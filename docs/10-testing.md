@@ -158,6 +158,28 @@ assert::fails(msg string)
 assert::fails("this code path should not be reached")
 ```
 
+### assert::panics
+
+Asserts that the given function panics when called. The panic is caught via
+`recover()` so the test runner continues normally:
+
+```rust
+assert::panics(f fn() void)
+```
+
+```rust
+assert::panics(fn() void =
+  panic("expected panic")
+)
+
+assert::panics(fn() void =
+  let arr [any] = [1 as any]
+  let [a, b] [any] = arr   // bounds check panics: only 1 element, need 2
+)
+```
+
+If `f()` does **not** panic, `assert::panics` fails the current test.
+
 ---
 
 ## Failure behaviour

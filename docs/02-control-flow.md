@@ -182,6 +182,43 @@ variables.
 
 ---
 
+## recover
+
+`recover()` can be called inside a **deferred function** to catch a panic,
+preventing the process from exiting. It returns the panic message as a
+`string`, or an empty string if no panic is in progress.
+
+```rust
+fn risky() void =
+  let got string = ""
+  defer fn() void =
+    let msg = recover()
+    if len(msg) > 0 :
+      got = msg
+  panic("something went wrong")
+  // got == "something went wrong" after the deferred fn runs
+```
+
+`recover()` only has an effect when called from inside a `defer`'d function
+during a panic. Calling it outside a defer (or when no panic occurred) returns
+`""` and has no side effect.
+
+```rust
+fn safe_call(f fn() void) bool =
+  let panicked bool = false
+  defer fn() void =
+    let msg = recover()
+    panicked = len(msg) > 0
+  f()
+  return panicked
+```
+
+> **Note:** When a panic is recovered, the panicking function returns its zero
+> value rather than exiting the process. Subsequent code in the calling
+> function continues executing normally.
+
+---
+
 ## is  -  type narrowing for union types
 
 `is` tests a union-typed value and binds the inner value if the test
