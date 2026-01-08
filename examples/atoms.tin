@@ -1,0 +1,40 @@
+// Atoms: symbolic constants written with a leading single-quote.
+// Atoms are interned at compile time and compare by identity.
+
+// An atom enum declares a set of named atom constants.
+enum atom status =
+  'ok,
+  'err,
+
+enum atom weather =
+  'sunny,
+  'rainy,
+  'cloudy,
+
+// Functions can pattern-match on atoms using where clauses.
+fn describe_weather(w atom) =
+  where 'sunny: echo "It is sunny!"
+  where 'rainy: echo "It is rainy!"
+  where 'cloudy: echo "It is cloudy!"
+  where _:      echo "Unknown weather"
+
+fn status_message(s atom) string =
+  where 'ok:  return "Everything is fine"
+  where 'err: return "Something went wrong"
+  where _:    return "Unknown status"
+
+describe_weather('sunny)
+describe_weather('rainy)
+describe_weather('cloudy)
+describe_weather('windy)
+
+echo status_message('ok)
+echo status_message('err)
+
+// Atoms can be stored in variables.
+let current_weather atom = 'sunny
+describe_weather(current_weather)
+
+// Atoms are echoed with their name.
+echo 'ok
+echo 'err

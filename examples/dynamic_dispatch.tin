@@ -1,0 +1,53 @@
+// Dynamic dispatch via constrained generic functions.
+//
+// Generic functions are monomorphized at each call site for the concrete type,
+// with the constraint checked at compile time.  The method call inside the
+// function body dispatches statically to the concrete implementation.
+
+trait speaker =
+  fn speak(this speaker) string = virtual
+
+trait mover =
+  fn move(this mover) string = virtual
+
+struct dog(speaker, mover) =
+  name string
+
+  fn speak(this dog) string =
+    return "Woof! I am {this.name}"
+
+  fn move(this dog) string =
+    return "{this.name} runs"
+
+struct cat(speaker, mover) =
+  name string
+
+  fn speak(this cat) string =
+    return "Meow! I am {this.name}"
+
+  fn move(this cat) string =
+    return "{this.name} slinks"
+
+struct robot(speaker) =
+  id string
+
+  fn speak(this robot) string =
+    return "Beep boop, I am {this.id}"
+
+// Generic functions constrained by traits — monomorphized at each call site.
+fn make_speak[t](s t) where t is speaker =
+  echo s.speak()
+
+fn make_move[t](m t) where t is mover =
+  echo m.move()
+
+let d = dog{name: "Rex"}
+let c = cat{name: "Whiskers"}
+let r = robot{id: "R2D2"}
+
+make_speak(d)
+make_speak(c)
+make_speak(r)
+
+make_move(d)
+make_move(c)

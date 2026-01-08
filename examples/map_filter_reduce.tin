@@ -1,0 +1,65 @@
+// Generic map, filter, reduce, any, and all — curried higher-order functions
+// using type parameters, closures, and dynamic array building with ++=.
+// Demonstrates the |> pipe operator for readable data-transformation pipelines.
+
+fn map[t, r](f fn(i t) r) fn([t]) [r] =
+  return fn(list [t]) [r] =
+    let res [r] = []
+    for let i t in list:
+      res ++= f(i)
+    return res
+
+fn filter[t](f fn(i t) bool) fn([t]) [t] =
+  return fn(list [t]) [t] =
+    let res [t] = []
+    for let i t in list:
+      if f(i):
+        res ++= i
+    return res
+
+fn reduce[t, r](f fn(acc r, i t) r, init r) fn([t]) r =
+  return fn(list [t]) r =
+    let acc r = init
+    for let i t in list:
+      acc = f(acc, i)
+    return acc
+
+fn any[t](pred fn(i t) bool) fn([t]) bool =
+  return fn(list [t]) bool =
+    for let i t in list:
+      if pred(i):
+        return true
+    return false
+
+fn all[t](pred fn(i t) bool) fn([t]) bool =
+  return fn(list [t]) bool =
+    for let i t in list:
+      if pred(i) == false:
+        return false
+    return true
+
+let nums = [1, 2, 3, 4, 5]
+
+// Pipe: nums |> filter(even) |> map(double)
+let doubled = nums
+|> filter(fn(i i64) bool = return i % 2 == 0)
+|> map(fn(i i64) i64 = return i * 2)
+echo doubled[0]
+echo doubled[1]
+
+// Sum via reduce using pipe
+let sum = nums |> reduce(fn(acc i64, i i64) i64 = return acc + i, 0)
+echo sum
+
+// Product via reduce using pipe
+let product = nums |> reduce(fn(acc i64, i i64) i64 = return acc * i, 1)
+echo product
+
+// Closure: captured offset applied via map with pipe
+let offset i64 = 10
+let shifted = nums |> map(fn(i i64) i64 = return i + offset)
+echo shifted[0]
+echo shifted[4]
+
+echo nums |> any(fn(i i64) bool = return i > 4)
+echo nums |> all(fn(i i64) bool = return i > 0)

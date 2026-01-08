@@ -1,0 +1,40 @@
+// String interpolation and struct display
+
+struct point =
+  x i64
+  y i64
+
+  fn show(this point) string =
+    return "({this.x}, {this.y})"
+
+  fn manhattan(this point) i64 =
+    let ax i64 = this.x
+    let ay i64 = this.y
+    if ax < 0:
+      ax = 0 - ax
+    if ay < 0:
+      ay = 0 - ay
+    return ax + ay
+
+struct rect =
+  x i64
+  y i64
+  w i64
+  h i64
+
+  fn show(this rect) string =
+    return "rect at ({this.x},{this.y}) size {this.w}x{this.h}"
+
+  fn area(this rect) i64 =
+    return this.w * this.h
+
+let p = point{x: 3, y: 4}
+echo p.show()
+echo p.manhattan()
+
+let origin = point{x: 0, y: 0}
+echo origin.show()
+
+let r = rect{x: 10, y: 20, w: 5, h: 8}
+echo r.show()
+echo r.area()

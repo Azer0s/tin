@@ -44,25 +44,31 @@ fn main(args [string], argc u16) i32 =
 
 ### External functions
 
-````rust
-fn ex_printf(const *char, ...) i32 = extern(printf)
+```rust
+// Symbol name is a quoted string.
+fn ex_printf(const *char, ...) i32 = extern("printf")
 fn printf(format string, args ...) i32 =
   return ex_printf(&format[0], args)
 
 let hello = "Hello!"
 printf(hello)
-````
+```
 
 ```rust
+// use extern imports C symbols.
+// Local name == C name when no rename is given.
+// Use localName("cName") to rename.
 use extern (
   malloc as fn(size_t) *void,
   strcpy as fn(*char, const *char) *char,
+  myFree("free") as fn(*void),
 )
 
-let s *char = mallloc(10 * sizeof(*char)).(*char)
+let s *char = malloc(10 * sizeof(*char)).(*char)
 strcpy(s, "abcdefghij")
+defer myFree(s)
 
-let a = "Hello" //string is inferred
+let a = "Hello" // string is inferred
 a = a ++ ", world!"
 a = a ++ [',', ' ', 'w', 'o', 'r', 'l', 'd', '!']
 ```
@@ -75,7 +81,7 @@ struct person =
   age u8
 
   fn init(this person) =
-    echo "this is called when a person struct is initialized (except for malloc)"
+    echo "called when a person struct is initialized (except for malloc)"
 
   fn show(this person) string =
     return "{this.name} is {this.age} years old"
@@ -102,9 +108,9 @@ struct tuple[t] =
   fn show(this tuple) string =
     return "first: {this.first}, second: {this.second}"
 
-type point = tuple[f32] override =	
+type point = tuple[f32] override =
   fn show(this point) string =
-    return "({point.first}, {point.second})"
+    return "({this.first}, {this.second})"
 
 let p1 point = point{1.2, 1.4}
 
@@ -118,7 +124,7 @@ let t tuple = p1
 let nums [i32] = [1, 2, 3, 4, 5, 6, 7]
 
 fn filter[t](f fn(i t) bool) fn([t]) [t] =
-  return fn(list [t]) [t] = 
+  return fn(list [t]) [t] =
     let res [t] = []
 
     for let i t in list:
@@ -142,18 +148,19 @@ nums
 ```
 
 ```rust
-fn subsquences[t](l [t]) [t] =
+fn subsequences[t](l [t]) [[t]] =
   let res [[t]] = []
-  
+
   for let i i64 = 0..(len(l) ^ 2):
     let sequence [t] = []
-    
-    for let j i64 in 0..len(2):
+
+    for let j i64 in 0..len(l):
       let pick = (i >> j) & 1
       if pick == 0:
         sequence ++= l[j]
-	
+
     res ++= sequence
+  return res
 ```
 
 ### Close to metal programming
@@ -171,51 +178,67 @@ fn write_string(color i32, s string) =
 ### Iterators & traits
 
 ```rust
-type size_t = uint32
+type size_t = u32
 
 use extern (
   // extern functions are always marked as #sideEffectful
-  strlen as fn(const *char) size_t
+  strlen as fn(const *char) size_t,
 )
 
-trait iter[t] = 
-  fn size() size_t = virtual
-  fn idx(i size_t) t = virtual
+// Regular trait with virtual methods.
+trait iter[t] =
+  fn len(this iter[t]) size_t = virtual
+  fn get(this iter[t], i size_t) t = virtual
 
-trait size = 
-	s size_t forward
-	fn size() size_t = return s
+// Forward-field trait: injects a field + default method.
+trait size =
+  s size_t forward
+  fn size(this size) size_t =
+    return this.s
 
+// Alias trait: maps to a single function signature.
+// Implementing structs use fn ::print() to provide the impl.
 trait print as fn() [char]
 
+// Generic alias trait: static conversion function.
+// k is the output type (inferred as the implementing struct).
+// t is the input type (specified in the trait bound, e.g. implicit[[char]]).
 trait[k] implicit[t] as static fn(val t) k
 
 struct{ #pure@fn #const@field } str(size, print,
-    implicit[[char]], implicit[char], 
-    iter[char], iter[str]) = 
+    implicit[[char]], implicit[char],
+    iter[char], iter[str]) =
 
   v [char]
 
-  static fn ::implicit[[char]] (val [char]) str =
+  // Alias trait implementations use fn ::traitName.
+  static fn ::implicit[[char]](val [char]) str =
     let len size_t = 0
     { #ignoreSideEffectful } {
       len = strlen(val)
     }
     return str{v: val, s: len}
 
-  static fn ::implicit[char] (val char) str = 
+  static fn ::implicit[char](val char) str =
     return str{v: [val], s: 1}
 
-  fn idx(i size_t) char = return v[i]
+  fn ::print() [char] =
+    return this.v
 
-  fn iter[char]::idx(i size_t) char = idx
-  fn iter[str]::idx(i size_t) str = idx
+  // When a struct implements the same generic trait twice (e.g. iter[char]
+  // and iter[str]), qualify each impl with the trait instantiation.
+  fn iter[char]::get(this str, i size_t) char =
+    return this.v[i]
 
-  fn ::print() [char] = return v
+  fn iter[str]::get(this str, i size_t) str =
+    return str{v: [this.v[i]], s: 1}
 
-  fn for_each(this str, f fn(c char)) = 
+  fn len(this str) size_t =
+    return this.s
+
+  fn for_each(this str, f fn(c char)) =
     for let i size_t = 0; i < this.s; i++:
-      { #ignoreSideEffectful } { f(v[i]) }
+      { #ignoreSideEffectful } { f(this.v[i]) }
 
 let h str = "Hello world"
 echo h
@@ -239,13 +262,13 @@ type u = i8 | string
 let a u = 10
 
 if a is i i8:
-  printf("%d", i * i)
+  echo "{i}"
 else:
-  echo i as string
+  echo "not i8"
 
 match a.(type):
   case i i8:
-    printf("%d", i)
+    echo "{i}"
   case s string:
     echo s
 ```
@@ -267,24 +290,20 @@ if m is None:
 ### Native union types
 
 ```rust
-//this is a C union
+// this is a C union
 union u = i8 | string
 union u_named = as_i8 i8 | as_string string
 
 let a u = 10
 
-echo a as string
-printf("%d", a.(int))
-
 let b u_named = 10
-echo b.as_string //this is the same as b.(string)
-printf("%d", b.as_i8)
+echo b.as_string // same as b.(string)
 ```
 
 ### Enums
 
 ```rust
-enum i32 weather = 
+enum i32 weather =
   sunny: 0,
   rainy: 1,
   foggy: 2,
@@ -300,7 +319,7 @@ match w:
   default:
     echo "there is weather"
 
-enum slider_type = //this will take the smallest integer type possible (u8 in this case)
+enum slider_type = // takes the smallest integer type possible (u8 here)
   horizontal,
   vertical,
 ```
@@ -308,8 +327,8 @@ enum slider_type = //this will take the smallest integer type possible (u8 in th
 ### Packages & exports
 
 ```rust
-fn print(t string) = 
-	break
+fn print(t string) =
+  echo t
 
 export { print } as io
 ```
@@ -335,7 +354,7 @@ let a = std::math::floor(std::math::PI)
 ```rust
 use extern (
   malloc as fn(size_t) *void,
-  memset as fn(*void, value_t, size_t)
+  memset as fn(*void, i32, size_t),
 )
 
 fn malloc_zeroed(s size_t) *void =
@@ -347,41 +366,47 @@ fn malloc_zeroed(s size_t) *void =
 ### Control tags
 
 ```rust
-fn{#pure #recurse} fib(n u32) u32 = 
+fn{#pure #recurse} fib(n u32) u32 =
   where n <= 1: n
   where _: fib(n - 1) + fib(n - 2)
 
-echo fib(10) //this will be calculated at compile time
+echo fib(10) // calculated at compile time
 ```
 
 ```rust
-fn{#noRecurse} foo() = 
+fn{#noRecurse} foo() =
   foo()
 
-//this will fail to compile
+// this will fail to compile
 ```
 
 ```rust
 macro{#noExcl #noParens} proc() =
   return `fn{#pure #recurse #noThread}`
 
-proc fib(n u32) u32 = 
+proc fib(n u32) u32 =
   where n <= 1: n
   where _: fib(n - 1) + fib(n - 2)
 
-fn ex_printf(const *char, ...) i32 = extern(printf) //this will automatically have a #sideEffectful tag
+fn ex_printf(const *char, ...) i32 = extern("printf") // automatically has #sideEffectful tag
 fn printf(format string, args ...) i32 =
   return ex_printf(&format[0], args)
 
 proc print() =
-  printf("Hello world") //this will fail to compile
+  printf("Hello world") // this will fail to compile
 ```
 
 ### defer
 
 ```rust
-let s = mallloc(10 * sizeof(*char)).([char; 10])
+use extern (
+  malloc as fn(size_t) *void,
+  free   as fn(*void),
+)
+
+let s *void = malloc(10 * sizeof(char))
 defer free(s)
+// free(s) is called at end of scope, even on early return
 ```
 
 ### Atoms & Macros
@@ -398,27 +423,76 @@ struct result[t] =
   val t
   status
 
-  static fn ok(val t) =
-    return result{val, status: status.ok}
+  static fn ok(val t) result[t] =
+    return result{val: val, status: status.ok}
 
-  static fn err() = 
+  static fn err() result[t] =
     return result{val: default(t), status: status.err}
 
-macro try!(action) = 
+macro try!(action) =
   let i = "_" ++ guid::new().show().replace("-", "")
   return `
     (let {i} = {action}; {i}.status == status.ok) ? {i}.val : return result.err()
-	`
+  `
 
 fn do_stuff() result[u32] =
-	return ok(42)
+  return result[u32]::ok(42)
 
-let val = try!(do_stuff())	
+let val = try!(do_stuff())
 ```
 
 ```rust
-fn it_is(weather atom) = 
-	where 'sunny: echo "It is sunny!"
-	where 'rainy: echo "It is rainy!"
-	where _: echo "Sorry, I don't know this condition :("
+fn it_is(weather atom) =
+  where 'sunny: echo "It is sunny!"
+  where 'rainy: echo "It is rainy!"
+  where _: echo "Sorry, I don't know this condition :("
 ```
+
+## Trait System Design Notes
+
+### Trait kinds
+
+| Kind | Syntax | Description |
+|------|--------|-------------|
+| Regular | `trait T = fn m(...) = virtual` | virtual + default methods, forward fields |
+| Alias | `trait T as fn(...) R` | single function type; impl with `fn ::T` |
+| Generic alias | `trait[k] T[t] as static fn(val t) k` | static conversion; `k` inferred as struct type |
+
+### Implementing traits in a struct
+
+```rust
+// Regular virtual method — name matches the trait's virtual method:
+fn speak(this dog) string = "Woof"
+
+// Alias trait — prefix with :: to mark it as the alias implementation:
+fn ::print() [char] = return this.v
+
+// Disambiguation when the same generic trait is implemented twice:
+fn iter[char]::get(this str, i size_t) char = return this.v[i]
+fn iter[str]::get(this str, i size_t) str = ...
+```
+
+### Method Name Conflict Resolution
+When two traits declare methods with the same name, resolution is by **type context**:
+- If the receiver has a concrete struct type, the struct's own method is called directly (static dispatch).
+- If the receiver has a trait-typed value (fat pointer), the vtable for that specific trait is used.
+- Use `traitName[args]::method` inside a struct body to disambiguate when the same generic trait is instantiated more than once on the same struct.
+
+### Implicit Trait Type Parameter Inference
+For generic implicit conversion traits like `trait[k] implicit[t] as static fn(val t) k`:
+- When a struct declares `implicit[[char]]`, the compiler infers `k = StructType` and `t = [char]`.
+- Explicit type arguments are not required — parameters are inferred from context.
+
+### Vtable Layout
+- One vtable per `(struct, trait_instantiation)` pair.
+- Fat pointer: `{data_ptr: i8*, vtable_ptr: VTableType*}` for trait-typed values.
+- Mixin/forward/alias traits do not generate vtables.
+
+### Default Method Bodies
+- Methods declared in a trait with a body (not `virtual`) are mixin defaults.
+- All implementing structs inherit the default unless they override it.
+
+### defer
+- `defer expr` registers a call to be executed before the function returns.
+- Multiple defers fire in LIFO order (last deferred runs first).
+- The deferred call fires on every exit path including early `return`.

@@ -1,0 +1,22 @@
+// geomlib.tin — exports a struct type with methods
+// Compile: tin build -lib geomlib.tin -o geomlib.o
+
+struct point =
+  x i64
+  y i64
+
+  fn show(this point) string =
+    return "({this.x}, {this.y})"
+
+  fn distance_sq(this point, other point) i64 =
+    let dx = this.x - other.x
+    let dy = this.y - other.y
+    return dx * dx + dy * dy
+
+fn make_point(x i64, y i64) point =
+  return point{x: x, y: y}
+
+fn midpoint(a point, b point) point =
+  return point{x: (a.x + b.x) / 2, y: (a.y + b.y) / 2}
+
+export { point, make_point, midpoint } as geomlib

@@ -1,0 +1,33 @@
+// Struct with mutable state: a simple counter
+
+struct counter =
+  value i64
+
+  fn new() counter =
+    return counter{value: 0}
+
+  fn inc(this counter) counter =
+    return counter{value: this.value + 1}
+
+  fn dec(this counter) counter =
+    return counter{value: this.value - 1}
+
+  fn add(this counter, n i64) counter =
+    return counter{value: this.value + n}
+
+  fn get(this counter) i64 =
+    return this.value
+
+let c = counter{value: 0}
+echo c.get()
+
+let c2 = c.inc()
+let c3 = c2.inc()
+let c4 = c3.inc()
+echo c4.get()
+
+let c5 = c4.add(10)
+echo c5.get()
+
+let c6 = c5.dec()
+echo c6.get()

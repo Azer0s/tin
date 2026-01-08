@@ -1,0 +1,72 @@
+// stdlib/io — I/O functions.
+//
+// Wraps standard C file and console I/O.
+// No extra linker flags required (all in libc).
+
+// ── Console output ────────────────────────────────────────────────────────────
+
+// puts writes s followed by a newline to stdout.
+fn puts(s string) = extern("puts")
+
+// fputs writes s to the given FILE* stream (no trailing newline).
+// Pass the result of fopen() or the constants stdin/stdout/stderr.
+fn fputs(s string, stream *void) i32 = extern("fputs")
+
+// fprintf writes a formatted string to a FILE* stream.
+// Note: only string format args are fat-ptr unwrapped; use %s with string args.
+fn fprintf(stream *void, fmt string, ...) i32 = extern("fprintf")
+
+// printf writes a formatted string to stdout.
+fn printf(fmt string, ...) i32 = extern("printf")
+
+// ── Console input ─────────────────────────────────────────────────────────────
+
+// fgets reads at most n-1 characters into buf from stream.
+// Returns buf as a *char on success, null on EOF/error.
+fn fgets(buf *char, n i32, stream *void) *char = extern("fgets")
+
+// scanf reads formatted input from stdin.
+fn scanf(fmt string, ...) i32 = extern("scanf")
+
+// ── File I/O ──────────────────────────────────────────────────────────────────
+
+// fopen opens a file at path with the given mode ("r", "w", "a", "rb", etc.).
+// Returns a FILE* (opaque *void) or null on failure.
+fn fopen(path string, mode string) *void = extern("fopen")
+
+// fclose closes a FILE* stream. Returns 0 on success.
+fn fclose(stream *void) i32 = extern("fclose")
+
+// fread reads count items of size bytes from stream into buf.
+fn fread(buf *void, size i64, count i64, stream *void) i64 = extern("fread")
+
+// fwrite writes count items of size bytes from buf to stream.
+fn fwrite(buf *void, size i64, count i64, stream *void) i64 = extern("fwrite")
+
+// fseek sets the file position of stream. whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END.
+fn fseek(stream *void, offset i64, whence i32) i32 = extern("fseek")
+
+// ftell returns the current file position of stream.
+fn ftell(stream *void) i64 = extern("ftell")
+
+// fflush flushes the output buffer of stream. Pass null to flush all streams.
+fn fflush(stream *void) i32 = extern("fflush")
+
+// feof returns non-zero if the end-of-file indicator is set for stream.
+fn feof(stream *void) i32 = extern("feof")
+
+// ferror returns non-zero if the error indicator is set for stream.
+fn ferror(stream *void) i32 = extern("ferror")
+
+// remove deletes a file at the given path.
+fn remove(path string) i32 = extern("remove")
+
+// rename renames/moves a file.
+fn rename(old_path string, new_path string) i32 = extern("rename")
+
+export {
+  puts, fputs, fprintf, printf,
+  fgets, scanf,
+  fopen, fclose, fread, fwrite, fseek, ftell, fflush, feof, ferror,
+  remove, rename
+} as io

@@ -1,0 +1,20 @@
+// Higher-order functions and closures
+
+fn apply(f fn(x i32) i32, n i32) i32 =
+  return f(n)
+
+fn compose(f fn(x i32) i32, g fn(x i32) i32) fn(i32) i32 =
+  return fn(x i32) i32 = return f(g(x))
+
+let double = fn(x i32) i32 = return x * 2
+let square = fn(x i32) i32 = return x * x
+let inc    = fn(x i32) i32 = return x + 1
+
+echo apply(double, 5)
+echo apply(square, 4)
+
+let double_then_inc = compose(inc, double)
+echo apply(double_then_inc, 3)
+
+let square_then_double = compose(double, square)
+echo apply(square_then_double, 5)

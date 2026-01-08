@@ -1,0 +1,80 @@
+// Demonstrates spec features:
+//   • fn init(this S) — called automatically on every struct literal
+//   • type X = GenericStruct[T] — monomorphization (concrete alias)
+//   • type X = GenericStruct[T] override = fn ... — method override
+//
+// Spec reference:
+//   struct tuple[t] =
+//     first t; second t
+//     fn show(this tuple) string = "first: {this.first}, second: {this.second}"
+//
+//   type point = tuple[f32] override =
+//     fn show(this point) string = "({point.first}, {point.second})"
+//
+//   fn init(this person) =
+//     echo "called when a person struct is initialized (except for malloc)"
+
+// ── fn init ────────────────────────────────────────────────────────────────
+
+struct person =
+  name string
+  age  i64
+
+  // Called automatically for every struct literal: person{...}
+  fn init(this person) =
+    echo "new person: {this.name}"
+
+  fn show(this person) string =
+    return "{this.name} is {this.age} years old"
+
+let pete  = person{name: "Pete",  age: 20}  // prints "new person: Pete"
+let alice = person{name: "Alice", age: 30}  // prints "new person: Alice"
+
+echo pete.show()
+echo alice.show()
+
+// ── Generic struct template ────────────────────────────────────────────────
+
+struct tuple[t] =
+  first  t
+  second t
+
+  fn show(this tuple) string =
+    return "first: {this.first}, second: {this.second}"
+
+// ── type point = tuple[f32]  (plain monomorphization) ─────────────────────
+// "point" is a concrete struct with fields {first f32, second f32}.
+// It inherits the show method from tuple with t → f32.
+
+type point = tuple[f32]
+
+let origin = point{0.0, 0.0}
+echo origin.show()               // first: 0, second: 0
+
+let p1 = point{1.5, 2.5}
+echo p1.show()                   // first: 1.5, second: 2.5
+
+// ── type mypoint = tuple[f32] override = … ────────────────────────────────
+// Overrides show to use coordinate notation instead.
+
+type mypoint = tuple[f32] override =
+  fn show(this mypoint) string =
+    return "({this.first}, {this.second})"
+
+let mp = mypoint{3.0, 4.0}
+echo mp.show()                   // (3, 4)
+
+// ── Multiple monomorphizations of the same template ────────────────────────
+
+type int_pair = tuple[i64]
+
+let nums = int_pair{10, 20}
+echo nums.show()                 // first: 10, second: 20
+
+// ── Both types are independent ─────────────────────────────────────────────
+
+let a point   = point{9.0, 1.0}
+let b mypoint = mypoint{9.0, 1.0}
+
+echo a.show()                    // first: 9, second: 1  (tuple default)
+echo b.show()                    // (9, 1)               (overridden)

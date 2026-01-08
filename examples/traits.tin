@@ -1,0 +1,75 @@
+// Traits: default methods and forward fields
+//
+// A trait defines a set of methods. Structs list the traits they implement
+// in parentheses after the struct name. The trait's non-virtual methods are
+// automatically injected into implementing structs.
+//
+// Traits are NOT used as function parameter types (that was removed).
+// Instead, use generic type constraints: fn[t](x t) where t is traitName
+
+// Trait with a forward field and a default method using that field.
+// Any struct implementing "named" gets a "label" field and a "name()" method.
+trait named =
+  label string forward
+  fn name(this named) string =
+    return this.label
+
+// Trait with a virtual method (must be implemented by the struct).
+trait describable =
+  fn describe(this describable) string = virtual
+
+// Trait with only default methods (a pure mixin).
+trait greetable =
+  fn greet(this greetable) string =
+    return "Hello, I am {this.name()}"
+
+// A struct implementing all three traits.
+// It gets the "label" field, name() and greet() injected.
+struct animal(named, greetable, describable) =
+  species string
+
+  fn describe(this animal) string =
+    return "{this.label} is a {this.species}"
+
+// Another struct implementing all three traits with its own greet.
+struct robot(named, greetable, describable) =
+  model string
+
+  fn describe(this robot) string =
+    return "{this.label} is robot model {this.model}"
+
+  fn greet(this robot) string =
+    return "Beep boop, I am {this.name()}"
+
+let cat = animal{label: "Whiskers", species: "cat"}
+echo cat.name()
+echo cat.describe()
+echo cat.greet()
+
+let bot = robot{label: "R2D2", model: "astromech"}
+echo bot.name()
+echo bot.describe()
+echo bot.greet()
+
+// Generic functions with type constraints.
+// print_name accepts any type t that implements the "named" trait.
+fn print_name[t](x t) where t is named =
+  echo x.name()
+
+// print_greeting accepts any t implementing the "greetable" trait.
+fn print_greeting[t](x t) where t is greetable =
+  echo x.greet()
+
+// print_description accepts any t implementing the "describable" trait.
+fn print_description[t](x t) where t is describable =
+  echo x.describe()
+
+// The compiler monomorphizes each call with the concrete type.
+print_name(cat)
+print_name(bot)
+
+print_greeting(cat)
+print_greeting(bot)
+
+print_description(cat)
+print_description(bot)

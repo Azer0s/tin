@@ -1,0 +1,50 @@
+// External C functions: fat-pointer unwrapping / wrapping.
+//
+// When a Tin extern function takes `string` or `[]T` parameters, the compiler
+// automatically unwraps the fat-pointer to a raw C pointer before the call.
+// When it returns `string`, the result is wrapped back into a fat-pointer using
+// C's strlen to determine the length.
+//
+// Build with -lm if using math functions:
+//   tin build extern.tin -lm
+
+// ── String functions ──────────────────────────────────────────────────────────
+
+fn strlen(s string) i64 = extern("strlen")
+fn strcmp(a string, b string) i32 = extern("strcmp")
+fn puts(s string) = extern("puts")
+
+// ── Env / OS ──────────────────────────────────────────────────────────────────
+
+fn getenv(name string) string = extern("getenv")
+
+// ── Math (requires -lm at link time) ─────────────────────────────────────────
+
+fn sqrt(x f64) f64 = extern("sqrt")
+fn pow(x f64, y f64) f64 = extern("pow")
+
+// ── use extern() alternative syntax ──────────────────────────────────────────
+
+use extern (
+  printf as fn(string, ...),
+)
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+// string → unwrapped to char* automatically
+puts("hello from extern!")
+
+let msg string = "world"
+echo strlen(msg)     // string fat-ptr auto-unwrapped
+
+// strcmp: both strings unwrapped, result is i32
+echo strcmp("abc", "abc")  // 0  (equal)
+echo strcmp("abc", "xyz")  // negative
+
+// getenv: char* result auto-wrapped into string fat-ptr
+let home string = getenv("HOME")
+printf("HOME = %s\n", home)
+
+// math
+echo sqrt(144.0)
+echo pow(2.0, 8.0)

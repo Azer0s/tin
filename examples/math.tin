@@ -1,0 +1,24 @@
+// Math utilities: GCD, power, abs
+
+fn gcd(a i64, b i64) i64 =
+  where b == 0: a
+  where _: gcd(b, a % b)
+
+fn pow(base i64, exp i64) i64 =
+  where exp == 0: 1
+  where _: base * pow(base, exp - 1)
+
+fn abs(n i64) i64 =
+  where n < 0: 0 - n
+  where _: n
+
+echo gcd(48, 18)
+echo gcd(100, 75)
+echo gcd(17, 5)
+
+echo pow(2, 10)
+echo pow(3, 5)
+echo pow(10, 3)
+
+echo abs(0 - 42)
+echo abs(7)
