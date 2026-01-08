@@ -1,0 +1,10 @@
+// Various loop forms
+for let i i32 = 0; i < 5; i++:
+  echo "i = {i}"
+
+for let j i32 in 1..6:
+  echo "j = {j}"
+
+let items [string] = ["alpha", "beta", "gamma"]
+for let s string in items:
+  echo s

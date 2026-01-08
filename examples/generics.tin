@@ -1,0 +1,70 @@
+// Generics: constrained type parameters with `where t is Trait` syntax.
+//
+// Generic functions are monomorphized at each call site — the compiler
+// generates a concrete version for each distinct type argument.
+
+trait labeled =
+  fn label(this labeled) string = virtual
+
+trait sized =
+  fn size(this sized) i64 = virtual
+
+trait printable =
+  fn print(this printable) string = virtual
+
+struct box =
+  name  string
+  width i64
+
+  fn label(this box) string =
+    return this.name
+
+  fn size(this box) i64 =
+    return this.width * this.width * this.width
+
+  fn print(this box) string =
+    return "box({this.name}, {this.width})"
+
+struct circle =
+  id     string
+  radius i64
+
+  fn label(this circle) string =
+    return this.id
+
+  fn size(this circle) i64 =
+    return this.radius * this.radius  // simplified area
+
+  fn print(this circle) string =
+    return "circle({this.id}, r={this.radius})"
+
+// Single constraint.
+fn show_label[t](x t) where t is labeled =
+  echo x.label()
+
+// Single constraint, returns a value.
+fn get_size[t](x t) i64 where t is sized =
+  return x.size()
+
+// Multiple constraints on the same type param (+ syntax).
+fn describe[t](x t) where t is labeled+sized =
+  echo "{x.label()} has size {x.size()}"
+
+// Multiple constraints via comma (different type params).
+fn compare_sizes[t, r](a t, b r) i64 where t is sized, r is sized =
+  return a.size() - b.size()
+
+let b = box{name: "crate", width: 3}
+let c = circle{id: "wheel", radius: 5}
+
+show_label(b)          // crate
+show_label(c)          // wheel
+
+echo get_size(b)       // 27
+echo get_size(c)       // 25
+
+describe(b)            // crate has size 27
+describe(c)            // wheel has size 25
+
+let diff = compare_sizes(b, c)
+echo diff              // 2  (27 - 25)

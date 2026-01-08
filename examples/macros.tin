@@ -1,0 +1,32 @@
+// Macros: compile-time expression templates.
+//
+// A macro is declared with the `macro` keyword. When called, the arguments
+// are substituted textually into the body before evaluation — no function
+// call overhead.
+//
+// macro name!(params) = body_expression
+
+// A simple arithmetic macro.
+macro square!(x) = x * x
+macro double!(x) = x * 2
+macro add!(a, b) = a + b
+
+echo square!(5)
+echo square!(12)
+echo double!(21)
+echo add!(3, 4)
+
+// Macros can be nested.
+echo square!(double!(3))
+echo add!(square!(4), square!(3))
+
+// Macros work with string expressions too.
+macro greet!(name) = "Hello, " ++ name ++ "!"
+
+echo greet!("Alice")
+echo greet!("world")
+
+// Macros accept any expression as arguments.
+let x i64 = 7
+echo square!(x)
+echo add!(x, 3)

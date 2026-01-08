@@ -1,0 +1,19 @@
+// mathlib.tin — a simple math package
+// Compile: tin build mathlib.tin -o mathlib.o
+// This produces mathlib.o (object file) AND mathlib.tin.mod (declarations).
+
+fn add(a i64, b i64) i64 =
+  return a + b
+
+fn mul(a i64, b i64) i64 =
+  return a * b
+
+fn max(a i64, b i64) i64 =
+  where a >= b: a
+  where _:      b
+
+fn factorial(n i64) i64 =
+  where n <= 1: 1
+  where _:      n * factorial(n - 1)
+
+export { add, mul, max, factorial } as mathlib

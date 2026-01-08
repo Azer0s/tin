@@ -1,0 +1,10 @@
+// Structs with methods and string interpolation
+struct person =
+  name string
+  age u8
+
+  fn show(this person) string =
+    return "{this.name} is {this.age} years old"
+
+let pete = person{name: "Pete", age: 20}
+echo pete.show()

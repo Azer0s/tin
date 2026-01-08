@@ -1,0 +1,13 @@
+// Classic FizzBuzz using if/else and string interpolation
+fn fizzbuzz(n i32) string =
+  if n % 15 == 0:
+    return "FizzBuzz"
+  else if n % 3 == 0:
+    return "Fizz"
+  else if n % 5 == 0:
+    return "Buzz"
+  else:
+    return "{n}"
+
+for let i i32 = 1; i <= 20; i++:
+  echo fizzbuzz(i)

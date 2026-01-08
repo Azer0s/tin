@@ -1,0 +1,31 @@
+// Tin supports two comment styles:
+//   1. Line comments   //  (to end of line)
+//   2. Block comments  /* ... */  (can span multiple lines)
+
+/* This is a block comment on a single line. */
+echo "hello"
+
+/*
+  Block comments can span
+  multiple lines and are
+  ignored entirely by the compiler.
+*/
+echo "world"
+
+let x i64 = 10 /* inline block comment */ + 5
+echo x
+
+// Line comments and block comments can coexist.
+let y i64 = 42 // this is forty-two
+echo y
+
+/* Nested structures inside block comments are fine:
+   fn foo() = ...
+   struct bar = ...
+   They are never parsed.
+*/
+
+fn add(a i64, b i64) i64 = /* trivial add */ a + b
+
+echo add(3, 4) // prints 7
+echo add(/* left */ 10, /* right */ 20)

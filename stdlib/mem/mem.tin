@@ -1,0 +1,42 @@
+// stdlib/mem — Memory allocation and manipulation.
+//
+// Wraps standard C malloc/free family and memory utilities.
+// No extra linker flags required (all in libc).
+
+// ── Allocation ────────────────────────────────────────────────────────────────
+
+// malloc allocates size bytes and returns a pointer to the memory.
+// Returns null on failure.
+fn malloc(size i64) *void = extern("malloc")
+
+// calloc allocates n * size bytes, zero-initialised.
+// Returns null on failure.
+fn calloc(n i64, size i64) *void = extern("calloc")
+
+// realloc resizes a previously allocated block to new_size bytes.
+// If ptr is null, behaves like malloc(new_size).
+// Returns null on failure (original block is unchanged).
+fn realloc(ptr *void, new_size i64) *void = extern("realloc")
+
+// free releases memory previously allocated by malloc/calloc/realloc.
+fn free(ptr *void) = extern("free")
+
+// ── Memory operations ─────────────────────────────────────────────────────────
+
+// memcpy copies n bytes from src to dst. The regions must not overlap.
+fn memcpy(dst *void, src *void, n i64) *void = extern("memcpy")
+
+// memmove copies n bytes from src to dst. Handles overlapping regions correctly.
+fn memmove(dst *void, src *void, n i64) *void = extern("memmove")
+
+// memset fills the first n bytes of ptr with the byte value c (cast to u8).
+fn memset(ptr *void, c i32, n i64) *void = extern("memset")
+
+// memcmp compares the first n bytes of a and b.
+// Returns 0 if equal, negative if a < b, positive if a > b.
+fn memcmp(a *void, b *void, n i64) i32 = extern("memcmp")
+
+export {
+  malloc, calloc, realloc, free,
+  memcpy, memmove, memset, memcmp
+} as mem

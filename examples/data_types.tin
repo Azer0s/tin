@@ -1,0 +1,48 @@
+// Data types: discriminated unions with a None variant.
+// Similar to Rust's Option or Haskell's Maybe.
+//
+// data maybe[t] = t | None
+//
+// A value of type maybe[t] holds either a t or None.
+// Use `is` to test which variant is active and bind the inner value.
+
+data maybe[t] = t | None
+
+fn greet(name maybe[string]) =
+  if name is s string:
+    echo "Hello, {s}!"
+  if name is None:
+    echo "Hello, stranger!"
+
+greet("Alice")
+greet(None)
+
+// maybe[i64] for optional integers
+fn safe_div(a i64, b i64) maybe[i64] =
+  if b == 0:
+    return None
+  return a / b
+
+let r1 maybe[i64] = safe_div(10, 2)
+let r2 maybe[i64] = safe_div(10, 0)
+
+if r1 is v i64:
+  echo "10 / 2 = {v}"
+if r2 is None:
+  echo "10 / 0 = None (division by zero)"
+
+// Nested: maybe[maybe[i64]]
+fn find_first_positive(a i64, b i64) maybe[i64] =
+  if a > 0:
+    return a
+  if b > 0:
+    return b
+  return None
+
+let p1 maybe[i64] = find_first_positive(-1, 5)
+let p2 maybe[i64] = find_first_positive(-3, -7)
+
+if p1 is v i64:
+  echo "first positive: {v}"
+if p2 is None:
+  echo "no positive found"

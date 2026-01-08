@@ -1,0 +1,17 @@
+# compiled binary
+tin
+tinc
+*.tin.out
+
+# test binaries
+*.test
+
+# Go build cache
+/vendor/
+
+# Tin module build artifacts
+*.tin.mod
+# Pre-generated stdlib module files are tracked (override the rule above)
+!stdlib/**/*.tin.mod
+*.o
+examples/modules/modules_test

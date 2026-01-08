@@ -1,0 +1,29 @@
+// String concatenation with the ++ operator.
+// ++ joins two strings (or arrays) into a new one.
+
+let greeting string = "Hello" ++ ", " ++ "world!"
+echo greeting
+
+// Concatenating variables.
+let first string = "foo"
+let second string = "bar"
+echo first ++ second
+
+// Building strings in functions.
+fn join(a string, b string, sep string) string =
+  return a ++ sep ++ b
+
+echo join("tin", "lang", "-")
+echo join("hello", "world", " ")
+
+// Interpolation and concat together.
+let lang string = "Tin"
+let version string = "1.0"
+echo lang ++ " version " ++ version
+
+// Concatenation with function return values.
+fn exclaim(msg string) string =
+  return msg ++ "!"
+
+echo exclaim("Hello")
+echo exclaim(exclaim("Hi"))

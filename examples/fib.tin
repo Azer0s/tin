@@ -1,0 +1,7 @@
+// Recursive fibonacci using where-clause pattern matching
+fn fib(n u32) u32 =
+  where n <= 1: n
+  where _: fib(n - 1) + fib(n - 2)
+
+echo fib(10)
+echo fib(20)

@@ -1,0 +1,44 @@
+// Enums and pattern matching
+
+enum i32 direction =
+  north: 0,
+  south: 1,
+  east:  2,
+  west:  3,
+
+enum i32 day =
+  monday:    0,
+  tuesday:   1,
+  wednesday: 2,
+  thursday:  3,
+  friday:    4,
+  saturday:  5,
+  sunday:    6,
+
+fn is_weekend(d day) bool =
+  match d:
+    case day.saturday:
+      return true
+    case day.sunday:
+      return true
+    default:
+      return false
+
+fn direction_name(d direction) string =
+  match d:
+    case direction.north: return "north"
+    case direction.south: return "south"
+    case direction.east:  return "east"
+    case direction.west:  return "west"
+    default:              return "unknown"
+
+echo direction_name(direction.north)
+echo direction_name(direction.west)
+
+let today day = day.saturday
+if is_weekend(today):
+  echo "it is the weekend"
+
+let workday day = day.wednesday
+if is_weekend(workday):
+  echo "weekend"

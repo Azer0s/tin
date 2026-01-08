@@ -1,0 +1,18 @@
+// main.tin — uses the mathlib package
+// After building mathlib.tin:
+//   tin build main.tin -o main.o
+//   clang main.o mathlib.o -o main && ./main
+
+use mathlib
+
+let a = mathlib::add(3, 4)
+echo a                            // 7
+
+let b = mathlib::mul(6, 7)
+echo b                            // 42
+
+let c = mathlib::max(10, 20)
+echo c                            // 20
+
+let d = mathlib::factorial(10)
+echo d                            // 3628800

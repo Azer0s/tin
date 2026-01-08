@@ -1,0 +1,18 @@
+// geommain.tin — uses the geomlib package (structs + functions)
+// Build steps:
+//   tin build -lib geomlib.tin -o geomlib.o
+//   tin run geommain.tin geomlib.o
+
+use geomlib
+
+let a = geomlib::make_point(3, 4)
+let b = geomlib::make_point(6, 8)
+
+echo a.show()                        // (3, 4)
+echo b.show()                        // (6, 8)
+
+let d = a.distance_sq(b)
+echo d                               // 25
+
+let m = geomlib::midpoint(a, b)
+echo m.show()                        // (4, 6)

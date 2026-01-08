@@ -1,0 +1,28 @@
+// stdlib_usage.tin — demonstrates using the standard library modules.
+//
+// The stdlib modules (io, math, mem, os, str) are pre-compiled and bundled
+// with the tin compiler. They are available via `use <name>`.
+//
+// Build:   tin build examples/stdlib_usage.tin -lm
+// Run:     tin run   examples/stdlib_usage.tin -lm
+
+use io
+use math
+use str
+
+// Print a greeting via io::puts (wraps C puts, adds newline).
+io::puts("=== stdlib_usage example ===")
+
+// Math: compute sqrt(2) and floor/ceil it.
+let root2 = math::sqrt(2.0)
+io::printf("sqrt(2) = %f\n", root2)
+io::printf("floor   = %f\n", math::floor(root2))
+io::printf("ceil    = %f\n", math::ceil(root2))
+
+// str: measure string length and compare two strings.
+let hello = "Hello, world!"
+let n i64 = str::strlen(hello)
+io::printf("len(\"%s\") = %lld\n", hello, n)
+
+let cmp i32 = str::strcmp("abc", "abc")
+io::printf("strcmp(\"abc\",\"abc\") = %d\n", cmp)

@@ -1,0 +1,9 @@
+let x any = 42
+let y any = 3.14
+let z any = "hello"
+let b any = true
+
+echo x
+echo y
+echo z
+echo b
