@@ -170,6 +170,24 @@ echo sign(42)    // 1
 The first parameter is used as the implicit match subject, mirroring how
 `where` works in named functions.
 
+### Immediate invocation
+
+A lambda can be invoked immediately after it is defined by appending `(args)`:
+
+```rust
+let result = (fn() i64 = return 42)()
+echo result   // 42
+
+let doubled = (fn(x i64) i64 = return x * 2)(5)
+echo doubled  // 10
+```
+
+This is sometimes useful for immediately-invoked computations or with `defer`:
+
+```rust
+defer (fn() void = cleanup())()
+```
+
 ### Closure type syntax
 
 The type of a function value is written as `fn(ParamTypes) RetType`:

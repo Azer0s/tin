@@ -72,6 +72,60 @@ Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len` builtin
 simply reads the second word; it compiles to a single load with no function
 call overhead.
 
+### Array destructuring
+
+Array destructuring binds multiple variables from an array in a single `let`
+statement.
+
+#### Uniform typed destructuring
+
+All slots have the same element type:
+
+```rust
+let arr [i64] = [10, 20, 30]
+let [a, b] [i64] = arr
+// a == 10, b == 20
+```
+
+#### Per-slot typed destructuring from `[any]`
+
+When different slots hold different types (stored in a `[any]` array), list
+the types inside the brackets. A **runtime bounds check** is performed:
+
+```rust
+let arr [any] = [42 as any, true as any]
+let [n, flag] [i32, bool] = arr
+// n == 42 (i32), flag == true (bool)
+```
+
+If the array has fewer elements than needed, the program panics at runtime.
+
+#### Rest split
+
+Capture the first element and the remaining slice:
+
+```rust
+let arr [i64] = [1, 2, 3, 4]
+let [x, ...xs] [i64] = arr
+// x == 1, xs == [2, 3, 4]
+```
+
+Only the two-name form `[first, ...rest]` is supported. The rest variable
+holds a sub-slice (a fresh copy) of the remaining elements.
+
+#### Named type alias for per-slot destructuring
+
+Use `@[T1, T2, ...]` to define a named type alias for a per-slot destructuring
+pattern, then reference it by name:
+
+```rust
+type coord = @[i32, bool]
+
+let arr [any] = [10 as any, false as any]
+let [n, flag] coord = arr
+// n == 10 (i32), flag == false (bool)
+```
+
 ### Generic collections
 
 Arrays are fully generic. Any type parameter `t` can be used as the element
