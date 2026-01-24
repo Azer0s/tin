@@ -6,6 +6,7 @@
 //
 // Traits are NOT used as function parameter types (that was removed).
 // Instead, use generic type constraints: fn[t](x t) where t is traitName
+use assert
 
 // Trait with a forward field and a default method using that field.
 // Any struct implementing "named" gets a "label" field and a "name()" method.
@@ -73,3 +74,15 @@ print_greeting(bot)
 
 print_description(cat)
 print_description(bot)
+
+test "animal trait methods" =
+  let a = animal{label: "Whiskers", species: "cat"}
+  assert::equals_str(a.name(), "Whiskers")
+  assert::equals_str(a.describe(), "Whiskers is a cat")
+  assert::equals_str(a.greet(), "Hello, I am Whiskers")
+
+test "robot trait methods" =
+  let bot = robot{label: "R2D2", model: "astromech"}
+  assert::equals_str(bot.name(), "R2D2")
+  assert::equals_str(bot.describe(), "R2D2 is robot model astromech")
+  assert::equals_str(bot.greet(), "Beep boop, I am R2D2")

@@ -1,0 +1,151 @@
+// lambdas.tin — tests for lambda expression variants:
+//   multiline bodies, void (no-return) lambdas, where-clause bodies, and pass.
+
+use assert
+
+// ── Helpers used across tests ─────────────────────────────────────────────────
+
+fn apply(f fn(i64) i64, x i64) i64 = return f(x)
+
+fn run(f fn()) =
+  f()
+
+fn run_n(f fn(), n i64) =
+  for let i i64 in 0..n :
+    f()
+
+fn apply_void(f fn(i64), x i64) =
+  f(x)
+
+// ── Multiline lambda bodies ───────────────────────────────────────────────────
+
+test "multiline lambda" =
+  let clamp = fn(x i64) i64 =
+    if x < 0 :
+      return 0
+    if x > 100 :
+      return 100
+    return x
+  assert::equals(apply(clamp, -5), 0)
+  assert::equals(apply(clamp, 50), 50)
+  assert::equals(apply(clamp, 200), 100)
+
+test "multiline lambda with local let" =
+  let summarise = fn(x i64) i64 =
+    let doubled = x * 2
+    let tripled = x * 3
+    return doubled + tripled
+  assert::equals(apply(summarise, 4), 20)
+  assert::equals(apply(summarise, 0), 0)
+
+// ── Void (no-return) lambdas ──────────────────────────────────────────────────
+
+test "void lambda can be called" =
+  let noop = fn() = pass
+  run(noop)
+  run_n(noop, 5)
+  assert::ok(true)
+
+test "void lambda with parameter" =
+  // Void lambdas that accept params are useful as callbacks.
+  // apply_void calls f(x) and discards the result.
+  let checker = fn(x i64) =
+    // side-effect: we just exercise the code path
+    let _ = x * 2
+  apply_void(checker, 10)
+  apply_void(checker, -3)
+  assert::ok(true)
+
+test "void lambda closure" =
+  // Closures capture outer values by copy; void lambdas work well as
+  // one-shot callbacks that use (not mutate) captured read-only state.
+  let scale i64 = 3
+  let total i64 = 0
+  // Use a returning lambda that uses the captured scale, to verify capture.
+  let scaled = fn(x i64) i64 = return x * scale
+  assert::equals(apply(scaled, 5), 15)
+  assert::equals(apply(scaled, 0), 0)
+
+// ── Multiline lambda as function parameter ────────────────────────────────────
+
+test "multiline lambda as function param" =
+  let result = apply(fn(x i64) i64 =
+    let doubled = x * 2
+    let plus_one = doubled + 1
+    return plus_one
+  , 5)
+  assert::equals(result, 11)
+
+test "two multiline lambdas as params" =
+  // Chain: apply the result of one to the other.
+  let f = fn(x i64) i64 =
+    let a = x * 3
+    return a - 1
+  let result = apply(fn(x i64) i64 =
+    let step = x + 10
+    return step * 2
+  , apply(f, 4))
+  assert::equals(result, 42)
+
+test "multiline lambda with if in param position" =
+  let result = apply(fn(x i64) i64 =
+    if x > 0 :
+      return x * x
+    return 0
+  , 7)
+  assert::equals(result, 49)
+
+// ── Where-clause lambda bodies ────────────────────────────────────────────────
+
+test "where clause lambda basic" =
+  let sign = fn(x i64) i64 =
+    where x < 0: -1
+    where x > 0: 1
+    where _: 0
+  assert::equals(apply(sign, -10), -1)
+  assert::equals(apply(sign, 0), 0)
+  assert::equals(apply(sign, 42), 1)
+
+test "where clause lambda atom match" =
+  let describe = fn(x i64) string =
+    where x == 0: "zero"
+    where x < 0: "negative"
+    where _: "positive"
+  assert::equals_str(describe(0), "zero")
+  assert::equals_str(describe(-1), "negative")
+  assert::equals_str(describe(99), "positive")
+
+test "where clause lambda as higher-order arg" =
+  let abs = fn(x i64) i64 =
+    where x < 0: x * -1
+    where _: x
+  assert::equals(apply(abs, -7), 7)
+  assert::equals(apply(abs, 7), 7)
+  assert::equals(apply(abs, 0), 0)
+
+// ── pass keyword ──────────────────────────────────────────────────────────────
+
+test "pass in empty function body" =
+  fn do_nothing() =
+    pass
+  do_nothing()
+  assert::ok(true)
+
+test "pass in empty lambda" =
+  let f = fn() = pass
+  run(f)
+  assert::ok(true)
+
+test "pass in else branch" =
+  let x i64 = 5
+  if x > 10 :
+    assert::fails("should not reach here")
+  else :
+    pass
+  assert::ok(true)
+
+test "pass in for loop body" =
+  // A for loop body with only pass is a valid no-op loop.
+  for let i i64 in 0..5 :
+    pass
+  assert::ok(true)

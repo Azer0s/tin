@@ -1,5 +1,6 @@
 // Atoms: symbolic constants written with a leading single-quote.
 // Atoms are interned at compile time and compare by identity.
+use assert
 
 // An atom enum declares a set of named atom constants.
 enum atom status =
@@ -38,3 +39,18 @@ describe_weather(current_weather)
 // Atoms are echoed with their name.
 echo 'ok
 echo 'err
+
+test "status messages" =
+  assert::equals_str(status_message('ok), "Everything is fine")
+  assert::equals_str(status_message('err), "Something went wrong")
+
+test "unknown status" =
+  assert::equals_str(status_message('other), "Unknown status")
+
+test "quoted atom equals simple atom" =
+  // '"hello" and 'hello are the same atom
+  let a atom = 'hello
+  let b atom = '"hello"
+  assert::ok(a == b)
+  assert::equals_str(a, "'hello")
+  assert::equals_str(b, "'hello")

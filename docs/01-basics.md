@@ -28,9 +28,36 @@ It works with any type — strings, integers, floats, booleans, and structs.
 | `f64` | 64-bit float | 8 bytes |
 | `string` | UTF-8 string | fat pointer |
 | `char` | Single byte character (`u8`) | 1 byte |
+| `any` | Dynamically-typed box (type-id + heap pointer) | 16 bytes |
 
 Integer literals default to `i64`; float literals default to `f64`.
 The compiler coerces integer literals to the required width automatically.
+
+The `any` type can hold a value of any other type at runtime. See
+[09 – Reflection](09-reflection.md) for full details.
+
+---
+
+## null
+
+`null` is the zero pointer literal, assignable to any pointer type:
+
+```rust
+let p *i64  = null
+let s *char = null
+```
+
+Dereferencing a null pointer is undefined behaviour (no runtime null check).
+
+---
+
+## The ternary operator
+
+Tin supports the C ternary expression `cond ? a : b`:
+
+```rust
+let abs_x = x < 0 ? 0 - x : x
+```
 
 ---
 

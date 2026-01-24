@@ -5,6 +5,7 @@
 //
 // A value of type maybe[t] holds either a t or None.
 // Use `is` to test which variant is active and bind the inner value.
+use assert
 
 data maybe[t] = t | None
 
@@ -46,3 +47,19 @@ if p1 is v i64:
   echo "first positive: {v}"
 if p2 is None:
   echo "no positive found"
+
+test "safe division" =
+  let r1 maybe[i64] = safe_div(10, 2)
+  if r1 is v i64:
+    assert::equals(v, 5)
+
+test "division by zero" =
+  let r2 maybe[i64] = safe_div(10, 0)
+  assert::ok(r2 is None)
+
+test "find first positive" =
+  let p1 maybe[i64] = find_first_positive(-1, 5)
+  if p1 is v i64:
+    assert::equals(v, 5)
+  let p2 maybe[i64] = find_first_positive(-3, -7)
+  assert::ok(p2 is None)

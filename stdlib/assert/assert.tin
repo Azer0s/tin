@@ -1,0 +1,38 @@
+// stdlib/assert — test assertion helpers for use with `test` blocks
+//
+// abort is the only native primitive: it prints "FAILED", writes msg to
+// stderr, then longjmps back to the test runner (or exit(1) standalone)
+// All assertion logic is implemented in Tin
+
+fn abort(msg string) = extern("_tin_assert_abort")
+
+fn ok(cond bool) =
+  if !cond :
+    abort("assertion failed: expected true")
+
+fn not_ok(cond bool) =
+  if cond :
+    abort("assertion failed: expected false")
+
+fn equals(expected i64, actual i64) =
+  if expected != actual :
+    abort("expected {expected}, got {actual}")
+
+fn not_equals(a i64, b i64) =
+  if a == b :
+    abort("expected values to differ, both were {a}")
+
+fn equals_str(expected string, actual string) =
+  if expected != actual :
+    abort("expected \"{expected}\", got \"{actual}\"")
+
+fn equals_f64(expected f64, actual f64) =
+  if expected != actual :
+    abort("expected {expected}, got {actual}")
+
+fn fails(msg string) =
+  abort(msg)
+
+export {
+  ok, not_ok, equals, not_equals, equals_str, equals_f64, fails
+} as assert

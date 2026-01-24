@@ -1,6 +1,6 @@
 // Package types defines the tin language type system and provides utilities
 // for converting AST type expressions into resolved runtime types that the
-// LLVM code generator can consume.
+// LLVM code generator can consume
 package types
 
 import (
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Kind classifies a tin type.
+// Kind classifies a tin type
 type Kind int
 
 const (
@@ -29,7 +29,7 @@ const (
 	KindAtom        // atom literal type
 )
 
-// Type represents a resolved tin type.
+// Type represents a resolved tin type
 type Type struct {
 	Kind Kind
 	Name string // canonical name used as LLVM struct/alias name
@@ -75,7 +75,7 @@ type Type struct {
 	Tags map[string]bool // #pure, #recurse, #noRecurse, …
 }
 
-// FieldInfo describes a struct field.
+// FieldInfo describes a struct field
 type FieldInfo struct {
 	Name      string
 	Type      *Type
@@ -83,7 +83,7 @@ type FieldInfo struct {
 	Offset    int // field index (for GEP)
 }
 
-// FuncInfo describes a function/method signature.
+// FuncInfo describes a function/method signature
 type FuncInfo struct {
 	Name     string
 	Params   []*Type
@@ -92,7 +92,7 @@ type FuncInfo struct {
 	Tags     map[string]bool
 }
 
-// EnumMember holds one enum variant.
+// EnumMember holds one enum variant
 type EnumMember struct {
 	Name  string
 	Value int64
@@ -119,7 +119,7 @@ var (
 	TinStr  = &Type{Kind: KindString, Name: "string"}
 )
 
-// Builtins maps tin type names to their pre-resolved *Type.
+// Builtins maps tin type names to their pre-resolved *Type
 var Builtins = map[string]*Type{
 	"void": Void, "bool": Bool,
 	"i8": I8, "i16": I16, "i32": I32, "i64": I64,
@@ -202,17 +202,17 @@ func NewGenericParam(name string) *Type {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// IsInteger returns true for all integer kinds including char.
+// IsInteger returns true for all integer kinds including char
 func (t *Type) IsInteger() bool {
 	return t.Kind == KindInt
 }
 
-// IsNumeric returns true for integers and floats.
+// IsNumeric returns true for integers and floats
 func (t *Type) IsNumeric() bool {
 	return t.Kind == KindInt || t.Kind == KindFloat
 }
 
-// ByteSize returns the size in bytes of the type (approximate for complex types).
+// ByteSize returns the size in bytes of the type (approximate for complex types)
 func (t *Type) ByteSize() int {
 	switch t.Kind {
 	case KindBool:
@@ -253,7 +253,7 @@ func (t *Type) ByteSize() int {
 	return 8
 }
 
-// String returns a human-readable representation.
+// String returns a human-readable representation
 func (t *Type) String() string {
 	if t == nil {
 		return "<nil>"
@@ -261,7 +261,7 @@ func (t *Type) String() string {
 	return t.Name
 }
 
-// Substitute replaces generic type parameters with concrete types.
+// Substitute replaces generic type parameters with concrete types
 func (t *Type) Substitute(mapping map[string]*Type) *Type {
 	if t == nil {
 		return nil

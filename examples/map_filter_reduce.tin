@@ -1,6 +1,7 @@
 // Generic map, filter, reduce, any, and all — curried higher-order functions
 // using type parameters, closures, and dynamic array building with ++=.
 // Demonstrates the |> pipe operator for readable data-transformation pipelines.
+use assert
 
 fn map[t, r](f fn(i t) r) fn([t]) [r] =
   return fn(list [t]) [r] =
@@ -63,3 +64,22 @@ echo shifted[4]
 
 echo nums |> any(fn(i i64) bool = return i > 4)
 echo nums |> all(fn(i i64) bool = return i > 0)
+
+test "filter and map" =
+  let evens_doubled = [1, 2, 3, 4, 5]
+  |> filter(fn(i i64) bool = return i % 2 == 0)
+  |> map(fn(i i64) i64 = return i * 2)
+  assert::equals(evens_doubled[0], 4)
+  assert::equals(evens_doubled[1], 8)
+
+test "reduce" =
+  let total = [1, 2, 3, 4, 5] |> reduce(fn(acc i64, i i64) i64 = return acc + i, 0)
+  let product = [1, 2, 3, 4, 5] |> reduce(fn(acc i64, i i64) i64 = return acc * i, 1)
+  assert::equals(total, 15)
+  assert::equals(product, 120)
+
+test "any and all" =
+  assert::ok([1, 2, 3, 4, 5] |> any(fn(i i64) bool = return i > 4))
+  assert::ok([1, 2, 3, 4, 5] |> all(fn(i i64) bool = return i > 0))
+  assert::not_ok([1, 2, 3, 4, 5] |> any(fn(i i64) bool = return i > 10))
+  assert::not_ok([1, 2, 3, 4, 5] |> all(fn(i i64) bool = return i > 3))

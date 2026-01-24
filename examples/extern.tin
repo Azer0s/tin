@@ -5,8 +5,10 @@
 // When it returns `string`, the result is wrapped back into a fat-pointer using
 // C's strlen to determine the length.
 //
-// Build with -lm if using math functions:
+// Build/test with -lm for the math functions:
 //   tin build extern.tin -lm
+//   tin test  extern.tin -lm
+use assert
 
 // ── String functions ──────────────────────────────────────────────────────────
 
@@ -31,20 +33,31 @@ use extern (
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-// string → unwrapped to char* automatically
 puts("hello from extern!")
 
 let msg string = "world"
-echo strlen(msg)     // string fat-ptr auto-unwrapped
+echo strlen(msg)
 
-// strcmp: both strings unwrapped, result is i32
-echo strcmp("abc", "abc")  // 0  (equal)
-echo strcmp("abc", "xyz")  // negative
+echo strcmp("abc", "abc")
+echo strcmp("abc", "xyz")
 
-// getenv: char* result auto-wrapped into string fat-ptr
 let home string = getenv("HOME")
 printf("HOME = %s\n", home)
 
-// math
 echo sqrt(144.0)
 echo pow(2.0, 8.0)
+
+test "string length" =
+  assert::equals(strlen("hello"), 5)
+  assert::equals(strlen(""), 0)
+  assert::equals(strlen("Hello, world!"), 13)
+
+test "strcmp" =
+  assert::equals(strcmp("abc", "abc") as i64, 0)
+  assert::ok(strcmp("abc", "xyz") < 0)
+  assert::ok(strcmp("xyz", "abc") > 0)
+
+test "math functions" =
+  assert::equals_f64(sqrt(144.0), 12.0)
+  assert::equals_f64(pow(2.0, 8.0), 256.0)
+  assert::equals_f64(pow(3.0, 3.0), 27.0)

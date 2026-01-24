@@ -1,6 +1,6 @@
-// Package parser implements a recursive-descent parser for the tin language.
+// Package parser implements a recursive-descent parser for the tin language
 // It consumes the INDENT/DEDENT token stream produced by the lexer and
-// builds the AST defined in the ast package.
+// builds the AST defined in the ast package
 package parser
 
 import (
@@ -12,18 +12,18 @@ import (
 	"github.com/Azer0s/tin/lexer"
 )
 
-// Parser holds the token stream and current position.
+// Parser holds the token stream and current position
 type Parser struct {
 	tokens []lexer.Token
 	pos    int
 }
 
-// New creates a Parser over the given token slice.
+// New creates a Parser over the given token slice
 func New(tokens []lexer.Token) *Parser {
 	return &Parser{tokens: tokens}
 }
 
-// ── Navigation helpers ────────────────────────────────────────────────────────
+// -- Navigation helpers
 
 func (p *Parser) peek() lexer.Token {
 	if p.pos >= len(p.tokens) {
@@ -74,8 +74,8 @@ func (p *Parser) skipNewlines() {
 	}
 }
 
-// skipWhitespace skips NEWLINE, INDENT, and DEDENT tokens.
-// Use this inside parenthesised lists where indentation is not significant.
+// skipWhitespace skips NEWLINE, INDENT, and DEDENT tokens
+// Use this inside parenthesised lists where indentation is not significant
 func (p *Parser) skipWhitespace() {
 	for p.match(lexer.NEWLINE, lexer.INDENT, lexer.DEDENT) {
 		p.advance()
@@ -92,9 +92,9 @@ func (p *Parser) errorf(f string, a ...any) error {
 	return fmt.Errorf(f+" (at %d:%d)", append(a, t.Line, t.Col)...)
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// -- Entry point
 
-// Parse builds and returns the complete AST for the token stream.
+// Parse builds and returns the complete AST for the token stream
 func (p *Parser) Parse() (*ast.Program, error) {
 	prog := &ast.Program{}
 	p.skipNewlines()
@@ -111,7 +111,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 	return prog, nil
 }
 
-// ── Top-level declarations ────────────────────────────────────────────────────
+// -- Top-level declarations
 
 func (p *Parser) parseTopLevel() (ast.Node, error) {
 	// Collect leading control tags: fn{#pure #recurse} …
@@ -138,15 +138,20 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 		return p.parseUseDecl()
 	case lexer.KW_EXPORT:
 		return p.parseExportDecl()
+	case lexer.KW_TEST:
+		return p.parseTestDecl()
 	case lexer.KW_STATIC:
 		p.advance()
 		return p.parseFuncDecl(tags, true)
+	case lexer.DEDENT:
+		p.advance() // consume stray DEDENT at top level (from multiline function bodies)
+		return nil, nil
 	default:
 		return p.parseStatement()
 	}
 }
 
-// parseTags consumes optional {#tag …} before a declaration keyword.
+// parseTags consumes optional {#tag …} before a declaration keyword
 func (p *Parser) parseTags() []string {
 	var tags []string
 	// Two forms: fn{#pure} or just leading control tags on the fn line
@@ -173,7 +178,7 @@ func (p *Parser) parseTags() []string {
 	return tags
 }
 
-// ── Function declaration ──────────────────────────────────────────────────────
+// -- Function declaration
 
 func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, error) {
 	pos := p.curPos()
@@ -187,7 +192,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		tags = append(tags, moreTags...)
 	}
 
-	// Optional name (lambdas are anonymous).
+	// Optional name (lambdas are anonymous)
 	// Forms:
 	//   fn name(...)            – regular method
 	//   fn ::name(...)          – alias-trait implementation
@@ -267,7 +272,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 	// Generic type constraints: "where t is Labeled+Sized, r is Printable"
 	// Appear BEFORE the `=` body separator.  One `where` keyword may be
 	// followed by multiple comma-separated bindings; multiple `where` keywords
-	// are also accepted for readability.
+	// are also accepted for readability
 	var constraints []ast.TypeConstraint
 	parseOneConstraint := func() bool {
 		if !(p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.KW_IS) {
@@ -276,7 +281,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		typeParam := p.advance().Literal // e.g. "t"
 		p.advance()                      // consume "is"
 		var traits []ast.TypeExpr
-		// Each trait may be a simple name or a generic like iter[i64].
+		// Each trait may be a simple name or a generic like iter[i64]
 		if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
 			te, err2 := p.parseTypeSingle()
 			if err2 == nil {
@@ -302,7 +307,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			p.pos = saved
 			break
 		}
-		// Additional constraints after commas (still in the same `where` clause).
+		// Additional constraints after commas (still in the same `where` clause)
 		for p.check(lexer.COMMA) {
 			p.advance() // consume ","
 			if !parseOneConstraint() {
@@ -365,9 +370,9 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 	}, nil
 }
 
-// parseFuncBody parses the body after the `=` sign.
-// It has already been consumed by the caller.
-// Handles: single-line expr, indented block, indented where list.
+// parseFuncBody parses the body after the `=` sign
+// It has already been consumed by the caller
+// Handles: single-line expr, indented block, indented where list
 func (p *Parser) parseFuncBody() (ast.Node, error) {
 	if p.check(lexer.NEWLINE) {
 		p.advance() // consume NEWLINE
@@ -385,7 +390,7 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 	return p.parseStatement()
 }
 
-// parseWhereBlock consumes INDENT, parses where clauses, consumes DEDENT.
+// parseWhereBlock consumes INDENT, parses where clauses, consumes DEDENT
 func (p *Parser) parseWhereBlock() (*ast.WhereList, error) {
 	if _, err := p.expect(lexer.INDENT); err != nil {
 		return nil, err
@@ -450,9 +455,9 @@ func (p *Parser) parseWhereClause() (ast.WhereClause, error) {
 	return ast.WhereClause{Pos: pos, Cond: cond, Body: body}, nil
 }
 
-// ── Block parsing ─────────────────────────────────────────────────────────────
+// -- Block parsing
 
-// parseBlock consumes INDENT, zero or more statements, then DEDENT.
+// parseBlock consumes INDENT, zero or more statements, then DEDENT
 func (p *Parser) parseBlock() (*ast.Block, error) {
 	pos := p.curPos()
 	if _, err := p.expect(lexer.INDENT); err != nil {
@@ -477,7 +482,7 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	return b, nil
 }
 
-// ── Statements ────────────────────────────────────────────────────────────────
+// -- Statements
 
 func (p *Parser) parseStatement() (ast.Node, error) {
 	tags := p.parseTags()
@@ -496,6 +501,9 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		return p.parseEnumDecl()
 	case lexer.KW_RETURN:
 		return p.parseReturnStmt()
+	case lexer.KW_PASS:
+		p.advance()
+		return nil, nil // no-op statement; not appended to block
 	case lexer.KW_BREAK:
 		p.advance()
 		return &ast.BreakStmt{}, nil
@@ -934,7 +942,7 @@ func (p *Parser) parseTaggedBlock() (*ast.TaggedBlock, error) {
 }
 
 // parseExprStatement handles assignments, augmented assignments, postfixes,
-// and bare expression statements.
+// and bare expression statements
 func (p *Parser) parseExprStatement() (ast.Node, error) {
 	expr, err := p.parseExpr()
 	if err != nil {
@@ -988,7 +996,7 @@ func augOp(t lexer.TokenType) (string, bool) {
 	return "", false
 }
 
-// ── Struct / Trait / Type / Enum / Union / Data declarations ──────────────────
+// -- Struct / Trait / Type / Enum / Union / Data declarations
 
 func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	p.advance() // consume struct
@@ -1088,7 +1096,17 @@ func (p *Parser) parseStructItem() (any, error) {
 		isForward = true
 		p.advance()
 	}
-	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward}, nil
+	// Optional field tags: @"tag1" @"tag2"
+	var tags []string
+	for p.check(lexer.AT) {
+		p.advance()
+		tagTok, err2 := p.expect(lexer.STRING_LIT)
+		if err2 != nil {
+			return nil, err2
+		}
+		tags = append(tags, tagTok.Literal)
+	}
+	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, Tags: tags}, nil
 }
 
 func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
@@ -1340,7 +1358,7 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 			decl.Variants = append(decl.Variants, ast.DataVariant{Name: "None"})
 		} else {
 			// Use parseTypeSingle (not parseTypeExpr) so that | is treated as
-			// variant separator, not as a union type operator.
+			// variant separator, not as a union type operator
 			typ, err2 := p.parseTypeSingle()
 			if err2 != nil {
 				return nil, err2
@@ -1397,7 +1415,7 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 
 func (p *Parser) parseUseImport() (ast.UseImport, error) {
 	imp := ast.UseImport{}
-	// Parse the local (Tin) name first.
+	// Parse the local (Tin) name first
 	if p.check(lexer.IDENT) {
 		imp.LocalName = p.advance().Literal
 		imp.ExternName = imp.LocalName // default: C name == Tin name
@@ -1431,6 +1449,11 @@ func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 	if p.check(lexer.LBRACE) {
 		p.advance()
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+			// Skip whitespace tokens (multiline export blocks produce INDENT/DEDENT/NEWLINE)
+			if p.check(lexer.NEWLINE) || p.check(lexer.INDENT) || p.check(lexer.DEDENT) {
+				p.advance()
+				continue
+			}
 			if p.check(lexer.IDENT) {
 				decl.Names = append(decl.Names, p.advance().Literal)
 			}
@@ -1448,6 +1471,31 @@ func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 			decl.AsName = p.advance().Literal
 		}
 	}
+	return decl, nil
+}
+
+func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
+	tok := p.advance() // consume 'test'
+	decl := &ast.TestDecl{}
+	// Collect position from 'test' token
+	_ = tok
+
+	// Expect a string description
+	if !p.check(lexer.STRING_LIT) {
+		return nil, fmt.Errorf("line %d: expected string description after 'test'", p.peek().Line)
+	}
+	decl.Desc = p.advance().Literal
+
+	p.skipNewlines()
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+
+	body, err := p.parseFuncBody()
+	if err != nil {
+		return nil, err
+	}
+	decl.Body = body
 	return decl, nil
 }
 
@@ -1493,7 +1541,7 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 	return &ast.MacroDecl{Name: name, Tags: tags, Params: params, Body: body}, nil
 }
 
-// ── Expressions ───────────────────────────────────────────────────────────────
+// -- Expressions
 
 // Expression precedence (lowest → highest):
 //
@@ -1616,9 +1664,9 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 		return nil, err
 	}
 	for p.match(lexer.PLUS, lexer.MINUS, lexer.INC) {
-		// ++ is both a binary concat operator and a postfix increment.
+		// ++ is both a binary concat operator and a postfix increment
 		// Only treat it as binary concat when followed by a valid expression
-		// start; otherwise leave it for parseExprStatement's postfix check.
+		// start; otherwise leave it for parseExprStatement's postfix check
 		if p.peek().Type == lexer.INC && !isExprStart(p.peekAt(1)) {
 			break
 		}
@@ -1632,13 +1680,15 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 	return left, nil
 }
 
-// isExprStart returns true if tok can begin a primary expression.
+// isExprStart returns true if tok can begin a primary expression
 func isExprStart(tok lexer.Token) bool {
 	switch tok.Type {
 	case lexer.IDENT, lexer.INT_LIT, lexer.FLOAT_LIT, lexer.STRING_LIT,
 		lexer.BOOL_LIT, lexer.CHAR_LIT, lexer.NONE_LIT,
 		lexer.LPAREN, lexer.LBRACKET, lexer.MINUS, lexer.NOT,
-		lexer.STAR, lexer.AMP, lexer.KW_FN, lexer.KW_SIZEOF, lexer.KW_ADDR:
+		lexer.STAR, lexer.AMP, lexer.KW_FN, lexer.KW_SIZEOF, lexer.KW_ADDR,
+		lexer.KW_TYPEOF, lexer.KW_TRAITOF, lexer.KW_FIELDNAMES, lexer.KW_FIELDTYPES,
+		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD:
 		return true
 	}
 	return isTypeKeyword(tok)
@@ -1938,6 +1988,132 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		}
 		return &ast.SizeofExpr{Type: typ}, nil
 
+	case lexer.KW_TYPEOF:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.TypeofExpr{Expr: inner}, nil
+
+	case lexer.KW_TRAITOF:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.TraitofExpr{Expr: inner}, nil
+
+	case lexer.KW_FIELDNAMES:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.FieldnamesExpr{Expr: inner}, nil
+
+	case lexer.KW_FIELDTYPES:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.FieldtypesExpr{Expr: inner}, nil
+
+	case lexer.KW_FIELDTAG:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.COMMA); err != nil {
+			return nil, err
+		}
+		field, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.FieldtagExpr{Expr: expr, Field: field}, nil
+
+	case lexer.KW_GETFIELD:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.COMMA); err != nil {
+			return nil, err
+		}
+		field, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.GetfieldExpr{Expr: expr, Field: field}, nil
+
+	case lexer.KW_SETFIELD:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.COMMA); err != nil {
+			return nil, err
+		}
+		field, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.COMMA); err != nil {
+			return nil, err
+		}
+		val, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		return &ast.SetfieldExpr{Expr: expr, Field: field, Val: val}, nil
+
 	case lexer.KW_ADDR:
 		p.advance()
 		if _, err := p.expect(lexer.LPAREN); err != nil {
@@ -2088,9 +2264,9 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 	return lit, nil
 }
 
-// ── Type expressions ──────────────────────────────────────────────────────────
+// -- Type expressions
 
-// parseTypeExpr parses a type annotation.
+// parseTypeExpr parses a type annotation
 func (p *Parser) parseTypeExpr() (ast.TypeExpr, error) {
 	return p.parseTypeUnion()
 }
@@ -2247,7 +2423,7 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 	return ft, nil
 }
 
-// ── Parameter list ────────────────────────────────────────────────────────────
+// -- Parameter list
 
 func (p *Parser) parseParams() ([]ast.Param, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
@@ -2304,7 +2480,7 @@ func (p *Parser) parseParam() (ast.Param, error) {
 	return param, nil
 }
 
-// parseTypeParams parses optional generic type parameters [t] or [t, r].
+// parseTypeParams parses optional generic type parameters [t] or [t, r]
 func (p *Parser) parseTypeParams() ([]string, error) {
 	if !p.check(lexer.LBRACKET) {
 		return nil, nil
@@ -2325,11 +2501,11 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 	return params, nil
 }
 
-// ── String interpolation ──────────────────────────────────────────────────────
+// -- String interpolation
 
-// parseStringInterp splits a raw string literal into an AST node.
+// parseStringInterp splits a raw string literal into an AST node
 // If it contains {expr} patterns it returns an InterpolatedString,
-// otherwise a plain StringLit.
+// otherwise a plain StringLit
 func parseStringInterp(s string) (ast.Node, error) {
 	if !strings.Contains(s, "{") {
 		return &ast.StringLit{Value: s}, nil
@@ -2373,7 +2549,7 @@ func parseStringInterp(s string) (ast.Node, error) {
 	return &ast.InterpolatedString{Parts: parts}, nil
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// -- Helpers
 
 func isTypeKeyword(tok lexer.Token) bool {
 	switch tok.Type {
@@ -2384,7 +2560,7 @@ func isTypeKeyword(tok lexer.Token) bool {
 	case "i8", "i16", "i32", "i64",
 		"u8", "u16", "u32", "u64",
 		"f32", "f64",
-		"bool", "char", "string", "any",
+		"bool", "char", "string", "atom", "any",
 		"void", "uint32", "size_t",
 		"int", "uint":
 		return true
@@ -2397,13 +2573,13 @@ func isTypeToken(tok lexer.Token) bool {
 		tok.Type == lexer.KW_CONST
 }
 
-// newInlineLexer creates a lexer for an inline expression string.
+// newInlineLexer creates a lexer for an inline expression string
 func newInlineLexer(src string) *lexer.Lexer {
 	return lexer.New(src)
 }
 
-// ParseType parses a single Tin type expression from a source string.
-// Used by the module system to deserialize type signatures.
+// ParseType parses a single Tin type expression from a source string
+// Used by the module system to deserialize type signatures
 func ParseType(src string) (ast.TypeExpr, error) {
 	l := lexer.New(src)
 	tokens, err := l.Tokenize()

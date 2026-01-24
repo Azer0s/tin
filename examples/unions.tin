@@ -1,4 +1,5 @@
 // Enums and pattern matching
+use assert
 
 enum i32 direction =
   north: 0,
@@ -42,3 +43,16 @@ if is_weekend(today):
 let workday day = day.wednesday
 if is_weekend(workday):
   echo "weekend"
+
+test "direction names" =
+  assert::equals_str(direction_name(direction.north), "north")
+  assert::equals_str(direction_name(direction.south), "south")
+  assert::equals_str(direction_name(direction.east), "east")
+  assert::equals_str(direction_name(direction.west), "west")
+
+test "weekend check" =
+  assert::ok(is_weekend(day.saturday))
+  assert::ok(is_weekend(day.sunday))
+  assert::not_ok(is_weekend(day.monday))
+  assert::not_ok(is_weekend(day.wednesday))
+  assert::not_ok(is_weekend(day.friday))

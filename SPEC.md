@@ -409,6 +409,135 @@ defer free(s)
 // free(s) is called at end of scope, even on early return
 ```
 
+### pass statement
+
+`pass` is a no-op statement that explicitly marks an empty block:
+
+```rust
+fn do_nothing() =
+  pass
+
+let noop = fn() = pass
+
+if x > 10 :
+  do_thing()
+else :
+  pass
+
+for let i i64 in 0..n :
+  pass
+```
+
+`pass` has no runtime effect. It may appear anywhere a statement is expected.
+
+---
+
+### Linker directives
+
+Files can embed linker flags with `//!` comment lines at the top of the file
+(before any non-comment code):
+
+```rust
+//!-lm
+//!-lraylib
+```
+
+The text after `//!` is appended verbatim to the linker command line. Common
+uses: `//!-lm` (C math library), `//!-lraylib` (Raylib), `//!-lpthread`.
+
+---
+
+### Test blocks
+
+`test` blocks declare named test cases. They are compiled and run only when
+the file is executed with `tin test`; they are skipped during `tin run` and
+`tin build`.
+
+```rust
+use assert
+
+test "description" =
+  assert::equals(1 + 1, 2)
+  assert::ok(true)
+```
+
+Run tests:
+
+```
+tin test examples/test_example.tin   # single file
+tin test examples/                   # entire directory
+```
+
+The `assert` stdlib (`use assert`) provides:
+
+| Function | Description |
+|---|---|
+| `assert::equals(expected i64, actual i64)` | Assert two `i64` values are equal |
+| `assert::equals_str(expected string, actual string)` | Assert two strings are equal |
+| `assert::equals_f64(expected f64, actual f64)` | Assert two `f64` values are equal |
+| `assert::ok(cond bool)` | Assert condition is true |
+| `assert::not_ok(cond bool)` | Assert condition is false |
+| `assert::not_equals(a i64, b i64)` | Assert two `i64` values differ |
+| `assert::fails(msg string)` | Unconditionally fail with message |
+
+When an assertion fails inside `tin test`, the runner prints the failure and
+moves on to the next test (via `longjmp`). In a standalone run, `exit(1)` is
+called.
+
+---
+
+### Atoms
+
+Atoms are compile-time symbolic constants. They have type `atom` and compare
+by identity (interned at compile time).
+
+**Simple atoms** — a leading `'` followed by letters, digits, and underscores
+only:
+
+```rust
+'ok
+'err
+'sunny
+'my_type_1
+```
+
+These are used in enum declarations, `where` pattern matching, and are returned
+by `typeof` for primitive types:
+
+```rust
+let t = typeof(42)    // 'i64
+let t2 = typeof(true) // 'bool
+```
+
+**Complex (quoted) atoms** — when the type string contains characters not
+allowed in a simple atom name (`(`, `)`, `[`, `]`, `*`, `,`), use the quoted
+form `'"..."`:
+
+```rust
+'"fn(i64)bool"
+'"fn(i64,f64)bool"
+'"*bool"
+'"[string]"
+'"fn(fn(i64)bool,i64)string"
+```
+
+Quoted atoms are produced by `typeof` for pointer, array, and function types,
+and are the form expected by `reflect` API functions:
+
+```rust
+use reflect
+
+echo reflect::is_fn('"fn(i64)bool")      // 1
+echo reflect::fn_ret('"fn(i64,f64)bool") // 'bool
+echo reflect::elem('"*bool")             // 'bool
+echo reflect::elem('"[string]")          // 'string
+```
+
+Both simple and quoted atoms have type `atom` and work identically with `==`,
+`where` guards, and reflection functions.
+
+---
+
 ### Atoms & Macros
 
 ```rust

@@ -1,7 +1,7 @@
-// Package lexer implements the tin language lexer.
+// Package lexer implements the tin language lexer
 // It produces INDENT/DEDENT tokens for indentation-sensitive parsing
 // and handles all tin-specific syntax including atoms, control tags,
-// string interpolation, and the full operator set.
+// string interpolation, and the full operator set
 package lexer
 
 import (
@@ -10,7 +10,7 @@ import (
 	"unicode"
 )
 
-// TokenType identifies the kind of a token.
+// TokenType identifies the kind of a token
 type TokenType int
 
 const (
@@ -60,6 +60,15 @@ const (
 	KW_ADDR
 	KW_BREAK
 	KW_ECHO
+	KW_TEST
+	KW_TYPEOF
+	KW_TRAITOF
+	KW_FIELDNAMES
+	KW_FIELDTYPES
+	KW_FIELDTAG
+	KW_GETFIELD
+	KW_SETFIELD
+	KW_PASS
 
 	// Operators
 	PLUS       // +
@@ -135,7 +144,10 @@ var tokenNames = map[TokenType]string{
 	KW_DEFER: "defer", KW_WHERE: "where", KW_MACRO: "macro",
 	KW_STATIC: "static", KW_VIRTUAL: "virtual", KW_AS: "as", KW_IS: "is",
 	KW_FORWARD: "forward", KW_OVERRIDE: "override", KW_SIZEOF: "sizeof",
-	KW_ADDR: "addr", KW_BREAK: "break", KW_ECHO: "echo",
+	KW_ADDR: "addr", KW_BREAK: "break", KW_ECHO: "echo", KW_TEST: "test",
+	KW_TYPEOF: "typeof", KW_TRAITOF: "traitof", KW_FIELDNAMES: "fieldnames",
+	KW_FIELDTYPES: "fieldtypes", KW_FIELDTAG: "fieldtag",
+	KW_GETFIELD: "getfield", KW_SETFIELD: "setfield", KW_PASS: "pass",
 	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
@@ -166,11 +178,14 @@ var keywords = map[string]TokenType{
 	"defer": KW_DEFER, "where": KW_WHERE, "macro": KW_MACRO,
 	"static": KW_STATIC, "virtual": KW_VIRTUAL, "as": KW_AS, "is": KW_IS,
 	"forward": KW_FORWARD, "override": KW_OVERRIDE, "sizeof": KW_SIZEOF,
-	"addr": KW_ADDR, "break": KW_BREAK, "echo": KW_ECHO,
+	"addr": KW_ADDR, "break": KW_BREAK, "echo": KW_ECHO, "test": KW_TEST,
+	"typeof": KW_TYPEOF, "traitof": KW_TRAITOF, "fieldnames": KW_FIELDNAMES,
+	"fieldtypes": KW_FIELDTYPES, "fieldtag": KW_FIELDTAG,
+	"getfield": KW_GETFIELD, "setfield": KW_SETFIELD, "pass": KW_PASS,
 	"true": BOOL_LIT, "false": BOOL_LIT, "None": NONE_LIT,
 }
 
-// Token is a single lexical unit.
+// Token is a single lexical unit
 type Token struct {
 	Type    TokenType
 	Literal string
@@ -182,7 +197,7 @@ func (t Token) String() string {
 	return fmt.Sprintf("Token(%s, %q, %d:%d)", t.Type, t.Literal, t.Line, t.Col)
 }
 
-// Lexer tokenizes tin source code.
+// Lexer tokenizes tin source code
 type Lexer struct {
 	src          []rune
 	pos          int
@@ -195,11 +210,11 @@ type Lexer struct {
 	// dedenting is true when we are re-entering handleLineStart to emit
 	// additional DEDENT tokens for the same line.  In that case the position
 	// has already been advanced past the leading whitespace, so we must use
-	// lineIndent instead of recounting.
+	// lineIndent instead of recounting
 	dedenting bool
 }
 
-// New creates a new Lexer for the given source string.
+// New creates a new Lexer for the given source string
 func New(src string) *Lexer {
 	return &Lexer{
 		src:         []rune(src),
@@ -212,7 +227,7 @@ func New(src string) *Lexer {
 	}
 }
 
-// Tokenize returns all tokens from the source.
+// Tokenize returns all tokens from the source
 func (l *Lexer) Tokenize() ([]Token, error) {
 	for {
 		tok, err := l.nextToken()
@@ -346,11 +361,11 @@ func (l *Lexer) nextToken() (Token, error) {
 }
 
 func (l *Lexer) handleLineStart() (Token, error) {
-	// Count leading whitespace (skip recount when emitting additional DEDENTs).
+	// Count leading whitespace (skip recount when emitting additional DEDENTs)
 	var indent int
 	var startPos int
 	if l.dedenting {
-		// We already counted the indent for this line; reuse it.
+		// We already counted the indent for this line; reuse it
 		indent = l.lineIndent
 		startPos = l.pos
 	} else {
@@ -408,13 +423,13 @@ func (l *Lexer) handleLineStart() (Token, error) {
 	} else if indent < top {
 		// Pop stack until we match
 		l.indentStack = l.indentStack[:len(l.indentStack)-1]
-		// If still not matching, we'll emit more DEDENTs on subsequent calls.
+		// If still not matching, we'll emit more DEDENTs on subsequent calls
 		if len(l.indentStack) == 0 || indent > l.indentStack[len(l.indentStack)-1] {
 			// Inconsistent indentation
 			l.indentStack = append(l.indentStack, indent)
 		}
 		// Re-enter handleLineStart to possibly emit more DEDENTs, but reuse
-		// the already-computed indent so we don't recount past whitespace.
+		// the already-computed indent so we don't recount past whitespace
 		if indent < l.indentStack[len(l.indentStack)-1] {
 			l.atLineStart = true
 			l.dedenting = true
@@ -478,13 +493,42 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 
 	ch := l.peek()
 
-	// If it's a letter/digit/_  and not followed by a closing quote - it's an atom
+	// '"..."  →  quoted atom literal (for non-standard / user-defined names)
+	// If the content is a plain identifier (letters, digits, underscores only),
+	// the quotes are stripped and the atom is equivalent to the unquoted form:
+	// '"hello"' == 'hello.  Complex contents (e.g. '"fn(i64)bool"') keep the
+	// surrounding double-quotes in the literal so they remain distinct
+	if ch == '"' {
+		l.advance() // consume opening "
+		var sb strings.Builder
+		isSimple := true
+		for l.pos < len(l.src) && l.peek() != '"' && l.peek() != '\n' {
+			r := l.advance()
+			sb.WriteRune(r)
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+				isSimple = false
+			}
+		}
+		if l.pos < len(l.src) && l.peek() == '"' {
+			l.advance() // consume closing "
+		}
+		name := sb.String()
+		if !isSimple {
+			// Keep surrounding double-quotes for complex atoms like '"fn(i64)bool"'
+			name = "\"" + name + "\""
+		}
+		return Token{Type: ATOM_LIT, Literal: name, Line: line, Col: col}, nil
+	}
+
+	// If it's a letter or underscore - it's an atom
+	// Simple atoms only allow letters, digits, and underscores (no special characters)
+	// Use '"..."' quoted form for atoms containing special characters
 	if unicode.IsLetter(ch) || ch == '_' {
 		// Check: is it a single char followed by ' ? That would be a char literal
 		// We need to look ahead: if next-next is ' it might be a 1-char string
-		// But atoms like 'ok don't have a closing quote.
-		// Rule: peek ahead - if we find a non-ident char before finding ', it's ambiguous.
-		// Simpler: if after the char there's immediately a closing quote, it's a char literal.
+		// But atoms like 'ok don't have a closing quote
+		// Rule: peek ahead - if we find a non-ident char before finding ', it's ambiguous
+		// Simpler: if after the char there's immediately a closing quote, it's a char literal
 		nextCh := l.peekAt(1)
 		if nextCh == '\'' {
 			// char literal: 'x'
@@ -492,7 +536,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			l.advance()      // consume closing '
 			return Token{Type: CHAR_LIT, Literal: string(c), Line: line, Col: col}, nil
 		}
-		// It's an atom
+		// It's an atom — only letters, digits, and underscores allowed
 		var sb strings.Builder
 		for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 			sb.WriteRune(l.advance())

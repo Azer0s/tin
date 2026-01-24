@@ -1,5 +1,42 @@
 # 08 – Interop, Packages & Low-Level Features
 
+## Linker directives (`//!`)
+
+Files can declare linker flags that are passed to the linker at compile time.
+These directives appear at the top of the file as special comments starting
+with `//!`:
+
+```rust
+//!-lm
+//!-lraylib
+```
+
+Each `//!` line is a linker flag. The text after `//!` is appended verbatim to
+the linker command line. Common uses:
+
+| Directive | Purpose |
+|---|---|
+| `//!-lm` | Link the C math library (`libm`) |
+| `//!-lraylib` | Link Raylib |
+| `//!-lpthread` | Link pthreads |
+
+Linker directives must appear before any non-comment code in the file. They
+are processed before the rest of the compilation unit.
+
+Example — using `sqrt` and `pow` from `libm`:
+
+```rust
+//!-lm
+
+fn c_sqrt(x f64) f64 = extern("sqrt")
+fn c_pow(x f64, y f64) f64 = extern("pow")
+
+echo c_sqrt(144.0)    // 12.0
+echo c_pow(2.0, 10.0) // 1024.0
+```
+
+---
+
 ## Calling C functions (`extern`)
 
 ### Inline extern declaration
@@ -186,6 +223,31 @@ struct{ #pure@fn #const@field } str(...) = ...
 
 `#pure@fn` means all methods are `#pure`; `#const@field` means all fields
 are immutable.
+
+---
+
+## Function pointers and higher-order interop
+
+When a named function or extern function is passed as a value to a
+higher-order function, the compiler synthesises a **shim**:
+
+```rust
+fn ex_abs(x i64) i64 = extern("labs")
+
+fn apply(f fn(i64) i64, x i64) i64 = return f(x)
+
+echo apply(ex_abs, -42)    // 42
+```
+
+The shim wraps `labs` to match Tin's fat-function-pointer calling convention
+`{ fn(i8* env, args...) ret*, i8* env }`. For non-capturing references, the
+environment pointer is `null`.
+
+Parameters that require ABI coercion (e.g., Tin fat-string `{i8*,i64}` →
+C `i8*`) are converted inside the shim; the return value is wrapped back to
+Tin conventions via `wrapFromExtern`. This means extern functions retain
+correct type information when returned as `any` or inspected with `typeof`.
+See [09 – Reflection](09-reflection.md) for details.
 
 ---
 

@@ -201,6 +201,32 @@ type mypoint = tuple[f32] override =
 
 ---
 
+## Field tags
+
+Any field in a struct can carry a compile-time metadata tag. Tags are written
+as `@"tag_string"` immediately after the field type:
+
+```rust
+struct user =
+  id    i64    @"primary_key"
+  email string @"unique"
+  score f64    @"indexed"
+  notes string            // no tag
+```
+
+Tags do not affect the struct's memory layout or runtime performance.
+They are retrieved at runtime with `fieldtag(value, "fieldName")`:
+
+```rust
+echo fieldtag(user{}, "id")     // 'primary_key
+echo fieldtag(user{}, "email")  // 'unique
+echo fieldtag(user{}, "notes")  // '' (empty atom)
+```
+
+See [09 – Reflection](09-reflection.md) for the full reflection API.
+
+---
+
 ## Traits on structs
 
 Structs can implement traits by listing them in parentheses after the struct
