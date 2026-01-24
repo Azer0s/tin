@@ -1,4 +1,5 @@
 // String interpolation and struct display
+use assert
 
 struct point =
   x i64
@@ -38,3 +39,19 @@ echo origin.show()
 let r = rect{x: 10, y: 20, w: 5, h: 8}
 echo r.show()
 echo r.area()
+
+test "point show and manhattan" =
+  let p = point{x: 3, y: 4}
+  assert::equals_str(p.show(), "(3, 4)")
+  assert::equals(p.manhattan(), 7)
+
+test "manhattan with negatives" =
+  let neg = point{x: 0 - 3, y: 0 - 4}
+  assert::equals(neg.manhattan(), 7)
+  let origin = point{x: 0, y: 0}
+  assert::equals(origin.manhattan(), 0)
+
+test "rect show and area" =
+  let r = rect{x: 10, y: 20, w: 5, h: 8}
+  assert::equals_str(r.show(), "rect at (10,20) size 5x8")
+  assert::equals(r.area(), 40)

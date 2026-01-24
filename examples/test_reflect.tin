@@ -1,0 +1,128 @@
+// test_reflect.tin — test the reflect stdlib package
+use assert
+use reflect
+
+// ── kind() ────────────────────────────────────────────────────────────────
+echo reflect::kind(typeof(42))          // primitive
+echo reflect::kind(typeof(3.14))        // primitive
+echo reflect::kind(typeof(true))        // primitive
+echo reflect::kind(typeof("hello"))     // primitive  (string is a primitive)
+
+let arr = [1, 2, 3]
+echo reflect::kind(typeof(arr))         // array
+
+let p = 42
+let ptr = &p
+echo reflect::kind(typeof(ptr))         // ptr
+
+// ── is_* predicates ───────────────────────────────────────────────────────
+echo reflect::is_primitive(typeof(42))  // 1
+echo reflect::is_array(typeof(arr))     // 1
+echo reflect::is_ptr(typeof(ptr))       // 1
+echo reflect::is_fn('"fn(i64)bool")     // 1
+
+echo reflect::is_ptr(typeof(42))        // 0
+echo reflect::is_array(typeof(42))      // 0
+echo reflect::is_primitive(typeof(arr)) // 0
+
+// ── elem() ────────────────────────────────────────────────────────────────
+echo reflect::elem(typeof(ptr))         // 'i64
+echo reflect::elem(typeof(arr))         // 'i64
+echo reflect::elem('"*bool")            // 'bool
+echo reflect::elem('"[string]")         // 'string
+echo reflect::elem(typeof(42))          // (empty)
+
+// ── fn type atoms ─────────────────────────────────────────────────────────
+let fn_atom = '"fn(i64,f64)bool"
+echo reflect::kind(fn_atom)             // fn
+echo reflect::is_fn(fn_atom)            // 1
+echo reflect::fn_ret(fn_atom)           // 'bool
+
+let params = reflect::fn_params(fn_atom)
+echo params[0]                          // 'i64
+echo params[1]                          // 'f64
+
+// zero-arg fn
+let fn0 = '"fn()i64"
+echo reflect::fn_ret(fn0)               // 'i64
+let params0 = reflect::fn_params(fn0)
+// params0 is empty array — just check fn_ret works
+
+// one-arg fn
+let fn1 = '"fn(string)i32"
+let params1 = reflect::fn_params(fn1)
+echo params1[0]                         // 'string
+
+// nested fn type
+let fn_nested = '"fn(fn(i64)bool,i64)string"
+let params_nested = reflect::fn_params(fn_nested)
+echo params_nested[0]                   // 'fn(i64)bool
+echo params_nested[1]                   // 'i64
+echo reflect::fn_ret(fn_nested)         // 'string
+
+// ── non-fn atoms for fn_* functions ──────────────────────────────────────
+echo reflect::fn_ret(typeof(42))        // (empty)
+
+echo "done"
+
+test "kind" =
+  assert::equals_str(reflect::kind(typeof(42)), "primitive")
+  assert::equals_str(reflect::kind(typeof(3.14)), "primitive")
+  assert::equals_str(reflect::kind(typeof(true)), "primitive")
+  assert::equals_str(reflect::kind(typeof("hello")), "primitive")
+  let arr = [1, 2, 3]
+  assert::equals_str(reflect::kind(typeof(arr)), "array")
+  let p = 42
+  let ptr = &p
+  assert::equals_str(reflect::kind(typeof(ptr)), "ptr")
+  assert::equals_str(reflect::kind('"fn(i64)bool"), "fn")
+
+test "is predicates" =
+  assert::equals(reflect::is_primitive(typeof(42)), 1)
+  let arr = [1, 2, 3]
+  assert::equals(reflect::is_array(typeof(arr)), 1)
+  let p = 42
+  let ptr = &p
+  assert::equals(reflect::is_ptr(typeof(ptr)), 1)
+  assert::equals(reflect::is_fn('"fn(i64)bool"), 1)
+  assert::equals(reflect::is_ptr(typeof(42)), 0)
+  assert::equals(reflect::is_array(typeof(42)), 0)
+  assert::equals(reflect::is_primitive(typeof(arr)), 0)
+
+test "elem" =
+  let p = 42
+  let ptr = &p
+  let arr = [1, 2, 3]
+  assert::equals_str(reflect::elem(typeof(ptr)), "'i64")
+  assert::equals_str(reflect::elem(typeof(arr)), "'i64")
+  assert::equals_str(reflect::elem('"*bool"), "'bool")
+  assert::equals_str(reflect::elem('"[string]"), "'string")
+  assert::equals_str(reflect::elem(typeof(42)), "")
+
+test "fn type atoms" =
+  let fn_atom = '"fn(i64,f64)bool"
+  assert::equals_str(reflect::kind(fn_atom), "fn")
+  assert::equals(reflect::is_fn(fn_atom), 1)
+  assert::equals_str(reflect::fn_ret(fn_atom), "'bool")
+  let params = reflect::fn_params(fn_atom)
+  assert::equals_str(params[0], "'i64")
+  assert::equals_str(params[1], "'f64")
+
+test "fn_params zero-arg" =
+  let fn0 = '"fn()i64"
+  assert::equals_str(reflect::fn_ret(fn0), "'i64")
+
+test "fn_params one-arg" =
+  let fn1 = '"fn(string)i32"
+  let params1 = reflect::fn_params(fn1)
+  assert::equals_str(params1[0], "'string")
+
+test "fn_params nested" =
+  let fn_nested = '"fn(fn(i64)bool,i64)string"
+  let params_nested = reflect::fn_params(fn_nested)
+  assert::equals_str(params_nested[0], "'fn(i64)bool")
+  assert::equals_str(params_nested[1], "'i64")
+  assert::equals_str(reflect::fn_ret(fn_nested), "'string")
+
+test "fn_ret non-fn" =
+  assert::equals_str(reflect::fn_ret(typeof(42)), "")

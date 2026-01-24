@@ -5,6 +5,7 @@
 // call overhead.
 //
 // macro name!(params) = body_expression
+use assert
 
 // A simple arithmetic macro.
 macro square!(x) = x * x
@@ -30,3 +31,17 @@ echo greet!("world")
 let x i64 = 7
 echo square!(x)
 echo add!(x, 3)
+
+test "arithmetic macros" =
+  assert::equals(square!(5), 25)
+  assert::equals(square!(12), 144)
+  assert::equals(double!(21), 42)
+  assert::equals(add!(3, 4), 7)
+
+test "nested macros" =
+  assert::equals(square!(double!(3)), 36)
+  assert::equals(add!(square!(4), square!(3)), 25)
+
+test "string macros" =
+  assert::equals_str(greet!("Alice"), "Hello, Alice!")
+  assert::equals_str(greet!("world"), "Hello, world!")

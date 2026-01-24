@@ -268,3 +268,35 @@ generates:
 3. **Fat pointer** — `{i8* data, vtable*}` — created when a concrete value is coerced to a trait type.
 
 Alias traits and mixin/forward-field traits do not generate vtables. Only traits with virtual or virtual-overridable methods do.
+
+### LLVM struct layout with traits
+
+Every struct that implements at least one trait carries hidden fields:
+
+```
+%rect = type { i32, %drawable_vtable*, %resizable_vtable*, i64, i64 }
+               [0]        [1]                [2]           [3]  [4]
+                ↑                                           ↑
+          type-ID field                             first user field
+```
+
+- Index 0: `i32` compile-time type ID (used by the `any` and reflection system).
+- Indices 1…N: one `vtable*` per implemented trait, in declaration order.
+- Indices N+1…: user-visible fields.
+
+The type ID and vtable pointers are never visible in source code. They are
+accessible only through the reflection builtins described in
+[09 – Reflection](09-reflection.md).
+
+### Method dispatch sequence
+
+When `print_name(cat)` is called:
+
+1. The compiler coerces `cat animal` → fat pointer `{&cat_data, &animal__named__vtable}`.
+2. The callee receives `{i8* data, named_vtable* vt}`.
+3. `x.name()` is compiled as `vt->name_fn(data)`.
+4. `animal__named__name(i8* self)` bitcasts `self` to `*animal`, loads the
+   struct, and calls the concrete `animal.name` method.
+
+The indirection is one pointer load + one indirect call — the same as C++
+virtual dispatch.

@@ -1,4 +1,6 @@
 // Structs with methods and string interpolation
+use assert
+
 struct person =
   name string
   age u8
@@ -8,3 +10,9 @@ struct person =
 
 let pete = person{name: "Pete", age: 20}
 echo pete.show()
+
+test "person struct" =
+  let p = person{name: "Alice", age: 30}
+  assert::equals_str(p.show(), "Alice is 30 years old")
+  let q = person{name: "Bob", age: 0}
+  assert::equals_str(q.show(), "Bob is 0 years old")

@@ -1,5 +1,6 @@
 // String concatenation with the ++ operator.
 // ++ joins two strings (or arrays) into a new one.
+use assert
 
 let greeting string = "Hello" ++ ", " ++ "world!"
 echo greeting
@@ -27,3 +28,12 @@ fn exclaim(msg string) string =
 
 echo exclaim("Hello")
 echo exclaim(exclaim("Hi"))
+
+test "concatenation" =
+  assert::equals_str("Hello" ++ ", " ++ "world!", "Hello, world!")
+  assert::equals_str(join("tin", "lang", "-"), "tin-lang")
+  assert::equals_str(join("hello", "world", " "), "hello world")
+
+test "exclaim" =
+  assert::equals_str(exclaim("Hello"), "Hello!")
+  assert::equals_str(exclaim(exclaim("Hi")), "Hi!!")

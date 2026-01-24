@@ -1,12 +1,20 @@
 // Iterative factorial
+use assert
+
 fn factorial(n i64) i64 =
   let result i64 = 1
   for let i i64 = 2; i <= n; i++:
     result = result * i
   return result
 
-echo factorial(0)
-echo factorial(1)
 echo factorial(5)
-echo factorial(10)
-echo factorial(20)
+
+test "factorial base cases" =
+  assert::equals(factorial(0), 1)
+  assert::equals(factorial(1), 1)
+  assert::equals(factorial(2), 2)
+
+test "factorial larger values" =
+  assert::equals(factorial(5), 120)
+  assert::equals(factorial(10), 3628800)
+  assert::equals(factorial(20), 2432902008176640000)

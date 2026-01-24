@@ -2,6 +2,7 @@
 //
 // Generic functions are monomorphized at each call site — the compiler
 // generates a concrete version for each distinct type argument.
+use assert
 
 trait labeled =
   fn label(this labeled) string = virtual
@@ -68,3 +69,15 @@ describe(c)            // wheel has size 25
 
 let diff = compare_sizes(b, c)
 echo diff              // 2  (27 - 25)
+
+test "generic get_size" =
+  let b = box{name: "crate", width: 3}
+  let c = circle{id: "wheel", radius: 5}
+  assert::equals(get_size(b), 27)
+  assert::equals(get_size(c), 25)
+
+test "generic compare_sizes" =
+  let b = box{name: "test", width: 3}
+  let c = circle{id: "test", radius: 5}
+  assert::equals(compare_sizes(b, c), 2)
+  assert::equals(compare_sizes(c, b), 0 - 2)

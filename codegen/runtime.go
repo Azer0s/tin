@@ -1,0 +1,374 @@
+package codegen
+
+// runtime.go — ARC (automatic reference counting) helpers, string builders,
+// global string constants, and lazily-declared runtime/C functions.
+
+import (
+	"fmt"
+
+	"github.com/Azer0s/tin/ast"
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
+	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
+)
+
+// -- Basic C runtime declarations
+
+// ensurePrintf declares printf if not already done.
+func (cg *CodeGen) ensurePrintf() *ir.Func {
+	if cg.printfFn != nil {
+		return cg.printfFn
+	}
+	cg.printfFn = cg.ensureExternDecl("printf", irtypes.I32,
+		[]*ir.Param{ir.NewParam("format", irtypes.I8Ptr)}, true)
+	return cg.printfFn
+}
+
+// ensurePuts declares puts if not already done.
+func (cg *CodeGen) ensurePuts() *ir.Func {
+	if cg.putsF != nil {
+		return cg.putsF
+	}
+	cg.putsF = cg.ensureExternDecl("puts", irtypes.I32,
+		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
+	return cg.putsF
+}
+
+// ensureMalloc declares malloc if not already done.
+func (cg *CodeGen) ensureMalloc() *ir.Func {
+	if cg.mallocFn != nil {
+		return cg.mallocFn
+	}
+	cg.mallocFn = cg.ensureExternDecl("malloc", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
+	return cg.mallocFn
+}
+
+// -- ARC helpers
+
+// ensureRCAlloc lazily declares _tin_rc_alloc(size i64) i8*.
+func (cg *CodeGen) ensureRCAlloc() *ir.Func {
+	if cg.rcAllocFn != nil {
+		return cg.rcAllocFn
+	}
+	cg.rcAllocFn = cg.ensureExternDecl("_tin_rc_alloc", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
+	return cg.rcAllocFn
+}
+
+// ensureRetain lazily declares _tin_retain(ptr i8*).
+func (cg *CodeGen) ensureRetain() *ir.Func {
+	if cg.retainFn != nil {
+		return cg.retainFn
+	}
+	cg.retainFn = cg.ensureExternDecl("_tin_retain", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+	return cg.retainFn
+}
+
+// ensureRelease lazily declares _tin_release(ptr i8*).
+func (cg *CodeGen) ensureRelease() *ir.Func {
+	if cg.releaseFn != nil {
+		return cg.releaseFn
+	}
+	cg.releaseFn = cg.ensureExternDecl("_tin_release", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+	return cg.releaseFn
+}
+
+// isRCTrackedType returns true for types whose heap data is ARC-managed:
+// typed fat arrays [T], strings {i8*, i64} (with immortal-sentinel for literals),
+// and the any type {i32, i8*}.
+func isRCTrackedType(t irtypes.Type) bool {
+	return isFatArrayPtr(t) || isAnyType(t)
+}
+
+// isCopyExpr returns true when an AST expression produces a reference to
+// existing heap data rather than a fresh allocation.  The caller must
+// retain the result before storing it in a new alloca.
+func isCopyExpr(node ast.Node) bool {
+	_, ok := node.(*ast.Identifier)
+	return ok
+}
+
+// isTemporaryProducer returns true when an expression is known to return a
+// freshly heap-allocated RC-tracked value (rc = 1) that the caller owns.
+// Used by genEcho (and similar) to release temporaries that are never stored
+// in a named variable.
+func isTemporaryProducer(node ast.Node) bool {
+	if _, ok := node.(*ast.CallExpr); ok {
+		return true
+	}
+	if be, ok := node.(*ast.BinExpr); ok {
+		return be.Op == "++"
+	}
+	return false
+}
+
+// extractRCDataPtr extracts the ARC heap data pointer (i8*) from a
+// fat-array or any value.  Returns nil for non-ARC types.
+func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.Type) value.Value {
+	if isFatArrayPtr(t) {
+		// Fat array {T*, i64}: field 0 is the T* data pointer
+		dataPtr := block.NewExtractValue(val, 0)
+		return block.NewBitCast(dataPtr, irtypes.I8Ptr)
+	}
+	if isAnyType(t) {
+		// any {i32, i8*}: field 1 is the i8* data pointer
+		return block.NewExtractValue(val, 1)
+	}
+	return nil
+}
+
+// emitRetain emits a _tin_retain call for an ARC-tracked value.
+// For named structs, it also retains any RC-tracked fields.
+func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
+	rcPtr := cg.extractRCDataPtr(block, val, val.Type())
+	if rcPtr != nil {
+		block.NewCall(cg.ensureRetain(), rcPtr)
+		return
+	}
+	// Named struct: retain RC-tracked fields so copies are independent
+	if st, ok := val.Type().(*irtypes.StructType); ok {
+		structName := cg.typeNameOf(val.Type())
+		if structName == "" {
+			return
+		}
+		fieldTypes := cg.structFieldLLVMTypes[structName]
+		offset := 1 + cg.vtableOffset(structName)
+		alloca := block.NewAlloca(st)
+		block.NewStore(val, alloca)
+		for i, ft := range fieldTypes {
+			if !isRCTrackedType(ft) {
+				continue
+			}
+			gep := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
+			fieldVal := block.NewLoad(ft, gep)
+			cg.emitRetain(block, fieldVal)
+		}
+	}
+}
+
+// emitRelease emits a _tin_release call for an ARC-tracked value.
+// For named structs, it also releases any RC-tracked fields.
+func (cg *CodeGen) emitRelease(block *ir.Block, val value.Value) {
+	rcPtr := cg.extractRCDataPtr(block, val, val.Type())
+	if rcPtr != nil {
+		block.NewCall(cg.ensureRelease(), rcPtr)
+		return
+	}
+	// Named struct: release RC-tracked fields
+	if st, ok := val.Type().(*irtypes.StructType); ok {
+		structName := cg.typeNameOf(val.Type())
+		if structName == "" {
+			return
+		}
+		fieldTypes := cg.structFieldLLVMTypes[structName]
+		offset := 1 + cg.vtableOffset(structName)
+		alloca := block.NewAlloca(st)
+		block.NewStore(val, alloca)
+		for i, ft := range fieldTypes {
+			if !isRCTrackedType(ft) {
+				continue
+			}
+			gep := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
+			fieldVal := block.NewLoad(ft, gep)
+			cg.emitRelease(block, fieldVal)
+		}
+	}
+}
+
+// emitScopeRelease emits _tin_release for all ARC-tracked variables in scope s
+// whose block has not yet been terminated.  Named structs with RC-tracked
+// fields are also cleaned up via emitRelease's recursive handling.
+func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
+	if block == nil || block.Term != nil {
+		return
+	}
+	for _, entry := range s.vars {
+		if !entry.isAlloc {
+			continue
+		}
+		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
+		if !ok {
+			continue
+		}
+		loaded := block.NewLoad(ptrType.ElemType, entry.val)
+		cg.emitRelease(block, loaded)
+	}
+}
+
+// emitAllScopeReleases emits _tin_release for all ARC-tracked variables in
+// the current scope chain.  skipName, if non-empty, skips that variable
+// (used to transfer ownership of a return value to the caller).
+func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
+	if block == nil || block.Term != nil {
+		return
+	}
+	s := cg.curScope
+	for s != nil {
+		for name, entry := range s.vars {
+			if name == skipName || !entry.isAlloc {
+				continue
+			}
+			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
+			if !ok {
+				continue
+			}
+			loaded := block.NewLoad(ptrType.ElemType, entry.val)
+			cg.emitRelease(block, loaded)
+		}
+		s = s.parent
+	}
+}
+
+func (cg *CodeGen) ensureMemcpy() *ir.Func {
+	if cg.memcpyFn != nil {
+		return cg.memcpyFn
+	}
+	// LLVM intrinsic: declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)
+	f := cg.mod.NewFunc("llvm.memcpy.p0i8.p0i8.i64", irtypes.Void,
+		ir.NewParam("dst", irtypes.I8Ptr),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("isvolatile", irtypes.I1),
+	)
+	f.Blocks = nil
+	cg.memcpyFn = f
+	return f
+}
+
+// ensureAnyEq declares _tin_any_eq if not already done.
+// Signature: i64 _tin_any_eq({i32, i8*} a, {i32, i8*} b)
+func (cg *CodeGen) ensureAnyEq() *ir.Func {
+	if cg.anyEqFn != nil {
+		return cg.anyEqFn
+	}
+	anyT := anyFatPtrType()
+	cg.anyEqFn = cg.ensureExternDecl("_tin_any_eq", irtypes.I64,
+		[]*ir.Param{ir.NewParam("a", anyT), ir.NewParam("b", anyT)}, false)
+	return cg.anyEqFn
+}
+
+// ensureStrcmp declares strcmp if not already done.
+func (cg *CodeGen) ensureStrcmp() *ir.Func {
+	if cg.strcmpFn != nil {
+		return cg.strcmpFn
+	}
+	cg.strcmpFn = cg.ensureExternDecl("strcmp", irtypes.I32,
+		[]*ir.Param{ir.NewParam("s1", irtypes.I8Ptr), ir.NewParam("s2", irtypes.I8Ptr)}, false)
+	return cg.strcmpFn
+}
+
+// newGlobalString creates a private unnamed_addr constant for a string,
+// returning a pointer to its first byte.  The global is wrapped in a
+// { i64, [N x i8] } struct whose i64 field holds TIN_IMMORTAL_RC (-1) so
+// that _tin_retain / _tin_release treat it as an immortal, never-freed block.
+func (cg *CodeGen) newGlobalString(s string) value.Value {
+	data := []byte(s)
+	data = append(data, 0) // null terminator
+	arrType := irtypes.NewArray(uint64(len(data)), irtypes.I8)
+	ca := constant.NewCharArray(data)
+
+	// Wrap in { i64, [N x i8] } with immortal ARC header (rc = -1)
+	immortalRC := constant.NewInt(irtypes.I64, -1)
+	hdrStructType := irtypes.NewStruct(irtypes.I64, arrType)
+	hdrConst := constant.NewStruct(hdrStructType, immortalRC, ca)
+
+	g := cg.mod.NewGlobalDef(fmt.Sprintf("str.%d", cg.strCount), hdrConst)
+	g.Immutable = true
+	g.Linkage = enum.LinkagePrivate
+	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
+	cg.strCount++
+
+	// GEP: { i64, [N x i8] }* → [N x i8]* → i8* (skipping the 8-byte ARC header)
+	i32_0 := constant.NewInt(irtypes.I32, 0)
+	i32_1 := constant.NewInt(irtypes.I32, 1)
+	gep := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_1, i32_0)
+	gep.InBounds = true
+	return gep
+}
+
+// buildStringFatPtr creates a tin string fat-pointer {i8*, i64} from a literal string.
+func (cg *CodeGen) buildStringFatPtr(block *ir.Block, s string) value.Value {
+	ptr := cg.newGlobalString(s)
+	length := constant.NewInt(irtypes.I64, int64(len(s)))
+	fatPtrType := stringFatPtrType()
+	alloca := block.NewAlloca(fatPtrType)
+	// store ptr into field 0
+	gep0 := block.NewGetElementPtr(fatPtrType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(ptr, gep0)
+	// store length into field 1
+	gep1 := block.NewGetElementPtr(fatPtrType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(length, gep1)
+	return block.NewLoad(fatPtrType, alloca)
+}
+
+// extractStringPtr extracts the i8* data pointer from a tin string fat-ptr.
+func (cg *CodeGen) extractStringPtr(block *ir.Block, fatPtr value.Value) value.Value {
+	fatPtrType := stringFatPtrType()
+	alloca := block.NewAlloca(fatPtrType)
+	block.NewStore(fatPtr, alloca)
+	gep := block.NewGetElementPtr(fatPtrType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return block.NewLoad(irtypes.I8Ptr, gep)
+}
+
+// extractStringLen extracts the i64 length from a tin string fat-ptr.
+func (cg *CodeGen) extractStringLen(block *ir.Block, fatPtr value.Value) value.Value {
+	fatPtrType := stringFatPtrType()
+	alloca := block.NewAlloca(fatPtrType)
+	block.NewStore(fatPtr, alloca)
+	gep := block.NewGetElementPtr(fatPtrType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	return block.NewLoad(irtypes.I64, gep)
+}
+
+// -- panic builtin
+
+// ensurePanicFn lazily declares the _tin_panic external function.
+func (cg *CodeGen) ensurePanicFn() *ir.Func {
+	if cg.tinPanicFn != nil {
+		return cg.tinPanicFn
+	}
+	cg.tinPanicFn = cg.mod.NewFunc("_tin_panic", irtypes.Void,
+		ir.NewParam("msg", irtypes.I8Ptr),
+	)
+	return cg.tinPanicFn
+}
+
+// genBuiltinPanic implements panic(msg): runs the runtime defer chain and
+// terminates the program.  The call does not return; a NewUnreachable
+// terminator is appended so the block is valid LLVM IR.
+func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Value, error) {
+	msg, err := cg.genExpr(block, msgNode)
+	if err != nil {
+		return nil, err
+	}
+	var msgPtr value.Value
+	if isStringType(msg.Type()) {
+		msgPtr = cg.extractStringPtr(block, msg)
+	} else {
+		msgPtr = block.NewBitCast(msg, irtypes.I8Ptr)
+	}
+	block.NewCall(cg.ensurePanicFn(), msgPtr)
+	block.NewUnreachable()
+	return nil, nil
+}
+
+// ensureSnprintf lazily declares the snprintf external function.
+// int snprintf(char* buf, size_t n, const char* format, ...)
+func (cg *CodeGen) ensureSnprintf() *ir.Func {
+	if cg.sprintfFn != nil {
+		return cg.sprintfFn
+	}
+	cg.sprintfFn = cg.ensureExternDecl("snprintf", irtypes.I32,
+		[]*ir.Param{ir.NewParam("buf", irtypes.I8Ptr), ir.NewParam("n", irtypes.I64), ir.NewParam("format", irtypes.I8Ptr)}, true)
+	return cg.sprintfFn
+}

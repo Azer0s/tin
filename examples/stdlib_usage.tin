@@ -5,10 +5,12 @@
 //
 // Build:   tin build examples/stdlib_usage.tin -lm
 // Run:     tin run   examples/stdlib_usage.tin -lm
+// Test:    tin test  examples/stdlib_usage.tin -lm
 
 use io
 use math
 use str
+use assert
 
 // Print a greeting via io::puts (wraps C puts, adds newline).
 io::puts("=== stdlib_usage example ===")
@@ -26,3 +28,15 @@ io::printf("len(\"%s\") = %lld\n", hello, n)
 
 let cmp i32 = str::strcmp("abc", "abc")
 io::printf("strcmp(\"abc\",\"abc\") = %d\n", cmp)
+
+test "math stdlib" =
+  assert::equals_f64(math::floor(math::sqrt(2.0)), 1.0)
+  assert::equals_f64(math::ceil(math::sqrt(2.0)), 2.0)
+  assert::ok(math::sqrt(2.0) > 1.4)
+  assert::ok(math::sqrt(2.0) < 1.5)
+
+test "str stdlib" =
+  assert::equals(str::strlen("Hello, world!"), 13)
+  assert::equals(str::strlen(""), 0)
+  assert::equals(str::strcmp("abc", "abc") as i64, 0)
+  assert::ok(str::strcmp("abc", "xyz") < 0)

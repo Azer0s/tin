@@ -135,6 +135,50 @@ fn read_file() =
 ```
 
 `defer` is useful for resource cleanup without requiring `try/finally`.
+Multiple defers in one function run in **last-in, first-out** order.
+
+---
+
+## panic
+
+`panic(msg)` terminates the program after running **all** deferred calls in
+the entire call stack (not just the current function). The deferred calls run
+from the innermost live frame to the outermost, in the same LIFO order as for
+normal returns.
+
+```rust
+fn setup() =
+  let buf = malloc(64)
+  defer free(buf)
+  panic("setup failed")
+  // free(buf) is called automatically before exit
+
+fn main() =
+  defer echo "main cleanup"
+  setup()            // panic here runs setup's defer, then main's defer
+```
+
+Output:
+```
+tin panic: setup failed
+main cleanup
+```
+
+`panic` is a built-in statement, not a function; it does not return.
+
+### How it works
+
+Each `defer` statement pushes a lightweight thunk onto a process-global
+linked list (the **defer chain**). On a normal function return, the current
+frame's entries are popped and run inline. On `panic`, the runtime function
+`_tin_panic` walks the entire remaining chain — including entries from all
+live stack frames above the panic site — and calls each cleanup thunk before
+calling `exit(1)`.
+
+Because `_tin_panic` runs as a normal C function call (without C-level stack
+unwinding via `longjmp` or exceptions), all stack frames are still live when
+their cleanup thunks execute, so deferred calls can safely read local
+variables.
 
 ---
 

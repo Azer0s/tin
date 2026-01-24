@@ -56,7 +56,7 @@ io::printf("sizeof(cat)        = %lld\n", sizeof(cat))
 io::printf("sizeof(speak)      = %lld\n", sizeof(speak))
 io::printf("sizeof(i64)        = %lld\n", sizeof(i64))
 io::printf("sizeof(i32)        = %lld\n", sizeof(i32))
-// data types prepend a 1-byte tag: maybe[i64] = { i8 tag, [8 x i8] payload } = 9
+// data types: { i32 type_id, i8 variant_tag, [8 x i8] payload } = 16 (aligned)
 io::printf("sizeof(maybe[i64]) = %lld\n", sizeof(maybe[i64]))
 
 // ── Stack dispatch (constrained generic) ─────────────────────────────────────

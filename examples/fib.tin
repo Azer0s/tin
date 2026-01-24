@@ -1,7 +1,15 @@
 // Recursive fibonacci using where-clause pattern matching
+use assert
+
 fn fib(n u32) u32 =
   where n <= 1: n
   where _: fib(n - 1) + fib(n - 2)
 
 echo fib(10)
 echo fib(20)
+
+test "fibonacci" =
+  assert::equals(fib(0) as i64, 0)
+  assert::equals(fib(1) as i64, 1)
+  assert::equals(fib(10) as i64, 55)
+  assert::equals(fib(20) as i64, 6765)

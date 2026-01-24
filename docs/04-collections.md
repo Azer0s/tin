@@ -52,11 +52,25 @@ for let s string in items:
 
 ### Array length
 
-Use `len(arr)` to get the current length:
+Use the `len` builtin or the `.len` field shorthand:
 
 ```rust
-let n = len(nums)
+let n = len(nums)     // builtin call
+let m = nums.len      // equivalent field access
 ```
+
+Both return `i64`. The `.len` form works on strings too:
+
+```rust
+let s = "hello"
+echo s.len    // 5
+```
+
+### Implementation note
+
+Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len` builtin
+simply reads the second word; it compiles to a single load with no function
+call overhead.
 
 ### Generic collections
 

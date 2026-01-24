@@ -1,0 +1,27 @@
+// test_example.tin — demonstrates the test block syntax and assert library
+
+use assert
+
+fn add(a i64, b i64) i64 =
+  return a + b
+
+fn greet(name string) string =
+  return "Hello, " ++ name
+
+test "addition is correct" =
+  assert::equals(add(1, 2), 3)
+  assert::equals(add(0, 0), 0)
+  assert::equals(add(-1, 1), 0)
+
+test "string concatenation" =
+  assert::equals_str(greet("world"), "Hello, world")
+  assert::equals_str("foo" ++ "bar", "foobar")
+
+test "boolean assertions" =
+  assert::ok(1 == 1)
+  assert::ok(2 > 1)
+  assert::not_ok(1 == 2)
+
+test "inequality check" =
+  assert::not_equals(1, 2)
+  assert::not_equals(42, 0)

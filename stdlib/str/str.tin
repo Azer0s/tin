@@ -1,74 +1,74 @@
-// stdlib/str — String utility functions.
+// stdlib/str — String utility functions
 //
-// Wraps standard C string.h functions.
+// Wraps standard C string.h functions
 // Parameters typed as `string` have their fat-pointer automatically unwrapped
-// to char* when calling the underlying C function.
-// No extra linker flags required (all in libc).
+// to char* when calling the underlying C function
+// No extra linker flags required (all in libc)
 
-// ── Length / comparison ───────────────────────────────────────────────────────
+// -- Length / comparison
 
-// strlen returns the number of bytes in s (not including the null terminator).
+// strlen returns the number of bytes in s (not including the null terminator)
 fn strlen(s string) i64 = extern("strlen")
 
-// strcmp compares two strings lexicographically.
-// Returns 0 if equal, negative if a < b, positive if a > b.
+// strcmp compares two strings lexicographically
+// Returns 0 if equal, negative if a < b, positive if a > b
 fn strcmp(a string, b string) i32 = extern("strcmp")
 
-// strncmp compares at most n bytes of two strings.
+// strncmp compares at most n bytes of two strings
 fn strncmp(a string, b string, n i64) i32 = extern("strncmp")
 
-// strcasecmp compares two strings ignoring case (POSIX extension).
+// strcasecmp compares two strings ignoring case (POSIX extension)
 fn strcasecmp(a string, b string) i32 = extern("strcasecmp")
 
-// ── Searching ─────────────────────────────────────────────────────────────────
+// -- Searching
 
-// strchr finds the first occurrence of character c in s.
-// Returns a raw *char pointer (use with care).
+// strchr finds the first occurrence of character c in s
+// Returns a raw *char pointer (use with care)
 fn strchr(s string, c i32) *char = extern("strchr")
 
-// strrchr finds the last occurrence of character c in s.
+// strrchr finds the last occurrence of character c in s
 fn strrchr(s string, c i32) *char = extern("strrchr")
 
-// strstr finds the first occurrence of needle in haystack.
-// Returns a raw *char pointer, or null if not found.
+// strstr finds the first occurrence of needle in haystack
+// Returns a raw *char pointer, or null if not found
 fn strstr(haystack string, needle string) *char = extern("strstr")
 
-// ── Copy / concatenation ──────────────────────────────────────────────────────
+// -- Copy / concatenation
 
-// strcpy copies src (including null terminator) into dst.
-// dst must be large enough to hold src. Returns dst.
+// strcpy copies src (including null terminator) into dst
+// dst must be large enough to hold src. Returns dst
 fn strcpy(dst *char, src string) *char = extern("strcpy")
 
-// strncpy copies at most n bytes of src into dst.
+// strncpy copies at most n bytes of src into dst
 fn strncpy(dst *char, src string, n i64) *char = extern("strncpy")
 
-// strcat appends src to dst. dst must have enough space.
+// strcat appends src to dst. dst must have enough space
 fn strcat(dst *char, src string) *char = extern("strcat")
 
-// strdup duplicates s, returning a newly malloc'd copy.
-// The caller must free the result.
+// strdup duplicates s, returning a newly malloc'd copy
+// The caller must free the result
 fn strdup(s string) string = extern("strdup")
 
-// ── Conversion ────────────────────────────────────────────────────────────────
+// -- Conversion
 
-// atoi converts the string s to an i32 integer.
+// atoi converts the string s to an i32 integer
 fn atoi(s string) i32 = extern("atoi")
 
-// atol converts the string s to an i64 integer.
+// atol converts the string s to an i64 integer
 fn atol(s string) i64 = extern("atol")
 
-// atof converts the string s to an f64 floating-point value.
+// atof converts the string s to an f64 floating-point value
 fn atof(s string) f64 = extern("atof")
 
-// strtol converts s to i64, detecting the base automatically (0=auto, 10, 16, …).
-// endptr receives a pointer to the first non-numeric character; pass null to ignore.
+// strtol converts s to i64, detecting the base automatically (0=auto, 10, 16, …)
+// endptr receives a pointer to the first non-numeric character; pass null to ignore
 fn strtol(s string, endptr **char, base i32) i64 = extern("strtol")
 
-// strtod converts s to f64.
+// strtod converts s to f64
 fn strtod(s string, endptr **char) f64 = extern("strtod")
 
-// sprintf formats a string into buf (which must be large enough).
-// Returns the number of characters written.
+// sprintf formats a string into buf (which must be large enough)
+// Returns the number of characters written
 fn sprintf(buf *char, fmt string, ...) i32 = extern("sprintf")
 
 export {

@@ -1,4 +1,6 @@
 // Classic FizzBuzz using if/else and string interpolation
+use assert
+
 fn fizzbuzz(n i32) string =
   if n % 15 == 0:
     return "FizzBuzz"
@@ -11,3 +13,13 @@ fn fizzbuzz(n i32) string =
 
 for let i i32 = 1; i <= 20; i++:
   echo fizzbuzz(i)
+
+test "fizzbuzz" =
+  assert::equals_str(fizzbuzz(1), "1")
+  assert::equals_str(fizzbuzz(3), "Fizz")
+  assert::equals_str(fizzbuzz(5), "Buzz")
+  assert::equals_str(fizzbuzz(15), "FizzBuzz")
+  assert::equals_str(fizzbuzz(7), "7")
+  assert::equals_str(fizzbuzz(9), "Fizz")
+  assert::equals_str(fizzbuzz(10), "Buzz")
+  assert::equals_str(fizzbuzz(30), "FizzBuzz")

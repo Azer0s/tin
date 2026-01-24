@@ -1,10 +1,10 @@
-// Package ast defines the Abstract Syntax Tree for the tin language.
-// Every node carries source position information for error reporting.
+// Package ast defines the Abstract Syntax Tree for the tin language
+// Every node carries source position information for error reporting
 package ast
 
 import "fmt"
 
-// Pos is a source position.
+// Pos is a source position
 type Pos struct {
 	Line int
 	Col  int
@@ -14,27 +14,27 @@ func (p Pos) String() string {
 	return fmt.Sprintf("%d:%d", p.Line, p.Col)
 }
 
-// Node is the base interface for all AST nodes.
+// Node is the base interface for all AST nodes
 type Node interface {
 	Pos() Pos
 	nodeMarker()
 }
 
-// base embeds position; all nodes embed this.
+// base embeds position; all nodes embed this
 type base struct{ pos Pos }
 
 func (b base) Pos() Pos      { return b.pos }
 func (b base) nodeMarker()   {}
 
-// ── Top-level ─────────────────────────────────────────────────────────────────
+// -- Top-level
 
-// Program is the root node.
+// Program is the root node
 type Program struct {
 	base
 	Stmts []Node
 }
 
-// ── Declarations ──────────────────────────────────────────────────────────────
+// -- Declarations
 
 type VarDecl struct {
 	base
@@ -59,7 +59,7 @@ type FuncDecl struct {
 	IsVirtual   bool   // true for "fn f() T = virtual" in trait declarations
 }
 
-// TypeConstraint bounds a type parameter to one or more required traits.
+// TypeConstraint bounds a type parameter to one or more required traits
 // e.g. "where t is labeled+sized" → {TypeParam:"t", Traits:[labeled, sized]}
 // e.g. "where t is iter[i64]"   → {TypeParam:"t", Traits:[iter[i64]]}
 type TypeConstraint struct {
@@ -130,6 +130,13 @@ type ExportDecl struct {
 	AsName string
 }
 
+// TestDecl is a named test block: test "description" = body
+type TestDecl struct {
+	base
+	Desc string
+	Body Node
+}
+
 type MacroDecl struct {
 	base
 	Name   string
@@ -139,7 +146,7 @@ type MacroDecl struct {
 }
 
 
-// ── Statements ────────────────────────────────────────────────────────────────
+// -- Statements
 
 type Block struct {
 	base
@@ -228,7 +235,7 @@ type ExprStmt struct {
 	Expr Node
 }
 
-// EchoStmt represents the "echo" builtin statement.
+// EchoStmt represents the "echo" builtin statement
 type EchoStmt struct {
 	base
 	Value Node
@@ -241,7 +248,7 @@ type TaggedBlock struct {
 	Body *Block
 }
 
-// ── Expressions ───────────────────────────────────────────────────────────────
+// -- Expressions
 
 type BinExpr struct {
 	base
@@ -343,6 +350,45 @@ type SizeofExpr struct {
 	Type TypeExpr
 }
 
+type TypeofExpr struct {
+	base
+	Expr Node
+}
+
+type TraitofExpr struct {
+	base
+	Expr Node
+}
+
+type FieldnamesExpr struct {
+	base
+	Expr Node
+}
+
+type FieldtypesExpr struct {
+	base
+	Expr Node
+}
+
+type FieldtagExpr struct {
+	base
+	Expr  Node
+	Field Node // string expression — the field name
+}
+
+type GetfieldExpr struct {
+	base
+	Expr  Node
+	Field Node // string expression — the field name
+}
+
+type SetfieldExpr struct {
+	base
+	Expr  Node
+	Field Node // string expression — the field name
+	Val   Node // value to set
+}
+
 type AddrExpr struct {
 	base
 	Val Node
@@ -365,7 +411,7 @@ type TernaryExpr struct {
 	Else Node
 }
 
-// InterpolatedString: "hello {name}!" broken into parts.
+// InterpolatedString: "hello {name}!" broken into parts
 type InterpolatedString struct {
 	base
 	Parts []StringPart
@@ -415,7 +461,7 @@ type DefaultExpr struct {
 	Type TypeExpr
 }
 
-// ── Helper types ──────────────────────────────────────────────────────────────
+// -- Helper types
 
 type Param struct {
 	Name      string
@@ -483,9 +529,9 @@ type StringPart struct {
 	Expr   Node   // if IsExpr
 }
 
-// ── Type expressions ──────────────────────────────────────────────────────────
+// -- Type expressions
 
-// TypeExpr represents a type annotation in source.
+// TypeExpr represents a type annotation in source
 type TypeExpr interface {
 	typeExprMarker()
 	String() string
