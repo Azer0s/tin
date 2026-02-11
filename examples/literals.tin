@@ -1,0 +1,22 @@
+// literals.tin — integer literal formats: decimal, hex, octal, binary
+use assert
+
+test "hex literals" =
+  assert::equals(0xFF, 255)
+  assert::equals(0x10, 16)
+  assert::equals(0xDEAD, 57005)
+  assert::equals(0X0, 0)
+
+test "octal literals" =
+  assert::equals(0o377, 255)
+  assert::equals(0o10, 8)
+  assert::equals(0o0, 0)
+
+test "binary literals" =
+  assert::equals(0b11111111, 255)
+  assert::equals(0b1010, 10)
+  assert::equals(0b0, 0)
+
+test "mixed arithmetic" =
+  assert::equals(0xFF + 0o1 + 0b1, 257)
+  assert::equals(0b1000 * 0o10, 64)

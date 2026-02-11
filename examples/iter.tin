@@ -4,24 +4,24 @@
 // Functions now use generic constraints (`where t is Trait`) instead of
 // trait types as direct parameters.
 
-// ── Generic iterable trait ─────────────────────────────────────────────────
+// Generic iterable trait
 
 trait iter[t] =
   fn len(this iter[t]) i64 = virtual
   fn get(this iter[t], i i64) t = virtual
 
-// ── Function-alias trait ───────────────────────────────────────────────────
+// Function-alias trait
 
 trait display as fn() string
 
-// ── Forward-field trait with a default method ──────────────────────────────
+// Forward-field trait with a default method
 
 trait labeled =
   tag string forward
   fn label(this labeled) string =
     return this.tag
 
-// ── int_list: implements iter[i64] and display ────────────────────────────
+// int_list: implements iter[i64] and display
 
 struct int_list(iter[i64], display, labeled) =
   val i64
@@ -38,7 +38,7 @@ struct int_list(iter[i64], display, labeled) =
   fn ::display(this int_list) string =
     return "int_list({this.val}, len={this.count})"
 
-// ── pair: implements iter[i64] with two values ────────────────────────────
+// pair: implements iter[i64] with two values
 
 struct pair(iter[i64], display, labeled) =
   a i64
@@ -55,7 +55,7 @@ struct pair(iter[i64], display, labeled) =
   fn ::display(this pair) string =
     return "({this.a}, {this.b})"
 
-// ── Generic functions using trait constraints ─────────────────────────────
+// Generic functions using trait constraints
 // Each is monomorphized at every call site with the concrete type.
 
 fn first[t](it t) i64 where t is iter[i64] =
@@ -73,7 +73,7 @@ fn print_label[t](x t) where t is labeled =
 fn sum_first_last[t](it t) i64 where t is iter[i64] =
   return it.get(0) + it.get(it.len() - 1)
 
-// ── Demo ──────────────────────────────────────────────────────────────────
+// Demo
 
 let item = int_list{val: 42, count: 1, tag: "my-list"}
 echo first(item)          // 42

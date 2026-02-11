@@ -102,21 +102,21 @@ func main() {
 	// Collect linker flags declared in the source file via //! directives
 	fileLinkerFlags := parseFileLinkerFlags(string(src))
 
-	// ── Lex ──────────────────────────────────────────────────────────────────
+	// Lex
 	l := lexer.New(string(src))
 	tokens, lexErr := l.Tokenize()
 	if lexErr != nil {
 		die("lex error: %v", lexErr)
 	}
 
-	// ── Parse ─────────────────────────────────────────────────────────────────
+	// Parse
 	p := parser.New(tokens)
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		die("parse error: %v", parseErr)
 	}
 
-	// ── Codegen ───────────────────────────────────────────────────────────────
+	// Codegen
 	cg := codegen.New(file)
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)

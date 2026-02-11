@@ -5,7 +5,7 @@
 // to char* when calling the underlying C function
 // No extra linker flags required (all in libc)
 
-// -- Length / comparison
+// Length / comparison
 
 // strlen returns the number of bytes in s (not including the null terminator)
 fn strlen(s string) i64 = extern("strlen")
@@ -20,7 +20,7 @@ fn strncmp(a string, b string, n i64) i32 = extern("strncmp")
 // strcasecmp compares two strings ignoring case (POSIX extension)
 fn strcasecmp(a string, b string) i32 = extern("strcasecmp")
 
-// -- Searching
+// Searching
 
 // strchr finds the first occurrence of character c in s
 // Returns a raw *char pointer (use with care)
@@ -33,7 +33,7 @@ fn strrchr(s string, c i32) *char = extern("strrchr")
 // Returns a raw *char pointer, or null if not found
 fn strstr(haystack string, needle string) *char = extern("strstr")
 
-// -- Copy / concatenation
+// Copy / concatenation
 
 // strcpy copies src (including null terminator) into dst
 // dst must be large enough to hold src. Returns dst
@@ -49,7 +49,7 @@ fn strcat(dst *char, src string) *char = extern("strcat")
 // The caller must free the result
 fn strdup(s string) string = extern("strdup")
 
-// -- Conversion
+// Conversion
 
 // atoi converts the string s to an i32 integer
 fn atoi(s string) i32 = extern("atoi")

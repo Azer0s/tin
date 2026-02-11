@@ -65,45 +65,49 @@ if is_weekend(today):
 
 ## Union types (tagged unions)
 
-A union type is declared with `|`:
+A tagged union is a `type` alias over two or more types separated by `|`:
 
 ```rust
-type u = i8 | string
+type num = i64 | f64
+type strnum = string | i64
 ```
 
-A variable of union type can hold a value of any of the listed types. The
-runtime representation carries a tag to remember which variant is active.
+**Memory layout:** `{ i8 tag, [maxSize x i8] payload }` where tag 0 = first
+variant, 1 = second, and so on. The payload is sized to the largest variant.
 
 ### Assigning union values
 
+Assignment automatically selects the correct tag by matching the value's type:
+
 ```rust
-let a u = 10          // holds an i8
-let b u = "hello"     // holds a string
+let a num = 42        // tag=0, payload holds i64
+let b num = 3.14      // tag=1, payload holds f64
 ```
 
-### Testing and narrowing with `is`
+### Testing with `is`
 
-`is` tests which variant is active and binds the inner value:
+`is` checks the active variant and optionally binds the inner value:
 
 ```rust
-if a is i i8:
-  echo i * i          // i is bound as i8
+if a is i64:          // true/false check only
+  echo "integer"
+
+if a is n i64:        // n is bound as i64 in this branch
+  echo n
 ```
 
 ### Matching on union type
 
+`match a.(type)` dispatches on the tag, binding the payload in each case:
+
 ```rust
 match a.(type):
-  case i i8:
-    echo i
-  case s string:
-    echo s
-```
-
-### Casting with `as`
-
-```rust
-echo a as string
+  case n i64:
+    echo n
+  case x f64:
+    echo x
+  default:
+    echo "other"
 ```
 
 ---
@@ -126,31 +130,48 @@ if m is None:
 ```
 
 `data` introduces a named wrapper type (not a raw C union) with safe
-pattern-matching semantics.
+pattern-matching semantics. The layout includes a `i32` type ID plus variant
+tag for runtime type checks.
 
 ---
 
 ## Native C unions (`union`)
 
-`union` maps directly to a C union — all variants share the same memory:
+`union` maps directly to a C union — all variants share the same memory with
+no tag. Use this for FFI or when you need to manually reinterpret bytes.
+
+**Memory layout:** `{ [maxSize x i8] storage }` — a single byte array.
+
+### Unnamed union
 
 ```rust
-union u = i8 | string
-union u_named = as_i8 i8 | as_string string
-
-let a u = 10
-echo a as string
+union raw = i32 | i64
 ```
 
-Named union variants can be accessed with dot notation:
+Access via type cast:
 
 ```rust
-let b u_named = 10
-echo b.as_string    // same as b.(string)
+let r raw = 42
+let v i32 = r.(i32)   // read storage as i32
+let w i64 = r.(i64)   // read storage as i64
 ```
 
-> Native unions provide no runtime type tag. Use `data` for safe tagged
-> unions.
+### Named union
+
+```rust
+union color = as_i32 i32 | as_r u8
+```
+
+Access via field name or type cast:
+
+```rust
+let c color = 255
+let v i32 = c.as_i32    // read storage as i32
+let b u8  = c.as_r      // read same storage as u8
+```
+
+> Native unions have no tag — reading from the "wrong" field returns
+> reinterpreted bytes. Use `data` or tagged unions for safe alternatives.
 
 ---
 

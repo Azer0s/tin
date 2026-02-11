@@ -1,0 +1,49 @@
+// const and type alias — compile-time constants and named type aliases.
+//
+// const declares a named compile-time constant.
+// type creates an alias for an existing type.
+// Both are visible inside test blocks and function bodies.
+//
+// Build:  tin build examples/consts.tin
+// Run:    tin run   examples/consts.tin
+// Test:   tin test  examples/consts.tin
+
+use assert
+
+// Primitive constants
+const MAX_RETRIES i64   = 3
+const TIMEOUT_MS  i64   = 5000
+const PI          f64   = 3.14159
+const APP_NAME    string = "tin"
+const DEBUG       bool   = false
+
+// Type aliases — give a meaningful name to an existing type
+type size_t   = i64
+type score_t  = f64
+type label_t  = string
+
+echo MAX_RETRIES
+echo TIMEOUT_MS
+echo PI
+echo APP_NAME
+echo DEBUG
+
+let n size_t = 42
+echo n
+
+test "integer constants" =
+  assert::equals(MAX_RETRIES, 3)
+  assert::equals(TIMEOUT_MS, 5000)
+
+test "float constant" =
+  assert::equals_f64(PI, 3.14159)
+
+test "string constant" =
+  assert::equals_str(APP_NAME, "tin")
+
+test "bool constant" =
+  assert::not_ok(DEBUG)
+
+test "type alias" =
+  let s size_t = MAX_RETRIES
+  assert::equals(s, 3)

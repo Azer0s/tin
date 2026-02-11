@@ -10,28 +10,28 @@
 //   tin test  extern.tin -lm
 use assert
 
-// ── String functions ──────────────────────────────────────────────────────────
+// String functions
 
 fn strlen(s string) i64 = extern("strlen")
 fn strcmp(a string, b string) i32 = extern("strcmp")
 fn puts(s string) = extern("puts")
 
-// ── Env / OS ──────────────────────────────────────────────────────────────────
+// Env / OS
 
 fn getenv(name string) string = extern("getenv")
 
-// ── Math (requires -lm at link time) ─────────────────────────────────────────
+// Math (requires -lm at link time)
 
 fn sqrt(x f64) f64 = extern("sqrt")
 fn pow(x f64, y f64) f64 = extern("pow")
 
-// ── use extern() alternative syntax ──────────────────────────────────────────
+// use extern() alternative syntax
 
 use extern (
   printf as fn(string, ...),
 )
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// Main
 
 puts("hello from extern!")
 

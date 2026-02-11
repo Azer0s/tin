@@ -26,7 +26,7 @@ type base struct{ pos Pos }
 func (b base) Pos() Pos      { return b.pos }
 func (b base) nodeMarker()   {}
 
-// -- Top-level
+// Top-level
 
 // Program is the root node
 type Program struct {
@@ -34,7 +34,7 @@ type Program struct {
 	Stmts []Node
 }
 
-// -- Declarations
+// Declarations
 
 type VarDecl struct {
 	base
@@ -47,7 +47,7 @@ type VarDecl struct {
 type FuncDecl struct {
 	base
 	Name           string
-	TraitQualifier string   // non-empty for qualified impls: "iter[char]" → fn iter[char]::method
+	TraitQualifier string   // non-empty for qualified impls: "iter[char]" -> fn iter[char]::method
 	TypeParams     []string // generic: [t, r]
 	Constraints    []TypeConstraint // generic type constraints: where t is Labeled+Sized
 	Params         []Param
@@ -60,8 +60,8 @@ type FuncDecl struct {
 }
 
 // TypeConstraint bounds a type parameter to one or more required traits
-// e.g. "where t is labeled+sized" → {TypeParam:"t", Traits:[labeled, sized]}
-// e.g. "where t is iter[i64]"   → {TypeParam:"t", Traits:[iter[i64]]}
+// e.g. "where t is labeled+sized" -> {TypeParam:"t", Traits:[labeled, sized]}
+// e.g. "where t is iter[i64]"   -> {TypeParam:"t", Traits:[iter[i64]]}
 type TypeConstraint struct {
 	TypeParam string
 	Traits    []TypeExpr // each may be SimpleType or GenericType
@@ -146,7 +146,7 @@ type MacroDecl struct {
 }
 
 
-// -- Statements
+// Statements
 
 type Block struct {
 	base
@@ -248,7 +248,7 @@ type TaggedBlock struct {
 	Body *Block
 }
 
-// -- Expressions
+// Expressions
 
 type BinExpr struct {
 	base
@@ -461,7 +461,7 @@ type DefaultExpr struct {
 	Type TypeExpr
 }
 
-// -- Helper types
+// Helper types
 
 type Param struct {
 	Name      string
@@ -529,7 +529,7 @@ type StringPart struct {
 	Expr   Node   // if IsExpr
 }
 
-// -- Type expressions
+// Type expressions
 
 // TypeExpr represents a type annotation in source
 type TypeExpr interface {

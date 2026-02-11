@@ -14,7 +14,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 )
 
-// -- Basic C runtime declarations
+// Basic C runtime declarations
 
 // ensurePrintf declares printf if not already done.
 func (cg *CodeGen) ensurePrintf() *ir.Func {
@@ -46,7 +46,7 @@ func (cg *CodeGen) ensureMalloc() *ir.Func {
 	return cg.mallocFn
 }
 
-// -- ARC helpers
+// ARC helpers
 
 // ensureRCAlloc lazily declares _tin_rc_alloc(size i64) i8*.
 func (cg *CodeGen) ensureRCAlloc() *ir.Func {
@@ -285,7 +285,7 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
 	cg.strCount++
 
-	// GEP: { i64, [N x i8] }* → [N x i8]* → i8* (skipping the 8-byte ARC header)
+	// GEP: { i64, [N x i8] }* -> [N x i8]* -> i8* (skipping the 8-byte ARC header)
 	i32_0 := constant.NewInt(irtypes.I32, 0)
 	i32_1 := constant.NewInt(irtypes.I32, 1)
 	gep := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_1, i32_0)
@@ -330,7 +330,7 @@ func (cg *CodeGen) extractStringLen(block *ir.Block, fatPtr value.Value) value.V
 	return block.NewLoad(irtypes.I64, gep)
 }
 
-// -- panic builtin
+// panic builtin
 
 // ensurePanicFn lazily declares the _tin_panic external function.
 func (cg *CodeGen) ensurePanicFn() *ir.Func {

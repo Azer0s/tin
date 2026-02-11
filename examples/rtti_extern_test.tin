@@ -1,11 +1,11 @@
 //!-lm
 use assert
 // rtti_extern_test.tin — Comprehensive RTTI tagging tests for:
-//   1. Extern C functions returning primitives → box to any → typeof/echo
-//   2. Extern C functions returning strings    → box to any → typeof
+//   1. Extern C functions returning primitives -> box to any -> typeof/echo
+//   2. Extern C functions returning strings    -> box to any -> typeof
 //   3. Extern C functions passed as function-pointer arguments
 //   4. Tin functions returning structs via function pointers
-//   5. Lambdas/closures returning structs      → box to any → typeof
+//   5. Lambdas/closures returning structs      -> box to any -> typeof
 //   6. Multi-level function pointer indirection
 //   7. getfield/setfield on struct from fn return
 //   8. typeof/traitof/fieldnames on any from higher-order fn
@@ -14,7 +14,7 @@ use assert
 use io
 use mem
 
-// ── Traits and structs used throughout ────────────────────────────────────────
+// Traits and structs used throughout
 
 trait drawable =
   fn draw(this drawable) string = virtual
@@ -41,7 +41,7 @@ struct triple =
   b i64
   c i64
 
-// ── Extern C function declarations ────────────────────────────────────────────
+// Extern C function declarations
 
 fn c_abs(x i64)       i64    = extern("labs")
 fn c_strlen(s string) i64    = extern("strlen")
@@ -52,11 +52,9 @@ fn c_atoi(s string) i32      = extern("atoi")
 fn c_malloc(size i64) *void  = extern("malloc")
 fn c_free(ptr *void)         = extern("free")
 
-// ════════════════════════════════════════════════════════════════════════════
-// §1 — Extern C functions returning primitives → any boxing → typeof
-// ════════════════════════════════════════════════════════════════════════════
+// §1 — Extern C functions returning primitives -> any boxing -> typeof
 
-io::printf("=== §1 extern C primitives → any ===\n")
+io::printf("=== §1 extern C primitives -> any ===\n")
 
 let r1a = c_abs(-42)
 io::printf("labs(-42) = %lld\n", r1a)
@@ -74,11 +72,9 @@ let r1c = c_atoi("1234")
 let a1c any = r1c
 io::printf("typeof(atoi result) = %s\n", typeof(a1c))
 
-// ════════════════════════════════════════════════════════════════════════════
-// §2 — Extern C functions returning string → any boxing → typeof
-// ════════════════════════════════════════════════════════════════════════════
+// §2 — Extern C functions returning string -> any boxing -> typeof
 
-io::printf("=== §2 extern C string → any ===\n")
+io::printf("=== §2 extern C string -> any ===\n")
 
 let r2a = c_strlen("hello world")
 io::printf("strlen = %lld\n", r2a)
@@ -90,9 +86,7 @@ io::printf("typeof(getenv result) = %s\n", typeof(r2b))
 let a2b any = r2b
 io::printf("typeof(getenv any) = %s\n", typeof(a2b))
 
-// ════════════════════════════════════════════════════════════════════════════
 // §3 — Extern C functions passed as function-pointer arguments
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §3 extern fn as function-pointer arg ===\n")
 
@@ -124,9 +118,7 @@ io::printf("make_abs_fn()(-33) = %lld\n", r3c)
 let a3c any = r3c
 io::printf("typeof = %s\n", typeof(a3c))
 
-// ════════════════════════════════════════════════════════════════════════════
 // §4 — Tin functions returning structs via function pointers
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §4 struct from fn pointer ===\n")
 
@@ -162,9 +154,7 @@ let a4c = apply_struct_fn(make_rect, 5, 15)
 io::printf("typeof(apply_struct_fn result) = %s\n", typeof(a4c))
 io::printf("fieldnames len = %lld\n", fieldnames(a4c).len)
 
-// ════════════════════════════════════════════════════════════════════════════
-// §5 — Lambdas/closures returning structs → box to any
-// ════════════════════════════════════════════════════════════════════════════
+// §5 — Lambdas/closures returning structs -> box to any
 
 io::printf("=== §5 lambda/closure returning struct ===\n")
 
@@ -187,9 +177,7 @@ io::printf("fieldnames len = %lld\n", fieldnames(a5b).len)
 let r5c = apply_struct_fn(fn(w i64, h i64) rect = return rect { w: w + h, h: w - h }, 20, 8)
 io::printf("typeof(lambda via HOF) = %s\n", typeof(r5c))
 
-// ════════════════════════════════════════════════════════════════════════════
 // §6 — Multi-level function pointer indirection
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §6 multi-level fn pointer ===\n")
 
@@ -215,9 +203,7 @@ io::printf("compose(negate, labs)(-55) = %lld\n", r6b)
 let a6b any = r6b
 io::printf("typeof = %s\n", typeof(a6b))
 
-// ════════════════════════════════════════════════════════════════════════════
 // §7 — getfield / setfield on struct from function returns
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §7 getfield/setfield from fn returns ===\n")
 
@@ -244,9 +230,7 @@ let r7c = make_point(10, 20)
 setfield(r7c, "x", 999)
 io::printf("after setfield(point, \"x\", 999): x = %lld\n", r7c.x)
 
-// ════════════════════════════════════════════════════════════════════════════
 // §8 — any boxing / typeof with all RTTI builtins through HOF
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §8 full reflection through HOF ===\n")
 
@@ -277,9 +261,7 @@ let gb = getfield(a8a, "b")
 io::printf("getfield(triple, \"b\") = ")
 echo gb
 
-// ════════════════════════════════════════════════════════════════════════════
 // §9 — Edge cases
-// ════════════════════════════════════════════════════════════════════════════
 
 io::printf("=== §9 edge cases ===\n")
 
@@ -318,7 +300,7 @@ let mp2 maybe_point = None
 io::printf("typeof(data:point variant) = %s\n", typeof(mp1))
 io::printf("typeof(data:None) = %s\n", typeof(mp2))
 
-// typeof chained: extern → fn ptr → any → typeof
+// typeof chained: extern -> fn ptr -> any -> typeof
 fn make_len_fn() fn(string) i64 =
   return c_strlen
 
@@ -339,7 +321,7 @@ let a9f any = r9f
 io::printf("typeof(factory struct) = %s\n", typeof(a9f))
 io::printf("traitof len = %lld\n", traitof(a9f).len)
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "extern C primitives" =
   assert::equals(c_abs(-42), 42)
@@ -354,16 +336,16 @@ test "extern C primitives" =
 test "typeof with any boxing" =
   let i i64 = 42
   let ia any = i
-  assert::equals_str(typeof(ia), "'i64")
+  assert::equals_str(typeof(ia), "i64")
   let f f64 = 3.14
   let fa any = f
-  assert::equals_str(typeof(fa), "'f64")
+  assert::equals_str(typeof(fa), "f64")
   let r = make_rect(1, 2)
   let ra any = r
-  assert::equals_str(typeof(ra), "'rect")
+  assert::equals_str(typeof(ra), "rect")
   let p = make_point(0, 0)
   let pa any = p
-  assert::equals_str(typeof(pa), "'point")
+  assert::equals_str(typeof(pa), "point")
 
 test "extern fn as fn-pointer arg" =
   assert::equals(apply_i64(c_abs, -77), 77)
@@ -380,16 +362,16 @@ test "struct from fn pointer" =
   assert::equals(r.w, 10)
   assert::equals(r.h, 20)
   let ra any = r
-  assert::equals_str(typeof(ra), "'rect")
+  assert::equals_str(typeof(ra), "rect")
   assert::equals(traitof(ra).len, 2)
-  assert::equals_str(fieldnames(ra)[0], "'w")
-  assert::equals_str(fieldtypes(ra)[0], "'i64")
+  assert::equals_str(fieldnames(ra)[0], "w")
+  assert::equals_str(fieldtypes(ra)[0], "i64")
   let pf fn(i64, i64) point = make_point
   let p = pf(3, 7)
   assert::equals(p.x, 3)
   assert::equals(p.y, 7)
   let pa any = p
-  assert::equals_str(typeof(pa), "'point")
+  assert::equals_str(typeof(pa), "point")
 
 test "lambda and closure" =
   let mk = fn(w i64, h i64) rect = return rect { w: w, h: h }
@@ -397,14 +379,14 @@ test "lambda and closure" =
   assert::equals(r.w, 6)
   assert::equals(r.h, 9)
   let ra any = r
-  assert::equals_str(typeof(ra), "'rect")
+  assert::equals_str(typeof(ra), "rect")
   let sc i64 = 3
   let scaled = fn(w i64) rect = return rect { w: w * sc, h: w * sc * 2 }
   let sr = scaled(4)
   assert::equals(sr.w, 12)
   assert::equals(sr.h, 24)
   let r2 = apply_struct_fn(fn(w i64, h i64) rect = return rect { w: w + h, h: w - h }, 20, 8)
-  assert::equals_str(typeof(r2), "'rect")
+  assert::equals_str(typeof(r2), "rect")
 
 test "multi-level fn pointer" =
   let f = double_wrap(make_rect)
@@ -412,7 +394,7 @@ test "multi-level fn pointer" =
   assert::equals(r.w, 3)
   assert::equals(r.h, 4)
   let ra any = r
-  assert::equals_str(typeof(ra), "'rect")
+  assert::equals_str(typeof(ra), "rect")
   let neg_abs = compose_i64(fn(x i64) i64 = return x * -1, c_abs)
   assert::equals(neg_abs(-55), -55)
   assert::equals(neg_abs(10), -10)
@@ -432,15 +414,15 @@ test "getfield and setfield" =
 
 test "HOF full reflection" =
   let a = transform_any(make_triple, 1, 2, 3)
-  assert::equals_str(typeof(a), "'triple")
+  assert::equals_str(typeof(a), "triple")
   let fn8 = fieldnames(a)
   assert::equals(fn8.len, 3)
-  assert::equals_str(fn8[0], "'a")
-  assert::equals_str(fn8[1], "'b")
-  assert::equals_str(fn8[2], "'c")
+  assert::equals_str(fn8[0], "a")
+  assert::equals_str(fn8[1], "b")
+  assert::equals_str(fn8[2], "c")
   let ft8 = fieldtypes(a)
   assert::equals(ft8.len, 3)
-  assert::equals_str(ft8[0], "'i64")
+  assert::equals_str(ft8[0], "i64")
   assert::equals(getfield(a, "a") as i64, 1)
   assert::equals(getfield(a, "b") as i64, 2)
   assert::equals(getfield(a, "c") as i64, 3)
@@ -460,5 +442,5 @@ test "edge cases" =
   assert::equals(rf.w, 10)
   assert::equals(rf.h, 6)
   let rfa any = rf
-  assert::equals_str(typeof(rfa), "'rect")
+  assert::equals_str(typeof(rfa), "rect")
   assert::equals(traitof(rfa).len, 2)

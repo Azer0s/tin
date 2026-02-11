@@ -8,7 +8,6 @@ package codegen
 // compiled object file.
 //
 // Symbol naming convention
-// ------------------------
 // A function `foo` exported as package `mylib` gets the IR name `mylib__foo`.
 // Importing modules declare `mylib__foo` as extern and register the scope key
 // `mylib.foo` pointing to it, so `mylib::foo(...)` resolves correctly.
@@ -23,7 +22,7 @@ import (
 	"github.com/Azer0s/tin/parser"
 )
 
-// ── Module file format ────────────────────────────────────────────────────────
+// Module file format
 
 // ModFunc describes an exported function.
 type ModFunc struct {
@@ -74,11 +73,11 @@ type ModFile struct {
 	Structs []ModStruct    `json:"structs,omitempty"`
 	Types   []ModTypeAlias `json:"types,omitempty"`
 	// ReExports lists other packages that are re-exported under this package.
-	// e.g. "export { io, math } as std" → ReExports: ["io", "math"]
+	// e.g. "export { io, math } as std" -> ReExports: ["io", "math"]
 	ReExports []string `json:"reExports,omitempty"`
 }
 
-// ── I/O ──────────────────────────────────────────────────────────────────────
+// I/O
 
 // WriteModFile serialises mf to filename.
 func WriteModFile(filename string, mf *ModFile) error {
@@ -102,7 +101,7 @@ func ReadModFile(filename string) (*ModFile, error) {
 	return &mf, nil
 }
 
-// ── Type serialization helpers ────────────────────────────────────────────────
+// Type serialization helpers
 
 // typeExprToString converts an AST type expression to its Tin source form.
 // The result can be parsed back with parser.ParseType.

@@ -20,7 +20,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 	if te == nil {
 		return irtypes.Void, nil
 	}
-	// string / atom → i8*
+	// string / atom -> i8*
 	if st, ok := te.(*ast.SimpleType); ok {
 		if st.Name == "string" || st.Name == "atom" {
 			return irtypes.I8Ptr, nil
@@ -65,14 +65,26 @@ func (cg *CodeGen) ensureStrlenDecl() *ir.Func {
 		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
 }
 
-// unwrapForExtern extracts a raw C value from a Tin fat-pointer.
+// unwrapForExtern extracts a raw C value from a Tin fat-pointer or atom.
 // If val is already the target type it is returned unchanged.
 func (cg *CodeGen) unwrapForExtern(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
 	src := val.Type()
 	if src.Equal(target) {
 		return val
 	}
-	// {ptr, i64} fat-pointer → extract field 0 (the raw pointer)
+	// %__atom -> i8*: call __tin_atom_to_string then extract the data pointer.
+	if isAtomType(src) {
+		if _, ok := target.(*irtypes.PointerType); ok {
+			code := cg.extractAtomCode(block, val)
+			strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
+			rawPtr := cg.extractFatPtrData(block, strFatPtr, stringFatPtrType())
+			if rawPtr.Type().Equal(target) {
+				return rawPtr
+			}
+			return block.NewBitCast(rawPtr, target)
+		}
+	}
+	// {ptr, i64} fat-pointer -> extract field 0 (the raw pointer)
 	if isFatPtrType(src) {
 		if _, ok := target.(*irtypes.PointerType); ok {
 			rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
@@ -95,14 +107,21 @@ func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtyp
 	return block.NewLoad(st.Fields[0], gep)
 }
 
-// wrapFromExtern wraps a raw C return value into a Tin fat-pointer.
-// For char* → string, it calls strlen to obtain the length.
+// wrapFromExtern wraps a raw C return value into a Tin fat-pointer or atom.
+// For char* -> string, it calls strlen to obtain the length.
+// For char* -> atom, it calls __tin_string_to_atom.
 func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
 	src := val.Type()
 	if src.Equal(target) {
 		return val
 	}
-	// raw pointer → fat-pointer: build {ptr, len}
+	// i8* -> %__atom: find atom in table via strcmp.
+	if _, ok := src.(*irtypes.PointerType); ok {
+		if isAtomType(target) {
+			return block.NewCall(cg.ensureStringToAtom(), val)
+		}
+	}
+	// raw pointer -> fat-pointer: build {ptr, len}
 	if _, ok := src.(*irtypes.PointerType); ok {
 		if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
 			// Coerce pointer to the type expected by field 0

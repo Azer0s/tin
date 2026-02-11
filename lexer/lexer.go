@@ -493,7 +493,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 
 	ch := l.peek()
 
-	// '"..."  →  quoted atom literal (for non-standard / user-defined names)
+	// '"..."  ->  quoted atom literal (for non-standard / user-defined names)
 	// If the content is a plain identifier (letters, digits, underscores only),
 	// the quotes are stripped and the atom is equivalent to the unquoted form:
 	// '"hello"' == 'hello.  Complex contents (e.g. '"fn(i64)bool"') keep the
@@ -586,16 +586,33 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 func (l *Lexer) readNumber(line, col int) (Token, error) {
 	var sb strings.Builder
 	isFloat := false
-	isHex := false
 
-	if l.peek() == '0' && (l.peekAt(1) == 'x' || l.peekAt(1) == 'X') {
+	switch {
+	case l.peek() == '0' && (l.peekAt(1) == 'x' || l.peekAt(1) == 'X'):
 		sb.WriteRune(l.advance()) // 0
-		sb.WriteRune(l.advance()) // x
-		isHex = true
+		sb.WriteRune(l.advance()) // x/X
 		for l.pos < len(l.src) && isHexDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
-	} else {
+		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
+
+	case l.peek() == '0' && (l.peekAt(1) == 'b' || l.peekAt(1) == 'B'):
+		sb.WriteRune(l.advance()) // 0
+		sb.WriteRune(l.advance()) // b/B
+		for l.pos < len(l.src) && (l.peek() == '0' || l.peek() == '1') {
+			sb.WriteRune(l.advance())
+		}
+		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
+
+	case l.peek() == '0' && (l.peekAt(1) == 'o' || l.peekAt(1) == 'O'):
+		sb.WriteRune(l.advance()) // 0
+		sb.WriteRune(l.advance()) // o/O
+		for l.pos < len(l.src) && l.peek() >= '0' && l.peek() <= '7' {
+			sb.WriteRune(l.advance())
+		}
+		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
+
+	default:
 		for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
@@ -617,7 +634,6 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			}
 		}
 	}
-	_ = isHex
 	if isFloat {
 		return Token{Type: FLOAT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 	}

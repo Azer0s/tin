@@ -1,0 +1,282 @@
+package codegen
+
+// atoms.go — compile-time atom registration and IR generation for the
+// atom type (%__atom = type { i32 }).
+//
+// Each unique atom name is assigned a CRC32 code at compile time.  Collisions
+// are resolved by incrementing the code until a free slot is found.  The
+// global @__tin_atom_table (array of {i32, i8*} pairs) and helper functions
+// __tin_atom_to_string / __tin_string_to_atom are emitted at the end of
+// Generate() once all atoms are known.
+
+import (
+	"hash/crc32"
+
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
+	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
+)
+
+// registerAtom records the atom name and returns its CRC32 code.
+// Collisions are resolved by incrementing the code until a unique slot is found.
+func (cg *CodeGen) registerAtom(name string) int32 {
+	if code, ok := cg.atomCodes[name]; ok {
+		return code
+	}
+	code := int32(crc32.ChecksumIEEE([]byte(name)))
+	for {
+		if existing, ok := cg.atomCodeToName[code]; !ok || existing == name {
+			break
+		}
+		code++
+	}
+	cg.atomCodes[name] = code
+	cg.atomCodeToName[code] = name
+	cg.atomOrder = append(cg.atomOrder, name)
+	return code
+}
+
+// atomConstant returns a compile-time constant %__atom { i32 code } value.
+func (cg *CodeGen) atomConstant(code int32) value.Value {
+	return constant.NewStruct(cg.atomType, constant.NewInt(irtypes.I32, int64(code)))
+}
+
+// extractAtomCode extracts the i32 CRC32 code field from a %__atom value.
+func (cg *CodeGen) extractAtomCode(block *ir.Block, atomVal value.Value) value.Value {
+	alloca := block.NewAlloca(cg.atomType)
+	block.NewStore(atomVal, alloca)
+	gep := block.NewGetElementPtr(cg.atomType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return block.NewLoad(irtypes.I32, gep)
+}
+
+// ensureAtomToString lazily declares __tin_atom_to_string(i32) {i8*,i64}.
+// The body is filled in by emitAtomTable() at the end of Generate().
+func (cg *CodeGen) ensureAtomToString() *ir.Func {
+	if cg.atomToStrFn != nil {
+		return cg.atomToStrFn
+	}
+	cg.atomToStrFn = cg.mod.NewFunc("__tin_atom_to_string", stringFatPtrType(),
+		ir.NewParam("code", irtypes.I32))
+	return cg.atomToStrFn
+}
+
+// ensureStringToAtom lazily declares __tin_string_to_atom(i8*) %__atom.
+// The body is filled in by emitAtomTable() at the end of Generate().
+func (cg *CodeGen) ensureStringToAtom() *ir.Func {
+	if cg.strToAtomFn != nil {
+		return cg.strToAtomFn
+	}
+	cg.strToAtomFn = cg.mod.NewFunc("__tin_string_to_atom", cg.atomType,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+	return cg.strToAtomFn
+}
+
+// ensureRtAtomToStr lazily declares the C runtime helper
+// _tin_rt_atom_to_str(i32) i8* (returns NULL when not found).
+func (cg *CodeGen) ensureRtAtomToStr() *ir.Func {
+	return cg.ensureExternDecl("_tin_rt_atom_to_str", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("code", irtypes.I32)}, false)
+}
+
+// ensureLearnAtom lazily declares the C runtime helper
+// _tin_learn_atom(i8*) i32 (computes CRC32, stores in runtime table).
+func (cg *CodeGen) ensureLearnAtom() *ir.Func {
+	return cg.ensureExternDecl("_tin_learn_atom", irtypes.I32,
+		[]*ir.Param{ir.NewParam("str", irtypes.I8Ptr)}, false)
+}
+
+// emitAtomTable emits @__tin_atom_table and @__tin_atom_count globals, then
+// fills in the bodies of any lazily-declared atom helper functions.
+// Called at the end of Generate() after all atoms are registered.
+func (cg *CodeGen) emitAtomTable() {
+	n := int64(len(cg.atomOrder))
+	entryType := irtypes.NewStruct(irtypes.I32, irtypes.I8Ptr)
+	tableArrType := irtypes.NewArray(uint64(n), entryType)
+
+	// Build table entries: each entry is {i32 code, i8* name}.
+	entries := make([]constant.Constant, n)
+	for i, name := range cg.atomOrder {
+		code := cg.atomCodes[name]
+		// String is the bare atom name (no leading apostrophe).
+		strPtr := cg.newGlobalString(name).(constant.Constant)
+		entries[i] = constant.NewStruct(entryType,
+			constant.NewInt(irtypes.I32, int64(code)),
+			strPtr,
+		)
+	}
+
+	// Emit @__tin_atom_table.
+	var tableConst constant.Constant
+	if n > 0 {
+		tableConst = constant.NewArray(tableArrType, entries...)
+	} else {
+		tableConst = constant.NewArray(tableArrType)
+	}
+	tableGlobal := cg.mod.NewGlobalDef("__tin_atom_table", tableConst)
+	tableGlobal.Immutable = true
+
+	// Emit @__tin_atom_count.
+	countGlobal := cg.mod.NewGlobalDef("__tin_atom_count", constant.NewInt(irtypes.I64, n))
+	countGlobal.Immutable = true
+
+	// Fill in function bodies if they were requested during codegen.
+	if cg.atomToStrFn != nil {
+		cg.buildAtomToStringBody(cg.atomToStrFn, tableGlobal, countGlobal, tableArrType)
+	}
+	if cg.strToAtomFn != nil {
+		cg.buildStringToAtomBody(cg.strToAtomFn, tableGlobal, countGlobal, tableArrType)
+	}
+}
+
+// buildAtomToStringBody generates the body of __tin_atom_to_string.
+// It iterates @__tin_atom_table looking for the matching code and returns
+// the corresponding {i8*, i64} string fat-pointer (with leading apostrophe).
+func (cg *CodeGen) buildAtomToStringBody(fn *ir.Func, tableGlobal *ir.Global, countGlobal *ir.Global, tableArrType *irtypes.ArrayType) {
+	strType := stringFatPtrType()
+	codeParam := fn.Params[0]
+	zeroStr := constant.NewStruct(strType,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewInt(irtypes.I64, 0),
+	)
+
+	entry := fn.NewBlock("entry")
+
+	if len(cg.atomOrder) == 0 {
+		retAlloca := entry.NewAlloca(strType)
+		entry.NewStore(zeroStr, retAlloca)
+		entry.NewRet(entry.NewLoad(strType, retAlloca))
+		return
+	}
+
+	loopHeader := fn.NewBlock("loop.header")
+	loopBody := fn.NewBlock("loop.body")
+	found := fn.NewBlock("found")
+	loopCont := fn.NewBlock("loop.continue")
+	loopExit := fn.NewBlock("loop.exit")
+
+	// entry: load count, init i = 0
+	countVal := entry.NewLoad(irtypes.I64, countGlobal)
+	iAlloca := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+	entry.NewBr(loopHeader)
+
+	// loop.header: if i == count goto exit else goto body
+	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+	done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
+	loopHeader.NewCondBr(done, loopExit, loopBody)
+
+	// loop.body: compare table[i].code with input code
+	i64z := constant.NewInt(irtypes.I64, 0)
+	i32z := constant.NewInt(irtypes.I32, 0)
+	i32o := constant.NewInt(irtypes.I32, 1)
+	gepCode := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
+	entryCode := loopBody.NewLoad(irtypes.I32, gepCode)
+	match := loopBody.NewICmp(enum.IPredEQ, entryCode, codeParam)
+	loopBody.NewCondBr(match, found, loopCont)
+
+	// found: load table[i].str, compute strlen, build fat-ptr, return
+	gepStr := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
+	strPtr := found.NewLoad(irtypes.I8Ptr, gepStr)
+	length := found.NewCall(cg.ensureStrlenDecl(), strPtr)
+	fatAlloca := found.NewAlloca(strType)
+	gep0 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32z)
+	found.NewStore(strPtr, gep0)
+	gep1 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32o)
+	found.NewStore(length, gep1)
+	found.NewRet(found.NewLoad(strType, fatAlloca))
+
+	// loop.continue: i++, back to header
+	iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
+	loopCont.NewStore(iNext, iAlloca)
+	loopCont.NewBr(loopHeader)
+
+	// static.miss (was loop.exit): check runtime table via _tin_rt_atom_to_str
+	rtPtr := loopExit.NewCall(cg.ensureRtAtomToStr(), codeParam)
+	rtFound := fn.NewBlock("rt.found")
+	retZero := fn.NewBlock("ret.zero")
+	isNull := loopExit.NewICmp(enum.IPredEQ, rtPtr, constant.NewNull(irtypes.I8Ptr))
+	loopExit.NewCondBr(isNull, retZero, rtFound)
+
+	// rt.found: build fat-ptr from runtime string pointer
+	rtLen := rtFound.NewCall(cg.ensureStrlenDecl(), rtPtr)
+	rtFatAlloca := rtFound.NewAlloca(strType)
+	rtGep0 := rtFound.NewGetElementPtr(strType, rtFatAlloca, i32z, i32z)
+	rtFound.NewStore(rtPtr, rtGep0)
+	rtGep1 := rtFound.NewGetElementPtr(strType, rtFatAlloca, i32z, i32o)
+	rtFound.NewStore(rtLen, rtGep1)
+	rtFound.NewRet(rtFound.NewLoad(strType, rtFatAlloca))
+
+	// ret.zero: return zeroinitializer
+	exitAlloca := retZero.NewAlloca(strType)
+	retZero.NewStore(zeroStr, exitAlloca)
+	retZero.NewRet(retZero.NewLoad(strType, exitAlloca))
+}
+
+// buildStringToAtomBody generates the body of __tin_string_to_atom.
+// It iterates @__tin_atom_table comparing via strcmp and returns the
+// corresponding %__atom, or zeroinitializer if not found.
+func (cg *CodeGen) buildStringToAtomBody(fn *ir.Func, tableGlobal *ir.Global, countGlobal *ir.Global, tableArrType *irtypes.ArrayType) {
+	ptrParam := fn.Params[0]
+	zeroAtom := constant.NewStruct(cg.atomType, constant.NewInt(irtypes.I32, 0))
+
+	entry := fn.NewBlock("entry")
+
+	if len(cg.atomOrder) == 0 {
+		retAlloca := entry.NewAlloca(cg.atomType)
+		entry.NewStore(zeroAtom, retAlloca)
+		entry.NewRet(entry.NewLoad(cg.atomType, retAlloca))
+		return
+	}
+
+	loopHeader := fn.NewBlock("loop.header")
+	loopBody := fn.NewBlock("loop.body")
+	found := fn.NewBlock("found")
+	loopCont := fn.NewBlock("loop.continue")
+	loopExit := fn.NewBlock("loop.exit")
+
+	// entry
+	countVal := entry.NewLoad(irtypes.I64, countGlobal)
+	iAlloca := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+	entry.NewBr(loopHeader)
+
+	// loop.header
+	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+	done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
+	loopHeader.NewCondBr(done, loopExit, loopBody)
+
+	// loop.body: strcmp(input, table[i].str)
+	i64z := constant.NewInt(irtypes.I64, 0)
+	i32z := constant.NewInt(irtypes.I32, 0)
+	i32o := constant.NewInt(irtypes.I32, 1)
+	gepStr := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
+	tableStr := loopBody.NewLoad(irtypes.I8Ptr, gepStr)
+	cmpResult := loopBody.NewCall(cg.ensureStrcmp(), ptrParam, tableStr)
+	match := loopBody.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	loopBody.NewCondBr(match, found, loopCont)
+
+	// found: load table[i].code, build %__atom, return
+	gepCode := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
+	code := found.NewLoad(irtypes.I32, gepCode)
+	atomAlloca := found.NewAlloca(cg.atomType)
+	found.NewStore(zeroAtom, atomAlloca)
+	atomGep := found.NewGetElementPtr(cg.atomType, atomAlloca, i32z, i32z)
+	found.NewStore(code, atomGep)
+	found.NewRet(found.NewLoad(cg.atomType, atomAlloca))
+
+	// loop.continue: i++
+	iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
+	loopCont.NewStore(iNext, iAlloca)
+	loopCont.NewBr(loopHeader)
+
+	// static.miss (was loop.exit): fall back to runtime — learn the atom
+	rtCode := loopExit.NewCall(cg.ensureLearnAtom(), ptrParam)
+	rtAtomAlloca := loopExit.NewAlloca(cg.atomType)
+	loopExit.NewStore(zeroAtom, rtAtomAlloca)
+	rtAtomGep := loopExit.NewGetElementPtr(cg.atomType, rtAtomAlloca, i32z, i32z)
+	loopExit.NewStore(rtCode, rtAtomGep)
+	loopExit.NewRet(loopExit.NewLoad(cg.atomType, rtAtomAlloca))
+}

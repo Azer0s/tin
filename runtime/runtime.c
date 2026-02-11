@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <setjmp.h>
+#include <pthread.h>
 
 // -- Typed echo helpers
 
@@ -236,14 +237,17 @@ static int _tin_is_primitive_name(const char *s) {
     return 0;
 }
 
-// Returns the type-spec portion of an atom string (strips the leading ' and optional double-quotes)
-// For quoted atoms like '"fn(i64)bool"', writes the unquoted spec into buf (must be >= 256 bytes)
+// Returns the type-spec portion of an atom string.
+// Atoms are stored as bare names (no leading apostrophe).
+// Complex atoms whose names contain non-identifier chars are stored with
+// surrounding double-quotes preserved (e.g. '"fn(i64)bool"').
+// This function strips those quotes, writing the result into buf.
 static const char *atom_spec(const char *atom, char *buf) {
-    const char *s = atom + 1; // skip leading '
-    if (*s != '"') return s;
-    s++; // skip opening double-quote
+    if (!atom || atom[0] != '"') return atom; // simple atom: return as-is
+    // complex atom: '"fn(i64)bool"' → strip surrounding double-quotes
+    const char *s = atom + 1; // skip opening "
     size_t len = strlen(s);
-    if (len > 0 && s[len - 1] == '"') len--; // strip trailing double-quote
+    if (len > 0 && s[len - 1] == '"') len--; // strip trailing "
     if (len >= 256) len = 255;
     memcpy(buf, s, len);
     buf[len] = '\0';
@@ -299,24 +303,22 @@ const char *_tin_reflect_elem(const char *atom) {
     char sbuf[256];
     const char *s = atom_spec(atom, sbuf);
     if (*s == '*') {
-        // "'*T" → "'T" *
+        // "*T" → "T"
         const char *inner = s + 1;
         size_t len = strlen(inner);
-        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 2));
-        buf[0] = '\'';
-        memcpy(buf + 1, inner, len);
-        buf[1 + len] = '\0';
+        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
+        memcpy(buf, inner, len);
+        buf[len] = '\0';
         return buf;
     }
     if (*s == '[') {
-        // "'[T]" → "'T": strip '[' and trailing ']'
+        // "[T]" → "T": strip '[' and trailing ']'
         const char *inner = s + 1;
         size_t len = strlen(inner);
         if (len > 0 && inner[len - 1] == ']') len--;
-        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 2));
-        buf[0] = '\'';
-        memcpy(buf + 1, inner, len);
-        buf[1 + len] = '\0';
+        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
+        memcpy(buf, inner, len);
+        buf[len] = '\0';
         return buf;
     }
     return _rk_empty.data;
@@ -340,8 +342,8 @@ static const char *_reflect_find_params_end(const char *open_paren) {
 }
 
 // fn_ret: return type atom for a function type
-//   "'fn(i64,f64)bool" → "'bool"
-//   non-fn types       → ""
+//   "fn(i64,f64)bool" → "bool"
+//   non-fn types      → ""
 const char *_tin_reflect_fn_ret(const char *atom) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
@@ -349,14 +351,11 @@ const char *_tin_reflect_fn_ret(const char *atom) {
     if (strncmp(s, "fn(", 3) != 0) return _rk_empty.data;
     const char *after = _reflect_find_params_end(s + 2); // s+2 points to '('
     if (!after || *after == '\0') return _rk_empty.data;
-    // Strip trailing '"' if this came from a quoted complex atom
     size_t len = strlen(after);
-    if (len > 0 && after[len - 1] == '"') len--;
     if (len == 0) return _rk_empty.data;
-    char *buf = (char *)_tin_rc_alloc((int64_t)(len + 2));
-    buf[0] = '\'';
-    memcpy(buf + 1, after, len);
-    buf[1 + len] = '\0';
+    char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
+    memcpy(buf, after, len);
+    buf[len] = '\0';
     return buf;
 }
 
@@ -413,10 +412,9 @@ const char *_tin_reflect_fn_param(const char *atom, int64_t idx) {
 
 found:;
     size_t plen = (size_t)(p - start);
-    char *buf = (char *)_tin_rc_alloc((int64_t)(plen + 2));
-    buf[0] = '\'';
-    memcpy(buf + 1, start, plen);
-    buf[1 + plen] = '\0';
+    char *buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
+    memcpy(buf, start, plen);
+    buf[plen] = '\0';
     return buf;
 }
 
@@ -471,7 +469,7 @@ TinStringArray _tin_reflect_fn_params(const char *atom) {
     size_t arr_size = (size_t)arity * sizeof(TinString);
     size_t total = arr_size;
     for (int64_t i = 0; i < arity; i++) {
-        size_t rec_size = sizeof(int64_t) + lens[i] + 2; // rc + '\'' + data + '\0'
+        size_t rec_size = sizeof(int64_t) + lens[i] + 1; // rc + data + '\0'
         // round up to 8-byte alignment
         rec_size = (rec_size + 7) & ~(size_t)7;
         total += rec_size;
@@ -486,14 +484,13 @@ TinStringArray _tin_reflect_fn_params(const char *atom) {
         int64_t *rc_field = (int64_t *)rec;
         *rc_field = -1; // TIN_IMMORTAL_RC
         char *data = rec + sizeof(int64_t);
-        data[0] = '\'';
-        memcpy(data + 1, starts[i], lens[i]);
-        data[1 + lens[i]] = '\0';
+        memcpy(data, starts[i], lens[i]);
+        data[lens[i]] = '\0';
 
         arr[i].ptr = data;
-        arr[i].len = (int64_t)(lens[i] + 1); // include the '\'' prefix
+        arr[i].len = (int64_t)lens[i];
 
-        size_t rec_size = sizeof(int64_t) + lens[i] + 2;
+        size_t rec_size = sizeof(int64_t) + lens[i] + 1;
         rec_size = (rec_size + 7) & ~(size_t)7;
         rec += rec_size;
     }
@@ -557,6 +554,75 @@ void _tin_assert_abort(const char *msg) {
         exit(1);
     }
 }
+
+// -- Runtime atom table
+//
+// Atoms not known at compile time can be "learned" at runtime via
+// _tin_learn_atom().  Learned atoms are stored in a fixed-size table and can
+// be resolved back to their string name via _tin_rt_atom_to_str().
+
+static uint32_t _tin_crc32_str(const char *str) {
+    uint32_t crc = 0xFFFFFFFFu;
+    while (*str) {
+        crc ^= (unsigned char)*str++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+    }
+    return ~crc;
+}
+
+typedef struct TinRtAtomNode {
+    int32_t code;
+    char *str;
+    struct TinRtAtomNode *next;
+} TinRtAtomNode;
+
+static TinRtAtomNode *_tin_rt_atom_head = NULL;
+static pthread_mutex_t _tin_rt_atom_mu = PTHREAD_MUTEX_INITIALIZER;
+
+const char *_tin_rt_atom_to_str(int32_t code) {
+    pthread_mutex_lock(&_tin_rt_atom_mu);
+    const char *result = NULL;
+    for (TinRtAtomNode *n = _tin_rt_atom_head; n; n = n->next) {
+        if (n->code == code) { result = n->str; break; }
+    }
+    pthread_mutex_unlock(&_tin_rt_atom_mu);
+    return result;
+}
+
+int32_t _tin_learn_atom(const char *str) {
+    pthread_mutex_lock(&_tin_rt_atom_mu);
+    /* Already learned? */
+    for (TinRtAtomNode *n = _tin_rt_atom_head; n; n = n->next) {
+        if (strcmp(n->str, str) == 0) {
+            int32_t code = n->code;
+            pthread_mutex_unlock(&_tin_rt_atom_mu);
+            return code;
+        }
+    }
+    /* Compute code with collision resolution against the linked list */
+    int32_t code = (int32_t)_tin_crc32_str(str);
+    int collision;
+    do {
+        collision = 0;
+        for (TinRtAtomNode *n = _tin_rt_atom_head; n; n = n->next) {
+            if (n->code == code && strcmp(n->str, str) != 0) {
+                code++;
+                collision = 1;
+                break;
+            }
+        }
+    } while (collision);
+    /* Prepend a new node; strdup so the caller's storage need not persist */
+    TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
+    node->code = code;
+    node->str  = strdup(str);
+    node->next = _tin_rt_atom_head;
+    _tin_rt_atom_head = node;
+    pthread_mutex_unlock(&_tin_rt_atom_mu);
+    return code;
+}
+
 
 // -- any equality
 // Runtime comparison for `any` values - dispatches on the type tag:

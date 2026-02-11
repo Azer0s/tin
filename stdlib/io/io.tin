@@ -3,7 +3,7 @@
 // Wraps standard C file and console I/O
 // No extra linker flags required (all in libc)
 
-// -- Console output
+// Console output
 
 // puts writes s followed by a newline to stdout
 fn puts(s string) = extern("puts")
@@ -19,7 +19,7 @@ fn fprintf(stream *void, fmt string, ...) i32 = extern("fprintf")
 // printf writes a formatted string to stdout
 fn printf(fmt string, ...) i32 = extern("printf")
 
-// -- Console input
+// Console input
 
 // fgets reads at most n-1 characters into buf from stream
 // Returns buf as a *char on success, null on EOF/error
@@ -28,7 +28,7 @@ fn fgets(buf *char, n i32, stream *void) *char = extern("fgets")
 // scanf reads formatted input from stdin
 fn scanf(fmt string, ...) i32 = extern("scanf")
 
-// -- File I/O
+// File I/O
 
 // fopen opens a file at path with the given mode ("r", "w", "a", "rb", etc.)
 // Returns a FILE* (opaque *void) or null on failure

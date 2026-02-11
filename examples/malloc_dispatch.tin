@@ -4,7 +4,7 @@
 //   - sizeof(T) returning the correct byte size of any type
 //   - data types have a 1-byte tag prepended: sizeof(maybe[i64]) == 9 > 8
 //   - heap-allocating a struct via mem::malloc(sizeof(animal))
-//   - casting *void → *animal and initialising fields through the pointer
+//   - casting *void -> *animal and initialising fields through the pointer
 //   - wrapping the heap pointer in a speak fat-pointer for dynamic dispatch
 //
 // Build:  tin build examples/malloc_dispatch.tin
@@ -13,17 +13,17 @@
 use io
 use mem
 
-// ── Data type ─────────────────────────────────────────────────────────────────
+// Data type
 
 data maybe[t] = t | None
 
-// ── Trait ────────────────────────────────────────────────────────────────────
+// Trait
 
 trait speak =
   fn sound(this speak) string = virtual
   fn label(this speak) string = virtual
 
-// ── Structs ───────────────────────────────────────────────────────────────────
+// Structs
 
 struct dog(speak) =
   tag i64
@@ -43,13 +43,13 @@ struct cat(speak) =
   fn label(this cat) string =
     return "cat"
 
-// ── Generic constrained dispatch ─────────────────────────────────────────────
+// Generic constrained dispatch
 // Monomorphized at each call site — no fat-pointer overhead for stack values.
 
 fn describe[t](a t) where t is speak =
   io::printf("%s says: %s\n", a.label(), a.sound())
 
-// ── sizeof sanity-check ───────────────────────────────────────────────────────
+// sizeof sanity-check
 
 io::printf("sizeof(dog)        = %lld\n", sizeof(dog))
 io::printf("sizeof(cat)        = %lld\n", sizeof(cat))
@@ -59,14 +59,14 @@ io::printf("sizeof(i32)        = %lld\n", sizeof(i32))
 // data types: { i32 type_id, i8 variant_tag, [8 x i8] payload } = 16 (aligned)
 io::printf("sizeof(maybe[i64]) = %lld\n", sizeof(maybe[i64]))
 
-// ── Stack dispatch (constrained generic) ─────────────────────────────────────
+// Stack dispatch (constrained generic)
 
 let stack_d = dog { tag: 1 }
 let stack_c = cat { tag: 2 }
 describe(stack_d)
 describe(stack_c)
 
-// ── Heap allocation + fat-pointer dynamic dispatch ────────────────────────────
+// Heap allocation + fat-pointer dynamic dispatch
 
 // Allocate a dog on the heap and initialise it through the pointer.
 let raw_dog = mem::malloc(sizeof(dog))

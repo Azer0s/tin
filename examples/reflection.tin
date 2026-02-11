@@ -6,7 +6,7 @@
 
 use io
 
-// ── Traits ────────────────────────────────────────────────────────────────────
+// Traits
 
 trait labeled =
   fn label(this labeled) string = virtual
@@ -14,7 +14,7 @@ trait labeled =
 trait sized =
   fn size(this sized) i64 = virtual
 
-// ── Structs ───────────────────────────────────────────────────────────────────
+// Structs
 
 struct point(labeled, sized) =
   x i64
@@ -31,7 +31,7 @@ struct color =
   g i64
   b i64
 
-// ── typeof (concrete) ─────────────────────────────────────────────────────────
+// typeof (concrete)
 
 let p = point { x: 10, y: 20 }
 let c = color { r: 255, g: 128, b: 0 }
@@ -42,7 +42,7 @@ io::printf("typeof(42)   = %s\n", typeof(42))
 io::printf("typeof(3.14) = %s\n", typeof(3.14))
 io::printf("typeof(true) = %s\n", typeof(true))
 
-// ── traitof (concrete) ────────────────────────────────────────────────────────
+// traitof (concrete)
 
 let pt = traitof(p)
 io::printf("traitof(p).len = %lld\n", pt.len)
@@ -52,28 +52,28 @@ for let i i64 in 0..pt.len :
 let ct = traitof(c)
 io::printf("traitof(c).len = %lld\n", ct.len)
 
-// ── fieldnames (concrete) ─────────────────────────────────────────────────────
+// fieldnames (concrete)
 
 let pf = fieldnames(p)
 io::printf("fieldnames(p).len = %lld\n", pf.len)
 for let i i64 in 0..pf.len :
   io::printf("  field[%lld] = %s\n", i, pf[i])
 
-// ── fieldtypes (concrete) ─────────────────────────────────────────────────────
+// fieldtypes (concrete)
 
 let pfty = fieldtypes(p)
 io::printf("fieldtypes(p).len = %lld\n", pfty.len)
 for let i i64 in 0..pfty.len :
   io::printf("  ftype[%lld] = %s\n", i, pfty[i])
 
-// ── getfield / setfield (concrete) ────────────────────────────────────────────
+// getfield / setfield (concrete)
 
 let vx = getfield(p, "x")    // vx is any
 echo vx                       // prints the actual i64 value
 setfield(p, "x", 99)
 io::printf("after setfield x=99: p.x = %lld\n", p.x)
 
-// ── typeof / traitof / fieldnames on `any` ────────────────────────────────────
+// typeof / traitof / fieldnames on `any`
 
 let a1 any = p
 let a2 any = c
@@ -96,13 +96,13 @@ io::printf("fieldtypes(a1).len = %lld\n", aft1.len)
 for let i i64 in 0..aft1.len :
   io::printf("  ftype[%lld] = %s\n", i, aft1[i])
 
-// ── getfield on `any` ─────────────────────────────────────────────────────────
+// getfield on `any`
 
 let ag any = p
 let gx = getfield(ag, "x")    // gx is any
 echo gx
 
-// ── typeof on pointers and arrays ─────────────────────────────────────────────
+// typeof on pointers and arrays
 
 let pv = p
 let ptr_p = &pv

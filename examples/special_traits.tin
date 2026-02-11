@@ -1,6 +1,6 @@
 // special_traits.tin — demonstrates print, implicit, and iter special traits
 
-// ── 1. print trait ─────────────────────────────────────────────────────────
+// 1. print trait
 // Any struct implementing `print` can be used in echo and string interpolation.
 
 struct point2d(print) =
@@ -14,7 +14,7 @@ let p = point2d{x: 3, y: 7}
 echo p                      // (3, 7)
 echo "point is {p}"         // point is (3, 7)
 
-// ── 2. implicit trait ──────────────────────────────────────────────────────
+// 2. implicit trait
 // A struct implementing implicit[T] enables automatic coercion from T.
 // Declare the struct with (implicit[f64]) and provide a static conversion fn.
 
@@ -24,10 +24,10 @@ struct celsius(implicit[f64]) =
   static fn from(val f64) celsius =
     return celsius{degrees: val}
 
-let temp celsius = 36.6        // implicit f64 → celsius via celsius_from
+let temp celsius = 36.6        // implicit f64 -> celsius via celsius_from
 echo temp.degrees              // 36.600000
 
-// ── 3. iter[t] trait ───────────────────────────────────────────────────────
+// 3. iter[t] trait
 // A struct implementing iter[T] can be used in `for x in collection:` loops.
 
 struct int_range(iter[i64]) =
@@ -45,7 +45,7 @@ let r = int_range{start_val: 1, end_val: 6}   // represents [1,2,3,4,5]
 for n in r:
   echo n           // prints 1, 2, 3, 4, 5
 
-// ── Combining print + iter ─────────────────────────────────────────────────
+// Combining print + iter
 
 struct countdown(iter[i64], print) =
   from_val i64

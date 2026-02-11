@@ -34,44 +34,44 @@ type Type struct {
 	Kind Kind
 	Name string // canonical name used as LLVM struct/alias name
 
-	// ── Integers ─────────────────────────────────────────────────────────────
+	// Integers
 	BitSize  int  // 1, 8, 16, 32, 64
 	Signed   bool // false for u* types and char
 
-	// ── Float ────────────────────────────────────────────────────────────────
+	// Float
 	// BitSize used here too (32 or 64)
 
-	// ── Array ────────────────────────────────────────────────────────────────
+	// Array
 	Elem *Type
 	Len  int // -1 = dynamic slice
 
-	// ── Pointer ──────────────────────────────────────────────────────────────
+	// Pointer
 	PointsTo *Type
 	ConstPtr bool
 
-	// ── Function ─────────────────────────────────────────────────────────────
+	// Function
 	Params    []*Type
 	Return    *Type
 	IsVarArgs bool
 
-	// ── Struct ───────────────────────────────────────────────────────────────
+	// Struct
 	Fields  []FieldInfo
 	Methods []*FuncInfo
 
-	// ── Union / Data ─────────────────────────────────────────────────────────
+	// Union / Data
 	Variants    []*Type
 	VariantTags []string // tag name for each variant
 	HasNone     bool     // data types may carry a None variant
 
-	// ── Enum ─────────────────────────────────────────────────────────────────
+	// Enum
 	BaseType *Type
 	Members  []EnumMember
 
-	// ── Generics ─────────────────────────────────────────────────────────────
+	// Generics
 	TypeParams []string // parameter names for generic definitions
 	TypeArgs   []*Type  // resolved args for a specific instantiation
 
-	// ── Control tags ─────────────────────────────────────────────────────────
+	// Control tags
 	Tags map[string]bool // #pure, #recurse, #noRecurse, …
 }
 
@@ -98,7 +98,7 @@ type EnumMember struct {
 	Value int64
 }
 
-// ── Built-in types ────────────────────────────────────────────────────────────
+// Built-in types
 
 var (
 	Void    = &Type{Kind: KindVoid, Name: "void"}
@@ -130,7 +130,7 @@ var Builtins = map[string]*Type{
 	"int": I64,
 }
 
-// ── Constructors ──────────────────────────────────────────────────────────────
+// Constructors
 
 func NewPointer(to *Type, isConst bool) *Type {
 	return &Type{
@@ -200,7 +200,7 @@ func NewGenericParam(name string) *Type {
 	return &Type{Kind: KindGeneric, Name: name}
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 // IsInteger returns true for all integer kinds including char
 func (t *Type) IsInteger() bool {

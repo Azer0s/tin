@@ -1,0 +1,521 @@
+package parser
+
+import (
+	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/lexer"
+)
+
+// Statements
+
+func (p *Parser) parseStatement() (ast.Node, error) {
+	tags := p.parseTags()
+	_ = tags
+
+	switch p.peek().Type {
+	case lexer.KW_LET, lexer.KW_CONST:
+		return p.parseVarDecl()
+	case lexer.KW_FN:
+		return p.parseFuncDecl(tags, false)
+	case lexer.KW_STRUCT:
+		return p.parseStructDecl(tags)
+	case lexer.KW_TYPE:
+		return p.parseTypeDecl()
+	case lexer.KW_ENUM:
+		return p.parseEnumDecl()
+	case lexer.KW_RETURN:
+		return p.parseReturnStmt()
+	case lexer.KW_PASS:
+		p.advance()
+		return nil, nil // no-op statement; not appended to block
+	case lexer.KW_BREAK:
+		p.advance()
+		return &ast.BreakStmt{}, nil
+	case lexer.KW_DEFER:
+		return p.parseDeferStmt()
+	case lexer.KW_IF:
+		return p.parseIfStmt()
+	case lexer.KW_FOR:
+		return p.parseForStmt()
+	case lexer.KW_MATCH:
+		return p.parseMatchStmt()
+	case lexer.KW_ECHO:
+		return p.parseEchoStmt()
+	case lexer.KW_USE:
+		return p.parseUseDecl()
+	case lexer.KW_EXPORT:
+		return p.parseExportDecl()
+	case lexer.KW_WHERE:
+		wc, err := p.parseWhereClause()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
+	case lexer.LBRACE:
+		// { #tag } { body }  tagged block
+		if p.check(lexer.LBRACE) && p.peekAt(1).Type == lexer.CONTROL_TAG {
+			return p.parseTaggedBlock()
+		}
+		return p.parseExprStatement()
+	case lexer.NEWLINE, lexer.DEDENT:
+		return nil, nil
+	default:
+		return p.parseExprStatement()
+	}
+}
+
+func (p *Parser) parseVarDecl() (*ast.VarDecl, error) {
+	pos := p.curPos()
+	isConst := p.peek().Type == lexer.KW_CONST
+	p.advance() // consume let/const
+
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+
+	// Optional type annotation
+	var typ ast.TypeExpr
+	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.SEMI) {
+		typ, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Optional initializer
+	var val ast.Node
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+		val, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+	_ = pos
+	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
+}
+
+func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
+	p.advance() // consume return
+	if p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF) {
+		return &ast.ReturnStmt{}, nil
+	}
+	val, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ReturnStmt{Value: val}, nil
+}
+
+func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
+	p.advance() // consume defer
+	call, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.DeferStmt{Call: call}, nil
+}
+
+func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
+	p.advance() // consume echo
+	val, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.EchoStmt{Value: val}, nil
+}
+
+func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
+	p.advance() // consume if
+	cond, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+	// body
+	var thenBlock *ast.Block
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+		p.skipNewlines()
+		if p.check(lexer.INDENT) {
+			thenBlock, err = p.parseBlock()
+		} else {
+			thenBlock = &ast.Block{}
+		}
+	} else {
+		stmt, err2 := p.parseStatement()
+		if err2 != nil {
+			return nil, err2
+		}
+		thenBlock = &ast.Block{Stmts: []ast.Node{stmt}}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	stmt := &ast.IfStmt{Cond: cond, Then: thenBlock}
+
+	// else / else if
+	p.skipNewlines()
+	for p.check(lexer.KW_ELSE) {
+		p.advance()
+		if p.check(lexer.KW_IF) {
+			p.advance()
+			eicond, err2 := p.parseExpr()
+			if err2 != nil {
+				return nil, err2
+			}
+			if _, err2 := p.expect(lexer.COLON); err2 != nil {
+				return nil, err2
+			}
+			var eiBlock *ast.Block
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				p.skipNewlines()
+				if p.check(lexer.INDENT) {
+					eiBlock, err2 = p.parseBlock()
+					if err2 != nil {
+						return nil, err2
+					}
+				} else {
+					eiBlock = &ast.Block{}
+				}
+			} else {
+				es, err2 := p.parseStatement()
+				if err2 != nil {
+					return nil, err2
+				}
+				eiBlock = &ast.Block{Stmts: []ast.Node{es}}
+			}
+			stmt.ElseIfs = append(stmt.ElseIfs, ast.ElseIfClause{Cond: eicond, Body: eiBlock})
+			p.skipNewlines()
+		} else {
+			if _, err2 := p.expect(lexer.COLON); err2 != nil {
+				return nil, err2
+			}
+			var elseBlock *ast.Block
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				p.skipNewlines()
+				if p.check(lexer.INDENT) {
+					elseBlock, err = p.parseBlock()
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					elseBlock = &ast.Block{}
+				}
+			} else {
+				es, err2 := p.parseStatement()
+				if err2 != nil {
+					return nil, err2
+				}
+				elseBlock = &ast.Block{Stmts: []ast.Node{es}}
+			}
+			stmt.Else = elseBlock
+			break
+		}
+	}
+	return stmt, nil
+}
+
+func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
+	p.advance() // consume for
+	stmt := &ast.ForStmt{}
+
+	// Expect "let varName [type]"
+	if p.check(lexer.KW_LET) {
+		p.advance()
+	}
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	stmt.VarName = nameTok.Literal
+
+	// Optional type annotation for the loop variable
+	if !p.match(lexer.SEMI, lexer.KW_IN, lexer.ASSIGN, lexer.COLON) {
+		stmt.VarType, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if p.check(lexer.SEMI) {
+		// C-style (no initializer): for let i T; cond; post:
+		stmt.Kind = ast.ForCStyle
+		p.advance() // consume ;
+		stmt.Cond, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.SEMI); err != nil {
+			return nil, err
+		}
+		stmt.Post, err = p.parseExprStatement()
+		if err != nil {
+			return nil, err
+		}
+	} else if p.check(lexer.KW_IN) {
+		// for let i T in iter:
+		stmt.Kind = ast.ForIn
+		p.advance() // consume in
+		stmt.Iter, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	} else if p.check(lexer.ASSIGN) {
+		p.advance() // consume =
+		initExpr, err2 := p.parseExpr()
+		if err2 != nil {
+			return nil, err2
+		}
+		if p.check(lexer.SEMI) {
+			// C-style with initializer: for let i T = init; cond; post:
+			stmt.Kind = ast.ForCStyle
+			stmt.Init = &ast.VarDecl{Name: stmt.VarName, Type: stmt.VarType, Value: initExpr}
+			p.advance() // consume ;
+			stmt.Cond, err = p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.SEMI); err != nil {
+				return nil, err
+			}
+			stmt.Post, err = p.parseExprStatement()
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// for let i T = start..end:
+			stmt.Kind = ast.ForIn
+			stmt.Iter = initExpr
+		}
+	}
+
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+
+	// Body
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+		p.skipNewlines()
+		if p.check(lexer.INDENT) {
+			stmt.Body, err = p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			stmt.Body = &ast.Block{}
+		}
+	} else {
+		s, err2 := p.parseStatement()
+		if err2 != nil {
+			return nil, err2
+		}
+		stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
+	}
+	return stmt, nil
+}
+
+func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
+	p.advance() // consume match
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	// match a.(type): -> set IsType
+	isType := false
+	if ta, ok := expr.(*ast.TypeAssertExpr); ok && ta.IsType {
+		isType = true
+	}
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+
+	stmt := &ast.MatchStmt{Expr: expr, IsType: isType}
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+	}
+	p.skipNewlines()
+	if p.check(lexer.INDENT) {
+		p.advance()
+		p.skipNewlines()
+		for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+			if p.check(lexer.KW_DEFAULT) {
+				p.advance()
+				if _, err := p.expect(lexer.COLON); err != nil {
+					return nil, err
+				}
+				if p.check(lexer.NEWLINE) {
+					p.advance()
+					p.skipNewlines()
+					if p.check(lexer.INDENT) {
+						stmt.Default, err = p.parseBlock()
+						if err != nil {
+							return nil, err
+						}
+					}
+				} else if !p.check(lexer.EOF) && !p.check(lexer.DEDENT) {
+					// Inline body: default: return foo
+					s, err2 := p.parseStatement()
+					if err2 != nil {
+						return nil, err2
+					}
+					if s != nil {
+						stmt.Default = &ast.Block{Stmts: []ast.Node{s}}
+					}
+				}
+			} else if p.check(lexer.KW_CASE) {
+				mc, err2 := p.parseMatchCase()
+				if err2 != nil {
+					return nil, err2
+				}
+				stmt.Cases = append(stmt.Cases, mc)
+			} else {
+				break
+			}
+			p.skipNewlines()
+		}
+		if p.check(lexer.DEDENT) {
+			p.advance()
+		}
+	}
+	return stmt, nil
+}
+
+func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
+	pos := p.curPos()
+	if _, err := p.expect(lexer.KW_CASE); err != nil {
+		return ast.MatchCase{}, err
+	}
+
+	mc := ast.MatchCase{Pos: pos}
+
+	// case varName TypeExpr: OR case expr:
+	// If next is ident followed by a type, it's "case i i8"
+	if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) {
+		// Just an expression pattern
+		mc.Pattern, _ = p.parseExpr()
+	} else if p.check(lexer.IDENT) {
+		mc.VarName = p.advance().Literal
+		if !p.match(lexer.COLON, lexer.NEWLINE) {
+			t, err := p.parseTypeExpr()
+			if err != nil {
+				return ast.MatchCase{}, err
+			}
+			mc.VarType = t
+		}
+	} else {
+		var err error
+		mc.Pattern, err = p.parseExpr()
+		if err != nil {
+			return ast.MatchCase{}, err
+		}
+	}
+
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return ast.MatchCase{}, err
+	}
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+		p.skipNewlines()
+		if p.check(lexer.INDENT) {
+			var err error
+			mc.Body, err = p.parseBlock()
+			if err != nil {
+				return ast.MatchCase{}, err
+			}
+		}
+	} else if !p.check(lexer.EOF) && !p.check(lexer.KW_CASE) && !p.check(lexer.KW_DEFAULT) {
+		// Inline body: case foo: return bar
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return ast.MatchCase{}, err
+		}
+		mc.Body = &ast.Block{Stmts: []ast.Node{stmt}}
+	}
+	return mc, nil
+}
+
+func (p *Parser) parseTaggedBlock() (*ast.TaggedBlock, error) {
+	tags := p.parseTags()
+	if p.check(lexer.LBRACE) {
+		p.advance()
+	}
+	var stmts []ast.Node
+	p.skipNewlines()
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		s, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			stmts = append(stmts, s)
+		}
+		p.skipNewlines()
+	}
+	if p.check(lexer.RBRACE) {
+		p.advance()
+	}
+	return &ast.TaggedBlock{Tags: tags, Body: &ast.Block{Stmts: stmts}}, nil
+}
+
+// parseExprStatement handles assignments, augmented assignments, postfixes,
+// and bare expression statements
+func (p *Parser) parseExprStatement() (ast.Node, error) {
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	// Postfix ++/--
+	if p.check(lexer.INC) {
+		op := p.advance().Literal
+		return &ast.PostfixStmt{Expr: expr, Op: op}, nil
+	}
+
+	// Assignment =
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+		val, err2 := p.parseExpr()
+		if err2 != nil {
+			return nil, err2
+		}
+		return &ast.AssignStmt{Target: expr, Value: val}, nil
+	}
+
+	// Augmented assignment +=, -=, *=, /=, %=, ++=
+	if aug, ok := augOp(p.peek().Type); ok {
+		p.advance()
+		val, err2 := p.parseExpr()
+		if err2 != nil {
+			return nil, err2
+		}
+		return &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}, nil
+	}
+
+	return &ast.ExprStmt{Expr: expr}, nil
+}
+
+func augOp(t lexer.TokenType) (string, bool) {
+	switch t {
+	case lexer.PLUSEQ:
+		return "+=", true
+	case lexer.MINUSEQ:
+		return "-=", true
+	case lexer.STAREQ:
+		return "*=", true
+	case lexer.SLASHEQ:
+		return "/=", true
+	case lexer.PERCENTEQ:
+		return "%=", true
+	case lexer.APPENDEQ:
+		return "++=", true
+	}
+	return "", false
+}
+

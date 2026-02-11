@@ -38,6 +38,28 @@ The `any` type can hold a value of any other type at runtime. See
 
 ---
 
+## Integer literal formats
+
+Integer literals can be written in decimal, hexadecimal, octal, or binary:
+
+| Prefix | Base | Example | Decimal value |
+|--------|------|---------|---------------|
+| (none) | 10 — decimal | `255` | 255 |
+| `0x` / `0X` | 16 — hexadecimal | `0xFF` | 255 |
+| `0o` / `0O` | 8 — octal | `0o377` | 255 |
+| `0b` / `0B` | 2 — binary | `0b11111111` | 255 |
+
+```rust
+let mask  i64 = 0xFF00FF        // hex
+let perms i64 = 0o755           // octal  (rwxr-xr-x)
+let flags i64 = 0b1010_0011     // binary (underscores not yet supported)
+```
+
+All bases produce an `i64` literal; the `as` operator or an explicit type
+annotation coerces to a narrower type.
+
+---
+
 ## null
 
 `null` is the zero pointer literal, assignable to any pointer type:

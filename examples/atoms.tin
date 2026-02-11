@@ -36,9 +36,9 @@ echo status_message('err)
 let current_weather atom = 'sunny
 describe_weather(current_weather)
 
-// Atoms are echoed with their name.
-echo 'ok
-echo 'err
+// Atoms are echoed with their apostrophe prefix.
+echo 'ok    // 'ok
+echo 'err   // 'err
 
 test "status messages" =
   assert::equals_str(status_message('ok), "Everything is fine")
@@ -52,5 +52,5 @@ test "quoted atom equals simple atom" =
   let a atom = 'hello
   let b atom = '"hello"
   assert::ok(a == b)
-  assert::equals_str(a, "'hello")
-  assert::equals_str(b, "'hello")
+  assert::equals_str(a, "hello")
+  assert::equals_str(b, "hello")
