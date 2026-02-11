@@ -1,0 +1,510 @@
+package codegen
+
+import (
+	"fmt"
+
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
+	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
+)
+
+// Helper utilities
+
+// callPrintTrait tries to call the print trait method on val, returning the
+// resulting string value and true, or (nil, false) if not applicable.
+// Handles both concrete-struct dispatch and print fat-pointer dispatch.
+func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value, bool) {
+	t := val.Type()
+	// Case 1: concrete struct — look up structName_print directly.
+	if structName := cg.typeNameOf(t); structName != "" {
+		if e, ok := cg.curScope.lookup(structName + "_print"); ok {
+			if fn, ok2 := e.val.(*ir.Func); ok2 {
+				args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
+				return block.NewCall(fn, args...), true
+			}
+		}
+	}
+	// Case 2: print trait fat pointer — dispatch through vtable.
+	if instKey, ok := cg.isTraitFatPtr(t); ok {
+		baseTrait := instKey
+		if base, exists := cg.traitInstKeys[instKey]; exists {
+			baseTrait = base
+		}
+		if baseTrait == "print" {
+			strVal, err := cg.callTraitMethod(block, val, instKey, instKey, nil)
+			if err == nil && strVal != nil {
+				return strVal, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// vtableOffset returns the number of vtable pointer fields prepended to the
+
+// fieldIndex returns the LLVM field index for a named user field, accounting
+// for the leading i32 type_id and vtable pointer fields at the front.
+// Layout: [i32 type_id, vtable_0*, …, user_field_0, …]
+
+// isStringType returns true if t is the tin string fat-pointer type {i8*, i64}.
+
+// isAnyType returns true if t is the tin `any` fat-pointer type {i32, i8*}.
+
+// boxToAny boxes val into an `any` fat-pointer {i32 type_id, i8* data}.
+func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
+	if val == nil {
+		val = constant.NewInt(irtypes.I64, 0)
+	}
+	// If already any, pass through.
+	if isAnyType(val.Type()) {
+		return val
+	}
+
+	anyType := anyFatPtrType()
+	alloca := block.NewAlloca(anyType)
+
+	t := val.Type()
+	var tag int32
+	var dataPtr value.Value
+
+	// Use ARC-managed allocations for boxed data so typeof/release work.
+	rcAlloc := cg.ensureRCAlloc()
+	switch {
+	case isStringType(t):
+		tag = anyTagString
+		sz := constant.NewInt(irtypes.I64, 16) // {i8*, i64} = 16 bytes
+		rawPtr := block.NewCall(rcAlloc, sz)
+		strPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
+		block.NewStore(val, strPtr)
+		dataPtr = rawPtr
+	case t.Equal(irtypes.I1):
+		tag = anyTagBool
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, 1))
+		boolPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(irtypes.I1))
+		block.NewStore(val, boolPtr)
+		dataPtr = rawPtr
+	case irtypes.IsFloat(t):
+		tag = anyTagFloat
+		var f64Val value.Value
+		if t == irtypes.Double {
+			f64Val = val
+		} else {
+			f64Val = block.NewFPExt(val, irtypes.Double)
+		}
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, 8))
+		fPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(irtypes.Double))
+		block.NewStore(f64Val, fPtr)
+		dataPtr = rawPtr
+	case irtypes.IsInt(t):
+		tag = anyTagInt
+		i64Val := cg.coerce(block, val, irtypes.I64)
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, 8))
+		iPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(irtypes.I64))
+		block.NewStore(i64Val, iPtr)
+		dataPtr = rawPtr
+	case isFatFnPtr(t):
+		// Fat function pointer { fn(i8*,...)*, i8* }: heap-copy the struct so
+		// the any can outlive its stack alloca.
+		{
+			st2 := t.(*irtypes.StructType)
+			innerFnType := st2.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+			tag = cg.ensureFnTypeID(fnSigName(innerFnType, true))
+		}
+		sz := llvmTypeSize(t)
+		if sz == 0 {
+			sz = 16 // two pointers
+		}
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, int64(sz)))
+		fnPtrStore := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
+		block.NewStore(val, fnPtrStore)
+		dataPtr = rawPtr
+	case irtypes.IsPointer(t):
+		// A pointer to a FuncType is a named/extern function reference; give
+		// it the fn tag so typeof() returns 'fn(...) instead of 'ptr.
+		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
+			if fnType, isFnType := pt.ElemType.(*irtypes.FuncType); isFnType {
+				tag = cg.ensureFnTypeID(fnSigName(fnType, false))
+			} else {
+				tag = anyTagPtr
+			}
+		} else {
+			tag = anyTagPtr
+		}
+		dataPtr = block.NewBitCast(val, irtypes.I8Ptr)
+	default:
+		// Named struct or data type: heap-allocate so the any can escape.
+		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+			if id, ok2 := cg.structTypeIDs[st.Name()]; ok2 {
+				tag = id
+			} else if id, ok2 := cg.dataTypeIDs[st.Name()]; ok2 {
+				tag = id
+			} else if id, ok2 := cg.unionTypeIDs[st.Name()]; ok2 {
+				tag = id
+			} else {
+				tag = anyTagPtr // unknown named type – treat as opaque pointer
+			}
+		} else {
+			tag = anyTagInt
+		}
+		sz := llvmTypeSize(t)
+		if sz == 0 {
+			sz = 8
+		}
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, int64(sz)))
+		vPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
+		block.NewStore(val, vPtr)
+		dataPtr = rawPtr
+	}
+
+	// Layout: {i32 type_id, i8* data}
+	tagGep := block.NewGetElementPtr(anyType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(constant.NewInt(irtypes.I32, int64(tag)), tagGep)
+
+	ptrGep := block.NewGetElementPtr(anyType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(dataPtr, ptrGep)
+
+	return block.NewLoad(anyType, alloca)
+}
+
+// genEchoAny emits a runtime type-dispatch printf for an `any` value.
+func (cg *CodeGen) genEchoAny(block *ir.Block, val value.Value) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	anyType := anyFatPtrType()
+
+	anyAlloca := block.NewAlloca(anyType)
+	block.NewStore(val, anyAlloca)
+	// Layout: {i32 type_id, i8* data}
+	tagGep := block.NewGetElementPtr(anyType, anyAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ptrGep := block.NewGetElementPtr(anyType, anyAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tag := block.NewLoad(irtypes.I32, tagGep)
+	dataPtr := block.NewLoad(irtypes.I8Ptr, ptrGep)
+
+	f := cg.curFn
+	id := cg.labelCount
+	cg.labelCount++
+	intBlock := f.NewBlock(fmt.Sprintf("any.int.%d", id))
+	floatBlock := f.NewBlock(fmt.Sprintf("any.float.%d", id))
+	strBlock := f.NewBlock(fmt.Sprintf("any.str.%d", id))
+	boolBlock := f.NewBlock(fmt.Sprintf("any.bool.%d", id))
+	ptrBlock := f.NewBlock(fmt.Sprintf("any.ptr.%d", id))
+	doneBlock := f.NewBlock(fmt.Sprintf("any.done.%d", id))
+
+	block.NewSwitch(tag, ptrBlock,
+		ir.NewCase(constant.NewInt(irtypes.I32, int64(anyTagInt)), intBlock),
+		ir.NewCase(constant.NewInt(irtypes.I32, int64(anyTagFloat)), floatBlock),
+		ir.NewCase(constant.NewInt(irtypes.I32, int64(anyTagString)), strBlock),
+		ir.NewCase(constant.NewInt(irtypes.I32, int64(anyTagBool)), boolBlock),
+	)
+
+	// int branch
+	i64Ptr := intBlock.NewBitCast(dataPtr, irtypes.NewPointer(irtypes.I64))
+	ival := intBlock.NewLoad(irtypes.I64, i64Ptr)
+	intBlock.NewCall(printf, cg.newGlobalString("%lld\n"), ival)
+	intBlock.NewBr(doneBlock)
+
+	// float branch
+	f64Ptr := floatBlock.NewBitCast(dataPtr, irtypes.NewPointer(irtypes.Double))
+	fval := floatBlock.NewLoad(irtypes.Double, f64Ptr)
+	floatBlock.NewCall(printf, cg.newGlobalString("%g\n"), fval)
+	floatBlock.NewBr(doneBlock)
+
+	// string branch
+	strFatType := stringFatPtrType()
+	strFatPtrPtr := strBlock.NewBitCast(dataPtr, irtypes.NewPointer(strFatType))
+	strFatVal := strBlock.NewLoad(strFatType, strFatPtrPtr)
+	strDataPtr := cg.extractStringPtr(strBlock, strFatVal)
+	strBlock.NewCall(printf, cg.newGlobalString("%s\n"), strDataPtr)
+	strBlock.NewBr(doneBlock)
+
+	// bool branch
+	boolPtr := boolBlock.NewBitCast(dataPtr, irtypes.NewPointer(irtypes.I1))
+	bval := boolBlock.NewLoad(irtypes.I1, boolPtr)
+	bval32 := boolBlock.NewZExt(bval, irtypes.I32)
+	boolBlock.NewCall(printf, cg.newGlobalString("%d\n"), bval32)
+	boolBlock.NewBr(doneBlock)
+
+	// ptr branch (default)
+	ptrBlock.NewCall(printf, cg.newGlobalString("%p\n"), dataPtr)
+	ptrBlock.NewBr(doneBlock)
+
+	return doneBlock, nil
+}
+
+// toBool converts a value to i1.
+func (cg *CodeGen) toBool(block *ir.Block, val value.Value) value.Value {
+	if val == nil {
+		return constant.NewInt(irtypes.I1, 0)
+	}
+	t := val.Type()
+	if t.Equal(irtypes.I1) {
+		return val
+	}
+	if irtypes.IsInt(t) {
+		zero := cg.coerce(block, constant.NewInt(irtypes.I64, 0), t)
+		return block.NewICmp(enum.IPredNE, val, zero)
+	}
+	if irtypes.IsFloat(t) {
+		zero := constant.NewFloat(t.(*irtypes.FloatType), 0)
+		return block.NewFCmp(enum.FPredONE, val, zero)
+	}
+	if irtypes.IsPointer(t) {
+		null := constant.NewNull(t.(*irtypes.PointerType))
+		return block.NewICmp(enum.IPredNE, val, null)
+	}
+	return constant.NewInt(irtypes.I1, 1)
+}
+
+// coerce converts a value to the target type, inserting casts as needed.
+func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
+	if val == nil || target == nil {
+		return val
+	}
+	src := val.Type()
+	if src.Equal(target) {
+		return val
+	}
+
+	// Data type: wrap a value into a tagged union.
+	if targetSt, ok := target.(*irtypes.StructType); ok {
+		if targetName := cg.typeNameOf(target); targetName != "" {
+			if _, isData := cg.dataDecls[targetName]; isData {
+				if !src.Equal(target) {
+					// If the source is i64 0 (the None sentinel), return a zero-tagged struct.
+					if c, ok := val.(*constant.Int); ok && c.X != nil && c.X.Sign() == 0 && irtypes.IsInt(src) {
+						if noneVal := cg.makeNoneValue(block, target); noneVal != nil {
+							return noneVal
+						}
+					}
+					if wrapped := cg.wrapDataVariant(block, val, targetSt, targetName); wrapped != nil {
+						return wrapped
+					}
+				}
+			}
+		}
+	}
+	// Tagged union: wrap a value into a tagged union type (type u = i8 | string).
+	if targetSt, ok := target.(*irtypes.StructType); ok {
+		if targetName := cg.typeNameOf(target); targetName != "" {
+			if _, isUnion := cg.unionTypeMembers[targetName]; isUnion {
+				if !src.Equal(target) {
+					if wrapped := cg.wrapTaggedUnionVariant(block, val, targetSt, targetName); wrapped != nil {
+						return wrapped
+					}
+				}
+			}
+		}
+	}
+	// Native union: store value into union storage (union u_named = ...).
+	if targetSt, ok := target.(*irtypes.StructType); ok {
+		if targetName := cg.typeNameOf(target); targetName != "" {
+			if _, isNative := cg.nativeUnionDecls[targetName]; isNative {
+				if !src.Equal(target) {
+					if wrapped := cg.wrapNativeUnion(block, val, targetSt); wrapped != nil {
+						return wrapped
+					}
+				}
+			}
+		}
+	}
+	// Trait fat-pointer: coerce a concrete struct into the trait iface.
+	if traitName, ok := cg.isTraitFatPtr(target); ok {
+		if _, srcIsTrait := cg.isTraitFatPtr(src); !srcIsTrait {
+			result, err := cg.coerceToTrait(block, val, traitName)
+			if err == nil {
+				return result
+			}
+		}
+	}
+
+	// implicit[T] conversion: struct S implements implicit[T], call static fn.
+	if targetName := cg.typeNameOf(target); targetName != "" {
+		for _, entry := range cg.implicitConvFns[targetName] {
+			if entry.srcLLVM.Equal(src) {
+				return block.NewCall(entry.fn, val)
+			}
+		}
+	}
+
+	// Named function pointer -> fat-fn-ptr: wrap in a thin shim with (i8* env, params...).
+	// This enables passing named functions (including extern) to higher-order functions.
+	if isFatFnPtr(target) && !isFatFnPtr(src) {
+		if _, ok := src.(*irtypes.PointerType); ok {
+			return cg.wrapFnAsFatPtr(block, val, target)
+		}
+	}
+
+	// Empty array literal {i8*, i64} -> typed fat array {T*, i64}: use zero value
+	// of the target type so the null data pointer is properly typed.
+	if isFatArrayPtr(src) && isFatArrayPtr(target) {
+		return cg.zeroValue(target)
+	}
+
+	// %__atom -> string fat-ptr or i8*: convert via __tin_atom_to_string.
+	if isAtomType(src) {
+		code := cg.extractAtomCode(block, val)
+		strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
+		if isFatPtrType(target) {
+			return strFatPtr
+		}
+		if _, ok := target.(*irtypes.PointerType); ok {
+			rawPtr := cg.extractFatPtrData(block, strFatPtr, stringFatPtrType())
+			if rawPtr.Type().Equal(target) {
+				return rawPtr
+			}
+			return block.NewBitCast(rawPtr, target)
+		}
+	}
+
+	// Fat-pointer (string / dynamic array) -> raw C pointer: extract data ptr.
+	// This enables passing Tin strings directly to extern C functions.
+	if isFatPtrType(src) {
+		if _, ok := target.(*irtypes.PointerType); ok {
+			rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
+			if rawPtr.Type().Equal(target) {
+				return rawPtr
+			}
+			return block.NewBitCast(rawPtr, target)
+		}
+	}
+
+	switch {
+	// Any type: box the value.
+	case isAnyType(target) && !isAnyType(src):
+		return cg.boxToAny(block, val)
+
+	// Int -> Int: extend or truncate.
+	case irtypes.IsInt(src) && irtypes.IsInt(target):
+		sBits := src.(*irtypes.IntType).BitSize
+		tBits := target.(*irtypes.IntType).BitSize
+		if sBits < tBits {
+			return block.NewSExt(val, target)
+		} else if sBits > tBits {
+			return block.NewTrunc(val, target)
+		}
+		return val
+
+	// Float -> Float.
+	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
+		sBits := floatBits(src.(*irtypes.FloatType))
+		tBits := floatBits(target.(*irtypes.FloatType))
+		if sBits < tBits {
+			return block.NewFPExt(val, target)
+		} else if sBits > tBits {
+			return block.NewFPTrunc(val, target)
+		}
+		return val
+
+	// Int -> Float.
+	case irtypes.IsInt(src) && irtypes.IsFloat(target):
+		return block.NewSIToFP(val, target)
+
+	// Float -> Int.
+	case irtypes.IsFloat(src) && irtypes.IsInt(target):
+		return block.NewFPToSI(val, target)
+
+	// Pointer -> Pointer.
+	case irtypes.IsPointer(src) && irtypes.IsPointer(target):
+		return block.NewBitCast(val, target)
+
+	// Int -> Pointer.
+	case irtypes.IsInt(src) && irtypes.IsPointer(target):
+		return block.NewIntToPtr(val, target)
+
+	// Pointer -> Int.
+	case irtypes.IsPointer(src) && irtypes.IsInt(target):
+		return block.NewPtrToInt(val, target)
+	}
+
+	// Unbox any to a primitive scalar (int or float).
+	// Extract the data pointer from the any fat-ptr and load the value.
+	if isAnyType(src) && (irtypes.IsInt(target) || irtypes.IsFloat(target)) {
+		anyType := anyFatPtrType()
+		anyAlloca := block.NewAlloca(anyType)
+		block.NewStore(val, anyAlloca)
+		ptrGep := block.NewGetElementPtr(anyType, anyAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		dataPtr := block.NewLoad(irtypes.I8Ptr, ptrGep)
+		typedPtr := block.NewBitCast(dataPtr, irtypes.NewPointer(target))
+		return block.NewLoad(target, typedPtr)
+	}
+
+	// Last resort: bitcast if same size.
+	return val
+}
+
+// constCoerce coerces a compile-time constant to the target type without a
+// block (used for const preregistration). Handles int/float narrowing/widening.
+func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
+	if v == nil || target == nil || v.Type().Equal(target) {
+		return v
+	}
+	c, ok := v.(constant.Constant)
+	if !ok {
+		return v
+	}
+	src := v.Type()
+	switch {
+	case irtypes.IsInt(src) && irtypes.IsInt(target):
+		if ci, ok2 := c.(*constant.Int); ok2 {
+			return constant.NewInt(target.(*irtypes.IntType), ci.X.Int64())
+		}
+	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
+		return c
+	case irtypes.IsInt(src) && irtypes.IsFloat(target):
+		if ci, ok2 := c.(*constant.Int); ok2 {
+			return constant.NewFloat(target.(*irtypes.FloatType), float64(ci.X.Int64()))
+		}
+	case irtypes.IsFloat(src) && irtypes.IsInt(target):
+		if cf, ok2 := c.(*constant.Float); ok2 {
+			fv, _ := cf.X.Float64()
+			return constant.NewInt(target.(*irtypes.IntType), int64(fv))
+		}
+	}
+	return v
+}
+
+func floatBits(t *irtypes.FloatType) int {
+	switch t.Kind {
+	case irtypes.FloatKindHalf:
+		return 16
+	case irtypes.FloatKindFloat:
+		return 32
+	case irtypes.FloatKindDouble:
+		return 64
+	}
+	return 64
+}
+
+// zeroValue returns the zero constant for a given type.
+func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
+	switch {
+	case irtypes.IsInt(t):
+		return constant.NewInt(t.(*irtypes.IntType), 0)
+	case irtypes.IsFloat(t):
+		return constant.NewFloat(t.(*irtypes.FloatType), 0)
+	case irtypes.IsPointer(t):
+		return constant.NewNull(t.(*irtypes.PointerType))
+	case irtypes.IsStruct(t):
+		st := t.(*irtypes.StructType)
+		fields := make([]constant.Constant, len(st.Fields))
+		for i, f := range st.Fields {
+			fields[i] = cg.zeroValue(f).(constant.Constant)
+		}
+		return constant.NewStruct(st, fields...)
+	case irtypes.IsArray(t):
+		at := t.(*irtypes.ArrayType)
+		elems := make([]constant.Constant, at.Len)
+		for i := range elems {
+			elems[i] = cg.zeroValue(at.ElemType).(constant.Constant)
+		}
+		return constant.NewArray(at, elems...)
+	}
+	return constant.NewInt(irtypes.I64, 0)
+}
+

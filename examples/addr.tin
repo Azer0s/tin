@@ -1,0 +1,27 @@
+// addr.tin — address-of (&), dereference (*), and addr() builtin
+use assert
+
+test "address-of and dereference" =
+  let x i64 = 42
+  let p *i64 = &x
+  assert::equals(*p, 42)
+  *p = 99
+  assert::equals(x, 99)
+
+test "pointer write-back" =
+  let a i64 = 1
+  let b i64 = 2
+  let pa *i64 = &a
+  let pb *i64 = &b
+  *pa = *pb
+  assert::equals(a, 2)
+
+test "addr integer to pointer" =
+  // addr(N) interprets an integer as a raw address; casting back to i64 recovers the value
+  let p *void = addr(0xDEAD)
+  let n i64 = p as i64
+  assert::equals(n, 0xDEAD)
+
+test "addr with hex literal" =
+  let p *void = addr(0xFF00)
+  assert::equals(p as i64, 0xFF00)

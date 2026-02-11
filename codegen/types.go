@@ -7,7 +7,7 @@ import (
 	irtypes "github.com/llir/llvm/ir/types"
 )
 
-// -- Type mapping
+// Type mapping
 
 // tinTypeToLLVM converts an ast.TypeExpr to an LLVM type.
 func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
@@ -67,7 +67,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if t.Name == "fn" && len(t.TypeParams) >= 1 {
 			return cg.tinTypeToLLVM(&ast.FuncType{})
 		}
-		// Generic trait instantiation (e.g. iter[i64]) → fat pointer type
+		// Generic trait instantiation (e.g. iter[i64]) -> fat pointer type
 		if td, ok := cg.traits[t.Name]; ok {
 			instKey := traitImplKey(t)
 			typeSubst := map[string]irtypes.Type{}
@@ -88,8 +88,18 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 		return cg.resolveSimpleType(t.Name)
 	case *ast.UnionTypeExpr:
-		// Simplified: use i64 for union types
-		return irtypes.I64, nil
+		// Anonymous tagged union: { i8 tag, [maxSize x i8] payload }
+		var maxSize uint64 = 1
+		for _, te := range t.Types {
+			lt, err := cg.tinTypeToLLVM(te)
+			if err != nil {
+				return nil, err
+			}
+			if sz := llvmTypeSize(lt); sz > maxSize {
+				maxSize = sz
+			}
+		}
+		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	}
 	return irtypes.I64, nil
 }
@@ -124,8 +134,8 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		// fat pointer: {i8*, i64}
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
 	case "atom":
-		// Atoms are represented as string fat-pointers at runtime
-		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
+		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
+		return cg.atomType, nil
 	case "any":
 		// fat pointer: {i8*, i32}  (type-tagged box)
 		return anyFatPtrType(), nil
@@ -177,7 +187,7 @@ const (
 	anyTagFn     = int32(5) // closure / fat function pointer
 )
 
-// -- Type size helpers
+// Type size helpers
 
 // llvmTypeSize returns the byte size of an LLVM type (approximate, for data
 // type payload sizing on a 64-bit target).
@@ -237,7 +247,7 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	return 8, 8
 }
 
-// -- Type query helpers
+// Type query helpers
 
 // isFatPtrType returns true if t is a two-field struct whose first field
 // is a pointer — i.e., a Tin fat-pointer (string, array, etc.).
@@ -300,6 +310,12 @@ func isFatFnPtr(t irtypes.Type) bool {
 	}
 	_, ok = pt.ElemType.(*irtypes.FuncType)
 	return ok
+}
+
+// isAtomType returns true if t is the %__atom named struct type { i32 }.
+func isAtomType(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	return ok && st.Name() == "__atom"
 }
 
 // typeNameOf returns the type name for a struct or empty string.

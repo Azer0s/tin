@@ -1,0 +1,43 @@
+// defer — register a call to run when the enclosing function returns.
+//
+// Key properties:
+//   - The deferred call fires on EVERY exit path, including early return.
+//   - Multiple defers in one function fire in LIFO order
+//     (last deferred runs first).
+//
+// Build:  tin build examples/defer.tin
+// Run:    tin run   examples/defer.tin
+// Test:   tin test  examples/defer.tin
+
+use mem
+use assert
+
+fn process(size i64) i64 =
+  let buf = mem::malloc(size)
+  defer mem::free(buf)      // freed when process() returns
+  if size <= 0:
+    return 0 - 1            // buf still freed here
+  return size * 2
+
+// Multiple defers: LIFO — b freed before a
+fn two_resources(n i64) i64 =
+  let a = mem::malloc(16)
+  defer mem::free(a)        // runs second
+  let b = mem::malloc(16)
+  defer mem::free(b)        // runs first
+  return n + 1
+
+echo process(8)             // 16
+echo process(-1)            // -1
+echo two_resources(10)      // 11
+
+test "defer on normal return" =
+  assert::equals(process(4), 8)
+  assert::equals(process(10), 20)
+
+test "defer on early return" =
+  assert::equals(process(-1), -1)
+  assert::equals(process(0), -1)
+
+test "multiple defers" =
+  assert::equals(two_resources(5), 6)

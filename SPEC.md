@@ -26,6 +26,27 @@ fn fib(n u32) u32 =
   where _: fib(n - 1) + fib(n - 2)
 ```
 
+## Integer literal formats
+
+Integer literals can be written in decimal, hexadecimal, octal, or binary:
+
+| Prefix | Base | Example | Value |
+|--------|------|---------|-------|
+| (none) | 10 | `255` | 255 |
+| `0x` / `0X` | 16 | `0xFF` | 255 |
+| `0o` / `0O` | 8 | `0o377` | 255 |
+| `0b` / `0B` | 2 | `0b11111111` | 255 |
+
+```rust
+let mask  i64 = 0xFF00FF     // hex
+let perms i64 = 0o755        // octal
+let flags i64 = 0b10100011   // binary
+```
+
+All integer literals are `i64` by default and coerce automatically to narrower types.
+
+---
+
 ## Language samples
 
 ```rust
@@ -254,23 +275,32 @@ for let i i8 in 1..10:
   echo "{i}"
 ```
 
-### Union types
+### Union types (tagged unions)
+
+`type` aliases over `|`-separated types create a tagged union.
+Layout: `{ i8 tag, [maxSize x i8] payload }`.
 
 ```rust
-type u = i8 | string
+type num = i64 | f64
+type strnum = string | i64
 
-let a u = 10
+let a num = 42        // tag=0 (i64)
+let b num = 3.14      // tag=1 (f64)
 
-if a is i i8:
-  echo "{i}"
-else:
-  echo "not i8"
+// is-check (no binding)
+if a is i64:
+  echo "integer"
 
+// is-check with binding
+if a is n i64:
+  echo n              // n bound as i64
+
+// type dispatch
 match a.(type):
-  case i i8:
-    echo "{i}"
-  case s string:
-    echo s
+  case n i64:
+    echo n
+  case x f64:
+    echo x
 ```
 
 ### Wrapper types
@@ -289,15 +319,23 @@ if m is None:
 
 ### Native union types
 
+`union` creates a C-style union — overlapping memory, no tag.
+Layout: `{ [maxSize x i8] storage }`.
+
 ```rust
-// this is a C union
-union u = i8 | string
-union u_named = as_i8 i8 | as_string string
+// Unnamed: access via .(Type) cast
+union raw = i32 | i64
 
-let a u = 10
+let r raw = 42
+let v i32 = r.(i32)
+let w i64 = r.(i64)
 
-let b u_named = 10
-echo b.as_string // same as b.(string)
+// Named: access via field name or .(Type)
+union color = as_i32 i32 | as_r u8
+
+let c color = 255
+let v i32 = c.as_i32
+let b u8  = c.as_r    // same memory, read as u8
 ```
 
 ### Enums
@@ -528,13 +566,43 @@ and are the form expected by `reflect` API functions:
 use reflect
 
 echo reflect::is_fn('"fn(i64)bool")      // 1
-echo reflect::fn_ret('"fn(i64,f64)bool") // 'bool
-echo reflect::elem('"*bool")             // 'bool
-echo reflect::elem('"[string]")          // 'string
+echo reflect::fn_ret('"fn(i64,f64)bool") // bool
+echo reflect::elem('"*bool")             // bool
+echo reflect::elem('"[string]")          // string
 ```
 
 Both simple and quoted atoms have type `atom` and work identically with `==`,
 `where` guards, and reflection functions.
+
+**String representation** — `echo` prints atoms with their leading apostrophe:
+
+```rust
+echo 'ok    // 'ok
+echo 'err   // 'err
+```
+
+When an atom is coerced to `string` (for comparisons or passed to an `extern`
+function declared as returning `atom`), the apostrophe is **not** included —
+the bare name is used:
+
+```rust
+assert::ok('ok == "ok")      // true — bare name comparison
+assert::equals_str('ok, "ok") // passes
+```
+
+**Runtime atom learning** — `__tin_string_to_atom` searches the compile-time
+atom table first. If the bare string is not found (e.g., it came from an
+external C function at runtime), the CRC32 is computed on the fly, the atom is
+stored in a mutex-protected linked-list table, and subsequent lookups return the
+same code (idempotent):
+
+```rust
+fn dynamic_name() atom = extern("some_c_fn_returning_char_ptr")
+
+let a = dynamic_name()
+let b = dynamic_name()
+assert::ok(a == b)            // same code, regardless of static table
+```
 
 ---
 

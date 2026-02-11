@@ -3,7 +3,7 @@
 // Wraps standard C stdlib.h / unistd.h process and environment functions
 // No extra linker flags required (all in libc)
 
-// -- Process control
+// Process control
 
 // exit terminates the process with the given status code
 // Conventionally 0 = success, non-zero = failure
@@ -15,7 +15,7 @@ fn abort() = extern("abort")
 // system runs the given shell command and returns the exit status
 fn system(cmd string) i32 = extern("system")
 
-// -- Environment
+// Environment
 
 // getenv retrieves the value of the environment variable named name
 // Returns the value as a string, or an empty string if not set
@@ -29,7 +29,7 @@ fn setenv(name string, value string, overwrite i32) i32 = extern("setenv")
 // unsetenv removes the environment variable name
 fn unsetenv(name string) i32 = extern("unsetenv")
 
-// -- Process information
+// Process information
 
 // getpid returns the process ID of the calling process
 fn getpid() i32 = extern("getpid")

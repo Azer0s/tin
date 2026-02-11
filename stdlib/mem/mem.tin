@@ -3,7 +3,7 @@
 // Wraps standard C malloc/free family and memory utilities
 // No extra linker flags required (all in libc)
 
-// -- Allocation
+// Allocation
 
 // malloc allocates size bytes and returns a pointer to the memory
 // Returns null on failure
@@ -21,7 +21,7 @@ fn realloc(ptr *void, new_size i64) *void = extern("realloc")
 // free releases memory previously allocated by malloc/calloc/realloc
 fn free(ptr *void) = extern("free")
 
-// -- Memory operations
+// Memory operations
 
 // memcpy copies n bytes from src to dst. The regions must not overlap
 fn memcpy(dst *void, src *void, n i64) *void = extern("memcpy")

@@ -8,15 +8,15 @@ import (
 	"github.com/llir/llvm/ir/value"
 )
 
-// -- Implicit conversion registry
+// Implicit conversion registry
 
-// implicitConvEntry records one implicit[T] → S conversion function.
+// implicitConvEntry records one implicit[T] -> S conversion function.
 type implicitConvEntry struct {
 	srcLLVM irtypes.Type // source type T
 	fn      *ir.Func     // static fn(T) S
 }
 
-// -- Scope
+// Scope
 
 type scopeEntry struct {
 	val     value.Value // alloca pointer (for locals) or *ir.Func (for functions)

@@ -4,10 +4,10 @@
 // Type atoms are the values returned by typeof(), fieldtypes(), etc
 //
 // Atom format:
-//   'i64              → primitive type
-//   '*point           → pointer type  (elem = 'point)
-//   '[i64]            → array type    (elem = 'i64)
-//   'fn(i64)bool      → function type (fn_arity=1, fn_param(0)='i64, fn_ret='bool)
+//   'i64              -> primitive type
+//   '*point           -> pointer type  (elem = 'point)
+//   '[i64]            -> array type    (elem = 'i64)
+//   'fn(i64)bool      -> function type (fn_arity=1, fn_param(0)='i64, fn_ret='bool)
 //
 // All functions accept atom values. Atoms coerce automatically to string/i8*
 // when passed to extern functions since they share the same fat-pointer layout

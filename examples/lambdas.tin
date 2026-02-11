@@ -3,7 +3,7 @@
 
 use assert
 
-// ── Helpers used across tests ─────────────────────────────────────────────────
+// Helpers used across tests
 
 fn apply(f fn(i64) i64, x i64) i64 = return f(x)
 
@@ -17,7 +17,7 @@ fn run_n(f fn(), n i64) =
 fn apply_void(f fn(i64), x i64) =
   f(x)
 
-// ── Multiline lambda bodies ───────────────────────────────────────────────────
+// Multiline lambda bodies
 
 test "multiline lambda" =
   let clamp = fn(x i64) i64 =
@@ -38,7 +38,7 @@ test "multiline lambda with local let" =
   assert::equals(apply(summarise, 4), 20)
   assert::equals(apply(summarise, 0), 0)
 
-// ── Void (no-return) lambdas ──────────────────────────────────────────────────
+// Void (no-return) lambdas
 
 test "void lambda can be called" =
   let noop = fn() = pass
@@ -66,7 +66,7 @@ test "void lambda closure" =
   assert::equals(apply(scaled, 5), 15)
   assert::equals(apply(scaled, 0), 0)
 
-// ── Multiline lambda as function parameter ────────────────────────────────────
+// Multiline lambda as function parameter
 
 test "multiline lambda as function param" =
   let result = apply(fn(x i64) i64 =
@@ -95,7 +95,7 @@ test "multiline lambda with if in param position" =
   , 7)
   assert::equals(result, 49)
 
-// ── Where-clause lambda bodies ────────────────────────────────────────────────
+// Where-clause lambda bodies
 
 test "where clause lambda basic" =
   let sign = fn(x i64) i64 =
@@ -123,7 +123,7 @@ test "where clause lambda as higher-order arg" =
   assert::equals(apply(abs, 7), 7)
   assert::equals(apply(abs, 0), 0)
 
-// ── pass keyword ──────────────────────────────────────────────────────────────
+// pass keyword
 
 test "pass in empty function body" =
   fn do_nothing() =
