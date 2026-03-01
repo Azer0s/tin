@@ -27,6 +27,8 @@ func printNode(n Node, depth int) string {
 		return fmt.Sprintf("%g", v.Value)
 	case *StringLit:
 		return fmt.Sprintf("%q", v.Value)
+	case *BacktickLit:
+		return "`" + v.Content + "`"
 	case *BoolLit:
 		if v.Value {
 			return "true"
@@ -98,12 +100,115 @@ func printNode(n Node, depth int) string {
 		return fmt.Sprintf("sizeof(%s)", v.Type.String())
 	case *TypeofExpr:
 		return fmt.Sprintf("typeof(%s)", printNode(v.Expr, depth))
+	case *InterpolatedString:
+		var sb strings.Builder
+		sb.WriteString("\"")
+		for _, part := range v.Parts {
+			if !part.IsExpr {
+				sb.WriteString(part.Str)
+			} else if part.Format != "" {
+				sb.WriteString("{")
+				sb.WriteString(printNode(part.Expr, 0))
+				sb.WriteString(":")
+				sb.WriteString(part.Format)
+				sb.WriteString("}")
+			} else {
+				sb.WriteString("{")
+				sb.WriteString(printNode(part.Expr, 0))
+				sb.WriteString("}")
+			}
+		}
+		sb.WriteString("\"")
+		return sb.String()
 	case *ArrayLit:
 		elems := make([]string, len(v.Elems))
 		for i, e := range v.Elems {
 			elems[i] = printNode(e, depth)
 		}
 		return fmt.Sprintf("[%s]", strings.Join(elems, ", "))
+
+	// Top-level declarations
+	case *FuncDecl:
+		params := make([]string, len(v.Params))
+		for i, p := range v.Params {
+			if p.IsVarArgs {
+				params[i] = "..."
+			} else if p.Type != nil {
+				params[i] = p.Name + " " + p.Type.String()
+			} else {
+				params[i] = p.Name
+			}
+		}
+		ret := ""
+		if v.RetType != nil {
+			ret = " " + v.RetType.String()
+		}
+		sig := fmt.Sprintf("%sfn %s(%s)%s", ind(depth), v.Name, strings.Join(params, ", "), ret)
+		if v.IsExtern != "" {
+			return sig + " = extern(\"" + v.IsExtern + "\")"
+		}
+		if v.Body != nil {
+			return sig + " =\n" + printNode(v.Body, depth+1)
+		}
+		return sig
+	case *UseDecl:
+		return fmt.Sprintf("%suse %s", ind(depth), v.Path)
+	case *ExportDecl:
+		return fmt.Sprintf("%sexport { %s } as %s", ind(depth), strings.Join(v.Names, ", "), v.AsName)
+	case *MacroDecl:
+		body := printNode(v.Body, depth+1)
+		// Name already includes trailing "!" (e.g. "square!")
+		macroName := v.Name
+		if !strings.HasSuffix(macroName, "!") {
+			macroName += "!"
+		}
+		return fmt.Sprintf("%smacro %s(%s) =\n%s", ind(depth), macroName, strings.Join(v.Params, ", "), body)
+	case *StructDecl:
+		var lines []string
+		lines = append(lines, fmt.Sprintf("%sstruct %s =", ind(depth), v.Name))
+		for _, f := range v.Fields {
+			if f.Type != nil {
+				lines = append(lines, fmt.Sprintf("%s%s %s", ind(depth+1), f.Name, f.Type.String()))
+			} else {
+				lines = append(lines, fmt.Sprintf("%s%s", ind(depth+1), f.Name))
+			}
+		}
+		for _, m := range v.Methods {
+			lines = append(lines, printNode(m, depth+1))
+		}
+		return strings.Join(lines, "\n")
+	case *EnumDecl:
+		var lines []string
+		lines = append(lines, fmt.Sprintf("%senum %s =", ind(depth), v.Name))
+		for _, m := range v.Members {
+			lines = append(lines, fmt.Sprintf("%s%s", ind(depth+1), m.Name))
+		}
+		return strings.Join(lines, "\n")
+	case *TypeDecl:
+		return fmt.Sprintf("%stype %s = %s", ind(depth), v.Name, v.Type.String())
+	case *TestDecl:
+		body := printNode(v.Body, depth+1)
+		return fmt.Sprintf("%stest %q =\n%s", ind(depth), v.Desc, body)
+	case *LambdaExpr:
+		params := make([]string, len(v.Params))
+		for i, p := range v.Params {
+			if p.IsVarArgs {
+				params[i] = "..."
+			} else if p.Type != nil {
+				params[i] = p.Name + " " + p.Type.String()
+			} else {
+				params[i] = p.Name
+			}
+		}
+		ret := ""
+		if v.RetType != nil {
+			ret = " " + v.RetType.String()
+		}
+		sig := fmt.Sprintf("fn(%s)%s", strings.Join(params, ", "), ret)
+		if v.Body != nil {
+			return sig + " => " + printNode(v.Body, 0)
+		}
+		return sig
 
 	// Statements
 	case *ExprStmt:

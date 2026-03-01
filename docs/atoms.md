@@ -1,6 +1,6 @@
 # Atoms
 
-Atoms are lightweight, globally unique symbolic values — similar to atoms in Erlang/Elixir or
+Atoms are lightweight, globally unique symbolic values  -  similar to atoms in Erlang/Elixir or
 symbols in Ruby/Lisp. They are written with a leading apostrophe:
 
 ```tin
@@ -66,7 +66,7 @@ table, then the runtime learned-atom table:
 ```llvm
 define { i8*, i64 } @__tin_atom_to_string(i32 %code) {
   ; 1. loop over @__tin_atom_table until table[i].code == %code
-  ; 2. if not found, call _tin_rt_atom_to_str(%code) — runtime learned table
+  ; 2. if not found, call _tin_rt_atom_to_str(%code)  -  runtime learned table
   ; returns {ptr, strlen(ptr)} string fat-pointer, or {null, 0} if unknown
 }
 ```
@@ -82,7 +82,7 @@ The compiler also generates `__tin_string_to_atom` for the reverse direction:
 ```llvm
 define %__atom @__tin_string_to_atom(i8* %ptr) {
   ; 1. loop over @__tin_atom_table comparing via strcmp
-  ; 2. if not found, call _tin_learn_atom(%ptr) — computes CRC32 at runtime,
+  ; 2. if not found, call _tin_learn_atom(%ptr)  -  computes CRC32 at runtime,
   ;    stores in the runtime linked-list table, returns the new code
 }
 ```
@@ -144,7 +144,7 @@ use extern {
 
 | Left | Right | Operation |
 |------|-------|-----------|
-| `atom` | `atom` | `icmp eq` on the two i32 codes — O(1) |
+| `atom` | `atom` | `icmp eq` on the two i32 codes  -  O(1) |
 | `atom` | `string` | convert atom to string, then `strcmp` |
 | `string` | `atom` | convert atom to string, then `strcmp` |
 

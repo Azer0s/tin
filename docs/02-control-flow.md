@@ -90,7 +90,7 @@ match d:
 
 ---
 
-## where — pattern matching on function arguments
+## where  -  pattern matching on function arguments
 
 `where` is a declarative alternative to `if/else` or `match` inside a
 function body. Each arm specifies a guard expression; the first arm whose
@@ -102,8 +102,8 @@ fn fib(n u32) u32 =
   where _: fib(n - 1) + fib(n - 2)
 ```
 
-- `where <guard>: <expr>` — if guard is true, return expr.
-- `where _: <expr>` — wildcard, always matches (like `default`).
+- `where <guard>: <expr>`  -  if guard is true, return expr.
+- `where _: <expr>`  -  wildcard, always matches (like `default`).
 
 `where` can replace a multi-branch function body entirely:
 
@@ -171,8 +171,8 @@ main cleanup
 Each `defer` statement pushes a lightweight thunk onto a process-global
 linked list (the **defer chain**). On a normal function return, the current
 frame's entries are popped and run inline. On `panic`, the runtime function
-`_tin_panic` walks the entire remaining chain — including entries from all
-live stack frames above the panic site — and calls each cleanup thunk before
+`_tin_panic` walks the entire remaining chain  -  including entries from all
+live stack frames above the panic site  -  and calls each cleanup thunk before
 calling `exit(1)`.
 
 Because `_tin_panic` runs as a normal C function call (without C-level stack
@@ -182,7 +182,7 @@ variables.
 
 ---
 
-## is — type narrowing for union types
+## is  -  type narrowing for union types
 
 `is` tests a union-typed value and binds the inner value if the test
 succeeds:

@@ -2,19 +2,19 @@
 use assert
 
 enum i32 direction =
-  north: 0,
-  south: 1,
-  east:  2,
-  west:  3,
+  north: 0
+  south: 1
+  east:  2
+  west:  3
 
 enum i32 day =
-  monday:    0,
-  tuesday:   1,
-  wednesday: 2,
-  thursday:  3,
-  friday:    4,
-  saturday:  5,
-  sunday:    6,
+  monday:    0
+  tuesday:   1
+  wednesday: 2
+  thursday:  3
+  friday:    4
+  saturday:  5
+  sunday:    6
 
 fn is_weekend(d day) bool =
   match d:

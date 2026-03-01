@@ -72,7 +72,7 @@ type Type struct {
 	TypeArgs   []*Type  // resolved args for a specific instantiation
 
 	// Control tags
-	Tags map[string]bool // #pure, #recurse, #noRecurse, …
+	Tags map[string]bool // #pure, #sideffect, #no_recurse, #no_thread, …
 }
 
 // FieldInfo describes a struct field

@@ -207,8 +207,15 @@ func (p *Parser) parseParam() (ast.Param, error) {
 		// Heuristic: if next token is a type token or IDENT, consume as name
 		savedPos := p.pos
 		candidate := p.advance().Literal
-		if p.match(lexer.RPAREN, lexer.COMMA, lexer.DOTDOTDOT) {
-			// only one ident - treat as type name
+		if p.check(lexer.DOTDOTDOT) {
+			// "name ..." — named variadic parameter: args ...
+			param.Name = candidate
+			param.IsVarArgs = true
+			p.advance() // consume ...
+			return param, nil
+		}
+		if p.match(lexer.RPAREN, lexer.COMMA) {
+			// only one ident followed by ) or , — treat as type name
 			p.pos = savedPos
 		} else {
 			param.Name = candidate
@@ -250,6 +257,9 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 // parseStringInterp splits a raw string literal into an AST node
 // If it contains {expr} patterns it returns an InterpolatedString,
 // otherwise a plain StringLit
+// ParseStringInterp is the exported form of parseStringInterp for use by codegen.
+func ParseStringInterp(s string) (ast.Node, error) { return parseStringInterp(s) }
+
 func parseStringInterp(s string) (ast.Node, error) {
 	if !strings.Contains(s, "{") {
 		return &ast.StringLit{Value: s}, nil
@@ -274,6 +284,13 @@ func parseStringInterp(s string) (ast.Node, error) {
 		exprSrc := s[:end]
 		s = s[end+1:]
 
+		// Split off format specifier: {expr:fmt} → exprSrc="expr", fmtSpec="fmt"
+		fmtSpec := ""
+		if colonIdx := strings.Index(exprSrc, ":"); colonIdx >= 0 {
+			fmtSpec = exprSrc[colonIdx+1:]
+			exprSrc = exprSrc[:colonIdx]
+		}
+
 		// Re-lex and re-parse the embedded expression
 		l := newInlineLexer(exprSrc)
 		toks, err := l.Tokenize()
@@ -285,7 +302,7 @@ func parseStringInterp(s string) (ast.Node, error) {
 		if err != nil {
 			return nil, fmt.Errorf("interpolation error in {%s}: %v", exprSrc, err)
 		}
-		parts = append(parts, ast.StringPart{IsExpr: true, Expr: expr})
+		parts = append(parts, ast.StringPart{IsExpr: true, Expr: expr, Format: fmtSpec})
 	}
 	if len(parts) == 1 && !parts[0].IsExpr {
 		return &ast.StringLit{Value: parts[0].Str}, nil

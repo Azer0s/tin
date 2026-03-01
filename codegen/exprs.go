@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -44,6 +45,26 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 	case *ast.StringLit:
 		return cg.buildStringFatPtr(block, e.Value), nil
+
+	case *ast.BacktickLit:
+		// Backtick literal: compile as string with backtick delimiters.
+		// If the content contains {expr} interpolations (used in CTFE macro bodies),
+		// expand them so that variable values are substituted at runtime.
+		// In non-CTFE macro context the expander unwraps this before codegen (see expandMacro).
+		if strings.Contains(e.Content, "{") {
+			node, err := parser.ParseStringInterp(e.Content)
+			if err == nil {
+				if interp, ok := node.(*ast.InterpolatedString); ok {
+					// Wrap interpolated parts with backtick delimiters.
+					parts := make([]ast.StringPart, 0, len(interp.Parts)+2)
+					parts = append(parts, ast.StringPart{Str: "`"})
+					parts = append(parts, interp.Parts...)
+					parts = append(parts, ast.StringPart{Str: "`"})
+					return cg.genInterpolatedString(block, &ast.InterpolatedString{Parts: parts})
+				}
+			}
+		}
+		return cg.buildStringFatPtr(block, "`"+e.Content+"`"), nil
 
 	case *ast.InterpolatedString:
 		return cg.genInterpolatedString(block, e)
@@ -107,6 +128,21 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return constant.NewInt(irtypes.I1, 1), nil
 
 	case *ast.DefaultExpr:
+		if e.OfExpr != nil {
+			// default(typeof(expr)): get LLVM type of inner expression, return zero for it.
+			// e.OfExpr is the TypeofExpr node; we evaluate its inner Expr to get the type.
+			inner := e.OfExpr
+			if te, ok := inner.(*ast.TypeofExpr); ok {
+				inner = te.Expr
+			}
+			val, err := cg.genExpr(block, inner)
+			if err != nil {
+				return nil, err
+			}
+			if val != nil {
+				return cg.zeroValue(val.Type()), nil
+			}
+		}
 		if e.Type != nil {
 			lt, err := cg.tinTypeToLLVM(e.Type)
 			if err != nil {
@@ -115,6 +151,35 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return cg.zeroValue(lt), nil
 		}
 		return constant.NewInt(irtypes.I64, 0), nil
+
+	case *ast.Block:
+		// Block expression: (let x = ...; ...; last_expr) — produced by CTFE macro splices.
+		// Generate all statements and return the value of the last expression.
+		curBlock := block
+		var lastVal value.Value = constant.NewInt(irtypes.I64, 0)
+		for i, stmt := range e.Stmts {
+			isLast := i == len(e.Stmts)-1
+			if isLast {
+				if es, ok := stmt.(*ast.ExprStmt); ok {
+					v, err := cg.genExpr(curBlock, es.Expr)
+					if err != nil {
+						return nil, err
+					}
+					if v != nil {
+						lastVal = v
+					}
+					continue
+				}
+			}
+			newBlock, _, err := cg.genStmt(curBlock, stmt)
+			if err != nil {
+				return nil, err
+			}
+			if newBlock != nil {
+				curBlock = newBlock
+			}
+		}
+		return lastVal, nil
 
 	case *ast.SizeofExpr:
 		if e.Type == nil {
@@ -551,6 +616,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 	switch fn := e.Func.(type) {
 	case *ast.Identifier:
+		// CTFE: evaluate #pure #no_recurse calls with constant arguments at compile time.
+		if ctfeResult, err := cg.tryEvalPureCall(e); err != nil {
+			return nil, err
+		} else if ctfeResult != nil {
+			return ctfeResult, nil
+		}
 		// Macro expansion: check before scope lookup.
 		macroName := fn.Name
 		if macro, ok := cg.macros[macroName]; ok {
@@ -573,6 +644,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// Built-in: panic(msg)
 		if fn.Name == "panic" && len(e.Args) == 1 {
 			return cg.genBuiltinPanic(block, e.Args[0])
+		}
+		// Built-in: default(TypeName) — returns the zero value for a type.
+		// Used in generic code to produce a typed zero without knowing the concrete type.
+		if fn.Name == "default" && len(e.Args) == 1 {
+			return cg.genBuiltinDefault(block, e.Args[0])
 		}
 		// Check if this is a constrained generic function call — monomorphize it.
 		if tmpl, ok := cg.constrainedFuncs[fn.Name]; ok {
@@ -623,10 +699,17 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 	case *ast.FieldAccess:
-		// Method call: obj.method(args...)
+		// Method call: obj.method(args...) or ptr->method(args...)
 		objVal, err := cg.genExpr(block, fn.Expr)
 		if err != nil {
 			return nil, err
+		}
+
+		// -> operator: dereference the pointer-to-struct to get the struct value.
+		if fn.IsPtr {
+			if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
+				objVal = block.NewLoad(pt.ElemType, objVal)
+			}
 		}
 
 		// Trait fat-pointer dispatch: if obj is {i8*, vtable*}, use vtable.
@@ -805,6 +888,10 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			if it, ok3 := baseType.(*irtypes.IntType); ok3 {
 				return constant.NewInt(it, val), nil
 			}
+			// Atom enum: wrap i32 code in %__atom struct.
+			if isAtomType(baseType) {
+				return cg.atomConstant(int32(val)), nil
+			}
 			return constant.NewInt(irtypes.I32, val), nil
 		}
 	}
@@ -952,6 +1039,19 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		}
 		return entry.val, nil
 	}
+	// For 3+ segment paths like std::math::floor, try dropping the first segment:
+	// "math.floor" after failing "std.math.floor".
+	if len(e.Path) >= 3 {
+		tail := strings.Join(e.Path[1:], ".")
+		entry, ok = cg.curScope.lookup(tail)
+		if ok {
+			if entry.isAlloc {
+				ptrType := entry.val.Type().(*irtypes.PointerType)
+				return block.NewLoad(ptrType.ElemType, entry.val), nil
+			}
+			return entry.val, nil
+		}
+	}
 	// Try last element.
 	last := e.Path[len(e.Path)-1]
 	entry, ok = cg.curScope.lookup(last)
@@ -961,6 +1061,49 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 			return block.NewLoad(ptrType.ElemType, entry.val), nil
 		}
 		return entry.val, nil
+	}
+	// Try struct static method: TypeName::method or TypeName[T]::method
+	// Scope key is "TypeName_method" (set when struct is compiled with static methods).
+	if len(e.Path) >= 2 {
+		baseName := e.Path[0]
+		typeParamStr := ""
+		if i := strings.Index(baseName, "["); i >= 0 {
+			typeParamStr = strings.TrimSuffix(baseName[i+1:], "]")
+			baseName = baseName[:i]
+		}
+		staticKey := baseName + "_" + last
+		entry, ok = cg.curScope.lookup(staticKey)
+		if ok {
+			if entry.isAlloc {
+				ptrType := entry.val.Type().(*irtypes.PointerType)
+				return block.NewLoad(ptrType.ElemType, entry.val), nil
+			}
+			return entry.val, nil
+		}
+		// On-demand monomorphization: if baseName is a generic struct template and
+		// we have a concrete type param, monomorphize now and retry.
+		if typeParamStr != "" {
+			if _, isGeneric := cg.genericStructs[baseName]; isGeneric {
+				concreteName := baseName + "__" + typeParamStr
+				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					typeParamTE := &ast.SimpleType{Name: typeParamStr}
+					synthDecl := &ast.TypeDecl{
+						Name: concreteName,
+						Type: &ast.GenericType{Name: baseName, TypeParams: []ast.TypeExpr{typeParamTE}},
+					}
+					_ = cg.genTypeDecl(synthDecl) // ignore error; best-effort
+				}
+				concreteStaticKey := concreteName + "_" + last
+				entry, ok = cg.curScope.lookup(concreteStaticKey)
+				if ok {
+					if entry.isAlloc {
+						ptrType := entry.val.Type().(*irtypes.PointerType)
+						return block.NewLoad(ptrType.ElemType, entry.val), nil
+					}
+					return entry.val, nil
+				}
+			}
+		}
 	}
 	return nil, fmt.Errorf("undefined: %s", strings.Join(e.Path, "::"))
 }
@@ -1877,6 +2020,66 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				continue
 			}
 			t := val.Type()
+
+			// If a format specifier was provided, use it directly.
+			if part.Format != "" {
+				fmtSpec := part.Format
+				lastChar := fmtSpec[len(fmtSpec)-1]
+				prefix := fmtSpec[:len(fmtSpec)-1]
+				switch lastChar {
+				case 'x', 'X', 'o', 'u':
+					// Unsigned/hex/octal integer format
+					if it, ok := t.(*irtypes.IntType); ok {
+						if it.BitSize > 32 {
+							fmtParts = append(fmtParts, "%"+prefix+"ll"+string(lastChar))
+							val = cg.coerce(block, val, irtypes.I64)
+						} else {
+							fmtParts = append(fmtParts, "%"+prefix+string(lastChar))
+							if it.BitSize < 32 {
+								val = block.NewZExt(val, irtypes.I32)
+							}
+						}
+						args = append(args, val)
+						continue
+					}
+				case 'd', 'i':
+					// Signed integer format
+					if it, ok := t.(*irtypes.IntType); ok {
+						if it.BitSize > 32 {
+							fmtParts = append(fmtParts, "%"+prefix+"ll"+string(lastChar))
+							val = cg.coerce(block, val, irtypes.I64)
+						} else {
+							fmtParts = append(fmtParts, "%"+prefix+string(lastChar))
+							if it.BitSize < 32 {
+								val = block.NewSExt(val, irtypes.I32)
+							}
+						}
+						args = append(args, val)
+						continue
+					}
+				case 'f', 'e', 'g', 'E', 'G':
+					// Floating-point format
+					fmtParts = append(fmtParts, "%"+fmtSpec)
+					if irtypes.IsFloat(t) {
+						if t != irtypes.Double {
+							val = block.NewFPExt(val, irtypes.Double)
+						}
+					} else if irtypes.IsInt(t) {
+						val = block.NewSIToFP(val, irtypes.Double)
+					}
+					args = append(args, val)
+					continue
+				case 's':
+					// String format
+					if isStringType(t) {
+						fmtParts = append(fmtParts, "%"+fmtSpec)
+						args = append(args, cg.extractStringPtr(block, val))
+						continue
+					}
+				}
+				// Unknown format specifier — fall through to default handling
+			}
+
 			switch {
 			case isStringType(t):
 				fmtParts = append(fmtParts, "%s")
@@ -1913,28 +2116,30 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 		}
 	}
 
-	// Build result string using snprintf.
+	// Build result string using snprintf with a two-pass approach:
+	//   1. snprintf(NULL, 0, fmt, ...) → returns the required length (excluding NUL).
+	//   2. malloc(len+1) → allocate exact buffer.
+	//   3. snprintf(buf, len+1, fmt, ...) → fill buffer.
+	// This avoids a fixed-size buffer and handles arbitrarily long interpolations.
 	fmtStr := strings.Join(fmtParts, "")
 	fmtPtr := cg.newGlobalString(fmtStr)
-
-	// Allocate a buffer (256 bytes for simplicity).
-	bufSize := constant.NewInt(irtypes.I64, 256)
-	malloc := cg.ensureMalloc()
-	buf := block.NewCall(malloc, bufSize)
-
-	// Declare snprintf.
 	snprintfFn := cg.ensureSnprintf()
-	snprintfArgs := []value.Value{buf, bufSize, fmtPtr}
-	snprintfArgs = append(snprintfArgs, args...)
-	block.NewCall(snprintfFn, snprintfArgs...)
+	malloc := cg.ensureMalloc()
 
-	// Return as fat pointer.
-	// We need the actual length.
-	// Simplification: use 256 as max length, then compute strlen.
-	// Actually, snprintf returns the number of chars written.
-	// Let's use that as our length.
-	written := block.NewCall(snprintfFn, snprintfArgs...)
-	writtenI64 := block.NewSExt(written, irtypes.I64)
+	// Pass 1: measure required length.
+	nullBuf := constant.NewNull(irtypes.I8Ptr)
+	sizeZero := constant.NewInt(irtypes.I64, 0)
+	measureArgs := []value.Value{nullBuf, sizeZero, fmtPtr}
+	measureArgs = append(measureArgs, args...)
+	needed := block.NewCall(snprintfFn, measureArgs...)     // i32
+	neededI64 := block.NewSExt(needed, irtypes.I64)
+	allocSize := block.NewAdd(neededI64, constant.NewInt(irtypes.I64, 1)) // +1 for NUL
+
+	// Pass 2: allocate and fill.
+	buf := block.NewCall(malloc, allocSize)
+	fillArgs := []value.Value{buf, allocSize, fmtPtr}
+	fillArgs = append(fillArgs, args...)
+	block.NewCall(snprintfFn, fillArgs...)
 
 	fatPtrType := stringFatPtrType()
 	fatAlloca := block.NewAlloca(fatPtrType)
@@ -1943,7 +2148,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	block.NewStore(buf, ptrGep)
 	lenGep := block.NewGetElementPtr(fatPtrType, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(writtenI64, lenGep)
+	block.NewStore(neededI64, lenGep)
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }
 

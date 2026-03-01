@@ -11,6 +11,12 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	tags := p.parseTags()
 	_ = tags
 
+	// If parseTags() consumed a {#tag} block, the next token is the body opener.
+	// Build the TaggedBlock using the already-parsed tags.
+	if len(tags) > 0 && p.check(lexer.LBRACE) {
+		return p.parseTaggedBlockWithTags(tags)
+	}
+
 	switch p.peek().Type {
 	case lexer.KW_LET, lexer.KW_CONST:
 		return p.parseVarDecl()
@@ -51,12 +57,12 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		}
 		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
 	case lexer.LBRACE:
-		// { #tag } { body }  tagged block
-		if p.check(lexer.LBRACE) && p.peekAt(1).Type == lexer.CONTROL_TAG {
+		// { #tag } { body }  tagged block — tags not yet parsed (legacy path)
+		if p.peekAt(1).Type == lexer.CONTROL_TAG {
 			return p.parseTaggedBlock()
 		}
 		return p.parseExprStatement()
-	case lexer.NEWLINE, lexer.DEDENT:
+	case lexer.NEWLINE, lexer.DEDENT, lexer.SEMI:
 		return nil, nil
 	default:
 		return p.parseExprStatement()
@@ -97,7 +103,7 @@ func (p *Parser) parseVarDecl() (*ast.VarDecl, error) {
 
 func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 	p.advance() // consume return
-	if p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF) {
+	if p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF, lexer.SEMI) {
 		return &ast.ReturnStmt{}, nil
 	}
 	val, err := p.parseExpr()
@@ -441,14 +447,41 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 	return mc, nil
 }
 
+// parseTaggedBlock handles { #tag } { body } when tags haven't been pre-parsed.
 func (p *Parser) parseTaggedBlock() (*ast.TaggedBlock, error) {
 	tags := p.parseTags()
+	return p.parseTaggedBlockWithTags(tags)
+}
+
+// parseTaggedBlockWithTags builds a TaggedBlock given already-parsed tags.
+// The current token must be { (the body opening brace).
+// The body can be:
+//   - Inline brace form:   { ... }
+//   - Indented brace form: {\n  ...\n} (INDENT/DEDENT inside braces)
+func (p *Parser) parseTaggedBlockWithTags(tags []string) (*ast.TaggedBlock, error) {
 	if p.check(lexer.LBRACE) {
 		p.advance()
 	}
-	var stmts []ast.Node
+	// Skip optional newline and consume INDENT if body is on the next line.
 	p.skipNewlines()
-	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+	indented := false
+	if p.check(lexer.INDENT) {
+		p.advance()
+		indented = true
+	}
+	var stmts []ast.Node
+	for {
+		p.skipNewlines()
+		if p.check(lexer.EOF) {
+			break
+		}
+		if indented && p.check(lexer.DEDENT) {
+			p.advance()
+			break
+		}
+		if !indented && p.check(lexer.RBRACE) {
+			break
+		}
 		s, err := p.parseStatement()
 		if err != nil {
 			return nil, err
@@ -456,8 +489,8 @@ func (p *Parser) parseTaggedBlock() (*ast.TaggedBlock, error) {
 		if s != nil {
 			stmts = append(stmts, s)
 		}
-		p.skipNewlines()
 	}
+	// Consume the closing brace (if present — it may have been preceded by DEDENT)
 	if p.check(lexer.RBRACE) {
 		p.advance()
 	}

@@ -98,7 +98,7 @@ let p = point{x: 3, y: 4}
 let ap any = p        // box: stores (type='point', data→copy of p)
 ```
 
-The stored type identity is exact — boxing a `rect` stores type `'rect`, not
+The stored type identity is exact  -  boxing a `rect` stores type `'rect`, not
 any base trait or generic name.
 
 ### any and extern functions
@@ -164,7 +164,7 @@ When called on an `any` value, `typeof` inspects the stored type at runtime:
 
 ```rust
 let a any = point{x: 0, y: 0}
-echo typeof(a)      // 'point — not 'any!
+echo typeof(a)      // 'point  -  not 'any!
 
 let b any = rect{w: 5, h: 3}
 echo typeof(b)      // 'rect
@@ -239,7 +239,7 @@ echo an[0]          // 'x
 ```
 
 Internal implementation fields (the leading `i32` type-ID and vtable
-pointers) are not included — only the fields visible in the source code.
+pointers) are not included  -  only the fields visible in the source code.
 
 ---
 
@@ -290,7 +290,7 @@ let u = user{id: 1, name: "Alice", bio: ""}
 
 echo fieldtag(u, "id")    // 'primary_key
 echo fieldtag(u, "name")  // 'required
-echo fieldtag(u, "bio")   // '' (empty atom — no tag)
+echo fieldtag(u, "bio")   // '' (empty atom  -  no tag)
 ```
 
 Field tags are stored in a compile-time global map and require no runtime
@@ -399,7 +399,7 @@ echo p.y    // 2
 
 ---
 
-## Field tags — `@"tag"` syntax
+## Field tags  -  `@"tag"` syntax
 
 Any field in a struct can be annotated with a string tag immediately after
 its type:
@@ -505,7 +505,7 @@ The LLVM layout is:
        field:   0          1                  2             3    4
 ```
 
-`fieldnames(rect)` returns `['w, 'h]` — only indices 3 and 4.
+`fieldnames(rect)` returns `['w, 'h]`  -  only indices 3 and 4.
 `vtableOffset("rect")` = 2, so user field index `k` lives at LLVM index
 `1 + 2 + k`.
 
@@ -527,7 +527,7 @@ value use a compile-time-generated linear `select` chain keyed on
 result = select(type_id == struct_id && field_match, boxed_field, result)
 ```
 
-All comparisons are emitted in a single basic block — no branching, no
+All comparisons are emitted in a single basic block  -  no branching, no
 function calls (apart from `strcmp` for field-name matching in `getfield`).
 
 ### Function pointer coercion

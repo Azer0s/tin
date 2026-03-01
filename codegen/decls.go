@@ -274,14 +274,70 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 		newParams[i] = ast.Param{Name: p.Name, Type: newType, IsConst: p.IsConst, IsVarArgs: p.IsVarArgs}
 	}
 	newRet := substituteTypeInTypeExpr(m.RetType, subst)
+	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 	return &ast.FuncDecl{
 		Name:     m.Name,
 		Params:   newParams,
 		RetType:  newRet,
-		Body:     m.Body,
+		Body:     newBody,
 		Tags:     m.Tags,
 		IsStatic: m.IsStatic,
 	}
+}
+
+// substituteStructNameInBody walks the AST body and replaces any StructLit
+// with TypeName == genericName to use concreteName instead.
+func substituteStructNameInBody(node ast.Node, genericName, concreteName string) ast.Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *ast.StructLit:
+		newFields := make([]ast.StructLitField, len(n.Fields))
+		for i, f := range n.Fields {
+			newFields[i] = ast.StructLitField{Name: f.Name, Value: substituteStructNameInBody(f.Value, genericName, concreteName)}
+		}
+		typeName := n.TypeName
+		if typeName == genericName {
+			typeName = concreteName
+		}
+		return &ast.StructLit{TypeName: typeName, Fields: newFields, Positional: n.Positional}
+	case *ast.Block:
+		newStmts := make([]ast.Node, len(n.Stmts))
+		for i, s := range n.Stmts {
+			newStmts[i] = substituteStructNameInBody(s, genericName, concreteName)
+		}
+		return &ast.Block{Stmts: newStmts}
+	case *ast.ReturnStmt:
+		return &ast.ReturnStmt{Value: substituteStructNameInBody(n.Value, genericName, concreteName)}
+	case *ast.VarDecl:
+		return &ast.VarDecl{Name: n.Name, Type: n.Type, Value: substituteStructNameInBody(n.Value, genericName, concreteName), IsConst: n.IsConst}
+	case *ast.IfStmt:
+		newIf := *n
+		newIf.Cond = substituteStructNameInBody(n.Cond, genericName, concreteName)
+		if n.Then != nil {
+			if b, ok := substituteStructNameInBody(n.Then, genericName, concreteName).(*ast.Block); ok {
+				newIf.Then = b
+			}
+		}
+		if n.Else != nil {
+			if b, ok := substituteStructNameInBody(n.Else, genericName, concreteName).(*ast.Block); ok {
+				newIf.Else = b
+			}
+		}
+		return &newIf
+	case *ast.CallExpr:
+		newArgs := make([]ast.Node, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = substituteStructNameInBody(a, genericName, concreteName)
+		}
+		return &ast.CallExpr{Func: substituteStructNameInBody(n.Func, genericName, concreteName), Args: newArgs}
+	case *ast.BinExpr:
+		return &ast.BinExpr{Left: substituteStructNameInBody(n.Left, genericName, concreteName), Op: n.Op, Right: substituteStructNameInBody(n.Right, genericName, concreteName)}
+	case *ast.FieldAccess:
+		return &ast.FieldAccess{Expr: substituteStructNameInBody(n.Expr, genericName, concreteName), Field: n.Field, IsPtr: n.IsPtr}
+	}
+	return node
 }
 
 // genTypeDecl handles "type X = SomeType [override = ...]" declarations.
@@ -824,6 +880,10 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 }
 
 func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
+	// Idempotent: skip if already registered (can be called from preregister AND pass 3).
+	if _, alreadyDone := cg.enumTypes[n.Name]; alreadyDone {
+		return nil
+	}
 	// Determine base LLVM type.
 	var baseType irtypes.Type = irtypes.I32
 	if n.BaseType != nil {

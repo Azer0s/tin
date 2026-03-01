@@ -10,6 +10,7 @@ import (
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 )
@@ -419,6 +420,27 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 			return fmt.Errorf("use %s: %s: %w", pkgPath, fd.Name, compErr)
+		}
+	}
+
+	// Pass 4: register exported constants (VarDecl with IsConst=true and literal values).
+	for _, node := range prog.Stmts {
+		vd, ok := node.(*ast.VarDecl)
+		if !ok || !vd.IsConst || !exportedNames[vd.Name] {
+			continue
+		}
+		var constVal value.Value
+		switch lit := vd.Value.(type) {
+		case *ast.FloatLit:
+			constVal = constant.NewFloat(irtypes.Double, lit.Value)
+		case *ast.IntLit:
+			constVal = constant.NewInt(irtypes.I64, lit.Value)
+		}
+		if constVal != nil {
+			entry := &scopeEntry{val: constVal, isAlloc: false}
+			cg.curScope.set(vd.Name, entry)
+			prevScope.set(pkgName+"."+vd.Name, entry)
+			prevScope.set(pkgName+"::"+vd.Name, entry)
 		}
 	}
 

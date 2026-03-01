@@ -176,7 +176,7 @@ Failure messages include the expected and actual values.
 ## Full example
 
 ```rust
-// test_example.tin — demonstrates test blocks and the assert library
+// test_example.tin  -  demonstrates test blocks and the assert library
 
 use assert
 

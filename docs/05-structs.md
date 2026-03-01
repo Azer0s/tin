@@ -47,7 +47,7 @@ Methods are called with dot notation: `value.method(args)`.
 
 ---
 
-## fn init — initializer
+## fn init  -  initializer
 
 If a struct defines `fn init(this S)`, it is called **automatically** every
 time a struct literal is evaluated. It is used for setup side-effects (logging,
@@ -175,7 +175,7 @@ let nums = int_pair{10, 20}
 echo nums.show()           // first: 10, second: 20
 ```
 
-### override — replace inherited methods
+### override  -  replace inherited methods
 
 `override` lets you replace specific methods from the template:
 

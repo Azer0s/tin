@@ -54,6 +54,12 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 	f := cg.mod.NewFunc(cName, retType, params...)
 	f.Sig.Variadic = variadic
 	f.Blocks = nil
+	// Track that this IR name is a C extern symbol so that Tin user functions
+	// with the same name can be mangled to avoid redefinition conflicts.
+	if cg.externIRNames == nil {
+		cg.externIRNames = map[string]bool{}
+	}
+	cg.externIRNames[cName] = true
 	return f
 }
 

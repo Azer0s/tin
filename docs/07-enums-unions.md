@@ -137,10 +137,10 @@ tag for runtime type checks.
 
 ## Native C unions (`union`)
 
-`union` maps directly to a C union — all variants share the same memory with
+`union` maps directly to a C union  -  all variants share the same memory with
 no tag. Use this for FFI or when you need to manually reinterpret bytes.
 
-**Memory layout:** `{ [maxSize x i8] storage }` — a single byte array.
+**Memory layout:** `{ [maxSize x i8] storage }`  -  a single byte array.
 
 ### Unnamed union
 
@@ -170,7 +170,7 @@ let v i32 = c.as_i32    // read storage as i32
 let b u8  = c.as_r      // read same storage as u8
 ```
 
-> Native unions have no tag — reading from the "wrong" field returns
+> Native unions have no tag  -  reading from the "wrong" field returns
 > reinterpreted bytes. Use `data` or tagged unions for safe alternatives.
 
 ---

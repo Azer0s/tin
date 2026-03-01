@@ -215,8 +215,33 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 		}
 		return &ast.Block{}, nil
 	}
-	// Single expression / statement on same line
-	return p.parseStatement()
+	// Single expression / statement on same line — may be SEMI-separated multi-statement
+	first, err := p.parseStatement()
+	if err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.SEMI) {
+		return first, nil
+	}
+	// Multiple statements separated by semicolons on one line: wrap in a Block
+	var stmts []ast.Node
+	if first != nil {
+		stmts = append(stmts, first)
+	}
+	for p.check(lexer.SEMI) {
+		p.advance() // consume SEMI
+		if p.check(lexer.NEWLINE) || p.check(lexer.EOF) || p.check(lexer.DEDENT) {
+			break
+		}
+		stmt, err2 := p.parseStatement()
+		if err2 != nil {
+			return nil, err2
+		}
+		if stmt != nil {
+			stmts = append(stmts, stmt)
+		}
+	}
+	return &ast.Block{Stmts: stmts}, nil
 }
 
 // parseWhereBlock consumes INDENT, parses where clauses, consumes DEDENT
@@ -294,7 +319,7 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	}
 	b := &ast.Block{}
 	_ = pos
-	p.skipNewlines()
+	p.skipSemisAndNewlines()
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 		stmt, err := p.parseStatement()
 		if err != nil {
@@ -303,7 +328,7 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 		if stmt != nil {
 			b.Stmts = append(b.Stmts, stmt)
 		}
-		p.skipNewlines()
+		p.skipSemisAndNewlines()
 	}
 	if p.check(lexer.DEDENT) {
 		p.advance()

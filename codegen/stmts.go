@@ -410,6 +410,15 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		llType = irtypes.I64
 	}
 
+	// If llType is the i64 fallback (unresolved generic/alias) and the init
+	// value has a concrete struct type, use the init value's type instead.
+	// This handles: let t GenericType = expr  where GenericType resolves to a concrete struct.
+	if initVal != nil && llType.Equal(irtypes.I64) {
+		if _, isStruct := initVal.Type().(*irtypes.StructType); isStruct {
+			llType = initVal.Type()
+		}
+	}
+
 	alloca := block.NewAlloca(llType)
 	isRC := isRCTrackedType(llType)
 	if initVal != nil {
@@ -695,6 +704,64 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	return fnI8, envI8, nil
 }
 
+// genBuiltinDefault implements default(TypeName) — returns the zero/null value
+// for the given type. Works on numeric types, booleans, floats, pointers, and
+// struct types. Used in generic code: `default(t)` where `t` is a type param
+// that has been monomorphized to a concrete type before this is called.
+func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value, error) {
+	// Handle default(typeof(expr)): generate expr to discover its LLVM type,
+	// then return the zero value for that type. The generated code for the
+	// inner expression is dead but LLVM will optimise it away.
+	if call, ok := arg.(*ast.CallExpr); ok {
+		if fnId, ok2 := call.Func.(*ast.Identifier); ok2 && fnId.Name == "typeof" && len(call.Args) == 1 {
+			val, err := cg.genExpr(block, call.Args[0])
+			if err != nil {
+				return nil, err
+			}
+			return cg.zeroValue(val.Type()), nil
+		}
+	}
+
+	// The argument is a type used as an expression — typically an Identifier.
+	var typeExpr ast.TypeExpr
+	switch a := arg.(type) {
+	case *ast.Identifier:
+		typeExpr = &ast.SimpleType{Name: a.Name}
+	default:
+		return constant.NewInt(irtypes.I64, 0), nil
+	}
+	llvmType, err := cg.tinTypeToLLVM(typeExpr)
+	if err != nil {
+		return constant.NewInt(irtypes.I64, 0), nil
+	}
+	switch t := llvmType.(type) {
+	case *irtypes.IntType:
+		return constant.NewInt(t, 0), nil
+	case *irtypes.FloatType:
+		return constant.NewFloat(t, 0), nil
+	case *irtypes.PointerType:
+		return constant.NewNull(t), nil
+	case *irtypes.StructType:
+		// Zero-initialise each field.
+		fields := make([]constant.Constant, len(t.Fields))
+		for i, f := range t.Fields {
+			switch ft := f.(type) {
+			case *irtypes.IntType:
+				fields[i] = constant.NewInt(ft, 0)
+			case *irtypes.FloatType:
+				fields[i] = constant.NewFloat(ft, 0)
+			case *irtypes.PointerType:
+				fields[i] = constant.NewNull(ft)
+			default:
+				fields[i] = constant.NewUndef(ft)
+			}
+		}
+		return constant.NewStruct(t, fields...), nil
+	default:
+		return constant.NewUndef(llvmType), nil
+	}
+}
+
 // panic builtin
 
 // genBuiltinPanic implements panic(msg): runs the runtime defer chain and
@@ -727,6 +794,14 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		body = es.Expr
 	}
 	expanded := substituteMacroNode(body, subst)
+	// Backtick literal body: parse the content as tin source and expand that instead.
+	if btl, ok := expanded.(*ast.BacktickLit); ok {
+		node, err := parseExprString(btl.Content)
+		if err != nil {
+			return nil, fmt.Errorf("macro %s: backtick parse error: %v", macro.Name, err)
+		}
+		return cg.genExpr(block, node)
+	}
 	return cg.genExpr(block, expanded)
 }
 
@@ -913,7 +988,8 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) error {
 	switch s.Op {
 	case "+=":
 		if pt, ok := elemType.(*irtypes.PointerType); ok {
-			result = block.NewGetElementPtr(pt.ElemType, current, rhs)
+			idx := cg.coerce(block, rhs, irtypes.I64)
+			result = block.NewGetElementPtr(pt.ElemType, current, idx)
 		} else if irtypes.IsFloat(elemType) {
 			result = block.NewFAdd(current, rhs)
 		} else {
@@ -921,7 +997,8 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) error {
 		}
 	case "-=":
 		if pt, ok := elemType.(*irtypes.PointerType); ok {
-			neg := block.NewSub(constant.NewInt(irtypes.I64, 0), rhs)
+			idx := cg.coerce(block, rhs, irtypes.I64)
+			neg := block.NewSub(constant.NewInt(irtypes.I64, 0), idx)
 			result = block.NewGetElementPtr(pt.ElemType, current, neg)
 		} else if irtypes.IsFloat(elemType) {
 			result = block.NewFSub(current, rhs)
@@ -1145,6 +1222,15 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*i
 	if s.Init != nil {
 		var err error
 		block, _, err = cg.genStmt(block, s.Init)
+		if err != nil {
+			return nil, err
+		}
+	} else if s.VarName != "" && s.VarType != nil {
+		// C-style for without explicit initializer: `for let i T; cond; post:`
+		// Declare the loop variable zero-initialized so it is in scope.
+		zeroDecl := &ast.VarDecl{Name: s.VarName, Type: s.VarType}
+		var err error
+		block, err = cg.genVarDecl(block, zeroDecl)
 		if err != nil {
 			return nil, err
 		}
@@ -1400,8 +1486,18 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 		}
 	}
 
-	// Build switch.
-	switchExpr := cg.coerce(block, expr, irtypes.I64)
+	// Build switch. Use the natural type of the expression so case constants
+	// always match the switch condition type (avoids i32 case vs i64 switch mismatch).
+	switchExpr := expr
+	switchType := expr.Type()
+	// Re-build cases using the actual switch expression type so they match.
+	for i, origCase := range cases {
+		if constX, ok := origCase.X.(constant.Constant); ok {
+			if target, ok2 := origCase.Target.(*ir.Block); ok2 {
+				cases[i] = ir.NewCase(cg.toConstInt(constX, switchType), target)
+			}
+		}
+	}
 	block.NewSwitch(switchExpr, defaultBlock, cases...)
 
 	// Generate case bodies.

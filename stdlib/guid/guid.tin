@@ -1,0 +1,17 @@
+// stdlib/guid — pseudo-GUID generation
+//
+// Generates a random GUID-like string using libc rand().
+// Note: not cryptographically secure. Seed with srand() for varied output.
+// No extra linker flags required (all in libc).
+
+fn rand() i32 = extern("rand")
+
+// new returns a pseudo-random unique identifier string in GUID format
+fn new() string =
+  let a = rand()
+  let b = rand()
+  let c = rand()
+  let d = rand()
+  return "{a:08x}-{b:04x}-4{c:03x}-8{d:03x}-{a:08x}{b:08x}"
+
+export { new } as guid

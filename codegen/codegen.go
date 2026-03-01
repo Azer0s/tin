@@ -136,6 +136,14 @@ type CodeGen struct {
 	// macros: macro name -> MacroDecl AST
 	macros map[string]*ast.MacroDecl
 
+	// funcDecls: function name -> FuncDecl AST, populated during predeclaration.
+	// Used by the #pure transitive side-effect checker.
+	funcDecls map[string]*ast.FuncDecl
+
+	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
+	// Used to detect collisions when a Tin user function has the same name as a C symbol.
+	externIRNames map[string]bool
+
 	// linkLibs: libraries to pass to the linker (from `use extern` lib entries)
 	linkLibs []string
 
@@ -215,6 +223,7 @@ func New(filename string) *CodeGen {
 		genericDataDecls:         make(map[string]*ast.DataDecl),
 		dataVariantTags:          make(map[string]int8),
 		macros:                   make(map[string]*ast.MacroDecl),
+		funcDecls:                make(map[string]*ast.FuncDecl),
 		structTypeIDs:            make(map[string]int32),
 		dataTypeIDs:              make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
@@ -310,6 +319,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Pre-pass 1.5: collect C extern symbol names BEFORE predeclaring Tin user
+	// functions. This allows predeclareFuncAs to detect collisions and mangle
+	// Tin wrapper names (e.g. `fn printf(...)` → IR `@_tin__printf`) to avoid
+	// redefinition conflicts with C externs declared in the same source file.
+	if cg.externIRNames == nil {
+		cg.externIRNames = map[string]bool{}
+	}
+	for _, node := range prog.Stmts {
+		if fd, ok := node.(*ast.FuncDecl); ok && fd.IsExtern != "" {
+			cg.externIRNames[fd.IsExtern] = true
+		}
+	}
+
 	// Second pass: pre-declare all functions (signatures only) so forward calls work.
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok {
@@ -318,6 +340,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		}
 		if sd, ok := node.(*ast.StructDecl); ok {
+			// Skip method predeclaration for generic struct templates — methods
+			// will be compiled on demand when the concrete type is instantiated.
+			if len(sd.TypeParams) > 0 {
+				continue
+			}
 			aug := cg.augmentStructFromTraits(sd)
 			for _, m := range aug.Methods {
 				if err := cg.predeclareMethod(aug.Name, m); err != nil {
@@ -325,6 +352,16 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				}
 			}
 		}
+	}
+
+	// Validate #pure functions: transitive side-effect check.
+	// Validate #no_recurse functions: transitive call-graph cycle check.
+	// Both run after predeclaration so all function signatures and tags are known.
+	if err := cg.checkAllPureFuncs(); err != nil {
+		return nil, err
+	}
+	if err := cg.checkAllNoRecurseFuncs(); err != nil {
+		return nil, err
 	}
 
 	// Third pass: generate full function bodies and other declarations.
@@ -426,8 +463,28 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if !hasMain {
 			wf := cg.mod.NewFunc("main", irtypes.I32)
 			wb := wf.NewBlock("entry")
-			wb.NewCall(userMainFn)
-			wb.NewRet(constant.NewInt(irtypes.I32, 0))
+			// Build zero-value args for each parameter of _tin_user_main.
+			var callArgs []value.Value
+			for _, p := range userMainFn.Params {
+				callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
+			}
+			retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
+			if retIsVoid {
+				wb.NewCall(userMainFn, callArgs...)
+				wb.NewRet(constant.NewInt(irtypes.I32, 0))
+			} else {
+				ret := wb.NewCall(userMainFn, callArgs...)
+				// Coerce return value to i32 if needed.
+				var retVal value.Value = ret
+				if !ret.Type().Equal(irtypes.I32) {
+					if ret.Type().Equal(irtypes.I64) {
+						retVal = wb.NewTrunc(ret, irtypes.I32)
+					} else {
+						retVal = constant.NewInt(irtypes.I32, 0)
+					}
+				}
+				wb.NewRet(retVal)
+			}
 		}
 	}
 
@@ -437,6 +494,21 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Write module file for any package exports in this source file.
 	if err := cg.writeModuleFiles(prog); err != nil {
 		return nil, err
+	}
+
+	// If no main function was generated (e.g. export-only module), emit a
+	// trivial no-op main so the binary links successfully.
+	hasMain := false
+	for _, f := range cg.mod.Funcs {
+		if f.Name() == "main" {
+			hasMain = true
+			break
+		}
+	}
+	if !hasMain {
+		wf := cg.mod.NewFunc("main", irtypes.I32)
+		wb := wf.NewBlock("entry")
+		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
 	return cg.mod, nil

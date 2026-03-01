@@ -12,13 +12,81 @@ import (
 
 // Parser holds the token stream and current position
 type Parser struct {
-	tokens []lexer.Token
-	pos    int
+	tokens         []lexer.Token
+	pos            int
+	noParensMacros map[string]string // macro name → backtick expansion body
 }
 
 // New creates a Parser over the given token slice
 func New(tokens []lexer.Token) *Parser {
-	return &Parser{tokens: tokens}
+	p := &Parser{tokens: tokens, noParensMacros: map[string]string{}}
+	p.collectNoParensMacros()
+	return p
+}
+
+// collectNoParensMacros performs a first-pass scan to find all macro declarations
+// tagged with #no_parens and records their backtick expansion body.
+// It does not advance p.pos — it uses a local index only.
+func (p *Parser) collectNoParensMacros() {
+	for i := 0; i < len(p.tokens); i++ {
+		if p.tokens[i].Type != lexer.KW_MACRO {
+			continue
+		}
+		// Expect: macro { #... no_parens ... } NAME ( ) = NEWLINE INDENT return BACKTICK_LIT
+		j := i + 1
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.LBRACE {
+			continue
+		}
+		j++ // skip {
+		hasNoParens := false
+		for j < len(p.tokens) && p.tokens[j].Type != lexer.RBRACE {
+			if p.tokens[j].Type == lexer.CONTROL_TAG && p.tokens[j].Literal == "no_parens" {
+				hasNoParens = true
+			}
+			j++
+		}
+		if !hasNoParens || j >= len(p.tokens) {
+			continue
+		}
+		j++ // skip }
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.IDENT {
+			continue
+		}
+		macroName := p.tokens[j].Literal
+		j++
+		// Optional ! suffix on macro name
+		if j < len(p.tokens) && p.tokens[j].Type == lexer.NOT {
+			j++
+		}
+		// () — zero-arg macro
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.LPAREN {
+			continue
+		}
+		j++
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.RPAREN {
+			continue
+		}
+		j++
+		// = NEWLINE INDENT return BACKTICK_LIT
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.ASSIGN {
+			continue
+		}
+		j++
+		// skip newlines/indent
+		for j < len(p.tokens) && (p.tokens[j].Type == lexer.NEWLINE || p.tokens[j].Type == lexer.INDENT) {
+			j++
+		}
+		// Expect: return BACKTICK_LIT   (simple case)
+		// Also handle: just BACKTICK_LIT if body is a single expression
+		if j < len(p.tokens) && p.tokens[j].Type == lexer.KW_RETURN {
+			j++
+		}
+		if j >= len(p.tokens) || p.tokens[j].Type != lexer.BACKTICK_LIT {
+			continue
+		}
+		expansion := p.tokens[j].Literal
+		p.noParensMacros[macroName] = expansion
+	}
 }
 
 // Navigation helpers
@@ -72,6 +140,12 @@ func (p *Parser) skipNewlines() {
 	}
 }
 
+func (p *Parser) skipSemisAndNewlines() {
+	for p.check(lexer.NEWLINE) || p.check(lexer.SEMI) {
+		p.advance()
+	}
+}
+
 // skipWhitespace skips NEWLINE, INDENT, and DEDENT tokens
 // Use this inside parenthesised lists where indentation is not significant
 func (p *Parser) skipWhitespace() {
@@ -95,7 +169,7 @@ func (p *Parser) errorf(f string, a ...any) error {
 // Parse builds and returns the complete AST for the token stream
 func (p *Parser) Parse() (*ast.Program, error) {
 	prog := &ast.Program{}
-	p.skipNewlines()
+	p.skipSemisAndNewlines()
 	for !p.check(lexer.EOF) {
 		node, err := p.parseTopLevel()
 		if err != nil {
@@ -104,7 +178,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 		if node != nil {
 			prog.Stmts = append(prog.Stmts, node)
 		}
-		p.skipNewlines()
+		p.skipSemisAndNewlines()
 	}
 	return prog, nil
 }
@@ -121,6 +195,12 @@ func (p *Parser) ParseExpr() (ast.Node, error) {
 func (p *Parser) parseTopLevel() (ast.Node, error) {
 	// Collect leading control tags: fn{#pure #recurse} …
 	tags := p.parseTags()
+
+	// If parseTags() consumed a {#tag} block, the next token must be a body brace
+	// for a tagged block statement.
+	if len(tags) > 0 && p.check(lexer.LBRACE) {
+		return p.parseTaggedBlockWithTags(tags)
+	}
 
 	switch p.peek().Type {
 	case lexer.KW_FN:
@@ -151,6 +231,28 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 	case lexer.DEDENT:
 		p.advance() // consume stray DEDENT at top level (from multiline function bodies)
 		return nil, nil
+	case lexer.IDENT:
+		// Check if this identifier is a #no_parens macro name.
+		// If so, expand the macro by injecting its backtick expansion as prefix tokens
+		// before the rest of the declaration.
+		if expansion, ok := p.noParensMacros[p.peek().Literal]; ok {
+			p.advance() // consume macro name
+			expToks, err := lexer.New(expansion).Tokenize()
+			if err != nil {
+				return nil, fmt.Errorf("no_parens macro expansion tokenize error: %v", err)
+			}
+			// Remove trailing EOF from expansion tokens
+			for len(expToks) > 0 && expToks[len(expToks)-1].Type == lexer.EOF {
+				expToks = expToks[:len(expToks)-1]
+			}
+			// Inject expansion tokens before current position
+			newToks := make([]lexer.Token, 0, len(expToks)+len(p.tokens)-p.pos)
+			newToks = append(newToks, expToks...)
+			newToks = append(newToks, p.tokens[p.pos:]...)
+			p.tokens = append(p.tokens[:p.pos], newToks...)
+			return p.parseTopLevel()
+		}
+		return p.parseStatement()
 	default:
 		return p.parseStatement()
 	}

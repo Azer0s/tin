@@ -81,9 +81,10 @@ type TraitDecl struct {
 	base
 	Name          string
 	TypeParams    []string
-	Methods       []*FuncDecl  // virtual or default methods
+	Methods       []*FuncDecl   // virtual or default methods
 	ForwardFields []StructField // "s size_t forward" – injected into implementing structs
 	IsAlias       bool
+	IsStaticAlias bool     // "trait[k] T[t] as static fn(val t) k"
 	AliasType     TypeExpr // "trait print as fn() [char]"
 }
 
@@ -437,6 +438,14 @@ type StringLit struct {
 	Value string
 }
 
+// BacktickLit is a code-splice literal: `expr`.
+// In macro context it expands to the parsed tin expression/identifier inside the backticks.
+// Outside macros it compiles to a string constant with the backtick delimiters preserved.
+type BacktickLit struct {
+	base
+	Content string // raw source between the backticks
+}
+
 type CharLit struct {
 	base
 	Value byte
@@ -458,7 +467,8 @@ type WildcardExpr struct{ base } // "_" in where/match patterns
 
 type DefaultExpr struct {
 	base
-	Type TypeExpr
+	Type   TypeExpr
+	OfExpr Node // non-nil: derive zero value from this expression's compile-time type
 }
 
 // Helper types
@@ -527,6 +537,7 @@ type StringPart struct {
 	IsExpr bool
 	Str    string // if !IsExpr
 	Expr   Node   // if IsExpr
+	Format string // printf-style specifier without leading %, e.g. "08x", ".2f" (empty = default)
 }
 
 // Type expressions

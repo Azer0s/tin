@@ -191,7 +191,7 @@ fn compose(f fn(i64) i64, g fn(i64) i64) fn(i64) i64 =
 ## The `pass` keyword
 
 `pass` is an explicit no-op statement. It is used to fill a block that would
-otherwise be empty — in function bodies, lambda bodies, `if`/`else` branches,
+otherwise be empty  -  in function bodies, lambda bodies, `if`/`else` branches,
 and loop bodies:
 
 ```rust
@@ -290,7 +290,7 @@ Variadic parameters are typically used with `extern` C functions.
 
 ## Static methods
 
-A struct method can be declared `static` — it does not receive a `this`
+A struct method can be declared `static`  -  it does not receive a `this`
 parameter and is called as `StructName.methodName(args)`:
 
 ```rust
