@@ -28,17 +28,21 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	typeParams, _ := p.parseTypeParams()
 
 	// Optional trait implementations: struct Foo(TraitA, TraitB[T]) =
+	// The list may span multiple lines; newlines inside parens are ignored.
 	var impls []ast.TypeExpr
 	if p.check(lexer.LPAREN) {
 		p.advance()
+		p.skipWhitespace()
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			ti, err2 := p.parseTypeExpr()
 			if err2 != nil {
 				return nil, err2
 			}
 			impls = append(impls, ti)
+			p.skipWhitespace()
 			if p.check(lexer.COMMA) {
 				p.advance()
+				p.skipWhitespace()
 			}
 		}
 		if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
@@ -140,9 +144,14 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 	_ = traitTypeParams
 
 	// "trait print as fn() [char]"
+	// "trait[k] implicit[t] as static fn(val t) k"
 	if p.check(lexer.KW_AS) {
 		p.advance()
 		decl.IsAlias = true
+		if p.check(lexer.KW_STATIC) {
+			p.advance() // consume "static"
+			decl.IsStaticAlias = true
+		}
 		decl.AliasType, err = p.parseTypeExpr()
 		if err != nil {
 			return nil, err

@@ -7,7 +7,7 @@ echo "Hello, world!"
 ```
 
 `echo` is a built-in statement that prints its argument followed by a newline.
-It works with any type — strings, integers, floats, booleans, and structs.
+It works with any type  -  strings, integers, floats, booleans, and structs.
 
 ---
 
@@ -44,10 +44,10 @@ Integer literals can be written in decimal, hexadecimal, octal, or binary:
 
 | Prefix | Base | Example | Decimal value |
 |--------|------|---------|---------------|
-| (none) | 10 — decimal | `255` | 255 |
-| `0x` / `0X` | 16 — hexadecimal | `0xFF` | 255 |
-| `0o` / `0O` | 8 — octal | `0o377` | 255 |
-| `0b` / `0B` | 2 — binary | `0b11111111` | 255 |
+| (none) | 10  -  decimal | `255` | 255 |
+| `0x` / `0X` | 16  -  hexadecimal | `0xFF` | 255 |
+| `0o` / `0O` | 8  -  octal | `0o377` | 255 |
+| `0b` / `0B` | 2  -  binary | `0b11111111` | 255 |
 
 ```rust
 let mask  i64 = 0xFF00FF        // hex
@@ -158,6 +158,33 @@ struct point =
 
 let p = point{x: 3, y: 4}
 echo "point: ({p.x}, {p.y})"          // point: (3, 4)
+```
+
+### Format specifiers
+
+A `:` inside `{}` introduces a printf-style format specifier:
+
+```rust
+let n u32 = 255
+echo "{n:08x}"     // 000000ff  (8-wide zero-padded hex)
+echo "{n:d}"       // 255       (signed decimal)
+echo "{n:u}"       // 255       (unsigned decimal)
+
+let f f64 = 3.14159
+echo "{f:.2f}"     // 3.14      (2 decimal places)
+echo "{f:e}"       // 3.141590e+00
+```
+
+Supported specifiers: `d` / `i` (signed int), `u` / `x` / `X` / `o` (unsigned/hex/octal), `f` / `e` / `g` and their uppercase variants (float), `s` (string). A width or precision prefix (e.g. `08`, `.2`) may precede the letter.
+
+---
+
+## Statement separators
+
+Statements can be separated by newlines (the default) or by semicolons on the same line:
+
+```rust
+let x = 1; let y = 2; echo x + y   // 3
 ```
 
 ---

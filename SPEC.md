@@ -116,7 +116,13 @@ echo pPtr->show()
 ```
 
 ```rust
-let pete *person = malloc(sizeof(person)).(*person)
+use mem
+
+struct person =
+  name string
+  age u8
+
+let pete *person = mem::calloc(1, sizeof(person)).(*person)
 (*pete).name = "Pete"
 (*pete).age = 20
 ```
@@ -202,7 +208,7 @@ fn write_string(color i32, s string) =
 type size_t = u32
 
 use extern (
-  // extern functions are always marked as #sideEffectful
+  // extern functions are always marked as #sideffect
   strlen as fn(const *char) size_t,
 )
 
@@ -235,7 +241,7 @@ struct{ #pure@fn #const@field } str(size, print,
   // Alias trait implementations use fn ::traitName.
   static fn ::implicit[[char]](val [char]) str =
     let len size_t = 0
-    { #ignoreSideEffectful } {
+    { #allow_sideffect } {
       len = strlen(val)
     }
     return str{v: val, s: len}
@@ -259,7 +265,7 @@ struct{ #pure@fn #const@field } str(size, print,
 
   fn for_each(this str, f fn(c char)) =
     for let i size_t = 0; i < this.s; i++:
-      { #ignoreSideEffectful } { f(this.v[i]) }
+      { #allow_sideffect } { f(this.v[i]) }
 
 let h str = "Hello world"
 echo h
@@ -319,7 +325,7 @@ if m is None:
 
 ### Native union types
 
-`union` creates a C-style union — overlapping memory, no tag.
+`union` creates a C-style union  -  overlapping memory, no tag.
 Layout: `{ [maxSize x i8] storage }`.
 
 ```rust
@@ -342,10 +348,10 @@ let b u8  = c.as_r    // same memory, read as u8
 
 ```rust
 enum i32 weather =
-  sunny: 0,
-  rainy: 1,
-  foggy: 2,
-  clear: 3,
+  sunny: 0
+  rainy: 1
+  foggy: 2
+  clear: 3
 
 let w weather = weather.sunny
 
@@ -358,8 +364,8 @@ match w:
     echo "there is weather"
 
 enum slider_type = // takes the smallest integer type possible (u8 here)
-  horizontal,
-  vertical,
+  horizontal
+  vertical
 ```
 
 ### Packages & exports
@@ -403,35 +409,91 @@ fn malloc_zeroed(s size_t) *void =
 
 ### Control tags
 
-```rust
-fn{#pure #recurse} fib(n u32) u32 =
-  where n <= 1: n
-  where _: fib(n - 1) + fib(n - 2)
+Tags are written in lowercase with underscores (`#tag_name`) and describe the
+**capability or property** of the annotated construct. Syntax: `fn{#tag} name(…)`.
 
-echo fib(10) // calculated at compile time
+#### `#pure`  -  no observable side effects (enforced)
+
+The compiler transitively verifies that the function contains no `echo` and
+calls no `#sideffect` or extern functions, unless wrapped in a `#allow_sideffect` block.
+
+```rust
+fn{#pure} square(n i64) i64 = return n * n
+fn{#pure} dist_sq(x i64, y i64) i64 = return square(x) + square(y)
+
+fn{#pure} bad() i64 =
+  echo "oops"   // compile error: #pure violation  -  echo is a side effect
+  return 1
 ```
 
-```rust
-fn{#noRecurse} foo() =
-  foo()
+#### `#sideffect`  -  declares observable side effects
 
-// this will fail to compile
+Advisory tag. Extern C functions are automatically tagged `#sideffect`.
+Calling a `#sideffect` function from a `#pure` function is a compile error.
+
+```rust
+fn{#sideffect} log(msg string) = extern("c_log")  // auto-tagged #sideffect
+
+fn{#pure} read_only() i64 =
+  log("hi")   // compile error: #pure violation  -  calls #sideffect function "log"
+  return 42
 ```
 
+#### `#allow_sideffect`  -  escape hatch inside a `#pure` function
+
+A tagged block `{ #allow_sideffect } { … }` suppresses purity checks for its body,
+allowing side effects in an otherwise pure function.
+
 ```rust
-macro{#noExcl #noParens} proc() =
-  return `fn{#pure #recurse #noThread}`
+fn{#pure} mostly_pure(n i64) i64 =
+  { #allow_sideffect } {
+    echo "debug"   // allowed
+  }
+  return n * n
+```
+
+#### `#no_recurse`  -  must not call itself (enforced)
+
+The compiler walks the generated IR to ensure no self-call exists.
+
+```rust
+fn{#no_recurse} foo() =
+  foo()   // compile error: #no_recurse violation  -  function calls itself
+```
+
+#### `#no_thread`  -  unsafe for concurrent calls (advisory)
+
+Not enforced at compile time; serves as documentation.
+
+```rust
+fn{#no_thread} init_globals() = pass
+```
+
+#### Macro tags
+
+| Tag | Meaning |
+|-----|---------|
+| `#no_excl` | Macro callable without `!` suffix |
+| `#no_parens` | Macro callable without parentheses |
+
+```rust
+macro{#no_excl #no_parens} proc() =
+  return `fn{#pure #no_recurse #no_thread}`
 
 proc fib(n u32) u32 =
   where n <= 1: n
   where _: fib(n - 1) + fib(n - 2)
+```
 
-fn ex_printf(const *char, ...) i32 = extern("printf") // automatically has #sideEffectful tag
+Extern functions are automatically tagged `#sideffect`:
+
+```rust
+fn ex_printf(const *char, ...) i32 = extern("printf")  // auto-tagged #sideffect
 fn printf(format string, args ...) i32 =
   return ex_printf(&format[0], args)
 
-proc print() =
-  printf("Hello world") // this will fail to compile
+fn{#pure} pure_fn() =
+  printf("Hello world")  // compile error: #pure violation  -  calls #sideffect function "printf"
 ```
 
 ### defer
@@ -455,7 +517,11 @@ defer free(s)
 fn do_nothing() =
   pass
 
+fn do_thing() = pass
+
 let noop = fn() = pass
+let x i64 = 5
+let n i64 = 3
 
 if x > 10 :
   do_thing()
@@ -529,7 +595,7 @@ called.
 Atoms are compile-time symbolic constants. They have type `atom` and compare
 by identity (interned at compile time).
 
-**Simple atoms** — a leading `'` followed by letters, digits, and underscores
+**Simple atoms**  -  a leading `'` followed by letters, digits, and underscores
 only:
 
 ```rust
@@ -547,7 +613,7 @@ let t = typeof(42)    // 'i64
 let t2 = typeof(true) // 'bool
 ```
 
-**Complex (quoted) atoms** — when the type string contains characters not
+**Complex (quoted) atoms**  -  when the type string contains characters not
 allowed in a simple atom name (`(`, `)`, `[`, `]`, `*`, `,`), use the quoted
 form `'"..."`:
 
@@ -574,7 +640,7 @@ echo reflect::elem('"[string]")          // string
 Both simple and quoted atoms have type `atom` and work identically with `==`,
 `where` guards, and reflection functions.
 
-**String representation** — `echo` prints atoms with their leading apostrophe:
+**String representation**  -  `echo` prints atoms with their leading apostrophe:
 
 ```rust
 echo 'ok    // 'ok
@@ -582,15 +648,16 @@ echo 'err   // 'err
 ```
 
 When an atom is coerced to `string` (for comparisons or passed to an `extern`
-function declared as returning `atom`), the apostrophe is **not** included —
+function declared as returning `atom`), the apostrophe is **not** included  - 
 the bare name is used:
 
 ```rust
-assert::ok('ok == "ok")      // true — bare name comparison
+use assert
+assert::ok('ok == "ok")      // true  -  bare name comparison
 assert::equals_str('ok, "ok") // passes
 ```
 
-**Runtime atom learning** — `__tin_string_to_atom` searches the compile-time
+**Runtime atom learning**  -  `__tin_string_to_atom` searches the compile-time
 atom table first. If the bare string is not found (e.g., it came from an
 external C function at runtime), the CRC32 is computed on the fly, the atom is
 stored in a mutex-protected linked-list table, and subsequent lookups return the
@@ -611,14 +678,15 @@ assert::ok(a == b)            // same code, regardless of static table
 ```rust
 use io
 use guid
+use strings
 
 enum atom status =
-  'ok,
+  'ok
   'err
 
 struct result[t] =
   val t
-  status
+  status status
 
   static fn ok(val t) result[t] =
     return result{val: val, status: status.ok}
@@ -627,15 +695,15 @@ struct result[t] =
     return result{val: default(t), status: status.err}
 
 macro try!(action) =
-  let i = "_" ++ guid::new().show().replace("-", "")
-  return `
-    (let {i} = {action}; {i}.status == status.ok) ? {i}.val : return result.err()
-  `
+  let i = "_" ++ strings::replace(guid::new(), "-", "")
+  return `(let {i} = {action}; {i}.status == status.ok ? {i}.val : default(typeof({i}.val)))`
 
 fn do_stuff() result[u32] =
   return result[u32]::ok(42)
 
-let val = try!(do_stuff())
+fn main() void =
+  let val = try!(do_stuff())
+  echo val
 ```
 
 ```rust
@@ -658,15 +726,26 @@ fn it_is(weather atom) =
 ### Implementing traits in a struct
 
 ```rust
-// Regular virtual method — name matches the trait's virtual method:
-fn speak(this dog) string = "Woof"
+// Regular virtual method  -  name matches the trait's virtual method:
+trait speaker =
+  fn speak(this speaker) string = virtual
 
-// Alias trait — prefix with :: to mark it as the alias implementation:
-fn ::print() [char] = return this.v
+struct dog(speaker) =
+  fn speak(this dog) string = "Woof"
 
-// Disambiguation when the same generic trait is implemented twice:
-fn iter[char]::get(this str, i size_t) char = return this.v[i]
-fn iter[str]::get(this str, i size_t) str = ...
+let d = dog{}
+echo d.speak()
+
+// Alias trait  -  implementing struct uses fn ::traitName(this T) to provide the impl:
+trait show as fn() string
+
+struct point(show) =
+  x i64
+  y i64
+  fn ::show(this point) string = return "point"
+
+let p = point{x: 1, y: 2}
+echo p.show()
 ```
 
 ### Method Name Conflict Resolution
@@ -678,7 +757,7 @@ When two traits declare methods with the same name, resolution is by **type cont
 ### Implicit Trait Type Parameter Inference
 For generic implicit conversion traits like `trait[k] implicit[t] as static fn(val t) k`:
 - When a struct declares `implicit[[char]]`, the compiler infers `k = StructType` and `t = [char]`.
-- Explicit type arguments are not required — parameters are inferred from context.
+- Explicit type arguments are not required  -  parameters are inferred from context.
 
 ### Vtable Layout
 - One vtable per `(struct, trait_instantiation)` pair.

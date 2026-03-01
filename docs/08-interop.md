@@ -23,7 +23,7 @@ the linker command line. Common uses:
 Linker directives must appear before any non-comment code in the file. They
 are processed before the rest of the compilation unit.
 
-Example — using `sqrt` and `pow` from `libm`:
+Example  -  using `sqrt` and `pow` from `libm`:
 
 ```rust
 //!-lm
@@ -190,6 +190,64 @@ let a = std::math::floor(std::math::PI)
 
 ---
 
+## Standard library packages
+
+### `io` - input/output
+
+```rust
+use io
+
+io::print("hello\n")        // print without trailing newline
+io::println("hello")        // print with trailing newline
+io::read_line()             // read a line from stdin, returns string
+```
+
+### `math` - mathematics
+
+```rust
+use math
+
+echo math::sqrt(2.0)        // 1.4142...
+echo math::floor(3.7)       // 3
+echo math::ceil(3.2)        // 4
+echo math::PI               // 3.14159...
+```
+
+### `strings` - string manipulation
+
+```rust
+use strings
+
+let s = strings::replace("hello-world", "-", " ")   // "hello world"
+```
+
+| Function | Description |
+|---|---|
+| `strings::replace(s, old, new) string` | Replace all occurrences of `old` with `new` in `s` |
+
+### `guid` - globally unique identifiers
+
+```rust
+use guid
+
+let id = guid::new()   // e.g. "6b8b4567-327b-4b23-8663-6b8b4567327b"
+```
+
+`guid::new()` returns a UUID v4 formatted string. Each call produces a different value.
+
+### `std` - convenience meta-package
+
+`use std` is equivalent to `use io` + `use math` in one import:
+
+```rust
+use std
+
+echo std::math::PI
+std::io::println("done")
+```
+
+---
+
 ## Control tags
 
 Control tags annotate functions with compiler hints. They are written in
@@ -259,7 +317,7 @@ They are declared with `macro` instead of `fn` and return quoted code
 
 ```rust
 macro try!(action) =
-  let i = "_" ++ guid::new().show().replace("-", "")
+  let i = "_" ++ strings::replace(guid::new(), "-", "")
   return `
     (let {i} = {action}; {i}.status == status.ok) ? {i}.val : return result.err()
   `

@@ -18,12 +18,14 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	if len(n.Constraints) > 0 {
 		return nil
 	}
+	// Register for #pure transitive side-effect checking.
+	cg.funcDecls[n.Name] = n
 	irName := n.Name
 	if pkg, ok := cg.exports[n.Name]; ok {
 		irName = pkg + "__" + n.Name
 	}
-	// Mirror the rename done in genFuncDecl for user-declared void main.
-	if n.Name == "main" && n.RetType == nil && !n.IsStatic {
+	// Mirror the rename done in genFuncDecl: any user fn main is _tin_user_main.
+	if n.Name == "main" && !n.IsStatic {
 		irName = "_tin_user_main"
 	}
 	return cg.predeclareFuncAs(n, irName)
@@ -65,7 +67,10 @@ func methodScopeName(structName string, m *ast.FuncDecl) string {
 // ("StructName_methodName") so that methods with the same name on different
 // structs don't collide.
 func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
-	return cg.predeclareFuncAs(m, methodScopeName(structName, m))
+	// Register in funcDecls so that #pure tag checking applies to methods too.
+	key := methodScopeName(structName, m)
+	cg.funcDecls[key] = m
+	return cg.predeclareFuncAs(m, key)
 }
 
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.
@@ -74,13 +79,16 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	if n.IsExtern != "" {
 		return nil
 	}
-	params := make([]*ir.Param, len(n.Params))
-	for i, p := range n.Params {
+	var params []*ir.Param
+	for _, p := range n.Params {
+		if p.IsVarArgs {
+			continue // varargs is not an LLVM-level named parameter
+		}
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return err
 		}
-		params[i] = ir.NewParam(p.Name, pt)
+		params = append(params, ir.NewParam(p.Name, pt))
 	}
 	var retType irtypes.Type = irtypes.Void
 	if n.RetType != nil {
@@ -90,20 +98,35 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			return err
 		}
 	}
-	// Check if already declared under this scope name.
-	if existing, ok := cg.curScope.vars[scopeName]; ok {
+	// If this Tin function has the same name as a C extern symbol, mangle the
+	// IR name to avoid a redefinition conflict.  Both the mangled and bare names
+	// are registered in scope so that Tin call sites resolve to the wrapper.
+	irName := scopeName
+	if cg.externIRNames[scopeName] {
+		irName = "_tin__" + scopeName
+	}
+	// Check if already declared under the (possibly mangled) IR name.
+	if existing, ok := cg.curScope.vars[irName]; ok {
 		if _, isFunc := existing.val.(*ir.Func); isFunc {
+			if irName != scopeName {
+				// Ensure the original Tin name also resolves.
+				cg.curScope.set(scopeName, &scopeEntry{val: existing.val, isAlloc: false})
+			}
 			return nil // already declared
 		}
 	}
-	// Add function to module (declaration) using the IR name == scopeName.
-	f := cg.mod.NewFunc(scopeName, retType, params...)
+	// Add function to module (declaration) using the IR name.
+	f := cg.mod.NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
-	cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
+	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
+	if irName != scopeName {
+		// Register original Tin name so call sites resolve to the wrapper.
+		cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
+	}
 	// If this was registered under an export-mangled name (pkg__foo), also
 	// register the bare name so that local callsites still resolve.
-	if idx := strings.Index(scopeName, "__"); idx >= 0 {
-		localName := scopeName[idx+2:]
+	if idx := strings.Index(irName, "__"); idx >= 0 {
+		localName := irName[idx+2:]
 		if _, already := cg.curScope.vars[localName]; !already {
 			cg.curScope.set(localName, &scopeEntry{val: f, isAlloc: false})
 		}
@@ -128,7 +151,11 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 		}
 	case *ast.EnumDecl:
-		// Will be fully registered in genEnumDecl.
+		// Register enum values early so they are available during on-demand
+		// struct monomorphization triggered from pass 2 (predeclare).
+		if err := cg.genEnumDecl(n); err != nil {
+			return err
+		}
 	case *ast.UnionDecl:
 		// Register an opaque struct so forward references work.
 		st := irtypes.NewStruct()
@@ -218,14 +245,29 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 			}
 		}()
 	}
-	// A user-declared void `fn main()` is compiled as `_tin_user_main` so we
-	// can generate a proper `i32 @main()` wrapper that returns 0.
-	if n.Name == "main" && n.RetType == nil && !n.IsStatic {
+	// Any user-declared `fn main(...)` is compiled as `_tin_user_main` so we
+	// can generate a proper C `i32 @main()` wrapper that passes default args
+	// and returns the result (or 0 for void).
+	if n.Name == "main" && !n.IsStatic {
 		irName = "_tin_user_main"
 		// Keep `main` resolvable from Tin source (e.g. for recursion).
 		defer func() {
 			if entry, ok2 := cg.curScope.lookup("_tin_user_main"); ok2 {
 				cg.curScope.set("main", entry)
+			}
+		}()
+	}
+	// If this user-defined function has the same name as an already-declared
+	// C extern symbol, mangle the IR name to avoid a redefinition conflict.
+	// We only mangle against EXTERN declarations (not against the function's own
+	// predeclared stub in the IR — that is handled by genFuncDeclAs reuse logic).
+	if n.IsExtern == "" && cg.externIRNames[irName] {
+		mangledName := "_tin__" + irName
+		tinName := irName // capture for deferred closure
+		irName = mangledName
+		defer func() {
+			if entry, ok2 := cg.curScope.lookup(mangledName); ok2 {
+				cg.curScope.set(tinName, entry)
 			}
 		}()
 	}
@@ -286,6 +328,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	}
 
 	if n.IsExtern != "" {
+		// Extern functions are always side-effectful; ensure the tag is present.
+		if !hasTag(n.Tags, "sideffect") {
+			n.Tags = append(n.Tags, "sideffect")
+		}
 		// Collect non-varargs parameters with their C-level types.
 		isVariadic := false
 		var cParams []*ir.Param
@@ -404,18 +450,36 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Register function in current scope so recursion works.
 	cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
 
+	// Mark the LLVM function as variadic if any tin param is varargs.
+	for _, p := range n.Params {
+		if p.IsVarArgs {
+			f.Sig.Variadic = true
+			break
+		}
+	}
+
 	// Alloca parameters and register them in scope.
+	// Iterate tin params; skip varargs (no LLVM parameter), but register a
+	// null placeholder so the name is defined inside the body.
 	var firstParamAlloca *ir.InstAlloca
-	for i, p := range f.Params {
+	llIdx := 0
+	for _, astParam := range n.Params {
+		if astParam.IsVarArgs {
+			if astParam.Name != "" {
+				// Register as null i8* placeholder; true forwarding needs va_list.
+				null := constant.NewNull(irtypes.NewPointer(irtypes.I8))
+				cg.curScope.set(astParam.Name, &scopeEntry{val: null, isAlloc: false})
+			}
+			continue
+		}
+		p := f.Params[llIdx]
+		llIdx++
 		alloca := entry.NewAlloca(p.Type())
 		entry.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
-		// ARC: the caller passes the value without retaining; we retain here
-		// so that the param alloca owns one reference independently.
-		// emitRetain handles RC-tracked values and named structs with RC fields.
 		cg.emitRetain(entry, p)
-		cg.curScope.set(n.Params[i].Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC})
-		if i == 0 {
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC})
+		if llIdx == 1 {
 			firstParamAlloca = alloca
 		}
 	}
@@ -440,21 +504,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.pendingDefers = prevDefers
 	cg.pendingDeferFrames = prevDeferFrames
 
-	// Enforce #noRecurse: walk IR to find any call to self.
-	for _, tag := range n.Tags {
-		if tag == "noRecurse" {
-			for _, blk := range f.Blocks {
-				for _, instr := range blk.Insts {
-					if call, ok := instr.(*ir.InstCall); ok {
-						if callee, ok2 := call.Callee.(*ir.Func); ok2 && callee == f {
-							return fmt.Errorf("fn %s: #noRecurse violation — function calls itself", n.Name)
-						}
-					}
-				}
-			}
-			break
-		}
-	}
+	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
+	// transitive) before this function is ever compiled. No IR walk needed.
 
 	// Ensure function is registered in current scope.
 	if cg.curScope != nil {

@@ -33,7 +33,7 @@ still be overridden.
 
 ---
 
-## Forward fields — injecting state into implementing structs
+## Forward fields  -  injecting state into implementing structs
 
 A **forward field** (`fieldName Type forward`) is automatically added to
 every struct that implements the trait. Default methods on the trait can
@@ -121,7 +121,7 @@ echo bot.greet()       // Beep boop, I am R2D2
 
 ---
 
-## Dynamic dispatch — trait-typed parameters
+## Dynamic dispatch  -  trait-typed parameters
 
 A function that accepts a trait type receives a **fat pointer**
 `{data*, vtable*}` and dispatches through it. Any concrete struct that
@@ -263,9 +263,9 @@ passed to any function expecting `iter[i64]`, `display`, or `labeled`.
 Internally, for each `(struct, trait_instantiation)` pair the compiler
 generates:
 
-1. **One wrapper function per method** — `structName__instKey__methodName(i8* self, ...)` — bitcasts `self` to the concrete pointer, loads the struct value, and calls the concrete method.
-2. **One vtable global constant** — an immutable struct of function pointers, one per trait method.
-3. **Fat pointer** — `{i8* data, vtable*}` — created when a concrete value is coerced to a trait type.
+1. **One wrapper function per method**  -  `structName__instKey__methodName(i8* self, ...)`  -  bitcasts `self` to the concrete pointer, loads the struct value, and calls the concrete method.
+2. **One vtable global constant**  -  an immutable struct of function pointers, one per trait method.
+3. **Fat pointer**  -  `{i8* data, vtable*}`  -  created when a concrete value is coerced to a trait type.
 
 Alias traits and mixin/forward-field traits do not generate vtables. Only traits with virtual or virtual-overridable methods do.
 
@@ -298,5 +298,5 @@ When `print_name(cat)` is called:
 4. `animal__named__name(i8* self)` bitcasts `self` to `*animal`, loads the
    struct, and calls the concrete `animal.name` method.
 
-The indirection is one pointer load + one indirect call — the same as C++
+The indirection is one pointer load + one indirect call  -  the same as C++
 virtual dispatch.

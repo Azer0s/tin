@@ -15,13 +15,14 @@ type TokenType int
 
 const (
 	// Literals
-	INT_LIT    TokenType = iota // 42, 0xFF
-	FLOAT_LIT                   // 3.14
-	STRING_LIT                  // "hello"
-	CHAR_LIT                    // 'a'
-	BOOL_LIT                    // true / false
-	ATOM_LIT                    // 'ok  'err
-	NONE_LIT                    // None
+	INT_LIT       TokenType = iota // 42, 0xFF
+	FLOAT_LIT                      // 3.14
+	STRING_LIT                     // "hello"
+	BACKTICK_LIT                   // `expr`  — code splice literal
+	CHAR_LIT                       // 'a'
+	BOOL_LIT                       // true / false
+	ATOM_LIT                       // 'ok  'err
+	NONE_LIT                       // None
 
 	// Identifier
 	IDENT
@@ -120,7 +121,7 @@ const (
 	DOT      // .
 	HASH     // # (standalone, for tags parsed specially)
 
-	// Tag (e.g. #pure, #noRecurse)
+	// Tag (e.g. #pure, #no_recurse, #sideffect)
 	CONTROL_TAG // #ident
 
 	// Indentation
@@ -133,7 +134,7 @@ const (
 )
 
 var tokenNames = map[TokenType]string{
-	INT_LIT: "INT", FLOAT_LIT: "FLOAT", STRING_LIT: "STRING",
+	INT_LIT: "INT", FLOAT_LIT: "FLOAT", STRING_LIT: "STRING", BACKTICK_LIT: "BACKTICK",
 	CHAR_LIT: "CHAR", BOOL_LIT: "BOOL", ATOM_LIT: "ATOM", NONE_LIT: "NONE",
 	IDENT:      "IDENT",
 	KW_LET:     "let", KW_CONST: "const", KW_FN: "fn", KW_TYPE: "type",
@@ -580,7 +581,7 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 		}
 		sb.WriteRune(ch)
 	}
-	return Token{Type: STRING_LIT, Literal: sb.String(), Line: line, Col: col}, nil
+	return Token{Type: BACKTICK_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
 func (l *Lexer) readNumber(line, col int) (Token, error) {

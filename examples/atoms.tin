@@ -4,13 +4,13 @@ use assert
 
 // An atom enum declares a set of named atom constants.
 enum atom status =
-  'ok,
-  'err,
+  'ok
+  'err
 
 enum atom weather =
-  'sunny,
-  'rainy,
-  'cloudy,
+  'sunny
+  'rainy
+  'cloudy
 
 // Functions can pattern-match on atoms using where clauses.
 fn describe_weather(w atom) =

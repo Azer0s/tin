@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
@@ -22,6 +23,7 @@ Usage:
   tin test  <file.tin>              run test blocks and report results
   tin build-test <file.tin> [-o out] compile test binary without running
   tin ir-test <file.tin>            emit test-mode LLVM IR to stdout
+  tin preprocess <file.tin>         expand macros and print source to stdout
 
 Linker flags (passed after the source file):
   -lNAME       link with libNAME (e.g. -lm for libmath)
@@ -114,6 +116,22 @@ func main() {
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		die("parse error: %v", parseErr)
+	}
+
+	// Preprocess: expand macros and print expanded source (no codegen/IR)
+	if cmd == "preprocess" {
+		cg := codegen.New(file)
+		expanded, ppErr := cg.ExpandProgramMacros(prog)
+		if ppErr != nil {
+			die("preprocess error: %v", ppErr)
+		}
+		for _, stmt := range expanded.Stmts {
+			if _, isMacro := stmt.(*ast.MacroDecl); isMacro {
+				continue // macro decls are consumed; not printed
+			}
+			fmt.Println(ast.PrintStmt(stmt, 0))
+		}
+		return
 	}
 
 	// Codegen

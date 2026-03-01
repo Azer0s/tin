@@ -89,11 +89,20 @@ fn fmin(x f64, y f64) f64 = extern("fmin")
 // fmax returns the larger of x and y
 fn fmax(x f64, y f64) f64 = extern("fmax")
 
+// Constants
+
+// PI is the ratio of a circle's circumference to its diameter
+const PI f64 = 3.14159265358979323846
+
+// E is Euler's number (the base of natural logarithm)
+const E f64 = 2.71828182845904523536
+
 export {
   fabs, fmod,
   sqrt, cbrt, pow, hypot,
   exp, exp2, log, log2, log10,
   sin, cos, tan, asin, acos, atan, atan2,
   floor, ceil, round, trunc,
-  fmin, fmax
+  fmin, fmax,
+  PI, E
 } as math

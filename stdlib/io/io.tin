@@ -64,8 +64,11 @@ fn remove(path string) i32 = extern("remove")
 // rename renames/moves a file
 fn rename(old_path string, new_path string) i32 = extern("rename")
 
+// print writes s followed by a newline (alias for puts)
+fn print(s string) = puts(s)
+
 export {
-  puts, fputs, fprintf, printf,
+  puts, fputs, fprintf, printf, print,
   fgets, scanf,
   fopen, fclose, fread, fwrite, fseek, ftell, fflush, feof, ferror,
   remove, rename

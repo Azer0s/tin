@@ -1,0 +1,257 @@
+// control_tags.tin — demonstrates and tests control tag enforcement.
+//
+// Tags:
+//   #pure            — no side effects; compiler enforces transitively
+//   #sideffect       — declares side effects (auto-applied to extern fns)
+//   #no_recurse      — function must not call itself (enforced via IR)
+//   #no_thread       — advisory: unsafe for concurrent use
+//   #allow_sideffect — block tag: permits side effects in a #pure function
+//
+// Error cases (compile-time rejections) are tested via shell:
+//   ./tin run /tmp/bad.tin 2>&1 | grep "#pure violation"
+use assert
+
+// ---------------------------------------------------------------------------
+// #pure — basic case: arithmetic-only functions
+// ---------------------------------------------------------------------------
+
+fn{#pure} square(n i64) i64 = return n * n
+fn{#pure} cube(n i64) i64   = return n * n * n
+
+// #pure function may call other #pure functions
+fn{#pure} sum_squares(a i64, b i64) i64 = return square(a) + square(b)
+
+test "#pure: pure math functions" =
+  assert::equals(square(5), 25)
+  assert::equals(cube(3), 27)
+  assert::equals(sum_squares(3, 4), 25)
+
+// ---------------------------------------------------------------------------
+// #pure — transitive call graph: A -> B -> C (all pure)
+// ---------------------------------------------------------------------------
+
+fn{#pure} double(n i64) i64 = return n * 2
+fn{#pure} quad(n i64) i64   = return double(double(n))
+fn{#pure} oct(n i64) i64    = return quad(quad(n))
+
+test "#pure: transitive pure call chain" =
+  assert::equals(double(5), 10)
+  assert::equals(quad(3), 12)
+  assert::equals(oct(1), 16)
+
+// ---------------------------------------------------------------------------
+// #pure — control flow: if/else, ternary, for loop
+// ---------------------------------------------------------------------------
+
+fn{#pure} abs_val(n i64) i64 =
+  if n < 0:
+    return -n
+  return n
+
+fn{#pure} clamp(v i64, lo i64, hi i64) i64 =
+  if v < lo:
+    return lo
+  else if v > hi:
+    return hi
+  else:
+    return v
+
+fn{#pure} sum_range(n i64) i64 =
+  let acc i64 = 0
+  for let i i64 = 0; i < n; i++:
+    acc = acc + i
+  return acc
+
+test "#pure: if/else and ternary" =
+  assert::equals(abs_val(-7), 7)
+  assert::equals(abs_val(3), 3)
+  assert::equals(clamp(5, 0, 10), 5)
+  assert::equals(clamp(-1, 0, 10), 0)
+  assert::equals(clamp(99, 0, 10), 10)
+
+test "#pure: for loop (no IO)" =
+  assert::equals(sum_range(5), 10)
+  assert::equals(sum_range(10), 45)
+
+// ---------------------------------------------------------------------------
+// #pure — where-clause bodies
+// ---------------------------------------------------------------------------
+
+fn{#pure} sign(n i64) i64 =
+  where n < 0:  -1
+  where n == 0:  0
+  where _:       1
+
+test "#pure: where-clause body" =
+  assert::equals(sign(-5), -1)
+  assert::equals(sign(0), 0)
+  assert::equals(sign(42), 1)
+
+// ---------------------------------------------------------------------------
+// #pure — self-recursive (mutual recursion between pure functions)
+// ---------------------------------------------------------------------------
+
+fn{#pure} is_even(n i64) bool =
+  where n == 0: true
+  where _: is_odd(n - 1)
+
+fn{#pure} is_odd(n i64) bool =
+  where n == 0: false
+  where _: is_even(n - 1)
+
+test "#pure: mutually recursive pure functions" =
+  assert::equals(is_even(4), true)
+  assert::equals(is_even(7), false)
+  assert::equals(is_odd(3), true)
+  assert::equals(is_odd(8), false)
+
+// ---------------------------------------------------------------------------
+// #pure with #allow_sideffect escape hatch
+// ---------------------------------------------------------------------------
+
+fn{#pure} debug_square(n i64) i64 =
+  { #allow_sideffect } {
+    echo "computing square of {n}"
+  }
+  return n * n
+
+test "#pure: #allow_sideffect permits echo in block" =
+  assert::equals(debug_square(6), 36)
+
+// Multiple sequential #allow_sideffect blocks in the same function
+fn{#pure} logging_compute(n i64) i64 =
+  { #allow_sideffect } {
+    echo "start: n={n}"
+  }
+  let result i64 = n * n * n
+  { #allow_sideffect } {
+    echo "done: result={result}"
+  }
+  return result
+
+test "#pure: multiple sequential #allow_sideffect blocks" =
+  assert::equals(logging_compute(3), 27)
+  assert::equals(logging_compute(4), 64)
+
+// ---------------------------------------------------------------------------
+// #sideffect — explicit declaration
+// ---------------------------------------------------------------------------
+
+fn{#sideffect} noisy_double(n i64) i64 =
+  echo "doubling {n}"
+  return n * 2
+
+fn{#sideffect} noisy_triple(n i64) i64 =
+  echo "tripling {n}"
+  return n * 3
+
+// #sideffect chain: a #sideffect function may call other #sideffect functions
+fn{#sideffect} noisy_sextuple(n i64) i64 =
+  return noisy_double(noisy_triple(n))
+
+test "#sideffect: function works normally" =
+  assert::equals(noisy_double(7), 14)
+
+test "#sideffect: chain of sideffect functions" =
+  assert::equals(noisy_sextuple(2), 12)
+
+// ---------------------------------------------------------------------------
+// #no_recurse — must not call itself
+// ---------------------------------------------------------------------------
+
+fn{#no_recurse} iterative_fib(n i64) i64 =
+  let a i64 = 0
+  let b i64 = 1
+  for let i i64 = 0; i < n; i++:
+    let t i64 = a + b
+    a = b
+    b = t
+  return a
+
+test "#no_recurse: iterative fibonacci" =
+  assert::equals(iterative_fib(0), 0)
+  assert::equals(iterative_fib(1), 1)
+  assert::equals(iterative_fib(10), 55)
+
+// #no_recurse with where-clause body (no self-call)
+fn{#no_recurse} safe_sign(n i64) i64 =
+  where n < 0:  -1
+  where n == 0:  0
+  where _:       1
+
+test "#no_recurse: where-clause without recursion" =
+  assert::equals(safe_sign(-3), -1)
+  assert::equals(safe_sign(0), 0)
+  assert::equals(safe_sign(9), 1)
+
+// #no_recurse checks transitively: calling helpers that call each other is fine
+// as long as no path leads back to the tagged function itself.
+fn count_down_a(n i64) i64 = return count_down_b(n - 1)
+fn count_down_b(n i64) i64 =
+  if n <= 0:
+    return 0
+  return count_down_a(n - 1)
+
+fn{#no_recurse} use_countdown(n i64) i64 =
+  return count_down_a(n)   // OK — neither count_down_a nor count_down_b calls use_countdown
+
+test "#no_recurse: helpers that recurse among themselves do not violate tag" =
+  assert::equals(use_countdown(4), 0)
+
+// ---------------------------------------------------------------------------
+// #no_thread — advisory (no enforcement, just documentation)
+// ---------------------------------------------------------------------------
+
+fn{#no_thread} non_reentrant_op(n i64) i64 =
+  return n + 1
+
+test "#no_thread: function works normally" =
+  assert::equals(non_reentrant_op(41), 42)
+
+// ---------------------------------------------------------------------------
+// Multiple tags combined
+// ---------------------------------------------------------------------------
+
+fn{#pure #no_recurse} safe_add(a i64, b i64) i64 = return a + b
+
+fn{#pure #no_thread} thread_unsafe_pure(n i64) i64 = return n * n + n
+
+test "combined tags: #pure #no_recurse" =
+  assert::equals(safe_add(10, 32), 42)
+
+test "combined tags: #pure #no_thread" =
+  assert::equals(thread_unsafe_pure(5), 30)
+
+// ---------------------------------------------------------------------------
+// CTFE: #pure #no_recurse functions with literal arguments are evaluated
+// at compile time — the call is replaced with a constant in the IR.
+// ---------------------------------------------------------------------------
+
+fn{#pure #no_recurse} ctfe_square(n i64) i64 = return n * n
+
+fn{#pure #no_recurse} ctfe_fib(n i64) i64 =
+  let a i64 = 0
+  let b i64 = 1
+  for let i i64 = 0; i < n; i++:
+    let t i64 = a + b
+    a = b
+    b = t
+  return a
+
+// Transitive: ctfe_hyp calls ctfe_square, still fully evaluated at compile time
+fn{#pure #no_recurse} ctfe_hyp(x i64, y i64) i64 = return ctfe_square(x) + ctfe_square(y)
+
+test "CTFE: #pure #no_recurse with literal args is evaluated at compile time" =
+  assert::equals(ctfe_square(7), 49)
+  assert::equals(ctfe_square(0), 0)
+  assert::equals(ctfe_square(100), 10000)
+  assert::equals(ctfe_fib(10), 55)
+  assert::equals(ctfe_fib(0), 0)
+  assert::equals(ctfe_hyp(3, 4), 25)
+
+// Non-literal args: CTFE does not apply (falls through to normal call codegen)
+fn use_ctfe_square(n i64) i64 = return ctfe_square(n)
+
+test "CTFE: non-literal args fall back to normal codegen" =
+  assert::equals(use_ctfe_square(5), 25)
+  assert::equals(use_ctfe_square(10), 100)

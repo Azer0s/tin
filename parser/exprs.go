@@ -148,7 +148,7 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 // isExprStart returns true if tok can begin a primary expression
 func isExprStart(tok lexer.Token) bool {
 	switch tok.Type {
-	case lexer.IDENT, lexer.INT_LIT, lexer.FLOAT_LIT, lexer.STRING_LIT,
+	case lexer.IDENT, lexer.INT_LIT, lexer.FLOAT_LIT, lexer.STRING_LIT, lexer.BACKTICK_LIT,
 		lexer.BOOL_LIT, lexer.CHAR_LIT, lexer.NONE_LIT,
 		lexer.LPAREN, lexer.LBRACKET, lexer.MINUS, lexer.NOT,
 		lexer.STAR, lexer.AMP, lexer.KW_FN, lexer.KW_SIZEOF, lexer.KW_ADDR,
@@ -304,6 +304,24 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				} else {
 					expr = sa
 				}
+			} else if idx, ok2 := expr.(*ast.IndexExpr); ok2 {
+				// e.g. result[u32]::ok(42) — static method call on generic type
+				if idExpr, ok3 := idx.Expr.(*ast.Identifier); ok3 {
+					typeName := idExpr.Name
+					if typeArgId, ok4 := idx.Index.(*ast.Identifier); ok4 {
+						typeName = idExpr.Name + "[" + typeArgId.Name + "]"
+					}
+					sa := &ast.ScopeAccess{Path: []string{typeName, field.Literal}}
+					if p.check(lexer.LPAREN) {
+						args, err3 := p.parseArgList()
+						if err3 != nil {
+							return nil, err3
+						}
+						expr = &ast.CallExpr{Func: sa, Args: args}
+					} else {
+						expr = sa
+					}
+				}
 			}
 
 		case lexer.LBRACKET:
@@ -414,6 +432,10 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.STRING_LIT:
 		p.advance()
 		return parseStringInterp(tok.Literal)
+
+	case lexer.BACKTICK_LIT:
+		p.advance()
+		return &ast.BacktickLit{Content: tok.Literal}, nil
 
 	case lexer.CHAR_LIT:
 		p.advance()
@@ -598,6 +620,17 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+		// default(typeof(expr)) — derive zero value from expression's compile-time type
+		if p.check(lexer.KW_TYPEOF) {
+			inner, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+			return &ast.DefaultExpr{OfExpr: inner}, nil
+		}
 		typ, err := p.parseTypeExpr()
 		if err != nil {
 			return nil, err
@@ -609,19 +642,32 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.LPAREN:
 		p.advance()
+		// Block expression: (let x = ...; expr) — produced by CTFE macro splices.
+		// Parsed as a sequence of statements terminated by ')'; the last statement
+		// must be an expression whose value is returned.
+		if p.check(lexer.KW_LET) {
+			var stmts []ast.Node
+			for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+				if p.check(lexer.SEMI) || p.check(lexer.NEWLINE) {
+					p.advance()
+					continue
+				}
+				stmt, err := p.parseStatement()
+				if err != nil {
+					return nil, err
+				}
+				if stmt != nil {
+					stmts = append(stmts, stmt)
+				}
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+			return &ast.Block{Stmts: stmts}, nil
+		}
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
-		}
-		// handle (let x = expr; cond) ? ... : ... style  (macro helper)
-		if p.check(lexer.SEMI) {
-			p.advance()
-			cond, err2 := p.parseExpr()
-			if err2 != nil {
-				return nil, err2
-			}
-			_ = cond
-			// simplified: just return inner
 		}
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err

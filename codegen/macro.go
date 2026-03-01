@@ -84,7 +84,8 @@ func blockHasSideEffects(b *ast.Block) bool {
 // ctfeExpandMacro compiles and runs the macro body at compile time,
 // wrapped in a typed function so that `return` works correctly.
 func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node, error) {
-	src := buildMacroSource(m, args)
+	retType := inferReturnType(m, args)
+	src := buildMacroSource(m, args, cg.macros, cg.importedPkgs)
 
 	tmpFile, err := os.CreateTemp("", "tin_macro_*.tin")
 	if err != nil {
@@ -122,7 +123,55 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 	if result == "" {
 		return nil, fmt.Errorf("macro %s: produced no output\nGenerated source:\n%s", m.Name, src)
 	}
-	return parseExprString(result)
+	return parseCtfeResult(result, retType, m.Name, src)
+}
+
+// parseCtfeResult converts raw CTFE stdout into an AST literal node.
+// Special cases:
+//   - backtick-wrapped output `` `expr` `` → parse inner content as tin source (code splice)
+//   - "string" return type → wrap bare output in StringLit
+//   - "f64" return type → promote integer-looking output to FloatLit
+func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
+	// Backtick splice: the macro returned a backtick literal; echo printed `content`
+	if len(result) >= 2 && result[0] == '`' && result[len(result)-1] == '`' {
+		inner := result[1 : len(result)-1]
+		node, err := parseExprString(inner)
+		if err != nil {
+			return nil, fmt.Errorf("macro %s: backtick splice parse error %q: %v\nGenerated source:\n%s",
+				macroName, inner, err, src)
+		}
+		return node, nil
+	}
+	switch retType {
+	case "string":
+		// echo prints bare string content — wrap it back into a StringLit directly
+		return &ast.StringLit{Value: result}, nil
+	case "f64":
+		// Try normal parse first (handles "3.14", "-1.5", etc.)
+		node, err := parseExprString(result)
+		if err != nil {
+			return nil, fmt.Errorf("macro %s: cannot parse output %q: %v\nGenerated source:\n%s",
+				macroName, result, err, src)
+		}
+		// If we got an IntLit, promote it to FloatLit (echo 1.0 → "1")
+		if il, ok := node.(*ast.IntLit); ok {
+			return &ast.FloatLit{Value: float64(il.Value)}, nil
+		}
+		// UnaryExpr(-IntLit) → promote to negative FloatLit
+		if ue, ok := node.(*ast.UnaryExpr); ok && ue.Op == "-" {
+			if il, ok2 := ue.Expr.(*ast.IntLit); ok2 {
+				return &ast.FloatLit{Value: -float64(il.Value)}, nil
+			}
+		}
+		return node, nil
+	default:
+		node, err := parseExprString(result)
+		if err != nil {
+			return nil, fmt.Errorf("macro %s: cannot parse output %q: %v\nGenerated source:\n%s",
+				macroName, result, err, src)
+		}
+		return node, nil
+	}
 }
 
 // inferArgType returns the tin type name for an argument expression.
@@ -138,7 +187,21 @@ func inferArgType(arg ast.Node) string {
 	case *ast.StringLit:
 		return "string"
 	default:
-		return "i64" // conservative default for most numeric macros
+		// Complex expressions (calls, field accesses, etc.) are code fragments:
+		// pass them as strings containing the source text so they can be spliced
+		// into backtick templates via string interpolation.
+		return "string"
+	}
+}
+
+// isCodeFragmentArg returns true when the arg is not a simple literal and
+// should therefore be passed to the CTFE subprocess as a quoted source string.
+func isCodeFragmentArg(arg ast.Node) bool {
+	switch arg.(type) {
+	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -181,29 +244,43 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 	}
 	switch v := node.(type) {
 	case *ast.ReturnStmt:
+		if v == nil {
+			return ""
+		}
 		if v.Value != nil {
 			return typeOfExpr(v.Value, paramTypes)
 		}
 	case *ast.Block:
+		if v == nil {
+			return ""
+		}
 		for _, s := range v.Stmts {
 			if t := findReturnTypeInNode(s, paramTypes); t != "" {
 				return t
 			}
 		}
 	case *ast.IfStmt:
-		if t := findReturnTypeInNode(v.Then, paramTypes); t != "" {
-			return t
-		}
-		for _, ei := range v.ElseIfs {
-			if t := findReturnTypeInNode(ei.Body, paramTypes); t != "" {
+		if v.Then != nil {
+			if t := findReturnTypeInNode(v.Then, paramTypes); t != "" {
 				return t
 			}
 		}
-		if t := findReturnTypeInNode(v.Else, paramTypes); t != "" {
-			return t
+		for _, ei := range v.ElseIfs {
+			if ei.Body != nil {
+				if t := findReturnTypeInNode(ei.Body, paramTypes); t != "" {
+					return t
+				}
+			}
+		}
+		if v.Else != nil {
+			if t := findReturnTypeInNode(v.Else, paramTypes); t != "" {
+				return t
+			}
 		}
 	case *ast.ForStmt:
-		return findReturnTypeInNode(v.Body, paramTypes)
+		if v.Body != nil {
+			return findReturnTypeInNode(v.Body, paramTypes)
+		}
 	}
 	return ""
 }
@@ -219,6 +296,8 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 		return "bool"
 	case *ast.StringLit:
 		return "string"
+	case *ast.BacktickLit:
+		return "string" // backtick literals compile to string at runtime
 	case *ast.Identifier:
 		if t, ok := paramTypes[v.Name]; ok {
 			return t
@@ -244,15 +323,55 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 // converting recursive macro calls into ordinary function recursion without
 // spawning additional compiler processes.
 //
+// allMacros is the full macro registry; simple (expression-body) macros other
+// than m itself are emitted as `macro` declarations so that inter-macro calls
+// inside m's body work correctly.
+//
 // Generated structure:
 //
+//	macro dep1!(p) = <expr>     // dependency simple macros
 //	fn __macro_<name>(param1 type1, ...) = <body with self-calls renamed>
 //	echo __macro_<name>(arg1, arg2, ...)
-func buildMacroSource(m *ast.MacroDecl, args []ast.Node) string {
+func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*ast.MacroDecl, importedPkgs map[string]bool) string {
 	baseName := strings.TrimSuffix(m.Name, "!")
 	fnName := "__macro_" + baseName
 
 	var sb strings.Builder
+
+	// Emit use declarations so the macro body can call stdlib functions.
+	for pkg := range importedPkgs {
+		sb.WriteString("use " + pkg + "\n")
+	}
+	if len(importedPkgs) > 0 {
+		sb.WriteString("\n")
+	}
+
+	// Emit simple (expression-body) macros that m might call
+	for _, dep := range allMacros {
+		if dep.Name == m.Name {
+			continue // skip self; self-calls are handled by renameMacroCalls
+		}
+		if isMacroComplex(dep) {
+			continue // only emit simple macros as declarations
+		}
+		sb.WriteString("macro " + dep.Name + "(")
+		for i, p := range dep.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(p)
+		}
+		sb.WriteString(") = ")
+		body := dep.Body
+		if es, ok := body.(*ast.ExprStmt); ok {
+			body = es.Expr
+		}
+		sb.WriteString(ast.PrintExpr(body))
+		sb.WriteString("\n")
+	}
+	if len(allMacros) > 1 {
+		sb.WriteString("\n")
+	}
 
 	retType := inferReturnType(m, args)
 
@@ -271,13 +390,23 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node) string {
 	sb.WriteString(ast.PrintStmt(body, 1))
 	sb.WriteString("\n\n")
 
-	// Entry point: echo the result
+	// Entry point: echo the result.
+	// Code-fragment args are passed as quoted source strings so the CTFE body
+	// can embed them in backtick splices via {param} interpolation.
 	sb.WriteString("echo " + fnName + "(")
 	for i, arg := range args {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(ast.PrintExpr(arg))
+		if isCodeFragmentArg(arg) {
+			src := ast.PrintExpr(arg)
+			// Escape backslashes and double quotes for embedding in a string literal.
+			src = strings.ReplaceAll(src, `\`, `\\`)
+			src = strings.ReplaceAll(src, `"`, `\"`)
+			sb.WriteString(`"` + src + `"`)
+		} else {
+			sb.WriteString(ast.PrintExpr(arg))
+		}
 	}
 	sb.WriteString(")\n")
 	return sb.String()

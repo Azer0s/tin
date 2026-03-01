@@ -26,3 +26,33 @@ test "CTFE macro: recursive fibonacci" =
   assert::equals(fib!(0), 0)
   assert::equals(fib!(1), 1)
   assert::equals(fib!(10), 55)
+
+// Backtick literals: `expr` splices raw tin code at the call site.
+// Simple (expression-body) version: body is a backtick literal.
+macro field_a!() = `alpha`
+macro field_b!() = `beta`
+
+// CTFE version: conditionally return a code splice.
+macro pick_var!(n) =
+  if (n == 0):
+    return `alpha`
+  return `beta`
+
+test "backtick splice: simple macro returns identifier" =
+  let alpha i64 = 42
+  let beta i64 = 99
+  assert::equals(field_a!(), 42)
+  assert::equals(field_b!(), 99)
+
+test "backtick splice: CTFE macro conditionally returns identifier" =
+  let alpha i64 = 10
+  let beta i64 = 20
+  assert::equals(pick_var!(0), 10)
+  assert::equals(pick_var!(1), 20)
+
+// String-returning CTFE macro (returns the string value, not a code splice)
+macro greet_ctfe!(name) =
+  return "Hello, " ++ name ++ "!"
+
+test "CTFE macro: string return" =
+  assert::equals_str(greet_ctfe!("World"), "Hello, World!")

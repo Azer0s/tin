@@ -86,6 +86,34 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if dd, ok := cg.genericDataDecls[t.Name]; ok {
 			return cg.instantiateDataType(dd, t.TypeParams)
 		}
+		// On-demand monomorphization of generic struct (e.g. result[u32])
+		// Only triggered when the type param is a concrete type (not a template var).
+		if tmplStruct, isGenericStruct := cg.genericStructs[t.Name]; isGenericStruct && len(t.TypeParams) > 0 {
+			typeParamStr := t.TypeParams[0].String()
+			// Detect if typeParamStr is actually a template type-param name of this struct.
+			// If so, skip monomorphization — we're inside the template body itself.
+			isTemplateVar := false
+			for _, tpName := range tmplStruct.TypeParams {
+				if tpName == typeParamStr {
+					isTemplateVar = true
+					break
+				}
+			}
+			if !isTemplateVar {
+				// Build a concrete name: base__typeParam (e.g. result__u32)
+				concreteName := t.Name + "__" + typeParamStr
+				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					synthDecl := &ast.TypeDecl{
+						Name: concreteName,
+						Type: &ast.GenericType{Name: t.Name, TypeParams: t.TypeParams},
+					}
+					_ = cg.genTypeDecl(synthDecl) // best-effort
+				}
+				if st, ok2 := cg.structTypes[concreteName]; ok2 {
+					return st, nil
+				}
+			}
+		}
 		return cg.resolveSimpleType(t.Name)
 	case *ast.UnionTypeExpr:
 		// Anonymous tagged union: { i8 tag, [maxSize x i8] payload }

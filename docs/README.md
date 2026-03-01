@@ -17,6 +17,8 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [08 – Interop & Packages](08-interop.md) | `extern`, pointers, `use`/`export`, `defer`, linker directives (`//!`) |
 | [09 – Reflection](09-reflection.md) | `any` type, `typeof`, `traitof`, `fieldnames`, `fieldtypes`, `fieldtag`, `getfield`, `setfield`, atoms |
 | [10 – Testing](10-testing.md) | `test` blocks, `assert` stdlib, `tin test` command |
+| [11 – Macros](11-macros.md) | Simple macros (AST substitution), CTFE macros (compile-time execution), backtick code-splice literals |
+| [12 – Control Tags](12-control-tags.md) | `#pure`, `#sideffect`, `#no_recurse`, `#no_thread`, `#allow_sideffect`, macro tags |
 
 ## Quick taste
 
