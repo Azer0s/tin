@@ -1,0 +1,20 @@
+// anon_fn.tin — immediate anonymous function invocation
+// Demonstrates (fn() = ...)() syntax including use with defer.
+
+use assert
+
+test "no-arg lambda invoked immediately" =
+  let result = (fn() i64 = return 42)()
+  assert::equals(result, 42)
+
+test "lambda with args invoked immediately" =
+  let result = (fn(x i64) i64 = return x * 2)(5)
+  assert::equals(result, 10)
+
+test "void lambda invoked immediately" =
+  (fn() void = pass)()
+
+test "defer with immediately-invoked lambda" =
+  let ran i64 = 0
+  defer (fn() void = ran = ran + 1)()
+  assert::equals(ran, 0)

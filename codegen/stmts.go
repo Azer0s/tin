@@ -283,6 +283,14 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 		block, err := cg.genVarDecl(block, s)
 		return block, false, err
 
+	case *ast.ArrayDestructDecl:
+		newBlock, err := cg.genArrayDestructDecl(block, s)
+		return newBlock, false, err
+
+	case *ast.StructDestructDecl:
+		newBlock, err := cg.genStructDestructDecl(block, s)
+		return newBlock, false, err
+
 	case *ast.ReturnStmt:
 		if err := cg.genReturn(block, s); err != nil {
 			return nil, false, err
@@ -587,9 +595,21 @@ func (cg *CodeGen) ensureDeferChain() {
 
 // genDeferThunk generates a zero-param thunk function that, when called,
 // executes the deferred call expression.  Free variables referenced by the
-// call are captured by value into a heap-allocated env struct (same mechanics
-// as genLambdaExpr).  Returns (fn as i8*, env as i8*).
+// call are captured by reference (alloca pointer) into a heap-allocated env
+// struct so that mutations inside the thunk propagate back to the outer scope.
+// Returns (fn as i8*, env as i8*).
 func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, value.Value, error) {
+	// Special case: "defer fn() = body" — the call IS a lambda expression.
+	// Also handles "defer (fn() = body)()" — a CallExpr with no args whose Func is a lambda.
+	if _, ok := call.(*ast.LambdaExpr); ok {
+		return cg.genDeferLambdaThunk(block, call)
+	}
+	if callExpr, ok := call.(*ast.CallExpr); ok && len(callExpr.Args) == 0 {
+		if _, isLambda := callExpr.Func.(*ast.LambdaExpr); isLambda {
+			return cg.genDeferLambdaThunk(block, callExpr.Func)
+		}
+	}
+
 	name := fmt.Sprintf("defer.thunk.%d", cg.strCount)
 	cg.strCount++
 
@@ -600,6 +620,7 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 		name   string
 		val    value.Value
 		llvmTy irtypes.Type
+		byRef  bool // true = store alloca pointer; false = store loaded value
 	}
 	var captures []capture
 	for _, n := range freeNames {
@@ -610,17 +631,12 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
 			continue // global function — reachable by name, no capture needed
 		}
-		var val value.Value
-		var ty irtypes.Type
 		if entry.isAlloc {
-			pt := entry.val.Type().(*irtypes.PointerType)
-			ty = pt.ElemType
-			val = block.NewLoad(ty, entry.val)
+			// Capture by reference so mutations inside the thunk are visible outside.
+			captures = append(captures, capture{n, entry.val, entry.val.Type(), true})
 		} else {
-			val = entry.val
-			ty = val.Type()
+			captures = append(captures, capture{n, entry.val, entry.val.Type(), false})
 		}
-		captures = append(captures, capture{n, val, ty})
 	}
 
 	// Step 2: build env struct and heap-allocate it
@@ -680,10 +696,15 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 			gep := entryBlock.NewGetElementPtr(envStructType, envTypedPtr,
 				constant.NewInt(irtypes.I32, 0),
 				constant.NewInt(irtypes.I32, int64(i)))
-			alloca := entryBlock.NewAlloca(c.llvmTy)
-			loaded := entryBlock.NewLoad(c.llvmTy, gep)
-			entryBlock.NewStore(loaded, alloca)
-			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
+			if c.byRef {
+				allocaPtr := entryBlock.NewLoad(c.llvmTy, gep)
+				cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
+			} else {
+				alloca := entryBlock.NewAlloca(c.llvmTy)
+				loaded := entryBlock.NewLoad(c.llvmTy, gep)
+				entryBlock.NewStore(loaded, alloca)
+				cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
+			}
 		}
 	}
 
@@ -700,6 +721,138 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	cg.pendingDeferFrames = prevDeferFrames
 
 	// Return fn as i8* and env as i8*.
+	fnI8 := block.NewBitCast(f, irtypes.I8Ptr)
+	return fnI8, envI8, nil
+}
+
+// genDeferLambdaThunk handles "defer fn() = body".
+// The lambda's free variables are captured by reference (alloca pointer) into
+// a heap-allocated env struct so that mutations inside the thunk propagate back
+// to the outer function's locals. This is safe because the thunk always runs
+// before the outer function returns (either inline via emitDefers or via
+// _tin_panic's defer chain while the outer stack frame is still live).
+func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (value.Value, value.Value, error) {
+	lambda := lambdaNode.(*ast.LambdaExpr)
+	name := fmt.Sprintf("defer.lambda.thunk.%d", cg.strCount)
+	cg.strCount++
+
+	// Collect free variables from the lambda BODY (skip lambda params).
+	localNames := map[string]bool{}
+	for _, p := range lambda.Params {
+		localNames[p.Name] = true
+	}
+	freeNames := collectFreeVars(lambda.Body, localNames)
+
+	type capture struct {
+		name   string
+		val    value.Value  // alloca pointer (byRef) or loaded value (!byRef)
+		llvmTy irtypes.Type
+		byRef  bool
+	}
+	var captures []capture
+	for _, n := range freeNames {
+		entry, ok := cg.curScope.lookup(n)
+		if !ok {
+			continue
+		}
+		if _, isFunc := entry.val.(*ir.Func); isFunc {
+			continue
+		}
+		if entry.isAlloc {
+			captures = append(captures, capture{n, entry.val, entry.val.Type(), true})
+		} else {
+			captures = append(captures, capture{n, entry.val, entry.val.Type(), false})
+		}
+	}
+
+	// Build heap-allocated env struct.
+	var envI8 value.Value = constant.NewNull(irtypes.I8Ptr)
+	var envStructType *irtypes.StructType
+
+	if len(captures) > 0 {
+		fields := make([]irtypes.Type, len(captures))
+		for i, c := range captures {
+			fields[i] = c.llvmTy
+		}
+		envStructType = irtypes.NewStruct(fields...)
+
+		nullPtr := constant.NewNull(irtypes.NewPointer(envStructType))
+		oneGEP := block.NewGetElementPtr(envStructType, nullPtr, constant.NewInt(irtypes.I32, 1))
+		envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
+		envI8 = block.NewCall(cg.ensureMalloc(), envSize)
+
+		envTypedPtr := block.NewBitCast(envI8, irtypes.NewPointer(envStructType))
+		for i, c := range captures {
+			gep := block.NewGetElementPtr(envStructType, envTypedPtr,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, int64(i)))
+			block.NewStore(c.val, gep)
+		}
+	}
+
+	// Create the thunk function: void(i8* env)
+	f := cg.mod.NewFunc(name, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
+	entryBlock := f.NewBlock("entry")
+
+	prevFn := cg.curFn
+	prevScope := cg.curScope
+	prevDefers := cg.pendingDefers
+	prevDeferFrames := cg.pendingDeferFrames
+	cg.curFn = f
+	cg.pendingDefers = nil
+	cg.pendingDeferFrames = nil
+	global := prevScope
+	for global.parent != nil {
+		global = global.parent
+	}
+	cg.curScope = newScope(global)
+
+	// Unpack captures from env.
+	if len(captures) > 0 {
+		envRaw := f.Params[0]
+		envTypedPtr := entryBlock.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
+		for i, c := range captures {
+			gep := entryBlock.NewGetElementPtr(envStructType, envTypedPtr,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, int64(i)))
+			if c.byRef {
+				// Load the alloca pointer and put it directly in scope.
+				allocaPtr := entryBlock.NewLoad(c.llvmTy, gep)
+				cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
+			} else {
+				alloca := entryBlock.NewAlloca(c.llvmTy)
+				loaded := entryBlock.NewLoad(c.llvmTy, gep)
+				entryBlock.NewStore(loaded, alloca)
+				cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
+			}
+		}
+	}
+
+	// Register lambda params (none for "defer fn() void = body", but support them for completeness).
+	for i, p := range lambda.Params {
+		// Lambda thunks take no user params — these would be zero-valued placeholders.
+		_ = i
+		pt, err := cg.tinTypeToLLVM(p.Type)
+		if err == nil {
+			alloca := entryBlock.NewAlloca(pt)
+			cg.curScope.set(p.Name, &scopeEntry{val: alloca, isAlloc: true})
+		}
+	}
+
+	// Emit the lambda body.
+	if _, err := cg.genBody(entryBlock, lambda.Body, irtypes.Void); err != nil {
+		cg.curFn = prevFn
+		cg.curScope = prevScope
+		cg.pendingDefers = prevDefers
+		cg.pendingDeferFrames = prevDeferFrames
+		return nil, nil, err
+	}
+
+	cg.curFn = prevFn
+	cg.curScope = prevScope
+	cg.pendingDefers = prevDefers
+	cg.pendingDeferFrames = prevDeferFrames
+
 	fnI8 := block.NewBitCast(f, irtypes.I8Ptr)
 	return fnI8, envI8, nil
 }
@@ -1648,4 +1801,237 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	}
 
 	return afterBlock, nil
+}
+
+// genArrayDestructDecl handles:
+//   let [a, b] [T] = arr          — uniform typed (compile-time indexing)
+//   let [a, b] [T1, T2] = arr     — per-slot typed from [any]  (runtime bounds check)
+//   let [x, ...xs] [T] = arr      — rest split
+//   let [a, b] res = arr          — named type alias resolved to per-slot types
+func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDecl) (*ir.Block, error) {
+	// Resolve named type alias (e.g. `type res = @[i32, bool]`)
+	if s.NamedType != nil && len(s.ElemTypes) == 0 {
+		// Look up the named type in typeAliases
+		typeName := ""
+		if st, ok := s.NamedType.(*ast.SimpleType); ok {
+			typeName = st.Name
+		}
+		if typeName != "" {
+			if aliasedTE, ok2 := cg.typeAliases[typeName]; ok2 {
+				if tat, ok3 := aliasedTE.(*ast.TupleArrayType); ok3 {
+					s = &ast.ArrayDestructDecl{
+						Names:     s.Names,
+						ElemTypes: tat.ElemTypes,
+						IsAny:     true,
+						Value:     s.Value,
+					}
+				}
+			}
+		}
+	}
+
+	arrVal, err := cg.genExpr(block, s.Value)
+	if err != nil {
+		return nil, err
+	}
+	if arrVal == nil {
+		return block, nil
+	}
+
+	// Count regular (non-rest) names and find rest name index
+	regularCount := 0
+	restIdx := -1
+	for i, n := range s.Names {
+		if len(n) > 3 && n[:3] == "..." {
+			restIdx = i
+		} else {
+			regularCount++
+		}
+	}
+
+	// For [any] or per-slot typed: emit runtime bounds check
+	if s.IsAny {
+		arrAlloca := block.NewAlloca(arrVal.Type())
+		block.NewStore(arrVal, arrAlloca)
+		lenGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		arrLen := block.NewLoad(irtypes.I64, lenGep)
+
+		needed := constant.NewInt(irtypes.I64, int64(regularCount))
+		cond := block.NewICmp(enum.IPredSLT, arrLen, needed)
+
+		id := cg.labelCount
+		cg.labelCount++
+		panicBlock := cg.curFn.NewBlock(fmt.Sprintf("destruct.panic.%d", id))
+		okBlock := cg.curFn.NewBlock(fmt.Sprintf("destruct.ok.%d", id))
+		block.NewCondBr(cond, panicBlock, okBlock)
+
+		msg := cg.newGlobalString(fmt.Sprintf("array destructuring: need %d elements, got fewer", regularCount))
+		panicBlock.NewCall(cg.ensurePanicFn(), msg)
+		// Use a proper ret (not unreachable) so that recovered panics can return.
+		retType := cg.curFn.Sig.RetType
+		if irtypes.IsVoid(retType) {
+			panicBlock.NewRet(nil)
+		} else {
+			panicBlock.NewRet(cg.zeroValue(retType))
+		}
+
+		block = okBlock
+	}
+
+	// Determine uniform element LLVM type (used when ElemTypes has 1 entry or is empty)
+	var elemLLType irtypes.Type = anyFatPtrType()
+	if len(s.ElemTypes) == 1 {
+		elemLLType, err = cg.tinTypeToLLVM(s.ElemTypes[0])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Extract data pointer from fat array {elemPtr*, i64}
+	arrAlloca := block.NewAlloca(arrVal.Type())
+	block.NewStore(arrVal, arrAlloca)
+	ptrFieldGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ptrField := block.NewLoad(arrVal.Type().(*irtypes.StructType).Fields[0], ptrFieldGep)
+
+	// Extract each regular element
+	regIdx := 0
+	for _, name := range s.Names {
+		if len(name) > 3 && name[:3] == "..." {
+			continue
+		}
+
+		// Per-slot type or uniform type
+		var slotType irtypes.Type
+		if len(s.ElemTypes) > 1 {
+			slotType, err = cg.tinTypeToLLVM(s.ElemTypes[regIdx])
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			slotType = elemLLType
+		}
+
+		idxVal := constant.NewInt(irtypes.I64, int64(regIdx))
+		if pt, ok := ptrField.Type().(*irtypes.PointerType); ok {
+			elemGep := block.NewGetElementPtr(pt.ElemType, ptrField, idxVal)
+			loaded := block.NewLoad(pt.ElemType, elemGep)
+			coerced := cg.coerce(block, loaded, slotType)
+			alloca := block.NewAlloca(slotType)
+			block.NewStore(coerced, alloca)
+			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true})
+		}
+		regIdx++
+	}
+
+	// Handle rest: create a sub-slice starting at regularCount
+	if restIdx >= 0 {
+		restName := s.Names[restIdx][3:] // strip "..."
+
+		var elemSzBytes int64 = 8
+		if pt, ok := ptrField.Type().(*irtypes.PointerType); ok {
+			if sz := llvmTypeSize(pt.ElemType); sz > 0 {
+				elemSzBytes = int64(sz)
+			}
+		}
+
+		// Build a generic {i8*, i64} slice for _tin_slice_subslice
+		sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+		rawAlloca := block.NewAlloca(sliceType)
+
+		dataPtrAsI8 := block.NewBitCast(ptrField, irtypes.I8Ptr)
+		rawPtrGep := block.NewGetElementPtr(sliceType, rawAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		block.NewStore(dataPtrAsI8, rawPtrGep)
+
+		lenGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		arrLen := block.NewLoad(irtypes.I64, lenGep)
+		rawLenGep := block.NewGetElementPtr(sliceType, rawAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		block.NewStore(arrLen, rawLenGep)
+		rawSlice := block.NewLoad(sliceType, rawAlloca)
+
+		subFn := cg.ensureSliceSubslice()
+		subResult := block.NewCall(subFn, rawSlice,
+			constant.NewInt(irtypes.I64, int64(regularCount)),
+			constant.NewInt(irtypes.I64, elemSzBytes))
+
+		// Cast the {i8*, i64} result back to the original fat-array type
+		restType := arrVal.Type()
+		tmpAlloca := block.NewAlloca(sliceType)
+		block.NewStore(subResult, tmpAlloca)
+		castPtr := block.NewBitCast(tmpAlloca, irtypes.NewPointer(restType))
+		restVal := block.NewLoad(restType, castPtr)
+		restAlloca := block.NewAlloca(restType)
+		block.NewStore(restVal, restAlloca)
+		cg.curScope.set(restName, &scopeEntry{val: restAlloca, isAlloc: true})
+	}
+
+	return block, nil
+}
+
+// genStructDestructDecl handles: let {x, y} TypeName = expr
+func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructDecl) (*ir.Block, error) {
+	val, err := cg.genExpr(block, s.Value)
+	if err != nil {
+		return nil, err
+	}
+	if val == nil {
+		return block, nil
+	}
+
+	// Resolve the struct type name
+	typeName := ""
+	switch t := s.StructType.(type) {
+	case *ast.SimpleType:
+		typeName = t.Name
+	case *ast.GenericType:
+		typeName = t.Name
+	}
+	if typeName == "" {
+		return nil, fmt.Errorf("struct destructuring: cannot determine struct type name")
+	}
+
+	concreteName := typeName
+	if aliasedType, ok := cg.typeAliases[typeName]; ok {
+		if st, ok2 := aliasedType.(*ast.SimpleType); ok2 {
+			concreteName = st.Name
+		}
+	}
+
+	fields, ok := cg.structFields[concreteName]
+	if !ok {
+		return nil, fmt.Errorf("struct destructuring: unknown struct type '%s'", concreteName)
+	}
+
+	llType, err := cg.tinTypeToLLVM(s.StructType)
+	if err != nil {
+		return nil, err
+	}
+
+	structAlloca := block.NewAlloca(llType)
+	block.NewStore(val, structAlloca)
+
+	_ = fields // validated above; actual indices computed via fieldIndex (includes hidden fields)
+	for _, fieldName := range s.Names {
+		fieldIdx := cg.fieldIndex(concreteName, fieldName)
+		if fieldIdx < 0 {
+			return nil, fmt.Errorf("struct destructuring: field '%s' not found in struct '%s'", fieldName, concreteName)
+		}
+
+		fieldGep := block.NewGetElementPtr(llType, structAlloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		if pt, ok := fieldGep.Type().(*irtypes.PointerType); ok {
+			fieldVal := block.NewLoad(pt.ElemType, fieldGep)
+			alloca := block.NewAlloca(pt.ElemType)
+			block.NewStore(fieldVal, alloca)
+			cg.curScope.set(fieldName, &scopeEntry{val: alloca, isAlloc: true})
+		}
+	}
+
+	return block, nil
 }

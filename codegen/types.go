@@ -128,6 +128,9 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			}
 		}
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
+	case *ast.TupleArrayType:
+		// @[T1, T2, ...] resolves to [any] — fat array of any values.
+		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
 	}
 	return irtypes.I64, nil
 }

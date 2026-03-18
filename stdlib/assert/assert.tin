@@ -33,6 +33,16 @@ fn equals_f64(expected f64, actual f64) =
 fn fails(msg string) =
   abort(msg)
 
+fn panics(f fn() void) =
+  let did_panic bool = false
+  defer fn() void =
+    let msg string = recover()
+    if len(msg) > 0 :
+      did_panic = true
+  f()
+  if !did_panic :
+    abort("expected panic but none occurred")
+
 export {
-  ok, not_ok, equals, not_equals, equals_str, equals_f64, fails
+  ok, not_ok, equals, not_equals, equals_str, equals_f64, fails, panics
 } as assert

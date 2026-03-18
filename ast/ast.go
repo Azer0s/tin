@@ -118,6 +118,45 @@ type DataDecl struct {
 	Variants   []DataVariant
 }
 
+// ArrayDestructDecl: let [a, b] [T] = expr
+//                    let [a, b] [T1, T2] = expr  (per-slot types, implies [any] source)
+//                    let [x, ...xs] [T] = expr   (rest split)
+//                    let [a, b] res = expr        (named type alias, resolved at codegen)
+type ArrayDestructDecl struct {
+	base
+	Names     []string   // variable names; rest name is prefixed with "..."
+	ElemTypes []TypeExpr // len==1 for uniform [T]; len>1 for per-slot types
+	IsAny     bool       // true → runtime bounds check required
+	NamedType TypeExpr   // non-nil when a named type alias is used (e.g. `type res = @[i32, bool]`)
+	Value     Node
+}
+
+// StructDestructDecl: let {x, y} TypeName = expr
+type StructDestructDecl struct {
+	base
+	Names      []string
+	StructType TypeExpr
+	Value      Node
+}
+
+// TupleArrayType: @[T1, T2, ...] — a typed-destructuring annotation
+// indicating a [any] array whose elements are typed per-slot.
+type TupleArrayType struct {
+	ElemTypes []TypeExpr
+}
+
+func (t *TupleArrayType) typeExprMarker() {}
+func (t *TupleArrayType) String() string {
+	s := "@["
+	for i, e := range t.ElemTypes {
+		if i > 0 {
+			s += ", "
+		}
+		s += e.String()
+	}
+	return s + "]"
+}
+
 type UseDecl struct {
 	base
 	Path     string       // "io" or "extern"

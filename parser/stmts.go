@@ -19,7 +19,7 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 
 	switch p.peek().Type {
 	case lexer.KW_LET, lexer.KW_CONST:
-		return p.parseVarDecl()
+		return p.parseLetStmt()
 	case lexer.KW_FN:
 		return p.parseFuncDecl(tags, false)
 	case lexer.KW_STRUCT:
@@ -550,5 +550,194 @@ func augOp(t lexer.TokenType) (string, bool) {
 		return "++=", true
 	}
 	return "", false
+}
+
+// parseLetStmt handles let/const statements including destructuring forms.
+// Returns *ast.VarDecl, *ast.ArrayDestructDecl, or *ast.StructDestructDecl.
+func (p *Parser) parseLetStmt() (ast.Node, error) {
+	pos := p.curPos()
+	isConst := p.peek().Type == lexer.KW_CONST
+	p.advance() // consume let/const
+
+	// Array destructuring: let [a, b] [T] = expr
+	//                       let [x, ...xs] [T] = expr
+	//                       let [a, b] [T1, T2] = expr
+	if p.check(lexer.LBRACKET) {
+		return p.parseArrayDestructDecl(isConst, pos)
+	}
+
+	// Struct destructuring: let {x, y} TypeName = expr
+	if p.check(lexer.LBRACE) {
+		return p.parseStructDestructDecl(isConst, pos)
+	}
+
+	// Normal variable declaration
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	var typ ast.TypeExpr
+	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.SEMI) {
+		typ, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+	var val ast.Node
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+		val, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
+}
+
+// parseArrayDestructDecl parses: let [a, b] [T] = expr
+//                                  let [x, ...xs] [T] = expr
+//                                  let [a, b] [T1, T2] = expr
+func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDestructDecl, error) {
+	p.advance() // consume [
+	var names []string
+	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		if p.check(lexer.DOTDOTDOT) {
+			p.advance() // consume ...
+			nameTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, "..."+nameTok.Literal)
+		} else {
+			nameTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, nameTok.Literal)
+		}
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return nil, err
+	}
+
+	// Validate: at most one rest name, must be last; if rest present, total == 2
+	restCount := 0
+	for i, n := range names {
+		if len(n) > 3 && n[:3] == "..." {
+			restCount++
+			if i != len(names)-1 {
+				return nil, p.errorf("rest element '...%s' must be the last in destructuring pattern", n[3:])
+			}
+		}
+	}
+	if restCount > 0 && len(names) != 2 {
+		return nil, p.errorf("rest destructuring requires exactly 2 elements (one name + one ...rest)")
+	}
+
+	// Parse type annotation: [T] or [T1, T2, ...] or @[T1, T2, ...] or NamedType
+	var elemTypes []ast.TypeExpr
+	isAny := false
+	var namedType ast.TypeExpr // non-nil when type is a named alias (resolved at codegen)
+
+	if p.check(lexer.AT) {
+		// @[T1, T2, ...] — tuple-array type alias sugar
+		t, err := p.parseTypeExpr() // parseTypeSingle handles @[...]
+		if err != nil {
+			return nil, err
+		}
+		if tat, ok := t.(*ast.TupleArrayType); ok {
+			elemTypes = tat.ElemTypes
+			isAny = true
+		} else {
+			namedType = t
+		}
+	} else if p.check(lexer.LBRACKET) {
+		p.advance() // consume [
+		// Parse all types separated by commas
+		for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+			t, err := p.parseTypeExpr()
+			if err != nil {
+				return nil, err
+			}
+			elemTypes = append(elemTypes, t)
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+		if _, err := p.expect(lexer.RBRACKET); err != nil {
+			return nil, err
+		}
+		if len(elemTypes) == 1 {
+			if st, ok := elemTypes[0].(*ast.SimpleType); ok && st.Name == "any" {
+				isAny = true
+			}
+		} else if len(elemTypes) > 1 {
+			isAny = true // multiple types → [any] with per-slot cast
+		}
+	} else if !p.check(lexer.ASSIGN) {
+		// Named type alias (e.g. `res` from `type res = @[i32, bool]`)
+		t, err := p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+		namedType = t
+	}
+	// Validate: per-slot types count must match non-rest names
+	nonRestCount := len(names) - restCount
+	if len(elemTypes) > 1 && len(elemTypes) != nonRestCount {
+		return nil, p.errorf("number of per-slot types (%d) must match number of variables (%d)", len(elemTypes), nonRestCount)
+	}
+
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+	val, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	_ = pos
+	_ = isConst
+	return &ast.ArrayDestructDecl{Names: names, ElemTypes: elemTypes, IsAny: isAny, NamedType: namedType, Value: val}, nil
+}
+
+// parseStructDestructDecl parses: let {x, y} TypeName = expr
+func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.StructDestructDecl, error) {
+	p.advance() // consume {
+	var names []string
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, nameTok.Literal)
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+
+	// Parse struct type
+	structType, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+	val, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	_ = pos
+	_ = isConst
+	return &ast.StructDestructDecl{Names: names, StructType: structType, Value: val}, nil
 }
 
