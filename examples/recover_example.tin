@@ -1,0 +1,29 @@
+// recover_example.tin — recover() built-in for catching panics
+// recover() called inside a deferred function catches the panic message
+// and prevents process exit.
+
+use assert
+
+fn panicky(msg string) void =
+  panic(msg)
+
+test "deferred recover captures panic message" =
+  let got string = ""
+  defer fn() void =
+    let msg = recover()
+    if len(msg) > 0 :
+      got = msg
+  panicky("oops")
+  assert::equals_str(got, "oops")
+
+test "recover in non-panicking defer returns empty string" =
+  let was_empty bool = true
+  defer fn() void =
+    let msg = recover()
+    was_empty = len(msg) == 0
+  assert::ok(was_empty)
+
+test "assert::panics catches any panic" =
+  assert::panics(fn() void =
+    panic("test panic")
+  )

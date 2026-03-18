@@ -78,3 +78,17 @@ let b mypoint = mypoint{9.0, 1.0}
 
 echo a.show()                    // first: 9, second: 1  (tuple default)
 echo b.show()                    // (9, 1)               (overridden)
+
+use assert
+
+test "type alias show method" =
+  let pt = point{3.0, 4.0}
+  assert::equals_str(pt.show(), "first: 3, second: 4")
+
+test "override show method" =
+  let mp2 = mypoint{5.0, 6.0}
+  assert::equals_str(mp2.show(), "(5, 6)")
+
+test "int_pair" =
+  let nums2 = int_pair{7, 8}
+  assert::equals_str(nums2.show(), "first: 7, second: 8")

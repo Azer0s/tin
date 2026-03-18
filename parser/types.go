@@ -51,6 +51,28 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		}
 		return &ast.PointerType{Elem: elem, IsConst: isConst}, nil
 	}
+	// @[T1, T2, ...] — TupleArrayType (typed per-slot destructuring annotation)
+	if p.check(lexer.AT) {
+		p.advance() // consume @
+		if _, err := p.expect(lexer.LBRACKET); err != nil {
+			return nil, err
+		}
+		var elems []ast.TypeExpr
+		for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+			t, err := p.parseTypeExpr()
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, t)
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+		if _, err := p.expect(lexer.RBRACKET); err != nil {
+			return nil, err
+		}
+		return &ast.TupleArrayType{ElemTypes: elems}, nil
+	}
 	// [T] or [T; N] – array
 	if p.check(lexer.LBRACKET) {
 		p.advance()

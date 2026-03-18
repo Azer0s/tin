@@ -89,3 +89,21 @@ print_label(p)            // coords
 
 echo sum_first_last(item) // 84
 echo sum_first_last(p)    // 30
+
+use assert
+
+test "int_list first and last" =
+  let lst = int_list{val: 42, count: 1, tag: "t"}
+  assert::equals(first(lst), 42)
+  assert::equals(last(lst), 42)
+
+test "pair first and last" =
+  let p2 = pair{a: 10, b: 20, tag: "coords"}
+  assert::equals(first(p2), 10)
+  assert::equals(last(p2), 20)
+
+test "sum_first_last" =
+  let lst2 = int_list{val: 5, count: 1, tag: "t"}
+  assert::equals(sum_first_last(lst2), 10)
+  let p3 = pair{a: 3, b: 7, tag: "t"}
+  assert::equals(sum_first_last(p3), 10)

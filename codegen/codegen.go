@@ -84,6 +84,10 @@ type CodeGen struct {
 
 	// tinPanicFn is the lazily declared _tin_panic(msg i8*) extern.
 	tinPanicFn *ir.Func
+	// tinRecoverFn is the lazily declared _tin_recover() -> TinString extern.
+	tinRecoverFn *ir.Func
+	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
+	sliceSubsliceFn *ir.Func
 
 	// ARC runtime functions (lazily declared).
 	rcAllocFn *ir.Func // _tin_rc_alloc(size i64) i8*

@@ -64,3 +64,22 @@ echo cd                       // countdown(from=5)
 
 for v in cd:
   echo v                      // 5, 4, 3, 2, 1
+
+use assert
+
+test "print trait produces string" =
+  let p2d = point2d{x: 3, y: 7}
+  assert::equals_str("{p2d}", "(3, 7)")
+
+test "int_range len and get" =
+  let r2 = int_range{start_val: 1, end_val: 6}
+  assert::equals(r2.len(), 5)
+  assert::equals(r2.get(0), 1)
+  assert::equals(r2.get(4), 5)
+
+test "countdown iteration sum" =
+  let cd2 = countdown{from_val: 4}
+  let s i64 = 0
+  for let v i64 in cd2:
+    s = s + v
+  assert::equals(s, 10)

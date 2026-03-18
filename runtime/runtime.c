@@ -183,9 +183,42 @@ void _tin_defer_pop(int64_t n) {
 
 // -- Panic / assert
 
-// Run all pending deferred calls in LIFO order, print the panic message, then exit
-// Defers run first so cleanup output appears before the fatal message
+// Return a sub-slice starting at index `start`, with `elem_size`-byte elements.
+// Allocates a fresh copy with an ARC header (rc=1) so retain/release work correctly.
+TinSlice _tin_slice_subslice(TinSlice s, int64_t start, int64_t elem_size) {
+    if (start >= s.len) return (TinSlice){NULL, 0};
+    int64_t new_len = s.len - start;
+    size_t data_size = (size_t)(new_len * elem_size);
+    char *block = (char *)malloc(sizeof(int64_t) + data_size);
+    *(int64_t *)block = 1;  /* rc = 1 */
+    if (data_size > 0) memcpy(block + sizeof(int64_t), (char *)s.ptr + start * elem_size, data_size);
+    return (TinSlice){block + sizeof(int64_t), new_len};
+}
+
+// recover() support: stores the current panic message so a deferred function
+// can retrieve and clear it via _tin_recover().
+static const char *_tin_panic_msg = NULL;
+
+// An immortal (rc=-1) empty string returned by _tin_recover() when not panicking.
+// The TIN_IMMORTAL_RC sentinel is placed immediately before the data byte so that
+// _tin_release() treats this pointer as a static and skips deallocation.
+static const struct { int64_t rc; char c; } _tin_empty_str_sentinel = { TIN_IMMORTAL_RC, '\0' };
+
+// Called from a deferred function to retrieve and clear the current panic message.
+// Returns an empty TinString if not currently panicking.
+TinString _tin_recover(void) {
+    if (_tin_panic_msg == NULL)
+        return (TinString){ (const char *)&_tin_empty_str_sentinel.c, 0 };
+    TinString s = _tin_str_from_cstr(_tin_panic_msg);
+    _tin_panic_msg = NULL;  // marks as recovered
+    return s;
+}
+
+// Run all pending deferred calls in LIFO order, print the panic message, then exit.
+// Defers run first so cleanup output appears before the fatal message.
+// If a deferred function calls recover(), _tin_panic_msg is cleared and we return.
 void _tin_panic(const char *msg) {
+    _tin_panic_msg = msg;
     TinDeferEntry *e = _tin_defer_chain;
     _tin_defer_chain = NULL; // prevent re-entrant panic from re-running
     while (e != NULL) {
@@ -193,6 +226,7 @@ void _tin_panic(const char *msg) {
         if (e->fn) e->fn(e->env);
         e = next;
     }
+    if (_tin_panic_msg == NULL) return;  // a deferred fn called recover()
     fflush(stdout);
     fprintf(stderr, "tin panic: %s\n", msg);
     exit(1);

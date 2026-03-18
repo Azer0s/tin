@@ -645,6 +645,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if fn.Name == "panic" && len(e.Args) == 1 {
 			return cg.genBuiltinPanic(block, e.Args[0])
 		}
+		// Built-in: recover() — retrieve panic message from deferred function.
+		if fn.Name == "recover" && len(e.Args) == 0 {
+			return cg.genBuiltinRecover(block)
+		}
 		// Built-in: default(TypeName) — returns the zero value for a type.
 		// Used in generic code to produce a typed zero without knowing the concrete type.
 		if fn.Name == "default" && len(e.Args) == 1 {
@@ -1915,6 +1919,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	prevFn := cg.curFn
 	prevScope := cg.curScope
+	prevDefers := cg.pendingDefers
+	prevDeferFrames := cg.pendingDeferFrames
+	cg.pendingDefers = nil
+	cg.pendingDeferFrames = nil
 	cg.curFn = f
 	// Start a fresh scope (not inheriting outer scope — captured values are
 	// explicitly loaded from the env struct below).
@@ -1984,6 +1992,8 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	cg.curFn = prevFn
 	cg.curScope = prevScope
+	cg.pendingDefers = prevDefers
+	cg.pendingDeferFrames = prevDeferFrames
 
 	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr }
 	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)

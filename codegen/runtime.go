@@ -358,8 +358,46 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 		msgPtr = block.NewBitCast(msg, irtypes.I8Ptr)
 	}
 	block.NewCall(cg.ensurePanicFn(), msgPtr)
-	block.NewUnreachable()
+	// _tin_panic normally calls exit(1) and never returns.  However, when a
+	// deferred function calls recover(), _tin_panic returns instead of exiting.
+	// Emit a return (rather than unreachable) so the IR is valid in that case.
+	retType := cg.curFn.Sig.RetType
+	if irtypes.IsVoid(retType) {
+		block.NewRet(nil)
+	} else {
+		block.NewRet(cg.zeroValue(retType))
+	}
 	return nil, nil
+}
+
+// ensureSliceSubslice lazily declares _tin_slice_subslice(TinSlice s, i64 start, i64 elem_size) -> TinSlice.
+// TinSlice has the same layout as a fat array: { i8*, i64 }.
+func (cg *CodeGen) ensureSliceSubslice() *ir.Func {
+	if cg.sliceSubsliceFn != nil {
+		return cg.sliceSubsliceFn
+	}
+	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	cg.sliceSubsliceFn = cg.mod.NewFunc("_tin_slice_subslice", sliceType,
+		ir.NewParam("s", sliceType),
+		ir.NewParam("start", irtypes.I64),
+		ir.NewParam("elem_size", irtypes.I64),
+	)
+	return cg.sliceSubsliceFn
+}
+
+// ensureRecoverFn lazily declares the _tin_recover() -> TinString extern.
+func (cg *CodeGen) ensureRecoverFn() *ir.Func {
+	if cg.tinRecoverFn != nil {
+		return cg.tinRecoverFn
+	}
+	cg.tinRecoverFn = cg.mod.NewFunc("_tin_recover", stringFatPtrType())
+	return cg.tinRecoverFn
+}
+
+// genBuiltinRecover implements recover(): returns the panic message from a
+// deferred function, or an empty string if not currently panicking.
+func (cg *CodeGen) genBuiltinRecover(block *ir.Block) (value.Value, error) {
+	return block.NewCall(cg.ensureRecoverFn()), nil
 }
 
 // ensureSnprintf lazily declares the snprintf external function.

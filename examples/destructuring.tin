@@ -1,0 +1,50 @@
+// destructuring.tin — array and struct destructuring
+// Demonstrates let [a, b] [T] = arr, let [a, b] [T1, T2] = arr,
+// let [x, ...xs] [T] = arr, let {x, y} TypeName = expr,
+// and @[T1, T2] type alias for per-slot destructuring.
+
+use assert
+
+struct point =
+  x i64
+  y i64
+
+type coord = @[i32, bool]
+
+test "uniform array destructuring" =
+  let arr [i64] = [10, 20, 30]
+  let [a, b] [i64] = arr
+  assert::equals(a, 10)
+  assert::equals(b, 20)
+
+test "per-slot typed any-array destructuring" =
+  let arr [any] = [42 as any, true as any]
+  let [n, flag] [i32, bool] = arr
+  assert::equals(n as i64, 42)
+  assert::ok(flag)
+
+test "rest split" =
+  let arr [i64] = [1, 2, 3, 4]
+  let [x, ...xs] [i64] = arr
+  assert::equals(x, 1)
+  assert::equals(len(xs), 3)
+  assert::equals(xs[0], 2)
+  assert::equals(xs[2], 4)
+
+test "struct destructuring" =
+  let p = point{x: 3, y: 4}
+  let {x, y} point = p
+  assert::equals(x, 3)
+  assert::equals(y, 4)
+
+test "type alias for per-slot destructuring" =
+  let arr [any] = [10 as any, false as any]
+  let [n, flag] coord = arr
+  assert::equals(n as i64, 10)
+  assert::not_ok(flag)
+
+test "any-array bounds failure panics" =
+  assert::panics(fn() void =
+    let arr [any] = [1 as any]
+    let [a, b] [any] = arr
+  )

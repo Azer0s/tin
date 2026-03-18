@@ -29,3 +29,17 @@ fn add(a i64, b i64) i64 = /* trivial add */ a + b
 
 echo add(3, 4) // prints 7
 echo add(/* left */ 10, /* right */ 20)
+
+use assert
+
+test "inline block comment does not affect expression" =
+  let x i64 = 10 /* + 100 */ + 5
+  assert::equals(x, 15)
+
+test "line comment does not affect value" =
+  let y i64 = 42 // not 43
+  assert::equals(y, 42)
+
+test "add with inline comments" =
+  assert::equals(add(/* left */ 10, /* right */ 20), 30)
+  assert::equals(add(3, 4), 7)
