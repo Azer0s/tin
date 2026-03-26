@@ -772,3 +772,47 @@ For generic implicit conversion traits like `trait[k] implicit[t] as static fn(v
 - `defer expr` registers a call to be executed before the function returns.
 - Multiple defers fire in LIFO order (last deferred runs first).
 - The deferred call fires on every exit path including early `return`.
+- `defer fn() void = body` defers an inline lambda. The lambda captures outer
+  variables by reference, so mutations inside propagate back to the caller.
+- `defer (fn() void = body)()` — immediately-invoked anonymous function also
+  works with defer.
+
+### recover
+- `recover()` is a built-in function that can only be called inside a `defer`'d
+  function.
+- If the enclosing function panicked, `recover()` returns the panic message as
+  a `string` and suppresses the panic (the process does not exit).
+- If no panic is in progress, `recover()` returns `""`.
+
+```rust
+fn safe(f fn() void) string =
+  let msg string = ""
+  defer fn() void =
+    msg = recover()
+  f()
+  return msg
+```
+
+### Array and struct destructuring
+
+```rust
+// Uniform array destructuring
+let arr [i64] = [1, 2, 3]
+let [a, b] [i64] = arr      // a=1, b=2
+
+// Per-slot from [any] with runtime bounds check
+let mixed [any] = [42 as any, true as any]
+let [n, flag] [i32, bool] = mixed   // n=42, flag=true
+
+// Rest split
+let [head, ...tail] [i64] = arr     // head=1, tail=[2,3]
+
+// Named type alias for per-slot pattern
+type res = @[i32, bool]
+let [code, ok] res = mixed          // code=42, ok=true
+
+// Struct destructuring
+struct point = x i64; y i64
+let p = point{x: 3, y: 4}
+let {x, y} point = p               // x=3, y=4
+```

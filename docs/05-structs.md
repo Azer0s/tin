@@ -24,6 +24,25 @@ supported:
 let pete = person{"Pete", 20}   // positional: name first, age second
 ```
 
+### Struct destructuring
+
+Destructuring extracts multiple fields into separate variables in a single
+`let` statement:
+
+```rust
+struct point =
+  x i64
+  y i64
+
+let p = point{x: 3, y: 4}
+let {x, y} point = p
+// x == 3, y == 4
+```
+
+The type name after `}` is required to tell the compiler the struct's field
+layout. Field order in the name list does not matter — each name is looked up
+by name, not position.
+
 ---
 
 ## Methods
