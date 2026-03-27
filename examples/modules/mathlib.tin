@@ -1,4 +1,4 @@
-// mathlib.tin — a simple math package
+// mathlib.tin - a simple math package
 // Compile: tin build mathlib.tin -o mathlib.o
 // This produces mathlib.o (object file) AND mathlib.tin.mod (declarations).
 

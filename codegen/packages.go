@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
-	"github.com/Azer0s/tin/lexer"
-	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/lexer"
+	"github.com/Azer0s/tin/parser"
 )
 
 func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {

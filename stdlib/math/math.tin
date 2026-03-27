@@ -1,4 +1,4 @@
-// stdlib/math — Mathematical functions
+// stdlib/math - Mathematical functions
 //
 // Wraps standard C math.h functions
 // Requires linking with libm: pass -lm when building

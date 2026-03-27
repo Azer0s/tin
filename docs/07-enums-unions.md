@@ -1,4 +1,4 @@
-# 07 – Enums & Unions
+# 07 - Enums & Unions
 
 ## Enums
 

@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // traitBaseName returns the bare name of a trait TypeExpr (ignoring type params).
@@ -167,7 +168,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 		cg.structTypeIDs[n.Name] = cg.nextTypeID
 		cg.nextTypeID++
 	}
-	// Final layout: [i32 type_id, vtable_0*, vtable_1*, …, user_field_0, …]
+	// Final layout: [i32 type_id, vtable_0*, vtable_1*, ..., user_field_0, ...]
 	// The leading i32 is always field 0; a *struct can be bitcast to *any
 	// and the type read directly from field 0.
 	st.Fields = append([]irtypes.Type{irtypes.I32}, append(vtableFieldTypes, userFieldTypes...)...)
@@ -420,7 +421,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 
 // buildTraitFatPtrType computes (and caches) the LLVM fat-pointer type for a
 // trait: { i8*, vtable_struct* }.  The vtable struct has one fn-ptr slot per
-// trait method, each with signature (i8* self, …) -> ret.
+// trait method, each with signature (i8* self, ...) -> ret.
 // traitImplKey returns a unique string key for a trait impl TypeExpr.
 // For "named" -> "named"; for "iter[i64]" -> "iter_i64".
 func traitImplKey(te ast.TypeExpr) string {
@@ -491,7 +492,7 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 	} else {
 		for _, m := range td.Methods {
 			methodNames = append(methodNames, m.Name)
-			// Wrapper signature: (i8* self, non-self params…) -> ret
+			// Wrapper signature: (i8* self, non-self params...) -> ret
 			params := []irtypes.Type{irtypes.I8Ptr}
 			for i, p := range m.Params {
 				if i == 0 {
@@ -532,7 +533,7 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 }
 
 // genTraitVtables generates, for each trait that structName implements:
-//  1. One wrapper function per trait method: structName__instKey__methodName(i8* self, …)
+//  1. One wrapper function per trait method: structName__instKey__methodName(i8* self, ...)
 //  2. One vtable global constant referencing those wrappers.
 func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 	for _, impl := range n.Implements {
@@ -919,8 +920,8 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 
 // genDataDecl registers a non-generic data type as a tagged union.
 // Layout: { i32 type_id, i8 variant_tag, [payload_bytes x i8] payload }
-// Field 0: i32  – compile-time type ID (same registry as structs, for any boxing)
-// Field 1: i8   – variant discriminant: None=0, typed variants 1, 2, …
+// Field 0: i32  - compile-time type ID (same registry as structs, for any boxing)
+// Field 1: i8   - variant discriminant: None=0, typed variants 1, 2, ...
 // Field 2: payload bytes (size = max variant payload)
 // Having type_id as field 0 means *data can be bitcast to *any.
 func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {

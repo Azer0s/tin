@@ -1,4 +1,4 @@
-// defer — register a call to run when the enclosing function returns.
+// defer - register a call to run when the enclosing function returns.
 //
 // Key properties:
 //   - The deferred call fires on EVERY exit path, including early return.
@@ -19,7 +19,7 @@ fn process(size i64) i64 =
     return 0 - 1            // buf still freed here
   return size * 2
 
-// Multiple defers: LIFO — b freed before a
+// Multiple defers: LIFO - b freed before a
 fn two_resources(n i64) i64 =
   let a = mem::malloc(16)
   defer mem::free(a)        // runs second

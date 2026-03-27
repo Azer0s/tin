@@ -35,7 +35,7 @@ struct robot(speaker) =
   fn speak(this robot) string =
     return "Beep boop, I am {this.id}"
 
-// Generic functions constrained by traits — monomorphized at each call site.
+// Generic functions constrained by traits - monomorphized at each call site.
 fn make_speak[t](s t) where t is speaker =
   echo s.speak()
 

@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
-	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/parser"
 )
 
 // Expression generation
@@ -342,93 +343,9 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case "%":
 		return block.NewSRem(left, right), nil
 	case "==":
-		if isFloat {
-			return block.NewFCmp(enum.FPredOEQ, left, right), nil
-		}
-		// any equality: dynamically dispatched by runtime.
-		if isAnyType(lt) || isAnyType(rt) {
-			if !isAnyType(lt) {
-				left = cg.boxToAny(block, left)
-			}
-			if !isAnyType(rt) {
-				right = cg.boxToAny(block, right)
-			}
-			cmp := block.NewCall(cg.ensureAnyEq(), left, right)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I64, 0)), nil
-		}
-		// atom == atom: compare CRC32 codes directly.
-		if isAtomType(lt) && isAtomType(rt) {
-			lcode := cg.extractAtomCode(block, left)
-			rcode := cg.extractAtomCode(block, right)
-			return block.NewICmp(enum.IPredEQ, lcode, rcode), nil
-		}
-		// atom == string or string == atom: convert atom to string, then strcmp.
-		if isAtomType(lt) && isFatPtrType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
-			lptr := cg.extractStringPtr(block, strVal)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		if isFatPtrType(lt) && isAtomType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, strVal)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		// String equality: compare via strcmp.
-		if isFatPtrType(lt) {
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		return block.NewICmp(enum.IPredEQ, left, right), nil
+		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false), nil
 	case "!=":
-		if isFloat {
-			return block.NewFCmp(enum.FPredONE, left, right), nil
-		}
-		// any inequality: dynamically dispatched by runtime.
-		if isAnyType(lt) || isAnyType(rt) {
-			if !isAnyType(lt) {
-				left = cg.boxToAny(block, left)
-			}
-			if !isAnyType(rt) {
-				right = cg.boxToAny(block, right)
-			}
-			cmp := block.NewCall(cg.ensureAnyEq(), left, right)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0)), nil
-		}
-		// atom != atom
-		if isAtomType(lt) && isAtomType(rt) {
-			lcode := cg.extractAtomCode(block, left)
-			rcode := cg.extractAtomCode(block, right)
-			return block.NewICmp(enum.IPredNE, lcode, rcode), nil
-		}
-		// atom != string or string != atom
-		if isAtomType(lt) && isFatPtrType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
-			lptr := cg.extractStringPtr(block, strVal)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		if isFatPtrType(lt) && isAtomType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, strVal)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		// String inequality: compare via strcmp.
-		if isFatPtrType(lt) {
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		return block.NewICmp(enum.IPredNE, left, right), nil
+		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true), nil
 	case "<":
 		if isFloat {
 			return block.NewFCmp(enum.FPredOLT, left, right), nil
@@ -536,6 +453,69 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	}
 
 	return constant.NewInt(irtypes.I64, 0), nil
+}
+
+// genEqNeqExpr implements shared handling for == and != operators.
+func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt irtypes.Type, isFloat bool, notEqual bool) value.Value {
+	if isFloat {
+		if notEqual {
+			return block.NewFCmp(enum.FPredONE, left, right)
+		}
+		return block.NewFCmp(enum.FPredOEQ, left, right)
+	}
+
+	pred := enum.IPredEQ
+	if notEqual {
+		pred = enum.IPredNE
+	}
+
+	// any equality/inequality: dynamically dispatched by runtime.
+	if isAnyType(lt) || isAnyType(rt) {
+		if !isAnyType(lt) {
+			left = cg.boxToAny(block, left)
+		}
+		if !isAnyType(rt) {
+			right = cg.boxToAny(block, right)
+		}
+		cmp := block.NewCall(cg.ensureAnyEq(), left, right)
+		if notEqual {
+			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0))
+		}
+		return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I64, 0))
+	}
+
+	// atom ==/!= atom: compare CRC32 codes directly.
+	if isAtomType(lt) && isAtomType(rt) {
+		lcode := cg.extractAtomCode(block, left)
+		rcode := cg.extractAtomCode(block, right)
+		return block.NewICmp(pred, lcode, rcode)
+	}
+
+	// atom <-> string: convert atom to string, then strcmp.
+	if isAtomType(lt) && isFatPtrType(rt) {
+		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
+		lptr := cg.extractStringPtr(block, strVal)
+		rptr := cg.extractStringPtr(block, right)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+	if isFatPtrType(lt) && isAtomType(rt) {
+		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
+		lptr := cg.extractStringPtr(block, left)
+		rptr := cg.extractStringPtr(block, strVal)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+
+	// String equality/inequality: compare via strcmp.
+	if isFatPtrType(lt) {
+		lptr := cg.extractStringPtr(block, left)
+		rptr := cg.extractStringPtr(block, right)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+
+	return block.NewICmp(pred, left, right)
 }
 
 func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
@@ -738,7 +718,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// Determine the first argument: if the method expects a pointer
 			// receiver (*Struct), pass the address of the object rather than
 			// its value so that mutations through `this` are visible to the caller.
-			var thisArg value.Value = objVal
+			thisArg := objVal
 			if f, ok2 := callee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
 				firstParam := f.Sig.Params[0]
 				if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
@@ -1177,14 +1157,14 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// userOff = 1 (type_id) + vtable fields
 	userOff := 1 + vtableOff
 
-	// Initialise the leading i32 type_id field (index 0).
+	// Initialize the leading i32 type_id field (index 0).
 	if typeID, ok := cg.structTypeIDs[e.TypeName]; ok {
 		typeIDGep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
 	}
 
-	// Initialise embedded vtable pointer fields (indices 1 … vtableOff).
+	// Initialize embedded vtable pointer fields (indices 1 ... vtableOff).
 	for i, instKey := range cg.structVtableOrder[e.TypeName] {
 		vtableKey := e.TypeName + "__" + instKey
 		if vg, ok := cg.traitVtableGlobals[vtableKey]; ok {
@@ -1852,7 +1832,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 			continue
 		}
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
-			continue // global function – reachable by name, no capture needed
+			continue // global function - reachable by name, no capture needed
 		}
 		var val value.Value
 		var ty irtypes.Type
@@ -2125,9 +2105,9 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	}
 
 	// Build result string using snprintf with a two-pass approach:
-	//   1. snprintf(NULL, 0, fmt, ...) → returns the required length (excluding NUL).
-	//   2. malloc(len+1) → allocate exact buffer.
-	//   3. snprintf(buf, len+1, fmt, ...) → fill buffer.
+	//   1. snprintf(NULL, 0, fmt, ...) -> returns the required length (excluding NUL).
+	//   2. malloc(len+1) -> allocate exact buffer.
+	//   3. snprintf(buf, len+1, fmt, ...) -> fill buffer.
 	// This avoids a fixed-size buffer and handles arbitrarily long interpolations.
 	fmtStr := strings.Join(fmtParts, "")
 	fmtPtr := cg.newGlobalString(fmtStr)
@@ -2222,7 +2202,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			// genLValue failed for the sub-expression (e.g. a non-lvalue like a
 			// function call return value).  Fall back to a temporary alloca; this
 			// means field-writes on temporaries are discarded, but that is the
-			// pre-existing behaviour for such expressions.
+			// pre-existing behavior for such expressions.
 			obj, err2 := cg.genExpr(block, e.Expr)
 			if err2 != nil {
 				return nil, err2

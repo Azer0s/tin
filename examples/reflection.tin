@@ -1,4 +1,4 @@
-// reflection.tin — demonstrates typeof, traitof, fieldnames, fieldtypes,
+// reflection.tin - demonstrates typeof, traitof, fieldnames, fieldtypes,
 //                  getfield, setfield (including runtime dispatch via `any`)
 //
 // Build:  tin build examples/reflection.tin

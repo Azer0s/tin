@@ -410,7 +410,7 @@ fn malloc_zeroed(s size_t) *void =
 ### Control tags
 
 Tags are written in lowercase with underscores (`#tag_name`) and describe the
-**capability or property** of the annotated construct. Syntax: `fn{#tag} name(…)`.
+**capability or property** of the annotated construct. Syntax: `fn{#tag} name(...)`.
 
 #### `#pure`  -  no observable side effects (enforced)
 
@@ -441,7 +441,7 @@ fn{#pure} read_only() i64 =
 
 #### `#allow_sideffect`  -  escape hatch inside a `#pure` function
 
-A tagged block `{ #allow_sideffect } { … }` suppresses purity checks for its body,
+A tagged block `{ #allow_sideffect } { ... }` suppresses purity checks for its body,
 allowing side effects in an otherwise pure function.
 
 ```rust
@@ -774,7 +774,7 @@ For generic implicit conversion traits like `trait[k] implicit[t] as static fn(v
 - The deferred call fires on every exit path including early `return`.
 - `defer fn() void = body` defers an inline lambda. The lambda captures outer
   variables by reference, so mutations inside propagate back to the caller.
-- `defer (fn() void = body)()` — immediately-invoked anonymous function also
+- `defer (fn() void = body)()` - immediately-invoked anonymous function also
   works with defer.
 
 ### recover

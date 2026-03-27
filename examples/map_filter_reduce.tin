@@ -1,4 +1,4 @@
-// Generic map, filter, reduce, any, and all — curried higher-order functions
+// Generic map, filter, reduce, any, and all - curried higher-order functions
 // using type parameters, closures, and dynamic array building with ++=.
 // Demonstrates the |> pipe operator for readable data-transformation pipelines.
 use assert

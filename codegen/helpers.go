@@ -46,7 +46,7 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 
 // fieldIndex returns the LLVM field index for a named user field, accounting
 // for the leading i32 type_id and vtable pointer fields at the front.
-// Layout: [i32 type_id, vtable_0*, …, user_field_0, …]
+// Layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]
 
 // isStringType returns true if t is the tin string fat-pointer type {i8*, i64}.
 
@@ -143,7 +143,7 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 			} else if id, ok2 := cg.unionTypeIDs[st.Name()]; ok2 {
 				tag = id
 			} else {
-				tag = anyTagPtr // unknown named type – treat as opaque pointer
+				tag = anyTagPtr // unknown named type - treat as opaque pointer
 			}
 		} else {
 			tag = anyTagInt

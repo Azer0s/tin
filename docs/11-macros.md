@@ -1,4 +1,4 @@
-# 11 – Macros
+# 11 - Macros
 
 Tin macros are compile-time templates. Every macro call is fully evaluated
 before the program runs  -  there is no macro call overhead at runtime.

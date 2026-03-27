@@ -1,4 +1,4 @@
-# 09 – Reflection & Runtime Type Information
+# 09 - Reflection & Runtime Type Information
 
 Tin includes a set of built-in reflection operators that let programs inspect
 types, traits, field names, and field values at runtime without any virtual
@@ -92,10 +92,10 @@ is called **boxing**:
 
 ```rust
 let x i64  = 42
-let a any  = x        // box: stores (type='i64', data→42)
+let a any  = x        // box: stores (type='i64', data->42)
 
 let p = point{x: 3, y: 4}
-let ap any = p        // box: stores (type='point', data→copy of p)
+let ap any = p        // box: stores (type='point', data->copy of p)
 ```
 
 The stored type identity is exact  -  boxing a `rect` stores type `'rect`, not
@@ -539,7 +539,7 @@ compiler generates a **shim** wrapper:
 - The shim has the fat-pointer calling convention (first arg is `i8* env`,
   then the Tin-typed parameters).
 - Inside the shim, arguments are coerced to the original function's C-level
-  types (e.g., fat-string `{i8*,i64}` → raw `i8*`).
+  types (e.g., fat-string `{i8*,i64}` -> raw `i8*`).
 - The original function is called, and the return value is wrapped back to
   Tin conventions via `wrapFromExtern`.
 - The fat pointer is `{ shim_ptr, null }` (no environment needed for

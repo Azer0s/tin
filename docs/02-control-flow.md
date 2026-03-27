@@ -1,4 +1,4 @@
-# 02 – Control Flow
+# 02 - Control Flow
 
 ## if / else
 
@@ -235,4 +235,4 @@ else:
   echo a as string
 ```
 
-See [07 – Enums & Unions](07-enums-unions.md) for details.
+See [07 - Enums & Unions](07-enums-unions.md) for details.

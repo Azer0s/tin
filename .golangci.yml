@@ -1,0 +1,81 @@
+# golangci-lint v2 configuration for the Tin compiler.
+# Run: golangci-lint run ./...
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # --- Correctness ---
+    - errcheck      # unchecked error return values
+    - govet         # go vet checks (printf format, shadow, etc.)
+    - staticcheck   # comprehensive static analysis (SA*, S*, QF* checks)
+    - ineffassign   # assigned value never used
+    - errorlint     # enforce errors.Is/As; catch bare == comparisons with errors
+
+    # --- Maintenance ---
+    - misspell      # typos in comments and string literals
+    - unconvert     # unnecessary type conversions
+    - revive        # configurable style linter (modern golint replacement)
+    - dupl          # duplicate code blocks
+
+  settings:
+    errcheck:
+      # Explicit _ = f() assignments are intentional in this codebase
+      # (e.g. best-effort defers); do not flag them.
+      check-blank: false
+      # Temp-file cleanup; errors are not actionable in these contexts.
+      exclude-functions:
+        - os.Remove
+        - (*os.File).Close
+
+    staticcheck:
+      checks: ["all"]
+
+    revive:
+      rules:
+        # Godoc on every exported symbol is impractical for a compiler tool.
+        - name: exported
+          disabled: true
+        # LLVM-style abbreviations (llFile, rtC, cg) are conventional here.
+        - name: var-naming
+          disabled: true
+        # Single-letter receiver names are idiomatic in this codebase (cg, p, l).
+        - name: receiver-naming
+          disabled: true
+
+    misspell:
+      locale: US
+
+    dupl:
+      # 150 tokens - matches GoLand's "Duplicated code fragment" default.
+      threshold: 150
+
+  exclusions:
+    rules:
+      # Intentional blank-identifier discards of error returns used for
+      # best-effort operations (e.g. emitDefers inside terminator paths).
+      - linters: [errcheck]
+        text: "Error return value of .* is not checked"
+        source: "_ ="
+
+      # staticcheck SA1019: llir/llvm sometimes uses deprecated APIs internally;
+      # we cannot control that from the consumer side.
+      - linters: [staticcheck]
+        text: "SA1019"
+        path: "codegen/"
+
+      # lexer token constants intentionally use ALL_CAPS (e.g. INT_LIT, KW_LET);
+      # this is a deliberate, consistent naming convention across the lexer/parser.
+      - linters: [staticcheck]
+        text: "should not use ALL_CAPS"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      # Group stdlib / external / internal imports separately.
+      local-prefixes:
+        - github.com/Azer0s/tin
