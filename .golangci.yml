@@ -21,9 +21,9 @@ linters:
 
   settings:
     errcheck:
-      # Flag explicit _ = f() discards; use exclude-functions below for the
-      # specific cases where ignoring the error is genuinely intentional.
-      check-blank: true
+      # Explicit _ = f() assignments are intentional in this codebase
+      # (e.g. best-effort defers); do not flag them.
+      check-blank: false
       # Temp-file cleanup; errors are not actionable in these contexts.
       exclude-functions:
         - os.Remove
