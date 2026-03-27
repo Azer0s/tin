@@ -1,6 +1,6 @@
 module github.com/Azer0s/tin
 
-go 1.25.0
+go 1.24
 
 require github.com/llir/llvm v0.3.6
 
