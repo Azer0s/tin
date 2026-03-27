@@ -57,7 +57,7 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		}
 		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
 	case lexer.LBRACE:
-		// { #tag } { body }  tagged block — tags not yet parsed (legacy path)
+		// { #tag } { body }  tagged block - tags not yet parsed (legacy path)
 		if p.peekAt(1).Type == lexer.CONTROL_TAG {
 			return p.parseTaggedBlock()
 		}
@@ -490,7 +490,7 @@ func (p *Parser) parseTaggedBlockWithTags(tags []string) (*ast.TaggedBlock, erro
 			stmts = append(stmts, s)
 		}
 	}
-	// Consume the closing brace (if present — it may have been preceded by DEDENT)
+	// Consume the closing brace (if present - it may have been preceded by DEDENT)
 	if p.check(lexer.RBRACE) {
 		p.advance()
 	}
@@ -595,8 +595,9 @@ func (p *Parser) parseLetStmt() (ast.Node, error) {
 }
 
 // parseArrayDestructDecl parses: let [a, b] [T] = expr
-//                                  let [x, ...xs] [T] = expr
-//                                  let [a, b] [T1, T2] = expr
+//
+//	let [x, ...xs] [T] = expr
+//	let [a, b] [T1, T2] = expr
 func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDestructDecl, error) {
 	p.advance() // consume [
 	var names []string
@@ -643,7 +644,7 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 	var namedType ast.TypeExpr // non-nil when type is a named alias (resolved at codegen)
 
 	if p.check(lexer.AT) {
-		// @[T1, T2, ...] — tuple-array type alias sugar
+		// @[T1, T2, ...] - tuple-array type alias sugar
 		t, err := p.parseTypeExpr() // parseTypeSingle handles @[...]
 		if err != nil {
 			return nil, err
@@ -740,4 +741,3 @@ func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.Struct
 	_ = isConst
 	return &ast.StructDestructDecl{Names: names, StructType: structType, Value: val}, nil
 }
-

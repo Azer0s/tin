@@ -261,7 +261,6 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 	return true, nil
 }
 
-
 // Statement generation
 
 // genStmt generates a single statement. Returns (currentBlock, terminated, error).
@@ -599,8 +598,8 @@ func (cg *CodeGen) ensureDeferChain() {
 // struct so that mutations inside the thunk propagate back to the outer scope.
 // Returns (fn as i8*, env as i8*).
 func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, value.Value, error) {
-	// Special case: "defer fn() = body" — the call IS a lambda expression.
-	// Also handles "defer (fn() = body)()" — a CallExpr with no args whose Func is a lambda.
+	// Special case: "defer fn() = body" - the call IS a lambda expression.
+	// Also handles "defer (fn() = body)()" - a CallExpr with no args whose Func is a lambda.
 	if _, ok := call.(*ast.LambdaExpr); ok {
 		return cg.genDeferLambdaThunk(block, call)
 	}
@@ -629,7 +628,7 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 			continue
 		}
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
-			continue // global function — reachable by name, no capture needed
+			continue // global function - reachable by name, no capture needed
 		}
 		if entry.isAlloc {
 			// Capture by reference so mutations inside the thunk are visible outside.
@@ -745,7 +744,7 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 
 	type capture struct {
 		name   string
-		val    value.Value  // alloca pointer (byRef) or loaded value (!byRef)
+		val    value.Value // alloca pointer (byRef) or loaded value (!byRef)
 		llvmTy irtypes.Type
 		byRef  bool
 	}
@@ -830,7 +829,7 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 
 	// Register lambda params (none for "defer fn() void = body", but support them for completeness).
 	for i, p := range lambda.Params {
-		// Lambda thunks take no user params — these would be zero-valued placeholders.
+		// Lambda thunks take no user params - these would be zero-valued placeholders.
 		_ = i
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err == nil {
@@ -857,7 +856,7 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 	return fnI8, envI8, nil
 }
 
-// genBuiltinDefault implements default(TypeName) — returns the zero/null value
+// genBuiltinDefault implements default(TypeName) - returns the zero/null value
 // for the given type. Works on numeric types, booleans, floats, pointers, and
 // struct types. Used in generic code: `default(t)` where `t` is a type param
 // that has been monomorphized to a concrete type before this is called.
@@ -875,7 +874,7 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 		}
 	}
 
-	// The argument is a type used as an expression — typically an Identifier.
+	// The argument is a type used as an expression - typically an Identifier.
 	var typeExpr ast.TypeExpr
 	switch a := arg.(type) {
 	case *ast.Identifier:
@@ -921,9 +920,9 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 // terminates the program.  The call does not return; a NewUnreachable
 
 // expandMacro evaluates a macro call, choosing the appropriate strategy:
-//   - Complex macros (block body): CTFE — compile to a temp binary, run with timeout,
+//   - Complex macros (block body): CTFE - compile to a temp binary, run with timeout,
 //     parse stdout as the expansion result.
-//   - Simple macros (expression body): AST substitution — fast, no subprocess.
+//   - Simple macros (expression body): AST substitution - fast, no subprocess.
 func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast.Node) (value.Value, error) {
 	if len(args) != len(macro.Params) {
 		return nil, fmt.Errorf("macro %s: expected %d args, got %d",
@@ -987,8 +986,8 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 			newArgs[i] = substituteMacroNode(a, subst)
 		}
 		return &ast.CallExpr{
-			Func:    substituteMacroNode(n.Func, subst),
-			Args:    newArgs,
+			Func:     substituteMacroNode(n.Func, subst),
+			Args:     newArgs,
 			TypeArgs: n.TypeArgs,
 		}
 	case *ast.FieldAccess:
@@ -1351,7 +1350,6 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	return mergeBlock, false, nil
 }
 
-
 func (cg *CodeGen) genFor(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
 	f := cg.curFn
 
@@ -1451,7 +1449,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*ir.Bl
 		return nil, err
 	}
 
-	// iter[t] trait: struct (or fat-ptr) implementing iter[T] — use vtable.
+	// iter[t] trait: struct (or fat-ptr) implementing iter[T] - use vtable.
 	if iterFatPtr, instKey, ok := cg.tryCoerceToIter(block, iterVal); ok {
 		return cg.genForIterTrait(block, s, iterFatPtr, instKey)
 	}
@@ -1519,7 +1517,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*ir.Bl
 	elemAlloca := bodyBlock.NewAlloca(elemType)
 	bodyBlock.NewStore(elemVal, elemAlloca)
 	isElemRC := isRCTrackedType(elemType)
-	// ARC: each iteration copies an element — retain to claim ownership.
+	// ARC: each iteration copies an element - retain to claim ownership.
 	if isElemRC {
 		cg.emitRetain(bodyBlock, elemVal)
 	}
@@ -1699,7 +1697,6 @@ func (cg *CodeGen) toConstInt(c constant.Constant, targetType irtypes.Type) *con
 	return constant.NewInt(irtypes.I64, 0)
 }
 
-
 // genMatchType handles "match a.(type):" dispatch for tagged unions.
 // Each case "case i T:" extracts the payload as variable i of type T.
 func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
@@ -1804,10 +1801,11 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 }
 
 // genArrayDestructDecl handles:
-//   let [a, b] [T] = arr          — uniform typed (compile-time indexing)
-//   let [a, b] [T1, T2] = arr     — per-slot typed from [any]  (runtime bounds check)
-//   let [x, ...xs] [T] = arr      — rest split
-//   let [a, b] res = arr          — named type alias resolved to per-slot types
+//
+//	let [a, b] [T] = arr          - uniform typed (compile-time indexing)
+//	let [a, b] [T1, T2] = arr     - per-slot typed from [any]  (runtime bounds check)
+//	let [x, ...xs] [T] = arr      - rest split
+//	let [a, b] res = arr          - named type alias resolved to per-slot types
 func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDecl) (*ir.Block, error) {
 	// Resolve named type alias (e.g. `type res = @[i32, bool]`)
 	if s.NamedType != nil && len(s.ElemTypes) == 0 {

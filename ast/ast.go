@@ -23,8 +23,8 @@ type Node interface {
 // base embeds position; all nodes embed this
 type base struct{ pos Pos }
 
-func (b base) Pos() Pos      { return b.pos }
-func (b base) nodeMarker()   {}
+func (b base) Pos() Pos    { return b.pos }
+func (b base) nodeMarker() {}
 
 // Top-level
 
@@ -47,16 +47,16 @@ type VarDecl struct {
 type FuncDecl struct {
 	base
 	Name           string
-	TraitQualifier string   // non-empty for qualified impls: "iter[char]" -> fn iter[char]::method
-	TypeParams     []string // generic: [t, r]
+	TraitQualifier string           // non-empty for qualified impls: "iter[char]" -> fn iter[char]::method
+	TypeParams     []string         // generic: [t, r]
 	Constraints    []TypeConstraint // generic type constraints: where t is Labeled+Sized
 	Params         []Param
 	RetType        TypeExpr // nil = void/infer
 	Body           Node     // *Block or *WhereList or expression
 	Tags           []string // control tags: #pure, #recurse, …
 	IsStatic       bool
-	IsExtern    string // non-empty = extern symbol name
-	IsVirtual   bool   // true for "fn f() T = virtual" in trait declarations
+	IsExtern       string // non-empty = extern symbol name
+	IsVirtual      bool   // true for "fn f() T = virtual" in trait declarations
 }
 
 // TypeConstraint bounds a type parameter to one or more required traits
@@ -118,10 +118,11 @@ type DataDecl struct {
 	Variants   []DataVariant
 }
 
-// ArrayDestructDecl: let [a, b] [T] = expr
-//                    let [a, b] [T1, T2] = expr  (per-slot types, implies [any] source)
-//                    let [x, ...xs] [T] = expr   (rest split)
-//                    let [a, b] res = expr        (named type alias, resolved at codegen)
+// ArrayDestructDecl let [a, b] [T] = expr
+//
+//	let [a, b] [T1, T2] = expr  (per-slot types, implies [any] source)
+//	let [x, ...xs] [T] = expr   (rest split)
+//	let [a, b] res = expr        (named type alias, resolved at codegen)
 type ArrayDestructDecl struct {
 	base
 	Names     []string   // variable names; rest name is prefixed with "..."
@@ -131,7 +132,7 @@ type ArrayDestructDecl struct {
 	Value     Node
 }
 
-// StructDestructDecl: let {x, y} TypeName = expr
+// StructDestructDecl let {x, y} TypeName = expr
 type StructDestructDecl struct {
 	base
 	Names      []string
@@ -139,7 +140,7 @@ type StructDestructDecl struct {
 	Value      Node
 }
 
-// TupleArrayType: @[T1, T2, ...] — a typed-destructuring annotation
+// TupleArrayType @[T1, T2, ...] - a typed-destructuring annotation
 // indicating a [any] array whose elements are typed per-slot.
 type TupleArrayType struct {
 	ElemTypes []TypeExpr
@@ -159,9 +160,9 @@ func (t *TupleArrayType) String() string {
 
 type UseDecl struct {
 	base
-	Path     string       // "io" or "extern"
+	Path     string // "io" or "extern"
 	IsExtern bool
-	Imports  []UseImport  // for "use extern (...)"
+	Imports  []UseImport // for "use extern (...)"
 }
 
 type ExportDecl struct {
@@ -185,7 +186,6 @@ type MacroDecl struct {
 	Body   Node
 }
 
-
 // Statements
 
 type Block struct {
@@ -207,16 +207,17 @@ type DeferStmt struct {
 
 type IfStmt struct {
 	base
-	Cond     Node
-	Then     *Block
-	ElseIfs  []ElseIfClause
-	Else     *Block // nil if no else
+	Cond    Node
+	Then    *Block
+	ElseIfs []ElseIfClause
+	Else    *Block // nil if no else
 }
 
 // ForStmt covers all three for variants:
-//   C-style:  for let i T ; cond ; post : body
-//   For-in:   for let i T in iter : body
-//   For-range: for let i T in start..end : body  (handled as for-in over range)
+//
+//	C-style:  for let i T ; cond ; post : body
+//	For-in:   for let i T in iter : body
+//	For-range: for let i T in start..end : body  (handled as for-in over range)
 type ForStmt struct {
 	base
 	Kind    ForKind
@@ -281,7 +282,7 @@ type EchoStmt struct {
 	Value Node
 }
 
-// TaggedBlock: { #tag } { body }
+// TaggedBlock { #tag } { body }
 type TaggedBlock struct {
 	base
 	Tags []string
@@ -413,19 +414,19 @@ type FieldtypesExpr struct {
 type FieldtagExpr struct {
 	base
 	Expr  Node
-	Field Node // string expression — the field name
+	Field Node // string expression - the field name
 }
 
 type GetfieldExpr struct {
 	base
 	Expr  Node
-	Field Node // string expression — the field name
+	Field Node // string expression - the field name
 }
 
 type SetfieldExpr struct {
 	base
 	Expr  Node
-	Field Node // string expression — the field name
+	Field Node // string expression - the field name
 	Val   Node // value to set
 }
 
@@ -451,7 +452,7 @@ type TernaryExpr struct {
 	Else Node
 }
 
-// InterpolatedString: "hello {name}!" broken into parts
+// InterpolatedString "hello {name}!" broken into parts
 type InterpolatedString struct {
 	base
 	Parts []StringPart
@@ -527,13 +528,13 @@ type StructField struct {
 }
 
 type EnumMember struct {
-	Name  string
-	Value Node // nil = auto (previous+1 or iota)
+	Name   string
+	Value  Node // nil = auto (previous+1 or iota)
 	IsAtom bool
 }
 
 type UnionMember struct {
-	FieldName string   // for named unions ("as_i8")
+	FieldName string // for named unions ("as_i8")
 	Type      TypeExpr
 }
 

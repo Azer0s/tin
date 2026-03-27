@@ -519,7 +519,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 }
 
 // genSetfield sets the named field of a struct value (via lvalue) from a typed value.
-// Generates a compile-time strcmp chain — one comparison per field.
+// Generates a compile-time strcmp chain - one comparison per field.
 func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Value, error) {
 	structPtr, err := cg.genLValue(block, e.Expr)
 	if err != nil {
@@ -578,4 +578,3 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 
 	return nil, nil
 }
-

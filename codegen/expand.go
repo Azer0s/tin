@@ -36,7 +36,7 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.
 		return nil, fmt.Errorf("macro %s: expected %d args, got %d",
 			macro.Name, len(macro.Params), len(args))
 	}
-	// Complex macros (block body): CTFE path — returns ast.Node directly.
+	// Complex macros (block body): CTFE path - returns ast.Node directly.
 	if isMacroComplex(macro) {
 		return cg.ctfeExpandMacro(macro, args)
 	}

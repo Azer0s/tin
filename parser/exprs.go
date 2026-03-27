@@ -305,7 +305,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					expr = sa
 				}
 			} else if idx, ok2 := expr.(*ast.IndexExpr); ok2 {
-				// e.g. result[u32]::ok(42) — static method call on generic type
+				// e.g. result[u32]::ok(42) - static method call on generic type
 				if idExpr, ok3 := idx.Expr.(*ast.Identifier); ok3 {
 					typeName := idExpr.Name
 					if typeArgId, ok4 := idx.Index.(*ast.Identifier); ok4 {
@@ -336,7 +336,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			expr = &ast.IndexExpr{Expr: expr, Index: idx}
 
 		case lexer.NOT:
-			// Macro call syntax: ident!(args) — only when followed by '('
+			// Macro call syntax: ident!(args) - only when followed by '('
 			if p.peekAt(1).Type != lexer.LPAREN {
 				return expr, nil
 			}
@@ -620,7 +620,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
-		// default(typeof(expr)) — derive zero value from expression's compile-time type
+		// default(typeof(expr)) - derive zero value from expression's compile-time type
 		if p.check(lexer.KW_TYPEOF) {
 			inner, err := p.parseExpr()
 			if err != nil {
@@ -642,7 +642,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.LPAREN:
 		p.advance()
-		// Block expression: (let x = ...; expr) — produced by CTFE macro splices.
+		// Block expression: (let x = ...; expr) - produced by CTFE macro splices.
 		// Parsed as a sequence of statements terminated by ')'; the last statement
 		// must be an expression whose value is returned.
 		if p.check(lexer.KW_LET) {
@@ -774,4 +774,3 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 	}
 	return lit, nil
 }
-

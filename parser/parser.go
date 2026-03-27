@@ -26,7 +26,7 @@ func New(tokens []lexer.Token) *Parser {
 
 // collectNoParensMacros performs a first-pass scan to find all macro declarations
 // tagged with #no_parens and records their backtick expansion body.
-// It does not advance p.pos — it uses a local index only.
+// It does not advance p.pos - it uses a local index only.
 func (p *Parser) collectNoParensMacros() {
 	for i := 0; i < len(p.tokens); i++ {
 		if p.tokens[i].Type != lexer.KW_MACRO {
@@ -58,7 +58,7 @@ func (p *Parser) collectNoParensMacros() {
 		if j < len(p.tokens) && p.tokens[j].Type == lexer.NOT {
 			j++
 		}
-		// () — zero-arg macro
+		// () - zero-arg macro
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.LPAREN {
 			continue
 		}
@@ -284,4 +284,3 @@ func (p *Parser) parseTags() []string {
 	}
 	return tags
 }
-

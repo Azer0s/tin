@@ -1,6 +1,6 @@
 package codegen
 
-// module.go — module file (.tin.mod) serialization and deserialization.
+// module.go - module file (.tin.mod) serialization and deserialization.
 //
 // A .tin.mod file is a JSON file that describes all symbols exported by a Tin
 // package.  It acts like a C header: the importing compiler reads declarations

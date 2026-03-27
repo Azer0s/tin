@@ -1,6 +1,6 @@
 package codegen
 
-// scope.go — implicit conversion registry entry and lexical scope types/functions.
+// scope.go - implicit conversion registry entry and lexical scope types/functions.
 
 import (
 	"github.com/llir/llvm/ir"

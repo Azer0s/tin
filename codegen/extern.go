@@ -1,6 +1,6 @@
 package codegen
 
-// extern.go — helpers for mapping Tin types to C-compatible LLVM types,
+// extern.go - helpers for mapping Tin types to C-compatible LLVM types,
 // declaring extern C functions, and wrapping/unwrapping fat-pointer arguments.
 
 import (

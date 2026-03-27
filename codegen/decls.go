@@ -75,7 +75,7 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 		// Inject default (non-virtual) methods the struct doesn't override.
 		for _, m := range trait.Methods {
 			if m.IsVirtual || m.Body == nil {
-				continue // virtual — struct must provide its own
+				continue // virtual - struct must provide its own
 			}
 			if !structHasMethod(aug, m.Name) {
 				// Bind "this" parameter to this struct type.
@@ -101,7 +101,7 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 
 func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	if len(n.TypeParams) > 0 {
-		return nil // generic template — only compiled when monomorphized
+		return nil // generic template - only compiled when monomorphized
 	}
 	orig := n // keep original for Implements list
 	n = cg.augmentStructFromTraits(n)
@@ -351,7 +351,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	}
 	gt, ok := n.Type.(*ast.GenericType)
 	if !ok {
-		// Simple alias — already registered in preregister. Nothing to do.
+		// Simple alias - already registered in preregister. Nothing to do.
 		return nil
 	}
 
@@ -447,9 +447,10 @@ func (cg *CodeGen) buildTraitFatPtrType(traitName string) (*irtypes.StructType, 
 
 // buildTraitFatPtrTypeInst computes and caches the fat-pointer type for a
 // (possibly generic) trait instantiation.
-//   traitName — base trait name (e.g. "iter")
-//   instKey   — unique instance key (e.g. "iter_i64")
-//   typeSubst — map from trait type-param name -> concrete LLVM type
+//
+//	traitName - base trait name (e.g. "iter")
+//	instKey   - unique instance key (e.g. "iter_i64")
+//	typeSubst - map from trait type-param name -> concrete LLVM type
 func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst map[string]irtypes.Type) (*irtypes.StructType, error) {
 	if fp, ok := cg.traitFatPtrTypes[instKey]; ok {
 		return fp, nil
@@ -463,7 +464,7 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 	var fnPtrTypes []irtypes.Type
 
 	if td.IsAlias {
-		// "trait X as fn(params) ret" — single method whose name is the trait name
+		// "trait X as fn(params) ret" - single method whose name is the trait name
 		// and whose signature comes from the alias function type.
 		ft, ok := td.AliasType.(*ast.FuncType)
 		if !ok {
@@ -854,7 +855,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	}
 
 	// The vtable global is a compile-time constant that is always correct for
-	// the (struct, trait) pair — including malloc'd structs whose embedded
+	// the (struct, trait) pair - including malloc'd structs whose embedded
 	// vtable field has not yet been initialized.
 	structName := cg.typeNameOf(concreteType)
 	vtableKey := structName + "__" + instKey
@@ -924,7 +925,7 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 // Having type_id as field 0 means *data can be bitcast to *any.
 func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 	if len(n.TypeParams) > 0 {
-		// Generic — stored as template; instantiated lazily in tinTypeToLLVM.
+		// Generic - stored as template; instantiated lazily in tinTypeToLLVM.
 		cg.genericDataDecls[n.Name] = n
 		return nil
 	}
@@ -1024,7 +1025,7 @@ func (cg *CodeGen) genTaggedUnionTypeDecl(name string, ut *ast.UnionTypeExpr) er
 
 // genUnionDecl generates the LLVM layout for a native C-style union declared
 // via "union u = as_i8 i8 | as_string string". Layout: { [maxSize x i8] storage }.
-// No tag — members overlap the same memory region.
+// No tag - members overlap the same memory region.
 func (cg *CodeGen) genUnionDecl(n *ast.UnionDecl) error {
 	var maxSize uint64 = 1
 	for _, m := range n.Members {
@@ -1188,7 +1189,6 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, val value.Value, targetSt *i
 	}
 	return nil
 }
-
 
 // wrapTaggedUnionVariant wraps a value into a tagged union struct.
 // Layout: { i32 type_id, i8 tag, [N x i8] payload }. Returns nil if no variant matches.

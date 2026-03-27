@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
-	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/constant"
+	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 )
 
@@ -72,7 +72,7 @@ func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
 	for i, argNode := range call.Args {
 		val, err := evalNode(argNode, env, cg, 0)
 		if err != nil {
-			return nil, nil // argument not constant — fall back to normal codegen
+			return nil, nil // argument not constant - fall back to normal codegen
 		}
 		if i < len(fd.Params) {
 			env[fd.Params[i].Name] = val
@@ -82,7 +82,7 @@ func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
 	// Evaluate the function body.
 	result, err := evalBody(fd.Body, env, cg, 0)
 	if err != nil {
-		return nil, nil // evaluation failed — fall back to normal codegen
+		return nil, nil // evaluation failed - fall back to normal codegen
 	}
 
 	// Convert the result to an LLVM constant.
@@ -134,7 +134,7 @@ func evalBlock(blk *ast.Block, env map[string]ctfeVal, cg *CodeGen, depth int) (
 func evalWhereList(wl *ast.WhereList, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	for _, clause := range wl.Clauses {
 		if clause.Cond == nil {
-			// Wildcard "_" — always matches.
+			// Wildcard "_" - always matches.
 			return evalNode(clause.Body, env, cg, depth)
 		}
 		cv, err := evalNode(clause.Cond, env, cg, depth)
@@ -207,7 +207,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if id, ok := v.Target.(*ast.Identifier); ok {
 			env[id.Name] = val
 		} else {
-			return ctfeVal{}, errNotConst // indexed or field assignment — bail
+			return ctfeVal{}, errNotConst // indexed or field assignment - bail
 		}
 		return ctfeVal{kind: "i64"}, nil
 
@@ -364,7 +364,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		return evalBlock(v, copyEnv(env), cg, depth)
 
 	case *ast.TaggedBlock:
-		// #allow_sideffect blocks may contain echo — bail on CTFE.
+		// #allow_sideffect blocks may contain echo - bail on CTFE.
 		if hasTag(v.Tags, "allow_sideffect") {
 			return ctfeVal{}, errNotConst
 		}
@@ -387,7 +387,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		return ctfeVal{}, errNotConst
 
 	default:
-		// Unknown node type — cannot evaluate.
+		// Unknown node type - cannot evaluate.
 		return ctfeVal{}, errNotConst
 	}
 }
@@ -442,7 +442,7 @@ func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int)
 		return ctfeVal{kind: "i64"}, nil
 
 	default:
-		// For-in loops require range evaluation — not supported yet.
+		// For-in loops require range evaluation - not supported yet.
 		return ctfeVal{}, errNotConst
 	}
 }
@@ -547,7 +547,7 @@ func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 		case "/":
 			return ctfeVal{kind: "f64", f: l / r}, nil
 		case "**":
-			return ctfeVal{kind: "f64", f: math.Pow(l, r), }, nil
+			return ctfeVal{kind: "f64", f: math.Pow(l, r)}, nil
 		case "==":
 			return ctfeVal{kind: "bool", b: l == r}, nil
 		case "!=":
@@ -623,7 +623,7 @@ func ctfeValToLLVM(v ctfeVal, fd *ast.FuncDecl, cg *CodeGen) (value.Value, error
 		}
 		return constant.NewInt(irtypes.I1, b), nil
 	}
-	// Strings and other types require fat-pointer construction — not a simple constant.
+	// Strings and other types require fat-pointer construction - not a simple constant.
 	return nil, nil
 }
 

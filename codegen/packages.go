@@ -122,7 +122,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 
 	// Check for a companion .tin source file alongside the mod file.
 	// A local .tin file is only treated as a package if a .tin.mod file also
-	// exists next to it — this prevents plain example files from accidentally
+	// exists next to it - this prevents plain example files from accidentally
 	// shadowing stdlib packages (e.g. examples/math.tin vs stdlib math).
 	// Source files take precedence over pre-compiled .tin.mod: they are
 	// compiled inline so no separate linking step is needed.
@@ -160,14 +160,14 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			mf, err = ReadModFile(p1)
 			if err != nil {
 				// Try <execDir>/stdlib/<pkgName>/<pkgName>.tin.mod
-				// (e.g. stdlib/io/io.tin.mod — matches the stdlib source layout).
+				// (e.g. stdlib/io/io.tin.mod - matches the stdlib source layout).
 				p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin.mod"
 				mf, err = ReadModFile(p2)
 			}
 		}
 	}
 	if err != nil {
-		// Module file not found — not an error if the file simply doesn't exist
+		// Module file not found - not an error if the file simply doesn't exist
 		// yet (the user may be compiling the module for the first time).
 		return nil
 	}
@@ -495,8 +495,8 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	newParams := make([]ast.Param, len(tmpl.Params))
 	for i, p := range tmpl.Params {
 		newParams[i] = ast.Param{
-			Name:     p.Name,
-			Type:     substituteTypeInTypeExpr(p.Type, astSubst),
+			Name:      p.Name,
+			Type:      substituteTypeInTypeExpr(p.Type, astSubst),
 			IsVarArgs: p.IsVarArgs,
 		}
 	}
@@ -703,4 +703,3 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	}
 	return nil
 }
-

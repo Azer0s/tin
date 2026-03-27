@@ -51,7 +51,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		}
 		return &ast.PointerType{Elem: elem, IsConst: isConst}, nil
 	}
-	// @[T1, T2, ...] — TupleArrayType (typed per-slot destructuring annotation)
+	// @[T1, T2, ...] - TupleArrayType (typed per-slot destructuring annotation)
 	if p.check(lexer.AT) {
 		p.advance() // consume @
 		if _, err := p.expect(lexer.LBRACKET); err != nil {
@@ -230,14 +230,14 @@ func (p *Parser) parseParam() (ast.Param, error) {
 		savedPos := p.pos
 		candidate := p.advance().Literal
 		if p.check(lexer.DOTDOTDOT) {
-			// "name ..." — named variadic parameter: args ...
+			// "name ..." - named variadic parameter: args ...
 			param.Name = candidate
 			param.IsVarArgs = true
 			p.advance() // consume ...
 			return param, nil
 		}
 		if p.match(lexer.RPAREN, lexer.COMMA) {
-			// only one ident followed by ) or , — treat as type name
+			// only one ident followed by ) or , - treat as type name
 			p.pos = savedPos
 		} else {
 			param.Name = candidate
@@ -372,4 +372,3 @@ func ParseType(src string) (ast.TypeExpr, error) {
 	p := New(tokens)
 	return p.parseTypeExpr()
 }
-

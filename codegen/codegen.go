@@ -78,9 +78,9 @@ type CodeGen struct {
 	pendingDeferFrames []value.Value
 
 	// Defer chain runtime functions (lazily declared).
-	deferPushFn    *ir.Func             // _tin_defer_push(entry i8*, fn i8*, env i8*)
-	deferPopFn     *ir.Func             // _tin_defer_pop(n i64)
-	deferEntryType *irtypes.StructType  // { i8*, i8*, i8* } = TinDeferEntry layout
+	deferPushFn    *ir.Func            // _tin_defer_push(entry i8*, fn i8*, env i8*)
+	deferPopFn     *ir.Func            // _tin_defer_pop(n i64)
+	deferEntryType *irtypes.StructType // { i8*, i8*, i8* } = TinDeferEntry layout
 
 	// tinPanicFn is the lazily declared _tin_panic(msg i8*) extern.
 	tinPanicFn *ir.Func
@@ -161,12 +161,12 @@ type CodeGen struct {
 	// atomCodes maps atom name -> CRC32 code (collision-resolved).
 	// atomCodeToName is the reverse map for collision detection.
 	// atomOrder holds insertion order for stable @__tin_atom_table output.
-	atomType      *irtypes.StructType
-	atomCodes     map[string]int32
+	atomType       *irtypes.StructType
+	atomCodes      map[string]int32
 	atomCodeToName map[int32]string
-	atomOrder     []string
-	atomToStrFn   *ir.Func // __tin_atom_to_string(i32) {i8*,i64}
-	strToAtomFn   *ir.Func // __tin_string_to_atom(i8*) %__atom
+	atomOrder      []string
+	atomToStrFn    *ir.Func // __tin_atom_to_string(i32) {i8*,i64}
+	strToAtomFn    *ir.Func // __tin_string_to_atom(i8*) %__atom
 
 	// Tagged union registry: type name -> ordered variant TypeExprs (index = tag).
 	// Created by "type u = i8 | string" declarations.
@@ -177,7 +177,7 @@ type CodeGen struct {
 	nativeUnionDecls map[string]*ast.UnionDecl
 
 	// Tagged union type ID registry: union name -> compile-time i32 type ID.
-	// Same purpose as structTypeIDs/dataTypeIDs — used for any boxing and typeof.
+	// Same purpose as structTypeIDs/dataTypeIDs - used for any boxing and typeof.
 	unionTypeIDs map[string]int32
 }
 
@@ -203,22 +203,22 @@ func (cg *CodeGen) HasTests() bool { return len(cg.testDecls) > 0 }
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {
 	cg := &CodeGen{
-		filename:               filename,
-		mod:                    ir.NewModule(),
-		structTypes:            make(map[string]*irtypes.StructType),
-		structFields:           make(map[string][]string),
-		genericStructs:         make(map[string]*ast.StructDecl),
-		traitVtableStructTypes: make(map[string]*irtypes.StructType),
-		traitFatPtrTypes:       make(map[string]*irtypes.StructType),
-		traitMethodOrder:       make(map[string][]string),
-		traitVtableGlobals:     make(map[string]*ir.Global),
-		traitInstKeys:          make(map[string]string),
-		implicitConvFns:        make(map[string][]implicitConvEntry),
-		structVtableOrder:      make(map[string][]string),
-		enumValues:             make(map[string]int64),
-		enumTypes:              make(map[string]irtypes.Type),
-		typeAliases:            make(map[string]ast.TypeExpr),
-		traits:                 make(map[string]*ast.TraitDecl),
+		filename:                 filename,
+		mod:                      ir.NewModule(),
+		structTypes:              make(map[string]*irtypes.StructType),
+		structFields:             make(map[string][]string),
+		genericStructs:           make(map[string]*ast.StructDecl),
+		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
+		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
+		traitMethodOrder:         make(map[string][]string),
+		traitVtableGlobals:       make(map[string]*ir.Global),
+		traitInstKeys:            make(map[string]string),
+		implicitConvFns:          make(map[string][]implicitConvEntry),
+		structVtableOrder:        make(map[string][]string),
+		enumValues:               make(map[string]int64),
+		enumTypes:                make(map[string]irtypes.Type),
+		typeAliases:              make(map[string]ast.TypeExpr),
+		traits:                   make(map[string]*ast.TraitDecl),
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
 		constrainedFuncs:         make(map[string]*ast.FuncDecl),
@@ -314,7 +314,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// Validate complex (block-body) macros: side-effect check.
-	// Recursive macros are allowed — the 5-second timeout handles runaway recursion.
+	// Recursive macros are allowed - the 5-second timeout handles runaway recursion.
 	for _, m := range cg.macros {
 		if isMacroComplex(m) {
 			if err := checkMacroSideEffects(m); err != nil {
@@ -344,7 +344,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		}
 		if sd, ok := node.(*ast.StructDecl); ok {
-			// Skip method predeclaration for generic struct templates — methods
+			// Skip method predeclaration for generic struct templates - methods
 			// will be compiled on demand when the concrete type is instantiated.
 			if len(sd.TypeParams) > 0 {
 				continue
@@ -517,4 +517,3 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	return cg.mod, nil
 }
-

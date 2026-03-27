@@ -22,7 +22,7 @@ func isMacroComplex(m *ast.MacroDecl) bool {
 }
 
 // checkMacroSideEffects returns an error if the macro body contains echo or I/O.
-// Recursive macros are allowed — the 5-second timeout handles runaway recursion.
+// Recursive macros are allowed - the 5-second timeout handles runaway recursion.
 func checkMacroSideEffects(m *ast.MacroDecl) error {
 	if nodeHasSideEffects(m.Body) {
 		return fmt.Errorf("macro %s: macros must be pure (no echo or I/O statements)", m.Name)
@@ -128,7 +128,7 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 // parseCtfeResult converts raw CTFE stdout into an AST literal node.
 // Special cases:
-//   - backtick-wrapped output `` `expr` `` → parse inner content as tin source (code splice)
+//   - backtick-wrapped output “ `expr` “ → parse inner content as tin source (code splice)
 //   - "string" return type → wrap bare output in StringLit
 //   - "f64" return type → promote integer-looking output to FloatLit
 func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
@@ -144,7 +144,7 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 	}
 	switch retType {
 	case "string":
-		// echo prints bare string content — wrap it back into a StringLit directly
+		// echo prints bare string content - wrap it back into a StringLit directly
 		return &ast.StringLit{Value: result}, nil
 	case "f64":
 		// Try normal parse first (handles "3.14", "-1.5", etc.)

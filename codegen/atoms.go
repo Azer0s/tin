@@ -1,6 +1,6 @@
 package codegen
 
-// atoms.go — compile-time atom registration and IR generation for the
+// atoms.go - compile-time atom registration and IR generation for the
 // atom type (%__atom = type { i32 }).
 //
 // Each unique atom name is assigned a CRC32 code at compile time.  Collisions
@@ -272,7 +272,7 @@ func (cg *CodeGen) buildStringToAtomBody(fn *ir.Func, tableGlobal *ir.Global, co
 	loopCont.NewStore(iNext, iAlloca)
 	loopCont.NewBr(loopHeader)
 
-	// static.miss (was loop.exit): fall back to runtime — learn the atom
+	// static.miss (was loop.exit): fall back to runtime - learn the atom
 	rtCode := loopExit.NewCall(cg.ensureLearnAtom(), ptrParam)
 	rtAtomAlloca := loopExit.NewAlloca(cg.atomType)
 	loopExit.NewStore(zeroAtom, rtAtomAlloca)
