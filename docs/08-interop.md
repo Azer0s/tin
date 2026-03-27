@@ -1,4 +1,4 @@
-# 08 – Interop, Packages & Low-Level Features
+# 08 - Interop, Packages & Low-Level Features
 
 ## Linker directives (`//!`)
 
@@ -301,11 +301,11 @@ The shim wraps `labs` to match Tin's fat-function-pointer calling convention
 `{ fn(i8* env, args...) ret*, i8* env }`. For non-capturing references, the
 environment pointer is `null`.
 
-Parameters that require ABI coercion (e.g., Tin fat-string `{i8*,i64}` →
+Parameters that require ABI coercion (e.g., Tin fat-string `{i8*,i64}` ->
 C `i8*`) are converted inside the shim; the return value is wrapped back to
 Tin conventions via `wrapFromExtern`. This means extern functions retain
 correct type information when returned as `any` or inspected with `typeof`.
-See [09 – Reflection](09-reflection.md) for details.
+See [09 - Reflection](09-reflection.md) for details.
 
 ---
 

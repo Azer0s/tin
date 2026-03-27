@@ -3,12 +3,13 @@ package codegen
 import (
 	"fmt"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Body generation
@@ -575,7 +576,7 @@ func (cg *CodeGen) genBuiltinLen(block *ir.Block, arg ast.Node) (value.Value, er
 // Defer chain helpers
 
 // ensureDeferChain lazily declares the runtime defer-chain functions and
-// initialises the TinDeferEntry LLVM struct type.
+// initializes the TinDeferEntry LLVM struct type.
 func (cg *CodeGen) ensureDeferChain() {
 	if cg.deferPushFn != nil {
 		return
@@ -863,9 +864,9 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value, error) {
 	// Handle default(typeof(expr)): generate expr to discover its LLVM type,
 	// then return the zero value for that type. The generated code for the
-	// inner expression is dead but LLVM will optimise it away.
+	// inner expression is dead but LLVM will optimize it away.
 	if call, ok := arg.(*ast.CallExpr); ok {
-		if fnId, ok2 := call.Func.(*ast.Identifier); ok2 && fnId.Name == "typeof" && len(call.Args) == 1 {
+		if fnID, ok2 := call.Func.(*ast.Identifier); ok2 && fnID.Name == "typeof" && len(call.Args) == 1 {
 			val, err := cg.genExpr(block, call.Args[0])
 			if err != nil {
 				return nil, err
@@ -894,7 +895,7 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 	case *irtypes.PointerType:
 		return constant.NewNull(t), nil
 	case *irtypes.StructType:
-		// Zero-initialise each field.
+		// Zero-initialize each field.
 		fields := make([]constant.Constant, len(t.Fields))
 		for i, f := range t.Fields {
 			switch ft := f.(type) {
@@ -950,7 +951,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
 		node, err := parseExprString(btl.Content)
 		if err != nil {
-			return nil, fmt.Errorf("macro %s: backtick parse error: %v", macro.Name, err)
+			return nil, fmt.Errorf("macro %s: backtick parse error: %w", macro.Name, err)
 		}
 		return cg.genExpr(block, node)
 	}

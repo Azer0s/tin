@@ -308,8 +308,8 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				// e.g. result[u32]::ok(42) - static method call on generic type
 				if idExpr, ok3 := idx.Expr.(*ast.Identifier); ok3 {
 					typeName := idExpr.Name
-					if typeArgId, ok4 := idx.Index.(*ast.Identifier); ok4 {
-						typeName = idExpr.Name + "[" + typeArgId.Name + "]"
+					if typeArgID, ok4 := idx.Index.(*ast.Identifier); ok4 {
+						typeName = idExpr.Name + "[" + typeArgID.Name + "]"
 					}
 					sa := &ast.ScopeAccess{Path: []string{typeName, field.Literal}}
 					if p.check(lexer.LPAREN) {

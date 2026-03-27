@@ -1,4 +1,4 @@
-// test_reflect.tin — test the reflect stdlib package
+// test_reflect.tin - test the reflect stdlib package
 use assert
 use reflect
 
@@ -46,7 +46,7 @@ echo params[1]                          // f64
 let fn0 = '"fn()i64"
 echo reflect::fn_ret(fn0)               // i64
 let params0 = reflect::fn_params(fn0)
-// params0 is empty array — just check fn_ret works
+// params0 is empty array - just check fn_ret works
 
 // one-arg fn
 let fn1 = '"fn(string)i32"

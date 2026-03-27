@@ -1,4 +1,4 @@
-// malloc_dispatch.tin — allocate structs with mem::malloc and use dynamic dispatch.
+// malloc_dispatch.tin - allocate structs with mem::malloc and use dynamic dispatch.
 //
 // Demonstrates:
 //   - sizeof(T) returning the correct byte size of any type
@@ -44,7 +44,7 @@ struct cat(speak) =
     return "cat"
 
 // Generic constrained dispatch
-// Monomorphized at each call site — no fat-pointer overhead for stack values.
+// Monomorphized at each call site - no fat-pointer overhead for stack values.
 
 fn describe[t](a t) where t is speak =
   io::printf("%s says: %s\n", a.label(), a.sound())

@@ -23,10 +23,10 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 
 	// Optional name (lambdas are anonymous)
 	// Forms:
-	//   fn name(...)            – regular method
-	//   fn ::name(...)          – alias-trait implementation
-	//   fn trait::method(...)   – qualified trait-method implementation
-	//   fn trait[T]::method(...)– generic qualified implementation
+	//   fn name(...)            - regular method
+	//   fn ::name(...)          - alias-trait implementation
+	//   fn trait::method(...)   - qualified trait-method implementation
+	//   fn trait[T]::method(...)- generic qualified implementation
 	var name string
 	var traitQualifier string
 	if p.check(lexer.DCOLON) {
@@ -104,7 +104,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 	// are also accepted for readability
 	var constraints []ast.TypeConstraint
 	parseOneConstraint := func() bool {
-		if !(p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.KW_IS) {
+		if !p.check(lexer.IDENT) || p.peekAt(1).Type != lexer.KW_IS {
 			return false
 		}
 		typeParam := p.advance().Literal // e.g. "t"

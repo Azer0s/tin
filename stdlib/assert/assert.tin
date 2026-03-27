@@ -1,4 +1,4 @@
-// stdlib/assert — test assertion helpers for use with `test` blocks
+// stdlib/assert - test assertion helpers for use with `test` blocks
 //
 // abort is the only native primitive: it prints "FAILED", writes msg to
 // stderr, then longjmps back to the test runner (or exit(1) standalone)

@@ -1,4 +1,4 @@
-# 04 – Collections
+# 04 - Collections
 
 ## Arrays
 
@@ -146,13 +146,13 @@ fn sum[t](list [t]) t =
 The `..` operator creates a half-open integer range `[start, end)`:
 
 ```rust
-let r = 1..10   // values 1, 2, …, 9
+let r = 1..10   // values 1, 2, ..., 9
 
 for let i i64 in 1..6:
   echo "{i}"    // prints 1 through 5
 ```
 
-Ranges are most commonly used with `for … in` loops.
+Ranges are most commonly used with `for ... in` loops.
 
 ---
 

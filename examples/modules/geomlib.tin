@@ -1,4 +1,4 @@
-// geomlib.tin — exports a struct type with methods
+// geomlib.tin - exports a struct type with methods
 // Compile: tin build -lib geomlib.tin -o geomlib.o
 
 struct point =

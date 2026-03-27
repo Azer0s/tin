@@ -1,4 +1,4 @@
-// recover_example.tin — recover() built-in for catching panics
+// recover_example.tin - recover() built-in for catching panics
 // recover() called inside a deferred function catches the panic message
 // and prevents process exit.
 

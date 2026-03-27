@@ -1,4 +1,4 @@
-// anon_fn.tin — immediate anonymous function invocation
+// anon_fn.tin - immediate anonymous function invocation
 // Demonstrates (fn() = ...)() syntax including use with defer.
 
 use assert

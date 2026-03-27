@@ -1,4 +1,4 @@
-# 01 – Basics
+# 01 - Basics
 
 ## Hello, world
 
@@ -34,7 +34,7 @@ Integer literals default to `i64`; float literals default to `f64`.
 The compiler coerces integer literals to the required width automatically.
 
 The `any` type can hold a value of any other type at runtime. See
-[09 – Reflection](09-reflection.md) for full details.
+[09 - Reflection](09-reflection.md) for full details.
 
 ---
 
@@ -214,6 +214,6 @@ let x = 1; let y = 2; echo x + y   // 3
 | Increment / decrement | `i++` `i--` (statement form) |
 | Array append | `++=` |
 | Concatenation | `++` |
-| Pipe | `\|>` (see [03 – Functions](03-functions.md)) |
+| Pipe | `\|>` (see [03 - Functions](03-functions.md)) |
 
 Tin uses **C-style operator precedence**.

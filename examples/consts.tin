@@ -1,4 +1,4 @@
-// const and type alias — compile-time constants and named type aliases.
+// const and type alias - compile-time constants and named type aliases.
 //
 // const declares a named compile-time constant.
 // type creates an alias for an existing type.
@@ -17,7 +17,7 @@ const PI          f64   = 3.14159
 const APP_NAME    string = "tin"
 const DEBUG       bool   = false
 
-// Type aliases — give a meaningful name to an existing type
+// Type aliases - give a meaningful name to an existing type
 type size_t   = i64
 type score_t  = f64
 type label_t  = string

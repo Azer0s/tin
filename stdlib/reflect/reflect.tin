@@ -1,4 +1,4 @@
-// stdlib/reflect — Type atom inspection
+// stdlib/reflect - Type atom inspection
 //
 // The reflect package provides predicates and destructors for Tin type atoms
 // Type atoms are the values returned by typeof(), fieldtypes(), etc

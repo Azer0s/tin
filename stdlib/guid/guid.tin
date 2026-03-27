@@ -1,4 +1,4 @@
-// stdlib/guid — pseudo-GUID generation
+// stdlib/guid - pseudo-GUID generation
 //
 // Generates a random GUID-like string using libc rand().
 // Note: not cryptographically secure. Seed with srand() for varied output.

@@ -1,4 +1,4 @@
-// special_traits.tin — demonstrates print, implicit, and iter special traits
+// special_traits.tin - demonstrates print, implicit, and iter special traits
 
 // 1. print trait
 // Any struct implementing `print` can be used in echo and string interpolation.

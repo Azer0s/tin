@@ -4,11 +4,12 @@ package codegen
 // declaring extern C functions, and wrapping/unwrapping fat-pointer arguments.
 
 import (
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // tinTypeToExternLLVM returns the C-compatible LLVM type for a Tin type.

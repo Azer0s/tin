@@ -1,4 +1,4 @@
-# 05 – Structs
+# 05 - Structs
 
 ## Basic structs
 
@@ -40,7 +40,7 @@ let {x, y} point = p
 ```
 
 The type name after `}` is required to tell the compiler the struct's field
-layout. Field order in the name list does not matter — each name is looked up
+layout. Field order in the name list does not matter - each name is looked up
 by name, not position.
 
 ---
@@ -242,14 +242,14 @@ echo fieldtag(user{}, "email")  // 'unique
 echo fieldtag(user{}, "notes")  // '' (empty atom)
 ```
 
-See [09 – Reflection](09-reflection.md) for the full reflection API.
+See [09 - Reflection](09-reflection.md) for the full reflection API.
 
 ---
 
 ## Traits on structs
 
 Structs can implement traits by listing them in parentheses after the struct
-name. See [06 – Traits](06-traits.md) for full details.
+name. See [06 - Traits](06-traits.md) for full details.
 
 ```rust
 trait named =

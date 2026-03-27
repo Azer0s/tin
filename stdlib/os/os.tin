@@ -1,4 +1,4 @@
-// stdlib/os — Operating-system interface
+// stdlib/os - Operating-system interface
 //
 // Wraps standard C stdlib.h / unistd.h process and environment functions
 // No extra linker flags required (all in libc)

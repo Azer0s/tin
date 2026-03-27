@@ -579,8 +579,6 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 			if depth == 0 {
 				break
 			}
-		} else if ch == '`' {
-			depth++
 		}
 		sb.WriteRune(ch)
 	}

@@ -79,7 +79,7 @@ type ModFile struct {
 
 // I/O
 
-// WriteModFile serialises mf to filename.
+// WriteModFile serializes mf to filename.
 func WriteModFile(filename string, mf *ModFile) error {
 	data, err := json.MarshalIndent(mf, "", "  ")
 	if err != nil {

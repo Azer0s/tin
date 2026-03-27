@@ -1,10 +1,10 @@
-# 12 – Control Tags
+# 12 - Control Tags
 
 Control tags annotate functions, methods, lambdas, macros, and blocks with
 compile-time constraints and properties. The compiler either enforces them or
 uses them as documentation.
 
-**Syntax:** `fn{#tag} name(…)`  -  one or more tags in braces after the keyword.
+**Syntax:** `fn{#tag} name(...)`  -  one or more tags in braces after the keyword.
 
 **Naming convention:** all lowercase with underscores. Tags describe what a
 thing *is* or *has*, not what it *cannot* do.
@@ -129,7 +129,7 @@ fn step_a(n i64) i64 = return target(n - 1)   // calls back into target
 fn{#no_recurse} target(n i64) i64 =
   if n <= 0:
     return 0
-  return step_a(n)   // ERROR: step_a → target is indirect recursion
+  return step_a(n)   // ERROR: step_a -> target is indirect recursion
 ```
 
 Helpers that recurse *among themselves* without calling back into the tagged

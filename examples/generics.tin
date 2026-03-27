@@ -1,6 +1,6 @@
 // Generics: constrained type parameters with `where t is Trait` syntax.
 //
-// Generic functions are monomorphized at each call site — the compiler
+// Generic functions are monomorphized at each call site - the compiler
 // generates a concrete version for each distinct type argument.
 use assert
 
