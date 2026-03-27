@@ -98,10 +98,16 @@ fn{#sideffect} info(msg string) =
 
 ### `#no_recurse`
 
-The function must not call itself, directly.
+The function must not call itself, directly or indirectly through any chain
+of helpers.
 
-**Enforcement:** the compiler walks the generated LLVM IR and rejects any
-`call` instruction whose callee is the function itself.
+**Enforcement:** the compiler performs a transitive AST-level call-graph walk
+before code generation and rejects any path that leads back to the tagged
+function.
+
+**Exception:** functions tagged with both `#pure` and `#no_recurse` are CTFE
+macros. Their self-calls are resolved at compile time by the CTFE evaluator,
+so the runtime recursion check is skipped for them.
 
 ```rust
 fn{#no_recurse} fib(n i64) i64 =
@@ -120,8 +126,7 @@ fn{#no_recurse} fib_iter(n i64) i64 =
   return a
 ```
 
-**Note:** The check is *transitive*  -  it follows the entire call graph to detect
-any path that leads back to the tagged function, at any depth:
+Indirect recursion through helper functions is also caught:
 
 ```rust
 fn step_a(n i64) i64 = return target(n - 1)   // calls back into target
@@ -274,10 +279,13 @@ rejected because their purity cannot be verified.
 
 ### `#no_recurse` catches all recursive paths
 
-`#no_recurse` performs a transitive call-graph walk, exactly like `#pure`. Any
-path through any number of helper functions that leads back to the tagged
-function is a violation. Only indirect calls through function pointers (whose
-targets cannot be statically resolved) are not traced.
+`#no_recurse` performs a transitive AST-level call-graph walk, similar to
+`#pure`. Any path through any number of helper functions that leads back to the
+tagged function is a violation. Indirect calls through function pointers cannot
+be statically resolved and are conservatively allowed (not traced).
+
+Functions tagged `#pure #no_recurse` are exempt: they are CTFE macros whose
+self-calls are evaluated at compile time rather than emitted as runtime calls.
 
 ---
 
