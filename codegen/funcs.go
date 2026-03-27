@@ -313,11 +313,6 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 	return true
 }
 
-// structImplementsTrait is a convenience wrapper for simple (non-generic) traits.
-func (cg *CodeGen) structImplementsTrait(structName, traitName string) bool {
-	return cg.structSatisfiesConstraint(structName, &ast.SimpleType{Name: traitName})
-}
-
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	var retType irtypes.Type = irtypes.Void
 	if n.RetType != nil {

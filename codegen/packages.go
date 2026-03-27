@@ -589,8 +589,7 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	// Group exports by package name.
 	type exportGroup struct {
-		names     []string
-		reExports []string
+		names []string
 	}
 	groups := map[string]*exportGroup{}
 	for _, node := range prog.Stmts {

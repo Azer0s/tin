@@ -27,16 +27,6 @@ func (cg *CodeGen) ensurePrintf() *ir.Func {
 	return cg.printfFn
 }
 
-// ensurePuts declares puts if not already done.
-func (cg *CodeGen) ensurePuts() *ir.Func {
-	if cg.putsF != nil {
-		return cg.putsF
-	}
-	cg.putsF = cg.ensureExternDecl("puts", irtypes.I32,
-		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
-	return cg.putsF
-}
-
 // ensureMalloc declares malloc if not already done.
 func (cg *CodeGen) ensureMalloc() *ir.Func {
 	if cg.mallocFn != nil {

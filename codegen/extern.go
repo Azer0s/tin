@@ -72,38 +72,6 @@ func (cg *CodeGen) ensureStrlenDecl() *ir.Func {
 		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
 }
 
-// unwrapForExtern extracts a raw C value from a Tin fat-pointer or atom.
-// If val is already the target type it is returned unchanged.
-func (cg *CodeGen) unwrapForExtern(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
-	src := val.Type()
-	if src.Equal(target) {
-		return val
-	}
-	// %__atom -> i8*: call __tin_atom_to_string then extract the data pointer.
-	if isAtomType(src) {
-		if _, ok := target.(*irtypes.PointerType); ok {
-			code := cg.extractAtomCode(block, val)
-			strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
-			rawPtr := cg.extractFatPtrData(block, strFatPtr, stringFatPtrType())
-			if rawPtr.Type().Equal(target) {
-				return rawPtr
-			}
-			return block.NewBitCast(rawPtr, target)
-		}
-	}
-	// {ptr, i64} fat-pointer -> extract field 0 (the raw pointer)
-	if isFatPtrType(src) {
-		if _, ok := target.(*irtypes.PointerType); ok {
-			rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
-			if rawPtr.Type().Equal(target) {
-				return rawPtr
-			}
-			return block.NewBitCast(rawPtr, target)
-		}
-	}
-	return val
-}
-
 // extractFatPtrData extracts field 0 (the raw data pointer) from a fat-pointer
 // struct value. Works whether the value is a struct value or a pointer to one.
 func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtypes.StructType) value.Value {

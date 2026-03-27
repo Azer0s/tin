@@ -273,10 +273,6 @@ func (l *Lexer) advance() rune {
 	return ch
 }
 
-func (l *Lexer) makeToken(t TokenType, lit string) Token {
-	return Token{Type: t, Literal: lit, Line: l.line, Col: l.col}
-}
-
 func (l *Lexer) nextToken() (Token, error) {
 	// Handle indentation at line start
 	if l.atLineStart {

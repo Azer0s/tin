@@ -21,7 +21,6 @@ type CodeGen struct {
 
 	// declared C functions
 	printfFn  *ir.Func
-	putsF     *ir.Func
 	sprintfFn *ir.Func
 	mallocFn  *ir.Func
 	memcpyFn  *ir.Func
