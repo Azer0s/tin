@@ -616,13 +616,7 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	// Step 1: collect free variables
 	freeNames := collectFreeVars(call, map[string]bool{})
 
-	type capture struct {
-		name   string
-		val    value.Value
-		llvmTy irtypes.Type
-		byRef  bool // true = store alloca pointer; false = store loaded value
-	}
-	var captures []capture
+	var captures []closureCapture
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
@@ -633,80 +627,23 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 		}
 		if entry.isAlloc {
 			// Capture by reference so mutations inside the thunk are visible outside.
-			captures = append(captures, capture{n, entry.val, entry.val.Type(), true})
+			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
 		} else {
-			captures = append(captures, capture{n, entry.val, entry.val.Type(), false})
+			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), false})
 		}
 	}
 
 	// Step 2: build env struct and heap-allocate it
-	var envI8 value.Value = constant.NewNull(irtypes.I8Ptr)
-	var envStructType *irtypes.StructType
-
-	if len(captures) > 0 {
-		fields := make([]irtypes.Type, len(captures))
-		for i, c := range captures {
-			fields[i] = c.llvmTy
-		}
-		envStructType = irtypes.NewStruct(fields...)
-
-		nullEnvPtr := constant.NewNull(irtypes.NewPointer(envStructType))
-		oneGEP := block.NewGetElementPtr(envStructType, nullEnvPtr, constant.NewInt(irtypes.I32, 1))
-		envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
-		envI8 = block.NewCall(cg.ensureMalloc(), envSize)
-
-		envTypedPtr := block.NewBitCast(envI8, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := block.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			block.NewStore(c.val, gep)
-		}
-	}
+	envI8, envStructType := cg.buildEnv(block, captures)
 
 	// Step 3: create the thunk IR function void(i8* env)
 	f := cg.mod.NewFunc(name, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
 	entryBlock := f.NewBlock("entry")
 
-	// Save and reset context so the thunk body doesn't inherit the caller's
-	// pending defers or scope.
-	prevFn := cg.curFn
-	prevScope := cg.curScope
-	prevDefers := cg.pendingDefers
-	prevDeferFrames := cg.pendingDeferFrames
-
-	cg.curFn = f
-	cg.pendingDefers = nil
-	cg.pendingDeferFrames = nil
-
-	// Root the scope at the global level so top-level functions remain
-	// reachable, but local variables from the outer scope are NOT visible
-	// (they are accessed exclusively through the env struct below).
-	global := prevScope
-	for global.parent != nil {
-		global = global.parent
-	}
-	cg.curScope = newScope(global)
+	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env
-	if len(captures) > 0 {
-		envRaw := f.Params[0]
-		envTypedPtr := entryBlock.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := entryBlock.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			if c.byRef {
-				allocaPtr := entryBlock.NewLoad(c.llvmTy, gep)
-				cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
-			} else {
-				alloca := entryBlock.NewAlloca(c.llvmTy)
-				loaded := entryBlock.NewLoad(c.llvmTy, gep)
-				entryBlock.NewStore(loaded, alloca)
-				cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
-			}
-		}
-	}
+	cg.unpackEnv(entryBlock, f, envStructType, captures)
 
 	// Step 5: emit the deferred call
 	if _, err := cg.genExpr(entryBlock, call); err != nil {
@@ -715,10 +652,7 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	entryBlock.NewRet(nil)
 
 	// Restore context.
-	cg.curFn = prevFn
-	cg.curScope = prevScope
-	cg.pendingDefers = prevDefers
-	cg.pendingDeferFrames = prevDeferFrames
+	cg.popClosureCtx(prevCtx)
 
 	// Return fn as i8* and env as i8*.
 	fnI8 := block.NewBitCast(f, irtypes.I8Ptr)
@@ -743,13 +677,7 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 	}
 	freeNames := collectFreeVars(lambda.Body, localNames)
 
-	type capture struct {
-		name   string
-		val    value.Value // alloca pointer (byRef) or loaded value (!byRef)
-		llvmTy irtypes.Type
-		byRef  bool
-	}
-	var captures []capture
+	var captures []closureCapture
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
@@ -759,74 +687,23 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 			continue
 		}
 		if entry.isAlloc {
-			captures = append(captures, capture{n, entry.val, entry.val.Type(), true})
+			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
 		} else {
-			captures = append(captures, capture{n, entry.val, entry.val.Type(), false})
+			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), false})
 		}
 	}
 
 	// Build heap-allocated env struct.
-	var envI8 value.Value = constant.NewNull(irtypes.I8Ptr)
-	var envStructType *irtypes.StructType
-
-	if len(captures) > 0 {
-		fields := make([]irtypes.Type, len(captures))
-		for i, c := range captures {
-			fields[i] = c.llvmTy
-		}
-		envStructType = irtypes.NewStruct(fields...)
-
-		nullPtr := constant.NewNull(irtypes.NewPointer(envStructType))
-		oneGEP := block.NewGetElementPtr(envStructType, nullPtr, constant.NewInt(irtypes.I32, 1))
-		envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
-		envI8 = block.NewCall(cg.ensureMalloc(), envSize)
-
-		envTypedPtr := block.NewBitCast(envI8, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := block.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			block.NewStore(c.val, gep)
-		}
-	}
+	envI8, envStructType := cg.buildEnv(block, captures)
 
 	// Create the thunk function: void(i8* env)
 	f := cg.mod.NewFunc(name, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
 	entryBlock := f.NewBlock("entry")
 
-	prevFn := cg.curFn
-	prevScope := cg.curScope
-	prevDefers := cg.pendingDefers
-	prevDeferFrames := cg.pendingDeferFrames
-	cg.curFn = f
-	cg.pendingDefers = nil
-	cg.pendingDeferFrames = nil
-	global := prevScope
-	for global.parent != nil {
-		global = global.parent
-	}
-	cg.curScope = newScope(global)
+	prevCtx := cg.pushClosureCtx(f)
 
 	// Unpack captures from env.
-	if len(captures) > 0 {
-		envRaw := f.Params[0]
-		envTypedPtr := entryBlock.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := entryBlock.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			if c.byRef {
-				// Load the alloca pointer and put it directly in scope.
-				allocaPtr := entryBlock.NewLoad(c.llvmTy, gep)
-				cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
-			} else {
-				alloca := entryBlock.NewAlloca(c.llvmTy)
-				loaded := entryBlock.NewLoad(c.llvmTy, gep)
-				entryBlock.NewStore(loaded, alloca)
-				cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
-			}
-		}
-	}
+	cg.unpackEnv(entryBlock, f, envStructType, captures)
 
 	// Register lambda params (none for "defer fn() void = body", but support them for completeness).
 	for i, p := range lambda.Params {
@@ -841,17 +718,11 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 
 	// Emit the lambda body.
 	if _, err := cg.genBody(entryBlock, lambda.Body, irtypes.Void); err != nil {
-		cg.curFn = prevFn
-		cg.curScope = prevScope
-		cg.pendingDefers = prevDefers
-		cg.pendingDeferFrames = prevDeferFrames
+		cg.popClosureCtx(prevCtx)
 		return nil, nil, err
 	}
 
-	cg.curFn = prevFn
-	cg.curScope = prevScope
-	cg.pendingDefers = prevDefers
-	cg.pendingDeferFrames = prevDeferFrames
+	cg.popClosureCtx(prevCtx)
 
 	fnI8 := block.NewBitCast(f, irtypes.I8Ptr)
 	return fnI8, envI8, nil
