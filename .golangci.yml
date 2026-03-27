@@ -11,6 +11,7 @@ linters:
     - staticcheck   # comprehensive static analysis (SA*, S*, QF* checks)
     - ineffassign   # assigned value never used
     - errorlint     # enforce errors.Is/As; catch bare == comparisons with errors
+    - unused        # unused exported/unexported types, funcs, struct fields, vars
 
     # --- Maintenance ---
     - misspell      # typos in comments and string literals
@@ -20,9 +21,9 @@ linters:
 
   settings:
     errcheck:
-      # Explicit _ = f() assignments are intentional in this codebase
-      # (e.g. best-effort defers); do not flag them.
-      check-blank: false
+      # Flag explicit _ = f() discards; use exclude-functions below for the
+      # specific cases where ignoring the error is genuinely intentional.
+      check-blank: true
       # Temp-file cleanup; errors are not actionable in these contexts.
       exclude-functions:
         - os.Remove
@@ -52,12 +53,6 @@ linters:
 
   exclusions:
     rules:
-      # Intentional blank-identifier discards of error returns used for
-      # best-effort operations (e.g. emitDefers inside terminator paths).
-      - linters: [errcheck]
-        text: "Error return value of .* is not checked"
-        source: "_ ="
-
       # staticcheck SA1019: llir/llvm sometimes uses deprecated APIs internally;
       # we cannot control that from the consumer side.
       - linters: [staticcheck]
