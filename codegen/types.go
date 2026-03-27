@@ -228,12 +228,6 @@ func llvmTypeSize(t irtypes.Type) uint64 {
 	return sz
 }
 
-// llvmTypeAlign returns the ABI alignment of t on a 64-bit target.
-func llvmTypeAlign(t irtypes.Type) uint64 {
-	_, al := llvmTypeSizeAlign(t)
-	return al
-}
-
 // llvmTypeSizeAlign returns (size, alignment) for t on a 64-bit x86 target.
 // It accounts for alignment padding so that malloc receives the correct size.
 func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {

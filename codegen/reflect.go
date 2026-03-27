@@ -147,11 +147,6 @@ func primitiveTypeName(t irtypes.Type) string {
 	return llvmTypeName(t)
 }
 
-// buildTypeNameAtom builds the atom for a known struct/data-type name.
-func (cg *CodeGen) buildTypeNameAtom(_ *ir.Block, sn string) value.Value {
-	return cg.atomConstant(cg.registerAtom(sn))
-}
-
 // runtimeAtomSelectByTypeID generates an inline select chain that picks the
 // correct %__atom from a table keyed by compile-time type IDs.
 // table maps type_id -> atom name string (with leading apostrophe, e.g. "'i64").
