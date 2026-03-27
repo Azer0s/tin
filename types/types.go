@@ -249,6 +249,16 @@ func (t *Type) ByteSize() int {
 		return max + 4 // + tag i32
 	case KindClosure:
 		return 16 // fn_ptr(8) + env_ptr(8)
+	case KindVoid:
+		return 0
+	case KindFunction:
+		return 8 // function pointer
+	case KindEnum:
+		return 4 // underlying integer (i32 by default)
+	case KindAtom:
+		return 8 // { i32 code, i8* str } rounded to pointer size
+	case KindGeneric:
+		return 8 // unresolved generic; caller should not reach here
 	}
 	return 8
 }
@@ -284,6 +294,10 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 			params[i] = p.Substitute(mapping)
 		}
 		return NewFunction(params, t.Return.Substitute(mapping), t.IsVarArgs)
+	case KindVoid, KindBool, KindInt, KindFloat, KindString,
+		KindClosure, KindStruct, KindUnion, KindData,
+		KindEnum, KindGeneric, KindAtom:
+		return t
 	}
 	return t
 }

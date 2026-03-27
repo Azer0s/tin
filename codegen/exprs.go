@@ -1820,12 +1820,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	// Resolve each free name in the current (outer) scope. Skip names that
 	// resolve to module-level IR functions (not allocas) - those are callable
 	// directly by name and don't need capturing.
-	type capture struct {
-		name   string
-		val    value.Value // loaded value (not the alloca)
-		llvmTy irtypes.Type
-	}
-	var captures []capture
+	var captures []closureCapture
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
@@ -1844,35 +1839,11 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 			val = entry.val
 			ty = val.Type()
 		}
-		captures = append(captures, capture{n, val, ty})
+		captures = append(captures, closureCapture{name: n, val: val, llvmTy: ty})
 	}
 
 	// Step 2: build env struct and malloc it (if there are captures)
-	var envI8Ptr value.Value = constant.NewNull(irtypes.I8Ptr)
-	var envStructType *irtypes.StructType
-
-	if len(captures) > 0 {
-		fields := make([]irtypes.Type, len(captures))
-		for i, c := range captures {
-			fields[i] = c.llvmTy
-		}
-		envStructType = irtypes.NewStruct(fields...)
-
-		// sizeof(*envStructType): GEP trick - null + 1 element then ptrtoint.
-		nullEnvPtr := constant.NewNull(irtypes.NewPointer(envStructType))
-		oneGEP := block.NewGetElementPtr(envStructType, nullEnvPtr, constant.NewInt(irtypes.I32, 1))
-		envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
-		envI8Ptr = block.NewCall(cg.ensureMalloc(), envSize)
-
-		// Store each captured value into the env struct.
-		envTypedPtr := block.NewBitCast(envI8Ptr, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := block.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			block.NewStore(c.val, gep)
-		}
-	}
+	envI8Ptr, envStructType := cg.buildEnv(block, captures)
 
 	// Step 3: create the lambda IR function with (i8* env, params...) sig
 	llParams := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
@@ -1896,39 +1867,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	f := cg.mod.NewFunc(name, retType, llParams...)
 	entry := f.NewBlock("entry")
 
-	prevFn := cg.curFn
-	prevScope := cg.curScope
-	prevDefers := cg.pendingDefers
-	prevDeferFrames := cg.pendingDeferFrames
-	cg.pendingDefers = nil
-	cg.pendingDeferFrames = nil
-	cg.curFn = f
-	// Start a fresh scope (not inheriting outer scope - captured values are
-	// explicitly loaded from the env struct below).
-	cg.curScope = newScope(nil)
-
-	// Register global scope so functions/enums remain accessible.
-	// Walk up to the top-level scope and set it as the parent.
-	global := prevScope
-	for global.parent != nil {
-		global = global.parent
-	}
-	cg.curScope = newScope(global)
+	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env inside the lambda body
-	if len(captures) > 0 {
-		envRaw := f.Params[0]
-		envTypedPtr := entry.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			alloca := entry.NewAlloca(c.llvmTy)
-			loaded := entry.NewLoad(c.llvmTy, gep)
-			entry.NewStore(loaded, alloca)
-			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
-		}
-	}
+	cg.unpackEnv(entry, f, envStructType, captures)
 
 	// Register lambda params (skip index 0 = env).
 	for i, p := range e.Params {
@@ -1969,10 +1911,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		}
 	}
 
-	cg.curFn = prevFn
-	cg.curScope = prevScope
-	cg.pendingDefers = prevDefers
-	cg.pendingDeferFrames = prevDeferFrames
+	cg.popClosureCtx(prevCtx)
 
 	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr }
 	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)
