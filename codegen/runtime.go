@@ -1,6 +1,6 @@
 package codegen
 
-// runtime.go — ARC (automatic reference counting) helpers, string builders,
+// runtime.go - ARC (automatic reference counting) helpers, string builders,
 // global string constants, and lazily-declared runtime/C functions.
 
 import (

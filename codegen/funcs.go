@@ -140,7 +140,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 	switch n := node.(type) {
 	case *ast.StructDecl:
 		if len(n.TypeParams) > 0 {
-			// Generic struct — store as template; concrete types are created
+			// Generic struct - store as template; concrete types are created
 			// when a "type X = GenericStruct[T]" alias is processed.
 			cg.genericStructs[n.Name] = n
 		} else {
@@ -180,7 +180,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		cg.traits[n.Name] = n
 	case *ast.DataDecl:
 		if len(n.TypeParams) > 0 {
-			// Generic data type — register template immediately so that
+			// Generic data type - register template immediately so that
 			// function signatures predeclared in pass 2 can resolve it.
 			cg.genericDataDecls[n.Name] = n
 		} else {
@@ -260,7 +260,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// If this user-defined function has the same name as an already-declared
 	// C extern symbol, mangle the IR name to avoid a redefinition conflict.
 	// We only mangle against EXTERN declarations (not against the function's own
-	// predeclared stub in the IR — that is handled by genFuncDeclAs reuse logic).
+	// predeclared stub in the IR - that is handled by genFuncDeclAs reuse logic).
 	if n.IsExtern == "" && cg.externIRNames[irName] {
 		mangledName := "_tin__" + irName
 		tinName := irName // capture for deferred closure
@@ -437,7 +437,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Create entry block.
 	entry := f.NewBlock("entry")
 
-	// Save context (including defer lists — each function has its own).
+	// Save context (including defer lists - each function has its own).
 	prevFn := cg.curFn
 	prevScope := cg.curScope
 	prevDefers := cg.pendingDefers
@@ -546,12 +546,11 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	return nil
 }
 
-
 // genTestRunner generates one __tin_test_N function per TestDecl, plus a
 // main() that:
-//   1. Runs any top-level setup statements (non-test stmts).
-//   2. Calls _tin_run_test(desc, fn_ptr) for each test.
-//   3. Returns the exit code from _tin_test_finish(total_count).
+//  1. Runs any top-level setup statements (non-test stmts).
+//  2. Calls _tin_run_test(desc, fn_ptr) for each test.
+//  3. Returns the exit code from _tin_test_finish(total_count).
 //
 // _tin_run_test and _tin_test_finish are C helpers in runtime.c that use
 // setjmp/longjmp to isolate test failures and accumulate pass/fail counts.
@@ -653,4 +652,3 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 	cg.curScope = prevScope
 	return nil
 }
-

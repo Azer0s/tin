@@ -15,14 +15,14 @@ type TokenType int
 
 const (
 	// Literals
-	INT_LIT       TokenType = iota // 42, 0xFF
-	FLOAT_LIT                      // 3.14
-	STRING_LIT                     // "hello"
-	BACKTICK_LIT                   // `expr`  — code splice literal
-	CHAR_LIT                       // 'a'
-	BOOL_LIT                       // true / false
-	ATOM_LIT                       // 'ok  'err
-	NONE_LIT                       // None
+	INT_LIT      TokenType = iota // 42, 0xFF
+	FLOAT_LIT                     // 3.14
+	STRING_LIT                    // "hello"
+	BACKTICK_LIT                  // `expr`  - code splice literal
+	CHAR_LIT                      // 'a'
+	BOOL_LIT                      // true / false
+	ATOM_LIT                      // 'ok  'err
+	NONE_LIT                      // None
 
 	// Identifier
 	IDENT
@@ -72,41 +72,41 @@ const (
 	KW_PASS
 
 	// Operators
-	PLUS       // +
-	MINUS      // -
-	STAR       // *
-	SLASH      // /
-	PERCENT    // %
-	ASSIGN     // =
-	EQEQ       // ==
-	NEQ        // !=
-	LT         // <
-	LTEQ       // <=
-	GT         // >
-	GTEQ       // >=
-	AND        // &&
-	OR         // ||
-	NOT        // !
-	AMP        // &
-	BITOR      // |
-	XOR        // ^
-	SHL        // <<
-	SHR        // >>
-	INC        // ++
-	APPENDEQ   // ++=
-	PLUSEQ     // +=
-	MINUSEQ    // -=
-	STAREQ     // *=
-	SLASHEQ    // /=
-	PERCENTEQ  // %=
-	RANGE      // ..
-	PIPE       // |>
-	ARROW      // ->
-	DCOLON     // ::
-	QUESTION   // ?
-	AT         // @
-	TILDE      // ~
-	DOTDOTDOT  // ... (varargs)
+	PLUS      // +
+	MINUS     // -
+	STAR      // *
+	SLASH     // /
+	PERCENT   // %
+	ASSIGN    // =
+	EQEQ      // ==
+	NEQ       // !=
+	LT        // <
+	LTEQ      // <=
+	GT        // >
+	GTEQ      // >=
+	AND       // &&
+	OR        // ||
+	NOT       // !
+	AMP       // &
+	BITOR     // |
+	XOR       // ^
+	SHL       // <<
+	SHR       // >>
+	INC       // ++
+	APPENDEQ  // ++=
+	PLUSEQ    // +=
+	MINUSEQ   // -=
+	STAREQ    // *=
+	SLASHEQ   // /=
+	PERCENTEQ // %=
+	RANGE     // ..
+	PIPE      // |>
+	ARROW     // ->
+	DCOLON    // ::
+	QUESTION  // ?
+	AT        // @
+	TILDE     // ~
+	DOTDOTDOT // ... (varargs)
 
 	// Delimiters
 	LPAREN   // (
@@ -136,8 +136,8 @@ const (
 var tokenNames = map[TokenType]string{
 	INT_LIT: "INT", FLOAT_LIT: "FLOAT", STRING_LIT: "STRING", BACKTICK_LIT: "BACKTICK",
 	CHAR_LIT: "CHAR", BOOL_LIT: "BOOL", ATOM_LIT: "ATOM", NONE_LIT: "NONE",
-	IDENT:      "IDENT",
-	KW_LET:     "let", KW_CONST: "const", KW_FN: "fn", KW_TYPE: "type",
+	IDENT:  "IDENT",
+	KW_LET: "let", KW_CONST: "const", KW_FN: "fn", KW_TYPE: "type",
 	KW_STRUCT: "struct", KW_TRAIT: "trait", KW_ENUM: "enum", KW_UNION: "union",
 	KW_DATA: "data", KW_USE: "use", KW_EXPORT: "export", KW_EXTERN: "extern",
 	KW_RETURN: "return", KW_IF: "if", KW_ELSE: "else", KW_FOR: "for",
@@ -159,7 +159,7 @@ var tokenNames = map[TokenType]string{
 	LPAREN: "(", RPAREN: ")", LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]",
 	COLON: ":", SEMI: ";", COMMA: ",", DOT: ".", HASH: "#",
 	CONTROL_TAG: "TAG",
-	NEWLINE: "NEWLINE", INDENT: "INDENT", DEDENT: "DEDENT",
+	NEWLINE:     "NEWLINE", INDENT: "INDENT", DEDENT: "DEDENT",
 	EOF: "EOF", ILLEGAL: "ILLEGAL",
 }
 
@@ -200,14 +200,14 @@ func (t Token) String() string {
 
 // Lexer tokenizes tin source code
 type Lexer struct {
-	src          []rune
-	pos          int
-	line         int
-	col          int
-	indentStack  []int
-	tokens       []Token
-	atLineStart  bool
-	lineIndent   int
+	src         []rune
+	pos         int
+	line        int
+	col         int
+	indentStack []int
+	tokens      []Token
+	atLineStart bool
+	lineIndent  int
 	// dedenting is true when we are re-entering handleLineStart to emit
 	// additional DEDENT tokens for the same line.  In that case the position
 	// has already been advanced past the leading whitespace, so we must use
@@ -342,11 +342,14 @@ func (l *Lexer) nextToken() (Token, error) {
 	}
 
 	if ch == '.' && l.peekAt(1) == '.' && l.peekAt(2) == '.' {
-		l.advance(); l.advance(); l.advance()
+		l.advance()
+		l.advance()
+		l.advance()
 		return Token{Type: DOTDOTDOT, Literal: "...", Line: line, Col: col}, nil
 	}
 	if ch == '.' && l.peekAt(1) == '.' {
-		l.advance(); l.advance()
+		l.advance()
+		l.advance()
 		return Token{Type: RANGE, Literal: "..", Line: line, Col: col}, nil
 	}
 
@@ -405,7 +408,7 @@ func (l *Lexer) handleLineStart() (Token, error) {
 		return l.nextToken()
 	}
 	if l.src[l.pos] == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*' {
-		// Block comment — set atLineStart=false so we don't re-enter here
+		// Block comment - set atLineStart=false so we don't re-enter here
 		l.atLineStart = false
 		return l.nextToken()
 	}
@@ -537,7 +540,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			l.advance()      // consume closing '
 			return Token{Type: CHAR_LIT, Literal: string(c), Line: line, Col: col}, nil
 		}
-		// It's an atom — only letters, digits, and underscores allowed
+		// It's an atom - only letters, digits, and underscores allowed
 		var sb strings.Builder
 		for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 			sb.WriteRune(l.advance())

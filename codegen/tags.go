@@ -57,7 +57,7 @@ func (cg *CodeGen) checkAllPureFuncs() error {
 // checkPureBody verifies that fn is actually pure by walking its body.
 // A function is pure if it contains no echo statements, no calls to
 // #sideffect or extern functions, no indirect (function-pointer) calls,
-// and no calls to unverifiable external package functions —
+// and no calls to unverifiable external package functions -
 // except inside #allow_sideffect blocks.
 func (cg *CodeGen) checkPureBody(fn *ast.FuncDecl) error {
 	visited := make(map[string]bool)
@@ -75,7 +75,7 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 	switch v := node.(type) {
 	case *ast.EchoStmt:
 		if !allowSideEffect {
-			return fmt.Errorf("fn %s: #pure violation — echo is a side effect", fnCtx)
+			return fmt.Errorf("fn %s: #pure violation - echo is a side effect", fnCtx)
 		}
 
 	case *ast.TaggedBlock:
@@ -207,14 +207,14 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 
 // checkCallPure checks whether a CallExpr is pure (no side effects).
 // It resolves the callee name and follows transitive calls.
-// Unresolvable calls (function pointers / indirect calls) are rejected —
+// Unresolvable calls (function pointers / indirect calls) are rejected -
 // their purity cannot be verified statically.
 func (cg *CodeGen) checkCallPure(fnCtx string, call *ast.CallExpr, visited map[string]bool) error {
 	calleeName := resolveCalleeName(call)
 	if calleeName == "" {
 		// Cannot resolve statically (e.g. function pointer / indirect call).
-		// Purity cannot be verified — reject.
-		return fmt.Errorf("fn %s: #pure violation — indirect call through function pointer is not verifiable", fnCtx)
+		// Purity cannot be verified - reject.
+		return fmt.Errorf("fn %s: #pure violation - indirect call through function pointer is not verifiable", fnCtx)
 	}
 	return cg.isPureCallable(fnCtx, calleeName, visited)
 }
@@ -224,9 +224,9 @@ func (cg *CodeGen) checkCallPure(fnCtx string, call *ast.CallExpr, visited map[s
 // to handle mutual recursion without infinite loops.
 //
 // calleeName may be:
-//   - "funcName"        — top-level function
-//   - "pkg::funcName"   — package-qualified function (rejected: unverifiable)
-//   - ".methodName"     — method call (receiver type unknown); checked conservatively
+//   - "funcName"        - top-level function
+//   - "pkg::funcName"   - package-qualified function (rejected: unverifiable)
+//   - ".methodName"     - method call (receiver type unknown); checked conservatively
 //     by scanning all registered "Struct_methodName" entries for any #sideffect match
 func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]bool) error {
 	// Method call via FieldAccess: we don't have the receiver type, so do a
@@ -240,10 +240,10 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 			}
 			// Found at least one struct method with this name. Check it.
 			if hasTag(fd.Tags, "sideffect") {
-				return fmt.Errorf("fn %s: #pure violation — calls #sideffect method %q", fnCtx, methodName)
+				return fmt.Errorf("fn %s: #pure violation - calls #sideffect method %q", fnCtx, methodName)
 			}
 			if fd.IsExtern != "" {
-				return fmt.Errorf("fn %s: #pure violation — calls extern method %q", fnCtx, methodName)
+				return fmt.Errorf("fn %s: #pure violation - calls extern method %q", fnCtx, methodName)
 			}
 			if visited[key] {
 				continue
@@ -257,12 +257,12 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 	}
 
 	// Package-qualified call (e.g. "assert::equals"): purity of external
-	// package functions cannot be verified — reject.
+	// package functions cannot be verified - reject.
 	if strings.Contains(calleeName, "::") {
-		return fmt.Errorf("fn %s: #pure violation — cannot verify purity of package call %q", fnCtx, calleeName)
+		return fmt.Errorf("fn %s: #pure violation - cannot verify purity of package call %q", fnCtx, calleeName)
 	}
 
-	// Already checked in this traversal — avoid infinite recursion
+	// Already checked in this traversal - avoid infinite recursion
 	if visited[calleeName] {
 		return nil
 	}
@@ -274,18 +274,18 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 		if isPureBuiltin(calleeName) {
 			return nil
 		}
-		// Unknown function — purity cannot be verified.
-		return fmt.Errorf("fn %s: #pure violation — cannot verify purity of %q", fnCtx, calleeName)
+		// Unknown function - purity cannot be verified.
+		return fmt.Errorf("fn %s: #pure violation - cannot verify purity of %q", fnCtx, calleeName)
 	}
 
 	// Explicitly tagged #sideffect
 	if hasTag(fd.Tags, "sideffect") {
-		return fmt.Errorf("fn %s: #pure violation — calls #sideffect function %q", fnCtx, calleeName)
+		return fmt.Errorf("fn %s: #pure violation - calls #sideffect function %q", fnCtx, calleeName)
 	}
 
 	// Extern functions (all extern = side-effectful)
 	if fd.IsExtern != "" {
-		return fmt.Errorf("fn %s: #pure violation — calls extern function %q", fnCtx, calleeName)
+		return fmt.Errorf("fn %s: #pure violation - calls extern function %q", fnCtx, calleeName)
 	}
 
 	// Transitively check the callee's body
@@ -301,7 +301,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 func (cg *CodeGen) checkAllNoRecurseFuncs() error {
 	for key, fd := range cg.funcDecls {
 		if hasTag(fd.Tags, "no_recurse") {
-			// #pure #no_recurse functions are CTFE macros — their body may contain
+			// #pure #no_recurse functions are CTFE macros - their body may contain
 			// self-calls that are resolved at compile time. Skip the recursion check
 			// since CTFE handles them rather than runtime calls.
 			if hasTag(fd.Tags, "pure") {
@@ -452,7 +452,7 @@ func (cg *CodeGen) walkNoRecurseNode(targetFn string, node ast.Node, visited map
 func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visited map[string]bool) error {
 	calleeName := resolveCalleeName(call)
 	if calleeName == "" {
-		// Indirect call — cannot trace; conservatively allow.
+		// Indirect call - cannot trace; conservatively allow.
 		return nil
 	}
 
@@ -465,7 +465,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 				continue
 			}
 			if key == targetFn {
-				return fmt.Errorf("fn %s: #no_recurse violation — function calls itself", targetFn)
+				return fmt.Errorf("fn %s: #no_recurse violation - function calls itself", targetFn)
 			}
 			if visited[key] {
 				continue
@@ -486,10 +486,10 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 
 	// Direct match: the callee IS the no_recurse function.
 	if lookupName == targetFn {
-		return fmt.Errorf("fn %s: #no_recurse violation — function calls itself", targetFn)
+		return fmt.Errorf("fn %s: #no_recurse violation - function calls itself", targetFn)
 	}
 
-	// Already explored this callee in this traversal — skip.
+	// Already explored this callee in this traversal - skip.
 	if visited[calleeName] {
 		return nil
 	}
@@ -497,7 +497,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 
 	fd, known := cg.funcDecls[lookupName]
 	if !known {
-		// External / built-in — cannot trace; conservatively allow.
+		// External / built-in - cannot trace; conservatively allow.
 		return nil
 	}
 
@@ -520,7 +520,7 @@ func resolveCalleeName(call *ast.CallExpr) string {
 	case *ast.ScopeAccess:
 		return strings.Join(f.Path, "::")
 	case *ast.FieldAccess:
-		// obj.method() — return ".method" as a hint; callers will do a suffix search
+		// obj.method() - return ".method" as a hint; callers will do a suffix search
 		return "." + f.Field
 	}
 	return ""

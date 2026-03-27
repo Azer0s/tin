@@ -349,7 +349,7 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 				p.pos = saved
 			}
 		}
-		// Use parseTypeSingle so that '|' is NOT consumed as part of the type —
+		// Use parseTypeSingle so that '|' is NOT consumed as part of the type -
 		// it is the separator between union members.
 		typ, err2 := p.parseTypeSingle()
 		if err2 != nil {
@@ -565,4 +565,3 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 	}
 	return &ast.MacroDecl{Name: name, Tags: tags, Params: params, Body: body}, nil
 }
-

@@ -12,21 +12,21 @@ import (
 type Kind int
 
 const (
-	KindVoid    Kind = iota
-	KindBool        // bool (i1)
-	KindInt         // i8, i16, i32, i64, u8, u16, u32, u64, char
-	KindFloat       // f32, f64
-	KindString      // string = [char] (fat pointer: {i8*, i64})
-	KindArray       // [T] dynamic or [T; N] fixed
-	KindPointer     // *T
-	KindFunction    // fn(T...) R  (bare function pointer)
-	KindClosure     // fn with captured environment
-	KindStruct      // struct
-	KindUnion       // tagged union: type u = A | B
-	KindData        // data maybe[t] = t | None
-	KindEnum        // enum
-	KindGeneric     // unresolved type parameter
-	KindAtom        // atom literal type
+	KindVoid     Kind = iota
+	KindBool          // bool (i1)
+	KindInt           // i8, i16, i32, i64, u8, u16, u32, u64, char
+	KindFloat         // f32, f64
+	KindString        // string = [char] (fat pointer: {i8*, i64})
+	KindArray         // [T] dynamic or [T; N] fixed
+	KindPointer       // *T
+	KindFunction      // fn(T...) R  (bare function pointer)
+	KindClosure       // fn with captured environment
+	KindStruct        // struct
+	KindUnion         // tagged union: type u = A | B
+	KindData          // data maybe[t] = t | None
+	KindEnum          // enum
+	KindGeneric       // unresolved type parameter
+	KindAtom          // atom literal type
 )
 
 // Type represents a resolved tin type
@@ -35,8 +35,8 @@ type Type struct {
 	Name string // canonical name used as LLVM struct/alias name
 
 	// Integers
-	BitSize  int  // 1, 8, 16, 32, 64
-	Signed   bool // false for u* types and char
+	BitSize int  // 1, 8, 16, 32, 64
+	Signed  bool // false for u* types and char
 
 	// Float
 	// BitSize used here too (32 or 64)
@@ -101,22 +101,22 @@ type EnumMember struct {
 // Built-in types
 
 var (
-	Void    = &Type{Kind: KindVoid, Name: "void"}
-	Bool    = &Type{Kind: KindBool, Name: "bool", BitSize: 1}
-	I8      = &Type{Kind: KindInt, Name: "i8", BitSize: 8, Signed: true}
-	I16     = &Type{Kind: KindInt, Name: "i16", BitSize: 16, Signed: true}
-	I32     = &Type{Kind: KindInt, Name: "i32", BitSize: 32, Signed: true}
-	I64     = &Type{Kind: KindInt, Name: "i64", BitSize: 64, Signed: true}
-	U8      = &Type{Kind: KindInt, Name: "u8", BitSize: 8, Signed: false}
-	U16     = &Type{Kind: KindInt, Name: "u16", BitSize: 16, Signed: false}
-	U32     = &Type{Kind: KindInt, Name: "u32", BitSize: 32, Signed: false}
-	U64     = &Type{Kind: KindInt, Name: "u64", BitSize: 64, Signed: false}
-	F32     = &Type{Kind: KindFloat, Name: "f32", BitSize: 32}
-	F64     = &Type{Kind: KindFloat, Name: "f64", BitSize: 64}
-	Char    = &Type{Kind: KindInt, Name: "char", BitSize: 8, Signed: false}
-	SizeT   = &Type{Kind: KindInt, Name: "size_t", BitSize: 64, Signed: false}
-	UInt32  = &Type{Kind: KindInt, Name: "uint32", BitSize: 32, Signed: false}
-	TinStr  = &Type{Kind: KindString, Name: "string"}
+	Void   = &Type{Kind: KindVoid, Name: "void"}
+	Bool   = &Type{Kind: KindBool, Name: "bool", BitSize: 1}
+	I8     = &Type{Kind: KindInt, Name: "i8", BitSize: 8, Signed: true}
+	I16    = &Type{Kind: KindInt, Name: "i16", BitSize: 16, Signed: true}
+	I32    = &Type{Kind: KindInt, Name: "i32", BitSize: 32, Signed: true}
+	I64    = &Type{Kind: KindInt, Name: "i64", BitSize: 64, Signed: true}
+	U8     = &Type{Kind: KindInt, Name: "u8", BitSize: 8, Signed: false}
+	U16    = &Type{Kind: KindInt, Name: "u16", BitSize: 16, Signed: false}
+	U32    = &Type{Kind: KindInt, Name: "u32", BitSize: 32, Signed: false}
+	U64    = &Type{Kind: KindInt, Name: "u64", BitSize: 64, Signed: false}
+	F32    = &Type{Kind: KindFloat, Name: "f32", BitSize: 32}
+	F64    = &Type{Kind: KindFloat, Name: "f64", BitSize: 64}
+	Char   = &Type{Kind: KindInt, Name: "char", BitSize: 8, Signed: false}
+	SizeT  = &Type{Kind: KindInt, Name: "size_t", BitSize: 64, Signed: false}
+	UInt32 = &Type{Kind: KindInt, Name: "uint32", BitSize: 32, Signed: false}
+	TinStr = &Type{Kind: KindString, Name: "string"}
 )
 
 // Builtins maps tin type names to their pre-resolved *Type

@@ -1,6 +1,6 @@
 package codegen
 
-// types.go — LLVM type mapping, type helpers, and type query utilities.
+// types.go - LLVM type mapping, type helpers, and type query utilities.
 
 import (
 	"github.com/Azer0s/tin/ast"
@@ -20,7 +20,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 	case *ast.VoidType:
 		return irtypes.Void, nil
 	case *ast.PointerType:
-		// *void is invalid in LLVM IR — use i8* (opaque pointer convention)
+		// *void is invalid in LLVM IR - use i8* (opaque pointer convention)
 		if st, ok := t.Elem.(*ast.SimpleType); ok && st.Name == "void" {
 			return irtypes.I8Ptr, nil
 		}
@@ -91,7 +91,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if tmplStruct, isGenericStruct := cg.genericStructs[t.Name]; isGenericStruct && len(t.TypeParams) > 0 {
 			typeParamStr := t.TypeParams[0].String()
 			// Detect if typeParamStr is actually a template type-param name of this struct.
-			// If so, skip monomorphization — we're inside the template body itself.
+			// If so, skip monomorphization - we're inside the template body itself.
 			isTemplateVar := false
 			for _, tpName := range tmplStruct.TypeParams {
 				if tpName == typeParamStr {
@@ -129,7 +129,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	case *ast.TupleArrayType:
-		// @[T1, T2, ...] resolves to [any] — fat array of any values.
+		// @[T1, T2, ...] resolves to [any] - fat array of any values.
 		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
 	}
 	return irtypes.I64, nil
@@ -171,7 +171,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		// fat pointer: {i8*, i32}  (type-tagged box)
 		return anyFatPtrType(), nil
 	}
-	// Check trait types — represented as fat pointers {i8*, vtable*}
+	// Check trait types - represented as fat pointers {i8*, vtable*}
 	if _, ok := cg.traits[name]; ok {
 		fp, err := cg.buildTraitFatPtrType(name)
 		if err != nil {
@@ -281,7 +281,7 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 // Type query helpers
 
 // isFatPtrType returns true if t is a two-field struct whose first field
-// is a pointer — i.e., a Tin fat-pointer (string, array, etc.).
+// is a pointer - i.e., a Tin fat-pointer (string, array, etc.).
 func isFatPtrType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
 	if !ok || len(st.Fields) != 2 {

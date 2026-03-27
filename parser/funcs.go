@@ -2,7 +2,7 @@ package parser
 
 import (
 	"fmt"
-	
+
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
 )
@@ -74,7 +74,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 				name = p.advance().Literal
 			}
 		} else {
-			// plain name — restore and re-read cleanly
+			// plain name - restore and re-read cleanly
 			p.pos = saved
 			name = p.advance().Literal
 		}
@@ -215,7 +215,7 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 		}
 		return &ast.Block{}, nil
 	}
-	// Single expression / statement on same line — may be SEMI-separated multi-statement
+	// Single expression / statement on same line - may be SEMI-separated multi-statement
 	first, err := p.parseStatement()
 	if err != nil {
 		return nil, err
@@ -335,4 +335,3 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	}
 	return b, nil
 }
-

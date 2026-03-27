@@ -17,7 +17,7 @@ import (
 // Handles both concrete-struct dispatch and print fat-pointer dispatch.
 func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value, bool) {
 	t := val.Type()
-	// Case 1: concrete struct — look up structName_print directly.
+	// Case 1: concrete struct - look up structName_print directly.
 	if structName := cg.typeNameOf(t); structName != "" {
 		if e, ok := cg.curScope.lookup(structName + "_print"); ok {
 			if fn, ok2 := e.val.(*ir.Func); ok2 {
@@ -26,7 +26,7 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 			}
 		}
 	}
-	// Case 2: print trait fat pointer — dispatch through vtable.
+	// Case 2: print trait fat pointer - dispatch through vtable.
 	if instKey, ok := cg.isTraitFatPtr(t); ok {
 		baseTrait := instKey
 		if base, exists := cg.traitInstKeys[instKey]; exists {
@@ -507,4 +507,3 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 	}
 	return constant.NewInt(irtypes.I64, 0)
 }
-

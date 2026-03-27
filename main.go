@@ -44,7 +44,7 @@ func parseFileLinkerFlags(src string) []string {
 	for _, line := range strings.SplitAfter(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
-			// blank or ordinary comment — keep scanning
+			// blank or ordinary comment - keep scanning
 			continue
 		}
 		if strings.HasPrefix(trimmed, "//!") {
@@ -54,7 +54,7 @@ func parseFileLinkerFlags(src string) []string {
 			}
 			continue
 		}
-		break // first non-comment, non-blank line — stop
+		break // first non-comment, non-blank line - stop
 	}
 	return flags
 }
