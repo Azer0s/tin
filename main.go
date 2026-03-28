@@ -30,34 +30,79 @@ Linker flags (passed after the source file):
   -lNAME       link with libNAME (e.g. -lm for libmath)
   -LDIR        add DIR to the library search path
   file.o/.a    link with extra object/archive file
+
+In-source directives (at the top of the .tin file):
+  //!-lNAME            link with libNAME
+  //!+file.c           compile C source file alongside the tin module
+  //!+file.c -- FLAGS  compile C source with extra clang flags
 `
 
-// parseFileLinkerFlags scans the leading lines of src for //! directives and
-// returns the flags they specify.  Each directive line has the form:
+// cSource represents a C source file to compile alongside the tin module,
+// optionally with extra clang flags (from //!+file.c -- -DFOO directives).
+type cSource struct {
+	path  string
+	flags []string
+}
+
+// parseFileDirectives scans the leading lines of src for //! directives and
+// returns linker flags and C source files to compile in.
 //
-//	//!-lm
-//	//!-lraylib
-//	//!-L/usr/local/lib
+//	//!-lm            -> linker flag -lm
+//	//!-lraylib       -> linker flag -lraylib
+//	//!-L/usr/local/lib -> linker flag -L/usr/local/lib
+//	//!+helper.c      -> compile helper.c alongside the module
+//	//!+src/foo.c -- -DDEBUG -> compile src/foo.c with extra flag -DDEBUG
 //
-// Scanning stops at the first line that is not a comment or blank
-func parseFileLinkerFlags(src string) []string {
-	var flags []string
+// srcDir is the directory of the .tin file; relative C source paths are
+// resolved against it. Scanning stops at the first non-comment, non-blank line.
+func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []cSource) {
 	for _, line := range strings.SplitAfter(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
-			// blank or ordinary comment - keep scanning
 			continue
 		}
 		if strings.HasPrefix(trimmed, "//!") {
-			flag := strings.TrimSpace(trimmed[3:])
-			if flag != "" {
-				flags = append(flags, flag)
+			rest := strings.TrimSpace(trimmed[3:])
+			if rest == "" {
+				continue
+			}
+			if strings.HasPrefix(rest, "+") {
+				spec := strings.TrimSpace(rest[1:])
+				parts := strings.SplitN(spec, " -- ", 2)
+				cpath := filepath.Join(srcDir, strings.TrimSpace(parts[0]))
+				var extraFlags []string
+				if len(parts) == 2 {
+					fields := strings.Fields(parts[1])
+					for i := 0; i < len(fields); i++ {
+						f := fields[i]
+						var iPath string
+						if f == "-I" && i+1 < len(fields) {
+							// "-I path" (space-separated)
+							i++
+							iPath = fields[i]
+						} else if strings.HasPrefix(f, "-I") && len(f) > 2 {
+							// "-Ipath" (no space)
+							iPath = f[2:]
+						}
+						if iPath != "" {
+							if !filepath.IsAbs(iPath) {
+								iPath = filepath.Join(srcDir, iPath)
+							}
+							extraFlags = append(extraFlags, "-I"+iPath)
+						} else {
+							extraFlags = append(extraFlags, f)
+						}
+					}
+				}
+				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
+			} else {
+				linkerFlags = append(linkerFlags, rest)
 			}
 			continue
 		}
-		break // first non-comment, non-blank line - stop
+		break
 	}
-	return flags
+	return
 }
 
 func main() {
@@ -102,8 +147,8 @@ func main() {
 		die("error reading file: %v", err)
 	}
 
-	// Collect linker flags declared in the source file via //! directives
-	fileLinkerFlags := parseFileLinkerFlags(string(src))
+	// Collect directives declared in the source file via //! lines
+	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file))
 
 	// Lex
 	l := lexer.New(string(src))
@@ -147,6 +192,18 @@ func main() {
 
 	irText := mod.String()
 
+	// Collect C sources and linker flags from loaded package source files.
+	// Packages may declare //!+file.c directives that need to be compiled in.
+	for _, pkgSrc := range cg.PackageSrcPaths() {
+		src, readErr := os.ReadFile(pkgSrc)
+		if readErr != nil {
+			continue
+		}
+		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc))
+		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
+		fileCSources = append(fileCSources, pkgCSources...)
+	}
+
 	// Collect linker flags: //! directives in the file + codegen link directives
 	srcLinkFlags := append([]string{}, fileLinkerFlags...)
 	for _, lib := range cg.LinkLibs() {
@@ -178,7 +235,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, libMode, extraObjs); err != nil {
+		if err := compileIR(irText, out, libMode, extraObjs, fileCSources); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -199,7 +256,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, false, extraObjs); err != nil {
+		if err := compileIR(irText, out, false, extraObjs, fileCSources); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -217,7 +274,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, tmp, false, extraObjs); err != nil {
+		if err := compileIR(irText, tmp, false, extraObjs, fileCSources); err != nil {
 			die("compile error: %v", err)
 		}
 		defer func(name string) {
@@ -240,10 +297,11 @@ func main() {
 	}
 }
 
-// compileIR writes the LLVM IR to a temp .ll file and invokes clang
-// If libMode is true, compile to an object file with -c (no linking)
-// extraObjs are additional .o/.a files to link with
-func compileIR(ir, outBin string, libMode bool, extraObjs []string) error {
+// compileIR writes the LLVM IR to a temp .ll file and invokes clang.
+// If libMode is true, compile to an object file with -c (no linking).
+// extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
+// cSources are C source files to compile in alongside the IR.
+func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource) error {
 	// Write IR to temp file
 	//goland:noinspection GoResourceLeak
 	llFile, err := os.CreateTemp("", "tin-*.ll")
@@ -263,17 +321,70 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string) error {
 	rtC := filepath.Join(filepath.Dir(ex), "runtime", "runtime.c")
 
 	if libMode {
-		// Library mode: compile to object file only (-c), no runtime, no linking
-		args := []string{"-O2", "-c", llFile.Name(), "-o", outBin}
-		clang := exec.Command("clang", args...)
-		clang.Stdout = os.Stdout
-		clang.Stderr = os.Stderr
-		return clang.Run()
+		// Library mode: compile to object file(s) with -c, then merge with ld -r.
+		// clang -c cannot write multiple inputs to a single -o, so each source is
+		// compiled separately and the results are partially linked together.
+		irObj, err := os.CreateTemp("", "tin-ir-*.o")
+		if err != nil {
+			return fmt.Errorf("cannot create temp object file: %w", err)
+		}
+		irObjName := irObj.Name()
+		_ = irObj.Close()
+		defer func() { _ = os.Remove(irObjName) }()
+
+		clangIR := exec.Command("clang", "-O2", "-c", llFile.Name(), "-o", irObjName)
+		clangIR.Stdout = os.Stdout
+		clangIR.Stderr = os.Stderr
+		if err := clangIR.Run(); err != nil {
+			return err
+		}
+
+		objs := []string{irObjName}
+		var tmpObjs []string
+		for _, cs := range cSources {
+			cObj, err := os.CreateTemp("", "tin-c-*.o")
+			if err != nil {
+				return fmt.Errorf("cannot create temp object file: %w", err)
+			}
+			cObjName := cObj.Name()
+			_ = cObj.Close()
+			tmpObjs = append(tmpObjs, cObjName)
+			cArgs := []string{"-O2", "-c"}
+			cArgs = append(cArgs, cs.flags...)
+			cArgs = append(cArgs, cs.path, "-o", cObjName)
+			clangC := exec.Command("clang", cArgs...)
+			clangC.Stdout = os.Stdout
+			clangC.Stderr = os.Stderr
+			if err := clangC.Run(); err != nil {
+				for _, f := range tmpObjs {
+					_ = os.Remove(f)
+				}
+				return err
+			}
+			objs = append(objs, cObjName)
+		}
+		defer func() {
+			for _, f := range tmpObjs {
+				_ = os.Remove(f)
+			}
+		}()
+
+		// Merge all object files into the final output with ld -r (partial link)
+		ldArgs := append([]string{"-r"}, objs...)
+		ldArgs = append(ldArgs, "-o", outBin)
+		ld := exec.Command("ld", ldArgs...)
+		ld.Stdout = os.Stdout
+		ld.Stderr = os.Stderr
+		return ld.Run()
 	}
 
 	args := []string{"-O2", llFile.Name()}
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
+	}
+	for _, cs := range cSources {
+		args = append(args, cs.flags...)
+		args = append(args, cs.path)
 	}
 	args = append(args, extraObjs...)
 	args = append(args, "-o", outBin)
@@ -333,9 +444,21 @@ func runDirTests(dir string, extraFlags []string) {
 			continue // no test blocks in this file
 		}
 
-		srcLinks := append([]string{}, parseFileLinkerFlags(string(src))...)
+		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath))
+		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
 			srcLinks = append(srcLinks, "-l"+lib)
+		}
+		// Collect //!+file.c and //!-lNAME directives from imported packages,
+		// just as the single-file build path does.
+		for _, pkgSrc := range cg.PackageSrcPaths() {
+			pkgBytes, pkgReadErr := os.ReadFile(pkgSrc)
+			if pkgReadErr != nil {
+				continue
+			}
+			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc))
+			srcLinks = append(srcLinks, pkgLinks...)
+			fCSources = append(fCSources, pkgCSrcs...)
 		}
 		linkFlags := append(srcLinks, extraFlags...)
 
@@ -354,7 +477,7 @@ func runDirTests(dir string, extraFlags []string) {
 		}(tmp.Name())
 
 		irText := mod.String()
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 			results = append(results, result{e.Name(), false})
 			continue

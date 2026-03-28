@@ -9,7 +9,7 @@ fn panicky(msg string) void =
 
 test "deferred recover captures panic message" =
   let got string = ""
-  defer fn() void =
+  defer do:
     let msg = recover()
     if len(msg) > 0 :
       got = msg
@@ -18,7 +18,7 @@ test "deferred recover captures panic message" =
 
 test "recover in non-panicking defer returns empty string" =
   let was_empty bool = true
-  defer fn() void =
+  defer do:
     let msg = recover()
     was_empty = len(msg) == 0
   assert::ok(was_empty)

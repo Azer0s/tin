@@ -1,0 +1,9 @@
+//!+helper.c
+
+fn add(a i64, b i64) i64 = extern("add")
+fn greet() = extern("greet")
+
+fn main() =
+  let x i64 = add(3, 4)
+  echo x
+  greet()

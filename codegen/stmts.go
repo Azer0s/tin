@@ -348,8 +348,10 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 		entryI8 := block.NewBitCast(entryAlloca, irtypes.I8Ptr)
 		block.NewCall(cg.deferPushFn, entryI8, fnI8, envI8)
 		cg.pendingDeferFrames = append(cg.pendingDeferFrames, entryI8)
-		// 3. Also record the original call for inline LIFO emission on normal return.
-		cg.pendingDefers = append(cg.pendingDefers, s.Call)
+		// 3. Record the thunk fn and its env for inline LIFO emission on normal
+		//    return: emitDefers calls thunk(env) then frees env.
+		cg.pendingDeferFnI8s = append(cg.pendingDeferFnI8s, fnI8)
+		cg.pendingDeferEnvs = append(cg.pendingDeferEnvs, envI8)
 		return block, false, nil
 
 	case *ast.FuncDecl:
@@ -437,12 +439,18 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				initVal = cg.zeroValue(llType)
 			}
 		}
+		srcType := initVal.Type()
 		initVal = cg.coerce(block, initVal, llType)
 		block.NewStore(initVal, alloca)
 		// ARC: retain when copying from an existing variable (identifier).
 		// emitRetain handles RC-tracked values (fat arrays, strings, any) and
 		// named structs with RC-tracked fields, and is a no-op for everything else.
-		if isCopyExpr(s.Value) {
+		//
+		// EXCEPTION: if coerce just boxed a non-any value into `any`, the new
+		// box block is a fresh _tin_rc_alloc (rc=1) - it is already owned, so
+		// an extra retain would over-count and cause a leak.
+		boxedToAny := isAnyType(llType) && !isAnyType(srcType)
+		if isCopyExpr(s.Value) && !boxedToAny {
 			cg.emitRetain(block, initVal)
 		}
 	} else {
@@ -458,22 +466,38 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 // executing it inline.  This ensures that if a deferred call itself panics,
 // the remaining (not-yet-run) defers are still in the chain and will be
 // executed by _tin_panic.
+//
+// IMPORTANT: this function does NOT clear pendingDeferFnI8s.  Each return path in
+// a function lives in its own basic block and independently emits the same set
+// of defers.  Clearing here would cause the second (and later) return paths to
+// see an empty list and silently skip their defers.  The list is naturally
+// cleared when genFuncDeclAs restores the outer function's prevDefers state.
 func (cg *CodeGen) emitDefers(block *ir.Block) error {
-	n := len(cg.pendingDefers)
+	n := len(cg.pendingDeferFnI8s)
 	if n == 0 {
 		return nil
 	}
+	// All thunks share the same signature: void(i8* env).
+	thunkFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
 	for i := n - 1; i >= 0; i-- {
 		// Deregister this one entry before running it.
 		if cg.deferPopFn != nil {
 			block.NewCall(cg.deferPopFn, constant.NewInt(irtypes.I64, 1))
 		}
-		if _, err := cg.genExpr(block, cg.pendingDefers[i]); err != nil {
-			return err
+		// Call the compiled thunk directly with its captured env.
+		// This is correct for both plain-call defers and lambda defers because
+		// the thunk captures all free variables by reference (alloca pointer),
+		// and the allocas remain live until the enclosing function returns.
+		fnI8 := cg.pendingDeferFnI8s[i]
+		env := cg.pendingDeferEnvs[i]
+		thunkFnPtr := block.NewBitCast(fnI8, irtypes.NewPointer(thunkFnType))
+		block.NewCall(thunkFnPtr, env)
+		// Free the heap env that was malloc'd for the thunk.
+		// Skip the null sentinel emitted when there were no captures.
+		if _, isNull := env.(*constant.Null); !isNull {
+			block.NewCall(cg.ensureFree(), env)
 		}
 	}
-	cg.pendingDeferFrames = nil
-	cg.pendingDefers = nil
 	return nil
 }
 
@@ -599,11 +623,8 @@ func (cg *CodeGen) ensureDeferChain() {
 // struct so that mutations inside the thunk propagate back to the outer scope.
 // Returns (fn as i8*, env as i8*).
 func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, value.Value, error) {
-	// Special case: "defer fn() = body" - the call IS a lambda expression.
-	// Also handles "defer (fn() = body)()" - a CallExpr with no args whose Func is a lambda.
-	if _, ok := call.(*ast.LambdaExpr); ok {
-		return cg.genDeferLambdaThunk(block, call)
-	}
+	// Handles "defer (fn() = body)()" and "defer do: body" (both parsed as
+	// CallExpr{Func: LambdaExpr, Args: nil}).
 	if callExpr, ok := call.(*ast.CallExpr); ok && len(callExpr.Args) == 0 {
 		if _, isLambda := callExpr.Func.(*ast.LambdaExpr); isLambda {
 			return cg.genDeferLambdaThunk(block, callExpr.Func)
@@ -980,10 +1001,14 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) error {
 	}
 	// Get the element type of the pointer.
 	ptrType := ptr.Type().(*irtypes.PointerType)
+	srcType := val.Type()
 	val = cg.coerce(block, val, ptrType.ElemType)
 	// ARC: for RC-tracked types, retain new value (if copy) then release old.
+	// Skip retain if coerce just boxed a non-any value to any: the new box is
+	// a fresh _tin_rc_alloc (rc=1) and is already owned.
 	if isRCTrackedType(ptrType.ElemType) {
-		if isCopyExpr(s.Value) {
+		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
+		if isCopyExpr(s.Value) && !boxedToAny {
 			cg.emitRetain(block, val)
 		}
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)

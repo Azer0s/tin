@@ -22,7 +22,7 @@ jobs:
           cache: true
 
       - name: Install clang (required by tin codegen)
-        run: sudo apt-get update -qq && sudo apt-get install -y clang
+        run: sudo apt-get update -qq && sudo apt-get install -y clang valgrind
 
       - name: Build compiler
         run: go build -o tin .
@@ -35,3 +35,12 @@ jobs:
 
       - name: Run example tests
         run: ./tin test examples/ -lm
+
+      - name: Run ARC stress tests under valgrind
+        run: |
+          for f in examples/arc_stress/*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== $name ==="
+            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            valgrind --error-exitcode=1 --leak-check=full "/tmp/tin_arc_${name}"
+          done

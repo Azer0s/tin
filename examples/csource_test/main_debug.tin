@@ -1,0 +1,6 @@
+//!+helper.c -- -DDEBUG
+
+fn greet() = extern("greet")
+
+fn main() =
+  greet()

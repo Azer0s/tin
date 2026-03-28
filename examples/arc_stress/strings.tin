@@ -1,0 +1,46 @@
+// ARC stress: strings
+// Tests retain/release cycles for string values
+
+fn concat_loop() string =
+  let a = "hello"
+  let b = " world"
+  let c = a ++ b
+  let d = c ++ "!"
+  let e = d ++ d
+  return e
+
+fn overwrite_string() =
+  let s = "first"
+  let s2 = s ++ " second"
+  echo s2
+
+fn string_in_function_args() =
+  fn take_str(s string) string =
+    return s ++ " suffix"
+  let base = "base"
+  let r = take_str(base)
+  echo r
+
+fn many_concats() =
+  let parts = ["a", "b", "c", "d", "e", "f", "g", "h"]
+  let acc = "start"
+  let r1 = acc ++ parts[0]
+  let r2 = r1 ++ parts[1]
+  let r3 = r2 ++ parts[2]
+  let r4 = r3 ++ parts[3]
+  echo r4
+
+fn interp_chain() =
+  let x = 42
+  let y = 7
+  let s1 = "x={x}"
+  let s2 = "y={y}"
+  let s3 = s1 ++ ", " ++ s2
+  echo s3
+
+let r = concat_loop()
+echo r
+overwrite_string()
+string_in_function_args()
+many_concats()
+interp_chain()

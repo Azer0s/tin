@@ -1,3 +1,5 @@
+//!+reflect.c -- -I ../../runtime
+
 // stdlib/reflect - Type atom inspection
 //
 // The reflect package provides predicates and destructors for Tin type atoms

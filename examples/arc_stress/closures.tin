@@ -1,0 +1,59 @@
+// ARC stress: closures capturing RC-tracked values
+// Tests that closures correctly retain/release captured strings and arrays.
+
+// Closure captures a string by value; the string should be retained in the
+// closure env and released when the closure goes out of scope.
+fn capture_string() =
+  let prefix = "hello" ++ ""
+  let greet = fn(name string) string =
+    return prefix ++ ", " ++ name
+  echo greet("world")
+  echo greet("tin")
+
+// Closure captures an i64 (non-RC) - baseline sanity check.
+fn capture_int() =
+  let base = 100
+  let adder = fn(x i64) i64 = return base + x
+  echo adder(5)
+  echo adder(42)
+
+// Closure returned from a function - env must survive beyond the creating scope.
+fn make_adder(n i64) fn(i64) i64 =
+  return fn(x i64) i64 = return n + x
+
+// Two closures from the same scope each get their own env copy.
+fn two_closures() =
+  let msg = "msg" ++ ""
+  let f = fn() string = return msg ++ "1"
+  let g = fn() string = return msg ++ "2"
+  echo f()
+  echo g()
+
+// Closure that builds a string inside itself (allocates inside the closure).
+fn closure_alloc_inside() =
+  let tag = "tag" ++ ""
+  let build = fn(n i64) string =
+    let s = tag ++ ": " ++ "value"
+    return s
+  echo build(1)
+  echo build(2)
+
+// Immediately-invoked closure (no variable binding).
+fn iife() =
+  let x = 7
+  let result = (fn(n i64) i64 = return n * n)(x)
+  echo result
+
+capture_string()
+capture_int()
+
+let add10 = make_adder(10)
+echo add10(3)
+echo add10(7)
+
+let add100 = make_adder(100)
+echo add100(5)
+
+two_closures()
+closure_alloc_inside()
+iife()

@@ -104,6 +104,9 @@ struct person =
   fn init(this person) =
     echo "called when a person struct is initialized (except for malloc)"
 
+  fn deinit(this person) =
+    echo "called when a named person variable goes out of scope"
+
   fn show(this person) string =
     return "{this.name} is {this.age} years old"
 

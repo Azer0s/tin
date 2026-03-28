@@ -19,9 +19,10 @@ type implicitConvEntry struct {
 // Scope
 
 type scopeEntry struct {
-	val     value.Value // alloca pointer (for locals) or *ir.Func (for functions)
-	isAlloc bool        // true if val is an alloca (needs load/store)
-	isRC    bool        // true if the alloca holds an ARC-managed value ([T] or any)
+	val      value.Value // alloca pointer (for locals) or *ir.Func (for functions)
+	isAlloc  bool        // true if val is an alloca (needs load/store)
+	isRC     bool        // true if the alloca holds an ARC-managed value ([T] or any)
+	noDeinit bool        // true for the `this` parameter of a deinit method (prevents recursive deinit)
 }
 
 type scope struct {
