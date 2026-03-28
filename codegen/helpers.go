@@ -399,9 +399,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		if targetName := cg.typeNameOf(target); targetName != "" {
 			if _, isNative := cg.nativeUnionDecls[targetName]; isNative {
 				if !src.Equal(target) {
-					if wrapped := cg.wrapNativeUnion(block, val, targetSt); wrapped != nil {
-						return wrapped
-					}
+					return cg.wrapNativeUnion(block, val, targetSt)
 				}
 			}
 		}
@@ -564,7 +562,7 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 }
 
 func floatBits(t *irtypes.FloatType) int {
-	switch t.Kind {
+	switch t.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 	case irtypes.FloatKindHalf:
 		return 16
 	case irtypes.FloatKindFloat:

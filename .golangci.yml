@@ -21,6 +21,8 @@ linters:
     - errorlint     # enforce errors.Is/As; catch bare == comparisons with errors
     - unused        # unused exported/unexported types, funcs, struct fields, vars
 
+    - exhaustive     # missing cases for iota consts in switch statements
+
     # --- Maintenance ---
     - misspell      # typos in comments and string literals
     - unconvert     # unnecessary type conversions
@@ -76,6 +78,12 @@ linters:
       # this is a deliberate, consistent naming convention across the lexer/parser.
       - linters: [staticcheck]
         text: "should not use ALL_CAPS"
+
+      # Parser dispatch switches on lexer.TokenType intentionally handle only
+      # the relevant subset of tokens; exhaustive coverage of all ~80 token
+      # kinds is not meaningful here.
+      - linters: [exhaustive]
+        path: "parser/"
 
 formatters:
   enable:

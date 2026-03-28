@@ -236,7 +236,7 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 		b := (ty.BitSize + 7) / 8
 		return b, b
 	case *irtypes.FloatType:
-		switch ty.Kind {
+		switch ty.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 		case irtypes.FloatKindHalf:
 			return 2, 2
 		case irtypes.FloatKindFloat:

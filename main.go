@@ -62,7 +62,7 @@ func parseFileLinkerFlags(src string) []string {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprint(os.Stderr, usage)
+		_, _ = fmt.Fprint(os.Stderr, usage)
 		os.Exit(1)
 	}
 	cmd := os.Args[1]
@@ -74,7 +74,7 @@ func main() {
 		libMode = true
 		fileArgIdx = 3
 		if len(os.Args) <= fileArgIdx {
-			fmt.Fprint(os.Stderr, usage)
+			_, _ = fmt.Fprint(os.Stderr, usage)
 			os.Exit(1)
 		}
 	}
@@ -220,7 +220,9 @@ func main() {
 		if err := compileIR(irText, tmp, true, false, extraObjs); err != nil {
 			die("compile error: %v", err)
 		}
-		defer os.Remove(tmp)
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(tmp)
 		run := exec.Command(tmp)
 		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
@@ -247,11 +249,13 @@ func compileIR(ir, outBin string, addRuntime bool, libMode bool, extraObjs []str
 	if err != nil {
 		return fmt.Errorf("cannot create temp file: %w", err)
 	}
-	defer os.Remove(llFile.Name())
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(llFile.Name())
 	if _, err := llFile.WriteString(ir); err != nil {
 		return err
 	}
-	llFile.Close()
+	_ = llFile.Close()
 
 	// Find runtime .c alongside the tin binary
 	ex, _ := os.Executable()
@@ -308,20 +312,20 @@ func runDirTests(dir string, extraFlags []string) {
 		l := lexer.New(string(src))
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
-			fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", e.Name(), lexErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", e.Name(), lexErr)
 			continue
 		}
 		p := parser.New(tokens)
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
 			continue
 		}
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
 		mod, cgErr := cg.Generate(prog)
 		if cgErr != nil {
-			fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", e.Name(), cgErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", e.Name(), cgErr)
 			continue
 		}
 		if !cg.HasTests() {
@@ -338,16 +342,18 @@ func runDirTests(dir string, extraFlags []string) {
 
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
-			fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
+			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 			results = append(results, result{e.Name(), false})
 			continue
 		}
-		tmp.Close()
-		defer os.Remove(tmp.Name())
+		_ = tmp.Close()
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(tmp.Name())
 
 		irText := mod.String()
 		if compErr := compileIR(irText, tmp.Name(), true, false, linkFlags); compErr != nil {
-			fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
+			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 			results = append(results, result{e.Name(), false})
 			continue
 		}
@@ -383,6 +389,6 @@ func runDirTests(dir string, extraFlags []string) {
 }
 
 func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
 	os.Exit(1)
 }

@@ -238,15 +238,15 @@ func (t *Type) ByteSize() int {
 		}
 		return total
 	case KindUnion, KindData:
-		max := 0
+		m := 0
 		for _, v := range t.Variants {
 			if v != nil {
-				if s := v.ByteSize(); s > max {
-					max = s
+				if s := v.ByteSize(); s > m {
+					m = s
 				}
 			}
 		}
-		return max + 4 // + tag i32
+		return m + 4 // + tag i32
 	case KindClosure:
 		return 16 // fn_ptr(8) + env_ptr(8)
 	case KindVoid:
