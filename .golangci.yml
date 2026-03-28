@@ -2,6 +2,14 @@
 # Run: golangci-lint run ./...
 version: "2"
 
+run:
+  # Pin the Go language version used for analysis to match our go.mod
+  # directive. Without this, golangci-lint infers the version from the
+  # maximum required by any transitive dependency (currently x/tools v0.43.0
+  # which requires go 1.25), causing a version mismatch error when the
+  # installed golangci-lint binary was itself built with go 1.24.
+  go: "1.24"
+
 linters:
   default: none
   enable:
