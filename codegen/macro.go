@@ -130,9 +130,9 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 // parseCtfeResult converts raw CTFE stdout into an AST literal node.
 // Special cases:
-//   - backtick-wrapped output “ `expr` “ → parse inner content as tin source (code splice)
-//   - "string" return type → wrap bare output in StringLit
-//   - "f64" return type → promote integer-looking output to FloatLit
+//   - backtick-wrapped output " `expr` " -> parse inner content as tin source (code splice)
+//   - "string" return type -> wrap bare output in StringLit
+//   - "f64" return type -> promote integer-looking output to FloatLit
 func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 	// Backtick splice: the macro returned a backtick literal; echo printed `content`
 	if len(result) >= 2 && result[0] == '`' && result[len(result)-1] == '`' {
@@ -155,11 +155,11 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 			return nil, fmt.Errorf("macro %s: cannot parse output %q: %v\nGenerated source:\n%s",
 				macroName, result, err, src)
 		}
-		// If we got an IntLit, promote it to FloatLit (echo 1.0 → "1")
+		// If we got an IntLit, promote it to FloatLit (echo 1.0 -> "1")
 		if il, ok := node.(*ast.IntLit); ok {
 			return &ast.FloatLit{Value: float64(il.Value)}, nil
 		}
-		// UnaryExpr(-IntLit) → promote to negative FloatLit
+		// UnaryExpr(-IntLit) -> promote to negative FloatLit
 		if ue, ok := node.(*ast.UnaryExpr); ok && ue.Op == "-" {
 			if il, ok2 := ue.Expr.(*ast.IntLit); ok2 {
 				return &ast.FloatLit{Value: -float64(il.Value)}, nil
@@ -230,7 +230,7 @@ func findReturnType(node ast.Node, args []ast.Node, params []string) string {
 	if node == nil {
 		return ""
 	}
-	// Build param→type map for lookup
+	// Build param->type map for lookup
 	paramTypes := make(map[string]string, len(params))
 	for i, p := range params {
 		if i < len(args) {

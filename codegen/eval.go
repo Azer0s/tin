@@ -6,10 +6,11 @@ import (
 	"math"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // ---------------------------------------------------------------------------
@@ -224,7 +225,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if err != nil {
 			return ctfeVal{}, err
 		}
-		// Strip trailing '=' to get the operator (e.g. "+=" → "+")
+		// Strip trailing '=' to get the operator (e.g. "+=" -> "+")
 		baseOp := strings.TrimSuffix(v.Op, "=")
 		result, err := evalBinOp(cur, baseOp, rhs)
 		if err != nil {
