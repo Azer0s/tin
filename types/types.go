@@ -101,34 +101,8 @@ type EnumMember struct {
 // Built-in types
 
 var (
-	Void   = &Type{Kind: KindVoid, Name: "void"}
-	Bool   = &Type{Kind: KindBool, Name: "bool", BitSize: 1}
-	I8     = &Type{Kind: KindInt, Name: "i8", BitSize: 8, Signed: true}
-	I16    = &Type{Kind: KindInt, Name: "i16", BitSize: 16, Signed: true}
-	I32    = &Type{Kind: KindInt, Name: "i32", BitSize: 32, Signed: true}
-	I64    = &Type{Kind: KindInt, Name: "i64", BitSize: 64, Signed: true}
-	U8     = &Type{Kind: KindInt, Name: "u8", BitSize: 8, Signed: false}
-	U16    = &Type{Kind: KindInt, Name: "u16", BitSize: 16, Signed: false}
-	U32    = &Type{Kind: KindInt, Name: "u32", BitSize: 32, Signed: false}
-	U64    = &Type{Kind: KindInt, Name: "u64", BitSize: 64, Signed: false}
-	F32    = &Type{Kind: KindFloat, Name: "f32", BitSize: 32}
-	F64    = &Type{Kind: KindFloat, Name: "f64", BitSize: 64}
-	Char   = &Type{Kind: KindInt, Name: "char", BitSize: 8, Signed: false}
-	SizeT  = &Type{Kind: KindInt, Name: "size_t", BitSize: 64, Signed: false}
-	UInt32 = &Type{Kind: KindInt, Name: "uint32", BitSize: 32, Signed: false}
-	TinStr = &Type{Kind: KindString, Name: "string"}
+	Void = &Type{Kind: KindVoid, Name: "void"}
 )
-
-// Builtins maps tin type names to their pre-resolved *Type
-var Builtins = map[string]*Type{
-	"void": Void, "bool": Bool,
-	"i8": I8, "i16": I16, "i32": I32, "i64": I64,
-	"u8": U8, "u16": U16, "u32": U32, "u64": U64,
-	"f32": F32, "f64": F64,
-	"char": Char, "string": TinStr,
-	"size_t": SizeT, "uint32": UInt32, "uint": U64,
-	"int": I64,
-}
 
 // Constructors
 
@@ -170,34 +144,6 @@ func NewFunction(params []*Type, ret *Type, varargs bool) *Type {
 		ret = Void
 	}
 	return &Type{Kind: KindFunction, Name: name, Params: params, Return: ret, IsVarArgs: varargs}
-}
-
-func NewClosure(params []*Type, ret *Type, captured []FieldInfo) *Type {
-	base := NewFunction(params, ret, false)
-	t := *base
-	t.Kind = KindClosure
-	t.Fields = captured
-	return &t
-}
-
-func NewStruct(name string, fields []FieldInfo) *Type {
-	return &Type{Kind: KindStruct, Name: name, Fields: fields}
-}
-
-func NewUnion(name string, variants []*Type, tags []string) *Type {
-	return &Type{Kind: KindUnion, Name: name, Variants: variants, VariantTags: tags}
-}
-
-func NewData(name string, variants []*Type, hasNone bool) *Type {
-	return &Type{Kind: KindData, Name: name, Variants: variants, HasNone: hasNone}
-}
-
-func NewEnum(name string, base *Type, members []EnumMember) *Type {
-	return &Type{Kind: KindEnum, Name: name, BaseType: base, Members: members}
-}
-
-func NewGenericParam(name string) *Type {
-	return &Type{Kind: KindGeneric, Name: name}
 }
 
 // Helpers

@@ -335,10 +335,10 @@ func parseStringInterp(s string) (ast.Node, error) {
 // Helpers
 
 func isTypeKeyword(tok lexer.Token) bool {
-	switch tok.Type {
-	case lexer.KW_FN:
+	if tok.Type == lexer.KW_FN {
 		return true
 	}
+
 	switch tok.Literal {
 	case "i8", "i16", "i32", "i64",
 		"u8", "u16", "u32", "u64",
@@ -347,8 +347,9 @@ func isTypeKeyword(tok lexer.Token) bool {
 		"void", "uint32", "size_t",
 		"int", "uint":
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 func isTypeToken(tok lexer.Token) bool {

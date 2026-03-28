@@ -243,8 +243,9 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 			return 4, 4
 		case irtypes.FloatKindDouble:
 			return 8, 8
+		default:
+			return 8, 8
 		}
-		return 8, 8
 	case *irtypes.PointerType:
 		return 8, 8
 	case *irtypes.StructType:
@@ -269,8 +270,9 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	case *irtypes.ArrayType:
 		esz, eal := llvmTypeSizeAlign(ty.ElemType)
 		return ty.Len * esz, eal
+	default:
+		return 8, 8
 	}
-	return 8, 8
 }
 
 // Type query helpers

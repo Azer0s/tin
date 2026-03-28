@@ -263,14 +263,14 @@ func printBlockInline(b *Block, depth int) string {
 
 func printIfStmt(v *IfStmt, depth int) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "if %s:\n", printNode(v.Cond, depth))
+	_, _ = fmt.Fprintf(&sb, "if %s:\n", printNode(v.Cond, depth))
 	sb.WriteString(printBlockBody(v.Then, depth+1))
 	for _, ei := range v.ElseIfs {
-		fmt.Fprintf(&sb, "\n%selif %s:\n", ind(depth), printNode(ei.Cond, depth))
+		_, _ = fmt.Fprintf(&sb, "\n%selif %s:\n", ind(depth), printNode(ei.Cond, depth))
 		sb.WriteString(printBlockBody(ei.Body, depth+1))
 	}
 	if v.Else != nil {
-		fmt.Fprintf(&sb, "\n%selse:\n", ind(depth))
+		_, _ = fmt.Fprintf(&sb, "\n%selse:\n", ind(depth))
 		sb.WriteString(printBlockBody(v.Else, depth+1))
 	}
 	return sb.String()
@@ -286,26 +286,26 @@ func printForStmt(v *ForStmt, depth int) string {
 		}
 		if v.Init != nil {
 			// for let i T = init; cond; post:
-			fmt.Fprintf(&sb, "for %s; %s; %s:\n",
+			_, _ = fmt.Fprintf(&sb, "for %s; %s; %s:\n",
 				printNode(v.Init, depth),
 				printNode(v.Cond, depth),
 				printNode(v.Post, depth))
 		} else if v.VarName != "" {
 			// for let i T; cond; post:  (no initializer)
-			fmt.Fprintf(&sb, "for let %s%s; %s; %s:\n",
+			_, _ = fmt.Fprintf(&sb, "for let %s%s; %s; %s:\n",
 				v.VarName, typeStr,
 				printNode(v.Cond, depth),
 				printNode(v.Post, depth))
 		} else {
 			// Condition-only fallback (not standard tin but handled gracefully)
-			fmt.Fprintf(&sb, "for %s:\n", printNode(v.Cond, depth))
+			_, _ = fmt.Fprintf(&sb, "for %s:\n", printNode(v.Cond, depth))
 		}
 	case ForIn:
 		typeStr := ""
 		if v.VarType != nil {
 			typeStr = " " + v.VarType.String()
 		}
-		fmt.Fprintf(&sb, "for let %s%s in %s:\n", v.VarName, typeStr, printNode(v.Iter, depth))
+		_, _ = fmt.Fprintf(&sb, "for let %s%s in %s:\n", v.VarName, typeStr, printNode(v.Iter, depth))
 	}
 	sb.WriteString(printBlockBody(v.Body, depth+1))
 	return sb.String()

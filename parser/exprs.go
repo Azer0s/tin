@@ -155,8 +155,9 @@ func isExprStart(tok lexer.Token) bool {
 		lexer.KW_TYPEOF, lexer.KW_TRAITOF, lexer.KW_FIELDNAMES, lexer.KW_FIELDTYPES,
 		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD:
 		return true
+	default:
+		return isTypeKeyword(tok)
 	}
-	return isTypeKeyword(tok)
 }
 
 func (p *Parser) parseMultiplicative() (ast.Node, error) {
@@ -688,15 +689,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.KW_LET:
 		// inline let (for ternary macro usage)
 		return p.parseVarDecl()
-	}
 
-	// Type keywords used as identifiers / type names in expressions
-	if isTypeKeyword(tok) {
-		p.advance()
-		return &ast.Identifier{Name: tok.Literal}, nil
-	}
+	default:
+		// Type keywords used as identifiers / type names in expressions
+		if isTypeKeyword(tok) {
+			p.advance()
+			return &ast.Identifier{Name: tok.Literal}, nil
+		}
 
-	return nil, p.errorf("unexpected token %s (%q)", tok.Type, tok.Literal)
+		return nil, p.errorf("unexpected token %s (%q)", tok.Type, tok.Literal)
+	}
 }
 
 func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {

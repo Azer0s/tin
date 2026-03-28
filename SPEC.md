@@ -30,12 +30,12 @@ fn fib(n u32) u32 =
 
 Integer literals can be written in decimal, hexadecimal, octal, or binary:
 
-| Prefix | Base | Example | Value |
-|--------|------|---------|-------|
-| (none) | 10 | `255` | 255 |
-| `0x` / `0X` | 16 | `0xFF` | 255 |
-| `0o` / `0O` | 8 | `0o377` | 255 |
-| `0b` / `0B` | 2 | `0b11111111` | 255 |
+| Prefix      | Base | Example      | Value |
+|-------------|------|--------------|-------|
+| (none)      | 10   | `255`        | 255   |
+| `0x` / `0X` | 16   | `0xFF`       | 255   |
+| `0o` / `0O` | 8    | `0o377`      | 255   |
+| `0b` / `0B` | 2    | `0b11111111` | 255   |
 
 ```rust
 let mask  i64 = 0xFF00FF     // hex
@@ -471,9 +471,9 @@ fn{#no_thread} init_globals() = pass
 
 #### Macro tags
 
-| Tag | Meaning |
-|-----|---------|
-| `#no_excl` | Macro callable without `!` suffix |
+| Tag          | Meaning                            |
+|--------------|------------------------------------|
+| `#no_excl`   | Macro callable without `!` suffix  |
 | `#no_parens` | Macro callable without parentheses |
 
 ```rust
@@ -574,15 +574,15 @@ tin test examples/                   # entire directory
 
 The `assert` stdlib (`use assert`) provides:
 
-| Function | Description |
-|---|---|
-| `assert::equals(expected i64, actual i64)` | Assert two `i64` values are equal |
-| `assert::equals_str(expected string, actual string)` | Assert two strings are equal |
-| `assert::equals_f64(expected f64, actual f64)` | Assert two `f64` values are equal |
-| `assert::ok(cond bool)` | Assert condition is true |
-| `assert::not_ok(cond bool)` | Assert condition is false |
-| `assert::not_equals(a i64, b i64)` | Assert two `i64` values differ |
-| `assert::fails(msg string)` | Unconditionally fail with message |
+| Function                                             | Description                       |
+|------------------------------------------------------|-----------------------------------|
+| `assert::equals(expected i64, actual i64)`           | Assert two `i64` values are equal |
+| `assert::equals_str(expected string, actual string)` | Assert two strings are equal      |
+| `assert::equals_f64(expected f64, actual f64)`       | Assert two `f64` values are equal |
+| `assert::ok(cond bool)`                              | Assert condition is true          |
+| `assert::not_ok(cond bool)`                          | Assert condition is false         |
+| `assert::not_equals(a i64, b i64)`                   | Assert two `i64` values differ    |
+| `assert::fails(msg string)`                          | Unconditionally fail with message |
 
 When an assertion fails inside `tin test`, the runner prints the failure and
 moves on to the next test (via `longjmp`). In a standalone run, `exit(1)` is
@@ -717,10 +717,10 @@ fn it_is(weather atom) =
 
 ### Trait kinds
 
-| Kind | Syntax | Description |
-|------|--------|-------------|
-| Regular | `trait T = fn m(...) = virtual` | virtual + default methods, forward fields |
-| Alias | `trait T as fn(...) R` | single function type; impl with `fn ::T` |
+| Kind          | Syntax                                | Description                                    |
+|---------------|---------------------------------------|------------------------------------------------|
+| Regular       | `trait T = fn m(...) = virtual`       | virtual + default methods, forward fields      |
+| Alias         | `trait T as fn(...) R`                | single function type; impl with `fn ::T`       |
 | Generic alias | `trait[k] T[t] as static fn(val t) k` | static conversion; `k` inferred as struct type |
 
 ### Implementing traits in a struct

@@ -1223,18 +1223,16 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 }
 
 func (cg *CodeGen) genFor(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
-	f := cg.curFn
-
 	switch s.Kind {
 	case ast.ForCStyle:
-		return cg.genForCStyle(block, s, f)
+		return cg.genForCStyle(block, s)
 	case ast.ForIn:
-		return cg.genForIn(block, s, f)
+		return cg.genForIn(block, s)
 	}
 	return block, nil
 }
 
-func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*ir.Block, error) {
+func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
 	condBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	postBlock := cg.newBlock("for.post")
@@ -1306,13 +1304,13 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*i
 	return afterBlock, nil
 }
 
-func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*ir.Block, error) {
+func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
 	// Check if iter is a RangeExpr or a BinExpr with op ".." (start..end).
 	if rng, ok := s.Iter.(*ast.RangeExpr); ok {
-		return cg.genForRange(block, s, rng, f)
+		return cg.genForRange(block, s, rng)
 	}
 	if bin, ok := s.Iter.(*ast.BinExpr); ok && bin.Op == ".." {
-		return cg.genForRange(block, s, &ast.RangeExpr{Start: bin.Left, End: bin.Right}, f)
+		return cg.genForRange(block, s, &ast.RangeExpr{Start: bin.Left, End: bin.Right})
 	}
 
 	// Iterate over a dynamic array: {ptr*, len}.
@@ -1417,7 +1415,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt, f *ir.Func) (*ir.Bl
 	return afterBlock, nil
 }
 
-func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeExpr, f *ir.Func) (*ir.Block, error) {
+func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeExpr) (*ir.Block, error) {
 	start, err := cg.genExpr(block, rng.Start)
 	if err != nil {
 		return nil, err

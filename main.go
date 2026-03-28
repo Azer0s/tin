@@ -178,7 +178,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, false, libMode, extraObjs); err != nil {
+		if err := compileIR(irText, out, libMode, extraObjs); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -199,7 +199,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, true, false, extraObjs); err != nil {
+		if err := compileIR(irText, out, false, extraObjs); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -217,7 +217,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, tmp, true, false, extraObjs); err != nil {
+		if err := compileIR(irText, tmp, false, extraObjs); err != nil {
 			die("compile error: %v", err)
 		}
 		defer func(name string) {
@@ -235,7 +235,7 @@ func main() {
 		}
 
 	default:
-		fmt.Fprint(os.Stderr, usage)
+		_, _ = fmt.Fprint(os.Stderr, usage)
 		os.Exit(1)
 	}
 }
@@ -243,8 +243,9 @@ func main() {
 // compileIR writes the LLVM IR to a temp .ll file and invokes clang
 // If libMode is true, compile to an object file with -c (no linking)
 // extraObjs are additional .o/.a files to link with
-func compileIR(ir, outBin string, addRuntime bool, libMode bool, extraObjs []string) error {
+func compileIR(ir, outBin string, libMode bool, extraObjs []string) error {
 	// Write IR to temp file
+	//goland:noinspection GoResourceLeak
 	llFile, err := os.CreateTemp("", "tin-*.ll")
 	if err != nil {
 		return fmt.Errorf("cannot create temp file: %w", err)
@@ -347,12 +348,13 @@ func runDirTests(dir string, extraFlags []string) {
 			continue
 		}
 		_ = tmp.Close()
+		//goland:noinspection GoDeferInLoop
 		defer func(name string) {
 			_ = os.Remove(name)
 		}(tmp.Name())
 
 		irText := mod.String()
-		if compErr := compileIR(irText, tmp.Name(), true, false, linkFlags); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 			results = append(results, result{e.Name(), false})
 			continue
