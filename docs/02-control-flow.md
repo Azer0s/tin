@@ -90,7 +90,7 @@ match d:
 
 ---
 
-## where  -  pattern matching on function arguments
+## where - pattern matching on function arguments
 
 `where` is a declarative alternative to `if/else` or `match` inside a
 function body. Each arm specifies a guard expression; the first arm whose

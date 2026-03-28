@@ -11,11 +11,11 @@ let tag    = '"fn(i64)bool"   // quoted form for names with special characters
 
 ## Syntax
 
-| Form | Example | Atom name |
-|------|---------|-----------|
-| Simple | `'ok` | `ok` |
-| Quoted (plain identifier) | `'"Point"` | `Point` |
-| Quoted (complex) | `'"fn(i64)bool"` | `fn(i64)bool` |
+| Form                      | Example          | Atom name     |
+|---------------------------|------------------|---------------|
+| Simple                    | `'ok`            | `ok`          |
+| Quoted (plain identifier) | `'"Point"`       | `Point`       |
+| Quoted (complex)          | `'"fn(i64)bool"` | `fn(i64)bool` |
 
 The quoted form is used when the atom name contains characters that are not letters, digits, or
 underscores. If the quoted content is a plain identifier, the surrounding double-quotes are
@@ -101,10 +101,10 @@ for thread safety.
 
 C API (in `runtime/runtime.c`):
 
-| Function | Description |
-|----------|-------------|
-| `_tin_learn_atom(const char*)` | Search list; if absent compute CRC32, add node, return code |
-| `_tin_rt_atom_to_str(int32_t code)` | Return the string for a runtime-learned code, or NULL |
+| Function                            | Description                                                 |
+|-------------------------------------|-------------------------------------------------------------|
+| `_tin_learn_atom(const char*)`      | Search list; if absent compute CRC32, add node, return code |
+| `_tin_rt_atom_to_str(int32_t code)` | Return the string for a runtime-learned code, or NULL       |
 
 New strings are `strdup`'d so the caller's storage does not need to persist.
 
@@ -142,11 +142,11 @@ use extern {
 
 ## Equality rules
 
-| Left | Right | Operation |
-|------|-------|-----------|
-| `atom` | `atom` | `icmp eq` on the two i32 codes  -  O(1) |
-| `atom` | `string` | convert atom to string, then `strcmp` |
-| `string` | `atom` | convert atom to string, then `strcmp` |
+| Left     | Right    | Operation                               |
+|----------|----------|-----------------------------------------|
+| `atom`   | `atom`   | `icmp eq` on the two i32 codes  -  O(1) |
+| `atom`   | `string` | convert atom to string, then `strcmp`   |
+| `string` | `atom`   | convert atom to string, then `strcmp`   |
 
 ## ARC (automatic reference counting)
 

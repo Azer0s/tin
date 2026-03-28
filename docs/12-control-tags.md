@@ -291,12 +291,12 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 
 ## Quick reference
 
-| Tag | Applies to | Enforced | Meaning |
-|-----|-----------|----------|---------|
-| `#pure` | fn / method / lambda | Yes  -  transitive AST walk | No side effects |
-| `#sideffect` | fn / method / lambda | No (declaration) | Has side effects; auto-applied to extern fns |
-| `#no_recurse` | fn / method / lambda | Yes  -  transitive AST walk | Must not call itself (at any depth) |
-| `#no_thread` | fn / method / lambda | No (advisory) | Unsafe for concurrent use |
-| `#allow_sideffect` | block | Yes  -  suppresses `#pure` check | Permits side effects in this block |
-| `#no_excl` | macro | Parser | Callable without `!` suffix |
-| `#no_parens` | macro | Parser | Callable without parentheses |
+| Tag                | Applies to           | Enforced                         | Meaning                                      |
+|--------------------|----------------------|----------------------------------|----------------------------------------------|
+| `#pure`            | fn / method / lambda | Yes  -  transitive AST walk      | No side effects                              |
+| `#sideffect`       | fn / method / lambda | No (declaration)                 | Has side effects; auto-applied to extern fns |
+| `#no_recurse`      | fn / method / lambda | Yes  -  transitive AST walk      | Must not call itself (at any depth)          |
+| `#no_thread`       | fn / method / lambda | No (advisory)                    | Unsafe for concurrent use                    |
+| `#allow_sideffect` | block                | Yes  -  suppresses `#pure` check | Permits side effects in this block           |
+| `#no_excl`         | macro                | Parser                           | Callable without `!` suffix                  |
+| `#no_parens`       | macro                | Parser                           | Callable without parentheses                 |

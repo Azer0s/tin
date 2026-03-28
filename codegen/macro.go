@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -89,7 +90,7 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 	tmpFile, err := os.CreateTemp("", "tin_macro_*.tin")
 	if err != nil {
-		return nil, fmt.Errorf("macro %s: %v", m.Name, err)
+		return nil, fmt.Errorf("macro %s: %w", m.Name, err)
 	}
 	defer func(name string) {
 		_ = os.Remove(name)
@@ -102,22 +103,23 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("macro %s: cannot locate tin binary: %v", m.Name, err)
+		return nil, fmt.Errorf("macro %s: cannot locate tin binary: %w", m.Name, err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), macroTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "run", tmpFile.Name())
 	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, fmt.Errorf("macro %s: timed out after %v\nGenerated source:\n%s", m.Name, macroTimeout, src)
 	}
 	if err != nil {
 		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			stderr = string(ee.Stderr)
 		}
-		return nil, fmt.Errorf("macro %s: execution failed: %v\nStderr: %s\nGenerated source:\n%s",
+		return nil, fmt.Errorf("macro %s: execution failed: %w\nStderr: %s\nGenerated source:\n%s",
 			m.Name, err, stderr, src)
 	}
 
@@ -139,7 +141,7 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 		inner := result[1 : len(result)-1]
 		node, err := parseExprString(inner)
 		if err != nil {
-			return nil, fmt.Errorf("macro %s: backtick splice parse error %q: %v\nGenerated source:\n%s",
+			return nil, fmt.Errorf("macro %s: backtick splice parse error %q: %w\nGenerated source:\n%s",
 				macroName, inner, err, src)
 		}
 		return node, nil
@@ -152,7 +154,7 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 		// Try normal parse first (handles "3.14", "-1.5", etc.)
 		node, err := parseExprString(result)
 		if err != nil {
-			return nil, fmt.Errorf("macro %s: cannot parse output %q: %v\nGenerated source:\n%s",
+			return nil, fmt.Errorf("macro %s: cannot parse output %q: %w\nGenerated source:\n%s",
 				macroName, result, err, src)
 		}
 		// If we got an IntLit, promote it to FloatLit (echo 1.0 -> "1")
@@ -169,7 +171,7 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 	default:
 		node, err := parseExprString(result)
 		if err != nil {
-			return nil, fmt.Errorf("macro %s: cannot parse output %q: %v\nGenerated source:\n%s",
+			return nil, fmt.Errorf("macro %s: cannot parse output %q: %w\nGenerated source:\n%s",
 				macroName, result, err, src)
 		}
 		return node, nil
@@ -564,7 +566,7 @@ func parseExprString(s string) (ast.Node, error) {
 	l := lexer.New(s)
 	tokens, err := l.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("parse macro output %q: lex error: %v", s, err)
+		return nil, fmt.Errorf("parse macro output %q: lex error: %w", s, err)
 	}
 	p := parser.New(tokens)
 	return p.ParseExpr()

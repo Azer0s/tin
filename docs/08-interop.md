@@ -14,11 +14,11 @@ with `//!`:
 Each `//!` line is a linker flag. The text after `//!` is appended verbatim to
 the linker command line. Common uses:
 
-| Directive | Purpose |
-|---|---|
-| `//!-lm` | Link the C math library (`libm`) |
-| `//!-lraylib` | Link Raylib |
-| `//!-lpthread` | Link pthreads |
+| Directive      | Purpose                          |
+|----------------|----------------------------------|
+| `//!-lm`       | Link the C math library (`libm`) |
+| `//!-lraylib`  | Link Raylib                      |
+| `//!-lpthread` | Link pthreads                    |
 
 Linker directives must appear before any non-comment code in the file. They
 are processed before the rest of the compilation unit.
@@ -81,11 +81,11 @@ fn printf(format string, args ...) i32 =
 
 ### Pointer types
 
-| Syntax | Meaning |
-|---|---|
-| `*T` | Mutable pointer to `T` |
-| `const *T` | Immutable pointer to `T` |
-| `*void` | Untyped pointer (like C `void*`) |
+| Syntax     | Meaning                          |
+|------------|----------------------------------|
+| `*T`       | Mutable pointer to `T`           |
+| `const *T` | Immutable pointer to `T`         |
+| `*void`    | Untyped pointer (like C `void*`) |
 
 ### Address-of and dereference
 
@@ -221,8 +221,8 @@ use strings
 let s = strings::replace("hello-world", "-", " ")   // "hello world"
 ```
 
-| Function | Description |
-|---|---|
+| Function                               | Description                                        |
+|----------------------------------------|----------------------------------------------------|
 | `strings::replace(s, old, new) string` | Replace all occurrences of `old` with `new` in `s` |
 
 ### `guid` - globally unique identifiers
@@ -253,11 +253,11 @@ std::io::println("done")
 Control tags annotate functions with compiler hints. They are written in
 curly braces after `fn`:
 
-| Tag | Effect |
-|---|---|
-| `#pure` | Function has no side effects; may be evaluated at compile time |
-| `#recurse` | Function is allowed to call itself |
-| `#noRecurse` | Compiler error if the function recurses |
+| Tag              | Effect                                                            |
+|------------------|-------------------------------------------------------------------|
+| `#pure`          | Function has no side effects; may be evaluated at compile time    |
+| `#recurse`       | Function is allowed to call itself                                |
+| `#noRecurse`     | Compiler error if the function recurses                           |
 | `#sideEffectful` | Function has side effects (all extern fns get this automatically) |
 
 ```rust
