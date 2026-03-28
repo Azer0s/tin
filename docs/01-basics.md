@@ -216,4 +216,98 @@ let x = 1; let y = 2; echo x + y   // 3
 | Concatenation | `++` |
 | Pipe | `\|>` (see [03 - Functions](03-functions.md)) |
 
-Tin uses **C-style operator precedence**.
+### Operator precedence
+
+Higher rows bind tighter (evaluated first):
+
+| Priority | Operators | Associativity |
+|----------|-----------|---------------|
+| 1 (highest) | `()` `[]` `.` `->` (call, index, field) | left |
+| 2 | unary `-` `!` `*` `&` | right |
+| 3 | `*` `/` `%` | left |
+| 4 | `+` `-` `++` | left |
+| 5 | `<<` `>>` | left |
+| 6 | `<` `<=` `>` `>=` | left |
+| 7 | `==` `!=` | left |
+| 8 | `&` (bitwise and) | left |
+| 9 | `^` (bitwise xor) | left |
+| 10 | `\|` (bitwise or) | left |
+| 11 | `&&` | left |
+| 12 | `\|\|` | left |
+| 13 | `? :` (ternary) | right |
+| 14 (lowest) | `\|>` (pipe) | left |
+
+When in doubt, use parentheses.
+
+---
+
+## Floating-point types
+
+`f32` is a 32-bit single-precision float; `f64` is a 64-bit double-precision
+float. Float literals (e.g. `3.14`, `1.0`, `2.5e-3`) default to `f64`.
+
+```rust
+let x f64 = 3.14
+let y f32 = 2.5
+
+// int -> float
+let n i64 = 42
+let f = n as f64        // 42.0
+
+// float -> int (truncates toward zero)
+let i = 3.9 as i64      // 3
+```
+
+Arithmetic between `f64` values uses the standard operators:
+
+```rust
+let a f64 = 1.5
+let b f64 = 2.5
+echo a + b              // 4
+echo a * b              // 3.75
+echo b / a              // 1.66667
+```
+
+The `math` standard library provides transcendental functions (`sqrt`, `sin`,
+`cos`, `pow`, …) and constants (`math::PI`, `math::E`). It requires linking
+with `-lm`:
+
+```rust
+//!-lm
+use math
+
+echo math::sqrt(2.0)    // 1.41421
+echo math::PI           // 3.14159
+```
+
+See [`examples/floats.tin`](../examples/floats.tin) for a complete float example.
+
+---
+
+## The `default` builtin
+
+`default(T)` returns the zero value for type `T`:
+
+| Type | `default` value |
+|------|----------------|
+| integers | `0` |
+| floats | `0.0` |
+| `bool` | `false` |
+| pointers | `null` |
+| strings | `""` (empty string) |
+| arrays | `[]` (empty array) |
+| structs | all fields zeroed |
+
+```rust
+let n  = default(i64)     // 0
+let f  = default(f64)     // 0.0
+let ok = default(bool)    // false
+```
+
+`default` is most useful in generic code where the concrete type is not known
+at the call site:
+
+```rust
+fn zero[t](x t) t =
+  return default(t)
+```

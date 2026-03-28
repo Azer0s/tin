@@ -126,6 +126,44 @@ let [n, flag] coord = arr
 // n == 10 (i32), flag == false (bool)
 ```
 
+### Destructuring in loops
+
+Array destructuring can be combined with loop iteration:
+
+```rust
+let pairs [i64] = [1, 2, 3, 4, 6, 8]
+
+for let i i64 = 0; i < len(pairs); i += 2:
+  let a i64 = pairs[i]
+  let b i64 = pairs[i + 1]
+  echo "{a} + {b} = {a + b}"
+```
+
+### Nested struct field access
+
+Struct fields that are themselves structs can be accessed with chained `.`:
+
+```rust
+struct vec2 = x f64; y f64
+struct rect = origin vec2; size vec2
+
+let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}
+echo r.origin.x    // 1
+echo r.size.y      // 3
+```
+
+Struct destructuring extracts the direct fields of the outer struct. To work
+with inner fields you access them through the extracted variable:
+
+```rust
+let {origin, size} rect = r
+echo origin.x      // 1
+echo size.y        // 3
+```
+
+See [`examples/nested_destructuring.tin`](../examples/nested_destructuring.tin)
+for a complete runnable example.
+
 ### Generic collections
 
 Arrays are fully generic. Any type parameter `t` can be used as the element
