@@ -1,4 +1,4 @@
-# 10 – Testing
+# 10 - Testing
 
 Tin has built-in support for unit tests via `test` blocks and the `assert`
 standard library. Tests are discovered and run by the `tin test` command.

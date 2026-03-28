@@ -1,6 +1,6 @@
 //!-lm
 use assert
-// rtti_extern_test.tin — Comprehensive RTTI tagging tests for:
+// rtti_extern_test.tin - Comprehensive RTTI tagging tests for:
 //   1. Extern C functions returning primitives -> box to any -> typeof/echo
 //   2. Extern C functions returning strings    -> box to any -> typeof
 //   3. Extern C functions passed as function-pointer arguments
@@ -52,9 +52,9 @@ fn c_atoi(s string) i32      = extern("atoi")
 fn c_malloc(size i64) *void  = extern("malloc")
 fn c_free(ptr *void)         = extern("free")
 
-// §1 — Extern C functions returning primitives -> any boxing -> typeof
+// #1 - Extern C functions returning primitives -> any boxing -> typeof
 
-io::printf("=== §1 extern C primitives -> any ===\n")
+io::printf("=== #1 extern C primitives -> any ===\n")
 
 let r1a = c_abs(-42)
 io::printf("labs(-42) = %lld\n", r1a)
@@ -72,9 +72,9 @@ let r1c = c_atoi("1234")
 let a1c any = r1c
 io::printf("typeof(atoi result) = %s\n", typeof(a1c))
 
-// §2 — Extern C functions returning string -> any boxing -> typeof
+// #2 - Extern C functions returning string -> any boxing -> typeof
 
-io::printf("=== §2 extern C string -> any ===\n")
+io::printf("=== #2 extern C string -> any ===\n")
 
 let r2a = c_strlen("hello world")
 io::printf("strlen = %lld\n", r2a)
@@ -86,9 +86,9 @@ io::printf("typeof(getenv result) = %s\n", typeof(r2b))
 let a2b any = r2b
 io::printf("typeof(getenv any) = %s\n", typeof(a2b))
 
-// §3 — Extern C functions passed as function-pointer arguments
+// #3 - Extern C functions passed as function-pointer arguments
 
-io::printf("=== §3 extern fn as function-pointer arg ===\n")
+io::printf("=== #3 extern fn as function-pointer arg ===\n")
 
 fn apply_i64(f fn(i64) i64, x i64) i64 =
   return f(x)
@@ -118,9 +118,9 @@ io::printf("make_abs_fn()(-33) = %lld\n", r3c)
 let a3c any = r3c
 io::printf("typeof = %s\n", typeof(a3c))
 
-// §4 — Tin functions returning structs via function pointers
+// #4 - Tin functions returning structs via function pointers
 
-io::printf("=== §4 struct from fn pointer ===\n")
+io::printf("=== #4 struct from fn pointer ===\n")
 
 fn make_rect(w i64, h i64) rect =
   return rect { w: w, h: h }
@@ -154,9 +154,9 @@ let a4c = apply_struct_fn(make_rect, 5, 15)
 io::printf("typeof(apply_struct_fn result) = %s\n", typeof(a4c))
 io::printf("fieldnames len = %lld\n", fieldnames(a4c).len)
 
-// §5 — Lambdas/closures returning structs -> box to any
+// #5 - Lambdas/closures returning structs -> box to any
 
-io::printf("=== §5 lambda/closure returning struct ===\n")
+io::printf("=== #5 lambda/closure returning struct ===\n")
 
 let make_rect_lambda = fn(w i64, h i64) rect = return rect { w: w, h: h }
 let r5a = make_rect_lambda(6, 9)
@@ -177,9 +177,9 @@ io::printf("fieldnames len = %lld\n", fieldnames(a5b).len)
 let r5c = apply_struct_fn(fn(w i64, h i64) rect = return rect { w: w + h, h: w - h }, 20, 8)
 io::printf("typeof(lambda via HOF) = %s\n", typeof(r5c))
 
-// §6 — Multi-level function pointer indirection
+// #6 - Multi-level function pointer indirection
 
-io::printf("=== §6 multi-level fn pointer ===\n")
+io::printf("=== #6 multi-level fn pointer ===\n")
 
 fn wrap_rect_maker(f fn(i64, i64) rect) fn(i64, i64) rect =
   return f
@@ -203,9 +203,9 @@ io::printf("compose(negate, labs)(-55) = %lld\n", r6b)
 let a6b any = r6b
 io::printf("typeof = %s\n", typeof(a6b))
 
-// §7 — getfield / setfield on struct from function returns
+// #7 - getfield / setfield on struct from function returns
 
-io::printf("=== §7 getfield/setfield from fn returns ===\n")
+io::printf("=== #7 getfield/setfield from fn returns ===\n")
 
 // getfield on struct from direct tin fn call
 let r7a = make_rect(8, 16)
@@ -230,9 +230,9 @@ let r7c = make_point(10, 20)
 setfield(r7c, "x", 999)
 io::printf("after setfield(point, \"x\", 999): x = %lld\n", r7c.x)
 
-// §8 — any boxing / typeof with all RTTI builtins through HOF
+// #8 - any boxing / typeof with all RTTI builtins through HOF
 
-io::printf("=== §8 full reflection through HOF ===\n")
+io::printf("=== #8 full reflection through HOF ===\n")
 
 fn make_triple(a i64, b i64, c i64) triple =
   return triple { a: a, b: b, c: c }
@@ -261,9 +261,9 @@ let gb = getfield(a8a, "b")
 io::printf("getfield(triple, \"b\") = ")
 echo gb
 
-// §9 — Edge cases
+// #9 - Edge cases
 
-io::printf("=== §9 edge cases ===\n")
+io::printf("=== #9 edge cases ===\n")
 
 // typeof on pointer to struct
 let r9a = make_point(5, 6)

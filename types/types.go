@@ -72,7 +72,7 @@ type Type struct {
 	TypeArgs   []*Type  // resolved args for a specific instantiation
 
 	// Control tags
-	Tags map[string]bool // #pure, #sideffect, #no_recurse, #no_thread, …
+	Tags map[string]bool // #pure, #sideffect, #no_recurse, #no_thread, ...
 }
 
 // FieldInfo describes a struct field
@@ -101,34 +101,8 @@ type EnumMember struct {
 // Built-in types
 
 var (
-	Void   = &Type{Kind: KindVoid, Name: "void"}
-	Bool   = &Type{Kind: KindBool, Name: "bool", BitSize: 1}
-	I8     = &Type{Kind: KindInt, Name: "i8", BitSize: 8, Signed: true}
-	I16    = &Type{Kind: KindInt, Name: "i16", BitSize: 16, Signed: true}
-	I32    = &Type{Kind: KindInt, Name: "i32", BitSize: 32, Signed: true}
-	I64    = &Type{Kind: KindInt, Name: "i64", BitSize: 64, Signed: true}
-	U8     = &Type{Kind: KindInt, Name: "u8", BitSize: 8, Signed: false}
-	U16    = &Type{Kind: KindInt, Name: "u16", BitSize: 16, Signed: false}
-	U32    = &Type{Kind: KindInt, Name: "u32", BitSize: 32, Signed: false}
-	U64    = &Type{Kind: KindInt, Name: "u64", BitSize: 64, Signed: false}
-	F32    = &Type{Kind: KindFloat, Name: "f32", BitSize: 32}
-	F64    = &Type{Kind: KindFloat, Name: "f64", BitSize: 64}
-	Char   = &Type{Kind: KindInt, Name: "char", BitSize: 8, Signed: false}
-	SizeT  = &Type{Kind: KindInt, Name: "size_t", BitSize: 64, Signed: false}
-	UInt32 = &Type{Kind: KindInt, Name: "uint32", BitSize: 32, Signed: false}
-	TinStr = &Type{Kind: KindString, Name: "string"}
+	Void = &Type{Kind: KindVoid, Name: "void"}
 )
-
-// Builtins maps tin type names to their pre-resolved *Type
-var Builtins = map[string]*Type{
-	"void": Void, "bool": Bool,
-	"i8": I8, "i16": I16, "i32": I32, "i64": I64,
-	"u8": U8, "u16": U16, "u32": U32, "u64": U64,
-	"f32": F32, "f64": F64,
-	"char": Char, "string": TinStr,
-	"size_t": SizeT, "uint32": UInt32, "uint": U64,
-	"int": I64,
-}
 
 // Constructors
 
@@ -172,34 +146,6 @@ func NewFunction(params []*Type, ret *Type, varargs bool) *Type {
 	return &Type{Kind: KindFunction, Name: name, Params: params, Return: ret, IsVarArgs: varargs}
 }
 
-func NewClosure(params []*Type, ret *Type, captured []FieldInfo) *Type {
-	base := NewFunction(params, ret, false)
-	t := *base
-	t.Kind = KindClosure
-	t.Fields = captured
-	return &t
-}
-
-func NewStruct(name string, fields []FieldInfo) *Type {
-	return &Type{Kind: KindStruct, Name: name, Fields: fields}
-}
-
-func NewUnion(name string, variants []*Type, tags []string) *Type {
-	return &Type{Kind: KindUnion, Name: name, Variants: variants, VariantTags: tags}
-}
-
-func NewData(name string, variants []*Type, hasNone bool) *Type {
-	return &Type{Kind: KindData, Name: name, Variants: variants, HasNone: hasNone}
-}
-
-func NewEnum(name string, base *Type, members []EnumMember) *Type {
-	return &Type{Kind: KindEnum, Name: name, BaseType: base, Members: members}
-}
-
-func NewGenericParam(name string) *Type {
-	return &Type{Kind: KindGeneric, Name: name}
-}
-
 // Helpers
 
 // IsInteger returns true for all integer kinds including char
@@ -238,17 +184,27 @@ func (t *Type) ByteSize() int {
 		}
 		return total
 	case KindUnion, KindData:
-		max := 0
+		m := 0
 		for _, v := range t.Variants {
 			if v != nil {
-				if s := v.ByteSize(); s > max {
-					max = s
+				if s := v.ByteSize(); s > m {
+					m = s
 				}
 			}
 		}
-		return max + 4 // + tag i32
+		return m + 4 // + tag i32
 	case KindClosure:
 		return 16 // fn_ptr(8) + env_ptr(8)
+	case KindVoid:
+		return 0
+	case KindFunction:
+		return 8 // function pointer
+	case KindEnum:
+		return 4 // underlying integer (i32 by default)
+	case KindAtom:
+		return 8 // { i32 code, i8* str } rounded to pointer size
+	case KindGeneric:
+		return 8 // unresolved generic; caller should not reach here
 	}
 	return 8
 }
@@ -284,6 +240,10 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 			params[i] = p.Substitute(mapping)
 		}
 		return NewFunction(params, t.Return.Substitute(mapping), t.IsVarArgs)
+	case KindVoid, KindBool, KindInt, KindFloat, KindString,
+		KindClosure, KindStruct, KindUnion, KindData,
+		KindEnum, KindGeneric, KindAtom:
+		return t
 	}
 	return t
 }

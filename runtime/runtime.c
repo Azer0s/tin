@@ -278,7 +278,7 @@ static int _tin_is_primitive_name(const char *s) {
 // This function strips those quotes, writing the result into buf.
 static const char *atom_spec(const char *atom, char *buf) {
     if (!atom || atom[0] != '"') return atom; // simple atom: return as-is
-    // complex atom: '"fn(i64)bool"' → strip surrounding double-quotes
+    // complex atom: '"fn(i64)bool"' -> strip surrounding double-quotes
     const char *s = atom + 1; // skip opening "
     size_t len = strlen(s);
     if (len > 0 && s[len - 1] == '"') len--; // strip trailing "
@@ -329,15 +329,15 @@ int64_t _tin_reflect_is_primitive(const char *atom) {
 }
 
 // elem: inner type atom for pointer or array
-//   "'*point" → "'point"
-//   "'[i64]"  → "'i64"
-//   otherwise → ""
+//   "'*point" -> "'point"
+//   "'[i64]"  -> "'i64"
+//   otherwise -> ""
 const char *_tin_reflect_elem(const char *atom) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
     const char *s = atom_spec(atom, sbuf);
     if (*s == '*') {
-        // "*T" → "T"
+        // "*T" -> "T"
         const char *inner = s + 1;
         size_t len = strlen(inner);
         char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
@@ -346,7 +346,7 @@ const char *_tin_reflect_elem(const char *atom) {
         return buf;
     }
     if (*s == '[') {
-        // "[T]" → "T": strip '[' and trailing ']'
+        // "[T]" -> "T": strip '[' and trailing ']'
         const char *inner = s + 1;
         size_t len = strlen(inner);
         if (len > 0 && inner[len - 1] == ']') len--;
@@ -376,8 +376,8 @@ static const char *_reflect_find_params_end(const char *open_paren) {
 }
 
 // fn_ret: return type atom for a function type
-//   "fn(i64,f64)bool" → "bool"
-//   non-fn types      → ""
+//   "fn(i64,f64)bool" -> "bool"
+//   non-fn types      -> ""
 const char *_tin_reflect_fn_ret(const char *atom) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
@@ -394,10 +394,10 @@ const char *_tin_reflect_fn_ret(const char *atom) {
 }
 
 // fn_arity: number of parameters in a function type atom
-//   "'fn()"          → 0
-//   "'fn(i64)"       → 1
-//   "'fn(i64,f64)"   → 2
-//   non-fn types     → 0
+//   "'fn()"          -> 0
+//   "'fn(i64)"       -> 1
+//   "'fn(i64,f64)"   -> 2
+//   non-fn types     -> 0
 int64_t _tin_reflect_fn_arity(const char *atom) {
     if (!atom) return 0;
     char sbuf[256];
@@ -417,9 +417,9 @@ int64_t _tin_reflect_fn_arity(const char *atom) {
 }
 
 // fn_param: type atom of the idx-th parameter (0-based)
-//   "'fn(i64,f64)bool", 0 → "'i64"
-//   "'fn(i64,f64)bool", 1 → "'f64"
-//   out of range or non-fn → ""
+//   "'fn(i64,f64)bool", 0 -> "'i64"
+//   "'fn(i64,f64)bool", 1 -> "'f64"
+//   out of range or non-fn -> ""
 const char *_tin_reflect_fn_param(const char *atom, int64_t idx) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
@@ -682,7 +682,7 @@ char *tin_str_replace(const char *s, const char *old, const char *newstr) {
     // Allocate result
     size_t slen = strlen(s);
     size_t rlen = slen + count * (newlen - oldlen) + 1;
-    // But if newlen < oldlen, rlen might underflow — cap at slen+1 min
+    // But if newlen < oldlen, rlen might underflow - cap at slen+1 min
     if (newlen < oldlen && count * (oldlen - newlen) > slen) rlen = slen + 1;
     char *result = (char *)malloc(rlen);
     if (!result) return strdup(s);
@@ -711,7 +711,7 @@ int64_t _tin_any_eq(_TinAny a, _TinAny b) {
     switch (a.tag) {
     case 0: return *(int64_t *)a.ptr == *(int64_t *)b.ptr ? 1 : 0;   // i64
     case 1: return *(double  *)a.ptr == *(double  *)b.ptr ? 1 : 0;   // f64
-    case 2: {  // string / atom: ptr → TinString = {char*, i64}; compare char* *
+    case 2: {  // string / atom: ptr -> TinString = {char*, i64}; compare char* *
         const char *sa = *(const char **)a.ptr;
         const char *sb = *(const char **)b.ptr;
         return strcmp(sa, sb) == 0 ? 1 : 0;

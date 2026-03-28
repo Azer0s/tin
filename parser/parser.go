@@ -14,7 +14,7 @@ import (
 type Parser struct {
 	tokens         []lexer.Token
 	pos            int
-	noParensMacros map[string]string // macro name → backtick expansion body
+	noParensMacros map[string]string // macro name -> backtick expansion body
 }
 
 // New creates a Parser over the given token slice
@@ -193,7 +193,7 @@ func (p *Parser) ParseExpr() (ast.Node, error) {
 // Top-level declarations
 
 func (p *Parser) parseTopLevel() (ast.Node, error) {
-	// Collect leading control tags: fn{#pure #recurse} …
+	// Collect leading control tags: fn{#pure #recurse} ...
 	tags := p.parseTags()
 
 	// If parseTags() consumed a {#tag} block, the next token must be a body brace
@@ -239,7 +239,7 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 			p.advance() // consume macro name
 			expToks, err := lexer.New(expansion).Tokenize()
 			if err != nil {
-				return nil, fmt.Errorf("no_parens macro expansion tokenize error: %v", err)
+				return nil, fmt.Errorf("no_parens macro expansion tokenize error: %w", err)
 			}
 			// Remove trailing EOF from expansion tokens
 			for len(expToks) > 0 && expToks[len(expToks)-1].Type == lexer.EOF {
@@ -258,7 +258,7 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 	}
 }
 
-// parseTags consumes optional {#tag …} before a declaration keyword
+// parseTags consumes optional {#tag ...} before a declaration keyword
 func (p *Parser) parseTags() []string {
 	var tags []string
 	// Two forms: fn{#pure} or just leading control tags on the fn line
@@ -279,7 +279,7 @@ func (p *Parser) parseTags() []string {
 				p.advance()
 			}
 		} else {
-			p.pos = saved // not a tag block – restore
+			p.pos = saved // not a tag block - restore
 		}
 	}
 	return tags

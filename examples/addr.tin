@@ -1,4 +1,4 @@
-// addr.tin — address-of (&), dereference (*), and addr() builtin
+// addr.tin - address-of (&), dereference (*), and addr() builtin
 use assert
 
 test "address-of and dereference" =

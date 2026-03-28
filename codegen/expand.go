@@ -54,7 +54,7 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
 		node, err := parseExprString(btl.Content)
 		if err != nil {
-			return nil, fmt.Errorf("macro %s: backtick parse error: %v", macro.Name, err)
+			return nil, fmt.Errorf("macro %s: backtick parse error: %w", macro.Name, err)
 		}
 		return node, nil
 	}

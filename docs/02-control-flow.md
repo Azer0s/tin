@@ -1,4 +1,4 @@
-# 02 – Control Flow
+# 02 - Control Flow
 
 ## if / else
 
@@ -90,7 +90,7 @@ match d:
 
 ---
 
-## where  -  pattern matching on function arguments
+## where - pattern matching on function arguments
 
 `where` is a declarative alternative to `if/else` or `match` inside a
 function body. Each arm specifies a guard expression; the first arm whose
@@ -235,4 +235,4 @@ else:
   echo a as string
 ```
 
-See [07 – Enums & Unions](07-enums-unions.md) for details.
+See [07 - Enums & Unions](07-enums-unions.md) for details.

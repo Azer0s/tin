@@ -6,12 +6,13 @@ package codegen
 import (
 	"fmt"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Basic C runtime declarations
@@ -24,16 +25,6 @@ func (cg *CodeGen) ensurePrintf() *ir.Func {
 	cg.printfFn = cg.ensureExternDecl("printf", irtypes.I32,
 		[]*ir.Param{ir.NewParam("format", irtypes.I8Ptr)}, true)
 	return cg.printfFn
-}
-
-// ensurePuts declares puts if not already done.
-func (cg *CodeGen) ensurePuts() *ir.Func {
-	if cg.putsF != nil {
-		return cg.putsF
-	}
-	cg.putsF = cg.ensureExternDecl("puts", irtypes.I32,
-		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
-	return cg.putsF
 }
 
 // ensureMalloc declares malloc if not already done.
@@ -122,6 +113,30 @@ func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.
 	return nil
 }
 
+func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit func(value.Value)) {
+	st, ok := val.Type().(*irtypes.StructType)
+	if !ok {
+		return
+	}
+	structName := cg.typeNameOf(val.Type())
+	if structName == "" {
+		return
+	}
+	fieldTypes := cg.structFieldLLVMTypes[structName]
+	offset := 1 + cg.vtableOffset(structName)
+	alloca := block.NewAlloca(st)
+	block.NewStore(val, alloca)
+	for i, ft := range fieldTypes {
+		if !isRCTrackedType(ft) {
+			continue
+		}
+		gep := block.NewGetElementPtr(st, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
+		fieldVal := block.NewLoad(ft, gep)
+		visit(fieldVal)
+	}
+}
+
 // emitRetain emits a _tin_retain call for an ARC-tracked value.
 // For named structs, it also retains any RC-tracked fields.
 func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
@@ -130,26 +145,10 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 		block.NewCall(cg.ensureRetain(), rcPtr)
 		return
 	}
-	// Named struct: retain RC-tracked fields so copies are independent
-	if st, ok := val.Type().(*irtypes.StructType); ok {
-		structName := cg.typeNameOf(val.Type())
-		if structName == "" {
-			return
-		}
-		fieldTypes := cg.structFieldLLVMTypes[structName]
-		offset := 1 + cg.vtableOffset(structName)
-		alloca := block.NewAlloca(st)
-		block.NewStore(val, alloca)
-		for i, ft := range fieldTypes {
-			if !isRCTrackedType(ft) {
-				continue
-			}
-			gep := block.NewGetElementPtr(st, alloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
-			fieldVal := block.NewLoad(ft, gep)
-			cg.emitRetain(block, fieldVal)
-		}
-	}
+	// Named struct: retain RC-tracked fields so copies are independent.
+	cg.walkRCStructFields(block, val, func(fieldVal value.Value) {
+		cg.emitRetain(block, fieldVal)
+	})
 }
 
 // emitRelease emits a _tin_release call for an ARC-tracked value.
@@ -160,26 +159,10 @@ func (cg *CodeGen) emitRelease(block *ir.Block, val value.Value) {
 		block.NewCall(cg.ensureRelease(), rcPtr)
 		return
 	}
-	// Named struct: release RC-tracked fields
-	if st, ok := val.Type().(*irtypes.StructType); ok {
-		structName := cg.typeNameOf(val.Type())
-		if structName == "" {
-			return
-		}
-		fieldTypes := cg.structFieldLLVMTypes[structName]
-		offset := 1 + cg.vtableOffset(structName)
-		alloca := block.NewAlloca(st)
-		block.NewStore(val, alloca)
-		for i, ft := range fieldTypes {
-			if !isRCTrackedType(ft) {
-				continue
-			}
-			gep := block.NewGetElementPtr(st, alloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
-			fieldVal := block.NewLoad(ft, gep)
-			cg.emitRelease(block, fieldVal)
-		}
-	}
+	// Named struct: release RC-tracked fields.
+	cg.walkRCStructFields(block, val, func(fieldVal value.Value) {
+		cg.emitRelease(block, fieldVal)
+	})
 }
 
 // emitScopeRelease emits _tin_release for all ARC-tracked variables in scope s
@@ -268,6 +251,8 @@ func (cg *CodeGen) ensureStrcmp() *ir.Func {
 // returning a pointer to its first byte.  The global is wrapped in a
 // { i64, [N x i8] } struct whose i64 field holds TIN_IMMORTAL_RC (-1) so
 // that _tin_retain / _tin_release treat it as an immortal, never-freed block.
+//
+//goland:noinspection GoSnakeCaseUsage
 func (cg *CodeGen) newGlobalString(s string) value.Value {
 	data := []byte(s)
 	data = append(data, 0) // null terminator

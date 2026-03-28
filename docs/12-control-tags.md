@@ -1,10 +1,10 @@
-# 12 – Control Tags
+# 12 - Control Tags
 
 Control tags annotate functions, methods, lambdas, macros, and blocks with
 compile-time constraints and properties. The compiler either enforces them or
 uses them as documentation.
 
-**Syntax:** `fn{#tag} name(…)`  -  one or more tags in braces after the keyword.
+**Syntax:** `fn{#tag} name(...)`  -  one or more tags in braces after the keyword.
 
 **Naming convention:** all lowercase with underscores. Tags describe what a
 thing *is* or *has*, not what it *cannot* do.
@@ -98,10 +98,16 @@ fn{#sideffect} info(msg string) =
 
 ### `#no_recurse`
 
-The function must not call itself, directly.
+The function must not call itself, directly or indirectly through any chain
+of helpers.
 
-**Enforcement:** the compiler walks the generated LLVM IR and rejects any
-`call` instruction whose callee is the function itself.
+**Enforcement:** the compiler performs a transitive AST-level call-graph walk
+before code generation and rejects any path that leads back to the tagged
+function.
+
+**Exception:** functions tagged with both `#pure` and `#no_recurse` are CTFE
+macros. Their self-calls are resolved at compile time by the CTFE evaluator,
+so the runtime recursion check is skipped for them.
 
 ```rust
 fn{#no_recurse} fib(n i64) i64 =
@@ -120,8 +126,7 @@ fn{#no_recurse} fib_iter(n i64) i64 =
   return a
 ```
 
-**Note:** The check is *transitive*  -  it follows the entire call graph to detect
-any path that leads back to the tagged function, at any depth:
+Indirect recursion through helper functions is also caught:
 
 ```rust
 fn step_a(n i64) i64 = return target(n - 1)   // calls back into target
@@ -129,7 +134,7 @@ fn step_a(n i64) i64 = return target(n - 1)   // calls back into target
 fn{#no_recurse} target(n i64) i64 =
   if n <= 0:
     return 0
-  return step_a(n)   // ERROR: step_a → target is indirect recursion
+  return step_a(n)   // ERROR: step_a -> target is indirect recursion
 ```
 
 Helpers that recurse *among themselves* without calling back into the tagged
@@ -274,21 +279,24 @@ rejected because their purity cannot be verified.
 
 ### `#no_recurse` catches all recursive paths
 
-`#no_recurse` performs a transitive call-graph walk, exactly like `#pure`. Any
-path through any number of helper functions that leads back to the tagged
-function is a violation. Only indirect calls through function pointers (whose
-targets cannot be statically resolved) are not traced.
+`#no_recurse` performs a transitive AST-level call-graph walk, similar to
+`#pure`. Any path through any number of helper functions that leads back to the
+tagged function is a violation. Indirect calls through function pointers cannot
+be statically resolved and are conservatively allowed (not traced).
+
+Functions tagged `#pure #no_recurse` are exempt: they are CTFE macros whose
+self-calls are evaluated at compile time rather than emitted as runtime calls.
 
 ---
 
 ## Quick reference
 
-| Tag | Applies to | Enforced | Meaning |
-|-----|-----------|----------|---------|
-| `#pure` | fn / method / lambda | Yes  -  transitive AST walk | No side effects |
-| `#sideffect` | fn / method / lambda | No (declaration) | Has side effects; auto-applied to extern fns |
-| `#no_recurse` | fn / method / lambda | Yes  -  transitive AST walk | Must not call itself (at any depth) |
-| `#no_thread` | fn / method / lambda | No (advisory) | Unsafe for concurrent use |
-| `#allow_sideffect` | block | Yes  -  suppresses `#pure` check | Permits side effects in this block |
-| `#no_excl` | macro | Parser | Callable without `!` suffix |
-| `#no_parens` | macro | Parser | Callable without parentheses |
+| Tag                | Applies to           | Enforced                         | Meaning                                      |
+|--------------------|----------------------|----------------------------------|----------------------------------------------|
+| `#pure`            | fn / method / lambda | Yes  -  transitive AST walk      | No side effects                              |
+| `#sideffect`       | fn / method / lambda | No (declaration)                 | Has side effects; auto-applied to extern fns |
+| `#no_recurse`      | fn / method / lambda | Yes  -  transitive AST walk      | Must not call itself (at any depth)          |
+| `#no_thread`       | fn / method / lambda | No (advisory)                    | Unsafe for concurrent use                    |
+| `#allow_sideffect` | block                | Yes  -  suppresses `#pure` check | Permits side effects in this block           |
+| `#no_excl`         | macro                | Parser                           | Callable without `!` suffix                  |
+| `#no_parens`       | macro                | Parser                           | Callable without parentheses                 |

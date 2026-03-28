@@ -4,11 +4,12 @@ package codegen
 import (
 	"fmt"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // CodeGen
@@ -20,7 +21,6 @@ type CodeGen struct {
 
 	// declared C functions
 	printfFn  *ir.Func
-	putsF     *ir.Func
 	sprintfFn *ir.Func
 	mallocFn  *ir.Func
 	memcpyFn  *ir.Func
@@ -115,7 +115,7 @@ type CodeGen struct {
 	dataVariantTags map[string]int8
 
 	// Universal runtime type ID registry.
-	// Primitives use anyTag* constants (0–5).  Every named struct, data type,
+	// Primitives use anyTag* constants (0-5).  Every named struct, data type,
 	// and unique function signature gets a unique i32 starting at 6.
 	structTypeIDs map[string]int32 // struct name -> compile-time type ID
 	dataTypeIDs   map[string]int32 // data type name -> compile-time type ID
@@ -231,7 +231,7 @@ func New(filename string) *CodeGen {
 		structTypeIDs:            make(map[string]int32),
 		dataTypeIDs:              make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
-		nextTypeID:               6, // 0–5 reserved for anyTag* primitives (fn=5)
+		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
 		structImpls:              make(map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
 		atomCodes:                make(map[string]int32),
@@ -325,7 +325,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// Pre-pass 1.5: collect C extern symbol names BEFORE predeclaring Tin user
 	// functions. This allows predeclareFuncAs to detect collisions and mangle
-	// Tin wrapper names (e.g. `fn printf(...)` → IR `@_tin__printf`) to avoid
+	// Tin wrapper names (e.g. `fn printf(...)` -> IR `@_tin__printf`) to avoid
 	// redefinition conflicts with C externs declared in the same source file.
 	if cg.externIRNames == nil {
 		cg.externIRNames = map[string]bool{}

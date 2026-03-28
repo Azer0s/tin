@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
-	"github.com/Azer0s/tin/lexer"
-	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/lexer"
+	"github.com/Azer0s/tin/parser"
 )
 
 func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
@@ -588,8 +589,7 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	// Group exports by package name.
 	type exportGroup struct {
-		names     []string
-		reExports []string
+		names []string
 	}
 	groups := map[string]*exportGroup{}
 	for _, node := range prog.Stmts {

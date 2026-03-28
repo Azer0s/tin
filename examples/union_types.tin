@@ -1,4 +1,4 @@
-// union_types.tin — tagged union types: type u = A | B
+// union_types.tin - tagged union types: type u = A | B
 // Layout: { i32 type_id, i8 tag, [maxSize x i8] payload }
 // type_id enables any boxing and typeof. Tag 0 = first variant, 1 = second, etc.
 use assert
@@ -44,7 +44,7 @@ test "tagged union: match on type f64 branch" =
       hit = true
   assert::ok(hit)
 
-test "tagged union: string | i64 — string variant" =
+test "tagged union: string | i64 - string variant" =
   let s strnum = "hello"
   assert::ok(s is string)
   assert::not_ok(s is i64)

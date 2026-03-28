@@ -1,4 +1,4 @@
-// stdlib/io — I/O functions
+// stdlib/io - I/O functions
 //
 // Wraps standard C file and console I/O
 // No extra linker flags required (all in libc)

@@ -13,6 +13,7 @@ import (
 // TokenType identifies the kind of a token
 type TokenType int
 
+//goland:noinspection ALL
 const (
 	// Literals
 	INT_LIT      TokenType = iota // 42, 0xFF
@@ -271,10 +272,6 @@ func (l *Lexer) advance() rune {
 		l.col++
 	}
 	return ch
-}
-
-func (l *Lexer) makeToken(t TokenType, lit string) Token {
-	return Token{Type: t, Literal: lit, Line: l.line, Col: l.col}
 }
 
 func (l *Lexer) nextToken() (Token, error) {
@@ -579,8 +576,6 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 			if depth == 0 {
 				break
 			}
-		} else if ch == '`' {
-			depth++
 		}
 		sb.WriteRune(ch)
 	}

@@ -1,4 +1,4 @@
-// literals.tin — integer literal formats: decimal, hex, octal, binary
+// literals.tin - integer literal formats: decimal, hex, octal, binary
 use assert
 
 test "hex literals" =

@@ -1,4 +1,4 @@
-// stdlib_usage.tin — demonstrates using the standard library modules.
+// stdlib_usage.tin - demonstrates using the standard library modules.
 //
 // The stdlib modules (io, math, mem, os, str) are pre-compiled and bundled
 // with the tin compiler. They are available via `use <name>`.

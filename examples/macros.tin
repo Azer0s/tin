@@ -1,7 +1,7 @@
 // Macros: compile-time expression templates.
 //
 // A macro is declared with the `macro` keyword. When called, the arguments
-// are substituted textually into the body before evaluation — no function
+// are substituted textually into the body before evaluation - no function
 // call overhead.
 //
 // macro name!(params) = body_expression

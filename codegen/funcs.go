@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // predeclareFunc adds a function to the module and registers it in the global
@@ -310,11 +311,6 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		}
 	}
 	return true
-}
-
-// structImplementsTrait is a convenience wrapper for simple (non-generic) traits.
-func (cg *CodeGen) structImplementsTrait(structName, traitName string) bool {
-	return cg.structSatisfiesConstraint(structName, &ast.SimpleType{Name: traitName})
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {

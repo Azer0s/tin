@@ -1,14 +1,14 @@
-# 11 – Macros
+# 11 - Macros
 
 Tin macros are compile-time templates. Every macro call is fully evaluated
 before the program runs  -  there is no macro call overhead at runtime.
 
 There are two kinds of macros:
 
-| Kind | Body | Evaluation |
-|------|------|-----------|
-| **Simple** | single expression | AST substitution |
-| **CTFE** | indented block | compiled and executed at compile time |
+| Kind       | Body              | Evaluation                            |
+|------------|-------------------|---------------------------------------|
+| **Simple** | single expression | AST substitution                      |
+| **CTFE**   | indented block    | compiled and executed at compile time |
 
 ---
 
@@ -102,12 +102,12 @@ The compiler infers the return type of a CTFE macro by inspecting `return`
 statements in the block body. If no clear type can be found it falls back to
 the type of the first argument.
 
-| Returned expression | Inferred type |
-|---------------------|---------------|
-| integer literal     | `i64`         |
-| float literal       | `f64`         |
-| bool literal        | `bool`        |
-| string literal      | `string`      |
+| Returned expression | Inferred type         |
+|---------------------|-----------------------|
+| integer literal     | `i64`                 |
+| float literal       | `f64`                 |
+| bool literal        | `bool`                |
+| string literal      | `string`              |
 | parameter name      | same as that argument |
 
 ### String-returning CTFE macros

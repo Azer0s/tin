@@ -1,4 +1,4 @@
-// stdlib/mem — Memory allocation and manipulation
+// stdlib/mem - Memory allocation and manipulation
 //
 // Wraps standard C malloc/free family and memory utilities
 // No extra linker flags required (all in libc)

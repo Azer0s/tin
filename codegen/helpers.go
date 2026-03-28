@@ -8,9 +8,103 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Helper utilities
+
+// closureCapture describes a variable captured from the enclosing scope.
+type closureCapture struct {
+	name   string
+	val    value.Value
+	llvmTy irtypes.Type
+	byRef  bool // true: store the alloca pointer; false: store the loaded value
+}
+
+// closureCtx saves the mutable per-function state so it can be restored after
+// emitting a nested closure / thunk function.
+type closureCtx struct {
+	fn          *ir.Func
+	scope       *scope
+	defers      []ast.Node
+	deferFrames []value.Value
+}
+
+// pushClosureCtx saves the current function context, switches cg to f, and
+// roots the new scope at the module-level (global) scope.
+func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
+	prev := closureCtx{cg.curFn, cg.curScope, cg.pendingDefers, cg.pendingDeferFrames}
+	cg.curFn = f
+	cg.pendingDefers = nil
+	cg.pendingDeferFrames = nil
+	global := prev.scope
+	for global.parent != nil {
+		global = global.parent
+	}
+	cg.curScope = newScope(global)
+	return prev
+}
+
+// popClosureCtx restores the function context saved by pushClosureCtx.
+func (cg *CodeGen) popClosureCtx(prev closureCtx) {
+	cg.curFn = prev.fn
+	cg.curScope = prev.scope
+	cg.pendingDefers = prev.defers
+	cg.pendingDeferFrames = prev.deferFrames
+}
+
+// buildEnv heap-allocates an env struct for the given captures and stores each
+// captured value into it. Returns the i8* pointer to the env and the struct
+// type (nil struct type and null pointer when there are no captures).
+func (cg *CodeGen) buildEnv(block *ir.Block, captures []closureCapture) (value.Value, *irtypes.StructType) {
+	if len(captures) == 0 {
+		return constant.NewNull(irtypes.I8Ptr), nil
+	}
+	fields := make([]irtypes.Type, len(captures))
+	for i, c := range captures {
+		fields[i] = c.llvmTy
+	}
+	envStructType := irtypes.NewStruct(fields...)
+	// sizeof(*envStructType) via GEP trick: null + 1 element then ptrtoint.
+	nullPtr := constant.NewNull(irtypes.NewPointer(envStructType))
+	oneGEP := block.NewGetElementPtr(envStructType, nullPtr, constant.NewInt(irtypes.I32, 1))
+	envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
+	envI8 := block.NewCall(cg.ensureMalloc(), envSize)
+	envTypedPtr := block.NewBitCast(envI8, irtypes.NewPointer(envStructType))
+	for i, c := range captures {
+		gep := block.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i)))
+		block.NewStore(c.val, gep)
+	}
+	return envI8, envStructType
+}
+
+// unpackEnv unpacks captured values from the env struct into the current scope.
+// byRef captures load the stored alloca pointer; non-byRef captures copy the
+// value into a fresh alloca.
+func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes.StructType, captures []closureCapture) {
+	if len(captures) == 0 || envStructType == nil {
+		return
+	}
+	envRaw := f.Params[0]
+	envTypedPtr := entry.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
+	for i, c := range captures {
+		gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i)))
+		if c.byRef {
+			allocaPtr := entry.NewLoad(c.llvmTy, gep)
+			cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
+		} else {
+			alloca := entry.NewAlloca(c.llvmTy)
+			loaded := entry.NewLoad(c.llvmTy, gep)
+			entry.NewStore(loaded, alloca)
+			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
+		}
+	}
+}
 
 // callPrintTrait tries to call the print trait method on val, returning the
 // resulting string value and true, or (nil, false) if not applicable.
@@ -46,7 +140,7 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 
 // fieldIndex returns the LLVM field index for a named user field, accounting
 // for the leading i32 type_id and vtable pointer fields at the front.
-// Layout: [i32 type_id, vtable_0*, …, user_field_0, …]
+// Layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]
 
 // isStringType returns true if t is the tin string fat-pointer type {i8*, i64}.
 
@@ -143,7 +237,7 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 			} else if id, ok2 := cg.unionTypeIDs[st.Name()]; ok2 {
 				tag = id
 			} else {
-				tag = anyTagPtr // unknown named type – treat as opaque pointer
+				tag = anyTagPtr // unknown named type - treat as opaque pointer
 			}
 		} else {
 			tag = anyTagInt
@@ -305,9 +399,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		if targetName := cg.typeNameOf(target); targetName != "" {
 			if _, isNative := cg.nativeUnionDecls[targetName]; isNative {
 				if !src.Equal(target) {
-					if wrapped := cg.wrapNativeUnion(block, val, targetSt); wrapped != nil {
-						return wrapped
-					}
+					return cg.wrapNativeUnion(block, val, targetSt)
 				}
 			}
 		}
@@ -470,15 +562,16 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 }
 
 func floatBits(t *irtypes.FloatType) int {
-	switch t.Kind {
+	switch t.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 	case irtypes.FloatKindHalf:
 		return 16
 	case irtypes.FloatKindFloat:
 		return 32
 	case irtypes.FloatKindDouble:
 		return 64
+	default:
+		return 64
 	}
-	return 64
 }
 
 // zeroValue returns the zero constant for a given type.

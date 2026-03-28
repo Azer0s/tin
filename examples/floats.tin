@@ -1,0 +1,84 @@
+// floats.tin - floating-point types, arithmetic, and conversions
+//
+// Build: tin build examples/floats.tin -lm
+// Run:   tin run   examples/floats.tin -lm
+// Test:  tin test  examples/floats.tin -lm
+
+use math
+use assert
+
+// -------------------------------------------------------------------------
+// Basic f64 literals and arithmetic
+
+fn circle_area(r f64) f64 =
+  return math::PI * r * r
+
+fn circle_circumference(r f64) f64 =
+  return 2.0 * math::PI * r
+
+// -------------------------------------------------------------------------
+// int <-> float conversions
+
+fn int_to_float(n i64) f64 = return n as f64
+fn float_to_int(x f64) i64 = return x as i64
+
+// -------------------------------------------------------------------------
+// Utility functions using stdlib math
+
+fn hypotenuse(a f64, b f64) f64 =
+  return math::sqrt(a * a + b * b)
+
+fn clamp(x f64, lo f64, hi f64) f64 =
+  return math::fmax(lo, math::fmin(hi, x))
+
+// -------------------------------------------------------------------------
+// Newton-Raphson square root (pure-Tin, no stdlib)
+
+fn sqrt_approx(n f64) f64 =
+  let x f64 = n / 2.0
+  for let i i64 = 0; i < 20; i++:
+    x = (x + n / x) / 2.0
+  return x
+
+// -------------------------------------------------------------------------
+
+echo circle_area(1.0)
+echo hypotenuse(3.0, 4.0)
+echo sqrt_approx(2.0)
+
+// -------------------------------------------------------------------------
+
+test "basic arithmetic" =
+  assert::equals_f64(1.5 + 2.5, 4.0)
+  assert::equals_f64(3.0 * 2.0, 6.0)
+  assert::equals_f64(7.0 / 2.0, 3.5)
+  assert::equals_f64(math::fmod(10.0, 3.0), 1.0)
+
+test "conversions" =
+  assert::equals_f64(int_to_float(42), 42.0)
+  assert::equals(float_to_int(3.9), 3)
+  assert::equals(float_to_int(0.0 - 2.7), 0 - 2)
+
+test "math stdlib" =
+  assert::equals_f64(math::sqrt(9.0), 3.0)
+  assert::equals_f64(math::floor(3.9), 3.0)
+  assert::equals_f64(math::ceil(3.1), 4.0)
+  assert::equals_f64(math::fabs(0.0 - 5.0), 5.0)
+  assert::equals_f64(math::fmin(1.0, 2.0), 1.0)
+  assert::equals_f64(math::fmax(1.0, 2.0), 2.0)
+
+test "geometry" =
+  assert::equals_f64(hypotenuse(3.0, 4.0), 5.0)
+  assert::equals_f64(circle_area(1.0), math::PI)
+
+test "clamp" =
+  assert::equals_f64(clamp(5.0, 0.0, 10.0), 5.0)
+  assert::equals_f64(clamp(0.0 - 1.0, 0.0, 10.0), 0.0)
+  assert::equals_f64(clamp(11.0, 0.0, 10.0), 10.0)
+
+test "newton sqrt" =
+  assert::equals_f64(sqrt_approx(4.0), 2.0)
+  assert::equals_f64(sqrt_approx(9.0), 3.0)
+  // epsilon check: |approx - exact| < 1e-9
+  let diff f64 = math::fabs(sqrt_approx(2.0) - math::sqrt(2.0))
+  assert::ok(diff < 0.000000001)

@@ -478,7 +478,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 		return nil
 	}
 
-	// Strip module qualifier for lookup (e.g. "pkg::fn" → "fn")
+	// Strip module qualifier for lookup (e.g. "pkg::fn" -> "fn")
 	lookupName := calleeName
 	if idx := strings.LastIndex(calleeName, "::"); idx >= 0 {
 		lookupName = calleeName[idx+2:]

@@ -1,0 +1,75 @@
+// nested_destructuring.tin - destructuring nested structs and mixed patterns
+//
+// Builds on destructuring.tin to show deeper struct field access,
+// destructuring inside loops, and combining struct + array patterns.
+
+use assert
+
+struct vec2 =
+  x f64
+  y f64
+
+struct rect =
+  origin vec2
+  size   vec2
+
+fn vec2_add(a vec2, b vec2) vec2 =
+  return vec2{x: a.x + b.x, y: a.y + b.y}
+
+fn vec2_dot(a vec2, b vec2) f64 =
+  return a.x * b.x + a.y * b.y
+
+fn rect_area(r rect) f64 =
+  return r.size.x * r.size.y
+
+fn rect_contains(r rect, p vec2) bool =
+  let in_x bool = p.x >= r.origin.x && p.x <= r.origin.x + r.size.x
+  let in_y bool = p.y >= r.origin.y && p.y <= r.origin.y + r.size.y
+  return in_x && in_y
+
+// -------------------------------------------------------------------------
+
+test "nested field access" =
+  let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}
+  assert::equals_f64(r.origin.x, 1.0)
+  assert::equals_f64(r.origin.y, 2.0)
+  assert::equals_f64(r.size.x, 5.0)
+  assert::equals_f64(rect_area(r), 15.0)
+
+test "struct destructuring" =
+  let v = vec2{x: 3.0, y: 4.0}
+  let {x, y} vec2 = v
+  assert::equals_f64(x, 3.0)
+  assert::equals_f64(y, 4.0)
+
+test "destructuring in computation" =
+  let a = vec2{x: 1.0, y: 0.0}
+  let b = vec2{x: 0.0, y: 1.0}
+  assert::equals_f64(vec2_dot(a, b), 0.0)
+  let c = vec2_add(a, b)
+  let {x, y} vec2 = c
+  assert::equals_f64(x, 1.0)
+  assert::equals_f64(y, 1.0)
+
+test "array destructuring in loop" =
+  let pairs [i64] = [1, 2, 3, 4, 6, 8]
+  let sum i64 = 0
+  for let i i64 = 0; i < len(pairs); i += 2:
+    let a i64 = pairs[i]
+    let b i64 = pairs[i + 1]
+    sum += a + b
+  assert::equals(sum, 24)
+
+test "rest split into sub-array" =
+  let nums [i64] = [10, 20, 30, 40, 50]
+  let [first, ...rest] [i64] = nums
+  assert::equals(first, 10)
+  assert::equals(len(rest), 4)
+  let [second, ...tail] [i64] = rest
+  assert::equals(second, 20)
+  assert::equals(len(tail), 3)
+
+test "rect contains point" =
+  let r = rect{origin: vec2{x: 0.0, y: 0.0}, size: vec2{x: 10.0, y: 10.0}}
+  assert::ok(rect_contains(r, vec2{x: 5.0, y: 5.0}))
+  assert::not_ok(rect_contains(r, vec2{x: 11.0, y: 5.0}))
