@@ -150,7 +150,7 @@ ARC block (rc=1):
   ┌────────────────────────────┐
   │  TinString[0]              │  <- ptr points into record[0].data
   │  TinString[1]              │     len = strlen(param[1])
-  │  …                         │
+  │  ...                       │
   │  TinString[arity-1]        │
   ├────────────────────────────┤
   │  record[0]:                │
@@ -158,8 +158,8 @@ ARC block (rc=1):
   │    char data[plen+1]       │  <- TinString[0].ptr points here
   │    padding to 8-byte align │
   ├────────────────────────────┤
-  │  record[1]: …              │
-  │  …                         │
+  │  record[1]: ...            │
+  │  ...                       │
   └────────────────────────────┘
 ```
 

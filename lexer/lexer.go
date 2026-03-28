@@ -61,6 +61,7 @@ const (
 	KW_SIZEOF
 	KW_ADDR
 	KW_BREAK
+	KW_DO
 	KW_ECHO
 	KW_TEST
 	KW_TYPEOF
@@ -146,7 +147,7 @@ var tokenNames = map[TokenType]string{
 	KW_DEFER: "defer", KW_WHERE: "where", KW_MACRO: "macro",
 	KW_STATIC: "static", KW_VIRTUAL: "virtual", KW_AS: "as", KW_IS: "is",
 	KW_FORWARD: "forward", KW_OVERRIDE: "override", KW_SIZEOF: "sizeof",
-	KW_ADDR: "addr", KW_BREAK: "break", KW_ECHO: "echo", KW_TEST: "test",
+	KW_ADDR: "addr", KW_BREAK: "break", KW_DO: "do", KW_ECHO: "echo", KW_TEST: "test",
 	KW_TYPEOF: "typeof", KW_TRAITOF: "traitof", KW_FIELDNAMES: "fieldnames",
 	KW_FIELDTYPES: "fieldtypes", KW_FIELDTAG: "fieldtag",
 	KW_GETFIELD: "getfield", KW_SETFIELD: "setfield", KW_PASS: "pass",
@@ -180,7 +181,7 @@ var keywords = map[string]TokenType{
 	"defer": KW_DEFER, "where": KW_WHERE, "macro": KW_MACRO,
 	"static": KW_STATIC, "virtual": KW_VIRTUAL, "as": KW_AS, "is": KW_IS,
 	"forward": KW_FORWARD, "override": KW_OVERRIDE, "sizeof": KW_SIZEOF,
-	"addr": KW_ADDR, "break": KW_BREAK, "echo": KW_ECHO, "test": KW_TEST,
+	"addr": KW_ADDR, "break": KW_BREAK, "do": KW_DO, "echo": KW_ECHO, "test": KW_TEST,
 	"typeof": KW_TYPEOF, "traitof": KW_TRAITOF, "fieldnames": KW_FIELDNAMES,
 	"fieldtypes": KW_FIELDTYPES, "fieldtag": KW_FIELDTAG,
 	"getfield": KW_GETFIELD, "setfield": KW_SETFIELD, "pass": KW_PASS,
