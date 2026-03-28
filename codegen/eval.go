@@ -442,10 +442,11 @@ func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int)
 		}
 		return ctfeVal{kind: "i64"}, nil
 
-	default:
+	case ast.ForIn:
 		// For-in loops require range evaluation - not supported yet.
 		return ctfeVal{}, errNotConst
 	}
+	return ctfeVal{}, errNotConst
 }
 
 // ---------------------------------------------------------------------------
