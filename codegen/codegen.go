@@ -23,6 +23,7 @@ type CodeGen struct {
 	printfFn  *ir.Func
 	sprintfFn *ir.Func
 	mallocFn  *ir.Func
+	freeFn    *ir.Func
 	memcpyFn  *ir.Func
 
 	// struct type registry: name -> LLVM struct type
@@ -68,14 +69,21 @@ type CodeGen struct {
 	curFn    *ir.Func
 	curScope *scope
 
-	// pendingDefers holds calls deferred in the current function (LIFO on return).
-	pendingDefers []ast.Node
+	// pendingDeferFnI8s holds the thunk i8* function pointers for deferred calls
+	// registered in the current function (LIFO on return).
+	pendingDeferFnI8s []value.Value
 
 	// pendingDeferFrames holds the i8* pointers to the TinDeferEntry allocas
 	// pushed onto the runtime defer chain for this function.  They are popped
 	// (without calling) before each normal return so that _tin_panic only runs
 	// defers from frames that have not yet returned.
 	pendingDeferFrames []value.Value
+
+	// pendingDeferEnvs holds the malloc'd i8* env pointers corresponding to
+	// each pendingDeferFnI8s entry.  The env is allocated in genDeferThunk to
+	// capture free variables; it is passed to the thunk on normal return and
+	// freed afterwards.
+	pendingDeferEnvs []value.Value
 
 	// Defer chain runtime functions (lazily declared).
 	deferPushFn    *ir.Func            // _tin_defer_push(entry i8*, fn i8*, env i8*)
@@ -150,6 +158,10 @@ type CodeGen struct {
 
 	// linkLibs: libraries to pass to the linker (from `use extern` lib entries)
 	linkLibs []string
+
+	// pkgSrcPaths: paths of all .tin source files loaded as packages.
+	// Populated by loadPackageFromSource so callers can scan them for //! directives.
+	pkgSrcPaths []string
 
 	// test mode: when true, TestDecl blocks are compiled into test functions
 	// and a test-runner main is generated instead of the normal implicit main.
@@ -283,6 +295,11 @@ func (cg *CodeGen) registerBuiltinTraits() {
 // requested to link against (e.g. from `use extern` lib entries).
 // The caller should pass these as -l<lib> flags to the linker.
 func (cg *CodeGen) LinkLibs() []string { return cg.linkLibs }
+
+// PackageSrcPaths returns the paths of all .tin source files that were loaded
+// as packages during codegen. The caller can scan these for //! directives
+// (e.g. //!+file.c) to collect C sources that need to be compiled alongside.
+func (cg *CodeGen) PackageSrcPaths() []string { return cg.pkgSrcPaths }
 
 // Generate translates the AST program into an LLVM IR module.
 func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {

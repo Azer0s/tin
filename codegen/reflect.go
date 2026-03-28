@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -25,16 +27,19 @@ func structNameFromValue(v value.Value) string {
 	return ""
 }
 
-// buildAtomArray allocates a heap array of %__atom values and returns a
-// fat-pointer {%__atom*, i64} representing [atom].
-// Each element of atoms is an atom name with a leading apostrophe (e.g. "'ok").
+// buildAtomArray returns a fat-pointer {%__atom*, i64} representing a [atom]
+// array whose elements are the given atom names (each with a leading apostrophe).
+// The data is stored in an immortal global constant so that _tin_release is a
+// no-op: the global is wrapped in { i64, [N x %__atom] } with an immortal ARC
+// header (rc = -1) exactly like string literals, allowing the fat pointer to be
+// freely copied/released without lifetime management.
 func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	elemType := cg.atomType // %__atom = { i32 }
 	n := int64(len(atoms))
-
 	fat := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
 
 	if n == 0 {
+		// Empty array: null data pointer, length 0.
 		alloca := block.NewAlloca(fat)
 		ptrGep := block.NewGetElementPtr(fat, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -45,33 +50,41 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 		return block.NewLoad(fat, alloca)
 	}
 
-	// Register each atom (strip leading apostrophe) and build constants.
-	vals := make([]value.Value, n)
+	// Register each atom and build element constants.
+	elems := make([]constant.Constant, n)
 	for i, a := range atoms {
 		name := a
 		if len(name) > 0 && name[0] == '\'' {
 			name = name[1:]
 		}
-		vals[i] = cg.atomConstant(cg.registerAtom(name))
+		elems[i] = cg.atomConstant(cg.registerAtom(name)).(*constant.Struct)
 	}
 
-	nullPtr := constant.NewNull(irtypes.NewPointer(elemType))
-	sizeGep := block.NewGetElementPtr(elemType, nullPtr, constant.NewInt(irtypes.I64, 1))
-	elemSz := block.NewPtrToInt(sizeGep, irtypes.I64)
-	totalSz := block.NewMul(elemSz, constant.NewInt(irtypes.I64, n))
+	// Build a global { i64, [N x %__atom] } with an immortal RC header (-1).
+	// _tin_release(ptr) reads ptr-8 for the RC: the i64 field == -1 -> no-op.
+	arrType := irtypes.NewArray(uint64(n), elemType)
+	immortalRC := constant.NewInt(irtypes.I64, -1)
+	atomArr := constant.NewArray(arrType, elems...)
+	hdrStructType := irtypes.NewStruct(irtypes.I64, arrType)
+	hdrConst := constant.NewStruct(hdrStructType, immortalRC, atomArr)
 
-	mallocI8 := block.NewCall(cg.ensureMalloc(), totalSz)
-	dataPtr := block.NewBitCast(mallocI8, irtypes.NewPointer(elemType))
+	g := cg.mod.NewGlobalDef(fmt.Sprintf("atoms.%d", cg.strCount), hdrConst)
+	g.Immutable = true
+	g.Linkage = enum.LinkagePrivate
+	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
+	cg.strCount++
 
-	for i, v := range vals {
-		gep := block.NewGetElementPtr(elemType, dataPtr, constant.NewInt(irtypes.I64, int64(i)))
-		block.NewStore(v, gep)
-	}
+	// GEP to skip the 8-byte ARC header: { i64, [N x %__atom] }* -> %__atom*
+	i32_0 := constant.NewInt(irtypes.I32, 0)
+	i32_1 := constant.NewInt(irtypes.I32, 1)
+	i64_0 := constant.NewInt(irtypes.I64, 0)
+	dataGEP := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_1, i64_0)
+	dataGEP.InBounds = true
 
 	fatAlloca := block.NewAlloca(fat)
 	ptrGep := block.NewGetElementPtr(fat, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(dataPtr, ptrGep)
+	block.NewStore(dataGEP, ptrGep)
 	lenGep := block.NewGetElementPtr(fat, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
@@ -437,6 +450,9 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 	strcmp := cg.ensureStrcmp()
 	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
 
+	// Collect all boxes so we can release non-selected ones after selection.
+	var allBoxes []value.Value
+
 	for sn, typeID := range cg.structTypeIDs {
 		st := cg.structTypes[sn]
 		if st == nil {
@@ -463,6 +479,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
 			fieldVal := block.NewLoad(fieldTypes[i], fieldGep)
 			boxed := cg.boxToAny(block, fieldVal)
+			allBoxes = append(allBoxes, boxed)
 
 			current := block.NewLoad(anyType, resultAlloca)
 			selected := block.NewSelect(isMatch, boxed, current)
@@ -470,7 +487,14 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 		}
 	}
 
-	return block.NewLoad(anyType, resultAlloca)
+	result := block.NewLoad(anyType, resultAlloca)
+	// Retain the winner before releasing all boxes so it isn't freed underneath us.
+	// _tin_retain(null) is a safe no-op when no field matched.
+	cg.emitRetain(block, result)
+	for _, box := range allBoxes {
+		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
+	}
+	return result
 }
 
 // genGetfieldForStruct generates a strcmp chain for a concrete struct type.
@@ -495,6 +519,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 	resultAlloca := block.NewAlloca(anyType)
 	block.NewStore(zeroAny, resultAlloca)
 
+	boxes := make([]value.Value, 0, len(fieldNames))
 	for i, fname := range fieldNames {
 		namePtr := cg.newGlobalString(fname)
 		cmp := block.NewCall(strcmp, fieldNamePtr, namePtr)
@@ -505,13 +530,21 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
 		fieldVal := block.NewLoad(fieldTypes[i], fieldGep)
 		boxed := cg.boxToAny(block, fieldVal)
+		boxes = append(boxes, boxed)
 
 		current := block.NewLoad(anyType, resultAlloca)
 		selected := block.NewSelect(isMatch, boxed, current)
 		block.NewStore(selected, resultAlloca)
 	}
 
-	return block.NewLoad(anyType, resultAlloca), nil
+	result := block.NewLoad(anyType, resultAlloca)
+	// Retain the winner before releasing all boxes.
+	// _tin_retain(null) is a safe no-op when no field matched.
+	cg.emitRetain(block, result)
+	for _, box := range boxes {
+		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
+	}
+	return result, nil
 }
 
 // genSetfield sets the named field of a struct value (via lvalue) from a typed value.

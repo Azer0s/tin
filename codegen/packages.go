@@ -360,6 +360,9 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	}
 
 	// Process `use` declarations inside the package source first.
+	// Record this package source path so callers can scan it for //! directives.
+	cg.pkgSrcPaths = append(cg.pkgSrcPaths, srcPath)
+
 	prevFilename := cg.filename
 	cg.filename = srcPath
 	for _, node := range prog.Stmts {

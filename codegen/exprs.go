@@ -420,7 +420,15 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			lenGep := block.NewGetElementPtr(fatType, fatAlloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			block.NewStore(totalLen, lenGep)
-			return block.NewLoad(fatType, fatAlloca), nil
+			result := block.NewLoad(fatType, fatAlloca)
+			// Release sub-expression temporaries now that the result is built.
+			if isTemporaryProducer(e.Left) {
+				cg.emitRelease(block, left)
+			}
+			if isTemporaryProducer(e.Right) {
+				cg.emitRelease(block, right)
+			}
+			return result, nil
 		}
 
 		// String concatenation: both operands are {i8*, i64} fat-ptrs.
@@ -449,7 +457,15 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		gep1 := block.NewGetElementPtr(fatPtrType, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		block.NewStore(totalLen, gep1)
-		return block.NewLoad(fatPtrType, alloca), nil
+		result := block.NewLoad(fatPtrType, alloca)
+		// Release sub-expression temporaries now that the result is built.
+		if isTemporaryProducer(e.Left) {
+			cg.emitRelease(block, left)
+		}
+		if isTemporaryProducer(e.Right) {
+			cg.emitRelease(block, right)
+		}
+		return result, nil
 	}
 
 	return constant.NewInt(irtypes.I64, 0), nil
@@ -819,9 +835,20 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if argIdx >= len(llArgsPreCoerce) {
 			break
 		}
-		av := llArgsPreCoerce[argIdx]
+		preCoerce := llArgsPreCoerce[argIdx]
+		postCoerce := llArgs[argIdx]
 		argIdx++
-		if !isRCTrackedType(av.Type()) {
+
+		// Case 1: adaptArgs boxed a non-any value to any (fresh _tin_rc_alloc).
+		// The box is now owned by us; release it after the call regardless of
+		// whether the source expression was a copy (identifier) or a temporary.
+		if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+			cg.emitRelease(block, postCoerce)
+			continue
+		}
+
+		// Case 2: pre-coerce value is RC-tracked and the argument is a temporary.
+		if !isRCTrackedType(preCoerce.Type()) {
 			continue
 		}
 		if isCopyExpr(astArg) {
@@ -829,7 +856,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			continue
 		}
 		// Temporary fresh allocation: release our reference.
-		cg.emitRelease(block, av)
+		cg.emitRelease(block, preCoerce)
 	}
 
 	if irtypes.IsVoid(result.Type()) {
@@ -1285,20 +1312,21 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	if rightFn == nil {
 		return leftVal, nil
 	}
-	// If rightFn is a closure fat pointer {fn*, i8*}, call through it.
+	// Call through the function (fat-pointer or plain).
+	var result value.Value
 	if isFatFnPtr(rightFn.Type()) {
 		fnPtr := block.NewExtractValue(rightFn, 0)
 		envPtr := block.NewExtractValue(rightFn, 1)
 		fnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 		llArgs := cg.adaptArgs(block, []value.Value{envPtr, leftVal}, fnType)
-		result := block.NewCall(fnPtr, llArgs...)
-		if irtypes.IsVoid(result.Type()) {
-			return nil, nil
-		}
-		return result, nil
+		result = block.NewCall(fnPtr, llArgs...)
+	} else {
+		result = block.NewCall(rightFn, leftVal)
 	}
-	// Plain function pointer.
-	result := block.NewCall(rightFn, leftVal)
+	// ARC: release the left-hand value if it is a temporary RC allocation.
+	if isRCTrackedType(leftVal.Type()) && !isCopyExpr(e.Left) {
+		cg.emitRelease(block, leftVal)
+	}
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
 	}
@@ -1786,13 +1814,16 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 	fnPtr := block.NewExtractValue(fatPtr, 0)
 	envPtr := block.NewExtractValue(fatPtr, 1)
 
+	// Build args (index 0 = env, indices 1..N = actual params).
 	llArgs := []value.Value{envPtr}
+	llArgsPreCoerce := []value.Value{envPtr}
 	for _, arg := range argNodes {
 		av, err := cg.genExpr(block, arg)
 		if err != nil {
 			return nil, err
 		}
 		llArgs = append(llArgs, av)
+		llArgsPreCoerce = append(llArgsPreCoerce, av)
 	}
 
 	// Adapt args to the underlying function's signature.
@@ -1800,6 +1831,28 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 	llArgs = cg.adaptArgs(block, llArgs, fnType)
 
 	result := block.NewCall(fnPtr, llArgs...)
+
+	// ARC: release temporary RC-tracked arguments (skip index 0 = env).
+	for i, astArg := range argNodes {
+		argIdx := i + 1 // offset by 1 for the env slot
+		preCoerce := llArgsPreCoerce[argIdx]
+		postCoerce := llArgs[argIdx]
+
+		// Case 1: adaptArgs boxed a non-any value to any.
+		if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+			cg.emitRelease(block, postCoerce)
+			continue
+		}
+		// Case 2: RC-tracked temporary argument.
+		if !isRCTrackedType(preCoerce.Type()) {
+			continue
+		}
+		if isCopyExpr(astArg) {
+			continue
+		}
+		cg.emitRelease(block, preCoerce)
+	}
+
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
 	}
@@ -1881,7 +1934,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		}
 		alloca := entry.NewAlloca(pt)
 		entry.NewStore(param, alloca)
-		cg.curScope.set(p.Name, &scopeEntry{val: alloca, isAlloc: true})
+		// ARC: retain RC-tracked params so scope-exit release is balanced.
+		// Same convention as genFuncDeclAs: callee owns a reference.
+		cg.emitRetain(entry, param)
+		cg.curScope.set(p.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRCTrackedType(pt)})
 	}
 
 	// For where-list bodies, the match subject is the first parameter so that
@@ -2045,13 +2101,14 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 
 	// Build result string using snprintf with a two-pass approach:
 	//   1. snprintf(NULL, 0, fmt, ...) -> returns the required length (excluding NUL).
-	//   2. malloc(len+1) -> allocate exact buffer.
+	//   2. _tin_rc_alloc(len+1) -> allocate exact buffer with ARC header.
 	//   3. snprintf(buf, len+1, fmt, ...) -> fill buffer.
 	// This avoids a fixed-size buffer and handles arbitrarily long interpolations.
+	// IMPORTANT: must use _tin_rc_alloc (not malloc) so that the result is ARC-tracked
+	// and _tin_release can safely read the RC header 8 bytes before the returned ptr.
 	fmtStr := strings.Join(fmtParts, "")
 	fmtPtr := cg.newGlobalString(fmtStr)
 	snprintfFn := cg.ensureSnprintf()
-	malloc := cg.ensureMalloc()
 
 	// Pass 1: measure required length.
 	nullBuf := constant.NewNull(irtypes.I8Ptr)
@@ -2062,8 +2119,8 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	neededI64 := block.NewSExt(needed, irtypes.I64)
 	allocSize := block.NewAdd(neededI64, constant.NewInt(irtypes.I64, 1)) // +1 for NUL
 
-	// Pass 2: allocate and fill.
-	buf := block.NewCall(malloc, allocSize)
+	// Pass 2: allocate with ARC header and fill.
+	buf := block.NewCall(cg.ensureRCAlloc(), allocSize)
 	fillArgs := []value.Value{buf, allocSize, fmtPtr}
 	fillArgs = append(fillArgs, args...)
 	block.NewCall(snprintfFn, fillArgs...)

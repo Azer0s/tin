@@ -8,8 +8,6 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
-
-	"github.com/Azer0s/tin/ast"
 )
 
 // Helper utilities
@@ -27,17 +25,19 @@ type closureCapture struct {
 type closureCtx struct {
 	fn          *ir.Func
 	scope       *scope
-	defers      []ast.Node
+	deferFnI8s  []value.Value
 	deferFrames []value.Value
+	deferEnvs   []value.Value
 }
 
 // pushClosureCtx saves the current function context, switches cg to f, and
 // roots the new scope at the module-level (global) scope.
 func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
-	prev := closureCtx{cg.curFn, cg.curScope, cg.pendingDefers, cg.pendingDeferFrames}
+	prev := closureCtx{cg.curFn, cg.curScope, cg.pendingDeferFnI8s, cg.pendingDeferFrames, cg.pendingDeferEnvs}
 	cg.curFn = f
-	cg.pendingDefers = nil
+	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
+	cg.pendingDeferEnvs = nil
 	global := prev.scope
 	for global.parent != nil {
 		global = global.parent
@@ -50,8 +50,9 @@ func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
 func (cg *CodeGen) popClosureCtx(prev closureCtx) {
 	cg.curFn = prev.fn
 	cg.curScope = prev.scope
-	cg.pendingDefers = prev.defers
+	cg.pendingDeferFnI8s = prev.deferFnI8s
 	cg.pendingDeferFrames = prev.deferFrames
+	cg.pendingDeferEnvs = prev.deferEnvs
 }
 
 // buildEnv heap-allocates an env struct for the given captures and stores each
@@ -101,6 +102,13 @@ func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes
 			alloca := entry.NewAlloca(c.llvmTy)
 			loaded := entry.NewLoad(c.llvmTy, gep)
 			entry.NewStore(loaded, alloca)
+			// ARC: retain RC-tracked captures so that each invocation holds its
+			// own reference.  The closure's scope-exit release will balance this.
+			// This ensures correctness for closures called multiple times: each
+			// call borrows the value with a retain+release pair.
+			if isRCTrackedType(c.llvmTy) {
+				cg.emitRetain(entry, loaded)
+			}
 			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
 		}
 	}

@@ -13,10 +13,10 @@ use mem
 use assert
 
 fn process(size i64) i64 =
+  if size <= 0:
+    return 0 - 1
   let buf = mem::malloc(size)
   defer mem::free(buf)      // freed when process() returns
-  if size <= 0:
-    return 0 - 1            // buf still freed here
   return size * 2
 
 // Multiple defers: LIFO - b freed before a

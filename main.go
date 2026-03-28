@@ -47,11 +47,11 @@ type cSource struct {
 // parseFileDirectives scans the leading lines of src for //! directives and
 // returns linker flags and C source files to compile in.
 //
-//	//!-lm            → linker flag -lm
-//	//!-lraylib       → linker flag -lraylib
-//	//!-L/usr/local/lib → linker flag -L/usr/local/lib
-//	//!+helper.c      → compile helper.c alongside the module
-//	//!+src/foo.c -- -DDEBUG → compile src/foo.c with extra flag -DDEBUG
+//	//!-lm            -> linker flag -lm
+//	//!-lraylib       -> linker flag -lraylib
+//	//!-L/usr/local/lib -> linker flag -L/usr/local/lib
+//	//!+helper.c      -> compile helper.c alongside the module
+//	//!+src/foo.c -- -DDEBUG -> compile src/foo.c with extra flag -DDEBUG
 //
 // srcDir is the directory of the .tin file; relative C source paths are
 // resolved against it. Scanning stops at the first non-comment, non-blank line.
@@ -72,8 +72,26 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 				cpath := filepath.Join(srcDir, strings.TrimSpace(parts[0]))
 				var extraFlags []string
 				if len(parts) == 2 {
-					for _, f := range strings.Fields(parts[1]) {
-						extraFlags = append(extraFlags, f)
+					fields := strings.Fields(parts[1])
+					for i := 0; i < len(fields); i++ {
+						f := fields[i]
+						var iPath string
+						if f == "-I" && i+1 < len(fields) {
+							// "-I path" (space-separated)
+							i++
+							iPath = fields[i]
+						} else if strings.HasPrefix(f, "-I") && len(f) > 2 {
+							// "-Ipath" (no space)
+							iPath = f[2:]
+						}
+						if iPath != "" {
+							if !filepath.IsAbs(iPath) {
+								iPath = filepath.Join(srcDir, iPath)
+							}
+							extraFlags = append(extraFlags, "-I"+iPath)
+						} else {
+							extraFlags = append(extraFlags, f)
+						}
 					}
 				}
 				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
@@ -173,6 +191,18 @@ func main() {
 	}
 
 	irText := mod.String()
+
+	// Collect C sources and linker flags from loaded package source files.
+	// Packages may declare //!+file.c directives that need to be compiled in.
+	for _, pkgSrc := range cg.PackageSrcPaths() {
+		src, readErr := os.ReadFile(pkgSrc)
+		if readErr != nil {
+			continue
+		}
+		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc))
+		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
+		fileCSources = append(fileCSources, pkgCSources...)
+	}
 
 	// Collect linker flags: //! directives in the file + codegen link directives
 	srcLinkFlags := append([]string{}, fileLinkerFlags...)
@@ -418,6 +448,17 @@ func runDirTests(dir string, extraFlags []string) {
 		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
 			srcLinks = append(srcLinks, "-l"+lib)
+		}
+		// Collect //!+file.c and //!-lNAME directives from imported packages,
+		// just as the single-file build path does.
+		for _, pkgSrc := range cg.PackageSrcPaths() {
+			pkgBytes, pkgReadErr := os.ReadFile(pkgSrc)
+			if pkgReadErr != nil {
+				continue
+			}
+			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc))
+			srcLinks = append(srcLinks, pkgLinks...)
+			fCSources = append(fCSources, pkgCSrcs...)
 		}
 		linkFlags := append(srcLinks, extraFlags...)
 

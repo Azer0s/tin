@@ -1,0 +1,82 @@
+// deinit_test - demonstrates and verifies fn deinit lifecycle
+//
+// fn deinit(this S) is called automatically when a struct value goes out
+// of scope (scope exit, overwrite, or return path release).
+// It runs before the struct's ARC-tracked fields are released, so fields
+// are still valid when deinit executes.
+
+use assert
+
+// --- basic resource struct ---
+
+struct resource =
+  id i64
+
+  fn init(this resource) =
+    echo "init {this.id}"
+
+  fn deinit(this resource) =
+    echo "deinit {this.id}"
+
+// --- struct containing another struct ---
+
+struct holder =
+  item resource
+
+  fn deinit(this holder) =
+    echo "deinit holder"
+
+// --- Top-level: deinit called at program exit ---
+
+let r = resource{id: 1}
+// prints: init 1  (deinit 1 printed at program end)
+
+// --- Function scope: deinit called on scope exit ---
+
+fn use_resource() =
+  let r2 = resource{id: 2}
+  echo "using {r2.id}"
+  // deinit 2 printed here when r2 goes out of scope
+
+use_resource()
+
+// --- Nested struct: holder deinit first, then inner resource deinit ---
+
+fn use_holder() =
+  let h = holder{item: resource{id: 3}}
+  echo "holder has {h.item.id}"
+  // deinit holder, then deinit 3
+
+use_holder()
+
+// --- Tests ---
+
+test "resource fields accessible in deinit" =
+  // Verifies the struct is fully constructed before deinit is eventually called.
+  let r3 = resource{id: 10}
+  assert::equals(r3.id, 10)
+  // r3 out of scope: deinit 10
+
+test "nested struct deinit order" =
+  // holder.deinit fires before the inner resource.deinit (field release).
+  let h2 = holder{item: resource{id: 20}}
+  assert::equals(h2.item.id, 20)
+  // deinit holder, then deinit 20
+
+test "returned struct deinit deferred to caller scope" =
+  // Returning a struct passes ownership to the caller.
+  // deinit is NOT called inside make_res; it is called when r4 exits scope.
+  fn make_res(id i64) resource =
+    return resource{id: id}
+  let r4 = make_res(30)
+  assert::equals(r4.id, 30)
+  // deinit 30 here
+
+// plain has no deinit - verifies no crash when releasing such a struct
+struct plain =
+  x i64
+
+test "struct without deinit compiles cleanly" =
+  let p = plain{x: 42}
+  assert::equals(p.x, 42)
+  // no deinit defined; no call emitted - no crash
