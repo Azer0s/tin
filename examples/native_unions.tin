@@ -1,4 +1,4 @@
-// native_unions.tin — C-style unions: overlapping memory, no tag
+// native_unions.tin - C-style unions: overlapping memory, no tag
 // Layout: { [maxSize x i8] storage }
 // Named members: access via b.field_name
 // Type cast access: b.(Type)

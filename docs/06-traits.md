@@ -1,4 +1,4 @@
-# 06 – Traits
+# 06 - Traits
 
 A **trait** is a named collection of method signatures and optional default
 implementations. Structs declare the traits they implement; the compiler
@@ -281,18 +281,18 @@ Every struct that implements at least one trait carries hidden fields:
 ```
 
 - Index 0: `i32` compile-time type ID (used by the `any` and reflection system).
-- Indices 1…N: one `vtable*` per implemented trait, in declaration order.
-- Indices N+1…: user-visible fields.
+- Indices 1...N: one `vtable*` per implemented trait, in declaration order.
+- Indices N+1...: user-visible fields.
 
 The type ID and vtable pointers are never visible in source code. They are
 accessible only through the reflection builtins described in
-[09 – Reflection](09-reflection.md).
+[09 - Reflection](09-reflection.md).
 
 ### Method dispatch sequence
 
 When `print_name(cat)` is called:
 
-1. The compiler coerces `cat animal` → fat pointer `{&cat_data, &animal__named__vtable}`.
+1. The compiler coerces `cat animal` -> fat pointer `{&cat_data, &animal__named__vtable}`.
 2. The callee receives `{i8* data, named_vtable* vt}`.
 3. `x.name()` is compiled as `vt->name_fn(data)`.
 4. `animal__named__name(i8* self)` bitcasts `self` to `*animal`, loads the

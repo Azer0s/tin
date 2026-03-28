@@ -53,7 +53,7 @@ type FuncDecl struct {
 	Params         []Param
 	RetType        TypeExpr // nil = void/infer
 	Body           Node     // *Block or *WhereList or expression
-	Tags           []string // control tags: #pure, #recurse, …
+	Tags           []string // control tags: #pure, #recurse, ...
 	IsStatic       bool
 	IsExtern       string // non-empty = extern symbol name
 	IsVirtual      bool   // true for "fn f() T = virtual" in trait declarations
@@ -82,7 +82,7 @@ type TraitDecl struct {
 	Name          string
 	TypeParams    []string
 	Methods       []*FuncDecl   // virtual or default methods
-	ForwardFields []StructField // "s size_t forward" – injected into implementing structs
+	ForwardFields []StructField // "s size_t forward" - injected into implementing structs
 	IsAlias       bool
 	IsStaticAlias bool     // "trait[k] T[t] as static fn(val t) k"
 	AliasType     TypeExpr // "trait print as fn() [char]"
@@ -93,7 +93,7 @@ type TypeDecl struct {
 	Name       string
 	TypeParams []string
 	Type       TypeExpr
-	Overrides  []*FuncDecl // "override = fn show …"
+	Overrides  []*FuncDecl // "override = fn show ..."
 }
 
 type EnumDecl struct {
@@ -127,7 +127,7 @@ type ArrayDestructDecl struct {
 	base
 	Names     []string   // variable names; rest name is prefixed with "..."
 	ElemTypes []TypeExpr // len==1 for uniform [T]; len>1 for per-slot types
-	IsAny     bool       // true → runtime bounds check required
+	IsAny     bool       // true -> runtime bounds check required
 	NamedType TypeExpr   // non-nil when a named type alias is used (e.g. `type res = @[i32, bool]`)
 	Value     Node
 }

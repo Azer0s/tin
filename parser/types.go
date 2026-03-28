@@ -42,7 +42,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		isConst = true
 		p.advance()
 	}
-	// *T – pointer
+	// *T - pointer
 	if p.check(lexer.STAR) {
 		p.advance()
 		elem, err := p.parseTypeSingle()
@@ -73,7 +73,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		}
 		return &ast.TupleArrayType{ElemTypes: elems}, nil
 	}
-	// [T] or [T; N] – array
+	// [T] or [T; N] - array
 	if p.check(lexer.LBRACKET) {
 		p.advance()
 		// Empty brackets = void/unknown
@@ -98,7 +98,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		}
 		return &ast.ArrayType{Elem: elem, Size: size}, nil
 	}
-	// fn(T...) R – function type
+	// fn(T...) R - function type
 	if p.check(lexer.KW_FN) {
 		return p.parseFuncType()
 	}
@@ -276,10 +276,10 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 
 // String interpolation
 
-// parseStringInterp splits a raw string literal into an AST node
-// If it contains {expr} patterns it returns an InterpolatedString,
-// otherwise a plain StringLit
 // ParseStringInterp is the exported form of parseStringInterp for use by codegen.
+// It splits a raw string literal into an AST node.
+// If it contains {expr} patterns it returns an InterpolatedString,
+// otherwise a plain StringLit.
 func ParseStringInterp(s string) (ast.Node, error) { return parseStringInterp(s) }
 
 func parseStringInterp(s string) (ast.Node, error) {
@@ -299,14 +299,14 @@ func parseStringInterp(s string) (ast.Node, error) {
 		s = s[idx+1:]
 		end := strings.Index(s, "}")
 		if end < 0 {
-			// No closing brace – treat rest as literal
+			// No closing brace - treat rest as literal
 			parts = append(parts, ast.StringPart{Str: "{" + s})
 			break
 		}
 		exprSrc := s[:end]
 		s = s[end+1:]
 
-		// Split off format specifier: {expr:fmt} → exprSrc="expr", fmtSpec="fmt"
+		// Split off format specifier: {expr:fmt} -> exprSrc="expr", fmtSpec="fmt"
 		fmtSpec := ""
 		if colonIdx := strings.Index(exprSrc, ":"); colonIdx >= 0 {
 			fmtSpec = exprSrc[colonIdx+1:]
@@ -317,12 +317,12 @@ func parseStringInterp(s string) (ast.Node, error) {
 		l := newInlineLexer(exprSrc)
 		toks, err := l.Tokenize()
 		if err != nil {
-			return nil, fmt.Errorf("interpolation error in {%s}: %v", exprSrc, err)
+			return nil, fmt.Errorf("interpolation error in {%s}: %w", exprSrc, err)
 		}
 		rp := New(toks)
 		expr, err := rp.parseExpr()
 		if err != nil {
-			return nil, fmt.Errorf("interpolation error in {%s}: %v", exprSrc, err)
+			return nil, fmt.Errorf("interpolation error in {%s}: %w", exprSrc, err)
 		}
 		parts = append(parts, ast.StringPart{IsExpr: true, Expr: expr, Format: fmtSpec})
 	}
@@ -335,10 +335,10 @@ func parseStringInterp(s string) (ast.Node, error) {
 // Helpers
 
 func isTypeKeyword(tok lexer.Token) bool {
-	switch tok.Type {
-	case lexer.KW_FN:
+	if tok.Type == lexer.KW_FN {
 		return true
 	}
+
 	switch tok.Literal {
 	case "i8", "i16", "i32", "i64",
 		"u8", "u16", "u32", "u64",
@@ -347,8 +347,9 @@ func isTypeKeyword(tok lexer.Token) bool {
 		"void", "uint32", "size_t",
 		"int", "uint":
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 func isTypeToken(tok lexer.Token) bool {

@@ -1,16 +1,16 @@
-// macros_ctfe.tin — CTFE (compile-time function evaluation) macros.
+// macros_ctfe.tin - CTFE (compile-time function evaluation) macros.
 // Macros with block bodies are compiled and run at compile time;
 // the function's return value becomes the expansion result.
 use assert
 
-// Iterative factorial — evaluated entirely at compile time
+// Iterative factorial - evaluated entirely at compile time
 macro factorial!(n) =
   let result i64 = 1
   for let i i64 = 1; i <= n; i++:
     result = result * i
   return result
 
-// Recursive fibonacci — recursive macros are allowed; the 5-second timeout
+// Recursive fibonacci - recursive macros are allowed; the 5-second timeout
 // protects against accidental infinite recursion
 macro fib!(n) =
   if (n <= 1):

@@ -1,4 +1,4 @@
-// test_example.tin — demonstrates the test block syntax and assert library
+// test_example.tin - demonstrates the test block syntax and assert library
 
 use assert
 

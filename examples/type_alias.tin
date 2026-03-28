@@ -1,7 +1,7 @@
 // Demonstrates spec features:
-//   * fn init(this S) — called automatically on every struct literal
-//   * type X = GenericStruct[T] — monomorphization (concrete alias)
-//   * type X = GenericStruct[T] override = fn ... — method override
+//   * fn init(this S) - called automatically on every struct literal
+//   * type X = GenericStruct[T] - monomorphization (concrete alias)
+//   * type X = GenericStruct[T] override = fn ... - method override
 //
 // Spec reference:
 //   struct tuple[t] =
@@ -54,7 +54,7 @@ echo origin.show()               // first: 0, second: 0
 let p1 = point{1.5, 2.5}
 echo p1.show()                   // first: 1.5, second: 2.5
 
-// type mypoint = tuple[f32] override = …
+// type mypoint = tuple[f32] override = ...
 // Overrides show to use coordinate notation instead.
 
 type mypoint = tuple[f32] override =

@@ -1,12 +1,13 @@
 package codegen
 
 import (
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Reflection builtins
@@ -144,11 +145,6 @@ func llvmTypeName(t irtypes.Type) string {
 // that only deal with simple scalar types.
 func primitiveTypeName(t irtypes.Type) string {
 	return llvmTypeName(t)
-}
-
-// buildTypeNameAtom builds the atom for a known struct/data-type name.
-func (cg *CodeGen) buildTypeNameAtom(_ *ir.Block, sn string) value.Value {
-	return cg.atomConstant(cg.registerAtom(sn))
 }
 
 // runtimeAtomSelectByTypeID generates an inline select chain that picks the

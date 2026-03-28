@@ -1,0 +1,97 @@
+# golangci-lint v2 configuration for the Tin compiler.
+# Run: golangci-lint run ./...
+version: "2"
+
+run:
+  # Pin the Go language version used for analysis to match our go.mod
+  # directive. Without this, golangci-lint infers the version from the
+  # maximum required by any transitive dependency (currently x/tools v0.43.0
+  # which requires go 1.25), causing a version mismatch error when the
+  # installed golangci-lint binary was itself built with go 1.24.
+  go: "1.24"
+
+linters:
+  default: none
+  enable:
+    # --- Correctness ---
+    - errcheck      # unchecked error return values
+    - govet         # go vet checks (printf format, shadow, etc.)
+    - staticcheck   # comprehensive static analysis (SA*, S*, QF* checks)
+    - ineffassign   # assigned value never used
+    - errorlint     # enforce errors.Is/As; catch bare == comparisons with errors
+    - unused        # unused exported/unexported types, funcs, struct fields, vars
+
+    - exhaustive     # missing cases for iota consts in switch statements
+
+    # --- Maintenance ---
+    - misspell      # typos in comments and string literals
+    - unconvert     # unnecessary type conversions
+    - revive        # configurable style linter (modern golint replacement)
+    - dupl          # duplicate code blocks
+
+  settings:
+    errorlint:
+      # Flag `err == ErrFoo` / `err != nil`-style comparisons that break on
+      # wrapped errors; callers must use errors.Is instead.
+      comparison: true
+
+    errcheck:
+      # Explicit _ = f() assignments are intentional in this codebase
+      # (e.g. best-effort defers); do not flag them.
+      check-blank: false
+      # Temp-file cleanup; errors are not actionable in these contexts.
+      exclude-functions:
+        - os.Remove
+        - (*os.File).Close
+
+    staticcheck:
+      checks: ["all"]
+
+    revive:
+      rules:
+        # Godoc on every exported symbol is impractical for a compiler tool.
+        - name: exported
+          disabled: true
+        # LLVM-style abbreviations (llFile, rtC, cg) are conventional here.
+        - name: var-naming
+          disabled: true
+        # Single-letter receiver names are idiomatic in this codebase (cg, p, l).
+        - name: receiver-naming
+          disabled: true
+
+    misspell:
+      locale: US
+
+    dupl:
+      # 150 tokens - matches GoLand's "Duplicated code fragment" default.
+      threshold: 150
+
+  exclusions:
+    rules:
+      # staticcheck SA1019: llir/llvm sometimes uses deprecated APIs internally;
+      # we cannot control that from the consumer side.
+      - linters: [staticcheck]
+        text: "SA1019"
+        path: "codegen/"
+
+      # lexer token constants intentionally use ALL_CAPS (e.g. INT_LIT, KW_LET);
+      # this is a deliberate, consistent naming convention across the lexer/parser.
+      - linters: [staticcheck]
+        text: "should not use ALL_CAPS"
+
+      # Parser dispatch switches on lexer.TokenType intentionally handle only
+      # the relevant subset of tokens; exhaustive coverage of all ~80 token
+      # kinds is not meaningful here.
+      - linters: [exhaustive]
+        path: "parser/"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      # Group stdlib / external / internal imports separately.
+      local-prefixes:
+        - github.com/Azer0s/tin

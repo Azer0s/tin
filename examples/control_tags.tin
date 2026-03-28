@@ -1,18 +1,18 @@
-// control_tags.tin — demonstrates and tests control tag enforcement.
+// control_tags.tin - demonstrates and tests control tag enforcement.
 //
 // Tags:
-//   #pure            — no side effects; compiler enforces transitively
-//   #sideffect       — declares side effects (auto-applied to extern fns)
-//   #no_recurse      — function must not call itself (enforced via IR)
-//   #no_thread       — advisory: unsafe for concurrent use
-//   #allow_sideffect — block tag: permits side effects in a #pure function
+//   #pure            - no side effects; compiler enforces transitively
+//   #sideffect       - declares side effects (auto-applied to extern fns)
+//   #no_recurse      - function must not call itself (enforced via IR)
+//   #no_thread       - advisory: unsafe for concurrent use
+//   #allow_sideffect - block tag: permits side effects in a #pure function
 //
 // Error cases (compile-time rejections) are tested via shell:
 //   ./tin run /tmp/bad.tin 2>&1 | grep "#pure violation"
 use assert
 
 // ---------------------------------------------------------------------------
-// #pure — basic case: arithmetic-only functions
+// #pure - basic case: arithmetic-only functions
 // ---------------------------------------------------------------------------
 
 fn{#pure} square(n i64) i64 = return n * n
@@ -27,7 +27,7 @@ test "#pure: pure math functions" =
   assert::equals(sum_squares(3, 4), 25)
 
 // ---------------------------------------------------------------------------
-// #pure — transitive call graph: A -> B -> C (all pure)
+// #pure - transitive call graph: A -> B -> C (all pure)
 // ---------------------------------------------------------------------------
 
 fn{#pure} double(n i64) i64 = return n * 2
@@ -40,7 +40,7 @@ test "#pure: transitive pure call chain" =
   assert::equals(oct(1), 16)
 
 // ---------------------------------------------------------------------------
-// #pure — control flow: if/else, ternary, for loop
+// #pure - control flow: if/else, ternary, for loop
 // ---------------------------------------------------------------------------
 
 fn{#pure} abs_val(n i64) i64 =
@@ -74,7 +74,7 @@ test "#pure: for loop (no IO)" =
   assert::equals(sum_range(10), 45)
 
 // ---------------------------------------------------------------------------
-// #pure — where-clause bodies
+// #pure - where-clause bodies
 // ---------------------------------------------------------------------------
 
 fn{#pure} sign(n i64) i64 =
@@ -88,7 +88,7 @@ test "#pure: where-clause body" =
   assert::equals(sign(42), 1)
 
 // ---------------------------------------------------------------------------
-// #pure — self-recursive (mutual recursion between pure functions)
+// #pure - self-recursive (mutual recursion between pure functions)
 // ---------------------------------------------------------------------------
 
 fn{#pure} is_even(n i64) bool =
@@ -134,7 +134,7 @@ test "#pure: multiple sequential #allow_sideffect blocks" =
   assert::equals(logging_compute(4), 64)
 
 // ---------------------------------------------------------------------------
-// #sideffect — explicit declaration
+// #sideffect - explicit declaration
 // ---------------------------------------------------------------------------
 
 fn{#sideffect} noisy_double(n i64) i64 =
@@ -156,7 +156,7 @@ test "#sideffect: chain of sideffect functions" =
   assert::equals(noisy_sextuple(2), 12)
 
 // ---------------------------------------------------------------------------
-// #no_recurse — must not call itself
+// #no_recurse - must not call itself
 // ---------------------------------------------------------------------------
 
 fn{#no_recurse} iterative_fib(n i64) i64 =
@@ -193,13 +193,13 @@ fn count_down_b(n i64) i64 =
   return count_down_a(n - 1)
 
 fn{#no_recurse} use_countdown(n i64) i64 =
-  return count_down_a(n)   // OK — neither count_down_a nor count_down_b calls use_countdown
+  return count_down_a(n)   // OK - neither count_down_a nor count_down_b calls use_countdown
 
 test "#no_recurse: helpers that recurse among themselves do not violate tag" =
   assert::equals(use_countdown(4), 0)
 
 // ---------------------------------------------------------------------------
-// #no_thread — advisory (no enforcement, just documentation)
+// #no_thread - advisory (no enforcement, just documentation)
 // ---------------------------------------------------------------------------
 
 fn{#no_thread} non_reentrant_op(n i64) i64 =
@@ -224,7 +224,7 @@ test "combined tags: #pure #no_thread" =
 
 // ---------------------------------------------------------------------------
 // CTFE: #pure #no_recurse functions with literal arguments are evaluated
-// at compile time — the call is replaced with a constant in the IR.
+// at compile time - the call is replaced with a constant in the IR.
 // ---------------------------------------------------------------------------
 
 fn{#pure #no_recurse} ctfe_square(n i64) i64 = return n * n

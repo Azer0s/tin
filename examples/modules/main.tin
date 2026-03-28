@@ -1,4 +1,4 @@
-// main.tin — uses the mathlib package
+// main.tin - uses the mathlib package
 // After building mathlib.tin:
 //   tin build main.tin -o main.o
 //   clang main.o mathlib.o -o main && ./main

@@ -548,8 +548,9 @@ func augOp(t lexer.TokenType) (string, bool) {
 		return "%=", true
 	case lexer.APPENDEQ:
 		return "++=", true
+	default:
+		return "", false
 	}
-	return "", false
 }
 
 // parseLetStmt handles let/const statements including destructuring forms.
@@ -676,7 +677,7 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 				isAny = true
 			}
 		} else if len(elemTypes) > 1 {
-			isAny = true // multiple types → [any] with per-slot cast
+			isAny = true // multiple types -> [any] with per-slot cast
 		}
 	} else if !p.check(lexer.ASSIGN) {
 		// Named type alias (e.g. `res` from `type res = @[i32, bool]`)

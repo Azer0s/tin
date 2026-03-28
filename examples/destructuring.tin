@@ -1,4 +1,4 @@
-// destructuring.tin — array and struct destructuring
+// destructuring.tin - array and struct destructuring
 // Demonstrates let [a, b] [T] = arr, let [a, b] [T1, T2] = arr,
 // let [x, ...xs] [T] = arr, let {x, y} TypeName = expr,
 // and @[T1, T2] type alias for per-slot destructuring.

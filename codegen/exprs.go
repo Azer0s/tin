@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azer0s/tin/ast"
-	"github.com/Azer0s/tin/parser"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
+	"github.com/Azer0s/tin/parser"
 )
 
 // Expression generation
@@ -342,93 +343,9 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case "%":
 		return block.NewSRem(left, right), nil
 	case "==":
-		if isFloat {
-			return block.NewFCmp(enum.FPredOEQ, left, right), nil
-		}
-		// any equality: dynamically dispatched by runtime.
-		if isAnyType(lt) || isAnyType(rt) {
-			if !isAnyType(lt) {
-				left = cg.boxToAny(block, left)
-			}
-			if !isAnyType(rt) {
-				right = cg.boxToAny(block, right)
-			}
-			cmp := block.NewCall(cg.ensureAnyEq(), left, right)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I64, 0)), nil
-		}
-		// atom == atom: compare CRC32 codes directly.
-		if isAtomType(lt) && isAtomType(rt) {
-			lcode := cg.extractAtomCode(block, left)
-			rcode := cg.extractAtomCode(block, right)
-			return block.NewICmp(enum.IPredEQ, lcode, rcode), nil
-		}
-		// atom == string or string == atom: convert atom to string, then strcmp.
-		if isAtomType(lt) && isFatPtrType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
-			lptr := cg.extractStringPtr(block, strVal)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		if isFatPtrType(lt) && isAtomType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, strVal)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		// String equality: compare via strcmp.
-		if isFatPtrType(lt) {
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		return block.NewICmp(enum.IPredEQ, left, right), nil
+		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false), nil
 	case "!=":
-		if isFloat {
-			return block.NewFCmp(enum.FPredONE, left, right), nil
-		}
-		// any inequality: dynamically dispatched by runtime.
-		if isAnyType(lt) || isAnyType(rt) {
-			if !isAnyType(lt) {
-				left = cg.boxToAny(block, left)
-			}
-			if !isAnyType(rt) {
-				right = cg.boxToAny(block, right)
-			}
-			cmp := block.NewCall(cg.ensureAnyEq(), left, right)
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0)), nil
-		}
-		// atom != atom
-		if isAtomType(lt) && isAtomType(rt) {
-			lcode := cg.extractAtomCode(block, left)
-			rcode := cg.extractAtomCode(block, right)
-			return block.NewICmp(enum.IPredNE, lcode, rcode), nil
-		}
-		// atom != string or string != atom
-		if isAtomType(lt) && isFatPtrType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
-			lptr := cg.extractStringPtr(block, strVal)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		if isFatPtrType(lt) && isAtomType(rt) {
-			strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, strVal)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		// String inequality: compare via strcmp.
-		if isFatPtrType(lt) {
-			lptr := cg.extractStringPtr(block, left)
-			rptr := cg.extractStringPtr(block, right)
-			cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
-			return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I32, 0)), nil
-		}
-		return block.NewICmp(enum.IPredNE, left, right), nil
+		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true), nil
 	case "<":
 		if isFloat {
 			return block.NewFCmp(enum.FPredOLT, left, right), nil
@@ -536,6 +453,69 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	}
 
 	return constant.NewInt(irtypes.I64, 0), nil
+}
+
+// genEqNeqExpr implements shared handling for == and != operators.
+func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt irtypes.Type, isFloat bool, notEqual bool) value.Value {
+	if isFloat {
+		if notEqual {
+			return block.NewFCmp(enum.FPredONE, left, right)
+		}
+		return block.NewFCmp(enum.FPredOEQ, left, right)
+	}
+
+	pred := enum.IPredEQ
+	if notEqual {
+		pred = enum.IPredNE
+	}
+
+	// any equality/inequality: dynamically dispatched by runtime.
+	if isAnyType(lt) || isAnyType(rt) {
+		if !isAnyType(lt) {
+			left = cg.boxToAny(block, left)
+		}
+		if !isAnyType(rt) {
+			right = cg.boxToAny(block, right)
+		}
+		cmp := block.NewCall(cg.ensureAnyEq(), left, right)
+		if notEqual {
+			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0))
+		}
+		return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I64, 0))
+	}
+
+	// atom ==/!= atom: compare CRC32 codes directly.
+	if isAtomType(lt) && isAtomType(rt) {
+		lcode := cg.extractAtomCode(block, left)
+		rcode := cg.extractAtomCode(block, right)
+		return block.NewICmp(pred, lcode, rcode)
+	}
+
+	// atom <-> string: convert atom to string, then strcmp.
+	if isAtomType(lt) && isFatPtrType(rt) {
+		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
+		lptr := cg.extractStringPtr(block, strVal)
+		rptr := cg.extractStringPtr(block, right)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+	if isFatPtrType(lt) && isAtomType(rt) {
+		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
+		lptr := cg.extractStringPtr(block, left)
+		rptr := cg.extractStringPtr(block, strVal)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+
+	// String equality/inequality: compare via strcmp.
+	if isFatPtrType(lt) {
+		lptr := cg.extractStringPtr(block, left)
+		rptr := cg.extractStringPtr(block, right)
+		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
+	}
+
+	return block.NewICmp(pred, left, right)
 }
 
 func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
@@ -738,7 +718,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// Determine the first argument: if the method expects a pointer
 			// receiver (*Struct), pass the address of the object rather than
 			// its value so that mutations through `this` are visible to the caller.
-			var thisArg value.Value = objVal
+			thisArg := objVal
 			if f, ok2 := callee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
 				firstParam := f.Sig.Params[0]
 				if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
@@ -1177,14 +1157,14 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// userOff = 1 (type_id) + vtable fields
 	userOff := 1 + vtableOff
 
-	// Initialise the leading i32 type_id field (index 0).
+	// Initialize the leading i32 type_id field (index 0).
 	if typeID, ok := cg.structTypeIDs[e.TypeName]; ok {
 		typeIDGep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
 	}
 
-	// Initialise embedded vtable pointer fields (indices 1 … vtableOff).
+	// Initialize embedded vtable pointer fields (indices 1 ... vtableOff).
 	for i, instKey := range cg.structVtableOrder[e.TypeName] {
 		vtableKey := e.TypeName + "__" + instKey
 		if vg, ok := cg.traitVtableGlobals[vtableKey]; ok {
@@ -1840,19 +1820,14 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	// Resolve each free name in the current (outer) scope. Skip names that
 	// resolve to module-level IR functions (not allocas) - those are callable
 	// directly by name and don't need capturing.
-	type capture struct {
-		name   string
-		val    value.Value // loaded value (not the alloca)
-		llvmTy irtypes.Type
-	}
-	var captures []capture
+	var captures []closureCapture
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
 			continue
 		}
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
-			continue // global function – reachable by name, no capture needed
+			continue // global function - reachable by name, no capture needed
 		}
 		var val value.Value
 		var ty irtypes.Type
@@ -1864,35 +1839,11 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 			val = entry.val
 			ty = val.Type()
 		}
-		captures = append(captures, capture{n, val, ty})
+		captures = append(captures, closureCapture{name: n, val: val, llvmTy: ty})
 	}
 
 	// Step 2: build env struct and malloc it (if there are captures)
-	var envI8Ptr value.Value = constant.NewNull(irtypes.I8Ptr)
-	var envStructType *irtypes.StructType
-
-	if len(captures) > 0 {
-		fields := make([]irtypes.Type, len(captures))
-		for i, c := range captures {
-			fields[i] = c.llvmTy
-		}
-		envStructType = irtypes.NewStruct(fields...)
-
-		// sizeof(*envStructType): GEP trick - null + 1 element then ptrtoint.
-		nullEnvPtr := constant.NewNull(irtypes.NewPointer(envStructType))
-		oneGEP := block.NewGetElementPtr(envStructType, nullEnvPtr, constant.NewInt(irtypes.I32, 1))
-		envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
-		envI8Ptr = block.NewCall(cg.ensureMalloc(), envSize)
-
-		// Store each captured value into the env struct.
-		envTypedPtr := block.NewBitCast(envI8Ptr, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := block.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			block.NewStore(c.val, gep)
-		}
-	}
+	envI8Ptr, envStructType := cg.buildEnv(block, captures)
 
 	// Step 3: create the lambda IR function with (i8* env, params...) sig
 	llParams := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
@@ -1916,39 +1867,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	f := cg.mod.NewFunc(name, retType, llParams...)
 	entry := f.NewBlock("entry")
 
-	prevFn := cg.curFn
-	prevScope := cg.curScope
-	prevDefers := cg.pendingDefers
-	prevDeferFrames := cg.pendingDeferFrames
-	cg.pendingDefers = nil
-	cg.pendingDeferFrames = nil
-	cg.curFn = f
-	// Start a fresh scope (not inheriting outer scope - captured values are
-	// explicitly loaded from the env struct below).
-	cg.curScope = newScope(nil)
-
-	// Register global scope so functions/enums remain accessible.
-	// Walk up to the top-level scope and set it as the parent.
-	global := prevScope
-	for global.parent != nil {
-		global = global.parent
-	}
-	cg.curScope = newScope(global)
+	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env inside the lambda body
-	if len(captures) > 0 {
-		envRaw := f.Params[0]
-		envTypedPtr := entry.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
-		for i, c := range captures {
-			gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, int64(i)))
-			alloca := entry.NewAlloca(c.llvmTy)
-			loaded := entry.NewLoad(c.llvmTy, gep)
-			entry.NewStore(loaded, alloca)
-			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
-		}
-	}
+	cg.unpackEnv(entry, f, envStructType, captures)
 
 	// Register lambda params (skip index 0 = env).
 	for i, p := range e.Params {
@@ -1989,10 +1911,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		}
 	}
 
-	cg.curFn = prevFn
-	cg.curScope = prevScope
-	cg.pendingDefers = prevDefers
-	cg.pendingDeferFrames = prevDeferFrames
+	cg.popClosureCtx(prevCtx)
 
 	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr }
 	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)
@@ -2125,9 +2044,9 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	}
 
 	// Build result string using snprintf with a two-pass approach:
-	//   1. snprintf(NULL, 0, fmt, ...) → returns the required length (excluding NUL).
-	//   2. malloc(len+1) → allocate exact buffer.
-	//   3. snprintf(buf, len+1, fmt, ...) → fill buffer.
+	//   1. snprintf(NULL, 0, fmt, ...) -> returns the required length (excluding NUL).
+	//   2. malloc(len+1) -> allocate exact buffer.
+	//   3. snprintf(buf, len+1, fmt, ...) -> fill buffer.
 	// This avoids a fixed-size buffer and handles arbitrarily long interpolations.
 	fmtStr := strings.Join(fmtParts, "")
 	fmtPtr := cg.newGlobalString(fmtStr)
@@ -2222,7 +2141,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			// genLValue failed for the sub-expression (e.g. a non-lvalue like a
 			// function call return value).  Fall back to a temporary alloca; this
 			// means field-writes on temporaries are discarded, but that is the
-			// pre-existing behaviour for such expressions.
+			// pre-existing behavior for such expressions.
 			obj, err2 := cg.genExpr(block, e.Expr)
 			if err2 != nil {
 				return nil, err2

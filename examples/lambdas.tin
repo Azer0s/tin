@@ -1,4 +1,4 @@
-// lambdas.tin — tests for lambda expression variants:
+// lambdas.tin - tests for lambda expression variants:
 //   multiline bodies, void (no-return) lambdas, where-clause bodies, and pass.
 
 use assert

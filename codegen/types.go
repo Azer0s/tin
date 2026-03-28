@@ -3,8 +3,9 @@ package codegen
 // types.go - LLVM type mapping, type helpers, and type query utilities.
 
 import (
-	"github.com/Azer0s/tin/ast"
 	irtypes "github.com/llir/llvm/ir/types"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Type mapping
@@ -201,8 +202,8 @@ func stringFatPtrType() *irtypes.StructType {
 }
 
 // anyFatPtrType returns the {i32, i8*} type used for tin `any` values.
-// Field 0: i32  – type tag (0=i64, 1=f64, 2=string, 3=bool, 4=ptr, 5+=user).
-// Field 1: i8*  – pointer to the boxed value on the stack or heap.
+// Field 0: i32  - type tag (0=i64, 1=f64, 2=string, 3=bool, 4=ptr, 5+=user).
+// Field 1: i8*  - pointer to the boxed value on the stack or heap.
 // The type tag is always field 0 so that any pointer can be bitcast to
 // *any and the type read from field 0.
 func anyFatPtrType() *irtypes.StructType {
@@ -227,12 +228,6 @@ func llvmTypeSize(t irtypes.Type) uint64 {
 	return sz
 }
 
-// llvmTypeAlign returns the ABI alignment of t on a 64-bit target.
-func llvmTypeAlign(t irtypes.Type) uint64 {
-	_, al := llvmTypeSizeAlign(t)
-	return al
-}
-
 // llvmTypeSizeAlign returns (size, alignment) for t on a 64-bit x86 target.
 // It accounts for alignment padding so that malloc receives the correct size.
 func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
@@ -241,15 +236,16 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 		b := (ty.BitSize + 7) / 8
 		return b, b
 	case *irtypes.FloatType:
-		switch ty.Kind {
+		switch ty.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 		case irtypes.FloatKindHalf:
 			return 2, 2
 		case irtypes.FloatKindFloat:
 			return 4, 4
 		case irtypes.FloatKindDouble:
 			return 8, 8
+		default:
+			return 8, 8
 		}
-		return 8, 8
 	case *irtypes.PointerType:
 		return 8, 8
 	case *irtypes.StructType:
@@ -274,8 +270,9 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	case *irtypes.ArrayType:
 		esz, eal := llvmTypeSizeAlign(ty.ElemType)
 		return ty.Len * esz, eal
+	default:
+		return 8, 8
 	}
-	return 8, 8
 }
 
 // Type query helpers
@@ -365,7 +362,7 @@ func (cg *CodeGen) vtableOffset(structName string) int {
 
 // fieldIndex returns the LLVM field index for a named user field, accounting
 // for the leading i32 type_id and vtable pointer fields at the front.
-// Layout: [i32 type_id, vtable_0*, …, user_field_0, …]
+// Layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]
 // Returns -1 if not found.
 func (cg *CodeGen) fieldIndex(structName, fieldName string) int {
 	names, ok := cg.structFields[structName]

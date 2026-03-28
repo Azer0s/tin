@@ -1,4 +1,4 @@
-// stdlib/str — String utility functions
+// stdlib/str - String utility functions
 //
 // Wraps standard C string.h functions
 // Parameters typed as `string` have their fat-pointer automatically unwrapped
@@ -60,7 +60,7 @@ fn atol(s string) i64 = extern("atol")
 // atof converts the string s to an f64 floating-point value
 fn atof(s string) f64 = extern("atof")
 
-// strtol converts s to i64, detecting the base automatically (0=auto, 10, 16, …)
+// strtol converts s to i64, detecting the base automatically (0=auto, 10, 16, ...)
 // endptr receives a pointer to the first non-numeric character; pass null to ignore
 fn strtol(s string, endptr **char, base i32) i64 = extern("strtol")
 
