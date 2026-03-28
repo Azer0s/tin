@@ -269,7 +269,7 @@ echo b / a              // 1.66667
 ```
 
 The `math` standard library provides transcendental functions (`sqrt`, `sin`,
-`cos`, `pow`, …) and constants (`math::PI`, `math::E`). It requires linking
+`cos`, `pow`, ...) and constants (`math::PI`, `math::E`). It requires linking
 with `-lm`:
 
 ```rust
