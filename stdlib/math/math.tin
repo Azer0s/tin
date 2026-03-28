@@ -1,9 +1,8 @@
+//!-lm
+
 // stdlib/math - Mathematical functions
 //
 // Wraps standard C math.h functions
-// Requires linking with libm: pass -lm when building
-//   tin build myfile.tin -lm
-//   tin run   myfile.tin -lm
 
 // Basic arithmetic
 

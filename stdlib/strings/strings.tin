@@ -1,3 +1,5 @@
+//!+strings.c
+
 // stdlib/strings - higher-level string operations
 //
 // Provides string manipulation functions not available in libc directly.
