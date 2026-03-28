@@ -623,11 +623,8 @@ func (cg *CodeGen) ensureDeferChain() {
 // struct so that mutations inside the thunk propagate back to the outer scope.
 // Returns (fn as i8*, env as i8*).
 func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, value.Value, error) {
-	// Special case: "defer fn() = body" - the call IS a lambda expression.
-	// Also handles "defer (fn() = body)()" - a CallExpr with no args whose Func is a lambda.
-	if _, ok := call.(*ast.LambdaExpr); ok {
-		return cg.genDeferLambdaThunk(block, call)
-	}
+	// Handles "defer (fn() = body)()" and "defer do: body" (both parsed as
+	// CallExpr{Func: LambdaExpr, Args: nil}).
 	if callExpr, ok := call.(*ast.CallExpr); ok && len(callExpr.Args) == 0 {
 		if _, isLambda := callExpr.Func.(*ast.LambdaExpr); isLambda {
 			return cg.genDeferLambdaThunk(block, callExpr.Func)

@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"fmt"
+
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
 )
@@ -115,9 +117,45 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 
 func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
 	p.advance() // consume defer
+
+	// defer do: <body>  ->  defer (fn() void = <body>)()
+	if p.check(lexer.KW_DO) {
+		p.advance() // consume do
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+		var body ast.Node
+		var err error
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			p.skipNewlines()
+			if p.check(lexer.INDENT) {
+				body, err = p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				body = &ast.Block{}
+			}
+		} else {
+			stmt, err2 := p.parseStatement()
+			if err2 != nil {
+				return nil, err2
+			}
+			body = &ast.Block{Stmts: []ast.Node{stmt}}
+		}
+		lambda := &ast.LambdaExpr{Body: body}
+		call := &ast.CallExpr{Func: lambda}
+		return &ast.DeferStmt{Call: call}, nil
+	}
+
+	// defer <expr>  - must be a call expression; bare lambdas are not allowed.
 	call, err := p.parseExpr()
 	if err != nil {
 		return nil, err
+	}
+	if _, isLambda := call.(*ast.LambdaExpr); isLambda {
+		return nil, fmt.Errorf("bare lambda in defer is not valid; use `defer (fn() void = ...)()` or `defer do:`")
 	}
 	return &ast.DeferStmt{Call: call}, nil
 }

@@ -1,5 +1,6 @@
 # compiled binary
 tin
+tin_dev
 tinc
 *.tin.out
 
