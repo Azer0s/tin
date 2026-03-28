@@ -1,0 +1,78 @@
+// mutual_recursion.tin - functions that call each other recursively
+//
+// Demonstrates that tin correctly resolves forward references so functions
+// can be declared in any order, enabling mutual recursion patterns.
+
+use assert
+
+// -------------------------------------------------------------------------
+// Classic even / odd using mutual recursion
+
+fn is_even(n i64) bool =
+  where n == 0: true
+  where _: is_odd(n - 1)
+
+fn is_odd(n i64) bool =
+  where n == 0: false
+  where _: is_even(n - 1)
+
+// -------------------------------------------------------------------------
+// Collatz sequence length (stopping time)
+// The sequence n -> n/2 (even) or 3n+1 (odd) always reaches 1 (conjecture).
+
+fn collatz_steps(n i64) i64 =
+  where n == 1: 0
+  where n % 2 == 0: 1 + collatz_steps(n / 2)
+  where _: 1 + collatz_steps(n * 3 + 1)
+
+// -------------------------------------------------------------------------
+// Mutual recursion over a state machine:
+// A sequence is "alternating" if it strictly alternates between
+// values above and below a pivot (here: odd/even positions).
+
+fn expect_high(arr [i64], i i64) bool =
+  where i >= len(arr): true
+  where arr[i] > 0: expect_low(arr, i + 1)
+  where _: false
+
+fn expect_low(arr [i64], i i64) bool =
+  where i >= len(arr): true
+  where arr[i] < 0: expect_high(arr, i + 1)
+  where _: false
+
+fn is_alternating(arr [i64]) bool =
+  return expect_high(arr, 0)
+
+// -------------------------------------------------------------------------
+
+echo is_even(4)
+echo is_odd(7)
+echo collatz_steps(27)
+
+// -------------------------------------------------------------------------
+
+test "even / odd" =
+  assert::ok(is_even(0))
+  assert::ok(is_even(2))
+  assert::ok(is_even(100))
+  assert::not_ok(is_even(1))
+  assert::not_ok(is_even(99))
+  assert::ok(is_odd(1))
+  assert::ok(is_odd(7))
+  assert::not_ok(is_odd(0))
+  assert::not_ok(is_odd(8))
+
+test "collatz stopping times" =
+  assert::equals(collatz_steps(1), 0)
+  assert::equals(collatz_steps(2), 1)
+  assert::equals(collatz_steps(4), 2)
+  assert::equals(collatz_steps(6), 8)
+  assert::equals(collatz_steps(27), 111)
+
+test "alternating sequence" =
+  let yes [i64] = [1, 0 - 1, 2, 0 - 3, 5]
+  let no  [i64] = [1, 2, 0 - 1]
+  assert::ok(is_alternating(yes))
+  assert::not_ok(is_alternating(no))
+  let empty [i64] = []
+  assert::ok(is_alternating(empty))
