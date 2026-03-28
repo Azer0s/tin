@@ -13,6 +13,7 @@ import (
 // TokenType identifies the kind of a token
 type TokenType int
 
+//goland:noinspection ALL
 const (
 	// Literals
 	INT_LIT      TokenType = iota // 42, 0xFF

@@ -548,8 +548,9 @@ func augOp(t lexer.TokenType) (string, bool) {
 		return "%=", true
 	case lexer.APPENDEQ:
 		return "++=", true
+	default:
+		return "", false
 	}
-	return "", false
 }
 
 // parseLetStmt handles let/const statements including destructuring forms.

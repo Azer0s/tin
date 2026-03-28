@@ -251,6 +251,8 @@ func (cg *CodeGen) ensureStrcmp() *ir.Func {
 // returning a pointer to its first byte.  The global is wrapped in a
 // { i64, [N x i8] } struct whose i64 field holds TIN_IMMORTAL_RC (-1) so
 // that _tin_retain / _tin_release treat it as an immortal, never-freed block.
+//
+//goland:noinspection GoSnakeCaseUsage
 func (cg *CodeGen) newGlobalString(s string) value.Value {
 	data := []byte(s)
 	data = append(data, 0) // null terminator

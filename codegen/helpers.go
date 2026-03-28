@@ -569,8 +569,9 @@ func floatBits(t *irtypes.FloatType) int {
 		return 32
 	case irtypes.FloatKindDouble:
 		return 64
+	default:
+		return 64
 	}
-	return 64
 }
 
 // zeroValue returns the zero constant for a given type.
