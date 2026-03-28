@@ -37,6 +37,16 @@ func (cg *CodeGen) ensureMalloc() *ir.Func {
 	return cg.mallocFn
 }
 
+// ensureFree declares free if not already done.
+func (cg *CodeGen) ensureFree() *ir.Func {
+	if cg.freeFn != nil {
+		return cg.freeFn
+	}
+	cg.freeFn = cg.ensureExternDecl("free", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+	return cg.freeFn
+}
+
 // ARC helpers
 
 // ensureRCAlloc lazily declares _tin_rc_alloc(size i64) i8*.
@@ -70,10 +80,11 @@ func (cg *CodeGen) ensureRelease() *ir.Func {
 }
 
 // isRCTrackedType returns true for types whose heap data is ARC-managed:
-// typed fat arrays [T], strings {i8*, i64} (with immortal-sentinel for literals),
-// and the any type {i32, i8*}.
+//   - strings    {i8*, i64}   - ptr is either immortal (-1 sentinel) or rc-alloc'd
+//   - fat arrays {T*,  i64}   - ptr is always rc-alloc'd
+//   - any        {i32, i8*}   - ptr is rc-alloc'd (boxed value)
 func isRCTrackedType(t irtypes.Type) bool {
-	return isFatArrayPtr(t) || isAnyType(t)
+	return isStringType(t) || isFatArrayPtr(t) || isAnyType(t)
 }
 
 // isCopyExpr returns true when an AST expression produces a reference to
@@ -86,8 +97,13 @@ func isCopyExpr(node ast.Node) bool {
 
 // isTemporaryProducer returns true when an expression is known to return a
 // freshly heap-allocated RC-tracked value (rc = 1) that the caller owns.
-// Used by genEcho (and similar) to release temporaries that are never stored
-// in a named variable.
+// Used to release intermediates that are never stored in a named variable.
+//
+// Covered cases:
+//   - CallExpr:           function may return a heap-allocated RC value
+//   - BinExpr("++"):      string/array concat always creates a fresh allocation
+//   - InterpolatedString: snprintf result is _tin_rc_alloc'd
+//   - ArrayLit:           non-empty array literal is _tin_rc_alloc'd
 func isTemporaryProducer(node ast.Node) bool {
 	if _, ok := node.(*ast.CallExpr); ok {
 		return true
@@ -95,14 +111,24 @@ func isTemporaryProducer(node ast.Node) bool {
 	if be, ok := node.(*ast.BinExpr); ok {
 		return be.Op == "++"
 	}
+	if _, ok := node.(*ast.InterpolatedString); ok {
+		return true
+	}
+	if al, ok := node.(*ast.ArrayLit); ok {
+		return len(al.Elems) > 0 // empty [] has no heap block
+	}
 	return false
 }
 
 // extractRCDataPtr extracts the ARC heap data pointer (i8*) from a
-// fat-array or any value.  Returns nil for non-ARC types.
+// string, fat-array, or any value.  Returns nil for non-ARC types.
 func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.Type) value.Value {
+	if isStringType(t) {
+		// String {i8*, i64}: field 0 is already i8* - no bitcast needed
+		return block.NewExtractValue(val, 0)
+	}
 	if isFatArrayPtr(t) {
-		// Fat array {T*, i64}: field 0 is the T* data pointer
+		// Fat array {T*, i64}: field 0 is T* - bitcast to i8* for _tin_retain/release
 		dataPtr := block.NewExtractValue(val, 0)
 		return block.NewBitCast(dataPtr, irtypes.I8Ptr)
 	}
@@ -127,7 +153,8 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	alloca := block.NewAlloca(st)
 	block.NewStore(val, alloca)
 	for i, ft := range fieldTypes {
-		if !isRCTrackedType(ft) {
+		_, isNestedStruct := ft.(*irtypes.StructType)
+		if !isRCTrackedType(ft) && !isNestedStruct {
 			continue
 		}
 		gep := block.NewGetElementPtr(st, alloca,
@@ -152,16 +179,45 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 }
 
 // emitRelease emits a _tin_release call for an ARC-tracked value.
-// For named structs, it also releases any RC-tracked fields.
+// For named structs it first calls deinit (if defined), then releases any
+// RC-tracked fields and recurses into nested struct fields.
 func (cg *CodeGen) emitRelease(block *ir.Block, val value.Value) {
+	cg.emitReleaseInner(block, val, false)
+}
+
+// emitReleaseNoDeinit is like emitRelease but suppresses the deinit call for
+// the top-level value.  Used when releasing the `this` parameter of a deinit
+// method itself to prevent infinite recursion.  Field releases still recurse
+// normally (nested struct fields call their own deinit as usual).
+func (cg *CodeGen) emitReleaseNoDeinit(block *ir.Block, val value.Value) {
+	cg.emitReleaseInner(block, val, true)
+}
+
+func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit bool) {
 	rcPtr := cg.extractRCDataPtr(block, val, val.Type())
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRelease(), rcPtr)
 		return
 	}
-	// Named struct: release RC-tracked fields.
+	// Named struct: call deinit (if defined) before releasing RC fields so
+	// the user-supplied cleanup runs while fields are still valid.
+	if !skipDeinit {
+		structName := cg.typeNameOf(val.Type())
+		if structName != "" && cg.curScope != nil {
+			deinitName := structName + "_deinit"
+			if entry, ok := cg.curScope.lookup(deinitName); ok {
+				if fn, ok2 := entry.val.(*ir.Func); ok2 {
+					args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
+					block.NewCall(fn, args...)
+				}
+			}
+		}
+	}
+	// Release RC-tracked fields and recurse into nested struct fields.
+	// Propagate skipDeinit so that parameter-copy teardown does not call deinit
+	// on nested struct fields (the caller's emitRelease already handles that).
 	cg.walkRCStructFields(block, val, func(fieldVal value.Value) {
-		cg.emitRelease(block, fieldVal)
+		cg.emitReleaseInner(block, fieldVal, skipDeinit)
 	})
 }
 
@@ -181,7 +237,11 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			continue
 		}
 		loaded := block.NewLoad(ptrType.ElemType, entry.val)
-		cg.emitRelease(block, loaded)
+		if entry.noDeinit {
+			cg.emitReleaseNoDeinit(block, loaded)
+		} else {
+			cg.emitRelease(block, loaded)
+		}
 	}
 }
 
@@ -203,7 +263,11 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				continue
 			}
 			loaded := block.NewLoad(ptrType.ElemType, entry.val)
-			cg.emitRelease(block, loaded)
+			if entry.noDeinit {
+				cg.emitReleaseNoDeinit(block, loaded)
+			} else {
+				cg.emitRelease(block, loaded)
+			}
 		}
 		s = s.parent
 	}

@@ -436,10 +436,12 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Save context (including defer lists - each function has its own).
 	prevFn := cg.curFn
 	prevScope := cg.curScope
-	prevDefers := cg.pendingDefers
+	prevDeferFnI8s := cg.pendingDeferFnI8s
 	prevDeferFrames := cg.pendingDeferFrames
-	cg.pendingDefers = nil
+	prevDeferEnvs := cg.pendingDeferEnvs
+	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
+	cg.pendingDeferEnvs = nil
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 
@@ -474,7 +476,12 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		entry.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
 		cg.emitRetain(entry, p)
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC})
+		// Function parameters receive a by-value copy of the caller's struct.
+		// The parameter is not the owner of the value; the caller is.  Mark
+		// noDeinit so that scope-exit release of the parameter copy does not
+		// invoke deinit (which would be a spurious call from the callee's
+		// perspective and could double-free external resources).
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true})
 		if llIdx == 1 {
 			firstParamAlloca = alloca
 		}
@@ -497,8 +504,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Restore context.
 	cg.curFn = prevFn
 	cg.curScope = prevScope
-	cg.pendingDefers = prevDefers
+	cg.pendingDeferFnI8s = prevDeferFnI8s
 	cg.pendingDeferFrames = prevDeferFrames
+	cg.pendingDeferEnvs = prevDeferEnvs
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.
@@ -534,6 +542,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 	if entry != nil && entry.Term == nil {
 		_ = cg.emitDefers(entry)
+		cg.emitAllScopeReleases(entry, "")
 		entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
@@ -578,12 +587,14 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 
 		prevFn := cg.curFn
 		prevScope := cg.curScope
-		prevDefers := cg.pendingDefers
+		prevDeferFnI8s := cg.pendingDeferFnI8s
 		prevDeferFrames := cg.pendingDeferFrames
+		prevDeferEnvs := cg.pendingDeferEnvs
 		cg.curFn = fn
 		cg.curScope = newScope(cg.curScope)
-		cg.pendingDefers = nil
+		cg.pendingDeferFnI8s = nil
 		cg.pendingDeferFrames = nil
+		cg.pendingDeferEnvs = nil
 		cg.labelCount = 0
 
 		terminated, err := cg.genBody(entry, td.Body, irtypes.Void)
@@ -602,8 +613,9 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 
 		cg.curFn = prevFn
 		cg.curScope = prevScope
-		cg.pendingDefers = prevDefers
+		cg.pendingDeferFnI8s = prevDeferFnI8s
 		cg.pendingDeferFrames = prevDeferFrames
+		cg.pendingDeferEnvs = prevDeferEnvs
 
 		testFuncs[i] = fn
 	}

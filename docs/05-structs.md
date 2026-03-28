@@ -91,6 +91,48 @@ let alice = person{name: "Alice", age: 30}   // prints: new person: Alice
 
 ---
 
+## fn deinit  -  destructor
+
+If a struct defines `fn deinit(this S)`, it is called **automatically** when a
+named variable of that type goes out of scope. It runs before the struct's
+ARC-managed fields are released, so fields are still accessible.
+
+```rust
+struct resource =
+  id i64
+
+  fn init(this resource) =
+    echo "init {this.id}"
+
+  fn deinit(this resource) =
+    echo "deinit {this.id}"
+
+fn use_it() =
+  let r = resource{id: 42}
+  echo "using {r.id}"
+  // r goes out of scope: deinit 42 printed here
+
+use_it()
+// prints:
+//   init 42
+//   using 42
+//   deinit 42
+```
+
+**Ownership semantics**: `deinit` is called for the *owner* of a value (a
+named `let`/`var` binding), not for function parameters (which are by-value
+copies that borrow the struct). This means `deinit` fires exactly once per
+struct value.
+
+**Nested structs**: if a struct contains a field of another named struct type,
+and that type also defines `deinit`, the inner `deinit` is called automatically
+after the outer `deinit` completes.
+
+> `deinit` is **not** called when the struct is boxed to `any` or when it is
+> stored as an element of a slice.  See `docs/internals/deinit.md` for details.
+
+---
+
 ## Static methods
 
 A static method has no `this` parameter and belongs to the struct as a

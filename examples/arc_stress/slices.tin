@@ -1,0 +1,32 @@
+// ARC stress: slices
+
+fn slice_basic() =
+  let a = [1, 2, 3]
+  let b = [4, 5, 6]
+  let c = a ++ b
+  echo c[0]
+  echo c[5]
+
+fn slice_returned() [i64] =
+  let inner = [100, 200, 300]
+  return inner
+
+fn slice_append_loop() =
+  let res [i64] = []
+  res ++= 1
+  res ++= 2
+  res ++= 3
+  res ++= 4
+  echo res[3]
+
+fn nested_slice_ops() =
+  let base = ["x", "y", "z"]
+  let extra = base ++ ["w"]
+  echo extra[3]
+
+let r = slice_returned()
+echo r[0]
+
+slice_basic()
+slice_append_loop()
+nested_slice_ops()
