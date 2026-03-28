@@ -470,13 +470,13 @@ heap-allocated copy of the value.
 
 Type IDs are assigned at compile time:
 
-| ID | Type |
-|---|---|
-| 0 | `i64` (all integer types are widened to i64 when boxed) |
-| 1 | `f64` (all float types are widened to f64 when boxed) |
-| 2 | `string` |
-| 3 | `bool` |
-| 4 | `*T` pointer |
+| ID | Type                                                        |
+|----|-------------------------------------------------------------|
+| 0  | `i64` (all integer types are widened to i64 when boxed)     |
+| 1  | `f64` (all float types are widened to f64 when boxed)       |
+| 2  | `string`                                                    |
+| 3  | `bool`                                                      |
+| 4  | `*T` pointer                                                |
 | 5+ | User-defined structs and `data` types, in declaration order |
 
 ### Heap allocation for escape safety

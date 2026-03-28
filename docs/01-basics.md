@@ -13,22 +13,22 @@ It works with any type  -  strings, integers, floats, booleans, and structs.
 
 ## Primitive types
 
-| Type | Description | Size |
-|---|---|---|
-| `bool` | Boolean | 1 byte |
-| `i8` | Signed 8-bit integer | 1 byte |
-| `i16` | Signed 16-bit integer | 2 bytes |
-| `i32` | Signed 32-bit integer | 4 bytes |
-| `i64` | Signed 64-bit integer | 8 bytes |
-| `u8` | Unsigned 8-bit integer | 1 byte |
-| `u16` | Unsigned 16-bit integer | 2 bytes |
-| `u32` | Unsigned 32-bit integer | 4 bytes |
-| `u64` | Unsigned 64-bit integer | 8 bytes |
-| `f32` | 32-bit float | 4 bytes |
-| `f64` | 64-bit float | 8 bytes |
-| `string` | UTF-8 string | fat pointer |
-| `char` | Single byte character (`u8`) | 1 byte |
-| `any` | Dynamically-typed box (type-id + heap pointer) | 16 bytes |
+| Type     | Description                                    | Size        |
+|----------|------------------------------------------------|-------------|
+| `bool`   | Boolean                                        | 1 byte      |
+| `i8`     | Signed 8-bit integer                           | 1 byte      |
+| `i16`    | Signed 16-bit integer                          | 2 bytes     |
+| `i32`    | Signed 32-bit integer                          | 4 bytes     |
+| `i64`    | Signed 64-bit integer                          | 8 bytes     |
+| `u8`     | Unsigned 8-bit integer                         | 1 byte      |
+| `u16`    | Unsigned 16-bit integer                        | 2 bytes     |
+| `u32`    | Unsigned 32-bit integer                        | 4 bytes     |
+| `u64`    | Unsigned 64-bit integer                        | 8 bytes     |
+| `f32`    | 32-bit float                                   | 4 bytes     |
+| `f64`    | 64-bit float                                   | 8 bytes     |
+| `string` | UTF-8 string                                   | fat pointer |
+| `char`   | Single byte character (`u8`)                   | 1 byte      |
+| `any`    | Dynamically-typed box (type-id + heap pointer) | 16 bytes    |
 
 Integer literals default to `i64`; float literals default to `f64`.
 The compiler coerces integer literals to the required width automatically.
@@ -42,12 +42,12 @@ The `any` type can hold a value of any other type at runtime. See
 
 Integer literals can be written in decimal, hexadecimal, octal, or binary:
 
-| Prefix | Base | Example | Decimal value |
-|--------|------|---------|---------------|
-| (none) | 10  -  decimal | `255` | 255 |
-| `0x` / `0X` | 16  -  hexadecimal | `0xFF` | 255 |
-| `0o` / `0O` | 8  -  octal | `0o377` | 255 |
-| `0b` / `0B` | 2  -  binary | `0b11111111` | 255 |
+| Prefix      | Base               | Example      | Decimal value |
+|-------------|--------------------|--------------|---------------|
+| (none)      | 10  -  decimal     | `255`        | 255           |
+| `0x` / `0X` | 16  -  hexadecimal | `0xFF`       | 255           |
+| `0o` / `0O` | 8  -  octal        | `0o377`      | 255           |
+| `0b` / `0B` | 2  -  binary       | `0b11111111` | 255           |
 
 ```rust
 let mask  i64 = 0xFF00FF        // hex
@@ -204,38 +204,38 @@ let x = 1; let y = 2; echo x + y   // 3
 
 ## Operators
 
-| Category | Operators |
-|---|---|
-| Arithmetic | `+` `-` `*` `/` `%` |
-| Comparison | `==` `!=` `<` `<=` `>` `>=` |
-| Logical | `&&` `\|\|` `!` |
-| Bitwise | `&` `\|` `^` `<<` `>>` |
-| Unary | `-` (negation) `!` (boolean not) |
-| Increment / decrement | `i++` `i--` (statement form) |
-| Array append | `++=` |
-| Concatenation | `++` |
-| Pipe | `\|>` (see [03 - Functions](03-functions.md)) |
+| Category              | Operators                                     |
+|-----------------------|-----------------------------------------------|
+| Arithmetic            | `+` `-` `*` `/` `%`                           |
+| Comparison            | `==` `!=` `<` `<=` `>` `>=`                   |
+| Logical               | `&&` `\|\|` `!`                               |
+| Bitwise               | `&` `\|` `^` `<<` `>>`                        |
+| Unary                 | `-` (negation) `!` (boolean not)              |
+| Increment / decrement | `i++` `i--` (statement form)                  |
+| Array append          | `++=`                                         |
+| Concatenation         | `++`                                          |
+| Pipe                  | `\|>` (see [03 - Functions](03-functions.md)) |
 
 ### Operator precedence
 
 Higher rows bind tighter (evaluated first):
 
-| Priority | Operators | Associativity |
-|----------|-----------|---------------|
-| 1 (highest) | `()` `[]` `.` `->` (call, index, field) | left |
-| 2 | unary `-` `!` `*` `&` | right |
-| 3 | `*` `/` `%` | left |
-| 4 | `+` `-` `++` | left |
-| 5 | `<<` `>>` | left |
-| 6 | `<` `<=` `>` `>=` | left |
-| 7 | `==` `!=` | left |
-| 8 | `&` (bitwise and) | left |
-| 9 | `^` (bitwise xor) | left |
-| 10 | `\|` (bitwise or) | left |
-| 11 | `&&` | left |
-| 12 | `\|\|` | left |
-| 13 | `? :` (ternary) | right |
-| 14 (lowest) | `\|>` (pipe) | left |
+| Priority    | Operators                               | Associativity |
+|-------------|-----------------------------------------|---------------|
+| 1 (highest) | `()` `[]` `.` `->` (call, index, field) | left          |
+| 2           | unary `-` `!` `*` `&`                   | right         |
+| 3           | `*` `/` `%`                             | left          |
+| 4           | `+` `-` `++`                            | left          |
+| 5           | `<<` `>>`                               | left          |
+| 6           | `<` `<=` `>` `>=`                       | left          |
+| 7           | `==` `!=`                               | left          |
+| 8           | `&` (bitwise and)                       | left          |
+| 9           | `^` (bitwise xor)                       | left          |
+| 10          | `\|` (bitwise or)                       | left          |
+| 11          | `&&`                                    | left          |
+| 12          | `\|\|`                                  | left          |
+| 13          | `? :` (ternary)                         | right         |
+| 14 (lowest) | `\|>` (pipe)                            | left          |
 
 When in doubt, use parentheses.
 
@@ -288,15 +288,15 @@ See [`examples/floats.tin`](../examples/floats.tin) for a complete float example
 
 `default(T)` returns the zero value for type `T`:
 
-| Type | `default` value |
-|------|----------------|
-| integers | `0` |
-| floats | `0.0` |
-| `bool` | `false` |
-| pointers | `null` |
-| strings | `""` (empty string) |
-| arrays | `[]` (empty array) |
-| structs | all fields zeroed |
+| Type     | `default` value     |
+|----------|---------------------|
+| integers | `0`                 |
+| floats   | `0.0`               |
+| `bool`   | `false`             |
+| pointers | `null`              |
+| strings  | `""` (empty string) |
+| arrays   | `[]` (empty array)  |
+| structs  | all fields zeroed   |
 
 ```rust
 let n  = default(i64)     // 0

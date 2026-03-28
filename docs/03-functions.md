@@ -46,7 +46,7 @@ fn factorial(n i64) i64 =
 
 ## where-clause style (pattern-matching functions)
 
-See also [02 - Control Flow](02-control-flow.md#where--pattern-matching-on-function-arguments).
+See also [02 - Control Flow](02-control-flow.md#where---pattern-matching-on-function-arguments).
 
 ```rust
 fn gcd(a i64, b i64) i64 =

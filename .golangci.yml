@@ -28,6 +28,11 @@ linters:
     - dupl          # duplicate code blocks
 
   settings:
+    errorlint:
+      # Flag `err == ErrFoo` / `err != nil`-style comparisons that break on
+      # wrapped errors; callers must use errors.Is instead.
+      comparison: true
+
     errcheck:
       # Explicit _ = f() assignments are intentional in this codebase
       # (e.g. best-effort defers); do not flag them.
