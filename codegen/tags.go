@@ -14,6 +14,7 @@ func hasTag(tags []string, name string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -51,6 +52,7 @@ func (cg *CodeGen) checkAllPureFuncs() error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -61,6 +63,7 @@ func (cg *CodeGen) checkAllPureFuncs() error {
 // except inside #allow_sideffect blocks.
 func (cg *CodeGen) checkPureBody(fn *ast.FuncDecl) error {
 	visited := make(map[string]bool)
+
 	return cg.walkPureNode(fn.Name, fn.Body, false, visited)
 }
 
@@ -81,6 +84,7 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 	case *ast.TaggedBlock:
 		// #allow_sideffect block: permit side effects inside
 		inner := allowSideEffect || hasTag(v.Tags, "allow_sideffect")
+
 		return cg.walkPureNode(fnCtx, v.Body, inner, visited)
 
 	case *ast.CallExpr:
@@ -148,30 +152,37 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 		}
 
 	case *ast.ReturnStmt:
+
 		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
 
 	case *ast.AssignStmt:
 		if err := cg.walkPureNode(fnCtx, v.Target, allowSideEffect, visited); err != nil {
 			return err
 		}
+
 		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
 
 	case *ast.AugAssignStmt:
+
 		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
 
 	case *ast.VarDecl:
+
 		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
 
 	case *ast.ExprStmt:
+
 		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
 
 	case *ast.BinExpr:
 		if err := cg.walkPureNode(fnCtx, v.Left, allowSideEffect, visited); err != nil {
 			return err
 		}
+
 		return cg.walkPureNode(fnCtx, v.Right, allowSideEffect, visited)
 
 	case *ast.UnaryExpr:
+
 		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
 
 	case *ast.TernaryExpr:
@@ -181,18 +192,22 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 		if err := cg.walkPureNode(fnCtx, v.Then, allowSideEffect, visited); err != nil {
 			return err
 		}
+
 		return cg.walkPureNode(fnCtx, v.Else, allowSideEffect, visited)
 
 	case *ast.FieldAccess:
+
 		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
 
 	case *ast.IndexExpr:
 		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited); err != nil {
 			return err
 		}
+
 		return cg.walkPureNode(fnCtx, v.Index, allowSideEffect, visited)
 
 	case *ast.DeferStmt:
+
 		return cg.walkPureNode(fnCtx, v.Call, allowSideEffect, visited)
 
 	case *ast.WhereList:
@@ -202,6 +217,7 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -214,8 +230,10 @@ func (cg *CodeGen) checkCallPure(fnCtx string, call *ast.CallExpr, visited map[s
 	if calleeName == "" {
 		// Cannot resolve statically (e.g. function pointer / indirect call).
 		// Purity cannot be verified - reject.
+
 		return fmt.Errorf("fn %s: #pure violation - indirect call through function pointer is not verifiable", fnCtx)
 	}
+
 	return cg.isPureCallable(fnCtx, calleeName, visited)
 }
 
@@ -253,6 +271,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 				return err
 			}
 		}
+
 		return nil
 	}
 
@@ -275,6 +294,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 			return nil
 		}
 		// Unknown function - purity cannot be verified.
+
 		return fmt.Errorf("fn %s: #pure violation - cannot verify purity of %q", fnCtx, calleeName)
 	}
 
@@ -289,6 +309,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 	}
 
 	// Transitively check the callee's body
+
 	return cg.walkPureNode(fnCtx, fd.Body, false, visited)
 }
 
@@ -314,6 +335,7 @@ func (cg *CodeGen) checkAllNoRecurseFuncs() error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -343,6 +365,7 @@ func (cg *CodeGen) walkNoRecurseNode(targetFn string, node ast.Node, visited map
 		}
 
 	case *ast.TaggedBlock:
+
 		return cg.walkNoRecurseNode(targetFn, v.Body, visited)
 
 	case *ast.IfStmt:
@@ -390,30 +413,37 @@ func (cg *CodeGen) walkNoRecurseNode(targetFn string, node ast.Node, visited map
 		}
 
 	case *ast.ReturnStmt:
+
 		return cg.walkNoRecurseNode(targetFn, v.Value, visited)
 
 	case *ast.AssignStmt:
 		if err := cg.walkNoRecurseNode(targetFn, v.Target, visited); err != nil {
 			return err
 		}
+
 		return cg.walkNoRecurseNode(targetFn, v.Value, visited)
 
 	case *ast.AugAssignStmt:
+
 		return cg.walkNoRecurseNode(targetFn, v.Value, visited)
 
 	case *ast.VarDecl:
+
 		return cg.walkNoRecurseNode(targetFn, v.Value, visited)
 
 	case *ast.ExprStmt:
+
 		return cg.walkNoRecurseNode(targetFn, v.Expr, visited)
 
 	case *ast.BinExpr:
 		if err := cg.walkNoRecurseNode(targetFn, v.Left, visited); err != nil {
 			return err
 		}
+
 		return cg.walkNoRecurseNode(targetFn, v.Right, visited)
 
 	case *ast.UnaryExpr:
+
 		return cg.walkNoRecurseNode(targetFn, v.Expr, visited)
 
 	case *ast.TernaryExpr:
@@ -423,18 +453,22 @@ func (cg *CodeGen) walkNoRecurseNode(targetFn string, node ast.Node, visited map
 		if err := cg.walkNoRecurseNode(targetFn, v.Then, visited); err != nil {
 			return err
 		}
+
 		return cg.walkNoRecurseNode(targetFn, v.Else, visited)
 
 	case *ast.FieldAccess:
+
 		return cg.walkNoRecurseNode(targetFn, v.Expr, visited)
 
 	case *ast.IndexExpr:
 		if err := cg.walkNoRecurseNode(targetFn, v.Expr, visited); err != nil {
 			return err
 		}
+
 		return cg.walkNoRecurseNode(targetFn, v.Index, visited)
 
 	case *ast.DeferStmt:
+
 		return cg.walkNoRecurseNode(targetFn, v.Call, visited)
 
 	case *ast.WhereList:
@@ -444,6 +478,7 @@ func (cg *CodeGen) walkNoRecurseNode(targetFn string, node ast.Node, visited map
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -453,6 +488,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 	calleeName := resolveCalleeName(call)
 	if calleeName == "" {
 		// Indirect call - cannot trace; conservatively allow.
+
 		return nil
 	}
 
@@ -475,6 +511,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 				return err
 			}
 		}
+
 		return nil
 	}
 
@@ -498,10 +535,12 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 	fd, known := cg.funcDecls[lookupName]
 	if !known {
 		// External / built-in - cannot trace; conservatively allow.
+
 		return nil
 	}
 
 	// Recursively check the callee's body for a path back to targetFn.
+
 	return cg.walkNoRecurseNode(targetFn, fd.Body, visited)
 }
 
@@ -516,12 +555,16 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 func resolveCalleeName(call *ast.CallExpr) string {
 	switch f := call.Func.(type) {
 	case *ast.Identifier:
+
 		return f.Name
 	case *ast.ScopeAccess:
+
 		return strings.Join(f.Path, "::")
 	case *ast.FieldAccess:
 		// obj.method() - return ".method" as a hint; callers will do a suffix search
+
 		return "." + f.Field
 	}
+
 	return ""
 }

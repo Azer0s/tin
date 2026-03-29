@@ -1,0 +1,83 @@
+//!+channel_arc.c -- -lpthread
+
+// stdlib/sync - Channel[T]: a bounded, thread-safe FIFO channel.
+//
+// Channel[T] is a thin wrapper around an opaque heap-allocated C control block
+// (TinChannel*). Copying the Tin struct copies only the pointer, so all copies
+// share the same ring buffer and mutex - giving Go-style reference semantics
+// within Tin's value-type system.
+//
+// Both send() and recv() are fiber-aware: they spawn a background coroutine
+// that retries with yield() rather than blocking the OS worker thread.
+//
+// Usage:
+//   let ch = Channel[i64].make(16)   // buffered channel, capacity 16
+//   await ch.send(42)                // wait for send to complete
+//   let v = await ch.recv()          // wait for a value
+//
+// Fire-and-forget send (no await):
+//   ch.send(42)                      // spawns send_fiber, returns Future[Unit]
+//
+//   Without await the send happens asynchronously - the value will eventually
+//   be enqueued, but the caller does not wait.  Use this when:
+//     * you don't need backpressure (channel has plenty of headroom), and
+//     * nothing depends on the send completing before the next statement.
+//
+//   WARNING: sending to a closed channel always panics, even fire-and-forget.
+//   If the channel may be closed before the send_fiber runs, use await so the
+//   panic is synchronous and traceable, or ensure the channel outlives all
+//   in-flight sends.
+
+use "./future"
+use mem
+
+fn _tin_channel_new(cap i64, elem_size i64, is_rc i32) *void = extern("_tin_channel_new")
+fn _tin_channel_free(ch *void)                              = extern("_tin_channel_free")
+fn _tin_channel_send_try(ch *void, val *void, elem_size i64, is_rc i32) i32 = extern("_tin_channel_send_try")
+fn _tin_channel_recv_try(ch *void) *void                    = extern("_tin_channel_recv_park")
+fn _tin_channel_recv_blocked_val() i64                      = extern("_tin_channel_recv_blocked_val")
+fn _tin_channel_close(ch *void)                             = extern("_tin_channel_close")
+fn _tin_channel_is_closed_empty(ch *void) i32               = extern("_tin_channel_is_closed_empty")
+
+struct Channel[T] =
+  _ptr *void
+
+  static fn make(cap i64) Channel[T] =
+    return Channel[T]{ _ptr: _tin_channel_new(cap, sizeof(T), isrc(T)) }
+
+  fn send(this *Channel[T], val T) Future[Unit] =
+    return spawn this.send_fiber(val)
+
+  fn{#async} send_fiber(this *Channel[T], val T) =
+    for true:
+      let r i32 = _tin_channel_send_try(this._ptr, &val, sizeof(T), isrc(T))
+      if r == -1:
+        panic("send on closed channel")
+      if r == 0:
+        return
+      yield
+
+  fn recv(this *Channel[T]) Future[T] =
+    return spawn this.recv_fiber()
+
+  fn{#async} recv_fiber(this *Channel[T]) T =
+    let blocked = _tin_channel_recv_blocked_val()
+    for true:
+      let r *void = _tin_channel_recv_try(this._ptr)
+      if r == 0 as *void:
+        panic("recv on closed channel")
+      if (r as i64) != blocked:
+        return *(r as *T)
+      yield
+
+  fn close(this *Channel[T]) =
+    _tin_channel_close(this._ptr)
+
+  fn is_closed_empty(this *Channel[T]) bool =
+    return _tin_channel_is_closed_empty(this._ptr) != 0
+
+  fn deinit(this Channel[T]) =
+    _tin_channel_free(this._ptr)
+    // _ptr is *void (not ARC-tracked), so ARC will not double-free it
+
+export { Channel } as sync

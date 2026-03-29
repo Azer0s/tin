@@ -3,9 +3,9 @@
 // stdlib/strings - higher-level string operations
 //
 // Provides string manipulation functions not available in libc directly.
-// No extra linker flags required (tin_str_replace is in the tin runtime).
+// The implementation lives in strings.c (compiled via //!+strings.c above).
 
 // replace returns a copy of s with all occurrences of old replaced by new_str.
-fn replace(s string, old string, new_str string) string = extern("tin_str_replace")
+fn replace(s string, old string, new_str string) string = extern("_tin_str_replace")
 
 export { replace } as strings

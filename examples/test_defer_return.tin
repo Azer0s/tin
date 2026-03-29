@@ -1,0 +1,93 @@
+// test_defer_return.tin - Tests for defer return value override.
+//
+// Two forms of override:
+//   1. `return val` inside `defer do:` - directly overrides the function's return.
+//   2. `defer (fn() *T = ...)()` - if the lambda returns a non-nil *T pointer,
+//      the dereferenced value overrides the function's return.
+//   3. `return` in a defer+recover combo works correctly.
+
+use assert
+
+// Form 1: return in defer do:
+
+fn always_returns_42() i64 =
+  defer do:
+    return 42
+  return 1
+
+fn override_with_zero() i64 =
+  defer do:
+    return 0
+  return 99
+
+fn no_override_when_no_return() i64 =
+  defer do:
+    let x = 1 + 1  // just some work, no return
+  return 7
+
+test "return in defer do: overrides function return" =
+  assert::equals(always_returns_42(), 42)
+
+test "return 0 in defer do: overrides function return" =
+  assert::equals(override_with_zero(), 0)
+
+test "defer do without return does not override" =
+  assert::equals(no_override_when_no_return(), 7)
+
+// Multiple defers: LIFO order, last override wins
+
+fn two_defers_lifo() i64 =
+  defer do:
+    return 1    // registered first, runs last (LIFO) -> this wins
+  defer do:
+    return 2    // registered second, runs first (LIFO) -> written, then overwritten
+  return 0
+
+test "LIFO order: last-registered defer's return wins" =
+  // LIFO: defer 2 runs first (writes 2), defer 1 runs second (writes 1).
+  // The final override is from defer 1 (last to run) = 1.
+  assert::equals(two_defers_lifo(), 1)
+
+// Form 2: defer (fn() *T = ...)()
+
+fn lambda_returns_nil() i64 =
+  defer (fn() *i64 =
+    return None
+  )()
+  return 100
+
+fn lambda_returns_pointer() i64 =
+  let x i64 = 55
+  defer (fn() *i64 =
+    return &x
+  )()
+  return 100
+
+test "lambda returning nil pointer does not override" =
+  assert::equals(lambda_returns_nil(), 100)
+
+test "lambda returning non-nil pointer overrides return" =
+  assert::equals(lambda_returns_pointer(), 55)
+
+// Form 3: defer return with recover
+
+fn recoverable_with_override() i64 =
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      return -1  // override: return -1 if we caught a panic
+  panic("oops")
+  return 0
+
+test "return in defer+recover overrides return value" =
+  assert::equals(recoverable_with_override(), -1)
+
+fn recover_no_panic() i64 =
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      return -1
+  return 42
+
+test "recover without panic does not override return" =
+  assert::equals(recover_no_panic(), 42)

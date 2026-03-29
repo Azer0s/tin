@@ -1,0 +1,180 @@
+// examples/ptr_mutation.tin
+//
+// Tests that mutations through pointer levels propagate back to the caller.
+//
+//   *struct   - modify a struct's fields through a single pointer
+//   **struct  - redirect a pointer through a double pointer; modify through it
+//   ***struct - triple-level write-through
+//
+// Also tests string fields under ARC: updating a string field via *struct
+// must properly retain the new value and release the old one.
+
+use assert
+use mem
+
+// structs
+
+struct point =
+  x i64
+  y i64
+
+struct named =
+  label string
+  value i64
+
+// single-pointer mutation
+
+// Adds (dx, dy) to the point in place; caller sees the change.
+fn translate(p *point, dx i64, dy i64) =
+  p.x = p.x + dx
+  p.y = p.y + dy
+
+// Zeroes both fields.
+fn zero(p *point) =
+  p.x = 0
+  p.y = 0
+
+// Scales both fields by a factor.
+fn scale(p *point, factor i64) =
+  p.x = p.x * factor
+  p.y = p.y * factor
+
+// double-pointer: redirect + modify
+
+// Redirects *pp to point at `target` instead.
+fn redirect(pp **point, target *point) =
+  *pp = target
+
+// Writes a value through a **point: (**pp).x = val.
+fn set_x_via_double(pp **point, val i64) =
+  (*pp).x = val
+
+// triple-pointer
+
+// Writes through ***point: (***ppp).y = val.
+fn set_y_via_triple(ppp ***point, val i64) =
+  (**ppp).y = val
+
+// string field under ARC
+
+// Replaces the label string in the named struct; old string must be released.
+fn relabel(p *named, new_label string) =
+  p.label = new_label
+
+// Appends a suffix to the label in place.
+fn append_label(p *named, suffix string) =
+  p.label = p.label ++ suffix
+
+// tests
+
+test "single pointer: translate mutates caller's struct" =
+  let pt = point{x: 10, y: 20}
+  translate(&pt, 3, -7)
+  assert::equals(pt.x, 13)
+  assert::equals(pt.y, 13)
+
+test "single pointer: zero clears both fields" =
+  let pt = point{x: 5, y: 9}
+  zero(&pt)
+  assert::equals(pt.x, 0)
+  assert::equals(pt.y, 0)
+
+test "single pointer: scale multiplies in place" =
+  let pt = point{x: 3, y: 4}
+  scale(&pt, 10)
+  assert::equals(pt.x, 30)
+  assert::equals(pt.y, 40)
+
+test "single pointer: chained mutations" =
+  let pt = point{x: 1, y: 2}
+  translate(&pt, 4, 6)   // (5, 8)
+  scale(&pt, 3)           // (15, 24)
+  translate(&pt, -5, -4)  // (10, 20)
+  assert::equals(pt.x, 10)
+  assert::equals(pt.y, 20)
+
+test "double pointer: redirect changes which struct *p points to" =
+  let a = &point{x: 1, y: 2}
+  let b = &point{x: 3, y: 4}
+  let p *point = a
+  redirect(&p, b)
+  assert::equals(p.x, 3)
+  assert::equals(p.y, 4)
+  // original a is unchanged
+  assert::equals(a.x, 1)
+  mem::free(a as *void)
+  mem::free(b as *void)
+
+test "double pointer: write through **point reaches original struct" =
+  let pt = point{x: 0, y: 0}
+  let p *point = &pt
+  set_x_via_double(&p, 42)
+  assert::equals(pt.x, 42)
+  assert::equals(p.x, 42)
+
+test "double pointer: set_x then translate" =
+  let pt = point{x: 0, y: 100}
+  let p *point = &pt
+  set_x_via_double(&p, 10)
+  translate(p, 5, -50)
+  assert::equals(pt.x, 15)
+  assert::equals(pt.y, 50)
+
+test "triple pointer: write through ***point reaches original" =
+  let pt = point{x: 0, y: 0}
+  let p *point = &pt
+  let pp **point = &p
+  set_y_via_triple(&pp, 77)
+  assert::equals(pt.y, 77)
+  assert::equals(p.y, 77)
+
+test "triple pointer: chain redirect then write" =
+  let a = &point{x: 0, y: 0}
+  let b = &point{x: 0, y: 0}
+  let p *point = a
+  let pp **point = &p
+  // redirect p -> b through double pointer
+  redirect(pp, b)
+  // now write through triple pointer - should land in b
+  set_y_via_triple(&pp, 55)
+  assert::equals(b.y, 55)
+  assert::equals(a.y, 0)
+  mem::free(a as *void)
+  mem::free(b as *void)
+
+test "string field: relabel releases old string, retains new" =
+  let n = named{label: "hello", value: 1}
+  relabel(&n, "world")
+  assert::equals_str(n.label, "world")
+  assert::equals(n.value, 1)
+
+test "string field: append_label concatenates in place" =
+  let n = named{label: "foo", value: 2}
+  append_label(&n, "-bar")
+  assert::equals_str(n.label, "foo-bar")
+
+test "string field: multiple relabels stay clean" =
+  let n = named{label: "v1", value: 0}
+  relabel(&n, "v2")
+  relabel(&n, "v3")
+  relabel(&n, "v4")
+  assert::equals_str(n.label, "v4")
+
+test "heap struct: single pointer mutation propagates" =
+  let p = &point{x: 7, y: 8}
+  translate(p, -7, -8)
+  assert::equals(p.x, 0)
+  assert::equals(p.y, 0)
+  mem::free(p as *void)
+
+test "heap struct: double pointer swap then modify" =
+  let a = &point{x: 10, y: 20}
+  let b = &point{x: 30, y: 40}
+  let cur *point = a
+  redirect(&cur, b)
+  translate(cur, 1, 1)
+  assert::equals(b.x, 31)
+  assert::equals(b.y, 41)
+  assert::equals(a.x, 10) // a untouched
+  mem::free(a as *void)
+  mem::free(b as *void)

@@ -3,6 +3,8 @@ package codegen
 
 import (
 	"fmt"
+	"os/exec"
+	"runtime"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -30,8 +32,10 @@ type CodeGen struct {
 	structTypes map[string]*irtypes.StructType
 	// struct field order: name -> []fieldName
 	structFields map[string][]string
-	// generic struct templates: name -> AST node (not compiled directly)
-	genericStructs map[string]*ast.StructDecl
+	// struct field tags: structName -> fieldName -> first @"..." tag value (empty string = untagged)
+	structFieldTags map[string]map[string]string
+	// generic struct templates: name -> arity -> AST node (not compiled directly)
+	genericStructsByArity map[string]map[int]*ast.StructDecl
 
 	// trait vtable struct types: instKey -> LLVM struct type for vtable
 	// instKey = traitName for non-generic, "traitName_typeArg" for generic
@@ -44,6 +48,8 @@ type CodeGen struct {
 	traitVtableGlobals map[string]*ir.Global
 	// instKey -> base trait name (for generic traits)
 	traitInstKeys map[string]string
+	// traitAsyncMethodNames: base trait name -> names of its {#async} virtual methods (in order)
+	traitAsyncMethodNames map[string][]string
 	// implicit conversion registry: struct name -> []entry
 	implicitConvFns map[string][]implicitConvEntry
 	// structVtableOrder: struct name -> ordered instKeys embedded as leading fields
@@ -66,8 +72,9 @@ type CodeGen struct {
 	labelCount int
 
 	// current function being built
-	curFn    *ir.Func
-	curScope *scope
+	curFn       *ir.Func
+	curScope    *scope
+	moduleScope *scope // root/global scope for module-level declarations
 
 	// pendingDeferFnI8s holds the thunk i8* function pointers for deferred calls
 	// registered in the current function (LIFO on return).
@@ -111,22 +118,18 @@ type CodeGen struct {
 	// constrained generic functions
 	// constrainedFuncs: funcName -> FuncDecl template (has Constraints)
 	constrainedFuncs map[string]*ast.FuncDecl
+	// genericFuncs: funcName -> FuncDecl template (has TypeParams, may have no Constraints)
+	genericFuncs map[string]*ast.FuncDecl
+	// genericFuncHomeScopes: funcName -> scope in which the template was declared.
+	// Used during monomorphization so the template body can resolve bare local names.
+	genericFuncHomeScopes map[string]*scope
 	// constrainedFuncInstances: "funcName__typeArg" -> compiled *ir.Func
 	constrainedFuncInstances map[string]*ir.Func
 
-	// data type registry: name -> DataDecl AST node (non-generic)
-	dataDecls map[string]*ast.DataDecl
-	// generic data type templates: name -> DataDecl AST (has TypeParams)
-	genericDataDecls map[string]*ast.DataDecl
-	// data type tag assignments: "TypeName.VariantIndex" -> i8 tag value
-	// None is always tag 0, typed variants start at 1.
-	dataVariantTags map[string]int8
-
 	// Universal runtime type ID registry.
-	// Primitives use anyTag* constants (0-5).  Every named struct, data type,
-	// and unique function signature gets a unique i32 starting at 6.
+	// Primitives use anyTag* constants (0-5).  Every named struct and
+	// unique function signature gets a unique i32 starting at 6.
 	structTypeIDs map[string]int32 // struct name -> compile-time type ID
-	dataTypeIDs   map[string]int32 // data type name -> compile-time type ID
 	fnTypeIDs     map[string]int32 // fn signature string -> compile-time type ID
 	nextTypeID    int32            // counter; starts at 6
 
@@ -135,6 +138,24 @@ type CodeGen struct {
 	structImpls map[string][]string
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
 	structFieldLLVMTypes map[string][]irtypes.Type
+
+	// Trait init/deinit chaining: when a struct overrides init/deinit but the
+	// trait also defines one, the trait's version is compiled separately and
+	// recorded here so both are invoked during struct lifecycle.
+	traitChainedInits   map[string][]*ir.Func // struct name -> extra init funcs from traits
+	traitChainedDeinits map[string][]*ir.Func // struct name -> extra deinit funcs from traits
+
+	// Defer return-value override.
+	// curDeferRetSlotParam: inside a defer thunk, the i8* "ret_slot" parameter
+	// passed by the outer function. Non-nil only inside genDeferThunk/genDeferLambdaThunk.
+	curDeferRetSlotParam value.Value
+	// curFnDeferRetAlloca: in the outer function, an i8* bitcast to the alloca of
+	// { i8 valid, retType value } that a deferred thunk may write an override into.
+	// Nil for void functions and functions with no defers.
+	curFnDeferRetAlloca value.Value
+	// curDeferThunkRetType: inside a defer lambda thunk, the lambda's declared return
+	// type (e.g. *i64). Used to coerce return values (e.g. None -> null *i64).
+	curDeferThunkRetType irtypes.Type
 
 	// match subject: set before entering genWhereList when the function body
 	// is a pure where-list pattern match. Used to compare atom conditions.
@@ -191,6 +212,162 @@ type CodeGen struct {
 	// Tagged union type ID registry: union name -> compile-time i32 type ID.
 	// Same purpose as structTypeIDs/dataTypeIDs - used for any boxing and typeof.
 	unionTypeIDs map[string]int32
+
+	// ------------------------------------------------------------------
+	// Fiber / coroutine state
+	// ------------------------------------------------------------------
+
+	// LLVM coroutine intrinsics (lazily declared by ensureCoroIntrinsics).
+	coroIDFn      *ir.Func
+	coroAllocFn   *ir.Func
+	coroSizeFn    *ir.Func
+	coroBeginFn   *ir.Func
+	coroSuspendFn *ir.Func
+	coroEndFn     *ir.Func
+	coroFreeFn    *ir.Func
+	coroResumeFn  *ir.Func // llvm.coro.resume - used by coroutine chaining
+	coroDoneFn    *ir.Func // llvm.coro.done - used by coroutine chaining
+	coroDestroyFn *ir.Func // llvm.coro.destroy - used by coroutine chaining
+
+	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
+	fiberSpawnFn       *ir.Func
+	fiberCompleteFn    *ir.Func
+	fiberJoinFn        *ir.Func // _tin_fiber_join(pid i64, hdl i8*): register waiter
+	fiberGetResultFn   *ir.Func // _tin_fiber_get_result(pid i64) -> i8*
+	fiberGetPanicMsgFn *ir.Func // _tin_fiber_get_panic_msg(pid i64) -> i8* (null = ok)
+	coroTakeResultFn   *ir.Func // _tin_coro_take_result() -> i8*: for chaining
+	fiberYieldCoroFn   *ir.Func
+	fiberInitFn        *ir.Func
+	fiberRunFn         *ir.Func
+	ioInitFn           *ir.Func
+
+	// coroCallable: set of function names that need a $coro duplicate.
+	// Built by colorCallGraph() after the predeclaration pass.
+	coroCallable map[string]bool
+
+	// callGraph: funcName -> []callee names. Built during predeclaration.
+	callGraph map[string][]string
+
+	// Per-function coro state (valid only when genCoroFuncBody is active).
+	inCoroFn       bool
+	curFnAutoYield bool         // true in $coro variant of #async functions without #no_autoyield
+	curCoroHdl     value.Value  // %hdl i8* in the current coro function
+	curCoroID      value.Value  // %id token in the current coro function
+	curCoroCleanup *ir.Block    // cleanup block for the current coro function
+	curCoroFrame   *coroFrame   // full frame for the current coro function
+	curCoroRetType irtypes.Type // original return type of current $coro function
+
+	// usesAnyFiber is set to true when the program contains at least one
+	// spawn/await/yield, so main() is wrapped with fiber init + run.
+	usesAnyFiber bool
+
+	// spawnDoCounter is incremented each time a `spawn do:` block is synthesized
+	// to generate unique anonymous function names (__spawn_do_N).
+	spawnDoCounter int
+
+	// syncModuleLoaded is set to true once the stdlib/sync module has been
+	// auto-loaded by ensureSyncModule.  Prevents double-loading.
+	syncModuleLoaded bool
+	// syncLoadErr holds the error from the most recent ensureSyncModule call,
+	// so wrapPidInFuture can report it if Future[T] is not available.
+	syncLoadErr error
+
+	// curBlock tracks the current IR block during expression generation.
+	// It is updated by genExpr when control flow changes the active block
+	// (e.g. await/yield emit a coro.suspend which switches to a new resume block).
+	// Callers that need to continue emitting into the correct block after a
+	// potentially-suspending expression should read cg.curBlock after genExpr.
+	curBlock *ir.Block
+
+	// breakStack is a stack of "after" blocks for the innermost enclosing loop.
+	// pushBreak/popBreak are called around loop body generation; genBreakStmt
+	// emits a branch to the top of the stack so break works correctly.
+	breakStack     []*ir.Block
+	breakUsedStack []bool // parallel to breakStack: true if any break was emitted
+
+	// topLevelVarInits: deferred runtime-expression initializers for top-level
+	// var declarations. They are emitted at the top of implicit/explicit main.
+	topLevelVarInits []topLevelVarInit
+
+	// allTopLevelVars: ALL top-level var declarations in declaration order.
+	// Used to emit deinits in reverse order at the end of main().
+	allTopLevelVars []topLevelVarInit
+
+	// ------------------------------------------------------------------
+	// Function overloading
+	// ------------------------------------------------------------------
+
+	// overloadedNames: base name (or "StructName_method") -> true when multiple
+	// definitions with the same name exist in the current module.
+	// Populated by a pre-scan pass before predeclaration.
+	overloadedNames map[string]bool
+
+	// overloads: base name -> slice of registered variants (mangled IR names,
+	// resolved LLVM param types, arity).  Populated during predeclaration.
+	overloads map[string][]*overloadEntry
+
+	// currentPkg is the package name currently being compiled via
+	// loadPackageFromSource (e.g. "sync", "io").  It is set before the
+	// preregister pass and cleared after the package scope is restored.
+	// Used by pkgStructKey to produce canonical LLVM struct names.
+	currentPkg string
+}
+
+// topLevelVarInit holds a deferred runtime initializer for a top-level var.
+type topLevelVarInit struct {
+	name     string
+	global   *ir.Global
+	initExpr ast.Node
+}
+
+// pushBreakTarget pushes afterBlock onto the break stack before generating a
+// loop body.  The matching popBreakTarget must be called after.
+func (cg *CodeGen) pushBreakTarget(afterBlock *ir.Block) {
+	cg.breakStack = append(cg.breakStack, afterBlock)
+	cg.breakUsedStack = append(cg.breakUsedStack, false)
+}
+
+// popBreakTarget removes the innermost break target after loop body generation.
+// Returns true if any break statement was emitted to this target.
+func (cg *CodeGen) popBreakTarget() bool {
+	if len(cg.breakStack) == 0 {
+		return false
+	}
+	used := cg.breakUsedStack[len(cg.breakUsedStack)-1]
+	cg.breakStack = cg.breakStack[:len(cg.breakStack)-1]
+	cg.breakUsedStack = cg.breakUsedStack[:len(cg.breakUsedStack)-1]
+
+	return used
+}
+
+// currentBreakTarget returns the innermost loop's after-block, or nil if not in a loop.
+func (cg *CodeGen) currentBreakTarget() *ir.Block {
+	if len(cg.breakStack) == 0 {
+		return nil
+	}
+
+	return cg.breakStack[len(cg.breakStack)-1]
+}
+
+// markBreakUsed records that a break was emitted to the current break target.
+func (cg *CodeGen) markBreakUsed() {
+	if len(cg.breakUsedStack) > 0 {
+		cg.breakUsedStack[len(cg.breakUsedStack)-1] = true
+	}
+}
+
+// pkgStructKey returns the canonical map key / LLVM IR name for a struct named
+// "name" that is being compiled under the current package.  When currentPkg is
+// set (i.e. we are inside loadPackageFromSource), the returned key is
+// "pkgName__name" so that structs from different packages never collide even
+// when they share the same short name.  For user-level structs (currentPkg="")
+// the bare name is returned unchanged.
+func (cg *CodeGen) pkgStructKey(name string) string {
+	if cg.currentPkg != "" {
+		return cg.currentPkg + "__" + name
+	}
+
+	return name
 }
 
 // newBlock creates a uniquely-named basic block in the current function.
@@ -201,6 +378,7 @@ type CodeGen struct {
 func (cg *CodeGen) newBlock(base string) *ir.Block {
 	id := cg.labelCount
 	cg.labelCount++
+
 	return cg.curFn.NewBlock(fmt.Sprintf("%s.%d", base, id))
 }
 
@@ -212,19 +390,51 @@ func (cg *CodeGen) SetTestMode(v bool) { cg.testMode = v }
 // Only meaningful after Generate has been called.
 func (cg *CodeGen) HasTests() bool { return len(cg.testDecls) > 0 }
 
+// newModuleWithTriple creates a new LLVM IR module pre-populated with the
+// target triple for the current host, preventing clang from emitting
+// "overriding the module target triple" warnings.
+func newModuleWithTriple() *ir.Module {
+	mod := ir.NewModule()
+	// Ask clang for the exact triple it would use.
+	if out, err := exec.Command("clang", "-dumpmachine").Output(); err == nil {
+		triple := runtime.GOOS // fallback key
+		_ = triple
+		mod.TargetTriple = string(out[:len(out)-1]) // strip trailing newline
+
+		return mod
+	}
+	// Fallback by GOOS/GOARCH when clang is unavailable.
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "linux/amd64":
+		mod.TargetTriple = "x86_64-pc-linux-gnu"
+	case "linux/arm64":
+		mod.TargetTriple = "aarch64-unknown-linux-gnu"
+	case "darwin/amd64":
+		mod.TargetTriple = "x86_64-apple-macosx11.0.0"
+	case "darwin/arm64":
+		mod.TargetTriple = "arm64-apple-macosx11.0.0"
+	default:
+		mod.TargetTriple = "x86_64-pc-linux-gnu"
+	}
+
+	return mod
+}
+
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {
 	cg := &CodeGen{
 		filename:                 filename,
-		mod:                      ir.NewModule(),
+		mod:                      newModuleWithTriple(),
 		structTypes:              make(map[string]*irtypes.StructType),
 		structFields:             make(map[string][]string),
-		genericStructs:           make(map[string]*ast.StructDecl),
+		structFieldTags:          make(map[string]map[string]string),
+		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
 		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
 		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
 		traitMethodOrder:         make(map[string][]string),
 		traitVtableGlobals:       make(map[string]*ir.Global),
 		traitInstKeys:            make(map[string]string),
+		traitAsyncMethodNames:    make(map[string][]string),
 		implicitConvFns:          make(map[string][]implicitConvEntry),
 		structVtableOrder:        make(map[string][]string),
 		enumValues:               make(map[string]int64),
@@ -234,29 +444,55 @@ func New(filename string) *CodeGen {
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
 		constrainedFuncs:         make(map[string]*ast.FuncDecl),
+		genericFuncs:             make(map[string]*ast.FuncDecl),
+		genericFuncHomeScopes:    make(map[string]*scope),
 		constrainedFuncInstances: make(map[string]*ir.Func),
-		dataDecls:                make(map[string]*ast.DataDecl),
-		genericDataDecls:         make(map[string]*ast.DataDecl),
-		dataVariantTags:          make(map[string]int8),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
 		structTypeIDs:            make(map[string]int32),
-		dataTypeIDs:              make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
 		structImpls:              make(map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
+		traitChainedInits:        make(map[string][]*ir.Func),
+		traitChainedDeinits:      make(map[string][]*ir.Func),
 		atomCodes:                make(map[string]int32),
 		atomCodeToName:           make(map[int32]string),
 		unionTypeMembers:         make(map[string][]ast.TypeExpr),
 		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
 		unionTypeIDs:             make(map[string]int32),
+		coroCallable:             make(map[string]bool),
+		callGraph:                make(map[string][]string),
+		overloadedNames:          make(map[string]bool),
+		overloads:                make(map[string][]*overloadEntry),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")
 	cg.atomType = atomType
 	cg.mod.TypeDefs = append(cg.mod.TypeDefs, atomType)
+	cg.initBuiltinTupleTemplates()
+
 	return cg
+}
+
+// initBuiltinTupleTemplates pre-populates the Tuple generic struct templates
+// for arities 2-10. Fields are named alphabetically: a, b, c, ...
+func (cg *CodeGen) initBuiltinTupleTemplates() {
+	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	cg.genericStructsByArity["Tuple"] = make(map[int]*ast.StructDecl)
+	for arity := 2; arity <= 10; arity++ {
+		typeParams := make([]string, arity)
+		copy(typeParams, letters[:arity])
+		fields := make([]ast.StructField, arity)
+		for i, name := range typeParams {
+			fields[i] = ast.StructField{Name: name, Type: &ast.SimpleType{Name: name}}
+		}
+		cg.genericStructsByArity["Tuple"][arity] = &ast.StructDecl{
+			Name:       "Tuple",
+			TypeParams: typeParams,
+			Fields:     fields,
+		}
+	}
 }
 
 // registerBuiltinTraits pre-populates cg.traits with synthetic declarations for
@@ -305,6 +541,7 @@ func (cg *CodeGen) PackageSrcPaths() []string { return cg.pkgSrcPaths }
 func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Initialize global scope.
 	cg.curScope = newScope(nil)
+	cg.moduleScope = cg.curScope
 
 	// Register built-in special traits so structs can implement them without
 	// an explicit trait declaration in source.
@@ -320,6 +557,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.Constraints) > 0 {
 			cg.constrainedFuncs[fd.Name] = fd
+		}
+		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.TypeParams) > 0 {
+			cg.genericFuncs[fd.Name] = fd
 		}
 	}
 
@@ -351,6 +591,36 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.IsExtern != "" {
 			cg.externIRNames[fd.IsExtern] = true
 		}
+	}
+
+	// Pre-pass 1.9: load all imported packages BEFORE registering top-level vars
+	// and predeclaring function signatures. This ensures struct types (e.g.
+	// AtomicI64 from "use sync") are registered before preregisterTopLevelVar
+	// tries to resolve types like sync::AtomicI64, and before predeclareFunc
+	// tries to resolve parameter types like sync::Channel[i64].
+	for _, node := range prog.Stmts {
+		if ud, ok := node.(*ast.UseDecl); ok {
+			if err := cg.genUseDecl(ud); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Pre-pass 1.7: register top-level var declarations as LLVM globals so that
+	// all functions (predeclared in pass 2) can reference them.
+	// Must run AFTER pre-pass 1.9 so package types are available.
+	for _, node := range prog.Stmts {
+		if tv, ok := node.(*ast.TopLevelVar); ok {
+			if err := cg.preregisterTopLevelVar(tv); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Pre-pass 1.8: detect overloaded function/method base names so that
+	// predeclareFunc and predeclareMethod can mangle their IR names.
+	for name, flag := range scanOverloadedNames(prog.Stmts) {
+		cg.overloadedNames[name] = flag
 	}
 
 	// Second pass: pre-declare all functions (signatures only) so forward calls work.
@@ -385,6 +655,32 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		return nil, err
 	}
 
+	// Build call graph and run color propagation for the #async / coro system.
+	for _, node := range prog.Stmts {
+		if fd, ok := node.(*ast.FuncDecl); ok && fd.Body != nil {
+			cg.buildCallGraphEntry(fd.Name, fd.Body)
+		}
+		if sd, ok := node.(*ast.StructDecl); ok {
+			for _, m := range sd.Methods {
+				key := methodScopeName(sd.Name, m)
+				cg.buildCallGraphEntry(key, m.Body)
+			}
+		}
+	}
+	cg.colorCallGraph()
+
+	// Pre-declare $coro variants for all colored functions so that mutual
+	// references across coro bodies resolve correctly.
+	for _, node := range prog.Stmts {
+		if fd, ok := node.(*ast.FuncDecl); ok {
+			if cg.coroCallable[fd.Name] {
+				if err := cg.predeclareCoroVariant(fd, fd.Name, false); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	// Third pass: generate full function bodies and other declarations.
 	var topStmts []ast.Node
 	for _, node := range prog.Stmts {
@@ -415,10 +711,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Registered in preregister; no IR to emit.
 		case *ast.MacroDecl:
 			// Registered in preregister; no IR to emit.
-		case *ast.DataDecl:
-			if err := cg.genDataDecl(n); err != nil {
-				return nil, err
-			}
 		case *ast.UnionDecl:
 			if err := cg.genUnionDecl(n); err != nil {
 				return nil, err
@@ -428,6 +720,10 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				cg.testDecls = append(cg.testDecls, n)
 			}
 			// In normal mode, test blocks are silently ignored.
+		case *ast.TopLevelVar:
+			// Already registered as an LLVM global in pre-pass 1.7.
+			// If the initializer is a runtime expression, it was appended to
+			// cg.topLevelVarInits and will be emitted at the top of main().
 		default:
 			topStmts = append(topStmts, node)
 		}
@@ -442,6 +738,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if err := cg.writeModuleFiles(prog); err != nil {
 			return nil, err
 		}
+
 		return cg.mod, nil
 	}
 
@@ -452,6 +749,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasmain = true
+
 				break
 			}
 		}
@@ -469,6 +767,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "_tin_user_main" {
 			userMainFn = f
+
 			break
 		}
 	}
@@ -478,12 +777,30 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasMain = true
+
 				break
 			}
 		}
 		if !hasMain {
 			wf := cg.mod.NewFunc("main", irtypes.I32)
 			wb := wf.NewBlock("entry")
+
+			// Save context so emitTopLevelVarInits can generate expressions.
+			prevFn := cg.curFn
+			prevScope := cg.curScope
+			cg.curFn = wf
+			cg.curScope = newScope(cg.curScope)
+
+			// Emit fiber init + io init when the program uses fiber features.
+			wb = cg.emitFiberMainWrap(wb)
+
+			// Emit runtime initializers for top-level var declarations.
+			var err error
+			wb, err = cg.emitTopLevelVarInits(wb)
+			if err != nil {
+				return nil, err
+			}
+
 			// Build zero-value args for each parameter of _tin_user_main.
 			var callArgs []value.Value
 			for _, p := range userMainFn.Params {
@@ -492,9 +809,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
 			if retIsVoid {
 				wb.NewCall(userMainFn, callArgs...)
+				cg.emitTopLevelVarDeinits(wb)
+				cg.emitFiberMainEnd(wb)
 				wb.NewRet(constant.NewInt(irtypes.I32, 0))
 			} else {
 				ret := wb.NewCall(userMainFn, callArgs...)
+				cg.emitTopLevelVarDeinits(wb)
+				cg.emitFiberMainEnd(wb)
 				// Coerce return value to i32 if needed.
 				var retVal value.Value = ret
 				if !ret.Type().Equal(irtypes.I32) {
@@ -506,6 +827,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				}
 				wb.NewRet(retVal)
 			}
+
+			cg.curFn = prevFn
+			cg.curScope = prevScope
 		}
 	}
 
@@ -523,6 +847,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "main" {
 			hasMain = true
+
 			break
 		}
 	}

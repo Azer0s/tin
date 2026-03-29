@@ -1,0 +1,42 @@
+// examples/arc_stress/fiber_string_storm.tin
+//
+// Stress-tests string ARC across fibers: each fiber builds a large string
+// through concatenation, sends it, and the receiver concatenates all results.
+// Tests that string RC is correct when strings pass fiber boundaries.
+
+use sync
+
+var ch sync::Channel[string]
+
+fn{#async} build_string(id i64, depth i64) =
+  let s = "fiber-{id}"
+  let i i64 = 0
+  for i < depth:
+    s = s ++ "-{i}"
+    i = i + 1
+  await ch.send(s)
+
+fn main() =
+  let n i64 = 500
+  let depth i64 = 10
+  ch = sync::Channel[string].make(n)
+
+  let i i64 = 0
+  for i < n:
+    spawn build_string(i, depth)
+    i = i + 1
+
+  let combined = ""
+  let collected i64 = 0
+  for collected < n:
+    let s = await ch.recv()
+    combined = combined ++ s
+    collected = collected + 1
+
+  // The combined string should be non-empty
+  let l = len(combined)
+  if l == 0:
+    echo "FAIL: combined string is empty"
+    return
+
+  echo "fiber_string_storm: OK, collected {collected} strings, total len={l}"

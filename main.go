@@ -98,10 +98,13 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 			} else {
 				linkerFlags = append(linkerFlags, rest)
 			}
+
 			continue
 		}
+
 		break
 	}
+
 	return
 }
 
@@ -138,6 +141,7 @@ func main() {
 				}
 			}
 			runDirTests(file, extraFlags)
+
 			return
 		}
 	}
@@ -158,7 +162,12 @@ func main() {
 	}
 
 	// Parse
+	// Pre-scan for #no_parens macros from `use { } from` imports so the parser
+	// can do token substitution for them before parsing begins.
 	p := parser.New(tokens)
+	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens) {
+		p.RegisterNoParensMacro(name, expansion)
+	}
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		die("parse error: %v", parseErr)
@@ -177,6 +186,7 @@ func main() {
 			}
 			fmt.Println(ast.PrintStmt(stmt, 0))
 		}
+
 		return
 	}
 
@@ -190,7 +200,7 @@ func main() {
 		die("codegen error: %v", cgErr)
 	}
 
-	irText := mod.String()
+	irText := fixCoroAttrs(mod.String())
 
 	// Collect C sources and linker flags from loaded package source files.
 	// Packages may declare //!+file.c directives that need to be compiled in.
@@ -202,6 +212,32 @@ func main() {
 		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc))
 		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
 		fileCSources = append(fileCSources, pkgCSources...)
+	}
+
+	// Deduplicate C sources by path (a single .c helper may be referenced by
+	// multiple .tin files via //!+file.c; only compile it once).
+	{
+		seen := map[string]bool{}
+		deduped := fileCSources[:0]
+		for _, cs := range fileCSources {
+			if !seen[cs.path] {
+				seen[cs.path] = true
+				deduped = append(deduped, cs)
+			}
+		}
+		fileCSources = deduped
+	}
+	// Deduplicate linker flags too.
+	{
+		seen := map[string]bool{}
+		deduped := fileLinkerFlags[:0]
+		for _, f := range fileLinkerFlags {
+			if !seen[f] {
+				seen[f] = true
+				deduped = append(deduped, f)
+			}
+		}
+		fileLinkerFlags = deduped
 	}
 
 	// Collect linker flags: //! directives in the file + codegen link directives
@@ -297,6 +333,13 @@ func main() {
 	}
 }
 
+// fixCoroAttrs rewrites the string attribute form emitted by the llir library
+// ("presplitcoroutine") to the LLVM keyword attribute form (presplitcoroutine)
+// that the coro-split pass requires to detect coroutines.
+func fixCoroAttrs(ir string) string {
+	return strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
+}
+
 // compileIR writes the LLVM IR to a temp .ll file and invokes clang.
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
@@ -315,6 +358,24 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		return err
 	}
 	_ = llFile.Close()
+	if dumpPath := os.Getenv("TIN_DUMP_IR"); dumpPath != "" {
+		_ = os.WriteFile(dumpPath, []byte(ir), 0644)
+	}
+
+	// When the IR contains LLVM coroutine intrinsics (llvm.coro.*), clang must
+	// handle them internally at optimisation level >= O1. Clang's O1 pipeline
+	// runs coro-early -> coro-split -> coro-cleanup before the backend, which
+	// correctly splits each presplitcoroutine function into .resume/.destroy/
+	// .cleanup variants. Using an external `opt` step is unreliable (coro-elide
+	// can fold the splits incorrectly), and using -O2 causes the optimizer to
+	// propagate 'unreachable' backwards through the yield path.  -O1 is the
+	// safe default for any module that uses fibers.
+	hasCoro := strings.Contains(ir, "llvm.coro.")
+	llInputFile := llFile.Name()
+	optLevel := "-O2"
+	if hasCoro {
+		optLevel = "-O1"
+	}
 
 	// Find runtime .c alongside the tin binary
 	ex, _ := os.Executable()
@@ -332,7 +393,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		_ = irObj.Close()
 		defer func() { _ = os.Remove(irObjName) }()
 
-		clangIR := exec.Command("clang", "-O2", "-c", llFile.Name(), "-o", irObjName)
+		clangIR := exec.Command("clang", optLevel, "-c", llInputFile, "-o", irObjName)
 		clangIR.Stdout = os.Stdout
 		clangIR.Stderr = os.Stderr
 		if err := clangIR.Run(); err != nil {
@@ -359,6 +420,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 				for _, f := range tmpObjs {
 					_ = os.Remove(f)
 				}
+
 				return err
 			}
 			objs = append(objs, cObjName)
@@ -375,10 +437,11 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		ld := exec.Command("ld", ldArgs...)
 		ld.Stdout = os.Stdout
 		ld.Stderr = os.Stderr
+
 		return ld.Run()
 	}
 
-	args := []string{"-O2", llFile.Name()}
+	args := []string{optLevel, llInputFile}
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
 	}
@@ -392,6 +455,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	clang := exec.Command("clang", args...)
 	clang.Stdout = os.Stdout
 	clang.Stderr = os.Stderr
+
 	return clang.Run()
 }
 
@@ -425,12 +489,14 @@ func runDirTests(dir string, extraFlags []string) {
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", e.Name(), lexErr)
+
 			continue
 		}
 		p := parser.New(tokens)
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
+
 			continue
 		}
 		cg := codegen.New(fpath)
@@ -438,6 +504,7 @@ func runDirTests(dir string, extraFlags []string) {
 		mod, cgErr := cg.Generate(prog)
 		if cgErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", e.Name(), cgErr)
+
 			continue
 		}
 		if !cg.HasTests() {
@@ -460,6 +527,31 @@ func runDirTests(dir string, extraFlags []string) {
 			srcLinks = append(srcLinks, pkgLinks...)
 			fCSources = append(fCSources, pkgCSrcs...)
 		}
+		// Deduplicate C sources (same helper may be pulled in by multiple
+		// imported packages, e.g. sync_helpers.c from mutex/rwmutex/cond).
+		{
+			seen := map[string]bool{}
+			deduped := fCSources[:0]
+			for _, cs := range fCSources {
+				if !seen[cs.path] {
+					seen[cs.path] = true
+					deduped = append(deduped, cs)
+				}
+			}
+			fCSources = deduped
+		}
+		// Deduplicate link flags too.
+		{
+			seen := map[string]bool{}
+			deduped := srcLinks[:0]
+			for _, f := range srcLinks {
+				if !seen[f] {
+					seen[f] = true
+					deduped = append(deduped, f)
+				}
+			}
+			srcLinks = deduped
+		}
 		linkFlags := append(srcLinks, extraFlags...)
 
 		fmt.Printf("\n=== %s ===\n", e.Name())
@@ -468,6 +560,7 @@ func runDirTests(dir string, extraFlags []string) {
 		if tmpErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 			results = append(results, result{e.Name(), false})
+
 			continue
 		}
 		_ = tmp.Close()
@@ -476,10 +569,11 @@ func runDirTests(dir string, extraFlags []string) {
 			_ = os.Remove(name)
 		}(tmp.Name())
 
-		irText := mod.String()
+		irText := fixCoroAttrs(mod.String())
 		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 			results = append(results, result{e.Name(), false})
+
 			continue
 		}
 
@@ -495,6 +589,7 @@ func runDirTests(dir string, extraFlags []string) {
 
 	if len(results) == 0 {
 		fmt.Printf("no test files found in %s\n", dir)
+
 		return
 	}
 

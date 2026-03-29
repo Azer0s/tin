@@ -1,0 +1,565 @@
+// stdlib/json - JSON encoding and decoding
+//
+// ## Encoding
+//
+// json::encode(v) serialises any Tin value to a JSON string.
+// Struct field tags control the JSON key name and visibility:
+//
+//   struct user =
+//     id    i64    @"json:id"
+//     email string @"json:email_address"
+//     pwd   string @"json:-"       // skip this field
+//
+//   echo json::encode(user{id: 1, email: "a@b.com", pwd: "secret"})
+//   // {"id":1,"email_address":"a@b.com"}
+//
+// ## Parsing - untyped
+//
+// json::parse(s) returns a Value tree for untyped field access:
+//
+//   let v = json::parse(s)
+//   echo v.get("name").as_string()
+//   for k in v.keys():
+//     echo k
+//
+// ## Parsing - typed (generic)
+//
+// json::parse[T](s) decodes JSON directly into a struct T using reflection.
+// Field tags @"json:key" map JSON keys to struct fields; @"json:-" skips.
+//
+//   struct point = x i64  y i64
+//   let p = json::parse[point]("{\"x\":3,\"y\":4}")
+//   echo p.x    // 3
+//
+// ## String iteration
+//
+// json.tin uses `for c in s:` (for-in over strings) throughout its
+// helpers, demonstrating the feature on real code.
+
+use str
+
+// Low-level C helpers
+
+fn _tin_string_from_bytes(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
+fn _tin_string_data(s string) *byte              = extern("_tin_string_data")
+fn _tin_buf_alloc(n i64) *byte                   = extern("_tin_buf_alloc")
+fn _tin_buf_realloc(ptr *byte, n i64) *byte      = extern("_tin_buf_realloc")
+fn _tin_buf_free(ptr *byte)                      = extern("_tin_buf_free")
+fn _snprintf(buf *byte, size i64, fmt string, ...) i32 = extern("snprintf")
+fn _atof(s string) f64 = extern("atof")
+
+// Kind enum
+
+// Kind identifies the type of a parsed JSON value.
+enum Kind =
+  null_v,
+  bool_v,
+  int_v,
+  float_v,
+  string_v,
+  array_v,
+  object_v,
+
+// Value
+
+struct Value =
+  kind  Kind
+  bval  bool
+  ival  i64
+  fval  f64
+  sval  string
+  items [*Value]
+  kkeys [string]
+
+  fn is_null(this Value) bool   = return this.kind == Kind.null_v
+  fn is_bool(this Value) bool   = return this.kind == Kind.bool_v
+  fn is_int(this Value) bool    = return this.kind == Kind.int_v
+  fn is_float(this Value) bool  = return this.kind == Kind.float_v
+  fn is_string(this Value) bool = return this.kind == Kind.string_v
+  fn is_array(this Value) bool  = return this.kind == Kind.array_v
+  fn is_object(this Value) bool = return this.kind == Kind.object_v
+
+  fn as_bool(this Value) bool     = return this.bval
+  fn as_int(this Value) i64       = return this.ival
+  fn as_float(this Value) f64     = return this.fval
+  fn as_string(this Value) string = return this.sval
+  fn array_len(this Value) i64    = return len(this.items)
+
+  // keys returns the key list for a JSON object Value.
+  fn keys(this Value) [string] = return this.kkeys
+
+  // get returns the value for key in a JSON object, or a null Value.
+  fn get(this Value, key string) Value =
+    if this.kind != Kind.object_v:
+      return Value{kind: Kind.null_v}
+    let i i64 = 0
+    for i < len(this.kkeys):
+      if str::strcmp(this.kkeys[i], key) == 0:
+        return *this.items[i]
+      i = i + 1
+    return Value{kind: Kind.null_v}
+
+  // index returns the i-th element of a JSON array, or a null Value.
+  fn index(this Value, i i64) Value =
+    if this.kind != Kind.array_v || i < 0 || i >= len(this.items):
+      return Value{kind: Kind.null_v}
+    return *this.items[i]
+
+// String helpers
+
+// escape_string produces the JSON encoding of s including surrounding quotes.
+// Iterates over bytes with `for c in s:`.
+fn escape_string(s string) string =
+  let cap i64 = len(s) * 2 + 4
+  let buf      = _tin_buf_alloc(cap)
+  let n   i64  = 0
+
+  buf[n] = @'\"'
+  n = n + 1
+
+  for c in s:
+    if n + 6 >= cap:
+      cap = cap * 2
+      buf = _tin_buf_realloc(buf, cap)
+    if c == @'\"':
+      buf[n] = @'\\'  n = n + 1  buf[n] = @'\"'
+    else if c == @'\\':
+      buf[n] = @'\\'  n = n + 1  buf[n] = @'\\'
+    else if c == @'\n':
+      buf[n] = @'\\'  n = n + 1  buf[n] = @'n'
+    else if c == @'\r':
+      buf[n] = @'\\'  n = n + 1  buf[n] = @'r'
+    else if c == @'\t':
+      buf[n] = @'\\'  n = n + 1  buf[n] = @'t'
+    else:
+      buf[n] = c
+    n = n + 1
+
+  buf[n] = @'\"'
+  n = n + 1
+  let result = _tin_string_from_bytes(buf, n)
+  _tin_buf_free(buf)
+  return result
+
+// json_key maps a struct field to its JSON key via a @"json:..." tag.
+// Returns "" to signal that the field should be omitted.
+fn json_key(field_name string, tag string) string =
+  if len(tag) == 0:
+    return field_name
+  if len(tag) <= 5 || str::strncmp(tag, "json:", 5) != 0:
+    return field_name
+  let raw = _tin_string_data(tag)
+  if len(tag) == 6 && raw[5] == @'-':
+    return ""
+  return _tin_string_from_bytes(raw + 5, len(tag) - 5)
+
+// Encoding
+
+// encode_any encodes any value to JSON.
+// Primitives (bool, i64, f64, string, null) are encoded directly.
+// Struct-typed any values encode as null when called directly (use encode[T] for structs).
+fn encode_any(v any) string =
+  let t = typeof(v)
+  if t == 'none:
+    return "null"
+  if t == 'bool:
+    if v as bool:
+      return "true"
+    return "false"
+  if t == 'i64:
+    let n = v as i64
+    return "{n}"
+  if t == 'f64:
+    let f = v as f64
+    let buf = _tin_buf_alloc(64)
+    let w i32 = _snprintf(buf, 64, "%g", f)
+    let s = _tin_string_from_bytes(buf, w as i64)
+    _tin_buf_free(buf)
+    return s
+  if t == 'string:
+    return escape_string(v as string)
+  return "null"
+
+// _encode_any[T] encodes an any value to JSON with full struct type dispatch.
+// The phantom type parameter T forces per-instantiation compilation at each call site,
+// which means the fieldnames(v) call inside has access to all struct types registered
+// in the caller's module - including user-defined nested struct types.
+// Call as _encode_any[T](val) from within encode[T] to encode field values.
+fn _encode_any[T](v any, _unused T) string =
+  let t = typeof(v)
+  if t == 'none:
+    return "null"
+  if t == 'bool:
+    if v as bool:
+      return "true"
+    return "false"
+  if t == 'i64:
+    let n = v as i64
+    return "{n}"
+  if t == 'f64:
+    let f = v as f64
+    let buf = _tin_buf_alloc(64)
+    let w i32 = _snprintf(buf, 64, "%g", f)
+    let s = _tin_string_from_bytes(buf, w as i64)
+    _tin_buf_free(buf)
+    return s
+  if t == 'string:
+    return escape_string(v as string)
+  // Struct: fieldnames(v: any) compiled in instantiation context -> full type dispatch
+  // Handles nested user-defined struct types because the dispatch table is built at the
+  // call site (user module's third pass) rather than at json.tin compilation time.
+  let fields = fieldnames(v)
+  let nf = len(fields)
+  if nf == 0:
+    return "null"
+  let out = "{"
+  let written i64 = 0
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i]
+    let jkey string = json_key(fname, fieldtag(v, fname))
+    if len(jkey) > 0:
+      if written > 0:
+        out = out ++ ","
+      out = out ++ escape_string(jkey) ++ ":" ++ _encode_any[T](getfield(v, fname), _unused)
+      written = written + 1
+    i = i + 1
+  return out ++ "}"
+
+// encode[T] serialises a value of type T to a JSON string.
+// T may be any primitive type, string, struct, or nested struct.
+// Struct fields are encoded using compile-time reflection so all user-defined
+// types - including nested structs and tuples - are supported automatically.
+// Field tags control JSON keys: @"json:key" renames, @"json:-" omits.
+//
+//   encode(42 as i64)                -> "42"
+//   encode(true)                     -> "true"
+//   encode("hi")                     -> "\"hi\""
+//   encode(point{x:1,y:2})          -> "{\"x\":1,\"y\":2}"
+//   encode(nested{inner: point{...}}) -> nested JSON objects
+//   encode((10, "hello"))            -> "{\"a\":10,\"b\":\"hello\"}"
+fn encode[T](v T) string =
+  let t = typeof(v)
+
+  if t == 'none:
+    return "null"
+  if t == 'bool:
+    if v as bool:
+      return "true"
+    return "false"
+  if t == 'i64:
+    let n = v as i64
+    return "{n}"
+  if t == 'f64:
+    let f = v as f64
+    let buf = _tin_buf_alloc(64)
+    let w i32 = _snprintf(buf, 64, "%g", f)
+    let s = _tin_string_from_bytes(buf, w as i64)
+    _tin_buf_free(buf)
+    return s
+  if t == 'string:
+    let sv T = v
+    return escape_string(sv as string)
+
+  // Struct (including tuples): iterate fields via compile-time reflection on T.
+  // Uses _encode_any[T] so that nested struct fields are encoded recursively with
+  // full struct type dispatch (handles user-defined nested struct types).
+  let fields  = fieldnames(v)
+  let nf      = len(fields)
+  if nf == 0:
+    return "null"
+
+  let out     = "{"
+  let written i64 = 0
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i]
+    let jkey  string = json_key(fname, fieldtag(v, fname))
+    if len(jkey) > 0:
+      if written > 0:
+        out = out ++ ","
+      out = out ++ escape_string(jkey) ++ ":" ++ _encode_any[T](getfield(v, fname), v)
+      written = written + 1
+    i = i + 1
+  return out ++ "}"
+
+// Internal parser
+
+struct Parser =
+  src *byte
+  pos i64
+  len i64
+
+  fn peek(this Parser) byte =
+    if this.pos >= this.len:
+      return 0
+    return this.src[this.pos]
+
+  fn advance(this *Parser) byte =
+    let c = this.src[this.pos]
+    this.pos = this.pos + 1
+    return c
+
+  fn skip_ws(this *Parser) =
+    for this.pos < this.len:
+      let c = this.src[this.pos]
+      if c != @' ' && c != @'\t' && c != @'\n' && c != @'\r':
+        break
+      this.pos = this.pos + 1
+
+  fn at_end(this Parser) bool = return this.pos >= this.len
+
+fn parse_str(p *Parser) string =
+  p.advance()  // consume opening "
+  let buf = _tin_buf_alloc(256)
+  let cap i64 = 256
+  let n   i64 = 0
+  for !p.at_end():
+    let c = p.advance()
+    if c == @'\"': break
+    let out byte = c
+    if c == @'\\':
+      if p.at_end(): break
+      let esc = p.advance()
+      if esc == @'\"':      out = @'\"'
+      else if esc == @'\\': out = @'\\'
+      else if esc == @'/':  out = @'/'
+      else if esc == @'n':  out = @'\n'
+      else if esc == @'r':  out = @'\r'
+      else if esc == @'t':  out = @'\t'
+      else:                 out = esc
+    if n >= cap:
+      cap = cap * 2
+      buf = _tin_buf_realloc(buf, cap)
+    buf[n] = out
+    n = n + 1
+  let result = _tin_string_from_bytes(buf, n)
+  _tin_buf_free(buf)
+  return result
+
+fn parse_int_str(s string) i64 =
+  let src = _tin_string_data(s)
+  let n   = len(s)
+  let neg = false
+  let i   i64 = 0
+  let r   i64 = 0
+  if i < n && src[i] == @'-':
+    neg = true
+    i = i + 1
+  for i < n:
+    let c = src[i]
+    if c < @'0' || c > @'9': break
+    r = r * 10 + (c - @'0') as i64
+    i = i + 1
+  if neg: return -r
+  return r
+
+fn parse_number(p *Parser) *Value =
+  let start    = p.pos
+  let is_float = false
+  if p.peek() == @'-': p.advance()
+  for !p.at_end():
+    let c = p.peek()
+    if c < @'0' || c > @'9': break
+    p.advance()
+  if !p.at_end() && p.peek() == @'.':
+    is_float = true
+    p.advance()
+    for !p.at_end():
+      let c = p.peek()
+      if c < @'0' || c > @'9': break
+      p.advance()
+  if !p.at_end() && (p.peek() == @'e' || p.peek() == @'E'):
+    is_float = true
+    p.advance()
+    if !p.at_end() && (p.peek() == @'+' || p.peek() == @'-'): p.advance()
+    for !p.at_end():
+      let c = p.peek()
+      if c < @'0' || c > @'9': break
+      p.advance()
+  let num = _tin_string_from_bytes(p.src + start, p.pos - start)
+  if is_float:
+    return &Value{kind: Kind.float_v, fval: _atof(num)}
+  return &Value{kind: Kind.int_v, ival: parse_int_str(num)}
+
+fn parse_value(p *Parser) *Value  // forward declaration
+
+fn parse_array(p *Parser) *Value =
+  p.advance()  // consume '['
+  let items [*Value] = []
+  p.skip_ws()
+  if !p.at_end() && p.peek() == @']':
+    p.advance()
+    return &Value{kind: Kind.array_v, items: items}
+  for !p.at_end():
+    p.skip_ws()
+    items ++= parse_value(p)
+    p.skip_ws()
+    if p.at_end(): break
+    let c = p.peek()
+    if c == @']':
+      p.advance()
+      break
+    if c == @',': p.advance()
+  return &Value{kind: Kind.array_v, items: items}
+
+fn parse_object(p *Parser) *Value =
+  p.advance()  // consume '{'
+  let items [*Value] = []
+  let kkeys [string] = []
+  p.skip_ws()
+  if !p.at_end() && p.peek() == @'}':
+    p.advance()
+    return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
+  for !p.at_end():
+    p.skip_ws()
+    if p.at_end() || p.peek() != @'\"': break
+    let key = parse_str(p)
+    p.skip_ws()
+    if !p.at_end() && p.peek() == @':': p.advance()
+    p.skip_ws()
+    kkeys ++= key
+    items ++= parse_value(p)
+    p.skip_ws()
+    if p.at_end(): break
+    let c = p.peek()
+    if c == @'}':
+      p.advance()
+      break
+    if c == @',': p.advance()
+  return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
+
+fn parse_value(p *Parser) *Value =
+  p.skip_ws()
+  if p.at_end():
+    return &Value{kind: Kind.null_v}
+  let c = p.peek()
+  if c == @'\"': return &Value{kind: Kind.string_v, sval: parse_str(p)}
+  if c == @'[':  return parse_array(p)
+  if c == @'{':  return parse_object(p)
+  if c == @'t':
+    p.pos = p.pos + 4
+    return &Value{kind: Kind.bool_v, bval: true}
+  if c == @'f':
+    p.pos = p.pos + 5
+    return &Value{kind: Kind.bool_v, bval: false}
+  if c == @'n':
+    p.pos = p.pos + 4
+    return &Value{kind: Kind.null_v}
+  return parse_number(p)
+
+// Public API
+
+// parse parses a JSON string and returns a Value tree for untyped inspection.
+//
+//   let v = json::parse(s)
+//   v.get("name").as_string()
+//   for k in v.keys():
+//     echo k
+fn parse(s string) Value =
+  if len(s) == 0:
+    return Value{kind: Kind.null_v}
+  let p = Parser{src: _tin_string_data(s), pos: 0, len: len(s)}
+  return *parse_value(&p)
+
+// _parse_nested_any[T] populates nested struct fields from a JSON Value object.
+// `zero` is an any-boxed zero value of the nested struct type (obtained via getfield).
+// The phantom type parameter T ensures this generic is compiled at the call site with
+// full struct type dispatch tables, so fieldnames/fieldtypes work for user-defined types.
+// Returns the updated any value with fields set from doc.
+fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
+  let fields = fieldnames(zero)   // runtime dispatch, full tables in instantiation
+  let ftypes = fieldtypes(zero)   // runtime dispatch, full tables in instantiation
+  let nf = len(fields)
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i]
+    let jval = doc.get(fname)
+    if !jval.is_null():
+      let ftype = ftypes[i]
+      match jval.kind:
+        case Kind.int_v:
+          if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
+            setfield(zero, fname, jval.ival)
+          else if ftype == 'f64:
+            setfield(zero, fname, jval.ival as f64)
+        case Kind.float_v:
+          if ftype == 'f64:
+            setfield(zero, fname, jval.fval)
+          else if ftype == 'i64:
+            setfield(zero, fname, jval.fval as i64)
+        case Kind.bool_v:
+          if ftype == 'bool:
+            setfield(zero, fname, jval.bval)
+        case Kind.string_v:
+          if ftype == 'string:
+            setfield(zero, fname, jval.sval)
+        case Kind.object_v:
+          // Recursively parse deeply-nested struct objects.
+          let nested_zero = getfield(zero, fname)
+          let nested = _parse_nested_any[T](nested_zero, jval, _unused)
+          setfield(zero, fname, nested)
+        default:
+          pass
+    i = i + 1
+  return zero
+
+// parse[T] parses a JSON string and decodes it directly into a value of type T.
+// T must be a struct.  Field tags @"json:key" rename fields; @"json:-" skips.
+// Unrecognised JSON keys are silently ignored.
+// Nested struct fields (Kind.object_v) are decoded recursively.
+//
+//   struct user =
+//     id   i64    @"json:id"
+//     name string @"json:name"
+//
+//   let u = json::parse[user]("{\"id\":1,\"name\":\"Alice\"}")
+//   echo u.name   // Alice
+fn parse[T](s string) T =
+  let doc    = parse(s)
+  let result T
+  if doc.is_null():
+    return result
+  let fields = fieldnames(result)
+  let ftypes = fieldtypes(result)
+  let nf     = len(fields)
+  let i i64  = 0
+  for i < nf:
+    let fname  string = fields[i]
+    let ftypei any    = ftypes[i]
+    let jkey   string = json_key(fname, fieldtag(result, fname))
+    if len(jkey) > 0:
+      let jval = doc.get(jkey)
+      if !jval.is_null():
+        let ftype = ftypei
+        match jval.kind:
+          case Kind.int_v:
+            if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
+              setfield(result, fname, jval.ival)
+            else if ftype == 'f64:
+              setfield(result, fname, jval.ival as f64)
+          case Kind.float_v:
+            if ftype == 'f64:
+              setfield(result, fname, jval.fval)
+            else if ftype == 'i64:
+              setfield(result, fname, jval.fval as i64)
+          case Kind.bool_v:
+            if ftype == 'bool:
+              setfield(result, fname, jval.bval)
+          case Kind.string_v:
+            if ftype == 'string:
+              setfield(result, fname, jval.sval)
+          case Kind.object_v:
+            // Nested struct field: get the zero-valued field as any, populate it,
+            // then set it back (coerce any->FieldType is handled by setfield's coerce).
+            let zero_nested = getfield(result, fname)
+            let populated = _parse_nested_any[T](zero_nested, jval, result)
+            setfield(result, fname, populated)
+          default:
+            pass
+    i = i + 1
+  return result
+
+export {
+  Kind, Value, parse, encode,
+} as json

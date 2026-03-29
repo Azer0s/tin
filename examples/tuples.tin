@@ -1,0 +1,95 @@
+// tuples.tin - Tuple types, literals, destructuring, and reflection
+//
+// Tuples are built-in generic structs with alphabetically-named fields (a, b, c, ...).
+// The type syntax (T1, T2) is shorthand for Tuple[T1, T2].
+// The literal syntax (e1, e2) creates a Tuple value.
+// Destructuring: let (x, y) = expr unpacks a Tuple.
+//
+// Build: tin build examples/tuples.tin
+// Run:   tin run   examples/tuples.tin
+
+use assert
+
+// Helper functions that return Tuples.
+fn min_max(arr [i64]) (i64, i64) =
+  let min i64 = arr[0]
+  let max i64 = arr[0]
+  for let i i64 in 0..len(arr) :
+    if arr[i] < min :
+      min = arr[i]
+    if arr[i] > max :
+      max = arr[i]
+  return (min, max)
+
+fn swap(x i64, y i64) (i64, i64) =
+  return (y, x)
+
+fn add_indexed(s string, idx i64) (i64, string) =
+  return (idx, s)
+
+// Type aliases using tuple shorthand
+type int_pair = (i64, i64)
+type int_bool = (i64, bool)
+
+test "basic tuple construction and field access" =
+  let t = (10, 20)
+  assert::equals(t.a, 10)
+  assert::equals(t.b, 20)
+
+test "tuple type shorthand as variable type" =
+  let p int_pair = (100, 200)
+  assert::equals(p.a, 100)
+  assert::equals(p.b, 200)
+
+test "function returning tuple shorthand" =
+  let result = swap(3, 7)
+  assert::equals(result.a, 7)
+  assert::equals(result.b, 3)
+
+test "tuple destructuring" =
+  let (lo, hi) = min_max([5, 2, 9, 1, 7])
+  assert::equals(lo, 1)
+  assert::equals(hi, 9)
+
+test "tuple destructuring from swap" =
+  let (x, y) = swap(42, 99)
+  assert::equals(x, 99)
+  assert::equals(y, 42)
+
+test "3-tuple construction and access" =
+  let t = (1, true, 3)
+  assert::equals(t.a, 1)
+  assert::ok(t.b)
+  assert::equals(t.c, 3)
+
+test "tuple reflection - typeof" =
+  let t = (1, true)
+  let name = typeof(t)
+  assert::equals_str(name, "Tuple__i64__bool")
+
+test "tuple reflection - fieldnames" =
+  let t = (1, 2, 3)
+  let names = fieldnames(t)
+  assert::equals(names.len, 3)
+  assert::equals_str(names[0], "a")
+  assert::equals_str(names[1], "b")
+  assert::equals_str(names[2], "c")
+
+test "tuple boxing and unboxing via any" =
+  let t = (42, true)
+  let boxed any = t as any
+  let t2 = boxed as (i64, bool)
+  assert::equals(t2.a, 42)
+  assert::ok(t2.b)
+
+test "tuple pointer" =
+  let t = (1, 2)
+  let ptr *(i64, i64) = &t
+  let v = *ptr
+  assert::equals(v.a, 1)
+  assert::equals(v.b, 2)
+
+test "indexed string tuple" =
+  let (idx, s) = add_indexed("hello", 5)
+  assert::equals(idx, 5)
+  assert::equals_str(s, "hello")

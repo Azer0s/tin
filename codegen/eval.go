@@ -87,6 +87,7 @@ func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
 	}
 
 	// Convert the result to an LLVM constant.
+
 	return ctfeValToLLVM(result, fd, cg)
 }
 
@@ -102,11 +103,14 @@ func evalBody(body ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	}
 	switch v := body.(type) {
 	case *ast.Block:
+
 		return evalBlock(v, copyEnv(env), cg, depth)
 	case *ast.WhereList:
+
 		return evalWhereList(v, env, cg, depth)
 	default:
 		// Single-expression body.
+
 		return evalNode(body, env, cg, depth)
 	}
 }
@@ -124,10 +128,12 @@ func evalBlock(blk *ast.Block, env map[string]ctfeVal, cg *CodeGen, depth int) (
 			if errors.As(err, &ret) {
 				return ret.val, nil
 			}
+
 			return ctfeVal{}, err
 		}
 		_ = val
 	}
+
 	return ctfeVal{kind: "i64"}, nil
 }
 
@@ -136,6 +142,7 @@ func evalWhereList(wl *ast.WhereList, env map[string]ctfeVal, cg *CodeGen, depth
 	for _, clause := range wl.Clauses {
 		if clause.Cond == nil {
 			// Wildcard "_" - always matches.
+
 			return evalNode(clause.Body, env, cg, depth)
 		}
 		cv, err := evalNode(clause.Cond, env, cg, depth)
@@ -153,6 +160,7 @@ func evalWhereList(wl *ast.WhereList, env map[string]ctfeVal, cg *CodeGen, depth
 			return evalNode(clause.Body, env, cg, depth)
 		}
 	}
+
 	return ctfeVal{kind: "i64"}, nil
 }
 
@@ -172,14 +180,19 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 	// --- Literals ---
 	case *ast.IntLit:
+
 		return ctfeVal{kind: "i64", i: v.Value}, nil
 	case *ast.FloatLit:
+
 		return ctfeVal{kind: "f64", f: v.Value}, nil
 	case *ast.BoolLit:
+
 		return ctfeVal{kind: "bool", b: v.Value}, nil
 	case *ast.StringLit:
+
 		return ctfeVal{kind: "string", s: v.Value}, nil
 	case *ast.CharLit:
+
 		return ctfeVal{kind: "i64", i: int64(v.Value)}, nil
 
 	// --- Variables ---
@@ -187,6 +200,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if cv, ok := env[v.Name]; ok {
 			return cv, nil
 		}
+
 		return ctfeVal{}, errNotConst
 
 	// --- Declarations / assignments (mutate env) ---
@@ -198,6 +212,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 			}
 			env[v.Name] = val
 		}
+
 		return ctfeVal{kind: "i64"}, nil
 
 	case *ast.AssignStmt:
@@ -210,6 +225,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		} else {
 			return ctfeVal{}, errNotConst // indexed or field assignment - bail
 		}
+
 		return ctfeVal{kind: "i64"}, nil
 
 	case *ast.AugAssignStmt:
@@ -232,6 +248,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 			return ctfeVal{}, err
 		}
 		env[id.Name] = result
+
 		return ctfeVal{kind: "i64"}, nil
 
 	case *ast.PostfixStmt:
@@ -247,8 +264,10 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 				cur.i--
 			}
 			env[id.Name] = cur
+
 			return old, nil
 		}
+
 		return ctfeVal{}, errNotConst
 
 	case *ast.UnaryExpr:
@@ -263,8 +282,10 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		case "-":
 			switch operand.kind {
 			case "i64":
+
 				return ctfeVal{kind: "i64", i: -operand.i}, nil
 			case "f64":
+
 				return ctfeVal{kind: "f64", f: -operand.f}, nil
 			}
 		case "!":
@@ -276,6 +297,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 				return ctfeVal{kind: "i64", i: ^operand.i}, nil
 			}
 		}
+
 		return ctfeVal{}, errNotConst
 
 	// --- Binary expressions ---
@@ -295,6 +317,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 			if v.Op == "||" && left.b {
 				return ctfeVal{kind: "bool", b: true}, nil
 			}
+
 			return evalNode(v.Right, env, cg, depth)
 		}
 		left, err := evalNode(v.Left, env, cg, depth)
@@ -305,6 +328,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if err != nil {
 			return ctfeVal{}, err
 		}
+
 		return evalBinOp(left, v.Op, right)
 
 	// --- Ternary ---
@@ -319,6 +343,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if cond.b {
 			return evalNode(v.Then, env, cg, depth)
 		}
+
 		return evalNode(v.Else, env, cg, depth)
 
 	// --- Control flow ---
@@ -327,6 +352,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if err != nil {
 			return ctfeVal{}, err
 		}
+
 		return ctfeVal{}, ctfeReturn{val: val}
 
 	case *ast.IfStmt:
@@ -355,13 +381,16 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if v.Else != nil {
 			return evalBlock(v.Else, copyEnv(env), cg, depth)
 		}
+
 		return ctfeVal{kind: "i64"}, nil
 
 	case *ast.ForStmt:
+
 		return evalForStmt(v, env, cg, depth)
 
 	// --- Block / tagged block ---
 	case *ast.Block:
+
 		return evalBlock(v, copyEnv(env), cg, depth)
 
 	case *ast.TaggedBlock:
@@ -369,26 +398,32 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		if hasTag(v.Tags, "allow_sideffect") {
 			return ctfeVal{}, errNotConst
 		}
+
 		return evalNode(v.Body, env, cg, depth)
 
 	// --- Calls ---
 	case *ast.CallExpr:
+
 		return evalCallExpr(v, env, cg, depth)
 
 	// --- Where list (expression-position where) ---
 	case *ast.WhereList:
+
 		return evalWhereList(v, env, cg, depth)
 
 	// --- Wrapper statements ---
 	case *ast.ExprStmt:
+
 		return evalNode(v.Expr, env, cg, depth)
 
 	// --- Echo: #pure functions cannot echo; bail anyway to be safe ---
 	case *ast.EchoStmt:
+
 		return ctfeVal{}, errNotConst
 
 	default:
 		// Unknown node type - cannot evaluate.
+
 		return ctfeVal{}, errNotConst
 	}
 }
@@ -423,6 +458,7 @@ func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int)
 				if errors.As(err, &ret) {
 					return ctfeVal{}, err // propagate return
 				}
+
 				return ctfeVal{}, err
 			}
 			// Post
@@ -440,12 +476,20 @@ func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int)
 				env[k] = cv
 			}
 		}
+
 		return ctfeVal{kind: "i64"}, nil
 
 	case ast.ForIn:
 		// For-in loops require range evaluation - not supported yet.
+
+		return ctfeVal{}, errNotConst
+
+	case ast.ForWhile:
+		// While loops are not supported in CTFE yet.
+
 		return ctfeVal{}, errNotConst
 	}
+
 	return ctfeVal{}, errNotConst
 }
 
@@ -496,42 +540,58 @@ func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 		l, r := left.i, right.i
 		switch op {
 		case "+":
+
 			return ctfeVal{kind: "i64", i: l + r}, nil
 		case "-":
+
 			return ctfeVal{kind: "i64", i: l - r}, nil
 		case "*":
+
 			return ctfeVal{kind: "i64", i: l * r}, nil
 		case "/":
 			if r == 0 {
 				return ctfeVal{}, fmt.Errorf("CTFE: division by zero")
 			}
+
 			return ctfeVal{kind: "i64", i: l / r}, nil
 		case "%":
 			if r == 0 {
 				return ctfeVal{}, fmt.Errorf("CTFE: modulo by zero")
 			}
+
 			return ctfeVal{kind: "i64", i: l % r}, nil
 		case "&":
+
 			return ctfeVal{kind: "i64", i: l & r}, nil
 		case "|":
+
 			return ctfeVal{kind: "i64", i: l | r}, nil
 		case "^":
+
 			return ctfeVal{kind: "i64", i: l ^ r}, nil
 		case "<<":
+
 			return ctfeVal{kind: "i64", i: l << uint(r)}, nil
 		case ">>":
+
 			return ctfeVal{kind: "i64", i: l >> uint(r)}, nil
 		case "==":
+
 			return ctfeVal{kind: "bool", b: l == r}, nil
 		case "!=":
+
 			return ctfeVal{kind: "bool", b: l != r}, nil
 		case "<":
+
 			return ctfeVal{kind: "bool", b: l < r}, nil
 		case "<=":
+
 			return ctfeVal{kind: "bool", b: l <= r}, nil
 		case ">":
+
 			return ctfeVal{kind: "bool", b: l > r}, nil
 		case ">=":
+
 			return ctfeVal{kind: "bool", b: l >= r}, nil
 		}
 	}
@@ -541,26 +601,37 @@ func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 		l, r := left.f, right.f
 		switch op {
 		case "+":
+
 			return ctfeVal{kind: "f64", f: l + r}, nil
 		case "-":
+
 			return ctfeVal{kind: "f64", f: l - r}, nil
 		case "*":
+
 			return ctfeVal{kind: "f64", f: l * r}, nil
 		case "/":
+
 			return ctfeVal{kind: "f64", f: l / r}, nil
 		case "**":
+
 			return ctfeVal{kind: "f64", f: math.Pow(l, r)}, nil
 		case "==":
+
 			return ctfeVal{kind: "bool", b: l == r}, nil
 		case "!=":
+
 			return ctfeVal{kind: "bool", b: l != r}, nil
 		case "<":
+
 			return ctfeVal{kind: "bool", b: l < r}, nil
 		case "<=":
+
 			return ctfeVal{kind: "bool", b: l <= r}, nil
 		case ">":
+
 			return ctfeVal{kind: "bool", b: l > r}, nil
 		case ">=":
+
 			return ctfeVal{kind: "bool", b: l >= r}, nil
 		}
 	}
@@ -582,8 +653,10 @@ func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 	if left.kind == "bool" && right.kind == "bool" {
 		switch op {
 		case "==":
+
 			return ctfeVal{kind: "bool", b: left.b == right.b}, nil
 		case "!=":
+
 			return ctfeVal{kind: "bool", b: left.b != right.b}, nil
 		}
 	}
@@ -601,6 +674,7 @@ func copyEnv(env map[string]ctfeVal) map[string]ctfeVal {
 	for k, v := range env {
 		out[k] = v
 	}
+
 	return out
 }
 
@@ -615,17 +689,21 @@ func ctfeValToLLVM(v ctfeVal, fd *ast.FuncDecl, cg *CodeGen) (value.Value, error
 			return constant.NewInt(it, v.i), nil
 		}
 		// Default to i64.
+
 		return constant.NewInt(irtypes.I64, v.i), nil
 	case "f64":
+
 		return constant.NewFloat(irtypes.Double, v.f), nil
 	case "bool":
 		b := int64(0)
 		if v.b {
 			b = 1
 		}
+
 		return constant.NewInt(irtypes.I1, b), nil
 	}
 	// Strings and other types require fat-pointer construction - not a simple constant.
+
 	return nil, nil
 }
 
@@ -638,28 +716,40 @@ func (cg *CodeGen) resolveReturnType(fd *ast.FuncDecl) irtypes.Type {
 	case *ast.SimpleType:
 		switch t.Name {
 		case "i8":
+
 			return irtypes.I8
 		case "i16":
+
 			return irtypes.I16
 		case "i32":
+
 			return irtypes.I32
 		case "i64", "int":
+
 			return irtypes.I64
 		case "u8":
+
 			return irtypes.I8
 		case "u16":
+
 			return irtypes.I16
 		case "u32":
+
 			return irtypes.I32
 		case "u64":
+
 			return irtypes.I64
 		case "f32":
+
 			return irtypes.Float
 		case "f64":
+
 			return irtypes.Double
 		case "bool":
+
 			return irtypes.I1
 		}
 	}
+
 	return irtypes.I64
 }

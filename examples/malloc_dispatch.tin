@@ -2,7 +2,6 @@
 //
 // Demonstrates:
 //   - sizeof(T) returning the correct byte size of any type
-//   - data types have a 1-byte tag prepended: sizeof(maybe[i64]) == 9 > 8
 //   - heap-allocating a struct via mem::malloc(sizeof(animal))
 //   - casting *void -> *animal and initialising fields through the pointer
 //   - wrapping the heap pointer in a speak fat-pointer for dynamic dispatch
@@ -12,10 +11,6 @@
 
 use io
 use mem
-
-// Data type
-
-data maybe[t] = t | None
 
 // Trait
 
@@ -56,8 +51,6 @@ io::printf("sizeof(cat)        = %lld\n", sizeof(cat))
 io::printf("sizeof(speak)      = %lld\n", sizeof(speak))
 io::printf("sizeof(i64)        = %lld\n", sizeof(i64))
 io::printf("sizeof(i32)        = %lld\n", sizeof(i32))
-// data types: { i32 type_id, i8 variant_tag, [8 x i8] payload } = 16 (aligned)
-io::printf("sizeof(maybe[i64]) = %lld\n", sizeof(maybe[i64]))
 
 // Stack dispatch (constrained generic)
 
@@ -108,6 +101,3 @@ test "heap cat dispatch" =
   assert::equals_str(hc.sound(), "Meow!")
   assert::equals_str(hc.label(), "cat")
   mem::free(raw)
-
-test "sizeof data type includes tag" =
-  assert::ok(sizeof(maybe[i64]) > 8)

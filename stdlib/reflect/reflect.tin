@@ -20,18 +20,18 @@ fn kind(t atom) string = extern("_tin_reflect_kind")
 
 // elem returns the inner type atom for pointer or array types
 // For '*point returns 'point; for '[i64] returns 'i64
-// Returns "" for all other types
-fn elem(t atom) string = extern("_tin_reflect_elem")
+// Returns '' for all other types
+fn elem(t atom) atom = extern("_tin_reflect_elem")
 
 // fn_ret returns the return type atom for a function type atom
 // For 'fn(i64,f64)bool returns 'bool
-// Returns "" for non-function types
-fn fn_ret(t atom) string = extern("_tin_reflect_fn_ret")
+// Returns '' for non-function types
+fn fn_ret(t atom) atom = extern("_tin_reflect_fn_ret")
 
 // fn_params returns the list of parameter type atoms for a function type atom
 // For 'fn(i64,f64)bool returns ['i64, 'f64]
 // Returns [] for non-function types or zero-argument functions
-fn fn_params(t atom) [string] = extern("_tin_reflect_fn_params")
+fn fn_params(t atom) [atom] = extern("_tin_reflect_fn_params")
 
 // is_ptr returns 1 if the atom denotes a pointer type (*T), 0 otherwise
 fn is_ptr(t atom) i64 = extern("_tin_reflect_is_ptr")

@@ -1,0 +1,91 @@
+// test_overloading.tin - comprehensive tests for function and method overloading.
+use assert
+
+// top-level function overloads by type
+
+fn double(n i64) i64 =
+  return n * 2
+
+fn double(x f64) f64 =
+  return x * 2.0
+
+fn greet(name string) string =
+  return "Hello, " ++ name
+
+fn greet(times i64, name string) string =
+  let result string = ""
+  let i i64 = 0
+  for i < times:
+    result = result ++ name ++ " "
+    i = i + 1
+  return result
+
+// top-level overloads by arity
+
+fn sum(a i64) i64 =
+  return a
+
+fn sum(a i64, b i64) i64 =
+  return a + b
+
+fn sum(a i64, b i64, c i64) i64 =
+  return a + b + c
+
+// struct method overloads
+
+struct Box =
+  value i64
+
+  // Same method name, different argument type
+  fn set(this *Box, n i64) =
+    this.value = n
+
+  fn set(this *Box, s string) =
+    this.value = len(s)
+
+  // Same method name, different arity
+  fn scale(this Box) i64 =
+    return this.value
+
+  fn scale(this Box, factor i64) i64 =
+    return this.value * factor
+
+  fn scale(this Box, a i64, b i64) i64 =
+    return this.value * a * b
+
+// tests
+
+test "overload by type - i64" =
+  assert::equals(double(5), 10)
+  assert::equals(double(0), 0)
+  assert::equals(double(-3), -6)
+
+test "overload by type - f64" =
+  assert::ok(double(2.5) > 4.9)
+  assert::ok(double(2.5) < 5.1)
+
+test "overload by type - string" =
+  assert::equals_str(greet("World"), "Hello, World")
+  assert::equals_str(greet("Alice"), "Hello, Alice")
+
+test "overload by arity - string and i64+string" =
+  assert::equals_str(greet(2, "hi"), "hi hi ")
+  assert::equals_str(greet(1, "yo"), "yo ")
+
+test "overload by arity - sum" =
+  assert::equals(sum(7), 7)
+  assert::equals(sum(1, 2), 3)
+  assert::equals(sum(1, 2, 3), 6)
+
+test "method overload by type - set" =
+  let b = Box{value: 0}
+  b.set(42)
+  assert::equals(b.value, 42)
+  b.set("hello")
+  assert::equals(b.value, 5)
+
+test "method overload by arity - scale" =
+  let b = Box{value: 3}
+  assert::equals(b.scale(), 3)
+  assert::equals(b.scale(4), 12)
+  assert::equals(b.scale(2, 3), 18)

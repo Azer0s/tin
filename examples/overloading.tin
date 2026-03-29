@@ -1,0 +1,64 @@
+// examples/overloading.tin - function overloading by parameter arity and type.
+//
+// Multiple functions (or struct methods) may share the same name as long as
+// their parameter signatures differ. The compiler picks the best match at each
+// call site by comparing the evaluated argument types.
+
+// top-level function overloads
+
+// Overloads of `describe` differing by parameter type.
+fn describe(n i64) string =
+  return "integer: {n}"
+
+fn describe(s string) string =
+  return "string: " ++ s
+
+fn describe(b bool) string =
+  return "bool: {b}"
+
+// Overload by arity.
+fn add(a i64) i64 =
+  return a
+
+fn add(a i64, b i64) i64 =
+  return a + b
+
+fn add(a i64, b i64, c i64) i64 =
+  return a + b + c
+
+// struct method overloads
+
+struct Formatter =
+  prefix string
+
+  fn format(this Formatter, n i64) string =
+    return "{this.prefix}{n}"
+
+  fn format(this Formatter, s string) string =
+    return this.prefix ++ s
+
+  fn format(this Formatter, b bool) string =
+    return "{this.prefix}{b}"
+
+  fn format(this Formatter, x i64, y i64) string =
+    return "{this.prefix}{x},{y}"
+
+// main
+
+fn main() =
+  // top-level overloads by type
+  echo describe(42)          // integer: 42
+  echo describe("hello")     // string: hello
+  echo describe(true)        // bool: true
+
+  // top-level overloads by arity
+  echo add(10)               // 10
+  echo add(1, 2)             // 3
+  echo add(1, 2, 3)          // 6
+
+  // method overloads
+  let f = Formatter{prefix: ">> "}
+  echo f.format(99)          // >> 99
+  echo f.format("world")     // >> world
+  echo f.format(false)       // >> false
+  echo f.format(3, 4)        // >> 3,4

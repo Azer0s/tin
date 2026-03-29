@@ -52,6 +52,40 @@ The block is wrapped in a typed helper function, compiled to a standalone
 program, and executed. The result (printed via `echo`) is parsed back as a
 tin expression and substituted at the call site.
 
+CTFE macros are automatically tagged `#computed` - you can check for this
+tag with `typeof` or inspection tools to distinguish compile-time macros from
+simple (expression-body) macros.
+
+### Typed parameters
+
+Parameters **used in computation** should have explicit type annotations.
+Parameters used only as code fragments for backtick splicing do not need
+types - the compiler infers them from the call site.
+
+```tin
+// Typed parameters: n is used in computation -> annotate with i64
+macro factorial!(n i64) =
+  let result i64 = 1
+  let i i64 = 1
+  for i <= n:
+    result = result * i
+    i = i + 1
+  return result
+
+echo factorial!(10)   // 3628800
+
+// Mixed: a is used in computation (typed), b is a code fragment (untyped)
+macro add_to!(a i64, b) =
+  return a + b
+
+echo add_to!(5, counter)   // 5 + counter (counter may be any i64 expr)
+```
+
+Without type annotations, parameter types are inferred from the call-site
+arguments (e.g. an integer literal -> `i64`, a string literal -> `string`).
+Explicit types are preferred for clarity and correctness when the parameter
+appears in arithmetic or comparisons.
+
 ```rust
 // Iterative factorial  -  computed entirely at compile time
 macro factorial!(n) =
@@ -198,6 +232,96 @@ assert_pos!(5)   // clear: this is a compile-time expansion
 
 The `!` suffix is part of the name but is optional during lookup  -  the
 compiler recognises both `name!` and `name` when resolving macro calls.
+
+---
+
+## Macro tags
+
+Tags in `{...}` after `macro` change how the macro is called.
+
+### `#no_excl` - allow calling without `!`
+
+By default macro names must end with `!` at call sites. `#no_excl` removes
+this requirement:
+
+```tin
+macro{#no_excl} debug(x) = echo x
+
+debug(42)    // works without !
+debug!(42)   // also works
+```
+
+### `#no_parens` - statement macro with `:` body
+
+`#no_parens` marks a macro whose expansion produces a statement keyword that
+takes an indented body block. The macro itself is called without parentheses
+and is followed by `:`:
+
+```tin
+macro{#no_excl #no_parens} loop() = return `for true`
+
+loop:
+  echo "running"
+  break
+```
+
+The body after `:` is attached to the expanded keyword (here `for true:`).
+This is how the `loop` stdlib macro works.
+
+---
+
+## Stdlib macros (`use { name } from macros`)
+
+The `macros` package (`stdlib/macros/macros.tin`) provides commonly used
+macros. Import specific ones with selective syntax:
+
+```tin
+use { loop, async } from macros
+```
+
+### `loop` - infinite loop
+
+```tin
+use { loop } from macros
+
+loop:
+  // body runs forever until break
+  break
+```
+
+Expands to `for true:`. Tags: `#no_excl #no_parens`.
+
+### `async` - async function shorthand
+
+```tin
+use { async } from macros
+
+async worker(n i64) =   // same as fn{#async} worker(n i64) =
+  echo n
+```
+
+Expands to `fn{#async}`. Tags: `#no_excl #no_parens`.
+
+### Utility macros
+
+| Macro             | Expansion             | Example                           |
+|-------------------|-----------------------|-----------------------------------|
+| `min!(a, b)`      | `a < b ? a : b`       | `min!(x, 10)` -> smaller of x, 10 |
+| `max!(a, b)`      | `a > b ? a : b`       | `max!(x, 0)` -> non-negative x    |
+| `clamp!(x,lo,hi)` | `x<lo?lo:(x>hi?hi:x)` | `clamp!(v, 0, 255)`               |
+| `abs!(x)`         | `x < 0 ? -x : x`      | `abs!(-7)` -> `7`                 |
+| `dbg!(x)`         | `x`                   | identity; placeholder for debug   |
+| `todo!()`         | panic at runtime      | marks unimplemented code paths    |
+| `unreachable!()`  | panic at runtime      | marks branches that must not run  |
+
+```tin
+use { min, max, clamp, abs } from macros
+
+echo min!(3, 7)          // 3
+echo max!(-1, 0)         // 0
+echo clamp!(300, 0, 255) // 255
+echo abs!(-42)           // 42
+```
 
 ---
 

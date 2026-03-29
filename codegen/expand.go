@@ -26,6 +26,7 @@ func (cg *CodeGen) ExpandProgramMacros(prog *ast.Program) (*ast.Program, error) 
 		}
 		stmts = append(stmts, expanded)
 	}
+
 	return &ast.Program{Stmts: stmts}, nil
 }
 
@@ -50,14 +51,17 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.
 		body = es.Expr
 	}
 	expanded := substituteMacroNode(body, subst)
-	// Backtick body: parse content as Tin source.
+	// Backtick body: parse content as Tin source, then substitute params.
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
 		node, err := parseExprString(btl.Content)
 		if err != nil {
 			return nil, fmt.Errorf("macro %s: backtick parse error: %w", macro.Name, err)
 		}
-		return node, nil
+		// Params are not yet substituted (backtick is an opaque string); do it now.
+
+		return substituteMacroNode(node, subst), nil
 	}
+
 	return expanded, nil
 }
 
@@ -70,8 +74,16 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 
 	case *ast.CallExpr:
 		// Check whether this is a macro call.
-		if id, ok := n.Func.(*ast.Identifier); ok && strings.HasSuffix(id.Name, "!") {
-			macro := cg.lookupMacro(id.Name)
+		if id, ok := n.Func.(*ast.Identifier); ok {
+			var macro *ast.MacroDecl
+			if strings.HasSuffix(id.Name, "!") {
+				macro = cg.lookupMacro(id.Name)
+			} else {
+				// #no_excl: plain function call can invoke a macro tagged #no_excl.
+				if m, found := cg.macros[id.Name+"!"]; found && macroHasTag(m, "no_excl") {
+					macro = m
+				}
+			}
 			if macro != nil {
 				// Expand args first (nested macro calls).
 				expandedArgs := make([]ast.Node, len(n.Args))
@@ -82,6 +94,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 					}
 					expandedArgs[i] = ea
 				}
+
 				return cg.expandMacroToAST(macro, expandedArgs)
 			}
 		}
@@ -98,6 +111,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.CallExpr{Func: newFunc, Args: newArgs, TypeArgs: n.TypeArgs}, nil
 
 	case *ast.FuncDecl:
@@ -107,6 +121,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		}
 		out := *n
 		out.Body = newBody
+
 		return &out, nil
 
 	case *ast.Block:
@@ -118,6 +133,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 			}
 			newStmts = append(newStmts, es)
 		}
+
 		return &ast.Block{Stmts: newStmts}, nil
 
 	case *ast.ExprStmt:
@@ -125,6 +141,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.ExprStmt{Expr: newExpr}, nil
 
 	case *ast.EchoStmt:
@@ -132,6 +149,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.EchoStmt{Value: newVal}, nil
 
 	case *ast.ReturnStmt:
@@ -142,6 +160,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.ReturnStmt{Value: newVal}, nil
 
 	case *ast.VarDecl:
@@ -154,6 +173,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		}
 		out := *n
 		out.Value = newVal
+
 		return &out, nil
 
 	case *ast.AssignStmt:
@@ -161,6 +181,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.AssignStmt{Target: n.Target, Value: newVal}, nil
 
 	case *ast.AugAssignStmt:
@@ -168,6 +189,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.AugAssignStmt{Target: n.Target, Op: n.Op, Value: newVal}, nil
 
 	case *ast.IfStmt:
@@ -195,6 +217,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.IfStmt{Cond: newCond, Then: newThen, ElseIfs: newElseIfs, Else: newElse}, nil
 
 	case *ast.ForStmt:
@@ -224,6 +247,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		out.Post = newPost
 		out.Iter = newIter
 		out.Body = newBody
+
 		return &out, nil
 
 	case *ast.BinExpr:
@@ -235,6 +259,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.BinExpr{Left: newLeft, Right: newRight, Op: n.Op}, nil
 
 	case *ast.UnaryExpr:
@@ -242,6 +267,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.UnaryExpr{Expr: newExpr, Op: n.Op, Post: n.Post}, nil
 
 	case *ast.TernaryExpr:
@@ -257,6 +283,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.TernaryExpr{Cond: newCond, Then: newThen, Else: newElse}, nil
 
 	case *ast.FieldAccess:
@@ -266,6 +293,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		}
 		out := *n
 		out.Expr = newExpr
+
 		return &out, nil
 
 	case *ast.IndexExpr:
@@ -277,6 +305,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.IndexExpr{Expr: newExpr, Index: newIdx}, nil
 
 	case *ast.TestDecl:
@@ -284,9 +313,11 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.TestDecl{Desc: n.Desc, Body: newBody}, nil
 
 	default:
+
 		return node, nil
 	}
 }
@@ -303,7 +334,19 @@ func (cg *CodeGen) expandBlockMacros(b *ast.Block) (*ast.Block, error) {
 	if eb, ok := expanded.(*ast.Block); ok {
 		return eb, nil
 	}
+
 	return b, nil
+}
+
+// macroHasTag reports whether a MacroDecl has a given tag (e.g. "no_excl").
+func macroHasTag(m *ast.MacroDecl, tag string) bool {
+	for _, t := range m.Tags {
+		if t == tag {
+			return true
+		}
+	}
+
+	return false
 }
 
 // lookupMacro tries to find a macro by the full name (e.g. "square!") in cg.macros.
@@ -321,5 +364,6 @@ func (cg *CodeGen) lookupMacro(name string) *ast.MacroDecl {
 			return m
 		}
 	}
+
 	return nil
 }

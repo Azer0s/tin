@@ -1,0 +1,91 @@
+// examples/arc_stress/fiber_channel_close.tin
+//
+// Memory safety tests for channel close scenarios.
+// Run under valgrind: no leaks, no invalid accesses.
+//
+// Scenarios:
+//   1. Close channel with strings still in buffer - deinit must free them.
+//   2. Blocked sender unblocks when receiver drains - string must not leak.
+//   3. Drain closed channel completely - is_closed_empty becomes true.
+//   4. Multiple concurrent fiber readers each receive one item via park/unpark.
+
+use sync
+
+var ch2       sync::Channel[string]
+var ch4       sync::Channel[i64]
+var read_done sync::Channel[i64]
+
+fn{#async} blocking_sender(s string) =
+  // ch2 is full (capacity 1, already has one item). This send blocks until
+  // the receiver drains ch2; s is released normally when this fiber exits.
+  await ch2.send(s)
+
+fn{#async} waiting_reader(id i64) =
+  // Park on empty ch4 until a value is sent, then signal done.
+  await ch4.recv()
+  await read_done.send(id)
+
+fn main() =
+  // Scenario 1: close with strings still in buffer
+  // Three strings are sent but never recv'd. When ch1 goes out of scope,
+  // deinit calls _tin_channel_free which drains and releases each string.
+  let ch1 = sync::Channel[string].make(8)
+  await ch1.send("alpha")
+  await ch1.send("beta")
+  await ch1.send("gamma")
+  ch1.close()
+  // ch1 goes out of scope here; deinit frees the 3 buffered strings.
+  echo "scenario 1: close with buffered strings - freed at deinit"
+
+  // Scenario 2: blocked sender unblocks when receiver drains
+  ch2 = sync::Channel[string].make(1)
+  // Fill ch2 so the next send will block.
+  await ch2.send("occupant")
+  // Spawn a sender that blocks (ch2 is full); it will unblock once we drain.
+  let sf = spawn blocking_sender("queued-value")
+  // Drain ch2 - this frees space and unblocks blocking_sender.
+  let occ = await ch2.recv()
+  // Wait for blocking_sender to finish enqueuing its value.
+  await sf
+  // Drain the value that blocking_sender sent.
+  let queued = await ch2.recv()
+  echo "scenario 2: blocked sender unblocked - occupant={occ} queued={queued}"
+
+  // Scenario 3: drain closed channel, is_closed_empty becomes true
+  let ch3 = sync::Channel[i64].make(4)
+  await ch3.send(1)
+  await ch3.send(2)
+  await ch3.send(3)
+  ch3.close()
+  await ch3.recv()
+  await ch3.recv()
+  await ch3.recv()
+  if ch3.is_closed_empty():
+    echo "scenario 3: is_closed_empty after full drain - OK"
+  else:
+    echo "scenario 3: FAIL"
+
+  // Scenario 4: multiple concurrent fiber readers woken by send
+  // Spawn readers before any items exist so they park on the empty channel.
+  // Then send one item per reader - each send unparks one parked recv_fiber.
+  // Tests the fiber park/unpark path through _tin_channel_recv_park.
+  let n_readers i64 = 3
+  ch4       = sync::Channel[i64].make(n_readers)
+  read_done = sync::Channel[i64].make(n_readers)
+  let r i64 = 0
+  for r < n_readers:
+    spawn waiting_reader(r)
+    r = r + 1
+  // Send items after spawning - each send unparks one parked reader fiber.
+  let s i64 = 0
+  for s < n_readers:
+    await ch4.send(s + 1)
+    s = s + 1
+  // Collect completion signals from all readers.
+  let done i64 = 0
+  for done < n_readers:
+    await read_done.recv()
+    done = done + 1
+  echo "scenario 4: {n_readers} concurrent readers woken by send - OK"
+
+  echo "fiber_channel_close: OK"

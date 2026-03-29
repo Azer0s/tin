@@ -111,13 +111,6 @@ type UnionDecl struct {
 	IsNamed bool // "union u_named = as_i8 i8 | as_string string"
 }
 
-type DataDecl struct {
-	base
-	Name       string
-	TypeParams []string
-	Variants   []DataVariant
-}
-
 // ArrayDestructDecl let [a, b] [T] = expr
 //
 //	let [a, b] [T1, T2] = expr  (per-slot types, implies [any] source)
@@ -155,14 +148,18 @@ func (t *TupleArrayType) String() string {
 		}
 		s += e.String()
 	}
+
 	return s + "]"
 }
 
 type UseDecl struct {
 	base
-	Path     string // "io" or "extern"
-	IsExtern bool
-	Imports  []UseImport // for "use extern (...)"
+	Path       string // "io" or "std::math" (module path) or "./<file>" (file path)
+	IsExtern   bool
+	Imports    []UseImport // for "use extern (...)"
+	IsFile     bool        // true when path was given as a string literal: use "./foo.tin"
+	Names      []string    // selective import: names from `use { name1, name2 } from path`
+	FromSyntax bool        // true when `use { ... } from` syntax was used
 }
 
 type ExportDecl struct {
@@ -180,10 +177,11 @@ type TestDecl struct {
 
 type MacroDecl struct {
 	base
-	Name   string
-	Tags   []string
-	Params []string
-	Body   Node
+	Name       string
+	Tags       []string
+	Params     []string
+	ParamTypes []string // parallel to Params; "" means untyped (infer from call site)
+	Body       Node
 }
 
 // Statements
@@ -237,6 +235,7 @@ type ForKind int
 const (
 	ForCStyle ForKind = iota
 	ForIn
+	ForWhile // condition-only: for <bool-expr>:
 )
 
 type MatchStmt struct {
@@ -287,6 +286,15 @@ type TaggedBlock struct {
 	base
 	Tags []string
 	Body *Block
+}
+
+// TupleDestructDecl represents: let (x, y) = expr
+// Destructures a Tuple value into named local variables.
+type TupleDestructDecl struct {
+	base
+	IsConst bool
+	Names   []string
+	Value   Node
 }
 
 // Expressions
@@ -369,8 +377,7 @@ type IsExpr struct {
 	base
 	Expr    Node
 	VarName string   // variable to bind matched value to
-	Type    TypeExpr // or nil for "is None"
-	IsNone  bool
+	Type    TypeExpr // nil only if used as bare type-check
 }
 
 type TypeAssertExpr struct {
@@ -387,6 +394,12 @@ type AsExpr struct {
 }
 
 type SizeofExpr struct {
+	base
+	Type TypeExpr
+}
+
+// IsRCExpr evaluates to i32 1 if the type is ARC-tracked (string, array, any), 0 otherwise.
+type IsRCExpr struct {
 	base
 	Type TypeExpr
 }
@@ -501,9 +514,22 @@ type AtomLit struct {
 	Name string // 'ok -> "ok"
 }
 
-type NoneLit struct{ base }
-
 type WildcardExpr struct{ base } // "_" in where/match patterns
+
+// TupleLit is a tuple literal: (e1, e2, ...) - sugar for Tuple[T1,T2,...]{a:e1, b:e2, ...}
+type TupleLit struct {
+	base
+	Elems []Node
+}
+
+// SliceExpr is an array slice: arr[start:end], arr[start:], arr[:end], arr[:]
+// Start and End are nil when omitted.
+type SliceExpr struct {
+	base
+	Expr  Node
+	Start Node // nil = from beginning (0)
+	End   Node // nil = to end (len)
+}
 
 type DefaultExpr struct {
 	base
@@ -536,11 +562,6 @@ type EnumMember struct {
 type UnionMember struct {
 	FieldName string // for named unions ("as_i8")
 	Type      TypeExpr
-}
-
-type DataVariant struct {
-	Name string   // "None" or empty for typed variant
-	Type TypeExpr // nil if just "None"
 }
 
 type UseImport struct {
@@ -580,6 +601,30 @@ type StringPart struct {
 	Format string // printf-style specifier without leading %, e.g. "08x", ".2f" (empty = default)
 }
 
+// TopLevelVar is a mutable module-scoped variable: var name Type [= expr]
+type TopLevelVar struct {
+	base
+	Name  string
+	Type  TypeExpr
+	Value Node // nil = zero-initialized
+}
+
+// SpawnExpr spawns a fiber: spawn expr  or  spawn do: block
+type SpawnExpr struct {
+	base
+	Call    Node   // expression to spawn (nil if DoBlock set)
+	DoBlock *Block // spawn do: body (nil if Call set)
+}
+
+// AwaitExpr waits for a fiber future: await expr
+type AwaitExpr struct {
+	base
+	Future Node
+}
+
+// YieldStmt voluntarily yields the current fiber's time slice.
+type YieldStmt struct{ base }
+
 // Type expressions
 
 // TypeExpr represents a type annotation in source
@@ -609,6 +654,7 @@ func (g *GenericType) String() string {
 		}
 		params += p.String()
 	}
+
 	return g.Name + "[" + params + "]"
 }
 
@@ -622,6 +668,7 @@ func (a *ArrayType) String() string {
 	if a.Size < 0 {
 		return "[" + a.Elem.String() + "]"
 	}
+
 	return fmt.Sprintf("[%s; %d]", a.Elem.String(), a.Size)
 }
 
@@ -635,6 +682,7 @@ func (p *PointerType) String() string {
 	if p.IsConst {
 		return "const *" + p.Elem.String()
 	}
+
 	return "*" + p.Elem.String()
 }
 
@@ -660,6 +708,7 @@ func (u *UnionTypeExpr) String() string {
 		}
 		s += t.String()
 	}
+
 	return s
 }
 

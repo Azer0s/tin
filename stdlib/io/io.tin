@@ -1,7 +1,10 @@
 // stdlib/io - I/O functions
 //
-// Wraps standard C file and console I/O
+// Wraps standard C file and console I/O, plus async fiber-friendly wrappers.
 // No extra linker flags required (all in libc)
+
+use { loop } from macros
+use sync
 
 // Console output
 
@@ -67,9 +70,128 @@ fn rename(old_path string, new_path string) i32 = extern("rename")
 // print writes s followed by a newline (alias for puts)
 fn print(s string) = puts(s)
 
+// ---------------------------------------------------------------------------
+// Async I/O - non-blocking reads/writes backed by the dedicated I/O thread.
+//
+// Low-level primitives (async_read, async_write) are {#async} functions that
+// must be called with `await spawn`.  Higher-level functions (sleep, write_all,
+// read_exact) return Future[T] directly and can be awaited without spawn:
+//
+//   let n = await spawn io::async_read(fd, &buf[0], 4096)  // low-level
+//   await io::sleep(100)                                    // high-level
+//   await io::write_all(fd, &buf[0], n)                    // high-level
+// ---------------------------------------------------------------------------
+
+// Raw C helpers (not exported)
+fn _tin_async_read_c(fd i32, buf *byte, n i64) i64 = extern("_tin_async_read")
+fn _tin_async_write_c(fd i32, buf *byte, n i64) i64 = extern("_tin_async_write")
+fn _tin_sleep_ms_c(ms i64) = extern("_tin_sleep_ms")
+fn _tin_io_blocked_val_c() i64 = extern("_tin_io_blocked_val")
+
+// async_read reads up to n bytes from fd into buf.
+// Returns the number of bytes read, or a negative errno on error.
+// Suspends the fiber if fd is not ready and retries after wakeup.
+// Low-level primitive: call with `await spawn io::async_read(fd, buf, n)`.
+fn{#async} async_read(fd i32, buf *byte, n i64) i64 =
+  let blocked = _tin_io_blocked_val_c()
+  loop:
+    let r = _tin_async_read_c(fd, buf, n)
+    if r != blocked:
+      return r
+    yield
+
+// async_write writes up to n bytes from buf to fd.
+// Returns the number of bytes written, or a negative errno on error.
+// Suspends the fiber if fd is not ready and retries after wakeup.
+// Low-level primitive: call with `await spawn io::async_write(fd, buf, n)`.
+fn{#async} async_write(fd i32, buf *byte, n i64) i64 =
+  let blocked = _tin_io_blocked_val_c()
+  loop:
+    let r = _tin_async_write_c(fd, buf, n)
+    if r != blocked:
+      return r
+    yield
+
+// sleep suspends the current fiber for at least ms milliseconds without
+// blocking the worker thread.  Returns a Future[sync::Unit] - use `await io::sleep(ms)`.
+fn sleep(ms i64) Future[sync::Unit] =
+  return spawn sleep_impl(ms)
+
+fn{#async} sleep_impl(ms i64) =
+  _tin_sleep_ms_c(ms)
+  yield
+
+// write_all writes all n bytes from buf to fd, retrying on partial writes.
+// Returns a Future[sync::Unit] - use `await io::write_all(fd, buf, n)`.
+fn write_all(fd i32, buf *byte, n i64) Future[sync::Unit] =
+  return spawn write_all_impl(fd, buf, n)
+
+fn{#async} write_all_impl(fd i32, buf *byte, n i64) =
+  let sent i64 = 0
+  loop:
+    if sent >= n:
+      break
+    let w = await spawn async_write(fd, buf + sent, n - sent)
+    if w <= 0:
+      break
+    sent = sent + w
+
+// read_exact reads exactly n bytes from fd into buf, retrying until full or EOF.
+// Returns a Future[i64] holding the total bytes read - use `await io::read_exact(fd, buf, n)`.
+fn read_exact(fd i32, buf *byte, n i64) Future[i64] =
+  return spawn read_exact_impl(fd, buf, n)
+
+fn{#async} read_exact_impl(fd i32, buf *byte, n i64) i64 =
+  let got i64 = 0
+  loop:
+    if got >= n:
+      break
+    let r = await spawn async_read(fd, buf + got, n - got)
+    if r <= 0:
+      return got
+    got = got + r
+  return got
+
+// ---------------------------------------------------------------------------
+// TCP sockets - thin wrappers around POSIX socket helpers in runtime/net.c
+// ---------------------------------------------------------------------------
+
+// tcp_listen creates a TCP listen socket on port. Returns fd or negative errno.
+fn tcp_listen(port i32) i32 = extern("_tin_tcp_listen")
+
+// tcp_accept waits for the next connection on listen_fd. Returns fd or negative errno.
+fn tcp_accept(listen_fd i32) i32 = extern("_tin_tcp_accept")
+
+// close closes a file descriptor.
+fn close(fd i32) = extern("_tin_fd_close")
+
+// ---------------------------------------------------------------------------
+// I/O traits
+// ---------------------------------------------------------------------------
+
+trait Reader =
+  fn read(this *Reader, buf *byte, n i64) i64 = virtual
+
+trait Writer =
+  fn write(this *Writer, buf *byte, n i64) i64 = virtual
+
+// AsyncReader is implemented by types whose read returns a Future[i64].
+// Await the result directly: `let n = await r.read(buf, n)`.
+trait AsyncReader =
+  fn read(this *AsyncReader, buf *byte, n i64) Future[i64] = virtual
+
+// AsyncWriter is implemented by types whose write returns a Future[i64].
+// Await the result directly: `let n = await w.write(buf, n)`.
+trait AsyncWriter =
+  fn write(this *AsyncWriter, buf *byte, n i64) Future[i64] = virtual
+
 export {
   puts, fputs, fprintf, printf, print,
   fgets, scanf,
   fopen, fclose, fread, fwrite, fseek, ftell, fflush, feof, ferror,
-  remove, rename
+  remove, rename,
+  async_read, async_write, sleep,
+  write_all, read_exact,
+  tcp_listen, tcp_accept, close,
+  Reader, Writer, AsyncReader, AsyncWriter
 } as io

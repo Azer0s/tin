@@ -24,6 +24,7 @@ func structNameFromValue(v value.Value) string {
 	if st, ok := t.(*irtypes.StructType); ok {
 		return st.Name()
 	}
+
 	return ""
 }
 
@@ -47,6 +48,7 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 		lenGep := block.NewGetElementPtr(fat, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		block.NewStore(constant.NewInt(irtypes.I64, 0), lenGep)
+
 		return block.NewLoad(fat, alloca)
 	}
 
@@ -57,7 +59,8 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 		if len(name) > 0 && name[0] == '\'' {
 			name = name[1:]
 		}
-		elems[i] = cg.atomConstant(cg.registerAtom(name)).(*constant.Struct)
+		code := cg.registerAtom(name)
+		elems[i] = cg.atomConstant(code).(*constant.Struct)
 	}
 
 	// Build a global { i64, [N x %__atom] } with an immortal RC header (-1).
@@ -88,6 +91,7 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	lenGep := block.NewGetElementPtr(fat, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
+
 	return block.NewLoad(fat, fatAlloca)
 }
 
@@ -99,24 +103,32 @@ func llvmTypeName(t irtypes.Type) string {
 	}
 	switch {
 	case t.Equal(irtypes.I1):
+
 		return "bool"
 	case t.Equal(irtypes.I8):
+
 		return "i8"
 	case t.Equal(irtypes.I16):
+
 		return "i16"
 	case t.Equal(irtypes.I32):
+
 		return "i32"
 	case t.Equal(irtypes.I64):
+
 		return "i64"
 	case t.Equal(irtypes.Float):
+
 		return "f32"
 	case t.Equal(irtypes.Double):
+
 		return "f64"
 	}
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if fnType, isFnType := pt.ElemType.(*irtypes.FuncType); isFnType {
 			return fnSigName(fnType, false)
 		}
+
 		return "*" + llvmTypeName(pt.ElemType)
 	}
 	if at, ok := t.(*irtypes.ArrayType); ok {
@@ -128,6 +140,7 @@ func llvmTypeName(t irtypes.Type) string {
 		}
 		if st.Name() != "" {
 			// User-defined struct / data type: use struct name as atom.
+
 			return st.Name()
 		}
 		// Anonymous struct: could be fat ptr, any, etc.
@@ -140,6 +153,7 @@ func llvmTypeName(t irtypes.Type) string {
 		if isFatFnPtr(t) {
 			st2 := t.(*irtypes.StructType)
 			innerFnType := st2.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
 			return fnSigName(innerFnType, true)
 		}
 		if isFatArrayPtr(t) {
@@ -148,9 +162,11 @@ func llvmTypeName(t irtypes.Type) string {
 					return "[" + llvmTypeName(pt.ElemType) + "]"
 				}
 			}
+
 			return "[unknown]"
 		}
 	}
+
 	return "unknown"
 }
 
@@ -179,6 +195,7 @@ func (cg *CodeGen) runtimeAtomSelectByTypeID(block *ir.Block, typeIDVal value.Va
 		candidate := cg.atomConstant(cg.registerAtom(name))
 		result = block.NewSelect(isMatch, candidate, result)
 	}
+
 	return result
 }
 
@@ -189,6 +206,7 @@ func (cg *CodeGen) extractAnyTypeID(block *ir.Block, anyVal value.Value) value.V
 	block.NewStore(anyVal, alloca)
 	tagGep := block.NewGetElementPtr(anyType, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
 	return block.NewLoad(irtypes.I32, tagGep)
 }
 
@@ -206,15 +224,13 @@ func (cg *CodeGen) buildTypeIDToNameTable() map[int32]string {
 	for sn, id := range cg.structTypeIDs {
 		table[id] = "'" + sn
 	}
-	for dn, id := range cg.dataTypeIDs {
-		table[id] = "'" + dn
-	}
 	for sig, id := range cg.fnTypeIDs {
 		table[id] = "'" + sig
 	}
 	for un, id := range cg.unionTypeIDs {
 		table[id] = "'" + un
 	}
+
 	return table
 }
 
@@ -228,6 +244,7 @@ func (cg *CodeGen) buildTypeIDToTraitsTable() map[int32][]string {
 		}
 		table[id] = atoms
 	}
+
 	return table
 }
 
@@ -241,6 +258,7 @@ func (cg *CodeGen) buildTypeIDToFieldsTable() map[int32][]string {
 		}
 		table[id] = atoms
 	}
+
 	return table
 }
 
@@ -254,6 +272,7 @@ func (cg *CodeGen) buildTypeIDToFieldTypesTable() map[int32][]string {
 		}
 		table[id] = atoms
 	}
+
 	return table
 }
 
@@ -274,11 +293,13 @@ func (cg *CodeGen) genTypeof(block *ir.Block, e *ast.TypeofExpr) (value.Value, e
 		typeIDVal := cg.extractAnyTypeID(block, val)
 		table := cg.buildTypeIDToNameTable()
 		defaultAtom := cg.atomConstant(cg.registerAtom("unknown"))
+
 		return cg.runtimeAtomSelectByTypeID(block, typeIDVal, table, defaultAtom), nil
 	}
 
 	// Compile-time: resolve the tin type name and register as an atom.
 	name := llvmTypeName(val.Type())
+
 	return cg.atomConstant(cg.registerAtom(name)), nil
 }
 
@@ -297,6 +318,7 @@ func (cg *CodeGen) genTraitof(block *ir.Block, e *ast.TraitofExpr) (value.Value,
 	// Runtime dispatch for `any`.
 	if isAnyType(val.Type()) {
 		typeIDVal := cg.extractAnyTypeID(block, val)
+
 		return cg.runtimeAtomArraySelectByTypeID(block, typeIDVal, cg.buildTypeIDToTraitsTable()), nil
 	}
 
@@ -308,6 +330,7 @@ func (cg *CodeGen) genTraitof(block *ir.Block, e *ast.TraitofExpr) (value.Value,
 			atoms = append(atoms, "'"+tn)
 		}
 	}
+
 	return cg.buildAtomArray(block, atoms), nil
 }
 
@@ -325,6 +348,7 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 	// Runtime dispatch for `any`.
 	if isAnyType(val.Type()) {
 		typeIDVal := cg.extractAnyTypeID(block, val)
+
 		return cg.runtimeAtomArraySelectByTypeID(block, typeIDVal, cg.buildTypeIDToFieldsTable()), nil
 	}
 
@@ -336,6 +360,7 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 			atoms = append(atoms, "'"+fn)
 		}
 	}
+
 	return cg.buildAtomArray(block, atoms), nil
 }
 
@@ -379,6 +404,7 @@ func (cg *CodeGen) genFieldtypes(block *ir.Block, e *ast.FieldtypesExpr) (value.
 	// Runtime dispatch for `any`.
 	if isAnyType(val.Type()) {
 		typeIDVal := cg.extractAnyTypeID(block, val)
+
 		return cg.runtimeAtomArraySelectByTypeID(block, typeIDVal, cg.buildTypeIDToFieldTypesTable()), nil
 	}
 
@@ -390,12 +416,72 @@ func (cg *CodeGen) genFieldtypes(block *ir.Block, e *ast.FieldtypesExpr) (value.
 			atoms = append(atoms, "'"+primitiveTypeName(ft))
 		}
 	}
+
 	return cg.buildAtomArray(block, atoms), nil
 }
 
 // genFieldtag returns the first @"tag" annotation for the named field, or empty atom.
-func (cg *CodeGen) genFieldtag(_ *ir.Block, _ *ast.FieldtagExpr) (value.Value, error) {
-	return cg.atomConstant(cg.registerAtom("")), nil
+// For concrete struct types it generates a runtime strcmp chain over field names,
+// returning the compile-time atom constant for the matching field's tag.
+func (cg *CodeGen) genFieldtag(block *ir.Block, e *ast.FieldtagExpr) (value.Value, error) {
+	val, err := cg.genExpr(block, e.Expr)
+	if err != nil {
+		return nil, err
+	}
+	fieldNameVal, err := cg.genExpr(block, e.Field)
+	if err != nil {
+		return nil, err
+	}
+
+	emptyAtom := cg.atomConstant(cg.registerAtom(""))
+
+	sn := structNameFromValue(val)
+	if sn == "" {
+		return emptyAtom, nil
+	}
+
+	fieldNames := cg.structFields[sn]
+	if len(fieldNames) == 0 {
+		return emptyAtom, nil
+	}
+
+	// Fast path: compile-time string literal -> return atom constant directly.
+	if strLit, ok := e.Field.(*ast.StringLit); ok {
+		tags := cg.structFieldTags[sn]
+		tag := ""
+		if tags != nil {
+			tag = tags[strLit.Value]
+		}
+
+		return cg.atomConstant(cg.registerAtom(tag)), nil
+	}
+
+	// Runtime path: strcmp chain over all fields, select the matching tag atom.
+	atomType := cg.atomType
+	resultAlloca := block.NewAlloca(atomType)
+	block.NewStore(emptyAtom, resultAlloca)
+
+	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
+	strcmp := cg.ensureStrcmp()
+	tags := cg.structFieldTags[sn]
+
+	for _, fname := range fieldNames {
+		tag := ""
+		if tags != nil {
+			tag = tags[fname]
+		}
+		tagAtom := cg.atomConstant(cg.registerAtom(tag))
+
+		namePtr := cg.newGlobalString(fname)
+		cmp := block.NewCall(strcmp, fieldNamePtr, namePtr)
+		isMatch := block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
+
+		current := block.NewLoad(atomType, resultAlloca)
+		selected := block.NewSelect(isMatch, tagAtom, current)
+		block.NewStore(selected, resultAlloca)
+	}
+
+	return block.NewLoad(atomType, resultAlloca), nil
 }
 
 // genGetfield returns an `any` fat-ptr containing the value of the named field.
@@ -429,10 +515,17 @@ func (cg *CodeGen) genGetfield(block *ir.Block, e *ast.GetfieldExpr) (value.Valu
 	if sn == "" {
 		return zeroAny, nil
 	}
+
 	return cg.genGetfieldForStruct(block, sn, val, fieldNameVal)
 }
 
 // genGetfieldFromAny dispatches getfield for an `any` value over all known struct types.
+//
+// To avoid out-of-bounds reads when the `any` holds a smaller struct (e.g. triple/32 bytes)
+// and code unconditionally GEPs into a larger struct layout (e.g. rect/40 bytes), each
+// struct type gets its own stack-allocated dummy buffer.  A `select` chooses between the
+// actual heap data pointer and the dummy based on the runtime type_id.  GEPs therefore
+// always reach valid memory: heap data for the matching type, dummy stack memory otherwise.
 func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, fieldNameVal value.Value) value.Value {
 	anyType := anyFatPtrType()
 	resultAlloca := block.NewAlloca(anyType)
@@ -464,8 +557,18 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 
 		isTypeMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(typeID)))
 
-		// Bitcast data pointer to *struct.
-		structPtr := block.NewBitCast(dataI8Ptr, irtypes.NewPointer(st))
+		// Allocate a same-typed stack dummy so GEPs into it are always in-bounds
+		// when the type_id does NOT match.  select(isTypeMatch, heapPtr, dummyPtr)
+		// routes loads to the correct buffer without any branches.
+		// Zero-initialize so pointer fields load as null - _tin_release(null) is a
+		// no-op, preventing a crash when a garbage pointer would otherwise be released.
+		dummyAlloca := block.NewAlloca(st)
+		block.NewStore(cg.zeroValue(st), dummyAlloca)
+		dummyI8Ptr := block.NewBitCast(dummyAlloca, irtypes.I8Ptr)
+		safeI8Ptr := block.NewSelect(isTypeMatch, dataI8Ptr, dummyI8Ptr)
+
+		// Bitcast the safe pointer to *struct.
+		structPtr := block.NewBitCast(safeI8Ptr, irtypes.NewPointer(st))
 
 		for i, fname := range fieldNames {
 			namePtr := cg.newGlobalString(fname)
@@ -494,6 +597,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 	for _, box := range allBoxes {
 		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
 	}
+
 	return result
 }
 
@@ -544,11 +648,78 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 	for _, box := range boxes {
 		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
 	}
+
 	return result, nil
+}
+
+// genSetfieldOnAny writes the named field of an any-boxed struct value in place.
+// It mirrors genGetfieldFromAny but stores instead of loads.  The any fat-ptr
+// alloca is modified directly: for each known struct type, a safe dummy-alloca
+// pattern is used (same as genGetfieldFromAny) so GEPs are always in-bounds.
+func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fieldNameVal value.Value, newVal value.Value) {
+	anyType := anyFatPtrType()
+
+	typeIDVal := cg.extractAnyTypeID(block, block.NewLoad(anyType, anyAlloca))
+
+	// Extract the raw i8* data pointer from the any fat-ptr.
+	dataPtrGep := block.NewGetElementPtr(anyType, anyAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	dataI8Ptr := block.NewLoad(irtypes.I8Ptr, dataPtrGep)
+
+	strcmp := cg.ensureStrcmp()
+	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
+
+	for sn, typeID := range cg.structTypeIDs {
+		st := cg.structTypes[sn]
+		if st == nil {
+			continue
+		}
+		fieldNames := cg.structFields[sn]
+		fieldTypes := cg.structFieldLLVMTypes[sn]
+		vtableOff := cg.vtableOffset(sn)
+
+		isTypeMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(typeID)))
+
+		// Safe dummy alloca: zero-initialized so pointer fields load as null (no crash
+		// when a garbage pointer would otherwise be released).
+		dummyAlloca := block.NewAlloca(st)
+		block.NewStore(cg.zeroValue(st), dummyAlloca)
+		dummyI8Ptr := block.NewBitCast(dummyAlloca, irtypes.I8Ptr)
+		safeI8Ptr := block.NewSelect(isTypeMatch, dataI8Ptr, dummyI8Ptr)
+
+		structPtr := block.NewBitCast(safeI8Ptr, irtypes.NewPointer(st))
+
+		for i, fname := range fieldNames {
+			namePtr := cg.newGlobalString(fname)
+			cmp := block.NewCall(strcmp, fieldNamePtr, namePtr)
+			isFieldMatch := block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
+			isMatch := block.NewAnd(isTypeMatch, isFieldMatch)
+
+			fieldIdx := int64(1 + vtableOff + i)
+			fieldGep := block.NewGetElementPtr(st, structPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+
+			coerced := cg.coerce(block, newVal, fieldTypes[i])
+			if !coerced.Type().Equal(fieldTypes[i]) {
+				continue
+			}
+			currentField := block.NewLoad(fieldTypes[i], fieldGep)
+			selected := block.NewSelect(isMatch, coerced, currentField)
+			block.NewStore(selected, fieldGep)
+			// ARC: retain selected, release old - safe whether or not field matched.
+			//   match:   retain(new) + release(old) → correct ownership transfer
+			//   !match:  retain(old) + release(old) → net no-op
+			if isStringType(fieldTypes[i]) || isFatArrayPtr(fieldTypes[i]) {
+				cg.emitRetain(block, selected)
+				cg.emitRelease(block, currentField)
+			}
+		}
+	}
 }
 
 // genSetfield sets the named field of a struct value (via lvalue) from a typed value.
 // Generates a compile-time strcmp chain - one comparison per field.
+// Also handles any-typed first arguments via genSetfieldOnAny (runtime struct dispatch).
 func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Value, error) {
 	structPtr, err := cg.genLValue(block, e.Expr)
 	if err != nil {
@@ -577,6 +748,11 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 	}
 	sn := st.Name()
 	if sn == "" {
+		// Anonymous struct: check if this is an any fat-ptr (setfield on any-boxed struct).
+		if isAnyType(pt.ElemType) {
+			cg.genSetfieldOnAny(block, structPtr, fieldNameVal, newVal)
+		}
+
 		return nil, nil
 	}
 
@@ -600,9 +776,24 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
 
 		coerced := cg.coerce(block, newVal, fieldTypes[i])
+		// Skip fields where the value type cannot be coerced to the field type.
+		// At runtime the name comparison will be false for these fields anyway,
+		// but the LLVM NewSelect / NewStore require type-compatible operands.
+		if !coerced.Type().Equal(fieldTypes[i]) {
+			continue
+		}
 		currentField := block.NewLoad(fieldTypes[i], fieldGep)
 		selected := block.NewSelect(isMatch, coerced, currentField)
 		block.NewStore(selected, fieldGep)
+		// ARC: for RC-tracked fields (strings, fat arrays), retain the selected
+		// value and release the old value. This pattern is safe whether or not the
+		// field matched (isMatch):
+		//   if match:  retain(new) + release(old) -> correct ownership transfer
+		//   if !match: retain(old) + release(old) -> net no-op
+		if isStringType(fieldTypes[i]) || isFatArrayPtr(fieldTypes[i]) {
+			cg.emitRetain(block, selected)
+			cg.emitRelease(block, currentField)
+		}
 	}
 
 	return nil, nil

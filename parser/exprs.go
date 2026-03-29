@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/Azer0s/tin/ast"
@@ -49,6 +50,7 @@ func (p *Parser) parsePipe() (ast.Node, error) {
 		}
 		left = &ast.PipeExpr{Left: left, Right: right}
 	}
+
 	return left, nil
 }
 
@@ -63,8 +65,10 @@ func (p *Parser) parseRange() (ast.Node, error) {
 		if err2 != nil {
 			return nil, err2
 		}
+
 		return &ast.BinExpr{Left: left, Op: "..", Right: right}, nil
 	}
+
 	return left, nil
 }
 
@@ -86,8 +90,10 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 		if err2 != nil {
 			return nil, err2
 		}
+
 		return &ast.TernaryExpr{Cond: cond, Then: then, Else: els}, nil
 	}
+
 	return cond, nil
 }
 
@@ -142,6 +148,7 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 		}
 		left = &ast.BinExpr{Left: left, Op: op, Right: right}
 	}
+
 	return left, nil
 }
 
@@ -149,13 +156,15 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 func isExprStart(tok lexer.Token) bool {
 	switch tok.Type {
 	case lexer.IDENT, lexer.INT_LIT, lexer.FLOAT_LIT, lexer.STRING_LIT, lexer.BACKTICK_LIT,
-		lexer.BOOL_LIT, lexer.CHAR_LIT, lexer.NONE_LIT,
+		lexer.BOOL_LIT, lexer.CHAR_LIT, lexer.AT,
 		lexer.LPAREN, lexer.LBRACKET, lexer.MINUS, lexer.NOT,
 		lexer.STAR, lexer.AMP, lexer.KW_FN, lexer.KW_SIZEOF, lexer.KW_ADDR,
 		lexer.KW_TYPEOF, lexer.KW_TRAITOF, lexer.KW_FIELDNAMES, lexer.KW_FIELDTYPES,
-		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD:
+		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD, lexer.KW_ISRC:
+
 		return true
 	default:
+
 		return isTypeKeyword(tok)
 	}
 }
@@ -177,6 +186,7 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 		}
 		left = &ast.BinExpr{Left: left, Op: op, Right: right}
 	}
+
 	return left, nil
 }
 
@@ -187,6 +197,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.UnaryExpr{Op: op, Expr: expr}, nil
 	}
 	// Dereference: *expr
@@ -196,6 +207,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.DerefExpr{Expr: expr}, nil
 	}
 	// Address-of: &expr
@@ -205,8 +217,10 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.AddressOfExpr{Expr: expr}, nil
 	}
+
 	return p.parsePostfix()
 }
 
@@ -229,6 +243,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 						return nil, err2
 					}
 					expr = &ast.TypeAssertExpr{Expr: expr, IsType: true}
+
 					continue
 				}
 				typ, err2 := p.parseTypeExpr()
@@ -239,6 +254,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					return nil, err2
 				}
 				expr = &ast.TypeAssertExpr{Expr: expr, Type: typ}
+
 				continue
 			}
 			field, err2 := p.expect(lexer.IDENT)
@@ -326,15 +342,36 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			}
 
 		case lexer.LBRACKET:
-			p.advance()
-			idx, err2 := p.parseExpr()
-			if err2 != nil {
-				return nil, err2
+			p.advance() // consume [
+			// Detect slice syntax: arr[:], arr[n:], arr[:m], arr[n:m]
+			var start ast.Node
+			if !p.check(lexer.COLON) && !p.check(lexer.RBRACKET) {
+				var err3 error
+				start, err3 = p.parseExpr()
+				if err3 != nil {
+					return nil, err3
+				}
 			}
-			if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
-				return nil, err2
+			if p.check(lexer.COLON) {
+				p.advance() // consume :
+				var end ast.Node
+				if !p.check(lexer.RBRACKET) {
+					var err3 error
+					end, err3 = p.parseExpr()
+					if err3 != nil {
+						return nil, err3
+					}
+				}
+				if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
+					return nil, err2
+				}
+				expr = &ast.SliceExpr{Expr: expr, Start: start, End: end}
+			} else {
+				if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
+					return nil, err2
+				}
+				expr = &ast.IndexExpr{Expr: expr, Index: start}
 			}
-			expr = &ast.IndexExpr{Expr: expr, Index: idx}
 
 		case lexer.NOT:
 			// Macro call syntax: ident!(args) - only when followed by '('
@@ -370,24 +407,20 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		case lexer.KW_IS:
 			p.advance()
 			isExpr := &ast.IsExpr{Expr: expr}
-			if p.check(lexer.NONE_LIT) || (p.check(lexer.IDENT) && p.peek().Literal == "None") {
-				p.advance()
-				isExpr.IsNone = true
-			} else {
-				if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
-					isExpr.VarName = p.advance().Literal
-				}
-				if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
-					var err2 error
-					isExpr.Type, err2 = p.parseTypeExpr()
-					if err2 != nil {
-						return nil, err2
-					}
+			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
+				isExpr.VarName = p.advance().Literal
+			}
+			if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
+				var err2 error
+				isExpr.Type, err2 = p.parseTypeExpr()
+				if err2 != nil {
+					return nil, err2
 				}
 			}
 			expr = isExpr
 
 		default:
+
 			return expr, nil
 		}
 	}
@@ -411,6 +444,7 @@ func (p *Parser) parseArgList() ([]ast.Node, error) {
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
+
 	return args, nil
 }
 
@@ -423,43 +457,63 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.INT_LIT:
 		p.advance()
 		v, _ := strconv.ParseInt(tok.Literal, 0, 64)
+
 		return &ast.IntLit{Value: v}, nil
 
 	case lexer.FLOAT_LIT:
 		p.advance()
 		v, _ := strconv.ParseFloat(tok.Literal, 64)
+
 		return &ast.FloatLit{Value: v}, nil
 
 	case lexer.STRING_LIT:
 		p.advance()
+
 		return parseStringInterp(tok.Literal)
 
 	case lexer.BACKTICK_LIT:
 		p.advance()
+
 		return &ast.BacktickLit{Content: tok.Literal}, nil
 
-	case lexer.CHAR_LIT:
-		p.advance()
-		var b byte
-		if len(tok.Literal) > 0 {
-			b = tok.Literal[0]
+	case lexer.AT:
+		// @'X' -> byte value of character X  (i8 CharLit)
+		// @N   -> integer N                  (i64 IntLit)
+		p.advance() // consume @
+		next := p.peek()
+		switch next.Type {
+		case lexer.CHAR_LIT:
+			p.advance()
+			var b byte
+			if len(next.Literal) > 0 {
+				b = next.Literal[0]
+			}
+
+			return &ast.CharLit{Value: b}, nil
+		case lexer.INT_LIT:
+			p.advance()
+			v, _ := strconv.ParseInt(next.Literal, 0, 64)
+
+			return &ast.IntLit{Value: v}, nil
+		default:
+
+			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
+				next.Line, next.Literal)
 		}
-		return &ast.CharLit{Value: b}, nil
 
 	case lexer.BOOL_LIT:
 		p.advance()
+
 		return &ast.BoolLit{Value: tok.Literal == "true"}, nil
 
 	case lexer.ATOM_LIT:
 		p.advance()
-		return &ast.AtomLit{Name: tok.Literal}, nil
 
-	case lexer.NONE_LIT:
-		p.advance()
-		return &ast.NoneLit{}, nil
+		return &ast.AtomLit{Name: tok.Literal}, nil
 
 	case lexer.KW_FN:
 		// Lambda expression
+
 		return p.parseLambda()
 
 	case lexer.KW_SIZEOF:
@@ -474,7 +528,23 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.SizeofExpr{Type: typ}, nil
+
+	case lexer.KW_ISRC:
+		p.advance()
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+		typ, err := p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+
+		return &ast.IsRCExpr{Type: typ}, nil
 
 	case lexer.KW_TYPEOF:
 		p.advance()
@@ -488,6 +558,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.TypeofExpr{Expr: inner}, nil
 
 	case lexer.KW_TRAITOF:
@@ -502,6 +573,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.TraitofExpr{Expr: inner}, nil
 
 	case lexer.KW_FIELDNAMES:
@@ -516,6 +588,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.FieldnamesExpr{Expr: inner}, nil
 
 	case lexer.KW_FIELDTYPES:
@@ -530,6 +603,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.FieldtypesExpr{Expr: inner}, nil
 
 	case lexer.KW_FIELDTAG:
@@ -551,6 +625,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.FieldtagExpr{Expr: expr, Field: field}, nil
 
 	case lexer.KW_GETFIELD:
@@ -572,6 +647,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.GetfieldExpr{Expr: expr, Field: field}, nil
 
 	case lexer.KW_SETFIELD:
@@ -600,6 +676,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.SetfieldExpr{Expr: expr, Field: field, Val: val}, nil
 
 	case lexer.KW_ADDR:
@@ -614,6 +691,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.AddrExpr{Val: inner}, nil
 
 	case lexer.KW_DEFAULT:
@@ -630,6 +708,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
+
 			return &ast.DefaultExpr{OfExpr: inner}, nil
 		}
 		typ, err := p.parseTypeExpr()
@@ -639,6 +718,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return &ast.DefaultExpr{Type: typ}, nil
 
 	case lexer.LPAREN:
@@ -651,6 +731,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 				if p.check(lexer.SEMI) || p.check(lexer.NEWLINE) {
 					p.advance()
+
 					continue
 				}
 				stmt, err := p.parseStatement()
@@ -664,18 +745,38 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
+
 			return &ast.Block{Stmts: stmts}, nil
 		}
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+		// Tuple literal: (e1, e2, ...) with 2+ elements
+		if p.check(lexer.COMMA) {
+			elems := []ast.Node{inner}
+			for p.check(lexer.COMMA) {
+				p.advance()
+				e, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				elems = append(elems, e)
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+
+			return &ast.TupleLit{Elems: elems}, nil
+		}
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+
 		return inner, nil
 
 	case lexer.LBRACKET:
+
 		return p.parseArrayLit()
 
 	case lexer.IDENT:
@@ -684,16 +785,56 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if p.check(lexer.LBRACE) {
 			return p.parseStructLit(name)
 		}
+		// generic struct literal: Name[TypeArg]{...}
+		if p.check(lexer.LBRACKET) {
+			// Speculatively parse [TypeArg] and check for {
+			saved := p.pos
+			typeArgs, err2 := p.parseTypeArgList()
+			if err2 == nil && p.check(lexer.LBRACE) {
+				lit, err3 := p.parseStructLit(name)
+				if err3 != nil {
+					return nil, err3
+				}
+				if sl, ok := lit.(*ast.StructLit); ok {
+					sl.TypeArgs = typeArgs
+				}
+
+				return lit, nil
+			}
+			// Not a generic struct literal; restore position
+			p.pos = saved
+		}
+
 		return &ast.Identifier{Name: name}, nil
 
 	case lexer.KW_LET:
 		// inline let (for ternary macro usage)
+
 		return p.parseVarDecl()
+
+	case lexer.KW_SPAWN:
+
+		return p.parseSpawnExpr()
+
+	case lexer.KW_AWAIT:
+		p.advance()
+		fut, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+
+		return &ast.AwaitExpr{Future: fut}, nil
+
+	case lexer.KW_YIELD:
+		p.advance()
+
+		return &ast.YieldStmt{}, nil
 
 	default:
 		// Type keywords used as identifiers / type names in expressions
 		if isTypeKeyword(tok) {
 			p.advance()
+
 			return &ast.Identifier{Name: tok.Literal}, nil
 		}
 
@@ -725,6 +866,7 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 			return nil, err
 		}
 	}
+
 	return &ast.LambdaExpr{TypeParams: typeParams, Params: params, RetType: retType, Body: body}, nil
 }
 
@@ -744,6 +886,7 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
 	}
+
 	return &ast.ArrayLit{Elems: elems}, nil
 }
 
@@ -774,5 +917,6 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
+
 	return lit, nil
 }

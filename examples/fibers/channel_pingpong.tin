@@ -1,0 +1,31 @@
+// examples/fibers/channel_pingpong.tin
+//
+// Two fibers play ping-pong through a Channel[i64].
+// The pinger sends N values then closes the channel.
+// The ponger drains all values until the channel is closed and empty.
+
+use sync
+
+fn{#async} pinger(ch sync::Channel[i64], n i64) =
+  let i i64 = 0
+  for i < n:
+    await ch.send(i)
+    i = i + 1
+  ch.close()
+
+fn{#async} ponger(ch sync::Channel[i64]) =
+  let running bool = true
+  for running:
+    if ch.is_closed_empty():
+      running = false
+    else:
+      let v = await ch.recv()
+      echo "pong: {v}"
+
+fn main() =
+  let ch = sync::Channel[i64].make(4)
+  let p1 = spawn pinger(ch, 5)
+  let p2 = spawn ponger(ch)
+  await p1
+  await p2
+  echo "ping-pong done"

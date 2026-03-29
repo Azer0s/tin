@@ -3,10 +3,69 @@ package codegen
 // types.go - LLVM type mapping, type helpers, and type query utilities.
 
 import (
+	"strings"
+
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
 )
+
+// typeExprCanonicalKey returns a canonical string key for a TypeExpr that is
+// suitable for use as a monomorphization concrete-type name component.
+//
+// For non-generic (simple) types:
+//   - Qualified names like "sync::Unit" are converted to "sync__Unit".
+//   - Bare names like "Unit" are looked up in cg.typeAliases; if the alias
+//     resolves to a SimpleType (e.g. "sync__Unit"), that canonical name is
+//     returned.  This ensures that bare names used inside a package body
+//     produce the same key as the fully-qualified names used from the outside.
+//
+// For generic types:
+//   - The template name has its package qualifier stripped (bare template name).
+//   - Type parameters are recursively canonicalized.
+//
+// This guarantees that Future[sync::Unit] and Future[Unit] (inside sync)
+// coalesce to the same concrete key "Future__sync__Unit".
+func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			// Qualified name: convert pkg::Name to pkg__Name.
+			return strings.ReplaceAll(name, "::", "__")
+		}
+		// Bare name: look up in typeAliases for the canonical form.
+		if alias, ok := cg.typeAliases[name]; ok {
+			if simple, ok2 := alias.(*ast.SimpleType); ok2 {
+				// The alias points to a canonical name like "sync__Unit".
+				return simple.Name
+			}
+		}
+
+		return name
+	case *ast.GenericType:
+		name := t.Name
+		// Strip package qualifier from the template name to get the bare key
+		// used in genericStructsByArity (templates are always keyed by bare name).
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+		parts := make([]string, len(t.TypeParams))
+		for i, tp := range t.TypeParams {
+			parts[i] = cg.typeExprCanonicalKey(tp)
+		}
+
+		return name + "__" + strings.Join(parts, "__")
+	case *ast.PointerType:
+
+		return "*" + cg.typeExprCanonicalKey(t.Elem)
+	case *ast.ArrayType:
+
+		return "[]" + cg.typeExprCanonicalKey(t.Elem)
+	}
+
+	return te.String()
+}
 
 // Type mapping
 
@@ -17,8 +76,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 	}
 	switch t := te.(type) {
 	case *ast.SimpleType:
+
 		return cg.resolveSimpleType(t.Name)
 	case *ast.VoidType:
+
 		return irtypes.Void, nil
 	case *ast.PointerType:
 		// *void is invalid in LLVM IR - use i8* (opaque pointer convention)
@@ -29,6 +90,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return irtypes.NewPointer(inner), nil
 	case *ast.ArrayType:
 		elem, err := cg.tinTypeToLLVM(t.Elem)
@@ -37,8 +99,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 		if t.Size < 0 {
 			// Dynamic array: {elem*, i64}
+
 			return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64), nil
 		}
+
 		return irtypes.NewArray(uint64(t.Size), elem), nil
 	case *ast.FuncType:
 		// Function values are fat pointers: { fn(i8* env, params...) ret *, i8* }
@@ -62,6 +126,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		ft := irtypes.NewFunc(ret, llParams...)
 		ft.Variadic = t.IsVarArgs
 		// Fat pointer struct: { fn_ptr*, i8* }
+
 		return irtypes.NewStruct(irtypes.NewPointer(ft), irtypes.I8Ptr), nil
 	case *ast.GenericType:
 		// Handle known generic types
@@ -81,40 +146,58 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					typeSubst[tpName] = lt
 				}
 			}
+
 			return cg.buildTraitFatPtrTypeInst(t.Name, instKey, typeSubst)
 		}
-		// Generic data type instantiation (e.g. maybe[string])
-		if dd, ok := cg.genericDataDecls[t.Name]; ok {
-			return cg.instantiateDataType(dd, t.TypeParams)
+		// On-demand monomorphization of generic struct (e.g. result[u32]).
+		// The type name may be package-qualified (e.g. "sync::Channel"); resolve
+		// using just the bare name (last component after "::") for the generic
+		// struct lookup, but use the bare name for the concrete type as well.
+		bareTypeName := t.Name
+		if idx := strings.LastIndex(t.Name, "::"); idx >= 0 {
+			bareTypeName = t.Name[idx+2:]
 		}
-		// On-demand monomorphization of generic struct (e.g. result[u32])
-		// Only triggered when the type param is a concrete type (not a template var).
-		if tmplStruct, isGenericStruct := cg.genericStructs[t.Name]; isGenericStruct && len(t.TypeParams) > 0 {
-			typeParamStr := t.TypeParams[0].String()
-			// Detect if typeParamStr is actually a template type-param name of this struct.
-			// If so, skip monomorphization - we're inside the template body itself.
-			isTemplateVar := false
-			for _, tpName := range tmplStruct.TypeParams {
-				if tpName == typeParamStr {
-					isTemplateVar = true
-					break
+		// Only triggered when the type params are concrete types (not template vars).
+		arity := len(t.TypeParams)
+		if arityMap, isGenericStruct := cg.genericStructsByArity[bareTypeName]; isGenericStruct && arity > 0 {
+			if tmplStruct, hasArity := arityMap[arity]; hasArity {
+				// Build concrete name from ALL type params joined with __.
+				// Use typeExprCanonicalKey (method) to produce canonical part names
+				// so that e.g. Future[sync::Unit] and Future[Unit] coalesce to the
+				// same concrete LLVM struct type "Future__sync__Unit".
+				parts := make([]string, arity)
+				for i, tp := range t.TypeParams {
+					parts[i] = cg.typeExprCanonicalKey(tp)
 				}
-			}
-			if !isTemplateVar {
-				// Build a concrete name: base__typeParam (e.g. result__u32)
-				concreteName := t.Name + "__" + typeParamStr
-				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-					synthDecl := &ast.TypeDecl{
-						Name: concreteName,
-						Type: &ast.GenericType{Name: t.Name, TypeParams: t.TypeParams},
+				// Detect if any part is a template type-param name of this struct.
+				// If so, skip monomorphization - we're inside the template body itself.
+				isTemplateVar := false
+			outer:
+				for _, part := range parts {
+					for _, tpName := range tmplStruct.TypeParams {
+						if tpName == part {
+							isTemplateVar = true
+
+							break outer
+						}
 					}
-					_ = cg.genTypeDecl(synthDecl) // best-effort
 				}
-				if st, ok2 := cg.structTypes[concreteName]; ok2 {
-					return st, nil
+				if !isTemplateVar {
+					concreteName := bareTypeName + "__" + strings.Join(parts, "__")
+					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+						synthDecl := &ast.TypeDecl{
+							Name: concreteName,
+							Type: &ast.GenericType{Name: bareTypeName, TypeParams: t.TypeParams},
+						}
+						_ = cg.genTypeDecl(synthDecl) // best-effort
+					}
+					if st, ok2 := cg.structTypes[concreteName]; ok2 {
+						return st, nil
+					}
 				}
 			}
 		}
+
 		return cg.resolveSimpleType(t.Name)
 	case *ast.UnionTypeExpr:
 		// Anonymous tagged union: { i8 tag, [maxSize x i8] payload }
@@ -128,48 +211,66 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				maxSize = sz
 			}
 		}
+
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	case *ast.TupleArrayType:
 		// @[T1, T2, ...] resolves to [any] - fat array of any values.
+
 		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
 	}
+
 	return irtypes.I64, nil
 }
 
 func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	switch name {
 	case "void":
+
 		return irtypes.Void, nil
 	case "bool":
+
 		return irtypes.I1, nil
 	case "i8":
+
 		return irtypes.I8, nil
 	case "i16":
+
 		return irtypes.I16, nil
 	case "i32":
+
 		return irtypes.I32, nil
 	case "i64", "int":
+
 		return irtypes.I64, nil
-	case "u8", "char":
+	case "u8", "char", "byte":
+
 		return irtypes.I8, nil
 	case "u16":
+
 		return irtypes.I16, nil
 	case "u32", "uint32":
+
 		return irtypes.I32, nil
 	case "u64", "uint", "size_t":
+
 		return irtypes.I64, nil
 	case "f32":
+
 		return irtypes.Float, nil
 	case "f64":
+
 		return irtypes.Double, nil
 	case "string":
 		// fat pointer: {i8*, i64}
+
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
 	case "atom":
 		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
+
 		return cg.atomType, nil
 	case "any":
 		// fat pointer: {i8*, i32}  (type-tagged box)
+
 		return anyFatPtrType(), nil
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
@@ -178,22 +279,93 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return fp, nil
 	}
+	// Strip package qualifier (e.g. "sync::AtomicI64" -> "AtomicI64") and retry.
+	bareName := name
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		bareName = name[idx+2:]
+	}
+	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
+	if bareName != name {
+		if _, ok := cg.traits[bareName]; ok {
+			fp, err := cg.buildTraitFatPtrType(bareName)
+			if err != nil {
+				return nil, err
+			}
+
+			return fp, nil
+		}
+	}
 	// Check struct types
-	if st, ok := cg.structTypes[name]; ok {
+	if st, ok := cg.structTypes[bareName]; ok {
 		return st, nil
 	}
 	// Check enum types
-	if et, ok := cg.enumTypes[name]; ok {
+	if et, ok := cg.enumTypes[bareName]; ok {
 		return et, nil
 	}
 	// Check type aliases
-	if alias, ok := cg.typeAliases[name]; ok {
+	if alias, ok := cg.typeAliases[bareName]; ok {
 		return cg.tinTypeToLLVM(alias)
 	}
 	// Default to i64
+
 	return irtypes.I64, nil
+}
+
+// llvmTypeToTinName returns the canonical tin type name for a given LLVM type.
+// Used when building Tuple concrete names from element types.
+// For named struct types, uses the LLVM struct name directly.
+// Falls back to "any" for types that don't have a canonical mapping.
+func llvmTypeToTinName(t irtypes.Type) string {
+	switch t {
+	case irtypes.I1:
+
+		return "bool"
+	case irtypes.I8:
+
+		return "i8"
+	case irtypes.I16:
+
+		return "i16"
+	case irtypes.I32:
+
+		return "i32"
+	case irtypes.I64:
+
+		return "i64"
+	case irtypes.Float:
+
+		return "f32"
+	case irtypes.Double:
+
+		return "f64"
+	}
+	if st, ok := t.(*irtypes.StructType); ok {
+		if n := st.Name(); n != "" {
+			return n
+		}
+		// Anonymous struct - detect by shape:
+		// {i8*, i64}  = string
+		// {i32, i8*}  = any
+		if len(st.Fields) == 2 {
+			if st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I64) {
+				return "string"
+			}
+			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
+				return "any"
+			}
+		}
+	}
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		inner := llvmTypeToTinName(pt.ElemType)
+
+		return "*" + inner
+	}
+
+	return "any"
 }
 
 // stringFatPtrType returns the {i8*, i64} type used for tin strings.
@@ -225,6 +397,7 @@ const (
 // type payload sizing on a 64-bit target).
 func llvmTypeSize(t irtypes.Type) uint64 {
 	sz, _ := llvmTypeSizeAlign(t)
+
 	return sz
 }
 
@@ -234,19 +407,25 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	switch ty := t.(type) {
 	case *irtypes.IntType:
 		b := (ty.BitSize + 7) / 8
+
 		return b, b
 	case *irtypes.FloatType:
 		switch ty.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 		case irtypes.FloatKindHalf:
+
 			return 2, 2
 		case irtypes.FloatKindFloat:
+
 			return 4, 4
 		case irtypes.FloatKindDouble:
+
 			return 8, 8
 		default:
+
 			return 8, 8
 		}
 	case *irtypes.PointerType:
+
 		return 8, 8
 	case *irtypes.StructType:
 		var offset, maxAlign uint64
@@ -266,11 +445,14 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 		}
 		// Pad struct to its own alignment
 		offset = (offset + maxAlign - 1) &^ (maxAlign - 1)
+
 		return offset, maxAlign
 	case *irtypes.ArrayType:
 		esz, eal := llvmTypeSizeAlign(ty.ElemType)
+
 		return ty.Len * esz, eal
 	default:
+
 		return 8, 8
 	}
 }
@@ -285,6 +467,7 @@ func isFatPtrType(t irtypes.Type) bool {
 		return false
 	}
 	_, isPtr := st.Fields[0].(*irtypes.PointerType)
+
 	return isPtr && irtypes.IsInt(st.Fields[1])
 }
 
@@ -295,6 +478,7 @@ func isStringType(t irtypes.Type) bool {
 	if !ok || st.Name() != "" || len(st.Fields) != 2 {
 		return false
 	}
+
 	return st.Fields[0] == irtypes.I8Ptr && st.Fields[1].Equal(irtypes.I64)
 }
 
@@ -305,6 +489,7 @@ func isAnyType(t irtypes.Type) bool {
 	if !ok || st.Name() != "" || len(st.Fields) != 2 {
 		return false
 	}
+
 	return st.Fields[0].Equal(irtypes.I32) && st.Fields[1] == irtypes.I8Ptr
 }
 
@@ -320,6 +505,7 @@ func isFatArrayPtr(t irtypes.Type) bool {
 		return false
 	}
 	_, ok = st.Fields[0].(*irtypes.PointerType)
+
 	return ok
 }
 
@@ -337,13 +523,30 @@ func isFatFnPtr(t irtypes.Type) bool {
 		return false
 	}
 	_, ok = pt.ElemType.(*irtypes.FuncType)
+
 	return ok
 }
 
 // isAtomType returns true if t is the %__atom named struct type { i32 }.
 func isAtomType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
+
 	return ok && st.Name() == "__atom"
+}
+
+// isStructType returns true if t is a named LLVM struct type (excluding the
+// special any, atom, and fat-pointer types so those use their own coercion paths).
+func isStructType(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	if !ok || st.Name() == "" || st.Name() == "__atom" {
+		return false
+	}
+	// Exclude any, string, and dynamic-array fat-pointers.
+	if isAnyType(t) || isFatPtrType(t) || isFatArrayPtr(t) || isFatFnPtr(t) {
+		return false
+	}
+
+	return true
 }
 
 // typeNameOf returns the type name for a struct or empty string.
@@ -351,6 +554,7 @@ func (cg *CodeGen) typeNameOf(t irtypes.Type) string {
 	if st, ok := t.(*irtypes.StructType); ok {
 		return st.Name()
 	}
+
 	return ""
 }
 
@@ -376,6 +580,7 @@ func (cg *CodeGen) fieldIndex(structName, fieldName string) int {
 			return offset + i
 		}
 	}
+
 	return -1
 }
 
@@ -390,16 +595,8 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 			return lt, nil
 		}
 	}
+
 	return cg.tinTypeToLLVM(te)
 }
 
 // typeExprName returns a short string name for a TypeExpr (used in instance keys).
-func typeExprName(te ast.TypeExpr) string {
-	switch t := te.(type) {
-	case *ast.SimpleType:
-		return t.Name
-	case *ast.GenericType:
-		return t.Name
-	}
-	return "unknown"
-}

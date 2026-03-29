@@ -84,6 +84,7 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 			}
 		}
 	}
+
 	return decl, nil
 }
 
@@ -95,6 +96,14 @@ func (p *Parser) parseStructItem() (any, error) {
 	}
 	if p.check(lexer.KW_FN) {
 		fn, err := p.parseFuncDecl(nil, isStatic)
+		if err == nil && fn != nil && !fn.IsStatic {
+			// Auto-detect: a struct method with no "this" first parameter is static.
+			hasThis := len(fn.Params) > 0 && fn.Params[0].Name == "this"
+			if !hasThis && !fn.IsVirtual {
+				fn.IsStatic = true
+			}
+		}
+
 		return fn, err
 	}
 	// Field: name type [forward]
@@ -124,6 +133,7 @@ func (p *Parser) parseStructItem() (any, error) {
 		}
 		tags = append(tags, tagTok.Literal)
 	}
+
 	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, Tags: tags}, nil
 }
 
@@ -156,6 +166,7 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return decl, nil
 	}
 
@@ -198,6 +209,7 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 			}
 		}
 	}
+
 	return decl, nil
 }
 
@@ -246,6 +258,7 @@ func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 			}
 		}
 	}
+
 	return decl, nil
 }
 
@@ -290,6 +303,7 @@ func (p *Parser) parseEnumDecl() (*ast.EnumDecl, error) {
 			}
 		}
 	}
+
 	return decl, nil
 }
 
@@ -320,6 +334,7 @@ func (p *Parser) parseEnumMember(isAtom bool) (ast.EnumMember, error) {
 	if p.check(lexer.COMMA) {
 		p.advance()
 	}
+
 	return mem, nil
 }
 
@@ -361,46 +376,60 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 		}
 		p.advance()
 	}
-	return decl, nil
-}
 
-func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
-	p.advance() // consume data
-	nameTok, err := p.expect(lexer.IDENT)
-	if err != nil {
-		return nil, err
-	}
-	typeParams, _ := p.parseTypeParams()
-	if _, err := p.expect(lexer.ASSIGN); err != nil {
-		return nil, err
-	}
-
-	decl := &ast.DataDecl{Name: nameTok.Literal, TypeParams: typeParams}
-	// "t | None"  or "SomeType | None"
-	for {
-		if p.check(lexer.NONE_LIT) || (p.check(lexer.IDENT) && p.peek().Literal == "None") {
-			p.advance()
-			decl.Variants = append(decl.Variants, ast.DataVariant{Name: "None"})
-		} else {
-			// Use parseTypeSingle (not parseTypeExpr) so that | is treated as
-			// variant separator, not as a union type operator
-			typ, err2 := p.parseTypeSingle()
-			if err2 != nil {
-				return nil, err2
-			}
-			decl.Variants = append(decl.Variants, ast.DataVariant{Type: typ})
-		}
-		if !p.check(lexer.BITOR) {
-			break
-		}
-		p.advance()
-	}
 	return decl, nil
 }
 
 func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 	p.advance() // consume use
 	decl := &ast.UseDecl{}
+
+	// `use { name1, name2! } from module` - selective import as bare names.
+	if p.check(lexer.LBRACE) {
+		p.advance() // consume {
+		var names []string
+		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+			if p.check(lexer.IDENT) {
+				name := p.advance().Literal
+				// Allow trailing ! for macro names: min!, max!
+				if p.check(lexer.NOT) {
+					p.advance()
+					name += "!"
+				}
+				names = append(names, name)
+			}
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+		if _, err := p.expect(lexer.RBRACE); err != nil {
+			return nil, err
+		}
+		// Expect soft keyword "from"
+		if !p.check(lexer.IDENT) || p.peek().Literal != "from" {
+			return nil, fmt.Errorf("expected 'from' after import list, got %q", p.peek().Literal)
+		}
+		p.advance() // consume "from"
+		// Parse the module path: "sync", "std::math", or "./foo.tin"
+		if p.check(lexer.STRING_LIT) {
+			decl.Path = p.advance().Literal
+			decl.IsFile = true
+		} else {
+			var parts []string
+			if p.check(lexer.IDENT) {
+				parts = append(parts, p.advance().Literal)
+			}
+			for p.check(lexer.DCOLON) {
+				p.advance()
+				parts = append(parts, p.advance().Literal)
+			}
+			decl.Path = strings.Join(parts, "::")
+		}
+		decl.Names = names
+		decl.FromSyntax = true
+
+		return decl, nil
+	}
 
 	if p.check(lexer.KW_EXTERN) {
 		decl.IsExtern = true
@@ -423,6 +452,10 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+	} else if p.check(lexer.STRING_LIT) {
+		// File-path import: use "./foo.tin" or use "./bar"
+		decl.Path = p.advance().Literal
+		decl.IsFile = true
 	} else {
 		// Build path from scope-access tokens: "use io" / "use std::math"
 		var parts []string
@@ -435,6 +468,7 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 		}
 		decl.Path = strings.Join(parts, "::")
 	}
+
 	return decl, nil
 }
 
@@ -465,6 +499,7 @@ func (p *Parser) parseUseImport() (ast.UseImport, error) {
 		}
 		imp.Type = typ
 	}
+
 	return imp, nil
 }
 
@@ -477,10 +512,20 @@ func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 			// Skip whitespace tokens (multiline export blocks produce INDENT/DEDENT/NEWLINE)
 			if p.check(lexer.NEWLINE) || p.check(lexer.INDENT) || p.check(lexer.DEDENT) {
 				p.advance()
+
 				continue
 			}
 			if p.check(lexer.IDENT) {
-				decl.Names = append(decl.Names, p.advance().Literal)
+				name := p.advance().Literal
+				// Allow trailing ! on macro names: "min!", "todo!", etc.
+				if p.check(lexer.NOT) {
+					p.advance()
+					name += "!"
+				}
+				decl.Names = append(decl.Names, name)
+			} else if p.check(lexer.NOT) {
+				// Stray ! that wasn't consumed; skip to avoid infinite loop.
+				p.advance()
 			}
 			if p.check(lexer.COMMA) {
 				p.advance()
@@ -496,6 +541,7 @@ func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 			decl.AsName = p.advance().Literal
 		}
 	}
+
 	return decl, nil
 }
 
@@ -521,6 +567,7 @@ func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
 		return nil, err
 	}
 	decl.Body = body
+
 	return decl, nil
 }
 
@@ -540,13 +587,25 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 		p.advance()
 		name += "!"
 	}
-	// params
+	// params - optional typed parameters: (n i64, m, s string)
 	var params []string
+	var paramTypes []string
 	if p.check(lexer.LPAREN) {
 		p.advance()
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			if p.check(lexer.IDENT) {
-				params = append(params, p.advance().Literal)
+				paramName := p.advance().Literal
+				params = append(params, paramName)
+				// Check for optional type annotation (not a comma, closing paren, or EOF)
+				if !p.check(lexer.COMMA) && !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+					te, terr := p.parseTypeExpr()
+					if terr != nil {
+						return nil, terr
+					}
+					paramTypes = append(paramTypes, te.String())
+				} else {
+					paramTypes = append(paramTypes, "") // untyped - infer from call site
+				}
 			}
 			if p.check(lexer.COMMA) {
 				p.advance()
@@ -563,5 +622,10 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.MacroDecl{Name: name, Tags: tags, Params: params, Body: body}, nil
+	// CTFE macros (block body) automatically get the #computed tag
+	if _, isBlock := body.(*ast.Block); isBlock {
+		tags = append(tags, "computed")
+	}
+
+	return &ast.MacroDecl{Name: name, Tags: tags, Params: params, ParamTypes: paramTypes, Body: body}, nil
 }

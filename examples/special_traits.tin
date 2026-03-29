@@ -42,7 +42,7 @@ struct int_range(iter[i64]) =
 
 let r = int_range{start_val: 1, end_val: 6}   // represents [1,2,3,4,5]
 
-for n in r:
+for let n i64 in r:
   echo n           // prints 1, 2, 3, 4, 5
 
 // Combining print + iter
@@ -62,7 +62,7 @@ struct countdown(iter[i64], print) =
 let cd = countdown{from_val: 5}
 echo cd                       // countdown(from=5)
 
-for v in cd:
+for let v i64 in cd:
   echo v                      // 5, 4, 3, 2, 1
 
 use assert

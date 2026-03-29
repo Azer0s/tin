@@ -1,0 +1,41 @@
+// stdlib/strings/strings_test.tin
+//
+// Tests for the strings stdlib: replace (replaces all occurrences).
+// Run with: tin test stdlib/strings/strings_test.tin
+
+use assert
+use strings
+
+// replace
+
+test "replace all occurrences" =
+  let result = strings::replace("foo bar foo baz foo", "foo", "qux")
+  assert::equals_str(result, "qux bar qux baz qux")
+
+test "replace no occurrence returns original" =
+  let result = strings::replace("hello world", "xyz", "abc")
+  assert::equals_str(result, "hello world")
+
+test "replace single occurrence" =
+  let result = strings::replace("hello world", "world", "tin")
+  assert::equals_str(result, "hello tin")
+
+test "replace with empty new string deletes" =
+  let result = strings::replace("aXbXcX", "X", "")
+  assert::equals_str(result, "abc")
+
+test "replace old same as new is no-op" =
+  let result = strings::replace("hello", "hello", "hello")
+  assert::equals_str(result, "hello")
+
+test "replace adjacent occurrences" =
+  let result = strings::replace("aabbaabb", "aa", "X")
+  assert::equals_str(result, "XbbXbb")
+
+test "replace empty string input" =
+  let result = strings::replace("", "x", "y")
+  assert::equals_str(result, "")
+
+test "replace spaces" =
+  let result = strings::replace("hello world foo", " ", "_")
+  assert::equals_str(result, "hello_world_foo")

@@ -1,0 +1,35 @@
+// examples/echo_server/echo_server.tin
+//
+// A concurrent TCP echo server using the higher-level tcp and ioutil packages.
+// Accepts connections on port 8080 and spawns a fiber per connection.
+//
+// Usage:
+//   ./tin build examples/echo_server/echo_server.tin -lm -o /tmp/echo_server
+//   /tmp/echo_server &
+//   echo "hello world" | nc 127.0.0.1 8080
+//   kill %1
+//
+// Demonstrates: tcp::listen/accept, ioutil::read_string/write_string,
+//               spawn, async I/O, TINMAXPROCS M:N scheduling.
+
+use { loop, async } from macros
+use io
+use ioutil
+use tcp
+
+async handle_conn(conn tcp::Conn) =
+  defer conn.close()
+  loop:
+    let line = await ioutil::read_string(conn)
+    if len(line) == 0:
+      return
+    await ioutil::write_string(conn, "ECHO: {line}\n")
+
+fn main() =
+  let srv = tcp::listen(8080)
+  echo "listening on :8080"
+  loop:
+    let (c, ok) = srv.accept()
+    if !ok:
+      break
+    spawn handle_conn(c)

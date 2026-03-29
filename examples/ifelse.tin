@@ -1,0 +1,110 @@
+// examples/ifelse.tin - demonstrates all if/else/else-if forms.
+
+use assert
+
+//  Standalone if (no else)
+
+fn{#pure} positive(n i64) bool =
+  if n > 0:
+    return true
+  return false
+
+test "if no else - true branch" =
+  assert::ok(positive(1))
+
+test "if no else - falls through" =
+  assert::not_ok(positive(0))
+
+//  if / else
+
+fn{#pure} sign(n i64) string =
+  if n > 0:
+    return "pos"
+  else:
+    return "neg or zero"
+
+test "if/else - true branch" =
+  assert::equals_str(sign(5), "pos")
+
+test "if/else - false branch" =
+  assert::equals_str(sign(0), "neg or zero")
+
+//  if / else - empty else body
+
+fn{#pure} clamp_low(n i64, lo i64) i64 =
+  let r i64 = n
+  if n < lo:
+    r = lo
+  else:
+    // intentionally empty - r stays as-is
+  return r
+
+test "if/else empty else - clamps when below" =
+  assert::equals(clamp_low(3, 10), 10)
+
+test "if/else empty else - passes through when above" =
+  assert::equals(clamp_low(20, 10), 20)
+
+//  if / else if (no trailing else)
+
+fn{#pure} category(n i64) string =
+  if n < 0:
+    return "negative"
+  else if n == 0:
+    return "zero"
+  return "positive"   // falls through when both conditions are false
+
+test "else if no trailing else - negative" =
+  assert::equals_str(category(0 - 1), "negative")
+
+test "else if no trailing else - zero" =
+  assert::equals_str(category(0), "zero")
+
+test "else if no trailing else - positive fallthrough" =
+  assert::equals_str(category(42), "positive")
+
+//  if / else if / else full chain
+
+fn{#pure} fizzbuzz(n i64) string =
+  if n % 15 == 0:
+    return "FizzBuzz"
+  else if n % 3 == 0:
+    return "Fizz"
+  else if n % 5 == 0:
+    return "Buzz"
+  else:
+    return "{n}"
+
+test "full chain - FizzBuzz" =
+  assert::equals_str(fizzbuzz(15), "FizzBuzz")
+
+test "full chain - Fizz" =
+  assert::equals_str(fizzbuzz(9), "Fizz")
+
+test "full chain - Buzz" =
+  assert::equals_str(fizzbuzz(10), "Buzz")
+
+test "full chain - number" =
+  assert::equals_str(fizzbuzz(7), "7")
+
+//  Inline (single-statement) forms
+
+fn{#pure} abs_val(n i64) i64 =
+  if n < 0: return 0 - n
+  return n
+
+test "inline if - negative" =
+  assert::equals(abs_val(0 - 5), 5)
+
+test "inline if - positive" =
+  assert::equals(abs_val(3), 3)
+
+fn{#pure} max2(a i64, b i64) i64 =
+  if a >= b: return a
+  else: return b
+
+test "inline if/else - left wins" =
+  assert::equals(max2(7, 3), 7)
+
+test "inline if/else - right wins" =
+  assert::equals(max2(2, 9), 9)

@@ -25,22 +25,28 @@ echo reflect::is_ptr(typeof(42))        // 0
 echo reflect::is_array(typeof(42))      // 0
 echo reflect::is_primitive(typeof(arr)) // 0
 
-// elem()
-echo reflect::elem(typeof(ptr))         // i64
-echo reflect::elem(typeof(arr))         // i64
-echo reflect::elem('"*bool")            // bool
-echo reflect::elem('"[string]")         // string
-echo reflect::elem(typeof(42))          // (empty)
+// elem() -- returns atom (shown with ' prefix when echoed)
+echo reflect::elem(typeof(ptr))         // 'i64
+echo reflect::elem(typeof(arr))         // 'i64
+echo reflect::elem('"*bool")            // 'bool
+echo reflect::elem('"[string]")         // 'string
+echo reflect::elem(typeof(42))          // '' (empty atom)
+
+// multi-level pointer elem
+let pp = &ptr
+echo typeof(pp)                         // '**i64
+echo reflect::elem(typeof(pp))          // '*i64
+echo reflect::elem(reflect::elem(typeof(pp)))  // 'i64
 
 // fn type atoms
 let fn_atom = '"fn(i64,f64)bool"
 echo reflect::kind(fn_atom)             // fn
 echo reflect::is_fn(fn_atom)            // 1
-echo reflect::fn_ret(fn_atom)           // bool
+echo reflect::fn_ret(fn_atom)           // 'bool
 
 let params = reflect::fn_params(fn_atom)
-echo params[0]                          // i64
-echo params[1]                          // f64
+echo params[0]                          // 'i64
+echo params[1]                          // 'f64
 
 // zero-arg fn
 let fn0 = '"fn()i64"
@@ -126,3 +132,35 @@ test "fn_params nested" =
 
 test "fn_ret non-fn" =
   assert::equals_str(reflect::fn_ret(typeof(42)), "")
+
+test "elem returns atom" =
+  let x i64 = 0
+  let px *i64 = &x
+  // elem of *i64 is 'i64 - check it equals typeof(x) directly
+  assert::equals(reflect::elem(typeof(px)) == typeof(x), true)
+
+test "multi-level pointer elem" =
+  let x i64 = 0
+  let p *i64 = &x
+  let pp **i64 = &p
+  let ppp ***i64 = &pp
+  // typeof chain: ***i64, **i64, *i64, i64
+  assert::equals(reflect::elem(typeof(ppp))  == typeof(pp), true)
+  assert::equals(reflect::elem(typeof(pp))   == typeof(p),  true)
+  assert::equals(reflect::elem(typeof(p))    == typeof(x),  true)
+  // Two-level strip: elem(elem(***i64)) == *i64
+  assert::equals(reflect::elem(reflect::elem(typeof(ppp))) == typeof(p), true)
+
+test "elem of array returns atom" =
+  let arr = [1, 2, 3]
+  assert::equals(reflect::elem(typeof(arr)) == typeof(42), true)
+
+test "fn_ret returns atom" =
+  let fn_atom = '"fn(i64,f64)bool"
+  assert::equals(reflect::fn_ret(fn_atom) == 'bool, true)
+
+test "fn_params returns atom slice" =
+  let fn_atom = '"fn(i64,f64)bool"
+  let ps = reflect::fn_params(fn_atom)
+  assert::equals(ps[0] == 'i64,  true)
+  assert::equals(ps[1] == 'f64,  true)

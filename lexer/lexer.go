@@ -23,8 +23,6 @@ const (
 	CHAR_LIT                      // 'a'
 	BOOL_LIT                      // true / false
 	ATOM_LIT                      // 'ok  'err
-	NONE_LIT                      // None
-
 	// Identifier
 	IDENT
 
@@ -37,7 +35,6 @@ const (
 	KW_TRAIT
 	KW_ENUM
 	KW_UNION
-	KW_DATA
 	KW_USE
 	KW_EXPORT
 	KW_EXTERN
@@ -72,6 +69,11 @@ const (
 	KW_GETFIELD
 	KW_SETFIELD
 	KW_PASS
+	KW_ISRC
+	KW_VAR
+	KW_SPAWN
+	KW_AWAIT
+	KW_YIELD
 
 	// Operators
 	PLUS      // +
@@ -137,11 +139,11 @@ const (
 
 var tokenNames = map[TokenType]string{
 	INT_LIT: "INT", FLOAT_LIT: "FLOAT", STRING_LIT: "STRING", BACKTICK_LIT: "BACKTICK",
-	CHAR_LIT: "CHAR", BOOL_LIT: "BOOL", ATOM_LIT: "ATOM", NONE_LIT: "NONE",
+	CHAR_LIT: "CHAR", BOOL_LIT: "BOOL", ATOM_LIT: "ATOM",
 	IDENT:  "IDENT",
 	KW_LET: "let", KW_CONST: "const", KW_FN: "fn", KW_TYPE: "type",
 	KW_STRUCT: "struct", KW_TRAIT: "trait", KW_ENUM: "enum", KW_UNION: "union",
-	KW_DATA: "data", KW_USE: "use", KW_EXPORT: "export", KW_EXTERN: "extern",
+	KW_USE: "use", KW_EXPORT: "export", KW_EXTERN: "extern",
 	KW_RETURN: "return", KW_IF: "if", KW_ELSE: "else", KW_FOR: "for",
 	KW_IN: "in", KW_MATCH: "match", KW_CASE: "case", KW_DEFAULT: "default",
 	KW_DEFER: "defer", KW_WHERE: "where", KW_MACRO: "macro",
@@ -151,6 +153,8 @@ var tokenNames = map[TokenType]string{
 	KW_TYPEOF: "typeof", KW_TRAITOF: "traitof", KW_FIELDNAMES: "fieldnames",
 	KW_FIELDTYPES: "fieldtypes", KW_FIELDTAG: "fieldtag",
 	KW_GETFIELD: "getfield", KW_SETFIELD: "setfield", KW_PASS: "pass",
+	KW_ISRC: "isrc",
+	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield",
 	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
@@ -169,13 +173,14 @@ func (t TokenType) String() string {
 	if s, ok := tokenNames[t]; ok {
 		return s
 	}
+
 	return fmt.Sprintf("TOKEN(%d)", int(t))
 }
 
 var keywords = map[string]TokenType{
 	"let": KW_LET, "const": KW_CONST, "fn": KW_FN, "type": KW_TYPE,
 	"struct": KW_STRUCT, "trait": KW_TRAIT, "enum": KW_ENUM, "union": KW_UNION,
-	"data": KW_DATA, "use": KW_USE, "export": KW_EXPORT, "extern": KW_EXTERN,
+	"use": KW_USE, "export": KW_EXPORT, "extern": KW_EXTERN,
 	"return": KW_RETURN, "if": KW_IF, "else": KW_ELSE, "for": KW_FOR,
 	"in": KW_IN, "match": KW_MATCH, "case": KW_CASE, "default": KW_DEFAULT,
 	"defer": KW_DEFER, "where": KW_WHERE, "macro": KW_MACRO,
@@ -185,7 +190,9 @@ var keywords = map[string]TokenType{
 	"typeof": KW_TYPEOF, "traitof": KW_TRAITOF, "fieldnames": KW_FIELDNAMES,
 	"fieldtypes": KW_FIELDTYPES, "fieldtag": KW_FIELDTAG,
 	"getfield": KW_GETFIELD, "setfield": KW_SETFIELD, "pass": KW_PASS,
-	"true": BOOL_LIT, "false": BOOL_LIT, "None": NONE_LIT,
+	"isrc": KW_ISRC,
+	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD,
+	"true": BOOL_LIT, "false": BOOL_LIT,
 }
 
 // Token is a single lexical unit
@@ -242,6 +249,7 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			break
 		}
 	}
+
 	return l.tokens, nil
 }
 
@@ -249,6 +257,7 @@ func (l *Lexer) peek() rune {
 	if l.pos >= len(l.src) {
 		return 0
 	}
+
 	return l.src[l.pos]
 }
 
@@ -257,6 +266,7 @@ func (l *Lexer) peekAt(offset int) rune {
 	if i >= len(l.src) {
 		return 0
 	}
+
 	return l.src[i]
 }
 
@@ -272,6 +282,7 @@ func (l *Lexer) advance() rune {
 	} else {
 		l.col++
 	}
+
 	return ch
 }
 
@@ -288,6 +299,7 @@ func (l *Lexer) nextToken() (Token, error) {
 
 	if l.pos >= len(l.src) {
 		// Emit remaining DEDENTs
+
 		return l.handleEOF()
 	}
 
@@ -298,6 +310,7 @@ func (l *Lexer) nextToken() (Token, error) {
 		l.advance()
 		l.atLineStart = true
 		l.lineIndent = 0
+
 		return Token{Type: NEWLINE, Literal: "\n", Line: l.line - 1, Col: l.col}, nil
 	}
 
@@ -306,6 +319,7 @@ func (l *Lexer) nextToken() (Token, error) {
 		for l.pos < len(l.src) && l.peek() != '\n' {
 			l.advance()
 		}
+
 		return l.nextToken()
 	}
 	if ch == '/' && l.peekAt(1) == '*' {
@@ -315,6 +329,7 @@ func (l *Lexer) nextToken() (Token, error) {
 			if l.peek() == '*' && l.peekAt(1) == '/' {
 				l.advance() // consume *
 				l.advance() // consume /
+
 				break
 			}
 			if l.peek() == '\n' {
@@ -323,6 +338,7 @@ func (l *Lexer) nextToken() (Token, error) {
 			}
 			l.advance()
 		}
+
 		return l.nextToken()
 	}
 
@@ -330,12 +346,16 @@ func (l *Lexer) nextToken() (Token, error) {
 
 	switch ch {
 	case '"':
+
 		return l.readString(line, col)
 	case '\'':
+
 		return l.readSingleQuote(line, col)
 	case '#':
+
 		return l.readControlTag(line, col)
 	case '`':
+
 		return l.readBacktick(line, col)
 	}
 
@@ -343,11 +363,13 @@ func (l *Lexer) nextToken() (Token, error) {
 		l.advance()
 		l.advance()
 		l.advance()
+
 		return Token{Type: DOTDOTDOT, Literal: "...", Line: line, Col: col}, nil
 	}
 	if ch == '.' && l.peekAt(1) == '.' {
 		l.advance()
 		l.advance()
+
 		return Token{Type: RANGE, Literal: "..", Line: line, Col: col}, nil
 	}
 
@@ -393,6 +415,7 @@ func (l *Lexer) handleLineStart() (Token, error) {
 		// Reset
 		l.pos = startPos + (l.pos - startPos)
 		_ = startPos
+
 		return l.nextToken()
 	}
 	if l.src[l.pos] == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/' {
@@ -403,11 +426,13 @@ func (l *Lexer) handleLineStart() (Token, error) {
 		if l.pos < len(l.src) {
 			l.advance() // consume \n
 		}
+
 		return l.nextToken()
 	}
 	if l.src[l.pos] == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*' {
 		// Block comment - set atLineStart=false so we don't re-enter here
 		l.atLineStart = false
+
 		return l.nextToken()
 	}
 
@@ -421,6 +446,7 @@ func (l *Lexer) handleLineStart() (Token, error) {
 
 	if indent > top {
 		l.indentStack = append(l.indentStack, indent)
+
 		return Token{Type: INDENT, Literal: "", Line: l.line, Col: 1}, nil
 	} else if indent < top {
 		// Pop stack until we match
@@ -436,9 +462,11 @@ func (l *Lexer) handleLineStart() (Token, error) {
 			l.atLineStart = true
 			l.dedenting = true
 		}
+
 		return Token{Type: DEDENT, Literal: "", Line: l.line, Col: 1}, nil
 	}
 	// indent == top: just continue tokenizing
+
 	return l.nextToken()
 }
 
@@ -446,8 +474,10 @@ func (l *Lexer) handleEOF() (Token, error) {
 	// Emit remaining DEDENTs before EOF
 	if len(l.indentStack) > 1 {
 		l.indentStack = l.indentStack[:len(l.indentStack)-1]
+
 		return Token{Type: DEDENT, Literal: "", Line: l.line, Col: l.col}, nil
 	}
+
 	return Token{Type: EOF, Literal: "", Line: l.line, Col: l.col}, nil
 }
 
@@ -458,6 +488,7 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 		ch := l.peek()
 		if ch == '"' {
 			l.advance()
+
 			break
 		}
 		if ch == '\\' {
@@ -476,14 +507,24 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 				sb.WriteByte('\\')
 			case '0':
 				sb.WriteByte(0)
+			case '{':
+				// \{ produces a literal { that is NOT treated as an interpolation marker.
+				// We keep the backslash so parseStringInterp can distinguish it.
+				sb.WriteByte('\\')
+				sb.WriteByte('{')
+			case '}':
+				sb.WriteByte('\\')
+				sb.WriteByte('}')
 			default:
 				sb.WriteRune('\\')
 				sb.WriteRune(esc)
 			}
+
 			continue
 		}
 		sb.WriteRune(l.advance())
 	}
+
 	return Token{Type: STRING_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
@@ -494,6 +535,36 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 	}
 
 	ch := l.peek()
+
+	// Escape-sequence char literal: '\n', '\t', '\r', '\\', '\'', '\0', '"'
+	if ch == '\\' {
+		l.advance() // consume '\'
+		esc := l.advance()
+		var b byte
+		switch esc {
+		case 'n':
+			b = '\n'
+		case 't':
+			b = '\t'
+		case 'r':
+			b = '\r'
+		case '\\':
+			b = '\\'
+		case '\'':
+			b = '\''
+		case '0':
+			b = 0
+		case '"':
+			b = '"'
+		default:
+			b = byte(esc)
+		}
+		if l.pos < len(l.src) && l.peek() == '\'' {
+			l.advance() // consume closing '
+		}
+
+		return Token{Type: CHAR_LIT, Literal: string([]byte{b}), Line: line, Col: col}, nil
+	}
 
 	// '"..."  ->  quoted atom literal (for non-standard / user-defined names)
 	// If the content is a plain identifier (letters, digits, underscores only),
@@ -519,6 +590,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			// Keep surrounding double-quotes for complex atoms like '"fn(i64)bool"'
 			name = "\"" + name + "\""
 		}
+
 		return Token{Type: ATOM_LIT, Literal: name, Line: line, Col: col}, nil
 	}
 
@@ -536,6 +608,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			// char literal: 'x'
 			c := l.advance() // consume the char
 			l.advance()      // consume closing '
+
 			return Token{Type: CHAR_LIT, Literal: string(c), Line: line, Col: col}, nil
 		}
 		// It's an atom - only letters, digits, and underscores allowed
@@ -543,6 +616,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 		for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 			sb.WriteRune(l.advance())
 		}
+
 		return Token{Type: ATOM_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 	}
 
@@ -551,6 +625,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 	if l.pos < len(l.src) && l.peek() == '\'' {
 		l.advance() // consume closing '
 	}
+
 	return Token{Type: CHAR_LIT, Literal: string(c), Line: line, Col: col}, nil
 }
 
@@ -563,6 +638,7 @@ func (l *Lexer) readControlTag(line, col int) (Token, error) {
 	if sb.Len() == 0 {
 		return Token{Type: HASH, Literal: "#", Line: line, Col: col}, nil
 	}
+
 	return Token{Type: CONTROL_TAG, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
@@ -580,6 +656,7 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 		}
 		sb.WriteRune(ch)
 	}
+
 	return Token{Type: BACKTICK_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
@@ -594,6 +671,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 		for l.pos < len(l.src) && isHexDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
+
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	case l.peek() == '0' && (l.peekAt(1) == 'b' || l.peekAt(1) == 'B'):
@@ -602,6 +680,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 		for l.pos < len(l.src) && (l.peek() == '0' || l.peek() == '1') {
 			sb.WriteRune(l.advance())
 		}
+
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	case l.peek() == '0' && (l.peekAt(1) == 'o' || l.peekAt(1) == 'O'):
@@ -610,6 +689,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 		for l.pos < len(l.src) && l.peek() >= '0' && l.peek() <= '7' {
 			sb.WriteRune(l.advance())
 		}
+
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	default:
@@ -637,6 +717,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 	if isFloat {
 		return Token{Type: FLOAT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 	}
+
 	return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
@@ -655,8 +736,10 @@ func (l *Lexer) readIdentOrKeyword(line, col int) (Token, error) {
 		if tt == BOOL_LIT {
 			lit = word // "true" or "false"
 		}
+
 		return Token{Type: tt, Literal: lit, Line: line, Col: col}, nil
 	}
+
 	return Token{Type: IDENT, Literal: word, Line: line, Col: col}, nil
 }
 
@@ -668,134 +751,180 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 			l.advance()
 			if l.peek() == '=' {
 				l.advance()
+
 				return Token{Type: APPENDEQ, Literal: "++=", Line: line, Col: col}, nil
 			}
+
 			return Token{Type: INC, Literal: "++", Line: line, Col: col}, nil
 		}
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: PLUSEQ, Literal: "+=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: PLUS, Literal: "+", Line: line, Col: col}, nil
 	case '-':
 		if l.peek() == '>' {
 			l.advance()
+
 			return Token{Type: ARROW, Literal: "->", Line: line, Col: col}, nil
 		}
 		if l.peek() == '-' {
 			l.advance()
+
 			return Token{Type: INC, Literal: "--", Line: line, Col: col}, nil
 		}
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: MINUSEQ, Literal: "-=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: MINUS, Literal: "-", Line: line, Col: col}, nil
 	case '*':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: STAREQ, Literal: "*=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: STAR, Literal: "*", Line: line, Col: col}, nil
 	case '/':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: SLASHEQ, Literal: "/=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: SLASH, Literal: "/", Line: line, Col: col}, nil
 	case '%':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: PERCENTEQ, Literal: "%=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: PERCENT, Literal: "%", Line: line, Col: col}, nil
 	case '=':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: EQEQ, Literal: "==", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: ASSIGN, Literal: "=", Line: line, Col: col}, nil
 	case '!':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: NEQ, Literal: "!=", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: NOT, Literal: "!", Line: line, Col: col}, nil
 	case '<':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: LTEQ, Literal: "<=", Line: line, Col: col}, nil
 		}
 		if l.peek() == '<' {
 			l.advance()
+
 			return Token{Type: SHL, Literal: "<<", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: LT, Literal: "<", Line: line, Col: col}, nil
 	case '>':
 		if l.peek() == '=' {
 			l.advance()
+
 			return Token{Type: GTEQ, Literal: ">=", Line: line, Col: col}, nil
 		}
 		if l.peek() == '>' {
 			l.advance()
+
 			return Token{Type: SHR, Literal: ">>", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: GT, Literal: ">", Line: line, Col: col}, nil
 	case '&':
 		if l.peek() == '&' {
 			l.advance()
+
 			return Token{Type: AND, Literal: "&&", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: AMP, Literal: "&", Line: line, Col: col}, nil
 	case '|':
 		if l.peek() == '|' {
 			l.advance()
+
 			return Token{Type: OR, Literal: "||", Line: line, Col: col}, nil
 		}
 		if l.peek() == '>' {
 			l.advance()
+
 			return Token{Type: PIPE, Literal: "|>", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: BITOR, Literal: "|", Line: line, Col: col}, nil
 	case '^':
+
 		return Token{Type: XOR, Literal: "^", Line: line, Col: col}, nil
 	case '~':
+
 		return Token{Type: TILDE, Literal: "~", Line: line, Col: col}, nil
 	case '?':
+
 		return Token{Type: QUESTION, Literal: "?", Line: line, Col: col}, nil
 	case '@':
+
 		return Token{Type: AT, Literal: "@", Line: line, Col: col}, nil
 	case '.':
 		if l.peek() == '.' {
 			l.advance()
 			if l.peek() == '.' {
 				l.advance()
+
 				return Token{Type: DOTDOTDOT, Literal: "...", Line: line, Col: col}, nil
 			}
+
 			return Token{Type: RANGE, Literal: "..", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: DOT, Literal: ".", Line: line, Col: col}, nil
 	case ':':
 		if l.peek() == ':' {
 			l.advance()
+
 			return Token{Type: DCOLON, Literal: "::", Line: line, Col: col}, nil
 		}
+
 		return Token{Type: COLON, Literal: ":", Line: line, Col: col}, nil
 	case '(':
+
 		return Token{Type: LPAREN, Literal: "(", Line: line, Col: col}, nil
 	case ')':
+
 		return Token{Type: RPAREN, Literal: ")", Line: line, Col: col}, nil
 	case '{':
+
 		return Token{Type: LBRACE, Literal: "{", Line: line, Col: col}, nil
 	case '}':
+
 		return Token{Type: RBRACE, Literal: "}", Line: line, Col: col}, nil
 	case '[':
+
 		return Token{Type: LBRACKET, Literal: "[", Line: line, Col: col}, nil
 	case ']':
+
 		return Token{Type: RBRACKET, Literal: "]", Line: line, Col: col}, nil
 	case ';':
+
 		return Token{Type: SEMI, Literal: ";", Line: line, Col: col}, nil
 	case ',':
+
 		return Token{Type: COMMA, Literal: ",", Line: line, Col: col}, nil
 	}
 

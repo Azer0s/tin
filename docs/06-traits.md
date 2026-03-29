@@ -269,34 +269,89 @@ generates:
 
 Alias traits and mixin/forward-field traits do not generate vtables. Only traits with virtual or virtual-overridable methods do.
 
-### LLVM struct layout with traits
-
-Every struct that implements at least one trait carries hidden fields:
-
-```
-%rect = type { i32, %drawable_vtable*, %resizable_vtable*, i64, i64 }
-               [0]        [1]                [2]           [3]  [4]
-                ↑                                           ↑
-          type-ID field                             first user field
-```
-
-- Index 0: `i32` compile-time type ID (used by the `any` and reflection system).
-- Indices 1...N: one `vtable*` per implemented trait, in declaration order.
-- Indices N+1...: user-visible fields.
-
-The type ID and vtable pointers are never visible in source code. They are
-accessible only through the reflection builtins described in
-[09 - Reflection](09-reflection.md).
-
 ### Method dispatch sequence
 
-When `print_name(cat)` is called:
+When `print_name(cat)` is called, the compiler coerces the concrete `cat`
+value to a fat pointer `{data*, vtable*}`. The callee dispatches through the
+vtable pointer - one pointer load + one indirect call, the same as C++ virtual
+dispatch. See `docs/internals/values.md` for the full LLVM layout details.
 
-1. The compiler coerces `cat animal` -> fat pointer `{&cat_data, &animal__named__vtable}`.
-2. The callee receives `{i8* data, named_vtable* vt}`.
-3. `x.name()` is compiled as `vt->name_fn(data)`.
-4. `animal__named__name(i8* self)` bitcasts `self` to `*animal`, loads the
-   struct, and calls the concrete `animal.name` method.
+---
 
-The indirection is one pointer load + one indirect call  -  the same as C++
-virtual dispatch.
+## Trait fat pointers (`*TraitName`)
+
+A trait value can be held as a pointer using the `*TraitName` type. Dereferencing
+or calling methods through a `*TraitName` pointer works via the `->` operator,
+which loads the fat pointer and dispatches through the vtable:
+
+```rust
+trait greeter =
+  fn greet(this greeter) string = virtual
+
+struct person(greeter) =
+  name string
+  fn greet(this person) string = return "Hello, I am {this.name}"
+
+let p = person{name: "Alice"}
+let gp *greeter = &p          // pointer to fat pointer
+echo gp->greet()              // "Hello, I am Alice"
+```
+
+The `->` operator automatically dereferences `*TraitName` to get the fat pointer,
+then dispatches via the vtable.
+
+---
+
+## Trait method mutation write-back
+
+When a trait method returns the same trait type (e.g. `fn inc(this counter) counter`),
+the vtable wrapper automatically **writes the returned struct value back** to the
+caller's storage. This ensures mutations are visible after calling through a fat pointer:
+
+```rust
+trait counter =
+  fn inc(this counter) counter = virtual
+  fn get(this counter) i64 = virtual
+
+struct tally(counter) =
+  count i64
+  fn inc(this tally) tally = return tally{count: this.count + 1}
+  fn get(this tally) i64   = return this.count
+
+let t = tally{count: 0}
+let ct counter = t
+let ct2 = ct.inc()   // returns incremented counter fat ptr
+echo ct2.get()       // 1
+```
+
+The vtable wrapper:
+1. Loads the concrete struct value from the fat pointer's data slot.
+2. Calls the concrete method (e.g. `tally_inc`).
+3. **Stores the result back** to the data slot so subsequent calls see the update.
+4. Constructs a fat pointer from the updated data slot and the static vtable.
+
+---
+
+## Trait `init` / `deinit` chaining
+
+When a struct **and** a trait both define `fn init` (or `fn deinit`), both are
+called - the struct's version first, then the trait's version:
+
+```rust
+trait observable =
+  fn init(this observable)   = global_init_count = global_init_count + 1
+  fn deinit(this observable) = global_deinit_count = global_deinit_count + 1
+
+struct widget(observable) =
+  id i64
+  fn init(this widget)   = setup(this.id)    // called first
+  fn deinit(this widget) = teardown(this.id) // called first
+```
+
+Creating `widget{id: 1}` calls `widget_init` (struct's init) **and** the
+trait's `observable_init` (trait's init). Similarly, when the widget goes out of
+scope or is explicitly released, `widget_deinit` is called followed by the
+trait's `observable_deinit`.
+
+Chaining is automatic - no extra syntax is required. It mirrors base-class
+constructor/destructor chaining in object-oriented languages.

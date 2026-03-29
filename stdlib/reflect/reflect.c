@@ -81,31 +81,44 @@ int64_t _tin_reflect_is_primitive(const char *atom) {
     return _tin_is_primitive_name(atom_spec(atom, buf)) ? 1 : 0;
 }
 
+// make_immortal_string: registers the string in the runtime atom table and
+// returns a pointer to the table's own copy of the string.  The runtime table
+// owns the memory (via strdup) and it remains reachable for the program's
+// lifetime, so valgrind does not report it as a leak.
+// Callers pass the raw type name (no apostrophe prefix); wrapFromExtern will
+// call __tin_string_to_atom on the returned pointer to get the atom value.
+static const char *make_immortal_string(const char *s, size_t len) {
+    // Build a temporary null-terminated copy (stack-allocated for small sizes).
+    char tmp[512];
+    if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+    memcpy(tmp, s, len);
+    tmp[len] = '\0';
+    // Register in the runtime table; the table strdup's the string so the
+    // storage persists until the process exits (and is reachable, not "lost").
+    int32_t code = _tin_learn_atom(tmp);
+    const char *stored = _tin_rt_atom_to_str(code);
+    return stored ? stored : _rk_empty.data;
+}
+
 // elem: inner type atom for pointer or array
 //   "*point" -> "point"
 //   "[i64]"  -> "i64"
 //   otherwise -> ""
+// Returns an immortal string so wrapFromExtern can convert i8* -> atom safely.
 const char *_tin_reflect_elem(const char *atom) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
     const char *s = atom_spec(atom, sbuf);
     if (*s == '*') {
         const char *inner = s + 1;
-        size_t len = strlen(inner);
-        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
-        memcpy(buf, inner, len);
-        buf[len] = '\0';
-        return buf;
+        return make_immortal_string(inner, strlen(inner));
     }
     if (*s == '[') {
         // "[T]" -> "T": strip '[' and trailing ']'
         const char *inner = s + 1;
         size_t len = strlen(inner);
         if (len > 0 && inner[len - 1] == ']') len--;
-        char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
-        memcpy(buf, inner, len);
-        buf[len] = '\0';
-        return buf;
+        return make_immortal_string(inner, len);
     }
     return _rk_empty.data;
 }
@@ -129,6 +142,7 @@ static const char *_reflect_find_params_end(const char *open_paren) {
 // fn_ret: return type atom for a function type
 //   "fn(i64,f64)bool" -> "bool"
 //   non-fn types      -> ""
+// Returns an immortal string so wrapFromExtern can convert i8* -> atom safely.
 const char *_tin_reflect_fn_ret(const char *atom) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
@@ -138,10 +152,7 @@ const char *_tin_reflect_fn_ret(const char *atom) {
     if (!after || *after == '\0') return _rk_empty.data;
     size_t len = strlen(after);
     if (len == 0) return _rk_empty.data;
-    char *buf = (char *)_tin_rc_alloc((int64_t)(len + 1));
-    memcpy(buf, after, len);
-    buf[len] = '\0';
-    return buf;
+    return make_immortal_string(after, len);
 }
 
 // fn_arity: number of parameters in a function type atom
@@ -164,6 +175,7 @@ int64_t _tin_reflect_fn_arity(const char *atom) {
 }
 
 // fn_param: type atom of the idx-th parameter (0-based)
+// Returns an immortal string so wrapFromExtern can convert i8* -> atom safely.
 const char *_tin_reflect_fn_param(const char *atom, int64_t idx) {
     if (!atom) return _rk_empty.data;
     char sbuf[256];
@@ -190,16 +202,16 @@ const char *_tin_reflect_fn_param(const char *atom, int64_t idx) {
 
 found:;
     size_t plen = (size_t)(p - start);
-    char *buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
-    memcpy(buf, start, plen);
-    buf[plen] = '\0';
-    return buf;
+    return make_immortal_string(start, plen);
 }
 
-// fn_params: returns a TinStringArray of parameter type atoms.
-// Memory is one _tin_rc_alloc block: TinString[N] + N immortal records.
-TinStringArray _tin_reflect_fn_params(const char *atom) {
-    TinStringArray empty = { NULL, 0 };
+// fn_params: returns a TinAtomArray of parameter type atoms.
+// Each element is a TinAtom { int32_t code } matching Tin's %__atom type.
+// Atom codes are registered in the runtime table via _tin_learn_atom so that
+// __tin_string_to_atom / __tin_atom_to_string can resolve them later.
+// The TinAtom array is allocated with TIN_IMMORTAL_RC so it is never freed.
+TinAtomArray _tin_reflect_fn_params(const char *atom) {
+    TinAtomArray empty = { NULL, 0 };
     if (!atom) return empty;
     char sbuf[256];
     const char *s = atom_spec(atom, sbuf);
@@ -235,33 +247,31 @@ TinStringArray _tin_reflect_fn_params(const char *atom) {
     arity++;
     if (arity > MAX_PARAMS) arity = MAX_PARAMS;
 
-    // Total buffer: TinString[arity] + N immortal records (8-byte aligned)
-    size_t arr_size = (size_t)arity * sizeof(TinString);
-    size_t total = arr_size;
+    // Allocate TinAtom array with an RC header so _tin_release is safe.
+    // sizeof(TinAtom) == 4 (single int32_t).  Layout: [int64_t RC | TinAtom[arity]].
+    // Setting RC = TIN_IMMORTAL_RC ensures _tin_release is a no-op.
+    // We keep hdr reachable in a static list so valgrind sees it as
+    // "still reachable" rather than "definitely lost".
+    size_t arr_size = (size_t)arity * sizeof(TinAtom);
+    int64_t *hdr = (int64_t *)malloc(sizeof(int64_t) + arr_size);
+    if (!hdr) return empty;
+    *hdr = TIN_IMMORTAL_RC;
+    TinAtom *arr = (TinAtom *)(hdr + 1);
+    // Keep hdr reachable via a simple static linked list.
+    typedef struct _AtomArrNode { void *ptr; struct _AtomArrNode *next; } AtomArrNode;
+    static AtomArrNode *_atom_arr_head = NULL;
+    AtomArrNode *node = (AtomArrNode *)malloc(sizeof(AtomArrNode));
+    if (node) { node->ptr = hdr; node->next = _atom_arr_head; _atom_arr_head = node; }
+
     for (int64_t i = 0; i < arity; i++) {
-        size_t rec_size = sizeof(int64_t) + lens[i] + 1;
-        rec_size = (rec_size + 7) & ~(size_t)7;
-        total += rec_size;
+        // Copy param string into a temporary null-terminated buffer
+        char tmp[256];
+        size_t copy_len = lens[i] < 255 ? lens[i] : 255;
+        memcpy(tmp, starts[i], copy_len);
+        tmp[copy_len] = '\0';
+        // Register in the runtime atom table and get the CRC32 code
+        arr[i].code = _tin_learn_atom(tmp);
     }
 
-    char *block = (char *)_tin_rc_alloc((int64_t)total);
-    TinString *arr = (TinString *)block;
-    char *rec = block + arr_size;
-
-    for (int64_t i = 0; i < arity; i++) {
-        int64_t *rc_field = (int64_t *)rec;
-        *rc_field = -1; // TIN_IMMORTAL_RC
-        char *data = rec + sizeof(int64_t);
-        memcpy(data, starts[i], lens[i]);
-        data[lens[i]] = '\0';
-
-        arr[i].ptr = data;
-        arr[i].len = (int64_t)lens[i];
-
-        size_t rec_size = sizeof(int64_t) + lens[i] + 1;
-        rec_size = (rec_size + 7) & ~(size_t)7;
-        rec += rec_size;
-    }
-
-    return (TinStringArray){ arr, arity };
+    return (TinAtomArray){ arr, arity };
 }

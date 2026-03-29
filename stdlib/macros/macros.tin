@@ -1,0 +1,38 @@
+// stdlib/macros - Standard macro library
+//
+// Import with: use macros
+// Selective import: use { loop, min!, max! } from macros
+//
+// #no_parens macros require selective import: use { loop } from macros
+// Regular macros work with selective import: use { min! } from macros
+
+// loop - infinite loop via literal token substitution.
+// #no_parens means bare `loop` expands to `for true` in the token stream.
+macro{#no_parens #no_excl} loop() = `for true`
+
+// async - shorthand for `fn{#async}`.
+// Write `async foo(x i32) i32 =` instead of `fn{#async} foo(x i32) i32 =`.
+macro{#no_parens #no_excl} async() = `fn{#async}`
+
+// todo!() - panic with "not yet implemented" at the call site.
+macro todo!() = `_tin_panic("not yet implemented")`
+
+// unreachable!() - panic indicating code should never be reached.
+macro unreachable!() = `_tin_panic("unreachable")`
+
+// min!(a, b) - minimum of two comparable values.
+macro min!(a, b) = return a < b ? a : b
+
+// max!(a, b) - maximum of two comparable values.
+macro max!(a, b) = return a > b ? a : b
+
+// abs!(x) - absolute value.
+macro abs!(x) = return x < 0 ? -x : x
+
+// clamp!(x, lo, hi) - clamp x to [lo, hi].
+macro clamp!(x, lo, hi) = return x < lo ? lo : (x > hi ? hi : x)
+
+// dbg!(x) - identity: returns x unchanged (placeholder for debug tracing).
+macro dbg!(x) = `x`
+
+export { loop, async, todo!, unreachable!, min!, max!, abs!, clamp!, dbg! } as macros

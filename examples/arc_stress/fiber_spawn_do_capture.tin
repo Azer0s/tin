@@ -1,0 +1,45 @@
+// examples/arc_stress/fiber_spawn_do_capture.tin
+//
+// Memory safety stress test for spawn do: blocks with local variable capture.
+//
+// Unlike fiber_spawn_do.tin (which accesses only module-level channels),
+// this test verifies that locally-captured variables - packed into a heap env
+// struct at spawn time and unpacked inside the $coro ramp - survive the full
+// fiber lifecycle without use-after-free or leaks.
+//
+// Each iteration captures two loop-local values:
+//   idx   i64    - the loop counter, captured by value
+//   label string - an interpolated string, captured by value (ARC-tracked)
+//
+// The $coro body combines them into a result string and sends it to a
+// module-level results channel.  We verify all 500 fibers completed.
+// Run under valgrind: no leaks, no invalid accesses.
+
+use sync
+
+var capture_results_ch sync::Channel[string]
+
+fn main() =
+  let n i64 = 500
+  capture_results_ch = sync::Channel[string].make(n)
+
+  // Each iteration creates fresh stack locals `idx` and `label`.
+  // spawn do: captures them by value into the env struct before this
+  // iteration's allocas go out of scope on the next loop iteration.
+  let i i64 = 0
+  for i < n:
+    let idx i64 = i
+    let label = "item-{i}"
+    spawn do:
+      let result = "{label}-done-{idx}"
+      await capture_results_ch.send(result)
+    i = i + 1
+
+  // Drain all results - this is the synchronisation point confirming
+  // all 500 do-block fibers have finished executing.
+  let collected i64 = 0
+  for collected < n:
+    await capture_results_ch.recv()
+    collected = collected + 1
+
+  echo "fiber_spawn_do_capture: OK, {collected} do-blocks with capture completed"

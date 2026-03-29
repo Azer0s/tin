@@ -1,0 +1,74 @@
+// arity_generics.tin - generic struct arity overloading
+//
+// The same struct name can be declared with different numbers of type
+// parameters. Each arity is a distinct template that is monomorphized
+// independently. Concrete instances are named: BaseName__T1__T2__...
+//
+// Build: tin build examples/arity_generics.tin
+// Run:   tin run   examples/arity_generics.tin
+
+use assert
+
+// pair: 2-arity generic
+struct pair[a, b] =
+  first  a
+  second b
+
+// triple: 3-arity generic
+struct triple[a, b, c] =
+  first  a
+  second b
+  third  c
+
+// result[ok] (1-param) and result[ok, err] (2-param) coexist under the same base name.
+struct result[ok] =
+  value ok
+  is_ok bool
+
+struct result[ok, err] =
+  value   ok
+  err_val err
+  is_ok   bool
+
+// Top-level type aliases
+type int_pair   = pair[i64, i64]
+type bool_triple = triple[bool, bool, bool]
+
+test "pair of integers" =
+  let p = int_pair{first: 10, second: 20}
+  assert::equals(p.first, 10)
+  assert::equals(p.second, 20)
+
+test "triple of booleans" =
+  let t = bool_triple{first: true, second: false, third: true}
+  assert::ok(t.first)
+  assert::not_ok(t.second)
+  assert::ok(t.third)
+
+test "result 1-arity" =
+  type i64_result = result[i64]
+  let r = i64_result{value: 42, is_ok: true}
+  assert::ok(r.is_ok)
+  assert::equals(r.value, 42)
+
+test "result 2-arity" =
+  type i64_pair_result = result[i64, i64]
+  let r = i64_pair_result{value: 0, err_val: 404, is_ok: false}
+  assert::not_ok(r.is_ok)
+  assert::equals(r.err_val, 404)
+
+test "different arities coexist" =
+  // Both result[i64] and result[i64, i64] are live at the same time.
+  type i64_result      = result[i64]
+  type i64_pair_result = result[i64, i64]
+  let r1 = i64_result{value: 99, is_ok: true}
+  let r2 = i64_pair_result{value: 0, err_val: 500, is_ok: false}
+  assert::ok(r1.is_ok)
+  assert::not_ok(r2.is_ok)
+  assert::equals(r2.err_val, 500)
+
+test "generic struct literal with explicit type args" =
+  // Name[TypeArg, TypeArg]{...} syntax for inline generic struct construction.
+  let p = pair[i64, bool]{first: 7, second: true}
+  assert::equals(p.first, 7)
+  assert::ok(p.second)

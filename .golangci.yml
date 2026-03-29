@@ -28,6 +28,7 @@ linters:
     - unconvert     # unnecessary type conversions
     - revive        # configurable style linter (modern golint replacement)
     - dupl          # duplicate code blocks
+    - nlreturn      # require blank line before return statements
 
   settings:
     errorlint:

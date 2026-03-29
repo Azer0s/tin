@@ -292,14 +292,6 @@ let r9d = point { x: 0, y: 0 }
 let a9d any = r9d
 io::printf("typeof(zero struct) = %s\n", typeof(a9d))
 
-// Struct in data type (any boxing + typeof on data type)
-data maybe_point = point | None
-
-let mp1 maybe_point = make_point(10, 20)
-let mp2 maybe_point = None
-io::printf("typeof(data:point variant) = %s\n", typeof(mp1))
-io::printf("typeof(data:None) = %s\n", typeof(mp2))
-
 // typeof chained: extern -> fn ptr -> any -> typeof
 fn make_len_fn() fn(string) i64 =
   return c_strlen

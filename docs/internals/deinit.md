@@ -29,8 +29,8 @@ struct resource =
 the compiler emits an ARC release for a named struct type.  The three
 call-sites that trigger this:
 
-| Trigger                             | Code path                              |
-|-------------------------------------|----------------------------------------|
+| Trigger                             | Code path                               |
+|-------------------------------------|-----------------------------------------|
 | Local variable goes out of scope    | `emitScopeRelease` -> `emitRelease`     |
 | All scopes unwound on `return`      | `emitAllScopeReleases` -> `emitRelease` |
 | Old value overwritten by assignment | `genAssignStmt` -> `emitRelease`        |

@@ -1,0 +1,173 @@
+// examples/pemdas.tin
+//
+// Tests for PEMDAS / operator precedence:
+//   P - Parentheses
+//   E - Exponents (not a built-in operator; using multiplication to approximate)
+//   M - Multiplication
+//   D - Division
+//   A - Addition
+//   S - Subtraction
+//
+// Also tests bitwise and logical operator precedence.
+
+use assert
+
+// Basic arithmetic precedence
+
+test "multiplication before addition" =
+  assert::equals(2 + 3 * 4, 14)
+
+test "division before subtraction" =
+  assert::equals(10 - 8 / 2, 6)
+
+test "multiplication and division left-to-right" =
+  assert::equals(12 / 3 * 2, 8)
+
+test "addition and subtraction left-to-right" =
+  assert::equals(10 - 3 + 2, 9)
+
+test "mixed mul/div and add/sub" =
+  assert::equals(2 + 3 * 4 - 8 / 2, 10)
+
+test "unary negation before multiplication" =
+  let x i64 = 3
+  assert::equals(-x * 2, -6)
+
+test "unary negation before addition" =
+  let x i64 = 5
+  assert::equals(-x + 10, 5)
+
+// Parentheses override precedence
+
+test "parentheses override mul before add" =
+  assert::equals((2 + 3) * 4, 20)
+
+test "parentheses override div before sub" =
+  assert::equals((10 - 8) / 2, 1)
+
+test "nested parentheses" =
+  assert::equals(((2 + 3) * (4 - 1)), 15)
+
+test "parentheses in complex expression" =
+  assert::equals(2 * (3 + 4) - (6 / 2), 11)
+
+test "deeply nested parentheses" =
+  assert::equals(((((5)))), 5)
+
+// Modulo precedence
+
+test "modulo same precedence as multiplication" =
+  assert::equals(10 % 3 + 1, 2)
+
+test "modulo before addition" =
+  assert::equals(1 + 10 % 3, 2)
+
+test "parentheses around modulo operands" =
+  assert::equals((10 + 2) % 5, 2)
+
+// Integer division truncation
+
+test "integer division truncates toward zero" =
+  assert::equals(7 / 2, 3)
+
+test "negative integer division truncates toward zero" =
+  assert::equals(-7 / 2, -3)
+
+test "division in expression" =
+  assert::equals(1 + 7 / 2 * 3, 10)
+
+// Comparison operators
+
+test "arithmetic before comparison" =
+  assert::equals(2 + 3 < 4 + 5, true)
+
+test "comparison chains with arithmetic" =
+  let a i64 = 10
+  let b i64 = 3
+  assert::equals(a - b > 5, true)
+
+test "equality after arithmetic" =
+  assert::equals(2 * 3 + 1 == 7, true)
+
+// Logical operators
+
+test "and before or" =
+  // true || false && false  =>  true || (false && false)  =>  true || false  => true
+  assert::equals(true || false && false, true)
+
+test "and before or - second case" =
+  // false && true || true  =>  (false && true) || true  =>  false || true  => true
+  assert::equals(false && true || true, true)
+
+test "not before and" =
+  // !false && true  =>  (!false) && true  =>  true && true  =>  true
+  assert::equals(!false && true, true)
+
+test "not before or" =
+  // !true || true  =>  (!true) || true  =>  false || true  =>  true
+  assert::equals(!true || true, true)
+
+test "parentheses override logical and/or" =
+  // !(false || true)  =>  !true  =>  false
+  assert::equals(!(false || true), false)
+
+// Bitwise operators
+
+test "shift before bitwise and" =
+  // 1 << 2 & 7  =>  (1 << 2) & 7  =>  4 & 7  =>  4
+  assert::equals(1 << 2 & 7, 4)
+
+test "bitwise and before bitwise or" =
+  // 5 | 3 & 6  =>  5 | (3 & 6)  =>  5 | 2  =>  7
+  assert::equals(5 | 3 & 6, 7)
+
+test "bitwise xor between and and or" =
+  // 6 | 3 ^ 5  =>  6 | (3 ^ 5)  =>  6 | 6  =>  6
+  assert::equals(6 | 3 ^ 5, 6)
+
+test "bitwise operators with parentheses" =
+  // (5 | 3) & 6  =>  7 & 6  =>  6
+  assert::equals((5 | 3) & 6, 6)
+
+test "left shift" =
+  assert::equals(1 << 4, 16)
+
+test "right shift" =
+  assert::equals(32 >> 2, 8)
+
+test "shift then add" =
+  assert::equals(1 + 2 << 1, 6)
+
+// Mixed expression chains
+
+test "complex expression 1" =
+  // 3 + 4 * 2 / (1 - 5) = 3 + 8 / (-4) = 3 + (-2) = 1
+  assert::equals(3 + 4 * 2 / (1 - 5), 1)
+
+test "complex expression 2" =
+  // (2 + 3) * (4 + 1) - 6 / 2 = 25 - 3 = 22
+  assert::equals((2 + 3) * (4 + 1) - 6 / 2, 22)
+
+test "complex expression 3: precedence chain" =
+  // 2 * 3 + 4 * 5 - 6 / 2 + 1 = 6 + 20 - 3 + 1 = 24
+  assert::equals(2 * 3 + 4 * 5 - 6 / 2 + 1, 24)
+
+test "complex expression 4: all operators" =
+  // 10 + 2 * 6 / 3 - 1 + 4 % 3 = 10 + 4 - 1 + 1 = 14
+  assert::equals(10 + 2 * 6 / 3 - 1 + 4 % 3, 14)
+
+test "negative result" =
+  // 5 - 3 * 4 = 5 - 12 = -7
+  assert::equals(5 - 3 * 4, -7)
+
+test "f64 multiplication before addition" =
+  let result f64 = 2.0 + 3.0 * 4.0
+  assert::equals(result, 14.0)
+
+test "f64 parentheses override" =
+  let result f64 = (2.0 + 3.0) * 4.0
+  assert::equals(result, 20.0)
+
+test "f64 division before subtraction" =
+  let result f64 = 10.0 - 8.0 / 4.0
+  assert::equals(result, 8.0)

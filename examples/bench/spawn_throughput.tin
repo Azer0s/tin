@@ -1,0 +1,43 @@
+// examples/bench/spawn_throughput.tin
+//
+// Measures fiber spawn throughput: spawns N fibers each incrementing an
+// AtomicI64 counter, then waits for all of them to finish via a done channel.
+//
+// Usage:
+//   ./tin build examples/bench/spawn_throughput.tin -lm -o /tmp/bench_spawn
+//   /tmp/bench_spawn
+//
+// Expected output (approximate):
+//   spawned 100000 fibers
+//   all done in ~XXXms  (~XXXX fibers/sec)
+
+use sync
+use io
+
+var g_counter sync::AtomicI64
+var g_done    sync::Channel[i64]
+
+fn{#async} worker() =
+  g_counter.add(1)
+  await g_done.send(1)
+
+fn main() =
+  let n i64 = 100000
+  g_counter = sync::AtomicI64.make(0)
+  g_done = sync::Channel[i64].make(n)
+
+  let start_ms = _tin_now_ms()
+  let i i64 = 0
+  for i < n:
+    spawn worker()
+    i = i + 1
+  echo "spawned {n} fibers"
+
+  let j i64 = 0
+  for j < n:
+    await g_done.recv()
+    j = j + 1
+
+  let elapsed = _tin_now_ms() - start_ms
+  let rate = n * 1000 / elapsed
+  echo "all done in ~{elapsed}ms  (~{rate} fibers/sec)"

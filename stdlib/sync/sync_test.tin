@@ -1,0 +1,171 @@
+// stdlib/sync/sync_test.tin
+//
+// Tests for the sync stdlib: Channel[T] (i64, string, bool), close/is_closed_empty,
+// Mutex lock/unlock, AtomicI64 load/store/add/cas.
+// Run with: tin test stdlib/sync/sync_test.tin -lpthread
+
+use assert
+use sync
+
+fn{#async} i64_sender(ch sync::Channel[i64], val i64) =
+  await ch.send(val)
+
+fn{#async} str_sender(ch sync::Channel[string], val string) =
+  await ch.send(val)
+
+// Channel[i64]
+
+test "channel i64 send and recv" =
+  let ch = sync::Channel[i64].make(1)
+  await ch.send(42)
+  let v = await ch.recv()
+  assert::equals(v, 42)
+
+test "channel i64 fifo ordering" =
+  let ch = sync::Channel[i64].make(5)
+  await ch.send(1)
+  await ch.send(2)
+  await ch.send(3)
+  assert::equals(await ch.recv(), 1)
+  assert::equals(await ch.recv(), 2)
+  assert::equals(await ch.recv(), 3)
+
+test "channel i64 capacity one" =
+  let ch = sync::Channel[i64].make(1)
+  await ch.send(7)
+  assert::equals(await ch.recv(), 7)
+
+test "channel i64 via fiber spawn and await" =
+  let ch = sync::Channel[i64].make(1)
+  let f = spawn i64_sender(ch, 99)
+  await f
+  assert::equals(await ch.recv(), 99)
+
+test "channel i64 multiple fibers" =
+  let ch = sync::Channel[i64].make(3)
+  let f1 = spawn i64_sender(ch, 10)
+  let f2 = spawn i64_sender(ch, 20)
+  let f3 = spawn i64_sender(ch, 30)
+  await f1
+  await f2
+  await f3
+  let sum i64 = 0
+  sum = sum + await ch.recv()
+  sum = sum + await ch.recv()
+  sum = sum + await ch.recv()
+  assert::equals(sum, 60)
+
+// Channel[string] (ARC)
+
+test "channel string send and recv" =
+  let ch = sync::Channel[string].make(1)
+  await ch.send("hello")
+  assert::equals_str(await ch.recv(), "hello")
+
+test "channel string multiple values" =
+  let ch = sync::Channel[string].make(3)
+  await ch.send("one")
+  await ch.send("two")
+  await ch.send("three")
+  assert::equals_str(await ch.recv(), "one")
+  assert::equals_str(await ch.recv(), "two")
+  assert::equals_str(await ch.recv(), "three")
+
+test "channel string via fiber" =
+  let ch = sync::Channel[string].make(1)
+  let f = spawn str_sender(ch, "from fiber")
+  await f
+  assert::equals_str(await ch.recv(), "from fiber")
+
+// Channel close / is_closed_empty
+
+test "channel not closed initially" =
+  let ch = sync::Channel[i64].make(1)
+  assert::not_ok(ch.is_closed_empty())
+
+test "channel close without pending items" =
+  let ch = sync::Channel[i64].make(1)
+  ch.close()
+  assert::ok(ch.is_closed_empty())
+
+test "channel not closed_empty when items remain after close" =
+  let ch = sync::Channel[i64].make(2)
+  await ch.send(10)
+  ch.close()
+  assert::not_ok(ch.is_closed_empty())
+
+test "channel closed_empty after draining closed channel" =
+  let ch = sync::Channel[i64].make(2)
+  await ch.send(10)
+  ch.close()
+  await ch.recv()
+  assert::ok(ch.is_closed_empty())
+
+// Channel[bool]
+
+test "channel bool true" =
+  let ch = sync::Channel[bool].make(1)
+  await ch.send(true)
+  assert::ok(await ch.recv())
+
+test "channel bool false" =
+  let ch = sync::Channel[bool].make(1)
+  await ch.send(false)
+  assert::not_ok(await ch.recv())
+
+// Mutex
+
+test "mutex lock and unlock" =
+  let m = sync::Mutex.make()
+  m.lock()
+  m.unlock()
+  assert::ok(true)
+
+test "mutex reacquirable after unlock" =
+  let m = sync::Mutex.make()
+  m.lock()
+  m.unlock()
+  m.lock()
+  m.unlock()
+  assert::ok(true)
+
+// AtomicI64
+
+test "atomic make and load initial value" =
+  let a = sync::AtomicI64.make(42)
+  assert::equals(a.load(), 42)
+
+test "atomic store and load" =
+  let a = sync::AtomicI64.make(0)
+  a.store(99)
+  assert::equals(a.load(), 99)
+
+test "atomic add returns new value" =
+  let a = sync::AtomicI64.make(10)
+  let newval = a.add(5)
+  assert::equals(newval, 15)
+  assert::equals(a.load(), 15)
+
+test "atomic add negative" =
+  let a = sync::AtomicI64.make(10)
+  a.add(0 - 3)
+  assert::equals(a.load(), 7)
+
+test "atomic cas success returns old" =
+  let a = sync::AtomicI64.make(10)
+  let prev = a.cas(10, 20)
+  assert::equals(prev, 10)
+  assert::equals(a.load(), 20)
+
+test "atomic cas failure leaves value unchanged" =
+  let a = sync::AtomicI64.make(10)
+  let prev = a.cas(99, 20)
+  assert::equals(prev, 10)
+  assert::equals(a.load(), 10)
+
+test "atomic multiple adds" =
+  let a = sync::AtomicI64.make(0)
+  a.add(1)
+  a.add(2)
+  a.add(3)
+  assert::equals(a.load(), 6)

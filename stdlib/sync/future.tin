@@ -1,0 +1,39 @@
+// stdlib/sync/future.tin
+//
+// Future[t] - wraps a fiber PID returned by `spawn`.
+// Implements Awaitable[t] so `await f` retrieves the fiber's return value.
+//
+// Usage:
+//   fn{#async} compute(n i64) i64 =
+//     return n * n
+//
+//   let f = spawn compute(7)   // f : Future[i64]
+//   let r = await f            // r : i64 = 49
+//
+// Unit is the return type used for void {#async} functions.
+// await-ing a Future[Unit] just waits for completion, discards the result.
+
+use "./awaitable"
+
+fn _tin_future_await_raw(pid i64) *void = extern("_tin_future_await_raw")
+
+// Unit - placeholder struct used as the type parameter for void async functions.
+struct Unit =
+  _unit i8
+
+// Future[t] - wraps a fiber PID for type-safe deferred awaiting.
+struct Future[t](Awaitable[t]) =
+  pid i64
+
+  static fn make(pid i64) Future[t] =
+    return Future[t]{pid: pid}
+
+  fn pid_val(this Future[t]) i64 =
+    return this.pid
+
+  fn await_result(this Future[t]) t =
+    let raw *void = _tin_future_await_raw(this.pid)
+    let typed *t = raw as *t
+    return *typed
+
+export { Future, Unit } as sync

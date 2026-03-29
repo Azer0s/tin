@@ -1,0 +1,187 @@
+// examples/fibers/fiber_syntax_edge_cases.tin
+//
+// Tests syntax forms and return types that have compiler support but no
+// dedicated test coverage. Has both a main() for the CI fiber run step and
+// test "..." blocks for the tin test framework.
+//
+// Covers:
+//   - await spawn without an intermediate variable
+//   - nested await spawn: inner result feeds outer
+//   - spawn do: block with channel signaling (local channel captured by env struct)
+//   - multiple spawn do: blocks running concurrently
+//   - fiber with bool return type
+//   - fiber with f64 return type
+//   - fiber returning string directly (ARC through Future[string])
+//   - multiple spawns of same function are independent
+//   - unawaited spawn (abandoned, must not crash)
+//   - type coalescing: Future[sync::Unit] == Future[Unit] (package-qualified type params)
+
+use assert
+use sync
+
+// Helpers
+
+fn{#async} square(n i64) i64 =
+  return n * n
+
+fn{#async} double(n i64) i64 =
+  return n * 2
+
+fn{#async} is_positive(n i64) bool =
+  return n > 0
+
+fn{#async} half(x f64) f64 =
+  return x * 0.5
+
+fn{#async} make_greeting(name string) string =
+  return "hello " ++ name
+
+fn{#async} fire_and_forget() =
+  let x i64 = 1
+
+// qualify_void_impl is an internal void {#async} helper - spawn returns Future[Unit].
+// qualify_void wraps it and is declared as returning Future[sync::Unit] (package-qualified).
+// The type coalescing in the compiler must make these the same LLVM type.
+fn{#async} qualify_void_impl(ch sync::Channel[i64]) =
+  await ch.send(7)
+
+fn qualify_void(ch sync::Channel[i64]) Future[sync::Unit] =
+  return spawn qualify_void_impl(ch)
+
+// main() for the CI fiber run step
+
+fn main() =
+  // await spawn without intermediate variable
+  let r1 = await spawn square(9)
+  echo "square(9) = {r1}"
+
+  // nested await spawn: inner feeds outer - double(square(3)) = 18
+  let r2 = await spawn double(await spawn square(3))
+  echo "double(square(3)) = {r2}"
+
+  // bool return
+  let b1 = await spawn is_positive(5)
+  let b2 = await spawn is_positive(0 - 1)
+  echo "is_positive(5)  = {b1}"
+  echo "is_positive(-1) = {b2}"
+
+  // f64 return
+  let f1 = await spawn half(10.0)
+  echo "half(10.0) = {f1}"
+
+  // string return directly from Future[string]
+  let s1 = await spawn make_greeting("world")
+  echo s1
+
+  // spawn do: block signaling via local channel
+  let sig_ch = sync::Channel[i64].make(1)
+  let fd = spawn do:
+    await sig_ch.send(42)
+  await fd
+  let sig = await sig_ch.recv()
+  echo "spawn do: signal = {sig}"
+
+  // multiple concurrent spawn do: blocks
+  let res_ch = sync::Channel[i64].make(3)
+  let fd1 = spawn do:
+    await res_ch.send(10)
+  let fd2 = spawn do:
+    await res_ch.send(20)
+  let fd3 = spawn do:
+    await res_ch.send(30)
+  await fd1
+  await fd2
+  await fd3
+  let sum i64 = 0
+  let k i64 = 0
+  for k < 3:
+    sum = sum + await res_ch.recv()
+    k = k + 1
+  echo "spawn do: sum = {sum}"
+
+  // multiple independent spawns of the same function
+  let fa = spawn square(3)
+  let fb = spawn square(5)
+  let ra = await fa
+  let rb = await fb
+  echo "square(3)={ra} square(5)={rb}"
+
+  // unawaited spawn - abandoned; must not crash on exit
+  spawn fire_and_forget()
+
+  echo "fiber_syntax_edge_cases: OK"
+
+// test blocks for tin test framework
+
+test "await spawn without intermediate variable" =
+  let result = await spawn square(7)
+  assert::equals(result, 49)
+
+test "nested await spawn inner feeds outer" =
+  let result = await spawn double(await spawn square(4))
+  assert::equals(result, 32)
+
+test "fiber bool return type true" =
+  let b = await spawn is_positive(100)
+  assert::ok(b)
+
+test "fiber bool return type false" =
+  let b = await spawn is_positive(0 - 1)
+  assert::not_ok(b)
+
+test "fiber f64 return type" =
+  let v = await spawn half(8.0)
+  assert::equals_f64(v, 4.0)
+
+test "fiber string return type via Future[string]" =
+  let s = await spawn make_greeting("tin")
+  assert::equals_str(s, "hello tin")
+
+test "spawn do captures local channel" =
+  let ch = sync::Channel[i64].make(1)
+  let f = spawn do:
+    await ch.send(42)
+  await f
+  let v = await ch.recv()
+  assert::equals(v, 42)
+
+test "spawn do block signals completion via module-level channel" =
+  let ch = sync::Channel[i64].make(1)
+  let f = spawn do:
+    await ch.send(99)
+  await f
+  let v = await ch.recv()
+  assert::equals(v, 99)
+
+test "multiple spawn do blocks run and sum correctly" =
+  let ch = sync::Channel[i64].make(3)
+  let f1 = spawn do:
+    await ch.send(10)
+  let f2 = spawn do:
+    await ch.send(20)
+  let f3 = spawn do:
+    await ch.send(30)
+  await f1
+  await f2
+  await f3
+  let total i64 = 0
+  let i i64 = 0
+  for i < 3:
+    total = total + await ch.recv()
+    i = i + 1
+  assert::equals(total, 60)
+
+test "multiple spawns of same function are independent" =
+  let fa = spawn square(3)
+  let fb = spawn square(5)
+  let ra = await fa
+  let rb = await fb
+  assert::equals(ra, 9)
+  assert::equals(rb, 25)
+
+test "Future[sync::Unit] and Future[Unit] coalesce to the same type" =
+  let ch = sync::Channel[i64].make(1)
+  let f Future[sync::Unit] = qualify_void(ch)
+  await f
+  let v = await ch.recv()
+  assert::equals(v, 7)

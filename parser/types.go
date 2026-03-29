@@ -32,6 +32,7 @@ func (p *Parser) parseTypeUnion() (ast.TypeExpr, error) {
 		}
 		union.Types = append(union.Types, next)
 	}
+
 	return union, nil
 }
 
@@ -49,6 +50,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.PointerType{Elem: elem, IsConst: isConst}, nil
 	}
 	// @[T1, T2, ...] - TupleArrayType (typed per-slot destructuring annotation)
@@ -71,6 +73,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		if _, err := p.expect(lexer.RBRACKET); err != nil {
 			return nil, err
 		}
+
 		return &ast.TupleArrayType{ElemTypes: elems}, nil
 	}
 	// [T] or [T; N] - array
@@ -79,6 +82,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		// Empty brackets = void/unknown
 		if p.check(lexer.RBRACKET) {
 			p.advance()
+
 			return &ast.ArrayType{Elem: &ast.SimpleType{Name: "void"}, Size: -1}, nil
 		}
 		elem, err := p.parseTypeExpr()
@@ -96,6 +100,7 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		if _, err := p.expect(lexer.RBRACKET); err != nil {
 			return nil, err
 		}
+
 		return &ast.ArrayType{Elem: elem, Size: size}, nil
 	}
 	// fn(T...) R - function type
@@ -106,20 +111,52 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 	if p.check(lexer.KW_EXTERN) {
 		// skip "extern" used as void-like placeholder
 		p.advance()
+
 		return &ast.SimpleType{Name: "void"}, nil
 	}
 
-	// None used as a type (e.g. in `data maybe[t] = t | None`)
-	if p.check(lexer.NONE_LIT) {
-		p.advance()
-		return &ast.SimpleType{Name: "None"}, nil
+	// (T1, T2, ...) - tuple type shorthand for Tuple[T1, T2, ...]
+	// (T) with a single element is treated as grouping (returns T itself).
+	if p.check(lexer.LPAREN) {
+		p.advance() // consume (
+		first, err := p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+		types := []ast.TypeExpr{first}
+		for p.check(lexer.COMMA) {
+			p.advance()
+			t, err := p.parseTypeExpr()
+			if err != nil {
+				return nil, err
+			}
+			types = append(types, t)
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		if len(types) == 1 {
+			return types[0], nil // grouping
+		}
+
+		return &ast.GenericType{Name: "Tuple", TypeParams: types}, nil
 	}
 
-	// Named type, possibly generic: name[T, R]
+	// Named type, possibly generic: name[T, R] or module::name[T, R]
 	if !p.match(lexer.IDENT) && !isTypeKeyword(p.peek()) {
 		return nil, p.errorf("expected type, got %s (%q)", p.peek().Type, p.peek().Literal)
 	}
 	name := p.advance().Literal
+
+	// Module-qualified type: module::Type[T, R]
+	for p.check(lexer.DCOLON) {
+		p.advance() // consume ::
+		part, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		name = name + "::" + part.Literal
+	}
 
 	// Generic type args: name[T, R]
 	if p.check(lexer.LBRACKET) {
@@ -138,8 +175,10 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		if _, err := p.expect(lexer.RBRACKET); err != nil {
 			return nil, err
 		}
+
 		return &ast.GenericType{Name: name, TypeParams: args}, nil
 	}
+
 	return &ast.SimpleType{Name: name}, nil
 }
 
@@ -164,6 +203,7 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 				}
 				ft.Params = append(ft.Params, t)
 			}
+
 			break
 		}
 		t, err := p.parseTypeExpr()
@@ -186,6 +226,7 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 			return nil, err
 		}
 	}
+
 	return ft, nil
 }
 
@@ -209,6 +250,7 @@ func (p *Parser) parseParams() ([]ast.Param, error) {
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
+
 	return params, nil
 }
 
@@ -221,6 +263,7 @@ func (p *Parser) parseParam() (ast.Param, error) {
 	if p.check(lexer.DOTDOTDOT) {
 		param.IsVarArgs = true
 		p.advance()
+
 		return param, nil
 	}
 	// name (optional for anonymous params like "const *char")
@@ -234,6 +277,7 @@ func (p *Parser) parseParam() (ast.Param, error) {
 			param.Name = candidate
 			param.IsVarArgs = true
 			p.advance() // consume ...
+
 			return param, nil
 		}
 		if p.match(lexer.RPAREN, lexer.COMMA) {
@@ -250,6 +294,7 @@ func (p *Parser) parseParam() (ast.Param, error) {
 			return param, err
 		}
 	}
+
 	return param, nil
 }
 
@@ -271,7 +316,33 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
 	}
+
 	return params, nil
+}
+
+// parseTypeArgList parses [TypeExpr] or [TypeExpr, TypeExpr, ...] (concrete type arguments).
+// Used for generic struct literals like Channel[i64]{...}.
+func (p *Parser) parseTypeArgList() ([]ast.TypeExpr, error) {
+	if !p.check(lexer.LBRACKET) {
+		return nil, nil
+	}
+	p.advance()
+	var args []ast.TypeExpr
+	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		t, err := p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, t)
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return nil, err
+	}
+
+	return args, nil
 }
 
 // String interpolation
@@ -284,23 +355,48 @@ func ParseStringInterp(s string) (ast.Node, error) { return parseStringInterp(s)
 
 func parseStringInterp(s string) (ast.Node, error) {
 	if !strings.Contains(s, "{") {
+		// Still need to unescape \{ and \} that might appear even without interpolation.
+		if strings.Contains(s, "\\{") || strings.Contains(s, "\\}") {
+			s = strings.ReplaceAll(s, "\\{", "{")
+			s = strings.ReplaceAll(s, "\\}", "}")
+		}
+
 		return &ast.StringLit{Value: s}, nil
 	}
 	var parts []ast.StringPart
 	for len(s) > 0 {
 		idx := strings.Index(s, "{")
 		if idx < 0 {
+			// Unescape any remaining \{ \} in the tail.
+			s = strings.ReplaceAll(s, "\\{", "{")
+			s = strings.ReplaceAll(s, "\\}", "}")
 			parts = append(parts, ast.StringPart{Str: s})
+
 			break
 		}
+		// Check for \{ escape: if the { is preceded by a backslash it is literal.
+		if idx > 0 && s[idx-1] == '\\' {
+			// Emit the text before \{ (without the backslash), then a literal {, and continue.
+			prefix := s[:idx-1]
+			prefix = strings.ReplaceAll(prefix, "\\{", "{")
+			prefix = strings.ReplaceAll(prefix, "\\}", "}")
+			parts = append(parts, ast.StringPart{Str: prefix + "{"})
+			s = s[idx+1:]
+
+			continue
+		}
 		if idx > 0 {
-			parts = append(parts, ast.StringPart{Str: s[:idx]})
+			prefix := s[:idx]
+			prefix = strings.ReplaceAll(prefix, "\\{", "{")
+			prefix = strings.ReplaceAll(prefix, "\\}", "}")
+			parts = append(parts, ast.StringPart{Str: prefix})
 		}
 		s = s[idx+1:]
 		end := strings.Index(s, "}")
 		if end < 0 {
 			// No closing brace - treat rest as literal
 			parts = append(parts, ast.StringPart{Str: "{" + s})
+
 			break
 		}
 		exprSrc := s[:end]
@@ -329,6 +425,7 @@ func parseStringInterp(s string) (ast.Node, error) {
 	if len(parts) == 1 && !parts[0].IsExpr {
 		return &ast.StringLit{Value: parts[0].Str}, nil
 	}
+
 	return &ast.InterpolatedString{Parts: parts}, nil
 }
 
@@ -346,15 +443,17 @@ func isTypeKeyword(tok lexer.Token) bool {
 		"bool", "char", "string", "atom", "any",
 		"void", "uint32", "size_t",
 		"int", "uint":
+
 		return true
 	default:
+
 		return false
 	}
 }
 
 func isTypeToken(tok lexer.Token) bool {
 	return isTypeKeyword(tok) || tok.Type == lexer.STAR || tok.Type == lexer.LBRACKET ||
-		tok.Type == lexer.KW_CONST
+		tok.Type == lexer.KW_CONST || tok.Type == lexer.LPAREN
 }
 
 // newInlineLexer creates a lexer for an inline expression string
@@ -371,5 +470,6 @@ func ParseType(src string) (ast.TypeExpr, error) {
 		return nil, err
 	}
 	p := New(tokens)
+
 	return p.parseTypeExpr()
 }

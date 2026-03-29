@@ -120,6 +120,7 @@ func NewArray(elem *Type, length int) *Type {
 	if length >= 0 {
 		name = fmt.Sprintf("[%s; %d]", elem.Name, length)
 	}
+
 	return &Type{Kind: KindArray, Name: name, Elem: elem, Len: length}
 }
 
@@ -143,6 +144,7 @@ func NewFunction(params []*Type, ret *Type, varargs bool) *Type {
 	if ret == nil {
 		ret = Void
 	}
+
 	return &Type{Kind: KindFunction, Name: name, Params: params, Return: ret, IsVarArgs: varargs}
 }
 
@@ -162,12 +164,16 @@ func (t *Type) IsNumeric() bool {
 func (t *Type) ByteSize() int {
 	switch t.Kind {
 	case KindBool:
+
 		return 1
 	case KindInt, KindFloat:
+
 		return t.BitSize / 8
 	case KindPointer:
+
 		return 8
 	case KindString:
+
 		return 16 // ptr(8) + len(8)
 	case KindArray:
 		if t.Len < 0 {
@@ -176,12 +182,14 @@ func (t *Type) ByteSize() int {
 		if t.Elem != nil {
 			return t.Elem.ByteSize() * t.Len
 		}
+
 		return 8
 	case KindStruct:
 		total := 0
 		for _, f := range t.Fields {
 			total += f.Type.ByteSize()
 		}
+
 		return total
 	case KindUnion, KindData:
 		m := 0
@@ -192,20 +200,28 @@ func (t *Type) ByteSize() int {
 				}
 			}
 		}
+
 		return m + 4 // + tag i32
 	case KindClosure:
+
 		return 16 // fn_ptr(8) + env_ptr(8)
 	case KindVoid:
+
 		return 0
 	case KindFunction:
+
 		return 8 // function pointer
 	case KindEnum:
+
 		return 4 // underlying integer (i32 by default)
 	case KindAtom:
+
 		return 8 // { i32 code, i8* str } rounded to pointer size
 	case KindGeneric:
+
 		return 8 // unresolved generic; caller should not reach here
 	}
+
 	return 8
 }
 
@@ -214,6 +230,7 @@ func (t *Type) String() string {
 	if t == nil {
 		return "<nil>"
 	}
+
 	return t.Name
 }
 
@@ -226,24 +243,30 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 		if concrete, ok := mapping[t.Name]; ok {
 			return concrete
 		}
+
 		return t
 	}
 	// For compound types, recursively substitute
 	switch t.Kind {
 	case KindArray:
+
 		return NewArray(t.Elem.Substitute(mapping), t.Len)
 	case KindPointer:
+
 		return NewPointer(t.PointsTo.Substitute(mapping), t.ConstPtr)
 	case KindFunction:
 		params := make([]*Type, len(t.Params))
 		for i, p := range t.Params {
 			params[i] = p.Substitute(mapping)
 		}
+
 		return NewFunction(params, t.Return.Substitute(mapping), t.IsVarArgs)
 	case KindVoid, KindBool, KindInt, KindFloat, KindString,
 		KindClosure, KindStruct, KindUnion, KindData,
 		KindEnum, KindGeneric, KindAtom:
+
 		return t
 	}
+
 	return t
 }

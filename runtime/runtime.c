@@ -6,6 +6,14 @@
 // via this umbrella so the build system only needs to reference one file.
 
 #include "runtime.h"
+#include <stdio.h>
+
+// Make stdout line-buffered so echo output appears immediately even when
+// stdout is connected to a pipe.  Line-buffering flushes on every '\n',
+// which is how tin's echo statement terminates every value.
+__attribute__((constructor)) static void _tin_stdout_init(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
 #include "arc.c"
 #include "strings.c"   // uses _tin_rc_alloc (arc)
 #include "slice.c"     // uses _tin_rc_alloc (arc)
@@ -16,3 +24,7 @@
 #include "test.c"
 #include "atom.c"
 #include "any.c"
+#include "fiber.c"     // M:N fiber scheduler (TINMAXPROCS worker threads)
+#include "async_io.c"  // epoll/kqueue async I/O (dedicated I/O thread)
+#include "timer.c"     // fiber sleep / timer support
+#include "net.c"       // TCP socket helpers

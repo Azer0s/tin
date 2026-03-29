@@ -1,0 +1,17 @@
+// stdlib/sync/awaitable.tin
+//
+// Awaitable[t] trait - implement this on a struct to make it usable with the
+// `await` keyword.
+//
+// Example:
+//   struct MyFuture(Awaitable[i64]) =
+//     ...
+//     fn await_result(this MyFuture) i64 = ...
+//
+//   let f = MyFuture{...}
+//   let v = await f   // calls f.await_result()
+
+trait Awaitable[t] =
+  fn await_result(this Awaitable[t]) t = virtual
+
+export { Awaitable } as sync

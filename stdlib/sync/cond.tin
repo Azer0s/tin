@@ -1,0 +1,31 @@
+//!+sync_helpers.c -- -lpthread
+
+// stdlib/sync - Cond (condition variable backed by pthread_cond_t)
+
+use "./mutex"
+
+fn _tin_cond_new() *void              = extern("_tin_cond_new")
+fn _tin_cond_wait(c *void, m *void)   = extern("_tin_cond_wait")
+fn _tin_cond_signal(c *void)          = extern("_tin_cond_signal")
+fn _tin_cond_broadcast(c *void)       = extern("_tin_cond_broadcast")
+fn _tin_cond_free(c *void)            = extern("_tin_cond_free")
+
+struct Cond =
+  _ptr *void
+
+  static fn make() Cond =
+    return Cond{_ptr: _tin_cond_new()}
+
+  fn wait(this Cond, mu Mutex) =
+    _tin_cond_wait(this._ptr, mu._ptr)
+
+  fn signal(this Cond) =
+    _tin_cond_signal(this._ptr)
+
+  fn broadcast(this Cond) =
+    _tin_cond_broadcast(this._ptr)
+
+  fn deinit(this Cond) =
+    _tin_cond_free(this._ptr)
+
+export { Cond } as sync

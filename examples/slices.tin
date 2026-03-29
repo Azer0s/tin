@@ -1,0 +1,69 @@
+// slices.tin - Array slice syntax: arr[start:end]
+//
+// A slice is a view into an existing array's memory.  The result is a new
+// fat-array value {T*, i64} pointing into the original data with an
+// adjusted length.  The original array is not modified.
+//
+// Syntax variants:
+//   arr[n:]    - from index n to end
+//   arr[:m]    - from start to (not including) index m
+//   arr[n:m]   - from index n to (not including) index m
+//
+// Build: tin build examples/slices.tin
+// Run:   tin run   examples/slices.tin
+
+use assert
+
+test "slice from index" =
+  let arr = [1, 2, 3, 4, 5]
+  let s = arr[1:]
+  assert::equals(s.len, 4)
+  assert::equals(s[0], 2)
+  assert::equals(s[3], 5)
+
+test "slice to index" =
+  let arr = [1, 2, 3, 4, 5]
+  let s = arr[:3]
+  assert::equals(s.len, 3)
+  assert::equals(s[0], 1)
+  assert::equals(s[2], 3)
+
+test "slice range" =
+  let arr = [10, 20, 30, 40, 50]
+  let s = arr[1:4]
+  assert::equals(s.len, 3)
+  assert::equals(s[0], 20)
+  assert::equals(s[1], 30)
+  assert::equals(s[2], 40)
+
+test "full slice" =
+  let arr = [1, 2, 3]
+  let s = arr[0:3]
+  assert::equals(s.len, 3)
+  assert::equals(s[0], 1)
+  assert::equals(s[2], 3)
+
+test "single element slice" =
+  let arr = [10, 20, 30]
+  let s = arr[1:2]
+  assert::equals(s.len, 1)
+  assert::equals(s[0], 20)
+
+test "slice from zero" =
+  let arr = [7, 8, 9]
+  let s = arr[0:]
+  assert::equals(s.len, 3)
+  assert::equals(s[0], 7)
+
+test "slice preserves element values" =
+  let arr = [100, 200, 300, 400]
+  let s = arr[2:]
+  assert::equals(s[0], 300)
+  assert::equals(s[1], 400)
+
+test "slice of string array" =
+  let words = ["alpha", "beta", "gamma", "delta"]
+  let s = words[1:3]
+  assert::equals(s.len, 2)
+  assert::equals_str(s[0], "beta")
+  assert::equals_str(s[1], "gamma")

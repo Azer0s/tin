@@ -1,8 +1,7 @@
-# 09 - Reflection & Runtime Type Information
+# 10 - Reflection & Runtime Type Information
 
-Tin includes a set of built-in reflection operators that let programs inspect
-types, traits, field names, and field values at runtime without any virtual
-method overhead.
+Tin includes built-in reflection operators that let programs inspect types,
+traits, field names, and field values at runtime.
 
 ---
 
@@ -29,8 +28,8 @@ returned by `typeof`:
 
 ```rust
 enum atom status =
-  'ok,
-  'err,
+  'ok
+  'err
 
 fn check(s atom) =
   where 'ok:  echo "all good"
@@ -60,7 +59,7 @@ function types. They are also produced by `typeof` for such values:
 
 ```rust
 let arr = [1, 2, 3]
-echo typeof(arr)         // '[i64]   (simple form when unambiguous)
+echo typeof(arr)         // '[i64]
 
 let p = 42
 let ptr = &p
@@ -98,7 +97,7 @@ let p = point{x: 3, y: 4}
 let ap any = p        // box: stores (type='point', data->copy of p)
 ```
 
-The stored type identity is exact  -  boxing a `rect` stores type `'rect`, not
+The stored type identity is exact - boxing a `rect` stores type `'rect`, not
 any base trait or generic name.
 
 ### any and extern functions
@@ -128,14 +127,6 @@ fn apply(f fn(i64) i64, x i64) i64 = return f(x)
 let r = apply(c_abs, -77)
 let a any = r
 echo typeof(a)    // 'i64
-
-fn make_rect(w i64, h i64) rect = return rect{w: w, h: h}
-
-fn box_rect(f fn(i64, i64) rect, w i64, h i64) any =
-  return f(w, h)
-
-let ar = box_rect(make_rect, 5, 10)
-echo typeof(ar)   // 'rect
 ```
 
 ---
@@ -164,7 +155,7 @@ When called on an `any` value, `typeof` inspects the stored type at runtime:
 
 ```rust
 let a any = point{x: 0, y: 0}
-echo typeof(a)      // 'point  -  not 'any!
+echo typeof(a)      // 'point  - not 'any!
 
 let b any = rect{w: 5, h: 3}
 echo typeof(b)      // 'rect
@@ -181,7 +172,7 @@ or compared with `==`.
 type, as a `[atom]` array:
 
 ```rust
-trait drawable = fn draw(this drawable) string = virtual
+trait drawable  = fn draw(this drawable) string = virtual
 trait resizable = fn resize(this resizable, factor i64) i64 = virtual
 
 struct rect(drawable, resizable) =
@@ -238,8 +229,8 @@ echo an.len         // 2
 echo an[0]          // 'x
 ```
 
-Internal implementation fields (the leading `i32` type-ID and vtable
-pointers) are not included  -  only the fields visible in the source code.
+Internal implementation fields (the hidden type-ID and vtable pointers)
+are not included - only the fields visible in source code.
 
 ---
 
@@ -278,11 +269,11 @@ echo types[1]       // '*node
 
 `fieldtag(expr, "fieldName")` returns the tag annotation attached to a
 field declaration, as an `atom`. Fields are tagged with `@"tag"` in the
-struct body:
+struct body (see [05 - Structs](05-structs.md) for tag declaration syntax):
 
 ```rust
 struct user =
-  id   i64  @"primary_key"
+  id   i64    @"primary_key"
   name string @"required"
   bio  string
 
@@ -290,11 +281,11 @@ let u = user{id: 1, name: "Alice", bio: ""}
 
 echo fieldtag(u, "id")    // 'primary_key
 echo fieldtag(u, "name")  // 'required
-echo fieldtag(u, "bio")   // '' (empty atom  -  no tag)
+echo fieldtag(u, "bio")   // '' (empty atom - no tag)
 ```
 
-Field tags are stored in a compile-time global map and require no runtime
-overhead beyond the atom lookup.
+Field tags are stored in a compile-time global map with no runtime overhead
+beyond the atom lookup.
 
 ---
 
@@ -312,14 +303,10 @@ let p = point{x: 10, y: 20}
 
 let vx = getfield(p, "x")    // vx is any
 echo vx                        // 10
-
-let vy = getfield(p, "y")
-echo vy                        // 20
 ```
 
-On a concrete struct, `getfield` is lowered to a direct GEP + load at
-compile time (no dispatch table). On an `any` value, runtime dispatch
-selects the correct struct layout:
+On a concrete struct, `getfield` is lowered to a direct GEP + load at compile
+time. On an `any` value, runtime dispatch selects the correct struct layout:
 
 ```rust
 let a any = p
@@ -328,35 +315,21 @@ let gx = getfield(a, "x")    // runtime dispatch via type_id
 echo gx                        // 10
 ```
 
-This makes it possible to write generic inspect/serialise functions that
-work on any struct type.
-
 ### Unboxing `any` with `as`
 
-`getfield` returns `any`. To use the result as a concrete scalar type, unbox
-it with `as`:
+`getfield` returns `any`. To use the result as a concrete type, unbox it
+with `as`:
 
 ```rust
-let p = point{x: 10, y: 20}
-
-let vx = getfield(p, "x") as i64    // unbox to i64
+let vx = getfield(p, "x") as i64
 let vy = getfield(p, "y") as i64
 
 echo vx    // 10
 echo vy    // 20
 ```
 
-This works for all primitive scalar types: `i64`, `f64`, `bool`, etc. It is
-particularly useful when passing the result directly to a function that
-expects a concrete type:
-
-```rust
-assert::equals(getfield(r, "w") as i64, 8)
-assert::equals(getfield(r, "h") as i64, 16)
-```
-
-The `as` cast also works on values returned by `any`-typed extern or
-higher-order functions:
+This works for all scalar types: `i64`, `f64`, `bool`, etc. The `as` cast
+also works on values returned by `any`-typed extern or higher-order functions:
 
 ```rust
 fn c_sqrt(x f64) f64 = extern("sqrt")
@@ -373,18 +346,13 @@ echo result as f64    // 12.0
 The expression must be an lvalue (a variable, not a temporary):
 
 ```rust
-struct point =
-  x i64
-  y i64
-
 let p = point{x: 10, y: 20}
 
 setfield(p, "x", 99)
 echo p.x    // 99
 ```
 
-`setfield` is particularly useful when the field name is only known at
-runtime (for example, when reading from a config map):
+`setfield` is useful when the field name is only known at runtime:
 
 ```rust
 let fields = ["x", "y"]
@@ -399,26 +367,7 @@ echo p.y    // 2
 
 ---
 
-## Field tags  -  `@"tag"` syntax
-
-Any field in a struct can be annotated with a string tag immediately after
-its type:
-
-```rust
-struct db_row =
-  id    i64    @"pk"
-  email string @"unique"
-  score f64    @"indexed"
-  notes string            // untagged
-```
-
-Tags are purely metadata: they are stored in a compile-time table and have
-no runtime representation in the struct layout. Retrieve them with
-`fieldtag(expr, "name")`.
-
----
-
-## Full reflection example
+## Full example
 
 ```rust
 use io
@@ -457,93 +406,3 @@ let a any = s
 io::printf("typeof(any) = %s\n", typeof(a))
 echo getfield(a, "height")    // 5
 ```
-
----
-
-## Implementation notes
-
-### any representation
-
-`any` is a two-field struct `{ i32 type_id, i8* data }`. The `type_id`
-identifies the contained type and the `data` pointer points to a
-heap-allocated copy of the value.
-
-Type IDs are assigned at compile time:
-
-| ID | Type                                                        |
-|----|-------------------------------------------------------------|
-| 0  | `i64` (all integer types are widened to i64 when boxed)     |
-| 1  | `f64` (all float types are widened to f64 when boxed)       |
-| 2  | `string`                                                    |
-| 3  | `bool`                                                      |
-| 4  | `*T` pointer                                                |
-| 5+ | User-defined structs and `data` types, in declaration order |
-
-### Heap allocation for escape safety
-
-When a value is boxed into `any`, a copy is placed on the heap via
-`malloc`. This ensures the `any` value can safely escape the scope where
-it was created (e.g., be returned from a function or stored in a
-collection) without the data pointer becoming a dangling reference.
-
-### Struct memory layout
-
-Every struct has a hidden leading `i32` field at LLVM layout index 0 that
-stores the struct's compile-time type ID. Vtable pointers (one per
-implemented trait) occupy the next positions, followed by user-visible
-fields. Given:
-
-```rust
-struct rect(drawable, resizable) =
-  w i64
-  h i64
-```
-
-The LLVM layout is:
-```
-%rect = type { i32, %drawable_vtable*, %resizable_vtable*, i64, i64 }
-       field:   0          1                  2             3    4
-```
-
-`fieldnames(rect)` returns `['w, 'h]`  -  only indices 3 and 4.
-`vtableOffset("rect")` = 2, so user field index `k` lives at LLVM index
-`1 + 2 + k`.
-
-### Struct size and ABI alignment
-
-When boxing a struct to `any`, the compiler computes the allocation size
-using `llvmTypeSizeAlign`, which accounts for ABI padding between fields
-(e.g., the 4-byte pad between an `i32` and the next `i64`). This is
-important: under `-O2`, LLVM uses the malloc size for pointer-provenance
-alias analysis, so an undersized allocation corrupts field reads.
-
-### Runtime dispatch for `any`
-
-`typeof`, `traitof`, `fieldnames`, `fieldtypes`, and `getfield` on an `any`
-value use a compile-time-generated linear `select` chain keyed on
-`type_id`. For each struct registered in the module, the compiler emits:
-
-```
-result = select(type_id == struct_id && field_match, boxed_field, result)
-```
-
-All comparisons are emitted in a single basic block  -  no branching, no
-function calls (apart from `strcmp` for field-name matching in `getfield`).
-
-### Function pointer coercion
-
-When a named or extern function is passed to a higher-order function that
-expects a fat function pointer `{ fn(i8* env, params...)*, i8* }`, the
-compiler generates a **shim** wrapper:
-
-- The shim has the fat-pointer calling convention (first arg is `i8* env`,
-  then the Tin-typed parameters).
-- Inside the shim, arguments are coerced to the original function's C-level
-  types (e.g., fat-string `{i8*,i64}` -> raw `i8*`).
-- The original function is called, and the return value is wrapped back to
-  Tin conventions via `wrapFromExtern`.
-- The fat pointer is `{ shim_ptr, null }` (no environment needed for
-  non-capturing references to named functions).
-
-This is why `typeof` and `getfield` work correctly even on values returned
-by extern functions passed through higher-order functions.

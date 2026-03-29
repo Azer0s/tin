@@ -23,26 +23,40 @@ type closureCapture struct {
 // closureCtx saves the mutable per-function state so it can be restored after
 // emitting a nested closure / thunk function.
 type closureCtx struct {
-	fn          *ir.Func
-	scope       *scope
-	deferFnI8s  []value.Value
-	deferFrames []value.Value
-	deferEnvs   []value.Value
+	fn                *ir.Func
+	scope             *scope
+	curBlock          *ir.Block
+	deferFnI8s        []value.Value
+	deferFrames       []value.Value
+	deferEnvs         []value.Value
+	deferRetSlotParam value.Value
+	fnDeferRetAlloca  value.Value
+	deferThunkRetType irtypes.Type
+	inCoroFn          bool
 }
 
 // pushClosureCtx saves the current function context, switches cg to f, and
 // roots the new scope at the module-level (global) scope.
 func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
-	prev := closureCtx{cg.curFn, cg.curScope, cg.pendingDeferFnI8s, cg.pendingDeferFrames, cg.pendingDeferEnvs}
+	prev := closureCtx{cg.curFn, cg.curScope, cg.curBlock, cg.pendingDeferFnI8s, cg.pendingDeferFrames, cg.pendingDeferEnvs, cg.curDeferRetSlotParam, cg.curFnDeferRetAlloca, cg.curDeferThunkRetType, cg.inCoroFn}
 	cg.curFn = f
+	cg.curBlock = nil
 	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
 	cg.pendingDeferEnvs = nil
+	cg.curDeferRetSlotParam = nil
+	cg.curFnDeferRetAlloca = nil
+	cg.curDeferThunkRetType = nil
+	// Thunks and closures are plain functions, not coroutines. Resetting
+	// inCoroFn prevents emitTerminator from emitting coro completion code
+	// (which would create cross-function SSA references) inside the thunk.
+	cg.inCoroFn = false
 	global := prev.scope
 	for global.parent != nil {
 		global = global.parent
 	}
 	cg.curScope = newScope(global)
+
 	return prev
 }
 
@@ -50,9 +64,14 @@ func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
 func (cg *CodeGen) popClosureCtx(prev closureCtx) {
 	cg.curFn = prev.fn
 	cg.curScope = prev.scope
+	cg.curBlock = prev.curBlock
 	cg.pendingDeferFnI8s = prev.deferFnI8s
 	cg.pendingDeferFrames = prev.deferFrames
 	cg.pendingDeferEnvs = prev.deferEnvs
+	cg.curDeferRetSlotParam = prev.deferRetSlotParam
+	cg.curFnDeferRetAlloca = prev.fnDeferRetAlloca
+	cg.curDeferThunkRetType = prev.deferThunkRetType
+	cg.inCoroFn = prev.inCoroFn
 }
 
 // buildEnv heap-allocates an env struct for the given captures and stores each
@@ -79,6 +98,7 @@ func (cg *CodeGen) buildEnv(block *ir.Block, captures []closureCapture) (value.V
 			constant.NewInt(irtypes.I32, int64(i)))
 		block.NewStore(c.val, gep)
 	}
+
 	return envI8, envStructType
 }
 
@@ -97,7 +117,7 @@ func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes
 			constant.NewInt(irtypes.I32, int64(i)))
 		if c.byRef {
 			allocaPtr := entry.NewLoad(c.llvmTy, gep)
-			cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true})
+			cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true, noDeinit: true})
 		} else {
 			alloca := entry.NewAlloca(c.llvmTy)
 			loaded := entry.NewLoad(c.llvmTy, gep)
@@ -109,7 +129,11 @@ func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes
 			if isRCTrackedType(c.llvmTy) {
 				cg.emitRetain(entry, loaded)
 			}
-			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true})
+			// noDeinit: the captured variable is a borrow from the enclosing scope.
+			// The original scope owns the value and will call deinit on cleanup.
+			// This prevents double-deinit for struct types (e.g. Channel) that have
+			// a deinit method but are not ARC-tracked via the RC pointer mechanism.
+			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true, noDeinit: true})
 		}
 	}
 }
@@ -124,6 +148,7 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 		if e, ok := cg.curScope.lookup(structName + "_print"); ok {
 			if fn, ok2 := e.val.(*ir.Func); ok2 {
 				args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
+
 				return block.NewCall(fn, args...), true
 			}
 		}
@@ -141,6 +166,7 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 			}
 		}
 	}
+
 	return nil, false
 }
 
@@ -174,6 +200,16 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 	// Use ARC-managed allocations for boxed data so typeof/release work.
 	rcAlloc := cg.ensureRCAlloc()
 	switch {
+	case isAtomType(t):
+		// Atom values: box as anyTagInt using the i32 hash code widened to i64.
+		// This makes `ftype == 'i64` work via integer comparison in _tin_any_eq.
+		tag = anyTagInt
+		hashCode := cg.extractAtomCode(block, val) // i32
+		i64Hash := block.NewSExt(hashCode, irtypes.I64)
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, 8))
+		iPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(irtypes.I64))
+		block.NewStore(i64Hash, iPtr)
+		dataPtr = rawPtr
 	case isStringType(t):
 		tag = anyTagString
 		sz := constant.NewInt(irtypes.I64, 16) // {i8*, i64} = 16 bytes
@@ -239,8 +275,6 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		// Named struct or data type: heap-allocate so the any can escape.
 		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
 			if id, ok2 := cg.structTypeIDs[st.Name()]; ok2 {
-				tag = id
-			} else if id, ok2 := cg.dataTypeIDs[st.Name()]; ok2 {
 				tag = id
 			} else if id, ok2 := cg.unionTypeIDs[st.Name()]; ok2 {
 				tag = id
@@ -349,16 +383,20 @@ func (cg *CodeGen) toBool(block *ir.Block, val value.Value) value.Value {
 	}
 	if irtypes.IsInt(t) {
 		zero := cg.coerce(block, constant.NewInt(irtypes.I64, 0), t)
+
 		return block.NewICmp(enum.IPredNE, val, zero)
 	}
 	if irtypes.IsFloat(t) {
 		zero := constant.NewFloat(t.(*irtypes.FloatType), 0)
+
 		return block.NewFCmp(enum.FPredONE, val, zero)
 	}
 	if irtypes.IsPointer(t) {
 		null := constant.NewNull(t.(*irtypes.PointerType))
+
 		return block.NewICmp(enum.IPredNE, val, null)
 	}
+
 	return constant.NewInt(irtypes.I1, 1)
 }
 
@@ -372,24 +410,6 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		return val
 	}
 
-	// Data type: wrap a value into a tagged union.
-	if targetSt, ok := target.(*irtypes.StructType); ok {
-		if targetName := cg.typeNameOf(target); targetName != "" {
-			if _, isData := cg.dataDecls[targetName]; isData {
-				if !src.Equal(target) {
-					// If the source is i64 0 (the None sentinel), return a zero-tagged struct.
-					if c, ok := val.(*constant.Int); ok && c.X != nil && c.X.Sign() == 0 && irtypes.IsInt(src) {
-						if noneVal := cg.makeNoneValue(block, target); noneVal != nil {
-							return noneVal
-						}
-					}
-					if wrapped := cg.wrapDataVariant(block, val, targetSt, targetName); wrapped != nil {
-						return wrapped
-					}
-				}
-			}
-		}
-	}
 	// Tagged union: wrap a value into a tagged union type (type u = i8 | string).
 	if targetSt, ok := target.(*irtypes.StructType); ok {
 		if targetName := cg.typeNameOf(target); targetName != "" {
@@ -457,6 +477,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			if rawPtr.Type().Equal(target) {
 				return rawPtr
 			}
+
 			return block.NewBitCast(rawPtr, target)
 		}
 	}
@@ -469,6 +490,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			if rawPtr.Type().Equal(target) {
 				return rawPtr
 			}
+
 			return block.NewBitCast(rawPtr, target)
 		}
 	}
@@ -476,6 +498,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	switch {
 	// Any type: box the value.
 	case isAnyType(target) && !isAnyType(src):
+
 		return cg.boxToAny(block, val)
 
 	// Int -> Int: extend or truncate.
@@ -487,6 +510,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		} else if sBits > tBits {
 			return block.NewTrunc(val, target)
 		}
+
 		return val
 
 	// Float -> Float.
@@ -498,32 +522,38 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		} else if sBits > tBits {
 			return block.NewFPTrunc(val, target)
 		}
+
 		return val
 
 	// Int -> Float.
 	case irtypes.IsInt(src) && irtypes.IsFloat(target):
+
 		return block.NewSIToFP(val, target)
 
 	// Float -> Int.
 	case irtypes.IsFloat(src) && irtypes.IsInt(target):
+
 		return block.NewFPToSI(val, target)
 
 	// Pointer -> Pointer.
 	case irtypes.IsPointer(src) && irtypes.IsPointer(target):
+
 		return block.NewBitCast(val, target)
 
 	// Int -> Pointer.
 	case irtypes.IsInt(src) && irtypes.IsPointer(target):
+
 		return block.NewIntToPtr(val, target)
 
 	// Pointer -> Int.
 	case irtypes.IsPointer(src) && irtypes.IsInt(target):
+
 		return block.NewPtrToInt(val, target)
 	}
 
-	// Unbox any to a primitive scalar (int or float).
+	// Unbox any to a scalar (int, float), struct, or string fat-ptr.
 	// Extract the data pointer from the any fat-ptr and load the value.
-	if isAnyType(src) && (irtypes.IsInt(target) || irtypes.IsFloat(target)) {
+	if isAnyType(src) && (irtypes.IsInt(target) || irtypes.IsFloat(target) || isStructType(target) || isStringType(target)) {
 		anyType := anyFatPtrType()
 		anyAlloca := block.NewAlloca(anyType)
 		block.NewStore(val, anyAlloca)
@@ -531,10 +561,21 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		dataPtr := block.NewLoad(irtypes.I8Ptr, ptrGep)
 		typedPtr := block.NewBitCast(dataPtr, irtypes.NewPointer(target))
+
 		return block.NewLoad(target, typedPtr)
 	}
 
+	// Pointer-to-struct -> struct value: load the pointed-to value.
+	// This handles value-receiver methods called on a pointer (e.g. p.method()
+	// where method takes 'this T' but p is '*T').
+	if pt, ok := src.(*irtypes.PointerType); ok {
+		if pt.ElemType.Equal(target) {
+			return block.NewLoad(target, val)
+		}
+	}
+
 	// Last resort: bitcast if same size.
+
 	return val
 }
 
@@ -555,6 +596,7 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 			return constant.NewInt(target.(*irtypes.IntType), ci.X.Int64())
 		}
 	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
+
 		return c
 	case irtypes.IsInt(src) && irtypes.IsFloat(target):
 		if ci, ok2 := c.(*constant.Int); ok2 {
@@ -563,21 +605,27 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 	case irtypes.IsFloat(src) && irtypes.IsInt(target):
 		if cf, ok2 := c.(*constant.Float); ok2 {
 			fv, _ := cf.X.Float64()
+
 			return constant.NewInt(target.(*irtypes.IntType), int64(fv))
 		}
 	}
+
 	return v
 }
 
 func floatBits(t *irtypes.FloatType) int {
 	switch t.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 	case irtypes.FloatKindHalf:
+
 		return 16
 	case irtypes.FloatKindFloat:
+
 		return 32
 	case irtypes.FloatKindDouble:
+
 		return 64
 	default:
+
 		return 64
 	}
 }
@@ -586,10 +634,13 @@ func floatBits(t *irtypes.FloatType) int {
 func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 	switch {
 	case irtypes.IsInt(t):
+
 		return constant.NewInt(t.(*irtypes.IntType), 0)
 	case irtypes.IsFloat(t):
+
 		return constant.NewFloat(t.(*irtypes.FloatType), 0)
 	case irtypes.IsPointer(t):
+
 		return constant.NewNull(t.(*irtypes.PointerType))
 	case irtypes.IsStruct(t):
 		st := t.(*irtypes.StructType)
@@ -597,6 +648,7 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 		for i, f := range st.Fields {
 			fields[i] = cg.zeroValue(f).(constant.Constant)
 		}
+
 		return constant.NewStruct(st, fields...)
 	case irtypes.IsArray(t):
 		at := t.(*irtypes.ArrayType)
@@ -604,7 +656,9 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 		for i := range elems {
 			elems[i] = cg.zeroValue(at.ElemType).(constant.Constant)
 		}
+
 		return constant.NewArray(at, elems...)
 	}
+
 	return constant.NewInt(irtypes.I64, 0)
 }

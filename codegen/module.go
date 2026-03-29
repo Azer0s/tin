@@ -66,12 +66,26 @@ type ModTypeAlias struct {
 	Target string `json:"target"`
 }
 
+// ModMacro describes an exported macro.
+type ModMacro struct {
+	// Name is the macro name (without trailing !).
+	Name string `json:"name"`
+	// Body is the backtick expansion string (e.g. "for true" for loop).
+	Body string `json:"body"`
+	// Tags lists the macro control tags (e.g. ["no_parens", "no_excl"]).
+	Tags []string `json:"tags,omitempty"`
+	// Params lists parameter names for parametric macros.
+	Params []string `json:"params,omitempty"`
+}
+
 // ModFile is the top-level structure written to / read from a .tin.mod file.
 type ModFile struct {
 	Package string         `json:"package"`
 	Funcs   []ModFunc      `json:"functions,omitempty"`
 	Structs []ModStruct    `json:"structs,omitempty"`
 	Types   []ModTypeAlias `json:"types,omitempty"`
+	// Macros lists exported macros so they can be imported cross-module.
+	Macros []ModMacro `json:"macros,omitempty"`
 	// ReExports lists other packages that are re-exported under this package.
 	// e.g. "export { io, math } as std" -> ReExports: ["io", "math"]
 	ReExports []string `json:"reExports,omitempty"`
@@ -85,6 +99,7 @@ func WriteModFile(filename string, mf *ModFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal module file: %w", err)
 	}
+
 	return os.WriteFile(filename, data, 0o644)
 }
 
@@ -98,6 +113,7 @@ func ReadModFile(filename string) (*ModFile, error) {
 	if err := json.Unmarshal(data, &mf); err != nil {
 		return nil, fmt.Errorf("parse module file %s: %w", filename, err)
 	}
+
 	return &mf, nil
 }
 
@@ -111,16 +127,19 @@ func typeExprToString(te ast.TypeExpr) string {
 	}
 	switch t := te.(type) {
 	case *ast.SimpleType:
+
 		return t.Name
 	case *ast.PointerType:
 		if t.IsConst {
 			return "const *" + typeExprToString(t.Elem)
 		}
+
 		return "*" + typeExprToString(t.Elem)
 	case *ast.ArrayType:
 		if t.Size < 0 {
 			return "[" + typeExprToString(t.Elem) + "]"
 		}
+
 		return fmt.Sprintf("[%s; %d]", typeExprToString(t.Elem), t.Size)
 	case *ast.FuncType:
 		parts := make([]string, len(t.Params))
@@ -135,20 +154,24 @@ func typeExprToString(te ast.TypeExpr) string {
 		if t.IsVarArgs {
 			suffix = ", ..."
 		}
+
 		return "fn(" + strings.Join(parts, ", ") + suffix + ")" + ret
 	case *ast.GenericType:
 		params := make([]string, len(t.TypeParams))
 		for i, p := range t.TypeParams {
 			params[i] = typeExprToString(p)
 		}
+
 		return t.Name + "[" + strings.Join(params, ", ") + "]"
 	case *ast.UnionTypeExpr:
 		parts := make([]string, len(t.Types))
 		for i, u := range t.Types {
 			parts[i] = typeExprToString(u)
 		}
+
 		return strings.Join(parts, " | ")
 	}
+
 	return ""
 }
 
@@ -157,5 +180,6 @@ func parseTypeString(s string) (ast.TypeExpr, error) {
 	if s == "" {
 		return nil, nil
 	}
+
 	return parser.ParseType(s)
 }

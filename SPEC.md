@@ -312,20 +312,6 @@ match a.(type):
     echo x
 ```
 
-### Wrapper types
-
-```rust
-data maybe[t] = t | None
-
-let m maybe[string] = None
-
-if m is s string:
-  echo s
-
-if m is None:
-  echo "m is unset"
-```
-
 ### Native union types
 
 `union` creates a C-style union  -  overlapping memory, no tag.

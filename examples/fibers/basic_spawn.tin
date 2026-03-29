@@ -1,0 +1,28 @@
+// examples/fibers/basic_spawn.tin
+//
+// Demonstrates: spawn, yield, await, and typed Future[t] results.
+//
+// spawn always returns Future[T] where T is the return type of the
+// async function (or Future[Unit] for void functions). Use `await`
+// to block until the fiber completes and retrieve the result.
+
+fn{#async} worker(n i64) =
+  echo "fiber started: {n}"
+  yield
+  echo "fiber done: {n}"
+
+fn{#async} compute(n i64) i64 =
+  return n * n
+
+fn main() =
+  let p1 = spawn worker(1)
+  let p2 = spawn worker(2)
+  echo "main: fibers spawned"
+  await p1
+  await p2
+  echo "all done"
+
+  // Typed return: await retrieves the i64 result directly.
+  let f = spawn compute(7)
+  let result = await f
+  echo result

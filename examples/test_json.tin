@@ -1,0 +1,139 @@
+// examples/test_json.tin - tests for the json stdlib
+use assert
+use json
+
+struct point =
+  x i64
+  y i64
+
+struct person =
+  id    i64    @"json:id"
+  name  string @"json:name"
+  score f64    @"json:score"
+  pwd   string @"json:-"
+
+// Helper: wrap JSON content in braces
+fn obj(s string) string = return "\{" ++ s ++ "\}"
+
+// encode tests
+
+test "encode bool true" =
+  assert::equals_str(json::encode(true), "true")
+
+test "encode bool false" =
+  assert::equals_str(json::encode(false), "false")
+
+test "encode integer" =
+  assert::equals_str(json::encode(42 as i64), "42")
+
+test "encode negative integer" =
+  assert::equals_str(json::encode(-7 as i64), "-7")
+
+test "encode string plain" =
+  assert::equals_str(json::encode("hello"), "\"hello\"")
+
+test "encode string with special chars" =
+  assert::equals_str(json::encode("a\"b"), "\"a\\\"b\"")
+
+test "encode struct point" =
+  let p = point{x: 1, y: 2}
+  assert::equals_str(json::encode(p), obj("\"x\":1,\"y\":2"))
+
+test "encode struct with tags and skip" =
+  let u = person{id: 7, name: "Alice", score: 9.5, pwd: "secret"}
+  assert::equals_str(json::encode(u), obj("\"id\":7,\"name\":\"Alice\",\"score\":9.5"))
+
+// parse (untyped) tests
+
+test "parse null" =
+  let v = json::parse("null")
+  assert::ok(v.is_null())
+
+test "parse true" =
+  let v = json::parse("true")
+  assert::ok(v.is_bool())
+  assert::ok(v.as_bool())
+
+test "parse false" =
+  let v = json::parse("false")
+  assert::ok(v.is_bool())
+  assert::ok(!v.as_bool())
+
+test "parse integer" =
+  let v = json::parse("42")
+  assert::ok(v.is_int())
+  assert::equals(v.as_int(), 42)
+
+test "parse negative integer" =
+  let v = json::parse("-3")
+  assert::equals(v.as_int(), -3)
+
+test "parse float" =
+  let v = json::parse("3.14")
+  assert::ok(v.is_float())
+  assert::equals_f64(v.as_float(), 3.14)
+
+test "parse string" =
+  let v = json::parse("\"hello\"")
+  assert::ok(v.is_string())
+  assert::equals_str(v.as_string(), "hello")
+
+test "parse array" =
+  let v = json::parse("[1,2,3]")
+  assert::ok(v.is_array())
+  assert::equals(v.array_len(), 3)
+  assert::equals(v.index(0).as_int(), 1)
+  assert::equals(v.index(2).as_int(), 3)
+
+test "parse array out of range" =
+  let v = json::parse("[1,2]")
+  assert::ok(v.index(5).is_null())
+
+test "parse object" =
+  let v = json::parse(obj("\"x\":10,\"y\":20"))
+  assert::ok(v.is_object())
+  assert::equals(v.get("x").as_int(), 10)
+  assert::equals(v.get("y").as_int(), 20)
+
+test "parse object missing key" =
+  let v = json::parse(obj("\"a\":1"))
+  assert::ok(v.get("z").is_null())
+
+test "parse nested object" =
+  let inner = obj("\"x\":3,\"y\":4")
+  let v = json::parse(obj("\"pt\":" ++ inner))
+  assert::equals(v.get("pt").get("x").as_int(), 3)
+
+test "parse object keys" =
+  let v = json::parse(obj("\"a\":1,\"b\":2"))
+  let ks = v.keys()
+  assert::equals(len(ks), 2)
+
+// parse[T] (typed/generic) tests
+
+test "parse[T] struct" =
+  let src = obj("\"id\":1,\"name\":\"Bob\",\"score\":7.5")
+  let u = json::parse[person](src)
+  assert::equals(u.id, 1)
+  assert::equals_str(u.name, "Bob")
+  assert::equals_f64(u.score, 7.5)
+
+test "parse[T] ignores skipped field" =
+  let u = json::parse[person](obj("\"id\":2,\"pwd\":\"leaked\""))
+  assert::equals(u.id, 2)
+  assert::equals_str(u.pwd, "")
+
+test "parse[T] point no tags" =
+  let p = json::parse[point](obj("\"x\":5,\"y\":9"))
+  assert::equals(p.x, 5)
+  assert::equals(p.y, 9)
+
+test "parse[T] unknown keys ignored" =
+  let p = json::parse[point](obj("\"x\":1,\"z\":99,\"y\":2"))
+  assert::equals(p.x, 1)
+  assert::equals(p.y, 2)
+
+test "parse[T] empty object gives zero struct" =
+  let p = json::parse[point]("\{\}")
+  assert::equals(p.x, 0)
+  assert::equals(p.y, 0)

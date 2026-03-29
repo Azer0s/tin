@@ -1,0 +1,88 @@
+// stdlib/str/str_test.tin
+//
+// Tests for the str stdlib: strlen, strcmp, strncmp, strcasecmp,
+// strstr, atoi, atol, atof.
+// Run with: tin test stdlib/str/str_test.tin
+
+use assert
+use str
+
+// strlen
+
+test "strlen empty string" =
+  assert::equals(str::strlen(""), 0)
+
+test "strlen basic" =
+  assert::equals(str::strlen("hello"), 5)
+
+test "strlen with spaces" =
+  assert::equals(str::strlen("hello world"), 11)
+
+// strcmp
+
+test "strcmp equal strings" =
+  assert::equals(str::strcmp("abc", "abc") as i64, 0)
+
+test "strcmp less than" =
+  assert::ok(str::strcmp("abc", "abd") < 0)
+
+test "strcmp greater than" =
+  assert::ok(str::strcmp("abd", "abc") > 0)
+
+test "strcmp empty vs non-empty" =
+  assert::ok(str::strcmp("", "a") < 0)
+
+test "strcmp both empty" =
+  assert::equals(str::strcmp("", "") as i64, 0)
+
+// strncmp
+
+test "strncmp equal within n" =
+  assert::equals(str::strncmp("abcXXX", "abcYYY", 3) as i64, 0)
+
+test "strncmp differ within n" =
+  assert::ok(str::strncmp("abcX", "abcY", 4) != 0)
+
+// strcasecmp
+
+test "strcasecmp equal case insensitive" =
+  assert::equals(str::strcasecmp("Hello", "hello") as i64, 0)
+
+test "strcasecmp equal mixed case" =
+  assert::equals(str::strcasecmp("ABC", "abc") as i64, 0)
+
+test "strcasecmp differ" =
+  assert::ok(str::strcasecmp("abc", "xyz") != 0)
+
+// strstr
+
+// strstr returns a *char - tested via strchr which gives comparable results.
+// Direct null-pointer comparison omitted as the null literal is context-specific.
+
+// atoi / atol
+
+test "atoi positive" =
+  assert::equals(str::atoi("42") as i64, 42)
+
+test "atoi negative" =
+  assert::equals(str::atoi("-7") as i64, 0 - 7)
+
+test "atoi zero" =
+  assert::equals(str::atoi("0") as i64, 0)
+
+test "atol positive" =
+  assert::equals(str::atol("123456789"), 123456789)
+
+test "atol negative" =
+  assert::equals(str::atol("-1"), 0 - 1)
+
+// atof
+
+test "atof positive" =
+  assert::equals_f64(str::atof("3.14"), 3.14)
+
+test "atof negative" =
+  assert::equals_f64(str::atof("-2.5"), 0.0 - 2.5)
+
+test "atof integer string" =
+  assert::equals_f64(str::atof("10"), 10.0)

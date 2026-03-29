@@ -51,6 +51,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 					depth--
 					if depth == 0 {
 						p.pos++ // consume ]
+
 						break
 					}
 				} else if t.Type == lexer.EOF {
@@ -127,6 +128,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			}
 		}
 		constraints = append(constraints, ast.TypeConstraint{TypeParam: typeParam, Traits: traits})
+
 		return true
 	}
 	for p.check(lexer.KW_WHERE) {
@@ -134,6 +136,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		p.advance() // consume "where"
 		if !parseOneConstraint() {
 			p.pos = saved
+
 			break
 		}
 		// Additional constraints after commas (still in the same `where` clause)
@@ -150,6 +153,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		p.advance()
 		if p.check(lexer.KW_VIRTUAL) {
 			p.advance() // consume "virtual"
+
 			return &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
@@ -170,6 +174,9 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
+			// Allow trailing tags after extern("sym"): e.g. extern("read") {#blocking}
+			tags = append(tags, p.parseTags()...)
+
 			return &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
@@ -183,6 +190,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			return nil, err
 		}
 		_ = pos
+
 		return &ast.FuncDecl{
 			Name: name, TraitQualifier: traitQualifier,
 			TypeParams: typeParams, Constraints: constraints, Params: params,
@@ -192,6 +200,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 
 	// fn with no body (forward declaration / extern / trait virtual)
 	_ = pos
+
 	return &ast.FuncDecl{
 		Name: name, TraitQualifier: traitQualifier,
 		TypeParams: typeParams, Constraints: constraints, Params: params,
@@ -211,8 +220,10 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 			if p.peekAt(1).Type == lexer.KW_WHERE {
 				return p.parseWhereBlock()
 			}
+
 			return p.parseBlock()
 		}
+
 		return &ast.Block{}, nil
 	}
 	// Single expression / statement on same line - may be SEMI-separated multi-statement
@@ -241,6 +252,7 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 			stmts = append(stmts, stmt)
 		}
 	}
+
 	return &ast.Block{Stmts: stmts}, nil
 }
 
@@ -262,6 +274,7 @@ func (p *Parser) parseWhereBlock() (*ast.WhereList, error) {
 	if p.check(lexer.DEDENT) {
 		p.advance()
 	}
+
 	return wl, nil
 }
 
@@ -306,6 +319,7 @@ func (p *Parser) parseWhereClause() (ast.WhereClause, error) {
 	if err != nil {
 		return ast.WhereClause{}, err
 	}
+
 	return ast.WhereClause{Pos: pos, Cond: cond, Body: body}, nil
 }
 
@@ -333,5 +347,6 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	if p.check(lexer.DEDENT) {
 		p.advance()
 	}
+
 	return b, nil
 }

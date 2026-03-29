@@ -1,0 +1,51 @@
+// examples/arc_stress/struct_ptr_array.tin
+//
+// ARC stress: function returning a heap-allocated struct pointer (&item{}).
+// Calls make_item 10 times, appends each *item into an array, then:
+//   (a) verifies each struct's fields have the expected values
+//   (b) verifies all 10 pointers are unique (no aliasing)
+// Finally releases each string field and frees the raw memory to ensure
+// a clean heap. The [*item] array itself is ARC-tracked and freed on exit.
+
+use mem
+use assert
+
+struct item =
+  id    i64
+  label string
+
+fn make_item(i i64) *item =
+  return &item{id: i, label: "item-{i}"}
+
+fn main() =
+  let items [*item] = []
+  let i i64 = 0
+  for i < 10:
+    items ++= make_item(i)
+    i = i + 1
+
+  // (a) check field values
+  let j i64 = 0
+  for j < 10:
+    let p = items[j]
+    assert::equals(p.id, j)
+    assert::equals_str(p.label, "item-{j}")
+    j = j + 1
+
+  // (b) check all pointers are distinct
+  let a i64 = 0
+  for a < 10:
+    let b i64 = a + 1
+    for b < 10:
+      assert::not_equals(items[a] as i64, items[b] as i64)
+      b = b + 1
+    a = a + 1
+
+  // free: release string field then free raw memory
+  let k i64 = 0
+  for k < 10:
+    items[k].label = ""
+    mem::free(items[k] as *void)
+    k = k + 1
+
+  echo "struct_ptr_array: OK"

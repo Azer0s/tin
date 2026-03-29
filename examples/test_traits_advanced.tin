@@ -1,0 +1,119 @@
+// test_traits_advanced.tin - Tests for advanced trait features:
+//   - Trait fat pointer dispatch
+//   - Trait mutation write-back (virtual method called through fat ptr)
+//   - Trait init/deinit chaining
+
+use assert
+
+// Trait fat pointer dispatch
+
+trait greeter =
+  fn greet(this greeter) string = virtual
+
+struct person(greeter) =
+  name string
+  fn greet(this person) string =
+    return "Hello, I am {this.name}"
+
+struct bot(greeter) =
+  model string
+  fn greet(this bot) string =
+    return "Beep, I am model {this.model}"
+
+test "trait fat pointer dispatch - person" =
+  let p = person{name: "Alice"}
+  let gp greeter = p
+  assert::equals_str(gp.greet(), "Hello, I am Alice")
+
+test "trait fat pointer dispatch - bot" =
+  let b = bot{model: "R2D2"}
+  let gb greeter = b
+  assert::equals_str(gb.greet(), "Beep, I am model R2D2")
+
+// Trait with forwarded fields (default methods accessing forward fields)
+
+trait named =
+  label string forward
+  fn name(this named) string =
+    return this.label
+
+struct animal(named) =
+  species string
+
+test "trait default method with forward field" =
+  let a = animal{label: "Whiskers", species: "cat"}
+  assert::equals_str(a.name(), "Whiskers")
+  // Access through fat ptr
+  let n named = a
+  assert::equals_str(n.name(), "Whiskers")
+
+// Forward field mutations in trait default methods
+// Trait default methods that assign to forward fields should mutate the
+// caller's actual struct in-place (pointer receiver semantics injected by the
+// compiler when augmenting the struct).
+
+trait counter =
+  count i64 forward
+  fn inc(this counter) =
+    this.count = this.count + 1
+  fn get(this counter) i64 =
+    return this.count
+
+struct tally(counter) =
+  name string
+
+test "forward field mutation via direct call" =
+  let t = tally{name: "x", count: 0}
+  t.inc()
+  assert::equals(t.count, 1)
+  t.inc()
+  assert::equals(t.count, 2)
+  assert::equals(t.get(), 2)
+
+test "forward field mutation via trait fat pointer" =
+  let t = tally{name: "y", count: 0}
+  let ct counter = t
+  ct.inc()
+  assert::equals(ct.get(), 1)
+  ct.inc()
+  assert::equals(ct.get(), 2)
+
+// Trait init/deinit chaining
+// When a struct defines its own init/deinit AND the trait also defines one,
+// both should be called.
+
+// Global counters to observe call order.
+// Use `var` so they are proper LLVM globals accessible from chained functions.
+var init_count i64
+var deinit_count i64
+
+trait observable =
+  fn init(this observable) =
+    init_count = init_count + 1
+
+  fn deinit(this observable) =
+    deinit_count = deinit_count + 1
+
+struct observable_widget(observable) =
+  id i64
+  fn init(this observable_widget) =
+    init_count = init_count + 10
+  fn deinit(this observable_widget) =
+    deinit_count = deinit_count + 10
+
+test "both struct and trait init are called" =
+  init_count = 0
+  let w = observable_widget{id: 1}
+  let dummy i64 = w.id  // use the struct so it's not optimized away
+  // struct init adds 10, trait init adds 1 => total 11
+  assert::equals(init_count, 11)
+
+test "both struct and trait deinit are called" =
+  deinit_count = 0
+  fn run_deinit() void =
+    let w2 = observable_widget{id: 2}
+    let dummy i64 = w2.id
+    echo dummy
+  run_deinit()
+  // struct deinit adds 10, trait deinit adds 1 => total 11
+  assert::equals(deinit_count, 11)

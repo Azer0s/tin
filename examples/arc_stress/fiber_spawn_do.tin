@@ -1,0 +1,46 @@
+// examples/arc_stress/fiber_spawn_do.tin
+//
+// Memory safety stress test for spawn do: blocks.
+// Spawns 500 do-blocks; each recvs a string from a global channel,
+// concatenates it, and sends the result to a results channel.
+// Run under valgrind: no leaks, no invalid accesses.
+//
+// Design: do-blocks access only module-level vars (no local capture) to
+// avoid any stack lifetime issues. String values flow through channels,
+// exercising ARC retain/release on every send and recv.
+
+use sync
+
+var input_ch   sync::Channel[string]
+var results_ch sync::Channel[string]
+
+fn main() =
+  let n i64 = 500
+  input_ch   = sync::Channel[string].make(n)
+  results_ch = sync::Channel[string].make(n)
+
+  // Pre-fill the input channel with n strings.
+  let i i64 = 0
+  for i < n:
+    let s = "item-{i}"
+    await input_ch.send(s)
+    i = i + 1
+
+  // Spawn 500 do: blocks; each recvs one string, transforms it, sends result.
+  // The future f goes out of scope on each iteration (unawaited); the do-block
+  // fiber runs to completion independently. Results channel is the sync point.
+  let j i64 = 0
+  for j < n:
+    spawn do:
+      let raw = await input_ch.recv()
+      let out = "done-" ++ raw
+      await results_ch.send(out)
+    j = j + 1
+
+  // Drain all results - this ensures all 500 do-blocks have completed.
+  let collected i64 = 0
+  for collected < n:
+    await results_ch.recv()
+    collected = collected + 1
+
+  echo "fiber_spawn_do: OK, {collected} do-blocks completed"

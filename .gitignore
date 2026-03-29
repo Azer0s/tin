@@ -16,3 +16,11 @@ tinc
 !stdlib/**/*.tin.mod
 *.o
 examples/modules/modules_test
+tin_old
+tin
+examples/fibers/channel_pingpong
+
+# Core dump files
+core
+core.*
+examples/test_json

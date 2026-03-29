@@ -1,0 +1,46 @@
+// examples/fibers/auto_yield.tin
+//
+// Auto-yield: every loop backedge in an {#async} function automatically
+// emits a cooperative yield point, allowing other fibers to run.
+// Disable per-function with {#no_autoyield}.
+
+use assert
+
+fn{#async} count_up(n i64) i64 =
+  let sum i64 = 0
+  for let i i64 = 0; i < n; i = i + 1:
+    sum = sum + i
+  return sum
+
+// {#no_autoyield} disables auto-yield for performance-critical loops.
+fn{#async #no_autoyield} count_fast(n i64) i64 =
+  let sum i64 = 0
+  for let i i64 = 0; i < n; i = i + 1:
+    sum = sum + i
+  return sum
+
+fn main() =
+  let f1 = spawn count_up(1000)
+  let f2 = spawn count_fast(1000)
+  let r1 = await f1
+  let r2 = await f2
+  echo r1    // 499500
+  echo r2    // 499500
+
+test "auto yield produces correct result" =
+  let f = spawn count_up(100)
+  let result = await f
+  assert::equals(result, 4950)
+
+test "no_autoyield produces correct result" =
+  let f = spawn count_fast(100)
+  let result = await f
+  assert::equals(result, 4950)
+
+test "concurrent auto-yield fibers" =
+  let f1 = spawn count_up(50)
+  let f2 = spawn count_up(50)
+  let r1 = await f1
+  let r2 = await f2
+  assert::equals(r1, 1225)
+  assert::equals(r2, 1225)

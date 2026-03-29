@@ -21,7 +21,15 @@ type Parser struct {
 func New(tokens []lexer.Token) *Parser {
 	p := &Parser{tokens: tokens, noParensMacros: map[string]string{}}
 	p.collectNoParensMacros()
+
 	return p
+}
+
+// RegisterNoParensMacro adds an external #no_parens macro to the parser's
+// expansion table. Call after New() and before Parse() to support imported
+// #no_parens macros (e.g. `use { loop } from macros`).
+func (p *Parser) RegisterNoParensMacro(name, expansion string) {
+	p.noParensMacros[name] = expansion
 }
 
 // collectNoParensMacros performs a first-pass scan to find all macro declarations
@@ -95,6 +103,7 @@ func (p *Parser) peek() lexer.Token {
 	if p.pos >= len(p.tokens) {
 		return lexer.Token{Type: lexer.EOF}
 	}
+
 	return p.tokens[p.pos]
 }
 
@@ -103,6 +112,7 @@ func (p *Parser) peekAt(offset int) lexer.Token {
 	if i < 0 || i >= len(p.tokens) {
 		return lexer.Token{Type: lexer.EOF}
 	}
+
 	return p.tokens[i]
 }
 
@@ -111,6 +121,7 @@ func (p *Parser) advance() lexer.Token {
 	if p.pos < len(p.tokens) {
 		p.pos++
 	}
+
 	return tok
 }
 
@@ -122,6 +133,7 @@ func (p *Parser) match(ts ...lexer.TokenType) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -131,6 +143,7 @@ func (p *Parser) expect(t lexer.TokenType) (lexer.Token, error) {
 		return tok, fmt.Errorf("expected %s, got %s (%q) at %d:%d",
 			t, tok.Type, tok.Literal, tok.Line, tok.Col)
 	}
+
 	return p.advance(), nil
 }
 
@@ -156,11 +169,13 @@ func (p *Parser) skipWhitespace() {
 
 func (p *Parser) curPos() ast.Pos {
 	t := p.peek()
+
 	return ast.Pos{Line: t.Line, Col: t.Col}
 }
 
 func (p *Parser) errorf(f string, a ...any) error {
 	t := p.peek()
+
 	return fmt.Errorf(f+" (at %d:%d)", append(a, t.Line, t.Col)...)
 }
 
@@ -180,6 +195,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 		}
 		p.skipSemisAndNewlines()
 	}
+
 	return prog, nil
 }
 
@@ -187,6 +203,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 // Used by the CTFE macro system to re-parse macro execution output.
 func (p *Parser) ParseExpr() (ast.Node, error) {
 	p.skipNewlines()
+
 	return p.parseExpr()
 }
 
@@ -204,32 +221,42 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 
 	switch p.peek().Type {
 	case lexer.KW_FN:
+
 		return p.parseFuncDecl(tags, false)
 	case lexer.KW_MACRO:
+
 		return p.parseMacroDecl(tags)
 	case lexer.KW_STRUCT:
+
 		return p.parseStructDecl(tags)
 	case lexer.KW_TRAIT:
+
 		return p.parseTraitDecl()
 	case lexer.KW_TYPE:
+
 		return p.parseTypeDecl()
 	case lexer.KW_ENUM:
+
 		return p.parseEnumDecl()
 	case lexer.KW_UNION:
+
 		return p.parseUnionDecl()
-	case lexer.KW_DATA:
-		return p.parseDataDecl()
 	case lexer.KW_USE:
+
 		return p.parseUseDecl()
 	case lexer.KW_EXPORT:
+
 		return p.parseExportDecl()
 	case lexer.KW_TEST:
+
 		return p.parseTestDecl()
 	case lexer.KW_STATIC:
 		p.advance()
+
 		return p.parseFuncDecl(tags, true)
 	case lexer.DEDENT:
 		p.advance() // consume stray DEDENT at top level (from multiline function bodies)
+
 		return nil, nil
 	case lexer.IDENT:
 		// Check if this identifier is a #no_parens macro name.
@@ -250,10 +277,13 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 			newToks = append(newToks, expToks...)
 			newToks = append(newToks, p.tokens[p.pos:]...)
 			p.tokens = append(p.tokens[:p.pos], newToks...)
+
 			return p.parseTopLevel()
 		}
+
 		return p.parseStatement()
 	default:
+
 		return p.parseStatement()
 	}
 }
@@ -282,5 +312,6 @@ func (p *Parser) parseTags() []string {
 			p.pos = saved // not a tag block - restore
 		}
 	}
+
 	return tags
 }

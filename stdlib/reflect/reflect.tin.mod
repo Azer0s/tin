@@ -23,7 +23,7 @@
           "type": "atom"
         }
       ],
-      "retType": "string"
+      "retType": "atom"
     },
     {
       "name": "fn_ret",
@@ -35,7 +35,7 @@
           "type": "atom"
         }
       ],
-      "retType": "string"
+      "retType": "atom"
     },
     {
       "name": "fn_params",
@@ -47,7 +47,7 @@
           "type": "atom"
         }
       ],
-      "retType": "[string]"
+      "retType": "[atom]"
     },
     {
       "name": "is_ptr",

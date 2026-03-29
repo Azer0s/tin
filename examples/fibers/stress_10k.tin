@@ -1,0 +1,35 @@
+// examples/fibers/stress_10k.tin
+//
+// Spawn 10,000 fibers, each incrementing a shared atomic counter.
+// Verifies that all 10k fibers complete and the counter is exactly 10000.
+
+use sync
+
+var counter sync::AtomicI64
+var done_ch sync::Channel[i64]
+
+fn{#async} inc_fiber() =
+  counter.add(1)
+  await done_ch.send(1)
+
+fn main() =
+  counter = sync::AtomicI64.make(0)
+  done_ch = sync::Channel[i64].make(10000)
+
+  let n i64 = 10000
+  let i i64 = 0
+  for i < n:
+    spawn inc_fiber()
+    i = i + 1
+
+  // Collect all completions.
+  let j i64 = 0
+  for j < n:
+    await done_ch.recv()
+    j = j + 1
+
+  let total = counter.load()
+  if total == n:
+    echo "PASS: counter = {total}"
+  else:
+    echo "FAIL: expected {n} got {total}"

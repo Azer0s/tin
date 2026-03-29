@@ -35,6 +35,7 @@ func (cg *CodeGen) registerAtom(name string) int32 {
 	cg.atomCodes[name] = code
 	cg.atomCodeToName[code] = name
 	cg.atomOrder = append(cg.atomOrder, name)
+
 	return code
 }
 
@@ -49,6 +50,7 @@ func (cg *CodeGen) extractAtomCode(block *ir.Block, atomVal value.Value) value.V
 	block.NewStore(atomVal, alloca)
 	gep := block.NewGetElementPtr(cg.atomType, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
 	return block.NewLoad(irtypes.I32, gep)
 }
 
@@ -60,6 +62,7 @@ func (cg *CodeGen) ensureAtomToString() *ir.Func {
 	}
 	cg.atomToStrFn = cg.mod.NewFunc("__tin_atom_to_string", stringFatPtrType(),
 		ir.NewParam("code", irtypes.I32))
+
 	return cg.atomToStrFn
 }
 
@@ -71,6 +74,7 @@ func (cg *CodeGen) ensureStringToAtom() *ir.Func {
 	}
 	cg.strToAtomFn = cg.mod.NewFunc("__tin_string_to_atom", cg.atomType,
 		ir.NewParam("ptr", irtypes.I8Ptr))
+
 	return cg.strToAtomFn
 }
 
@@ -148,6 +152,7 @@ func (cg *CodeGen) buildAtomToStringBody(fn *ir.Func, tableGlobal *ir.Global, co
 		retAlloca := entry.NewAlloca(strType)
 		entry.NewStore(zeroStr, retAlloca)
 		entry.NewRet(entry.NewLoad(strType, retAlloca))
+
 		return
 	}
 
@@ -228,6 +233,7 @@ func (cg *CodeGen) buildStringToAtomBody(fn *ir.Func, tableGlobal *ir.Global, co
 		retAlloca := entry.NewAlloca(cg.atomType)
 		entry.NewStore(zeroAtom, retAlloca)
 		entry.NewRet(entry.NewLoad(cg.atomType, retAlloca))
+
 		return
 	}
 

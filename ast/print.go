@@ -22,83 +22,121 @@ func printNode(n Node, depth int) string {
 	switch v := n.(type) {
 	// Literals
 	case *IntLit:
+
 		return fmt.Sprintf("%d", v.Value)
 	case *FloatLit:
+
 		return fmt.Sprintf("%g", v.Value)
 	case *StringLit:
+
 		return fmt.Sprintf("%q", v.Value)
 	case *BacktickLit:
+
 		return "`" + v.Content + "`"
 	case *BoolLit:
 		if v.Value {
 			return "true"
 		}
+
 		return "false"
 	case *AtomLit:
+
 		return "'" + v.Name
 	case *CharLit:
+
 		return fmt.Sprintf("%d", v.Value) // emit as integer literal
-	case *NoneLit:
-		return "none"
 	case *Identifier:
+
 		return v.Name
 	case *WildcardExpr:
+
 		return "_"
 
 	// Expressions
 	case *BinExpr:
+
 		return fmt.Sprintf("(%s %s %s)", printNode(v.Left, depth), v.Op, printNode(v.Right, depth))
 	case *UnaryExpr:
 		if v.Post {
 			return fmt.Sprintf("(%s%s)", printNode(v.Expr, depth), v.Op)
 		}
+
 		return fmt.Sprintf("(%s%s)", v.Op, printNode(v.Expr, depth))
 	case *CallExpr:
 		args := make([]string, len(v.Args))
 		for i, a := range v.Args {
 			args[i] = printNode(a, depth)
 		}
+
 		return fmt.Sprintf("%s(%s)", printNode(v.Func, depth), strings.Join(args, ", "))
 	case *FieldAccess:
 		op := "."
 		if v.IsPtr {
 			op = "->"
 		}
+
 		return fmt.Sprintf("%s%s%s", printNode(v.Expr, depth), op, v.Field)
 	case *ScopeAccess:
+
 		return strings.Join(v.Path, "::")
 	case *IndexExpr:
+
 		return fmt.Sprintf("%s[%s]", printNode(v.Expr, depth), printNode(v.Index, depth))
+	case *SliceExpr:
+		s, e := "", ""
+		if v.Start != nil {
+			s = printNode(v.Start, depth)
+		}
+		if v.End != nil {
+			e = printNode(v.End, depth)
+		}
+
+		return fmt.Sprintf("%s[%s:%s]", printNode(v.Expr, depth), s, e)
+	case *TupleLit:
+		parts := make([]string, len(v.Elems))
+		for i, elem := range v.Elems {
+			parts[i] = printNode(elem, depth)
+		}
+
+		return "(" + strings.Join(parts, ", ") + ")"
 	case *TernaryExpr:
+
 		return fmt.Sprintf("(%s ? %s : %s)", printNode(v.Cond, depth), printNode(v.Then, depth), printNode(v.Else, depth))
 	case *AsExpr:
+
 		return fmt.Sprintf("(%s as %s)", printNode(v.Expr, depth), v.Type.String())
 	case *AddrExpr:
+
 		return fmt.Sprintf("(&%s)", printNode(v.Val, depth))
 	case *AddressOfExpr:
+
 		return fmt.Sprintf("(&%s)", printNode(v.Expr, depth))
 	case *DerefExpr:
+
 		return fmt.Sprintf("(*%s)", printNode(v.Expr, depth))
 	case *PipeExpr:
+
 		return fmt.Sprintf("(%s |> %s)", printNode(v.Left, depth), printNode(v.Right, depth))
 	case *RangeExpr:
+
 		return fmt.Sprintf("(%s..%s)", printNode(v.Start, depth), printNode(v.End, depth))
 	case *IsExpr:
 		if v.VarName != "" {
 			return fmt.Sprintf("(%s is %s %s)", printNode(v.Expr, depth), v.VarName, v.Type.String())
 		}
-		if v.IsNone {
-			return fmt.Sprintf("(%s is none)", printNode(v.Expr, depth))
-		}
+
 		return fmt.Sprintf("(%s is %s)", printNode(v.Expr, depth), v.Type.String())
 	case *TypeAssertExpr:
 		if v.IsType {
 			return fmt.Sprintf("%s.(type)", printNode(v.Expr, depth))
 		}
+
 		return fmt.Sprintf("%s.(%s)", printNode(v.Expr, depth), v.Type.String())
 	case *SizeofExpr:
+
 		return fmt.Sprintf("sizeof(%s)", v.Type.String())
 	case *TypeofExpr:
+
 		return fmt.Sprintf("typeof(%s)", printNode(v.Expr, depth))
 	case *InterpolatedString:
 		var sb strings.Builder
@@ -119,12 +157,14 @@ func printNode(n Node, depth int) string {
 			}
 		}
 		sb.WriteString("\"")
+
 		return sb.String()
 	case *ArrayLit:
 		elems := make([]string, len(v.Elems))
 		for i, e := range v.Elems {
 			elems[i] = printNode(e, depth)
 		}
+
 		return fmt.Sprintf("[%s]", strings.Join(elems, ", "))
 
 	// Top-level declarations
@@ -150,10 +190,16 @@ func printNode(n Node, depth int) string {
 		if v.Body != nil {
 			return sig + " =\n" + printNode(v.Body, depth+1)
 		}
+
 		return sig
 	case *UseDecl:
+		if v.FromSyntax {
+			return fmt.Sprintf("%suse { %s } from %s", ind(depth), strings.Join(v.Names, ", "), v.Path)
+		}
+
 		return fmt.Sprintf("%suse %s", ind(depth), v.Path)
 	case *ExportDecl:
+
 		return fmt.Sprintf("%sexport { %s } as %s", ind(depth), strings.Join(v.Names, ", "), v.AsName)
 	case *MacroDecl:
 		body := printNode(v.Body, depth+1)
@@ -162,7 +208,16 @@ func printNode(n Node, depth int) string {
 		if !strings.HasSuffix(macroName, "!") {
 			macroName += "!"
 		}
-		return fmt.Sprintf("%smacro %s(%s) =\n%s", ind(depth), macroName, strings.Join(v.Params, ", "), body)
+		paramStrs := make([]string, len(v.Params))
+		for i, p := range v.Params {
+			if i < len(v.ParamTypes) && v.ParamTypes[i] != "" {
+				paramStrs[i] = p + " " + v.ParamTypes[i]
+			} else {
+				paramStrs[i] = p
+			}
+		}
+
+		return fmt.Sprintf("%smacro %s(%s) =\n%s", ind(depth), macroName, strings.Join(paramStrs, ", "), body)
 	case *StructDecl:
 		var lines []string
 		lines = append(lines, fmt.Sprintf("%sstruct %s =", ind(depth), v.Name))
@@ -176,6 +231,7 @@ func printNode(n Node, depth int) string {
 		for _, m := range v.Methods {
 			lines = append(lines, printNode(m, depth+1))
 		}
+
 		return strings.Join(lines, "\n")
 	case *EnumDecl:
 		var lines []string
@@ -183,11 +239,14 @@ func printNode(n Node, depth int) string {
 		for _, m := range v.Members {
 			lines = append(lines, fmt.Sprintf("%s%s", ind(depth+1), m.Name))
 		}
+
 		return strings.Join(lines, "\n")
 	case *TypeDecl:
+
 		return fmt.Sprintf("%stype %s = %s", ind(depth), v.Name, v.Type.String())
 	case *TestDecl:
 		body := printNode(v.Body, depth+1)
+
 		return fmt.Sprintf("%stest %q =\n%s", ind(depth), v.Desc, body)
 	case *LambdaExpr:
 		params := make([]string, len(v.Params))
@@ -208,27 +267,36 @@ func printNode(n Node, depth int) string {
 		if v.Body != nil {
 			return sig + " => " + printNode(v.Body, 0)
 		}
+
 		return sig
 
 	// Statements
 	case *ExprStmt:
+
 		return printNode(v.Expr, depth)
 	case *EchoStmt:
+
 		return fmt.Sprintf("echo %s", printNode(v.Value, depth))
 	case *ReturnStmt:
 		if v.Value == nil {
 			return "return"
 		}
+
 		return fmt.Sprintf("return %s", printNode(v.Value, depth))
 	case *BreakStmt:
+
 		return "break"
 	case *DeferStmt:
+
 		return fmt.Sprintf("defer %s", printNode(v.Call, depth))
 	case *AssignStmt:
+
 		return fmt.Sprintf("%s = %s", printNode(v.Target, depth), printNode(v.Value, depth))
 	case *AugAssignStmt:
+
 		return fmt.Sprintf("%s %s %s", printNode(v.Target, depth), v.Op, printNode(v.Value, depth))
 	case *PostfixStmt:
+
 		return fmt.Sprintf("%s%s", printNode(v.Expr, depth), v.Op)
 	case *VarDecl:
 		if v.Type != nil && v.Value != nil {
@@ -238,14 +306,42 @@ func printNode(n Node, depth int) string {
 		} else if v.Value != nil {
 			return fmt.Sprintf("let %s = %s", v.Name, printNode(v.Value, depth))
 		}
+
 		return "let " + v.Name
+	case *TupleDestructDecl:
+
+		return fmt.Sprintf("let (%s) = %s", strings.Join(v.Names, ", "), printNode(v.Value, depth))
 	case *IfStmt:
+
 		return printIfStmt(v, depth)
 	case *ForStmt:
+
 		return printForStmt(v, depth)
 	case *Block:
+
 		return printBlockInline(v, depth)
+	// Phase 0 - top-level var
+	case *TopLevelVar:
+		if v.Value != nil {
+			return fmt.Sprintf("var %s %s = %s", v.Name, v.Type.String(), printNode(v.Value, depth))
+		}
+
+		return fmt.Sprintf("var %s %s", v.Name, v.Type.String())
+	// Fiber nodes
+	case *SpawnExpr:
+		if v.DoBlock != nil {
+			return fmt.Sprintf("spawn do:\n%s", printBlockInline(v.DoBlock, depth+1))
+		}
+
+		return fmt.Sprintf("spawn %s", printNode(v.Call, depth))
+	case *AwaitExpr:
+
+		return fmt.Sprintf("await %s", printNode(v.Future, depth))
+	case *YieldStmt:
+
+		return "yield"
 	default:
+
 		return fmt.Sprintf("/* unhandled: %T */", n)
 	}
 }
@@ -258,6 +354,7 @@ func printBlockInline(b *Block, depth int) string {
 	for _, s := range b.Stmts {
 		lines = append(lines, ind(depth)+printNode(s, depth))
 	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -273,6 +370,7 @@ func printIfStmt(v *IfStmt, depth int) string {
 		_, _ = fmt.Fprintf(&sb, "\n%selse:\n", ind(depth))
 		sb.WriteString(printBlockBody(v.Else, depth+1))
 	}
+
 	return sb.String()
 }
 
@@ -306,8 +404,11 @@ func printForStmt(v *ForStmt, depth int) string {
 			typeStr = " " + v.VarType.String()
 		}
 		_, _ = fmt.Fprintf(&sb, "for let %s%s in %s:\n", v.VarName, typeStr, printNode(v.Iter, depth))
+	case ForWhile:
+		_, _ = fmt.Fprintf(&sb, "for %s:\n", printNode(v.Cond, depth))
 	}
 	sb.WriteString(printBlockBody(v.Body, depth+1))
+
 	return sb.String()
 }
 
@@ -319,5 +420,6 @@ func printBlockBody(b *Block, depth int) string {
 	for _, s := range b.Stmts {
 		lines = append(lines, ind(depth)+printNode(s, depth))
 	}
+
 	return strings.Join(lines, "\n")
 }

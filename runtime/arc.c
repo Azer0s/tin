@@ -20,18 +20,23 @@ void *_tin_rc_alloc(int64_t size) {
     return hdr + 1;
 }
 
-// Increment reference count; skips immortal (rc == -1) and NULL pointers
+// Increment reference count; skips immortal (rc == -1) and NULL pointers.
+// Uses RELAXED ordering: only the increment itself needs to be atomic;
+// no happens-before relationship is required for retain.
 void _tin_retain(void *ptr) {
     if (!ptr) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
-    if (hdr->rc == TIN_IMMORTAL_RC) return;
-    hdr->rc++;
+    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
+    __atomic_fetch_add(&hdr->rc, 1, __ATOMIC_RELAXED);
 }
 
-// Decrement reference count; frees the block when it reaches zero
+// Decrement reference count; frees the block when it reaches zero.
+// Uses ACQ_REL ordering so all prior accesses to the object are visible
+// before the free (preventing use-after-free on concurrent release).
 void _tin_release(void *ptr) {
     if (!ptr) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
-    if (hdr->rc == TIN_IMMORTAL_RC) return;
-    if (--hdr->rc == 0) free(hdr);
+    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
+    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    if (prev == 1) free(hdr);
 }

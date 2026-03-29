@@ -300,3 +300,4 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 | `#allow_sideffect` | block                | Yes  -  suppresses `#pure` check | Permits side effects in this block           |
 | `#no_excl`         | macro                | Parser                           | Callable without `!` suffix                  |
 | `#no_parens`       | macro                | Parser                           | Callable without parentheses                 |
+| `#async`           | fn / method / lambda | No (enables fiber codegen)       | Runs as a cooperative green thread (fiber)   |

@@ -1,0 +1,27 @@
+// Test: selective macro imports and stdlib/macros
+use { loop, min!, max!, abs!, clamp! } from macros
+use { Channel } from sync
+
+fn main() =
+  // Test loop (no_parens macro)
+  let i i64 = 0
+  loop:
+    if i >= 3: break
+    echo i
+    i = i + 1
+
+  // Test min! and max!
+  echo min!(10, 5)
+  echo max!(10, 5)
+
+  // Test abs!
+  echo abs!(-7)
+
+  // Test clamp!
+  echo clamp!(15, 0, 10)
+
+  // Test selective struct import (bare Channel, no sync:: prefix)
+  let ch = Channel[i64].make(4)
+  await ch.send(42)
+  let v = await ch.recv()
+  echo v

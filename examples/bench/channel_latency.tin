@@ -1,0 +1,48 @@
+// examples/bench/channel_latency.tin
+//
+// Measures channel round-trip latency: two fibers ping-pong a token over two
+// channels for N rounds, then compute nanoseconds per round trip.
+//
+// Usage:
+//   ./tin build examples/bench/channel_latency.tin -lm -o /tmp/bench_ch
+//   /tmp/bench_ch
+//
+// Expected output (approximate):
+//   1000000 round trips
+//   elapsed: ~XXXms
+//   latency: ~XXXns / round trip
+
+use sync
+use io
+
+var g_ping sync::Channel[i64]
+var g_pong sync::Channel[i64]
+
+fn{#async} pong_loop(n i64) =
+  let i i64 = 0
+  for i < n:
+    let v = await g_ping.recv()
+    await g_pong.send(v)
+    i = i + 1
+
+fn main() =
+  let n i64 = 1000000
+  g_ping = sync::Channel[i64].make(1)
+  g_pong = sync::Channel[i64].make(1)
+
+  let ponger = spawn pong_loop(n)
+
+  let start_ms = _tin_now_ms()
+  let i i64 = 0
+  for i < n:
+    await g_ping.send(1)
+    await g_pong.recv()
+    i = i + 1
+  let elapsed = _tin_now_ms() - start_ms
+
+  await ponger
+
+  let ns_per_rt = elapsed * 1000000 / n
+  echo "{n} round trips"
+  echo "elapsed: ~{elapsed}ms"
+  echo "latency: ~{ns_per_rt}ns / round trip"

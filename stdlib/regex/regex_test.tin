@@ -1,0 +1,168 @@
+// stdlib/regex/regex_test.tin
+//
+// Tests for the regex stdlib: compile, exec, match groups, convenience
+// functions (matches, find, find_all, replace, replace_all, split).
+// Run with: tin test stdlib/regex/regex_test.tin
+
+use assert
+use regex
+
+// compile / exec
+
+test "compile valid pattern succeeds" =
+  let re = regex::compile("hello")
+  assert::not_ok(re.is_err())
+
+test "compile invalid pattern sets is_err" =
+  let re = regex::compile("[invalid")
+  assert::ok(re.is_err())
+
+test "compile invalid pattern has non-empty err_msg" =
+  let re = regex::compile("[invalid")
+  assert::ok(len(re.err_msg()) > 0)
+
+test "exec matches simple pattern" =
+  let re = regex::compile("hello")
+  let m = re.exec("say hello world")
+  assert::ok(m.matched())
+
+test "exec no match" =
+  let re = regex::compile("xyz")
+  let m = re.exec("hello world")
+  assert::not_ok(m.matched())
+
+test "exec whole match is group 0" =
+  let re = regex::compile("\\d+")
+  let m = re.exec("price: 42 dollars")
+  assert::ok(m.matched())
+  assert::equals_str(m.group(0), "42")
+
+test "exec capture group 1" =
+  let re = regex::compile("(\\w+)@(\\w+\\.\\w+)")
+  let m = re.exec("mail to user@example.com please")
+  assert::ok(m.matched())
+  assert::equals_str(m.group(0), "user@example.com")
+  assert::equals_str(m.group(1), "user")
+  assert::equals_str(m.group(2), "example.com")
+
+test "exec group out of range returns empty string" =
+  let re = regex::compile("hello")
+  let m = re.exec("hello")
+  assert::ok(m.matched())
+  assert::equals_str(m.group(99), "")
+
+test "exec count includes group 0" =
+  let re = regex::compile("(a)(b)")
+  let m = re.exec("ab")
+  assert::ok(m.matched())
+  assert::equals(m.count(), 3)
+
+test "match_at starts at offset" =
+  let re = regex::compile("\\d+")
+  let m = re.match_at("abc 123 def 456", 8)
+  assert::ok(m.matched())
+  assert::equals_str(m.group(0), "456")
+
+// find_all on compiled Regex
+
+test "compiled find_all returns all matches" =
+  let re = regex::compile("\\d+")
+  let results = re.find_all("a1 b22 c333")
+  assert::equals(len(results), 3)
+  assert::equals_str(results[0], "1")
+  assert::equals_str(results[1], "22")
+  assert::equals_str(results[2], "333")
+
+test "compiled find_all no matches returns empty array" =
+  let re = regex::compile("\\d+")
+  let results = re.find_all("no digits here")
+  assert::equals(len(results), 0)
+
+// matches
+
+test "matches returns true when pattern found" =
+  assert::ok(regex::matches("\\d+", "abc 42 def"))
+
+test "matches returns false when not found" =
+  assert::not_ok(regex::matches("\\d+", "no digits"))
+
+test "matches anchored pattern" =
+  assert::ok(regex::matches("^\\d+$", "12345"))
+  assert::not_ok(regex::matches("^\\d+$", "123abc"))
+
+// find
+
+test "find returns first match" =
+  let result = regex::find("\\d+", "abc 123 def 456")
+  assert::equals_str(result, "123")
+
+test "find no match returns empty string" =
+  let result = regex::find("\\d+", "no numbers")
+  assert::equals_str(result, "")
+
+// find_all convenience
+
+test "find_all all digits" =
+  let nums = regex::find_all("\\d+", "a1 b22 c333")
+  assert::equals(len(nums), 3)
+  assert::equals_str(nums[0], "1")
+  assert::equals_str(nums[1], "22")
+  assert::equals_str(nums[2], "333")
+
+test "find_all empty result" =
+  let results = regex::find_all("\\d+", "no digits here")
+  assert::equals(len(results), 0)
+
+test "find_all words" =
+  let words = regex::find_all("\\w+", "hello world tin")
+  assert::equals(len(words), 3)
+  assert::equals_str(words[0], "hello")
+  assert::equals_str(words[2], "tin")
+
+// replace
+
+test "replace replaces first occurrence only" =
+  let result = regex::replace("o", "foo bar boo", "0")
+  assert::equals_str(result, "f0o bar boo")
+
+test "replace no match returns original" =
+  let result = regex::replace("\\d+", "no numbers", "X")
+  assert::equals_str(result, "no numbers")
+
+test "replace whitespace run" =
+  let result = regex::replace("\\s+", "hello   world", " ")
+  assert::equals_str(result, "hello world")
+
+// replace_all
+
+test "replace_all replaces all occurrences" =
+  let result = regex::replace_all("\\d", "a1b2c3", "*")
+  assert::equals_str(result, "a*b*c*")
+
+test "replace_all no match returns original" =
+  let result = regex::replace_all("\\d+", "abc", "X")
+  assert::equals_str(result, "abc")
+
+test "replace_all all digits to zero" =
+  let result = regex::replace_all("\\d+", "foo 42 bar 7 baz", "0")
+  assert::equals_str(result, "foo 0 bar 0 baz")
+
+// split
+
+test "split on comma" =
+  let parts = regex::split(",", "a,b,c")
+  assert::equals(len(parts), 3)
+  assert::equals_str(parts[0], "a")
+  assert::equals_str(parts[1], "b")
+  assert::equals_str(parts[2], "c")
+
+test "split on comma-space pattern" =
+  let parts = regex::split(",\\s*", "one, two,three,  four")
+  assert::equals(len(parts), 4)
+  assert::equals_str(parts[0], "one")
+  assert::equals_str(parts[3], "four")
+
+test "split no match returns whole string as single element" =
+  let parts = regex::split("\\d+", "no digits")
+  assert::equals(len(parts), 1)
+  assert::equals_str(parts[0], "no digits")

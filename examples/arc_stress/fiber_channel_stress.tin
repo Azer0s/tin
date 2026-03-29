@@ -1,0 +1,52 @@
+// examples/arc_stress/fiber_channel_stress.tin
+//
+// Stress-tests multiple concurrent producers and consumers sharing one channel.
+// N producers each send M strings; N consumers each receive M strings.
+// Tests concurrent ARC under heavy channel pressure.
+
+use sync
+
+var ch sync::Channel[string]
+var done_ch sync::Channel[i64]
+
+fn{#async} producer(id i64, count i64) =
+  let i i64 = 0
+  for i < count:
+    let msg = "prod-{id}-item-{i}"
+    await ch.send(msg)
+    i = i + 1
+  await done_ch.send(id)
+
+fn{#async} consumer(id i64, count i64) =
+  let i i64 = 0
+  for i < count:
+    let msg = await ch.recv()
+    i = i + 1
+  await done_ch.send(id * -1)
+
+fn main() =
+  let n_prod i64 = 10
+  let n_cons i64 = 10
+  let items_each i64 = 100
+  let total i64 = n_prod * items_each
+  
+  ch = sync::Channel[string].make(total)
+  done_ch = sync::Channel[i64].make(n_prod + n_cons)
+  
+  let i i64 = 0
+  for i < n_prod:
+    spawn producer(i, items_each)
+    i = i + 1
+  
+  let j i64 = 0
+  for j < n_cons:
+    spawn consumer(j, items_each)
+    j = j + 1
+  
+  // Wait for all producers and consumers
+  let k i64 = 0
+  for k < n_prod + n_cons:
+    await done_ch.recv()
+    k = k + 1
+  
+  echo "fiber_channel_stress: OK, {n_prod} producers * {items_each} items, {n_cons} consumers"

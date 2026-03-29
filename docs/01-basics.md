@@ -34,7 +34,7 @@ Integer literals default to `i64`; float literals default to `f64`.
 The compiler coerces integer literals to the required width automatically.
 
 The `any` type can hold a value of any other type at runtime. See
-[09 - Reflection](09-reflection.md) for full details.
+[10 - Reflection](10-reflection.md) for full details.
 
 ---
 
@@ -57,6 +57,28 @@ let flags i64 = 0b1010_0011     // binary (underscores not yet supported)
 
 All bases produce an `i64` literal; the `as` operator or an explicit type
 annotation coerces to a narrower type.
+
+### Character code literals
+
+`@'x'` produces the ASCII/byte value of a single character as an `i8`:
+
+```rust
+let newline i8 = @'\n'   // 10
+let tab     i8 = @'\t'   // 9
+let A       i8 = @'A'    // 65
+let zero    i8 = @'0'    // 48
+```
+
+The following escape sequences are recognised inside `@'...'`:
+
+| Escape | Value                |
+|--------|----------------------|
+| `\n`   | newline (10)         |
+| `\t`   | tab (9)              |
+| `\r`   | carriage return (13) |
+| `\\`   | backslash (92)       |
+| `\'`   | single quote (39)    |
+| `\0`   | null byte (0)        |
 
 ---
 
@@ -119,6 +141,35 @@ const MAX i32 = 100
 const PI  f64 = 3.14159265
 ```
 
+### Top-level (global) variables
+
+`var` declares a mutable package-level variable. It lives outside any
+function and is visible throughout the entire file:
+
+```tin
+var counter i64          // zero-initialized (0)
+var name    string       // zero-initialized ("")
+var flag    bool = true  // optional initializer, runs once at startup
+var buf     [byte; 4096] // fixed array, zero-initialized
+```
+
+Key properties:
+
+- **Zero-initialized** by default (`0`, `""`, `false`, all-zero array, etc.)
+- An optional `= expr` initializer runs once at the start of `main()`
+- **Hoisted**: visible throughout the file regardless of declaration order
+- **Exported** when the name starts with an uppercase letter
+
+```tin
+var TotalRequests i64   // exported - readable from other packages
+
+fn handle() =
+  TotalRequests = TotalRequests + 1
+```
+
+For variables shared across concurrent fibers, use `sync::AtomicI64` or a
+`sync::Mutex` - plain `var` declarations are not thread-safe.
+
 ---
 
 ## Simple type aliases
@@ -176,6 +227,27 @@ echo "{f:e}"       // 3.141590e+00
 ```
 
 Supported specifiers: `d` / `i` (signed int), `u` / `x` / `X` / `o` (unsigned/hex/octal), `f` / `e` / `g` and their uppercase variants (float), `s` (string). A width or precision prefix (e.g. `08`, `.2`) may precede the letter.
+
+### Escape sequences in strings
+
+String literals support the following escape sequences:
+
+| Escape | Meaning                                  |
+|--------|------------------------------------------|
+| `\n`   | newline                                  |
+| `\t`   | tab                                      |
+| `\r`   | carriage return                          |
+| `\\`   | literal backslash                        |
+| `\"`   | literal double quote                     |
+| `\0`   | null byte                                |
+| `\{`   | literal `{` (not an interpolation start) |
+| `\}`   | literal `}` (not an interpolation end)   |
+
+```rust
+echo "line1\nline2"        // two lines
+echo "path: C:\\Users"     // path: C:\Users
+echo "price: \{42}"        // price: {42}  (braces not interpolated)
+```
 
 ---
 

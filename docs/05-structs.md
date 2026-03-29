@@ -191,6 +191,52 @@ struct tuple[t] =
 Generic structs are **templates**; they are not compiled directly. They are
 only compiled when instantiated through a `type` alias.
 
+### Generic struct arity overloading
+
+Multiple generic structs can share the same name as long as they have different
+numbers of type parameters (different arities):
+
+```rust
+struct result[ok] =
+  val ok
+  ok  bool
+
+struct result[ok, err] =
+  val   ok
+  err   err
+  is_ok bool
+
+type int_result  = result[i64]
+type str_or_err  = result[string, string]
+```
+
+The compiler selects the correct template based on the number of type arguments
+at the instantiation site. This enables "same concept, different shapes" without
+name collisions.
+
+---
+
+## Heap allocation
+
+Prefixing a struct literal with `&` allocates it on the heap and returns a
+pointer to it:
+
+```rust
+struct node =
+  value i64
+  next  *node
+
+fn make_node(v i64) *node =
+  return &node{value: v, next: null}
+
+let n = make_node(42)   // n : *node
+echo n.value            // 42
+```
+
+The allocated struct is ARC-tracked (the pointer is released when the variable
+goes out of scope). This is the idiomatic pattern for factory functions that
+return heap-allocated structs.
+
 ---
 
 ## type aliases
@@ -284,7 +330,7 @@ echo fieldtag(user{}, "email")  // 'unique
 echo fieldtag(user{}, "notes")  // '' (empty atom)
 ```
 
-See [09 - Reflection](09-reflection.md) for the full reflection API.
+See [10 - Reflection](10-reflection.md) for the full reflection API.
 
 ---
 
@@ -303,4 +349,89 @@ struct cat(named) =
 
 let c = cat{label: "Whiskers", breed: "tabby"}
 echo c.name()    // Whiskers
+```
+
+---
+
+## Tuples
+
+A **tuple** is an anonymous struct whose fields are named alphabetically
+(`a`, `b`, `c`, ...). Tin provides built-in `Tuple` templates for arities
+2 through 10.
+
+### Type syntax
+
+`(T1, T2)` is shorthand for `Tuple[T1, T2]`:
+
+```tin
+type int_pair = (i64, i64)
+type result   = (i64, bool)
+```
+
+Use tuple types anywhere a type annotation is accepted: variable
+declarations, function parameters, and return types.
+
+### Literal syntax
+
+Write `(e1, e2, ...)` to create a tuple value:
+
+```tin
+let t = (10, true)       // infers Tuple[i64, bool]
+let p (i64, i64) = (3, 7)
+```
+
+### Function return
+
+A function can declare a tuple return type and return a tuple literal
+directly without naming a struct:
+
+```tin
+fn swap(x i64, y i64) (i64, i64) =
+  return (y, x)
+
+fn min_max(arr [i64]) (i64, i64) =
+  // ...
+  return (min, max)
+```
+
+### Field access
+
+Tuple fields are accessed by name (`a`, `b`, `c`, ...):
+
+```tin
+let t = (42, true, 3)
+echo t.a    // 42
+echo t.b    // true
+echo t.c    // 3
+```
+
+### Destructuring
+
+`let (name1, name2, ...) = expr` unpacks a tuple into individual variables:
+
+```tin
+let (lo, hi) = min_max([5, 2, 9, 1])
+echo lo   // 1
+echo hi   // 9
+
+let (x, y) = swap(3, 7)
+echo x    // 7
+echo y    // 3
+```
+
+### Tuples vs named structs
+
+Use a tuple when the shape is transient (e.g., returning two values from a
+function). Use a named struct when the type is reused, has meaningful field
+names, or carries methods.
+
+### Type aliases for tuples
+
+A named type alias creates a distinct type with the same layout:
+
+```tin
+type point2d = (i64, i64)
+let p point2d = (10, 20)
+echo p.a   // 10
+echo p.b   // 20
 ```

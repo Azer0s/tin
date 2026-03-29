@@ -1,0 +1,96 @@
+// examples/fibers/panic_propagation.tin
+//
+// Tests that panics from awaited fibers propagate to the awaiting fiber,
+// where they can be caught with defer + recover().
+//
+// Fire-and-forget fibers that panic are NOT covered here - those kill the
+// process (unhandled async panic is fatal, same as Go's goroutine panics).
+//
+// Run with: tin test examples/fibers/panic_propagation.tin
+
+use assert
+use sync
+
+fn{#async} always_panics() i64 =
+  panic("boom from fiber")
+  return 0
+
+fn{#async} panics_with_value(msg string) =
+  panic(msg)
+
+fn{#async} returns_normally() i64 =
+  return 42
+
+// Panic from awaited fiber is catchable
+
+test "await panic propagates to caller" =
+  let caught string = ""
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      caught = msg
+  let f = spawn always_panics()
+  await f
+  // unreachable if panic propagated
+  assert::ok(false)
+
+test "await panic message is preserved" =
+  let caught string = ""
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      caught = msg
+  let f = spawn panics_with_value("my error")
+  await f
+  assert::equals_str(caught, "my error")
+
+test "no panic from awaited fiber leaves caught empty" =
+  let caught string = ""
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      caught = msg
+  let f = spawn returns_normally()
+  let v = await f
+  assert::equals(v, 42)
+  assert::equals_str(caught, "")
+
+test "panic does not affect subsequent fibers" =
+  let caught string = ""
+  defer do:
+    let msg = recover()
+    if len(msg) > 0:
+      caught = msg
+  let f1 = spawn always_panics()
+  await f1
+  // After catching the panic, spawn another fiber normally.
+  let f2 = spawn returns_normally()
+  let v = await f2
+  assert::equals(v, 42)
+  assert::equals_str(caught, "boom from fiber")
+
+// Recovered panic in async fn yields zero value to outer awaiter
+//
+// If an async function catches a panic from an inner fiber via defer+recover
+// and does NOT explicitly override the return value, the outer awaiter should
+// receive the zero value of the return type (not crash with a NULL dereference).
+
+fn{#async} catches_await_panic() i64 =
+  defer do:
+    let _ = recover()
+  let _ = await spawn always_panics()
+  return 0
+
+fn{#async} catches_direct_panic() i64 =
+  defer do:
+    let _ = recover()
+  panic("direct")
+  return 0
+
+test "recovered await-panic in async fn yields zero to outer awaiter" =
+  let result = await spawn catches_await_panic()
+  assert::equals(result, 0)
+
+test "recovered direct panic in async fn yields zero to outer awaiter" =
+  let result = await spawn catches_direct_panic()
+  assert::equals(result, 0)

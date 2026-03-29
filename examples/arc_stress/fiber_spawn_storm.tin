@@ -1,0 +1,32 @@
+// examples/arc_stress/fiber_spawn_storm.tin
+//
+// Spawns a large number of fibers in rapid succession. Tests the fiber
+// scheduler under maximum concurrency pressure and verifies no ARC leaks.
+
+use sync
+
+var counter sync::Channel[i64]
+
+fn{#async} count_once() =
+  await counter.send(1)
+
+fn main() =
+  let n i64 = 5000
+  counter = sync::Channel[i64].make(n)
+  
+  let i i64 = 0
+  for i < n:
+    spawn count_once()
+    i = i + 1
+  
+  let total i64 = 0
+  let j i64 = 0
+  for j < n:
+    let v = await counter.recv()
+    total = total + v
+    j = j + 1
+  
+  if total != n:
+    echo "FAIL: expected {n} got {total}"
+    return
+  echo "fiber_spawn_storm: OK, spawned and collected {total} fibers"

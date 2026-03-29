@@ -1,0 +1,19 @@
+// examples/fibers/yield_cpu.tin
+//
+// Demonstrates explicit yield to cooperatively share the scheduler.
+// Two compute-heavy fibers yield periodically so neither starves.
+
+fn{#async} counter(name string, n i64) =
+  let i i64 = 0
+  for i < n:
+    i = i + 1
+    if i % 1000 == 0:
+      yield
+  echo "{name} finished: {i}"
+
+fn main() =
+  let p1 = spawn counter("A", 5000)
+  let p2 = spawn counter("B", 5000)
+  await p1
+  await p2
+  echo "both counters done"

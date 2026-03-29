@@ -1,0 +1,34 @@
+// examples/fibers/stress_100.tin
+//
+// Spawn 100 fibers, each incrementing a shared atomic counter.
+// Same logic as stress_10k but small enough to run under valgrind.
+
+use sync
+
+var counter sync::AtomicI64
+var done_ch sync::Channel[i64]
+
+fn{#async} inc_fiber() =
+  counter.add(1)
+  await done_ch.send(1)
+
+fn main() =
+  counter = sync::AtomicI64.make(0)
+  done_ch = sync::Channel[i64].make(100)
+
+  let n i64 = 100
+  let i i64 = 0
+  for i < n:
+    spawn inc_fiber()
+    i = i + 1
+
+  let j i64 = 0
+  for j < n:
+    await done_ch.recv()
+    j = j + 1
+
+  let total = counter.load()
+  if total == n:
+    echo "PASS: counter = {total}"
+  else:
+    echo "FAIL: expected {n} got {total}"

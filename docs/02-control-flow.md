@@ -53,6 +53,27 @@ for let s string in items:
 
 Any array can be iterated with `in`.
 
+### String iteration
+
+`for ... in string` iterates byte-by-byte, yielding each byte as an `i8`:
+
+```rust
+let s = "hello"
+for let b i8 in s:
+  echo "{b}"   // prints ASCII codes: 104, 101, 108, 108, 111
+```
+
+This is useful for byte-level string processing. For character code comparisons,
+use `@'x'` literals:
+
+```rust
+let count i64 = 0
+for let b i8 in "hello world":
+  if b == @' ':
+    count = count + 1
+echo count   // 1  (one space)
+```
+
 ---
 
 ## match

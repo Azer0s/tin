@@ -19,54 +19,104 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		return p.parseTaggedBlockWithTags(tags)
 	}
 
+	// Check for #no_parens macro invocation (same as parseTopLevel).
+	// Allows macros like `loop:` to work inside function bodies.
+	if p.peek().Type == lexer.IDENT {
+		if expansion, ok := p.noParensMacros[p.peek().Literal]; ok {
+			p.advance() // consume macro name
+			expToks, err := lexer.New(expansion).Tokenize()
+			if err != nil {
+				return nil, fmt.Errorf("no_parens macro expansion tokenize error: %w", err)
+			}
+			for len(expToks) > 0 && expToks[len(expToks)-1].Type == lexer.EOF {
+				expToks = expToks[:len(expToks)-1]
+			}
+			newToks := make([]lexer.Token, 0, len(expToks)+len(p.tokens)-p.pos)
+			newToks = append(newToks, expToks...)
+			newToks = append(newToks, p.tokens[p.pos:]...)
+			p.tokens = append(p.tokens[:p.pos], newToks...)
+
+			return p.parseStatement()
+		}
+	}
+
 	switch p.peek().Type {
+	case lexer.KW_VAR:
+
+		return p.parseTopLevelVar()
+	case lexer.KW_SPAWN:
+
+		return p.parseSpawnExprStmt()
+	case lexer.KW_YIELD:
+		p.advance()
+
+		return &ast.YieldStmt{}, nil
 	case lexer.KW_LET, lexer.KW_CONST:
+
 		return p.parseLetStmt()
 	case lexer.KW_FN:
+
 		return p.parseFuncDecl(tags, false)
 	case lexer.KW_STRUCT:
+
 		return p.parseStructDecl(tags)
 	case lexer.KW_TYPE:
+
 		return p.parseTypeDecl()
 	case lexer.KW_ENUM:
+
 		return p.parseEnumDecl()
 	case lexer.KW_RETURN:
+
 		return p.parseReturnStmt()
 	case lexer.KW_PASS:
 		p.advance()
+
 		return nil, nil // no-op statement; not appended to block
 	case lexer.KW_BREAK:
 		p.advance()
+
 		return &ast.BreakStmt{}, nil
 	case lexer.KW_DEFER:
+
 		return p.parseDeferStmt()
 	case lexer.KW_IF:
+
 		return p.parseIfStmt()
 	case lexer.KW_FOR:
+
 		return p.parseForStmt()
 	case lexer.KW_MATCH:
+
 		return p.parseMatchStmt()
 	case lexer.KW_ECHO:
+
 		return p.parseEchoStmt()
 	case lexer.KW_USE:
+
 		return p.parseUseDecl()
 	case lexer.KW_EXPORT:
+
 		return p.parseExportDecl()
 	case lexer.KW_WHERE:
 		wc, err := p.parseWhereClause()
 		if err != nil {
 			return nil, err
 		}
+
 		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
 	case lexer.LBRACE:
 		// { #tag } { body }  tagged block - tags not yet parsed (legacy path)
 		if p.peekAt(1).Type == lexer.CONTROL_TAG {
 			return p.parseTaggedBlock()
 		}
+
 		return p.parseExprStatement()
 	case lexer.NEWLINE, lexer.DEDENT, lexer.SEMI:
+
 		return nil, nil
 	default:
+
 		return p.parseExprStatement()
 	}
 }
@@ -100,6 +150,7 @@ func (p *Parser) parseVarDecl() (*ast.VarDecl, error) {
 		}
 	}
 	_ = pos
+
 	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
 }
 
@@ -112,6 +163,7 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &ast.ReturnStmt{Value: val}, nil
 }
 
@@ -146,6 +198,7 @@ func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
 		}
 		lambda := &ast.LambdaExpr{Body: body}
 		call := &ast.CallExpr{Func: lambda}
+
 		return &ast.DeferStmt{Call: call}, nil
 	}
 
@@ -157,6 +210,7 @@ func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
 	if _, isLambda := call.(*ast.LambdaExpr); isLambda {
 		return nil, fmt.Errorf("bare lambda in defer is not valid; use `defer (fn() void = ...)()` or `defer do:`")
 	}
+
 	return &ast.DeferStmt{Call: call}, nil
 }
 
@@ -166,6 +220,7 @@ func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &ast.EchoStmt{Value: val}, nil
 }
 
@@ -259,9 +314,11 @@ func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
 				elseBlock = &ast.Block{Stmts: []ast.Node{es}}
 			}
 			stmt.Else = elseBlock
+
 			break
 		}
 	}
+
 	return stmt, nil
 }
 
@@ -269,10 +326,97 @@ func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
 	p.advance() // consume for
 	stmt := &ast.ForStmt{}
 
-	// Expect "let varName [type]"
-	if p.check(lexer.KW_LET) {
-		p.advance()
+	// Shorthand for-in without 'let': for c in iter: / for c T in iter:
+	// Detect: IDENT [IDENT|type] KW_IN ...
+	if !p.check(lexer.KW_LET) && p.check(lexer.IDENT) {
+		// Look ahead: skip optional type token(s), then check for KW_IN.
+		// Simple heuristic: if token[1] or token[2] is KW_IN, treat as for-in.
+		t1 := p.peekAt(1)
+		t2 := p.peekAt(2)
+		isForIn := t1.Type == lexer.KW_IN || t2.Type == lexer.KW_IN
+		if isForIn {
+			nameTok := p.advance() // consume variable name
+			stmt.VarName = nameTok.Literal
+			// Optional type annotation between name and 'in'
+			if !p.check(lexer.KW_IN) {
+				var typeErr error
+				stmt.VarType, typeErr = p.parseTypeExpr()
+				if typeErr != nil {
+					return nil, typeErr
+				}
+			}
+			if _, err := p.expect(lexer.KW_IN); err != nil {
+				return nil, err
+			}
+			stmt.Kind = ast.ForIn
+			var iterErr error
+			stmt.Iter, iterErr = p.parseExpr()
+			if iterErr != nil {
+				return nil, iterErr
+			}
+			if _, err := p.expect(lexer.COLON); err != nil {
+				return nil, err
+			}
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				p.skipNewlines()
+				if p.check(lexer.INDENT) {
+					var bodyErr error
+					stmt.Body, bodyErr = p.parseBlock()
+					if bodyErr != nil {
+						return nil, bodyErr
+					}
+				} else {
+					stmt.Body = &ast.Block{}
+				}
+			} else {
+				s, err2 := p.parseStatement()
+				if err2 != nil {
+					return nil, err2
+				}
+				stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
+			}
+
+			return stmt, nil
+		}
 	}
+
+	// Condition-only (while-style): for <bool-expr>:
+	// Triggered when there is no leading 'let' keyword.
+	if !p.check(lexer.KW_LET) {
+		cond, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Kind = ast.ForWhile
+		stmt.Cond = cond
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			p.skipNewlines()
+			if p.check(lexer.INDENT) {
+				stmt.Body, err = p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				stmt.Body = &ast.Block{}
+			}
+		} else {
+			s, err2 := p.parseStatement()
+			if err2 != nil {
+				return nil, err2
+			}
+			stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
+		}
+
+		return stmt, nil
+	}
+
+	// Expect "let varName [type]"
+	p.advance() // consume let
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
@@ -362,6 +506,7 @@ func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
 		}
 		stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
 	}
+
 	return stmt, nil
 }
 
@@ -428,6 +573,7 @@ func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
 			p.advance()
 		}
 	}
+
 	return stmt, nil
 }
 
@@ -482,12 +628,14 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 		}
 		mc.Body = &ast.Block{Stmts: []ast.Node{stmt}}
 	}
+
 	return mc, nil
 }
 
 // parseTaggedBlock handles { #tag } { body } when tags haven't been pre-parsed.
 func (p *Parser) parseTaggedBlock() (*ast.TaggedBlock, error) {
 	tags := p.parseTags()
+
 	return p.parseTaggedBlockWithTags(tags)
 }
 
@@ -515,6 +663,7 @@ func (p *Parser) parseTaggedBlockWithTags(tags []string) (*ast.TaggedBlock, erro
 		}
 		if indented && p.check(lexer.DEDENT) {
 			p.advance()
+
 			break
 		}
 		if !indented && p.check(lexer.RBRACE) {
@@ -532,6 +681,7 @@ func (p *Parser) parseTaggedBlockWithTags(tags []string) (*ast.TaggedBlock, erro
 	if p.check(lexer.RBRACE) {
 		p.advance()
 	}
+
 	return &ast.TaggedBlock{Tags: tags, Body: &ast.Block{Stmts: stmts}}, nil
 }
 
@@ -546,6 +696,7 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 	// Postfix ++/--
 	if p.check(lexer.INC) {
 		op := p.advance().Literal
+
 		return &ast.PostfixStmt{Expr: expr, Op: op}, nil
 	}
 
@@ -556,6 +707,7 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 		if err2 != nil {
 			return nil, err2
 		}
+
 		return &ast.AssignStmt{Target: expr, Value: val}, nil
 	}
 
@@ -566,6 +718,7 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 		if err2 != nil {
 			return nil, err2
 		}
+
 		return &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}, nil
 	}
 
@@ -575,18 +728,25 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 func augOp(t lexer.TokenType) (string, bool) {
 	switch t {
 	case lexer.PLUSEQ:
+
 		return "+=", true
 	case lexer.MINUSEQ:
+
 		return "-=", true
 	case lexer.STAREQ:
+
 		return "*=", true
 	case lexer.SLASHEQ:
+
 		return "/=", true
 	case lexer.PERCENTEQ:
+
 		return "%=", true
 	case lexer.APPENDEQ:
+
 		return "++=", true
 	default:
+
 		return "", false
 	}
 }
@@ -610,6 +770,11 @@ func (p *Parser) parseLetStmt() (ast.Node, error) {
 		return p.parseStructDestructDecl(isConst, pos)
 	}
 
+	// Tuple destructuring: let (x, y) = expr
+	if p.check(lexer.LPAREN) {
+		return p.parseTupleDestructDecl(isConst, pos)
+	}
+
 	// Normal variable declaration
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
@@ -630,6 +795,7 @@ func (p *Parser) parseLetStmt() (ast.Node, error) {
 			return nil, err
 		}
 	}
+
 	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
 }
 
@@ -741,6 +907,7 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 
 	_ = pos
 	_ = isConst
+
 	return &ast.ArrayDestructDecl{Names: names, ElemTypes: elemTypes, IsAny: isAny, NamedType: namedType, Value: val}, nil
 }
 
@@ -778,5 +945,110 @@ func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.Struct
 
 	_ = pos
 	_ = isConst
+
 	return &ast.StructDestructDecl{Names: names, StructType: structType, Value: val}, nil
+}
+
+// parseTupleDestructDecl parses: let (x, y) = expr
+func (p *Parser) parseTupleDestructDecl(isConst bool, pos ast.Pos) (*ast.TupleDestructDecl, error) {
+	p.advance() // consume (
+	var names []string
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, nameTok.Literal)
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+	val, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	_ = pos
+
+	return &ast.TupleDestructDecl{IsConst: isConst, Names: names, Value: val}, nil
+}
+
+// parseTopLevelVar parses:  var name Type [= expr]
+func (p *Parser) parseTopLevelVar() (*ast.TopLevelVar, error) {
+	p.advance() // consume var
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	typ, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+	var val ast.Node
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+		val, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &ast.TopLevelVar{Name: nameTok.Literal, Type: typ, Value: val}, nil
+}
+
+// parseSpawnExprStmt parses a spawn statement (spawn expr or spawn do: block).
+// Returns a *ast.SpawnExpr wrapped in an ExprStmt.
+func (p *Parser) parseSpawnExprStmt() (ast.Node, error) {
+	expr, err := p.parseSpawnExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ast.ExprStmt{Expr: expr}, nil
+}
+
+// parseSpawnExpr parses spawn as an expression.
+func (p *Parser) parseSpawnExpr() (*ast.SpawnExpr, error) {
+	p.advance() // consume spawn
+
+	// spawn do: block
+	if p.check(lexer.KW_DO) {
+		p.advance() // consume do
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+		var block *ast.Block
+		var err error
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			if p.check(lexer.INDENT) {
+				// parseBlock consumes INDENT itself; do not advance here.
+				block, err = p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			stmt, err := p.parseStatement()
+			if err != nil {
+				return nil, err
+			}
+			block = &ast.Block{Stmts: []ast.Node{stmt}}
+		}
+
+		return &ast.SpawnExpr{DoBlock: block}, nil
+	}
+
+	// spawn expr
+	call, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ast.SpawnExpr{Call: call}, nil
 }

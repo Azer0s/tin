@@ -23,11 +23,13 @@ type scopeEntry struct {
 	isAlloc  bool        // true if val is an alloca (needs load/store)
 	isRC     bool        // true if the alloca holds an ARC-managed value ([T] or any)
 	noDeinit bool        // true for the `this` parameter of a deinit method (prevents recursive deinit)
+	isGlobal bool        // true for module-level globals; skip in per-function scope release
 }
 
 type scope struct {
-	vars   map[string]*scopeEntry
-	parent *scope
+	vars               map[string]*scopeEntry
+	parent             *scope
+	isFunctionBoundary bool // if true, emitAllScopeReleases stops here and does not release parent vars
 }
 
 func newScope(parent *scope) *scope {
@@ -41,6 +43,7 @@ func (s *scope) lookup(name string) (*scopeEntry, bool) {
 	if s.parent != nil {
 		return s.parent.lookup(name)
 	}
+
 	return nil, false
 }
 
