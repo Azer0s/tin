@@ -1,0 +1,310 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Tin",
+  "scopeName": "source.tin",
+  "fileTypes": ["tin"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#control-tag" },
+    { "include": "#string" },
+    { "include": "#backtick-literal" },
+    { "include": "#atom-literal" },
+    { "include": "#char-literal" },
+    { "include": "#number" },
+    { "include": "#keyword" },
+    { "include": "#builtin-type" },
+    { "include": "#boolean" },
+    { "include": "#nil" },
+    { "include": "#macro-call" },
+    { "include": "#function-decl" },
+    { "include": "#struct-decl" },
+    { "include": "#trait-decl" },
+    { "include": "#enum-decl" },
+    { "include": "#union-decl" },
+    { "include": "#type-decl" },
+    { "include": "#namespace-access" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.double-slash.tin",
+      "match": "//.*$"
+    },
+
+    "control-tag": {
+      "patterns": [
+        {
+          "comment": "Block control tags: fn{#tag, #tag}",
+          "name": "meta.control-tag.tin",
+          "match": "(\\{)(#[a-zA-Z_][a-zA-Z0-9_]*(?:,\\s*#[a-zA-Z_][a-zA-Z0-9_]*)*)*(\\})",
+          "captures": {
+            "2": { "name": "entity.other.attribute-name.tin" }
+          }
+        },
+        {
+          "comment": "Standalone control tag #ident",
+          "name": "entity.other.attribute-name.tin",
+          "match": "#[a-zA-Z_][a-zA-Z0-9_]*"
+        }
+      ]
+    },
+
+    "string": {
+      "name": "string.quoted.double.tin",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "comment": "String interpolation {expr}",
+          "name": "meta.interpolation.tin",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.tin" } },
+          "endCaptures":   { "0": { "name": "punctuation.definition.template-expression.end.tin" } },
+          "patterns": [{ "include": "$self" }]
+        },
+        {
+          "comment": "Escape sequences",
+          "name": "constant.character.escape.tin",
+          "match": "\\\\[nrt\\\\\"'0]"
+        }
+      ]
+    },
+
+    "backtick-literal": {
+      "name": "meta.backtick.tin",
+      "begin": "`",
+      "end": "`",
+      "contentName": "meta.embedded.tin",
+      "patterns": [{ "include": "$self" }]
+    },
+
+    "atom-literal": {
+      "comment": "Atoms: 'ok  'err  'some_atom",
+      "name": "constant.other.atom.tin",
+      "match": "'[a-zA-Z_][a-zA-Z0-9_]*"
+    },
+
+    "char-literal": {
+      "comment": "Character literal: single char in single-quotes like 'a'",
+      "name": "string.quoted.single.tin",
+      "match": "'(\\\\.|[^'\\\\])'"
+    },
+
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.tin",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.tin",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.tin",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.tin",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.tin",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "boolean": {
+      "name": "constant.language.boolean.tin",
+      "match": "\\b(true|false)\\b"
+    },
+
+    "nil": {
+      "name": "constant.language.null.tin",
+      "match": "\\bnil\\b"
+    },
+
+    "keyword": {
+      "patterns": [
+        {
+          "comment": "Control flow keywords",
+          "name": "keyword.control.tin",
+          "match": "\\b(if|else|for|in|match|case|default|break|return|do|defer|where|yield|await|spawn)\\b"
+        },
+        {
+          "comment": "Declaration keywords",
+          "name": "keyword.declaration.tin",
+          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|forward|override|static|virtual)\\b"
+        },
+        {
+          "comment": "Expression keywords",
+          "name": "keyword.operator.word.tin",
+          "match": "\\b(as|is|sizeof|addr|typeof|traitof|fieldnames|fieldtypes|fieldtag|getfield|setfield|isrc)\\b"
+        },
+        {
+          "comment": "Statement keywords",
+          "name": "keyword.other.tin",
+          "match": "\\b(echo|test|pass)\\b"
+        }
+      ]
+    },
+
+    "builtin-type": {
+      "name": "support.type.primitive.tin",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|string|atom|void|any)\\b"
+    },
+
+    "macro-call": {
+      "comment": "Macro invocation: name!(args)",
+      "name": "meta.macro-call.tin",
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(!)(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.macro.tin" },
+        "2": { "name": "keyword.operator.macro.tin" }
+      }
+    },
+
+    "function-decl": {
+      "comment": "Function declaration: fn name(...) or fn[T] name(...)",
+      "match": "\\b(fn)(?:\\{[^}]*\\})?(?:\\[[^\\]]*\\])?\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.function.tin" }
+      }
+    },
+
+    "struct-decl": {
+      "comment": "Struct declaration: struct Name",
+      "match": "\\b(struct)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.type.struct.tin" }
+      }
+    },
+
+    "trait-decl": {
+      "comment": "Trait declaration: trait Name",
+      "match": "\\b(trait)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.type.trait.tin" }
+      }
+    },
+
+    "enum-decl": {
+      "comment": "Enum declaration: enum [atom] Name",
+      "match": "\\b(enum)(?:\\s+(atom))?\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "keyword.declaration.tin" },
+        "3": { "name": "entity.name.type.enum.tin" }
+      }
+    },
+
+    "union-decl": {
+      "comment": "Union declaration: union Name",
+      "match": "\\b(union)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.type.union.tin" }
+      }
+    },
+
+    "type-decl": {
+      "comment": "Type alias declaration: type Name",
+      "match": "\\b(type)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.type.alias.tin" }
+      }
+    },
+
+    "namespace-access": {
+      "comment": "Module path: module::item",
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(::)([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "entity.name.namespace.tin" },
+        "2": { "name": "punctuation.accessor.tin" },
+        "3": { "name": "entity.name.function.tin" }
+      }
+    },
+
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.tin",
+          "match": "(\\+\\+=|\\+=|-=|\\*=|/=|%=|=(?!=))"
+        },
+        {
+          "name": "keyword.operator.comparison.tin",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.tin",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.tin",
+          "match": "(\\+\\+|\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.bitwise.tin",
+          "match": "(<<|>>|\\^|&|\\|(?!>))"
+        },
+        {
+          "name": "keyword.operator.pipe.tin",
+          "match": "(\\|>)"
+        },
+        {
+          "name": "keyword.operator.range.tin",
+          "match": "(\\.\\.\\.|\\.\\.)(?!\\.)"
+        },
+        {
+          "name": "keyword.operator.arrow.tin",
+          "match": "(->)"
+        },
+        {
+          "name": "keyword.operator.concat.tin",
+          "match": "(\\+\\+)"
+        },
+        {
+          "name": "keyword.operator.other.tin",
+          "match": "([?@~])"
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.definition.block.tin",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.definition.brackets.tin",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "punctuation.definition.parens.tin",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.separator.comma.tin",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.colon.tin",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.tin",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}
+

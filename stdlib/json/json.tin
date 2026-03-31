@@ -121,16 +121,27 @@ fn escape_string(s string) string =
     if n + 6 >= cap:
       cap = cap * 2
       buf = _tin_buf_realloc(buf, cap)
+
     if c == @'\"':
-      buf[n] = @'\\'  n = n + 1  buf[n] = @'\"'
+      buf[n] = @'\\'
+      n = n + 1
+      buf[n] = @'\"'
     else if c == @'\\':
-      buf[n] = @'\\'  n = n + 1  buf[n] = @'\\'
+      buf[n] = @'\\'
+      n = n + 1
+      buf[n] = @'\\'
     else if c == @'\n':
-      buf[n] = @'\\'  n = n + 1  buf[n] = @'n'
+      buf[n] = @'\\'
+      n = n + 1
+      buf[n] = @'n'
     else if c == @'\r':
-      buf[n] = @'\\'  n = n + 1  buf[n] = @'r'
+      buf[n] = @'\\'
+      n = n + 1
+      buf[n] = @'r'
     else if c == @'\t':
-      buf[n] = @'\\'  n = n + 1  buf[n] = @'t'
+      buf[n] = @'\\'
+      n = n + 1
+      buf[n] = @'t'
     else:
       buf[n] = c
     n = n + 1
@@ -146,9 +157,11 @@ fn escape_string(s string) string =
 fn json_key(field_name string, tag string) string =
   if len(tag) == 0:
     return field_name
+
   if len(tag) <= 5 || str::strncmp(tag, "json:", 5) != 0:
     return field_name
   let raw = _tin_string_data(tag)
+
   if len(tag) == 6 && raw[5] == @'-':
     return ""
   return _tin_string_from_bytes(raw + 5, len(tag) - 5)
@@ -160,15 +173,19 @@ fn json_key(field_name string, tag string) string =
 // Struct-typed any values encode as null when called directly (use encode[T] for structs).
 fn encode_any(v any) string =
   let t = typeof(v)
+
   if t == 'none:
     return "null"
+
   if t == 'bool:
     if v as bool:
       return "true"
     return "false"
+
   if t == 'i64:
     let n = v as i64
     return "{n}"
+
   if t == 'f64:
     let f = v as f64
     let buf = _tin_buf_alloc(64)
@@ -176,6 +193,7 @@ fn encode_any(v any) string =
     let s = _tin_string_from_bytes(buf, w as i64)
     _tin_buf_free(buf)
     return s
+
   if t == 'string:
     return escape_string(v as string)
   return "null"
@@ -187,15 +205,19 @@ fn encode_any(v any) string =
 // Call as _encode_any[T](val) from within encode[T] to encode field values.
 fn _encode_any[T](v any, _unused T) string =
   let t = typeof(v)
+
   if t == 'none:
     return "null"
+
   if t == 'bool:
     if v as bool:
       return "true"
     return "false"
+
   if t == 'i64:
     let n = v as i64
     return "{n}"
+
   if t == 'f64:
     let f = v as f64
     let buf = _tin_buf_alloc(64)
@@ -203,13 +225,16 @@ fn _encode_any[T](v any, _unused T) string =
     let s = _tin_string_from_bytes(buf, w as i64)
     _tin_buf_free(buf)
     return s
+
   if t == 'string:
     return escape_string(v as string)
+
   // Struct: fieldnames(v: any) compiled in instantiation context -> full type dispatch
   // Handles nested user-defined struct types because the dispatch table is built at the
   // call site (user module's third pass) rather than at json.tin compilation time.
   let fields = fieldnames(v)
   let nf = len(fields)
+
   if nf == 0:
     return "null"
   let out = "{"
@@ -218,12 +243,14 @@ fn _encode_any[T](v any, _unused T) string =
   for i < nf:
     let fname string = fields[i]
     let jkey string = json_key(fname, fieldtag(v, fname))
+
     if len(jkey) > 0:
       if written > 0:
         out = out ++ ","
       out = out ++ escape_string(jkey) ++ ":" ++ _encode_any[T](getfield(v, fname), _unused)
       written = written + 1
     i = i + 1
+
   return out ++ "}"
 
 // encode[T] serialises a value of type T to a JSON string.
@@ -243,13 +270,16 @@ fn encode[T](v T) string =
 
   if t == 'none:
     return "null"
+
   if t == 'bool:
     if v as bool:
       return "true"
     return "false"
+
   if t == 'i64:
     let n = v as i64
     return "{n}"
+
   if t == 'f64:
     let f = v as f64
     let buf = _tin_buf_alloc(64)
@@ -257,6 +287,7 @@ fn encode[T](v T) string =
     let s = _tin_string_from_bytes(buf, w as i64)
     _tin_buf_free(buf)
     return s
+
   if t == 'string:
     let sv T = v
     return escape_string(sv as string)
@@ -266,6 +297,7 @@ fn encode[T](v T) string =
   // full struct type dispatch (handles user-defined nested struct types).
   let fields  = fieldnames(v)
   let nf      = len(fields)
+
   if nf == 0:
     return "null"
 
@@ -275,6 +307,7 @@ fn encode[T](v T) string =
   for i < nf:
     let fname string = fields[i]
     let jkey  string = json_key(fname, fieldtag(v, fname))
+
     if len(jkey) > 0:
       if written > 0:
         out = out ++ ","
@@ -303,6 +336,7 @@ struct Parser =
   fn skip_ws(this *Parser) =
     for this.pos < this.len:
       let c = this.src[this.pos]
+
       if c != @' ' && c != @'\t' && c != @'\n' && c != @'\r':
         break
       this.pos = this.pos + 1
@@ -316,11 +350,16 @@ fn parse_str(p *Parser) string =
   let n   i64 = 0
   for !p.at_end():
     let c = p.advance()
-    if c == @'\"': break
+
+    if c == @'\"':
+      break
     let out byte = c
+
     if c == @'\\':
-      if p.at_end(): break
+      if p.at_end():
+        break
       let esc = p.advance()
+
       if esc == @'\"':      out = @'\"'
       else if esc == @'\\': out = @'\\'
       else if esc == @'/':  out = @'/'
@@ -328,6 +367,7 @@ fn parse_str(p *Parser) string =
       else if esc == @'r':  out = @'\r'
       else if esc == @'t':  out = @'\t'
       else:                 out = esc
+
     if n >= cap:
       cap = cap * 2
       buf = _tin_buf_realloc(buf, cap)
@@ -343,41 +383,59 @@ fn parse_int_str(s string) i64 =
   let neg = false
   let i   i64 = 0
   let r   i64 = 0
+
   if i < n && src[i] == @'-':
     neg = true
     i = i + 1
   for i < n:
     let c = src[i]
-    if c < @'0' || c > @'9': break
+
+    if c < @'0' || c > @'9':
+      break
     r = r * 10 + (c - @'0') as i64
     i = i + 1
-  if neg: return -r
+
+  if neg:
+    return -r
   return r
 
 fn parse_number(p *Parser) *Value =
   let start    = p.pos
   let is_float = false
-  if p.peek() == @'-': p.advance()
+
+  if p.peek() == @'-':
+    p.advance()
   for !p.at_end():
     let c = p.peek()
-    if c < @'0' || c > @'9': break
+
+    if c < @'0' || c > @'9':
+      break
     p.advance()
+
   if !p.at_end() && p.peek() == @'.':
     is_float = true
     p.advance()
     for !p.at_end():
       let c = p.peek()
-      if c < @'0' || c > @'9': break
+
+      if c < @'0' || c > @'9':
+        break
       p.advance()
+
   if !p.at_end() && (p.peek() == @'e' || p.peek() == @'E'):
     is_float = true
     p.advance()
-    if !p.at_end() && (p.peek() == @'+' || p.peek() == @'-'): p.advance()
+
+    if !p.at_end() && (p.peek() == @'+' || p.peek() == @'-'):
+      p.advance()
     for !p.at_end():
       let c = p.peek()
-      if c < @'0' || c > @'9': break
+
+      if c < @'0' || c > @'9':
+        break
       p.advance()
   let num = _tin_string_from_bytes(p.src + start, p.pos - start)
+
   if is_float:
     return &Value{kind: Kind.float_v, fval: _atof(num)}
   return &Value{kind: Kind.int_v, ival: parse_int_str(num)}
@@ -388,6 +446,7 @@ fn parse_array(p *Parser) *Value =
   p.advance()  // consume '['
   let items [*Value] = []
   p.skip_ws()
+
   if !p.at_end() && p.peek() == @']':
     p.advance()
     return &Value{kind: Kind.array_v, items: items}
@@ -395,12 +454,17 @@ fn parse_array(p *Parser) *Value =
     p.skip_ws()
     items ++= parse_value(p)
     p.skip_ws()
-    if p.at_end(): break
+
+    if p.at_end():
+      break
     let c = p.peek()
+
     if c == @']':
       p.advance()
       break
-    if c == @',': p.advance()
+
+    if c == @',':
+      p.advance()
   return &Value{kind: Kind.array_v, items: items}
 
 fn parse_object(p *Parser) *Value =
@@ -408,41 +472,61 @@ fn parse_object(p *Parser) *Value =
   let items [*Value] = []
   let kkeys [string] = []
   p.skip_ws()
+
   if !p.at_end() && p.peek() == @'}':
     p.advance()
     return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
   for !p.at_end():
     p.skip_ws()
-    if p.at_end() || p.peek() != @'\"': break
+
+    if p.at_end() || p.peek() != @'\"':
+      break
     let key = parse_str(p)
     p.skip_ws()
-    if !p.at_end() && p.peek() == @':': p.advance()
+
+    if !p.at_end() && p.peek() == @':':
+      p.advance()
     p.skip_ws()
     kkeys ++= key
     items ++= parse_value(p)
     p.skip_ws()
-    if p.at_end(): break
+
+    if p.at_end():
+      break
     let c = p.peek()
+
     if c == @'}':
       p.advance()
       break
-    if c == @',': p.advance()
+
+    if c == @',':
+      p.advance()
   return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
 
 fn parse_value(p *Parser) *Value =
   p.skip_ws()
+
   if p.at_end():
     return &Value{kind: Kind.null_v}
   let c = p.peek()
-  if c == @'\"': return &Value{kind: Kind.string_v, sval: parse_str(p)}
-  if c == @'[':  return parse_array(p)
-  if c == @'{':  return parse_object(p)
+
+  if c == @'\"':
+    return &Value{kind: Kind.string_v, sval: parse_str(p)}
+
+  if c == @'[':
+    return parse_array(p)
+
+  if c == @'{':
+    return parse_object(p)
+
   if c == @'t':
     p.pos = p.pos + 4
     return &Value{kind: Kind.bool_v, bval: true}
+
   if c == @'f':
     p.pos = p.pos + 5
     return &Value{kind: Kind.bool_v, bval: false}
+
   if c == @'n':
     p.pos = p.pos + 4
     return &Value{kind: Kind.null_v}
@@ -475,30 +559,38 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
   for i < nf:
     let fname string = fields[i]
     let jval = doc.get(fname)
+
     if !jval.is_null():
       let ftype = ftypes[i]
+
       match jval.kind:
+
         case Kind.int_v:
           if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
             setfield(zero, fname, jval.ival)
           else if ftype == 'f64:
             setfield(zero, fname, jval.ival as f64)
+
         case Kind.float_v:
           if ftype == 'f64:
             setfield(zero, fname, jval.fval)
           else if ftype == 'i64:
             setfield(zero, fname, jval.fval as i64)
+
         case Kind.bool_v:
           if ftype == 'bool:
             setfield(zero, fname, jval.bval)
+
         case Kind.string_v:
           if ftype == 'string:
             setfield(zero, fname, jval.sval)
+
         case Kind.object_v:
           // Recursively parse deeply-nested struct objects.
           let nested_zero = getfield(zero, fname)
           let nested = _parse_nested_any[T](nested_zero, jval, _unused)
           setfield(zero, fname, nested)
+
         default:
           pass
     i = i + 1
@@ -518,6 +610,7 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
 fn parse[T](s string) T =
   let doc    = parse(s)
   let result T
+
   if doc.is_null():
     return result
   let fields = fieldnames(result)
@@ -528,35 +621,45 @@ fn parse[T](s string) T =
     let fname  string = fields[i]
     let ftypei any    = ftypes[i]
     let jkey   string = json_key(fname, fieldtag(result, fname))
+
     if len(jkey) > 0:
       let jval = doc.get(jkey)
+
       if !jval.is_null():
         let ftype = ftypei
+
         match jval.kind:
+
           case Kind.int_v:
             if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
               setfield(result, fname, jval.ival)
             else if ftype == 'f64:
               setfield(result, fname, jval.ival as f64)
+
           case Kind.float_v:
             if ftype == 'f64:
               setfield(result, fname, jval.fval)
             else if ftype == 'i64:
               setfield(result, fname, jval.fval as i64)
+
           case Kind.bool_v:
             if ftype == 'bool:
               setfield(result, fname, jval.bval)
+
           case Kind.string_v:
             if ftype == 'string:
               setfield(result, fname, jval.sval)
+
           case Kind.object_v:
             // Nested struct field: get the zero-valued field as any, populate it,
             // then set it back (coerce any->FieldType is handled by setfield's coerce).
             let zero_nested = getfield(result, fname)
             let populated = _parse_nested_any[T](zero_nested, jval, result)
             setfield(result, fname, populated)
+
           default:
             pass
+
     i = i + 1
   return result
 
