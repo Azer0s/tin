@@ -1,0 +1,78 @@
+// qsort.tin - quicksort using where guard dispatch and array split destructuring
+
+use assert
+
+// qsort sorts an [i64] array in ascending order.
+//
+// where arms handle dispatch:
+//   - base case: array of 0 or 1 elements is already sorted
+//   - recursive case: split off the pivot with array destructuring,
+//     partition the rest, recurse, then concatenate
+fn qsort(arr [i64]) [i64] =
+  where len(arr) <= 1: arr
+  where _:
+    let [pivot, ...rest] [i64] = arr
+
+    let left  [i64] = []
+    let right [i64] = []
+
+    for let x i64 in rest:
+      if x < pivot:
+        left ++= x
+      else:
+        right ++= x
+
+    let result [i64] = []
+
+    for let x i64 in qsort(left):
+      result ++= x
+    result ++= pivot
+    for let x i64 in qsort(right):
+      result ++= x
+
+    return result
+
+// demo
+
+let nums = [5, 2, 8, 1, 9, 3]
+let sorted = qsort(nums)
+for let x i64 in sorted:
+  echo x
+
+// tests
+
+test "sorts ascending" =
+  let out = qsort([5, 2, 8, 1, 9, 3])
+  assert::equals(out[0], 1)
+  assert::equals(out[1], 2)
+  assert::equals(out[2], 3)
+  assert::equals(out[3], 5)
+  assert::equals(out[4], 8)
+  assert::equals(out[5], 9)
+
+test "empty array" =
+  let out = qsort([])
+  assert::equals(len(out), 0)
+
+test "single element" =
+  let out = qsort([42])
+  assert::equals(len(out), 1)
+  assert::equals(out[0], 42)
+
+test "already sorted" =
+  let out = qsort([1, 2, 3])
+  assert::equals(out[0], 1)
+  assert::equals(out[2], 3)
+
+test "reverse sorted" =
+  let out = qsort([3, 2, 1])
+  assert::equals(out[0], 1)
+  assert::equals(out[1], 2)
+  assert::equals(out[2], 3)
+
+test "duplicates" =
+  let out = qsort([3, 1, 2, 1])
+  assert::equals(out[0], 1)
+  assert::equals(out[1], 1)
+  assert::equals(out[2], 2)
+  assert::equals(out[3], 3)

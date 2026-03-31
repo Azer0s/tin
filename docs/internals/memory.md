@@ -26,7 +26,7 @@ low address
   ┌─────────────────────────────┐
   │  TinRCHdr  { int64_t rc }   │  <- 8 bytes
   ├─────────────────────────────┤
-  │  user data …                │  <- public pointer starts here
+  │  user data ...              │  <- public pointer starts here
   └─────────────────────────────┘
 high address
 ```

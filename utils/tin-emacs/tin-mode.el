@@ -25,7 +25,7 @@
     (modify-syntax-entry ?\n ">" table)
     ;; String literals
     (modify-syntax-entry ?\" "\"" table)
-    ;; Single quote is punctuation — atoms use 'ident, not a string delimiter
+    ;; Single quote is punctuation - atoms use 'ident, not a string delimiter
     (modify-syntax-entry ?' "." table)
     ;; # is punctuation (control tags, not a preprocessor line)
     (modify-syntax-entry ?# "." table)
@@ -74,7 +74,7 @@
 (defun tin-font-lock-keywords ()
   "Font-lock keyword list for `tin-mode'."
   (list
-   ;; Control tags: #pure  #no_recurse  #sideffect  #allow_sideffect …
+   ;; Control tags: #pure  #no_recurse  #sideffect  #allow_sideffect ...
    `("\\(#[a-zA-Z_][a-zA-Z0-9_]*\\)" . font-lock-preprocessor-face)
 
    ;; Atom literals: 'ok  'err  'some_atom
@@ -90,17 +90,17 @@
    `(,(regexp-opt (tin-constants) 'symbols) . font-lock-constant-face)
 
    ;; Function declaration:
-   ;;   fn name(…)
-   ;;   fn{#pure} name(…)
-   ;;   fn[T] name(…)
+   ;;   fn name(...)
+   ;;   fn{#pure} name(...)
+   ;;   fn[T] name(...)
    `("\\bfn\\(?:{[^}]*}\\)?\\(?:\\[[^]]*\\]\\)?\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
      (1 font-lock-function-name-face))
 
-   ;; Macro definition: macro name!(…)
+   ;; Macro definition: macro name!(...)
    `("\\bmacro\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)!"
      (1 font-lock-function-name-face))
 
-   ;; Macro call: name!(…)
+   ;; Macro call: name!(...)
    `("\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)!("
      (1 font-lock-function-name-face))
 
@@ -116,11 +116,11 @@
 ;;
 ;; Tin opens blocks with = or : at the end of a line (like Python uses :).
 ;; Rules:
-;;   - prev line ends with = or : → indent in by indent-len
-;;   - current line starts with else → dedent (back to the if level)
-;;   - current line starts with case or default → indent in from match:,
+;;   - prev line ends with = or : -> indent in by indent-len
+;;   - current line starts with else -> dedent (back to the if level)
+;;   - current line starts with case or default -> indent in from match:,
 ;;     or dedent from a case body
-;;   - otherwise → same indent as previous non-empty line
+;;   - otherwise -> same indent as previous non-empty line
 
 (defun tin--previous-non-empty-line ()
   "Return (LINE . INDENTATION) for the nearest previous non-empty line, or nil."
@@ -152,13 +152,13 @@
              (prev-opens   (or (string-suffix-p "=" prev-line)
                                (string-suffix-p ":" prev-line))))
         (cond
-         ;; else / else if — dedent to the matching if level
+         ;; else / else if - dedent to the matching if level
          ((string-prefix-p "else" cur-trimmed)
           (if prev-opens
               (+ prev-indent indent-len)   ; prev was already a block opener
             (max (- prev-indent indent-len) 0)))
 
-         ;; case / default — indent in from match:, or dedent from case body
+         ;; case / default - indent in from match:, or dedent from case body
          ((string-match-p "^\\(?:case\\|default\\)\\b" cur-trimmed)
           (if prev-opens
               (+ prev-indent indent-len)
