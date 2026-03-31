@@ -182,7 +182,7 @@ fn sum[t](list [t]) t =
 A slice is a sub-view of an array created with `[start:end]` syntax.  It
 returns a new fat-array `{T*, i64}` pointing into the original data:
 
-```tin
+```rust
 let arr = [10, 20, 30, 40, 50]
 
 let s1 = arr[1:]     // from index 1 to end   -> [20, 30, 40, 50]
@@ -192,7 +192,7 @@ let s3 = arr[1:4]    // indices 1..3 inclusive -> [20, 30, 40]
 
 The `.len` field reflects the slice length:
 
-```tin
+```rust
 echo s1.len   // 4
 echo s3[0]    // 20
 ```

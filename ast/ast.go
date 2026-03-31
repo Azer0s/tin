@@ -514,6 +514,8 @@ type AtomLit struct {
 	Name string // 'ok -> "ok"
 }
 
+type NilLit struct{ base } // nil - null pointer literal
+
 type WildcardExpr struct{ base } // "_" in where/match patterns
 
 // TupleLit is a tuple literal: (e1, e2, ...) - sugar for Tuple[T1,T2,...]{a:e1, b:e2, ...}

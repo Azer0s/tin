@@ -52,13 +52,13 @@ fn _atof(s string) f64 = extern("atof")
 
 // Kind identifies the type of a parsed JSON value.
 enum Kind =
-  null_v,
-  bool_v,
-  int_v,
-  float_v,
-  string_v,
-  array_v,
-  object_v,
+  null_v
+  bool_v
+  int_v
+  float_v
+  string_v
+  array_v
+  object_v
 
 // Value
 

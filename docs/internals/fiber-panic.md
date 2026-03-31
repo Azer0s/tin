@@ -193,7 +193,7 @@ if cg.inCoroFn {
 Example - outer awaiter gets `0` for an `i64` async function that swallowed
 its inner fiber's panic:
 
-```tin
+```rust
 fn{#async} always_panics() i64 =
   panic("boom from fiber")
   return 0

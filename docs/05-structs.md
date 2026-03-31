@@ -363,7 +363,7 @@ A **tuple** is an anonymous struct whose fields are named alphabetically
 
 `(T1, T2)` is shorthand for `Tuple[T1, T2]`:
 
-```tin
+```rust
 type int_pair = (i64, i64)
 type result   = (i64, bool)
 ```
@@ -375,7 +375,7 @@ declarations, function parameters, and return types.
 
 Write `(e1, e2, ...)` to create a tuple value:
 
-```tin
+```rust
 let t = (10, true)       // infers Tuple[i64, bool]
 let p (i64, i64) = (3, 7)
 ```
@@ -385,7 +385,7 @@ let p (i64, i64) = (3, 7)
 A function can declare a tuple return type and return a tuple literal
 directly without naming a struct:
 
-```tin
+```rust
 fn swap(x i64, y i64) (i64, i64) =
   return (y, x)
 
@@ -398,7 +398,7 @@ fn min_max(arr [i64]) (i64, i64) =
 
 Tuple fields are accessed by name (`a`, `b`, `c`, ...):
 
-```tin
+```rust
 let t = (42, true, 3)
 echo t.a    // 42
 echo t.b    // true
@@ -409,7 +409,7 @@ echo t.c    // 3
 
 `let (name1, name2, ...) = expr` unpacks a tuple into individual variables:
 
-```tin
+```rust
 let (lo, hi) = min_max([5, 2, 9, 1])
 echo lo   // 1
 echo hi   // 9
@@ -429,7 +429,7 @@ names, or carries methods.
 
 A named type alias creates a distinct type with the same layout:
 
-```tin
+```rust
 type point2d = (i64, i64)
 let p point2d = (10, 20)
 echo p.a   // 10

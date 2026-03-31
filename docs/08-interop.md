@@ -81,7 +81,7 @@ double  c_add_xy(point2d p)              { return p.x + p.y; }
 point2d c_make_point(double x, double y) { return (point2d){x, y}; }
 ```
 
-```tin
+```rust
 //!+helpers.c
 
 struct point2d =
@@ -109,7 +109,7 @@ structs are handled recursively. Structs larger than 16 bytes are passed
 Extern functions taking `*S` where `S` is a named Tin struct receive a
 pointer to the C-native layout:
 
-```tin
+```rust
 fn c_init_point(dst *point2d, x f64, y f64) = extern("c_init_point")
 ```
 
@@ -136,7 +136,7 @@ let y = *p             // dereference
 
 ### Multi-level pointers
 
-```tin
+```rust
 let x i64  = 42
 let p  *i64  = &x
 let pp **i64 = &p

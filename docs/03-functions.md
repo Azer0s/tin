@@ -333,7 +333,7 @@ site by comparing the evaluated argument types.
 
 ### Overloading by type
 
-```tin
+```rust
 fn describe(n i64) string =
   return "integer: {n}"
 
@@ -350,7 +350,7 @@ echo describe(true)     // bool: true
 
 ### Overloading by arity
 
-```tin
+```rust
 fn sum(a i64) i64 =
   return a
 
@@ -370,7 +370,7 @@ echo sum(1, 2, 3) // 6
 Struct methods follow the same rules. The receiver (`this`) is not part of the
 overload signature - only the explicit call-site arguments are compared.
 
-```tin
+```rust
 struct Box =
   value i64
 
@@ -467,7 +467,7 @@ override the return value by returning a non-nil pointer:
   return type.
 - If the lambda returns a **non-nil** `*T`, the dereferenced value replaces the
   function's return value.
-- If the lambda returns `None` (nil), the function's return value is left unchanged.
+- If the lambda returns nil, the function's return value is left unchanged.
 
 ```rust
 fn maybe_override(flag bool) i64 =

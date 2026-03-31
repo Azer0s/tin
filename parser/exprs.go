@@ -160,7 +160,8 @@ func isExprStart(tok lexer.Token) bool {
 		lexer.LPAREN, lexer.LBRACKET, lexer.MINUS, lexer.NOT,
 		lexer.STAR, lexer.AMP, lexer.KW_FN, lexer.KW_SIZEOF, lexer.KW_ADDR,
 		lexer.KW_TYPEOF, lexer.KW_TRAITOF, lexer.KW_FIELDNAMES, lexer.KW_FIELDTYPES,
-		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD, lexer.KW_ISRC:
+		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD, lexer.KW_ISRC,
+		lexer.KW_NIL:
 
 		return true
 	default:
@@ -824,6 +825,11 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		}
 
 		return &ast.AwaitExpr{Future: fut}, nil
+
+	case lexer.KW_NIL:
+		p.advance()
+
+		return &ast.NilLit{}, nil
 
 	case lexer.KW_YIELD:
 		p.advance()

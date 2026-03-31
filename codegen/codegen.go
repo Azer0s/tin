@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -272,6 +273,13 @@ type CodeGen struct {
 	// so wrapPidInFuture can report it if Future[T] is not available.
 	syncLoadErr error
 
+	// lastSliceBase is a side-channel set by genSliceExpr to communicate the
+	// base allocation pointer (i8*, before any GEP offset) to genVarDecl.
+	// genVarDecl reads and clears it immediately after calling genExpr on a SliceExpr
+	// so that ARC retain/release operates on the real base pointer, not the interior
+	// pointer that may be stored in the slice fat-ptr's field 0.
+	lastSliceBase value.Value
+
 	// curBlock tracks the current IR block during expression generation.
 	// It is updated by genExpr when control flow changes the active block
 	// (e.g. await/yield emit a coro.suspend which switches to a new resume block).
@@ -390,18 +398,41 @@ func (cg *CodeGen) SetTestMode(v bool) { cg.testMode = v }
 // Only meaningful after Generate has been called.
 func (cg *CodeGen) HasTests() bool { return len(cg.testDecls) > 0 }
 
+// targetIsAMD64 reports whether the module's target triple is an x86-64 target.
+// Used in place of runtime.GOARCH so that cross-compilation works correctly:
+// the decision is based on the compilation target, not the host.
+func (cg *CodeGen) targetIsAMD64() bool {
+	return strings.HasPrefix(cg.mod.TargetTriple, "x86_64")
+}
+
 // newModuleWithTriple creates a new LLVM IR module pre-populated with the
-// target triple for the current host, preventing clang from emitting
-// "overriding the module target triple" warnings.
+// target triple that clang will actually use, preventing the
+// "overriding the module target triple" warning.
+//
+// clang -dumpmachine (and llc --version) return the darwin-style triple
+// (e.g. arm64-apple-darwin25.1.0) but clang normalises it to the macosx-style
+// triple (e.g. arm64-apple-macosx26.0.0) when compiling LLVM IR.  Setting a
+// darwin-style triple in the module therefore always triggers the override
+// warning.  The only reliable way to get the exact string clang will use is to
+// compile a trivial C snippet to LLVM IR and read the "target triple" line.
 func newModuleWithTriple() *ir.Module {
 	mod := ir.NewModule()
-	// Ask clang for the exact triple it would use.
-	if out, err := exec.Command("clang", "-dumpmachine").Output(); err == nil {
-		triple := runtime.GOOS // fallback key
-		_ = triple
-		mod.TargetTriple = string(out[:len(out)-1]) // strip trailing newline
+	// Compile an empty C translation unit to LLVM IR and extract the triple
+	// that clang actually emits.  This is the only way to get the normalised
+	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
+	if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
+		Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, `target triple = "`) {
+				triple := strings.TrimPrefix(line, `target triple = "`)
+				triple = strings.TrimSuffix(triple, `"`)
+				if triple != "" {
+					mod.TargetTriple = triple
 
-		return mod
+					return mod
+				}
+			}
+		}
 	}
 	// Fallback by GOOS/GOARCH when clang is unavailable.
 	switch runtime.GOOS + "/" + runtime.GOARCH {

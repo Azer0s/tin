@@ -29,7 +29,7 @@ background work, use `await` or a `Channel`.
 
 Mark a function with the `{#async}` tag to make it spawnable as a fiber:
 
-```tin
+```rust
 fn{#async} compute(n i64) i64 =
   return n * n
 ```
@@ -48,7 +48,7 @@ An async function:
 `spawn expr` starts a fiber and returns `Future[T]` where `T` is the return
 type of the async function (`Future[Unit]` for void functions):
 
-```tin
+```rust
 let f = spawn compute(7)    // f : Future[i64]
 ```
 
@@ -62,7 +62,7 @@ Only calls to `{#async}` functions can be spawned.
 evaluates to a value implementing `Awaitable[T]`. The form of `expr` does not
 matter - any of the following work:
 
-```tin
+```rust
 // 1. Variable that holds a Future[T]:
 let f = spawn compute(7)   // f : Future[i64]
 let result = await f       // f is Awaitable[i64] -> result : i64
@@ -82,7 +82,7 @@ Many stdlib functions return `Future[T]` directly and can be awaited without
 `spawn`. Low-level primitives (`io::async_read`, `io::async_write`) are
 `{#async}` functions that require `spawn`:
 
-```tin
+```rust
 // Low-level: async_read is {#async} - must use spawn
 let n = await spawn io::async_read(fd, &buf[0], 4096)
 
@@ -98,7 +98,7 @@ function returns `Future[T]` in its signature, use `await` directly.**
 
 For void fibers (`Future[Unit]`), `await` is used as a statement:
 
-```tin
+```rust
 fn{#async} worker(n i64) =
   echo "fiber started: {n}"
   yield
@@ -113,7 +113,7 @@ Calling an `{#async}` function directly (without `spawn`) invokes its **sync
 variant**, which runs inline and returns a plain value - not a `Future[T]`.
 This is a compile error with `await`:
 
-```tin
+```rust
 // ERROR: async_read() returns i64, not Awaitable[T]
 let n = await io::async_read(fd, &buf[0], 4096)
 
@@ -131,7 +131,7 @@ implements `Awaitable[T]`. It is returned automatically by `spawn`.
 You do not need to `use sync` to use `Future[T]` - the sync module is
 auto-imported when fibers are used.
 
-```tin
+```rust
 fn{#async} compute(n i64) i64 =
   return n * n
 
@@ -145,7 +145,7 @@ let r = await f            // r is i64 = 49
 
 `yield` suspends the current fiber and re-enqueues it so other fibers can run:
 
-```tin
+```rust
 fn{#async} heavy(n i64) =
   let i i64 = 0
   for i < n:
@@ -162,7 +162,7 @@ By default, every `{#async}` function **automatically emits a yield point at
 every loop backedge** in its `$coro` variant. This means loops cooperate with
 other fibers without any manual `yield` calls.
 
-```tin
+```rust
 fn{#async} count_up(n i64) i64 =
   let sum i64 = 0
   for let i i64 = 0; i < n; i = i + 1:
@@ -177,7 +177,7 @@ inside the fiber scheduler.
 
 Use `{#no_autoyield}` to disable auto-yield for a specific async function:
 
-```tin
+```rust
 fn{#async #no_autoyield} tight_loop(n i64) i64 =
   let sum i64 = 0
   for let i i64 = 0; i < n; i = i + 1:
@@ -199,7 +199,7 @@ stores the panic message on the fiber and marks it done. When you `await` that
 fiber, the panic is re-raised in the calling fiber's context - making it
 catchable with `defer + recover()` just like any other panic:
 
-```tin
+```rust
 fn{#async} risky(n i64) i64 =
   if n < 0:
     panic("negative input")
@@ -217,7 +217,7 @@ fn main() =
 
 The panic message is preserved exactly:
 
-```tin
+```rust
 fn{#async} panics_with_value(msg string) =
   panic(msg)
 
@@ -237,7 +237,7 @@ An `{#async}` function can also catch panics from fibers it spawns internally.
 When a panic is recovered and the defer does not explicitly override the return
 value, the outer awaiter receives the **zero value** of the return type:
 
-```tin
+```rust
 fn{#async} always_panics() i64 =
   panic("boom")
   return 0
@@ -255,7 +255,7 @@ test "recovered panic in async fn yields zero value" =
 
 The same applies to a `panic()` call directly inside the async function:
 
-```tin
+```rust
 fn{#async} catches_direct_panic() i64 =
   defer do:
     let _ = recover()
@@ -277,7 +277,7 @@ shutdown and re-raised on the main thread - killing the process. This matches
 Go's goroutine panic semantics: an unhandled panic in any concurrent task is
 fatal.
 
-```tin
+```rust
 fn{#async} background_task() =
   panic("something went wrong")
 
@@ -298,7 +298,7 @@ with `defer + recover()`.
 The `async` macro from `stdlib/macros` is a convenient shorthand for
 `fn{#async}`:
 
-```tin
+```rust
 use { loop, async } from macros
 
 async handle(fd i32) =   // same as fn{#async} handle(fd i32) =
@@ -315,7 +315,7 @@ async handle(fd i32) =   // same as fn{#async} handle(fd i32) =
 Suspend the current fiber for at least `ms` milliseconds without blocking the
 worker thread. `io::sleep` returns `Future[Unit]` - use `await io::sleep(ms)`:
 
-```tin
+```rust
 use io
 
 fn{#async} delayed_hello() =
@@ -331,7 +331,7 @@ fn{#async} delayed_hello() =
 Captured local variables are safely copied into an env struct before
 the fiber starts (ARC-retained if they are reference-counted types):
 
-```tin
+```rust
 use sync
 
 fn main() =
@@ -362,7 +362,7 @@ read or write would block (EAGAIN), the fiber is parked and the underlying
 file descriptor is registered with **epoll** (Linux) or **kqueue**
 (macOS/FreeBSD). The fiber is automatically woken when the fd becomes ready.
 
-```tin
+```rust
 use io
 
 fn{#async} handle_conn(fd i32) =
@@ -395,7 +395,7 @@ All are in `stdlib/io` and accessed via `io::name`.
 If you call a blocking C extern inside an `{#async}` function, the compiler
 emits a warning:
 
-```tin
+```rust
 fn raw_read(fd i32, buf *byte, n i64) i64 = extern("read") {#blocking}
 
 fn{#async} example(fd i32) =
@@ -413,7 +413,7 @@ thread.
 
 `stdlib/io` includes thin wrappers around POSIX socket helpers:
 
-```tin
+```rust
 use io
 
 let listen_fd = io::tcp_listen(8080)       // create TCP listen socket; returns fd or -errno
@@ -429,7 +429,7 @@ io::close(fd)                              // close any file descriptor
 
 ### Echo server example (low-level fd)
 
-```tin
+```rust
 use { loop, async } from macros
 use io
 
@@ -465,7 +465,7 @@ The `tcp` and `ioutil` packages provide a higher-level API:
 
 See `examples/echo_server/echo_server.tin`:
 
-```tin
+```rust
 use { loop, async } from macros
 use ioutil
 use tcp
@@ -495,7 +495,7 @@ fn main() =
 `Channel[T]` from `stdlib/sync` is a bounded FIFO channel backed by a ring
 buffer protected by a mutex and condition variables.
 
-```tin
+```rust
 use sync
 
 let ch = sync::Channel[i64].make(8)  // capacity 8
@@ -512,7 +512,7 @@ retain/release - primitive types (`i64`, `bool`, etc.) incur no overhead.
 
 ### Channel example: producer/consumer
 
-```tin
+```rust
 use sync
 
 fn{#async} producer(ch sync::Channel[string], n i64) =
@@ -541,7 +541,7 @@ fn main() =
 `Future[T]` implements the `Awaitable[t]` trait. You can implement this trait
 on your own types to make them awaitable with the `await` keyword:
 
-```tin
+```rust
 use sync
 
 struct MyResult(sync::Awaitable[i64]) =

@@ -42,6 +42,10 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 		return constant.NewInt(irtypes.I8, int64(e.Value)), nil
 
+	case *ast.NilLit:
+
+		return constant.NewNull(irtypes.I8Ptr), nil
+
 	case *ast.AtomLit:
 		// Emit atom as %__atom { i32 CRC32(name) } constant.
 
@@ -2240,6 +2244,11 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(newDataPtr, newDataGep)
 	block.NewStore(newLen, newLenGep)
+
+	// Expose the BASE allocation pointer (before the GEP offset) so that genVarDecl
+	// can retain/release the actual ARC block rather than a possibly-interior pointer.
+	// For start==0 newDataPtr==dataPtr; for start>0 newDataPtr is interior.
+	cg.lastSliceBase = block.NewBitCast(dataPtr, irtypes.I8Ptr)
 
 	return block.NewLoad(arrType, resultAlloca), nil
 }

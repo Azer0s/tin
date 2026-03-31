@@ -421,7 +421,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				return err
 			}
 			// Named Tin struct params > 16 bytes must use byval to match AMD64 ABI.
-			if nativeSt, isNative := ct.(*irtypes.StructType); isNative && nativeStructNeedsByval(nativeSt) {
+			// On ARM64, LLVM handles struct-by-value calling convention automatically
+			// (HFAs go in SIMD registers, non-HFAs via memory), so byval is not used.
+			if nativeSt, isNative := ct.(*irtypes.StructType); isNative && nativeStructNeedsByval(nativeSt) && cg.targetIsAMD64() {
 				bvParam := ir.NewParam(p.Name, irtypes.I8Ptr)
 				bvParam.Attrs = append(bvParam.Attrs, ir.Byval{Typ: nativeSt})
 				cParams = append(cParams, bvParam)

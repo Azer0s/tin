@@ -9,7 +9,7 @@ Tin provides JSON encoding and decoding through `stdlib/json`.
 
 ## Import
 
-```tin
+```rust
 use json
 ```
 
@@ -20,7 +20,7 @@ use json
 `json::encode[T](v T) string` serialises any Tin value to a JSON string.
 `T` may be a primitive type (`bool`, `i64`, `f64`), `string`, struct, or tuple.
 
-```tin
+```rust
 json::encode(42 as i64)          // "42"
 json::encode(true)               // "true"
 json::encode(false)              // "false"
@@ -33,7 +33,7 @@ json::encode("say \"hi\"")       // "\"say \\\"hi\\\"\""
 Struct fields are encoded using compile-time reflection. By default the field
 name is used as the JSON key:
 
-```tin
+```rust
 struct point =
   x i64
   y i64
@@ -48,7 +48,7 @@ type is another struct are encoded as `null` - this is a limitation of the
 reflection system, which resolves field names at compile time but cannot
 enumerate fields of runtime `any` values:
 
-```tin
+```rust
 struct rect =
   origin point
   size   point
@@ -65,7 +65,7 @@ string manually.
 Tuples are encoded as JSON objects with alphabetical field names (`a`, `b`,
 `c`, ...):
 
-```tin
+```rust
 json::encode((10, "hello"))           // "{\"a\":10,\"b\":\"hello\"}"
 json::encode((1, true, 3.14))         // "{\"a\":1,\"b\":true,\"c\":3.14}"
 ```
@@ -74,7 +74,7 @@ json::encode((1, true, 3.14))         // "{\"a\":1,\"b\":true,\"c\":3.14}"
 
 Add a `@"json:..."` tag to control how a field appears in JSON:
 
-```tin
+```rust
 struct user =
   id    i64    @"json:user_id"          // rename key
   email string @"json:email_address"   // rename key
@@ -97,7 +97,7 @@ json::encode(user{id: 1, email: "a@b.com", pwd: "secret"})
 `json::parse(s string) Value` parses a JSON string into a dynamic `Value` tree.
 Use this when the JSON structure is not known at compile time.
 
-```tin
+```rust
 let v = json::parse("{\"name\":\"alice\",\"age\":30}")
 v.get("name").as_string()   // "alice"
 v.get("age").as_int()       // 30
@@ -105,7 +105,7 @@ v.get("age").as_int()       // 30
 
 ### `Value` kind checks
 
-```tin
+```rust
 v.is_null()    // true for JSON null
 v.is_bool()
 v.is_int()
@@ -117,7 +117,7 @@ v.is_object()
 
 ### `Value` accessors
 
-```tin
+```rust
 v.as_bool()    // bool
 v.as_int()     // i64
 v.as_float()   // f64
@@ -126,7 +126,7 @@ v.as_string()  // string
 
 ### Object access
 
-```tin
+```rust
 let obj = json::parse("{\"x\":1,\"y\":2}")
 
 // Get value by key (returns null Value if missing):
@@ -141,7 +141,7 @@ for let k string in keys:
 
 ### Array access
 
-```tin
+```rust
 let arr = json::parse("[10,20,30]")
 
 arr.array_len()           // 3
@@ -158,7 +158,7 @@ arr.index(99).is_null()   // true - out of bounds returns null
 compile-time reflection. This is more convenient than untyped parsing when the
 JSON schema is fixed at compile time.
 
-```tin
+```rust
 struct point =
   x i64
   y i64
@@ -170,7 +170,7 @@ echo p.y    // 4
 
 Field tags work the same way as for encoding:
 
-```tin
+```rust
 struct api_user =
   id   i64    @"json:user_id"
   name string @"json:display_name"

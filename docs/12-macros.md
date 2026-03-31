@@ -62,7 +62,7 @@ Parameters **used in computation** should have explicit type annotations.
 Parameters used only as code fragments for backtick splicing do not need
 types - the compiler infers them from the call site.
 
-```tin
+```rust
 // Typed parameters: n is used in computation -> annotate with i64
 macro factorial!(n i64) =
   let result i64 = 1
@@ -244,7 +244,7 @@ Tags in `{...}` after `macro` change how the macro is called.
 By default macro names must end with `!` at call sites. `#no_excl` removes
 this requirement:
 
-```tin
+```rust
 macro{#no_excl} debug(x) = echo x
 
 debug(42)    // works without !
@@ -257,7 +257,7 @@ debug!(42)   // also works
 takes an indented body block. The macro itself is called without parentheses
 and is followed by `:`:
 
-```tin
+```rust
 macro{#no_excl #no_parens} loop() = return `for true`
 
 loop:
@@ -275,13 +275,13 @@ This is how the `loop` stdlib macro works.
 The `macros` package (`stdlib/macros/macros.tin`) provides commonly used
 macros. Import specific ones with selective syntax:
 
-```tin
+```rust
 use { loop, async } from macros
 ```
 
 ### `loop` - infinite loop
 
-```tin
+```rust
 use { loop } from macros
 
 loop:
@@ -293,7 +293,7 @@ Expands to `for true:`. Tags: `#no_excl #no_parens`.
 
 ### `async` - async function shorthand
 
-```tin
+```rust
 use { async } from macros
 
 async worker(n i64) =   // same as fn{#async} worker(n i64) =
@@ -314,7 +314,7 @@ Expands to `fn{#async}`. Tags: `#no_excl #no_parens`.
 | `todo!()`         | panic at runtime      | marks unimplemented code paths    |
 | `unreachable!()`  | panic at runtime      | marks branches that must not run  |
 
-```tin
+```rust
 use { min, max, clamp, abs } from macros
 
 echo min!(3, 7)          // 3

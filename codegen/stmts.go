@@ -602,6 +602,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		srcType := initVal.Type()
 		initVal = cg.coerce(block, initVal, llType)
 		block.NewStore(initVal, alloca)
+
 		// ARC: retain when copying from an existing variable (identifier).
 		// emitRetain handles RC-tracked values (fat arrays, strings, any) and
 		// named structs with RC-tracked fields, and is a no-op for everything else.
@@ -618,24 +619,40 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		block.NewStore(cg.zeroValue(llType), alloca)
 	}
 
+	// Consume lastSliceBase: genSliceExpr sets it to the base allocation pointer
+	// (before any GEP offset) so that ARC retain/release works on the real ARC
+	// header rather than a possibly-interior fat-ptr field-0 pointer.
+	// We read it here (after genExpr returns) so that any nested expression that
+	// also calls genSliceExpr doesn't clobber our value.
+	sliceBase := cg.lastSliceBase
+	cg.lastSliceBase = nil
+	if sliceBase != nil {
+		// Retain the base pointer once to balance the scope-exit release below.
+		block.NewCall(cg.ensureRetain(), sliceBase)
+	}
+
 	// If there is already an RC-tracked variable with the same name in the CURRENT
 	// (not parent) scope, release it before overwriting the entry.  This handles
 	// re-declarations inside loop bodies (e.g. `for ...: let x = recv()`)
 	// where the same name is declared on every iteration and the old value would
 	// otherwise be orphaned.
 	if existing, ok := cg.curScope.vars[s.Name]; ok && existing.isAlloc && existing.isRC {
-		existingPtrType, isPtrType := existing.val.Type().(*irtypes.PointerType)
-		if isPtrType {
-			oldVal := block.NewLoad(existingPtrType.ElemType, existing.val)
-			if existing.noDeinit {
-				cg.emitReleaseNoDeinit(block, oldVal)
-			} else {
-				cg.emitRelease(block, oldVal)
+		if existing.basePtr != nil {
+			block.NewCall(cg.ensureRelease(), existing.basePtr)
+		} else {
+			existingPtrType, isPtrType := existing.val.Type().(*irtypes.PointerType)
+			if isPtrType {
+				oldVal := block.NewLoad(existingPtrType.ElemType, existing.val)
+				if existing.noDeinit {
+					cg.emitReleaseNoDeinit(block, oldVal)
+				} else {
+					cg.emitRelease(block, oldVal)
+				}
 			}
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC})
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase})
 
 	return block, nil
 }
@@ -1794,10 +1811,15 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 
 	// Cond
 	if s.Cond != nil {
+		cg.curBlock = condBlock
 		cond, err := cg.genExpr(condBlock, s.Cond)
 		if err != nil {
 			return nil, err
 		}
+		if cg.curBlock != nil && cg.curBlock != condBlock {
+			condBlock = cg.curBlock
+		}
+		cg.curBlock = nil
 		cond = cg.toBool(condBlock, cond)
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
 	} else {

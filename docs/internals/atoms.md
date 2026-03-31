@@ -3,7 +3,7 @@
 Atoms are lightweight, globally unique symbolic values  -  similar to atoms in Erlang/Elixir or
 symbols in Ruby/Lisp. They are written with a leading apostrophe:
 
-```tin
+```rust
 let status = 'ok
 let kind   = 'error
 let tag    = '"fn(i64)bool"   // quoted form for names with special characters
@@ -113,7 +113,7 @@ New strings are `strdup`'d so the caller's storage does not need to persist.
 When an atom value is passed to an `extern` (C) function, the compiler automatically calls
 `__tin_atom_to_string` and passes the resulting `i8*` (the bare atom name) to the C function:
 
-```tin
+```rust
 fn print_atom(a atom) = extern("my_c_func")
 // Tin calls: my_c_func(__tin_atom_to_string(a.code).ptr)
 ```
@@ -125,7 +125,7 @@ compiler calls `__tin_string_to_atom` to convert back (no apostrophe required in
 
 Inline extern declarations use a string literal to specify the C symbol name:
 
-```tin
+```rust
 fn abs(x i64) i64    = extern("labs")
 fn sqrt(x f64) f64   = extern("sqrt")
 fn kind(t atom) string = extern("_tin_reflect_kind")
@@ -133,7 +133,7 @@ fn kind(t atom) string = extern("_tin_reflect_kind")
 
 The `use extern {}` block form still uses identifiers (optionally with an override string):
 
-```tin
+```rust
 use extern {
     malloc("my_malloc") as fn(i64) *void
     free as fn(*void)
@@ -157,7 +157,7 @@ so they never need retain/release calls.
 
 The `typeof`, `traitof`, `fieldnames`, and `fieldtypes` builtins return atoms. For example:
 
-```tin
+```rust
 let x i64 = 42
 echo typeof(x)         // i64
 let r = rect { w: 10, h: 20 }

@@ -4,7 +4,7 @@
 
 `stdlib/reflect/reflect.c` - compiled alongside `reflect.tin` via:
 
-```tin
+```rust
 //!+reflect.c -- -I ../../runtime
 ```
 

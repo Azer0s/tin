@@ -69,7 +69,7 @@ if cg.curFnAutoYield {
 
 Add the `#no_autoyield` tag to disable auto-yield for a specific function:
 
-```tin
+```rust
 fn{#async #no_autoyield} tight_loop(n i64) i64 =
   let sum i64 = 0
   for let i i64 = 0; i < n; i = i + 1:

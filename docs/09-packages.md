@@ -26,7 +26,7 @@ greeter::greet("world")
 Package names map to directories under `stdlib/`. The short name `sync`
 resolves to `stdlib/sync/sync.tin`. You can also use the path form with `::`:
 
-```tin
+```rust
 use sync          // stdlib/sync/sync.tin - preferred
 use std::sync     // same package via a nested path
 ```
@@ -37,7 +37,7 @@ For the standard library the short form (`use sync`) is always preferred.
 
 Import only specific names to avoid pulling the whole namespace into scope:
 
-```tin
+```rust
 use { Channel, AtomicI64 } from sync
 
 let ch = Channel[i64].make(8)
@@ -48,7 +48,7 @@ let c  = AtomicI64.make(0)
 
 Import from a relative file path:
 
-```tin
+```rust
 use "./helpers.tin"
 
 helpers::greet("world")
@@ -56,7 +56,7 @@ helpers::greet("world")
 
 Selective imports also work with file paths:
 
-```tin
+```rust
 use { greet } from "./helpers.tin"
 
 greet("world")
@@ -103,7 +103,7 @@ echo std::math::PI
 
 ## `io` - input/output
 
-```tin
+```rust
 use io
 
 io::puts("hello")                                              // stdout
@@ -115,7 +115,7 @@ Async I/O integrates with the fiber scheduler. Low-level functions
 Higher-level functions (`sleep`, `write_all`, `read_exact`) return `Future[T]`
 and are awaited directly:
 
-```tin
+```rust
 fn{#async} handler(fd i32) =
   let buf [byte; 4096]
   let n = await spawn io::async_read(fd, &buf[0], 4096)   // {#async} - needs spawn
@@ -130,7 +130,7 @@ Exported I/O traits: `Reader`, `Writer` (sync), `AsyncReader`, `AsyncWriter`
 
 ## `ioutil` - line-oriented I/O
 
-```tin
+```rust
 use ioutil
 use tcp
 
@@ -147,7 +147,7 @@ trait values.
 
 ## `tcp` - TCP connections
 
-```tin
+```rust
 use tcp
 
 let srv = tcp::listen(8080)    // Server
@@ -163,7 +163,7 @@ directly with `ioutil`.
 
 ## `sync` - concurrency primitives
 
-```tin
+```rust
 use sync
 
 let ch  = sync::Channel[i64].make(8)   // bounded channel, cap 8
@@ -177,7 +177,7 @@ See [14 - Fibers & Channels](14-fibers.md) for fiber and channel usage.
 
 ## `math` - mathematics
 
-```tin
+```rust
 //!-lm
 use math
 
@@ -191,7 +191,7 @@ Requires `//!-lm` at the top of the file.
 
 ## `assert` - test assertions
 
-```tin
+```rust
 use assert
 
 assert::equals(result, 42)
@@ -208,7 +208,7 @@ See [11 - Testing](11-testing.md) for full test block syntax.
 
 `use std` imports `io`, `math`, `os`, and `assert` in one step:
 
-```tin
+```rust
 use std
 
 io::puts("hello")

@@ -52,7 +52,7 @@ test "LIFO order: last-registered defer's return wins" =
 
 fn lambda_returns_nil() i64 =
   defer (fn() *i64 =
-    return None
+    return nil
   )()
   return 100
 

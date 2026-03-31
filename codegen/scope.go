@@ -24,6 +24,11 @@ type scopeEntry struct {
 	isRC     bool        // true if the alloca holds an ARC-managed value ([T] or any)
 	noDeinit bool        // true for the `this` parameter of a deinit method (prevents recursive deinit)
 	isGlobal bool        // true for module-level globals; skip in per-function scope release
+	// basePtr is set for slice variables (arr[start:end]).  Because the fat-ptr
+	// stores an interior pointer (offset into the allocation), ARC retain/release
+	// must operate on the base allocation pointer, not the possibly-interior field 0.
+	// When non-nil, scope-exit releases basePtr directly instead of the fat-ptr.
+	basePtr value.Value // i8* base allocation pointer for slice variables; nil otherwise
 }
 
 type scope struct {

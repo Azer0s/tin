@@ -203,7 +203,7 @@ worker thread. The calling fiber simply parks until the target is done.
 The `await` guard checks only the **type** of the expression - any
 `Awaitable[T]` value can be awaited, regardless of how it was produced:
 
-```tin
+```rust
 // All valid - expression evaluates to Awaitable[T]:
 await spawn fn_b(args)       // spawn returns Future[T]
 let f = spawn fn_b(args)

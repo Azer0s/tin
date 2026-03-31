@@ -48,6 +48,9 @@ func printNode(n Node, depth int) string {
 	case *Identifier:
 
 		return v.Name
+	case *NilLit:
+
+		return "nil"
 	case *WildcardExpr:
 
 		return "_"

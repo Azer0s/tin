@@ -10,7 +10,7 @@ Tin provides PCRE-based regular expressions through `stdlib/regex`.
 
 ## Import
 
-```tin
+```rust
 use regex
 ```
 
@@ -18,7 +18,7 @@ use regex
 
 ## Compiling a pattern
 
-```tin
+```rust
 let re = regex::compile("^hello (\\w+)$")
 if re.is_err():
   echo "compile error: {re.err_msg()}"
@@ -32,7 +32,7 @@ Tin string literals (`\\w`, `\\d`, `\\s`, etc.).
 
 ## Executing a match
 
-```tin
+```rust
 let re = regex::compile("(\\w+)@(\\w+\\.\\w+)")
 let m  = re.exec("send mail to user@example.com please")
 
@@ -60,7 +60,7 @@ These one-shot functions compile and execute in a single call:
 
 Returns `true` if the pattern matches anywhere in `s`:
 
-```tin
+```rust
 if regex::matches("^\\d+$", "12345"):
   echo "all digits"
 ```
@@ -69,7 +69,7 @@ if regex::matches("^\\d+$", "12345"):
 
 Returns the first match, or `""` if there is no match:
 
-```tin
+```rust
 let first = regex::find("\\d+", "abc 123 def 456")
 echo first   // "123"
 ```
@@ -78,7 +78,7 @@ echo first   // "123"
 
 Returns all non-overlapping matches as an array of strings:
 
-```tin
+```rust
 let nums = regex::find_all("\\d+", "a1 b22 c333")
 // nums: ["1", "22", "333"]
 for let n string in nums:
@@ -89,7 +89,7 @@ for let n string in nums:
 
 Replaces the **first** occurrence of the pattern with `repl`:
 
-```tin
+```rust
 let result = regex::replace("\\s+", "hello   world", " ")
 echo result   // "hello world"
 ```
@@ -98,7 +98,7 @@ echo result   // "hello world"
 
 Replaces **all** non-overlapping occurrences:
 
-```tin
+```rust
 let result = regex::replace_all("\\d", "a1b2c3", "*")
 echo result   // "a*b*c*"
 ```
@@ -107,7 +107,7 @@ echo result   // "a*b*c*"
 
 Splits `s` on every match of the pattern:
 
-```tin
+```rust
 let parts = regex::split(",\\s*", "one, two,three,  four")
 // parts: ["one", "two", "three", "four"]
 ```
@@ -119,7 +119,7 @@ let parts = regex::split(",\\s*", "one, two,three,  four")
 When the same pattern is used many times, compile it once and reuse the
 `Regex` value:
 
-```tin
+```rust
 let re = regex::compile("\\d+")
 if re.is_err():
   return

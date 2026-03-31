@@ -94,7 +94,7 @@ The `assert` stdlib (`stdlib/assert/assert.tin`) implements the comparison and
 message-formatting logic entirely in tin, then calls `_tin_assert_abort` with
 the formatted message. For example:
 
-```tin
+```rust
 fn equals(actual i64, expected i64) =
   if actual != expected
     _tin_assert_abort("expected " + str(expected) + ", got " + str(actual))

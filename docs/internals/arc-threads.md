@@ -36,7 +36,7 @@ slices), the compiler emits a **retain** on each such argument before the spawn
 and a corresponding **release** inside the spawned coroutine after it has
 finished using the value.
 
-```tin
+```rust
 fn{#async} worker(s string) =
   echo s      // s is retained by the spawn; released when worker exits
 

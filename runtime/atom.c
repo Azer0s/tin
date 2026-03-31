@@ -61,10 +61,16 @@ int32_t _tin_learn_atom(const char *str) {
             }
         }
     } while (collision);
-    /* Prepend a new node; strdup so the caller's storage need not persist */
+    /* Prepend a new node; allocate the string as an immortal ARC block so
+     * that _tin_retain/_tin_release on it are safe no-ops. */
+    size_t len = strlen(str);
+    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + len + 1);
+    hdr->rc = TIN_IMMORTAL_RC;
+    char *s = (char *)(hdr + 1);
+    memcpy(s, str, len + 1);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
     node->code = code;
-    node->str  = strdup(str);
+    node->str  = s;
     node->next = _tin_rt_atom_head;
     _tin_rt_atom_head = node;
     pthread_mutex_unlock(&_tin_rt_atom_mu);

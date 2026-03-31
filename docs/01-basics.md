@@ -146,7 +146,7 @@ const PI  f64 = 3.14159265
 `var` declares a mutable package-level variable. It lives outside any
 function and is visible throughout the entire file:
 
-```tin
+```rust
 var counter i64          // zero-initialized (0)
 var name    string       // zero-initialized ("")
 var flag    bool = true  // optional initializer, runs once at startup
@@ -160,7 +160,7 @@ Key properties:
 - **Hoisted**: visible throughout the file regardless of declaration order
 - **Exported** when the name starts with an uppercase letter
 
-```tin
+```rust
 var TotalRequests i64   // exported - readable from other packages
 
 fn handle() =

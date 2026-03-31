@@ -74,6 +74,7 @@ const (
 	KW_SPAWN
 	KW_AWAIT
 	KW_YIELD
+	KW_NIL
 
 	// Operators
 	PLUS      // +
@@ -154,7 +155,7 @@ var tokenNames = map[TokenType]string{
 	KW_FIELDTYPES: "fieldtypes", KW_FIELDTAG: "fieldtag",
 	KW_GETFIELD: "getfield", KW_SETFIELD: "setfield", KW_PASS: "pass",
 	KW_ISRC: "isrc",
-	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield",
+	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield", KW_NIL: "nil",
 	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
@@ -191,7 +192,7 @@ var keywords = map[string]TokenType{
 	"fieldtypes": KW_FIELDTYPES, "fieldtag": KW_FIELDTAG,
 	"getfield": KW_GETFIELD, "setfield": KW_SETFIELD, "pass": KW_PASS,
 	"isrc": KW_ISRC,
-	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD,
+	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD, "nil": KW_NIL,
 	"true": BOOL_LIT, "false": BOOL_LIT,
 }
 

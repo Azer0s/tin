@@ -265,6 +265,13 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if !entry.isAlloc {
 			continue
 		}
+		// Slice variables store the base allocation pointer separately so that
+		// ARC release hits the real ARC header rather than an interior pointer.
+		if entry.basePtr != nil {
+			block.NewCall(cg.ensureRelease(), entry.basePtr)
+
+			continue
+		}
 		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 		if !ok {
 			continue
@@ -289,6 +296,12 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 	for s != nil {
 		for name, entry := range s.vars {
 			if name == skipName || !entry.isAlloc || entry.isGlobal {
+				continue
+			}
+			// Slice variables: release the base allocation pointer, not the fat-ptr.
+			if entry.basePtr != nil {
+				block.NewCall(cg.ensureRelease(), entry.basePtr)
+
 				continue
 			}
 			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
