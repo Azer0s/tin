@@ -34,7 +34,7 @@ jobs:
           args: --timeout=5m
 
       - name: Run example tests
-        run: ./tin test examples/ -lm
+        run: ./tin test examples/... -lm
 
       - name: Run fiber example tests
         run: |
@@ -77,4 +77,22 @@ jobs:
             echo "=== $name ==="
             ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
             "/tmp/tin_arc_${name}"
+          done
+
+      - name: Run echo server stress test
+        run: |
+          ./tin build examples/echo_server/echo_server_bad.tin -o /tmp/echo_server_bad
+          python3 examples/echo_server/stress_test.py
+
+      - name: Run I/O stress tests under valgrind
+        # Uses build-test so the same binary that runs under `tin test` is
+        # checked for memory errors. --leak-check=no matches the policy used
+        # for all other fiber tests (fibers use OS threads; leak accounting
+        # across thread stacks produces false positives).
+        run: |
+          for f in examples/io_stress/*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== valgrind: $name ==="
+            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done

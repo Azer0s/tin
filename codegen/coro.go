@@ -73,7 +73,7 @@ func (cg *CodeGen) ensureCoroIntrinsics() {
 		ir.NewParam("", coroTokType),
 		ir.NewParam("", irtypes.I1),
 	})
-	cg.coroEndFn = cg.ensureIntrinsic("llvm.coro.end", irtypes.I1, []*ir.Param{
+	cg.coroEndFn = cg.ensureIntrinsic("llvm.coro.end", irtypes.Void, []*ir.Param{
 		ir.NewParam("", irtypes.I8Ptr),
 		ir.NewParam("", irtypes.I1),
 		ir.NewParam("", coroTokType),

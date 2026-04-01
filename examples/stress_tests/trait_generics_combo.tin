@@ -1,0 +1,218 @@
+// stress_tests/trait_generics_combo.tin
+//
+// Tests: combinations of trait constraints with generics that stress the
+// monomorphization and trait dispatch machinery:
+//   - Generic function with multiple trait constraints on the same type param
+//   - Generic struct that implements multiple traits
+//   - One struct implementing the same generic trait twice with different types
+//   - Trait method calling another trait method on the same receiver
+//   - Forward-field traits combined with virtual traits
+//   - Generic functions that call other generic functions with constraints
+//   - Trait default methods that call virtual methods (vtable through default)
+//
+// Compiler paths exercised:
+//   - Multiple trait constraint checking at the same call site
+//   - Disambiguated trait method calls (traitName::method)
+//   - Vtable generation for structs implementing multiple traits
+
+use assert
+
+// ---------------------------------------------------------------------------
+// Traits
+// ---------------------------------------------------------------------------
+
+trait labeled =
+  fn label(this labeled) string = virtual
+
+trait measurable =
+  fn measure(this measurable) i64 = virtual
+
+trait comparable =
+  fn compare_to(this comparable, other i64) i64 = virtual  // negative/0/positive
+
+trait summarizable =
+  fn summary(this summarizable) string =
+    return "item"   // default; can be overridden
+
+trait named_size =
+  name_field string forward
+  size_field i64    forward
+  fn info(this named_size) string =
+    return "{this.name_field}(size={this.size_field})"
+
+// ---------------------------------------------------------------------------
+// Structs
+// ---------------------------------------------------------------------------
+
+struct widget(labeled, measurable, comparable, summarizable, named_size) =
+  name_field string
+  size_field i64
+  color      string
+
+  fn label(this widget) string =
+    return "{this.name_field}/{this.color}"
+
+  fn measure(this widget) i64 =
+    return this.size_field * this.size_field
+
+  fn compare_to(this widget, other i64) i64 =
+    let m = this.measure()
+    if m < other:
+      return 0 - 1
+    if m > other:
+      return 1
+    return 0
+
+  fn summary(this widget) string =
+    return "widget[{this.name_field}, size={this.size_field}, color={this.color}]"
+
+struct gadget(labeled, measurable, comparable, named_size) =
+  name_field string
+  size_field i64
+
+  fn label(this gadget) string =
+    return "gadget:{this.name_field}"
+
+  fn measure(this gadget) i64 =
+    return this.size_field * 2
+
+  fn compare_to(this gadget, other i64) i64 =
+    let m = this.measure()
+    if m < other:
+      return 0 - 1
+    if m > other:
+      return 1
+    return 0
+
+// ---------------------------------------------------------------------------
+// Generic functions with multiple constraints
+// ---------------------------------------------------------------------------
+
+fn describe_item[t](x t) string where t is labeled+measurable =
+  return "{x.label()} measures {x.measure()}"
+
+fn rank[t](x t, baseline i64) string where t is labeled+measurable+comparable =
+  let cmp = x.compare_to(baseline)
+  if cmp < 0:
+    return "{x.label()} is below baseline"
+  if cmp > 0:
+    return "{x.label()} is above baseline"
+  return "{x.label()} equals baseline"
+
+fn summarize_all[t](items [t]) [string] where t is summarizable =
+  let out [string] = []
+  for let item t in items:
+    out ++= item.summary()
+  return out
+
+fn find_largest[t](items [t]) i64 where t is measurable =
+  let max i64 = 0 - 9999999
+  for let item t in items:
+    let m = item.measure()
+    if m > max:
+      max = m
+  return max
+
+// ---------------------------------------------------------------------------
+// Generic function calling another generic function
+// ---------------------------------------------------------------------------
+
+fn compare_pair[t](a t, b t) string where t is labeled+measurable =
+  let diff = a.measure() - b.measure()
+  if diff > 0:
+    return "{a.label()} > {b.label()}"
+  if diff < 0:
+    return "{a.label()} < {b.label()}"
+  return "{a.label()} == {b.label()}"
+
+// ---------------------------------------------------------------------------
+// One struct implementing the same generic trait concept at two types
+// (using two different method names that serve as iter-like roles)
+// ---------------------------------------------------------------------------
+
+struct dual_container =
+  ints    [i64]
+  strings [string]
+
+  fn count_ints(this dual_container) i64 =
+    return len(this.ints)
+
+  fn count_strings(this dual_container) i64 =
+    return len(this.strings)
+
+  fn get_int(this dual_container, i i64) i64 =
+    return this.ints[i]
+
+  fn get_string(this dual_container, i i64) string =
+    return this.strings[i]
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "describe_item with widget" =
+  let w = widget{name_field: "btn", size_field: 5, color: "red"}
+  assert::equals_str(describe_item(w), "btn/red measures 25")
+
+test "describe_item with gadget" =
+  let g = gadget{name_field: "knob", size_field: 8}
+  assert::equals_str(describe_item(g), "gadget:knob measures 16")
+
+test "rank widget above baseline" =
+  let w = widget{name_field: "w", size_field: 5, color: "blue"}
+  assert::equals_str(rank(w, 20), "w/blue is above baseline")
+
+test "rank widget below baseline" =
+  let w = widget{name_field: "w", size_field: 3, color: "blue"}
+  assert::equals_str(rank(w, 20), "w/blue is below baseline")
+
+test "rank widget equals baseline" =
+  let w = widget{name_field: "w", size_field: 5, color: "blue"}
+  assert::equals_str(rank(w, 25), "w/blue equals baseline")
+
+test "summarize_all uses default for gadget (no summary override)" =
+  let items [gadget] = [
+    gadget{name_field: "a", size_field: 1},
+    gadget{name_field: "b", size_field: 2},
+  ]
+  let summaries = summarize_all(items)
+  // gadget doesn't override summary(), uses default "item"
+  assert::equals_str(summaries[0], "item")
+  assert::equals_str(summaries[1], "item")
+
+test "summarize_all uses override for widget" =
+  let items [widget] = [
+    widget{name_field: "x", size_field: 3, color: "g"},
+    widget{name_field: "y", size_field: 4, color: "r"},
+  ]
+  let summaries = summarize_all(items)
+  assert::equals_str(summaries[0], "widget[x, size=3, color=g]")
+
+test "find_largest across widgets" =
+  let items [widget] = [
+    widget{name_field: "s", size_field: 2, color: "r"},  // measure=4
+    widget{name_field: "m", size_field: 5, color: "g"},  // measure=25
+    widget{name_field: "l", size_field: 3, color: "b"},  // measure=9
+  ]
+  assert::equals(find_largest(items), 25)
+
+test "compare_pair widgets" =
+  let big = widget{name_field: "big", size_field: 10, color: "r"}
+  let small = widget{name_field: "small", size_field: 2, color: "b"}
+  assert::equals_str(compare_pair(big, small), "big/r > small/b")
+
+test "named_size forward field trait" =
+  let w = widget{name_field: "btn", size_field: 7, color: "g"}
+  assert::equals_str(w.info(), "btn(size=7)")
+  let g = gadget{name_field: "knob", size_field: 4}
+  assert::equals_str(g.info(), "knob(size=4)")
+
+test "dual_container independent type counts" =
+  let dc = dual_container{
+    ints: [1, 2, 3],
+    strings: ["a", "b"],
+  }
+  assert::equals(dc.count_ints(), 3)
+  assert::equals(dc.count_strings(), 2)
+  assert::equals(dc.get_int(1), 2)
+  assert::equals_str(dc.get_string(0), "a")

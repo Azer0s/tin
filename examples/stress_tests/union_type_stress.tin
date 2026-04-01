@@ -1,0 +1,191 @@
+// stress_tests/union_type_stress.tin
+//
+// Tests: tagged union types in complex scenarios:
+//   - Union with many variants (5+)
+//   - Union of union types (nested tagged unions)
+//   - Union assigned in one branch, read in another (SSA across branches)
+//   - Union in struct fields
+//   - Union in arrays
+//   - is-binding chain on the same union variable
+//   - Union passed to generic function
+//   - match.(type) on union inside a loop
+//   - Union type returned from function, immediately matched
+//
+// Compiler paths exercised:
+//   - Tagged union layout for N>2 variants
+//   - Phi nodes for union values across branches
+//   - Union field access in struct with mixed non-union fields
+//   - Type tag comparison in a loop
+
+use assert
+
+// ---------------------------------------------------------------------------
+// 1. Union with many variants
+// ---------------------------------------------------------------------------
+
+type json_val = i64 | f64 | string | bool | bool  // note: last bool = null sentinel
+
+// Using a five-way union: int, float, string, bool, and a null flag
+// In practice we encode null as a second bool variant -- the compiler
+// must handle two identical inner types with distinct tags.
+// Better: use a dedicated null type via a struct.
+struct json_null =
+  pass
+
+type json5 = i64 | f64 | string | bool | json_null
+
+fn json5_type_name(v json5) string =
+  match v.(type):
+    case _ i64:      return "int"
+    case _ f64:      return "float"
+    case _ string:   return "string"
+    case _ bool:     return "bool"
+    case _ json_null: return "null"
+
+fn json5_to_i64(v json5) i64 =
+  if v is n i64:
+    return n
+  if v is x f64:
+    return x as i64
+  if v is s string:
+    return len(s)
+  if v is b bool:
+    if b:
+      return 1
+    return 0
+  return 0 - 1  // null
+
+// ---------------------------------------------------------------------------
+// 2. Union in struct field
+// ---------------------------------------------------------------------------
+
+struct tagged_value =
+  name  string
+  value json5
+
+fn describe_tagged(tv tagged_value) string =
+  return "{tv.name}: {json5_type_name(tv.value)}"
+
+// ---------------------------------------------------------------------------
+// 3. Union in an array, iterated with match
+// ---------------------------------------------------------------------------
+
+fn count_ints(items [json5]) i64 =
+  let count i64 = 0
+  for let v json5 in items:
+    if v is _ i64:
+      count = count + 1
+  return count
+
+fn sum_numeric(items [json5]) f64 =
+  let total f64 = 0.0
+  for let v json5 in items:
+    match v.(type):
+      case n i64:
+        total = total + n as f64
+      case x f64:
+        total = total + x
+      default:
+        pass
+  return total
+
+// ---------------------------------------------------------------------------
+// 4. Union assigned conditionally, later matched
+//    Tests that the union SSA value is correctly constructed at each branch
+//    merge point.
+// ---------------------------------------------------------------------------
+
+fn make_json5(flag bool, n i64) json5 =
+  if flag:
+    return n as json5
+  return (n as f64 * 1.5) as json5
+
+// ---------------------------------------------------------------------------
+// 5. Two-level union: union of tagged unions
+// ---------------------------------------------------------------------------
+
+type num_or_str = i64 | string
+type rich_val = num_or_str | bool
+
+fn rich_describe(v rich_val) string =
+  match v.(type):
+    case n num_or_str:
+      match n.(type):
+        case i i64:   return "int:{i}"
+        case s string: return "str:{s}"
+    case b bool:
+      if b:
+        return "yes"
+      return "no"
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "json5 type names" =
+  assert::equals_str(json5_type_name(42 as json5), "int")
+  assert::equals_str(json5_type_name(3.14 as json5), "float")
+  assert::equals_str(json5_type_name("hello" as json5), "string")
+  assert::equals_str(json5_type_name(true as json5), "bool")
+  assert::equals_str(json5_type_name(json_null{} as json5), "null")
+
+test "json5 to i64 coercion" =
+  assert::equals(json5_to_i64(7 as json5), 7)
+  assert::equals(json5_to_i64(2.9 as json5), 2)
+  assert::equals(json5_to_i64("abc" as json5), 3)
+  assert::equals(json5_to_i64(true as json5), 1)
+  assert::equals(json5_to_i64(false as json5), 0)
+  assert::equals(json5_to_i64(json_null{} as json5), 0 - 1)
+
+test "union in struct field" =
+  let tv = tagged_value{name: "score", value: 100 as json5}
+  assert::equals_str(describe_tagged(tv), "score: int")
+  let tv2 = tagged_value{name: "pi", value: 3.14 as json5}
+  assert::equals_str(describe_tagged(tv2), "pi: float")
+
+test "count_ints in heterogeneous array" =
+  let items [json5] = [
+    1 as json5,
+    "x" as json5,
+    2 as json5,
+    true as json5,
+    3 as json5,
+  ]
+  assert::equals(count_ints(items), 3)
+
+test "sum_numeric from mixed array" =
+  let items [json5] = [
+    10 as json5,
+    2.5 as json5,
+    "ignored" as json5,
+    5 as json5,
+  ]
+  assert::equals_f64(sum_numeric(items), 17.5)
+
+test "union assigned conditionally" =
+  let v1 = make_json5(true, 5)
+  let v2 = make_json5(false, 4)
+  assert::ok(v1 is i64)
+  assert::ok(v2 is f64)
+  assert::equals(json5_to_i64(v1), 5)
+  // 4 * 1.5 = 6.0 -> as i64 = 6
+  assert::equals(json5_to_i64(v2), 6)
+
+test "union is-binding chain on same variable" =
+  let v json5 = "hello" as json5
+  let hit_int bool = false
+  let hit_str bool = false
+  if v is _ i64:
+    hit_int = true
+  if v is s string:
+    hit_str = true
+  assert::not_ok(hit_int)
+  assert::ok(hit_str)
+
+test "two-level union rich_val" =
+  let a rich_val = (42 as num_or_str) as rich_val
+  let b rich_val = ("tin" as num_or_str) as rich_val
+  let c rich_val = true as rich_val
+  assert::equals_str(rich_describe(a), "int:42")
+  assert::equals_str(rich_describe(b), "str:tin")
+  assert::equals_str(rich_describe(c), "yes")

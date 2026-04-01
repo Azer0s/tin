@@ -1016,11 +1016,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			} else {
 				ovCallee = oEntry.val
 			}
+			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
 			}
+			result := block.NewCall(ovCallee, argVals...)
+			for i, astArg := range e.Args {
+				if i >= len(argValsPreCoerce) {
+					break
+				}
+				preCoerce := argValsPreCoerce[i]
+				postCoerce := argVals[i]
+				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+					cg.emitRelease(block, postCoerce)
 
-			return block.NewCall(ovCallee, argVals...), nil
+					continue
+				}
+				if !isRCTrackedType(preCoerce.Type()) {
+					continue
+				}
+				if isCopyExpr(astArg) {
+					continue
+				}
+				cg.emitRelease(block, preCoerce)
+			}
+			if irtypes.IsVoid(result.Type()) {
+				return nil, nil
+			}
+
+			return result, nil
 		}
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
@@ -1347,11 +1371,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					} else {
 						ovCallee = oEntry.val
 					}
+					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
 						argVals = cg.adaptArgs(block, argVals, f.Sig)
 					}
+					result := block.NewCall(ovCallee, argVals...)
+					for i, astArg := range e.Args {
+						if i >= len(argValsPreCoerce) {
+							break
+						}
+						preCoerce := argValsPreCoerce[i]
+						postCoerce := argVals[i]
+						if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+							cg.emitRelease(block, postCoerce)
 
-					return block.NewCall(ovCallee, argVals...), nil
+							continue
+						}
+						if !isRCTrackedType(preCoerce.Type()) {
+							continue
+						}
+						if isCopyExpr(astArg) {
+							continue
+						}
+						cg.emitRelease(block, preCoerce)
+					}
+					if irtypes.IsVoid(result.Type()) {
+						return nil, nil
+					}
+
+					return result, nil
 				}
 			}
 		}
@@ -3397,13 +3445,12 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	}
 
 	// Coerce arguments to match coro function params.
+	// Note: no ARC retain here - the $coro ramp block retains RC-tracked
+	// params before the initial suspend (see genCoroFuncBody).  A caller-side
+	// retain would double-count and produce a leak.
 	for i, val := range callArgs {
 		if i < len(coroFn.Params) {
 			callArgs[i] = cg.coerce(block, val, coroFn.Params[i].Type())
-		}
-		// ARC: retain cross-fiber arguments so the fiber owns a reference.
-		if isRCTrackedType(callArgs[i].Type()) {
-			cg.emitRetain(block, callArgs[i])
 		}
 	}
 

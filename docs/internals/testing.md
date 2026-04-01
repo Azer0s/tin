@@ -130,3 +130,75 @@ define i32 @main() {
 
 The exit code is `0` (all passed) or `1` (at least one failure), suitable for
 use in CI pipelines.
+
+---
+
+## Directory mode
+
+`tin test <dir>` calls `runDirTests(dir, extraFlags)` in `main.go`. It reads
+the directory entries once, skips non-`.tin` files, and skips files whose
+parsed AST has no test blocks (`!cg.HasTests()`).
+
+## Recursive directory mode (`dir/...`)
+
+`tin test <dir>/...` strips the trailing `...` component (detected via
+`filepath.Base(file) == "..."`), then calls `runDirTestsRecursive`. The
+function walks the tree depth-first and calls `runDirTests` on every
+subdirectory that contains at least one `.tin` file.
+
+Directories named `wip` are skipped. This convention marks test files that
+exercise compiler features which are not yet fully implemented -- they remain
+in-tree as specification and regression targets but are excluded from the
+normal CI gate. When the underlying compiler bug is fixed the file should be
+moved out of `wip/` and into the parent directory.
+
+## CI pipeline
+
+The CI workflow (`.github/workflows/ci.yml`) runs:
+
+1. `./tin test examples/... -lm` -- covers all test-block files in `examples/`
+   and every subdirectory except `wip/`.
+2. Per-binary build loops for `examples/fibers/` and `examples/arc_stress/`
+   (these are build-and-run programs, not test-block files).
+3. Selected valgrind runs for fiber and ARC stress binaries.
+4. `examples/echo_server/stress_test.py` -- builds `echo_server_bad` and runs
+   the Python stress harness against it.
+5. `examples/io_stress/` valgrind loop -- compiles each test file with
+   `tin build-test`, then runs the resulting binary under
+   `valgrind --error-exitcode=1 --leak-check=no`.
+
+## examples/stress_tests layout
+
+```
+examples/stress_tests/
+  async_channel_patterns.tin   -- channel fan-out, fan-in, pipeline
+  async_nested_await.tin       -- await spawn patterns, phi nodes across awaits
+  deep_generics.tin            -- skipped: multi-line method chaining not parsed
+  dominance_edge_cases.tin     -- IR dominance regression tests
+  mixed_async_sync.tin         -- sync helpers called from async functions
+  ...
+  wip/
+    init_deinit_stress.tin     -- compiler bug: deinit fires in FIFO not LIFO order
+    return_closures.tin        -- compiler bug: closure-over-array hangs
+
+```
+
+## examples/io_stress layout
+
+I/O-focused tests that run under valgrind:
+
+```
+examples/io_stress/
+  channel_fanout.tin    -- N consumers, shared buffered channel, spawn do: capture
+  concurrent_writes.tin -- N fibers concurrently echoing formatted lines
+  string_pipeline.tin   -- 3-stage generator/transformer/sink pipeline
+```
+
+Each file uses test blocks so it is picked up by both `tin test examples/...`
+and the dedicated valgrind step. The valgrind step uses `tin build-test` to
+produce the same binary the test runner would execute.
+
+Note: passing `sync::Channel[T]` as a named parameter to a spawned `#async`
+function does not work reliably -- channels must be either module-level `var`
+globals or captured via `spawn do:`. All io_stress tests use the `spawn do:`
+capture pattern.

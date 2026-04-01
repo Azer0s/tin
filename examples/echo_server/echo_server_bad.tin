@@ -20,13 +20,18 @@ use json
 
 async handle_conn(conn tcp::Conn) =
   defer conn.close()
+
   loop:
     let line = await ioutil::read_string(conn)
 
-    echo json::encode(line)
-
     if len(line) == 0:
       return
+
+    if line == "quit\n":
+      return
+
+    echo json::encode(line)
+
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn main() =

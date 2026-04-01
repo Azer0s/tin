@@ -138,8 +138,13 @@ func main() {
 		}
 	}
 
-	// Directory mode: tin test <dir> runs all test files in a directory
+	// Directory mode: tin test <dir> runs all test files in a directory.
+	// tin test <dir>/... recurses into all subdirectories (Go-style wildcard).
 	if cmd == "test" {
+		recursive := filepath.Base(file) == "..."
+		if recursive {
+			file = filepath.Dir(file)
+		}
 		if fi, statErr := os.Stat(file); statErr == nil && fi.IsDir() {
 			// Collect extra link flags from remaining args
 			var extraFlags []string
@@ -150,7 +155,11 @@ func main() {
 					extraFlags = append(extraFlags, a)
 				}
 			}
-			runDirTests(file, extraFlags)
+			if recursive {
+				runDirTestsRecursive(file, extraFlags)
+			} else {
+				runDirTests(file, extraFlags)
+			}
 
 			return
 		}
@@ -474,6 +483,35 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	clang.Stderr = os.Stderr
 
 	return clang.Run()
+}
+
+// runDirTestsRecursive calls runDirTests on root and every subdirectory
+// that contains at least one .tin file.
+func runDirTestsRecursive(root string, extraFlags []string) {
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		hasTin := false
+		for _, e := range entries {
+			if !e.IsDir() && filepath.Ext(e.Name()) == ".tin" {
+				hasTin = true
+
+				break
+			}
+		}
+		if hasTin {
+			runDirTests(dir, extraFlags)
+		}
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "wip" {
+				walk(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	walk(root)
 }
 
 // runDirTests runs all .tin files in dir that contain test blocks

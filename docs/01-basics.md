@@ -82,16 +82,16 @@ The following escape sequences are recognised inside `@'...'`:
 
 ---
 
-## null
+## nil
 
-`null` is the zero pointer literal, assignable to any pointer type:
+`nil` is the zero pointer literal, assignable to any pointer type:
 
 ```rust
-let p *i64  = null
-let s *char = null
+let p *i64  = nil
+let s *char = nil
 ```
 
-Dereferencing a null pointer is undefined behaviour (no runtime null check).
+Dereferencing a nil pointer is undefined behaviour (no runtime nil check).
 
 ---
 
@@ -365,7 +365,7 @@ See [`examples/floats.tin`](../examples/floats.tin) for a complete float example
 | integers | `0`                 |
 | floats   | `0.0`               |
 | `bool`   | `false`             |
-| pointers | `null`              |
+| pointers | `nil`               |
 | strings  | `""` (empty string) |
 | arrays   | `[]` (empty array)  |
 | structs  | all fields zeroed   |

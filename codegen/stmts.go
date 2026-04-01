@@ -1318,9 +1318,13 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 
+	cg.curBlock = block
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
+	}
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
 	}
 
 	if val == nil {

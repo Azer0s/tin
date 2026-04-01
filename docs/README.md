@@ -33,7 +33,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 
 Tin compiles to native code via LLVM. Run a file with `tin run file.tin`,
 build a binary with `tin build file.tin`, and run tests with `tin test file.tin`
-(or `tin test dir/` to test an entire directory).
+(or `tin test dir/` for one directory, `tin test dir/...` to recurse).
 
 ```rust
 // Hello world
