@@ -258,7 +258,7 @@ struct node =
   val  i64
   next *node
 
-let types = fieldtypes(node{val: 0, next: null})
+let types = fieldtypes(node{val: 0, next: nil})
 echo types[0]       // 'i64
 echo types[1]       // '*node
 ```

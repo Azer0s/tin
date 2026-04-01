@@ -268,7 +268,7 @@ test "recovered direct panic yields zero value" =
 ```
 
 Zero values by type: `0` for integers, `false` for `bool`, `""` for `string`,
-`0.0` for floats, `null` for pointers.
+`0.0` for floats, `nil` for pointers.
 
 ### Fire-and-forget panics
 

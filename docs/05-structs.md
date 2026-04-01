@@ -227,7 +227,7 @@ struct node =
   next  *node
 
 fn make_node(v i64) *node =
-  return &node{value: v, next: null}
+  return &node{value: v, next: nil}
 
 let n = make_node(42)   // n : *node
 echo n.value            // 42
