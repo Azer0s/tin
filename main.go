@@ -26,10 +26,11 @@ Usage:
   tin ir-test <file.tin>            emit test-mode LLVM IR to stdout
   tin preprocess <file.tin>         expand macros and print source to stdout
 
-Linker flags (passed after the source file):
+Flags (passed after the source file):
   -lNAME       link with libNAME (e.g. -lm for libmath)
   -LDIR        add DIR to the library search path
   file.o/.a    link with extra object/archive file
+  -cflag FLAG  pass FLAG to clang (repeatable, e.g. -cflag -fsanitize=address)
 
 In-source directives (at the top of the .tin file):
   //!-lNAME            link with libNAME
@@ -127,6 +128,15 @@ func main() {
 		}
 	}
 	file := os.Args[fileArgIdx]
+
+	// Collect -cflag values from anywhere after the file arg.
+	var extraCFlags []string
+	for i := fileArgIdx + 1; i < len(os.Args); i++ {
+		if os.Args[i] == "-cflag" && i+1 < len(os.Args) {
+			i++
+			extraCFlags = append(extraCFlags, os.Args[i])
+		}
+	}
 
 	// Directory mode: tin test <dir> runs all test files in a directory
 	if cmd == "test" {
@@ -264,6 +274,8 @@ func main() {
 				if i < len(os.Args) {
 					out = os.Args[i]
 				}
+			} else if a == "-cflag" {
+				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
 			} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") {
@@ -271,7 +283,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, libMode, extraObjs, fileCSources); err != nil {
+		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -285,6 +297,8 @@ func main() {
 				if i < len(os.Args) {
 					out = os.Args[i]
 				}
+			} else if a == "-cflag" {
+				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
 			} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") {
@@ -292,7 +306,7 @@ func main() {
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, false, extraObjs, fileCSources); err != nil {
+		if err := compileIR(irText, out, false, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -303,14 +317,16 @@ func main() {
 		var extraObjs []string
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
-			if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
+			if a == "-cflag" {
+				i++ // value already collected above
+			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
 			} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") {
 				extraObjs = append(extraObjs, a)
 			}
 		}
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, tmp, false, extraObjs, fileCSources); err != nil {
+		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
 		}
 		defer func(name string) {
@@ -344,7 +360,7 @@ func fixCoroAttrs(ir string) string {
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
 // cSources are C source files to compile in alongside the IR.
-func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource) error {
+func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string) error {
 	// Write IR to temp file
 	//goland:noinspection GoResourceLeak
 	llFile, err := os.CreateTemp("", "tin-*.ll")
@@ -450,6 +466,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		args = append(args, cs.path)
 	}
 	args = append(args, extraObjs...)
+	args = append(args, extraCFlags...)
 	args = append(args, "-o", outBin)
 
 	clang := exec.Command("clang", args...)
@@ -570,7 +587,7 @@ func runDirTests(dir string, extraFlags []string) {
 		}(tmp.Name())
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 			results = append(results, result{e.Name(), false})
 

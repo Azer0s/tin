@@ -59,11 +59,28 @@ typedef struct {
     // Fibers waiting for this one to finish (protected by _table_mu).
     int64_t  waiters[FIBER_MAX_WAITERS];
     int      waiter_cnt;
-    // Pending wakeup flag: set by _tin_fiber_unpark when the fiber is still
-    // RUNNING (park hasn't happened yet). _tin_fiber_park checks and clears
-    // this flag; if set, it skips setting BLOCKED so no double-resume occurs.
+    // pending_wakeup: set by _tin_fiber_unpark when the fiber is still RUNNING
+    // (its coro.suspend hasn't fired yet).  The worker loop checks and clears
+    // this flag after _coro_resume returns; if set, it re-enqueues instead of
+    // blocking so no double-resume occurs.
+    // Also set by _fire_done_waiters when a waiter has pending_join set.
     // Protected by _table_mu.
     int      pending_wakeup;
+    // pending_join: set by _tin_fiber_join to signal the worker loop.
+    // After coro.suspend returns, set to BLOCKED (or re-enqueue if
+    // pending_wakeup is set).  Deferred to avoid a double-resume race where
+    // _fire_done_waiters sees FIBER_BLOCKED and pushes the waiter before
+    // coro.suspend has actually executed.
+    // Protected by _table_mu.
+    int      pending_join;
+    // pending_park: set by _tin_fiber_park (called from async I/O / timer C
+    // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
+    // pending_join: the fiber sets pending_park, continues to its next yield,
+    // and the worker blocks it after _coro_resume returns.  Without this,
+    // the wakeup can fire between _tin_fiber_park and the yield, see BLOCKED,
+    // and enqueue a concurrent resume - causing a double-resume race.
+    // Protected by _table_mu.
+    int      pending_park;
     // If the fiber panicked and the panic was caught by the worker loop,
     // this field holds the message as an ARC-managed buffer (via _tin_rc_alloc)
     // so it can be safely wrapped in a TinString by the awaiting fiber.
@@ -178,6 +195,21 @@ int64_t _tin_current_pid(void) { return _current_pid; }
 static pthread_t *_workers    = NULL;
 static int        _worker_cnt = 0;
 
+// Returns 1 if the calling thread is one of the M:N worker threads.
+// Used to decide whether to access _current_pid (a __thread variable) inside
+// _tin_fiber_join: accessing a __thread variable for the first time on a thread
+// causes macOS dyld to lazily allocate TLS storage for that thread.  Worker
+// threads clean up their TLS when they exit (pthread_join); the main thread
+// does not, producing a spurious LSAN report.  Avoiding TLS access on
+// non-worker threads eliminates this leak without changing the fast path.
+static int _is_worker_thread(void) {
+    pthread_t me = pthread_self();
+    for (int i = 0; i < _worker_cnt; i++) {
+        if (pthread_equal(_workers[i], me)) return 1;
+    }
+    return 0;
+}
+
 static void _fire_done_waiters(TinFiber *f) {
     // Must be called with _table_mu held.
     for (int i = 0; i < f->waiter_cnt; i++) {
@@ -185,8 +217,18 @@ static void _fire_done_waiters(TinFiber *f) {
         if (wpid <= 0 || wpid >= _fiber_cnt || !_fibers[wpid]) continue;
         TinFiber *w = _fibers[wpid];
         if (w->status == FIBER_BLOCKED) {
+            // Waiter already suspended; wake it immediately.
             w->status = FIBER_RUNNABLE;
             _rq_push((TinRunnable){ w->hdl, wpid });
+        } else if (w->pending_join) {
+            // Waiter called _tin_fiber_join but its coro.suspend hasn't fired
+            // yet (status is still FIBER_RUNNING).  Setting FIBER_RUNNABLE and
+            // pushing NOW would cause a second worker to call _coro_resume
+            // while the first worker's _coro_resume is still on the stack -
+            // a double-resume that corrupts the coroutine frame.
+            // Instead, set pending_wakeup: the worker loop will re-queue the
+            // fiber after _coro_resume returns and coro.suspend has completed.
+            w->pending_wakeup = 1;
         }
     }
     f->waiter_cnt = 0;
@@ -217,7 +259,10 @@ static void *_worker_thread(void *_) {
         const char *panicked = _tin_panic_catch_end();
 
         if (panicked) {
-            // Fiber panicked.  Destroy the coro frame (it returned after panic).
+            // Fiber panicked.  Destroy the coro frame, then free it.
+            // LLVM's optimizer (at -O1) produces a no-op destroy function for
+            // all fiber types (coro-elide removes the cleanup path), so we must
+            // free the frame manually after calling _coro_destroy.
             _coro_destroy(r.hdl);
             free(r.hdl);
             pthread_mutex_lock(&_table_mu);
@@ -243,6 +288,9 @@ static void *_worker_thread(void *_) {
 
         if (_coro_done) {
             // Fiber completed: store result, wake waiters, signal done_cv.
+            // LLVM's optimizer (at -O1) produces a no-op destroy function for
+            // all fiber types (coro-elide removes the cleanup path), so we must
+            // free the frame manually after calling _coro_destroy.
             _coro_destroy(r.hdl);
             free(r.hdl);
             pthread_mutex_lock(&_table_mu);
@@ -254,20 +302,52 @@ static void *_worker_thread(void *_) {
             pthread_mutex_unlock(&f->done_mu);
             pthread_mutex_unlock(&_table_mu);
         } else {
-            // Fiber yielded or parked.
-            // Only the worker re-enqueues on regular yield (RUNNING status).
-            // If a waker (timer/IO) already transitioned to RUNNABLE and enqueued,
-            // we see RUNNABLE here and must NOT push again (avoids double-enqueue).
-            // If the fiber parked (sleep/IO set BLOCKED), the waker will enqueue.
+            // Fiber yielded, parked, or joined.
             pthread_mutex_lock(&_table_mu);
             FiberStatus st = f->status;
-            if (st == FIBER_RUNNING) {
+
+            if (f->pending_join) {
+                // Fiber called _tin_fiber_join: the coroutine has now suspended
+                // (coro.suspend fired and _coro_resume returned).  Decide whether
+                // to block or re-queue based on whether the join target already
+                // completed and set pending_wakeup.
+                f->pending_join = 0;
+                if (f->pending_wakeup) {
+                    // Target completed before we suspended; re-queue now.
+                    f->pending_wakeup = 0;
+                    f->status = FIBER_RUNNABLE;
+                    pthread_mutex_unlock(&_table_mu);
+                    _rq_push(r);
+                } else {
+                    // Target not yet done; block until _fire_done_waiters wakes us.
+                    f->status = FIBER_BLOCKED;
+                    pthread_mutex_unlock(&_table_mu);
+                }
+            } else if (f->pending_park) {
+                // Fiber called _tin_fiber_park (async I/O / timer): the coroutine
+                // has now suspended.  Same deferred-BLOCKED pattern as pending_join:
+                // block unless a wakeup already arrived (pending_wakeup), in which
+                // case re-enqueue immediately.
+                f->pending_park = 0;
+                if (f->pending_wakeup) {
+                    // Wakeup arrived before coro.suspend; re-queue now.
+                    f->pending_wakeup = 0;
+                    f->status = FIBER_RUNNABLE;
+                    pthread_mutex_unlock(&_table_mu);
+                    _rq_push(r);
+                } else {
+                    // No wakeup yet; block until _tin_fiber_unpark fires.
+                    f->status = FIBER_BLOCKED;
+                    pthread_mutex_unlock(&_table_mu);
+                }
+            } else if (st == FIBER_RUNNING) {
+                // Normal yield (_tin_fiber_yield_coro): re-enqueue.
                 f->status = FIBER_RUNNABLE;
                 pthread_mutex_unlock(&_table_mu);
                 _rq_push(r);
             } else {
                 // FIBER_RUNNABLE: waker already enqueued - don't push again.
-                // FIBER_BLOCKED:  waker will enqueue when condition resolves.
+                // FIBER_BLOCKED:  park already processed; waker will enqueue.
                 pthread_mutex_unlock(&_table_mu);
             }
         }
@@ -423,13 +503,24 @@ void _tin_fiber_join(int64_t pid, void *my_hdl) {
         return;
     }
 
-    int64_t my_pid = _current_pid;
+    // Only access the __thread _current_pid on actual worker threads.
+    // Accessing __thread variables on the main thread causes macOS dyld to
+    // lazily allocate TLS storage that is never freed (main thread TLS has
+    // process lifetime with no explicit cleanup), producing LSAN reports.
+    // _is_worker_thread() uses pthread_self() which needs no TLS allocation.
+    int64_t my_pid = _is_worker_thread() ? _current_pid : -1;
     if (my_pid > 0 && my_pid < _fiber_cnt && _fibers[my_pid]) {
-        // Called from inside a fiber: park this fiber as a waiter.
+        // Called from inside a fiber: register as a waiter and defer blocking.
+        // We must NOT set FIBER_BLOCKED here because coro.suspend hasn't fired
+        // yet - _fire_done_waiters could see FIBER_BLOCKED, push us onto the
+        // run queue, and a second worker would call _coro_resume concurrently
+        // (double-resume, corrupting the coroutine frame).
+        // Instead, set pending_join so the worker loop sets BLOCKED (or
+        // re-queues if pending_wakeup is already set) after _coro_resume returns.
         TinFiber *me = _fibers[my_pid];
         if (target->waiter_cnt < FIBER_MAX_WAITERS) {
             target->waiters[target->waiter_cnt++] = my_pid;
-            me->status = FIBER_BLOCKED;
+            me->pending_join = 1;
             pthread_mutex_unlock(&_table_mu);
             // coro.suspend fires after this call returns in the generated IR.
             return;
@@ -479,26 +570,21 @@ void _tin_fiber_yield_coro(void *hdl) {
     // _coro_resume returns and acts accordingly.
 }
 
-// Park the current fiber: mark it BLOCKED so the worker does not re-enqueue it.
+// Park the current fiber: signal the worker loop to block it after coro.suspend.
 // The caller is responsible for registering a waker that calls _tin_fiber_unpark.
 // Must be called before the coro.suspend (yield) that follows in the IR.
 //
-// If a waker called _tin_fiber_unpark while the fiber was still RUNNING (before
-// this function), pending_wakeup is set. In that case we skip marking BLOCKED so
-// the worker re-enqueues the fiber normally after the subsequent yield - avoiding
-// a double-resume race where two workers both try to _coro_resume the same fiber.
+// We set pending_park (not FIBER_BLOCKED directly) to avoid a double-resume race:
+// if the waker fires between _tin_fiber_park and the subsequent yield, it sees
+// FIBER_RUNNING and sets pending_wakeup.  The worker loop then re-enqueues instead
+// of blocking, so _coro_resume is never called on a coroutine that is still
+// executing its body on another worker thread.
 void _tin_fiber_park(int64_t pid) {
     if (pid <= 0) return;
     pthread_mutex_lock(&_table_mu);
     if (pid < _fiber_cnt && _fibers[pid]) {
         TinFiber *f = _fibers[pid];
-        if (f->pending_wakeup) {
-            // Wakeup arrived before the park; clear the flag and stay RUNNABLE.
-            // The fiber will be re-enqueued by the worker after the next yield.
-            f->pending_wakeup = 0;
-        } else {
-            f->status = FIBER_BLOCKED;
-        }
+        f->pending_park = 1;  // Worker will set BLOCKED after coro.suspend fires.
     }
     pthread_mutex_unlock(&_table_mu);
 }

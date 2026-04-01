@@ -707,8 +707,8 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 			selected := block.NewSelect(isMatch, coerced, currentField)
 			block.NewStore(selected, fieldGep)
 			// ARC: retain selected, release old - safe whether or not field matched.
-			//   match:   retain(new) + release(old) → correct ownership transfer
-			//   !match:  retain(old) + release(old) → net no-op
+			//   match:   retain(new) + release(old) -> correct ownership transfer
+			//   !match:  retain(old) + release(old) -> net no-op
 			if isStringType(fieldTypes[i]) || isFatArrayPtr(fieldTypes[i]) {
 				cg.emitRetain(block, selected)
 				cg.emitRelease(block, currentField)

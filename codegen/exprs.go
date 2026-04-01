@@ -1391,7 +1391,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// If the explicit type argument refers to a type parameter that has been
 			// substituted (e.g. a recursive call like _encode_any[T](...) inside
 			// _encode_any__jt_rect), resolve it to the concrete type so we don't
-			// create a self-referential alias ("T" → "T") that causes infinite recursion.
+			// create a self-referential alias ("T" -> "T") that causes infinite recursion.
 			if alias, ok := cg.typeAliases[typeArgName]; ok {
 				if st, ok2 := alias.(*ast.SimpleType); ok2 && st.Name != typeArgName {
 					typeArgName = st.Name

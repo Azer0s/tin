@@ -97,7 +97,7 @@ func isRCTrackedType(t irtypes.Type) bool {
 // existing heap data rather than a fresh allocation.  The caller must
 // retain the result before storing it in a new alloca.
 func isCopyExpr(node ast.Node) bool {
-	switch node.(type) {
+	switch n := node.(type) {
 	case *ast.Identifier:
 		// Named variable - its scope entry owns the RC reference.
 
@@ -111,6 +111,14 @@ func isCopyExpr(node ast.Node) bool {
 		// Borrowing an element from an array - the array retains ownership.
 
 		return true
+	case *ast.AsExpr:
+		// A cast does not allocate new memory; the underlying value still owns
+		// the RC reference.  Propagate through so that `sv as string` (where sv
+		// is a named variable) is treated as a copy and not released after a
+		// call.  Without this, the ARC release loop would drop the RC after the
+		// callee returns AND scope-exit would drop it again, double-freeing the
+		// underlying string and corrupting any references still held by the caller.
+		return isCopyExpr(n.Expr)
 	}
 
 	return false
