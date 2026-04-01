@@ -2459,7 +2459,12 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 				payloadAlloca := block.NewAlloca(targetLLVM)
 				payloadVal := block.NewLoad(targetLLVM, payloadPtr)
 				block.NewStore(payloadVal, payloadAlloca)
-				cg.curScope.set(e.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true})
+				// noRelease: the binding is a borrow from the union -- the union
+				// owns the ARC reference.  The scope exit must not release it
+				// because (a) no retain was performed and (b) in the non-match
+				// path the alloca contains the union data interpreted as the
+				// wrong type, so releasing it would corrupt memory.
+				cg.curScope.set(e.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true, noRelease: true})
 			}
 
 			return cmp, nil

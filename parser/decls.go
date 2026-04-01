@@ -67,6 +67,13 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 			p.advance()
 			p.skipNewlines()
 			for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+				// `pass` as the sole body element declares an empty struct.
+				if p.check(lexer.KW_PASS) {
+					p.advance()
+					p.skipNewlines()
+
+					continue
+				}
 				item, err2 := p.parseStructItem()
 				if err2 != nil {
 					return nil, err2

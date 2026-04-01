@@ -128,7 +128,8 @@ class TinLexer : LexerBase() {
         if (c == '\\') {
             val next = char(tokenStart + 1)
             if (next == 'n' || next == 'r' || next == 't' || next == '\\' ||
-                next == '"' || next == '\'' || next == '0') {
+                next == '"' || next == '\'' || next == '0' ||
+                next == '{' || next == '}') {  // \{ and \} are literal braces, not interpolation
                 tokenEnd = tokenStart + 2
             }
             return TinTokenTypes.STRING_ESCAPE
@@ -188,12 +189,22 @@ class TinLexer : LexerBase() {
         if (c == '\'') {
             contextHint = HINT_NONE
             val c1 = char(tokenStart + 1)
+            // Quoted atom: '"content"  (content may contain special chars)
+            if (c1 == '"') {
+                tokenEnd = tokenStart + 2
+                while (tokenEnd < bufferEnd && char(tokenEnd) != '"' && char(tokenEnd) != '\n') tokenEnd++
+                if (tokenEnd < bufferEnd && char(tokenEnd) == '"') tokenEnd++ // consume closing "
+                return TinTokenTypes.ATOM
+            }
+            // Escaped char literal: '\n', '\t', '\r', '\\', '\'', '\0', '"'
             if (c1 == '\\' && char(tokenStart + 3) == '\'') {
                 tokenEnd = tokenStart + 4; return TinTokenTypes.CHAR_LITERAL
             }
+            // Plain char literal: 'x'
             if (c1 != '\'' && char(tokenStart + 2) == '\'') {
                 tokenEnd = tokenStart + 3; return TinTokenTypes.CHAR_LITERAL
             }
+            // Simple atom: 'identifier
             if (c1.isLetter() || c1 == '_') {
                 tokenEnd = tokenStart + 2
                 while (tokenEnd < bufferEnd && (char(tokenEnd).isLetterOrDigit() || char(tokenEnd) == '_')) tokenEnd++

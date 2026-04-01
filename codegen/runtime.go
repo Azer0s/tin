@@ -270,7 +270,7 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		return
 	}
 	for _, entry := range s.vars {
-		if !entry.isAlloc {
+		if !entry.isAlloc || entry.noRelease {
 			continue
 		}
 		// Slice variables store the base allocation pointer separately so that
@@ -303,7 +303,7 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 	s := cg.curScope
 	for s != nil {
 		for name, entry := range s.vars {
-			if name == skipName || !entry.isAlloc || entry.isGlobal {
+			if name == skipName || !entry.isAlloc || entry.isGlobal || entry.noRelease {
 				continue
 			}
 			// Slice variables: release the base allocation pointer, not the fat-ptr.

@@ -586,8 +586,13 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 	mc := ast.MatchCase{Pos: pos}
 
 	// case varName TypeExpr: OR case expr:
-	// If next is ident followed by a type, it's "case i i8"
-	if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) {
+	// Detect "case varName TypeName:" -- either TypeName is a built-in type token
+	// OR it is a user-defined type (plain IDENT) followed immediately by ":".
+	// The second heuristic handles "case _ json_null:" where json_null is a struct.
+	nextIsUserType := p.check(lexer.IDENT) &&
+		p.peekAt(1).Type == lexer.IDENT &&
+		p.peekAt(2).Type == lexer.COLON
+	if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) && !nextIsUserType {
 		// Just an expression pattern
 		mc.Pattern, _ = p.parseExpr()
 	} else if p.check(lexer.IDENT) {

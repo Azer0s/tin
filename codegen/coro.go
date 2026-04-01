@@ -538,13 +538,21 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.ensureFiberRuntime()
 	frame, rampBlock := cg.emitCoroPrologue(entryBlk)
 
-	// ARC: retain RC-tracked parameters in the ramp block, BEFORE the initial
-	// suspend.  The ramp function returns the coroutine handle to the scheduler
-	// and then the caller may immediately release its own reference (the
-	// scope-exit release of a temporary).  Without a retain here there is a
-	// window between "spawn returns" and "first coro.resume" where the
-	// reference count can drop to zero and the value is freed.  The matching
-	// release is the scope-exit _tin_release emitted at the end of the body.
+	// ARC: retain every parameter before the initial suspend.
+	//
+	// The ramp function returns the coroutine handle to the scheduler before
+	// any body code runs.  The caller's scope may release its local variables
+	// immediately after spawn returns, so without a retain here there is a
+	// window where the reference count can drop to zero and the value is freed
+	// before the fiber ever reads it.  The matching release is the scope-exit
+	// emitRelease at the end of the coroutine body.
+	//
+	// emitRetain handles all cases:
+	//   - primitive RC-tracked types (string, []T, any)  -> _tin_retain
+	//   - named structs with ARC-tracked fields          -> walkRCStructFields
+	//   - named structs with C-level resources that
+	//     define fn _fiber_retain                        -> calls that method
+	//   - plain scalars / structs with no RC data        -> no-op
 	{
 		llParam := 0
 		for _, astParam := range n.Params {
@@ -553,9 +561,25 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 			}
 			p := coroFn.Params[llParam]
 			llParam++
-			if isRCTrackedType(p.Type()) {
-				cg.emitRetain(rampBlock, p)
+			// Retain ARC-tracked data (strings, arrays, any, nested struct fields).
+			cg.emitRetain(rampBlock, p)
+			// Additionally call fn _fiber_retain for structs that manage C-level
+			// resources outside the ARC system (e.g. Channel[T]).
+			structName := cg.typeNameOf(p.Type())
+			if structName == "" {
+				continue
 			}
+			fiberRetainName := structName + "__fiber_retain"
+			entry, ok := cg.curScope.lookup(fiberRetainName)
+			if !ok {
+				continue
+			}
+			fn, ok2 := entry.val.(*ir.Func)
+			if !ok2 {
+				continue
+			}
+			args := cg.adaptArgs(rampBlock, []value.Value{p}, fn.Sig)
+			rampBlock.NewCall(fn, args...)
 		}
 	}
 

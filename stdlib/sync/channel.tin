@@ -33,6 +33,7 @@ use mem
 
 fn _tin_channel_new(cap i64, elem_size i64, is_rc i32) *void = extern("_tin_channel_new")
 fn _tin_channel_free(ch *void)                              = extern("_tin_channel_free")
+fn _tin_channel_retain(ch *void)                            = extern("_tin_channel_retain")
 fn _tin_channel_send_try(ch *void, val *void, elem_size i64, is_rc i32) i32 = extern("_tin_channel_send_try")
 fn _tin_channel_recv_try(ch *void) *void                    = extern("_tin_channel_recv_park")
 fn _tin_channel_recv_blocked_val() i64                      = extern("_tin_channel_recv_blocked_val")
@@ -79,5 +80,13 @@ struct Channel[T] =
   fn deinit(this Channel[T]) =
     _tin_channel_free(this._ptr)
     // _ptr is *void (not ARC-tracked), so ARC will not double-free it
+
+  // _fiber_retain is called by the compiler's ramp block when this channel is
+  // passed as a named parameter to a spawned async function. It increments the
+  // internal reference count so the fiber's copy remains valid even after the
+  // caller's local variable is released. The matching release is the deinit
+  // called when the fiber's parameter goes out of scope.
+  fn _fiber_retain(this Channel[T]) =
+    _tin_channel_retain(this._ptr)
 
 export { Channel } as sync

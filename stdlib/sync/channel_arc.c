@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdatomic.h>
 
 // Forward-declare ARC functions from runtime.h
 void _tin_retain(void *ptr);
@@ -29,6 +30,7 @@ void _tin_release(void *ptr);
 #define TIN_CHAN_BLOCKED ((void*)(intptr_t)-1)
 
 typedef struct TinChannel {
+    atomic_int      ref_count; // number of Channel[T] struct copies alive
     pthread_mutex_t mu;
     pthread_cond_t  not_full;
     pthread_cond_t  not_empty;
@@ -50,6 +52,7 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     size_t total = sizeof(TinChannel) + (size_t)(cap * elem_size);
     TinChannel *ch = (TinChannel *)calloc(1, total);
     if (!ch) { fputs("tin: channel alloc failed\n", stderr); exit(1); }
+    atomic_init(&ch->ref_count, 1);
     pthread_mutex_init(&ch->mu, NULL);
     pthread_cond_init(&ch->not_full, NULL);
     pthread_cond_init(&ch->not_empty, NULL);
@@ -63,11 +66,25 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     return ch;
 }
 
-// Free the channel control block, releasing any RC items still in the buffer.
+// Increment the reference count. Called when a Channel[T] value crosses a
+// fiber boundary (e.g. passed as a spawn argument) so the fiber owns its own
+// reference independent of the caller's local variable.
+void _tin_channel_retain(void *ptr) {
+    if (!ptr) return;
+    TinChannel *ch = (TinChannel *)ptr;
+    atomic_fetch_add_explicit(&ch->ref_count, 1, memory_order_relaxed);
+}
+
+// Release one reference to the channel. When the last reference is dropped the
+// control block is destroyed and freed. Matching function for _tin_channel_retain
+// and the implicit retain performed by Channel[T].make().
 void _tin_channel_free(void *ptr) {
     TinChannel *ch = (TinChannel *)ptr;
     if (!ch) return;
-    // Drain remaining RC elements.
+    if (atomic_fetch_sub_explicit(&ch->ref_count, 1, memory_order_acq_rel) > 1) {
+        return; // other references still alive
+    }
+    // Last reference dropped: drain buffered RC elements and destroy.
     if (ch->is_rc) {
         for (int64_t i = 0; i < ch->count; i++) {
             int64_t slot = (ch->head + i) % ch->cap;

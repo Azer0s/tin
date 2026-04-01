@@ -198,7 +198,15 @@ Each file uses test blocks so it is picked up by both `tin test examples/...`
 and the dedicated valgrind step. The valgrind step uses `tin build-test` to
 produce the same binary the test runner would execute.
 
-Note: passing `sync::Channel[T]` as a named parameter to a spawned `#async`
-function does not work reliably -- channels must be either module-level `var`
-globals or captured via `spawn do:`. All io_stress tests use the `spawn do:`
-capture pattern.
+Any value -- including structs -- can be passed as a named parameter to a spawned 
+`#async` function. For structs whose resources are managed outside the ARC system 
+(e.g. a C-level heap pointer), define `fn _fiber_retain(this S)` on the struct. 
+The compiler calls this method in the ramp block for each parameter of that struct type,
+before the initial suspend. `fn deinit` serves as the matching release: it is called by both the
+caller's scope-exit and the fiber's scope-exit, so the underlying resource must
+be reference-counted.
+
+`sync::Channel[T]` implements this convention: it adds an atomic reference
+count to the C control block (`TinChannel.ref_count`), `fn _fiber_retain`
+increments it via `_tin_channel_retain`, and `fn deinit` calls
+`_tin_channel_free` which decrements and frees only when the count reaches 0.

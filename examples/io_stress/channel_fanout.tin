@@ -1,55 +1,47 @@
 // examples/io_stress/channel_fanout.tin
 //
 // I/O stress: fan-out channel pattern.
-// N consumer fibers each receive one message from a shared buffered channel.
-// Tests string ARC across concurrent channel boundaries under fan-out load.
+// N consumer fibers each receive from a dedicated per-consumer channel.
+// Tests that sync::Channel[T] values survive the fiber boundary when passed
+// as named parameters to a spawned #async function.
 //
 // Compiler paths exercised:
-//   - Channel send/recv with string values (ARC through channel boundary)
+//   - Channel[T] passed as a named #async function parameter (fn _fiber_retain)
 //   - Concurrent fiber scheduling under high spawn count
-//   - String interpolation in concurrent context
+//   - Caller and fiber both access the same channel concurrently
 
 use assert
 use sync
 
-test "channel fanout 50 consumers" =
+fn{#async} fanout_consumer(id i64, inbox sync::Channel[string], done sync::Channel[i64]) =
+  let msg = await inbox.recv()
+  let _ = "consumer-{id}: got [{msg}]"
+  await done.send(id)
+
+test "channel fanout 50 consumers (named param)" =
   let n i64 = 50
-  let ch   = sync::Channel[string].make(n)
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
   for i < n:
-    let id = i
-    spawn do:
-      let msg = await ch.recv()
-      let _ = "consumer-{id}: got [{msg}]"
-      await done.send(id)
+    let ch = sync::Channel[string].make(1)
+    spawn fanout_consumer(i, ch, done)
+    await ch.send("item-{i}")
     i = i + 1
-  let j i64 = 0
-  for j < n:
-    await ch.send("item-{j}")
-    j = j + 1
   let received i64 = 0
   for received < n:
     await done.recv()
     received = received + 1
   assert::equals(received, n)
 
-test "channel fanout 200 consumers" =
+test "channel fanout 200 consumers (named param)" =
   let n i64 = 200
-  let ch   = sync::Channel[string].make(n)
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
   for i < n:
-    let id = i
-    spawn do:
-      let msg = await ch.recv()
-      let _ = "consumer-{id}: got [{msg}]"
-      await done.send(id)
+    let ch = sync::Channel[string].make(1)
+    spawn fanout_consumer(i, ch, done)
+    await ch.send("payload-{i}-data")
     i = i + 1
-  let j i64 = 0
-  for j < n:
-    await ch.send("payload-{j}-data")
-    j = j + 1
   let received i64 = 0
   for received < n:
     await done.recv()
