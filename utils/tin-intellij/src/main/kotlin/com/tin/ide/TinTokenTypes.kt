@@ -35,7 +35,7 @@ object TinTokenTypes {
     @JvmField val BOOLEAN             = IElementType("BOOLEAN",             TinLanguage)
     @JvmField val NIL                 = IElementType("NIL",                 TinLanguage)
 
-    // Identifiers — context-sensitive
+    // Identifiers - context-sensitive
     @JvmField val IDENTIFIER          = IElementType("IDENTIFIER",          TinLanguage)
     @JvmField val FUNCTION_DECL       = IElementType("FUNCTION_DECL",       TinLanguage)
     @JvmField val FUNCTION_CALL       = IElementType("FUNCTION_CALL",       TinLanguage)

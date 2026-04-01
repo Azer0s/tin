@@ -11,11 +11,11 @@ import com.intellij.psi.tree.IElementType
  *
  *   bits 0-3  : string nesting depth  (how many `"` have been opened without a closing `"`)
  *   bits 4-11 : brace depth inside the current interpolation level
- *               > 0 means we are currently scanning code inside `{…}` interpolation
- *   bit  12   : 1 = currently inside a block comment  /* … */
+ *               > 0 means we are currently scanning code inside `{...}` interpolation
+ *   bit  12   : 1 = currently inside a block comment  /* ... */
  *
  * Context hints (HINT_*) drive identifier colouring but are NOT part of the
- * incremental state — they reset to HINT_NONE whenever a new segment starts.
+ * incremental state - they reset to HINT_NONE whenever a new segment starts.
  * The worst-case consequence is one mis-coloured token at the start of an
  * incremental re-lex segment, which is acceptable for a highlighter-only lexer.
  */
@@ -56,7 +56,7 @@ class TinLexer : LexerBase() {
     private var contextHint  = HINT_NONE
     private var contextDepth = 0
 
-    // ── Lexer infrastructure ────────────────────────────────────────────────
+    //  Lexer infrastructure
 
     override fun start(buffer: CharSequence, startOffset: Int, endOffset: Int, initialState: Int) {
         this.buffer     = buffer
@@ -91,7 +91,7 @@ class TinLexer : LexerBase() {
 
     private fun char(pos: Int): Char = if (pos < bufferEnd) buffer[pos] else '\u0000'
 
-    // ── Block comment scanning ──────────────────────────────────────────────
+    //  Block comment scanning
 
     private fun scanBlockComment(): IElementType {
         // tokenStart is already inside the comment (past the opening `/*`)
@@ -106,7 +106,7 @@ class TinLexer : LexerBase() {
         return TinTokenTypes.BLOCK_COMMENT
     }
 
-    // ── String-content scanning ─────────────────────────────────────────────
+    //  String-content scanning
 
     private fun scanStringContent(): IElementType {
         tokenEnd = tokenStart + 1
@@ -135,7 +135,7 @@ class TinLexer : LexerBase() {
             return TinTokenTypes.STRING_ESCAPE
         }
 
-        // Plain string content — consume until a special char
+        // Plain string content - consume until a special char
         while (tokenEnd < bufferEnd) {
             val ch = char(tokenEnd)
             if (ch == '"' || ch == '{' || ch == '\\') break
@@ -144,13 +144,13 @@ class TinLexer : LexerBase() {
         return TinTokenTypes.STRING_CONTENT
     }
 
-    // ── Normal / interpolation scanning ────────────────────────────────────
+    //  Normal / interpolation scanning
 
     private fun scanNormal(): IElementType {
         val c = char(tokenStart)
         tokenEnd = tokenStart + 1
 
-        // Whitespace — never touches contextHint
+        // Whitespace - never touches contextHint
         if (c.isWhitespace()) {
             while (tokenEnd < bufferEnd && char(tokenEnd).isWhitespace()) tokenEnd++
             return TinTokenTypes.WHITESPACE
@@ -213,7 +213,7 @@ class TinLexer : LexerBase() {
             return TokenType.BAD_CHARACTER
         }
 
-        // Control tag — intentionally does NOT clear contextHint
+        // Control tag - intentionally does NOT clear contextHint
         // so `fn{#inline} name` keeps HINT_AFTER_FN alive.
         if (c == '#') {
             val c1 = char(tokenStart + 1)
@@ -274,7 +274,7 @@ class TinLexer : LexerBase() {
         return TinTokenTypes.NUMBER
     }
 
-    // ── Identifier / keyword classification ────────────────────────────────
+    //  Identifier / keyword classification
 
     private fun classifyWord(word: String): IElementType {
         val kwToken = keywordToken(word)
@@ -327,7 +327,7 @@ class TinLexer : LexerBase() {
         else            -> null
     }
 
-    // ── Symbol scanning ─────────────────────────────────────────────────────
+    //  Symbol scanning
 
     private fun scanSymbol(c: Char): IElementType {
         val n1 = char(tokenStart + 1)
@@ -342,7 +342,7 @@ class TinLexer : LexerBase() {
                 if (interpDepth > 0) {
                     interpDepth--
                     if (interpDepth == 0) {
-                        // Close string interpolation — return to string-content mode
+                        // Close string interpolation - return to string-content mode
                         return TinTokenTypes.STRING_INTERP_END
                     }
                 }
@@ -398,7 +398,7 @@ class TinLexer : LexerBase() {
         }
     }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
+    //  Helpers
 
     /** First two non-horizontal-whitespace chars starting at [from]. */
     private fun peek2(from: Int): Pair<Char, Char> {
