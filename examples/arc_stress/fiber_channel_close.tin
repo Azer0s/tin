@@ -25,7 +25,7 @@ fn{#async} waiting_reader(id i64) =
   await ch4.recv()
   await read_done.send(id)
 
-fn main() =
+fn{#async} main() =
   // Scenario 1: close with strings still in buffer
   // Three strings are sent but never recv'd. When ch1 goes out of scope,
   // deinit calls _tin_channel_free which drains and releases each string.

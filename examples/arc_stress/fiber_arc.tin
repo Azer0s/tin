@@ -11,7 +11,7 @@ fn{#async} make_string(n i64) =
   let s = "fiber-{n}"
   await result_ch.send(s)
 
-fn main() =
+fn{#async} main() =
   let n i64 = 1000
   result_ch = sync::Channel[string].make(n)
 

@@ -16,6 +16,8 @@
 use sync
 use io
 
+fn _tin_now_ms() i64 = extern("_tin_now_ms")
+
 fn{#async} count_autoyield(n i64) i64 =
   let sum i64 = 0
   let i i64 = 0
@@ -34,7 +36,7 @@ fn{#async #no_autoyield} count_manual_yield(n i64) i64 =
       yield
   return sum
 
-fn main() =
+fn{#async} main() =
   let n i64 = 10000000
 
   let t0 = _tin_now_ms()

@@ -18,14 +18,8 @@ fn{#async} fanout_consumer(id i64, inbox sync::Channel[string], done sync::Chann
   let _ = "consumer-{id}: got [{msg}]"
   await done.send(id)
 
-// Consumer counts are intentionally modest: each consumer spawns two sub-fibers
-// (recv_fiber + send_fiber), so n consumers produce 3n concurrent fibers.
-// Under valgrind on CI runners (~10-20x slower than bare metal) large counts
-// can cause the test to time out.  20 and 40 are enough to exercise the
-// named-param retain path without hitting that ceiling.
-
-test "channel fanout 20 consumers (named param)" =
-  let n i64 = 20
+test "channel fanout 50 consumers (named param)" =
+  let n i64 = 50
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
   for i < n:
@@ -39,8 +33,8 @@ test "channel fanout 20 consumers (named param)" =
     received = received + 1
   assert::equals(received, n)
 
-test "channel fanout 40 consumers (named param)" =
-  let n i64 = 40
+test "channel fanout 200 consumers (named param)" =
+  let n i64 = 200
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
   for i < n:

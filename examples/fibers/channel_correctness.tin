@@ -28,7 +28,7 @@ fn{#async} producer_counted(id i64, count i64) =
 
 // main() for the CI fiber run step
 
-fn main() =
+fn{#async} main() =
   // FIFO ordering
   let ch = sync::Channel[i64].make(8)
   await ch.send(0)

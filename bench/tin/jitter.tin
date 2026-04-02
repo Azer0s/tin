@@ -1,0 +1,56 @@
+// Jitter: 8 workers with variable work (0-3 yields per task).
+// Tests scheduler under non-uniform load — some tasks fast, some slow.
+
+use sync
+use io
+
+fn _tin_now_us() i64 = extern("_tin_now_us")
+
+var g_tasks   sync::Channel[i64]
+var g_results sync::Channel[i64]
+var g_elapsed i64
+
+fn{#async} worker(n i64) =
+  let i i64 = 0
+  for i < n:
+    let cost = await g_tasks.recv()
+    let j i64 = 0
+    for j < cost:
+      yield
+      j = j + 1
+    await g_results.send(1)
+    i = i + 1
+
+fn{#async} dispatch(total i64) =
+  let i i64 = 0
+  for i < total:
+    await g_tasks.send(i % 4)
+    i = i + 1
+
+fn{#async} main() =
+  let workers i64 = 8
+  let per     i64 = 125000
+  let total       = workers * per
+
+  g_tasks   = sync::Channel[i64].make(256)
+  g_results = sync::Channel[i64].make(256)
+
+  let i i64 = 0
+  for i < workers:
+    spawn worker(per)
+    i = i + 1
+
+  let start = _tin_now_us()
+
+  spawn dispatch(total)
+
+  i = 0
+  for i < total:
+    await g_results.recv()
+    i = i + 1
+
+  g_elapsed = _tin_now_us() - start
+  let throughput = total * 1000000 / g_elapsed
+  echo "{total} tasks, {workers} workers, cost 0-3 yields/task"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "throughput: ~{throughput} tasks/sec"

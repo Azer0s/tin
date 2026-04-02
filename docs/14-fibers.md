@@ -23,6 +23,43 @@ background work, use `await` or a `Channel`.
 
 ---
 
+## Async main
+
+For programs that use `spawn` or `await` at the top level, mark `main` as
+`{#async}`:
+
+```rust
+use sync
+
+fn{#async} main() =
+  let ch = sync::Channel[i64].make(1)
+  let f = spawn some_worker(ch)
+  await ch.send(42)
+  let result = await f
+  echo result
+```
+
+An `{#async} main` is spawned as a fiber before the scheduler starts. The
+process exits after `main`'s fiber completes.
+
+If you use `spawn` or `await` inside a non-async `main()`, the compiler
+emits a warning:
+
+```
+tin: warning: main() uses 'spawn' or 'await' but is not marked async.
+    Each await in a non-async main() creates a temporary fiber, which is slower
+    and bypasses inline channel optimizations.
+    Fix: change 'fn main()' to 'fn{#async} main()'
+```
+
+Suppress this warning with `-Wno-async-main`:
+
+```sh
+tin build myfile.tin -Wno-async-main
+```
+
+---
+
 ## Async functions
 
 ### `fn{#async}` tag

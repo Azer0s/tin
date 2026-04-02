@@ -15,7 +15,7 @@ fn{#async} work_with_defer(id i64) =
   // tmp1, tmp2, tmp3 should be freed when function exits
   await results.send("done-{id}")
 
-fn main() =
+fn{#async} main() =
   let n i64 = 200
   results = sync::Channel[string].make(n)
   

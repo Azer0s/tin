@@ -50,7 +50,7 @@ fn qualify_void(ch sync::Channel[i64]) Future[sync::Unit] =
 
 // main() for the CI fiber run step
 
-fn main() =
+fn{#async} main() =
   // await spawn without intermediate variable
   let r1 = await spawn square(9)
   echo "square(9) = {r1}"

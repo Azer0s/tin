@@ -24,7 +24,7 @@ fn{#async} consumer(id i64, count i64) =
     i = i + 1
   await done_ch.send(id * -1)
 
-fn main() =
+fn{#async} main() =
   let n_prod i64 = 10
   let n_cons i64 = 10
   let items_each i64 = 100

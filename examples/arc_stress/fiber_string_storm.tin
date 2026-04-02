@@ -16,7 +16,7 @@ fn{#async} build_string(id i64, depth i64) =
     i = i + 1
   await ch.send(s)
 
-fn main() =
+fn{#async} main() =
   let n i64 = 500
   let depth i64 = 10
   ch = sync::Channel[string].make(n)

@@ -1,0 +1,131 @@
+// examples/fibers/channel_mpmc.tin
+//
+// Correctness tests for MPMC (multi-producer multi-consumer) channel semantics.
+//
+// Strategy: each producer sends values 1..per; expected total sum across all
+// producers = P * per*(per+1)/2.  Consumers accumulate partial sums and
+// signal a done channel; main collects them and compares to expected.
+//
+// Test cases:
+//   - 4P + 4C  (symmetric MPMC)
+//   - 8P + 1C  (MPSC stress)
+//   - 1P + 8C  (SPMC stress)
+//   - asymmetric: 3P + 5C
+//   - high-contention: 8P + 8C, 500 items each
+
+use assert
+use sync
+
+var g_ch   sync::Channel[i64]
+var g_done sync::Channel[i64]
+
+fn{#async} mpmc_producer(per i64) =
+  let i i64 = 1
+  for i <= per:
+    await g_ch.send(i)
+    i = i + 1
+
+fn{#async} mpmc_consumer(n i64) =
+  let sum i64 = 0
+  let i i64 = 0
+  for i < n:
+    sum = sum + (await g_ch.recv())
+    i = i + 1
+  await g_done.send(sum)
+
+// Initialise channels, launch producers and consumers, then collect partial
+// sums from g_done and return the total.
+fn{#async} mpmc_run(producers i64, consumers i64, per i64) i64 =
+  g_ch   = sync::Channel[i64].make(64)
+  g_done = sync::Channel[i64].make(consumers)
+  let p i64 = 0
+  for p < producers:
+    spawn mpmc_producer(per)
+    p = p + 1
+  let total_msgs i64 = producers * per
+  let msgs_per_c i64 = total_msgs / consumers
+  let remainder  i64 = total_msgs - msgs_per_c * consumers
+  let c i64 = 0
+  for c < consumers:
+    let mine i64 = msgs_per_c
+    if c < remainder:
+      mine = mine + 1
+    spawn mpmc_consumer(mine)
+    c = c + 1
+  let got i64 = 0
+  let k i64 = 0
+  for k < consumers:
+    got = got + (await g_done.recv())
+    k = k + 1
+  return got
+
+fn{#async} main() =
+  let per i64 = 100
+
+  let h1 = spawn mpmc_run(4, 4, per)
+  let sum1 = await h1
+  let expected_4p i64 = 4 * (per * (per + 1) / 2)
+  if sum1 == expected_4p:
+    echo "4P+4C: OK"
+  else:
+    echo "4P+4C: FAIL (got {sum1}, want {expected_4p})"
+
+  let h2 = spawn mpmc_run(8, 1, per)
+  let sum2 = await h2
+  let expected_8p i64 = 8 * (per * (per + 1) / 2)
+  if sum2 == expected_8p:
+    echo "8P+1C: OK"
+  else:
+    echo "8P+1C: FAIL (got {sum2}, want {expected_8p})"
+
+  let h3 = spawn mpmc_run(1, 8, per)
+  let sum3 = await h3
+  let expected_1p i64 = 1 * (per * (per + 1) / 2)
+  if sum3 == expected_1p:
+    echo "1P+8C: OK"
+  else:
+    echo "1P+8C: FAIL (got {sum3}, want {expected_1p})"
+
+  let h4 = spawn mpmc_run(3, 5, per)
+  let sum4 = await h4
+  let expected_3p i64 = 3 * (per * (per + 1) / 2)
+  if sum4 == expected_3p:
+    echo "3P+5C: OK"
+  else:
+    echo "3P+5C: FAIL (got {sum4}, want {expected_3p})"
+
+  let hiper i64 = 500
+  let h5 = spawn mpmc_run(8, 8, hiper)
+  let sum5 = await h5
+  let expected_hi i64 = 8 * (hiper * (hiper + 1) / 2)
+  if sum5 == expected_hi:
+    echo "8P+8C hi-contention: OK"
+  else:
+    echo "8P+8C hi-contention: FAIL (got {sum5}, want {expected_hi})"
+
+  echo "channel_mpmc: OK"
+
+test "4P+4C sum correctness" =
+  let per i64 = 100
+  let h = spawn mpmc_run(4, 4, per)
+  assert::equals(await h, 4 * (per * (per + 1) / 2))
+
+test "8P+1C sum correctness (MPSC stress)" =
+  let per i64 = 100
+  let h = spawn mpmc_run(8, 1, per)
+  assert::equals(await h, 8 * (per * (per + 1) / 2))
+
+test "1P+8C sum correctness (SPMC stress)" =
+  let per i64 = 100
+  let h = spawn mpmc_run(1, 8, per)
+  assert::equals(await h, 1 * (per * (per + 1) / 2))
+
+test "3P+5C asymmetric sum correctness" =
+  let per i64 = 100
+  let h = spawn mpmc_run(3, 5, per)
+  assert::equals(await h, 3 * (per * (per + 1) / 2))
+
+test "8P+8C high-contention sum correctness" =
+  let per i64 = 500
+  let h = spawn mpmc_run(8, 8, per)
+  assert::equals(await h, 8 * (per * (per + 1) / 2))

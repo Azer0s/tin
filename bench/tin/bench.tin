@@ -1,27 +1,10 @@
-// examples/bench/channel_latency.tin
-//
-// Measures channel round-trip latency: two fibers ping-pong a token over two
-// channels for N rounds, then compute nanoseconds per round trip.
-//
-// Both ping_loop and pong_loop run as async fibers so all send/recv ops are
-// driven inline (no per-operation fiber spawn, no OS-blocking await in the
-// hot path).  main() only performs two OS-blocking awaits total (for the two
-// long-lived fibers).
-//
-// Usage:
-//   ./tin build examples/bench/channel_latency.tin -o /tmp/bench_ch
-//   /tmp/bench_ch
-//
-// Expected output (approximate):
-//   1000000 round trips
-//   elapsed: ~XXXms
-//   latency: ~XXXns / round trip
+// Channel round-trip latency: two fibers ping-pong a token over two
+// buffered channels for 1M rounds.
 
 use sync
 use io
 
-fn _tin_now_ms() i64 = extern("_tin_now_ms")
-fn _tin_now_us() i64  = extern("_tin_now_us")
+fn _tin_now_us() i64 = extern("_tin_now_us")
 
 var g_ping sync::Channel[i64]
 var g_pong sync::Channel[i64]

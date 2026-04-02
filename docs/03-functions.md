@@ -19,6 +19,48 @@ fn greet(name string) =
   echo "Hello, {name}!"
 ```
 
+### Explicit returns required
+
+Every non-void function must end with an explicit `return` on all reachable
+paths. The compiler rejects functions where control can fall off the end
+without returning:
+
+```rust
+fn sign(x i64) i64 =
+  if x > 0:
+    return 1
+  // ERROR: fn sign: not all code paths return a value
+```
+
+The trailing expression of a block is **not** an implicit return. Use `return`:
+
+```rust
+fn sign(x i64) i64 =
+  if x > 0:
+    return 1
+  return -1     // OK - all paths covered
+```
+
+If/else chains and `match` statements where every branch returns are
+recognised as exhaustive - no extra `return` is needed after them:
+
+```rust
+fn sign(x i64) i64 =
+  if x > 0:
+    return 1
+  else:
+    return -1   // OK - both branches return; no fall-through possible
+```
+
+Void functions can use bare `return` to exit early:
+
+```rust
+fn greet(name string) =
+  if len(name) == 0:
+    return   // early exit; no value needed
+  echo "Hello, {name}!"
+```
+
 ---
 
 ## Single-expression functions

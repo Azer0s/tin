@@ -29,7 +29,7 @@ fn{#async} parent_work(parent_id i64, n_children i64) =
   let summary = "parent-{parent_id}: {collected} children done"
   await results.send(summary)
 
-fn main() =
+fn{#async} main() =
   let n_parents i64 = 20
   let n_children i64 = 10
   results = sync::Channel[string].make(n_parents)

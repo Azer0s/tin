@@ -19,7 +19,7 @@ fn{#async #no_autoyield} count_fast(n i64) i64 =
     sum = sum + i
   return sum
 
-fn main() =
+fn{#async} main() =
   let f1 = spawn count_up(1000)
   let f2 = spawn count_fast(1000)
   let r1 = await f1

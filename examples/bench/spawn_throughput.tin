@@ -14,6 +14,8 @@
 use sync
 use io
 
+fn _tin_now_ms() i64 = extern("_tin_now_ms")
+
 var g_counter sync::AtomicI64
 var g_done    sync::Channel[i64]
 
@@ -21,7 +23,7 @@ fn{#async} worker() =
   g_counter.add(1)
   await g_done.send(1)
 
-fn main() =
+fn{#async} main() =
   let n i64 = 100000
   g_counter = sync::AtomicI64.make(0)
   g_done = sync::Channel[i64].make(n)

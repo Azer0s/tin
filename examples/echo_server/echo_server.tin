@@ -25,7 +25,7 @@ async handle_conn(conn tcp::Conn) =
       return
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
-fn main() =
+fn{#async} main() =
   let srv = tcp::listen(8080)
   echo "listening on :8080"
   loop:
