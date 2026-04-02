@@ -178,6 +178,10 @@ type CodeGen struct {
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
 
+	// externTLSVars: extern thread-local global variables declared in the IR.
+	// Keyed by C variable name. Populated by ensureExternTLSVar.
+	externTLSVars map[string]*ir.Global
+
 	// linkLibs: libraries to pass to the linker (from `use extern` lib entries)
 	linkLibs []string
 
@@ -189,6 +193,9 @@ type CodeGen struct {
 	// and a test-runner main is generated instead of the normal implicit main.
 	testMode  bool
 	testDecls []*ast.TestDecl
+
+	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
+	noWarnAsyncMain bool
 
 	// Atom type and registry.
 	// atomType is the named LLVM struct %__atom = type { i32 }.
@@ -257,6 +264,13 @@ type CodeGen struct {
 	curCoroCleanup *ir.Block    // cleanup block for the current coro function
 	curCoroFrame   *coroFrame   // full frame for the current coro function
 	curCoroRetType irtypes.Type // original return type of current $coro function
+
+	// yieldResumeBlocks: IR blocks that are resume-points after an explicit
+	// `yield` statement.  At loop backedges, if `from` is in this set the
+	// fiber was just unparked from an explicit yield - autoyield would add a
+	// redundant second suspension.  Suppressing it saves one round-trip per
+	// blocked iteration.  Replaces the `#no_autoyield` language annotation.
+	yieldResumeBlocks map[*ir.Block]bool
 
 	// usesAnyFiber is set to true when the program contains at least one
 	// spawn/await/yield, so main() is wrapped with fiber init + run.
@@ -392,7 +406,8 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool) { cg.testMode = v }
+func (cg *CodeGen) SetTestMode(v bool)        { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool) { cg.noWarnAsyncMain = v }
 
 // HasTests reports whether the source contained at least one test block.
 // Only meaningful after Generate has been called.
@@ -480,6 +495,7 @@ func New(filename string) *CodeGen {
 		constrainedFuncInstances: make(map[string]*ir.Func),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
+		externTLSVars:            make(map[string]*ir.Global),
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
@@ -704,8 +720,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// references across coro bodies resolve correctly.
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok {
-			if cg.coroCallable[fd.Name] {
-				if err := cg.predeclareCoroVariant(fd, fd.Name, false); err != nil {
+			// fn main() is renamed to _tin_user_main at IR level; predeclare
+			// the $coro stub under that IR name so genFuncDeclAs can find it.
+			coroKey := fd.Name
+			if fd.Name == "main" && !fd.IsStatic {
+				coroKey = "_tin_user_main"
+			}
+			if cg.coroCallable[coroKey] {
+				if err := cg.predeclareCoroVariant(fd, coroKey, false); err != nil {
 					return nil, err
 				}
 			}
@@ -813,6 +835,17 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		}
 		if !hasMain {
+			// Check whether the user wrote fn{#async} main() - if so we have a
+			// $coro ramp and main should run as the first fiber.
+			var userMainCoroFn *ir.Func
+			for _, f := range cg.mod.Funcs {
+				if f.Name() == "_tin_user_main$coro" {
+					userMainCoroFn = f
+
+					break
+				}
+			}
+
 			wf := cg.mod.NewFunc("main", irtypes.I32)
 			wb := wf.NewBlock("entry")
 
@@ -825,38 +858,61 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Emit fiber init + io init when the program uses fiber features.
 			wb = cg.emitFiberMainWrap(wb)
 
-			// Emit runtime initializers for top-level var declarations.
+			// Emit runtime initializers for top-level var declarations before
+			// any fiber runs so that globals are valid from the start.
 			var err error
 			wb, err = cg.emitTopLevelVarInits(wb)
 			if err != nil {
 				return nil, err
 			}
 
-			// Build zero-value args for each parameter of _tin_user_main.
-			var callArgs []value.Value
-			for _, p := range userMainFn.Params {
-				callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
-			}
-			retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
-			if retIsVoid {
-				wb.NewCall(userMainFn, callArgs...)
-				cg.emitTopLevelVarDeinits(wb)
+			if userMainCoroFn != nil {
+				// fn{#async} main(): spawn as the first fiber and block the OS
+				// main thread until it completes, then drain remaining fibers.
+				// _tin_fiber_run() sends a shutdown signal immediately - if we
+				// called it before main's fiber finished, workers would exit too
+				// early.  _tin_fiber_sync_await blocks without touching the run
+				// queue, so workers continue normally until main is done.
+				cg.ensureFiberRuntime()
+				syncAwaitFn := cg.ensureExternDecl("_tin_fiber_sync_await", irtypes.Void,
+					[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
+				var coroArgs []value.Value
+				for _, p := range userMainCoroFn.Params {
+					coroArgs = append(coroArgs, constant.NewZeroInitializer(p.Type()))
+				}
+				coroHdl := wb.NewCall(userMainCoroFn, coroArgs...)
+				mainPid := wb.NewCall(cg.fiberSpawnFn, coroHdl)
+				wb.NewCall(syncAwaitFn, mainPid)
 				cg.emitFiberMainEnd(wb)
+				cg.emitTopLevelVarDeinits(wb)
 				wb.NewRet(constant.NewInt(irtypes.I32, 0))
 			} else {
-				ret := wb.NewCall(userMainFn, callArgs...)
-				cg.emitTopLevelVarDeinits(wb)
-				cg.emitFiberMainEnd(wb)
-				// Coerce return value to i32 if needed.
-				var retVal value.Value = ret
-				if !ret.Type().Equal(irtypes.I32) {
-					if ret.Type().Equal(irtypes.I64) {
-						retVal = wb.NewTrunc(ret, irtypes.I32)
-					} else {
-						retVal = constant.NewInt(irtypes.I32, 0)
-					}
+				// fn main(): call synchronously (existing behavior).
+				var callArgs []value.Value
+				for _, p := range userMainFn.Params {
+					callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
 				}
-				wb.NewRet(retVal)
+				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
+				if retIsVoid {
+					wb.NewCall(userMainFn, callArgs...)
+					cg.emitTopLevelVarDeinits(wb)
+					cg.emitFiberMainEnd(wb)
+					wb.NewRet(constant.NewInt(irtypes.I32, 0))
+				} else {
+					ret := wb.NewCall(userMainFn, callArgs...)
+					cg.emitTopLevelVarDeinits(wb)
+					cg.emitFiberMainEnd(wb)
+					// Coerce return value to i32 if needed.
+					var retVal value.Value = ret
+					if !ret.Type().Equal(irtypes.I32) {
+						if ret.Type().Equal(irtypes.I64) {
+							retVal = wb.NewTrunc(ret, irtypes.I32)
+						} else {
+							retVal = constant.NewInt(irtypes.I32, 0)
+						}
+					}
+					wb.NewRet(retVal)
+				}
 			}
 
 			cg.curFn = prevFn

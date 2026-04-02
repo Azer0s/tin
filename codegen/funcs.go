@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -287,6 +288,79 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 
 	return nil
 }
+
+// bodyContainsSpawnOrAwait reports whether any node in the body (recursively)
+// is a SpawnExpr or AwaitExpr. Nested fn declarations are not descended into.
+func bodyContainsSpawnOrAwait(body []ast.Node) bool {
+	var walk func(node ast.Node) bool
+	walk = func(node ast.Node) bool {
+		if node == nil {
+			return false
+		}
+		switch n := node.(type) {
+		case *ast.SpawnExpr, *ast.AwaitExpr:
+			return true
+		case *ast.FuncDecl:
+			return false // don't descend into nested fn declarations
+		case *ast.Block:
+			for _, s := range n.Stmts {
+				if walk(s) {
+					return true
+				}
+			}
+		case *ast.ExprStmt:
+			return walk(n.Expr)
+		case *ast.VarDecl:
+			return walk(n.Value)
+		case *ast.AssignStmt:
+			return walk(n.Value)
+		case *ast.AugAssignStmt:
+			return walk(n.Value)
+		case *ast.ReturnStmt:
+			return walk(n.Value)
+		case *ast.EchoStmt:
+			return walk(n.Value)
+		case *ast.IfStmt:
+			if walk(n.Cond) {
+				return true
+			}
+			if n.Then != nil && walk(n.Then) {
+				return true
+			}
+			if n.Else != nil && walk(n.Else) {
+				return true
+			}
+		case *ast.ForStmt:
+			if walk(n.Cond) {
+				return true
+			}
+			if n.Body != nil && walk(n.Body) {
+				return true
+			}
+		case *ast.CallExpr:
+			if walk(n.Func) {
+				return true
+			}
+			for _, a := range n.Args {
+				if walk(a) {
+					return true
+				}
+			}
+		case *ast.BinExpr:
+			return walk(n.Left) || walk(n.Right)
+		}
+
+		return false
+	}
+	for _, s := range body {
+		if walk(s) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// Constrained generic functions are compiled on demand at call sites.
 	if len(n.Constraints) > 0 {
@@ -306,6 +380,13 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// can generate a proper C `i32 @main()` wrapper that passes default args
 	// and returns the result (or 0 for void).
 	if n.Name == "main" && !n.IsStatic {
+		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) && !cg.noWarnAsyncMain {
+			fmt.Fprintf(os.Stderr,
+				"tin: warning: main() uses 'spawn' or 'await' but is not marked async.\n"+
+					"    Each await in a non-async main() creates a temporary fiber, which is slower\n"+
+					"    and bypasses inline channel optimizations.\n"+
+					"    Fix: change 'fn main()' to 'fn{#async} main()'\n")
+		}
 		irName = "_tin_user_main"
 		// Keep `main` resolvable from Tin source (e.g. for recursion).
 		defer func() {
@@ -759,6 +840,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 // genImplicitMain creates a main() function containing the top-level statements.
 func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
+	if bodyContainsSpawnOrAwait(stmts) && !cg.noWarnAsyncMain {
+		fmt.Fprintf(os.Stderr,
+			"tin: warning: top-level statements use 'spawn' or 'await' but there is no async main().\n"+
+				"    Each await at the top level creates a temporary fiber, which is slower\n"+
+				"    and bypasses inline channel optimizations.\n"+
+				"    Fix: wrap your code in 'fn{#async} main() = ...' instead\n")
+	}
 	f := cg.mod.NewFunc("main", irtypes.I32)
 	entry := f.NewBlock("entry")
 

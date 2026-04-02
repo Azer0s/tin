@@ -9,6 +9,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -264,6 +265,23 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 	cg.externIRNames[cName] = true
 
 	return f
+}
+
+// ensureExternTLSVar returns (or creates) an extern thread-local global variable
+// declaration in the IR. Used to read runtime TLS state (e.g. _current_pid)
+// without a function call, enabling the compiler to inline the TLS load.
+// Uses localexec TLS model for the most efficient single-instruction access
+// in standalone (non-shared-library) executables.
+func (cg *CodeGen) ensureExternTLSVar(name string, typ irtypes.Type) *ir.Global {
+	if g, ok := cg.externTLSVars[name]; ok {
+		return g
+	}
+	g := cg.mod.NewGlobal(name, typ)
+	g.Linkage = enum.LinkageExternal
+	g.TLSModel = enum.TLSModelLocalExec
+	cg.externTLSVars[name] = g
+
+	return g
 }
 
 // ensureStrlenDecl lazily creates the bare `declare i64 @strlen(i8*)` for use

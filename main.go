@@ -129,12 +129,18 @@ func main() {
 	}
 	file := os.Args[fileArgIdx]
 
-	// Collect -cflag values from anywhere after the file arg.
+	// Collect -cflag values and warning-suppression flags from anywhere after the file arg.
 	var extraCFlags []string
+	noWarnAsyncMain := false
 	for i := fileArgIdx + 1; i < len(os.Args); i++ {
-		if os.Args[i] == "-cflag" && i+1 < len(os.Args) {
-			i++
-			extraCFlags = append(extraCFlags, os.Args[i])
+		switch os.Args[i] {
+		case "-cflag":
+			if i+1 < len(os.Args) {
+				i++
+				extraCFlags = append(extraCFlags, os.Args[i])
+			}
+		case "-Wno-async-main":
+			noWarnAsyncMain = true
 		}
 	}
 
@@ -213,6 +219,9 @@ func main() {
 	cg := codegen.New(file)
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)
+	}
+	if noWarnAsyncMain {
+		cg.SetNoWarnAsyncMain(true)
 	}
 	mod, cgErr := cg.Generate(prog)
 	if cgErr != nil {
@@ -466,14 +475,55 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		return ld.Run()
 	}
 
+	// Compile each cSource at -O2 (always safe: C files never contain coro
+	// intrinsics, so -O2 is correct and avoids the -O1 penalty forced on the IR).
+	// Linker flags (-l/-L) are separated out and passed only at link time.
+	var tmpCObjs []string
+	var cObjPaths []string
+	var cLinkerFlags []string
+	for _, cs := range cSources {
+		var compileFlags []string
+		for _, f := range cs.flags {
+			if strings.HasPrefix(f, "-l") || strings.HasPrefix(f, "-L") {
+				cLinkerFlags = append(cLinkerFlags, f)
+			} else {
+				compileFlags = append(compileFlags, f)
+			}
+		}
+		cObj, tmpErr := os.CreateTemp("", "tin-c-*.o")
+		if tmpErr != nil {
+			return fmt.Errorf("cannot create temp object file: %w", tmpErr)
+		}
+		cObjName := cObj.Name()
+		_ = cObj.Close()
+		tmpCObjs = append(tmpCObjs, cObjName)
+		cArgs := []string{"-O2", "-c"}
+		cArgs = append(cArgs, compileFlags...)
+		cArgs = append(cArgs, cs.path, "-o", cObjName)
+		clangC := exec.Command("clang", cArgs...)
+		clangC.Stdout = os.Stdout
+		clangC.Stderr = os.Stderr
+		if err := clangC.Run(); err != nil {
+			for _, f := range tmpCObjs {
+				_ = os.Remove(f)
+			}
+
+			return err
+		}
+		cObjPaths = append(cObjPaths, cObjName)
+	}
+	defer func() {
+		for _, f := range tmpCObjs {
+			_ = os.Remove(f)
+		}
+	}()
+
 	args := []string{optLevel, llInputFile}
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
 	}
-	for _, cs := range cSources {
-		args = append(args, cs.flags...)
-		args = append(args, cs.path)
-	}
+	args = append(args, cObjPaths...)
+	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
 	args = append(args, "-o", outBin)

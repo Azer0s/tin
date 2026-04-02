@@ -87,6 +87,14 @@ fn _tin_async_read_c(fd i32, buf *byte, n i64) i64 = extern("_tin_async_read")
 fn _tin_async_write_c(fd i32, buf *byte, n i64) i64 = extern("_tin_async_write")
 fn _tin_sleep_ms_c(ms i64) = extern("_tin_sleep_ms")
 fn _tin_io_blocked_val_c() i64 = extern("_tin_io_blocked_val")
+fn _tin_now_ms() i64 = extern("_tin_now_ms")
+fn _tin_now_us() i64 = extern("_tin_now_us")
+
+// now_ms returns monotonic milliseconds (suitable for elapsed-time measurement).
+fn now_ms() i64 = return _tin_now_ms()
+
+// now_us returns monotonic microseconds.
+fn now_us() i64 = return _tin_now_us()
 
 // async_read reads up to n bytes from fd into buf.
 // Returns the number of bytes read, or a negative errno on error.
@@ -193,5 +201,6 @@ export {
   async_read, async_write, sleep,
   write_all, read_exact,
   tcp_listen, tcp_accept, close,
+  now_ms, now_us,
   Reader, Writer, AsyncReader, AsyncWriter
 } as io
