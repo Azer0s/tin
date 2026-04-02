@@ -92,8 +92,9 @@ static pthread_once_t  _chan_waiter_once = PTHREAD_ONCE_INIT;
 
 static void _chan_waiter_init_once(void) {
     const char *env = getenv("TINMAXCHANWAITERS");
+    // 0 = unlimited (old behaviour: grow forever without panicking).
     _chan_waiter_max = (env && *env) ? atoi(env) : TIN_CHAN_WAITERS_DEFAULT_MAX;
-    if (_chan_waiter_max <= 0) _chan_waiter_max = TIN_CHAN_WAITERS_DEFAULT_MAX;
+    if (_chan_waiter_max < 0) _chan_waiter_max = TIN_CHAN_WAITERS_DEFAULT_MAX;
 }
 
 static void _wq_alloc(TinWaiterQueue *wq, int has_outs) {
@@ -123,13 +124,13 @@ static void _wq_free(TinWaiterQueue *wq) {
 // Unlocks fmu before panicking to avoid deadlock.
 static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_outs) {
     pthread_once(&_chan_waiter_once, _chan_waiter_init_once);
-    if (wq->cap >= _chan_waiter_max) {
+    if (_chan_waiter_max > 0 && wq->cap >= _chan_waiter_max) {
         tin_fmutex_unlock(fmu);
         _tin_panic("channel: waiter queue full - raise TINMAXCHANWAITERS");
         return;
     }
     int new_cap = wq->cap * 2;
-    if (new_cap > _chan_waiter_max) new_cap = _chan_waiter_max;
+    if (_chan_waiter_max > 0 && new_cap > _chan_waiter_max) new_cap = _chan_waiter_max;
 
     int64_t *np = (int64_t *)malloc((size_t)new_cap * sizeof(int64_t));
     void   **nh = (void   **)malloc((size_t)new_cap * sizeof(void *));

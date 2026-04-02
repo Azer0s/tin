@@ -142,8 +142,9 @@ static void _rq_init(void) {
     _run_queue.shutdown = 0;
 
     const char *env = getenv("TINMAXRUNNABLES");
+    // 0 = unlimited (old behaviour: grow forever without panicking).
     _rq_max = (env && *env) ? (int64_t)atoi(env) : RQ_DEFAULT_MAX;
-    if (_rq_max <= 0) _rq_max = RQ_DEFAULT_MAX;
+    if (_rq_max < 0) _rq_max = RQ_DEFAULT_MAX;
 }
 
 // Declared here so _rq_push can check it; defined after _rq_pop.
@@ -152,13 +153,13 @@ static atomic_int _spinning_workers;
 static void _rq_push(TinRunnable r) {
     pthread_mutex_lock(&_run_queue.mu);
     if (_run_queue.count == _run_queue.cap) {
-        if (_run_queue.cap >= _rq_max) {
+        if (_rq_max > 0 && _run_queue.cap >= _rq_max) {
             pthread_mutex_unlock(&_run_queue.mu);
             _tin_panic("run queue overflow: too many runnable fibers - raise TINMAXRUNNABLES");
             return;
         }
         int64_t newcap = _run_queue.cap * 2;
-        if (newcap > _rq_max) newcap = _rq_max;
+        if (_rq_max > 0 && newcap > _rq_max) newcap = _rq_max;
         TinRunnable *nb = (TinRunnable *)malloc((size_t)newcap * sizeof(TinRunnable));
         if (!nb) {
             pthread_mutex_unlock(&_run_queue.mu);

@@ -293,13 +293,17 @@ handles arbitrarily many waiters correctly.
 
 All queues grow dynamically (doubling) up to a configurable cap, then panic.
 
-| Queue              | Initial | Default cap | Env var             |
-|--------------------|---------|-------------|---------------------|
-| Fiber table        | 256     | 1M          | `TINMAXFIBERS`      |
-| Run queue          | 1024    | 1M          | `TINMAXRUNNABLES`   |
-| Timer table        | 1024    | 1M          | `TINMAXTIMERS`      |
-| IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   |
-| Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` |
+| Queue              | Initial | Default cap | Env var             | `=0` behaviour |
+|--------------------|---------|-------------|---------------------|----------------|
+| Fiber table        | 256     | 1M          | `TINMAXFIBERS`      | panic          |
+| Run queue          | 1024    | 1M          | `TINMAXRUNNABLES`   | **unlimited**  |
+| Timer table        | 1024    | 1M          | `TINMAXTIMERS`      | panic          |
+| IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   | panic          |
+| Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` | **unlimited**  |
+
+`=0` means "no cap — grow forever without panicking" (restores pre-cap behaviour
+for run queue and channel waiters). Not supported for the other queues because
+their pre-cap behaviour was a silent hang rather than a safe degradation.
 
 ---
 

@@ -7,23 +7,27 @@ cheap (a few dozen instructions, no OS context switch).
 
 ### Environment variables
 
-| Variable            | Default | Description                                              |
-|---------------------|---------|----------------------------------------------------------|
-| `TINMAXPROCS`       | nproc   | Number of worker OS threads                              |
-| `TINMAXFIBERS`      | 1M      | Maximum concurrent fibers before panic                   |
-| `TINMAXRUNNABLES`   | 1M      | Maximum entries in the run queue before panic            |
-| `TINMAXTIMERS`      | 1M      | Maximum simultaneous `sleep` timers before panic         |
-| `TINMAXIOWATCHES`   | 64K     | Maximum simultaneous async I/O watches before panic      |
-| `TINMAXCHANWAITERS` | 64K     | Maximum fibers parked per channel waiter queue before panic |
+| Variable            | Default | `=0` meaning      | Description                                              |
+|---------------------|---------|-------------------|----------------------------------------------------------|
+| `TINMAXPROCS`       | nproc   | n/a               | Number of worker OS threads                              |
+| `TINMAXFIBERS`      | 1M      | panic             | Maximum concurrent fibers before panic                   |
+| `TINMAXRUNNABLES`   | 1M      | **unlimited**     | Maximum entries in the run queue before panic            |
+| `TINMAXTIMERS`      | 1M      | panic             | Maximum simultaneous `sleep` timers before panic         |
+| `TINMAXIOWATCHES`   | 64K     | panic             | Maximum simultaneous async I/O watches before panic      |
+| `TINMAXCHANWAITERS` | 64K     | **unlimited**     | Maximum fibers parked per channel waiter queue before panic |
 
 All queues grow dynamically (doubling on demand) up to their cap, then
-`panic()` with a message naming the variable to raise. Set any of these
-before running your program:
+`panic()` with a message naming the variable to raise.
+
+`TINMAXRUNNABLES=0` and `TINMAXCHANWAITERS=0` disable the cap entirely —
+the queue grows without bound and never panics (pre-cap behaviour).
 
 ```sh
 TINMAXPROCS=4 ./my_program               # use 4 worker threads
 TINMAXFIBERS=4000000 ./my_program        # allow up to 4M concurrent fibers
 TINMAXCHANWAITERS=262144 ./my_program    # 256K waiters per channel
+TINMAXRUNNABLES=0 ./my_program           # unlimited run queue (no panic)
+TINMAXCHANWAITERS=0 ./my_program         # unlimited channel waiter queues
 ```
 
 ### Exit semantics
