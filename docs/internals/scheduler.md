@@ -14,18 +14,23 @@ Source: `runtime/fiber.c`
 
 ## Run Queue
 
-```
+```c
 TinRunQueue {
-    TinFiber *ring[TIN_MAX_FIBERS];  // circular buffer
-    int       head, tail, count;     // FIFO indices
+    TinRunnable *buf;           // heap-allocated ring buffer (grows on demand)
+    int64_t      cap, head, tail, count;
     pthread_mutex_t mu;
-    pthread_cond_t  cond;
-    int       shutdown;              // set to 1 on exit
+    pthread_cond_t  not_empty;
+    int          shutdown;      // set to 1 on exit
 }
 ```
 
-- **Push**: `ring[tail++ % TIN_MAX_FIBERS] = f`, increment `count`, signal `cond`.
-- **Pop**: blocks on `cond` until `count > 0` or `shutdown == 1`; returns `NULL` on shutdown.
+The buffer starts at 1024 slots and doubles on each overflow up to `_rq_max`
+(default 1M, configurable via `TINMAXRUNNABLES`). Exceeding the cap calls
+`_tin_panic` with a message naming the env var to raise.
+
+- **Push**: append to ring, increment `count`, signal `not_empty` (skipped when a spinner is polling).
+- **Pop**: adaptive spin (`RQ_SPIN_ITERS=500` trylock attempts, one spinner at a time) then
+  block on `not_empty`; returns empty sentinel on shutdown.
 - Lock ordering: only one lock at a time. Never hold `_table_mu` while taking `_run_queue.mu`.
 
 ---
@@ -127,11 +132,16 @@ void _tin_fiber_unpark(int64_t pid) {
 `runtime/async_io.c` runs a dedicated I/O thread that calls `epoll_wait`
 (Linux) or `kevent` (macOS/FreeBSD) with a 5ms timeout.
 
+The watch table is a heap-allocated `TinIOWatch[]` starting at 256 slots,
+doubling up to `_io_watch_max` (default 64K, configurable via
+`TINMAXIOWATCHES`). Exceeding the cap panics before the fiber is parked.
+
 When `_tin_async_read` or `_tin_async_write` gets EAGAIN:
 1. Sets fd to O_NONBLOCK.
 2. Calls `_io_park(fd, outerPid, readFlag)` which:
+   - Adds fd to the watch table (growing if needed, panicking if full).
+   - Registers fd with epoll/kqueue (EPOLLONESHOT / EV_ONESHOT).
    - Calls `_tin_fiber_park(outerPid)` -> fiber status = BLOCKED.
-   - Registers `fd` with epoll/kqueue for the appropriate event.
 3. Returns `TIN_IO_BLOCKED` sentinel (`INT64_MIN`).
 
 When epoll/kqueue fires:
@@ -147,10 +157,16 @@ When epoll/kqueue fires:
 
 `runtime/timer.c` runs a timer thread that polls every 1ms.
 
+The timer table is a heap-allocated `TinTimer[]` starting at 1024 slots,
+doubling up to `_timer_max` (default 1M, configurable via `TINMAXTIMERS`).
+The fiber is parked **before** the table is grown; if the table is full,
+`_tin_panic` is called after releasing the mutex.
+
 When `io::sleep(ms)` is called:
 1. `_tin_sleep_ms(ms)` in C parks the fiber: `_tin_fiber_park(pid)`.
-2. Appends `TinTimer{deadline, pid}` to the timer table.
-3. Timer thread wakes -> finds expired entries -> calls `_tin_fiber_unpark(pid)`.
+2. Grows the timer table if needed, panics if at cap.
+3. Appends `TinTimer{deadline, pid}` to the table.
+4. Timer thread wakes -> finds expired entries -> calls `_tin_fiber_unpark(pid)`.
 
 ---
 
@@ -182,9 +198,18 @@ await spawn fn_b(args)
 ```c
 // Simplified
 void *_tin_fiber_join(int64_t pid) {
-    _join_register(_current_pid, pid);   // wake calling fiber when pid2 is DONE
-    _tin_fiber_park(_current_pid);       // park calling fiber (BLOCKED)
-    // ... calling fiber resumes here after pid2 completes ...
+    // Register calling fiber as a waiter on pid's done list, then park.
+    pthread_mutex_lock(&_table_mu);
+    TinFiber *target = _fibers[pid];
+    if (target->status == FIBER_DONE) {
+        pthread_mutex_unlock(&_table_mu);
+        return _tin_coro_take_result();  // already done
+    }
+    // Add calling fiber pid to target->waiters[], then park.
+    target->waiters[target->waiter_cnt++] = _current_pid;
+    pthread_mutex_unlock(&_table_mu);
+    _tin_fiber_park(_current_pid);       // BLOCKED until target is DONE
+    // ... resumes here after target completes ...
     return _tin_coro_take_result();      // ownership transferred to caller
 }
 ```
@@ -234,6 +259,47 @@ Many stdlib functions (`io::sleep`, `io::write_all`, `ioutil::read_string`,
 
 Unawaited fibers still in the run queue or parked are abandoned - their
 coroutine handles are not destroyed (memory is reclaimed by the OS on process exit).
+
+---
+
+## Channel Waiter Queues
+
+`stdlib/sync/channel_arc.c` parks fibers that call `send` on a full channel or
+`recv` on an empty one. Each `TinChannel` has two dynamic waiter queues:
+
+```c
+TinWaiterQueue {
+    int64_t *pids;   // fiber PIDs
+    void   **hdls;   // coroutine handles (for _tin_fiber_unpark_hdl)
+    void   **fibs;   // TinFiber* pointers (for _tin_fiber_unpark_fib)
+    void   **outs;   // recv-direct out buffers (recv queue only; NULL = recv_blocking)
+    int      cnt;    // current count
+    int      cap;    // current capacity
+}
+```
+
+Each queue starts at 8 slots and doubles up to `_chan_waiter_max` (default 64K,
+configurable via `TINMAXCHANWAITERS`). Growth is triggered while the channel's
+`TinFastMutex` is held; on OOM or cap exceeded the mutex is unlocked before
+`_tin_panic` is called to avoid deadlock.
+
+`_tin_channel_close` collects all parked fibers into heap-allocated snapshot
+arrays (sized to the actual waiter count) before releasing the lock, so it
+handles arbitrarily many waiters correctly.
+
+---
+
+## Queue Sizing Reference
+
+All queues grow dynamically (doubling) up to a configurable cap, then panic.
+
+| Queue              | Initial | Default cap | Env var             |
+|--------------------|---------|-------------|---------------------|
+| Fiber table        | 256     | 1M          | `TINMAXFIBERS`      |
+| Run queue          | 1024    | 1M          | `TINMAXRUNNABLES`   |
+| Timer table        | 1024    | 1M          | `TINMAXTIMERS`      |
+| IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   |
+| Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` |
 
 ---
 

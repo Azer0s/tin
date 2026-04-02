@@ -5,14 +5,25 @@ Tin has built-in support for lightweight concurrent green threads called
 OS threads**. Fibers are compiled to LLVM coroutines; context switching is
 cheap (a few dozen instructions, no OS context switch).
 
-### TINMAXPROCS
+### Environment variables
 
-Set the `TINMAXPROCS` environment variable to control the number of worker
-threads (default: number of CPU cores):
+| Variable            | Default | Description                                              |
+|---------------------|---------|----------------------------------------------------------|
+| `TINMAXPROCS`       | nproc   | Number of worker OS threads                              |
+| `TINMAXFIBERS`      | 1M      | Maximum concurrent fibers before panic                   |
+| `TINMAXRUNNABLES`   | 1M      | Maximum entries in the run queue before panic            |
+| `TINMAXTIMERS`      | 1M      | Maximum simultaneous `sleep` timers before panic         |
+| `TINMAXIOWATCHES`   | 64K     | Maximum simultaneous async I/O watches before panic      |
+| `TINMAXCHANWAITERS` | 64K     | Maximum fibers parked per channel waiter queue before panic |
+
+All queues grow dynamically (doubling on demand) up to their cap, then
+`panic()` with a message naming the variable to raise. Set any of these
+before running your program:
 
 ```sh
-TINMAXPROCS=4 ./my_program   # use 4 worker threads
-TINMAXPROCS=1 ./my_program   # single-threaded (useful for debugging)
+TINMAXPROCS=4 ./my_program               # use 4 worker threads
+TINMAXFIBERS=4000000 ./my_program        # allow up to 4M concurrent fibers
+TINMAXCHANWAITERS=262144 ./my_program    # 256K waiters per channel
 ```
 
 ### Exit semantics
