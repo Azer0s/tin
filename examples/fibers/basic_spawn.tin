@@ -14,7 +14,7 @@ fn{#async} worker(n i64) =
 fn{#async} compute(n i64) i64 =
   return n * n
 
-fn main() =
+fn{#async} main() =
   let p1 = spawn worker(1)
   let p2 = spawn worker(2)
   echo "main: fibers spawned"

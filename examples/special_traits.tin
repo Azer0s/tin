@@ -21,7 +21,7 @@ echo "point is {p}"         // point is (3, 7)
 struct celsius(implicit[f64]) =
   degrees f64
 
-  static fn from(val f64) celsius =
+  static fn ::implicit(val f64) celsius =
     return celsius{degrees: val}
 
 let temp celsius = 36.6        // implicit f64 -> celsius via celsius_from

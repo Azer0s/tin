@@ -1,0 +1,58 @@
+// examples/io_stress/concurrent_writes.tin
+//
+// I/O stress: many fibers concurrently building and echoing formatted lines.
+// Tests concurrent string allocation, interpolation, and stdout output under
+// fiber scheduling pressure. Each fiber constructs strings via interpolation
+// and echoes them, exercising the print path under concurrent load.
+//
+// Compiler paths exercised:
+//   - String interpolation with multiple substitutions per fiber
+//   - Concurrent echo (stdout write) from many fibers
+//   - String ARC under high-concurrency allocation/deallocation
+
+use assert
+use sync
+
+test "20 fibers each write 50 lines" =
+  let n i64 = 20
+  let lines_each i64 = 50
+  let done = sync::Channel[i64].make(n)
+  let i i64 = 0
+  for i < n:
+    let id = i
+    let count = lines_each
+    spawn do:
+      let k i64 = 0
+      for k < count:
+        let line = "fiber-{id} line-{k} x={k * id + 1}"
+        echo line
+        k = k + 1
+      await done.send(id)
+    i = i + 1
+  let j i64 = 0
+  for j < n:
+    await done.recv()
+    j = j + 1
+  assert::equals(j, n)
+
+test "5 fibers each write 200 lines" =
+  let n i64 = 5
+  let lines_each i64 = 200
+  let done = sync::Channel[i64].make(n)
+  let i i64 = 0
+  for i < n:
+    let id = i
+    let count = lines_each
+    spawn do:
+      let k i64 = 0
+      for k < count:
+        let line = "fiber-{id} line-{k} x={k * id + 1}"
+        echo line
+        k = k + 1
+      await done.send(id)
+    i = i + 1
+  let j i64 = 0
+  for j < n:
+    await done.recv()
+    j = j + 1
+  assert::equals(j, n)

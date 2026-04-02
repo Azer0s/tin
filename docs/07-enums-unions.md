@@ -72,6 +72,36 @@ fn is_weekend(d day) bool =
     default:           return false
 ```
 
+### Exhaustive enum matches
+
+When every member of an enum is covered by an explicit `case`, the `default`
+clause is optional. The compiler detects this and does not require a trailing
+`return` after the match:
+
+```rust
+type direction = enum:
+  north, south, east, west
+
+fn direction_name(d direction) string =
+  match d:
+    case direction.north: return "north"
+    case direction.south: return "south"
+    case direction.east:  return "east"
+    case direction.west:  return "west"
+    // no default needed - all 4 members are covered
+```
+
+This only applies when **all** declared members are explicitly listed. A
+partial match (some members omitted, no `default`) is a compile-time error:
+
+```rust
+// ERROR: fn direction_name: not all code paths return a value
+fn direction_name(d direction) string =
+  match d:
+    case direction.north: return "north"
+    // south, east, west not handled
+```
+
 ---
 
 ## Atom enums

@@ -11,7 +11,7 @@ fn{#async} counter(name string, n i64) =
       yield
   echo "{name} finished: {i}"
 
-fn main() =
+fn{#async} main() =
   let p1 = spawn counter("A", 5000)
   let p2 = spawn counter("B", 5000)
   await p1

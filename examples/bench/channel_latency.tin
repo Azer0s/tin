@@ -3,8 +3,13 @@
 // Measures channel round-trip latency: two fibers ping-pong a token over two
 // channels for N rounds, then compute nanoseconds per round trip.
 //
+// Both ping_loop and pong_loop run as async fibers so all send/recv ops are
+// driven inline (no per-operation fiber spawn, no OS-blocking await in the
+// hot path).  main() only performs two OS-blocking awaits total (for the two
+// long-lived fibers).
+//
 // Usage:
-//   ./tin build examples/bench/channel_latency.tin -lm -o /tmp/bench_ch
+//   ./tin build examples/bench/channel_latency.tin -o /tmp/bench_ch
 //   /tmp/bench_ch
 //
 // Expected output (approximate):
@@ -15,8 +20,12 @@
 use sync
 use io
 
+fn _tin_now_ms() i64 = extern("_tin_now_ms")
+fn _tin_now_us() i64  = extern("_tin_now_us")
+
 var g_ping sync::Channel[i64]
 var g_pong sync::Channel[i64]
+var g_elapsed i64
 
 fn{#async} pong_loop(n i64) =
   let i i64 = 0
@@ -25,24 +34,26 @@ fn{#async} pong_loop(n i64) =
     await g_pong.send(v)
     i = i + 1
 
-fn main() =
-  let n i64 = 1000000
-  g_ping = sync::Channel[i64].make(1)
-  g_pong = sync::Channel[i64].make(1)
-
-  let ponger = spawn pong_loop(n)
-
-  let start_ms = _tin_now_ms()
+fn{#async} ping_loop(n i64) =
+  let start = _tin_now_us()
   let i i64 = 0
   for i < n:
     await g_ping.send(1)
     await g_pong.recv()
     i = i + 1
-  let elapsed = _tin_now_ms() - start_ms
+  g_elapsed = _tin_now_us() - start
 
+fn{#async} main() =
+  let n i64 = 1000000
+  g_ping = sync::Channel[i64].make(1)
+  g_pong = sync::Channel[i64].make(1)
+
+  let pinger = spawn ping_loop(n)
+  let ponger = spawn pong_loop(n)
+  await pinger
   await ponger
 
-  let ns_per_rt = elapsed * 1000000 / n
+  let ns_per_rt = g_elapsed * 1000 / n
   echo "{n} round trips"
-  echo "elapsed: ~{elapsed}ms"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
   echo "latency: ~{ns_per_rt}ns / round trip"

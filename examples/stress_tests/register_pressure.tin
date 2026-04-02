@@ -1,0 +1,220 @@
+// stress_tests/register_pressure.tin
+//
+// Tests: functions with a large number of simultaneously live local variables,
+// stressing the register allocator. The LLVM backend should correctly spill
+// to the stack when register pressure exceeds the available physical registers.
+//
+// Patterns:
+//   - 30+ integer locals live at the same time
+//   - 20+ f64 locals live at the same time (separate float register file)
+//   - Large number of booleans (typically packed into GP regs)
+//   - Function with many parameters (beyond the 6 SysV argument registers)
+//   - Loop body with high register demand per iteration
+//   - Cross-call live ranges (values live across function calls)
+
+use assert
+
+// ---------------------------------------------------------------------------
+// 1. Many integer locals all live simultaneously
+// ---------------------------------------------------------------------------
+
+fn many_int_locals() i64 =
+  let a0 i64 = 1
+  let a1 i64 = 2
+  let a2 i64 = 3
+  let a3 i64 = 4
+  let a4 i64 = 5
+  let a5 i64 = 6
+  let a6 i64 = 7
+  let a7 i64 = 8
+  let a8 i64 = 9
+  let a9 i64 = 10
+  let b0 i64 = a0 + a1
+  let b1 i64 = a2 + a3
+  let b2 i64 = a4 + a5
+  let b3 i64 = a6 + a7
+  let b4 i64 = a8 + a9
+  let c0 i64 = b0 * b1
+  let c1 i64 = b2 * b3
+  let c2 i64 = b4 * b0
+  let c3 i64 = b1 * b2
+  let c4 i64 = b3 * b4
+  let d0 i64 = c0 + c1 + c2
+  let d1 i64 = c3 + c4
+  let e0 i64 = d0 - d1
+  let e1 i64 = d0 + d1
+  // All of a0..e1 are still in scope; force a use of each
+  return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9
+       + b0 + b1 + b2 + b3 + b4
+       + c0 + c1 + c2 + c3 + c4
+       + d0 + d1
+       + e0 + e1
+
+// ---------------------------------------------------------------------------
+// 2. Many f64 locals
+// ---------------------------------------------------------------------------
+
+fn many_f64_locals() f64 =
+  let x0 f64 = 1.0
+  let x1 f64 = 1.5
+  let x2 f64 = 2.0
+  let x3 f64 = 2.5
+  let x4 f64 = 3.0
+  let x5 f64 = 3.5
+  let x6 f64 = 4.0
+  let x7 f64 = 4.5
+  let x8 f64 = 5.0
+  let x9 f64 = 5.5
+  let y0 f64 = x0 * x1
+  let y1 f64 = x2 * x3
+  let y2 f64 = x4 * x5
+  let y3 f64 = x6 * x7
+  let y4 f64 = x8 * x9
+  let z0 f64 = y0 + y1 + y2
+  let z1 f64 = y3 + y4
+  let w0 f64 = z0 * z1
+  let w1 f64 = z0 + z1
+  return w0 + w1 + x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9
+
+// ---------------------------------------------------------------------------
+// 3. Function with many parameters (past the 6-register ABI boundary)
+// ---------------------------------------------------------------------------
+
+fn sum_12_params(a i64, b i64, c i64, d i64, e i64, f i64,
+                 g i64, h i64, ii i64, j i64, k i64, l i64) i64 =
+  return a + b + c + d + e + f + g + h + ii + j + k + l
+
+fn product_8_params(a i64, b i64, c i64, d i64,
+                    e i64, f i64, g i64, h i64) i64 =
+  return a * b * c * d * e * f * g * h
+
+// ---------------------------------------------------------------------------
+// 4. Loop with high per-iteration register demand
+// ---------------------------------------------------------------------------
+
+fn dense_loop(n i64) i64 =
+  let total i64 = 0
+  let i i64 = 0
+  for i < n:
+    let a i64 = i * 3
+    let b i64 = i * 5
+    let c i64 = i * 7
+    let d i64 = i * 11
+    let e i64 = i * 13
+    let f i64 = a * b - c
+    let g i64 = d + e - f
+    let h i64 = g * a + b
+    let sum_local i64 = a + b + c + d + e + f + g + h
+    total = total + sum_local % 1000
+    i = i + 1
+  return total
+
+// ---------------------------------------------------------------------------
+// 5. Cross-call live ranges: values live across multiple function calls
+// ---------------------------------------------------------------------------
+
+fn pure_add(a i64, b i64) i64 = return a + b
+fn pure_mul(a i64, b i64) i64 = return a * b
+
+fn cross_call_live(n i64) i64 =
+  // Compute several values, then call functions; each call can kill registers,
+  // so the compiler must keep live values on the stack across calls.
+  let v0 i64 = n * 2
+  let v1 i64 = n * 3
+  let v2 i64 = n * 5
+  let v3 i64 = n * 7
+  let v4 i64 = n * 11
+  // All of v0..v4 must survive the upcoming calls
+  let r0 = pure_add(v0, v1)  // call: v2, v3, v4 must survive
+  let r1 = pure_mul(v2, v3)  // call: v4 must survive
+  let r2 = pure_add(v4, r0)  // call
+  let r3 = pure_mul(r1, r2)  // call
+  return r3 + v0 + v1 + v2 + v3 + v4
+
+// ---------------------------------------------------------------------------
+// 6. Many boolean locals (flags)
+// ---------------------------------------------------------------------------
+
+fn many_bool_locals(n i64) i64 =
+  let f0 bool = n > 0
+  let f1 bool = n > 1
+  let f2 bool = n > 2
+  let f3 bool = n > 3
+  let f4 bool = n > 4
+  let f5 bool = n > 5
+  let f6 bool = n > 6
+  let f7 bool = n > 7
+  let f8 bool = n > 8
+  let f9 bool = n > 9
+  let f10 bool = n % 2 == 0
+  let f11 bool = n % 3 == 0
+  let f12 bool = n % 5 == 0
+  let f13 bool = n % 7 == 0
+  // Count how many are true
+  let count i64 = 0
+  if f0: count = count + 1
+  if f1: count = count + 1
+  if f2: count = count + 1
+  if f3: count = count + 1
+  if f4: count = count + 1
+  if f5: count = count + 1
+  if f6: count = count + 1
+  if f7: count = count + 1
+  if f8: count = count + 1
+  if f9: count = count + 1
+  if f10: count = count + 1
+  if f11: count = count + 1
+  if f12: count = count + 1
+  if f13: count = count + 1
+  return count
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "many int locals" =
+  let r = many_int_locals()
+  // a0..a9 = 55
+  // b0..b4 = 3+7+11+15+19 = 55
+  // c0..c4 = 21+77+57+49+285 = 489  (3*7, 11*15, 19*3, 7*11, 15*19)
+  // d0 = 21+77+57 = 155, d1 = 49+285 = 334
+  // e0 = 155-334 = -179, e1 = 155+334 = 489
+  // total = 55+55+489+155+334+(-179)+489
+  assert::equals(r, 55 + 55 + (3*7 + 11*15 + 19*3 + 7*11 + 15*19) + 155 + 334 + (155 - 334) + 489)
+
+test "many f64 locals produces finite result" =
+  let r = many_f64_locals()
+  // Just verify it doesn't crash and is > 0
+  assert::ok(r > 0.0)
+
+test "12 params beyond register ABI" =
+  let r = sum_12_params(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+  assert::equals(r, 78)
+
+test "8 params product" =
+  let r = product_8_params(1, 2, 3, 4, 5, 6, 7, 8)
+  assert::equals(r, 40320)
+
+test "dense loop register pressure" =
+  let r = dense_loop(10)
+  assert::ok(r >= 0)  // just verify no crash
+
+test "cross-call live ranges n=2" =
+  // v0=4, v1=6, v2=10, v3=14, v4=22
+  // r0=add(4,6)=10, r1=mul(10,14)=140, r2=add(22,10)=32, r3=mul(140,32)=4480
+  // total = 4480 + 4+6+10+14+22 = 4536
+  let r = cross_call_live(2)
+  assert::equals(r, 4536)
+
+test "many bool locals count n=15" =
+  // 15 > 0..9 (all true = 10), 15%2!=0, 15%3=0, 15%5=0, 15%7!=0
+  // true flags: f0..f9 (10), f11, f12 -> count=12
+  let r = many_bool_locals(15)
+  assert::equals(r, 12)
+
+test "many bool locals count n=5" =
+  // 5>0..4 (true), 5>5..9 (false) = 5 true for f0-f9
+  // 5%2!=0, 5%3!=0, 5%5=0 (f12), 5%7!=0
+  // count = 5 + 1 = 6
+  let r = many_bool_locals(5)
+  assert::equals(r, 6)

@@ -1,0 +1,55 @@
+// MPMC: 4 producers + 4 consumers on one shared buffered channel.
+// Forces contention on the channel mutex — no SPSC fast path possible.
+
+use sync
+use io
+
+fn _tin_now_us() i64 = extern("_tin_now_us")
+
+var g_ch      sync::Channel[i64]
+var g_done    sync::Channel[i64]
+var g_elapsed i64
+
+fn{#async} producer(n i64) =
+  let i i64 = 0
+  for i < n:
+    await g_ch.send(i)
+    i = i + 1
+
+fn{#async} consumer(n i64) =
+  let i i64 = 0
+  for i < n:
+    await g_ch.recv()
+    i = i + 1
+  await g_done.send(1)
+
+fn{#async} main() =
+  let workers  i64 = 4
+  let per      i64 = 250000
+  let total        = workers * per
+
+  g_ch   = sync::Channel[i64].make(64)
+  g_done = sync::Channel[i64].make(workers)
+
+  let i i64 = 0
+  for i < workers:
+    spawn consumer(per)
+    i = i + 1
+
+  let start = _tin_now_us()
+
+  i = 0
+  for i < workers:
+    spawn producer(per)
+    i = i + 1
+
+  i = 0
+  for i < workers:
+    await g_done.recv()
+    i = i + 1
+
+  g_elapsed = _tin_now_us() - start
+  let throughput = total * 1000000 / g_elapsed
+  echo "{total} msgs, {workers}P+{workers}C"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "throughput: ~{throughput} msgs/sec"

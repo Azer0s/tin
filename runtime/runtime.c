@@ -25,6 +25,8 @@ __attribute__((constructor)) static void _tin_stdout_init(void) {
 #include "atom.c"
 #include "any.c"
 #include "fiber.c"     // M:N fiber scheduler (TINMAXPROCS worker threads)
+#include "fastmutex.c" // TinFastMutex: atomic spinlock + coro wait queue
 #include "async_io.c"  // epoll/kqueue async I/O (dedicated I/O thread)
 #include "timer.c"     // fiber sleep / timer support
 #include "net.c"       // TCP socket helpers
+#include "time.c"      // _tin_now_ms / _tin_now_us monotonic clock

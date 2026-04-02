@@ -19,7 +19,7 @@ use sync
 
 var capture_results_ch sync::Channel[string]
 
-fn main() =
+fn{#async} main() =
   let n i64 = 500
   capture_results_ch = sync::Channel[string].make(n)
 

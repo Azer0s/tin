@@ -19,11 +19,12 @@ type implicitConvEntry struct {
 // Scope
 
 type scopeEntry struct {
-	val      value.Value // alloca pointer (for locals) or *ir.Func (for functions)
-	isAlloc  bool        // true if val is an alloca (needs load/store)
-	isRC     bool        // true if the alloca holds an ARC-managed value ([T] or any)
-	noDeinit bool        // true for the `this` parameter of a deinit method (prevents recursive deinit)
-	isGlobal bool        // true for module-level globals; skip in per-function scope release
+	val       value.Value // alloca pointer (for locals) or *ir.Func (for functions)
+	isAlloc   bool        // true if val is an alloca (needs load/store)
+	isRC      bool        // true if the alloca holds an ARC-managed value ([T] or any)
+	noDeinit  bool        // true for the `this` parameter of a deinit method (prevents recursive deinit)
+	noRelease bool        // true for borrowed bindings (e.g. union `is` vars) -- scope exit skips all release
+	isGlobal  bool        // true for module-level globals; skip in per-function scope release
 	// basePtr is set for slice variables (arr[start:end]).  Because the fat-ptr
 	// stores an interior pointer (offset into the allocation), ARC retain/release
 	// must operate on the base allocation pointer, not the possibly-interior field 0.

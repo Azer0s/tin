@@ -1,0 +1,40 @@
+<idea-plugin>
+    <id>com.tin.ide</id>
+    <name>Tin Language</name>
+    <vendor>Tin</vendor>
+    <description><![CDATA[
+        Syntax highlighting and language support for the <a href="https://github.com/ariel-workspace/tin">Tin programming language</a>.
+        <ul>
+            <li>Syntax highlighting for <code>.tin</code> files</li>
+            <li>Line comment support (<code>//</code>)</li>
+            <li>Bracket matching for <code>{}</code>, <code>[]</code>, <code>()</code></li>
+            <li>Customizable color scheme via <em>Settings &rarr; Editor &rarr; Color Scheme &rarr; Tin</em></li>
+        </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType
+            name="Tin"
+            language="Tin"
+            extensions="tin"
+            implementationClass="com.tin.ide.TinFileType"
+            fieldName="INSTANCE"/>
+
+        <lang.syntaxHighlighterFactory
+            language="Tin"
+            implementationClass="com.tin.ide.TinSyntaxHighlighterFactory"/>
+
+        <colorSettingsPage
+            implementation="com.tin.ide.TinColorSettingsPage"/>
+
+        <lang.commenter
+            language="Tin"
+            implementationClass="com.tin.ide.TinCommenter"/>
+
+        <lang.braceMatcher
+            language="Tin"
+            implementationClass="com.tin.ide.TinBracketMatcher"/>
+    </extensions>
+</idea-plugin>

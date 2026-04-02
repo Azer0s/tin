@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -60,21 +61,27 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			b.NewRet(val)
 		}
 	}
-	addDefaultRet := func(b *ir.Block) {
-		if b != nil && b.Term == nil {
-			if cg.inCoroFn {
-				emitTerminator(b, nil, "")
-			} else if irtypes.IsVoid(retType) {
-				_ = cg.emitDefers(b)
-				cg.emitAllScopeReleases(b, "")
-				b.NewRet(nil)
-			} else {
-				_ = cg.emitDefers(b)
-				cg.emitAllScopeReleases(b, "")
-				defVal := checkDeferRetOverride(b, cg.zeroValue(retType))
-				b.NewRet(defVal)
-			}
+	addDefaultRet := func(b *ir.Block) error {
+		if b == nil || b.Term != nil {
+			return nil
 		}
+		if !irtypes.IsVoid(retType) {
+			fnName := ""
+			if cg.curFn != nil {
+				fnName = cg.curFn.Name()
+			}
+
+			return fmt.Errorf("fn %s: not all code paths return a value", fnName)
+		}
+		if cg.inCoroFn {
+			emitTerminator(b, nil, "")
+		} else {
+			_ = cg.emitDefers(b)
+			cg.emitAllScopeReleases(b, "")
+			b.NewRet(nil)
+		}
+
+		return nil
 	}
 	switch b := body.(type) {
 	case *ast.Block:
@@ -83,7 +90,9 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			return false, err
 		}
 		if !term {
-			addDefaultRet(newBlock)
+			if err := addDefaultRet(newBlock); err != nil {
+				return false, err
+			}
 		}
 
 		return true, nil
@@ -111,7 +120,9 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 				}
 				emitTerminator(block, val, retSkip)
 			} else {
-				addDefaultRet(block)
+				if err := addDefaultRet(block); err != nil {
+					return false, err
+				}
 			}
 
 			return true, nil
@@ -122,7 +133,9 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			return false, err
 		}
 		if !terminated {
-			addDefaultRet(newBlock)
+			if err := addDefaultRet(newBlock); err != nil {
+				return false, err
+			}
 		}
 
 		return true, nil
@@ -134,7 +147,9 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			return false, err
 		}
 		if !terminated {
-			addDefaultRet(newBlock)
+			if err := addDefaultRet(newBlock); err != nil {
+				return false, err
+			}
 		}
 
 		return true, nil
@@ -886,6 +901,11 @@ func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	block.NewCall(cg.fiberYieldCoroFn, cg.curCoroHdl)
 	// Suspend the coroutine; returns the resume block.
 	resumeBlk := cg.emitSuspendPoint(block, cg.curCoroFrame)
+	// Track yield-resume blocks so genYieldAutoAt can suppress the redundant
+	// autoyield when the loop backedge lands on this resume block.
+	if cg.yieldResumeBlocks != nil {
+		cg.yieldResumeBlocks[resumeBlk] = true
+	}
 
 	return resumeBlk, nil
 }
@@ -1318,9 +1338,13 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 
+	cg.curBlock = block
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
+	}
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
 	}
 
 	if val == nil {
@@ -1691,7 +1715,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		mergeBlock.NewUnreachable()
 	}
 
-	return mergeBlock, false, nil
+	return mergeBlock, allTerminated, nil
 }
 
 func (cg *CodeGen) genFor(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
@@ -2052,6 +2076,48 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	return afterBlock, nil
 }
 
+// isExhaustiveEnumMatch returns true when every case pattern is a member of
+// the same enum and all members of that enum are covered - making a default
+// clause unnecessary for exhaustiveness.
+func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
+	if len(s.Cases) == 0 {
+		return false
+	}
+	var enumName string
+	for _, c := range s.Cases {
+		fa, ok := c.Pattern.(*ast.FieldAccess)
+		if !ok {
+			return false
+		}
+		id, ok := fa.Expr.(*ast.Identifier)
+		if !ok {
+			return false
+		}
+		key := id.Name + "." + fa.Field
+		if _, isEnum := cg.enumValues[key]; !isEnum {
+			return false
+		}
+		if enumName == "" {
+			enumName = id.Name
+		} else if enumName != id.Name {
+			return false
+		}
+	}
+	if enumName == "" {
+		return false
+	}
+	// Count total members registered for this enum.
+	prefix := enumName + "."
+	total := 0
+	for key := range cg.enumValues {
+		if strings.HasPrefix(key, prefix) {
+			total++
+		}
+	}
+
+	return len(s.Cases) == total
+}
+
 func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
 	if s.IsType {
 		return cg.genMatchType(block, s)
@@ -2097,7 +2163,10 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 	}
 	block.NewSwitch(switchExpr, defaultBlock, cases...)
 
-	// Generate case bodies.
+	// Generate case bodies. Track whether any arm fell through to afterBlock.
+	// A match without a default is still exhaustive when every member of an
+	// enum atom type is covered by an explicit case.
+	anyFallthrough := s.Default == nil && !cg.isExhaustiveEnumMatch(s)
 	for i, c := range s.Cases {
 		var caseBlock *ir.Block
 		if i < len(caseBlocks) {
@@ -2113,6 +2182,7 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 		}
 		if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
+			anyFallthrough = true
 		}
 	}
 
@@ -2126,10 +2196,16 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 		}
 		if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
+			anyFallthrough = true
 		}
 	}
 
-	// If afterBlock was never jumped to (all arms terminated), mark unreachable.
+	// All arms terminated - afterBlock is unreachable; signal exhaustive termination.
+	if !anyFallthrough {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
 
 	return afterBlock, nil
 }

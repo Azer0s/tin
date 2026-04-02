@@ -1,0 +1,198 @@
+// stress_tests/async_nested_await.tin
+//
+// Tests: complex async/await patterns that stress the fiber IR codegen:
+//   - await inside a for loop (loop body must survive yield/resume)
+//   - await on both branches of an if/else (phi-node across resumed blocks)
+//   - await after if/else (dominance: value live across a conditional branch)
+//   - nested await: result of await used as argument to spawn
+//   - await in while-style loop with mutable accumulator
+//   - await result used immediately in a larger expression
+//   - spawning inside a loop and collecting all futures before awaiting
+//
+// Each pattern tests a slightly different IR shape around yield/resume splits.
+
+use assert
+use sync
+
+// ---------------------------------------------------------------------------
+// Basic async helpers
+// ---------------------------------------------------------------------------
+
+fn{#async} add_one(n i64) i64 =
+  return n + 1
+
+fn{#async} multiply(a i64, b i64) i64 =
+  return a * b
+
+fn{#async} conditional_result(n i64) i64 =
+  if n > 0:
+    return n * 10
+  else:
+    return 0 - n
+
+fn{#async} sum_range(lo i64, hi i64) i64 =
+  let acc i64 = 0
+  let i i64 = lo
+  for i < hi:
+    acc = acc + i
+    i = i + 1
+  return acc
+
+// ---------------------------------------------------------------------------
+// Pattern 1: await inside a for loop - accumulates results
+// ---------------------------------------------------------------------------
+
+fn{#async} sum_via_await_loop(n i64) i64 =
+  let total i64 = 0
+  let i i64 = 0
+  for i < n:
+    // Each iteration suspends, resumes, adds result
+    let v = await spawn add_one(i)
+    total = total + v
+    i = i + 1
+  return total
+
+// ---------------------------------------------------------------------------
+// Pattern 2: await on both branches of if/else
+//            The resumed basic block must have a valid dominator.
+// ---------------------------------------------------------------------------
+
+fn{#async} await_in_both_branches(x i64) i64 =
+  if x > 0:
+    let a = await spawn multiply(x, 2)
+    return a
+  else:
+    let b = await spawn multiply(0 - x, 3)
+    return b
+
+// ---------------------------------------------------------------------------
+// Pattern 3: await after an if/else that doesn't return
+//            Value computed before the if must remain live after it.
+// ---------------------------------------------------------------------------
+
+fn{#async} await_after_if(x i64) i64 =
+  let base i64 = x * 5        // computed before if
+  if x > 100:
+    pass                       // side-effect-free branch that does nothing
+  // base must still be live here after a potential yield point
+  let result = await spawn add_one(base)
+  return result
+
+// ---------------------------------------------------------------------------
+// Pattern 4: nested await - inner await feeds outer spawn
+// ---------------------------------------------------------------------------
+
+fn{#async} nested_await_chain(n i64) i64 =
+  let a = await spawn add_one(n)
+  let b = await spawn multiply(a, a)
+  let c = await spawn add_one(b)
+  return c
+
+// ---------------------------------------------------------------------------
+// Pattern 5: collect futures in a loop, then await them all
+//            Tests that a [Future[i64]] array survives yield/resume.
+// ---------------------------------------------------------------------------
+
+fn{#async} spawn_collect_await(n i64) i64 =
+  let futures [Future[i64]] = []
+  let i i64 = 0
+  for i < n:
+    futures ++= spawn add_one(i)
+    i = i + 1
+
+  let total i64 = 0
+  let j i64 = 0
+  for j < n:
+    total = total + await futures[j]
+    j = j + 1
+  return total
+
+// ---------------------------------------------------------------------------
+// Pattern 6: await result used directly in arithmetic expression
+// ---------------------------------------------------------------------------
+
+fn{#async} await_in_expr(a i64, b i64) i64 =
+  return (await spawn add_one(a)) * (await spawn add_one(b))
+
+// ---------------------------------------------------------------------------
+// Pattern 7: await inside a while-style loop with early break
+// ---------------------------------------------------------------------------
+
+fn{#async} await_loop_break(limit i64) i64 =
+  let acc i64 = 0
+  let i i64 = 0
+  let running bool = true
+  for running:
+    let v = await spawn add_one(i)
+    acc = acc + v
+    i = i + 1
+    if i >= limit:
+      running = false
+  return acc
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "await inside for loop accumulator" =
+  // sum of (i+1) for i in 0..5 = 1+2+3+4+5 = 15
+  let result = await spawn sum_via_await_loop(5)
+  assert::equals(result, 15)
+
+test "await in both if/else branches - positive" =
+  let result = await spawn await_in_both_branches(4)
+  assert::equals(result, 8)
+
+test "await in both if/else branches - negative" =
+  let result = await spawn await_in_both_branches(0 - 3)
+  assert::equals(result, 9)
+
+test "await after if - value live across conditional" =
+  let result = await spawn await_after_if(6)
+  // base=30, add_one(30)=31
+  assert::equals(result, 31)
+
+test "await after if - with large x (takes pass branch)" =
+  let result = await spawn await_after_if(200)
+  // base=1000, add_one(1000)=1001
+  assert::equals(result, 1001)
+
+test "nested await chain" =
+  // n=3: add_one(3)=4, multiply(4,4)=16, add_one(16)=17
+  let result = await spawn nested_await_chain(3)
+  assert::equals(result, 17)
+
+test "collect futures then await all" =
+  // spawn add_one(0..4), collect, await: sum = 1+2+3+4+5 = 15
+  let result = await spawn spawn_collect_await(5)
+  assert::equals(result, 15)
+
+test "await result used in expression" =
+  // (add_one(3)) * (add_one(4)) = 4*5 = 20
+  let result = await spawn await_in_expr(3, 4)
+  assert::equals(result, 20)
+
+test "await inside while-style loop with break" =
+  // i=0..3: acc += (0+1)+(1+1)+(2+1) = 1+2+3 = 6
+  let result = await spawn await_loop_break(3)
+  assert::equals(result, 6)
+
+test "inline nested await spawn" =
+  // double(square(5)) = double(25) = 26 (add_one on square)
+  let inner = await spawn add_one(await spawn multiply(5, 5))
+  assert::equals(inner, 26)
+
+test "two concurrent fibers writing to channel" =
+  let ch = sync::Channel[i64].make(2)
+  let f1 = spawn do:
+    let v = await spawn add_one(10)
+    await ch.send(v)
+  let f2 = spawn do:
+    let v = await spawn multiply(3, 4)
+    await ch.send(v)
+  await f1
+  await f2
+  let a = await ch.recv()
+  let b = await ch.recv()
+  // order not guaranteed, so just check sum
+  assert::equals(a + b, 23)

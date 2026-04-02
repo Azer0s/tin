@@ -33,11 +33,17 @@ use mem
 
 fn _tin_channel_new(cap i64, elem_size i64, is_rc i32) *void = extern("_tin_channel_new")
 fn _tin_channel_free(ch *void)                              = extern("_tin_channel_free")
+fn _tin_channel_retain(ch *void)                            = extern("_tin_channel_retain")
 fn _tin_channel_send_try(ch *void, val *void, elem_size i64, is_rc i32) i32 = extern("_tin_channel_send_try")
 fn _tin_channel_recv_try(ch *void) *void                    = extern("_tin_channel_recv_park")
 fn _tin_channel_recv_blocked_val() i64                      = extern("_tin_channel_recv_blocked_val")
 fn _tin_channel_close(ch *void)                             = extern("_tin_channel_close")
 fn _tin_channel_is_closed_empty(ch *void) i32               = extern("_tin_channel_is_closed_empty")
+// Blocking park/unpark send and recv.
+fn _tin_channel_recv_blocking(ch *void, pid i64) *void      = extern("_tin_channel_recv_blocking")
+fn _tin_channel_send_blocking(ch *void, val *void, elem_size i64, is_rc i32, pid i64) i32 = extern("_tin_channel_send_blocking")
+// Current fiber pid - used to register as a waiter before parking.
+fn _tin_current_pid_c() i64                                 = extern("_tin_current_pid")
 
 struct Channel[T] =
   _ptr *void
@@ -45,25 +51,28 @@ struct Channel[T] =
   static fn make(cap i64) Channel[T] =
     return Channel[T]{ _ptr: _tin_channel_new(cap, sizeof(T), isrc(T)) }
 
-  fn send(this *Channel[T], val T) Future[Unit] =
-    return spawn this.send_fiber(val)
-
-  fn{#async} send_fiber(this *Channel[T], val T) =
+  // send parks the calling fiber directly when the channel is full —
+  // no wrapper fiber is spawned.  Use `await ch.send(v)` to send inline.
+  // Fire-and-forget: `spawn ch.send(v)` to send without waiting.
+  // #no_autoyield: the loop already has an explicit `yield` for the blocked case;
+  // the auto-yield at the loop backedge would add a redundant second suspension.
+  fn{#async #no_autoyield} send(this *Channel[T], val T) =
+    let pid = _tin_current_pid_c()
     for true:
-      let r i32 = _tin_channel_send_try(this._ptr, &val, sizeof(T), isrc(T))
+      let r i32 = _tin_channel_send_blocking(this._ptr, &val, sizeof(T), isrc(T), pid)
       if r == -1:
         panic("send on closed channel")
       if r == 0:
         return
       yield
 
-  fn recv(this *Channel[T]) Future[T] =
-    return spawn this.recv_fiber()
-
-  fn{#async} recv_fiber(this *Channel[T]) T =
+  // recv parks the calling fiber directly when the channel is empty —
+  // no wrapper fiber is spawned.  Use `await ch.recv()` to receive inline.
+  fn{#async #no_autoyield} recv(this *Channel[T]) T =
     let blocked = _tin_channel_recv_blocked_val()
+    let pid = _tin_current_pid_c()
     for true:
-      let r *void = _tin_channel_recv_try(this._ptr)
+      let r *void = _tin_channel_recv_blocking(this._ptr, pid)
       if r == 0 as *void:
         panic("recv on closed channel")
       if (r as i64) != blocked:
@@ -79,5 +88,13 @@ struct Channel[T] =
   fn deinit(this Channel[T]) =
     _tin_channel_free(this._ptr)
     // _ptr is *void (not ARC-tracked), so ARC will not double-free it
+
+  // _fiber_retain is called by the compiler's ramp block when this channel is
+  // passed as a named parameter to a spawned async function. It increments the
+  // internal reference count so the fiber's copy remains valid even after the
+  // caller's local variable is released. The matching release is the deinit
+  // called when the fiber's parameter goes out of scope.
+  fn _fiber_retain(this Channel[T]) =
+    _tin_channel_retain(this._ptr)
 
 export { Channel } as sync

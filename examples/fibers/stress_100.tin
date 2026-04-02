@@ -12,7 +12,7 @@ fn{#async} inc_fiber() =
   counter.add(1)
   await done_ch.send(1)
 
-fn main() =
+fn{#async} main() =
   counter = sync::AtomicI64.make(0)
   done_ch = sync::Channel[i64].make(100)
 

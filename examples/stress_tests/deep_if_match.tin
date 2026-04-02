@@ -1,0 +1,239 @@
+// stress_tests/deep_if_match.tin
+//
+// Tests: deeply nested if/else chains and match expressions
+//   - if/else chain 10+ levels deep (produces a long ladder of basic blocks)
+//   - match on enum inside an if inside a loop
+//   - where-clause dispatch with many arms
+//   - match with fall-through to default
+//   - nested match inside match
+//   - match on tagged union inside another match
+//   - where chains on multiple conditions
+//
+// Compiler paths exercised:
+//   - Long phi-node chains from deeply nested conditionals
+//   - Correct dominance across deeply nested branches
+//   - IR block labeling for deeply nested structures
+//   - Tagged union type dispatch nested inside control flow
+
+use assert
+
+enum i32 color =
+  red:   0
+  green: 1
+  blue:  2
+  alpha: 3
+
+enum i32 shape =
+  circle:    0
+  square:    1
+  triangle:  2
+  hexagon:   3
+
+type maybe_i64 = i64 | bool   // bool encodes "nothing"
+
+// ---------------------------------------------------------------------------
+// 1. Deep if/else ladder (10 levels)
+// ---------------------------------------------------------------------------
+
+fn classify_i64(n i64) string =
+  if n < 0 - 100:
+    return "very negative"
+  else:
+    if n < 0 - 10:
+      return "negative"
+    else:
+      if n == 0 - 1:
+        return "minus one"
+      else:
+        if n == 0:
+          return "zero"
+        else:
+          if n == 1:
+            return "one"
+          else:
+            if n < 10:
+              return "small positive"
+            else:
+              if n < 100:
+                return "medium positive"
+              else:
+                if n < 1000:
+                  return "large positive"
+                else:
+                  if n < 1000000:
+                    return "very large"
+                  else:
+                    return "astronomical"
+
+// ---------------------------------------------------------------------------
+// 2. Deeply nested if inside a loop - dominance stress
+// ---------------------------------------------------------------------------
+
+fn sum_classified(arr [i64]) i64 =
+  let total i64 = 0
+  for let v i64 in arr:
+    if v < 0:
+      if v < 0 - 50:
+        total = total + (0 - v) * 3   // triple magnitude for very negative
+      else:
+        total = total + (0 - v)        // plain magnitude
+    else:
+      if v == 0:
+        pass                           // zero contributes nothing
+      else:
+        if v > 50:
+          total = total + v * 2        // double for large positives
+        else:
+          total = total + v
+  return total
+
+// ---------------------------------------------------------------------------
+// 3. Match on enum inside if inside loop
+// ---------------------------------------------------------------------------
+
+fn score_shapes(shapes [shape], colors [color]) i64 =
+  let score i64 = 0
+  let n i64 = len(shapes)
+  let i i64 = 0
+  for i < n:
+    let s shape = shapes[i]
+    let c color = colors[i]
+    let base i64 = 0
+    match s:
+      case shape.circle:   base = 10
+      case shape.square:   base = 8
+      case shape.triangle: base = 6
+      case shape.hexagon:  base = 12
+      default:             base = 0
+    if c == color.red:
+      base = base * 2
+    else:
+      if c == color.alpha:
+        base = base / 2
+    score = score + base
+    i = i + 1
+  return score
+
+// ---------------------------------------------------------------------------
+// 4. where-clause dispatch with many arms on atom
+// ---------------------------------------------------------------------------
+
+fn describe_atom(a atom) string =
+  where a == 'ok:      "success"
+  where a == 'err:     "failure"
+  where a == 'pending: "in progress"
+  where a == 'timeout: "timed out"
+  where a == 'retry:   "please retry"
+  where a == 'cancel:  "cancelled"
+  where _:             "unknown status"
+
+// ---------------------------------------------------------------------------
+// 5. Nested match inside match
+// ---------------------------------------------------------------------------
+
+fn describe_shape_color(s shape, c color) string =
+  match s:
+    case shape.circle:
+      match c:
+        case color.red:   return "red circle"
+        case color.green: return "green circle"
+        case color.blue:  return "blue circle"
+        default:          return "other circle"
+    case shape.square:
+      match c:
+        case color.red:   return "red square"
+        default:          return "non-red square"
+    default:
+      return "other shape"
+
+// ---------------------------------------------------------------------------
+// 6. Tagged union inside match
+// ---------------------------------------------------------------------------
+
+fn extract_or_zero(m maybe_i64) i64 =
+  match m.(type):
+    case n i64:
+      return n
+    case _ bool:
+      return 0
+
+fn double_if_present(m maybe_i64) maybe_i64 =
+  if m is n i64:
+    return (n * 2) as maybe_i64
+  return false as maybe_i64
+
+// ---------------------------------------------------------------------------
+// 7. Long where chain on multiple conditions
+// ---------------------------------------------------------------------------
+
+fn fizzbuzz_str(n i64) string =
+  where n % 15 == 0: "FizzBuzz"
+  where n % 3 == 0:  "Fizz"
+  where n % 5 == 0:  "Buzz"
+  where _:           "{n}"
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "classify_i64 deep nesting" =
+  assert::equals_str(classify_i64(0 - 200), "very negative")
+  assert::equals_str(classify_i64(0 - 50), "negative")
+  assert::equals_str(classify_i64(0 - 1), "minus one")
+  assert::equals_str(classify_i64(0), "zero")
+  assert::equals_str(classify_i64(1), "one")
+  assert::equals_str(classify_i64(5), "small positive")
+  assert::equals_str(classify_i64(50), "medium positive")
+  assert::equals_str(classify_i64(500), "large positive")
+  assert::equals_str(classify_i64(50000), "very large")
+  assert::equals_str(classify_i64(9999999), "astronomical")
+
+test "sum_classified nested if in loop" =
+  // [-100, -20, 0, 5, 100] -> 300 + 20 + 0 + 5 + 200 = 525
+  let result = sum_classified([0 - 100, 0 - 20, 0, 5, 100])
+  assert::equals(result, 525)
+
+test "score_shapes enum+match in loop" =
+  let shapes [shape] = [shape.circle, shape.square, shape.hexagon]
+  let colors [color] = [color.red, color.green, color.alpha]
+  // circle+red=20, square+green=8, hexagon+alpha=6 -> 34
+  let s = score_shapes(shapes, colors)
+  assert::equals(s, 34)
+
+test "describe_atom where chain" =
+  assert::equals_str(describe_atom('ok), "success")
+  assert::equals_str(describe_atom('err), "failure")
+  assert::equals_str(describe_atom('pending), "in progress")
+  assert::equals_str(describe_atom('timeout), "timed out")
+  assert::equals_str(describe_atom('retry), "please retry")
+  assert::equals_str(describe_atom('cancel), "cancelled")
+  assert::equals_str(describe_atom('other), "unknown status")
+
+test "nested match" =
+  assert::equals_str(describe_shape_color(shape.circle, color.red), "red circle")
+  assert::equals_str(describe_shape_color(shape.circle, color.blue), "blue circle")
+  assert::equals_str(describe_shape_color(shape.square, color.red), "red square")
+  assert::equals_str(describe_shape_color(shape.square, color.green), "non-red square")
+  assert::equals_str(describe_shape_color(shape.triangle, color.red), "other shape")
+
+test "tagged union extract_or_zero" =
+  let a maybe_i64 = 42
+  let b maybe_i64 = false
+  assert::equals(extract_or_zero(a), 42)
+  assert::equals(extract_or_zero(b), 0)
+
+test "double_if_present with value" =
+  let m maybe_i64 = 7
+  let result = double_if_present(m)
+  assert::equals(extract_or_zero(result), 14)
+
+test "double_if_present with nothing" =
+  let m maybe_i64 = false
+  let result = double_if_present(m)
+  assert::ok(result is bool)
+
+test "fizzbuzz where chain" =
+  assert::equals_str(fizzbuzz_str(15), "FizzBuzz")
+  assert::equals_str(fizzbuzz_str(9), "Fizz")
+  assert::equals_str(fizzbuzz_str(10), "Buzz")
+  assert::equals_str(fizzbuzz_str(7), "7")

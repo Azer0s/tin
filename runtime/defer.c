@@ -49,7 +49,10 @@ void _tin_defer_pop(int64_t n) {
 
 // recover() support: stores the current panic message so a deferred function
 // can retrieve and clear it via _tin_recover().
-static const char *_tin_panic_msg = NULL;
+// Must be thread-local: each worker thread executes one fiber at a time, and
+// two fibers panicking concurrently on different workers must not corrupt each
+// other's panic state.  A plain static here is a data race.
+static __thread const char *_tin_panic_msg = NULL;
 
 // An immortal (rc=-1) empty string returned by _tin_recover() when not panicking.
 static const struct { int64_t rc; char c; } _tin_empty_str_sentinel = { TIN_IMMORTAL_RC, '\0' };

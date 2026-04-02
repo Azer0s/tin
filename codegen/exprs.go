@@ -173,10 +173,39 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		//   await spawn fn(args)      - spawn returns Future[T]
 		//   await fetch()             - fetch() returns Future[T]
 		//   await f                   - f : Future[T] variable
+		//   await asyncFn(args)       - inline drive: no fiber allocation (inCoroFn only)
 		//
 		// Type rule: await is valid iff expr : Awaitable[T] (i.e. Future[T]).
-		// Calling a {#async} fn directly returns T (not Future[T]) - not awaitable.
-		val, err := cg.genExpr(block, e.Future)
+		// Calling a {#async} fn directly within a coroutine uses inline drive.
+
+		// {#async} direct call handling: `await asyncFn(args)` (no explicit spawn).
+		//
+		// Two cases based on calling context:
+		//   inCoroFn == true  → inline drive: runs inner coro in this fiber's frame,
+		//                        no fiber allocation, direct park/unpark via runnext.
+		//   inCoroFn == false → auto-spawn: wrap in synthetic SpawnExpr so the regular
+		//                        await-Future path takes over (e.g. sync wrapper body,
+		//                        or main() in non-async context).
+		futureExpr := e.Future
+		if callNode, ok := e.Future.(*ast.CallExpr); ok {
+			if cg.inCoroFn {
+				// Inside a coroutine: try zero-cost inline drive.
+				result, driveErr := cg.genInlineAsyncDrive(block, callNode)
+				if driveErr != nil {
+					return nil, driveErr
+				}
+				if result != nil {
+					return result, nil
+				}
+				// (nil, nil) → callee $coro not in scope yet; fall through to auto-spawn.
+			}
+			// Not in coroutine (or inline drive not available): auto-spawn if async.
+			if cg.directCallHasCoroVariant(callNode) {
+				futureExpr = &ast.SpawnExpr{Call: callNode}
+			}
+		}
+
+		val, err := cg.genExpr(block, futureExpr)
 		if err != nil {
 			return nil, err
 		}
@@ -225,13 +254,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return nil, fmt.Errorf("await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
-		// Extract pid from Future[T].
+		// Extract pid from Future[T] using extractvalue (no alloca → safe inside loops).
 		cg.ensureFiberRuntime()
-		alloca := block.NewAlloca(val.Type())
-		block.NewStore(val, alloca)
-		pidGEP := block.NewGetElementPtr(val.Type(), alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pidIdx)))
-		pid := block.NewLoad(irtypes.I64, pidGEP)
+		pid := block.NewExtractValue(val, uint64(pidIdx))
 
 		// Properly suspend the calling fiber (or block main) until pid completes.
 		resumeBlk, awaitErr := cg.genAwaitStmt(block, pid)
@@ -1016,11 +1041,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			} else {
 				ovCallee = oEntry.val
 			}
+			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
 			}
+			result := block.NewCall(ovCallee, argVals...)
+			for i, astArg := range e.Args {
+				if i >= len(argValsPreCoerce) {
+					break
+				}
+				preCoerce := argValsPreCoerce[i]
+				postCoerce := argVals[i]
+				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+					cg.emitRelease(block, postCoerce)
 
-			return block.NewCall(ovCallee, argVals...), nil
+					continue
+				}
+				if !isRCTrackedType(preCoerce.Type()) {
+					continue
+				}
+				if isCopyExpr(astArg) {
+					continue
+				}
+				cg.emitRelease(block, preCoerce)
+			}
+			if irtypes.IsVoid(result.Type()) {
+				return nil, nil
+			}
+
+			return result, nil
 		}
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
@@ -1347,11 +1396,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					} else {
 						ovCallee = oEntry.val
 					}
+					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
 						argVals = cg.adaptArgs(block, argVals, f.Sig)
 					}
+					result := block.NewCall(ovCallee, argVals...)
+					for i, astArg := range e.Args {
+						if i >= len(argValsPreCoerce) {
+							break
+						}
+						preCoerce := argValsPreCoerce[i]
+						postCoerce := argVals[i]
+						if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
+							cg.emitRelease(block, postCoerce)
 
-					return block.NewCall(ovCallee, argVals...), nil
+							continue
+						}
+						if !isRCTrackedType(preCoerce.Type()) {
+							continue
+						}
+						if isCopyExpr(astArg) {
+							continue
+						}
+						cg.emitRelease(block, preCoerce)
+					}
+					if irtypes.IsVoid(result.Type()) {
+						return nil, nil
+					}
+
+					return result, nil
 				}
 			}
 		}
@@ -1391,7 +1464,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// If the explicit type argument refers to a type parameter that has been
 			// substituted (e.g. a recursive call like _encode_any[T](...) inside
 			// _encode_any__jt_rect), resolve it to the concrete type so we don't
-			// create a self-referential alias ("T" → "T") that causes infinite recursion.
+			// create a self-referential alias ("T" -> "T") that causes infinite recursion.
 			if alias, ok := cg.typeAliases[typeArgName]; ok {
 				if st, ok2 := alias.(*ast.SimpleType); ok2 && st.Name != typeArgName {
 					typeArgName = st.Name
@@ -2411,7 +2484,12 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 				payloadAlloca := block.NewAlloca(targetLLVM)
 				payloadVal := block.NewLoad(targetLLVM, payloadPtr)
 				block.NewStore(payloadVal, payloadAlloca)
-				cg.curScope.set(e.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true})
+				// noRelease: the binding is a borrow from the union -- the union
+				// owns the ARC reference.  The scope exit must not release it
+				// because (a) no retain was performed and (b) in the non-match
+				// path the alloca contains the union data interpreted as the
+				// wrong type, so releasing it would corrupt memory.
+				cg.curScope.set(e.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true, noRelease: true})
 			}
 
 			return cmp, nil
@@ -3281,6 +3359,490 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	return block.NewCall(makeFn, pid), nil
 }
 
+// peekStructTypeName returns the LLVM struct type name for a simple identifier
+// expression without evaluating it.  Returns "" when the type cannot be
+// determined statically (e.g., complex sub-expression).
+func (cg *CodeGen) peekStructTypeName(identName string) string {
+	se, ok := cg.curScope.lookup(identName)
+	if !ok {
+		return ""
+	}
+	t := se.val.Type()
+	if se.isAlloc {
+		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
+			t = pt.ElemType
+		}
+	}
+	if name := cg.typeNameOf(t); name != "" {
+		return name
+	}
+	if pt, ok2 := t.(*irtypes.PointerType); ok2 {
+		return cg.typeNameOf(pt.ElemType)
+	}
+
+	return ""
+}
+
+// directCallHasCoroVariant returns true if callNode is a direct call to an
+// {#async} function (i.e., its $coro ramp exists in scope).  Does not evaluate
+// any sub-expressions or generate IR.
+func (cg *CodeGen) directCallHasCoroVariant(callNode *ast.CallExpr) bool {
+	switch fn := callNode.Func.(type) {
+	case *ast.FieldAccess:
+		if id, ok := fn.Expr.(*ast.Identifier); ok {
+			if structName := cg.peekStructTypeName(id.Name); structName != "" {
+				_, ok2 := cg.curScope.lookup(structName + "_" + fn.Field + "$coro")
+
+				return ok2
+			}
+		}
+	case *ast.Identifier:
+		_, ok := cg.curScope.lookup(fn.Name + "$coro")
+
+		return ok
+	}
+
+	return false
+}
+
+// genInlineAsyncDrive drives an {#async} function call inline within the
+// current coroutine, without spawning a new fiber.
+//
+// Called when `await asyncFn(args)` is encountered (no spawn) and inCoroFn==true.
+// Instead of allocating a fiber and joining it, we:
+//  1. Call the $coro ramp to allocate only the inner coroutine frame.
+//  2. Resume the inner coroutine until it completes.
+//  3. Whenever the inner coroutine yields, yield the outer coroutine too —
+//     the scheduler will resume both in turn.
+//  4. When the inner coroutine is done, take its result via _tin_coro_take_result.
+//
+// Returns (nil, nil) when the callee has no $coro variant (not {#async});
+// the caller should fall through to the regular spawn+join path.
+func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) (value.Value, error) {
+	cg.ensureCoroIntrinsics()
+	cg.ensureFiberRuntime()
+
+	var coroFn *ir.Func
+	var coroArgs []value.Value
+	var origFnName string
+
+	switch fn := callNode.Func.(type) {
+	case *ast.FieldAccess:
+		// Method call: obj.method(args...)
+		// Peek at the struct type without evaluating to decide quickly.
+		structName := ""
+		if id, ok2 := fn.Expr.(*ast.Identifier); ok2 {
+			if se, ok3 := cg.curScope.lookup(id.Name); ok3 {
+				t := se.val.Type()
+				if se.isAlloc {
+					if pt, ok4 := t.(*irtypes.PointerType); ok4 {
+						t = pt.ElemType
+					}
+				}
+				structName = cg.typeNameOf(t)
+				if structName == "" {
+					if pt, ok4 := t.(*irtypes.PointerType); ok4 {
+						structName = cg.typeNameOf(pt.ElemType)
+					}
+				}
+			}
+		}
+		if structName == "" {
+			return nil, nil // can't determine struct type without evaluation — fall through
+		}
+		coroName := structName + "_" + fn.Field + "$coro"
+		se, ok2 := cg.curScope.lookup(coroName)
+		if !ok2 {
+			return nil, nil // not {#async} — fall through
+		}
+		var ok3 bool
+		coroFn, ok3 = se.val.(*ir.Func)
+		if !ok3 {
+			return nil, nil
+		}
+		origFnName = structName + "_" + fn.Field
+
+		// Evaluate the object expression.
+		objVal, err := cg.genExpr(block, fn.Expr)
+		if err != nil {
+			return nil, err
+		}
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		// Coerce this arg to the $coro ramp's first param type.
+		// If the method expects a pointer receiver (*T) but we have a value T,
+		// use genLValue to get the address or fall back to a temp alloca.
+		thisArg := objVal
+		if len(coroFn.Params) > 0 {
+			firstParamTy := coroFn.Params[0].Type()
+			if pt, isPtr := firstParamTy.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(objVal.Type()) {
+				if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
+					thisArg = lv
+				} else {
+					tmp := block.NewAlloca(objVal.Type())
+					block.NewStore(objVal, tmp)
+					thisArg = tmp
+				}
+			} else {
+				thisArg = cg.coerce(block, objVal, firstParamTy)
+			}
+		}
+		coroArgs = []value.Value{thisArg}
+
+		for i, arg := range callNode.Args {
+			av, err2 := cg.genExpr(block, arg)
+			if err2 != nil {
+				return nil, err2
+			}
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
+			if i+1 < len(coroFn.Params) {
+				av = cg.coerce(block, av, coroFn.Params[i+1].Type())
+			}
+			coroArgs = append(coroArgs, av)
+		}
+
+		// Fast path: Channel[T].send and Channel[T].recv — inline the blocking
+		// retry loop directly into the outer coro using the outer coro's own
+		// coro.suspend.  This eliminates the inner $coro frame allocation
+		// (2 malloc/free per operation, 4 per round trip) at the cost of a
+		// slightly larger outer coro frame (pid + blocked_val spilled to frame).
+		// Channel[T].send and Channel[T].recv fast path.
+		// structName may be bare ("Channel__i64") or package-prefixed ("sync__Channel__i64").
+		if strings.Contains(structName, "Channel__") {
+			if fn.Field == "send" && len(coroArgs) == 2 {
+				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1])
+			}
+			if fn.Field == "recv" && len(coroArgs) == 1 {
+				if origDecl, ok4 := cg.funcDecls[origFnName]; ok4 && origDecl.RetType != nil {
+					if elemType, err4 := cg.tinTypeToLLVM(origDecl.RetType); err4 == nil && elemType != nil && !irtypes.IsVoid(elemType) {
+						return cg.genDirectChanRecv(block, coroArgs[0], elemType)
+					}
+				}
+			}
+		}
+
+	case *ast.Identifier:
+		// Free function call: fn(args...)
+		coroName := fn.Name + "$coro"
+		se, ok2 := cg.curScope.lookup(coroName)
+		if !ok2 {
+			return nil, nil // not {#async} — fall through
+		}
+		var ok3 bool
+		coroFn, ok3 = se.val.(*ir.Func)
+		if !ok3 {
+			return nil, nil
+		}
+		origFnName = fn.Name
+
+		for i, arg := range callNode.Args {
+			av, err2 := cg.genExpr(block, arg)
+			if err2 != nil {
+				return nil, err2
+			}
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
+			if i < len(coroFn.Params) {
+				av = cg.coerce(block, av, coroFn.Params[i].Type())
+			}
+			coroArgs = append(coroArgs, av)
+		}
+
+	default:
+		return nil, nil // unsupported callee shape — fall through
+	}
+
+	cg.usesAnyFiber = true
+
+	// Call the $coro ramp: allocates (or stack-allocates if coro-elide fires)
+	// the inner coroutine frame and returns i8* handle.
+	// Does NOT run the body; body starts on the first coro.resume call.
+	innerHdl := block.NewCall(coroFn, coroArgs...)
+
+	// ---------------------------------------------------------------
+	// Drive loop:
+	//   drive.loop:
+	//     _tin_inline_result_mode_begin()   ; arm TLS result buffer for inner coro
+	//     llvm.coro.resume(inner)           ; run body until yield or done
+	//     done = llvm.coro.done(inner)
+	//     br done ? drive.done : drive.yield
+	//   drive.yield:
+	//     sp = llvm.coro.suspend(outer) ; outer suspends
+	//     switch sp: 0 → drive.loop, 1 → cleanup
+	//   drive.done:
+	//     result = _tin_coro_take_result()
+	//     llvm.coro.destroy(inner)
+	//     _tin_inline_result_mode_end()
+	// ---------------------------------------------------------------
+	// mode_begin is placed at the TOP of driveLoopBlk so it fires before EVERY
+	// coro.resume — including re-entries after the outer fiber was parked and
+	// resumed (at which point the worker loop reset _inline_result_mode to 0).
+	// This keeps the TLS fast path active across park/unpark cycles.
+	inlineBeginFn := cg.ensureExternDecl("_tin_inline_result_mode_begin", irtypes.Void,
+		[]*ir.Param{}, false)
+
+	driveLoopBlk := cg.newBlock("coro.drive.loop")
+	block.NewBr(driveLoopBlk)
+
+	driveLoopBlk.NewCall(inlineBeginFn)
+	driveLoopBlk.NewCall(cg.coroResumeFn, innerHdl)
+	done := driveLoopBlk.NewCall(cg.coroDoneFn, innerHdl)
+	driveDoneBlk := cg.newBlock("coro.drive.done")
+	driveYieldBlk := cg.newBlock("coro.drive.yield")
+	driveLoopBlk.NewCondBr(done, driveDoneBlk, driveYieldBlk)
+
+	// Yield path: inner yielded → outer suspends to let inner run.
+	// No _tin_fiber_yield_coro call needed (it's a no-op; worker loop
+	// handles re-enqueue when FIBER_RUNNING status after _coro_resume returns).
+	sp := driveYieldBlk.NewCall(cg.coroSuspendFn, coroNone, constant.NewInt(irtypes.I1, 0))
+	suspBlk := cg.newBlock("coro.drive.suspended")
+	cleanupBrBlk := cg.newBlock("coro.drive.cleanup.br")
+	driveYieldBlk.NewSwitch(sp, suspBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), driveLoopBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBrBlk),
+	)
+	suspBlk.NewRet(cg.curCoroHdl)
+	cleanupBrBlk.NewBr(cg.curCoroFrame.cleanupEntry)
+
+	// Done path: take result, destroy inner frame.
+	// coro.destroy runs the coroutine's cleanup path (coro.end + coro.free + free),
+	// so we must NOT call free(innerHdl) again — that would double-free.
+	resultRaw := driveDoneBlk.NewCall(cg.coroTakeResultFn)
+	driveDoneBlk.NewCall(cg.coroDestroyFn, innerHdl)
+
+	// End inline-result mode (balanced with the begin call before the ramp).
+	inlineEndFn := cg.ensureExternDecl("_tin_inline_result_mode_end", irtypes.Void,
+		[]*ir.Param{}, false)
+	driveDoneBlk.NewCall(inlineEndFn)
+
+	cg.curBlock = driveDoneBlk
+
+	// Mark driveDoneBlk as a yield-resume equivalent so genYieldAutoAt suppresses
+	// the redundant autoyield at the enclosing for-loop backedge.  The drive loop
+	// already contains its own suspension points (coro.drive.yield) that fire when
+	// the inner $coro blocks.  When the drive completes without blocking, the outer
+	// fiber's natural park/unpark via the channel wakes the next fiber — no extra
+	// autoyield is needed.
+	if cg.yieldResumeBlocks != nil {
+		cg.yieldResumeBlocks[driveDoneBlk] = true
+	}
+
+	// Determine result type (same lookup as wrapPidInFuture).
+	var retTypeExpr ast.TypeExpr
+	if origFnName != "" {
+		if origDecl, ok2 := cg.funcDecls[origFnName]; ok2 && origDecl.RetType != nil {
+			retTypeExpr = origDecl.RetType
+		}
+	}
+	if retTypeExpr == nil {
+		// void/Unit result — nothing to free.
+		return constant.NewInt(irtypes.I1, 1), nil
+	}
+	retLLVM, err := cg.tinTypeToLLVM(retTypeExpr)
+	if err != nil || retLLVM == nil || irtypes.IsVoid(retLLVM) {
+		return constant.NewInt(irtypes.I1, 1), nil
+	}
+	typedPtr := driveDoneBlk.NewBitCast(resultRaw, irtypes.NewPointer(retLLVM))
+	result := driveDoneBlk.NewLoad(retLLVM, typedPtr)
+	// Free the result buffer (no-op if TLS, free() if heap-allocated for spawned fibers).
+	inlineFreeFn := cg.ensureExternDecl("_tin_inline_result_free", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+	driveDoneBlk.NewCall(inlineFreeFn, resultRaw)
+
+	return result, nil
+}
+
+// genDirectChanSend emits an inline channel-send retry loop that uses the outer
+// coro's own llvm.coro.suspend instead of allocating an inner send$coro frame.
+//
+// Equivalent to the generated code for:
+//
+//	fn{#async #no_autoyield} send(this *Channel[T], val T) =
+//	  let pid = _tin_current_pid()
+//	  for true:
+//	    let r = _tin_channel_send_blocking(this._ptr, &val, sizeof(T), isrc(T), pid)
+//	    if r == -1: panic("send on closed channel")
+//	    if r == 0: return
+//	    yield   ← replaced by outer coro.suspend
+//
+// Eliminates 1 malloc + 1 free per send (2 per round trip).
+func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value) (value.Value, error) {
+	cg.ensureCoroIntrinsics()
+	cg.ensureFiberRuntime()
+	cg.usesAnyFiber = true
+
+	// Load ch._ptr from the Channel struct.
+	// Layout: [i32 type_id, i8* _ptr, ...] so _ptr is at LLVM field index 1.
+	// Use fieldIndex for correctness in case the layout changes.
+	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
+	if !isPtr {
+		fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T — falling back to slow send$coro path\n", thisPtr.Type())
+
+		return nil, nil
+	}
+	chanStructTy := pt.ElemType
+	ptrFieldIdx := int64(cg.fieldIndex(cg.typeNameOf(chanStructTy), "_ptr"))
+	if ptrFieldIdx < 0 {
+		ptrFieldIdx = 1 // fallback: type_id at 0, _ptr at 1
+	}
+	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, ptrFieldIdx))
+	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
+
+	// Alloca for val so send_blocking can take &val.  Allocated in the outer coro
+	// frame — persists across suspensions.  The value is set once and retried
+	// until the channel accepts it.
+	elemType := valArg.Type()
+	valSlot := block.NewAlloca(elemType)
+	block.NewStore(valArg, valSlot)
+	valPtr := block.NewBitCast(valSlot, irtypes.I8Ptr)
+
+	// sizeof(T) and is_rc — compile-time constants.
+	elemSize := cg.llvmSizeOf(block, elemType)
+	isRCVal := constant.NewInt(irtypes.I32, 0)
+	if isRCTrackedType(elemType) {
+		isRCVal = constant.NewInt(irtypes.I32, 1)
+	}
+
+	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// so the TLS lookup is not repeated on every iteration.
+	// Load _current_pid directly as a TLS variable (no function call overhead).
+	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)
+	pid := block.NewLoad(irtypes.I64, pidVar)
+
+	sendFn := cg.ensureExternDecl("_tin_channel_send_blocking", irtypes.I32,
+		[]*ir.Param{
+			ir.NewParam("ch", irtypes.I8Ptr),
+			ir.NewParam("val", irtypes.I8Ptr),
+			ir.NewParam("elem_size", irtypes.I64),
+			ir.NewParam("is_rc", irtypes.I32),
+			ir.NewParam("pid", irtypes.I64),
+		}, false)
+
+	retryBlk := cg.newBlock("chan.send.retry")
+	block.NewBr(retryBlk)
+
+	r := retryBlk.NewCall(sendFn, chPtr, valPtr, elemSize, isRCVal, pid)
+
+	// r == -1 → channel closed → panic.
+	isClosed := retryBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, -1))
+	checkDoneBlk := cg.newBlock("chan.send.check")
+	panicBlk := cg.newBlock("chan.send.panic")
+	retryBlk.NewCondBr(isClosed, panicBlk, checkDoneBlk)
+
+	// Panic block — must follow the coro completion path (not a bare ret).
+	panicMsg := cg.newGlobalString("send on closed channel")
+	panicBlk.NewCall(cg.ensurePanicFn(), panicMsg)
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+
+	// r == 0 → success; otherwise park and retry.
+	isDone := checkDoneBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 0))
+	doneBlk := cg.newBlock("chan.send.done")
+	yieldBlk := cg.newBlock("chan.send.yield")
+	checkDoneBlk.NewCondBr(isDone, doneBlk, yieldBlk)
+
+	// Yield: outer coro suspends until the channel has room.
+	cg.emitInlineChanSuspend("chan.send", yieldBlk, retryBlk, doneBlk)
+
+	return constant.NewInt(irtypes.I1, 1), nil // void send — return sentinel i1 true
+}
+
+// genDirectChanRecv emits an inline channel-recv retry loop that uses the outer
+// coro's own llvm.coro.suspend instead of allocating an inner recv$coro frame.
+//
+// Equivalent to the generated code for:
+//
+//	fn{#async #no_autoyield} recv(this *Channel[T]) T =
+//	  let blocked = _tin_channel_recv_blocked_val()
+//	  let pid = _tin_current_pid()
+//	  for true:
+//	    let r = _tin_channel_recv_blocking(this._ptr, pid)
+//	    if r == null: panic("recv on closed channel")
+//	    if (r as i64) != blocked: return *(r as *T)
+//	    yield   ← replaced by outer coro.suspend
+//
+// Eliminates 1 malloc + 1 free per recv (2 per round trip).
+func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemType irtypes.Type) (value.Value, error) {
+	cg.ensureCoroIntrinsics()
+	cg.ensureFiberRuntime()
+	cg.usesAnyFiber = true
+
+	// Load ch._ptr from the Channel struct.
+	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
+	if !isPtr {
+		fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T — falling back to slow recv$coro path\n", thisPtr.Type())
+
+		return nil, nil
+	}
+	chanStructTy := pt.ElemType
+	ptrFieldIdx := int64(cg.fieldIndex(cg.typeNameOf(chanStructTy), "_ptr"))
+	if ptrFieldIdx < 0 {
+		ptrFieldIdx = 1 // fallback: type_id at 0, _ptr at 1
+	}
+	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, ptrFieldIdx))
+	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
+
+	// Alloca for result — written by _tin_channel_recv_direct, persists across
+	// suspensions so the retry loop can safely re-use the slot on wakeup.
+	outSlot := block.NewAlloca(elemType)
+	outPtr := block.NewBitCast(outSlot, irtypes.I8Ptr)
+
+	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// so the TLS lookup is not repeated on every iteration.
+	// Load _current_pid directly as a TLS variable (no function call overhead).
+	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)
+	pid := block.NewLoad(irtypes.I64, pidVar)
+
+	// _tin_channel_recv_direct writes directly into caller's alloca, eliminating
+	// the per-thread TLS scratch buffer and pthread_getspecific overhead.
+	// Returns: 0 = dequeued, 1 = blocked/contended (yield+retry), -1 = closed.
+	recvFn := cg.ensureExternDecl("_tin_channel_recv_direct", irtypes.I32,
+		[]*ir.Param{
+			ir.NewParam("ch", irtypes.I8Ptr),
+			ir.NewParam("pid", irtypes.I64),
+			ir.NewParam("out", irtypes.I8Ptr),
+		}, false)
+
+	retryBlk := cg.newBlock("chan.recv.retry")
+	block.NewBr(retryBlk)
+
+	r := retryBlk.NewCall(recvFn, chPtr, pid, outPtr)
+
+	// r == -1 → channel closed and drained → panic.
+	isClosed := retryBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, -1))
+	checkBlk := cg.newBlock("chan.recv.check")
+	panicBlk := cg.newBlock("chan.recv.panic")
+	retryBlk.NewCondBr(isClosed, panicBlk, checkBlk)
+
+	panicMsg := cg.newGlobalString("recv on closed channel")
+	panicBlk.NewCall(cg.ensurePanicFn(), panicMsg)
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+
+	// r == 1 → yield and retry; r == 0 → value written to outSlot.
+	isBlocked := checkBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 1))
+	doneBlk := cg.newBlock("chan.recv.done")
+	yieldBlk := cg.newBlock("chan.recv.yield")
+	checkBlk.NewCondBr(isBlocked, yieldBlk, doneBlk)
+
+	// Yield: outer coro suspends until the channel has data.
+	cg.emitInlineChanSuspend("chan.recv", yieldBlk, retryBlk, doneBlk)
+
+	// Done: load T from the alloca that recv_direct wrote into.
+	result := doneBlk.NewLoad(elemType, outSlot)
+
+	return result, nil
+}
+
 // genSpawnExpr generates code for `spawn callExpr`.
 // The callee must be a function marked {#async} (in coroCallable).
 // Returns Future[T] wrapping the fiber PID.
@@ -3397,13 +3959,12 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	}
 
 	// Coerce arguments to match coro function params.
+	// Note: no ARC retain here - the $coro ramp block retains RC-tracked
+	// params before the initial suspend (see genCoroFuncBody).  A caller-side
+	// retain would double-count and produce a leak.
 	for i, val := range callArgs {
 		if i < len(coroFn.Params) {
 			callArgs[i] = cg.coerce(block, val, coroFn.Params[i].Type())
-		}
-		// ARC: retain cross-fiber arguments so the fiber owns a reference.
-		if isRCTrackedType(callArgs[i].Type()) {
-			cg.emitRetain(block, callArgs[i])
 		}
 	}
 
@@ -3498,8 +4059,23 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		return nil, fmt.Errorf("spawn: %s is not a function", coroName)
 	}
 
-	// Build call args: (obj, args...)
-	coroArgs := []value.Value{objVal}
+	// Build call args: (obj, args...).
+	// If the $coro expects a pointer receiver (*T) but we have a value T,
+	// use genLValue to get the address or fall back to a temp alloca.
+	thisArg2 := objVal
+	if len(coroFn2.Params) > 0 {
+		firstParamTy2 := coroFn2.Params[0].Type()
+		if pt2, isPtr2 := firstParamTy2.(*irtypes.PointerType); isPtr2 && pt2.ElemType.Equal(objVal.Type()) {
+			if lv, err2 := cg.genLValue(block, fa.Expr); err2 == nil {
+				thisArg2 = lv
+			} else {
+				tmp2 := block.NewAlloca(objVal.Type())
+				block.NewStore(objVal, tmp2)
+				thisArg2 = tmp2
+			}
+		}
+	}
+	coroArgs := []value.Value{thisArg2}
 	for i, arg := range callNode.Args {
 		av, err2 := cg.genExpr(block, arg)
 		if err2 != nil {

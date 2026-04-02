@@ -2,7 +2,7 @@
 use { loop, min!, max!, abs!, clamp! } from macros
 use { Channel } from sync
 
-fn main() =
+fn{#async} main() =
   // Test loop (no_parens macro)
   let i i64 = 0
   loop:

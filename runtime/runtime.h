@@ -79,6 +79,10 @@ TinSlice _tin_slice_subslice(TinSlice s, int64_t start, int64_t elem_size);
 void *_tin_malloc(int64_t size);
 void  _tin_free(void *p);
 
+// -- Coroutine frame pool (hot path: no system malloc/free for reused frames)
+void *_tin_coro_malloc(int64_t size);
+void  _tin_coro_free(void *ptr);
+
 // -- Defer / panic
 void      _tin_defer_push(TinDeferEntry *entry, void (*fn)(void *, void *), void *env, void *ret_slot);
 void      _tin_defer_pop(int64_t n);
@@ -101,7 +105,7 @@ void    _tin_assert_abort(const char *msg);
 // -- Fiber scheduler (M:N, TINMAXPROCS worker threads)
 void    _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
-void    _tin_fiber_complete(void *hdl, void *result);
+void    _tin_fiber_complete(void *result);
 void    _tin_fiber_join(int64_t pid, void *my_hdl);
 void   *_tin_fiber_get_result(int64_t pid);
 const char *_tin_fiber_get_panic_msg(int64_t pid);  // NULL if completed normally
@@ -112,8 +116,10 @@ void    _tin_fiber_unpark(int64_t pid);
 void    _tin_fiber_park(int64_t pid);
 void   *_tin_coro_take_result(void); // for coroutine-chaining drive loop
 
-// -- Timer / sleep
-void _tin_sleep_ms(int64_t ms);
+// -- Timer / sleep / clock
+void    _tin_sleep_ms(int64_t ms);
+int64_t _tin_now_ms(void);   // monotonic milliseconds
+int64_t _tin_now_us(void);   // monotonic microseconds
 
 // -- Async I/O (dedicated epoll/kqueue I/O thread)
 void    _tin_io_init(void);

@@ -59,8 +59,21 @@ tin test examples/
 ```
 
 All `.tin` files in the directory are compiled and tested. Files that contain
-no `test` blocks are still compiled (to check for errors) but produce no test
-output.
+no `test` blocks are skipped.
+
+### Directory tree (recursive)
+
+```
+tin test examples/...
+```
+
+The `...` suffix (Go-style wildcard) walks every subdirectory under `examples/`
+and runs tests in each one. Directories named `wip/` are skipped -- they hold
+tests for features that are not yet fully implemented in the compiler.
+
+```
+tin test examples/stress_tests/...   # all stress tests, recursively
+```
 
 ---
 

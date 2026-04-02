@@ -14,7 +14,7 @@ use sync
 var input_ch   sync::Channel[string]
 var results_ch sync::Channel[string]
 
-fn main() =
+fn{#async} main() =
   let n i64 = 500
   input_ch   = sync::Channel[string].make(n)
   results_ch = sync::Channel[string].make(n)

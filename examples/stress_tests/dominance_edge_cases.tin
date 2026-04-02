@@ -1,0 +1,222 @@
+// stress_tests/dominance_edge_cases.tin
+//
+// Tests: IR dominance edge cases - the exact class of bug that was fixed
+// recently. These patterns generate code where a value defined in one
+// basic block is used in a block that may not be dominated by the
+// definition block if the compiler gets branching wrong.
+//
+// Specifically targeted patterns:
+//   1. Variable defined before an if, used after both branches
+//   2. Variable defined in one branch of if/else, used after merge
+//      (must be a phi or must not compile - tests that we don't crash)
+//   3. Value live across a loop iteration boundary (loop-carried dependency)
+//   4. Value defined before a match, used in every case and after
+//   5. async: value defined before await, used after resume
+//   6. async: value defined in if-branch before await used after await
+//   7. Phi node at loop header fed by pre-loop def and loop-body update
+//   8. Value defined at top of function, used after many branches
+//
+// The goal is to trigger dominance violations if the compiler makes
+// incorrect assumptions about which block dominates which.
+
+use assert
+use sync
+
+// ---------------------------------------------------------------------------
+// 1. Value defined before if, used after both branches merge
+// ---------------------------------------------------------------------------
+
+fn val_before_if(n i64) i64 =
+  let base i64 = n * 3          // defined here
+  if n > 10:
+    let extra i64 = 100         // only in this branch
+    extra = extra + base        // uses base from pre-if
+    return extra
+  else:
+    let reduced i64 = base - 1  // uses base from pre-if
+    return reduced
+  // base is correctly dominated everywhere above
+
+fn val_before_if_used_after(n i64) i64 =
+  let base i64 = n * 7          // defined before if
+  let bonus i64 = 0
+  if n % 2 == 0:
+    bonus = 1
+  else:
+    bonus = 2
+  // Both branches define bonus; base must still be live here
+  return base + bonus            // uses base (pre-if) and bonus (post-merge)
+
+// ---------------------------------------------------------------------------
+// 2. Loop-carried dependency: value updated in loop, used after
+// ---------------------------------------------------------------------------
+
+fn loop_carried(n i64) i64 =
+  let acc i64 = 0               // initial value
+  let prev i64 = 1              // loop-carried across iterations
+  let i i64 = 0
+  for i < n:
+    let next i64 = acc + prev   // uses both acc and prev from previous iteration
+    acc = prev
+    prev = next
+    i = i + 1
+  return prev                   // uses prev after loop exits
+
+// ---------------------------------------------------------------------------
+// 3. Value defined before match, used in every case and after
+// ---------------------------------------------------------------------------
+
+enum i32 kind =
+  a_kind: 0
+  b_kind: 1
+  c_kind: 2
+
+fn val_before_match(k kind, n i64) i64 =
+  let factor i64 = n * 2        // defined before match
+  let delta i64 = 0
+  match k:
+    case kind.a_kind:
+      delta = factor + 10       // uses pre-match `factor`
+    case kind.b_kind:
+      delta = factor - 5        // uses pre-match `factor`
+    default:
+      delta = factor * 2        // uses pre-match `factor`
+  return factor + delta         // uses pre-match `factor` and post-match `delta`
+
+// ---------------------------------------------------------------------------
+// 4. Nested loops: inner loop carries value to outer
+// ---------------------------------------------------------------------------
+
+fn nested_loop_live(rows i64, cols i64) i64 =
+  let total i64 = 0
+  let row_sum i64 = 0           // updated per-outer-iteration
+  let i i64 = 0
+  for i < rows:
+    row_sum = 0                 // reset per outer iteration
+    let j i64 = 0
+    for j < cols:
+      row_sum = row_sum + (i * cols + j)
+      j = j + 1
+    total = total + row_sum     // row_sum defined in inner loop body
+    i = i + 1
+  return total
+
+// ---------------------------------------------------------------------------
+// 5. async: value defined before await, used after resume
+// ---------------------------------------------------------------------------
+
+fn{#async} val_across_await(n i64) i64 =
+  let pre_val i64 = n * 5       // defined before first yield point
+  let fut = spawn do:
+    pass                        // just a yield
+  await fut                     // yield/resume here
+  return pre_val + 1            // pre_val must be live after resume
+
+// ---------------------------------------------------------------------------
+// 6. async: value defined in if-branch, then await outside branch
+//    The value from the if-branch must be available after the await.
+// ---------------------------------------------------------------------------
+
+fn{#async} conditional_then_await(n i64) i64 =
+  let result i64 = 0
+  if n > 0:
+    result = n * 10
+  else:
+    result = 0 - n
+  // Both branches write result; it becomes a phi here.
+  // Then we await - the phi node result must survive yield/resume.
+  let fut = spawn do:
+    pass
+  await fut
+  return result   // must be the phi value, live after resume
+
+// ---------------------------------------------------------------------------
+// 7. async loop: accumulator live across multiple awaits
+// ---------------------------------------------------------------------------
+
+fn{#async} loop_across_awaits(n i64) i64 =
+  let acc i64 = 0
+  let i i64 = 0
+  for i < n:
+    let fut = spawn do:
+      pass   // just yield
+    await fut
+    acc = acc + i + 1    // acc must be live across the await inside the loop
+    i = i + 1
+  return acc
+
+// ---------------------------------------------------------------------------
+// 8. Many branches all feeding the same post-merge variable
+// ---------------------------------------------------------------------------
+
+fn fan_in_branches(n i64) i64 =
+  let pre i64 = n * 2           // pre-branch
+  let branch_result i64 = 0
+  if n == 0:
+    branch_result = 100
+  else:
+    if n == 1:
+      branch_result = 200
+    else:
+      if n == 2:
+        branch_result = 300
+      else:
+        if n == 3:
+          branch_result = 400
+        else:
+          branch_result = 500
+  // All branches feed branch_result; pre must still be live
+  return pre + branch_result
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "val before if used in both branches" =
+  assert::equals(val_before_if(5), 14)   // base=15, reduced=14
+  assert::equals(val_before_if(11), 133) // base=33, extra=100+33=133
+
+test "val before if used after merge" =
+  assert::equals(val_before_if_used_after(4), 29)  // base=28, bonus=1, 28+1=29
+  assert::equals(val_before_if_used_after(3), 23)  // base=21, bonus=2, 21+2=23
+
+test "loop-carried fibonacci-like" =
+  assert::equals(loop_carried(0), 1)   // prev=1, no iterations
+  assert::equals(loop_carried(1), 1)   // fib(2)=1
+  assert::equals(loop_carried(2), 2)   // fib(3)=2
+  assert::equals(loop_carried(7), 21)  // fib(8)=21
+
+test "val before match used in every case and after" =
+  // factor=6, a_kind: delta=6+10=16, return 6+16=22
+  assert::equals(val_before_match(kind.a_kind, 3), 22)
+  // factor=6, b_kind: delta=6-5=1, return 6+1=7
+  assert::equals(val_before_match(kind.b_kind, 3), 7)
+  // factor=6, c_kind: delta=6*2=12, return 6+12=18
+  assert::equals(val_before_match(kind.c_kind, 3), 18)
+
+test "nested loop live values" =
+  // 2x3 grid: sum of (i*3+j) for i in 0..2, j in 0..3
+  // i=0: 0+1+2=3, i=1: 3+4+5=12; total=15
+  assert::equals(nested_loop_live(2, 3), 15)
+
+test "async value across await" =
+  let r = await spawn val_across_await(6)
+  assert::equals(r, 31)  // 6*5+1=31
+
+test "async conditional before await" =
+  let r1 = await spawn conditional_then_await(4)
+  let r2 = await spawn conditional_then_await(0 - 3)
+  assert::equals(r1, 40)
+  assert::equals(r2, 3)
+
+test "async accumulator across multiple awaits" =
+  let r = await spawn loop_across_awaits(5)
+  // acc += 1+2+3+4+5 = 15
+  assert::equals(r, 15)
+
+test "fan-in branches all feed same variable" =
+  assert::equals(fan_in_branches(0), 100)   // pre=0, result=100
+  assert::equals(fan_in_branches(1), 202)   // pre=2, result=200
+  assert::equals(fan_in_branches(2), 304)   // pre=4, result=300
+  assert::equals(fan_in_branches(3), 406)   // pre=6, result=400
+  assert::equals(fan_in_branches(9), 518)   // pre=18, result=500

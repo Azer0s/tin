@@ -27,6 +27,13 @@ jobs:
       - name: Build compiler
         run: go build -o tin .
 
+      - name: Verify inline channel fast path is generated
+        run: |
+          ir=$(./tin ir examples/bench/channel_latency.tin 2>/dev/null)
+          echo "$ir" | grep -q 'call i32 @_tin_channel_recv_direct' || { echo "FAIL: _tin_channel_recv_direct not found in IR (fast recv path regressed)"; exit 1; }
+          echo "$ir" | grep -q 'call i32 @_tin_channel_send_blocking' || { echo "FAIL: _tin_channel_send_blocking not found in IR (fast send path regressed)"; exit 1; }
+          echo "ok: inline channel fast path verified"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -34,7 +41,7 @@ jobs:
           args: --timeout=5m
 
       - name: Run example tests
-        run: ./tin test examples/ -lm
+        run: ./tin test examples/... -lm
 
       - name: Run fiber example tests
         run: |
@@ -49,7 +56,7 @@ jobs:
         run: |
           # stress_10k spawns 10,000 OS threads which exhausts valgrind's memory.
           # stress_100 covers the same logic with a valgrind-safe thread count.
-          for f in examples/fibers/basic_spawn.tin examples/fibers/channel_pingpong.tin examples/fibers/yield_cpu.tin examples/fibers/stress_100.tin examples/fibers/fiber_syntax_edge_cases.tin examples/fibers/channel_correctness.tin; do
+          for f in examples/fibers/basic_spawn.tin examples/fibers/channel_pingpong.tin examples/fibers/yield_cpu.tin examples/fibers/stress_100.tin examples/fibers/fiber_syntax_edge_cases.tin examples/fibers/channel_correctness.tin examples/fibers/channel_mpmc.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
             ./tin build "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
@@ -77,4 +84,103 @@ jobs:
             echo "=== $name ==="
             ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
             "/tmp/tin_arc_${name}"
+          done
+
+      - name: Run echo server stress test
+        run: |
+          ./tin build examples/echo_server/echo_server_bad.tin -o /tmp/echo_server_bad
+          python3 examples/echo_server/stress_test.py
+
+      - name: Run I/O stress tests under valgrind
+        # Uses build-test so the same binary that runs under `tin test` is
+        # checked for memory errors. --leak-check=no matches the policy used
+        # for all other fiber tests (fibers use OS threads; leak accounting
+        # across thread stacks produces false positives).
+        run: |
+          for f in examples/io_stress/*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== valgrind: $name ==="
+            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
+          done
+
+  build-and-test-arm64:
+    name: Build and test (arm64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install clang and valgrind
+        run: sudo apt-get update -qq && sudo apt-get install -y clang valgrind
+
+      - name: Build compiler
+        run: go build -o tin .
+
+      - name: Verify inline channel fast path is generated
+        run: |
+          ir=$(./tin ir examples/bench/channel_latency.tin 2>/dev/null)
+          echo "$ir" | grep -q 'call i32 @_tin_channel_recv_direct' || { echo "FAIL: _tin_channel_recv_direct not found in IR (fast recv path regressed)"; exit 1; }
+          echo "$ir" | grep -q 'call i32 @_tin_channel_send_blocking' || { echo "FAIL: _tin_channel_send_blocking not found in IR (fast send path regressed)"; exit 1; }
+          echo "ok: inline channel fast path verified"
+
+      - name: Run example tests
+        run: ./tin test examples/... -lm
+
+      - name: Run fiber example tests
+        run: |
+          for f in examples/fibers/*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== $name ==="
+            ./tin build "$f" -o "/tmp/tin_fiber_${name}" -lm
+            "/tmp/tin_fiber_${name}"
+          done
+
+      - name: Run fiber examples under valgrind
+        run: |
+          for f in examples/fibers/basic_spawn.tin examples/fibers/channel_pingpong.tin examples/fibers/yield_cpu.tin examples/fibers/stress_100.tin examples/fibers/fiber_syntax_edge_cases.tin examples/fibers/channel_correctness.tin examples/fibers/channel_mpmc.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== valgrind: $name ==="
+            ./tin build "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
+            valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_fiber_vg_${name}"
+          done
+
+      - name: Run ARC stress tests (non-fiber) under valgrind
+        run: |
+          for f in examples/arc_stress/*.tin; do
+            [[ "$(basename "$f")" == fiber_* ]] && continue
+            name=$(basename "$f" .tin)
+            echo "=== valgrind: $name ==="
+            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_arc_${name}"
+          done
+
+      - name: Run ARC stress tests (fiber) without valgrind
+        run: |
+          for f in examples/arc_stress/fiber_*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== $name ==="
+            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            "/tmp/tin_arc_${name}"
+          done
+
+      - name: Run echo server stress test
+        run: |
+          ./tin build examples/echo_server/echo_server_bad.tin -o /tmp/echo_server_bad
+          python3 examples/echo_server/stress_test.py
+
+      - name: Run I/O stress tests under valgrind
+        run: |
+          for f in examples/io_stress/*.tin; do
+            name=$(basename "$f" .tin)
+            echo "=== valgrind: $name ==="
+            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done

@@ -1,7 +1,9 @@
-# compiled binary
-tin
-tin_dev
-tinc
+# compiled binaries
+/tin
+/tin_dev
+/tin_bin
+/tinc
+tin_old
 *.tin.out
 
 # test binaries
@@ -15,12 +17,27 @@ tinc
 # Pre-generated stdlib module files are tracked (override the rule above)
 !stdlib/**/*.tin.mod
 *.o
-examples/modules/modules_test
-tin_old
-tin
-examples/fibers/channel_pingpong
 
-# Core dump files
+# Example / bench compiled outputs (not source)
+examples/modules/modules_test
+examples/fibers/channel_pingpong
+examples/bench/channel_latency
+examples/bench/spawn_throughput
+examples/bench/yield_overhead
+examples/test_json
+bench/bin/
+bench/results*.md
+bench/rust/target/
+
+# Core and memory profiler dumps
 core
 core.*
-examples/test_json
+vgcore.*
+massif.out.*
+
+# IDE / editor
+/utils/tin-intellij/.kotlin/
+.idea
+
+**/*.orig
+**/*.rej

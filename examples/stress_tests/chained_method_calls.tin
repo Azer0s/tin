@@ -1,0 +1,229 @@
+// stress_tests/chained_method_calls.tin
+//
+// Tests: long chains of method calls on complex types, including:
+//   - Chaining methods that each return a new struct value (builder pattern)
+//   - Chaining methods across trait implementations
+//   - Method chaining with intermediate casts
+//   - Method chains inside string interpolation
+//   - Method chains as function arguments
+//   - Method chains inside conditionals
+//   - Method chains on generic types
+//
+// Compiler paths exercised:
+//   - Intermediate struct value lifetime (SSA temporaries for each call result)
+//   - Correct receiver passing for each chained call
+//   - Method resolution on returned struct type vs. original receiver type
+
+use assert
+
+// ---------------------------------------------------------------------------
+// 1. Builder pattern: each method returns a copy with one field updated
+// ---------------------------------------------------------------------------
+
+struct query_builder =
+  table_name  string
+  limit_val   i64
+  offset_val  i64
+  where_clause string
+  order_col   string
+  ascending   bool
+
+  static fn new(table string) query_builder =
+    return query_builder{
+      table_name: table,
+      limit_val: 0 - 1,   // -1 = unlimited
+      offset_val: 0,
+      where_clause: "",
+      order_col: "",
+      ascending: true,
+    }
+
+  fn limit(this query_builder, n i64) query_builder =
+    return query_builder{
+      table_name: this.table_name,
+      limit_val: n,
+      offset_val: this.offset_val,
+      where_clause: this.where_clause,
+      order_col: this.order_col,
+      ascending: this.ascending,
+    }
+
+  fn offset(this query_builder, n i64) query_builder =
+    return query_builder{
+      table_name: this.table_name,
+      limit_val: this.limit_val,
+      offset_val: n,
+      where_clause: this.where_clause,
+      order_col: this.order_col,
+      ascending: this.ascending,
+    }
+
+  fn where_clause_set(this query_builder, w string) query_builder =
+    return query_builder{
+      table_name: this.table_name,
+      limit_val: this.limit_val,
+      offset_val: this.offset_val,
+      where_clause: w,
+      order_col: this.order_col,
+      ascending: this.ascending,
+    }
+
+  fn order_by(this query_builder, col string, asc bool) query_builder =
+    return query_builder{
+      table_name: this.table_name,
+      limit_val: this.limit_val,
+      offset_val: this.offset_val,
+      where_clause: this.where_clause,
+      order_col: col,
+      ascending: asc,
+    }
+
+  fn build(this query_builder) string =
+    let s string = "SELECT * FROM {this.table_name}"
+    if len(this.where_clause) > 0:
+      s = s ++ " WHERE {this.where_clause}"
+    if len(this.order_col) > 0:
+      let dir string = "ASC"
+      if this.ascending == false:
+        dir = "DESC"
+      s = s ++ " ORDER BY {this.order_col} {dir}"
+    if this.limit_val >= 0:
+      s = s ++ " LIMIT {this.limit_val}"
+    if this.offset_val > 0:
+      s = s ++ " OFFSET {this.offset_val}"
+    return s
+
+// ---------------------------------------------------------------------------
+// 2. Generic chain: methods on a generic wrapper
+// ---------------------------------------------------------------------------
+
+struct pipeline[t] =
+  data [t]
+
+  static fn of(items [t]) pipeline[t] =
+    return pipeline[t]{data: items}
+
+  fn push(this pipeline[t], item t) pipeline[t] =
+    let d [t] = this.data
+    d ++= item
+    return pipeline[t]{data: d}
+
+  fn len_p(this pipeline[t]) i64 =
+    return len(this.data)
+
+  fn get_p(this pipeline[t], i i64) t =
+    return this.data[i]
+
+// ---------------------------------------------------------------------------
+// 3. String methods (via stdlib strings pattern) simulated here
+// ---------------------------------------------------------------------------
+
+struct str_builder =
+  buf string
+
+  static fn new() str_builder =
+    return str_builder{buf: ""}
+
+  fn append(this str_builder, s string) str_builder =
+    return str_builder{buf: this.buf ++ s}
+
+  fn append_line(this str_builder, s string) str_builder =
+    return str_builder{buf: this.buf ++ s ++ "\n"}
+
+  fn prepend(this str_builder, s string) str_builder =
+    return str_builder{buf: s ++ this.buf}
+
+  fn build(this str_builder) string =
+    return this.buf
+
+  fn len_sb(this str_builder) i64 =
+    return len(this.buf)
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "query builder chain: all options" =
+  let q = query_builder::new("users")
+    .where_clause_set("age > 18")
+    .order_by("name", true)
+    .limit(10)
+    .offset(20)
+    .build()
+  assert::equals_str(q, "SELECT * FROM users WHERE age > 18 ORDER BY name ASC LIMIT 10 OFFSET 20")
+
+test "query builder chain: minimal" =
+  let q = query_builder::new("products").limit(5).build()
+  assert::equals_str(q, "SELECT * FROM products LIMIT 5")
+
+test "query builder chain: no limit" =
+  let q = query_builder::new("logs").where_clause_set("level = error").build()
+  assert::equals_str(q, "SELECT * FROM logs WHERE level = error")
+
+test "query builder chain: descending order" =
+  let q = query_builder::new("events").order_by("ts", false).limit(100).build()
+  assert::equals_str(q, "SELECT * FROM events ORDER BY ts DESC LIMIT 100")
+
+test "pipeline chain push multiple" =
+  let p = pipeline[i64]::of([1, 2, 3])
+    .push(4)
+    .push(5)
+    .push(6)
+  assert::equals(p.len_p(), 6)
+  assert::equals(p.get_p(5), 6)
+
+test "pipeline chain with strings" =
+  let p = pipeline[string]::of(["a"])
+    .push("b")
+    .push("c")
+    .push("d")
+  assert::equals(p.len_p(), 4)
+  assert::equals_str(p.get_p(0), "a")
+  assert::equals_str(p.get_p(3), "d")
+
+test "str_builder chain simple" =
+  let s = str_builder::new()
+    .append("hello")
+    .append(", ")
+    .append("world")
+    .build()
+  assert::equals_str(s, "hello, world")
+
+test "str_builder chain with prepend" =
+  let s = str_builder::new()
+    .append("world")
+    .prepend("hello ")
+    .build()
+  assert::equals_str(s, "hello world")
+
+test "str_builder chain append_line" =
+  let s = str_builder::new()
+    .append_line("line1")
+    .append_line("line2")
+    .append("line3")
+    .build()
+  assert::equals_str(s, "line1\nline2\nline3")
+
+test "chain method result used as argument" =
+  let q1 = query_builder::new("a").limit(1).build()
+  let q2 = query_builder::new("b").limit(2).build()
+  // Use both query strings together
+  let combined = str_builder::new()
+    .append(q1)
+    .append(" / ")
+    .append(q2)
+    .build()
+  assert::equals_str(combined, "SELECT * FROM a LIMIT 1 / SELECT * FROM b LIMIT 2")
+
+test "chain inside conditional" =
+  let use_limit bool = true
+  let q = if use_limit:
+    query_builder::new("t").limit(5).build()
+  else:
+    query_builder::new("t").build()
+  assert::equals_str(q, "SELECT * FROM t LIMIT 5")
+
+test "chain len used in expression" =
+  let p = pipeline[i64]::of([10, 20, 30]).push(40).push(50)
+  let doubled_len = p.len_p() * 2
+  assert::equals(doubled_len, 10)

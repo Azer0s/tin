@@ -88,10 +88,11 @@ void _tin_sleep_ms(int64_t ms) {
 
     int64_t deadline = _now_ms() + ms;
 
-    // Park the fiber BEFORE adding to the timer list. This way, even if the
-    // timer fires immediately in another thread, _tin_fiber_unpark will see
-    // BLOCKED and enqueue exactly once. The worker then sees RUNNABLE (not
-    // RUNNING) and skips its own re-enqueue.
+    // Park the fiber before adding to the timer list.  _tin_fiber_park now sets
+    // pending_park (not FIBER_BLOCKED directly) so even if the timer fires before
+    // coro.suspend, _tin_fiber_unpark sees FIBER_RUNNING and sets pending_wakeup;
+    // the worker loop re-enqueues after coro.suspend returns, avoiding a
+    // double-resume race.
     _tin_fiber_park(pid);
 
     pthread_mutex_lock(&_timer_mu);

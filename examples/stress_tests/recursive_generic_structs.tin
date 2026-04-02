@@ -1,0 +1,240 @@
+// stress_tests/recursive_generic_structs.tin
+//
+// Tests: recursive and mutually-referential generic struct definitions,
+// generic linked-list, binary tree, and result/option types implemented
+// as structs (not language builtins). The compiler must correctly size,
+// initialize, and traverse these heap-allocated recursive types.
+//
+// Compiler paths exercised:
+//   - Generic struct with pointer-to-self field (recursive type)
+//   - Monomorphization of recursive generic structs at multiple types
+//   - Methods on recursive generic structs that call themselves
+//   - Generic type parameter threading through recursive calls
+//   - Static constructor methods on generic structs
+
+use assert
+use mem
+
+// ---------------------------------------------------------------------------
+// 1. Linked list node (singly linked, heap allocated)
+// ---------------------------------------------------------------------------
+
+struct list_node[t] =
+  val  t
+  next *list_node[t]    // nil = end of list
+
+  static fn cons(val t, next *list_node[t]) *list_node[t] =
+    let n *list_node[t] = mem::calloc(1, sizeof(list_node[t])).(*list_node[t])
+    (*n).val = val
+    (*n).next = next
+    return n
+
+fn list_len[t](node *list_node[t]) i64 =
+  if node == nil:
+    return 0
+  return 1 + list_len((*node).next)
+
+fn list_sum_i64(node *list_node[i64]) i64 =
+  if node == nil:
+    return 0
+  return (*node).val + list_sum_i64((*node).next)
+
+fn list_get[t](node *list_node[t], idx i64) t =
+  if idx == 0:
+    return (*node).val
+  return list_get((*node).next, idx - 1)
+
+// ---------------------------------------------------------------------------
+// 2. Binary tree (generic, heap allocated)
+// ---------------------------------------------------------------------------
+
+struct tree_node[t] =
+  val   t
+  left  *tree_node[t]
+  right *tree_node[t]
+
+  static fn leaf(v t) *tree_node[t] =
+    let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
+    (*n).val = v
+    (*n).left = nil
+    (*n).right = nil
+    return n
+
+  static fn branch(v t, l *tree_node[t], r *tree_node[t]) *tree_node[t] =
+    let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
+    (*n).val = v
+    (*n).left = l
+    (*n).right = r
+    return n
+
+fn tree_sum(root *tree_node[i64]) i64 =
+  if root == nil:
+    return 0
+  return (*root).val + tree_sum((*root).left) + tree_sum((*root).right)
+
+fn tree_depth[t](root *tree_node[t]) i64 =
+  if root == nil:
+    return 0
+  let l = tree_depth((*root).left)
+  let r = tree_depth((*root).right)
+  if l > r:
+    return l + 1
+  return r + 1
+
+fn tree_count[t](root *tree_node[t]) i64 =
+  if root == nil:
+    return 0
+  return 1 + tree_count((*root).left) + tree_count((*root).right)
+
+// ---------------------------------------------------------------------------
+// 3. Option type (generic, value-semantic via tagged union approach)
+//    Simulated as a struct since Tin doesn't have built-in Option.
+// ---------------------------------------------------------------------------
+
+struct option[t] =
+  has_value bool
+  val       t
+
+  static fn some(v t) option[t] =
+    return option[t]{has_value: true, val: v}
+
+  static fn none() option[t] =
+    return option[t]{has_value: false, val: default(t)}
+
+  fn unwrap_or(this option[t], fallback t) t =
+    if this.has_value:
+      return this.val
+    return fallback
+
+  fn map_opt[r](this option[t], f fn(t) r) option[r] =
+    if this.has_value:
+      return option[r]::some(f(this.val))
+    return option[r]::none()
+
+// ---------------------------------------------------------------------------
+// 4. Result type (generic over value and error string)
+// ---------------------------------------------------------------------------
+
+struct result[t] =
+  ok  bool
+  val t
+  err string
+
+  static fn success(v t) result[t] =
+    return result[t]{ok: true, val: v, err: ""}
+
+  static fn failure(msg string) result[t] =
+    return result[t]{ok: false, val: default(t), err: msg}
+
+  fn unwrap_or(this result[t], fallback t) t =
+    if this.ok:
+      return this.val
+    return fallback
+
+fn safe_div(a i64, b i64) result[i64] =
+  if b == 0:
+    return result[i64]::failure("division by zero")
+  return result[i64]::success(a / b)
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "linked list construction and length" =
+  // 3 -> 2 -> 1 -> nil
+  let n1 = list_node[i64]::cons(1, nil)
+  let n2 = list_node[i64]::cons(2, n1)
+  let n3 = list_node[i64]::cons(3, n2)
+  assert::equals(list_len(n3), 3)
+
+test "linked list sum" =
+  let n1 = list_node[i64]::cons(10, nil)
+  let n2 = list_node[i64]::cons(20, n1)
+  let n3 = list_node[i64]::cons(30, n2)
+  assert::equals(list_sum_i64(n3), 60)
+
+test "linked list element access" =
+  let n1 = list_node[i64]::cons(100, nil)
+  let n2 = list_node[i64]::cons(200, n1)
+  let n3 = list_node[i64]::cons(300, n2)
+  assert::equals(list_get(n3, 0), 300)
+  assert::equals(list_get(n3, 1), 200)
+  assert::equals(list_get(n3, 2), 100)
+
+test "linked list with string type" =
+  let n1 = list_node[string]::cons("c", nil)
+  let n2 = list_node[string]::cons("b", n1)
+  let n3 = list_node[string]::cons("a", n2)
+  assert::equals_str(list_get(n3, 0), "a")
+  assert::equals_str(list_get(n3, 1), "b")
+  assert::equals_str(list_get(n3, 2), "c")
+
+test "binary tree sum" =
+  //       5
+  //      / \
+  //     3   7
+  //    / \
+  //   1   4
+  let t1 = tree_node[i64]::leaf(1)
+  let t4 = tree_node[i64]::leaf(4)
+  let t3 = tree_node[i64]::branch(3, t1, t4)
+  let t7 = tree_node[i64]::leaf(7)
+  let root = tree_node[i64]::branch(5, t3, t7)
+  assert::equals(tree_sum(root), 20)
+
+test "binary tree depth" =
+  let t1 = tree_node[i64]::leaf(1)
+  let t4 = tree_node[i64]::leaf(4)
+  let t3 = tree_node[i64]::branch(3, t1, t4)
+  let t7 = tree_node[i64]::leaf(7)
+  let root = tree_node[i64]::branch(5, t3, t7)
+  assert::equals(tree_depth(root), 3)
+
+test "binary tree count" =
+  let t1 = tree_node[i64]::leaf(1)
+  let t4 = tree_node[i64]::leaf(4)
+  let t3 = tree_node[i64]::branch(3, t1, t4)
+  let t7 = tree_node[i64]::leaf(7)
+  let root = tree_node[i64]::branch(5, t3, t7)
+  assert::equals(tree_count(root), 5)
+
+test "option some unwrap_or" =
+  let o = option[i64]::some(42)
+  assert::ok(o.has_value)
+  assert::equals(o.unwrap_or(0), 42)
+
+test "option none unwrap_or" =
+  let o = option[i64]::none()
+  assert::not_ok(o.has_value)
+  assert::equals(o.unwrap_or(99), 99)
+
+test "option map_opt some" =
+  let o = option[i64]::some(5)
+  let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+  assert::ok(doubled.has_value)
+  assert::equals(doubled.val, 10)
+
+test "option map_opt none" =
+  let o = option[i64]::none()
+  let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+  assert::not_ok(doubled.has_value)
+
+test "option map_opt type change string" =
+  let o = option[i64]::some(7)
+  let as_str = o.map_opt(fn(n i64) string = return "val={n}")
+  assert::ok(as_str.has_value)
+  assert::equals_str(as_str.val, "val=7")
+
+test "result success" =
+  let r = safe_div(10, 2)
+  assert::ok(r.ok)
+  assert::equals(r.val, 5)
+
+test "result failure division by zero" =
+  let r = safe_div(10, 0)
+  assert::not_ok(r.ok)
+  assert::equals_str(r.err, "division by zero")
+
+test "result unwrap_or" =
+  assert::equals(safe_div(10, 0).unwrap_or(0 - 1), 0 - 1)
+  assert::equals(safe_div(9, 3).unwrap_or(0 - 1), 3)

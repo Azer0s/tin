@@ -1,0 +1,48 @@
+// 4-stage pipeline: 1M messages each traverse 4 relay fibers in series.
+// Reports ns per full pipeline pass (4 channel hops each way).
+
+use sync
+use io
+
+fn _tin_now_us() i64 = extern("_tin_now_us")
+
+var g_elapsed i64
+
+fn{#async} relay(src sync::Channel[i64], dst sync::Channel[i64], n i64) =
+  let i i64 = 0
+  for i < n:
+    let v = await src.recv()
+    await dst.send(v + 1)
+    i = i + 1
+
+fn{#async} main() =
+  let n i64 = 1000000
+
+  let ch0 = sync::Channel[i64].make(1)
+  let ch1 = sync::Channel[i64].make(1)
+  let ch2 = sync::Channel[i64].make(1)
+  let ch3 = sync::Channel[i64].make(1)
+  let ch4 = sync::Channel[i64].make(1)
+
+  let r0 = spawn relay(ch0, ch1, n)
+  let r1 = spawn relay(ch1, ch2, n)
+  let r2 = spawn relay(ch2, ch3, n)
+  let r3 = spawn relay(ch3, ch4, n)
+
+  let start = _tin_now_us()
+  let i i64 = 0
+  for i < n:
+    await ch0.send(i)
+    await ch4.recv()
+    i = i + 1
+  g_elapsed = _tin_now_us() - start
+
+  await r0
+  await r1
+  await r2
+  await r3
+
+  let ns_per_pass = g_elapsed * 1000 / n
+  echo "{n} messages through 4 stages"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "latency: ~{ns_per_pass}ns / pipeline pass"

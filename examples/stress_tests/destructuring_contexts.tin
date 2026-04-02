@@ -1,0 +1,205 @@
+// stress_tests/destructuring_contexts.tin
+//
+// Tests: tuple/array/struct destructuring in every context the compiler
+// must support, including destructuring inside loops, nested destructuring,
+// destructuring of function return values, rest-splits chained multiple
+// times, and per-slot typed any-array destructuring.
+//
+// Compiler paths exercised:
+//   - Array element assignment from destructuring
+//   - Rest-split generation (head + tail slice)
+//   - Struct field extraction via {field} pattern
+//   - Per-slot type assertion for [any] arrays
+//   - Destructuring as a loop induction variable
+
+use assert
+
+struct vec2 =
+  x i64
+  y i64
+
+struct color_rgba =
+  r u8
+  g u8
+  b u8
+  a u8
+
+struct named_pair =
+  key   string
+  value i64
+
+fn split_at_midpoint(arr [i64]) @[i64, [i64], [i64]] =
+  // Returns [first_half_last, first_half, second_half] as any-annotated
+  let mid = len(arr) / 2
+  let left [i64] = []
+  let right [i64] = []
+  let i i64 = 0
+  for i < len(arr):
+    if i < mid:
+      left ++= arr[i]
+    else:
+      right ++= arr[i]
+    i = i + 1
+  return [left[mid - 1] as any, left as any, right as any]
+
+// ---------------------------------------------------------------------------
+// 1. Basic array destructuring
+// ---------------------------------------------------------------------------
+
+test "uniform array destructuring two slots" =
+  let arr [i64] = [10, 20, 30]
+  let [a, b] [i64] = arr
+  assert::equals(a, 10)
+  assert::equals(b, 20)
+
+test "uniform array destructuring three slots" =
+  let arr [i64] = [1, 2, 3, 4, 5]
+  let [x, y, z] [i64] = arr
+  assert::equals(x, 1)
+  assert::equals(y, 2)
+  assert::equals(z, 3)
+
+// ---------------------------------------------------------------------------
+// 2. Rest-split destructuring
+// ---------------------------------------------------------------------------
+
+test "rest split head and tail" =
+  let arr [i64] = [100, 200, 300, 400]
+  let [head, ...tail] [i64] = arr
+  assert::equals(head, 100)
+  assert::equals(len(tail), 3)
+  assert::equals(tail[0], 200)
+  assert::equals(tail[2], 400)
+
+test "rest split chained twice" =
+  let arr [i64] = [1, 2, 3, 4, 5]
+  let [a, ...rest1] [i64] = arr
+  let [b, ...rest2] [i64] = rest1
+  let [c, ...rest3] [i64] = rest2
+  assert::equals(a, 1)
+  assert::equals(b, 2)
+  assert::equals(c, 3)
+  assert::equals(len(rest3), 2)
+  assert::equals(rest3[0], 4)
+
+// ---------------------------------------------------------------------------
+// 3. Struct destructuring
+// ---------------------------------------------------------------------------
+
+test "struct destructuring vec2" =
+  let v = vec2{x: 7, y: 13}
+  let {x, y} vec2 = v
+  assert::equals(x, 7)
+  assert::equals(y, 13)
+
+test "struct destructuring color_rgba" =
+  let c = color_rgba{r: 255, g: 128, b: 0, a: 255}
+  let {r, g, b, a} color_rgba = c
+  assert::equals(r as i64, 255)
+  assert::equals(g as i64, 128)
+  assert::equals(b as i64, 0)
+  assert::equals(a as i64, 255)
+
+// ---------------------------------------------------------------------------
+// 4. Per-slot any-array destructuring
+// ---------------------------------------------------------------------------
+
+test "per-slot any array i64 and bool" =
+  let arr [any] = [42 as any, true as any]
+  let [n, flag] [i64, bool] = arr
+  assert::equals(n, 42)
+  assert::ok(flag)
+
+test "per-slot any array string and i64" =
+  let arr [any] = ["hello" as any, 99 as any]
+  let [s, v] [string, i64] = arr
+  assert::equals_str(s, "hello")
+  assert::equals(v, 99)
+
+// ---------------------------------------------------------------------------
+// 5. Destructuring inside a for loop
+// ---------------------------------------------------------------------------
+
+test "struct destructuring inside loop" =
+  let points [vec2] = [
+    vec2{x: 1, y: 2},
+    vec2{x: 3, y: 4},
+    vec2{x: 5, y: 6},
+  ]
+  let sum_x i64 = 0
+  let sum_y i64 = 0
+  for let p vec2 in points:
+    let {x, y} vec2 = p
+    sum_x = sum_x + x
+    sum_y = sum_y + y
+  assert::equals(sum_x, 9)
+  assert::equals(sum_y, 12)
+
+test "array destructuring inside loop for pairs" =
+  // Process [key, value] pairs stored flat in a [i64]
+  let flat [i64] = [1, 10, 2, 20, 3, 30]
+  let sum_vals i64 = 0
+  let sum_keys i64 = 0
+  let i i64 = 0
+  for i < len(flat) / 2:
+    let k = flat[i * 2]
+    let v = flat[i * 2 + 1]
+    sum_keys = sum_keys + k
+    sum_vals = sum_vals + v
+    i = i + 1
+  assert::equals(sum_keys, 6)
+  assert::equals(sum_vals, 60)
+
+// ---------------------------------------------------------------------------
+// 6. Destructuring function return values
+// ---------------------------------------------------------------------------
+
+fn min_max(arr [i64]) @[i64, i64] =
+  let mn i64 = arr[0]
+  let mx i64 = arr[0]
+  for let v i64 in arr:
+    if v < mn:
+      mn = v
+    if v > mx:
+      mx = v
+  return [mn as any, mx as any]
+
+test "destructure function return min_max" =
+  let result = min_max([3, 1, 4, 1, 5, 9, 2, 6])
+  let [mn, mx] @[i64, i64] = result
+  assert::equals(mn, 1)
+  assert::equals(mx, 9)
+
+// ---------------------------------------------------------------------------
+// 7. Nested struct destructuring (destructure fields from inner struct)
+// ---------------------------------------------------------------------------
+
+struct segment =
+  start vec2
+  end_pt vec2
+
+test "manually decompose nested struct" =
+  let seg = segment{
+    start: vec2{x: 0, y: 0},
+    end_pt: vec2{x: 3, y: 4},
+  }
+  let {x: sx, y: sy} vec2 = seg.start
+  let {x: ex, y: ey} vec2 = seg.end_pt
+  // dx^2 + dy^2 = 9 + 16 = 25
+  assert::equals(sx, 0)
+  assert::equals(sy, 0)
+  assert::equals(ex, 3)
+  assert::equals(ey, 4)
+  assert::equals((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy), 25)
+
+// ---------------------------------------------------------------------------
+// 8. Shadowing with destructuring names
+// ---------------------------------------------------------------------------
+
+test "destructured names can shadow outer let bindings" =
+  let x i64 = 999
+  let y i64 = 888
+  let v = vec2{x: 1, y: 2}
+  let {x, y} vec2 = v   // shadows outer x, y
+  assert::equals(x, 1)
+  assert::equals(y, 2)

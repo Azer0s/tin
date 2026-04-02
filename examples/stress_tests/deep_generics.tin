@@ -1,0 +1,148 @@
+// stress_tests/deep_generics.tin
+//
+// Tests: deep generic instantiation, multi-level type parameter threading,
+// generic functions calling other generic functions with the same or different
+// type params, and nested generic struct construction.
+//
+// Compiler paths exercised:
+//   - Monomorphization of the same generic at many concrete types
+//   - Generic function calling a generic function (type param forwarded)
+//   - Generic struct with generic field types
+//   - Constraint checking across multi-level call chains
+
+use assert
+
+// ---------------------------------------------------------------------------
+// Level 1: basic generic wrapper
+// ---------------------------------------------------------------------------
+
+struct box[t] =
+  val t
+
+  fn unwrap(this box[t]) t =
+    return this.val
+
+  fn map_box[r](this box[t], f fn(t) r) box[r] =
+    return box[r]{val: f(this.val)}
+
+// ---------------------------------------------------------------------------
+// Level 2: pair of boxes - two independent type params
+// ---------------------------------------------------------------------------
+
+struct pair_box[a, b] =
+  left  box[a]
+  right box[b]
+
+  fn swap(this pair_box[a, b]) pair_box[b, a] =
+    return pair_box[b, a]{left: this.right, right: this.left}
+
+// ---------------------------------------------------------------------------
+// Level 3: a "stack" of same-type boxes (box inside box inside box)
+// ---------------------------------------------------------------------------
+
+fn triple_box[t](v t) box[box[box[t]]] =
+  return box[box[box[t]]]{val: box[box[t]]{val: box[t]{val: v}}}
+
+fn triple_unbox[t](b box[box[box[t]]]) t =
+  return b.val.val.val
+
+// ---------------------------------------------------------------------------
+// Level 4: generic identity passed through two hops
+// ---------------------------------------------------------------------------
+
+fn identity[t](x t) t =
+  return x
+
+fn double_identity[t](x t) t =
+  return identity(identity(x))
+
+fn quad_identity[t](x t) t =
+  return double_identity(double_identity(x))
+
+// ---------------------------------------------------------------------------
+// Level 5: generic map over array, constrained by nothing (pure type param)
+// ---------------------------------------------------------------------------
+
+fn arr_map[t, r](arr [t], f fn(t) r) [r] =
+  let out [r] = []
+  for let v t in arr:
+    out ++= f(v)
+  return out
+
+fn arr_map2[t, r, s](arr [t], f fn(t) r, g fn(r) s) [s] =
+  return arr_map(arr_map(arr, f), g)
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "box wrap/unwrap i64" =
+  let b = box[i64]{val: 42}
+  assert::equals(b.unwrap(), 42)
+
+test "box wrap/unwrap string" =
+  let b = box[string]{val: "hello"}
+  assert::equals_str(b.unwrap(), "hello")
+
+test "box map_box i64->string interpolation" =
+  let b = box[i64]{val: 7}
+  let bs = b.map_box(fn(n i64) string = return "{n}")
+  assert::equals_str(bs.unwrap(), "7")
+
+test "box map_box chained" =
+  let b = box[i64]{val: 3}
+  let b2 = b.map_box(fn(n i64) i64 = return n * n)
+           .map_box(fn(n i64) i64 = return n + 1)
+  assert::equals(b2.unwrap(), 10)
+
+test "pair_box construction and field access" =
+  let p = pair_box[i64, string]{
+    left: box[i64]{val: 10},
+    right: box[string]{val: "tin"},
+  }
+  assert::equals(p.left.unwrap(), 10)
+  assert::equals_str(p.right.unwrap(), "tin")
+
+test "pair_box swap" =
+  let p = pair_box[i64, bool]{
+    left: box[i64]{val: 99},
+    right: box[bool]{val: true},
+  }
+  let s = p.swap()
+  assert::ok(s.left.unwrap())
+  assert::equals(s.right.unwrap(), 99)
+
+test "triple_box round-trip i64" =
+  let tb = triple_box(55)
+  assert::equals(triple_unbox(tb), 55)
+
+test "triple_box round-trip string" =
+  let tb = triple_box("deep")
+  assert::equals_str(triple_unbox(tb), "deep")
+
+test "identity chain i64" =
+  assert::equals(quad_identity(123), 123)
+
+test "identity chain string" =
+  assert::equals_str(quad_identity("abc"), "abc")
+
+test "arr_map i64 to i64" =
+  let out = arr_map([1, 2, 3, 4], fn(n i64) i64 = return n * 2)
+  assert::equals(out[0], 2)
+  assert::equals(out[3], 8)
+
+test "arr_map2 two-stage transform" =
+  // [1,2,3] -> double -> add 1 -> [3,5,7]
+  let out = arr_map2(
+    [1, 2, 3],
+    fn(n i64) i64 = return n * 2,
+    fn(n i64) i64 = return n + 1,
+  )
+  assert::equals(out[0], 3)
+  assert::equals(out[1], 5)
+  assert::equals(out[2], 7)
+
+test "arr_map i64 to string" =
+  let labels = arr_map([10, 20, 30], fn(n i64) string = return "item_{n}")
+  assert::equals_str(labels[0], "item_10")
+  assert::equals_str(labels[2], "item_30")

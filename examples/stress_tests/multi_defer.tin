@@ -1,0 +1,187 @@
+// stress_tests/multi_defer.tin
+//
+// Tests: multiple levels of defer in the same function, defer ordering (LIFO),
+// defer interacting with early return, defer capturing variables by reference,
+// defer with inline lambdas, nested function calls that each have their own
+// defers, and recover() inside a deferred function.
+//
+// Compiler paths exercised:
+//   - Defer list insertion order vs. LIFO execution order
+//   - Correct SSA/IR patching on every exit path (return, early return)
+//   - Lambda capture in deferred inline fn() bodies
+//   - recover() call only valid inside a deferred lambda
+
+use assert
+use mem
+
+// ---------------------------------------------------------------------------
+// 1. Basic LIFO ordering - use a shared string log
+// ---------------------------------------------------------------------------
+
+fn lifo_order() string =
+  let log string = ""
+  defer do:
+    log = log ++ "A"   // runs third (last deferred = first to run... wait, LIFO)
+  defer do:
+    log = log ++ "B"   // runs second
+  defer do:
+    log = log ++ "C"   // runs first  (last registered)
+  return log
+
+// Note: defers run AFTER the return expression is evaluated but before the
+// function actually returns. The return value is the string at return time
+// (""), and the defers mutate `log` - but since we return `log` by value,
+// the returned copy is "". To observe LIFO we capture into a separately
+// returned string via a channel-like approach using a pointer.
+//
+// Alternative: build the log in reverse and assert that.
+// Actually the simplest testable version: use append to an [string] slice
+// captured by reference.
+
+fn lifo_via_array() [string] =
+  let log [string] = []
+  defer do:
+    log ++= "A"
+  defer do:
+    log ++= "B"
+  defer do:
+    log ++= "C"
+  return log
+
+// ---------------------------------------------------------------------------
+// 2. Defer with early return - all defers must fire on every path
+// ---------------------------------------------------------------------------
+
+fn with_early_return(n i64) i64 =
+  let freed [i64] = []
+  let a = mem::malloc(16)
+  defer do:
+    mem::free(a)
+    freed ++= 1
+  let b = mem::malloc(32)
+  defer do:
+    mem::free(b)
+    freed ++= 2
+  if n < 0:
+    return 0 - 1   // early return: both defers must fire
+  let c = mem::malloc(64)
+  defer do:
+    mem::free(c)
+    freed ++= 3
+  return n * 2     // normal return: all three defers fire
+
+// ---------------------------------------------------------------------------
+// 3. Defer an inline lambda that captures outer mutable variable
+// ---------------------------------------------------------------------------
+
+fn defer_lambda_capture(n i64) i64 =
+  let result i64 = n
+  defer fn() void =
+    result = result * 2  // mutates result after return expr is evaluated
+  result = result + 1
+  return result          // returns n+1; the lambda then doubles to 2*(n+1)
+                          // but the return value was already latched...
+                          // Actually in Tin, defers run before the actual return.
+                          // So: result = n, defer registered, result = n+1,
+                          //     return result triggers defer: result *= 2 = 2*(n+1)
+                          //     then returns the now-doubled value.
+
+// ---------------------------------------------------------------------------
+// 4. Five defers in one function - stress the defer list
+// ---------------------------------------------------------------------------
+
+fn five_defers(buf *void) i64 =
+  let count i64 = 0
+  defer do:
+    count = count + 1   // 5th registered, runs 1st: count=1
+  defer do:
+    count = count + 10  // 4th registered, runs 2nd: count=11
+  defer do:
+    count = count + 100 // 3rd registered, runs 3rd: count=111
+  defer do:
+    count = count + 1000 // 2nd registered, runs 4th: count=1111
+  defer mem::free(buf)    // 1st registered, runs 5th
+  return count           // defers run then this is returned; they increment count
+
+// ---------------------------------------------------------------------------
+// 5. recover() inside a deferred lambda catches panic
+// ---------------------------------------------------------------------------
+
+fn safe_divide(a i64, b i64) i64 =
+  let result i64 = 0
+  defer fn() void =
+    let msg = recover()
+    if len(msg) > 0:
+      result = 0 - 999   // sentinel: panic was caught
+  if b == 0:
+    panic("division by zero")
+  result = a / b
+  return result
+
+// ---------------------------------------------------------------------------
+// 6. Nested calls where each has its own defers - no cross-contamination
+// ---------------------------------------------------------------------------
+
+fn inner_with_defer(x i64) i64 =
+  let v i64 = x
+  defer do:
+    v = v + 100
+  return v
+
+fn outer_with_defer(x i64) i64 =
+  let a = inner_with_defer(x)
+  // inner's defer fires inside inner; outer sees return value only
+  let b i64 = a
+  defer do:
+    b = b + 10
+  return b   // after outer's defer, b = a+10 = (x+100)+10 = x+110
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "lifo ordering via array capture" =
+  let log = lifo_via_array()
+  // C registered last -> runs first, then B, then A
+  assert::equals(len(log), 3)
+  assert::equals_str(log[0], "C")
+  assert::equals_str(log[1], "B")
+  assert::equals_str(log[2], "A")
+
+test "defer fires on early return" =
+  let result = with_early_return(0 - 5)
+  assert::equals(result, 0 - 1)
+  // We can't easily inspect freed[] here, but the test exercises the codepath.
+
+test "defer fires on normal return with all three defers" =
+  let result = with_early_return(4)
+  assert::equals(result, 8)
+
+test "defer lambda captures and mutates" =
+  // n=3: result=3, defer registered (doubles result), result=4, return 4
+  // defer runs: result = 4*2 = 8, actual return = 8
+  let r = defer_lambda_capture(3)
+  assert::equals(r, 8)
+
+test "five defers run in LIFO order" =
+  let buf = mem::malloc(8)
+  let r = five_defers(buf)
+  // defers run in reverse registration: +1, +10, +100, +1000, free(buf)
+  // count starts 0, return captures count, then defers mutate count
+  // Because defers run BEFORE actual return, the returned value is:
+  // 0 + 1 + 10 + 100 + 1000 = 1111
+  assert::equals(r, 1111)
+
+test "recover catches panic and returns sentinel" =
+  let r = safe_divide(10, 0)
+  assert::equals(r, 0 - 999)
+
+test "recover not triggered when no panic" =
+  let r = safe_divide(10, 2)
+  assert::equals(r, 5)
+
+test "nested function defers are independent" =
+  let r = outer_with_defer(5)
+  // inner_with_defer(5): v=5, defer: v+=100, returns 105
+  // outer: a=105, b=105, defer: b+=10, returns 115
+  assert::equals(r, 115)

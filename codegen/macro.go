@@ -14,7 +14,20 @@ import (
 	"github.com/Azer0s/tin/parser"
 )
 
-const macroTimeout = 5 * time.Second
+// macroTimeout is the maximum wall-clock time allowed for one CTFE macro
+// execution (compilation + run).  Defaults to 5 s; override via the
+// TINMACRO_TIMEOUT environment variable (e.g. "30s", "2m").
+// The env var is read once at package init so the value is stable across
+// concurrent compilations.
+var macroTimeout = func() time.Duration {
+	if v := os.Getenv("TINMACRO_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+
+	return 5 * time.Second
+}()
 
 // isMacroComplex returns true if the macro body is a block (requires CTFE).
 func isMacroComplex(m *ast.MacroDecl) bool {

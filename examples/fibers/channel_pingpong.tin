@@ -22,7 +22,7 @@ fn{#async} ponger(ch sync::Channel[i64]) =
       let v = await ch.recv()
       echo "pong: {v}"
 
-fn main() =
+fn{#async} main() =
   let ch = sync::Channel[i64].make(4)
   let p1 = spawn pinger(ch, 5)
   let p2 = spawn ponger(ch)

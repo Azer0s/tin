@@ -10,7 +10,7 @@ var counter sync::Channel[i64]
 fn{#async} count_once() =
   await counter.send(1)
 
-fn main() =
+fn{#async} main() =
   let n i64 = 5000
   counter = sync::Channel[i64].make(n)
   
