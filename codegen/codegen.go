@@ -35,6 +35,8 @@ type CodeGen struct {
 	structFields map[string][]string
 	// struct field tags: structName -> fieldName -> first @"..." tag value (empty string = untagged)
 	structFieldTags map[string]map[string]string
+	// struct field Tin types: structName -> []TypeExpr per user field (same order as structFields)
+	structFieldTinTypes map[string][]ast.TypeExpr
 	// generic struct templates: name -> arity -> AST node (not compiled directly)
 	genericStructsByArity map[string]map[int]*ast.StructDecl
 
@@ -126,6 +128,10 @@ type CodeGen struct {
 	genericFuncHomeScopes map[string]*scope
 	// constrainedFuncInstances: "funcName__typeArg" -> compiled *ir.Func
 	constrainedFuncInstances map[string]*ir.Func
+	// genericMethodTemplates: "structName_methodName" -> generic method FuncDecl template.
+	// Methods with their own TypeParams (e.g. map_opt[r]) are stored here instead of
+	// being compiled eagerly; they are monomorphized on-demand at each call site.
+	genericMethodTemplates map[string]*ast.FuncDecl
 
 	// Universal runtime type ID registry.
 	// Primitives use anyTag* constants (0-5).  Every named struct and
@@ -157,6 +163,22 @@ type CodeGen struct {
 	// curDeferThunkRetType: inside a defer lambda thunk, the lambda's declared return
 	// type (e.g. *i64). Used to coerce return values (e.g. None -> null *i64).
 	curDeferThunkRetType irtypes.Type
+
+	// curFnEscapingVars: set of local variable names whose addresses escape the
+	// current function (e.g. `return &s` or `let p = &s; return p`).
+	// These are heap-promoted: genVarDecl uses malloc instead of alloca.
+	curFnEscapingVars map[string]bool
+
+	// curFnEscapingAliases: alias map built alongside curFnEscapingVars.
+	// aliases[name] = source means `let name = &source` was found in the body.
+	// Used at return sites to determine which heap-promoted variables are
+	// actually returned (and thus owned by caller) vs which can be freed.
+	curFnEscapingAliases map[string]string
+
+	// heapPromotingFns: set of function names that return late-heap-promoted
+	// pointers (*T via _tin_rc_alloc).  Callers use this to mark the result
+	// variable as isHeapOwned so scope-exit emits the correct two-step release.
+	heapPromotingFns map[string]bool
 
 	// match subject: set before entering genWhereList when the function body
 	// is a pure where-list pattern match. Used to compare atom conditions.
@@ -474,6 +496,7 @@ func New(filename string) *CodeGen {
 		structTypes:              make(map[string]*irtypes.StructType),
 		structFields:             make(map[string][]string),
 		structFieldTags:          make(map[string]map[string]string),
+		structFieldTinTypes:      make(map[string][]ast.TypeExpr),
 		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
 		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
 		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
@@ -493,6 +516,7 @@ func New(filename string) *CodeGen {
 		genericFuncs:             make(map[string]*ast.FuncDecl),
 		genericFuncHomeScopes:    make(map[string]*scope),
 		constrainedFuncInstances: make(map[string]*ir.Func),
+		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
 		externTLSVars:            make(map[string]*ir.Global),

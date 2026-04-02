@@ -598,6 +598,9 @@ func runDirTests(dir string, extraFlags []string) {
 			continue
 		}
 		p := parser.New(tokens)
+		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens) {
+			p.RegisterNoParensMacro(name, expansion)
+		}
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
@@ -606,7 +609,18 @@ func runDirTests(dir string, extraFlags []string) {
 		}
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
-		mod, cgErr := cg.Generate(prog)
+		type modIface interface{ String() string }
+		var mod modIface
+		cgErr := func() (retErr error) {
+			defer func() {
+				if r := recover(); r != nil {
+					retErr = fmt.Errorf("internal panic: %v", r)
+				}
+			}()
+			m, err := cg.Generate(prog)
+			mod = m
+			return err
+		}()
 		if cgErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", e.Name(), cgErr)
 

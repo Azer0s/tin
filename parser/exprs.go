@@ -33,22 +33,43 @@ func (p *Parser) parsePipe() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	for p.check(lexer.PIPE) || (p.check(lexer.NEWLINE) && p.peekAt(1).Type == lexer.PIPE) {
-		// |> may span newlines (a\n|> f)
-		if p.check(lexer.NEWLINE) {
-			if p.peekAt(1).Type != lexer.PIPE {
-				break
-			}
-			p.advance() // consume newline
-		}
+	indentConsumed := 0
+	for {
 		if p.check(lexer.PIPE) {
 			p.advance()
+		} else if p.check(lexer.NEWLINE) {
+			saved := p.pos
+			p.advance() // consume NEWLINE
+			consumedIndent := false
+			if p.check(lexer.INDENT) {
+				p.advance()
+				indentConsumed++
+				consumedIndent = true
+			}
+			if !p.check(lexer.PIPE) {
+				p.pos = saved
+				if consumedIndent {
+					indentConsumed--
+				}
+				break
+			}
+			p.advance() // consume PIPE
+		} else {
+			break
 		}
 		right, err2 := p.parseTernary()
 		if err2 != nil {
 			return nil, err2
 		}
 		left = &ast.PipeExpr{Left: left, Right: right}
+	}
+	// Consume matching DEDENT(s) for any INDENT consumed during pipe continuation.
+	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
+		p.advance()
+	}
+	for indentConsumed > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		indentConsumed--
 	}
 
 	return left, nil
@@ -79,16 +100,35 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 	}
 	if p.check(lexer.QUESTION) {
 		p.advance()
+		// Allow then-branch on next line; track consumed INDENTs to balance DEDENTs.
+		indentConsumed := 0
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			if p.check(lexer.INDENT) {
+				p.advance()
+				indentConsumed++
+			}
+		}
 		then, err2 := p.parseOr()
 		if err2 != nil {
 			return nil, err2
 		}
+		p.skipWhitespace() // allow : on next (same-indent) line
 		if _, err2 := p.expect(lexer.COLON); err2 != nil {
 			return nil, err2
 		}
+		p.skipWhitespace() // allow else-branch on next line
 		els, err2 := p.parseOr()
 		if err2 != nil {
 			return nil, err2
+		}
+		// Consume matching DEDENT(s) for any INDENTs consumed above.
+		if indentConsumed > 0 && p.check(lexer.NEWLINE) {
+			p.advance()
+		}
+		for indentConsumed > 0 && p.check(lexer.DEDENT) {
+			p.advance()
+			indentConsumed--
 		}
 
 		return &ast.TernaryExpr{Cond: cond, Then: then, Else: els}, nil
@@ -134,11 +174,36 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	for p.match(lexer.PLUS, lexer.MINUS, lexer.INC) {
-		// ++ is both a binary concat operator and a postfix increment
-		// Only treat it as binary concat when followed by a valid expression
-		// start; otherwise leave it for parseExprStatement's postfix check
-		if p.peek().Type == lexer.INC && !isExprStart(p.peekAt(1)) {
+	indentConsumed := 0
+	for {
+		if p.check(lexer.PLUS) || p.check(lexer.MINUS) || p.check(lexer.INC) {
+			// ++ is both a binary concat operator and a postfix increment.
+			// Only treat it as binary concat when followed by a valid expression
+			// start; otherwise leave it for parseExprStatement's postfix check.
+			if p.check(lexer.INC) && !isExprStart(p.peekAt(1)) {
+				break
+			}
+			// fall through - advance and parse right below
+		} else if p.check(lexer.NEWLINE) {
+			saved := p.pos
+			p.advance() // consume NEWLINE
+			if p.check(lexer.INDENT) {
+				p.advance()
+				indentConsumed++
+				if !p.check(lexer.PLUS) && !p.check(lexer.MINUS) {
+					p.pos = saved
+					indentConsumed--
+					break
+				}
+				// fall through - current token is PLUS/MINUS, advance and parse below
+			} else if indentConsumed > 0 && (p.check(lexer.PLUS) || p.check(lexer.MINUS)) {
+				// same-level continuation within an already-entered indent block
+				// fall through - current token is PLUS/MINUS, advance and parse below
+			} else {
+				p.pos = saved
+				break
+			}
+		} else {
 			break
 		}
 		op := p.advance().Literal
@@ -147,6 +212,14 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 			return nil, err2
 		}
 		left = &ast.BinExpr{Left: left, Op: op, Right: right}
+	}
+	// Consume matching DEDENT(s) for any INDENT consumed during additive continuation.
+	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
+		p.advance()
+	}
+	for indentConsumed > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		indentConsumed--
 	}
 
 	return left, nil
@@ -231,7 +304,27 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		return nil, err
 	}
 
+	indentConsumed := 0
 	for {
+		// Allow NEWLINE + optional INDENT before DOT or ARROW (method chain continuation).
+		if p.check(lexer.NEWLINE) {
+			saved := p.pos
+			p.advance() // consume NEWLINE
+			consumedIndent := false
+			if p.check(lexer.INDENT) {
+				p.advance()
+				indentConsumed++
+				consumedIndent = true
+			}
+			if !p.check(lexer.DOT) && !p.check(lexer.ARROW) {
+				p.pos = saved
+				if consumedIndent {
+					indentConsumed--
+				}
+				break
+			}
+			// Fall through: the loop body will consume DOT/ARROW below.
+		}
 		switch p.peek().Type {
 		case lexer.DOT:
 			p.advance()
@@ -421,16 +514,35 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			expr = isExpr
 
 		default:
+			// Consume any pending DEDENTs from method-chain INDENT continuation.
+			if indentConsumed > 0 && p.check(lexer.NEWLINE) {
+				p.advance()
+			}
+			for indentConsumed > 0 && p.check(lexer.DEDENT) {
+				p.advance()
+				indentConsumed--
+			}
 
 			return expr, nil
 		}
 	}
+	// Consume matching DEDENT(s) for any INDENT consumed during method-chain continuation.
+	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
+		p.advance()
+	}
+	for indentConsumed > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		indentConsumed--
+	}
+
+	return expr, nil
 }
 
 func (p *Parser) parseArgList() ([]ast.Node, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
+	p.skipWhitespace()
 	var args []ast.Node
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		arg, err := p.parseExpr()
@@ -438,8 +550,10 @@ func (p *Parser) parseArgList() ([]ast.Node, error) {
 			return nil, err
 		}
 		args = append(args, arg)
+		p.skipWhitespace()
 		if p.check(lexer.COMMA) {
 			p.advance()
+			p.skipWhitespace()
 		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
@@ -878,6 +992,7 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 
 func (p *Parser) parseArrayLit() (ast.Node, error) {
 	p.advance() // consume [
+	p.skipWhitespace()
 	var elems []ast.Node
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
 		elem, err := p.parseExpr()
@@ -887,6 +1002,7 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 		elems = append(elems, elem)
 		if p.check(lexer.COMMA) {
 			p.advance()
+			p.skipWhitespace()
 		}
 	}
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
@@ -898,6 +1014,7 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 
 func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 	p.advance() // consume {
+	p.skipWhitespace()
 	lit := &ast.StructLit{TypeName: typeName}
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		// Named: "name: value" or positional: "value"
@@ -918,6 +1035,7 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 		}
 		if p.check(lexer.COMMA) {
 			p.advance()
+			p.skipWhitespace()
 		}
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {

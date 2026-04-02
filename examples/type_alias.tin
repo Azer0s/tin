@@ -40,7 +40,7 @@ struct tuple[t] =
   second t
 
   fn show(this tuple) string =
-    return "first: {this.first}, second: {this.second}"
+    return "first: {this.first:g}, second: {this.second:g}"
 
 // type point = tuple[f32]  (plain monomorphization)
 // "point" is a concrete struct with fields {first f32, second f32}.
@@ -59,7 +59,7 @@ echo p1.show()                   // first: 1.5, second: 2.5
 
 type mypoint = tuple[f32] override =
   fn show(this mypoint) string =
-    return "({this.first}, {this.second})"
+    return "({this.first:.0f}, {this.second:.0f})"
 
 let mp = mypoint{3.0, 4.0}
 echo mp.show()                   // (3, 4)

@@ -2,7 +2,7 @@
 // learning introduced alongside the CRC32 atom implementation.
 //
 // Uses libc's strdup to produce a char* at runtime that is then coerced to an
-// atom via __tin_string_to_atom.  This exercises two paths:
+// atom via __tin_string_to_atom. This exercises two paths:
 //   * static table hit  - strdup("ok")    -> finds 'ok in the compile-time table
 //   * runtime learning  - strdup("dynfoo") -> not in static table; CRC32 is
 //     computed, atom stored in the linked-list runtime table, and resolved back

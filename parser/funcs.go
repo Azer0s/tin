@@ -215,6 +215,12 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 	if p.check(lexer.NEWLINE) {
 		p.advance() // consume NEWLINE
 		p.skipNewlines()
+		// A DEDENT here is an artifact of a multi-line parameter list: parseParams
+		// uses skipWhitespace to consume the INDENT between param lines, and the
+		// matching DEDENT lands just before the function body's INDENT.  Consume it.
+		for p.check(lexer.DEDENT) {
+			p.advance()
+		}
 		if p.check(lexer.INDENT) {
 			// Peek inside to determine block vs where-list
 			if p.peekAt(1).Type == lexer.KW_WHERE {
@@ -222,6 +228,13 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 			}
 
 			return p.parseBlock()
+		}
+		// No INDENT after NEWLINE+DEDENTs: this can happen when a function has a
+		// multi-line parameter list and the body is at a "inconsistent" indent level
+		// that the lexer doesn't emit a new INDENT for.  Parse the body as a single
+		// statement (covers the common case of `return expr` on one line).
+		if !p.check(lexer.EOF) && !p.check(lexer.DEDENT) && !p.check(lexer.NEWLINE) {
+			return p.parseStatement()
 		}
 
 		return &ast.Block{}, nil
@@ -335,6 +348,12 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	_ = pos
 	p.skipSemisAndNewlines()
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+		// A comma at block level signals we're inside a struct literal field value
+		// (e.g. `fn(x) = return x,` where `,` is the struct field separator).
+		// Treat it as a block terminator without consuming it.
+		if p.check(lexer.COMMA) {
+			break
+		}
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err

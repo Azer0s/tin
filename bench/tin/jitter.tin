@@ -1,5 +1,5 @@
 // Jitter: 8 workers with variable work (0-3 yields per task).
-// Tests scheduler under non-uniform load — some tasks fast, some slow.
+// Tests scheduler under non-uniform load - some tasks fast, some slow.
 
 use sync
 use io

@@ -119,7 +119,9 @@ class TinLexer : LexerBase() {
         }
 
         // Interpolation start: `{`
-        if (c == '{') {
+        // Only treat { as interpolation if there is a matching } before the next unescaped ".
+        // This mirrors the parser behaviour: an unclosed { is treated as literal text.
+        if (c == '{' && hasInterpolationClose(tokenStart + 1)) {
             interpDepth = 1   // enter interpolation; strDepth stays until STRING_INTERP_END
             return TinTokenTypes.STRING_INTERP_START
         }
@@ -399,6 +401,26 @@ class TinLexer : LexerBase() {
     }
 
     //  Helpers
+
+    /**
+     * Returns true if there is a matching `}` before the next `"` or newline.
+     * Used to distinguish a real interpolation `{expr}` from a bare `{` that the
+     * parser treats as literal text (e.g. the string `"{"` in json.tin).
+     */
+    private fun hasInterpolationClose(from: Int): Boolean {
+        var i = from
+        var depth = 1
+        while (i < bufferEnd) {
+            when (char(i)) {
+                '\\' -> i++              // skip escaped char
+                '{'  -> depth++
+                '}'  -> { depth--; if (depth == 0) return true }
+                '"', '\n' -> return false
+            }
+            i++
+        }
+        return false
+    }
 
     /** First two non-horizontal-whitespace chars starting at [from]. */
     private fun peek2(from: Int): Pair<Char, Char> {

@@ -514,6 +514,15 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 
 		return block, false, nil
 
+	case *ast.StructDecl:
+		// Struct declared inside a function/test body: register it so struct
+		// literals using its name can resolve it.
+		if err := cg.genStructDecl(s); err != nil {
+			return nil, false, err
+		}
+
+		return block, false, nil
+
 	case *ast.TypeDecl:
 		// Local type alias or generic struct instantiation inside a function/test body.
 		if err := cg.genTypeDecl(s); err != nil {
@@ -604,7 +613,19 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	if block == nil {
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
 	}
-	alloca := block.NewAlloca(llType)
+
+	// Heap promotion: if this variable's address escapes the function (e.g.
+	// `let p = &s; return p`), allocate it on the heap so the memory remains
+	// valid after the callee returns.  The caller is responsible for freeing it.
+	var alloca value.Value
+	isHeapPromoted := cg.curFnEscapingVars[s.Name]
+	if isHeapPromoted {
+		sz := cg.llvmSizeOf(block, llType)
+		rawPtr := block.NewCall(cg.ensureMalloc(), sz)
+		alloca = block.NewBitCast(rawPtr, irtypes.NewPointer(llType))
+	} else {
+		alloca = block.NewAlloca(llType)
+	}
 	isRC := isRCTrackedType(llType)
 	if initVal != nil {
 		// If the init value is an empty array {i8*, i64} but the declared type
@@ -667,7 +688,9 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase})
+	// Heap-promoted variables are owned by the caller after the function returns.
+	// Mark noRelease so scope-exit cleanup doesn't free the memory or release ARC.
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, noRelease: isHeapPromoted, isUnsigned: isUnsignedTinType(s.Type)})
 
 	return block, nil
 }
@@ -784,6 +807,8 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if err := cg.emitDefers(block); err != nil {
 			return err
 		}
+		// void return: no heap-promoted var is being returned; free all of them.
+		cg.emitFreeUnusedHeapVars(block, nil)
 		cg.emitAllScopeReleases(block, "")
 		block.NewRet(nil)
 
@@ -817,6 +842,13 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	}
 	if err := cg.emitDefers(block); err != nil {
 		return err
+	}
+	// Free any heap-promoted variables whose addresses are NOT being returned.
+	// This handles over-promotion in conditional branches: both `yes` and `no`
+	// may be heap-promoted, but only one is returned per path.
+	if len(cg.curFnEscapingVars) > 0 {
+		kept := retainedHeapVars(s.Value, cg.curFnEscapingAliases, cg.curFnEscapingVars)
+		cg.emitFreeUnusedHeapVars(block, kept)
 	}
 	// After running defers, check if any deferred function wrote an override return value.
 	if cg.curFnDeferRetAlloca != nil && cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
@@ -1042,8 +1074,8 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	prevCtx := cg.pushClosureCtx(f)
 	cg.curDeferRetSlotParam = f.Params[1]
 
-	// Step 4: unpack captures from env
-	cg.unpackEnv(entryBlock, f, envStructType, captures)
+	// Step 4: unpack captures from env (defer thunks run once; env persists during execution)
+	cg.unpackEnv(entryBlock, f, envStructType, captures, false)
 
 	// Step 5: emit the deferred call
 	if _, err := cg.genExpr(entryBlock, call); err != nil {
@@ -1119,8 +1151,8 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 		}
 	}
 
-	// Unpack captures from env.
-	cg.unpackEnv(entryBlock, f, envStructType, captures)
+	// Unpack captures from env (defer thunk runs once; env persists during execution).
+	cg.unpackEnv(entryBlock, f, envStructType, captures, false)
 
 	// Register lambda params (none for "defer fn() void = body", but support them for completeness).
 	for i, p := range lambda.Params {
@@ -2284,6 +2316,7 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	block.NewSwitch(tagI64, defaultBlock, cases...)
 
 	// Generate case bodies.
+	anyFallthrough := false
 	for i, c := range s.Cases {
 		caseBlock := caseBlocks[i]
 		cg.curScope = newScope(cg.curScope)
@@ -2307,6 +2340,7 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		}
 		if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
+			anyFallthrough = true
 		}
 	}
 
@@ -2320,7 +2354,15 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		}
 		if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
+			anyFallthrough = true
 		}
+	}
+
+	// All arms terminated - afterBlock is unreachable; signal exhaustive termination.
+	if !anyFallthrough {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
 	}
 
 	return afterBlock, nil
@@ -2539,7 +2581,11 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 	block.NewStore(val, structAlloca)
 
 	_ = fields // validated above; actual indices computed via fieldIndex (includes hidden fields)
-	for _, fieldName := range s.Names {
+	for i, fieldName := range s.Names {
+		varName := fieldName
+		if i < len(s.VarNames) && s.VarNames[i] != "" {
+			varName = s.VarNames[i]
+		}
 		fieldIdx := cg.fieldIndex(concreteName, fieldName)
 		if fieldIdx < 0 {
 			return nil, fmt.Errorf("struct destructuring: field '%s' not found in struct '%s'", fieldName, concreteName)
@@ -2553,7 +2599,17 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 			fieldVal := block.NewLoad(pt.ElemType, fieldGep)
 			alloca := block.NewAlloca(pt.ElemType)
 			block.NewStore(fieldVal, alloca)
-			cg.curScope.set(fieldName, &scopeEntry{val: alloca, isAlloc: true})
+			// Determine if this field's Tin type is unsigned so `as` casts zext.
+			var fieldUnsigned bool
+			if tinTypes, ok2 := cg.structFieldTinTypes[concreteName]; ok2 {
+				// fieldIdx includes the leading i32 type-id; user fields start at offset 1+vtables.
+				userOffset := 1 + len(cg.structVtableOrder[concreteName])
+				userIdx := fieldIdx - userOffset
+				if userIdx >= 0 && userIdx < len(tinTypes) {
+					fieldUnsigned = isUnsignedTinType(tinTypes[userIdx])
+				}
+			}
+			cg.curScope.set(varName, &scopeEntry{val: alloca, isAlloc: true, isUnsigned: fieldUnsigned})
 		}
 	}
 
@@ -2612,4 +2668,215 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	}
 
 	return block, nil
+}
+
+// findEscapingAddressTakenVars performs a lightweight escape analysis on a
+// function body.  It returns the set of local variable names whose addresses
+// escape the function frame - i.e. a pointer to them is returned from the
+// function.  These variables will be heap-promoted: genVarDecl allocates them
+// with malloc instead of alloca so the memory remains valid after the callee
+// returns.
+//
+// Patterns detected:
+//
+//	return &varName            -- address of local returned directly
+//	let alias = &varName
+//	return alias               -- address returned via an alias variable
+func findEscapingAddressTakenVars(body ast.Node) (map[string]bool, map[string]string) {
+	if body == nil {
+		return nil, nil
+	}
+	// Pass 1: collect address-of aliases.  aliases[alias] = source variable name.
+	aliases := make(map[string]string)
+	walkForAliases(body, aliases)
+
+	// Pass 2: collect escaping variables by inspecting return statements.
+	escaping := make(map[string]bool)
+	walkForEscapes(body, aliases, escaping)
+
+	if len(escaping) == 0 {
+		return nil, nil
+	}
+
+	return escaping, aliases
+}
+
+// walkForAliases walks node and populates aliases: for every
+//
+//	let name = &ident
+//
+// it records aliases[name] = ident.Name.
+func walkForAliases(node ast.Node, aliases map[string]string) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *ast.VarDecl:
+		if n.Value != nil {
+			if addrOf, ok := n.Value.(*ast.AddressOfExpr); ok {
+				if ident, ok2 := addrOf.Expr.(*ast.Identifier); ok2 {
+					aliases[n.Name] = ident.Name
+				}
+			}
+		}
+	case *ast.Block:
+		for _, s := range n.Stmts {
+			walkForAliases(s, aliases)
+		}
+	case *ast.IfStmt:
+		if n.Then != nil {
+			walkForAliases(n.Then, aliases)
+		}
+		for _, elif := range n.ElseIfs {
+			walkForAliases(elif.Body, aliases)
+		}
+		if n.Else != nil {
+			walkForAliases(n.Else, aliases)
+		}
+	case *ast.ForStmt:
+		if n.Body != nil {
+			walkForAliases(n.Body, aliases)
+		}
+	case *ast.MatchStmt:
+		for _, c := range n.Cases {
+			walkForAliases(c.Body, aliases)
+		}
+		if n.Default != nil {
+			walkForAliases(n.Default, aliases)
+		}
+	}
+}
+
+// walkForEscapes walks node and populates escaping: for every ReturnStmt
+// whose value is &ident or an alias of &ident, marks the source variable.
+func walkForEscapes(node ast.Node, aliases map[string]string, escaping map[string]bool) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *ast.ReturnStmt:
+		if n.Value == nil {
+			return
+		}
+		markEscapeVal(n.Value, aliases, escaping)
+	case *ast.Block:
+		for _, s := range n.Stmts {
+			walkForEscapes(s, aliases, escaping)
+		}
+	case *ast.IfStmt:
+		if n.Then != nil {
+			walkForEscapes(n.Then, aliases, escaping)
+		}
+		for _, elif := range n.ElseIfs {
+			walkForEscapes(elif.Body, aliases, escaping)
+		}
+		if n.Else != nil {
+			walkForEscapes(n.Else, aliases, escaping)
+		}
+	case *ast.ForStmt:
+		if n.Body != nil {
+			walkForEscapes(n.Body, aliases, escaping)
+		}
+	case *ast.MatchStmt:
+		for _, c := range n.Cases {
+			walkForEscapes(c.Body, aliases, escaping)
+		}
+		if n.Default != nil {
+			walkForEscapes(n.Default, aliases, escaping)
+		}
+	}
+}
+
+// markEscapeVal marks variables in aliases that escape via the given return value.
+// Handles identifiers, address-of expressions, and tuples containing those.
+// Alias chains are followed transitively: if `ppx = &px` and `px = &x`, returning
+// ppx marks both px and x as escaping.
+func markEscapeVal(val ast.Node, aliases map[string]string, escaping map[string]bool) {
+	if val == nil {
+		return
+	}
+	switch rv := val.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok {
+			markEscapeChain(ident.Name, aliases, escaping)
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok {
+			markEscapeChain(src, aliases, escaping)
+		}
+	case *ast.TupleLit:
+		for _, elem := range rv.Elems {
+			markEscapeVal(elem, aliases, escaping)
+		}
+	}
+}
+
+// markEscapeChain transitively marks name and all its alias sources as escaping.
+func markEscapeChain(name string, aliases map[string]string, escaping map[string]bool) {
+	for name != "" && !escaping[name] {
+		escaping[name] = true
+		name = aliases[name] // follow the chain: if px = &x, also mark x
+	}
+}
+
+// retainedHeapVars returns the subset of escaping vars that are actually returned
+// by retExpr.  Any heap-promoted var NOT in this set can be freed at the return site.
+// Uses the same resolution logic as markEscapeVal/markEscapeChain.
+func retainedHeapVars(retExpr ast.Node, aliases map[string]string, escaping map[string]bool) map[string]bool {
+	kept := make(map[string]bool)
+	collectRetained(retExpr, aliases, escaping, kept)
+	return kept
+}
+
+func collectRetained(node ast.Node, aliases map[string]string, escaping map[string]bool, kept map[string]bool) {
+	if node == nil {
+		return
+	}
+	switch rv := node.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok {
+			collectChain(ident.Name, aliases, escaping, kept)
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok {
+			collectChain(src, aliases, escaping, kept)
+		}
+	case *ast.TupleLit:
+		for _, elem := range rv.Elems {
+			collectRetained(elem, aliases, escaping, kept)
+		}
+	}
+}
+
+func collectChain(name string, aliases map[string]string, escaping map[string]bool, kept map[string]bool) {
+	for name != "" && escaping[name] && !kept[name] {
+		kept[name] = true
+		name = aliases[name]
+	}
+}
+
+// emitFreeUnusedHeapVars frees any heap-promoted scope variables that are NOT in keptVars.
+// Called at each return site so that conditional-branch over-promotion doesn't leak.
+func (cg *CodeGen) emitFreeUnusedHeapVars(block *ir.Block, keptVars map[string]bool) {
+	if len(cg.curFnEscapingVars) == 0 {
+		return
+	}
+	s := cg.curScope
+	for s != nil {
+		for name, entry := range s.vars {
+			if !entry.noRelease {
+				continue // not heap-promoted
+			}
+			if keptVars[name] {
+				continue // this var is being returned - caller owns it
+			}
+			// Free the unused heap-promoted block.
+			raw := block.NewBitCast(entry.val, irtypes.I8Ptr)
+			block.NewCall(cg.ensureFree(), raw)
+		}
+		if s.isFunctionBoundary {
+			break
+		}
+		s = s.parent
+	}
 }

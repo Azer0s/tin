@@ -597,7 +597,7 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
   return zero
 
 // parse[T] parses a JSON string and decodes it directly into a value of type T.
-// T must be a struct.  Field tags @"json:key" rename fields; @"json:-" skips.
+// T must be a struct. Field tags @"json:key" rename fields; @"json:-" skips.
 // Unrecognised JSON keys are silently ignored.
 // Nested struct fields (Kind.object_v) are decoded recursively.
 //

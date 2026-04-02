@@ -41,16 +41,16 @@ directive with `-I /path/to/runtime` on the include path.
 
 ## Documents
 
-| File                                           | Topics                                                                                    |
-|------------------------------------------------|-------------------------------------------------------------------------------------------|
-| [memory.md](memory.md)                         | ARC, immortal sentinel, `TinRCHdr`, `_tin_rc_alloc/retain/release`, raw mem               |
-| [values.md](values.md)                         | `TinString`, `TinSlice`, echo/print, `len`, `any` equality                                |
-| [control.md](control.md)                       | Defer chain, `_tin_panic`, `_tin_recover`, assert                                         |
-| [atoms.md](atoms.md)                           | Compile-time atom table, runtime atom learning, CRC32 collision resolution                |
-| [reflect.md](reflect.md)                       | Atom string format, `reflect.c` parsing, `fn_params` memory layout                        |
-| [testing.md](testing.md)                       | Test runner, `setjmp`/`longjmp` isolation, `_tin_assert_abort`                            |
-| [scheduler.md](scheduler.md)                   | M:N fiber scheduler, run queue, park/unpark, `await spawn` fiber join                     |
-| [deinit.md](deinit.md)                         | Struct `deinit` lifecycle, call sites, nested structs, value semantics                    |
-| [arc-threads.md](arc-threads.md)               | ARC thread safety, spawn/channel/Future ownership transfer                                |
-| [codegen-auto-yield.md](codegen-auto-yield.md) | Auto-yield at loop backedges, `{#no_autoyield}` opt-out                                   |
-| [fiber-panic.md](fiber-panic.md)               | Fiber panic lifecycle, `await` re-raise, `defer+recover` in async fns, codegen invariants |
+| File                                           | Topics                                                                                      |
+|------------------------------------------------|---------------------------------------------------------------------------------------------|
+| [memory.md](memory.md)                         | ARC, immortal sentinel, `TinRCHdr`, `_tin_rc_alloc/retain/release`, raw mem, heap promotion |
+| [values.md](values.md)                         | `TinString`, `TinSlice`, echo/print, `len`, `any` equality                                  |
+| [control.md](control.md)                       | Defer chain, `_tin_panic`, `_tin_recover`, assert                                           |
+| [atoms.md](atoms.md)                           | Compile-time atom table, runtime atom learning, CRC32 collision resolution                  |
+| [reflect.md](reflect.md)                       | Atom string format, `reflect.c` parsing, `fn_params` memory layout                          |
+| [testing.md](testing.md)                       | Test runner, `setjmp`/`longjmp` isolation, `_tin_assert_abort`                              |
+| [scheduler.md](scheduler.md)                   | M:N fiber scheduler, run queue, park/unpark, `await spawn` fiber join                       |
+| [deinit.md](deinit.md)                         | Struct `deinit` lifecycle, call sites, nested structs, value semantics                      |
+| [arc-threads.md](arc-threads.md)               | ARC thread safety, spawn/channel/Future ownership transfer                                  |
+| [codegen-auto-yield.md](codegen-auto-yield.md) | Auto-yield at loop backedges, `{#no_autoyield}` opt-out                                     |
+| [fiber-panic.md](fiber-panic.md)               | Fiber panic lifecycle, `await` re-raise, `defer+recover` in async fns, codegen invariants   |

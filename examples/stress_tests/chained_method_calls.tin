@@ -217,10 +217,9 @@ test "chain method result used as argument" =
 
 test "chain inside conditional" =
   let use_limit bool = true
-  let q = if use_limit:
+  let q = use_limit ?
     query_builder::new("t").limit(5).build()
-  else:
-    query_builder::new("t").build()
+    : query_builder::new("t").build()
   assert::equals_str(q, "SELECT * FROM t LIMIT 5")
 
 test "chain len used in expression" =

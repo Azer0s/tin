@@ -485,12 +485,53 @@ func (l *Lexer) handleEOF() (Token, error) {
 func (l *Lexer) readString(line, col int) (Token, error) {
 	l.advance() // consume opening "
 	var sb strings.Builder
+	braceDepth := 0
+	justOpenedBrace := false // true immediately after '{' is appended
 	for l.pos < len(l.src) {
 		ch := l.peek()
-		if ch == '"' {
+		if ch == '"' && braceDepth == 0 {
 			l.advance()
 
 			break
+		}
+		// Inside interpolation braces, a '"' starts a nested string literal -
+		// but only if there is actual expression content after the '{' (i.e. the
+		// '{' was not immediately followed by '"').  When justOpenedBrace is true
+		// the '{' had no intervening content and the '"' is the real closing quote.
+		if ch == '"' && braceDepth > 0 && !justOpenedBrace {
+			sb.WriteRune(l.advance()) // consume opening "
+			for l.pos < len(l.src) {
+				inner := l.peek()
+				if inner == '"' {
+					sb.WriteRune(l.advance())
+
+					break
+				}
+				if inner == '\\' {
+					sb.WriteRune(l.advance())
+					if l.pos < len(l.src) {
+						sb.WriteRune(l.advance())
+					}
+
+					continue
+				}
+				sb.WriteRune(l.advance())
+			}
+
+			continue
+		}
+		if ch == '"' && braceDepth > 0 && justOpenedBrace {
+			// '{' was immediately followed by '"' - the '"' closes the outer string.
+			l.advance()
+
+			break
+		}
+		justOpenedBrace = false
+		if ch == '{' {
+			braceDepth++
+			justOpenedBrace = true
+		} else if ch == '}' && braceDepth > 0 {
+			braceDepth--
 		}
 		if ch == '\\' {
 			l.advance()

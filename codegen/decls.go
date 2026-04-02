@@ -178,6 +178,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	// Build user field types
 	var userFieldTypes []irtypes.Type
 	var fieldNames []string
+	var fieldTinTypes []ast.TypeExpr
 	for _, f := range n.Fields {
 		ft, err := cg.tinTypeToLLVM(f.Type)
 		if err != nil {
@@ -185,7 +186,9 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 		}
 		userFieldTypes = append(userFieldTypes, ft)
 		fieldNames = append(fieldNames, f.Name)
+		fieldTinTypes = append(fieldTinTypes, f.Type)
 	}
+	cg.structFieldTinTypes[structKey] = fieldTinTypes
 	// Assign a compile-time type ID for this struct (used by any boxing /
 	// runtime type checks).  IDs are stable within a compilation unit.
 	if _, exists := cg.structTypeIDs[structKey]; !exists {
@@ -215,7 +218,14 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	cg.structImpls[structKey] = implNames
 
 	// Generate methods as top-level functions with struct-qualified names.
+	// Methods with their own TypeParams (e.g. map_opt[r]) are stored as templates
+	// and monomorphized on-demand at call sites.
 	for _, m := range n.Methods {
+		if len(m.TypeParams) > 0 {
+			templateKey := structKey + "_" + m.Name
+			cg.genericMethodTemplates[templateKey] = m
+			continue
+		}
 		if err := cg.genStructMethod(structKey, m); err != nil {
 			return err
 		}
@@ -371,12 +381,13 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
 	return &ast.FuncDecl{
-		Name:     m.Name,
-		Params:   newParams,
-		RetType:  newRet,
-		Body:     newBody,
-		Tags:     m.Tags,
-		IsStatic: m.IsStatic,
+		Name:       m.Name,
+		TypeParams: m.TypeParams,
+		Params:     newParams,
+		RetType:    newRet,
+		Body:       newBody,
+		Tags:       m.Tags,
+		IsStatic:   m.IsStatic,
 	}
 }
 

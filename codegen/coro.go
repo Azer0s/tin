@@ -490,8 +490,8 @@ func (cg *CodeGen) emitCoroComplete(block *ir.Block, retVal value.Value) {
 		resultI8Ptr = constant.NewNull(irtypes.I8Ptr)
 	} else {
 		// Store the result via the inline-result allocator.
-		// - Inline drive: _tin_inline_result_mode_begin() was called → TLS buffer (no malloc).
-		// - Spawned fiber: mode not active → malloc(sz) (result must outlive the coro).
+		// - Inline drive: _tin_inline_result_mode_begin() was called -> TLS buffer (no malloc).
+		// - Spawned fiber: mode not active -> malloc(sz) (result must outlive the coro).
 		sz := cg.llvmSizeOf(block, retVal.Type())
 		inlineAllocFn := cg.ensureExternDecl("_tin_inline_result_alloc", irtypes.I8Ptr,
 			[]*ir.Param{ir.NewParam("sz", irtypes.I64)}, false)
@@ -621,7 +621,9 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 
 	// Unpack captured locals from env struct (spawn do: blocks only).
 	// unpackEnv retains each RC-tracked value for the coro scope.
-	cg.unpackEnv(bodyStart, coroFn, envStructType, captures)
+	// useEnvDirect=false: genCoroFuncBody frees the env after unpacking, so
+	// we must copy values to local allocas (not use the env GEP directly).
+	cg.unpackEnv(bodyStart, coroFn, envStructType, captures, false)
 
 	// ARC: release the env's own reference to each RC-tracked capture (the
 	// matching retain was emitted in genSpawnDoBlock before buildEnv).
@@ -754,9 +756,9 @@ func (cg *CodeGen) recoverRetVal(block *ir.Block) value.Value {
 // LLVM coroutine ABI contract encoded here (single place to update if it changes):
 //
 //	coro.suspend(none, false) returns i8:
-//	  0  → normal resume   → jump back to retryBlk
-//	  1  → final cleanup   → jump to coro cleanup entry
-//	  default → the "suspend" path; the outer function returns its handle
+//	  0  -> normal resume   -> jump back to retryBlk
+//	  1  -> final cleanup   -> jump to coro cleanup entry
+//	  default -> the "suspend" path; the outer function returns its handle
 //
 // doneBlk is marked in yieldResumeBlocks so the auto-yield pass at the next
 // loop backedge sees that a real suspension point was just traversed and skips

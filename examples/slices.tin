@@ -1,8 +1,8 @@
 // slices.tin - Array slice syntax: arr[start:end]
 //
-// A slice is a view into an existing array's memory.  The result is a new
+// A slice is a view into an existing array's memory. The result is a new
 // fat-array value {T*, i64} pointing into the original data with an
-// adjusted length.  The original array is not modified.
+// adjusted length. The original array is not modified.
 //
 // Syntax variants:
 //   arr[n:]    - from index n to end

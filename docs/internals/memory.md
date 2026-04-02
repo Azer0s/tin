@@ -182,3 +182,93 @@ Fresh allocations (`++` concat, slice append, function return values) start
 with `rc = 1`. If they are stored in a named variable, the scope-exit release
 brings `rc` back to zero. If they are used as temporaries (e.g., passed
 directly to `echo`), an explicit release is emitted at the use site.
+
+---
+
+## Heap promotion
+
+### The problem
+
+A local variable declared with `let` lives on the stack (`alloca` in LLVM IR).
+If a pointer to that variable escapes the function frame - typically via
+`return &x` - the caller receives a dangling pointer. The stack frame is gone as
+soon as the callee returns.
+
+```tin
+fn bad() *i64 {
+    let x = 42
+    return &x  // would be a dangling pointer if x lives on the stack
+}
+```
+
+### What the compiler does
+
+Before generating the body of any function, the codegen runs a lightweight
+**escape analysis** (`findEscapingAddressTakenVars` in `codegen/stmts.go`).
+It walks the AST and collects every local variable whose address is returned:
+
+- `return &x` - direct address escape
+- `let p = &x; return p` - escape via alias variable
+- `return (&x, y)` - escape inside a tuple literal
+
+When a variable is found to escape, `genVarDecl` allocates it with `malloc`
+instead of `alloca`:
+
+```
+; non-escaping (stack)
+%x = alloca i64
+
+; escaping (heap)
+%sz = getelementptr i64, i64* null, i32 1   ; llvmSizeOf trick
+%i64_sz = ptrtoint i64* %sz to i64
+%raw = call i8* @malloc(i64 %i64_sz)
+%x = bitcast i8* %raw to i64*
+```
+
+The caller receives a valid heap pointer and owns the memory.
+
+### `noRelease` flag
+
+Heap-promoted variables are marked `noRelease: true` in the scope entry.
+Scope-exit cleanup skips them: the function must not free memory that the caller
+now owns. The caller is responsible for the lifetime of the returned pointer.
+For raw scalars/structs the memory is never freed automatically - the caller
+must either use it as a short-lived reference or manage it explicitly. ARC
+types (strings, arrays) stored inside the promoted variable continue to be
+ref-counted normally through their own `_tin_retain`/`_tin_release` calls.
+
+### Which patterns trigger promotion
+
+| Pattern                            | Promoted?     | Notes                                                                   |
+|------------------------------------|---------------|-------------------------------------------------------------------------|
+| `return &localVar`                 | Yes           | Core case                                                               |
+| `let p = &localVar; return p`      | Yes           | Alias chain                                                             |
+| `return (&x, y)`                   | Yes (x only)  | Tuple element                                                           |
+| `let p = &x; let q = &p; return q` | Yes (p and x) | Transitive chain                                                        |
+| `return localVar`                  | No            | Value return - no pointer, no escape                                    |
+| `return MyStruct{}`                | No            | Struct literal returned by value                                        |
+| `return &MyStruct{}`               | No            | Address-of literal - struct literal is a temp alloca, not a named local |
+| `let p = &x; foo(p)` (no return)   | No            | Pointer stays local                                                     |
+| `let p = &x; return y`             | No            | Alias exists but only `y` is returned                                   |
+
+### Limitations
+
+- **Parameter addresses**: `return &param` is detected by the analysis but
+  parameters are not run through `genVarDecl` - they get a plain `alloca`
+  regardless. Returning the address of a parameter is undefined behavior in Tin.
+- **Name shadowing**: if two variables in different scopes share the same name
+  and one escapes, both get heap-promoted. This is wasteful but safe.
+- **Non-return escapes**: passing `&x` to a function that stores it somewhere
+  external (e.g., a channel send) is not tracked. The analysis is intentionally
+  limited to return-path escapes.
+- **Heap memory is not freed automatically** for non-ARC types. The variable is
+  malloc'd; there is no corresponding free unless the caller calls `mem::free`.
+
+### Implementation files
+
+| File               | Role                                                                                                                                         |
+|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| `codegen/stmts.go` | `findEscapingAddressTakenVars`, `walkForAliases`, `walkForEscapes`, `markEscapeVal`, `markEscapeChain`; heap-allocation path in `genVarDecl` |
+| `codegen/funcs.go` | Sets `cg.curFnEscapingVars` before compiling each function body                                                                              |
+| `codegen/coro.go`  | `llvmSizeOf` - GEP null-pointer trick to compute `sizeof(T)` as an LLVM value                                                                |
+| `codegen/scope.go` | `noRelease` field on `scopeEntry` prevents scope-exit free                                                                                   |

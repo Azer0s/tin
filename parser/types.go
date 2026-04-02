@@ -236,6 +236,7 @@ func (p *Parser) parseParams() ([]ast.Param, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
+	p.skipWhitespace()
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		param, err := p.parseParam()
@@ -245,6 +246,7 @@ func (p *Parser) parseParams() ([]ast.Param, error) {
 		params = append(params, param)
 		if p.check(lexer.COMMA) {
 			p.advance()
+			p.skipWhitespace()
 		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {

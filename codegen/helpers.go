@@ -8,6 +8,8 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Helper utilities
@@ -103,9 +105,11 @@ func (cg *CodeGen) buildEnv(block *ir.Block, captures []closureCapture) (value.V
 }
 
 // unpackEnv unpacks captured values from the env struct into the current scope.
-// byRef captures load the stored alloca pointer; non-byRef captures copy the
-// value into a fresh alloca.
-func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes.StructType, captures []closureCapture) {
+// byRef captures load the stored alloca pointer; non-byRef captures use the env
+// field GEP directly (useEnvDirect=true, for lambdas whose env persists across
+// calls) or copy the value to a local alloca (useEnvDirect=false, for coro/defer
+// thunks that free the env after unpacking).
+func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes.StructType, captures []closureCapture, useEnvDirect bool) {
 	if len(captures) == 0 || envStructType == nil {
 		return
 	}
@@ -117,22 +121,29 @@ func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes
 			constant.NewInt(irtypes.I32, int64(i)))
 		if c.byRef {
 			allocaPtr := entry.NewLoad(c.llvmTy, gep)
-			cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true, noDeinit: true})
+			// noRelease: the captured variable is owned by the outer scope; the
+			// defer thunk must not release it at scope exit.  Only the outer scope
+			// (which allocated the variable) is responsible for releasing it.
+			cg.curScope.set(c.name, &scopeEntry{val: allocaPtr, isAlloc: true, noDeinit: true, noRelease: true})
+		} else if useEnvDirect {
+			// Use the env field GEP directly so mutations persist across calls
+			// (e.g. counter closures).  The env is heap-allocated and outlives
+			// individual invocations.
+			// ARC: retain RC-tracked captures so each call holds its own reference.
+			if isRCTrackedType(c.llvmTy) {
+				loaded := entry.NewLoad(c.llvmTy, gep)
+				cg.emitRetain(entry, loaded)
+			}
+			cg.curScope.set(c.name, &scopeEntry{val: gep, isAlloc: true, noDeinit: true})
 		} else {
 			alloca := entry.NewAlloca(c.llvmTy)
 			loaded := entry.NewLoad(c.llvmTy, gep)
 			entry.NewStore(loaded, alloca)
-			// ARC: retain RC-tracked captures so that each invocation holds its
-			// own reference.  The closure's scope-exit release will balance this.
-			// This ensures correctness for closures called multiple times: each
-			// call borrows the value with a retain+release pair.
+			// ARC: retain RC-tracked captures so that each invocation holds its own ref.
 			if isRCTrackedType(c.llvmTy) {
 				cg.emitRetain(entry, loaded)
 			}
 			// noDeinit: the captured variable is a borrow from the enclosing scope.
-			// The original scope owns the value and will call deinit on cleanup.
-			// This prevents double-deinit for struct types (e.g. Channel) that have
-			// a deinit method but are not ARC-tracked via the RC pointer mechanism.
 			cg.curScope.set(c.name, &scopeEntry{val: alloca, isAlloc: true, noDeinit: true})
 		}
 	}
@@ -661,4 +672,19 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 	}
 
 	return constant.NewInt(irtypes.I64, 0)
+}
+
+// isUnsignedTinType returns true when a Tin TypeExpr is one of the unsigned
+// integer types: u8, u16, u32, u64 (and their aliases char/byte/uint/size_t).
+func isUnsignedTinType(t ast.TypeExpr) bool {
+	st, ok := t.(*ast.SimpleType)
+	if !ok {
+		return false
+	}
+	switch st.Name {
+	case "u8", "char", "byte", "u16", "u32", "uint32", "u64", "uint", "size_t":
+		return true
+	}
+
+	return false
 }

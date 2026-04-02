@@ -363,7 +363,17 @@ func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 
 func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// Constrained generic functions are compiled on demand at call sites.
+	// Register them in constrainedFuncs so call-site monomorphization can find them
+	// even when defined locally inside a test or function body.
 	if len(n.Constraints) > 0 {
+		cg.constrainedFuncs[n.Name] = n
+		return nil
+	}
+	// Unconstrained generic functions (TypeParams only) are also compiled on demand.
+	// Register them in genericFuncs so call-site monomorphization can find them.
+	if len(n.TypeParams) > 0 {
+		cg.genericFuncs[n.Name] = n
+		cg.genericFuncHomeScopes[n.Name] = cg.curScope
 		return nil
 	}
 	irName := n.Name
@@ -447,7 +457,9 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 	}
 	td, ok := cg.traits[traitName]
 	if !ok {
-		return false
+		// Not a declared trait: treat as a type-equality constraint.
+		// "where t is i64" is satisfied iff concreteName == "i64".
+		return traitName == structName
 	}
 	instKey := traitImplKey(traitExpr)
 	for _, m := range td.Methods {
@@ -707,6 +719,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevDeferRetSlotParam := cg.curDeferRetSlotParam
 	prevFnDeferRetAlloca := cg.curFnDeferRetAlloca
 	prevDeferThunkRetType := cg.curDeferThunkRetType
+	prevEscapingVars := cg.curFnEscapingVars
+	prevEscapingAliases := cg.curFnEscapingAliases
 	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
 	cg.pendingDeferEnvs = nil
@@ -714,6 +728,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFnAutoYield = false // sync variant never auto-yields
 	cg.curDeferRetSlotParam = nil
 	cg.curDeferThunkRetType = nil
+	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
@@ -746,6 +761,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curDeferRetSlotParam = prevDeferRetSlotParam
 		cg.curFnDeferRetAlloca = prevFnDeferRetAlloca
 		cg.curDeferThunkRetType = prevDeferThunkRetType
+		cg.curFnEscapingVars = prevEscapingVars
+		cg.curFnEscapingAliases = prevEscapingAliases
 	}()
 
 	// Register function in current scope so recursion works.
@@ -786,7 +803,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type)})
 		if llIdx == 1 {
 			firstParamAlloca = alloca
 		}
@@ -819,6 +836,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.pendingDeferFnI8s = prevDeferFnI8s
 	cg.pendingDeferFrames = prevDeferFrames
 	cg.pendingDeferEnvs = prevDeferEnvs
+	cg.curFnEscapingVars = prevEscapingVars
+	cg.curFnEscapingAliases = prevEscapingAliases
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.
@@ -828,9 +847,23 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
 	}
 
-	// If this function is in the async-callable set, generate its $coro variant.
-	if cg.coroCallable[scopeName] {
-		if err := cg.genCoroFuncBody(n, coroVersionName(scopeName), nil, nil); err != nil {
+	// If this function is in the async-callable set (or has #async tag directly),
+	// generate its $coro variant. The #async tag check catches local functions
+	// that were not discovered by the pre-pass call graph analysis.
+	if cg.coroCallable[scopeName] || hasTag(n.Tags, "async") {
+		if !cg.coroCallable[scopeName] {
+			cg.coroCallable[scopeName] = true
+		}
+		coroKey := coroVersionName(scopeName)
+		// Ensure the $coro stub exists in the current scope's vars before calling
+		// genCoroFuncBody. For top-level functions the pre-pass already registered
+		// the stub - predeclareCoroVariant is a no-op when vars[coroKey] is set.
+		// For local/monomorphized async functions (not in the pre-pass), this
+		// creates the stub so genCoroFuncBody can find it.
+		if err := cg.predeclareCoroVariant(n, scopeName, false); err != nil {
+			return err
+		}
+		if err := cg.genCoroFuncBody(n, coroKey, nil, nil); err != nil {
 			return err
 		}
 	}

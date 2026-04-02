@@ -125,10 +125,11 @@ type ArrayDestructDecl struct {
 	Value     Node
 }
 
-// StructDestructDecl let {x, y} TypeName = expr
+// StructDestructDecl let {x, y} TypeName = expr  or  let {x: a, y: b} TypeName = expr
 type StructDestructDecl struct {
 	base
-	Names      []string
+	Names      []string // field names to extract
+	VarNames   []string // variable names to bind (if nil, same as Names)
 	StructType TypeExpr
 	Value      Node
 }

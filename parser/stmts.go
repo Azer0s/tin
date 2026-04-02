@@ -207,8 +207,8 @@ func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, isLambda := call.(*ast.LambdaExpr); isLambda {
-		return nil, fmt.Errorf("bare lambda in defer is not valid; use `defer (fn() void = ...)()` or `defer do:`")
+	if lambda, isLambda := call.(*ast.LambdaExpr); isLambda {
+		call = &ast.CallExpr{Func: lambda, Args: []ast.Node{}}
 	}
 
 	return &ast.DeferStmt{Call: call}, nil
@@ -917,21 +917,39 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 }
 
 // parseStructDestructDecl parses: let {x, y} TypeName = expr
+// or the aliased form: let {x: a, y: b} TypeName = expr
 func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.StructDestructDecl, error) {
 	p.advance() // consume {
 	var names []string
+	var varNames []string
+	hasAliases := false
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
-		names = append(names, nameTok.Literal)
+		fieldName := nameTok.Literal
+		varName := fieldName
+		if p.check(lexer.COLON) {
+			p.advance() // consume :
+			varTok, err2 := p.expect(lexer.IDENT)
+			if err2 != nil {
+				return nil, err2
+			}
+			varName = varTok.Literal
+			hasAliases = true
+		}
+		names = append(names, fieldName)
+		varNames = append(varNames, varName)
 		if p.check(lexer.COMMA) {
 			p.advance()
 		}
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
+	}
+	if !hasAliases {
+		varNames = nil // no aliases - use Names directly
 	}
 
 	// Parse struct type
@@ -951,7 +969,7 @@ func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.Struct
 	_ = pos
 	_ = isConst
 
-	return &ast.StructDestructDecl{Names: names, StructType: structType, Value: val}, nil
+	return &ast.StructDestructDecl{Names: names, VarNames: varNames, StructType: structType, Value: val}, nil
 }
 
 // parseTupleDestructDecl parses: let (x, y) = expr

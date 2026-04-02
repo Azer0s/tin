@@ -463,6 +463,13 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 			return block.NewLoad(targetLLVM, memberPtr), nil
 		}
+		// Pointer type cast: p.(*T) bitcasts between pointer types (e.g. *void -> *i64).
+		if irtypes.IsPointer(inner.Type()) {
+			targetLLVM, err2 := cg.tinTypeToLLVM(e.Type)
+			if err2 == nil && irtypes.IsPointer(targetLLVM) && targetLLVM != inner.Type() {
+				return block.NewBitCast(inner, targetLLVM), nil
+			}
+		}
 
 		return inner, nil
 
@@ -979,38 +986,51 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if fn.Name == "default" && len(e.Args) == 1 {
 			return cg.genBuiltinDefault(block, e.Args[0])
 		}
-		// Check if this is a constrained generic function call - monomorphize it.
-		if tmpl, ok := cg.constrainedFuncs[fn.Name]; ok {
-			// Evaluate arguments first to infer concrete types.
-			argVals := make([]value.Value, 0, len(e.Args))
-			for _, arg := range e.Args {
-				av, err2 := cg.genExpr(block, arg)
+		// Check if this is a generic or constrained function call - monomorphize it.
+		{
+			var gTmpl *ast.FuncDecl
+			if t, ok2 := cg.constrainedFuncs[fn.Name]; ok2 {
+				gTmpl = t
+			} else if t, ok2 := cg.genericFuncs[fn.Name]; ok2 {
+				// Prefer a concrete compiled version over the template when one exists in
+				// scope (e.g. the non-generic parse() inside json::parse[T]).
+				if _, concreteOk := cg.curScope.lookup(fn.Name); !concreteOk {
+					gTmpl = t
+				}
+			}
+			if gTmpl != nil {
+				tmpl := gTmpl
+				// Evaluate arguments first to infer concrete types.
+				argVals := make([]value.Value, 0, len(e.Args))
+				for _, arg := range e.Args {
+					av, err2 := cg.genExpr(block, arg)
+					if err2 != nil {
+						return nil, err2
+					}
+					argVals = append(argVals, av)
+				}
+				typeSubst := cg.inferTypeArgs(tmpl, argVals)
+				// Build instance key from substituted types.
+				instKey := ""
+				for i, tp := range tmpl.TypeParams {
+					if i > 0 {
+						instKey += "__"
+					}
+					if name, found := typeSubst[tp]; found {
+						instKey += name
+					} else {
+						instKey += tp
+					}
+				}
+				concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
 				if err2 != nil {
 					return nil, err2
 				}
-				argVals = append(argVals, av)
-			}
-			typeSubst := cg.inferTypeArgs(tmpl, argVals)
-			// Build instance key from substituted types.
-			instKey := ""
-			for i, tp := range tmpl.TypeParams {
-				if i > 0 {
-					instKey += "__"
-				}
-				if name, found := typeSubst[tp]; found {
-					instKey += name
-				} else {
-					instKey += tp
-				}
-			}
-			concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
-			if err2 != nil {
-				return nil, err2
-			}
-			// Adapt args if needed and call.
-			argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
+				// Adapt args if needed and call.
+				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
 
-			return block.NewCall(concreteFunc, argVals...), nil
+				return block.NewCall(concreteFunc, argVals...), nil
+			}
 		}
 		// Overload resolution: if this name has multiple variants, evaluate args
 		// first to pick the best match by type, then call it directly.
@@ -1265,6 +1285,69 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		entry, ok := cg.curScope.lookup(methodName)
 		if !ok {
+			// Check for a generic method template (e.g. map_opt[r] on option__i64).
+			if tmpl, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod {
+				// Evaluate call arguments.
+				callArgs := make([]value.Value, 0, len(e.Args))
+				for _, arg := range e.Args {
+					av, err2 := cg.genExpr(block, arg)
+					if err2 != nil {
+						return nil, err2
+					}
+					callArgs = append(callArgs, av)
+					if cg.curBlock != nil && cg.curBlock != block {
+						block = cg.curBlock
+					}
+				}
+				// Build arg list for type inference: this + call args.
+				inferArgs := make([]value.Value, 0, len(callArgs)+1)
+				inferArgs = append(inferArgs, objVal)
+				inferArgs = append(inferArgs, callArgs...)
+				typeSubst := cg.inferTypeArgs(tmpl, inferArgs)
+				instKey := ""
+				for i, tp := range tmpl.TypeParams {
+					if i > 0 {
+						instKey += "__"
+					}
+					if name, found := typeSubst[tp]; found {
+						instKey += name
+					} else {
+						instKey += tp
+					}
+				}
+				// Monomorphize: use the full method scope name as the function name so
+				// the IR name becomes "structName_methodName__instKey".
+				tmplCopy := *tmpl
+				tmplCopy.Name = methodName
+				concreteFunc, err2 := cg.monomorphizeFunc(&tmplCopy, instKey, typeSubst)
+				if err2 != nil {
+					return nil, err2
+				}
+				// Build LLVM call args: this + call args, adapted to signature.
+				thisArg := objVal
+				if len(concreteFunc.Sig.Params) > 0 {
+					if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr {
+						if pt.ElemType.Equal(objVal.Type()) {
+							if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
+								thisArg = lv
+							} else {
+								tmp := block.NewAlloca(objVal.Type())
+								block.NewStore(objVal, tmp)
+								thisArg = tmp
+							}
+						}
+					}
+				}
+				llArgs := make([]value.Value, 0, len(callArgs)+1)
+				llArgs = append(llArgs, thisArg)
+				llArgs = append(llArgs, callArgs...)
+				llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
+				result := block.NewCall(concreteFunc, llArgs...)
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+				return result, nil
+			}
 			// Also check without prefix.
 			entry, ok = cg.curScope.lookup(fn.Field)
 		}
@@ -1367,7 +1450,20 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			return result, nil
 		}
-		_ = objVal
+		// Fallback: the "method" might be a callable function field on the struct.
+		// e.g. struct handler { validate fn(i64) bool } called as h.validate(x).
+		if st, isStruct := objVal.Type().(*irtypes.StructType); isStruct {
+			if fieldIdx := cg.fieldIndex(structName, fn.Field); fieldIdx >= 0 && fieldIdx < len(st.Fields) {
+				alloca := block.NewAlloca(st)
+				block.NewStore(objVal, alloca)
+				gep := block.NewGetElementPtr(st, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+				fieldVal := block.NewLoad(st.Fields[fieldIdx], gep)
+				if isFatFnPtr(fieldVal.Type()) {
+					return cg.callFatFn(block, fieldVal, e.Args)
+				}
+			}
+		}
 
 		return nil, fmt.Errorf("undefined method: %s.%s", structName, fn.Field)
 
@@ -1850,9 +1946,17 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		// we have a concrete type param, monomorphize now and retry.
 		if typeParamStr != "" {
 			if _, isGeneric := cg.genericStructsByArity[baseName]; isGeneric {
-				concreteName := baseName + "__" + typeParamStr
+				// Resolve typeParamStr through type aliases (e.g. "r" → "string" inside a
+				// generic method body where cg.typeAliases["r"] = string).
+				resolvedTypeParam := typeParamStr
+				if alias, ok2 := cg.typeAliases[typeParamStr]; ok2 {
+					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+						resolvedTypeParam = simple.Name
+					}
+				}
+				concreteName := baseName + "__" + resolvedTypeParam
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-					typeParamTE := &ast.SimpleType{Name: typeParamStr}
+					typeParamTE := &ast.SimpleType{Name: resolvedTypeParam}
 					synthDecl := &ast.TypeDecl{
 						Name: concreteName,
 						Type: &ast.GenericType{Name: baseName, TypeParams: []ast.TypeExpr{typeParamTE}},
@@ -2336,6 +2440,25 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		return nil, err
 	}
 
+	// For unsigned source types, integer widening must use zext, not sext.
+	// Determine signedness from the scope entry of the source identifier.
+	if irtypes.IsInt(val.Type()) && irtypes.IsInt(targetType) {
+		sBits := val.Type().(*irtypes.IntType).BitSize
+		tBits := targetType.(*irtypes.IntType).BitSize
+		if sBits < tBits {
+			srcUnsigned := false
+			if ident, ok := e.Expr.(*ast.Identifier); ok {
+				if entry, ok2 := cg.curScope.lookup(ident.Name); ok2 {
+					srcUnsigned = entry.isUnsigned
+				}
+			}
+			if srcUnsigned {
+				return block.NewZExt(val, targetType), nil
+			}
+			return block.NewSExt(val, targetType), nil
+		}
+	}
+
 	return cg.coerce(block, val, targetType), nil
 }
 
@@ -2604,7 +2727,20 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 			walk(v.Value)
 			localNames[v.Name] = true
 		case *ast.LambdaExpr:
-			// Don't descend into nested lambdas; they capture independently.
+			// Collect free vars of nested lambda that the current lambda needs to
+			// capture so they're available in scope when the nested lambda is compiled.
+			// Example: fn(b) = return fn(c) = return a+b+c
+			// The outer lambda must capture 'a' even though 'a' only appears in the inner lambda.
+			nestedLocals := map[string]bool{}
+			for _, p := range v.Params {
+				nestedLocals[p.Name] = true
+			}
+			for _, nf := range collectFreeVars(v.Body, nestedLocals) {
+				if !localNames[nf] && !seen[nf] {
+					seen[nf] = true
+					result = append(result, nf)
+				}
+			}
 		case *ast.Block:
 			for _, s := range v.Stmts {
 				walk(s)
@@ -3064,7 +3200,9 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env inside the lambda body
-	cg.unpackEnv(entry, f, envStructType, captures)
+	// useEnvDirect=true: lambda env is heap-allocated and persists across calls,
+	// so mutations (e.g. counter++) are visible on subsequent invocations.
+	cg.unpackEnv(entry, f, envStructType, captures, true)
 
 	// Register lambda params (skip index 0 = env).
 	for i, p := range e.Params {
@@ -3218,16 +3356,24 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 			case irtypes.IsInt(t):
 				it := t.(*irtypes.IntType)
 				if it.BitSize == 1 {
-					fmtParts = append(fmtParts, "%d")
-					val = block.NewZExt(val, irtypes.I32)
+					// bool: print "true" or "false"
+					truePtr := cg.newGlobalString("true")
+					falsePtr := cg.newGlobalString("false")
+					selected := block.NewSelect(val, truePtr, falsePtr)
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, selected)
 				} else {
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
+					args = append(args, val)
 				}
-				args = append(args, val)
 			case irtypes.IsFloat(t):
-				fmtParts = append(fmtParts, "%g")
-				if t != irtypes.Double {
+				if t == irtypes.Double {
+					// f64: use %f (e.g. "1.000000")
+					fmtParts = append(fmtParts, "%f")
+				} else {
+					// f32: use %g (e.g. "3" for 3.0, "1.5" for 1.5)
+					fmtParts = append(fmtParts, "%g")
 					val = block.NewFPExt(val, irtypes.Double)
 				}
 				args = append(args, val)
@@ -3947,6 +4093,43 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 						coroFn = fn2
 						resolvedCalleeName = best.irName
 
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// If direct lookup failed, try monomorphizing a generic async template.
+	if coroFn == nil {
+		if tmpl, isGeneric := cg.genericFuncs[calleeName]; isGeneric && hasTag(tmpl.Tags, "async") {
+			typeSubst := cg.inferTypeArgs(tmpl, callArgs)
+			instKey := ""
+			for i, tp := range tmpl.TypeParams {
+				if i > 0 {
+					instKey += "__"
+				}
+				if name, found := typeSubst[tp]; found {
+					instKey += name
+				} else {
+					instKey += tp
+				}
+			}
+			monoName := tmpl.Name + "__" + instKey
+			coroName := monoName + "$coro"
+			// Monomorphize the concrete variant. genFuncDeclAs will call
+			// predeclareCoroVariant + genCoroFuncBody for async functions
+			// (because no $coro stub exists for the monomorphized name yet).
+			if concreteFn, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst); err2 == nil {
+				if syncFnRetType == nil {
+					syncFnRetType = concreteFn.Sig.RetType
+				}
+				resolvedCalleeName = monoName
+				// Find the $coro variant in the module (generated as side effect).
+				for _, f := range cg.mod.Funcs {
+					if f.Name() == coroName {
+						coroFn = f
+						cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})
 						break
 					}
 				}

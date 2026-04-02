@@ -1,5 +1,5 @@
 // MPMC: 4 producers + 4 consumers on one shared buffered channel.
-// Forces contention on the channel mutex — no SPSC fast path possible.
+// Forces contention on the channel mutex - no SPSC fast path possible.
 
 use sync
 use io

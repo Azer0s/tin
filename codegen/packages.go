@@ -1293,6 +1293,66 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 	return result
 }
 
+// ensureDefaultTraitMethods generates default (non-virtual) trait methods for
+// concreteName if the struct doesn't already have them.  This is needed when a
+// struct satisfies a constraint via the trait's default implementation without
+// explicitly listing the trait in its Implements clause.
+func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.TypeExpr) error {
+	var traitName string
+	switch te := traitExpr.(type) {
+	case *ast.SimpleType:
+		traitName = te.Name
+	case *ast.GenericType:
+		traitName = te.Name
+	default:
+		return nil
+	}
+	td, ok := cg.traits[traitName]
+	if !ok {
+		return nil
+	}
+	for _, m := range td.Methods {
+		if m.IsVirtual || m.Body == nil {
+			continue // virtual methods must be explicitly implemented
+		}
+		scopeKey := concreteName + "_" + m.Name
+		if _, exists := cg.curScope.lookup(scopeKey); exists {
+			continue // already generated
+		}
+		// Create a concrete copy of the method with this param bound to *concreteName.
+		injected := *m
+		ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: concreteName}}
+		if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
+			injected.Params = append([]ast.Param{{Name: "this", Type: ptrType}}, injected.Params...)
+		} else {
+			newParams := make([]ast.Param, len(injected.Params))
+			copy(newParams, injected.Params)
+			newParams[0] = ast.Param{Name: "this", Type: ptrType}
+			injected.Params = newParams
+		}
+		// Pre-declare the stub in the current scope so genFuncDeclAs (line 677)
+		// finds it via cg.curScope.vars[scopeKey] (direct map lookup, not parent-walk).
+		// This also ensures that after generation the function lives in the global
+		// scope (not just a temporary inner scope) by registering at every level.
+		if err := cg.predeclareFuncAs(&injected, scopeKey); err != nil {
+			return fmt.Errorf("ensureDefaultTraitMethods predeclare: %w", err)
+		}
+		// Walk to global scope and ensure the entry is also there (predeclareFuncAs
+		// writes to cg.curScope which may be an inner function scope at this point).
+		if entry, ok := cg.curScope.vars[scopeKey]; ok {
+			global := cg.curScope
+			for global.parent != nil {
+				global = global.parent
+			}
+			global.set(scopeKey, entry)
+		}
+		if err := cg.genStructMethod(concreteName, &injected); err != nil {
+			return fmt.Errorf("ensureDefaultTraitMethods: %w", err)
+		}
+	}
+	return nil
+}
+
 // Constrained generic function monomorphization
 
 // monomorphizeFunc compiles a concrete instance of a constrained generic
@@ -1306,7 +1366,8 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		return f, nil // already compiled (or forward-declared for recursive generics)
 	}
 
-	// Validate that each concrete type satisfies its declared constraints.
+	// Validate that each concrete type satisfies its declared constraints, and
+	// ensure default (non-virtual) trait methods are available for the concrete type.
 	for _, c := range tmpl.Constraints {
 		concreteName, ok := typeSubst[c.TypeParam]
 		if !ok {
@@ -1316,6 +1377,12 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
 				return nil, fmt.Errorf("fn %s: type %q does not satisfy constraint 'where %s is %s'",
 					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
+			}
+			// Inject any default (non-virtual) trait methods the concrete type
+			// doesn't already implement (e.g. a struct satisfying a trait via its
+			// default method without explicitly listing it in its Implements clause).
+			if err := cg.ensureDefaultTraitMethods(concreteName, traitExpr); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -1423,33 +1490,103 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 		if i >= len(argVals) {
 			break
 		}
-		if st, ok := p.Type.(*ast.SimpleType); ok {
-			// If the param type is one of the type params, bind it.
-			for _, tp := range tmpl.TypeParams {
-				if st.Name == tp {
-					name := cg.typeNameOf(argVals[i].Type())
-					if name == "" {
-						// Try pointee type for pointer args.
-						if pt, ok2 := argVals[i].Type().(*irtypes.PointerType); ok2 {
-							if st2, ok3 := pt.ElemType.(*irtypes.StructType); ok3 {
-								name = st2.Name()
-							}
-						}
-					}
-					// Fall back to llvmTypeName for primitive types (bool, i64, f64,
-					// string, etc.) that are not struct types.
-					if name == "" {
-						name = llvmTypeName(argVals[i].Type())
-					}
-					if name != "" {
-						subst[tp] = name
-					}
-				}
-			}
-		}
+		cg.inferTypeArgsFromParam(p.Type, argVals[i].Type(), tmpl.TypeParams, subst)
 	}
 
 	return subst
+}
+
+// inferTypeArgsFromParam recursively matches an AST parameter type against an
+// LLVM argument type to infer type-parameter bindings.  Handles:
+//   - Direct type-param: fn foo[t](x t)   arg: i64      -> t=i64
+//   - Pointer-to-param:  fn foo[t](x *t)  arg: *struct  -> t=struct
+//   - Generic struct:    fn foo[t](x S[t]) arg: S__i64   -> t=i64
+//   - Pointer-to-generic fn foo[t](x *S[t]) arg: *S__i64 -> t=i64
+func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtypes.Type, typeParams []string, subst map[string]string) {
+	switch pt := paramType.(type) {
+	case *ast.SimpleType:
+		// Direct type-param binding: fn foo[t](x t)
+		for _, tp := range typeParams {
+			if pt.Name == tp {
+				name := cg.typeNameOf(argType)
+				if name == "" {
+					if ptr, ok2 := argType.(*irtypes.PointerType); ok2 {
+						if st2, ok3 := ptr.ElemType.(*irtypes.StructType); ok3 {
+							name = st2.Name()
+						}
+					}
+				}
+				if name == "" {
+					name = llvmTypeName(argType)
+				}
+				if name != "" {
+					subst[tp] = name
+				}
+			}
+		}
+	case *ast.PointerType:
+		// Unwrap pointer on both sides and recurse.
+		if ptr, ok := argType.(*irtypes.PointerType); ok {
+			cg.inferTypeArgsFromParam(pt.Elem, ptr.ElemType, typeParams, subst)
+		}
+	case *ast.GenericType:
+		// Generic struct: fn foo[t](x S[t])  arg LLVM type is "S__i64"
+		// The concrete type name is "S__<tp_concrete>" so strip the "S__" prefix.
+		if len(pt.TypeParams) != 1 {
+			break
+		}
+		innerParam, ok := pt.TypeParams[0].(*ast.SimpleType)
+		if !ok {
+			break
+		}
+		for _, tp := range typeParams {
+			if innerParam.Name != tp {
+				continue
+			}
+			// Get the LLVM struct name (e.g. "list_node__i64").
+			structName := ""
+			if st, ok2 := argType.(*irtypes.StructType); ok2 {
+				structName = st.Name()
+			}
+			if structName == "" {
+				break
+			}
+			// Strip "GenericTypeName__" prefix to get the concrete type param.
+			prefix := pt.Name + "__"
+			if strings.HasPrefix(structName, prefix) {
+				subst[tp] = strings.TrimPrefix(structName, prefix)
+			}
+		}
+	case *ast.ArrayType:
+		// [t] → { t*, i64 } in LLVM.  Extract the element type from field 0.
+		if st, ok := argType.(*irtypes.StructType); ok && len(st.Fields) >= 2 {
+			if ptrField, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
+				cg.inferTypeArgsFromParam(pt.Elem, ptrField.ElemType, typeParams, subst)
+			}
+		}
+	case *ast.FuncType:
+		// fn(params...) retType - extract type-param bindings from return type and params.
+		// The LLVM representation is a fat function pointer {fn_ptr*, i8*}.
+		if !isFatFnPtr(argType) {
+			break
+		}
+		st := argType.(*irtypes.StructType)
+		innerFnType, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+		if !ok {
+			break
+		}
+		// Match return type (LLVM env param is at index 0, so user params start at 1).
+		if pt.RetType != nil && innerFnType.RetType != nil {
+			cg.inferTypeArgsFromParam(pt.RetType, innerFnType.RetType, typeParams, subst)
+		}
+		// Match parameter types (skip env param at LLVM index 0).
+		for i, astParam := range pt.Params {
+			llIdx := i + 1
+			if llIdx < len(innerFnType.Params) {
+				cg.inferTypeArgsFromParam(astParam, innerFnType.Params[llIdx], typeParams, subst)
+			}
+		}
+	}
 }
 
 // extractBacktickBody returns the raw string from a BacktickLit node, or from

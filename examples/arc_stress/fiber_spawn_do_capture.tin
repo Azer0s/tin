@@ -12,7 +12,7 @@
 //   label string - an interpolated string, captured by value (ARC-tracked)
 //
 // The $coro body combines them into a result string and sends it to a
-// module-level results channel.  We verify all 500 fibers completed.
+// module-level results channel. We verify all 500 fibers completed.
 // Run under valgrind: no leaks, no invalid accesses.
 
 use sync
