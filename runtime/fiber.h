@@ -18,8 +18,26 @@ void _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
 
 // Called by the coroutine body when it has finished.
-// result: heap-allocated result value; NULL for void-returning fibers.
-void _tin_fiber_complete(void *hdl, void *result);
+// result: pointer to the return value; NULL for void-returning fibers.
+// The hdl parameter was removed — LLVM's coro-elide pass can now see that
+// the inner coroutine handle does not escape to any external function, enabling
+// stack-allocation of inner coroutine frames for inline-drive call sites.
+void _tin_fiber_complete(void *result);
+
+// Inline-drive result helpers — used by emitCoroComplete / genInlineAsyncDrive.
+// When an inner $coro is driven inline (no fiber spawn), the result is stored
+// in a per-thread TLS buffer instead of a heap allocation.  The outer coroutine
+// reads the result via _tin_coro_take_result() before calling coro.destroy.
+//
+//  _tin_inline_result_mode_begin()   — enable TLS result storage
+//  _tin_inline_result_alloc(sz)      — returns TLS ptr if inline mode + fits,
+//                                      else falls back to malloc(sz)
+//  _tin_inline_result_mode_end()     — disable TLS result storage
+//  _tin_inline_result_free(ptr)      — free() only if ptr was heap-allocated
+void  _tin_inline_result_mode_begin(void);
+void *_tin_inline_result_alloc(int64_t sz);
+void  _tin_inline_result_mode_end(void);
+void  _tin_inline_result_free(void *ptr);
 
 // Block the calling thread until the fiber with the given PID is done.
 // In the thread model, my_hdl is ignored (kept for API compatibility).
@@ -46,10 +64,8 @@ void _tin_fiber_sync_await(int64_t pid);
 // Used by Future[t].await_result() in stdlib/sync/future.tin.
 void *_tin_future_await_raw(int64_t pid);
 
-// Returns the PID of the fiber currently executing on this worker thread,
-// or -1 if called from outside a fiber context (e.g. I/O thread, main).
-// Used by async_io.c and timer.c to park/unpark fibers.
-int64_t _tin_current_pid(void);
+// _tin_current_pid and _tin_current_coro_hdl are static inline in runtime.h
+// (via extern __thread _current_pid / _current_hdl).
 
 // Mark fiber `pid` as RUNNABLE and push it onto the global run queue.
 // Used by the I/O thread and timer thread to wake blocked fibers.
@@ -58,3 +74,30 @@ void _tin_fiber_unpark(int64_t pid);
 // Mark fiber `pid` as BLOCKED so the worker will not re-enqueue it after yield.
 // Caller must register a waker that calls _tin_fiber_unpark before yielding.
 void _tin_fiber_park(int64_t pid);
+
+// Like _tin_fiber_unpark but the caller already holds the coro handle (hdl),
+// skipping the fiber-table lookup for it.  Used by TinFastMutex and the channel
+// waiter lists to shorten the unpark hot path.
+void _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
+
+// Returns the coro handle of the fiber currently running on this worker thread,
+// or NULL if called from outside a fiber context (I/O thread, timer, main).
+// Used by channel_arc.c to pass hdl to TinFastMutex without _table_mu.
+// (Defined as static inline in runtime.h via extern __thread _current_hdl.)
+void *_tin_current_coro_hdl(void);
+
+// Returns the internal TinFiber* of the fiber currently running on this worker
+// thread as an opaque void*, or NULL outside a fiber context.  Store this in
+// channel waiter lists to allow _tin_fiber_unpark_fib to skip _table_mu.
+void *_tin_current_fib(void);
+
+// Like _tin_fiber_unpark_hdl but uses a pre-captured TinFiber* (from
+// _tin_current_fib) to bypass the global _table_mu lock entirely.
+// Only the per-fiber spinlock is acquired on the unpark hot path.
+void  _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
+
+// Called by channel_arc.c send_blocking to mark that data was delivered
+// directly to the receiver's out buffer (bypassing the ring buffer).
+// Must be called BEFORE _tin_fiber_unpark_fib so the write is visible via
+// the release/acquire pair on the per-fiber state_lock.
+void  _tin_fiber_set_direct_recv(void *fib);

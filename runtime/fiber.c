@@ -66,12 +66,12 @@ typedef struct {
     // Also set by _fire_done_waiters when a waiter has pending_join set.
     // Protected by _table_mu.
     int      pending_wakeup;
-    // pending_join: set by _tin_fiber_join to signal the worker loop.
-    // After coro.suspend returns, set to BLOCKED (or re-enqueue if
-    // pending_wakeup is set).  Deferred to avoid a double-resume race where
-    // _fire_done_waiters sees FIBER_BLOCKED and pushes the waiter before
-    // coro.suspend has actually executed.
-    // Protected by _table_mu.
+    // pending_join: set by _tin_fiber_join on the fiber's own OS thread before
+    // the coroutine yields; read by the worker loop after _coro_resume returns.
+    // Sequential execution on the same thread guarantees visibility without a
+    // lock.  _fire_done_waiters reads it under _table_mu+state_lock, which is
+    // also safe.  The worker loop now checks it inside state_lock (state_lock
+    // is acquired first; _table_mu is NOT taken for this check).
     int      pending_join;
     // pending_park: set by _tin_fiber_park (called from async I/O / timer C
     // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
@@ -90,12 +90,26 @@ typedef struct {
     // Set to 1 when _tin_fiber_get_panic_msg reads a non-NULL panic_msg.
     // Used at shutdown to detect fire-and-forget panics nobody awaited.
     int      panic_checked;
+    // Set to 1 by _tin_fiber_set_direct_recv when a channel sender delivers data
+    // directly to this fiber's recv `out` buffer (bypassing the ring buffer).
+    // The worker loop propagates this to _direct_recv_flag TLS before resuming,
+    // allowing recv_direct's fast path to return 0 without acquiring the mutex.
+    // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
+    // provides release); read by worker after _fib_lock (acquire), safe.
+    int      direct_recv_done;
+    // Per-fiber spinlock: protects status, pending_park, and pending_wakeup
+    // in the park/unpark hot path.  Replacing the global _table_mu for these
+    // transitions eliminates cross-core cache-line bouncing between workers
+    // when each worker is running a different fiber (e.g. TINMAXPROCS=2).
+    // Lock ordering: _table_mu (outer) -> state_lock (inner) — never reverse.
+    _Atomic(uint32_t) state_lock;
 } TinFiber;
 
 static TinFiber  **_fibers    = NULL;
 static int64_t     _fiber_cap = 0;
 static int64_t     _fiber_cnt = 1;   // next pid; 0 reserved
 static pthread_mutex_t _table_mu = PTHREAD_MUTEX_INITIALIZER;
+
 
 // -------------------------------------------------------------------
 // Run queue - mutex + condvar FIFO ring buffer
@@ -122,6 +136,9 @@ static void _rq_init(void) {
     _run_queue.shutdown = 0;
 }
 
+// Declared here so _rq_push can check it; defined after _rq_pop.
+static atomic_int _spinning_workers;
+
 static void _rq_push(TinRunnable r) {
     pthread_mutex_lock(&_run_queue.mu);
     if (_run_queue.count == _run_queue.cap) {
@@ -139,20 +156,69 @@ static void _rq_push(TinRunnable r) {
     _run_queue.buf[_run_queue.tail] = r;
     _run_queue.tail = (_run_queue.tail + 1) % _run_queue.cap;
     _run_queue.count++;
-    pthread_cond_signal(&_run_queue.not_empty);
+    // Skip the condvar signal when a spinner is already polling the queue.
+    // The spinner will find this item in its trylock loop without an OS wake-up.
+    // Signal only when all workers are sleeping.
+    if (atomic_load_explicit(&_spinning_workers, memory_order_relaxed) == 0)
+        pthread_cond_signal(&_run_queue.not_empty);
     pthread_mutex_unlock(&_run_queue.mu);
 }
 
-// Blocks until a runnable is available or shutdown is signalled.
-// Returns a sentinel with pid=-1 on shutdown (even if items remain in queue).
-// This ensures that when _tin_fiber_run signals shutdown, workers stop
-// immediately without draining unawaited fibers.
+// Adaptive spin: at most one worker spins at a time (Go-style single spinner).
+// More than one spinner causes trylock contention that is worse than sleeping.
+#define RQ_SPIN_ITERS 500
+
+// CPU-level spin hint (avoids cache-line thrashing on the mutex).
+static inline void _cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ volatile("yield" ::: "memory");
+#else
+    sched_yield();
+#endif
+}
+
+// Pop one runnable from the queue.
+// One worker at a time is allowed to spin briefly before sleeping so that
+// short idle gaps (back-to-back spawns) skip the OS wake-up latency (~3 us).
+// All other idle workers block on the condvar immediately.
+// Returns a sentinel with pid=-1 on shutdown.
 static TinRunnable _rq_pop(void) {
+    // Compete to become the single spinning worker.
+    int expected = 0;
+    int became_spinner = atomic_compare_exchange_strong_explicit(
+        &_spinning_workers, &expected, 1,
+        memory_order_acquire, memory_order_relaxed);
+
+    if (became_spinner) {
+        for (int spin = 0; spin < RQ_SPIN_ITERS; spin++) {
+            if (pthread_mutex_trylock(&_run_queue.mu) == 0) {
+                if (_run_queue.shutdown) {
+                    atomic_fetch_sub_explicit(&_spinning_workers, 1, memory_order_release);
+                    pthread_mutex_unlock(&_run_queue.mu);
+                    return (TinRunnable){ NULL, -1 };
+                }
+                if (_run_queue.count > 0) {
+                    TinRunnable r = _run_queue.buf[_run_queue.head];
+                    _run_queue.head = (_run_queue.head + 1) % _run_queue.cap;
+                    _run_queue.count--;
+                    atomic_fetch_sub_explicit(&_spinning_workers, 1, memory_order_release);
+                    pthread_mutex_unlock(&_run_queue.mu);
+                    return r;
+                }
+                pthread_mutex_unlock(&_run_queue.mu);
+            }
+            _cpu_relax();
+        }
+        atomic_fetch_sub_explicit(&_spinning_workers, 1, memory_order_release);
+    }
+
+    // No work found during spin (or we weren't the spinner): block on condvar.
     pthread_mutex_lock(&_run_queue.mu);
     while (_run_queue.count == 0 && !_run_queue.shutdown)
         pthread_cond_wait(&_run_queue.not_empty, &_run_queue.mu);
     if (_run_queue.shutdown) {
-        // Shut down immediately regardless of remaining items.
         pthread_mutex_unlock(&_run_queue.mu);
         return (TinRunnable){ NULL, -1 };
     }
@@ -181,12 +247,60 @@ static inline void _coro_destroy(void *hdl) {
 // Per-worker thread-locals
 // -------------------------------------------------------------------
 
-static __thread int64_t  _current_pid    = -1;
+__thread int64_t  _current_pid    = -1;
+__thread void     *_current_hdl   = NULL;  // coro handle of running fiber
+__thread TinFiber *_current_fib   = NULL;  // TinFiber* of running fiber (no table lock needed)
+// Set to 1 by the worker loop when the fiber it's about to resume had a
+// direct recv delivery (sender wrote to the receiver's out buffer directly).
+// Checked by _tin_channel_recv_direct's fast path to skip mutex+dequeue.
+__thread int       _direct_recv_flag = 0;
 static __thread int       _coro_done     = 0;
 static __thread void     *_coro_result   = NULL;
+// Inline-drive result mode: set to 1 by genInlineAsyncDrive's mode_begin call
+// (inside an outer coroutine body) so the inner $coro's emitCoroComplete skips
+// the malloc and stores the result in the TLS buffer instead.  Reset to 0 by
+// the worker loop before each fiber resume so that TLS mode cannot leak across
+// a fiber context switch to another fiber's resume on the same OS thread.
+static __thread int       _inline_result_mode = 0;
+
+// Set to 1 at the start of each worker thread; stays 0 on all other threads
+// (main thread, I/O thread, timer thread).  Used by _tin_fiber_unpark to
+// decide whether a direct runnext hand-off is safe.
+static __thread int        _is_worker      = 0;
+
+// Per-worker hot slot: populated by _tin_fiber_unpark when called from within
+// a worker thread.  The worker loop drains this before calling _rq_pop, giving
+// a zero-overhead direct hand-off to the newly-runnable fiber without going
+// through the global run queue (no mutex, no condvar).
+static __thread int64_t    _worker_runnext_pid = -1;
+static __thread void      *_worker_runnext_hdl = NULL;
+// Companion to runnext: store the TinFiber* so the worker loop can skip the
+// _table_mu lookup that otherwise happens on every dequeue.  Only valid when
+// _worker_runnext_pid >= 0.
+static __thread TinFiber  *_worker_runnext_fib = NULL;
 
 // Called by the I/O layer to access current fiber pid.
 int64_t _tin_current_pid(void) { return _current_pid; }
+
+// Called by channel_arc.c (and other C helpers) to get the coro handle of the
+// currently-running fiber without acquiring _table_mu.  Returns NULL when called
+// from a non-worker context (I/O thread, timer thread, main thread).
+// (channel_arc.c inlines this directly via extern __thread _current_hdl.)
+void *_tin_current_coro_hdl(void) { return _current_hdl; }
+
+// Returns the TinFiber* of the currently-running fiber as an opaque void*.
+// Safe to store in channel waiter lists because the fiber is alive for the
+// duration of the park; it cannot be freed until after _tin_fiber_unpark_fib
+// transitions it out of FIBER_BLOCKED.
+void *_tin_current_fib(void) { return (void *)_current_fib; }
+
+// Mark that a channel sender delivered data directly to this fiber's recv
+// out buffer.  Called by send_blocking before _tin_fiber_unpark_fib so that
+// the release in _fib_unlock (inside unpark) makes the write visible to the
+// worker's subsequent _fib_lock (acquire) when the fiber is resumed.
+void _tin_fiber_set_direct_recv(void *fib) {
+    if (fib) ((TinFiber *)fib)->direct_recv_done = 1;
+}
 
 // -------------------------------------------------------------------
 // Worker threads
@@ -210,16 +324,85 @@ static int _is_worker_thread(void) {
     return 0;
 }
 
+// Per-fiber spinlock helpers for the park/unpark hot path.
+// Only used for status, pending_park, and pending_wakeup transitions.
+static inline void _fib_lock(TinFiber *f) {
+    uint32_t z = 0;
+    while (!atomic_compare_exchange_weak_explicit(&f->state_lock, &z, 1u,
+               memory_order_acquire, memory_order_relaxed)) {
+        z = 0;
+        _cpu_relax();
+    }
+}
+static inline void _fib_unlock(TinFiber *f) {
+    atomic_store_explicit(&f->state_lock, 0u, memory_order_release);
+}
+
+// Like _tin_fiber_unpark_hdl but uses a pre-captured TinFiber* to skip the
+// _table_mu global lock entirely.  Only the per-fiber state_lock is needed.
+// Also stores the TinFiber* in _worker_runnext_fib so the worker loop can skip
+// the subsequent _table_mu lookup for the runnext case.
+void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
+    TinFiber *f = (TinFiber *)fib;
+    if (!f) return;
+    _fib_lock(f);
+    if (f->status == FIBER_BLOCKED) {
+        f->status = FIBER_RUNNABLE;
+        _fib_unlock(f);
+        if (_is_worker) {
+            if (_worker_runnext_pid < 0) {
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+            } else {
+                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+                _rq_push(old);
+            }
+        } else {
+            _rq_push((TinRunnable){ hdl, pid });
+        }
+        return;
+    }
+    if (f->status == FIBER_RUNNING) {
+        f->pending_wakeup = 1;
+        _fib_unlock(f);
+        return;
+    }
+    _fib_unlock(f);
+}
+
 static void _fire_done_waiters(TinFiber *f) {
     // Must be called with _table_mu held.
     for (int i = 0; i < f->waiter_cnt; i++) {
         int64_t wpid = f->waiters[i];
         if (wpid <= 0 || wpid >= _fiber_cnt || !_fibers[wpid]) continue;
         TinFiber *w = _fibers[wpid];
+        _fib_lock(w);  // lock ordering: _table_mu (held) -> state_lock (acquired here)
         if (w->status == FIBER_BLOCKED) {
             // Waiter already suspended; wake it immediately.
             w->status = FIBER_RUNNABLE;
-            _rq_push((TinRunnable){ w->hdl, wpid });
+            void *whdl = w->hdl;
+            _fib_unlock(w);
+            // Use runnext when called from a worker to avoid cross-core
+            // condvar wakeup — keeps the woken fiber on the same worker.
+            if (_is_worker) {
+                if (_worker_runnext_pid < 0) {
+                    _worker_runnext_pid = wpid;
+                    _worker_runnext_hdl = whdl;
+                    _worker_runnext_fib = w;
+                } else {
+                    TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                    _worker_runnext_pid = wpid;
+                    _worker_runnext_hdl = whdl;
+                    _worker_runnext_fib = w;
+                    _rq_push(old);
+                }
+            } else {
+                _rq_push((TinRunnable){ whdl, wpid });
+            }
         } else if (w->pending_join) {
             // Waiter called _tin_fiber_join but its coro.suspend hasn't fired
             // yet (status is still FIBER_RUNNING).  Setting FIBER_RUNNABLE and
@@ -229,6 +412,9 @@ static void _fire_done_waiters(TinFiber *f) {
             // Instead, set pending_wakeup: the worker loop will re-queue the
             // fiber after _coro_resume returns and coro.suspend has completed.
             w->pending_wakeup = 1;
+            _fib_unlock(w);
+        } else {
+            _fib_unlock(w);
         }
     }
     f->waiter_cnt = 0;
@@ -236,35 +422,65 @@ static void _fire_done_waiters(TinFiber *f) {
 
 static void *_worker_thread(void *_) {
     (void)_;
+    _is_worker       = 1;
     _tin_defer_chain = NULL;
     while (1) {
-        TinRunnable r = _rq_pop();
-        if (r.pid < 0) break;  // shutdown sentinel
-
-        pthread_mutex_lock(&_table_mu);
-        if (r.pid >= _fiber_cnt || !_fibers[r.pid]) {
-            pthread_mutex_unlock(&_table_mu);
-            continue;
+        // Drain runnext first: direct hand-off from the previous fiber's unpark
+        // call, bypassing the global run queue entirely (no mutex, no condvar).
+        TinRunnable r;
+        TinFiber   *f = NULL;
+        if (_worker_runnext_pid >= 0) {
+            r.pid = _worker_runnext_pid;
+            r.hdl = _worker_runnext_hdl;
+            f     = _worker_runnext_fib;   // pre-captured TinFiber*, no _table_mu needed
+            _worker_runnext_pid = -1;
+            _worker_runnext_hdl = NULL;
+            _worker_runnext_fib = NULL;
+        } else {
+            r = _rq_pop();
+            if (r.pid < 0) break;  // shutdown sentinel
         }
-        TinFiber *f = _fibers[r.pid];
-        f->status = FIBER_RUNNING;
-        pthread_mutex_unlock(&_table_mu);
 
-        _current_pid  = r.pid;
-        _coro_done    = 0;
-        _coro_result  = NULL;
+        if (!f) {
+            // runnext didn't carry a pre-captured TinFiber* (run-queue path or
+            // legacy unpark via _tin_fiber_unpark_hdl): fall back to table lookup.
+            pthread_mutex_lock(&_table_mu);
+            if (r.pid >= _fiber_cnt || !_fibers[r.pid]) {
+                pthread_mutex_unlock(&_table_mu);
+                continue;
+            }
+            f = _fibers[r.pid];
+            pthread_mutex_unlock(&_table_mu);
+        }
+        _fib_lock(f);
+        f->status = FIBER_RUNNING;
+        _fib_unlock(f);
+
+        _current_pid         = r.pid;
+        _current_hdl         = r.hdl;
+        _current_fib         = f;
+        // Propagate direct-recv delivery flag from the fiber struct to TLS.
+        // The _fib_lock above provides the acquire barrier that makes the
+        // sender's _tin_fiber_set_direct_recv write (done before _fib_unlock
+        // in _tin_fiber_unpark_fib) visible here.
+        _direct_recv_flag    = f->direct_recv_done;
+        if (f->direct_recv_done) f->direct_recv_done = 0;
+        _coro_done           = 0;
+        _coro_result         = NULL;
+        _inline_result_mode  = 0;  // reset so inline-drive TLS cannot leak across fibers
 
         _tin_panic_catch_begin();
         _coro_resume(r.hdl);
         const char *panicked = _tin_panic_catch_end();
 
         if (panicked) {
-            // Fiber panicked.  Destroy the coro frame, then free it.
-            // LLVM's optimizer (at -O1) produces a no-op destroy function for
-            // all fiber types (coro-elide removes the cleanup path), so we must
-            // free the frame manually after calling _coro_destroy.
+            // Fiber panicked.  Destroy the coro frame.
+            // The cleanup path (emitCoroEpilogue) calls llvm.coro.free which
+            // frees the heap-allocated frame inside _coro_destroy.  Spawned
+            // fiber frames cannot be stack-allocated by coro-elide (the hdl
+            // escapes to _tin_fiber_spawn in the caller), so _coro_destroy
+            // always runs the full cleanup here.
             _coro_destroy(r.hdl);
-            free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             // Allocate with _tin_rc_alloc so the message has a proper ARC header.
             // This lets the awaiting fiber wrap it in a TinString and release it
@@ -288,11 +504,9 @@ static void *_worker_thread(void *_) {
 
         if (_coro_done) {
             // Fiber completed: store result, wake waiters, signal done_cv.
-            // LLVM's optimizer (at -O1) produces a no-op destroy function for
-            // all fiber types (coro-elide removes the cleanup path), so we must
-            // free the frame manually after calling _coro_destroy.
+            // The cleanup path (emitCoroEpilogue) calls llvm.coro.free which
+            // frees the heap-allocated frame inside _coro_destroy.
             _coro_destroy(r.hdl);
-            free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
@@ -303,55 +517,87 @@ static void *_worker_thread(void *_) {
             pthread_mutex_unlock(&_table_mu);
         } else {
             // Fiber yielded, parked, or joined.
-            pthread_mutex_lock(&_table_mu);
-            FiberStatus st = f->status;
-
-            if (f->pending_join) {
-                // Fiber called _tin_fiber_join: the coroutine has now suspended
-                // (coro.suspend fired and _coro_resume returned).  Decide whether
-                // to block or re-queue based on whether the join target already
-                // completed and set pending_wakeup.
+            //
+            // Hot path: use only the per-fiber state_lock.  All three flags
+            // (pending_join, pending_park, pending_wakeup) are written while
+            // holding state_lock (or on the same OS thread as the fiber body,
+            // which provides sequential visibility before the yield).  _table_mu
+            // is only needed for the slow join completion path, which acquires it
+            // AFTER the flag check inside state_lock so the lock order
+            // (state_lock first, _table_mu second) never reverses.
+            _fib_lock(f);
+            if (__builtin_expect(f->pending_join, 0)) {
+                // Fiber called _tin_fiber_join.  Check pending_wakeup to see if
+                // the target already completed before coro.suspend fired.
+                // pending_wakeup is written by _fire_done_waiters under
+                // _table_mu+state_lock; reading it here under state_lock is safe.
                 f->pending_join = 0;
-                if (f->pending_wakeup) {
+                int wake = f->pending_wakeup;
+                if (wake) f->pending_wakeup = 0;
+                if (wake) {
                     // Target completed before we suspended; re-queue now.
-                    f->pending_wakeup = 0;
                     f->status = FIBER_RUNNABLE;
-                    pthread_mutex_unlock(&_table_mu);
-                    _rq_push(r);
+                    _fib_unlock(f);
+                    if (_worker_runnext_pid < 0) {
+                        _worker_runnext_pid = r.pid;
+                        _worker_runnext_hdl = r.hdl;
+                        _worker_runnext_fib = f;
+                    } else {
+                        TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                        _worker_runnext_pid = r.pid;
+                        _worker_runnext_hdl = r.hdl;
+                        _worker_runnext_fib = f;
+                        _rq_push(old);
+                    }
                 } else {
                     // Target not yet done; block until _fire_done_waiters wakes us.
                     f->status = FIBER_BLOCKED;
-                    pthread_mutex_unlock(&_table_mu);
+                    _fib_unlock(f);
                 }
             } else if (f->pending_park) {
-                // Fiber called _tin_fiber_park (async I/O / timer): the coroutine
-                // has now suspended.  Same deferred-BLOCKED pattern as pending_join:
-                // block unless a wakeup already arrived (pending_wakeup), in which
-                // case re-enqueue immediately.
+                // Fiber called _tin_fiber_park (async I/O / timer / channel):
+                // block unless a wakeup already arrived (pending_wakeup).
                 f->pending_park = 0;
                 if (f->pending_wakeup) {
                     // Wakeup arrived before coro.suspend; re-queue now.
                     f->pending_wakeup = 0;
                     f->status = FIBER_RUNNABLE;
-                    pthread_mutex_unlock(&_table_mu);
-                    _rq_push(r);
+                    _fib_unlock(f);
+                    if (_worker_runnext_pid < 0) {
+                        _worker_runnext_pid = r.pid;
+                        _worker_runnext_hdl = r.hdl;
+                        _worker_runnext_fib = f;
+                    } else {
+                        TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                        _worker_runnext_pid = r.pid;
+                        _worker_runnext_hdl = r.hdl;
+                        _worker_runnext_fib = f;
+                        _rq_push(old);
+                    }
                 } else {
                     // No wakeup yet; block until _tin_fiber_unpark fires.
                     f->status = FIBER_BLOCKED;
-                    pthread_mutex_unlock(&_table_mu);
+                    _fib_unlock(f);
                 }
-            } else if (st == FIBER_RUNNING) {
+            } else if (f->status == FIBER_RUNNING) {
                 // Normal yield (_tin_fiber_yield_coro): re-enqueue.
                 f->status = FIBER_RUNNABLE;
-                pthread_mutex_unlock(&_table_mu);
-                _rq_push(r);
+                _fib_unlock(f);
+                if (_worker_runnext_pid < 0) {
+                    _worker_runnext_pid = r.pid;
+                    _worker_runnext_hdl = r.hdl;
+                    _worker_runnext_fib = f;
+                } else {
+                    _rq_push(r);
+                }
             } else {
                 // FIBER_RUNNABLE: waker already enqueued - don't push again.
                 // FIBER_BLOCKED:  park already processed; waker will enqueue.
-                pthread_mutex_unlock(&_table_mu);
+                _fib_unlock(f);
             }
         }
         _current_pid = -1;
+        _current_hdl = NULL;
     }
     return NULL;
 }
@@ -434,19 +680,38 @@ int64_t _tin_fiber_spawn(void *hdl) {
     _fibers[pid] = f;
     pthread_mutex_unlock(&_table_mu);
 
-    _rq_push((TinRunnable){ hdl, pid });
+    // When spawning from a worker thread, use runnext so the new fiber runs on
+    // the same worker as the spawner.  This avoids waking idle workers and keeps
+    // cooperating fibers (e.g. ping-pong channels) on the same core, eliminating
+    // cross-core cache-line bouncing on the per-fiber state_lock.
+    // If runnext is occupied, flush the old entry to the global queue (waking
+    // a sleeping worker) and replace it with the new fiber.
+    if (_is_worker) {
+        if (_worker_runnext_pid < 0) {
+            _worker_runnext_pid = pid;
+            _worker_runnext_hdl = hdl;
+            _worker_runnext_fib = f;
+        } else {
+            TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+            _worker_runnext_pid = pid;
+            _worker_runnext_hdl = hdl;
+            _worker_runnext_fib = f;
+            _rq_push(old);
+        }
+    } else {
+        _rq_push((TinRunnable){ hdl, pid });
+    }
     return pid;
 }
 
-void _tin_fiber_complete(void *hdl, void *result) {
+void _tin_fiber_complete(void *result) {
     _coro_done   = 1;
     _coro_result = result;
-    (void)hdl;
 }
 
 // _tin_coro_take_result is used by the coroutine-chaining drive loop.
-// After an inner $coro completes (coro.done returns true), its heap-boxed
-// result was stored in _coro_result by _tin_fiber_complete.  This function
+// After an inner $coro completes (coro.done returns true), its result
+// was stored in _coro_result by _tin_fiber_complete.  This function
 // reads and clears both thread-locals so the outer fiber's own completion
 // can be detected correctly by the worker loop.
 void *_tin_coro_take_result(void) {
@@ -454,6 +719,119 @@ void *_tin_coro_take_result(void) {
     _coro_result = NULL;
     _coro_done   = 0;
     return r;
+}
+
+// ---------------------------------------------------------------------------
+// Inline-drive result buffer — zero-malloc result storage for await.
+//
+// When genInlineAsyncDrive drives an inner $coro directly (no fiber spawn),
+// the inner$coro's emitCoroComplete should NOT heap-allocate the result box,
+// because:
+//  1. The outer coroutine reads the result immediately (before coro.destroy).
+//  2. The inner$coro runs on the same OS thread as the outer → TLS is safe.
+//  3. Avoiding the malloc lets LLVM's coro-elide promote inner frames to the
+//     outer coroutine frame (stack-allocated when coro-elide works).
+//
+// Usage (genInlineAsyncDrive, outer coroutine):
+//   _tin_inline_result_mode_begin();
+//   innerHdl = call innerCoro(args...);
+//   [drive loop...]
+//   resultRaw = _tin_coro_take_result();   // TLS ptr or heap ptr
+//   _tin_inline_result_mode_end();
+//   load T from resultRaw;
+//   _tin_inline_result_free(resultRaw);    // no-op for TLS, free() for heap
+//
+// Usage (emitCoroComplete, inner $coro body):
+//   slot = _tin_inline_result_alloc(sizeof(T));
+//   store T to slot;
+//   _tin_fiber_complete(slot);
+//
+// Maximum result size that fits in the TLS buffer.  Types larger than this
+// fall back to malloc (rare — most return types are scalars or small structs).
+// ---------------------------------------------------------------------------
+#define INLINE_RESULT_BUF_SIZE 256
+
+static _Thread_local char _inline_result_buf[INLINE_RESULT_BUF_SIZE];
+
+void _tin_inline_result_mode_begin(void) {
+    _inline_result_mode = 1;
+}
+
+void _tin_inline_result_mode_end(void) {
+    _inline_result_mode = 0;
+}
+
+// Returns a pointer to the TLS buffer (no malloc) when inline mode is active
+// and sz <= INLINE_RESULT_BUF_SIZE; otherwise falls back to malloc(sz).
+void *_tin_inline_result_alloc(int64_t sz) {
+    if (_inline_result_mode && sz <= INLINE_RESULT_BUF_SIZE) {
+        return _inline_result_buf;
+    }
+    return malloc((size_t)sz);
+}
+
+// Free the result pointer returned by _tin_coro_take_result().
+// If it points to the TLS buffer it is a no-op; otherwise it is a heap pointer
+// that must be freed to avoid a memory leak.
+void _tin_inline_result_free(void *ptr) {
+    if (ptr != (void *)_inline_result_buf) {
+        free(ptr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coroutine frame pool — eliminates per-operation malloc/free on the hot path.
+//
+// _tin_coro_malloc(size) is called from emitCoroPrologue instead of malloc().
+// It prefixes the allocation with an 8-byte size field and returns ptr+8 as
+// the LLVM frame pointer.  On a pool hit, the frame is reused without any
+// system allocator call.
+//
+// _tin_coro_free(ptr) is called from emitCoroEpilogue instead of free().
+// It receives the LLVM frame pointer (ptr+8 from the original allocation) and
+// returns it to the per-thread pool.  Null (coro-elided / stack frame) is a no-op.
+//
+// Pool layout (per-thread):
+//   _coro_pool[0..cnt-1]  – LLVM frame pointers (raw_alloc + 8)
+//   Lookup: linear scan checking *(int64_t*)(ptr - 8) == requested size.
+// ---------------------------------------------------------------------------
+#define CORO_POOL_MAX 16
+
+static _Thread_local void    *_coro_pool[CORO_POOL_MAX];
+static _Thread_local int      _coro_pool_cnt = 0;
+
+void *_tin_coro_malloc(int64_t size) {
+    // Fast path: search pool for a frame of the exact size.
+    for (int i = _coro_pool_cnt - 1; i >= 0; i--) {
+        int64_t cached_sz;
+        memcpy(&cached_sz, (char *)_coro_pool[i] - 8, sizeof(int64_t));
+        if (cached_sz == size) {
+            void *p = _coro_pool[i];
+            // Remove by swapping with last entry.
+            _coro_pool_cnt--;
+            if (i < _coro_pool_cnt)
+                _coro_pool[i] = _coro_pool[_coro_pool_cnt];
+            return p;
+        }
+    }
+    // Miss: allocate raw + 8-byte size prefix; return the LLVM frame pointer.
+    char *raw = (char *)malloc((size_t)size + 8);
+    if (!raw) { fputs("tin: coro frame alloc failed\n", stderr); exit(1); }
+    memcpy(raw, &size, sizeof(int64_t));
+    return raw + 8;
+}
+
+void _tin_coro_free(void *ptr) {
+    if (!ptr) return;  // coro-elided (stack-allocated) frame — nothing to do
+    if (_coro_pool_cnt < CORO_POOL_MAX) {
+        _coro_pool[_coro_pool_cnt++] = ptr;
+        return;
+    }
+    // Pool full: evict the oldest entry (index 0) and free it to system.
+    free((char *)_coro_pool[0] - 8);
+    // Shift pool left by one and insert at end.
+    memmove(_coro_pool, _coro_pool + 1, (size_t)(_coro_pool_cnt - 1) * sizeof(void *));
+    _coro_pool[_coro_pool_cnt - 1] = ptr;
 }
 
 // Static sentinel for void-returning fibers so Future[Unit].await_result
@@ -537,7 +915,17 @@ void _tin_fiber_join(int64_t pid, void *my_hdl) {
 }
 
 // Wake a blocked fiber by marking it RUNNABLE and re-enqueueing it.
-// Called from the I/O thread and timer thread.
+// Called from the I/O thread, timer thread, and channel helpers (while a
+// worker fiber is running).
+//
+// Fast path (called from within a worker thread):
+//   Store the newly-runnable fiber in _worker_runnext so the calling worker
+//   picks it up on the very next loop iteration — no global run queue mutex,
+//   no condvar signal.  If runnext is already occupied, flush the old entry to
+//   the global queue and replace it with the new one.
+//
+// Slow path (called from I/O thread / timer thread / main thread):
+//   Push to the global run queue as before.
 void _tin_fiber_unpark(int64_t pid) {
     pthread_mutex_lock(&_table_mu);
     if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) {
@@ -545,21 +933,78 @@ void _tin_fiber_unpark(int64_t pid) {
         return;
     }
     TinFiber *f = _fibers[pid];
+    void *hdl = f->hdl;
+    pthread_mutex_unlock(&_table_mu);  // release early; status via per-fiber lock
+
+    _fib_lock(f);
     if (f->status == FIBER_BLOCKED) {
         f->status = FIBER_RUNNABLE;
-        pthread_mutex_unlock(&_table_mu);
-        _rq_push((TinRunnable){ f->hdl, pid });
+        _fib_unlock(f);
+        if (_is_worker) {
+            if (_worker_runnext_pid < 0) {
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+            } else {
+                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+                _rq_push(old);
+            }
+        } else {
+            _rq_push((TinRunnable){ hdl, pid });
+        }
         return;
     }
     if (f->status == FIBER_RUNNING) {
-        // _tin_fiber_park hasn't been called yet (fiber is still running).
-        // Set pending_wakeup so that when _tin_fiber_park is called it will
-        // skip blocking the fiber; the worker re-enqueues it after yield.
         f->pending_wakeup = 1;
+        _fib_unlock(f);
+        return;
+    }
+    _fib_unlock(f);
+}
+
+// Like _tin_fiber_unpark but the caller already has the coro handle so we skip
+// the _table_mu-protected f->hdl read.  The status check still needs _table_mu.
+// Used by TinFastMutex (fastmutex.c) and the channel waiter lists so that the
+// unpark path never has to dereference the fiber table to find the handle.
+void _tin_fiber_unpark_hdl(int64_t pid, void *hdl) {
+    pthread_mutex_lock(&_table_mu);
+    if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) {
         pthread_mutex_unlock(&_table_mu);
         return;
     }
-    pthread_mutex_unlock(&_table_mu);
+    TinFiber *f = _fibers[pid];
+    pthread_mutex_unlock(&_table_mu);  // release early; status via per-fiber lock
+
+    _fib_lock(f);
+    if (f->status == FIBER_BLOCKED) {
+        f->status = FIBER_RUNNABLE;
+        _fib_unlock(f);
+        if (_is_worker) {
+            if (_worker_runnext_pid < 0) {
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+            } else {
+                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                _worker_runnext_pid = pid;
+                _worker_runnext_hdl = hdl;
+                _worker_runnext_fib = f;
+                _rq_push(old);
+            }
+        } else {
+            _rq_push((TinRunnable){ hdl, pid });
+        }
+        return;
+    }
+    if (f->status == FIBER_RUNNING) {
+        f->pending_wakeup = 1;
+        _fib_unlock(f);
+        return;
+    }
+    _fib_unlock(f);
 }
 
 void _tin_fiber_yield_coro(void *hdl) {
@@ -581,12 +1026,13 @@ void _tin_fiber_yield_coro(void *hdl) {
 // executing its body on another worker thread.
 void _tin_fiber_park(int64_t pid) {
     if (pid <= 0) return;
-    pthread_mutex_lock(&_table_mu);
-    if (pid < _fiber_cnt && _fibers[pid]) {
-        TinFiber *f = _fibers[pid];
-        f->pending_park = 1;  // Worker will set BLOCKED after coro.suspend fires.
-    }
-    pthread_mutex_unlock(&_table_mu);
+    // pid is always _tin_current_pid() — the currently running fiber.
+    // Running fibers are never freed, so _fibers[pid] is valid without _table_mu.
+    TinFiber *f = _fibers[pid];
+    if (!f) return;
+    _fib_lock(f);
+    f->pending_park = 1;  // Worker will set BLOCKED after coro.suspend fires.
+    _fib_unlock(f);
 }
 
 void _tin_fiber_sync_await(int64_t pid) {
