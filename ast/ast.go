@@ -653,6 +653,34 @@ type AwaitExpr struct {
 // YieldStmt voluntarily yields the current fiber's time slice.
 type YieldStmt struct{ base }
 
+// AwaitMatchCase is one arm of an await match statement.
+// SlotIdx is the index of the one non-wildcard slot in the array pattern.
+// BindName is the variable that receives the result (empty = wildcard, currently rejected).
+type AwaitMatchCase struct {
+	Pos      Pos
+	SlotIdx  int
+	BindName string
+	Guard    Node
+	Body     *Block
+}
+
+// AwaitMatchStmt selects among multiple futures:
+//
+//	await match [a, b, c]:
+//	  case [x, _, _]: ...   // fires when a completes; x = a's result
+//	  case [_, y, _]: ...   // fires when b completes; y = b's result
+//	  default: ...          // non-blocking: runs if nothing is actionable
+//
+// Futures is always a fixed-length inline list (no array variables).
+// Without default: blocks until one future fires and a guard passes; panics if all exhausted.
+// With default: one non-blocking check; default runs if nothing is actionable.
+type AwaitMatchStmt struct {
+	base
+	Futures []Node
+	Cases   []AwaitMatchCase
+	Default *Block
+}
+
 // Type expressions
 
 // TypeExpr represents a type annotation in source

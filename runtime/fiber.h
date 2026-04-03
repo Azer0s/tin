@@ -64,6 +64,27 @@ void _tin_fiber_sync_await(int64_t pid);
 // Used by Future[t].await_result() in stdlib/sync/future.tin.
 void *_tin_future_await_raw(int64_t pid);
 
+// ---------------------------------------------------------------------------
+// await match support
+// ---------------------------------------------------------------------------
+
+// Forward declaration (full typedef is in fiber.c).
+typedef struct TinAnyWaiter TinAnyWaiter;
+
+// Non-blocking: returns index of first FIBER_DONE pid in pids[0..n-1], or -1.
+int64_t _tin_fiber_poll_any(int64_t *pids, int64_t n);
+
+// Like poll_any but skips indices where skip[i] != 0.
+int64_t _tin_fiber_poll_any_skip(int64_t *pids, int64_t n, int8_t *skip);
+
+// Park the calling fiber until any non-skipped pid completes.
+// aw must point to a TinAnyWaiter whose lifetime covers the suspend point.
+void _tin_fiber_join_any(int64_t *pids, int64_t n, int8_t *skip, void *my_hdl,
+                         TinAnyWaiter *aw);
+
+// Synchronous (main-thread) spin-wait. Returns index of first completed pid.
+int64_t _tin_fiber_sync_await_any(int64_t *pids, int64_t n, int8_t *skip);
+
 // _tin_current_pid and _tin_current_coro_hdl are static inline in runtime.h
 // (via extern __thread _current_pid / _current_hdl).
 

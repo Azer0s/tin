@@ -48,6 +48,13 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		return p.parseTopLevelVar()
 	case lexer.KW_SPAWN:
 		return p.parseSpawnExprStmt()
+	case lexer.KW_AWAIT:
+		// await match [...]: is a statement; plain await expr falls through to expression statement.
+		if p.peekAt(1).Type == lexer.KW_MATCH {
+			return p.parseAwaitMatchStmt()
+		}
+
+		return p.parseExprStatement()
 	case lexer.KW_YIELD:
 		p.advance()
 
@@ -643,6 +650,264 @@ func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
 	}
 
 	return stmt, nil
+}
+
+// parseAwaitMatchStmt parses:
+//
+//	await match [e1, e2, e3]:
+//	  case [x, _, _]: body
+//	  case [_, y, _] if guard: body
+//	  default: body
+//
+// The bracket list is parsed as a positional awaitable list, NOT an array literal.
+// Compiler errors are emitted for non-literal array syntax, wrong pattern lengths,
+// and invalid patterns (zero or multiple bindings per case).
+func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
+	p.advance() // consume "await"
+	p.advance() // consume "match"
+
+	// Require inline array literal.
+	if !p.check(lexer.LBRACKET) {
+		return nil, fmt.Errorf("await match requires an inline array literal [...]; variable and computed arrays are not yet supported (at %d:%d)",
+			p.peek().Line, p.peek().Col)
+	}
+
+	p.advance() // consume "["
+
+	var futures []ast.Node
+
+	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		p.skipWhitespace()
+
+		if p.check(lexer.RBRACKET) {
+			break
+		}
+
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+
+		futures = append(futures, expr)
+		p.skipWhitespace()
+
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return nil, err
+	}
+
+	if len(futures) == 0 {
+		return nil, fmt.Errorf("await match requires at least one future in the array literal")
+	}
+
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+
+	stmt := &ast.AwaitMatchStmt{Futures: futures}
+
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+	}
+
+	p.skipNewlines()
+
+	if !p.check(lexer.INDENT) {
+		return nil, fmt.Errorf("expected indented block after await match:")
+	}
+
+	p.advance() // consume INDENT
+	p.skipNewlines()
+
+	hasGuard := false
+
+	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+		if p.check(lexer.KW_DEFAULT) {
+			p.advance()
+
+			if _, err := p.expect(lexer.COLON); err != nil {
+				return nil, err
+			}
+
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				p.skipNewlines()
+
+				if p.check(lexer.INDENT) {
+					var err error
+
+					stmt.Default, err = p.parseBlock()
+					if err != nil {
+						return nil, err
+					}
+				}
+			} else if !p.check(lexer.EOF) && !p.check(lexer.DEDENT) {
+				s, err := p.parseStatement()
+				if err != nil {
+					return nil, err
+				}
+
+				if s != nil {
+					stmt.Default = &ast.Block{Stmts: []ast.Node{s}}
+				}
+			}
+		} else if p.check(lexer.KW_CASE) {
+			mc, err := p.parseAwaitMatchCase(len(futures))
+			if err != nil {
+				return nil, err
+			}
+
+			if mc.Guard != nil {
+				hasGuard = true
+			}
+
+			stmt.Cases = append(stmt.Cases, mc)
+		} else {
+			break
+		}
+
+		p.skipNewlines()
+	}
+
+	if p.check(lexer.DEDENT) {
+		p.advance()
+	}
+
+	// Warn if guards present but no default: all-exhausted path can panic at runtime.
+	if hasGuard && stmt.Default == nil {
+		fmt.Printf("warning: await match has guards but no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm to handle the unmatched case\n")
+	}
+
+	return stmt, nil
+}
+
+// parseAwaitMatchCase parses one "case [x, _, _] if guard: body" arm.
+// nFutures is the expected pattern length for validation.
+func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
+	pos := p.curPos()
+
+	if _, err := p.expect(lexer.KW_CASE); err != nil {
+		return ast.AwaitMatchCase{}, err
+	}
+
+	// Must be an array pattern.
+	if !p.check(lexer.LBRACKET) {
+		return ast.AwaitMatchCase{}, fmt.Errorf("await match case must use an array pattern [...] (at %d:%d)",
+			p.peek().Line, p.peek().Col)
+	}
+
+	p.advance() // consume "["
+
+	type slot struct {
+		name   string
+		isWild bool
+	}
+
+	var slots []slot
+
+	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		p.skipWhitespace()
+
+		if p.check(lexer.RBRACKET) {
+			break
+		}
+
+		if p.check(lexer.IDENT) && p.peek().Literal == "_" {
+			p.advance()
+			slots = append(slots, slot{isWild: true})
+		} else if p.check(lexer.IDENT) {
+			name := p.advance().Literal
+			slots = append(slots, slot{name: name})
+		} else {
+			return ast.AwaitMatchCase{}, fmt.Errorf("unexpected token in await match pattern: %s (at %d:%d)",
+				p.peek().Type, p.peek().Line, p.peek().Col)
+		}
+
+		p.skipWhitespace()
+
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return ast.AwaitMatchCase{}, err
+	}
+
+	// Validate pattern length.
+	if len(slots) != nFutures {
+		return ast.AwaitMatchCase{}, fmt.Errorf("await match pattern length %d does not match futures array length %d",
+			len(slots), nFutures)
+	}
+
+	// Validate exactly one binding slot.
+	bindIdx := -1
+
+	for i, s := range slots {
+		if !s.isWild {
+			if bindIdx >= 0 {
+				return ast.AwaitMatchCase{}, fmt.Errorf("await match case must have exactly one binding slot; found multiple non-wildcard slots")
+			}
+
+			bindIdx = i
+		}
+	}
+
+	if bindIdx < 0 {
+		return ast.AwaitMatchCase{}, fmt.Errorf("await match case has no binding slot; use 'default:' for an unconditional arm")
+	}
+
+	mc := ast.AwaitMatchCase{
+		Pos:      pos,
+		SlotIdx:  bindIdx,
+		BindName: slots[bindIdx].name,
+	}
+
+	// Optional guard.
+	if p.check(lexer.KW_IF) {
+		p.advance()
+
+		guard, err := p.parseExpr()
+		if err != nil {
+			return ast.AwaitMatchCase{}, err
+		}
+
+		mc.Guard = guard
+	}
+
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return ast.AwaitMatchCase{}, err
+	}
+
+	// Parse body.
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+		p.skipNewlines()
+
+		if p.check(lexer.INDENT) {
+			var err error
+
+			mc.Body, err = p.parseBlock()
+			if err != nil {
+				return ast.AwaitMatchCase{}, err
+			}
+		}
+	} else if !p.check(lexer.EOF) && !p.check(lexer.KW_CASE) && !p.check(lexer.KW_DEFAULT) {
+		s, err := p.parseStatement()
+		if err != nil {
+			return ast.AwaitMatchCase{}, err
+		}
+
+		if s != nil {
+			mc.Body = &ast.Block{Stmts: []ast.Node{s}}
+		}
+	}
+
+	return mc, nil
 }
 
 func (p *Parser) parseMatchCase() (ast.MatchCase, error) {

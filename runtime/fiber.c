@@ -103,7 +103,22 @@ typedef struct {
     // when each worker is running a different fiber (e.g. TINMAXPROCS=2).
     // Lock ordering: _table_mu (outer) -> state_lock (inner) — never reverse.
     _Atomic(uint32_t) state_lock;
+    // Set by _tin_fiber_join_any when a fiber is waiting for any of N targets.
+    // _fire_done_waiters checks this to do a CAS-based single-winner wakeup.
+    // Protected by _table_mu.
+    struct TinAnyWaiter *any_waiter;
 } TinFiber;
+
+// TinAnyWaiter - shared state for _tin_fiber_join_any.
+// Stack-allocated in _tin_fiber_join_any (safe: the frame lives until after
+// the fiber is unparked and the any_waiter pointer is cleared on all targets).
+typedef struct TinAnyWaiter {
+    int64_t          waiter_pid;
+    _Atomic(int32_t) fired;       // CAS 0->1 by the winning target fiber
+    int64_t          result_idx;  // index that completed; set before fired=1
+    int64_t         *pids;        // the watched pid array (for cleanup)
+    int64_t          n;           // length of pids
+} TinAnyWaiter;
 
 #define FIBER_DEFAULT_MAX (1 << 20)  // 1M
 
@@ -396,48 +411,74 @@ void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     _fib_unlock(f);
 }
 
+// _enqueue_waiter wakes wpid (already locked under _table_mu).
+// Caller must hold w's state_lock; this function releases it.
+static void _enqueue_waiter(int64_t wpid, TinFiber *w) {
+    if (w->status == FIBER_BLOCKED) {
+        w->status = FIBER_RUNNABLE;
+        void *whdl = w->hdl;
+        _fib_unlock(w);
+        if (_is_worker) {
+            if (_worker_runnext_pid < 0) {
+                _worker_runnext_pid = wpid;
+                _worker_runnext_hdl = whdl;
+                _worker_runnext_fib = w;
+            } else {
+                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
+                _worker_runnext_pid = wpid;
+                _worker_runnext_hdl = whdl;
+                _worker_runnext_fib = w;
+                _rq_push(old);
+            }
+        } else {
+            _rq_push((TinRunnable){ whdl, wpid });
+        }
+    } else if (w->pending_join) {
+        w->pending_wakeup = 1;
+        _fib_unlock(w);
+    } else {
+        _fib_unlock(w);
+    }
+}
+
 static void _fire_done_waiters(TinFiber *f) {
     // Must be called with _table_mu held.
     for (int i = 0; i < f->waiter_cnt; i++) {
         int64_t wpid = f->waiters[i];
         if (wpid <= 0 || wpid >= _fiber_cnt || !_fibers[wpid]) continue;
         TinFiber *w = _fibers[wpid];
-        _fib_lock(w);  // lock ordering: _table_mu (held) -> state_lock (acquired here)
-        if (w->status == FIBER_BLOCKED) {
-            // Waiter already suspended; wake it immediately.
-            w->status = FIBER_RUNNABLE;
-            void *whdl = w->hdl;
-            _fib_unlock(w);
-            // Use runnext when called from a worker to avoid cross-core
-            // condvar wakeup — keeps the woken fiber on the same worker.
-            if (_is_worker) {
-                if (_worker_runnext_pid < 0) {
-                    _worker_runnext_pid = wpid;
-                    _worker_runnext_hdl = whdl;
-                    _worker_runnext_fib = w;
-                } else {
-                    TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                    _worker_runnext_pid = wpid;
-                    _worker_runnext_hdl = whdl;
-                    _worker_runnext_fib = w;
-                    _rq_push(old);
-                }
-            } else {
-                _rq_push((TinRunnable){ whdl, wpid });
+        _fib_lock(w);
+
+        // If this waiter is part of a join_any group, attempt CAS to win.
+        TinAnyWaiter *aw = w->any_waiter;
+        if (aw) {
+            // Find which index f->pid corresponds to in aw->pids.
+            int64_t idx = -1;
+            for (int64_t j = 0; j < aw->n; j++) {
+                if (aw->pids[j] == f->pid) { idx = j; break; }
             }
-        } else if (w->pending_join) {
-            // Waiter called _tin_fiber_join but its coro.suspend hasn't fired
-            // yet (status is still FIBER_RUNNING).  Setting FIBER_RUNNABLE and
-            // pushing NOW would cause a second worker to call _coro_resume
-            // while the first worker's _coro_resume is still on the stack -
-            // a double-resume that corrupts the coroutine frame.
-            // Instead, set pending_wakeup: the worker loop will re-queue the
-            // fiber after _coro_resume returns and coro.suspend has completed.
-            w->pending_wakeup = 1;
-            _fib_unlock(w);
-        } else {
-            _fib_unlock(w);
+            int32_t expected = 0;
+            if (idx >= 0 && atomic_compare_exchange_strong(&aw->fired, &expected, 1)) {
+                // We won: record the result index and wake the waiter.
+                aw->result_idx = idx;
+                // Clear any_waiter on all other targets to avoid dangling pointer.
+                for (int64_t j = 0; j < aw->n; j++) {
+                    if (aw->pids[j] != f->pid && aw->pids[j] > 0 &&
+                        aw->pids[j] < _fiber_cnt && _fibers[aw->pids[j]]) {
+                        _fibers[aw->pids[j]]->any_waiter = NULL;
+                    }
+                }
+                w->any_waiter = NULL;
+                _enqueue_waiter(wpid, w); // releases w's state_lock
+            } else {
+                // Another target already won; just clear any_waiter on this target.
+                f->any_waiter = NULL;
+                _fib_unlock(w);
+            }
+            continue;
         }
+
+        _enqueue_waiter(wpid, w); // releases w's state_lock
     }
     f->waiter_cnt = 0;
 }
@@ -955,6 +996,124 @@ void _tin_fiber_join(int64_t pid, void *my_hdl) {
     while (target->status != FIBER_DONE)
         pthread_cond_wait(&target->done_cv, &target->done_mu);
     pthread_mutex_unlock(&target->done_mu);
+}
+
+// ---------------------------------------------------------------------------
+// await match runtime support
+// ---------------------------------------------------------------------------
+
+// _tin_fiber_poll_any: non-blocking check.
+// Returns the index of the first FIBER_DONE pid in pids[0..n-1], or -1.
+int64_t _tin_fiber_poll_any(int64_t *pids, int64_t n) {
+    pthread_mutex_lock(&_table_mu);
+    int64_t result = -1;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t pid = pids[i];
+        if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) continue;
+        if (_fibers[pid]->status == FIBER_DONE) { result = i; break; }
+    }
+    pthread_mutex_unlock(&_table_mu);
+    return result;
+}
+
+// _tin_fiber_poll_any_skip: like poll_any but skips indices where skip[i] != 0.
+// Used by the re-block loop when guards fail.
+int64_t _tin_fiber_poll_any_skip(int64_t *pids, int64_t n, int8_t *skip) {
+    pthread_mutex_lock(&_table_mu);
+    int64_t result = -1;
+    for (int64_t i = 0; i < n; i++) {
+        if (skip[i]) continue;
+        int64_t pid = pids[i];
+        if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) continue;
+        if (_fibers[pid]->status == FIBER_DONE) { result = i; break; }
+    }
+    pthread_mutex_unlock(&_table_mu);
+    return result;
+}
+
+// _tin_fiber_join_any: park the calling fiber until any of pids[0..n-1] completes.
+// skip[i] != 0 means ignore that slot (already processed with a failing guard).
+// On return the fiber has been unparked; call _tin_fiber_poll_any_skip to get idx.
+void _tin_fiber_join_any(int64_t *pids, int64_t n, int8_t *skip, void *my_hdl,
+                         TinAnyWaiter *aw) {
+    (void)my_hdl;
+    pthread_mutex_lock(&_table_mu);
+
+    int64_t my_pid = _is_worker_thread() ? _current_pid : -1;
+
+    // Check if any non-skipped target is already done.
+    for (int64_t i = 0; i < n; i++) {
+        if (skip && skip[i]) continue;
+        int64_t pid = pids[i];
+        if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) continue;
+        if (_fibers[pid]->status == FIBER_DONE) {
+            pthread_mutex_unlock(&_table_mu);
+            return; // no need to park
+        }
+    }
+
+    if (my_pid <= 0 || my_pid >= _fiber_cnt || !_fibers[my_pid]) {
+        // Non-fiber context: fall through to sync wait below.
+        pthread_mutex_unlock(&_table_mu);
+        for (;;) {
+            int64_t idx = _tin_fiber_poll_any_skip(pids, n, skip);
+            if (idx >= 0) return;
+            sched_yield();
+        }
+    }
+
+    // Initialize the any_waiter.
+    atomic_store(&aw->fired, 0);
+    aw->result_idx = -1;
+    aw->pids       = pids;
+    aw->n          = n;
+    aw->waiter_pid = my_pid;
+
+    TinFiber *me = _fibers[my_pid];
+    me->any_waiter = aw;
+
+    // Register my_pid in each non-skipped, not-done target's waiter list.
+    int registered = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (skip && skip[i]) continue;
+        int64_t pid = pids[i];
+        if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) continue;
+        TinFiber *t = _fibers[pid];
+        if (t->status == FIBER_DONE) {
+            // Found a done target while registering: win immediately.
+            atomic_store(&aw->fired, 1);
+            aw->result_idx = i;
+            me->any_waiter = NULL;
+            pthread_mutex_unlock(&_table_mu);
+            return;
+        }
+        if (t->waiter_cnt < FIBER_MAX_WAITERS) {
+            t->waiters[t->waiter_cnt++] = my_pid;
+            t->any_waiter = aw;
+            registered++;
+        }
+    }
+
+    if (registered == 0) {
+        // Nothing to wait on (all skipped or list full).
+        me->any_waiter = NULL;
+        pthread_mutex_unlock(&_table_mu);
+        return;
+    }
+
+    me->pending_join = 1;
+    pthread_mutex_unlock(&_table_mu);
+    // coro.suspend fires after this call returns in the generated IR.
+}
+
+// _tin_fiber_sync_await_any: synchronous (main-thread) wait.
+// Spin-polls until any non-skipped pid completes. Returns its index.
+int64_t _tin_fiber_sync_await_any(int64_t *pids, int64_t n, int8_t *skip) {
+    for (;;) {
+        int64_t idx = _tin_fiber_poll_any_skip(pids, n, skip);
+        if (idx >= 0) return idx;
+        sched_yield();
+    }
 }
 
 // Wake a blocked fiber by marking it RUNNABLE and re-enqueueing it.
