@@ -1,51 +1,55 @@
 //!+udp.c -- -I ../../runtime
 // stdlib/udp - UDP socket types.
 //
-// Provides two types:
-//   udp::Socket  - bound socket for receiving from any sender
-//   udp::Conn    - connected socket for talking to a fixed peer
+// Mirrors the tcp package but uses datagrams instead of streams:
 //
-// Socket example (echo server):
-//   let sock = udp::listen(8082)
-//   let buf   = ...  // heap-allocated buffer
-//   let (n, host, port) = await sock.recv_from(buf, 4096)
-//   await sock.send_to(buf, n, host, port)
+//   let srv = udp::listen(8082)
+//   let (c, ok) = await srv.accept(65536)
+//   await c.write(c.data)                 // echo the received datagram back
 //
-// Conn example (client):
+// For a connected client:
 //   let c = udp::dial("127.0.0.1", 8082)
-//   await c.write(&buf[0], n)
-//   let got = await c.read(&buf[0], 4096)
+//   await c.write(buf, n)
+//   let got = await ioutil::read_bytes(c, 4096)
 
 use { loop } from macros
 use io
 use sync
 
 // C helpers (private)
-fn _tin_udp_listen_c(port i32) i32                                          = extern("_tin_udp_listen")
-fn _tin_udp_connect_c(host string, port i32) i32                            = extern("_tin_udp_connect")
-fn _tin_udp_recvfrom_c(fd i32, buf *byte, n i64, host_out *byte, port_out *i32) i64 = extern("_tin_udp_recvfrom")
-fn _tin_udp_sendto_c(fd i32, buf *byte, n i64, host string, port i32) i64   = extern("_tin_udp_sendto")
-fn _tin_io_blocked_val_c() i64                                              = extern("_tin_io_blocked_val")
-fn _tin_buf_alloc_c(n i64) *byte                                            = extern("_tin_buf_alloc")
-fn _tin_buf_free_c(ptr *byte)                                               = extern("_tin_buf_free")
-fn _tin_string_from_bytes_c(ptr *byte, n i64) string                        = extern("_tin_string_from_bytes")
-fn _tin_strlen_c(s *byte) i64                                               = extern("strlen")
+fn _tin_udp_listen_c(port i32) i32                                                     = extern("_tin_udp_listen")
+fn _tin_udp_connect_c(host string, port i32) i32                                       = extern("_tin_udp_connect")
+fn _tin_udp_recvfrom_c(fd i32, buf *byte, n i64, host_out *string, port_out *i32) i64  = extern("_tin_udp_recvfrom")
+fn _tin_udp_sendto_c(fd i32, buf *byte, n i64, host string, port i32) i64              = extern("_tin_udp_sendto")
+fn _tin_io_blocked_val_c() i64                                                         = extern("_tin_io_blocked_val")
+fn _tin_buf_alloc_c(n i64) *byte                                                       = extern("_tin_buf_alloc")
+fn _tin_buf_free_c(ptr *byte)                                                          = extern("_tin_buf_free")
+fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]                                      = extern("_tin_bytes_from_buf")
 
 // Internal async implementations
 
-fn{#async} recv_from_impl(fd i32, buf *byte, n i64) (i64, string, i32) =
-  let blocked = _tin_io_blocked_val_c()
-  let host_buf = _tin_buf_alloc_c(64)
-  let port_out i32 = 0
+fn{#async} recv_from_impl(fd i32, max_n i64) ([byte], string, i32) =
+  let blocked  = _tin_io_blocked_val_c()
+  let buf      = _tin_buf_alloc_c(max_n)
+  let host     = ""
+  let port i32 = 0
   loop:
-    let r = _tin_udp_recvfrom_c(fd, buf, n, host_buf, &port_out)
+    let r = _tin_udp_recvfrom_c(fd, buf, max_n, &host, &port)
     if r != blocked:
-      let host = _tin_string_from_bytes_c(host_buf, _tin_strlen_c(host_buf))
-      _tin_buf_free_c(host_buf)
-      return (r, host, port_out)
+      let sz = r
+      if sz < 0: sz = 0
+      let data = _tin_bytes_from_buf_c(buf, sz)
+      _tin_buf_free_c(buf)
+      return (data, host, port)
     yield
 
-fn{#async} send_to_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
+fn{#async} accept_impl(fd i32, max_n i64) (Conn, bool) =
+  let (data, host, port) = await spawn recv_from_impl(fd, max_n)
+  if len(data) == 0:
+    return (Conn{fd: fd, host: "", port: 0, data: [], owns_fd: false}, false)
+  return (Conn{fd: fd, host: host, port: port, data: data, owns_fd: false}, true)
+
+fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = _tin_io_blocked_val_c()
   loop:
     let r = _tin_udp_sendto_c(fd, buf, n, host, port)
@@ -53,57 +57,59 @@ fn{#async} send_to_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
       return r
     yield
 
-// Socket is a bound UDP socket that can receive from any sender.
-// Create one with udp::listen(port).
-struct Socket =
-  fd i32
+fn{#async} send_to_impl(fd i32, data [byte], host string, port i32) i64 =
+  if len(data) == 0:
+    return 0
+  return await spawn send_to_raw_impl(fd, &data[0], len(data), host, port)
 
-  // recv receives up to n bytes from any source (source address discarded).
-  // Returns Future[i64] - use `await sock.recv(buf, n)`.
-  fn recv(this Socket, buf *byte, n i64) Future[i64] =
-    return spawn io::async_read(this.fd, buf, n)
-
-  // recv_from receives up to n bytes and returns (bytes_read, source_host, source_port).
-  // Returns Future[(i64, string, i32)] - use `let (n, host, port) = await sock.recv_from(buf, n)`.
-  fn recv_from(this Socket, buf *byte, n i64) Future[(i64, string, i32)] =
-    return spawn recv_from_impl(this.fd, buf, n)
-
-  // send_to sends n bytes to host:port.
-  // Returns Future[i64] - use `await sock.send_to(buf, n, host, port)`.
-  fn send_to(this Socket, buf *byte, n i64, host string, port i32) Future[i64] =
-    return spawn send_to_impl(this.fd, buf, n, host, port)
-
-  fn close(this Socket) =
-    io::close(this.fd)
-
-// Conn is a connected UDP socket bound to a fixed remote peer.
-// Create one with udp::dial(host, port).
+// Conn is a UDP connection returned by either Server.accept or udp::dial.
+// For accept-based Conn, c.data holds the received datagram; write sends back to the sender.
+// For dial-based Conn, implements io::AsyncReader and io::AsyncWriter.
 struct Conn (io::AsyncReader, io::AsyncWriter) =
-  fd i32
+  fd      i32
+  host    string
+  port    i32
+  data    [byte]  // datagram received during accept (empty for dial-based Conn)
+  owns_fd bool    // false for accept-based (server fd is shared); true for dial-based
 
-  // read receives up to n bytes from the connected peer.
-  // Returns Future[i64] - use `await conn.read(buf, n)`.
   fn read(this Conn, buf *byte, n i64) Future[i64] =
     return spawn io::async_read(this.fd, buf, n)
 
-  // write sends up to n bytes to the connected peer.
-  // Returns Future[i64] - use `await conn.write(buf, n)`.
+  // write sends buf[0..n] to the peer (AsyncWriter interface).
   fn write(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn io::async_write(this.fd, buf, n)
+    return spawn send_to_raw_impl(this.fd, buf, n, this.host, this.port)
+
+  // write sends data to the peer (slice convenience overload).
+  fn write(this Conn, data [byte]) Future[i64] =
+    return spawn send_to_impl(this.fd, data, this.host, this.port)
 
   fn close(this Conn) =
-    io::close(this.fd)
+    if this.owns_fd:
+      io::close(this.fd)
 
   fn valid(this Conn) bool =
     return this.fd >= 0
 
+// Server listens for incoming UDP datagrams.
+// Create with udp::listen(port).
+struct Server =
+  fd i32
+
+  // accept waits for the next datagram and returns a Conn to the sender.
+  // max_n is the maximum datagram size to receive.
+  fn accept(this Server, max_n i64) Future[(Conn, bool)] =
+    return spawn accept_impl(this.fd, max_n)
+
+  fn close(this Server) =
+    io::close(this.fd)
+
 // listen creates a bound UDP socket on the given port.
 // Panics if the port cannot be bound.
-fn listen(port i32) Socket =
+fn listen(port i32) Server =
   let fd = _tin_udp_listen_c(port)
   if fd < 0:
     panic("udp::listen: failed to bind port {port}")
-  return Socket{fd: fd}
+  return Server{fd: fd}
 
 // dial creates a connected UDP socket to host:port.
 // Panics on failure.
@@ -111,6 +117,6 @@ fn dial(host string, port i32) Conn =
   let fd = _tin_udp_connect_c(host, port)
   if fd < 0:
     panic("udp::dial: failed to connect to {host}:{port}")
-  return Conn{fd: fd}
+  return Conn{fd: fd, host: host, port: port, data: [], owns_fd: true}
 
-export { Socket, Conn, listen, dial } as udp
+export { Server, Conn, listen, dial } as udp

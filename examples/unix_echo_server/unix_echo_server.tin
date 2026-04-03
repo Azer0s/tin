@@ -10,7 +10,6 @@
 //   kill %1
 
 use { loop, async } from macros
-use io
 use ioutil
 use unix
 

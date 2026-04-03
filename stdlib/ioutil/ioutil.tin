@@ -1,9 +1,8 @@
 // stdlib/ioutil - high-level I/O utilities.
 //
-// Provides read_string_until / read_string / write_string that work on both
-// raw file descriptors (i32) and any io::AsyncReader / io::AsyncWriter.
-//
-// All functions return Future[T] so callers can await them directly:
+// All functions are overloaded to accept either a raw file descriptor (i32) or
+// any io::AsyncReader / io::AsyncWriter. The fd overloads delegate through
+// FdReader / FdWriter adapters so there is only one implementation per operation.
 //
 //   let line = await ioutil::read_string(conn)
 //   await ioutil::write_string(conn, "response\n")
@@ -17,44 +16,33 @@ use { loop } from macros
 
 // C helpers
 fn _tin_string_from_bytes_c(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
-fn _tin_string_data_c(s string) *byte         = extern("_tin_string_data")
-fn _tin_buf_alloc_c(n i64) *byte              = extern("_tin_buf_alloc")
-fn _tin_buf_realloc_c(ptr *byte, n i64) *byte = extern("_tin_buf_realloc")
-fn _tin_buf_free_c(ptr *byte)                 = extern("_tin_buf_free")
-fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
+fn _tin_string_data_c(s string) *byte                = extern("_tin_string_data")
+fn _tin_buf_alloc_c(n i64) *byte                     = extern("_tin_buf_alloc")
+fn _tin_buf_realloc_c(ptr *byte, n i64) *byte        = extern("_tin_buf_realloc")
+fn _tin_buf_free_c(ptr *byte)                        = extern("_tin_buf_free")
+fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]    = extern("_tin_bytes_from_buf")
 
+// ---------------------------------------------------------------------------
+// Adapters: wrap a raw fd so it works with AsyncReader / AsyncWriter overloads.
+// ---------------------------------------------------------------------------
+
+struct FdReader (io::AsyncReader) =
+  fd i32
+
+  fn read(this FdReader, buf *byte, n i64) Future[i64] =
+    return spawn io::async_read(this.fd, buf, n)
+
+struct FdWriter (io::AsyncWriter) =
+  fd i32
+
+  fn write(this FdWriter, buf *byte, n i64) Future[i64] =
+    return spawn io::async_write(this.fd, buf, n)
+
+// ---------------------------------------------------------------------------
 // Internal {#async} implementations
+// ---------------------------------------------------------------------------
 
-fn{#async} read_string_until_fd(fd i32, delim byte) string =
-  let tmp  = _tin_buf_alloc_c(4096)
-  let out  = _tin_buf_alloc_c(256)
-  let cap  i64 = 256
-  let n    i64 = 0
-  let done = false
-  loop:
-    if done: break
-    let r = await spawn io::async_read(fd, tmp, 4096)
-    if r <= 0: break
-    let i i64 = 0
-    loop:
-      if i >= r: break
-      if n >= cap:
-        cap = cap * 2
-        out = _tin_buf_realloc_c(out, cap)
-      out[n] = tmp[i]
-      n = n + 1
-      if delim != 0 && tmp[i] == delim:
-        done = true
-        break
-      i = i + 1
-  if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
-  if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
-  let s = _tin_string_from_bytes_c(out, n)
-  _tin_buf_free_c(tmp)
-  _tin_buf_free_c(out)
-  return s
-
-fn{#async} read_string_until_reader(r io::AsyncReader, delim byte) string =
+fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
   let tmp  = _tin_buf_alloc_c(4096)
   let out  = _tin_buf_alloc_c(256)
   let cap  i64 = 256
@@ -83,59 +71,17 @@ fn{#async} read_string_until_reader(r io::AsyncReader, delim byte) string =
   _tin_buf_free_c(out)
   return s
 
-fn{#async} write_string_fd(fd i32, s string) =
-  let ptr = _tin_string_data_c(s)
-  await io::write_all(fd, ptr, len(s))
+fn{#async} write_string_impl(w io::AsyncWriter, s string) =
+  let ptr  = _tin_string_data_c(s)
+  let n    = len(s)
+  let sent i64 = 0
+  loop:
+    if sent >= n: break
+    let r = await w.write(ptr + sent, n - sent)
+    if r <= 0: break
+    sent = sent + r
 
-fn{#async} write_string_writer(w io::AsyncWriter, s string) =
-  let ptr = _tin_string_data_c(s)
-  await w.write(ptr, len(s))
-
-// Public API
-
-// read_string_until reads from fd until delim is seen (or EOF).
-// Pass 0 as delim to read until EOF.
-// Returns Future[string] - use `await ioutil::read_string_until(fd, delim)`.
-fn read_string_until(fd i32, delim byte) Future[string] =
-  return spawn read_string_until_fd(fd, delim)
-
-// read_string_until reads from an AsyncReader until delim is seen (or EOF).
-// Returns Future[string] - use `await ioutil::read_string_until(r, delim)`.
-fn read_string_until(r io::AsyncReader, delim byte) Future[string] =
-  return spawn read_string_until_reader(r, delim)
-
-// read_string reads a line from a raw file descriptor (until newline or EOF).
-// Returns Future[string] - use `await ioutil::read_string(fd)`.
-fn read_string(fd i32) Future[string] =
-  return spawn read_string_until_fd(fd, @'\n')
-
-// read_string reads a line from any AsyncReader (until newline or EOF).
-// Returns Future[string] - use `await ioutil::read_string(r)`.
-fn read_string(r io::AsyncReader) Future[string] =
-  return spawn read_string_until_reader(r, @'\n')
-
-// write_string writes s to a raw file descriptor.
-// Returns Future[sync::Unit] - use `await ioutil::write_string(fd, s)`.
-fn write_string(fd i32, s string) Future[sync::Unit] =
-  return spawn write_string_fd(fd, s)
-
-// write_string writes s to any AsyncWriter.
-// Returns Future[sync::Unit] - use `await ioutil::write_string(w, s)`.
-fn write_string(w io::AsyncWriter, s string) Future[sync::Unit] =
-  return spawn write_string_writer(w, s)
-
-// ---------------------------------------------------------------------------
-// Bytes API
-// ---------------------------------------------------------------------------
-
-fn{#async} read_bytes_fd_impl(fd i32, n i64) [byte] =
-  let tmp = _tin_buf_alloc_c(n)
-  let got = await io::read_exact(fd, tmp, n)
-  let result = _tin_bytes_from_buf_c(tmp, got)
-  _tin_buf_free_c(tmp)
-  return result
-
-fn{#async} read_bytes_reader_impl(r io::AsyncReader, n i64) [byte] =
+fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
   let tmp = _tin_buf_alloc_c(n)
   let got i64 = 0
   loop:
@@ -147,35 +93,7 @@ fn{#async} read_bytes_reader_impl(r io::AsyncReader, n i64) [byte] =
   _tin_buf_free_c(tmp)
   return result
 
-fn{#async} read_bytes_until_fd_impl(fd i32, delim byte) [byte] =
-  let tmp  = _tin_buf_alloc_c(4096)
-  let out  = _tin_buf_alloc_c(256)
-  let cap  i64 = 256
-  let n    i64 = 0
-  let done = false
-  loop:
-    if done: break
-    let r = await spawn io::async_read(fd, tmp, 4096)
-    if r <= 0: break
-    let i i64 = 0
-    loop:
-      if i >= r: break
-      if n >= cap:
-        cap = cap * 2
-        out = _tin_buf_realloc_c(out, cap)
-      out[n] = tmp[i]
-      n = n + 1
-      if delim != 0 && tmp[i] == delim:
-        done = true
-        break
-      i = i + 1
-  if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
-  let result = _tin_bytes_from_buf_c(out, n)
-  _tin_buf_free_c(tmp)
-  _tin_buf_free_c(out)
-  return result
-
-fn{#async} read_bytes_until_reader_impl(r io::AsyncReader, delim byte) [byte] =
+fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
   let tmp  = _tin_buf_alloc_c(4096)
   let out  = _tin_buf_alloc_c(256)
   let cap  i64 = 256
@@ -203,46 +121,71 @@ fn{#async} read_bytes_until_reader_impl(r io::AsyncReader, delim byte) [byte] =
   _tin_buf_free_c(out)
   return result
 
-fn{#async} write_bytes_fd_impl(fd i32, data [byte]) =
+fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
   let n = len(data)
-  if n > 0:
-    await io::write_all(fd, &data[0], n)
+  if n == 0:
+    return
+  let ptr  = &data[0]
+  let sent i64 = 0
+  loop:
+    if sent >= n: break
+    let r = await w.write(ptr + sent, n - sent)
+    if r <= 0: break
+    sent = sent + r
 
-fn{#async} write_bytes_writer_impl(w io::AsyncWriter, data [byte]) =
-  let n = len(data)
-  if n > 0:
-    await w.write(&data[0], n)
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// read_string_until reads from fd until delim is seen (or EOF).
+// Pass 0 as delim to read until EOF.
+fn read_string_until(fd i32, delim byte) Future[string] =
+  return read_string_until(FdReader{fd: fd}, delim)
+
+// read_string_until reads from an AsyncReader until delim is seen (or EOF).
+fn read_string_until(r io::AsyncReader, delim byte) Future[string] =
+  return spawn read_string_until_impl(r, delim)
+
+// read_string reads a line (until newline or EOF) from a raw file descriptor.
+fn read_string(fd i32) Future[string] =
+  return read_string(FdReader{fd: fd})
+
+// read_string reads a line (until newline or EOF) from any AsyncReader.
+fn read_string(r io::AsyncReader) Future[string] =
+  return spawn read_string_until_impl(r, @'\n')
+
+// write_string writes s to a raw file descriptor.
+fn write_string(fd i32, s string) Future[sync::Unit] =
+  return write_string(FdWriter{fd: fd}, s)
+
+// write_string writes s to any AsyncWriter.
+fn write_string(w io::AsyncWriter, s string) Future[sync::Unit] =
+  return spawn write_string_impl(w, s)
 
 // read_bytes reads exactly n bytes from a raw file descriptor.
-// Returns Future[[byte]] - use `let data = await ioutil::read_bytes(fd, n)`.
 fn read_bytes(fd i32, n i64) Future[[byte]] =
-  return spawn read_bytes_fd_impl(fd, n)
+  return read_bytes(FdReader{fd: fd}, n)
 
 // read_bytes reads exactly n bytes from any AsyncReader.
-// Returns Future[[byte]] - use `let data = await ioutil::read_bytes(r, n)`.
 fn read_bytes(r io::AsyncReader, n i64) Future[[byte]] =
-  return spawn read_bytes_reader_impl(r, n)
+  return spawn read_bytes_impl(r, n)
 
-// read_bytes_until reads bytes from a raw file descriptor until delim is seen (or EOF).
+// read_bytes_until reads bytes from a raw file descriptor until delim (or EOF).
 // The delimiter is not included in the returned slice.
-// Returns Future[[byte]] - use `let data = await ioutil::read_bytes_until(fd, delim)`.
 fn read_bytes_until(fd i32, delim byte) Future[[byte]] =
-  return spawn read_bytes_until_fd_impl(fd, delim)
+  return read_bytes_until(FdReader{fd: fd}, delim)
 
-// read_bytes_until reads bytes from any AsyncReader until delim is seen (or EOF).
-// Returns Future[[byte]] - use `let data = await ioutil::read_bytes_until(r, delim)`.
+// read_bytes_until reads bytes from any AsyncReader until delim (or EOF).
 fn read_bytes_until(r io::AsyncReader, delim byte) Future[[byte]] =
-  return spawn read_bytes_until_reader_impl(r, delim)
+  return spawn read_bytes_until_impl(r, delim)
 
 // write_bytes writes a byte slice to a raw file descriptor.
-// Returns Future[sync::Unit] - use `await ioutil::write_bytes(fd, data)`.
 fn write_bytes(fd i32, data [byte]) Future[sync::Unit] =
-  return spawn write_bytes_fd_impl(fd, data)
+  return write_bytes(FdWriter{fd: fd}, data)
 
 // write_bytes writes a byte slice to any AsyncWriter.
-// Returns Future[sync::Unit] - use `await ioutil::write_bytes(w, data)`.
 fn write_bytes(w io::AsyncWriter, data [byte]) Future[sync::Unit] =
-  return spawn write_bytes_writer_impl(w, data)
+  return spawn write_bytes_impl(w, data)
 
 export {
   read_string, read_string_until, write_string,

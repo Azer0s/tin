@@ -60,10 +60,10 @@ int32_t _tin_udp_connect(const char *host, int32_t port) {
 
 // Non-blocking recvfrom.
 // Returns bytes received (>= 0), -errno on hard error, or INT64_MIN if blocked.
-// Fills host_out (at least 48 bytes) with a null-terminated dotted-decimal IP.
-// Sets *port_out to the source port in host byte order.
+// On success, constructs a TinString in *host_out with the dotted-decimal source IP
+// and sets *port_out to the source port in host byte order.
 int64_t _tin_udp_recvfrom(int32_t fd, void *buf, int64_t n,
-                           char *host_out, int32_t *port_out) {
+                           TinString *host_out, int32_t *port_out) {
     _tin_set_nonblocking(fd);
 
     struct sockaddr_in src;
@@ -75,14 +75,16 @@ int64_t _tin_udp_recvfrom(int32_t fd, void *buf, int64_t n,
     } while (r < 0 && errno == EINTR);
 
     if (r >= 0) {
-        inet_ntop(AF_INET, &src.sin_addr, host_out, 48);
+        char host_buf[48];
+        inet_ntop(AF_INET, &src.sin_addr, host_buf, sizeof(host_buf));
+        *host_out = _tin_string_from_bytes(host_buf, (int64_t)strlen(host_buf));
         *port_out = (int32_t)ntohs(src.sin_port);
         return (int64_t)r;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK)
         return _tin_async_park_read(fd);
 
-    host_out[0] = '\0';
+    *host_out = _tin_string_from_bytes("", 0);
     *port_out = 0;
     return -(int64_t)errno;
 }
