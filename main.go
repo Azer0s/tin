@@ -666,7 +666,6 @@ func runDirTests(dir string, extraFlags []string) {
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
 func runFileTests(fpaths []string, extraFlags []string) {
-
 	type result struct {
 		file   string
 		passed bool

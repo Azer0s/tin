@@ -21,7 +21,8 @@ async handle_conn(conn tcp::Conn) =
   defer conn.close()
   loop:
     let line = await ioutil::read_string(conn)
-    if len(line) == 0:
+
+    if len(line) == 0 || line == "quit":
       return
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
