@@ -252,3 +252,31 @@ String literals can be concatenated with `++`:
 let a = "Hello"
 let b = a ++ ", world!"
 ```
+
+### Byte-array echo formats
+
+`[byte]`, `[u8]`, and `[char]` are all the same underlying type (`{i8*, i64}`),
+but `echo` formats each one differently based on the declared element type:
+
+| Element type | `echo` output          | Per-element format |
+|--------------|------------------------|--------------------|
+| `[byte]`     | `[48 65 6c 6c 6f]`     | two-digit hex      |
+| `[u8]`       | `[72 101 108 108 111]` | unsigned decimal   |
+| `[char]`     | `[H e l l o]`          | character          |
+| `string`     | `Hello`                | UTF-8 string       |
+
+```rust
+let s = "Hello"
+
+let as_bytes = s as [byte]
+echo as_bytes   // [48 65 6c 6c 6f]
+
+let as_u8s = s as [u8]
+echo as_u8s     // [72 101 108 108 111]
+
+let as_chars = s as [char]
+echo as_chars   // [H e l l o]
+```
+
+The format is chosen at compile time from the static type of the variable or
+cast expression -- there is no runtime overhead.
