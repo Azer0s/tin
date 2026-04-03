@@ -233,9 +233,11 @@ let n = make_node(42)   // n : *node
 echo n.value            // 42
 ```
 
-The allocated struct is ARC-tracked (the pointer is released when the variable
-goes out of scope). This is the idiomatic pattern for factory functions that
-return heap-allocated structs.
+The allocated struct is ARC-tracked - the pointer is released automatically
+when the variable goes out of scope. No `mem::free` is needed. The same applies
+when returning the address of a named local (`return &x`): the compiler promotes
+the variable to an ARC block at the return site and the caller's variable
+releases it on scope exit.
 
 ---
 

@@ -227,8 +227,9 @@ let p = mem::malloc(64) as *byte    // raw C malloc - caller must free
 mem::free(p as *void)               // explicit release required
 ```
 
-Normal Tin code does not need `mem`. `&struct{}` heap literals are
-ARC-managed automatically and are freed when the owning variable leaves scope.
+Normal Tin code does not need `mem`. All pointers obtained via `&` (struct
+literals, named locals returned from functions) are ARC-managed and freed
+automatically when the owning variable leaves scope.
 
 ---
 
