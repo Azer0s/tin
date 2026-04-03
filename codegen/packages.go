@@ -538,11 +538,21 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 				prevScope.set(methodKey, entry)
 			}
+			// Propagate $coro variant so that `await obj.method()` works in
+			// calling code (directCallHasCoroVariant checks prevScope for the $coro).
+			coroKey := methodKey + "$coro"
+			if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+				prevScope.set(coroKey, entry)
+			}
 			// Also expose under bare key for backward compatibility.
 			bareMethodKey := sd.Name + "_" + m.Name
 			if bareMethodKey != methodKey {
 				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 					prevScope.set(bareMethodKey, entry)
+				}
+				bareCoroKey := bareMethodKey + "$coro"
+				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+					prevScope.set(bareCoroKey, entry)
 				}
 			}
 		}
@@ -855,11 +865,21 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 				prevScope.set(methodKey, entry)
 			}
+			// Propagate $coro variant so that `await obj.method()` works in
+			// calling code (directCallHasCoroVariant checks prevScope for the $coro).
+			coroKey := methodKey + "$coro"
+			if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+				prevScope.set(coroKey, entry)
+			}
 			// Also register under bare name for backward compatibility within same scope.
 			bareMethodKey := sd.Name + "_" + m.Name
 			if bareMethodKey != methodKey {
 				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 					prevScope.set(bareMethodKey, entry)
+				}
+				bareCoroKey := bareMethodKey + "$coro"
+				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+					prevScope.set(bareCoroKey, entry)
 				}
 			}
 		}

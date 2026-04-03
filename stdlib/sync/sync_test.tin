@@ -117,15 +117,15 @@ test "channel bool false" =
 
 test "mutex lock and unlock" =
   let m = sync::Mutex.make()
-  m.lock()
+  await m.lock()
   m.unlock()
   assert::ok(true)
 
 test "mutex reacquirable after unlock" =
   let m = sync::Mutex.make()
-  m.lock()
+  await m.lock()
   m.unlock()
-  m.lock()
+  await m.lock()
   m.unlock()
   assert::ok(true)
 
