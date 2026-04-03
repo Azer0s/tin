@@ -150,7 +150,6 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		//
 		// Type rule: await is valid iff expr : Awaitable[T] (i.e. Future[T]).
 		// Calling a {#async} fn directly within a coroutine uses inline drive.
-
 		// {#async} direct call handling: `await asyncFn(args)` (no explicit spawn).
 		//
 		// Two cases based on calling context:
