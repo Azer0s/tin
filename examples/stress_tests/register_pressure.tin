@@ -176,11 +176,11 @@ test "many int locals" =
   let r = many_int_locals()
   // a0..a9 = 55
   // b0..b4 = 3+7+11+15+19 = 55
-  // c0..c4 = 21+77+57+49+285 = 489  (3*7, 11*15, 19*3, 7*11, 15*19)
-  // d0 = 21+77+57 = 155, d1 = 49+285 = 334
-  // e0 = 155-334 = -179, e1 = 155+334 = 489
-  // total = 55+55+489+155+334+(-179)+489
-  assert::equals(r, 55 + 55 + (3*7 + 11*15 + 19*3 + 7*11 + 15*19) + 155 + 334 + (155 - 334) + 489)
+  // c0..c4 = 21+165+57+77+285 = 605  (b0*b1, b2*b3, b4*b0, b1*b2, b3*b4)
+  // d0 = c0+c1+c2 = 21+165+57 = 243, d1 = c3+c4 = 77+285 = 362
+  // e0 = d0-d1 = 243-362 = -119, e1 = d0+d1 = 243+362 = 605
+  // total = 55+55+605+243+362+(-119)+605 = 1806
+  assert::equals(r, 55 + 55 + (3*7 + 11*15 + 19*3 + 7*11 + 15*19) + 243 + 362 + (243 - 362) + 605)
 
 test "many f64 locals produces finite result" =
   let r = many_f64_locals()
@@ -197,7 +197,7 @@ test "8 params product" =
 
 test "dense loop register pressure" =
   let r = dense_loop(10)
-  assert::ok(r >= 0)  // just verify no crash
+  assert::equals(r, -3560)  // verified with C: h=g*a+b goes negative at i>=3
 
 test "cross-call live ranges n=2" =
   // v0=4, v1=6, v2=10, v3=14, v4=22

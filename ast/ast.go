@@ -125,10 +125,11 @@ type ArrayDestructDecl struct {
 	Value     Node
 }
 
-// StructDestructDecl let {x, y} TypeName = expr
+// StructDestructDecl let {x, y} TypeName = expr  or  let {x: a, y: b} TypeName = expr
 type StructDestructDecl struct {
 	base
-	Names      []string
+	Names      []string // field names to extract
+	VarNames   []string // variable names to bind (if nil, same as Names)
 	StructType TypeExpr
 	Value      Node
 }
@@ -142,10 +143,12 @@ type TupleArrayType struct {
 func (t *TupleArrayType) typeExprMarker() {}
 func (t *TupleArrayType) String() string {
 	s := "@["
+
 	for i, e := range t.ElemTypes {
 		if i > 0 {
 			s += ", "
 		}
+
 		s += e.String()
 	}
 
@@ -650,10 +653,12 @@ type GenericType struct {
 func (g *GenericType) typeExprMarker() {}
 func (g *GenericType) String() string {
 	params := ""
+
 	for i, p := range g.TypeParams {
 		if i > 0 {
 			params += ", "
 		}
+
 		params += p.String()
 	}
 
@@ -704,10 +709,12 @@ type UnionTypeExpr struct {
 func (u *UnionTypeExpr) typeExprMarker() {}
 func (u *UnionTypeExpr) String() string {
 	s := ""
+
 	for i, t := range u.Types {
 		if i > 0 {
 			s += " | "
 		}
+
 		s += t.String()
 	}
 

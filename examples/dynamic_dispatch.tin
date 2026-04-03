@@ -1,7 +1,7 @@
 // Dynamic dispatch via constrained generic functions.
 //
 // Generic functions are monomorphized at each call site for the concrete type,
-// with the constraint checked at compile time.  The method call inside the
+// with the constraint checked at compile time. The method call inside the
 // function body dispatches statically to the concrete implementation.
 use assert
 

@@ -5,14 +5,29 @@ Tin has built-in support for lightweight concurrent green threads called
 OS threads**. Fibers are compiled to LLVM coroutines; context switching is
 cheap (a few dozen instructions, no OS context switch).
 
-### TINMAXPROCS
+### Environment variables
 
-Set the `TINMAXPROCS` environment variable to control the number of worker
-threads (default: number of CPU cores):
+| Variable            | Default | `=0` meaning  | Description                                                 |
+|---------------------|---------|---------------|-------------------------------------------------------------|
+| `TINMAXPROCS`       | nproc   | n/a           | Number of worker OS threads                                 |
+| `TINMAXFIBERS`      | 1M      | panic         | Maximum concurrent fibers before panic                      |
+| `TINMAXRUNNABLES`   | 1M      | **unlimited** | Maximum entries in the run queue before panic               |
+| `TINMAXTIMERS`      | 1M      | panic         | Maximum simultaneous `sleep` timers before panic            |
+| `TINMAXIOWATCHES`   | 64K     | panic         | Maximum simultaneous async I/O watches before panic         |
+| `TINMAXCHANWAITERS` | 64K     | **unlimited** | Maximum fibers parked per channel waiter queue before panic |
+
+All queues grow dynamically (doubling on demand) up to their cap, then
+`panic()` with a message naming the variable to raise.
+
+`TINMAXRUNNABLES=0` and `TINMAXCHANWAITERS=0` disable the cap entirely -
+the queue grows without bound and never panics (pre-cap behaviour).
 
 ```sh
-TINMAXPROCS=4 ./my_program   # use 4 worker threads
-TINMAXPROCS=1 ./my_program   # single-threaded (useful for debugging)
+TINMAXPROCS=4 ./my_program               # use 4 worker threads
+TINMAXFIBERS=4000000 ./my_program        # allow up to 4M concurrent fibers
+TINMAXCHANWAITERS=262144 ./my_program    # 256K waiters per channel
+TINMAXRUNNABLES=0 ./my_program           # unlimited run queue (no panic)
+TINMAXCHANWAITERS=0 ./my_program         # unlimited channel waiter queues
 ```
 
 ### Exit semantics

@@ -1,65 +1,241 @@
-// tin stdlib/sync - pthread wrappers for Mutex, RWMutex, Cond, AtomicI64
+// tin stdlib/sync - Fiber-aware synchronization primitives + AtomicI64
 //
-// All synchronization primitives use opaque heap-allocated handles so the
-// Tin struct definitions don't need to know the underlying sizes.
+// Mutex, RWMutex, and Cond are built on TinFastMutex (runtime/fastmutex.h)
+// rather than pthreads.  TinFastMutex parks contended fibers via
+// _tin_fiber_park / _tin_fiber_unpark_hdl instead of blocking the OS thread,
+// so these primitives are safe to use from fiber-scheduled coroutines.
+//
+// AtomicI64 uses C11 __atomic builtins; no OS primitives needed.
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <pthread.h>
+#include <stdatomic.h>
+#include <string.h>
 
-// --- Mutex ---
+// Fiber park / unpark (runtime/fiber.c)
+void    _tin_fiber_park(int64_t pid);
+void    _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
 
-void *_tin_mutex_new(void) {
-    pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+// Current coroutine handle (TLS, runtime/fiber.c)
+extern __thread void *_current_hdl;
+static inline void *_sync_coro_hdl(void) { return _current_hdl; }
+
+// TinFastMutex: coroutine-aware spinlock (runtime/fastmutex.h/.c)
+#include "../../runtime/fastmutex.h"
+
+// ---------------------------------------------------------------------------
+// Mutex  (exclusive lock)
+// ---------------------------------------------------------------------------
+
+typedef struct { TinFastMutex fmu; } TinMutexFA;
+
+void *_tin_fmutex2_new(void) {
+    TinMutexFA *m = (TinMutexFA *)malloc(sizeof(TinMutexFA));
     if (!m) { fputs("tin: mutex alloc failed\n", stderr); exit(1); }
-    pthread_mutex_init(m, NULL);
+    tin_fmutex_init(&m->fmu);
     return m;
 }
-void _tin_mutex_lock(void *m)   { pthread_mutex_lock((pthread_mutex_t *)m); }
-void _tin_mutex_unlock(void *m) { pthread_mutex_unlock((pthread_mutex_t *)m); }
-void _tin_mutex_free(void *m)   {
-    pthread_mutex_destroy((pthread_mutex_t *)m);
-    free(m);
+
+// Try to acquire. Returns 1 if locked, 0 if parked (caller must yield+retry).
+int _tin_fmutex2_try_lock(void *m, int64_t pid) {
+    return tin_fmutex_lock_coro(&((TinMutexFA *)m)->fmu, pid, _sync_coro_hdl());
 }
 
-// --- RWMutex ---
+void _tin_fmutex2_unlock(void *m) { tin_fmutex_unlock(&((TinMutexFA *)m)->fmu); }
+void _tin_fmutex2_free(void *m)   { free(m); }
 
-void *_tin_rwmutex_new(void) {
-    pthread_rwlock_t *m = (pthread_rwlock_t *)malloc(sizeof(pthread_rwlock_t));
+// ---------------------------------------------------------------------------
+// RWMutex  (reader-writer lock)
+//
+// State (atomic int32):
+//   0   - unlocked
+//   N>0 - N concurrent readers
+//  -1   - write-locked
+// ---------------------------------------------------------------------------
+
+#define RWMU_MAX_WAITERS 8
+
+typedef struct {
+    _Atomic(int32_t)  state;
+    _Atomic(uint32_t) wl_lock;              // protects waiter arrays
+    int64_t rw_pid[RWMU_MAX_WAITERS];       // reader waiters
+    void   *rw_hdl[RWMU_MAX_WAITERS];
+    int     rw_cnt;
+    int64_t ww_pid[RWMU_MAX_WAITERS];       // writer waiters
+    void   *ww_hdl[RWMU_MAX_WAITERS];
+    int     ww_cnt;
+} TinRWMutexFA;
+
+static void _rwmu_lock(TinRWMutexFA *m) {
+    uint32_t z = 0;
+    while (!atomic_compare_exchange_weak_explicit(&m->wl_lock, &z, 1u,
+               memory_order_acquire, memory_order_relaxed))
+        z = 0;
+}
+static void _rwmu_unlock(TinRWMutexFA *m) {
+    atomic_store_explicit(&m->wl_lock, 0u, memory_order_release);
+}
+
+void *_tin_frwmutex2_new(void) {
+    TinRWMutexFA *m = (TinRWMutexFA *)calloc(1, sizeof(TinRWMutexFA));
     if (!m) { fputs("tin: rwmutex alloc failed\n", stderr); exit(1); }
-    pthread_rwlock_init(m, NULL);
     return m;
 }
-void _tin_rwmutex_rlock(void *m)   { pthread_rwlock_rdlock((pthread_rwlock_t *)m); }
-void _tin_rwmutex_runlock(void *m) { pthread_rwlock_unlock((pthread_rwlock_t *)m); }
-void _tin_rwmutex_lock(void *m)    { pthread_rwlock_wrlock((pthread_rwlock_t *)m); }
-void _tin_rwmutex_unlock(void *m)  { pthread_rwlock_unlock((pthread_rwlock_t *)m); }
-void _tin_rwmutex_free(void *m) {
-    pthread_rwlock_destroy((pthread_rwlock_t *)m);
-    free(m);
+
+// Read-lock: returns 1 if acquired, 0 if parked (write lock held).
+int _tin_frwmutex2_rlock_try(void *p, int64_t pid) {
+    TinRWMutexFA *m = (TinRWMutexFA *)p;
+    int32_t s = atomic_load_explicit(&m->state, memory_order_acquire);
+    while (s >= 0) {
+        if (atomic_compare_exchange_weak_explicit(&m->state, &s, s + 1,
+                memory_order_acquire, memory_order_relaxed))
+            return 1;
+    }
+    void *hdl = _sync_coro_hdl();
+    if (!pid || !hdl) return 0;
+    _rwmu_lock(m);
+    if (m->rw_cnt < RWMU_MAX_WAITERS) {
+        m->rw_pid[m->rw_cnt] = pid;
+        m->rw_hdl[m->rw_cnt] = hdl;
+        m->rw_cnt++;
+    }
+    _rwmu_unlock(m);
+    _tin_fiber_park(pid);
+    return 0;
 }
 
-// --- Cond ---
+void _tin_frwmutex2_runlock(void *p) {
+    TinRWMutexFA *m = (TinRWMutexFA *)p;
+    int32_t old = atomic_fetch_sub_explicit(&m->state, 1, memory_order_acq_rel);
+    if (old != 1) return;
+    // Last reader: wake one write waiter.
+    _rwmu_lock(m);
+    int64_t pid = -1; void *hdl = NULL;
+    if (m->ww_cnt > 0) {
+        m->ww_cnt--;
+        pid = m->ww_pid[m->ww_cnt];
+        hdl = m->ww_hdl[m->ww_cnt];
+    }
+    _rwmu_unlock(m);
+    if (pid >= 0) _tin_fiber_unpark_hdl(pid, hdl);
+}
 
-void *_tin_cond_new(void) {
-    pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+// Write-lock: returns 1 if acquired, 0 if parked.
+int _tin_frwmutex2_lock_try(void *p, int64_t pid) {
+    TinRWMutexFA *m = (TinRWMutexFA *)p;
+    int32_t expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&m->state, &expected, -1,
+            memory_order_acquire, memory_order_relaxed))
+        return 1;
+    void *hdl = _sync_coro_hdl();
+    if (!pid || !hdl) return 0;
+    _rwmu_lock(m);
+    if (m->ww_cnt < RWMU_MAX_WAITERS) {
+        m->ww_pid[m->ww_cnt] = pid;
+        m->ww_hdl[m->ww_cnt] = hdl;
+        m->ww_cnt++;
+    }
+    _rwmu_unlock(m);
+    _tin_fiber_park(pid);
+    return 0;
+}
+
+void _tin_frwmutex2_unlock(void *p) {
+    TinRWMutexFA *m = (TinRWMutexFA *)p;
+    atomic_store_explicit(&m->state, 0, memory_order_release);
+    _rwmu_lock(m);
+    // Prefer waking readers; fall back to one writer if no readers waiting.
+    int rn = m->rw_cnt; m->rw_cnt = 0;
+    int64_t rpid[RWMU_MAX_WAITERS]; void *rhdl[RWMU_MAX_WAITERS];
+    memcpy(rpid, m->rw_pid, rn * sizeof(int64_t));
+    memcpy(rhdl, m->rw_hdl, rn * sizeof(void *));
+    int64_t wpid = -1; void *whdl = NULL;
+    if (rn == 0 && m->ww_cnt > 0) {
+        m->ww_cnt--;
+        wpid = m->ww_pid[m->ww_cnt];
+        whdl = m->ww_hdl[m->ww_cnt];
+    }
+    _rwmu_unlock(m);
+    for (int i = 0; i < rn; i++) _tin_fiber_unpark_hdl(rpid[i], rhdl[i]);
+    if (wpid >= 0) _tin_fiber_unpark_hdl(wpid, whdl);
+}
+
+void _tin_frwmutex2_free(void *p) { free(p); }
+
+// ---------------------------------------------------------------------------
+// Cond  (condition variable)
+// ---------------------------------------------------------------------------
+
+#define COND_MAX_WAITERS 16
+
+typedef struct {
+    _Atomic(uint32_t) wl_lock;
+    int64_t wpid[COND_MAX_WAITERS];
+    void   *whdl[COND_MAX_WAITERS];
+    int     wcnt;
+} TinCondFA;
+
+static void _cond_lock(TinCondFA *c) {
+    uint32_t z = 0;
+    while (!atomic_compare_exchange_weak_explicit(&c->wl_lock, &z, 1u,
+               memory_order_acquire, memory_order_relaxed))
+        z = 0;
+}
+static void _cond_unlock(TinCondFA *c) {
+    atomic_store_explicit(&c->wl_lock, 0u, memory_order_release);
+}
+
+void *_tin_fcond2_new(void) {
+    TinCondFA *c = (TinCondFA *)calloc(1, sizeof(TinCondFA));
     if (!c) { fputs("tin: cond alloc failed\n", stderr); exit(1); }
-    pthread_cond_init(c, NULL);
     return c;
 }
-// m is the raw pthread_mutex_t* stored as *void in the Mutex struct.
-void _tin_cond_wait(void *c, void *m) {
-    pthread_cond_wait((pthread_cond_t *)c, (pthread_mutex_t *)m);
-}
-void _tin_cond_signal(void *c)    { pthread_cond_signal((pthread_cond_t *)c); }
-void _tin_cond_broadcast(void *c) { pthread_cond_broadcast((pthread_cond_t *)c); }
-void _tin_cond_free(void *c) {
-    pthread_cond_destroy((pthread_cond_t *)c);
-    free(c);
+
+// Register the current fiber as a waiter and set pending_park.
+// Called before releasing the associated mutex.
+void _tin_fcond2_add_waiter(void *p, int64_t pid) {
+    TinCondFA *c = (TinCondFA *)p;
+    void *hdl = _sync_coro_hdl();
+    _cond_lock(c);
+    if (c->wcnt < COND_MAX_WAITERS) {
+        c->wpid[c->wcnt] = pid;
+        c->whdl[c->wcnt] = hdl;
+        c->wcnt++;
+    }
+    _cond_unlock(c);
+    if (pid > 0) _tin_fiber_park(pid);
 }
 
-// --- AtomicI64 ---
+void _tin_fcond2_signal(void *p) {
+    TinCondFA *c = (TinCondFA *)p;
+    _cond_lock(c);
+    int64_t pid = -1; void *hdl = NULL;
+    if (c->wcnt > 0) {
+        c->wcnt--;
+        pid = c->wpid[c->wcnt];
+        hdl = c->whdl[c->wcnt];
+    }
+    _cond_unlock(c);
+    if (pid >= 0) _tin_fiber_unpark_hdl(pid, hdl);
+}
+
+void _tin_fcond2_broadcast(void *p) {
+    TinCondFA *c = (TinCondFA *)p;
+    _cond_lock(c);
+    int n = c->wcnt; c->wcnt = 0;
+    int64_t pids[COND_MAX_WAITERS]; void *hdls[COND_MAX_WAITERS];
+    memcpy(pids, c->wpid, n * sizeof(int64_t));
+    memcpy(hdls, c->whdl, n * sizeof(void *));
+    _cond_unlock(c);
+    for (int i = 0; i < n; i++) _tin_fiber_unpark_hdl(pids[i], hdls[i]);
+}
+
+void _tin_fcond2_free(void *p) { free(p); }
+
+// ---------------------------------------------------------------------------
+// AtomicI64 (unchanged)
+// ---------------------------------------------------------------------------
 
 void *_tin_atomic_new_i64(int64_t v) {
     int64_t *p = (int64_t *)malloc(sizeof(int64_t));

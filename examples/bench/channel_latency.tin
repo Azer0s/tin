@@ -5,7 +5,7 @@
 //
 // Both ping_loop and pong_loop run as async fibers so all send/recv ops are
 // driven inline (no per-operation fiber spawn, no OS-blocking await in the
-// hot path).  main() only performs two OS-blocking awaits total (for the two
+// hot path). main() only performs two OS-blocking awaits total (for the two
 // long-lived fibers).
 //
 // Usage:

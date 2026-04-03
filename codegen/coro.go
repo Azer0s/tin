@@ -55,6 +55,7 @@ func (cg *CodeGen) ensureCoroIntrinsics() {
 	if cg.coroIDFn != nil {
 		return
 	}
+
 	cg.coroIDFn = cg.ensureIntrinsic("llvm.coro.id", coroTokType, []*ir.Param{
 		ir.NewParam("", irtypes.I32),
 		ir.NewParam("", irtypes.I8Ptr),
@@ -100,6 +101,7 @@ func (cg *CodeGen) ensureIntrinsic(name string, ret irtypes.Type, params []*ir.P
 			return f
 		}
 	}
+
 	f := cg.mod.NewFunc(name, ret, params...)
 	f.Blocks = nil
 
@@ -110,6 +112,7 @@ func (cg *CodeGen) ensureFiberRuntime() {
 	if cg.fiberSpawnFn != nil {
 		return
 	}
+
 	cg.fiberSpawnFn = cg.ensureExternDecl("_tin_fiber_spawn", irtypes.I64,
 		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
 	cg.fiberCompleteFn = cg.ensureExternDecl("_tin_fiber_complete", irtypes.Void,
@@ -139,6 +142,7 @@ func (cg *CodeGen) ensureSyncModule() error {
 	if cg.syncModuleLoaded {
 		return nil
 	}
+
 	cg.syncModuleLoaded = true
 
 	return cg.loadPackage("sync")
@@ -280,12 +284,15 @@ func recordCallees(n ast.Node, out *[]string) {
 	if n == nil {
 		return
 	}
+
 	switch v := n.(type) {
 	case *ast.CallExpr:
 		if id, ok := v.Func.(*ast.Identifier); ok {
 			*out = append(*out, id.Name)
 		}
+
 		recordCallees(v.Func, out)
+
 		for _, a := range v.Args {
 			recordCallees(a, out)
 		}
@@ -307,15 +314,19 @@ func recordCallees(n ast.Node, out *[]string) {
 		recordCallees(v.Value, out)
 	case *ast.IfStmt:
 		recordCallees(v.Cond, out)
+
 		for _, s := range v.Then.Stmts {
 			recordCallees(s, out)
 		}
+
 		for _, elif := range v.ElseIfs {
 			recordCallees(elif.Cond, out)
+
 			for _, s := range elif.Body.Stmts {
 				recordCallees(s, out)
 			}
 		}
+
 		if v.Else != nil {
 			for _, s := range v.Else.Stmts {
 				recordCallees(s, out)
@@ -326,6 +337,7 @@ func recordCallees(n ast.Node, out *[]string) {
 		recordCallees(v.Init, out)
 		recordCallees(v.Post, out)
 		recordCallees(v.Iter, out)
+
 		if v.Body != nil {
 			for _, s := range v.Body.Stmts {
 				recordCallees(s, out)
@@ -354,6 +366,7 @@ func recordCallees(n ast.Node, out *[]string) {
 		recordCallees(v.Call, out)
 	case *ast.SpawnExpr:
 		recordCallees(v.Call, out)
+
 		if v.DoBlock != nil {
 			for _, s := range v.DoBlock.Stmts {
 				recordCallees(s, out)
@@ -378,6 +391,7 @@ func (cg *CodeGen) buildCallGraphEntry(name string, body ast.Node) {
 	if body == nil {
 		return
 	}
+
 	var callees []string
 	recordCallees(body, &callees)
 	// deduplicate
@@ -394,17 +408,21 @@ func (cg *CodeGen) buildCallGraphEntry(name string, body ast.Node) {
 // Tin function as needing a $coro duplicate.
 func (cg *CodeGen) colorCallGraph() {
 	worklist := make([]string, 0)
+
 	for name, decl := range cg.funcDecls {
 		if isAsyncTag(decl.Tags) {
 			worklist = append(worklist, name)
 		}
 	}
+
 	for len(worklist) > 0 {
 		name := worklist[0]
 		worklist = worklist[1:]
+
 		if cg.coroCallable[name] {
 			continue
 		}
+
 		cg.coroCallable[name] = true
 		for _, callee := range cg.callGraph[name] {
 			if _, ok := cg.funcDecls[callee]; ok && !cg.coroCallable[callee] {
@@ -439,14 +457,17 @@ func (cg *CodeGen) predeclareCoroVariant(n *ast.FuncDecl, tinName string, hasEnv
 	if hasEnv {
 		params = append(params, ir.NewParam("env", irtypes.I8Ptr))
 	}
+
 	for _, p := range n.Params {
 		if p.IsVarArgs {
 			continue
 		}
+
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return fmt.Errorf("predeclareCoroVariant %s param %s: %w", tinName, p.Name, err)
 		}
+
 		params = append(params, ir.NewParam(p.Name, pt))
 	}
 	// Ramp function always returns i8* (the coroutine handle).
@@ -485,21 +506,24 @@ func (cg *CodeGen) llvmSizeOf(block *ir.Block, t irtypes.Type) value.Value {
 // external function, enabling stack-allocation of inner coroutine frames.
 func (cg *CodeGen) emitCoroComplete(block *ir.Block, retVal value.Value) {
 	cg.ensureFiberRuntime()
+
 	var resultI8Ptr value.Value
 	if retVal == nil || irtypes.IsVoid(retVal.Type()) {
 		resultI8Ptr = constant.NewNull(irtypes.I8Ptr)
 	} else {
 		// Store the result via the inline-result allocator.
-		// - Inline drive: _tin_inline_result_mode_begin() was called → TLS buffer (no malloc).
-		// - Spawned fiber: mode not active → malloc(sz) (result must outlive the coro).
+		// - Inline drive: _tin_inline_result_mode_begin() was called -> TLS buffer (no malloc).
+		// - Spawned fiber: mode not active -> malloc(sz) (result must outlive the coro).
 		sz := cg.llvmSizeOf(block, retVal.Type())
 		inlineAllocFn := cg.ensureExternDecl("_tin_inline_result_alloc", irtypes.I8Ptr,
 			[]*ir.Param{ir.NewParam("sz", irtypes.I64)}, false)
 		slot := block.NewCall(inlineAllocFn, sz)
 		slotTyped := block.NewBitCast(slot, irtypes.NewPointer(retVal.Type()))
 		block.NewStore(retVal, slotTyped)
+
 		resultI8Ptr = slot
 	}
+
 	block.NewCall(cg.fiberCompleteFn, resultI8Ptr)
 }
 
@@ -514,6 +538,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	if !ok {
 		return nil
 	}
+
 	coroFn, ok := se.val.(*ir.Func)
 	if !ok || len(coroFn.Blocks) > 0 {
 		return nil // Already generated or not a function.
@@ -526,8 +551,10 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 
 	// Determine the original return type for body generation.
 	var origRetType irtypes.Type = irtypes.Void
+
 	if n.RetType != nil {
 		var err error
+
 		origRetType, err = cg.tinTypeToLLVM(n.RetType)
 		if err != nil {
 			return err
@@ -567,6 +594,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 
 	// Emit coroutine prologue: entry -> coro.alloc -> coro.begin.
 	entryBlk := coroFn.NewBlock("entry")
+
 	cg.ensureFiberRuntime()
 	frame, rampBlock := cg.emitCoroPrologue(entryBlk)
 
@@ -587,10 +615,12 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	//   - plain scalars / structs with no RC data        -> no-op
 	{
 		llParam := 0
+
 		for _, astParam := range n.Params {
 			if astParam.IsVarArgs {
 				continue
 			}
+
 			p := coroFn.Params[llParam]
 			llParam++
 			// Retain ARC-tracked data (strings, arrays, any, nested struct fields).
@@ -601,15 +631,19 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 			if structName == "" {
 				continue
 			}
+
 			fiberRetainName := structName + "__fiber_retain"
+
 			entry, ok := cg.curScope.lookup(fiberRetainName)
 			if !ok {
 				continue
 			}
+
 			fn, ok2 := entry.val.(*ir.Func)
 			if !ok2 {
 				continue
 			}
+
 			args := cg.adaptArgs(rampBlock, []value.Value{p}, fn.Sig)
 			rampBlock.NewCall(fn, args...)
 		}
@@ -621,7 +655,9 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 
 	// Unpack captured locals from env struct (spawn do: blocks only).
 	// unpackEnv retains each RC-tracked value for the coro scope.
-	cg.unpackEnv(bodyStart, coroFn, envStructType, captures)
+	// useEnvDirect=false: genCoroFuncBody frees the env after unpacking, so
+	// we must copy values to local allocas (not use the env GEP directly).
+	cg.unpackEnv(bodyStart, coroFn, envStructType, captures, false)
 
 	// ARC: release the env's own reference to each RC-tracked capture (the
 	// matching retain was emitted in genSpawnDoBlock before buildEnv).
@@ -632,11 +668,13 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 			if !isRCTrackedType(c.llvmTy) {
 				continue
 			}
+
 			if se, ok := cg.curScope.lookup(c.name); ok && se.isAlloc {
 				loaded := bodyStart.NewLoad(c.llvmTy, se.val)
 				cg.emitRelease(bodyStart, loaded)
 			}
 		}
+
 		bodyStart.NewCall(cg.ensureFree(), coroFn.Params[0])
 	}
 
@@ -649,10 +687,10 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.curCoroRetType = origRetType
 	cg.usesAnyFiber = true
 
-	// Set up defer return override slot for this coro body (mirrors genFuncDecl).
-	// Without this, cg.curFnDeferRetAlloca would bleed in from the outer function,
-	// causing cross-function SSA value references in the coro's IR.
-	if origRetType != nil && !irtypes.IsVoid(origRetType) {
+	// Set up defer return override slot for this coro body only when defer stmts
+	// are present (mirrors genFuncDeclAs).  Always clear curFnDeferRetAlloca so
+	// it doesn't bleed in from an outer function, causing cross-function SSA refs.
+	if origRetType != nil && !irtypes.IsVoid(origRetType) && hasDeferStmt(n.Body) {
 		slotType := irtypes.NewStruct(irtypes.I8, origRetType)
 		slotAlloca := bodyStart.NewAlloca(slotType)
 		validGep := bodyStart.NewGetElementPtr(slotType, slotAlloca,
@@ -671,10 +709,12 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	// (before the initial suspend) so we do NOT emit another retain here.
 	// The scope-exit release at body end provides the matching release.
 	llIdx := 0
+
 	for _, astParam := range n.Params {
 		if astParam.IsVarArgs {
 			continue
 		}
+
 		p := coroFn.Params[llIdx]
 		llIdx++
 		alloca := bodyStart.NewAlloca(p.Type())
@@ -730,10 +770,12 @@ func (cg *CodeGen) recoverRetVal(block *ir.Block) value.Value {
 	if rt == nil || irtypes.IsVoid(rt) {
 		return nil
 	}
+
 	base := cg.zeroValue(rt)
 	if cg.curFnDeferRetAlloca == nil {
 		return base
 	}
+
 	slotType := irtypes.NewStruct(irtypes.I8, rt)
 	slotPtr := block.NewBitCast(cg.curFnDeferRetAlloca, irtypes.NewPointer(slotType))
 	validGep := block.NewGetElementPtr(slotType, slotPtr,
@@ -754,9 +796,9 @@ func (cg *CodeGen) recoverRetVal(block *ir.Block) value.Value {
 // LLVM coroutine ABI contract encoded here (single place to update if it changes):
 //
 //	coro.suspend(none, false) returns i8:
-//	  0  → normal resume   → jump back to retryBlk
-//	  1  → final cleanup   → jump to coro cleanup entry
-//	  default → the "suspend" path; the outer function returns its handle
+//	  0  -> normal resume   -> jump back to retryBlk
+//	  1  -> final cleanup   -> jump to coro cleanup entry
+//	  default -> the "suspend" path; the outer function returns its handle
 //
 // doneBlk is marked in yieldResumeBlocks so the auto-yield pass at the next
 // loop backedge sees that a real suspension point was just traversed and skips
@@ -771,9 +813,11 @@ func (cg *CodeGen) emitInlineChanSuspend(prefix string, yieldBlk, retryBlk, done
 	)
 	suspBlk.NewRet(cg.curCoroHdl)
 	cleanupBlk.NewBr(cg.curCoroFrame.cleanupEntry)
+
 	if cg.yieldResumeBlocks != nil {
 		cg.yieldResumeBlocks[doneBlk] = true
 	}
+
 	cg.curBlock = doneBlk
 }
 
@@ -790,6 +834,7 @@ func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 
 		return
 	}
+
 	resume := cg.emitSuspendPoint(from, cg.curCoroFrame)
 	resume.NewBr(header)
 }

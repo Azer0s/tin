@@ -245,6 +245,7 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		l.tokens = append(l.tokens, tok)
 		if tok.Type == EOF {
 			break
@@ -275,7 +276,9 @@ func (l *Lexer) advance() rune {
 	if l.pos >= len(l.src) {
 		return 0
 	}
+
 	ch := l.src[l.pos]
+
 	l.pos++
 	if ch == '\n' {
 		l.line++
@@ -300,7 +303,6 @@ func (l *Lexer) nextToken() (Token, error) {
 
 	if l.pos >= len(l.src) {
 		// Emit remaining DEDENTs
-
 		return l.handleEOF()
 	}
 
@@ -323,9 +325,11 @@ func (l *Lexer) nextToken() (Token, error) {
 
 		return l.nextToken()
 	}
+
 	if ch == '/' && l.peekAt(1) == '*' {
 		l.advance() // consume /
 		l.advance() // consume *
+
 		for l.pos < len(l.src) {
 			if l.peek() == '*' && l.peekAt(1) == '/' {
 				l.advance() // consume *
@@ -333,10 +337,12 @@ func (l *Lexer) nextToken() (Token, error) {
 
 				break
 			}
+
 			if l.peek() == '\n' {
 				l.line++
 				l.col = 0
 			}
+
 			l.advance()
 		}
 
@@ -347,16 +353,12 @@ func (l *Lexer) nextToken() (Token, error) {
 
 	switch ch {
 	case '"':
-
 		return l.readString(line, col)
 	case '\'':
-
 		return l.readSingleQuote(line, col)
 	case '#':
-
 		return l.readControlTag(line, col)
 	case '`':
-
 		return l.readBacktick(line, col)
 	}
 
@@ -367,6 +369,7 @@ func (l *Lexer) nextToken() (Token, error) {
 
 		return Token{Type: DOTDOTDOT, Literal: "...", Line: line, Col: col}, nil
 	}
+
 	if ch == '.' && l.peekAt(1) == '.' {
 		l.advance()
 		l.advance()
@@ -387,8 +390,11 @@ func (l *Lexer) nextToken() (Token, error) {
 
 func (l *Lexer) handleLineStart() (Token, error) {
 	// Count leading whitespace (skip recount when emitting additional DEDENTs)
-	var indent int
-	var startPos int
+	var (
+		indent   int
+		startPos int
+	)
+
 	if l.dedenting {
 		// We already counted the indent for this line; reuse it
 		indent = l.lineIndent
@@ -401,6 +407,7 @@ func (l *Lexer) handleLineStart() (Token, error) {
 			} else {
 				indent++
 			}
+
 			l.pos++
 			l.col++
 		}
@@ -410,6 +417,7 @@ func (l *Lexer) handleLineStart() (Token, error) {
 	if l.pos >= len(l.src) {
 		return l.handleEOF()
 	}
+
 	if l.src[l.pos] == '\n' {
 		// Blank line - skip
 		l.advance()
@@ -419,17 +427,20 @@ func (l *Lexer) handleLineStart() (Token, error) {
 
 		return l.nextToken()
 	}
+
 	if l.src[l.pos] == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/' {
 		// Comment line - skip to end
 		for l.pos < len(l.src) && l.src[l.pos] != '\n' {
 			l.advance()
 		}
+
 		if l.pos < len(l.src) {
 			l.advance() // consume \n
 		}
 
 		return l.nextToken()
 	}
+
 	if l.src[l.pos] == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*' {
 		// Block comment - set atLineStart=false so we don't re-enter here
 		l.atLineStart = false
@@ -439,10 +450,12 @@ func (l *Lexer) handleLineStart() (Token, error) {
 
 	wasDedenting := l.dedenting
 	l.atLineStart = false
+
 	l.dedenting = false
 	if !wasDedenting {
 		l.lineIndent = indent
 	}
+
 	top := l.indentStack[len(l.indentStack)-1]
 
 	if indent > top {
@@ -484,16 +497,69 @@ func (l *Lexer) handleEOF() (Token, error) {
 
 func (l *Lexer) readString(line, col int) (Token, error) {
 	l.advance() // consume opening "
+
 	var sb strings.Builder
+
+	braceDepth := 0
+	justOpenedBrace := false // true immediately after '{' is appended
+
 	for l.pos < len(l.src) {
 		ch := l.peek()
-		if ch == '"' {
+		if ch == '"' && braceDepth == 0 {
 			l.advance()
 
 			break
 		}
+		// Inside interpolation braces, a '"' starts a nested string literal -
+		// but only if there is actual expression content after the '{' (i.e. the
+		// '{' was not immediately followed by '"').  When justOpenedBrace is true
+		// the '{' had no intervening content and the '"' is the real closing quote.
+		if ch == '"' && braceDepth > 0 && !justOpenedBrace {
+			sb.WriteRune(l.advance()) // consume opening "
+
+			for l.pos < len(l.src) {
+				inner := l.peek()
+				if inner == '"' {
+					sb.WriteRune(l.advance())
+
+					break
+				}
+
+				if inner == '\\' {
+					sb.WriteRune(l.advance())
+
+					if l.pos < len(l.src) {
+						sb.WriteRune(l.advance())
+					}
+
+					continue
+				}
+
+				sb.WriteRune(l.advance())
+			}
+
+			continue
+		}
+
+		if ch == '"' && braceDepth > 0 && justOpenedBrace {
+			// '{' was immediately followed by '"' - the '"' closes the outer string.
+			l.advance()
+
+			break
+		}
+
+		justOpenedBrace = false
+
+		if ch == '{' {
+			braceDepth++
+			justOpenedBrace = true
+		} else if ch == '}' && braceDepth > 0 {
+			braceDepth--
+		}
+
 		if ch == '\\' {
 			l.advance()
+
 			esc := l.advance()
 			switch esc {
 			case 'n':
@@ -523,6 +589,7 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 
 			continue
 		}
+
 		sb.WriteRune(l.advance())
 	}
 
@@ -531,6 +598,7 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 
 func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 	l.advance() // consume '
+
 	if l.pos >= len(l.src) {
 		return Token{Type: ILLEGAL, Literal: "'", Line: line, Col: col}, nil
 	}
@@ -541,7 +609,9 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 	if ch == '\\' {
 		l.advance() // consume '\'
 		esc := l.advance()
+
 		var b byte
+
 		switch esc {
 		case 'n':
 			b = '\n'
@@ -560,6 +630,7 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 		default:
 			b = byte(esc)
 		}
+
 		if l.pos < len(l.src) && l.peek() == '\'' {
 			l.advance() // consume closing '
 		}
@@ -574,18 +645,24 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 	// surrounding double-quotes in the literal so they remain distinct
 	if ch == '"' {
 		l.advance() // consume opening "
+
 		var sb strings.Builder
+
 		isSimple := true
+
 		for l.pos < len(l.src) && l.peek() != '"' && l.peek() != '\n' {
 			r := l.advance()
 			sb.WriteRune(r)
+
 			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
 				isSimple = false
 			}
 		}
+
 		if l.pos < len(l.src) && l.peek() == '"' {
 			l.advance() // consume closing "
 		}
+
 		name := sb.String()
 		if !isSimple {
 			// Keep surrounding double-quotes for complex atoms like '"fn(i64)bool"'
@@ -632,10 +709,12 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 
 func (l *Lexer) readControlTag(line, col int) (Token, error) {
 	l.advance() // consume #
+
 	var sb strings.Builder
 	for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 		sb.WriteRune(l.advance())
 	}
+
 	if sb.Len() == 0 {
 		return Token{Type: HASH, Literal: "#", Line: line, Col: col}, nil
 	}
@@ -645,8 +724,11 @@ func (l *Lexer) readControlTag(line, col int) (Token, error) {
 
 func (l *Lexer) readBacktick(line, col int) (Token, error) {
 	l.advance() // consume `
+
 	var sb strings.Builder
+
 	depth := 1
+
 	for l.pos < len(l.src) {
 		ch := l.advance()
 		if ch == '`' {
@@ -655,6 +737,7 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 				break
 			}
 		}
+
 		sb.WriteRune(ch)
 	}
 
@@ -663,12 +746,14 @@ func (l *Lexer) readBacktick(line, col int) (Token, error) {
 
 func (l *Lexer) readNumber(line, col int) (Token, error) {
 	var sb strings.Builder
+
 	isFloat := false
 
 	switch {
 	case l.peek() == '0' && (l.peekAt(1) == 'x' || l.peekAt(1) == 'X'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // x/X
+
 		for l.pos < len(l.src) && isHexDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
@@ -678,6 +763,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 	case l.peek() == '0' && (l.peekAt(1) == 'b' || l.peekAt(1) == 'B'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // b/B
+
 		for l.pos < len(l.src) && (l.peek() == '0' || l.peek() == '1') {
 			sb.WriteRune(l.advance())
 		}
@@ -687,6 +773,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 	case l.peek() == '0' && (l.peekAt(1) == 'o' || l.peekAt(1) == 'O'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // o/O
+
 		for l.pos < len(l.src) && l.peek() >= '0' && l.peek() <= '7' {
 			sb.WriteRune(l.advance())
 		}
@@ -697,24 +784,32 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 		for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
+
 		if l.pos < len(l.src) && l.peek() == '.' && l.peekAt(1) != '.' {
 			isFloat = true
+
 			sb.WriteRune(l.advance()) // .
+
 			for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
 				sb.WriteRune(l.advance())
 			}
 		}
+
 		if l.pos < len(l.src) && (l.peek() == 'e' || l.peek() == 'E') {
 			isFloat = true
+
 			sb.WriteRune(l.advance())
+
 			if l.pos < len(l.src) && (l.peek() == '+' || l.peek() == '-') {
 				sb.WriteRune(l.advance())
 			}
+
 			for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
 				sb.WriteRune(l.advance())
 			}
 		}
 	}
+
 	if isFloat {
 		return Token{Type: FLOAT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 	}
@@ -731,6 +826,7 @@ func (l *Lexer) readIdentOrKeyword(line, col int) (Token, error) {
 	for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 		sb.WriteRune(l.advance())
 	}
+
 	word := sb.String()
 	if tt, ok := keywords[word]; ok {
 		lit := word
@@ -750,6 +846,7 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 	case '+':
 		if l.peek() == '+' {
 			l.advance()
+
 			if l.peek() == '=' {
 				l.advance()
 
@@ -758,6 +855,7 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 			return Token{Type: INC, Literal: "++", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '=' {
 			l.advance()
 
@@ -771,11 +869,13 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 			return Token{Type: ARROW, Literal: "->", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '-' {
 			l.advance()
 
 			return Token{Type: INC, Literal: "--", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '=' {
 			l.advance()
 
@@ -829,6 +929,7 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 			return Token{Type: LTEQ, Literal: "<=", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '<' {
 			l.advance()
 
@@ -842,6 +943,7 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 			return Token{Type: GTEQ, Literal: ">=", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '>' {
 			l.advance()
 
@@ -863,6 +965,7 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 			return Token{Type: OR, Literal: "||", Line: line, Col: col}, nil
 		}
+
 		if l.peek() == '>' {
 			l.advance()
 
@@ -871,20 +974,17 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 		return Token{Type: BITOR, Literal: "|", Line: line, Col: col}, nil
 	case '^':
-
 		return Token{Type: XOR, Literal: "^", Line: line, Col: col}, nil
 	case '~':
-
 		return Token{Type: TILDE, Literal: "~", Line: line, Col: col}, nil
 	case '?':
-
 		return Token{Type: QUESTION, Literal: "?", Line: line, Col: col}, nil
 	case '@':
-
 		return Token{Type: AT, Literal: "@", Line: line, Col: col}, nil
 	case '.':
 		if l.peek() == '.' {
 			l.advance()
+
 			if l.peek() == '.' {
 				l.advance()
 
@@ -904,28 +1004,20 @@ func (l *Lexer) readOperatorOrDelim(line, col int) (Token, error) {
 
 		return Token{Type: COLON, Literal: ":", Line: line, Col: col}, nil
 	case '(':
-
 		return Token{Type: LPAREN, Literal: "(", Line: line, Col: col}, nil
 	case ')':
-
 		return Token{Type: RPAREN, Literal: ")", Line: line, Col: col}, nil
 	case '{':
-
 		return Token{Type: LBRACE, Literal: "{", Line: line, Col: col}, nil
 	case '}':
-
 		return Token{Type: RBRACE, Literal: "}", Line: line, Col: col}, nil
 	case '[':
-
 		return Token{Type: LBRACKET, Literal: "[", Line: line, Col: col}, nil
 	case ']':
-
 		return Token{Type: RBRACKET, Literal: "]", Line: line, Col: col}, nil
 	case ';':
-
 		return Token{Type: SEMI, Literal: ";", Line: line, Col: col}, nil
 	case ',':
-
 		return Token{Type: COMMA, Literal: ",", Line: line, Col: col}, nil
 	}
 

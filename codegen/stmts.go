@@ -24,9 +24,11 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if cg.curDeferRetSlotParam != nil {
 			return val // inside a thunk - no override slot
 		}
+
 		if cg.curFnDeferRetAlloca == nil || irtypes.IsVoid(retType) || val == nil {
 			return val
 		}
+
 		slotType := irtypes.NewStruct(irtypes.I8, retType)
 		slotPtr := b.NewBitCast(cg.curFnDeferRetAlloca, irtypes.NewPointer(slotType))
 		validGep := b.NewGetElementPtr(slotType, slotPtr,
@@ -47,11 +49,14 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if b == nil || b.Term != nil {
 			return
 		}
+
 		_ = cg.emitDefers(b)
 		if val != nil && !irtypes.IsVoid(retType) {
 			val = checkDeferRetOverride(b, val)
 		}
+
 		cg.emitAllScopeReleases(b, skipName)
+
 		if cg.inCoroFn {
 			cg.emitCoroComplete(b, val)
 			cg.emitFinalSuspend(b, cg.curCoroFrame)
@@ -61,10 +66,12 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			b.NewRet(val)
 		}
 	}
+
 	addDefaultRet := func(b *ir.Block) error {
 		if b == nil || b.Term != nil {
 			return nil
 		}
+
 		if !irtypes.IsVoid(retType) {
 			fnName := ""
 			if cg.curFn != nil {
@@ -73,6 +80,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 
 			return fmt.Errorf("fn %s: not all code paths return a value", fnName)
 		}
+
 		if cg.inCoroFn {
 			emitTerminator(b, nil, "")
 		} else {
@@ -89,6 +97,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if err != nil {
 			return false, err
 		}
+
 		if !term {
 			if err := addDefaultRet(newBlock); err != nil {
 				return false, err
@@ -97,10 +106,8 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 
 		return true, nil
 	case *ast.WhereList:
-
 		return cg.genWhereList(block, b, retType)
 	case nil:
-
 		return false, nil
 	case *ast.ExprStmt:
 		// Single expression-statement body (e.g. fn foo() = someCall())
@@ -112,12 +119,15 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			if err != nil {
 				return false, err
 			}
+
 			if val != nil {
 				val = cg.coerce(block, val, retType)
+
 				retSkip := ""
 				if ident, ok := inner.(*ast.Identifier); ok {
 					retSkip = ident.Name
 				}
+
 				emitTerminator(block, val, retSkip)
 			} else {
 				if err := addDefaultRet(block); err != nil {
@@ -132,6 +142,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if err != nil {
 			return false, err
 		}
+
 		if !terminated {
 			if err := addDefaultRet(newBlock); err != nil {
 				return false, err
@@ -146,6 +157,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if err != nil {
 			return false, err
 		}
+
 		if !terminated {
 			if err := addDefaultRet(newBlock); err != nil {
 				return false, err
@@ -159,12 +171,15 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		if err != nil {
 			return false, err
 		}
+
 		if !irtypes.IsVoid(retType) && val != nil {
 			val = cg.coerce(block, val, retType)
+
 			retSkip := ""
 			if ident, ok := body.(*ast.Identifier); ok {
 				retSkip = ident.Name
 			}
+
 			emitTerminator(block, val, retSkip)
 		} else {
 			emitTerminator(block, nil, "")
@@ -181,15 +196,19 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 // creates new merge blocks.
 func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, error) {
 	var err error
+
 	for _, stmt := range b.Stmts {
 		if block == nil {
 			panic(fmt.Sprintf("genBlock: block nil before stmt %T", stmt))
 		}
+
 		var terminated bool
+
 		block, terminated, err = cg.genStmt(block, stmt)
 		if err != nil {
 			return nil, false, err
 		}
+
 		if terminated || block == nil {
 			return nil, true, nil
 		}
@@ -206,7 +225,6 @@ func isStmtNode(node ast.Node) bool {
 		*ast.AugAssignStmt, *ast.PostfixStmt, *ast.VarDecl,
 		*ast.IfStmt, *ast.ForStmt, *ast.MatchStmt, *ast.DeferStmt,
 		*ast.BreakStmt, *ast.FuncDecl, *ast.TaggedBlock:
-
 		return true
 	}
 
@@ -227,6 +245,7 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		if err != nil {
 			return err
 		}
+
 		if !terminated && newBlock != nil && newBlock.Term == nil {
 			_ = cg.emitDefers(newBlock)
 			newBlock.NewRet(nil)
@@ -240,6 +259,7 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 	if err != nil {
 		return err
 	}
+
 	if !irtypes.IsVoid(retType) && bodyVal != nil {
 		bodyVal = cg.coerce(block, bodyVal, retType)
 		_ = cg.emitDefers(block)
@@ -273,6 +293,7 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 
 		return block.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0)), nil
 	}
+
 	cond, err := cg.genExpr(block, condNode)
 	if err != nil {
 		return nil, err
@@ -286,6 +307,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 	// mergeBlock is created lazily so it only gets added to the function
 	// if actually needed (when no wildcard catches everything).
 	var mergeBlock *ir.Block
+
 	getMerge := func() *ir.Block {
 		if mergeBlock == nil {
 			mergeBlock = cg.newBlock("where.merge")
@@ -324,6 +346,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 		cg.curBlock = nil
 
 		thenBlock := cg.newBlock(fmt.Sprintf("where.then.%d", i))
+
 		var elseBlock *ir.Block
 		if i == len(wl.Clauses)-1 {
 			elseBlock = getMerge()
@@ -356,12 +379,12 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 // If the block was terminated (ret/br), currentBlock may be nil.
 func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, error) {
 	switch s := node.(type) {
-
 	case *ast.Block:
 		newBlock, term, err := cg.genBlock(block, s)
 		if err != nil {
 			return nil, false, err
 		}
+
 		if term {
 			return nil, true, nil
 		}
@@ -406,6 +429,7 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 
 	case *ast.EchoStmt:
 		var err error
+
 		block, err = cg.genEcho(block, s)
 
 		return block, false, err
@@ -425,16 +449,19 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 			// current block before calling genExpr so we can detect if genExpr
 			// advanced to a new block (e.g. coroutine chaining creates new blocks).
 			cg.curBlock = block
+
 			_, err := cg.genExpr(block, s.Expr)
 			if err != nil {
 				return nil, false, err
 			}
+
 			if cg.curBlock != nil && cg.curBlock != block {
 				return cg.curBlock, false, nil
 			}
 
 			return block, false, nil
 		}
+
 		cg.curBlock = block
 		val, err := cg.genExpr(block, s.Expr)
 		// If genExpr advanced the current block (e.g. an await arg created new
@@ -442,6 +469,7 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
+
 		if err == nil && val != nil && isRCTrackedType(val.Type()) && isTemporaryProducer(s.Expr) {
 			// Discarded RC-tracked value from a call/concat/etc.: release our ref.
 			cg.emitRelease(block, val)
@@ -505,12 +533,22 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 		if retSlotArg == nil {
 			retSlotArg = constant.NewNull(irtypes.I8Ptr)
 		}
+
 		block.NewCall(cg.deferPushFn, entryI8, fnI8, envI8, retSlotArg)
 		cg.pendingDeferFrames = append(cg.pendingDeferFrames, entryI8)
 		// 3. Record the thunk fn and its env for inline LIFO emission on normal
 		//    return: emitDefers calls thunk(env) then frees env.
 		cg.pendingDeferFnI8s = append(cg.pendingDeferFnI8s, fnI8)
 		cg.pendingDeferEnvs = append(cg.pendingDeferEnvs, envI8)
+
+		return block, false, nil
+
+	case *ast.StructDecl:
+		// Struct declared inside a function/test body: register it so struct
+		// literals using its name can resolve it.
+		if err := cg.genStructDecl(s); err != nil {
+			return nil, false, err
+		}
 
 		return block, false, nil
 
@@ -531,7 +569,6 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 		return block, false, nil
 
 	case *ast.TaggedBlock:
-
 		return cg.genStmt(block, s.Body)
 
 	default:
@@ -557,8 +594,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			return block, nil
 		}
 	}
-	var llType irtypes.Type
-	var err error
+
+	var (
+		llType irtypes.Type
+		err    error
+	)
 
 	if s.Type != nil {
 		llType, err = cg.tinTypeToLLVM(s.Type)
@@ -568,6 +608,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	}
 
 	var initVal value.Value
+
 	if s.Value != nil {
 		cg.curBlock = block
 		// TupleLit: pass the declared type so fields get the right LLVM types.
@@ -576,6 +617,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		} else {
 			initVal, err = cg.genExpr(block, s.Value)
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -583,6 +625,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		if cg.curBlock != block {
 			block = cg.curBlock
 		}
+
 		if llType == nil && initVal != nil {
 			llType = initVal.Type()
 		}
@@ -604,7 +647,43 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	if block == nil {
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
 	}
+
+	// All local variables are stack-allocated. Heap promotion happens lazily at
+	// the return site (genLatePromotedReturn) for variables whose addresses escape.
 	alloca := block.NewAlloca(llType)
+
+	// isHeapOwned: this variable receives the return value of a heap-promoting
+	// function (one that uses _tin_rc_alloc to return *T), or a &StructLit{} that
+	// was RC-alloc'd inline.  Scope-exit performs a chain release rather than the
+	// normal ARC release.
+	isHeapOwned := false
+	heapOwnedDepth := 0
+
+	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
+		calleeName := ""
+
+		switch fn := callExpr.Func.(type) {
+		case *ast.Identifier:
+			calleeName = fn.Name
+		}
+
+		if calleeName != "" && cg.heapPromotingFns[calleeName] && llType != nil {
+			depth := pointerChainDepth(llType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
+	} else if addrOf, isAddrOf := s.Value.(*ast.AddressOfExpr); isAddrOf {
+		if _, isStructLit := addrOf.Expr.(*ast.StructLit); isStructLit && llType != nil {
+			depth := pointerChainDepth(llType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
+	}
+
 	isRC := isRCTrackedType(llType)
 	if initVal != nil {
 		// If the init value is an empty array {i8*, i64} but the declared type
@@ -614,6 +693,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				initVal = cg.zeroValue(llType)
 			}
 		}
+
 		srcType := initVal.Type()
 		initVal = cg.coerce(block, initVal, llType)
 		block.NewStore(initVal, alloca)
@@ -640,6 +720,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// We read it here (after genExpr returns) so that any nested expression that
 	// also calls genSliceExpr doesn't clobber our value.
 	sliceBase := cg.lastSliceBase
+
 	cg.lastSliceBase = nil
 	if sliceBase != nil {
 		// Retain the base pointer once to balance the scope-exit release below.
@@ -667,7 +748,24 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase})
+	// Non-capturing closures (null env): scope-exit would emit _tin_release_closure(null)
+	// which is a no-op in the runtime.  Set noRelease to skip it entirely.
+	noReleaseClosureEnv := false
+	if _, isLambda := s.Value.(*ast.LambdaExpr); isLambda && isFatFnPtr(llType) {
+		noReleaseClosureEnv = !cg.lastLambdaHadCaptures
+		cg.lastLambdaHadCaptures = false // consume
+	}
+
+	// Determine the byte-array element kind: prefer the explicit declared type,
+	// then fall back to the RHS AsExpr type (covers `let x = expr as [byte]`).
+	bae := byteArrayElemType(s.Type)
+	if bae == "" {
+		if asExpr, ok := s.Value.(*ast.AsExpr); ok {
+			bae = byteArrayElemType(asExpr.Type)
+		}
+	}
+
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
 
 	return block, nil
 }
@@ -690,10 +788,12 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 	}
 	// All thunks share the same signature: void(i8* env, i8* ret_slot).
 	thunkFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr, irtypes.I8Ptr)
+
 	retSlotArg := cg.curFnDeferRetAlloca
 	if retSlotArg == nil {
 		retSlotArg = constant.NewNull(irtypes.I8Ptr)
 	}
+
 	for i := n - 1; i >= 0; i-- {
 		// Deregister this one entry before running it.
 		if cg.deferPopFn != nil {
@@ -749,6 +849,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				nilBlock := cg.curFn.NewBlock(fmt.Sprintf("defer.ret.nil.%d", cg.labelCount))
 				overrideBlock := cg.curFn.NewBlock(fmt.Sprintf("defer.ret.override.%d", cg.labelCount))
 				cg.labelCount++
+
 				block.NewCondBr(isNilPtr, nilBlock, overrideBlock)
 				// Override branch: load *retVal and write to slot.
 				derefVal := overrideBlock.NewLoad(innerType, retVal)
@@ -784,22 +885,36 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if err := cg.emitDefers(block); err != nil {
 			return err
 		}
+
 		cg.emitAllScopeReleases(block, "")
 		block.NewRet(nil)
 
 		return nil
 	}
+
+	// Late heap promotion: if this return involves escaping vars, defer evaluation
+	// until after defers so the post-defer stack values are used for the RC blocks.
+	if len(cg.curFnEscapingVars) > 0 {
+		promoted := retainedHeapVars(s.Value, cg.curFnEscapingAliases, cg.curFnEscapingVars)
+		if len(promoted) > 0 {
+			return cg.genLatePromotedReturn(block, s, promoted)
+		}
+	}
+
 	cg.curBlock = block // sync before genExpr so we can detect block advances
 	// TupleLit: pass the declared return type so fields get the right types.
 	var val value.Value
+
 	if tup, ok := s.Value.(*ast.TupleLit); ok && cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
 		var err2 error
+
 		val, err2 = cg.genTupleLit(block, tup, cg.curFn.Sig.RetType)
 		if err2 != nil {
 			return err2
 		}
 	} else {
 		var err2 error
+
 		val, err2 = cg.genExpr(block, s.Value)
 		if err2 != nil {
 			return err2
@@ -809,12 +924,14 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
+
 	if cg.curFn != nil {
 		retType := cg.curFn.Sig.RetType
 		if !irtypes.IsVoid(retType) {
 			val = cg.coerce(block, val, retType)
 		}
 	}
+
 	if err := cg.emitDefers(block); err != nil {
 		return err
 	}
@@ -844,6 +961,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		// decrements the RC back to a net-neutral result.
 		cg.emitRetain(block, val)
 	}
+
 	cg.emitAllScopeReleases(block, retSkipName)
 	block.NewRet(val)
 
@@ -855,9 +973,12 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 // emits the final coro.suspend which leads to cleanup.
 func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	var retVal value.Value
+
 	if s.Value != nil {
 		cg.curBlock = block // sync before genExpr so we can detect block advances
+
 		var err error
+
 		retVal, err = cg.genExpr(block, s.Value)
 		if err != nil {
 			return err
@@ -871,15 +992,19 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			retVal = cg.coerce(block, retVal, cg.curCoroRetType)
 		}
 	}
+
 	if err := cg.emitDefers(block); err != nil {
 		return err
 	}
+
 	retSkipName := ""
+
 	if s.Value != nil {
 		if ident, ok := s.Value.(*ast.Identifier); ok {
 			retSkipName = ident.Name
 		}
 	}
+
 	cg.emitAllScopeReleases(block, retSkipName)
 	cg.emitCoroComplete(block, retVal)
 	cg.emitFinalSuspend(block, cg.curCoroFrame)
@@ -893,9 +1018,9 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	if !cg.inCoroFn {
 		// In the sync version of an {#async} function, yield is a no-op.
-
 		return block, nil
 	}
+
 	cg.ensureFiberRuntime()
 	// Notify the scheduler that we want to be re-enqueued.
 	block.NewCall(cg.fiberYieldCoroFn, cg.curCoroHdl)
@@ -916,9 +1041,11 @@ func (cg *CodeGen) genAwaitStmt(block *ir.Block, pidVal value.Value) (*ir.Block,
 	if !cg.inCoroFn {
 		// Non-coroutine context (e.g., main): run scheduler until the fiber completes.
 		cg.ensureFiberRuntime()
+
 		if pidVal == nil {
 			return block, nil
 		}
+
 		pid64 := cg.coerce(block, pidVal, irtypes.I64)
 		syncAwaitFn := cg.ensureExternDecl("_tin_fiber_sync_await", irtypes.Void,
 			[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
@@ -926,10 +1053,13 @@ func (cg *CodeGen) genAwaitStmt(block *ir.Block, pidVal value.Value) (*ir.Block,
 
 		return block, nil
 	}
+
 	cg.ensureFiberRuntime()
+
 	if pidVal != nil && !pidVal.Type().Equal(irtypes.I64) {
 		pidVal = cg.coerce(block, pidVal, irtypes.I64)
 	}
+
 	if pidVal == nil {
 		return block, nil
 	}
@@ -948,6 +1078,7 @@ func (cg *CodeGen) genBuiltinLen(block *ir.Block, arg ast.Node) (value.Value, er
 	if err != nil {
 		return nil, err
 	}
+
 	t := val.Type()
 	// String fat-ptr {i8*, i64}: extract field 1.
 	if isStringType(t) {
@@ -1013,14 +1144,17 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	freeNames := collectFreeVars(call, map[string]bool{})
 
 	var captures []closureCapture
+
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
 			continue
 		}
+
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
 			continue // global function - reachable by name, no capture needed
 		}
+
 		if entry.isAlloc {
 			// Capture by reference so mutations inside the thunk are visible outside.
 			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
@@ -1042,13 +1176,14 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	prevCtx := cg.pushClosureCtx(f)
 	cg.curDeferRetSlotParam = f.Params[1]
 
-	// Step 4: unpack captures from env
-	cg.unpackEnv(entryBlock, f, envStructType, captures)
+	// Step 4: unpack captures from env (defer thunks run once; env persists during execution)
+	cg.unpackEnv(entryBlock, f, envStructType, captures, false)
 
 	// Step 5: emit the deferred call
 	if _, err := cg.genExpr(entryBlock, call); err != nil {
 		return nil, nil, err
 	}
+
 	if entryBlock.Term == nil {
 		entryBlock.NewRet(nil)
 	}
@@ -1078,17 +1213,21 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 	for _, p := range lambda.Params {
 		localNames[p.Name] = true
 	}
+
 	freeNames := collectFreeVars(lambda.Body, localNames)
 
 	var captures []closureCapture
+
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
 			continue
 		}
+
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
 			continue
 		}
+
 		if entry.isAlloc {
 			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
 		} else {
@@ -1112,6 +1251,7 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 	// Set the lambda's declared return type so genReturn can coerce values correctly.
 	// e.g. for `fn() *i64 = return None`, curDeferThunkRetType = *i64.
 	var lambdaRetType irtypes.Type = irtypes.Void
+
 	if lambda.RetType != nil {
 		if rt, err2 := cg.tinTypeToLLVM(lambda.RetType); err2 == nil {
 			lambdaRetType = rt
@@ -1119,13 +1259,14 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 		}
 	}
 
-	// Unpack captures from env.
-	cg.unpackEnv(entryBlock, f, envStructType, captures)
+	// Unpack captures from env (defer thunk runs once; env persists during execution).
+	cg.unpackEnv(entryBlock, f, envStructType, captures, false)
 
 	// Register lambda params (none for "defer fn() void = body", but support them for completeness).
 	for i, p := range lambda.Params {
 		// Lambda thunks take no user params - these would be zero-valued placeholders.
 		_ = i
+
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err == nil {
 			alloca := entryBlock.NewAlloca(pt)
@@ -1168,26 +1309,25 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 
 	// The argument is a type used as an expression - typically an Identifier.
 	var typeExpr ast.TypeExpr
+
 	switch a := arg.(type) {
 	case *ast.Identifier:
 		typeExpr = &ast.SimpleType{Name: a.Name}
 	default:
-
 		return constant.NewInt(irtypes.I64, 0), nil
 	}
+
 	llvmType, err := cg.tinTypeToLLVM(typeExpr)
 	if err != nil {
 		return constant.NewInt(irtypes.I64, 0), nil
 	}
+
 	switch t := llvmType.(type) {
 	case *irtypes.IntType:
-
 		return constant.NewInt(t, 0), nil
 	case *irtypes.FloatType:
-
 		return constant.NewFloat(t, 0), nil
 	case *irtypes.PointerType:
-
 		return constant.NewNull(t), nil
 	case *irtypes.StructType:
 		// Zero-initialize each field.
@@ -1207,7 +1347,6 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 
 		return constant.NewStruct(t, fields...), nil
 	default:
-
 		return constant.NewUndef(llvmType), nil
 	}
 }
@@ -1240,14 +1379,17 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 	for i, p := range macro.Params {
 		subst[p] = args[i]
 	}
+
 	body := macro.Body
 	// Unwrap ExprStmt and ReturnStmt wrappers so the body is a bare expression.
 	if es, ok := body.(*ast.ExprStmt); ok {
 		body = es.Expr
 	}
+
 	if rs, ok := body.(*ast.ReturnStmt); ok && rs.Value != nil {
 		body = rs.Value
 	}
+
 	expanded := substituteMacroNode(body, subst)
 	// Backtick literal body: parse the content as tin source, substitute params, then codegen.
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
@@ -1270,6 +1412,7 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	if node == nil {
 		return nil
 	}
+
 	switch n := node.(type) {
 	case *ast.Identifier:
 		if replacement, ok := subst[n.Name]; ok {
@@ -1278,14 +1421,12 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 
 		return n
 	case *ast.BinExpr:
-
 		return &ast.BinExpr{
 			Left:  substituteMacroNode(n.Left, subst),
 			Right: substituteMacroNode(n.Right, subst),
 			Op:    n.Op,
 		}
 	case *ast.UnaryExpr:
-
 		return &ast.UnaryExpr{
 			Expr: substituteMacroNode(n.Expr, subst),
 			Op:   n.Op,
@@ -1302,27 +1443,23 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 			TypeArgs: n.TypeArgs,
 		}
 	case *ast.FieldAccess:
-
 		return &ast.FieldAccess{
 			Expr:  substituteMacroNode(n.Expr, subst),
 			Field: n.Field,
 			IsPtr: n.IsPtr,
 		}
 	case *ast.IndexExpr:
-
 		return &ast.IndexExpr{
 			Expr:  substituteMacroNode(n.Expr, subst),
 			Index: substituteMacroNode(n.Index, subst),
 		}
 	case *ast.TernaryExpr:
-
 		return &ast.TernaryExpr{
 			Cond: substituteMacroNode(n.Cond, subst),
 			Then: substituteMacroNode(n.Then, subst),
 			Else: substituteMacroNode(n.Else, subst),
 		}
 	case *ast.ExprStmt:
-
 		return &ast.ExprStmt{Expr: substituteMacroNode(n.Expr, subst)}
 	case *ast.ReturnStmt:
 		if n.Value != nil {
@@ -1335,14 +1472,32 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	return node
 }
 
+// exprByteArrayElem returns the element type name ("byte", "u8", "char") when
+// the AST expression is statically known to be a [byte]/[u8]/[char] fat array,
+// and "" otherwise.
+func (cg *CodeGen) exprByteArrayElem(node ast.Node) string {
+	switch n := node.(type) {
+	case *ast.AsExpr:
+		return byteArrayElemType(n.Type)
+	case *ast.Identifier:
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			return se.byteArrayElem
+		}
+	}
+
+	return ""
+}
+
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 
 	cg.curBlock = block
+
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
 	}
+
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
@@ -1354,7 +1509,6 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 	t := val.Type()
 	switch {
 	case isAnyType(t):
-
 		return cg.genEchoAny(block, val)
 
 	case isAtomType(t):
@@ -1366,6 +1520,32 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 		block.NewCall(printf, fmtStr, ptr)
 
 	case isStringType(t):
+		// [byte]/[u8]/[char] arrays share {i8*, i64} layout with string.
+		// Dispatch by element type: byte -> hex, u8 -> decimal, char -> %c.
+		// Plain strings fall through to %s.
+		if elem := cg.exprByteArrayElem(s.Value); elem != "" {
+			var perElemFmt string
+
+			switch elem {
+			case "byte":
+				perElemFmt = "%02x"
+			case "u8":
+				perElemFmt = "%u"
+			default: // "char"
+				perElemFmt = "%c"
+			}
+
+			var printErr error
+
+			block, printErr = cg.genPrintByteArray(block, val, perElemFmt)
+			if printErr != nil {
+				return nil, printErr
+			}
+
+			block.NewCall(printf, cg.newGlobalString("\n"))
+
+			break
+		}
 		// Extract data pointer and call printf("%s\n", ptr).
 		ptr := cg.extractStringPtr(block, val)
 		fmtStr := cg.newGlobalString("%s\n")
@@ -1373,6 +1553,7 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 	case irtypes.IsInt(t):
 		it := t.(*irtypes.IntType)
+
 		var fmtStr value.Value
 		if it.BitSize == 1 {
 			// bool: print 0 or 1 via printf
@@ -1382,6 +1563,7 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 			return block, nil
 		}
+
 		if it.BitSize == 8 {
 			// char/u8: print as character
 			fmtStr = cg.newGlobalString("%c\n")
@@ -1390,18 +1572,21 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 			return block, nil
 		}
+
 		fmtStr = cg.newGlobalString("%lld\n")
 		ext := cg.coerce(block, val, irtypes.I64)
 		block.NewCall(printf, fmtStr, ext)
 
 	case irtypes.IsFloat(t):
 		fmtStr := cg.newGlobalString("%g\n")
+
 		var ext value.Value
 		if t == irtypes.Double {
 			ext = val
 		} else {
 			ext = block.NewFPExt(val, irtypes.Double)
 		}
+
 		block.NewCall(printf, fmtStr, ext)
 
 	case irtypes.IsPointer(t):
@@ -1417,10 +1602,15 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 			break
 		}
-		// Fallback: print as integer.
-		fmtStr := cg.newGlobalString("%lld\n")
-		ext := cg.coerce(block, val, irtypes.I64)
-		block.NewCall(printf, fmtStr, ext)
+		// Struct or array: Go-style formatting.
+		var printErr error
+
+		block, printErr = cg.genPrintValue(block, val)
+		if printErr != nil {
+			return nil, printErr
+		}
+
+		block.NewCall(printf, cg.newGlobalString("\n"))
 	}
 
 	// ARC: release fresh RC-tracked values produced by function calls or
@@ -1433,12 +1623,226 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 	return block, nil
 }
 
+// genPrintValue emits printf calls to print val in Go-style format without a
+// trailing newline. Structs print as {f1 f2 ...}, arrays as [e1 e2 ...].
+func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	t := val.Type()
+
+	switch {
+	case isStringType(t):
+		ptr := cg.extractStringPtr(block, val)
+		block.NewCall(printf, cg.newGlobalString("%s"), ptr)
+
+	case isAtomType(t):
+		code := cg.extractAtomCode(block, val)
+		strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
+		ptr := cg.extractStringPtr(block, strFatPtr)
+		block.NewCall(printf, cg.newGlobalString("'%s"), ptr)
+
+	case irtypes.IsInt(t):
+		it := t.(*irtypes.IntType)
+		switch it.BitSize {
+		case 1:
+			trueStr := cg.newGlobalString("true")
+			falseStr := cg.newGlobalString("false")
+			chosen := block.NewSelect(val, trueStr, falseStr)
+			block.NewCall(printf, cg.newGlobalString("%s"), chosen)
+		case 8:
+			zext := block.NewZExt(val, irtypes.I32)
+			block.NewCall(printf, cg.newGlobalString("%c"), zext)
+		default:
+			ext := cg.coerce(block, val, irtypes.I64)
+			block.NewCall(printf, cg.newGlobalString("%lld"), ext)
+		}
+
+	case irtypes.IsFloat(t):
+		var ext value.Value
+		if t == irtypes.Double {
+			ext = val
+		} else {
+			ext = block.NewFPExt(val, irtypes.Double)
+		}
+
+		block.NewCall(printf, cg.newGlobalString("%g"), ext)
+
+	case irtypes.IsPointer(t):
+		block.NewCall(printf, cg.newGlobalString("%p"), val)
+
+	case isFatArrayPtr(t):
+		var err error
+
+		block, err = cg.genPrintArray(block, val)
+		if err != nil {
+			return nil, err
+		}
+
+	default:
+		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+			var err error
+
+			block, err = cg.genPrintStruct(block, val, st)
+			if err != nil {
+				return nil, err
+			}
+
+			break
+		}
+
+		ext := cg.coerce(block, val, irtypes.I64)
+		block.NewCall(printf, cg.newGlobalString("%lld"), ext)
+	}
+
+	return block, nil
+}
+
+// genPrintStruct emits printf calls to print a named struct value as {f1 f2 ...}.
+func (cg *CodeGen) genPrintStruct(block *ir.Block, val value.Value, st *irtypes.StructType) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	name := st.Name()
+	fieldNames := cg.structFields[name]
+	userOff := 1 + cg.vtableOffset(name)
+
+	block.NewCall(printf, cg.newGlobalString("{"))
+
+	for i, fieldName := range fieldNames {
+		if fieldName == "" {
+			continue
+		}
+
+		llIdx := userOff + i
+		if llIdx >= len(st.Fields) {
+			break
+		}
+
+		if i > 0 {
+			block.NewCall(printf, cg.newGlobalString(" "))
+		}
+
+		fieldVal := block.NewExtractValue(val, uint64(llIdx))
+
+		var err error
+
+		block, err = cg.genPrintValue(block, fieldVal)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	block.NewCall(printf, cg.newGlobalString("}"))
+
+	return block, nil
+}
+
+// genPrintArray emits a loop that prints a fat-array value as [e1 e2 ...].
+func (cg *CodeGen) genPrintArray(block *ir.Block, val value.Value) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	fatType := val.Type().(*irtypes.StructType)
+	elemPtrType := fatType.Fields[0].(*irtypes.PointerType)
+	elemType := elemPtrType.ElemType
+
+	dataPtr := block.NewExtractValue(val, 0)
+	length := block.NewExtractValue(val, 1)
+
+	// Alloca for loop counter.
+	iAlloca := block.NewAlloca(irtypes.I64)
+	block.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+
+	block.NewCall(printf, cg.newGlobalString("["))
+
+	condBlock := cg.newBlock("print.arr.cond")
+	bodyBlock := cg.newBlock("print.arr.body")
+	endBlock := cg.newBlock("print.arr.end")
+
+	block.NewBr(condBlock)
+
+	// Condition: i < length
+	iVal := condBlock.NewLoad(irtypes.I64, iAlloca)
+	cmp := condBlock.NewICmp(enum.IPredSLT, iVal, length)
+	condBlock.NewCondBr(cmp, bodyBlock, endBlock)
+
+	// Body: print separator if i > 0, print element, increment i.
+	iVal2 := bodyBlock.NewLoad(irtypes.I64, iAlloca)
+	isFirst := bodyBlock.NewICmp(enum.IPredEQ, iVal2, constant.NewInt(irtypes.I64, 0))
+	spaceStr := cg.newGlobalString(" ")
+	emptyStr := cg.newGlobalString("")
+	sepStr := bodyBlock.NewSelect(isFirst, emptyStr, spaceStr)
+	bodyBlock.NewCall(printf, cg.newGlobalString("%s"), sepStr)
+
+	elemPtr := bodyBlock.NewGetElementPtr(elemType, dataPtr, iVal2)
+	elemVal := bodyBlock.NewLoad(elemType, elemPtr)
+
+	var err error
+
+	bodyBlock, err = cg.genPrintValue(bodyBlock, elemVal)
+	if err != nil {
+		return nil, err
+	}
+
+	iNext := bodyBlock.NewAdd(iVal2, constant.NewInt(irtypes.I64, 1))
+	bodyBlock.NewStore(iNext, iAlloca)
+	bodyBlock.NewBr(condBlock)
+
+	endBlock.NewCall(printf, cg.newGlobalString("]"))
+
+	return endBlock, nil
+}
+
+// genPrintByteArray emits a loop that prints a [byte]/[u8]/[char] fat-array as
+// [e1 e2 ...] where each element is formatted with perElemFmt (e.g. "%02x",
+// "%u", "%c").  The fat-array must have layout {i8*, i64}.
+func (cg *CodeGen) genPrintByteArray(block *ir.Block, val value.Value, perElemFmt string) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+
+	dataPtr := block.NewExtractValue(val, 0)
+	length := block.NewExtractValue(val, 1)
+
+	iAlloca := block.NewAlloca(irtypes.I64)
+	block.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+
+	block.NewCall(printf, cg.newGlobalString("["))
+
+	condBlock := cg.newBlock("print.bytes.cond")
+	bodyBlock := cg.newBlock("print.bytes.body")
+	endBlock := cg.newBlock("print.bytes.end")
+
+	block.NewBr(condBlock)
+
+	// Condition: i < length
+	iVal := condBlock.NewLoad(irtypes.I64, iAlloca)
+	cmp := condBlock.NewICmp(enum.IPredSLT, iVal, length)
+	condBlock.NewCondBr(cmp, bodyBlock, endBlock)
+
+	// Body: print space separator (except before first), print element, increment.
+	iVal2 := bodyBlock.NewLoad(irtypes.I64, iAlloca)
+	isFirst := bodyBlock.NewICmp(enum.IPredEQ, iVal2, constant.NewInt(irtypes.I64, 0))
+	spaceStr := cg.newGlobalString(" ")
+	emptyStr := cg.newGlobalString("")
+	sepStr := bodyBlock.NewSelect(isFirst, emptyStr, spaceStr)
+	bodyBlock.NewCall(printf, cg.newGlobalString("%s"), sepStr)
+
+	elemPtr := bodyBlock.NewGetElementPtr(irtypes.I8, dataPtr, iVal2)
+	elemVal := bodyBlock.NewLoad(irtypes.I8, elemPtr)
+	zext := bodyBlock.NewZExt(elemVal, irtypes.I32)
+	bodyBlock.NewCall(printf, cg.newGlobalString(perElemFmt), zext)
+
+	iNext := bodyBlock.NewAdd(iVal2, constant.NewInt(irtypes.I64, 1))
+	bodyBlock.NewStore(iNext, iAlloca)
+	bodyBlock.NewBr(condBlock)
+
+	endBlock.NewCall(printf, cg.newGlobalString("]"))
+
+	return endBlock, nil
+}
+
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
 	ptr, err := cg.genLValue(block, s.Target)
 	if err != nil {
 		return block, err
 	}
+
 	cg.curBlock = block
+
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return block, err
@@ -1460,9 +1864,11 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		if isCopyExpr(s.Value) && !boxedToAny {
 			cg.emitRetain(block, val)
 		}
+
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)
 		cg.emitRelease(block, oldVal)
 	}
+
 	block.NewStore(val, ptr)
 
 	return block, nil
@@ -1473,11 +1879,13 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	if err != nil {
 		return block, err
 	}
+
 	ptrType := ptr.Type().(*irtypes.PointerType)
 	elemType := ptrType.ElemType
 	current := block.NewLoad(elemType, ptr)
 
 	cg.curBlock = block
+
 	rhs, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return block, err
@@ -1494,6 +1902,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	rhs = cg.coerce(block, rhs, elemType)
 
 	var result value.Value
+
 	switch s.Op {
 	case "+=":
 		if pt, ok := elemType.(*irtypes.PointerType); ok {
@@ -1590,6 +1999,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	default:
 		result = rhs
 	}
+
 	block.NewStore(result, ptr)
 
 	return block, nil
@@ -1600,12 +2010,15 @@ func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
 	if err != nil {
 		return err
 	}
+
 	ptrType := ptr.Type().(*irtypes.PointerType)
 	elemType := ptrType.ElemType
 	current := block.NewLoad(elemType, ptr)
 
 	one := cg.coerce(block, constant.NewInt(irtypes.I64, 1), elemType)
+
 	var result value.Value
+
 	switch s.Op {
 	case "++":
 		result = block.NewAdd(current, one)
@@ -1614,6 +2027,7 @@ func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
 	default:
 		result = current
 	}
+
 	block.NewStore(result, ptr)
 
 	return nil
@@ -1626,9 +2040,11 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	if err != nil {
 		return nil, false, err
 	}
+
 	cond = cg.toBool(block, cond)
 
 	thenBlock := cg.newBlock("if.then")
+
 	var elseStart *ir.Block
 	if s.Else != nil || len(s.ElseIfs) > 0 {
 		elseStart = cg.newBlock("if.else")
@@ -1640,6 +2056,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 
 	// Then branch.
 	cg.curScope = newScope(cg.curScope)
+
 	thenCurBlock, thenTerm, err := cg.genBlock(thenBlock, s.Then)
 	if thenCurBlock == nil {
 		thenCurBlock = thenBlock
@@ -1647,9 +2064,11 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	// ARC: release scope before popping (only when not already terminated).
 	cg.emitScopeRelease(thenCurBlock, cg.curScope)
 	cg.curScope = cg.curScope.parent
+
 	if err != nil {
 		return nil, false, err
 	}
+
 	thenTerminated := thenTerm || thenCurBlock.Term != nil
 	if !thenTerminated {
 		thenCurBlock.NewBr(mergeBlock)
@@ -1658,47 +2077,61 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	// ElseIf chains.
 	allElifTerminated := true
 	currentElse := elseStart
+
 	for _, elif := range s.ElseIfs {
 		nextBlock := cg.newBlock("elif.next")
+
 		elifCond, err := cg.genExpr(currentElse, elif.Cond)
 		if err != nil {
 			return nil, false, err
 		}
+
 		elifCond = cg.toBool(currentElse, elifCond)
 		elifThen := cg.newBlock("elif.then")
 		currentElse.NewCondBr(elifCond, elifThen, nextBlock)
 
 		cg.curScope = newScope(cg.curScope)
+
 		elifCurBlock, elifTerm, err := cg.genBlock(elifThen, elif.Body)
 		if elifCurBlock == nil {
 			elifCurBlock = elifThen
 		}
+
 		cg.emitScopeRelease(elifCurBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, false, err
 		}
+
 		elifTerminated := elifTerm || elifCurBlock.Term != nil
 		if !elifTerminated {
 			elifCurBlock.NewBr(mergeBlock)
+
 			allElifTerminated = false
 		}
+
 		currentElse = nextBlock
 	}
 
 	// Else branch.
 	elseTerminated := false
+
 	if s.Else != nil {
 		cg.curScope = newScope(cg.curScope)
+
 		elseCurBlock, elseTerm, err := cg.genBlock(currentElse, s.Else)
 		if elseCurBlock == nil {
 			elseCurBlock = currentElse
 		}
+
 		cg.emitScopeRelease(elseCurBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, false, err
 		}
+
 		elseTerminated = elseTerm || elseCurBlock.Term != nil
 		if !elseTerminated {
 			elseCurBlock.NewBr(mergeBlock)
@@ -1721,13 +2154,10 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 func (cg *CodeGen) genFor(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
 	switch s.Kind {
 	case ast.ForCStyle:
-
 		return cg.genForCStyle(block, s)
 	case ast.ForIn:
-
 		return cg.genForIn(block, s)
 	case ast.ForWhile:
-
 		return cg.genForWhile(block, s)
 	}
 
@@ -1744,13 +2174,16 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 
 	// Condition - set curBlock so we can detect if await/yield changed it.
 	cg.curBlock = condBlock
+
 	cond, err := cg.genExpr(condBlock, s.Cond)
 	if err != nil {
 		return nil, err
 	}
+
 	if cg.curBlock != condBlock {
 		condBlock = cg.curBlock
 	}
+
 	cg.curBlock = nil
 	cond = cg.toBool(condBlock, cond)
 
@@ -1763,6 +2196,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	isConstTrue := false
 	if ci, ok := cond.(*constant.Int); ok && ci.X.IsInt64() && ci.X.Int64() == 1 {
 		isConstTrue = true
+
 		condBlock.NewBr(bodyBlock)
 	} else {
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
@@ -1774,23 +2208,29 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	prevScope := cg.curScope
 	cg.curScope = newScope(prevScope)
 	cg.pushBreakTarget(afterBlock)
+
 	var endBody *ir.Block
+
 	endBody, _, err = cg.genStmt(bodyBlock, s.Body)
+
 	breakUsed := cg.popBreakTarget()
 	if err != nil {
 		cg.curScope = prevScope
 
 		return nil, err
 	}
+
 	if endBody != nil && endBody.Term == nil {
 		// Release loop-body-local RC vars before jumping back to the condition.
 		cg.emitScopeRelease(endBody, cg.curScope)
+
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(endBody, condBlock)
 		} else {
 			endBody.NewBr(condBlock)
 		}
 	}
+
 	cg.curScope = prevScope
 
 	// For constant-true loops: if no break statement branched to afterBlock,
@@ -1813,8 +2253,10 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 
 	// Init: push a scope so the loop variable is scoped to the loop.
 	cg.curScope = newScope(cg.curScope)
+
 	if s.Init != nil {
 		var err error
+
 		block, _, err = cg.genStmt(block, s.Init)
 		if err != nil {
 			return nil, err
@@ -1823,12 +2265,15 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 		// C-style for without explicit initializer: `for let i T; cond; post:`
 		// Declare the loop variable zero-initialized so it is in scope.
 		zeroDecl := &ast.VarDecl{Name: s.VarName, Type: s.VarType}
+
 		var err error
+
 		block, err = cg.genVarDecl(block, zeroDecl)
 		if err != nil {
 			return nil, err
 		}
 	}
+
 	if block.Term == nil {
 		block.NewBr(condBlock)
 	}
@@ -1836,13 +2281,16 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 	// Cond
 	if s.Cond != nil {
 		cg.curBlock = condBlock
+
 		cond, err := cg.genExpr(condBlock, s.Cond)
 		if err != nil {
 			return nil, err
 		}
+
 		if cg.curBlock != nil && cg.curBlock != condBlock {
 			condBlock = cg.curBlock
 		}
+
 		cg.curBlock = nil
 		cond = cg.toBool(condBlock, cond)
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
@@ -1852,16 +2300,20 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 
 	// Body
 	cg.curScope = newScope(cg.curScope)
+
 	var err error
+
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, err = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
 	// ARC: release loop body scope vars before back-edge.
 	cg.emitScopeRelease(bodyBlock, cg.curScope)
 	cg.curScope = cg.curScope.parent
+
 	if err != nil {
 		return nil, err
 	}
+
 	if bodyBlock != nil && bodyBlock.Term == nil {
 		bodyBlock.NewBr(postBlock)
 	}
@@ -1873,6 +2325,7 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 			return nil, err
 		}
 	}
+
 	if postBlock.Term == nil {
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(postBlock, condBlock)
@@ -1893,6 +2346,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	if rng, ok := s.Iter.(*ast.RangeExpr); ok {
 		return cg.genForRange(block, s, rng)
 	}
+
 	if bin, ok := s.Iter.(*ast.BinExpr); ok && bin.Op == ".." {
 		return cg.genForRange(block, s, &ast.RangeExpr{Start: bin.Left, End: bin.Right})
 	}
@@ -1914,6 +2368,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	if isStringType(iterVal.Type()) {
 		elemType = irtypes.I8
 	}
+
 	if s.VarType != nil {
 		elemType, err = cg.tinTypeToLLVM(s.VarType)
 		if err != nil {
@@ -1974,22 +2429,26 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	// Register loop variable.
 	elemAlloca := bodyBlock.NewAlloca(elemType)
 	bodyBlock.NewStore(elemVal, elemAlloca)
+
 	isElemRC := isRCTrackedType(elemType)
 	// ARC: each iteration copies an element - retain to claim ownership.
 	if isElemRC {
 		cg.emitRetain(bodyBlock, elemVal)
 	}
+
 	if s.VarName != "" {
 		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC})
 	}
 
 	var bodyErr error
+
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
 	// ARC: release loop body scope before back-edge.
 	cg.emitScopeRelease(bodyBlock, cg.curScope)
 	cg.curScope = cg.curScope.parent
+
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
@@ -1999,6 +2458,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		bodyIdx2 := bodyBlock.NewLoad(irtypes.I64, idxAlloca)
 		newIdx := bodyBlock.NewAdd(bodyIdx2, constant.NewInt(irtypes.I64, 1))
 		bodyBlock.NewStore(newIdx, idxAlloca)
+
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(bodyBlock, condBlock)
 		} else {
@@ -2014,6 +2474,7 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	if err != nil {
 		return nil, err
 	}
+
 	end, err := cg.genExpr(block, rng.End)
 	if err != nil {
 		return nil, err
@@ -2051,11 +2512,14 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	if s.VarName != "" {
 		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true})
 	}
+
 	var bodyErr error
+
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
 	cg.curScope = cg.curScope.parent
+
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
@@ -2066,6 +2530,7 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 		one := cg.coerce(bodyBlock, constant.NewInt(irtypes.I64, 1), varType)
 		newI := bodyBlock.NewAdd(iVal2, one)
 		bodyBlock.NewStore(newI, loopVar)
+
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(bodyBlock, condBlock)
 		} else {
@@ -2083,32 +2548,39 @@ func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
 	if len(s.Cases) == 0 {
 		return false
 	}
+
 	var enumName string
+
 	for _, c := range s.Cases {
 		fa, ok := c.Pattern.(*ast.FieldAccess)
 		if !ok {
 			return false
 		}
+
 		id, ok := fa.Expr.(*ast.Identifier)
 		if !ok {
 			return false
 		}
+
 		key := id.Name + "." + fa.Field
 		if _, isEnum := cg.enumValues[key]; !isEnum {
 			return false
 		}
+
 		if enumName == "" {
 			enumName = id.Name
 		} else if enumName != id.Name {
 			return false
 		}
 	}
+
 	if enumName == "" {
 		return false
 	}
 	// Count total members registered for this enum.
 	prefix := enumName + "."
 	total := 0
+
 	for key := range cg.enumValues {
 		if strings.HasPrefix(key, prefix) {
 			total++
@@ -2122,27 +2594,34 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 	if s.IsType {
 		return cg.genMatchType(block, s)
 	}
+
 	expr, err := cg.genExpr(block, s.Expr)
 	if err != nil {
 		return nil, err
 	}
 
 	afterBlock := cg.newBlock("match.after")
+
 	defaultBlock := afterBlock
 	if s.Default != nil {
 		defaultBlock = cg.newBlock("match.default")
 	}
 
 	// Build cases.
-	var cases []*ir.Case
-	var caseBlocks []*ir.Block
+	var (
+		cases      []*ir.Case
+		caseBlocks []*ir.Block
+	)
+
 	for i, c := range s.Cases {
 		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		caseBlocks = append(caseBlocks, caseBlock)
+
 		pat, err := cg.genExpr(block, c.Pattern)
 		if err != nil {
 			return nil, err
 		}
+
 		if constPat, ok := pat.(constant.Constant); ok {
 			intPat := cg.toConstInt(constPat, expr.Type())
 			cases = append(cases, ir.NewCase(intPat, caseBlock))
@@ -2161,6 +2640,7 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 			}
 		}
 	}
+
 	block.NewSwitch(switchExpr, defaultBlock, cases...)
 
 	// Generate case bodies. Track whether any arm fell through to afterBlock.
@@ -2174,14 +2654,18 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 		} else {
 			caseBlock = cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		}
+
 		cg.curScope = newScope(cg.curScope)
 		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, err
 		}
+
 		if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
+
 			anyFallthrough = true
 		}
 	}
@@ -2191,11 +2675,14 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 		cg.curScope = newScope(cg.curScope)
 		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, err
 		}
+
 		if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
+
 			anyFallthrough = true
 		}
 	}
@@ -2230,11 +2717,13 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return nil, fmt.Errorf("match .(type): nil expression")
 	}
 
 	unionName := cg.typeNameOf(val.Type())
+
 	members, isUnion := cg.unionTypeMembers[unionName]
 	if !isUnion {
 		return nil, fmt.Errorf("match .(type) requires a tagged union type, got %s", unionName)
@@ -2250,18 +2739,23 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	tagI64 := block.NewZExt(tagVal, irtypes.I64)
 
 	afterBlock := cg.newBlock("match.after")
+
 	defaultBlock := afterBlock
 	if s.Default != nil {
 		defaultBlock = cg.newBlock("match.default")
 	}
 
 	// Build cases: determine tag for each case from VarType.
-	var cases []*ir.Case
-	var caseBlocks []*ir.Block
+	var (
+		cases      []*ir.Case
+		caseBlocks []*ir.Block
+	)
+
 	for i, c := range s.Cases {
 		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		caseBlocks = append(caseBlocks, caseBlock)
 		tag := int64(0)
+
 		if c.VarType != nil {
 			targetLLVM, err2 := cg.tinTypeToLLVM(c.VarType)
 			if err2 == nil {
@@ -2270,6 +2764,7 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 					if err3 != nil {
 						continue
 					}
+
 					if lt.Equal(targetLLVM) {
 						tag = int64(j)
 
@@ -2278,12 +2773,15 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 				}
 			}
 		}
+
 		cases = append(cases, ir.NewCase(constant.NewInt(irtypes.I64, tag), caseBlock))
 	}
 
 	block.NewSwitch(tagI64, defaultBlock, cases...)
 
 	// Generate case bodies.
+	anyFallthrough := false
+
 	for i, c := range s.Cases {
 		caseBlock := caseBlocks[i]
 		cg.curScope = newScope(cg.curScope)
@@ -2300,13 +2798,18 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 				cg.curScope.set(c.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true})
 			}
 		}
+
 		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, err
 		}
+
 		if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
+
+			anyFallthrough = true
 		}
 	}
 
@@ -2315,12 +2818,23 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		cg.curScope = newScope(cg.curScope)
 		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
 		cg.curScope = cg.curScope.parent
+
 		if err != nil {
 			return nil, err
 		}
+
 		if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
+
+			anyFallthrough = true
 		}
+	}
+
+	// All arms terminated - afterBlock is unreachable; signal exhaustive termination.
+	if !anyFallthrough {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
 	}
 
 	return afterBlock, nil
@@ -2340,6 +2854,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		if st, ok := s.NamedType.(*ast.SimpleType); ok {
 			typeName = st.Name
 		}
+
 		if typeName != "" {
 			if aliasedTE, ok2 := cg.typeAliases[typeName]; ok2 {
 				if tat, ok3 := aliasedTE.(*ast.TupleArrayType); ok3 {
@@ -2358,6 +2873,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 	if err != nil {
 		return nil, err
 	}
+
 	if arrVal == nil {
 		return block, nil
 	}
@@ -2365,6 +2881,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 	// Count regular (non-rest) names and find rest name index
 	regularCount := 0
 	restIdx := -1
+
 	for i, n := range s.Names {
 		if len(n) > 3 && n[:3] == "..." {
 			restIdx = i
@@ -2421,6 +2938,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 
 	// Extract each regular element
 	regIdx := 0
+
 	for _, name := range s.Names {
 		if len(name) > 3 && name[:3] == "..." {
 			continue
@@ -2446,6 +2964,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 			block.NewStore(coerced, alloca)
 			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true})
 		}
+
 		regIdx++
 	}
 
@@ -2454,6 +2973,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		restName := s.Names[restIdx][3:] // strip "..."
 
 		var elemSzBytes int64 = 8
+
 		if pt, ok := ptrField.Type().(*irtypes.PointerType); ok {
 			if sz := llvmTypeSize(pt.ElemType); sz > 0 {
 				elemSzBytes = int64(sz)
@@ -2502,18 +3022,21 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return block, nil
 	}
 
 	// Resolve the struct type name
 	typeName := ""
+
 	switch t := s.StructType.(type) {
 	case *ast.SimpleType:
 		typeName = t.Name
 	case *ast.GenericType:
 		typeName = t.Name
 	}
+
 	if typeName == "" {
 		return nil, fmt.Errorf("struct destructuring: cannot determine struct type name")
 	}
@@ -2539,7 +3062,13 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 	block.NewStore(val, structAlloca)
 
 	_ = fields // validated above; actual indices computed via fieldIndex (includes hidden fields)
-	for _, fieldName := range s.Names {
+
+	for i, fieldName := range s.Names {
+		varName := fieldName
+		if i < len(s.VarNames) && s.VarNames[i] != "" {
+			varName = s.VarNames[i]
+		}
+
 		fieldIdx := cg.fieldIndex(concreteName, fieldName)
 		if fieldIdx < 0 {
 			return nil, fmt.Errorf("struct destructuring: field '%s' not found in struct '%s'", fieldName, concreteName)
@@ -2553,7 +3082,20 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 			fieldVal := block.NewLoad(pt.ElemType, fieldGep)
 			alloca := block.NewAlloca(pt.ElemType)
 			block.NewStore(fieldVal, alloca)
-			cg.curScope.set(fieldName, &scopeEntry{val: alloca, isAlloc: true})
+			// Determine if this field's Tin type is unsigned so `as` casts zext.
+			var fieldUnsigned bool
+
+			if tinTypes, ok2 := cg.structFieldTinTypes[concreteName]; ok2 {
+				// fieldIdx includes the leading i32 type-id; user fields start at offset 1+vtables.
+				userOffset := 1 + len(cg.structVtableOrder[concreteName])
+
+				userIdx := fieldIdx - userOffset
+				if userIdx >= 0 && userIdx < len(tinTypes) {
+					fieldUnsigned = isUnsignedTinType(tinTypes[userIdx])
+				}
+			}
+
+			cg.curScope.set(varName, &scopeEntry{val: alloca, isAlloc: true, isUnsigned: fieldUnsigned})
 		}
 	}
 
@@ -2567,6 +3109,7 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return block, nil
 	}
@@ -2584,6 +3127,16 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	structAlloca := block.NewAlloca(llType)
 	block.NewStore(val, structAlloca)
 
+	// Detect whether the source is a call to a heap-promoting function.
+	// If so, each *T field in the destructured tuple is itself a heap-owned RC block.
+	heapPromotingSource := false
+
+	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
+		if fnIdent, isIdent := callExpr.Func.(*ast.Identifier); isIdent {
+			heapPromotingSource = cg.heapPromotingFns[fnIdent.Name]
+		}
+	}
+
 	// Tuple fields are named a, b, c, ... (alphabet by position).
 	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
 	userOff := 1 + cg.vtableOffset(concreteName) // skip type_id + vtable fields
@@ -2592,15 +3145,19 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 		if i >= len(letters) {
 			break
 		}
+
 		fieldName := letters[i]
+
 		fieldIdx := cg.fieldIndex(concreteName, fieldName)
 		if fieldIdx < 0 {
 			// Fall back to positional
 			fieldIdx = userOff + i
 		}
+
 		if fieldIdx >= len(llType.Fields) {
 			break
 		}
+
 		fieldType := llType.Fields[fieldIdx]
 		fieldGep := block.NewGetElementPtr(llType, structAlloca,
 			constant.NewInt(irtypes.I32, 0),
@@ -2608,8 +3165,478 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 		fieldVal := block.NewLoad(fieldType, fieldGep)
 		alloca := block.NewAlloca(fieldType)
 		block.NewStore(fieldVal, alloca)
-		cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true})
+
+		isHeapOwned := false
+		heapOwnedDepth := 0
+
+		if heapPromotingSource {
+			depth := pointerChainDepth(fieldType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
+
+		cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth})
 	}
 
 	return block, nil
+}
+
+// findEscapingAddressTakenVars performs a lightweight escape analysis on a
+// function body.  It returns the set of local variable names whose addresses
+// escape the function frame - i.e. a pointer to them is returned from the
+// function.  These variables will be heap-promoted: genVarDecl allocates them
+// with malloc instead of alloca so the memory remains valid after the callee
+// returns.
+//
+// Patterns detected:
+//
+//	return &varName            -- address of local returned directly
+//	let alias = &varName
+//	return alias               -- address returned via an alias variable
+func findEscapingAddressTakenVars(body ast.Node) (map[string]bool, map[string]string) {
+	if body == nil {
+		return nil, nil
+	}
+	// Pass 1: collect address-of aliases.  aliases[alias] = source variable name.
+	aliases := make(map[string]string)
+	walkForAliases(body, aliases)
+
+	// Pass 2: collect escaping variables by inspecting return statements.
+	escaping := make(map[string]bool)
+	walkForEscapes(body, aliases, escaping)
+
+	if len(escaping) == 0 {
+		return nil, nil
+	}
+
+	return escaping, aliases
+}
+
+// walkForAliases walks node and populates aliases: for every
+//
+//	let name = &ident
+//
+// it records aliases[name] = ident.Name.
+func walkForAliases(node ast.Node, aliases map[string]string) {
+	if node == nil {
+		return
+	}
+
+	switch n := node.(type) {
+	case *ast.VarDecl:
+		if n.Value != nil {
+			if addrOf, ok := n.Value.(*ast.AddressOfExpr); ok {
+				if ident, ok2 := addrOf.Expr.(*ast.Identifier); ok2 {
+					aliases[n.Name] = ident.Name
+				}
+			}
+		}
+	case *ast.Block:
+		for _, s := range n.Stmts {
+			walkForAliases(s, aliases)
+		}
+	case *ast.IfStmt:
+		if n.Then != nil {
+			walkForAliases(n.Then, aliases)
+		}
+
+		for _, elif := range n.ElseIfs {
+			walkForAliases(elif.Body, aliases)
+		}
+
+		if n.Else != nil {
+			walkForAliases(n.Else, aliases)
+		}
+	case *ast.ForStmt:
+		if n.Body != nil {
+			walkForAliases(n.Body, aliases)
+		}
+	case *ast.MatchStmt:
+		for _, c := range n.Cases {
+			walkForAliases(c.Body, aliases)
+		}
+
+		if n.Default != nil {
+			walkForAliases(n.Default, aliases)
+		}
+	}
+}
+
+// walkForEscapes walks node and populates escaping: for every ReturnStmt
+// whose value is &ident or an alias of &ident, marks the source variable.
+func walkForEscapes(node ast.Node, aliases map[string]string, escaping map[string]bool) {
+	if node == nil {
+		return
+	}
+
+	switch n := node.(type) {
+	case *ast.ReturnStmt:
+		if n.Value == nil {
+			return
+		}
+
+		markEscapeVal(n.Value, aliases, escaping)
+	case *ast.Block:
+		for _, s := range n.Stmts {
+			walkForEscapes(s, aliases, escaping)
+		}
+	case *ast.IfStmt:
+		if n.Then != nil {
+			walkForEscapes(n.Then, aliases, escaping)
+		}
+
+		for _, elif := range n.ElseIfs {
+			walkForEscapes(elif.Body, aliases, escaping)
+		}
+
+		if n.Else != nil {
+			walkForEscapes(n.Else, aliases, escaping)
+		}
+	case *ast.ForStmt:
+		if n.Body != nil {
+			walkForEscapes(n.Body, aliases, escaping)
+		}
+	case *ast.MatchStmt:
+		for _, c := range n.Cases {
+			walkForEscapes(c.Body, aliases, escaping)
+		}
+
+		if n.Default != nil {
+			walkForEscapes(n.Default, aliases, escaping)
+		}
+	}
+}
+
+// markEscapeVal marks variables in aliases that escape via the given return value.
+// Handles identifiers, address-of expressions, and tuples containing those.
+// Alias chains are followed transitively: if `ppx = &px` and `px = &x`, returning
+// ppx marks both px and x as escaping.
+func markEscapeVal(val ast.Node, aliases map[string]string, escaping map[string]bool) {
+	if val == nil {
+		return
+	}
+
+	switch rv := val.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok {
+			markEscapeChain(ident.Name, aliases, escaping)
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok {
+			markEscapeChain(src, aliases, escaping)
+		}
+	case *ast.TupleLit:
+		for _, elem := range rv.Elems {
+			markEscapeVal(elem, aliases, escaping)
+		}
+	}
+}
+
+// markEscapeChain transitively marks name and all its alias sources as escaping.
+func markEscapeChain(name string, aliases map[string]string, escaping map[string]bool) {
+	for name != "" && !escaping[name] {
+		escaping[name] = true
+		name = aliases[name] // follow the chain: if px = &x, also mark x
+	}
+}
+
+// retainedHeapVars returns the subset of escaping vars that are actually returned
+// by retExpr.  Any heap-promoted var NOT in this set can be freed at the return site.
+// Uses the same resolution logic as markEscapeVal/markEscapeChain.
+func retainedHeapVars(retExpr ast.Node, aliases map[string]string, escaping map[string]bool) map[string]bool {
+	kept := make(map[string]bool)
+	collectRetained(retExpr, aliases, escaping, kept)
+
+	return kept
+}
+
+func collectRetained(node ast.Node, aliases map[string]string, escaping map[string]bool, kept map[string]bool) {
+	if node == nil {
+		return
+	}
+
+	switch rv := node.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok {
+			collectChain(ident.Name, aliases, escaping, kept)
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok {
+			collectChain(src, aliases, escaping, kept)
+		}
+	case *ast.TupleLit:
+		for _, elem := range rv.Elems {
+			collectRetained(elem, aliases, escaping, kept)
+		}
+	}
+}
+
+func collectChain(name string, aliases map[string]string, escaping map[string]bool, kept map[string]bool) {
+	for name != "" && escaping[name] && !kept[name] {
+		kept[name] = true
+		name = aliases[name]
+	}
+}
+
+// pointerChainDepth counts the number of consecutive pointer dereferences in t.
+// Returns 0 for non-pointer types, 1 for *T, 2 for **T, etc.
+func pointerChainDepth(t irtypes.Type) int {
+	depth := 0
+
+	for {
+		pt, ok := t.(*irtypes.PointerType)
+		if !ok {
+			break
+		}
+
+		depth++
+		t = pt.ElemType
+	}
+
+	return depth
+}
+
+// genLatePromotedReturn handles return statements in functions where one or more
+// local variables escape via their address.  The key invariant: defers may modify
+// the stack copies of promoted variables, so we run defers FIRST, then copy the
+// post-defer values into fresh _tin_rc_alloc blocks and return those.
+//
+// For tuple returns, non-promoted elements are latched BEFORE defers run so that
+// the caller sees the pre-defer values (the same semantics as early-promotion).
+func (cg *CodeGen) genLatePromotedReturn(block *ir.Block, s *ast.ReturnStmt, promoted map[string]bool) error {
+	retType := cg.curFn.Sig.RetType
+
+	if tup, ok := s.Value.(*ast.TupleLit); ok {
+		structType, ok2 := retType.(*irtypes.StructType)
+		if !ok2 {
+			return fmt.Errorf("genLatePromotedReturn: expected struct type for tuple return, got %v", retType)
+		}
+
+		concreteName := structType.Name()
+		userOff := 1 + cg.vtableOffset(concreteName)
+
+		// Phase 1: latch non-promoted elements BEFORE defers run.
+		type latched struct {
+			val      value.Value
+			retained bool
+		}
+
+		preLatch := make([]latched, len(tup.Elems))
+		for i, elem := range tup.Elems {
+			if isPromotedTupleElem(elem, cg.curFnEscapingAliases, promoted) {
+				continue
+			}
+
+			v, err := cg.genExpr(block, elem)
+			if err != nil {
+				return err
+			}
+
+			fi := userOff + i
+			if v != nil && fi < len(structType.Fields) {
+				v = cg.coerce(block, v, structType.Fields[fi])
+			}
+
+			retained := false
+
+			if isCopyExpr(elem) {
+				cg.emitRetain(block, v)
+
+				retained = true
+			}
+
+			preLatch[i] = latched{val: v, retained: retained}
+		}
+
+		// Run defers (may modify stack copies of promoted vars).
+		if err := cg.emitDefers(block); err != nil {
+			return err
+		}
+
+		// Phase 2: build the result tuple.
+		alloca := block.NewAlloca(structType)
+		block.NewStore(constant.NewZeroInitializer(structType), alloca)
+
+		if typeID, has := cg.structTypeIDs[concreteName]; has {
+			typeIDGep := block.NewGetElementPtr(structType, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
+		}
+
+		for i, elem := range tup.Elems {
+			fi := userOff + i
+			if fi >= len(structType.Fields) {
+				break
+			}
+
+			var v value.Value
+
+			if isPromotedTupleElem(elem, cg.curFnEscapingAliases, promoted) {
+				rootVar := promotedTupleElemVar(elem, cg.curFnEscapingAliases, promoted)
+
+				var err error
+
+				v, err = cg.emitChainedHeapPromotion(block, rootVar)
+				if err != nil {
+					return err
+				}
+			} else {
+				v = preLatch[i].val
+			}
+
+			if v == nil {
+				continue
+			}
+
+			v = cg.coerce(block, v, structType.Fields[fi])
+			gep := block.NewGetElementPtr(structType, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+			block.NewStore(v, gep)
+		}
+
+		retVal := block.NewLoad(structType, alloca)
+		cg.emitAllScopeReleases(block, "")
+		block.NewRet(retVal)
+
+		return nil
+	}
+
+	// Non-tuple: `return &x` or `return p` (p = &x).
+	// No pre-defer latching needed - just run defers and build the RC block.
+	if err := cg.emitDefers(block); err != nil {
+		return err
+	}
+
+	rootVar := latePromotionRootVar(s.Value, cg.curFnEscapingAliases, promoted)
+	if rootVar == "" {
+		return fmt.Errorf("genLatePromotedReturn: cannot find promoted root var in %T", s.Value)
+	}
+
+	retVal, err := cg.emitChainedHeapPromotion(block, rootVar)
+	if err != nil {
+		return err
+	}
+
+	if cg.curFn != nil && !irtypes.IsVoid(retType) {
+		retVal = cg.coerce(block, retVal, retType)
+	}
+
+	cg.emitAllScopeReleases(block, "")
+	block.NewRet(retVal)
+
+	return nil
+}
+
+// emitChainedHeapPromotion promotes rootVar (and all variables in its alias chain
+// that are in curFnEscapingVars) from stack to ARC heap blocks.  Inner variables
+// (further down the alias chain) are promoted first; each parent's alloca is then
+// updated to hold the child's heap pointer before the parent is promoted.  This
+// ensures that returned pointer chains are fully heap-resident.
+func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (value.Value, error) {
+	aliases := cg.curFnEscapingAliases
+	promoted := cg.curFnEscapingVars
+
+	// Build the chain from rootVar following alias links in promoted.
+	chain := []string{rootVar}
+	for {
+		cur := chain[len(chain)-1]
+
+		next, ok := aliases[cur]
+		if !ok || next == "" || !promoted[next] {
+			break
+		}
+
+		chain = append(chain, next)
+	}
+
+	// heapPtrs maps varName -> its heap block pointer (typed as *T for T = element type).
+	heapPtrs := make(map[string]value.Value)
+
+	// Promote from leaf (last in chain) to root (first in chain).
+	for i := len(chain) - 1; i >= 0; i-- {
+		varName := chain[i]
+
+		entry, ok := cg.curScope.lookup(varName)
+		if !ok || !entry.isAlloc {
+			return nil, fmt.Errorf("emitChainedHeapPromotion: var %q not found in scope", varName)
+		}
+
+		ptrType, ok2 := entry.val.Type().(*irtypes.PointerType)
+		if !ok2 {
+			return nil, fmt.Errorf("emitChainedHeapPromotion: var %q alloca not a pointer type", varName)
+		}
+
+		elemType := ptrType.ElemType
+
+		// If this var points to a child that was just promoted, update the alloca
+		// so it holds the child's heap pointer instead of the child's stack address.
+		if i < len(chain)-1 {
+			childHeapPtr := heapPtrs[chain[i+1]]
+			childCast := block.NewBitCast(childHeapPtr, elemType)
+			block.NewStore(childCast, entry.val)
+		}
+
+		// Load the (potentially updated) value from the stack alloca.
+		stackVal := block.NewLoad(elemType, entry.val)
+
+		// Allocate ARC block and copy the value into it.
+		sz := cg.llvmSizeOf(block, elemType)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		heapPtr := block.NewBitCast(heapI8, irtypes.NewPointer(elemType))
+		block.NewStore(stackVal, heapPtr)
+
+		// Retain ARC sub-fields (strings, arrays) so scope cleanup on the stack
+		// copy is balanced.  For plain i64/pointers this is a no-op.
+		cg.emitRetain(block, stackVal)
+
+		heapPtrs[varName] = heapPtr
+	}
+
+	return heapPtrs[rootVar], nil
+}
+
+// latePromotionRootVar extracts the name of the underlying escaping variable from
+// a simple return expression: `return &x` -> "x", `return p` (p=&x) -> "x".
+func latePromotionRootVar(node ast.Node, aliases map[string]string, promoted map[string]bool) string {
+	switch rv := node.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok && promoted[ident.Name] {
+			return ident.Name
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok && promoted[src] {
+			return src
+		}
+		// Also handle direct identifier that is itself the promoted var
+		if promoted[rv.Name] {
+			return rv.Name
+		}
+	}
+
+	return ""
+}
+
+// isPromotedTupleElem reports whether a tuple element is a promoted pointer
+// (either &x where x is promoted, or an alias identifier p where aliases[p] is promoted).
+func isPromotedTupleElem(elem ast.Node, aliases map[string]string, promoted map[string]bool) bool {
+	return promotedTupleElemVar(elem, aliases, promoted) != ""
+}
+
+// promotedTupleElemVar returns the root escaping variable name for a promoted
+// tuple element, or "" if the element is not promoted.
+func promotedTupleElemVar(elem ast.Node, aliases map[string]string, promoted map[string]bool) string {
+	switch e := elem.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := e.Expr.(*ast.Identifier); ok && promoted[ident.Name] {
+			return ident.Name
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[e.Name]; ok && promoted[src] {
+			return src
+		}
+	}
+
+	return ""
 }

@@ -11,6 +11,14 @@ import (
 // new Program where every macro call has been replaced with its expansion.
 // MacroDecl nodes are removed from the output (they have been inlined).
 func (cg *CodeGen) ExpandProgramMacros(prog *ast.Program) (*ast.Program, error) {
+	// Collect use declarations so CTFE macros can reference stdlib packages.
+	// buildMacroSource emits "use pkg" lines from importedPkgs into the
+	// generated temp source; without this the macro subprocess sees undefined symbols.
+	for _, stmt := range prog.Stmts {
+		if ud, ok := stmt.(*ast.UseDecl); ok && !ud.IsExtern && !ud.IsFile {
+			cg.importedPkgs[ud.Path] = true
+		}
+	}
 	// Register macros first so expandMacroToAST can find them.
 	for _, stmt := range prog.Stmts {
 		if m, ok := stmt.(*ast.MacroDecl); ok {
@@ -19,11 +27,13 @@ func (cg *CodeGen) ExpandProgramMacros(prog *ast.Program) (*ast.Program, error) 
 	}
 	// Expand every statement.
 	var stmts []ast.Node
+
 	for _, stmt := range prog.Stmts {
 		expanded, err := cg.expandNodeMacros(stmt)
 		if err != nil {
 			return nil, err
 		}
+
 		stmts = append(stmts, expanded)
 	}
 
@@ -46,10 +56,12 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.
 	for i, p := range macro.Params {
 		subst[p] = args[i]
 	}
+
 	body := macro.Body
 	if es, ok := body.(*ast.ExprStmt); ok {
 		body = es.Expr
 	}
+
 	expanded := substituteMacroNode(body, subst)
 	// Backtick body: parse content as Tin source, then substitute params.
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
@@ -70,8 +82,8 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 	if node == nil {
 		return nil, nil
 	}
-	switch n := node.(type) {
 
+	switch n := node.(type) {
 	case *ast.CallExpr:
 		// Check whether this is a macro call.
 		if id, ok := n.Func.(*ast.Identifier); ok {
@@ -84,6 +96,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 					macro = m
 				}
 			}
+
 			if macro != nil {
 				// Expand args first (nested macro calls).
 				expandedArgs := make([]ast.Node, len(n.Args))
@@ -92,6 +105,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 					if err != nil {
 						return nil, err
 					}
+
 					expandedArgs[i] = ea
 				}
 
@@ -105,8 +119,10 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			newArgs[i] = ea
 		}
+
 		newFunc, err := cg.expandNodeMacros(n.Func)
 		if err != nil {
 			return nil, err
@@ -119,6 +135,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		out := *n
 		out.Body = newBody
 
@@ -131,6 +148,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			newStmts = append(newStmts, es)
 		}
 
@@ -156,6 +174,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if n.Value == nil {
 			return n, nil
 		}
+
 		newVal, err := cg.expandNodeMacros(n.Value)
 		if err != nil {
 			return nil, err
@@ -167,10 +186,12 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if n.Value == nil {
 			return n, nil
 		}
+
 		newVal, err := cg.expandNodeMacros(n.Value)
 		if err != nil {
 			return nil, err
 		}
+
 		out := *n
 		out.Value = newVal
 
@@ -197,22 +218,27 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		newThen, err := cg.expandBlockMacros(n.Then)
 		if err != nil {
 			return nil, err
 		}
+
 		newElseIfs := make([]ast.ElseIfClause, len(n.ElseIfs))
 		for i, ei := range n.ElseIfs {
 			newEICond, err := cg.expandNodeMacros(ei.Cond)
 			if err != nil {
 				return nil, err
 			}
+
 			newEIBody, err := cg.expandBlockMacros(ei.Body)
 			if err != nil {
 				return nil, err
 			}
+
 			newElseIfs[i] = ast.ElseIfClause{Cond: newEICond, Body: newEIBody}
 		}
+
 		newElse, err := cg.expandBlockMacros(n.Else)
 		if err != nil {
 			return nil, err
@@ -225,22 +251,27 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		newCond, err := cg.expandNodeMacros(n.Cond)
 		if err != nil {
 			return nil, err
 		}
+
 		newPost, err := cg.expandNodeMacros(n.Post)
 		if err != nil {
 			return nil, err
 		}
+
 		newIter, err := cg.expandNodeMacros(n.Iter)
 		if err != nil {
 			return nil, err
 		}
+
 		newBody, err := cg.expandBlockMacros(n.Body)
 		if err != nil {
 			return nil, err
 		}
+
 		out := *n
 		out.Init = newInit
 		out.Cond = newCond
@@ -255,6 +286,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		newRight, err := cg.expandNodeMacros(n.Right)
 		if err != nil {
 			return nil, err
@@ -275,10 +307,12 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		newThen, err := cg.expandNodeMacros(n.Then)
 		if err != nil {
 			return nil, err
 		}
+
 		newElse, err := cg.expandNodeMacros(n.Else)
 		if err != nil {
 			return nil, err
@@ -291,6 +325,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		out := *n
 		out.Expr = newExpr
 
@@ -301,6 +336,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		newIdx, err := cg.expandNodeMacros(n.Index)
 		if err != nil {
 			return nil, err
@@ -317,7 +353,6 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 		return &ast.TestDecl{Desc: n.Desc, Body: newBody}, nil
 
 	default:
-
 		return node, nil
 	}
 }
@@ -327,10 +362,12 @@ func (cg *CodeGen) expandBlockMacros(b *ast.Block) (*ast.Block, error) {
 	if b == nil {
 		return nil, nil
 	}
+
 	expanded, err := cg.expandNodeMacros(b)
 	if err != nil {
 		return nil, err
 	}
+
 	if eb, ok := expanded.(*ast.Block); ok {
 		return eb, nil
 	}
@@ -360,6 +397,7 @@ func (cg *CodeGen) lookupMacro(name string) *ast.MacroDecl {
 		if m, ok := cg.macros[base+"!"]; ok {
 			return m
 		}
+
 		if m, ok := cg.macros[base]; ok {
 			return m
 		}

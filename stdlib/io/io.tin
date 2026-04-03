@@ -74,7 +74,7 @@ fn print(s string) = puts(s)
 // Async I/O - non-blocking reads/writes backed by the dedicated I/O thread.
 //
 // Low-level primitives (async_read, async_write) are {#async} functions that
-// must be called with `await spawn`.  Higher-level functions (sleep, write_all,
+// must be called with `await spawn`. Higher-level functions (sleep, write_all,
 // read_exact) return Future[T] directly and can be awaited without spawn:
 //
 //   let n = await spawn io::async_read(fd, &buf[0], 4096)  // low-level
@@ -121,7 +121,7 @@ fn{#async} async_write(fd i32, buf *byte, n i64) i64 =
     yield
 
 // sleep suspends the current fiber for at least ms milliseconds without
-// blocking the worker thread.  Returns a Future[sync::Unit] - use `await io::sleep(ms)`.
+// blocking the worker thread. Returns a Future[sync::Unit] - use `await io::sleep(ms)`.
 fn sleep(ms i64) Future[sync::Unit] =
   return spawn sleep_impl(ms)
 

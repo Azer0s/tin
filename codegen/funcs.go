@@ -29,6 +29,7 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	}
 	// Register for #pure transitive side-effect checking.
 	cg.funcDecls[n.Name] = n
+
 	irName := n.Name
 	if pkg, ok := cg.exports[n.Name]; ok {
 		irName = pkg + "__" + n.Name
@@ -47,6 +48,7 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 		if err != nil {
 			return err
 		}
+
 		cg.overloads[n.Name] = append(cg.overloads[n.Name], &overloadEntry{
 			irName:     mangledName,
 			paramSig:   sig,
@@ -110,6 +112,7 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 		if err != nil {
 			return err
 		}
+
 		cg.overloads[key] = append(cg.overloads[key], &overloadEntry{
 			irName:     mangledKey,
 			paramSig:   sig,
@@ -129,20 +132,27 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	if n.IsExtern != "" {
 		return nil
 	}
+
 	var params []*ir.Param
+
 	for _, p := range n.Params {
 		if p.IsVarArgs {
 			continue // varargs is not an LLVM-level named parameter
 		}
+
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return err
 		}
+
 		params = append(params, ir.NewParam(p.Name, pt))
 	}
+
 	var retType irtypes.Type = irtypes.Void
+
 	if n.RetType != nil {
 		var err error
+
 		retType, err = cg.tinTypeToLLVM(n.RetType)
 		if err != nil {
 			return err
@@ -170,6 +180,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	f := cg.mod.NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
+
 	if irName != scopeName {
 		// Register original Tin name so call sites resolve to the wrapper.
 		cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
@@ -199,6 +210,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			if cg.genericStructsByArity[n.Name] == nil {
 				cg.genericStructsByArity[n.Name] = make(map[int]*ast.StructDecl)
 			}
+
 			cg.genericStructsByArity[n.Name][len(n.TypeParams)] = n
 		} else {
 			// Register an opaque struct so recursive types work.
@@ -257,6 +269,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		// Only simple literal values are evaluated here; complex expressions
 		// are left to the normal genVarDecl pass.
 		var cv value.Value
+
 		switch lit := n.Value.(type) {
 		case *ast.IntLit:
 			cv = constant.NewInt(irtypes.I64, lit.Value)
@@ -276,12 +289,14 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		case *ast.AtomLit:
 			cv = cg.atomConstant(cg.registerAtom(lit.Name))
 		}
+
 		if cv != nil {
 			if n.Type != nil {
 				if lt, err := cg.tinTypeToLLVM(n.Type); err == nil {
 					cv = cg.constCoerce(cv, lt)
 				}
 			}
+
 			cg.curScope.set(n.Name, &scopeEntry{val: cv, isAlloc: false})
 		}
 	}
@@ -289,14 +304,103 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 	return nil
 }
 
+// hasDeferStmt reports whether body contains any DeferStmt (recursively).
+// Nested fn/lambda declarations are not descended into.
+// NOTE: concrete nil pointers (e.g. (*ast.Block)(nil)) passed as ast.Node are
+// non-nil interfaces; all concrete-pointer cases must guard against nil n.
+func hasDeferStmt(body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	switch n := body.(type) {
+	case *ast.DeferStmt:
+		return n != nil
+	case *ast.FuncDecl, *ast.LambdaExpr:
+		return false // defers inside nested fns don't affect outer's ret slot
+	case *ast.Block:
+		if n == nil {
+			return false
+		}
+
+		for _, s := range n.Stmts {
+			if hasDeferStmt(s) {
+				return true
+			}
+		}
+	case *ast.ExprStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Expr)
+	case *ast.VarDecl:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.AssignStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.ReturnStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.IfStmt:
+		if n == nil {
+			return false
+		}
+
+		if n.Then != nil && hasDeferStmt(n.Then) {
+			return true
+		}
+
+		if n.Else != nil && hasDeferStmt(n.Else) {
+			return true
+		}
+
+		for _, elif := range n.ElseIfs {
+			if elif.Body != nil && hasDeferStmt(elif.Body) {
+				return true
+			}
+		}
+	case *ast.ForStmt:
+		if n == nil {
+			return false
+		}
+
+		return n.Body != nil && hasDeferStmt(n.Body)
+	case *ast.MatchStmt:
+		if n == nil {
+			return false
+		}
+
+		for _, arm := range n.Cases {
+			if arm.Body != nil && hasDeferStmt(arm.Body) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // bodyContainsSpawnOrAwait reports whether any node in the body (recursively)
 // is a SpawnExpr or AwaitExpr. Nested fn declarations are not descended into.
 func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 	var walk func(node ast.Node) bool
+
 	walk = func(node ast.Node) bool {
 		if node == nil {
 			return false
 		}
+
 		switch n := node.(type) {
 		case *ast.SpawnExpr, *ast.AwaitExpr:
 			return true
@@ -324,9 +428,11 @@ func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 			if walk(n.Cond) {
 				return true
 			}
+
 			if n.Then != nil && walk(n.Then) {
 				return true
 			}
+
 			if n.Else != nil && walk(n.Else) {
 				return true
 			}
@@ -334,6 +440,7 @@ func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 			if walk(n.Cond) {
 				return true
 			}
+
 			if n.Body != nil && walk(n.Body) {
 				return true
 			}
@@ -341,6 +448,7 @@ func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 			if walk(n.Func) {
 				return true
 			}
+
 			for _, a := range n.Args {
 				if walk(a) {
 					return true
@@ -363,9 +471,22 @@ func bodyContainsSpawnOrAwait(body []ast.Node) bool {
 
 func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// Constrained generic functions are compiled on demand at call sites.
+	// Register them in constrainedFuncs so call-site monomorphization can find them
+	// even when defined locally inside a test or function body.
 	if len(n.Constraints) > 0 {
+		cg.constrainedFuncs[n.Name] = n
+
 		return nil
 	}
+	// Unconstrained generic functions (TypeParams only) are also compiled on demand.
+	// Register them in genericFuncs so call-site monomorphization can find them.
+	if len(n.TypeParams) > 0 {
+		cg.genericFuncs[n.Name] = n
+		cg.genericFuncHomeScopes[n.Name] = cg.curScope
+
+		return nil
+	}
+
 	irName := n.Name
 	if pkg, ok := cg.exports[n.Name]; ok {
 		irName = pkg + "__" + n.Name
@@ -387,6 +508,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 					"    and bypasses inline channel optimizations.\n"+
 					"    Fix: change 'fn main()' to 'fn{#async} main()'\n")
 		}
+
 		irName = "_tin_user_main"
 		// Keep `main` resolvable from Tin source (e.g. for recursion).
 		defer func() {
@@ -403,6 +525,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 		mangledName := "_tin__" + irName
 		tinName := irName // capture for deferred closure
 		irName = mangledName
+
 		defer func() {
 			if entry, ok2 := cg.curScope.lookup(mangledName); ok2 {
 				cg.curScope.set(tinName, entry)
@@ -436,27 +559,34 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 // traitExpr may be a SimpleType ("labeled") or a GenericType ("iter[i64]").
 func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.TypeExpr) bool {
 	var traitName string
+
 	switch te := traitExpr.(type) {
 	case *ast.SimpleType:
 		traitName = te.Name
 	case *ast.GenericType:
 		traitName = te.Name
 	default:
-
 		return false
 	}
+
 	td, ok := cg.traits[traitName]
 	if !ok {
-		return false
+		// Not a declared trait: treat as a type-equality constraint.
+		// "where t is i64" is satisfied iff concreteName == "i64".
+		return traitName == structName
 	}
+
 	instKey := traitImplKey(traitExpr)
+
 	for _, m := range td.Methods {
 		if !m.IsVirtual {
 			continue
 		}
+
 		qualName := structName + "_" + traitQualifierKey(instKey) + "_" + m.Name
 		plainName := structName + "_" + m.Name
 		_, hasQual := cg.curScope.lookup(qualName)
+
 		_, hasPlain := cg.curScope.lookup(plainName)
 		if !hasQual && !hasPlain {
 			return false
@@ -468,8 +598,10 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	var retType irtypes.Type = irtypes.Void
+
 	if n.RetType != nil {
 		var err error
+
 		retType, err = cg.tinTypeToLLVM(n.RetType)
 		if err != nil {
 			return err
@@ -483,20 +615,24 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 		// Collect non-varargs parameters with their C-level types.
 		isVariadic := false
+
 		var cParams []*ir.Param
 		// cParamByval[i] is non-nil when cParams[i] uses byval (large struct > 16 bytes).
 		var cParamByval []*irtypes.StructType
+
 		for _, p := range n.Params {
 			if p.IsVarArgs {
 				isVariadic = true
 
 				continue
 			}
+
 			if vt, ok := p.Type.(*ast.SimpleType); ok && vt.Name == "..." {
 				isVariadic = true
 
 				continue
 			}
+
 			ct, err := cg.tinTypeToExternLLVM(p.Type, false)
 			if err != nil {
 				return err
@@ -516,8 +652,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 		// Compute C-level return type.
 		var cRetType irtypes.Type = irtypes.Void
+
 		if n.RetType != nil {
 			var err error
+
 			cRetType, err = cg.tinTypeToExternLLVM(n.RetType, true)
 			if err != nil {
 				return err
@@ -534,16 +672,19 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// Detect if any parameter or return type is a named Tin struct that needs
 		// Tin->C conversion at the call boundary.
 		needsStructConv := false
+
 		for _, p := range n.Params {
 			if p.IsVarArgs {
 				continue
 			}
+
 			if _, isStruct := cg.isNamedTinStruct(p.Type); isStruct {
 				needsStructConv = true
 
 				break
 			}
 		}
+
 		if n.RetType != nil {
 			if _, isStruct := cg.isNamedTinStruct(n.RetType); isStruct {
 				needsStructConv = true
@@ -563,7 +704,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// to C-native layout, calls C, converts result back to Tin layout.
 		// For other types (e.g. char* -> string): same as before.
 		wrapperName := "__tinwrap_" + scopeName
+
 		var wrapperFn *ir.Func
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == wrapperName {
 				wrapperFn = f
@@ -571,10 +714,12 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				break
 			}
 		}
+
 		if wrapperFn == nil {
 			// Build wrapper params: use Tin-level types for struct params, C-level
 			// for all others (so call sites don't need special coerce for structs).
 			wrapperParams := make([]*ir.Param, len(cParams))
+
 			tinParamIdx := 0
 			for i, cp := range cParams {
 				// Find the corresponding AST param (skip varargs already filtered out).
@@ -583,14 +728,17 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 					tinParamIdx++
 					tinParam = n.Params[tinParamIdx]
 				}
+
 				if sName, isStruct := cg.isNamedTinStruct(tinParam.Type); isStruct {
 					tinType, _ := cg.tinTypeToLLVM(tinParam.Type)
 					wrapperParams[i] = ir.NewParam(sName, tinType)
 				} else {
 					wrapperParams[i] = cp
 				}
+
 				tinParamIdx++
 			}
+
 			wrapperFn = cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
 			prevFn := cg.curFn
 			prevScope := cg.curScope
@@ -600,6 +748,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			// Build C-level call args: convert struct params to native, pass others as-is.
 			callArgs := make([]value.Value, len(wrapperFn.Params))
+
 			tinParamIdx = 0
 			for i, p := range wrapperFn.Params {
 				tinParam := n.Params[tinParamIdx]
@@ -607,6 +756,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 					tinParamIdx++
 					tinParam = n.Params[tinParamIdx]
 				}
+
 				if sName, isStruct := cg.isNamedTinStruct(tinParam.Type); isStruct {
 					native, err := cg.wrapStructToExtern(entry, p, sName)
 					if err != nil {
@@ -628,6 +778,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				} else {
 					callArgs[i] = p
 				}
+
 				tinParamIdx++
 			}
 
@@ -635,6 +786,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			// Convert result: if C returned a native struct, wrap back to Tin.
 			var finalResult value.Value
+
 			if n.RetType != nil {
 				if sName, isStruct := cg.isNamedTinStruct(n.RetType); isStruct {
 					tinResult, err := cg.wrapNativeStructToTin(entry, rawResult, sName)
@@ -644,19 +796,23 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 						return err
 					}
+
 					finalResult = tinResult
 				} else {
 					finalResult = cg.wrapFromExtern(entry, rawResult, retType)
 				}
 			}
+
 			if irtypes.IsVoid(retType) {
 				entry.NewRet(nil)
 			} else {
 				entry.NewRet(finalResult)
 			}
+
 			cg.curFn = prevFn
 			cg.curScope = prevScope
 		}
+
 		cg.curScope.set(scopeName, &scopeEntry{val: wrapperFn, isAlloc: false})
 
 		return nil
@@ -664,11 +820,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 	// Look up pre-declared function in global scope (by qualified name), or create.
 	var f *ir.Func
+
 	if entry, ok := cg.curScope.vars[scopeName]; ok {
 		if fn, isFunc := entry.val.(*ir.Func); isFunc {
 			f = fn
 		}
 	}
+
 	if f == nil {
 		// Not pre-declared - create now (e.g. nested or struct method).
 		params := make([]*ir.Param, len(n.Params))
@@ -677,8 +835,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			if err != nil {
 				return err
 			}
+
 			params[i] = ir.NewParam(p.Name, pt)
 		}
+
 		f = cg.mod.NewFunc(scopeName, retType, params...)
 	}
 
@@ -707,6 +867,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevDeferRetSlotParam := cg.curDeferRetSlotParam
 	prevFnDeferRetAlloca := cg.curFnDeferRetAlloca
 	prevDeferThunkRetType := cg.curDeferThunkRetType
+	prevEscapingVars := cg.curFnEscapingVars
+	prevEscapingAliases := cg.curFnEscapingAliases
 	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
 	cg.pendingDeferEnvs = nil
@@ -714,14 +876,20 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFnAutoYield = false // sync variant never auto-yields
 	cg.curDeferRetSlotParam = nil
 	cg.curDeferThunkRetType = nil
+
+	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
+	if len(cg.curFnEscapingVars) > 0 {
+		cg.heapPromotingFns[scopeName] = true
+	}
+
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
 
-	// For non-void functions: alloca a {i8, retType} slot for defer return override.
-	// Field 0 = valid flag (0 = not set, 1 = set); field 1 = override return value.
-	// The slot is passed to each defer thunk as ret_slot so the thunk can write back.
-	if !irtypes.IsVoid(retType) {
+	// For non-void functions that contain defer stmts: alloca a {i8, retType} slot
+	// so a defer thunk can override the return value.  Skip when no defer is present
+	// to avoid generating dead code in the common case.
+	if !irtypes.IsVoid(retType) && hasDeferStmt(n.Body) {
 		slotType := irtypes.NewStruct(irtypes.I8, retType)
 		slotAlloca := entry.NewAlloca(slotType)
 		// Zero-initialize the valid byte.
@@ -746,6 +914,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curDeferRetSlotParam = prevDeferRetSlotParam
 		cg.curFnDeferRetAlloca = prevFnDeferRetAlloca
 		cg.curDeferThunkRetType = prevDeferThunkRetType
+		cg.curFnEscapingVars = prevEscapingVars
+		cg.curFnEscapingAliases = prevEscapingAliases
 	}()
 
 	// Register function in current scope so recursion works.
@@ -764,7 +934,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Iterate tin params; skip varargs (no LLVM parameter), but register a
 	// null placeholder so the name is defined inside the body.
 	var firstParamAlloca *ir.InstAlloca
+
 	llIdx := 0
+
 	for _, astParam := range n.Params {
 		if astParam.IsVarArgs {
 			if astParam.Name != "" {
@@ -775,6 +947,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			continue
 		}
+
 		p := f.Params[llIdx]
 		llIdx++
 		alloca := entry.NewAlloca(p.Type())
@@ -786,7 +959,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type)})
+
 		if llIdx == 1 {
 			firstParamAlloca = alloca
 		}
@@ -802,6 +976,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Generate body (genBody ensures a terminator is added to the current block).
 	_, bodyErr := cg.genBody(entry, n.Body, retType)
 	cg.matchSubject = prevMatchSubject
+
 	if bodyErr != nil {
 		// Even on error, register the (partially compiled) function so it
 		// appears in scope for callers that check for it. The error typically
@@ -819,6 +994,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.pendingDeferFnI8s = prevDeferFnI8s
 	cg.pendingDeferFrames = prevDeferFrames
 	cg.pendingDeferEnvs = prevDeferEnvs
+	cg.curFnEscapingVars = prevEscapingVars
+	cg.curFnEscapingAliases = prevEscapingAliases
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.
@@ -828,9 +1005,25 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curScope.set(scopeName, &scopeEntry{val: f, isAlloc: false})
 	}
 
-	// If this function is in the async-callable set, generate its $coro variant.
-	if cg.coroCallable[scopeName] {
-		if err := cg.genCoroFuncBody(n, coroVersionName(scopeName), nil, nil); err != nil {
+	// If this function is in the async-callable set (or has #async tag directly),
+	// generate its $coro variant. The #async tag check catches local functions
+	// that were not discovered by the pre-pass call graph analysis.
+	if cg.coroCallable[scopeName] || hasTag(n.Tags, "async") {
+		if !cg.coroCallable[scopeName] {
+			cg.coroCallable[scopeName] = true
+		}
+
+		coroKey := coroVersionName(scopeName)
+		// Ensure the $coro stub exists in the current scope's vars before calling
+		// genCoroFuncBody. For top-level functions the pre-pass already registered
+		// the stub - predeclareCoroVariant is a no-op when vars[coroKey] is set.
+		// For local/monomorphized async functions (not in the pre-pass), this
+		// creates the stub so genCoroFuncBody can find it.
+		if err := cg.predeclareCoroVariant(n, scopeName, false); err != nil {
+			return err
+		}
+
+		if err := cg.genCoroFuncBody(n, coroKey, nil, nil); err != nil {
 			return err
 		}
 	}
@@ -847,6 +1040,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 				"    and bypasses inline channel optimizations.\n"+
 				"    Fix: wrap your code in 'fn{#async} main() = ...' instead\n")
 	}
+
 	f := cg.mod.NewFunc("main", irtypes.I32)
 	entry := f.NewBlock("entry")
 
@@ -860,6 +1054,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 	// Emit top-level var runtime initializations (deferred from pre-pass 1.7).
 	var err error
+
 	entry, err = cg.emitTopLevelVarInits(entry)
 	if err != nil {
 		return err
@@ -870,6 +1065,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 		if err != nil {
 			return err
 		}
+
 		if entry == nil {
 			break
 		}
@@ -978,6 +1174,7 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 		if err != nil {
 			return err
 		}
+
 		if cur == nil {
 			break
 		}

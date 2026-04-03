@@ -17,10 +17,8 @@ import (
 func traitBaseName(te ast.TypeExpr) string {
 	switch t := te.(type) {
 	case *ast.SimpleType:
-
 		return t.Name
 	case *ast.GenericType:
-
 		return t.Name
 	}
 
@@ -72,6 +70,7 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 				name = name[idx+2:]
 			}
 		}
+
 		trait, ok := cg.traits[name]
 		if !ok {
 			continue
@@ -89,9 +88,11 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 			if m.IsVirtual || m.Body == nil {
 				continue // virtual - struct must provide its own
 			}
+
 			if !structHasMethod(aug, m.Name) {
 				// Bind "this" parameter to this struct type.
 				injected := *m
+
 				ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: n.Name}}
 				if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
 					injected.Params = append([]ast.Param{
@@ -106,6 +107,7 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 					newParams[0].Type = ptrType
 					injected.Params = newParams
 				}
+
 				aug.Methods = append(aug.Methods, &injected)
 			}
 		}
@@ -118,12 +120,14 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	if len(n.TypeParams) > 0 {
 		return nil // generic template - only compiled when monomorphized
 	}
+
 	orig := n // keep original for Implements list
 	n = cg.augmentStructFromTraits(n)
 	n.Implements = orig.Implements // preserve for vtable generation
 	// Canonical key/IR-name for all maps and LLVM.  For package structs this is
 	// "pkgName__StructName" (e.g. "sync__Unit"); for user structs it is bare.
 	structKey := cg.pkgStructKey(n.Name)
+
 	st, ok := cg.structTypes[structKey]
 	if !ok {
 		st = irtypes.NewStruct()
@@ -135,8 +139,11 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	// Prepend vtable pointer fields for each non-implicit implemented trait
 	// buildTraitFatPtrTypeInst is idempotent; calling it here ensures the vtable
 	// struct type is registered before we reference its pointer type.
-	var vtableInstKeys []string
-	var vtableFieldTypes []irtypes.Type
+	var (
+		vtableInstKeys   []string
+		vtableFieldTypes []irtypes.Type
+	)
+
 	for _, impl := range orig.Implements {
 		traitName := traitBaseName(impl)
 		if traitName == "implicit" {
@@ -149,11 +156,14 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 				traitName = traitName[idx+2:]
 			}
 		}
+
 		if _, ok := cg.traits[traitName]; !ok {
 			continue
 		}
+
 		instKey := traitImplKey(impl)
 		typeSubst := map[string]irtypes.Type{}
+
 		if gt, ok2 := impl.(*ast.GenericType); ok2 {
 			td := cg.traits[traitName]
 			for i, tpName := range td.TypeParams {
@@ -162,30 +172,42 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 					if err != nil {
 						return err
 					}
+
 					typeSubst[tpName] = lt
 				}
 			}
 		}
+
 		if _, err := cg.buildTraitFatPtrTypeInst(traitName, instKey, typeSubst); err != nil {
 			return err
 		}
+
 		vtableSt := cg.traitVtableStructTypes[instKey]
 		vtableInstKeys = append(vtableInstKeys, instKey)
 		vtableFieldTypes = append(vtableFieldTypes, irtypes.NewPointer(vtableSt))
 	}
+
 	cg.structVtableOrder[structKey] = vtableInstKeys
 
 	// Build user field types
-	var userFieldTypes []irtypes.Type
-	var fieldNames []string
+	var (
+		userFieldTypes []irtypes.Type
+		fieldNames     []string
+		fieldTinTypes  []ast.TypeExpr
+	)
+
 	for _, f := range n.Fields {
 		ft, err := cg.tinTypeToLLVM(f.Type)
 		if err != nil {
 			return err
 		}
+
 		userFieldTypes = append(userFieldTypes, ft)
 		fieldNames = append(fieldNames, f.Name)
+		fieldTinTypes = append(fieldTinTypes, f.Type)
 	}
+
+	cg.structFieldTinTypes[structKey] = fieldTinTypes
 	// Assign a compile-time type ID for this struct (used by any boxing /
 	// runtime type checks).  IDs are stable within a compilation unit.
 	if _, exists := cg.structTypeIDs[structKey]; !exists {
@@ -205,6 +227,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 			fieldTags[f.Name] = f.Tags[0]
 		}
 	}
+
 	cg.structFieldTags[structKey] = fieldTags
 
 	// Record which traits this struct implements (for typeof/traitof).
@@ -212,10 +235,20 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	for _, impl := range n.Implements {
 		implNames = append(implNames, impl.String())
 	}
+
 	cg.structImpls[structKey] = implNames
 
 	// Generate methods as top-level functions with struct-qualified names.
+	// Methods with their own TypeParams (e.g. map_opt[r]) are stored as templates
+	// and monomorphized on-demand at call sites.
 	for _, m := range n.Methods {
+		if len(m.TypeParams) > 0 {
+			templateKey := structKey + "_" + m.Name
+			cg.genericMethodTemplates[templateKey] = m
+
+			continue
+		}
+
 		if err := cg.genStructMethod(structKey, m); err != nil {
 			return err
 		}
@@ -231,19 +264,23 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 				traitName = traitName[idx+2:]
 			}
 		}
+
 		td, ok := cg.traits[traitName]
 		if !ok {
 			continue
 		}
+
 		for _, tm := range td.Methods {
 			if tm.Body == nil || tm.IsVirtual {
 				continue
 			}
+
 			if tm.Name != "init" && tm.Name != "deinit" {
 				continue
 			}
 			// Check if the original struct has its own init/deinit (not trait-qualified)
 			structHasOwn := false
+
 			for _, sm := range orig.Methods {
 				if sm.Name == tm.Name && sm.TraitQualifier == "" {
 					structHasOwn = true
@@ -251,6 +288,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 					break
 				}
 			}
+
 			if !structHasOwn {
 				continue
 			}
@@ -261,6 +299,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 					return err
 				}
 			}
+
 			if entry, ok2 := cg.curScope.lookup(chainName); ok2 {
 				if fn, ok3 := entry.val.(*ir.Func); ok3 {
 					if tm.Name == "init" {
@@ -277,23 +316,28 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	// under the plain name (e.g. struct_idx) when no other method with that
 	// plain name already exists. This lets non-disambiguated call sites work.
 	plainMethodNames := map[string]bool{}
+
 	for _, m := range n.Methods {
 		if m.TraitQualifier == "" {
 			plainMethodNames[m.Name] = true
 		}
 	}
+
 	for _, m := range n.Methods {
 		if m.TraitQualifier == "" {
 			continue
 		}
+
 		if plainMethodNames[m.Name] {
 			continue // a plain method already covers this name
 		}
+
 		plainName := structKey + "_" + m.Name
 		if _, exists := cg.curScope.lookup(plainName); !exists {
 			qualName := methodScopeName(structKey, m)
 			if entry, ok := cg.curScope.lookup(qualName); ok {
 				cg.curScope.set(plainName, entry)
+
 				plainMethodNames[m.Name] = true // mark so only first qualifier wins
 			}
 		}
@@ -315,6 +359,7 @@ func substituteTypeInTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) as
 	if te == nil || len(subst) == 0 {
 		return te
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		if rep, ok := subst[t.Name]; ok {
@@ -322,14 +367,17 @@ func substituteTypeInTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) as
 		}
 	case *ast.GenericType:
 		changed := false
+
 		newParams := make([]ast.TypeExpr, len(t.TypeParams))
 		for i, p := range t.TypeParams {
 			newP := substituteTypeInTypeExpr(p, subst)
+
 			newParams[i] = newP
 			if newP != p {
 				changed = true
 			}
 		}
+
 		if changed {
 			return &ast.GenericType{Name: t.Name, TypeParams: newParams}
 		}
@@ -365,18 +413,21 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 				newType = &ast.PointerType{Elem: &ast.SimpleType{Name: concreteName}}
 			}
 		}
+
 		newParams[i] = ast.Param{Name: p.Name, Type: newType, IsConst: p.IsConst, IsVarArgs: p.IsVarArgs}
 	}
+
 	newRet := substituteTypeInTypeExpr(m.RetType, subst)
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
 	return &ast.FuncDecl{
-		Name:     m.Name,
-		Params:   newParams,
-		RetType:  newRet,
-		Body:     newBody,
-		Tags:     m.Tags,
-		IsStatic: m.IsStatic,
+		Name:       m.Name,
+		TypeParams: m.TypeParams,
+		Params:     newParams,
+		RetType:    newRet,
+		Body:       newBody,
+		Tags:       m.Tags,
+		IsStatic:   m.IsStatic,
 	}
 }
 
@@ -386,18 +437,25 @@ func substituteStructNameInBody(node ast.Node, genericName, concreteName string)
 	if node == nil {
 		return nil
 	}
+
 	switch n := node.(type) {
 	case *ast.StructLit:
 		newFields := make([]ast.StructLitField, len(n.Fields))
 		for i, f := range n.Fields {
 			newFields[i] = ast.StructLitField{Name: f.Name, Value: substituteStructNameInBody(f.Value, genericName, concreteName)}
 		}
+
 		typeName := n.TypeName
-		if typeName == genericName {
+		// Only rename bare (no TypeArgs) struct literals.  If TypeArgs are present,
+		// genStructLit will resolve the concrete name at codegen time via typeAliases
+		// (set by monomorphizeFunc).  Pre-renaming here AND dropping the TypeArgs
+		// causes genStructLit to use the wrong concrete struct (e.g. box__i64 instead
+		// of box__string when r=string), producing a type-mismatch panic.
+		if typeName == genericName && len(n.TypeArgs) == 0 {
 			typeName = concreteName
 		}
 
-		return &ast.StructLit{TypeName: typeName, Fields: newFields, Positional: n.Positional}
+		return &ast.StructLit{TypeName: typeName, TypeArgs: n.TypeArgs, Fields: newFields, Positional: n.Positional}
 	case *ast.Block:
 		newStmts := make([]ast.Node, len(n.Stmts))
 		for i, s := range n.Stmts {
@@ -406,19 +464,19 @@ func substituteStructNameInBody(node ast.Node, genericName, concreteName string)
 
 		return &ast.Block{Stmts: newStmts}
 	case *ast.ReturnStmt:
-
 		return &ast.ReturnStmt{Value: substituteStructNameInBody(n.Value, genericName, concreteName)}
 	case *ast.VarDecl:
-
 		return &ast.VarDecl{Name: n.Name, Type: n.Type, Value: substituteStructNameInBody(n.Value, genericName, concreteName), IsConst: n.IsConst}
 	case *ast.IfStmt:
 		newIf := *n
+
 		newIf.Cond = substituteStructNameInBody(n.Cond, genericName, concreteName)
 		if n.Then != nil {
 			if b, ok := substituteStructNameInBody(n.Then, genericName, concreteName).(*ast.Block); ok {
 				newIf.Then = b
 			}
 		}
+
 		if n.Else != nil {
 			if b, ok := substituteStructNameInBody(n.Else, genericName, concreteName).(*ast.Block); ok {
 				newIf.Else = b
@@ -434,10 +492,8 @@ func substituteStructNameInBody(node ast.Node, genericName, concreteName string)
 
 		return &ast.CallExpr{Func: substituteStructNameInBody(n.Func, genericName, concreteName), Args: newArgs}
 	case *ast.BinExpr:
-
 		return &ast.BinExpr{Left: substituteStructNameInBody(n.Left, genericName, concreteName), Op: n.Op, Right: substituteStructNameInBody(n.Right, genericName, concreteName)}
 	case *ast.FieldAccess:
-
 		return &ast.FieldAccess{Expr: substituteStructNameInBody(n.Expr, genericName, concreteName), Field: n.Field, IsPtr: n.IsPtr}
 	}
 
@@ -453,19 +509,22 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	if ut, ok := n.Type.(*ast.UnionTypeExpr); ok {
 		return cg.genTaggedUnionTypeDecl(n.Name, ut)
 	}
+
 	gt, ok := n.Type.(*ast.GenericType)
 	if !ok {
 		// Simple alias - already registered in preregister. Nothing to do.
-
 		return nil
 	}
 
 	arity := len(gt.TypeParams)
+
 	var tmpl *ast.StructDecl
+
 	isTmpl := false
 	if arityMap, ok := cg.genericStructsByArity[gt.Name]; ok {
 		tmpl, isTmpl = arityMap[arity]
 	}
+
 	if !isTmpl {
 		// GenericType refers to something other than a generic struct
 		// (e.g. a generic trait instantiation used as a type alias).
@@ -476,6 +535,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 
 	// Build type-parameter substitution: tmpl.TypeParams[i] -> gt.TypeParams[i]
 	subst := make(map[string]ast.TypeExpr)
+
 	for i, paramName := range tmpl.TypeParams {
 		if i < len(gt.TypeParams) {
 			subst[paramName] = gt.TypeParams[i]
@@ -489,6 +549,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	for _, impl := range tmpl.Implements {
 		concreteImpls = append(concreteImpls, substituteTypeInTypeExpr(impl, subst))
 	}
+
 	concrete := &ast.StructDecl{
 		Name:       n.Name,
 		Implements: concreteImpls,
@@ -508,9 +569,11 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	for _, ov := range n.Overrides {
 		overrideSet[ov.Name] = ov
 	}
+
 	for _, m := range tmpl.Methods {
 		if ov, ok := overrideSet[m.Name]; ok {
 			concrete.Methods = append(concrete.Methods, ov)
+
 			delete(overrideSet, m.Name)
 		} else {
 			concrete.Methods = append(concrete.Methods, substituteMethod(m, tmpl.Name, n.Name, subst))
@@ -521,6 +584,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		if _, already := overrideSet[ov.Name]; !already {
 			continue // already applied above
 		}
+
 		concrete.Methods = append(concrete.Methods, ov)
 	}
 
@@ -541,6 +605,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		if old, had := cg.typeAliases[param]; had {
 			prevAliases[param] = old
 		}
+
 		cg.typeAliases[param] = typeExpr
 	}
 
@@ -552,6 +617,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	if cg.moduleScope != nil && cg.curScope != cg.moduleScope {
 		cg.curScope = cg.moduleScope
 	}
+
 	prevPkg := cg.currentPkg
 	cg.currentPkg = ""
 
@@ -567,8 +633,10 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		if !isAsyncTag(m.Tags) || m.IsExtern != "" {
 			continue
 		}
+
 		scopeKey := methodScopeName(n.Name, m)
 		cg.coroCallable[scopeKey] = true
+
 		cg.funcDecls[scopeKey] = m // so wrapPidInFuture can find the return type
 		if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
 			cg.currentPkg = prevPkg
@@ -615,6 +683,7 @@ func traitImplKey(te ast.TypeExpr) string {
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
 			name = name[idx+2:]
 		}
+
 		key := name
 		for _, tp := range t.TypeParams {
 			key += "_" + traitImplKey(tp)
@@ -644,6 +713,7 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 	if fp, ok := cg.traitFatPtrTypes[instKey]; ok {
 		return fp, nil
 	}
+
 	td, ok := cg.traits[traitName]
 	if !ok {
 		return nil, fmt.Errorf("unknown trait: %s", traitName)
@@ -660,8 +730,10 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 	cg.traitFatPtrTypes[instKey] = fatPtrStub
 	cg.traitInstKeys[instKey] = traitName
 
-	var methodNames []string
-	var fnPtrTypes []irtypes.Type
+	var (
+		methodNames []string
+		fnPtrTypes  []irtypes.Type
+	)
 
 	if td.IsAlias {
 		// "trait X as fn(params) ret" - single method whose name is the trait name
@@ -670,47 +742,61 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 		if !ok {
 			return nil, fmt.Errorf("trait %s: alias type is not a function type", traitName)
 		}
+
 		methodNames = []string{traitName}
 		params := []irtypes.Type{irtypes.I8Ptr} // implicit self
+
 		for _, p := range ft.Params {
 			pt, err := cg.resolveTypeWithSubst(p, typeSubst)
 			if err != nil {
 				return nil, err
 			}
+
 			params = append(params, pt)
 		}
+
 		var ret irtypes.Type = irtypes.Void
+
 		if ft.RetType != nil {
 			var err error
+
 			ret, err = cg.resolveTypeWithSubst(ft.RetType, typeSubst)
 			if err != nil {
 				return nil, err
 			}
 		}
+
 		fnPtrTypes = []irtypes.Type{irtypes.NewPointer(irtypes.NewFunc(ret, params...))}
 	} else {
 		for _, m := range td.Methods {
 			methodNames = append(methodNames, m.Name)
 			// Wrapper signature: (i8* self, non-self params...) -> ret
 			params := []irtypes.Type{irtypes.I8Ptr}
+
 			for i, p := range m.Params {
 				if i == 0 {
 					continue // skip self
 				}
+
 				pt, err := cg.resolveTypeWithSubst(p.Type, typeSubst)
 				if err != nil {
 					return nil, err
 				}
+
 				params = append(params, pt)
 			}
+
 			var ret irtypes.Type = irtypes.Void
+
 			if m.RetType != nil {
 				var err error
+
 				ret, err = cg.resolveTypeWithSubst(m.RetType, typeSubst)
 				if err != nil {
 					return nil, err
 				}
 			}
+
 			ft := irtypes.NewFunc(ret, params...)
 			fnPtrTypes = append(fnPtrTypes, irtypes.NewPointer(ft))
 		}
@@ -718,24 +804,31 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 		// Append $coro slots (after all sync slots) for {#async} virtual methods.
 		// Each $coro slot has signature (i8* self, params...) -> i8*.
 		var asyncNames []string
+
 		for _, m := range td.Methods {
 			if !isAsyncTag(m.Tags) {
 				continue
 			}
+
 			asyncNames = append(asyncNames, m.Name)
 			coroParams := []irtypes.Type{irtypes.I8Ptr}
+
 			for i, p := range m.Params {
 				if i == 0 {
 					continue // skip self
 				}
+
 				pt, err := cg.resolveTypeWithSubst(p.Type, typeSubst)
 				if err != nil {
 					return nil, err
 				}
+
 				coroParams = append(coroParams, pt)
 			}
+
 			fnPtrTypes = append(fnPtrTypes, irtypes.NewPointer(irtypes.NewFunc(irtypes.I8Ptr, coroParams...)))
 		}
+
 		cg.traitAsyncMethodNames[traitName] = asyncNames
 	}
 
@@ -771,10 +864,12 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 						if !m.IsStatic || len(m.Params) != 1 {
 							continue
 						}
+
 						paramLLVM, err2 := cg.tinTypeToLLVM(m.Params[0].Type)
 						if err2 != nil {
 							continue
 						}
+
 						if paramLLVM.Equal(srcLLVM) {
 							if fnEntry, ok2 := cg.curScope.lookup(methodScopeName(structKey, m)); ok2 {
 								if fn, ok3 := fnEntry.val.(*ir.Func); ok3 {
@@ -800,11 +895,14 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				traitName = traitName[idx+2:]
 			}
 		}
+
 		td, ok := cg.traits[traitName]
 		if !ok {
 			continue
 		}
+
 		instKey := traitImplKey(impl)
+
 		vtableKey := structKey + "__" + instKey
 		if _, ok := cg.traitVtableGlobals[vtableKey]; ok {
 			continue // already generated
@@ -812,6 +910,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 		// Build type substitution for generic traits.
 		typeSubst := map[string]irtypes.Type{}
+
 		if gt, ok := impl.(*ast.GenericType); ok {
 			for i, tpName := range td.TypeParams {
 				if i < len(gt.TypeParams) {
@@ -819,6 +918,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 					if err != nil {
 						return err
 					}
+
 					typeSubst[tpName] = lt
 				}
 			}
@@ -828,6 +928,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		if _, err := cg.buildTraitFatPtrTypeInst(traitName, instKey, typeSubst); err != nil {
 			return err
 		}
+
 		vtableSt := cg.traitVtableStructTypes[instKey]
 		methodNames := cg.traitMethodOrder[traitName]
 
@@ -835,6 +936,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		if structSt == nil {
 			continue
 		}
+
 		structPtrType := irtypes.NewPointer(structSt)
 
 		// Pre-declare the vtable global with a zero initializer so that wrappers
@@ -846,14 +948,17 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 		// Generate one wrapper per trait method.
 		var wrappers []constant.Constant
+
 		for i, methodName := range methodNames {
 			wrapSlot := vtableSt.Fields[i].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			wrapperName := structKey + "__" + instKey + "__" + methodName
 			wrapParams := make([]*ir.Param, len(wrapSlot.Params))
+
 			wrapParams[0] = ir.NewParam("self", irtypes.I8Ptr)
 			for pi := 1; pi < len(wrapSlot.Params); pi++ {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), wrapSlot.Params[pi])
 			}
+
 			wrapFn := cg.mod.NewFunc(wrapperName, wrapSlot.RetType, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
@@ -866,20 +971,24 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			// then fall back to the plain "Struct_method".
 			qualifiedName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName
 			concreteName := structKey + "_" + methodName
+
 			concreteFn, ok := cg.curScope.lookup(qualifiedName)
 			if ok {
 				concreteName = qualifiedName
 			} else {
 				concreteFn, ok = cg.curScope.lookup(concreteName)
 			}
+
 			if !ok {
 				return fmt.Errorf("trait vtable: missing concrete method %s (also tried %s)", concreteName, qualifiedName)
 			}
+
 			concreteFunc := concreteFn.val.(*ir.Func)
 
 			// Build call args: first arg is either selfPtr (pointer receiver) or
 			// selfVal (value receiver), depending on what the concrete method expects.
 			var firstArg value.Value
+
 			if len(concreteFunc.Sig.Params) > 0 {
 				if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr && pt.ElemType.Equal(structSt) {
 					firstArg = selfPtr // pointer receiver: mutations persist in-place
@@ -889,10 +998,12 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			} else {
 				firstArg = selfVal
 			}
+
 			callArgs := []value.Value{firstArg}
 			for pi := 1; pi < len(wrapParams); pi++ {
 				callArgs = append(callArgs, wrapParams[pi])
 			}
+
 			callArgs = cg.adaptArgs(entry, callArgs, concreteFunc.Sig)
 			result := entry.NewCall(concreteFunc, callArgs...)
 
@@ -906,6 +1017,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				// the returned fat-pointer is valid beyond this wrapper's stack frame.
 				fatPtrType := cg.traitFatPtrTypes[retInstKey]
 				retVtableKey := structKey + "__" + retInstKey
+
 				retVtableGlobal := cg.traitVtableGlobals[retVtableKey]
 				if fatPtrType != nil && retVtableGlobal != nil {
 					fpAlloca := entry.NewAlloca(fatPtrType)
@@ -922,6 +1034,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			} else {
 				entry.NewRet(result)
 			}
+
 			wrappers = append(wrappers, wrapFn)
 		}
 
@@ -934,10 +1047,12 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			coroSlot := vtableSt.Fields[coroSlotIdx].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			wrapperName := structKey + "__" + instKey + "__" + methodName + "$coro"
 			wrapParams := make([]*ir.Param, len(coroSlot.Params))
+
 			wrapParams[0] = ir.NewParam("self", irtypes.I8Ptr)
 			for pi := 1; pi < len(coroSlot.Params); pi++ {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), coroSlot.Params[pi])
 			}
+
 			wrapFn := cg.mod.NewFunc(wrapperName, irtypes.I8Ptr, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
@@ -948,22 +1063,27 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			// Try trait-qualified name first, then plain name.
 			qualifiedCoroName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName + "$coro"
 			plainCoroName := structKey + "_" + methodName + "$coro"
+
 			concreteCoro, ok2 := cg.curScope.lookup(qualifiedCoroName)
 			if !ok2 {
 				concreteCoro, ok2 = cg.curScope.lookup(plainCoroName)
 			}
+
 			if !ok2 {
 				return fmt.Errorf("trait vtable: missing $coro method %s (also tried %s)", plainCoroName, qualifiedCoroName)
 			}
+
 			concreteCoroFn := concreteCoro.val.(*ir.Func)
 
 			callArgs := []value.Value{selfVal}
 			for pi := 1; pi < len(wrapParams); pi++ {
 				callArgs = append(callArgs, wrapParams[pi])
 			}
+
 			callArgs = cg.adaptArgs(entry, callArgs, concreteCoroFn.Sig)
 			hdl := entry.NewCall(concreteCoroFn, callArgs...)
 			entry.NewRet(hdl)
+
 			wrappers = append(wrappers, wrapFn)
 		}
 
@@ -989,13 +1109,16 @@ func (cg *CodeGen) isTraitFatPtr(t irtypes.Type) (string, bool) {
 	if !ok || len(st.Fields) != 2 {
 		return "", false
 	}
+
 	if st.Fields[0] != irtypes.I8Ptr {
 		return "", false
 	}
+
 	pt, ok := st.Fields[1].(*irtypes.PointerType)
 	if !ok {
 		return "", false
 	}
+
 	vst, ok := pt.ElemType.(*irtypes.StructType)
 	if !ok {
 		return "", false
@@ -1020,6 +1143,7 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		if base, exists := cg.traitInstKeys[instKey]; exists {
 			baseTrait = base
 		}
+
 		if baseTrait == "iter" {
 			return iterVal, instKey, true
 		}
@@ -1032,17 +1156,21 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 	if structName == "" {
 		return nil, "", false
 	}
+
 	for vtableKey := range cg.traitVtableGlobals {
 		// vtableKey format: "structName__instKey"
 		prefix := structName + "__"
 		if len(vtableKey) <= len(prefix) || vtableKey[:len(prefix)] != prefix {
 			continue
 		}
+
 		instKey := vtableKey[len(prefix):]
+
 		baseTrait := instKey
 		if base, exists := cg.traitInstKeys[instKey]; exists {
 			baseTrait = base
 		}
+
 		if baseTrait != "iter" {
 			continue
 		}
@@ -1070,6 +1198,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	// Look up method order: ["len", "get"]
 	methodOrder := cg.traitMethodOrder[baseTrait]
 	lenSlot, getSlot := -1, -1
+
 	for i, name := range methodOrder {
 		switch name {
 		case "len":
@@ -1078,6 +1207,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 			getSlot = i
 		}
 	}
+
 	if lenSlot < 0 || getSlot < 0 {
 		return nil, fmt.Errorf("iter trait %s missing len/get methods", instKey)
 	}
@@ -1138,10 +1268,12 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	}
 
 	var bodyErr error
+
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
 	cg.curScope = cg.curScope.parent
+
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
@@ -1151,6 +1283,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 		bodyIdx2 := bodyBlock.NewLoad(irtypes.I64, idxAlloca)
 		newIdx := bodyBlock.NewAdd(bodyIdx2, constant.NewInt(irtypes.I64, 1))
 		bodyBlock.NewStore(newIdx, idxAlloca)
+
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(bodyBlock, condBlock)
 		} else {
@@ -1168,8 +1301,10 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey string) (value.Value, error) {
 	structType := structVal.Type()
 
-	var dataPtr value.Value
-	var concreteType irtypes.Type
+	var (
+		dataPtr      value.Value
+		concreteType irtypes.Type
+	)
 
 	if pt, ok := structType.(*irtypes.PointerType); ok {
 		// Already a pointer (e.g. from malloc + bitcast). Use it directly.
@@ -1188,6 +1323,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	// vtable field has not yet been initialized.
 	structName := cg.typeNameOf(concreteType)
 	vtableKey := structName + "__" + instKey
+
 	vtableGlobal, ok := cg.traitVtableGlobals[vtableKey]
 	if !ok {
 		return nil, fmt.Errorf("no vtable for %s implementing %s", structName, instKey)
@@ -1217,19 +1353,24 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 	}
 	// Determine base LLVM type.
 	var baseType irtypes.Type = irtypes.I32
+
 	if n.BaseType != nil {
 		bt, err := cg.tinTypeToLLVM(n.BaseType)
 		if err != nil {
 			return err
 		}
+
 		baseType = bt
 	}
+
 	cg.enumTypes[n.Name] = baseType
 
 	// Register member values.
 	var nextVal int64 = 0
+
 	for _, m := range n.Members {
 		var val int64
+
 		if m.Value != nil {
 			// Evaluate constant expression.
 			if il, ok := m.Value.(*ast.IntLit); ok {
@@ -1240,6 +1381,7 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 		} else {
 			val = nextVal
 		}
+
 		key := n.Name + "." + m.Name
 		cg.enumValues[key] = val
 		nextVal = val + 1
@@ -1254,16 +1396,20 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 // Tag 0 = first variant, 1 = second, etc.
 func (cg *CodeGen) genTaggedUnionTypeDecl(name string, ut *ast.UnionTypeExpr) error {
 	var maxSize uint64 = 1
+
 	for _, te := range ut.Types {
 		lt, err := cg.tinTypeToLLVM(te)
 		if err != nil {
 			return err
 		}
+
 		if sz := llvmTypeSize(lt); sz > maxSize {
 			maxSize = sz
 		}
 	}
+
 	payloadType := irtypes.NewArray(maxSize, irtypes.I8)
+
 	st := cg.structTypes[name]
 	if st == nil {
 		st = irtypes.NewStruct()
@@ -1286,16 +1432,20 @@ func (cg *CodeGen) genTaggedUnionTypeDecl(name string, ut *ast.UnionTypeExpr) er
 // No tag - members overlap the same memory region.
 func (cg *CodeGen) genUnionDecl(n *ast.UnionDecl) error {
 	var maxSize uint64 = 1
+
 	for _, m := range n.Members {
 		lt, err := cg.tinTypeToLLVM(m.Type)
 		if err != nil {
 			return err
 		}
+
 		if sz := llvmTypeSize(lt); sz > maxSize {
 			maxSize = sz
 		}
 	}
+
 	storageType := irtypes.NewArray(maxSize, irtypes.I8)
+
 	st := cg.structTypes[n.Name]
 	if st == nil {
 		st = irtypes.NewStruct()
@@ -1303,6 +1453,7 @@ func (cg *CodeGen) genUnionDecl(n *ast.UnionDecl) error {
 		cg.structTypes[n.Name] = st
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
+
 	st.Fields = []irtypes.Type{storageType}
 	cg.nativeUnionDecls[n.Name] = n
 
@@ -1320,6 +1471,7 @@ func (cg *CodeGen) wrapTaggedUnionVariant(block *ir.Block, val value.Value, targ
 		if err != nil {
 			continue
 		}
+
 		if lt.Equal(val.Type()) {
 			tag = int8(i)
 
@@ -1333,9 +1485,11 @@ func (cg *CodeGen) wrapTaggedUnionVariant(block *ir.Block, val value.Value, targ
 			if err != nil {
 				continue
 			}
+
 			if irtypes.IsFloat(lt) != irtypes.IsFloat(val.Type()) {
 				continue // never conflate float and int variants of same size
 			}
+
 			if llvmTypeSize(lt) == llvmTypeSize(val.Type()) {
 				tag = int8(i)
 
@@ -1343,15 +1497,18 @@ func (cg *CodeGen) wrapTaggedUnionVariant(block *ir.Block, val value.Value, targ
 			}
 		}
 	}
+
 	if tag < 0 {
 		return nil
 	}
+
 	alloca := block.NewAlloca(targetSt)
 	// Field 0 = i32 type_id.
 	typeIDVal := int32(0)
 	if id, ok := cg.unionTypeIDs[unionName]; ok {
 		typeIDVal = id
 	}
+
 	typeIDGEP := block.NewGetElementPtr(targetSt, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	block.NewStore(constant.NewInt(irtypes.I32, int64(typeIDVal)), typeIDGEP)
@@ -1381,12 +1538,14 @@ func (cg *CodeGen) wrapNativeUnion(block *ir.Block, val value.Value, targetSt *i
 	if arr, ok := targetSt.Fields[0].(*irtypes.ArrayType); ok {
 		storageBytes = arr.Len
 	}
+
 	storedVal := val
 	// If the value is wider than the storage, truncate to the storage size.
 	if storageBytes > 0 {
 		valBytes := llvmTypeSize(val.Type())
 		if valBytes > storageBytes {
 			var storeType irtypes.Type
+
 			switch storageBytes {
 			case 1:
 				storeType = irtypes.I8
@@ -1397,11 +1556,13 @@ func (cg *CodeGen) wrapNativeUnion(block *ir.Block, val value.Value, targetSt *i
 			default:
 				storeType = irtypes.I64
 			}
+
 			if irtypes.IsInt(val.Type()) && irtypes.IsInt(storeType) {
 				storedVal = block.NewTrunc(val, storeType)
 			}
 		}
 	}
+
 	valPtr := block.NewBitCast(storageGEP, irtypes.NewPointer(storedVal.Type()))
 	block.NewStore(storedVal, valPtr)
 

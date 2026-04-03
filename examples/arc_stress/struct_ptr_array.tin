@@ -4,10 +4,8 @@
 // Calls make_item 10 times, appends each *item into an array, then:
 //   (a) verifies each struct's fields have the expected values
 //   (b) verifies all 10 pointers are unique (no aliasing)
-// Finally releases each string field and frees the raw memory to ensure
-// a clean heap. The [*item] array itself is ARC-tracked and freed on exit.
+// The [*item] array is ARC-tracked and freed on scope exit.
 
-use mem
 use assert
 
 struct item =
@@ -40,12 +38,5 @@ fn main() =
       assert::not_equals(items[a] as i64, items[b] as i64)
       b = b + 1
     a = a + 1
-
-  // free: release string field then free raw memory
-  let k i64 = 0
-  for k < 10:
-    items[k].label = ""
-    mem::free(items[k] as *void)
-    k = k + 1
 
   echo "struct_ptr_array: OK"

@@ -8,7 +8,7 @@
 ;; Features:
 ;;   - Syntax highlighting for keywords, types, constants, atoms,
 ;;     control tags, function/type declarations, macros, namespaces
-;;   - Line comments (//)
+;;   - Line comments (//) and block comments (/* */)
 ;;   - Indentation: blocks open with = or : at end of line (2-space)
 ;;   - auto-mode-alist for *.tin
 
@@ -20,9 +20,10 @@
 
 (defvar tin-mode-syntax-table
   (let ((table (make-syntax-table)))
-    ;; Line comments: //
-    (modify-syntax-entry ?/ ". 12" table)
-    (modify-syntax-entry ?\n ">" table)
+    ;; Line comments (//) and block comments (/* */)
+    (modify-syntax-entry ?/ ". 124b" table)
+    (modify-syntax-entry ?* ". 23" table)
+    (modify-syntax-entry ?\n "> b" table)
     ;; String literals
     (modify-syntax-entry ?\" "\"" table)
     ;; Single quote is punctuation - atoms use 'ident, not a string delimiter
@@ -34,7 +35,6 @@
     ;; Operators
     (modify-syntax-entry ?+ "." table)
     (modify-syntax-entry ?- "." table)
-    (modify-syntax-entry ?* "." table)
     (modify-syntax-entry ?% "." table)
     (modify-syntax-entry ?& "." table)
     (modify-syntax-entry ?| "." table)
@@ -77,7 +77,10 @@
    ;; Control tags: #pure  #no_recurse  #sideffect  #allow_sideffect ...
    `("\\(#[a-zA-Z_][a-zA-Z0-9_]*\\)" . font-lock-preprocessor-face)
 
-   ;; Atom literals: 'ok  'err  'some_atom
+   ;; Quoted atom literals: '"content"
+   `("'\"[^\"\n]*\"" . font-lock-constant-face)
+
+   ;; Simple atom literals: 'ok  'err  'some_atom
    `("\\('[a-zA-Z_][a-zA-Z0-9_]*\\)" . font-lock-constant-face)
 
    ;; Keywords
@@ -107,6 +110,9 @@
    ;; Type declarations: struct/trait/enum/union/type [atom] Name
    `("\\b\\(?:struct\\|trait\\|enum\\|union\\|type\\)\\(?:\\s-+atom\\)?\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
      (1 font-lock-type-face))
+
+   ;; Function calls: name(
+   `("\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\s-*(" (1 font-lock-function-name-face))
 
    ;; Namespace access: module::item  (highlight the namespace part)
    `("\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)::[a-zA-Z_]"
@@ -179,10 +185,26 @@
       (indent-line-to desired)
       (forward-char n))))
 
+;;;; File icon support
+
+(defun tin--icon (&rest _)
+  (propertize "🥫" 'face '(:height 1.0) 'font-lock-face '(:height 1.0)
+              'display '(raise -0.1) 'rear-nonsticky t))
+;; all-the-icons calls `(fn)-family' to get the font family name; return nil for emoji icons
+(defun tin--icon-family () nil)
+
+(with-eval-after-load 'all-the-icons
+  (add-to-list 'all-the-icons-extension-icon-alist '("tin" tin--icon ""))
+  (add-to-list 'all-the-icons-mode-icon-alist      '(tin-mode tin--icon "")))
+
+(with-eval-after-load 'nerd-icons
+  (add-to-list 'nerd-icons-extension-icon-alist '("tin" tin--icon ""))
+  (add-to-list 'nerd-icons-mode-icon-alist      '(tin-mode tin--icon "")))
+
 ;;;; Major mode definition
 
 ;;;###autoload
-(define-derived-mode tin-mode prog-mode "Tin"
+(define-derived-mode tin-mode prog-mode "🥫 Tin"
   "Major mode for editing Tin source files.
 
 Based on simpc-mode by rexim (https://github.com/rexim/simpc-mode)."

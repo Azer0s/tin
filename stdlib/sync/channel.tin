@@ -19,7 +19,7 @@
 //   ch.send(42)                      // spawns send_fiber, returns Future[Unit]
 //
 //   Without await the send happens asynchronously - the value will eventually
-//   be enqueued, but the caller does not wait.  Use this when:
+//   be enqueued, but the caller does not wait. Use this when:
 //     * you don't need backpressure (channel has plenty of headroom), and
 //     * nothing depends on the send completing before the next statement.
 //
@@ -51,8 +51,8 @@ struct Channel[T] =
   static fn make(cap i64) Channel[T] =
     return Channel[T]{ _ptr: _tin_channel_new(cap, sizeof(T), isrc(T)) }
 
-  // send parks the calling fiber directly when the channel is full —
-  // no wrapper fiber is spawned.  Use `await ch.send(v)` to send inline.
+  // send parks the calling fiber directly when the channel is full -
+  // no wrapper fiber is spawned. Use `await ch.send(v)` to send inline.
   // Fire-and-forget: `spawn ch.send(v)` to send without waiting.
   // #no_autoyield: the loop already has an explicit `yield` for the blocked case;
   // the auto-yield at the loop backedge would add a redundant second suspension.
@@ -66,8 +66,8 @@ struct Channel[T] =
         return
       yield
 
-  // recv parks the calling fiber directly when the channel is empty —
-  // no wrapper fiber is spawned.  Use `await ch.recv()` to receive inline.
+  // recv parks the calling fiber directly when the channel is empty -
+  // no wrapper fiber is spawned. Use `await ch.recv()` to receive inline.
   fn{#async #no_autoyield} recv(this *Channel[T]) T =
     let blocked = _tin_channel_recv_blocked_val()
     let pid = _tin_current_pid_c()
