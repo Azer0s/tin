@@ -276,6 +276,7 @@ on the receiving variable and releases it at scope exit instead.
 | Pattern                            | ARC?  | Notes                                                          |
 |------------------------------------|-------|----------------------------------------------------------------|
 | `return &localVar`                 | Yes   | Late-promoted to `_tin_rc_alloc`; caller auto-releases         |
+| `return &param`                    | Yes   | Parameter value copied into `_tin_rc_alloc`; caller releases   |
 | `let p = &localVar; return p`      | Yes   | Alias chain - same promotion                                   |
 | `return (&x, y)`                   | Yes   | Tuple element - x promoted                                     |
 | `let p = &x; let q = &p; return q` | Yes   | Transitive chain - both promoted                               |
@@ -288,8 +289,6 @@ on the receiving variable and releases it at scope exit instead.
 
 ### Limitations
 
-- **Parameter addresses**: `return &param` is not tracked - parameters use plain
-  `alloca` regardless. Returning the address of a parameter is undefined behavior.
 - **Name shadowing**: if two variables in different scopes share the same name and
   one escapes, both get heap-promoted. Wasteful but safe.
 - **Non-return escapes**: passing `&x` to a function that stores it externally
