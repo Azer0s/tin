@@ -105,9 +105,12 @@ typedef struct {
     _Atomic(uint32_t) state_lock;
 } TinFiber;
 
+#define FIBER_DEFAULT_MAX (1 << 20)  // 1M
+
 static TinFiber  **_fibers    = NULL;
 static int64_t     _fiber_cap = 0;
 static int64_t     _fiber_cnt = 1;   // next pid; 0 reserved
+static int64_t     _fiber_max = 0;
 static pthread_mutex_t _table_mu = PTHREAD_MUTEX_INITIALIZER;
 
 
@@ -116,6 +119,8 @@ static pthread_mutex_t _table_mu = PTHREAD_MUTEX_INITIALIZER;
 // -------------------------------------------------------------------
 
 typedef struct { void *hdl; int64_t pid; } TinRunnable;
+
+#define RQ_DEFAULT_MAX (1 << 20)  // 1M
 
 typedef struct {
     pthread_mutex_t mu;
@@ -126,6 +131,7 @@ typedef struct {
 } TinRunQueue;
 
 static TinRunQueue _run_queue;
+static int64_t     _rq_max = 0;
 
 static void _rq_init(void) {
     pthread_mutex_init(&_run_queue.mu, NULL);
@@ -134,6 +140,11 @@ static void _rq_init(void) {
     _run_queue.buf  = (TinRunnable *)calloc((size_t)_run_queue.cap, sizeof(TinRunnable));
     _run_queue.head = _run_queue.tail = _run_queue.count = 0;
     _run_queue.shutdown = 0;
+
+    const char *env = getenv("TINMAXRUNNABLES");
+    // 0 = unlimited (old behaviour: grow forever without panicking).
+    _rq_max = (env && *env) ? (int64_t)atoi(env) : RQ_DEFAULT_MAX;
+    if (_rq_max < 0) _rq_max = RQ_DEFAULT_MAX;
 }
 
 // Declared here so _rq_push can check it; defined after _rq_pop.
@@ -142,8 +153,19 @@ static atomic_int _spinning_workers;
 static void _rq_push(TinRunnable r) {
     pthread_mutex_lock(&_run_queue.mu);
     if (_run_queue.count == _run_queue.cap) {
+        if (_rq_max > 0 && _run_queue.cap >= _rq_max) {
+            pthread_mutex_unlock(&_run_queue.mu);
+            _tin_panic("run queue overflow: too many runnable fibers - raise TINMAXRUNNABLES");
+            return;
+        }
         int64_t newcap = _run_queue.cap * 2;
+        if (_rq_max > 0 && newcap > _rq_max) newcap = _rq_max;
         TinRunnable *nb = (TinRunnable *)malloc((size_t)newcap * sizeof(TinRunnable));
+        if (!nb) {
+            pthread_mutex_unlock(&_run_queue.mu);
+            _tin_panic("run queue OOM");
+            return;
+        }
         // Copy linearised.
         for (int64_t i = 0; i < _run_queue.count; i++)
             nb[i] = _run_queue.buf[(_run_queue.head + i) % _run_queue.cap];
@@ -480,6 +502,9 @@ static void *_worker_thread(void *_) {
             // fiber frames cannot be stack-allocated by coro-elide (the hdl
             // escapes to _tin_fiber_spawn in the caller), so _coro_destroy
             // always runs the full cleanup here.
+            // Clear direct-recv flag: if the fiber panicked before consuming
+            // it, the next fiber on this worker must not inherit a stale flag.
+            _direct_recv_flag = 0;
             _coro_destroy(r.hdl);
             pthread_mutex_lock(&_table_mu);
             // Allocate with _tin_rc_alloc so the message has a proper ARC header.
@@ -609,6 +634,10 @@ static void *_worker_thread(void *_) {
 void _tin_fiber_init(void) {
     pthread_mutex_lock(&_table_mu);
     if (!_fibers) {
+        const char *env = getenv("TINMAXFIBERS");
+        _fiber_max = (env && *env) ? (int64_t)atoi(env) : FIBER_DEFAULT_MAX;
+        if (_fiber_max <= 0) _fiber_max = FIBER_DEFAULT_MAX;
+
         _fiber_cap = 256;
         _fibers    = (TinFiber **)calloc((size_t)_fiber_cap, sizeof(TinFiber *));
         if (!_fibers) { fputs("tin: fiber table OOM\n", stderr); exit(1); }
@@ -652,15 +681,29 @@ int64_t _tin_fiber_spawn(void *hdl) {
 
     if (!_fibers) {
         // _tin_fiber_init was not called; bootstrap lazily (single-threaded context).
+        const char *env = getenv("TINMAXFIBERS");
+        _fiber_max = (env && *env) ? (int64_t)atoi(env) : FIBER_DEFAULT_MAX;
+        if (_fiber_max <= 0) _fiber_max = FIBER_DEFAULT_MAX;
         _fiber_cap = 256;
         _fibers    = (TinFiber **)calloc((size_t)_fiber_cap, sizeof(TinFiber *));
         if (!_fibers) { fputs("tin: fiber table OOM\n", stderr); exit(1); }
         _fiber_cnt = 1;
     }
     if (_fiber_cnt >= _fiber_cap) {
+        int64_t max = (_fiber_max > 0) ? _fiber_max : FIBER_DEFAULT_MAX;
+        if (_fiber_cap >= max) {
+            pthread_mutex_unlock(&_table_mu);
+            _tin_panic("fiber limit reached: too many concurrent fibers - raise TINMAXFIBERS");
+            return -1;
+        }
         int64_t new_cap = _fiber_cap * 2;
+        if (new_cap > max) new_cap = max;
         TinFiber **nf = (TinFiber **)realloc(_fibers, sizeof(TinFiber *) * (size_t)new_cap);
-        if (!nf) { fputs("tin: fiber table OOM\n", stderr); exit(1); }
+        if (!nf) {
+            pthread_mutex_unlock(&_table_mu);
+            _tin_panic("fiber table OOM");
+            return -1;
+        }
         memset(nf + _fiber_cap, 0, sizeof(TinFiber *) * (size_t)(new_cap - _fiber_cap));
         _fibers    = nf;
         _fiber_cap = new_cap;

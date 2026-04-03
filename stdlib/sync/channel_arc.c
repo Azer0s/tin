@@ -21,6 +21,9 @@
 void _tin_retain(void *ptr);
 void _tin_release(void *ptr);
 
+// Forward-declare panic from runtime.h
+void _tin_panic(const char *msg);
+
 // Forward-declare fiber park/unpark/hdl from fiber.h
 void    _tin_fiber_park(int64_t pid);
 void    _tin_fiber_unpark(int64_t pid);
@@ -68,12 +71,89 @@ static inline void _chan_elem_copy(void *dst, const void *src, size_t sz) {
 // The caller must yield immediately after receiving this.  Never a valid data pointer.
 #define TIN_CHAN_BLOCKED ((void*)(intptr_t)-1)
 
-// Maximum fibers that can wait on a single channel at once.
-// Excess waiters fall back to the yield-retry path (still correct, just slower).
-// Keep this small (8) so the TinChannel struct fits in a few cache lines —
-// the hot fields (lock state, count, head, tail) must stay within the first
-// 64-byte cache line to avoid costly cache misses on every operation.
-#define TIN_CHAN_MAX_WAITERS 8
+#define TIN_CHAN_WAITERS_INIT        8
+#define TIN_CHAN_WAITERS_DEFAULT_MAX (1 << 16)  // 64K
+
+// Dynamic waiter queue: grows on demand up to _chan_waiter_max, then panics.
+// pid + hdl + fib are stored so _tin_fiber_unpark_fib can bypass _table_mu
+// entirely on the unpark hot path (only the per-fiber spinlock is needed).
+// outs is non-NULL only for recv queues (direct-delivery target buffers).
+typedef struct {
+    int64_t *pids;
+    void   **hdls;
+    void   **fibs;
+    void   **outs;  // recv only; NULL entries = recv_blocking callers
+    int      cnt;
+    int      cap;
+} TinWaiterQueue;
+
+static int             _chan_waiter_max  = 0;
+static pthread_once_t  _chan_waiter_once = PTHREAD_ONCE_INIT;
+
+static void _chan_waiter_init_once(void) {
+    const char *env = getenv("TINMAXCHANWAITERS");
+    // 0 = unlimited (old behaviour: grow forever without panicking).
+    _chan_waiter_max = (env && *env) ? atoi(env) : TIN_CHAN_WAITERS_DEFAULT_MAX;
+    if (_chan_waiter_max < 0) _chan_waiter_max = TIN_CHAN_WAITERS_DEFAULT_MAX;
+}
+
+static void _wq_alloc(TinWaiterQueue *wq, int has_outs) {
+    wq->pids = (int64_t *)malloc((size_t)TIN_CHAN_WAITERS_INIT * sizeof(int64_t));
+    wq->hdls = (void   **)malloc((size_t)TIN_CHAN_WAITERS_INIT * sizeof(void *));
+    wq->fibs = (void   **)malloc((size_t)TIN_CHAN_WAITERS_INIT * sizeof(void *));
+    wq->outs = has_outs
+        ? (void **)calloc((size_t)TIN_CHAN_WAITERS_INIT, sizeof(void *))
+        : NULL;
+    wq->cnt  = 0;
+    wq->cap  = TIN_CHAN_WAITERS_INIT;
+    if (!wq->pids || !wq->hdls || !wq->fibs || (has_outs && !wq->outs)) {
+        fputs("tin: channel waiter queue OOM\n", stderr);
+        exit(1);
+    }
+}
+
+static void _wq_free(TinWaiterQueue *wq) {
+    free(wq->pids); wq->pids = NULL;
+    free(wq->hdls); wq->hdls = NULL;
+    free(wq->fibs); wq->fibs = NULL;
+    free(wq->outs); wq->outs = NULL;
+    wq->cnt = wq->cap = 0;
+}
+
+// Grow the waiter queue.  Must be called with ch->fmu held.
+// Unlocks fmu before panicking to avoid deadlock.
+static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_outs) {
+    pthread_once(&_chan_waiter_once, _chan_waiter_init_once);
+    if (_chan_waiter_max > 0 && wq->cap >= _chan_waiter_max) {
+        tin_fmutex_unlock(fmu);
+        _tin_panic("channel: waiter queue full - raise TINMAXCHANWAITERS");
+        return;
+    }
+    int new_cap = wq->cap * 2;
+    if (_chan_waiter_max > 0 && new_cap > _chan_waiter_max) new_cap = _chan_waiter_max;
+
+    int64_t *np = (int64_t *)malloc((size_t)new_cap * sizeof(int64_t));
+    void   **nh = (void   **)malloc((size_t)new_cap * sizeof(void *));
+    void   **nf = (void   **)malloc((size_t)new_cap * sizeof(void *));
+    void   **no = (has_outs && wq->outs)
+        ? (void **)calloc((size_t)new_cap, sizeof(void *))
+        : NULL;
+    if (!np || !nh || !nf || (has_outs && wq->outs && !no)) {
+        free(np); free(nh); free(nf); free(no);
+        tin_fmutex_unlock(fmu);
+        _tin_panic("channel: waiter queue OOM");
+        return;
+    }
+    memcpy(np, wq->pids, (size_t)wq->cnt * sizeof(int64_t));
+    memcpy(nh, wq->hdls, (size_t)wq->cnt * sizeof(void *));
+    memcpy(nf, wq->fibs, (size_t)wq->cnt * sizeof(void *));
+    if (no) memcpy(no, wq->outs, (size_t)wq->cnt * sizeof(void *));
+    free(wq->pids); wq->pids = np;
+    free(wq->hdls); wq->hdls = nh;
+    free(wq->fibs); wq->fibs = nf;
+    free(wq->outs); wq->outs = no;
+    wq->cap = new_cap;
+}
 
 // TinChannel layout — cache-line conscious:
 //   Bytes   0..3   : ref_count      (ARC, rarely touched in fast path)
@@ -89,7 +169,7 @@ static inline void _chan_elem_copy(void *dst, const void *src, size_t sz) {
 //   Bytes 136..143 : head           (hot)
 //   Bytes 144..151 : tail           (hot)
 //   Bytes 152..153 : closed, is_rc
-//   Bytes 154+     : waiter arrays, buf[]
+//   Bytes 154+     : recv_wq, send_wq (pointers into heap), buf[]
 //
 // With FMUTEX_MAX_WAITERS=4 the fmu is 4+4+4+4*8+4*8 = 80 bytes.
 // The hot ring-buffer fields sit at offset ~80–152, inside the first 3 cache lines.
@@ -104,18 +184,8 @@ typedef struct TinChannel {
     int64_t         tail;
     bool            closed;
     int             is_rc;    // whether T is RC-tracked
-    // Park/unpark waiter queues.  Fibers park here instead of spin-yielding.
-    // pid + hdl + fib are stored so _tin_fiber_unpark_fib can bypass _table_mu
-    // entirely on the unpark hot path (only the per-fiber spinlock is needed).
-    int64_t recv_waiters[TIN_CHAN_MAX_WAITERS];
-    void   *recv_waiter_hdls[TIN_CHAN_MAX_WAITERS];
-    void   *recv_waiter_fibs[TIN_CHAN_MAX_WAITERS];
-    void   *recv_waiter_outs[TIN_CHAN_MAX_WAITERS]; // direct delivery target buffers
-    int     recv_waiter_cnt;
-    int64_t send_waiters[TIN_CHAN_MAX_WAITERS];
-    void   *send_waiter_hdls[TIN_CHAN_MAX_WAITERS];
-    void   *send_waiter_fibs[TIN_CHAN_MAX_WAITERS];
-    int     send_waiter_cnt;
+    TinWaiterQueue  recv_wq;  // fibers parked waiting to receive
+    TinWaiterQueue  send_wq;  // fibers parked waiting to send
     char            buf[];    // flexible array member: cap * elem_size bytes
 } TinChannel;
 
@@ -142,6 +212,8 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     ch->tail      = 0;
     ch->closed    = false;
     ch->is_rc     = is_rc;
+    _wq_alloc(&ch->recv_wq, 1 /* has_outs */);
+    _wq_alloc(&ch->send_wq, 0 /* no outs  */);
     return ch;
 }
 
@@ -174,6 +246,8 @@ void _tin_channel_free(void *ptr) {
         }
     }
     // TinFastMutex uses only atomic fields; no destructor needed.
+    _wq_free(&ch->recv_wq);
+    _wq_free(&ch->send_wq);
     free(ch);
 }
 
@@ -285,11 +359,11 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
     if (ch->count > 0) {
         void *data = _chan_dequeue(ch);
         // Wake one parked sender now that there is space.
-        if (ch->send_waiter_cnt > 0) {
-            ch->send_waiter_cnt--;
-            int64_t spid = ch->send_waiters[ch->send_waiter_cnt];
-            void   *shdl = ch->send_waiter_hdls[ch->send_waiter_cnt];
-            void   *sfib = ch->send_waiter_fibs[ch->send_waiter_cnt];
+        if (ch->send_wq.cnt > 0) {
+            ch->send_wq.cnt--;
+            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
             tin_fmutex_unlock(&ch->fmu);
             _tin_fiber_unpark_fib(sfib, spid, shdl);
             return data;
@@ -308,17 +382,20 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
     // the worker loop transitions to FIBER_BLOCKED after coro.suspend fires).
     // This eliminates the double-resume race if a sender unparks us between
     // _tin_fiber_park and the subsequent yield.
-    if (pid > 0 && hdl && ch->recv_waiter_cnt < TIN_CHAN_MAX_WAITERS) {
-        ch->recv_waiters[ch->recv_waiter_cnt]     = pid;
-        ch->recv_waiter_hdls[ch->recv_waiter_cnt] = hdl;
-        ch->recv_waiter_fibs[ch->recv_waiter_cnt] = _tin_current_fib();
-        ch->recv_waiter_cnt++;
+    if (pid > 0 && hdl) {
+        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
+            _wq_grow_or_panic(&ch->recv_wq, &ch->fmu, 1);
+        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
+        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
+        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
+        ch->recv_wq.outs[ch->recv_wq.cnt] = NULL;  // recv_blocking: no direct buffer
+        ch->recv_wq.cnt++;
         tin_fmutex_unlock(&ch->fmu);
         _tin_fiber_park(pid);
         return TIN_CHAN_BLOCKED;
     }
 
-    // Waiter list full or no pid/hdl: fall back to yield-retry.
+    // No pid/hdl: fall back to yield-retry.
     tin_fmutex_unlock(&ch->fmu);
     return TIN_CHAN_BLOCKED;
 }
@@ -348,12 +425,12 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         // the receiver's retry call (2 LOCK CAS + mutex overhead).
         // If rout == NULL the receiver used recv_blocking: enqueue to ring buffer
         // so it can dequeue on its normal retry path, then unpark it.
-        if (ch->recv_waiter_cnt > 0) {
-            ch->recv_waiter_cnt--;
-            int64_t rpid = ch->recv_waiters[ch->recv_waiter_cnt];
-            void   *rhdl = ch->recv_waiter_hdls[ch->recv_waiter_cnt];
-            void   *rfib = ch->recv_waiter_fibs[ch->recv_waiter_cnt];
-            void   *rout = ch->recv_waiter_outs[ch->recv_waiter_cnt];
+        if (ch->recv_wq.cnt > 0) {
+            ch->recv_wq.cnt--;
+            int64_t rpid = ch->recv_wq.pids[ch->recv_wq.cnt];
+            void   *rhdl = ch->recv_wq.hdls[ch->recv_wq.cnt];
+            void   *rfib = ch->recv_wq.fibs[ch->recv_wq.cnt];
+            void   *rout = ch->recv_wq.outs ? ch->recv_wq.outs[ch->recv_wq.cnt] : NULL;
             if (rout) {
                 // recv_direct receiver: write directly to its alloca.
                 _chan_elem_copy(rout, val, esz);
@@ -413,17 +490,19 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
     }
 
     // Channel full: register as a data waiter and park.
-    if (pid > 0 && hdl && ch->send_waiter_cnt < TIN_CHAN_MAX_WAITERS) {
-        ch->send_waiters[ch->send_waiter_cnt]     = pid;
-        ch->send_waiter_hdls[ch->send_waiter_cnt] = hdl;
-        ch->send_waiter_fibs[ch->send_waiter_cnt] = _tin_current_fib();
-        ch->send_waiter_cnt++;
+    if (pid > 0 && hdl) {
+        if (ch->send_wq.cnt >= ch->send_wq.cap)
+            _wq_grow_or_panic(&ch->send_wq, &ch->fmu, 0);
+        ch->send_wq.pids[ch->send_wq.cnt] = pid;
+        ch->send_wq.hdls[ch->send_wq.cnt] = hdl;
+        ch->send_wq.fibs[ch->send_wq.cnt] = _tin_current_fib();
+        ch->send_wq.cnt++;
         tin_fmutex_unlock(&ch->fmu);
         _tin_fiber_park(pid);
         return 1;
     }
 
-    // Waiter list full: fall back to yield-retry.
+    // No pid/hdl: fall back to yield-retry.
     tin_fmutex_unlock(&ch->fmu);
     return 1;
 }
@@ -461,11 +540,11 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
         ch->head = (int64_t)((head + 1) & (size_t)ch->cap_mask);
         ch->count--;
 
-        if (ch->send_waiter_cnt > 0) {
-            ch->send_waiter_cnt--;
-            int64_t spid = ch->send_waiters[ch->send_waiter_cnt];
-            void   *shdl = ch->send_waiter_hdls[ch->send_waiter_cnt];
-            void   *sfib = ch->send_waiter_fibs[ch->send_waiter_cnt];
+        if (ch->send_wq.cnt > 0) {
+            ch->send_wq.cnt--;
+            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
             tin_fmutex_unlock(&ch->fmu);
             _tin_fiber_unpark_fib(sfib, spid, shdl);
             return 0;
@@ -479,12 +558,14 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
         return -1;
     }
 
-    if (pid > 0 && hdl && ch->recv_waiter_cnt < TIN_CHAN_MAX_WAITERS) {
-        ch->recv_waiters[ch->recv_waiter_cnt]     = pid;
-        ch->recv_waiter_hdls[ch->recv_waiter_cnt] = hdl;
-        ch->recv_waiter_fibs[ch->recv_waiter_cnt] = _tin_current_fib();
-        ch->recv_waiter_outs[ch->recv_waiter_cnt] = out;  // for direct delivery
-        ch->recv_waiter_cnt++;
+    if (pid > 0 && hdl) {
+        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
+            _wq_grow_or_panic(&ch->recv_wq, &ch->fmu, 1);
+        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
+        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
+        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
+        ch->recv_wq.outs[ch->recv_wq.cnt] = out;  // for direct delivery
+        ch->recv_wq.cnt++;
         tin_fmutex_unlock(&ch->fmu);
         _tin_fiber_park(pid);
         return 1;
@@ -594,31 +675,40 @@ void _tin_channel_close(void *ptr) {
 
     // Collect all parked {fib, pid, hdl} triples before unlocking so we can
     // unpark without holding ch->fmu (avoids lock-order issues with fiber.c).
-    int64_t wake_pids[TIN_CHAN_MAX_WAITERS * 2];
-    void   *wake_hdls[TIN_CHAN_MAX_WAITERS * 2];
-    void   *wake_fibs[TIN_CHAN_MAX_WAITERS * 2];
-    int     nwake = 0;
-
     tin_fmutex_lock_spin(&ch->fmu);
+    int nwake = ch->recv_wq.cnt + ch->send_wq.cnt;
+    int64_t *wake_pids = (nwake > 0) ? (int64_t *)malloc((size_t)nwake * sizeof(int64_t)) : NULL;
+    void   **wake_hdls = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
+    void   **wake_fibs = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
+    int      w = 0;
+
     ch->closed = true;
-    while (ch->recv_waiter_cnt > 0) {
-        ch->recv_waiter_cnt--;
-        wake_pids[nwake] = ch->recv_waiters[ch->recv_waiter_cnt];
-        wake_hdls[nwake] = ch->recv_waiter_hdls[ch->recv_waiter_cnt];
-        wake_fibs[nwake] = ch->recv_waiter_fibs[ch->recv_waiter_cnt];
-        nwake++;
+    while (ch->recv_wq.cnt > 0) {
+        ch->recv_wq.cnt--;
+        if (wake_pids) {
+            wake_pids[w] = ch->recv_wq.pids[ch->recv_wq.cnt];
+            wake_hdls[w] = ch->recv_wq.hdls[ch->recv_wq.cnt];
+            wake_fibs[w] = ch->recv_wq.fibs[ch->recv_wq.cnt];
+            w++;
+        }
     }
-    while (ch->send_waiter_cnt > 0) {
-        ch->send_waiter_cnt--;
-        wake_pids[nwake] = ch->send_waiters[ch->send_waiter_cnt];
-        wake_hdls[nwake] = ch->send_waiter_hdls[ch->send_waiter_cnt];
-        wake_fibs[nwake] = ch->send_waiter_fibs[ch->send_waiter_cnt];
-        nwake++;
+    while (ch->send_wq.cnt > 0) {
+        ch->send_wq.cnt--;
+        if (wake_pids) {
+            wake_pids[w] = ch->send_wq.pids[ch->send_wq.cnt];
+            wake_hdls[w] = ch->send_wq.hdls[ch->send_wq.cnt];
+            wake_fibs[w] = ch->send_wq.fibs[ch->send_wq.cnt];
+            w++;
+        }
     }
     tin_fmutex_unlock(&ch->fmu);
 
-    for (int i = 0; i < nwake; i++)
+    for (int i = 0; i < w; i++)
         _tin_fiber_unpark_fib(wake_fibs[i], wake_pids[i], wake_hdls[i]);
+
+    free(wake_pids);
+    free(wake_hdls);
+    free(wake_fibs);
 }
 
 // ---------------------------------------------------------------------------

@@ -17,15 +17,18 @@
 #include <pthread.h>
 #include <time.h>
 
-#define TIN_MAX_TIMERS 1024
+#define TIN_TIMERS_INIT        1024
+#define TIN_TIMERS_DEFAULT_MAX (1 << 20)  // 1M
 
 typedef struct {
     int64_t deadline_ms;  // absolute deadline in milliseconds since epoch
     int64_t pid;          // fiber to wake
 } TinTimer;
 
-static TinTimer        _timers[TIN_MAX_TIMERS];
+static TinTimer       *_timers    = NULL;
 static int             _timer_cnt = 0;
+static int             _timer_cap = 0;
+static int             _timer_max = 0;
 static pthread_mutex_t _timer_mu  = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t     _timer_thread_id;
@@ -69,6 +72,15 @@ static void *_timer_thread_fn(void *_) {
 void _tin_timer_init(void) {
     if (_timer_initialized) return;
     _timer_initialized = 1;
+
+    const char *env = getenv("TINMAXTIMERS");
+    _timer_max = (env && *env) ? atoi(env) : TIN_TIMERS_DEFAULT_MAX;
+    if (_timer_max <= 0) _timer_max = TIN_TIMERS_DEFAULT_MAX;
+
+    _timer_cap = TIN_TIMERS_INIT;
+    _timers = (TinTimer *)malloc((size_t)_timer_cap * sizeof(TinTimer));
+    if (!_timers) { fputs("tin: timer table OOM\n", stderr); exit(1); }
+
     _timer_shutdown = 0;
     pthread_create(&_timer_thread_id, NULL, _timer_thread_fn, NULL);
 }
@@ -78,6 +90,10 @@ void _tin_timer_shutdown(void) {
     _timer_shutdown = 1;
     pthread_join(_timer_thread_id, NULL);
     _timer_initialized = 0;
+    free(_timers);
+    _timers    = NULL;
+    _timer_cap = 0;
+    _timer_cnt = 0;
 }
 
 // Park the current fiber for `ms` milliseconds.
@@ -96,8 +112,23 @@ void _tin_sleep_ms(int64_t ms) {
     _tin_fiber_park(pid);
 
     pthread_mutex_lock(&_timer_mu);
-    if (_timer_cnt < TIN_MAX_TIMERS) {
-        _timers[_timer_cnt++] = (TinTimer){ deadline, pid };
+    if (_timer_cnt >= _timer_cap) {
+        if (_timer_cap >= _timer_max) {
+            pthread_mutex_unlock(&_timer_mu);
+            _tin_panic("sleep: timer queue full - raise TINMAXTIMERS");
+            return;
+        }
+        int new_cap = _timer_cap * 2;
+        if (new_cap > _timer_max) new_cap = _timer_max;
+        TinTimer *nt = (TinTimer *)realloc(_timers, (size_t)new_cap * sizeof(TinTimer));
+        if (!nt) {
+            pthread_mutex_unlock(&_timer_mu);
+            _tin_panic("sleep: timer queue OOM");
+            return;
+        }
+        _timers    = nt;
+        _timer_cap = new_cap;
     }
+    _timers[_timer_cnt++] = (TinTimer){ deadline, pid };
     pthread_mutex_unlock(&_timer_mu);
 }

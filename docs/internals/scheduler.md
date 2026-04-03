@@ -301,7 +301,8 @@ All queues grow dynamically (doubling) up to a configurable cap, then panic.
 | IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   | panic          |
 | Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` | **unlimited**  |
 
-`=0` means "no cap - grow forever without panicking" (restores pre-cap behaviour
+
+`=0` means "no cap — grow forever without panicking" (restores pre-cap behaviour
 for run queue and channel waiters). Not supported for the other queues because
 their pre-cap behaviour was a silent hang rather than a safe degradation.
 
