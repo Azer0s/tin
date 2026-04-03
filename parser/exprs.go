@@ -730,6 +730,10 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 		return &ast.AtomLit{Name: tok.Literal}, nil
 
+	case lexer.KW_MATCH:
+		// match as expression: let x = match ...: case ...: value
+		return p.parseMatchStmt()
+
 	case lexer.KW_FN:
 		// Lambda expression
 		return p.parseLambda()

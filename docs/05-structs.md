@@ -241,6 +241,78 @@ releases it on scope exit.
 
 ---
 
+## Weak fields
+
+Two structs that each hold a pointer to the other form a reference cycle.
+Tin's compiler detects cycles in the struct field graph at compile time and
+requires at least one edge in every cycle to be marked `weak`.
+
+### The problem
+
+A doubly-linked list node needs to point both forward and backward:
+
+```rust
+struct node =
+  value i64
+  next  *node   // forward pointer
+  prev  *node   // backward pointer - creates a cycle
+```
+
+Because both fields point to `node`, the type graph has a cycle. The compiler
+rejects this:
+
+```
+error: reference cycle detected: node
+  at least one field in the cycle must be marked `weak`
+```
+
+### The solution
+
+Mark the non-owning direction `weak`:
+
+```rust
+struct node =
+  value i64
+  next  *node        // strong: owns / leads the chain
+  prev  weak *node   // weak:   back-reference, does not own
+```
+
+`weak` goes directly before the field type. A weak field behaves as a
+non-owning pointer - no retain or release is emitted for it at runtime:
+
+- Is **not** retained when assigned.
+- Is **not** released when the struct is freed.
+- The programmer is responsible for not letting it outlive the owning side.
+
+### Compiler cycle detection
+
+The compiler runs Tarjan's SCC algorithm on the struct type graph. Every
+strongly-connected component that forms a cycle must satisfy:
+
+| Cycle composition | Result |
+|---|---|
+| All strong edges | **Error** - at least one must be `weak` |
+| All weak edges | **Error** - nobody owns the structs |
+| Mix of strong and weak | **OK** |
+
+```rust
+// ERROR: mutual strong references
+struct parent =
+  child *child
+
+struct child =
+  parent *parent
+
+// OK: one strong, one weak
+struct parent =
+  child *child
+
+struct child =
+  parent weak *parent
+```
+
+---
+
 ## type aliases
 
 ### Simple alias

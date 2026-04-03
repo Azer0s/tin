@@ -589,10 +589,32 @@ type ElseIfClause struct {
 
 type MatchCase struct {
 	Pos     Pos
-	Pattern Node   // expression or type pattern
+	Pattern Node   // expression, type pattern, or *StructPattern
 	VarName string // "i" in "case i i8:"
 	VarType TypeExpr
+	Guard   Node // optional "if expr" after pattern; nil = no guard
 	Body    *Block
+}
+
+// StructPatternField is one slot in a struct destructuring pattern.
+// Literal == nil means bind the field value to Name in the arm scope.
+// Literal != nil means the field must equal that value (constraint).
+// IsWild == true means "_": match but discard (no binding).
+// BindTo non-empty means rename: bind field Name to variable BindTo.
+type StructPatternField struct {
+	Name    string
+	Literal Node
+	IsWild  bool
+	BindTo  string // "x: px" -> Name="x", BindTo="px"
+}
+
+// StructPattern is used in match case arms to destructure a struct value:
+//
+//	case TypeName{field: literal, bound}:
+type StructPattern struct {
+	base
+	TypeName string
+	Fields   []StructPatternField
 }
 
 type StructLitField struct {

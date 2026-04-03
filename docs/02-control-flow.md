@@ -109,6 +109,135 @@ match d:
     return "other"
 ```
 
+### Struct destructuring patterns
+
+A `case` arm can destructure a struct value by naming fields inside `{}`.
+Free names are bound as local variables; a `field: literal` pair constrains
+the field to that exact value; `_` discards a field without binding it.
+
+```rust
+struct point =
+  x i64
+  y i64
+
+fn classify(p point) string =
+  match p:
+    case point{x: 0, y: 0}: return "origin"
+    case point{x: 0, y}:    return "y-axis at {y}"
+    case point{x, y: 0}:    return "x-axis at {x}"
+    case point{x, y}:       return "({x}, {y})"
+```
+
+An optional `if <guard>` after the pattern further filters the arm.
+Guards can reference any fields bound in that arm:
+
+```rust
+match p:
+  case point{x, y} if x == y: return "diagonal"
+  case point{x, y}:           return "other"
+```
+
+A match is considered exhaustive when at least one arm has no literal
+constraints and no guard (a "total" arm that matches every value), or when
+a `default` arm is present. Guards do not count toward exhaustiveness.
+
+### Field rename bindings
+
+By default a free name in a pattern binds the field under its own name.
+Use `field: newName` to bind the field under a different variable name:
+
+```rust
+struct point =
+  x i64
+  y i64
+
+match p:
+  case point{x: col, y: row}:  // bound as col and row, not x and y
+    echo "col={col} row={row}"
+```
+
+A rename is recognized when the right side of `:` is a bare identifier not
+followed by operators or `(`, `[`, `.`, `::`. Literal constraints still work
+as before: `x: 0` requires the field to equal `0`; `name: "alice"` requires
+the string field to equal `"alice"`.
+
+### Nested struct patterns
+
+Field values that are themselves structs can be matched by nesting a pattern
+after the `:` separator. Any depth of nesting is supported. Free names (and
+renames) at any nesting level are bound as local variables:
+
+```rust
+struct vec2 =
+  x i64
+  y i64
+
+struct rect =
+  origin vec2
+  size   vec2
+
+fn classify(r rect) string =
+  match r:
+    case rect{origin: vec2{x: 0, y: 0}, size}:        return "at-origin"
+    case rect{origin: vec2{x: ox, y: oy}, size} if ox == oy: return "diagonal"
+    case rect{origin: vec2{x: ox, y: oy}, size}:      return "({ox}, {oy})"
+```
+
+Fields bound inside a nested pattern are available in the guard and body of
+the same arm, alongside fields from outer levels.
+
+String fields work in literal constraints inside nested patterns too:
+
+```rust
+match emp:
+  case employee{person: person{name: "alice", age, _}, _, salary}:
+    echo "alice is {age}, earns {salary}"
+```
+
+### match as an expression
+
+`match` can produce a value when used in an expression context. Each arm body
+must be **exactly one expression** (no `return`, no multi-statement blocks):
+
+```rust
+let label = match p:
+  case point{x: 0, y: 0}: "origin"
+  case point{x, y} if x == y: "diagonal"
+  case point{x, y}: "other"
+```
+
+All arms must produce the same (non-void) type. If arms need multiple
+statements, use `return match ...` instead of `let x = match ...`.
+
+### Nested match
+
+`match` can be nested freely. A match arm can contain another match statement
+as its body, or use a match expression as its value:
+
+```rust
+struct point =
+  x i64
+  y i64
+
+// match statement inside a match arm
+fn describe(p point) void =
+  match p:
+    case point{x, y}:
+      match x:
+        case 0: echo "on y-axis"
+        default: echo "x={x}"
+
+// nested match expression - arm value is itself a match
+let label = match p:
+  case point{x, y}: match x:
+    case 0: "zero"
+    case 1: "one"
+    default: "many"
+```
+
+Struct fields bound in an outer arm are visible inside any nested match in
+that arm's body.
+
 ---
 
 ## where - pattern matching on function arguments

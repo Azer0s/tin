@@ -39,5 +39,8 @@
 
         <spellchecker.bundledDictionaryProvider
             implementation="com.tin.ide.TinBundledDictionaryProvider"/>
+
+        <langCodeStyleSettingsProvider
+            implementation="com.tin.ide.TinLanguageCodeStyleSettingsProvider"/>
     </extensions>
 </idea-plugin>

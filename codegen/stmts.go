@@ -2560,6 +2560,379 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 // isExhaustiveEnumMatch returns true when every case pattern is a member of
 // the same enum and all members of that enum are covered - making a default
 // clause unnecessary for exhaustiveness.
+// isExhaustiveStructMatch returns true when the struct match has at least one
+// total pattern arm: a StructPattern with no literal constraints and no guard,
+// or a default arm. Such an arm covers all remaining values.
+func (cg *CodeGen) isExhaustiveStructMatch(s *ast.MatchStmt) bool {
+	if s.Default != nil {
+		return true
+	}
+
+	for _, c := range s.Cases {
+		sp, ok := c.Pattern.(*ast.StructPattern)
+		if !ok {
+			continue
+		}
+
+		if c.Guard != nil {
+			continue
+		}
+
+		total := true
+
+		for _, f := range sp.Fields {
+			if f.Literal != nil {
+				total = false
+
+				break
+			}
+		}
+
+		if total {
+			return true
+		}
+	}
+
+	return false
+}
+
+// applyPatternChecks emits constraint checks for a struct pattern against the
+// value stored in scrutAlloca. For each literal-constrained field it compares
+// the loaded field value against the literal (or recursively checks a nested
+// StructPattern) and branches to failBlock on mismatch. Returns the block
+// where all constraints have passed. The current scope must already be open;
+// free fields are NOT bound here - call bindPatternFree after all checks.
+func (cg *CodeGen) applyPatternChecks(
+	checkBlock *ir.Block,
+	failBlock *ir.Block,
+	scrutType irtypes.Type,
+	scrutAlloca value.Value,
+	structName string,
+	sp *ast.StructPattern,
+	caseIdx int,
+	passSeq *int,
+) (*ir.Block, error) {
+	for _, field := range sp.Fields {
+		if field.IsWild || field.Literal == nil {
+			continue
+		}
+
+		fieldIdx := cg.fieldIndex(structName, field.Name)
+		if fieldIdx < 0 {
+			return nil, fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+		}
+
+		var fieldType irtypes.Type
+
+		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+			fieldType = st.Fields[fieldIdx]
+		} else {
+			fieldType = irtypes.I64
+		}
+
+		gep := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		// Nested struct pattern: recurse.
+		if nested, ok := field.Literal.(*ast.StructPattern); ok {
+			subAlloca := checkBlock.NewAlloca(fieldType)
+			subVal := checkBlock.NewLoad(fieldType, gep)
+			checkBlock.NewStore(subVal, subAlloca)
+
+			subName := cg.typeNameOf(fieldType)
+
+			var err error
+
+			checkBlock, err = cg.applyPatternChecks(checkBlock, failBlock, fieldType, subAlloca, subName, nested, caseIdx, passSeq)
+			if err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		// Scalar literal constraint.
+		fieldVal := checkBlock.NewLoad(fieldType, gep)
+
+		litVal, err := cg.genExpr(checkBlock, field.Literal)
+		if err != nil {
+			return nil, err
+		}
+
+		litVal = cg.coerce(checkBlock, litVal, fieldType)
+
+		var cmp value.Value
+
+		if irtypes.IsFloat(fieldType) {
+			cmp = checkBlock.NewFCmp(enum.FPredOEQ, fieldVal, litVal)
+		} else if isFatPtrType(fieldType) {
+			// String/fat-pointer equality: use strcmp.
+			lptr := cg.extractStringPtr(checkBlock, fieldVal)
+			rptr := cg.extractStringPtr(checkBlock, litVal)
+			strcmpResult := checkBlock.NewCall(cg.ensureStrcmp(), lptr, rptr)
+			cmp = checkBlock.NewICmp(enum.IPredEQ, strcmpResult, constant.NewInt(irtypes.I32, 0))
+		} else {
+			cmp = checkBlock.NewICmp(enum.IPredEQ, fieldVal, litVal)
+		}
+
+		*passSeq++
+		passBlock := cg.newBlock(fmt.Sprintf("match.case.%d.pass.%d", caseIdx, *passSeq))
+		checkBlock.NewCondBr(cmp, passBlock, failBlock)
+		checkBlock = passBlock
+	}
+
+	return checkBlock, nil
+}
+
+// bindPatternFree loads each free (unbound) field from scrutAlloca and creates
+// an alloca in cg.curScope. For nested StructPattern fields it recurses.
+func (cg *CodeGen) bindPatternFree(
+	block *ir.Block,
+	scrutType irtypes.Type,
+	scrutAlloca value.Value,
+	structName string,
+	sp *ast.StructPattern,
+) error {
+	for _, field := range sp.Fields {
+		if field.IsWild {
+			continue
+		}
+
+		fieldIdx := cg.fieldIndex(structName, field.Name)
+		if fieldIdx < 0 {
+			return fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+		}
+
+		var fieldType irtypes.Type
+
+		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+			fieldType = st.Fields[fieldIdx]
+		} else {
+			fieldType = irtypes.I64
+		}
+
+		gep := block.NewGetElementPtr(scrutType, scrutAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		// Nested struct pattern: recurse into sub-fields.
+		if nested, ok := field.Literal.(*ast.StructPattern); ok {
+			subAlloca := block.NewAlloca(fieldType)
+			subVal := block.NewLoad(fieldType, gep)
+			block.NewStore(subVal, subAlloca)
+
+			if err := cg.bindPatternFree(block, fieldType, subAlloca, cg.typeNameOf(fieldType), nested); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		// Literal constraint: no binding needed.
+		if field.Literal != nil {
+			continue
+		}
+
+		// Free field: bind to scope under Name (or BindTo if a rename was specified).
+		bindName := field.Name
+		if field.BindTo != "" {
+			bindName = field.BindTo
+		}
+
+		fv := block.NewLoad(fieldType, gep)
+		fa := block.NewAlloca(fieldType)
+		block.NewStore(fv, fa)
+		cg.curScope.set(bindName, &scopeEntry{val: fa, isAlloc: true})
+	}
+
+	return nil
+}
+
+// genStructMatch generates an if-else chain for match statements whose cases
+// use struct destructuring patterns. resAlloca is non-nil in expression mode:
+// each arm must consist of a single ExprStmt whose value is stored there.
+func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
+	scrutinee, err := cg.genExpr(block, s.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	scrutType := scrutinee.Type()
+	// Auto-deref pointer to named struct.
+	if pt, ok := scrutType.(*irtypes.PointerType); ok {
+		if cg.typeNameOf(pt.ElemType) != "" {
+			scrutinee = block.NewLoad(pt.ElemType, scrutinee)
+			scrutType = pt.ElemType
+		}
+	}
+
+	scrutAlloca := block.NewAlloca(scrutType)
+	block.NewStore(scrutinee, scrutAlloca)
+
+	structName := cg.typeNameOf(scrutType)
+
+	afterBlock := cg.newBlock("match.after")
+	anyFallthrough := false
+
+	curCheckBlock := block
+
+	for i, c := range s.Cases {
+		sp, ok := c.Pattern.(*ast.StructPattern)
+		if !ok {
+			return nil, fmt.Errorf("genStructMatch: non-struct pattern in struct match (case %d)", i)
+		}
+
+		nextCaseBlock := cg.newBlock(fmt.Sprintf("match.next.%d", i))
+		bodyBlock := cg.newBlock(fmt.Sprintf("match.case.%d", i))
+		checkBlock := curCheckBlock
+
+		// Emit constraint checks for this pattern (recurses into nested StructPatterns).
+		passSeq := 0
+
+		var err2 error
+
+		checkBlock, err2 = cg.applyPatternChecks(checkBlock, nextCaseBlock, scrutType, scrutAlloca, structName, sp, i, &passSeq)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		// Bind free fields (including nested) before the guard so guard expressions
+		// can reference them. Allocas in checkBlock dominate bodyBlock and nextCaseBlock.
+		cg.curScope = newScope(cg.curScope)
+
+		if err2 = cg.bindPatternFree(checkBlock, scrutType, scrutAlloca, structName, sp); err2 != nil {
+			cg.curScope = cg.curScope.parent
+
+			return nil, err2
+		}
+
+		// After field constraints (and bindings): apply guard if present.
+		if c.Guard != nil {
+			guardVal, err2 := cg.genExpr(checkBlock, c.Guard)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, err2
+			}
+
+			checkBlock.NewCondBr(cg.toBool(checkBlock, guardVal), bodyBlock, nextCaseBlock)
+		} else {
+			checkBlock.NewBr(bodyBlock)
+		}
+
+		if resAlloca != nil {
+			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
+			if c.Body != nil && len(c.Body.Stmts) == 1 {
+				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into bodyBlock.
+					cg.curBlock = bodyBlock
+
+					exprVal, err2 := cg.genExpr(bodyBlock, expr)
+					if err2 != nil {
+						cg.curScope = cg.curScope.parent
+
+						return nil, err2
+					}
+
+					// genExpr may have advanced cg.curBlock (e.g. inner match expression).
+					if cg.curBlock != bodyBlock {
+						bodyBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			bodyBlock.NewBr(afterBlock)
+
+			anyFallthrough = true
+		} else {
+			var err2 error
+
+			bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, err2
+			}
+
+			if bodyBlock != nil && bodyBlock.Term == nil {
+				bodyBlock.NewBr(afterBlock)
+
+				anyFallthrough = true
+			}
+		}
+
+		cg.curScope = cg.curScope.parent
+		curCheckBlock = nextCaseBlock
+	}
+
+	// Default or exhaustiveness fallthrough.
+	if s.Default != nil {
+		if resAlloca != nil {
+			if len(s.Default.Stmts) == 1 {
+				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into curCheckBlock.
+					cg.curBlock = curCheckBlock
+
+					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if cg.curBlock != curCheckBlock {
+						curCheckBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						curCheckBlock.NewStore(cg.coerce(curCheckBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			curCheckBlock.NewBr(afterBlock)
+
+			anyFallthrough = true
+		} else {
+			cg.curScope = newScope(cg.curScope)
+
+			var err2 error
+
+			curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
+			cg.curScope = cg.curScope.parent
+
+			if err2 != nil {
+				return nil, err2
+			}
+
+			if curCheckBlock != nil && curCheckBlock.Term == nil {
+				curCheckBlock.NewBr(afterBlock)
+
+				anyFallthrough = true
+			}
+		}
+	} else if cg.isExhaustiveStructMatch(s) {
+		curCheckBlock.NewUnreachable()
+	} else {
+		curCheckBlock.NewBr(afterBlock)
+
+		anyFallthrough = true
+	}
+
+	if !anyFallthrough && resAlloca == nil {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
+
+	return afterBlock, nil
+}
+
 func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
 	if len(s.Cases) == 0 {
 		return false
@@ -2607,8 +2980,19 @@ func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
 }
 
 func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
+	return cg.genMatchWithResult(block, s, nil)
+}
+
+func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
 	if s.IsType {
 		return cg.genMatchType(block, s)
+	}
+
+	// Struct-pattern match: use if-else chain dispatch.
+	for _, c := range s.Cases {
+		if _, ok := c.Pattern.(*ast.StructPattern); ok {
+			return cg.genStructMatch(block, s, resAlloca)
+		}
 	}
 
 	expr, err := cg.genExpr(block, s.Expr)
@@ -2663,6 +3047,47 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 	// A match without a default is still exhaustive when every member of an
 	// enum atom type is covered by an explicit case.
 	anyFallthrough := s.Default == nil && !cg.isExhaustiveEnumMatch(s)
+
+	genCaseBody := func(caseBlock *ir.Block, body *ast.Block) (*ir.Block, error) {
+		if resAlloca != nil {
+			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
+			if body != nil && len(body.Stmts) == 1 {
+				if expr := armExprNode(body.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into caseBlock.
+					cg.curBlock = caseBlock
+
+					exprVal, err2 := cg.genExpr(caseBlock, expr)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if cg.curBlock != caseBlock {
+						caseBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						caseBlock.NewStore(cg.coerce(caseBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			caseBlock.NewBr(afterBlock)
+
+			return nil, nil
+		}
+
+		cg.curScope = newScope(cg.curScope)
+
+		var err2 error
+
+		caseBlock, _, err2 = cg.genStmt(caseBlock, body)
+		cg.curScope = cg.curScope.parent
+
+		return caseBlock, err2
+	}
+
 	for i, c := range s.Cases {
 		var caseBlock *ir.Block
 		if i < len(caseBlocks) {
@@ -2671,15 +3096,14 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 			caseBlock = cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		}
 
-		cg.curScope = newScope(cg.curScope)
-		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
-		cg.curScope = cg.curScope.parent
-
+		caseBlock, err = genCaseBody(caseBlock, c.Body)
 		if err != nil {
 			return nil, err
 		}
 
-		if caseBlock != nil && caseBlock.Term == nil {
+		if resAlloca != nil {
+			anyFallthrough = true
+		} else if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
 
 			anyFallthrough = true
@@ -2688,15 +3112,14 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 
 	// Default.
 	if s.Default != nil {
-		cg.curScope = newScope(cg.curScope)
-		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
-		cg.curScope = cg.curScope.parent
-
+		defaultBlock, err = genCaseBody(defaultBlock, s.Default)
 		if err != nil {
 			return nil, err
 		}
 
-		if defaultBlock != nil && defaultBlock.Term == nil {
+		if resAlloca != nil {
+			anyFallthrough = true
+		} else if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
 
 			anyFallthrough = true
@@ -2761,7 +3184,7 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		defaultBlock = cg.newBlock("match.default")
 	}
 
-	// Build cases: determine tag for each case from VarType.
+	// Build cases: determine tag for each case from VarType or StructPattern.TypeName.
 	var (
 		cases      []*ir.Case
 		caseBlocks []*ir.Block
@@ -2772,8 +3195,17 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		caseBlocks = append(caseBlocks, caseBlock)
 		tag := int64(0)
 
+		// Determine the target type: from VarType or from StructPattern.TypeName.
+		var targetType ast.TypeExpr
+
 		if c.VarType != nil {
-			targetLLVM, err2 := cg.tinTypeToLLVM(c.VarType)
+			targetType = c.VarType
+		} else if sp, ok := c.Pattern.(*ast.StructPattern); ok {
+			targetType = &ast.SimpleType{Name: sp.TypeName}
+		}
+
+		if targetType != nil {
+			targetLLVM, err2 := cg.tinTypeToLLVM(targetType)
 			if err2 == nil {
 				for j, te := range members {
 					lt, err3 := cg.tinTypeToLLVM(te)
@@ -2801,7 +3233,8 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	for i, c := range s.Cases {
 		caseBlock := caseBlocks[i]
 		cg.curScope = newScope(cg.curScope)
-		// Bind payload variable if specified.
+
+		// Bind payload: either VarName+VarType or StructPattern fields.
 		if c.VarName != "" && c.VarType != nil {
 			targetLLVM, err2 := cg.tinTypeToLLVM(c.VarType)
 			if err2 == nil {
@@ -2813,6 +3246,58 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 				caseBlock.NewStore(payloadVal, payloadAlloca)
 				cg.curScope.set(c.VarName, &scopeEntry{val: payloadAlloca, isAlloc: true})
 			}
+		} else if sp, ok := c.Pattern.(*ast.StructPattern); ok {
+			structLLVM, err2 := cg.tinTypeToLLVM(&ast.SimpleType{Name: sp.TypeName})
+			if err2 == nil {
+				payloadGEP := caseBlock.NewGetElementPtr(st, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+				payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(structLLVM))
+				payloadAlloca := caseBlock.NewAlloca(structLLVM)
+				payloadVal := caseBlock.NewLoad(structLLVM, payloadPtr)
+				caseBlock.NewStore(payloadVal, payloadAlloca)
+
+				for _, field := range sp.Fields {
+					if field.IsWild || field.Literal != nil {
+						continue
+					}
+
+					fieldIdx := cg.fieldIndex(sp.TypeName, field.Name)
+					if fieldIdx < 0 {
+						continue
+					}
+
+					var fieldType irtypes.Type
+
+					if st2, ok2 := structLLVM.(*irtypes.StructType); ok2 && fieldIdx < len(st2.Fields) {
+						fieldType = st2.Fields[fieldIdx]
+					} else {
+						fieldType = irtypes.I64
+					}
+
+					gep := caseBlock.NewGetElementPtr(structLLVM, payloadAlloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+					fv := caseBlock.NewLoad(fieldType, gep)
+					fa := caseBlock.NewAlloca(fieldType)
+					caseBlock.NewStore(fv, fa)
+					cg.curScope.set(field.Name, &scopeEntry{val: fa, isAlloc: true})
+				}
+			}
+		}
+
+		// Apply guard if present.
+		if c.Guard != nil {
+			guardVal, err2 := cg.genExpr(caseBlock, c.Guard)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, err2
+			}
+
+			bodyBlock := cg.newBlock(fmt.Sprintf("match.case.%d.body", i))
+			caseBlock.NewCondBr(cg.toBool(caseBlock, guardVal), bodyBlock, afterBlock)
+
+			anyFallthrough = true // guard failure goes to afterBlock
+			caseBlock = bodyBlock
 		}
 
 		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
