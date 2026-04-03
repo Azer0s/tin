@@ -208,6 +208,17 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	}
 
 	cg.structFieldTinTypes[structKey] = fieldTinTypes
+
+	// Record weak fields for this struct.
+	weakSet := make(map[string]bool)
+
+	for _, f := range n.Fields {
+		if f.IsWeak {
+			weakSet[f.Name] = true
+		}
+	}
+
+	cg.structWeakFields[structKey] = weakSet
 	// Assign a compile-time type ID for this struct (used by any boxing /
 	// runtime type checks).  IDs are stable within a compilation unit.
 	if _, exists := cg.structTypeIDs[structKey]; !exists {
@@ -560,6 +571,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			Type:      substituteTypeInTypeExpr(f.Type, subst),
 			Tags:      f.Tags,
 			IsForward: f.IsForward,
+			IsWeak:    f.IsWeak,
 		})
 	}
 

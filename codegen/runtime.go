@@ -315,9 +315,16 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	alloca := block.NewAlloca(st)
 	block.NewStore(val, alloca)
 
+	fieldNames := cg.structFields[structName]
+	weakSet := cg.structWeakFields[structName]
+
 	for i, ft := range fieldTypes {
 		_, isNestedStruct := ft.(*irtypes.StructType)
 		if !isRCTrackedType(ft) && !isNestedStruct {
+			continue
+		}
+		// Weak fields are non-owning: skip retain/release entirely.
+		if i < len(fieldNames) && weakSet[fieldNames[i]] {
 			continue
 		}
 
