@@ -109,6 +109,50 @@ match d:
     return "other"
 ```
 
+### Struct destructuring patterns
+
+A `case` arm can destructure a struct value by naming fields inside `{}`.
+Free names are bound as local variables; a `field: literal` pair constrains
+the field to that exact value; `_` discards a field without binding it.
+
+```rust
+struct point =
+  x i64
+  y i64
+
+fn classify(p point) string =
+  match p:
+    case point{x: 0, y: 0}: return "origin"
+    case point{x: 0, y}:    return "y-axis at {y}"
+    case point{x, y: 0}:    return "x-axis at {x}"
+    case point{x, y}:       return "({x}, {y})"
+```
+
+An optional `if <guard>` after the pattern further filters the arm.
+Guards can reference any fields bound in that arm:
+
+```rust
+match p:
+  case point{x, y} if x == y: return "diagonal"
+  case point{x, y}:           return "other"
+```
+
+A match is considered exhaustive when at least one arm has no literal
+constraints and no guard (a "total" arm that matches every value), or when
+a `default` arm is present. Guards do not count toward exhaustiveness.
+
+### match as an expression
+
+`match` can produce a value when used in an expression context. Each arm
+body is a bare expression (no `return`):
+
+```rust
+let label = match p:
+  case point{x: 0, y: 0}: "origin"
+  case point{x, y} if x == y: "diagonal"
+  case point{x, y}: "other"
+```
+
 ---
 
 ## where - pattern matching on function arguments

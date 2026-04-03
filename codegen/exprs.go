@@ -505,9 +505,129 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 		return entry.val, nil
 
+	case *ast.MatchStmt:
+		return cg.genMatchAsExpr(block, e)
+
 	default:
 		return nil, nil
 	}
+}
+
+// astInferType attempts to determine the LLVM type of a simple AST expression
+// without generating any code. Returns nil when the type cannot be determined.
+func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
+	switch e := node.(type) {
+	case *ast.IntLit:
+		return irtypes.I64
+	case *ast.FloatLit:
+		return irtypes.Double
+	case *ast.BoolLit:
+		return irtypes.I1
+	case *ast.CharLit:
+		return irtypes.I8
+	case *ast.AtomLit:
+		return cg.atomType
+	case *ast.NilLit:
+		return irtypes.I64
+	case *ast.StringLit, *ast.InterpolatedString:
+		return stringFatPtrType()
+	case *ast.Identifier:
+		en, ok := cg.curScope.lookup(e.Name)
+		if !ok {
+			return nil
+		}
+
+		if en.isAlloc {
+			return en.val.Type().(*irtypes.PointerType).ElemType
+		}
+
+		return en.val.Type()
+	case *ast.BinExpr:
+		switch e.Op {
+		case "==", "!=", "<", ">", "<=", ">=", "&&", "||":
+			return irtypes.I1
+		default:
+			return cg.astInferType(e.Left)
+		}
+	case *ast.AsExpr:
+		t, err := cg.tinTypeToLLVM(e.Type)
+		if err != nil {
+			return nil
+		}
+
+		return t
+	case *ast.UnaryExpr:
+		return cg.astInferType(e.Expr)
+	case *ast.FieldAccess:
+		obj := cg.astInferType(e.Expr)
+		if obj == nil {
+			return nil
+		}
+
+		structName := cg.typeNameOf(obj)
+		if structName == "" {
+			return nil
+		}
+
+		idx := cg.fieldIndex(structName, e.Field)
+		if idx < 0 {
+			return nil
+		}
+
+		if st, ok := obj.(*irtypes.StructType); ok && idx < len(st.Fields) {
+			return st.Fields[idx]
+		}
+
+		return nil
+	}
+
+	return nil
+}
+
+// genMatchAsExpr runs a MatchStmt in expression mode: each arm body must be a
+// single expression whose result is stored to a pre-allocated slot. The function
+// updates cg.curBlock to the continuation block (afterBlock) so that callers
+// using the cg.curBlock pattern (genVarDecl, genReturn, etc.) pick up the
+// correct block for subsequent code emission.
+func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Value, error) {
+	// Determine result type from the first case arm.
+	var resType irtypes.Type
+
+	if len(s.Cases) > 0 {
+		c := s.Cases[0]
+		if c.Body != nil && len(c.Body.Stmts) == 1 {
+			if es, ok := c.Body.Stmts[0].(*ast.ExprStmt); ok {
+				resType = cg.astInferType(es.Expr)
+			}
+		}
+	}
+
+	if resType == nil && s.Default != nil {
+		if len(s.Default.Stmts) == 1 {
+			if es, ok := s.Default.Stmts[0].(*ast.ExprStmt); ok {
+				resType = cg.astInferType(es.Expr)
+			}
+		}
+	}
+
+	if resType == nil {
+		return nil, fmt.Errorf("match expression: cannot infer result type; annotate the variable or use 'return match ...'")
+	}
+
+	resAlloca := block.NewAlloca(resType)
+
+	afterBlock, err := cg.genStructMatch(block, s, resAlloca)
+	if err != nil {
+		return nil, err
+	}
+
+	if afterBlock == nil {
+		afterBlock = cg.newBlock("match.after")
+	}
+
+	cg.curBlock = afterBlock
+
+	return afterBlock.NewLoad(resType, resAlloca), nil
 }
 
 func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Value, error) {

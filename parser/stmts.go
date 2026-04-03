@@ -653,33 +653,55 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 
 	mc := ast.MatchCase{Pos: pos}
 
-	// case varName TypeExpr: OR case expr:
-	// Detect "case varName TypeName:" -- either TypeName is a built-in type token
-	// OR it is a user-defined type (plain IDENT) followed immediately by ":".
-	// The second heuristic handles "case _ json_null:" where json_null is a struct.
-	nextIsUserType := p.check(lexer.IDENT) &&
-		p.peekAt(1).Type == lexer.IDENT &&
-		p.peekAt(2).Type == lexer.COLON
-	if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) && !nextIsUserType {
-		// Just an expression pattern
-		mc.Pattern, _ = p.parseExpr()
-	} else if p.check(lexer.IDENT) {
-		mc.VarName = p.advance().Literal
-		if !p.match(lexer.COLON, lexer.NEWLINE) {
-			t, err := p.parseTypeExpr()
-			if err != nil {
-				return ast.MatchCase{}, err
-			}
-
-			mc.VarType = t
-		}
-	} else {
-		var err error
-
-		mc.Pattern, err = p.parseExpr()
+	// Struct pattern: "case TypeName{...}:"
+	if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LBRACE {
+		sp, err := p.parseStructPattern()
 		if err != nil {
 			return ast.MatchCase{}, err
 		}
+
+		mc.Pattern = sp
+	} else {
+		// case varName TypeExpr: OR case expr:
+		// Detect "case varName TypeName:" -- either TypeName is a built-in type token
+		// OR it is a user-defined type (plain IDENT) followed immediately by ":".
+		// The second heuristic handles "case _ json_null:" where json_null is a struct.
+		nextIsUserType := p.check(lexer.IDENT) &&
+			p.peekAt(1).Type == lexer.IDENT &&
+			p.peekAt(2).Type == lexer.COLON
+		if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) && !nextIsUserType {
+			// Just an expression pattern
+			mc.Pattern, _ = p.parseExpr()
+		} else if p.check(lexer.IDENT) {
+			mc.VarName = p.advance().Literal
+			if !p.match(lexer.COLON, lexer.NEWLINE) {
+				t, err := p.parseTypeExpr()
+				if err != nil {
+					return ast.MatchCase{}, err
+				}
+
+				mc.VarType = t
+			}
+		} else {
+			var err error
+
+			mc.Pattern, err = p.parseExpr()
+			if err != nil {
+				return ast.MatchCase{}, err
+			}
+		}
+	}
+
+	// Optional guard: "if guard_expr"
+	if p.check(lexer.KW_IF) {
+		p.advance()
+
+		guard, err := p.parseExpr()
+		if err != nil {
+			return ast.MatchCase{}, err
+		}
+
+		mc.Guard = guard
 	}
 
 	if _, err := p.expect(lexer.COLON); err != nil {
@@ -699,7 +721,7 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 			}
 		}
 	} else if !p.check(lexer.EOF) && !p.check(lexer.KW_CASE) && !p.check(lexer.KW_DEFAULT) {
-		// Inline body: case foo: return bar
+		// Inline body: case foo: return bar  OR  case foo: expr (match expression)
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return ast.MatchCase{}, err
@@ -709,6 +731,58 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 	}
 
 	return mc, nil
+}
+
+func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
+	typeName := p.advance().Literal // consume IDENT (type name)
+	p.advance()                     // consume {
+
+	sp := &ast.StructPattern{TypeName: typeName}
+
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		p.skipWhitespace()
+
+		if p.check(lexer.RBRACE) {
+			break
+		}
+
+		// "_": wildcard field - match but discard
+		if p.check(lexer.IDENT) && p.peek().Literal == "_" {
+			p.advance()
+
+			sp.Fields = append(sp.Fields, ast.StructPatternField{IsWild: true})
+		} else if p.check(lexer.IDENT) {
+			name := p.advance().Literal
+
+			if p.check(lexer.COLON) {
+				p.advance() // consume :
+
+				lit, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+
+				sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: lit})
+			} else {
+				// bare name: bind field to this name
+				sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name})
+			}
+		} else {
+			break
+		}
+
+		p.skipWhitespace()
+
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+
+	return sp, nil
 }
 
 // parseTaggedBlock handles { #tag } { body } when tags haven't been pre-parsed.
