@@ -617,6 +617,29 @@ type StructPattern struct {
 	Fields   []StructPatternField
 }
 
+// ArrayPatternElement is one slot in an array destructuring pattern.
+// IsRest == true means this is a "...name" rest element (always last).
+// IsWild == true means "_" or unnamed rest: match but discard (no binding).
+// Name is the variable to bind (empty or "_" = discard).
+type ArrayPatternElement struct {
+	Name   string
+	IsRest bool // "...xs" or "..." -- must be last element if present
+	IsWild bool // "_" wildcard
+}
+
+// ArrayPattern is used in match case arms to destructure a slice/array value:
+//
+//	case []:          empty array
+//	case [x]:         exactly 1 element, bind to x
+//	case [x, y]:      exactly 2 elements
+//	case [x, ...xs]:  first element + rest slice bound to xs
+//	case [_, _]:      2 elements, wildcards (discard)
+//	case [...xs]:     catch-all -- all elements as xs
+type ArrayPattern struct {
+	base
+	Elems []ArrayPatternElement
+}
+
 type StructLitField struct {
 	Name  string
 	Value Node

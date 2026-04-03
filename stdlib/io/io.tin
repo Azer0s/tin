@@ -160,16 +160,6 @@ fn{#async} read_exact_impl(fd i32, buf *byte, n i64) i64 =
     got = got + r
   return got
 
-// ---------------------------------------------------------------------------
-// TCP sockets - thin wrappers around POSIX socket helpers in runtime/net.c
-// ---------------------------------------------------------------------------
-
-// tcp_listen creates a TCP listen socket on port. Returns fd or negative errno.
-fn tcp_listen(port i32) i32 = extern("_tin_tcp_listen")
-
-// tcp_accept waits for the next connection on listen_fd. Returns fd or negative errno.
-fn tcp_accept(listen_fd i32) i32 = extern("_tin_tcp_accept")
-
 // close closes a file descriptor.
 fn close(fd i32) = extern("_tin_fd_close")
 
@@ -200,7 +190,7 @@ export {
   remove, rename,
   async_read, async_write, sleep,
   write_all, read_exact,
-  tcp_listen, tcp_accept, close,
+  close,
   now_ms, now_us,
   Reader, Writer, AsyncReader, AsyncWriter
 } as io

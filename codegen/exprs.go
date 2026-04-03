@@ -2574,15 +2574,18 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 		resolvedTypeArgs := make([]ast.TypeExpr, len(e.TypeArgs))
 		for i, ta := range e.TypeArgs {
-			// Resolve through type aliases (handles generic function type params like t->i64).
-			lt, err2 := cg.tinTypeToLLVM(ta)
-			if err2 == nil {
-				parts[i] = llvmTypeToTinName(lt)
-			} else {
-				parts[i] = ta.String()
+			// Use typeExprCanonicalKey for naming: correctly distinguishes [byte] from string
+			// (both have the same {i8*,i64} LLVM layout, so llvmTypeToTinName can't tell them apart).
+			parts[i] = cg.typeExprCanonicalKey(ta)
+			// For synthDecl: resolve SimpleType aliases to their actual AST type so that
+			// genTypeDecl substitutes the real type (e.g. ArrayType) into struct fields.
+			resolved := ast.TypeExpr(ta)
+			if st2, ok2 := ta.(*ast.SimpleType); ok2 {
+				if alias, ok3 := cg.typeAliases[st2.Name]; ok3 {
+					resolved = alias
+				}
 			}
-
-			resolvedTypeArgs[i] = &ast.SimpleType{Name: parts[i]}
+			resolvedTypeArgs[i] = resolved
 		}
 
 		concreteName := typeName + "__" + strings.Join(parts, "__")
@@ -4087,13 +4090,10 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 		retTypeExpr = &ast.SimpleType{Name: "Unit"}
 	}
 
-	// Get string name for the concrete type parameter (e.g., "i64", "string").
-	retTypeLLVM, err := cg.tinTypeToLLVM(retTypeExpr)
-	if err != nil {
-		return nil, fmt.Errorf("spawn: cannot determine return type for Future[T]: %w", err)
-	}
-
-	retTypeStr := llvmTypeName(retTypeLLVM)
+	// Get canonical name for the concrete type parameter (e.g., "i64", "string", "[]byte").
+	// Use typeExprCanonicalKey rather than llvmTypeName(tinTypeToLLVM(...)) because
+	// llvmTypeName cannot distinguish [byte] from string (both are {i8*, i64} fat ptrs).
+	retTypeStr := cg.typeExprCanonicalKey(retTypeExpr)
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
 	futureConcreteName := "Future__" + retTypeStr

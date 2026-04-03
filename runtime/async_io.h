@@ -21,3 +21,13 @@ int64_t _tin_io_blocked_val(void);
 
 // Legacy stub -- no-op; kept for source compatibility.
 void _tin_io_poll(int timeout_ms);
+
+// Set fd to non-blocking mode.  Safe to call multiple times.
+void _tin_set_nonblocking(int fd);
+
+// Register fd for read or write events and park the current fiber.
+// Returns INT64_MIN so callers can pass it straight through as the
+// "io blocked" sentinel.  The fiber is unparked by the I/O thread
+// when the fd is ready; the Tin wrapper must then retry the syscall.
+int64_t _tin_async_park_read(int fd);
+int64_t _tin_async_park_write(int fd);
