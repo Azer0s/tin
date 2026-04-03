@@ -127,20 +127,27 @@ func NewArray(elem *Type, length int) *Type {
 func NewFunction(params []*Type, ret *Type, varargs bool) *Type {
 	var sb strings.Builder
 	sb.WriteString("fn(")
+
 	for i, p := range params {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
+
 		sb.WriteString(p.Name)
 	}
+
 	if varargs {
 		sb.WriteString(", ...")
 	}
+
 	sb.WriteString(")")
+
 	if ret != nil && ret.Kind != KindVoid {
 		sb.WriteString(" " + ret.Name)
 	}
+
 	name := sb.String()
+
 	if ret == nil {
 		ret = Void
 	}
@@ -164,21 +171,18 @@ func (t *Type) IsNumeric() bool {
 func (t *Type) ByteSize() int {
 	switch t.Kind {
 	case KindBool:
-
 		return 1
 	case KindInt, KindFloat:
-
 		return t.BitSize / 8
 	case KindPointer:
-
 		return 8
 	case KindString:
-
 		return 16 // ptr(8) + len(8)
 	case KindArray:
 		if t.Len < 0 {
 			return 16 // fat pointer
 		}
+
 		if t.Elem != nil {
 			return t.Elem.ByteSize() * t.Len
 		}
@@ -193,6 +197,7 @@ func (t *Type) ByteSize() int {
 		return total
 	case KindUnion, KindData:
 		m := 0
+
 		for _, v := range t.Variants {
 			if v != nil {
 				if s := v.ByteSize(); s > m {
@@ -203,22 +208,16 @@ func (t *Type) ByteSize() int {
 
 		return m + 4 // + tag i32
 	case KindClosure:
-
 		return 16 // fn_ptr(8) + env_ptr(8)
 	case KindVoid:
-
 		return 0
 	case KindFunction:
-
 		return 8 // function pointer
 	case KindEnum:
-
 		return 4 // underlying integer (i32 by default)
 	case KindAtom:
-
 		return 8 // { i32 code, i8* str } rounded to pointer size
 	case KindGeneric:
-
 		return 8 // unresolved generic; caller should not reach here
 	}
 
@@ -239,6 +238,7 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 	if t == nil {
 		return nil
 	}
+
 	if t.Kind == KindGeneric {
 		if concrete, ok := mapping[t.Name]; ok {
 			return concrete
@@ -249,10 +249,8 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 	// For compound types, recursively substitute
 	switch t.Kind {
 	case KindArray:
-
 		return NewArray(t.Elem.Substitute(mapping), t.Len)
 	case KindPointer:
-
 		return NewPointer(t.PointsTo.Substitute(mapping), t.ConstPtr)
 	case KindFunction:
 		params := make([]*Type, len(t.Params))
@@ -264,7 +262,6 @@ func (t *Type) Substitute(mapping map[string]*Type) *Type {
 	case KindVoid, KindBool, KindInt, KindFloat, KindString,
 		KindClosure, KindStruct, KindUnion, KindData,
 		KindEnum, KindGeneric, KindAtom:
-
 		return t
 	}
 

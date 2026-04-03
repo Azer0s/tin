@@ -33,43 +33,55 @@ func (p *Parser) parsePipe() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	indentConsumed := 0
+
 	for {
 		if p.check(lexer.PIPE) {
 			p.advance()
 		} else if p.check(lexer.NEWLINE) {
 			saved := p.pos
 			p.advance() // consume NEWLINE
+
 			consumedIndent := false
+
 			if p.check(lexer.INDENT) {
 				p.advance()
+
 				indentConsumed++
 				consumedIndent = true
 			}
+
 			if !p.check(lexer.PIPE) {
 				p.pos = saved
+
 				if consumedIndent {
 					indentConsumed--
 				}
 
 				break
 			}
+
 			p.advance() // consume PIPE
 		} else {
 			break
 		}
+
 		right, err2 := p.parseTernary()
 		if err2 != nil {
 			return nil, err2
 		}
+
 		left = &ast.PipeExpr{Left: left, Right: right}
 	}
 	// Consume matching DEDENT(s) for any INDENT consumed during pipe continuation.
 	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
 		p.advance()
 	}
+
 	for indentConsumed > 0 && p.check(lexer.DEDENT) {
 		p.advance()
+
 		indentConsumed--
 	}
 
@@ -81,8 +93,10 @@ func (p *Parser) parseRange() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if p.check(lexer.RANGE) {
 		p.advance()
+
 		right, err2 := p.parseTernary()
 		if err2 != nil {
 			return nil, err2
@@ -99,26 +113,35 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if p.check(lexer.QUESTION) {
 		p.advance()
 		// Allow then-branch on next line; track consumed INDENTs to balance DEDENTs.
 		indentConsumed := 0
+
 		if p.check(lexer.NEWLINE) {
 			p.advance()
+
 			if p.check(lexer.INDENT) {
 				p.advance()
+
 				indentConsumed++
 			}
 		}
+
 		then, err2 := p.parseOr()
 		if err2 != nil {
 			return nil, err2
 		}
+
 		p.skipWhitespace() // allow : on next (same-indent) line
+
 		if _, err2 := p.expect(lexer.COLON); err2 != nil {
 			return nil, err2
 		}
+
 		p.skipWhitespace() // allow else-branch on next line
+
 		els, err2 := p.parseOr()
 		if err2 != nil {
 			return nil, err2
@@ -127,8 +150,10 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 		if indentConsumed > 0 && p.check(lexer.NEWLINE) {
 			p.advance()
 		}
+
 		for indentConsumed > 0 && p.check(lexer.DEDENT) {
 			p.advance()
+
 			indentConsumed--
 		}
 
@@ -175,7 +200,9 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	indentConsumed := 0
+
 	for {
 		if p.check(lexer.PLUS) || p.check(lexer.MINUS) || p.check(lexer.INC) {
 			// ++ is both a binary concat operator and a postfix increment.
@@ -188,9 +215,12 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 		} else if p.check(lexer.NEWLINE) {
 			saved := p.pos
 			p.advance() // consume NEWLINE
+
 			if p.check(lexer.INDENT) {
 				p.advance()
+
 				indentConsumed++
+
 				if !p.check(lexer.PLUS) && !p.check(lexer.MINUS) {
 					p.pos = saved
 					indentConsumed--
@@ -209,19 +239,24 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 		} else {
 			break
 		}
+
 		op := p.advance().Literal
+
 		right, err2 := p.parseMultiplicative()
 		if err2 != nil {
 			return nil, err2
 		}
+
 		left = &ast.BinExpr{Left: left, Op: op, Right: right}
 	}
 	// Consume matching DEDENT(s) for any INDENT consumed during additive continuation.
 	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
 		p.advance()
 	}
+
 	for indentConsumed > 0 && p.check(lexer.DEDENT) {
 		p.advance()
+
 		indentConsumed--
 	}
 
@@ -238,10 +273,8 @@ func isExprStart(tok lexer.Token) bool {
 		lexer.KW_TYPEOF, lexer.KW_TRAITOF, lexer.KW_FIELDNAMES, lexer.KW_FIELDTYPES,
 		lexer.KW_FIELDTAG, lexer.KW_GETFIELD, lexer.KW_SETFIELD, lexer.KW_ISRC,
 		lexer.KW_NIL:
-
 		return true
 	default:
-
 		return isTypeKeyword(tok)
 	}
 }
@@ -255,12 +288,15 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 	if err != nil {
 		return nil, err
 	}
+
 	for p.match(ops...) {
 		op := p.advance().Literal
+
 		right, err2 := sub()
 		if err2 != nil {
 			return nil, err2
 		}
+
 		left = &ast.BinExpr{Left: left, Op: op, Right: right}
 	}
 
@@ -270,6 +306,7 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.match(lexer.NOT, lexer.MINUS, lexer.TILDE) {
 		op := p.advance().Literal
+
 		expr, err := p.parseUnary()
 		if err != nil {
 			return nil, err
@@ -280,6 +317,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	// Dereference: *expr
 	if p.check(lexer.STAR) {
 		p.advance()
+
 		expr, err := p.parseUnary()
 		if err != nil {
 			return nil, err
@@ -290,6 +328,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	// Address-of: &expr
 	if p.check(lexer.AMP) {
 		p.advance()
+
 		expr, err := p.parseUnary()
 		if err != nil {
 			return nil, err
@@ -308,19 +347,25 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 	}
 
 	indentConsumed := 0
+
 	for {
 		// Allow NEWLINE + optional INDENT before DOT or ARROW (method chain continuation).
 		if p.check(lexer.NEWLINE) {
 			saved := p.pos
 			p.advance() // consume NEWLINE
+
 			consumedIndent := false
+
 			if p.check(lexer.INDENT) {
 				p.advance()
+
 				indentConsumed++
 				consumedIndent = true
 			}
+
 			if !p.check(lexer.DOT) && !p.check(lexer.ARROW) {
 				p.pos = saved
+
 				if consumedIndent {
 					indentConsumed--
 				}
@@ -329,32 +374,40 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			}
 			// Fall through: the loop body will consume DOT/ARROW below.
 		}
+
 		switch p.peek().Type {
 		case lexer.DOT:
 			p.advance()
 			// .(Type) or .(type)
 			if p.check(lexer.LPAREN) {
 				p.advance()
+
 				if p.check(lexer.KW_TYPE) || p.peek().Literal == "type" {
 					p.advance()
+
 					if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
 						return nil, err2
 					}
+
 					expr = &ast.TypeAssertExpr{Expr: expr, IsType: true}
 
 					continue
 				}
+
 				typ, err2 := p.parseTypeExpr()
 				if err2 != nil {
 					return nil, err2
 				}
+
 				if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
 					return nil, err2
 				}
+
 				expr = &ast.TypeAssertExpr{Expr: expr, Type: typ}
 
 				continue
 			}
+
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
 				return nil, err2
@@ -365,6 +418,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				if err3 != nil {
 					return nil, err3
 				}
+
 				expr = &ast.CallExpr{
 					Func: &ast.FieldAccess{Expr: expr, Field: field.Literal},
 					Args: args,
@@ -375,15 +429,18 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.ARROW:
 			p.advance()
+
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
 				return nil, err2
 			}
+
 			if p.check(lexer.LPAREN) {
 				args, err3 := p.parseArgList()
 				if err3 != nil {
 					return nil, err3
 				}
+
 				expr = &ast.CallExpr{
 					Func: &ast.FieldAccess{Expr: expr, Field: field.Literal, IsPtr: true},
 					Args: args,
@@ -394,6 +451,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.DCOLON:
 			p.advance()
+
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
 				return nil, err2
@@ -401,20 +459,24 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			// Build scope access from existing expr + new segment
 			if sa, ok := expr.(*ast.ScopeAccess); ok {
 				sa.Path = append(sa.Path, field.Literal)
+
 				if p.check(lexer.LPAREN) {
 					args, err3 := p.parseArgList()
 					if err3 != nil {
 						return nil, err3
 					}
+
 					expr = &ast.CallExpr{Func: sa, Args: args}
 				}
 			} else if id, ok := expr.(*ast.Identifier); ok {
 				sa := &ast.ScopeAccess{Path: []string{id.Name, field.Literal}}
+
 				if p.check(lexer.LPAREN) {
 					args, err3 := p.parseArgList()
 					if err3 != nil {
 						return nil, err3
 					}
+
 					expr = &ast.CallExpr{Func: sa, Args: args}
 				} else {
 					expr = sa
@@ -426,12 +488,15 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					if typeArgID, ok4 := idx.Index.(*ast.Identifier); ok4 {
 						typeName = idExpr.Name + "[" + typeArgID.Name + "]"
 					}
+
 					sa := &ast.ScopeAccess{Path: []string{typeName, field.Literal}}
+
 					if p.check(lexer.LPAREN) {
 						args, err3 := p.parseArgList()
 						if err3 != nil {
 							return nil, err3
 						}
+
 						expr = &ast.CallExpr{Func: sa, Args: args}
 					} else {
 						expr = sa
@@ -443,31 +508,40 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			p.advance() // consume [
 			// Detect slice syntax: arr[:], arr[n:], arr[:m], arr[n:m]
 			var start ast.Node
+
 			if !p.check(lexer.COLON) && !p.check(lexer.RBRACKET) {
 				var err3 error
+
 				start, err3 = p.parseExpr()
 				if err3 != nil {
 					return nil, err3
 				}
 			}
+
 			if p.check(lexer.COLON) {
 				p.advance() // consume :
+
 				var end ast.Node
+
 				if !p.check(lexer.RBRACKET) {
 					var err3 error
+
 					end, err3 = p.parseExpr()
 					if err3 != nil {
 						return nil, err3
 					}
 				}
+
 				if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
 					return nil, err2
 				}
+
 				expr = &ast.SliceExpr{Expr: expr, Start: start, End: end}
 			} else {
 				if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
 					return nil, err2
 				}
+
 				expr = &ast.IndexExpr{Expr: expr, Index: start}
 			}
 
@@ -476,14 +550,18 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			if p.peekAt(1).Type != lexer.LPAREN {
 				return expr, nil
 			}
+
 			p.advance() // consume !
+
 			if id, ok := expr.(*ast.Identifier); ok {
 				id.Name += "!"
 			}
+
 			args, err2 := p.parseArgList()
 			if err2 != nil {
 				return nil, err2
 			}
+
 			expr = &ast.CallExpr{Func: expr, Args: args}
 
 		case lexer.LPAREN:
@@ -492,29 +570,36 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			if err2 != nil {
 				return nil, err2
 			}
+
 			expr = &ast.CallExpr{Func: expr, Args: args}
 
 		case lexer.KW_AS:
 			p.advance()
+
 			typ, err2 := p.parseTypeExpr()
 			if err2 != nil {
 				return nil, err2
 			}
+
 			expr = &ast.AsExpr{Expr: expr, Type: typ}
 
 		case lexer.KW_IS:
 			p.advance()
+
 			isExpr := &ast.IsExpr{Expr: expr}
 			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
 				isExpr.VarName = p.advance().Literal
 			}
+
 			if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
 				var err2 error
+
 				isExpr.Type, err2 = p.parseTypeExpr()
 				if err2 != nil {
 					return nil, err2
 				}
 			}
+
 			expr = isExpr
 
 		default:
@@ -522,8 +607,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			if indentConsumed > 0 && p.check(lexer.NEWLINE) {
 				p.advance()
 			}
+
 			for indentConsumed > 0 && p.check(lexer.DEDENT) {
 				p.advance()
+
 				indentConsumed--
 			}
 
@@ -534,8 +621,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
 		p.advance()
 	}
+
 	for indentConsumed > 0 && p.check(lexer.DEDENT) {
 		p.advance()
+
 		indentConsumed--
 	}
 
@@ -546,20 +635,27 @@ func (p *Parser) parseArgList() ([]ast.Node, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
+
 	p.skipWhitespace()
+
 	var args []ast.Node
+
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		arg, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		args = append(args, arg)
+
 		p.skipWhitespace()
+
 		if p.check(lexer.COMMA) {
 			p.advance()
 			p.skipWhitespace()
 		}
 	}
+
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
@@ -575,12 +671,14 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	switch tok.Type {
 	case lexer.INT_LIT:
 		p.advance()
+
 		v, _ := strconv.ParseInt(tok.Literal, 0, 64)
 
 		return &ast.IntLit{Value: v}, nil
 
 	case lexer.FLOAT_LIT:
 		p.advance()
+
 		v, _ := strconv.ParseFloat(tok.Literal, 64)
 
 		return &ast.FloatLit{Value: v}, nil
@@ -599,10 +697,12 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		// @'X' -> byte value of character X  (i8 CharLit)
 		// @N   -> integer N                  (i64 IntLit)
 		p.advance() // consume @
+
 		next := p.peek()
 		switch next.Type {
 		case lexer.CHAR_LIT:
 			p.advance()
+
 			var b byte
 			if len(next.Literal) > 0 {
 				b = next.Literal[0]
@@ -611,11 +711,11 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			return &ast.CharLit{Value: b}, nil
 		case lexer.INT_LIT:
 			p.advance()
+
 			v, _ := strconv.ParseInt(next.Literal, 0, 64)
 
 			return &ast.IntLit{Value: v}, nil
 		default:
-
 			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
 				next.Line, next.Literal)
 		}
@@ -632,18 +732,20 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_FN:
 		// Lambda expression
-
 		return p.parseLambda()
 
 	case lexer.KW_SIZEOF:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		typ, err := p.parseTypeExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -652,13 +754,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_ISRC:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		typ, err := p.parseTypeExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -667,13 +772,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_TYPEOF:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -682,13 +790,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_TRAITOF:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -697,13 +808,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_FIELDNAMES:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -712,13 +826,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_FIELDTYPES:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -727,20 +844,25 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_FIELDTAG:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		expr, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.COMMA); err != nil {
 			return nil, err
 		}
+
 		field, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -749,20 +871,25 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_GETFIELD:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		expr, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.COMMA); err != nil {
 			return nil, err
 		}
+
 		field, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -771,27 +898,34 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_SETFIELD:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		expr, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.COMMA); err != nil {
 			return nil, err
 		}
+
 		field, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.COMMA); err != nil {
 			return nil, err
 		}
+
 		val, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -800,13 +934,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_ADDR:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -815,6 +952,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_DEFAULT:
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
@@ -824,16 +962,19 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
 
 			return &ast.DefaultExpr{OfExpr: inner}, nil
 		}
+
 		typ, err := p.parseTypeExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -847,26 +988,31 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		// must be an expression whose value is returned.
 		if p.check(lexer.KW_LET) {
 			var stmts []ast.Node
+
 			for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 				if p.check(lexer.SEMI) || p.check(lexer.NEWLINE) {
 					p.advance()
 
 					continue
 				}
+
 				stmt, err := p.parseStatement()
 				if err != nil {
 					return nil, err
 				}
+
 				if stmt != nil {
 					stmts = append(stmts, stmt)
 				}
 			}
+
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
 
 			return &ast.Block{Stmts: stmts}, nil
 		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
@@ -874,20 +1020,25 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		// Tuple literal: (e1, e2, ...) with 2+ elements
 		if p.check(lexer.COMMA) {
 			elems := []ast.Node{inner}
+
 			for p.check(lexer.COMMA) {
 				p.advance()
+
 				e, err := p.parseExpr()
 				if err != nil {
 					return nil, err
 				}
+
 				elems = append(elems, e)
 			}
+
 			if _, err := p.expect(lexer.RPAREN); err != nil {
 				return nil, err
 			}
 
 			return &ast.TupleLit{Elems: elems}, nil
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -895,7 +1046,6 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		return inner, nil
 
 	case lexer.LBRACKET:
-
 		return p.parseArrayLit()
 
 	case lexer.IDENT:
@@ -908,12 +1058,14 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if p.check(lexer.LBRACKET) {
 			// Speculatively parse [TypeArg] and check for {
 			saved := p.pos
+
 			typeArgs, err2 := p.parseTypeArgList()
 			if err2 == nil && p.check(lexer.LBRACE) {
 				lit, err3 := p.parseStructLit(name)
 				if err3 != nil {
 					return nil, err3
 				}
+
 				if sl, ok := lit.(*ast.StructLit); ok {
 					sl.TypeArgs = typeArgs
 				}
@@ -928,15 +1080,14 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.KW_LET:
 		// inline let (for ternary macro usage)
-
 		return p.parseVarDecl()
 
 	case lexer.KW_SPAWN:
-
 		return p.parseSpawnExpr()
 
 	case lexer.KW_AWAIT:
 		p.advance()
+
 		fut, err := p.parseExpr()
 		if err != nil {
 			return nil, err
@@ -970,11 +1121,14 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 	if _, err := p.expect(lexer.KW_FN); err != nil {
 		return nil, err
 	}
+
 	typeParams, _ := p.parseTypeParams()
+
 	params, err := p.parseParams()
 	if err != nil {
 		return nil, err
 	}
+
 	var retType ast.TypeExpr
 	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.COMMA, lexer.RPAREN) {
 		retType, err = p.parseTypeExpr()
@@ -982,9 +1136,12 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 			return nil, err
 		}
 	}
+
 	var body ast.Node
+
 	if p.check(lexer.ASSIGN) {
 		p.advance()
+
 		body, err = p.parseFuncBody()
 		if err != nil {
 			return nil, err
@@ -997,18 +1154,23 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 func (p *Parser) parseArrayLit() (ast.Node, error) {
 	p.advance() // consume [
 	p.skipWhitespace()
+
 	var elems []ast.Node
+
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
 		elem, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
 		elems = append(elems, elem)
+
 		if p.check(lexer.COMMA) {
 			p.advance()
 			p.skipWhitespace()
 		}
 	}
+
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
 	}
@@ -1019,29 +1181,36 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 	p.advance() // consume {
 	p.skipWhitespace()
+
 	lit := &ast.StructLit{TypeName: typeName}
+
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		// Named: "name: value" or positional: "value"
 		if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.COLON {
 			field := p.advance().Literal
 			p.advance() // :
+
 			val, err := p.parseExpr()
 			if err != nil {
 				return nil, err
 			}
+
 			lit.Fields = append(lit.Fields, ast.StructLitField{Name: field, Value: val})
 		} else {
 			val, err := p.parseExpr()
 			if err != nil {
 				return nil, err
 			}
+
 			lit.Positional = append(lit.Positional, val)
 		}
+
 		if p.check(lexer.COMMA) {
 			p.advance()
 			p.skipWhitespace()
 		}
 	}
+
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}

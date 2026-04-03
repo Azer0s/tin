@@ -388,6 +388,7 @@ func (cg *CodeGen) popBreakTarget() bool {
 	if len(cg.breakStack) == 0 {
 		return false
 	}
+
 	used := cg.breakUsedStack[len(cg.breakUsedStack)-1]
 	cg.breakStack = cg.breakStack[:len(cg.breakStack)-1]
 	cg.breakUsedStack = cg.breakUsedStack[:len(cg.breakUsedStack)-1]
@@ -473,6 +474,7 @@ func newModuleWithTriple() *ir.Module {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasPrefix(line, `target triple = "`) {
 				triple := strings.TrimPrefix(line, `target triple = "`)
+
 				triple = strings.TrimSuffix(triple, `"`)
 				if triple != "" {
 					mod.TargetTriple = triple
@@ -562,14 +564,17 @@ func New(filename string) *CodeGen {
 // for arities 2-10. Fields are named alphabetically: a, b, c, ...
 func (cg *CodeGen) initBuiltinTupleTemplates() {
 	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+
 	cg.genericStructsByArity["Tuple"] = make(map[int]*ast.StructDecl)
 	for arity := 2; arity <= 10; arity++ {
 		typeParams := make([]string, arity)
 		copy(typeParams, letters[:arity])
+
 		fields := make([]ast.StructField, arity)
 		for i, name := range typeParams {
 			fields[i] = ast.StructField{Name: name, Type: &ast.SimpleType{Name: name}}
 		}
+
 		cg.genericStructsByArity["Tuple"][arity] = &ast.StructDecl{
 			Name:       "Tuple",
 			TypeParams: typeParams,
@@ -638,9 +643,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				cg.exports[name] = exp.AsName
 			}
 		}
+
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.Constraints) > 0 {
 			cg.constrainedFuncs[fd.Name] = fd
 		}
+
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.TypeParams) > 0 {
 			cg.genericFuncs[fd.Name] = fd
 		}
@@ -670,6 +677,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if cg.externIRNames == nil {
 		cg.externIRNames = map[string]bool{}
 	}
+
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.IsExtern != "" {
 			cg.externIRNames[fd.IsExtern] = true
@@ -713,12 +721,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				return nil, err
 			}
 		}
+
 		if sd, ok := node.(*ast.StructDecl); ok {
 			// Skip method predeclaration for generic struct templates - methods
 			// will be compiled on demand when the concrete type is instantiated.
 			if len(sd.TypeParams) > 0 {
 				continue
 			}
+
 			aug := cg.augmentStructFromTraits(sd)
 			for _, m := range aug.Methods {
 				if err := cg.predeclareMethod(aug.Name, m); err != nil {
@@ -734,6 +744,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if err := cg.checkAllPureFuncs(); err != nil {
 		return nil, err
 	}
+
 	if err := cg.checkAllNoRecurseFuncs(); err != nil {
 		return nil, err
 	}
@@ -743,6 +754,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.Body != nil {
 			cg.buildCallGraphEntry(fd.Name, fd.Body)
 		}
+
 		if sd, ok := node.(*ast.StructDecl); ok {
 			for _, m := range sd.Methods {
 				key := methodScopeName(sd.Name, m)
@@ -750,6 +762,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		}
 	}
+
 	cg.colorCallGraph()
 
 	// Pre-declare $coro variants for all colored functions so that mutual
@@ -762,6 +775,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if fd.Name == "main" && !fd.IsStatic {
 				coroKey = "_tin_user_main"
 			}
+
 			if cg.coroCallable[coroKey] {
 				if err := cg.predeclareCoroVariant(fd, coroKey, false); err != nil {
 					return nil, err
@@ -772,6 +786,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// Third pass: generate full function bodies and other declarations.
 	var topStmts []ast.Node
+
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.FuncDecl:
@@ -823,7 +838,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if err := cg.genTestRunner(topStmts); err != nil {
 			return nil, err
 		}
+
 		cg.emitAtomTable()
+
 		if err := cg.writeModuleFiles(prog); err != nil {
 			return nil, err
 		}
@@ -835,6 +852,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if len(topStmts) > 0 {
 		// Check if main is already defined.
 		hasmain := false
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasmain = true
@@ -842,6 +860,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				break
 			}
 		}
+
 		if !hasmain {
 			if err := cg.genImplicitMain(topStmts); err != nil {
 				return nil, err
@@ -853,6 +872,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// `_tin_user_main`.  Generate a proper `i32 @main()` wrapper that
 	// calls it and returns 0 so the process exits cleanly.
 	var userMainFn *ir.Func
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "_tin_user_main" {
 			userMainFn = f
@@ -860,9 +880,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			break
 		}
 	}
+
 	if userMainFn != nil {
 		// Only add the wrapper if there is no `i32 @main` already.
 		hasMain := false
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasMain = true
@@ -870,10 +892,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				break
 			}
 		}
+
 		if !hasMain {
 			// Check whether the user wrote fn{#async} main() - if so we have a
 			// $coro ramp and main should run as the first fiber.
 			var userMainCoroFn *ir.Func
+
 			for _, f := range cg.mod.Funcs {
 				if f.Name() == "_tin_user_main$coro" {
 					userMainCoroFn = f
@@ -897,6 +921,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Emit runtime initializers for top-level var declarations before
 			// any fiber runs so that globals are valid from the start.
 			var err error
+
 			wb, err = cg.emitTopLevelVarInits(wb)
 			if err != nil {
 				return nil, err
@@ -912,10 +937,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				cg.ensureFiberRuntime()
 				syncAwaitFn := cg.ensureExternDecl("_tin_fiber_sync_await", irtypes.Void,
 					[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
+
 				var coroArgs []value.Value
 				for _, p := range userMainCoroFn.Params {
 					coroArgs = append(coroArgs, constant.NewZeroInitializer(p.Type()))
 				}
+
 				coroHdl := wb.NewCall(userMainCoroFn, coroArgs...)
 				mainPid := wb.NewCall(cg.fiberSpawnFn, coroHdl)
 				wb.NewCall(syncAwaitFn, mainPid)
@@ -928,6 +955,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				for _, p := range userMainFn.Params {
 					callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
 				}
+
 				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
 				if retIsVoid {
 					wb.NewCall(userMainFn, callArgs...)
@@ -947,6 +975,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 							retVal = constant.NewInt(irtypes.I32, 0)
 						}
 					}
+
 					wb.NewRet(retVal)
 				}
 			}
@@ -967,6 +996,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// If no main function was generated (e.g. export-only module), emit a
 	// trivial no-op main so the binary links successfully.
 	hasMain := false
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "main" {
 			hasMain = true
@@ -974,6 +1004,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			break
 		}
 	}
+
 	if !hasMain {
 		wf := cg.mod.NewFunc("main", irtypes.I32)
 		wb := wf.NewBlock("entry")

@@ -45,21 +45,27 @@ func (p *Parser) collectNoParensMacros() {
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.LBRACE {
 			continue
 		}
+
 		j++ // skip {
 		hasNoParens := false
+
 		for j < len(p.tokens) && p.tokens[j].Type != lexer.RBRACE {
 			if p.tokens[j].Type == lexer.CONTROL_TAG && p.tokens[j].Literal == "no_parens" {
 				hasNoParens = true
 			}
+
 			j++
 		}
+
 		if !hasNoParens || j >= len(p.tokens) {
 			continue
 		}
+
 		j++ // skip }
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.IDENT {
 			continue
 		}
+
 		macroName := p.tokens[j].Literal
 		j++
 		// Optional ! suffix on macro name
@@ -70,15 +76,18 @@ func (p *Parser) collectNoParensMacros() {
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.LPAREN {
 			continue
 		}
+
 		j++
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.RPAREN {
 			continue
 		}
+
 		j++
 		// = NEWLINE INDENT return BACKTICK_LIT
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.ASSIGN {
 			continue
 		}
+
 		j++
 		// skip newlines/indent
 		for j < len(p.tokens) && (p.tokens[j].Type == lexer.NEWLINE || p.tokens[j].Type == lexer.INDENT) {
@@ -89,9 +98,11 @@ func (p *Parser) collectNoParensMacros() {
 		if j < len(p.tokens) && p.tokens[j].Type == lexer.KW_RETURN {
 			j++
 		}
+
 		if j >= len(p.tokens) || p.tokens[j].Type != lexer.BACKTICK_LIT {
 			continue
 		}
+
 		expansion := p.tokens[j].Literal
 		p.noParensMacros[macroName] = expansion
 	}
@@ -184,15 +195,19 @@ func (p *Parser) errorf(f string, a ...any) error {
 // Parse builds and returns the complete AST for the token stream
 func (p *Parser) Parse() (*ast.Program, error) {
 	prog := &ast.Program{}
+
 	p.skipSemisAndNewlines()
+
 	for !p.check(lexer.EOF) {
 		node, err := p.parseTopLevel()
 		if err != nil {
 			return nil, err
 		}
+
 		if node != nil {
 			prog.Stmts = append(prog.Stmts, node)
 		}
+
 		p.skipSemisAndNewlines()
 	}
 
@@ -221,34 +236,24 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 
 	switch p.peek().Type {
 	case lexer.KW_FN:
-
 		return p.parseFuncDecl(tags, false)
 	case lexer.KW_MACRO:
-
 		return p.parseMacroDecl(tags)
 	case lexer.KW_STRUCT:
-
 		return p.parseStructDecl(tags)
 	case lexer.KW_TRAIT:
-
 		return p.parseTraitDecl()
 	case lexer.KW_TYPE:
-
 		return p.parseTypeDecl()
 	case lexer.KW_ENUM:
-
 		return p.parseEnumDecl()
 	case lexer.KW_UNION:
-
 		return p.parseUnionDecl()
 	case lexer.KW_USE:
-
 		return p.parseUseDecl()
 	case lexer.KW_EXPORT:
-
 		return p.parseExportDecl()
 	case lexer.KW_TEST:
-
 		return p.parseTestDecl()
 	case lexer.KW_STATIC:
 		p.advance()
@@ -264,6 +269,7 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 		// before the rest of the declaration.
 		if expansion, ok := p.noParensMacros[p.peek().Literal]; ok {
 			p.advance() // consume macro name
+
 			expToks, err := lexer.New(expansion).Tokenize()
 			if err != nil {
 				return nil, fmt.Errorf("no_parens macro expansion tokenize error: %w", err)
@@ -283,7 +289,6 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 
 		return p.parseStatement()
 	default:
-
 		return p.parseStatement()
 	}
 }
@@ -296,6 +301,7 @@ func (p *Parser) parseTags() []string {
 		// Peek ahead to see if this is a {#tag} block
 		saved := p.pos
 		p.advance() // consume {
+
 		if p.check(lexer.CONTROL_TAG) {
 			for p.check(lexer.CONTROL_TAG) {
 				tags = append(tags, p.advance().Literal)
@@ -305,6 +311,7 @@ func (p *Parser) parseTags() []string {
 					p.advance() // qualifier ident
 				}
 			}
+
 			if p.check(lexer.RBRACE) {
 				p.advance()
 			}

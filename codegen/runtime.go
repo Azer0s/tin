@@ -22,6 +22,7 @@ func (cg *CodeGen) ensurePrintf() *ir.Func {
 	if cg.printfFn != nil {
 		return cg.printfFn
 	}
+
 	cg.printfFn = cg.ensureExternDecl("printf", irtypes.I32,
 		[]*ir.Param{ir.NewParam("format", irtypes.I8Ptr)}, true)
 
@@ -33,6 +34,7 @@ func (cg *CodeGen) ensureMalloc() *ir.Func {
 	if cg.mallocFn != nil {
 		return cg.mallocFn
 	}
+
 	cg.mallocFn = cg.ensureExternDecl("malloc", irtypes.I8Ptr,
 		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
 
@@ -44,6 +46,7 @@ func (cg *CodeGen) ensureFree() *ir.Func {
 	if cg.freeFn != nil {
 		return cg.freeFn
 	}
+
 	cg.freeFn = cg.ensureExternDecl("free", irtypes.Void,
 		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
 
@@ -57,6 +60,7 @@ func (cg *CodeGen) ensureRCAlloc() *ir.Func {
 	if cg.rcAllocFn != nil {
 		return cg.rcAllocFn
 	}
+
 	cg.rcAllocFn = cg.ensureExternDecl("_tin_rc_alloc", irtypes.I8Ptr,
 		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
 
@@ -68,6 +72,7 @@ func (cg *CodeGen) ensureRetain() *ir.Func {
 	if cg.retainFn != nil {
 		return cg.retainFn
 	}
+
 	cg.retainFn = cg.ensureExternDecl("_tin_retain", irtypes.Void,
 		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
 
@@ -79,6 +84,7 @@ func (cg *CodeGen) ensureRelease() *ir.Func {
 	if cg.releaseFn != nil {
 		return cg.releaseFn
 	}
+
 	cg.releaseFn = cg.ensureExternDecl("_tin_release", irtypes.Void,
 		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
 
@@ -91,6 +97,7 @@ func (cg *CodeGen) ensureReleaseFatElemArray() *ir.Func {
 	if cg.releaseFatElemArrayFn != nil {
 		return cg.releaseFatElemArrayFn
 	}
+
 	cg.releaseFatElemArrayFn = cg.ensureExternDecl("_tin_release_fat_elem_array", irtypes.Void,
 		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
 
@@ -103,6 +110,7 @@ func (cg *CodeGen) ensureReleaseAnyElemArray() *ir.Func {
 	if cg.releaseAnyElemArrayFn != nil {
 		return cg.releaseAnyElemArrayFn
 	}
+
 	cg.releaseAnyElemArrayFn = cg.ensureExternDecl("_tin_release_any_elem_array", irtypes.Void,
 		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
 
@@ -115,6 +123,7 @@ func (cg *CodeGen) ensureReleaseFnElemArray() *ir.Func {
 	if cg.releaseFnElemArrayFn != nil {
 		return cg.releaseFnElemArrayFn
 	}
+
 	cg.releaseFnElemArrayFn = cg.ensureExternDecl("_tin_release_fn_elem_array", irtypes.Void,
 		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
 
@@ -128,6 +137,7 @@ func (cg *CodeGen) ensureReleaseClosure() *ir.Func {
 	if cg.releaseClosureFn != nil {
 		return cg.releaseClosureFn
 	}
+
 	cg.releaseClosureFn = cg.ensureExternDecl("_tin_release_closure", irtypes.Void,
 		[]*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}, false)
 
@@ -141,6 +151,7 @@ func (cg *CodeGen) ensureReleaseAny() *ir.Func {
 	if cg.releaseAnyFn != nil {
 		return cg.releaseAnyFn
 	}
+
 	cg.releaseAnyFn = cg.ensureExternDecl("_tin_release_any", irtypes.Void,
 		[]*ir.Param{ir.NewParam("tag", irtypes.I32), ir.NewParam("data", irtypes.I8Ptr)}, false)
 
@@ -163,16 +174,13 @@ func isCopyExpr(node ast.Node) bool {
 	switch n := node.(type) {
 	case *ast.Identifier:
 		// Named variable - its scope entry owns the RC reference.
-
 		return true
 	case *ast.FieldAccess:
 		// Borrowing a field from a struct - the struct retains ownership.
 		// Do not release after use; the struct's scope release handles it.
-
 		return true
 	case *ast.IndexExpr:
 		// Borrowing an element from an array - the array retains ownership.
-
 		return true
 	case *ast.AsExpr:
 		// Casting to `any` boxes the source value into a fresh _tin_rc_alloc.
@@ -213,12 +221,15 @@ func isTemporaryProducer(node ast.Node) bool {
 	if _, ok := node.(*ast.CallExpr); ok {
 		return true
 	}
+
 	if be, ok := node.(*ast.BinExpr); ok {
 		return be.Op == "++"
 	}
+
 	if _, ok := node.(*ast.InterpolatedString); ok {
 		return true
 	}
+
 	if al, ok := node.(*ast.ArrayLit); ok {
 		return len(al.Elems) > 0 // empty [] has no heap block
 	}
@@ -245,15 +256,18 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 	if structName == "" {
 		return true // anonymous struct (e.g. from external code) - be conservative
 	}
+
 	if cg.curScope != nil {
 		if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
 			return true
 		}
 	}
+
 	for _, ft := range cg.structFieldLLVMTypes[structName] {
 		if isRCTrackedType(ft) {
 			return true
 		}
+
 		if _, isNested := ft.(*irtypes.StructType); isNested {
 			return true // may contain RC fields deeper in
 		}
@@ -267,18 +281,18 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.Type) value.Value {
 	if isStringType(t) {
 		// String {i8*, i64}: field 0 is already i8* - no bitcast needed
-
 		return block.NewExtractValue(val, 0)
 	}
+
 	if isFatArrayPtr(t) {
 		// Fat array {T*, i64}: field 0 is T* - bitcast to i8* for _tin_retain/release
 		dataPtr := block.NewExtractValue(val, 0)
 
 		return block.NewBitCast(dataPtr, irtypes.I8Ptr)
 	}
+
 	if isAnyType(t) {
 		// any {i32, i8*}: field 1 is the i8* data pointer
-
 		return block.NewExtractValue(val, 1)
 	}
 
@@ -290,19 +304,23 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	if !ok {
 		return
 	}
+
 	structName := cg.typeNameOf(val.Type())
 	if structName == "" {
 		return
 	}
+
 	fieldTypes := cg.structFieldLLVMTypes[structName]
 	offset := 1 + cg.vtableOffset(structName)
 	alloca := block.NewAlloca(st)
 	block.NewStore(val, alloca)
+
 	for i, ft := range fieldTypes {
 		_, isNestedStruct := ft.(*irtypes.StructType)
 		if !isRCTrackedType(ft) && !isNestedStruct {
 			continue
 		}
+
 		gep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
 		fieldVal := block.NewLoad(ft, gep)
@@ -321,6 +339,7 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 		return
 	}
+
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRetain(), rcPtr)
@@ -377,6 +396,7 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 				if isRCTrackedType(elemType) {
 					dataPtr := block.NewExtractValue(val, 0)
 					length := block.NewExtractValue(val, 1)
+
 					dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
 					if isAnyType(elemType) {
 						block.NewCall(cg.ensureReleaseAnyElemArray(), dataPtrI8, length)
@@ -393,6 +413,7 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			}
 		}
 	}
+
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRelease(), rcPtr)
@@ -435,6 +456,7 @@ func (cg *CodeGen) emitHeapChainRelease(block *ir.Block, heapPtr value.Value, de
 	if !ok {
 		return
 	}
+
 	elemType := ptrType.ElemType
 
 	// Load T from the heap block.
@@ -460,10 +482,12 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 	if block == nil || block.Term != nil {
 		return
 	}
+
 	for _, entry := range s.vars {
 		if !entry.isAlloc || entry.noRelease {
 			continue
 		}
+
 		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 		if !ok {
 			continue
@@ -483,10 +507,12 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 
 			continue
 		}
+
 		elemType := ptrType.ElemType
 		if !cg.elemNeedsRelease(elemType) {
 			continue
 		}
+
 		loaded := block.NewLoad(elemType, entry.val)
 		if entry.noDeinit {
 			cg.emitReleaseNoDeinit(block, loaded)
@@ -503,12 +529,14 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 	if block == nil || block.Term != nil {
 		return
 	}
+
 	s := cg.curScope
 	for s != nil {
 		for name, entry := range s.vars {
 			if name == skipName || !entry.isAlloc || entry.isGlobal || entry.noRelease {
 				continue
 			}
+
 			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 			if !ok {
 				continue
@@ -526,10 +554,12 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 
 				continue
 			}
+
 			elemType := ptrType.ElemType
 			if !cg.elemNeedsRelease(elemType) {
 				continue
 			}
+
 			loaded := block.NewLoad(elemType, entry.val)
 			if entry.noDeinit {
 				cg.emitReleaseNoDeinit(block, loaded)
@@ -537,9 +567,11 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				cg.emitRelease(block, loaded)
 			}
 		}
+
 		if s.isFunctionBoundary {
 			break
 		}
+
 		s = s.parent
 	}
 }
@@ -567,6 +599,7 @@ func (cg *CodeGen) ensureAnyEq() *ir.Func {
 	if cg.anyEqFn != nil {
 		return cg.anyEqFn
 	}
+
 	anyT := anyFatPtrType()
 	cg.anyEqFn = cg.ensureExternDecl("_tin_any_eq", irtypes.I64,
 		[]*ir.Param{ir.NewParam("a", anyT), ir.NewParam("b", anyT)}, false)
@@ -579,6 +612,7 @@ func (cg *CodeGen) ensureStrcmp() *ir.Func {
 	if cg.strcmpFn != nil {
 		return cg.strcmpFn
 	}
+
 	cg.strcmpFn = cg.ensureExternDecl("strcmp", irtypes.I32,
 		[]*ir.Param{ir.NewParam("s1", irtypes.I8Ptr), ir.NewParam("s2", irtypes.I8Ptr)}, false)
 
@@ -669,6 +703,7 @@ func (cg *CodeGen) ensurePanicFn() *ir.Func {
 	if cg.tinPanicFn != nil {
 		return cg.tinPanicFn
 	}
+
 	cg.tinPanicFn = cg.mod.NewFunc("_tin_panic", irtypes.Void,
 		ir.NewParam("msg", irtypes.I8Ptr),
 	)
@@ -684,12 +719,14 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 	if err != nil {
 		return nil, err
 	}
+
 	var msgPtr value.Value
 	if isStringType(msg.Type()) {
 		msgPtr = cg.extractStringPtr(block, msg)
 	} else {
 		msgPtr = block.NewBitCast(msg, irtypes.I8Ptr)
 	}
+
 	block.NewCall(cg.ensurePanicFn(), msgPtr)
 	// _tin_panic normally calls exit(1) and never returns.  However, when a
 	// deferred function calls recover(), _tin_panic returns instead of exiting.
@@ -728,6 +765,7 @@ func (cg *CodeGen) ensureSliceSubslice() *ir.Func {
 	if cg.sliceSubsliceFn != nil {
 		return cg.sliceSubsliceFn
 	}
+
 	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 	cg.sliceSubsliceFn = cg.mod.NewFunc("_tin_slice_subslice", sliceType,
 		ir.NewParam("s", sliceType),
@@ -743,6 +781,7 @@ func (cg *CodeGen) ensureRecoverFn() *ir.Func {
 	if cg.tinRecoverFn != nil {
 		return cg.tinRecoverFn
 	}
+
 	cg.tinRecoverFn = cg.mod.NewFunc("_tin_recover", stringFatPtrType())
 
 	return cg.tinRecoverFn
@@ -760,6 +799,7 @@ func (cg *CodeGen) ensureSnprintf() *ir.Func {
 	if cg.sprintfFn != nil {
 		return cg.sprintfFn
 	}
+
 	cg.sprintfFn = cg.ensureExternDecl("snprintf", irtypes.I32,
 		[]*ir.Param{ir.NewParam("buf", irtypes.I8Ptr), ir.NewParam("n", irtypes.I64), ir.NewParam("format", irtypes.I8Ptr)}, true)
 

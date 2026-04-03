@@ -21,16 +21,19 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 		if n.FromSyntax {
 			return cg.loadPackageSelective(n.Path, n.Names, n.IsFile)
 		}
+
 		if n.IsFile {
 			return cg.loadPackageFromFilePath(n.Path)
 		}
 
 		return cg.loadPackage(n.Path)
 	}
+
 	for _, imp := range n.Imports {
 		if imp.Type == nil {
 			continue
 		}
+
 		ft, ok := imp.Type.(*ast.FuncType)
 		if !ok {
 			continue
@@ -42,25 +45,34 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			if err != nil {
 				return err
 			}
+
 			cParams[i] = ir.NewParam(fmt.Sprintf("p%d", i), ct)
 		}
-		var tinRetType irtypes.Type = irtypes.Void
-		var cRetType irtypes.Type = irtypes.Void
+
+		var (
+			tinRetType irtypes.Type = irtypes.Void
+			cRetType   irtypes.Type = irtypes.Void
+		)
+
 		if ft.RetType != nil {
 			var err error
+
 			tinRetType, err = cg.tinTypeToLLVM(ft.RetType)
 			if err != nil {
 				return err
 			}
+
 			cRetType, err = cg.tinTypeToExternLLVM(ft.RetType, true)
 			if err != nil {
 				return err
 			}
 		}
+
 		cName := imp.ExternName
 		if cName == "" {
 			cName = imp.LocalName
 		}
+
 		cFunc := cg.ensureExternDecl(cName, cRetType, cParams, ft.IsVarArgs)
 
 		if cg.curScope == nil {
@@ -77,7 +89,9 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 
 		// Return type needs wrapping: generate a small wrapper.
 		wrapperName := "__tinwrap_" + imp.LocalName
+
 		var wrapperFn *ir.Func
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == wrapperName {
 				wrapperFn = f
@@ -85,6 +99,7 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 				break
 			}
 		}
+
 		if wrapperFn == nil {
 			wrapperFn = cg.mod.NewFunc(wrapperName, tinRetType, cParams...)
 			prevFn := cg.curFn
@@ -92,15 +107,18 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			cg.curFn = wrapperFn
 			cg.curScope = newScope(prevScope)
 			entry := wrapperFn.NewBlock("entry")
+
 			callArgs := make([]value.Value, len(wrapperFn.Params))
 			for i, p := range wrapperFn.Params {
 				callArgs[i] = p
 			}
+
 			raw := entry.NewCall(cFunc, callArgs...)
 			entry.NewRet(cg.wrapFromExtern(entry, raw, tinRetType))
 			cg.curFn = prevFn
 			cg.curScope = prevScope
 		}
+
 		cg.curScope.set(imp.LocalName, &scopeEntry{val: wrapperFn, isAlloc: false})
 	}
 
@@ -123,6 +141,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	if cg.importedPkgs[pkgPath] {
 		return nil // already loaded
 	}
+
 	cg.importedPkgs[pkgPath] = true
 
 	// Resolve package paths.  Try multiple locations in order:
@@ -139,12 +158,14 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	// compiled inline so no separate linking step is needed.
 	tinSrc := strings.TrimSuffix(modFile, ".tin.mod") + ".tin"
 	_, modExists := os.Stat(modFile)
+
 	_, srcExists := os.Stat(tinSrc)
 	if srcExists != nil || modExists != nil {
 		// Not a valid local package; try stdlib locations.
 		if ex, exErr := os.Executable(); exErr == nil {
 			execDir := filepath.Dir(ex)
 			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin"
+
 			p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin"
 			if _, e := os.Stat(p1); e == nil {
 				tinSrc = p1
@@ -157,6 +178,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			tinSrc = ""
 		}
 	}
+
 	if tinSrc != "" {
 		return cg.loadPackageFromSource(pkgPath, pkgName, tinSrc)
 	}
@@ -168,6 +190,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			execDir := filepath.Dir(ex)
 			// Try <execDir>/stdlib/<parts...>.tin.mod (e.g. stdlib/io.tin.mod).
 			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin.mod"
+
 			mf, err = ReadModFile(p1)
 			if err != nil {
 				// Try <execDir>/stdlib/<pkgName>/<pkgName>.tin.mod
@@ -177,10 +200,10 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			}
 		}
 	}
+
 	if err != nil {
 		// Module file not found - not an error if the file simply doesn't exist
 		// yet (the user may be compiling the module for the first time).
-
 		return nil
 	}
 
@@ -192,20 +215,26 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			st := irtypes.NewStruct()
 			st.SetName(ms.IRName)
 			// Populate fields.
-			var fieldTypes []irtypes.Type
-			var fieldNames []string
+			var (
+				fieldTypes []irtypes.Type
+				fieldNames []string
+			)
+
 			for _, f := range ms.Fields {
 				te, err2 := parseTypeString(f.Type)
 				if err2 != nil {
 					return fmt.Errorf("use %s: struct %s field %s: %w", pkgPath, ms.LocalName, f.Name, err2)
 				}
+
 				ft, err2 := cg.tinTypeToLLVM(te)
 				if err2 != nil {
 					return fmt.Errorf("use %s: struct %s field %s: %w", pkgPath, ms.LocalName, f.Name, err2)
 				}
+
 				fieldTypes = append(fieldTypes, ft)
 				fieldNames = append(fieldNames, f.Name)
 			}
+
 			st.Fields = fieldTypes
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 			cg.structTypes[ms.IRName] = st
@@ -226,19 +255,24 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 					if err2 != nil {
 						continue
 					}
+
 					pt, err2 := cg.tinTypeToLLVM(te)
 					if err2 != nil {
 						continue
 					}
+
 					mparams[i] = ir.NewParam(p.Name, pt)
 				}
+
 				var mret irtypes.Type = irtypes.Void
+
 				if mfn.RetType != "" {
 					te, err2 := parseTypeString(mfn.RetType)
 					if err2 == nil {
 						mret, _ = cg.tinTypeToLLVM(te)
 					}
 				}
+
 				irMeth := cg.mod.NewFunc(mfn.IRName, mret, mparams...)
 				irMeth.Blocks = nil
 				cg.curScope.set(mfn.IRName, &scopeEntry{val: irMeth, isAlloc: false})
@@ -252,6 +286,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 		if err2 != nil {
 			return fmt.Errorf("use %s: type %s: %w", pkgPath, ta.Name, err2)
 		}
+
 		cg.typeAliases[pkgName+"."+ta.Name] = te
 		cg.typeAliases[pkgName+"::"+ta.Name] = te
 		// Also register locally if not already defined.
@@ -268,24 +303,31 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			// Extern-backed function: reconstruct a FuncDecl and use the full
 			// extern-wrapper path so fat-pointer unwrapping is applied correctly.
 			var astParams []ast.Param
+
 			for _, p := range fn.Params {
 				te, err2 := parseTypeString(p.Type)
 				if err2 != nil {
 					return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
 				}
+
 				astParams = append(astParams, ast.Param{Name: p.Name, Type: te})
 			}
+
 			if fn.Variadic {
 				astParams = append(astParams, ast.Param{Name: "...", IsVarArgs: true})
 			}
+
 			var retTE ast.TypeExpr
+
 			if fn.RetType != "" {
 				var err2 error
+
 				retTE, err2 = parseTypeString(fn.RetType)
 				if err2 != nil {
 					return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
 				}
 			}
+
 			fd := &ast.FuncDecl{
 				Name:     fn.LocalName,
 				Params:   astParams,
@@ -306,23 +348,29 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			if err2 != nil {
 				return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
 			}
+
 			pt, err2 := cg.tinTypeToLLVM(te)
 			if err2 != nil {
 				return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
 			}
+
 			params[i] = ir.NewParam(p.Name, pt)
 		}
+
 		var retType irtypes.Type = irtypes.Void
+
 		if fn.RetType != "" {
 			te, err2 := parseTypeString(fn.RetType)
 			if err2 != nil {
 				return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
 			}
+
 			retType, err2 = cg.tinTypeToLLVM(te)
 			if err2 != nil {
 				return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
 			}
 		}
+
 		irFunc := cg.mod.NewFunc(fn.IRName, retType, params...)
 		irFunc.Sig.Variadic = fn.Variadic
 		irFunc.Blocks = nil // declaration only
@@ -335,6 +383,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 		if mm.Body == "" && len(mm.Params) == 0 {
 			continue
 		}
+
 		md := &ast.MacroDecl{
 			Name:   mm.Name + "!",
 			Tags:   mm.Tags,
@@ -392,6 +441,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	if cg.importedPkgs[dedupeKey] {
 		return nil
 	}
+
 	cg.importedPkgs[dedupeKey] = true
 
 	src, err := os.ReadFile(srcPath)
@@ -400,16 +450,19 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	}
 
 	l := lexer.New(string(src))
+
 	tokens, lexErr := l.Tokenize()
 	if lexErr != nil {
 		return fmt.Errorf("use %q: lex: %w", rawPath, lexErr)
 	}
+
 	p := parser.New(tokens)
 	// Pre-scan for #no_parens macros from `use { name } from pkg` so the parser
 	// can do token substitution before parsing (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
+
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %q: parse: %w", rawPath, parseErr)
@@ -417,6 +470,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 
 	// Collect all exported names from the file (ignore the "as <pkg>" name).
 	exportedNames := map[string]bool{}
+
 	for _, node := range prog.Stmts {
 		if exp, ok := node.(*ast.ExportDecl); ok {
 			for _, name := range exp.Names {
@@ -439,6 +493,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			} else {
 				loadErr = cg.loadPackage(ud.Path)
 			}
+
 			if loadErr != nil {
 				cg.filename = prevFilename
 
@@ -469,6 +524,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok || fd.IsExtern == "" {
 			continue
 		}
+
 		prefixed := pkgName + "__" + fd.Name
 		if compErr := cg.genFuncDeclAs(fd, prefixed); compErr != nil {
 			cg.curScope = prevScope
@@ -476,6 +532,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 
 			return fmt.Errorf("use %q: %s: %w", rawPath, fd.Name, compErr)
 		}
+
 		if entry, ok2 := cg.curScope.lookup(prefixed); ok2 {
 			if _, already := cg.curScope.vars[fd.Name]; !already {
 				cg.curScope.set(fd.Name, entry)
@@ -498,11 +555,14 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok || len(sd.TypeParams) > 0 {
 			continue
 		}
+
 		for _, m := range sd.Methods {
 			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
 				continue
 			}
+
 			scopeKey := methodScopeName(sd.Name, m)
+
 			cg.coroCallable[scopeKey] = true
 			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
 				cg.curScope = prevScope
@@ -519,6 +579,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok {
 			continue
 		}
+
 		if compErr := cg.genStructDecl(sd); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -550,6 +611,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 					prevScope.set(bareMethodKey, entry)
 				}
+
 				bareCoroKey := bareMethodKey + "$coro"
 				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
 					prevScope.set(bareCoroKey, entry)
@@ -564,6 +626,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok || fd.IsExtern != "" {
 			continue
 		}
+
 		prefixed := pkgName + "__" + fd.Name
 		if preErr := cg.predeclareFuncAs(fd, prefixed); preErr != nil {
 			cg.curScope = prevScope
@@ -579,6 +642,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok || fd.IsExtern != "" {
 			continue
 		}
+
 		prefixed := pkgName + "__" + fd.Name
 		if compErr := cg.genFuncDeclAs(fd, prefixed); compErr != nil {
 			cg.curScope = prevScope
@@ -605,6 +669,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		if !ok {
 			continue
 		}
+
 		bareName := strings.TrimSuffix(md.Name, "!")
 		if !exportedNames[md.Name] && !exportedNames[bareName] {
 			continue
@@ -636,16 +701,19 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	}
 
 	l := lexer.New(string(src))
+
 	tokens, lexErr := l.Tokenize()
 	if lexErr != nil {
 		return fmt.Errorf("use %s: lex: %w", pkgPath, lexErr)
 	}
+
 	p := parser.New(tokens)
 	// Pre-scan for #no_parens macros imported via `use { name } from pkg` so the
 	// parser can substitute them as bare tokens (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
+
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %s: parse: %w", pkgPath, parseErr)
@@ -653,6 +721,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	// Collect exported names from the package.
 	exportedNames := map[string]bool{}
+
 	for _, node := range prog.Stmts {
 		if exp, ok := node.(*ast.ExportDecl); ok && exp.AsName == pkgName {
 			for _, name := range exp.Names {
@@ -672,7 +741,9 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// canonical "pkgName__StructName" keys/IR-names for structs defined in this
 	// package (including those brought in via `use "./..."` file-path imports).
 	cg.currentPkg = pkgName
+
 	defer func() { cg.currentPkg = prevPkg }()
+
 	for _, node := range prog.Stmts {
 		if ud, ok := node.(*ast.UseDecl); ok {
 			var loadErr error
@@ -681,6 +752,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			} else {
 				loadErr = cg.loadPackage(ud.Path)
 			}
+
 			if loadErr != nil {
 				cg.filename = prevFilename
 
@@ -737,6 +809,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok || fd.IsExtern == "" {
 			continue
 		}
+
 		prefixed := pkgName + "__" + fd.Name
 		if compErr := cg.genFuncDeclAs(fd, prefixed); compErr != nil {
 			cg.curScope = prevScope
@@ -775,6 +848,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok || len(sd.TypeParams) > 0 {
 			continue
 		}
+
 		for _, m := range sd.Methods {
 			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
 				continue
@@ -799,17 +873,21 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	for name, flag := range scanOverloadedNames(prog.Stmts) {
 		cg.overloadedNames[name] = flag
 	}
+
 	for _, node := range prog.Stmts {
 		fd, ok := node.(*ast.FuncDecl)
 		if !ok || fd.IsExtern != "" || len(fd.TypeParams) > 0 || len(fd.Constraints) > 0 {
 			continue
 		}
+
 		baseName := pkgName + "__" + fd.Name
 		irName := baseName
+
 		if cg.overloadedNames[fd.Name] {
 			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
+
 		if preErr := cg.predeclareFuncAs(fd, irName); preErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -832,6 +910,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok {
 			continue
 		}
+
 		if compErr := cg.genStructDecl(sd); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -877,6 +956,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
 					prevScope.set(bareMethodKey, entry)
 				}
+
 				bareCoroKey := bareMethodKey + "$coro"
 				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
 					prevScope.set(bareCoroKey, entry)
@@ -904,8 +984,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 			continue
 		}
+
 		baseName := pkgName + "__" + fd.Name
 		irName := baseName
+
 		if cg.overloadedNames[fd.Name] && fd.IsExtern == "" {
 			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
@@ -914,6 +996,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			if ptErr == nil {
 				// Avoid duplicate entries (loadPackageFromSource may be called multiple times).
 				alreadyHave := false
+
 				for _, existing := range cg.overloads[fd.Name] {
 					if existing.irName == irName {
 						alreadyHave = true
@@ -921,6 +1004,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 						break
 					}
 				}
+
 				if !alreadyHave {
 					cg.overloads[fd.Name] = append(cg.overloads[fd.Name], &overloadEntry{
 						irName:     irName,
@@ -931,6 +1015,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				}
 			}
 		}
+
 		if preErr := cg.predeclareFuncAs(fd, irName); preErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -949,12 +1034,15 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) {
 			continue
 		}
+
 		baseName := pkgName + "__" + fd.Name
 		irName := baseName
+
 		if cg.overloadedNames[fd.Name] {
 			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
+
 		cg.coroCallable[irName] = true
 		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
 			cg.curScope = prevScope
@@ -974,12 +1062,15 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if len(fd.TypeParams) > 0 {
 			continue
 		}
+
 		baseName := pkgName + "__" + fd.Name
 		irName := baseName
+
 		if cg.overloadedNames[fd.Name] && fd.IsExtern == "" {
 			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
+
 		if compErr := cg.genFuncDeclAs(fd, irName); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -994,13 +1085,16 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok || !vd.IsConst || !exportedNames[vd.Name] {
 			continue
 		}
+
 		var constVal value.Value
+
 		switch lit := vd.Value.(type) {
 		case *ast.FloatLit:
 			constVal = constant.NewFloat(irtypes.Double, lit.Value)
 		case *ast.IntLit:
 			constVal = constant.NewInt(irtypes.I64, lit.Value)
 		}
+
 		if constVal != nil {
 			entry := &scopeEntry{val: constVal, isAlloc: false}
 			cg.curScope.set(vd.Name, entry)
@@ -1044,6 +1138,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				if entry2, ok2 := cg.curScope.lookup(v.irName); ok2 {
 					prevScope.set(v.irName, entry2)
 				}
+
 				coroKey := v.irName + "$coro"
 				if coroEntry, ok3 := cg.curScope.lookup(coroKey); ok3 {
 					prevScope.set(coroKey, coroEntry)
@@ -1079,12 +1174,14 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
 				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 			}
+
 			for key, entry := range cg.curScope.vars {
 				if strings.HasPrefix(key, name+"_") {
 					prevScope.set(key, entry)
 				}
 			}
 		}
+
 		if _, isGeneric := cg.genericStructsByArity[name]; isGeneric {
 			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
 				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
@@ -1100,6 +1197,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !ok {
 			continue
 		}
+
 		bareName := strings.TrimSuffix(md.Name, "!")
 		if !exportedNames[md.Name] && !exportedNames[bareName] {
 			continue
@@ -1128,6 +1226,7 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 	} else {
 		err = cg.loadPackage(path)
 	}
+
 	if err != nil {
 		return err
 	}
@@ -1138,6 +1237,7 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 	// For file paths, derive from basename.
 	if isFile {
 		base := filepath.Base(path)
+
 		pkgName = strings.TrimSuffix(strings.TrimSuffix(base, ".tin"), "./")
 		if pkgName == "" {
 			pkgName = base
@@ -1152,6 +1252,7 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 		if isMacroCall {
 			// Macro: look up by pkg-qualified key and register as bare name.
 			found := false
+
 			for _, key := range []string{
 				pkgName + "." + bareName + "!",
 				pkgName + "::" + bareName + "!",
@@ -1166,6 +1267,7 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 					break
 				}
 			}
+
 			if !found {
 				// Macro may not be in cg.macros yet; try to find it bare.
 				if m, ok := cg.macros[bareName+"!"]; ok {
@@ -1219,13 +1321,16 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 		if tokens[i].Type != lexer.KW_USE {
 			continue
 		}
+
 		i++
 		if i >= len(tokens) || tokens[i].Type != lexer.LBRACE {
 			continue
 		}
+
 		i++
 		// Collect names until RBRACE.
 		var names []string
+
 		for i < len(tokens) && tokens[i].Type != lexer.RBRACE {
 			if tokens[i].Type == lexer.IDENT {
 				name := tokens[i].Literal
@@ -1233,37 +1338,47 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 					name += "!"
 					i++
 				}
+
 				names = append(names, name)
 			}
+
 			i++ // advance (also skips commas)
 		}
+
 		if i >= len(tokens) || tokens[i].Type != lexer.RBRACE {
 			continue
 		}
+
 		i++ // consume }
 		// Expect soft keyword "from".
 		if i >= len(tokens) || tokens[i].Type != lexer.IDENT || tokens[i].Literal != "from" {
 			continue
 		}
+
 		i++ // consume "from"
 		// Read module path.
 		if i >= len(tokens) {
 			continue
 		}
+
 		var pkgPath string
 		if tokens[i].Type == lexer.STRING_LIT {
 			pkgPath = tokens[i].Literal
 		} else {
 			var parts []string
+
 			for i < len(tokens) && (tokens[i].Type == lexer.IDENT || tokens[i].Type == lexer.DCOLON) {
 				if tokens[i].Type == lexer.IDENT {
 					parts = append(parts, tokens[i].Literal)
 				}
+
 				i++
 			}
+
 			i-- // will be incremented by outer loop
 			pkgPath = strings.Join(parts, "::")
 		}
+
 		if pkgPath == "" {
 			continue
 		}
@@ -1274,12 +1389,15 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 
 		// Build candidate .tin.mod paths (same logic as loadPackage).
 		modFile := filepath.Join(append([]string{baseDir}, pathParts...)...) + ".tin.mod"
+
 		var mf *ModFile
+
 		mf, _ = ReadModFile(modFile)
 		if mf == nil {
 			if ex, exErr := os.Executable(); exErr == nil {
 				execDir := filepath.Dir(ex)
 				p1 := filepath.Join(append([]string{execDir, "stdlib"}, pathParts...)...) + ".tin.mod"
+
 				mf, _ = ReadModFile(p1)
 				if mf == nil {
 					p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin.mod"
@@ -1287,6 +1405,7 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 				}
 			}
 		}
+
 		if mf == nil {
 			continue
 		}
@@ -1296,10 +1415,12 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 		for _, n := range names {
 			nameSet[strings.TrimSuffix(n, "!")] = true
 		}
+
 		for _, mm := range mf.Macros {
 			if !nameSet[mm.Name] {
 				continue
 			}
+
 			for _, tag := range mm.Tags {
 				if tag == "no_parens" && mm.Body != "" {
 					result[mm.Name] = mm.Body
@@ -1319,6 +1440,7 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 // explicitly listing the trait in its Implements clause.
 func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.TypeExpr) error {
 	var traitName string
+
 	switch te := traitExpr.(type) {
 	case *ast.SimpleType:
 		traitName = te.Name
@@ -1327,20 +1449,24 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 	default:
 		return nil
 	}
+
 	td, ok := cg.traits[traitName]
 	if !ok {
 		return nil
 	}
+
 	for _, m := range td.Methods {
 		if m.IsVirtual || m.Body == nil {
 			continue // virtual methods must be explicitly implemented
 		}
+
 		scopeKey := concreteName + "_" + m.Name
 		if _, exists := cg.curScope.lookup(scopeKey); exists {
 			continue // already generated
 		}
 		// Create a concrete copy of the method with this param bound to *concreteName.
 		injected := *m
+
 		ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: concreteName}}
 		if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
 			injected.Params = append([]ast.Param{{Name: "this", Type: ptrType}}, injected.Params...)
@@ -1364,8 +1490,10 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 			for global.parent != nil {
 				global = global.parent
 			}
+
 			global.set(scopeKey, entry)
 		}
+
 		if err := cg.genStructMethod(concreteName, &injected); err != nil {
 			return fmt.Errorf("ensureDefaultTraitMethods: %w", err)
 		}
@@ -1394,6 +1522,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		if !ok {
 			continue
 		}
+
 		for _, traitExpr := range c.Traits {
 			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
 				return nil, fmt.Errorf("fn %s: type %q does not satisfy constraint 'where %s is %s'",
@@ -1442,16 +1571,19 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// json.tin's decode[T]) resolve correctly. If no home scope is recorded, fall
 	// back to moduleScope so that at least package-exported names are visible.
 	prevScope := cg.curScope
+
 	baseScope, hasHome := cg.genericFuncHomeScopes[tmpl.Name]
 	if !hasHome || baseScope == nil {
 		baseScope = cg.moduleScope
 	}
+
 	if baseScope == nil {
 		baseScope = cg.curScope
 		for baseScope.parent != nil {
 			baseScope = baseScope.parent
 		}
 	}
+
 	cg.curScope = newScope(baseScope)
 
 	// Register type aliases so that body expressions referring to the type
@@ -1463,6 +1595,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		if old, had := cg.typeAliases[param]; had {
 			prevAliases[param] = old
 		}
+
 		cg.typeAliases[param] = concreteTE
 	}
 
@@ -1471,6 +1604,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// resolve to a forward declaration rather than triggering recursive instantiation.
 	if err := cg.predeclareFuncAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
+
 		for param := range astSubst {
 			if old, had := prevAliases[param]; had {
 				cg.typeAliases[param] = old
@@ -1493,6 +1627,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	if err := cg.genFuncDeclAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
+
 		for param := range astSubst {
 			if old, had := prevAliases[param]; had {
 				cg.typeAliases[param] = old
@@ -1518,6 +1653,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	// Find the compiled function (now has a body).
 	var compiled *ir.Func
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == irName {
 			compiled = f
@@ -1525,9 +1661,11 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 			break
 		}
 	}
+
 	if compiled == nil {
 		return nil, fmt.Errorf("monomorphize %s: compiled function not found", irName)
 	}
+
 	cg.constrainedFuncInstances[irName] = compiled
 
 	return compiled, nil
@@ -1537,10 +1675,12 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 // actual argument LLVM types at a call site.
 func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[string]string {
 	subst := make(map[string]string)
+
 	for i, p := range tmpl.Params {
 		if i >= len(argVals) {
 			break
 		}
+
 		cg.inferTypeArgsFromParam(p.Type, argVals[i].Type(), tmpl.TypeParams, subst)
 	}
 
@@ -1567,9 +1707,11 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 						}
 					}
 				}
+
 				if name == "" {
 					name = llvmTypeName(argType)
 				}
+
 				if name != "" {
 					subst[tp] = name
 				}
@@ -1591,6 +1733,7 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		if st, ok2 := argType.(*irtypes.StructType); ok2 {
 			structName = st.Name()
 		}
+
 		if structName == "" {
 			break
 		}
@@ -1599,7 +1742,9 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		if !strings.HasPrefix(structName, prefix) {
 			break
 		}
+
 		innerName := strings.TrimPrefix(structName, prefix)
+
 		innerParam := pt.TypeParams[0]
 		if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
 			// Direct type param: bind it to the inner concrete name.
@@ -1629,7 +1774,9 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		if !isFatFnPtr(argType) {
 			break
 		}
+
 		st := argType.(*irtypes.StructType)
+
 		innerFnType, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 		if !ok {
 			break
@@ -1653,7 +1800,6 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 func extractBacktickBody(node ast.Node) (string, bool) {
 	switch n := node.(type) {
 	case *ast.BacktickLit:
-
 		return n.Content, true
 	case *ast.ReturnStmt:
 		if n.Value != nil {
@@ -1664,7 +1810,6 @@ func extractBacktickBody(node ast.Node) (string, bool) {
 			return extractBacktickBody(n.Stmts[0])
 		}
 	case *ast.ExprStmt:
-
 		return extractBacktickBody(n.Expr)
 	}
 
@@ -1677,19 +1822,24 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	type exportGroup struct {
 		names []string
 	}
+
 	groups := map[string]*exportGroup{}
+
 	for _, node := range prog.Stmts {
 		exp, ok := node.(*ast.ExportDecl)
 		if !ok || exp.AsName == "" {
 			continue
 		}
+
 		g := groups[exp.AsName]
 		if g == nil {
 			g = &exportGroup{}
 			groups[exp.AsName] = g
 		}
+
 		g.names = append(g.names, exp.Names...)
 	}
+
 	if len(groups) == 0 {
 		return nil
 	}
@@ -1699,6 +1849,7 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	structsDecl := map[string]*ast.StructDecl{}
 	typesDecl := map[string]*ast.TypeDecl{}
 	macrosDecl := map[string]*ast.MacroDecl{}
+
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.FuncDecl:
@@ -1736,11 +1887,13 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 
 						continue
 					}
+
 					mfn.Params = append(mfn.Params, ModParam{
 						Name: p.Name,
 						Type: typeExprToString(p.Type),
 					})
 				}
+
 				mfn.RetType = typeExprToString(fd.RetType)
 				mf.Funcs = append(mf.Funcs, mfn)
 
@@ -1763,6 +1916,7 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 					if m.IsVirtual {
 						continue
 					}
+
 					mfn := ModFunc{
 						LocalName: m.Name,
 						IRName:    name + "_" + m.Name, // e.g. Point_show
@@ -1774,9 +1928,11 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 							Type: typeExprToString(p.Type),
 						})
 					}
+
 					mfn.RetType = typeExprToString(m.RetType)
 					ms.Methods = append(ms.Methods, mfn)
 				}
+
 				mf.Structs = append(mf.Structs, ms)
 
 				continue
@@ -1795,6 +1951,7 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 			if !isMacro {
 				md, isMacro = macrosDecl[strings.TrimSuffix(name, "!")]
 			}
+
 			if isMacro {
 				mm := ModMacro{
 					Name:   strings.TrimSuffix(md.Name, "!"),
@@ -1805,6 +1962,7 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 				if body, ok2 := extractBacktickBody(md.Body); ok2 {
 					mm.Body = body
 				}
+
 				mf.Macros = append(mf.Macros, mm)
 
 				continue

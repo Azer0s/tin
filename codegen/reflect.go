@@ -21,6 +21,7 @@ func structNameFromValue(v value.Value) string {
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		t = pt.ElemType
 	}
+
 	if st, ok := t.(*irtypes.StructType); ok {
 		return st.Name()
 	}
@@ -54,11 +55,13 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 
 	// Register each atom and build element constants.
 	elems := make([]constant.Constant, n)
+
 	for i, a := range atoms {
 		name := a
 		if len(name) > 0 && name[0] == '\'' {
 			name = name[1:]
 		}
+
 		code := cg.registerAtom(name)
 		elems[i] = cg.atomConstant(code).(*constant.Struct)
 	}
@@ -101,29 +104,24 @@ func llvmTypeName(t irtypes.Type) string {
 	if t == nil {
 		return "void"
 	}
+
 	switch {
 	case t.Equal(irtypes.I1):
-
 		return "bool"
 	case t.Equal(irtypes.I8):
-
 		return "i8"
 	case t.Equal(irtypes.I16):
-
 		return "i16"
 	case t.Equal(irtypes.I32):
-
 		return "i32"
 	case t.Equal(irtypes.I64):
-
 		return "i64"
 	case t.Equal(irtypes.Float):
-
 		return "f32"
 	case t.Equal(irtypes.Double):
-
 		return "f64"
 	}
+
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if fnType, isFnType := pt.ElemType.(*irtypes.FuncType); isFnType {
 			return fnSigName(fnType, false)
@@ -131,31 +129,36 @@ func llvmTypeName(t irtypes.Type) string {
 
 		return "*" + llvmTypeName(pt.ElemType)
 	}
+
 	if at, ok := t.(*irtypes.ArrayType); ok {
 		return "[" + llvmTypeName(at.ElemType) + "]"
 	}
+
 	if st, ok := t.(*irtypes.StructType); ok {
 		if st.Name() == "__atom" {
 			return "atom"
 		}
+
 		if st.Name() != "" {
 			// User-defined struct / data type: use struct name as atom.
-
 			return st.Name()
 		}
 		// Anonymous struct: could be fat ptr, any, etc.
 		if isStringType(t) {
 			return "string"
 		}
+
 		if isAnyType(t) {
 			return "any"
 		}
+
 		if isFatFnPtr(t) {
 			st2 := t.(*irtypes.StructType)
 			innerFnType := st2.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
 			return fnSigName(innerFnType, true)
 		}
+
 		if isFatArrayPtr(t) {
 			if len(st.Fields) == 2 {
 				if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
@@ -183,8 +186,8 @@ func primitiveTypeName(t irtypes.Type) string {
 // defaultAtom is the %__atom value used when no type_id matches.
 func (cg *CodeGen) runtimeAtomSelectByTypeID(block *ir.Block, typeIDVal value.Value,
 	table map[int32]string, defaultAtom value.Value) value.Value {
-
 	result := defaultAtom
+
 	for id, atomStr := range table {
 		isMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(id)))
 		// Strip leading apostrophe to get the atom name.
@@ -192,6 +195,7 @@ func (cg *CodeGen) runtimeAtomSelectByTypeID(block *ir.Block, typeIDVal value.Va
 		if len(name) > 0 && name[0] == '\'' {
 			name = name[1:]
 		}
+
 		candidate := cg.atomConstant(cg.registerAtom(name))
 		result = block.NewSelect(isMatch, candidate, result)
 	}
@@ -224,9 +228,11 @@ func (cg *CodeGen) buildTypeIDToNameTable() map[int32]string {
 	for sn, id := range cg.structTypeIDs {
 		table[id] = "'" + sn
 	}
+
 	for sig, id := range cg.fnTypeIDs {
 		table[id] = "'" + sig
 	}
+
 	for un, id := range cg.unionTypeIDs {
 		table[id] = "'" + un
 	}
@@ -237,11 +243,13 @@ func (cg *CodeGen) buildTypeIDToNameTable() map[int32]string {
 // buildTypeIDToTraitsTable builds type_id -> []trait atom strings table.
 func (cg *CodeGen) buildTypeIDToTraitsTable() map[int32][]string {
 	table := make(map[int32][]string)
+
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
 		for _, tn := range cg.structImpls[sn] {
 			atoms = append(atoms, "'"+tn)
 		}
+
 		table[id] = atoms
 	}
 
@@ -251,11 +259,13 @@ func (cg *CodeGen) buildTypeIDToTraitsTable() map[int32][]string {
 // buildTypeIDToFieldsTable builds type_id -> []field name atom strings table.
 func (cg *CodeGen) buildTypeIDToFieldsTable() map[int32][]string {
 	table := make(map[int32][]string)
+
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
 		for _, fn := range cg.structFields[sn] {
 			atoms = append(atoms, "'"+fn)
 		}
+
 		table[id] = atoms
 	}
 
@@ -265,11 +275,13 @@ func (cg *CodeGen) buildTypeIDToFieldsTable() map[int32][]string {
 // buildTypeIDToFieldTypesTable builds type_id -> []field type name atom strings table.
 func (cg *CodeGen) buildTypeIDToFieldTypesTable() map[int32][]string {
 	table := make(map[int32][]string)
+
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
 		for _, ft := range cg.structFieldLLVMTypes[sn] {
 			atoms = append(atoms, "'"+primitiveTypeName(ft))
 		}
+
 		table[id] = atoms
 	}
 
@@ -284,6 +296,7 @@ func (cg *CodeGen) genTypeof(block *ir.Block, e *ast.TypeofExpr) (value.Value, e
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return cg.atomConstant(cg.registerAtom("unknown")), nil
 	}
@@ -311,6 +324,7 @@ func (cg *CodeGen) genTraitof(block *ir.Block, e *ast.TraitofExpr) (value.Value,
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return cg.buildAtomArray(block, nil), nil
 	}
@@ -324,7 +338,9 @@ func (cg *CodeGen) genTraitof(block *ir.Block, e *ast.TraitofExpr) (value.Value,
 
 	// Compile-time.
 	sn := structNameFromValue(val)
+
 	var atoms []string
+
 	if sn != "" {
 		for _, tn := range cg.structImpls[sn] {
 			atoms = append(atoms, "'"+tn)
@@ -341,6 +357,7 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return cg.buildAtomArray(block, nil), nil
 	}
@@ -354,7 +371,9 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 
 	// Compile-time.
 	sn := structNameFromValue(val)
+
 	var atoms []string
+
 	if sn != "" {
 		for _, fn := range cg.structFields[sn] {
 			atoms = append(atoms, "'"+fn)
@@ -369,7 +388,6 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 // to pick the right one.  The result type is always {%__atom*, i64}.
 func (cg *CodeGen) runtimeAtomArraySelectByTypeID(block *ir.Block, typeIDVal value.Value,
 	table map[int32][]string) value.Value {
-
 	// Fat-pointer type for [atom]: {%__atom*, i64}.
 	fatType := irtypes.NewStruct(irtypes.NewPointer(cg.atomType), irtypes.I64)
 
@@ -397,6 +415,7 @@ func (cg *CodeGen) genFieldtypes(block *ir.Block, e *ast.FieldtypesExpr) (value.
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return cg.buildAtomArray(block, nil), nil
 	}
@@ -410,7 +429,9 @@ func (cg *CodeGen) genFieldtypes(block *ir.Block, e *ast.FieldtypesExpr) (value.
 
 	// Compile-time.
 	sn := structNameFromValue(val)
+
 	var atoms []string
+
 	if sn != "" {
 		for _, ft := range cg.structFieldLLVMTypes[sn] {
 			atoms = append(atoms, "'"+primitiveTypeName(ft))
@@ -428,6 +449,7 @@ func (cg *CodeGen) genFieldtag(block *ir.Block, e *ast.FieldtagExpr) (value.Valu
 	if err != nil {
 		return nil, err
 	}
+
 	fieldNameVal, err := cg.genExpr(block, e.Field)
 	if err != nil {
 		return nil, err
@@ -448,6 +470,7 @@ func (cg *CodeGen) genFieldtag(block *ir.Block, e *ast.FieldtagExpr) (value.Valu
 	// Fast path: compile-time string literal -> return atom constant directly.
 	if strLit, ok := e.Field.(*ast.StringLit); ok {
 		tags := cg.structFieldTags[sn]
+
 		tag := ""
 		if tags != nil {
 			tag = tags[strLit.Value]
@@ -470,6 +493,7 @@ func (cg *CodeGen) genFieldtag(block *ir.Block, e *ast.FieldtagExpr) (value.Valu
 		if tags != nil {
 			tag = tags[fname]
 		}
+
 		tagAtom := cg.atomConstant(cg.registerAtom(tag))
 
 		namePtr := cg.newGlobalString(fname)
@@ -492,6 +516,7 @@ func (cg *CodeGen) genGetfield(block *ir.Block, e *ast.GetfieldExpr) (value.Valu
 	if err != nil {
 		return nil, err
 	}
+
 	fieldNameVal, err := cg.genExpr(block, e.Field)
 	if err != nil {
 		return nil, err
@@ -551,6 +576,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 		if st == nil {
 			continue
 		}
+
 		fieldNames := cg.structFields[sn]
 		fieldTypes := cg.structFieldLLVMTypes[sn]
 		vtableOff := cg.vtableOffset(sn)
@@ -594,6 +620,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 	// Retain the winner before releasing all boxes so it isn't freed underneath us.
 	// _tin_retain(null) is a safe no-op when no field matched.
 	cg.emitRetain(block, result)
+
 	for _, box := range allBoxes {
 		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
 	}
@@ -608,6 +635,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 
 	fieldNames := cg.structFields[sn]
 	fieldTypes := cg.structFieldLLVMTypes[sn]
+
 	st := cg.structTypes[sn]
 	if st == nil || len(fieldNames) == 0 {
 		return zeroAny, nil
@@ -645,6 +673,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 	// Retain the winner before releasing all boxes.
 	// _tin_retain(null) is a safe no-op when no field matched.
 	cg.emitRetain(block, result)
+
 	for _, box := range boxes {
 		cg.emitRelease(block, box) // winner -> RC=1; non-selected -> freed
 	}
@@ -674,6 +703,7 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 		if st == nil {
 			continue
 		}
+
 		fieldNames := cg.structFields[sn]
 		fieldTypes := cg.structFieldLLVMTypes[sn]
 		vtableOff := cg.vtableOffset(sn)
@@ -703,6 +733,7 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 			if !coerced.Type().Equal(fieldTypes[i]) {
 				continue
 			}
+
 			currentField := block.NewLoad(fieldTypes[i], fieldGep)
 			selected := block.NewSelect(isMatch, coerced, currentField)
 			block.NewStore(selected, fieldGep)
@@ -725,10 +756,12 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 	if err != nil {
 		return nil, err
 	}
+
 	fieldNameVal, err := cg.genExpr(block, e.Field)
 	if err != nil {
 		return nil, err
 	}
+
 	newVal, err := cg.genExpr(block, e.Val)
 	if err != nil {
 		return nil, err
@@ -742,10 +775,12 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 	if !ok {
 		return nil, nil
 	}
+
 	st, ok := pt.ElemType.(*irtypes.StructType)
 	if !ok {
 		return nil, nil
 	}
+
 	sn := st.Name()
 	if sn == "" {
 		// Anonymous struct: check if this is an any fat-ptr (setfield on any-boxed struct).
@@ -758,6 +793,7 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 
 	fieldNames := cg.structFields[sn]
 	fieldTypes := cg.structFieldLLVMTypes[sn]
+
 	if len(fieldNames) == 0 {
 		return nil, nil
 	}
@@ -782,6 +818,7 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 		if !coerced.Type().Equal(fieldTypes[i]) {
 			continue
 		}
+
 		currentField := block.NewLoad(fieldTypes[i], fieldGep)
 		selected := block.NewSelect(isMatch, coerced, currentField)
 		block.NewStore(selected, fieldGep)

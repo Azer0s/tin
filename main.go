@@ -62,21 +62,27 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
 			continue
 		}
+
 		if strings.HasPrefix(trimmed, "//!") {
 			rest := strings.TrimSpace(trimmed[3:])
 			if rest == "" {
 				continue
 			}
+
 			if strings.HasPrefix(rest, "+") {
 				spec := strings.TrimSpace(rest[1:])
 				parts := strings.SplitN(spec, " -- ", 2)
 				cpath := filepath.Join(srcDir, strings.TrimSpace(parts[0]))
+
 				var extraFlags []string
+
 				if len(parts) == 2 {
 					fields := strings.Fields(parts[1])
 					for i := 0; i < len(fields); i++ {
 						f := fields[i]
+
 						var iPath string
+
 						if f == "-I" && i+1 < len(fields) {
 							// "-I path" (space-separated)
 							i++
@@ -85,16 +91,19 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 							// "-Ipath" (no space)
 							iPath = f[2:]
 						}
+
 						if iPath != "" {
 							if !filepath.IsAbs(iPath) {
 								iPath = filepath.Join(srcDir, iPath)
 							}
+
 							extraFlags = append(extraFlags, "-I"+iPath)
 						} else {
 							extraFlags = append(extraFlags, f)
 						}
 					}
 				}
+
 				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
 			} else {
 				linkerFlags = append(linkerFlags, rest)
@@ -112,26 +121,34 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 func main() {
 	if len(os.Args) < 3 {
 		_, _ = fmt.Fprint(os.Stderr, usage)
+
 		os.Exit(1)
 	}
+
 	cmd := os.Args[1]
 
 	// Parse flags: -lib means compile to object file, not a binary
 	libMode := false
 	fileArgIdx := 2
+
 	if cmd == "build" && len(os.Args) > 2 && os.Args[2] == "-lib" {
 		libMode = true
+
 		fileArgIdx = 3
 		if len(os.Args) <= fileArgIdx {
 			_, _ = fmt.Fprint(os.Stderr, usage)
+
 			os.Exit(1)
 		}
 	}
+
 	file := os.Args[fileArgIdx]
 
 	// Collect -cflag values and warning-suppression flags from anywhere after the file arg.
 	var extraCFlags []string
+
 	noWarnAsyncMain := false
+
 	for i := fileArgIdx + 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-cflag":
@@ -151,9 +168,11 @@ func main() {
 		if recursive {
 			file = filepath.Dir(file)
 		}
+
 		if fi, statErr := os.Stat(file); statErr == nil && fi.IsDir() {
 			// Collect extra link flags from remaining args
 			var extraFlags []string
+
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
 				a := os.Args[i]
 				if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
@@ -161,6 +180,7 @@ func main() {
 					extraFlags = append(extraFlags, a)
 				}
 			}
+
 			if recursive {
 				runDirTestsRecursive(file, extraFlags)
 			} else {
@@ -181,6 +201,7 @@ func main() {
 
 	// Lex
 	l := lexer.New(string(src))
+
 	tokens, lexErr := l.Tokenize()
 	if lexErr != nil {
 		die("lex error: %v", lexErr)
@@ -193,6 +214,7 @@ func main() {
 	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
+
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		die("parse error: %v", parseErr)
@@ -201,14 +223,17 @@ func main() {
 	// Preprocess: expand macros and print expanded source (no codegen/IR)
 	if cmd == "preprocess" {
 		cg := codegen.New(file)
+
 		expanded, ppErr := cg.ExpandProgramMacros(prog)
 		if ppErr != nil {
 			die("preprocess error: %v", ppErr)
 		}
+
 		for _, stmt := range expanded.Stmts {
 			if _, isMacro := stmt.(*ast.MacroDecl); isMacro {
 				continue // macro decls are consumed; not printed
 			}
+
 			fmt.Println(ast.PrintStmt(stmt, 0))
 		}
 
@@ -220,9 +245,11 @@ func main() {
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)
 	}
+
 	if noWarnAsyncMain {
 		cg.SetNoWarnAsyncMain(true)
 	}
+
 	mod, cgErr := cg.Generate(prog)
 	if cgErr != nil {
 		die("codegen error: %v", cgErr)
@@ -237,6 +264,7 @@ func main() {
 		if readErr != nil {
 			continue
 		}
+
 		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc))
 		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
 		fileCSources = append(fileCSources, pkgCSources...)
@@ -246,6 +274,7 @@ func main() {
 	// multiple .tin files via //!+file.c; only compile it once).
 	{
 		seen := map[string]bool{}
+
 		deduped := fileCSources[:0]
 		for _, cs := range fileCSources {
 			if !seen[cs.path] {
@@ -253,11 +282,13 @@ func main() {
 				deduped = append(deduped, cs)
 			}
 		}
+
 		fileCSources = deduped
 	}
 	// Deduplicate linker flags too.
 	{
 		seen := map[string]bool{}
+
 		deduped := fileLinkerFlags[:0]
 		for _, f := range fileLinkerFlags {
 			if !seen[f] {
@@ -265,6 +296,7 @@ func main() {
 				deduped = append(deduped, f)
 			}
 		}
+
 		fileLinkerFlags = deduped
 	}
 
@@ -285,6 +317,7 @@ func main() {
 		}
 		// Collect extra link inputs: .o/.a files, -lNAME, -LDIR, -o flag
 		var extraObjs []string
+
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-o" {
@@ -300,6 +333,7 @@ func main() {
 				extraObjs = append(extraObjs, a)
 			}
 		}
+
 		extraObjs = append(srcLinkFlags, extraObjs...)
 		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
@@ -307,7 +341,9 @@ func main() {
 
 	case "build-test":
 		out := strings.TrimSuffix(file, filepath.Ext(file)) + ".test"
+
 		var extraObjs []string
+
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-o" {
@@ -323,6 +359,7 @@ func main() {
 				extraObjs = append(extraObjs, a)
 			}
 		}
+
 		extraObjs = append(srcLinkFlags, extraObjs...)
 		if err := compileIR(irText, out, false, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
@@ -333,6 +370,7 @@ func main() {
 		tmp, _ := filepath.Abs(tmpRel)
 		// Collect extra link inputs for run/test mode too
 		var extraObjs []string
+
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-cflag" {
@@ -343,26 +381,32 @@ func main() {
 				extraObjs = append(extraObjs, a)
 			}
 		}
+
 		extraObjs = append(srcLinkFlags, extraObjs...)
+
 		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags); err != nil {
 			die("compile error: %v", err)
 		}
 		defer func(name string) {
 			_ = os.Remove(name)
 		}(tmp)
+
 		run := exec.Command(tmp)
 		run.Stdout = os.Stdout
+
 		run.Stderr = os.Stderr
 		if err := run.Run(); err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
 				os.Exit(exitErr.ExitCode())
 			}
+
 			die("run error: %v", err)
 		}
 
 	default:
 		_, _ = fmt.Fprint(os.Stderr, usage)
+
 		os.Exit(1)
 	}
 }
@@ -388,10 +432,13 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	defer func(name string) {
 		_ = os.Remove(name)
 	}(llFile.Name())
+
 	if _, err := llFile.WriteString(ir); err != nil {
 		return err
 	}
+
 	_ = llFile.Close()
+
 	if dumpPath := os.Getenv("TIN_DUMP_IR"); dumpPath != "" {
 		_ = os.WriteFile(dumpPath, []byte(ir), 0644)
 	}
@@ -406,6 +453,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	// safe default for any module that uses fibers.
 	hasCoro := strings.Contains(ir, "llvm.coro.")
 	llInputFile := llFile.Name()
+
 	optLevel := "-O2"
 	if hasCoro {
 		optLevel = "-O1"
@@ -423,32 +471,40 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		if err != nil {
 			return fmt.Errorf("cannot create temp object file: %w", err)
 		}
+
 		irObjName := irObj.Name()
 		_ = irObj.Close()
+
 		defer func() { _ = os.Remove(irObjName) }()
 
 		clangIR := exec.Command("clang", optLevel, "-c", llInputFile, "-o", irObjName)
 		clangIR.Stdout = os.Stdout
+
 		clangIR.Stderr = os.Stderr
 		if err := clangIR.Run(); err != nil {
 			return err
 		}
 
 		objs := []string{irObjName}
+
 		var tmpObjs []string
+
 		for _, cs := range cSources {
 			cObj, err := os.CreateTemp("", "tin-c-*.o")
 			if err != nil {
 				return fmt.Errorf("cannot create temp object file: %w", err)
 			}
+
 			cObjName := cObj.Name()
 			_ = cObj.Close()
+
 			tmpObjs = append(tmpObjs, cObjName)
 			cArgs := []string{"-O2", "-c"}
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
 			clangC := exec.Command("clang", cArgs...)
 			clangC.Stdout = os.Stdout
+
 			clangC.Stderr = os.Stderr
 			if err := clangC.Run(); err != nil {
 				for _, f := range tmpObjs {
@@ -457,8 +513,10 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 				return err
 			}
+
 			objs = append(objs, cObjName)
 		}
+
 		defer func() {
 			for _, f := range tmpObjs {
 				_ = os.Remove(f)
@@ -478,11 +536,15 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	// Compile each cSource at -O2 (always safe: C files never contain coro
 	// intrinsics, so -O2 is correct and avoids the -O1 penalty forced on the IR).
 	// Linker flags (-l/-L) are separated out and passed only at link time.
-	var tmpCObjs []string
-	var cObjPaths []string
-	var cLinkerFlags []string
+	var (
+		tmpCObjs     []string
+		cObjPaths    []string
+		cLinkerFlags []string
+	)
+
 	for _, cs := range cSources {
 		var compileFlags []string
+
 		for _, f := range cs.flags {
 			if strings.HasPrefix(f, "-l") || strings.HasPrefix(f, "-L") {
 				cLinkerFlags = append(cLinkerFlags, f)
@@ -490,18 +552,22 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 				compileFlags = append(compileFlags, f)
 			}
 		}
+
 		cObj, tmpErr := os.CreateTemp("", "tin-c-*.o")
 		if tmpErr != nil {
 			return fmt.Errorf("cannot create temp object file: %w", tmpErr)
 		}
+
 		cObjName := cObj.Name()
 		_ = cObj.Close()
+
 		tmpCObjs = append(tmpCObjs, cObjName)
 		cArgs := []string{"-O2", "-c"}
 		cArgs = append(cArgs, compileFlags...)
 		cArgs = append(cArgs, cs.path, "-o", cObjName)
 		clangC := exec.Command("clang", cArgs...)
 		clangC.Stdout = os.Stdout
+
 		clangC.Stderr = os.Stderr
 		if err := clangC.Run(); err != nil {
 			for _, f := range tmpCObjs {
@@ -510,8 +576,10 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 			return err
 		}
+
 		cObjPaths = append(cObjPaths, cObjName)
 	}
+
 	defer func() {
 		for _, f := range tmpCObjs {
 			_ = os.Remove(f)
@@ -522,6 +590,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
 	}
+
 	args = append(args, cObjPaths...)
 	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
@@ -539,12 +608,15 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 // that contains at least one .tin file.
 func runDirTestsRecursive(root string, extraFlags []string) {
 	var walk func(dir string)
+
 	walk = func(dir string) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return
 		}
+
 		hasTin := false
+
 		for _, e := range entries {
 			if !e.IsDir() && filepath.Ext(e.Name()) == ".tin" {
 				hasTin = true
@@ -552,9 +624,11 @@ func runDirTestsRecursive(root string, extraFlags []string) {
 				break
 			}
 		}
+
 		if hasTin {
 			runDirTests(dir, extraFlags)
 		}
+
 		for _, e := range entries {
 			if e.IsDir() && e.Name() != "wip" {
 				walk(filepath.Join(dir, e.Name()))
@@ -577,12 +651,14 @@ func runDirTests(dir string, extraFlags []string) {
 		file   string
 		passed bool
 	}
+
 	var results []result
 
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".tin" {
 			continue
 		}
+
 		fpath := filepath.Join(dir, e.Name())
 
 		src, err := os.ReadFile(fpath)
@@ -591,32 +667,40 @@ func runDirTests(dir string, extraFlags []string) {
 		}
 
 		l := lexer.New(string(src))
+
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", e.Name(), lexErr)
 
 			continue
 		}
+
 		p := parser.New(tokens)
 		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens) {
 			p.RegisterNoParensMacro(name, expansion)
 		}
+
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
 
 			continue
 		}
+
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
+
 		type modIface interface{ String() string }
+
 		var mod modIface
+
 		cgErr := func() (retErr error) {
 			defer func() {
 				if r := recover(); r != nil {
 					retErr = fmt.Errorf("internal panic: %v", r)
 				}
 			}()
+
 			m, err := cg.Generate(prog)
 			mod = m
 
@@ -627,11 +711,13 @@ func runDirTests(dir string, extraFlags []string) {
 
 			continue
 		}
+
 		if !cg.HasTests() {
 			continue // no test blocks in this file
 		}
 
 		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath))
+
 		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
 			srcLinks = append(srcLinks, "-l"+lib)
@@ -643,6 +729,7 @@ func runDirTests(dir string, extraFlags []string) {
 			if pkgReadErr != nil {
 				continue
 			}
+
 			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc))
 			srcLinks = append(srcLinks, pkgLinks...)
 			fCSources = append(fCSources, pkgCSrcs...)
@@ -651,6 +738,7 @@ func runDirTests(dir string, extraFlags []string) {
 		// imported packages, e.g. sync_helpers.c from mutex/rwmutex/cond).
 		{
 			seen := map[string]bool{}
+
 			deduped := fCSources[:0]
 			for _, cs := range fCSources {
 				if !seen[cs.path] {
@@ -658,11 +746,13 @@ func runDirTests(dir string, extraFlags []string) {
 					deduped = append(deduped, cs)
 				}
 			}
+
 			fCSources = deduped
 		}
 		// Deduplicate link flags too.
 		{
 			seen := map[string]bool{}
+
 			deduped := srcLinks[:0]
 			for _, f := range srcLinks {
 				if !seen[f] {
@@ -670,8 +760,10 @@ func runDirTests(dir string, extraFlags []string) {
 					deduped = append(deduped, f)
 				}
 			}
+
 			srcLinks = deduped
 		}
+
 		linkFlags := append(srcLinks, extraFlags...)
 
 		fmt.Printf("\n=== %s ===\n", e.Name())
@@ -679,10 +771,12 @@ func runDirTests(dir string, extraFlags []string) {
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
+
 			results = append(results, result{e.Name(), false})
 
 			continue
 		}
+
 		_ = tmp.Close()
 		//goland:noinspection GoDeferInLoop
 		defer func(name string) {
@@ -692,6 +786,7 @@ func runDirTests(dir string, extraFlags []string) {
 		irText := fixCoroAttrs(mod.String())
 		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
+
 			results = append(results, result{e.Name(), false})
 
 			continue
@@ -700,10 +795,12 @@ func runDirTests(dir string, extraFlags []string) {
 		run := exec.Command(tmp.Name())
 		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
+
 		passed := true
 		if runErr := run.Run(); runErr != nil {
 			passed = false
 		}
+
 		results = append(results, result{e.Name(), passed})
 	}
 
@@ -714,12 +811,15 @@ func runDirTests(dir string, extraFlags []string) {
 	}
 
 	fmt.Printf("\n")
+
 	failed := 0
+
 	for _, r := range results {
 		if !r.passed {
 			failed++
 		}
 	}
+
 	if failed == 0 {
 		fmt.Printf("all %d test file(s) passed.\n", len(results))
 	} else {
@@ -730,5 +830,6 @@ func runDirTests(dir string, extraFlags []string) {
 
 func die(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
+
 	os.Exit(1)
 }
