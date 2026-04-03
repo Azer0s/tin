@@ -604,9 +604,11 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	return clang.Run()
 }
 
-// runDirTestsRecursive calls runDirTests on root and every subdirectory
-// that contains at least one .tin file.
-func runDirTestsRecursive(root string, extraFlags []string) {
+// collectTinFiles recursively collects all .tin file paths under root,
+// skipping directories named "wip".
+func collectTinFiles(root string) []string {
+	var files []string
+
 	var walk func(dir string)
 
 	walk = func(dir string) {
@@ -615,18 +617,10 @@ func runDirTestsRecursive(root string, extraFlags []string) {
 			return
 		}
 
-		hasTin := false
-
 		for _, e := range entries {
 			if !e.IsDir() && filepath.Ext(e.Name()) == ".tin" {
-				hasTin = true
-
-				break
+				files = append(files, filepath.Join(dir, e.Name()))
 			}
-		}
-
-		if hasTin {
-			runDirTests(dir, extraFlags)
 		}
 
 		for _, e := range entries {
@@ -635,17 +629,43 @@ func runDirTestsRecursive(root string, extraFlags []string) {
 			}
 		}
 	}
+
 	walk(root)
+
+	return files
 }
 
-// runDirTests runs all .tin files in dir that contain test blocks
+// runDirTestsRecursive collects all .tin files under root and runs them
+// together as a single test batch with one combined summary.
+func runDirTestsRecursive(root string, extraFlags []string) {
+	files := collectTinFiles(root)
+	runFileTests(files, extraFlags)
+}
+
+// runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
-// if any file has failing tests
+// if any file has failing tests.
 func runDirTests(dir string, extraFlags []string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		die("cannot read directory %s: %v", dir, err)
 	}
+
+	var files []string
+
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".tin" {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+
+	runFileTests(files, extraFlags)
+}
+
+// runFileTests runs the given .tin files that contain test blocks.
+// It prints a per-file header and aggregate summary, then exits non-zero
+// if any file has failing tests.
+func runFileTests(fpaths []string, extraFlags []string) {
 
 	type result struct {
 		file   string
@@ -654,12 +674,8 @@ func runDirTests(dir string, extraFlags []string) {
 
 	var results []result
 
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".tin" {
-			continue
-		}
-
-		fpath := filepath.Join(dir, e.Name())
+	for _, fpath := range fpaths {
+		fname := filepath.Base(fpath)
 
 		src, err := os.ReadFile(fpath)
 		if err != nil {
@@ -670,7 +686,7 @@ func runDirTests(dir string, extraFlags []string) {
 
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", e.Name(), lexErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
 
 			continue
 		}
@@ -682,7 +698,7 @@ func runDirTests(dir string, extraFlags []string) {
 
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", e.Name(), parseErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
 
 			continue
 		}
@@ -707,7 +723,7 @@ func runDirTests(dir string, extraFlags []string) {
 			return err
 		}()
 		if cgErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", e.Name(), cgErr)
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
 
 			continue
 		}
@@ -766,13 +782,13 @@ func runDirTests(dir string, extraFlags []string) {
 
 		linkFlags := append(srcLinks, extraFlags...)
 
-		fmt.Printf("\n=== %s ===\n", e.Name())
+		fmt.Printf("\n=== %s ===\n", fname)
 
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 
-			results = append(results, result{e.Name(), false})
+			results = append(results, result{fname, false})
 
 			continue
 		}
@@ -787,7 +803,7 @@ func runDirTests(dir string, extraFlags []string) {
 		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 
-			results = append(results, result{e.Name(), false})
+			results = append(results, result{fname, false})
 
 			continue
 		}
@@ -801,11 +817,11 @@ func runDirTests(dir string, extraFlags []string) {
 			passed = false
 		}
 
-		results = append(results, result{e.Name(), passed})
+		results = append(results, result{fname, passed})
 	}
 
 	if len(results) == 0 {
-		fmt.Printf("no test files found in %s\n", dir)
+		fmt.Printf("no test files found\n")
 
 		return
 	}

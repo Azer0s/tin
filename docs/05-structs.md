@@ -243,22 +243,23 @@ releases it on scope exit.
 
 ## Weak fields
 
-Tin uses **ARC** (Automatic Reference Counting) to manage the lifetime of
-heap-allocated values. ARC works well for trees and DAGs, but a cycle between
-two structs that each hold a reference to the other would keep both alive
-forever - neither reference count reaches zero.
+Two structs that each hold a pointer to the other form a reference cycle.
+Tin's compiler detects cycles in the struct field graph at compile time and
+requires at least one edge in every cycle to be marked `weak`.
 
 ### The problem
 
+A doubly-linked list node needs to point both forward and backward:
+
 ```rust
 struct node =
-  next [node]   // strong: owns the next node
-  prev [node]   // strong: also owns... the previous node?
+  value i64
+  next  *node   // forward pointer
+  prev  *node   // backward pointer - creates a cycle
 ```
 
-Here every node owns its successor *and* its predecessor. The reference count
-of a node can never drop to zero because someone always holds a strong reference
-to it. Tin's compiler detects this at compile time:
+Because both fields point to `node`, the type graph has a cycle. The compiler
+rejects this:
 
 ```
 error: reference cycle detected: node
@@ -271,62 +272,44 @@ Mark the non-owning direction `weak`:
 
 ```rust
 struct node =
-  next [node]        // strong: owns the forward chain
-  prev weak [node]   // weak:   back-reference, does not own
+  value i64
+  next  *node        // strong: owns / leads the chain
+  prev  weak *node   // weak:   back-reference, does not own
 ```
 
-`weak` goes directly before the field type. A weak field:
+`weak` goes directly before the field type. A weak field behaves as a
+non-owning pointer - no retain or release is emitted for it at runtime:
 
-- Is **not** retained when assigned (no `rc++`).
-- Is **not** released when the struct is freed (no `rc--`).
-- Contains a valid value as long as the owning side is alive - the programmer
-  is responsible for not outliving the owner.
+- Is **not** retained when assigned.
+- Is **not** released when the struct is freed.
+- The programmer is responsible for not letting it outlive the owning side.
 
 ### Compiler cycle detection
 
-The compiler runs Tarjan's SCC algorithm on the struct type graph at
-compile time. Every struct whose fields transitively reference itself (or
-another struct that references back) forms a cycle.
-
-**Rules:**
+The compiler runs Tarjan's SCC algorithm on the struct type graph. Every
+strongly-connected component that forms a cycle must satisfy:
 
 | Cycle composition | Result |
 |---|---|
-| All strong edges | **Error** - cycle would leak memory |
-| All weak edges | **Error** - nobody owns the structs; they would be freed immediately |
-| Mix of strong and weak | **OK** - exactly one ownership chain per cycle |
+| All strong edges | **Error** - at least one must be `weak` |
+| All weak edges | **Error** - nobody owns the structs |
+| Mix of strong and weak | **OK** |
 
 ```rust
-// ERROR: both strong -> cycle would never be freed
-struct a =
-  b_ref [b]
+// ERROR: mutual strong references
+struct parent =
+  child *child
 
-struct b =
-  a_ref [a]
+struct child =
+  parent *parent
 
-// OK: one strong edge, one weak edge
-struct a =
-  b_ref [b]
+// OK: one strong, one weak
+struct parent =
+  child *child
 
-struct b =
-  a_ref weak [a]
+struct child =
+  parent weak *parent
 ```
-
-### Raw pointer fields
-
-`weak` also works with raw pointer fields (`*T`). Since raw pointers are
-never ARC-managed, `weak *T` is purely an ownership annotation for the cycle
-checker - it carries no runtime difference from `*T`:
-
-```rust
-struct node =
-  value i64
-  next  *node        // forward pointer (not ARC-managed)
-  prev  weak *node   // back-pointer (weak: satisfies cycle invariant)
-```
-
-This lets the compiler accept the file while making ownership intent explicit
-in the source.
 
 ---
 

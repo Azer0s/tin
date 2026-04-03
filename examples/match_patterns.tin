@@ -1,0 +1,196 @@
+// examples/match_patterns.tin
+//
+// Demonstrates struct destructuring match patterns:
+//   - field binding (bind field to same name)
+//   - field rename (bind field to a different name)
+//   - literal constraint (require field == value)
+//   - wildcard (_)
+//   - nested patterns
+//   - guard clauses (if expr)
+//   - match as expression
+//   - patterns over string fields
+
+use assert
+
+struct point =
+  x i64
+  y i64
+
+struct person =
+  name   string
+  age    i64
+  active bool
+
+struct address =
+  city    string
+  country string
+
+struct employee =
+  person  person
+  address address
+  salary  i64
+
+// ── basic binding ──────────────────────────────────────────────────────────
+
+test "bind all fields" =
+  let p = point{x: 3, y: 7}
+  match p:
+    case point{x, y}:
+      assert::equals(x, 3)
+      assert::equals(y, 7)
+
+test "bind subset of fields" =
+  let p = point{x: 10, y: 20}
+  match p:
+    case point{x, _}:
+      assert::equals(x, 10)
+
+// ── literal constraints ────────────────────────────────────────────────────
+
+test "literal constraint on i64 field" =
+  let p = point{x: 0, y: 42}
+  match p:
+    case point{x: 0, y}:
+      assert::equals(y, 42)
+    default:
+      assert::fails("should match x==0")
+
+test "literal constraint not matched" =
+  let p = point{x: 1, y: 42}
+  let hit = false
+  match p:
+    case point{x: 0, y}:
+      assert::fails("x is not 0")
+    default:
+      hit = true
+  assert::ok(hit)
+
+test "literal constraint on string field" =
+  let emp = person{name: "alice", age: 30, active: true}
+  match emp:
+    case person{name: "alice", age, _}:
+      assert::equals(age, 30)
+    default:
+      assert::fails("should match alice")
+
+test "literal constraint on bool field" =
+  let emp = person{name: "bob", age: 25, active: false}
+  let matched = false
+  match emp:
+    case person{_, _, active: true}:
+      assert::fails("should not match active=true")
+    default:
+      matched = true
+  assert::ok(matched)
+
+// ── rename bindings ────────────────────────────────────────────────────────
+
+test "rename binding" =
+  let p = point{x: 5, y: 9}
+  match p:
+    case point{x: col, y: row}:
+      assert::equals(col, 5)
+      assert::equals(row, 9)
+
+test "rename binding with string field" =
+  let emp = person{name: "carol", age: 40, active: true}
+  match emp:
+    case person{name: n, age: yrs, _}:
+      assert::equals_str(n, "carol")
+      assert::equals(yrs, 40)
+
+test "mix rename and literal constraint" =
+  let p = point{x: 0, y: 7}
+  match p:
+    case point{x: 0, y: row}:
+      assert::equals(row, 7)
+    default:
+      assert::fails("should match")
+
+// ── guard clauses ──────────────────────────────────────────────────────────
+
+test "guard with bound field" =
+  let p = point{x: 10, y: 3}
+  match p:
+    case point{x, y} if x > y:
+      assert::equals(x, 10)
+    default:
+      assert::fails("guard should pass")
+
+test "guard with renamed field" =
+  let p = point{x: 5, y: 5}
+  match p:
+    case point{x: a, y: b} if a == b:
+      assert::equals(a, 5)
+    default:
+      assert::fails("should match diagonal")
+
+test "guard failure falls to next arm" =
+  let p = point{x: 3, y: 7}
+  let result = match p:
+    case point{x, y} if x > y: "x bigger"
+    case point{x, y}: "y bigger or equal"
+  assert::equals_str(result, "y bigger or equal")
+
+// ── nested patterns ────────────────────────────────────────────────────────
+
+test "nested pattern with constraint" =
+  let e = employee{
+    person:  person{name: "dave", age: 28, active: true},
+    address: address{city: "vienna", country: "austria"},
+    salary:  80000,
+  }
+  match e:
+    case employee{person: person{name: "dave", age, _}, address, salary}:
+      assert::equals(age, 28)
+      assert::equals(salary, 80000)
+    default:
+      assert::fails("should match dave")
+
+test "nested pattern rename at inner level" =
+  let e = employee{
+    person:  person{name: "eve", age: 35, active: true},
+    address: address{city: "berlin", country: "germany"},
+    salary:  95000,
+  }
+  match e:
+    case employee{person: person{name: emp_name, age: emp_age, _}, _, salary: pay}:
+      assert::equals_str(emp_name, "eve")
+      assert::equals(emp_age, 35)
+      assert::equals(pay, 95000)
+
+test "nested pattern string constraint" =
+  let e = employee{
+    person:  person{name: "frank", age: 50, active: false},
+    address: address{city: "paris", country: "france"},
+    salary:  120000,
+  }
+  match e:
+    case employee{_, address: address{city: "paris", country: c}, _}:
+      assert::equals_str(c, "france")
+    default:
+      assert::fails("should match paris")
+
+// ── match as expression ────────────────────────────────────────────────────
+
+test "match expression basic" =
+  let p = point{x: 0, y: 0}
+  let label = match p:
+    case point{x: 0, y: 0}: "origin"
+    case point{x: 0, _}:    "y-axis"
+    case point{_, y: 0}:    "x-axis"
+    case point{_, _}:       "other"
+  assert::equals_str(label, "origin")
+
+test "match expression with rename" =
+  let p = point{x: 4, y: 7}
+  let sum = match p:
+    case point{x: a, y: b}: a + b
+  assert::equals(sum, 11)
+
+test "match expression with string field" =
+  let emp = person{name: "grace", age: 22, active: true}
+  let greeting = match emp:
+    case person{name: n, _, active: true}:  "hello {n}"
+    case person{name: n, _, active: false}: "bye {n}"
+  assert::equals_str(greeting, "hello grace")

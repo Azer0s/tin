@@ -141,11 +141,31 @@ A match is considered exhaustive when at least one arm has no literal
 constraints and no guard (a "total" arm that matches every value), or when
 a `default` arm is present. Guards do not count toward exhaustiveness.
 
+### Field rename bindings
+
+By default a free name in a pattern binds the field under its own name.
+Use `field: newName` to bind the field under a different variable name:
+
+```rust
+struct point =
+  x i64
+  y i64
+
+match p:
+  case point{x: col, y: row}:  // bound as col and row, not x and y
+    echo "col={col} row={row}"
+```
+
+A rename is recognized when the right side of `:` is a bare identifier not
+followed by operators or `(`, `[`, `.`, `::`. Literal constraints still work
+as before: `x: 0` requires the field to equal `0`; `name: "alice"` requires
+the string field to equal `"alice"`.
+
 ### Nested struct patterns
 
 Field values that are themselves structs can be matched by nesting a pattern
-after the `:` separator. Any depth of nesting is supported. Free names at any
-nesting level are bound as local variables:
+after the `:` separator. Any depth of nesting is supported. Free names (and
+renames) at any nesting level are bound as local variables:
 
 ```rust
 struct vec2 =
@@ -158,13 +178,21 @@ struct rect =
 
 fn classify(r rect) string =
   match r:
-    case rect{origin: vec2{x: 0, y: 0}, size}:  return "at-origin"
-    case rect{origin: vec2{x, y}, size} if x == y: return "diagonal origin"
-    case rect{origin: vec2{x, y}, size}:           return "other"
+    case rect{origin: vec2{x: 0, y: 0}, size}:        return "at-origin"
+    case rect{origin: vec2{x: ox, y: oy}, size} if ox == oy: return "diagonal"
+    case rect{origin: vec2{x: ox, y: oy}, size}:      return "({ox}, {oy})"
 ```
 
-Fields bound inside a nested pattern (e.g. `x`, `y` above) are available in
-the guard and body of the same arm, alongside fields from outer levels.
+Fields bound inside a nested pattern are available in the guard and body of
+the same arm, alongside fields from outer levels.
+
+String fields work in literal constraints inside nested patterns too:
+
+```rust
+match emp:
+  case employee{person: person{name: "alice", age, _}, _, salary}:
+    echo "alice is {age}, earns {salary}"
+```
 
 ### match as an expression
 

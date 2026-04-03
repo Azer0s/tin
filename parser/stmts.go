@@ -765,6 +765,10 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 					}
 
 					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: nested})
+				} else if p.isRenameBinding() {
+					// Bare IDENT not followed by expression-continuation tokens → rename.
+					bindTo := p.advance().Literal
+					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, BindTo: bindTo})
 				} else {
 					lit, err := p.parseExpr()
 					if err != nil {
@@ -793,6 +797,28 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 	}
 
 	return sp, nil
+}
+
+// isRenameBinding returns true when the current position holds a bare IDENT
+// that should be treated as a rename target (field: newName) rather than an
+// expression to evaluate as a constraint. A bare IDENT is one not followed by
+// any token that would continue an expression: (, [, {, ., ::, or an operator.
+func (p *Parser) isRenameBinding() bool {
+	if !p.check(lexer.IDENT) {
+		return false
+	}
+
+	next := p.peekAt(1).Type
+	switch next {
+	case lexer.LPAREN, lexer.LBRACKET, lexer.LBRACE,
+		lexer.DOT, lexer.DCOLON,
+		lexer.PLUS, lexer.MINUS, lexer.STAR, lexer.SLASH, lexer.PERCENT,
+		lexer.EQEQ, lexer.NEQ, lexer.LT, lexer.GT, lexer.LTEQ, lexer.GTEQ,
+		lexer.AND, lexer.OR, lexer.PIPE, lexer.KW_AS:
+		return false
+	}
+
+	return true
 }
 
 // parseTaggedBlock handles { #tag } { body } when tags haven't been pre-parsed.

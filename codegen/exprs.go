@@ -527,6 +527,89 @@ func armExprNode(stmt ast.Node) ast.Node {
 	return nil
 }
 
+// astInferTypeWithPattern infers the type of node like astInferType but first
+// pushes a temporary scope that maps pattern-bound names to their field types,
+// so that renamed bindings (e.g. "x: px") are visible when node is "px".
+func (cg *CodeGen) astInferTypeWithPattern(node ast.Node, pattern ast.Node) irtypes.Type {
+	sp, ok := pattern.(*ast.StructPattern)
+	if !ok {
+		return cg.astInferType(node)
+	}
+
+	// Collect bindings: field name -> LLVM field type from the struct.
+	bindings := map[string]irtypes.Type{}
+	cg.collectPatternBindingTypes(sp, bindings)
+
+	if len(bindings) == 0 {
+		return cg.astInferType(node)
+	}
+
+	// Push a temporary scope with those bindings as non-alloc entries.
+	cg.curScope = newScope(cg.curScope)
+
+	for varName, llvmType := range bindings {
+		cg.curScope.set(varName, &scopeEntry{val: &syntheticValue{t: llvmType}})
+	}
+
+	t := cg.astInferType(node)
+	cg.curScope = cg.curScope.parent
+
+	return t
+}
+
+// collectPatternBindingTypes walks a StructPattern and fills bindings with the
+// LLVM type for each free or renamed field, recursing into nested patterns.
+func (cg *CodeGen) collectPatternBindingTypes(sp *ast.StructPattern, bindings map[string]irtypes.Type) {
+	llvmType, ok := cg.structTypes[sp.TypeName]
+	if !ok {
+		return
+	}
+
+	for _, field := range sp.Fields {
+		if field.IsWild {
+			continue
+		}
+
+		idx := cg.fieldIndex(sp.TypeName, field.Name)
+		if idx < 0 {
+			continue
+		}
+
+		var ft irtypes.Type
+
+		if idx < len(llvmType.Fields) {
+			ft = llvmType.Fields[idx]
+		}
+
+		if nested, ok2 := field.Literal.(*ast.StructPattern); ok2 {
+			cg.collectPatternBindingTypes(nested, bindings)
+
+			continue
+		}
+
+		if field.Literal != nil {
+			continue
+		}
+
+		bindName := field.Name
+		if field.BindTo != "" {
+			bindName = field.BindTo
+		}
+
+		if ft != nil {
+			bindings[bindName] = ft
+		}
+	}
+}
+
+// syntheticValue is a zero-size placeholder value.Value used only to carry a
+// type through astInferType's Identifier case without emitting any IR.
+type syntheticValue struct{ t irtypes.Type }
+
+func (s *syntheticValue) Type() irtypes.Type { return s.t }
+func (s *syntheticValue) Ident() string      { return "%synthetic" }
+func (s *syntheticValue) String() string     { return "%synthetic" }
+
 // astInferType attempts to determine the LLVM type of a simple AST expression
 // without generating any code. Returns nil when the type cannot be determined.
 func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
@@ -652,13 +735,18 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 		}
 	}
 
-	// Determine result type from the first case arm.
+	// Determine result type from the first arm that can be inferred.
+	// Push pattern bindings into a temporary scope so that renamed fields
+	// (e.g. "x: px") are visible to astInferType when the arm body is "px".
 	var resType irtypes.Type
 
-	if len(s.Cases) > 0 {
-		c := s.Cases[0]
+	for _, c := range s.Cases {
 		if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
-			resType = cg.astInferType(expr)
+			resType = cg.astInferTypeWithPattern(expr, c.Pattern)
+		}
+
+		if resType != nil {
+			break
 		}
 	}
 

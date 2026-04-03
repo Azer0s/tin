@@ -600,10 +600,12 @@ type MatchCase struct {
 // Literal == nil means bind the field value to Name in the arm scope.
 // Literal != nil means the field must equal that value (constraint).
 // IsWild == true means "_": match but discard (no binding).
+// BindTo non-empty means rename: bind field Name to variable BindTo.
 type StructPatternField struct {
 	Name    string
 	Literal Node
 	IsWild  bool
+	BindTo  string // "x: px" -> Name="x", BindTo="px"
 }
 
 // StructPattern is used in match case arms to destructure a struct value:

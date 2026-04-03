@@ -2665,6 +2665,12 @@ func (cg *CodeGen) applyPatternChecks(
 
 		if irtypes.IsFloat(fieldType) {
 			cmp = checkBlock.NewFCmp(enum.FPredOEQ, fieldVal, litVal)
+		} else if isFatPtrType(fieldType) {
+			// String/fat-pointer equality: use strcmp.
+			lptr := cg.extractStringPtr(checkBlock, fieldVal)
+			rptr := cg.extractStringPtr(checkBlock, litVal)
+			strcmpResult := checkBlock.NewCall(cg.ensureStrcmp(), lptr, rptr)
+			cmp = checkBlock.NewICmp(enum.IPredEQ, strcmpResult, constant.NewInt(irtypes.I32, 0))
 		} else {
 			cmp = checkBlock.NewICmp(enum.IPredEQ, fieldVal, litVal)
 		}
@@ -2726,11 +2732,16 @@ func (cg *CodeGen) bindPatternFree(
 			continue
 		}
 
-		// Free field: bind to scope.
+		// Free field: bind to scope under Name (or BindTo if a rename was specified).
+		bindName := field.Name
+		if field.BindTo != "" {
+			bindName = field.BindTo
+		}
+
 		fv := block.NewLoad(fieldType, gep)
 		fa := block.NewAlloca(fieldType)
 		block.NewStore(fv, fa)
-		cg.curScope.set(field.Name, &scopeEntry{val: fa, isAlloc: true})
+		cg.curScope.set(bindName, &scopeEntry{val: fa, isAlloc: true})
 	}
 
 	return nil
