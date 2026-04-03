@@ -50,9 +50,9 @@ func nodeHasSideEffects(node ast.Node) bool {
 	if node == nil {
 		return false
 	}
+
 	switch v := node.(type) {
 	case *ast.EchoStmt:
-
 		return true
 	case *ast.Block:
 		for _, s := range v.Stmts {
@@ -64,6 +64,7 @@ func nodeHasSideEffects(node ast.Node) bool {
 		if nodeHasSideEffects(v.Cond) || blockHasSideEffects(v.Then) {
 			return true
 		}
+
 		for _, ei := range v.ElseIfs {
 			if blockHasSideEffects(ei.Body) {
 				return true
@@ -72,22 +73,16 @@ func nodeHasSideEffects(node ast.Node) bool {
 
 		return blockHasSideEffects(v.Else)
 	case *ast.ForStmt:
-
 		return nodeHasSideEffects(v.Cond) || blockHasSideEffects(v.Body)
 	case *ast.ReturnStmt:
-
 		return nodeHasSideEffects(v.Value)
 	case *ast.AssignStmt:
-
 		return nodeHasSideEffects(v.Value)
 	case *ast.VarDecl:
-
 		return nodeHasSideEffects(v.Value)
 	case *ast.ExprStmt:
-
 		return nodeHasSideEffects(v.Expr)
 	case *ast.BinExpr:
-
 		return nodeHasSideEffects(v.Left) || nodeHasSideEffects(v.Right)
 	}
 
@@ -98,6 +93,7 @@ func blockHasSideEffects(b *ast.Block) bool {
 	if b == nil {
 		return false
 	}
+
 	for _, s := range b.Stmts {
 		if nodeHasSideEffects(s) {
 			return true
@@ -120,11 +116,13 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 	defer func(name string) {
 		_ = os.Remove(name)
 	}(tmpFile.Name())
+
 	if _, err := tmpFile.WriteString(src); err != nil {
 		_ = tmpFile.Close()
 
 		return nil, err
 	}
+
 	_ = tmpFile.Close()
 
 	exe, err := os.Executable()
@@ -134,13 +132,17 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 	ctx, cancel := context.WithTimeout(context.Background(), macroTimeout)
 	defer cancel()
+
 	cmd := exec.CommandContext(ctx, exe, "run", tmpFile.Name())
 	out, err := cmd.Output()
+
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, fmt.Errorf("macro %s: timed out after %v\nGenerated source:\n%s", m.Name, macroTimeout, src)
 	}
+
 	if err != nil {
 		stderr := ""
+
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			stderr = string(ee.Stderr)
@@ -167,6 +169,7 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 	// Backtick splice: the macro returned a backtick literal; echo printed `content`
 	if len(result) >= 2 && result[0] == '`' && result[len(result)-1] == '`' {
 		inner := result[1 : len(result)-1]
+
 		node, err := parseExprString(inner)
 		if err != nil {
 			return nil, fmt.Errorf("macro %s: backtick splice parse error %q: %w\nGenerated source:\n%s",
@@ -175,10 +178,10 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 
 		return node, nil
 	}
+
 	switch retType {
 	case "string":
 		// echo prints bare string content - wrap it back into a StringLit directly
-
 		return &ast.StringLit{Value: result}, nil
 	case "f64":
 		// Try normal parse first (handles "3.14", "-1.5", etc.)
@@ -215,22 +218,17 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 func inferArgType(arg ast.Node) string {
 	switch arg.(type) {
 	case *ast.IntLit:
-
 		return "i64"
 	case *ast.FloatLit:
-
 		return "f64"
 	case *ast.BoolLit:
-
 		return "bool"
 	case *ast.StringLit:
-
 		return "string"
 	default:
 		// Complex expressions (calls, field accesses, etc.) are code fragments:
 		// pass them as strings containing the source text so they can be spliced
 		// into backtick templates via string interpolation.
-
 		return "string"
 	}
 }
@@ -240,10 +238,8 @@ func inferArgType(arg ast.Node) string {
 func isCodeFragmentArg(arg ast.Node) bool {
 	switch arg.(type) {
 	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit:
-
 		return false
 	default:
-
 		return true
 	}
 }
@@ -285,11 +281,13 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 	if node == nil {
 		return ""
 	}
+
 	switch v := node.(type) {
 	case *ast.ReturnStmt:
 		if v == nil {
 			return ""
 		}
+
 		if v.Value != nil {
 			return typeOfExpr(v.Value, paramTypes)
 		}
@@ -297,6 +295,7 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 		if v == nil {
 			return ""
 		}
+
 		for _, s := range v.Stmts {
 			if t := findReturnTypeInNode(s, paramTypes); t != "" {
 				return t
@@ -308,6 +307,7 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 				return t
 			}
 		}
+
 		for _, ei := range v.ElseIfs {
 			if ei.Body != nil {
 				if t := findReturnTypeInNode(ei.Body, paramTypes); t != "" {
@@ -315,6 +315,7 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 				}
 			}
 		}
+
 		if v.Else != nil {
 			if t := findReturnTypeInNode(v.Else, paramTypes); t != "" {
 				return t
@@ -333,19 +334,14 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 	switch v := n.(type) {
 	case *ast.IntLit:
-
 		return "i64"
 	case *ast.FloatLit:
-
 		return "f64"
 	case *ast.BoolLit:
-
 		return "bool"
 	case *ast.StringLit:
-
 		return "string"
 	case *ast.BacktickLit:
-
 		return "string" // backtick literals compile to string at runtime
 	case *ast.Identifier:
 		if t, ok := paramTypes[v.Name]; ok {
@@ -358,7 +354,6 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 
 		return typeOfExpr(v.Right, paramTypes)
 	case *ast.UnaryExpr:
-
 		return typeOfExpr(v.Expr, paramTypes)
 	case *ast.AsExpr:
 		if v.Type != nil {
@@ -376,6 +371,7 @@ func paramType(m *ast.MacroDecl, i int, args []ast.Node) string {
 	if i < len(m.ParamTypes) && m.ParamTypes[i] != "" {
 		return m.ParamTypes[i]
 	}
+
 	if i < len(args) {
 		return inferArgType(args[i])
 	}
@@ -408,6 +404,7 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 	for pkg := range importedPkgs {
 		sb.WriteString("use " + pkg + "\n")
 	}
+
 	if len(importedPkgs) > 0 {
 		sb.WriteString("\n")
 	}
@@ -417,24 +414,32 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 		if dep.Name == m.Name {
 			continue // skip self; self-calls are handled by renameMacroCalls
 		}
+
 		if isMacroComplex(dep) {
 			continue // only emit simple macros as declarations
 		}
+
 		sb.WriteString("macro " + dep.Name + "(")
+
 		for i, p := range dep.Params {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
+
 			sb.WriteString(p)
 		}
+
 		sb.WriteString(") = ")
+
 		body := dep.Body
 		if es, ok := body.(*ast.ExprStmt); ok {
 			body = es.Expr
 		}
+
 		sb.WriteString(ast.PrintExpr(body))
 		sb.WriteString("\n")
 	}
+
 	if len(allMacros) > 1 {
 		sb.WriteString("\n")
 	}
@@ -443,12 +448,15 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 
 	// Generate function declaration with inferred/declared parameter types
 	sb.WriteString("fn " + fnName + "(")
+
 	for i, param := range m.Params {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
+
 		sb.WriteString(param + " " + paramType(m, i, args))
 	}
+
 	sb.WriteString(") " + retType + " =\n")
 
 	// Print body with self-calls renamed to fnName (enables recursion without nested processes)
@@ -460,10 +468,12 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 	// Code-fragment args are passed as quoted source strings so the CTFE body
 	// can embed them in backtick splices via {param} interpolation.
 	sb.WriteString("echo " + fnName + "(")
+
 	for i, arg := range args {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
+
 		if isCodeFragmentArg(arg) {
 			src := ast.PrintExpr(arg)
 			// Escape backslashes and double quotes for embedding in a string literal.
@@ -474,6 +484,7 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 			sb.WriteString(ast.PrintExpr(arg))
 		}
 	}
+
 	sb.WriteString(")\n")
 
 	return sb.String()
@@ -487,6 +498,7 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 	if node == nil {
 		return nil
 	}
+
 	isMacroIdent := func(name string) bool {
 		return name == macroName || name == baseName+"!" || name == baseName
 	}
@@ -497,6 +509,7 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		for i, a := range v.Args {
 			newArgs[i] = renameMacroCalls(a, macroName, baseName, fnName)
 		}
+
 		if id, ok := v.Func.(*ast.Identifier); ok && isMacroIdent(id.Name) {
 			return &ast.CallExpr{Func: &ast.Identifier{Name: fnName}, Args: newArgs}
 		}
@@ -523,10 +536,12 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 				Body: renameMacroCalls(ei.Body, macroName, baseName, fnName).(*ast.Block),
 			}
 		}
+
 		var elsePart *ast.Block
 		if v.Else != nil {
 			elsePart = renameMacroCalls(v.Else, macroName, baseName, fnName).(*ast.Block)
 		}
+
 		var thenPart *ast.Block
 		if v.Then != nil {
 			thenPart = renameMacroCalls(v.Then, macroName, baseName, fnName).(*ast.Block)
@@ -557,18 +572,15 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.ReturnStmt:
-
 		return &ast.ReturnStmt{Value: renameMacroCalls(v.Value, macroName, baseName, fnName)}
 
 	case *ast.AssignStmt:
-
 		return &ast.AssignStmt{
 			Target: renameMacroCalls(v.Target, macroName, baseName, fnName),
 			Value:  renameMacroCalls(v.Value, macroName, baseName, fnName),
 		}
 
 	case *ast.AugAssignStmt:
-
 		return &ast.AugAssignStmt{
 			Target: v.Target,
 			Op:     v.Op,
@@ -576,14 +588,12 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.PostfixStmt:
-
 		return &ast.PostfixStmt{
 			Expr: renameMacroCalls(v.Expr, macroName, baseName, fnName),
 			Op:   v.Op,
 		}
 
 	case *ast.VarDecl:
-
 		return &ast.VarDecl{
 			IsConst: v.IsConst,
 			Name:    v.Name,
@@ -592,11 +602,9 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.ExprStmt:
-
 		return &ast.ExprStmt{Expr: renameMacroCalls(v.Expr, macroName, baseName, fnName)}
 
 	case *ast.BinExpr:
-
 		return &ast.BinExpr{
 			Left:  renameMacroCalls(v.Left, macroName, baseName, fnName),
 			Op:    v.Op,
@@ -604,7 +612,6 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.UnaryExpr:
-
 		return &ast.UnaryExpr{
 			Op:   v.Op,
 			Expr: renameMacroCalls(v.Expr, macroName, baseName, fnName),
@@ -612,7 +619,6 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.TernaryExpr:
-
 		return &ast.TernaryExpr{
 			Cond: renameMacroCalls(v.Cond, macroName, baseName, fnName),
 			Then: renameMacroCalls(v.Then, macroName, baseName, fnName),
@@ -620,7 +626,6 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.FieldAccess:
-
 		return &ast.FieldAccess{
 			Expr:  renameMacroCalls(v.Expr, macroName, baseName, fnName),
 			Field: v.Field,
@@ -628,14 +633,12 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 		}
 
 	case *ast.IndexExpr:
-
 		return &ast.IndexExpr{
 			Expr:  renameMacroCalls(v.Expr, macroName, baseName, fnName),
 			Index: renameMacroCalls(v.Index, macroName, baseName, fnName),
 		}
 
 	default:
-
 		return node
 	}
 }
@@ -643,10 +646,12 @@ func renameMacroCalls(node ast.Node, macroName, baseName, fnName string) ast.Nod
 // parseExprString parses a single tin expression from a string (the CTFE output).
 func parseExprString(s string) (ast.Node, error) {
 	l := lexer.New(s)
+
 	tokens, err := l.Tokenize()
 	if err != nil {
 		return nil, fmt.Errorf("parse macro output %q: lex error: %w", s, err)
 	}
+
 	p := parser.New(tokens)
 
 	return p.ParseExpr()

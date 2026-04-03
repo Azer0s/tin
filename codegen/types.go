@@ -50,6 +50,7 @@ func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
 			name = name[idx+2:]
 		}
+
 		parts := make([]string, len(t.TypeParams))
 		for i, tp := range t.TypeParams {
 			parts[i] = cg.typeExprCanonicalKey(tp)
@@ -57,10 +58,8 @@ func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
 
 		return name + "__" + strings.Join(parts, "__")
 	case *ast.PointerType:
-
 		return "*" + cg.typeExprCanonicalKey(t.Elem)
 	case *ast.ArrayType:
-
 		return "[]" + cg.typeExprCanonicalKey(t.Elem)
 	}
 
@@ -74,18 +73,18 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 	if te == nil {
 		return irtypes.Void, nil
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
-
 		return cg.resolveSimpleType(t.Name)
 	case *ast.VoidType:
-
 		return irtypes.Void, nil
 	case *ast.PointerType:
 		// *void is invalid in LLVM IR - use i8* (opaque pointer convention)
 		if st, ok := t.Elem.(*ast.SimpleType); ok && st.Name == "void" {
 			return irtypes.I8Ptr, nil
 		}
+
 		inner, err := cg.tinTypeToLLVM(t.Elem)
 		if err != nil {
 			return nil, err
@@ -97,9 +96,9 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		if t.Size < 0 {
 			// Dynamic array: {elem*, i64}
-
 			return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64), nil
 		}
 
@@ -108,21 +107,27 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		// Function values are fat pointers: { fn(i8* env, params...) ret *, i8* }
 		// The i8* env carries the closure environment; non-capturing lambdas use null
 		llParams := []irtypes.Type{irtypes.I8Ptr} // env is always first
+
 		for _, p := range t.Params {
 			pt, err := cg.tinTypeToLLVM(p)
 			if err != nil {
 				return nil, err
 			}
+
 			llParams = append(llParams, pt)
 		}
+
 		var ret irtypes.Type = irtypes.Void
+
 		if t.RetType != nil {
 			var err error
+
 			ret, err = cg.tinTypeToLLVM(t.RetType)
 			if err != nil {
 				return nil, err
 			}
 		}
+
 		ft := irtypes.NewFunc(ret, llParams...)
 		ft.Variadic = t.IsVarArgs
 		// Fat pointer struct: { fn_ptr*, i8* }
@@ -137,12 +142,14 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		if td, ok := cg.traits[t.Name]; ok {
 			instKey := traitImplKey(t)
 			typeSubst := map[string]irtypes.Type{}
+
 			for i, tpName := range td.TypeParams {
 				if i < len(t.TypeParams) {
 					lt, err := cg.tinTypeToLLVM(t.TypeParams[i])
 					if err != nil {
 						return nil, err
 					}
+
 					typeSubst[tpName] = lt
 				}
 			}
@@ -172,6 +179,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				// Detect if any part is a template type-param name of this struct.
 				// If so, skip monomorphization - we're inside the template body itself.
 				isTemplateVar := false
+
 			outer:
 				for _, part := range parts {
 					for _, tpName := range tmplStruct.TypeParams {
@@ -182,6 +190,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 						}
 					}
 				}
+
 				if !isTemplateVar {
 					concreteName := bareTypeName + "__" + strings.Join(parts, "__")
 					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
@@ -191,6 +200,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 						}
 						_ = cg.genTypeDecl(synthDecl) // best-effort
 					}
+
 					if st, ok2 := cg.structTypes[concreteName]; ok2 {
 						return st, nil
 					}
@@ -202,11 +212,13 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 	case *ast.UnionTypeExpr:
 		// Anonymous tagged union: { i8 tag, [maxSize x i8] payload }
 		var maxSize uint64 = 1
+
 		for _, te := range t.Types {
 			lt, err := cg.tinTypeToLLVM(te)
 			if err != nil {
 				return nil, err
 			}
+
 			if sz := llvmTypeSize(lt); sz > maxSize {
 				maxSize = sz
 			}
@@ -215,7 +227,6 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	case *ast.TupleArrayType:
 		// @[T1, T2, ...] resolves to [any] - fat array of any values.
-
 		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
 	}
 
@@ -225,52 +236,37 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	switch name {
 	case "void":
-
 		return irtypes.Void, nil
 	case "bool":
-
 		return irtypes.I1, nil
 	case "i8":
-
 		return irtypes.I8, nil
 	case "i16":
-
 		return irtypes.I16, nil
 	case "i32":
-
 		return irtypes.I32, nil
 	case "i64", "int":
-
 		return irtypes.I64, nil
 	case "u8", "char", "byte":
-
 		return irtypes.I8, nil
 	case "u16":
-
 		return irtypes.I16, nil
 	case "u32", "uint32":
-
 		return irtypes.I32, nil
 	case "u64", "uint", "size_t":
-
 		return irtypes.I64, nil
 	case "f32":
-
 		return irtypes.Float, nil
 	case "f64":
-
 		return irtypes.Double, nil
 	case "string":
 		// fat pointer: {i8*, i64}
-
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
 	case "atom":
 		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
-
 		return cg.atomType, nil
 	case "any":
 		// fat pointer: {i8*, i32}  (type-tagged box)
-
 		return anyFatPtrType(), nil
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
@@ -322,27 +318,21 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 func llvmTypeToTinName(t irtypes.Type) string {
 	switch t {
 	case irtypes.I1:
-
 		return "bool"
 	case irtypes.I8:
-
 		return "i8"
 	case irtypes.I16:
-
 		return "i16"
 	case irtypes.I32:
-
 		return "i32"
 	case irtypes.I64:
-
 		return "i64"
 	case irtypes.Float:
-
 		return "f32"
 	case irtypes.Double:
-
 		return "f64"
 	}
+
 	if st, ok := t.(*irtypes.StructType); ok {
 		if n := st.Name(); n != "" {
 			return n
@@ -354,11 +344,13 @@ func llvmTypeToTinName(t irtypes.Type) string {
 			if st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I64) {
 				return "string"
 			}
+
 			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
 				return "any"
 			}
 		}
 	}
+
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		inner := llvmTypeToTinName(pt.ElemType)
 
@@ -412,23 +404,19 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	case *irtypes.FloatType:
 		switch ty.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
 		case irtypes.FloatKindHalf:
-
 			return 2, 2
 		case irtypes.FloatKindFloat:
-
 			return 4, 4
 		case irtypes.FloatKindDouble:
-
 			return 8, 8
 		default:
-
 			return 8, 8
 		}
 	case *irtypes.PointerType:
-
 		return 8, 8
 	case *irtypes.StructType:
 		var offset, maxAlign uint64
+
 		for _, f := range ty.Fields {
 			fsz, fal := llvmTypeSizeAlign(f)
 			if fal > maxAlign {
@@ -438,8 +426,10 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 			if fal > 0 {
 				offset = (offset + fal - 1) &^ (fal - 1)
 			}
+
 			offset += fsz
 		}
+
 		if maxAlign == 0 {
 			maxAlign = 1
 		}
@@ -452,7 +442,6 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 
 		return ty.Len * esz, eal
 	default:
-
 		return 8, 8
 	}
 }
@@ -466,6 +455,7 @@ func isFatPtrType(t irtypes.Type) bool {
 	if !ok || len(st.Fields) != 2 {
 		return false
 	}
+
 	_, isPtr := st.Fields[0].(*irtypes.PointerType)
 
 	return isPtr && irtypes.IsInt(st.Fields[1])
@@ -501,9 +491,11 @@ func isFatArrayPtr(t irtypes.Type) bool {
 	if !ok || st.Name() != "" || len(st.Fields) != 2 {
 		return false
 	}
+
 	if !irtypes.IsInt(st.Fields[1]) {
 		return false
 	}
+
 	_, ok = st.Fields[0].(*irtypes.PointerType)
 
 	return ok
@@ -515,13 +507,16 @@ func isFatFnPtr(t irtypes.Type) bool {
 	if !ok || len(st.Fields) != 2 {
 		return false
 	}
+
 	if st.Fields[1] != irtypes.I8Ptr {
 		return false
 	}
+
 	pt, ok := st.Fields[0].(*irtypes.PointerType)
 	if !ok {
 		return false
 	}
+
 	_, ok = pt.ElemType.(*irtypes.FuncType)
 
 	return ok
@@ -575,6 +570,7 @@ func (cg *CodeGen) fieldIndex(structName, fieldName string) int {
 	}
 	// +1 for the leading i32 type_id field
 	offset := 1 + cg.vtableOffset(structName)
+
 	for i, n := range names {
 		if n == fieldName {
 			return offset + i
@@ -590,6 +586,7 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 	if len(subst) == 0 {
 		return cg.tinTypeToLLVM(te)
 	}
+
 	if st, ok := te.(*ast.SimpleType); ok {
 		if lt, ok2 := subst[st.Name]; ok2 {
 			return lt, nil

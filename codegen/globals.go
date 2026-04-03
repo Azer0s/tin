@@ -25,6 +25,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	if tv.Value != nil {
 		initVal = cg.tryConstantFold(tv.Value, lt)
 	}
+
 	if initVal == nil {
 		initVal = cg.zeroConstant(lt)
 	}
@@ -89,6 +90,7 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		raw := cg.newGlobalString(v.Value).(constant.Constant)
 		strType := stringFatPtrType()
 		lenVal := constant.NewInt(irtypes.I64, int64(len(v.Value)))
+
 		s := constant.NewStruct(strType, raw, lenVal)
 		if targetType.Equal(strType) {
 			return s
@@ -104,13 +106,10 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 func (cg *CodeGen) zeroConstant(t irtypes.Type) constant.Constant {
 	switch v := t.(type) {
 	case *irtypes.IntType:
-
 		return constant.NewInt(v, 0)
 	case *irtypes.FloatType:
-
 		return constant.NewFloat(v, 0)
 	case *irtypes.PointerType:
-
 		return constant.NewNull(v)
 	case *irtypes.StructType:
 		fields := make([]constant.Constant, len(v.Fields))
@@ -132,6 +131,7 @@ func (cg *CodeGen) emitTopLevelVarInits(block *ir.Block) (*ir.Block, error) {
 		if err != nil {
 			return block, err
 		}
+
 		if val != nil {
 			lt := vi.global.ContentType
 			val = cg.coerce(block, val, lt)
@@ -150,6 +150,7 @@ func (cg *CodeGen) emitFiberMainWrap(block *ir.Block) *ir.Block {
 	if !cg.usesAnyFiber {
 		return block
 	}
+
 	cg.ensureFiberRuntime()
 	block.NewCall(cg.fiberInitFn)
 	block.NewCall(cg.ioInitFn)
@@ -162,5 +163,6 @@ func (cg *CodeGen) emitFiberMainEnd(block *ir.Block) {
 	if !cg.usesAnyFiber {
 		return
 	}
+
 	block.NewCall(cg.fiberRunFn)
 }

@@ -109,6 +109,7 @@ func ReadModFile(filename string) (*ModFile, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var mf ModFile
 	if err := json.Unmarshal(data, &mf); err != nil {
 		return nil, fmt.Errorf("parse module file %s: %w", filename, err)
@@ -125,9 +126,9 @@ func typeExprToString(te ast.TypeExpr) string {
 	if te == nil {
 		return ""
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
-
 		return t.Name
 	case *ast.PointerType:
 		if t.IsConst {
@@ -146,10 +147,12 @@ func typeExprToString(te ast.TypeExpr) string {
 		for i, p := range t.Params {
 			parts[i] = typeExprToString(p)
 		}
+
 		ret := ""
 		if t.RetType != nil {
 			ret = " " + typeExprToString(t.RetType)
 		}
+
 		suffix := ""
 		if t.IsVarArgs {
 			suffix = ", ..."

@@ -56,6 +56,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 		if forReturn {
 			return cg.tinTypeToLLVM(te)
 		}
+
 		elem, err := cg.tinTypeToLLVM(at.Elem)
 		if err != nil {
 			return nil, err
@@ -76,10 +77,12 @@ func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, 
 	if st, ok := cg.structTypes[nativeName]; ok {
 		return st, nil
 	}
+
 	userFields, ok := cg.structFieldLLVMTypes[structName]
 	if !ok {
 		return nil, fmt.Errorf("tinStructNativeLLVM: unknown struct %q", structName)
 	}
+
 	nativeFields := make([]irtypes.Type, len(userFields))
 	for i, ft := range userFields {
 		// Recursively convert nested named struct fields.
@@ -88,11 +91,13 @@ func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, 
 			if err != nil {
 				return nil, err
 			}
+
 			nativeFields[i] = inner
 		} else {
 			nativeFields[i] = ft
 		}
 	}
+
 	st := irtypes.NewStruct(nativeFields...)
 	st.SetName(nativeName)
 	cg.structTypes[nativeName] = st
@@ -108,6 +113,7 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 	if !ok {
 		return val, nil // not a struct; pass through
 	}
+
 	nativeSt, err := cg.tinStructNativeLLVM(structName)
 	if err != nil {
 		return nil, err
@@ -123,6 +129,7 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 	for i, ft := range userFields {
 		srcGep := block.NewGetElementPtr(tinSt, tinAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, offset+int64(i)))
+
 		var fv value.Value = block.NewLoad(ft, srcGep)
 		// Recursively convert nested struct fields.
 		if innerSt, ok2 := ft.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
@@ -130,8 +137,10 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 			if err2 != nil {
 				return nil, err2
 			}
+
 			fv = fv2
 		}
+
 		dstGep := block.NewGetElementPtr(nativeSt, nativeAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		block.NewStore(fv, dstGep)
@@ -147,10 +156,12 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 	if !ok {
 		return val, nil
 	}
+
 	tinSt, tinOk := cg.structTypes[structName]
 	if !tinOk {
 		return val, nil
 	}
+
 	userFields := cg.structFieldLLVMTypes[structName]
 	typeID := cg.structTypeIDs[structName]
 	offset := int64(1 + cg.vtableOffset(structName))
@@ -179,19 +190,23 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 		nativeFieldType := nativeSt.Fields[i]
 		srcGep := block.NewGetElementPtr(nativeSt, nativeAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+
 		var fv value.Value = block.NewLoad(nativeFieldType, srcGep)
 		// Recursively reconstruct nested struct fields.
 		if nativeName, ok2 := nativeFieldType.(*irtypes.StructType); ok2 {
 			innerName := nativeName.Name()
 			if strings.HasSuffix(innerName, ".native") {
 				innerTinName := strings.TrimSuffix(innerName, ".native")
+
 				fv2, err2 := cg.wrapNativeStructToTin(block, fv, innerTinName)
 				if err2 != nil {
 					return nil, err2
 				}
+
 				fv = fv2
 			}
 		}
+
 		dstGep := block.NewGetElementPtr(tinSt, tinAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, offset+int64(i)))
 		block.NewStore(fv, dstGep)
@@ -216,6 +231,7 @@ func (cg *CodeGen) isNamedTinStruct(te ast.TypeExpr) (string, bool) {
 // This is used to decide whether to use byval (> 16 bytes) or register passing.
 func nativeStructByteSize(st *irtypes.StructType) int {
 	total := 0
+
 	for _, field := range st.Fields {
 		switch f := field.(type) {
 		case *irtypes.StructType:
@@ -254,6 +270,7 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 			return f
 		}
 	}
+
 	f := cg.mod.NewFunc(cName, retType, params...)
 	f.Sig.Variadic = variadic
 	f.Blocks = nil
@@ -262,6 +279,7 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 	if cg.externIRNames == nil {
 		cg.externIRNames = map[string]bool{}
 	}
+
 	cg.externIRNames[cName] = true
 
 	return f
@@ -276,6 +294,7 @@ func (cg *CodeGen) ensureExternTLSVar(name string, typ irtypes.Type) *ir.Global 
 	if g, ok := cg.externTLSVars[name]; ok {
 		return g
 	}
+
 	g := cg.mod.NewGlobal(name, typ)
 	g.Linkage = enum.LinkageExternal
 	g.TLSModel = enum.TLSModelLocalExec
@@ -329,10 +348,12 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 			}
 			// Use strlen to get the length (treat as a null-terminated string)
 			strlenFn := cg.ensureStrlenDecl()
+
 			rawI8Ptr := ptr
 			if !src.Equal(irtypes.I8Ptr) {
 				rawI8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
 			}
+
 			length := block.NewCall(strlenFn, rawI8Ptr)
 			// Build the fat-pointer struct
 			alloca := block.NewAlloca(tgtSt)

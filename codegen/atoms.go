@@ -25,13 +25,16 @@ func (cg *CodeGen) registerAtom(name string) int32 {
 	if code, ok := cg.atomCodes[name]; ok {
 		return code
 	}
+
 	code := int32(crc32.ChecksumIEEE([]byte(name)))
 	for {
 		if existing, ok := cg.atomCodeToName[code]; !ok || existing == name {
 			break
 		}
+
 		code++
 	}
+
 	cg.atomCodes[name] = code
 	cg.atomCodeToName[code] = name
 	cg.atomOrder = append(cg.atomOrder, name)
@@ -60,6 +63,7 @@ func (cg *CodeGen) ensureAtomToString() *ir.Func {
 	if cg.atomToStrFn != nil {
 		return cg.atomToStrFn
 	}
+
 	cg.atomToStrFn = cg.mod.NewFunc("__tin_atom_to_string", stringFatPtrType(),
 		ir.NewParam("code", irtypes.I32))
 
@@ -72,6 +76,7 @@ func (cg *CodeGen) ensureStringToAtom() *ir.Func {
 	if cg.strToAtomFn != nil {
 		return cg.strToAtomFn
 	}
+
 	cg.strToAtomFn = cg.mod.NewFunc("__tin_string_to_atom", cg.atomType,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 
@@ -102,6 +107,7 @@ func (cg *CodeGen) emitAtomTable() {
 
 	// Build table entries: each entry is {i32 code, i8* name}.
 	entries := make([]constant.Constant, n)
+
 	for i, name := range cg.atomOrder {
 		code := cg.atomCodes[name]
 		// String is the bare atom name (no leading apostrophe).
@@ -119,6 +125,7 @@ func (cg *CodeGen) emitAtomTable() {
 	} else {
 		tableConst = constant.NewArray(tableArrType)
 	}
+
 	tableGlobal := cg.mod.NewGlobalDef("__tin_atom_table", tableConst)
 	tableGlobal.Immutable = true
 
@@ -130,6 +137,7 @@ func (cg *CodeGen) emitAtomTable() {
 	if cg.atomToStrFn != nil {
 		cg.buildAtomToStringBody(cg.atomToStrFn, tableGlobal, countGlobal, tableArrType)
 	}
+
 	if cg.strToAtomFn != nil {
 		cg.buildStringToAtomBody(cg.strToAtomFn, tableGlobal, countGlobal, tableArrType)
 	}
