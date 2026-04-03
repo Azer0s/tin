@@ -1,11 +1,12 @@
 use assert
+use { sleep } from io
 
 fn{#async} slow_int(n i64) i64 =
-  yield
+  await sleep(1)
   return n
 
 fn{#async} slow_str(s string) string =
-  yield
+  await sleep(1)
   return s
 
 test "await match single future" =

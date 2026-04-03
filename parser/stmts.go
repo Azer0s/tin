@@ -663,8 +663,9 @@ func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
 // Compiler errors are emitted for non-literal array syntax, wrong pattern lengths,
 // and invalid patterns (zero or multiple bindings per case).
 func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
-	p.advance() // consume "await"
-	p.advance() // consume "match"
+	awaitPos := p.peek() // position of "await" keyword
+	p.advance()          // consume "await"
+	p.advance()          // consume "match"
 
 	// Require inline array literal.
 	if !p.check(lexer.LBRACKET) {
@@ -723,8 +724,6 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	p.advance() // consume INDENT
 	p.skipNewlines()
 
-	hasGuard := false
-
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 		if p.check(lexer.KW_DEFAULT) {
 			p.advance()
@@ -761,10 +760,6 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 				return nil, err
 			}
 
-			if mc.Guard != nil {
-				hasGuard = true
-			}
-
 			stmt.Cases = append(stmt.Cases, mc)
 		} else {
 			break
@@ -777,9 +772,21 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		p.advance()
 	}
 
-	// Warn if guards present but no default: all-exhausted path can panic at runtime.
-	if hasGuard && stmt.Default == nil {
-		fmt.Printf("warning: await match has guards but no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm to handle the unmatched case\n")
+	// Warn only when every case arm has a guard and there is no default arm: in that
+	// situation the all-exhausted path will always panic at runtime.
+	if stmt.Default == nil && !p.noWarnAwaitMatchGuards {
+		allGuarded := len(stmt.Cases) > 0
+		for _, mc := range stmt.Cases {
+			if mc.Guard == nil {
+				allGuarded = false
+				break
+			}
+		}
+
+		if allGuarded {
+			fmt.Printf("%d:%d: warning: every await match arm has a guard and there is no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm or remove at least one guard, or suppress with -Wno-await-match-guards\n",
+				awaitPos.Line, awaitPos.Col)
+		}
 	}
 
 	return stmt, nil

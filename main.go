@@ -149,6 +149,7 @@ func main() {
 	var extraCFlags []string
 
 	noWarnAsyncMain := false
+	noWarnAwaitMatchGuards := false
 
 	for i := fileArgIdx + 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -159,6 +160,8 @@ func main() {
 			}
 		case "-Wno-async-main":
 			noWarnAsyncMain = true
+		case "-Wno-await-match-guards":
+			noWarnAwaitMatchGuards = true
 		}
 	}
 
@@ -214,6 +217,10 @@ func main() {
 	p := parser.New(tokens)
 	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens) {
 		p.RegisterNoParensMacro(name, expansion)
+	}
+
+	if noWarnAwaitMatchGuards {
+		p.SetNoWarnAwaitMatchGuards(true)
 	}
 
 	prog, parseErr := p.Parse()
