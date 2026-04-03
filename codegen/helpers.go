@@ -104,6 +104,80 @@ func (cg *CodeGen) buildEnv(block *ir.Block, captures []closureCapture) (value.V
 	return envI8, envStructType
 }
 
+// buildClosureEnv heap-allocates an RC-managed env struct for lambda closure captures.
+// Layout: { i8* dtor_fn_ptr, capture_0, capture_1, ... } (dtor at field 0).
+// All RC-tracked captures are retained so the env independently owns them.
+// dtorFn may be nil if there are no RC-tracked captures (dtor slot is set to null).
+func (cg *CodeGen) buildClosureEnv(block *ir.Block, captures []closureCapture, dtorFn *ir.Func) (value.Value, *irtypes.StructType) {
+	if len(captures) == 0 {
+		return constant.NewNull(irtypes.I8Ptr), nil
+	}
+	// Field 0: i8* dtor; fields 1..N: captures.
+	fields := make([]irtypes.Type, len(captures)+1)
+	fields[0] = irtypes.I8Ptr
+	for i, c := range captures {
+		fields[i+1] = c.llvmTy
+	}
+	envStructType := irtypes.NewStruct(fields...)
+
+	// Compute size via GEP trick.
+	nullPtr := constant.NewNull(irtypes.NewPointer(envStructType))
+	oneGEP := block.NewGetElementPtr(envStructType, nullPtr, constant.NewInt(irtypes.I32, 1))
+	envSize := block.NewPtrToInt(oneGEP, irtypes.I64)
+
+	// Use _tin_rc_alloc so the env lifetime is reference-counted.
+	envI8 := block.NewCall(cg.ensureRCAlloc(), envSize)
+	envTypedPtr := block.NewBitCast(envI8, irtypes.NewPointer(envStructType))
+
+	// Store dtor pointer as field 0.
+	dtorGep := block.NewGetElementPtr(envStructType, envTypedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	if dtorFn != nil {
+		dtorI8 := block.NewBitCast(dtorFn, irtypes.I8Ptr)
+		block.NewStore(dtorI8, dtorGep)
+	} else {
+		block.NewStore(constant.NewNull(irtypes.I8Ptr), dtorGep)
+	}
+
+	// Store captures at fields 1..N and retain RC-tracked ones.
+	for i, c := range captures {
+		gep := block.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i+1)))
+		block.NewStore(c.val, gep)
+		if isRCTrackedType(c.llvmTy) {
+			cg.emitRetain(block, c.val)
+		}
+	}
+
+	return envI8, envStructType
+}
+
+// unpackClosureEnv unpacks captures from a closure env (built by buildClosureEnv).
+// GEP indices are offset by 1 to skip the dtor pointer at field 0.
+// Uses env field GEPs directly (useEnvDirect=true semantics): mutations to
+// captured variables persist across closure calls.
+func (cg *CodeGen) unpackClosureEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes.StructType, captures []closureCapture) {
+	if len(captures) == 0 || envStructType == nil {
+		return
+	}
+	envRaw := f.Params[0]
+	envTypedPtr := entry.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
+	for i, c := range captures {
+		// Field index = i+1 (offset by 1 to skip dtor slot at field 0).
+		gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i+1)))
+		// Retain RC-tracked captures so each closure call holds its own reference.
+		if isRCTrackedType(c.llvmTy) {
+			loaded := entry.NewLoad(c.llvmTy, gep)
+			cg.emitRetain(entry, loaded)
+		}
+		// Use env GEP directly so mutations persist across calls (counter closures, etc.)
+		cg.curScope.set(c.name, &scopeEntry{val: gep, isAlloc: true, noDeinit: true})
+	}
+}
+
 // unpackEnv unpacks captured values from the env struct into the current scope.
 // byRef captures load the stored alloca pointer; non-byRef captures use the env
 // field GEP directly (useEnvDirect=true, for lambdas whose env persists across
@@ -254,13 +328,10 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		block.NewStore(i64Val, iPtr)
 		dataPtr = rawPtr
 	case isFatFnPtr(t):
-		// Fat function pointer { fn(i8*,...)*, i8* }: heap-copy the struct so
-		// the any can outlive its stack alloca.
-		{
-			st2 := t.(*irtypes.StructType)
-			innerFnType := st2.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
-			tag = cg.ensureFnTypeID(fnSigName(innerFnType, true))
-		}
+		// Fat function pointer { fn(i8*,...)*, i8* }: heap-copy the struct so the
+		// any can outlive its stack alloca.  Use anyTagFn (5) for all fat fn ptrs
+		// so the any-release path can detect closures and release their env.
+		tag = anyTagFn
 		sz := llvmTypeSize(t)
 		if sz == 0 {
 			sz = 16 // two pointers
@@ -268,6 +339,10 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, int64(sz)))
 		fnPtrStore := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
 		block.NewStore(val, fnPtrStore)
+		// Retain env so the any data block independently owns a reference to it.
+		// _tin_retain is null-safe (handles null env for wrapped named functions).
+		envField := block.NewExtractValue(val, 1)
+		block.NewCall(cg.ensureRetain(), envField)
 		dataPtr = rawPtr
 	case irtypes.IsPointer(t):
 		// A pointer to a FuncType is a named/extern function reference; give

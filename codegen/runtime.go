@@ -85,12 +85,75 @@ func (cg *CodeGen) ensureRelease() *ir.Func {
 	return cg.releaseFn
 }
 
+// ensureReleaseFatElemArray lazily declares _tin_release_fat_elem_array(data i8*, count i64).
+// Decrements the outer array RC; when RC hits 0, releases each fat-ptr element then frees.
+func (cg *CodeGen) ensureReleaseFatElemArray() *ir.Func {
+	if cg.releaseFatElemArrayFn != nil {
+		return cg.releaseFatElemArrayFn
+	}
+	cg.releaseFatElemArrayFn = cg.ensureExternDecl("_tin_release_fat_elem_array", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.releaseFatElemArrayFn
+}
+
+// ensureReleaseAnyElemArray lazily declares _tin_release_any_elem_array(data i8*, count i64).
+// Decrements the outer array RC; when RC hits 0, releases each `any` element then frees.
+func (cg *CodeGen) ensureReleaseAnyElemArray() *ir.Func {
+	if cg.releaseAnyElemArrayFn != nil {
+		return cg.releaseAnyElemArrayFn
+	}
+	cg.releaseAnyElemArrayFn = cg.ensureExternDecl("_tin_release_any_elem_array", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.releaseAnyElemArrayFn
+}
+
+// ensureReleaseFnElemArray lazily declares _tin_release_fn_elem_array(data i8*, count i64).
+// Decrements the outer array RC; when RC hits 0, releases each closure env then frees.
+func (cg *CodeGen) ensureReleaseFnElemArray() *ir.Func {
+	if cg.releaseFnElemArrayFn != nil {
+		return cg.releaseFnElemArrayFn
+	}
+	cg.releaseFnElemArrayFn = cg.ensureExternDecl("_tin_release_fn_elem_array", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.releaseFnElemArrayFn
+}
+
+// ensureReleaseClosure lazily declares _tin_release_closure(env i8*).
+// Decrements the closure env RC; when RC hits 0, calls the per-closure dtor
+// (stored at env field 0) to release RC-tracked captures, then frees the block.
+func (cg *CodeGen) ensureReleaseClosure() *ir.Func {
+	if cg.releaseClosureFn != nil {
+		return cg.releaseClosureFn
+	}
+	cg.releaseClosureFn = cg.ensureExternDecl("_tin_release_closure", irtypes.Void,
+		[]*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}, false)
+
+	return cg.releaseClosureFn
+}
+
+// ensureReleaseAny lazily declares _tin_release_any(tag i32, data i8*).
+// For anyTagFn (5): also releases the closure env before freeing the data block.
+// For all other tags: equivalent to _tin_release(data).
+func (cg *CodeGen) ensureReleaseAny() *ir.Func {
+	if cg.releaseAnyFn != nil {
+		return cg.releaseAnyFn
+	}
+	cg.releaseAnyFn = cg.ensureExternDecl("_tin_release_any", irtypes.Void,
+		[]*ir.Param{ir.NewParam("tag", irtypes.I32), ir.NewParam("data", irtypes.I8Ptr)}, false)
+
+	return cg.releaseAnyFn
+}
+
 // isRCTrackedType returns true for types whose heap data is ARC-managed:
-//   - strings    {i8*, i64}   - ptr is either immortal (-1 sentinel) or rc-alloc'd
-//   - fat arrays {T*,  i64}   - ptr is always rc-alloc'd
-//   - any        {i32, i8*}   - ptr is rc-alloc'd (boxed value)
+//   - strings      {i8*, i64}           - ptr is either immortal (-1 sentinel) or rc-alloc'd
+//   - fat arrays   {T*,  i64}           - ptr is always rc-alloc'd
+//   - any          {i32, i8*}           - ptr is rc-alloc'd (boxed value)
+//   - fat fn ptrs  {fn(i8*,...)*, i8*}  - env (field 1) is rc-alloc'd (null for named-fn wrappers)
 func isRCTrackedType(t irtypes.Type) bool {
-	return isStringType(t) || isFatArrayPtr(t) || isAnyType(t)
+	return isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t)
 }
 
 // isCopyExpr returns true when an AST expression produces a reference to
@@ -112,13 +175,26 @@ func isCopyExpr(node ast.Node) bool {
 
 		return true
 	case *ast.AsExpr:
-		// A cast does not allocate new memory; the underlying value still owns
-		// the RC reference.  Propagate through so that `sv as string` (where sv
-		// is a named variable) is treated as a copy and not released after a
-		// call.  Without this, the ARC release loop would drop the RC after the
-		// callee returns AND scope-exit would drop it again, double-freeing the
-		// underlying string and corrupting any references still held by the caller.
+		// Casting to `any` boxes the source value into a fresh _tin_rc_alloc.
+		// The resulting any value is a NEW allocation, not a copy of an existing
+		// reference.  Treating it as a copy would emit an extra retain (RC=2) that
+		// the single scope-exit release cannot balance, causing a leak.
+		if st, ok2 := n.Type.(*ast.SimpleType); ok2 && st.Name == "any" {
+			return false
+		}
+		// Other casts (sv as string, n as i64, etc.) do not allocate new memory;
+		// the underlying value still owns the RC reference.  Propagate through so
+		// that `sv as string` (where sv is a named variable) is treated as a copy
+		// and not released after a call.  Without this, the ARC release loop would
+		// drop the RC after the callee returns AND scope-exit would drop it again,
+		// double-freeing the underlying string.
 		return isCopyExpr(n.Expr)
+	case *ast.DerefExpr:
+		// Dereferencing a pointer (*ptr) loads an ARC-managed value that is still
+		// owned by the pointee.  The caller must retain to get an independent copy;
+		// without a retain, both the new variable and the original heap block will
+		// release the same inner RC pointers, causing a double-free.
+		return true
 	}
 
 	return false
@@ -145,6 +221,42 @@ func isTemporaryProducer(node ast.Node) bool {
 	}
 	if al, ok := node.(*ast.ArrayLit); ok {
 		return len(al.Elems) > 0 // empty [] has no heap block
+	}
+
+	return false
+}
+
+// elemNeedsRelease reports whether a scope variable with element type elemType
+// requires any ARC or deinit processing at scope exit.  Returns false for
+// primitive types (int, float, raw pointers) and for named structs with no RC
+// fields, no deinit, and no nested structs - so emitScopeRelease can skip the
+// load entirely rather than loading and then emitting nothing.
+func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
+	switch elemType.(type) {
+	case *irtypes.IntType, *irtypes.FloatType, *irtypes.PointerType:
+		return false
+	}
+	// RC-tracked fat types (strings, arrays, closures, any): always need release.
+	if isRCTrackedType(elemType) {
+		return true
+	}
+	// Named struct: need release only if it has a deinit, RC fields, or nested structs.
+	structName := cg.typeNameOf(elemType)
+	if structName == "" {
+		return true // anonymous struct (e.g. from external code) - be conservative
+	}
+	if cg.curScope != nil {
+		if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
+			return true
+		}
+	}
+	for _, ft := range cg.structFieldLLVMTypes[structName] {
+		if isRCTrackedType(ft) {
+			return true
+		}
+		if _, isNested := ft.(*irtypes.StructType); isNested {
+			return true // may contain RC fields deeper in
+		}
 	}
 
 	return false
@@ -201,7 +313,15 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 // emitRetain emits a _tin_retain call for an ARC-tracked value.
 // For named structs, it also retains any RC-tracked fields.
 func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
-	rcPtr := cg.extractRCDataPtr(block, val, val.Type())
+	t := val.Type()
+	// Closure fat pointer: retain the env field (i8*). _tin_retain handles null env.
+	if isFatFnPtr(t) {
+		envField := block.NewExtractValue(val, 1)
+		block.NewCall(cg.ensureRetain(), envField)
+
+		return
+	}
+	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRetain(), rcPtr)
 
@@ -229,7 +349,51 @@ func (cg *CodeGen) emitReleaseNoDeinit(block *ir.Block, val value.Value) {
 }
 
 func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit bool) {
-	rcPtr := cg.extractRCDataPtr(block, val, val.Type())
+	t := val.Type()
+	// Closure fat pointer: release the env via _tin_release_closure (null-safe).
+	if isFatFnPtr(t) {
+		envField := block.NewExtractValue(val, 1)
+		block.NewCall(cg.ensureReleaseClosure(), envField)
+
+		return
+	}
+	// any value: use tag-aware release that also handles closure envs inside.
+	if isAnyType(t) {
+		tag := block.NewExtractValue(val, 0)
+		data := block.NewExtractValue(val, 1)
+		block.NewCall(cg.ensureReleaseAny(), tag, data)
+
+		return
+	}
+	// Fat array with RC-tracked element type: use a combined release that
+	// decrements the outer RC and, only when it hits 0, releases each element
+	// and frees the outer block.  This prevents double-free when the array is
+	// shared (e.g. struct copy): the copy's release decrements RC without
+	// touching elements; only the last owner's release triggers element cleanup.
+	if isFatArrayPtr(t) {
+		if st, ok := t.(*irtypes.StructType); ok {
+			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
+				elemType := pt.ElemType
+				if isRCTrackedType(elemType) {
+					dataPtr := block.NewExtractValue(val, 0)
+					length := block.NewExtractValue(val, 1)
+					dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
+					if isAnyType(elemType) {
+						block.NewCall(cg.ensureReleaseAnyElemArray(), dataPtrI8, length)
+					} else if isFatFnPtr(elemType) {
+						// Array of closures: env is field 1 (offset 8); use dedicated fn.
+						block.NewCall(cg.ensureReleaseFnElemArray(), dataPtrI8, length)
+					} else {
+						// string {i8*,i64} or nested fat array {T*,i64}: field 0 is RC ptr
+						block.NewCall(cg.ensureReleaseFatElemArray(), dataPtrI8, length)
+					}
+					// Combined function handles outer block free - don't call _tin_release.
+					return
+				}
+			}
+		}
+	}
+	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRelease(), rcPtr)
 
@@ -262,6 +426,33 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 	})
 }
 
+// emitHeapChainRelease releases a heap-promoted pointer chain of the given depth.
+// For depth=1 (*T): loads T, releases T's ARC sub-fields, frees the RC block.
+// For depth>1 (**T, ***T, ...): recursively releases inner chains before freeing
+// the outer RC block.  This handles nested heap promotion (alloc_nested, etc.).
+func (cg *CodeGen) emitHeapChainRelease(block *ir.Block, heapPtr value.Value, depth int) {
+	ptrType, ok := heapPtr.Type().(*irtypes.PointerType)
+	if !ok {
+		return
+	}
+	elemType := ptrType.ElemType
+
+	// Load T from the heap block.
+	tVal := block.NewLoad(elemType, heapPtr)
+
+	if depth == 1 {
+		// Leaf: release T's ARC sub-fields (handles strings/arrays inside structs).
+		cg.emitRelease(block, tVal)
+	} else {
+		// Non-leaf: the loaded value is itself a heap-promoted pointer chain.
+		cg.emitHeapChainRelease(block, tVal, depth-1)
+	}
+
+	// Free this RC block.
+	rcI8 := block.NewBitCast(heapPtr, irtypes.I8Ptr)
+	block.NewCall(cg.ensureRelease(), rcI8)
+}
+
 // emitScopeRelease emits _tin_release for all ARC-tracked variables in scope s
 // whose block has not yet been terminated.  Named structs with RC-tracked
 // fields are also cleaned up via emitRelease's recursive handling.
@@ -273,6 +464,18 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if !entry.isAlloc || entry.noRelease {
 			continue
 		}
+		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
+		if !ok {
+			continue
+		}
+		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
+		// heap-promoting callee.  Use chain release to free all RC blocks.
+		if entry.isHeapOwned {
+			heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
+			cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+
+			continue
+		}
 		// Slice variables store the base allocation pointer separately so that
 		// ARC release hits the real ARC header rather than an interior pointer.
 		if entry.basePtr != nil {
@@ -280,11 +483,11 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 
 			continue
 		}
-		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
-		if !ok {
+		elemType := ptrType.ElemType
+		if !cg.elemNeedsRelease(elemType) {
 			continue
 		}
-		loaded := block.NewLoad(ptrType.ElemType, entry.val)
+		loaded := block.NewLoad(elemType, entry.val)
 		if entry.noDeinit {
 			cg.emitReleaseNoDeinit(block, loaded)
 		} else {
@@ -306,17 +509,28 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			if name == skipName || !entry.isAlloc || entry.isGlobal || entry.noRelease {
 				continue
 			}
+			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
+			if !ok {
+				continue
+			}
+			// isHeapOwned: chain release.
+			if entry.isHeapOwned {
+				heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
+				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+
+				continue
+			}
 			// Slice variables: release the base allocation pointer, not the fat-ptr.
 			if entry.basePtr != nil {
 				block.NewCall(cg.ensureRelease(), entry.basePtr)
 
 				continue
 			}
-			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
-			if !ok {
+			elemType := ptrType.ElemType
+			if !cg.elemNeedsRelease(elemType) {
 				continue
 			}
-			loaded := block.NewLoad(ptrType.ElemType, entry.val)
+			loaded := block.NewLoad(elemType, entry.val)
 			if entry.noDeinit {
 				cg.emitReleaseNoDeinit(block, loaded)
 			} else {

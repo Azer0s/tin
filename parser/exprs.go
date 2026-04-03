@@ -51,6 +51,7 @@ func (p *Parser) parsePipe() (ast.Node, error) {
 				if consumedIndent {
 					indentConsumed--
 				}
+
 				break
 			}
 			p.advance() // consume PIPE
@@ -193,6 +194,7 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 				if !p.check(lexer.PLUS) && !p.check(lexer.MINUS) {
 					p.pos = saved
 					indentConsumed--
+
 					break
 				}
 				// fall through - current token is PLUS/MINUS, advance and parse below
@@ -201,6 +203,7 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 				// fall through - current token is PLUS/MINUS, advance and parse below
 			} else {
 				p.pos = saved
+
 				break
 			}
 		} else {
@@ -321,6 +324,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				if consumedIndent {
 					indentConsumed--
 				}
+
 				break
 			}
 			// Fall through: the loop body will consume DOT/ARROW below.

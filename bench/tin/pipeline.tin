@@ -3,8 +3,7 @@
 
 use sync
 use io
-
-fn _tin_now_us() i64 = extern("_tin_now_us")
+use measure
 
 var g_elapsed i64
 
@@ -29,13 +28,13 @@ fn{#async} main() =
   let r2 = spawn relay(ch2, ch3, n)
   let r3 = spawn relay(ch3, ch4, n)
 
-  let start = _tin_now_us()
+  let start = measure::now_us()
   let i i64 = 0
   for i < n:
     await ch0.send(i)
     await ch4.recv()
     i = i + 1
-  g_elapsed = _tin_now_us() - start
+  g_elapsed = measure::now_us() - start
 
   await r0
   await r1

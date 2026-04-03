@@ -651,10 +651,10 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.curCoroRetType = origRetType
 	cg.usesAnyFiber = true
 
-	// Set up defer return override slot for this coro body (mirrors genFuncDecl).
-	// Without this, cg.curFnDeferRetAlloca would bleed in from the outer function,
-	// causing cross-function SSA value references in the coro's IR.
-	if origRetType != nil && !irtypes.IsVoid(origRetType) {
+	// Set up defer return override slot for this coro body only when defer stmts
+	// are present (mirrors genFuncDeclAs).  Always clear curFnDeferRetAlloca so
+	// it doesn't bleed in from an outer function, causing cross-function SSA refs.
+	if origRetType != nil && !irtypes.IsVoid(origRetType) && hasDeferStmt(n.Body) {
 		slotType := irtypes.NewStruct(irtypes.I8, origRetType)
 		slotAlloca := bodyStart.NewAlloca(slotType)
 		validGep := bodyStart.NewGetElementPtr(slotType, slotAlloca,

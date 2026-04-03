@@ -3,8 +3,7 @@
 
 use sync
 use io
-
-fn _tin_now_us() i64 = extern("_tin_now_us")
+use measure
 
 var g_tasks   sync::Channel[i64]
 var g_results sync::Channel[i64]
@@ -40,7 +39,7 @@ fn{#async} main() =
     spawn worker(per)
     i = i + 1
 
-  let start = _tin_now_us()
+  let start = measure::now_us()
 
   spawn dispatch(total)
 
@@ -49,7 +48,7 @@ fn{#async} main() =
     await g_results.recv()
     i = i + 1
 
-  g_elapsed = _tin_now_us() - start
+  g_elapsed = measure::now_us() - start
   let throughput = total * 1000000 / g_elapsed
   echo "{total} tasks, {workers} workers, cost 0-3 yields/task"
   echo "elapsed: ~{g_elapsed / 1000}ms"

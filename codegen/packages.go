@@ -1350,6 +1350,7 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 			return fmt.Errorf("ensureDefaultTraitMethods: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -1435,8 +1436,14 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	// Register type aliases so that body expressions referring to the type
 	// param (e.g. as a variable type annotation) resolve to the concrete type.
-	for param, concrete := range astSubst {
-		cg.typeAliases[param] = concrete
+	// Save previous values so they can be restored after compilation - stale
+	// aliases from one monomorphization must not bleed into the next.
+	prevAliases := make(map[string]ast.TypeExpr, len(astSubst))
+	for param, concreteTE := range astSubst {
+		if old, had := cg.typeAliases[param]; had {
+			prevAliases[param] = old
+		}
+		cg.typeAliases[param] = concreteTE
 	}
 
 	// Pre-declare the function signature (no body yet) so that recursive calls
@@ -1444,6 +1451,13 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// resolve to a forward declaration rather than triggering recursive instantiation.
 	if err := cg.predeclareFuncAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
+		for param := range astSubst {
+			if old, had := prevAliases[param]; had {
+				cg.typeAliases[param] = old
+			} else {
+				delete(cg.typeAliases, param)
+			}
+		}
 
 		return nil, err
 	}
@@ -1459,8 +1473,25 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	if err := cg.genFuncDeclAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
+		for param := range astSubst {
+			if old, had := prevAliases[param]; had {
+				cg.typeAliases[param] = old
+			} else {
+				delete(cg.typeAliases, param)
+			}
+		}
 
 		return nil, err
+	}
+
+	// Restore type aliases - must happen before restoring curScope so that any
+	// scope-sensitive alias lookups during cleanup see the original state.
+	for param := range astSubst {
+		if old, had := prevAliases[param]; had {
+			cg.typeAliases[param] = old
+		} else {
+			delete(cg.typeAliases, param)
+		}
 	}
 
 	cg.curScope = prevScope
@@ -1531,30 +1562,38 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		}
 	case *ast.GenericType:
 		// Generic struct: fn foo[t](x S[t])  arg LLVM type is "S__i64"
-		// The concrete type name is "S__<tp_concrete>" so strip the "S__" prefix.
+		// Handles nested cases too: fn foo[t](x S[S[t]]) arg "S__S__i64" -> t=i64.
 		if len(pt.TypeParams) != 1 {
 			break
 		}
-		innerParam, ok := pt.TypeParams[0].(*ast.SimpleType)
-		if !ok {
+		// Get the concrete LLVM struct name (e.g. "box__box__i64").
+		structName := ""
+		if st, ok2 := argType.(*irtypes.StructType); ok2 {
+			structName = st.Name()
+		}
+		if structName == "" {
 			break
 		}
-		for _, tp := range typeParams {
-			if innerParam.Name != tp {
-				continue
+		// Strip the outer "GenericTypeName__" prefix to get the inner concrete part.
+		prefix := pt.Name + "__"
+		if !strings.HasPrefix(structName, prefix) {
+			break
+		}
+		innerName := strings.TrimPrefix(structName, prefix)
+		innerParam := pt.TypeParams[0]
+		if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
+			// Direct type param: bind it to the inner concrete name.
+			for _, tp := range typeParams {
+				if simpleInner.Name == tp {
+					subst[tp] = innerName
+
+					break
+				}
 			}
-			// Get the LLVM struct name (e.g. "list_node__i64").
-			structName := ""
-			if st, ok2 := argType.(*irtypes.StructType); ok2 {
-				structName = st.Name()
-			}
-			if structName == "" {
-				break
-			}
-			// Strip "GenericTypeName__" prefix to get the concrete type param.
-			prefix := pt.Name + "__"
-			if strings.HasPrefix(structName, prefix) {
-				subst[tp] = strings.TrimPrefix(structName, prefix)
+		} else {
+			// Nested generic (e.g. S[S[t]]): look up the inner struct type and recurse.
+			if innerST, ok := cg.structTypes[innerName]; ok {
+				cg.inferTypeArgsFromParam(innerParam, innerST, typeParams, subst)
 			}
 		}
 	case *ast.ArrayType:

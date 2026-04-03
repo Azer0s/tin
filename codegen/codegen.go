@@ -108,9 +108,14 @@ type CodeGen struct {
 	sliceSubsliceFn *ir.Func
 
 	// ARC runtime functions (lazily declared).
-	rcAllocFn *ir.Func // _tin_rc_alloc(size i64) i8*
-	retainFn  *ir.Func // _tin_retain(ptr i8*)
-	releaseFn *ir.Func // _tin_release(ptr i8*)
+	rcAllocFn             *ir.Func // _tin_rc_alloc(size i64) i8*
+	retainFn              *ir.Func // _tin_retain(ptr i8*)
+	releaseFn             *ir.Func // _tin_release(ptr i8*)
+	releaseFatElemArrayFn *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
+	releaseAnyElemArrayFn *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
+	releaseFnElemArrayFn  *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)
+	releaseClosureFn      *ir.Func // _tin_release_closure(env i8*)
+	releaseAnyFn          *ir.Func // _tin_release_any(tag i32, data i8*)
 
 	// module system
 	// exports: localName -> packageName  (from ExportDecl)
@@ -315,6 +320,12 @@ type CodeGen struct {
 	// so that ARC retain/release operates on the real base pointer, not the interior
 	// pointer that may be stored in the slice fat-ptr's field 0.
 	lastSliceBase value.Value
+
+	// lastLambdaHadCaptures is set by genLambdaExpr to indicate whether the most
+	// recently emitted lambda closure had any captured variables.  genVarDecl reads
+	// and clears it to mark non-capturing closure vars noRelease=true so that
+	// emitScopeRelease skips the redundant _tin_release_closure(null) call.
+	lastLambdaHadCaptures bool
 
 	// curBlock tracks the current IR block during expression generation.
 	// It is updated by genExpr when control flow changes the active block
@@ -536,6 +547,7 @@ func New(filename string) *CodeGen {
 		callGraph:                make(map[string][]string),
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
+		heapPromotingFns:         make(map[string]bool),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")

@@ -3,8 +3,7 @@
 
 use sync
 use io
-
-fn _tin_now_us() i64 = extern("_tin_now_us")
+use measure
 
 var g_ping sync::Channel[i64]
 var g_pong sync::Channel[i64]
@@ -18,13 +17,13 @@ fn{#async} pong_loop(n i64) =
     i = i + 1
 
 fn{#async} ping_loop(n i64) =
-  let start = _tin_now_us()
+  let start = measure::now_us()
   let i i64 = 0
   for i < n:
     await g_ping.send(1)
     await g_pong.recv()
     i = i + 1
-  g_elapsed = _tin_now_us() - start
+  g_elapsed = measure::now_us() - start
 
 fn{#async} main() =
   let n i64 = 1000000

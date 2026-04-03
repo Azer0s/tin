@@ -614,17 +614,37 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
 	}
 
-	// Heap promotion: if this variable's address escapes the function (e.g.
-	// `let p = &s; return p`), allocate it on the heap so the memory remains
-	// valid after the callee returns.  The caller is responsible for freeing it.
-	var alloca value.Value
-	isHeapPromoted := cg.curFnEscapingVars[s.Name]
-	if isHeapPromoted {
-		sz := cg.llvmSizeOf(block, llType)
-		rawPtr := block.NewCall(cg.ensureMalloc(), sz)
-		alloca = block.NewBitCast(rawPtr, irtypes.NewPointer(llType))
-	} else {
-		alloca = block.NewAlloca(llType)
+	// All local variables are stack-allocated. Heap promotion happens lazily at
+	// the return site (genLatePromotedReturn) for variables whose addresses escape.
+	alloca := block.NewAlloca(llType)
+
+	// isHeapOwned: this variable receives the return value of a heap-promoting
+	// function (one that uses _tin_rc_alloc to return *T), or a &StructLit{} that
+	// was RC-alloc'd inline.  Scope-exit performs a chain release rather than the
+	// normal ARC release.
+	isHeapOwned := false
+	heapOwnedDepth := 0
+	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
+		calleeName := ""
+		switch fn := callExpr.Func.(type) {
+		case *ast.Identifier:
+			calleeName = fn.Name
+		}
+		if calleeName != "" && cg.heapPromotingFns[calleeName] && llType != nil {
+			depth := pointerChainDepth(llType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
+	} else if addrOf, isAddrOf := s.Value.(*ast.AddressOfExpr); isAddrOf {
+		if _, isStructLit := addrOf.Expr.(*ast.StructLit); isStructLit && llType != nil {
+			depth := pointerChainDepth(llType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
 	}
 	isRC := isRCTrackedType(llType)
 	if initVal != nil {
@@ -688,9 +708,15 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	// Heap-promoted variables are owned by the caller after the function returns.
-	// Mark noRelease so scope-exit cleanup doesn't free the memory or release ARC.
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, noRelease: isHeapPromoted, isUnsigned: isUnsignedTinType(s.Type)})
+	// Non-capturing closures (null env): scope-exit would emit _tin_release_closure(null)
+	// which is a no-op in the runtime.  Set noRelease to skip it entirely.
+	noReleaseClosureEnv := false
+	if _, isLambda := s.Value.(*ast.LambdaExpr); isLambda && isFatFnPtr(llType) {
+		noReleaseClosureEnv = !cg.lastLambdaHadCaptures
+		cg.lastLambdaHadCaptures = false // consume
+	}
+
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
 
 	return block, nil
 }
@@ -807,13 +833,21 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if err := cg.emitDefers(block); err != nil {
 			return err
 		}
-		// void return: no heap-promoted var is being returned; free all of them.
-		cg.emitFreeUnusedHeapVars(block, nil)
 		cg.emitAllScopeReleases(block, "")
 		block.NewRet(nil)
 
 		return nil
 	}
+
+	// Late heap promotion: if this return involves escaping vars, defer evaluation
+	// until after defers so the post-defer stack values are used for the RC blocks.
+	if len(cg.curFnEscapingVars) > 0 {
+		promoted := retainedHeapVars(s.Value, cg.curFnEscapingAliases, cg.curFnEscapingVars)
+		if len(promoted) > 0 {
+			return cg.genLatePromotedReturn(block, s, promoted)
+		}
+	}
+
 	cg.curBlock = block // sync before genExpr so we can detect block advances
 	// TupleLit: pass the declared return type so fields get the right types.
 	var val value.Value
@@ -842,13 +876,6 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	}
 	if err := cg.emitDefers(block); err != nil {
 		return err
-	}
-	// Free any heap-promoted variables whose addresses are NOT being returned.
-	// This handles over-promotion in conditional branches: both `yes` and `no`
-	// may be heap-promoted, but only one is returned per path.
-	if len(cg.curFnEscapingVars) > 0 {
-		kept := retainedHeapVars(s.Value, cg.curFnEscapingAliases, cg.curFnEscapingVars)
-		cg.emitFreeUnusedHeapVars(block, kept)
 	}
 	// After running defers, check if any deferred function wrote an override return value.
 	if cg.curFnDeferRetAlloca != nil && cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
@@ -2640,6 +2667,15 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	structAlloca := block.NewAlloca(llType)
 	block.NewStore(val, structAlloca)
 
+	// Detect whether the source is a call to a heap-promoting function.
+	// If so, each *T field in the destructured tuple is itself a heap-owned RC block.
+	heapPromotingSource := false
+	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
+		if fnIdent, isIdent := callExpr.Func.(*ast.Identifier); isIdent {
+			heapPromotingSource = cg.heapPromotingFns[fnIdent.Name]
+		}
+	}
+
 	// Tuple fields are named a, b, c, ... (alphabet by position).
 	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
 	userOff := 1 + cg.vtableOffset(concreteName) // skip type_id + vtable fields
@@ -2664,7 +2700,17 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 		fieldVal := block.NewLoad(fieldType, fieldGep)
 		alloca := block.NewAlloca(fieldType)
 		block.NewStore(fieldVal, alloca)
-		cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true})
+
+		isHeapOwned := false
+		heapOwnedDepth := 0
+		if heapPromotingSource {
+			depth := pointerChainDepth(fieldType)
+			if depth > 0 {
+				isHeapOwned = true
+				heapOwnedDepth = depth
+			}
+		}
+		cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth})
 	}
 
 	return block, nil
@@ -2825,6 +2871,7 @@ func markEscapeChain(name string, aliases map[string]string, escaping map[string
 func retainedHeapVars(retExpr ast.Node, aliases map[string]string, escaping map[string]bool) map[string]bool {
 	kept := make(map[string]bool)
 	collectRetained(retExpr, aliases, escaping, kept)
+
 	return kept
 }
 
@@ -2855,28 +2902,241 @@ func collectChain(name string, aliases map[string]string, escaping map[string]bo
 	}
 }
 
-// emitFreeUnusedHeapVars frees any heap-promoted scope variables that are NOT in keptVars.
-// Called at each return site so that conditional-branch over-promotion doesn't leak.
-func (cg *CodeGen) emitFreeUnusedHeapVars(block *ir.Block, keptVars map[string]bool) {
-	if len(cg.curFnEscapingVars) == 0 {
-		return
-	}
-	s := cg.curScope
-	for s != nil {
-		for name, entry := range s.vars {
-			if !entry.noRelease {
-				continue // not heap-promoted
-			}
-			if keptVars[name] {
-				continue // this var is being returned - caller owns it
-			}
-			// Free the unused heap-promoted block.
-			raw := block.NewBitCast(entry.val, irtypes.I8Ptr)
-			block.NewCall(cg.ensureFree(), raw)
-		}
-		if s.isFunctionBoundary {
+// pointerChainDepth counts the number of consecutive pointer dereferences in t.
+// Returns 0 for non-pointer types, 1 for *T, 2 for **T, etc.
+func pointerChainDepth(t irtypes.Type) int {
+	depth := 0
+	for {
+		pt, ok := t.(*irtypes.PointerType)
+		if !ok {
 			break
 		}
-		s = s.parent
+		depth++
+		t = pt.ElemType
 	}
+
+	return depth
+}
+
+// genLatePromotedReturn handles return statements in functions where one or more
+// local variables escape via their address.  The key invariant: defers may modify
+// the stack copies of promoted variables, so we run defers FIRST, then copy the
+// post-defer values into fresh _tin_rc_alloc blocks and return those.
+//
+// For tuple returns, non-promoted elements are latched BEFORE defers run so that
+// the caller sees the pre-defer values (the same semantics as early-promotion).
+func (cg *CodeGen) genLatePromotedReturn(block *ir.Block, s *ast.ReturnStmt, promoted map[string]bool) error {
+	retType := cg.curFn.Sig.RetType
+
+	if tup, ok := s.Value.(*ast.TupleLit); ok {
+		structType, ok2 := retType.(*irtypes.StructType)
+		if !ok2 {
+			return fmt.Errorf("genLatePromotedReturn: expected struct type for tuple return, got %v", retType)
+		}
+
+		concreteName := structType.Name()
+		userOff := 1 + cg.vtableOffset(concreteName)
+
+		// Phase 1: latch non-promoted elements BEFORE defers run.
+		type latched struct {
+			val      value.Value
+			retained bool
+		}
+		preLatch := make([]latched, len(tup.Elems))
+		for i, elem := range tup.Elems {
+			if isPromotedTupleElem(elem, cg.curFnEscapingAliases, promoted) {
+				continue
+			}
+			v, err := cg.genExpr(block, elem)
+			if err != nil {
+				return err
+			}
+			fi := userOff + i
+			if v != nil && fi < len(structType.Fields) {
+				v = cg.coerce(block, v, structType.Fields[fi])
+			}
+			retained := false
+			if isCopyExpr(elem) {
+				cg.emitRetain(block, v)
+				retained = true
+			}
+			preLatch[i] = latched{val: v, retained: retained}
+		}
+
+		// Run defers (may modify stack copies of promoted vars).
+		if err := cg.emitDefers(block); err != nil {
+			return err
+		}
+
+		// Phase 2: build the result tuple.
+		alloca := block.NewAlloca(structType)
+		block.NewStore(constant.NewZeroInitializer(structType), alloca)
+		if typeID, has := cg.structTypeIDs[concreteName]; has {
+			typeIDGep := block.NewGetElementPtr(structType, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
+		}
+
+		for i, elem := range tup.Elems {
+			fi := userOff + i
+			if fi >= len(structType.Fields) {
+				break
+			}
+			var v value.Value
+			if isPromotedTupleElem(elem, cg.curFnEscapingAliases, promoted) {
+				rootVar := promotedTupleElemVar(elem, cg.curFnEscapingAliases, promoted)
+				var err error
+				v, err = cg.emitChainedHeapPromotion(block, rootVar)
+				if err != nil {
+					return err
+				}
+			} else {
+				v = preLatch[i].val
+			}
+			if v == nil {
+				continue
+			}
+			v = cg.coerce(block, v, structType.Fields[fi])
+			gep := block.NewGetElementPtr(structType, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+			block.NewStore(v, gep)
+		}
+
+		retVal := block.NewLoad(structType, alloca)
+		cg.emitAllScopeReleases(block, "")
+		block.NewRet(retVal)
+
+		return nil
+	}
+
+	// Non-tuple: `return &x` or `return p` (p = &x).
+	// No pre-defer latching needed - just run defers and build the RC block.
+	if err := cg.emitDefers(block); err != nil {
+		return err
+	}
+
+	rootVar := latePromotionRootVar(s.Value, cg.curFnEscapingAliases, promoted)
+	if rootVar == "" {
+		return fmt.Errorf("genLatePromotedReturn: cannot find promoted root var in %T", s.Value)
+	}
+
+	retVal, err := cg.emitChainedHeapPromotion(block, rootVar)
+	if err != nil {
+		return err
+	}
+	if cg.curFn != nil && !irtypes.IsVoid(retType) {
+		retVal = cg.coerce(block, retVal, retType)
+	}
+
+	cg.emitAllScopeReleases(block, "")
+	block.NewRet(retVal)
+
+	return nil
+}
+
+// emitChainedHeapPromotion promotes rootVar (and all variables in its alias chain
+// that are in curFnEscapingVars) from stack to ARC heap blocks.  Inner variables
+// (further down the alias chain) are promoted first; each parent's alloca is then
+// updated to hold the child's heap pointer before the parent is promoted.  This
+// ensures that returned pointer chains are fully heap-resident.
+func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (value.Value, error) {
+	aliases := cg.curFnEscapingAliases
+	promoted := cg.curFnEscapingVars
+
+	// Build the chain from rootVar following alias links in promoted.
+	chain := []string{rootVar}
+	for {
+		cur := chain[len(chain)-1]
+		next, ok := aliases[cur]
+		if !ok || next == "" || !promoted[next] {
+			break
+		}
+		chain = append(chain, next)
+	}
+
+	// heapPtrs maps varName -> its heap block pointer (typed as *T for T = element type).
+	heapPtrs := make(map[string]value.Value)
+
+	// Promote from leaf (last in chain) to root (first in chain).
+	for i := len(chain) - 1; i >= 0; i-- {
+		varName := chain[i]
+		entry, ok := cg.curScope.lookup(varName)
+		if !ok || !entry.isAlloc {
+			return nil, fmt.Errorf("emitChainedHeapPromotion: var %q not found in scope", varName)
+		}
+		ptrType, ok2 := entry.val.Type().(*irtypes.PointerType)
+		if !ok2 {
+			return nil, fmt.Errorf("emitChainedHeapPromotion: var %q alloca not a pointer type", varName)
+		}
+		elemType := ptrType.ElemType
+
+		// If this var points to a child that was just promoted, update the alloca
+		// so it holds the child's heap pointer instead of the child's stack address.
+		if i < len(chain)-1 {
+			childHeapPtr := heapPtrs[chain[i+1]]
+			childCast := block.NewBitCast(childHeapPtr, elemType)
+			block.NewStore(childCast, entry.val)
+		}
+
+		// Load the (potentially updated) value from the stack alloca.
+		stackVal := block.NewLoad(elemType, entry.val)
+
+		// Allocate ARC block and copy the value into it.
+		sz := cg.llvmSizeOf(block, elemType)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		heapPtr := block.NewBitCast(heapI8, irtypes.NewPointer(elemType))
+		block.NewStore(stackVal, heapPtr)
+
+		// Retain ARC sub-fields (strings, arrays) so scope cleanup on the stack
+		// copy is balanced.  For plain i64/pointers this is a no-op.
+		cg.emitRetain(block, stackVal)
+
+		heapPtrs[varName] = heapPtr
+	}
+
+	return heapPtrs[rootVar], nil
+}
+
+// latePromotionRootVar extracts the name of the underlying escaping variable from
+// a simple return expression: `return &x` -> "x", `return p` (p=&x) -> "x".
+func latePromotionRootVar(node ast.Node, aliases map[string]string, promoted map[string]bool) string {
+	switch rv := node.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := rv.Expr.(*ast.Identifier); ok && promoted[ident.Name] {
+			return ident.Name
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[rv.Name]; ok && promoted[src] {
+			return src
+		}
+		// Also handle direct identifier that is itself the promoted var
+		if promoted[rv.Name] {
+			return rv.Name
+		}
+	}
+
+	return ""
+}
+
+// isPromotedTupleElem reports whether a tuple element is a promoted pointer
+// (either &x where x is promoted, or an alias identifier p where aliases[p] is promoted).
+func isPromotedTupleElem(elem ast.Node, aliases map[string]string, promoted map[string]bool) bool {
+	return promotedTupleElemVar(elem, aliases, promoted) != ""
+}
+
+// promotedTupleElemVar returns the root escaping variable name for a promoted
+// tuple element, or "" if the element is not promoted.
+func promotedTupleElemVar(elem ast.Node, aliases map[string]string, promoted map[string]bool) string {
+	switch e := elem.(type) {
+	case *ast.AddressOfExpr:
+		if ident, ok := e.Expr.(*ast.Identifier); ok && promoted[ident.Name] {
+			return ident.Name
+		}
+	case *ast.Identifier:
+		if src, ok := aliases[e.Name]; ok && promoted[src] {
+			return src
+		}
+	}
+
+	return ""
 }

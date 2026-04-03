@@ -27,6 +27,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | Document | Contents |
 |----------|----------|
 | [JSON](stdlib/json.md) | JSON encoding/decoding: `encode`, `parse`, `parse[T]`, field tags |
+| [Measure](stdlib/measure.md) | Monotonic clock: `now_us`, `now_ms` for benchmarking |
 | [Regex](stdlib/regex.md) | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split` |
 
 ## Quick taste

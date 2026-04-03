@@ -1,0 +1,12 @@
+// stdlib/measure - monotonic clock utilities for benchmarking
+
+fn _tin_now_us_c() i64 = extern("_tin_now_us")
+fn _tin_now_ms_c() i64 = extern("_tin_now_ms")
+
+// now_us returns the current monotonic time in microseconds.
+fn now_us() i64 = return _tin_now_us_c()
+
+// now_ms returns the current monotonic time in milliseconds.
+fn now_ms() i64 = return _tin_now_ms_c()
+
+export { now_us, now_ms } as measure

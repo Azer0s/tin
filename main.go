@@ -619,6 +619,7 @@ func runDirTests(dir string, extraFlags []string) {
 			}()
 			m, err := cg.Generate(prog)
 			mod = m
+
 			return err
 		}()
 		if cgErr != nil {

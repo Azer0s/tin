@@ -90,13 +90,14 @@ echo std::math::PI
 | `tcp`     | `tcp::Conn`, `tcp::Server`, `tcp::listen` - high-level TCP                 |
 | `sync`    | `Channel[T]`, `Mutex`, `RWMutex`, `Cond`, `AtomicI64`, `Future[T]`, `Unit` |
 | `math`    | `sqrt`, `pow`, `floor`, `ceil`, `sin`, `cos`, `PI`, `E` - links `-lm`      |
+| `measure` | `now_us`, `now_ms` - monotonic clock for benchmarking                      |
 | `strings` | `strings::replace(s, old, new) string`                                     |
 | `str`     | Wrappers around libc string functions: `atoi`, `strcmp`, `strlen`, ...     |
 | `regex`   | PCRE regular expressions - see [`docs/stdlib/regex.md`](stdlib/regex.md)   |
 | `json`    | JSON encoding/decoding - see [`docs/stdlib/json.md`](stdlib/json.md)       |
 | `os`      | `exit`, `getenv`, `setenv`, `getpid`, ...                                  |
 | `assert`  | Test assertion helpers: `ok`, `equals`, `equals_str`, `fails`, `panics`    |
-| `mem`     | `malloc`, `calloc`, `realloc`, `free`, `memcpy`, ...                       |
+| `mem`     | C-level `malloc`, `calloc`, `realloc`, `free`, `memcpy` - for C interop only |
 | `std`     | Convenience re-export: `io`, `math`, `os`, `assert`                        |
 
 ---
@@ -186,6 +187,48 @@ echo math::PI          // 3.14159...
 ```
 
 Requires `//!-lm` at the top of the file.
+
+---
+
+## `measure` - monotonic clock
+
+```rust
+use measure
+
+let start = measure::now_us()
+// ... work ...
+let elapsed_us = measure::now_us() - start
+echo "elapsed: ~{elapsed_us / 1000}ms"
+echo "per-op: ~{elapsed_us * 1000 / n}ns"
+```
+
+| Function         | Returns | Description                    |
+|------------------|---------|--------------------------------|
+| `measure::now_us()` | `i64`   | Monotonic time in microseconds |
+| `measure::now_ms()` | `i64`   | Monotonic time in milliseconds |
+
+Both functions use `CLOCK_MONOTONIC` and never go backwards. Use `now_us` for
+sub-millisecond precision; `now_ms` when millisecond granularity is enough.
+
+---
+
+## `mem` - C-level allocator
+
+`mem` exposes the raw C heap functions directly. It is intended for **C interop
+only** - use it when interfacing with a C library that expects you to manage
+memory manually (`malloc`/`free` contracts) or when constructing objects that
+live outside Tin's ARC system.
+
+```rust
+use mem
+
+let p = mem::malloc(64) as *byte    // raw C malloc - caller must free
+// ... use p ...
+mem::free(p as *void)               // explicit release required
+```
+
+Normal Tin code does not need `mem`. `&struct{}` heap literals are
+ARC-managed automatically and are freed when the owning variable leaves scope.
 
 ---
 

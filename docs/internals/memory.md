@@ -119,6 +119,25 @@ the block entirely - no bookkeeping for static data.
 
 ---
 
+## `&struct{}` - ARC-managed heap literals
+
+When user code writes `&MyStruct{...}` (address-of a struct literal), the
+compiler allocates the struct with `_tin_rc_alloc` rather than a plain `alloca`
+or `malloc`. The variable that holds the pointer is tagged `isHeapOwned = true`
+in the scope, and `emitHeapChainRelease` is called at scope exit to release it.
+
+```tin
+let p = &point{x: 10, y: 20}   // _tin_rc_alloc; freed when p leaves scope
+// no mem::free needed
+```
+
+The `mem` package is reserved for explicit C-interop (`malloc`/`free`) contracts
+where the caller must manage memory manually. Normal Tin code should never need
+`mem::free` on a `&struct{}` pointer - doing so passes the wrong address (the
+user-data pointer, not the header) to C's `free`, causing undefined behavior.
+
+---
+
 ## Raw memory helpers (`mem.c`)
 
 For cases where ARC overhead is unwanted (e.g. temporary internal buffers),
@@ -239,17 +258,18 @@ ref-counted normally through their own `_tin_retain`/`_tin_release` calls.
 
 ### Which patterns trigger promotion
 
-| Pattern                            | Promoted?     | Notes                                                                   |
-|------------------------------------|---------------|-------------------------------------------------------------------------|
-| `return &localVar`                 | Yes           | Core case                                                               |
-| `let p = &localVar; return p`      | Yes           | Alias chain                                                             |
-| `return (&x, y)`                   | Yes (x only)  | Tuple element                                                           |
-| `let p = &x; let q = &p; return q` | Yes (p and x) | Transitive chain                                                        |
-| `return localVar`                  | No            | Value return - no pointer, no escape                                    |
-| `return MyStruct{}`                | No            | Struct literal returned by value                                        |
-| `return &MyStruct{}`               | No            | Address-of literal - struct literal is a temp alloca, not a named local |
-| `let p = &x; foo(p)` (no return)   | No            | Pointer stays local                                                     |
-| `let p = &x; return y`             | No            | Alias exists but only `y` is returned                                   |
+| Pattern                            | Promoted?     | Notes                                                                        |
+|------------------------------------|---------------|------------------------------------------------------------------------------|
+| `return &localVar`                 | Yes           | Core case                                                                    |
+| `let p = &localVar; return p`      | Yes           | Alias chain                                                                  |
+| `return (&x, y)`                   | Yes (x only)  | Tuple element                                                                |
+| `let p = &x; let q = &p; return q` | Yes (p and x) | Transitive chain                                                             |
+| `return localVar`                  | No            | Value return - no pointer, no escape                                         |
+| `return MyStruct{}`                | No            | Struct literal returned by value                                             |
+| `return &MyStruct{}`               | No            | Struct literal - ARC-alloc'd, caller takes ownership via RC transfer         |
+| `let p = &MyStruct{}`              | ARC           | Uses `_tin_rc_alloc`; freed automatically when `p` leaves scope             |
+| `let p = &x; foo(p)` (no return)   | No            | Pointer stays local                                                          |
+| `let p = &x; return y`             | No            | Alias exists but only `y` is returned                                        |
 
 ### Limitations
 
@@ -261,8 +281,12 @@ ref-counted normally through their own `_tin_retain`/`_tin_release` calls.
 - **Non-return escapes**: passing `&x` to a function that stores it somewhere
   external (e.g., a channel send) is not tracked. The analysis is intentionally
   limited to return-path escapes.
-- **Heap memory is not freed automatically** for non-ARC types. The variable is
-  malloc'd; there is no corresponding free unless the caller calls `mem::free`.
+- **Heap memory is not freed automatically** for heap-promoted named locals
+  (scalars, raw struct pointers returned from functions). The variable is
+  malloc'd for return-escape; the caller owns the memory and is responsible
+  for its lifetime. `&MyStruct{}` literals are the exception: they use
+  `_tin_rc_alloc` and are freed automatically by ARC when the owning variable
+  leaves scope.
 
 ### Implementation files
 

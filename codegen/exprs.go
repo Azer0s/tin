@@ -1027,9 +1027,31 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return nil, err2
 				}
 				// Adapt args if needed and call.
+				preCoerceVals := argVals
 				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
+				result := block.NewCall(concreteFunc, argVals...)
+				// ARC: release temporary RC-tracked arguments (same as regular call path).
+				for i, astArg := range e.Args {
+					if i >= len(preCoerceVals) {
+						break
+					}
+					pre := preCoerceVals[i]
+					post := argVals[i]
+					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+						cg.emitRelease(block, post)
 
-				return block.NewCall(concreteFunc, argVals...), nil
+						continue
+					}
+					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+						continue
+					}
+					cg.emitRelease(block, pre)
+				}
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+
+				return result, nil
 			}
 		}
 		// Overload resolution: if this name has multiple variants, evaluate args
@@ -1343,9 +1365,27 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				llArgs = append(llArgs, callArgs...)
 				llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
 				result := block.NewCall(concreteFunc, llArgs...)
+				// ARC: release temporary RC-tracked call arguments (index 1+ in llArgs; 0 is this).
+				for i, astArg := range e.Args {
+					if i >= len(callArgs) || i+1 >= len(llArgs) {
+						break
+					}
+					pre := callArgs[i]
+					post := llArgs[i+1]
+					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+						cg.emitRelease(block, post)
+
+						continue
+					}
+					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+						continue
+					}
+					cg.emitRelease(block, pre)
+				}
 				if irtypes.IsVoid(result.Type()) {
 					return nil, nil
 				}
+
 				return result, nil
 			}
 			// Also check without prefix.
@@ -2455,6 +2495,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 			if srcUnsigned {
 				return block.NewZExt(val, targetType), nil
 			}
+
 			return block.NewSExt(val, targetType), nil
 		}
 	}
@@ -3172,8 +3213,17 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		captures = append(captures, closureCapture{name: n, val: val, llvmTy: ty})
 	}
 
-	// Step 2: build env struct and malloc it (if there are captures)
-	envI8Ptr, envStructType := cg.buildEnv(block, captures)
+	// Step 2: generate per-closure dtor (releases RC-tracked captures when env RC=0),
+	// then build an RC-managed env struct with the dtor stored at field 0.
+	var dtorFn *ir.Func
+	for _, c := range captures {
+		if isRCTrackedType(c.llvmTy) {
+			dtorFn = cg.genClosureDtor(name+".dtor", captures)
+
+			break
+		}
+	}
+	envI8Ptr, envStructType := cg.buildClosureEnv(block, captures, dtorFn)
 
 	// Step 3: create the lambda IR function with (i8* env, params...) sig
 	llParams := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
@@ -3199,10 +3249,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	prevCtx := cg.pushClosureCtx(f)
 
-	// Step 4: unpack captures from env inside the lambda body
-	// useEnvDirect=true: lambda env is heap-allocated and persists across calls,
-	// so mutations (e.g. counter++) are visible on subsequent invocations.
-	cg.unpackEnv(entry, f, envStructType, captures, true)
+	// Step 4: unpack captures from env inside the lambda body.
+	// unpackClosureEnv uses GEPs directly (env persists across calls) and retains
+	// each RC-tracked capture so the body's scope-exit release is balanced.
+	cg.unpackClosureEnv(entry, f, envStructType, captures)
 
 	// Register lambda params (skip index 0 = env).
 	for i, p := range e.Params {
@@ -3248,17 +3298,49 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	cg.popClosureCtx(prevCtx)
 
-	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr }
+	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr } using insertvalue
+	// so no stack alloca is needed.
 	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)
-	alloca := block.NewAlloca(fatStructType)
-	gep0 := block.NewGetElementPtr(fatStructType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(f, gep0)
-	gep1 := block.NewGetElementPtr(fatStructType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(envI8Ptr, gep1)
+	fat0 := block.NewInsertValue(constant.NewUndef(fatStructType), f, 0)
+	fat1 := block.NewInsertValue(fat0, envI8Ptr, 1)
 
-	return block.NewLoad(fatStructType, alloca), nil
+	// Signal to genVarDecl whether this closure has captured variables so it can
+	// skip the _tin_release_closure(null) call for non-capturing closures.
+	cg.lastLambdaHadCaptures = len(captures) > 0
+
+	return fat1, nil
+}
+
+// genClosureDtor generates a per-closure destructor IR function that releases
+// any RC-tracked captures stored in the closure env (built by buildClosureEnv).
+// The dtor signature is void(i8* env). The env layout matches buildClosureEnv:
+// field 0 = i8* dtor_ptr, fields 1..N = captures.
+func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Func {
+	// Reconstruct the env struct type (must match buildClosureEnv layout).
+	fields := make([]irtypes.Type, len(captures)+1)
+	fields[0] = irtypes.I8Ptr
+	for i, c := range captures {
+		fields[i+1] = c.llvmTy
+	}
+	envStructType := irtypes.NewStruct(fields...)
+
+	dtorFn := cg.mod.NewFunc(name, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
+	entry := dtorFn.NewBlock("entry")
+
+	envTypedPtr := entry.NewBitCast(dtorFn.Params[0], irtypes.NewPointer(envStructType))
+	for i, c := range captures {
+		if !isRCTrackedType(c.llvmTy) {
+			continue
+		}
+		gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i+1)))
+		fieldVal := entry.NewLoad(c.llvmTy, gep)
+		cg.emitRelease(entry, fieldVal)
+	}
+	entry.NewRet(nil)
+
+	return dtorFn
 }
 
 // Interpolated string
@@ -4130,6 +4212,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 					if f.Name() == coroName {
 						coroFn = f
 						cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})
+
 						break
 					}
 				}
@@ -4589,7 +4672,9 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		nullPtr := constant.NewNull(irtypes.NewPointer(st))
 		gepOne := block.NewGetElementPtr(st, nullPtr, constant.NewInt(irtypes.I32, 1))
 		sz := block.NewPtrToInt(gepOne, irtypes.I64)
-		heapI8 := block.NewCall(cg.ensureMalloc(), sz)
+		// Use _tin_rc_alloc so the block is ARC-managed: scope exit can call
+		// _tin_release to free it without a manual mem::free.
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
 		typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(st))
 		block.NewStore(val, typedPtr)
 

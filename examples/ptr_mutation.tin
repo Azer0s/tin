@@ -102,8 +102,6 @@ test "double pointer: redirect changes which struct *p points to" =
   assert::equals(p.y, 4)
   // original a is unchanged
   assert::equals(a.x, 1)
-  mem::free(a as *void)
-  mem::free(b as *void)
 
 test "double pointer: write through **point reaches original struct" =
   let pt = point{x: 0, y: 0}
@@ -139,8 +137,6 @@ test "triple pointer: chain redirect then write" =
   set_y_via_triple(&pp, 55)
   assert::equals(b.y, 55)
   assert::equals(a.y, 0)
-  mem::free(a as *void)
-  mem::free(b as *void)
 
 test "string field: relabel releases old string, retains new" =
   let n = named{label: "hello", value: 1}
@@ -165,7 +161,6 @@ test "heap struct: single pointer mutation propagates" =
   translate(p, -7, -8)
   assert::equals(p.x, 0)
   assert::equals(p.y, 0)
-  mem::free(p as *void)
 
 test "heap struct: double pointer swap then modify" =
   let a = &point{x: 10, y: 20}
@@ -176,5 +171,3 @@ test "heap struct: double pointer swap then modify" =
   assert::equals(b.x, 31)
   assert::equals(b.y, 41)
   assert::equals(a.x, 10) // a untouched
-  mem::free(a as *void)
-  mem::free(b as *void)

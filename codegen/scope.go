@@ -28,9 +28,10 @@ type scopeEntry struct {
 	isUnsigned bool        // true if the variable's Tin type is unsigned (u8/u16/u32/u64)
 	// isHeapOwned: true when this variable holds the result of a late-promoted
 	// heap allocation (returned via _tin_rc_alloc from a callee that heap-promotes).
-	// Scope-exit performs a two-step release: first release T's ARC sub-fields by
-	// loading T from *T, then _tin_release the RC wrapper block itself.
-	isHeapOwned bool
+	// Scope-exit calls emitHeapChainRelease(depth) to walk the chain of RC blocks
+	// and free all of them (including inner blocks for nested promotions like **i64).
+	isHeapOwned    bool
+	heapOwnedDepth int // number of RC-promoted pointer levels (1 for *T, 2 for **T, ...)
 	// basePtr is set for slice variables (arr[start:end]).  Because the fat-ptr
 	// stores an interior pointer (offset into the allocation), ARC retain/release
 	// must operate on the base allocation pointer, not the possibly-interior field 0.

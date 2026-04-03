@@ -224,6 +224,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 		if len(m.TypeParams) > 0 {
 			templateKey := structKey + "_" + m.Name
 			cg.genericMethodTemplates[templateKey] = m
+
 			continue
 		}
 		if err := cg.genStructMethod(structKey, m); err != nil {
@@ -404,11 +405,16 @@ func substituteStructNameInBody(node ast.Node, genericName, concreteName string)
 			newFields[i] = ast.StructLitField{Name: f.Name, Value: substituteStructNameInBody(f.Value, genericName, concreteName)}
 		}
 		typeName := n.TypeName
-		if typeName == genericName {
+		// Only rename bare (no TypeArgs) struct literals.  If TypeArgs are present,
+		// genStructLit will resolve the concrete name at codegen time via typeAliases
+		// (set by monomorphizeFunc).  Pre-renaming here AND dropping the TypeArgs
+		// causes genStructLit to use the wrong concrete struct (e.g. box__i64 instead
+		// of box__string when r=string), producing a type-mismatch panic.
+		if typeName == genericName && len(n.TypeArgs) == 0 {
 			typeName = concreteName
 		}
 
-		return &ast.StructLit{TypeName: typeName, Fields: newFields, Positional: n.Positional}
+		return &ast.StructLit{TypeName: typeName, TypeArgs: n.TypeArgs, Fields: newFields, Positional: n.Positional}
 	case *ast.Block:
 		newStmts := make([]ast.Node, len(n.Stmts))
 		for i, s := range n.Stmts {

@@ -289,6 +289,87 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 	return nil
 }
 
+// hasDeferStmt reports whether body contains any DeferStmt (recursively).
+// Nested fn/lambda declarations are not descended into.
+// NOTE: concrete nil pointers (e.g. (*ast.Block)(nil)) passed as ast.Node are
+// non-nil interfaces; all concrete-pointer cases must guard against nil n.
+func hasDeferStmt(body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+	switch n := body.(type) {
+	case *ast.DeferStmt:
+		return n != nil
+	case *ast.FuncDecl, *ast.LambdaExpr:
+		return false // defers inside nested fns don't affect outer's ret slot
+	case *ast.Block:
+		if n == nil {
+			return false
+		}
+		for _, s := range n.Stmts {
+			if hasDeferStmt(s) {
+				return true
+			}
+		}
+	case *ast.ExprStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Expr)
+	case *ast.VarDecl:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.AssignStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.ReturnStmt:
+		if n == nil {
+			return false
+		}
+
+		return hasDeferStmt(n.Value)
+	case *ast.IfStmt:
+		if n == nil {
+			return false
+		}
+		if n.Then != nil && hasDeferStmt(n.Then) {
+			return true
+		}
+		if n.Else != nil && hasDeferStmt(n.Else) {
+			return true
+		}
+		for _, elif := range n.ElseIfs {
+			if elif.Body != nil && hasDeferStmt(elif.Body) {
+				return true
+			}
+		}
+	case *ast.ForStmt:
+		if n == nil {
+			return false
+		}
+
+		return n.Body != nil && hasDeferStmt(n.Body)
+	case *ast.MatchStmt:
+		if n == nil {
+			return false
+		}
+		for _, arm := range n.Cases {
+			if arm.Body != nil && hasDeferStmt(arm.Body) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // bodyContainsSpawnOrAwait reports whether any node in the body (recursively)
 // is a SpawnExpr or AwaitExpr. Nested fn declarations are not descended into.
 func bodyContainsSpawnOrAwait(body []ast.Node) bool {
@@ -367,6 +448,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// even when defined locally inside a test or function body.
 	if len(n.Constraints) > 0 {
 		cg.constrainedFuncs[n.Name] = n
+
 		return nil
 	}
 	// Unconstrained generic functions (TypeParams only) are also compiled on demand.
@@ -374,6 +456,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	if len(n.TypeParams) > 0 {
 		cg.genericFuncs[n.Name] = n
 		cg.genericFuncHomeScopes[n.Name] = cg.curScope
+
 		return nil
 	}
 	irName := n.Name
@@ -729,14 +812,17 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curDeferRetSlotParam = nil
 	cg.curDeferThunkRetType = nil
 	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
+	if len(cg.curFnEscapingVars) > 0 {
+		cg.heapPromotingFns[scopeName] = true
+	}
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
 
-	// For non-void functions: alloca a {i8, retType} slot for defer return override.
-	// Field 0 = valid flag (0 = not set, 1 = set); field 1 = override return value.
-	// The slot is passed to each defer thunk as ret_slot so the thunk can write back.
-	if !irtypes.IsVoid(retType) {
+	// For non-void functions that contain defer stmts: alloca a {i8, retType} slot
+	// so a defer thunk can override the return value.  Skip when no defer is present
+	// to avoid generating dead code in the common case.
+	if !irtypes.IsVoid(retType) && hasDeferStmt(n.Body) {
 		slotType := irtypes.NewStruct(irtypes.I8, retType)
 		slotAlloca := entry.NewAlloca(slotType)
 		// Zero-initialize the valid byte.
