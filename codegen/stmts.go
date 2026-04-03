@@ -716,7 +716,16 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		cg.lastLambdaHadCaptures = false // consume
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
+	// Determine the byte-array element kind: prefer the explicit declared type,
+	// then fall back to the RHS AsExpr type (covers `let x = expr as [byte]`).
+	bae := byteArrayElemType(s.Type)
+	if bae == "" {
+		if asExpr, ok := s.Value.(*ast.AsExpr); ok {
+			bae = byteArrayElemType(asExpr.Type)
+		}
+	}
+
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
 
 	return block, nil
 }
@@ -1394,6 +1403,22 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	return node
 }
 
+// exprByteArrayElem returns the element type name ("byte", "u8", "char") when
+// the AST expression is statically known to be a [byte]/[u8]/[char] fat array,
+// and "" otherwise.
+func (cg *CodeGen) exprByteArrayElem(node ast.Node) string {
+	switch n := node.(type) {
+	case *ast.AsExpr:
+		return byteArrayElemType(n.Type)
+	case *ast.Identifier:
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			return se.byteArrayElem
+		}
+	}
+
+	return ""
+}
+
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 
@@ -1425,6 +1450,28 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 		block.NewCall(printf, fmtStr, ptr)
 
 	case isStringType(t):
+		// [byte]/[u8]/[char] arrays share {i8*, i64} layout with string.
+		// Dispatch by element type: byte -> hex, u8 -> decimal, char -> %c.
+		// Plain strings fall through to %s.
+		if elem := cg.exprByteArrayElem(s.Value); elem != "" {
+			var perElemFmt string
+			switch elem {
+			case "byte":
+				perElemFmt = "%02x"
+			case "u8":
+				perElemFmt = "%u"
+			default: // "char"
+				perElemFmt = "%c"
+			}
+			var printErr error
+			block, printErr = cg.genPrintByteArray(block, val, perElemFmt)
+			if printErr != nil {
+				return nil, printErr
+			}
+			block.NewCall(printf, cg.newGlobalString("\n"))
+
+			break
+		}
 		// Extract data pointer and call printf("%s\n", ptr).
 		ptr := cg.extractStringPtr(block, val)
 		fmtStr := cg.newGlobalString("%s\n")
@@ -1554,6 +1601,7 @@ func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, e
 			if err != nil {
 				return nil, err
 			}
+
 			break
 		}
 		ext := cg.coerce(block, val, irtypes.I64)
@@ -1638,6 +1686,53 @@ func (cg *CodeGen) genPrintArray(block *ir.Block, val value.Value) (*ir.Block, e
 	if err != nil {
 		return nil, err
 	}
+
+	iNext := bodyBlock.NewAdd(iVal2, constant.NewInt(irtypes.I64, 1))
+	bodyBlock.NewStore(iNext, iAlloca)
+	bodyBlock.NewBr(condBlock)
+
+	endBlock.NewCall(printf, cg.newGlobalString("]"))
+
+	return endBlock, nil
+}
+
+// genPrintByteArray emits a loop that prints a [byte]/[u8]/[char] fat-array as
+// [e1 e2 ...] where each element is formatted with perElemFmt (e.g. "%02x",
+// "%u", "%c").  The fat-array must have layout {i8*, i64}.
+func (cg *CodeGen) genPrintByteArray(block *ir.Block, val value.Value, perElemFmt string) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+
+	dataPtr := block.NewExtractValue(val, 0)
+	length := block.NewExtractValue(val, 1)
+
+	iAlloca := block.NewAlloca(irtypes.I64)
+	block.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+
+	block.NewCall(printf, cg.newGlobalString("["))
+
+	condBlock := cg.newBlock("print.bytes.cond")
+	bodyBlock := cg.newBlock("print.bytes.body")
+	endBlock := cg.newBlock("print.bytes.end")
+
+	block.NewBr(condBlock)
+
+	// Condition: i < length
+	iVal := condBlock.NewLoad(irtypes.I64, iAlloca)
+	cmp := condBlock.NewICmp(enum.IPredSLT, iVal, length)
+	condBlock.NewCondBr(cmp, bodyBlock, endBlock)
+
+	// Body: print space separator (except before first), print element, increment.
+	iVal2 := bodyBlock.NewLoad(irtypes.I64, iAlloca)
+	isFirst := bodyBlock.NewICmp(enum.IPredEQ, iVal2, constant.NewInt(irtypes.I64, 0))
+	spaceStr := cg.newGlobalString(" ")
+	emptyStr := cg.newGlobalString("")
+	sepStr := bodyBlock.NewSelect(isFirst, emptyStr, spaceStr)
+	bodyBlock.NewCall(printf, cg.newGlobalString("%s"), sepStr)
+
+	elemPtr := bodyBlock.NewGetElementPtr(irtypes.I8, dataPtr, iVal2)
+	elemVal := bodyBlock.NewLoad(irtypes.I8, elemPtr)
+	zext := bodyBlock.NewZExt(elemVal, irtypes.I32)
+	bodyBlock.NewCall(printf, cg.newGlobalString(perElemFmt), zext)
 
 	iNext := bodyBlock.NewAdd(iVal2, constant.NewInt(irtypes.I64, 1))
 	bodyBlock.NewStore(iNext, iAlloca)

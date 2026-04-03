@@ -26,6 +26,10 @@ type scopeEntry struct {
 	noRelease  bool        // true for borrowed bindings (e.g. union `is` vars) -- scope exit skips all release
 	isGlobal   bool        // true for module-level globals; skip in per-function scope release
 	isUnsigned bool        // true if the variable's Tin type is unsigned (u8/u16/u32/u64)
+	// byteArrayElem is the element type name ("byte", "u8", "char") when this
+	// variable holds a [byte]/[u8]/[char] fat array.  Empty string otherwise.
+	// Used by genEcho to choose the per-element printf format.
+	byteArrayElem string
 	// isHeapOwned: true when this variable holds the result of a late-promoted
 	// heap allocation (returned via _tin_rc_alloc from a callee that heap-promotes).
 	// Scope-exit calls emitHeapChainRelease(depth) to walk the chain of RC blocks
