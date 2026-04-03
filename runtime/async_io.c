@@ -21,7 +21,8 @@
 #include <string.h>
 #include <pthread.h>
 
-#define TIN_IO_MAX_WATCHES 4096
+#define TIN_IO_WATCHES_INIT        256
+#define TIN_IO_WATCHES_DEFAULT_MAX (1 << 16)  // 64K
 
 // Sentinel: caller must retry the I/O after being woken.
 #define TIN_IO_BLOCKED INT64_MIN
@@ -32,9 +33,11 @@ typedef struct {
     int     events; // EPOLLIN / EPOLLOUT equivalent
 } TinIOWatch;
 
-static TinIOWatch       _io_watches[TIN_IO_MAX_WATCHES];
-static int              _io_watch_len = 0;
-static pthread_mutex_t  _io_watch_mu  = PTHREAD_MUTEX_INITIALIZER;
+static TinIOWatch      *_io_watches    = NULL;
+static int              _io_watch_len  = 0;
+static int              _io_watch_cap  = 0;
+static int              _io_watch_max  = 0;
+static pthread_mutex_t  _io_watch_mu   = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t _io_thread_id;
 static volatile int _io_shutdown = 0;
@@ -53,16 +56,26 @@ static void _set_nonblocking(int fd) {
 }
 
 // Add or update a watch entry.  Must be called with _io_watch_mu held.
-static void _io_watch_add_locked(int fd, int64_t pid, int events) {
+// Returns 1 on success, 0 if the table is full or OOM.
+static int _io_watch_add_locked(int fd, int64_t pid, int events) {
     for (int i = 0; i < _io_watch_len; i++) {
         if (_io_watches[i].fd == fd) {
             _io_watches[i].pid    = pid;
             _io_watches[i].events = events;
-            return;
+            return 1;
         }
     }
-    if (_io_watch_len < TIN_IO_MAX_WATCHES)
-        _io_watches[_io_watch_len++] = (TinIOWatch){ fd, pid, events };
+    if (_io_watch_len >= _io_watch_cap) {
+        if (_io_watch_cap >= _io_watch_max) return 0;
+        int new_cap = _io_watch_cap * 2;
+        if (new_cap > _io_watch_max) new_cap = _io_watch_max;
+        TinIOWatch *nw = (TinIOWatch *)realloc(_io_watches, (size_t)new_cap * sizeof(TinIOWatch));
+        if (!nw) return 0;
+        _io_watches    = nw;
+        _io_watch_cap  = new_cap;
+    }
+    _io_watches[_io_watch_len++] = (TinIOWatch){ fd, pid, events };
+    return 1;
 }
 
 // Register fd for the given events and park the current fiber.
@@ -70,8 +83,13 @@ static void _io_park(int fd, int64_t pid, int read_not_write) {
     int events = read_not_write ? 1 : 2;
 
     pthread_mutex_lock(&_io_watch_mu);
-    _io_watch_add_locked(fd, pid, events);
+    int ok = _io_watch_add_locked(fd, pid, events);
     pthread_mutex_unlock(&_io_watch_mu);
+
+    if (!ok) {
+        _tin_panic("async I/O: watch table full - raise TINMAXIOWATCHES");
+        return;
+    }
 
 #if defined(__linux__)
     if (_epoll_fd >= 0) {
@@ -152,6 +170,15 @@ static int _io_initialized = 0;
 void _tin_io_init(void) {
     if (_io_initialized) return;
     _io_initialized = 1;
+
+    const char *env = getenv("TINMAXIOWATCHES");
+    _io_watch_max = (env && *env) ? atoi(env) : TIN_IO_WATCHES_DEFAULT_MAX;
+    if (_io_watch_max <= 0) _io_watch_max = TIN_IO_WATCHES_DEFAULT_MAX;
+
+    _io_watch_cap = TIN_IO_WATCHES_INIT;
+    _io_watches = (TinIOWatch *)malloc((size_t)_io_watch_cap * sizeof(TinIOWatch));
+    if (!_io_watches) { fputs("tin: IO watch table OOM\n", stderr); exit(1); }
+
 #if defined(__linux__)
     _epoll_fd = epoll_create1(0);
     if (_epoll_fd < 0) perror("tin: epoll_create1");
@@ -168,6 +195,10 @@ void _tin_io_shutdown(void) {
     _io_shutdown = 1;
     pthread_join(_io_thread_id, NULL);
     _io_initialized = 0;
+    free(_io_watches);
+    _io_watches   = NULL;
+    _io_watch_cap = 0;
+    _io_watch_len = 0;
 #if defined(__linux__)
     if (_epoll_fd >= 0) { close(_epoll_fd); _epoll_fd = -1; }
 #elif defined(__APPLE__) || defined(__FreeBSD__)
