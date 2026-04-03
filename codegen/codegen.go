@@ -35,6 +35,8 @@ type CodeGen struct {
 	structFields map[string][]string
 	// struct field tags: structName -> fieldName -> first @"..." tag value (empty string = untagged)
 	structFieldTags map[string]map[string]string
+	// struct field Tin types: structName -> []TypeExpr per user field (same order as structFields)
+	structFieldTinTypes map[string][]ast.TypeExpr
 	// generic struct templates: name -> arity -> AST node (not compiled directly)
 	genericStructsByArity map[string]map[int]*ast.StructDecl
 
@@ -106,9 +108,14 @@ type CodeGen struct {
 	sliceSubsliceFn *ir.Func
 
 	// ARC runtime functions (lazily declared).
-	rcAllocFn *ir.Func // _tin_rc_alloc(size i64) i8*
-	retainFn  *ir.Func // _tin_retain(ptr i8*)
-	releaseFn *ir.Func // _tin_release(ptr i8*)
+	rcAllocFn             *ir.Func // _tin_rc_alloc(size i64) i8*
+	retainFn              *ir.Func // _tin_retain(ptr i8*)
+	releaseFn             *ir.Func // _tin_release(ptr i8*)
+	releaseFatElemArrayFn *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
+	releaseAnyElemArrayFn *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
+	releaseFnElemArrayFn  *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)
+	releaseClosureFn      *ir.Func // _tin_release_closure(env i8*)
+	releaseAnyFn          *ir.Func // _tin_release_any(tag i32, data i8*)
 
 	// module system
 	// exports: localName -> packageName  (from ExportDecl)
@@ -126,6 +133,10 @@ type CodeGen struct {
 	genericFuncHomeScopes map[string]*scope
 	// constrainedFuncInstances: "funcName__typeArg" -> compiled *ir.Func
 	constrainedFuncInstances map[string]*ir.Func
+	// genericMethodTemplates: "structName_methodName" -> generic method FuncDecl template.
+	// Methods with their own TypeParams (e.g. map_opt[r]) are stored here instead of
+	// being compiled eagerly; they are monomorphized on-demand at each call site.
+	genericMethodTemplates map[string]*ast.FuncDecl
 
 	// Universal runtime type ID registry.
 	// Primitives use anyTag* constants (0-5).  Every named struct and
@@ -157,6 +168,22 @@ type CodeGen struct {
 	// curDeferThunkRetType: inside a defer lambda thunk, the lambda's declared return
 	// type (e.g. *i64). Used to coerce return values (e.g. None -> null *i64).
 	curDeferThunkRetType irtypes.Type
+
+	// curFnEscapingVars: set of local variable names whose addresses escape the
+	// current function (e.g. `return &s` or `let p = &s; return p`).
+	// These are heap-promoted: genVarDecl uses malloc instead of alloca.
+	curFnEscapingVars map[string]bool
+
+	// curFnEscapingAliases: alias map built alongside curFnEscapingVars.
+	// aliases[name] = source means `let name = &source` was found in the body.
+	// Used at return sites to determine which heap-promoted variables are
+	// actually returned (and thus owned by caller) vs which can be freed.
+	curFnEscapingAliases map[string]string
+
+	// heapPromotingFns: set of function names that return late-heap-promoted
+	// pointers (*T via _tin_rc_alloc).  Callers use this to mark the result
+	// variable as isHeapOwned so scope-exit emits the correct two-step release.
+	heapPromotingFns map[string]bool
 
 	// match subject: set before entering genWhereList when the function body
 	// is a pure where-list pattern match. Used to compare atom conditions.
@@ -294,6 +321,12 @@ type CodeGen struct {
 	// pointer that may be stored in the slice fat-ptr's field 0.
 	lastSliceBase value.Value
 
+	// lastLambdaHadCaptures is set by genLambdaExpr to indicate whether the most
+	// recently emitted lambda closure had any captured variables.  genVarDecl reads
+	// and clears it to mark non-capturing closure vars noRelease=true so that
+	// emitScopeRelease skips the redundant _tin_release_closure(null) call.
+	lastLambdaHadCaptures bool
+
 	// curBlock tracks the current IR block during expression generation.
 	// It is updated by genExpr when control flow changes the active block
 	// (e.g. await/yield emit a coro.suspend which switches to a new resume block).
@@ -355,6 +388,7 @@ func (cg *CodeGen) popBreakTarget() bool {
 	if len(cg.breakStack) == 0 {
 		return false
 	}
+
 	used := cg.breakUsedStack[len(cg.breakUsedStack)-1]
 	cg.breakStack = cg.breakStack[:len(cg.breakStack)-1]
 	cg.breakUsedStack = cg.breakUsedStack[:len(cg.breakUsedStack)-1]
@@ -440,6 +474,7 @@ func newModuleWithTriple() *ir.Module {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasPrefix(line, `target triple = "`) {
 				triple := strings.TrimPrefix(line, `target triple = "`)
+
 				triple = strings.TrimSuffix(triple, `"`)
 				if triple != "" {
 					mod.TargetTriple = triple
@@ -474,6 +509,7 @@ func New(filename string) *CodeGen {
 		structTypes:              make(map[string]*irtypes.StructType),
 		structFields:             make(map[string][]string),
 		structFieldTags:          make(map[string]map[string]string),
+		structFieldTinTypes:      make(map[string][]ast.TypeExpr),
 		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
 		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
 		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
@@ -493,6 +529,7 @@ func New(filename string) *CodeGen {
 		genericFuncs:             make(map[string]*ast.FuncDecl),
 		genericFuncHomeScopes:    make(map[string]*scope),
 		constrainedFuncInstances: make(map[string]*ir.Func),
+		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
 		externTLSVars:            make(map[string]*ir.Global),
@@ -512,6 +549,7 @@ func New(filename string) *CodeGen {
 		callGraph:                make(map[string][]string),
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
+		heapPromotingFns:         make(map[string]bool),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")
@@ -526,14 +564,17 @@ func New(filename string) *CodeGen {
 // for arities 2-10. Fields are named alphabetically: a, b, c, ...
 func (cg *CodeGen) initBuiltinTupleTemplates() {
 	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+
 	cg.genericStructsByArity["Tuple"] = make(map[int]*ast.StructDecl)
 	for arity := 2; arity <= 10; arity++ {
 		typeParams := make([]string, arity)
 		copy(typeParams, letters[:arity])
+
 		fields := make([]ast.StructField, arity)
 		for i, name := range typeParams {
 			fields[i] = ast.StructField{Name: name, Type: &ast.SimpleType{Name: name}}
 		}
+
 		cg.genericStructsByArity["Tuple"][arity] = &ast.StructDecl{
 			Name:       "Tuple",
 			TypeParams: typeParams,
@@ -602,9 +643,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				cg.exports[name] = exp.AsName
 			}
 		}
+
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.Constraints) > 0 {
 			cg.constrainedFuncs[fd.Name] = fd
 		}
+
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.TypeParams) > 0 {
 			cg.genericFuncs[fd.Name] = fd
 		}
@@ -634,6 +677,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if cg.externIRNames == nil {
 		cg.externIRNames = map[string]bool{}
 	}
+
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.IsExtern != "" {
 			cg.externIRNames[fd.IsExtern] = true
@@ -677,12 +721,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				return nil, err
 			}
 		}
+
 		if sd, ok := node.(*ast.StructDecl); ok {
 			// Skip method predeclaration for generic struct templates - methods
 			// will be compiled on demand when the concrete type is instantiated.
 			if len(sd.TypeParams) > 0 {
 				continue
 			}
+
 			aug := cg.augmentStructFromTraits(sd)
 			for _, m := range aug.Methods {
 				if err := cg.predeclareMethod(aug.Name, m); err != nil {
@@ -698,6 +744,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if err := cg.checkAllPureFuncs(); err != nil {
 		return nil, err
 	}
+
 	if err := cg.checkAllNoRecurseFuncs(); err != nil {
 		return nil, err
 	}
@@ -707,6 +754,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.Body != nil {
 			cg.buildCallGraphEntry(fd.Name, fd.Body)
 		}
+
 		if sd, ok := node.(*ast.StructDecl); ok {
 			for _, m := range sd.Methods {
 				key := methodScopeName(sd.Name, m)
@@ -714,6 +762,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		}
 	}
+
 	cg.colorCallGraph()
 
 	// Pre-declare $coro variants for all colored functions so that mutual
@@ -726,6 +775,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if fd.Name == "main" && !fd.IsStatic {
 				coroKey = "_tin_user_main"
 			}
+
 			if cg.coroCallable[coroKey] {
 				if err := cg.predeclareCoroVariant(fd, coroKey, false); err != nil {
 					return nil, err
@@ -736,6 +786,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// Third pass: generate full function bodies and other declarations.
 	var topStmts []ast.Node
+
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.FuncDecl:
@@ -787,7 +838,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		if err := cg.genTestRunner(topStmts); err != nil {
 			return nil, err
 		}
+
 		cg.emitAtomTable()
+
 		if err := cg.writeModuleFiles(prog); err != nil {
 			return nil, err
 		}
@@ -799,6 +852,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if len(topStmts) > 0 {
 		// Check if main is already defined.
 		hasmain := false
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasmain = true
@@ -806,6 +860,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				break
 			}
 		}
+
 		if !hasmain {
 			if err := cg.genImplicitMain(topStmts); err != nil {
 				return nil, err
@@ -817,6 +872,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// `_tin_user_main`.  Generate a proper `i32 @main()` wrapper that
 	// calls it and returns 0 so the process exits cleanly.
 	var userMainFn *ir.Func
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "_tin_user_main" {
 			userMainFn = f
@@ -824,9 +880,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			break
 		}
 	}
+
 	if userMainFn != nil {
 		// Only add the wrapper if there is no `i32 @main` already.
 		hasMain := false
+
 		for _, f := range cg.mod.Funcs {
 			if f.Name() == "main" {
 				hasMain = true
@@ -834,10 +892,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				break
 			}
 		}
+
 		if !hasMain {
 			// Check whether the user wrote fn{#async} main() - if so we have a
 			// $coro ramp and main should run as the first fiber.
 			var userMainCoroFn *ir.Func
+
 			for _, f := range cg.mod.Funcs {
 				if f.Name() == "_tin_user_main$coro" {
 					userMainCoroFn = f
@@ -861,6 +921,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Emit runtime initializers for top-level var declarations before
 			// any fiber runs so that globals are valid from the start.
 			var err error
+
 			wb, err = cg.emitTopLevelVarInits(wb)
 			if err != nil {
 				return nil, err
@@ -876,10 +937,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				cg.ensureFiberRuntime()
 				syncAwaitFn := cg.ensureExternDecl("_tin_fiber_sync_await", irtypes.Void,
 					[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
+
 				var coroArgs []value.Value
 				for _, p := range userMainCoroFn.Params {
 					coroArgs = append(coroArgs, constant.NewZeroInitializer(p.Type()))
 				}
+
 				coroHdl := wb.NewCall(userMainCoroFn, coroArgs...)
 				mainPid := wb.NewCall(cg.fiberSpawnFn, coroHdl)
 				wb.NewCall(syncAwaitFn, mainPid)
@@ -892,6 +955,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				for _, p := range userMainFn.Params {
 					callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
 				}
+
 				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
 				if retIsVoid {
 					wb.NewCall(userMainFn, callArgs...)
@@ -911,6 +975,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 							retVal = constant.NewInt(irtypes.I32, 0)
 						}
 					}
+
 					wb.NewRet(retVal)
 				}
 			}
@@ -931,6 +996,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// If no main function was generated (e.g. export-only module), emit a
 	// trivial no-op main so the binary links successfully.
 	hasMain := false
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == "main" {
 			hasMain = true
@@ -938,6 +1004,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			break
 		}
 	}
+
 	if !hasMain {
 		wf := cg.mod.NewFunc("main", irtypes.I32)
 		wb := wf.NewBlock("entry")

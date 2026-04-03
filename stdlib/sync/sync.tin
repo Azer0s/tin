@@ -1,9 +1,9 @@
 // stdlib/sync - Synchronization primitives, Channel[T], and fiber futures.
 //
 // Provides:
-//   Mutex        - exclusive lock (pthread_mutex_t)
-//   RWMutex      - reader-writer lock (pthread_rwlock_t)
-//   Cond         - condition variable (pthread_cond_t)
+//   Mutex        - exclusive lock (fiber-aware, parks instead of blocking OS thread)
+//   RWMutex      - reader-writer lock (fiber-aware)
+//   Cond         - condition variable (fiber-aware)
 //   AtomicI64    - lock-free 64-bit integer (C11 atomics)
 //   Channel[T]   - bounded FIFO channel (ring buffer + Mutex + Cond)
 //   Awaitable[t] - trait for types that can be awaited with `await`

@@ -1,7 +1,7 @@
 // ARC stress: slice of strings
 // Tests slices that store string values.
 // Known limitation: slice elements are not RC-retained on insertion or
-// RC-released when the slice data block is freed.  This test documents
+// RC-released when the slice data block is freed. This test documents
 // current behavior with immortal literals (no leak because literals are
 // static) and will catch regressions.
 

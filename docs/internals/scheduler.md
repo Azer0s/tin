@@ -52,7 +52,7 @@ The buffer starts at 1024 slots and doubles on each overflow up to `_rq_max`
               ▼
            BLOCKED
               │
-      unpark()│  (timer fires / epoll/kqueue fires)
+     unpark() │  (timer fires / epoll/kqueue fires)
               ▼
            RUNNABLE -> ... -> DONE
 ```
@@ -300,6 +300,7 @@ All queues grow dynamically (doubling) up to a configurable cap, then panic.
 | Timer table        | 1024    | 1M          | `TINMAXTIMERS`      | panic          |
 | IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   | panic          |
 | Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` | **unlimited**  |
+
 
 `=0` means "no cap — grow forever without panicking" (restores pre-cap behaviour
 for run queue and channel waiters). Not supported for the other queues because

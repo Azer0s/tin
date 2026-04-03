@@ -3,7 +3,7 @@
 // Correctness tests for MPMC (multi-producer multi-consumer) channel semantics.
 //
 // Strategy: each producer sends values 1..per; expected total sum across all
-// producers = P * per*(per+1)/2.  Consumers accumulate partial sums and
+// producers = P * per*(per+1)/2. Consumers accumulate partial sums and
 // signal a done channel; main collects them and compares to expected.
 //
 // Test cases:

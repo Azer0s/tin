@@ -4,7 +4,8 @@
   "scopeName": "source.tin",
   "fileTypes": ["tin"],
   "patterns": [
-    { "include": "#comment" },
+    { "include": "#line-comment" },
+    { "include": "#block-comment" },
     { "include": "#control-tag" },
     { "include": "#string" },
     { "include": "#backtick-literal" },
@@ -22,14 +23,21 @@
     { "include": "#enum-decl" },
     { "include": "#union-decl" },
     { "include": "#type-decl" },
+    { "include": "#function-call" },
     { "include": "#namespace-access" },
     { "include": "#operator" },
     { "include": "#punctuation" }
   ],
   "repository": {
-    "comment": {
+    "line-comment": {
       "name": "comment.line.double-slash.tin",
       "match": "//.*$"
+    },
+
+    "block-comment": {
+      "name": "comment.block.tin",
+      "begin": "/\\*",
+      "end": "\\*/"
     },
 
     "control-tag": {
@@ -67,7 +75,7 @@
         {
           "comment": "Escape sequences",
           "name": "constant.character.escape.tin",
-          "match": "\\\\[nrt\\\\\"'0]"
+          "match": "\\\\[nrt\\\\\"'0{}]"
         }
       ]
     },
@@ -81,9 +89,18 @@
     },
 
     "atom-literal": {
-      "comment": "Atoms: 'ok  'err  'some_atom",
-      "name": "constant.other.atom.tin",
-      "match": "'[a-zA-Z_][a-zA-Z0-9_]*"
+      "patterns": [
+        {
+          "comment": "Quoted atom: '\"content\"",
+          "name": "constant.other.atom.tin",
+          "match": "'\"[^\"\\n]*\""
+        },
+        {
+          "comment": "Simple atom: 'ok  'err  'some_atom",
+          "name": "constant.other.atom.tin",
+          "match": "'[a-zA-Z_][a-zA-Z0-9_]*"
+        }
+      ]
     },
 
     "char-literal": {
@@ -222,14 +239,35 @@
       }
     },
 
-    "namespace-access": {
-      "comment": "Module path: module::item",
-      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(::)([a-zA-Z_][a-zA-Z0-9_]*)",
+    "function-call": {
+      "comment": "Function call: name(",
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(?=\\s*\\()",
       "captures": {
-        "1": { "name": "entity.name.namespace.tin" },
-        "2": { "name": "punctuation.accessor.tin" },
-        "3": { "name": "entity.name.function.tin" }
+        "1": { "name": "entity.name.function.tin" }
       }
+    },
+
+    "namespace-access": {
+      "patterns": [
+        {
+          "comment": "Module path + function call: module::fn(",
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(::)([a-zA-Z_][a-zA-Z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.namespace.tin" },
+            "2": { "name": "punctuation.accessor.tin" },
+            "3": { "name": "entity.name.function.tin" }
+          }
+        },
+        {
+          "comment": "Module path: module::item",
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(::)([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.namespace.tin" },
+            "2": { "name": "punctuation.accessor.tin" },
+            "3": { "name": "entity.name.namespace.tin" }
+          }
+        }
+      ]
     },
 
     "operator": {

@@ -41,10 +41,10 @@ func typeExprMangle(te ast.TypeExpr) string {
 	if te == nil {
 		return "void"
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		// Replace non-identifier chars with underscore.
-
 		return strings.Map(func(r rune) rune {
 			if r == ':' || r == '.' {
 				return '_'
@@ -59,7 +59,6 @@ func typeExprMangle(te ast.TypeExpr) string {
 
 		return "ptr_" + typeExprMangle(t.Elem)
 	case *ast.ArrayType:
-
 		return "arr_" + typeExprMangle(t.Elem)
 	case *ast.GenericType:
 		parts := []string{t.Name}
@@ -69,16 +68,12 @@ func typeExprMangle(te ast.TypeExpr) string {
 
 		return strings.Join(parts, "_")
 	case *ast.FuncType:
-
 		return "fn"
 	case *ast.VoidType:
-
 		return "void"
 	case *ast.UnionTypeExpr:
-
 		return "union"
 	case *ast.TupleArrayType:
-
 		return "tuple"
 	}
 
@@ -90,10 +85,12 @@ func typeExprMangle(te ast.TypeExpr) string {
 // Vararg parameters are excluded.
 func funcParamSig(params []ast.Param) string {
 	var parts []string
+
 	for _, p := range params {
 		if p.IsVarArgs {
 			continue
 		}
+
 		parts = append(parts, typeExprMangle(p.Type))
 	}
 
@@ -142,27 +139,33 @@ func scanOverloadedNames(nodes []ast.Node) map[string]bool {
 	// Count occurrences of each name (excluding constrained generics and externs,
 	// which are handled by their own systems).
 	counts := make(map[string]int)
+
 	for _, node := range nodes {
 		switch n := node.(type) {
 		case *ast.FuncDecl:
 			if n.IsExtern != "" || len(n.Constraints) > 0 {
 				continue
 			}
+
 			counts[n.Name]++
 		case *ast.StructDecl:
 			if len(n.TypeParams) > 0 {
 				continue // generic templates handled separately
 			}
+
 			for _, m := range n.Methods {
 				if m.IsExtern != "" {
 					continue
 				}
+
 				key := methodScopeName(n.Name, m)
 				counts[key]++
 			}
 		}
 	}
+
 	overloaded := make(map[string]bool)
+
 	for name, count := range counts {
 		if count > 1 {
 			overloaded[name] = true
@@ -178,7 +181,9 @@ func scanOverloadedNames(nodes []ast.Node) map[string]bool {
 // "this" receiver and is excluded from the returned slice.
 func (cg *CodeGen) resolveParamTypes(params []ast.Param, structName string) ([]irtypes.Type, error) {
 	var types []irtypes.Type
+
 	first := true
+
 	for _, p := range params {
 		if p.IsVarArgs {
 			continue
@@ -200,11 +205,14 @@ func (cg *CodeGen) resolveParamTypes(params []ast.Param, structName string) ([]i
 				}
 			}
 		}
+
 		first = false
+
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return nil, err
 		}
+
 		types = append(types, pt)
 	}
 
@@ -233,6 +241,7 @@ func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Va
 		if v.arity != len(argVals) {
 			continue
 		}
+
 		if typesMatchExact(v.paramTypes, argTypes) {
 			return v
 		}
@@ -242,6 +251,7 @@ func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Va
 		if v.arity != len(argVals) {
 			continue
 		}
+
 		if cg.typesMatchCoercible(v.paramTypes, argTypes) {
 			return v
 		}
@@ -271,11 +281,13 @@ func (cg *CodeGen) typesMatchCoercible(paramTypes, argTypes []irtypes.Type) bool
 	if len(paramTypes) != len(argTypes) {
 		return false
 	}
+
 	for i, pt := range paramTypes {
 		at := argTypes[i]
 		if pt == nil || at == nil {
 			continue
 		}
+
 		if pt.Equal(at) {
 			continue
 		}
@@ -297,6 +309,7 @@ func (cg *CodeGen) typesMatchCoercible(paramTypes, argTypes []irtypes.Type) bool
 		if structName == "" {
 			return false
 		}
+
 		vtableKey := structName + "__" + instKey
 		if _, ok := cg.traitVtableGlobals[vtableKey]; !ok {
 			return false
@@ -311,11 +324,13 @@ func typesMatchExact(paramTypes []irtypes.Type, argTypes []irtypes.Type) bool {
 	if len(paramTypes) != len(argTypes) {
 		return false
 	}
+
 	for i, pt := range paramTypes {
 		at := argTypes[i]
 		if pt == nil || at == nil {
 			continue
 		}
+
 		if !pt.Equal(at) {
 			return false
 		}

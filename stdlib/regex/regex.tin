@@ -1,6 +1,6 @@
 // stdlib/regex - Regular expression matching via PCRE
 //
-// Links against libpcre (-lpcre).  Every tin file that uses this package
+// Links against libpcre (-lpcre). Every tin file that uses this package
 // should already pick up the flag automatically via the //! directive below,
 // but you can also pass -lpcre explicitly when building.
 //

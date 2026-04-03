@@ -36,5 +36,8 @@
         <lang.braceMatcher
             language="Tin"
             implementationClass="com.tin.ide.TinBracketMatcher"/>
+
+        <spellchecker.bundledDictionaryProvider
+            implementation="com.tin.ide.TinBundledDictionaryProvider"/>
     </extensions>
 </idea-plugin>

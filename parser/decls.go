@@ -25,26 +25,33 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	typeParams, _ := p.parseTypeParams()
 
 	// Optional trait implementations: struct Foo(TraitA, TraitB[T]) =
 	// The list may span multiple lines; newlines inside parens are ignored.
 	var impls []ast.TypeExpr
+
 	if p.check(lexer.LPAREN) {
 		p.advance()
 		p.skipWhitespace()
+
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			ti, err2 := p.parseTypeExpr()
 			if err2 != nil {
 				return nil, err2
 			}
+
 			impls = append(impls, ti)
+
 			p.skipWhitespace()
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 				p.skipWhitespace()
 			}
 		}
+
 		if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
 			return nil, err2
 		}
@@ -63,9 +70,11 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	if p.check(lexer.NEWLINE) {
 		p.advance()
 		p.skipNewlines()
+
 		if p.check(lexer.INDENT) {
 			p.advance()
 			p.skipNewlines()
+
 			for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 				// `pass` as the sole body element declares an empty struct.
 				if p.check(lexer.KW_PASS) {
@@ -74,18 +83,22 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 
 					continue
 				}
+
 				item, err2 := p.parseStructItem()
 				if err2 != nil {
 					return nil, err2
 				}
+
 				switch v := item.(type) {
 				case *ast.StructField:
 					decl.Fields = append(decl.Fields, *v)
 				case *ast.FuncDecl:
 					decl.Methods = append(decl.Methods, v)
 				}
+
 				p.skipNewlines()
 			}
+
 			if p.check(lexer.DEDENT) {
 				p.advance()
 			}
@@ -99,8 +112,10 @@ func (p *Parser) parseStructItem() (any, error) {
 	isStatic := false
 	if p.check(lexer.KW_STATIC) {
 		isStatic = true
+
 		p.advance()
 	}
+
 	if p.check(lexer.KW_FN) {
 		fn, err := p.parseFuncDecl(nil, isStatic)
 		if err == nil && fn != nil && !fn.IsStatic {
@@ -118,26 +133,34 @@ func (p *Parser) parseStructItem() (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var typ ast.TypeExpr
+
 	isForward := false
+
 	if !p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF) {
 		typ, err = p.parseTypeExpr()
 		if err != nil {
 			return nil, err
 		}
 	}
+
 	if p.check(lexer.KW_FORWARD) {
 		isForward = true
+
 		p.advance()
 	}
 	// Optional field tags: @"tag1" @"tag2"
 	var tags []string
+
 	for p.check(lexer.AT) {
 		p.advance()
+
 		tagTok, err2 := p.expect(lexer.STRING_LIT)
 		if err2 != nil {
 			return nil, err2
 		}
+
 		tags = append(tags, tagTok.Literal)
 	}
 
@@ -151,10 +174,12 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 	if p.check(lexer.LBRACKET) {
 		traitTypeParams, _ = p.parseTypeParams()
 	}
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
 	}
+
 	typeParams, _ := p.parseTypeParams()
 
 	decl := &ast.TraitDecl{Name: nameTok.Literal, TypeParams: typeParams}
@@ -164,11 +189,15 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 	// "trait[k] implicit[t] as static fn(val t) k"
 	if p.check(lexer.KW_AS) {
 		p.advance()
+
 		decl.IsAlias = true
+
 		if p.check(lexer.KW_STATIC) {
 			p.advance() // consume "static"
+
 			decl.IsStaticAlias = true
 		}
+
 		decl.AliasType, err = p.parseTypeExpr()
 		if err != nil {
 			return nil, err
@@ -180,37 +209,46 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 	if !p.check(lexer.ASSIGN) {
 		return decl, nil
 	}
+
 	p.advance() // consume =
 
 	if p.check(lexer.NEWLINE) {
 		p.advance()
 		p.skipNewlines()
+
 		if p.check(lexer.INDENT) {
 			p.advance()
 			p.skipNewlines()
+
 			for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 				if p.check(lexer.KW_FN) {
 					fn, err2 := p.parseFuncDecl(nil, false)
 					if err2 != nil {
 						return nil, err2
 					}
+
 					decl.Methods = append(decl.Methods, fn)
 				} else if p.check(lexer.IDENT) {
 					// forward field: "name type forward"
 					fname := p.advance().Literal
+
 					ftype, err2 := p.parseTypeExpr()
 					if err2 != nil {
 						return nil, err2
 					}
+
 					if p.check(lexer.KW_FORWARD) {
 						p.advance()
 					}
+
 					decl.ForwardFields = append(decl.ForwardFields, ast.StructField{Name: fname, Type: ftype})
 				} else {
 					p.advance() // skip unexpected tokens
 				}
+
 				p.skipNewlines()
 			}
+
 			if p.check(lexer.DEDENT) {
 				p.advance()
 			}
@@ -222,14 +260,17 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 
 func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 	p.advance() // consume type
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
 	}
+
 	typeParams, _ := p.parseTypeParams()
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
+
 	typ, err := p.parseTypeExpr()
 	if err != nil {
 		return nil, err
@@ -240,25 +281,32 @@ func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 	// optional "override = fn ..."
 	if p.check(lexer.KW_OVERRIDE) {
 		p.advance()
+
 		if _, err := p.expect(lexer.ASSIGN); err != nil {
 			return nil, err
 		}
+
 		if p.check(lexer.NEWLINE) {
 			p.advance()
 			p.skipNewlines()
+
 			if p.check(lexer.INDENT) {
 				p.advance()
 				p.skipNewlines()
+
 				for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 					if p.check(lexer.KW_FN) {
 						fn, err2 := p.parseFuncDecl(nil, false)
 						if err2 != nil {
 							return nil, err2
 						}
+
 						decl.Overrides = append(decl.Overrides, fn)
 					}
+
 					p.skipNewlines()
 				}
+
 				if p.check(lexer.DEDENT) {
 					p.advance()
 				}
@@ -271,11 +319,13 @@ func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 
 func (p *Parser) parseEnumDecl() (*ast.EnumDecl, error) {
 	p.advance() // consume enum
+
 	decl := &ast.EnumDecl{}
 
 	// "enum atom status" or "enum i32 weather"
 	if p.check(lexer.IDENT) && p.peek().Literal == "atom" {
 		decl.IsAtom = true
+
 		p.advance()
 	} else if isTypeKeyword(p.peek()) {
 		decl.BaseType, _ = p.parseTypeExpr()
@@ -285,6 +335,7 @@ func (p *Parser) parseEnumDecl() (*ast.EnumDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	decl.Name = nameTok.Literal
 
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
@@ -294,17 +345,22 @@ func (p *Parser) parseEnumDecl() (*ast.EnumDecl, error) {
 	if p.check(lexer.NEWLINE) {
 		p.advance()
 		p.skipNewlines()
+
 		if p.check(lexer.INDENT) {
 			p.advance()
 			p.skipNewlines()
+
 			for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 				mem, err2 := p.parseEnumMember(decl.IsAtom)
 				if err2 != nil {
 					return nil, err2
 				}
+
 				decl.Members = append(decl.Members, mem)
+
 				p.skipNewlines()
 			}
+
 			if p.check(lexer.DEDENT) {
 				p.advance()
 			}
@@ -327,17 +383,21 @@ func (p *Parser) parseEnumMember(isAtom bool) (ast.EnumMember, error) {
 		if err != nil {
 			return mem, err
 		}
+
 		mem.Name = nameTok.Literal
 	}
 
 	if p.check(lexer.COLON) {
 		p.advance()
+
 		var err error
+
 		mem.Value, err = p.parseExpr()
 		if err != nil {
 			return mem, err
 		}
 	}
+
 	if p.check(lexer.COMMA) {
 		p.advance()
 	}
@@ -347,22 +407,27 @@ func (p *Parser) parseEnumMember(isAtom bool) (ast.EnumMember, error) {
 
 func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 	p.advance() // consume union
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
+
 	decl := &ast.UnionDecl{Name: nameTok.Literal}
 
 	// "as_i8 i8 | as_string string" vs "i8 | string"
 	for {
 		var fieldName string
+
 		if p.check(lexer.IDENT) && !isTypeKeyword(p.peek()) {
 			// Could be "as_i8 i8" (named) or just type name matching a non-primitive
 			// Check if next is a type: named field followed by type
 			saved := p.pos
+
 			candidate := p.advance().Literal
 			if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
 				fieldName = candidate
@@ -377,10 +442,13 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 		if err2 != nil {
 			return nil, err2
 		}
+
 		decl.Members = append(decl.Members, ast.UnionMember{FieldName: fieldName, Type: typ})
+
 		if !p.check(lexer.BITOR) {
 			break
 		}
+
 		p.advance()
 	}
 
@@ -389,26 +457,33 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 
 func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 	p.advance() // consume use
+
 	decl := &ast.UseDecl{}
 
 	// `use { name1, name2! } from module` - selective import as bare names.
 	if p.check(lexer.LBRACE) {
 		p.advance() // consume {
+
 		var names []string
+
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 			if p.check(lexer.IDENT) {
 				name := p.advance().Literal
 				// Allow trailing ! for macro names: min!, max!
 				if p.check(lexer.NOT) {
 					p.advance()
+
 					name += "!"
 				}
+
 				names = append(names, name)
 			}
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 			}
 		}
+
 		if _, err := p.expect(lexer.RBRACE); err != nil {
 			return nil, err
 		}
@@ -416,6 +491,7 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 		if !p.check(lexer.IDENT) || p.peek().Literal != "from" {
 			return nil, fmt.Errorf("expected 'from' after import list, got %q", p.peek().Literal)
 		}
+
 		p.advance() // consume "from"
 		// Parse the module path: "sync", "std::math", or "./foo.tin"
 		if p.check(lexer.STRING_LIT) {
@@ -426,12 +502,15 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 			if p.check(lexer.IDENT) {
 				parts = append(parts, p.advance().Literal)
 			}
+
 			for p.check(lexer.DCOLON) {
 				p.advance()
 				parts = append(parts, p.advance().Literal)
 			}
+
 			decl.Path = strings.Join(parts, "::")
 		}
+
 		decl.Names = names
 		decl.FromSyntax = true
 
@@ -440,22 +519,30 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 
 	if p.check(lexer.KW_EXTERN) {
 		decl.IsExtern = true
+
 		p.advance()
+
 		if _, err := p.expect(lexer.LPAREN); err != nil {
 			return nil, err
 		}
+
 		p.skipWhitespace()
+
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			imp, err := p.parseUseImport()
 			if err != nil {
 				return nil, err
 			}
+
 			decl.Imports = append(decl.Imports, imp)
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 			}
+
 			p.skipWhitespace()
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
@@ -469,10 +556,12 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 		if p.check(lexer.IDENT) {
 			parts = append(parts, p.advance().Literal)
 		}
+
 		for p.check(lexer.DCOLON) {
 			p.advance()
 			parts = append(parts, p.advance().Literal)
 		}
+
 		decl.Path = strings.Join(parts, "::")
 	}
 
@@ -491,19 +580,24 @@ func (p *Parser) parseUseImport() (ast.UseImport, error) {
 	// means LocalName="malloc", ExternName="mymallocname"
 	if p.check(lexer.LPAREN) {
 		p.advance()
+
 		if p.check(lexer.STRING_LIT) {
 			imp.ExternName = p.advance().Literal
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return imp, err
 		}
 	}
+
 	if p.check(lexer.KW_AS) {
 		p.advance()
+
 		typ, err := p.parseTypeExpr()
 		if err != nil {
 			return imp, err
 		}
+
 		imp.Type = typ
 	}
 
@@ -512,9 +606,12 @@ func (p *Parser) parseUseImport() (ast.UseImport, error) {
 
 func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 	p.advance() // consume export
+
 	decl := &ast.ExportDecl{}
+
 	if p.check(lexer.LBRACE) {
 		p.advance()
+
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 			// Skip whitespace tokens (multiline export blocks produce INDENT/DEDENT/NEWLINE)
 			if p.check(lexer.NEWLINE) || p.check(lexer.INDENT) || p.check(lexer.DEDENT) {
@@ -522,28 +619,35 @@ func (p *Parser) parseExportDecl() (*ast.ExportDecl, error) {
 
 				continue
 			}
+
 			if p.check(lexer.IDENT) {
 				name := p.advance().Literal
 				// Allow trailing ! on macro names: "min!", "todo!", etc.
 				if p.check(lexer.NOT) {
 					p.advance()
+
 					name += "!"
 				}
+
 				decl.Names = append(decl.Names, name)
 			} else if p.check(lexer.NOT) {
 				// Stray ! that wasn't consumed; skip to avoid infinite loop.
 				p.advance()
 			}
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 			}
 		}
+
 		if _, err := p.expect(lexer.RBRACE); err != nil {
 			return nil, err
 		}
 	}
+
 	if p.check(lexer.KW_AS) {
 		p.advance()
+
 		if p.check(lexer.IDENT) {
 			decl.AsName = p.advance().Literal
 		}
@@ -562,9 +666,11 @@ func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
 	if !p.check(lexer.STRING_LIT) {
 		return nil, fmt.Errorf("line %d: expected string description after 'test'", p.peek().Line)
 	}
+
 	decl.Desc = p.advance().Literal
 
 	p.skipNewlines()
+
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
@@ -573,6 +679,7 @@ func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	decl.Body = body
 
 	return decl, nil
@@ -580,25 +687,33 @@ func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
 
 func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 	p.advance() // consume macro
+
 	if p.check(lexer.LBRACE) {
 		moreTags := p.parseTags()
 		tags = append(tags, moreTags...)
 	}
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
 	}
 	// macro may have "!" in name: try!
 	name := nameTok.Literal
+
 	if p.check(lexer.NOT) {
 		p.advance()
+
 		name += "!"
 	}
 	// params - optional typed parameters: (n i64, m, s string)
-	var params []string
-	var paramTypes []string
+	var (
+		params     []string
+		paramTypes []string
+	)
+
 	if p.check(lexer.LPAREN) {
 		p.advance()
+
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			if p.check(lexer.IDENT) {
 				paramName := p.advance().Literal
@@ -609,22 +724,27 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 					if terr != nil {
 						return nil, terr
 					}
+
 					paramTypes = append(paramTypes, te.String())
 				} else {
 					paramTypes = append(paramTypes, "") // untyped - infer from call site
 				}
 			}
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 			}
 		}
+
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
 	}
+
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
+
 	body, err := p.parseFuncBody()
 	if err != nil {
 		return nil, err

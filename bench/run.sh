@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# bench/run.sh — build and benchmark channel patterns across Go, Crystal, Rust, Tin.
+# bench/run.sh - build and benchmark channel patterns across Go, Crystal, Rust, Tin.
 #
 # Benchmarks:
-#   pingpong  — 2 fibers, 1M round trips (SPSC latency baseline)
-#   pipeline  — 4 relay fibers in series, 1M passes (multi-hop latency)
-#   mpmc      — 4 producers + 4 consumers, 1M msgs (MPMC throughput)
-#   jitter    — 8 workers, variable 0-3 yields/task, 1M tasks (scheduler stress)
+#   pingpong  - 2 fibers, 1M round trips (SPSC latency baseline)
+#   pipeline  - 4 relay fibers in series, 1M passes (multi-hop latency)
+#   mpmc      - 4 producers + 4 consumers, 1M msgs (MPMC throughput)
+#   jitter    - 8 workers, variable 0-3 yields/task, 1M tasks (scheduler stress)
 #
 # Requires: go, crystal, cargo, tin (built at ../tin)
 # Optional: hyperfine (cargo install hyperfine)
@@ -81,7 +81,7 @@ if command -v hyperfine &>/dev/null; then
     done
     echo "Results written to bench/results_*.md"
 else
-    echo "hyperfine not found — install with: cargo install hyperfine"
+    echo "hyperfine not found - install with: cargo install hyperfine"
     echo "Running each benchmark once:"
     echo ""
     run_bench bench    "pingpong (1M round trips)"             "latency"

@@ -22,13 +22,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 	if node == nil {
 		return nil, nil
 	}
+
 	switch e := node.(type) {
 	case *ast.IntLit:
-
 		return constant.NewInt(irtypes.I64, e.Value), nil
 
 	case *ast.FloatLit:
-
 		return constant.NewFloat(irtypes.Double, e.Value), nil
 
 	case *ast.BoolLit:
@@ -39,20 +38,16 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return constant.NewInt(irtypes.I1, 0), nil
 
 	case *ast.CharLit:
-
 		return constant.NewInt(irtypes.I8, int64(e.Value)), nil
 
 	case *ast.NilLit:
-
 		return constant.NewNull(irtypes.I8Ptr), nil
 
 	case *ast.AtomLit:
 		// Emit atom as %__atom { i32 CRC32(name) } constant.
-
 		return cg.atomConstant(cg.registerAtom(e.Name)), nil
 
 	case *ast.StringLit:
-
 		return cg.buildStringFatPtr(block, e.Value), nil
 
 	case *ast.BacktickLit:
@@ -78,92 +73,70 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return cg.buildStringFatPtr(block, "`"+e.Content+"`"), nil
 
 	case *ast.InterpolatedString:
-
 		return cg.genInterpolatedString(block, e)
 
 	case *ast.Identifier:
-
 		return cg.genIdentifier(block, e)
 
 	case *ast.BinExpr:
-
 		return cg.genBinExpr(block, e)
 
 	case *ast.UnaryExpr:
-
 		return cg.genUnaryExpr(block, e)
 
 	case *ast.CallExpr:
-
 		return cg.genCallExpr(block, e)
 
 	case *ast.FieldAccess:
-
 		return cg.genFieldAccess(block, e)
 
 	case *ast.IndexExpr:
-
 		return cg.genIndexExpr(block, e)
 
 	case *ast.ScopeAccess:
-
 		return cg.genScopeAccess(block, e)
 
 	case *ast.ArrayLit:
-
 		return cg.genArrayLit(block, e)
 
 	case *ast.StructLit:
-
 		return cg.genStructLit(block, e)
 
 	case *ast.TupleLit:
-
 		return cg.genTupleLit(block, e, nil)
 
 	case *ast.SliceExpr:
-
 		return cg.genSliceExpr(block, e)
 
 	case *ast.AsExpr:
-
 		return cg.genAsExpr(block, e)
 
 	case *ast.AddrExpr:
-
 		return cg.genAddrExpr(block, e)
 
 	case *ast.AddressOfExpr:
-
 		return cg.genAddrOfExpr(block, e)
 
 	case *ast.DerefExpr:
-
 		return cg.genDerefExpr(block, e)
 
 	case *ast.PipeExpr:
-
 		return cg.genPipeExpr(block, e)
 
 	case *ast.TernaryExpr:
-
 		return cg.genTernaryExpr(block, e)
 
 	case *ast.IsExpr:
-
 		return cg.genIsExpr(block, e)
 
 	case *ast.RangeExpr:
 		// RangeExpr in expression context returns start value.
-
 		return cg.genExpr(block, e.Start)
 
 	case *ast.LambdaExpr:
-
 		return cg.genLambdaExpr(block, e)
 
 	case *ast.SpawnExpr:
-
 		return cg.genSpawnExpr(block, e)
 
 	case *ast.AwaitExpr:
@@ -194,6 +167,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				if driveErr != nil {
 					return nil, driveErr
 				}
+
 				if result != nil {
 					return result, nil
 				}
@@ -209,6 +183,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if err != nil {
 			return nil, err
 		}
+
 		if val == nil {
 			return nil, fmt.Errorf("await: expression produced no value")
 		}
@@ -256,6 +231,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 		// Extract pid from Future[T] using extractvalue (no alloca → safe inside loops).
 		cg.ensureFiberRuntime()
+
 		pid := block.NewExtractValue(val, uint64(pidIdx))
 
 		// Properly suspend the calling fiber (or block main) until pid completes.
@@ -263,6 +239,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if awaitErr != nil {
 			return nil, awaitErr
 		}
+
 		if resumeBlk != nil {
 			block = resumeBlk
 			cg.curBlock = block
@@ -294,6 +271,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// (A bare ret in a presplit coro body bypasses coro.end and leaves the
 		// frame in an undefined state.)  This mirrors the fix in genBuiltinPanic.
 		panicBlk.NewCall(cg.ensurePanicFn(), pmsg)
+
 		if cg.inCoroFn {
 			cg.ensureFiberRuntime()
 			// If _tin_panic returns (panic was caught by defer+recover in this
@@ -321,10 +299,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if len(structName) > 8 && structName[:8] == "Future__" {
 			retTypeName = structName[8:]
 		}
+
 		if retTypeName == "" || retTypeName == "Unit" {
 			// void result - return a sentinel i1 true so callers don't see nil.
 			return constant.NewInt(irtypes.I1, 1), nil
 		}
+
 		retLLVM, resolveErr := cg.resolveSimpleType(retTypeName)
 		if resolveErr != nil || retLLVM == nil || irtypes.IsVoid(retLLVM) {
 			return constant.NewInt(irtypes.I1, 1), nil
@@ -344,12 +324,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if err != nil {
 			return nil, err
 		}
+
 		cg.curBlock = newBlk
 
 		return constant.NewInt(irtypes.I1, 0), nil
 
 	case *ast.WildcardExpr:
-
 		return constant.NewInt(irtypes.I1, 1), nil
 
 	case *ast.DefaultExpr:
@@ -360,14 +340,17 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			if te, ok := inner.(*ast.TypeofExpr); ok {
 				inner = te.Expr
 			}
+
 			val, err := cg.genExpr(block, inner)
 			if err != nil {
 				return nil, err
 			}
+
 			if val != nil {
 				return cg.zeroValue(val.Type()), nil
 			}
 		}
+
 		if e.Type != nil {
 			lt, err := cg.tinTypeToLLVM(e.Type)
 			if err != nil {
@@ -383,7 +366,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// Block expression: (let x = ...; ...; last_expr) - produced by CTFE macro splices.
 		// Generate all statements and return the value of the last expression.
 		curBlock := block
+
 		var lastVal value.Value = constant.NewInt(irtypes.I64, 0)
+
 		for i, stmt := range e.Stmts {
 			isLast := i == len(e.Stmts)-1
 			if isLast {
@@ -392,6 +377,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 					if err != nil {
 						return nil, err
 					}
+
 					if v != nil {
 						lastVal = v
 					}
@@ -399,10 +385,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 					continue
 				}
 			}
+
 			newBlock, _, err := cg.genStmt(curBlock, stmt)
 			if err != nil {
 				return nil, err
 			}
+
 			if newBlock != nil {
 				curBlock = newBlock
 			}
@@ -414,10 +402,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if e.Type == nil {
 			return constant.NewInt(irtypes.I64, 0), nil
 		}
+
 		lt, err := cg.tinTypeToLLVM(e.Type)
 		if err != nil {
 			return nil, err
 		}
+
 		if irtypes.IsVoid(lt) {
 			return constant.NewInt(irtypes.I64, 0), nil
 		}
@@ -432,10 +422,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if e.Type == nil {
 			return constant.NewInt(irtypes.I32, 0), nil
 		}
+
 		lt, err := cg.tinTypeToLLVM(e.Type)
 		if err != nil {
 			return nil, err
 		}
+
 		if isRCTrackedType(lt) {
 			return constant.NewInt(irtypes.I32, 1), nil
 		}
@@ -454,6 +446,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			if err2 != nil {
 				return nil, err2
 			}
+
 			st := inner.Type().(*irtypes.StructType)
 			alloca := block.NewAlloca(st)
 			block.NewStore(inner, alloca)
@@ -463,35 +456,35 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 			return block.NewLoad(targetLLVM, memberPtr), nil
 		}
+		// Pointer type cast: p.(*T) bitcasts between pointer types (e.g. *void -> *i64).
+		if irtypes.IsPointer(inner.Type()) {
+			targetLLVM, err2 := cg.tinTypeToLLVM(e.Type)
+			if err2 == nil && irtypes.IsPointer(targetLLVM) && targetLLVM != inner.Type() {
+				return block.NewBitCast(inner, targetLLVM), nil
+			}
+		}
 
 		return inner, nil
 
 	case *ast.TypeofExpr:
-
 		return cg.genTypeof(block, e)
 
 	case *ast.TraitofExpr:
-
 		return cg.genTraitof(block, e)
 
 	case *ast.FieldnamesExpr:
-
 		return cg.genFieldnames(block, e)
 
 	case *ast.FieldtypesExpr:
-
 		return cg.genFieldtypes(block, e)
 
 	case *ast.FieldtagExpr:
-
 		return cg.genFieldtag(block, e)
 
 	case *ast.GetfieldExpr:
-
 		return cg.genGetfield(block, e)
 
 	case *ast.SetfieldExpr:
-
 		return cg.genSetfield(block, e)
 
 	case *ast.VarDecl:
@@ -504,6 +497,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if !ok {
 			return nil, nil
 		}
+
 		if entry.isAlloc {
 			ptrType := entry.val.Type().(*irtypes.PointerType)
 
@@ -513,7 +507,6 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return entry.val, nil
 
 	default:
-
 		return nil, nil
 	}
 }
@@ -523,6 +516,7 @@ func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Valu
 	if !ok {
 		return nil, fmt.Errorf("undefined identifier: %s", e.Name)
 	}
+
 	if entry.isAlloc {
 		ptrType := entry.val.Type().(*irtypes.PointerType)
 
@@ -536,26 +530,29 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	// Short-circuit for && and ||.
 	switch e.Op {
 	case "&&":
-
 		return cg.genLogicalAnd(block, e)
 	case "||":
-
 		return cg.genLogicalOr(block, e)
 	}
 
 	cg.curBlock = block
+
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		return nil, err
 	}
+
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
+
 	cg.curBlock = block
+
 	right, err := cg.genExpr(block, e.Right)
 	if err != nil {
 		return nil, err
 	}
+
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
@@ -571,6 +568,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	// Type promotion.
 	if irtypes.IsInt(lt) && irtypes.IsInt(rt) {
 		lBits := lt.(*irtypes.IntType).BitSize
+
 		rBits := rt.(*irtypes.IntType).BitSize
 		if lBits < rBits {
 			left = block.NewSExt(left, rt)
@@ -593,9 +591,9 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		if rt.(*irtypes.IntType).BitSize < 64 {
 			right = block.NewSExt(right, irtypes.I64)
 		}
+
 		switch e.Op {
 		case "+":
-
 			return block.NewGetElementPtr(ptrType.ElemType, left, right), nil
 		case "-":
 			negIdx := block.NewSub(constant.NewInt(irtypes.I64, 0), right)
@@ -630,13 +628,10 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewSDiv(left, right), nil
 	case "%":
-
 		return block.NewSRem(left, right), nil
 	case "==":
-
 		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false), nil
 	case "!=":
-
 		return cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true), nil
 	case "<":
 		if isFloat {
@@ -663,19 +658,14 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewICmp(enum.IPredSGE, left, right), nil
 	case "&":
-
 		return block.NewAnd(left, right), nil
 	case "|":
-
 		return block.NewOr(left, right), nil
 	case "^":
-
 		return block.NewXor(left, right), nil
 	case "<<":
-
 		return block.NewShl(left, right), nil
 	case ">>":
-
 		return block.NewAShr(left, right), nil
 	case "++":
 		// Typed array concatenation: {T*, i64} ++ {T*, i64} -> {T*, i64}
@@ -726,6 +716,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			if isTemporaryProducer(e.Left) {
 				cg.emitRelease(block, left)
 			}
+
 			if isTemporaryProducer(e.Right) {
 				cg.emitRelease(block, right)
 			}
@@ -764,6 +755,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		if isTemporaryProducer(e.Left) {
 			cg.emitRelease(block, left)
 		}
+
 		if isTemporaryProducer(e.Right) {
 			cg.emitRelease(block, right)
 		}
@@ -794,9 +786,11 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 		if !isAnyType(lt) {
 			left = cg.boxToAny(block, left)
 		}
+
 		if !isAnyType(rt) {
 			right = cg.boxToAny(block, right)
 		}
+
 		cmp := block.NewCall(cg.ensureAnyEq(), left, right)
 		if notEqual {
 			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0))
@@ -822,6 +816,7 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 
 		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
 	}
+
 	if isFatPtrType(lt) && isAtomType(rt) {
 		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
 		lptr := cg.extractStringPtr(block, left)
@@ -860,12 +855,14 @@ func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, 
 	if err != nil {
 		return nil, err
 	}
+
 	leftBool := cg.toBool(block, left)
 
 	right, err := cg.genExpr(block, e.Right)
 	if err != nil {
 		return nil, err
 	}
+
 	rightBool := cg.toBool(block, right)
 
 	// true && x = x;  false && _ = false
@@ -878,12 +875,14 @@ func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, e
 	if err != nil {
 		return nil, err
 	}
+
 	leftBool := cg.toBool(block, left)
 
 	right, err := cg.genExpr(block, e.Right)
 	if err != nil {
 		return nil, err
 	}
+
 	rightBool := cg.toBool(block, right)
 
 	// false || x = x;  true || _ = true
@@ -896,14 +895,17 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return nil, nil
 	}
+
 	switch e.Op {
 	case "-":
 		if irtypes.IsFloat(val.Type()) {
 			return block.NewFNeg(val), nil
 		}
+
 		zero := cg.coerce(block, constant.NewInt(irtypes.I64, 0), val.Type())
 
 		return block.NewSub(zero, val), nil
@@ -929,8 +931,10 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 
 func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, error) {
 	// Resolve callee.
-	var callee value.Value
-	var calleeType *irtypes.FuncType
+	var (
+		callee     value.Value
+		calleeType *irtypes.FuncType
+	)
 
 	switch fn := e.Func.(type) {
 	case *ast.Identifier:
@@ -951,6 +955,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if macro, ok := cg.macros[baseName+"!"]; ok {
 				return cg.expandMacro(block, macro, e.Args)
 			}
+
 			if macro, ok := cg.macros[baseName]; ok {
 				return cg.expandMacro(block, macro, e.Args)
 			}
@@ -979,38 +984,84 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if fn.Name == "default" && len(e.Args) == 1 {
 			return cg.genBuiltinDefault(block, e.Args[0])
 		}
-		// Check if this is a constrained generic function call - monomorphize it.
-		if tmpl, ok := cg.constrainedFuncs[fn.Name]; ok {
-			// Evaluate arguments first to infer concrete types.
-			argVals := make([]value.Value, 0, len(e.Args))
-			for _, arg := range e.Args {
-				av, err2 := cg.genExpr(block, arg)
+		// Check if this is a generic or constrained function call - monomorphize it.
+		{
+			var gTmpl *ast.FuncDecl
+			if t, ok2 := cg.constrainedFuncs[fn.Name]; ok2 {
+				gTmpl = t
+			} else if t, ok2 := cg.genericFuncs[fn.Name]; ok2 {
+				// Prefer a concrete compiled version over the template when one exists in
+				// scope (e.g. the non-generic parse() inside json::parse[T]).
+				if _, concreteOk := cg.curScope.lookup(fn.Name); !concreteOk {
+					gTmpl = t
+				}
+			}
+
+			if gTmpl != nil {
+				tmpl := gTmpl
+				// Evaluate arguments first to infer concrete types.
+				argVals := make([]value.Value, 0, len(e.Args))
+				for _, arg := range e.Args {
+					av, err2 := cg.genExpr(block, arg)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					argVals = append(argVals, av)
+				}
+
+				typeSubst := cg.inferTypeArgs(tmpl, argVals)
+				// Build instance key from substituted types.
+				instKey := ""
+
+				for i, tp := range tmpl.TypeParams {
+					if i > 0 {
+						instKey += "__"
+					}
+
+					if name, found := typeSubst[tp]; found {
+						instKey += name
+					} else {
+						instKey += tp
+					}
+				}
+
+				concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
 				if err2 != nil {
 					return nil, err2
 				}
-				argVals = append(argVals, av)
-			}
-			typeSubst := cg.inferTypeArgs(tmpl, argVals)
-			// Build instance key from substituted types.
-			instKey := ""
-			for i, tp := range tmpl.TypeParams {
-				if i > 0 {
-					instKey += "__"
-				}
-				if name, found := typeSubst[tp]; found {
-					instKey += name
-				} else {
-					instKey += tp
-				}
-			}
-			concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
-			if err2 != nil {
-				return nil, err2
-			}
-			// Adapt args if needed and call.
-			argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
+				// Adapt args if needed and call.
+				preCoerceVals := argVals
+				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
+				result := block.NewCall(concreteFunc, argVals...)
+				// ARC: release temporary RC-tracked arguments (same as regular call path).
+				for i, astArg := range e.Args {
+					if i >= len(preCoerceVals) {
+						break
+					}
 
-			return block.NewCall(concreteFunc, argVals...), nil
+					pre := preCoerceVals[i]
+
+					post := argVals[i]
+					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+						cg.emitRelease(block, post)
+
+						continue
+					}
+
+					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+						continue
+					}
+
+					cg.emitRelease(block, pre)
+				}
+
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+
+				return result, nil
+			}
 		}
 		// Overload resolution: if this name has multiple variants, evaluate args
 		// first to pick the best match by type, then call it directly.
@@ -1021,56 +1072,72 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if err2 != nil {
 					return nil, err2
 				}
+
 				argVals = append(argVals, av)
+
 				if cg.curBlock != nil && cg.curBlock != block {
 					block = cg.curBlock
 				}
 			}
+
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
 				return nil, fmt.Errorf("no matching overload for %s (got %d arg(s))", fn.Name, len(argVals))
 			}
+
 			oEntry, oOk := cg.curScope.lookup(best.irName)
 			if !oOk {
 				return nil, fmt.Errorf("overload %s not found in scope", best.irName)
 			}
+
 			var ovCallee value.Value
+
 			if oEntry.isAlloc {
 				ptrType := oEntry.val.Type().(*irtypes.PointerType)
 				ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
 			} else {
 				ovCallee = oEntry.val
 			}
+
 			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
 			}
+
 			result := block.NewCall(ovCallee, argVals...)
+
 			for i, astArg := range e.Args {
 				if i >= len(argValsPreCoerce) {
 					break
 				}
+
 				preCoerce := argValsPreCoerce[i]
+
 				postCoerce := argVals[i]
 				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
 					cg.emitRelease(block, postCoerce)
 
 					continue
 				}
+
 				if !isRCTrackedType(preCoerce.Type()) {
 					continue
 				}
+
 				if isCopyExpr(astArg) {
 					continue
 				}
+
 				cg.emitRelease(block, preCoerce)
 			}
+
 			if irtypes.IsVoid(result.Type()) {
 				return nil, nil
 			}
 
 			return result, nil
 		}
+
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
 			return nil, fmt.Errorf("undefined function: %s", fn.Name)
@@ -1085,6 +1152,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 			}
 		}
+
 		if entry.isAlloc {
 			ptrType := entry.val.Type().(*irtypes.PointerType)
 			loaded := block.NewLoad(ptrType.ElemType, entry.val)
@@ -1092,6 +1160,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if isFatFnPtr(loaded.Type()) {
 				return cg.callFatFn(block, loaded, e.Args)
 			}
+
 			callee = loaded
 		} else {
 			callee = entry.val
@@ -1115,11 +1184,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						_ = cg.genTypeDecl(synthDecl)
 					}
 				}
+
 				if _, exists := cg.structTypes[concreteName]; exists {
 					methodKey = concreteName + "_" + fn.Field
 					staticName = concreteName
 				}
 			}
+
 			if entry, ok := cg.curScope.lookup(methodKey); ok {
 				if f, isFn := entry.val.(*ir.Func); isFn && cg.isStaticMethodIR(f, staticName) {
 					llArgs := make([]value.Value, 0, len(e.Args))
@@ -1128,11 +1199,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						if err2 != nil {
 							return nil, err2
 						}
+
 						llArgs = append(llArgs, av)
+
 						if cg.curBlock != nil && cg.curBlock != block {
 							block = cg.curBlock
 						}
 					}
+
 					llArgs = cg.adaptArgs(block, llArgs, f.Sig)
 
 					return block.NewCall(f, llArgs...), nil
@@ -1167,6 +1241,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				objLookupType = pt.ElemType
 			}
 		}
+
 		structName := cg.typeNameOf(objLookupType)
 		methodName := structName + "_" + fn.Field
 
@@ -1178,20 +1253,26 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if err2 != nil {
 					return nil, err2
 				}
+
 				argVals = append(argVals, av)
+
 				if cg.curBlock != nil && cg.curBlock != block {
 					block = cg.curBlock
 				}
 			}
+
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
 				return nil, fmt.Errorf("no matching overload for %s.%s (got %d arg(s))", structName, fn.Field, len(argVals))
 			}
+
 			oEntry, oOk := cg.curScope.lookup(best.irName)
 			if !oOk {
 				return nil, fmt.Errorf("overload %s not found in scope", best.irName)
 			}
+
 			var ovCallee value.Value
+
 			if oEntry.isAlloc {
 				ptrType := oEntry.val.Type().(*irtypes.PointerType)
 				ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
@@ -1203,6 +1284,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				ovIsStatic = cg.isStaticMethodIR(f, structName)
 			}
+
 			var llArgs []value.Value
 			if ovIsStatic {
 				llArgs = make([]value.Value, 0, len(argVals))
@@ -1210,6 +1292,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			} else {
 				// Build thisArg (pointer receiver if needed).
 				thisArg := objVal
+
 				if f, ok2 := ovCallee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
 					firstParam := f.Sig.Params[0]
 					if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
@@ -1224,38 +1307,48 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 				}
+
 				llArgs = make([]value.Value, 0, len(argVals)+1)
 				llArgs = append(llArgs, thisArg)
 				llArgs = append(llArgs, argVals...)
 			}
+
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				llArgs = cg.adaptArgs(block, llArgs, f.Sig)
 			}
+
 			result := block.NewCall(ovCallee, llArgs...)
 			// ARC: release temporary RC-tracked args (same logic as genCallExpr bottom).
 			thisOff := 1
 			if ovIsStatic {
 				thisOff = 0
 			}
+
 			for i, astArg := range e.Args {
 				if i >= len(argVals) || i+thisOff >= len(llArgs) {
 					break
 				}
+
 				preCoerce := argVals[i]
+
 				postCoerce := llArgs[i+thisOff]
 				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
 					cg.emitRelease(block, postCoerce)
 
 					continue
 				}
+
 				if !isRCTrackedType(preCoerce.Type()) {
 					continue
 				}
+
 				if isCopyExpr(astArg) {
 					continue
 				}
+
 				cg.emitRelease(block, preCoerce)
 			}
+
 			if irtypes.IsVoid(result.Type()) {
 				return nil, nil
 			}
@@ -1265,9 +1358,103 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		entry, ok := cg.curScope.lookup(methodName)
 		if !ok {
+			// Check for a generic method template (e.g. map_opt[r] on option__i64).
+			if tmpl, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod {
+				// Evaluate call arguments.
+				callArgs := make([]value.Value, 0, len(e.Args))
+				for _, arg := range e.Args {
+					av, err2 := cg.genExpr(block, arg)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					callArgs = append(callArgs, av)
+
+					if cg.curBlock != nil && cg.curBlock != block {
+						block = cg.curBlock
+					}
+				}
+				// Build arg list for type inference: this + call args.
+				inferArgs := make([]value.Value, 0, len(callArgs)+1)
+				inferArgs = append(inferArgs, objVal)
+				inferArgs = append(inferArgs, callArgs...)
+				typeSubst := cg.inferTypeArgs(tmpl, inferArgs)
+				instKey := ""
+
+				for i, tp := range tmpl.TypeParams {
+					if i > 0 {
+						instKey += "__"
+					}
+
+					if name, found := typeSubst[tp]; found {
+						instKey += name
+					} else {
+						instKey += tp
+					}
+				}
+				// Monomorphize: use the full method scope name as the function name so
+				// the IR name becomes "structName_methodName__instKey".
+				tmplCopy := *tmpl
+				tmplCopy.Name = methodName
+
+				concreteFunc, err2 := cg.monomorphizeFunc(&tmplCopy, instKey, typeSubst)
+				if err2 != nil {
+					return nil, err2
+				}
+				// Build LLVM call args: this + call args, adapted to signature.
+				thisArg := objVal
+
+				if len(concreteFunc.Sig.Params) > 0 {
+					if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr {
+						if pt.ElemType.Equal(objVal.Type()) {
+							if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
+								thisArg = lv
+							} else {
+								tmp := block.NewAlloca(objVal.Type())
+								block.NewStore(objVal, tmp)
+								thisArg = tmp
+							}
+						}
+					}
+				}
+
+				llArgs := make([]value.Value, 0, len(callArgs)+1)
+				llArgs = append(llArgs, thisArg)
+				llArgs = append(llArgs, callArgs...)
+				llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
+				result := block.NewCall(concreteFunc, llArgs...)
+				// ARC: release temporary RC-tracked call arguments (index 1+ in llArgs; 0 is this).
+				for i, astArg := range e.Args {
+					if i >= len(callArgs) || i+1 >= len(llArgs) {
+						break
+					}
+
+					pre := callArgs[i]
+
+					post := llArgs[i+1]
+					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+						cg.emitRelease(block, post)
+
+						continue
+					}
+
+					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+						continue
+					}
+
+					cg.emitRelease(block, pre)
+				}
+
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+
+				return result, nil
+			}
 			// Also check without prefix.
 			entry, ok = cg.curScope.lookup(fn.Field)
 		}
+
 		if ok {
 			if entry.isAlloc {
 				ptrType := entry.val.Type().(*irtypes.PointerType)
@@ -1280,7 +1467,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if f, ok2 := callee.(*ir.Func); ok2 {
 				instIsStatic = cg.isStaticMethodIR(f, structName)
 			}
+
 			var llArgs []value.Value
+
 			llArgsPreCoerce := make([]value.Value, 0, len(e.Args))
 			if instIsStatic {
 				llArgs = make([]value.Value, 0, len(e.Args))
@@ -1289,8 +1478,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					if err != nil {
 						return nil, err
 					}
+
 					llArgs = append(llArgs, av)
 					llArgsPreCoerce = append(llArgsPreCoerce, av)
+
 					if cg.curBlock != nil && cg.curBlock != block {
 						block = cg.curBlock
 					}
@@ -1300,6 +1491,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				// receiver (*Struct), pass the address of the object rather than
 				// its value so that mutations through `this` are visible to the caller.
 				thisArg := objVal
+
 				if f, ok2 := callee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
 					firstParam := f.Sig.Params[0]
 					if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
@@ -1317,15 +1509,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 				}
+
 				llArgs = make([]value.Value, 0, len(e.Args)+1)
 				llArgs = append(llArgs, thisArg)
+
 				for _, arg := range e.Args {
 					av, err := cg.genExpr(block, arg)
 					if err != nil {
 						return nil, err
 					}
+
 					llArgs = append(llArgs, av)
 					llArgsPreCoerce = append(llArgsPreCoerce, av)
+
 					if cg.curBlock != nil && cg.curBlock != block {
 						block = cg.curBlock
 					}
@@ -1336,38 +1532,60 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				calleeType = f.Sig
 				llArgs = cg.adaptArgs(block, llArgs, calleeType)
 			}
+
 			result := block.NewCall(callee, llArgs...)
 			// ARC: release temporary RC-tracked args (same logic as genCallExpr bottom).
 			thisOff := 1
 			if instIsStatic {
 				thisOff = 0
 			}
+
 			for i, astArg := range e.Args {
 				if i >= len(llArgsPreCoerce) || i+thisOff >= len(llArgs) {
 					break
 				}
+
 				preCoerce := llArgsPreCoerce[i]
+
 				postCoerce := llArgs[i+thisOff]
 				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
 					cg.emitRelease(block, postCoerce)
 
 					continue
 				}
+
 				if !isRCTrackedType(preCoerce.Type()) {
 					continue
 				}
+
 				if isCopyExpr(astArg) {
 					continue
 				}
+
 				cg.emitRelease(block, preCoerce)
 			}
+
 			if irtypes.IsVoid(result.Type()) {
 				return nil, nil
 			}
 
 			return result, nil
 		}
-		_ = objVal
+		// Fallback: the "method" might be a callable function field on the struct.
+		// e.g. struct handler { validate fn(i64) bool } called as h.validate(x).
+		if st, isStruct := objVal.Type().(*irtypes.StructType); isStruct {
+			if fieldIdx := cg.fieldIndex(structName, fn.Field); fieldIdx >= 0 && fieldIdx < len(st.Fields) {
+				alloca := block.NewAlloca(st)
+				block.NewStore(objVal, alloca)
+				gep := block.NewGetElementPtr(st, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+				fieldVal := block.NewLoad(st.Fields[fieldIdx], gep)
+				if isFatFnPtr(fieldVal.Type()) {
+					return cg.callFatFn(block, fieldVal, e.Args)
+				}
+			}
+		}
 
 		return nil, fmt.Errorf("undefined method: %s.%s", structName, fn.Field)
 
@@ -1381,45 +1599,58 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if err2 != nil {
 					return nil, err2
 				}
+
 				argVals = append(argVals, av)
+
 				if cg.curBlock != nil && cg.curBlock != block {
 					block = cg.curBlock
 				}
 			}
+
 			best := cg.resolveOverload(variants, argVals)
 			if best != nil {
 				if oEntry, oOk := cg.curScope.lookup(best.irName); oOk {
 					var ovCallee value.Value
+
 					if oEntry.isAlloc {
 						ptrType := oEntry.val.Type().(*irtypes.PointerType)
 						ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
 					} else {
 						ovCallee = oEntry.val
 					}
+
 					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
 						argVals = cg.adaptArgs(block, argVals, f.Sig)
 					}
+
 					result := block.NewCall(ovCallee, argVals...)
+
 					for i, astArg := range e.Args {
 						if i >= len(argValsPreCoerce) {
 							break
 						}
+
 						preCoerce := argValsPreCoerce[i]
+
 						postCoerce := argVals[i]
 						if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
 							cg.emitRelease(block, postCoerce)
 
 							continue
 						}
+
 						if !isRCTrackedType(preCoerce.Type()) {
 							continue
 						}
+
 						if isCopyExpr(astArg) {
 							continue
 						}
+
 						cg.emitRelease(block, preCoerce)
 					}
+
 					if irtypes.IsVoid(result.Type()) {
 						return nil, nil
 					}
@@ -1435,8 +1666,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if err2 != nil {
 				return nil, err2
 			}
-			if found {
 
+			if found {
 				return result, nil
 			}
 		}
@@ -1445,6 +1676,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if err != nil {
 			return nil, err
 		}
+
 		callee = v
 
 	case *ast.IndexExpr:
@@ -1454,12 +1686,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if typeArgID, ok := fn.Index.(*ast.Identifier); ok {
 			// Get the function name (bare or scope-qualified)
 			var funcName string
+
 			switch inner := fn.Expr.(type) {
 			case *ast.Identifier:
 				funcName = inner.Name
 			case *ast.ScopeAccess:
 				funcName = inner.Path[len(inner.Path)-1]
 			}
+
 			typeArgName := typeArgID.Name
 			// If the explicit type argument refers to a type parameter that has been
 			// substituted (e.g. a recursive call like _encode_any[T](...) inside
@@ -1470,15 +1704,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					typeArgName = st.Name
 				}
 			}
+
 			if funcName != "" {
 				// Look up the generic function template
 				tmpl, isGeneric := cg.genericFuncs[funcName]
 				if !isGeneric {
 					tmpl, isGeneric = cg.constrainedFuncs[funcName]
 				}
+
 				if isGeneric && len(tmpl.TypeParams) > 0 {
 					typeSubst := map[string]string{tmpl.TypeParams[0]: typeArgName}
 					instKey := typeArgName
+
 					concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
 					if err2 != nil {
 						return nil, err2
@@ -1490,11 +1727,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						if err3 != nil {
 							return nil, err3
 						}
+
 						argVals = append(argVals, av)
+
 						if cg.curBlock != nil && cg.curBlock != block {
 							block = cg.curBlock
 						}
 					}
+
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
 
 					return block.NewCall(concreteFunc, argVals...), nil
@@ -1503,16 +1743,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// Fallthrough: evaluate as regular index expression used as function
 		var err error
+
 		callee, err = cg.genExpr(block, e.Func)
 		if err != nil {
 			return nil, err
 		}
+
 		if callee != nil && isFatFnPtr(callee.Type()) {
 			return cg.callFatFn(block, callee, e.Args)
 		}
 
 	default:
 		var err error
+
 		callee, err = cg.genExpr(block, e.Func)
 		if err != nil {
 			return nil, err
@@ -1529,16 +1772,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 	// Build arguments. Keep pre-coercion values for ARC temporary release.
 	llArgs := make([]value.Value, 0, len(e.Args))
+
 	llArgsPreCoerce := make([]value.Value, 0, len(e.Args))
 	for _, arg := range e.Args {
 		av, err := cg.genExpr(block, arg)
 		if err != nil {
 			return nil, err
 		}
+
 		if av != nil {
 			llArgs = append(llArgs, av)
 			llArgsPreCoerce = append(llArgsPreCoerce, av)
 		}
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
@@ -1552,6 +1798,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			calleeType = ft
 		}
 	}
+
 	if calleeType != nil {
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
 	}
@@ -1569,6 +1816,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if argIdx >= len(llArgsPreCoerce) {
 			break
 		}
+
 		preCoerce := llArgsPreCoerce[argIdx]
 		postCoerce := llArgs[argIdx]
 		argIdx++
@@ -1586,9 +1834,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if !isRCTrackedType(preCoerce.Type()) {
 			continue
 		}
+
 		if isCopyExpr(astArg) {
 			// Named variable: its scope entry will release it at scope exit.
-
 			continue
 		}
 		// Temporary fresh allocation: release our reference.
@@ -1606,6 +1854,7 @@ func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.F
 	if sig == nil {
 		return args
 	}
+
 	result := make([]value.Value, len(args))
 	for i, arg := range args {
 		if i < len(sig.Params) {
@@ -1649,6 +1898,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 	if err != nil {
 		return nil, err
 	}
+
 	if obj == nil {
 		return nil, nil
 	}
@@ -1693,6 +1943,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 				if err2 != nil {
 					return nil, err2
 				}
+
 				alloca := block.NewAlloca(objType)
 				block.NewStore(obj, alloca)
 				storageGEP := block.NewGetElementPtr(objType, alloca,
@@ -1730,10 +1981,12 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	if err != nil {
 		return nil, err
 	}
+
 	idx, err := cg.genExpr(block, e.Index)
 	if err != nil {
 		return nil, err
 	}
+
 	if arr == nil || idx == nil {
 		return nil, nil
 	}
@@ -1751,6 +2004,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 			block.NewStore(arr, alloca)
 			ptrGep := block.NewGetElementPtr(arrType, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
 			dataPtr := block.NewLoad(elemPtrType, ptrGep)
 			if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 				elemGep := block.NewGetElementPtr(pt.ElemType, dataPtr, idx)
@@ -1789,6 +2043,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 	}
 	// Try identifier lookup.
 	joined := strings.Join(e.Path, ".")
+
 	entry, ok := cg.curScope.lookup(joined)
 	if ok {
 		if entry.isAlloc {
@@ -1803,6 +2058,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 	// "math.floor" after failing "std.math.floor".
 	if len(e.Path) >= 3 {
 		tail := strings.Join(e.Path[1:], ".")
+
 		entry, ok = cg.curScope.lookup(tail)
 		if ok {
 			if entry.isAlloc {
@@ -1816,6 +2072,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 	}
 	// Try last element.
 	last := e.Path[len(e.Path)-1]
+
 	entry, ok = cg.curScope.lookup(last)
 	if ok {
 		if entry.isAlloc {
@@ -1830,12 +2087,15 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 	// Scope key is "TypeName_method" (set when struct is compiled with static methods).
 	if len(e.Path) >= 2 {
 		baseName := e.Path[0]
+
 		typeParamStr := ""
 		if i := strings.Index(baseName, "["); i >= 0 {
 			typeParamStr = strings.TrimSuffix(baseName[i+1:], "]")
 			baseName = baseName[:i]
 		}
+
 		staticKey := baseName + "_" + last
+
 		entry, ok = cg.curScope.lookup(staticKey)
 		if ok {
 			if entry.isAlloc {
@@ -1850,16 +2110,27 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		// we have a concrete type param, monomorphize now and retry.
 		if typeParamStr != "" {
 			if _, isGeneric := cg.genericStructsByArity[baseName]; isGeneric {
-				concreteName := baseName + "__" + typeParamStr
+				// Resolve typeParamStr through type aliases (e.g. "r" → "string" inside a
+				// generic method body where cg.typeAliases["r"] = string).
+				resolvedTypeParam := typeParamStr
+				if alias, ok2 := cg.typeAliases[typeParamStr]; ok2 {
+					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+						resolvedTypeParam = simple.Name
+					}
+				}
+
+				concreteName := baseName + "__" + resolvedTypeParam
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-					typeParamTE := &ast.SimpleType{Name: typeParamStr}
+					typeParamTE := &ast.SimpleType{Name: resolvedTypeParam}
 					synthDecl := &ast.TypeDecl{
 						Name: concreteName,
 						Type: &ast.GenericType{Name: baseName, TypeParams: []ast.TypeExpr{typeParamTE}},
 					}
 					_ = cg.genTypeDecl(synthDecl) // ignore error; best-effort
 				}
+
 				concreteStaticKey := concreteName + "_" + last
+
 				entry, ok = cg.curScope.lookup(concreteStaticKey)
 				if ok {
 					if entry.isAlloc {
@@ -1888,6 +2159,7 @@ func (cg *CodeGen) tryResolveStructTypeName(expr ast.Node) (string, string) {
 		if _, ok := cg.structTypes[e.Name]; ok {
 			return e.Name, ""
 		}
+
 		if _, ok := cg.genericStructsByArity[e.Name]; ok {
 			return e.Name, ""
 		}
@@ -1897,6 +2169,7 @@ func (cg *CodeGen) tryResolveStructTypeName(expr ast.Node) (string, string) {
 				if _, ok3 := cg.structTypes[st.Name]; ok3 {
 					return st.Name, ""
 				}
+
 				if _, ok3 := cg.genericStructsByArity[st.Name]; ok3 {
 					return st.Name, ""
 				}
@@ -1910,17 +2183,20 @@ func (cg *CodeGen) tryResolveStructTypeName(expr ast.Node) (string, string) {
 				if _, ok3 := cg.structTypes[st.Name]; ok3 {
 					return st.Name, ""
 				}
+
 				if _, ok3 := cg.genericStructsByArity[st.Name]; ok3 {
 					return st.Name, ""
 				}
 			}
 		}
+
 		key2 := strings.Join(e.Path, "::")
 		if ta, ok := cg.typeAliases[key2]; ok {
 			if st, ok2 := ta.(*ast.SimpleType); ok2 {
 				if _, ok3 := cg.structTypes[st.Name]; ok3 {
 					return st.Name, ""
 				}
+
 				if _, ok3 := cg.genericStructsByArity[st.Name]; ok3 {
 					return st.Name, ""
 				}
@@ -1932,6 +2208,7 @@ func (cg *CodeGen) tryResolveStructTypeName(expr ast.Node) (string, string) {
 		if base == "" {
 			return "", ""
 		}
+
 		if typeArgID, ok := e.Index.(*ast.Identifier); ok {
 			return base, typeArgID.Name
 		}
@@ -1948,14 +2225,17 @@ func (cg *CodeGen) isStaticMethodIR(fn *ir.Func, structName string) bool {
 	if len(fn.Sig.Params) == 0 {
 		return true
 	}
+
 	st, ok := cg.structTypes[structName]
 	if !ok {
 		return true
 	}
+
 	first := fn.Sig.Params[0]
 	if first.Equal(st) {
 		return false // instance method: first param is the struct value
 	}
+
 	if pt, isPtr := first.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(st) {
 		return false // pointer receiver
 	}
@@ -1984,6 +2264,7 @@ func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, e
 		if err != nil {
 			return nil, err
 		}
+
 		vals[i] = v
 	}
 
@@ -2025,6 +2306,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// Monomorphize to the concrete name Name__T1__T2 (resolving type aliases).
 	if len(e.TypeArgs) > 0 {
 		parts := make([]string, len(e.TypeArgs))
+
 		resolvedTypeArgs := make([]ast.TypeExpr, len(e.TypeArgs))
 		for i, ta := range e.TypeArgs {
 			// Resolve through type aliases (handles generic function type params like t->i64).
@@ -2034,8 +2316,10 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			} else {
 				parts[i] = ta.String()
 			}
+
 			resolvedTypeArgs[i] = &ast.SimpleType{Name: parts[i]}
 		}
+
 		concreteName := typeName + "__" + strings.Join(parts, "__")
 		if _, done := cg.structTypes[concreteName]; !done {
 			synthDecl := &ast.TypeDecl{
@@ -2044,6 +2328,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 			_ = cg.genTypeDecl(synthDecl)
 		}
+
 		typeName = concreteName
 		// Rewrite the StructLit to use the concrete name for the rest of genStructLit.
 		e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
@@ -2058,6 +2343,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 		}
 	}
+
 	st, ok := cg.structTypes[typeName]
 	if !ok {
 		return nil, fmt.Errorf("unknown struct type: %s", typeName)
@@ -2068,6 +2354,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// Without this, ARC retain/release on array or string fields (which are
 	// fat-ptrs) would operate on garbage stack values and segfault.
 	block.NewStore(constant.NewZeroInitializer(st), alloca)
+
 	fieldNames := cg.structFields[e.TypeName]
 	vtableOff := cg.vtableOffset(e.TypeName)
 	// userOff = 1 (type_id) + vtable fields
@@ -2096,10 +2383,12 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			if idx >= len(st.Fields) {
 				break
 			}
+
 			val, err := cg.genExpr(block, v)
 			if err != nil {
 				return nil, err
 			}
+
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
@@ -2115,6 +2404,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	} else {
 		for _, f := range e.Fields {
 			rawIdx := -1
+
 			for i, fn := range fieldNames {
 				if fn == f.Name {
 					rawIdx = i
@@ -2122,14 +2412,18 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 					break
 				}
 			}
+
 			if rawIdx < 0 {
 				continue
 			}
+
 			idx := userOff + rawIdx
+
 			val, err := cg.genExpr(block, f.Value)
 			if err != nil {
 				return nil, err
 			}
+
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
@@ -2140,6 +2434,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 		}
 	}
+
 	result := block.NewLoad(st, alloca)
 
 	// Call the struct's init method (if defined) for side-effects.
@@ -2177,12 +2472,14 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		if err != nil {
 			return nil, err
 		}
+
 		vals[i] = v
 	}
 
 	// Determine concrete Tuple struct name.
 	// If expectedType is a known named struct, use it directly.
 	var concreteName string
+
 	if expectedType != nil {
 		if st, ok := expectedType.(*irtypes.StructType); ok {
 			if n := st.Name(); n != "" {
@@ -2192,12 +2489,14 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 			}
 		}
 	}
+
 	if concreteName == "" {
 		// Infer from element LLVM types.
 		parts := make([]string, len(vals))
 		for i, v := range vals {
 			parts[i] = llvmTypeToTinName(v.Type())
 		}
+
 		concreteName = "Tuple__" + strings.Join(parts, "__")
 		// Trigger monomorphization for this concrete name.
 		if _, done := cg.structTypes[concreteName]; !done {
@@ -2205,6 +2504,7 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 			for i, p := range parts {
 				typeParams[i] = &ast.SimpleType{Name: p}
 			}
+
 			synthDecl := &ast.TypeDecl{
 				Name: concreteName,
 				Type: &ast.GenericType{Name: "Tuple", TypeParams: typeParams},
@@ -2237,6 +2537,7 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		if idx >= len(st.Fields) {
 			break
 		}
+
 		fieldType := st.Fields[idx]
 		v = cg.coerce(block, v, fieldType)
 		gep := block.NewGetElementPtr(st, alloca,
@@ -2265,10 +2566,12 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 	}
 
 	ptrField := arrType.Fields[0]
+
 	ptrType, isPtrType := ptrField.(*irtypes.PointerType)
 	if !isPtrType {
 		return nil, fmt.Errorf("slice expression: first field must be a pointer, got %s", ptrField)
 	}
+
 	elemType := ptrType.ElemType
 
 	alloca := block.NewAlloca(arrType)
@@ -2289,6 +2592,7 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 		if err != nil {
 			return nil, err
 		}
+
 		startVal = cg.coerce(block, sv, irtypes.I64)
 	} else {
 		startVal = constant.NewInt(irtypes.I64, 0)
@@ -2299,6 +2603,7 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 		if err != nil {
 			return nil, err
 		}
+
 		endVal = cg.coerce(block, ev, irtypes.I64)
 	} else {
 		endVal = arrLen
@@ -2331,9 +2636,33 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	if err != nil {
 		return nil, err
 	}
+
 	targetType, err := cg.tinTypeToLLVM(e.Type)
 	if err != nil {
 		return nil, err
+	}
+
+	// For unsigned source types, integer widening must use zext, not sext.
+	// Determine signedness from the scope entry of the source identifier.
+	if irtypes.IsInt(val.Type()) && irtypes.IsInt(targetType) {
+		sBits := val.Type().(*irtypes.IntType).BitSize
+
+		tBits := targetType.(*irtypes.IntType).BitSize
+		if sBits < tBits {
+			srcUnsigned := false
+
+			if ident, ok := e.Expr.(*ast.Identifier); ok {
+				if entry, ok2 := cg.curScope.lookup(ident.Name); ok2 {
+					srcUnsigned = entry.isUnsigned
+				}
+			}
+
+			if srcUnsigned {
+				return block.NewZExt(val, targetType), nil
+			}
+
+			return block.NewSExt(val, targetType), nil
+		}
 	}
 
 	return cg.coerce(block, val, targetType), nil
@@ -2359,9 +2688,11 @@ func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value,
 	if err != nil {
 		return nil, err
 	}
+
 	if val == nil {
 		return nil, nil
 	}
+
 	if pt, ok := val.Type().(*irtypes.PointerType); ok {
 		return block.NewLoad(pt.ElemType, val), nil
 	}
@@ -2384,11 +2715,13 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	if err != nil {
 		return nil, err
 	}
+
 	if rightFn == nil {
 		return leftVal, nil
 	}
 	// Call through the function (fat-pointer or plain).
 	var result value.Value
+
 	if isFatFnPtr(rightFn.Type()) {
 		fnPtr := block.NewExtractValue(rightFn, 0)
 		envPtr := block.NewExtractValue(rightFn, 1)
@@ -2402,6 +2735,7 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	if isRCTrackedType(leftVal.Type()) && !isCopyExpr(e.Left) {
 		cg.emitRelease(block, leftVal)
 	}
+
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
 	}
@@ -2414,12 +2748,14 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 	if err != nil {
 		return nil, err
 	}
+
 	cond = cg.toBool(block, cond)
 
 	thenVal, err := cg.genExpr(block, e.Then)
 	if err != nil {
 		return nil, err
 	}
+
 	elseVal, err := cg.genExpr(block, e.Else)
 	if err != nil {
 		return nil, err
@@ -2428,6 +2764,7 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 	if thenVal == nil {
 		thenVal = constant.NewInt(irtypes.I64, 0)
 	}
+
 	if elseVal == nil {
 		elseVal = constant.NewInt(irtypes.I64, 0)
 	}
@@ -2454,27 +2791,33 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 			if err2 != nil {
 				return nil, err2
 			}
+
 			tag := int8(-1)
+
 			for i, te := range members {
 				lt, err3 := cg.tinTypeToLLVM(te)
 				if err3 != nil {
 					continue
 				}
+
 				if lt.Equal(targetLLVM) {
 					tag = int8(i)
 
 					break
 				}
 			}
+
 			if tag < 0 {
 				tag = 0
 			}
+
 			alloca := block.NewAlloca(st)
 			block.NewStore(val, alloca)
 			// Field 1 = i8 tag (field 0 is i32 type_id).
 			tagGEP := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			tagVal := block.NewLoad(irtypes.I8, tagGEP)
+
 			cmp := block.NewICmp(enum.IPredEQ, tagVal, constant.NewInt(irtypes.I8, int64(tag)))
 			if e.VarName != "" {
 				// Field 2 = [N x i8] payload.
@@ -2494,22 +2837,27 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 
 			return cmp, nil
 		}
-
 	}
 	// any type check: "x is dog" where x is any - compare type_id (field 0).
 	if isAnyType(val.Type()) && e.Type != nil {
 		targetName := ""
+
 		switch t := e.Type.(type) {
 		case *ast.SimpleType:
 			targetName = t.Name
 		}
+
 		if targetName != "" {
-			var targetID int32
-			var found bool
+			var (
+				targetID int32
+				found    bool
+			)
+
 			if id, ok := cg.structTypeIDs[targetName]; ok {
 				targetID = id
 				found = true
 			}
+
 			if found {
 				anyType := anyFatPtrType()
 				anyAlloca := block.NewAlloca(anyType)
@@ -2551,17 +2899,22 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 func fnSigName(ft *irtypes.FuncType, skipFirstEnv bool) string {
 	var sb strings.Builder
 	sb.WriteString("fn(")
+
 	start := 0
 	if skipFirstEnv && len(ft.Params) > 0 {
 		start = 1
 	}
+
 	for i := start; i < len(ft.Params); i++ {
 		if i > start {
 			sb.WriteString(",")
 		}
+
 		sb.WriteString(llvmTypeName(ft.Params[i]))
 	}
+
 	sb.WriteString(")")
+
 	if ft.RetType != nil && !irtypes.IsVoid(ft.RetType) {
 		sb.WriteString(llvmTypeName(ft.RetType))
 	}
@@ -2575,6 +2928,7 @@ func (cg *CodeGen) ensureFnTypeID(sig string) int32 {
 	if id, ok := cg.fnTypeIDs[sig]; ok {
 		return id
 	}
+
 	id := cg.nextTypeID
 	cg.nextTypeID++
 	cg.fnTypeIDs[sig] = id
@@ -2588,12 +2942,17 @@ func (cg *CodeGen) ensureFnTypeID(sig string) int32 {
 // own scope and will capture independently).
 func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 	seen := map[string]bool{}
-	var result []string
-	var walk func(ast.Node)
+
+	var (
+		result []string
+		walk   func(ast.Node)
+	)
+
 	walk = func(n ast.Node) {
 		if n == nil {
 			return
 		}
+
 		switch v := n.(type) {
 		case *ast.Identifier:
 			if !localNames[v.Name] && !seen[v.Name] {
@@ -2604,7 +2963,21 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 			walk(v.Value)
 			localNames[v.Name] = true
 		case *ast.LambdaExpr:
-			// Don't descend into nested lambdas; they capture independently.
+			// Collect free vars of nested lambda that the current lambda needs to
+			// capture so they're available in scope when the nested lambda is compiled.
+			// Example: fn(b) = return fn(c) = return a+b+c
+			// The outer lambda must capture 'a' even though 'a' only appears in the inner lambda.
+			nestedLocals := map[string]bool{}
+			for _, p := range v.Params {
+				nestedLocals[p.Name] = true
+			}
+
+			for _, nf := range collectFreeVars(v.Body, nestedLocals) {
+				if !localNames[nf] && !seen[nf] {
+					seen[nf] = true
+					result = append(result, nf)
+				}
+			}
 		case *ast.Block:
 			for _, s := range v.Stmts {
 				walk(s)
@@ -2628,6 +3001,7 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 			walk(v.Expr)
 		case *ast.CallExpr:
 			walk(v.Func)
+
 			for _, a := range v.Args {
 				walk(a)
 			}
@@ -2639,10 +3013,12 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 		case *ast.IfStmt:
 			walk(v.Cond)
 			walk(v.Then)
+
 			for _, ei := range v.ElseIfs {
 				walk(ei.Cond)
 				walk(ei.Body)
 			}
+
 			if v.Else != nil {
 				walk(v.Else)
 			}
@@ -2690,9 +3066,11 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 			walk(v.Body)
 		case *ast.MatchStmt:
 			walk(v.Expr)
+
 			for _, c := range v.Cases {
 				walk(c.Body)
 			}
+
 			if v.Default != nil {
 				walk(v.Default)
 			}
@@ -2730,8 +3108,10 @@ func (cg *CodeGen) callTraitMethod(block *ir.Block, ifaceVal value.Value, instKe
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
 	}
+
 	methodOrder := cg.traitMethodOrder[baseTrait]
 	slotIdx := -1
+
 	for i, n := range methodOrder {
 		if n == methodName {
 			slotIdx = i
@@ -2739,6 +3119,7 @@ func (cg *CodeGen) callTraitMethod(block *ir.Block, ifaceVal value.Value, instKe
 			break
 		}
 	}
+
 	if slotIdx < 0 {
 		return nil, fmt.Errorf("trait %s has no method %s", instKey, methodName)
 	}
@@ -2756,14 +3137,18 @@ func (cg *CodeGen) callTraitMethod(block *ir.Block, ifaceVal value.Value, instKe
 
 	// Build call args: (data_ptr, extra_args...).
 	llArgs := []value.Value{dataPtr}
+
 	for _, arg := range argNodes {
 		av, err := cg.genExpr(block, arg)
 		if err != nil {
 			return nil, err
 		}
+
 		llArgs = append(llArgs, av)
 	}
+
 	llArgs = cg.adaptArgs(block, llArgs, fnSlotType)
+
 	result := block.NewCall(fnPtr, llArgs...)
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
@@ -2779,6 +3164,7 @@ func (cg *CodeGen) isAsyncTraitMethod(instKey, methodName string) bool {
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
 	}
+
 	for _, name := range cg.traitAsyncMethodNames[baseTrait] {
 		if name == methodName {
 			return true
@@ -2798,6 +3184,7 @@ func (cg *CodeGen) asyncCoroSlotIndex(instKey, methodName string) int {
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
 	}
+
 	syncCount := len(cg.traitMethodOrder[baseTrait])
 	for i, name := range cg.traitAsyncMethodNames[baseTrait] {
 		if name == methodName {
@@ -2815,17 +3202,21 @@ func (cg *CodeGen) traitMethodRetType(instKey, methodName string) irtypes.Type {
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
 	}
+
 	methodOrder := cg.traitMethodOrder[baseTrait]
+
 	vtableSt := cg.traitVtableStructTypes[instKey]
 	if vtableSt == nil {
 		return nil
 	}
+
 	for i, name := range methodOrder {
 		if name == methodName {
 			fnPtr, ok := vtableSt.Fields[i].(*irtypes.PointerType)
 			if !ok {
 				return nil
 			}
+
 			ft, ok := fnPtr.ElemType.(*irtypes.FuncType)
 			if !ok {
 				return nil
@@ -2846,17 +3237,21 @@ func (cg *CodeGen) traitAsyncMethodRetType(instKey, methodName string) irtypes.T
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
 	}
+
 	td, ok := cg.traits[baseTrait]
 	if !ok {
 		return nil
 	}
+
 	for _, m := range td.Methods {
 		if m.Name != methodName || !isAsyncTag(m.Tags) {
 			continue
 		}
+
 		if m.RetType == nil {
 			return irtypes.Void
 		}
+
 		lt, err := cg.tinTypeToLLVM(m.RetType)
 		if err != nil {
 			return nil
@@ -2882,6 +3277,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 	if !ok {
 		return cg.zeroValue(targetFatType)
 	}
+
 	origFnType, ok := srcFnType.ElemType.(*irtypes.FuncType)
 	if !ok {
 		return cg.zeroValue(targetFatType)
@@ -2898,6 +3294,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 
 	// Reuse cached shim if already generated.
 	var shim *ir.Func
+
 	for _, fn := range cg.mod.Funcs {
 		if fn.Name() == shimName {
 			shim = fn
@@ -2916,8 +3313,10 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 			if i > 0 {
 				name = fmt.Sprintf("p%d", i-1)
 			}
+
 			shimParams[i] = ir.NewParam(name, pt)
 		}
+
 		shim = cg.mod.NewFunc(shimName, wrapperFnType.RetType, shimParams...)
 		entry := shim.NewBlock("entry")
 		// Forward call: skip env (index 0), adapt remaining args to orig signature.
@@ -2925,7 +3324,9 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 		for i := range origFnType.Params {
 			callArgs[i] = shim.Params[i+1]
 		}
+
 		callArgs = cg.adaptArgs(entry, callArgs, origFnType)
+
 		result := entry.NewCall(fnVal, callArgs...)
 		if irtypes.IsVoid(wrapperFnType.RetType) {
 			entry.NewRet(nil)
@@ -2956,11 +3357,13 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 	// Build args (index 0 = env, indices 1..N = actual params).
 	llArgs := []value.Value{envPtr}
 	llArgsPreCoerce := []value.Value{envPtr}
+
 	for _, arg := range argNodes {
 		av, err := cg.genExpr(block, arg)
 		if err != nil {
 			return nil, err
 		}
+
 		llArgs = append(llArgs, av)
 		llArgsPreCoerce = append(llArgsPreCoerce, av)
 	}
@@ -2987,9 +3390,11 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 		if !isRCTrackedType(preCoerce.Type()) {
 			continue
 		}
+
 		if isCopyExpr(astArg) {
 			continue
 		}
+
 		cg.emitRelease(block, preCoerce)
 	}
 
@@ -3009,22 +3414,29 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	for _, p := range e.Params {
 		localNames[p.Name] = true
 	}
+
 	freeNames := collectFreeVars(e.Body, localNames)
 
 	// Resolve each free name in the current (outer) scope. Skip names that
 	// resolve to module-level IR functions (not allocas) - those are callable
 	// directly by name and don't need capturing.
 	var captures []closureCapture
+
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
 			continue
 		}
+
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
 			continue // global function - reachable by name, no capture needed
 		}
-		var val value.Value
-		var ty irtypes.Type
+
+		var (
+			val value.Value
+			ty  irtypes.Type
+		)
+
 		if entry.isAlloc {
 			pt := entry.val.Type().(*irtypes.PointerType)
 			ty = pt.ElemType
@@ -3033,25 +3445,41 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 			val = entry.val
 			ty = val.Type()
 		}
+
 		captures = append(captures, closureCapture{name: n, val: val, llvmTy: ty})
 	}
 
-	// Step 2: build env struct and malloc it (if there are captures)
-	envI8Ptr, envStructType := cg.buildEnv(block, captures)
+	// Step 2: generate per-closure dtor (releases RC-tracked captures when env RC=0),
+	// then build an RC-managed env struct with the dtor stored at field 0.
+	var dtorFn *ir.Func
+
+	for _, c := range captures {
+		if isRCTrackedType(c.llvmTy) {
+			dtorFn = cg.genClosureDtor(name+".dtor", captures)
+
+			break
+		}
+	}
+
+	envI8Ptr, envStructType := cg.buildClosureEnv(block, captures, dtorFn)
 
 	// Step 3: create the lambda IR function with (i8* env, params...) sig
 	llParams := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
+
 	for _, p := range e.Params {
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return nil, err
 		}
+
 		llParams = append(llParams, ir.NewParam(p.Name, pt))
 	}
 
 	var retType irtypes.Type = irtypes.Void
+
 	if e.RetType != nil {
 		var err error
+
 		retType, err = cg.tinTypeToLLVM(e.RetType)
 		if err != nil {
 			return nil, err
@@ -3063,16 +3491,20 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	prevCtx := cg.pushClosureCtx(f)
 
-	// Step 4: unpack captures from env inside the lambda body
-	cg.unpackEnv(entry, f, envStructType, captures)
+	// Step 4: unpack captures from env inside the lambda body.
+	// unpackClosureEnv uses GEPs directly (env persists across calls) and retains
+	// each RC-tracked capture so the body's scope-exit release is balanced.
+	cg.unpackClosureEnv(entry, f, envStructType, captures)
 
 	// Register lambda params (skip index 0 = env).
 	for i, p := range e.Params {
 		param := f.Params[i+1]
+
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
 			return nil, err
 		}
+
 		alloca := entry.NewAlloca(pt)
 		entry.NewStore(param, alloca)
 		// ARC: retain RC-tracked params so scope-exit release is balanced.
@@ -3084,6 +3516,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	// For where-list bodies, the match subject is the first parameter so that
 	// atom and comparison conditions compare against it (mirroring genFuncDeclAs).
 	prevMatchSubject := cg.matchSubject
+
 	if _, isWhere := e.Body.(*ast.WhereList); isWhere && len(e.Params) > 0 {
 		firstParamName := e.Params[0].Name
 		if se, ok := cg.curScope.lookup(firstParamName); ok && se.isAlloc {
@@ -3094,9 +3527,11 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	term, err := cg.genBody(entry, e.Body, retType)
 	cg.matchSubject = prevMatchSubject
+
 	if err != nil {
 		return nil, err
 	}
+
 	if !term {
 		lastBlock := f.Blocks[len(f.Blocks)-1]
 		if lastBlock.Term == nil {
@@ -3110,25 +3545,64 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	cg.popClosureCtx(prevCtx)
 
-	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr }
+	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr } using insertvalue
+	// so no stack alloca is needed.
 	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)
-	alloca := block.NewAlloca(fatStructType)
-	gep0 := block.NewGetElementPtr(fatStructType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(f, gep0)
-	gep1 := block.NewGetElementPtr(fatStructType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(envI8Ptr, gep1)
+	fat0 := block.NewInsertValue(constant.NewUndef(fatStructType), f, 0)
+	fat1 := block.NewInsertValue(fat0, envI8Ptr, 1)
 
-	return block.NewLoad(fatStructType, alloca), nil
+	// Signal to genVarDecl whether this closure has captured variables so it can
+	// skip the _tin_release_closure(null) call for non-capturing closures.
+	cg.lastLambdaHadCaptures = len(captures) > 0
+
+	return fat1, nil
+}
+
+// genClosureDtor generates a per-closure destructor IR function that releases
+// any RC-tracked captures stored in the closure env (built by buildClosureEnv).
+// The dtor signature is void(i8* env). The env layout matches buildClosureEnv:
+// field 0 = i8* dtor_ptr, fields 1..N = captures.
+func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Func {
+	// Reconstruct the env struct type (must match buildClosureEnv layout).
+	fields := make([]irtypes.Type, len(captures)+1)
+
+	fields[0] = irtypes.I8Ptr
+	for i, c := range captures {
+		fields[i+1] = c.llvmTy
+	}
+
+	envStructType := irtypes.NewStruct(fields...)
+
+	dtorFn := cg.mod.NewFunc(name, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
+	entry := dtorFn.NewBlock("entry")
+
+	envTypedPtr := entry.NewBitCast(dtorFn.Params[0], irtypes.NewPointer(envStructType))
+
+	for i, c := range captures {
+		if !isRCTrackedType(c.llvmTy) {
+			continue
+		}
+
+		gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, int64(i+1)))
+		fieldVal := entry.NewLoad(c.llvmTy, gep)
+		cg.emitRelease(entry, fieldVal)
+	}
+
+	entry.NewRet(nil)
+
+	return dtorFn
 }
 
 // Interpolated string
 
 func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedString) (value.Value, error) {
 	// Build a format string and argument list for printf/sprintf.
-	var fmtParts []string
-	var args []value.Value
+	var (
+		fmtParts []string
+		args     []value.Value
+	)
 
 	for _, part := range e.Parts {
 		if !part.IsExpr {
@@ -3140,11 +3614,13 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 			if err != nil {
 				return nil, err
 			}
+
 			if val == nil {
 				fmtParts = append(fmtParts, "(nil)")
 
 				continue
 			}
+
 			t := val.Type()
 
 			// If a format specifier was provided, use it directly.
@@ -3152,6 +3628,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				fmtSpec := part.Format
 				lastChar := fmtSpec[len(fmtSpec)-1]
 				prefix := fmtSpec[:len(fmtSpec)-1]
+
 				switch lastChar {
 				case 'x', 'X', 'o', 'u':
 					// Unsigned/hex/octal integer format
@@ -3161,10 +3638,12 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 							val = cg.coerce(block, val, irtypes.I64)
 						} else {
 							fmtParts = append(fmtParts, "%"+prefix+string(lastChar))
+
 							if it.BitSize < 32 {
 								val = block.NewZExt(val, irtypes.I32)
 							}
 						}
+
 						args = append(args, val)
 
 						continue
@@ -3177,10 +3656,12 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 							val = cg.coerce(block, val, irtypes.I64)
 						} else {
 							fmtParts = append(fmtParts, "%"+prefix+string(lastChar))
+
 							if it.BitSize < 32 {
 								val = block.NewSExt(val, irtypes.I32)
 							}
 						}
+
 						args = append(args, val)
 
 						continue
@@ -3188,6 +3669,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				case 'f', 'e', 'g', 'E', 'G':
 					// Floating-point format
 					fmtParts = append(fmtParts, "%"+fmtSpec)
+
 					if irtypes.IsFloat(t) {
 						if t != irtypes.Double {
 							val = block.NewFPExt(val, irtypes.Double)
@@ -3195,6 +3677,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 					} else if irtypes.IsInt(t) {
 						val = block.NewSIToFP(val, irtypes.Double)
 					}
+
 					args = append(args, val)
 
 					continue
@@ -3218,18 +3701,28 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 			case irtypes.IsInt(t):
 				it := t.(*irtypes.IntType)
 				if it.BitSize == 1 {
-					fmtParts = append(fmtParts, "%d")
-					val = block.NewZExt(val, irtypes.I32)
+					// bool: print "true" or "false"
+					truePtr := cg.newGlobalString("true")
+					falsePtr := cg.newGlobalString("false")
+					selected := block.NewSelect(val, truePtr, falsePtr)
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, selected)
 				} else {
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
+					args = append(args, val)
 				}
-				args = append(args, val)
 			case irtypes.IsFloat(t):
-				fmtParts = append(fmtParts, "%g")
-				if t != irtypes.Double {
+				if t == irtypes.Double {
+					// f64: use %f (e.g. "1.000000")
+					fmtParts = append(fmtParts, "%f")
+				} else {
+					// f32: use %g (e.g. "3" for 3.0, "1.5" for 1.5)
+					fmtParts = append(fmtParts, "%g")
 					val = block.NewFPExt(val, irtypes.Double)
 				}
+
 				args = append(args, val)
 			default:
 				// print trait: struct or fat-pointer with a print() method.
@@ -3312,11 +3805,13 @@ func (cg *CodeGen) canonicalUnitStructName() string {
 func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName string) (value.Value, error) {
 	// Determine the type parameter: original function's return type, or Unit for void.
 	var retTypeExpr ast.TypeExpr
+
 	if calleeName != "" {
 		if origDecl, ok := cg.funcDecls[calleeName]; ok && origDecl.RetType != nil {
 			retTypeExpr = origDecl.RetType
 		}
 	}
+
 	if retTypeExpr == nil {
 		retTypeExpr = &ast.SimpleType{Name: "Unit"}
 	}
@@ -3326,6 +3821,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	if err != nil {
 		return nil, fmt.Errorf("spawn: cannot determine return type for Future[T]: %w", err)
 	}
+
 	retTypeStr := llvmTypeName(retTypeLLVM)
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
@@ -3343,6 +3839,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	// Call Future[T].make(pid) to construct the struct value properly
 	// (sets type_id, vtable pointer, and pid field).
 	makeFnName := futureConcreteName + "_make"
+
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
 		if cg.syncLoadErr != nil {
@@ -3351,6 +3848,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 
 		return nil, fmt.Errorf("spawn: Future[%s] not available - stdlib/sync could not be loaded; ensure the tin executable is in its installed location alongside the stdlib/ directory, or add `use sync` explicitly before using spawn/await", retTypeStr)
 	}
+
 	makeFn, ok := se.val.(*ir.Func)
 	if !ok {
 		return nil, fmt.Errorf("spawn: %s is not a function", makeFnName)
@@ -3367,15 +3865,18 @@ func (cg *CodeGen) peekStructTypeName(identName string) string {
 	if !ok {
 		return ""
 	}
+
 	t := se.val.Type()
 	if se.isAlloc {
 		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
 			t = pt.ElemType
 		}
 	}
+
 	if name := cg.typeNameOf(t); name != "" {
 		return name
 	}
+
 	if pt, ok2 := t.(*irtypes.PointerType); ok2 {
 		return cg.typeNameOf(pt.ElemType)
 	}
@@ -3422,15 +3923,18 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	cg.ensureCoroIntrinsics()
 	cg.ensureFiberRuntime()
 
-	var coroFn *ir.Func
-	var coroArgs []value.Value
-	var origFnName string
+	var (
+		coroFn     *ir.Func
+		coroArgs   []value.Value
+		origFnName string
+	)
 
 	switch fn := callNode.Func.(type) {
 	case *ast.FieldAccess:
 		// Method call: obj.method(args...)
 		// Peek at the struct type without evaluating to decide quickly.
 		structName := ""
+
 		if id, ok2 := fn.Expr.(*ast.Identifier); ok2 {
 			if se, ok3 := cg.curScope.lookup(id.Name); ok3 {
 				t := se.val.Type()
@@ -3439,6 +3943,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 						t = pt.ElemType
 					}
 				}
+
 				structName = cg.typeNameOf(t)
 				if structName == "" {
 					if pt, ok4 := t.(*irtypes.PointerType); ok4 {
@@ -3447,19 +3952,25 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 				}
 			}
 		}
+
 		if structName == "" {
 			return nil, nil // can't determine struct type without evaluation — fall through
 		}
+
 		coroName := structName + "_" + fn.Field + "$coro"
+
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
 			return nil, nil // not {#async} — fall through
 		}
+
 		var ok3 bool
+
 		coroFn, ok3 = se.val.(*ir.Func)
 		if !ok3 {
 			return nil, nil
 		}
+
 		origFnName = structName + "_" + fn.Field
 
 		// Evaluate the object expression.
@@ -3467,6 +3978,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		if err != nil {
 			return nil, err
 		}
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
@@ -3475,6 +3987,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		// If the method expects a pointer receiver (*T) but we have a value T,
 		// use genLValue to get the address or fall back to a temp alloca.
 		thisArg := objVal
+
 		if len(coroFn.Params) > 0 {
 			firstParamTy := coroFn.Params[0].Type()
 			if pt, isPtr := firstParamTy.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(objVal.Type()) {
@@ -3489,6 +4002,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 				thisArg = cg.coerce(block, objVal, firstParamTy)
 			}
 		}
+
 		coroArgs = []value.Value{thisArg}
 
 		for i, arg := range callNode.Args {
@@ -3496,12 +4010,15 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 			if err2 != nil {
 				return nil, err2
 			}
+
 			if cg.curBlock != nil && cg.curBlock != block {
 				block = cg.curBlock
 			}
+
 			if i+1 < len(coroFn.Params) {
 				av = cg.coerce(block, av, coroFn.Params[i+1].Type())
 			}
+
 			coroArgs = append(coroArgs, av)
 		}
 
@@ -3516,6 +4033,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 			if fn.Field == "send" && len(coroArgs) == 2 {
 				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1])
 			}
+
 			if fn.Field == "recv" && len(coroArgs) == 1 {
 				if origDecl, ok4 := cg.funcDecls[origFnName]; ok4 && origDecl.RetType != nil {
 					if elemType, err4 := cg.tinTypeToLLVM(origDecl.RetType); err4 == nil && elemType != nil && !irtypes.IsVoid(elemType) {
@@ -3528,15 +4046,19 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	case *ast.Identifier:
 		// Free function call: fn(args...)
 		coroName := fn.Name + "$coro"
+
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
 			return nil, nil // not {#async} — fall through
 		}
+
 		var ok3 bool
+
 		coroFn, ok3 = se.val.(*ir.Func)
 		if !ok3 {
 			return nil, nil
 		}
+
 		origFnName = fn.Name
 
 		for i, arg := range callNode.Args {
@@ -3544,12 +4066,15 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 			if err2 != nil {
 				return nil, err2
 			}
+
 			if cg.curBlock != nil && cg.curBlock != block {
 				block = cg.curBlock
 			}
+
 			if i < len(coroFn.Params) {
 				av = cg.coerce(block, av, coroFn.Params[i].Type())
 			}
+
 			coroArgs = append(coroArgs, av)
 		}
 
@@ -3634,19 +4159,23 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 
 	// Determine result type (same lookup as wrapPidInFuture).
 	var retTypeExpr ast.TypeExpr
+
 	if origFnName != "" {
 		if origDecl, ok2 := cg.funcDecls[origFnName]; ok2 && origDecl.RetType != nil {
 			retTypeExpr = origDecl.RetType
 		}
 	}
+
 	if retTypeExpr == nil {
 		// void/Unit result — nothing to free.
 		return constant.NewInt(irtypes.I1, 1), nil
 	}
+
 	retLLVM, err := cg.tinTypeToLLVM(retTypeExpr)
 	if err != nil || retLLVM == nil || irtypes.IsVoid(retLLVM) {
 		return constant.NewInt(irtypes.I1, 1), nil
 	}
+
 	typedPtr := driveDoneBlk.NewBitCast(resultRaw, irtypes.NewPointer(retLLVM))
 	result := driveDoneBlk.NewLoad(retLLVM, typedPtr)
 	// Free the result buffer (no-op if TLS, free() if heap-allocated for spawned fibers).
@@ -3685,11 +4214,14 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 
 		return nil, nil
 	}
+
 	chanStructTy := pt.ElemType
+
 	ptrFieldIdx := int64(cg.fieldIndex(cg.typeNameOf(chanStructTy), "_ptr"))
 	if ptrFieldIdx < 0 {
 		ptrFieldIdx = 1 // fallback: type_id at 0, _ptr at 1
 	}
+
 	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
@@ -3705,6 +4237,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 
 	// sizeof(T) and is_rc — compile-time constants.
 	elemSize := cg.llvmSizeOf(block, elemType)
+
 	isRCVal := constant.NewInt(irtypes.I32, 0)
 	if isRCTrackedType(elemType) {
 		isRCVal = constant.NewInt(irtypes.I32, 1)
@@ -3781,11 +4314,14 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 
 		return nil, nil
 	}
+
 	chanStructTy := pt.ElemType
+
 	ptrFieldIdx := int64(cg.fieldIndex(cg.typeNameOf(chanStructTy), "_ptr"))
 	if ptrFieldIdx < 0 {
 		ptrFieldIdx = 1 // fallback: type_id at 0, _ptr at 1
 	}
+
 	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
@@ -3866,8 +4402,11 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 		return cg.genSpawnMethodExpr(block, callNode, fa)
 	}
 
-	var calleeName string
-	var scopeKey string
+	var (
+		calleeName string
+		scopeKey   string
+	)
+
 	switch fn := callNode.Func.(type) {
 	case *ast.Identifier:
 		calleeName = fn.Name
@@ -3884,12 +4423,15 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 	// Evaluate arguments first so we can do overload resolution if needed.
 	var callArgs []value.Value
+
 	for _, arg := range callNode.Args {
 		val, err := cg.genExpr(block, arg)
 		if err != nil {
 			return nil, err
 		}
+
 		callArgs = append(callArgs, val)
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
@@ -3898,8 +4440,11 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	// Look up the sync function first to derive its IR name (which may differ from calleeName)
 	// and to get its return type for wrapPidInFuture.
 	// e.g. for bare "async_write" inside io.tin, the scope entry points to "io__async_write".
-	var syncIRName string
-	var syncFnRetType irtypes.Type
+	var (
+		syncIRName    string
+		syncFnRetType irtypes.Type
+	)
+
 	for _, key := range []string{scopeKey, calleeName} {
 		if se2, ok3 := cg.curScope.lookup(key); ok3 {
 			if fn2, ok4 := se2.val.(*ir.Func); ok4 {
@@ -3914,10 +4459,12 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	// Look up the $coro variant of the callee.
 	// Try bare name, scope-qualified name, and sync IR name (for cross-package).
 	var coroFn *ir.Func
+
 	coroKeys := []string{calleeName + "$coro", scopeKey + "$coro"}
 	if syncIRName != "" && syncIRName != calleeName && syncIRName != scopeKey {
 		coroKeys = append(coroKeys, syncIRName+"$coro")
 	}
+
 	for _, coroKey := range coroKeys {
 		if se2, ok3 := cg.curScope.lookup(coroKey); ok3 {
 			if fn2, ok4 := se2.val.(*ir.Func); ok4 {
@@ -3941,11 +4488,54 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 					syncFnRetType = fn3.Sig.RetType
 				}
 			}
+
 			for _, coroKey := range []string{best.irName + "$coro", calleeName + "$coro"} {
 				if se2, ok3 := cg.curScope.lookup(coroKey); ok3 {
 					if fn2, ok4 := se2.val.(*ir.Func); ok4 {
 						coroFn = fn2
 						resolvedCalleeName = best.irName
+
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// If direct lookup failed, try monomorphizing a generic async template.
+	if coroFn == nil {
+		if tmpl, isGeneric := cg.genericFuncs[calleeName]; isGeneric && hasTag(tmpl.Tags, "async") {
+			typeSubst := cg.inferTypeArgs(tmpl, callArgs)
+			instKey := ""
+
+			for i, tp := range tmpl.TypeParams {
+				if i > 0 {
+					instKey += "__"
+				}
+
+				if name, found := typeSubst[tp]; found {
+					instKey += name
+				} else {
+					instKey += tp
+				}
+			}
+
+			monoName := tmpl.Name + "__" + instKey
+			coroName := monoName + "$coro"
+			// Monomorphize the concrete variant. genFuncDeclAs will call
+			// predeclareCoroVariant + genCoroFuncBody for async functions
+			// (because no $coro stub exists for the monomorphized name yet).
+			if concreteFn, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst); err2 == nil {
+				if syncFnRetType == nil {
+					syncFnRetType = concreteFn.Sig.RetType
+				}
+
+				resolvedCalleeName = monoName
+				// Find the $coro variant in the module (generated as side effect).
+				for _, f := range cg.mod.Funcs {
+					if f.Name() == coroName {
+						coroFn = f
+						cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})
 
 						break
 					}
@@ -3979,6 +4569,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	if _, hasFuncDecl := cg.funcDecls[resolvedCalleeName]; hasFuncDecl {
 		return cg.wrapPidInFuture(block, pid, resolvedCalleeName)
 	}
+
 	if syncFnRetType != nil {
 		return cg.wrapPidInFutureWithLLVMType(block, pid, syncFnRetType)
 	}
@@ -3998,6 +4589,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		if !cg.isAsyncTraitMethod(instKey, fa.Field) {
 			return nil, fmt.Errorf("spawn: trait method %q is not {#async}", fa.Field)
 		}
+
 		coroSlotIdx := cg.asyncCoroSlotIndex(instKey, fa.Field)
 		if coroSlotIdx < 0 {
 			return nil, fmt.Errorf("spawn: no $coro slot for trait method %q", fa.Field)
@@ -4015,13 +4607,16 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 
 		// Evaluate args
 		llArgs := []value.Value{dataPtr}
+
 		for _, arg := range callNode.Args {
 			av, err2 := cg.genExpr(block, arg)
 			if err2 != nil {
 				return nil, err2
 			}
+
 			llArgs = append(llArgs, av)
 		}
+
 		llArgs = cg.adaptArgs(block, llArgs, coroSlotFnType)
 
 		hdl := block.NewCall(fnPtr, llArgs...)
@@ -4046,14 +4641,18 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 			structName = cg.typeNameOf(pt.ElemType)
 		}
 	}
+
 	if structName == "" {
 		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", objVal.Type())
 	}
+
 	coroName := structName + "_" + fa.Field + "$coro"
+
 	se2, ok3 := cg.curScope.lookup(coroName)
 	if !ok3 {
 		return nil, fmt.Errorf("spawn: method %s.%s does not have a $coro variant; is it {#async}?", structName, fa.Field)
 	}
+
 	coroFn2, ok4 := se2.val.(*ir.Func)
 	if !ok4 {
 		return nil, fmt.Errorf("spawn: %s is not a function", coroName)
@@ -4063,6 +4662,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	// If the $coro expects a pointer receiver (*T) but we have a value T,
 	// use genLValue to get the address or fall back to a temp alloca.
 	thisArg2 := objVal
+
 	if len(coroFn2.Params) > 0 {
 		firstParamTy2 := coroFn2.Params[0].Type()
 		if pt2, isPtr2 := firstParamTy2.(*irtypes.PointerType); isPtr2 && pt2.ElemType.Equal(objVal.Type()) {
@@ -4075,15 +4675,19 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 			}
 		}
 	}
+
 	coroArgs := []value.Value{thisArg2}
+
 	for i, arg := range callNode.Args {
 		av, err2 := cg.genExpr(block, arg)
 		if err2 != nil {
 			return nil, err2
 		}
+
 		if i+1 < len(coroFn2.Params) {
 			av = cg.coerce(block, av, coroFn2.Params[i+1].Type())
 		}
+
 		coroArgs = append(coroArgs, av)
 	}
 
@@ -4111,6 +4715,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 	futureConcreteName := "Future__" + retTypeStr
 	if _, exists := cg.structTypes[futureConcreteName]; !exists {
 		retTypeExpr := &ast.SimpleType{Name: retTypeStr}
+
 		futureASTType := &ast.GenericType{
 			Name:       "Future",
 			TypeParams: []ast.TypeExpr{retTypeExpr},
@@ -4122,6 +4727,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 	}
 
 	makeFnName := futureConcreteName + "_make"
+
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
 		if cg.syncLoadErr != nil {
@@ -4130,6 +4736,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 
 		return nil, fmt.Errorf("spawn: Future[%s] not available - stdlib/sync could not be loaded", retTypeStr)
 	}
+
 	makeFn, ok := se.val.(*ir.Func)
 	if !ok {
 		return nil, fmt.Errorf("spawn: %s is not a function", makeFnName)
@@ -4149,25 +4756,32 @@ func (cg *CodeGen) genSpawnDoBlock(block *ir.Block, doBlock *ast.Block) (value.V
 	// enclosing function's scope.  These need to be captured by value into an env
 	// struct so that the synthesized $coro function can access them safely.
 	freeNames := collectFreeVars(doBlock, map[string]bool{})
+
 	var captures []closureCapture
+
 	for _, n := range freeNames {
 		entry, ok := cg.curScope.lookup(n)
 		if !ok {
 			continue
 		}
+
 		if _, isFunc := entry.val.(*ir.Func); isFunc {
 			continue // global function - reachable by name, no capture needed
 		}
+
 		if entry.isGlobal {
 			continue // module-level global - reachable directly
 		}
+
 		if !entry.isAlloc {
 			continue // not an alloca - skip
 		}
+
 		pt, ok2 := entry.val.Type().(*irtypes.PointerType)
 		if !ok2 {
 			continue
 		}
+
 		ty := pt.ElemType
 		val := block.NewLoad(ty, entry.val)
 		captures = append(captures, closureCapture{name: n, val: val, llvmTy: ty})
@@ -4210,10 +4824,12 @@ func (cg *CodeGen) genSpawnDoBlock(block *ir.Block, doBlock *ast.Block) (value.V
 
 	// Look up the generated $coro function.
 	coroName := coroVersionName(anonName)
+
 	se, ok := cg.curScope.lookup(coroName)
 	if !ok || se == nil {
 		return nil, fmt.Errorf("spawn do: %s$coro not found after generation", anonName)
 	}
+
 	coroFn, ok := se.val.(*ir.Func)
 	if !ok {
 		return nil, fmt.Errorf("spawn do: %s$coro is not a function", anonName)
@@ -4238,6 +4854,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		if !ok {
 			return nil, fmt.Errorf("undefined identifier: %s", e.Name)
 		}
+
 		if entry.isAlloc {
 			return entry.val, nil
 		}
@@ -4252,10 +4869,12 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		if err != nil {
 			return nil, err
 		}
+
 		idx, err := cg.genExpr(block, e.Index)
 		if err != nil {
 			return nil, err
 		}
+
 		idx = cg.coerce(block, idx, irtypes.I64)
 
 		arrType := arr.Type()
@@ -4267,6 +4886,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 				ptrGep := block.NewGetElementPtr(arrType, alloca,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 				elemPtrType := at.Fields[0]
+
 				dataPtr := block.NewLoad(elemPtrType, ptrGep)
 				if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 					return block.NewGetElementPtr(pt.ElemType, dataPtr, idx), nil
@@ -4289,7 +4909,6 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			return block.NewGetElementPtr(arrType, alloca,
 				constant.NewInt(irtypes.I32, 0), idx), nil
 		case *irtypes.PointerType:
-
 			return block.NewGetElementPtr(at.ElemType, arr, idx), nil
 		}
 
@@ -4309,10 +4928,12 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			if err2 != nil {
 				return nil, err2
 			}
+
 			objType := obj.Type()
 			if e.IsPtr {
 				if pt, ok := objType.(*irtypes.PointerType); ok {
 					structName := cg.typeNameOf(pt.ElemType)
+
 					fieldIdx := cg.fieldIndex(structName, e.Field)
 					if fieldIdx < 0 {
 						return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
@@ -4322,9 +4943,12 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx))), nil
 				}
 			}
+
 			alloca := block.NewAlloca(objType)
 			block.NewStore(obj, alloca)
+
 			structName := cg.typeNameOf(objType)
+
 			fieldIdx := cg.fieldIndex(structName, e.Field)
 			if fieldIdx < 0 {
 				return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
@@ -4338,12 +4962,14 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		if !ok {
 			return nil, fmt.Errorf("genLValue: expected pointer for field access")
 		}
+
 		objType := objPtrType.ElemType
 		if e.IsPtr {
 			// e.Expr is a variable holding a *struct - dereference once.
 			structPtrVal := block.NewLoad(objType, objPtr)
 			if pt, ok2 := objType.(*irtypes.PointerType); ok2 {
 				structName := cg.typeNameOf(pt.ElemType)
+
 				fieldIdx := cg.fieldIndex(structName, e.Field)
 				if fieldIdx < 0 {
 					return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
@@ -4359,6 +4985,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			if cg.typeNameOf(pt.ElemType) != "" {
 				structPtrVal := block.NewLoad(objType, objPtr)
 				structName := cg.typeNameOf(pt.ElemType)
+
 				fieldIdx := cg.fieldIndex(structName, e.Field)
 				if fieldIdx < 0 {
 					return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
@@ -4368,7 +4995,9 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx))), nil
 			}
 		}
+
 		structName := cg.typeNameOf(objType)
+
 		fieldIdx := cg.fieldIndex(structName, e.Field)
 		if fieldIdx < 0 {
 			return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
@@ -4382,6 +5011,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		if err != nil {
 			return nil, err
 		}
+
 		if irtypes.IsPointer(val.Type()) {
 			return val, nil
 		}
@@ -4398,6 +5028,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		if err != nil {
 			return nil, err
 		}
+
 		st, ok2 := val.Type().(*irtypes.StructType)
 		if !ok2 {
 			return nil, fmt.Errorf("&struct{} requires a struct literal")
@@ -4406,7 +5037,9 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		nullPtr := constant.NewNull(irtypes.NewPointer(st))
 		gepOne := block.NewGetElementPtr(st, nullPtr, constant.NewInt(irtypes.I32, 1))
 		sz := block.NewPtrToInt(gepOne, irtypes.I64)
-		heapI8 := block.NewCall(cg.ensureMalloc(), sz)
+		// Use _tin_rc_alloc so the block is ARC-managed: scope exit can call
+		// _tin_release to free it without a manual mem::free.
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
 		typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(st))
 		block.NewStore(val, typedPtr)
 
@@ -4437,7 +5070,9 @@ func (cg *CodeGen) callGenericFromMap(
 		if err != nil {
 			return nil, block, true, err
 		}
+
 		argVals = append(argVals, av)
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
@@ -4445,10 +5080,12 @@ func (cg *CodeGen) callGenericFromMap(
 
 	typeSubst := cg.inferTypeArgs(tmpl, argVals)
 	instKey := ""
+
 	for i, tp := range tmpl.TypeParams {
 		if i > 0 {
 			instKey += "__"
 		}
+
 		if name, found := typeSubst[tp]; found {
 			instKey += name
 		} else {
@@ -4460,6 +5097,7 @@ func (cg *CodeGen) callGenericFromMap(
 	if err != nil {
 		return nil, block, true, err
 	}
+
 	argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
 
 	return block.NewCall(concreteFunc, argVals...), block, true, nil
