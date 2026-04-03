@@ -1,0 +1,27 @@
+// examples/udp_echo_server - UDP datagram echo server.
+//
+// Listens on UDP port 8082 and echoes every received datagram back
+// to the sender.
+//
+// Usage:
+//   ./tin build examples/udp_echo_server/udp_echo_server.tin -lm -o /tmp/udp_echo_server
+//   /tmp/udp_echo_server &
+//   echo -n "hello" | nc -u 127.0.0.1 8082
+//   kill %1
+
+use { loop } from macros
+use io
+use udp
+
+fn _tin_buf_alloc_c(n i64) *byte  = extern("_tin_buf_alloc")
+fn _tin_buf_free_c(ptr *byte)     = extern("_tin_buf_free")
+
+fn{#async} main() =
+  let sock = udp::listen(8082)
+  echo "udp echo listening on :8082"
+  let buf = _tin_buf_alloc_c(65536)
+  loop:
+    let (n, host, port) = await sock.recv_from(buf, 65536)
+    if n > 0:
+      await sock.send_to(buf, n, host, port)
+  _tin_buf_free_c(buf)

@@ -1,0 +1,255 @@
+// examples/array_match_patterns.tin
+//
+// Demonstrates array destructuring match patterns:
+//   - empty array []
+//   - exact-length patterns [x], [x, y], [x, y, z]
+//   - head + rest  [x, ...xs]
+//   - catch-all rest  [...xs]
+//   - unnamed rest  [x, ...]  (discard tail)
+//   - wildcards  [_, _]
+//   - guard clauses  case [x, ...] if x > 0:
+//   - match as expression
+//   - exhaustiveness detection
+//   - partial match with default:
+//   - recursive algorithms built on array patterns
+
+use assert
+
+// ── empty / exact-length ──────────────────────────────────────────────────────
+
+test "empty array" =
+  let a [int] = []
+  let hit = false
+  match a:
+    case []:
+      hit = true
+    default:
+      assert::fails("should be empty")
+  assert::ok(hit)
+
+test "single element binds variable" =
+  let a [int] = [42]
+  match a:
+    case [x]:
+      assert::equals(42, x)
+    default:
+      assert::fails("should match single")
+
+test "two elements bind both variables" =
+  let a [int] = [10, 20]
+  match a:
+    case [x, y]:
+      assert::equals(10, x)
+      assert::equals(20, y)
+    default:
+      assert::fails("should match pair")
+
+test "three elements" =
+  let a [int] = [1, 2, 3]
+  match a:
+    case [x, y, z]:
+      assert::equals(1, x)
+      assert::equals(2, y)
+      assert::equals(3, z)
+    default:
+      assert::fails("should match triple")
+
+test "exact length mismatch falls to default" =
+  let a [int] = [1, 2, 3]
+  let hit = false
+  match a:
+    case [x, y]:
+      assert::fails("wrong length")
+    default:
+      hit = true
+  assert::ok(hit)
+
+// ── wildcards ─────────────────────────────────────────────────────────────────
+
+test "wildcard discards elements" =
+  let a [int] = [7, 8]
+  match a:
+    case [_, _]:
+      assert::ok(true)
+    default:
+      assert::fails("should match pair")
+
+test "wildcard mixed with binding" =
+  let a [int] = [5, 99, 3]
+  match a:
+    case [_, mid, _]:
+      assert::equals(99, mid)
+    default:
+      assert::fails("should match triple")
+
+// ── rest patterns ─────────────────────────────────────────────────────────────
+
+test "head + rest binds both" =
+  let a [int] = [1, 2, 3, 4]
+  match a:
+    case [head, ...tail]:
+      assert::equals(1, head)
+      assert::equals(3, len(tail))
+    default:
+      assert::fails("should match")
+
+test "rest slice contains correct elements" =
+  let a [int] = [10, 20, 30]
+  match a:
+    case [_, ...rest]:
+      assert::equals(2, len(rest))
+      assert::equals(20, rest[0])
+      assert::equals(30, rest[1])
+    default:
+      assert::fails("should match")
+
+test "catch-all rest on non-empty" =
+  let a [int] = [5, 6, 7]
+  match a:
+    case [...all]:
+      assert::equals(3, len(all))
+    default:
+      assert::fails("should match")
+
+test "catch-all rest on empty" =
+  let a [int] = []
+  match a:
+    case [...all]:
+      assert::equals(0, len(all))
+    default:
+      assert::fails("should match empty")
+
+test "unnamed rest discards tail" =
+  let a [int] = [42, 1, 2, 3]
+  match a:
+    case [first, ...]:
+      assert::equals(42, first)
+    default:
+      assert::fails("should match")
+
+// ── guard clauses ─────────────────────────────────────────────────────────────
+
+test "guard passes" =
+  let a [int] = [10, 2, 3]
+  let hit = false
+  match a:
+    case [x, ...] if x > 5:
+      hit = true
+    default:
+      assert::fails("guard should pass")
+  assert::ok(hit)
+
+test "guard fails, falls to next arm" =
+  let a [int] = [1, 2, 3]
+  let which = 0
+  match a:
+    case [x, ...] if x > 5:
+      which = 1
+    case [x, ...]:
+      which = 2
+    case []:
+      which = 3
+  assert::equals(2, which)
+
+test "guard on exact-length pattern" =
+  let a [int] = [3, 7]
+  match a:
+    case [x, y] if x < y:
+      assert::ok(x < y)
+    case [x, y]:
+      assert::fails("guard should have passed")
+    default:
+      assert::fails("should match pair")
+
+// ── match as expression ───────────────────────────────────────────────────────
+
+test "match expression on empty vs nonempty" =
+  let a [int] = []
+  let b [int] = [1, 2]
+  let la = match a:
+    case []: 0
+    case [...]: 1
+  let lb = match b:
+    case []: 0
+    case [...]: 1
+  assert::equals(0, la)
+  assert::equals(1, lb)
+
+test "match expression binds and computes" =
+  let a [int] = [3, 4]
+  let s = match a:
+    case [x, y]: x + y
+    case [x]:    x
+    default:     0
+  assert::equals(7, s)
+
+// ── exhaustiveness ────────────────────────────────────────────────────────────
+
+// [] + [x,...xs] together cover all lengths -> exhaustive (no default needed)
+fn classify_len(a [int]) string =
+  match a:
+    case []:
+      return "zero"
+    case [_]:
+      return "one"
+    case [_, _]:
+      return "two"
+    case [_, ...]:
+      return "many"
+
+test "exhaustive via [] + rest covers all lengths" =
+  assert::equals_str("zero",  classify_len([]))
+  assert::equals_str("one",   classify_len([1]))
+  assert::equals_str("two",   classify_len([1, 2]))
+  assert::equals_str("many",  classify_len([1, 2, 3]))
+  assert::equals_str("many",  classify_len([1, 2, 3, 4, 5]))
+
+// ── partial match ─────────────────────────────────────────────────────────────
+
+test "partial match with default" =
+  let a [int] = [1, 2, 3, 4]
+  let result = match a:
+    case [x, y]: x + y
+    default:     -1
+  assert::equals(-1, result)
+
+// ── recursive algorithms ──────────────────────────────────────────────────────
+
+fn arr_sum(a [int]) int =
+  match a:
+    case []:
+      return 0
+    case [x, ...xs]:
+      return x + arr_sum(xs)
+
+fn arr_max(a [int], cur int) int =
+  match a:
+    case []:
+      return cur
+    case [x, ...xs]:
+      if x > cur:
+        return arr_max(xs, x)
+      return arr_max(xs, cur)
+
+fn arr_reverse(a [int]) [int] =
+  let out [int] = []
+  let i = len(a) - 1
+  for i >= 0:
+    out ++= a[i]
+    i--
+  return out
+
+test "recursive sum" =
+  assert::equals(0,  arr_sum([]))
+  assert::equals(1,  arr_sum([1]))
+  assert::equals(15, arr_sum([1, 2, 3, 4, 5]))
+
+test "recursive max" =
+  assert::equals(5, arr_max([3, 1, 5, 2, 4], 0))
+  assert::equals(0, arr_max([], 0))
+
+test "reverse via pattern-extracted index" =
+  let rev = arr_reverse([1, 2, 3])
+  assert::equals(3, rev[0])
+  assert::equals(2, rev[1])
+  assert::equals(1, rev[2])

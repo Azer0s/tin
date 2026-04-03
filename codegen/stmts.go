@@ -2939,6 +2939,314 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 	return afterBlock, nil
 }
 
+// isExhaustiveArrayMatch returns true when the match is guaranteed to cover
+// every possible array length.  Exhaustive when:
+//   - default: arm is present, or
+//   - a guard-free [...xs] arm catches everything, or
+//   - the union of exact-length arms (guard-free) and the minimum-length
+//     intervals of rest arms (guard-free) covers all non-negative integers.
+//
+// Example: []  +  [x, ...xs]  ->  {0} ∪ [1,∞) = [0,∞)  -> exhaustive.
+func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
+	if s.Default != nil {
+		return true
+	}
+
+	exactLengths := make(map[int]bool)
+	minRestCover := -1 // smallest min-length seen across rest arms; -1 = none
+
+	for _, c := range s.Cases {
+		ap, ok := c.Pattern.(*ast.ArrayPattern)
+		if !ok || c.Guard != nil {
+			continue
+		}
+
+		hasRest := false
+		fixed := 0
+		for _, e := range ap.Elems {
+			if e.IsRest {
+				hasRest = true
+			} else {
+				fixed++
+			}
+		}
+
+		if hasRest {
+			// This arm covers [fixed, ∞).
+			if minRestCover < 0 || fixed < minRestCover {
+				minRestCover = fixed
+			}
+		} else {
+			exactLengths[fixed] = true
+		}
+	}
+
+	if minRestCover < 0 {
+		return false // no rest arm
+	}
+
+	// Check that every integer 0 .. minRestCover-1 is covered by exact arms.
+	for i := 0; i < minRestCover; i++ {
+		if !exactLengths[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// genArrayMatch generates an if-else chain for match statements whose cases
+// use array destructuring patterns.  resAlloca is non-nil in expression mode.
+//
+// Each case checks:
+//   - No rest: exact length match (len == n)
+//   - Rest at end: minimum length match (len >= n-1)
+//
+// Variables are bound to individual elements (or a sub-slice for rest).
+func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
+	scrutinee, err := cg.genExpr(block, s.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isFatArrayPtr(scrutinee.Type()) {
+		return nil, fmt.Errorf("array pattern match requires an array type, got %s", scrutinee.Type())
+	}
+
+	arrType := scrutinee.Type().(*irtypes.StructType)
+	elemPtrType := arrType.Fields[0].(*irtypes.PointerType)
+	elemType := elemPtrType.ElemType
+
+	// Spill scrutinee to alloca so we can GEP into it.
+	arrAlloca := block.NewAlloca(arrType)
+	block.NewStore(scrutinee, arrAlloca)
+
+	// Load length: GEP field 1.
+	lenGep := block.NewGetElementPtr(arrType, arrAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	arrLen := block.NewLoad(irtypes.I64, lenGep)
+
+	// Load data pointer: GEP field 0.
+	ptrGep := block.NewGetElementPtr(arrType, arrAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dataPtr := block.NewLoad(elemPtrType, ptrGep)
+
+	afterBlock := cg.newBlock("amatch.after")
+	anyFallthrough := false
+	curCheckBlock := block
+
+	for i, c := range s.Cases {
+		ap, ok := c.Pattern.(*ast.ArrayPattern)
+		if !ok {
+			return nil, fmt.Errorf("genArrayMatch: non-array pattern in case %d", i)
+		}
+
+		nextBlock := cg.newBlock(fmt.Sprintf("amatch.next.%d", i))
+		bodyBlock := cg.newBlock(fmt.Sprintf("amatch.case.%d", i))
+
+		// Count regular (non-rest) elements and find rest index.
+		regularCount := 0
+		restIdx := -1
+
+		for j, e := range ap.Elems {
+			if e.IsRest {
+				restIdx = j
+			} else {
+				regularCount++
+			}
+		}
+
+		// Emit length check.
+		var lenCond value.Value
+
+		checkBlock := curCheckBlock
+		nConst := constant.NewInt(irtypes.I64, int64(regularCount))
+
+		if restIdx >= 0 {
+			// len >= regularCount
+			lenCond = checkBlock.NewICmp(enum.IPredSGE, arrLen, nConst)
+		} else {
+			// len == regularCount
+			lenCond = checkBlock.NewICmp(enum.IPredEQ, arrLen, nConst)
+		}
+
+		afterLenCheck := cg.newBlock(fmt.Sprintf("amatch.lenok.%d", i))
+		checkBlock.NewCondBr(lenCond, afterLenCheck, nextBlock)
+		checkBlock = afterLenCheck
+
+		// Open scope for bindings.
+		cg.curScope = newScope(cg.curScope)
+
+		// Bind regular elements.
+		regIdx := 0
+		for _, e := range ap.Elems {
+			if e.IsRest {
+				continue
+			}
+
+			if !e.IsWild && e.Name != "" {
+				idxVal := constant.NewInt(irtypes.I64, int64(regIdx))
+				elemGep := checkBlock.NewGetElementPtr(elemType, dataPtr, idxVal)
+				loaded := checkBlock.NewLoad(elemType, elemGep)
+				alloca := checkBlock.NewAlloca(elemType)
+				checkBlock.NewStore(loaded, alloca)
+				cg.curScope.set(e.Name, &scopeEntry{val: alloca, isAlloc: true})
+			}
+
+			regIdx++
+		}
+
+		// Bind rest element.
+		if restIdx >= 0 {
+			e := ap.Elems[restIdx]
+
+			if !e.IsWild && e.Name != "" {
+				// Build {i8*, i64} raw slice then subslice from regularCount.
+				var elemSzBytes int64 = 8
+				if sz := llvmTypeSize(elemType); sz > 0 {
+					elemSzBytes = int64(sz)
+				}
+
+				sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+				rawAlloca := checkBlock.NewAlloca(sliceType)
+
+				dataPtrAsI8 := checkBlock.NewBitCast(dataPtr, irtypes.I8Ptr)
+				rawPtrGep := checkBlock.NewGetElementPtr(sliceType, rawAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+				checkBlock.NewStore(dataPtrAsI8, rawPtrGep)
+				rawLenGep := checkBlock.NewGetElementPtr(sliceType, rawAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+				checkBlock.NewStore(arrLen, rawLenGep)
+				rawSlice := checkBlock.NewLoad(sliceType, rawAlloca)
+
+				subFn := cg.ensureSliceSubslice()
+				subResult := checkBlock.NewCall(subFn, rawSlice,
+					constant.NewInt(irtypes.I64, int64(regularCount)),
+					constant.NewInt(irtypes.I64, elemSzBytes))
+
+				// Reinterpret {i8*, i64} as the original fat-array type.
+				tmpAlloca := checkBlock.NewAlloca(sliceType)
+				checkBlock.NewStore(subResult, tmpAlloca)
+				castPtr := checkBlock.NewBitCast(tmpAlloca, irtypes.NewPointer(arrType))
+				restVal := checkBlock.NewLoad(arrType, castPtr)
+				restAlloca := checkBlock.NewAlloca(arrType)
+				checkBlock.NewStore(restVal, restAlloca)
+				cg.curScope.set(e.Name, &scopeEntry{val: restAlloca, isAlloc: true})
+			}
+		}
+
+		// Optional guard.
+		if c.Guard != nil {
+			guardVal, err2 := cg.genExpr(checkBlock, c.Guard)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+				return nil, err2
+			}
+
+			checkBlock.NewCondBr(cg.toBool(checkBlock, guardVal), bodyBlock, nextBlock)
+		} else {
+			checkBlock.NewBr(bodyBlock)
+		}
+
+		// Emit body.
+		if resAlloca != nil {
+			if c.Body != nil && len(c.Body.Stmts) == 1 {
+				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+					cg.curBlock = bodyBlock
+
+					exprVal, err2 := cg.genExpr(bodyBlock, expr)
+					if err2 != nil {
+						cg.curScope = cg.curScope.parent
+						return nil, err2
+					}
+
+					if cg.curBlock != bodyBlock {
+						bodyBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			bodyBlock.NewBr(afterBlock)
+			anyFallthrough = true
+		} else {
+			var err2 error
+			bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+				return nil, err2
+			}
+
+			if bodyBlock != nil && bodyBlock.Term == nil {
+				bodyBlock.NewBr(afterBlock)
+				anyFallthrough = true
+			}
+		}
+
+		cg.curScope = cg.curScope.parent
+		curCheckBlock = nextBlock
+	}
+
+	// Default arm or exhaustiveness.
+	if s.Default != nil {
+		if resAlloca != nil {
+			if len(s.Default.Stmts) == 1 {
+				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+					cg.curBlock = curCheckBlock
+
+					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if cg.curBlock != curCheckBlock {
+						curCheckBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						curCheckBlock.NewStore(cg.coerce(curCheckBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			curCheckBlock.NewBr(afterBlock)
+			anyFallthrough = true
+		} else {
+			cg.curScope = newScope(cg.curScope)
+
+			var err2 error
+			curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
+			cg.curScope = cg.curScope.parent
+
+			if err2 != nil {
+				return nil, err2
+			}
+
+			if curCheckBlock != nil && curCheckBlock.Term == nil {
+				curCheckBlock.NewBr(afterBlock)
+				anyFallthrough = true
+			}
+		}
+	} else if cg.isExhaustiveArrayMatch(s) {
+		curCheckBlock.NewUnreachable()
+	} else {
+		curCheckBlock.NewBr(afterBlock)
+		anyFallthrough = true
+	}
+
+	if !anyFallthrough && resAlloca == nil {
+		afterBlock.NewUnreachable()
+		return nil, nil
+	}
+
+	return afterBlock, nil
+}
+
 func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
 	if len(s.Cases) == 0 {
 		return false
@@ -2998,6 +3306,13 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	for _, c := range s.Cases {
 		if _, ok := c.Pattern.(*ast.StructPattern); ok {
 			return cg.genStructMatch(block, s, resAlloca)
+		}
+	}
+
+	// Array-pattern match: use if-else chain dispatch on array length.
+	for _, c := range s.Cases {
+		if _, ok := c.Pattern.(*ast.ArrayPattern); ok {
+			return cg.genArrayMatch(block, s, resAlloca)
 		}
 	}
 
@@ -3959,6 +4274,10 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
+	}
+	// Update block in case genExpr advanced it (e.g. await generates a new resume block).
+	if cg.curBlock != nil {
+		block = cg.curBlock
 	}
 
 	if val == nil {

@@ -35,11 +35,9 @@ func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
 			return strings.ReplaceAll(name, "::", "__")
 		}
 		// Bare name: look up in typeAliases for the canonical form.
+		// Recurse to handle alias chains (e.g. t -> Unit -> sync__Unit, or t -> [byte]).
 		if alias, ok := cg.typeAliases[name]; ok {
-			if simple, ok2 := alias.(*ast.SimpleType); ok2 {
-				// The alias points to a canonical name like "sync__Unit".
-				return simple.Name
-			}
+			return cg.typeExprCanonicalKey(alias)
 		}
 
 		return name

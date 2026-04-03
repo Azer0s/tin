@@ -1,0 +1,32 @@
+// examples/unix_echo_server - Unix domain socket echo server.
+//
+// Listens on /tmp/tin_unix_echo.sock, accepts connections concurrently,
+// and echoes each line back prefixed with "ECHO: ".
+//
+// Usage:
+//   ./tin build examples/unix_echo_server/unix_echo_server.tin -lm -o /tmp/unix_echo_server
+//   /tmp/unix_echo_server &
+//   echo "hello" | nc -U /tmp/tin_unix_echo.sock
+//   kill %1
+
+use { loop, async } from macros
+use io
+use ioutil
+use unix
+
+async handle_conn(conn unix::Conn) =
+  defer conn.close()
+  loop:
+    let line = await ioutil::read_string(conn)
+    if len(line) == 0 || line == "quit":
+      return
+    await ioutil::write_string(conn, "ECHO: {line}\n")
+
+fn{#async} main() =
+  let srv = unix::listen("/tmp/tin_unix_echo.sock")
+  echo "listening on /tmp/tin_unix_echo.sock"
+  loop:
+    let (c, ok) = srv.accept()
+    if !ok:
+      break
+    spawn handle_conn(c)

@@ -352,6 +352,21 @@ func printNode(n Node, depth int) string {
 		return fmt.Sprintf("await %s", printNode(v.Future, depth))
 	case *YieldStmt:
 		return "yield"
+	case *ArrayPattern:
+		parts := make([]string, len(v.Elems))
+		for i, e := range v.Elems {
+			switch {
+			case e.IsRest && (e.Name == "" || e.IsWild):
+				parts[i] = "..."
+			case e.IsRest:
+				parts[i] = "..." + e.Name
+			case e.IsWild:
+				parts[i] = "_"
+			default:
+				parts[i] = e.Name
+			}
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
 	default:
 		return fmt.Sprintf("/* unhandled: %T */", n)
 	}

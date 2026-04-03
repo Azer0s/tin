@@ -925,8 +925,16 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 
 	mc := ast.MatchCase{Pos: pos}
 
-	// Struct pattern: "case TypeName{...}:"
-	if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LBRACE {
+	// Array pattern: "case [elem, ...rest]:"
+	if p.check(lexer.LBRACKET) {
+		ap, err := p.parseArrayPattern()
+		if err != nil {
+			return ast.MatchCase{}, err
+		}
+
+		mc.Pattern = ap
+	} else if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LBRACE {
+		// Struct pattern: "case TypeName{...}:"
 		sp, err := p.parseStructPattern()
 		if err != nil {
 			return ast.MatchCase{}, err
@@ -1069,6 +1077,65 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 	}
 
 	return sp, nil
+}
+
+// parseArrayPattern parses "[elem, ...rest]" array destructuring patterns.
+// Called when the current token is LBRACKET.
+func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
+	p.advance() // consume [
+	ap := &ast.ArrayPattern{}
+
+	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		p.skipWhitespace()
+
+		if p.check(lexer.RBRACKET) {
+			break
+		}
+
+		elem := ast.ArrayPatternElement{}
+
+		if p.check(lexer.DOTDOTDOT) {
+			p.advance() // consume ...
+			elem.IsRest = true
+
+			if p.check(lexer.IDENT) {
+				lit := p.peek().Literal
+				if lit == "_" {
+					p.advance()
+					elem.IsWild = true
+				} else {
+					elem.Name = p.advance().Literal
+				}
+			}
+
+			ap.Elems = append(ap.Elems, elem)
+			break // rest must be last
+		} else if p.check(lexer.IDENT) {
+			lit := p.peek().Literal
+			if lit == "_" {
+				p.advance()
+				elem.IsWild = true
+			} else {
+				elem.Name = p.advance().Literal
+			}
+
+			ap.Elems = append(ap.Elems, elem)
+		} else {
+			return nil, fmt.Errorf("unexpected token in array pattern: %s", p.peek().Type)
+		}
+
+		p.skipWhitespace()
+
+		if p.check(lexer.COMMA) {
+			p.advance()
+		}
+	}
+
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return nil, err
+	}
+
+	return ap, nil
 }
 
 // isRenameBinding returns true when the current position holds a bare IDENT
