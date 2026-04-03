@@ -2725,14 +2725,23 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 		}
 
 		if resAlloca != nil {
-			// Expression mode: single ExprStmt body.
+			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
 			if c.Body != nil && len(c.Body.Stmts) == 1 {
-				if es, ok2 := c.Body.Stmts[0].(*ast.ExprStmt); ok2 {
-					exprVal, err2 := cg.genExpr(bodyBlock, es.Expr)
+				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into bodyBlock.
+					cg.curBlock = bodyBlock
+
+					exprVal, err2 := cg.genExpr(bodyBlock, expr)
 					if err2 != nil {
 						cg.curScope = cg.curScope.parent
 
 						return nil, err2
+					}
+
+					// genExpr may have advanced cg.curBlock (e.g. inner match expression).
+					if cg.curBlock != bodyBlock {
+						bodyBlock = cg.curBlock
 					}
 
 					if exprVal != nil {
@@ -2770,10 +2779,18 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 	if s.Default != nil {
 		if resAlloca != nil {
 			if len(s.Default.Stmts) == 1 {
-				if es, ok := s.Default.Stmts[0].(*ast.ExprStmt); ok {
-					exprVal, err2 := cg.genExpr(curCheckBlock, es.Expr)
+				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into curCheckBlock.
+					cg.curBlock = curCheckBlock
+
+					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
 					if err2 != nil {
 						return nil, err2
+					}
+
+					if cg.curBlock != curCheckBlock {
+						curCheckBlock = cg.curBlock
 					}
 
 					if exprVal != nil {
@@ -2868,6 +2885,10 @@ func (cg *CodeGen) isExhaustiveEnumMatch(s *ast.MatchStmt) bool {
 }
 
 func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
+	return cg.genMatchWithResult(block, s, nil)
+}
+
+func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
 	if s.IsType {
 		return cg.genMatchType(block, s)
 	}
@@ -2875,7 +2896,7 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 	// Struct-pattern match: use if-else chain dispatch.
 	for _, c := range s.Cases {
 		if _, ok := c.Pattern.(*ast.StructPattern); ok {
-			return cg.genStructMatch(block, s, nil)
+			return cg.genStructMatch(block, s, resAlloca)
 		}
 	}
 
@@ -2931,6 +2952,47 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 	// A match without a default is still exhaustive when every member of an
 	// enum atom type is covered by an explicit case.
 	anyFallthrough := s.Default == nil && !cg.isExhaustiveEnumMatch(s)
+
+	genCaseBody := func(caseBlock *ir.Block, body *ast.Block) (*ir.Block, error) {
+		if resAlloca != nil {
+			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
+			if body != nil && len(body.Stmts) == 1 {
+				if expr := armExprNode(body.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into caseBlock.
+					cg.curBlock = caseBlock
+
+					exprVal, err2 := cg.genExpr(caseBlock, expr)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if cg.curBlock != caseBlock {
+						caseBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						caseBlock.NewStore(cg.coerce(caseBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			caseBlock.NewBr(afterBlock)
+
+			return nil, nil
+		}
+
+		cg.curScope = newScope(cg.curScope)
+
+		var err2 error
+
+		caseBlock, _, err2 = cg.genStmt(caseBlock, body)
+		cg.curScope = cg.curScope.parent
+
+		return caseBlock, err2
+	}
+
 	for i, c := range s.Cases {
 		var caseBlock *ir.Block
 		if i < len(caseBlocks) {
@@ -2939,15 +3001,14 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 			caseBlock = cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		}
 
-		cg.curScope = newScope(cg.curScope)
-		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
-		cg.curScope = cg.curScope.parent
-
+		caseBlock, err = genCaseBody(caseBlock, c.Body)
 		if err != nil {
 			return nil, err
 		}
 
-		if caseBlock != nil && caseBlock.Term == nil {
+		if resAlloca != nil {
+			anyFallthrough = true
+		} else if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
 
 			anyFallthrough = true
@@ -2956,15 +3017,14 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 
 	// Default.
 	if s.Default != nil {
-		cg.curScope = newScope(cg.curScope)
-		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
-		cg.curScope = cg.curScope.parent
-
+		defaultBlock, err = genCaseBody(defaultBlock, s.Default)
 		if err != nil {
 			return nil, err
 		}
 
-		if defaultBlock != nil && defaultBlock.Term == nil {
+		if resAlloca != nil {
+			anyFallthrough = true
+		} else if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
 
 			anyFallthrough = true

@@ -513,6 +513,20 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 	}
 }
 
+// armExprNode returns the expression node from a single-statement arm body.
+// It handles both *ast.ExprStmt (bare expression) and *ast.MatchStmt (nested
+// match expression used as arm value). Returns nil for anything else.
+func armExprNode(stmt ast.Node) ast.Node {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		return s.Expr
+	case *ast.MatchStmt:
+		return s // genExpr handles *ast.MatchStmt directly
+	}
+
+	return nil
+}
+
 // astInferType attempts to determine the LLVM type of a simple AST expression
 // without generating any code. Returns nil when the type cannot be determined.
 func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
@@ -579,6 +593,25 @@ func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
 		}
 
 		return nil
+	case *ast.MatchStmt:
+		// Infer from the first arm whose body is a single expression.
+		for _, c := range e.Cases {
+			if c.Body != nil && len(c.Body.Stmts) == 1 {
+				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+					if t := cg.astInferType(expr); t != nil {
+						return t
+					}
+				}
+			}
+		}
+
+		if e.Default != nil && len(e.Default.Stmts) == 1 {
+			if expr := armExprNode(e.Default.Stmts[0]); expr != nil {
+				return cg.astInferType(expr)
+			}
+		}
+
+		return nil
 	}
 
 	return nil
@@ -596,16 +629,16 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 	if len(s.Cases) > 0 {
 		c := s.Cases[0]
 		if c.Body != nil && len(c.Body.Stmts) == 1 {
-			if es, ok := c.Body.Stmts[0].(*ast.ExprStmt); ok {
-				resType = cg.astInferType(es.Expr)
+			if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+				resType = cg.astInferType(expr)
 			}
 		}
 	}
 
 	if resType == nil && s.Default != nil {
 		if len(s.Default.Stmts) == 1 {
-			if es, ok := s.Default.Stmts[0].(*ast.ExprStmt); ok {
-				resType = cg.astInferType(es.Expr)
+			if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+				resType = cg.astInferType(expr)
 			}
 		}
 	}
@@ -616,7 +649,7 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 
 	resAlloca := block.NewAlloca(resType)
 
-	afterBlock, err := cg.genStructMatch(block, s, resAlloca)
+	afterBlock, err := cg.genMatchWithResult(block, s, resAlloca)
 	if err != nil {
 		return nil, err
 	}

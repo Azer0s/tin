@@ -153,6 +153,35 @@ let label = match p:
   case point{x, y}: "other"
 ```
 
+### Nested match
+
+`match` can be nested freely. A match arm can contain another match statement
+as its body, or use a match expression as its value:
+
+```rust
+struct point =
+  x i64
+  y i64
+
+// match statement inside a match arm
+fn describe(p point) void =
+  match p:
+    case point{x, y}:
+      match x:
+        case 0: echo "on y-axis"
+        default: echo "x={x}"
+
+// nested match expression - arm value is itself a match
+let label = match p:
+  case point{x, y}: match x:
+    case 0: "zero"
+    case 1: "one"
+    default: "many"
+```
+
+Struct fields bound in an outer arm are visible inside any nested match in
+that arm's body.
+
 ---
 
 ## where - pattern matching on function arguments
