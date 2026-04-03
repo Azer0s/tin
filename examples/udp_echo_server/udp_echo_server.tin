@@ -19,6 +19,6 @@ fn{#async} main() =
   let srv = udp::listen(8082)
   echo "udp echo listening on :8082"
   loop:
-    let (c, ok) = await srv.accept(65536)
+    let (c, ok) = await srv.accept()
     if ok:
       spawn handle_conn(c)

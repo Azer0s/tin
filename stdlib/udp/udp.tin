@@ -91,25 +91,32 @@ struct Conn (io::AsyncReader, io::AsyncWriter) =
     return this.fd >= 0
 
 // Server listens for incoming UDP datagrams.
-// Create with udp::listen(port).
+// Create with udp::listen(port) or udp::listen(port, max_dgram).
 struct Server =
-  fd i32
+  fd       i32
+  max_dgram i64  // maximum datagram size; set at listen time
 
   // accept waits for the next datagram and returns a Conn to the sender.
-  // max_n is the maximum datagram size to receive.
-  fn accept(this Server, max_n i64) Future[(Conn, bool)] =
-    return spawn accept_impl(this.fd, max_n)
+  fn accept(this Server) Future[(Conn, bool)] =
+    return spawn accept_impl(this.fd, this.max_dgram)
 
   fn close(this Server) =
     io::close(this.fd)
 
 // listen creates a bound UDP socket on the given port.
+// max_dgram sets the receive buffer size per datagram (default 65536).
 // Panics if the port cannot be bound.
 fn listen(port i32) Server =
   let fd = _tin_udp_listen_c(port)
   if fd < 0:
     panic("udp::listen: failed to bind port {port}")
-  return Server{fd: fd}
+  return Server{fd: fd, max_dgram: 65536}
+
+fn listen(port i32, max_dgram i64) Server =
+  let fd = _tin_udp_listen_c(port)
+  if fd < 0:
+    panic("udp::listen: failed to bind port {port}")
+  return Server{fd: fd, max_dgram: max_dgram}
 
 // dial creates a connected UDP socket to host:port.
 // Panics on failure.

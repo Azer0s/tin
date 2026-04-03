@@ -196,14 +196,16 @@ use udp
 let srv = udp::listen(8082)
 ```
 
-`Server.accept(max_n)` parks the calling fiber until a datagram arrives, then
-returns `(Conn, bool)`. `max_n` is the maximum number of bytes to receive.
+`Server.accept()` parks the calling fiber until a datagram arrives, then
+returns `(Conn, bool)`. The receive buffer size is set at `listen` time
+(default 65536; use `udp::listen(port, max_dgram)` for a custom size).
 
 ```rust
 fn{#async} main() =
-  let srv = udp::listen(8082)
+  let srv = udp::listen(8082)          // default max datagram: 65536 bytes
+  // let srv = udp::listen(8082, 512)  // DNS-sized datagrams
   loop:
-    let (c, ok) = await srv.accept(65536)
+    let (c, ok) = await srv.accept()
     if ok:
       spawn handle_conn(c)
 ```
@@ -238,7 +240,7 @@ fn{#async} main() =
   let srv = udp::listen(8082)
   echo "udp echo listening on :8082"
   loop:
-    let (c, ok) = await srv.accept(65536)
+    let (c, ok) = await srv.accept()
     if ok:
       spawn handle_conn(c)
 ```
