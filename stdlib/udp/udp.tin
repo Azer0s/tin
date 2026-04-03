@@ -14,6 +14,7 @@
 
 use { loop } from macros
 use io
+use mem
 use sync
 
 // C helpers (private)
@@ -22,15 +23,13 @@ fn _tin_udp_connect_c(host string, port i32) i32                                
 fn _tin_udp_recvfrom_c(fd i32, buf *byte, n i64, host_out *string, port_out *i32) i64  = extern("_tin_udp_recvfrom")
 fn _tin_udp_sendto_c(fd i32, buf *byte, n i64, host string, port i32) i64              = extern("_tin_udp_sendto")
 fn _tin_io_blocked_val_c() i64                                                         = extern("_tin_io_blocked_val")
-fn _tin_buf_alloc_c(n i64) *byte                                                       = extern("_tin_buf_alloc")
-fn _tin_buf_free_c(ptr *byte)                                                          = extern("_tin_buf_free")
 fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]                                      = extern("_tin_bytes_from_buf")
 
 // Internal async implementations
 
 fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
   let blocked  = _tin_io_blocked_val_c()
-  let buf      = _tin_buf_alloc_c(65536)
+  let buf      = mem::malloc(65536) as *byte
   let host     = ""
   let port i32 = 0
   loop:
@@ -39,7 +38,7 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
       let sz = r
       if sz < 0: sz = 0
       let data = _tin_bytes_from_buf_c(buf, sz)
-      _tin_buf_free_c(buf)
+      mem::free(buf as *void)
       return (data, host, port)
     yield
 

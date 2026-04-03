@@ -31,13 +31,15 @@ use io
 
 ```rust
 use io
+use mem
 
 fn{#async} echo_fd(fd i32) =
-  let buf = _tin_buf_alloc(4096)
+  let buf = mem::malloc(4096) as *byte
   loop:
     let n = await spawn io::async_read(fd, buf, 4096)
     if n <= 0: break
     await io::write_all(fd, buf, n)
+  mem::free(buf as *void)
   io::close(fd)
 ```
 

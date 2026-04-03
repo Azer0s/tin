@@ -11,15 +11,13 @@
 // Reads are done in 4096-byte chunks for efficiency.
 
 use io
+use mem
 use sync
 use { loop } from macros
 
-// C helpers
+// C helpers (private runtime operations with no stdlib equivalent)
 fn _tin_string_from_bytes_c(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
 fn _tin_string_data_c(s string) *byte                = extern("_tin_string_data")
-fn _tin_buf_alloc_c(n i64) *byte                     = extern("_tin_buf_alloc")
-fn _tin_buf_realloc_c(ptr *byte, n i64) *byte        = extern("_tin_buf_realloc")
-fn _tin_buf_free_c(ptr *byte)                        = extern("_tin_buf_free")
 fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]    = extern("_tin_bytes_from_buf")
 
 // ---------------------------------------------------------------------------
@@ -43,8 +41,8 @@ struct FdWriter (io::AsyncWriter) =
 // ---------------------------------------------------------------------------
 
 fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
-  let tmp  = _tin_buf_alloc_c(4096)
-  let out  = _tin_buf_alloc_c(256)
+  let tmp  = mem::malloc(4096) as *byte
+  let out  = mem::malloc(256) as *byte
   let cap  i64 = 256
   let n    i64 = 0
   let done = false
@@ -57,7 +55,7 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
       if i >= rd: break
       if n >= cap:
         cap = cap * 2
-        out = _tin_buf_realloc_c(out, cap)
+        out = mem::realloc(out as *void, cap) as *byte
       out[n] = tmp[i]
       n = n + 1
       if delim != 0 && tmp[i] == delim:
@@ -67,8 +65,8 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
   let s = _tin_string_from_bytes_c(out, n)
-  _tin_buf_free_c(tmp)
-  _tin_buf_free_c(out)
+  mem::free(tmp as *void)
+  mem::free(out as *void)
   return s
 
 fn{#async} write_string_impl(w io::AsyncWriter, s string) =
@@ -82,7 +80,7 @@ fn{#async} write_string_impl(w io::AsyncWriter, s string) =
     sent = sent + r
 
 fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
-  let tmp = _tin_buf_alloc_c(n)
+  let tmp = mem::malloc(n) as *byte
   let got i64 = 0
   loop:
     if got >= n: break
@@ -90,12 +88,12 @@ fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
     if rd <= 0: break
     got = got + rd
   let result = _tin_bytes_from_buf_c(tmp, got)
-  _tin_buf_free_c(tmp)
+  mem::free(tmp as *void)
   return result
 
 fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
-  let tmp  = _tin_buf_alloc_c(4096)
-  let out  = _tin_buf_alloc_c(256)
+  let tmp  = mem::malloc(4096) as *byte
+  let out  = mem::malloc(256) as *byte
   let cap  i64 = 256
   let n    i64 = 0
   let done = false
@@ -108,7 +106,7 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
       if i >= rd: break
       if n >= cap:
         cap = cap * 2
-        out = _tin_buf_realloc_c(out, cap)
+        out = mem::realloc(out as *void, cap) as *byte
       out[n] = tmp[i]
       n = n + 1
       if delim != 0 && tmp[i] == delim:
@@ -117,8 +115,8 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
       i = i + 1
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   let result = _tin_bytes_from_buf_c(out, n)
-  _tin_buf_free_c(tmp)
-  _tin_buf_free_c(out)
+  mem::free(tmp as *void)
+  mem::free(out as *void)
   return result
 
 fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
