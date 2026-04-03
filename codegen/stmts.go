@@ -1859,7 +1859,23 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// ARC: for RC-tracked types, retain new value (if copy) then release old.
 	// Skip retain if coerce just boxed a non-any value to any: the new box is
 	// a fresh _tin_rc_alloc (rc=1) and is already owned.
-	if isRCTrackedType(ptrType.ElemType) {
+	// Weak field targets are non-owning: skip both retain and release.
+	isWeakTarget := false
+
+	if fa, ok2 := s.Target.(*ast.FieldAccess); ok2 {
+		if ident, ok3 := fa.Expr.(*ast.Identifier); ok3 {
+			if se, ok4 := cg.curScope.lookup(ident.Name); ok4 {
+				if pt, ok5 := se.val.Type().(*irtypes.PointerType); ok5 {
+					parentName := cg.typeNameOf(pt.ElemType)
+					if parentName != "" {
+						isWeakTarget = cg.structWeakFields[parentName][fa.Field]
+					}
+				}
+			}
+		}
+	}
+
+	if isRCTrackedType(ptrType.ElemType) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
 		if isCopyExpr(s.Value) && !boxedToAny {
 			cg.emitRetain(block, val)

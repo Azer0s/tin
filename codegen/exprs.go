@@ -150,7 +150,6 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		//
 		// Type rule: await is valid iff expr : Awaitable[T] (i.e. Future[T]).
 		// Calling a {#async} fn directly within a coroutine uses inline drive.
-
 		// {#async} direct call handling: `await asyncFn(args)` (no explicit spawn).
 		//
 		// Two cases based on calling context:
@@ -2377,6 +2376,8 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		}
 	}
 
+	weakSet := cg.structWeakFields[e.TypeName]
+
 	if len(e.Positional) > 0 {
 		for i, v := range e.Positional {
 			idx := userOff + i
@@ -2393,11 +2394,14 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
 			block.NewStore(val, gep)
-			// ARC: retain RC-tracked values that are copied from existing owners
-			// (variables, field accesses, index expressions).  Without this, the
-			// original owner's scope-release would free the buffer while the struct
-			// still holds a reference to it.
-			if isCopyExpr(v) {
+			// ARC: retain RC-tracked values that are copied from existing owners.
+			// Weak fields are non-owning: skip retain so only one owner counts.
+			fieldName := ""
+			if i < len(fieldNames) {
+				fieldName = fieldNames[i]
+			}
+
+			if isCopyExpr(v) && !weakSet[fieldName] {
 				cg.emitRetain(block, val)
 			}
 		}
@@ -2429,7 +2433,8 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			val = cg.coerce(block, val, st.Fields[idx])
 			block.NewStore(val, gep)
 			// ARC: retain RC-tracked values copied from existing owners.
-			if isCopyExpr(f.Value) {
+			// Weak fields are non-owning: skip retain.
+			if isCopyExpr(f.Value) && !weakSet[f.Name] {
 				cg.emitRetain(block, val)
 			}
 		}

@@ -556,6 +556,7 @@ type StructField struct {
 	Type      TypeExpr
 	Tags      []string
 	IsForward bool
+	IsWeak    bool // non-owning: field does not retain/release its value
 }
 
 type EnumMember struct {

@@ -107,6 +107,10 @@ type CodeGen struct {
 	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
 	sliceSubsliceFn *ir.Func
 
+	// structWeakFields: struct key -> set of field names declared as `weak`.
+	// Weak fields are non-owning: they do not retain/release their values.
+	structWeakFields map[string]map[string]bool
+
 	// ARC runtime functions (lazily declared).
 	rcAllocFn             *ir.Func // _tin_rc_alloc(size i64) i8*
 	retainFn              *ir.Func // _tin_retain(ptr i8*)
@@ -550,6 +554,7 @@ func New(filename string) *CodeGen {
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
 		heapPromotingFns:         make(map[string]bool),
+		structWeakFields:         make(map[string]map[string]bool),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")
@@ -654,10 +659,23 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// First pass: register struct / enum / type declarations so forward refs work.
+	// Collect concrete struct decls for the cycle check below.
+	var concreteStructDecls []*ast.StructDecl
+
 	for _, node := range prog.Stmts {
 		if err := cg.preregister(node); err != nil {
 			return nil, err
 		}
+
+		if sd, ok := node.(*ast.StructDecl); ok && len(sd.TypeParams) == 0 {
+			concreteStructDecls = append(concreteStructDecls, sd)
+		}
+	}
+
+	// Validate struct reference cycles: every cycle must have at least one
+	// weak edge and at least one strong edge.
+	if err := cg.checkStructCycles(concreteStructDecls); err != nil {
+		return nil, err
 	}
 
 	// Validate complex (block-body) macros: side-effect check.

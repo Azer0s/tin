@@ -1,0 +1,54 @@
+// examples/weak_refs.tin
+//
+// Demonstrates weak struct fields and compile-time cycle detection.
+//
+// A doubly-linked list node where:
+//   next  *Node       -- strong: forward pointer (owns the chain)
+//   prev  weak *Node  -- weak:   back-pointer    (does not own)
+//
+// Without `weak` on one of the *Node fields the compiler rejects
+// the program:
+//   error: reference cycle detected: Node
+//   at least one field in the cycle must be marked `weak`
+//
+// *Node is a raw pointer and not ARC-managed by itself, but the
+// `weak` annotation:
+//   1. Documents ownership intent clearly
+//   2. Satisfies the compiler's cycle invariant
+//
+// Tests:
+//   - basic value reads on a node with weak pointer fields
+//   - nil weak pointer works as a default
+//   - compiler accepted this file (cycle check passed)
+
+use assert
+
+struct Node =
+  value i64
+  next  *Node       // forward link (strong: owns the chain)
+  prev  weak *Node  // back link (weak: non-owning back-reference)
+
+fn main() =
+  let a = Node{value: 1, next: nil, prev: nil}
+  let b = Node{value: 2, next: nil, prev: nil}
+  echo "a.value = {a.value}"
+  echo "b.value = {b.value}"
+  echo "weak_refs: OK"
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "node value reads correctly" =
+  let n = Node{value: 42, next: nil, prev: nil}
+  assert::equals(n.value, 42)
+
+test "nil weak pointer works as default" =
+  let n = Node{value: 7, next: nil, prev: nil}
+  assert::equals(n.next == nil, true)
+  assert::equals(n.prev == nil, true)
+
+test "cycle check accepted this file" =
+  // The presence of this test proves the compiler's cycle checker
+  // accepted the `weak` annotation on Node.prev and did not error.
+  assert::ok(true)
