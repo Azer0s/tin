@@ -241,6 +241,95 @@ releases it on scope exit.
 
 ---
 
+## Weak fields
+
+Tin uses **ARC** (Automatic Reference Counting) to manage the lifetime of
+heap-allocated values. ARC works well for trees and DAGs, but a cycle between
+two structs that each hold a reference to the other would keep both alive
+forever - neither reference count reaches zero.
+
+### The problem
+
+```rust
+struct node =
+  next [node]   // strong: owns the next node
+  prev [node]   // strong: also owns... the previous node?
+```
+
+Here every node owns its successor *and* its predecessor. The reference count
+of a node can never drop to zero because someone always holds a strong reference
+to it. Tin's compiler detects this at compile time:
+
+```
+error: reference cycle detected: node
+  at least one field in the cycle must be marked `weak`
+```
+
+### The solution
+
+Mark the non-owning direction `weak`:
+
+```rust
+struct node =
+  next [node]        // strong: owns the forward chain
+  prev weak [node]   // weak:   back-reference, does not own
+```
+
+`weak` goes directly before the field type. A weak field:
+
+- Is **not** retained when assigned (no `rc++`).
+- Is **not** released when the struct is freed (no `rc--`).
+- Contains a valid value as long as the owning side is alive - the programmer
+  is responsible for not outliving the owner.
+
+### Compiler cycle detection
+
+The compiler runs Tarjan's SCC algorithm on the struct type graph at
+compile time. Every struct whose fields transitively reference itself (or
+another struct that references back) forms a cycle.
+
+**Rules:**
+
+| Cycle composition | Result |
+|---|---|
+| All strong edges | **Error** - cycle would leak memory |
+| All weak edges | **Error** - nobody owns the structs; they would be freed immediately |
+| Mix of strong and weak | **OK** - exactly one ownership chain per cycle |
+
+```rust
+// ERROR: both strong -> cycle would never be freed
+struct a =
+  b_ref [b]
+
+struct b =
+  a_ref [a]
+
+// OK: one strong edge, one weak edge
+struct a =
+  b_ref [b]
+
+struct b =
+  a_ref weak [a]
+```
+
+### Raw pointer fields
+
+`weak` also works with raw pointer fields (`*T`). Since raw pointers are
+never ARC-managed, `weak *T` is purely an ownership annotation for the cycle
+checker - it carries no runtime difference from `*T`:
+
+```rust
+struct node =
+  value i64
+  next  *node        // forward pointer (not ARC-managed)
+  prev  weak *node   // back-pointer (weak: satisfies cycle invariant)
+```
+
+This lets the compiler accept the file while making ownership intent explicit
+in the source.
+
+---
+
 ## type aliases
 
 ### Simple alias
