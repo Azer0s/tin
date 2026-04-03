@@ -11,6 +11,14 @@ import (
 // new Program where every macro call has been replaced with its expansion.
 // MacroDecl nodes are removed from the output (they have been inlined).
 func (cg *CodeGen) ExpandProgramMacros(prog *ast.Program) (*ast.Program, error) {
+	// Collect use declarations so CTFE macros can reference stdlib packages.
+	// buildMacroSource emits "use pkg" lines from importedPkgs into the
+	// generated temp source; without this the macro subprocess sees undefined symbols.
+	for _, stmt := range prog.Stmts {
+		if ud, ok := stmt.(*ast.UseDecl); ok && !ud.IsExtern && !ud.IsFile {
+			cg.importedPkgs[ud.Path] = true
+		}
+	}
 	// Register macros first so expandMacroToAST can find them.
 	for _, stmt := range prog.Stmts {
 		if m, ok := stmt.(*ast.MacroDecl); ok {
