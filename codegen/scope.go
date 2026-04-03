@@ -57,6 +57,7 @@ func (s *scope) lookup(name string) (*scopeEntry, bool) {
 	if e, ok := s.vars[name]; ok {
 		return e, true
 	}
+
 	if s.parent != nil {
 		return s.parent.lookup(name)
 	}
