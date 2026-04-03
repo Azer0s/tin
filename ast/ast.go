@@ -143,10 +143,12 @@ type TupleArrayType struct {
 func (t *TupleArrayType) typeExprMarker() {}
 func (t *TupleArrayType) String() string {
 	s := "@["
+
 	for i, e := range t.ElemTypes {
 		if i > 0 {
 			s += ", "
 		}
+
 		s += e.String()
 	}
 
@@ -651,10 +653,12 @@ type GenericType struct {
 func (g *GenericType) typeExprMarker() {}
 func (g *GenericType) String() string {
 	params := ""
+
 	for i, p := range g.TypeParams {
 		if i > 0 {
 			params += ", "
 		}
+
 		params += p.String()
 	}
 
@@ -705,10 +709,12 @@ type UnionTypeExpr struct {
 func (u *UnionTypeExpr) typeExprMarker() {}
 func (u *UnionTypeExpr) String() string {
 	s := ""
+
 	for i, t := range u.Types {
 		if i > 0 {
 			s += " | "
 		}
+
 		s += t.String()
 	}
 
