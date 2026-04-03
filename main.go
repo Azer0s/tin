@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -781,10 +782,9 @@ func runFileTests(fpaths []string, extraFlags []string) {
 
 		linkFlags := append(srcLinks, extraFlags...)
 
-		fmt.Printf("\n=== %s ===\n", fname)
-
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
+			fmt.Printf("\n=== FAIL %s ===\n", fname)
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 
 			results = append(results, result{fname, false})
@@ -800,6 +800,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 
 		irText := fixCoroAttrs(mod.String())
 		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
+			fmt.Printf("\n=== FAIL %s ===\n", fname)
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 
 			results = append(results, result{fname, false})
@@ -807,13 +808,20 @@ func runFileTests(fpaths []string, extraFlags []string) {
 			continue
 		}
 
+		var runOut bytes.Buffer
+
 		run := exec.Command(tmp.Name())
-		run.Stdout = os.Stdout
-		run.Stderr = os.Stderr
+		run.Stdout = &runOut
+		run.Stderr = &runOut
 
 		passed := true
 		if runErr := run.Run(); runErr != nil {
 			passed = false
+		}
+
+		if !passed {
+			fmt.Printf("\n=== FAIL %s ===\n", fname)
+			fmt.Print(runOut.String())
 		}
 
 		results = append(results, result{fname, passed})
