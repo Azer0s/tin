@@ -751,6 +751,26 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 
 // isUnsignedTinType returns true when a Tin TypeExpr is one of the unsigned
 // integer types: u8, u16, u32, u64 (and their aliases char/byte/uint/size_t).
+// byteArrayElemType returns the element type name when t is a [byte], [u8], or
+// [char] array type, and "" otherwise.  Used by genEcho to select per-element
+// printf format: "byte" -> %02x, "u8" -> %u, "char" -> %c.
+func byteArrayElemType(t ast.TypeExpr) string {
+	at, ok := t.(*ast.ArrayType)
+	if !ok {
+		return ""
+	}
+	st, ok2 := at.Elem.(*ast.SimpleType)
+	if !ok2 {
+		return ""
+	}
+	switch st.Name {
+	case "byte", "u8", "char":
+		return st.Name
+	}
+
+	return ""
+}
+
 func isUnsignedTinType(t ast.TypeExpr) bool {
 	st, ok := t.(*ast.SimpleType)
 	if !ok {
