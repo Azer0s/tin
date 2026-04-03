@@ -1476,10 +1476,13 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 			break
 		}
-		// Fallback: print as integer.
-		fmtStr := cg.newGlobalString("%lld\n")
-		ext := cg.coerce(block, val, irtypes.I64)
-		block.NewCall(printf, fmtStr, ext)
+		// Struct or array: Go-style formatting.
+		var printErr error
+		block, printErr = cg.genPrintValue(block, val)
+		if printErr != nil {
+			return nil, printErr
+		}
+		block.NewCall(printf, cg.newGlobalString("\n"))
 	}
 
 	// ARC: release fresh RC-tracked values produced by function calls or
@@ -1490,6 +1493,159 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 	}
 
 	return block, nil
+}
+
+// genPrintValue emits printf calls to print val in Go-style format without a
+// trailing newline. Structs print as {f1 f2 ...}, arrays as [e1 e2 ...].
+func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	t := val.Type()
+
+	switch {
+	case isStringType(t):
+		ptr := cg.extractStringPtr(block, val)
+		block.NewCall(printf, cg.newGlobalString("%s"), ptr)
+
+	case isAtomType(t):
+		code := cg.extractAtomCode(block, val)
+		strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
+		ptr := cg.extractStringPtr(block, strFatPtr)
+		block.NewCall(printf, cg.newGlobalString("'%s"), ptr)
+
+	case irtypes.IsInt(t):
+		it := t.(*irtypes.IntType)
+		switch it.BitSize {
+		case 1:
+			trueStr := cg.newGlobalString("true")
+			falseStr := cg.newGlobalString("false")
+			chosen := block.NewSelect(val, trueStr, falseStr)
+			block.NewCall(printf, cg.newGlobalString("%s"), chosen)
+		case 8:
+			zext := block.NewZExt(val, irtypes.I32)
+			block.NewCall(printf, cg.newGlobalString("%c"), zext)
+		default:
+			ext := cg.coerce(block, val, irtypes.I64)
+			block.NewCall(printf, cg.newGlobalString("%lld"), ext)
+		}
+
+	case irtypes.IsFloat(t):
+		var ext value.Value
+		if t == irtypes.Double {
+			ext = val
+		} else {
+			ext = block.NewFPExt(val, irtypes.Double)
+		}
+		block.NewCall(printf, cg.newGlobalString("%g"), ext)
+
+	case irtypes.IsPointer(t):
+		block.NewCall(printf, cg.newGlobalString("%p"), val)
+
+	case isFatArrayPtr(t):
+		var err error
+		block, err = cg.genPrintArray(block, val)
+		if err != nil {
+			return nil, err
+		}
+
+	default:
+		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+			var err error
+			block, err = cg.genPrintStruct(block, val, st)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+		ext := cg.coerce(block, val, irtypes.I64)
+		block.NewCall(printf, cg.newGlobalString("%lld"), ext)
+	}
+
+	return block, nil
+}
+
+// genPrintStruct emits printf calls to print a named struct value as {f1 f2 ...}.
+func (cg *CodeGen) genPrintStruct(block *ir.Block, val value.Value, st *irtypes.StructType) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	name := st.Name()
+	fieldNames := cg.structFields[name]
+	userOff := 1 + cg.vtableOffset(name)
+
+	block.NewCall(printf, cg.newGlobalString("{"))
+
+	for i, fieldName := range fieldNames {
+		if fieldName == "" {
+			continue
+		}
+		llIdx := userOff + i
+		if llIdx >= len(st.Fields) {
+			break
+		}
+		if i > 0 {
+			block.NewCall(printf, cg.newGlobalString(" "))
+		}
+		fieldVal := block.NewExtractValue(val, uint64(llIdx))
+		var err error
+		block, err = cg.genPrintValue(block, fieldVal)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	block.NewCall(printf, cg.newGlobalString("}"))
+
+	return block, nil
+}
+
+// genPrintArray emits a loop that prints a fat-array value as [e1 e2 ...].
+func (cg *CodeGen) genPrintArray(block *ir.Block, val value.Value) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	fatType := val.Type().(*irtypes.StructType)
+	elemPtrType := fatType.Fields[0].(*irtypes.PointerType)
+	elemType := elemPtrType.ElemType
+
+	dataPtr := block.NewExtractValue(val, 0)
+	length := block.NewExtractValue(val, 1)
+
+	// Alloca for loop counter.
+	iAlloca := block.NewAlloca(irtypes.I64)
+	block.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+
+	block.NewCall(printf, cg.newGlobalString("["))
+
+	condBlock := cg.newBlock("print.arr.cond")
+	bodyBlock := cg.newBlock("print.arr.body")
+	endBlock := cg.newBlock("print.arr.end")
+
+	block.NewBr(condBlock)
+
+	// Condition: i < length
+	iVal := condBlock.NewLoad(irtypes.I64, iAlloca)
+	cmp := condBlock.NewICmp(enum.IPredSLT, iVal, length)
+	condBlock.NewCondBr(cmp, bodyBlock, endBlock)
+
+	// Body: print separator if i > 0, print element, increment i.
+	iVal2 := bodyBlock.NewLoad(irtypes.I64, iAlloca)
+	isFirst := bodyBlock.NewICmp(enum.IPredEQ, iVal2, constant.NewInt(irtypes.I64, 0))
+	spaceStr := cg.newGlobalString(" ")
+	emptyStr := cg.newGlobalString("")
+	sepStr := bodyBlock.NewSelect(isFirst, emptyStr, spaceStr)
+	bodyBlock.NewCall(printf, cg.newGlobalString("%s"), sepStr)
+
+	elemPtr := bodyBlock.NewGetElementPtr(elemType, dataPtr, iVal2)
+	elemVal := bodyBlock.NewLoad(elemType, elemPtr)
+	var err error
+	bodyBlock, err = cg.genPrintValue(bodyBlock, elemVal)
+	if err != nil {
+		return nil, err
+	}
+
+	iNext := bodyBlock.NewAdd(iVal2, constant.NewInt(irtypes.I64, 1))
+	bodyBlock.NewStore(iNext, iAlloca)
+	bodyBlock.NewBr(condBlock)
+
+	endBlock.NewCall(printf, cg.newGlobalString("]"))
+
+	return endBlock, nil
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
