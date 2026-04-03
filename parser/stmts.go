@@ -757,12 +757,22 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 			if p.check(lexer.COLON) {
 				p.advance() // consume :
 
-				lit, err := p.parseExpr()
-				if err != nil {
-					return nil, err
-				}
+				// IDENT { = nested struct pattern
+				if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LBRACE {
+					nested, err := p.parseStructPattern()
+					if err != nil {
+						return nil, err
+					}
 
-				sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: lit})
+					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: nested})
+				} else {
+					lit, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+
+					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: lit})
+				}
 			} else {
 				// bare name: bind field to this name
 				sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name})

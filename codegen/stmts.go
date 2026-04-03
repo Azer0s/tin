@@ -2596,6 +2596,146 @@ func (cg *CodeGen) isExhaustiveStructMatch(s *ast.MatchStmt) bool {
 	return false
 }
 
+// applyPatternChecks emits constraint checks for a struct pattern against the
+// value stored in scrutAlloca. For each literal-constrained field it compares
+// the loaded field value against the literal (or recursively checks a nested
+// StructPattern) and branches to failBlock on mismatch. Returns the block
+// where all constraints have passed. The current scope must already be open;
+// free fields are NOT bound here - call bindPatternFree after all checks.
+func (cg *CodeGen) applyPatternChecks(
+	checkBlock *ir.Block,
+	failBlock *ir.Block,
+	scrutType irtypes.Type,
+	scrutAlloca value.Value,
+	structName string,
+	sp *ast.StructPattern,
+	caseIdx int,
+	passSeq *int,
+) (*ir.Block, error) {
+	for _, field := range sp.Fields {
+		if field.IsWild || field.Literal == nil {
+			continue
+		}
+
+		fieldIdx := cg.fieldIndex(structName, field.Name)
+		if fieldIdx < 0 {
+			return nil, fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+		}
+
+		var fieldType irtypes.Type
+
+		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+			fieldType = st.Fields[fieldIdx]
+		} else {
+			fieldType = irtypes.I64
+		}
+
+		gep := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		// Nested struct pattern: recurse.
+		if nested, ok := field.Literal.(*ast.StructPattern); ok {
+			subAlloca := checkBlock.NewAlloca(fieldType)
+			subVal := checkBlock.NewLoad(fieldType, gep)
+			checkBlock.NewStore(subVal, subAlloca)
+
+			subName := cg.typeNameOf(fieldType)
+
+			var err error
+
+			checkBlock, err = cg.applyPatternChecks(checkBlock, failBlock, fieldType, subAlloca, subName, nested, caseIdx, passSeq)
+			if err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		// Scalar literal constraint.
+		fieldVal := checkBlock.NewLoad(fieldType, gep)
+
+		litVal, err := cg.genExpr(checkBlock, field.Literal)
+		if err != nil {
+			return nil, err
+		}
+
+		litVal = cg.coerce(checkBlock, litVal, fieldType)
+
+		var cmp value.Value
+
+		if irtypes.IsFloat(fieldType) {
+			cmp = checkBlock.NewFCmp(enum.FPredOEQ, fieldVal, litVal)
+		} else {
+			cmp = checkBlock.NewICmp(enum.IPredEQ, fieldVal, litVal)
+		}
+
+		*passSeq++
+		passBlock := cg.newBlock(fmt.Sprintf("match.case.%d.pass.%d", caseIdx, *passSeq))
+		checkBlock.NewCondBr(cmp, passBlock, failBlock)
+		checkBlock = passBlock
+	}
+
+	return checkBlock, nil
+}
+
+// bindPatternFree loads each free (unbound) field from scrutAlloca and creates
+// an alloca in cg.curScope. For nested StructPattern fields it recurses.
+func (cg *CodeGen) bindPatternFree(
+	block *ir.Block,
+	scrutType irtypes.Type,
+	scrutAlloca value.Value,
+	structName string,
+	sp *ast.StructPattern,
+) error {
+	for _, field := range sp.Fields {
+		if field.IsWild {
+			continue
+		}
+
+		fieldIdx := cg.fieldIndex(structName, field.Name)
+		if fieldIdx < 0 {
+			return fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+		}
+
+		var fieldType irtypes.Type
+
+		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+			fieldType = st.Fields[fieldIdx]
+		} else {
+			fieldType = irtypes.I64
+		}
+
+		gep := block.NewGetElementPtr(scrutType, scrutAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		// Nested struct pattern: recurse into sub-fields.
+		if nested, ok := field.Literal.(*ast.StructPattern); ok {
+			subAlloca := block.NewAlloca(fieldType)
+			subVal := block.NewLoad(fieldType, gep)
+			block.NewStore(subVal, subAlloca)
+
+			if err := cg.bindPatternFree(block, fieldType, subAlloca, cg.typeNameOf(fieldType), nested); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		// Literal constraint: no binding needed.
+		if field.Literal != nil {
+			continue
+		}
+
+		// Free field: bind to scope.
+		fv := block.NewLoad(fieldType, gep)
+		fa := block.NewAlloca(fieldType)
+		block.NewStore(fv, fa)
+		cg.curScope.set(field.Name, &scopeEntry{val: fa, isAlloc: true})
+	}
+
+	return nil
+}
+
 // genStructMatch generates an if-else chain for match statements whose cases
 // use struct destructuring patterns. resAlloca is non-nil in expression mode:
 // each arm must consist of a single ExprStmt whose value is stored there.
@@ -2634,80 +2774,24 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 		bodyBlock := cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		checkBlock := curCheckBlock
 
-		// Emit one conditional branch per literal-constrained field.
-		for _, field := range sp.Fields {
-			if field.IsWild || field.Literal == nil {
-				continue
-			}
+		// Emit constraint checks for this pattern (recurses into nested StructPatterns).
+		passSeq := 0
 
-			fieldIdx := cg.fieldIndex(structName, field.Name)
-			if fieldIdx < 0 {
-				return nil, fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
-			}
+		var err2 error
 
-			var fieldType irtypes.Type
-
-			if st, ok2 := scrutType.(*irtypes.StructType); ok2 && fieldIdx < len(st.Fields) {
-				fieldType = st.Fields[fieldIdx]
-			} else {
-				fieldType = irtypes.I64
-			}
-
-			gep := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-			fieldVal := checkBlock.NewLoad(fieldType, gep)
-
-			litVal, err2 := cg.genExpr(checkBlock, field.Literal)
-			if err2 != nil {
-				return nil, err2
-			}
-
-			litVal = cg.coerce(checkBlock, litVal, fieldType)
-
-			var cmp value.Value
-
-			if irtypes.IsFloat(fieldType) {
-				cmp = checkBlock.NewFCmp(enum.FPredOEQ, fieldVal, litVal)
-			} else {
-				cmp = checkBlock.NewICmp(enum.IPredEQ, fieldVal, litVal)
-			}
-
-			passBlock := cg.newBlock(fmt.Sprintf("match.case.%d.pass", i))
-			checkBlock.NewCondBr(cmp, passBlock, nextCaseBlock)
-			checkBlock = passBlock
+		checkBlock, err2 = cg.applyPatternChecks(checkBlock, nextCaseBlock, scrutType, scrutAlloca, structName, sp, i, &passSeq)
+		if err2 != nil {
+			return nil, err2
 		}
 
-		// Bind free fields before the guard so guard expressions can reference them.
-		// Allocas in checkBlock dominate both bodyBlock and nextCaseBlock, so the
-		// values are valid regardless of which branch is taken.
+		// Bind free fields (including nested) before the guard so guard expressions
+		// can reference them. Allocas in checkBlock dominate bodyBlock and nextCaseBlock.
 		cg.curScope = newScope(cg.curScope)
 
-		for _, field := range sp.Fields {
-			if field.IsWild || field.Literal != nil {
-				continue
-			}
+		if err2 = cg.bindPatternFree(checkBlock, scrutType, scrutAlloca, structName, sp); err2 != nil {
+			cg.curScope = cg.curScope.parent
 
-			fieldIdx := cg.fieldIndex(structName, field.Name)
-			if fieldIdx < 0 {
-				cg.curScope = cg.curScope.parent
-
-				return nil, fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
-			}
-
-			var fieldType irtypes.Type
-
-			if st, ok2 := scrutType.(*irtypes.StructType); ok2 && fieldIdx < len(st.Fields) {
-				fieldType = st.Fields[fieldIdx]
-			} else {
-				fieldType = irtypes.I64
-			}
-
-			gep := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-			fv := checkBlock.NewLoad(fieldType, gep)
-			fa := checkBlock.NewAlloca(fieldType)
-			checkBlock.NewStore(fv, fa)
-			cg.curScope.set(field.Name, &scopeEntry{val: fa, isAlloc: true})
+			return nil, err2
 		}
 
 		// After field constraints (and bindings): apply guard if present.

@@ -623,23 +623,48 @@ func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
 // using the cg.curBlock pattern (genVarDecl, genReturn, etc.) pick up the
 // correct block for subsequent code emission.
 func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Value, error) {
+	// Validate: each arm must have exactly one expression body.
+	for i, c := range s.Cases {
+		if c.Body == nil || len(c.Body.Stmts) == 0 {
+			return nil, fmt.Errorf("match expression: case %d has no body", i)
+		}
+
+		if len(c.Body.Stmts) > 1 {
+			return nil, fmt.Errorf("match expression: case %d has multiple statements; match expressions allow exactly one expression per arm", i)
+		}
+
+		if armExprNode(c.Body.Stmts[0]) == nil {
+			return nil, fmt.Errorf("match expression: case %d body is not an expression (use 'return match ...' for statement arms)", i)
+		}
+	}
+
+	if s.Default != nil {
+		if len(s.Default.Stmts) == 0 {
+			return nil, fmt.Errorf("match expression: default arm has no body")
+		}
+
+		if len(s.Default.Stmts) > 1 {
+			return nil, fmt.Errorf("match expression: default arm has multiple statements; match expressions allow exactly one expression per arm")
+		}
+
+		if armExprNode(s.Default.Stmts[0]) == nil {
+			return nil, fmt.Errorf("match expression: default arm body is not an expression (use 'return match ...' for statement arms)")
+		}
+	}
+
 	// Determine result type from the first case arm.
 	var resType irtypes.Type
 
 	if len(s.Cases) > 0 {
 		c := s.Cases[0]
-		if c.Body != nil && len(c.Body.Stmts) == 1 {
-			if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
-				resType = cg.astInferType(expr)
-			}
+		if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+			resType = cg.astInferType(expr)
 		}
 	}
 
 	if resType == nil && s.Default != nil {
-		if len(s.Default.Stmts) == 1 {
-			if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
-				resType = cg.astInferType(expr)
-			}
+		if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+			resType = cg.astInferType(expr)
 		}
 	}
 

@@ -141,10 +141,35 @@ A match is considered exhaustive when at least one arm has no literal
 constraints and no guard (a "total" arm that matches every value), or when
 a `default` arm is present. Guards do not count toward exhaustiveness.
 
+### Nested struct patterns
+
+Field values that are themselves structs can be matched by nesting a pattern
+after the `:` separator. Any depth of nesting is supported. Free names at any
+nesting level are bound as local variables:
+
+```rust
+struct vec2 =
+  x i64
+  y i64
+
+struct rect =
+  origin vec2
+  size   vec2
+
+fn classify(r rect) string =
+  match r:
+    case rect{origin: vec2{x: 0, y: 0}, size}:  return "at-origin"
+    case rect{origin: vec2{x, y}, size} if x == y: return "diagonal origin"
+    case rect{origin: vec2{x, y}, size}:           return "other"
+```
+
+Fields bound inside a nested pattern (e.g. `x`, `y` above) are available in
+the guard and body of the same arm, alongside fields from outer levels.
+
 ### match as an expression
 
-`match` can produce a value when used in an expression context. Each arm
-body is a bare expression (no `return`):
+`match` can produce a value when used in an expression context. Each arm body
+must be **exactly one expression** (no `return`, no multi-statement blocks):
 
 ```rust
 let label = match p:
@@ -152,6 +177,9 @@ let label = match p:
   case point{x, y} if x == y: "diagonal"
   case point{x, y}: "other"
 ```
+
+All arms must produce the same (non-void) type. If arms need multiple
+statements, use `return match ...` instead of `let x = match ...`.
 
 ### Nested match
 
