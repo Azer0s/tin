@@ -43,8 +43,8 @@ fn{#async} recv_from_impl(fd i32, max_n i64) ([byte], string, i32) =
       return (data, host, port)
     yield
 
-fn{#async} accept_impl(fd i32, max_n i64) (Conn, bool) =
-  let (data, host, port) = await spawn recv_from_impl(fd, max_n)
+fn{#async} accept_impl(fd i32) (Conn, bool) =
+  let (data, host, port) = await spawn recv_from_impl(fd, 65536)
   if len(data) == 0:
     return (Conn{fd: fd, host: "", port: 0, data: [], owns_fd: false}, false)
   return (Conn{fd: fd, host: host, port: port, data: data, owns_fd: false}, true)
@@ -91,32 +91,24 @@ struct Conn (io::AsyncReader, io::AsyncWriter) =
     return this.fd >= 0
 
 // Server listens for incoming UDP datagrams.
-// Create with udp::listen(port) or udp::listen(port, max_dgram).
+// Create with udp::listen(port).
 struct Server =
-  fd       i32
-  max_dgram i64  // maximum datagram size; set at listen time
+  fd i32
 
   // accept waits for the next datagram and returns a Conn to the sender.
   fn accept(this Server) Future[(Conn, bool)] =
-    return spawn accept_impl(this.fd, this.max_dgram)
+    return spawn accept_impl(this.fd)
 
   fn close(this Server) =
     io::close(this.fd)
 
 // listen creates a bound UDP socket on the given port.
-// max_dgram sets the receive buffer size per datagram (default 65536).
 // Panics if the port cannot be bound.
 fn listen(port i32) Server =
   let fd = _tin_udp_listen_c(port)
   if fd < 0:
     panic("udp::listen: failed to bind port {port}")
-  return Server{fd: fd, max_dgram: 65536}
-
-fn listen(port i32, max_dgram i64) Server =
-  let fd = _tin_udp_listen_c(port)
-  if fd < 0:
-    panic("udp::listen: failed to bind port {port}")
-  return Server{fd: fd, max_dgram: max_dgram}
+  return Server{fd: fd}
 
 // dial creates a connected UDP socket to host:port.
 // Panics on failure.
