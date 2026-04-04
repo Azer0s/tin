@@ -14,7 +14,6 @@
 
 use { loop } from macros
 use io
-use mem
 use sync
 
 // C helpers (private)
@@ -28,17 +27,16 @@ fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]                               
 // Internal async implementations
 
 fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
-  let blocked  = _tin_io_blocked_val_c()
-  let buf      = mem::malloc(65536) as *byte
-  let host     = ""
-  let port i32 = 0
+  let blocked      = _tin_io_blocked_val_c()
+  let buf [byte; 65536]
+  let host         = ""
+  let port i32     = 0
   loop:
-    let r = _tin_udp_recvfrom_c(fd, buf, 65536, &host, &port)
+    let r = _tin_udp_recvfrom_c(fd, &buf[0], 65536, &host, &port)
     if r != blocked:
       let sz = r
       if sz < 0: sz = 0
-      let data = _tin_bytes_from_buf_c(buf, sz)
-      mem::free(buf as *void)
+      let data = _tin_bytes_from_buf_c(&buf[0], sz)
       return (data, host, port)
     yield
 
