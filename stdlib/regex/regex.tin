@@ -26,9 +26,10 @@
 
 //!-lpcre
 
+use mem
+
 // PCRE C API declarations
 
-// Opaque PCRE handle
 fn _pcre_compile(pattern string, options i32, errptr **byte, erroffset *i32, tables *byte) *void = extern("pcre_compile")
 
 fn _pcre_exec(code *void, extra *void, subject string, length i32, startoffset i32, options i32, ovector *i32, ovecsize i32) i32 = extern("pcre_exec")
@@ -36,11 +37,6 @@ fn _pcre_exec(code *void, extra *void, subject string, length i32, startoffset i
 fn _pcre_free_fn(ptr *void) = extern("pcre_free_fn_wrapper")
 
 fn _pcre_capturecount(code *void, rc *i32) i32 = extern("pcre_fullinfo_capturecount")
-
-fn _tin_string_from_bytes_c(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
-fn _tin_string_data_c(s string) *byte              = extern("_tin_string_data")
-fn _tin_buf_alloc_c(n i64) *byte                   = extern("_tin_buf_alloc")
-fn _tin_buf_free_c(ptr *byte)                      = extern("_tin_buf_free")
 
 // C helper file
 //
@@ -52,12 +48,22 @@ fn _tin_buf_free_c(ptr *byte)                      = extern("_tin_buf_free")
 
 //!+regex.c
 
+// substr extracts s[beg:end] as a string using byte-by-byte append.
+fn substr(s string, beg i64, end i64) string =
+  let out = ""
+  let i i64 = beg
+  for i < end:
+    out = out ++ (s[i] as char)
+    i = i + 1
+  return out
+
 // Match result
 
 struct Match =
   _matched bool
   _groups  [string]   // captured groups: index 0 = whole match, 1+ = sub-groups
-  _ends    [i64]      // end offsets (for iterating find_all)
+  _begs    [i64]      // begin offsets per group
+  _ends    [i64]      // end offsets per group (for iterating find_all)
 
   fn matched(this Match) bool  = return this._matched
   fn count(this Match) i64     = return len(this._groups)
@@ -67,6 +73,11 @@ struct Match =
     if i < 0 || i >= len(this._groups):
       return ""
     return this._groups[i]
+
+  fn _beg(this Match, i i64) i64 =
+    if i < 0 || i >= len(this._begs):
+      return 0
+    return this._begs[i]
 
   fn _end(this Match, i i64) i64 =
     if i < 0 || i >= len(this._ends):
@@ -78,25 +89,24 @@ struct Match =
 fn _exec(code *void, subject string, start i64) Match =
   let slen    = len(subject)
   let ovsize  i32 = 30          // supports up to 9 capture groups
-  let ov      = _tin_buf_alloc_c(ovsize as i64 * 4)  // i32 array
-  let ov_i32  = ov as *i32
-  let rc i32  = _pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov_i32, ovsize)
+  let ov      = mem::malloc(ovsize as i64 * 4) as *i32
+  let rc i32  = _pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
   if rc < 0:
-    _tin_buf_free_c(ov)
-    return Match{_matched: false, _groups: [], _ends: []}
+    mem::free(ov as *void)
+    return Match{_matched: false, _groups: [], _begs: [], _ends: []}
   let groups [string] = []
+  let begs   [i64]    = []
   let ends   [i64]    = []
-  let src = _tin_string_data_c(subject)
   let i i32 = 0
   for i < rc:
-    let beg = ov_i32[i * 2]
-    let end = ov_i32[i * 2 + 1]
-    let gstr = _tin_string_from_bytes_c(src + beg as i64, (end - beg) as i64)
-    groups ++= gstr
-    ends   ++= end as i64
+    let beg = ov[i * 2] as i64
+    let end = ov[i * 2 + 1] as i64
+    groups ++= substr(subject, beg, end)
+    begs   ++= beg
+    ends   ++= end
     i = i + 1
-  _tin_buf_free_c(ov)
-  return Match{_matched: true, _groups: groups, _ends: ends}
+  mem::free(ov as *void)
+  return Match{_matched: true, _groups: groups, _begs: begs, _ends: ends}
 
 // Compiled regex
 
@@ -147,13 +157,15 @@ fn compile(pattern string) Regex =
   let erroff  i32   = 0
   let code = _pcre_compile(pattern, 0, &errptr, &erroff, 0 as *byte)
   if code == 0 as *void:
-    let msg string = "regex compile error"
+    let msg = "regex compile error"
     if (errptr as i64) != 0:
-      // Build error string from C char*
-      let elen i64 = 0
-      for errptr[elen] != 0:
-        elen = elen + 1
-      msg = _tin_string_from_bytes_c(errptr, elen)
+      // Build error string from C char* using byte-by-byte append.
+      let msg_out = ""
+      let ei i64 = 0
+      for errptr[ei] != 0:
+        msg_out = msg_out ++ errptr[ei]
+        ei = ei + 1
+      msg = msg_out
     return Regex{_code: 0 as *void, _err_msg: msg}
   return Regex{_code: code, _err_msg: ""}
 
@@ -189,20 +201,9 @@ fn replace(pattern string, s string, repl string) string =
   let m = re.exec(s)
   if !m.matched():
     return s
-  // Build: prefix + repl + suffix
-  let src  = _tin_string_data_c(s)
-  let slen = len(s)
-  // group(0) span: need start offset too
-  // Recompile or use a local exec to get start offset
-  let beg_buf = _tin_buf_alloc_c(8)
-  let beg_i32 = beg_buf as *i32
-  _pcre_exec(re._code, 0 as *void, s, slen as i32, 0, 0, beg_i32, 2)
-  let beg = beg_i32[0] as i64
-  let end = beg_i32[1] as i64
-  _tin_buf_free_c(beg_buf)
-  let prefix = _tin_string_from_bytes_c(src, beg)
-  let suffix = _tin_string_from_bytes_c(src + end, slen - end)
-  return prefix ++ repl ++ suffix
+  let beg = m._beg(0)
+  let end = m._end(0)
+  return substr(s, 0, beg) ++ repl ++ substr(s, end, len(s))
 
 // replace_all replaces all non-overlapping occurrences of pattern in s with repl.
 fn replace_all(pattern string, s string, repl string) string =
@@ -210,25 +211,18 @@ fn replace_all(pattern string, s string, repl string) string =
   if re.is_err():
     return s
   let result = ""
-  let src  = _tin_string_data_c(s)
   let slen = len(s)
   let pos  i64 = 0
   for pos <= slen:
     let m = re.match_at(s, pos)
     if !m.matched():
-      result = result ++ _tin_string_from_bytes_c(src + pos, slen - pos)
+      result = result ++ substr(s, pos, slen)
       break
-    // append text before match
-    let beg_buf = _tin_buf_alloc_c(8)
-    let beg_i32 = beg_buf as *i32
-    _pcre_exec(re._code, 0 as *void, s, slen as i32, pos as i32, 0, beg_i32, 2)
-    let beg = beg_i32[0] as i64
-    let end = beg_i32[1] as i64
-    _tin_buf_free_c(beg_buf)
-    result = result ++ _tin_string_from_bytes_c(src + pos, beg - pos)
-    result = result ++ repl
+    let beg = m._beg(0)
+    let end = m._end(0)
+    result = result ++ substr(s, pos, beg) ++ repl
     if end <= pos:
-      result = result ++ _tin_string_from_bytes_c(src + pos, 1)
+      result = result ++ substr(s, pos, pos + 1)
       pos = pos + 1
     else:
       pos = end
@@ -241,21 +235,16 @@ fn split(pattern string, s string) [string] =
   if re.is_err():
     parts ++= s
     return parts
-  let src  = _tin_string_data_c(s)
   let slen = len(s)
   let pos  i64 = 0
   for pos <= slen:
-    let beg_buf = _tin_buf_alloc_c(8)
-    let beg_i32 = beg_buf as *i32
-    let rc i32  = _pcre_exec(re._code, 0 as *void, s, slen as i32, pos as i32, 0, beg_i32, 2)
-    if rc < 0:
-      _tin_buf_free_c(beg_buf)
-      parts ++= _tin_string_from_bytes_c(src + pos, slen - pos)
+    let m = re.match_at(s, pos)
+    if !m.matched():
+      parts ++= substr(s, pos, slen)
       break
-    let beg = beg_i32[0] as i64
-    let end = beg_i32[1] as i64
-    _tin_buf_free_c(beg_buf)
-    parts ++= _tin_string_from_bytes_c(src + pos, beg - pos)
+    let beg = m._beg(0)
+    let end = m._end(0)
+    parts ++= substr(s, pos, beg)
     if end <= pos:
       pos = pos + 1
     else:

@@ -690,6 +690,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		}
 
 		futures = append(futures, expr)
+
 		p.skipWhitespace()
 
 		if p.check(lexer.COMMA) {
@@ -718,7 +719,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	p.skipNewlines()
 
 	if !p.check(lexer.INDENT) {
-		return nil, fmt.Errorf("expected indented block after await match:")
+		return nil, fmt.Errorf("expected indented block after await match")
 	}
 
 	p.advance() // consume INDENT
@@ -779,6 +780,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		for _, mc := range stmt.Cases {
 			if mc.Guard == nil {
 				allGuarded = false
+
 				break
 			}
 		}
@@ -825,6 +827,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 		if p.check(lexer.IDENT) && p.peek().Literal == "_" {
 			p.advance()
+
 			slots = append(slots, slot{isWild: true})
 		} else if p.check(lexer.IDENT) {
 			name := p.advance().Literal
@@ -1083,6 +1086,7 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 // Called when the current token is LBRACKET.
 func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
 	p.advance() // consume [
+
 	ap := &ast.ArrayPattern{}
 
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
@@ -1096,12 +1100,14 @@ func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
 
 		if p.check(lexer.DOTDOTDOT) {
 			p.advance() // consume ...
+
 			elem.IsRest = true
 
 			if p.check(lexer.IDENT) {
 				lit := p.peek().Literal
 				if lit == "_" {
 					p.advance()
+
 					elem.IsWild = true
 				} else {
 					elem.Name = p.advance().Literal
@@ -1109,11 +1115,13 @@ func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
 			}
 
 			ap.Elems = append(ap.Elems, elem)
+
 			break // rest must be last
 		} else if p.check(lexer.IDENT) {
 			lit := p.peek().Literal
 			if lit == "_" {
 				p.advance()
+
 				elem.IsWild = true
 			} else {
 				elem.Name = p.advance().Literal

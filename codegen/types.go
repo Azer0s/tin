@@ -594,4 +594,27 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 	return cg.tinTypeToLLVM(te)
 }
 
+// llvmElemByteSize returns the size in bytes of a scalar LLVM type, or 0 for
+// types whose size is unknown at compile time (structs, fat pointers, etc.).
+// Used to compute the byte length for llvm.memset when zero-initializing a
+// fixed-size array alloca without generating a huge aggregate-value store.
+func llvmElemByteSize(t irtypes.Type) int64 {
+	if it, ok := t.(*irtypes.IntType); ok {
+		return int64((it.BitSize + 7) / 8)
+	}
+
+	switch t {
+	case irtypes.Float:
+		return 4
+	case irtypes.Double:
+		return 8
+	}
+
+	if _, ok := t.(*irtypes.PointerType); ok {
+		return 8 // 64-bit pointers
+	}
+
+	return 0
+}
+
 // typeExprName returns a short string name for a TypeExpr (used in instance keys).

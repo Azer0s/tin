@@ -421,7 +421,15 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 
 	case *ast.BreakStmt:
 		// Emit an unconditional branch to the innermost loop's after-block.
+		// First release any RC-tracked variables declared inside the loop body
+		// (from the current scope up to, but not including, the scope that was
+		// active before the loop body was entered).
 		if target := cg.currentBreakTarget(); target != nil {
+			outerScope := cg.currentBreakScope()
+			for s := cg.curScope; s != nil && s != outerScope && !s.isFunctionBoundary; s = s.parent {
+				cg.emitScopeRelease(block, s)
+			}
+
 			block.NewBr(target)
 			cg.markBreakUsed()
 		}
@@ -673,11 +681,25 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			calleeName = fn.Name
 		}
 
-		if calleeName != "" && cg.heapPromotingFns[calleeName] && llType != nil {
-			depth := pointerChainDepth(llType)
-			if depth > 0 {
-				isHeapOwned = true
-				heapOwnedDepth = depth
+		if calleeName != "" && llType != nil {
+			// Check both the raw AST name and the scope-resolved IR name (e.g.
+			// "parse_value" AST name vs "json__parse_value" IR name) so that
+			// package-qualified functions are detected correctly.
+			isHeapFn := cg.heapPromotingFns[calleeName]
+			if !isHeapFn {
+				if entry, ok := cg.curScope.lookup(calleeName); ok {
+					if f, ok2 := entry.val.(*ir.Func); ok2 {
+						isHeapFn = cg.heapPromotingFns[f.Name()]
+					}
+				}
+			}
+
+			if isHeapFn {
+				depth := pointerChainDepth(llType)
+				if depth > 0 {
+					isHeapOwned = true
+					heapOwnedDepth = depth
+				}
 			}
 		}
 	} else if addrOf, isAddrOf := s.Value.(*ast.AddressOfExpr); isAddrOf {
@@ -717,7 +739,23 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	} else {
 		// Zero-initialize.
-		block.NewStore(cg.zeroValue(llType), alloca)
+		// For fixed-size arrays >= 128 bytes, use llvm.memset rather than
+		// storing a huge aggregate constant: large aggregate value stores
+		// (e.g. [65536 x i8] zeroinitializer) crash LLVM's instruction selector.
+		if at, ok := llType.(*irtypes.ArrayType); ok {
+			elemBytes := llvmElemByteSize(at.ElemType)
+			if elemBytes > 0 && int64(at.Len)*elemBytes >= 128 {
+				totalBytes := constant.NewInt(irtypes.I64, int64(at.Len)*elemBytes)
+				dstPtr := block.NewBitCast(alloca, irtypes.I8Ptr)
+				block.NewCall(cg.ensureMemset(), dstPtr,
+					constant.NewInt(irtypes.I8, 0), totalBytes,
+					constant.NewInt(irtypes.I1, 0))
+			} else {
+				block.NewStore(cg.zeroValue(llType), alloca)
+			}
+		} else {
+			block.NewStore(cg.zeroValue(llType), alloca)
+		}
 	}
 
 	// Consume lastSliceBase: genSliceExpr sets it to the base allocation pointer
@@ -771,7 +809,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
 
 	return block, nil
 }
@@ -1494,6 +1532,54 @@ func (cg *CodeGen) exprByteArrayElem(node ast.Node) string {
 	return ""
 }
 
+// exprByte8Type returns the Tin type name for an 8-bit scalar expression:
+// "char", "byte", "u8", or "i8".  Returns "" for non-8-bit types.
+// Handles identifiers (scope lookup), function parameters, and struct field
+// accesses (e.g. this.age where age is declared u8).
+func (cg *CodeGen) exprByte8Type(node ast.Node) string {
+	switch n := node.(type) {
+	case *ast.AsExpr:
+		return scalar8BitTypeName(n.Type)
+	case *ast.Identifier:
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			return se.scalarTypeName
+		}
+	case *ast.FieldAccess:
+		if ident, ok := n.Expr.(*ast.Identifier); ok {
+			se, ok2 := cg.curScope.lookup(ident.Name)
+			if !ok2 {
+				break
+			}
+
+			// se.val is an alloca; its element type is the struct (possibly via *)
+			var elemT irtypes.Type
+			if pt, ok3 := se.val.Type().(*irtypes.PointerType); ok3 {
+				elemT = pt.ElemType
+				// Handle pointer-receiver: *Struct -> Struct
+				if pt2, ok4 := elemT.(*irtypes.PointerType); ok4 {
+					elemT = pt2.ElemType
+				}
+			}
+
+			structName := cg.typeNameOf(elemT)
+			if structName == "" {
+				break
+			}
+
+			fields := cg.structFields[structName]
+			tinTypes := cg.structFieldTinTypes[structName]
+
+			for i, fname := range fields {
+				if fname == n.Field && i < len(tinTypes) {
+					return scalar8BitTypeName(tinTypes[i])
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 
@@ -1571,10 +1657,19 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 		}
 
 		if it.BitSize == 8 {
-			// char/u8: print as character
-			fmtStr = cg.newGlobalString("%c\n")
-			zext := block.NewZExt(val, irtypes.I32)
-			block.NewCall(printf, fmtStr, zext)
+			// Dispatch format by Tin type: char->%c, byte->%02x, u8/i8->%d
+			ext := block.NewZExt(val, irtypes.I32)
+
+			switch cg.exprByte8Type(s.Value) {
+			case "char":
+				fmtStr = cg.newGlobalString("%c\n")
+			case "byte":
+				fmtStr = cg.newGlobalString("%02x\n")
+			default: // "u8", "i8", ""
+				fmtStr = cg.newGlobalString("%d\n")
+			}
+
+			block.NewCall(printf, fmtStr, ext)
 
 			return block, nil
 		}
@@ -1994,12 +2089,40 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 			// than the element type.  Re-coerce here to elemT (element type).
 			newElemGep := block.NewGetElementPtr(elemT, newPtr, oldLen)
 			newElem := cg.coerce(block, rhsRaw, elemT)
+
+			// ARC for pointer-typed elements ([*T]):
+			// The array co-owns every element pointer, so all elements must be
+			// heap-allocated (ARC-managed) before being stored.
+			if pt, isPtr := elemT.(*irtypes.PointerType); isPtr {
+				if addrOf, ok := s.Value.(*ast.AddressOfExpr); ok {
+					if _, isIdent := addrOf.Expr.(*ast.Identifier); isIdent {
+						// &localVar: the pointer is to a stack alloca.  Heap-promote
+						// it by copying the struct value into a fresh _tin_rc_alloc
+						// block so the array holds a proper ARC-managed pointer.
+						structVal := block.NewLoad(pt.ElemType, newElem)
+						sz := cg.llvmSizeOf(block, pt.ElemType)
+						heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+						typedHeapPtr := block.NewBitCast(heapI8, elemT)
+						cg.emitRetain(block, structVal) // retain RC fields before copying
+						block.NewStore(structVal, typedHeapPtr)
+						newElem = typedHeapPtr
+						// newElem is fresh (RC=1) - no additional retain below
+					}
+				}
+			}
+
 			block.NewStore(newElem, newElemGep)
 			// ARC: retain element if it is copied from an existing owner (variable,
 			// field, or index).  Without this, releasing the source variable frees
 			// the element's data while the array still holds a reference.
 			if isCopyExpr(s.Value) {
-				cg.emitRetain(block, newElem)
+				if _, isPtr := elemT.(*irtypes.PointerType); isPtr {
+					// For pointer elements: retain the pointed-to ARC block itself.
+					ptrI8 := block.NewBitCast(newElem, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRetain(), ptrI8)
+				} else {
+					cg.emitRetain(block, newElem)
+				}
 			}
 
 			// Build new fat ptr.
@@ -2825,109 +2948,24 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 			checkBlock.NewBr(bodyBlock)
 		}
 
-		if resAlloca != nil {
-			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
-			if c.Body != nil && len(c.Body.Stmts) == 1 {
-				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
-					// Reset curBlock so a previous arm's inner-match advancement
-					// doesn't pollute emission into bodyBlock.
-					cg.curBlock = bodyBlock
+		var bodyErr error
 
-					exprVal, err2 := cg.genExpr(bodyBlock, expr)
-					if err2 != nil {
-						cg.curScope = cg.curScope.parent
+		_, bodyErr = cg.emitMatchArmBody(c, bodyBlock, afterBlock, resAlloca, &anyFallthrough)
+		cg.curScope = cg.curScope.parent
 
-						return nil, err2
-					}
-
-					// genExpr may have advanced cg.curBlock (e.g. inner match expression).
-					if cg.curBlock != bodyBlock {
-						bodyBlock = cg.curBlock
-					}
-
-					if exprVal != nil {
-						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
-						bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
-					}
-				}
-			}
-
-			bodyBlock.NewBr(afterBlock)
-
-			anyFallthrough = true
-		} else {
-			var err2 error
-
-			bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
-			if err2 != nil {
-				cg.curScope = cg.curScope.parent
-
-				return nil, err2
-			}
-
-			if bodyBlock != nil && bodyBlock.Term == nil {
-				bodyBlock.NewBr(afterBlock)
-
-				anyFallthrough = true
-			}
+		if bodyErr != nil {
+			return nil, bodyErr
 		}
 
-		cg.curScope = cg.curScope.parent
 		curCheckBlock = nextCaseBlock
 	}
 
 	// Default or exhaustiveness fallthrough.
-	if s.Default != nil {
-		if resAlloca != nil {
-			if len(s.Default.Stmts) == 1 {
-				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
-					// Reset curBlock so a previous arm's inner-match advancement
-					// doesn't pollute emission into curCheckBlock.
-					cg.curBlock = curCheckBlock
+	var defaultErr error
 
-					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
-					if err2 != nil {
-						return nil, err2
-					}
-
-					if cg.curBlock != curCheckBlock {
-						curCheckBlock = cg.curBlock
-					}
-
-					if exprVal != nil {
-						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
-						curCheckBlock.NewStore(cg.coerce(curCheckBlock, exprVal, resType), resAlloca)
-					}
-				}
-			}
-
-			curCheckBlock.NewBr(afterBlock)
-
-			anyFallthrough = true
-		} else {
-			cg.curScope = newScope(cg.curScope)
-
-			var err2 error
-
-			curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
-			cg.curScope = cg.curScope.parent
-
-			if err2 != nil {
-				return nil, err2
-			}
-
-			if curCheckBlock != nil && curCheckBlock.Term == nil {
-				curCheckBlock.NewBr(afterBlock)
-
-				anyFallthrough = true
-			}
-		}
-	} else if cg.isExhaustiveStructMatch(s) {
-		curCheckBlock.NewUnreachable()
-	} else {
-		curCheckBlock.NewBr(afterBlock)
-
-		anyFallthrough = true
+	_, defaultErr = cg.emitMatchDefaultArm(s, curCheckBlock, afterBlock, resAlloca, &anyFallthrough, cg.isExhaustiveStructMatch(s))
+	if defaultErr != nil {
+		return nil, defaultErr
 	}
 
 	if !anyFallthrough && resAlloca == nil {
@@ -2963,6 +3001,7 @@ func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 
 		hasRest := false
 		fixed := 0
+
 		for _, e := range ap.Elems {
 			if e.IsRest {
 				hasRest = true
@@ -2993,6 +3032,129 @@ func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 	}
 
 	return true
+}
+
+// emitMatchDefaultArm emits the default arm (or exhaustiveness terminator) that
+// is shared by genStructMatch and genArrayMatch.  It mutates anyFallthrough
+// through the supplied pointer and returns the (possibly updated) curCheckBlock.
+func (cg *CodeGen) emitMatchDefaultArm(
+	s *ast.MatchStmt,
+	curCheckBlock *ir.Block,
+	afterBlock *ir.Block,
+	resAlloca value.Value,
+	anyFallthrough *bool,
+	isExhaustive bool,
+) (*ir.Block, error) {
+	if s.Default != nil {
+		if resAlloca != nil {
+			if len(s.Default.Stmts) == 1 {
+				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
+					// Reset curBlock so a previous arm's inner-match advancement
+					// doesn't pollute emission into curCheckBlock.
+					cg.curBlock = curCheckBlock
+
+					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if cg.curBlock != curCheckBlock {
+						curCheckBlock = cg.curBlock
+					}
+
+					if exprVal != nil {
+						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+						curCheckBlock.NewStore(cg.coerce(curCheckBlock, exprVal, resType), resAlloca)
+					}
+				}
+			}
+
+			curCheckBlock.NewBr(afterBlock)
+
+			*anyFallthrough = true
+		} else {
+			cg.curScope = newScope(cg.curScope)
+
+			var err2 error
+
+			curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
+			cg.curScope = cg.curScope.parent
+
+			if err2 != nil {
+				return nil, err2
+			}
+
+			if curCheckBlock != nil && curCheckBlock.Term == nil {
+				curCheckBlock.NewBr(afterBlock)
+
+				*anyFallthrough = true
+			}
+		}
+	} else if isExhaustive {
+		curCheckBlock.NewUnreachable()
+	} else {
+		curCheckBlock.NewBr(afterBlock)
+
+		*anyFallthrough = true
+	}
+
+	return curCheckBlock, nil
+}
+
+// emitMatchArmBody emits the body of a single match arm in expression or
+// statement mode.  Scope management (push/pop) is the caller's responsibility.
+// On error the caller must still pop the scope before propagating.
+func (cg *CodeGen) emitMatchArmBody(
+	c ast.MatchCase,
+	bodyBlock *ir.Block,
+	afterBlock *ir.Block,
+	resAlloca value.Value,
+	anyFallthrough *bool,
+) (*ir.Block, error) {
+	if resAlloca != nil {
+		// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
+		if c.Body != nil && len(c.Body.Stmts) == 1 {
+			if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
+				// Reset curBlock so a previous arm's inner-match advancement
+				// doesn't pollute emission into bodyBlock.
+				cg.curBlock = bodyBlock
+
+				exprVal, err2 := cg.genExpr(bodyBlock, expr)
+				if err2 != nil {
+					return nil, err2
+				}
+
+				// genExpr may have advanced cg.curBlock (e.g. inner match expression).
+				if cg.curBlock != bodyBlock {
+					bodyBlock = cg.curBlock
+				}
+
+				if exprVal != nil {
+					resType := resAlloca.Type().(*irtypes.PointerType).ElemType
+					bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
+				}
+			}
+		}
+
+		bodyBlock.NewBr(afterBlock)
+
+		*anyFallthrough = true
+	} else {
+		var err2 error
+
+		bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		if bodyBlock != nil && bodyBlock.Term == nil {
+			bodyBlock.NewBr(afterBlock)
+
+			*anyFallthrough = true
+		}
+	}
+
+	return bodyBlock, nil
 }
 
 // genArrayMatch generates an if-else chain for match statements whose cases
@@ -3079,6 +3241,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 
 		// Bind regular elements.
 		regIdx := 0
+
 		for _, e := range ap.Elems {
 			if e.IsRest {
 				continue
@@ -3140,6 +3303,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 			guardVal, err2 := cg.genExpr(checkBlock, c.Guard)
 			if err2 != nil {
 				cg.curScope = cg.curScope.parent
+
 				return nil, err2
 			}
 
@@ -3149,98 +3313,29 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 		}
 
 		// Emit body.
-		if resAlloca != nil {
-			if c.Body != nil && len(c.Body.Stmts) == 1 {
-				if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
-					cg.curBlock = bodyBlock
+		var bodyErr error
 
-					exprVal, err2 := cg.genExpr(bodyBlock, expr)
-					if err2 != nil {
-						cg.curScope = cg.curScope.parent
-						return nil, err2
-					}
+		_, bodyErr = cg.emitMatchArmBody(c, bodyBlock, afterBlock, resAlloca, &anyFallthrough)
+		cg.curScope = cg.curScope.parent
 
-					if cg.curBlock != bodyBlock {
-						bodyBlock = cg.curBlock
-					}
-
-					if exprVal != nil {
-						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
-						bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
-					}
-				}
-			}
-
-			bodyBlock.NewBr(afterBlock)
-			anyFallthrough = true
-		} else {
-			var err2 error
-			bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
-			if err2 != nil {
-				cg.curScope = cg.curScope.parent
-				return nil, err2
-			}
-
-			if bodyBlock != nil && bodyBlock.Term == nil {
-				bodyBlock.NewBr(afterBlock)
-				anyFallthrough = true
-			}
+		if bodyErr != nil {
+			return nil, bodyErr
 		}
 
-		cg.curScope = cg.curScope.parent
 		curCheckBlock = nextBlock
 	}
 
 	// Default arm or exhaustiveness.
-	if s.Default != nil {
-		if resAlloca != nil {
-			if len(s.Default.Stmts) == 1 {
-				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
-					cg.curBlock = curCheckBlock
+	var defaultErr error
 
-					exprVal, err2 := cg.genExpr(curCheckBlock, expr)
-					if err2 != nil {
-						return nil, err2
-					}
-
-					if cg.curBlock != curCheckBlock {
-						curCheckBlock = cg.curBlock
-					}
-
-					if exprVal != nil {
-						resType := resAlloca.Type().(*irtypes.PointerType).ElemType
-						curCheckBlock.NewStore(cg.coerce(curCheckBlock, exprVal, resType), resAlloca)
-					}
-				}
-			}
-
-			curCheckBlock.NewBr(afterBlock)
-			anyFallthrough = true
-		} else {
-			cg.curScope = newScope(cg.curScope)
-
-			var err2 error
-			curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
-			cg.curScope = cg.curScope.parent
-
-			if err2 != nil {
-				return nil, err2
-			}
-
-			if curCheckBlock != nil && curCheckBlock.Term == nil {
-				curCheckBlock.NewBr(afterBlock)
-				anyFallthrough = true
-			}
-		}
-	} else if cg.isExhaustiveArrayMatch(s) {
-		curCheckBlock.NewUnreachable()
-	} else {
-		curCheckBlock.NewBr(afterBlock)
-		anyFallthrough = true
+	_, defaultErr = cg.emitMatchDefaultArm(s, curCheckBlock, afterBlock, resAlloca, &anyFallthrough, cg.isExhaustiveArrayMatch(s))
+	if defaultErr != nil {
+		return nil, defaultErr
 	}
 
 	if !anyFallthrough && resAlloca == nil {
 		afterBlock.NewUnreachable()
+
 		return nil, nil
 	}
 
@@ -3484,6 +3579,7 @@ func (cg *CodeGen) toConstInt(c constant.Constant, targetType irtypes.Type) *con
 // actionable (no future done with a passing guard), runs the default body.
 func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Block, error) {
 	cg.ensureFiberRuntime()
+
 	n := len(s.Futures)
 
 	// Evaluate each future expression once and extract its PID.
@@ -3508,6 +3604,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		pid := block.NewExtractValue(fval, uint64(pidIdx))
 
 		retTypeName := sname[8:]
+
 		var retLLVM irtypes.Type
 
 		if retTypeName != "" && retTypeName != "Unit" {
@@ -3596,6 +3693,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 			okBlk, bindErr := cg.bindAwaitMatchSlot(checkBlock, c, slots[c.SlotIdx])
 			if bindErr != nil {
 				cg.curScope = cg.curScope.parent
+
 				return nil, bindErr
 			}
 
@@ -3605,6 +3703,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 				guardVal, err := cg.genExpr(armEntryBlock, c.Guard)
 				if err != nil {
 					cg.curScope = cg.curScope.parent
+
 					return nil, err
 				}
 
@@ -3703,6 +3802,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 	// Exhaustion: panic.
 	exhaustMsg := cg.newGlobalString("await match: all futures exhausted, no arm matched")
 	exhaustedBlock.NewCall(cg.ensurePanicFn(), exhaustMsg)
+
 	retType := cg.curFn.Sig.RetType
 	if irtypes.IsVoid(retType) {
 		exhaustedBlock.NewRet(nil)
@@ -3726,6 +3826,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		okBlk, bindErr := cg.bindAwaitMatchSlot(matchBlock, c, slots[c.SlotIdx])
 		if bindErr != nil {
 			cg.curScope = cg.curScope.parent
+
 			return nil, bindErr
 		}
 
@@ -3736,6 +3837,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 			guardVal, err := cg.genExpr(armEntry, c.Guard)
 			if err != nil {
 				cg.curScope = cg.curScope.parent
+
 				return nil, err
 			}
 
@@ -3793,6 +3895,7 @@ func (cg *CodeGen) bindAwaitMatchSlot(block *ir.Block, c ast.AwaitMatchCase, sl 
 	block.NewCondBr(panicked, panicBlk, okBlk)
 
 	panicBlk.NewCall(cg.ensurePanicFn(), pmsg)
+
 	retType := cg.curFn.Sig.RetType
 	if irtypes.IsVoid(retType) {
 		panicBlk.NewRet(nil)
@@ -4510,6 +4613,85 @@ func markEscapeChain(name string, aliases map[string]string, escaping map[string
 		escaping[name] = true
 		name = aliases[name] // follow the chain: if px = &x, also mark x
 	}
+}
+
+// hasDirectHeapReturn returns true if any return statement in body returns a
+// freshly heap-allocated pointer without going through a named local variable.
+// This covers two patterns not caught by findEscapingAddressTakenVars:
+//
+//	return &StructLit{...}        -- inline heap allocation in return position
+//	return heap_fn(args...)       -- forwarding the result of a heap-promoting fn
+//
+// heapFns is the current heapPromotingFns map so that callee lookups work for
+// functions already processed (defined before the current one in the same file).
+func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+
+	var walk func(ast.Node)
+
+	walk = func(node ast.Node) {
+		if node == nil || found {
+			return
+		}
+
+		switch n := node.(type) {
+		case *ast.ReturnStmt:
+			if n.Value == nil {
+				return
+			}
+
+			switch rv := n.Value.(type) {
+			case *ast.AddressOfExpr:
+				if _, isStruct := rv.Expr.(*ast.StructLit); isStruct {
+					found = true
+				}
+			case *ast.CallExpr:
+				if fnIdent, ok := rv.Func.(*ast.Identifier); ok && heapFns[fnIdent.Name] {
+					found = true
+				}
+			}
+		case *ast.Block:
+			for _, s := range n.Stmts {
+				walk(s)
+			}
+		case *ast.IfStmt:
+			if n.Then != nil {
+				walk(n.Then)
+			}
+
+			for _, elif := range n.ElseIfs {
+				if elif.Body != nil {
+					walk(elif.Body)
+				}
+			}
+
+			if n.Else != nil {
+				walk(n.Else)
+			}
+		case *ast.ForStmt:
+			if n.Body != nil {
+				walk(n.Body)
+			}
+		case *ast.MatchStmt:
+			for _, c := range n.Cases {
+				if c.Body != nil {
+					walk(c.Body)
+				}
+			}
+
+			if n.Default != nil {
+				walk(n.Default)
+			}
+		}
+	}
+
+	walk(body)
+
+	return found
 }
 
 // retainedHeapVars returns the subset of escaping vars that are actually returned

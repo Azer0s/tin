@@ -502,7 +502,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// and returns the result (or 0 for void).
 	if n.Name == "main" && !n.IsStatic {
 		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) && !cg.noWarnAsyncMain {
-			fmt.Fprintf(os.Stderr,
+			_, _ = fmt.Fprintf(os.Stderr,
 				"tin: warning: main() uses 'spawn' or 'await' but is not marked async.\n"+
 					"    Each await in a non-async main() creates a temporary fiber, which is slower\n"+
 					"    and bypasses inline channel optimizations.\n"+
@@ -878,8 +878,14 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curDeferThunkRetType = nil
 
 	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
-	if len(cg.curFnEscapingVars) > 0 {
+	if len(cg.curFnEscapingVars) > 0 || hasDirectHeapReturn(n.Body, cg.heapPromotingFns) {
 		cg.heapPromotingFns[scopeName] = true
+		// Also store under the actual IR function name (which may include a
+		// parameter-type suffix, e.g. "json__parse_value__ptr_Parser") so that
+		// genLetStmt can find it via the scope-resolved *ir.Func lookup.
+		if f != nil {
+			cg.heapPromotingFns[f.Name()] = true
+		}
 	}
 
 	cg.curFn = f
@@ -959,7 +965,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type)})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type)})
 
 		if llIdx == 1 {
 			firstParamAlloca = alloca
@@ -1034,7 +1040,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 // genImplicitMain creates a main() function containing the top-level statements.
 func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	if bodyContainsSpawnOrAwait(stmts) && !cg.noWarnAsyncMain {
-		fmt.Fprintf(os.Stderr,
+		_, _ = fmt.Fprintf(os.Stderr,
 			"tin: warning: top-level statements use 'spawn' or 'await' but there is no async main().\n"+
 				"    Each await at the top level creates a temporary fiber, which is slower\n"+
 				"    and bypasses inline channel optimizations.\n"+

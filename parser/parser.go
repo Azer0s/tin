@@ -12,10 +12,10 @@ import (
 
 // Parser holds the token stream and current position
 type Parser struct {
-	tokens                  []lexer.Token
-	pos                     int
-	noParensMacros          map[string]string // macro name -> backtick expansion body
-	noWarnAwaitMatchGuards  bool
+	tokens                 []lexer.Token
+	pos                    int
+	noParensMacros         map[string]string // macro name -> backtick expansion body
+	noWarnAwaitMatchGuards bool
 }
 
 // New creates a Parser over the given token slice

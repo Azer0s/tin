@@ -21,6 +21,10 @@ static uint32_t _tin_crc32_str(const char *str) {
 
 typedef struct TinRtAtomNode {
     int32_t code;
+    TinRCHdr *hdr; /* head of the malloc block (hdr+1 == str); kept so that
+                      valgrind sees a pointer to the allocation head and
+                      classifies the block as "still reachable" rather than
+                      "possibly lost" */
     char *str;
     struct TinRtAtomNode *next;
 } TinRtAtomNode;
@@ -70,6 +74,7 @@ int32_t _tin_learn_atom(const char *str) {
     memcpy(s, str, len + 1);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
     node->code = code;
+    node->hdr  = hdr;
     node->str  = s;
     node->next = _tin_rt_atom_head;
     _tin_rt_atom_head = node;

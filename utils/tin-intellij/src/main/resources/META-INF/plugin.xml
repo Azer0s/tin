@@ -22,6 +22,10 @@
             implementationClass="com.tin.ide.TinFileType"
             fieldName="INSTANCE"/>
 
+        <lang.parserDefinition
+            language="Tin"
+            implementationClass="com.tin.ide.TinParserDefinition"/>
+
         <lang.syntaxHighlighterFactory
             language="Tin"
             implementationClass="com.tin.ide.TinSyntaxHighlighterFactory"/>
@@ -42,5 +46,8 @@
 
         <langCodeStyleSettingsProvider
             implementation="com.tin.ide.TinLanguageCodeStyleSettingsProvider"/>
+
+        <annotator language="Tin"
+            implementationClass="com.tin.ide.TinMacroAnnotator"/>
     </extensions>
 </idea-plugin>

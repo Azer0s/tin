@@ -791,6 +791,22 @@ func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Valu
 	return entry.val, nil
 }
 
+// byteToStringFatPtr wraps a single i8 value in a {i8*, i64} fat-pointer so
+// that it can be used on either side of a string ++ byte concatenation.
+func byteToStringFatPtr(block *ir.Block, b value.Value) value.Value {
+	byteAlloca := block.NewAlloca(irtypes.I8)
+	block.NewStore(b, byteAlloca)
+
+	fatPtrType := stringFatPtrType()
+	tmp := block.NewAlloca(fatPtrType)
+	block.NewStore(byteAlloca, block.NewGetElementPtr(fatPtrType, tmp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0)))
+	block.NewStore(constant.NewInt(irtypes.I64, 1), block.NewGetElementPtr(fatPtrType, tmp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1)))
+
+	return block.NewLoad(fatPtrType, tmp)
+}
+
 func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
 	// Short-circuit for && and ||.
 	switch e.Op {
@@ -933,6 +949,14 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case ">>":
 		return block.NewAShr(left, right), nil
 	case "++":
+		// string ++ byte  /  byte ++ string: coerce the i8 operand to a 1-char string fat-ptr.
+		// The byte is stored in a stack alloca; the memcpy inside the concat path happens in the
+		// same basic block so the alloca lifetime is valid.
+		if isStringType(left.Type()) && irtypes.IsInt(right.Type()) && right.Type().(*irtypes.IntType).BitSize == 8 {
+			right = byteToStringFatPtr(block, right)
+		} else if isStringType(right.Type()) && irtypes.IsInt(left.Type()) && left.Type().(*irtypes.IntType).BitSize == 8 {
+			left = byteToStringFatPtr(block, left)
+		}
 		// Typed array concatenation: {T*, i64} ++ {T*, i64} -> {T*, i64}
 		// (strings {i8*, i64} are handled by the string path below)
 		if isFatArrayPtr(left.Type()) && !isStringType(left.Type()) {
@@ -977,13 +1001,41 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			block.NewStore(totalLen, lenGep)
 			result := block.NewLoad(fatType, fatAlloca)
-			// Release sub-expression temporaries now that the result is built.
+			// For non-temporary sources, the new buffer shares element pointers
+			// with the source array.  Retain each shared element so that releasing
+			// the source and the new buffer are independent: each holds its own RC
+			// claim and can be released in any order without use-after-free.
+			//
+			// For temporary sources, the temp buffer is released below (buffer-only,
+			// no element release), so elements are effectively transferred to the new
+			// buffer without needing a retain.
+			//
+			// Note: elemNeedsRelease returns false for *irtypes.PointerType (pointer
+			// variables don't need scope release), but pointer elements inside [*T]
+			// arrays DO need retain/release so we check that case explicitly.
+			_, elemIsPtr := elemT.(*irtypes.PointerType)
+			needsElemRetain := cg.elemNeedsRelease(elemT) || isRCTrackedType(elemT) || elemIsPtr
+
+			if !isTemporaryProducer(e.Left) && needsElemRetain {
+				cg.emitRetainElemSlice(block, newI8Ptr, leftLen, elemT)
+			}
+
+			if !isTemporaryProducer(e.Right) && needsElemRetain {
+				cg.emitRetainElemSlice(block, rightDst, rightLen, elemT)
+			}
+
+			// Release sub-expression temporaries: buffer-only release transfers
+			// ownership of elements to the new buffer without a retain.
 			if isTemporaryProducer(e.Left) {
-				cg.emitRelease(block, left)
+				if rcPtr := cg.extractRCDataPtr(block, left, left.Type()); rcPtr != nil {
+					block.NewCall(cg.ensureRelease(), rcPtr)
+				}
 			}
 
 			if isTemporaryProducer(e.Right) {
-				cg.emitRelease(block, right)
+				if rcPtr := cg.extractRCDataPtr(block, right, right.Type()); rcPtr != nil {
+					block.NewCall(cg.ensureRelease(), rcPtr)
+				}
 			}
 
 			return result, nil
@@ -2579,12 +2631,13 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			parts[i] = cg.typeExprCanonicalKey(ta)
 			// For synthDecl: resolve SimpleType aliases to their actual AST type so that
 			// genTypeDecl substitutes the real type (e.g. ArrayType) into struct fields.
-			resolved := ast.TypeExpr(ta)
+			resolved := ta
 			if st2, ok2 := ta.(*ast.SimpleType); ok2 {
 				if alias, ok3 := cg.typeAliases[st2.Name]; ok3 {
 					resolved = alias
 				}
 			}
+
 			resolvedTypeArgs[i] = resolved
 		}
 
@@ -2828,6 +2881,45 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 
 // genSliceExpr generates code for a slice expression arr[start:end].
 func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value, error) {
+	// Fixed-size byte arrays [byte; N]: heap-copy the slice to produce a [byte].
+	// Use genLValue to get the alloca pointer directly (no spurious full-array load).
+	if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
+		if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+			if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 && at.ElemType.Equal(irtypes.I8) {
+				var startVal, endVal value.Value
+
+				if e.Start != nil {
+					sv, err := cg.genExpr(block, e.Start)
+					if err != nil {
+						return nil, err
+					}
+
+					startVal = cg.coerce(block, sv, irtypes.I64)
+				} else {
+					startVal = constant.NewInt(irtypes.I64, 0)
+				}
+
+				if e.End != nil {
+					ev, err := cg.genExpr(block, e.End)
+					if err != nil {
+						return nil, err
+					}
+
+					endVal = cg.coerce(block, ev, irtypes.I64)
+				} else {
+					endVal = constant.NewInt(irtypes.I64, int64(at.Len))
+				}
+
+				length := block.NewSub(endVal, startVal)
+				elemPtr := block.NewGetElementPtr(at, arrPtr,
+					constant.NewInt(irtypes.I32, 0), startVal)
+				srcPtr := block.NewBitCast(elemPtr, irtypes.I8Ptr)
+
+				return block.NewCall(cg.ensureBytesFromBuf(), srcPtr, length), nil
+			}
+		}
+	}
+
 	arrVal, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
@@ -2906,12 +2998,29 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 }
 
 func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error) {
-	val, err := cg.genExpr(block, e.Expr)
+	targetType, err := cg.tinTypeToLLVM(e.Type)
 	if err != nil {
 		return nil, err
 	}
 
-	targetType, err := cg.tinTypeToLLVM(e.Type)
+	// [byte; N] as [byte]: heap-copy the fixed-size array to a fat [byte] slice.
+	// Use genLValue to get the alloca pointer without loading the full array.
+	if isFatArrayPtr(targetType) {
+		if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
+			if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+				if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 && at.ElemType.Equal(irtypes.I8) {
+					n := constant.NewInt(irtypes.I64, int64(at.Len))
+					elemPtr := block.NewGetElementPtr(at, arrPtr,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 0))
+					srcPtr := block.NewBitCast(elemPtr, irtypes.I8Ptr)
+
+					return block.NewCall(cg.ensureBytesFromBuf(), srcPtr, n), nil
+				}
+			}
+		}
+	}
+
+	val, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
 	}
@@ -2939,7 +3048,15 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		}
 	}
 
-	return cg.coerce(block, val, targetType), nil
+	result := cg.coerce(block, val, targetType)
+	// Release the `any` box after unboxing when it is a temporary (fresh allocation
+	// from a call/getfield).  Identifiers and field accesses are copy-borrows that
+	// are owned by their parent scope/struct and must NOT be released here.
+	if isAnyType(val.Type()) && !isAnyType(targetType) && !isCopyExpr(e.Expr) {
+		cg.emitRelease(block, val)
+	}
+
+	return result, nil
 }
 
 func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, error) {
@@ -3923,7 +4040,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 						continue
 					}
 				case 'd', 'i':
-					// Signed integer format
+					// Signed decimal format; use zero-extend for unsigned 8-bit types.
 					if it, ok := t.(*irtypes.IntType); ok {
 						if it.BitSize > 32 {
 							fmtParts = append(fmtParts, "%"+prefix+"ll"+string(lastChar))
@@ -3932,7 +4049,12 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 							fmtParts = append(fmtParts, "%"+prefix+string(lastChar))
 
 							if it.BitSize < 32 {
-								val = block.NewSExt(val, irtypes.I32)
+								ty8 := cg.exprByte8Type(part.Expr)
+								if ty8 == "byte" || ty8 == "u8" {
+									val = block.NewZExt(val, irtypes.I32)
+								} else {
+									val = block.NewSExt(val, irtypes.I32)
+								}
 							}
 						}
 
@@ -3974,7 +4096,8 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				args = append(args, ptr)
 			case irtypes.IsInt(t):
 				it := t.(*irtypes.IntType)
-				if it.BitSize == 1 {
+				switch it.BitSize {
+				case 1:
 					// bool: print "true" or "false"
 					truePtr := cg.newGlobalString("true")
 					falsePtr := cg.newGlobalString("false")
@@ -3982,7 +4105,28 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 
 					fmtParts = append(fmtParts, "%s")
 					args = append(args, selected)
-				} else {
+				case 8:
+					// Dispatch by Tin type: char->%c, byte->%x, u8/i8->%d
+					// Use format specifiers ({c:d}, {c:x}, {c:c}) to override.
+					switch cg.exprByte8Type(part.Expr) {
+					case "char":
+						fmtParts = append(fmtParts, "%c")
+					case "byte":
+						fmtParts = append(fmtParts, "%x")
+					default: // "u8", "i8", ""
+						fmtParts = append(fmtParts, "%d")
+					}
+
+					// byte/u8 are unsigned - zero-extend; char/i8 are signed - sign-extend.
+					ty8 := cg.exprByte8Type(part.Expr)
+					if ty8 == "byte" || ty8 == "u8" {
+						val = block.NewZExt(val, irtypes.I32)
+					} else {
+						val = block.NewSExt(val, irtypes.I32)
+					}
+
+					args = append(args, val)
+				default:
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
 					args = append(args, val)
@@ -4481,7 +4625,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// Use fieldIndex for correctness in case the layout changes.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T — falling back to slow send$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T — falling back to slow send$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -4581,7 +4725,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	// Load ch._ptr from the Channel struct.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T — falling back to slow recv$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T — falling back to slow recv$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -5136,17 +5280,29 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		return alloca, nil
 
 	case *ast.IndexExpr:
-		arr, err := cg.genExpr(block, e.Expr)
-		if err != nil {
-			return nil, err
-		}
-
 		idx, err := cg.genExpr(block, e.Index)
 		if err != nil {
 			return nil, err
 		}
 
 		idx = cg.coerce(block, idx, irtypes.I64)
+
+		// For fixed-size arrays [N x T]: GEP directly into the original alloca
+		// without loading the array value first (avoids spurious full-array loads).
+		if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
+			if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+				if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 {
+					return block.NewGetElementPtr(at, arrPtr,
+						constant.NewInt(irtypes.I32, 0), idx), nil
+				}
+			}
+		}
+
+		// Fat arrays and other types: load the value first, then index.
+		arr, err := cg.genExpr(block, e.Expr)
+		if err != nil {
+			return nil, err
+		}
 
 		arrType := arr.Type()
 		switch at := arrType.(type) {
@@ -5164,16 +5320,6 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 				}
 			}
 		case *irtypes.ArrayType:
-			// Prefer to GEP into the *original* storage (alloca) so that writes
-			// through the returned pointer actually mutate the source variable.
-			// This is critical for patterns like: let buf [byte;N]; async_read(fd, &buf[0], N)
-			if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
-				if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok && pt.ElemType.Equal(arrType) {
-					return block.NewGetElementPtr(arrType, arrPtr,
-						constant.NewInt(irtypes.I32, 0), idx), nil
-				}
-			}
-			// Fallback: copy into a temporary alloca (writes won't affect the original).
 			alloca := block.NewAlloca(arrType)
 			block.NewStore(arr, alloca)
 

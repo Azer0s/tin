@@ -171,7 +171,18 @@ func printNode(n Node, depth int) string {
 			ret = " " + v.RetType.String()
 		}
 
-		sig := fmt.Sprintf("%sfn %s(%s)%s", ind(depth), v.Name, strings.Join(params, ", "), ret)
+		tagStr := ""
+
+		if len(v.Tags) > 0 {
+			tagParts := make([]string, len(v.Tags))
+			for i, t := range v.Tags {
+				tagParts[i] = "#" + t
+			}
+
+			tagStr = "{" + strings.Join(tagParts, " ") + "}"
+		}
+
+		sig := fmt.Sprintf("%sfn%s %s(%s)%s", ind(depth), tagStr, v.Name, strings.Join(params, ", "), ret)
 		if v.IsExtern != "" {
 			return sig + " = extern(\"" + v.IsExtern + "\")"
 		}
@@ -283,7 +294,8 @@ func printNode(n Node, depth int) string {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("await match [%s]:\n", strings.Join(parts, ", ")))
+
+		_, _ = fmt.Fprintf(&sb, "await match [%s]:\n", strings.Join(parts, ", "))
 
 		for _, c := range v.Cases {
 			slots := make([]string, len(v.Futures))
@@ -298,13 +310,13 @@ func printNode(n Node, depth int) string {
 				guard = fmt.Sprintf(" if %s", printNode(c.Guard, 0))
 			}
 
-			sb.WriteString(fmt.Sprintf("%scase [%s]%s:\n%s\n",
+			_, _ = fmt.Fprintf(&sb, "%scase [%s]%s:\n%s\n",
 				ind(depth+1), strings.Join(slots, ", "), guard,
-				printBlockBody(c.Body, depth+2)))
+				printBlockBody(c.Body, depth+2))
 		}
 
 		if v.Default != nil {
-			sb.WriteString(fmt.Sprintf("%sdefault:\n%s", ind(depth+1), printBlockBody(v.Default, depth+2)))
+			_, _ = fmt.Fprintf(&sb, "%sdefault:\n%s", ind(depth+1), printBlockBody(v.Default, depth+2))
 		}
 
 		return sb.String()
@@ -366,6 +378,7 @@ func printNode(n Node, depth int) string {
 				parts[i] = e.Name
 			}
 		}
+
 		return "[" + strings.Join(parts, ", ") + "]"
 	default:
 		return fmt.Sprintf("/* unhandled: %T */", n)

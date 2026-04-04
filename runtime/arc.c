@@ -105,6 +105,96 @@ void _tin_release_fn_elem_array(void *data, int64_t count) {
     }
 }
 
+// Release a fat array whose elements are raw ARC-managed pointers (e.g. [*T]).
+// Decrements the outer buffer RC; when RC reaches 0, calls _tin_release on
+// each pointer element (treating the pointer value as the ARC data ptr) and
+// frees the outer buffer.  Every pointer in such an array must be heap-
+// allocated (via _tin_rc_alloc) - see compiler enforcement in genAugAssign.
+void _tin_release_ptr_elem_array(void *data, int64_t count) {
+    if (!data) return;
+    TinRCHdr *hdr = _rc_hdr(data);
+    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
+    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    if (prev == 1) {
+        void **elems = (void **)data;
+        for (int64_t i = 0; i < count; i++) _tin_release(elems[i]);
+        free(hdr);
+    }
+}
+
+// Release a fat array whose elements are named structs with RC fields.
+// Decrements the outer RC; when RC reaches 0, calls release_fn on each element
+// (passing a pointer to the element in-place) and frees the outer block.
+// release_fn is a compiler-generated per-struct helper that releases RC fields.
+typedef void (*TinElemReleaseFn)(void *elem);
+void _tin_foreach_struct_elem_release(
+    void *data, int64_t count, int64_t elem_size, TinElemReleaseFn release_fn
+) {
+    if (!data) return;
+    TinRCHdr *hdr = _rc_hdr(data);
+    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
+    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    if (prev == 1) {
+        for (int64_t i = 0; i < count; i++) {
+            release_fn((char *)data + i * elem_size);
+        }
+        free(hdr);
+    }
+}
+
+// Retain helpers for array concatenation: when `b = a ++ [item]` and `a` is a
+// non-temporary source, the new buffer `b` holds copies of `a`'s element
+// pointers.  Since `a` and `b` both hold those pointers, each element's RC
+// must be incremented so that releasing either array does not free elements
+// still held by the other.  The retain helpers below loop over the copied
+// portion of the new buffer and increment each element's RC.
+
+// Retain each pointer element in a [*T] array slice (count elements at data).
+void _tin_retain_ptr_elems(void *data, int64_t count) {
+    if (!data || count <= 0) return;
+    void **elems = (void **)data;
+    for (int64_t i = 0; i < count; i++) _tin_retain(elems[i]);
+}
+
+// Retain each fat-pointer element in a [string] or [[T]] slice.
+// Fat pointers are {void*, i64}; field 0 is the ARC-managed data pointer.
+void _tin_retain_fat_elems(void *data, int64_t count) {
+    if (!data || count <= 0) return;
+    typedef struct { void *ptr; int64_t dummy; } FatElem;
+    FatElem *elems = (FatElem *)data;
+    for (int64_t i = 0; i < count; i++) _tin_retain(elems[i].ptr);
+}
+
+// Retain each closure fat-pointer element in a [fn] slice.
+// Closure fat pointers are {fn_ptr*, i8* env}; the env (field 1) is ARC-managed.
+void _tin_retain_fn_elems(void *data, int64_t count) {
+    if (!data || count <= 0) return;
+    typedef struct { void *fn_ptr; void *env; } FnElem;
+    FnElem *elems = (FnElem *)data;
+    for (int64_t i = 0; i < count; i++) _tin_retain(elems[i].env);
+}
+
+// Retain each `any` element in a [any] slice.
+// `any` is {i32 tag, void* ptr}; field 1 is the ARC-managed data pointer.
+void _tin_retain_any_elems(void *data, int64_t count) {
+    if (!data || count <= 0) return;
+    typedef struct { int32_t tag; void *ptr; } AnyElem;
+    AnyElem *elems = (AnyElem *)data;
+    for (int64_t i = 0; i < count; i++) _tin_retain(elems[i].ptr);
+}
+
+// Retain each named-struct element in a slice using a per-type helper.
+// retain_fn is a compiler-generated function that retains RC fields in one element.
+typedef void (*TinElemRetainFn)(void *elem);
+void _tin_foreach_struct_elem_retain(
+    void *data, int64_t count, int64_t elem_size, TinElemRetainFn retain_fn
+) {
+    if (!data || count <= 0) return;
+    for (int64_t i = 0; i < count; i++) {
+        retain_fn((char *)data + i * elem_size);
+    }
+}
+
 // Release an `any` value whose tag is anyTagFn (5): the data block holds a
 // closure fat pointer {fn_ptr*, i8* env}.  Decrements the data RC; when RC
 // reaches 0 releases the env via _tin_release_closure then frees the block.

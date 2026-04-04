@@ -30,6 +30,10 @@ type scopeEntry struct {
 	// variable holds a [byte]/[u8]/[char] fat array.  Empty string otherwise.
 	// Used by genEcho to choose the per-element printf format.
 	byteArrayElem string
+	// scalarTypeName is the Tin type name for 8-bit scalar variables: "char", "byte",
+	// "u8", or "i8".  Empty for all other types.
+	// Used by interpolation/echo to choose the per-value printf format.
+	scalarTypeName string
 	// isHeapOwned: true when this variable holds the result of a late-promoted
 	// heap allocation (returned via _tin_rc_alloc from a callee that heap-promotes).
 	// Scope-exit calls emitHeapChainRelease(depth) to walk the chain of RC blocks

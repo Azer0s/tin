@@ -6,14 +6,17 @@
 // Usage:
 //   ./tin build examples/udp_echo_server/udp_echo_server.tin -lm -o /tmp/udp_echo_server
 //   /tmp/udp_echo_server &
-//   echo -n "hello" | nc -u 127.0.0.1 8082
+//   echo "hello" | nc -u 127.0.0.1 8082
 //   kill %1
 
 use { loop, async } from macros
 use udp
+use ioutil
 
 async handle_conn(c udp::Conn) =
-  await c.write(c.data)
+  let line = await ioutil::read_string(c)
+  await ioutil::write_string(c, line)
+  c.close()
 
 fn{#async} main() =
   let srv = udp::listen(8082)
