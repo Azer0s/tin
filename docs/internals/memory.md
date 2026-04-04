@@ -204,6 +204,8 @@ The codegen (`codegen/runtime.go`) inserts ARC calls at these points:
 | Return value                                               | retain before returning; caller takes ownership |
 | Temporary result from `++` or function call used in `echo` | `_tin_release(temp)` after use                  |
 | Function argument passing                                  | no retain (callee borrows, not owns)            |
+| Method called on temporary struct receiver (`tmp.method()`) | `emitRelease(tmp)` after the outer call        |
+| `*ptr` when `ptr` is a temporary producer                  | `_tin_release(ptr)` on the outer allocation     |
 
 This follows a **caller-retain, callee-borrows** model. Ownership transfers
 happen explicitly at assignment and scope exit.
@@ -419,3 +421,70 @@ value after the cast when:
 
 This prevents the `any` box from leaking when it is used as a transient
 unboxing vehicle and never assigned to a variable.
+
+---
+
+## Method chain temporary release
+
+When a method is called on a struct returned directly by another call (a method
+chain), the intermediate struct is a **temporary** - it was retained by the
+inner callee's return but is never stored in a named variable and therefore
+never released at scope exit.
+
+```tin
+let s = v.get("name").as_string()
+//         ^^^^^^^^^^^
+//         temporary Value returned by get(); never assigned to a variable
+```
+
+`genCallExpr` (`codegen/exprs.go`) emits `emitRelease(block, objVal)` on the
+receiver immediately after the outer call returns, provided:
+
+1. The method is not a pointer receiver (`!fn.IsPtr`) - pointer receivers
+   pass a pointer to an existing heap block; the caller does not own it.
+2. The receiver expression is a **temporary producer** (`isTemporaryProducer`):
+   a `CallExpr`, string interpolation, `++` concat result, or non-empty array
+   literal - i.e., any expression whose result is freshly retained and has no
+   other owner.
+
+This release is emitted at all three call paths inside `genCallExpr`:
+- Overload-resolved method calls.
+- Generic method instantiations.
+- Direct (non-generic) method calls.
+
+The emitted release calls `emitRelease`, which walks the struct's RC fields
+via `walkRCStructFields` (releasing strings, slices, closures, etc.) before
+freeing the struct's own allocation if it is heap-owned.
+
+### Why `!fn.IsPtr` matters
+
+A pointer receiver (`fn foo(this *MyStruct)`) receives `*MyStruct` - a pointer
+to an existing allocation. The caller never owns that pointer and must not
+release it. Only value receivers (`fn foo(this MyStruct)`) cause a struct copy
+whose RC fields are retained by the callee; those are the ones that need a
+matching release on the calling side.
+
+---
+
+## Pointer dereference of temporary (ARC move)
+
+`*ptr` when `ptr` is a temporary producer (e.g., `*parse_value(&p)`) performs
+an **ARC move**: the struct fields are transferred to the loaded copy, but the
+outer pointer allocation itself would otherwise leak.
+
+```tin
+return *parse_node(&p, 0)   // parse_node returns *Value; deref loads the Value
+                            // and must free the *Value allocation
+```
+
+`genDerefExpr` (`codegen/exprs.go`) handles this case:
+
+1. Loads the pointed-to value normally.
+2. When `isTemporaryProducer(e.Expr)` is true, bitcasts the pointer to `i8*`
+   and calls `_tin_release` directly (not `emitRelease`).
+
+The distinction is important: `emitRelease` would walk the struct's RC fields
+and release them - but those fields are now owned by the loaded copy. Only the
+outer heap block (the `_tin_rc_alloc` allocation for the pointer itself) needs
+to be freed. Calling `_tin_release` directly decrements that block's RC and
+frees it when it reaches zero, without touching the fields.
