@@ -8,7 +8,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | Document | Contents |
 |----------|----------|
 | [01 - Basics](01-basics.md) | Types, variables, `echo`, string interpolation, operators |
-| [02 - Control Flow](02-control-flow.md) | `if/else`, `for`, `match`, `where` pattern matching, `defer`, `panic` |
+| [02 - Control Flow](02-control-flow.md) | `if/else`, `for`, `match` (struct + array patterns), `where`, `defer`, `panic` |
 | [03 - Functions](03-functions.md) | Functions, closures, generics, pipe operator, overloading |
 | [04 - Collections](04-collections.md) | Arrays, slices, ranges, destructuring |
 | [05 - Structs](05-structs.md) | Structs, methods, `fn init`/`fn deinit`, generics, type aliases, tuples |
@@ -20,7 +20,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [11 - Testing](11-testing.md) | `test` blocks, `assert` stdlib, `tin test` command |
 | [12 - Macros](12-macros.md) | Simple macros (AST substitution), CTFE macros, backtick code-splice literals |
 | [13 - Control Tags](13-control-tags.md) | `#pure`, `#sideffect`, `#no_recurse`, `#no_thread`, `#allow_sideffect` |
-| [14 - Fibers & Channels](14-fibers.md) | `spawn`, `await`, `yield`, `Channel[T]`, `Future[T]`, async I/O, M:N scheduler |
+| [14 - Fibers & Channels](14-fibers.md) | `spawn`, `await`, `yield`, `await match`, `Channel[T]`, `Future[T]`, async I/O, M:N scheduler |
 
 ## Standard Library
 
@@ -28,6 +28,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 |----------|----------|
 | [JSON](stdlib/json.md) | JSON encoding/decoding: `encode`, `parse`, `parse[T]`, field tags |
 | [Measure](stdlib/measure.md) | Monotonic clock: `now_us`, `now_ms` for benchmarking |
+| [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types |
 | [Regex](stdlib/regex.md) | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split` |
 
 ## Quick taste

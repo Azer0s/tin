@@ -894,11 +894,41 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 			return fmt.Errorf("use %s: predeclare %s: %w", pkgPath, fd.Name, preErr)
 		}
+		// Register in funcDecls so wrapPidInFuture can resolve return types for
+		// package-loaded {#async} functions (e.g. [byte]-returning stdlib helpers).
+		if _, already := cg.funcDecls[fd.Name]; !already {
+			cg.funcDecls[fd.Name] = fd
+		}
 		// Also register the bare local name so struct methods can call it.
 		if entry, ok2 := cg.curScope.lookup(irName); ok2 {
 			if _, already := cg.curScope.vars[fd.Name]; !already {
 				cg.curScope.set(fd.Name, entry)
 			}
+		}
+	}
+
+	// Pass 1.45: predeclare $coro variants for module-level {#async} functions
+	// before Pass 1.5 compiles struct methods (which may spawn them).
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) {
+			continue
+		}
+
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+		}
+
+		cg.coroCallable[irName] = true
+		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: early coro predecl %s: %w", pkgPath, fd.Name, preErr)
 		}
 	}
 

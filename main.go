@@ -120,6 +120,13 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 }
 
 func main() {
+	if v := clangMajorVersion(); v > 0 && v < 15 {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"error: clang version %d is too old; tin requires clang >= 15 (the presplitcoroutine attribute was added in LLVM 15)\n", v)
+
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 3 {
 		_, _ = fmt.Fprint(os.Stderr, usage)
 
@@ -149,6 +156,7 @@ func main() {
 	var extraCFlags []string
 
 	noWarnAsyncMain := false
+	noWarnAwaitMatchGuards := false
 
 	for i := fileArgIdx + 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -159,6 +167,8 @@ func main() {
 			}
 		case "-Wno-async-main":
 			noWarnAsyncMain = true
+		case "-Wno-await-match-guards":
+			noWarnAwaitMatchGuards = true
 		}
 	}
 
@@ -214,6 +224,10 @@ func main() {
 	p := parser.New(tokens)
 	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens) {
 		p.RegisterNoParensMacro(name, expansion)
+	}
+
+	if noWarnAwaitMatchGuards {
+		p.SetNoWarnAwaitMatchGuards(true)
 	}
 
 	prog, parseErr := p.Parse()
@@ -412,6 +426,37 @@ func main() {
 	}
 }
 
+// clangMajorVersion runs `clang --version` and returns the major version number,
+// or 0 if the version cannot be determined.
+func clangMajorVersion() int {
+	out, err := exec.Command("clang", "--version").Output()
+	if err != nil {
+		return 0
+	}
+
+	// Output looks like: "Ubuntu clang version 18.1.3" or "clang version 14.0.0"
+	// Find "version " followed by a decimal major number.
+	s := string(out)
+
+	idx := strings.Index(s, "version ")
+	if idx < 0 {
+		return 0
+	}
+
+	s = s[idx+len("version "):]
+	major := 0
+
+	for _, ch := range s {
+		if ch >= '0' && ch <= '9' {
+			major = major*10 + int(ch-'0')
+		} else {
+			break
+		}
+	}
+
+	return major
+}
+
 // fixCoroAttrs rewrites the string attribute form emitted by the llir library
 // ("presplitcoroutine") to the LLVM keyword attribute form (presplitcoroutine)
 // that the coro-split pass requires to detect coroutines.
@@ -444,21 +489,38 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		_ = os.WriteFile(dumpPath, []byte(ir), 0644)
 	}
 
-	// When the IR contains LLVM coroutine intrinsics (llvm.coro.*), clang must
-	// handle them internally at optimisation level >= O1. Clang's O1 pipeline
-	// runs coro-early -> coro-split -> coro-cleanup before the backend, which
-	// correctly splits each presplitcoroutine function into .resume/.destroy/
-	// .cleanup variants. Using an external `opt` step is unreliable (coro-elide
-	// can fold the splits incorrectly), and using -O2 causes the optimizer to
-	// propagate 'unreachable' backwards through the yield path.  -O1 is the
-	// safe default for any module that uses fibers.
-	hasCoro := strings.Contains(ir, "llvm.coro.")
 	llInputFile := llFile.Name()
 
-	optLevel := "-O2"
-	if hasCoro {
-		optLevel = "-O1"
+	// LLVM 22's -O2 optimizer breaks coroutine yield paths: the "suspended"
+	// default arm of coro.suspend in the resume function is marked unreachable,
+	// causing backward DCE to remove the `store index; ret void` that the
+	// scheduler depends on.  Work around by splitting coroutines at -O1 first
+	// (which produces correct yield paths), then running -O2 on the split IR.
+	if strings.Contains(ir, "llvm.coro.") {
+		splitFile, err := os.CreateTemp("", "tin-split-*.ll")
+		if err != nil {
+			return fmt.Errorf("cannot create temp file for coro split: %w", err)
+		}
+
+		splitName := splitFile.Name()
+
+		_ = splitFile.Close()
+
+		defer func() { _ = os.Remove(splitName) }()
+
+		split := exec.Command("clang", "-O1", "-S", "-emit-llvm", llInputFile, "-o", splitName)
+		split.Stdout = os.Stdout
+
+		split.Stderr = os.Stderr
+
+		if err := split.Run(); err != nil {
+			return fmt.Errorf("coro split pass failed: %w", err)
+		}
+
+		llInputFile = splitName
 	}
+
+	optLevel := "-O2"
 
 	// Find runtime .c alongside the tin binary
 	ex, _ := os.Executable()
@@ -785,6 +847,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
+
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 
 			results = append(results, result{fname, false})
@@ -801,6 +864,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 		irText := fixCoroAttrs(mod.String())
 		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
+
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 
 			results = append(results, result{fname, false})

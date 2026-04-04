@@ -12,9 +12,10 @@ import (
 
 // Parser holds the token stream and current position
 type Parser struct {
-	tokens         []lexer.Token
-	pos            int
-	noParensMacros map[string]string // macro name -> backtick expansion body
+	tokens                 []lexer.Token
+	pos                    int
+	noParensMacros         map[string]string // macro name -> backtick expansion body
+	noWarnAwaitMatchGuards bool
 }
 
 // New creates a Parser over the given token slice
@@ -24,6 +25,9 @@ func New(tokens []lexer.Token) *Parser {
 
 	return p
 }
+
+// SetNoWarnAwaitMatchGuards suppresses the "all await match arms have guards" warning.
+func (p *Parser) SetNoWarnAwaitMatchGuards(v bool) { p.noWarnAwaitMatchGuards = v }
 
 // RegisterNoParensMacro adds an external #no_parens macro to the parser's
 // expansion table. Call after New() and before Parse() to support imported

@@ -259,3 +259,22 @@ void _tin_io_poll(int timeout_ms) {
 int64_t _tin_io_blocked_val(void) {
     return TIN_IO_BLOCKED;
 }
+
+// Exported wrappers for use from stdlib C files compiled outside the runtime
+// umbrella (e.g. stdlib/tcp/tcp.c, stdlib/udp/udp.c, stdlib/unix/unix.c).
+
+void _tin_set_nonblocking(int fd) {
+    _set_nonblocking(fd);
+}
+
+int64_t _tin_async_park_read(int fd) {
+    int64_t pid = _tin_current_pid();
+    if (pid >= 0) _io_park(fd, pid, 1 /* read */);
+    return TIN_IO_BLOCKED;
+}
+
+int64_t _tin_async_park_write(int fd) {
+    int64_t pid = _tin_current_pid();
+    if (pid >= 0) _io_park(fd, pid, 0 /* write */);
+    return TIN_IO_BLOCKED;
+}

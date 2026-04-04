@@ -43,10 +43,10 @@ json::encode(point{x: 3, y: 4})  // "{\"x\":3,\"y\":4}"
 
 ### Nested struct encoding
 
-Top-level struct fields of primitive types are encoded correctly. Fields whose
-type is another struct are encoded as `null` - this is a limitation of the
-reflection system, which resolves field names at compile time but cannot
-enumerate fields of runtime `any` values:
+Nested structs are encoded recursively. The phantom type parameter `T` on the
+internal `_encode_any[T]` helper forces the field dispatch tables to be built
+at the call site (the user's module), giving the encoder access to all
+user-defined struct types at any nesting depth:
 
 ```rust
 struct rect =
@@ -54,11 +54,8 @@ struct rect =
   size   point
 
 json::encode(rect{origin: point{x:0, y:0}, size: point{x:100, y:50}})
-// {"origin":null,"size":null}
+// {"origin":{"x":0,"y":0},"size":{"x":100,"y":50}}
 ```
-
-For nested structures, use untyped encoding per-level or build the JSON
-string manually.
 
 ### Tuple encoding
 
@@ -183,10 +180,19 @@ echo u.name  // "bob"
 Unknown JSON keys are silently ignored. Missing JSON keys leave the
 corresponding struct field at its zero value.
 
-> **Note:** Typed parsing (`parse[T]`) currently supports flat structs with
-> primitive fields (`bool`, `i64`, `f64`, `string`). Nested struct fields are
-> not yet populated via typed parsing; use untyped `parse` + `get` for nested
-> structures.
+### Nested struct parsing
+
+Nested struct fields are decoded recursively:
+
+```rust
+struct rect =
+  origin point
+  size   point
+
+let r = json::parse[rect]("{\"origin\":{\"x\":3,\"y\":4},\"size\":{\"x\":100,\"y\":50}}")
+echo r.origin.x   // 3
+echo r.size.y     // 50
+```
 
 ---
 
@@ -194,13 +200,14 @@ corresponding struct field at its zero value.
 
 Typed parsing maps JSON values to Tin types as follows:
 
-| JSON type          | Tin field types                                         |
-|--------------------|---------------------------------------------------------|
+| JSON type          | Tin field types                                          |
+|--------------------|----------------------------------------------------------|
 | `number` (integer) | `i64`, `i32`, `i16`, `i8` (truncated), `f64` (promoted) |
-| `number` (float)   | `f64`; `i64` (truncated)                                |
-| `bool`             | `bool`                                                  |
-| `string`           | `string`                                                |
-| `null`             | _(field left at zero value)_                            |
+| `number` (float)   | `f64`; `i64` (truncated)                                 |
+| `bool`             | `bool`                                                   |
+| `string`           | `string`                                                 |
+| `null`             | _(field left at zero value)_                             |
+| `object`           | nested struct (decoded recursively)                      |
 
 ---
 

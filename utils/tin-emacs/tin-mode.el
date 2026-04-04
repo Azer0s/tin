@@ -51,7 +51,7 @@
 (defun tin-keywords ()
   "Tin language keywords."
   '("let" "const" "fn" "type" "struct" "trait" "enum" "union"
-    "use" "export" "extern" "return" "if" "else" "for" "in"
+    "use" "from" "export" "extern" "return" "if" "else" "for" "in"
     "match" "case" "default" "defer" "where" "macro" "static"
     "virtual" "as" "is" "forward" "override" "sizeof" "addr"
     "break" "do" "echo" "test" "typeof" "traitof" "fieldnames"
@@ -68,6 +68,38 @@
 (defun tin-constants ()
   "Tin language constants."
   '("true" "false" "nil"))
+
+;;;; Imported macro tracking
+
+(defvar-local tin--imported-macros :unset
+  "Cache of macro names imported via `use { ... } from ...', or :unset if stale.")
+
+(defun tin--collect-imported-macros ()
+  "Scan buffer for `use { ... } from' and return a list of imported names."
+  (let (result)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward
+              "\\buse\\s-*{\\([^}]*\\)}\\s-*from\\b" nil t)
+        (dolist (tok (split-string (match-string-no-properties 1) "," t))
+          (let ((name (string-trim (string-trim-right (string-trim tok) "!"))))
+            (when (string-match-p "^[a-zA-Z_][a-zA-Z0-9_]*$" name)
+              (push name result))))))
+    result))
+
+(defun tin--invalidate-macro-cache (&rest _)
+  "Mark the imported-macro cache as stale."
+  (setq-local tin--imported-macros :unset))
+
+(defun tin--macro-matcher (limit)
+  "Font-lock matcher for names imported via `use { ... } from ...'.
+Only matches NAME! (with bang); plain NAME() is left to the function-call rule."
+  (when (eq tin--imported-macros :unset)
+    (setq-local tin--imported-macros (tin--collect-imported-macros)))
+  (when tin--imported-macros
+    (re-search-forward
+     (concat "\\<\\(" (mapconcat #'regexp-quote tin--imported-macros "\\|") "\\)\\(!\\)")
+     limit t)))
 
 ;;;; Font-lock
 
@@ -116,7 +148,13 @@
 
    ;; Namespace access: module::item  (highlight the namespace part)
    `("\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)::[a-zA-Z_]"
-     (1 font-lock-constant-face))))
+     (1 font-lock-constant-face))
+
+   ;; Names imported via use { x, y! } from ... highlighted as macro calls
+   ;; group 1 = name, group 2 = !; plain name() is left to function-call rule above
+   '(tin--macro-matcher
+     (1 font-lock-function-name-face)
+     (2 font-lock-function-name-face))))
 
 ;;;; Indentation
 ;;
@@ -210,6 +248,7 @@
 Based on simpc-mode by rexim (https://github.com/rexim/simpc-mode)."
   :syntax-table tin-mode-syntax-table
   (setq-local font-lock-defaults '(tin-font-lock-keywords))
+  (add-hook 'after-change-functions #'tin--invalidate-macro-cache nil t)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
   (setq-local comment-start-skip "//+\\s-*")

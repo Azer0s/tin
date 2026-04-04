@@ -80,6 +80,51 @@ The following escape sequences are recognised inside `@'...'`:
 | `\'`   | single quote (39)    |
 | `\0`   | null byte (0)        |
 
+### 8-bit type formatting
+
+The four 8-bit scalar types render differently by default in `echo` and string
+interpolation `{}`. The behaviour mirrors how byte arrays are printed:
+
+| Type   | Default `echo` / `{}` | Example (`@'A'` = 65) |
+|--------|-----------------------|-----------------------|
+| `char` | character (`%c`)      | `A`                   |
+| `byte` | hex lowercase (`%x`)  | `41`                  |
+| `u8`   | decimal (`%d`)        | `65`                  |
+| `i8`   | signed decimal (`%d`) | `65`                  |
+
+```rust
+let c char = @'A'
+let b byte = 0x41
+let u u8   = 65
+
+echo c          // A
+echo b          // 41
+echo u          // 65
+
+echo "{c}"      // A
+echo "{b}"      // 41
+echo "{u}"      // 65
+```
+
+Format specifiers override the default rendering:
+
+```rust
+echo "{c:d}"    // 65    (decimal for a char)
+echo "{b:d}"    // 65    (decimal for a byte; zero-extends)
+echo "{u:x}"    // 41    (hex for u8)
+```
+
+### Appending a byte/char to a string
+
+`++` accepts a `byte`, `char`, or `u8` on either side of a string. The byte
+value is appended as a single raw byte:
+
+```rust
+let c char = @'!'
+let s = "hello" ++ c      // "hello!"
+let s2 = c ++ " world"    // "! world"
+```
+
 ---
 
 ## nil
@@ -227,6 +272,12 @@ echo "{f:e}"       // 3.141590e+00
 ```
 
 Supported specifiers: `d` / `i` (signed int), `u` / `x` / `X` / `o` (unsigned/hex/octal), `f` / `e` / `g` and their uppercase variants (float), `s` (string). A width or precision prefix (e.g. `08`, `.2`) may precede the letter.
+
+For 8-bit types (`char`, `byte`, `u8`, `i8`) the default rendering depends on
+the type (see the 8-bit type formatting table above). Format specifiers always
+override the default: `{c:d}` gives the decimal value of a `char`; `{b:x}`
+gives hex for a `byte`; `{u:d}` gives decimal for a `u8` even though that is
+also the default.
 
 ### Escape sequences in strings
 

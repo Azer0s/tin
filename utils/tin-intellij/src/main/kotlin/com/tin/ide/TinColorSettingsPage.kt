@@ -34,6 +34,7 @@ class TinColorSettingsPage : ColorSettingsPage {
         AttributesDescriptor("Identifier//Variable (plain)",        TinSyntaxHighlighter.IDENTIFIER),
         AttributesDescriptor("Identifier//Function declaration",    TinSyntaxHighlighter.FUNCTION_DECL),
         AttributesDescriptor("Identifier//Function call",           TinSyntaxHighlighter.FUNCTION_CALL),
+        AttributesDescriptor("Identifier//Macro call",              TinSyntaxHighlighter.MACRO_CALL),
         AttributesDescriptor("Identifier//Namespace",               TinSyntaxHighlighter.NAMESPACE),
         AttributesDescriptor("Identifier//Namespace item",          TinSyntaxHighlighter.NAMESPACE_ITEM),
 

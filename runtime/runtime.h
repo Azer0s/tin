@@ -67,6 +67,7 @@ const char *_tin_string_data(TinString s);
 char *_tin_buf_alloc(int64_t n);
 char *_tin_buf_realloc(char *p, int64_t n);
 void  _tin_buf_free(char *p);
+TinSlice _tin_bytes_from_buf(const char *ptr, int64_t len);
 
 // -- Slices
 TinSlice _tin_slice_append(TinSlice s, const void *elem, int64_t elem_size);
@@ -128,9 +129,7 @@ int64_t _tin_async_read(int fd, void *buf, int64_t n);
 int64_t _tin_async_write(int fd, const void *buf, int64_t n);
 int64_t _tin_io_blocked_val(void);
 
-// -- TCP socket helpers
-int32_t _tin_tcp_listen(int32_t port);
-int32_t _tin_tcp_accept(int32_t listen_fd);
+// -- fd close (generic; used by all socket stdlibs)
 void    _tin_fd_close(int32_t fd);
 
 // -- Runtime atom table

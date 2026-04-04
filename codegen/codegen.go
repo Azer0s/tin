@@ -106,20 +106,37 @@ type CodeGen struct {
 	tinRecoverFn *ir.Func
 	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
 	sliceSubsliceFn *ir.Func
+	// bytesFromBufFn is the lazily declared _tin_bytes_from_buf extern.
+	bytesFromBufFn *ir.Func
+	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
+	memsetFn *ir.Func
 
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
 
 	// ARC runtime functions (lazily declared).
-	rcAllocFn             *ir.Func // _tin_rc_alloc(size i64) i8*
-	retainFn              *ir.Func // _tin_retain(ptr i8*)
-	releaseFn             *ir.Func // _tin_release(ptr i8*)
-	releaseFatElemArrayFn *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
-	releaseAnyElemArrayFn *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
-	releaseFnElemArrayFn  *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)
-	releaseClosureFn      *ir.Func // _tin_release_closure(env i8*)
-	releaseAnyFn          *ir.Func // _tin_release_any(tag i32, data i8*)
+	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
+	retainFn                   *ir.Func // _tin_retain(ptr i8*)
+	releaseFn                  *ir.Func // _tin_release(ptr i8*)
+	releaseFatElemArrayFn      *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
+	releaseAnyElemArrayFn      *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
+	releaseFnElemArrayFn       *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)
+	releaseClosureFn           *ir.Func // _tin_release_closure(env i8*)
+	releaseAnyFn               *ir.Func // _tin_release_any(tag i32, data i8*)
+	foreachStructElemReleaseFn *ir.Func // _tin_foreach_struct_elem_release(data i8*, count i64, elem_size i64, fn i8*)
+	releasePtrElemArrayFn      *ir.Func // _tin_release_ptr_elem_array(data i8*, count i64)
+	// per-type array element release helpers: type key -> IR function
+	elemReleaseHelpers map[string]*ir.Func
+
+	// Element retain helpers (for ++ concat when source is non-temporary).
+	retainPtrElemsFn          *ir.Func // _tin_retain_ptr_elems(data i8*, count i64)
+	retainFatElemsFn          *ir.Func // _tin_retain_fat_elems(data i8*, count i64)
+	retainFnElemsFn           *ir.Func // _tin_retain_fn_elems(data i8*, count i64)
+	retainAnyElemsFn          *ir.Func // _tin_retain_any_elems(data i8*, count i64)
+	foreachStructElemRetainFn *ir.Func // _tin_foreach_struct_elem_retain(data i8*, count i64, elem_size i64, fn i8*)
+	// per-type array element retain helpers: type key -> IR function
+	elemRetainHelpers map[string]*ir.Func
 
 	// module system
 	// exports: localName -> packageName  (from ExportDecl)
@@ -341,8 +358,9 @@ type CodeGen struct {
 	// breakStack is a stack of "after" blocks for the innermost enclosing loop.
 	// pushBreak/popBreak are called around loop body generation; genBreakStmt
 	// emits a branch to the top of the stack so break works correctly.
-	breakStack     []*ir.Block
-	breakUsedStack []bool // parallel to breakStack: true if any break was emitted
+	breakStack      []*ir.Block
+	breakUsedStack  []bool   // parallel to breakStack: true if any break was emitted
+	breakScopeStack []*scope // parallel to breakStack: scope before the loop body (break releases up to here)
 
 	// topLevelVarInits: deferred runtime-expression initializers for top-level
 	// var declarations. They are emitted at the top of implicit/explicit main.
@@ -381,9 +399,19 @@ type topLevelVarInit struct {
 
 // pushBreakTarget pushes afterBlock onto the break stack before generating a
 // loop body.  The matching popBreakTarget must be called after.
+// Must be called after the loop body scope has been pushed (cg.curScope is the
+// body scope), so that cg.curScope.parent is the scope before the loop.
 func (cg *CodeGen) pushBreakTarget(afterBlock *ir.Block) {
 	cg.breakStack = append(cg.breakStack, afterBlock)
 	cg.breakUsedStack = append(cg.breakUsedStack, false)
+	// Record the scope before the loop body so that break can release
+	// all variables declared inside the loop up to (not including) this scope.
+	var outerScope *scope
+	if cg.curScope != nil {
+		outerScope = cg.curScope.parent
+	}
+
+	cg.breakScopeStack = append(cg.breakScopeStack, outerScope)
 }
 
 // popBreakTarget removes the innermost break target after loop body generation.
@@ -396,6 +424,7 @@ func (cg *CodeGen) popBreakTarget() bool {
 	used := cg.breakUsedStack[len(cg.breakUsedStack)-1]
 	cg.breakStack = cg.breakStack[:len(cg.breakStack)-1]
 	cg.breakUsedStack = cg.breakUsedStack[:len(cg.breakUsedStack)-1]
+	cg.breakScopeStack = cg.breakScopeStack[:len(cg.breakScopeStack)-1]
 
 	return used
 }
@@ -407,6 +436,17 @@ func (cg *CodeGen) currentBreakTarget() *ir.Block {
 	}
 
 	return cg.breakStack[len(cg.breakStack)-1]
+}
+
+// currentBreakScope returns the scope before the innermost loop body, or nil.
+// On break, variables in scopes from cg.curScope up to (not including) this scope
+// must be released before branching to the break target.
+func (cg *CodeGen) currentBreakScope() *scope {
+	if len(cg.breakScopeStack) == 0 {
+		return nil
+	}
+
+	return cg.breakScopeStack[len(cg.breakScopeStack)-1]
 }
 
 // markBreakUsed records that a break was emitted to the current break target.
@@ -555,6 +595,8 @@ func New(filename string) *CodeGen {
 		overloads:                make(map[string][]*overloadEntry),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		elemReleaseHelpers:       make(map[string]*ir.Func),
+		elemRetainHelpers:        make(map[string]*ir.Func),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")

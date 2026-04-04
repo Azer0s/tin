@@ -106,7 +106,13 @@ C API (in `runtime/runtime.c`):
 | `_tin_learn_atom(const char*)`      | Search list; if absent compute CRC32, add node, return code |
 | `_tin_rt_atom_to_str(int32_t code)` | Return the string for a runtime-learned code, or NULL       |
 
-New strings are `strdup`'d so the caller's storage does not need to persist.
+Each node allocates its string as an immortal ARC block (`_tin_rc_alloc` with
+`rc = TIN_IMMORTAL_RC`) so that `_tin_retain`/`_tin_release` on the string are
+safe no-ops. The node stores both `hdr` (the head of the `malloc` block) and
+`str` (`hdr + 1`, the usable string data). Keeping the head pointer in the
+node ensures valgrind can see a pointer to the start of each allocation and
+classifies the atoms as "still reachable" rather than "possibly lost" at
+program exit.
 
 ## Extern conversion
 

@@ -7,19 +7,19 @@ cheap (a few dozen instructions, no OS context switch).
 
 ### Environment variables
 
-| Variable            | Default | `=0` meaning      | Description                                              |
-|---------------------|---------|-------------------|----------------------------------------------------------|
-| `TINMAXPROCS`       | nproc   | n/a               | Number of worker OS threads                              |
-| `TINMAXFIBERS`      | 1M      | panic             | Maximum concurrent fibers before panic                   |
-| `TINMAXRUNNABLES`   | 1M      | **unlimited**     | Maximum entries in the run queue before panic            |
-| `TINMAXTIMERS`      | 1M      | panic             | Maximum simultaneous `sleep` timers before panic         |
-| `TINMAXIOWATCHES`   | 64K     | panic             | Maximum simultaneous async I/O watches before panic      |
-| `TINMAXCHANWAITERS` | 64K     | **unlimited**     | Maximum fibers parked per channel waiter queue before panic |
+| Variable            | Default | `=0` meaning  | Description                                                 |
+|---------------------|---------|---------------|-------------------------------------------------------------|
+| `TINMAXPROCS`       | nproc   | n/a           | Number of worker OS threads                                 |
+| `TINMAXFIBERS`      | 1M      | panic         | Maximum concurrent fibers before panic                      |
+| `TINMAXRUNNABLES`   | 1M      | **unlimited** | Maximum entries in the run queue before panic               |
+| `TINMAXTIMERS`      | 1M      | panic         | Maximum simultaneous `sleep` timers before panic            |
+| `TINMAXIOWATCHES`   | 64K     | panic         | Maximum simultaneous async I/O watches before panic         |
+| `TINMAXCHANWAITERS` | 64K     | **unlimited** | Maximum fibers parked per channel waiter queue before panic |
 
 All queues grow dynamically (doubling on demand) up to their cap, then
 `panic()` with a message naming the variable to raise.
 
-`TINMAXRUNNABLES=0` and `TINMAXCHANWAITERS=0` disable the cap entirely —
+`TINMAXRUNNABLES=0` and `TINMAXCHANWAITERS=0` disable the cap entirely -
 the queue grows without bound and never panics (pre-cap behaviour).
 
 ```sh
@@ -620,6 +620,102 @@ let v = await r   // calls r.await_result() -> 42
 | `AtomicI64` | Lock-free 64-bit integer (C11 atomics)               |
 | `Future[T]` | Typed future from `spawn`; implements `Awaitable[T]` |
 | `Unit`      | Placeholder return type for void async functions     |
+
+---
+
+## await match
+
+`await match` selects among multiple futures: it blocks until one of them
+completes, then dispatches to the matching arm. Each arm binds exactly one
+future's result; wildcards (`_`) fill the remaining slots.
+
+```rust
+use { async } from macros
+use io
+
+async slow(n i64) i64 =
+  await io::sleep(10)
+  return n
+
+fn{#async} main() =
+  let a = spawn slow(1)
+  let b = spawn slow(2)
+
+  await match [a, b]:
+    case [x, _]:   echo "a finished first: {x}"
+    case [_, y]:   echo "b finished first: {y}"
+```
+
+### Syntax
+
+```
+await match [expr, expr, ...]:
+  case [slot, slot, ...]:          body
+  case [slot, slot, ...] if guard: body
+  default:                         body
+```
+
+- The bracketed list must be an **inline literal** - no array variables or
+  computed expressions.
+- Each `case` must have **exactly one** non-wildcard slot. The bound variable
+  receives the result of the future at that position (its type is inferred from
+  the future's type parameter).
+- Multiple `case` arms can match the same slot position (e.g., for guards).
+- Futures may be **heterogeneous** (`Future[i64]` and `Future[string]` in the
+  same list are fine).
+
+### Blocking semantics (no `default`)
+
+Without `default`, `await match` blocks until a future completes **and** a
+guard passes:
+
+1. Poll all futures once; if one is already done and its guard passes,
+   dispatch immediately.
+2. Otherwise block until any future completes, check its arms (in order);
+   if a guard fails, mark that future as skipped and keep blocking.
+3. If every future has completed and no arm's guard passed, the program
+   panics at runtime.
+
+The compiler emits a warning when **every** case arm has a guard and there is
+no `default` arm (because the exhaustion panic becomes reachable):
+
+```
+warning: every await match arm has a guard and there is no default arm ...
+```
+
+Suppress this warning with `-Wno-await-match-guards`.
+
+### Non-blocking semantics (`default`)
+
+With `default`, `await match` performs a **single non-blocking check**: it
+polls all futures once and dispatches to the first arm whose future is done
+and guard passes. If nothing is actionable, `default` runs immediately.
+
+```rust
+await match [a, b, c]:
+  case [x, _, _] if x > 0: echo "a done: {x}"
+  case [_, y, _]:           echo "b done: {y}"
+  case [_, _, z]:           echo "c done: {z}"
+  default:                  echo "nothing ready yet"
+```
+
+### Guards
+
+Guards filter the arm without affecting which future is considered done. A
+guard failure causes the runtime to skip that arm and continue waiting (in
+blocking mode) or fall through to `default` (in non-blocking mode).
+
+```rust
+let a = spawn slow(10)
+let b = spawn slow(20)
+let got i64 = 0
+
+await match [a, b]:
+  case [x, _] if x > 5:  got = x
+  case [x, _]:            got = -1   // unguarded fallback for a
+  case [_, y] if y > 5:  got = y
+  case [_, y]:            got = -2   // unguarded fallback for b
+```
 
 ---
 

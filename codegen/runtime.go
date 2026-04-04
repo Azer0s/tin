@@ -158,6 +158,288 @@ func (cg *CodeGen) ensureReleaseAny() *ir.Func {
 	return cg.releaseAnyFn
 }
 
+// ensureForeachStructElemRelease lazily declares
+// _tin_foreach_struct_elem_release(data i8*, count i64, elem_size i64, release_fn i8*).
+// The C function atomically decrements the outer array RC; when RC hits 0, calls
+// release_fn on each element (in-place pointer) then frees the buffer.
+func (cg *CodeGen) ensureForeachStructElemRelease() *ir.Func {
+	if cg.foreachStructElemReleaseFn != nil {
+		return cg.foreachStructElemReleaseFn
+	}
+
+	cg.foreachStructElemReleaseFn = cg.ensureExternDecl("_tin_foreach_struct_elem_release", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("data", irtypes.I8Ptr),
+			ir.NewParam("count", irtypes.I64),
+			ir.NewParam("elem_size", irtypes.I64),
+			ir.NewParam("release_fn", irtypes.I8Ptr),
+		}, false)
+
+	return cg.foreachStructElemReleaseFn
+}
+
+// ensureReleasePtrElemArray lazily declares _tin_release_ptr_elem_array(data i8*, count i64).
+// Decrements the outer buffer RC; when RC hits 0, calls _tin_release on each pointer
+// element and frees the buffer.  All pointer elements must be heap-allocated.
+func (cg *CodeGen) ensureReleasePtrElemArray() *ir.Func {
+	if cg.releasePtrElemArrayFn != nil {
+		return cg.releasePtrElemArrayFn
+	}
+
+	cg.releasePtrElemArrayFn = cg.ensureExternDecl("_tin_release_ptr_elem_array", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.releasePtrElemArrayFn
+}
+
+// --- Element retain helpers (for ++ concat from non-temporary sources) ---
+
+func (cg *CodeGen) ensureRetainPtrElems() *ir.Func {
+	if cg.retainPtrElemsFn != nil {
+		return cg.retainPtrElemsFn
+	}
+
+	cg.retainPtrElemsFn = cg.ensureExternDecl("_tin_retain_ptr_elems", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.retainPtrElemsFn
+}
+
+func (cg *CodeGen) ensureRetainFatElems() *ir.Func {
+	if cg.retainFatElemsFn != nil {
+		return cg.retainFatElemsFn
+	}
+
+	cg.retainFatElemsFn = cg.ensureExternDecl("_tin_retain_fat_elems", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.retainFatElemsFn
+}
+
+func (cg *CodeGen) ensureRetainFnElems() *ir.Func {
+	if cg.retainFnElemsFn != nil {
+		return cg.retainFnElemsFn
+	}
+
+	cg.retainFnElemsFn = cg.ensureExternDecl("_tin_retain_fn_elems", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.retainFnElemsFn
+}
+
+func (cg *CodeGen) ensureRetainAnyElems() *ir.Func {
+	if cg.retainAnyElemsFn != nil {
+		return cg.retainAnyElemsFn
+	}
+
+	cg.retainAnyElemsFn = cg.ensureExternDecl("_tin_retain_any_elems", irtypes.Void,
+		[]*ir.Param{ir.NewParam("data", irtypes.I8Ptr), ir.NewParam("count", irtypes.I64)}, false)
+
+	return cg.retainAnyElemsFn
+}
+
+func (cg *CodeGen) ensureForeachStructElemRetain() *ir.Func {
+	if cg.foreachStructElemRetainFn != nil {
+		return cg.foreachStructElemRetainFn
+	}
+
+	cg.foreachStructElemRetainFn = cg.ensureExternDecl("_tin_foreach_struct_elem_retain", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("data", irtypes.I8Ptr),
+			ir.NewParam("count", irtypes.I64),
+			ir.NewParam("elem_size", irtypes.I64),
+			ir.NewParam("retain_fn", irtypes.I8Ptr),
+		}, false)
+
+	return cg.foreachStructElemRetainFn
+}
+
+// ensureElemRetainHelper returns (or generates) a private IR function that,
+// given a pointer to one element of type t, retains its ARC-tracked fields.
+// This mirrors ensureElemReleaseHelper but calls retain instead of release.
+func (cg *CodeGen) ensureElemRetainHelper(t irtypes.Type) *ir.Func {
+	key := cg.elemTypeKey(t)
+	if fn, ok := cg.elemRetainHelpers[key]; ok {
+		return fn
+	}
+
+	name := "__tin_retain_elem_" + key
+	param := ir.NewParam("elem", irtypes.I8Ptr)
+	fn := cg.mod.NewFunc(name, irtypes.Void, param)
+	fn.Linkage = enum.LinkagePrivate
+	// Pre-register to handle recursive types.
+	cg.elemRetainHelpers[key] = fn
+
+	entryBlock := fn.NewBlock("entry")
+	elemI8 := fn.Params[0]
+
+	savedScope := cg.curScope
+	cg.curScope = cg.moduleScope
+
+	if _, isPtr := t.(*irtypes.PointerType); isPtr {
+		// Pointer element: retain the pointer value itself (it's an ARC heap ptr).
+		entryBlock.NewCall(cg.ensureRetain(), elemI8)
+	} else {
+		// Load the element value and call emitRetain on it.
+		typedPtr := entryBlock.NewBitCast(elemI8, irtypes.NewPointer(t))
+		elemVal := entryBlock.NewLoad(t, typedPtr)
+		cg.emitRetain(entryBlock, elemVal)
+	}
+
+	cg.curScope = savedScope
+
+	entryBlock.NewRet(nil)
+
+	return fn
+}
+
+// emitRetainElemSlice emits calls to retain each element in [data, data+count)
+// for arrays shared by a non-temporary source after ++ concatenation.
+// dataI8Ptr must point to the start of the element slice in the new buffer.
+func (cg *CodeGen) emitRetainElemSlice(block *ir.Block, dataI8Ptr value.Value, count value.Value, elemT irtypes.Type) {
+	if isAnyType(elemT) {
+		block.NewCall(cg.ensureRetainAnyElems(), dataI8Ptr, count)
+
+		return
+	}
+
+	if isFatFnPtr(elemT) {
+		block.NewCall(cg.ensureRetainFnElems(), dataI8Ptr, count)
+
+		return
+	}
+
+	if isStringType(elemT) || isFatArrayPtr(elemT) {
+		block.NewCall(cg.ensureRetainFatElems(), dataI8Ptr, count)
+
+		return
+	}
+
+	if _, isPtr := elemT.(*irtypes.PointerType); isPtr {
+		block.NewCall(cg.ensureRetainPtrElems(), dataI8Ptr, count)
+
+		return
+	}
+
+	if cg.elemNeedsRelease(elemT) {
+		helper := cg.ensureElemRetainHelper(elemT)
+		elemSize := cg.llvmSizeOf(block, elemT)
+		helperI8 := block.NewBitCast(helper, irtypes.I8Ptr)
+		block.NewCall(cg.ensureForeachStructElemRetain(), dataI8Ptr, count, elemSize, helperI8)
+	}
+}
+
+// elemTypeKey returns a stable unique string key for any LLVM type, used to
+// cache per-type element release helpers.
+func (cg *CodeGen) elemTypeKey(t irtypes.Type) string {
+	switch v := t.(type) {
+	case *irtypes.StructType:
+		if v.Name() != "" {
+			return v.Name()
+		}
+
+		if isFatArrayPtr(t) {
+			pt := v.Fields[0].(*irtypes.PointerType)
+
+			return "fatarray__" + cg.elemTypeKey(pt.ElemType)
+		}
+
+		return fmt.Sprintf("anon_%p", t)
+	case *irtypes.PointerType:
+		return "ptr__" + cg.elemTypeKey(v.ElemType)
+	case *irtypes.IntType:
+		return fmt.Sprintf("i%d", v.BitSize)
+	case *irtypes.FloatType:
+		return v.Kind.String()
+	default:
+		return fmt.Sprintf("t%p", t)
+	}
+}
+
+// ensureElemReleaseHelper lazily generates (or returns) a private IR function
+// `__tin_release_<key>_elem(i8* elem_ptr)` that loads an element from the
+// given pointer and calls emitRelease on it.  Works for any element type:
+// named structs, fat arrays (nested arrays like [[T]]), and raw pointers (*T).
+//
+// The helper is registered before its body is generated so that self-referential
+// types (e.g. json::Value containing [Value]) don't produce infinite recursion.
+func (cg *CodeGen) ensureElemReleaseHelper(t irtypes.Type) *ir.Func {
+	key := cg.elemTypeKey(t)
+	if fn, ok := cg.elemReleaseHelpers[key]; ok {
+		return fn
+	}
+
+	helperName := "__tin_release_" + key + "_elem"
+	param := ir.NewParam("elem_ptr", irtypes.I8Ptr)
+	fn := cg.mod.NewFunc(helperName, irtypes.Void, param)
+	fn.Linkage = enum.LinkagePrivate
+
+	// Register BEFORE generating the body to break potential recursion.
+	cg.elemReleaseHelpers[key] = fn
+
+	entry := fn.NewBlock("entry")
+
+	typedPtr := entry.NewBitCast(param, irtypes.NewPointer(t))
+
+	if pt, isPtr := t.(*irtypes.PointerType); isPtr {
+		// Pointer element: the stored value is the ARC data ptr itself.
+		// Load the pointer value, then release the inner struct's RC fields
+		// (if any) before freeing the outer block.
+		ptrVal := entry.NewLoad(t, typedPtr)
+
+		innerType := pt.ElemType
+		if cg.elemNeedsRelease(innerType) {
+			// Inner struct has RC fields: load it and release them first.
+			innerVal := entry.NewLoad(innerType, ptrVal)
+
+			savedFn := cg.curFn
+			savedScope := cg.curScope
+			cg.curFn = fn
+			cg.curScope = cg.moduleScope
+
+			cg.emitRelease(entry, innerVal)
+
+			cg.curFn = savedFn
+			cg.curScope = savedScope
+		}
+
+		ptrI8 := entry.NewBitCast(ptrVal, irtypes.I8Ptr)
+		entry.NewCall(cg.ensureRelease(), ptrI8)
+	} else {
+		val := entry.NewLoad(t, typedPtr)
+
+		savedFn := cg.curFn
+		savedScope := cg.curScope
+		cg.curFn = fn
+		cg.curScope = cg.moduleScope
+
+		cg.emitRelease(entry, val)
+
+		cg.curFn = savedFn
+		cg.curScope = savedScope
+	}
+
+	entry.NewRet(nil)
+
+	return fn
+}
+
+// emitGenericFatArrayRelease releases a fat array whose elements require
+// element-level ARC cleanup beyond a simple _tin_release of their data pointer.
+// This covers: named structs with RC fields, nested fat arrays ([[T]]), and
+// raw ARC-managed pointers ([*T]).  It calls _tin_foreach_struct_elem_release
+// with a compiler-generated per-type helper so each element is properly
+// decremented when the last owner drops the array.
+func (cg *CodeGen) emitGenericFatArrayRelease(block *ir.Block, val value.Value, elemType irtypes.Type) {
+	dataPtr := block.NewExtractValue(val, 0)
+	length := block.NewExtractValue(val, 1)
+	dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
+	elemSize := cg.llvmSizeOf(block, elemType)
+	releaseFn := cg.ensureElemReleaseHelper(elemType)
+	releaseFnI8 := block.NewBitCast(releaseFn, irtypes.I8Ptr)
+	block.NewCall(cg.ensureForeachStructElemRelease(), dataPtrI8, length, elemSize, releaseFnI8)
+}
+
 // isRCTrackedType returns true for types whose heap data is ARC-managed:
 //   - strings      {i8*, i64}           - ptr is either immortal (-1 sentinel) or rc-alloc'd
 //   - fat arrays   {T*,  i64}           - ptr is always rc-alloc'd
@@ -198,11 +480,17 @@ func isCopyExpr(node ast.Node) bool {
 		// double-freeing the underlying string.
 		return isCopyExpr(n.Expr)
 	case *ast.DerefExpr:
-		// Dereferencing a pointer (*ptr) loads an ARC-managed value that is still
-		// owned by the pointee.  The caller must retain to get an independent copy;
-		// without a retain, both the new variable and the original heap block will
-		// release the same inner RC pointers, causing a double-free.
-		return true
+		// Dereferencing a named pointer variable (*ptr): the pointee still owns
+		// the RC references for all inner fields.  Retain so the caller gets an
+		// independent copy; without a retain, both the new variable and the
+		// original pointee would release the same inner RC pointers (double-free).
+		//
+		// Dereferencing a temporary (*call()): genDerefExpr freed the outer RC block
+		// immediately after loading, transferring sole ownership of the inner fields
+		// to the loaded value.  No retain is needed - the loaded value already owns
+		// its fields at RC=1.  Retaining here would cause RC=2 with only one release,
+		// leaking the inner allocations.
+		return !isTemporaryProducer(n.Expr)
 	}
 
 	return false
@@ -244,7 +532,9 @@ func isTemporaryProducer(node ast.Node) bool {
 // load entirely rather than loading and then emitting nothing.
 func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 	switch elemType.(type) {
-	case *irtypes.IntType, *irtypes.FloatType, *irtypes.PointerType:
+	case *irtypes.IntType, *irtypes.FloatType, *irtypes.PointerType, *irtypes.ArrayType:
+		// Fixed-size arrays ([byte; N] etc.) are value types: never RC-tracked,
+		// never need a scope release.
 		return false
 	}
 	// RC-tracked fat types (strings, arrays, closures, any): always need release.
@@ -400,21 +690,54 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 		if st, ok := t.(*irtypes.StructType); ok {
 			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
 				elemType := pt.ElemType
-				if isRCTrackedType(elemType) {
-					dataPtr := block.NewExtractValue(val, 0)
-					length := block.NewExtractValue(val, 1)
+				// Dispatch to the most specific release function for the element type.
+				// All combined functions handle the outer buffer free - don't also
+				// call _tin_release after returning.
+				dataPtr := block.NewExtractValue(val, 0)
+				length := block.NewExtractValue(val, 1)
+				dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
 
-					dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
-					if isAnyType(elemType) {
-						block.NewCall(cg.ensureReleaseAnyElemArray(), dataPtrI8, length)
-					} else if isFatFnPtr(elemType) {
-						// Array of closures: env is field 1 (offset 8); use dedicated fn.
-						block.NewCall(cg.ensureReleaseFnElemArray(), dataPtrI8, length)
-					} else {
-						// string {i8*,i64} or nested fat array {T*,i64}: field 0 is RC ptr
-						block.NewCall(cg.ensureReleaseFatElemArray(), dataPtrI8, length)
+				if isAnyType(elemType) {
+					// [any]: tag-aware release handles closure envs
+					block.NewCall(cg.ensureReleaseAnyElemArray(), dataPtrI8, length)
+
+					return
+				}
+
+				if isFatFnPtr(elemType) {
+					// [fn]: closure env is at field 1 (offset 8)
+					block.NewCall(cg.ensureReleaseFnElemArray(), dataPtrI8, length)
+
+					return
+				}
+
+				if isStringType(elemType) {
+					// [string]: string data pointer is at field 0 - optimized path
+					block.NewCall(cg.ensureReleaseFatElemArray(), dataPtrI8, length)
+
+					return
+				}
+
+				if pt2, isPtr := elemType.(*irtypes.PointerType); isPtr {
+					// [*T]: check if the inner type T has RC fields that need
+					// deep release (load T, release its fields, free the block).
+					if cg.elemNeedsRelease(pt2.ElemType) {
+						cg.emitGenericFatArrayRelease(block, val, elemType)
+
+						return
 					}
-					// Combined function handles outer block free - don't call _tin_release.
+
+					// T has no RC fields: raw pointer release suffices.
+					block.NewCall(cg.ensureReleasePtrElemArray(), dataPtrI8, length)
+
+					return
+				}
+
+				if cg.elemNeedsRelease(elemType) {
+					// [[T]] nested arrays or structs with RC fields: per-element helper
+					// correctly recurses into inner element types at any depth.
+					cg.emitGenericFatArrayRelease(block, val, elemType)
+
 					return
 				}
 			}
@@ -596,6 +919,26 @@ func (cg *CodeGen) ensureMemcpy() *ir.Func {
 	)
 	f.Blocks = nil
 	cg.memcpyFn = f
+
+	return f
+}
+
+// ensureMemset lazily declares the llvm.memset.p0.i64 intrinsic.
+// Used to zero-initialize large fixed-size arrays without generating huge
+// aggregate-value stores that crash or hang LLVM's instruction selector.
+func (cg *CodeGen) ensureMemset() *ir.Func {
+	if cg.memsetFn != nil {
+		return cg.memsetFn
+	}
+
+	f := cg.mod.NewFunc("llvm.memset.p0.i64", irtypes.Void,
+		ir.NewParam("dst", irtypes.I8Ptr),
+		ir.NewParam("val", irtypes.I8),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("isvolatile", irtypes.I1),
+	)
+	f.Blocks = nil
+	cg.memsetFn = f
 
 	return f
 }
@@ -798,6 +1141,24 @@ func (cg *CodeGen) ensureRecoverFn() *ir.Func {
 // deferred function, or an empty string if not currently panicking.
 func (cg *CodeGen) genBuiltinRecover(block *ir.Block) (value.Value, error) {
 	return block.NewCall(cg.ensureRecoverFn()), nil
+}
+
+// ensureBytesFromBuf lazily declares _tin_bytes_from_buf(ptr *i8, len i64) {i8*, i64}.
+// Copies len bytes from ptr into a new RC-allocated heap buffer and returns
+// a fat [byte] slice.  Used to convert fixed-size stack arrays to [byte].
+func (cg *CodeGen) ensureBytesFromBuf() *ir.Func {
+	if cg.bytesFromBufFn != nil {
+		return cg.bytesFromBufFn
+	}
+
+	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	cg.bytesFromBufFn = cg.mod.NewFunc("_tin_bytes_from_buf", sliceType,
+		ir.NewParam("ptr", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+	)
+	cg.bytesFromBufFn.Blocks = nil
+
+	return cg.bytesFromBufFn
 }
 
 // ensureSnprintf lazily declares the snprintf external function.

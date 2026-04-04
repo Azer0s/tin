@@ -171,7 +171,18 @@ func printNode(n Node, depth int) string {
 			ret = " " + v.RetType.String()
 		}
 
-		sig := fmt.Sprintf("%sfn %s(%s)%s", ind(depth), v.Name, strings.Join(params, ", "), ret)
+		tagStr := ""
+
+		if len(v.Tags) > 0 {
+			tagParts := make([]string, len(v.Tags))
+			for i, t := range v.Tags {
+				tagParts[i] = "#" + t
+			}
+
+			tagStr = "{" + strings.Join(tagParts, " ") + "}"
+		}
+
+		sig := fmt.Sprintf("%sfn%s %s(%s)%s", ind(depth), tagStr, v.Name, strings.Join(params, ", "), ret)
 		if v.IsExtern != "" {
 			return sig + " = extern(\"" + v.IsExtern + "\")"
 		}
@@ -276,6 +287,39 @@ func printNode(n Node, depth int) string {
 		return fmt.Sprintf("return %s", printNode(v.Value, depth))
 	case *BreakStmt:
 		return "break"
+	case *AwaitMatchStmt:
+		parts := make([]string, len(v.Futures))
+		for i, f := range v.Futures {
+			parts[i] = printNode(f, 0)
+		}
+
+		var sb strings.Builder
+
+		_, _ = fmt.Fprintf(&sb, "await match [%s]:\n", strings.Join(parts, ", "))
+
+		for _, c := range v.Cases {
+			slots := make([]string, len(v.Futures))
+			for i := range slots {
+				slots[i] = "_"
+			}
+
+			slots[c.SlotIdx] = c.BindName
+
+			guard := ""
+			if c.Guard != nil {
+				guard = fmt.Sprintf(" if %s", printNode(c.Guard, 0))
+			}
+
+			_, _ = fmt.Fprintf(&sb, "%scase [%s]%s:\n%s\n",
+				ind(depth+1), strings.Join(slots, ", "), guard,
+				printBlockBody(c.Body, depth+2))
+		}
+
+		if v.Default != nil {
+			_, _ = fmt.Fprintf(&sb, "%sdefault:\n%s", ind(depth+1), printBlockBody(v.Default, depth+2))
+		}
+
+		return sb.String()
 	case *DeferStmt:
 		return fmt.Sprintf("defer %s", printNode(v.Call, depth))
 	case *AssignStmt:
@@ -320,6 +364,22 @@ func printNode(n Node, depth int) string {
 		return fmt.Sprintf("await %s", printNode(v.Future, depth))
 	case *YieldStmt:
 		return "yield"
+	case *ArrayPattern:
+		parts := make([]string, len(v.Elems))
+		for i, e := range v.Elems {
+			switch {
+			case e.IsRest && (e.Name == "" || e.IsWild):
+				parts[i] = "..."
+			case e.IsRest:
+				parts[i] = "..." + e.Name
+			case e.IsWild:
+				parts[i] = "_"
+			default:
+				parts[i] = e.Name
+			}
+		}
+
+		return "[" + strings.Join(parts, ", ") + "]"
 	default:
 		return fmt.Sprintf("/* unhandled: %T */", n)
 	}

@@ -767,14 +767,7 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 
 		return constant.NewStruct(st, fields...)
 	case irtypes.IsArray(t):
-		at := t.(*irtypes.ArrayType)
-
-		elems := make([]constant.Constant, at.Len)
-		for i := range elems {
-			elems[i] = cg.zeroValue(at.ElemType).(constant.Constant)
-		}
-
-		return constant.NewArray(at, elems...)
+		return constant.NewZeroInitializer(t)
 	}
 
 	return constant.NewInt(irtypes.I64, 0)
@@ -798,6 +791,23 @@ func byteArrayElemType(t ast.TypeExpr) string {
 
 	switch st.Name {
 	case "byte", "u8", "char":
+		return st.Name
+	}
+
+	return ""
+}
+
+// scalar8BitTypeName returns the Tin type name for 8-bit scalar types:
+// "char", "byte", "u8", or "i8".  Returns "" for all other types.
+// Used to dispatch printf format in interpolation/echo: char->%c, byte->%x, u8/%u/i8->%d.
+func scalar8BitTypeName(t ast.TypeExpr) string {
+	st, ok := t.(*ast.SimpleType)
+	if !ok {
+		return ""
+	}
+
+	switch st.Name {
+	case "char", "byte", "u8", "i8":
 		return st.Name
 	}
 

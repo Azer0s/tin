@@ -170,13 +170,14 @@ preferred.
 `isRCTrackedType` (`codegen/runtime.go`) determines whether the compiler
 inserts retain/release calls for a value of a given type:
 
-| LLVM type                  | Tin type            | ARC-tracked? | Notes                               |
-|----------------------------|---------------------|--------------|-------------------------------------|
-| `{i8*, i64}`               | `string` / `atom`   | Yes          | ptr may be immortal or rc-alloc'd   |
-| `{T*, i64}`                | `[T]` (typed array) | Yes          | ptr always rc-alloc'd               |
-| `{i32, i8*}`               | `any`               | Yes          | ptr always rc-alloc'd (boxed value) |
-| Named struct               | user-defined struct | Indirect     | Fields checked recursively          |
-| `i64`, `f64`, `bool`, etc. | primitives          | No           | value types, no heap                |
+| LLVM type                  | Tin type             | ARC-tracked? | Notes                                       |
+|----------------------------|----------------------|--------------|---------------------------------------------|
+| `{i8*, i64}`               | `string` / `atom`    | Yes          | ptr may be immortal or rc-alloc'd           |
+| `{T*, i64}`                | `[T]` (typed array)  | Yes          | ptr always rc-alloc'd                       |
+| `{i32, i8*}`               | `any`                | Yes          | ptr always rc-alloc'd (boxed value)         |
+| `T*`                       | `*T` in `[*T]` array | In-array     | Element pointer must be heap-allocated; see below |
+| Named struct               | user-defined struct  | Indirect     | Fields checked recursively                  |
+| `i64`, `f64`, `bool`, etc. | primitives           | No           | value types, no heap                        |
 
 For **named structs**, `walkRCStructFields` recursively retains/releases any
 fields whose types are ARC-tracked. A struct is never itself ARC-managed -
@@ -203,6 +204,8 @@ The codegen (`codegen/runtime.go`) inserts ARC calls at these points:
 | Return value                                               | retain before returning; caller takes ownership |
 | Temporary result from `++` or function call used in `echo` | `_tin_release(temp)` after use                  |
 | Function argument passing                                  | no retain (callee borrows, not owns)            |
+| Method called on temporary struct receiver (`tmp.method()`) | `emitRelease(tmp)` after the outer call        |
+| `*ptr` when `ptr` is a temporary producer                  | `_tin_release(ptr)` on the outer allocation     |
 
 This follows a **caller-retain, callee-borrows** model. Ownership transfers
 happen explicitly at assignment and scope exit.
@@ -303,3 +306,185 @@ on the receiving variable and releases it at scope exit instead.
 | `codegen/funcs.go` | Sets `cg.curFnEscapingVars` before compiling each function body                                                                              |
 | `codegen/coro.go`  | `llvmSizeOf` - GEP null-pointer trick to compute `sizeof(T)` as an LLVM value                                                                |
 | `codegen/scope.go` | `noRelease` field on `scopeEntry` prevents scope-exit free                                                                                   |
+
+---
+
+## Fat array element release
+
+When a fat array `[T]` is released, the correct action depends on the element
+type `T`. The outer buffer always carries an ARC header (allocated with
+`_tin_rc_alloc`); only the **last owner** (RC hits 0) runs element cleanup.
+
+### Element release dispatch (`emitReleaseInner`)
+
+`emitReleaseInner` in `codegen/runtime.go` selects the appropriate C function
+based on the element type:
+
+| Element type `T`                | C function called                    | Notes                                           |
+|---------------------------------|--------------------------------------|-------------------------------------------------|
+| `string` `{i8*, i64}`          | `_tin_release_fat_elem_array`        | Releases string data ptr at offset 0            |
+| `any` `{i32, i8*}`             | `_tin_release_any_elem_array`        | Tag-aware; handles closure envs inside `any`    |
+| closure `{fn*, i8*}`           | `_tin_release_fn_elem_array`         | Releases env ptr at offset 8                    |
+| `*T` raw pointer                | `_tin_release_ptr_elem_array`        | Each element is itself an ARC data ptr          |
+| `[T]` nested array or struct    | `_tin_foreach_struct_elem_release`   | Per-type IR helper; recurses to any depth       |
+
+All of these functions share the same outer-RC gate: they atomically decrement
+the buffer's RC and only run element cleanup when the count reaches zero.
+Concurrent copies of the array all hold a reference; only the last release
+triggers element cleanup, preventing double-free.
+
+### N-dimensional arrays (`[[T]]`, `[[[T]]]`, ...)
+
+Nested arrays like `[[string]]` are not a special case - they fall into the
+generic `_tin_foreach_struct_elem_release` path.
+
+At compile time, `emitGenericFatArrayRelease` generates a private IR helper
+`__tin_release_<type_key>_elem(i8* elem_ptr)` for the element type.
+The helper loads the element in-place and calls `emitRelease` on it, which in
+turn dispatches to the correct C function for that element type. Because the
+dispatch is recursive, any nesting depth is handled correctly with no
+special-casing.
+
+Example for `[[string]]`:
+```
+// outer: [string-array-element]
+_tin_foreach_struct_elem_release(outer_data, outer_len, sizeof({i8**,i64}),
+                                 __tin_release_fatarray__i8__elem)
+
+// generated helper:
+void __tin_release_fatarray__i8__elem(i8 *elem_ptr) {
+    [string] val = *({i8**,i64}*)elem_ptr;
+    _tin_release_fat_elem_array(val.ptr as i8*, val.len);  // releases strings
+}
+```
+
+The per-type helper is cached in `CodeGen.elemReleaseHelpers` and registered
+**before** its body is generated so that self-referential types (e.g. a struct
+containing an array of itself) do not produce infinite recursion.
+
+### Pointer arrays (`[*T]`)
+
+A `[*T]` array stores raw ARC-managed heap pointers as elements. Every
+pointer in such an array **must** point to a `_tin_rc_alloc`'d block.
+
+The compiler enforces this at every `++= ` append:
+
+- **`items ++= call_result`** - fresh pointer from a call (RC=1); no
+  retain needed, ownership transfers to the array.
+- **`items ++= ptr_variable`** - existing pointer variable; the compiler emits
+  `_tin_retain(ptr as i8*)` so the array co-owns the block.
+- **`items ++= &localVar`** - stack pointer; the compiler heap-promotes the
+  value: copies it into a fresh `_tin_rc_alloc` block so the stored pointer is
+  always ARC-managed.
+
+When the array is released, `_tin_release_ptr_elem_array` decrements the
+outer buffer RC; if it hits zero, it calls `_tin_release` on each element
+pointer and frees the buffer:
+
+```c
+void _tin_release_ptr_elem_array(void *data, int64_t count) {
+    // ... RC gate ...
+    void **elems = (void **)data;
+    for (int64_t i = 0; i < count; i++) _tin_release(elems[i]);
+    free(hdr);
+}
+```
+
+### Struct arrays (`[S]` where `S` has RC fields)
+
+Named struct elements with RC-tracked fields (strings, arrays, closures, etc.)
+are released by the same `_tin_foreach_struct_elem_release` / per-type helper
+mechanism described under N-dimensional arrays above.
+
+The helper is named `__tin_release_<StructName>_elem` and is generated by
+`ensureElemReleaseHelper`. It calls `emitRelease` on the loaded struct value,
+which invokes `deinit` (if defined) and then releases each RC field via
+`walkRCStructFields`.
+
+---
+
+## `any` cast release
+
+When an `any` value is immediately unboxed with `as T` without first being
+stored in a variable, the `any` box must be released at the cast site.
+
+```tin
+let x = getfield(obj, 'count) as i64   // any box freed here
+```
+
+`genAsExpr` (`codegen/exprs.go`) emits an `emitRelease` on the source `any`
+value after the cast when:
+1. The source type is `any`.
+2. The target type is not `any`.
+3. The source expression is not a copy-borrow (`!isCopyExpr`), i.e. the `any`
+   was freshly allocated (from a call, reflection, etc.) and has no other owner.
+
+This prevents the `any` box from leaking when it is used as a transient
+unboxing vehicle and never assigned to a variable.
+
+---
+
+## Method chain temporary release
+
+When a method is called on a struct returned directly by another call (a method
+chain), the intermediate struct is a **temporary** - it was retained by the
+inner callee's return but is never stored in a named variable and therefore
+never released at scope exit.
+
+```tin
+let s = v.get("name").as_string()
+//         ^^^^^^^^^^^
+//         temporary Value returned by get(); never assigned to a variable
+```
+
+`genCallExpr` (`codegen/exprs.go`) emits `emitRelease(block, objVal)` on the
+receiver immediately after the outer call returns, provided:
+
+1. The method is not a pointer receiver (`!fn.IsPtr`) - pointer receivers
+   pass a pointer to an existing heap block; the caller does not own it.
+2. The receiver expression is a **temporary producer** (`isTemporaryProducer`):
+   a `CallExpr`, string interpolation, `++` concat result, or non-empty array
+   literal - i.e., any expression whose result is freshly retained and has no
+   other owner.
+
+This release is emitted at all three call paths inside `genCallExpr`:
+- Overload-resolved method calls.
+- Generic method instantiations.
+- Direct (non-generic) method calls.
+
+The emitted release calls `emitRelease`, which walks the struct's RC fields
+via `walkRCStructFields` (releasing strings, slices, closures, etc.) before
+freeing the struct's own allocation if it is heap-owned.
+
+### Why `!fn.IsPtr` matters
+
+A pointer receiver (`fn foo(this *MyStruct)`) receives `*MyStruct` - a pointer
+to an existing allocation. The caller never owns that pointer and must not
+release it. Only value receivers (`fn foo(this MyStruct)`) cause a struct copy
+whose RC fields are retained by the callee; those are the ones that need a
+matching release on the calling side.
+
+---
+
+## Pointer dereference of temporary (ARC move)
+
+`*ptr` when `ptr` is a temporary producer (e.g., `*parse_value(&p)`) performs
+an **ARC move**: the struct fields are transferred to the loaded copy, but the
+outer pointer allocation itself would otherwise leak.
+
+```tin
+return *parse_node(&p, 0)   // parse_node returns *Value; deref loads the Value
+                            // and must free the *Value allocation
+```
+
+`genDerefExpr` (`codegen/exprs.go`) handles this case:
+
+1. Loads the pointed-to value normally.
+2. When `isTemporaryProducer(e.Expr)` is true, bitcasts the pointer to `i8*`
+   and calls `_tin_release` directly (not `emitRelease`).
+
+The distinction is important: `emitRelease` would walk the struct's RC fields
+and release them - but those fields are now owned by the loaded copy. Only the
+outer heap block (the `_tin_rc_alloc` allocation for the pointer itself) needs
+to be freed. Calling `_tin_release` directly decrements that block's RC and
+frees it when it reaches zero, without touching the fields.

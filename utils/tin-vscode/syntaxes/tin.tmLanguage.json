@@ -16,6 +16,7 @@
     { "include": "#builtin-type" },
     { "include": "#boolean" },
     { "include": "#nil" },
+    { "include": "#use-import" },
     { "include": "#macro-call" },
     { "include": "#function-decl" },
     { "include": "#struct-decl" },
@@ -154,7 +155,7 @@
         {
           "comment": "Declaration keywords",
           "name": "keyword.declaration.tin",
-          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|forward|override|static|virtual|weak)\\b"
+          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|from|forward|override|static|virtual|weak)\\b"
         },
         {
           "comment": "Expression keywords",
@@ -172,6 +173,31 @@
     "builtin-type": {
       "name": "support.type.primitive.tin",
       "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|string|atom|void|any)\\b"
+    },
+
+    "use-import": {
+      "comment": "use { x, y! } from module - highlight imported names as functions, ! as macro marker",
+      "begin": "\\b(use)\\s*\\{",
+      "end": "\\}\\s*(from)\\s*([a-zA-Z_][a-zA-Z0-9_:]*)",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.tin" }
+      },
+      "endCaptures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.namespace.tin" }
+      },
+      "patterns": [
+        {
+          "comment": "Macro import: name!",
+          "match": "([a-zA-Z_][a-zA-Z0-9_]*)(!)\\b",
+          "captures": {
+            "1": { "name": "entity.name.function.tin" },
+            "2": { "name": "keyword.operator.macro.tin" }
+          }
+        },
+        { "name": "entity.name.function.tin", "match": "[a-zA-Z_][a-zA-Z0-9_]*" },
+        { "name": "punctuation.separator.comma.tin", "match": "," }
+      ]
     },
 
     "macro-call": {

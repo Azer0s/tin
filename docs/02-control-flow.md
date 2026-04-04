@@ -240,6 +240,53 @@ that arm's body.
 
 ---
 
+### Array pattern matching
+
+`match` can destructure array/slice values. Each arm lists expected elements
+between `[` and `]`; free names bind to elements at that position, `_`
+discards an element, and `...name` binds the remainder of the array as a
+slice:
+
+```rust
+fn describe(xs [i64]) string =
+  match xs:
+    case []:             return "empty"
+    case [x]:            return "one: {x}"
+    case [x, y]:         return "two: {x}, {y}"
+    case [x, ...rest]:   return "head={x}, tail has {len(rest)} elements"
+    default:             return "unreachable if rest pattern above is present"
+```
+
+- An arm matches only if the array length equals the pattern length (for
+  exact patterns) or is at least the prefix length (for rest patterns).
+- `_` discards an element without binding it.
+- `...name` binds the tail slice starting at that position. If you do not
+  need the tail, write `..._` to discard it.
+- Guards (`if <expr>`) work the same as in struct patterns.
+
+```rust
+fn head_positive(xs [i64]) bool =
+  match xs:
+    case [x, ..._] if x > 0: return true
+    default:                  return false
+```
+
+**Exhaustiveness.** A match on arrays is exhaustive (no `default` needed)
+when the set of patterns covers all possible lengths. The most common
+exhaustive combination is an exact empty pattern plus a rest pattern:
+
+```rust
+fn sum(xs [i64]) i64 =
+  match xs:
+    case []:           return 0
+    case [x, ...rest]: return x + sum(rest)
+```
+
+`[]` covers length 0; `[x, ...rest]` covers every length >= 1, so together
+they are exhaustive.
+
+---
+
 ## where - pattern matching on function arguments
 
 `where` is a declarative alternative to `if/else` or `match` inside a

@@ -617,6 +617,29 @@ type StructPattern struct {
 	Fields   []StructPatternField
 }
 
+// ArrayPatternElement is one slot in an array destructuring pattern.
+// IsRest == true means this is a "...name" rest element (always last).
+// IsWild == true means "_" or unnamed rest: match but discard (no binding).
+// Name is the variable to bind (empty or "_" = discard).
+type ArrayPatternElement struct {
+	Name   string
+	IsRest bool // "...xs" or "..." -- must be last element if present
+	IsWild bool // "_" wildcard
+}
+
+// ArrayPattern is used in match case arms to destructure a slice/array value:
+//
+//	case []:          empty array
+//	case [x]:         exactly 1 element, bind to x
+//	case [x, y]:      exactly 2 elements
+//	case [x, ...xs]:  first element + rest slice bound to xs
+//	case [_, _]:      2 elements, wildcards (discard)
+//	case [...xs]:     catch-all -- all elements as xs
+type ArrayPattern struct {
+	base
+	Elems []ArrayPatternElement
+}
+
 type StructLitField struct {
 	Name  string
 	Value Node
@@ -652,6 +675,34 @@ type AwaitExpr struct {
 
 // YieldStmt voluntarily yields the current fiber's time slice.
 type YieldStmt struct{ base }
+
+// AwaitMatchCase is one arm of an await match statement.
+// SlotIdx is the index of the one non-wildcard slot in the array pattern.
+// BindName is the variable that receives the result (empty = wildcard, currently rejected).
+type AwaitMatchCase struct {
+	Pos      Pos
+	SlotIdx  int
+	BindName string
+	Guard    Node
+	Body     *Block
+}
+
+// AwaitMatchStmt selects among multiple futures:
+//
+//	await match [a, b, c]:
+//	  case [x, _, _]: ...   // fires when a completes; x = a's result
+//	  case [_, y, _]: ...   // fires when b completes; y = b's result
+//	  default: ...          // non-blocking: runs if nothing is actionable
+//
+// Futures is always a fixed-length inline list (no array variables).
+// Without default: blocks until one future fires and a guard passes; panics if all exhausted.
+// With default: one non-blocking check; default runs if nothing is actionable.
+type AwaitMatchStmt struct {
+	base
+	Futures []Node
+	Cases   []AwaitMatchCase
+	Default *Block
+}
 
 // Type expressions
 

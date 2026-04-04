@@ -46,3 +46,14 @@ const char *_tin_string_data(TinString s) {
 char *_tin_buf_alloc(int64_t n)            { return (char *)malloc((size_t)n); }
 char *_tin_buf_realloc(char *p, int64_t n) { return (char *)realloc(p, (size_t)n); }
 void  _tin_buf_free(char *p)               { free(p); }
+
+// Create an ARC-managed TinSlice (byte array) from a raw buffer (copies the bytes).
+// The returned slice's backing memory is managed by ARC: it is released when the
+// last reference to the slice goes out of scope.  Pass len=0 and ptr=NULL for
+// an empty slice.
+TinSlice _tin_bytes_from_buf(const char *ptr, int64_t len) {
+    char *buf = (char *)_tin_rc_alloc(len + 1);
+    if (ptr && len > 0) memcpy(buf, ptr, (size_t)len);
+    buf[len] = '\0';
+    return (TinSlice){buf, len};
+}

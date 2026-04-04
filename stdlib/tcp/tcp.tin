@@ -1,3 +1,4 @@
+//!+tcp.c -- -I ../../runtime
 // stdlib/tcp - higher-level TCP connection and server types.
 //
 // Wraps the raw file-descriptor async I/O from stdlib/io into ergonomic
@@ -9,6 +10,10 @@
 
 use io
 use sync
+
+// C helpers (private)
+fn _tin_tcp_listen_c(port i32) i32  = extern("_tin_tcp_listen")
+fn _tin_tcp_accept_c(fd i32) i32    = extern("_tin_tcp_accept")
 
 struct Conn (io::AsyncReader, io::AsyncWriter) =
   fd i32
@@ -36,7 +41,7 @@ struct Server =
   // Returns (Conn, bool) - destructure with:
   //   let (c, ok) = srv.accept()
   fn accept(this Server) (Conn, bool) =
-    let fd = io::tcp_accept(this.listen_fd)
+    let fd = _tin_tcp_accept_c(this.listen_fd)
     if fd < 0:
       return (Conn{fd: -1}, false)
     return (Conn{fd: fd}, true)
@@ -47,7 +52,7 @@ struct Server =
 // listen creates a TCP server on the given port.
 // Panics if the port cannot be bound.
 fn listen(port i32) Server =
-  let fd = io::tcp_listen(port)
+  let fd = _tin_tcp_listen_c(port)
   if fd < 0:
     panic("tcp::listen: failed to bind port {port}")
   return Server{listen_fd: fd}

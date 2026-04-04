@@ -1,0 +1,74 @@
+//!+unix.c -- -I ../../runtime
+// stdlib/unix - Unix domain socket connection and server types.
+//
+// Mirrors the tcp package but uses AF_UNIX paths instead of ports:
+//
+//   let srv = unix::listen("/tmp/myapp.sock")
+//   let (c, ok) = srv.accept()
+//   let line = await ioutil::read_string(c)
+//
+//   let c = unix::dial("/tmp/myapp.sock")
+//   await ioutil::write_string(c, "hello\n")
+
+use io
+use sync
+
+// C helpers (private)
+fn _tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
+fn _tin_unix_accept_c(fd i32) i32       = extern("_tin_unix_accept")
+fn _tin_unix_connect_c(path string) i32 = extern("_tin_unix_connect")
+
+// Conn is a connected Unix domain socket.
+// Implements io::AsyncReader and io::AsyncWriter so it works with ioutil.
+struct Conn (io::AsyncReader, io::AsyncWriter) =
+  fd i32
+
+  // read reads up to n bytes from the connection into buf.
+  // Returns Future[i64] - use `await conn.read(buf, n)`.
+  fn read(this Conn, buf *byte, n i64) Future[i64] =
+    return spawn io::async_read(this.fd, buf, n)
+
+  // write writes up to n bytes from buf to the connection.
+  // Returns Future[i64] - use `await conn.write(buf, n)`.
+  fn write(this Conn, buf *byte, n i64) Future[i64] =
+    return spawn io::async_write(this.fd, buf, n)
+
+  fn close(this Conn) =
+    io::close(this.fd)
+
+  fn valid(this Conn) bool =
+    return this.fd >= 0
+
+// Server listens for incoming Unix domain socket connections.
+struct Server =
+  listen_fd i32
+
+  // accept waits for the next connection.
+  // Returns (Conn, bool) - destructure with:
+  //   let (c, ok) = srv.accept()
+  fn accept(this Server) (Conn, bool) =
+    let fd = _tin_unix_accept_c(this.listen_fd)
+    if fd < 0:
+      return (Conn{fd: -1}, false)
+    return (Conn{fd: fd}, true)
+
+  fn close(this Server) =
+    io::close(this.listen_fd)
+
+// listen creates a Unix domain socket server at path.
+// Removes any stale socket file. Panics if binding fails.
+fn listen(path string) Server =
+  let fd = _tin_unix_listen_c(path)
+  if fd < 0:
+    panic("unix::listen: failed to bind {path}")
+  return Server{listen_fd: fd}
+
+// dial connects to a Unix domain socket at path.
+// Panics on failure.
+fn dial(path string) Conn =
+  let fd = _tin_unix_connect_c(path)
+  if fd < 0:
+    panic("unix::dial: failed to connect to {path}")
+  return Conn{fd: fd}
+
+export { Conn, Server, listen, dial } as unix
