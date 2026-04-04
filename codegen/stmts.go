@@ -632,9 +632,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			// ArrayLit with declared element type: coerce each element to the declared type.
 			// Handles e.g. let fns [fn{#async}(i64) i64] = [double] where elements need wrapping.
 			var targetElemType irtypes.Type
+
 			if at, ok2 := s.Type.(*ast.ArrayType); ok2 && at.Elem != nil {
 				targetElemType, _ = cg.tinTypeToLLVM(at.Elem)
 			}
+
 			initVal, err = cg.genArrayLitWithElemType(block, arrLit, targetElemType)
 		} else {
 			initVal, err = cg.genExpr(block, s.Value)

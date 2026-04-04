@@ -2628,19 +2628,24 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 		if err != nil {
 			return nil, err
 		}
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
+
 		if targetElemType != nil {
 			v = cg.coerce(block, v, targetElemType)
 		}
+
 		vals[i] = v
 	}
 
 	elemType := vals[0].Type()
+
 	if targetElemType != nil {
 		elemType = targetElemType
 	}
+
 	n := int64(len(vals))
 
 	// Compute element size via GEP trick: sizeof(elemType) = gep(null, 1) as i64.
@@ -3828,6 +3833,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 
 	// Find the $coro variant in scope.
 	coroName := fnName + "$coro"
+
 	coroEntry, ok := cg.curScope.lookup(coroName)
 	if !ok {
 		// Also try stripping a package prefix (pkg__foo → foo$coro).
@@ -3918,6 +3924,7 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 				expectedArity := len(fnType.Params) - 1 // subtract env
 
 				var best *overloadEntry
+
 				for _, v := range variants {
 					if v.arity == expectedArity {
 						best = v
@@ -3929,6 +3936,7 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 				if best != nil {
 					if se, seOk := cg.curScope.lookup(best.irName); seOk {
 						var fnVal value.Value
+
 						if se.isAlloc {
 							pt := se.val.Type().(*irtypes.PointerType)
 							fnVal = block.NewLoad(pt.ElemType, se.val)
@@ -3977,6 +3985,7 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 		llArgs = append(llArgs, av)
 		llArgsPreCoerce = append(llArgsPreCoerce, av)
 	}
+
 	llArgs = cg.adaptArgs(block, llArgs, fnType)
 
 	result := block.NewCall(fnPtr, llArgs...)
@@ -5073,6 +5082,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 					}
 				}
 			}
+
 			return cg.genSpawnAsyncFatPtr(block, fatVal, callNode.Args, tinFnType)
 		}
 
@@ -5214,6 +5224,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 				// Build args: env first, then actual params.
 				spawnArgs := []value.Value{envPtr}
+
 				for i, val := range callArgs {
 					// Params[0] is env; i-th tin arg maps to Params[i+1].
 					if i+1 < len(fatFnType.Params) {
@@ -5225,8 +5236,8 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 				hdl := block.NewCall(fnPtr, spawnArgs...)
 				pid := block.NewCall(cg.fiberSpawnFn, hdl)
-
 				retType := cg.asyncFatPtrRetType(se.tinType)
+
 				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
 			}
 		}
@@ -5270,14 +5281,17 @@ func (cg *CodeGen) asyncFatPtrRetType(tinFnType ast.TypeExpr) irtypes.Type {
 	if tinFnType == nil {
 		return nil
 	}
+
 	ft, ok := tinFnType.(*ast.FuncType)
 	if !ok || ft.RetType == nil {
 		return nil
 	}
+
 	llRet, err := cg.tinTypeToLLVM(ft.RetType)
 	if err != nil {
 		return nil
 	}
+
 	return llRet
 }
 
@@ -5320,6 +5334,7 @@ func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argN
 	pid := block.NewCall(cg.fiberSpawnFn, hdl)
 
 	retType := cg.asyncFatPtrRetType(tinFnType)
+
 	return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
 }
 
@@ -5403,9 +5418,11 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 
 		if st, ok := structLLVM.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
 			fieldTy := st.Fields[fieldIdx]
+
 			if isAsyncFatFnPtr(fieldTy) {
 				// Load the field value (need a pointer to the struct for GEP).
 				var fieldVal value.Value
+
 				if _, isPtr := objVal.Type().(*irtypes.PointerType); isPtr {
 					gep := block.NewGetElementPtr(structLLVM, objVal,
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -5417,17 +5434,22 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 					fieldVal = block.NewLoad(fieldTy, gep)
 				}
+
 				// Recover the Tin FuncType from structFieldTinTypes for proper Future[T].
 				var tinFnType ast.TypeExpr
+
 				if tinFields, hasTF := cg.structFieldTinTypes[structName]; hasTF {
 					fieldNames := cg.structFields[structName]
+
 					for i, fn := range fieldNames {
 						if fn == fa.Field && i < len(tinFields) {
 							tinFnType = tinFields[i]
+
 							break
 						}
 					}
 				}
+
 				return cg.genSpawnAsyncFatPtr(block, fieldVal, callNode.Args, tinFnType)
 			}
 		}

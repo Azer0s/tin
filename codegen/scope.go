@@ -3,10 +3,11 @@ package codegen
 // scope.go - implicit conversion registry entry and lexical scope types/functions.
 
 import (
-	"github.com/Azer0s/tin/ast"
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Implicit conversion registry
