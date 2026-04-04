@@ -381,10 +381,28 @@ func (cg *CodeGen) ensureElemReleaseHelper(t irtypes.Type) *ir.Func {
 
 	typedPtr := entry.NewBitCast(param, irtypes.NewPointer(t))
 
-	if _, isPtr := t.(*irtypes.PointerType); isPtr {
+	if pt, isPtr := t.(*irtypes.PointerType); isPtr {
 		// Pointer element: the stored value is the ARC data ptr itself.
-		// Load the pointer value and call _tin_release on it directly.
+		// Load the pointer value, then release the inner struct's RC fields
+		// (if any) before freeing the outer block.
 		ptrVal := entry.NewLoad(t, typedPtr)
+
+		innerType := pt.ElemType
+		if cg.elemNeedsRelease(innerType) {
+			// Inner struct has RC fields: load it and release them first.
+			innerVal := entry.NewLoad(innerType, ptrVal)
+
+			savedFn := cg.curFn
+			savedScope := cg.curScope
+			cg.curFn = fn
+			cg.curScope = cg.moduleScope
+
+			cg.emitRelease(entry, innerVal)
+
+			cg.curFn = savedFn
+			cg.curScope = savedScope
+		}
+
 		ptrI8 := entry.NewBitCast(ptrVal, irtypes.I8Ptr)
 		entry.NewCall(cg.ensureRelease(), ptrI8)
 	} else {
@@ -462,11 +480,17 @@ func isCopyExpr(node ast.Node) bool {
 		// double-freeing the underlying string.
 		return isCopyExpr(n.Expr)
 	case *ast.DerefExpr:
-		// Dereferencing a pointer (*ptr) loads an ARC-managed value that is still
-		// owned by the pointee.  The caller must retain to get an independent copy;
-		// without a retain, both the new variable and the original heap block will
-		// release the same inner RC pointers, causing a double-free.
-		return true
+		// Dereferencing a named pointer variable (*ptr): the pointee still owns
+		// the RC references for all inner fields.  Retain so the caller gets an
+		// independent copy; without a retain, both the new variable and the
+		// original pointee would release the same inner RC pointers (double-free).
+		//
+		// Dereferencing a temporary (*call()): genDerefExpr freed the outer RC block
+		// immediately after loading, transferring sole ownership of the inner fields
+		// to the loaded value.  No retain is needed - the loaded value already owns
+		// its fields at RC=1.  Retaining here would cause RC=2 with only one release,
+		// leaking the inner allocations.
+		return !isTemporaryProducer(n.Expr)
 	}
 
 	return false
@@ -694,8 +718,16 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 					return
 				}
 
-				if _, isPtr := elemType.(*irtypes.PointerType); isPtr {
-					// [*T]: each element is a raw ARC-managed heap pointer
+				if pt2, isPtr := elemType.(*irtypes.PointerType); isPtr {
+					// [*T]: check if the inner type T has RC fields that need
+					// deep release (load T, release its fields, free the block).
+					if cg.elemNeedsRelease(pt2.ElemType) {
+						cg.emitGenericFatArrayRelease(block, val, elemType)
+
+						return
+					}
+
+					// T has no RC fields: raw pointer release suffices.
 					block.NewCall(cg.ensureReleasePtrElemArray(), dataPtrI8, length)
 
 					return

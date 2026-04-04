@@ -2226,6 +2226,12 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	for _, elif := range s.ElseIfs {
 		nextBlock := cg.newBlock("elif.next")
 
+		// Reset curBlock to the condition-check block before generating the
+		// condition expression.  genBlock for the previous elif body may have
+		// left curBlock pointing to a block inside that body, which would cause
+		// genExpr to emit loads in the wrong (non-dominating) block.
+		cg.curBlock = currentElse
+
 		elifCond, err := cg.genExpr(currentElse, elif.Cond)
 		if err != nil {
 			return nil, false, err

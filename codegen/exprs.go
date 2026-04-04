@@ -1666,6 +1666,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				cg.emitRelease(block, preCoerce)
 			}
 
+			// ARC: release temporary struct receiver (method chain temporaries).
+			if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
+				cg.emitRelease(block, objVal)
+			}
+
 			if irtypes.IsVoid(result.Type()) {
 				return nil, nil
 			}
@@ -1760,6 +1765,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					cg.emitRelease(block, pre)
+				}
+
+				// ARC: release temporary struct receiver (method chain temporaries).
+				if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
+					cg.emitRelease(block, objVal)
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -1880,6 +1890,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				cg.emitRelease(block, preCoerce)
+			}
+
+			// ARC: release temporary struct receiver (method chain temporaries).
+			// When the receiver is a temporary produced by a call (e.g. foo().bar()),
+			// the struct returned by foo() has its RC fields retained by foo's return
+			// but is never stored in a named variable and thus never released at scope
+			// exit.  Release it here to balance the retain emitted by foo's return.
+			if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
+				cg.emitRelease(block, objVal)
 			}
 
 			if irtypes.IsVoid(result.Type()) {
@@ -3003,9 +3022,10 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		return nil, err
 	}
 
-	// [byte; N] as [byte]: heap-copy the fixed-size array to a fat [byte] slice.
+	// [byte; N] as [byte] or [byte; N] as string: heap-copy the fixed-size byte
+	// array into a new ARC-managed fat slice / string.
 	// Use genLValue to get the alloca pointer without loading the full array.
-	if isFatArrayPtr(targetType) {
+	if isFatArrayPtr(targetType) || isStringType(targetType) {
 		if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
 			if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
 				if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 && at.ElemType.Equal(irtypes.I8) {
@@ -3085,7 +3105,18 @@ func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value,
 	}
 
 	if pt, ok := val.Type().(*irtypes.PointerType); ok {
-		return block.NewLoad(pt.ElemType, val), nil
+		loaded := block.NewLoad(pt.ElemType, val)
+
+		// ARC move semantics: if the pointer is a temporary (e.g. *parse_value(&p)),
+		// the caller owns the RC block but no variable will release it. Free the
+		// outer allocation now. Do NOT call emitRelease (which walks struct fields) -
+		// the fields are transferred to the loaded copy and will be released there.
+		if isTemporaryProducer(e.Expr) {
+			rcPtr := block.NewBitCast(val, irtypes.I8Ptr)
+			block.NewCall(cg.ensureRelease(), rcPtr)
+		}
+
+		return loaded, nil
 	}
 
 	return val, nil

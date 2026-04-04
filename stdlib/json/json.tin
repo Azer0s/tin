@@ -38,16 +38,6 @@
 
 use str
 
-// Low-level C helpers
-
-fn _tin_string_from_bytes(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
-fn _tin_string_data(s string) *byte              = extern("_tin_string_data")
-fn _tin_buf_alloc(n i64) *byte                   = extern("_tin_buf_alloc")
-fn _tin_buf_realloc(ptr *byte, n i64) *byte      = extern("_tin_buf_realloc")
-fn _tin_buf_free(ptr *byte)                      = extern("_tin_buf_free")
-fn _snprintf(buf *byte, size i64, fmt string, ...) i32 = extern("snprintf")
-fn _atof(s string) f64 = extern("atof")
-
 // Kind enum
 
 // Kind identifies the type of a parsed JSON value.
@@ -108,49 +98,23 @@ struct Value =
 // String helpers
 
 // escape_string produces the JSON encoding of s including surrounding quotes.
-// Iterates over bytes with `for c in s:`.
+// Iterates over bytes with `for c in s:` using string ++ byte concatenation.
 fn escape_string(s string) string =
-  let cap i64 = len(s) * 2 + 4
-  let buf      = _tin_buf_alloc(cap)
-  let n   i64  = 0
-
-  buf[n] = @'\"'
-  n = n + 1
-
+  let result = "\""
   for c in s:
-    if n + 6 >= cap:
-      cap = cap * 2
-      buf = _tin_buf_realloc(buf, cap)
-
     if c == @'\"':
-      buf[n] = @'\\'
-      n = n + 1
-      buf[n] = @'\"'
+      result = result ++ "\\\""
     else if c == @'\\':
-      buf[n] = @'\\'
-      n = n + 1
-      buf[n] = @'\\'
+      result = result ++ "\\\\"
     else if c == @'\n':
-      buf[n] = @'\\'
-      n = n + 1
-      buf[n] = @'n'
+      result = result ++ "\\n"
     else if c == @'\r':
-      buf[n] = @'\\'
-      n = n + 1
-      buf[n] = @'r'
+      result = result ++ "\\r"
     else if c == @'\t':
-      buf[n] = @'\\'
-      n = n + 1
-      buf[n] = @'t'
+      result = result ++ "\\t"
     else:
-      buf[n] = c
-    n = n + 1
-
-  buf[n] = @'\"'
-  n = n + 1
-  let result = _tin_string_from_bytes(buf, n)
-  _tin_buf_free(buf)
-  return result
+      result = result ++ c
+  return result ++ "\""
 
 // json_key maps a struct field to its JSON key via a @"json:..." tag.
 // Returns "" to signal that the field should be omitted.
@@ -160,11 +124,17 @@ fn json_key(field_name string, tag string) string =
 
   if len(tag) <= 5 || str::strncmp(tag, "json:", 5) != 0:
     return field_name
-  let raw = _tin_string_data(tag)
 
-  if len(tag) == 6 && raw[5] == @'-':
+  if len(tag) == 6 && tag[5] == @'-':
     return ""
-  return _tin_string_from_bytes(raw + 5, len(tag) - 5)
+
+  // Extract the key name: tag[5:] using string ++ byte.
+  let key = ""
+  let i i64 = 5
+  for i < len(tag):
+    key = key ++ tag[i]
+    i = i + 1
+  return key
 
 // Encoding
 
@@ -188,11 +158,7 @@ fn encode_any(v any) string =
 
   if t == 'f64:
     let f = v as f64
-    let buf = _tin_buf_alloc(64)
-    let w i32 = _snprintf(buf, 64, "%g", f)
-    let s = _tin_string_from_bytes(buf, w as i64)
-    _tin_buf_free(buf)
-    return s
+    return "{f:g}"
 
   if t == 'string:
     return escape_string(v as string)
@@ -220,11 +186,7 @@ fn _encode_any[T](v any, _unused T) string =
 
   if t == 'f64:
     let f = v as f64
-    let buf = _tin_buf_alloc(64)
-    let w i32 = _snprintf(buf, 64, "%g", f)
-    let s = _tin_string_from_bytes(buf, w as i64)
-    _tin_buf_free(buf)
-    return s
+    return "{f:g}"
 
   if t == 'string:
     return escape_string(v as string)
@@ -282,11 +244,7 @@ fn encode[T](v T) string =
 
   if t == 'f64:
     let f = v as f64
-    let buf = _tin_buf_alloc(64)
-    let w i32 = _snprintf(buf, 64, "%g", f)
-    let s = _tin_string_from_bytes(buf, w as i64)
-    _tin_buf_free(buf)
-    return s
+    return "{f:g}"
 
   if t == 'string:
     let sv T = v
@@ -345,9 +303,7 @@ struct Parser =
 
 fn parse_str(p *Parser) string =
   p.advance()  // consume opening "
-  let buf = _tin_buf_alloc(256)
-  let cap i64 = 256
-  let n   i64 = 0
+  let result = ""
   for !p.at_end():
     let c = p.advance()
 
@@ -368,27 +324,20 @@ fn parse_str(p *Parser) string =
       else if esc == @'t':  out = @'\t'
       else:                 out = esc
 
-    if n >= cap:
-      cap = cap * 2
-      buf = _tin_buf_realloc(buf, cap)
-    buf[n] = out
-    n = n + 1
-  let result = _tin_string_from_bytes(buf, n)
-  _tin_buf_free(buf)
+    result = result ++ out
   return result
 
-fn parse_int_str(s string) i64 =
-  let src = _tin_string_data(s)
-  let n   = len(s)
+// parse_int_bytes parses an integer directly from raw bytes (p.src[start..p.pos]).
+fn parse_int_bytes(p *Parser, start i64) i64 =
   let neg = false
-  let i   i64 = 0
+  let i   i64 = start
   let r   i64 = 0
 
-  if i < n && src[i] == @'-':
+  if i < p.pos && p.src[i] == @'-':
     neg = true
     i = i + 1
-  for i < n:
-    let c = src[i]
+  for i < p.pos:
+    let c = p.src[i]
 
     if c < @'0' || c > @'9':
       break
@@ -434,11 +383,16 @@ fn parse_number(p *Parser) *Value =
       if c < @'0' || c > @'9':
         break
       p.advance()
-  let num = _tin_string_from_bytes(p.src + start, p.pos - start)
 
   if is_float:
-    return &Value{kind: Kind.float_v, fval: _atof(num)}
-  return &Value{kind: Kind.int_v, ival: parse_int_str(num)}
+    // Build string from raw bytes for atof.
+    let num = ""
+    let i i64 = start
+    for i < p.pos:
+      num = num ++ p.src[i]
+      i = i + 1
+    return &Value{kind: Kind.float_v, fval: str::atof(num)}
+  return &Value{kind: Kind.int_v, ival: parse_int_bytes(p, start)}
 
 fn parse_value(p *Parser) *Value  // forward declaration
 
@@ -543,7 +497,7 @@ fn parse_value(p *Parser) *Value =
 fn parse(s string) Value =
   if len(s) == 0:
     return Value{kind: Kind.null_v}
-  let p = Parser{src: _tin_string_data(s), pos: 0, len: len(s)}
+  let p = Parser{src: s as *byte, pos: 0, len: len(s)}
   return *parse_value(&p)
 
 // _parse_nested_any[T] populates nested struct fields from a JSON Value object.
