@@ -628,6 +628,14 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// TupleLit: pass the declared type so fields get the right LLVM types.
 		if tup, ok := s.Value.(*ast.TupleLit); ok && llType != nil {
 			initVal, err = cg.genTupleLit(block, tup, llType)
+		} else if arrLit, ok := s.Value.(*ast.ArrayLit); ok && s.Type != nil {
+			// ArrayLit with declared element type: coerce each element to the declared type.
+			// Handles e.g. let fns [fn{#async}(i64) i64] = [double] where elements need wrapping.
+			var targetElemType irtypes.Type
+			if at, ok2 := s.Type.(*ast.ArrayType); ok2 && at.Elem != nil {
+				targetElemType, _ = cg.tinTypeToLLVM(at.Elem)
+			}
+			initVal, err = cg.genArrayLitWithElemType(block, arrLit, targetElemType)
 		} else {
 			initVal, err = cg.genExpr(block, s.Value)
 		}
@@ -809,7 +817,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type})
 
 	return block, nil
 }

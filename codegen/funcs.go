@@ -965,7 +965,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type)})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type})
 
 		if llIdx == 1 {
 			firstParamAlloca = alloca

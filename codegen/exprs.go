@@ -175,6 +175,28 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			// Not in coroutine (or inline drive not available): auto-spawn if async.
 			if cg.directCallHasCoroVariant(callNode) {
 				futureExpr = &ast.SpawnExpr{Call: callNode}
+			} else {
+				// Check whether the callee evaluates to an async fat-ptr.
+				// Handles `await x(args)` and `await fns[i](args)`.
+				isAsyncFatPtrCallee := false
+
+				switch calleeNode := callNode.Func.(type) {
+				case *ast.Identifier:
+					// Variable of type fn{#async}(...): check scope.
+					if se, seOk := cg.curScope.lookup(calleeNode.Name); seOk && se.isAlloc {
+						if pt, ptOk := se.val.Type().(*irtypes.PointerType); ptOk && isAsyncFatFnPtr(pt.ElemType) {
+							isAsyncFatPtrCallee = true
+						}
+					}
+				case *ast.IndexExpr:
+					// fns[i](args) where fns: [fn{#async}(...)].
+					// Let genSpawnExpr evaluate and decide; mark as candidate.
+					isAsyncFatPtrCallee = true
+				}
+
+				if isAsyncFatPtrCallee {
+					futureExpr = &ast.SpawnExpr{Call: callNode}
+				}
 			}
 		}
 
@@ -2580,6 +2602,12 @@ func (cg *CodeGen) isStaticMethodIR(fn *ir.Func, structName string) bool {
 }
 
 func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, error) {
+	return cg.genArrayLitWithElemType(block, e, nil)
+}
+
+// genArrayLitWithElemType generates an array literal, optionally coercing each element to targetElemType.
+// Used when the declared array type is known (e.g. let fns [fn{#async}(i64) i64] = [double]).
+func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, targetElemType irtypes.Type) (value.Value, error) {
 	if len(e.Elems) == 0 {
 		// Empty dynamic array: {null, 0}
 		fat := stringFatPtrType() // {i8*, i64} - reuse structure
@@ -2596,15 +2624,23 @@ func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, e
 
 	vals := make([]value.Value, len(e.Elems))
 	for i, elem := range e.Elems {
-		v, err := cg.genExpr(block, elem)
+		v, err := cg.genArgWithTargetType(block, elem, targetElemType)
 		if err != nil {
 			return nil, err
 		}
-
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+		if targetElemType != nil {
+			v = cg.coerce(block, v, targetElemType)
+		}
 		vals[i] = v
 	}
 
 	elemType := vals[0].Type()
+	if targetElemType != nil {
+		elemType = targetElemType
+	}
 	n := int64(len(vals))
 
 	// Compute element size via GEP trick: sizeof(elemType) = gep(null, 1) as i64.
@@ -3771,6 +3807,149 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 	return block.NewLoad(fatSt, alloca)
 }
 
+// wrapAsyncFnAsFatPtr wraps an {#async} function's $coro variant into an async
+// fat-fn-ptr { fn(i8* env, params...) i8* *, i8* } with a null environment.
+// The shim ignores its env parameter and forwards to <name>$coro(params...).
+// Falls back to wrapFnAsFatPtr (with a sync shim) when no $coro is found.
+// Shims are cached per function name to avoid duplicate definitions.
+func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatType irtypes.Type) value.Value {
+	fatSt := targetFatType.(*irtypes.StructType)
+	wrapperFnType := fatSt.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
+	// Derive the name of the function so we can look up its $coro variant.
+	fnName := ""
+	if named, ok := fnVal.(interface{ Name() string }); ok {
+		fnName = named.Name()
+	}
+
+	if fnName == "" {
+		return cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
+	}
+
+	// Find the $coro variant in scope.
+	coroName := fnName + "$coro"
+	coroEntry, ok := cg.curScope.lookup(coroName)
+	if !ok {
+		// Also try stripping a package prefix (pkg__foo → foo$coro).
+		if idx := strings.Index(fnName, "__"); idx >= 0 {
+			coroEntry, ok = cg.curScope.lookup(fnName[idx+2:] + "$coro")
+		}
+	}
+
+	if !ok {
+		// No $coro variant — fall back to sync shim (type mismatch at runtime).
+		return cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
+	}
+
+	coroFn, ok := coroEntry.val.(*ir.Func)
+	if !ok {
+		return cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
+	}
+
+	shimName := "__ashim_" + fnName
+
+	// Reuse cached shim.
+	var shim *ir.Func
+
+	for _, f := range cg.mod.Funcs {
+		if f.Name() == shimName {
+			shim = f
+
+			break
+		}
+	}
+
+	if shim == nil {
+		// Build shim: fn(i8* env, tin_param_0, ...) i8*
+		// wrapperFnType.Params[0] is i8* (env); Params[1..] are actual types.
+		shimParams := make([]*ir.Param, len(wrapperFnType.Params))
+		for i, pt := range wrapperFnType.Params {
+			name := "env"
+			if i > 0 {
+				name = fmt.Sprintf("p%d", i-1)
+			}
+
+			shimParams[i] = ir.NewParam(name, pt)
+		}
+
+		shim = cg.mod.NewFunc(shimName, irtypes.I8Ptr, shimParams...)
+		entry := shim.NewBlock("entry")
+
+		// Forward call to $coro: skip env (index 0), pass and adapt remaining args.
+		n := len(coroFn.Params)
+		if n > len(shim.Params)-1 {
+			n = len(shim.Params) - 1
+		}
+
+		callArgs := make([]value.Value, n)
+		for i := 0; i < n; i++ {
+			callArgs[i] = cg.coerce(entry, shim.Params[i+1], coroFn.Params[i].Type())
+		}
+
+		hdl := entry.NewCall(coroFn, callArgs...)
+		entry.NewRet(hdl)
+	}
+
+	// Return async fat-fn-ptr { shim*, null }.
+	alloca := block.NewAlloca(fatSt)
+	gep0 := block.NewGetElementPtr(fatSt, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(shim, gep0)
+	gep1 := block.NewGetElementPtr(fatSt, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(constant.NewNull(irtypes.I8Ptr), gep1)
+
+	return block.NewLoad(fatSt, alloca)
+}
+
+// genArgWithTargetType evaluates an argument expression with a known target
+// parameter type, enabling type-guided overload resolution for function-value
+// arguments.  When the target is a fat-fn-ptr and the argument is a plain
+// identifier that names overloaded functions, the overload whose arity matches
+// the fat-ptr's parameter count is selected and wrapped appropriately.
+// Falls through to a normal genExpr when the heuristic does not apply.
+func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targetType irtypes.Type) (value.Value, error) {
+	if isFatFnPtr(targetType) {
+		if id, ok := argNode.(*ast.Identifier); ok {
+			if variants, hasOverloads := cg.overloads[id.Name]; hasOverloads {
+				// Extract expected arity from the fat-ptr: Params[0] is env, rest are actual.
+				fatSt := targetType.(*irtypes.StructType)
+				fnType := fatSt.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+				expectedArity := len(fnType.Params) - 1 // subtract env
+
+				var best *overloadEntry
+				for _, v := range variants {
+					if v.arity == expectedArity {
+						best = v
+
+						break
+					}
+				}
+
+				if best != nil {
+					if se, seOk := cg.curScope.lookup(best.irName); seOk {
+						var fnVal value.Value
+						if se.isAlloc {
+							pt := se.val.Type().(*irtypes.PointerType)
+							fnVal = block.NewLoad(pt.ElemType, se.val)
+						} else {
+							fnVal = se.val
+						}
+
+						if isAsyncFatFnPtr(targetType) {
+							return cg.wrapAsyncFnAsFatPtr(block, fnVal, targetType), nil
+						}
+
+						return cg.wrapFnAsFatPtr(block, fnVal, targetType), nil
+					}
+				}
+			}
+		}
+	}
+
+	return cg.genExpr(block, argNode)
+}
+
 // callFatFn emits a call through a closure fat pointer { fn(i8*,params...)*, i8* }.
 func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast.Node) (value.Value, error) {
 	fnPtr := block.NewExtractValue(fatPtr, 0)
@@ -3780,8 +3959,17 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 	llArgs := []value.Value{envPtr}
 	llArgsPreCoerce := []value.Value{envPtr}
 
-	for _, arg := range argNodes {
-		av, err := cg.genExpr(block, arg)
+	// Derive target param types for type-guided resolution (Params[0] is env).
+	fnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
+	for i, arg := range argNodes {
+		// Params[0] is env; the i-th tin arg maps to Params[i+1].
+		var targetType irtypes.Type
+		if i+1 < len(fnType.Params) {
+			targetType = fnType.Params[i+1]
+		}
+
+		av, err := cg.genArgWithTargetType(block, arg, targetType)
 		if err != nil {
 			return nil, err
 		}
@@ -3789,9 +3977,6 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 		llArgs = append(llArgs, av)
 		llArgsPreCoerce = append(llArgsPreCoerce, av)
 	}
-
-	// Adapt args to the underlying function's signature.
-	fnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 	llArgs = cg.adaptArgs(block, llArgs, fnType)
 
 	result := block.NewCall(fnPtr, llArgs...)
@@ -4864,6 +5049,33 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	}
 
 	if calleeName == "" {
+		// Callee is not a simple name (e.g. fns[0], obj.field, a closure variable).
+		// Evaluate it and check if it's an async fat-fn-ptr.
+		fatVal, evalErr := cg.genExpr(block, callNode.Func)
+		if evalErr != nil {
+			return nil, fmt.Errorf("spawn: cannot determine callee name; only named function calls are supported")
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		if fatVal != nil && isAsyncFatFnPtr(fatVal.Type()) {
+			// Try to recover the Tin FuncType for proper Future[T] wrapping.
+			// For fns[i](args) where fns: [fn{#async}(T) R], look up fns's tinType.
+			var tinFnType ast.TypeExpr
+			if ie, ok2 := callNode.Func.(*ast.IndexExpr); ok2 {
+				if id, ok3 := ie.Expr.(*ast.Identifier); ok3 {
+					if se2, ok4 := cg.curScope.lookup(id.Name); ok4 {
+						if at, ok5 := se2.tinType.(*ast.ArrayType); ok5 {
+							tinFnType = at.Elem
+						}
+					}
+				}
+			}
+			return cg.genSpawnAsyncFatPtr(block, fatVal, callNode.Args, tinFnType)
+		}
+
 		return nil, fmt.Errorf("spawn: cannot determine callee name; only named function calls are supported")
 	}
 
@@ -4991,6 +5203,34 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	}
 
 	if coroFn == nil {
+		// Last resort: check if calleeName is a variable whose type is an async
+		// fat-fn-ptr.  This handles `spawn x(args)` where x: fn{#async}(...).
+		if se, ok2 := cg.curScope.lookup(calleeName); ok2 && se.isAlloc {
+			if pt, ok3 := se.val.Type().(*irtypes.PointerType); ok3 && isAsyncFatFnPtr(pt.ElemType) {
+				loaded := block.NewLoad(pt.ElemType, se.val)
+				fnPtr := block.NewExtractValue(loaded, 0)
+				envPtr := block.NewExtractValue(loaded, 1)
+				fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
+				// Build args: env first, then actual params.
+				spawnArgs := []value.Value{envPtr}
+				for i, val := range callArgs {
+					// Params[0] is env; i-th tin arg maps to Params[i+1].
+					if i+1 < len(fatFnType.Params) {
+						spawnArgs = append(spawnArgs, cg.coerce(block, val, fatFnType.Params[i+1]))
+					} else {
+						spawnArgs = append(spawnArgs, val)
+					}
+				}
+
+				hdl := block.NewCall(fnPtr, spawnArgs...)
+				pid := block.NewCall(cg.fiberSpawnFn, hdl)
+
+				retType := cg.asyncFatPtrRetType(se.tinType)
+				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
+			}
+		}
+
 		return nil, fmt.Errorf("spawn: function %q does not have an {#async} variant; add {#async} tag", calleeName)
 	}
 
@@ -5021,6 +5261,66 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	}
 
 	return cg.wrapPidInFuture(block, pid, resolvedCalleeName)
+}
+
+// asyncFatPtrRetType extracts the actual Tin return type from a declared FuncType
+// for use when wrapping a Future after spawning an async fat-fn-ptr.
+// Returns nil if the type is unknown or not a FuncType.
+func (cg *CodeGen) asyncFatPtrRetType(tinFnType ast.TypeExpr) irtypes.Type {
+	if tinFnType == nil {
+		return nil
+	}
+	ft, ok := tinFnType.(*ast.FuncType)
+	if !ok || ft.RetType == nil {
+		return nil
+	}
+	llRet, err := cg.tinTypeToLLVM(ft.RetType)
+	if err != nil {
+		return nil
+	}
+	return llRet
+}
+
+// genSpawnAsyncFatPtr spawns a fiber from an already-evaluated async fat-fn-ptr
+// value.  It extracts the $coro fn-ptr and env, calls it with (env, args...)
+// to get the coroutine handle, then spawns the fiber and returns Future[T].
+// tinFnType is the declared Tin FuncType for the callee (may be nil, falls back to Future[Unit]).
+func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argNodes []ast.Node, tinFnType ast.TypeExpr) (value.Value, error) {
+	fnPtr := block.NewExtractValue(fatVal, 0)
+	envPtr := block.NewExtractValue(fatVal, 1)
+	fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
+	// Build arg list: env first, then actual params (type-guided for fn values).
+	llArgs := []value.Value{envPtr}
+
+	for i, argNode := range argNodes {
+		var targetType irtypes.Type
+		// Params[0] is env; i-th tin arg maps to Params[i+1].
+		if i+1 < len(fatFnType.Params) {
+			targetType = fatFnType.Params[i+1]
+		}
+
+		av, err := cg.genArgWithTargetType(block, argNode, targetType)
+		if err != nil {
+			return nil, err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		if targetType != nil {
+			av = cg.coerce(block, av, targetType)
+		}
+
+		llArgs = append(llArgs, av)
+	}
+
+	hdl := block.NewCall(fnPtr, llArgs...)
+	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+
+	retType := cg.asyncFatPtrRetType(tinFnType)
+	return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
 }
 
 // genSpawnMethodExpr handles `spawn obj.method(args)` - spawns a method call as a fiber.
@@ -5090,6 +5390,47 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 
 	if structName == "" {
 		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", objVal.Type())
+	}
+
+	// Check if fa.Field is an async fat-fn-ptr struct field (not a method).
+	// e.g. struct Handler = { handle fn{#async}(i64) i64 }; spawn h.handle(10)
+	if fieldIdx := cg.fieldIndex(structName, fa.Field); fieldIdx >= 0 {
+		// Determine the struct LLVM type.
+		structLLVM := objVal.Type()
+		if pt, ok := structLLVM.(*irtypes.PointerType); ok {
+			structLLVM = pt.ElemType
+		}
+
+		if st, ok := structLLVM.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+			fieldTy := st.Fields[fieldIdx]
+			if isAsyncFatFnPtr(fieldTy) {
+				// Load the field value (need a pointer to the struct for GEP).
+				var fieldVal value.Value
+				if _, isPtr := objVal.Type().(*irtypes.PointerType); isPtr {
+					gep := block.NewGetElementPtr(structLLVM, objVal,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+					fieldVal = block.NewLoad(fieldTy, gep)
+				} else {
+					alloca := block.NewAlloca(structLLVM)
+					block.NewStore(objVal, alloca)
+					gep := block.NewGetElementPtr(structLLVM, alloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+					fieldVal = block.NewLoad(fieldTy, gep)
+				}
+				// Recover the Tin FuncType from structFieldTinTypes for proper Future[T].
+				var tinFnType ast.TypeExpr
+				if tinFields, hasTF := cg.structFieldTinTypes[structName]; hasTF {
+					fieldNames := cg.structFields[structName]
+					for i, fn := range fieldNames {
+						if fn == fa.Field && i < len(tinFields) {
+							tinFnType = tinFields[i]
+							break
+						}
+					}
+				}
+				return cg.genSpawnAsyncFatPtr(block, fieldVal, callNode.Args, tinFnType)
+			}
+		}
 	}
 
 	coroName := structName + "_" + fa.Field + "$coro"

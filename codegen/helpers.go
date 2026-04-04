@@ -576,8 +576,13 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 
 	// Named function pointer -> fat-fn-ptr: wrap in a thin shim with (i8* env, params...).
 	// This enables passing named functions (including extern) to higher-order functions.
+	// For async fat-fn-ptrs (inner fn returns i8*), wrap the $coro variant instead.
 	if isFatFnPtr(target) && !isFatFnPtr(src) {
 		if _, ok := src.(*irtypes.PointerType); ok {
+			if isAsyncFatFnPtr(target) {
+				return cg.wrapAsyncFnAsFatPtr(block, val, target)
+			}
+
 			return cg.wrapFnAsFatPtr(block, val, target)
 		}
 	}
