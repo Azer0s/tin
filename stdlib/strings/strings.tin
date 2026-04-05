@@ -1,11 +1,209 @@
-//!+strings.c
-
 // stdlib/strings - higher-level string operations
 //
-// Provides string manipulation functions not available in libc directly.
-// The implementation lives in strings.c (compiled via //!+strings.c above).
+// All functions are implemented in pure Tin with no C helpers.
 
-// replace returns a copy of s with all occurrences of old replaced by new_str.
-fn replace(s string, old string, new_str string) string = extern("_tin_str_replace")
+// _match_at returns true if sub matches s starting at pos.
+// Caller must ensure pos + len(sub) <= len(s).
+fn _match_at(s string, pos i64, sub string) bool =
+  let m = len(sub)
+  let j i64 = 0
+  for j < m:
+    if s[pos + j] != sub[j]:
+      return false
+    j = j + 1
+  return true
 
-export { replace } as strings
+// substr returns the bytes of s from index from (inclusive) to to (exclusive).
+fn substr(s string, from i64, to i64) string =
+  let out = ""
+  let i i64 = from
+  for i < to:
+    out = out ++ s[i]
+    i = i + 1
+  return out
+
+// contains reports whether sub appears anywhere in s.
+fn contains(s string, sub string) bool =
+  return index_of(s, sub) >= 0
+
+// count returns the number of non-overlapping occurrences of sub in s.
+// If sub is empty, count returns len(s) + 1.
+fn count(s string, sub string) i64 =
+  let n = len(s)
+  let m = len(sub)
+  if m == 0:
+    return n + 1
+  let c i64 = 0
+  let i i64 = 0
+  for i <= n - m:
+    if _match_at(s, i, sub):
+      c = c + 1
+      i = i + m
+    else:
+      i = i + 1
+  return c
+
+// has_prefix reports whether s begins with prefix.
+fn has_prefix(s string, prefix string) bool =
+  let m = len(prefix)
+  if m > len(s):
+    return false
+  return _match_at(s, 0, prefix)
+
+// has_suffix reports whether s ends with suffix.
+fn has_suffix(s string, suffix string) bool =
+  let n = len(s)
+  let m = len(suffix)
+  if m > n:
+    return false
+  return _match_at(s, n - m, suffix)
+
+// index_of returns the byte index of the first occurrence of sub in s, or -1.
+fn index_of(s string, sub string) i64 =
+  let n = len(s)
+  let m = len(sub)
+  if m == 0:
+    return 0
+  let i i64 = 0
+  for i <= n - m:
+    if _match_at(s, i, sub):
+      return i
+    i = i + 1
+  return -1
+
+// last_index_of returns the byte index of the last occurrence of sub in s, or -1.
+fn last_index_of(s string, sub string) i64 =
+  let n = len(s)
+  let m = len(sub)
+  if m == 0:
+    return n
+  if m > n:
+    return -1
+  let last i64 = -1
+  let i i64 = 0
+  for i <= n - m:
+    if _match_at(s, i, sub):
+      last = i
+    i = i + 1
+  return last
+
+// join concatenates the elements of parts, placing sep between each pair.
+fn join(parts [string], sep string) string =
+  let n = len(parts)
+  if n == 0:
+    return ""
+  let result = parts[0]
+  let i i64 = 1
+  for i < n:
+    result = result ++ sep ++ parts[i]
+    i = i + 1
+  return result
+
+// repeat returns a new string consisting of n copies of s.
+fn repeat(s string, n i64) string =
+  let result = ""
+  let i i64 = 0
+  for i < n:
+    result = result ++ s
+    i = i + 1
+  return result
+
+// replace returns a copy of s with every non-overlapping occurrence of old
+// replaced by new_str. If old is empty, s is returned unchanged.
+fn replace(s string, old string, new_str string) string =
+  let n = len(s)
+  let m = len(old)
+  if m == 0:
+    return s
+  let result = ""
+  let i i64  = 0
+  for i < n:
+    if i + m <= n && _match_at(s, i, old):
+      result = result ++ new_str
+      i = i + m
+    else:
+      result = result ++ s[i]
+      i = i + 1
+  return result
+
+// split slices s into all substrings separated by sep and returns them as an
+// array. If sep is empty, each byte of s becomes its own element.
+fn split(s string, sep string) [string] =
+  let n = len(s)
+  let m = len(sep)
+  let parts [string] = []
+  if m == 0:
+    let i i64 = 0
+    for i < n:
+      parts ++= substr(s, i, i + 1)
+      i = i + 1
+    return parts
+  let i     i64 = 0
+  let start i64 = 0
+  for i <= n - m:
+    if _match_at(s, i, sep):
+      parts ++= substr(s, start, i)
+      i = i + m
+      start = i
+    else:
+      i = i + 1
+  parts ++= substr(s, start, n)
+  return parts
+
+// to_lower returns s with every ASCII uppercase letter replaced by its
+// lowercase equivalent. Non-ASCII bytes are passed through unchanged.
+fn to_lower(s string) string =
+  let result = ""
+  for c in s:
+    if c >= @'A' && c <= @'Z':
+      result = result ++ (c - @'A' + @'a')
+    else:
+      result = result ++ c
+  return result
+
+// to_upper returns s with every ASCII lowercase letter replaced by its
+// uppercase equivalent. Non-ASCII bytes are passed through unchanged.
+fn to_upper(s string) string =
+  let result = ""
+  for c in s:
+    if c >= @'a' && c <= @'z':
+      result = result ++ (c - @'a' + @'A')
+    else:
+      result = result ++ c
+  return result
+
+// trim returns s with leading and trailing ASCII whitespace removed.
+fn trim(s string) string =
+  return trim_right(trim_left(s))
+
+// trim_left returns s with leading ASCII whitespace removed.
+fn trim_left(s string) string =
+  let n = len(s)
+  let i i64 = 0
+  for i < n:
+    let c = s[i]
+    if c != @' ' && c != @'\t' && c != @'\n' && c != @'\r':
+      break
+    i = i + 1
+  return substr(s, i, n)
+
+// trim_right returns s with trailing ASCII whitespace removed.
+fn trim_right(s string) string =
+  let n = len(s)
+  let end = n
+  for end > 0:
+    let c = s[end - 1]
+    if c != @' ' && c != @'\t' && c != @'\n' && c != @'\r':
+      break
+    end = end - 1
+  return substr(s, 0, end)
+
+export {
+  substr,
+  contains, count,
+  has_prefix, has_suffix,
+  index_of, last_index_of,
+  join, repeat, replace, split,
+  to_lower, to_upper,
+  trim, trim_left, trim_right
+} as strings
