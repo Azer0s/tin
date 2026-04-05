@@ -99,6 +99,15 @@ int _tin_frwmutex2_rlock_try(void *p, int64_t pid) {
         m->rw_pid[m->rw_cnt] = pid;
         m->rw_hdl[m->rw_cnt] = hdl;
         m->rw_cnt++;
+        // Re-check: if the write lock was released while we were registering,
+        // remove ourselves and tell the caller to retry rather than parking.
+        // Without this, the write-unlock's waiter snapshot may have already
+        // run (seeing rw_cnt == 0) and this fiber would park forever.
+        if (atomic_load_explicit(&m->state, memory_order_acquire) >= 0) {
+            m->rw_cnt--;
+            _rwmu_unlock(m);
+            return 0;
+        }
     }
     _rwmu_unlock(m);
     _tin_fiber_park(pid);
@@ -135,6 +144,14 @@ int _tin_frwmutex2_lock_try(void *p, int64_t pid) {
         m->ww_pid[m->ww_cnt] = pid;
         m->ww_hdl[m->ww_cnt] = hdl;
         m->ww_cnt++;
+        // Re-check: if the lock is now free, remove ourselves and retry.
+        // The last reader (or writer) may have unlocked and taken a snapshot
+        // of ww_cnt == 0 before we registered, so no wakeup would arrive.
+        if (atomic_load_explicit(&m->state, memory_order_acquire) == 0) {
+            m->ww_cnt--;
+            _rwmu_unlock(m);
+            return 0;
+        }
     }
     _rwmu_unlock(m);
     _tin_fiber_park(pid);
@@ -243,6 +260,7 @@ void *_tin_atomic_new_i64(int64_t v) {
     __atomic_store_n(p, v, __ATOMIC_RELAXED);
     return p;
 }
+void _tin_atomic_free_i64(void *a) { free(a); }
 int64_t _tin_atomic_load_i64(void *a) {
     return __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
 }

@@ -32,6 +32,10 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+// Defined in defer.c; declared here so the worker loop can save/restore the
+// per-fiber defer chain around _coro_resume.
+extern __thread TinDeferEntry *_tin_defer_chain;
+
 // -------------------------------------------------------------------
 // Fiber status
 // -------------------------------------------------------------------
@@ -107,6 +111,13 @@ typedef struct {
     // _fire_done_waiters checks this to do a CAS-based single-winner wakeup.
     // Protected by _table_mu.
     struct TinAnyWaiter *any_waiter;
+    // Per-fiber defer chain: saves and restores _tin_defer_chain around each
+    // _coro_resume so that a fiber's deferred functions are only visible while
+    // that fiber is executing.  Without this, a second fiber running on the same
+    // worker thread after a yield would inherit the first fiber's defer chain,
+    // causing the second fiber's panic to accidentally consume the first fiber's
+    // recover() entry.
+    TinDeferEntry *saved_defer_chain;
 } TinFiber;
 
 // TinAnyWaiter - shared state for _tin_fiber_join_any.
@@ -127,6 +138,12 @@ static int64_t     _fiber_cap = 0;
 static int64_t     _fiber_cnt = 1;   // next pid; 0 reserved
 static int64_t     _fiber_max = 0;
 static pthread_mutex_t _table_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// Set to 1 (atomically) whenever a fiber stores a panic_msg that has not yet
+// been read by _tin_fiber_get_panic_msg / _tin_fiber_check_panic.
+// Gives _tin_fiber_check_panic an O(1) fast-path so the loop-edge check is
+// a single atomic load in the common (no panic) case.
+static _Atomic int _has_unhandled_panics = 0;
 
 
 // -------------------------------------------------------------------
@@ -483,6 +500,11 @@ static void _fire_done_waiters(TinFiber *f) {
     f->waiter_cnt = 0;
 }
 
+// Forward declarations for per-thread coro frame pool (defined after _worker_thread).
+#define CORO_POOL_MAX 16
+static _Thread_local void *_coro_pool[CORO_POOL_MAX];
+static _Thread_local int   _coro_pool_cnt = 0;
+
 static void *_worker_thread(void *_) {
     (void)_;
     _is_worker       = 1;
@@ -532,9 +554,21 @@ static void *_worker_thread(void *_) {
         _coro_result         = NULL;
         _inline_result_mode  = 0;  // reset so inline-drive TLS cannot leak across fibers
 
+        // Restore this fiber's defer chain so its deferred functions are only
+        // visible while the fiber is executing.  Without save/restore, a second
+        // fiber running on the same worker would inherit the first fiber's chain,
+        // letting the second fiber's panic accidentally consume the first fiber's
+        // recover() entry.
+        _tin_defer_chain = f->saved_defer_chain;
+
         _tin_panic_catch_begin();
         _coro_resume(r.hdl);
         const char *panicked = _tin_panic_catch_end();
+
+        // Save the (possibly updated) defer chain back into the fiber so that
+        // the next resume on any worker thread sees the correct chain head.
+        f->saved_defer_chain = _tin_defer_chain;
+        _tin_defer_chain     = NULL;  // don't let this fiber's chain bleed into the next
 
         if (panicked) {
             // Fiber panicked.  Destroy the coro frame.
@@ -546,7 +580,18 @@ static void *_worker_thread(void *_) {
             // Clear direct-recv flag: if the fiber panicked before consuming
             // it, the next fiber on this worker must not inherit a stale flag.
             _direct_recv_flag = 0;
-            _coro_destroy(r.hdl);
+            // Free any intermediate result that may have been stored by
+            // emitCoroComplete before the panic path took over (e.g., genBuiltinPanic
+            // calls emitCoroComplete then the runtime re-raises the panic).
+            if (_coro_result) {
+                _tin_inline_result_free(_coro_result);
+                _coro_result = NULL;
+            }
+            // LLVM's coro-split pass generates empty destroy functions for
+            // trivially-destructible C/Tin coroutines (no C++ dtors), so
+            // _coro_destroy is a no-op and the frame is never freed via the
+            // cleanup path.  Free it explicitly here.
+            _tin_coro_free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             // Allocate with _tin_rc_alloc so the message has a proper ARC header.
             // This lets the awaiting fiber wrap it in a TinString and release it
@@ -555,6 +600,7 @@ static void *_worker_thread(void *_) {
             char *pmsg_buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
             memcpy(pmsg_buf, panicked, plen + 1);
             f->panic_msg = pmsg_buf;
+            atomic_store(&_has_unhandled_panics, 1);
             f->status    = FIBER_DONE;
             _fire_done_waiters(f);           // wake any fiber waiters
             pthread_mutex_lock(&f->done_mu);
@@ -570,9 +616,11 @@ static void *_worker_thread(void *_) {
 
         if (_coro_done) {
             // Fiber completed: store result, wake waiters, signal done_cv.
-            // The cleanup path (emitCoroEpilogue) calls llvm.coro.free which
-            // frees the heap-allocated frame inside _coro_destroy.
-            _coro_destroy(r.hdl);
+            // LLVM's coro-split pass generates empty destroy functions for
+            // trivially-destructible C/Tin coroutines, so _coro_destroy is a
+            // no-op.  Free the frame explicitly instead of relying on the
+            // cleanup path.
+            _tin_coro_free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
@@ -665,6 +713,10 @@ static void *_worker_thread(void *_) {
         _current_pid = -1;
         _current_hdl = NULL;
     }
+    // Flush per-thread coro frame pool to avoid leaking frames at worker exit.
+    for (int i = 0; i < _coro_pool_cnt; i++)
+        free((char *)_coro_pool[i] - 8);
+    _coro_pool_cnt = 0;
     return NULL;
 }
 
@@ -789,6 +841,12 @@ int64_t _tin_fiber_spawn(void *hdl) {
 }
 
 void _tin_fiber_complete(void *result) {
+    // Free any previous result before overwriting.  This handles the case where
+    // genBuiltinPanic emits emitCoroComplete (storing an intermediate result),
+    // and the subsequent 'return' statement emits emitCoroComplete again.  Without
+    // this guard the first result buffer leaks.
+    if (_coro_result && _coro_result != result)
+        _tin_inline_result_free(_coro_result);
     _coro_done   = 1;
     _coro_result = result;
 }
@@ -879,11 +937,6 @@ void _tin_inline_result_free(void *ptr) {
 //   _coro_pool[0..cnt-1]  – LLVM frame pointers (raw_alloc + 8)
 //   Lookup: linear scan checking *(int64_t*)(ptr - 8) == requested size.
 // ---------------------------------------------------------------------------
-#define CORO_POOL_MAX 16
-
-static _Thread_local void    *_coro_pool[CORO_POOL_MAX];
-static _Thread_local int      _coro_pool_cnt = 0;
-
 void *_tin_coro_malloc(int64_t size) {
     // Fast path: search pool for a frame of the exact size.
     for (int i = _coro_pool_cnt - 1; i >= 0; i--) {
@@ -949,6 +1002,51 @@ const char *_tin_fiber_get_panic_msg(int64_t pid) {
         _tin_retain((void *)msg);
     }
     pthread_mutex_unlock(&_table_mu);
+    return msg;
+}
+
+// Check for any non-awaited fiber panic and return (retained) message, or NULL.
+// Called at every loop back edge of async functions so unhandled panics surface
+// as early as possible rather than only at scheduler shutdown.
+//
+// Fast path: if _has_unhandled_panics == 0, returns NULL without acquiring any
+// lock.  When a panic is found, marks it as checked and clears the flag if no
+// further unchecked panics remain.  The returned message is retained once; the
+// caller is expected to pass it to _tin_panic which will release it via ARC.
+const char *_tin_fiber_check_panic(void) {
+    if (!atomic_load(&_has_unhandled_panics)) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&_table_mu);
+
+    const char *msg = NULL;
+
+    for (int64_t i = 1; i < _fiber_cnt; i++) {
+        if (_fibers[i] && _fibers[i]->panic_msg && !_fibers[i]->panic_checked) {
+            msg = _fibers[i]->panic_msg;
+            _fibers[i]->panic_checked = 1;
+            _tin_retain((void *)msg);
+            break;
+        }
+    }
+
+    // Recheck whether any unchecked panics remain so we can clear the flag.
+    int still_pending = 0;
+
+    for (int64_t i = 1; i < _fiber_cnt; i++) {
+        if (_fibers[i] && _fibers[i]->panic_msg && !_fibers[i]->panic_checked) {
+            still_pending = 1;
+            break;
+        }
+    }
+
+    if (!still_pending) {
+        atomic_store(&_has_unhandled_panics, 0);
+    }
+
+    pthread_mutex_unlock(&_table_mu);
+
     return msg;
 }
 
@@ -1305,6 +1403,13 @@ void _tin_fiber_run(void) {
     _run_queue.buf = NULL;
     pthread_mutex_destroy(&_run_queue.mu);
     pthread_cond_destroy(&_run_queue.not_empty);
+
+    // Flush the main-thread coro frame pool.  Worker thread pools are flushed
+    // in _worker_thread before return.  The main thread drives test bodies and
+    // inline coroutines, accumulating frames here that are never otherwise freed.
+    for (int i = 0; i < _coro_pool_cnt; i++)
+        free((char *)_coro_pool[i] - 8);
+    _coro_pool_cnt = 0;
 }
 
 // (moved above _tin_fiber_await_result)

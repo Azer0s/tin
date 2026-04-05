@@ -771,6 +771,7 @@ type FuncType struct {
 	Params    []TypeExpr
 	RetType   TypeExpr // nil = void
 	IsVarArgs bool
+	IsAsync   bool // true for fn{#async}(...) type expressions
 }
 
 func (f *FuncType) typeExprMarker() {}

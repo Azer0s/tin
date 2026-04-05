@@ -26,14 +26,61 @@ struct resource =
 ## When deinit is called
 
 `fn deinit` is invoked from `emitRelease` (`codegen/runtime.go`) whenever
-the compiler emits an ARC release for a named struct type.  The three
-call-sites that trigger this:
+the compiler emits an ARC release for a named struct type.  The call-sites
+that trigger this:
 
-| Trigger                             | Code path                               |
-|-------------------------------------|-----------------------------------------|
-| Local variable goes out of scope    | `emitScopeRelease` -> `emitRelease`     |
-| All scopes unwound on `return`      | `emitAllScopeReleases` -> `emitRelease` |
-| Old value overwritten by assignment | `genAssignStmt` -> `emitRelease`        |
+| Trigger                                    | Code path                                         |
+|--------------------------------------------|---------------------------------------------------|
+| Local variable goes out of scope           | `emitScopeRelease` -> `emitRelease`               |
+| All scopes unwound on `return`             | `emitAllScopeReleases` -> `emitRelease`            |
+| Old value overwritten by assignment        | `genAssign` -> `emitRelease` (on old value)       |
+| Global variable overwritten by assignment  | `genAssign` -> `emitRelease` (on old value)       |
+| Top-level `var` at program exit            | `emitTopLevelVarDeinits` -> `emitRelease`         |
+| Coro parameter with `_fiber_retain` at exit| `emitAllScopeReleases` -> `emitRelease`           |
+
+### Assignment overwrites (`genAssign`)
+
+When a variable of a struct type with `fn deinit` is overwritten, the old
+value is released before the new value is stored.  This applies to both local
+variables and top-level `var` globals:
+
+```tin
+var g_mu sync::Mutex
+
+fn{#async} setup() =
+  g_mu = sync::Mutex.make()   // first call: deinit(zero_mutex) -> free(null), safe
+  g_mu = sync::Mutex.make()   // second call: deinit(old_mutex) -> free(old._ptr)
+```
+
+The check is: if `typeNameOf(target.ElemType)` yields a non-empty name and
+`cg.curScope.lookup(name + "_deinit")` succeeds, load the old value and call
+`emitRelease` before the store.  Only struct types with an explicit `fn deinit`
+are affected; primitives and structs without `deinit` are unchanged.
+
+### Top-level globals at program exit
+
+`emitTopLevelVarDeinits` (`codegen/globals.go`) iterates all `var` declarations
+in reverse order and calls `emitRelease` on each loaded value.  This runs
+immediately after `_tin_fiber_run()` returns (all fibers have finished) and
+before the process exits.
+
+In test-mode binaries this is emitted inside `genTestRunner` after
+`emitFiberMainEnd`, ensuring every test's globals are cleaned up when the
+runner exits.
+
+### Coroutine parameters with `_fiber_retain`
+
+Some stdlib types (e.g. `sync::Channel[T]`) define `fn _fiber_retain` to
+manage a C-level reference count that is outside the ARC system.  When a coro
+function receives such a type as a parameter:
+
+1. The ramp block calls `_fiber_retain` (C-level RC++).
+2. The parameter is registered in scope with `noDeinit: false` (not the usual
+   `noDeinit: true`), because the coro co-owns the value.
+3. At scope exit, `emitRelease` calls `deinit` which decrements the C-level RC.
+
+For all other coro parameters, `noDeinit: true` is still set so the callee
+does not call `deinit` on values it does not own.
 
 ### Order within a struct
 
@@ -134,6 +181,10 @@ Tin structs are value types.  The deinit model distinguishes **owners** from
   callee is a borrower; `deinit` is NOT called when the parameter goes out
   of scope at function exit (only the RC-tracked field counts are balanced via
   retain-on-entry / release-on-exit).
+- A **coro parameter whose struct type defines `fn _fiber_retain`** takes
+  ownership: the ramp block calls `_fiber_retain` before the first suspend,
+  incrementing the type's C-level RC.  Because the coro is now a co-owner,
+  `deinit` IS called at coro exit to decrement that RC.
 
 This means `deinit` fires exactly once per struct value from the owner's
 perspective, regardless of how many times the struct is passed to functions.

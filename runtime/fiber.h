@@ -101,6 +101,13 @@ void _tin_fiber_park(int64_t pid);
 // waiter lists to shorten the unpark hot path.
 void _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
 
+// Check for any non-awaited fiber panic.  Returns a retained panic message (i8*)
+// if any spawned-but-not-awaited fiber has an unchecked panic, or NULL otherwise.
+// Fast path: O(1) atomic check when no panics are pending.
+// Called at loop back edges of async functions (genYieldAutoAt) so panics from
+// fire-and-forget fibers surface promptly rather than only at scheduler shutdown.
+const char *_tin_fiber_check_panic(void);
+
 // Returns the coro handle of the fiber currently running on this worker thread,
 // or NULL if called from outside a fiber context (I/O thread, timer, main).
 // Used by channel_arc.c to pass hdl to TinFastMutex without _table_mu.

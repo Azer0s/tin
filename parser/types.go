@@ -218,11 +218,19 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 	p.advance() // consume fn
 
+	ft := &ast.FuncType{}
+
+	// Parse optional {#async} modifier on function type: fn{#async}(params) ret.
+	// Reuse parseTags which handles the {#tag} grammar correctly.
+	for _, tag := range p.parseTags() {
+		if tag == "async" {
+			ft.IsAsync = true
+		}
+	}
+
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
-
-	ft := &ast.FuncType{}
 
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		// optional param name (ignored in type)

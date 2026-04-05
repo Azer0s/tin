@@ -720,7 +720,16 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 		alloca := bodyStart.NewAlloca(p.Type())
 		bodyStart.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true})
+		// Parameters that have _fiber_retain called in the ramp block are co-owned
+		// by the coro (the ramp increments the C-level RC). The scope-exit release
+		// must call deinit to decrement that RC, so noDeinit must be false.
+		// All other parameters use noDeinit=true because the caller still owns them.
+		hasFiberRetain := false
+		if structName := cg.typeNameOf(p.Type()); structName != "" {
+			_, hasFiberRetain = cg.curScope.lookup(structName + "__fiber_retain")
+		}
+
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: !hasFiberRetain})
 	}
 
 	// Generate the function body. genReturn and genBody's addDefaultRet check
@@ -821,10 +830,27 @@ func (cg *CodeGen) emitInlineChanSuspend(prefix string, yieldBlk, retryBlk, done
 	cg.curBlock = doneBlk
 }
 
+// ensureFiberCheckPanicFn lazily declares _tin_fiber_check_panic() -> i8*.
+// Returns the first retained panic message from a non-awaited fiber, or NULL.
+func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
+	if cg.fiberCheckPanicFn != nil {
+		return cg.fiberCheckPanicFn
+	}
+
+	cg.fiberCheckPanicFn = cg.ensureExternDecl("_tin_fiber_check_panic", irtypes.I8Ptr, nil, false)
+
+	return cg.fiberCheckPanicFn
+}
+
 // genYieldAutoAt emits an automatic yield point at the backedge of a loop.
 // `from` is the block at the end of the loop body; after yielding it resumes
 // at `header` (the loop condition or post block).
 // Only called when cg.curFnAutoYield is true.
+//
+// After each resume, checks for unhandled panics from fire-and-forget fibers
+// (_tin_fiber_check_panic). If one is found, it is re-raised in the current
+// fiber so it surfaces at the earliest possible loop iteration rather than
+// only at scheduler shutdown.
 func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 	if cg.yieldResumeBlocks[from] {
 		// `from` is the resume block of an explicit `yield` statement.
@@ -836,5 +862,19 @@ func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 	}
 
 	resume := cg.emitSuspendPoint(from, cg.curCoroFrame)
-	resume.NewBr(header)
+
+	// Check for unhandled panics from non-awaited fibers.
+	msg := resume.NewCall(cg.ensureFiberCheckPanicFn())
+	isNotNull := resume.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	panicBlk := cg.newBlock("autoyield.panic")
+	resume.NewCondBr(isNotNull, panicBlk, header)
+
+	// Re-raise the panic in the current fiber. _tin_panic unwinds defers
+	// (making the panic catchable via recover()) then terminates the fiber.
+	panicBlk.NewCall(cg.ensurePanicFn(), msg)
+	// Do NOT release msg here — the defer thunk already balances the retain
+	// added by _tin_fiber_check_panic (same as the await.panic path; see the
+	// comment in genAwaitExpr).
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
 }

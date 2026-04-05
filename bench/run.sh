@@ -61,7 +61,11 @@ run_bench() {
     echo ""
 }
 
-if command -v hyperfine &>/dev/null; then
+# Locate hyperfine: prefer PATH, fall back to asdf rust installs.
+HYPERFINE=$(command -v hyperfine 2>/dev/null || \
+    ls "$HOME"/.asdf/installs/rust/*/bin/hyperfine 2>/dev/null | tail -1 || true)
+
+if [ -n "$HYPERFINE" ] && [ -x "$HYPERFINE" ]; then
     for bench in bench pipeline mpmc jitter; do
         case "$bench" in
             bench)    label="Pingpong (1M round trips)" ;;
@@ -70,7 +74,7 @@ if command -v hyperfine &>/dev/null; then
             jitter)   label="Jitter (1M tasks, 8 workers, 0-3 yields)" ;;
         esac
         echo "=== $label ==="
-        hyperfine \
+        "$HYPERFINE" \
             --warmup 2 \
             --export-markdown "$SCRIPT_DIR/results_${bench}.md" \
             --command-name go      "$BIN_DIR/bench_go ${bench}" \
@@ -81,7 +85,7 @@ if command -v hyperfine &>/dev/null; then
     done
     echo "Results written to bench/results_*.md"
 else
-    echo "hyperfine not found - install with: cargo install hyperfine"
+    echo "hyperfine not found - install with: yay -S hyperfine  (or: cargo install hyperfine)"
     echo "Running each benchmark once:"
     echo ""
     run_bench bench    "pingpong (1M round trips)"             "latency"

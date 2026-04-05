@@ -126,6 +126,12 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			}
 		}
 
+		// Async fat-fn-ptr: the inner function is the $coro variant which always
+		// returns i8* (coroutine handle), regardless of the declared return type.
+		if t.IsAsync {
+			ret = irtypes.I8Ptr
+		}
+
 		ft := irtypes.NewFunc(ret, llParams...)
 		ft.Variadic = t.IsVarArgs
 		// Fat pointer struct: { fn_ptr*, i8* }
@@ -518,6 +524,21 @@ func isFatFnPtr(t irtypes.Type) bool {
 	_, ok = pt.ElemType.(*irtypes.FuncType)
 
 	return ok
+}
+
+// isAsyncFatFnPtr returns true when t is an async closure fat pointer
+// { fn(i8*, params...) i8* *, i8* } — the inner function returns i8*
+// (coroutine handle), as produced for fn{#async}(...) type expressions.
+func isAsyncFatFnPtr(t irtypes.Type) bool {
+	if !isFatFnPtr(t) {
+		return false
+	}
+
+	st := t.(*irtypes.StructType)
+	fnPtr := st.Fields[0].(*irtypes.PointerType)
+	ft := fnPtr.ElemType.(*irtypes.FuncType)
+
+	return ft.RetType != nil && ft.RetType.Equal(irtypes.I8Ptr)
 }
 
 // isAtomType returns true if t is the %__atom named struct type { i32 }.

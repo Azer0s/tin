@@ -95,6 +95,99 @@ An async function:
 
 ---
 
+## Async function types
+
+`fn{#async}(params...) ret` is a first-class type that represents an async
+function value. It is distinct from `fn(params...) ret` (a sync function value):
+the compiler tracks the difference at the type level and generates correct spawn
+behavior for each.
+
+### Parameters
+
+Declare a parameter as `fn{#async}(params...) ret` to accept an async function:
+
+```rust
+fn run_async(cb fn{#async}(i64) i64, n i64) i64 =
+  let f = spawn cb(n)   // spawns cb as a fiber
+  let r = await f
+  return r
+
+fn{#async} double(n i64) i64 =
+  await io::sleep(1)
+  return n * 2
+
+test "pass async fn as parameter" =
+  let result = run_async(double, 21)
+  assert::equals(result, 42)
+```
+
+The compiler picks the correct overload automatically: if multiple functions
+share a name (sync and async variants), the one matching the declared parameter
+type is selected.
+
+### Arrays
+
+Use `[fn{#async}(params...) ret]` as the element type:
+
+```rust
+fn{#async} double(n i64) i64 =
+  await io::sleep(1)
+  return n * 2
+
+test "store async fn in array" =
+  let fns [fn{#async}(i64) i64] = [double]
+  let f = spawn fns[0](5)
+  let r = await f
+  assert::equals(r, 10)
+
+test "multiple async fns in array" =
+  let fns [fn{#async}(i64) i64] = [double, double]
+  let f0 = spawn fns[0](3)
+  let f1 = spawn fns[1](7)
+  assert::equals(await f0, 6)
+  assert::equals(await f1, 14)
+```
+
+### Struct fields
+
+Use `fn{#async}(params...) ret` as a struct field type:
+
+```rust
+struct Handler =
+  handle fn{#async}(i64) i64
+
+fn{#async} double(n i64) i64 =
+  await io::sleep(1)
+  return n * 2
+
+test "async fn in struct field" =
+  let h = Handler{handle: double}
+  let f = spawn h.handle(10)
+  let r = await f
+  assert::equals(r, 20)
+```
+
+### Overload resolution
+
+When a function has both sync and async overloads (or any two overloads), the
+compiler selects the correct one based on the declared parameter type:
+
+```rust
+fn apply(cb fn(i64) i64, n i64) i64 = return cb(n)
+
+fn add_one(n i64) i64 = return n + 1
+
+test "passing sync overload to higher-order function" =
+  let result = apply(add_one, 5)
+  assert::equals(result, 6)
+```
+
+If a function is named in a context where the target type is
+`fn{#async}(params...) ret`, the compiler wraps it in the async variant
+automatically. If the target is `fn(params...) ret`, the sync variant is used.
+
+---
+
 ## spawn
 
 `spawn expr` starts a fiber and returns `Future[T]` where `T` is the return

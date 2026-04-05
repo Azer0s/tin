@@ -628,6 +628,16 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// TupleLit: pass the declared type so fields get the right LLVM types.
 		if tup, ok := s.Value.(*ast.TupleLit); ok && llType != nil {
 			initVal, err = cg.genTupleLit(block, tup, llType)
+		} else if arrLit, ok := s.Value.(*ast.ArrayLit); ok && s.Type != nil {
+			// ArrayLit with declared element type: coerce each element to the declared type.
+			// Handles e.g. let fns [fn{#async}(i64) i64] = [double] where elements need wrapping.
+			var targetElemType irtypes.Type
+
+			if at, ok2 := s.Type.(*ast.ArrayType); ok2 && at.Elem != nil {
+				targetElemType, _ = cg.tinTypeToLLVM(at.Elem)
+			}
+
+			initVal, err = cg.genArrayLitWithElemType(block, arrLit, targetElemType)
 		} else {
 			initVal, err = cg.genExpr(block, s.Value)
 		}
@@ -809,7 +819,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv})
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type})
 
 	return block, nil
 }
@@ -1984,6 +1994,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)
 		cg.emitRelease(block, oldVal)
+	} else if !isWeakTarget {
+		// Struct types with an explicit deinit method own external resources
+		// (e.g. Mutex._ptr, Channel._ptr). Deinit the old value before
+		// overwriting so those resources are not leaked.
+		structName := cg.typeNameOf(ptrType.ElemType)
+		if structName != "" && cg.curScope != nil {
+			if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
+				oldVal := block.NewLoad(ptrType.ElemType, ptr)
+				cg.emitRelease(block, oldVal)
+			}
+		}
 	}
 
 	block.NewStore(val, ptr)
@@ -3505,6 +3526,9 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		var err2 error
 
 		caseBlock, _, err2 = cg.genStmt(caseBlock, body)
+
+		// ARC: release case-body scope vars before falling through to afterBlock.
+		cg.emitScopeRelease(caseBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		return caseBlock, err2
@@ -4075,6 +4099,9 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		}
 
 		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
+
+		// ARC: release case-body scope vars before falling through to afterBlock.
+		cg.emitScopeRelease(caseBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		if err != nil {
@@ -4092,6 +4119,9 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	if s.Default != nil {
 		cg.curScope = newScope(cg.curScope)
 		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
+
+		// ARC: release default-body scope vars before falling through.
+		cg.emitScopeRelease(defaultBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		if err != nil {

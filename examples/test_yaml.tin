@@ -1,0 +1,213 @@
+// examples/test_yaml.tin
+// Tests yaml stdlib by parsing a realistic docker-compose.yml structure.
+// Covers untyped and typed parsing, encode/decode round-trips, and
+// edge cases exercised by real-world YAML files.
+// Run with: tin test examples/test_yaml.tin
+
+use assert
+use yaml
+
+// Typed structs for typed-parse tests.
+
+struct dc_service =
+  image   string
+  restart string
+
+struct dc_deploy =
+  replicas i64
+  memory   string
+
+struct dc_healthcheck =
+  cmd      string @"yaml:test"
+  interval string
+  retries  i64
+
+// docker-compose YAML document:
+//   - document-start marker (---)
+//   - comments
+//   - quoted string for version ("3.8")
+//   - three levels of nesting
+//   - block sequences (ports, depends_on)
+//   - nested block mapping (environment)
+//   - plain scalars with colons (image tags: nginx:latest)
+fn compose_doc() string =
+  return "---\n# sample docker-compose for testing\nversion: \"3.8\"\nservices:\n  web:\n    image: nginx:latest\n    restart: always\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n  db:\n    image: postgres:15\n    restart: unless-stopped\n    environment:\n      POSTGRES_USER: admin\n      POSTGRES_DB: appdb\n  worker:\n    image: myapp:v1.2\n    restart: on-failure\n    depends_on:\n      - db\n      - web\n"
+
+// ---- top-level structure ----
+
+test "compose: document is an object" =
+  let v = yaml::parse(compose_doc())
+  assert::ok(v.is_object())
+
+test "compose: version is a quoted string" =
+  let v = yaml::parse(compose_doc())
+  assert::ok(v.get("version").is_string())
+  assert::equals_str(v.get("version").as_string(), "3.8")
+
+test "compose: services is an object" =
+  let v = yaml::parse(compose_doc())
+  assert::ok(v.get("services").is_object())
+
+test "compose: service count" =
+  let v = yaml::parse(compose_doc())
+  let ks = v.get("services").keys()
+  assert::equals(len(ks), 3)
+
+test "compose: missing top-level key is null" =
+  let v = yaml::parse(compose_doc())
+  assert::ok(v.get("volumes").is_null())
+
+// ---- web service ----
+
+test "compose: web image (colon in plain scalar)" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("web").get("image").as_string(), "nginx:latest")
+
+test "compose: web restart" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("web").get("restart").as_string(), "always")
+
+test "compose: web ports is an array" =
+  let v = yaml::parse(compose_doc())
+  let ports = v.get("services").get("web").get("ports")
+  assert::ok(ports.is_array())
+  assert::equals(ports.array_len(), 2)
+
+test "compose: web ports values (quoted colon strings)" =
+  let v = yaml::parse(compose_doc())
+  let ports = v.get("services").get("web").get("ports")
+  assert::equals_str(ports.index(0).as_string(), "80:80")
+  assert::equals_str(ports.index(1).as_string(), "443:443")
+
+// ---- db service ----
+
+test "compose: db image" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("db").get("image").as_string(), "postgres:15")
+
+test "compose: db restart" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("db").get("restart").as_string(), "unless-stopped")
+
+test "compose: db environment is an object" =
+  let v = yaml::parse(compose_doc())
+  let env = v.get("services").get("db").get("environment")
+  assert::ok(env.is_object())
+
+test "compose: db environment values" =
+  let v = yaml::parse(compose_doc())
+  let env = v.get("services").get("db").get("environment")
+  assert::equals_str(env.get("POSTGRES_USER").as_string(), "admin")
+  assert::equals_str(env.get("POSTGRES_DB").as_string(), "appdb")
+
+// ---- worker service ----
+
+test "compose: worker image" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("worker").get("image").as_string(), "myapp:v1.2")
+
+test "compose: worker restart on-failure (hyphenated plain scalar)" =
+  let v = yaml::parse(compose_doc())
+  assert::equals_str(v.get("services").get("worker").get("restart").as_string(), "on-failure")
+
+test "compose: worker depends_on is an array" =
+  let v = yaml::parse(compose_doc())
+  let deps = v.get("services").get("worker").get("depends_on")
+  assert::ok(deps.is_array())
+  assert::equals(deps.array_len(), 2)
+
+test "compose: worker depends_on values" =
+  let v = yaml::parse(compose_doc())
+  let deps = v.get("services").get("worker").get("depends_on")
+  assert::equals_str(deps.index(0).as_string(), "db")
+  assert::equals_str(deps.index(1).as_string(), "web")
+
+test "compose: missing service returns null" =
+  let v = yaml::parse(compose_doc())
+  assert::ok(v.get("services").get("redis").is_null())
+
+// ---- typed parsing ----
+
+test "typed: parse service YAML into dc_service struct" =
+  let svc_yaml = "image: redis:7\nrestart: always\n"
+  let svc = yaml::parse[dc_service](svc_yaml)
+  assert::equals_str(svc.image, "redis:7")
+  assert::equals_str(svc.restart, "always")
+
+test "typed: parse deploy config" =
+  let deploy_yaml = "replicas: 3\nmemory: 512m\n"
+  let d = yaml::parse[dc_deploy](deploy_yaml)
+  assert::equals(d.replicas, 3)
+  assert::equals_str(d.memory, "512m")
+
+test "typed: parse healthcheck with integer retries" =
+  let hc_yaml = "test: /health\ninterval: 30s\nretries: 5\n"
+  let hc = yaml::parse[dc_healthcheck](hc_yaml)
+  assert::equals_str(hc.cmd, "/health")
+  assert::equals_str(hc.interval, "30s")
+  assert::equals(hc.retries, 5)
+
+test "typed: unknown keys are ignored" =
+  let svc_yaml = "image: alpine:3\nrestart: no\nextra_key: ignored\n"
+  let svc = yaml::parse[dc_service](svc_yaml)
+  assert::equals_str(svc.image, "alpine:3")
+
+test "typed: missing keys leave zero values" =
+  let svc_yaml = "image: scratch\n"
+  let svc = yaml::parse[dc_service](svc_yaml)
+  assert::equals_str(svc.image, "scratch")
+  assert::equals_str(svc.restart, "")
+
+// ---- encode/decode round-trips ----
+
+test "roundtrip: dc_service encode then parse" =
+  let svc = dc_service{image: "node:20", restart: "unless-stopped"}
+  let encoded = yaml::encode(svc)
+  let parsed = yaml::parse[dc_service](encoded)
+  assert::equals_str(parsed.image, "node:20")
+  assert::equals_str(parsed.restart, "unless-stopped")
+
+test "roundtrip: dc_deploy encode then parse" =
+  let d = dc_deploy{replicas: 2, memory: "256m"}
+  let encoded = yaml::encode(d)
+  let parsed = yaml::parse[dc_deploy](encoded)
+  assert::equals(parsed.replicas, 2)
+  assert::equals_str(parsed.memory, "256m")
+
+test "roundtrip: healthcheck with special chars in test field" =
+  let hc = dc_healthcheck{cmd: "curl -f http://localhost/", interval: "10s", retries: 3}
+  let encoded = yaml::encode(hc)
+  let parsed = yaml::parse[dc_healthcheck](encoded)
+  assert::equals_str(parsed.cmd, "curl -f http://localhost/")
+  assert::equals(parsed.retries, 3)
+
+// ---- edge cases from real docker-compose files ----
+
+test "edge: inline comment after value" =
+  let v = yaml::parse("replicas: 2  # scale out\n")
+  assert::equals(v.get("replicas").as_int(), 2)
+
+test "edge: value with version-like float (parsed as string when quoted)" =
+  let v = yaml::parse("version: \"3.9\"\n")
+  assert::ok(v.get("version").is_string())
+  assert::equals_str(v.get("version").as_string(), "3.9")
+
+test "edge: on-failure is not a boolean" =
+  let v = yaml::parse("restart: on-failure\n")
+  assert::ok(v.get("restart").is_string())
+  assert::equals_str(v.get("restart").as_string(), "on-failure")
+
+test "edge: unless-stopped is a plain string" =
+  let v = yaml::parse("restart: unless-stopped\n")
+  assert::ok(v.get("restart").is_string())
+  assert::equals_str(v.get("restart").as_string(), "unless-stopped")
+
+test "edge: image tag with colon is a plain string" =
+  let v = yaml::parse("image: postgres:15\n")
+  assert::ok(v.get("image").is_string())
+  assert::equals_str(v.get("image").as_string(), "postgres:15")
+
+test "edge: empty depends_on sequence" =
+  let v = yaml::parse("depends_on: []\n")
+  assert::ok(v.get("depends_on").is_array())
+  assert::equals(v.get("depends_on").array_len(), 0)

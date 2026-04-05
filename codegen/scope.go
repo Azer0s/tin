@@ -6,6 +6,8 @@ import (
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Implicit conversion registry
@@ -45,6 +47,9 @@ type scopeEntry struct {
 	// must operate on the base allocation pointer, not the possibly-interior field 0.
 	// When non-nil, scope-exit releases basePtr directly instead of the fat-ptr.
 	basePtr value.Value // i8* base allocation pointer for slice variables; nil otherwise
+	// tinType is the declared Tin AST type for this variable (nil if unknown/inferred).
+	// Used for type-guided overload resolution and async fat-ptr return-type recovery.
+	tinType ast.TypeExpr
 }
 
 type scope struct {

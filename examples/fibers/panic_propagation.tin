@@ -3,8 +3,11 @@
 // Tests that panics from awaited fibers propagate to the awaiting fiber,
 // where they can be caught with defer + recover().
 //
-// Fire-and-forget fibers that panic are NOT covered here - those kill the
-// process (unhandled async panic is fatal, same as Go's goroutine panics).
+// Fire-and-forget fibers that panic are checked at loop back edges: an async
+// function that loops after spawning (but not awaiting) a panicking fiber will
+// receive the panic at the next auto-yield, where it can be caught via recover().
+// Fibers that complete before any loop edge or that are never looped over will
+// still be detected at scheduler shutdown.
 //
 // Run with: tin test examples/fibers/panic_propagation.tin
 
@@ -93,4 +96,26 @@ test "recovered await-panic in async fn yields zero to outer awaiter" =
 
 test "recovered direct panic in async fn yields zero to outer awaiter" =
   let result = await spawn catches_direct_panic()
+  assert::equals(result, 0)
+
+// Loop-edge panic re-raise: an async function that loops after spawning
+// (but not awaiting) a panicking fiber should receive the panic at the next
+// loop back-edge auto-yield, catchable via defer + recover().
+
+fn{#async} fire_and_forget_panicker() =
+  panic("ff panic")
+
+fn{#async} loop_catches_ff_panic() i64 =
+  defer do:
+    let _ = recover()
+  spawn fire_and_forget_panicker()
+  let i i64 = 0
+  for true:
+    i = i + 1
+    if i >= 1000000:
+      return -1  // safety: should never reach this
+  return 0  // unreachable normally; panic from ff fiber exits the loop via auto-yield check
+
+test "loop-edge re-raises panic from fire-and-forget fiber" =
+  let result = await spawn loop_catches_ff_panic()
   assert::equals(result, 0)
