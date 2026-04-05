@@ -1146,20 +1146,36 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 
 	// any equality/inequality: dynamically dispatched by runtime.
 	if isAnyType(lt) || isAnyType(rt) {
+		var tempLeft, tempRight value.Value
+
 		if !isAnyType(lt) {
 			left = cg.boxToAny(block, left)
+			tempLeft = left
 		}
 
 		if !isAnyType(rt) {
 			right = cg.boxToAny(block, right)
+			tempRight = right
 		}
 
 		cmp := block.NewCall(cg.ensureAnyEq(), left, right)
-		if notEqual {
-			return block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I64, 0))
+
+		// Release temporary boxes created by boxToAny - they are fresh RC=1
+		// allocations that exist only for this comparison.
+		if tempLeft != nil {
+			cg.emitRelease(block, tempLeft)
 		}
 
-		return block.NewICmp(enum.IPredNE, cmp, constant.NewInt(irtypes.I64, 0))
+		if tempRight != nil {
+			cg.emitRelease(block, tempRight)
+		}
+
+		result := cmp
+		if notEqual {
+			return block.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I64, 0))
+		}
+
+		return block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I64, 0))
 	}
 
 	// atom ==/!= atom: compare CRC32 codes directly.

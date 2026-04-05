@@ -3526,6 +3526,9 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		var err2 error
 
 		caseBlock, _, err2 = cg.genStmt(caseBlock, body)
+
+		// ARC: release case-body scope vars before falling through to afterBlock.
+		cg.emitScopeRelease(caseBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		return caseBlock, err2
@@ -4096,6 +4099,9 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 		}
 
 		caseBlock, _, err = cg.genStmt(caseBlock, c.Body)
+
+		// ARC: release case-body scope vars before falling through to afterBlock.
+		cg.emitScopeRelease(caseBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		if err != nil {
@@ -4113,6 +4119,9 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	if s.Default != nil {
 		cg.curScope = newScope(cg.curScope)
 		defaultBlock, _, err = cg.genStmt(defaultBlock, s.Default)
+
+		// ARC: release default-body scope vars before falling through.
+		cg.emitScopeRelease(defaultBlock, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
 		if err != nil {
