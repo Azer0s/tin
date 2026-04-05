@@ -1172,6 +1172,7 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 		if p.check(lexer.COMMA) {
 			p.advance()
 		}
+
 		p.skipWhitespace()
 	}
 
@@ -1212,6 +1213,7 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 		if p.check(lexer.COMMA) {
 			p.advance()
 		}
+
 		p.skipWhitespace()
 	}
 

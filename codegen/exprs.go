@@ -5742,12 +5742,15 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 					return block.NewGetElementPtr(at, arrPtr,
 						constant.NewInt(irtypes.I32, 0), idx), nil
 				}
+
 				if st, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && len(st.Fields) == 2 {
 					// Fat array: load the data pointer (field 0) and GEP into it.
 					ptrGep := block.NewGetElementPtr(st, arrPtr,
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 					elemPtrType := st.Fields[0]
+
 					dataPtr := block.NewLoad(elemPtrType, ptrGep)
+
 					if ept, ok3 := elemPtrType.(*irtypes.PointerType); ok3 {
 						return block.NewGetElementPtr(ept.ElemType, dataPtr, idx), nil
 					}
