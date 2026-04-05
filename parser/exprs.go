@@ -1171,8 +1171,8 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 
 		if p.check(lexer.COMMA) {
 			p.advance()
-			p.skipWhitespace()
 		}
+		p.skipWhitespace()
 	}
 
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
@@ -1211,8 +1211,8 @@ func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
 
 		if p.check(lexer.COMMA) {
 			p.advance()
-			p.skipWhitespace()
 		}
+		p.skipWhitespace()
 	}
 
 	if _, err := p.expect(lexer.RBRACE); err != nil {
