@@ -1071,10 +1071,45 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 	}
 
 	var msgPtr value.Value
-	if isStringType(msg.Type()) {
+	t := msg.Type()
+
+	switch {
+	case isStringType(t):
 		msgPtr = cg.extractStringPtr(block, msg)
-	} else {
-		msgPtr = block.NewBitCast(msg, irtypes.I8Ptr)
+	default:
+		if strVal, ok := cg.callPrintTrait(block, msg); ok {
+			msgPtr = cg.extractStringPtr(block, strVal)
+		} else if t == irtypes.I1 {
+			msgPtr = block.NewSelect(msg, cg.newGlobalString("true"), cg.newGlobalString("false"))
+		} else if irtypes.IsInt(t) {
+			arrTy := irtypes.NewArray(64, irtypes.I8)
+			buf := block.NewAlloca(arrTy)
+			bufPtr := block.NewGetElementPtr(arrTy, buf,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			var wide value.Value
+			if t == irtypes.I64 {
+				wide = msg
+			} else {
+				wide = block.NewSExt(msg, irtypes.I64)
+			}
+			block.NewCall(cg.ensureSnprintf(), bufPtr, constant.NewInt(irtypes.I64, 64), cg.newGlobalString("%lld"), wide)
+			msgPtr = bufPtr
+		} else if irtypes.IsFloat(t) {
+			arrTy := irtypes.NewArray(64, irtypes.I8)
+			buf := block.NewAlloca(arrTy)
+			bufPtr := block.NewGetElementPtr(arrTy, buf,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			var fval value.Value
+			if t == irtypes.Double {
+				fval = msg
+			} else {
+				fval = block.NewFPExt(msg, irtypes.Double)
+			}
+			block.NewCall(cg.ensureSnprintf(), bufPtr, constant.NewInt(irtypes.I64, 64), cg.newGlobalString("%g"), fval)
+			msgPtr = bufPtr
+		} else {
+			msgPtr = block.NewBitCast(msg, irtypes.I8Ptr)
+		}
 	}
 
 	block.NewCall(cg.ensurePanicFn(), msgPtr)

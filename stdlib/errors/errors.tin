@@ -22,6 +22,9 @@ struct Error =
   // message returns the error description.
   fn message(this Error) string = return this._msg
 
+  // print returns the error message (used by echo and panic dispatch).
+  fn print(this Error) string = return this._msg
+
 // Err is an alias for *Error.  nil means no error.
 type Err = *Error
 

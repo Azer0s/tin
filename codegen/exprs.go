@@ -1610,6 +1610,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if traitName, ok := cg.isTraitFatPtr(objVal.Type()); ok {
 			return cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
 		}
+		// Auto-deref: *TraitFatPtr -> load the fat pointer and dispatch through vtable.
+		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
+			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
+				loaded := block.NewLoad(pt.ElemType, objVal)
+
+				return cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+			}
+		}
 
 		// Concrete struct method: resolve as StructName_method.
 		// When obj is a pointer-to-struct (*T), use the pointee's name for method
@@ -1983,6 +1991,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return cg.callFatFn(block, fieldVal, e.Args)
 				}
 			}
+		}
+
+		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
+			return nil, fmt.Errorf("undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
 		}
 
 		return nil, fmt.Errorf("undefined method: %s.%s", structName, fn.Field)
