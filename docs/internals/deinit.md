@@ -181,9 +181,10 @@ Tin structs are value types.  The deinit model distinguishes **owners** from
   callee is a borrower; `deinit` is NOT called when the parameter goes out
   of scope at function exit (only the RC-tracked field counts are balanced via
   retain-on-entry / release-on-exit).
-- A **coro parameter with `_fiber_retain`** is an exception: the ramp block
-  increments the C-level RC before the first suspend, making the coro a
-  co-owner.  `deinit` IS called at coro exit to release that co-ownership.
+- A **coro parameter whose struct type defines `fn _fiber_retain`** takes
+  ownership: the ramp block calls `_fiber_retain` before the first suspend,
+  incrementing the type's C-level RC.  Because the coro is now a co-owner,
+  `deinit` IS called at coro exit to decrement that RC.
 
 This means `deinit` fires exactly once per struct value from the owner's
 perspective, regardless of how many times the struct is passed to functions.
