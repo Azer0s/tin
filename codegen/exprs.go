@@ -5073,6 +5073,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 			// Try to recover the Tin FuncType for proper Future[T] wrapping.
 			// For fns[i](args) where fns: [fn{#async}(T) R], look up fns's tinType.
 			var tinFnType ast.TypeExpr
+
 			if ie, ok2 := callNode.Func.(*ast.IndexExpr); ok2 {
 				if id, ok3 := ie.Expr.(*ast.Identifier); ok3 {
 					if se2, ok4 := cg.curScope.lookup(id.Name); ok4 {
