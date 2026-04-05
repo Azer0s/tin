@@ -1071,6 +1071,7 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 	}
 
 	var msgPtr value.Value
+
 	t := msg.Type()
 
 	switch {
@@ -1086,12 +1087,15 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 			buf := block.NewAlloca(arrTy)
 			bufPtr := block.NewGetElementPtr(arrTy, buf,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
 			var wide value.Value
+
 			if t == irtypes.I64 {
 				wide = msg
 			} else {
 				wide = block.NewSExt(msg, irtypes.I64)
 			}
+
 			block.NewCall(cg.ensureSnprintf(), bufPtr, constant.NewInt(irtypes.I64, 64), cg.newGlobalString("%lld"), wide)
 			msgPtr = bufPtr
 		} else if irtypes.IsFloat(t) {
@@ -1099,12 +1103,15 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 			buf := block.NewAlloca(arrTy)
 			bufPtr := block.NewGetElementPtr(arrTy, buf,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
 			var fval value.Value
+
 			if t == irtypes.Double {
 				fval = msg
 			} else {
 				fval = block.NewFPExt(msg, irtypes.Double)
 			}
+
 			block.NewCall(cg.ensureSnprintf(), bufPtr, constant.NewInt(irtypes.I64, 64), cg.newGlobalString("%g"), fval)
 			msgPtr = bufPtr
 		} else {
