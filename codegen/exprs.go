@@ -292,6 +292,13 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// (A bare ret in a presplit coro body bypasses coro.end and leaves the
 		// frame in an undefined state.)  This mirrors the fix in genBuiltinPanic.
 		panicBlk.NewCall(cg.ensurePanicFn(), pmsg)
+		// Do NOT release pmsg here.  _tin_fiber_get_panic_msg retained it for the
+		// caller, and the defer thunk balances that retain: either the thunk
+		// releases the discarded recover() result directly (consuming the retain),
+		// or it retains pmsg for a captured variable (e.g. "caught = msg").  In
+		// the latter case emitAllScopeReleases below releases the captured variable,
+		// which decrements the same ref.  Adding an explicit release here would
+		// cause a double-free for the discard pattern.
 
 		if cg.inCoroFn {
 			cg.ensureFiberRuntime()
@@ -303,6 +310,23 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
 			cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
 		} else {
+			// Release all ARC-tracked scope variables.  The defer thunk has
+			// already run via _tin_panic; any variable updated by the thunk
+			// (e.g. "caught = msg") now holds an extra ARC reference that must
+			// be released before the function returns.  This mirrors the
+			// emitAllScopeReleases call in the normal return path.
+			cg.emitAllScopeReleases(panicBlk, "")
+			// Free any malloc'd defer closure envs.  _tin_panic already called
+			// the thunks via the runtime defer chain; only the env allocations
+			// remain.  This mirrors emitDefers' env-free loop on the normal path.
+			freeFn := cg.ensureFree()
+			for i := len(cg.pendingDeferEnvs) - 1; i >= 0; i-- {
+				env := cg.pendingDeferEnvs[i]
+				if _, isNull := env.(*constant.Null); !isNull {
+					panicBlk.NewCall(freeFn, env)
+				}
+			}
+
 			retType := cg.curFn.Sig.RetType
 			if irtypes.IsVoid(retType) {
 				panicBlk.NewRet(nil)
@@ -4775,10 +4799,16 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	cleanupBrBlk.NewBr(cg.curCoroFrame.cleanupEntry)
 
 	// Done path: take result, destroy inner frame.
-	// coro.destroy runs the coroutine's cleanup path (coro.end + coro.free + free),
-	// so we must NOT call free(innerHdl) again — that would double-free.
+	// llvm.coro.destroy would run the cleanup path (coro.end + coro.free), but
+	// LLVM's coro-split pass generates empty destroy functions for trivially-
+	// destructible C/Tin coroutines (no C++ dtors) — the cleanup call is optimized
+	// away.  Call _tin_coro_free explicitly to return the heap-allocated frame to
+	// the per-thread pool.  _tin_coro_free(null) is a no-op when coro-elide
+	// stack-allocated the frame, so this is safe in all cases.
 	resultRaw := driveDoneBlk.NewCall(cg.coroTakeResultFn)
-	driveDoneBlk.NewCall(cg.coroDestroyFn, innerHdl)
+	coroFreeFn := cg.ensureExternDecl("_tin_coro_free", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+	driveDoneBlk.NewCall(coroFreeFn, innerHdl)
 
 	// End inline-result mode (balanced with the begin call before the ramp).
 	inlineEndFn := cg.ensureExternDecl("_tin_inline_result_mode_end", irtypes.Void,

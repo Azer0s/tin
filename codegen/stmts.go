@@ -1994,6 +1994,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)
 		cg.emitRelease(block, oldVal)
+	} else if !isWeakTarget {
+		// Struct types with an explicit deinit method own external resources
+		// (e.g. Mutex._ptr, Channel._ptr). Deinit the old value before
+		// overwriting so those resources are not leaked.
+		structName := cg.typeNameOf(ptrType.ElemType)
+		if structName != "" && cg.curScope != nil {
+			if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
+				oldVal := block.NewLoad(ptrType.ElemType, ptr)
+				cg.emitRelease(block, oldVal)
+			}
+		}
 	}
 
 	block.NewStore(val, ptr)

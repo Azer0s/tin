@@ -1197,6 +1197,9 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 		// Drain the run queue and shut down workers.
 		cg.emitFiberMainEnd(cur)
 
+		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.
+		cg.emitTopLevelVarDeinits(cur)
+
 		// Call _tin_test_finish(N) -> i64 exit code.
 		total := constant.NewInt(irtypes.I64, int64(len(cg.testDecls)))
 		rc64 := cur.NewCall(finishFn, total)

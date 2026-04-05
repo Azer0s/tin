@@ -260,6 +260,7 @@ void *_tin_atomic_new_i64(int64_t v) {
     __atomic_store_n(p, v, __ATOMIC_RELAXED);
     return p;
 }
+void _tin_atomic_free_i64(void *a) { free(a); }
 int64_t _tin_atomic_load_i64(void *a) {
     return __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
 }

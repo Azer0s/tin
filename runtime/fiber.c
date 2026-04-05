@@ -500,6 +500,11 @@ static void _fire_done_waiters(TinFiber *f) {
     f->waiter_cnt = 0;
 }
 
+// Forward declarations for per-thread coro frame pool (defined after _worker_thread).
+#define CORO_POOL_MAX 16
+static _Thread_local void *_coro_pool[CORO_POOL_MAX];
+static _Thread_local int   _coro_pool_cnt = 0;
+
 static void *_worker_thread(void *_) {
     (void)_;
     _is_worker       = 1;
@@ -575,7 +580,18 @@ static void *_worker_thread(void *_) {
             // Clear direct-recv flag: if the fiber panicked before consuming
             // it, the next fiber on this worker must not inherit a stale flag.
             _direct_recv_flag = 0;
-            _coro_destroy(r.hdl);
+            // Free any intermediate result that may have been stored by
+            // emitCoroComplete before the panic path took over (e.g., genBuiltinPanic
+            // calls emitCoroComplete then the runtime re-raises the panic).
+            if (_coro_result) {
+                _tin_inline_result_free(_coro_result);
+                _coro_result = NULL;
+            }
+            // LLVM's coro-split pass generates empty destroy functions for
+            // trivially-destructible C/Tin coroutines (no C++ dtors), so
+            // _coro_destroy is a no-op and the frame is never freed via the
+            // cleanup path.  Free it explicitly here.
+            _tin_coro_free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             // Allocate with _tin_rc_alloc so the message has a proper ARC header.
             // This lets the awaiting fiber wrap it in a TinString and release it
@@ -600,9 +616,11 @@ static void *_worker_thread(void *_) {
 
         if (_coro_done) {
             // Fiber completed: store result, wake waiters, signal done_cv.
-            // The cleanup path (emitCoroEpilogue) calls llvm.coro.free which
-            // frees the heap-allocated frame inside _coro_destroy.
-            _coro_destroy(r.hdl);
+            // LLVM's coro-split pass generates empty destroy functions for
+            // trivially-destructible C/Tin coroutines, so _coro_destroy is a
+            // no-op.  Free the frame explicitly instead of relying on the
+            // cleanup path.
+            _tin_coro_free(r.hdl);
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
@@ -695,6 +713,10 @@ static void *_worker_thread(void *_) {
         _current_pid = -1;
         _current_hdl = NULL;
     }
+    // Flush per-thread coro frame pool to avoid leaking frames at worker exit.
+    for (int i = 0; i < _coro_pool_cnt; i++)
+        free((char *)_coro_pool[i] - 8);
+    _coro_pool_cnt = 0;
     return NULL;
 }
 
@@ -819,6 +841,12 @@ int64_t _tin_fiber_spawn(void *hdl) {
 }
 
 void _tin_fiber_complete(void *result) {
+    // Free any previous result before overwriting.  This handles the case where
+    // genBuiltinPanic emits emitCoroComplete (storing an intermediate result),
+    // and the subsequent 'return' statement emits emitCoroComplete again.  Without
+    // this guard the first result buffer leaks.
+    if (_coro_result && _coro_result != result)
+        _tin_inline_result_free(_coro_result);
     _coro_done   = 1;
     _coro_result = result;
 }
@@ -909,11 +937,6 @@ void _tin_inline_result_free(void *ptr) {
 //   _coro_pool[0..cnt-1]  – LLVM frame pointers (raw_alloc + 8)
 //   Lookup: linear scan checking *(int64_t*)(ptr - 8) == requested size.
 // ---------------------------------------------------------------------------
-#define CORO_POOL_MAX 16
-
-static _Thread_local void    *_coro_pool[CORO_POOL_MAX];
-static _Thread_local int      _coro_pool_cnt = 0;
-
 void *_tin_coro_malloc(int64_t size) {
     // Fast path: search pool for a frame of the exact size.
     for (int i = _coro_pool_cnt - 1; i >= 0; i--) {
@@ -1380,6 +1403,13 @@ void _tin_fiber_run(void) {
     _run_queue.buf = NULL;
     pthread_mutex_destroy(&_run_queue.mu);
     pthread_cond_destroy(&_run_queue.not_empty);
+
+    // Flush the main-thread coro frame pool.  Worker thread pools are flushed
+    // in _worker_thread before return.  The main thread drives test bodies and
+    // inline coroutines, accumulating frames here that are never otherwise freed.
+    for (int i = 0; i < _coro_pool_cnt; i++)
+        free((char *)_coro_pool[i] - 8);
+    _coro_pool_cnt = 0;
 }
 
 // (moved above _tin_fiber_await_result)
