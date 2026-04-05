@@ -1,0 +1,52 @@
+// stdlib/errors - Error type and constructors.
+//
+// Provides a simple Err type (alias for *Error) for propagating errors
+// without panicking.  nil means success.
+//
+//   use { Err } from errors
+//
+//   fn open(path string) (*void, Err) =
+//     let fd = io::fopen(path, "r")
+//     if fd == nil:
+//       return (nil, errors::new("could not open file: " ++ path))
+//     return (fd, nil)
+//
+//   let (fd, err) = open("config.txt")
+//   if errors::has(err):
+//     echo "error: {err.message()}"
+
+// Error holds an error message.
+struct Error =
+  _msg string
+
+  // message returns the error description.
+  fn message(this Error) string = return this._msg
+
+// Err is an alias for *Error.  nil means no error.
+type Err = *Error
+
+// new creates a new Err with the given message.
+fn new(msg string) Err =
+  return &Error{_msg: msg}
+
+// wrap creates a new Err prepending context to the inner error's message.
+// If inner is nil, acts as new(msg).
+fn wrap(inner Err, msg string) Err =
+  if inner == nil:
+    return &Error{_msg: msg}
+  return &Error{_msg: msg ++ ": " ++ inner.message()}
+
+// has returns true when err is non-nil (i.e. an error occurred).
+fn has(err Err) bool =
+  return err != nil
+
+// equals returns true if both errors are non-nil and have the same message,
+// or both are nil.
+fn equals(a Err, b Err) bool =
+  if a == nil && b == nil:
+    return true
+  if a == nil || b == nil:
+    return false
+  return a.message() == b.message()
+
+export { Error, Err, new, wrap, has, equals } as errors

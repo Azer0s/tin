@@ -12,6 +12,7 @@
 use { loop, async } from macros
 use ioutil
 use unix
+use errors
 
 async handle_conn(conn unix::Conn) =
   defer conn.close()
@@ -22,10 +23,12 @@ async handle_conn(conn unix::Conn) =
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn{#async} main() =
-  let srv = unix::listen("/tmp/tin_unix_echo.sock")
+  let (srv, err) = unix::listen("/tmp/tin_unix_echo.sock")
+  if errors::has(err):
+    panic(err.message())
   echo "listening on /tmp/tin_unix_echo.sock"
   loop:
-    let (c, ok) = srv.accept()
-    if !ok:
+    let (c, cerr) = srv.accept()
+    if errors::has(cerr):
       break
     spawn handle_conn(c)

@@ -31,6 +31,8 @@
 //   echo p.x    // 3
 
 use str
+use errors
+use { Err } from errors
 
 // Kind identifies the type of a parsed YAML value.
 enum Kind =
@@ -719,11 +721,11 @@ fn parse_node(p *Parser, min_indent i64) *Value =
 //
 //   let v = yaml::parse("name: alice\nage: 30\n")
 //   echo v.get("name").as_string()  // alice
-fn parse(s string) Value =
+fn parse(s string) (Value, Err) =
   if len(s) == 0:
-    return Value{kind: Kind.null_v}
+    return (Value{kind: Kind.null_v}, errors::new("yaml: empty input"))
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
-  return *parse_node(&p, 0)
+  return (*parse_node(&p, 0), nil)
 
 // _parse_nested_any[T] populates nested struct fields from a YAML Value object.
 // The phantom type T ensures this generic is compiled at the call site with full
@@ -770,11 +772,13 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
 //
 //   struct point = x i64  y i64
 //   let p = yaml::parse[point]("x: 3\ny: 4\n")
-fn parse[T](s string) T =
-  let doc = parse(s)
+fn parse[T](s string) (T, Err) =
+  let (doc, perr) = parse(s)
   let result T
+  if errors::has(perr):
+    return (result, perr)
   if doc.is_null():
-    return result
+    return (result, nil)
   let fields = fieldnames(result)
   let ftypes = fieldtypes(result)
   let nf = len(fields)
@@ -811,7 +815,7 @@ fn parse[T](s string) T =
           default:
             pass
     i = i + 1
-  return result
+  return (result, nil)
 
 export {
   Kind, Value, parse, encode,

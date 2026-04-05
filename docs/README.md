@@ -26,6 +26,8 @@ expression-oriented syntax. It compiles to native code via LLVM.
 
 | Document | Contents |
 |----------|----------|
+| [Errors](stdlib/errors.md) | Error type: `Err` alias, `new`, `wrap`, `has`, `equals` |
+| [Floats](stdlib/floats.md) | IEEE 754 special values: `NaN`, `Inf`, `NegInf`, `is_nan`, `is_finite` |
 | [JSON](stdlib/json.md) | JSON encoding/decoding: `encode`, `parse`, `parse[T]`, field tags |
 | [Measure](stdlib/measure.md) | Monotonic clock: `now_us`, `now_ms` for benchmarking |
 | [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types |

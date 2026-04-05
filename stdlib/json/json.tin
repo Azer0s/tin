@@ -37,6 +37,8 @@
 // helpers, demonstrating the feature on real code.
 
 use str
+use errors
+use { Err } from errors
 
 // Kind enum
 
@@ -488,17 +490,17 @@ fn parse_value(p *Parser) *Value =
 
 // Public API
 
-// parse parses a JSON string and returns a Value tree for untyped inspection.
+// parse parses a JSON string and returns (Value, Err).
+// Err is nil on success. On empty input, returns (null Value, Err).
 //
-//   let v = json::parse(s)
+//   let (v, err) = json::parse(s)
+//   if errors::has(err): panic(err.message())
 //   v.get("name").as_string()
-//   for k in v.keys():
-//     echo k
-fn parse(s string) Value =
+fn parse(s string) (Value, Err) =
   if len(s) == 0:
-    return Value{kind: Kind.null_v}
+    return (Value{kind: Kind.null_v}, errors::new("json: empty input"))
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
-  return *parse_value(&p)
+  return (*parse_value(&p), nil)
 
 // _parse_nested_any[T] populates nested struct fields from a JSON Value object.
 // `zero` is an any-boxed zero value of the nested struct type (obtained via getfield).
@@ -561,12 +563,14 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
 //
 //   let u = json::parse[user]("{\"id\":1,\"name\":\"Alice\"}")
 //   echo u.name   // Alice
-fn parse[T](s string) T =
-  let doc    = parse(s)
+fn parse[T](s string) (T, Err) =
+  let (doc, perr) = parse(s)
   let result T
+  if errors::has(perr):
+    return (result, perr)
 
   if doc.is_null():
-    return result
+    return (result, nil)
   let fields = fieldnames(result)
   let ftypes = fieldtypes(result)
   let nf     = len(fields)
@@ -615,7 +619,7 @@ fn parse[T](s string) T =
             pass
 
     i = i + 1
-  return result
+  return (result, nil)
 
 export {
   Kind, Value, parse, encode,

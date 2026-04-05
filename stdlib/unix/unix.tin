@@ -3,15 +3,18 @@
 //
 // Mirrors the tcp package but uses AF_UNIX paths instead of ports:
 //
-//   let srv = unix::listen("/tmp/myapp.sock")
-//   let (c, ok) = srv.accept()
-//   let line = await ioutil::read_string(c)
+//   let (srv, err) = unix::listen("/tmp/myapp.sock")
+//   if errors::has(err): panic(err.message())
+//   let (c, aerr) = srv.accept()
 //
-//   let c = unix::dial("/tmp/myapp.sock")
+//   let (c, err) = unix::dial("/tmp/myapp.sock")
+//   if errors::has(err): panic(err.message())
 //   await ioutil::write_string(c, "hello\n")
 
 use io
 use sync
+use errors
+use { Err } from errors
 
 // C helpers (private)
 fn _tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
@@ -44,31 +47,30 @@ struct Server =
   listen_fd i32
 
   // accept waits for the next connection.
-  // Returns (Conn, bool) - destructure with:
-  //   let (c, ok) = srv.accept()
-  fn accept(this Server) (Conn, bool) =
+  // Returns (Conn, Err) - nil Err means success.
+  fn accept(this Server) (Conn, Err) =
     let fd = _tin_unix_accept_c(this.listen_fd)
     if fd < 0:
-      return (Conn{fd: -1}, false)
-    return (Conn{fd: fd}, true)
+      return (Conn{fd: -1}, errors::new("unix: accept failed"))
+    return (Conn{fd: fd}, nil)
 
   fn close(this Server) =
     io::close(this.listen_fd)
 
 // listen creates a Unix domain socket server at path.
-// Removes any stale socket file. Panics if binding fails.
-fn listen(path string) Server =
+// Removes any stale socket file. Returns (Server, Err).
+fn listen(path string) (Server, Err) =
   let fd = _tin_unix_listen_c(path)
   if fd < 0:
-    panic("unix::listen: failed to bind {path}")
-  return Server{listen_fd: fd}
+    return (Server{listen_fd: -1}, errors::new("unix: failed to bind {path}"))
+  return (Server{listen_fd: fd}, nil)
 
 // dial connects to a Unix domain socket at path.
-// Panics on failure.
-fn dial(path string) Conn =
+// Returns (Conn, Err).
+fn dial(path string) (Conn, Err) =
   let fd = _tin_unix_connect_c(path)
   if fd < 0:
-    panic("unix::dial: failed to connect to {path}")
-  return Conn{fd: fd}
+    return (Conn{fd: -1}, errors::new("unix: failed to connect to {path}"))
+  return (Conn{fd: fd}, nil)
 
 export { Conn, Server, listen, dial } as unix
