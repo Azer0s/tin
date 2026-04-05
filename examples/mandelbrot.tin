@@ -1,0 +1,69 @@
+// examples/mandelbrot.tin
+//
+// Renders the Mandelbrot set as ASCII art to stdout.
+//
+// The complex plane is mapped to an 80x40 character grid.
+// Each point is iterated z = z^2 + c until |z| > 2 or max_iter is reached.
+// The escape speed determines the character; points inside the set are '@'.
+//
+// Usage:
+//   ./tin build examples/mandelbrot.tin -o /tmp/mandelbrot
+//   /tmp/mandelbrot
+
+fn char_for(iter i64, max_iter i64) string =
+  if iter >= max_iter:
+    return "@"
+  let idx = iter * 9 / max_iter
+  if idx == 0:
+    return " "
+  if idx == 1:
+    return "."
+  if idx == 2:
+    return ":"
+  if idx == 3:
+    return "-"
+  if idx == 4:
+    return "="
+  if idx == 5:
+    return "+"
+  if idx == 6:
+    return "*"
+  if idx == 7:
+    return "#"
+  return "%"
+
+fn main() =
+  let width    i64 = 80
+  let height   i64 = 40
+  let max_iter i64 = 100
+
+  let x_min f64 = -2.5
+  let x_max f64 =  1.0
+  let y_min f64 = -1.1
+  let y_max f64 =  1.1
+
+  let row i64 = 0
+  for row < height:
+    let line string = ""
+    let col i64 = 0
+    for col < width:
+      let cx = x_min + (x_max - x_min) * (col as f64) / (width as f64)
+      let cy = y_min + (y_max - y_min) * (row as f64) / (height as f64)
+
+      let zx f64 = 0.0
+      let zy f64 = 0.0
+      let iter i64 = 0
+      for iter < max_iter:
+        let zx2 = zx * zx
+        let zy2 = zy * zy
+        if zx2 + zy2 > 4.0:
+          break
+        let nx = zx2 - zy2 + cx
+        zy = 2.0 * zx * zy + cy
+        zx = nx
+        iter = iter + 1
+
+      line = line ++ char_for(iter, max_iter)
+      col = col + 1
+    echo line
+    row = row + 1
