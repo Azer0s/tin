@@ -18,6 +18,8 @@ use { loop } from macros
 use io
 use mem
 use sync
+use errors
+use { Err } from errors
 
 // C helpers (private)
 fn _tin_udp_listen_c(port i32) i32                                                     = extern("_tin_udp_listen")
@@ -58,12 +60,12 @@ fn{#async} read_buf_impl(data [byte], pos *i64, out *byte, n i64) i64 =
   *pos = p + avail
   return avail
 
-fn{#async} accept_impl(fd i32) (Conn, bool) =
+fn{#async} accept_impl(fd i32) (Conn, Err) =
   let (data, host, port) = await spawn recv_from_impl(fd)
   if len(data) == 0:
-    return (Conn{fd: fd, host: "", port: 0, _data: [], _pos: nil, owns_fd: false}, false)
+    return (Conn{fd: fd, host: "", port: 0, _data: [], _pos: nil, owns_fd: false}, errors::new("udp: accept failed"))
   let pos = mem::calloc(1, 8) as *i64
-  return (Conn{fd: fd, host: host, port: port, _data: data, _pos: pos, owns_fd: false}, true)
+  return (Conn{fd: fd, host: host, port: port, _data: data, _pos: pos, owns_fd: false}, nil)
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = _tin_io_blocked_val_c()
@@ -126,26 +128,27 @@ struct Server =
   fd i32
 
   // accept waits for the next datagram and returns a Conn to the sender.
-  fn accept(this Server) Future[(Conn, bool)] =
+  // Returns Future[(Conn, Err)] - nil Err means success.
+  fn accept(this Server) Future[(Conn, Err)] =
     return spawn accept_impl(this.fd)
 
   fn close(this Server) =
     io::close(this.fd)
 
 // listen creates a bound UDP socket on the given port.
-// Panics if the port cannot be bound.
-fn listen(port i32) Server =
+// Returns (Server, Err).
+fn listen(port i32) (Server, Err) =
   let fd = _tin_udp_listen_c(port)
   if fd < 0:
-    panic("udp::listen: failed to bind port {port}")
-  return Server{fd: fd}
+    return (Server{fd: -1}, errors::new("udp: failed to bind port {port}"))
+  return (Server{fd: fd}, nil)
 
 // dial creates a connected UDP socket to host:port.
-// Panics on failure.
-fn dial(host string, port i32) Conn =
+// Returns (Conn, Err).
+fn dial(host string, port i32) (Conn, Err) =
   let fd = _tin_udp_connect_c(host, port)
   if fd < 0:
-    panic("udp::dial: failed to connect to {host}:{port}")
-  return Conn{fd: fd, host: host, port: port, _data: [], _pos: nil, owns_fd: true}
+    return (Conn{fd: -1, host: "", port: 0, _data: [], _pos: nil, owns_fd: false}, errors::new("udp: failed to connect to {host}:{port}"))
+  return (Conn{fd: fd, host: host, port: port, _data: [], _pos: nil, owns_fd: true}, nil)
 
 export { Server, Conn, listen, dial } as udp

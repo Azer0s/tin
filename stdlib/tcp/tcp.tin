@@ -10,6 +10,8 @@
 
 use io
 use sync
+use errors
+use { Err } from errors
 
 // C helpers (private)
 fn _tin_tcp_listen_c(port i32) i32  = extern("_tin_tcp_listen")
@@ -38,23 +40,24 @@ struct Server =
   listen_fd i32
 
   // accept waits for the next connection.
-  // Returns (Conn, bool) - destructure with:
-  //   let (c, ok) = srv.accept()
-  fn accept(this Server) (Conn, bool) =
+  // Returns (Conn, Err) - nil Err means success.
+  //   let (c, err) = srv.accept()
+  //   if errors::has(err): return
+  fn accept(this Server) (Conn, Err) =
     let fd = _tin_tcp_accept_c(this.listen_fd)
     if fd < 0:
-      return (Conn{fd: -1}, false)
-    return (Conn{fd: fd}, true)
+      return (Conn{fd: -1}, errors::new("tcp: accept failed"))
+    return (Conn{fd: fd}, nil)
 
   fn close(this Server) =
     io::close(this.listen_fd)
 
 // listen creates a TCP server on the given port.
-// Panics if the port cannot be bound.
-fn listen(port i32) Server =
+// Returns (Server, Err) - check Err before using Server.
+fn listen(port i32) (Server, Err) =
   let fd = _tin_tcp_listen_c(port)
   if fd < 0:
-    panic("tcp::listen: failed to bind port {port}")
-  return Server{listen_fd: fd}
+    return (Server{listen_fd: -1}, errors::new("tcp: failed to bind port {port}"))
+  return (Server{listen_fd: fd}, nil)
 
 export { Conn, Server, listen } as tcp

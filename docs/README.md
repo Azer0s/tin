@@ -26,10 +26,13 @@ expression-oriented syntax. It compiles to native code via LLVM.
 
 | Document | Contents |
 |----------|----------|
+| [Errors](stdlib/errors.md) | Error type: `Err` alias, `new`, `wrap`, `has`, `equals` |
+| [Floats](stdlib/floats.md) | IEEE 754 special values: `NaN`, `Inf`, `NegInf`, `is_nan`, `is_finite` |
 | [JSON](stdlib/json.md) | JSON encoding/decoding: `encode`, `parse`, `parse[T]`, field tags |
 | [Measure](stdlib/measure.md) | Monotonic clock: `now_us`, `now_ms` for benchmarking |
 | [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types |
 | [Regex](stdlib/regex.md) | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split` |
+| [Strings](stdlib/strings.md) | String operations: `replace`, `split`, `join`, `trim`, `contains`, `index_of`, case conversion |
 | [YAML](stdlib/yaml.md) | YAML encoding/decoding: `encode`, `parse`, `parse[T]`, field tags, nested structs |
 
 ## Quick taste

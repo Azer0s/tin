@@ -5,6 +5,9 @@
 // to char* when calling the underlying C function
 // No extra linker flags required (all in libc)
 
+use errors
+use { Err } from errors
+
 // Length / comparison
 
 // strlen returns the number of bytes in s (not including the null terminator)
@@ -71,10 +74,86 @@ fn strtod(s string, endptr **char) f64 = extern("strtod")
 // Returns the number of characters written
 fn sprintf(buf *char, fmt string, ...) i32 = extern("sprintf")
 
+// _is_digit returns true if the byte is an ASCII digit.
+fn _is_digit(c byte) bool = return c >= @'0' && c <= @'9'
+
+// parse_int parses s as a decimal i64.
+// Returns (value, Err); Err is nil on success.
+// Accepts an optional leading '-' or '+'.
+fn parse_int(s string) (i64, Err) =
+  let n = len(s)
+  if n == 0:
+    return (0, errors::new("str::parse_int: empty string"))
+  let i i64 = 0
+  if s[0] == @'-' || s[0] == @'+':
+    i = 1
+  if i >= n:
+    return (0, errors::new("str::parse_int: no digits"))
+  for i < n:
+    if !_is_digit(s[i]):
+      return (0, errors::new("str::parse_int: invalid character"))
+    i = i + 1
+  return (atol(s), nil)
+
+// parse_int32 parses s as a decimal i32.
+// Returns (value, Err); Err is nil on success.
+fn parse_int32(s string) (i32, Err) =
+  let (v, err) = parse_int(s)
+  return (v as i32, err)
+
+// parse_float parses s as an f64.
+// Returns (value, Err); Err is nil on success.
+// Accepts optional leading sign, digits, decimal point, and exponent.
+fn parse_float(s string) (f64, Err) =
+  let n = len(s)
+  if n == 0:
+    return (0.0, errors::new("str::parse_float: empty string"))
+  let i i64 = 0
+  if s[0] == @'-' || s[0] == @'+':
+    i = 1
+  if i >= n:
+    return (0.0, errors::new("str::parse_float: no digits"))
+  let has_digit = false
+  for i < n:
+    let c = s[i]
+    if _is_digit(c):
+      has_digit = true
+    else if c == @'.':
+      i = i + 1
+      break
+    else if c == @'e' || c == @'E':
+      break
+    else:
+      return (0.0, errors::new("str::parse_float: invalid character"))
+    i = i + 1
+  for i < n:
+    let c = s[i]
+    if _is_digit(c):
+      has_digit = true
+    else if c == @'e' || c == @'E':
+      i = i + 1
+      break
+    else:
+      return (0.0, errors::new("str::parse_float: invalid character"))
+    i = i + 1
+  if i < n:
+    if s[i] == @'-' || s[i] == @'+':
+      i = i + 1
+    if i >= n:
+      return (0.0, errors::new("str::parse_float: missing exponent digits"))
+    for i < n:
+      if !_is_digit(s[i]):
+        return (0.0, errors::new("str::parse_float: invalid exponent"))
+      i = i + 1
+  if !has_digit:
+    return (0.0, errors::new("str::parse_float: no digits"))
+  return (atof(s), nil)
+
 export {
   strlen, strcmp, strncmp, strcasecmp,
   strchr, strrchr, strstr,
   strcpy, strncpy, strcat, strdup,
   atoi, atol, atof, strtol, strtod,
-  sprintf
+  sprintf,
+  parse_int, parse_int32, parse_float
 } as str

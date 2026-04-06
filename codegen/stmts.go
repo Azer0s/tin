@@ -1701,8 +1701,14 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 		block.NewCall(printf, fmtStr, ext)
 
 	case irtypes.IsPointer(t):
-		fmtStr := cg.newGlobalString("%p\n")
-		block.NewCall(printf, fmtStr, val)
+		if strVal, ok := cg.callPrintTrait(block, val); ok {
+			ptr := cg.extractStringPtr(block, strVal)
+			fmtStr := cg.newGlobalString("%s\n")
+			block.NewCall(printf, fmtStr, ptr)
+		} else {
+			fmtStr := cg.newGlobalString("%p\n")
+			block.NewCall(printf, fmtStr, val)
+		}
 
 	default:
 		// print trait: struct or fat-pointer with a print() method.

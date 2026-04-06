@@ -251,6 +251,19 @@ func (cg *CodeGen) callPrintTrait(block *ir.Block, val value.Value) (value.Value
 			}
 		}
 	}
+	// Case 1b: pointer to struct - load the struct and dispatch print.
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		if structName := cg.typeNameOf(pt.ElemType); structName != "" {
+			if e, ok2 := cg.curScope.lookup(structName + "_print"); ok2 {
+				if fn, ok3 := e.val.(*ir.Func); ok3 {
+					loaded := block.NewLoad(pt.ElemType, val)
+					args := cg.adaptArgs(block, []value.Value{loaded}, fn.Sig)
+
+					return block.NewCall(fn, args...), true
+				}
+			}
+		}
+	}
 	// Case 2: print trait fat pointer - dispatch through vtable.
 	if instKey, ok := cg.isTraitFatPtr(t); ok {
 		baseTrait := instKey

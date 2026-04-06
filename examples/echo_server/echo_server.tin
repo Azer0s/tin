@@ -16,6 +16,7 @@ use { loop, async } from macros
 use io
 use ioutil
 use tcp
+use errors
 
 async handle_conn(conn tcp::Conn) =
   defer conn.close()
@@ -27,10 +28,12 @@ async handle_conn(conn tcp::Conn) =
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn{#async} main() =
-  let srv = tcp::listen(8080)
+  let (srv, err) = tcp::listen(8080)
+  if errors::has(err):
+    panic(err.message())
   echo "listening on :8080"
   loop:
-    let (c, ok) = srv.accept()
-    if !ok:
+    let (c, cerr) = srv.accept()
+    if errors::has(cerr):
       break
     spawn handle_conn(c)

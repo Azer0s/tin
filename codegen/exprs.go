@@ -1610,6 +1610,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if traitName, ok := cg.isTraitFatPtr(objVal.Type()); ok {
 			return cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
 		}
+		// Auto-deref: *TraitFatPtr -> load the fat pointer and dispatch through vtable.
+		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
+			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
+				loaded := block.NewLoad(pt.ElemType, objVal)
+
+				return cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+			}
+		}
 
 		// Concrete struct method: resolve as StructName_method.
 		// When obj is a pointer-to-struct (*T), use the pointee's name for method
@@ -1983,6 +1991,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return cg.callFatFn(block, fieldVal, e.Args)
 				}
 			}
+		}
+
+		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
+			return nil, fmt.Errorf("undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
 		}
 
 		return nil, fmt.Errorf("undefined method: %s.%s", structName, fn.Field)
@@ -5728,13 +5740,32 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 
 		idx = cg.coerce(block, idx, irtypes.I64)
 
-		// For fixed-size arrays [N x T]: GEP directly into the original alloca
-		// without loading the array value first (avoids spurious full-array loads).
+		// For addressable array lvalues: GEP directly through the stored pointer
+		// without loading the array value first (avoids spurious full-array copies).
+		//
+		//   Fixed-size [N x T]: GEP(alloca, 0, idx)
+		//   Fat array  {T*, i64}: load data-ptr field, then GEP(data_ptr, idx)
+		//
+		// Both paths require the expr to be an addressable lvalue (alloca or prior GEP).
 		if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
 			if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
 				if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 {
+					// Fixed-size array.
 					return block.NewGetElementPtr(at, arrPtr,
 						constant.NewInt(irtypes.I32, 0), idx), nil
+				}
+
+				if st, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && len(st.Fields) == 2 {
+					// Fat array: load the data pointer (field 0) and GEP into it.
+					ptrGep := block.NewGetElementPtr(st, arrPtr,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+					elemPtrType := st.Fields[0]
+
+					dataPtr := block.NewLoad(elemPtrType, ptrGep)
+
+					if ept, ok3 := elemPtrType.(*irtypes.PointerType); ok3 {
+						return block.NewGetElementPtr(ept.ElemType, dataPtr, idx), nil
+					}
 				}
 			}
 		}
