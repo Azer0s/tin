@@ -1,44 +1,62 @@
-// stdlib/os - Operating-system interface
+// stdlib/os - Operating-system interface.
 //
-// Wraps standard C stdlib.h / unistd.h process and environment functions
-// No extra linker flags required (all in libc)
+// Wraps standard C stdlib.h / unistd.h process and environment functions.
+// No extra linker flags required (all in libc).
+//
+// Sub-files are embedded via use "./..." and contribute their symbols here.
+// Only this file may contain an export declaration for the os package.
+
+use "./os_files"
+use "./os_stat"
+use "./os_dirs"
 
 // Process control
 
-// exit terminates the process with the given status code
-// Conventionally 0 = success, non-zero = failure
+// exit terminates the process with the given status code.
+// Conventionally 0 = success, non-zero = failure.
 fn exit(code i32) = extern("exit")
 
-// abort terminates the process abnormally (raises SIGABRT)
+// abort terminates the process abnormally (raises SIGABRT).
 fn abort() = extern("abort")
 
-// system runs the given shell command and returns the exit status
+// system runs the given shell command and returns the exit status.
 fn system(cmd string) i32 = extern("system")
 
 // Environment
 
-// getenv retrieves the value of the environment variable named name
-// Returns the value as a string, or an empty string if not set
+// getenv retrieves the value of the environment variable named name.
+// Returns the value as a string, or an empty string if not set.
 fn getenv(name string) string = extern("getenv")
 
-// setenv sets the environment variable name to value
-// If overwrite is non-zero, an existing variable is overwritten
-// Returns 0 on success, -1 on error (POSIX)
+// setenv sets the environment variable name to value.
+// If overwrite is non-zero, an existing variable is overwritten.
+// Returns 0 on success, -1 on error (POSIX).
 fn setenv(name string, value string, overwrite i32) i32 = extern("setenv")
 
-// unsetenv removes the environment variable name
+// unsetenv removes the environment variable name.
 fn unsetenv(name string) i32 = extern("unsetenv")
 
 // Process information
 
-// getpid returns the process ID of the calling process
+// getpid returns the process ID of the calling process.
 fn getpid() i32 = extern("getpid")
 
-// getppid returns the parent process ID
+// getppid returns the parent process ID.
 fn getppid() i32 = extern("getppid")
 
 export {
+  // Process
   exit, abort, system,
+  // Environment
   getenv, setenv, unsetenv,
-  getpid, getppid
+  // Process info
+  getpid, getppid,
+  // File I/O (os_files)
+  read_file, read_file_bytes,
+  write_file, write_file_bytes,
+  append_file,
+  // File system inspection (os_stat)
+  FileInfo, stat, exists, is_dir, file_size,
+  // Directory / path ops (os_dirs)
+  mkdir, remove, rmdir, rename
 } as os

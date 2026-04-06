@@ -2208,6 +2208,14 @@ func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
 func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error) {
 	mergeBlock := cg.newBlock("if.merge")
 
+	// Reset cg.curBlock to the entry block before evaluating the condition.
+	// Stale curBlock values left by prior statements (e.g. genBinExpr sets it
+	// to the condition-check block of the PREVIOUS if) cause the arg-loop in
+	// genCallExpr to emit the call into a non-dominating block while the arg
+	// loads already went into the correct block, violating SSA dominance.
+	// This mirrors the identical reset done for elif chains (see below).
+	cg.curBlock = block
+
 	cond, err := cg.genExpr(block, s.Cond)
 	if err != nil {
 		return nil, false, err
@@ -4416,14 +4424,20 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 // genTupleDestructDecl handles: let (x, y, ...) = expr
 // Extracts fields a, b, c, ... from a Tuple struct value by position.
 func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDecl) (*ir.Block, error) {
+	// Clear any stale curBlock from prior statements before evaluating the RHS.
+	// Without this, stale curBlock values (e.g. set by genEcho inside a preceding
+	// if-block's body) misdirect instruction emission to the wrong block.
+	cg.curBlock = nil
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
 	}
-	// Update block in case genExpr advanced it (e.g. await generates a new resume block).
-	if cg.curBlock != nil {
+	// Update block if genExpr advanced it (e.g. await generates a new resume block).
+	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
+
+	cg.curBlock = nil // clear so subsequent statements don't see a stale value
 
 	if val == nil {
 		return block, nil

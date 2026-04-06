@@ -1,0 +1,85 @@
+// os_files - high-level file read/write operations.
+//
+// Loaded via use "./os_files" in os.tin; all symbols are embedded directly
+// into the os package scope. Do not add an export declaration to this file.
+
+use io
+use mem
+use errors
+
+// C runtime helpers for string/byte conversions (already in the runtime).
+fn _tin_str_from_bytes(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
+fn _tin_str_data(s string) *byte                = extern("_tin_string_data")
+fn _tin_bytes_from_raw(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
+
+// read_file reads the entire contents of path and returns it as a string.
+// Returns ("", err) on failure.
+fn read_file(path string) (string, errors::Err) =
+  let f = io::fopen(path, "rb")
+  if f == nil:
+    return ("", errors::new("read_file: cannot open: " ++ path))
+  io::fseek(f, 0, 2)
+  let sz = io::ftell(f)
+  io::fseek(f, 0, 0)
+  let buf = mem::malloc(sz + 1) as *byte
+  let n = io::fread(buf as *void, 1, sz, f)
+  io::fclose(f)
+  let s = _tin_str_from_bytes(buf, n)
+  mem::free(buf as *void)
+  return (s, nil)
+
+// read_file_bytes reads the entire contents of path as a byte slice.
+// Returns ([], err) on failure.
+fn read_file_bytes(path string) ([byte], errors::Err) =
+  let f = io::fopen(path, "rb")
+  if f == nil:
+    let tmp = mem::malloc(1) as *byte
+    let empty = _tin_bytes_from_raw(tmp, 0)
+    mem::free(tmp as *void)
+    return (empty, errors::new("read_file_bytes: cannot open: " ++ path))
+  io::fseek(f, 0, 2)
+  let sz = io::ftell(f)
+  io::fseek(f, 0, 0)
+  let buf = mem::malloc(sz + 1) as *byte
+  let n = io::fread(buf as *void, 1, sz, f)
+  io::fclose(f)
+  let result = _tin_bytes_from_raw(buf, n)
+  mem::free(buf as *void)
+  return (result, nil)
+
+// write_file writes content to path, creating or truncating the file.
+// Returns nil on success, an error otherwise.
+fn write_file(path string, content string) errors::Err =
+  let f = io::fopen(path, "wb")
+  if f == nil:
+    return errors::new("write_file: cannot open: " ++ path)
+  let ptr = _tin_str_data(content)
+  let n = len(content)
+  io::fwrite(ptr as *void, 1, n, f)
+  io::fclose(f)
+  return nil
+
+// write_file_bytes writes data to path, creating or truncating the file.
+// Returns nil on success, an error otherwise.
+fn write_file_bytes(path string, data [byte]) errors::Err =
+  let f = io::fopen(path, "wb")
+  if f == nil:
+    return errors::new("write_file_bytes: cannot open: " ++ path)
+  let n = len(data)
+  if n > 0:
+    let ptr = &data[0]
+    io::fwrite(ptr as *void, 1, n, f)
+  io::fclose(f)
+  return nil
+
+// append_file appends content to path, creating it if it does not exist.
+// Returns nil on success, an error otherwise.
+fn append_file(path string, content string) errors::Err =
+  let f = io::fopen(path, "ab")
+  if f == nil:
+    return errors::new("append_file: cannot open: " ++ path)
+  let ptr = _tin_str_data(content)
+  let n = len(content)
+  io::fwrite(ptr as *void, 1, n, f)
+  io::fclose(f)
+  return nil

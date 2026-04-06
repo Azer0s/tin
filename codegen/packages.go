@@ -468,20 +468,21 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		return fmt.Errorf("use %q: parse: %w", rawPath, parseErr)
 	}
 
-	// Collect all exported names from the file (ignore the "as <pkg>" name).
-	exportedNames := map[string]bool{}
-
-	for _, node := range prog.Stmts {
-		if exp, ok := node.(*ast.ExportDecl); ok {
-			for _, name := range exp.Names {
-				exportedNames[name] = true
-			}
-		}
-	}
-
 	cg.pkgSrcPaths = append(cg.pkgSrcPaths, srcPath)
 
 	prevFilename := cg.filename
+
+	// Helper files loaded via use "./..." must not contain export declarations.
+	// All symbols they define are automatically embedded into the importing file's
+	// scope - no export declaration is needed or allowed. Only the single top-level
+	// package file (e.g. os.tin, sync.tin) may have an export declaration.
+	for _, node := range prog.Stmts {
+		if _, ok := node.(*ast.ExportDecl); ok {
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %q: helper files loaded via use \"./...\" must not contain an export declaration; only the top-level package file may export", rawPath)
+		}
+	}
 	cg.filename = srcPath
 
 	// Process nested use declarations first.
@@ -589,9 +590,8 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		// Expose the type alias as a bare name in the parent scope.
 		// Use the canonical struct key (e.g. "sync__Mutex") as the alias target.
 		structKey := cg.pkgStructKey(sd.Name)
-		if exportedNames[sd.Name] {
-			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
-		}
+		cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
+
 		// Propagate methods to prevScope so callers can call them.
 		// Methods are registered under canonicalKey_methodName in curScope.
 		for _, m := range sd.Methods {
@@ -652,18 +652,40 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
-	// Propagate exported symbols to prevScope as bare names (no package prefix).
-	// This makes file-path imports behave as glob imports: all exported symbols
-	// from the file are directly available in the importing file's scope.
-	for name := range exportedNames {
-		prefixed := pkgName + "__" + name
+	// Propagate ALL defined symbols to prevScope as bare names.
+	// use "./file" embeds the file: every function, type alias, and macro it
+	// defines becomes directly available in the importing scope without any
+	// package prefix. No export declaration is needed (or allowed) in helper files.
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		prefixed := pkgName + "__" + fd.Name
 		if entry, ok2 := cg.curScope.lookup(prefixed); ok2 {
-			prevScope.set(name, entry)
+			prevScope.set(fd.Name, entry)
+			// Also register under the parent package prefix (e.g. "os__stat") so that
+			// loadPackageFromSource can find and re-export this symbol under the package
+			// namespace (e.g. as "os::stat"). Without this, only the file-local prefix
+			// ("os_stat__stat") is known and the re-export lookup fails.
+			if cg.currentPkg != "" {
+				prevScope.set(cg.currentPkg+"__"+fd.Name, entry)
+			}
+		}
+
+		// Also propagate $coro variant for {#async} functions.
+		coroKey := prefixed + "$coro"
+		if coroEntry, ok3 := cg.curScope.lookup(coroKey); ok3 {
+			prevScope.set(fd.Name+"$coro", coroEntry)
+
+			if cg.currentPkg != "" {
+				prevScope.set(cg.currentPkg+"__"+fd.Name+"$coro", coroEntry)
+			}
 		}
 	}
 
-	// Register exported macros as bare names AND under pkg-qualified keys so
-	// that `use { mymin! } from "./mypkg.tin"` (loadPackageSelective) can find them.
+	// Register ALL macros defined in the file as bare names.
 	for _, node := range prog.Stmts {
 		md, ok := node.(*ast.MacroDecl)
 		if !ok {
@@ -671,9 +693,6 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 
 		bareName := strings.TrimSuffix(md.Name, "!")
-		if !exportedNames[md.Name] && !exportedNames[bareName] {
-			continue
-		}
 		// Bare name (for plain `use "./file.tin"` imports).
 		cg.macros[bareName+"!"] = md
 		cg.macros[bareName] = md

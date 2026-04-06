@@ -38,5 +38,3 @@ struct RWMutex =
 
   fn deinit(this RWMutex) =
     _tin_frwmutex2_free(this._ptr)
-
-export { RWMutex } as sync

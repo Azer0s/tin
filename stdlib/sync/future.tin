@@ -35,5 +35,3 @@ struct Future[t](Awaitable[t]) =
     let raw *void = _tin_future_await_raw(this.pid)
     let typed *t = raw as *t
     return *typed
-
-export { Future, Unit } as sync

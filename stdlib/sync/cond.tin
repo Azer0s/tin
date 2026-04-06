@@ -36,5 +36,3 @@ struct Cond =
 
   fn deinit(this Cond) =
     _tin_fcond2_free(this._ptr)
-
-export { Cond } as sync

@@ -1,0 +1,66 @@
+// os_dirs - directory and path-entry management.
+//
+// Loaded via use "./os_dirs" in os.tin; all symbols are embedded directly
+// into the os package scope. Do not add an export declaration to this file.
+
+use io
+use errors
+
+// POSIX directory / file-system operations.
+fn _os_mkdir(path string, mode i32) i32 = extern("mkdir")
+fn _os_rmdir(path string)          i32 = extern("rmdir")
+fn _os_opendir(path string) *void       = extern("opendir")
+fn _os_closedir(dir *void)  i32         = extern("closedir")
+
+// _prefix returns the first n characters of s.
+fn _prefix(s string, n i64) string =
+  let out = ""
+  let i i64 = 0
+  for i < n:
+    out = out ++ s[i]
+    i = i + 1
+  return out
+
+// mkdir creates directory path and all missing parent directories (like mkdir -p).
+// Returns nil on success. Succeeds silently if the directory already exists.
+fn mkdir(path string) errors::Err =
+  let n = len(path)
+  if n == 0:
+    return errors::new("mkdir: empty path")
+  // Walk forward creating each prefix component.
+  // Start at 1 to skip the leading '/' of absolute paths.
+  let i i64 = 1
+  for i <= n:
+    if i == n || path[i] == @'/':
+      _os_mkdir(_prefix(path, i), 493) // 0755 = 493; ignore EEXIST
+    i = i + 1
+  // Verify the target directory now exists.
+  let d = _os_opendir(path)
+  if d == nil:
+    return errors::new("mkdir: failed to create directory: " ++ path)
+  _os_closedir(d)
+  return nil
+
+// remove removes the file at path.
+// Returns nil on success, an error if the path does not exist or is a directory.
+fn remove(path string) errors::Err =
+  let r = io::remove(path)
+  if r != 0:
+    return errors::new("remove: failed: " ++ path)
+  return nil
+
+// rmdir removes the empty directory at path.
+// Returns nil on success, an error if the directory is not empty or missing.
+fn rmdir(path string) errors::Err =
+  let r = _os_rmdir(path)
+  if r != 0:
+    return errors::new("rmdir: failed: " ++ path)
+  return nil
+
+// rename moves old_path to new_path.
+// Returns nil on success, an error otherwise.
+fn rename(old_path string, new_path string) errors::Err =
+  let r = io::rename(old_path, new_path)
+  if r != 0:
+    return errors::new("rename: failed: " ++ old_path ++ " -> " ++ new_path)
+  return nil

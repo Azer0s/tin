@@ -29,5 +29,3 @@ struct AtomicI64 =
 
   fn deinit(this AtomicI64) =
     _tin_atomic_free_i64(this._ptr)
-
-export { AtomicI64 } as sync
