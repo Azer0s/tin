@@ -2192,6 +2192,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
 				cg.emitRelease(block, callee)
 			}
+
 			return result, err2
 		}
 
@@ -2209,6 +2210,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
 				cg.emitRelease(block, callee)
 			}
+
 			return result, err2
 		}
 	}
@@ -4850,6 +4852,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 				if len(callNode.Args) >= 1 {
 					sendAstArg = callNode.Args[0]
 				}
+
 				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1], sendAstArg)
 			}
 
