@@ -1178,13 +1178,16 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 // genTestRunner generates one __tin_test_N function per TestDecl, plus a
 // main() that:
-//  1. Runs any top-level setup statements (non-test stmts).
+//  1. Initializes top-level var globals (topLevelVarInits).
 //  2. Calls _tin_run_test(desc, fn_ptr) for each test.
 //  3. Returns the exit code from _tin_test_finish(total_count).
 //
+// Top-level statements that would form the implicit main are NOT executed;
+// only test blocks run.
+//
 // _tin_run_test and _tin_test_finish are C helpers in runtime.c that use
 // setjmp/longjmp to isolate test failures and accumulate pass/fail counts.
-func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
+func (cg *CodeGen) genTestRunner() error {
 	stringType, err := cg.tinTypeToLLVM(&ast.SimpleType{Name: "string"})
 	if err != nil {
 		return err
@@ -1261,16 +1264,10 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 	// Initialize fiber runtime (workers + I/O thread) so tests can use spawn/await.
 	cur := cg.emitFiberMainWrap(entry)
 
-	// Run setup statements (top-level non-test code).
-	for _, stmt := range setupStmts {
-		cur, _, err = cg.genStmt(cur, stmt)
-		if err != nil {
-			return err
-		}
-
-		if cur == nil {
-			break
-		}
+	// Initialize top-level var globals so tests can reference them.
+	cur, err = cg.emitTopLevelVarInits(cur)
+	if err != nil {
+		return err
 	}
 
 	// Call _tin_run_test for each test.
@@ -1284,7 +1281,7 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 		// Drain the run queue and shut down workers.
 		cg.emitFiberMainEnd(cur)
 
-		// Release RC-tracked locals from setup stmts (let declarations).
+		// Release RC-tracked locals (e.g. from topLevelVarInits).
 		cg.emitAllScopeReleases(cur, "")
 
 		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.

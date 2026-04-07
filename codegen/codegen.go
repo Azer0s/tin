@@ -906,8 +906,10 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// In test mode, generate test functions and a test-runner main.
+	// Top-level statements that would form the implicit main are intentionally
+	// not executed - only test blocks run.
 	if cg.testMode && len(cg.testDecls) > 0 {
-		if err := cg.genTestRunner(topStmts); err != nil {
+		if err := cg.genTestRunner(); err != nil {
 			return nil, err
 		}
 

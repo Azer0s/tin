@@ -123,6 +123,51 @@ fn map[t, r](f fn(i t) r) fn([t]) [r] =
     return res
 ```
 
+### Type constraints
+
+A type parameter can be constrained with a `where t is <constraint>` clause
+after the parameter list. Only types satisfying the constraint may be used as
+the type argument:
+
+```rust
+fn min[t](a t, b t) t where t is ord =
+  if a < b: return a
+  return b
+
+fn contains[t](haystack [t], needle t) bool where t is comp =
+  for let item t in haystack:
+    if item == needle: return true
+  return false
+```
+
+The two built-in constraints are:
+
+| Constraint | Satisfied by | Operators available |
+|------------|-------------|---------------------|
+| `ord` | All integer types (`i8`..`i128`, `u8`..`u128`), float types (`f32`, `f64`, `f128`), `byte`, `char`, `int`, `uint` | `<`, `<=`, `>`, `>=` (and by inclusion all `comp` operators) |
+| `comp` | Everything `ord` accepts, plus `string` and `bool` | `==`, `!=` |
+
+`comp` is a superset of `ord`: every `ord` type also satisfies `comp`.
+
+```rust
+// sort needs only ordering
+fn sort[t](list [t]) [t] where t is ord = ...
+
+// equality check needs only comparability
+fn index_of[t](list [t], val t) i64 where t is comp =
+  for let i i64 in 0..len(list):
+    if list[i] == val: return i
+  return -1
+```
+
+A `where` clause can also name a user-defined trait:
+
+```rust
+fn print_all[t](items [t]) where t is display =
+  for let item t in items:
+    echo item.display()
+```
+
 ---
 
 ## Closures / Lambdas
