@@ -2804,7 +2804,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				Name: concreteName,
 				Type: &ast.GenericType{Name: typeName, TypeParams: resolvedTypeArgs},
 			}
-			_ = cg.genTypeDecl(synthDecl)
+			if err := cg.genTypeDecl(synthDecl); err != nil {
+				return nil, err
+			}
 		}
 
 		typeName = concreteName

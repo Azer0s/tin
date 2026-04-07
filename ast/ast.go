@@ -69,12 +69,13 @@ type TypeConstraint struct {
 
 type StructDecl struct {
 	base
-	Name       string
-	TypeParams []string
-	Fields     []StructField
-	Methods    []*FuncDecl
-	Implements []TypeExpr // trait impls listed in parens
-	Tags       []string
+	Name        string
+	TypeParams  []string
+	Constraints []TypeConstraint // generic type constraints: where t is addable
+	Fields      []StructField
+	Methods     []*FuncDecl
+	Implements  []TypeExpr // trait impls listed in parens
+	Tags        []string
 }
 
 type TraitDecl struct {

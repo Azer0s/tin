@@ -110,62 +110,8 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 	}
 
 	// Generic type constraints: "where t is Labeled+Sized, r is Printable"
-	// Appear BEFORE the `=` body separator.  One `where` keyword may be
-	// followed by multiple comma-separated bindings; multiple `where` keywords
-	// are also accepted for readability
-	var constraints []ast.TypeConstraint
-
-	parseOneConstraint := func() bool {
-		if !p.check(lexer.IDENT) || p.peekAt(1).Type != lexer.KW_IS {
-			return false
-		}
-
-		typeParam := p.advance().Literal // e.g. "t"
-		p.advance()                      // consume "is"
-
-		var traits []ast.TypeExpr
-		// Each trait may be a simple name or a generic like iter[i64]
-		if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
-			te, err2 := p.parseTypeSingle()
-			if err2 == nil {
-				traits = append(traits, te)
-			}
-
-			for p.check(lexer.PLUS) {
-				p.advance() // consume +
-
-				if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
-					te2, err3 := p.parseTypeSingle()
-					if err3 == nil {
-						traits = append(traits, te2)
-					}
-				}
-			}
-		}
-
-		constraints = append(constraints, ast.TypeConstraint{TypeParam: typeParam, Traits: traits})
-
-		return true
-	}
-
-	for p.check(lexer.KW_WHERE) {
-		saved := p.pos
-		p.advance() // consume "where"
-
-		if !parseOneConstraint() {
-			p.pos = saved
-
-			break
-		}
-		// Additional constraints after commas (still in the same `where` clause)
-		for p.check(lexer.COMMA) {
-			p.advance() // consume ","
-
-			if !parseOneConstraint() {
-				break
-			}
-		}
-	}
+	// Appear BEFORE the `=` body separator.
+	constraints := p.parseTypeConstraints()
 
 	// extern body: = extern("symbol")  OR  virtual marker: = virtual
 	if p.check(lexer.ASSIGN) {
@@ -299,6 +245,68 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 	}
 
 	return &ast.Block{Stmts: stmts}, nil
+}
+
+// parseTypeConstraints parses zero or more "where t is Trait+Trait2" clauses
+// that appear before the `=` body separator in both function and struct
+// declarations.  Multiple `where` keywords and comma-separated bindings are
+// accepted: "where t is A, r is B" or "where t is A where r is B".
+func (p *Parser) parseTypeConstraints() []ast.TypeConstraint {
+	var constraints []ast.TypeConstraint
+
+	parseOne := func() bool {
+		if !p.check(lexer.IDENT) || p.peekAt(1).Type != lexer.KW_IS {
+			return false
+		}
+
+		typeParam := p.advance().Literal // e.g. "t"
+		p.advance()                      // consume "is"
+
+		var traits []ast.TypeExpr
+
+		if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
+			te, err := p.parseTypeSingle()
+			if err == nil {
+				traits = append(traits, te)
+			}
+
+			for p.check(lexer.PLUS) {
+				p.advance()
+
+				if isTypeToken(p.peek()) || p.check(lexer.IDENT) {
+					te2, err2 := p.parseTypeSingle()
+					if err2 == nil {
+						traits = append(traits, te2)
+					}
+				}
+			}
+		}
+
+		constraints = append(constraints, ast.TypeConstraint{TypeParam: typeParam, Traits: traits})
+
+		return true
+	}
+
+	for p.check(lexer.KW_WHERE) {
+		saved := p.pos
+		p.advance() // consume "where"
+
+		if !parseOne() {
+			p.pos = saved
+
+			break
+		}
+
+		for p.check(lexer.COMMA) {
+			p.advance()
+
+			if !parseOne() {
+				break
+			}
+		}
+	}
+
+	return constraints
 }
 
 // parseWhereBlock consumes INDENT, parses where clauses, consumes DEDENT

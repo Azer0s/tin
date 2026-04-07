@@ -555,6 +555,27 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 	}
 
+	// Validate generic type constraints (e.g. "where t is addable").
+	// Build a string-keyed map from the substitution for constraint checking.
+	typeSubst := make(map[string]string, len(subst))
+	for param, te := range subst {
+		typeSubst[param] = typeExprToString(te)
+	}
+
+	for _, c := range tmpl.Constraints {
+		concreteName, ok := typeSubst[c.TypeParam]
+		if !ok {
+			continue
+		}
+
+		for _, traitExpr := range c.Traits {
+			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
+				return fmt.Errorf("struct %s: type %q does not satisfy constraint 'where %s is %s'",
+					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
+			}
+		}
+	}
+
 	// Build the concrete struct by substituting type params in every field and trait.
 	// Implements must be substituted so that e.g. Future[t](Awaitable[t]) ->
 	// Future__i64(Awaitable[i64]) uses the correct concrete trait instance key.

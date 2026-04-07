@@ -556,7 +556,8 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.
 // structSatisfiesConstraint checks that structName satisfies a trait expression.
-// traitExpr may be a SimpleType ("labeled") or a GenericType ("iter[i64]").
+// traitExpr may be a SimpleType ("labeled"), GenericType ("iter[i64]"), or a
+// type alias that expands to a union ("addable" = i8|i16|i32|...).
 func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.TypeExpr) bool {
 	var traitName string
 
@@ -569,9 +570,31 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return false
 	}
 
+	// Built-in type-set constraints.
+	// "ord": ordered types that support <, <=, >, >= (all integer and float types).
+	// "comp": comparable types that support ==, != (integers, floats, and string).
+	switch traitName {
+	case "ord":
+		return isOrdType(structName)
+	case "comp":
+		return isCompType(structName)
+	}
+
+	// If the name is a tagged union type, check whether structName is one of
+	// its variants (recursively, since unions can contain other unions).
+	if members, ok := cg.unionTypeMembers[traitName]; ok {
+		for _, member := range members {
+			if cg.typeExprContains(member, structName) {
+				return true
+			}
+		}
+
+		return false
+	}
+
 	td, ok := cg.traits[traitName]
 	if !ok {
-		// Not a declared trait: treat as a type-equality constraint.
+		// Not a declared trait or union alias: type-equality constraint.
 		// "where t is i64" is satisfied iff concreteName == "i64".
 		return traitName == structName
 	}
@@ -594,6 +617,58 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 	}
 
 	return true
+}
+
+// typeExprContains reports whether the type named target is a member of te,
+// recursively expanding tagged union types.
+func (cg *CodeGen) typeExprContains(te ast.TypeExpr, target string) bool {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if t.Name == target {
+			return true
+		}
+
+		// Recurse into tagged union members.
+		if members, ok := cg.unionTypeMembers[t.Name]; ok {
+			for _, member := range members {
+				if cg.typeExprContains(member, target) {
+					return true
+				}
+			}
+		}
+
+		return false
+	case *ast.UnionTypeExpr:
+		for _, member := range t.Types {
+			if cg.typeExprContains(member, target) {
+				return true
+			}
+		}
+
+		return false
+	default:
+		return false
+	}
+}
+
+// isOrdType reports whether typeName is an ordered type that supports <, <=, >, >=.
+// Covers all integer and float primitives.
+func isOrdType(typeName string) bool {
+	switch typeName {
+	case "i8", "i16", "i32", "i64", "i128",
+		"u8", "u16", "u32", "u64", "u128",
+		"f32", "f64", "f128",
+		"byte", "char", "int", "uint":
+		return true
+	}
+
+	return false
+}
+
+// isCompType reports whether typeName is a comparable type that supports ==, !=.
+// Covers all ordered types plus string.
+func isCompType(typeName string) bool {
+	return isOrdType(typeName) || typeName == "string"
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
