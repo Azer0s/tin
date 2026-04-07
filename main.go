@@ -917,9 +917,11 @@ func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 		}
 
 		reason := ""
+
 		if !passed {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 			fmt.Print(runOut.String())
+
 			reason = "test failures"
 		}
 
