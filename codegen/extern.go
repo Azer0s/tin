@@ -486,5 +486,6 @@ func (cg *CodeGen) emitGenericPtrHandover(block *ir.Block, src value.Value, targ
 	if target.Equal(irtypes.I8Ptr) {
 		return result
 	}
+
 	return block.NewBitCast(result, target)
 }
