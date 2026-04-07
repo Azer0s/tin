@@ -1,1 +1,29 @@
-{"package": "limits"}
+{
+  "package": "limits",
+  "reExports": [
+    "I8_MIN",
+    "I8_MAX",
+    "U8_MIN",
+    "U8_MAX",
+    "I16_MIN",
+    "I16_MAX",
+    "U16_MIN",
+    "U16_MAX",
+    "I32_MIN",
+    "I32_MAX",
+    "U32_MIN",
+    "U32_MAX",
+    "I64_MIN",
+    "I64_MAX",
+    "U64_MIN",
+    "U64_MAX",
+    "I128_MIN",
+    "I128_MAX",
+    "U128_MIN",
+    "U128_MAX",
+    "F32_MAX",
+    "F32_MIN_POS",
+    "F64_MAX",
+    "F64_MIN_POS"
+  ]
+}

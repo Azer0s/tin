@@ -17,6 +17,7 @@ export
 extern
 f32
 f64
+f128
 false
 fieldnames
 fieldtag
@@ -30,6 +31,7 @@ i16
 i32
 i64
 i8
+i128
 if
 in
 isrc
@@ -56,6 +58,7 @@ u16
 u32
 u64
 u8
+u128
 union
 use
 var

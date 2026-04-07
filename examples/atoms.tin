@@ -41,16 +41,16 @@ echo 'ok    // 'ok
 echo 'err   // 'err
 
 test "status messages" =
-  assert::equals_str(status_message('ok), "Everything is fine")
-  assert::equals_str(status_message('err), "Something went wrong")
+  assert::equals(status_message('ok), "Everything is fine")
+  assert::equals(status_message('err), "Something went wrong")
 
 test "unknown status" =
-  assert::equals_str(status_message('other), "Unknown status")
+  assert::equals(status_message('other), "Unknown status")
 
 test "quoted atom equals simple atom" =
   // '"hello" and 'hello are the same atom
   let a atom = 'hello
   let b atom = '"hello"
   assert::ok(a == b)
-  assert::equals_str(a, "hello")
-  assert::equals_str(b, "hello")
+  assert::equals(a, "hello")
+  assert::equals(b, "hello")

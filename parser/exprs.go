@@ -1058,9 +1058,9 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		if p.check(lexer.LBRACE) {
 			return p.parseStructLit(name)
 		}
-		// generic struct literal: Name[TypeArg]{...} or Name[TypeArg](positional...)
+		// generic struct literal: Name[TypeArg]{...}
 		if p.check(lexer.LBRACKET) {
-			// Speculatively parse [TypeArg] and check for { or (
+			// Speculatively parse [TypeArg] and check for {
 			saved := p.pos
 
 			typeArgs, err2 := p.parseTypeArgList()
@@ -1076,17 +1076,6 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 				return lit, nil
 			}
-
-			if err2 == nil && p.check(lexer.LPAREN) {
-				// Name[T](val, ...) - positional construction of a generic struct
-				args, err3 := p.parseArgList()
-				if err3 != nil {
-					return nil, err3
-				}
-
-				return &ast.StructLit{TypeName: name, TypeArgs: typeArgs, Positional: args}, nil
-			}
-
 			// Not a generic struct literal; restore position
 			p.pos = saved
 		}

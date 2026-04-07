@@ -80,13 +80,13 @@ test "atol negative" =
 // atof
 
 test "atof positive" =
-  assert::equals_f64(str::atof("3.14"), 3.14)
+  assert::equals(str::atof("3.14"), 3.14)
 
 test "atof negative" =
-  assert::equals_f64(str::atof("-2.5"), 0.0 - 2.5)
+  assert::equals(str::atof("-2.5"), 0.0 - 2.5)
 
 test "atof integer string" =
-  assert::equals_f64(str::atof("10"), 10.0)
+  assert::equals(str::atof("10"), 10.0)
 
 // parse_int
 
@@ -133,22 +133,22 @@ test "parse_int32 invalid is error" =
 test "parse_float positive" =
   let (v, err) = str::parse_float("3.14")
   assert::ok(!errors::has(err))
-  assert::equals_f64(v, 3.14)
+  assert::equals(v, 3.14)
 
 test "parse_float negative" =
   let (v, err) = str::parse_float("-2.5")
   assert::ok(!errors::has(err))
-  assert::equals_f64(v, 0.0 - 2.5)
+  assert::equals(v, 0.0 - 2.5)
 
 test "parse_float integer" =
   let (v, err) = str::parse_float("10")
   assert::ok(!errors::has(err))
-  assert::equals_f64(v, 10.0)
+  assert::equals(v, 10.0)
 
 test "parse_float exponent" =
   let (v, err) = str::parse_float("1.5e2")
   assert::ok(!errors::has(err))
-  assert::equals_f64(v, 150.0)
+  assert::equals(v, 150.0)
 
 test "parse_float empty is error" =
   let (_, err) = str::parse_float("")

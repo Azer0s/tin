@@ -13,6 +13,6 @@ echo pete.show()
 
 test "person struct" =
   let p = person{name: "Alice", age: 30}
-  assert::equals_str(p.show(), "Alice is 30 years old")
+  assert::equals(p.show(), "Alice is 30 years old")
   let q = person{name: "Bob", age: 0}
-  assert::equals_str(q.show(), "Bob is 0 years old")
+  assert::equals(q.show(), "Bob is 0 years old")

@@ -65,12 +65,12 @@ test "overload by type - f64" =
   assert::ok(double(2.5) < 5.1)
 
 test "overload by type - string" =
-  assert::equals_str(greet("World"), "Hello, World")
-  assert::equals_str(greet("Alice"), "Hello, Alice")
+  assert::equals(greet("World"), "Hello, World")
+  assert::equals(greet("Alice"), "Hello, Alice")
 
 test "overload by arity - string and i64+string" =
-  assert::equals_str(greet(2, "hi"), "hi hi ")
-  assert::equals_str(greet(1, "yo"), "yo ")
+  assert::equals(greet(2, "hi"), "hi hi ")
+  assert::equals(greet(1, "yo"), "yo ")
 
 test "overload by arity - sum" =
   assert::equals(sum(7), 7)

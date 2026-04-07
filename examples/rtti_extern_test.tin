@@ -328,16 +328,16 @@ test "extern C primitives" =
 test "typeof with any boxing" =
   let i i64 = 42
   let ia any = i
-  assert::equals_str(typeof(ia), "i64")
+  assert::equals(typeof(ia), "i64")
   let f f64 = 3.14
   let fa any = f
-  assert::equals_str(typeof(fa), "f64")
+  assert::equals(typeof(fa), "f64")
   let r = make_rect(1, 2)
   let ra any = r
-  assert::equals_str(typeof(ra), "rect")
+  assert::equals(typeof(ra), "rect")
   let p = make_point(0, 0)
   let pa any = p
-  assert::equals_str(typeof(pa), "point")
+  assert::equals(typeof(pa), "point")
 
 test "extern fn as fn-pointer arg" =
   assert::equals(apply_i64(c_abs, -77), 77)
@@ -354,16 +354,16 @@ test "struct from fn pointer" =
   assert::equals(r.w, 10)
   assert::equals(r.h, 20)
   let ra any = r
-  assert::equals_str(typeof(ra), "rect")
+  assert::equals(typeof(ra), "rect")
   assert::equals(traitof(ra).len, 2)
-  assert::equals_str(fieldnames(ra)[0], "w")
-  assert::equals_str(fieldtypes(ra)[0], "i64")
+  assert::equals(fieldnames(ra)[0], "w")
+  assert::equals(fieldtypes(ra)[0], "i64")
   let pf fn(i64, i64) point = make_point
   let p = pf(3, 7)
   assert::equals(p.x, 3)
   assert::equals(p.y, 7)
   let pa any = p
-  assert::equals_str(typeof(pa), "point")
+  assert::equals(typeof(pa), "point")
 
 test "lambda and closure" =
   let mk = fn(w i64, h i64) rect = return rect { w: w, h: h }
@@ -371,14 +371,14 @@ test "lambda and closure" =
   assert::equals(r.w, 6)
   assert::equals(r.h, 9)
   let ra any = r
-  assert::equals_str(typeof(ra), "rect")
+  assert::equals(typeof(ra), "rect")
   let sc i64 = 3
   let scaled = fn(w i64) rect = return rect { w: w * sc, h: w * sc * 2 }
   let sr = scaled(4)
   assert::equals(sr.w, 12)
   assert::equals(sr.h, 24)
   let r2 = apply_struct_fn(fn(w i64, h i64) rect = return rect { w: w + h, h: w - h }, 20, 8)
-  assert::equals_str(typeof(r2), "rect")
+  assert::equals(typeof(r2), "rect")
 
 test "multi-level fn pointer" =
   let f = double_wrap(make_rect)
@@ -386,7 +386,7 @@ test "multi-level fn pointer" =
   assert::equals(r.w, 3)
   assert::equals(r.h, 4)
   let ra any = r
-  assert::equals_str(typeof(ra), "rect")
+  assert::equals(typeof(ra), "rect")
   let neg_abs = compose_i64(fn(x i64) i64 = return x * -1, c_abs)
   assert::equals(neg_abs(-55), -55)
   assert::equals(neg_abs(10), -10)
@@ -406,15 +406,15 @@ test "getfield and setfield" =
 
 test "HOF full reflection" =
   let a = transform_any(make_triple, 1, 2, 3)
-  assert::equals_str(typeof(a), "triple")
+  assert::equals(typeof(a), "triple")
   let fn8 = fieldnames(a)
   assert::equals(fn8.len, 3)
-  assert::equals_str(fn8[0], "a")
-  assert::equals_str(fn8[1], "b")
-  assert::equals_str(fn8[2], "c")
+  assert::equals(fn8[0], "a")
+  assert::equals(fn8[1], "b")
+  assert::equals(fn8[2], "c")
   let ft8 = fieldtypes(a)
   assert::equals(ft8.len, 3)
-  assert::equals_str(ft8[0], "i64")
+  assert::equals(ft8[0], "i64")
   assert::equals(getfield(a, "a") as i64, 1)
   assert::equals(getfield(a, "b") as i64, 2)
   assert::equals(getfield(a, "c") as i64, 3)
@@ -434,5 +434,5 @@ test "edge cases" =
   assert::equals(rf.w, 10)
   assert::equals(rf.h, 6)
   let rfa any = rf
-  assert::equals_str(typeof(rfa), "rect")
+  assert::equals(typeof(rfa), "rect")
   assert::equals(traitof(rfa).len, 2)

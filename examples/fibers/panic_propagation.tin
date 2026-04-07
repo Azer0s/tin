@@ -45,7 +45,7 @@ test "await panic message is preserved" =
       caught = msg
   let f = spawn panics_with_value("my error")
   await f
-  assert::equals_str(caught, "my error")
+  assert::equals(caught, "my error")
 
 test "no panic from awaited fiber leaves caught empty" =
   let caught string = ""
@@ -56,7 +56,7 @@ test "no panic from awaited fiber leaves caught empty" =
   let f = spawn returns_normally()
   let v = await f
   assert::equals(v, 42)
-  assert::equals_str(caught, "")
+  assert::equals(caught, "")
 
 test "panic does not affect subsequent fibers" =
   let caught string = ""
@@ -70,7 +70,7 @@ test "panic does not affect subsequent fibers" =
   let f2 = spawn returns_normally()
   let v = await f2
   assert::equals(v, 42)
-  assert::equals_str(caught, "boom from fiber")
+  assert::equals(caught, "boom from fiber")
 
 // Recovered panic in async fn yields zero value to outer awaiter
 //

@@ -96,7 +96,7 @@ test "rename binding with string field" =
   let emp = person{name: "carol", age: 40, active: true}
   match emp:
     case person{name: n, age: yrs, _}:
-      assert::equals_str(n, "carol")
+      assert::equals(n, "carol")
       assert::equals(yrs, 40)
 
 test "mix rename and literal constraint" =
@@ -130,7 +130,7 @@ test "guard failure falls to next arm" =
   let result = match p:
     case point{x, y} if x > y: "x bigger"
     case point{x, y}: "y bigger or equal"
-  assert::equals_str(result, "y bigger or equal")
+  assert::equals(result, "y bigger or equal")
 
 // ── nested patterns ────────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ test "nested pattern rename at inner level" =
   }
   match e:
     case employee{person: person{name: emp_name, age: emp_age, _}, _, salary: pay}:
-      assert::equals_str(emp_name, "eve")
+      assert::equals(emp_name, "eve")
       assert::equals(emp_age, 35)
       assert::equals(pay, 95000)
 
@@ -167,7 +167,7 @@ test "nested pattern string constraint" =
   }
   match e:
     case employee{_, address: address{city: "paris", country: c}, _}:
-      assert::equals_str(c, "france")
+      assert::equals(c, "france")
     default:
       assert::fails("should match paris")
 
@@ -180,7 +180,7 @@ test "match expression basic" =
     case point{x: 0, _}:    "y-axis"
     case point{_, y: 0}:    "x-axis"
     case point{_, _}:       "other"
-  assert::equals_str(label, "origin")
+  assert::equals(label, "origin")
 
 test "match expression with rename" =
   let p = point{x: 4, y: 7}
@@ -193,4 +193,4 @@ test "match expression with string field" =
   let greeting = match emp:
     case person{name: n, _, active: true}:  "hello {n}"
     case person{name: n, _, active: false}: "bye {n}"
-  assert::equals_str(greeting, "hello grace")
+  assert::equals(greeting, "hello grace")

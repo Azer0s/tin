@@ -177,16 +177,16 @@ fn fizzbuzz_str(n i64) string =
 // ---------------------------------------------------------------------------
 
 test "classify_i64 deep nesting" =
-  assert::equals_str(classify_i64(0 - 200), "very negative")
-  assert::equals_str(classify_i64(0 - 50), "negative")
-  assert::equals_str(classify_i64(0 - 1), "minus one")
-  assert::equals_str(classify_i64(0), "zero")
-  assert::equals_str(classify_i64(1), "one")
-  assert::equals_str(classify_i64(5), "small positive")
-  assert::equals_str(classify_i64(50), "medium positive")
-  assert::equals_str(classify_i64(500), "large positive")
-  assert::equals_str(classify_i64(50000), "very large")
-  assert::equals_str(classify_i64(9999999), "astronomical")
+  assert::equals(classify_i64(0 - 200), "very negative")
+  assert::equals(classify_i64(0 - 50), "negative")
+  assert::equals(classify_i64(0 - 1), "minus one")
+  assert::equals(classify_i64(0), "zero")
+  assert::equals(classify_i64(1), "one")
+  assert::equals(classify_i64(5), "small positive")
+  assert::equals(classify_i64(50), "medium positive")
+  assert::equals(classify_i64(500), "large positive")
+  assert::equals(classify_i64(50000), "very large")
+  assert::equals(classify_i64(9999999), "astronomical")
 
 test "sum_classified nested if in loop" =
   // [-100, -20, 0, 5, 100] -> 300 + 20 + 0 + 5 + 200 = 525
@@ -201,20 +201,20 @@ test "score_shapes enum+match in loop" =
   assert::equals(s, 34)
 
 test "describe_atom where chain" =
-  assert::equals_str(describe_atom('ok), "success")
-  assert::equals_str(describe_atom('err), "failure")
-  assert::equals_str(describe_atom('pending), "in progress")
-  assert::equals_str(describe_atom('timeout), "timed out")
-  assert::equals_str(describe_atom('retry), "please retry")
-  assert::equals_str(describe_atom('cancel), "cancelled")
-  assert::equals_str(describe_atom('other), "unknown status")
+  assert::equals(describe_atom('ok), "success")
+  assert::equals(describe_atom('err), "failure")
+  assert::equals(describe_atom('pending), "in progress")
+  assert::equals(describe_atom('timeout), "timed out")
+  assert::equals(describe_atom('retry), "please retry")
+  assert::equals(describe_atom('cancel), "cancelled")
+  assert::equals(describe_atom('other), "unknown status")
 
 test "nested match" =
-  assert::equals_str(describe_shape_color(shape.circle, color.red), "red circle")
-  assert::equals_str(describe_shape_color(shape.circle, color.blue), "blue circle")
-  assert::equals_str(describe_shape_color(shape.square, color.red), "red square")
-  assert::equals_str(describe_shape_color(shape.square, color.green), "non-red square")
-  assert::equals_str(describe_shape_color(shape.triangle, color.red), "other shape")
+  assert::equals(describe_shape_color(shape.circle, color.red), "red circle")
+  assert::equals(describe_shape_color(shape.circle, color.blue), "blue circle")
+  assert::equals(describe_shape_color(shape.square, color.red), "red square")
+  assert::equals(describe_shape_color(shape.square, color.green), "non-red square")
+  assert::equals(describe_shape_color(shape.triangle, color.red), "other shape")
 
 test "tagged union extract_or_zero" =
   let a maybe_i64 = 42
@@ -233,7 +233,7 @@ test "double_if_present with nothing" =
   assert::ok(result is bool)
 
 test "fizzbuzz where chain" =
-  assert::equals_str(fizzbuzz_str(15), "FizzBuzz")
-  assert::equals_str(fizzbuzz_str(9), "Fizz")
-  assert::equals_str(fizzbuzz_str(10), "Buzz")
-  assert::equals_str(fizzbuzz_str(7), "7")
+  assert::equals(fizzbuzz_str(15), "FizzBuzz")
+  assert::equals(fizzbuzz_str(9), "Fizz")
+  assert::equals(fizzbuzz_str(10), "Buzz")
+  assert::equals(fizzbuzz_str(7), "7")

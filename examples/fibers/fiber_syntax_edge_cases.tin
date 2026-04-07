@@ -131,11 +131,11 @@ test "fiber bool return type false" =
 
 test "fiber f64 return type" =
   let v = await spawn half(8.0)
-  assert::equals_f64(v, 4.0)
+  assert::equals(v, 4.0)
 
 test "fiber string return type via Future[string]" =
   let s = await spawn make_greeting("tin")
-  assert::equals_str(s, "hello tin")
+  assert::equals(s, "hello tin")
 
 test "spawn do captures local channel" =
   let ch = sync::Channel[i64].make(1)

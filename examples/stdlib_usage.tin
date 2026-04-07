@@ -30,8 +30,8 @@ let cmp i32 = str::strcmp("abc", "abc")
 io::printf("strcmp(\"abc\",\"abc\") = %d\n", cmp)
 
 test "math stdlib" =
-  assert::equals_f64(math::floor(math::sqrt(2.0)), 1.0)
-  assert::equals_f64(math::ceil(math::sqrt(2.0)), 2.0)
+  assert::equals(math::floor(math::sqrt(2.0)), 1.0)
+  assert::equals(math::ceil(math::sqrt(2.0)), 2.0)
   assert::ok(math::sqrt(2.0) > 1.4)
   assert::ok(math::sqrt(2.0) < 1.5)
 

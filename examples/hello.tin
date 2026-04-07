@@ -4,4 +4,4 @@ use assert
 
 test "hello string construction" =
   let s = "Hello, world!"
-  assert::equals_str(s, "Hello, world!")
+  assert::equals(s, "Hello, world!")

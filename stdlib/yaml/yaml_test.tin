@@ -47,50 +47,50 @@ struct yt_rect =
 // Encoding
 
 test "encode bool true" =
-  assert::equals_str(yaml::encode(true), "true\n")
+  assert::equals(yaml::encode(true), "true\n")
 
 test "encode bool false" =
-  assert::equals_str(yaml::encode(false), "false\n")
+  assert::equals(yaml::encode(false), "false\n")
 
 test "encode i64 positive" =
-  assert::equals_str(yaml::encode(42 as i64), "42\n")
+  assert::equals(yaml::encode(42 as i64), "42\n")
 
 test "encode i64 negative" =
-  assert::equals_str(yaml::encode(0 - 7 as i64), "-7\n")
+  assert::equals(yaml::encode(0 - 7 as i64), "-7\n")
 
 test "encode i64 zero" =
-  assert::equals_str(yaml::encode(0 as i64), "0\n")
+  assert::equals(yaml::encode(0 as i64), "0\n")
 
 test "encode string plain" =
-  assert::equals_str(yaml::encode("hello"), "hello\n")
+  assert::equals(yaml::encode("hello"), "hello\n")
 
 test "encode string needs quoting - reserved word" =
-  assert::equals_str(yaml::encode("null"), "\"null\"\n")
+  assert::equals(yaml::encode("null"), "\"null\"\n")
 
 test "encode string needs quoting - colon" =
-  assert::equals_str(yaml::encode("key: val"), "\"key: val\"\n")
+  assert::equals(yaml::encode("key: val"), "\"key: val\"\n")
 
 test "encode string needs quoting - hash" =
-  assert::equals_str(yaml::encode("hello # world"), "\"hello # world\"\n")
+  assert::equals(yaml::encode("hello # world"), "\"hello # world\"\n")
 
 test "encode string needs quoting - newline" =
-  assert::equals_str(yaml::encode("line1\nline2"), "\"line1\\nline2\"\n")
+  assert::equals(yaml::encode("line1\nline2"), "\"line1\\nline2\"\n")
 
 test "encode struct all fields" =
   let p = yt_point{x: 3, y: 4}
-  assert::equals_str(yaml::encode(p), "x: 3\ny: 4\n")
+  assert::equals(yaml::encode(p), "x: 3\ny: 4\n")
 
 test "encode struct with yaml tag rename" =
   let u = yt_tagged_user{id: 1, email: "a@b.com"}
-  assert::equals_str(yaml::encode(u), "user_id: 1\nemail_address: a@b.com\n")
+  assert::equals(yaml::encode(u), "user_id: 1\nemail_address: a@b.com\n")
 
 test "encode struct with yaml:- skips field" =
   let w = yt_with_secret{name: "alice", pwd: "hunter2"}
-  assert::equals_str(yaml::encode(w), "name: alice\n")
+  assert::equals(yaml::encode(w), "name: alice\n")
 
 test "encode nested struct" =
   let r = yt_rect{origin: yt_point{x: 0, y: 0}, size: yt_point{x: 100, y: 50}}
-  assert::equals_str(yaml::encode(r), "origin:\n  x: 0\n  y: 0\nsize:\n  x: 100\n  y: 50\n")
+  assert::equals(yaml::encode(r), "origin:\n  x: 0\n  y: 0\nsize:\n  x: 100\n  y: 50\n")
 
 // Untyped parsing
 
@@ -129,27 +129,27 @@ test "parse negative integer" =
 test "parse float" =
   let (v, _) = yaml::parse("3.14")
   assert::ok(v.is_float())
-  assert::equals_f64(v.as_float(), 3.14)
+  assert::equals(v.as_float(), 3.14)
 
 test "parse plain string" =
   let (v, _) = yaml::parse("hello")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "hello")
+  assert::equals(v.as_string(), "hello")
 
 test "parse double-quoted string" =
   let (v, _) = yaml::parse("\"hello world\"")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "hello world")
+  assert::equals(v.as_string(), "hello world")
 
 test "parse quoted string with escape sequences" =
   let (v, _) = yaml::parse("\"line1\\nline2\"")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "line1\nline2")
+  assert::equals(v.as_string(), "line1\nline2")
 
 test "parse block mapping" =
   let (v, _) = yaml::parse("name: alice\nage: 30\n")
   assert::ok(v.is_object())
-  assert::equals_str(v.get("name").as_string(), "alice")
+  assert::equals(v.get("name").as_string(), "alice")
   assert::equals(v.get("age").as_int(), 30)
 
 test "parse block mapping missing key returns null" =
@@ -173,9 +173,9 @@ test "parse block sequence of strings" =
   let (v, _) = yaml::parse("- apple\n- banana\n- cherry\n")
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
-  assert::equals_str(v.index(0).as_string(), "apple")
-  assert::equals_str(v.index(1).as_string(), "banana")
-  assert::equals_str(v.index(2).as_string(), "cherry")
+  assert::equals(v.index(0).as_string(), "apple")
+  assert::equals(v.index(1).as_string(), "banana")
+  assert::equals(v.index(2).as_string(), "cherry")
 
 test "parse array out of bounds returns null" =
   let (v, _) = yaml::parse("- 1\n- 2\n")
@@ -219,7 +219,7 @@ test "parse empty flow mapping" =
 test "parse document with leading blank lines" =
   let (v, _) = yaml::parse("\n\nname: bob\n")
   assert::ok(v.is_object())
-  assert::equals_str(v.get("name").as_string(), "bob")
+  assert::equals(v.get("name").as_string(), "bob")
 
 test "parse document with comment lines" =
   let (v, _) = yaml::parse("# a comment\nval: 42\n")
@@ -229,7 +229,7 @@ test "parse document with comment lines" =
 test "parse document start marker" =
   let (v, _) = yaml::parse("---\nname: alice\n")
   assert::ok(v.is_object())
-  assert::equals_str(v.get("name").as_string(), "alice")
+  assert::equals(v.get("name").as_string(), "alice")
 
 test "parse inline comment on value line" =
   let (v, _) = yaml::parse("x: 99  # the answer\n")
@@ -239,12 +239,12 @@ test "parse inline comment on value line" =
 test "parse block mapping with bool and float fields" =
   let (v, _) = yaml::parse("enabled: true\nrate: 1.5\n")
   assert::ok(v.get("enabled").as_bool())
-  assert::equals_f64(v.get("rate").as_float(), 1.5)
+  assert::equals(v.get("rate").as_float(), 1.5)
 
 test "parse block mapping with quoted string value" =
   let (v, _) = yaml::parse("msg: \"hello, world\"\n")
   assert::ok(v.is_object())
-  assert::equals_str(v.get("msg").as_string(), "hello, world")
+  assert::equals(v.get("msg").as_string(), "hello, world")
 
 // Typed parsing
 
@@ -256,7 +256,7 @@ test "typed parse basic struct" =
 test "typed parse with yaml tag" =
   let (u, _) = yaml::parse[yt_api_user]("user_id: 7\ndisplay_name: bob\n")
   assert::equals(u.id, 7)
-  assert::equals_str(u.name, "bob")
+  assert::equals(u.name, "bob")
 
 test "typed parse unknown keys ignored" =
   let (s, _) = yaml::parse[yt_simple]("x: 3\nextra: ignored\n")
@@ -264,7 +264,7 @@ test "typed parse unknown keys ignored" =
 
 test "typed parse float field" =
   let (m, _) = yaml::parse[yt_measure]("val: 2.5\n")
-  assert::equals_f64(m.val, 2.5)
+  assert::equals(m.val, 2.5)
 
 test "typed parse bool field" =
   let (f, _) = yaml::parse[yt_flags]("enabled: true\n")
@@ -272,7 +272,7 @@ test "typed parse bool field" =
 
 test "typed parse string field" =
   let (g, _) = yaml::parse[yt_greeting]("msg: hi there\n")
-  assert::equals_str(g.msg, "hi there")
+  assert::equals(g.msg, "hi there")
 
 test "typed parse nested struct" =
   let s = "origin:\n  x: 3\n  y: 4\nsize:\n  x: 100\n  y: 50\n"

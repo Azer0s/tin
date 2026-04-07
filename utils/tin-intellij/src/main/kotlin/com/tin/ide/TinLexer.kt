@@ -321,8 +321,8 @@ class TinLexer : LexerBase() {
         "fieldnames", "fieldtypes", "fieldtag", "getfield", "setfield", "isrc"
             -> TinTokenTypes.KEYWORD_EXPR
         "echo", "test", "pass" -> TinTokenTypes.KEYWORD_OTHER
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-        "f32", "f64", "bool", "string", "atom", "void", "any"
+        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128",
+        "f32", "f64", "f128", "bool", "string", "atom", "void", "any"
             -> TinTokenTypes.BUILTIN_TYPE
         "true", "false" -> TinTokenTypes.BOOLEAN
         "nil"           -> TinTokenTypes.NIL

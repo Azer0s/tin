@@ -144,12 +144,12 @@ test "parse_rfc3339 round-trip" =
   let iso = "2024-06-01T08:00:00.000000000Z"
   let (t, _) = time::parse_rfc3339(iso)
   let iso2 = t.to_rfc3339()
-  assert::equals_str(iso, iso2)
+  assert::equals(iso, iso2)
 
 test "to_rfc3339 formats correctly" =
   let t = Instant{ns: 0}
   let s = t.to_rfc3339()
-  assert::equals_str(s, "1970-01-01T00:00:00.000000000Z")
+  assert::equals(s, "1970-01-01T00:00:00.000000000Z")
 
 // ---- time::parse with layout ----
 
@@ -178,17 +178,17 @@ test "now monotonically increases" =
 test "Instant to_json produces RFC3339 string" =
   let t = Instant{ns: 0}
   let j = t.to_json()
-  assert::equals_str(j, "\"1970-01-01T00:00:00.000000000Z\"")
+  assert::equals(j, "\"1970-01-01T00:00:00.000000000Z\"")
 
 test "Instant to_json non-zero" =
   let (t, _) = time::parse_rfc3339("2024-01-15T12:34:56Z")
   let j = t.to_json()
-  assert::equals_str(j, "\"2024-01-15T12:34:56.000000000Z\"")
+  assert::equals(j, "\"2024-01-15T12:34:56.000000000Z\"")
 
 test "json::encode Instant uses to_json" =
   let t = Instant{ns: 0}
   let j = json::encode(t)
-  assert::equals_str(j, "\"1970-01-01T00:00:00.000000000Z\"")
+  assert::equals(j, "\"1970-01-01T00:00:00.000000000Z\"")
 
 // ---- Instant JSON deserialization as struct field ----
 
@@ -200,7 +200,7 @@ test "json::parse Instant field from RFC3339 string" =
   let s = "\{\"name\":\"hello\",\"created_at\":\"1970-01-01T00:00:00.000000000Z\"\}"
   let (ev, err) = json::parse[event_with_time](s)
   assert::not_ok(errors::has(err))
-  assert::equals_str(ev.name, "hello")
+  assert::equals(ev.name, "hello")
   assert::equals(ev.created_at.ns, 0)
 
 test "json::parse Instant field non-zero" =
@@ -217,16 +217,16 @@ test "Guid new returns non-empty" =
 
 test "Guid value is string field" =
   let g = Guid{value: "test-guid-1234"}
-  assert::equals_str(g.value, "test-guid-1234")
+  assert::equals(g.value, "test-guid-1234")
 
 test "Guid to_json wraps in quotes" =
   let g = Guid{value: "abc-123"}
-  assert::equals_str(g.to_json(), "\"abc-123\"")
+  assert::equals(g.to_json(), "\"abc-123\"")
 
 test "json::encode Guid" =
   let g = Guid{value: "abc-123"}
   let j = json::encode(g)
-  assert::equals_str(j, "\"abc-123\"")
+  assert::equals(j, "\"abc-123\"")
 
 // ---- Guid as struct field in JSON ----
 
@@ -238,10 +238,10 @@ test "json::parse Guid field" =
   let s = "\{\"id\":\"my-guid-value\",\"name\":\"Alice\"\}"
   let (e, err) = json::parse[entity_with_guid](s)
   assert::not_ok(errors::has(err))
-  assert::equals_str(e.id.value, "my-guid-value")
-  assert::equals_str(e.name, "Alice")
+  assert::equals(e.id.value, "my-guid-value")
+  assert::equals(e.name, "Alice")
 
 test "json::encode struct with Guid field" =
   let e = entity_with_guid{id: Guid{value: "test-id"}, name: "Bob"}
   let j = json::encode(e)
-  assert::equals_str(j, "\{\"id\":\"test-id\",\"name\":\"Bob\"\}")
+  assert::equals(j, "\{\"id\":\"test-id\",\"name\":\"Bob\"\}")

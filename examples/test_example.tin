@@ -14,8 +14,8 @@ test "addition is correct" =
   assert::equals(add(-1, 1), 0)
 
 test "string concatenation" =
-  assert::equals_str(greet("world"), "Hello, world")
-  assert::equals_str("foo" ++ "bar", "foobar")
+  assert::equals(greet("world"), "Hello, world")
+  assert::equals("foo" ++ "bar", "foobar")
 
 test "boolean assertions" =
   assert::ok(1 == 1)

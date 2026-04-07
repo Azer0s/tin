@@ -191,9 +191,9 @@ test "linked list with string type" =
   let n1 = list_node[string]::cons("c", nil)
   let n2 = list_node[string]::cons("b", n1)
   let n3 = list_node[string]::cons("a", n2)
-  assert::equals_str(list_get(n3, 0), "a")
-  assert::equals_str(list_get(n3, 1), "b")
-  assert::equals_str(list_get(n3, 2), "c")
+  assert::equals(list_get(n3, 0), "a")
+  assert::equals(list_get(n3, 1), "b")
+  assert::equals(list_get(n3, 2), "c")
   (*n3).deinit()
   mem::free(n3)
 
@@ -257,7 +257,7 @@ test "option map_opt type change string" =
   let o = option[i64]::some(7)
   let as_str = o.map_opt(fn(n i64) string = return "val={n}")
   assert::ok(as_str.has_value)
-  assert::equals_str(as_str.val, "val=7")
+  assert::equals(as_str.val, "val=7")
 
 test "result success" =
   let r = safe_div(10, 2)
@@ -267,7 +267,7 @@ test "result success" =
 test "result failure division by zero" =
   let r = safe_div(10, 0)
   assert::not_ok(r.ok)
-  assert::equals_str(r.err, "division by zero")
+  assert::equals(r.err, "division by zero")
 
 test "result unwrap_or" =
   assert::equals(safe_div(10, 0).unwrap_or(0 - 1), 0 - 1)

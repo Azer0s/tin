@@ -114,15 +114,15 @@ io::printf("typeof([1,2,3])= %s\n", typeof(arr))
 use assert
 
 test "typeof primitives" =
-  assert::equals_str(typeof(42),   "i64")
-  assert::equals_str(typeof(true), "bool")
+  assert::equals(typeof(42),   "i64")
+  assert::equals(typeof(true), "bool")
 
 test "fieldnames on point" =
   let p2 = point{x: 1, y: 2}
   let names = fieldnames(p2)
   assert::equals(len(names), 2)
-  assert::equals_str(names[0], "x")
-  assert::equals_str(names[1], "y")
+  assert::equals(names[0], "x")
+  assert::equals(names[1], "y")
 
 test "getfield and setfield on point" =
   let p3 = point{x: 10, y: 20}

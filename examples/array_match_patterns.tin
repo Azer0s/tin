@@ -198,11 +198,11 @@ fn classify_len(a [int]) string =
       return "many"
 
 test "exhaustive via [] + rest covers all lengths" =
-  assert::equals_str("zero",  classify_len([]))
-  assert::equals_str("one",   classify_len([1]))
-  assert::equals_str("two",   classify_len([1, 2]))
-  assert::equals_str("many",  classify_len([1, 2, 3]))
-  assert::equals_str("many",  classify_len([1, 2, 3, 4, 5]))
+  assert::equals("zero",  classify_len([]))
+  assert::equals("one",   classify_len([1]))
+  assert::equals("two",   classify_len([1, 2]))
+  assert::equals("many",  classify_len([1, 2, 3]))
+  assert::equals("many",  classify_len([1, 2, 3, 4, 5]))
 
 // ── partial match ─────────────────────────────────────────────────────────────
 

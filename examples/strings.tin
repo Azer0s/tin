@@ -42,7 +42,7 @@ echo r.area()
 
 test "point show and manhattan" =
   let p = point{x: 3, y: 4}
-  assert::equals_str(p.show(), "(3, 4)")
+  assert::equals(p.show(), "(3, 4)")
   assert::equals(p.manhattan(), 7)
 
 test "manhattan with negatives" =
@@ -53,5 +53,5 @@ test "manhattan with negatives" =
 
 test "rect show and area" =
   let r = rect{x: 10, y: 20, w: 5, h: 8}
-  assert::equals_str(r.show(), "rect at (10,20) size 5x8")
+  assert::equals(r.show(), "rect at (10,20) size 5x8")
   assert::equals(r.area(), 40)

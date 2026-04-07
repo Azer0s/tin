@@ -18,27 +18,27 @@ test "i128 addition" =
   let a i128 = 100
   let b i128 = 200
   let c i128 = a + b
-  assert::equals_i128(300, c)
+  assert::equals(300, c)
 
 test "i128 subtraction" =
   let a i128 = 500
   let b i128 = 300
-  assert::equals_i128(200, a - b)
+  assert::equals(200, a - b)
 
 test "i128 multiplication" =
   let a i128 = 1000000000 as i128
   let b i128 = 1000000000 as i128
-  assert::equals_i128(1000000000000000000 as i128, a * b)
+  assert::equals(1000000000000000000 as i128, a * b)
 
 test "i128 division" =
   let a i128 = 1000000000000000000 as i128
   let b i128 = 1000000000 as i128
-  assert::equals_i128(1000000000 as i128, a / b)
+  assert::equals(1000000000 as i128, a / b)
 
 test "i128 negation" =
   let x i128 = 42
   let y i128 = -x
-  assert::equals_i128(-42 as i128, y)
+  assert::equals(-42 as i128, y)
 
 test "i128 negative values" =
   let x i128 = -9999999999999999999 as i128
@@ -78,24 +78,24 @@ test "u128 basic echo" =
 test "u128 addition" =
   let a u128 = 100 as u128
   let b u128 = 200 as u128
-  assert::equals_u128(300 as u128, a + b)
+  assert::equals(300 as u128, a + b)
 
 test "u128 subtraction" =
   let a u128 = 500 as u128
   let b u128 = 300 as u128
-  assert::equals_u128(200 as u128, a - b)
+  assert::equals(200 as u128, a - b)
 
 test "u128 multiplication" =
   let a u128 = 1000000000 as u128
   let b u128 = 1000000000 as u128
-  assert::equals_u128(1000000000000000000 as u128, a * b)
+  assert::equals(1000000000000000000 as u128, a * b)
 
 test "u128 limits MAX" =
   let mx u128 = limits::U128_MAX
-  assert::equals_u128(mx, ~(0 as u128))
+  assert::equals(mx, ~(0 as u128))
 
 test "u128 MIN is zero" =
-  assert::equals_u128(0 as u128, limits::U128_MIN)
+  assert::equals(0 as u128, limits::U128_MIN)
 
 // ============================================================
 // f128 arithmetic
@@ -108,17 +108,17 @@ test "f128 basic" =
 test "f128 addition" =
   let a f128 = 1.5 as f128
   let b f128 = 2.5 as f128
-  assert::equals_f128(4.0 as f128, a + b)
+  assert::equals(4.0 as f128, a + b)
 
 test "f128 multiplication" =
   let a f128 = 2.0 as f128
   let b f128 = 3.0 as f128
-  assert::equals_f128(6.0 as f128, a * b)
+  assert::equals(6.0 as f128, a * b)
 
 test "f128 division" =
   let a f128 = 10.0 as f128
   let b f128 = 4.0 as f128
-  assert::equals_f128(2.5 as f128, a / b)
+  assert::equals(2.5 as f128, a / b)
 
 test "f128 negative" =
   let x f128 = -1.5 as f128
@@ -131,7 +131,7 @@ test "f128 negative" =
 test "i64 to i128 cast" =
   let x i64 = 9223372036854775807
   let y i128 = x as i128
-  assert::equals_i128(9223372036854775807 as i128, y)
+  assert::equals(9223372036854775807 as i128, y)
 
 test "i128 to i64 cast (fits)" =
   let x i128 = 42
@@ -141,12 +141,12 @@ test "i128 to i64 cast (fits)" =
 test "u64 to u128 cast" =
   let x u64 = 18446744073709551615
   let y u128 = x as u128
-  assert::equals_u128(18446744073709551615 as u128, y)
+  assert::equals(18446744073709551615 as u128, y)
 
 test "i128 to u128 cast (positive)" =
   let x i128 = 100
   let y u128 = x as u128
-  assert::equals_u128(100 as u128, y)
+  assert::equals(100 as u128, y)
 
 test "f64 to f128 cast" =
   let x f64 = 3.14
@@ -156,13 +156,13 @@ test "f64 to f128 cast" =
 test "f128 to f64 cast" =
   let x f128 = 2.5 as f128
   let y f64 = x as f64
-  assert::equals_f64(2.5, y)
+  assert::equals(2.5, y)
 
 test "i32 to i128 arithmetic" =
   let x i32 = 2147483647
   let y i128 = x as i128
   let z i128 = y * 2
-  assert::equals_i128(4294967294 as i128, z)
+  assert::equals(4294967294 as i128, z)
 
 // ============================================================
 // Comparisons
@@ -203,17 +203,17 @@ test "f128 comparison" =
 test "i128 bitwise AND" =
   let a i128 = 0xFF as i128
   let b i128 = 0x0F as i128
-  assert::equals_i128(0x0F as i128, a & b)
+  assert::equals(0x0F as i128, a & b)
 
 test "i128 bitwise OR" =
   let a i128 = 0xF0 as i128
   let b i128 = 0x0F as i128
-  assert::equals_i128(0xFF as i128, a | b)
+  assert::equals(0xFF as i128, a | b)
 
 test "i128 bitwise XOR" =
   let a i128 = 0xFF as i128
   let b i128 = 0xFF as i128
-  assert::equals_i128(0 as i128, a ^ b)
+  assert::equals(0 as i128, a ^ b)
 
 test "i128 left shift" =
   let a i128 = 1
@@ -223,7 +223,7 @@ test "i128 left shift" =
 test "i128 right shift" =
   let a i128 = 1 as i128 << 64
   let b i128 = a >> 64
-  assert::equals_i128(1, b)
+  assert::equals(1, b)
 
 // ============================================================
 // String interpolation
@@ -232,13 +232,13 @@ test "i128 right shift" =
 test "i128 string interpolation" =
   let x i128 = -42
   let s string = "val={x}"
-  assert::equals_str("val=-42", s)
+  assert::equals("val=-42", s)
 
 test "u128 string interpolation" =
   // Use a value that fits in i64 to exercise u128 printing path
   let x u128 = 1234567890123456789 as u128
   let s string = "val={x}"
-  assert::equals_str("val=1234567890123456789", s)
+  assert::equals("val=1234567890123456789", s)
 
 test "f128 string interpolation" =
   let x f128 = 3.14 as f128
@@ -248,12 +248,12 @@ test "f128 string interpolation" =
 
 test "limits in interpolation" =
   let s string = "MAX={limits::I128_MAX}"
-  assert::equals_str("MAX=170141183460469231731687303715884105727", s)
+  assert::equals("MAX=170141183460469231731687303715884105727", s)
 
 test "u64 max in interpolation" =
   let mx u64 = limits::U64_MAX
   let s string = "max={mx}"
-  assert::equals_str("max=18446744073709551615", s)
+  assert::equals("max=18446744073709551615", s)
 
 // ============================================================
 // Reflection
@@ -261,15 +261,15 @@ test "u64 max in interpolation" =
 
 test "reflect kind of i128" =
   let t atom = 'i128
-  assert::equals_str("primitive", reflect::kind(t))
+  assert::equals("primitive", reflect::kind(t))
 
 test "reflect kind of u128" =
   let t atom = 'u128
-  assert::equals_str("primitive", reflect::kind(t))
+  assert::equals("primitive", reflect::kind(t))
 
 test "reflect kind of f128" =
   let t atom = 'f128
-  assert::equals_str("primitive", reflect::kind(t))
+  assert::equals("primitive", reflect::kind(t))
 
 test "reflect is_primitive for i128" =
   assert::ok(reflect::is_primitive('i128))

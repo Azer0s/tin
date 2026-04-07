@@ -23,12 +23,12 @@ struct bot(greeter) =
 test "trait fat pointer dispatch - person" =
   let p = person{name: "Alice"}
   let gp greeter = p
-  assert::equals_str(gp.greet(), "Hello, I am Alice")
+  assert::equals(gp.greet(), "Hello, I am Alice")
 
 test "trait fat pointer dispatch - bot" =
   let b = bot{model: "R2D2"}
   let gb greeter = b
-  assert::equals_str(gb.greet(), "Beep, I am model R2D2")
+  assert::equals(gb.greet(), "Beep, I am model R2D2")
 
 // Trait with forwarded fields (default methods accessing forward fields)
 
@@ -42,10 +42,10 @@ struct animal(named) =
 
 test "trait default method with forward field" =
   let a = animal{label: "Whiskers", species: "cat"}
-  assert::equals_str(a.name(), "Whiskers")
+  assert::equals(a.name(), "Whiskers")
   // Access through fat ptr
   let n named = a
-  assert::equals_str(n.name(), "Whiskers")
+  assert::equals(n.name(), "Whiskers")
 
 // Forward field mutations in trait default methods
 // Trait default methods that assign to forward fields should mutate the

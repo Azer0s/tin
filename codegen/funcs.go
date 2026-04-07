@@ -666,9 +666,9 @@ func isOrdType(typeName string) bool {
 }
 
 // isCompType reports whether typeName is a comparable type that supports ==, !=.
-// Covers all ordered types plus string.
+// Covers all ordered types plus string and bool.
 func isCompType(typeName string) bool {
-	return isOrdType(typeName) || typeName == "string"
+	return isOrdType(typeName) || typeName == "string" || typeName == "bool"
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {

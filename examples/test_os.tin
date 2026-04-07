@@ -22,7 +22,7 @@ test "write_file and read_file round-trip" =
   assert::ok(!errors::has(we))
   let (content, re) = os::read_file(path)
   assert::ok(!errors::has(re))
-  assert::equals_str(content, "hello\n")
+  assert::equals(content, "hello\n")
   os::remove(path)
 
 test "write_file creates file" =
@@ -37,7 +37,7 @@ test "write_file truncates existing file" =
   os::write_file(path, "long content here")
   os::write_file(path, "short")
   let (content, _) = os::read_file(path)
-  assert::equals_str(content, "short")
+  assert::equals(content, "short")
   os::remove(path)
 
 test "append_file" =
@@ -47,7 +47,7 @@ test "append_file" =
   os::append_file(path, "line3\n")
   let (content, err) = os::read_file(path)
   assert::ok(!errors::has(err))
-  assert::equals_str(content, "line1\nline2\nline3\n")
+  assert::equals(content, "line1\nline2\nline3\n")
   os::remove(path)
 
 test "append_file creates file if missing" =
@@ -55,7 +55,7 @@ test "append_file creates file if missing" =
   let ae = os::append_file(path, "first\n")
   assert::ok(!errors::has(ae))
   let (content, _) = os::read_file(path)
-  assert::equals_str(content, "first\n")
+  assert::equals(content, "first\n")
   os::remove(path)
 
 test "read_file error on missing file" =
@@ -81,7 +81,7 @@ test "empty file round-trip" =
   os::write_file(path, "")
   let (content, err) = os::read_file(path)
   assert::ok(!errors::has(err))
-  assert::equals_str(content, "")
+  assert::equals(content, "")
   assert::equals(os::file_size(path), 0)
   os::remove(path)
 
@@ -183,7 +183,7 @@ test "rename moves a file" =
   assert::ok(!os::exists(src))
   assert::ok(os::exists(dst))
   let (content, _) = os::read_file(dst)
-  assert::equals_str(content, "moved")
+  assert::equals(content, "moved")
   os::remove(dst)
 
 test "rename error on missing source" =

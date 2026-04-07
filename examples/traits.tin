@@ -77,12 +77,12 @@ print_description(bot)
 
 test "animal trait methods" =
   let a = animal{label: "Whiskers", species: "cat"}
-  assert::equals_str(a.name(), "Whiskers")
-  assert::equals_str(a.describe(), "Whiskers is a cat")
-  assert::equals_str(a.greet(), "Hello, I am Whiskers")
+  assert::equals(a.name(), "Whiskers")
+  assert::equals(a.describe(), "Whiskers is a cat")
+  assert::equals(a.greet(), "Hello, I am Whiskers")
 
 test "robot trait methods" =
   let bot = robot{label: "R2D2", model: "astromech"}
-  assert::equals_str(bot.name(), "R2D2")
-  assert::equals_str(bot.describe(), "R2D2 is robot model astromech")
-  assert::equals_str(bot.greet(), "Beep boop, I am R2D2")
+  assert::equals(bot.name(), "R2D2")
+  assert::equals(bot.describe(), "R2D2 is robot model astromech")
+  assert::equals(bot.greet(), "Beep boop, I am R2D2")

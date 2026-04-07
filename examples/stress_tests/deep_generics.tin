@@ -82,12 +82,12 @@ test "box wrap/unwrap i64" =
 
 test "box wrap/unwrap string" =
   let b = box[string]{val: "hello"}
-  assert::equals_str(b.unwrap(), "hello")
+  assert::equals(b.unwrap(), "hello")
 
 test "box map_box i64->string interpolation" =
   let b = box[i64]{val: 7}
   let bs = b.map_box(fn(n i64) string = return "{n}")
-  assert::equals_str(bs.unwrap(), "7")
+  assert::equals(bs.unwrap(), "7")
 
 test "box map_box chained" =
   let b = box[i64]{val: 3}
@@ -101,7 +101,7 @@ test "pair_box construction and field access" =
     right: box[string]{val: "tin"},
   }
   assert::equals(p.left.unwrap(), 10)
-  assert::equals_str(p.right.unwrap(), "tin")
+  assert::equals(p.right.unwrap(), "tin")
 
 test "pair_box swap" =
   let p = pair_box[i64, bool]{
@@ -118,13 +118,13 @@ test "triple_box round-trip i64" =
 
 test "triple_box round-trip string" =
   let tb = triple_box("deep")
-  assert::equals_str(triple_unbox(tb), "deep")
+  assert::equals(triple_unbox(tb), "deep")
 
 test "identity chain i64" =
   assert::equals(quad_identity(123), 123)
 
 test "identity chain string" =
-  assert::equals_str(quad_identity("abc"), "abc")
+  assert::equals(quad_identity("abc"), "abc")
 
 test "arr_map i64 to i64" =
   let out = arr_map([1, 2, 3, 4], fn(n i64) i64 = return n * 2)
@@ -144,5 +144,5 @@ test "arr_map2 two-stage transform" =
 
 test "arr_map i64 to string" =
   let labels = arr_map([10, 20, 30], fn(n i64) string = return "item_{n}")
-  assert::equals_str(labels[0], "item_10")
-  assert::equals_str(labels[2], "item_30")
+  assert::equals(labels[0], "item_10")
+  assert::equals(labels[2], "item_30")

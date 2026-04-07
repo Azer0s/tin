@@ -43,5 +43,5 @@ test "nested macros" =
   assert::equals(add!(square!(4), square!(3)), 25)
 
 test "string macros" =
-  assert::equals_str(greet!("Alice"), "Hello, Alice!")
-  assert::equals_str(greet!("world"), "Hello, world!")
+  assert::equals(greet!("Alice"), "Hello, Alice!")
+  assert::equals(greet!("world"), "Hello, world!")

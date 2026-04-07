@@ -14,33 +14,13 @@ fn not_ok(cond bool) =
   if cond :
     abort("assertion failed: expected false")
 
-fn equals(expected i64, actual i64) =
+fn equals[t](expected t, actual t) where t is comp =
   if expected != actual :
     abort("expected {expected}, got {actual}")
 
 fn not_equals(a i64, b i64) =
   if a == b :
     abort("expected values to differ, both were {a}")
-
-fn equals_str(expected string, actual string) =
-  if expected != actual :
-    abort("expected \"{expected}\", got \"{actual}\"")
-
-fn equals_f64(expected f64, actual f64) =
-  if expected != actual :
-    abort("expected {expected}, got {actual}")
-
-fn equals_i128(expected i128, actual i128) =
-  if expected != actual :
-    abort("i128 mismatch: {expected} != {actual}")
-
-fn equals_u128(expected u128, actual u128) =
-  if expected != actual :
-    abort("u128 mismatch: {expected} != {actual}")
-
-fn equals_f128(expected f128, actual f128) =
-  if expected != actual :
-    abort("f128 mismatch: {expected} != {actual}")
 
 fn fails(msg string) =
   abort(msg)
@@ -56,7 +36,6 @@ fn panics(f fn() void) =
     abort("expected panic but none occurred")
 
 export {
-  ok, not_ok, equals, not_equals, equals_str, equals_f64,
-  equals_i128, equals_u128, equals_f128,
+  ok, not_ok, equals, not_equals,
   fails, panics
 } as assert

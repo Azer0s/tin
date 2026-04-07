@@ -55,4 +55,4 @@ macro greet_ctfe!(name) =
   return "Hello, " ++ name ++ "!"
 
 test "CTFE macro: string return" =
-  assert::equals_str(greet_ctfe!("World"), "Hello, World!")
+  assert::equals(greet_ctfe!("World"), "Hello, World!")

@@ -60,22 +60,22 @@ test "channel i64 multiple fibers" =
 test "channel string send and recv" =
   let ch = sync::Channel[string].make(1)
   await ch.send("hello")
-  assert::equals_str(await ch.recv(), "hello")
+  assert::equals(await ch.recv(), "hello")
 
 test "channel string multiple values" =
   let ch = sync::Channel[string].make(3)
   await ch.send("one")
   await ch.send("two")
   await ch.send("three")
-  assert::equals_str(await ch.recv(), "one")
-  assert::equals_str(await ch.recv(), "two")
-  assert::equals_str(await ch.recv(), "three")
+  assert::equals(await ch.recv(), "one")
+  assert::equals(await ch.recv(), "two")
+  assert::equals(await ch.recv(), "three")
 
 test "channel string via fiber" =
   let ch = sync::Channel[string].make(1)
   let f = spawn str_sender(ch, "from fiber")
   await f
-  assert::equals_str(await ch.recv(), "from fiber")
+  assert::equals(await ch.recv(), "from fiber")
 
 // Channel close / is_closed_empty
 

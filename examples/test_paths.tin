@@ -12,109 +12,109 @@ use assert
 // join
 
 test "join: simple" =
-  assert::equals_str(paths::join("foo", "bar"), "foo/bar")
+  assert::equals(paths::join("foo", "bar"), "foo/bar")
 
 test "join: trailing slash on left" =
-  assert::equals_str(paths::join("foo/", "bar"), "foo/bar")
+  assert::equals(paths::join("foo/", "bar"), "foo/bar")
 
 test "join: leading slash on right" =
-  assert::equals_str(paths::join("foo", "/bar"), "foo/bar")
+  assert::equals(paths::join("foo", "/bar"), "foo/bar")
 
 test "join: both slashes" =
-  assert::equals_str(paths::join("foo/", "/bar"), "foo/bar")
+  assert::equals(paths::join("foo/", "/bar"), "foo/bar")
 
 test "join: empty left" =
-  assert::equals_str(paths::join("", "bar"), "bar")
+  assert::equals(paths::join("", "bar"), "bar")
 
 test "join: empty right" =
-  assert::equals_str(paths::join("foo", ""), "foo")
+  assert::equals(paths::join("foo", ""), "foo")
 
 test "join: absolute paths" =
-  assert::equals_str(paths::join("/usr", "local"), "/usr/local")
+  assert::equals(paths::join("/usr", "local"), "/usr/local")
 
 test "join: multi-segment" =
-  assert::equals_str(paths::join("a/b/c", "d/e"), "a/b/c/d/e")
+  assert::equals(paths::join("a/b/c", "d/e"), "a/b/c/d/e")
 
 test "join: preserves extensions" =
-  assert::equals_str(paths::join("dir", "file.txt"), "dir/file.txt")
+  assert::equals(paths::join("dir", "file.txt"), "dir/file.txt")
 
 // -------------------------------------------------------------------------
 // basename
 
 test "basename: simple" =
-  assert::equals_str(paths::basename("foo.txt"), "foo.txt")
+  assert::equals(paths::basename("foo.txt"), "foo.txt")
 
 test "basename: with directory" =
-  assert::equals_str(paths::basename("/foo/bar/baz.txt"), "baz.txt")
+  assert::equals(paths::basename("/foo/bar/baz.txt"), "baz.txt")
 
 test "basename: trailing slash" =
-  assert::equals_str(paths::basename("/foo/bar/"), "bar")
+  assert::equals(paths::basename("/foo/bar/"), "bar")
 
 test "basename: root" =
-  assert::equals_str(paths::basename("/"), "/")
+  assert::equals(paths::basename("/"), "/")
 
 test "basename: no directory" =
-  assert::equals_str(paths::basename("file.txt"), "file.txt")
+  assert::equals(paths::basename("file.txt"), "file.txt")
 
 test "basename: empty" =
-  assert::equals_str(paths::basename(""), "")
+  assert::equals(paths::basename(""), "")
 
 test "basename: double trailing slash" =
-  assert::equals_str(paths::basename("foo//"), "foo")
+  assert::equals(paths::basename("foo//"), "foo")
 
 // -------------------------------------------------------------------------
 // dirname
 
 test "dirname: simple" =
-  assert::equals_str(paths::dirname("/foo/bar/baz.txt"), "/foo/bar")
+  assert::equals(paths::dirname("/foo/bar/baz.txt"), "/foo/bar")
 
 test "dirname: one level" =
-  assert::equals_str(paths::dirname("/foo/bar"), "/foo")
+  assert::equals(paths::dirname("/foo/bar"), "/foo")
 
 test "dirname: trailing slash" =
-  assert::equals_str(paths::dirname("/foo/bar/"), "/foo")
+  assert::equals(paths::dirname("/foo/bar/"), "/foo")
 
 test "dirname: no directory" =
-  assert::equals_str(paths::dirname("file.txt"), ".")
+  assert::equals(paths::dirname("file.txt"), ".")
 
 test "dirname: relative path" =
-  assert::equals_str(paths::dirname("foo/bar"), "foo")
+  assert::equals(paths::dirname("foo/bar"), "foo")
 
 test "dirname: root" =
-  assert::equals_str(paths::dirname("/"), "/")
+  assert::equals(paths::dirname("/"), "/")
 
 test "dirname: empty" =
-  assert::equals_str(paths::dirname(""), ".")
+  assert::equals(paths::dirname(""), ".")
 
 test "dirname: just filename in subdir" =
-  assert::equals_str(paths::dirname("dir/file"), "dir")
+  assert::equals(paths::dirname("dir/file"), "dir")
 
 // -------------------------------------------------------------------------
 // ext
 
 test "ext: simple" =
-  assert::equals_str(paths::ext("foo.tin"), ".tin")
+  assert::equals(paths::ext("foo.tin"), ".tin")
 
 test "ext: last extension only" =
-  assert::equals_str(paths::ext("archive.tar.gz"), ".gz")
+  assert::equals(paths::ext("archive.tar.gz"), ".gz")
 
 test "ext: no extension" =
-  assert::equals_str(paths::ext("Makefile"), "")
+  assert::equals(paths::ext("Makefile"), "")
 
 test "ext: hidden file (leading dot)" =
-  assert::equals_str(paths::ext(".gitignore"), "")
+  assert::equals(paths::ext(".gitignore"), "")
 
 test "ext: empty string" =
-  assert::equals_str(paths::ext(""), "")
+  assert::equals(paths::ext(""), "")
 
 test "ext: dot in directory, no ext on file" =
-  assert::equals_str(paths::ext("foo.bar/baz"), "")
+  assert::equals(paths::ext("foo.bar/baz"), "")
 
 test "ext: dot in directory, ext on file" =
-  assert::equals_str(paths::ext("foo.bar/baz.txt"), ".txt")
+  assert::equals(paths::ext("foo.bar/baz.txt"), ".txt")
 
 test "ext: multiple dots" =
-  assert::equals_str(paths::ext("a.b.c.d"), ".d")
+  assert::equals(paths::ext("a.b.c.d"), ".d")
 
 test "ext: just extension" =
-  assert::equals_str(paths::ext(".txt"), "")
+  assert::equals(paths::ext(".txt"), "")
