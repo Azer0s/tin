@@ -2153,17 +2153,23 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						if i >= len(preCoerceVals) {
 							break
 						}
+
 						pre := preCoerceVals[i]
 						post := argVals[i]
+
 						if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
 							cg.emitRelease(block, post)
+
 							continue
 						}
+
 						if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
 							continue
 						}
+
 						cg.emitRelease(block, pre)
 					}
+
 					if irtypes.IsVoid(result2.Type()) {
 						return nil, nil
 					}
@@ -3341,6 +3347,7 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 		zero := cg.zeroValue(t)
 		thenIsTemp := isTemporaryProducer(e.Then)
 		elseIsTemp := isTemporaryProducer(e.Else)
+
 		if thenIsTemp {
 			// Release thenVal when the else branch was selected (cond == false).
 			discarded := block.NewSelect(cond, zero, thenVal)
@@ -5463,15 +5470,20 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 		if i >= len(preCoerceCallArgs) {
 			break
 		}
+
 		pre := preCoerceCallArgs[i]
 		post := callArgs[i]
+
 		if isCopyExpr(astArg) {
 			continue
 		}
+
 		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
 			cg.emitRelease(block, post)
+
 			continue
 		}
+
 		if isRCTrackedType(pre.Type()) {
 			cg.emitRelease(block, pre)
 		} else if cg.typeNameOf(pre.Type()) != "" {
@@ -5733,15 +5745,20 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		if i >= len(preCoerceArgVals) {
 			break
 		}
+
 		pre := preCoerceArgVals[i]
 		post := coroArgs[i+1] // coroArgs[0] is thisArg; user args start at 1
+
 		if isCopyExpr(astArg) {
 			continue
 		}
+
 		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
 			cg.emitRelease(block, post)
+
 			continue
 		}
+
 		if isRCTrackedType(pre.Type()) {
 			cg.emitRelease(block, pre)
 		} else if cg.typeNameOf(pre.Type()) != "" {

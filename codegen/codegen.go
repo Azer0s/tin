@@ -259,10 +259,10 @@ type CodeGen struct {
 	// atomCodes maps atom name -> CRC32 code (collision-resolved).
 	// atomCodeToName is the reverse map for collision detection.
 	// atomOrder holds insertion order for stable @__tin_atom_table output.
-	atomType       *irtypes.StructType
-	atomCodes      map[string]int32
-	atomCodeToName map[int32]string
-	atomOrder      []string
+	atomType            *irtypes.StructType
+	atomCodes           map[string]int32
+	atomCodeToName      map[int32]string
+	atomOrder           []string
 	atomToStrFn         *ir.Func // __tin_atom_to_string(i32) {i8*,i64}
 	strToAtomFn         *ir.Func // __tin_string_to_atom(i8*) %__atom
 	strToAtomHandoverFn *ir.Func // __tin_string_to_atom_handover(i8*) %__atom

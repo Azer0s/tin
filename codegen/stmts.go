@@ -1175,7 +1175,9 @@ func (cg *CodeGen) genBuiltinLen(block *ir.Block, arg ast.Node) (value.Value, er
 	}
 
 	t := val.Type()
+
 	var length value.Value
+
 	// String fat-ptr {i8*, i64}: extract field 1.
 	if isStringType(t) {
 		length = cg.extractStringLen(block, val)
@@ -4382,6 +4384,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 				panicBlock.NewCall(cg.ensureFree(), env)
 			}
 		}
+
 		cg.emitAllScopeReleases(panicBlock, "")
 		// Use a proper ret (not unreachable) so that recovered panics can return.
 		retType := cg.curFn.Sig.RetType

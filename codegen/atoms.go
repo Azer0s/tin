@@ -119,6 +119,7 @@ func (cg *CodeGen) ensureStringToAtomHandover() *ir.Func {
 	if cg.strToAtomHandoverFn != nil {
 		return cg.strToAtomHandoverFn
 	}
+
 	cg.strToAtomHandoverFn = cg.mod.NewFunc("__tin_string_to_atom_handover", cg.atomType,
 		ir.NewParam("str", irtypes.I8Ptr))
 	return cg.strToAtomHandoverFn

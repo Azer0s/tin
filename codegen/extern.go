@@ -331,7 +331,7 @@ func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtyp
 //   - char* -> atom:         frees the char* after atom lookup.
 //   - char* -> string:       RC-ifies the char* and builds a fat-ptr.
 //   - native_struct* -> *T:  loads native data, frees original, adds type_id,
-//                            stores into a fresh RC allocation.
+//     stores into a fresh RC allocation.
 //   - any other T* -> T*:    calls _tin_ptr_handover to RC-ify.
 func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtypes.Type, handover bool) value.Value {
 	src := val.Type()
@@ -347,15 +347,18 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 			if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
 				handoverFn := cg.ensureExternDecl("_tin_string_handover", irtypes.I8Ptr,
 					[]*ir.Param{ir.NewParam("src", irtypes.I8Ptr)}, false)
+
 				i8Ptr := val
 				if !src.Equal(irtypes.I8Ptr) {
 					i8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
 				}
-				ptr := value.Value(block.NewCall(handoverFn, i8Ptr))
+
+				var ptr value.Value = block.NewCall(handoverFn, i8Ptr)
 				if !tgtSt.Fields[0].Equal(irtypes.I8Ptr) {
 					ptr = block.NewBitCast(ptr, tgtSt.Fields[0])
 				}
-				rawI8Ptr := value.Value(ptr)
+
+				rawI8Ptr := ptr
 				if !ptr.Type().Equal(irtypes.I8Ptr) {
 					rawI8Ptr = block.NewBitCast(ptr, irtypes.I8Ptr)
 				}
@@ -399,10 +402,12 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 				ptr = block.NewBitCast(val, tgtSt.Fields[0])
 			}
 			strlenFn := cg.ensureStrlenDecl()
+
 			rawI8Ptr := ptr
 			if !src.Equal(irtypes.I8Ptr) {
 				rawI8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
 			}
+
 			length := block.NewCall(strlenFn, rawI8Ptr)
 			alloca := block.NewAlloca(tgtSt)
 			gep0 := block.NewGetElementPtr(tgtSt, alloca,
@@ -465,7 +470,7 @@ func (cg *CodeGen) emitGenericPtrHandover(block *ir.Block, src value.Value, targ
 	}
 
 	// Cast source to i8* for _tin_ptr_handover.
-	i8Ptr := value.Value(src)
+	i8Ptr := src
 	if !src.Type().Equal(irtypes.I8Ptr) {
 		i8Ptr = block.NewBitCast(src, irtypes.I8Ptr)
 	}
