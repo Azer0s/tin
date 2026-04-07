@@ -535,7 +535,7 @@ func isFatFnPtr(t irtypes.Type) bool {
 }
 
 // isAsyncFatFnPtr returns true when t is an async closure fat pointer
-// { fn(i8*, params...) i8* *, i8* } — the inner function returns i8*
+// { fn(i8*, params...) i8* *, i8* } - the inner function returns i8*
 // (coroutine handle), as produced for fn{#async}(...) type expressions.
 func isAsyncFatFnPtr(t irtypes.Type) bool {
 	if !isFatFnPtr(t) {

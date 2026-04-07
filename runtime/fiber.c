@@ -105,7 +105,7 @@ typedef struct {
     // in the park/unpark hot path.  Replacing the global _table_mu for these
     // transitions eliminates cross-core cache-line bouncing between workers
     // when each worker is running a different fiber (e.g. TINMAXPROCS=2).
-    // Lock ordering: _table_mu (outer) -> state_lock (inner) — never reverse.
+    // Lock ordering: _table_mu (outer) -> state_lock (inner) - never reverse.
     _Atomic(uint32_t) state_lock;
     // Set by _tin_fiber_join_any when a fiber is waiting for any of N targets.
     // _fire_done_waiters checks this to do a CAS-based single-winner wakeup.
@@ -864,7 +864,7 @@ void *_tin_coro_take_result(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Inline-drive result buffer — zero-malloc result storage for await.
+// Inline-drive result buffer - zero-malloc result storage for await.
 //
 // When genInlineAsyncDrive drives an inner $coro directly (no fiber spawn),
 // the inner$coro's emitCoroComplete should NOT heap-allocate the result box,
@@ -889,7 +889,7 @@ void *_tin_coro_take_result(void) {
 //   _tin_fiber_complete(slot);
 //
 // Maximum result size that fits in the TLS buffer.  Types larger than this
-// fall back to malloc (rare — most return types are scalars or small structs).
+// fall back to malloc (rare - most return types are scalars or small structs).
 // ---------------------------------------------------------------------------
 #define INLINE_RESULT_BUF_SIZE 256
 
@@ -922,7 +922,7 @@ void _tin_inline_result_free(void *ptr) {
 }
 
 // ---------------------------------------------------------------------------
-// Coroutine frame pool — eliminates per-operation malloc/free on the hot path.
+// Coroutine frame pool - eliminates per-operation malloc/free on the hot path.
 //
 // _tin_coro_malloc(size) is called from emitCoroPrologue instead of malloc().
 // It prefixes the allocation with an 8-byte size field and returns ptr+8 as
@@ -959,7 +959,7 @@ void *_tin_coro_malloc(int64_t size) {
 }
 
 void _tin_coro_free(void *ptr) {
-    if (!ptr) return;  // coro-elided (stack-allocated) frame — nothing to do
+    if (!ptr) return;  // coro-elided (stack-allocated) frame - nothing to do
     if (_coro_pool_cnt < CORO_POOL_MAX) {
         _coro_pool[_coro_pool_cnt++] = ptr;
         return;
@@ -1220,7 +1220,7 @@ int64_t _tin_fiber_sync_await_any(int64_t *pids, int64_t n, int8_t *skip) {
 //
 // Fast path (called from within a worker thread):
 //   Store the newly-runnable fiber in _worker_runnext so the calling worker
-//   picks it up on the very next loop iteration — no global run queue mutex,
+//   picks it up on the very next loop iteration - no global run queue mutex,
 //   no condvar signal.  If runnext is already occupied, flush the old entry to
 //   the global queue and replace it with the new one.
 //
@@ -1326,7 +1326,7 @@ void _tin_fiber_yield_coro(void *hdl) {
 // executing its body on another worker thread.
 void _tin_fiber_park(int64_t pid) {
     if (pid <= 0) return;
-    // pid is always _tin_current_pid() — the currently running fiber.
+    // pid is always _tin_current_pid() - the currently running fiber.
     // Running fibers are never freed, so _fibers[pid] is valid without _table_mu.
     TinFiber *f = _fibers[pid];
     if (!f) return;

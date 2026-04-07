@@ -3986,7 +3986,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 	}
 
 	if !ok {
-		// No $coro variant — fall back to sync shim (type mismatch at runtime).
+		// No $coro variant - fall back to sync shim (type mismatch at runtime).
 		return cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
 	}
 
@@ -4744,7 +4744,7 @@ func (cg *CodeGen) directCallHasCoroVariant(callNode *ast.CallExpr) bool {
 // Instead of allocating a fiber and joining it, we:
 //  1. Call the $coro ramp to allocate only the inner coroutine frame.
 //  2. Resume the inner coroutine until it completes.
-//  3. Whenever the inner coroutine yields, yield the outer coroutine too —
+//  3. Whenever the inner coroutine yields, yield the outer coroutine too -
 //     the scheduler will resume both in turn.
 //  4. When the inner coroutine is done, take its result via _tin_coro_take_result.
 //
@@ -4785,14 +4785,14 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		}
 
 		if structName == "" {
-			return nil, nil // can't determine struct type without evaluation — fall through
+			return nil, nil // can't determine struct type without evaluation - fall through
 		}
 
 		coroName := structName + "_" + fn.Field + "$coro"
 
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
-			return nil, nil // not {#async} — fall through
+			return nil, nil // not {#async} - fall through
 		}
 
 		var ok3 bool
@@ -4853,7 +4853,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 			coroArgs = append(coroArgs, av)
 		}
 
-		// Fast path: Channel[T].send and Channel[T].recv — inline the blocking
+		// Fast path: Channel[T].send and Channel[T].recv - inline the blocking
 		// retry loop directly into the outer coro using the outer coro's own
 		// coro.suspend.  This eliminates the inner $coro frame allocation
 		// (2 malloc/free per operation, 4 per round trip) at the cost of a
@@ -4885,7 +4885,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
-			return nil, nil // not {#async} — fall through
+			return nil, nil // not {#async} - fall through
 		}
 
 		var ok3 bool
@@ -4915,7 +4915,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		}
 
 	default:
-		return nil, nil // unsupported callee shape — fall through
+		return nil, nil // unsupported callee shape - fall through
 	}
 
 	cg.usesAnyFiber = true
@@ -4941,7 +4941,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	//     _tin_inline_result_mode_end()
 	// ---------------------------------------------------------------
 	// mode_begin is placed at the TOP of driveLoopBlk so it fires before EVERY
-	// coro.resume — including re-entries after the outer fiber was parked and
+	// coro.resume - including re-entries after the outer fiber was parked and
 	// resumed (at which point the worker loop reset _inline_result_mode to 0).
 	// This keeps the TLS fast path active across park/unpark cycles.
 	inlineBeginFn := cg.ensureExternDecl("_tin_inline_result_mode_begin", irtypes.Void,
@@ -4973,7 +4973,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// Done path: take result, destroy inner frame.
 	// llvm.coro.destroy would run the cleanup path (coro.end + coro.free), but
 	// LLVM's coro-split pass generates empty destroy functions for trivially-
-	// destructible C/Tin coroutines (no C++ dtors) — the cleanup call is optimized
+	// destructible C/Tin coroutines (no C++ dtors) - the cleanup call is optimized
 	// away.  Call _tin_coro_free explicitly to return the heap-allocated frame to
 	// the per-thread pool.  _tin_coro_free(null) is a no-op when coro-elide
 	// stack-allocated the frame, so this is safe in all cases.
@@ -4993,7 +4993,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// the redundant autoyield at the enclosing for-loop backedge.  The drive loop
 	// already contains its own suspension points (coro.drive.yield) that fire when
 	// the inner $coro blocks.  When the drive completes without blocking, the outer
-	// fiber's natural park/unpark via the channel wakes the next fiber — no extra
+	// fiber's natural park/unpark via the channel wakes the next fiber - no extra
 	// autoyield is needed.
 	if cg.yieldResumeBlocks != nil {
 		cg.yieldResumeBlocks[driveDoneBlk] = true
@@ -5009,7 +5009,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	}
 
 	if retTypeExpr == nil {
-		// void/Unit result — nothing to free.
+		// void/Unit result - nothing to free.
 		return constant.NewInt(irtypes.I1, 1), nil
 	}
 
@@ -5052,7 +5052,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// Use fieldIndex for correctness in case the layout changes.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T — falling back to slow send$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T - falling back to slow send$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -5070,14 +5070,14 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
 
 	// Alloca for val so send_blocking can take &val.  Allocated in the outer coro
-	// frame — persists across suspensions.  The value is set once and retried
+	// frame - persists across suspensions.  The value is set once and retried
 	// until the channel accepts it.
 	elemType := valArg.Type()
 	valSlot := block.NewAlloca(elemType)
 	block.NewStore(valArg, valSlot)
 	valPtr := block.NewBitCast(valSlot, irtypes.I8Ptr)
 
-	// sizeof(T) and is_rc — compile-time constants.
+	// sizeof(T) and is_rc - compile-time constants.
 	elemSize := cg.llvmSizeOf(block, elemType)
 
 	isRCVal := constant.NewInt(irtypes.I32, 0)
@@ -5085,7 +5085,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 		isRCVal = constant.NewInt(irtypes.I32, 1)
 	}
 
-	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.
 	// Load _current_pid directly as a TLS variable (no function call overhead).
 	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)
@@ -5111,7 +5111,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	panicBlk := cg.newBlock("chan.send.panic")
 	retryBlk.NewCondBr(isClosed, panicBlk, checkDoneBlk)
 
-	// Panic block — must follow the coro completion path (not a bare ret).
+	// Panic block - must follow the coro completion path (not a bare ret).
 	panicMsg := cg.newGlobalString("send on closed channel")
 	panicBlk.NewCall(cg.ensurePanicFn(), panicMsg)
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
@@ -5131,12 +5131,12 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// _tin_channel_send_blocking retains the element when is_rc==1, so the
 	// sender's original reference must be dropped once the send completes.
 	// Named variable arguments are owned by their enclosing scope and must NOT
-	// be released here — the scope's exit will handle them.
+	// be released here - the scope's exit will handle them.
 	if astArg != nil && !isCopyExpr(astArg) && isRCTrackedType(valArg.Type()) {
 		cg.emitRelease(doneBlk, valArg)
 	}
 
-	return constant.NewInt(irtypes.I1, 1), nil // void send — return sentinel i1 true
+	return constant.NewInt(irtypes.I1, 1), nil // void send - return sentinel i1 true
 }
 
 // genDirectChanRecv emits an inline channel-recv retry loop that uses the outer
@@ -5162,7 +5162,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	// Load ch._ptr from the Channel struct.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T — falling back to slow recv$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T - falling back to slow recv$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -5179,12 +5179,12 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
 	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
 
-	// Alloca for result — written by _tin_channel_recv_direct, persists across
+	// Alloca for result - written by _tin_channel_recv_direct, persists across
 	// suspensions so the retry loop can safely re-use the slot on wakeup.
 	outSlot := block.NewAlloca(elemType)
 	outPtr := block.NewBitCast(outSlot, irtypes.I8Ptr)
 
-	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.
 	// Load _current_pid directly as a TLS variable (no function call overhead).
 	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)

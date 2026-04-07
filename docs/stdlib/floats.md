@@ -68,8 +68,8 @@ fn safe_div(a f64, b f64) f64 =
 | `NaN() f64` | NaN | Not-a-Number |
 | `Inf() f64` | +∞ | Positive infinity |
 | `NegInf() f64` | -∞ | Negative infinity |
-| `is_nan(x f64) bool` | — | True if `x` is NaN |
-| `is_inf(x f64) bool` | — | True if `x` is ±∞ |
-| `is_pos_inf(x f64) bool` | — | True if `x` is +∞ |
-| `is_neg_inf(x f64) bool` | — | True if `x` is -∞ |
-| `is_finite(x f64) bool` | — | True if `x` is a normal finite number |
+| `is_nan(x f64) bool` | - | True if `x` is NaN |
+| `is_inf(x f64) bool` | - | True if `x` is ±∞ |
+| `is_pos_inf(x f64) bool` | - | True if `x` is +∞ |
+| `is_neg_inf(x f64) bool` | - | True if `x` is -∞ |
+| `is_finite(x f64) bool` | - | True if `x` is a normal finite number |

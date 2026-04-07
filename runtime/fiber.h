@@ -19,21 +19,21 @@ int64_t _tin_fiber_spawn(void *hdl);
 
 // Called by the coroutine body when it has finished.
 // result: pointer to the return value; NULL for void-returning fibers.
-// The hdl parameter was removed — LLVM's coro-elide pass can now see that
+// The hdl parameter was removed - LLVM's coro-elide pass can now see that
 // the inner coroutine handle does not escape to any external function, enabling
 // stack-allocation of inner coroutine frames for inline-drive call sites.
 void _tin_fiber_complete(void *result);
 
-// Inline-drive result helpers — used by emitCoroComplete / genInlineAsyncDrive.
+// Inline-drive result helpers - used by emitCoroComplete / genInlineAsyncDrive.
 // When an inner $coro is driven inline (no fiber spawn), the result is stored
 // in a per-thread TLS buffer instead of a heap allocation.  The outer coroutine
 // reads the result via _tin_coro_take_result() before calling coro.destroy.
 //
-//  _tin_inline_result_mode_begin()   — enable TLS result storage
-//  _tin_inline_result_alloc(sz)      — returns TLS ptr if inline mode + fits,
+//  _tin_inline_result_mode_begin()   - enable TLS result storage
+//  _tin_inline_result_alloc(sz)      - returns TLS ptr if inline mode + fits,
 //                                      else falls back to malloc(sz)
-//  _tin_inline_result_mode_end()     — disable TLS result storage
-//  _tin_inline_result_free(ptr)      — free() only if ptr was heap-allocated
+//  _tin_inline_result_mode_end()     - disable TLS result storage
+//  _tin_inline_result_free(ptr)      - free() only if ptr was heap-allocated
 void  _tin_inline_result_mode_begin(void);
 void *_tin_inline_result_alloc(int64_t sz);
 void  _tin_inline_result_mode_end(void);

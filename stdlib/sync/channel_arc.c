@@ -28,7 +28,7 @@ void _tin_panic(const char *msg);
 void    _tin_fiber_park(int64_t pid);
 void    _tin_fiber_unpark(int64_t pid);
 void    _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
-// Inline TLS reads for current coro hdl and fib — avoids function-call
+// Inline TLS reads for current coro hdl and fib - avoids function-call
 // overhead in the hot send/recv path (cross-TU, so otherwise not inlinable).
 // Eliminates 2 PLT calls + double-load of recv_waiter_cnt per park operation.
 extern __thread void *_current_hdl;
@@ -48,7 +48,7 @@ void    _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
 #include "../../runtime/fastmutex.h"
 
 // ---------------------------------------------------------------------------
-// Fast element copy — avoids calling library memcpy for common small sizes.
+// Fast element copy - avoids calling library memcpy for common small sizes.
 // For 8-byte elements (int64, pointers, f64), the compiler inlines this as a
 // single 64-bit load+store, eliminating the __memcpy_avx_unaligned_erms overhead.
 // ---------------------------------------------------------------------------
@@ -155,14 +155,14 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
     wq->cap = new_cap;
 }
 
-// TinChannel layout — cache-line conscious:
+// TinChannel layout - cache-line conscious:
 //   Bytes   0..3   : ref_count      (ARC, rarely touched in fast path)
-//   Bytes   4..7   : fmu.state      (lock CAS — hit on every lock/unlock)
-//   Bytes   8..11  : fmu.wl_lock    (waiter-list spinlock — rare contended path)
+//   Bytes   4..7   : fmu.state      (lock CAS - hit on every lock/unlock)
+//   Bytes   8..11  : fmu.wl_lock    (waiter-list spinlock - rare contended path)
 //   Bytes  12..15  : fmu.wcnt       (mutex waiter count)
-//   Bytes  16..79  : fmu.wpid[4]    (mutex waiters pids — rarely used)
-//   Bytes  80..111 : fmu.whdl[4]    (mutex waiter hdls — rarely used)
-//   — after TinFastMutex (FMUTEX_MAX_WAITERS=4 → 112 bytes total for fmu) —
+//   Bytes  16..79  : fmu.wpid[4]    (mutex waiters pids - rarely used)
+//   Bytes  80..111 : fmu.whdl[4]    (mutex waiter hdls - rarely used)
+//   - after TinFastMutex (FMUTEX_MAX_WAITERS=4 → 112 bytes total for fmu) -
 //   Bytes 112..119 : cap            (hot: read on every enqueue/dequeue check)
 //   Bytes 120..127 : elem_size
 //   Bytes 128..135 : count          (hot)
@@ -333,7 +333,7 @@ static void *_chan_dequeue(TinChannel *ch) {
 // Blocking send/recv using TinFastMutex + fiber park/unpark.
 //
 // The channel's lock (ch->fmu) is a coroutine-aware atomic spinlock.
-// Uncontended acquire is a single CAS — no OS call, no syscall.
+// Uncontended acquire is a single CAS - no OS call, no syscall.
 // When contended after a brief spin, the fiber parks into the mutex's own
 // waiter list and is resumed directly by the unlocker (runnext fast path).
 //
