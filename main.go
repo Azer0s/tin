@@ -21,10 +21,10 @@ Usage:
   tin run         <file.tin>               compile and execute
   tin build       <file.tin> [-o out]      compile to native binary
   tin build       -lib <file.tin> [-o out] compile to object file (library)
-  tin ir          <file.tin>               emit LLVM IR to stdout
-  tin test        <file.tin|dir|dir/...]   run test blocks and report results
+  tin ir          <file.tin> [-o out]      emit LLVM IR (default: stdout)
+  tin ir-test     <file.tin> [-o out]      emit test-mode LLVM IR
+  tin test        <file.tin|dir|dir/...>   run test blocks and report results
   tin build-test  <file.tin> [-o out]      compile test binary without running
-  tin ir-test     <file.tin>               emit test-mode LLVM IR to stdout
   tin preprocess  <file.tin>               expand macros and print source to stdout
 
 Link flags (passed after the source file):
@@ -37,8 +37,8 @@ Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
 
-Test flags (tin test only):
-  -v-valgrind      run test binaries under valgrind --leak-check=full
+Run/test flags:
+  -v-valgrind      run binary under valgrind --leak-check=full (run, test)
 
 In-source directives (at the top of the .tin file):
   //!-lNAME            link with libNAME
