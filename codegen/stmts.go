@@ -1576,7 +1576,6 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	return node
 }
 
-
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
 	ptr, err := cg.genLValue(block, s.Target)
 	if err != nil {
