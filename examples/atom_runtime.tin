@@ -9,7 +9,7 @@
 //     to its string via _tin_rt_atom_to_str on the next __tin_atom_to_string call
 use assert
 
-fn strdup_atom(s string) atom = extern("strdup")
+fn{#handover} strdup_atom(s string) atom = extern("strdup")
 
 test "atom to string is bare name" =
   assert::equals_str('ok,    "ok")

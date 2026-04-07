@@ -2145,9 +2145,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 
+					preCoerceVals := append([]value.Value(nil), argVals...)
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
-
-					return block.NewCall(concreteFunc, argVals...), nil
+					result2 := block.NewCall(concreteFunc, argVals...)
+					// ARC: release temporary RC-tracked arguments.
+					for i, astArg := range e.Args {
+						if i >= len(preCoerceVals) {
+							break
+						}
+						pre := preCoerceVals[i]
+						post := argVals[i]
+						if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+							cg.emitRelease(block, post)
+							continue
+						}
+						if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+							continue
+						}
+						cg.emitRelease(block, pre)
+					}
+					if irtypes.IsVoid(result2.Type()) {
+						return nil, nil
+					}
+					return result2, nil
 				}
 			}
 		}
@@ -2160,7 +2180,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 		if callee != nil && isFatFnPtr(callee.Type()) {
-			return cg.callFatFn(block, callee, e.Args)
+			result, err2 := cg.callFatFn(block, callee, e.Args)
+			// ARC: release a temporary callee closure after the call.
+			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
+				cg.emitRelease(block, callee)
+			}
+			return result, err2
 		}
 
 	default:
@@ -2172,7 +2197,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// If the expression evaluated to a fat fn pointer, call through it.
 		if callee != nil && isFatFnPtr(callee.Type()) {
-			return cg.callFatFn(block, callee, e.Args)
+			result, err2 := cg.callFatFn(block, callee, e.Args)
+			// ARC: release a temporary callee closure after the call.
+			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
+				cg.emitRelease(block, callee)
+			}
+			return result, err2
 		}
 	}
 
@@ -2714,6 +2744,12 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 	for i, v := range vals {
 		gep := block.NewGetElementPtr(elemType, dataPtr, constant.NewInt(irtypes.I64, int64(i)))
 		block.NewStore(v, gep)
+		// ARC: retain copy expressions (identifiers, field accesses, etc.) so that
+		// both the array and the original owner hold an independent RC reference.
+		// Temporaries (call results, literals) are already owned by the array at RC=1.
+		if isRCTrackedType(elemType) && isCopyExpr(e.Elems[i]) {
+			cg.emitRetain(block, v)
+		}
 	}
 
 	// Return as fat pointer {T*, i64}.
@@ -3250,6 +3286,11 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	if isRCTrackedType(leftVal.Type()) && !isCopyExpr(e.Left) {
 		cg.emitRelease(block, leftVal)
 	}
+	// ARC: release the right-hand closure if it is a temporary RC allocation
+	// (e.g. `nums |> filter(fn)` where filter returns a fresh closure).
+	if isRCTrackedType(rightFn.Type()) && !isCopyExpr(e.Right) {
+		cg.emitRelease(block, rightFn)
+	}
 
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
@@ -3287,7 +3328,32 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 	// Unify types.
 	elseVal = cg.coerce(block, elseVal, thenVal.Type())
 
-	return block.NewSelect(cond, thenVal, elseVal), nil
+	result := block.NewSelect(cond, thenVal, elseVal)
+
+	// ARC: both branches are evaluated eagerly before select.  If a branch
+	// produces a fresh RC-tracked value (call, concat, etc.) that is not
+	// selected, it must be released.  Use a second select to identify the
+	// discarded value at runtime without actual conditional branching.
+	// Releasing a zero-initialized fat struct is safe: extractRCDataPtr returns
+	// a null ptr, and _tin_release(null) is a no-op.
+	t := result.Type()
+	if isRCTrackedType(t) {
+		zero := cg.zeroValue(t)
+		thenIsTemp := isTemporaryProducer(e.Then)
+		elseIsTemp := isTemporaryProducer(e.Else)
+		if thenIsTemp {
+			// Release thenVal when the else branch was selected (cond == false).
+			discarded := block.NewSelect(cond, zero, thenVal)
+			cg.emitRelease(block, discarded)
+		}
+		if elseIsTemp {
+			// Release elseVal when the then branch was selected (cond == true).
+			discarded := block.NewSelect(cond, elseVal, zero)
+			cg.emitRelease(block, discarded)
+		}
+	}
+
+	return result, nil
 }
 
 func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error) {
@@ -3847,7 +3913,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 			entry.NewRet(nil)
 		} else {
 			// Wrap return value if needed (e.g., raw i8* -> string fat-ptr).
-			ret := cg.wrapFromExtern(entry, result, wrapperFnType.RetType)
+			ret := cg.wrapFromExtern(entry, result, wrapperFnType.RetType, false)
 			entry.NewRet(ret)
 		}
 	}
@@ -4268,8 +4334,9 @@ func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Fu
 func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedString) (value.Value, error) {
 	// Build a format string and argument list for printf/sprintf.
 	var (
-		fmtParts []string
-		args     []value.Value
+		fmtParts  []string
+		args      []value.Value
+		toRelease []value.Value // ARC: RC-tracked temporaries to release after snprintf
 	)
 
 	for _, part := range e.Parts {
@@ -4371,6 +4438,10 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				fmtParts = append(fmtParts, "%s")
 				ptr := cg.extractStringPtr(block, val)
 				args = append(args, ptr)
+				// ARC: temporary string (call/concat result) must be released after snprintf.
+				if isTemporaryProducer(part.Expr) {
+					toRelease = append(toRelease, val)
+				}
 			case irtypes.IsInt(t):
 				it := t.(*irtypes.IntType)
 				switch it.BitSize {
@@ -4403,28 +4474,65 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 					}
 
 					args = append(args, val)
+				case 128:
+					// i128/u128: pre-convert to C string via runtime helper, use %s
+					ty128 := cg.exprByte8Type(part.Expr)
+
+					var cstr value.Value
+
+					if ty128 == "u128" {
+						cstr = block.NewCall(cg.ensureU128ToCstr(), val)
+					} else {
+						cstr = block.NewCall(cg.ensureI128ToCstr(), val)
+					}
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, cstr)
 				default:
-					fmtParts = append(fmtParts, "%lld")
-					val = cg.coerce(block, val, irtypes.I64)
-					args = append(args, val)
+					if cg.exprIsUnsigned(part.Expr) {
+						// Unsigned 16/32/64-bit: zero-extend to i64, use %llu.
+						fmtParts = append(fmtParts, "%llu")
+
+						it2 := t.(*irtypes.IntType)
+
+						if it2.BitSize < 64 {
+							val = block.NewZExt(val, irtypes.I64)
+						}
+
+						args = append(args, val)
+					} else {
+						fmtParts = append(fmtParts, "%lld")
+						val = cg.coerce(block, val, irtypes.I64)
+
+						args = append(args, val)
+					}
 				}
 			case irtypes.IsFloat(t):
-				if t == irtypes.Double {
+				ft := t.(*irtypes.FloatType)
+				if ft.Kind == irtypes.FloatKindFP128 {
+					// f128: pre-convert to C string via runtime helper, use %s
+					cstr := block.NewCall(cg.ensureF128ToCstr(), val)
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, cstr)
+				} else if t == irtypes.Double {
 					// f64: use %f (e.g. "1.000000")
 					fmtParts = append(fmtParts, "%f")
+					args = append(args, val)
 				} else {
 					// f32: use %g (e.g. "3" for 3.0, "1.5" for 1.5)
 					fmtParts = append(fmtParts, "%g")
 					val = block.NewFPExt(val, irtypes.Double)
+					args = append(args, val)
 				}
-
-				args = append(args, val)
 			default:
 				// print trait: struct or fat-pointer with a print() method.
 				if strVal, ok := cg.callPrintTrait(block, val); ok {
 					fmtParts = append(fmtParts, "%s")
 					ptr := cg.extractStringPtr(block, strVal)
 					args = append(args, ptr)
+					// ARC: ::print returns a fresh string; release after snprintf.
+					toRelease = append(toRelease, strVal)
 				} else {
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
@@ -4468,6 +4576,12 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	lenGep := block.NewGetElementPtr(fatPtrType, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(neededI64, lenGep)
+
+	// ARC: release temporary RC-tracked values (::print strings, concat/call results)
+	// now that snprintf has consumed their data pointers.
+	for _, sv := range toRelease {
+		cg.emitRelease(block, sv)
+	}
 
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }
@@ -4723,7 +4837,11 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		// structName may be bare ("Channel__i64") or package-prefixed ("sync__Channel__i64").
 		if strings.Contains(structName, "Channel__") {
 			if fn.Field == "send" && len(coroArgs) == 2 {
-				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1])
+				var sendAstArg ast.Node
+				if len(callNode.Args) >= 1 {
+					sendAstArg = callNode.Args[0]
+				}
+				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1], sendAstArg)
 			}
 
 			if fn.Field == "recv" && len(coroArgs) == 1 {
@@ -4898,7 +5016,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 //	    yield   ← replaced by outer coro.suspend
 //
 // Eliminates 1 malloc + 1 free per send (2 per round trip).
-func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value) (value.Value, error) {
+func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value, astArg ast.Node) (value.Value, error) {
 	cg.ensureCoroIntrinsics()
 	cg.ensureFiberRuntime()
 	cg.usesAnyFiber = true
@@ -4981,6 +5099,16 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 
 	// Yield: outer coro suspends until the channel has room.
 	cg.emitInlineChanSuspend("chan.send", yieldBlk, retryBlk, doneBlk)
+	// cg.curBlock == doneBlk after emitInlineChanSuspend.
+
+	// Release temporary RC-tracked value after the send succeeds.
+	// _tin_channel_send_blocking retains the element when is_rc==1, so the
+	// sender's original reference must be dropped once the send completes.
+	// Named variable arguments are owned by their enclosing scope and must NOT
+	// be released here — the scope's exit will handle them.
+	if astArg != nil && !isCopyExpr(astArg) && isRCTrackedType(valArg.Type()) {
+		cg.emitRelease(doneBlk, valArg)
+	}
 
 	return constant.NewInt(irtypes.I1, 1), nil // void send — return sentinel i1 true
 }
@@ -5308,6 +5436,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	// Note: no ARC retain here - the $coro ramp block retains RC-tracked
 	// params before the initial suspend (see genCoroFuncBody).  A caller-side
 	// retain would double-count and produce a leak.
+	preCoerceCallArgs := append([]value.Value(nil), callArgs...)
 	for i, val := range callArgs {
 		if i < len(coroFn.Params) {
 			callArgs[i] = cg.coerce(block, val, coroFn.Params[i].Type())
@@ -5319,6 +5448,39 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 	// Spawn the fiber: pid = _tin_fiber_spawn(hdl)
 	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+
+	// Release temporary RC-tracked arguments after spawning.  The $coro ramp
+	// retains them before the initial suspend, so the caller's own reference
+	// (RC=1 from construction) must be dropped after spawn.  Named variable
+	// references are skipped via isCopyExpr - they are owned by their
+	// declaration scope and must not be released by the call site.
+	//
+	// Placed AFTER _tin_fiber_spawn so that LLVM's optimizer does not pair
+	// the ramp's retain with this release and eliminate both (which would
+	// produce a use-after-free in the fiber if the array is freed before the
+	// fiber ever reads it).
+	for i, astArg := range callNode.Args {
+		if i >= len(preCoerceCallArgs) {
+			break
+		}
+		pre := preCoerceCallArgs[i]
+		post := callArgs[i]
+		if isCopyExpr(astArg) {
+			continue
+		}
+		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+			cg.emitRelease(block, post)
+			continue
+		}
+		if isRCTrackedType(pre.Type()) {
+			cg.emitRelease(block, pre)
+		} else if cg.typeNameOf(pre.Type()) != "" {
+			// Named struct value: the coro ramp retained its RC-tracked fields via
+			// walkRCStructFields.  Release those fields here (without deinit - the
+			// fiber still owns the struct and will call deinit at scope exit).
+			cg.emitReleaseNoDeinit(block, pre)
+		}
+	}
 
 	// Wrap pid in Future[t] where t is the original function's return type.
 	// Prefer the funcDecl lookup (bare name), fall back to sync function's LLVM return type.
@@ -5545,12 +5707,15 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	coroArgs := []value.Value{thisArg2}
+	preCoerceArgVals := make([]value.Value, 0, len(callNode.Args))
 
 	for i, arg := range callNode.Args {
 		av, err2 := cg.genExpr(block, arg)
 		if err2 != nil {
 			return nil, err2
 		}
+
+		preCoerceArgVals = append(preCoerceArgVals, av)
 
 		if i+1 < len(coroFn2.Params) {
 			av = cg.coerce(block, av, coroFn2.Params[i+1].Type())
@@ -5561,6 +5726,37 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 
 	hdl2 := block.NewCall(coroFn2, coroArgs...)
 	pid2 := block.NewCall(cg.fiberSpawnFn, hdl2)
+
+	// Release temporary RC-tracked args after spawning (same as genSpawnExpr).
+	// The receiver (coroArgs[0]) is handled separately below.
+	for i, astArg := range callNode.Args {
+		if i >= len(preCoerceArgVals) {
+			break
+		}
+		pre := preCoerceArgVals[i]
+		post := coroArgs[i+1] // coroArgs[0] is thisArg; user args start at 1
+		if isCopyExpr(astArg) {
+			continue
+		}
+		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+			cg.emitRelease(block, post)
+			continue
+		}
+		if isRCTrackedType(pre.Type()) {
+			cg.emitRelease(block, pre)
+		} else if cg.typeNameOf(pre.Type()) != "" {
+			cg.emitReleaseNoDeinit(block, pre)
+		}
+	}
+	// Release temporary receiver if it is not a named variable.
+	if !isCopyExpr(fa.Expr) {
+		if isRCTrackedType(objVal.Type()) {
+			cg.emitRelease(block, objVal)
+		} else if cg.typeNameOf(objVal.Type()) != "" {
+			cg.emitReleaseNoDeinit(block, objVal)
+		}
+	}
+
 	// Use the original method name for return type lookup.
 	fnName := structName + "_" + fa.Field
 

@@ -242,9 +242,11 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	cg.structFieldTags[structKey] = fieldTags
 
 	// Record which traits this struct implements (for typeof/traitof).
+	// Use the bare (package-stripped) trait name so that atom literals like
+	// 'JsonSerializable match regardless of how the trait was qualified.
 	var implNames []string
 	for _, impl := range n.Implements {
-		implNames = append(implNames, impl.String())
+		implNames = append(implNames, traitImplKey(impl))
 	}
 
 	cg.structImpls[structKey] = implNames

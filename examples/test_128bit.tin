@@ -1,0 +1,281 @@
+// test_128bit.tin - comprehensive tests for i128, u128, and f128 types
+//
+// Tests: arithmetic, comparisons, casts, limits, reflection, echo, interpolation
+
+use assert
+use limits
+use reflect
+
+// ============================================================
+// i128 arithmetic
+// ============================================================
+
+test "i128 basic echo" =
+  let x i128 = 42
+  echo x   // 42
+
+test "i128 addition" =
+  let a i128 = 100
+  let b i128 = 200
+  let c i128 = a + b
+  assert::equals_i128(300, c)
+
+test "i128 subtraction" =
+  let a i128 = 500
+  let b i128 = 300
+  assert::equals_i128(200, a - b)
+
+test "i128 multiplication" =
+  let a i128 = 1000000000 as i128
+  let b i128 = 1000000000 as i128
+  assert::equals_i128(1000000000000000000 as i128, a * b)
+
+test "i128 division" =
+  let a i128 = 1000000000000000000 as i128
+  let b i128 = 1000000000 as i128
+  assert::equals_i128(1000000000 as i128, a / b)
+
+test "i128 negation" =
+  let x i128 = 42
+  let y i128 = -x
+  assert::equals_i128(-42 as i128, y)
+
+test "i128 negative values" =
+  let x i128 = -9999999999999999999 as i128
+  assert::ok(x < 0)
+
+// ============================================================
+// i128 large values
+// ============================================================
+
+test "i128 large positive" =
+  // I128_MAX = 2^127 - 1 = (1 << 127) - 1; verify via limits
+  let big i128 = limits::I128_MAX
+  assert::ok(big > 0)
+  let big2 i128 = big - 1
+  assert::ok(big2 < big)
+
+test "i128 limits MIN" =
+  let mn i128 = limits::I128_MIN
+  assert::ok(mn < 0)
+  let mn2 i128 = mn + 1
+  assert::ok(mn2 > mn)
+
+test "i128 limits MAX" =
+  let mx i128 = limits::I128_MAX
+  assert::ok(mx > 0)
+  let mx2 i128 = mx - 1
+  assert::ok(mx2 < mx)
+
+// ============================================================
+// u128 arithmetic
+// ============================================================
+
+test "u128 basic echo" =
+  let x u128 = 42 as u128
+  echo x   // 42
+
+test "u128 addition" =
+  let a u128 = 100 as u128
+  let b u128 = 200 as u128
+  assert::equals_u128(300 as u128, a + b)
+
+test "u128 subtraction" =
+  let a u128 = 500 as u128
+  let b u128 = 300 as u128
+  assert::equals_u128(200 as u128, a - b)
+
+test "u128 multiplication" =
+  let a u128 = 1000000000 as u128
+  let b u128 = 1000000000 as u128
+  assert::equals_u128(1000000000000000000 as u128, a * b)
+
+test "u128 limits MAX" =
+  let mx u128 = limits::U128_MAX
+  assert::equals_u128(mx, ~(0 as u128))
+
+test "u128 MIN is zero" =
+  assert::equals_u128(0 as u128, limits::U128_MIN)
+
+// ============================================================
+// f128 arithmetic
+// ============================================================
+
+test "f128 basic" =
+  let x f128 = 3.14 as f128
+  assert::ok(x > 0.0 as f128)
+
+test "f128 addition" =
+  let a f128 = 1.5 as f128
+  let b f128 = 2.5 as f128
+  assert::equals_f128(4.0 as f128, a + b)
+
+test "f128 multiplication" =
+  let a f128 = 2.0 as f128
+  let b f128 = 3.0 as f128
+  assert::equals_f128(6.0 as f128, a * b)
+
+test "f128 division" =
+  let a f128 = 10.0 as f128
+  let b f128 = 4.0 as f128
+  assert::equals_f128(2.5 as f128, a / b)
+
+test "f128 negative" =
+  let x f128 = -1.5 as f128
+  assert::ok(x < 0.0 as f128)
+
+// ============================================================
+// Casts between 128-bit and other numeric types
+// ============================================================
+
+test "i64 to i128 cast" =
+  let x i64 = 9223372036854775807
+  let y i128 = x as i128
+  assert::equals_i128(9223372036854775807 as i128, y)
+
+test "i128 to i64 cast (fits)" =
+  let x i128 = 42
+  let y i64 = x as i64
+  assert::equals(42, y)
+
+test "u64 to u128 cast" =
+  let x u64 = 18446744073709551615
+  let y u128 = x as u128
+  assert::equals_u128(18446744073709551615 as u128, y)
+
+test "i128 to u128 cast (positive)" =
+  let x i128 = 100
+  let y u128 = x as u128
+  assert::equals_u128(100 as u128, y)
+
+test "f64 to f128 cast" =
+  let x f64 = 3.14
+  let y f128 = x as f128
+  assert::ok(y > 3.0 as f128)
+
+test "f128 to f64 cast" =
+  let x f128 = 2.5 as f128
+  let y f64 = x as f64
+  assert::equals_f64(2.5, y)
+
+test "i32 to i128 arithmetic" =
+  let x i32 = 2147483647
+  let y i128 = x as i128
+  let z i128 = y * 2
+  assert::equals_i128(4294967294 as i128, z)
+
+// ============================================================
+// Comparisons
+// ============================================================
+
+test "i128 equality" =
+  let a i128 = 999999999999999999
+  let b i128 = 999999999999999999
+  assert::ok(a == b)
+
+test "i128 inequality" =
+  let a i128 = 1
+  let b i128 = 2
+  assert::ok(a != b)
+
+test "i128 less than" =
+  let a i128 = limits::I128_MIN
+  let b i128 = limits::I128_MAX
+  assert::ok(a < b)
+
+test "u128 less than" =
+  // Compare values that are both positive as signed i128
+  let a u128 = 100 as u128
+  let b u128 = 200 as u128
+  assert::ok(a < b)
+
+test "f128 comparison" =
+  let a f128 = 1.0 as f128
+  let b f128 = 2.0 as f128
+  assert::ok(a < b)
+  assert::ok(b > a)
+  assert::ok(a != b)
+
+// ============================================================
+// Bitwise operations (i128/u128)
+// ============================================================
+
+test "i128 bitwise AND" =
+  let a i128 = 0xFF as i128
+  let b i128 = 0x0F as i128
+  assert::equals_i128(0x0F as i128, a & b)
+
+test "i128 bitwise OR" =
+  let a i128 = 0xF0 as i128
+  let b i128 = 0x0F as i128
+  assert::equals_i128(0xFF as i128, a | b)
+
+test "i128 bitwise XOR" =
+  let a i128 = 0xFF as i128
+  let b i128 = 0xFF as i128
+  assert::equals_i128(0 as i128, a ^ b)
+
+test "i128 left shift" =
+  let a i128 = 1
+  let b i128 = a << 64
+  assert::ok(b > 0)
+
+test "i128 right shift" =
+  let a i128 = 1 as i128 << 64
+  let b i128 = a >> 64
+  assert::equals_i128(1, b)
+
+// ============================================================
+// String interpolation
+// ============================================================
+
+test "i128 string interpolation" =
+  let x i128 = -42
+  let s string = "val={x}"
+  assert::equals_str("val=-42", s)
+
+test "u128 string interpolation" =
+  // Use a value that fits in i64 to exercise u128 printing path
+  let x u128 = 1234567890123456789 as u128
+  let s string = "val={x}"
+  assert::equals_str("val=1234567890123456789", s)
+
+test "f128 string interpolation" =
+  let x f128 = 3.14 as f128
+  let s string = "val={x}"
+  // f128 prints via long double; check the prefix
+  assert::ok(len(s) > 4)
+
+test "limits in interpolation" =
+  let s string = "MAX={limits::I128_MAX}"
+  assert::equals_str("MAX=170141183460469231731687303715884105727", s)
+
+test "u64 max in interpolation" =
+  let mx u64 = limits::U64_MAX
+  let s string = "max={mx}"
+  assert::equals_str("max=18446744073709551615", s)
+
+// ============================================================
+// Reflection
+// ============================================================
+
+test "reflect kind of i128" =
+  let t atom = 'i128
+  assert::equals_str("primitive", reflect::kind(t))
+
+test "reflect kind of u128" =
+  let t atom = 'u128
+  assert::equals_str("primitive", reflect::kind(t))
+
+test "reflect kind of f128" =
+  let t atom = 'f128
+  assert::equals_str("primitive", reflect::kind(t))
+
+test "reflect is_primitive for i128" =
+  assert::ok(reflect::is_primitive('i128))
+
+test "reflect is_primitive for u128" =
+  assert::ok(reflect::is_primitive('u128))
+
+test "reflect is_primitive for f128" =
+  assert::ok(reflect::is_primitive('f128))

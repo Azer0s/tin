@@ -181,21 +181,25 @@ func main() {
 		}
 
 		if fi, statErr := os.Stat(file); statErr == nil && fi.IsDir() {
-			// Collect extra link flags from remaining args
+			// Collect extra link flags and -v-valgrind from remaining args.
 			var extraFlags []string
+
+			useValgrind := false
 
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
 				a := os.Args[i]
-				if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
+				if a == "-v-valgrind" {
+					useValgrind = true
+				} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
 					strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 					extraFlags = append(extraFlags, a)
 				}
 			}
 
 			if recursive {
-				runDirTestsRecursive(file, extraFlags)
+				runDirTestsRecursive(file, extraFlags, useValgrind)
 			} else {
-				runDirTests(file, extraFlags)
+				runDirTests(file, extraFlags, useValgrind)
 			}
 
 			return
@@ -383,12 +387,16 @@ func main() {
 	case "run", "test":
 		tmpRel := strings.TrimSuffix(file, filepath.Ext(file)) + ".tin.out"
 		tmp, _ := filepath.Abs(tmpRel)
-		// Collect extra link inputs for run/test mode too
+		// Collect extra link inputs and -v-valgrind for run/test mode too.
 		var extraObjs []string
+
+		useValgrind := false
 
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
-			if a == "-cflag" {
+			if a == "-v-valgrind" {
+				useValgrind = true
+			} else if a == "-cflag" {
 				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
@@ -406,10 +414,16 @@ func main() {
 			_ = os.Remove(name)
 		}(tmp)
 
-		run := exec.Command(tmp)
-		run.Stdout = os.Stdout
+		var run *exec.Cmd
+		if useValgrind {
+			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp)
+		} else {
+			run = exec.Command(tmp)
+		}
 
+		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
+
 		if err := run.Run(); err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
@@ -700,15 +714,15 @@ func collectTinFiles(root string) []string {
 
 // runDirTestsRecursive collects all .tin files under root and runs them
 // together as a single test batch with one combined summary.
-func runDirTestsRecursive(root string, extraFlags []string) {
+func runDirTestsRecursive(root string, extraFlags []string, useValgrind bool) {
 	files := collectTinFiles(root)
-	runFileTests(files, extraFlags)
+	runFileTests(files, extraFlags, useValgrind)
 }
 
 // runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
-func runDirTests(dir string, extraFlags []string) {
+func runDirTests(dir string, extraFlags []string, useValgrind bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		die("cannot read directory %s: %v", dir, err)
@@ -722,13 +736,14 @@ func runDirTests(dir string, extraFlags []string) {
 		}
 	}
 
-	runFileTests(files, extraFlags)
+	runFileTests(files, extraFlags, useValgrind)
 }
 
 // runFileTests runs the given .tin files that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
-// if any file has failing tests.
-func runFileTests(fpaths []string, extraFlags []string) {
+// if any file has failing tests.  When useValgrind is true, each test binary
+// is run under valgrind --leak-check=full --error-exitcode=1.
+func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 	type result struct {
 		file   string
 		passed bool
@@ -874,7 +889,13 @@ func runFileTests(fpaths []string, extraFlags []string) {
 
 		var runOut bytes.Buffer
 
-		run := exec.Command(tmp.Name())
+		var run *exec.Cmd
+		if useValgrind {
+			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp.Name())
+		} else {
+			run = exec.Command(tmp.Name())
+		}
+
 		run.Stdout = &runOut
 		run.Stderr = &runOut
 

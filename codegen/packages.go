@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +115,7 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			}
 
 			raw := entry.NewCall(cFunc, callArgs...)
-			entry.NewRet(cg.wrapFromExtern(entry, raw, tinRetType))
+			entry.NewRet(cg.wrapFromExtern(entry, raw, tinRetType, false))
 			cg.curFn = prevFn
 			cg.curScope = prevScope
 		}
@@ -160,6 +161,7 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	_, modExists := os.Stat(modFile)
 
 	_, srcExists := os.Stat(tinSrc)
+
 	if srcExists != nil || modExists != nil {
 		// Not a valid local package; try stdlib locations.
 		if ex, exErr := os.Executable(); exErr == nil {
@@ -483,6 +485,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			return fmt.Errorf("use %q: helper files loaded via use \"./...\" must not contain an export declaration; only the top-level package file may export", rawPath)
 		}
 	}
+
 	cg.filename = srcPath
 
 	// Process nested use declarations first.
@@ -1101,6 +1104,38 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
+	// Pass 2.8: register ALL const declarations in scope so that function
+	// bodies compiled in Pass 3 can reference them by name.  This mirrors
+	// what Pass 4 does for exported names but covers the full set so that
+	// internal helpers (e.g. parse using RFC3339) can access the same values.
+	for _, node := range prog.Stmts {
+		vd, ok := node.(*ast.VarDecl)
+		if !ok || !vd.IsConst {
+			continue
+		}
+
+		constVal := cg.evalConstExpr(vd.Value)
+		if constVal == nil {
+			continue
+		}
+
+		stn := ""
+		isUnsigned := false
+
+		if vd.Type != nil {
+			stn = scalar8BitTypeName(vd.Type)
+
+			if stn == "" {
+				stn = scalar128BitTypeName(vd.Type)
+			}
+
+			isUnsigned = isUnsignedTinType(vd.Type)
+		}
+
+		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
+		cg.curScope.set(vd.Name, entry)
+	}
+
 	// Pass 3: compile non-extern function bodies.
 	for _, node := range prog.Stmts {
 		fd, ok := node.(*ast.FuncDecl)
@@ -1128,28 +1163,40 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 4: register exported constants (VarDecl with IsConst=true and literal values).
+	// Pass 4: register exported constants (VarDecl with IsConst=true).
+	// Simple literals are registered directly; complex constant expressions
+	// (e.g. casts, shifts, bitwise-NOT, arithmetic) are evaluated by
+	// evalConstExpr so that limits like I128_MIN/U128_MAX are propagated.
 	for _, node := range prog.Stmts {
 		vd, ok := node.(*ast.VarDecl)
 		if !ok || !vd.IsConst || !exportedNames[vd.Name] {
 			continue
 		}
 
-		var constVal value.Value
-
-		switch lit := vd.Value.(type) {
-		case *ast.FloatLit:
-			constVal = constant.NewFloat(irtypes.Double, lit.Value)
-		case *ast.IntLit:
-			constVal = constant.NewInt(irtypes.I64, lit.Value)
+		constVal := cg.evalConstExpr(vd.Value)
+		if constVal == nil {
+			continue
 		}
 
-		if constVal != nil {
-			entry := &scopeEntry{val: constVal, isAlloc: false}
-			cg.curScope.set(vd.Name, entry)
-			prevScope.set(pkgName+"."+vd.Name, entry)
-			prevScope.set(pkgName+"::"+vd.Name, entry)
+		// Carry type metadata so echo/interpolation know about u128 etc.
+		stn := ""
+
+		isUnsigned := false
+
+		if vd.Type != nil {
+			stn = scalar8BitTypeName(vd.Type)
+
+			if stn == "" {
+				stn = scalar128BitTypeName(vd.Type)
+			}
+
+			isUnsigned = isUnsignedTinType(vd.Type)
 		}
+
+		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
+		cg.curScope.set(vd.Name, entry)
+		prevScope.set(pkgName+"."+vd.Name, entry)
+		prevScope.set(pkgName+"::"+vd.Name, entry)
 	}
 
 	// Propagate only exported symbols up to the caller's scope.
@@ -2027,4 +2074,148 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 	}
 
 	return nil
+}
+
+// evalConstExpr attempts to evaluate a Tin AST expression as a compile-time
+// LLVM constant integer or float. Handles literals, type casts (as), bitwise
+// NOT (~), unary negation (-), and integer arithmetic / shifts (+, -, <<).
+// Returns nil for any expression that cannot be fully reduced to a constant.
+//
+// Integer values are computed using math/big so that operations like
+//
+//	const I128_MIN i128 = 1 as i128 << 127
+//
+// produce real constant.Int values rather than LLVM constant-expression nodes
+// (which newer LLVM backends reject for shift/bitwise operators).
+//
+// This is used by Pass 4 of loadPackageFromSource so that complex package
+// constants such as limits::I128_MIN are propagated to callers.
+func (cg *CodeGen) evalConstExpr(expr ast.Node) constant.Constant {
+	// Delegate integer evaluation to the big.Int evaluator; float literals
+	// are handled directly since float constants are always concrete values.
+	switch e := expr.(type) {
+	case *ast.FloatLit:
+		return constant.NewFloat(irtypes.Double, e.Value)
+	case *ast.StringLit:
+		raw := cg.newGlobalString(e.Value).(constant.Constant)
+		strType := stringFatPtrType()
+		lenVal := constant.NewInt(irtypes.I64, int64(len(e.Value)))
+
+		return constant.NewStruct(strType, raw, lenVal)
+	}
+
+	// Try integer path.
+	if intTyp, bigVal := cg.evalConstExprInt(expr, nil); intTyp != nil && bigVal != nil {
+		return &constant.Int{Typ: intTyp, X: bigVal}
+	}
+
+	return nil
+}
+
+// evalConstExprInt evaluates a Tin const expression as a (IntType, *big.Int)
+// pair. declType provides the target integer type for top-level declarations
+// (e.g. to resolve plain IntLit values that appear in a typed const); pass nil
+// to infer type from the expression (defaults to i64 for bare literals).
+// Returns (nil, nil) when the expression is not a constant integer.
+func (cg *CodeGen) evalConstExprInt(expr ast.Node, hint *irtypes.IntType) (*irtypes.IntType, *big.Int) {
+	switch e := expr.(type) {
+	case *ast.IntLit:
+		typ := hint
+		if typ == nil {
+			typ = irtypes.I64
+		}
+
+		raw := big.NewInt(e.Value)
+
+		return typ, normIntBig(raw, uint(typ.BitSize))
+
+	case *ast.UnaryExpr:
+		it, inner := cg.evalConstExprInt(e.Expr, hint)
+		if it == nil {
+			return nil, nil
+		}
+
+		switch e.Op {
+		case "-":
+			result := new(big.Int).Neg(inner)
+
+			return it, normIntBig(result, uint(it.BitSize))
+
+		case "~":
+			// bitwise NOT: ~x = -(x+1) in two's complement
+			result := new(big.Int).Add(inner, big.NewInt(1))
+			result.Neg(result)
+
+			return it, normIntBig(result, uint(it.BitSize))
+		}
+
+		return nil, nil
+
+	case *ast.AsExpr:
+		targetLLVM, err := cg.tinTypeToLLVM(e.Type)
+		if err != nil {
+			return nil, nil
+		}
+
+		toIt, toIsInt := targetLLVM.(*irtypes.IntType)
+		if !toIsInt {
+			return nil, nil
+		}
+
+		// Evaluate inner without hint so we get the raw value.
+		_, inner := cg.evalConstExprInt(e.Expr, nil)
+		if inner == nil {
+			return nil, nil
+		}
+
+		return toIt, normIntBig(inner, uint(toIt.BitSize))
+
+	case *ast.BinExpr:
+		lt, left := cg.evalConstExprInt(e.Left, hint)
+		if lt == nil {
+			return nil, nil
+		}
+
+		// For shifts the right operand width can differ; use i64 as default.
+		_, right := cg.evalConstExprInt(e.Right, irtypes.I64)
+		if right == nil {
+			return nil, nil
+		}
+
+		var result *big.Int
+
+		switch e.Op {
+		case "+":
+			result = new(big.Int).Add(left, right)
+		case "-":
+			result = new(big.Int).Sub(left, right)
+		case "<<":
+			shift := uint(right.Uint64())
+			result = new(big.Int).Lsh(left, shift)
+		default:
+			return nil, nil
+		}
+
+		return lt, normIntBig(result, uint(lt.BitSize))
+	}
+
+	return nil, nil
+}
+
+// normIntBig normalises a *big.Int to the signed two's-complement range
+// for an N-bit integer type: masks to N bits, then sign-extends from bit N-1.
+// This ensures that e.g. (1 << 127) becomes -2^127 (I128_MIN) when bits==128.
+func normIntBig(x *big.Int, bits uint) *big.Int {
+	maxUnsigned := new(big.Int).Lsh(big.NewInt(1), bits) // 2^N
+	maxSigned := new(big.Int).Rsh(maxUnsigned, 1)        // 2^(N-1)
+
+	// Mask to N bits (unsigned mod 2^N).
+	result := new(big.Int).And(x, new(big.Int).Sub(maxUnsigned, big.NewInt(1)))
+
+	// Convert to signed: if result >= 2^(N-1), subtract 2^N.
+	if result.Cmp(maxSigned) >= 0 {
+		result.Sub(result, maxUnsigned)
+	}
+
+	return result
 }

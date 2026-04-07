@@ -23,11 +23,17 @@ type CodeGen struct {
 	mod      *ir.Module
 
 	// declared C functions
-	printfFn  *ir.Func
-	sprintfFn *ir.Func
-	mallocFn  *ir.Func
-	freeFn    *ir.Func
-	memcpyFn  *ir.Func
+	printfFn     *ir.Func
+	sprintfFn    *ir.Func
+	mallocFn     *ir.Func
+	freeFn       *ir.Func
+	memcpyFn     *ir.Func
+	echoI128Fn   *ir.Func
+	echoU128Fn   *ir.Func
+	echoF128Fn   *ir.Func
+	i128ToCstrFn *ir.Func
+	u128ToCstrFn *ir.Func
+	f128ToCstrFn *ir.Func
 
 	// struct type registry: name -> LLVM struct type
 	structTypes map[string]*irtypes.StructType
@@ -128,6 +134,10 @@ type CodeGen struct {
 	releasePtrElemArrayFn      *ir.Func // _tin_release_ptr_elem_array(data i8*, count i64)
 	// per-type array element release helpers: type key -> IR function
 	elemReleaseHelpers map[string]*ir.Func
+	// per-struct null-safe pointer release helpers: struct name -> IR function.
+	// Each function has signature void @{name}__release_ptr({struct}* %ptr) and
+	// null-guards before loading/releasing the struct's ARC fields and freeing the block.
+	structPtrReleaseFns map[string]*ir.Func
 
 	// Element retain helpers (for ++ concat when source is non-temporary).
 	retainPtrElemsFn          *ir.Func // _tin_retain_ptr_elems(data i8*, count i64)
@@ -205,7 +215,6 @@ type CodeGen struct {
 	// pointers (*T via _tin_rc_alloc).  Callers use this to mark the result
 	// variable as isHeapOwned so scope-exit emits the correct two-step release.
 	heapPromotingFns map[string]bool
-
 	// match subject: set before entering genWhereList when the function body
 	// is a pure where-list pattern match. Used to compare atom conditions.
 	matchSubject value.Value
@@ -254,8 +263,9 @@ type CodeGen struct {
 	atomCodes      map[string]int32
 	atomCodeToName map[int32]string
 	atomOrder      []string
-	atomToStrFn    *ir.Func // __tin_atom_to_string(i32) {i8*,i64}
-	strToAtomFn    *ir.Func // __tin_string_to_atom(i8*) %__atom
+	atomToStrFn         *ir.Func // __tin_atom_to_string(i32) {i8*,i64}
+	strToAtomFn         *ir.Func // __tin_string_to_atom(i8*) %__atom
+	strToAtomHandoverFn *ir.Func // __tin_string_to_atom_handover(i8*) %__atom
 
 	// Tagged union registry: type name -> ordered variant TypeExprs (index = tag).
 	// Created by "type u = i8 | string" declarations.
@@ -598,6 +608,7 @@ func New(filename string) *CodeGen {
 		structWeakFields:         make(map[string]map[string]bool),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
+		structPtrReleaseFns:      make(map[string]*ir.Func),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")

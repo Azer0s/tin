@@ -249,6 +249,7 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 
 		if !terminated && newBlock != nil && newBlock.Term == nil {
 			_ = cg.emitDefers(newBlock)
+			cg.emitAllScopeReleases(newBlock, "")
 			newBlock.NewRet(nil)
 		}
 
@@ -261,12 +262,28 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		return err
 	}
 
+	// Sync up with cg.curBlock in case genExpr redirected emission to a new block.
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	// ARC: release scope variables (parameters) before returning.
+	// Parameters are retained on function entry; the return terminator must
+	// balance that retain.  Skip releasing the variable being directly
+	// returned (to transfer ownership to the caller without an extra retain).
+	skipName := ""
+	if ident, ok := body.(*ast.Identifier); ok {
+		skipName = ident.Name
+	}
+
 	if !irtypes.IsVoid(retType) && bodyVal != nil {
 		bodyVal = cg.coerce(block, bodyVal, retType)
 		_ = cg.emitDefers(block)
+		cg.emitAllScopeReleases(block, skipName)
 		block.NewRet(bodyVal)
 	} else {
 		_ = cg.emitDefers(block)
+		cg.emitAllScopeReleases(block, "")
 		block.NewRet(nil)
 	}
 
@@ -689,6 +706,8 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		switch fn := callExpr.Func.(type) {
 		case *ast.Identifier:
 			calleeName = fn.Name
+		case *ast.ScopeAccess:
+			calleeName = strings.Join(fn.Path, "__")
 		}
 
 		if calleeName != "" && llType != nil {
@@ -700,6 +719,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				if entry, ok := cg.curScope.lookup(calleeName); ok {
 					if f, ok2 := entry.val.(*ir.Func); ok2 {
 						isHeapFn = cg.heapPromotingFns[f.Name()]
+					}
+				}
+			}
+			// Resolve generic static method scope access, e.g. "tree_node[i64]__branch"
+			// -> "tree_node__i64_branch" (the key stored in heapPromotingFns).
+			if !isHeapFn {
+				if sa, ok := callExpr.Func.(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
+					baseName := sa.Path[0]
+					last := sa.Path[len(sa.Path)-1]
+					if i := strings.Index(baseName, "["); i >= 0 {
+						typeParam := strings.TrimSuffix(baseName[i+1:], "]")
+						base := baseName[:i]
+						concreteName := base + "__" + strings.ReplaceAll(typeParam, ",", "__")
+						concreteKey := concreteName + "_" + last
+						isHeapFn = cg.heapPromotingFns[concreteKey]
 					}
 				}
 			}
@@ -819,7 +853,14 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: scalar8BitTypeName(s.Type), isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type})
+	// scalarTypeName covers 8-bit types ("char","byte","u8","i8") and 128-bit types
+	// ("i128","u128","f128") for echo/interpolation dispatch.
+	stn := scalar8BitTypeName(s.Type)
+	if stn == "" {
+		stn = scalar128BitTypeName(s.Type)
+	}
+
+	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type})
 
 	return block, nil
 }
@@ -1134,26 +1175,32 @@ func (cg *CodeGen) genBuiltinLen(block *ir.Block, arg ast.Node) (value.Value, er
 	}
 
 	t := val.Type()
+	var length value.Value
 	// String fat-ptr {i8*, i64}: extract field 1.
 	if isStringType(t) {
-		return cg.extractStringLen(block, val), nil
-	}
-	// Dynamic array fat-ptr {T*, i64}: extract field 1.
-	if isFatArrayPtr(t) {
+		length = cg.extractStringLen(block, val)
+	} else if isFatArrayPtr(t) {
+		// Dynamic array fat-ptr {T*, i64}: extract field 1.
 		st := t.(*irtypes.StructType)
 		alloca := block.NewAlloca(st)
 		block.NewStore(val, alloca)
 		gep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-
-		return block.NewLoad(irtypes.I64, gep), nil
-	}
-	// Static array [N x T]: constant length.
-	if at, ok := t.(*irtypes.ArrayType); ok {
+		length = block.NewLoad(irtypes.I64, gep)
+	} else if at, ok := t.(*irtypes.ArrayType); ok {
+		// Static array [N x T]: constant length (no RC).
 		return constant.NewInt(irtypes.I64, int64(at.Len)), nil
+	} else {
+		return nil, fmt.Errorf("len() not supported for type %s", t)
 	}
 
-	return nil, fmt.Errorf("len() not supported for type %s", t)
+	// ARC: release the argument if it is a temporary RC allocation
+	// (e.g. len(a |> filter(f)) where the filtered array is a fresh allocation).
+	if isRCTrackedType(t) && !isCopyExpr(arg) {
+		cg.emitRelease(block, val)
+	}
+
+	return length, nil
 }
 
 // Defer chain helpers
@@ -1542,14 +1589,24 @@ func (cg *CodeGen) exprByteArrayElem(node ast.Node) string {
 	return ""
 }
 
-// exprByte8Type returns the Tin type name for an 8-bit scalar expression:
-// "char", "byte", "u8", or "i8".  Returns "" for non-8-bit types.
+// exprByte8Type returns the Tin type name for an 8-bit or 128-bit scalar
+// expression: "char", "byte", "u8", "i8", "i128", "u128", or "f128".
+// Returns "" for all other types.
 // Handles identifiers (scope lookup), function parameters, and struct field
 // accesses (e.g. this.age where age is declared u8).
 func (cg *CodeGen) exprByte8Type(node ast.Node) string {
 	switch n := node.(type) {
 	case *ast.AsExpr:
-		return scalar8BitTypeName(n.Type)
+		if s := scalar8BitTypeName(n.Type); s != "" {
+			return s
+		}
+
+		return scalar128BitTypeName(n.Type)
+	case *ast.ScopeAccess:
+		joined := strings.Join(n.Path, ".")
+		if se, ok := cg.curScope.lookup(joined); ok {
+			return se.scalarTypeName
+		}
 	case *ast.Identifier:
 		if se, ok := cg.curScope.lookup(n.Name); ok {
 			return se.scalarTypeName
@@ -1588,6 +1645,27 @@ func (cg *CodeGen) exprByte8Type(node ast.Node) string {
 	}
 
 	return ""
+}
+
+// exprIsUnsigned reports whether expr represents an unsigned integer value
+// (u16, u32, u64, u128 - not u8/byte which are handled via exprByte8Type).
+// Checks scope entries for identifiers and scope-access expressions.
+func (cg *CodeGen) exprIsUnsigned(node ast.Node) bool {
+	switch n := node.(type) {
+	case *ast.Identifier:
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			return se.isUnsigned
+		}
+	case *ast.ScopeAccess:
+		joined := strings.Join(n.Path, ".")
+		if se, ok := cg.curScope.lookup(joined); ok {
+			return se.isUnsigned
+		}
+	case *ast.AsExpr:
+		return isUnsignedTinType(n.Type)
+	}
+
+	return false
 }
 
 func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) {
@@ -1684,11 +1762,48 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 			return block, nil
 		}
 
-		fmtStr = cg.newGlobalString("%lld\n")
-		ext := cg.coerce(block, val, irtypes.I64)
-		block.NewCall(printf, fmtStr, ext)
+		if it.BitSize == 128 {
+			// i128/u128: call dedicated runtime function (no printf format for __int128)
+			switch cg.exprByte8Type(s.Value) {
+			case "u128":
+				block.NewCall(cg.ensureEchoU128(), val)
+			default: // "i128" or unknown 128-bit int
+				block.NewCall(cg.ensureEchoI128(), val)
+			}
+
+			return block, nil
+		}
+
+		if cg.exprIsUnsigned(s.Value) {
+			// Unsigned 16/32/64-bit: zero-extend and print as unsigned decimal.
+			fmtStr = cg.newGlobalString("%llu\n")
+
+			var ext value.Value
+
+			if it.BitSize < 64 {
+				ext = block.NewZExt(val, irtypes.I64)
+			} else {
+				ext = val // already i64; no extension needed
+			}
+
+			block.NewCall(printf, fmtStr, ext)
+		} else {
+			fmtStr = cg.newGlobalString("%lld\n")
+			ext := cg.coerce(block, val, irtypes.I64)
+
+			block.NewCall(printf, fmtStr, ext)
+		}
 
 	case irtypes.IsFloat(t):
+		ft := t.(*irtypes.FloatType)
+
+		if ft.Kind == irtypes.FloatKindFP128 {
+			// f128: call dedicated runtime function
+			block.NewCall(cg.ensureEchoF128(), val)
+
+			return block, nil
+		}
+
 		fmtStr := cg.newGlobalString("%g\n")
 
 		var ext value.Value
@@ -1705,6 +1820,8 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 			ptr := cg.extractStringPtr(block, strVal)
 			fmtStr := cg.newGlobalString("%s\n")
 			block.NewCall(printf, fmtStr, ptr)
+			// ARC: ::print returns a fresh string; release it after use.
+			cg.emitRelease(block, strVal)
 		} else {
 			fmtStr := cg.newGlobalString("%p\n")
 			block.NewCall(printf, fmtStr, val)
@@ -1716,6 +1833,8 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 			ptr := cg.extractStringPtr(block, strVal)
 			fmtStr := cg.newGlobalString("%s\n")
 			block.NewCall(printf, fmtStr, ptr)
+			// ARC: ::print returns a fresh string; release it after use.
+			cg.emitRelease(block, strVal)
 
 			break
 		}
@@ -1768,12 +1887,25 @@ func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, e
 		case 8:
 			zext := block.NewZExt(val, irtypes.I32)
 			block.NewCall(printf, cg.newGlobalString("%c"), zext)
+		case 128:
+			// i128/u128: use the cstr helper then %s
+			cstr := block.NewCall(cg.ensureI128ToCstr(), val)
+			block.NewCall(printf, cg.newGlobalString("%s"), cstr)
 		default:
 			ext := cg.coerce(block, val, irtypes.I64)
 			block.NewCall(printf, cg.newGlobalString("%lld"), ext)
 		}
 
 	case irtypes.IsFloat(t):
+		ft := t.(*irtypes.FloatType)
+
+		if ft.Kind == irtypes.FloatKindFP128 {
+			cstr := block.NewCall(cg.ensureF128ToCstr(), val)
+			block.NewCall(printf, cg.newGlobalString("%s"), cstr)
+
+			break
+		}
+
 		var ext value.Value
 		if t == irtypes.Double {
 			ext = val
@@ -2652,6 +2784,12 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		}
 	}
 
+	// ARC: release the iterator value if it was a temporary RC allocation
+	// (e.g. `for x in qsort(arr):` where qsort returns a fresh array).
+	if isRCTrackedType(iterVal.Type()) && !isCopyExpr(s.Iter) {
+		cg.emitRelease(afterBlock, iterVal)
+	}
+
 	return afterBlock, nil
 }
 
@@ -3177,6 +3315,10 @@ func (cg *CodeGen) emitMatchArmBody(
 			}
 		}
 
+		// Release match-arm-bound variables (e.g. ...rest subslice) before
+		// branching out of the arm.  This mirrors the scope-release emitted at
+		// normal function exit but is scoped to only the arm's own bindings.
+		cg.emitScopeRelease(bodyBlock, cg.curScope)
 		bodyBlock.NewBr(afterBlock)
 
 		*anyFallthrough = true
@@ -3189,6 +3331,11 @@ func (cg *CodeGen) emitMatchArmBody(
 		}
 
 		if bodyBlock != nil && bodyBlock.Term == nil {
+			// Release match-arm-bound variables (e.g. ...rest subslice) before
+			// branching out of the arm.  Explicit returns inside the arm already
+			// call emitAllScopeReleases, so this only runs when control falls
+			// through to afterBlock.
+			cg.emitScopeRelease(bodyBlock, cg.curScope)
 			bodyBlock.NewBr(afterBlock)
 
 			*anyFallthrough = true
@@ -4228,6 +4375,14 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 
 		msg := cg.newGlobalString(fmt.Sprintf("array destructuring: need %d elements, got fewer", regularCount))
 		panicBlock.NewCall(cg.ensurePanicFn(), msg)
+		// If _tin_panic returns (recover was called), clean up pending defer envs
+		// and release ARC-tracked scope variables (e.g. the array being destructured).
+		for _, env := range cg.pendingDeferEnvs {
+			if _, isNull := env.(*constant.Null); !isNull {
+				panicBlock.NewCall(cg.ensureFree(), env)
+			}
+		}
+		cg.emitAllScopeReleases(panicBlock, "")
 		// Use a proper ret (not unreachable) so that recovered panics can return.
 		retType := cg.curFn.Sig.RetType
 		if irtypes.IsVoid(retType) {
@@ -4428,10 +4583,12 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	// Without this, stale curBlock values (e.g. set by genEcho inside a preceding
 	// if-block's body) misdirect instruction emission to the wrong block.
 	cg.curBlock = nil
+
 	val, err := cg.genExpr(block, s.Value)
 	if err != nil {
 		return nil, err
 	}
+
 	// Update block if genExpr advanced it (e.g. await generates a new resume block).
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
@@ -4457,12 +4614,14 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	block.NewStore(val, structAlloca)
 
 	// Detect whether the source is a call to a heap-promoting function.
-	// If so, each *T field in the destructured tuple is itself a heap-owned RC block.
+	// Any pointer-type field of the destructured tuple is then treated as
+	// caller-owned (isHeapOwned), matching the semantics of returning
+	// &Tuple{a: val, b: heap_ptr} from the callee.
 	heapPromotingSource := false
 
-	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
-		if fnIdent, isIdent := callExpr.Func.(*ast.Identifier); isIdent {
-			heapPromotingSource = cg.heapPromotingFns[fnIdent.Name]
+	if callInst, isCall := val.(*ir.InstCall); isCall {
+		if callee, isFn := callInst.Callee.(*ir.Func); isFn {
+			heapPromotingSource = cg.heapPromotingFns[callee.Name()]
 		}
 	}
 
@@ -4685,6 +4844,27 @@ func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
 		return false
 	}
 
+	// isHeapExpr reports whether expr is a direct heap allocation:
+	//   &StructLit{...}    -- address of an inline struct literal
+	//   heap_fn(args...)   -- call to an already-registered heap-promoting function
+	isHeapExpr := func(expr ast.Node) bool {
+		switch rv := expr.(type) {
+		case *ast.AddressOfExpr:
+			_, ok := rv.Expr.(*ast.StructLit)
+
+			return ok
+		case *ast.CallExpr:
+			switch fn := rv.Func.(type) {
+			case *ast.Identifier:
+				return heapFns[fn.Name]
+			case *ast.ScopeAccess:
+				return heapFns[strings.Join(fn.Path, "__")]
+			}
+		}
+
+		return false
+	}
+
 	found := false
 
 	var walk func(ast.Node)
@@ -4700,14 +4880,15 @@ func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
 				return
 			}
 
-			switch rv := n.Value.(type) {
-			case *ast.AddressOfExpr:
-				if _, isStruct := rv.Expr.(*ast.StructLit); isStruct {
-					found = true
-				}
-			case *ast.CallExpr:
-				if fnIdent, ok := rv.Func.(*ast.Identifier); ok && heapFns[fnIdent.Name] {
-					found = true
+			if isHeapExpr(n.Value) {
+				found = true
+			} else if tl, isTuple := n.Value.(*ast.TupleLit); isTuple {
+				for _, elem := range tl.Elems {
+					if isHeapExpr(elem) {
+						found = true
+
+						break
+					}
 				}
 			}
 		case *ast.Block:

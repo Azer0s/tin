@@ -693,7 +693,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		// If the return type does not need wrapping and no struct params, expose
 		// the C function directly.  Fat-ptr parameters are handled by coerce().
-		if cRetType.Equal(retType) && !needsStructConv {
+		// #handover always needs a wrapper to RC-ify the returned pointer.
+		if cRetType.Equal(retType) && !needsStructConv && !hasTag(n.Tags, "handover") {
 			cg.curScope.set(scopeName, &scopeEntry{val: cFunc, isAlloc: false})
 
 			return nil
@@ -799,7 +800,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 					finalResult = tinResult
 				} else {
-					finalResult = cg.wrapFromExtern(entry, rawResult, retType)
+					finalResult = cg.wrapFromExtern(entry, rawResult, retType, hasTag(n.Tags, "handover"))
 				}
 			}
 
@@ -811,6 +812,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			cg.curFn = prevFn
 			cg.curScope = prevScope
+		}
+
+		// #handover pointer returns: mark the wrapper as heap-promoting so that
+		// genLetStmt sets isHeapOwned on the bound variable, enabling scope-exit
+		// release via emitHeapChainRelease / ensureStructPtrReleaseFn.
+		// String/fat-ptr returns are already RC-tracked; only raw pointer types need this.
+		if hasTag(n.Tags, "handover") {
+			if _, isPtr := retType.(*irtypes.PointerType); isPtr {
+				cg.heapPromotingFns[wrapperName] = true
+			}
 		}
 
 		cg.curScope.set(scopeName, &scopeEntry{val: wrapperFn, isAlloc: false})
@@ -1147,6 +1158,7 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 			for _, b := range fn.Blocks {
 				if b.Term == nil {
 					_ = cg.emitDefers(b)
+					cg.emitAllScopeReleases(b, "")
 					b.NewRet(nil)
 				}
 			}
@@ -1196,6 +1208,9 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 
 		// Drain the run queue and shut down workers.
 		cg.emitFiberMainEnd(cur)
+
+		// Release RC-tracked locals from setup stmts (let declarations).
+		cg.emitAllScopeReleases(cur, "")
 
 		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.
 		cg.emitTopLevelVarDeinits(cur)

@@ -2,6 +2,7 @@
 
 #include "runtime.h"
 #include <stdio.h>
+#include <string.h>
 
 void _tin_echo_i64(int64_t v)  { printf("%lld\n",  (long long)v);  fflush(stdout); }
 void _tin_echo_u64(uint64_t v) { printf("%llu\n",  (unsigned long long)v); fflush(stdout); }
@@ -22,3 +23,81 @@ void _tin_print_bool(int32_t v) { fputs(v ? "true" : "false", stdout); }
 void _tin_print_char(uint8_t v) { putchar(v); }
 void _tin_print_string(TinString s) { printf("%.*s", (int)s.len, s.ptr); }
 void _tin_print_newline(void)   { putchar('\n'); }
+
+// ---------------------------------------------------------------------------
+// 128-bit integer helpers
+//
+// GCC and Clang both support __int128 / unsigned __int128 on x86-64.
+// There is no standard printf format for these types, so we convert to
+// decimal manually using a small stack buffer (at most 40 digits).
+
+static void _i128_to_dec(__int128 v, char *out, int *len) {
+    char buf[50];
+    int i = 49;
+    buf[i] = '\0';
+    int neg = v < (__int128)0;
+    // Handle INT128_MIN: negate via two's complement without overflow.
+    unsigned __int128 u = neg
+        ? (unsigned __int128)(-(v + 1)) + 1
+        : (unsigned __int128)v;
+    do { buf[--i] = '0' + (int)(u % 10); u /= 10; } while (u > 0);
+    if (neg) buf[--i] = '-';
+    *len = 49 - i;
+    memcpy(out, buf + i, (size_t)(*len + 1)); // include NUL
+}
+
+static void _u128_to_dec(unsigned __int128 v, char *out, int *len) {
+    char buf[50];
+    int i = 49;
+    buf[i] = '\0';
+    do { buf[--i] = '0' + (int)(v % 10); v /= 10; } while (v > 0);
+    *len = 49 - i;
+    memcpy(out, buf + i, (size_t)(*len + 1));
+}
+
+void _tin_echo_i128(__int128 v) {
+    char buf[50]; int n;
+    _i128_to_dec(v, buf, &n);
+    puts(buf);
+    fflush(stdout);
+}
+
+void _tin_echo_u128(unsigned __int128 v) {
+    char buf[50]; int n;
+    _u128_to_dec(v, buf, &n);
+    puts(buf);
+    fflush(stdout);
+}
+
+// _tin_i128_to_cstr writes v as decimal into a thread-local 50-byte buffer
+// and returns a pointer to it.  Valid until the next call on the same thread.
+// Used by string interpolation (snprintf %s argument).
+const char *_tin_i128_to_cstr(__int128 v) {
+    static _Thread_local char buf[50];
+    int n; _i128_to_dec(v, buf, &n);
+    return buf;
+}
+
+const char *_tin_u128_to_cstr(unsigned __int128 v) {
+    static _Thread_local char buf[50];
+    int n; _u128_to_dec(v, buf, &n);
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// f128 helpers
+//
+// LLVM fp128 matches GCC/Clang __float128 on x86-64.
+// For echo/print we convert to long double (x86 80-bit) which gives ~18
+// significant digits - sufficient for display purposes.
+
+void _tin_echo_f128(__float128 v) {
+    printf("%Lg\n", (long double)v);
+    fflush(stdout);
+}
+
+const char *_tin_f128_to_cstr(__float128 v) {
+    static _Thread_local char buf[64];
+    snprintf(buf, sizeof(buf), "%Lg", (long double)v);
+    return buf;
+}

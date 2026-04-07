@@ -97,6 +97,33 @@ func (cg *CodeGen) ensureLearnAtom() *ir.Func {
 		[]*ir.Param{ir.NewParam("str", irtypes.I8Ptr)}, false)
 }
 
+// ensureLearnAtomHandover lazily declares _tin_learn_atom_handover(i8*) i32.
+// Like _tin_learn_atom but takes ownership of (and frees) str after use.
+func (cg *CodeGen) ensureLearnAtomHandover() *ir.Func {
+	return cg.ensureExternDecl("_tin_learn_atom_handover", irtypes.I32,
+		[]*ir.Param{ir.NewParam("str", irtypes.I8Ptr)}, false)
+}
+
+// ensureHandoverFree lazily declares _tin_handover_free(i8*) void.
+// Frees ptr if it was malloc'd; no-op for static/stack/NULL pointers.
+func (cg *CodeGen) ensureHandoverFree() *ir.Func {
+	return cg.ensureExternDecl("_tin_handover_free", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+}
+
+// ensureStringToAtomHandover lazily declares the LLVM IR helper
+// __tin_string_to_atom_handover(i8*) %__atom.
+// Like __tin_string_to_atom but takes ownership of the input char* (frees it
+// after the atom code is resolved, using _tin_handover_free / _tin_learn_atom_handover).
+func (cg *CodeGen) ensureStringToAtomHandover() *ir.Func {
+	if cg.strToAtomHandoverFn != nil {
+		return cg.strToAtomHandoverFn
+	}
+	cg.strToAtomHandoverFn = cg.mod.NewFunc("__tin_string_to_atom_handover", cg.atomType,
+		ir.NewParam("str", irtypes.I8Ptr))
+	return cg.strToAtomHandoverFn
+}
+
 // emitAtomTable emits @__tin_atom_table and @__tin_atom_count globals, then
 // fills in the bodies of any lazily-declared atom helper functions.
 // Called at the end of Generate() after all atoms are registered.
@@ -140,6 +167,10 @@ func (cg *CodeGen) emitAtomTable() {
 
 	if cg.strToAtomFn != nil {
 		cg.buildStringToAtomBody(cg.strToAtomFn, tableGlobal, countGlobal, tableArrType)
+	}
+
+	if cg.strToAtomHandoverFn != nil {
+		cg.buildStringToAtomHandoverBody(cg.strToAtomHandoverFn, tableGlobal, countGlobal, tableArrType)
 	}
 }
 
@@ -288,6 +319,79 @@ func (cg *CodeGen) buildStringToAtomBody(fn *ir.Func, tableGlobal *ir.Global, co
 
 	// static.miss (was loop.exit): fall back to runtime - learn the atom
 	rtCode := loopExit.NewCall(cg.ensureLearnAtom(), ptrParam)
+	rtAtomAlloca := loopExit.NewAlloca(cg.atomType)
+	loopExit.NewStore(zeroAtom, rtAtomAlloca)
+	rtAtomGep := loopExit.NewGetElementPtr(cg.atomType, rtAtomAlloca, i32z, i32z)
+	loopExit.NewStore(rtCode, rtAtomGep)
+	loopExit.NewRet(loopExit.NewLoad(cg.atomType, rtAtomAlloca))
+}
+
+// buildStringToAtomHandoverBody generates the body of __tin_string_to_atom_handover.
+// Identical to __tin_string_to_atom except:
+//   - On static table hit: frees the input char* via _tin_handover_free (it was malloc'd).
+//   - On static miss: delegates to _tin_learn_atom_handover which takes ownership and
+//     frees the input string internally.
+func (cg *CodeGen) buildStringToAtomHandoverBody(fn *ir.Func, tableGlobal *ir.Global, countGlobal *ir.Global, tableArrType *irtypes.ArrayType) {
+	ptrParam := fn.Params[0]
+	zeroAtom := constant.NewStruct(cg.atomType, constant.NewInt(irtypes.I32, 0))
+	i64z := constant.NewInt(irtypes.I64, 0)
+	i32z := constant.NewInt(irtypes.I32, 0)
+	i32o := constant.NewInt(irtypes.I32, 1)
+
+	entry := fn.NewBlock("entry")
+
+	if len(cg.atomOrder) == 0 {
+		// No static atoms: delegate directly to _tin_learn_atom_handover.
+		rtCode := entry.NewCall(cg.ensureLearnAtomHandover(), ptrParam)
+		retAlloca := entry.NewAlloca(cg.atomType)
+		entry.NewStore(zeroAtom, retAlloca)
+		retGep := entry.NewGetElementPtr(cg.atomType, retAlloca, i32z, i32z)
+		entry.NewStore(rtCode, retGep)
+		entry.NewRet(entry.NewLoad(cg.atomType, retAlloca))
+		return
+	}
+
+	loopHeader := fn.NewBlock("loop.header")
+	loopBody := fn.NewBlock("loop.body")
+	found := fn.NewBlock("found")
+	loopCont := fn.NewBlock("loop.continue")
+	loopExit := fn.NewBlock("loop.exit")
+
+	// entry
+	countVal := entry.NewLoad(irtypes.I64, countGlobal)
+	iAlloca := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+	entry.NewBr(loopHeader)
+
+	// loop.header
+	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+	done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
+	loopHeader.NewCondBr(done, loopExit, loopBody)
+
+	// loop.body: strcmp(input, table[i].str)
+	gepStr := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
+	tableStr := loopBody.NewLoad(irtypes.I8Ptr, gepStr)
+	cmpResult := loopBody.NewCall(cg.ensureStrcmp(), ptrParam, tableStr)
+	match := loopBody.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	loopBody.NewCondBr(match, found, loopCont)
+
+	// found: free the input (it was malloc'd, we own it), then return atom.
+	gepCode := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
+	code := found.NewLoad(irtypes.I32, gepCode)
+	found.NewCall(cg.ensureHandoverFree(), ptrParam)
+	atomAlloca := found.NewAlloca(cg.atomType)
+	found.NewStore(zeroAtom, atomAlloca)
+	atomGep := found.NewGetElementPtr(cg.atomType, atomAlloca, i32z, i32z)
+	found.NewStore(code, atomGep)
+	found.NewRet(found.NewLoad(cg.atomType, atomAlloca))
+
+	// loop.continue: i++
+	iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
+	loopCont.NewStore(iNext, iAlloca)
+	loopCont.NewBr(loopHeader)
+
+	// static miss: delegate to _tin_learn_atom_handover (takes ownership, frees str).
+	rtCode := loopExit.NewCall(cg.ensureLearnAtomHandover(), ptrParam)
 	rtAtomAlloca := loopExit.NewAlloca(cg.atomType)
 	loopExit.NewStore(zeroAtom, rtAtomAlloca)
 	rtAtomGep := loopExit.NewGetElementPtr(cg.atomType, rtAtomAlloca, i32z, i32z)

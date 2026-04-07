@@ -57,6 +57,13 @@ void _tin_print_bool(int32_t v);
 void _tin_print_char(uint8_t v);
 void _tin_print_string(TinString s);
 void _tin_print_newline(void);
+// 128-bit helpers (GCC/Clang __int128 / __float128)
+void             _tin_echo_i128(__int128 v);
+void             _tin_echo_u128(unsigned __int128 v);
+void             _tin_echo_f128(__float128 v);
+const char      *_tin_i128_to_cstr(__int128 v);
+const char      *_tin_u128_to_cstr(unsigned __int128 v);
+const char      *_tin_f128_to_cstr(__float128 v);
 
 // -- Strings
 TinString _tin_str_concat(TinString a, TinString b);
@@ -121,6 +128,10 @@ void   *_tin_coro_take_result(void); // for coroutine-chaining drive loop
 void    _tin_sleep_ms(int64_t ms);
 int64_t _tin_now_ms(void);   // monotonic milliseconds
 int64_t _tin_now_us(void);   // monotonic microseconds
+int64_t _tin_now_ns(void);   // monotonic nanoseconds
+int64_t _tin_now_ns_real(void);  // wall-clock (REALTIME) nanoseconds since Unix epoch
+int     _tin_instant_rfc3339(int64_t ns, char *buf);  // format ns as RFC3339 (buf >= 32)
+int     _tin_from_rfc3339(const char *s, int64_t *ns_out);  // parse RFC3339 to ns
 
 // -- Async I/O (dedicated epoll/kqueue I/O thread)
 void    _tin_io_init(void);
@@ -135,6 +146,20 @@ void    _tin_fd_close(int32_t fd);
 // -- Runtime atom table
 int32_t     _tin_learn_atom(const char *str);
 const char *_tin_rt_atom_to_str(int32_t code);
+int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but frees str when done
+
+// -- #handover: take ownership of a C pointer returned by an extern function.
+// Platform-specific malloc size detection used by arc.c / atom.c.
+#ifdef __APPLE__
+#  include <malloc/malloc.h>
+#  define _tin_usable_size(p) ((size_t)malloc_size(p))
+#else
+#  include <malloc.h>
+#  define _tin_usable_size(p) ((size_t)malloc_usable_size(p))
+#endif
+void  _tin_handover_free(void *ptr);      // free ptr if malloc'd, no-op otherwise
+char *_tin_string_handover(char *src);    // copy src into RC alloc, free if malloc'd
+void *_tin_ptr_handover(void *src, size_t elem_size); // RC-ify any C pointer
 
 // -- Any equality
 typedef struct { int32_t tag; void *ptr; } _TinAny;

@@ -1,17 +1,48 @@
-// stdlib/guid - pseudo-GUID generation
+// stdlib/guid - Pseudo-GUID generation and type.
 //
 // Generates a random GUID-like string using libc rand().
 // Note: not cryptographically secure. Seed with srand() for varied output.
 // No extra linker flags required (all in libc).
+//
+// ## Usage
+//
+//   let id = guid::new()          // Guid struct with random value
+//   echo id.value                 // print the GUID string
+//   echo id.to_json()             // "\"xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx\""
+//
+// ## JSON interoperability
+//
+// Guid implements json::JsonSerializable and json::JsonDeserializable.
+// Struct fields of type Guid are encoded as JSON strings and decoded automatically.
+
+use json
 
 fn rand() i32 = extern("rand")
 
-// new returns a pseudo-random unique identifier string in GUID format
-fn new() string =
+// Guid holds a pseudo-random unique identifier in GUID format.
+struct Guid(json::JsonSerializable, json::JsonDeserializable) =
+  value string
+
+  // to_json implements json::JsonSerializable.
+  // Returns the GUID as a JSON-encoded string (with surrounding quotes).
+  fn to_json(this Guid) string =
+    return "\"" ++ this.value ++ "\""
+
+  // apply_json implements json::JsonDeserializable.
+  // Sets the GUID value from a string (the unescaped JSON string value).
+  fn apply_json(this *Guid, s string) bool =
+    this.value = s
+    return true
+
+  // string returns the GUID value as a plain string.
+  fn string(this Guid) string = return this.value
+
+// new returns a new pseudo-random Guid.
+fn new() Guid =
   let a = rand()
   let b = rand()
   let c = rand()
   let d = rand()
-  return "{a:08x}-{b:04x}-4{c:03x}-8{d:03x}-{a:08x}{b:08x}"
+  return Guid{value: "{a:08x}-{b:04x}-4{c:03x}-8{d:03x}-{a:08x}{b:08x}"}
 
-export { new } as guid
+export { Guid, new } as guid

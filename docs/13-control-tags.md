@@ -301,3 +301,4 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 | `#no_excl`         | macro                | Parser                           | Callable without `!` suffix                  |
 | `#no_parens`       | macro                | Parser                           | Callable without parentheses                 |
 | `#async`           | fn / method / lambda | No (enables fiber codegen)       | Runs as a cooperative green thread (fiber)   |
+| `#handover`        | fn (extern only)     | No (changes codegen)             | Transfers ownership of returned C pointer into ARC |

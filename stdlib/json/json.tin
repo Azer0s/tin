@@ -40,6 +40,21 @@ use str
 use errors
 use { Err } from errors
 
+// JsonSerializable
+
+// JsonSerializable is implemented by types that produce their own JSON encoding.
+// to_json must return a complete JSON value string, including surrounding quotes
+// for string-typed encodings (e.g. `"\"2024-01-01T00:00:00Z\""`).
+trait JsonSerializable =
+  fn to_json(this JsonSerializable) string = virtual
+
+// JsonDeserializable is implemented by types that can populate themselves from
+// a JSON string value.  apply_json receives the unescaped string (without the
+// surrounding JSON quotes) and modifies the receiver in place.
+// Returns true on success, false if the string was not a valid representation.
+trait JsonDeserializable =
+  fn apply_json(this *JsonDeserializable, s string) bool = virtual
+
 // Kind enum
 
 // Kind identifies the type of a parsed JSON value.
@@ -193,6 +208,15 @@ fn _encode_any[T](v any, _unused T) string =
   if t == 'string:
     return escape_string(v as string)
 
+  // JsonSerializable: delegate to the type's own encoding if it implements the trait.
+  let vtraits = traitof(v)
+  let vti i64 = 0
+  for vti < len(vtraits):
+    if vtraits[vti] == 'JsonSerializable:
+      let ser = v as JsonSerializable
+      return ser.to_json()
+    vti = vti + 1
+
   // Struct: fieldnames(v: any) compiled in instantiation context -> full type dispatch
   // Handles nested user-defined struct types because the dispatch table is built at the
   // call site (user module's third pass) rather than at json.tin compilation time.
@@ -251,6 +275,14 @@ fn encode[T](v T) string =
   if t == 'string:
     let sv T = v
     return escape_string(sv as string)
+
+  // JsonSerializable: delegate to the type's own JSON encoding.
+  let etraits = traitof(v)
+  let eti i64 = 0
+  for eti < len(etraits):
+    if etraits[eti] == 'JsonSerializable:
+      return _encode_any[T](v as any, v)
+    eti = eti + 1
 
   // Struct (including tuples): iterate fields via compile-time reflection on T.
   // Uses _encode_any[T] so that nested struct fields are encoded recursively with
@@ -540,6 +572,17 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
         case Kind.string_v:
           if ftype == 'string:
             setfield(zero, fname, jval.sval)
+          else:
+            // JsonDeserializable: let the field type parse itself from a string.
+            let nfv = getfield(zero, fname)
+            let nft = traitof(nfv)
+            let nfi i64 = 0
+            for nfi < len(nft):
+              if nft[nfi] == 'JsonDeserializable:
+                let ndeser = nfv as JsonDeserializable
+                ndeser.apply_json(jval.sval)
+                setfield(zero, fname, nfv)
+              nfi = nfi + 1
 
         case Kind.object_v:
           // Recursively parse deeply-nested struct objects.
@@ -607,6 +650,17 @@ fn parse[T](s string) (T, Err) =
           case Kind.string_v:
             if ftype == 'string:
               setfield(result, fname, jval.sval)
+            else:
+              // JsonDeserializable: let the field type parse itself from a string.
+              let fv = getfield(result, fname)
+              let ftraits = traitof(fv)
+              let fi i64 = 0
+              for fi < len(ftraits):
+                if ftraits[fi] == 'JsonDeserializable:
+                  let deser = fv as JsonDeserializable
+                  deser.apply_json(jval.sval)
+                  setfield(result, fname, fv)
+                fi = fi + 1
 
           case Kind.object_v:
             // Nested struct field: get the zero-valued field as any, populate it,
@@ -623,4 +677,5 @@ fn parse[T](s string) (T, Err) =
 
 export {
   Kind, Value, parse, encode,
+  JsonSerializable, JsonDeserializable,
 } as json

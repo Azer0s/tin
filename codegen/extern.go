@@ -325,8 +325,60 @@ func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtyp
 // wrapFromExtern wraps a raw C return value into a Tin fat-pointer or atom.
 // For char* -> string, it calls strlen to obtain the length.
 // For char* -> atom, it calls __tin_string_to_atom.
-func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
+//
+// When handover is true the function was annotated {#handover}: ownership of
+// the raw pointer is transferred to Tin.
+//   - char* -> atom:         frees the char* after atom lookup.
+//   - char* -> string:       RC-ifies the char* and builds a fat-ptr.
+//   - native_struct* -> *T:  loads native data, frees original, adds type_id,
+//                            stores into a fresh RC allocation.
+//   - any other T* -> T*:    calls _tin_ptr_handover to RC-ify.
+func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtypes.Type, handover bool) value.Value {
 	src := val.Type()
+
+	// #handover: take ownership of pointer returns before any type conversion.
+	if handover {
+		if _, ok := src.(*irtypes.PointerType); ok {
+			// char* → atom: handover variant frees the input string.
+			if isAtomType(target) {
+				return block.NewCall(cg.ensureStringToAtomHandover(), val)
+			}
+			// char* → fat-ptr string: _tin_string_handover + fat-ptr.
+			if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
+				handoverFn := cg.ensureExternDecl("_tin_string_handover", irtypes.I8Ptr,
+					[]*ir.Param{ir.NewParam("src", irtypes.I8Ptr)}, false)
+				i8Ptr := val
+				if !src.Equal(irtypes.I8Ptr) {
+					i8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
+				}
+				ptr := value.Value(block.NewCall(handoverFn, i8Ptr))
+				if !tgtSt.Fields[0].Equal(irtypes.I8Ptr) {
+					ptr = block.NewBitCast(ptr, tgtSt.Fields[0])
+				}
+				rawI8Ptr := value.Value(ptr)
+				if !ptr.Type().Equal(irtypes.I8Ptr) {
+					rawI8Ptr = block.NewBitCast(ptr, irtypes.I8Ptr)
+				}
+				length := block.NewCall(cg.ensureStrlenDecl(), rawI8Ptr)
+				alloca := block.NewAlloca(tgtSt)
+				block.NewStore(ptr, block.NewGetElementPtr(tgtSt, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0)))
+				block.NewStore(length, block.NewGetElementPtr(tgtSt, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1)))
+				return block.NewLoad(tgtSt, alloca)
+			}
+			// native_struct* → *TinStruct: load, free original, convert layout, RC-alloc.
+			if tgtPt, ok2 := target.(*irtypes.PointerType); ok2 {
+				tgtName := cg.typeNameOf(tgtPt.ElemType)
+				if tgtName != "" && !strings.HasSuffix(tgtName, ".native") {
+					return cg.emitStructPtrHandover(block, val, tgtPt, tgtName)
+				}
+			}
+			// All other pointer types: generic _tin_ptr_handover.
+			return cg.emitGenericPtrHandover(block, val, target)
+		}
+	}
+
 	if src.Equal(target) {
 		return val
 	}
@@ -339,23 +391,19 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 	// raw pointer -> fat-pointer: build {ptr, len}
 	if _, ok := src.(*irtypes.PointerType); ok {
 		if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
-			// Coerce pointer to the type expected by field 0
+			// Coerce pointer to the type expected by field 0.
 			var ptr value.Value
 			if src.Equal(tgtSt.Fields[0]) {
 				ptr = val
 			} else {
 				ptr = block.NewBitCast(val, tgtSt.Fields[0])
 			}
-			// Use strlen to get the length (treat as a null-terminated string)
 			strlenFn := cg.ensureStrlenDecl()
-
 			rawI8Ptr := ptr
 			if !src.Equal(irtypes.I8Ptr) {
 				rawI8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
 			}
-
 			length := block.NewCall(strlenFn, rawI8Ptr)
-			// Build the fat-pointer struct
 			alloca := block.NewAlloca(tgtSt)
 			gep0 := block.NewGetElementPtr(tgtSt, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -363,10 +411,69 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 			gep1 := block.NewGetElementPtr(tgtSt, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			block.NewStore(length, gep1)
-
 			return block.NewLoad(tgtSt, alloca)
 		}
 	}
 
 	return val
+}
+
+// emitStructPtrHandover handles {#handover} for a C native struct pointer return.
+// It loads the native struct, frees the original (if malloc'd), converts to Tin
+// layout (type_id + user fields), stores in a fresh RC allocation, and returns
+// a *TinStruct pointer.
+func (cg *CodeGen) emitStructPtrHandover(block *ir.Block, src value.Value, tgtPt *irtypes.PointerType, structName string) value.Value {
+	srcPt := src.Type().(*irtypes.PointerType)
+	// 1. Load the native C struct value.
+	nativeVal := block.NewLoad(srcPt.ElemType, src)
+	// 2. Free the original C pointer if it was malloc'd.
+	i8Src := block.NewBitCast(src, irtypes.I8Ptr)
+	block.NewCall(cg.ensureHandoverFree(), i8Src)
+	// 3. Convert native → Tin struct (adds type_id and vtable stubs).
+	tinVal, err := cg.wrapNativeStructToTin(block, nativeVal, structName)
+	if err != nil {
+		return src // fallback: return original (already freed, but best-effort)
+	}
+	// 4. RC-allocate memory for the Tin struct, store, return typed pointer.
+	tinSize := cg.llvmSizeOf(block, tgtPt.ElemType)
+	rcRaw := block.NewCall(cg.ensureRCAlloc(), tinSize)
+	tinPtr := block.NewBitCast(rcRaw, tgtPt)
+	block.NewStore(tinVal, tinPtr)
+	return tinPtr
+}
+
+// emitGenericPtrHandover handles {#handover} for any other pointer type by
+// calling _tin_ptr_handover(src, elem_size), which copies into an RC allocation
+// and frees the original if it was malloc'd.
+func (cg *CodeGen) emitGenericPtrHandover(block *ir.Block, src value.Value, target irtypes.Type) value.Value {
+	handoverFn := cg.ensureExternDecl("_tin_ptr_handover", irtypes.I8Ptr,
+		[]*ir.Param{
+			ir.NewParam("src", irtypes.I8Ptr),
+			ir.NewParam("elem_size", irtypes.I64),
+		}, false)
+
+	// Determine element size from target type.
+	// Use 0 for void* / i8* targets (unknown size; relies on malloc_usable_size).
+	var elemSize value.Value
+	if tgtPt, ok := target.(*irtypes.PointerType); ok &&
+		tgtPt.ElemType != nil &&
+		!irtypes.IsVoid(tgtPt.ElemType) &&
+		!tgtPt.ElemType.Equal(irtypes.I8) {
+		elemSize = cg.llvmSizeOf(block, tgtPt.ElemType)
+	} else {
+		elemSize = constant.NewInt(irtypes.I64, 0)
+	}
+
+	// Cast source to i8* for _tin_ptr_handover.
+	i8Ptr := value.Value(src)
+	if !src.Type().Equal(irtypes.I8Ptr) {
+		i8Ptr = block.NewBitCast(src, irtypes.I8Ptr)
+	}
+	result := block.NewCall(handoverFn, i8Ptr, elemSize)
+
+	// Cast result to the target pointer type.
+	if target.Equal(irtypes.I8Ptr) {
+		return result
+	}
+	return block.NewBitCast(result, target)
 }

@@ -1,22 +1,18 @@
-// stress_tests/recursive_generic_structs.tin
+// stress_tests/recursive_generic_structs_auto.tin
 //
-// Tests: recursive and mutually-referential generic struct definitions,
-// generic linked-list, binary tree, and result/option types implemented
-// as structs (not language builtins). The compiler must correctly size,
-// initialize, and traverse these heap-allocated recursive types.
+// Duplicate of recursive_generic_structs.tin using struct pointer literals
+// (&struct{}) instead of mem::calloc for allocation.  ARC manages all memory
+// automatically: the release of the root variable cascades through the whole
+// chain via walkRCStructFields.  No manual cleanup is needed.
 //
-// Compiler paths exercised:
-//   - Generic struct with pointer-to-self field (recursive type)
-//   - Monomorphization of recursive generic structs at multiple types
-//   - Methods on recursive generic structs that call themselves
-//   - Generic type parameter threading through recursive calls
-//   - Static constructor methods on generic structs
+// Each test builds its structure inline (single root scope variable) to avoid
+// double-free from multiple isHeapOwned scope variables pointing into the
+// same chain.
 
 use assert
-use mem
 
 // ---------------------------------------------------------------------------
-// 1. Linked list node (singly linked, heap allocated)
+// 1. Linked list node (singly linked, RC-allocated via &struct{})
 // ---------------------------------------------------------------------------
 
 struct list_node[t] =
@@ -24,18 +20,7 @@ struct list_node[t] =
   next *list_node[t]    // nil = end of list
 
   static fn cons(val t, next *list_node[t]) *list_node[t] =
-    let n *list_node[t] = mem::calloc(1, sizeof(list_node[t])).(*list_node[t])
-    (*n).val = val
-    (*n).next = next
-    return n
-
-  // Frees all successor nodes recursively (not self).
-  // Caller must free self after calling deinit.
-  fn deinit(this list_node[t]) void =
-    if this.next != nil:
-      (*this.next).deinit()
-      mem::free(this.next)
-      this.next = nil
+    return &list_node[t]{val: val, next: next}
 
 fn list_len[t](node *list_node[t]) i64 =
   if node == nil:
@@ -53,7 +38,7 @@ fn list_get[t](node *list_node[t], idx i64) t =
   return list_get((*node).next, idx - 1)
 
 // ---------------------------------------------------------------------------
-// 2. Binary tree (generic, heap allocated)
+// 2. Binary tree (generic, RC-allocated via &struct{})
 // ---------------------------------------------------------------------------
 
 struct tree_node[t] =
@@ -62,30 +47,10 @@ struct tree_node[t] =
   right *tree_node[t]
 
   static fn leaf(v t) *tree_node[t] =
-    let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
-    (*n).val = v
-    (*n).left = nil
-    (*n).right = nil
-    return n
+    return &tree_node[t]{val: v, left: nil, right: nil}
 
   static fn branch(v t, l *tree_node[t], r *tree_node[t]) *tree_node[t] =
-    let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
-    (*n).val = v
-    (*n).left = l
-    (*n).right = r
-    return n
-
-  // Frees all descendant nodes recursively (not self).
-  // Caller must free self after calling deinit.
-  fn deinit(this tree_node[t]) void =
-    if this.left != nil:
-      (*this.left).deinit()
-      mem::free(this.left)
-      this.left = nil
-    if this.right != nil:
-      (*this.right).deinit()
-      mem::free(this.right)
-      this.right = nil
+    return &tree_node[t]{val: v, left: l, right: r}
 
 fn tree_sum(root *tree_node[i64]) i64 =
   if root == nil:
@@ -107,8 +72,7 @@ fn tree_count[t](root *tree_node[t]) i64 =
   return 1 + tree_count((*root).left) + tree_count((*root).right)
 
 // ---------------------------------------------------------------------------
-// 3. Option type (generic, value-semantic via tagged union approach)
-//    Simulated as a struct since Tin doesn't have built-in Option.
+// 3. Option type
 // ---------------------------------------------------------------------------
 
 struct option[t] =
@@ -132,7 +96,7 @@ struct option[t] =
     return option[r]::none()
 
 // ---------------------------------------------------------------------------
-// 4. Result type (generic over value and error string)
+// 4. Result type
 // ---------------------------------------------------------------------------
 
 struct result[t] =
@@ -161,41 +125,25 @@ fn safe_div(a i64, b i64) result[i64] =
 // ---------------------------------------------------------------------------
 
 test "linked list construction and length" =
-  // 3 -> 2 -> 1 -> nil
-  let n1 = list_node[i64]::cons(1, nil)
-  let n2 = list_node[i64]::cons(2, n1)
-  let n3 = list_node[i64]::cons(3, n2)
+  // Build inline: only root is a scope variable; ARC frees the whole chain.
+  let n3 = list_node[i64]::cons(3, list_node[i64]::cons(2, list_node[i64]::cons(1, nil)))
   assert::equals(list_len(n3), 3)
-  (*n3).deinit()
-  mem::free(n3)
 
 test "linked list sum" =
-  let n1 = list_node[i64]::cons(10, nil)
-  let n2 = list_node[i64]::cons(20, n1)
-  let n3 = list_node[i64]::cons(30, n2)
+  let n3 = list_node[i64]::cons(30, list_node[i64]::cons(20, list_node[i64]::cons(10, nil)))
   assert::equals(list_sum_i64(n3), 60)
-  (*n3).deinit()
-  mem::free(n3)
 
 test "linked list element access" =
-  let n1 = list_node[i64]::cons(100, nil)
-  let n2 = list_node[i64]::cons(200, n1)
-  let n3 = list_node[i64]::cons(300, n2)
+  let n3 = list_node[i64]::cons(300, list_node[i64]::cons(200, list_node[i64]::cons(100, nil)))
   assert::equals(list_get(n3, 0), 300)
   assert::equals(list_get(n3, 1), 200)
   assert::equals(list_get(n3, 2), 100)
-  (*n3).deinit()
-  mem::free(n3)
 
 test "linked list with string type" =
-  let n1 = list_node[string]::cons("c", nil)
-  let n2 = list_node[string]::cons("b", n1)
-  let n3 = list_node[string]::cons("a", n2)
+  let n3 = list_node[string]::cons("a", list_node[string]::cons("b", list_node[string]::cons("c", nil)))
   assert::equals_str(list_get(n3, 0), "a")
   assert::equals_str(list_get(n3, 1), "b")
   assert::equals_str(list_get(n3, 2), "c")
-  (*n3).deinit()
-  mem::free(n3)
 
 test "binary tree sum" =
   //       5
@@ -203,34 +151,16 @@ test "binary tree sum" =
   //     3   7
   //    / \
   //   1   4
-  let t1 = tree_node[i64]::leaf(1)
-  let t4 = tree_node[i64]::leaf(4)
-  let t3 = tree_node[i64]::branch(3, t1, t4)
-  let t7 = tree_node[i64]::leaf(7)
-  let root = tree_node[i64]::branch(5, t3, t7)
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
   assert::equals(tree_sum(root), 20)
-  (*root).deinit()
-  mem::free(root)
 
 test "binary tree depth" =
-  let t1 = tree_node[i64]::leaf(1)
-  let t4 = tree_node[i64]::leaf(4)
-  let t3 = tree_node[i64]::branch(3, t1, t4)
-  let t7 = tree_node[i64]::leaf(7)
-  let root = tree_node[i64]::branch(5, t3, t7)
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
   assert::equals(tree_depth(root), 3)
-  (*root).deinit()
-  mem::free(root)
 
 test "binary tree count" =
-  let t1 = tree_node[i64]::leaf(1)
-  let t4 = tree_node[i64]::leaf(4)
-  let t3 = tree_node[i64]::branch(3, t1, t4)
-  let t7 = tree_node[i64]::leaf(7)
-  let root = tree_node[i64]::branch(5, t3, t7)
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
   assert::equals(tree_count(root), 5)
-  (*root).deinit()
-  mem::free(root)
 
 test "option some unwrap_or" =
   let o = option[i64]::some(42)
