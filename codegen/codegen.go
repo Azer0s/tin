@@ -254,6 +254,11 @@ type CodeGen struct {
 	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
 	noWarnAsyncMain bool
 
+	// useDoubleForF128: when true, the f128 type is lowered to f64/double instead
+	// of fp128. Used on Apple arm64 where long double == double and compiler-rt
+	// does not provide the fp128 software-float routines (___eqtf2 etc.).
+	useDoubleForF128 bool
+
 	// Atom type and registry.
 	// atomType is the named LLVM struct %__atom = type { i32 }.
 	// atomCodes maps atom name -> CRC32 code (collision-resolved).
@@ -495,8 +500,9 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)        { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool) { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool)  { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
 
 // HasTests reports whether the source contained at least one test block.
 // Only meaningful after Generate has been called.

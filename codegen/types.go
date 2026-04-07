@@ -268,6 +268,10 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	case "f64":
 		return irtypes.Double, nil
 	case "f128":
+		if cg.useDoubleForF128 {
+			return irtypes.Double, nil
+		}
+
 		return irtypes.FP128, nil
 	case "string":
 		// fat pointer: {i8*, i64}

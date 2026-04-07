@@ -60,9 +60,14 @@ void _tin_print_newline(void);
 // 128-bit helpers.
 // __int128 / unsigned __int128 are universally available on 64-bit targets.
 // For fp128 we use mode(TF) - GCC/Clang's TFmode - which maps directly to
-// LLVM fp128 on all supported architectures (x86-64, AArch64, ...) without
+// LLVM fp128 on all supported architectures (x86-64, Linux AArch64) without
 // needing __float128 (x86-only extension) or _Float128 (requires glibc header).
+// Apple arm64 does not support TF mode; fall back to long double (64-bit there).
+#if defined(__APPLE__) && defined(__aarch64__)
+typedef long double tin_fp128_t;
+#else
 typedef float tin_fp128_t __attribute__((mode(TF)));
+#endif
 void             _tin_echo_i128(__int128 v);
 void             _tin_echo_u128(unsigned __int128 v);
 void             _tin_echo_f128(tin_fp128_t v);

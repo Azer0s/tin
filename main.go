@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
@@ -39,6 +39,7 @@ Warning flags:
 
 Run/test flags:
   -v-valgrind      run binary under valgrind --leak-check=full (run, test)
+  -v-leaks         run binary under leaks --atExit (run, test; macOS only)
 
 In-source directives (at the top of the .tin file):
   //!-lNAME            link with libNAME
@@ -188,25 +189,29 @@ func main() {
 		}
 
 		if fi, statErr := os.Stat(file); statErr == nil && fi.IsDir() {
-			// Collect extra link flags and -v-valgrind from remaining args.
+			// Collect extra link flags and memory-checker flag from remaining args.
 			var extraFlags []string
 
-			useValgrind := false
+			memcheck := ""
 
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
 				a := os.Args[i]
 				if a == "-v-valgrind" {
-					useValgrind = true
+					memcheck = "valgrind"
+				} else if a == "-v-leaks" {
+					memcheck = "leaks"
 				} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
 					strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 					extraFlags = append(extraFlags, a)
 				}
 			}
 
+			validateMemcheck(memcheck)
+
 			if recursive {
-				runDirTestsRecursive(file, extraFlags, useValgrind)
+				runDirTestsRecursive(file, extraFlags, memcheck)
 			} else {
-				runDirTests(file, extraFlags, useValgrind)
+				runDirTests(file, extraFlags, memcheck)
 			}
 
 			return
@@ -274,6 +279,11 @@ func main() {
 
 	if noWarnAsyncMain {
 		cg.SetNoWarnAsyncMain(true)
+	}
+
+	// On Apple arm64, long double == double and compiler-rt has no fp128 routines.
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		cg.SetUseDoubleForF128(true)
 	}
 
 	mod, cgErr := cg.Generate(prog)
@@ -394,15 +404,17 @@ func main() {
 	case "run", "test":
 		tmpRel := strings.TrimSuffix(file, filepath.Ext(file)) + ".tin.out"
 		tmp, _ := filepath.Abs(tmpRel)
-		// Collect extra link inputs and -v-valgrind for run/test mode too.
+		// Collect extra link inputs and memory-checker flag for run/test mode.
 		var extraObjs []string
 
-		useValgrind := false
+		memcheck := ""
 
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
 			if a == "-v-valgrind" {
-				useValgrind = true
+				memcheck = "valgrind"
+			} else if a == "-v-leaks" {
+				memcheck = "leaks"
 			} else if a == "-cflag" {
 				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
@@ -421,13 +433,9 @@ func main() {
 			_ = os.Remove(name)
 		}(tmp)
 
-		var run *exec.Cmd
-		if useValgrind {
-			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp)
-		} else {
-			run = exec.Command(tmp)
-		}
+		validateMemcheck(memcheck)
 
+		run := memcheckCmd(memcheck, tmp)
 		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
 
@@ -478,11 +486,24 @@ func clangMajorVersion() int {
 	return major
 }
 
-// fixCoroAttrs rewrites the string attribute form emitted by the llir library
-// ("presplitcoroutine") to the LLVM keyword attribute form (presplitcoroutine)
-// that the coro-split pass requires to detect coroutines.
+// fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
+// produce valid IR for the installed clang version:
+//
+//  1. "presplitcoroutine" string attr -> keyword attr (required by coro-split).
+//  2. On macOS Apple Silicon with clang 21, llvm.coro.end requires i1 return
+//     type and ptr argument; patch the declaration and call sites there.
 func fixCoroAttrs(ir string) string {
-	return strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
+	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
+
+	// Observed on macOS Apple Silicon (arm64) with clang 21: llvm.coro.end
+	// requires i1 return type and ptr argument (rather than void/i8*).
+	// Use a named result to avoid shifting implicit SSA slot numbering.
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && clangMajorVersion() == 21 {
+		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
+		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
+	}
+
+	return ir
 }
 
 // compileIR writes the LLVM IR to a temp .ll file and invokes clang.
@@ -719,17 +740,46 @@ func collectTinFiles(root string) []string {
 	return files
 }
 
+// validateMemcheck checks that the requested memory checker is available on
+// the current platform and exits with a helpful error if not.
+func validateMemcheck(memcheck string) {
+	switch memcheck {
+	case "valgrind":
+		if runtime.GOOS == "darwin" {
+			if _, err := exec.LookPath("valgrind"); err != nil {
+				die("valgrind is not supported on macOS; did you mean -v-leaks?")
+			}
+		}
+	case "leaks":
+		if runtime.GOOS != "darwin" {
+			die("leaks is a macOS-only tool; did you mean -v-valgrind?")
+		}
+	}
+}
+
+// memcheckCmd builds the exec.Cmd to run binary under the requested checker.
+func memcheckCmd(memcheck, binary string) *exec.Cmd {
+	switch memcheck {
+	case "valgrind":
+		return exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", binary)
+	case "leaks":
+		return exec.Command("leaks", "--atExit", "--", binary)
+	default:
+		return exec.Command(binary)
+	}
+}
+
 // runDirTestsRecursive collects all .tin files under root and runs them
 // together as a single test batch with one combined summary.
-func runDirTestsRecursive(root string, extraFlags []string, useValgrind bool) {
+func runDirTestsRecursive(root string, extraFlags []string, memcheck string) {
 	files := collectTinFiles(root)
-	runFileTests(files, extraFlags, useValgrind)
+	runFileTests(files, extraFlags, memcheck)
 }
 
 // runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
-func runDirTests(dir string, extraFlags []string, useValgrind bool) {
+func runDirTests(dir string, extraFlags []string, memcheck string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		die("cannot read directory %s: %v", dir, err)
@@ -743,14 +793,13 @@ func runDirTests(dir string, extraFlags []string, useValgrind bool) {
 		}
 	}
 
-	runFileTests(files, extraFlags, useValgrind)
+	runFileTests(files, extraFlags, memcheck)
 }
 
 // runFileTests runs the given .tin files that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
-// if any file has failing tests.  When useValgrind is true, each test binary
-// is run under valgrind --leak-check=full --error-exitcode=1.
-func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
+// if any file has failing tests.  memcheck is "", "valgrind", or "leaks".
+func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 	type result struct {
 		file    string
 		passed  bool
@@ -758,10 +807,17 @@ func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 		reason  string
 	}
 
+	wd, _ := os.Getwd()
+
 	var results []result
 
 	for _, fpath := range fpaths {
-		fname := filepath.Base(fpath)
+		rel, relErr := filepath.Rel(wd, fpath)
+		if relErr != nil {
+			rel = fpath
+		}
+
+		fname := rel
 
 		src, err := os.ReadFile(fpath)
 		if err != nil {
@@ -793,6 +849,10 @@ func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
+
+		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+			cg.SetUseDoubleForF128(true)
+		}
 
 		type modIface interface{ String() string }
 
@@ -899,29 +959,23 @@ func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 			continue
 		}
 
-		var runOut bytes.Buffer
+		fmt.Printf("%s\n\n", fname)
 
-		var run *exec.Cmd
-		if useValgrind {
-			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp.Name())
-		} else {
-			run = exec.Command(tmp.Name())
-		}
+		run := memcheckCmd(memcheck, tmp.Name())
 
-		run.Stdout = &runOut
-		run.Stderr = &runOut
+		run.Stdout = os.Stdout
+		run.Stderr = os.Stderr
 
 		passed := true
 		if runErr := run.Run(); runErr != nil {
 			passed = false
 		}
 
+		fmt.Println("------------------------------------------------")
+
 		reason := ""
 
 		if !passed {
-			fmt.Printf("\n=== FAIL %s ===\n", fname)
-			fmt.Print(runOut.String())
-
 			reason = "test failures"
 		}
 
