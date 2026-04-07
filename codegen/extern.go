@@ -369,6 +369,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0)))
 				block.NewStore(length, block.NewGetElementPtr(tgtSt, alloca,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1)))
+
 				return block.NewLoad(tgtSt, alloca)
 			}
 			// native_struct* → *TinStruct: load, free original, convert layout, RC-alloc.
@@ -418,6 +419,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 			gep1 := block.NewGetElementPtr(tgtSt, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			block.NewStore(length, gep1)
+
 			return block.NewLoad(tgtSt, alloca)
 		}
 	}
@@ -446,6 +448,7 @@ func (cg *CodeGen) emitStructPtrHandover(block *ir.Block, src value.Value, tgtPt
 	rcRaw := block.NewCall(cg.ensureRCAlloc(), tinSize)
 	tinPtr := block.NewBitCast(rcRaw, tgtPt)
 	block.NewStore(tinVal, tinPtr)
+
 	return tinPtr
 }
 
