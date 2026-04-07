@@ -866,6 +866,17 @@ func (cg *CodeGen) emitHeapChainRelease(block *ir.Block, heapPtr value.Value, de
 
 	elemType := ptrType.ElemType
 
+	// When the heap block holds a primitive leaf with no RC sub-fields, skip
+	// the load entirely: loading from a potentially-NULL heapPtr would
+	// segfault, and emitRelease would be a no-op anyway.  _tin_release is
+	// null-safe, so call it directly.
+	if depth == 1 && !cg.elemNeedsRelease(elemType) {
+		rcI8 := block.NewBitCast(heapPtr, irtypes.I8Ptr)
+		block.NewCall(cg.ensureRelease(), rcI8)
+
+		return
+	}
+
 	// Load T from the heap block.
 	tVal := block.NewLoad(elemType, heapPtr)
 
