@@ -2356,4 +2356,3 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 
 	return afterBlock, nil
 }
-
