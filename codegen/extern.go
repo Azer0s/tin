@@ -362,6 +362,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 				if !ptr.Type().Equal(irtypes.I8Ptr) {
 					rawI8Ptr = block.NewBitCast(ptr, irtypes.I8Ptr)
 				}
+
 				length := block.NewCall(cg.ensureStrlenDecl(), rawI8Ptr)
 				alloca := block.NewAlloca(tgtSt)
 				block.NewStore(ptr, block.NewGetElementPtr(tgtSt, alloca,
@@ -401,6 +402,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 			} else {
 				ptr = block.NewBitCast(val, tgtSt.Fields[0])
 			}
+
 			strlenFn := cg.ensureStrlenDecl()
 
 			rawI8Ptr := ptr
@@ -474,6 +476,7 @@ func (cg *CodeGen) emitGenericPtrHandover(block *ir.Block, src value.Value, targ
 	if !src.Type().Equal(irtypes.I8Ptr) {
 		i8Ptr = block.NewBitCast(src, irtypes.I8Ptr)
 	}
+
 	result := block.NewCall(handoverFn, i8Ptr, elemSize)
 
 	// Cast result to the target pointer type.

@@ -122,6 +122,7 @@ func (cg *CodeGen) ensureStringToAtomHandover() *ir.Func {
 
 	cg.strToAtomHandoverFn = cg.mod.NewFunc("__tin_string_to_atom_handover", cg.atomType,
 		ir.NewParam("str", irtypes.I8Ptr))
+
 	return cg.strToAtomHandoverFn
 }
 
@@ -349,6 +350,7 @@ func (cg *CodeGen) buildStringToAtomHandoverBody(fn *ir.Func, tableGlobal *ir.Gl
 		retGep := entry.NewGetElementPtr(cg.atomType, retAlloca, i32z, i32z)
 		entry.NewStore(rtCode, retGep)
 		entry.NewRet(entry.NewLoad(cg.atomType, retAlloca))
+
 		return
 	}
 

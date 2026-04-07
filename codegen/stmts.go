@@ -728,6 +728,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				if sa, ok := callExpr.Func.(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
 					baseName := sa.Path[0]
 					last := sa.Path[len(sa.Path)-1]
+
 					if i := strings.Index(baseName, "["); i >= 0 {
 						typeParam := strings.TrimSuffix(baseName[i+1:], "]")
 						base := baseName[:i]

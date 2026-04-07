@@ -2173,6 +2173,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					if irtypes.IsVoid(result2.Type()) {
 						return nil, nil
 					}
+
 					return result2, nil
 				}
 			}
@@ -3353,6 +3354,7 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 			discarded := block.NewSelect(cond, zero, thenVal)
 			cg.emitRelease(block, discarded)
 		}
+
 		if elseIsTemp {
 			// Release elseVal when the then branch was selected (cond == true).
 			discarded := block.NewSelect(cond, elseVal, zero)
