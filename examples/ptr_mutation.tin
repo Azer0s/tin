@@ -141,20 +141,20 @@ test "triple pointer: chain redirect then write" =
 test "string field: relabel releases old string, retains new" =
   let n = named{label: "hello", value: 1}
   relabel(&n, "world")
-  assert::equals_str(n.label, "world")
+  assert::equals(n.label, "world")
   assert::equals(n.value, 1)
 
 test "string field: append_label concatenates in place" =
   let n = named{label: "foo", value: 2}
   append_label(&n, "-bar")
-  assert::equals_str(n.label, "foo-bar")
+  assert::equals(n.label, "foo-bar")
 
 test "string field: multiple relabels stay clean" =
   let n = named{label: "v1", value: 0}
   relabel(&n, "v2")
   relabel(&n, "v3")
   relabel(&n, "v4")
-  assert::equals_str(n.label, "v4")
+  assert::equals(n.label, "v4")
 
 test "heap struct: single pointer mutation propagates" =
   let p = &point{x: 7, y: 8}

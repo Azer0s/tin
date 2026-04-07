@@ -29,11 +29,11 @@
       "params": [
         {
           "name": "expected",
-          "type": "i64"
+          "type": "t"
         },
         {
           "name": "actual",
-          "type": "i64"
+          "type": "t"
         }
       ],
       "retType": ""
@@ -49,36 +49,6 @@
         {
           "name": "b",
           "type": "i64"
-        }
-      ],
-      "retType": ""
-    },
-    {
-      "name": "equals_str",
-      "irName": "assert__equals_str",
-      "params": [
-        {
-          "name": "expected",
-          "type": "string"
-        },
-        {
-          "name": "actual",
-          "type": "string"
-        }
-      ],
-      "retType": ""
-    },
-    {
-      "name": "equals_f64",
-      "irName": "assert__equals_f64",
-      "params": [
-        {
-          "name": "expected",
-          "type": "f64"
-        },
-        {
-          "name": "actual",
-          "type": "f64"
         }
       ],
       "retType": ""

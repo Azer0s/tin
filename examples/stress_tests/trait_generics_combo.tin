@@ -152,23 +152,23 @@ struct dual_container =
 
 test "describe_item with widget" =
   let w = widget{name_field: "btn", size_field: 5, color: "red"}
-  assert::equals_str(describe_item(w), "btn/red measures 25")
+  assert::equals(describe_item(w), "btn/red measures 25")
 
 test "describe_item with gadget" =
   let g = gadget{name_field: "knob", size_field: 8}
-  assert::equals_str(describe_item(g), "gadget:knob measures 16")
+  assert::equals(describe_item(g), "gadget:knob measures 16")
 
 test "rank widget above baseline" =
   let w = widget{name_field: "w", size_field: 5, color: "blue"}
-  assert::equals_str(rank(w, 20), "w/blue is above baseline")
+  assert::equals(rank(w, 20), "w/blue is above baseline")
 
 test "rank widget below baseline" =
   let w = widget{name_field: "w", size_field: 3, color: "blue"}
-  assert::equals_str(rank(w, 20), "w/blue is below baseline")
+  assert::equals(rank(w, 20), "w/blue is below baseline")
 
 test "rank widget equals baseline" =
   let w = widget{name_field: "w", size_field: 5, color: "blue"}
-  assert::equals_str(rank(w, 25), "w/blue equals baseline")
+  assert::equals(rank(w, 25), "w/blue equals baseline")
 
 test "summarize_all uses default for gadget (no summary override)" =
   let items [gadget] = [
@@ -177,8 +177,8 @@ test "summarize_all uses default for gadget (no summary override)" =
   ]
   let summaries = summarize_all(items)
   // gadget doesn't override summary(), uses default "item"
-  assert::equals_str(summaries[0], "item")
-  assert::equals_str(summaries[1], "item")
+  assert::equals(summaries[0], "item")
+  assert::equals(summaries[1], "item")
 
 test "summarize_all uses override for widget" =
   let items [widget] = [
@@ -186,7 +186,7 @@ test "summarize_all uses override for widget" =
     widget{name_field: "y", size_field: 4, color: "r"},
   ]
   let summaries = summarize_all(items)
-  assert::equals_str(summaries[0], "widget[x, size=3, color=g]")
+  assert::equals(summaries[0], "widget[x, size=3, color=g]")
 
 test "find_largest across widgets" =
   let items [widget] = [
@@ -199,13 +199,13 @@ test "find_largest across widgets" =
 test "compare_pair widgets" =
   let big = widget{name_field: "big", size_field: 10, color: "r"}
   let small = widget{name_field: "small", size_field: 2, color: "b"}
-  assert::equals_str(compare_pair(big, small), "big/r > small/b")
+  assert::equals(compare_pair(big, small), "big/r > small/b")
 
 test "named_size forward field trait" =
   let w = widget{name_field: "btn", size_field: 7, color: "g"}
-  assert::equals_str(w.info(), "btn(size=7)")
+  assert::equals(w.info(), "btn(size=7)")
   let g = gadget{name_field: "knob", size_field: 4}
-  assert::equals_str(g.info(), "knob(size=4)")
+  assert::equals(g.info(), "knob(size=4)")
 
 test "dual_container independent type counts" =
   let dc = dual_container{
@@ -215,4 +215,4 @@ test "dual_container independent type counts" =
   assert::equals(dc.count_ints(), 3)
   assert::equals(dc.count_strings(), 2)
   assert::equals(dc.get_int(1), 2)
-  assert::equals_str(dc.get_string(0), "a")
+  assert::equals(dc.get_string(0), "a")

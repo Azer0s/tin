@@ -610,7 +610,18 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 
 	for i, ft := range fieldTypes {
 		_, isNestedStruct := ft.(*irtypes.StructType)
-		if !isRCTrackedType(ft) && !isNestedStruct {
+
+		// Owning pointer to a known Tin struct: must be recursively released/retained
+		// just like an inline nested struct.  Only non-weak fields qualify.
+		isTinStructPtr := false
+
+		if pt, ok2 := ft.(*irtypes.PointerType); ok2 {
+			if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+				_, isTinStructPtr = cg.structTypes[innerSt.Name()]
+			}
+		}
+
+		if !isRCTrackedType(ft) && !isNestedStruct && !isTinStructPtr {
 			continue
 		}
 		// Weak fields are non-owning: skip retain/release entirely.
@@ -666,6 +677,19 @@ func (cg *CodeGen) emitReleaseNoDeinit(block *ir.Block, val value.Value) {
 
 func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit bool) {
 	t := val.Type()
+	// Owning pointer to a known Tin struct: delegate to the null-safe per-struct
+	// release helper so that its RC-tracked and nested-struct-pointer fields are
+	// recursively released before the block itself is freed.
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+			if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+				relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+				block.NewCall(relFn, val)
+
+				return
+			}
+		}
+	}
 	// Closure fat pointer: release the env via _tin_release_closure (null-safe).
 	if isFatFnPtr(t) {
 		envField := block.NewExtractValue(val, 1)
@@ -777,6 +801,59 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 	})
 }
 
+// ensureStructPtrReleaseFn lazily creates (or returns a cached) null-safe pointer
+// release function for the named Tin struct:
+//
+//	define void @{structName}__release_ptr({struct}* %ptr) {
+//	entry:
+//	  %is_null = icmp eq {struct}* %ptr, null
+//	  br i1 %is_null, label %exit, label %do_release
+//	do_release:
+//	  %val = load {struct}, {struct}* %ptr
+//	  ; release RC-tracked fields
+//	  %ptr_i8 = bitcast {struct}* %ptr to i8*
+//	  call void @_tin_release(i8* %ptr_i8)
+//	  br label %exit
+//	exit:
+//	  ret void
+//	}
+//
+// This is used by emitScopeRelease / emitAllScopeReleases when a scope variable
+// has type *T (pointer to a Tin struct) so that a safe release is emitted without
+// splitting the caller's basic block.
+func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.StructType) *ir.Func {
+	if fn, ok := cg.structPtrReleaseFns[structName]; ok {
+		return fn
+	}
+
+	ptrType := irtypes.NewPointer(st)
+	fnName := structName + "__release_ptr"
+	fn := cg.mod.NewFunc(fnName, irtypes.Void, ir.NewParam("ptr", ptrType))
+	// Cache before generating body to handle any hypothetical recursive reference.
+	cg.structPtrReleaseFns[structName] = fn
+
+	entry := fn.NewBlock("entry")
+	doRelease := fn.NewBlock("do_release")
+	exit := fn.NewBlock("exit")
+
+	// Null guard.
+	isNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(ptrType))
+	entry.NewCondBr(isNull, exit, doRelease)
+
+	// Load the struct and release its RC-tracked fields.
+	structVal := doRelease.NewLoad(st, fn.Params[0])
+	cg.emitRelease(doRelease, structVal)
+
+	// Free the RC block itself.
+	ptrI8 := doRelease.NewBitCast(fn.Params[0], irtypes.I8Ptr)
+	doRelease.NewCall(cg.ensureRelease(), ptrI8)
+	doRelease.NewBr(exit)
+
+	exit.NewRet(nil)
+
+	return fn
+}
+
 // emitHeapChainRelease releases a heap-promoted pointer chain of the given depth.
 // For depth=1 (*T): loads T, releases T's ARC sub-fields, frees the RC block.
 // For depth>1 (**T, ***T, ...): recursively releases inner chains before freeing
@@ -788,6 +865,17 @@ func (cg *CodeGen) emitHeapChainRelease(block *ir.Block, heapPtr value.Value, de
 	}
 
 	elemType := ptrType.ElemType
+
+	// When the heap block holds a primitive leaf with no RC sub-fields, skip
+	// the load entirely: loading from a potentially-NULL heapPtr would
+	// segfault, and emitRelease would be a no-op anyway.  _tin_release is
+	// null-safe, so call it directly.
+	if depth == 1 && !cg.elemNeedsRelease(elemType) {
+		rcI8 := block.NewBitCast(heapPtr, irtypes.I8Ptr)
+		block.NewCall(cg.ensureRelease(), rcI8)
+
+		return
+	}
 
 	// Load T from the heap block.
 	tVal := block.NewLoad(elemType, heapPtr)
@@ -826,6 +914,22 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// heap-promoting callee.  Use chain release to free all RC blocks.
 		if entry.isHeapOwned {
 			heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
+			// Depth-1 pointer to a Tin struct: use the null-safe per-struct helper
+			// so that nullable error pointers (nil on success paths) are handled
+			// without a load-from-null crash.
+			if entry.heapOwnedDepth == 1 {
+				if innerPtr, isPtrType := ptrType.ElemType.(*irtypes.PointerType); isPtrType {
+					if st, ok := innerPtr.ElemType.(*irtypes.StructType); ok && st.Name() != "" {
+						if _, inStructTypes := cg.structTypes[st.Name()]; inStructTypes {
+							relFn := cg.ensureStructPtrReleaseFn(st.Name(), st)
+							block.NewCall(relFn, heapPtr)
+
+							continue
+						}
+					}
+				}
+			}
+
 			cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 
 			continue
@@ -874,6 +978,20 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {
 				heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
+				// Depth-1 pointer to a Tin struct: null-safe per-struct helper.
+				if entry.heapOwnedDepth == 1 {
+					if innerPtr, isPtrType := ptrType.ElemType.(*irtypes.PointerType); isPtrType {
+						if st, ok := innerPtr.ElemType.(*irtypes.StructType); ok && st.Name() != "" {
+							if _, inStructTypes := cg.structTypes[st.Name()]; inStructTypes {
+								relFn := cg.ensureStructPtrReleaseFn(st.Name(), st)
+								block.NewCall(relFn, heapPtr)
+
+								continue
+							}
+						}
+					}
+				}
+
 				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 
 				continue
@@ -1120,6 +1238,19 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 	}
 
 	block.NewCall(cg.ensurePanicFn(), msgPtr)
+	// If _tin_panic returns (a deferred function called recover()), all of this
+	// function's defer lambdas have already run inside _tin_panic.  Their heap
+	// envs were not freed by _tin_panic, so free them here.  This is the only
+	// cleanup path for the panic branch; the normal exit path (emitDefers) is
+	// never reached when panic() is called directly in the function body.
+	for _, env := range cg.pendingDeferEnvs {
+		if _, isNull := env.(*constant.Null); !isNull {
+			block.NewCall(cg.ensureFree(), env)
+		}
+	}
+	// Also release ARC-tracked scope variables so that e.g. a [any] array
+	// allocated before the panic call is freed even when recover() is in play.
+	cg.emitAllScopeReleases(block, "")
 	// _tin_panic normally calls exit(1) and never returns.  However, when a
 	// deferred function calls recover(), _tin_panic returns instead of exiting.
 	// We must emit a valid terminator so the IR block is well-formed.
@@ -1214,4 +1345,79 @@ func (cg *CodeGen) ensureSnprintf() *ir.Func {
 		[]*ir.Param{ir.NewParam("buf", irtypes.I8Ptr), ir.NewParam("n", irtypes.I64), ir.NewParam("format", irtypes.I8Ptr)}, true)
 
 	return cg.sprintfFn
+}
+
+// ---------------------------------------------------------------------------
+// 128-bit echo / format helpers
+
+// ensureEchoI128 lazily declares _tin_echo_i128(i128) void.
+func (cg *CodeGen) ensureEchoI128() *ir.Func {
+	if cg.echoI128Fn != nil {
+		return cg.echoI128Fn
+	}
+
+	cg.echoI128Fn = cg.ensureExternDecl("_tin_echo_i128", irtypes.Void,
+		[]*ir.Param{ir.NewParam("v", irtypes.I128)}, false)
+
+	return cg.echoI128Fn
+}
+
+// ensureEchoU128 lazily declares _tin_echo_u128(i128) void.
+func (cg *CodeGen) ensureEchoU128() *ir.Func {
+	if cg.echoU128Fn != nil {
+		return cg.echoU128Fn
+	}
+
+	cg.echoU128Fn = cg.ensureExternDecl("_tin_echo_u128", irtypes.Void,
+		[]*ir.Param{ir.NewParam("v", irtypes.I128)}, false)
+
+	return cg.echoU128Fn
+}
+
+// ensureEchoF128 lazily declares _tin_echo_f128(fp128) void.
+func (cg *CodeGen) ensureEchoF128() *ir.Func {
+	if cg.echoF128Fn != nil {
+		return cg.echoF128Fn
+	}
+
+	cg.echoF128Fn = cg.ensureExternDecl("_tin_echo_f128", irtypes.Void,
+		[]*ir.Param{ir.NewParam("v", irtypes.FP128)}, false)
+
+	return cg.echoF128Fn
+}
+
+// ensureI128ToCstr lazily declares _tin_i128_to_cstr(i128) i8*.
+func (cg *CodeGen) ensureI128ToCstr() *ir.Func {
+	if cg.i128ToCstrFn != nil {
+		return cg.i128ToCstrFn
+	}
+
+	cg.i128ToCstrFn = cg.ensureExternDecl("_tin_i128_to_cstr", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("v", irtypes.I128)}, false)
+
+	return cg.i128ToCstrFn
+}
+
+// ensureU128ToCstr lazily declares _tin_u128_to_cstr(i128) i8*.
+func (cg *CodeGen) ensureU128ToCstr() *ir.Func {
+	if cg.u128ToCstrFn != nil {
+		return cg.u128ToCstrFn
+	}
+
+	cg.u128ToCstrFn = cg.ensureExternDecl("_tin_u128_to_cstr", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("v", irtypes.I128)}, false)
+
+	return cg.u128ToCstrFn
+}
+
+// ensureF128ToCstr lazily declares _tin_f128_to_cstr(fp128) i8*.
+func (cg *CodeGen) ensureF128ToCstr() *ir.Func {
+	if cg.f128ToCstrFn != nil {
+		return cg.f128ToCstrFn
+	}
+
+	cg.f128ToCstrFn = cg.ensureExternDecl("_tin_f128_to_cstr", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("v", irtypes.FP128)}, false)
+
+	return cg.f128ToCstrFn
 }

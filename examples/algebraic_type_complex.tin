@@ -1,0 +1,22 @@
+use assert
+
+type iTypes = i8 | i16 | i32 | i64 | i128
+type fTypes = f32 | f64 | f128
+type uTypes = u8 | u16 | u32 | u64 | u128
+
+type addable = iTypes | fTypes | uTypes
+
+struct fooStruct[t] where t is addable =
+  value t
+
+test "fooStruct with i32" =
+  let a = fooStruct[i32](42)
+  assert::equals(a.value, 42)
+
+test "fooStruct with f64" =
+  let b = fooStruct[f64](3.14)
+  assert::equals(b.value, 3.14)
+
+test "fooStruct with u64" =
+  let c = fooStruct[u64](100)
+  assert::equals(c.value, 100)

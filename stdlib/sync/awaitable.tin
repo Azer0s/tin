@@ -13,5 +13,3 @@
 
 trait Awaitable[t] =
   fn await_result(this Awaitable[t]) t = virtual
-
-export { Awaitable } as sync

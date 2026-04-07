@@ -65,15 +65,15 @@ test "3-tuple construction and access" =
 test "tuple reflection - typeof" =
   let t = (1, true)
   let name = typeof(t)
-  assert::equals_str(name, "Tuple__i64__bool")
+  assert::equals(name, "Tuple__i64__bool")
 
 test "tuple reflection - fieldnames" =
   let t = (1, 2, 3)
   let names = fieldnames(t)
   assert::equals(names.len, 3)
-  assert::equals_str(names[0], "a")
-  assert::equals_str(names[1], "b")
-  assert::equals_str(names[2], "c")
+  assert::equals(names[0], "a")
+  assert::equals(names[1], "b")
+  assert::equals(names[2], "c")
 
 test "tuple boxing and unboxing via any" =
   let t = (42, true)
@@ -92,4 +92,4 @@ test "tuple pointer" =
 test "indexed string tuple" =
   let (idx, s) = add_indexed("hello", 5)
   assert::equals(idx, 5)
-  assert::equals_str(s, "hello")
+  assert::equals(s, "hello")

@@ -259,10 +259,16 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.I32, nil
 	case "u64", "uint", "size_t":
 		return irtypes.I64, nil
+	case "i128":
+		return irtypes.I128, nil
+	case "u128":
+		return irtypes.I128, nil
 	case "f32":
 		return irtypes.Float, nil
 	case "f64":
 		return irtypes.Double, nil
+	case "f128":
+		return irtypes.FP128, nil
 	case "string":
 		// fat pointer: {i8*, i64}
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
@@ -406,13 +412,15 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 
 		return b, b
 	case *irtypes.FloatType:
-		switch ty.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
+		switch ty.Kind { //nolint:exhaustive // X86_FP80/PPC_FP128 are not used by tin
 		case irtypes.FloatKindHalf:
 			return 2, 2
 		case irtypes.FloatKindFloat:
 			return 4, 4
 		case irtypes.FloatKindDouble:
 			return 8, 8
+		case irtypes.FloatKindFP128:
+			return 16, 16
 		default:
 			return 8, 8
 		}
@@ -527,7 +535,7 @@ func isFatFnPtr(t irtypes.Type) bool {
 }
 
 // isAsyncFatFnPtr returns true when t is an async closure fat pointer
-// { fn(i8*, params...) i8* *, i8* } — the inner function returns i8*
+// { fn(i8*, params...) i8* *, i8* } - the inner function returns i8*
 // (coroutine handle), as produced for fn{#async}(...) type expressions.
 func isAsyncFatFnPtr(t irtypes.Type) bool {
 	if !isFatFnPtr(t) {

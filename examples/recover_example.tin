@@ -14,7 +14,7 @@ test "deferred recover captures panic message" =
     if len(msg) > 0 :
       got = msg
   panicky("oops")
-  assert::equals_str(got, "oops")
+  assert::equals(got, "oops")
 
 test "recover in non-panicking defer returns empty string" =
   let was_empty bool = true

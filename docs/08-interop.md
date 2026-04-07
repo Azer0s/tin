@@ -184,6 +184,97 @@ let buf *char = malloc(10 * sizeof(*char)).(*char)
 
 ---
 
+## Ownership handover (`#handover`)
+
+When a C function allocates memory and returns a pointer, Tin normally has no
+way to know that it should manage that memory. The `#handover` tag transfers
+ownership of the returned pointer into Tin's ARC system.
+
+```rust
+fn{#handover} make_buffer() *i8  = extern("make_buffer")
+fn{#handover} make_point()  *vec2 = extern("make_point")
+```
+
+### What happens at the call site
+
+The compiler generates a thin wrapper around the C function. When the wrapper
+receives the raw pointer back from C, it:
+
+1. Uses `malloc_usable_size` to detect whether the pointer is a heap allocation.
+2. Copies the pointed-to data into a fresh RC-managed (`_tin_rc_alloc`) block.
+3. If the original was heap-allocated, frees it. If it was stack or static,
+   only the copy is kept (no free).
+
+The returned pointer is then treated exactly like any other RC-allocated Tin
+pointer: retained on assignment, released at scope exit.
+
+### Supported return types
+
+| Return type     | Handover behaviour                                              |
+|-----------------|-----------------------------------------------------------------|
+| `*T` (primitive / struct pointer) | `_tin_ptr_handover`: copies element, frees original if malloc'd |
+| `*i8` / `*char` returned as `string` | `_tin_string_handover`: RC-ifies the `char*`, builds fat-ptr |
+| `*i8` / `*char` returned as `atom`   | Looks up/registers atom, then frees the `char*`              |
+| `*StructName`   | Loads native layout, adds `type_id`, stores in RC block, frees original |
+
+`#handover` has no effect on non-pointer return types.
+
+### Example
+
+```c
+// helpers.c
+#include <stdlib.h>
+#include <stdint.h>
+
+int64_t *make_i64_ptr(void) {
+    int64_t *p = malloc(sizeof(int64_t));
+    *p = 42;
+    return p;
+}
+
+typedef struct { int64_t x; int64_t y; } c_vec2;
+
+c_vec2 *make_vec2_ptr(void) {
+    c_vec2 *v = malloc(sizeof(c_vec2));
+    v->x = 10;
+    v->y = 20;
+    return v;
+}
+```
+
+```rust
+//!+helpers.c
+use assert
+
+struct vec2 =
+  x i64
+  y i64
+
+fn{#handover} get_i64() *i64  = extern("make_i64_ptr")
+fn{#handover} get_vec2() *vec2 = extern("make_vec2_ptr")
+
+test "handover primitive" =
+  let p = get_i64()        // p is RC-managed; C's malloc block is freed
+  assert::equals(*p, 42)   // p released at end of scope - no leak
+
+test "handover struct pointer" =
+  let v = get_vec2()
+  assert::equals((*v).x, 10)
+  assert::equals((*v).y, 20)
+```
+
+No `mem::free` is needed - ARC releases the RC block when `p` and `v` go out
+of scope.
+
+### Combining with struct pointer fields
+
+When the returned struct itself contains pointer fields pointing to other
+heap-allocated data, those fields must be handled by the C side before
+returning (or by a `deinit` method on the Tin struct). `#handover` only
+takes ownership of the top-level allocation.
+
+---
+
 ## Function pointers and higher-order interop
 
 When a named or extern function is passed as a value to a higher-order

@@ -2116,6 +2116,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 
 			if funcName != "" {
+				// Generic struct positional construction: StructName[T](field1, field2, ...)
+				// e.g. fooStruct[i32](42) where fooStruct is a generic struct template.
+				if _, isStruct := cg.genericStructsByArity[funcName]; isStruct {
+					synthLit := &ast.StructLit{
+						TypeName:   funcName,
+						TypeArgs:   []ast.TypeExpr{&ast.SimpleType{Name: typeArgName}},
+						Positional: e.Args,
+					}
+
+					return cg.genStructLit(block, synthLit)
+				}
+
 				// Look up the generic function template
 				tmpl, isGeneric := cg.genericFuncs[funcName]
 				if !isGeneric {
@@ -2145,9 +2157,36 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 
+					preCoerceVals := append([]value.Value(nil), argVals...)
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
+					result2 := block.NewCall(concreteFunc, argVals...)
+					// ARC: release temporary RC-tracked arguments.
+					for i, astArg := range e.Args {
+						if i >= len(preCoerceVals) {
+							break
+						}
 
-					return block.NewCall(concreteFunc, argVals...), nil
+						pre := preCoerceVals[i]
+						post := argVals[i]
+
+						if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+							cg.emitRelease(block, post)
+
+							continue
+						}
+
+						if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
+							continue
+						}
+
+						cg.emitRelease(block, pre)
+					}
+
+					if irtypes.IsVoid(result2.Type()) {
+						return nil, nil
+					}
+
+					return result2, nil
 				}
 			}
 		}
@@ -2160,7 +2199,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 		if callee != nil && isFatFnPtr(callee.Type()) {
-			return cg.callFatFn(block, callee, e.Args)
+			result, err2 := cg.callFatFn(block, callee, e.Args)
+			// ARC: release a temporary callee closure after the call.
+			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
+				cg.emitRelease(block, callee)
+			}
+
+			return result, err2
 		}
 
 	default:
@@ -2172,7 +2217,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// If the expression evaluated to a fat fn pointer, call through it.
 		if callee != nil && isFatFnPtr(callee.Type()) {
-			return cg.callFatFn(block, callee, e.Args)
+			result, err2 := cg.callFatFn(block, callee, e.Args)
+			// ARC: release a temporary callee closure after the call.
+			if isRCTrackedType(callee.Type()) && !isCopyExpr(e.Func) {
+				cg.emitRelease(block, callee)
+			}
+
+			return result, err2
 		}
 	}
 
@@ -2714,6 +2765,12 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 	for i, v := range vals {
 		gep := block.NewGetElementPtr(elemType, dataPtr, constant.NewInt(irtypes.I64, int64(i)))
 		block.NewStore(v, gep)
+		// ARC: retain copy expressions (identifiers, field accesses, etc.) so that
+		// both the array and the original owner hold an independent RC reference.
+		// Temporaries (call results, literals) are already owned by the array at RC=1.
+		if isRCTrackedType(elemType) && isCopyExpr(e.Elems[i]) {
+			cg.emitRetain(block, v)
+		}
 	}
 
 	// Return as fat pointer {T*, i64}.
@@ -2759,7 +2816,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				Name: concreteName,
 				Type: &ast.GenericType{Name: typeName, TypeParams: resolvedTypeArgs},
 			}
-			_ = cg.genTypeDecl(synthDecl)
+			if err := cg.genTypeDecl(synthDecl); err != nil {
+				return nil, err
+			}
 		}
 
 		typeName = concreteName
@@ -3250,6 +3309,11 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	if isRCTrackedType(leftVal.Type()) && !isCopyExpr(e.Left) {
 		cg.emitRelease(block, leftVal)
 	}
+	// ARC: release the right-hand closure if it is a temporary RC allocation
+	// (e.g. `nums |> filter(fn)` where filter returns a fresh closure).
+	if isRCTrackedType(rightFn.Type()) && !isCopyExpr(e.Right) {
+		cg.emitRelease(block, rightFn)
+	}
 
 	if irtypes.IsVoid(result.Type()) {
 		return nil, nil
@@ -3287,7 +3351,34 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 	// Unify types.
 	elseVal = cg.coerce(block, elseVal, thenVal.Type())
 
-	return block.NewSelect(cond, thenVal, elseVal), nil
+	result := block.NewSelect(cond, thenVal, elseVal)
+
+	// ARC: both branches are evaluated eagerly before select.  If a branch
+	// produces a fresh RC-tracked value (call, concat, etc.) that is not
+	// selected, it must be released.  Use a second select to identify the
+	// discarded value at runtime without actual conditional branching.
+	// Releasing a zero-initialized fat struct is safe: extractRCDataPtr returns
+	// a null ptr, and _tin_release(null) is a no-op.
+	t := result.Type()
+	if isRCTrackedType(t) {
+		zero := cg.zeroValue(t)
+		thenIsTemp := isTemporaryProducer(e.Then)
+		elseIsTemp := isTemporaryProducer(e.Else)
+
+		if thenIsTemp {
+			// Release thenVal when the else branch was selected (cond == false).
+			discarded := block.NewSelect(cond, zero, thenVal)
+			cg.emitRelease(block, discarded)
+		}
+
+		if elseIsTemp {
+			// Release elseVal when the then branch was selected (cond == true).
+			discarded := block.NewSelect(cond, elseVal, zero)
+			cg.emitRelease(block, discarded)
+		}
+	}
+
+	return result, nil
 }
 
 func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error) {
@@ -3847,7 +3938,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 			entry.NewRet(nil)
 		} else {
 			// Wrap return value if needed (e.g., raw i8* -> string fat-ptr).
-			ret := cg.wrapFromExtern(entry, result, wrapperFnType.RetType)
+			ret := cg.wrapFromExtern(entry, result, wrapperFnType.RetType, false)
 			entry.NewRet(ret)
 		}
 	}
@@ -3895,7 +3986,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 	}
 
 	if !ok {
-		// No $coro variant — fall back to sync shim (type mismatch at runtime).
+		// No $coro variant - fall back to sync shim (type mismatch at runtime).
 		return cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
 	}
 
@@ -4268,8 +4359,9 @@ func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Fu
 func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedString) (value.Value, error) {
 	// Build a format string and argument list for printf/sprintf.
 	var (
-		fmtParts []string
-		args     []value.Value
+		fmtParts  []string
+		args      []value.Value
+		toRelease []value.Value // ARC: RC-tracked temporaries to release after snprintf
 	)
 
 	for _, part := range e.Parts {
@@ -4371,6 +4463,10 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 				fmtParts = append(fmtParts, "%s")
 				ptr := cg.extractStringPtr(block, val)
 				args = append(args, ptr)
+				// ARC: temporary string (call/concat result) must be released after snprintf.
+				if isTemporaryProducer(part.Expr) {
+					toRelease = append(toRelease, val)
+				}
 			case irtypes.IsInt(t):
 				it := t.(*irtypes.IntType)
 				switch it.BitSize {
@@ -4403,28 +4499,65 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 					}
 
 					args = append(args, val)
+				case 128:
+					// i128/u128: pre-convert to C string via runtime helper, use %s
+					ty128 := cg.exprByte8Type(part.Expr)
+
+					var cstr value.Value
+
+					if ty128 == "u128" {
+						cstr = block.NewCall(cg.ensureU128ToCstr(), val)
+					} else {
+						cstr = block.NewCall(cg.ensureI128ToCstr(), val)
+					}
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, cstr)
 				default:
-					fmtParts = append(fmtParts, "%lld")
-					val = cg.coerce(block, val, irtypes.I64)
-					args = append(args, val)
+					if cg.exprIsUnsigned(part.Expr) {
+						// Unsigned 16/32/64-bit: zero-extend to i64, use %llu.
+						fmtParts = append(fmtParts, "%llu")
+
+						it2 := t.(*irtypes.IntType)
+
+						if it2.BitSize < 64 {
+							val = block.NewZExt(val, irtypes.I64)
+						}
+
+						args = append(args, val)
+					} else {
+						fmtParts = append(fmtParts, "%lld")
+						val = cg.coerce(block, val, irtypes.I64)
+
+						args = append(args, val)
+					}
 				}
 			case irtypes.IsFloat(t):
-				if t == irtypes.Double {
+				ft := t.(*irtypes.FloatType)
+				if ft.Kind == irtypes.FloatKindFP128 {
+					// f128: pre-convert to C string via runtime helper, use %s
+					cstr := block.NewCall(cg.ensureF128ToCstr(), val)
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, cstr)
+				} else if t == irtypes.Double {
 					// f64: use %f (e.g. "1.000000")
 					fmtParts = append(fmtParts, "%f")
+					args = append(args, val)
 				} else {
 					// f32: use %g (e.g. "3" for 3.0, "1.5" for 1.5)
 					fmtParts = append(fmtParts, "%g")
 					val = block.NewFPExt(val, irtypes.Double)
+					args = append(args, val)
 				}
-
-				args = append(args, val)
 			default:
 				// print trait: struct or fat-pointer with a print() method.
 				if strVal, ok := cg.callPrintTrait(block, val); ok {
 					fmtParts = append(fmtParts, "%s")
 					ptr := cg.extractStringPtr(block, strVal)
 					args = append(args, ptr)
+					// ARC: ::print returns a fresh string; release after snprintf.
+					toRelease = append(toRelease, strVal)
 				} else {
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
@@ -4468,6 +4601,12 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	lenGep := block.NewGetElementPtr(fatPtrType, fatAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(neededI64, lenGep)
+
+	// ARC: release temporary RC-tracked values (::print strings, concat/call results)
+	// now that snprintf has consumed their data pointers.
+	for _, sv := range toRelease {
+		cg.emitRelease(block, sv)
+	}
 
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }
@@ -4605,7 +4744,7 @@ func (cg *CodeGen) directCallHasCoroVariant(callNode *ast.CallExpr) bool {
 // Instead of allocating a fiber and joining it, we:
 //  1. Call the $coro ramp to allocate only the inner coroutine frame.
 //  2. Resume the inner coroutine until it completes.
-//  3. Whenever the inner coroutine yields, yield the outer coroutine too —
+//  3. Whenever the inner coroutine yields, yield the outer coroutine too -
 //     the scheduler will resume both in turn.
 //  4. When the inner coroutine is done, take its result via _tin_coro_take_result.
 //
@@ -4646,14 +4785,14 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		}
 
 		if structName == "" {
-			return nil, nil // can't determine struct type without evaluation — fall through
+			return nil, nil // can't determine struct type without evaluation - fall through
 		}
 
 		coroName := structName + "_" + fn.Field + "$coro"
 
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
-			return nil, nil // not {#async} — fall through
+			return nil, nil // not {#async} - fall through
 		}
 
 		var ok3 bool
@@ -4714,7 +4853,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 			coroArgs = append(coroArgs, av)
 		}
 
-		// Fast path: Channel[T].send and Channel[T].recv — inline the blocking
+		// Fast path: Channel[T].send and Channel[T].recv - inline the blocking
 		// retry loop directly into the outer coro using the outer coro's own
 		// coro.suspend.  This eliminates the inner $coro frame allocation
 		// (2 malloc/free per operation, 4 per round trip) at the cost of a
@@ -4723,7 +4862,12 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		// structName may be bare ("Channel__i64") or package-prefixed ("sync__Channel__i64").
 		if strings.Contains(structName, "Channel__") {
 			if fn.Field == "send" && len(coroArgs) == 2 {
-				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1])
+				var sendAstArg ast.Node
+				if len(callNode.Args) >= 1 {
+					sendAstArg = callNode.Args[0]
+				}
+
+				return cg.genDirectChanSend(block, coroArgs[0], coroArgs[1], sendAstArg)
 			}
 
 			if fn.Field == "recv" && len(coroArgs) == 1 {
@@ -4741,7 +4885,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 
 		se, ok2 := cg.curScope.lookup(coroName)
 		if !ok2 {
-			return nil, nil // not {#async} — fall through
+			return nil, nil // not {#async} - fall through
 		}
 
 		var ok3 bool
@@ -4771,7 +4915,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		}
 
 	default:
-		return nil, nil // unsupported callee shape — fall through
+		return nil, nil // unsupported callee shape - fall through
 	}
 
 	cg.usesAnyFiber = true
@@ -4797,7 +4941,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	//     _tin_inline_result_mode_end()
 	// ---------------------------------------------------------------
 	// mode_begin is placed at the TOP of driveLoopBlk so it fires before EVERY
-	// coro.resume — including re-entries after the outer fiber was parked and
+	// coro.resume - including re-entries after the outer fiber was parked and
 	// resumed (at which point the worker loop reset _inline_result_mode to 0).
 	// This keeps the TLS fast path active across park/unpark cycles.
 	inlineBeginFn := cg.ensureExternDecl("_tin_inline_result_mode_begin", irtypes.Void,
@@ -4829,7 +4973,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// Done path: take result, destroy inner frame.
 	// llvm.coro.destroy would run the cleanup path (coro.end + coro.free), but
 	// LLVM's coro-split pass generates empty destroy functions for trivially-
-	// destructible C/Tin coroutines (no C++ dtors) — the cleanup call is optimized
+	// destructible C/Tin coroutines (no C++ dtors) - the cleanup call is optimized
 	// away.  Call _tin_coro_free explicitly to return the heap-allocated frame to
 	// the per-thread pool.  _tin_coro_free(null) is a no-op when coro-elide
 	// stack-allocated the frame, so this is safe in all cases.
@@ -4849,7 +4993,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// the redundant autoyield at the enclosing for-loop backedge.  The drive loop
 	// already contains its own suspension points (coro.drive.yield) that fire when
 	// the inner $coro blocks.  When the drive completes without blocking, the outer
-	// fiber's natural park/unpark via the channel wakes the next fiber — no extra
+	// fiber's natural park/unpark via the channel wakes the next fiber - no extra
 	// autoyield is needed.
 	if cg.yieldResumeBlocks != nil {
 		cg.yieldResumeBlocks[driveDoneBlk] = true
@@ -4865,7 +5009,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	}
 
 	if retTypeExpr == nil {
-		// void/Unit result — nothing to free.
+		// void/Unit result - nothing to free.
 		return constant.NewInt(irtypes.I1, 1), nil
 	}
 
@@ -4898,7 +5042,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 //	    yield   ← replaced by outer coro.suspend
 //
 // Eliminates 1 malloc + 1 free per send (2 per round trip).
-func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value) (value.Value, error) {
+func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value, astArg ast.Node) (value.Value, error) {
 	cg.ensureCoroIntrinsics()
 	cg.ensureFiberRuntime()
 	cg.usesAnyFiber = true
@@ -4908,7 +5052,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// Use fieldIndex for correctness in case the layout changes.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T — falling back to slow send$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanSend: expected pointer type, got %T - falling back to slow send$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -4926,14 +5070,14 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
 
 	// Alloca for val so send_blocking can take &val.  Allocated in the outer coro
-	// frame — persists across suspensions.  The value is set once and retried
+	// frame - persists across suspensions.  The value is set once and retried
 	// until the channel accepts it.
 	elemType := valArg.Type()
 	valSlot := block.NewAlloca(elemType)
 	block.NewStore(valArg, valSlot)
 	valPtr := block.NewBitCast(valSlot, irtypes.I8Ptr)
 
-	// sizeof(T) and is_rc — compile-time constants.
+	// sizeof(T) and is_rc - compile-time constants.
 	elemSize := cg.llvmSizeOf(block, elemType)
 
 	isRCVal := constant.NewInt(irtypes.I32, 0)
@@ -4941,7 +5085,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 		isRCVal = constant.NewInt(irtypes.I32, 1)
 	}
 
-	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.
 	// Load _current_pid directly as a TLS variable (no function call overhead).
 	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)
@@ -4967,7 +5111,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	panicBlk := cg.newBlock("chan.send.panic")
 	retryBlk.NewCondBr(isClosed, panicBlk, checkDoneBlk)
 
-	// Panic block — must follow the coro completion path (not a bare ret).
+	// Panic block - must follow the coro completion path (not a bare ret).
 	panicMsg := cg.newGlobalString("send on closed channel")
 	panicBlk.NewCall(cg.ensurePanicFn(), panicMsg)
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
@@ -4981,8 +5125,18 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 
 	// Yield: outer coro suspends until the channel has room.
 	cg.emitInlineChanSuspend("chan.send", yieldBlk, retryBlk, doneBlk)
+	// cg.curBlock == doneBlk after emitInlineChanSuspend.
 
-	return constant.NewInt(irtypes.I1, 1), nil // void send — return sentinel i1 true
+	// Release temporary RC-tracked value after the send succeeds.
+	// _tin_channel_send_blocking retains the element when is_rc==1, so the
+	// sender's original reference must be dropped once the send completes.
+	// Named variable arguments are owned by their enclosing scope and must NOT
+	// be released here - the scope's exit will handle them.
+	if astArg != nil && !isCopyExpr(astArg) && isRCTrackedType(valArg.Type()) {
+		cg.emitRelease(doneBlk, valArg)
+	}
+
+	return constant.NewInt(irtypes.I1, 1), nil // void send - return sentinel i1 true
 }
 
 // genDirectChanRecv emits an inline channel-recv retry loop that uses the outer
@@ -5008,7 +5162,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	// Load ch._ptr from the Channel struct.
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {
-		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T — falling back to slow recv$coro path\n", thisPtr.Type())
+		_, _ = fmt.Fprintf(os.Stderr, "tin: warning: genDirectChanRecv: expected pointer type, got %T - falling back to slow recv$coro path\n", thisPtr.Type())
 
 		return nil, nil
 	}
@@ -5025,12 +5179,12 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
 	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
 
-	// Alloca for result — written by _tin_channel_recv_direct, persists across
+	// Alloca for result - written by _tin_channel_recv_direct, persists across
 	// suspensions so the retry loop can safely re-use the slot on wakeup.
 	outSlot := block.NewAlloca(elemType)
 	outPtr := block.NewBitCast(outSlot, irtypes.I8Ptr)
 
-	// pid is constant for the lifetime of the fiber — hoist before the retry loop
+	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.
 	// Load _current_pid directly as a TLS variable (no function call overhead).
 	pidVar := cg.ensureExternTLSVar("_current_pid", irtypes.I64)
@@ -5308,6 +5462,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	// Note: no ARC retain here - the $coro ramp block retains RC-tracked
 	// params before the initial suspend (see genCoroFuncBody).  A caller-side
 	// retain would double-count and produce a leak.
+	preCoerceCallArgs := append([]value.Value(nil), callArgs...)
 	for i, val := range callArgs {
 		if i < len(coroFn.Params) {
 			callArgs[i] = cg.coerce(block, val, coroFn.Params[i].Type())
@@ -5319,6 +5474,44 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 	// Spawn the fiber: pid = _tin_fiber_spawn(hdl)
 	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+
+	// Release temporary RC-tracked arguments after spawning.  The $coro ramp
+	// retains them before the initial suspend, so the caller's own reference
+	// (RC=1 from construction) must be dropped after spawn.  Named variable
+	// references are skipped via isCopyExpr - they are owned by their
+	// declaration scope and must not be released by the call site.
+	//
+	// Placed AFTER _tin_fiber_spawn so that LLVM's optimizer does not pair
+	// the ramp's retain with this release and eliminate both (which would
+	// produce a use-after-free in the fiber if the array is freed before the
+	// fiber ever reads it).
+	for i, astArg := range callNode.Args {
+		if i >= len(preCoerceCallArgs) {
+			break
+		}
+
+		pre := preCoerceCallArgs[i]
+		post := callArgs[i]
+
+		if isCopyExpr(astArg) {
+			continue
+		}
+
+		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+			cg.emitRelease(block, post)
+
+			continue
+		}
+
+		if isRCTrackedType(pre.Type()) {
+			cg.emitRelease(block, pre)
+		} else if cg.typeNameOf(pre.Type()) != "" {
+			// Named struct value: the coro ramp retained its RC-tracked fields via
+			// walkRCStructFields.  Release those fields here (without deinit - the
+			// fiber still owns the struct and will call deinit at scope exit).
+			cg.emitReleaseNoDeinit(block, pre)
+		}
+	}
 
 	// Wrap pid in Future[t] where t is the original function's return type.
 	// Prefer the funcDecl lookup (bare name), fall back to sync function's LLVM return type.
@@ -5545,12 +5738,15 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	coroArgs := []value.Value{thisArg2}
+	preCoerceArgVals := make([]value.Value, 0, len(callNode.Args))
 
 	for i, arg := range callNode.Args {
 		av, err2 := cg.genExpr(block, arg)
 		if err2 != nil {
 			return nil, err2
 		}
+
+		preCoerceArgVals = append(preCoerceArgVals, av)
 
 		if i+1 < len(coroFn2.Params) {
 			av = cg.coerce(block, av, coroFn2.Params[i+1].Type())
@@ -5561,6 +5757,42 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 
 	hdl2 := block.NewCall(coroFn2, coroArgs...)
 	pid2 := block.NewCall(cg.fiberSpawnFn, hdl2)
+
+	// Release temporary RC-tracked args after spawning (same as genSpawnExpr).
+	// The receiver (coroArgs[0]) is handled separately below.
+	for i, astArg := range callNode.Args {
+		if i >= len(preCoerceArgVals) {
+			break
+		}
+
+		pre := preCoerceArgVals[i]
+		post := coroArgs[i+1] // coroArgs[0] is thisArg; user args start at 1
+
+		if isCopyExpr(astArg) {
+			continue
+		}
+
+		if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
+			cg.emitRelease(block, post)
+
+			continue
+		}
+
+		if isRCTrackedType(pre.Type()) {
+			cg.emitRelease(block, pre)
+		} else if cg.typeNameOf(pre.Type()) != "" {
+			cg.emitReleaseNoDeinit(block, pre)
+		}
+	}
+	// Release temporary receiver if it is not a named variable.
+	if !isCopyExpr(fa.Expr) {
+		if isRCTrackedType(objVal.Type()) {
+			cg.emitRelease(block, objVal)
+		} else if cg.typeNameOf(objVal.Type()) != "" {
+			cg.emitReleaseNoDeinit(block, objVal)
+		}
+	}
+
 	// Use the original method name for return type lookup.
 	fnName := structName + "_" + fa.Field
 

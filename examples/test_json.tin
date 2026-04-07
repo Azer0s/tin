@@ -18,30 +18,30 @@ fn obj(s string) string = return "\{" ++ s ++ "\}"
 // encode tests
 
 test "encode bool true" =
-  assert::equals_str(json::encode(true), "true")
+  assert::equals(json::encode(true), "true")
 
 test "encode bool false" =
-  assert::equals_str(json::encode(false), "false")
+  assert::equals(json::encode(false), "false")
 
 test "encode integer" =
-  assert::equals_str(json::encode(42 as i64), "42")
+  assert::equals(json::encode(42 as i64), "42")
 
 test "encode negative integer" =
-  assert::equals_str(json::encode(-7 as i64), "-7")
+  assert::equals(json::encode(-7 as i64), "-7")
 
 test "encode string plain" =
-  assert::equals_str(json::encode("hello"), "\"hello\"")
+  assert::equals(json::encode("hello"), "\"hello\"")
 
 test "encode string with special chars" =
-  assert::equals_str(json::encode("a\"b"), "\"a\\\"b\"")
+  assert::equals(json::encode("a\"b"), "\"a\\\"b\"")
 
 test "encode struct point" =
   let p = point{x: 1, y: 2}
-  assert::equals_str(json::encode(p), obj("\"x\":1,\"y\":2"))
+  assert::equals(json::encode(p), obj("\"x\":1,\"y\":2"))
 
 test "encode struct with tags and skip" =
   let u = person{id: 7, name: "Alice", score: 9.5, pwd: "secret"}
-  assert::equals_str(json::encode(u), obj("\"id\":7,\"name\":\"Alice\",\"score\":9.5"))
+  assert::equals(json::encode(u), obj("\"id\":7,\"name\":\"Alice\",\"score\":9.5"))
 
 // parse (untyped) tests
 
@@ -71,12 +71,12 @@ test "parse negative integer" =
 test "parse float" =
   let (v, _) = json::parse("3.14")
   assert::ok(v.is_float())
-  assert::equals_f64(v.as_float(), 3.14)
+  assert::equals(v.as_float(), 3.14)
 
 test "parse string" =
   let (v, _) = json::parse("\"hello\"")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "hello")
+  assert::equals(v.as_string(), "hello")
 
 test "parse array" =
   let (v, _) = json::parse("[1,2,3]")
@@ -115,13 +115,13 @@ test "parse[T] struct" =
   let src = obj("\"id\":1,\"name\":\"Bob\",\"score\":7.5")
   let (u, _) = json::parse[person](src)
   assert::equals(u.id, 1)
-  assert::equals_str(u.name, "Bob")
-  assert::equals_f64(u.score, 7.5)
+  assert::equals(u.name, "Bob")
+  assert::equals(u.score, 7.5)
 
 test "parse[T] ignores skipped field" =
   let (u, _) = json::parse[person](obj("\"id\":2,\"pwd\":\"leaked\""))
   assert::equals(u.id, 2)
-  assert::equals_str(u.pwd, "")
+  assert::equals(u.pwd, "")
 
 test "parse[T] point no tags" =
   let (p, _) = json::parse[point](obj("\"x\":5,\"y\":9"))

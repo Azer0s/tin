@@ -10,8 +10,8 @@
 //   2  - LOCKED, at least one waiter in the embedded array
 //
 // Fast paths (uncontended, common case):
-//   lock:   CAS(0→1)  — single atomic op, no OS call, no wl_lock
-//   unlock: CAS(1→0)  — single atomic op, no OS call, no wl_lock
+//   lock:   CAS(0→1)  - single atomic op, no OS call, no wl_lock
+//   unlock: CAS(1→0)  - single atomic op, no OS call, no wl_lock
 //
 // Slow paths (contended, rare):
 //   lock:   brief spin, then add {pid,hdl} to waiter array, CAS(1→2),
@@ -45,7 +45,7 @@
 typedef struct {
     _Atomic(uint32_t) state;    // 0=unlocked, 1=locked no waiters, 2=locked has waiters
     // Waiter array: only accessed when state == 2.
-    // Protected by wl_lock (acquired only in the slow path — never in fast unlock).
+    // Protected by wl_lock (acquired only in the slow path - never in fast unlock).
     _Atomic(uint32_t) wl_lock;
     int64_t wpid[FMUTEX_MAX_WAITERS];
     void   *whdl[FMUTEX_MAX_WAITERS];
@@ -64,7 +64,7 @@ static inline int tin_fmutex_trylock(TinFastMutex *m) {
         memory_order_acquire, memory_order_relaxed);
 }
 
-// Slow-path helpers — only called when the fast CAS fails.
+// Slow-path helpers - only called when the fast CAS fails.
 // Defined in fastmutex.c; not meant to be called directly.
 int  _tin_fmutex_lock_coro_slow(TinFastMutex *m, int64_t pid, void *hdl);
 void _tin_fmutex_unlock_slow(TinFastMutex *m);
@@ -91,7 +91,7 @@ void tin_fmutex_lock_spin(TinFastMutex *m);
 
 // Release the lock.
 //
-// Fast path (state == 1, no waiters): single inlined CAS(1→0) — no wl_lock.
+// Fast path (state == 1, no waiters): single inlined CAS(1→0) - no wl_lock.
 // Slow path (state == 2, has waiters): pop one waiter under wl_lock, update
 //   state, then call _tin_fiber_unpark_hdl (runnext on worker threads).
 static inline void tin_fmutex_unlock(TinFastMutex *m) {

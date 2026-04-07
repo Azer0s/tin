@@ -31,25 +31,25 @@ fn rect_contains(r rect, p vec2) bool =
 
 test "nested field access" =
   let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}
-  assert::equals_f64(r.origin.x, 1.0)
-  assert::equals_f64(r.origin.y, 2.0)
-  assert::equals_f64(r.size.x, 5.0)
-  assert::equals_f64(rect_area(r), 15.0)
+  assert::equals(r.origin.x, 1.0)
+  assert::equals(r.origin.y, 2.0)
+  assert::equals(r.size.x, 5.0)
+  assert::equals(rect_area(r), 15.0)
 
 test "struct destructuring" =
   let v = vec2{x: 3.0, y: 4.0}
   let {x, y} vec2 = v
-  assert::equals_f64(x, 3.0)
-  assert::equals_f64(y, 4.0)
+  assert::equals(x, 3.0)
+  assert::equals(y, 4.0)
 
 test "destructuring in computation" =
   let a = vec2{x: 1.0, y: 0.0}
   let b = vec2{x: 0.0, y: 1.0}
-  assert::equals_f64(vec2_dot(a, b), 0.0)
+  assert::equals(vec2_dot(a, b), 0.0)
   let c = vec2_add(a, b)
   let {x, y} vec2 = c
-  assert::equals_f64(x, 1.0)
-  assert::equals_f64(y, 1.0)
+  assert::equals(x, 1.0)
+  assert::equals(y, 1.0)
 
 test "array destructuring in loop" =
   let pairs [i64] = [1, 2, 3, 4, 6, 8]

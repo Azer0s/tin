@@ -1,0 +1,60 @@
+// handover_ptrs_extra.tin - edge-case tests for the #handover tag.
+//
+// Covers: null pointers (null-guard at scope exit), multi-element arrays
+// (malloc_usable_size copies full block), and nested structs.
+//
+//!+handover_ptrs_extra.c
+
+use assert
+
+// --- Null pointer ---
+// _tin_ptr_handover(NULL, ...) returns NULL.
+// The scope-exit release must be a no-op (null check in _tin_release).
+fn{#handover} get_null_ptr() *i64 = extern("get_null_ptr")
+
+// --- Multi-element array ---
+// C malloc's n * sizeof(i64) bytes.  malloc_usable_size reports the full
+// allocation so all elements are copied into the RC block.
+// The returned *i64 points at element 0; subsequent elements are at +8, +16, ...
+fn{#handover} get_i64_array(n i64) *i64 = extern("get_i64_array")
+
+// --- Nested struct ---
+struct inner_t =
+  x i64
+  y i64
+
+struct outer_t =
+  a inner_t
+  b inner_t
+  tag i64
+
+fn{#handover} get_outer_ptr() *outer_t = extern("get_outer_ptr")
+
+// -----------------------------------------------------------------------
+
+test "handover null pointer" =
+  // _tin_ptr_handover(NULL, ...) returns NULL.
+  // Scope exit must not crash on a nil *i64.
+  let p = get_null_ptr()
+  assert::equals(p == nil, true)
+
+test "handover multi-element array element 0" =
+  let arr = get_i64_array(5)
+  assert::equals(*arr, 10)
+
+test "handover multi-element array all elements via pointer arithmetic" =
+  let arr = get_i64_array(5)
+  assert::equals(*(arr + 0), 10)
+  assert::equals(*(arr + 1), 20)
+  assert::equals(*(arr + 2), 30)
+  assert::equals(*(arr + 3), 40)
+  assert::equals(*(arr + 4), 50)
+  // arr released here - frees the full RC block (all 5 elements).
+
+test "handover nested struct pointer" =
+  let p = get_outer_ptr()
+  assert::equals((*p).a.x, 1)
+  assert::equals((*p).a.y, 2)
+  assert::equals((*p).b.x, 3)
+  assert::equals((*p).b.y, 4)
+  assert::equals((*p).tag, 42)

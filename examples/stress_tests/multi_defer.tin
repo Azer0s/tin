@@ -148,7 +148,7 @@ test "lifo ordering via pointer" =
 test "lifo ordering via string pointer" =
   let s_ptr = lifo_via_string_ptr()
   let order = *s_ptr
-  assert::equals_str("CBA", order)
+  assert::equals("CBA", order)
 
 test "defer fires on early return" =
   let result = with_early_return(0 - 5)

@@ -113,7 +113,7 @@ test "per-slot any array i64 and bool" =
 test "per-slot any array string and i64" =
   let arr [any] = ["hello" as any, 99 as any]
   let [s, v] [string, i64] = arr
-  assert::equals_str(s, "hello")
+  assert::equals(s, "hello")
   assert::equals(v, 99)
 
 // ---------------------------------------------------------------------------

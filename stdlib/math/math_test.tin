@@ -10,21 +10,21 @@ use math
 // fabs
 
 test "fabs positive" =
-  assert::equals_f64(math::fabs(3.5), 3.5)
+  assert::equals(math::fabs(3.5), 3.5)
 
 test "fabs negative" =
-  assert::equals_f64(math::fabs(0.0 - 3.5), 3.5)
+  assert::equals(math::fabs(0.0 - 3.5), 3.5)
 
 test "fabs zero" =
-  assert::equals_f64(math::fabs(0.0), 0.0)
+  assert::equals(math::fabs(0.0), 0.0)
 
 // sqrt
 
 test "sqrt of 4" =
-  assert::equals_f64(math::sqrt(4.0), 2.0)
+  assert::equals(math::sqrt(4.0), 2.0)
 
 test "sqrt of 9" =
-  assert::equals_f64(math::sqrt(9.0), 3.0)
+  assert::equals(math::sqrt(9.0), 3.0)
 
 test "sqrt of 2 approximate" =
   let s = math::sqrt(2.0)
@@ -33,66 +33,66 @@ test "sqrt of 2 approximate" =
 // pow
 
 test "pow 2 to 10" =
-  assert::equals_f64(math::pow(2.0, 10.0), 1024.0)
+  assert::equals(math::pow(2.0, 10.0), 1024.0)
 
 test "pow x to 0 is 1" =
-  assert::equals_f64(math::pow(999.0, 0.0), 1.0)
+  assert::equals(math::pow(999.0, 0.0), 1.0)
 
 test "pow x to 1 is x" =
-  assert::equals_f64(math::pow(7.0, 1.0), 7.0)
+  assert::equals(math::pow(7.0, 1.0), 7.0)
 
 // floor / ceil / round / trunc
 
 test "floor positive" =
-  assert::equals_f64(math::floor(3.9), 3.0)
+  assert::equals(math::floor(3.9), 3.0)
 
 test "floor negative" =
-  assert::equals_f64(math::floor(0.0 - 3.1), 0.0 - 4.0)
+  assert::equals(math::floor(0.0 - 3.1), 0.0 - 4.0)
 
 test "ceil positive" =
-  assert::equals_f64(math::ceil(3.1), 4.0)
+  assert::equals(math::ceil(3.1), 4.0)
 
 test "ceil negative" =
-  assert::equals_f64(math::ceil(0.0 - 3.9), 0.0 - 3.0)
+  assert::equals(math::ceil(0.0 - 3.9), 0.0 - 3.0)
 
 test "round half up" =
-  assert::equals_f64(math::round(2.5), 3.0)
+  assert::equals(math::round(2.5), 3.0)
 
 test "round half down" =
-  assert::equals_f64(math::round(2.4), 2.0)
+  assert::equals(math::round(2.4), 2.0)
 
 test "trunc positive" =
-  assert::equals_f64(math::trunc(3.9), 3.0)
+  assert::equals(math::trunc(3.9), 3.0)
 
 test "trunc negative" =
-  assert::equals_f64(math::trunc(0.0 - 3.9), 0.0 - 3.0)
+  assert::equals(math::trunc(0.0 - 3.9), 0.0 - 3.0)
 
 // fmin / fmax
 
 test "fmin returns smaller" =
-  assert::equals_f64(math::fmin(3.0, 7.0), 3.0)
+  assert::equals(math::fmin(3.0, 7.0), 3.0)
 
 test "fmax returns larger" =
-  assert::equals_f64(math::fmax(3.0, 7.0), 7.0)
+  assert::equals(math::fmax(3.0, 7.0), 7.0)
 
 test "fmin equal values" =
-  assert::equals_f64(math::fmin(5.0, 5.0), 5.0)
+  assert::equals(math::fmin(5.0, 5.0), 5.0)
 
 // fmod
 
 test "fmod 10 mod 3" =
-  assert::equals_f64(math::fmod(10.0, 3.0), 1.0)
+  assert::equals(math::fmod(10.0, 3.0), 1.0)
 
 test "fmod exact division" =
-  assert::equals_f64(math::fmod(9.0, 3.0), 0.0)
+  assert::equals(math::fmod(9.0, 3.0), 0.0)
 
 // exp / log
 
 test "exp of 0 is 1" =
-  assert::equals_f64(math::exp(0.0), 1.0)
+  assert::equals(math::exp(0.0), 1.0)
 
 test "log of 1 is 0" =
-  assert::equals_f64(math::log(1.0), 0.0)
+  assert::equals(math::log(1.0), 0.0)
 
 test "exp and log are inverses" =
   let x = 2.5
@@ -100,18 +100,18 @@ test "exp and log are inverses" =
   assert::ok(result > 2.4999 && result < 2.5001)
 
 test "log2 of 8 is 3" =
-  assert::equals_f64(math::log2(8.0), 3.0)
+  assert::equals(math::log2(8.0), 3.0)
 
 test "log10 of 100 is 2" =
-  assert::equals_f64(math::log10(100.0), 2.0)
+  assert::equals(math::log10(100.0), 2.0)
 
 // trig
 
 test "sin of 0" =
-  assert::equals_f64(math::sin(0.0), 0.0)
+  assert::equals(math::sin(0.0), 0.0)
 
 test "cos of 0" =
-  assert::equals_f64(math::cos(0.0), 1.0)
+  assert::equals(math::cos(0.0), 1.0)
 
 test "sin of PI/2 is 1" =
   let result = math::sin(math::PI / 2.0)

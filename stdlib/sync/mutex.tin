@@ -26,5 +26,3 @@ struct Mutex =
 
   fn deinit(this Mutex) =
     _tin_fmutex2_free(this._ptr)
-
-export { Mutex } as sync

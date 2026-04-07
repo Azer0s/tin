@@ -23,22 +23,22 @@ use assert
 test "string copy retains" =
   let a = "hello"
   let b = a        // retain: both reference the same buffer
-  assert::equals_str(a, "hello")
-  assert::equals_str(b, "hello")
+  assert::equals(a, "hello")
+  assert::equals(b, "hello")
   // on scope exit: b released, then a released - buffer freed when rc -> 0
 
 test "string concatenation is a new allocation" =
   let a = "foo"
   let b = "bar"
   let c = a ++ b   // new allocation for "foobar"
-  assert::equals_str(c, "foobar")
-  assert::equals_str(a, "foo")   // original untouched
+  assert::equals(c, "foobar")
+  assert::equals(a, "foo")   // original untouched
 
 test "string passed to function" =
   fn greet(name string) string =
     return "hello " ++ name
   let s = greet("world")
-  assert::equals_str(s, "hello world")
+  assert::equals(s, "hello world")
 
 struct labeled =
   tag string
@@ -47,7 +47,7 @@ struct labeled =
 test "string field in struct" =
   let x = labeled{tag: "count", val: 42}
   let y = x           // copies struct; retains tag string
-  assert::equals_str(y.tag, "count")
+  assert::equals(y.tag, "count")
   assert::equals(y.val, 42)
 
 // Dynamic array ARC
@@ -70,7 +70,7 @@ test "array of strings" =
   let words = ["one", "two", "three"]
   let copy = words
   assert::equals(copy.len, 3)
-  assert::equals_str(copy[0], "one")
+  assert::equals(copy[0], "one")
 
 // `any` boxing ARC
 
@@ -78,7 +78,7 @@ test "string boxed to any and unboxed" =
   let s = "tin"
   let a any = s          // boxes s into a heap allocation
   let s2 = a as string   // unbox back to string
-  assert::equals_str(s2, "tin")
+  assert::equals(s2, "tin")
 
 test "i64 boxed to any and unboxed" =
   let n i64 = 99
@@ -97,7 +97,7 @@ test "multiple string variables in scope" =
   let a = "alpha"
   let b = "beta"
   let c = a ++ " " ++ b
-  assert::equals_str(c, "alpha beta")
+  assert::equals(c, "alpha beta")
 
 test "string returned from function keeps value" =
   fn make_str(n i64) string =
@@ -106,5 +106,5 @@ test "string returned from function keeps value" =
     return "non-positive"
   let r1 = make_str(5)
   let r2 = make_str(-1)
-  assert::equals_str(r1, "positive")
-  assert::equals_str(r2, "non-positive")
+  assert::equals(r1, "positive")
+  assert::equals(r2, "non-positive")

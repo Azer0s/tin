@@ -1,0 +1,193 @@
+// stdlib/time - High-resolution time and duration types.
+//
+// ## Instant
+//
+// An Instant is a nanosecond-precision point in wall-clock time, represented
+// internally as nanoseconds since the Unix epoch (1970-01-01T00:00:00Z).
+//
+//   let t = time::now()                          // current wall-clock time
+//   let iso = t.to_rfc3339()                     // "2024-01-01T12:34:56.000000000Z"
+//   let (t2, err) = time::parse_rfc3339(iso)     // round-trip
+//
+// ## Duration
+//
+// A Duration is a signed span of nanoseconds between two Instants.
+//
+//   let d = time::since(start)                   // Duration from start to now
+//   echo d.milliseconds()                         // elapsed ms as i64
+//
+// ## JSON interoperability
+//
+// Instant implements json::JsonSerializable and json::JsonDeserializable.
+// When a struct field is of type Instant, json::encode produces an RFC3339
+// string and json::parse[T] reconstructs the Instant automatically.
+//
+//   struct event = created_at Instant
+//   let (ev, _) = json::parse[event]("{\"created_at\":\"2024-01-01T00:00:00Z\"}")
+//
+// RFC3339 with nanosecond precision is used for cross-language interoperability.
+
+use errors
+use { Err } from errors
+use json
+
+// C helpers (private)
+fn _tin_now_ns_c() i64       = extern("_tin_now_ns_real")
+fn _tin_rfc3339_c(ns i64, buf *byte) i32 = extern("_tin_instant_rfc3339")
+fn _tin_from_rfc3339_c(s string, out *i64) i32 = extern("_tin_from_rfc3339")
+fn _tin_string_from_bytes_c(ptr *byte, len i64) string = extern("_tin_string_from_bytes")
+
+// Duration
+
+// Duration is a signed span of time, measured in nanoseconds.
+struct Duration =
+  ns i64
+
+  // nanoseconds returns the duration in nanoseconds.
+  fn nanoseconds(this Duration) i64 = return this.ns
+
+  // microseconds returns the duration in microseconds (truncated).
+  fn microseconds(this Duration) i64 = return this.ns / 1000
+
+  // milliseconds returns the duration in milliseconds (truncated).
+  fn milliseconds(this Duration) i64 = return this.ns / 1000000
+
+  // seconds returns the duration in seconds (truncated).
+  fn seconds(this Duration) i64 = return this.ns / 1000000000
+
+  // minutes returns the duration in minutes (truncated).
+  fn minutes(this Duration) i64 = return this.ns / 60000000000
+
+  // hours returns the duration in hours (truncated).
+  fn hours(this Duration) i64 = return this.ns / 3600000000000
+
+  // abs returns the absolute value of the duration.
+  fn abs(this Duration) Duration =
+    if this.ns < 0:
+      return Duration{ns: 0 - this.ns}
+    return this
+
+  // add returns d + other.
+  fn add(this Duration, other Duration) Duration = return Duration{ns: this.ns + other.ns}
+
+  // sub returns d - other.
+  fn sub(this Duration, other Duration) Duration = return Duration{ns: this.ns - other.ns}
+
+// from_ns creates a Duration from a nanosecond count.
+fn from_ns(ns i64) Duration = return Duration{ns: ns}
+
+// from_us creates a Duration from a microsecond count.
+fn from_us(us i64) Duration = return Duration{ns: us * 1000}
+
+// from_ms creates a Duration from a millisecond count.
+fn from_ms(ms i64) Duration = return Duration{ns: ms * 1000000}
+
+// from_sec creates a Duration from a second count.
+fn from_sec(s i64) Duration = return Duration{ns: s * 1000000000}
+
+// from_min creates a Duration from a minute count.
+fn from_min(m i64) Duration = return Duration{ns: m * 60000000000}
+
+// from_hours creates a Duration from an hour count.
+fn from_hours(h i64) Duration = return Duration{ns: h * 3600000000000}
+
+// Instant
+
+// Instant is a point in wall-clock time with nanosecond precision.
+// ns stores nanoseconds since the Unix epoch (1970-01-01T00:00:00Z, UTC).
+struct Instant(json::JsonSerializable, json::JsonDeserializable) =
+  ns i64
+
+  // to_rfc3339 formats the instant as an RFC3339 string with nanosecond precision.
+  // Example: "2024-01-15T12:34:56.000000123Z"
+  fn to_rfc3339(this Instant) string =
+    let buf [byte; 32]
+    let n = _tin_rfc3339_c(this.ns, &buf[0])
+    return _tin_string_from_bytes_c(&buf[0], n as i64)
+
+  // to_json implements json::JsonSerializable.
+  // Returns the Instant as a JSON-encoded RFC3339 string (with surrounding quotes).
+  fn to_json(this Instant) string =
+    return "\"" ++ this.to_rfc3339() ++ "\""
+
+  // apply_json implements json::JsonDeserializable.
+  // Parses an RFC3339 string (without surrounding quotes) into this instant.
+  fn apply_json(this *Instant, s string) bool =
+    let ok = _tin_from_rfc3339_c(s, &this.ns)
+    return ok == 0
+
+  // to_ns returns the underlying nanosecond timestamp.
+  fn to_ns(this Instant) i64 = return this.ns
+
+  // add returns the instant advanced by d.
+  fn add(this Instant, d Duration) Instant = return Instant{ns: this.ns + d.ns}
+
+  // sub returns the instant moved back by d.
+  fn sub(this Instant, d Duration) Instant = return Instant{ns: this.ns - d.ns}
+
+  // before reports whether this is earlier than other.
+  fn before(this Instant, other Instant) bool = return this.ns < other.ns
+
+  // after reports whether this is later than other.
+  fn after(this Instant, other Instant) bool = return this.ns > other.ns
+
+  // equal reports whether this and other represent the same instant.
+  fn equal(this Instant, other Instant) bool = return this.ns == other.ns
+
+  // until returns the Duration from this to later.
+  // Returns an error if later is before this.
+  fn until(this Instant, later Instant) (Duration, Err) =
+    if later.ns < this.ns:
+      return (Duration{ns: 0}, errors::new("time: end is before start"))
+    return (Duration{ns: later.ns - this.ns}, nil)
+
+  // elapsed returns the Duration from this to later without error checking.
+  fn elapsed(this Instant, later Instant) Duration =
+    return Duration{ns: later.ns - this.ns}
+
+// now returns the current wall-clock time as an Instant.
+fn now() Instant = return Instant{ns: _tin_now_ns_c()}
+
+// from_ns creates an Instant from a nanosecond Unix timestamp.
+fn instant_from_ns(ns i64) Instant = return Instant{ns: ns}
+
+// since returns the Duration elapsed since t.
+fn since(t Instant) Duration =
+  let cur = now()
+  return Duration{ns: cur.ns - t.ns}
+
+// until_instant returns the Duration from now until t.
+fn until_instant(t Instant) Duration =
+  let cur = now()
+  return Duration{ns: t.ns - cur.ns}
+
+// RFC3339 layout constants (match Go's time.RFC3339 and time.RFC3339Nano)
+const RFC3339     string = "2006-01-02T15:04:05Z07:00"
+const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
+
+// parse_rfc3339 parses an RFC3339 string into an Instant.
+// Supports UTC (Z) and timezone offsets (+HH:MM / -HH:MM).
+// Fractional seconds (up to nanosecond precision) are supported.
+fn parse_rfc3339(s string) (Instant, Err) =
+  let ns i64 = 0
+  let ok = _tin_from_rfc3339_c(s, &ns)
+  if ok != 0:
+    return (Instant{ns: 0}, errors::new("time: invalid RFC3339 string: " ++ s))
+  return (Instant{ns: ns}, nil)
+
+// parse parses a time string using a named layout.
+// Supported layouts: RFC3339, RFC3339Nano (both parse the same RFC3339 format).
+// For other layouts, an error is returned.
+fn parse(layout string, value string) (Instant, Err) =
+  if layout == RFC3339 || layout == RFC3339Nano:
+    return parse_rfc3339(value)
+  return (Instant{ns: 0}, errors::new("time: unsupported layout: " ++ layout))
+
+export {
+  Duration, Instant,
+  from_ns, from_us, from_ms, from_sec, from_min, from_hours,
+  instant_from_ns,
+  now, since, until_instant,
+  parse_rfc3339, parse,
+  RFC3339, RFC3339Nano,
+} as time

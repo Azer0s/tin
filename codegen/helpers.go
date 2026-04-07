@@ -568,12 +568,18 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			}
 		}
 	}
-	// Trait fat-pointer: coerce a concrete struct into the trait iface.
+	// Trait fat-pointer: coerce a concrete struct or `any` into the trait iface.
 	if traitName, ok := cg.isTraitFatPtr(target); ok {
 		if _, srcIsTrait := cg.isTraitFatPtr(src); !srcIsTrait {
-			result, err := cg.coerceToTrait(block, val, traitName)
-			if err == nil {
-				return result
+			if isAnyType(src) {
+				if result, err := cg.coerceAnyToTrait(block, val, traitName); err == nil {
+					return result
+				}
+			} else {
+				result, err := cg.coerceToTrait(block, val, traitName)
+				if err == nil {
+					return result
+				}
 			}
 		}
 	}
@@ -718,6 +724,62 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	return val
 }
 
+// coerceAnyToTrait constructs a trait fat-pointer {i8* data, vtable*} from an
+// `any` value, selecting the correct vtable at runtime via the any's type_id.
+// The select chain iterates all structs that implement the trait; the data
+// pointer is extracted directly from the any's heap block so mutations through
+// the fat-pointer persist (supporting pointer-receiver trait methods).
+func (cg *CodeGen) coerceAnyToTrait(block *ir.Block, anyVal value.Value, instKey string) (value.Value, error) {
+	fatPtrType, ok := cg.traitFatPtrTypes[instKey]
+	if !ok {
+		return nil, fmt.Errorf("coerceAnyToTrait: no fat-ptr type for trait %s", instKey)
+	}
+
+	vtableSt, ok2 := cg.traitVtableStructTypes[instKey]
+	if !ok2 {
+		return nil, fmt.Errorf("coerceAnyToTrait: no vtable struct type for trait %s", instKey)
+	}
+
+	vtablePtrType := irtypes.NewPointer(vtableSt)
+
+	// Extract type_id from the any value.
+	typeIDVal := cg.extractAnyTypeID(block, anyVal)
+
+	// Extract the raw i8* data pointer from the any value.
+	anyType := anyFatPtrType()
+	anyAlloca := block.NewAlloca(anyType)
+	block.NewStore(anyVal, anyAlloca)
+	ptrGep := block.NewGetElementPtr(anyType, anyAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	dataPtr := block.NewLoad(irtypes.I8Ptr, ptrGep)
+
+	// Build select chain: type_id -> correct vtable pointer.
+	var vtableResult value.Value = constant.NewNull(vtablePtrType)
+
+	for sn, typeID := range cg.structTypeIDs {
+		vtableKey := sn + "__" + instKey
+
+		vg, hasVtable := cg.traitVtableGlobals[vtableKey]
+		if !hasVtable {
+			continue
+		}
+
+		isMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(typeID)))
+		vtableResult = block.NewSelect(isMatch, vg, vtableResult)
+	}
+
+	// Construct the trait fat-pointer {i8* data, vtable*}.
+	ifaceAlloca := block.NewAlloca(fatPtrType)
+	dataGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(dataPtr, dataGep)
+	vtableGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(vtableResult, vtableGep)
+
+	return block.NewLoad(fatPtrType, ifaceAlloca), nil
+}
+
 // constCoerce coerces a compile-time constant to the target type without a
 // block (used for const preregistration). Handles int/float narrowing/widening.
 func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
@@ -754,13 +816,15 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 }
 
 func floatBits(t *irtypes.FloatType) int {
-	switch t.Kind { //nolint:exhaustive // FP128/X86_FP80/PPC_FP128 are not used by tin
+	switch t.Kind { //nolint:exhaustive // X86_FP80/PPC_FP128 are not used by tin
 	case irtypes.FloatKindHalf:
 		return 16
 	case irtypes.FloatKindFloat:
 		return 32
 	case irtypes.FloatKindDouble:
 		return 64
+	case irtypes.FloatKindFP128:
+		return 128
 	default:
 		return 64
 	}
@@ -832,6 +896,22 @@ func scalar8BitTypeName(t ast.TypeExpr) string {
 	return ""
 }
 
+// scalar128BitTypeName returns "i128", "u128", or "f128" when t is one of those
+// types. Returns "" for all other types. Used by echo/interpolation dispatch.
+func scalar128BitTypeName(t ast.TypeExpr) string {
+	st, ok := t.(*ast.SimpleType)
+	if !ok {
+		return ""
+	}
+
+	switch st.Name {
+	case "i128", "u128", "f128":
+		return st.Name
+	}
+
+	return ""
+}
+
 func isUnsignedTinType(t ast.TypeExpr) bool {
 	st, ok := t.(*ast.SimpleType)
 	if !ok {
@@ -839,7 +919,7 @@ func isUnsignedTinType(t ast.TypeExpr) bool {
 	}
 
 	switch st.Name {
-	case "u8", "char", "byte", "u16", "u32", "uint32", "u64", "uint", "size_t":
+	case "u8", "char", "byte", "u16", "u32", "uint32", "u64", "uint", "size_t", "u128":
 		return true
 	}
 

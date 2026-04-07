@@ -45,10 +45,10 @@ if is_weekend(workday):
   echo "weekend"
 
 test "direction names" =
-  assert::equals_str(direction_name(direction.north), "north")
-  assert::equals_str(direction_name(direction.south), "south")
-  assert::equals_str(direction_name(direction.east), "east")
-  assert::equals_str(direction_name(direction.west), "west")
+  assert::equals(direction_name(direction.north), "north")
+  assert::equals(direction_name(direction.south), "south")
+  assert::equals(direction_name(direction.east), "east")
+  assert::equals(direction_name(direction.west), "west")
 
 test "weekend check" =
   assert::ok(is_weekend(day.saturday))

@@ -498,7 +498,7 @@ func (cg *CodeGen) llvmSizeOf(block *ir.Block, t irtypes.Type) value.Value {
 //   - _tin_inline_result_alloc(sz) is called instead of malloc directly.
 //     When the inner $coro is being driven inline (genInlineAsyncDrive called
 //     _tin_inline_result_mode_begin() before the ramp), this returns a TLS
-//     pointer — no heap allocation.  For spawned fibers, it falls back to
+//     pointer - no heap allocation.  For spawned fibers, it falls back to
 //     malloc so the result survives beyond the worker loop iteration.
 //
 // The hdl parameter was removed from _tin_fiber_complete so that LLVM's
@@ -872,7 +872,7 @@ func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 	// Re-raise the panic in the current fiber. _tin_panic unwinds defers
 	// (making the panic catchable via recover()) then terminates the fiber.
 	panicBlk.NewCall(cg.ensurePanicFn(), msg)
-	// Do NOT release msg here — the defer thunk already balances the retain
+	// Do NOT release msg here - the defer thunk already balances the retain
 	// added by _tin_fiber_check_panic (same as the await.panic path; see the
 	// comment in genAwaitExpr).
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))

@@ -27,7 +27,7 @@ fn main() =
   for j < 10:
     let p = items[j]
     assert::equals(p.id, j)
-    assert::equals_str(p.label, "item-{j}")
+    assert::equals(p.label, "item-{j}")
     j = j + 1
 
   // (b) check all pointers are distinct

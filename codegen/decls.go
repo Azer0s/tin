@@ -242,9 +242,11 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	cg.structFieldTags[structKey] = fieldTags
 
 	// Record which traits this struct implements (for typeof/traitof).
+	// Use the bare (package-stripped) trait name so that atom literals like
+	// 'JsonSerializable match regardless of how the trait was qualified.
 	var implNames []string
 	for _, impl := range n.Implements {
-		implNames = append(implNames, impl.String())
+		implNames = append(implNames, traitImplKey(impl))
 	}
 
 	cg.structImpls[structKey] = implNames
@@ -550,6 +552,27 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	for i, paramName := range tmpl.TypeParams {
 		if i < len(gt.TypeParams) {
 			subst[paramName] = gt.TypeParams[i]
+		}
+	}
+
+	// Validate generic type constraints (e.g. "where t is addable").
+	// Build a string-keyed map from the substitution for constraint checking.
+	typeSubst := make(map[string]string, len(subst))
+	for param, te := range subst {
+		typeSubst[param] = typeExprToString(te)
+	}
+
+	for _, c := range tmpl.Constraints {
+		concreteName, ok := typeSubst[c.TypeParam]
+		if !ok {
+			continue
+		}
+
+		for _, traitExpr := range c.Traits {
+			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
+				return fmt.Errorf("struct %s: type %q does not satisfy constraint 'where %s is %s'",
+					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
+			}
 		}
 	}
 

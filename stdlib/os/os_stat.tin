@@ -1,0 +1,63 @@
+// os_stat - file system inspection (exists, is_dir, file_size, stat).
+//
+// Loaded via use "./os_stat" in os.tin; all symbols are embedded directly
+// into the os package scope. Do not add an export declaration to this file.
+
+use io
+use errors
+
+// opendir/closedir are used to distinguish directories from regular files
+// without requiring a C struct (no dirent or stat struct needed).
+fn _os_opendir(path string) *void  = extern("opendir")
+fn _os_closedir(dir *void)  i32    = extern("closedir")
+
+// FileInfo holds basic metadata for a file system entry.
+struct FileInfo =
+  size        i64
+  is_directory bool
+
+// exists returns true if path names an existing file or directory.
+fn exists(path string) bool =
+  let d = _os_opendir(path)
+  if d != nil:
+    _os_closedir(d)
+    return true
+  let f = io::fopen(path, "rb")
+  if f == nil:
+    return false
+  io::fclose(f)
+  return true
+
+// is_dir returns true if path is an existing directory.
+fn is_dir(path string) bool =
+  let d = _os_opendir(path)
+  if d == nil:
+    return false
+  _os_closedir(d)
+  return true
+
+// file_size returns the byte size of the file at path, or -1 on error.
+// Returns -1 for directories (use stat for full info).
+fn file_size(path string) i64 =
+  let f = io::fopen(path, "rb")
+  if f == nil:
+    return -1
+  io::fseek(f, 0, 2)
+  let sz = io::ftell(f)
+  io::fclose(f)
+  return sz
+
+// stat returns a FileInfo for path.
+// Returns (info, nil) on success, (zeroed info, err) on failure.
+fn stat(path string) (FileInfo, errors::Err) =
+  let d = _os_opendir(path)
+  if d != nil:
+    _os_closedir(d)
+    return (FileInfo{size: 0, is_directory: true}, nil)
+  let f = io::fopen(path, "rb")
+  if f == nil:
+    return (FileInfo{size: 0, is_directory: false}, errors::new("stat: no such file or directory: " ++ path))
+  io::fseek(f, 0, 2)
+  let sz = io::ftell(f)
+  io::fclose(f)
+  return (FileInfo{size: sz, is_directory: false}, nil)

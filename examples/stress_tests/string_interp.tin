@@ -50,77 +50,77 @@ fn repeat_str(s string, n i64) string =
 test "interpolate function call result" =
   let n i64 = 5
   let s = "sign of {n} is {sign_str(n)}"
-  assert::equals_str(s, "sign of 5 is positive")
+  assert::equals(s, "sign of 5 is positive")
 
 test "interpolate arithmetic expression" =
   let a i64 = 3
   let b i64 = 4
   let s = "hypotenuse squared: {a * a + b * b}"
-  assert::equals_str(s, "hypotenuse squared: 25")
+  assert::equals(s, "hypotenuse squared: 25")
 
 test "interpolate struct field chain" =
   let p = point3d{x: 1.0, y: 2.0, z: 3.0}
   let s = "x={p.x} y={p.y} z={p.z}"
-  assert::equals_str(s, "x=1.000000 y=2.000000 z=3.000000")
+  assert::equals(s, "x=1.000000 y=2.000000 z=3.000000")
 
 test "interpolate method call on struct" =
   let p = point3d{x: 3.0, y: 4.0, z: 0.0}
   let s = "magnitude squared: {p.magnitude()}"
-  assert::equals_str(s, "magnitude squared: 25.000000")
+  assert::equals(s, "magnitude squared: 25.000000")
 
 test "interpolate closure called inline" =
   let square = fn(n i64) i64 = return n * n
   let n i64 = 7
   let s = "{n} squared is {square(n)}"
-  assert::equals_str(s, "7 squared is 49")
+  assert::equals(s, "7 squared is 49")
 
 test "interpolate array element" =
   let labels [string] = ["alpha", "beta", "gamma"]
   let s = "first={labels[0]} last={labels[2]}"
-  assert::equals_str(s, "first=alpha last=gamma")
+  assert::equals(s, "first=alpha last=gamma")
 
 test "multiple interpolations in one string" =
   let a i64 = 10
   let b i64 = 3
   let s = "{a} + {b} = {a + b}, {a} * {b} = {a * b}, {a} % {b} = {a % b}"
-  assert::equals_str(s, "10 + 3 = 13, 10 * 3 = 30, 10 % 3 = 1")
+  assert::equals(s, "10 + 3 = 13, 10 * 3 = 30, 10 % 3 = 1")
 
 test "interpolated string inside interpolation" =
   let inner string = "world"
   let outer = "hello {inner}!"
   let wrapped = "message: {outer}"
-  assert::equals_str(wrapped, "message: hello world!")
+  assert::equals(wrapped, "message: hello world!")
 
 test "interpolation with boolean" =
   let x bool = true
   let s = "flag={x}"
-  assert::equals_str(s, "flag=true")
+  assert::equals(s, "flag=true")
 
 test "interpolation with string concatenation" =
   let prefix = "pre"
   let suffix = "fix"
   let s = "word={prefix ++ suffix}"
-  assert::equals_str(s, "word=prefix")
+  assert::equals(s, "word=prefix")
 
 test "interpolation of negative arithmetic" =
   let n i64 = 5
   let s = "negated: {0 - n}"
-  assert::equals_str(s, "negated: -5")
+  assert::equals(s, "negated: -5")
 
 test "interpolation with repeat_str call" =
   let s = "bar={repeat_str("x", 4)}"
-  assert::equals_str(s, "bar=xxxx")
+  assert::equals(s, "bar=xxxx")
 
 test "interpolation with chained function calls" =
   let arr [i64] = [1, 2, 3, 4, 5]
   let s = "len={len(arr)} first={arr[0]} last={arr[len(arr) - 1]}"
-  assert::equals_str(s, "len=5 first=1 last=5")
+  assert::equals(s, "len=5 first=1 last=5")
 
 test "consecutive empty and non-empty slots" =
   let a string = ""
   let b string = "B"
   let s = "start:{a}mid:{b}end"
-  assert::equals_str(s, "start:mid:Bend")
+  assert::equals(s, "start:mid:Bend")
 
 test "deep chain of struct field access in interpolation" =
   struct inner_s =
@@ -129,4 +129,4 @@ test "deep chain of struct field access in interpolation" =
     child inner_s
   let o = outer_s{child: inner_s{v: 42}}
   let s = "deep={o.child.v}"
-  assert::equals_str(s, "deep=42")
+  assert::equals(s, "deep=42")

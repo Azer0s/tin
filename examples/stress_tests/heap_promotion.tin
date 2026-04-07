@@ -57,7 +57,7 @@ fn alloc_string() *string =
 test "heap-promoted string pointer is readable" =
   let p = alloc_string()
   let v = (*p)
-  assert::equals_str("hello", v)
+  assert::equals("hello", v)
 
 // ---------------------------------------------------------------------------
 // 4. Multiple independent heap-promoted variables via tuple return
@@ -237,7 +237,7 @@ fn defer_lifo_string() *string =
 
 test "defer lifo string order via returned pointer" =
   let p = defer_lifo_string()
-  assert::equals_str("CBA", *p)
+  assert::equals("CBA", *p)
 
 // 13. Early return - defers that were registered must fire on every path
 //     Returns a counter that accumulates +1 per fired defer.
@@ -368,7 +368,7 @@ test "heap-promoted struct with ARC string field" =
   let p = make_named_value("stress", 99)
   let lbl = (*p).label
   let cnt = (*p).count
-  assert::equals_str("stress", lbl)
+  assert::equals("stress", lbl)
   assert::equals(99, cnt)
 
 // 19. Five independently heap-promoted variables returned as a tuple.
@@ -502,4 +502,4 @@ fn build_string_with_defers() *string =
 
 test "heap-promoted string built by defers" =
   let p = build_string_with_defers()
-  assert::equals_str("x123", *p)
+  assert::equals("x123", *p)

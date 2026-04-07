@@ -24,10 +24,10 @@ fn{#pure} sign(n i64) string =
     return "neg or zero"
 
 test "if/else - true branch" =
-  assert::equals_str(sign(5), "pos")
+  assert::equals(sign(5), "pos")
 
 test "if/else - false branch" =
-  assert::equals_str(sign(0), "neg or zero")
+  assert::equals(sign(0), "neg or zero")
 
 //  if / else - empty else body
 
@@ -55,13 +55,13 @@ fn{#pure} category(n i64) string =
   return "positive"   // falls through when both conditions are false
 
 test "else if no trailing else - negative" =
-  assert::equals_str(category(0 - 1), "negative")
+  assert::equals(category(0 - 1), "negative")
 
 test "else if no trailing else - zero" =
-  assert::equals_str(category(0), "zero")
+  assert::equals(category(0), "zero")
 
 test "else if no trailing else - positive fallthrough" =
-  assert::equals_str(category(42), "positive")
+  assert::equals(category(42), "positive")
 
 //  if / else if / else full chain
 
@@ -76,16 +76,16 @@ fn{#pure} fizzbuzz(n i64) string =
     return "{n}"
 
 test "full chain - FizzBuzz" =
-  assert::equals_str(fizzbuzz(15), "FizzBuzz")
+  assert::equals(fizzbuzz(15), "FizzBuzz")
 
 test "full chain - Fizz" =
-  assert::equals_str(fizzbuzz(9), "Fizz")
+  assert::equals(fizzbuzz(9), "Fizz")
 
 test "full chain - Buzz" =
-  assert::equals_str(fizzbuzz(10), "Buzz")
+  assert::equals(fizzbuzz(10), "Buzz")
 
 test "full chain - number" =
-  assert::equals_str(fizzbuzz(7), "7")
+  assert::equals(fizzbuzz(7), "7")
 
 //  Inline (single-statement) forms
 

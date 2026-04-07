@@ -556,7 +556,8 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.
 // structSatisfiesConstraint checks that structName satisfies a trait expression.
-// traitExpr may be a SimpleType ("labeled") or a GenericType ("iter[i64]").
+// traitExpr may be a SimpleType ("labeled"), GenericType ("iter[i64]"), or a
+// type alias that expands to a union ("addable" = i8|i16|i32|...).
 func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.TypeExpr) bool {
 	var traitName string
 
@@ -569,9 +570,31 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return false
 	}
 
+	// Built-in type-set constraints.
+	// "ord": ordered types that support <, <=, >, >= (all integer and float types).
+	// "comp": comparable types that support ==, != (integers, floats, and string).
+	switch traitName {
+	case "ord":
+		return isOrdType(structName)
+	case "comp":
+		return isCompType(structName)
+	}
+
+	// If the name is a tagged union type, check whether structName is one of
+	// its variants (recursively, since unions can contain other unions).
+	if members, ok := cg.unionTypeMembers[traitName]; ok {
+		for _, member := range members {
+			if cg.typeExprContains(member, structName) {
+				return true
+			}
+		}
+
+		return false
+	}
+
 	td, ok := cg.traits[traitName]
 	if !ok {
-		// Not a declared trait: treat as a type-equality constraint.
+		// Not a declared trait or union alias: type-equality constraint.
 		// "where t is i64" is satisfied iff concreteName == "i64".
 		return traitName == structName
 	}
@@ -594,6 +617,58 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 	}
 
 	return true
+}
+
+// typeExprContains reports whether the type named target is a member of te,
+// recursively expanding tagged union types.
+func (cg *CodeGen) typeExprContains(te ast.TypeExpr, target string) bool {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if t.Name == target {
+			return true
+		}
+
+		// Recurse into tagged union members.
+		if members, ok := cg.unionTypeMembers[t.Name]; ok {
+			for _, member := range members {
+				if cg.typeExprContains(member, target) {
+					return true
+				}
+			}
+		}
+
+		return false
+	case *ast.UnionTypeExpr:
+		for _, member := range t.Types {
+			if cg.typeExprContains(member, target) {
+				return true
+			}
+		}
+
+		return false
+	default:
+		return false
+	}
+}
+
+// isOrdType reports whether typeName is an ordered type that supports <, <=, >, >=.
+// Covers all integer and float primitives.
+func isOrdType(typeName string) bool {
+	switch typeName {
+	case "i8", "i16", "i32", "i64", "i128",
+		"u8", "u16", "u32", "u64", "u128",
+		"f32", "f64", "f128",
+		"byte", "char", "int", "uint":
+		return true
+	}
+
+	return false
+}
+
+// isCompType reports whether typeName is a comparable type that supports ==, !=.
+// Covers all ordered types plus string and bool.
+func isCompType(typeName string) bool {
+	return isOrdType(typeName) || typeName == "string" || typeName == "bool"
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
@@ -693,7 +768,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		// If the return type does not need wrapping and no struct params, expose
 		// the C function directly.  Fat-ptr parameters are handled by coerce().
-		if cRetType.Equal(retType) && !needsStructConv {
+		// #handover always needs a wrapper to RC-ify the returned pointer.
+		if cRetType.Equal(retType) && !needsStructConv && !hasTag(n.Tags, "handover") {
 			cg.curScope.set(scopeName, &scopeEntry{val: cFunc, isAlloc: false})
 
 			return nil
@@ -799,7 +875,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 					finalResult = tinResult
 				} else {
-					finalResult = cg.wrapFromExtern(entry, rawResult, retType)
+					finalResult = cg.wrapFromExtern(entry, rawResult, retType, hasTag(n.Tags, "handover"))
 				}
 			}
 
@@ -811,6 +887,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			cg.curFn = prevFn
 			cg.curScope = prevScope
+		}
+
+		// #handover pointer returns: mark the wrapper as heap-promoting so that
+		// genLetStmt sets isHeapOwned on the bound variable, enabling scope-exit
+		// release via emitHeapChainRelease / ensureStructPtrReleaseFn.
+		// String/fat-ptr returns are already RC-tracked; only raw pointer types need this.
+		if hasTag(n.Tags, "handover") {
+			if _, isPtr := retType.(*irtypes.PointerType); isPtr {
+				cg.heapPromotingFns[wrapperName] = true
+			}
 		}
 
 		cg.curScope.set(scopeName, &scopeEntry{val: wrapperFn, isAlloc: false})
@@ -1092,13 +1178,16 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 // genTestRunner generates one __tin_test_N function per TestDecl, plus a
 // main() that:
-//  1. Runs any top-level setup statements (non-test stmts).
+//  1. Initializes top-level var globals (topLevelVarInits).
 //  2. Calls _tin_run_test(desc, fn_ptr) for each test.
 //  3. Returns the exit code from _tin_test_finish(total_count).
 //
+// Top-level statements that would form the implicit main are NOT executed;
+// only test blocks run.
+//
 // _tin_run_test and _tin_test_finish are C helpers in runtime.c that use
 // setjmp/longjmp to isolate test failures and accumulate pass/fail counts.
-func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
+func (cg *CodeGen) genTestRunner() error {
 	stringType, err := cg.tinTypeToLLVM(&ast.SimpleType{Name: "string"})
 	if err != nil {
 		return err
@@ -1147,6 +1236,7 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 			for _, b := range fn.Blocks {
 				if b.Term == nil {
 					_ = cg.emitDefers(b)
+					cg.emitAllScopeReleases(b, "")
 					b.NewRet(nil)
 				}
 			}
@@ -1174,16 +1264,10 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 	// Initialize fiber runtime (workers + I/O thread) so tests can use spawn/await.
 	cur := cg.emitFiberMainWrap(entry)
 
-	// Run setup statements (top-level non-test code).
-	for _, stmt := range setupStmts {
-		cur, _, err = cg.genStmt(cur, stmt)
-		if err != nil {
-			return err
-		}
-
-		if cur == nil {
-			break
-		}
+	// Initialize top-level var globals so tests can reference them.
+	cur, err = cg.emitTopLevelVarInits(cur)
+	if err != nil {
+		return err
 	}
 
 	// Call _tin_run_test for each test.
@@ -1196,6 +1280,9 @@ func (cg *CodeGen) genTestRunner(setupStmts []ast.Node) error {
 
 		// Drain the run queue and shut down workers.
 		cg.emitFiberMainEnd(cur)
+
+		// Release RC-tracked locals (e.g. from topLevelVarInits).
+		cg.emitAllScopeReleases(cur, "")
 
 		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.
 		cg.emitTopLevelVarDeinits(cur)

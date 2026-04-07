@@ -47,57 +47,57 @@ struct jt_rect =
 // Encoding
 
 test "encode bool true" =
-  assert::equals_str(json::encode(true), "true")
+  assert::equals(json::encode(true), "true")
 
 test "encode bool false" =
-  assert::equals_str(json::encode(false), "false")
+  assert::equals(json::encode(false), "false")
 
 test "encode i64 positive" =
-  assert::equals_str(json::encode(42 as i64), "42")
+  assert::equals(json::encode(42 as i64), "42")
 
 test "encode i64 negative" =
-  assert::equals_str(json::encode(0 - 7 as i64), "-7")
+  assert::equals(json::encode(0 - 7 as i64), "-7")
 
 test "encode i64 zero" =
-  assert::equals_str(json::encode(0 as i64), "0")
+  assert::equals(json::encode(0 as i64), "0")
 
 test "encode string plain" =
-  assert::equals_str(json::encode("hello"), "\"hello\"")
+  assert::equals(json::encode("hello"), "\"hello\"")
 
 test "encode string with quotes" =
-  assert::equals_str(json::encode("say \"hi\""), "\"say \\\"hi\\\"\"")
+  assert::equals(json::encode("say \"hi\""), "\"say \\\"hi\\\"\"")
 
 test "encode string with backslash" =
-  assert::equals_str(json::encode("a\\b"), "\"a\\\\b\"")
+  assert::equals(json::encode("a\\b"), "\"a\\\\b\"")
 
 test "encode string with newline" =
-  assert::equals_str(json::encode("line1\nline2"), "\"line1\\nline2\"")
+  assert::equals(json::encode("line1\nline2"), "\"line1\\nline2\"")
 
 test "encode struct all fields" =
   let p = jt_point{x: 3, y: 4}
   let s = json::encode(p)
-  assert::equals_str(s, "\{\"x\":3,\"y\":4\}")
+  assert::equals(s, "\{\"x\":3,\"y\":4\}")
 
 test "encode struct with json tag rename" =
   let u = jt_tagged_user{id: 1, email: "a@b.com"}
   let s = json::encode(u)
-  assert::equals_str(s, "\{\"user_id\":1,\"email_address\":\"a@b.com\"\}")
+  assert::equals(s, "\{\"user_id\":1,\"email_address\":\"a@b.com\"\}")
 
 test "encode struct with json:- skips field" =
   let w = jt_with_secret{name: "alice", pwd: "hunter2"}
   let s = json::encode(w)
-  assert::equals_str(s, "\{\"name\":\"alice\"\}")
+  assert::equals(s, "\{\"name\":\"alice\"\}")
 
 test "encode nested struct" =
   let r = jt_rect{origin: jt_point{x: 0, y: 0}, size: jt_point{x: 100, y: 50}}
   let s = json::encode(r)
-  assert::equals_str("\{\"origin\":\{\"x\":0,\"y\":0\},\"size\":\{\"x\":100,\"y\":50\}\}", s)
+  assert::equals("\{\"origin\":\{\"x\":0,\"y\":0\},\"size\":\{\"x\":100,\"y\":50\}\}", s)
 
 test "encode tuple" =
   // Tuples are structs with alphabetical field names a, b, c, ...
   let t = (10 as i64, "hello")
   let s = json::encode(t)
-  assert::equals_str("\{\"a\":10,\"b\":\"hello\"\}", s)
+  assert::equals("\{\"a\":10,\"b\":\"hello\"\}", s)
 
 // Untyped parsing
 
@@ -128,22 +128,22 @@ test "parse negative integer" =
 test "parse float" =
   let (v, _) = json::parse("3.14")
   assert::ok(v.is_float())
-  assert::equals_f64(v.as_float(), 3.14)
+  assert::equals(v.as_float(), 3.14)
 
 test "parse string" =
   let (v, _) = json::parse("\"hello\"")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "hello")
+  assert::equals(v.as_string(), "hello")
 
 test "parse string with escape sequences" =
   let (v, _) = json::parse("\"line1\\nline2\"")
   assert::ok(v.is_string())
-  assert::equals_str(v.as_string(), "line1\nline2")
+  assert::equals(v.as_string(), "line1\nline2")
 
 test "parse object get field" =
   let (v, _) = json::parse("\{\"name\":\"alice\",\"age\":30\}")
   assert::ok(v.is_object())
-  assert::equals_str(v.get("name").as_string(), "alice")
+  assert::equals(v.get("name").as_string(), "alice")
   assert::equals(v.get("age").as_int(), 30)
 
 test "parse object missing key returns null" =
@@ -191,7 +191,7 @@ test "typed parse basic struct" =
 test "typed parse with json tag" =
   let (u, _) = json::parse[jt_api_user]("\{\"user_id\":7,\"display_name\":\"bob\"\}")
   assert::equals(u.id, 7)
-  assert::equals_str(u.name, "bob")
+  assert::equals(u.name, "bob")
 
 test "typed parse unknown keys ignored" =
   let (s, _) = json::parse[jt_simple]("\{\"x\":3,\"extra\":\"ignored\"\}")
@@ -199,7 +199,7 @@ test "typed parse unknown keys ignored" =
 
 test "typed parse float field" =
   let (m, _) = json::parse[jt_measure]("\{\"val\":2.5\}")
-  assert::equals_f64(m.val, 2.5)
+  assert::equals(m.val, 2.5)
 
 test "typed parse bool field" =
   let (f, _) = json::parse[jt_flags]("\{\"enabled\":true\}")
@@ -207,7 +207,7 @@ test "typed parse bool field" =
 
 test "typed parse string field" =
   let (g, _) = json::parse[jt_greeting]("\{\"msg\":\"hi there\"\}")
-  assert::equals_str(g.msg, "hi there")
+  assert::equals(g.msg, "hi there")
 
 test "typed parse nested struct" =
   let s = "\{\"origin\":\{\"x\":3,\"y\":4\},\"size\":\{\"x\":100,\"y\":50\}\}"

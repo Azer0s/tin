@@ -1,0 +1,247 @@
+// examples/time_test.tin - Tests for stdlib/time, stdlib/guid JSON traits.
+//
+// Run with: ./tin test examples/time_test.tin
+
+use assert
+use time
+use { Instant, Duration } from time
+use json
+use guid
+use { Guid } from guid
+use errors
+
+// ---- Duration arithmetic ----
+
+test "Duration from_ns" =
+  let d = time::from_ns(12345)
+  assert::equals(d.nanoseconds(), 12345)
+
+test "Duration from_us" =
+  let d = time::from_us(5)
+  assert::equals(d.nanoseconds(), 5000)
+
+test "Duration from_ms" =
+  let d = time::from_ms(3)
+  assert::equals(d.nanoseconds(), 3000000)
+
+test "Duration from_sec" =
+  let d = time::from_sec(2)
+  assert::equals(d.nanoseconds(), 2000000000)
+
+test "Duration from_min" =
+  let d = time::from_min(1)
+  assert::equals(d.nanoseconds(), 60000000000)
+
+test "Duration from_hours" =
+  let d = time::from_hours(1)
+  assert::equals(d.nanoseconds(), 3600000000000)
+
+test "Duration conversions" =
+  let d = time::from_ms(1500)
+  assert::equals(d.milliseconds(), 1500)
+  assert::equals(d.seconds(), 1)
+  assert::equals(d.microseconds(), 1500000)
+
+test "Duration add" =
+  let a = time::from_ms(100)
+  let b = time::from_ms(200)
+  let c = a.add(b)
+  assert::equals(c.milliseconds(), 300)
+
+test "Duration sub" =
+  let a = time::from_ms(500)
+  let b = time::from_ms(200)
+  let c = a.sub(b)
+  assert::equals(c.milliseconds(), 300)
+
+test "Duration abs negative" =
+  let d = Duration{ns: 0 - 5000000}
+  let a = d.abs()
+  assert::equals(a.milliseconds(), 5)
+
+// ---- Instant construction ----
+
+test "Instant from_ns" =
+  let t = time::instant_from_ns(1000000000)
+  assert::equals(t.to_ns(), 1000000000)
+
+test "Instant to_ns" =
+  let t = Instant{ns: 42}
+  assert::equals(t.to_ns(), 42)
+
+// ---- Instant comparisons ----
+
+test "Instant before" =
+  let a = Instant{ns: 100}
+  let b = Instant{ns: 200}
+  assert::ok(a.before(b))
+  assert::not_ok(b.before(a))
+
+test "Instant after" =
+  let a = Instant{ns: 100}
+  let b = Instant{ns: 200}
+  assert::ok(b.after(a))
+  assert::not_ok(a.after(b))
+
+test "Instant equal" =
+  let a = Instant{ns: 999}
+  let b = Instant{ns: 999}
+  let c = Instant{ns: 1000}
+  assert::ok(a.equal(b))
+  assert::not_ok(a.equal(c))
+
+// ---- Instant arithmetic ----
+
+test "Instant add duration" =
+  let t = Instant{ns: 1000000000}
+  let d = time::from_sec(5)
+  let t2 = t.add(d)
+  assert::equals(t2.ns, 6000000000)
+
+test "Instant sub duration" =
+  let t = Instant{ns: 6000000000}
+  let d = time::from_sec(5)
+  let t2 = t.sub(d)
+  assert::equals(t2.ns, 1000000000)
+
+test "Instant until success" =
+  let start = Instant{ns: 1000}
+  let end   = Instant{ns: 5000}
+  let (d, err) = start.until(end)
+  assert::not_ok(errors::has(err))
+  assert::equals(d.nanoseconds(), 4000)
+
+test "Instant until error when end before start" =
+  let start = Instant{ns: 5000}
+  let end   = Instant{ns: 1000}
+  let (_, err) = start.until(end)
+  assert::ok(errors::has(err))
+
+test "Instant elapsed" =
+  let start = Instant{ns: 100}
+  let end   = Instant{ns: 600}
+  let d = start.elapsed(end)
+  assert::equals(d.nanoseconds(), 500)
+
+// ---- RFC3339 parsing ----
+
+test "parse_rfc3339 UTC no fractional" =
+  let (t, err) = time::parse_rfc3339("2024-01-15T12:34:56Z")
+  assert::not_ok(errors::has(err))
+  // 2024-01-15T12:34:56Z -> Unix seconds: 1705322096
+  assert::equals(t.ns, 1705322096000000000)
+
+test "parse_rfc3339 with nanoseconds" =
+  let (t, err) = time::parse_rfc3339("2024-01-15T12:34:56.000000123Z")
+  assert::not_ok(errors::has(err))
+  assert::equals(t.ns, 1705322096000000123)
+
+test "parse_rfc3339 invalid returns error" =
+  let (_, err) = time::parse_rfc3339("not-a-time")
+  assert::ok(errors::has(err))
+
+test "parse_rfc3339 round-trip" =
+  let iso = "2024-06-01T08:00:00.000000000Z"
+  let (t, _) = time::parse_rfc3339(iso)
+  let iso2 = t.to_rfc3339()
+  assert::equals(iso, iso2)
+
+test "to_rfc3339 formats correctly" =
+  let t = Instant{ns: 0}
+  let s = t.to_rfc3339()
+  assert::equals(s, "1970-01-01T00:00:00.000000000Z")
+
+// ---- time::parse with layout ----
+
+test "parse with RFC3339 layout" =
+  let (t, err) = time::parse(time::RFC3339, "2024-01-15T12:34:56Z")
+  assert::not_ok(errors::has(err))
+  assert::equals(t.ns, 1705322096000000000)
+
+test "parse with unsupported layout returns error" =
+  let (_, err) = time::parse("YYYY-MM-DD", "2024-01-15")
+  assert::ok(errors::has(err))
+
+// ---- Instant::now ----
+
+test "now returns positive timestamp" =
+  let t = time::now()
+  assert::ok(t.ns > 0)
+
+test "now monotonically increases" =
+  let a = time::now()
+  let b = time::now()
+  assert::ok(b.ns >= a.ns)
+
+// ---- Instant JSON serialization ----
+
+test "Instant to_json produces RFC3339 string" =
+  let t = Instant{ns: 0}
+  let j = t.to_json()
+  assert::equals(j, "\"1970-01-01T00:00:00.000000000Z\"")
+
+test "Instant to_json non-zero" =
+  let (t, _) = time::parse_rfc3339("2024-01-15T12:34:56Z")
+  let j = t.to_json()
+  assert::equals(j, "\"2024-01-15T12:34:56.000000000Z\"")
+
+test "json::encode Instant uses to_json" =
+  let t = Instant{ns: 0}
+  let j = json::encode(t)
+  assert::equals(j, "\"1970-01-01T00:00:00.000000000Z\"")
+
+// ---- Instant JSON deserialization as struct field ----
+
+struct event_with_time =
+  name       string
+  created_at Instant @"json:created_at"
+
+test "json::parse Instant field from RFC3339 string" =
+  let s = "\{\"name\":\"hello\",\"created_at\":\"1970-01-01T00:00:00.000000000Z\"\}"
+  let (ev, err) = json::parse[event_with_time](s)
+  assert::not_ok(errors::has(err))
+  assert::equals(ev.name, "hello")
+  assert::equals(ev.created_at.ns, 0)
+
+test "json::parse Instant field non-zero" =
+  let s = "\{\"name\":\"test\",\"created_at\":\"2024-01-15T12:34:56Z\"\}"
+  let (ev, err) = json::parse[event_with_time](s)
+  assert::not_ok(errors::has(err))
+  assert::equals(ev.created_at.ns, 1705322096000000000)
+
+// ---- Guid struct ----
+
+test "Guid new returns non-empty" =
+  let g = guid::new()
+  assert::ok(len(g.value) > 0)
+
+test "Guid value is string field" =
+  let g = Guid{value: "test-guid-1234"}
+  assert::equals(g.value, "test-guid-1234")
+
+test "Guid to_json wraps in quotes" =
+  let g = Guid{value: "abc-123"}
+  assert::equals(g.to_json(), "\"abc-123\"")
+
+test "json::encode Guid" =
+  let g = Guid{value: "abc-123"}
+  let j = json::encode(g)
+  assert::equals(j, "\"abc-123\"")
+
+// ---- Guid as struct field in JSON ----
+
+struct entity_with_guid =
+  id   Guid   @"json:id"
+  name string @"json:name"
+
+test "json::parse Guid field" =
+  let s = "\{\"id\":\"my-guid-value\",\"name\":\"Alice\"\}"
+  let (e, err) = json::parse[entity_with_guid](s)
+  assert::not_ok(errors::has(err))
+  assert::equals(e.id.value, "my-guid-value")
+  assert::equals(e.name, "Alice")
+
+test "json::encode struct with Guid field" =
+  let e = entity_with_guid{id: Guid{value: "test-id"}, name: "Bob"}
+  let j = json::encode(e)
+  assert::equals(j, "\{\"id\":\"test-id\",\"name\":\"Bob\"\}")

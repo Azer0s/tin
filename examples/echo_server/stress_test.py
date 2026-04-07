@@ -210,7 +210,7 @@ def test_binary_like_payload():
     record("binary-like payload", True)  # server should not crash
 
 def test_newline_only():
-    """Send just a newline — ioutil::read_string strips it, giving empty string → close."""
+    """Send just a newline - ioutil::read_string strips it, giving empty string → close."""
     s = conn()
     s.sendall(b"\n")
     time.sleep(0.2)
@@ -218,7 +218,7 @@ def test_newline_only():
         s.settimeout(0.3)
         data = s.recv(256)
         s.close()
-        # empty line means len==0, so server closes — no ECHO expected
+        # empty line means len==0, so server closes - no ECHO expected
         record("newline-only closes", data == b"", repr(data))
     except:
         s.close()
@@ -250,7 +250,7 @@ def test_pipelined_quit():
     """Send multiple messages in one write (pipelining).
     BUG 1 (ioutil data-loss): all 4 lines arrive in one TCP segment;
     r.read() returns them all but read_string_until only keeps up to
-    the first newline — line2, line3, quit are silently discarded.
+    the first newline - line2, line3, quit are silently discarded.
     BUG 2 (quit newline-strip): even if quit were processed, the server
     checks line=="quit\\n" but the newline is stripped, so quit would
     be echoed rather than closing the connection."""
@@ -288,7 +288,7 @@ def test_json_special_strings():
 # ── half-open / abrupt close ─────────────────────────────────────────────────
 
 def test_abrupt_close():
-    """RST the connection mid-session — server should not crash."""
+    """RST the connection mid-session - server should not crash."""
     s = conn()
     s.sendall(b"hello\n")
     time.sleep(0.1)
@@ -309,7 +309,7 @@ def test_server_still_up_after_rst():
         record("server alive after RST", False, str(e))
 
 def test_half_close():
-    """Shutdown write side only — server reads EOF, should close."""
+    """Shutdown write side only - server reads EOF, should close."""
     s = conn()
     s.sendall(b"before-eof\n")
     time.sleep(0.1)

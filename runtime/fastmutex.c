@@ -67,7 +67,7 @@ int _tin_fmutex_lock_coro_slow(TinFastMutex *m, int64_t pid, void *hdl) {
     // Atomically transition state 1→2 to tell the unlocker "there are waiters".
     // If this CAS fails, the mutex was released while we were adding ourselves
     // (state became 0).  Remove the entry we just added and tell the caller to
-    // retry — the lock is now free so the next CAS will succeed.
+    // retry - the lock is now free so the next CAS will succeed.
     expected = 1;
     int marked = atomic_compare_exchange_strong_explicit(
         &m->state, &expected, 2u,

@@ -1,0 +1,204 @@
+// stress_tests/recursive_generic_structs_auto.tin
+//
+// Duplicate of recursive_generic_structs.tin using struct pointer literals
+// (&struct{}) instead of mem::calloc for allocation.  ARC manages all memory
+// automatically: the release of the root variable cascades through the whole
+// chain via walkRCStructFields.  No manual cleanup is needed.
+//
+// Each test builds its structure inline (single root scope variable) to avoid
+// double-free from multiple isHeapOwned scope variables pointing into the
+// same chain.
+
+use assert
+
+// ---------------------------------------------------------------------------
+// 1. Linked list node (singly linked, RC-allocated via &struct{})
+// ---------------------------------------------------------------------------
+
+struct list_node[t] =
+  val  t
+  next *list_node[t]    // nil = end of list
+
+  static fn cons(val t, next *list_node[t]) *list_node[t] =
+    return &list_node[t]{val: val, next: next}
+
+fn list_len[t](node *list_node[t]) i64 =
+  if node == nil:
+    return 0
+  return 1 + list_len((*node).next)
+
+fn list_sum_i64(node *list_node[i64]) i64 =
+  if node == nil:
+    return 0
+  return (*node).val + list_sum_i64((*node).next)
+
+fn list_get[t](node *list_node[t], idx i64) t =
+  if idx == 0:
+    return (*node).val
+  return list_get((*node).next, idx - 1)
+
+// ---------------------------------------------------------------------------
+// 2. Binary tree (generic, RC-allocated via &struct{})
+// ---------------------------------------------------------------------------
+
+struct tree_node[t] =
+  val   t
+  left  *tree_node[t]
+  right *tree_node[t]
+
+  static fn leaf(v t) *tree_node[t] =
+    return &tree_node[t]{val: v, left: nil, right: nil}
+
+  static fn branch(v t, l *tree_node[t], r *tree_node[t]) *tree_node[t] =
+    return &tree_node[t]{val: v, left: l, right: r}
+
+fn tree_sum(root *tree_node[i64]) i64 =
+  if root == nil:
+    return 0
+  return (*root).val + tree_sum((*root).left) + tree_sum((*root).right)
+
+fn tree_depth[t](root *tree_node[t]) i64 =
+  if root == nil:
+    return 0
+  let l = tree_depth((*root).left)
+  let r = tree_depth((*root).right)
+  if l > r:
+    return l + 1
+  return r + 1
+
+fn tree_count[t](root *tree_node[t]) i64 =
+  if root == nil:
+    return 0
+  return 1 + tree_count((*root).left) + tree_count((*root).right)
+
+// ---------------------------------------------------------------------------
+// 3. Option type
+// ---------------------------------------------------------------------------
+
+struct option[t] =
+  has_value bool
+  val       t
+
+  static fn some(v t) option[t] =
+    return option[t]{has_value: true, val: v}
+
+  static fn none() option[t] =
+    return option[t]{has_value: false, val: default(t)}
+
+  fn unwrap_or(this option[t], fallback t) t =
+    if this.has_value:
+      return this.val
+    return fallback
+
+  fn map_opt[r](this option[t], f fn(t) r) option[r] =
+    if this.has_value:
+      return option[r]::some(f(this.val))
+    return option[r]::none()
+
+// ---------------------------------------------------------------------------
+// 4. Result type
+// ---------------------------------------------------------------------------
+
+struct result[t] =
+  ok  bool
+  val t
+  err string
+
+  static fn success(v t) result[t] =
+    return result[t]{ok: true, val: v, err: ""}
+
+  static fn failure(msg string) result[t] =
+    return result[t]{ok: false, val: default(t), err: msg}
+
+  fn unwrap_or(this result[t], fallback t) t =
+    if this.ok:
+      return this.val
+    return fallback
+
+fn safe_div(a i64, b i64) result[i64] =
+  if b == 0:
+    return result[i64]::failure("division by zero")
+  return result[i64]::success(a / b)
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "linked list construction and length" =
+  // Build inline: only root is a scope variable; ARC frees the whole chain.
+  let n3 = list_node[i64]::cons(3, list_node[i64]::cons(2, list_node[i64]::cons(1, nil)))
+  assert::equals(list_len(n3), 3)
+
+test "linked list sum" =
+  let n3 = list_node[i64]::cons(30, list_node[i64]::cons(20, list_node[i64]::cons(10, nil)))
+  assert::equals(list_sum_i64(n3), 60)
+
+test "linked list element access" =
+  let n3 = list_node[i64]::cons(300, list_node[i64]::cons(200, list_node[i64]::cons(100, nil)))
+  assert::equals(list_get(n3, 0), 300)
+  assert::equals(list_get(n3, 1), 200)
+  assert::equals(list_get(n3, 2), 100)
+
+test "linked list with string type" =
+  let n3 = list_node[string]::cons("a", list_node[string]::cons("b", list_node[string]::cons("c", nil)))
+  assert::equals(list_get(n3, 0), "a")
+  assert::equals(list_get(n3, 1), "b")
+  assert::equals(list_get(n3, 2), "c")
+
+test "binary tree sum" =
+  //       5
+  //      / \
+  //     3   7
+  //    / \
+  //   1   4
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
+  assert::equals(tree_sum(root), 20)
+
+test "binary tree depth" =
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
+  assert::equals(tree_depth(root), 3)
+
+test "binary tree count" =
+  let root = tree_node[i64]::branch(5, tree_node[i64]::branch(3, tree_node[i64]::leaf(1), tree_node[i64]::leaf(4)), tree_node[i64]::leaf(7))
+  assert::equals(tree_count(root), 5)
+
+test "option some unwrap_or" =
+  let o = option[i64]::some(42)
+  assert::ok(o.has_value)
+  assert::equals(o.unwrap_or(0), 42)
+
+test "option none unwrap_or" =
+  let o = option[i64]::none()
+  assert::not_ok(o.has_value)
+  assert::equals(o.unwrap_or(99), 99)
+
+test "option map_opt some" =
+  let o = option[i64]::some(5)
+  let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+  assert::ok(doubled.has_value)
+  assert::equals(doubled.val, 10)
+
+test "option map_opt none" =
+  let o = option[i64]::none()
+  let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+  assert::not_ok(doubled.has_value)
+
+test "option map_opt type change string" =
+  let o = option[i64]::some(7)
+  let as_str = o.map_opt(fn(n i64) string = return "val={n}")
+  assert::ok(as_str.has_value)
+  assert::equals(as_str.val, "val=7")
+
+test "result success" =
+  let r = safe_div(10, 2)
+  assert::ok(r.ok)
+  assert::equals(r.val, 5)
+
+test "result failure division by zero" =
+  let r = safe_div(10, 0)
+  assert::not_ok(r.ok)
+  assert::equals(r.err, "division by zero")
+
+test "result unwrap_or" =
+  assert::equals(safe_div(10, 0).unwrap_or(0 - 1), 0 - 1)
+  assert::equals(safe_div(9, 3).unwrap_or(0 - 1), 3)

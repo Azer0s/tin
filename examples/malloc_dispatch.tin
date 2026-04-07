@@ -89,8 +89,8 @@ test "heap dog dispatch" =
   let dp = raw as *dog
   (*dp).tag = 1
   let hd speak = dp
-  assert::equals_str(hd.sound(), "Woof!")
-  assert::equals_str(hd.label(), "dog")
+  assert::equals(hd.sound(), "Woof!")
+  assert::equals(hd.label(), "dog")
   mem::free(raw)
 
 test "heap cat dispatch" =
@@ -98,6 +98,6 @@ test "heap cat dispatch" =
   let cp = raw as *cat
   (*cp).tag = 2
   let hc speak = cp
-  assert::equals_str(hc.sound(), "Meow!")
-  assert::equals_str(hc.label(), "cat")
+  assert::equals(hc.sound(), "Meow!")
+  assert::equals(hc.label(), "cat")
   mem::free(raw)

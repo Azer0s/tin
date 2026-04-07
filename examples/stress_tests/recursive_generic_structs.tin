@@ -29,6 +29,14 @@ struct list_node[t] =
     (*n).next = next
     return n
 
+  // Frees all successor nodes recursively (not self).
+  // Caller must free self after calling deinit.
+  fn deinit(this list_node[t]) void =
+    if this.next != nil:
+      (*this.next).deinit()
+      mem::free(this.next)
+      this.next = nil
+
 fn list_len[t](node *list_node[t]) i64 =
   if node == nil:
     return 0
@@ -66,6 +74,18 @@ struct tree_node[t] =
     (*n).left = l
     (*n).right = r
     return n
+
+  // Frees all descendant nodes recursively (not self).
+  // Caller must free self after calling deinit.
+  fn deinit(this tree_node[t]) void =
+    if this.left != nil:
+      (*this.left).deinit()
+      mem::free(this.left)
+      this.left = nil
+    if this.right != nil:
+      (*this.right).deinit()
+      mem::free(this.right)
+      this.right = nil
 
 fn tree_sum(root *tree_node[i64]) i64 =
   if root == nil:
@@ -146,12 +166,16 @@ test "linked list construction and length" =
   let n2 = list_node[i64]::cons(2, n1)
   let n3 = list_node[i64]::cons(3, n2)
   assert::equals(list_len(n3), 3)
+  (*n3).deinit()
+  mem::free(n3)
 
 test "linked list sum" =
   let n1 = list_node[i64]::cons(10, nil)
   let n2 = list_node[i64]::cons(20, n1)
   let n3 = list_node[i64]::cons(30, n2)
   assert::equals(list_sum_i64(n3), 60)
+  (*n3).deinit()
+  mem::free(n3)
 
 test "linked list element access" =
   let n1 = list_node[i64]::cons(100, nil)
@@ -160,14 +184,18 @@ test "linked list element access" =
   assert::equals(list_get(n3, 0), 300)
   assert::equals(list_get(n3, 1), 200)
   assert::equals(list_get(n3, 2), 100)
+  (*n3).deinit()
+  mem::free(n3)
 
 test "linked list with string type" =
   let n1 = list_node[string]::cons("c", nil)
   let n2 = list_node[string]::cons("b", n1)
   let n3 = list_node[string]::cons("a", n2)
-  assert::equals_str(list_get(n3, 0), "a")
-  assert::equals_str(list_get(n3, 1), "b")
-  assert::equals_str(list_get(n3, 2), "c")
+  assert::equals(list_get(n3, 0), "a")
+  assert::equals(list_get(n3, 1), "b")
+  assert::equals(list_get(n3, 2), "c")
+  (*n3).deinit()
+  mem::free(n3)
 
 test "binary tree sum" =
   //       5
@@ -181,6 +209,8 @@ test "binary tree sum" =
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
   assert::equals(tree_sum(root), 20)
+  (*root).deinit()
+  mem::free(root)
 
 test "binary tree depth" =
   let t1 = tree_node[i64]::leaf(1)
@@ -189,6 +219,8 @@ test "binary tree depth" =
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
   assert::equals(tree_depth(root), 3)
+  (*root).deinit()
+  mem::free(root)
 
 test "binary tree count" =
   let t1 = tree_node[i64]::leaf(1)
@@ -197,6 +229,8 @@ test "binary tree count" =
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
   assert::equals(tree_count(root), 5)
+  (*root).deinit()
+  mem::free(root)
 
 test "option some unwrap_or" =
   let o = option[i64]::some(42)
@@ -223,7 +257,7 @@ test "option map_opt type change string" =
   let o = option[i64]::some(7)
   let as_str = o.map_opt(fn(n i64) string = return "val={n}")
   assert::ok(as_str.has_value)
-  assert::equals_str(as_str.val, "val=7")
+  assert::equals(as_str.val, "val=7")
 
 test "result success" =
   let r = safe_div(10, 2)
@@ -233,7 +267,7 @@ test "result success" =
 test "result failure division by zero" =
   let r = safe_div(10, 0)
   assert::not_ok(r.ok)
-  assert::equals_str(r.err, "division by zero")
+  assert::equals(r.err, "division by zero")
 
 test "result unwrap_or" =
   assert::equals(safe_div(10, 0).unwrap_or(0 - 1), 0 - 1)

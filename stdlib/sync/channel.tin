@@ -96,5 +96,3 @@ struct Channel[T] =
   // called when the fiber's parameter goes out of scope.
   fn _fiber_retain(this Channel[T]) =
     _tin_channel_retain(this._ptr)
-
-export { Channel } as sync

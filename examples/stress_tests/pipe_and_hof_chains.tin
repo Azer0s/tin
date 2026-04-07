@@ -156,9 +156,9 @@ test "pipe on string array" =
     |> filter(fn(s string) bool = return len(s) > 4)
     |> map(fn(s string) string = return "{s}!")
   assert::equals(len(result), 3)
-  assert::equals_str(result[0], "hello!")
-  assert::equals_str(result[1], "world!")
-  assert::equals_str(result[2], "compiler!")
+  assert::equals(result[0], "hello!")
+  assert::equals(result[1], "world!")
+  assert::equals(result[2], "compiler!")
 
 test "pipe empty source" =
   let result [i64] = []

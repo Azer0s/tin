@@ -36,10 +36,10 @@ test "integer constants" =
   assert::equals(TIMEOUT_MS, 5000)
 
 test "float constant" =
-  assert::equals_f64(PI, 3.14159)
+  assert::equals(PI, 3.14159)
 
 test "string constant" =
-  assert::equals_str(APP_NAME, "tin")
+  assert::equals(APP_NAME, "tin")
 
 test "bool constant" =
   assert::not_ok(DEBUG)

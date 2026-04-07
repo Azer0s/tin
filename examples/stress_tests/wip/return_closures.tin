@@ -115,9 +115,9 @@ test "range check closure" =
 
 test "lookup closure with array env" =
   let lookup = make_lookup(["zero", "one", "two", "three"])
-  assert::equals_str(lookup(0), "zero")
-  assert::equals_str(lookup(2), "two")
-  assert::equals_str(lookup(5), "")   // out of bounds
+  assert::equals(lookup(0), "zero")
+  assert::equals(lookup(2), "two")
+  assert::equals(lookup(5), "")   // out of bounds
 
 test "generic default returner i64" =
   let get42 = make_default_returner(42)
@@ -126,7 +126,7 @@ test "generic default returner i64" =
 
 test "generic default returner string" =
   let get_hello = make_default_returner("hello")
-  assert::equals_str(get_hello(), "hello")
+  assert::equals(get_hello(), "hello")
 
 test "generic mapper closure" =
   let double_all = make_mapper(fn(n i64) i64 = return n * 2)

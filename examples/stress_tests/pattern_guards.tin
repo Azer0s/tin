@@ -144,13 +144,13 @@ fn evaluate_task(res task_result, prio priority) string =
 // ---------------------------------------------------------------------------
 
 test "grade where guards" =
-  assert::equals_str(grade(95), "A")
-  assert::equals_str(grade(85), "B")
-  assert::equals_str(grade(75), "C")
-  assert::equals_str(grade(65), "D")
-  assert::equals_str(grade(55), "F")
-  assert::equals_str(grade(90), "A")
-  assert::equals_str(grade(80), "B")
+  assert::equals(grade(95), "A")
+  assert::equals(grade(85), "B")
+  assert::equals(grade(75), "C")
+  assert::equals(grade(65), "D")
+  assert::equals(grade(55), "F")
+  assert::equals(grade(90), "A")
+  assert::equals(grade(80), "B")
 
 test "classify_temp atom guards" =
   assert::ok(classify_temp(0 - 5.0) == 'freezing)
@@ -166,14 +166,14 @@ test "collatz recursive where dispatch" =
   assert::equals(collatz(4), 2)
 
 test "describe_val tagged union dispatch" =
-  assert::equals_str(describe_val(42 as expr_val), "positive integer 42")
-  assert::equals_str(describe_val((0 - 5) as expr_val), "negative integer -5")
-  assert::equals_str(describe_val(0 as expr_val), "zero")
-  assert::equals_str(describe_val(3.14 as expr_val), "positive float")
-  assert::equals_str(describe_val("hi" as expr_val), "string: hi")
-  assert::equals_str(describe_val("" as expr_val), "empty string")
-  assert::equals_str(describe_val(true as expr_val), "true")
-  assert::equals_str(describe_val(false as expr_val), "false")
+  assert::equals(describe_val(42 as expr_val), "positive integer 42")
+  assert::equals(describe_val((0 - 5) as expr_val), "negative integer -5")
+  assert::equals(describe_val(0 as expr_val), "zero")
+  assert::equals(describe_val(3.14 as expr_val), "positive float")
+  assert::equals(describe_val("hi" as expr_val), "string: hi")
+  assert::equals(describe_val("" as expr_val), "empty string")
+  assert::equals(describe_val(true as expr_val), "true")
+  assert::equals(describe_val(false as expr_val), "false")
 
 test "process_maybe_num with is binding" =
   assert::equals(process_maybe_num(5 as expr_val), 10)
@@ -188,15 +188,15 @@ test "type_priority" =
   assert::equals(type_priority(true as expr_val), 1)
 
 test "atom_guard with numeric condition" =
-  assert::equals_str(atom_guard('special, 200), "special and large")
-  assert::equals_str(atom_guard('special, 50), "special but small")
-  assert::equals_str(atom_guard('normal, 0), "normal zero")
-  assert::equals_str(atom_guard('normal, 7), "normal 7")
-  assert::equals_str(atom_guard('other, 0), "unknown")
+  assert::equals(atom_guard('special, 200), "special and large")
+  assert::equals(atom_guard('special, 50), "special but small")
+  assert::equals(atom_guard('normal, 0), "normal zero")
+  assert::equals(atom_guard('normal, 7), "normal 7")
+  assert::equals(atom_guard('other, 0), "unknown")
 
 test "evaluate_task nested match" =
-  assert::equals_str(evaluate_task(10 as task_result, priority.high), "high priority result: 20")
-  assert::equals_str(evaluate_task(10 as task_result, priority.medium), "medium priority result: 10")
-  assert::equals_str(evaluate_task(10 as task_result, priority.low), "low priority result: 5")
-  assert::equals_str(evaluate_task("alert" as task_result, priority.high), "urgent: alert")
-  assert::equals_str(evaluate_task("info" as task_result, priority.low), "message: info")
+  assert::equals(evaluate_task(10 as task_result, priority.high), "high priority result: 20")
+  assert::equals(evaluate_task(10 as task_result, priority.medium), "medium priority result: 10")
+  assert::equals(evaluate_task(10 as task_result, priority.low), "low priority result: 5")
+  assert::equals(evaluate_task("alert" as task_result, priority.high), "urgent: alert")
+  assert::equals(evaluate_task("info" as task_result, priority.low), "message: info")

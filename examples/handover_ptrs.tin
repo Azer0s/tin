@@ -1,0 +1,32 @@
+// handover_ptrs.tin - tests for the #handover annotation on extern functions.
+//
+// #handover tells the compiler that the returned pointer is a malloc'd block
+// whose ownership is being transferred to Tin.  Tin detects via
+// malloc_usable_size whether the pointer is heap-allocated, copies the data
+// into an RC-managed allocation, and frees the original.  For static/stack
+// pointers the data is heap-promoted (copied into RC allocation without free).
+//
+//!+handover_ptrs_helper.c
+
+use assert
+
+struct vec2 =
+  x i64
+  y i64
+
+fn{#handover} get_i64_ptr() *i64  = extern("make_i64_ptr")
+fn{#handover} get_void_ptr() *i8  = extern("make_void_ptr")
+fn{#handover} get_vec2_ptr() *vec2 = extern("make_vec2_ptr")
+
+test "handover primitive pointer (*i64)" =
+  let p = get_i64_ptr()
+  assert::equals(*p, 42)
+
+test "handover void pointer (*i8)" =
+  let p = get_void_ptr()
+  assert::equals((*p) as i64, 99)
+
+test "handover struct pointer (*vec2)" =
+  let v = get_vec2_ptr()
+  assert::equals((*v).x, 10)
+  assert::equals((*v).y, 20)

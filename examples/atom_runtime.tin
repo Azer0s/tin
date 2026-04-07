@@ -9,12 +9,12 @@
 //     to its string via _tin_rt_atom_to_str on the next __tin_atom_to_string call
 use assert
 
-fn strdup_atom(s string) atom = extern("strdup")
+fn{#handover} strdup_atom(s string) atom = extern("strdup")
 
 test "atom to string is bare name" =
-  assert::equals_str('ok,    "ok")
-  assert::equals_str('err,   "err")
-  assert::equals_str('sunny, "sunny")
+  assert::equals('ok,    "ok")
+  assert::equals('err,   "err")
+  assert::equals('sunny, "sunny")
 
 test "atom equals bare string" =
   assert::ok('ok == "ok")
@@ -26,15 +26,15 @@ test "extern string to atom via static table" =
   // strdup copies "ok"; __tin_string_to_atom finds it in the compile-time table
   let a = strdup_atom("ok")
   assert::ok(a == 'ok)
-  assert::equals_str(a, "ok")
+  assert::equals(a, "ok")
   assert::ok(a != 'err)
 
 test "runtime atom learning" =
   // These names are not compile-time atoms - CRC32 is computed at runtime
   let foo = strdup_atom("dynfoo")
   let bar = strdup_atom("dynbar")
-  assert::equals_str(foo, "dynfoo")
-  assert::equals_str(bar, "dynbar")
+  assert::equals(foo, "dynfoo")
+  assert::equals(bar, "dynbar")
   assert::ok(foo != bar)
 
 test "runtime atom idempotency" =
@@ -42,4 +42,4 @@ test "runtime atom idempotency" =
   let a = strdup_atom("dynfoo")
   let b = strdup_atom("dynfoo")
   assert::ok(a == b)
-  assert::equals_str(a, "dynfoo")
+  assert::equals(a, "dynfoo")

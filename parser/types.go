@@ -433,6 +433,26 @@ func (p *Parser) parseTypeArgList() ([]ast.TypeExpr, error) {
 // otherwise a plain StringLit.
 func ParseStringInterp(s string) (ast.Node, error) { return parseStringInterp(s) }
 
+// findFormatColon finds the index of a single ':' in s that acts as a format
+// specifier separator, skipping '::' (scope-access operator).
+// Returns -1 if no such colon is found.
+func findFormatColon(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			// Skip '::' (scope-access operator).
+			if i+1 < len(s) && s[i+1] == ':' {
+				i++ // skip the second ':'
+
+				continue
+			}
+
+			return i
+		}
+	}
+
+	return -1
+}
+
 func parseStringInterp(s string) (ast.Node, error) {
 	if !strings.Contains(s, "{") {
 		// Still need to unescape \{ and \} that might appear even without interpolation.
@@ -489,8 +509,9 @@ func parseStringInterp(s string) (ast.Node, error) {
 		s = s[end+1:]
 
 		// Split off format specifier: {expr:fmt} -> exprSrc="expr", fmtSpec="fmt"
+		// Skip "::" (scope-access operator) when searching for the format colon.
 		fmtSpec := ""
-		if colonIdx := strings.Index(exprSrc, ":"); colonIdx >= 0 {
+		if colonIdx := findFormatColon(exprSrc); colonIdx >= 0 {
 			fmtSpec = exprSrc[colonIdx+1:]
 			exprSrc = exprSrc[:colonIdx]
 		}

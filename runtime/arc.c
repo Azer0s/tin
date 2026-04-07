@@ -7,6 +7,7 @@
 #include "runtime.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 static inline TinRCHdr *_rc_hdr(void *ptr) {
     return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
@@ -193,6 +194,51 @@ void _tin_foreach_struct_elem_retain(
     for (int64_t i = 0; i < count; i++) {
         retain_fn((char *)data + i * elem_size);
     }
+}
+
+// Free ptr if it was allocated via malloc (usable_size > 0).
+// No-op for static strings, stack variables, or NULL.
+void _tin_handover_free(void *ptr) {
+    if (!ptr) return;
+    if (_tin_usable_size(ptr) > 0) free(ptr);
+}
+
+// Take ownership of a C string returned by an extern #handover function.
+// If src was malloc'd (usable_size > 0): uses the usable block size for the
+// copy, then frees the original.
+// If src was not malloc'd (static/literal): falls back to strlen to determine
+// the copy length and heap-promotes (no free).
+// Returns the Tin RC string data pointer (i8* after RC header), RC = 1.
+char *_tin_string_handover(char *src) {
+    if (!src) return NULL;
+    size_t sz = _tin_usable_size(src);
+    size_t copy_len = (sz > 0) ? sz : (strlen(src) + 1);
+    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
+    if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
+    hdr->rc = 1;
+    char *dst = (char *)(hdr + 1);
+    memcpy(dst, src, copy_len);
+    if (sz > 0) free(src);
+    return dst;
+}
+
+// Take ownership of an arbitrary C pointer from an extern #handover function.
+// elem_size is the fallback copy length for non-malloc'd (static/stack) sources.
+// If src was malloc'd (usable_size > 0): uses the usable block size.
+// If src was not malloc'd: uses elem_size (0 = unknown, returns src unchanged).
+// Returns the Tin RC data pointer (after RC header), RC = 1.
+void *_tin_ptr_handover(void *src, size_t elem_size) {
+    if (!src) return NULL;
+    size_t sz = _tin_usable_size(src);
+    size_t copy_len = (sz > 0) ? sz : elem_size;
+    if (copy_len == 0) return src;
+    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
+    if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
+    hdr->rc = 1;
+    void *dst = (void *)(hdr + 1);
+    memcpy(dst, src, copy_len);
+    if (sz > 0) free(src);
+    return dst;
 }
 
 // Release an `any` value whose tag is anyTagFn (5): the data block holds a

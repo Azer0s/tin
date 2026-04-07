@@ -116,10 +116,14 @@ func llvmTypeName(t irtypes.Type) string {
 		return "i32"
 	case t.Equal(irtypes.I64):
 		return "i64"
+	case t.Equal(irtypes.I128):
+		return "i128"
 	case t.Equal(irtypes.Float):
 		return "f32"
 	case t.Equal(irtypes.Double):
 		return "f64"
+	case t.Equal(irtypes.FP128):
+		return "f128"
 	}
 
 	if pt, ok := t.(*irtypes.PointerType); ok {

@@ -18,20 +18,27 @@ import (
 const usage = `tin - the tin language compiler
 
 Usage:
-  tin run   <file.tin>              compile and execute
-  tin build <file.tin> [-o out]     compile to native binary
-  tin build -lib <file.tin> [-o out] compile to object file (library)
-  tin ir    <file.tin>              emit LLVM IR to stdout
-  tin test  <file.tin>              run test blocks and report results
-  tin build-test <file.tin> [-o out] compile test binary without running
-  tin ir-test <file.tin>            emit test-mode LLVM IR to stdout
-  tin preprocess <file.tin>         expand macros and print source to stdout
+  tin run         <file.tin>               compile and execute
+  tin build       <file.tin> [-o out]      compile to native binary
+  tin build       -lib <file.tin> [-o out] compile to object file (library)
+  tin ir          <file.tin> [-o out]      emit LLVM IR (default: stdout)
+  tin ir-test     <file.tin> [-o out]      emit test-mode LLVM IR
+  tin test        <file.tin|dir|dir/...>   run test blocks and report results
+  tin build-test  <file.tin> [-o out]      compile test binary without running
+  tin preprocess  <file.tin>               expand macros and print source to stdout
 
-Flags (passed after the source file):
-  -lNAME       link with libNAME (e.g. -lm for libmath)
-  -LDIR        add DIR to the library search path
-  file.o/.a    link with extra object/archive file
-  -cflag FLAG  pass FLAG to clang (repeatable, e.g. -cflag -fsanitize=address)
+Link flags (passed after the source file):
+  -lNAME           link with libNAME (e.g. -lm for libmath)
+  -LDIR            add DIR to the library search path
+  file.o / file.a  link with extra object or archive file
+  -cflag FLAG      pass FLAG to clang (repeatable, e.g. -cflag -fsanitize=address)
+
+Warning flags:
+  -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
+  -Wno-await-match-guards  suppress warning about guards in await-match arms
+
+Run/test flags:
+  -v-valgrind      run binary under valgrind --leak-check=full (run, test)
 
 In-source directives (at the top of the .tin file):
   //!-lNAME            link with libNAME
@@ -181,21 +188,25 @@ func main() {
 		}
 
 		if fi, statErr := os.Stat(file); statErr == nil && fi.IsDir() {
-			// Collect extra link flags from remaining args
+			// Collect extra link flags and -v-valgrind from remaining args.
 			var extraFlags []string
+
+			useValgrind := false
 
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
 				a := os.Args[i]
-				if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
+				if a == "-v-valgrind" {
+					useValgrind = true
+				} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
 					strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 					extraFlags = append(extraFlags, a)
 				}
 			}
 
 			if recursive {
-				runDirTestsRecursive(file, extraFlags)
+				runDirTestsRecursive(file, extraFlags, useValgrind)
 			} else {
-				runDirTests(file, extraFlags)
+				runDirTests(file, extraFlags, useValgrind)
 			}
 
 			return
@@ -383,12 +394,16 @@ func main() {
 	case "run", "test":
 		tmpRel := strings.TrimSuffix(file, filepath.Ext(file)) + ".tin.out"
 		tmp, _ := filepath.Abs(tmpRel)
-		// Collect extra link inputs for run/test mode too
+		// Collect extra link inputs and -v-valgrind for run/test mode too.
 		var extraObjs []string
+
+		useValgrind := false
 
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
-			if a == "-cflag" {
+			if a == "-v-valgrind" {
+				useValgrind = true
+			} else if a == "-cflag" {
 				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
@@ -406,10 +421,16 @@ func main() {
 			_ = os.Remove(name)
 		}(tmp)
 
-		run := exec.Command(tmp)
-		run.Stdout = os.Stdout
+		var run *exec.Cmd
+		if useValgrind {
+			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp)
+		} else {
+			run = exec.Command(tmp)
+		}
 
+		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
+
 		if err := run.Run(); err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
@@ -700,15 +721,15 @@ func collectTinFiles(root string) []string {
 
 // runDirTestsRecursive collects all .tin files under root and runs them
 // together as a single test batch with one combined summary.
-func runDirTestsRecursive(root string, extraFlags []string) {
+func runDirTestsRecursive(root string, extraFlags []string, useValgrind bool) {
 	files := collectTinFiles(root)
-	runFileTests(files, extraFlags)
+	runFileTests(files, extraFlags, useValgrind)
 }
 
 // runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
-func runDirTests(dir string, extraFlags []string) {
+func runDirTests(dir string, extraFlags []string, useValgrind bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		die("cannot read directory %s: %v", dir, err)
@@ -722,16 +743,19 @@ func runDirTests(dir string, extraFlags []string) {
 		}
 	}
 
-	runFileTests(files, extraFlags)
+	runFileTests(files, extraFlags, useValgrind)
 }
 
 // runFileTests runs the given .tin files that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
-// if any file has failing tests.
-func runFileTests(fpaths []string, extraFlags []string) {
+// if any file has failing tests.  When useValgrind is true, each test binary
+// is run under valgrind --leak-check=full --error-exitcode=1.
+func runFileTests(fpaths []string, extraFlags []string, useValgrind bool) {
 	type result struct {
-		file   string
-		passed bool
+		file    string
+		passed  bool
+		skipped bool
+		reason  string
 	}
 
 	var results []result
@@ -749,6 +773,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
+			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr)})
 
 			continue
 		}
@@ -761,6 +786,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
+			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr)})
 
 			continue
 		}
@@ -786,6 +812,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 		}()
 		if cgErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
+			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr)})
 
 			continue
 		}
@@ -850,7 +877,7 @@ func runFileTests(fpaths []string, extraFlags []string) {
 
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 
-			results = append(results, result{fname, false})
+			results = append(results, result{fname, false, false, fmt.Sprintf("error: %v", tmpErr)})
 
 			continue
 		}
@@ -867,14 +894,20 @@ func runFileTests(fpaths []string, extraFlags []string) {
 
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 
-			results = append(results, result{fname, false})
+			results = append(results, result{fname, false, false, fmt.Sprintf("compile error: %v", compErr)})
 
 			continue
 		}
 
 		var runOut bytes.Buffer
 
-		run := exec.Command(tmp.Name())
+		var run *exec.Cmd
+		if useValgrind {
+			run = exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", tmp.Name())
+		} else {
+			run = exec.Command(tmp.Name())
+		}
+
 		run.Stdout = &runOut
 		run.Stderr = &runOut
 
@@ -883,12 +916,16 @@ func runFileTests(fpaths []string, extraFlags []string) {
 			passed = false
 		}
 
+		reason := ""
+
 		if !passed {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 			fmt.Print(runOut.String())
+
+			reason = "test failures"
 		}
 
-		results = append(results, result{fname, passed})
+		results = append(results, result{fname, passed, false, reason})
 	}
 
 	if len(results) == 0 {
@@ -900,17 +937,46 @@ func runFileTests(fpaths []string, extraFlags []string) {
 	fmt.Printf("\n")
 
 	failed := 0
+	skipped := 0
 
 	for _, r := range results {
-		if !r.passed {
+		if r.skipped {
+			skipped++
+		} else if !r.passed {
 			failed++
 		}
 	}
 
-	if failed == 0 {
+	if failed == 0 && skipped == 0 {
 		fmt.Printf("all %d test file(s) passed.\n", len(results))
-	} else {
-		fmt.Printf("%d/%d test file(s) failed.\n", failed, len(results))
+
+		return
+	}
+
+	passed := len(results) - failed - skipped
+	fmt.Printf("%d passed, %d failed, %d skipped (%d total)\n", passed, failed, skipped, len(results))
+
+	if failed > 0 {
+		fmt.Printf("\nFailed:\n")
+
+		for _, r := range results {
+			if !r.skipped && !r.passed {
+				fmt.Printf("  %s: %s\n", r.file, r.reason)
+			}
+		}
+	}
+
+	if skipped > 0 {
+		fmt.Printf("\nSkipped:\n")
+
+		for _, r := range results {
+			if r.skipped {
+				fmt.Printf("  %s: %s\n", r.file, r.reason)
+			}
+		}
+	}
+
+	if failed > 0 || skipped > 0 {
 		os.Exit(1)
 	}
 }

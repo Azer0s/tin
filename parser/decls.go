@@ -57,13 +57,17 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 		}
 	}
 
+	// Optional generic type constraints: "where t is addable"
+	// Appear before `=`, same syntax as function constraints.
+	constraints := p.parseTypeConstraints()
+
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
 
 	decl := &ast.StructDecl{
 		Name: nameTok.Literal, TypeParams: typeParams,
-		Implements: impls, Tags: tags,
+		Constraints: constraints, Implements: impls, Tags: tags,
 	}
 
 	// Parse body (fields + methods)

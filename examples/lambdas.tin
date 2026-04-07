@@ -111,9 +111,9 @@ test "where clause lambda atom match" =
     where x == 0: "zero"
     where x < 0: "negative"
     where _: "positive"
-  assert::equals_str(describe(0), "zero")
-  assert::equals_str(describe(-1), "negative")
-  assert::equals_str(describe(99), "positive")
+  assert::equals(describe(0), "zero")
+  assert::equals(describe(-1), "negative")
+  assert::equals(describe(99), "positive")
 
 test "where clause lambda as higher-order arg" =
   let abs = fn(x i64) i64 =
