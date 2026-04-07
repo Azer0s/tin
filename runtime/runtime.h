@@ -57,13 +57,18 @@ void _tin_print_bool(int32_t v);
 void _tin_print_char(uint8_t v);
 void _tin_print_string(TinString s);
 void _tin_print_newline(void);
-// 128-bit helpers (GCC/Clang __int128 / __float128)
+// 128-bit helpers.
+// __int128 / unsigned __int128 are universally available on 64-bit targets.
+// For fp128 we use mode(TF) - GCC/Clang's TFmode - which maps directly to
+// LLVM fp128 on all supported architectures (x86-64, AArch64, ...) without
+// needing __float128 (x86-only extension) or _Float128 (requires glibc header).
+typedef float tin_fp128_t __attribute__((mode(TF)));
 void             _tin_echo_i128(__int128 v);
 void             _tin_echo_u128(unsigned __int128 v);
-void             _tin_echo_f128(__float128 v);
+void             _tin_echo_f128(tin_fp128_t v);
 const char      *_tin_i128_to_cstr(__int128 v);
 const char      *_tin_u128_to_cstr(unsigned __int128 v);
-const char      *_tin_f128_to_cstr(__float128 v);
+const char      *_tin_f128_to_cstr(tin_fp128_t v);
 
 // -- Strings
 TinString _tin_str_concat(TinString a, TinString b);

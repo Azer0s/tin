@@ -87,16 +87,17 @@ const char *_tin_u128_to_cstr(unsigned __int128 v) {
 // ---------------------------------------------------------------------------
 // f128 helpers
 //
-// LLVM fp128 matches GCC/Clang __float128 on x86-64.
-// For echo/print we convert to long double (x86 80-bit) which gives ~18
-// significant digits - sufficient for display purposes.
+// tin_fp128_t is declared in runtime.h as __attribute__((mode(TF))), which
+// matches LLVM fp128 on all targets (x86-64, AArch64, ...) without depending
+// on __float128 (x86-only) or _Float128 (needs glibc header).
+// We convert to long double for display (80-bit on x86, 64-bit on AArch64).
 
-void _tin_echo_f128(__float128 v) {
+void _tin_echo_f128(tin_fp128_t v) {
     printf("%Lg\n", (long double)v);
     fflush(stdout);
 }
 
-const char *_tin_f128_to_cstr(__float128 v) {
+const char *_tin_f128_to_cstr(tin_fp128_t v) {
     static _Thread_local char buf[64];
     snprintf(buf, sizeof(buf), "%Lg", (long double)v);
     return buf;
