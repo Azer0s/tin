@@ -7,6 +7,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 
 	"github.com/Azer0s/tin/ast"
 )
@@ -254,9 +255,15 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 			return nil, fmt.Errorf("struct destructuring: field '%s' not found in struct '%s'", fieldName, concreteName)
 		}
 
-		fieldGep := block.NewGetElementPtr(llType, structAlloca,
-			constant.NewInt(irtypes.I32, 0),
-			constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		var fieldGep value.Value
+		if cg.cLayoutStructs[concreteName] {
+			// fieldIdx is native 0-based for cLayoutStructs.
+			fieldGep = cg.emitCLayoutFieldPtr(block, structAlloca, concreteName, fieldIdx)
+		} else {
+			fieldGep = block.NewGetElementPtr(llType, structAlloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		}
 
 		if pt, ok := fieldGep.Type().(*irtypes.PointerType); ok {
 			fieldVal := block.NewLoad(pt.ElemType, fieldGep)
@@ -266,10 +273,16 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 			var fieldUnsigned bool
 
 			if tinTypes, ok2 := cg.structFieldTinTypes[concreteName]; ok2 {
-				// fieldIdx includes the leading i32 type-id; user fields start at offset 1+vtables.
-				userOffset := 1 + len(cg.structVtableOrder[concreteName])
+				var userIdx int
+				if cg.cLayoutStructs[concreteName] {
+					// fieldIdx is already the native 0-based index.
+					userIdx = fieldIdx
+				} else {
+					// fieldIdx includes the leading i32 type-id; user fields start at offset 1+vtables.
+					userOffset := 1 + len(cg.structVtableOrder[concreteName])
+					userIdx = fieldIdx - userOffset
+				}
 
-				userIdx := fieldIdx - userOffset
 				if userIdx >= 0 && userIdx < len(tinTypes) {
 					fieldUnsigned = isUnsignedTinType(tinTypes[userIdx])
 				}
@@ -333,7 +346,7 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 
 	// Tuple fields are named a, b, c, ... (alphabet by position).
 	letters := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
-	userOff := 1 + cg.vtableOffset(concreteName) // skip type_id + vtable fields
+	userOff := cg.userFieldOffset(concreteName)
 
 	for i, name := range s.Names {
 		if i >= len(letters) {

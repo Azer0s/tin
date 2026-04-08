@@ -362,6 +362,13 @@ type ArrayLit struct {
 	Elems []Node
 }
 
+// ArrayFillLit represents [value; count] - fill an array with `count` copies of `value`.
+type ArrayFillLit struct {
+	base
+	Value Node
+	Count int
+}
+
 type RangeExpr struct {
 	base
 	Start Node

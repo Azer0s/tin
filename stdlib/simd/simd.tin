@@ -1,0 +1,64 @@
+// stdlib/simd - portable SIMD operations
+//
+// Provides vectorized primitives behind a C shim. The correct C file is
+// selected at compile time via arch-specific //!+ directives.
+//
+// Arithmetic operators (+, -, *, /, &, |, ^) work directly on SIMD types
+// via Tin's built-in element-wise arithmetic - no wrapper needed.
+//
+// Supported types: u8x16, i8x16, u32x4, i32x4, u64x2, f32x4, f64x2
+// (and the 256-bit variants u8x32, u32x8, f32x8, f64x4 once aligned alloc lands)
+
+//!+simd_x86.c [x86_64] -- -msse4.2
+//!+simd_neon.c [aarch64]
+
+// -- splat: broadcast scalar to all lanes --
+
+fn splat(v u8)  u8x16  = extern("_tin_simd_splat_u8x16")
+fn splat(v i8)  i8x16  = extern("_tin_simd_splat_i8x16")
+fn splat(v u32) u32x4  = extern("_tin_simd_splat_u32x4")
+fn splat(v i32) i32x4  = extern("_tin_simd_splat_i32x4")
+fn splat(v u64) u64x2  = extern("_tin_simd_splat_u64x2")
+fn splat(v f32) f32x4  = extern("_tin_simd_splat_f32x4")
+fn splat(v f64) f64x2  = extern("_tin_simd_splat_f64x2")
+
+// -- loadu: unaligned load from pointer --
+
+fn loadu(ptr *u8)  u8x16  = extern("_tin_simd_loadu_u8x16")
+fn loadu(ptr *u32) u32x4  = extern("_tin_simd_loadu_u32x4")
+fn loadu(ptr *f32) f32x4  = extern("_tin_simd_loadu_f32x4")
+
+// -- storeu: unaligned store to pointer --
+
+fn storeu(ptr *u8,  v u8x16)  = extern("_tin_simd_storeu_u8x16")
+fn storeu(ptr *u32, v u32x4)  = extern("_tin_simd_storeu_u32x4")
+fn storeu(ptr *f32, v f32x4)  = extern("_tin_simd_storeu_f32x4")
+
+// -- cmpeq: element-wise equality (returns all-1s mask for matching lanes) --
+
+fn cmpeq(a u8x16, b u8x16)   u8x16  = extern("_tin_simd_cmpeq_u8x16")
+fn cmpeq(a u32x4, b u32x4)   u32x4  = extern("_tin_simd_cmpeq_u32x4")
+fn cmpeq(a f32x4, b f32x4)   f32x4  = extern("_tin_simd_cmpeq_f32x4")
+
+// -- movemask: collapse MSBs to a u32 bitmask --
+
+fn movemask(a u8x16) u32  = extern("_tin_simd_movemask_u8x16")
+
+// -- hadd: horizontal add of all lanes --
+
+fn hadd(a u32x4) u32  = extern("_tin_simd_hadd_u32x4")
+fn hadd(a f32x4) f32  = extern("_tin_simd_hadd_f32x4")
+
+// -- dot: dot product of two f32x4 vectors --
+
+fn dot(a f32x4, b f32x4) f32  = extern("_tin_simd_dot_f32x4")
+
+// -- rotate_left: rotate 32-bit lanes left by n bits --
+
+fn rotate_left(a u32x4, n i32) u32x4  = extern("_tin_simd_rotl_u32x4")
+
+export {
+  splat, loadu, storeu,
+  cmpeq, movemask,
+  hadd, dot, rotate_left
+} as simd

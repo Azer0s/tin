@@ -1,0 +1,52 @@
+//!+small_struct.c
+
+struct small_struct(print) =
+  a u8
+  b u8
+  c u8
+  d u8
+
+  fn ::print(this small_struct) [char] =
+    return "small_struct\{a: {this.a}, b: {this.b}, c: {this.c}, d: {this.d}\}"
+
+struct point =
+  x f64
+  y f64
+
+struct mixed_struct =
+  x u8
+  value f64
+
+struct int32_struct =
+  x i32
+  y i32
+
+fn modify_struct(s *small_struct) void =
+  s.a = s.a + 1
+  s.b = s.b + 1
+  s.c = s.c + 1
+  s.d = s.d + 1
+
+use extern (
+  print_small_struct("print_small_struct") as fn(small_struct) void
+  print_point("print_point") as fn(point) void
+  print_mixed_struct("print_mixed_struct") as fn(mixed_struct) void
+  print_int32_struct("print_int32_struct") as fn(int32_struct) void
+)
+
+fn main() =
+  let s = small_struct{a: 1, b: 2, c: 3, d: 4}
+  print_small_struct(s)
+
+  echo s
+  modify_struct(&s)
+  echo s
+
+  let p = point{x: 1.5, y: 2.5}
+  print_point(p)
+
+  let m = mixed_struct{x: @'A', value: 3.14}
+  print_mixed_struct(m)
+
+  let i = int32_struct{x: 100, y: 200}
+  print_int32_struct(i)

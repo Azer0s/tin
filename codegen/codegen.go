@@ -23,17 +23,19 @@ type CodeGen struct {
 	mod      *ir.Module
 
 	// declared C functions
-	printfFn     *ir.Func
-	sprintfFn    *ir.Func
-	mallocFn     *ir.Func
-	freeFn       *ir.Func
-	memcpyFn     *ir.Func
-	echoI128Fn   *ir.Func
-	echoU128Fn   *ir.Func
-	echoF128Fn   *ir.Func
-	i128ToCstrFn *ir.Func
-	u128ToCstrFn *ir.Func
-	f128ToCstrFn *ir.Func
+	printfFn             *ir.Func
+	sprintfFn            *ir.Func
+	mallocFn             *ir.Func
+	freeFn               *ir.Func
+	memcpyFn             *ir.Func
+	echoI128Fn           *ir.Func
+	echoU128Fn           *ir.Func
+	echoF128Fn           *ir.Func
+	echoStringEscapedFn  *ir.Func
+	printStringEscapedFn *ir.Func
+	i128ToCstrFn         *ir.Func
+	u128ToCstrFn         *ir.Func
+	f128ToCstrFn         *ir.Func
 
 	// struct type registry: name -> LLVM struct type
 	structTypes map[string]*irtypes.StructType
@@ -120,6 +122,22 @@ type CodeGen struct {
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
+
+	// cLayoutStructs: struct names used as *S in extern function signatures.
+	// These structs use a wrapper layout: { i32 type_id, vtable_ptrs..., i8* c_data_ptr, inline_fields... }
+	// All field accesses go through c_data_ptr, which points to C memory (non-handover)
+	// or inline fields within the same allocation (handover/struct-literal).
+	cLayoutStructs map[string]bool
+
+	// nativeStructTypes: for each cLayoutStruct, the C-layout LLVM struct type
+	// %S.native = { field_0_type, field_1_type, ... } (no type_id, no vtable).
+	// Used as the GEP target when accessing fields through c_data_ptr.
+	nativeStructTypes map[string]*irtypes.StructType
+
+	// packedStructs: struct names declared with the {#packed} tag.
+	// For cLayoutStructs: the %S.native type is packed (wrapper stays unpacked).
+	// For regular structs: the full LLVM struct type is packed.
+	packedStructs map[string]bool
 
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
@@ -399,11 +417,22 @@ type CodeGen struct {
 	// resolved LLVM param types, arity).  Populated during predeclaration.
 	overloads map[string][]*overloadEntry
 
+	// funcReturnUnsigned: IR function name -> true when the function's return
+	// type is an unsigned integer (u8/u16/u32/u64/u128).  Populated during
+	// predeclaration so exprIsUnsigned can correctly format CallExpr results.
+	funcReturnUnsigned map[string]bool
+
 	// currentPkg is the package name currently being compiled via
 	// loadPackageFromSource (e.g. "sync", "io").  It is set before the
 	// preregister pass and cleared after the package scope is restored.
 	// Used by pkgStructKey to produce canonical LLVM struct names.
 	currentPkg string
+
+	// returnTypeHint is the LLVM type expected at the current call site, set by
+	// genVarDecl when the let binding has an explicit type annotation. It guides
+	// overload resolution so that e.g. `let v f32x4 = simd::splat(3.0)` picks
+	// the f32x4 overload over f64x2. Cleared immediately after the call is resolved.
+	returnTypeHint irtypes.Type
 }
 
 // topLevelVarInit holds a deferred runtime initializer for a top-level var.
@@ -610,8 +639,12 @@ func New(filename string) *CodeGen {
 		callGraph:                make(map[string][]string),
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
+		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		cLayoutStructs:           make(map[string]bool),
+		nativeStructTypes:        make(map[string]*irtypes.StructType),
+		packedStructs:            make(map[string]bool),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
@@ -768,7 +801,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// tries to resolve types like sync::AtomicI64, and before predeclareFunc
 	// tries to resolve parameter types like sync::Channel[i64].
 	for _, node := range prog.Stmts {
-		if ud, ok := node.(*ast.UseDecl); ok {
+		if ud, ok := node.(*ast.UseDecl); ok && !ud.IsExtern {
 			if err := cg.genUseDecl(ud); err != nil {
 				return nil, err
 			}
@@ -862,15 +895,17 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	// Third pass: generate full function bodies and other declarations.
-	var topStmts []ast.Node
+	// Pre-pass 2.5: scan extern declarations for *StructName pointer types.
+	// Structs used as *S in extern signatures must use C-compatible layout
+	// (no type_id prefix) so raw pointers can round-trip to/from C.
+	cg.scanExternPtrStructs(prog.Stmts)
 
+	// Pre-pass 3: generate struct/enum/type/union declarations before anything
+	// else so that structFieldLLVMTypes is fully populated.  This is needed
+	// because use-extern declarations reference struct types for C ABI conversion
+	// and may appear before the struct definition in source order.
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
-		case *ast.FuncDecl:
-			if err := cg.genFuncDecl(n); err != nil {
-				return nil, err
-			}
 		case *ast.StructDecl:
 			if err := cg.genStructDecl(n); err != nil {
 				return nil, err
@@ -883,6 +918,28 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err := cg.genTypeDecl(n); err != nil {
 				return nil, err
 			}
+		case *ast.UnionDecl:
+			if err := cg.genUnionDecl(n); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Third pass: generate full function bodies and other declarations.
+	var topStmts []ast.Node
+
+	for _, node := range prog.Stmts {
+		switch n := node.(type) {
+		case *ast.FuncDecl:
+			if err := cg.genFuncDecl(n); err != nil {
+				return nil, err
+			}
+		case *ast.StructDecl:
+			// Already processed in pre-pass 3.
+		case *ast.EnumDecl:
+			// Already processed in pre-pass 3.
+		case *ast.TypeDecl:
+			// Already processed in pre-pass 3.
 		case *ast.UseDecl:
 			if err := cg.genUseDecl(n); err != nil {
 				return nil, err
@@ -894,9 +951,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		case *ast.MacroDecl:
 			// Registered in preregister; no IR to emit.
 		case *ast.UnionDecl:
-			if err := cg.genUnionDecl(n); err != nil {
-				return nil, err
-			}
+			// Already processed in pre-pass 3.
 		case *ast.TestDecl:
 			if cg.testMode {
 				cg.testDecls = append(cg.testDecls, n)

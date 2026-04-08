@@ -211,6 +211,60 @@ Typed parsing maps JSON values to Tin types as follows:
 
 ---
 
+---
+
+## Custom serialization
+
+### `JsonSerializable`
+
+Implement `JsonSerializable` to provide a custom JSON encoding for a type.
+`to_json` must return a complete JSON value string including surrounding quotes
+for string-typed encodings:
+
+```rust
+struct timestamp =
+  unix i64
+
+impl JsonSerializable for timestamp =
+  fn to_json(this JsonSerializable) string =
+    let ts = this as timestamp
+    return "\"{ts.unix}\""   // encode as a quoted integer string
+
+let t = timestamp{unix: 1700000000}
+json::encode(t)   // "\"1700000000\""
+```
+
+### `JsonDeserializable`
+
+Implement `JsonDeserializable` to parse a custom type from a JSON string value.
+`apply_json` receives the unescaped string (without surrounding quotes) and
+modifies the receiver in place. Returns `true` on success:
+
+```rust
+struct timestamp =
+  unix i64
+
+impl JsonDeserializable for timestamp =
+  fn apply_json(this *JsonDeserializable, s string) bool =
+    let ts = *this as *timestamp
+    ts.unix = str::atoi(s)
+    return true
+```
+
+When `json::parse[T]` encounters a JSON string for a field that is not `string`
+type, it checks whether the field type implements `JsonDeserializable` and calls
+`apply_json` with the unescaped string value.
+
+---
+
+## Implementation notes
+
+The internal `Parser.skip_ws` and `parse_str` functions use a 16-byte-at-a-time
+SIMD fast path (x86-64 SSE4.2 / AArch64 NEON) to accelerate whitespace skipping
+and string scanning. The scalar fallback handles tail bytes and escape sequences.
+
+---
+
 ## Reference
 
 | Function / Method                  | Description                                                              |
@@ -224,3 +278,5 @@ Typed parsing maps JSON values to Tin types as follows:
 | `v.keys()`                         | All keys in a JSON object `Value`                                        |
 | `v.index(i)`                       | Element `i` of a JSON array `Value`                                      |
 | `v.array_len()`                    | Number of elements in a JSON array `Value`                               |
+| `JsonSerializable.to_json()`       | Trait: custom JSON encoding                                              |
+| `JsonDeserializable.apply_json()`  | Trait: custom JSON decoding from a string value                          |

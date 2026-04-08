@@ -1,0 +1,193 @@
+// clayout_fiber.tin - C struct interop (#handover and non-handover) with fibers.
+//
+// Non-handover: C returns a pointer to a static global. Tin wraps it without
+// taking ownership. The c_data_ptr stays valid as long as C keeps the global alive.
+// Multiple fibers can safely share the wrapper (ARC on the wrapper is atomic).
+//
+// Handover (#handover): C malloc's a struct and transfers ownership to Tin.
+// The compiler copies the C data into an RC-managed block and frees the original.
+// Spawn retains the wrapper (RC++), fiber scope exit releases it (RC--). When the
+// last reference drops the block is freed - no leak, no double-free.
+//
+// Run with: tin test examples/clayout_fiber.tin
+//           tin test examples/clayout_fiber.tin -v-valgrind
+
+//!+clayout_fiber.c
+
+use assert
+use sync
+
+// ---------------------------------------------------------------------------
+// Struct declarations (must match clayout_fiber.c layout exactly)
+// ---------------------------------------------------------------------------
+
+struct packet_t =
+  seq     i64
+  payload i64
+
+fn get_packet() *packet_t = extern("get_packet")
+fn set_packet(p *packet_t, seq i64, payload i64) void = extern("set_packet")
+
+struct counter_t =
+  value i64
+  id    i64
+
+fn{#handover} make_counter(value i64, id i64) *counter_t = extern("make_counter")
+
+struct point_t =
+  x i64
+  y i64
+
+struct circle_t =
+  origin point_t
+  radius i64
+
+fn{#handover} make_circle(x i64, y i64, radius i64) *circle_t = extern("make_circle")
+
+// ---------------------------------------------------------------------------
+// Helpers for spawning (must be fn{#async})
+// ---------------------------------------------------------------------------
+
+fn{#async} fiber_read_packet(ch sync::Channel[i64]) =
+  let p = get_packet()
+  await ch.send((*p).seq)
+  await ch.send((*p).payload)
+
+fn{#async} fiber_mutate_and_report(ch sync::Channel[i64]) =
+  let p = get_packet()
+  set_packet(p, 42, 999)
+  await ch.send((*p).seq)
+  await ch.send((*p).payload)
+  set_packet(p, 1, 100)   // restore global for subsequent tests
+
+fn{#async} fiber_snapshot_seq(ch sync::Channel[i64]) =
+  let p = get_packet()
+  await ch.send((*p).seq)
+
+fn{#async} fiber_use_counter(c *counter_t, ch sync::Channel[i64]) =
+  await ch.send((*c).value)
+  await ch.send((*c).id)
+
+fn{#async} fiber_use_counter_after_yield(c *counter_t, ch sync::Channel[i64]) =
+  yield
+  yield
+  await ch.send((*c).value)
+
+fn{#async} fiber_make_and_report(value i64, id i64, ch sync::Channel[i64]) =
+  let c = make_counter(value, id)
+  yield
+  await ch.send((*c).value + (*c).id)
+
+fn{#async} fiber_read_circle(c *circle_t, ch sync::Channel[i64]) =
+  await ch.send((*c).origin.x)
+  await ch.send((*c).origin.y)
+  await ch.send((*c).radius)
+
+// Producer creates a handover struct internally and sends field values.
+// Demonstrates ARC correctness: RC=1 on make, RC=0 on fiber scope exit.
+fn{#async} fiber_produce_and_send(value i64, id i64, out sync::Channel[i64]) =
+  let c = make_counter(value, id)
+  await out.send((*c).value)
+  await out.send((*c).id)
+  // c released here (RC -> 0, RC block freed)
+
+// ---------------------------------------------------------------------------
+// Tests: non-handover (static C struct) + fibers
+// ---------------------------------------------------------------------------
+
+test "non-handover: fiber reads static C struct fields" =
+  let ch = sync::Channel[i64].make(2)
+  spawn fiber_read_packet(ch)
+  assert::equals(await ch.recv(), 1)
+  assert::equals(await ch.recv(), 100)
+
+test "non-handover: fiber mutates C struct, mutation visible via c_data_ptr" =
+  // The fiber holds the same c_data_ptr as the static global; mutations
+  // are immediately visible to any other wrapper pointing at the same struct.
+  let ch = sync::Channel[i64].make(2)
+  spawn fiber_mutate_and_report(ch)
+  assert::equals(await ch.recv(), 42)
+  assert::equals(await ch.recv(), 999)
+  // Global restored to {1,100} inside the fiber before sending.
+
+test "non-handover: two fibers share wrapper to same C struct" =
+  // Both wrappers carry the same c_data_ptr; ARC on the wrappers is atomic.
+  let ch = sync::Channel[i64].make(2)
+  spawn fiber_snapshot_seq(ch)
+  spawn fiber_snapshot_seq(ch)
+  assert::equals(await ch.recv(), 1)
+  assert::equals(await ch.recv(), 1)
+
+// ---------------------------------------------------------------------------
+// Tests: handover (malloc'd C struct, RC-managed by Tin) + fibers
+// ---------------------------------------------------------------------------
+
+test "handover: fiber reads RC-managed struct - correct fields" =
+  let ch = sync::Channel[i64].make(2)
+  let c = make_counter(77, 3)
+  spawn fiber_use_counter(c, ch)
+  assert::equals(await ch.recv(), 77)
+  assert::equals(await ch.recv(), 3)
+
+test "handover: fiber reads struct after yielding - RC keeps it alive" =
+  // Fiber yields twice before reading. The struct must remain alive because
+  // spawn retained it (RC++ before the fiber ran).
+  let ch = sync::Channel[i64].make(1)
+  let c = make_counter(55, 0)
+  spawn fiber_use_counter_after_yield(c, ch)
+  assert::equals(await ch.recv(), 55)
+
+test "handover: many fibers each own an independent RC copy" =
+  // Each fiber calls make_counter itself. Every handover is a separate RC
+  // block. When each fiber scope exits its RC block is released individually.
+  // Total = sum of (i*10 + i) for i in 0..4 = sum of 11i = 11*10 = 110.
+  let ch = sync::Channel[i64].make(5)
+  let i i64 = 0
+  for i < 5:
+    spawn fiber_make_and_report(i * 10, i, ch)
+    i = i + 1
+  let total i64 = 0
+  let j i64 = 0
+  for j < 5:
+    total = total + (await ch.recv())
+    j = j + 1
+  assert::equals(total, 110)
+
+test "handover: fiber creates struct internally, sends field values via channel" =
+  // The fiber owns the only RC reference. make_counter: RC=1. fiber scope
+  // exit: RC->0, block freed. No leak, no double-free.
+  let out = sync::Channel[i64].make(2)
+  spawn fiber_produce_and_send(123, 9, out)
+  assert::equals(await out.recv(), 123)
+  assert::equals(await out.recv(), 9)
+
+test "handover: nested cLayoutStruct fields accessible from fiber" =
+  // make_circle returns a malloc'd circle_t; #handover copies it into RC block.
+  // The nested point_t.origin is accessed via c_data_ptr -> native layout offset.
+  let ch = sync::Channel[i64].make(3)
+  let c = make_circle(10, 20, 5)
+  spawn fiber_read_circle(c, ch)
+  assert::equals(await ch.recv(), 10)
+  assert::equals(await ch.recv(), 20)
+  assert::equals(await ch.recv(), 5)
+
+// ---------------------------------------------------------------------------
+// Tests: Channel[*T] - pointer type as generic channel element
+// ---------------------------------------------------------------------------
+
+fn{#async} fiber_recv_counter_ptr(ch sync::Channel[*counter_t], out sync::Channel[i64]) =
+  let c = await ch.recv()
+  await out.send((*c).value)
+  await out.send((*c).id)
+
+test "Channel[*counter_t]: send and receive struct pointer via typed channel" =
+  // Verifies that Channel[*T] (pointer as generic type param) works correctly.
+  // The pointer is transmitted through the channel and field access works on
+  // the received pointer, confirming RC bookkeeping and type resolution are correct.
+  let pch = sync::Channel[*counter_t].make(1)
+  let out = sync::Channel[i64].make(2)
+  let c = make_counter(42, 7)
+  spawn fiber_recv_counter_ptr(pch, out)
+  await pch.send(c)
+  assert::equals(await out.recv(), 42)
+  assert::equals(await out.recv(), 7)

@@ -207,11 +207,34 @@ found:;
     return make_immortal_string(start, plen);
 }
 
+// Cache node for _tin_reflect_fn_params results.
+typedef struct _AtomArrNode {
+    char                *spec;  // owning copy of the atom spec string
+    TinRCHdr            *hdr;   // the allocation (hdr+1 is the TinAtom array)
+    int64_t              arity;
+    struct _AtomArrNode *next;
+} AtomArrNode;
+
+static AtomArrNode *_atom_arr_head = NULL;
+
+// Free all cached fn_params entries at program exit.
+static void _free_atom_arr_cache(void) {
+    AtomArrNode *n = _atom_arr_head;
+    while (n) {
+        AtomArrNode *next = n->next;
+        free(n->spec);
+        free(n->hdr);
+        free(n);
+        n = next;
+    }
+    _atom_arr_head = NULL;
+}
+
 // fn_params: returns a TinAtomArray of parameter type atoms.
 // Each element is a TinAtom { int32_t code } matching Tin's %__atom type.
 // Atom codes are registered in the runtime table via _tin_learn_atom so that
 // __tin_string_to_atom / __tin_atom_to_string can resolve them later.
-// The TinAtom array is allocated with TIN_IMMORTAL_RC so it is never freed.
+// Results are cached: each unique atom spec is allocated exactly once and freed at exit.
 TinAtomArray _tin_reflect_fn_params(const char *atom) {
     TinAtomArray empty = { NULL, 0 };
     if (!atom) return empty;
@@ -220,6 +243,12 @@ TinAtomArray _tin_reflect_fn_params(const char *atom) {
     if (strncmp(s, "fn(", 3) != 0) return empty;
     const char *p = s + 3;
     if (*p == ')') return empty;
+
+    // Check cache first.
+    for (AtomArrNode *n = _atom_arr_head; n; n = n->next) {
+        if (strcmp(n->spec, s) == 0)
+            return (TinAtomArray){ (TinAtom *)(n->hdr + 1), n->arity };
+    }
 
     #define MAX_PARAMS 64
     const char *starts[MAX_PARAMS];
@@ -249,30 +278,37 @@ TinAtomArray _tin_reflect_fn_params(const char *atom) {
     arity++;
     if (arity > MAX_PARAMS) arity = MAX_PARAMS;
 
-    // Allocate TinAtom array with an RC header so _tin_release is safe.
-    // sizeof(TinAtom) == 4 (single int32_t).  Layout: [int64_t RC | TinAtom[arity]].
-    // Setting RC = TIN_IMMORTAL_RC ensures _tin_release is a no-op.
-    // We keep hdr reachable in a static list so valgrind sees it as
-    // "still reachable" rather than "definitely lost".
+    // Register atexit once to free all cached entries at program exit.
+    static int _atexit_registered = 0;
+    if (!_atexit_registered) {
+        _atexit_registered = 1;
+        atexit(_free_atom_arr_cache);
+    }
+
+    // Allocate with a full TinRCHdr (16 bytes) so _tin_release reads the
+    // immortal sentinel at the correct offset (ptr - 16).
     size_t arr_size = (size_t)arity * sizeof(TinAtom);
-    int64_t *hdr = (int64_t *)malloc(sizeof(int64_t) + arr_size);
+    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + arr_size);
     if (!hdr) return empty;
-    *hdr = TIN_IMMORTAL_RC;
+    hdr->rc   = TIN_IMMORTAL_RC;
+    hdr->_pad = 0;
     TinAtom *arr = (TinAtom *)(hdr + 1);
-    // Keep hdr reachable via a simple static linked list.
-    typedef struct _AtomArrNode { void *ptr; struct _AtomArrNode *next; } AtomArrNode;
-    static AtomArrNode *_atom_arr_head = NULL;
-    AtomArrNode *node = (AtomArrNode *)malloc(sizeof(AtomArrNode));
-    if (node) { node->ptr = hdr; node->next = _atom_arr_head; _atom_arr_head = node; }
 
     for (int64_t i = 0; i < arity; i++) {
-        // Copy param string into a temporary null-terminated buffer
         char tmp[256];
         size_t copy_len = lens[i] < 255 ? lens[i] : 255;
         memcpy(tmp, starts[i], copy_len);
         tmp[copy_len] = '\0';
-        // Register in the runtime atom table and get the CRC32 code
         arr[i].code = _tin_learn_atom(tmp);
+    }
+
+    AtomArrNode *node = (AtomArrNode *)malloc(sizeof(AtomArrNode));
+    if (node) {
+        node->spec  = strdup(s);
+        node->hdr   = hdr;
+        node->arity = arity;
+        node->next  = _atom_arr_head;
+        _atom_arr_head = node;
     }
 
     return (TinAtomArray){ arr, arity };

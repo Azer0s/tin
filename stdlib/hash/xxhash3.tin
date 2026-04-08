@@ -1,0 +1,320 @@
+// stdlib/hash/xxhash3.tin - xxHash3 64-bit scalar implementation
+//
+// Pure Tin scalar path. Implements xxHash3_64bits (seed=0 and seeded).
+// Reference: https://github.com/Cyan4973/xxHash (v0.8.x)
+// Not cryptographic - optimised for speed and distribution.
+
+const PRIME64_1 u64 = 0x9E3779B185EBCA87
+const PRIME64_2 u64 = 0xC2B2AE3D27D4EB4F
+const PRIME64_3 u64 = 0x165667B19E3779F9
+const PRIME64_4 u64 = 0x85EBCA77C2B2AE63
+const PRIME64_5 u64 = 0x27D4EB2F165667C5
+const PRIME32_1 u32 = 0x9E3779B1
+const PRIME32_2 u32 = 0x85EBCA77
+const PRIME32_3 u32 = 0xC2B2AE3D
+
+// Read little-endian u32 from buf at byte offset off.
+fn xxh3_r32le(buf *u8, off i64) u32 =
+  let b0 u32 = buf[off] as u32
+  let b1 u32 = (buf[off + 1] as u32) << 8
+  let b2 u32 = (buf[off + 2] as u32) << 16
+  let b3 u32 = (buf[off + 3] as u32) << 24
+  return b0 | b1 | b2 | b3
+
+// Read little-endian u64 from buf at byte offset off.
+fn xxh3_r64le(buf *u8, off i64) u64 =
+  let b0 u64 = buf[off] as u64
+  let b1 u64 = (buf[off + 1] as u64) << 8
+  let b2 u64 = (buf[off + 2] as u64) << 16
+  let b3 u64 = (buf[off + 3] as u64) << 24
+  let b4 u64 = (buf[off + 4] as u64) << 32
+  let b5 u64 = (buf[off + 5] as u64) << 40
+  let b6 u64 = (buf[off + 6] as u64) << 48
+  let b7 u64 = (buf[off + 7] as u64) << 56
+  return b0 | b1 | b2 | b3 | b4 | b5 | b6 | b7
+
+// Write little-endian u64 into buf at byte offset off.
+fn xxh3_w64le(buf *u8, off i64, v u64) =
+  buf[off]     = (v & 0xff) as u8
+  buf[off + 1] = ((v >> 8) & 0xff) as u8
+  buf[off + 2] = ((v >> 16) & 0xff) as u8
+  buf[off + 3] = ((v >> 24) & 0xff) as u8
+  buf[off + 4] = ((v >> 32) & 0xff) as u8
+  buf[off + 5] = ((v >> 40) & 0xff) as u8
+  buf[off + 6] = ((v >> 48) & 0xff) as u8
+  buf[off + 7] = (v >> 56) as u8
+
+// Byte-swap u32.
+fn xxh3_swap32(v u32) u32 =
+  let a u32 = (v & 0xff) << 24
+  let b u32 = ((v >> 8) & 0xff) << 16
+  let c u32 = ((v >> 16) & 0xff) << 8
+  let d u32 = v >> 24
+  return a | b | c | d
+
+// Byte-swap u64.
+fn xxh3_swap64(v u64) u64 =
+  let b0 u64 = (v & 0xff) << 56
+  let b1 u64 = ((v >> 8) & 0xff) << 48
+  let b2 u64 = ((v >> 16) & 0xff) << 40
+  let b3 u64 = ((v >> 24) & 0xff) << 32
+  let b4 u64 = ((v >> 32) & 0xff) << 24
+  let b5 u64 = ((v >> 40) & 0xff) << 16
+  let b6 u64 = ((v >> 48) & 0xff) << 8
+  let b7 u64 = v >> 56
+  return b0 | b1 | b2 | b3 | b4 | b5 | b6 | b7
+
+// 128-bit multiply, XOR high and low 64-bit halves.
+fn xxh3_mul128_fold64(a u64, b u64) u64 =
+  let product u128 = (a as u128) * (b as u128)
+  return ((product >> 64) as u64) ^ (product as u64)
+
+// xxHash3 avalanche finalization.
+fn xxh3_avalanche(h u64) u64 =
+  h = h ^ (h >> 37)
+  h = h * 0x165667919E3779F9
+  h = h ^ (h >> 32)
+  return h
+
+// xxHash64 avalanche (used for very short inputs, len 0-3).
+fn xxh64_avalanche(h u64) u64 =
+  h = h ^ (h >> 33)
+  h = h * 0xC2B2AE3D27D4EB4F
+  h = h ^ (h >> 29)
+  h = h * 0x165667B19E3779F9
+  h = h ^ (h >> 32)
+  return h
+
+// rrmxmx finalizer used for 4-8 byte inputs.
+fn xxh3_rrmxmx(h u64, len i64) u64 =
+  let r49 u64 = (h << 49) | (h >> 15)
+  let r24 u64 = (h << 24) | (h >> 40)
+  h = h ^ r49 ^ r24
+  h = h * 0x9FB21C651E98DF25
+  h = h ^ ((h >> 35) + (len as u64))
+  h = h * 0x9FB21C651E98DF25
+  h = h ^ (h >> 28)
+  return h
+
+// Mix 16 input bytes with 16 secret bytes and a seed.
+fn xxh3_mix16b(input *u8, secret *u8, seed u64) u64 =
+  let lo u64 = xxh3_r64le(input, 0) ^ (xxh3_r64le(secret, 0) + seed)
+  let hi u64 = xxh3_r64le(input, 8) ^ (xxh3_r64le(secret, 8) - seed)
+  return xxh3_mul128_fold64(lo, hi)
+
+// Hash 0 bytes.
+fn xxh3_0bytes(secret *u8, seed u64) u64 =
+  return xxh64_avalanche(seed ^ (xxh3_r64le(secret, 56) ^ xxh3_r64le(secret, 64)))
+
+// Hash 1-3 bytes.
+fn xxh3_1to3(input *u8, len i64, secret *u8, seed u64) u64 =
+  let c1 u32 = input[0] as u32
+  let c2 u32 = input[len >> 1] as u32
+  let c3 u32 = input[len - 1] as u32
+  let combined u32 = (c1 << 16) | (c2 << 24) | c3 | ((len as u32) << 8)
+  let s0 u32 = xxh3_r32le(secret, 0)
+  let s4 u32 = xxh3_r32le(secret, 4)
+  let bitflip u64 = ((s0 ^ s4) as u64) + seed
+  return xxh64_avalanche((combined as u64) ^ bitflip)
+
+// Hash 4-8 bytes.
+fn xxh3_4to8(input *u8, len i64, secret *u8, seed u64) u64 =
+  let seed_lo u32 = seed as u32
+  let seed_hi u64 = (xxh3_swap32(seed_lo) as u64) << 32
+  let seed2 u64 = seed ^ seed_hi
+  let input1 u32 = xxh3_r32le(input, 0)
+  let input2 u32 = xxh3_r32le(input, len - 4)
+  let s8  u64 = xxh3_r64le(secret, 8)
+  let s16 u64 = xxh3_r64le(secret, 16)
+  let bitflip u64 = (s8 ^ s16) - seed2
+  let input64 u64 = (input2 as u64) + ((input1 as u64) << 32)
+  return xxh3_rrmxmx(input64 ^ bitflip, len)
+
+// Hash 9-16 bytes.
+fn xxh3_9to16(input *u8, len i64, secret *u8, seed u64) u64 =
+  let s24 u64 = xxh3_r64le(secret, 24)
+  let s32 u64 = xxh3_r64le(secret, 32)
+  let s40 u64 = xxh3_r64le(secret, 40)
+  let s48 u64 = xxh3_r64le(secret, 48)
+  let bitflip1 u64 = (s24 ^ s32) + seed
+  let bitflip2 u64 = (s40 ^ s48) - seed
+  let input_lo u64 = xxh3_r64le(input, 0) ^ bitflip1
+  let input_hi u64 = xxh3_r64le(input, len - 8) ^ bitflip2
+  let acc u64 = (len as u64) + xxh3_swap64(input_lo) + input_hi + xxh3_mul128_fold64(input_lo, input_hi)
+  return xxh3_avalanche(acc)
+
+// Hash 17-128 bytes.
+fn xxh3_17to128(input *u8, len i64, secret *u8, seed u64) u64 =
+  let acc u64 = (len as u64) * PRIME64_1
+  if len > 32:
+    if len > 64:
+      if len > 96:
+        acc = acc + xxh3_mix16b(addr(input[48]),       addr(secret[96]),  seed)
+        acc = acc + xxh3_mix16b(addr(input[len - 64]), addr(secret[112]), seed)
+      acc = acc + xxh3_mix16b(addr(input[32]),       addr(secret[64]), seed)
+      acc = acc + xxh3_mix16b(addr(input[len - 48]), addr(secret[80]), seed)
+    acc = acc + xxh3_mix16b(addr(input[16]),       addr(secret[32]), seed)
+    acc = acc + xxh3_mix16b(addr(input[len - 32]), addr(secret[48]), seed)
+  acc = acc + xxh3_mix16b(addr(input[0]),        addr(secret[0]),  seed)
+  acc = acc + xxh3_mix16b(addr(input[len - 16]), addr(secret[16]), seed)
+  return xxh3_avalanche(acc)
+
+// Hash 129-240 bytes.
+fn xxh3_129to240(input *u8, len i64, secret *u8, seed u64) u64 =
+  let acc u64 = (len as u64) * PRIME64_1
+  let nb_rounds i64 = len / 16
+  let i i64 = 0
+  for i < 8:
+    acc = acc + xxh3_mix16b(addr(input[i * 16]), addr(secret[i * 16]), seed)
+    i = i + 1
+  acc = xxh3_avalanche(acc)
+  i = 8
+  for i < nb_rounds:
+    acc = acc + xxh3_mix16b(addr(input[i * 16]), addr(secret[(i - 8) * 16 + 3]), seed)
+    i = i + 1
+  // Last 16 bytes use secret[119] (= 136 - 17).
+  acc = acc + xxh3_mix16b(addr(input[len - 16]), addr(secret[119]), seed)
+  return xxh3_avalanche(acc)
+
+// Process one 64-byte stripe into the 8 accumulators.
+fn xxh3_acc512(acc *u64, input *u8, secret *u8) =
+  let i i64 = 0
+  for i < 8:
+    let data_val u64 = xxh3_r64le(input, i * 8)
+    let data_key u64 = data_val ^ xxh3_r64le(secret, i * 8)
+    let j i64 = i ^ 1
+    acc[j] = acc[j] + data_val
+    acc[i] = acc[i] + ((data_key as u32) as u64) * (data_key >> 32)
+    i = i + 1
+
+// Scramble the 8 accumulators (applied after each full 1024-byte block).
+fn xxh3_scramble(acc *u64, secret *u8) =
+  let i i64 = 0
+  for i < 8:
+    let key64 u64 = xxh3_r64le(secret, i * 8)
+    let a u64 = acc[i]
+    a = a ^ (a >> 47)
+    a = a ^ key64
+    a = a * (PRIME32_1 as u64)
+    acc[i] = a
+    i = i + 1
+
+// Mix two adjacent accumulators with 16 secret bytes.
+fn xxh3_mix2accs(acc *u64, secret *u8) u64 =
+  let a0 u64 = acc[0] ^ xxh3_r64le(secret, 0)
+  let a1 u64 = acc[1] ^ xxh3_r64le(secret, 8)
+  return xxh3_mul128_fold64(a0, a1)
+
+// Merge 8 accumulators into the final 64-bit digest.
+fn xxh3_merge_accs(acc *u64, secret *u8, start u64) u64 =
+  let result u64 = start
+  result = result + xxh3_mix2accs(addr(acc[0]), addr(secret[0]))
+  result = result + xxh3_mix2accs(addr(acc[2]), addr(secret[16]))
+  result = result + xxh3_mix2accs(addr(acc[4]), addr(secret[32]))
+  result = result + xxh3_mix2accs(addr(acc[6]), addr(secret[48]))
+  return xxh3_avalanche(result)
+
+// Long-input hash (len > 240). Uses the provided 192-byte secret.
+fn xxh3_long(input *u8, len i64, secret *u8) u64 =
+  // Initial accumulator state.
+  let acc [u64; 8] = [
+    PRIME32_3 as u64,
+    PRIME64_1,
+    PRIME64_2,
+    PRIME64_3,
+    PRIME64_4,
+    PRIME32_2 as u64,
+    PRIME64_5,
+    PRIME32_1 as u64
+  ]
+  let ap *u64 = addr(acc[0])
+
+  // Full 1024-byte blocks: 16 stripes per block, then scramble.
+  let nb_blocks i64 = (len - 1) / 1024
+  let blk i64 = 0
+  for blk < nb_blocks:
+    let stripe i64 = 0
+    for stripe < 16:
+      xxh3_acc512(ap, addr(input[blk * 1024 + stripe * 64]), addr(secret[stripe * 8]))
+      stripe = stripe + 1
+    xxh3_scramble(ap, addr(secret[128]))
+    blk = blk + 1
+
+  // Remaining stripes in the final partial block.
+  let base_off i64 = nb_blocks * 1024
+  let nb_rem i64 = (len - 1 - base_off) / 64
+  let rs i64 = 0
+  for rs < nb_rem:
+    xxh3_acc512(ap, addr(input[base_off + rs * 64]), addr(secret[rs * 8]))
+    rs = rs + 1
+
+  // Last stripe (always covers the final 64 bytes).
+  xxh3_acc512(ap, addr(input[len - 64]), addr(secret[121]))
+
+  // Merge accumulators using secret[11..] as the merge secret.
+  return xxh3_merge_accs(ap, addr(secret[11]), (len as u64) * PRIME64_1)
+
+// xxhash3_seeded: main entry point - initialises the 192-byte default secret on the
+// stack, dispatches to the appropriate length-specific path, and derives a
+// custom secret for the long path when seed != 0.
+fn xxhash3_seeded(data *u8, len i64, seed u64) u64 =
+  // kSecret - xxHash3 default secret (192 bytes, v0.8.x).
+  let secret [u8; 192] = [
+    0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
+    0xde, 0xd4, 0x6d, 0xe9, 0x83, 0x90, 0x97, 0xdb, 0x72, 0x40, 0xa4, 0xa4, 0xb7, 0xb3, 0x67, 0x1f,
+    0xcb, 0x79, 0xe6, 0x4e, 0xcc, 0xc0, 0xe5, 0x78, 0x82, 0x5a, 0xd0, 0x7d, 0xcc, 0xff, 0x72, 0x21,
+    0xb8, 0x08, 0x46, 0x74, 0xf7, 0x43, 0x24, 0x8e, 0xe0, 0x35, 0x90, 0xe6, 0x81, 0x3a, 0x26, 0x4c,
+    0x3c, 0x28, 0x52, 0xbb, 0x91, 0xc3, 0x00, 0xcb, 0x88, 0xd0, 0x65, 0x8b, 0x1b, 0x53, 0x2e, 0xa3,
+    0x71, 0x64, 0x48, 0x97, 0xa2, 0x0d, 0xf9, 0x4e, 0x38, 0x19, 0xef, 0x46, 0xa9, 0xde, 0xac, 0xd8,
+    0xa8, 0xfa, 0x76, 0x3f, 0xe3, 0x9c, 0x34, 0x3f, 0xf9, 0xdc, 0xbb, 0xc7, 0xc7, 0x0b, 0x4f, 0x1d,
+    0x8a, 0x51, 0xe0, 0x4b, 0xcd, 0xb4, 0x59, 0x31, 0xc8, 0x9f, 0x7e, 0xc9, 0xd9, 0x78, 0x73, 0x64,
+    0xea, 0xc5, 0xac, 0x83, 0x34, 0xd3, 0xeb, 0xc3, 0xc5, 0x81, 0xa0, 0xff, 0xfa, 0x13, 0x63, 0xeb,
+    0x17, 0x0d, 0xdd, 0x51, 0xb7, 0xf0, 0xda, 0x49, 0xd3, 0x16, 0x55, 0x26, 0x29, 0xd4, 0x68, 0x9e,
+    0x2b, 0x16, 0xbe, 0x58, 0x7d, 0x47, 0xa1, 0xfc, 0x8f, 0xf8, 0xb8, 0xd1, 0x7a, 0xd0, 0x31, 0xce,
+    0x45, 0xcb, 0x3a, 0x8f, 0x95, 0x16, 0x04, 0x28, 0xaf, 0xd7, 0xfb, 0xca, 0xbb, 0x4b, 0x40, 0x7e
+  ]
+  let sp *u8 = addr(secret[0])
+
+  // Short paths (all use the default secret directly).
+  if len == 0:
+    return xxh3_0bytes(sp, seed)
+  if len <= 3:
+    return xxh3_1to3(data, len, sp, seed)
+  if len <= 8:
+    return xxh3_4to8(data, len, sp, seed)
+  if len <= 16:
+    return xxh3_9to16(data, len, sp, seed)
+  if len <= 128:
+    return xxh3_17to128(data, len, sp, seed)
+  if len <= 240:
+    return xxh3_129to240(data, len, sp, seed)
+
+  // Long path: derive a custom secret from the seed when seed != 0,
+  // otherwise use the default secret directly.
+  if seed != 0:
+    let custom [u8; 192]
+    let cp *u8 = addr(custom[0])
+    let i i64 = 0
+    for i < 12:
+      let lo u64 = xxh3_r64le(sp, i * 16) + seed
+      let hi u64 = xxh3_r64le(sp, i * 16 + 8) - seed
+      xxh3_w64le(cp, i * 16, lo)
+      xxh3_w64le(cp, i * 16 + 8, hi)
+      i = i + 1
+    return xxh3_long(data, len, cp)
+  return xxh3_long(data, len, sp)
+
+fn xxhash3(data *u8, len i64) u64 =
+  return xxhash3_seeded(data, len, 0)
+
+// Overload: xxhash3(string) - convenience overload accepting a string.
+fn xxhash3(s string) u64 =
+  return xxhash3_seeded(addr(s[0]), len(s), 0)
+
+// Overload: xxhash3_seeded(string, seed) - seeded variant accepting a string.
+fn xxhash3_seeded(s string, seed u64) u64 =
+  return xxhash3_seeded(addr(s[0]), len(s), seed)
+
+export {
+  xxhash3, xxhash3_seeded
+} as xxhash3

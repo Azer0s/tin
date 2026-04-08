@@ -1,0 +1,28 @@
+//!+extern_not_heap_promoted.c
+
+use assert
+
+struct small_struct =
+  a i8
+  b i16
+  c i32
+  d i64
+
+fn get_small_struct() *small_struct = extern("get_small_struct")
+fn compare_small_struct_ptr(a *small_struct) bool = extern("compare_small_struct_ptr")
+
+fn do_get_small_struct() *small_struct =
+  let s = get_small_struct()
+
+  return s
+
+test "extern function returning pointer to small struct" =
+  let s = do_get_small_struct()
+
+  assert::ok(compare_small_struct_ptr(s))
+
+  let v = *s
+  assert::equals(1, v.a)
+  assert::equals(2, v.b)
+  assert::equals(3, v.c)
+  assert::equals(4, v.d)

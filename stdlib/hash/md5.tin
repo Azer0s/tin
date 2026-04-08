@@ -1,0 +1,302 @@
+// stdlib/hash/md5.tin - MD5 128-bit digest (RFC 1321)
+//
+// Pure Tin implementation. 4x u32 state, 64 rounds.
+// Not cryptographically safe - use for checksums and legacy compatibility only.
+
+// Per-round shift amounts (RFC 1321 section 3.4).
+const s00 u32 = 7
+const s01 u32 = 12
+const s02 u32 = 17
+const s03 u32 = 22
+const s10 u32 = 5
+const s11 u32 = 9
+const s12 u32 = 14
+const s13 u32 = 20
+const s20 u32 = 4
+const s21 u32 = 11
+const s22 u32 = 16
+const s23 u32 = 23
+const s30 u32 = 6
+const s31 u32 = 10
+const s32 u32 = 15
+const s33 u32 = 21
+
+// T[i] = floor(abs(sin(i+1)) * 2^32) for i = 0..63 (RFC 1321 table 1).
+const T00 u32 = 0xd76aa478
+const T01 u32 = 0xe8c7b756
+const T02 u32 = 0x242070db
+const T03 u32 = 0xc1bdceee
+const T04 u32 = 0xf57c0faf
+const T05 u32 = 0x4787c62a
+const T06 u32 = 0xa8304613
+const T07 u32 = 0xfd469501
+const T08 u32 = 0x698098d8
+const T09 u32 = 0x8b44f7af
+const T10 u32 = 0xffff5bb1
+const T11 u32 = 0x895cd7be
+const T12 u32 = 0x6b901122
+const T13 u32 = 0xfd987193
+const T14 u32 = 0xa679438e
+const T15 u32 = 0x49b40821
+const T16 u32 = 0xf61e2562
+const T17 u32 = 0xc040b340
+const T18 u32 = 0x265e5a51
+const T19 u32 = 0xe9b6c7aa
+const T20 u32 = 0xd62f105d
+const T21 u32 = 0x02441453
+const T22 u32 = 0xd8a1e681
+const T23 u32 = 0xe7d3fbc8
+const T24 u32 = 0x21e1cde6
+const T25 u32 = 0xc33707d6
+const T26 u32 = 0xf4d50d87
+const T27 u32 = 0x455a14ed
+const T28 u32 = 0xa9e3e905
+const T29 u32 = 0xfcefa3f8
+const T30 u32 = 0x676f02d9
+const T31 u32 = 0x8d2a4c8a
+const T32 u32 = 0xfffa3942
+const T33 u32 = 0x8771f681
+const T34 u32 = 0x6d9d6122
+const T35 u32 = 0xfde5380c
+const T36 u32 = 0xa4beea44
+const T37 u32 = 0x4bdecfa9
+const T38 u32 = 0xf6bb4b60
+const T39 u32 = 0xbebfbc70
+const T40 u32 = 0x289b7ec6
+const T41 u32 = 0xeaa127fa
+const T42 u32 = 0xd4ef3085
+const T43 u32 = 0x04881d05
+const T44 u32 = 0xd9d4d039
+const T45 u32 = 0xe6db99e5
+const T46 u32 = 0x1fa27cf8
+const T47 u32 = 0xc4ac5665
+const T48 u32 = 0xf4292244
+const T49 u32 = 0x432aff97
+const T50 u32 = 0xab9423a7
+const T51 u32 = 0xfc93a039
+const T52 u32 = 0x655b59c3
+const T53 u32 = 0x8f0ccc92
+const T54 u32 = 0xffeff47d
+const T55 u32 = 0x85845dd1
+const T56 u32 = 0x6fa87e4f
+const T57 u32 = 0xfe2ce6e0
+const T58 u32 = 0xa3014314
+const T59 u32 = 0x4e0811a1
+const T60 u32 = 0xf7537e82
+const T61 u32 = 0xbd3af235
+const T62 u32 = 0x2ad7d2bb
+const T63 u32 = 0xeb86d391
+
+// rotl32: rotate left a 32-bit value by n bits.
+fn rotl32(x u32, n u32) u32 =
+  return (x << n) | (x >> (32 - n))
+
+// read_u32_le: read a little-endian u32 from buf at byte offset off.
+fn read_u32_le(buf *u8, off i64) u32 =
+  let b0 u32 = buf[off] as u32
+  let b1 u32 = (buf[off + 1] as u32) << 8
+  let b2 u32 = (buf[off + 2] as u32) << 16
+  let b3 u32 = (buf[off + 3] as u32) << 24
+  return b0 | b1 | b2 | b3
+
+// md5_process_block: run one 64-byte block through the MD5 compression function.
+// Updates state a/b/c/d in place (returned as [u32; 4]).
+fn md5_process_block(block *u8, a u32, b u32, c u32, d u32) [u32; 4] =
+  let aa u32 = a
+  let bb u32 = b
+  let cc u32 = c
+  let dd u32 = d
+
+  // Load 16 u32 words from the block (little-endian).
+  let x00 u32 = read_u32_le(block, 0)
+  let x01 u32 = read_u32_le(block, 4)
+  let x02 u32 = read_u32_le(block, 8)
+  let x03 u32 = read_u32_le(block, 12)
+  let x04 u32 = read_u32_le(block, 16)
+  let x05 u32 = read_u32_le(block, 20)
+  let x06 u32 = read_u32_le(block, 24)
+  let x07 u32 = read_u32_le(block, 28)
+  let x08 u32 = read_u32_le(block, 32)
+  let x09 u32 = read_u32_le(block, 36)
+  let x10 u32 = read_u32_le(block, 40)
+  let x11 u32 = read_u32_le(block, 44)
+  let x12 u32 = read_u32_le(block, 48)
+  let x13 u32 = read_u32_le(block, 52)
+  let x14 u32 = read_u32_le(block, 56)
+  let x15 u32 = read_u32_le(block, 60)
+
+  // Round 1: F(b,c,d) = (b & c) | (~b & d)
+  aa = rotl32(aa + ((bb & cc) | ((~bb) & dd)) + x00 + T00, s00) + bb
+  dd = rotl32(dd + ((aa & bb) | ((~aa) & cc)) + x01 + T01, s01) + aa
+  cc = rotl32(cc + ((dd & aa) | ((~dd) & bb)) + x02 + T02, s02) + dd
+  bb = rotl32(bb + ((cc & dd) | ((~cc) & aa)) + x03 + T03, s03) + cc
+  aa = rotl32(aa + ((bb & cc) | ((~bb) & dd)) + x04 + T04, s00) + bb
+  dd = rotl32(dd + ((aa & bb) | ((~aa) & cc)) + x05 + T05, s01) + aa
+  cc = rotl32(cc + ((dd & aa) | ((~dd) & bb)) + x06 + T06, s02) + dd
+  bb = rotl32(bb + ((cc & dd) | ((~cc) & aa)) + x07 + T07, s03) + cc
+  aa = rotl32(aa + ((bb & cc) | ((~bb) & dd)) + x08 + T08, s00) + bb
+  dd = rotl32(dd + ((aa & bb) | ((~aa) & cc)) + x09 + T09, s01) + aa
+  cc = rotl32(cc + ((dd & aa) | ((~dd) & bb)) + x10 + T10, s02) + dd
+  bb = rotl32(bb + ((cc & dd) | ((~cc) & aa)) + x11 + T11, s03) + cc
+  aa = rotl32(aa + ((bb & cc) | ((~bb) & dd)) + x12 + T12, s00) + bb
+  dd = rotl32(dd + ((aa & bb) | ((~aa) & cc)) + x13 + T13, s01) + aa
+  cc = rotl32(cc + ((dd & aa) | ((~dd) & bb)) + x14 + T14, s02) + dd
+  bb = rotl32(bb + ((cc & dd) | ((~cc) & aa)) + x15 + T15, s03) + cc
+
+  // Round 2: G(b,c,d) = (b & d) | (c & ~d)
+  aa = rotl32(aa + ((bb & dd) | (cc & (~dd))) + x01 + T16, s10) + bb
+  dd = rotl32(dd + ((aa & cc) | (bb & (~cc))) + x06 + T17, s11) + aa
+  cc = rotl32(cc + ((dd & bb) | (aa & (~bb))) + x11 + T18, s12) + dd
+  bb = rotl32(bb + ((cc & aa) | (dd & (~aa))) + x00 + T19, s13) + cc
+  aa = rotl32(aa + ((bb & dd) | (cc & (~dd))) + x05 + T20, s10) + bb
+  dd = rotl32(dd + ((aa & cc) | (bb & (~cc))) + x10 + T21, s11) + aa
+  cc = rotl32(cc + ((dd & bb) | (aa & (~bb))) + x15 + T22, s12) + dd
+  bb = rotl32(bb + ((cc & aa) | (dd & (~aa))) + x04 + T23, s13) + cc
+  aa = rotl32(aa + ((bb & dd) | (cc & (~dd))) + x09 + T24, s10) + bb
+  dd = rotl32(dd + ((aa & cc) | (bb & (~cc))) + x14 + T25, s11) + aa
+  cc = rotl32(cc + ((dd & bb) | (aa & (~bb))) + x03 + T26, s12) + dd
+  bb = rotl32(bb + ((cc & aa) | (dd & (~aa))) + x08 + T27, s13) + cc
+  aa = rotl32(aa + ((bb & dd) | (cc & (~dd))) + x13 + T28, s10) + bb
+  dd = rotl32(dd + ((aa & cc) | (bb & (~cc))) + x02 + T29, s11) + aa
+  cc = rotl32(cc + ((dd & bb) | (aa & (~bb))) + x07 + T30, s12) + dd
+  bb = rotl32(bb + ((cc & aa) | (dd & (~aa))) + x12 + T31, s13) + cc
+
+  // Round 3: H(b,c,d) = b ^ c ^ d
+  aa = rotl32(aa + (bb ^ cc ^ dd) + x05 + T32, s20) + bb
+  dd = rotl32(dd + (aa ^ bb ^ cc) + x08 + T33, s21) + aa
+  cc = rotl32(cc + (dd ^ aa ^ bb) + x11 + T34, s22) + dd
+  bb = rotl32(bb + (cc ^ dd ^ aa) + x14 + T35, s23) + cc
+  aa = rotl32(aa + (bb ^ cc ^ dd) + x01 + T36, s20) + bb
+  dd = rotl32(dd + (aa ^ bb ^ cc) + x04 + T37, s21) + aa
+  cc = rotl32(cc + (dd ^ aa ^ bb) + x07 + T38, s22) + dd
+  bb = rotl32(bb + (cc ^ dd ^ aa) + x10 + T39, s23) + cc
+  aa = rotl32(aa + (bb ^ cc ^ dd) + x13 + T40, s20) + bb
+  dd = rotl32(dd + (aa ^ bb ^ cc) + x00 + T41, s21) + aa
+  cc = rotl32(cc + (dd ^ aa ^ bb) + x03 + T42, s22) + dd
+  bb = rotl32(bb + (cc ^ dd ^ aa) + x06 + T43, s23) + cc
+  aa = rotl32(aa + (bb ^ cc ^ dd) + x09 + T44, s20) + bb
+  dd = rotl32(dd + (aa ^ bb ^ cc) + x12 + T45, s21) + aa
+  cc = rotl32(cc + (dd ^ aa ^ bb) + x15 + T46, s22) + dd
+  bb = rotl32(bb + (cc ^ dd ^ aa) + x02 + T47, s23) + cc
+
+  // Round 4: I(b,c,d) = c ^ (b | ~d)
+  aa = rotl32(aa + (cc ^ (bb | (~dd))) + x00 + T48, s30) + bb
+  dd = rotl32(dd + (bb ^ (aa | (~cc))) + x07 + T49, s31) + aa
+  cc = rotl32(cc + (aa ^ (dd | (~bb))) + x14 + T50, s32) + dd
+  bb = rotl32(bb + (dd ^ (cc | (~aa))) + x05 + T51, s33) + cc
+  aa = rotl32(aa + (cc ^ (bb | (~dd))) + x12 + T52, s30) + bb
+  dd = rotl32(dd + (bb ^ (aa | (~cc))) + x03 + T53, s31) + aa
+  cc = rotl32(cc + (aa ^ (dd | (~bb))) + x10 + T54, s32) + dd
+  bb = rotl32(bb + (dd ^ (cc | (~aa))) + x01 + T55, s33) + cc
+  aa = rotl32(aa + (cc ^ (bb | (~dd))) + x08 + T56, s30) + bb
+  dd = rotl32(dd + (bb ^ (aa | (~cc))) + x15 + T57, s31) + aa
+  cc = rotl32(cc + (aa ^ (dd | (~bb))) + x06 + T58, s32) + dd
+  bb = rotl32(bb + (dd ^ (cc | (~aa))) + x13 + T59, s33) + cc
+  aa = rotl32(aa + (cc ^ (bb | (~dd))) + x04 + T60, s30) + bb
+  dd = rotl32(dd + (bb ^ (aa | (~cc))) + x11 + T61, s31) + aa
+  cc = rotl32(cc + (aa ^ (dd | (~bb))) + x02 + T62, s32) + dd
+  bb = rotl32(bb + (dd ^ (cc | (~aa))) + x09 + T63, s33) + cc
+
+  let out [u32; 4] = [a + aa, b + bb, c + cc, d + dd]
+  return out
+
+// md5_write_le: write a u32 as 4 little-endian bytes into out starting at off.
+fn md5_write_le(out *u8, off i64, v u32) =
+  out[off]     = (v & 0xff) as u8
+  out[off + 1] = ((v >> 8) & 0xff) as u8
+  out[off + 2] = ((v >> 16) & 0xff) as u8
+  out[off + 3] = ((v >> 24) & 0xff) as u8
+
+// md5: compute the MD5 digest of data (returns 16-byte array).
+fn md5(data *u8, len i64) [u8; 16] =
+  // Initial state (RFC 1321 section 3.3).
+  let a u32 = 0x67452301
+  let b u32 = 0xefcdab89
+  let c u32 = 0x98badcfe
+  let d u32 = 0x10325476
+
+  // Process all complete 64-byte blocks.
+  let i i64 = 0
+  for i + 64 <= len:
+    let s [u32; 4] = md5_process_block(addr(data[i]), a, b, c, d)
+    a = s[0]
+    b = s[1]
+    c = s[2]
+    d = s[3]
+    i = i + 64
+
+  // Build the final padded block(s).
+  // We need a 128-byte scratch buffer to handle the 2-block padding case.
+  let buf [u8; 128]
+  let remaining i64 = len - i
+  let j i64 = 0
+  for j < remaining:
+    buf[j] = data[i + j]
+    j = j + 1
+  buf[remaining] = 0x80
+
+  // Bit length as u64 little-endian, placed at byte 56 of the last block
+  // (or byte 120 of a two-block padding when remaining >= 56).
+  let bit_len u64 = (len as u64) * 8
+  let off i64 = 56
+  if remaining >= 56:
+    off = 120
+
+  buf[off]     = (bit_len & 0xff) as u8
+  buf[off + 1] = ((bit_len >> 8) & 0xff) as u8
+  buf[off + 2] = ((bit_len >> 16) & 0xff) as u8
+  buf[off + 3] = ((bit_len >> 24) & 0xff) as u8
+  buf[off + 4] = ((bit_len >> 32) & 0xff) as u8
+  buf[off + 5] = ((bit_len >> 40) & 0xff) as u8
+  buf[off + 6] = ((bit_len >> 48) & 0xff) as u8
+  buf[off + 7] = ((bit_len >> 56) & 0xff) as u8
+
+  // Process the final block(s).
+  let s [u32; 4] = md5_process_block(addr(buf[0]), a, b, c, d)
+  a = s[0]
+  b = s[1]
+  c = s[2]
+  d = s[3]
+
+  if remaining >= 56:
+    let s2 [u32; 4] = md5_process_block(addr(buf[64]), a, b, c, d)
+    a = s2[0]
+    b = s2[1]
+    c = s2[2]
+    d = s2[3]
+
+  // Write digest as 16 little-endian bytes.
+  let digest [u8; 16]
+  md5_write_le(addr(digest[0]), 0, a)
+  md5_write_le(addr(digest[0]), 4, b)
+  md5_write_le(addr(digest[0]), 8, c)
+  md5_write_le(addr(digest[0]), 12, d)
+  return digest
+
+// hex nibble helper.
+fn hex_nibble(v u8) u8 =
+  if v < 10:
+    return (0x30 as u8) + v   // '0'..'9'
+  return (0x57 as u8) + v   // 'a'..'f' (0x61 - 10 = 0x57)
+
+// md5_hex_from_digest: convert a 16-byte digest to a 32-char hex string.
+fn md5_hex_from_digest(digest [u8; 16]) string =
+  let buf [char; 32]
+  let i i64 = 0
+  for i < 16:
+    let byte u8 = digest[i]
+    buf[i * 2]     = hex_nibble((byte >> 4) & 0x0f) as char
+    buf[i * 2 + 1] = hex_nibble(byte & 0x0f) as char
+    i = i + 1
+  return buf as string
+
+fn md5_hex(data *u8, len i64) string =
+  return md5_hex_from_digest(md5(data, len))
+
+// Overload: md5(string) - convenience overload accepting a string directly.
+fn md5(s string) string =
+  return md5_hex(addr(s[0]), len(s))
+
+export {
+  md5, md5_hex, md5_hex_from_digest
+} as md5

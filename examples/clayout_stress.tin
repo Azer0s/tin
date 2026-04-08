@@ -1,0 +1,186 @@
+// clayout_stress.tin - stress tests for the cLayoutStructs wrapper + native layout.
+//
+// Each cLayoutStruct holds an i8* c_data_ptr pointing to live C memory (non-handover)
+// or to inline overflow fields (handover / struct literals).  All field accesses go
+// through c_data_ptr so C mutations are immediately observable.
+//
+//!+clayout_stress.c
+
+use assert
+
+// ---------------------------------------------------------------------------
+// point2 - basic mutable struct
+// ---------------------------------------------------------------------------
+
+struct point2 =
+  x i32
+  y i32
+
+fn get_point() *point2 = extern("get_point")
+fn set_point_x(p *point2, v i32) void = extern("set_point_x")
+fn set_point_y(p *point2, v i32) void = extern("set_point_y")
+fn same_point_ptr(a *point2, b *point2) bool = extern("same_point_ptr")
+
+// ---------------------------------------------------------------------------
+// vec2 / rect - nested cLayoutStructs
+// ---------------------------------------------------------------------------
+
+struct vec2 =
+  x i64
+  y i64
+
+struct rect =
+  origin vec2
+  size   vec2
+  id     i64
+
+fn get_rect() *rect = extern("get_rect")
+fn set_rect_origin(r *rect, x i64, y i64) void = extern("set_rect_origin")
+fn set_rect_size(r *rect, w i64, h i64) void = extern("set_rect_size")
+fn set_rect_id(r *rect, id i64) void = extern("set_rect_id")
+
+// ---------------------------------------------------------------------------
+// color - u8 x4, used for struct literal round-trips
+// ---------------------------------------------------------------------------
+
+struct color =
+  r u8
+  g u8
+  b u8
+  a u8
+
+fn get_color() *color = extern("get_color")
+fn set_color(c *color, r u8, g u8, b u8, a u8) void = extern("set_color")
+fn verify_color(c *color, r u8, g u8, b u8, a u8) bool = extern("verify_color")
+
+// ---------------------------------------------------------------------------
+// Tests: mutation visibility
+// ---------------------------------------------------------------------------
+
+test "mutation visibility: initial field values" =
+  let p = get_point()
+  assert::equals((*p).x, 10)
+  assert::equals((*p).y, 20)
+
+test "mutation visibility: C mutates, Tin observes immediately" =
+  let p = get_point()
+  assert::equals((*p).x, 10)
+  set_point_x(p, 99)
+  assert::equals((*p).x, 99)  // live view - no snapshot
+  set_point_x(p, 10)           // restore global state
+
+test "mutation visibility: two Tin handles to same C struct" =
+  let p1 = get_point()
+  let p2 = get_point()
+  // Both must point to the exact same C struct.
+  assert::equals(same_point_ptr(p1, p2), true)
+  set_point_x(p1, 77)
+  assert::equals((*p2).x, 77)  // mutation through p1 visible via p2
+  set_point_x(p1, 10)           // restore
+
+test "mutation visibility: y field" =
+  let p = get_point()
+  set_point_y(p, 55)
+  assert::equals((*p).y, 55)
+  set_point_y(p, 20)
+
+// ---------------------------------------------------------------------------
+// Tests: nested cLayoutStructs
+// ---------------------------------------------------------------------------
+
+test "nested cLayoutStruct: initial field reads" =
+  let r = get_rect()
+  assert::equals((*r).origin.x, 0)
+  assert::equals((*r).origin.y, 0)
+  assert::equals((*r).size.x, 100)
+  assert::equals((*r).size.y, 200)
+  assert::equals((*r).id, 42)
+
+test "nested cLayoutStruct: C mutates origin, Tin observes" =
+  let r = get_rect()
+  set_rect_origin(r, 7, 13)
+  assert::equals((*r).origin.x, 7)
+  assert::equals((*r).origin.y, 13)
+  set_rect_origin(r, 0, 0)
+
+test "nested cLayoutStruct: C mutates size, Tin observes" =
+  let r = get_rect()
+  set_rect_size(r, 640, 480)
+  assert::equals((*r).size.x, 640)
+  assert::equals((*r).size.y, 480)
+  set_rect_size(r, 100, 200)
+
+test "nested cLayoutStruct: id field mutation" =
+  let r = get_rect()
+  set_rect_id(r, 99)
+  assert::equals((*r).id, 99)
+  set_rect_id(r, 42)
+
+// ---------------------------------------------------------------------------
+// Tests: struct literals (c_data_ptr -> stack native alloca)
+// ---------------------------------------------------------------------------
+
+test "struct literal: field reads" =
+  // Use values < 128 to avoid sign-extension ambiguity when casting u8 -> i64.
+  let c = color{r: 10, g: 20, b: 30, a: 64}
+  assert::equals(c.r as i64, 10)
+  assert::equals(c.g as i64, 20)
+  assert::equals(c.b as i64, 30)
+  assert::equals(c.a as i64, 64)
+
+test "struct literal: pass to C for verification" =
+  let c = color{r: 1, g: 2, b: 3, a: 128}
+  assert::equals(verify_color(&c, 1, 2, 3, 128), true)
+
+test "struct literal: positional syntax" =
+  let c = color{255, 0, 128, 64}
+  assert::equals(verify_color(&c, 255, 0, 128, 64), true)
+
+// ---------------------------------------------------------------------------
+// Tests: non-handover color pointer
+// ---------------------------------------------------------------------------
+
+test "non-handover pointer: color field reads" =
+  // g_color = {10, 20, 30, 40}; values < 128 avoid sign-extension with as i64.
+  let c = get_color()
+  assert::equals((*c).r as i64, 10)
+  assert::equals((*c).g as i64, 20)
+  assert::equals((*c).b as i64, 30)
+  assert::equals((*c).a as i64, 40)
+
+test "non-handover pointer: C mutates color, Tin observes" =
+  let c = get_color()
+  set_color(c, 5, 15, 25, 35)
+  assert::equals((*c).r as i64, 5)
+  assert::equals((*c).g as i64, 15)
+  assert::equals((*c).b as i64, 25)
+  assert::equals((*c).a as i64, 35)
+  set_color(c, 10, 20, 30, 40)
+
+test "non-handover pointer: pass back to C verify" =
+  let c = get_color()
+  assert::equals(verify_color(c, 10, 20, 30, 40), true)
+
+// ---------------------------------------------------------------------------
+// Tests: union member inside a cLayoutStruct
+// ---------------------------------------------------------------------------
+
+union num_union = as_i i32 | as_f f32
+
+struct tagged_val =
+  val num_union
+  tag i32
+
+fn get_tagged() *tagged_val = extern("get_tagged")
+fn set_tagged_i(t *tagged_val, v i32) void = extern("set_tagged_i")
+
+test "union member in cLayoutStruct: initial field reads" =
+  let t = get_tagged()
+  assert::equals((*t).val.as_i, 42)
+  assert::equals((*t).tag, 7)
+
+test "union member in cLayoutStruct: C mutation visible" =
+  let t = get_tagged()
+  set_tagged_i(t, 99)
+  assert::equals((*t).val.as_i, 99)
+  set_tagged_i(t, 42)   // restore

@@ -54,3 +54,4 @@ directive with `-I /path/to/runtime` on the include path.
 | [arc-threads.md](arc-threads.md)               | ARC thread safety, spawn/channel/Future ownership transfer                                  |
 | [codegen-auto-yield.md](codegen-auto-yield.md) | Auto-yield at loop backedges, `{#no_autoyield}` opt-out                                     |
 | [fiber-panic.md](fiber-panic.md)               | Fiber panic lifecycle, `await` re-raise, `defer+recover` in async fns, codegen invariants   |
+| [clayout-structs.md](clayout-structs.md)       | cLayoutStructs wrapper+native layout, c_data_ptr, non-handover/handover/literal paths       |

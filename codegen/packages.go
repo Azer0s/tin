@@ -80,15 +80,32 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			continue
 		}
 
-		// If the return type doesn't need wrapping, expose C function directly.
-		// Fat-ptr parameters are coerced at call sites by coerce().
-		if cRetType.Equal(tinRetType) {
+		// Check if any parameter is a named Tin struct needing conversion.
+		needsStructConv := false
+
+		for _, p := range ft.Params {
+			if _, isStruct := cg.isNamedTinStruct(p); isStruct {
+				needsStructConv = true
+
+				break
+			}
+		}
+
+		if ft.RetType != nil {
+			if _, isStruct := cg.isNamedTinStruct(ft.RetType); isStruct {
+				needsStructConv = true
+			}
+		}
+
+		// If no conversion needed, expose C function directly.
+		if cRetType.Equal(tinRetType) && !needsStructConv {
 			cg.curScope.set(imp.LocalName, &scopeEntry{val: cFunc, isAlloc: false})
 
 			continue
 		}
 
-		// Return type needs wrapping: generate a small wrapper.
+		// Generate a wrapper that converts Tin structs to C-native layout
+		// and/or wraps the return type.
 		wrapperName := "__tinwrap_" + imp.LocalName
 
 		var wrapperFn *ir.Func
@@ -102,7 +119,20 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 		}
 
 		if wrapperFn == nil {
-			wrapperFn = cg.mod.NewFunc(wrapperName, tinRetType, cParams...)
+			// Wrapper params use Tin-level types for struct params so callers
+			// pass full Tin structs; the wrapper converts to native layout.
+			wrapperParams := make([]*ir.Param, len(cParams))
+
+			for i, p := range ft.Params {
+				if sName, isStruct := cg.isNamedTinStruct(p); isStruct {
+					tinType, _ := cg.tinTypeToLLVM(p)
+					wrapperParams[i] = ir.NewParam(sName, tinType)
+				} else {
+					wrapperParams[i] = cParams[i]
+				}
+			}
+
+			wrapperFn = cg.mod.NewFunc(wrapperName, tinRetType, wrapperParams...)
 			prevFn := cg.curFn
 			prevScope := cg.curScope
 			cg.curFn = wrapperFn
@@ -111,11 +141,51 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 
 			callArgs := make([]value.Value, len(wrapperFn.Params))
 			for i, p := range wrapperFn.Params {
-				callArgs[i] = p
+				if sName, isStruct := cg.isNamedTinStruct(ft.Params[i]); isStruct {
+					native, convErr := cg.wrapStructToExtern(entry, p, sName)
+					if convErr != nil {
+						cg.curFn = prevFn
+						cg.curScope = prevScope
+
+						return convErr
+					}
+					// If the C param was coerced to an integer (small
+					// all-integer struct), bitcast through memory.
+					if _, isInt := cParams[i].Type().(*irtypes.IntType); isInt {
+						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
+							a := entry.NewAlloca(nativeSt)
+							entry.NewStore(native, a)
+							ip := entry.NewBitCast(a, irtypes.NewPointer(cParams[i].Type()))
+							native = entry.NewLoad(cParams[i].Type(), ip)
+						}
+					}
+
+					callArgs[i] = native
+				} else {
+					callArgs[i] = p
+				}
 			}
 
-			raw := entry.NewCall(cFunc, callArgs...)
-			entry.NewRet(cg.wrapFromExtern(entry, raw, tinRetType, false))
+			if irtypes.IsVoid(cRetType) {
+				entry.NewCall(cFunc, callArgs...)
+				entry.NewRet(nil)
+			} else {
+				raw := entry.NewCall(cFunc, callArgs...)
+				if sName, isStruct := cg.isNamedTinStruct(ft.RetType); isStruct {
+					tinResult, convErr := cg.wrapNativeStructToTin(entry, raw, sName)
+					if convErr != nil {
+						cg.curFn = prevFn
+						cg.curScope = prevScope
+
+						return convErr
+					}
+
+					entry.NewRet(tinResult)
+				} else {
+					entry.NewRet(cg.wrapFromExtern(entry, raw, tinRetType, false))
+				}
+			}
+
 			cg.curFn = prevFn
 			cg.curScope = prevScope
 		}
@@ -824,6 +894,12 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
+	// Pre-pass 0.8: detect overloaded function names BEFORE Pass 1 so that extern
+	// overloads (e.g. fn splat(v f32) / fn splat(v f64)) get mangled IR names.
+	for name, flag := range scanOverloadedNames(prog.Stmts) {
+		cg.overloadedNames[name] = flag
+	}
+
 	// Pass 1: compile extern-backed functions first so their names are in scope
 	// before non-extern bodies reference them.
 	for _, node := range prog.Stmts {
@@ -833,6 +909,40 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 
 		prefixed := pkgName + "__" + fd.Name
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			prefixed = overloadMangledName(prefixed, sig)
+			// Register in overloads map so call-site overload resolution works.
+			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
+			if ptErr == nil {
+				alreadyHave := false
+
+				for _, existing := range cg.overloads[fd.Name] {
+					if existing.irName == prefixed {
+						alreadyHave = true
+
+						break
+					}
+				}
+
+				if !alreadyHave {
+					var retType irtypes.Type
+
+					if fd.RetType != nil {
+						retType, _ = cg.tinTypeToLLVM(fd.RetType)
+					}
+
+					cg.overloads[fd.Name] = append(cg.overloads[fd.Name], &overloadEntry{
+						irName:     prefixed,
+						paramSig:   sig,
+						paramTypes: paramTypes,
+						arity:      len(paramTypes),
+						returnType: retType,
+					})
+				}
+			}
+		}
+
 		if compErr := cg.genFuncDeclAs(fd, prefixed); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
@@ -1058,11 +1168,18 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				}
 
 				if !alreadyHave {
+					var retType irtypes.Type
+
+					if fd.RetType != nil {
+						retType, _ = cg.tinTypeToLLVM(fd.RetType)
+					}
+
 					cg.overloads[fd.Name] = append(cg.overloads[fd.Name], &overloadEntry{
 						irName:     irName,
 						paramSig:   sig,
 						paramTypes: paramTypes,
 						arity:      len(paramTypes),
+						returnType: retType,
 					})
 				}
 			}
@@ -1114,7 +1231,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			continue
 		}
 
-		constVal := cg.evalConstExpr(vd.Value)
+		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
 		if constVal == nil {
 			continue
 		}
@@ -1173,7 +1290,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			continue
 		}
 
-		constVal := cg.evalConstExpr(vd.Value)
+		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
 		if constVal == nil {
 			continue
 		}
@@ -1771,28 +1888,40 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 // actual argument LLVM types at a call site.
 func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[string]string {
 	subst := make(map[string]string)
+	// Track whether each bound type param came from a constant (literal) argument.
+	// Non-constant (runtime) bindings take priority over constant-derived ones.
+	fromConst := make(map[string]bool)
 
-	for i, p := range tmpl.Params {
-		if i >= len(argVals) {
-			break
+	// Two-pass: first bind from runtime expressions, then fill gaps from constants.
+	for pass := 0; pass < 2; pass++ {
+		for i, p := range tmpl.Params {
+			if i >= len(argVals) {
+				break
+			}
+
+			_, isConst := argVals[i].(constant.Constant)
+
+			if pass == 0 && isConst {
+				continue // first pass: skip constants
+			}
+
+			if pass == 1 && !isConst {
+				continue // second pass: skip non-constants
+			}
+
+			cg.inferTypeArgsFromParamPrio(p.Type, argVals[i].Type(), tmpl.TypeParams, subst, fromConst, isConst)
 		}
-
-		cg.inferTypeArgsFromParam(p.Type, argVals[i].Type(), tmpl.TypeParams, subst)
 	}
 
 	return subst
 }
 
-// inferTypeArgsFromParam recursively matches an AST parameter type against an
-// LLVM argument type to infer type-parameter bindings.  Handles:
-//   - Direct type-param: fn foo[t](x t)   arg: i64      -> t=i64
-//   - Pointer-to-param:  fn foo[t](x *t)  arg: *struct  -> t=struct
-//   - Generic struct:    fn foo[t](x S[t]) arg: S__i64   -> t=i64
-//   - Pointer-to-generic fn foo[t](x *S[t]) arg: *S__i64 -> t=i64
-func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtypes.Type, typeParams []string, subst map[string]string) {
+// inferTypeArgsFromParamPrio is like inferTypeArgsFromParam but respects a priority rule:
+// a binding derived from a runtime (non-constant) argument always wins over one derived
+// from a literal constant.
+func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType irtypes.Type, typeParams []string, subst map[string]string, fromConst map[string]bool, isConst bool) {
 	switch pt := paramType.(type) {
 	case *ast.SimpleType:
-		// Direct type-param binding: fn foo[t](x t)
 		for _, tp := range typeParams {
 			if pt.Name == tp {
 				name := cg.typeNameOf(argType)
@@ -1809,23 +1938,32 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 				}
 
 				if name != "" {
-					subst[tp] = name
+					// Non-const always wins; const only fills a gap or replaces another const.
+					// Additionally, string wins over __atom even if atom came from a non-const
+					// argument: atoms are coercible to string, so mixed (atom, string) calls
+					// should resolve t = string rather than t = __atom.
+					existingIsAtom := subst[tp] == "__atom"
+
+					currentIsString := name == "string"
+					if existing, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) || (existingIsAtom && currentIsString) {
+						_ = existing
+						subst[tp] = name
+						fromConst[tp] = isConst
+					}
 				}
 			}
 		}
 	case *ast.PointerType:
-		// Unwrap pointer on both sides and recurse.
 		if ptr, ok := argType.(*irtypes.PointerType); ok {
-			cg.inferTypeArgsFromParam(pt.Elem, ptr.ElemType, typeParams, subst)
+			cg.inferTypeArgsFromParamPrio(pt.Elem, ptr.ElemType, typeParams, subst, fromConst, isConst)
 		}
 	case *ast.GenericType:
-		// Generic struct: fn foo[t](x S[t])  arg LLVM type is "S__i64"
-		// Handles nested cases too: fn foo[t](x S[S[t]]) arg "S__S__i64" -> t=i64.
 		if len(pt.TypeParams) != 1 {
 			break
 		}
-		// Get the concrete LLVM struct name (e.g. "box__box__i64").
+
 		structName := ""
+
 		if st, ok2 := argType.(*irtypes.StructType); ok2 {
 			structName = st.Name()
 		}
@@ -1833,40 +1971,38 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		if structName == "" {
 			break
 		}
-		// Strip the outer "GenericTypeName__" prefix to get the inner concrete part.
+
 		prefix := pt.Name + "__"
 		if !strings.HasPrefix(structName, prefix) {
 			break
 		}
 
 		innerName := strings.TrimPrefix(structName, prefix)
-
 		innerParam := pt.TypeParams[0]
+
 		if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
-			// Direct type param: bind it to the inner concrete name.
 			for _, tp := range typeParams {
 				if simpleInner.Name == tp {
-					subst[tp] = innerName
+					if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
+						subst[tp] = innerName
+						fromConst[tp] = isConst
+					}
 
 					break
 				}
 			}
 		} else {
-			// Nested generic (e.g. S[S[t]]): look up the inner struct type and recurse.
 			if innerST, ok := cg.structTypes[innerName]; ok {
-				cg.inferTypeArgsFromParam(innerParam, innerST, typeParams, subst)
+				cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
 			}
 		}
 	case *ast.ArrayType:
-		// [t] → { t*, i64 } in LLVM.  Extract the element type from field 0.
 		if st, ok := argType.(*irtypes.StructType); ok && len(st.Fields) >= 2 {
 			if ptrField, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
-				cg.inferTypeArgsFromParam(pt.Elem, ptrField.ElemType, typeParams, subst)
+				cg.inferTypeArgsFromParamPrio(pt.Elem, ptrField.ElemType, typeParams, subst, fromConst, isConst)
 			}
 		}
 	case *ast.FuncType:
-		// fn(params...) retType - extract type-param bindings from return type and params.
-		// The LLVM representation is a fat function pointer {fn_ptr*, i8*}.
 		if !isFatFnPtr(argType) {
 			break
 		}
@@ -1877,19 +2013,27 @@ func (cg *CodeGen) inferTypeArgsFromParam(paramType ast.TypeExpr, argType irtype
 		if !ok {
 			break
 		}
-		// Match return type (LLVM env param is at index 0, so user params start at 1).
+
 		if pt.RetType != nil && innerFnType.RetType != nil {
-			cg.inferTypeArgsFromParam(pt.RetType, innerFnType.RetType, typeParams, subst)
+			cg.inferTypeArgsFromParamPrio(pt.RetType, innerFnType.RetType, typeParams, subst, fromConst, isConst)
 		}
-		// Match parameter types (skip env param at LLVM index 0).
+
 		for i, astParam := range pt.Params {
 			llIdx := i + 1
+
 			if llIdx < len(innerFnType.Params) {
-				cg.inferTypeArgsFromParam(astParam, innerFnType.Params[llIdx], typeParams, subst)
+				cg.inferTypeArgsFromParamPrio(astParam, innerFnType.Params[llIdx], typeParams, subst, fromConst, isConst)
 			}
 		}
 	}
 }
+
+// inferTypeArgsFromParam recursively matches an AST parameter type against an
+// LLVM argument type to infer type-parameter bindings.  Handles:
+//   - Direct type-param: fn foo[t](x t)   arg: i64      -> t=i64
+//   - Pointer-to-param:  fn foo[t](x *t)  arg: *struct  -> t=struct
+//   - Generic struct:    fn foo[t](x S[t]) arg: S__i64   -> t=i64
+//   - Pointer-to-generic fn foo[t](x *S[t]) arg: *S__i64 -> t=i64
 
 // extractBacktickBody returns the raw string from a BacktickLit node, or from
 // a ReturnStmt wrapping one. Used when emitting macros to .tin.mod.
@@ -2090,6 +2234,23 @@ func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
 //
 // This is used by Pass 4 of loadPackageFromSource so that complex package
 // constants such as limits::I128_MIN are propagated to callers.
+// evalConstExprTyped is like evalConstExpr but uses the declared Tin type as an
+// integer-type hint so that typed constants (e.g. const T u32 = 0xd76aa478)
+// are created with the correct LLVM bit-width rather than defaulting to i64.
+func (cg *CodeGen) evalConstExprTyped(expr ast.Node, declType ast.TypeExpr) constant.Constant {
+	if declType != nil {
+		if llType, err := cg.tinTypeToLLVM(declType); err == nil {
+			if intType, ok := llType.(*irtypes.IntType); ok {
+				if intTyp, bigVal := cg.evalConstExprInt(expr, intType); intTyp != nil && bigVal != nil {
+					return &constant.Int{Typ: intTyp, X: bigVal}
+				}
+			}
+		}
+	}
+
+	return cg.evalConstExpr(expr)
+}
+
 func (cg *CodeGen) evalConstExpr(expr ast.Node) constant.Constant {
 	// Delegate integer evaluation to the big.Int evaluator; float literals
 	// are handled directly since float constants are always concrete values.

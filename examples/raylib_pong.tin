@@ -1,0 +1,170 @@
+//!-lraylib
+
+use extern (
+  init_window("InitWindow")            as fn(i32, i32, string) void,
+  set_target_fps("SetTargetFPS")       as fn(i32) void,
+  window_should_close("WindowShouldClose") as fn() bool,
+  begin_drawing("BeginDrawing")        as fn() void,
+  end_drawing("EndDrawing")            as fn() void,
+  clear_background("ClearBackground")  as fn(color) void,
+  draw_rectangle("DrawRectangle")      as fn(i32, i32, i32, i32, color) void,
+  draw_circle("DrawCircle")            as fn(i32, i32, f32, color) void,
+  draw_line("DrawLine")                as fn(i32, i32, i32, i32, color) void,
+  draw_text("DrawText")                as fn(string, i32, i32, i32, color) void,
+  is_key_down("IsKeyDown")             as fn(i32) bool,
+  get_frame_time("GetFrameTime")       as fn() f32,
+  close_window("CloseWindow")          as fn() void
+)
+
+struct color =
+  r u8
+  g u8
+  b u8
+  a u8
+
+const BLACK  = color{0,   0,   0,   255}
+const WHITE  = color{255, 255, 255, 255}
+const GRAY   = color{70,  70,  70,  255}
+const YELLOW = color{230, 200, 50,  255}
+
+// Screen dimensions
+const SW i32 = 800
+const SH i32 = 600
+
+// Paddle geometry
+const PAD_W     i32 = 12
+const PAD_H     i32 = 80
+const PAD_HALF  f32 = 40.0
+const BALL_R    f32 = 8.0
+const WIN_SCORE i32 = 7
+
+// Speeds (pixels / second)
+const PLYR_SPD f32 = 330.0
+const BOT_SPD  f32 = 270.0   // slightly slower than player -> beatable
+
+// Keyboard codes (raylib)
+const KEY_W i32 = 87
+const KEY_S i32 = 83
+
+// Game state
+let player_y     f32  = 300.0
+let bot_y        f32  = 300.0
+let ball_x       f32  = 400.0
+let ball_y       f32  = 300.0
+let ball_vx      f32  = 230.0
+let ball_vy      f32  = 150.0
+let player_score i32  = 0
+let bot_score    i32  = 0
+let game_over    bool = false
+let winner       string = ""
+
+init_window(SW, SH, "Tin Pong")
+set_target_fps(60)
+defer close_window()
+
+for !window_should_close():
+  let dt f32 = get_frame_time()
+
+  if !game_over:
+    // Player input (W / S)
+    if is_key_down(KEY_W):
+      player_y = player_y - PLYR_SPD * dt
+    if is_key_down(KEY_S):
+      player_y = player_y + PLYR_SPD * dt
+
+    // Clamp player paddle inside screen
+    if player_y < PAD_HALF:
+      player_y = PAD_HALF
+    if player_y > 600.0 - PAD_HALF:
+      player_y = 600.0 - PAD_HALF
+
+    // Bot: track ball with limited speed
+    if bot_y < ball_y - 5.0:
+      bot_y = bot_y + BOT_SPD * dt
+    if bot_y > ball_y + 5.0:
+      bot_y = bot_y - BOT_SPD * dt
+
+    // Clamp bot paddle inside screen
+    if bot_y < PAD_HALF:
+      bot_y = PAD_HALF
+    if bot_y > 600.0 - PAD_HALF:
+      bot_y = 600.0 - PAD_HALF
+
+    //Move ball
+    ball_x = ball_x + ball_vx * dt
+    ball_y = ball_y + ball_vy * dt
+
+    // Bounce off top and bottom walls
+    if ball_y - BALL_R < 0.0:
+      ball_y = BALL_R
+      ball_vy = 0.0 - ball_vy
+    if ball_y + BALL_R > 600.0:
+      ball_y = 600.0 - BALL_R
+      ball_vy = 0.0 - ball_vy
+
+    // Bounce off player paddle  (x = 10 .. 22)
+    if ball_vx < 0.0 && ball_x - BALL_R <= 22.0:
+      let ptop f32 = player_y - PAD_HALF
+      let pbtm f32 = player_y + PAD_HALF
+      if ball_y >= ptop && ball_y <= pbtm:
+        ball_x  = 22.0 + BALL_R
+        ball_vx = 0.0 - ball_vx
+        ball_vy = (ball_y - player_y) / PAD_HALF * 280.0
+
+    // Bounce off bot paddle  (x = 778 .. 790)
+    if ball_vx > 0.0 && ball_x + BALL_R >= 778.0:
+      let btop f32 = bot_y - PAD_HALF
+      let bbtm f32 = bot_y + PAD_HALF
+      if ball_y >= btop && ball_y <= bbtm:
+        ball_x  = 778.0 - BALL_R
+        ball_vx = 0.0 - ball_vx
+        ball_vy = (ball_y - bot_y) / PAD_HALF * 280.0
+
+    // Bot scores: ball left the left edge
+    if ball_x < 0.0:
+      bot_score = bot_score + 1
+      ball_x  = 400.0
+      ball_y  = 300.0
+      ball_vx = 230.0
+      ball_vy = 150.0
+      if bot_score >= WIN_SCORE:
+        game_over = true
+        winner = "Bot wins!"
+
+    // Player scores: ball left the right edge
+    if ball_x > 800.0:
+      player_score = player_score + 1
+      ball_x  = 400.0
+      ball_y  = 300.0
+      ball_vx = -230.0
+      ball_vy = 150.0
+      if player_score >= WIN_SCORE:
+        game_over = true
+        winner = "You win!"
+
+  // Draw
+  begin_drawing()
+  clear_background(BLACK)
+
+  // Center divider
+  draw_line(400, 0, 400, 600, GRAY)
+
+  // Player paddle (left)
+  draw_rectangle(10,  (player_y - PAD_HALF) as i32, PAD_W, PAD_H, WHITE)
+
+  // Bot paddle (right)
+  draw_rectangle(778, (bot_y - PAD_HALF) as i32, PAD_W, PAD_H, WHITE)
+
+  // Ball
+  draw_circle(ball_x as i32, ball_y as i32, BALL_R, WHITE)
+
+  // Scores
+  draw_text("{player_score}", 310, 20, 40, WHITE)
+  draw_text("{bot_score}",    450, 20, 40, WHITE)
+
+  // Win overlay
+  if game_over:
+    draw_text(winner, 260, 260, 48, YELLOW)
+    draw_text("close window to exit", 240, 330, 22, GRAY)
+
+  end_drawing()

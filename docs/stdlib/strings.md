@@ -1,7 +1,11 @@
 # Strings
 
 `stdlib/strings` provides higher-level string manipulation functions. All
-functions are implemented in pure Tin with no C dependency.
+functions are implemented in pure Tin.
+
+Single-byte search operations (`index_of`, `count`, `contains`) use a
+16-byte-at-a-time SIMD fast path on x86-64 (SSE4.2) and AArch64 (NEON), with
+an automatic scalar fallback for any remaining tail bytes.
 
 ## Import
 

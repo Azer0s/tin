@@ -34,6 +34,20 @@ use str
 use errors
 use { Err } from errors
 
+// YamlSerializable is implemented by types that produce their own YAML encoding.
+// to_yaml must return a complete YAML scalar string.  The returned value is
+// embedded directly as the mapping value, so it must be a valid YAML scalar
+// (no trailing newline; quoting must be applied when necessary).
+trait YamlSerializable =
+  fn to_yaml(this YamlSerializable) string = virtual
+
+// YamlDeserializable is implemented by types that can populate themselves from
+// a YAML scalar string.  apply_yaml receives the unquoted scalar text and
+// modifies the receiver in place.  Returns true on success, false if the
+// string was not a valid representation.
+trait YamlDeserializable =
+  fn apply_yaml(this *YamlDeserializable, s string) bool = virtual
+
 // Kind identifies the type of a parsed YAML value.
 enum Kind =
   null_v
@@ -187,6 +201,14 @@ fn _yaml_encode_any[T](v any, depth i64, _unused T) string =
     return "{f:g}"
   if t == 'string:
     return yaml_string(v as string)
+  // YamlSerializable: delegate to the type's own encoding if it implements the trait.
+  let vtraits = traitof(v)
+  let vti i64 = 0
+  for vti < len(vtraits):
+    if vtraits[vti] == 'YamlSerializable:
+      let ser = v as YamlSerializable
+      return ser.to_yaml()
+    vti = vti + 1
   let fields = fieldnames(v)
   let nf = len(fields)
   if nf == 0:
@@ -231,6 +253,13 @@ fn encode[T](v T) string =
   if t == 'string:
     let sv T = v
     return yaml_string(sv as string) ++ "\n"
+  // YamlSerializable: delegate to the type's own YAML encoding.
+  let etraits = traitof(v)
+  let eti i64 = 0
+  for eti < len(etraits):
+    if etraits[eti] == 'YamlSerializable:
+      return _yaml_encode_any[T](v as any, 0, v) ++ "\n"
+    eti = eti + 1
   let fields = fieldnames(v)
   let nf = len(fields)
   if nf == 0:
@@ -243,7 +272,17 @@ fn encode[T](v T) string =
     if len(ykey) > 0:
       let fval = getfield(v, fname)
       let ft = typeof(fval)
-      if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
+      // Check if the field implements YamlSerializable (custom scalar encoding).
+      let ftraits = traitof(fval)
+      let fti i64 = 0
+      let fIsSerializable bool = false
+      for fti < len(ftraits):
+        if ftraits[fti] == 'YamlSerializable:
+          fIsSerializable = true
+        fti = fti + 1
+      if fIsSerializable:
+        out = out ++ ykey ++ ": " ++ _yaml_encode_any[T](fval, 0, v) ++ "\n"
+      else if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
         out = out ++ ykey ++ ": " ++ _yaml_encode_any[T](fval, 0, v) ++ "\n"
       else:
         let ffields = fieldnames(fval)
@@ -757,6 +796,17 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
         case Kind.string_v:
           if ftype == 'string:
             setfield(zero, fname, yval.sval)
+          else:
+            // YamlDeserializable: let the field type parse itself from the scalar.
+            let nfv = getfield(zero, fname)
+            let nft = traitof(nfv)
+            let nfi i64 = 0
+            for nfi < len(nft):
+              if nft[nfi] == 'YamlDeserializable:
+                let ndeser = nfv as YamlDeserializable
+                ndeser.apply_yaml(yval.sval)
+                setfield(zero, fname, nfv)
+              nfi = nfi + 1
         case Kind.object_v:
           let nested_zero = getfield(zero, fname)
           let nested = _parse_nested_any[T](nested_zero, yval, _unused)
@@ -808,6 +858,17 @@ fn parse[T](s string) (T, Err) =
           case Kind.string_v:
             if ftype == 'string:
               setfield(result, fname, yval.sval)
+            else:
+              // YamlDeserializable: let the field type parse itself from the scalar.
+              let fv = getfield(result, fname)
+              let ftraits = traitof(fv)
+              let fi i64 = 0
+              for fi < len(ftraits):
+                if ftraits[fi] == 'YamlDeserializable:
+                  let deser = fv as YamlDeserializable
+                  deser.apply_yaml(yval.sval)
+                  setfield(result, fname, fv)
+                fi = fi + 1
           case Kind.object_v:
             let zero_nested = getfield(result, fname)
             let populated = _parse_nested_any[T](zero_nested, yval, result)
@@ -819,4 +880,5 @@ fn parse[T](s string) (T, Err) =
 
 export {
   Kind, Value, parse, encode,
+  YamlSerializable, YamlDeserializable,
 } as yaml

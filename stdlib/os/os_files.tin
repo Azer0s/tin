@@ -24,7 +24,7 @@ fn read_file(path string) (string, errors::Err) =
   let buf = mem::malloc(sz + 1) as *byte
   let n = io::fread(buf as *void, 1, sz, f)
   io::fclose(f)
-  let s = _tin_str_from_bytes(buf, n)
+  let s = _tin_bytes_from_raw(buf, n) as string
   mem::free(buf as *void)
   return (s, nil)
 

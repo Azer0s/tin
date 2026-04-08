@@ -1,0 +1,146 @@
+// examples/test_simd.tin - tests for SIMD vector types and stdlib/simd operations.
+// Run with: tin test examples/test_simd.tin
+
+use assert
+use simd
+
+test "f32x4 literal and lane access" =
+  let v = f32x4{ 1.0, 2.0, 3.0, 4.0 }
+  assert::equals(v[0], 1.0)
+  assert::equals(v[1], 2.0)
+  assert::equals(v[2], 3.0)
+  assert::equals(v[3], 4.0)
+
+test "u32x4 literal and lane access" =
+  let v = u32x4{ 10, 20, 30, 40 }
+  assert::equals(v[0], 10)
+  assert::equals(v[3], 40)
+
+test "f32x4 addition" =
+  let a = f32x4{ 1.0, 2.0, 3.0, 4.0 }
+  let b = f32x4{ 0.5, 0.5, 0.5, 0.5 }
+  let s = a + b
+  assert::equals(s[0], 1.5)
+  assert::equals(s[3], 4.5)
+
+test "f32x4 subtraction" =
+  let a = f32x4{ 4.0, 3.0, 2.0, 1.0 }
+  let b = f32x4{ 1.0, 1.0, 1.0, 1.0 }
+  let d = a - b
+  assert::equals(d[0], 3.0)
+  assert::equals(d[3], 0.0)
+
+test "f32x4 multiplication" =
+  let a = f32x4{ 1.0, 2.0, 3.0, 4.0 }
+  let b = f32x4{ 2.0, 2.0, 2.0, 2.0 }
+  let p = a * b
+  assert::equals(p[0], 2.0)
+  assert::equals(p[3], 8.0)
+
+test "u32x4 addition" =
+  let a = u32x4{ 1, 2, 3, 4 }
+  let b = u32x4{ 4, 3, 2, 1 }
+  let s = a + b
+  assert::equals(s[0], 5)
+  assert::equals(s[1], 5)
+  assert::equals(s[2], 5)
+  assert::equals(s[3], 5)
+
+test "u32x4 bitwise and" =
+  let x = u32x4{ 0xFF, 0x0F, 0xF0, 0x00 }
+  let y = u32x4{ 0x0F, 0xFF, 0x00, 0xF0 }
+  let r = x & y
+  assert::equals(r[0], 0x0F)
+  assert::equals(r[1], 0x0F)
+  assert::equals(r[2], 0)
+  assert::equals(r[3], 0)
+
+test "u32x4 bitwise or" =
+  let x = u32x4{ 0xFF, 0x00, 0xF0, 0x0F }
+  let y = u32x4{ 0x00, 0xFF, 0x0F, 0xF0 }
+  let r = x | y
+  assert::equals(r[0], 0xFF)
+  assert::equals(r[1], 0xFF)
+  assert::equals(r[2], 0xFF)
+  assert::equals(r[3], 0xFF)
+
+test "u32x4 bitwise xor" =
+  let x = u32x4{ 0xFF, 0xFF, 0x00, 0x00 }
+  let y = u32x4{ 0xFF, 0x00, 0xFF, 0x00 }
+  let r = x ^ y
+  assert::equals(r[0], 0)
+  assert::equals(r[1], 0xFF)
+  assert::equals(r[2], 0xFF)
+  assert::equals(r[3], 0)
+
+test "splat u8 all lanes equal" =
+  let v = simd::splat(@'A')
+  assert::equals(v[0], @'A')
+  assert::equals(v[7], @'A')
+  assert::equals(v[15], @'A')
+
+test "splat f32 all lanes equal" =
+  let v f32x4 = simd::splat(3.0)
+  assert::equals(v[0], 3.0)
+  assert::equals(v[3], 3.0)
+
+test "splat u32 all lanes equal" =
+  let v u32x4 = simd::splat(42)
+  assert::equals(v[0], 42)
+  assert::equals(v[3], 42)
+
+test "cmpeq u8x16 all match gives 0xffff" =
+  let a = simd::splat(@'X')
+  let b = simd::splat(@'X')
+  let mask = simd::movemask(simd::cmpeq(a, b))
+  assert::equals(mask, 0xffff)
+
+test "cmpeq u8x16 no match gives 0" =
+  let a = simd::splat(@'A')
+  let b = simd::splat(@'B')
+  let mask = simd::movemask(simd::cmpeq(a, b))
+  assert::equals(mask, 0)
+
+test "cmpeq u8x16 partial match" =
+  let data = u8x16{ @'A', @'B', @'A', @'B', @'A', @'B', @'A', @'B',
+                    @'A', @'B', @'A', @'B', @'A', @'B', @'A', @'B' }
+  let needle = simd::splat(@'A')
+  let mask = simd::movemask(simd::cmpeq(data, needle))
+  // Lanes 0,2,4,6,8,10,12,14 match -> bits 0,2,4,6,8,10,12,14 set = 0x5555
+  assert::equals(mask, 0x5555)
+
+test "hadd u32x4 sum of ones" =
+  let v u32x4 = simd::splat(1)
+  assert::equals(simd::hadd(v), 4)
+
+test "hadd u32x4 sum of sequence" =
+  let v = u32x4{ 1, 2, 3, 4 }
+  assert::equals(simd::hadd(v), 10)
+
+test "hadd f32x4" =
+  let v = f32x4{ 1.0, 2.0, 3.0, 4.0 }
+  assert::equals(simd::hadd(v), 10.0)
+
+test "dot f32x4 unit vectors" =
+  let a = f32x4{ 1.0, 0.0, 0.0, 0.0 }
+  let b = f32x4{ 1.0, 0.0, 0.0, 0.0 }
+  assert::equals(simd::dot(a, b), 1.0)
+
+test "dot f32x4 general" =
+  let a = f32x4{ 1.0, 2.0, 3.0, 4.0 }
+  let b = f32x4{ 1.0, 1.0, 1.0, 1.0 }
+  assert::equals(simd::dot(a, b), 10.0)
+
+// -- Constant coercion tests --
+
+test "coercion: int literal matches u32 lane" =
+  let v = u32x4{ 42, 0, 0, 0 }
+  assert::equals(v[0], 42)
+
+test "coercion: float literal matches f32 lane" =
+  let v = f32x4{ 1.0, 0.0, 0.0, 0.0 }
+  assert::equals(v[0], 1.0)
+
+test "coercion: int literal matches i64 return value" =
+  fn ret42() i64 = return 42
+  assert::equals(ret42(), 42)

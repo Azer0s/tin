@@ -15,6 +15,34 @@ void _tin_echo_string(TinString s) {
     fflush(stdout);
 }
 
+// _tin_echo_string_escaped / _tin_print_string_escaped: print a string escaping
+// any byte >= 128 as \xNN so non-ASCII content is always human-readable.
+// _tin_echo_string_escaped appends a trailing newline; _tin_print_string_escaped
+// does not (used inside struct/array formatting).
+void _tin_echo_string_escaped(const char *ptr, int64_t len) {
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)ptr[i];
+        if (c >= 128) {
+            printf("\\x%02x", c);
+        } else {
+            putchar(c);
+        }
+    }
+    putchar('\n');
+    fflush(stdout);
+}
+
+void _tin_print_string_escaped(const char *ptr, int64_t len) {
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)ptr[i];
+        if (c >= 128) {
+            printf("\\x%02x", c);
+        } else {
+            putchar(c);
+        }
+    }
+}
+
 // Print without trailing newline (used for string interpolation pieces)
 void _tin_print_i64(int64_t v)  { printf("%lld",  (long long)v); }
 void _tin_print_u64(uint64_t v) { printf("%llu",  (unsigned long long)v); }

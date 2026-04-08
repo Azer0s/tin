@@ -42,9 +42,14 @@ Run/test flags:
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
 
 In-source directives (at the top of the .tin file):
-  //!-lNAME            link with libNAME
-  //!+file.c           compile C source file alongside the tin module
-  //!+file.c -- FLAGS  compile C source with extra clang flags
+  //!-lNAME                    link with libNAME
+  //!+file.c                   compile C source file alongside the tin module
+  //!+file.c -- FLAGS          compile C source with extra clang flags
+  //!+file.c [arch]            compile only on matching arch
+  //!+file.c [arch] -- FLAGS   arch-specific file with extra flags
+  //!-lNAME [arch]             arch-specific linker flag
+
+  Arch tokens: x86_64, aarch64, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
 `
 
 // cSource represents a C source file to compile alongside the tin module,
@@ -54,14 +59,75 @@ type cSource struct {
 	flags []string
 }
 
+// archMatches reports whether the optional [arch] qualifier in a directive
+// matches the current platform. qualifier is the raw bracket content, e.g.
+// "x86_64" or "aarch64,darwin". Returns true when qualifier is empty (no
+// constraint) or every comma-separated token matches.
+//
+// Supported tokens:
+//
+//	x86_64   - runtime.GOARCH == "amd64"
+//	aarch64  - runtime.GOARCH == "arm64"
+//	darwin   - runtime.GOOS  == "darwin"
+//	linux    - runtime.GOOS  == "linux"
+func archMatches(qualifier string) bool {
+	if qualifier == "" {
+		return true
+	}
+
+	for _, tok := range strings.Split(qualifier, ",") {
+		tok = strings.TrimSpace(tok)
+		switch tok {
+		case "x86_64":
+			if runtime.GOARCH != "amd64" {
+				return false
+			}
+		case "aarch64":
+			if runtime.GOARCH != "arm64" {
+				return false
+			}
+		case "darwin":
+			if runtime.GOOS != "darwin" {
+				return false
+			}
+		case "linux":
+			if runtime.GOOS != "linux" {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// extractArchQualifier splits a directive token (file path or linker flag) into
+// the base value and an optional arch qualifier. The qualifier is the content
+// inside trailing [...], e.g.:
+//
+//	"helper.c [x86_64]"  -> ("helper.c", "x86_64")
+//	"-lm [darwin]"       -> ("-lm", "darwin")
+//	"helper.c"           -> ("helper.c", "")
+func extractArchQualifier(s string) (base, qualifier string) {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndex(s, "["); i >= 0 && strings.HasSuffix(s, "]") {
+		qualifier = strings.TrimSpace(s[i+1 : len(s)-1])
+		base = strings.TrimSpace(s[:i])
+
+		return
+	}
+
+	return s, ""
+}
+
 // parseFileDirectives scans the leading lines of src for //! directives and
 // returns linker flags and C source files to compile in.
 //
-//	//!-lm            -> linker flag -lm
-//	//!-lraylib       -> linker flag -lraylib
-//	//!-L/usr/local/lib -> linker flag -L/usr/local/lib
-//	//!+helper.c      -> compile helper.c alongside the module
-//	//!+src/foo.c -- -DDEBUG -> compile src/foo.c with extra flag -DDEBUG
+//	//!-lm                         -> linker flag -lm
+//	//!-lm [x86_64]                -> linker flag -lm, x86_64 only
+//	//!+helper.c                   -> compile helper.c alongside the module
+//	//!+src/foo.c -- -DDEBUG       -> compile src/foo.c with extra flag -DDEBUG
+//	//!+src/foo.c [arch]           -> compile only on matching arch
+//	//!+src/foo.c [arch] -- FLAGS  -> arch-specific file with extra flags
 //
 // srcDir is the directory of the .tin file; relative C source paths are
 // resolved against it. Scanning stops at the first non-comment, non-blank line.
@@ -80,8 +146,15 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 
 			if strings.HasPrefix(rest, "+") {
 				spec := strings.TrimSpace(rest[1:])
+				// Split on " -- " to separate file+qualifier from extra flags.
 				parts := strings.SplitN(spec, " -- ", 2)
-				cpath := filepath.Join(srcDir, strings.TrimSpace(parts[0]))
+				fileAndQualifier, archQualifier := extractArchQualifier(strings.TrimSpace(parts[0]))
+
+				if !archMatches(archQualifier) {
+					continue
+				}
+
+				cpath := filepath.Join(srcDir, fileAndQualifier)
 
 				var extraFlags []string
 
@@ -115,7 +188,11 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 
 				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
 			} else {
-				linkerFlags = append(linkerFlags, rest)
+				// Linker flag: check for optional arch qualifier.
+				flagAndQualifier, archQualifier := extractArchQualifier(rest)
+				if archMatches(archQualifier) {
+					linkerFlags = append(linkerFlags, flagAndQualifier)
+				}
 			}
 
 			continue

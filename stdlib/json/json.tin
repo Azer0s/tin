@@ -38,6 +38,7 @@
 
 use str
 use errors
+use simd
 use { Err } from errors
 
 // JsonSerializable
@@ -326,6 +327,37 @@ struct Parser =
     return c
 
   fn skip_ws(this *Parser) =
+    // SIMD fast path: check 16 bytes at a time for whitespace.
+    // A byte is whitespace iff it equals ' ', '\t', '\n', or '\r'.
+    let sp  = simd::splat(@' ')
+    let tab = simd::splat(@'\t')
+    let nl  = simd::splat(@'\n')
+    let cr  = simd::splat(@'\r')
+    for this.pos + 16 <= this.len:
+      let chunk = simd::loadu(addr(this.src[this.pos]))
+      let is_sp  = simd::cmpeq(chunk, sp)
+      let is_tab = simd::cmpeq(chunk, tab)
+      let is_nl  = simd::cmpeq(chunk, nl)
+      let is_cr  = simd::cmpeq(chunk, cr)
+      let is_ws  = is_sp | is_tab | is_nl | is_cr
+      let mask   = simd::movemask(is_ws)
+      // mask has a 1-bit for each whitespace byte.  If all 16 bits are set,
+      // every byte in this chunk is whitespace - skip the whole chunk.
+      if mask == 0xffff:
+        this.pos = this.pos + 16
+      else if mask == 0:
+        // No whitespace in this chunk - we are done.
+        return
+      else:
+        // Mixed chunk: find first non-whitespace byte.
+        let i i64 = 0
+        for i < 16:
+          if (mask >> (i as u32)) & (1 as u32) == 0:
+            this.pos = this.pos + i
+            return
+          i = i + 1
+        this.pos = this.pos + 16
+    // Scalar tail.
     for this.pos < this.len:
       let c = this.src[this.pos]
 
@@ -338,27 +370,60 @@ struct Parser =
 fn parse_str(p *Parser) string =
   p.advance()  // consume opening "
   let result = ""
-  for !p.at_end():
-    let c = p.advance()
-
-    if c == @'\"':
-      break
-    let out byte = c
-
-    if c == @'\\':
-      if p.at_end():
-        break
-      let esc = p.advance()
-
-      if esc == @'\"':      out = @'\"'
-      else if esc == @'\\': out = @'\\'
-      else if esc == @'/':  out = @'/'
-      else if esc == @'n':  out = @'\n'
-      else if esc == @'r':  out = @'\r'
-      else if esc == @'t':  out = @'\t'
-      else:                 out = esc
-
-    result = result ++ out
+  let dq   = simd::splat(@'\"')
+  let bsl  = simd::splat(@'\\')
+  let done = false
+  for !done && !p.at_end():
+    // SIMD inner loop: scan 16 bytes at a time for '"' or '\'.
+    // When a special byte is found, copy the plain prefix and break to the
+    // scalar handler below (which consumes the special byte itself).
+    for p.pos + 16 <= p.len:
+      let chunk  = simd::loadu(addr(p.src[p.pos]))
+      let hit_dq = simd::cmpeq(chunk, dq)
+      let hit_bs = simd::cmpeq(chunk, bsl)
+      let hits   = hit_dq | hit_bs
+      let mask   = simd::movemask(hits)
+      if mask == 0:
+        // No special bytes in this chunk - append all 16.
+        let j i64 = 0
+        for j < 16:
+          result = result ++ p.src[p.pos + j]
+          j = j + 1
+        p.pos = p.pos + 16
+      else:
+        // Find first special byte, copy plain prefix, leave special for scalar.
+        let first i64 = 0
+        for first < 16:
+          if (mask >> (first as u32)) & (1 as u32) != 0:
+            break
+          first = first + 1
+        let j i64 = 0
+        for j < first:
+          result = result ++ p.src[p.pos + j]
+          j = j + 1
+        p.pos = p.pos + first
+        break  // exit SIMD loop; scalar below handles the special byte
+    // Scalar: handle one byte ('"', '\', or a tail byte when < 16 remain).
+    if !done && !p.at_end():
+      let c = p.advance()
+      if c == @'\"':
+        done = true
+      else:
+        let out byte = c
+        if c == @'\\':
+          if p.at_end():
+            done = true
+          else:
+            let esc = p.advance()
+            if esc == @'\"':      out = @'\"'
+            else if esc == @'\\': out = @'\\'
+            else if esc == @'/':  out = @'/'
+            else if esc == @'n':  out = @'\n'
+            else if esc == @'r':  out = @'\r'
+            else if esc == @'t':  out = @'\t'
+            else:                 out = esc
+        if !done:
+          result = result ++ out
   return result
 
 // parse_int_bytes parses an integer directly from raw bytes (p.src[start..p.pos]).

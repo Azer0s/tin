@@ -1,0 +1,33 @@
+// stdlib/hash/fnv.tin - FNV-1a hash (32-bit and 64-bit)
+//
+// FNV-1a is a fast non-cryptographic hash suitable for hashmaps.
+// Reference: http://www.isthe.com/chongo/tech/comp/fnv/
+
+fn fnv1a_32(data *u8, len i64) u32 =
+  let hash u32 = 2166136261
+  let i i64 = 0
+  for i < len:
+    hash = hash ^ (data[i] as u32)
+    hash = hash * 16777619
+    i = i + 1
+  return hash
+
+fn fnv1a_64(data *u8, len i64) u64 =
+  let hash u64 = 0xcbf29ce484222325  // FNV offset basis
+  let i i64 = 0
+  for i < len:
+    hash = hash ^ (data[i] as u64)
+    hash = hash * 0x00000100000001b3  // FNV prime
+    i = i + 1
+  return hash
+
+// Overloads: fnv1a_32(string) and fnv1a_64(string) - accept string directly.
+fn fnv1a_32(s string) u32 =
+  return fnv1a_32(addr(s[0]), len(s))
+
+fn fnv1a_64(s string) u64 =
+  return fnv1a_64(addr(s[0]), len(s))
+
+export {
+  fnv1a_32, fnv1a_64
+} as fnv

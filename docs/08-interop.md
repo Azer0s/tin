@@ -68,10 +68,12 @@ fn printf(format string, args ...) i32 =
 
 ## C struct interop
 
-When an extern function takes or returns a named Tin struct, the compiler
-**automatically** converts between Tin's internal layout (which includes a
-hidden type-ID field and optional vtable pointers) and the C-compatible layout
-(user fields only, no metadata).
+### By-value struct parameters and returns
+
+When an extern function takes or returns a named Tin struct **by value**, the
+compiler automatically converts between Tin's internal layout (type-ID + vtable
+pointers + user fields) and the C-compatible layout (user fields only, no
+metadata).
 
 ```c
 // helpers.c
@@ -99,18 +101,87 @@ echo p2.x               // 1.5
 ```
 
 The compiler generates a thin `__tinwrap_<name>` for each extern function
-with struct parameters or returns. The wrapper extracts user fields into a
-C-native struct (or reconstructs the full Tin struct on return). Nested
-structs are handled recursively. Structs larger than 16 bytes are passed
-`byval` per AMD64 calling conventions.
+with struct parameters or returns. The wrapper strips the Tin metadata when
+passing to C and reconstructs it on return. Nested structs are handled
+recursively. Structs larger than 16 bytes are passed `byval` per AMD64
+calling conventions.
 
-### Pointer-to-struct parameters
+### Pointer-to-struct parameters and returns
 
-Extern functions taking `*S` where `S` is a named Tin struct receive a
-pointer to the C-native layout:
+When an extern function's signature contains `*S` for a named struct `S`,
+the compiler uses a **wrapper + native layout** for `S`:
+
+| LLVM type   | Contents                                              |
+|-------------|-------------------------------------------------------|
+| `%S`        | `{ i32 type_id, vtable_ptrs..., i8* c_data_ptr }`     |
+| `%S.native` | `{ field_0_type, field_1_type, ... }` - C layout only |
+
+`c_data_ptr` holds a raw pointer to the live C memory. All field reads and
+writes go through `c_data_ptr`, so **C mutations to the original struct are
+immediately visible** through the Tin wrapper - no snapshot is taken.
+
+```c
+// scene.c
+typedef struct { float x; float y; float z; } vec3;
+static vec3 g_camera = {0.0f, 5.0f, 10.0f};
+
+vec3 *get_camera(void)              { return &g_camera; }
+void  move_camera(vec3 *c, float dz) { c->z += dz; }
+```
 
 ```rust
-fn c_init_point(dst *point2d, x f64, y f64) = extern("c_init_point")
+//!+scene.c
+
+struct vec3 =
+  x f32
+  y f32
+  z f32
+
+fn get_camera() *vec3 = extern("get_camera")
+fn move_camera(c *vec3, dz f32) void = extern("move_camera")
+
+let cam = get_camera()     // cam.c_data_ptr -> &g_camera
+echo (*cam).z              // 10.0
+move_camera(cam, 5.0)      // C mutates g_camera.z
+echo (*cam).z              // 15.0  (live view - no snapshot)
+```
+
+When passing `*S` back to C (e.g., as a parameter), the compiler automatically
+extracts `c_data_ptr` and passes the raw C pointer.
+
+#### Struct literals with pointer-to-struct types
+
+When you create a struct literal for a type that appears as `*S` in extern
+signatures, the compiler allocates a native data region alongside the wrapper
+and wires `c_data_ptr` to it:
+
+```rust
+let color = color{r: 255, g: 0, b: 128, a: 255}
+draw_rect(x, y, w, h, &color)   // passes raw C pointer to native fields
+```
+
+#### Nested pointer-to-struct types
+
+If a struct that appears as `*S` has fields of another struct type `T`, `T`
+is also treated as a pointer-to-struct type transitively. Field access on an
+embedded `T` value reads directly from its position in the C memory layout
+(no additional indirection).
+
+```rust
+struct inner_t =
+  x i64
+  y i64
+
+struct outer_t =
+  a inner_t
+  b inner_t
+  tag i64
+
+fn get_data() *outer_t = extern("get_data")
+
+let d = get_data()
+echo (*d).a.x   // direct read from C memory
+echo (*d).b.y   // nested field, still live view
 ```
 
 ---
@@ -186,36 +257,49 @@ let buf *char = malloc(10 * sizeof(*char)).(*char)
 
 ## Ownership handover (`#handover`)
 
-When a C function allocates memory and returns a pointer, Tin normally has no
-way to know that it should manage that memory. The `#handover` tag transfers
-ownership of the returned pointer into Tin's ARC system.
+By default, when an extern function returns `*S`, Tin stores the raw C pointer
+in `c_data_ptr` and does **not** take ownership - C still manages that memory.
+The `#handover` tag tells the compiler that C is transferring ownership of the
+returned pointer to Tin's ARC system.
 
 ```rust
 fn{#handover} make_buffer() *i8  = extern("make_buffer")
 fn{#handover} make_point()  *vec2 = extern("make_point")
 ```
 
-### What happens at the call site
+### Non-handover vs handover behaviour
 
-The compiler generates a thin wrapper around the C function. When the wrapper
-receives the raw pointer back from C, it:
+| Mode                   | What Tin does with the raw C pointer                                               |
+|------------------------|------------------------------------------------------------------------------------|
+| Non-handover (default) | Stores raw C pointer in `c_data_ptr`; C owns memory; mutations immediately visible |
+| `#handover`            | Copies C data into a fresh RC-managed block; C ptr freed; Tin owns the copy        |
 
-1. Uses `malloc_usable_size` to detect whether the pointer is a heap allocation.
-2. Copies the pointed-to data into a fresh RC-managed (`_tin_rc_alloc`) block.
-3. If the original was heap-allocated, frees it. If it was stack or static,
-   only the copy is kept (no free).
+Use non-handover for long-lived C objects (e.g., a scene graph node returned
+by a C engine). Use `#handover` when C allocates a temporary and expects the
+caller to own and free it.
+
+### What happens at the call site with `#handover`
+
+The compiler generates a wrapper around the C function. When it receives the
+raw pointer from C it:
+
+1. For `*StructName`: copies the native C struct data into an RC block that
+   also holds the Tin wrapper (`type_id`, `c_data_ptr` pointing to the
+   copied data). Frees the original C pointer if it was heap-allocated.
+2. For `*i8`/`string`: copies the C string into an RC block, builds a fat-ptr.
+3. For `*T` (primitive): copies the value, frees original if heap-allocated.
 
 The returned pointer is then treated exactly like any other RC-allocated Tin
 pointer: retained on assignment, released at scope exit.
 
 ### Supported return types
 
-| Return type     | Handover behaviour                                              |
-|-----------------|-----------------------------------------------------------------|
-| `*T` (primitive / struct pointer) | `_tin_ptr_handover`: copies element, frees original if malloc'd |
-| `*i8` / `*char` returned as `string` | `_tin_string_handover`: RC-ifies the `char*`, builds fat-ptr |
-| `*i8` / `*char` returned as `atom`   | Looks up/registers atom, then frees the `char*`              |
-| `*StructName`   | Loads native layout, adds `type_id`, stores in RC block, frees original |
+| Return type                          | Handover behaviour                                        |
+|--------------------------------------|-----------------------------------------------------------|
+| `*T` (primitive)                     | `_tin_ptr_handover`: copies value, frees original         |
+| `*StructName`                        | Copies native layout into RC block; c_data_ptr -> copy    |
+| `*i8` / `*char` returned as `string` | Copies string into RC block, builds fat-ptr               |
+| `*i8` / `*char` returned as `atom`   | Looks up/registers atom, then frees the `char*`           |
 
 `#handover` has no effect on non-pointer return types.
 

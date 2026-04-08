@@ -273,6 +273,35 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		}
 
 		return irtypes.FP128, nil
+
+	// SIMD vector types - 128-bit
+	case "u8x16", "i8x16":
+		return irtypes.NewVector(16, irtypes.I8), nil
+	case "u16x8", "i16x8":
+		return irtypes.NewVector(8, irtypes.I16), nil
+	case "u32x4", "i32x4":
+		return irtypes.NewVector(4, irtypes.I32), nil
+	case "u64x2", "i64x2":
+		return irtypes.NewVector(2, irtypes.I64), nil
+	case "f32x4":
+		return irtypes.NewVector(4, irtypes.Float), nil
+	case "f64x2":
+		return irtypes.NewVector(2, irtypes.Double), nil
+
+	// SIMD vector types - 256-bit
+	case "u8x32", "i8x32":
+		return irtypes.NewVector(32, irtypes.I8), nil
+	case "u16x16", "i16x16":
+		return irtypes.NewVector(16, irtypes.I16), nil
+	case "u32x8", "i32x8":
+		return irtypes.NewVector(8, irtypes.I32), nil
+	case "u64x4", "i64x4":
+		return irtypes.NewVector(4, irtypes.I64), nil
+	case "f32x8":
+		return irtypes.NewVector(8, irtypes.Float), nil
+	case "f64x4":
+		return irtypes.NewVector(4, irtypes.Double), nil
+
 	case "string":
 		// fat pointer: {i8*, i64}
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
@@ -431,6 +460,8 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 	case *irtypes.PointerType:
 		return 8, 8
 	case *irtypes.StructType:
+		isPacked := ty.Packed
+
 		var offset, maxAlign uint64
 
 		for _, f := range ty.Fields {
@@ -438,8 +469,8 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 			if fal > maxAlign {
 				maxAlign = fal
 			}
-			// Align current offset to field's alignment
-			if fal > 0 {
+			// Align current offset to field's alignment (skip for packed structs).
+			if fal > 0 && !isPacked {
 				offset = (offset + fal - 1) &^ (fal - 1)
 			}
 
@@ -449,14 +480,26 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 		if maxAlign == 0 {
 			maxAlign = 1
 		}
-		// Pad struct to its own alignment
-		offset = (offset + maxAlign - 1) &^ (maxAlign - 1)
+
+		if isPacked {
+			// Packed structs have no trailing alignment padding; alignment is 1.
+			maxAlign = 1
+		} else {
+			// Pad struct to its own alignment.
+			offset = (offset + maxAlign - 1) &^ (maxAlign - 1)
+		}
 
 		return offset, maxAlign
 	case *irtypes.ArrayType:
 		esz, eal := llvmTypeSizeAlign(ty.ElemType)
 
 		return ty.Len * esz, eal
+	case *irtypes.VectorType:
+		// SIMD vector: contiguous, no padding. Alignment = total size.
+		esz, _ := llvmTypeSizeAlign(ty.ElemType)
+		size := ty.Len * esz
+
+		return size, size
 	default:
 		return 8, 8
 	}
@@ -562,6 +605,12 @@ func isAtomType(t irtypes.Type) bool {
 
 // isStructType returns true if t is a named LLVM struct type (excluding the
 // special any, atom, and fat-pointer types so those use their own coercion paths).
+func isVectorType(t irtypes.Type) bool {
+	_, ok := t.(*irtypes.VectorType)
+
+	return ok
+}
+
 func isStructType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
 	if !ok || st.Name() == "" || st.Name() == "__atom" {
@@ -590,21 +639,60 @@ func (cg *CodeGen) vtableOffset(structName string) int {
 	return len(cg.structVtableOrder[structName])
 }
 
-// fieldIndex returns the LLVM field index for a named user field, accounting
-// for the leading i32 type_id and vtable pointer fields at the front.
-// Layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]
+// userFieldOffset returns the LLVM field index where user fields start,
+// accounting for the i32 type_id and vtable pointer fields.
+func (cg *CodeGen) userFieldOffset(structName string) int {
+	return 1 + cg.vtableOffset(structName)
+}
+
+// cDataPtrIndex returns the LLVM field index of the i8* c_data_ptr field
+// for cLayoutStructs (= userFieldOffset). Returns -1 for non-cLayout structs.
+func (cg *CodeGen) cDataPtrIndex(structName string) int {
+	if !cg.cLayoutStructs[structName] {
+		return -1
+	}
+
+	return cg.userFieldOffset(structName)
+}
+
+// fieldIndex returns the LLVM struct field index for a named user field.
+// For regular structs: returns userFieldOffset + i (wrapper GEP index).
+// For cLayoutStructs: returns the native field index (0-based within %S.native).
+//
+//	Callers that need a GEP must use emitFieldGEP/emitCLayoutFieldPtr instead.
+//
 // Returns -1 if not found.
 func (cg *CodeGen) fieldIndex(structName, fieldName string) int {
 	names, ok := cg.structFields[structName]
 	if !ok {
 		return -1
 	}
-	// +1 for the leading i32 type_id field
-	offset := 1 + cg.vtableOffset(structName)
 
 	for i, n := range names {
 		if n == fieldName {
-			return offset + i
+			if cg.cLayoutStructs[structName] {
+				return i // native 0-based index; use emitCLayoutFieldPtr for GEP
+			}
+
+			return cg.userFieldOffset(structName) + i
+		}
+	}
+
+	return -1
+}
+
+// nativeFieldIndex returns the 0-based index of a named field within %S.native.
+// Used for GEP through c_data_ptr in cLayoutStructs.
+// Returns -1 if not found.
+func (cg *CodeGen) nativeFieldIndex(structName, fieldName string) int {
+	names, ok := cg.structFields[structName]
+	if !ok {
+		return -1
+	}
+
+	for i, n := range names {
+		if n == fieldName {
+			return i
 		}
 	}
 

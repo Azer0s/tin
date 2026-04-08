@@ -35,7 +35,7 @@ use json
 fn _tin_now_ns_c() i64       = extern("_tin_now_ns_real")
 fn _tin_rfc3339_c(ns i64, buf *byte) i32 = extern("_tin_instant_rfc3339")
 fn _tin_from_rfc3339_c(s string, out *i64) i32 = extern("_tin_from_rfc3339")
-fn _tin_string_from_bytes_c(ptr *byte, len i64) string = extern("_tin_string_from_bytes")
+fn _tin_bytes_from_raw(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 
 // Duration
 
@@ -103,7 +103,7 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
   fn to_rfc3339(this Instant) string =
     let buf [byte; 32]
     let n = _tin_rfc3339_c(this.ns, &buf[0])
-    return _tin_string_from_bytes_c(&buf[0], n as i64)
+    return _tin_bytes_from_raw(&buf[0], n as i64) as string
 
   // to_json implements json::JsonSerializable.
   // Returns the Instant as a JSON-encoded RFC3339 string (with surrounding quotes).

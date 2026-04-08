@@ -66,13 +66,15 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 		elems[i] = cg.atomConstant(code).(*constant.Struct)
 	}
 
-	// Build a global { i64, [N x %__atom] } with an immortal RC header (-1).
-	// _tin_release(ptr) reads ptr-8 for the RC: the i64 field == -1 -> no-op.
+	// Build a global { i64, i64, [N x %__atom] } with an immortal RC header (-1, pad = 0).
+	// _tin_release(ptr) reads ptr-16 for the RC: the first i64 == -1 -> no-op.
+	// The second i64 is padding to match the 16-byte TinRCHdr layout.
 	arrType := irtypes.NewArray(uint64(n), elemType)
 	immortalRC := constant.NewInt(irtypes.I64, -1)
+	pad := constant.NewInt(irtypes.I64, 0)
 	atomArr := constant.NewArray(arrType, elems...)
-	hdrStructType := irtypes.NewStruct(irtypes.I64, arrType)
-	hdrConst := constant.NewStruct(hdrStructType, immortalRC, atomArr)
+	hdrStructType := irtypes.NewStruct(irtypes.I64, irtypes.I64, arrType)
+	hdrConst := constant.NewStruct(hdrStructType, immortalRC, pad, atomArr)
 
 	g := cg.mod.NewGlobalDef(fmt.Sprintf("atoms.%d", cg.strCount), hdrConst)
 	g.Immutable = true
@@ -80,11 +82,11 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
 	cg.strCount++
 
-	// GEP to skip the 8-byte ARC header: { i64, [N x %__atom] }* -> %__atom*
+	// GEP to skip the 16-byte ARC header: { i64, i64, [N x %__atom] }* -> %__atom*
 	i32_0 := constant.NewInt(irtypes.I32, 0)
-	i32_1 := constant.NewInt(irtypes.I32, 1)
+	i32_2 := constant.NewInt(irtypes.I32, 2)
 	i64_0 := constant.NewInt(irtypes.I64, 0)
-	dataGEP := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_1, i64_0)
+	dataGEP := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_2, i64_0)
 	dataGEP.InBounds = true
 
 	fatAlloca := block.NewAlloca(fat)
@@ -136,6 +138,12 @@ func llvmTypeName(t irtypes.Type) string {
 
 	if at, ok := t.(*irtypes.ArrayType); ok {
 		return "[" + llvmTypeName(at.ElemType) + "]"
+	}
+
+	if vt, ok := t.(*irtypes.VectorType); ok {
+		elemName := llvmTypeName(vt.ElemType)
+
+		return fmt.Sprintf("%sx%d", elemName, vt.Len)
 	}
 
 	if st, ok := t.(*irtypes.StructType); ok {
@@ -583,7 +591,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 
 		fieldNames := cg.structFields[sn]
 		fieldTypes := cg.structFieldLLVMTypes[sn]
-		vtableOff := cg.vtableOffset(sn)
+		userOff := cg.userFieldOffset(sn)
 
 		isTypeMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(typeID)))
 
@@ -594,6 +602,19 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 		// no-op, preventing a crash when a garbage pointer would otherwise be released.
 		dummyAlloca := block.NewAlloca(st)
 		block.NewStore(cg.zeroValue(st), dummyAlloca)
+		// For cLayoutStructs, the dummy must have a valid c_data_ptr (not NULL)
+		// so emitCLayoutFieldPtr doesn't dereference a null pointer.
+		if cg.cLayoutStructs[sn] {
+			if nativeSt := cg.nativeStructTypes[sn]; nativeSt != nil {
+				dummyNative := block.NewAlloca(nativeSt)
+				block.NewStore(cg.zeroValue(nativeSt), dummyNative)
+				cDataIdx := int64(cg.cDataPtrIndex(sn))
+				cdGep := block.NewGetElementPtr(st, dummyAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+				block.NewStore(block.NewBitCast(dummyNative, irtypes.I8Ptr), cdGep)
+			}
+		}
+
 		dummyI8Ptr := block.NewBitCast(dummyAlloca, irtypes.I8Ptr)
 		safeI8Ptr := block.NewSelect(isTypeMatch, dataI8Ptr, dummyI8Ptr)
 
@@ -607,9 +628,15 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 
 			isMatch := block.NewAnd(isTypeMatch, isFieldMatch)
 
-			fieldIdx := int64(1 + vtableOff + i)
-			fieldGep := block.NewGetElementPtr(st, structPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+			var fieldGep value.Value
+			if cg.cLayoutStructs[sn] {
+				fieldGep = cg.emitCLayoutFieldPtr(block, structPtr, sn, i)
+			} else {
+				fieldIdx := int64(userOff + i)
+				fieldGep = block.NewGetElementPtr(st, structPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+			}
+
 			fieldVal := block.NewLoad(fieldTypes[i], fieldGep)
 			boxed := cg.boxToAny(block, fieldVal)
 			allBoxes = append(allBoxes, boxed)
@@ -650,7 +677,11 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 
 	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
 	strcmp := cg.ensureStrcmp()
-	vtableOff := cg.vtableOffset(sn)
+	userOff := cg.userFieldOffset(sn)
+
+	// For cLayoutStructs, ensure c_data_ptr is valid in structAlloca.
+	// (It should already be set from the wrapper value; no extra setup needed
+	//  as genExpr/genVarDecl always stores a valid wrapper.)
 
 	resultAlloca := block.NewAlloca(anyType)
 	block.NewStore(zeroAny, resultAlloca)
@@ -661,9 +692,15 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 		cmp := block.NewCall(strcmp, fieldNamePtr, namePtr)
 		isMatch := block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
 
-		fieldIdx := int64(1 + vtableOff + i)
-		fieldGep := block.NewGetElementPtr(st, structAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+		var fieldGep value.Value
+		if cg.cLayoutStructs[sn] {
+			fieldGep = cg.emitCLayoutFieldPtr(block, structAlloca, sn, i)
+		} else {
+			fieldIdx := int64(userOff + i)
+			fieldGep = block.NewGetElementPtr(st, structAlloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+		}
+
 		fieldVal := block.NewLoad(fieldTypes[i], fieldGep)
 		boxed := cg.boxToAny(block, fieldVal)
 		boxes = append(boxes, boxed)
@@ -710,7 +747,7 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 
 		fieldNames := cg.structFields[sn]
 		fieldTypes := cg.structFieldLLVMTypes[sn]
-		vtableOff := cg.vtableOffset(sn)
+		userOff := cg.userFieldOffset(sn)
 
 		isTypeMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(typeID)))
 
@@ -718,6 +755,18 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 		// when a garbage pointer would otherwise be released).
 		dummyAlloca := block.NewAlloca(st)
 		block.NewStore(cg.zeroValue(st), dummyAlloca)
+		// For cLayoutStructs, wire a valid c_data_ptr in the dummy wrapper.
+		if cg.cLayoutStructs[sn] {
+			if nativeSt := cg.nativeStructTypes[sn]; nativeSt != nil {
+				dummyNative := block.NewAlloca(nativeSt)
+				block.NewStore(cg.zeroValue(nativeSt), dummyNative)
+				cDataIdx := int64(cg.cDataPtrIndex(sn))
+				cdGep := block.NewGetElementPtr(st, dummyAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+				block.NewStore(block.NewBitCast(dummyNative, irtypes.I8Ptr), cdGep)
+			}
+		}
+
 		dummyI8Ptr := block.NewBitCast(dummyAlloca, irtypes.I8Ptr)
 		safeI8Ptr := block.NewSelect(isTypeMatch, dataI8Ptr, dummyI8Ptr)
 
@@ -729,9 +778,14 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 			isFieldMatch := block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
 			isMatch := block.NewAnd(isTypeMatch, isFieldMatch)
 
-			fieldIdx := int64(1 + vtableOff + i)
-			fieldGep := block.NewGetElementPtr(st, structPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+			var fieldGep value.Value
+			if cg.cLayoutStructs[sn] {
+				fieldGep = cg.emitCLayoutFieldPtr(block, structPtr, sn, i)
+			} else {
+				fieldIdx := int64(userOff + i)
+				fieldGep = block.NewGetElementPtr(st, structPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+			}
 
 			coerced := cg.coerce(block, newVal, fieldTypes[i])
 			if !coerced.Type().Equal(fieldTypes[i]) {
@@ -804,16 +858,21 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 
 	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
 	strcmp := cg.ensureStrcmp()
-	vtableOff := cg.vtableOffset(sn)
+	userOff := cg.userFieldOffset(sn)
 
 	for i, fname := range fieldNames {
 		namePtr := cg.newGlobalString(fname)
 		cmp := block.NewCall(strcmp, fieldNamePtr, namePtr)
 		isMatch := block.NewICmp(enum.IPredEQ, cmp, constant.NewInt(irtypes.I32, 0))
 
-		fieldIdx := int64(1 + vtableOff + i)
-		fieldGep := block.NewGetElementPtr(st, structPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+		var fieldGep value.Value
+		if cg.cLayoutStructs[sn] {
+			fieldGep = cg.emitCLayoutFieldPtr(block, structPtr, sn, i)
+		} else {
+			fieldIdx := int64(userOff + i)
+			fieldGep = block.NewGetElementPtr(st, structPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+		}
 
 		coerced := cg.coerce(block, newVal, fieldTypes[i])
 		// Skip fields where the value type cannot be coerced to the field type.

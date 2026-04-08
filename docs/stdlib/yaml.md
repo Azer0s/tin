@@ -248,6 +248,52 @@ Typed parsing maps YAML scalars to Tin types as follows:
 
 ---
 
+---
+
+## Custom serialization
+
+### `YamlSerializable`
+
+Implement `YamlSerializable` to provide a custom YAML scalar encoding for a
+type. `to_yaml` must return a complete YAML scalar string (no trailing newline;
+apply quoting via `yaml_string` when necessary):
+
+```rust
+struct timestamp =
+  unix i64
+
+impl YamlSerializable for timestamp =
+  fn to_yaml(this YamlSerializable) string =
+    let ts = this as timestamp
+    return "{ts.unix}"   // plain integer scalar
+
+let t = timestamp{unix: 1700000000}
+yaml::encode(t)   // "1700000000\n"
+```
+
+### `YamlDeserializable`
+
+Implement `YamlDeserializable` to parse a custom type from a YAML scalar
+string. `apply_yaml` receives the unquoted scalar text and modifies the
+receiver in place. Returns `true` on success:
+
+```rust
+struct timestamp =
+  unix i64
+
+impl YamlDeserializable for timestamp =
+  fn apply_yaml(this *YamlDeserializable, s string) bool =
+    let ts = *this as *timestamp
+    ts.unix = str::atoi(s)
+    return true
+```
+
+When `yaml::parse[T]` encounters a YAML string for a field that is not `string`
+type, it checks whether the field type implements `YamlDeserializable` and calls
+`apply_yaml` with the scalar text.
+
+---
+
 ## Reference
 
 | Function / Method                  | Description                                                        |
@@ -261,3 +307,5 @@ Typed parsing maps YAML scalars to Tin types as follows:
 | `v.keys()`                         | All keys in a YAML object `Value`                                  |
 | `v.index(i)`                       | Element `i` of a YAML array `Value`                                |
 | `v.array_len()`                    | Number of elements in a YAML array `Value`                         |
+| `YamlSerializable.to_yaml()`       | Trait: custom YAML scalar encoding                                 |
+| `YamlDeserializable.apply_yaml()`  | Trait: custom YAML decoding from a scalar string                   |

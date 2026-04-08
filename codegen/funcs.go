@@ -49,11 +49,17 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 			return err
 		}
 
+		var retType irtypes.Type
+		if n.RetType != nil {
+			retType, _ = cg.tinTypeToLLVM(n.RetType)
+		}
+
 		cg.overloads[n.Name] = append(cg.overloads[n.Name], &overloadEntry{
 			irName:     mangledName,
 			paramSig:   sig,
 			paramTypes: paramTypes,
 			arity:      len(paramTypes),
+			returnType: retType,
 		})
 		irName = mangledName
 	}
@@ -113,11 +119,17 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 			return err
 		}
 
+		var retType irtypes.Type
+		if m.RetType != nil {
+			retType, _ = cg.tinTypeToLLVM(m.RetType)
+		}
+
 		cg.overloads[key] = append(cg.overloads[key], &overloadEntry{
 			irName:     mangledKey,
 			paramSig:   sig,
 			paramTypes: paramTypes,
 			arity:      len(paramTypes),
+			returnType: retType,
 		})
 
 		return cg.predeclareFuncAs(m, mangledKey)
@@ -180,6 +192,10 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	f := cg.mod.NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
+
+	if n.RetType != nil && isUnsignedTinType(n.RetType) {
+		cg.funcReturnUnsigned[irName] = true
+	}
 
 	if irName != scopeName {
 		// Register original Tin name so call sites resolve to the wrapper.
@@ -666,9 +682,9 @@ func isOrdType(typeName string) bool {
 }
 
 // isCompType reports whether typeName is a comparable type that supports ==, !=.
-// Covers all ordered types plus string and bool.
+// Covers all ordered types plus string, bool, and atoms.
 func isCompType(typeName string) bool {
-	return isOrdType(typeName) || typeName == "string" || typeName == "bool"
+	return isOrdType(typeName) || typeName == "string" || typeName == "bool" || typeName == "__atom"
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
@@ -758,6 +774,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 				break
 			}
+
+			// *S pointer params where S has a hidden C pointer field.
+			if cg.isExternPtrParam(p.Type) {
+				needsStructConv = true
+
+				break
+			}
 		}
 
 		if n.RetType != nil {
@@ -808,6 +831,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				if sName, isStruct := cg.isNamedTinStruct(tinParam.Type); isStruct {
 					tinType, _ := cg.tinTypeToLLVM(tinParam.Type)
 					wrapperParams[i] = ir.NewParam(sName, tinType)
+				} else if cg.isExternPtrParam(tinParam.Type) {
+					// *S param with hidden C pointer: wrapper takes Tin pointer type.
+					tinType, _ := cg.tinTypeToLLVM(tinParam.Type)
+					wrapperParams[i] = ir.NewParam(cp.Name(), tinType)
 				} else {
 					wrapperParams[i] = cp
 				}
@@ -848,9 +875,22 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						entry.NewStore(native, nativeAlloca)
 						ptr := entry.NewBitCast(nativeAlloca, irtypes.I8Ptr)
 						callArgs[i] = ir.NewArg(ptr, ir.Byval{Typ: cParamByval[i]})
+					} else if _, isInt := cParams[i].Type().(*irtypes.IntType); isInt {
+						// Small all-integer struct coerced to integer register.
+						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
+							a := entry.NewAlloca(nativeSt)
+							entry.NewStore(native, a)
+							ip := entry.NewBitCast(a, irtypes.NewPointer(cParams[i].Type()))
+							native = entry.NewLoad(cParams[i].Type(), ip)
+						}
+
+						callArgs[i] = native
 					} else {
 						callArgs[i] = native
 					}
+				} else if cg.isExternPtrParam(tinParam.Type) {
+					// *S param with hidden C pointer: extract it and pass to C.
+					callArgs[i] = cg.extractCSrcPtr(entry, p, tinParam.Type, cParams[i].Type())
 				} else {
 					callArgs[i] = p
 				}
@@ -889,14 +929,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			cg.curScope = prevScope
 		}
 
-		// #handover pointer returns: mark the wrapper as heap-promoting so that
+		// Pointer returns from extern wrappers: mark as heap-promoting so that
 		// genLetStmt sets isHeapOwned on the bound variable, enabling scope-exit
 		// release via emitHeapChainRelease / ensureStructPtrReleaseFn.
 		// String/fat-ptr returns are already RC-tracked; only raw pointer types need this.
-		if hasTag(n.Tags, "handover") {
-			if _, isPtr := retType.(*irtypes.PointerType); isPtr {
-				cg.heapPromotingFns[wrapperName] = true
-			}
+		// Applies to both #handover (C frees original) and non-handover borrow
+		// (Tin owns the RC copy).
+		if _, isPtr := retType.(*irtypes.PointerType); isPtr {
+			cg.heapPromotingFns[wrapperName] = true
+			cg.heapPromotingFns[scopeName] = true
 		}
 
 		cg.curScope.set(scopeName, &scopeEntry{val: wrapperFn, isAlloc: false})

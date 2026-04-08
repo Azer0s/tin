@@ -399,6 +399,22 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		}
 
 		dataPtr = block.NewBitCast(val, irtypes.I8Ptr)
+	case isVectorType(t):
+		// SIMD vector: heap-allocate the vector value (16-byte aligned due to
+		// the padded TinRCHdr, so 128-bit SIMD is safe).
+		canonName := llvmTypeName(t) // e.g. "f32x4", "i8x16"
+		if _, exists := cg.structTypeIDs[canonName]; !exists {
+			cg.structTypeIDs[canonName] = cg.nextTypeID
+			cg.nextTypeID++
+		}
+
+		tag = cg.structTypeIDs[canonName]
+		sz, _ := llvmTypeSizeAlign(t)
+		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, int64(sz)))
+		vPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
+		block.NewStore(val, vPtr)
+
+		dataPtr = rawPtr
 	default:
 		// Named struct or data type: heap-allocate so the any can escape.
 		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
@@ -698,7 +714,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 
 	// Unbox any to a scalar (int, float), struct, or string fat-ptr.
 	// Extract the data pointer from the any fat-ptr and load the value.
-	if isAnyType(src) && (irtypes.IsInt(target) || irtypes.IsFloat(target) || isStructType(target) || isStringType(target)) {
+	if isAnyType(src) && (irtypes.IsInt(target) || irtypes.IsFloat(target) || isStructType(target) || isStringType(target) || isVectorType(target)) {
 		anyType := anyFatPtrType()
 		anyAlloca := block.NewAlloca(anyType)
 		block.NewStore(val, anyAlloca)
@@ -813,6 +829,46 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 	}
 
 	return v
+}
+
+// checkConstantCompatible returns an error if a constant LLVM value cannot be
+// safely coerced to targetType.  Specifically it rejects:
+//   - A negative integer literal coercing to an unsigned integer type.
+//   - An integer literal that exceeds the maximum value for the target type.
+//
+// Float truncation (f64 → f32) is always allowed; precision loss is acceptable.
+func checkConstantCompatible(c constant.Constant, targetType irtypes.Type) error {
+	intConst, ok := c.(*constant.Int)
+	if !ok {
+		return nil // floats and other constants are fine
+	}
+
+	targetInt, ok2 := targetType.(*irtypes.IntType)
+	if !ok2 {
+		return nil // not an integer target
+	}
+
+	bits := int(targetInt.BitSize)
+	val := intConst.X // *big.Int
+
+	// Negative literal → unsigned type.
+	// In Tin, all unsigned widths are tracked as signed bit patterns in i8/i16/i32/i64.
+	// We detect "intended unsigned" by checking whether the source constant came from
+	// a clearly signed context.  For now we simply reject negative values coercing
+	// into any sub-64-bit integer (u8/u16/u32) where the result would truncate sign.
+	if val.Sign() < 0 && bits < 64 {
+		return fmt.Errorf("constant %s cannot be coerced to %d-bit integer: negative value would lose sign", val.String(), bits)
+	}
+
+	// Integer literal overflow check (positive values only).
+	if val.Sign() >= 0 && bits < 64 {
+		maxVal := (int64(1) << bits) - 1
+		if val.IsInt64() && val.Int64() > maxVal {
+			return fmt.Errorf("constant %s overflows %d-bit integer type", val.String(), bits)
+		}
+	}
+
+	return nil
 }
 
 func floatBits(t *irtypes.FloatType) int {

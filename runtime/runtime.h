@@ -19,7 +19,7 @@ typedef struct { const char *ptr; int64_t len; } TinString;
 typedef struct { void *ptr; int64_t len; } TinSlice;
 
 // ARC header prepended before every heap-managed block
-typedef struct { int64_t rc; } TinRCHdr;
+typedef struct { int64_t rc; int64_t _pad; } TinRCHdr;  // 16 bytes for 128-bit SIMD alignment
 
 // Defer chain node - allocated on the registering frame's stack
 typedef struct TinDeferEntry {
@@ -50,6 +50,8 @@ void _tin_echo_f64(double v);
 void _tin_echo_bool(int32_t v);
 void _tin_echo_char(uint8_t v);
 void _tin_echo_string(TinString s);
+void _tin_echo_string_escaped(const char *ptr, int64_t len);
+void _tin_print_string_escaped(const char *ptr, int64_t len);
 void _tin_print_i64(int64_t v);
 void _tin_print_u64(uint64_t v);
 void _tin_print_f64(double v);

@@ -206,6 +206,9 @@ func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
 		return false
 	}
 
+	// Track variables bound to heap-promoting calls: let x = heap_fn()
+	heapVars := map[string]bool{}
+
 	found := false
 
 	var walk func(ast.Node)
@@ -216,12 +219,20 @@ func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
 		}
 
 		switch n := node.(type) {
+		case *ast.VarDecl:
+			// let x = heap_fn() → track x as a heap variable.
+			if n.Value != nil && isHeapExpr(n.Value) {
+				heapVars[n.Name] = true
+			}
 		case *ast.ReturnStmt:
 			if n.Value == nil {
 				return
 			}
 
 			if isHeapExpr(n.Value) {
+				found = true
+			} else if id, isID := n.Value.(*ast.Identifier); isID && heapVars[id.Name] {
+				// return x where x was bound to a heap-promoting call.
 				found = true
 			} else if tl, isTuple := n.Value.(*ast.TupleLit); isTuple {
 				for _, elem := range tl.Elems {
@@ -345,7 +356,7 @@ func (cg *CodeGen) genLatePromotedReturn(block *ir.Block, s *ast.ReturnStmt, pro
 		}
 
 		concreteName := structType.Name()
-		userOff := 1 + cg.vtableOffset(concreteName)
+		userOff := cg.userFieldOffset(concreteName)
 
 		// Phase 1: latch non-promoted elements BEFORE defers run.
 		type latched struct {
@@ -512,10 +523,47 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 		stackVal := block.NewLoad(elemType, entry.val)
 
 		// Allocate ARC block and copy the value into it.
+		// For cLayoutStructs, also allocate overflow space for the native data
+		// so that c_data_ptr does not dangle after the stack frame exits.
 		sz := cg.llvmSizeOf(block, elemType)
+		sName := cg.typeNameOf(elemType)
+		isCLayout := sName != "" && cg.cLayoutStructs[sName]
+
+		var nativeSt *irtypes.StructType
+
+		var nativeSize value.Value
+
+		if isCLayout {
+			nativeSt = cg.nativeStructTypes[sName]
+			if nativeSt != nil {
+				nativeSize = cg.llvmSizeOf(block, nativeSt)
+				sz = block.NewAdd(sz, nativeSize)
+			} else {
+				isCLayout = false
+			}
+		}
+
 		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
 		heapPtr := block.NewBitCast(heapI8, irtypes.NewPointer(elemType))
 		block.NewStore(stackVal, heapPtr)
+
+		if isCLayout {
+			// Load c_data_ptr from the just-copied wrapper.
+			tinSt := cg.structTypes[sName]
+			cDataIdx := int64(cg.cDataPtrIndex(sName))
+			cDataGep := block.NewGetElementPtr(tinSt, heapPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+			oldCDataPtr := block.NewLoad(irtypes.I8Ptr, cDataGep)
+
+			// Overflow area sits just past the wrapper in the same RC block.
+			overflowGEP := block.NewGetElementPtr(tinSt, heapPtr, constant.NewInt(irtypes.I64, 1))
+			overflowI8 := block.NewBitCast(overflowGEP, irtypes.I8Ptr)
+
+			// Copy native data from the old location (stack alloca or C pointer)
+			// into the overflow area, then update c_data_ptr.
+			block.NewCall(cg.ensureMemcpy(), overflowI8, oldCDataPtr, nativeSize, constant.NewInt(irtypes.I1, 0))
+			block.NewStore(overflowI8, cDataGep)
+		}
 
 		// Retain ARC sub-fields (strings, arrays) so scope cleanup on the stack
 		// copy is balanced.  For plain i64/pointers this is a no-op.

@@ -1,0 +1,202 @@
+// packed_struct.tin - Tests for {#packed} struct tag.
+//
+// Two use cases:
+//   1. cLayoutStruct + packed: Tin wrapper around a C __attribute__((packed)) struct.
+//      The %S.native LLVM type is packed; the wrapper keeps standard ABI alignment.
+//   2. Regular Tin packed struct: fields are laid out contiguously, no padding.
+//
+// Run with: tin test examples/packed_struct.tin
+
+//!+packed_struct.c
+
+use assert
+
+// ---------------------------------------------------------------------------
+// Packed cLayoutStruct declarations (must match packed_struct.c layout)
+// ---------------------------------------------------------------------------
+
+struct {#packed} packed_hdr =
+  tag   u8
+  value u32
+
+struct {#packed} packed_msg =
+  kind  u8
+  hdr   packed_hdr
+  extra u16
+
+fn get_hdr() *packed_hdr                                = extern("get_hdr")
+fn set_hdr(h *packed_hdr, tag u8, value u32) void       = extern("set_hdr")
+fn get_msg() *packed_msg                                = extern("get_msg")
+fn verify_hdr(h *packed_hdr, tag u8, value u32) bool    = extern("verify_hdr")
+fn sizeof_packed_hdr() i32                              = extern("sizeof_packed_hdr")
+fn sizeof_packed_msg() i32                              = extern("sizeof_packed_msg")
+
+// ---------------------------------------------------------------------------
+// Packed cLayoutStruct tests
+// ---------------------------------------------------------------------------
+
+test "packed cLayoutStruct: C reports correct packed sizeof" =
+  // packed_hdr = u8 + u32 = 5 bytes (no padding between tag and value).
+  // Without __attribute__((packed)) it would be 8 (4-byte alignment padding).
+  assert::equals(sizeof_packed_hdr() as i64, 5)
+  assert::equals(sizeof_packed_msg() as i64, 8)
+
+test "packed cLayoutStruct: field reads match C static initializer" =
+  let h = get_hdr()
+  assert::equals((*h).tag as i64, 1)
+  assert::equals((*h).value as i64, 0x12345678)
+
+test "packed cLayoutStruct: field write via C setter is visible on re-read" =
+  let h = get_hdr()
+  set_hdr(h, 7, 0xABCD)
+  assert::equals((*h).tag as i64, 7)
+  assert::equals((*h).value as i64, 0xABCD)
+  // Restore global for subsequent tests.
+  set_hdr(h, 1, 0x12345678)
+
+test "packed cLayoutStruct: verify_hdr confirms field values after set_hdr" =
+  let h = get_hdr()
+  set_hdr(h, 42, 999)
+  assert::equals(verify_hdr(h, 42, 999), true)
+  assert::equals(verify_hdr(h, 1, 0), false)
+  set_hdr(h, 1, 0x12345678)
+
+test "packed cLayoutStruct: nested packed struct field access" =
+  let m = get_msg()
+  assert::equals((*m).kind as i64, 2)
+  assert::equals((*m).hdr.tag as i64, 3)
+  assert::equals((*m).hdr.value as i64, 99999)
+  assert::equals((*m).extra as i64, 1234)
+
+// ---------------------------------------------------------------------------
+// Regular (non-cLayout) packed Tin struct
+// ---------------------------------------------------------------------------
+
+struct {#packed} tiny_rec =
+  a u8
+  b u16
+  c u8
+
+test "packed Tin struct: sizeof is smaller with packing" =
+  // tiny_rec layout with {#packed}: i32 type_id(4) + u8(1) + u16(2) + u8(1) = 8 bytes.
+  // Without packing: 4 + 1 + pad(1) + 2 + 1 + pad(1) = 10 bytes (u16 alignment).
+  // So sizeof(tiny_rec) = 8 confirms packing is applied.
+  let s i64 = sizeof(tiny_rec)
+  assert::equals(s, 8)
+
+test "packed Tin struct: field reads and writes" =
+  let r = tiny_rec{ a: 10, b: 1000, c: 42 }
+  assert::equals(r.a as i64, 10)
+  assert::equals(r.b as i64, 1000)
+  assert::equals(r.c as i64, 42)
+
+// ---------------------------------------------------------------------------
+// Reflection: getfield / setfield on a regular packed struct
+// ---------------------------------------------------------------------------
+
+test "packed Tin struct: getfield reads correct field values" =
+  let r = tiny_rec{ a: 3, b: 500, c: 7 }
+  let va = getfield(r, "a") as u8
+  let vb = getfield(r, "b") as u16
+  assert::equals(va as i64, 3)
+  assert::equals(vb as i64, 500)
+
+test "packed Tin struct: setfield updates field correctly" =
+  let r = tiny_rec{ a: 1, b: 2, c: 3 }
+  setfield(r, "a", 99 as u8)
+  assert::equals(r.a as i64, 99)
+  setfield(r, "b", 8888 as u16)
+  assert::equals(r.b as i64, 8888)
+
+// ---------------------------------------------------------------------------
+// Dynamic dispatch: packed struct implementing a trait
+// ---------------------------------------------------------------------------
+
+trait measurable =
+  fn measure(this measurable) i64 = virtual
+
+struct {#packed} sensor(measurable) =
+  lo u8
+  hi u16
+
+  fn measure(this sensor) i64 =
+    return (this.hi as i64) * 256 + (this.lo as i64)
+
+fn call_measure(s measurable) i64 =
+  return s.measure()
+
+test "packed struct dynamic dispatch: vtable lookup returns correct value" =
+  let s = sensor{ lo: 2, hi: 3 }
+  assert::equals(s.measure(), 3 * 256 + 2)
+  assert::equals(call_measure(s), 3 * 256 + 2)
+
+// ---------------------------------------------------------------------------
+// Boxing: packed struct assigned to trait variable (fat pointer)
+// ---------------------------------------------------------------------------
+
+test "packed struct trait variable: assign and dispatch" =
+  // Assigning a concrete packed struct to a trait variable creates a fat pointer
+  // {i8* data, vtable*} where data points to a stack alloca of the struct.
+  let s = sensor{ lo: 5, hi: 7 }
+  let m measurable = s
+  assert::equals(m.measure(), 7 * 256 + 5)
+
+test "packed struct trait variable: passed as trait parameter" =
+  let s = sensor{ lo: 10, hi: 20 }
+  assert::equals(call_measure(s), 20 * 256 + 10)
+
+// ---------------------------------------------------------------------------
+// Boxing to any: packed struct round-trip through any
+// ---------------------------------------------------------------------------
+
+test "packed struct boxed to any: unbox and read fields" =
+  let s = sensor{ lo: 4, hi: 9 }
+  let v any = s as any
+  let s2 = v as sensor
+  assert::equals(s2.lo as i64, 4)
+  assert::equals(s2.hi as i64, 9)
+  assert::equals(s2.measure(), 9 * 256 + 4)
+
+test "packed Tin struct boxed to any: unbox tiny_rec" =
+  let r = tiny_rec{ a: 11, b: 222, c: 33 }
+  let v any = r as any
+  let r2 = v as tiny_rec
+  assert::equals(r2.a as i64, 11)
+  assert::equals(r2.b as i64, 222)
+  assert::equals(r2.c as i64, 33)
+
+// ---------------------------------------------------------------------------
+// Echo/print: packed struct echo dispatches without crashing
+// ---------------------------------------------------------------------------
+
+fn sum_sensor(s sensor) i64 =
+  return s.measure()
+
+test "packed struct echo: direct echo of packed struct does not crash" =
+  // We cannot easily assert echo output in tests; just verify it runs without
+  // crashing and that field values are unchanged afterward.
+  let s = sensor{ lo: 1, hi: 2 }
+  echo s
+  // Fields still intact after echo.
+  assert::equals(s.lo as i64, 1)
+  assert::equals(s.hi as i64, 2)
+
+test "packed struct echo: echo tiny_rec does not crash" =
+  let r = tiny_rec{ a: 5, b: 100, c: 7 }
+  echo r
+  assert::equals(r.a as i64, 5)
+  assert::equals(r.b as i64, 100)
+
+// ---------------------------------------------------------------------------
+// typeof / traitof on packed struct
+// ---------------------------------------------------------------------------
+
+test "packed struct typeof returns struct name" =
+  let s = sensor{ lo: 0, hi: 0 }
+  assert::equals(typeof(s), "sensor")
+
+test "packed struct traitof lists implemented traits" =
+  let s = sensor{ lo: 0, hi: 0 }
+  let traits = traitof(s)
+  assert::equals(traits.len, 1)
+  assert::equals(traits[0], "measurable")

@@ -80,14 +80,28 @@ func (cg *CodeGen) applyPatternChecks(
 
 		var fieldType irtypes.Type
 
-		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
-			fieldType = st.Fields[fieldIdx]
-		} else {
-			fieldType = irtypes.I64
-		}
+		var gep value.Value
 
-		gep := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		if cg.cLayoutStructs[structName] {
+			// fieldIdx is native 0-based; access through c_data_ptr.
+			nativeSt := cg.nativeStructTypes[structName]
+			if nativeSt != nil && fieldIdx < len(nativeSt.Fields) {
+				fieldType = nativeSt.Fields[fieldIdx]
+			} else {
+				fieldType = irtypes.I64
+			}
+
+			gep = cg.emitCLayoutFieldPtr(checkBlock, scrutAlloca, structName, fieldIdx)
+		} else {
+			if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+				fieldType = st.Fields[fieldIdx]
+			} else {
+				fieldType = irtypes.I64
+			}
+
+			gep = checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		}
 
 		// Nested struct pattern: recurse.
 		if nested, ok := field.Literal.(*ast.StructPattern); ok {
@@ -159,16 +173,30 @@ func (cg *CodeGen) bindPatternFree(
 			return fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
 		}
 
-		var fieldType irtypes.Type
+		var (
+			fieldType irtypes.Type
+			gep       value.Value
+		)
 
-		if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
-			fieldType = st.Fields[fieldIdx]
+		if cg.cLayoutStructs[structName] {
+			nativeSt := cg.nativeStructTypes[structName]
+			if nativeSt != nil && fieldIdx < len(nativeSt.Fields) {
+				fieldType = nativeSt.Fields[fieldIdx]
+			} else {
+				fieldType = irtypes.I64
+			}
+
+			gep = cg.emitCLayoutFieldPtr(block, scrutAlloca, structName, fieldIdx)
 		} else {
-			fieldType = irtypes.I64
-		}
+			if st, ok := scrutType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
+				fieldType = st.Fields[fieldIdx]
+			} else {
+				fieldType = irtypes.I64
+			}
 
-		gep := block.NewGetElementPtr(scrutType, scrutAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			gep = block.NewGetElementPtr(scrutType, scrutAlloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		}
 
 		// Nested struct pattern: recurse into sub-fields.
 		if nested, ok := field.Literal.(*ast.StructPattern); ok {

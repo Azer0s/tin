@@ -137,3 +137,41 @@ test "parse[T] empty object gives zero struct" =
   let (p, _) = json::parse[point]("\{\}")
   assert::equals(p.x, 0)
   assert::equals(p.y, 0)
+
+// JsonSerializable / JsonDeserializable
+
+use strings
+
+struct jtag(JsonSerializable, JsonDeserializable) =
+  value string
+
+  fn to_json(this jtag) string =
+    return "\"{this.value}\""
+
+  fn apply_json(this *jtag, s string) bool =
+    this.value = s
+    return true
+
+struct jtagged_doc =
+  label jtag   @"json:label"
+  count i64    @"json:count"
+
+test "JsonSerializable custom scalar encoding" =
+  let t = jtag{value: "hello"}
+  assert::equals(json::encode(t), "\"hello\"")
+
+test "JsonSerializable in struct field encodes correctly" =
+  let doc = jtagged_doc{label: jtag{value: "mytag"}, count: 5}
+  let enc = json::encode(doc)
+  assert::ok(strings::contains(enc, "\"label\":\"mytag\""))
+  assert::ok(strings::contains(enc, "\"count\":5"))
+
+test "JsonDeserializable populates field from JSON string" =
+  let (doc, _) = json::parse[jtagged_doc]("\{\"label\":\"parsed\",\"count\":3\}")
+  assert::equals(doc.label.value, "parsed")
+  assert::equals(doc.count, 3)
+
+test "JsonDeserializable missing field leaves zero value" =
+  let (doc, _) = json::parse[jtagged_doc]("\{\"count\":7\}")
+  assert::equals(doc.label.value, "")
+  assert::equals(doc.count, 7)

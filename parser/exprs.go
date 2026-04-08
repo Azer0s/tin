@@ -672,7 +672,16 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.INT_LIT:
 		p.advance()
 
-		v, _ := strconv.ParseInt(tok.Literal, 0, 64)
+		v, err := strconv.ParseInt(tok.Literal, 0, 64)
+		if err != nil {
+			// Large hex/decimal literals that exceed max int64 (e.g. u64 constants
+			// like 0xffffffffffffffff): parse as uint64 and reinterpret bits as int64.
+			// The LLVM IR constant stores the bits unchanged; signedness is determined
+			// by the declared variable type, not the literal.
+			if uv, uerr := strconv.ParseUint(tok.Literal, 0, 64); uerr == nil {
+				v = int64(uv)
+			}
+		}
 
 		return &ast.IntLit{Value: v}, nil
 
@@ -712,7 +721,12 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		case lexer.INT_LIT:
 			p.advance()
 
-			v, _ := strconv.ParseInt(next.Literal, 0, 64)
+			v, err := strconv.ParseInt(next.Literal, 0, 64)
+			if err != nil {
+				if uv, uerr := strconv.ParseUint(next.Literal, 0, 64); uerr == nil {
+					v = int64(uv)
+				}
+			}
 
 			return &ast.IntLit{Value: v}, nil
 		default:
@@ -1159,12 +1173,50 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 	p.advance() // consume [
 	p.skipWhitespace()
 
-	var elems []ast.Node
+	// Empty array.
+	if p.check(lexer.RBRACKET) {
+		p.advance()
+
+		return &ast.ArrayLit{Elems: nil}, nil
+	}
+
+	// Parse first element.
+	first, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	// Fill syntax: [value; count] - fill array with `count` copies of `value`.
+	if p.check(lexer.SEMI) {
+		p.advance() // consume ;
+
+		countTok, err2 := p.expect(lexer.INT_LIT)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		count, _ := strconv.Atoi(countTok.Literal)
+
+		if _, err3 := p.expect(lexer.RBRACKET); err3 != nil {
+			return nil, err3
+		}
+
+		return &ast.ArrayFillLit{Value: first, Count: count}, nil
+	}
+
+	// Regular array literal: collect remaining elements.
+	elems := []ast.Node{first}
+
+	if p.check(lexer.COMMA) {
+		p.advance()
+	}
+
+	p.skipWhitespace()
 
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
-		elem, err := p.parseExpr()
-		if err != nil {
-			return nil, err
+		elem, err2 := p.parseExpr()
+		if err2 != nil {
+			return nil, err2
 		}
 
 		elems = append(elems, elem)

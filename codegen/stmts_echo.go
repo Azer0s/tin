@@ -86,6 +86,50 @@ func (cg *CodeGen) exprByte8Type(node ast.Node) string {
 	return ""
 }
 
+// exprElemIsUnsigned returns true when the AST expression produces an unsigned
+// integer value, including array/pointer indexing into unsigned element types.
+// Used by genAsExpr to choose zext vs sext when widening integer values.
+func (cg *CodeGen) exprElemIsUnsigned(node ast.Node) bool {
+	switch n := node.(type) {
+	case *ast.Identifier:
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			return se.isUnsigned
+		}
+	case *ast.ScopeAccess:
+		joined := strings.Join(n.Path, ".")
+		if se, ok := cg.curScope.lookup(joined); ok {
+			return se.isUnsigned
+		}
+	case *ast.AsExpr:
+		return isUnsignedTinType(n.Type)
+	case *ast.IndexExpr:
+		// arr[i] or ptr[i]: check the element type from the array/pointer declaration.
+		switch base := n.Expr.(type) {
+		case *ast.Identifier:
+			if se, ok := cg.curScope.lookup(base.Name); ok {
+				if se.tinType != nil {
+					switch t := se.tinType.(type) {
+					case *ast.PointerType:
+						if inner, ok2 := t.Elem.(*ast.SimpleType); ok2 {
+							return isUnsignedTinType(inner)
+						}
+					case *ast.ArrayType:
+						if inner, ok2 := t.Elem.(*ast.SimpleType); ok2 {
+							return isUnsignedTinType(inner)
+						}
+					}
+				}
+			}
+		}
+	case *ast.BinExpr:
+		// Arithmetic/bitwise binary ops propagate unsigned-ness from the left operand.
+		// E.g. (s0 ^ s4) as u64 must zext when s0 is u32.
+		return cg.exprElemIsUnsigned(n.Left)
+	}
+
+	return false
+}
+
 // exprIsUnsigned reports whether expr represents an unsigned integer value
 // (u16, u32, u64, u128 - not u8/byte which are handled via exprByte8Type).
 // Checks scope entries for identifiers and scope-access expressions.
@@ -102,6 +146,28 @@ func (cg *CodeGen) exprIsUnsigned(node ast.Node) bool {
 		}
 	case *ast.AsExpr:
 		return isUnsignedTinType(n.Type)
+	case *ast.CallExpr:
+		// Look up the callee function in scope to find its IR name, then check
+		// whether that function was registered with an unsigned return type.
+		var calleeName string
+
+		switch c := n.Func.(type) {
+		case *ast.Identifier:
+			calleeName = c.Name
+		case *ast.ScopeAccess:
+			calleeName = strings.Join(c.Path, "::")
+		}
+
+		if calleeName != "" {
+			if se, ok := cg.curScope.lookup(calleeName); ok {
+				if f, ok2 := se.val.(*ir.Func); ok2 {
+					return cg.funcReturnUnsigned[f.Name()]
+				}
+			}
+		}
+	case *ast.BinExpr:
+		// Arithmetic/bitwise binary ops propagate unsigned-ness from the left operand.
+		return cg.exprIsUnsigned(n.Left)
 	}
 
 	return false
@@ -129,6 +195,12 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 	switch {
 	case isAnyType(t):
 		return cg.genEchoAny(block, val)
+
+	case irtypes.IsVector(t):
+		block, err = cg.genEchoVector(block, val, true)
+		if err != nil {
+			return nil, err
+		}
 
 	case isAtomType(t):
 		// Convert atom to its string representation then print.
@@ -165,10 +237,10 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 			break
 		}
-		// Extract data pointer and call printf("%s\n", ptr).
+		// Extract data pointer + length and call the escape helper.
 		ptr := cg.extractStringPtr(block, val)
-		fmtStr := cg.newGlobalString("%s\n")
-		block.NewCall(printf, fmtStr, ptr)
+		length := cg.extractStringLen(block, val)
+		block.NewCall(cg.ensureEchoStringEscaped(), ptr, length)
 
 	case irtypes.IsInt(t):
 		it := t.(*irtypes.IntType)
@@ -307,7 +379,8 @@ func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, e
 	switch {
 	case isStringType(t):
 		ptr := cg.extractStringPtr(block, val)
-		block.NewCall(printf, cg.newGlobalString("%s"), ptr)
+		length := cg.extractStringLen(block, val)
+		block.NewCall(cg.ensurePrintStringEscaped(), ptr, length)
 
 	case isAtomType(t):
 		code := cg.extractAtomCode(block, val)
@@ -354,6 +427,14 @@ func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, e
 
 		block.NewCall(printf, cg.newGlobalString("%g"), ext)
 
+	case irtypes.IsVector(t):
+		var err error
+
+		block, err = cg.genEchoVector(block, val, false)
+		if err != nil {
+			return nil, err
+		}
+
 	case irtypes.IsPointer(t):
 		block.NewCall(printf, cg.newGlobalString("%p"), val)
 
@@ -384,14 +465,59 @@ func (cg *CodeGen) genPrintValue(block *ir.Block, val value.Value) (*ir.Block, e
 	return block, nil
 }
 
-// genPrintStruct emits printf calls to print a named struct value as {f1 f2 ...}.
+// genPrintStruct emits printf calls to print a named struct in Go style:
+// {field1 field2 ...}.
 func (cg *CodeGen) genPrintStruct(block *ir.Block, val value.Value, st *irtypes.StructType) (*ir.Block, error) {
 	printf := cg.ensurePrintf()
 	name := st.Name()
 	fieldNames := cg.structFields[name]
-	userOff := 1 + cg.vtableOffset(name)
 
 	block.NewCall(printf, cg.newGlobalString("{"))
+
+	printed := 0
+
+	// cLayoutStructs: fields live in the native layout pointed to by c_data_ptr.
+	if cg.cLayoutStructs[name] {
+		nativeSt := cg.nativeStructTypes[name]
+		if nativeSt == nil {
+			block.NewCall(printf, cg.newGlobalString("}"))
+
+			return block, nil
+		}
+		// Extract c_data_ptr from the wrapper struct value.
+		cDataIdx := cg.cDataPtrIndex(name)
+		cDataI8 := block.NewExtractValue(val, uint64(cDataIdx))
+		nativePtr := block.NewBitCast(cDataI8, irtypes.NewPointer(nativeSt))
+
+		for i, fieldName := range fieldNames {
+			if fieldName == "" || i >= len(nativeSt.Fields) {
+				continue
+			}
+
+			if printed > 0 {
+				block.NewCall(printf, cg.newGlobalString(" "))
+			}
+
+			gep := block.NewGetElementPtr(nativeSt, nativePtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			fieldVal := block.NewLoad(nativeSt.Fields[i], gep)
+
+			var err error
+
+			block, err = cg.genPrintValue(block, fieldVal)
+			if err != nil {
+				return nil, err
+			}
+
+			printed++
+		}
+
+		block.NewCall(printf, cg.newGlobalString("}"))
+
+		return block, nil
+	}
+
+	userOff := cg.userFieldOffset(name)
 
 	for i, fieldName := range fieldNames {
 		if fieldName == "" {
@@ -403,7 +529,7 @@ func (cg *CodeGen) genPrintStruct(block *ir.Block, val value.Value, st *irtypes.
 			break
 		}
 
-		if i > 0 {
+		if printed > 0 {
 			block.NewCall(printf, cg.newGlobalString(" "))
 		}
 
@@ -415,6 +541,8 @@ func (cg *CodeGen) genPrintStruct(block *ir.Block, val value.Value, st *irtypes.
 		if err != nil {
 			return nil, err
 		}
+
+		printed++
 	}
 
 	block.NewCall(printf, cg.newGlobalString("}"))
@@ -521,4 +649,41 @@ func (cg *CodeGen) genPrintByteArray(block *ir.Block, val value.Value, perElemFm
 	endBlock.NewCall(printf, cg.newGlobalString("]"))
 
 	return endBlock, nil
+}
+
+func (cg *CodeGen) genEchoVector(block *ir.Block, val value.Value, withNewline bool) (*ir.Block, error) {
+	printf := cg.ensurePrintf()
+	vt := val.Type().(*irtypes.VectorType)
+
+	block.NewCall(printf, cg.newGlobalString("<"))
+
+	for i := uint64(0); i < vt.Len; i++ {
+		if i > 0 {
+			block.NewCall(printf, cg.newGlobalString(" "))
+		}
+
+		lane := block.NewExtractElement(val, constant.NewInt(irtypes.I32, int64(i)))
+		switch {
+		case irtypes.IsFloat(lane.Type()):
+			var ext value.Value
+			if lane.Type() == irtypes.Double {
+				ext = lane
+			} else {
+				ext = block.NewFPExt(lane, irtypes.Double)
+			}
+
+			block.NewCall(printf, cg.newGlobalString("%g"), ext)
+		default:
+			ext := cg.coerce(block, lane, irtypes.I64)
+			block.NewCall(printf, cg.newGlobalString("%lld"), ext)
+		}
+	}
+
+	if withNewline {
+		block.NewCall(printf, cg.newGlobalString(">\n"))
+	} else {
+		block.NewCall(printf, cg.newGlobalString(">"))
+	}
+
+	return block, nil
 }

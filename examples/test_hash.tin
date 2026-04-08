@@ -1,0 +1,96 @@
+// examples/test_hash.tin - tests for stdlib/hash (fnv, md5, sha1, xxhash3).
+// Run with: tin test examples/test_hash.tin
+
+use assert
+use fnv
+use md5
+use sha1
+use xxhash3
+
+// -- FNV-1a --
+
+test "fnv1a_32 empty string is non-zero" =
+  let h = fnv::fnv1a_32("")
+  assert::ok(h != 0)
+
+test "fnv1a_32 deterministic" =
+  assert::equals(fnv::fnv1a_32("hello"), fnv::fnv1a_32("hello"))
+
+test "fnv1a_32 different inputs differ" =
+  assert::ok(fnv::fnv1a_32("hello") != fnv::fnv1a_32("world"))
+
+test "fnv1a_32 string and bytes overloads agree" =
+  let s = "hello"
+  assert::equals(fnv::fnv1a_32(s), fnv::fnv1a_32(addr(s[0]), len(s)))
+
+test "fnv1a_64 deterministic" =
+  assert::equals(fnv::fnv1a_64("hello"), fnv::fnv1a_64("hello"))
+
+test "fnv1a_64 different inputs differ" =
+  assert::ok(fnv::fnv1a_64("foo") != fnv::fnv1a_64("bar"))
+
+test "fnv1a_64 string and bytes overloads agree" =
+  let s = "tin"
+  assert::equals(fnv::fnv1a_64(s), fnv::fnv1a_64(addr(s[0]), len(s)))
+
+// -- MD5 --
+
+test "md5 empty string known value" =
+  assert::equals(md5::md5(""), "d41d8cd98f00b204e9800998ecf8427e")
+
+test "md5 hello world known value" =
+  assert::equals(md5::md5("hello world"), "5eb63bbbe01eeed093cb22bb8f5acdc3")
+
+test "md5 a known value" =
+  assert::equals(md5::md5("a"), "0cc175b9c0f1b6a831c399e269772661")
+
+test "md5 deterministic" =
+  assert::equals(md5::md5("test"), md5::md5("test"))
+
+test "md5 different inputs differ" =
+  assert::ok(md5::md5("a") != md5::md5("b"))
+
+test "md5 output is 32 hex chars" =
+  let h = md5::md5("hello")
+  assert::equals(len(h), 32)
+
+// -- SHA1 --
+
+test "sha1 empty string known value" =
+  assert::equals(sha1::sha1(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+
+test "sha1 abc known value" =
+  assert::equals(sha1::sha1("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+
+test "sha1 deterministic" =
+  assert::equals(sha1::sha1("test"), sha1::sha1("test"))
+
+test "sha1 different inputs differ" =
+  assert::ok(sha1::sha1("foo") != sha1::sha1("bar"))
+
+test "sha1 output is 40 hex chars" =
+  let h = sha1::sha1("hello")
+  assert::equals(len(h), 40)
+
+// -- xxHash3 --
+
+test "xxhash3 deterministic" =
+  assert::equals(xxhash3::xxhash3("hello"), xxhash3::xxhash3("hello"))
+
+test "xxhash3 empty string does not crash" =
+  let h = xxhash3::xxhash3("")
+  assert::ok(h == h)
+
+test "xxhash3 different inputs differ" =
+  assert::ok(xxhash3::xxhash3("hello") != xxhash3::xxhash3("world"))
+
+test "xxhash3 seeded differs from seed 0" =
+  assert::ok(xxhash3::xxhash3("hello") != xxhash3::xxhash3_seeded("hello", 42))
+
+test "xxhash3_seeded deterministic" =
+  assert::equals(xxhash3::xxhash3_seeded("test", 99), xxhash3::xxhash3_seeded("test", 99))
+
+test "xxhash3 long string" =
+  let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  assert::equals(xxhash3::xxhash3(s), xxhash3::xxhash3(s))
+  assert::ok(xxhash3::xxhash3(s) != xxhash3::xxhash3(s ++ "b"))

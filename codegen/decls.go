@@ -128,6 +128,10 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	// "pkgName__StructName" (e.g. "sync__Unit"); for user structs it is bare.
 	structKey := cg.pkgStructKey(n.Name)
 
+	if hasTag(n.Tags, "packed") {
+		cg.packedStructs[structKey] = true
+	}
+
 	st, ok := cg.structTypes[structKey]
 	if !ok {
 		st = irtypes.NewStruct()
@@ -225,12 +229,66 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 		cg.structTypeIDs[structKey] = cg.nextTypeID
 		cg.nextTypeID++
 	}
-	// Final layout: [i32 type_id, vtable_0*, vtable_1*, ..., user_field_0, ...]
-	// The leading i32 is always field 0; a *struct can be bitcast to *any
-	// and the type read directly from field 0.
-	st.Fields = append([]irtypes.Type{irtypes.I32}, append(vtableFieldTypes, userFieldTypes...)...)
+	// For cLayoutStructs, declare a %S.native type with just user fields (C layout),
+	// then declare %S wrapper as:
+	//   { i32 type_id, vtable_ptrs..., i8* c_data_ptr }
+	// No inline fields in the LLVM type; handover/literal allocations use
+	// sizeof(%S) + sizeof(%S.native) bytes via GEP+1 overflow area.
+	// All field accesses go through c_data_ptr for live mutation visibility.
+	if cg.cLayoutStructs[structKey] {
+		// Build native field types: nested cLayoutStruct fields must use their
+		// %S.native types (not the wrapper types) to match the C memory layout.
+		// Set structFieldLLVMTypes early so tinStructNativeLLVM can resolve
+		// transitively nested cLayoutStruct fields.
+		cg.structFieldLLVMTypes[structKey] = userFieldTypes
+
+		nativeFieldTypes := make([]irtypes.Type, len(userFieldTypes))
+		for i, ft := range userFieldTypes {
+			if innerSt, ok2 := ft.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+				if inner, err2 := cg.tinStructNativeLLVM(innerSt.Name()); err2 == nil {
+					nativeFieldTypes[i] = inner
+				} else {
+					nativeFieldTypes[i] = ft
+				}
+			} else {
+				nativeFieldTypes[i] = ft
+			}
+		}
+
+		nativeSt := irtypes.NewStruct(nativeFieldTypes...)
+		nativeSt.SetName(structKey + ".native")
+
+		if cg.packedStructs[structKey] {
+			nativeSt.Packed = true
+		}
+
+		cg.mod.TypeDefs = append(cg.mod.TypeDefs, nativeSt)
+		cg.nativeStructTypes[structKey] = nativeSt
+		// Also register under the ".native" key so tinStructNativeLLVM (which caches
+		// in cg.structTypes[name+".native"]) finds the already-declared type and does
+		// not create a second LLVM type definition.
+		cg.structTypes[structKey+".native"] = nativeSt
+
+		// Wrapper: { i32, vtable_ptrs..., i8* c_data_ptr }
+		wrapperFields := append([]irtypes.Type{irtypes.I32},
+			append(vtableFieldTypes, irtypes.I8Ptr)...)
+		st.Fields = wrapperFields
+	} else {
+		// Final layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]
+		// The leading i32 is always field 0; a *struct can be bitcast to *any
+		// and the type read directly from field 0.
+		st.Fields = append([]irtypes.Type{irtypes.I32}, append(vtableFieldTypes, userFieldTypes...)...)
+		if cg.packedStructs[structKey] {
+			st.Packed = true
+		}
+	}
+
 	cg.structFields[structKey] = fieldNames // user-visible names only
-	cg.structFieldLLVMTypes[structKey] = userFieldTypes
+	if !cg.cLayoutStructs[structKey] {
+		// For cLayoutStructs, structFieldLLVMTypes was already set above (before
+		// tinStructNativeLLVM calls for nested field type resolution).
+		cg.structFieldLLVMTypes[structKey] = userFieldTypes
+	}
 	// Record field tags (@"..." annotations).
 	fieldTags := make(map[string]string, len(n.Fields))
 	for _, f := range n.Fields {

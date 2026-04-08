@@ -525,6 +525,25 @@ func isTemporaryProducer(node ast.Node) bool {
 	return false
 }
 
+// isFreshBytesAlloc returns true when v is the direct result of _tin_bytes_from_buf.
+// Such strings already carry RC=1 (freshly allocated, not borrowed from any
+// existing variable) and must NOT receive an extra retain at assignment or return
+// sites.  An extra retain would raise the RC to 2 while only one release is ever
+// emitted, causing a permanent leak.
+func isFreshBytesAlloc(v value.Value) bool {
+	call, ok := v.(*ir.InstCall)
+	if !ok {
+		return false
+	}
+
+	fn, ok2 := call.Callee.(*ir.Func)
+	if !ok2 {
+		return false
+	}
+
+	return fn.Name() == "_tin_bytes_from_buf"
+}
+
 // elemNeedsRelease reports whether a scope variable with element type elemType
 // requires any ARC or deinit processing at scope exit.  Returns false for
 // primitive types (int, float, raw pointers) and for named structs with no RC
@@ -601,7 +620,7 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	}
 
 	fieldTypes := cg.structFieldLLVMTypes[structName]
-	offset := 1 + cg.vtableOffset(structName)
+	offset := cg.userFieldOffset(structName)
 	alloca := block.NewAlloca(st)
 	block.NewStore(val, alloca)
 
@@ -629,9 +648,18 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 			continue
 		}
 
-		gep := block.NewGetElementPtr(st, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
-		fieldVal := block.NewLoad(ft, gep)
+		var fieldVal value.Value
+
+		if cg.cLayoutStructs[structName] {
+			// cLayoutStructs: user fields live in native memory via c_data_ptr.
+			fieldGep := cg.emitCLayoutFieldPtr(block, alloca, structName, i)
+			fieldVal = block.NewLoad(ft, fieldGep)
+		} else {
+			gep := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
+			fieldVal = block.NewLoad(ft, gep)
+		}
+
 		visit(fieldVal)
 	}
 }
@@ -1089,8 +1117,10 @@ func (cg *CodeGen) ensureStrcmp() *ir.Func {
 
 // newGlobalString creates a private unnamed_addr constant for a string,
 // returning a pointer to its first byte.  The global is wrapped in a
-// { i64, [N x i8] } struct whose i64 field holds TIN_IMMORTAL_RC (-1) so
-// that _tin_retain / _tin_release treat it as an immortal, never-freed block.
+// { i64, i64, [N x i8] } struct where the first i64 holds TIN_IMMORTAL_RC (-1)
+// and the second i64 is padding to match the 16-byte TinRCHdr layout, so that
+// _tin_retain / _tin_release treat it as an immortal, never-freed block and
+// the data pointer is 16-byte aligned (needed for SIMD boxing).
 //
 //goland:noinspection GoSnakeCaseUsage
 func (cg *CodeGen) newGlobalString(s string) value.Value {
@@ -1099,10 +1129,11 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	arrType := irtypes.NewArray(uint64(len(data)), irtypes.I8)
 	ca := constant.NewCharArray(data)
 
-	// Wrap in { i64, [N x i8] } with immortal ARC header (rc = -1)
+	// Wrap in { i64, i64, [N x i8] } with immortal ARC header (rc = -1, pad = 0)
 	immortalRC := constant.NewInt(irtypes.I64, -1)
-	hdrStructType := irtypes.NewStruct(irtypes.I64, arrType)
-	hdrConst := constant.NewStruct(hdrStructType, immortalRC, ca)
+	pad := constant.NewInt(irtypes.I64, 0)
+	hdrStructType := irtypes.NewStruct(irtypes.I64, irtypes.I64, arrType)
+	hdrConst := constant.NewStruct(hdrStructType, immortalRC, pad, ca)
 
 	g := cg.mod.NewGlobalDef(fmt.Sprintf("str.%d", cg.strCount), hdrConst)
 	g.Immutable = true
@@ -1110,10 +1141,10 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
 	cg.strCount++
 
-	// GEP: { i64, [N x i8] }* -> [N x i8]* -> i8* (skipping the 8-byte ARC header)
+	// GEP: { i64, i64, [N x i8] }* -> [N x i8]* -> i8* (skipping the 16-byte ARC header)
 	i32_0 := constant.NewInt(irtypes.I32, 0)
-	i32_1 := constant.NewInt(irtypes.I32, 1)
-	gep := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_1, i32_0)
+	i32_2 := constant.NewInt(irtypes.I32, 2)
+	gep := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_2, i32_0)
 	gep.InBounds = true
 
 	return gep
@@ -1384,6 +1415,30 @@ func (cg *CodeGen) ensureEchoF128() *ir.Func {
 		[]*ir.Param{ir.NewParam("v", irtypes.FP128)}, false)
 
 	return cg.echoF128Fn
+}
+
+// ensureEchoStringEscaped lazily declares _tin_echo_string_escaped(i8*, i64) void.
+func (cg *CodeGen) ensureEchoStringEscaped() *ir.Func {
+	if cg.echoStringEscapedFn != nil {
+		return cg.echoStringEscapedFn
+	}
+
+	cg.echoStringEscapedFn = cg.ensureExternDecl("_tin_echo_string_escaped", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr), ir.NewParam("len", irtypes.I64)}, false)
+
+	return cg.echoStringEscapedFn
+}
+
+// ensurePrintStringEscaped lazily declares _tin_print_string_escaped(i8*, i64) void.
+func (cg *CodeGen) ensurePrintStringEscaped() *ir.Func {
+	if cg.printStringEscapedFn != nil {
+		return cg.printStringEscapedFn
+	}
+
+	cg.printStringEscapedFn = cg.ensureExternDecl("_tin_print_string_escaped", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr), ir.NewParam("len", irtypes.I64)}, false)
+
+	return cg.printStringEscapedFn
 }
 
 // ensureI128ToCstr lazily declares _tin_i128_to_cstr(i128) i8*.

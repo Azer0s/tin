@@ -1,0 +1,201 @@
+// examples/test_strings.tin - tests for stdlib/strings.
+// Covers all public functions plus SIMD fast-path correctness.
+// Run with: tin test examples/test_strings.tin
+
+use assert
+use strings
+
+// -- contains --
+
+test "contains true" =
+  assert::ok(strings::contains("hello world", "world"))
+
+test "contains false" =
+  assert::not_ok(strings::contains("hello world", "xyz"))
+
+test "contains empty needle" =
+  assert::ok(strings::contains("hello", ""))
+
+test "contains empty haystack empty needle" =
+  assert::ok(strings::contains("", ""))
+
+test "contains empty haystack non-empty needle" =
+  assert::not_ok(strings::contains("", "x"))
+
+// -- index_of --
+
+test "index_of found at start" =
+  assert::equals(strings::index_of("abcabc", "a"), 0)
+
+test "index_of found mid" =
+  assert::equals(strings::index_of("abcabc", "bc"), 1)
+
+test "index_of not found" =
+  assert::equals(strings::index_of("hello", "xyz"), -1)
+
+test "index_of empty needle returns 0" =
+  assert::equals(strings::index_of("hello", ""), 0)
+
+// -- last_index_of --
+
+test "last_index_of found" =
+  assert::equals(strings::last_index_of("abcabc", "bc"), 4)
+
+test "last_index_of not found" =
+  assert::equals(strings::last_index_of("hello", "xyz"), -1)
+
+test "last_index_of single occurrence" =
+  assert::equals(strings::last_index_of("hello", "ello"), 1)
+
+// -- has_prefix / has_suffix --
+
+test "has_prefix true" =
+  assert::ok(strings::has_prefix("hello world", "hello"))
+
+test "has_prefix false" =
+  assert::not_ok(strings::has_prefix("hello world", "world"))
+
+test "has_prefix empty prefix" =
+  assert::ok(strings::has_prefix("hello", ""))
+
+test "has_suffix true" =
+  assert::ok(strings::has_suffix("hello world", "world"))
+
+test "has_suffix false" =
+  assert::not_ok(strings::has_suffix("hello world", "hello"))
+
+test "has_suffix empty suffix" =
+  assert::ok(strings::has_suffix("hello", ""))
+
+// -- count --
+
+test "count single char repeated" =
+  assert::equals(strings::count("aaa", "a"), 3)
+
+test "count non-overlapping pairs" =
+  assert::equals(strings::count("aaaa", "aa"), 2)
+
+test "count not found" =
+  assert::equals(strings::count("hello", "x"), 0)
+
+test "count multi-char" =
+  assert::equals(strings::count("abababab", "ab"), 4)
+
+// -- substr --
+
+test "substr middle" =
+  assert::equals(strings::substr("hello", 1, 4), "ell")
+
+test "substr full" =
+  assert::equals(strings::substr("hello", 0, 5), "hello")
+
+test "substr empty range" =
+  assert::equals(strings::substr("hello", 2, 2), "")
+
+// -- replace --
+
+test "replace all occurrences" =
+  assert::equals(strings::replace("foo bar foo", "foo", "baz"), "baz bar baz")
+
+test "replace with empty replacement" =
+  assert::equals(strings::replace("aXbXc", "X", ""), "abc")
+
+test "replace no match" =
+  assert::equals(strings::replace("hello", "xyz", "abc"), "hello")
+
+// -- to_lower / to_upper --
+
+test "to_lower" =
+  assert::equals(strings::to_lower("Hello World"), "hello world")
+
+test "to_upper" =
+  assert::equals(strings::to_upper("Hello World"), "HELLO WORLD")
+
+test "to_lower already lower" =
+  assert::equals(strings::to_lower("hello"), "hello")
+
+test "to_upper already upper" =
+  assert::equals(strings::to_upper("HELLO"), "HELLO")
+
+// -- repeat --
+
+test "repeat n times" =
+  assert::equals(strings::repeat("ab", 3), "ababab")
+
+test "repeat zero times" =
+  assert::equals(strings::repeat("x", 0), "")
+
+test "repeat once" =
+  assert::equals(strings::repeat("hello", 1), "hello")
+
+// -- trim --
+
+test "trim both sides" =
+  assert::equals(strings::trim("  hello  "), "hello")
+
+test "trim_left" =
+  assert::equals(strings::trim_left("  hello  "), "hello  ")
+
+test "trim_right" =
+  assert::equals(strings::trim_right("  hello  "), "  hello")
+
+test "trim tabs and newlines" =
+  assert::equals(strings::trim("\t\nhello\n\t"), "hello")
+
+test "trim already trimmed" =
+  assert::equals(strings::trim("hello"), "hello")
+
+// -- split --
+
+test "split on comma" =
+  let parts = strings::split("a,b,c", ",")
+  assert::equals(len(parts), 3)
+  assert::equals(parts[0], "a")
+  assert::equals(parts[1], "b")
+  assert::equals(parts[2], "c")
+
+test "split with leading separator" =
+  let parts = strings::split(",a,", ",")
+  assert::equals(len(parts), 3)
+  assert::equals(parts[0], "")
+  assert::equals(parts[1], "a")
+  assert::equals(parts[2], "")
+
+test "split no separator found" =
+  let parts = strings::split("hello", ",")
+  assert::equals(len(parts), 1)
+  assert::equals(parts[0], "hello")
+
+// -- join --
+
+test "join with separator" =
+  let parts [string] = ["a", "b", "c"]
+  assert::equals(strings::join(parts, ", "), "a, b, c")
+
+test "join empty separator" =
+  let parts [string] = ["a", "b", "c"]
+  assert::equals(strings::join(parts, ""), "abc")
+
+test "join empty slice" =
+  let parts [string] = []
+  assert::equals(strings::join(parts, ","), "")
+
+// -- SIMD fast path correctness (exercises 16-byte-at-a-time code path) --
+
+test "simd path: index_of needle at end" =
+  // 32-byte string so the SIMD path processes at least one chunk
+  let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaabb"
+  assert::equals(strings::index_of(s, "bb"), 30)
+
+test "simd path: index_of not found in long string" =
+  let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  // 34 a's
+  assert::equals(strings::index_of(s, "b"), -1)
+
+test "simd path: count in long string" =
+  let s = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  // 35 x's
+  assert::equals(strings::count(s, "x"), 35)
+
+test "simd path: contains in long string" =
+  let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"  // 32 a's + b
+  assert::ok(strings::contains(s, "b"))
+  assert::not_ok(strings::contains(s, "c"))

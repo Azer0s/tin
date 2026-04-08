@@ -21,6 +21,7 @@ package codegen
 import (
 	"strings"
 
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -33,6 +34,7 @@ type overloadEntry struct {
 	paramSig   string         // raw signature string used for mangling
 	paramTypes []irtypes.Type // LLVM types of the non-this parameters (resolved after predecl)
 	arity      int            // number of explicit (non-this) parameters
+	returnType irtypes.Type   // LLVM return type (nil if unknown/void); used for hint-guided selection
 }
 
 // typeExprMangle converts a Tin TypeExpr to a safe identifier fragment used
@@ -136,14 +138,15 @@ func overloadMangledName(baseName, sig string) string {
 // For top-level functions the key is the function name.
 // For struct methods the key is "StructName_methodName".
 func scanOverloadedNames(nodes []ast.Node) map[string]bool {
-	// Count occurrences of each name (excluding constrained generics and externs,
-	// which are handled by their own systems).
+	// Count occurrences of each name (excluding constrained generics).
+	// Extern functions ARE included so that packages with multiple extern overloads
+	// (e.g. splat(f32) and splat(f64)) get their IR names mangled correctly.
 	counts := make(map[string]int)
 
 	for _, node := range nodes {
 		switch n := node.(type) {
 		case *ast.FuncDecl:
-			if n.IsExtern != "" || len(n.Constraints) > 0 {
+			if len(n.Constraints) > 0 {
 				continue
 			}
 
@@ -230,9 +233,42 @@ func (cg *CodeGen) resolveParamTypes(params []ast.Param, structName string) ([]i
 func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Value) *overloadEntry {
 	// Build a parallel slice of arg types once.
 	argTypes := make([]irtypes.Type, len(argVals))
+	allConstants := true
+
 	for i, v := range argVals {
 		if v != nil {
 			argTypes[i] = v.Type()
+
+			if _, isConst := v.(constant.Constant); !isConst {
+				allConstants = false
+			}
+		}
+	}
+
+	// Pass 0: return-type hint from let-binding annotation.
+	// Priority: let binding type > concrete arg types > constant arg types.
+	// When a hint is set, prefer the overload whose return type matches it.
+	// If all args are constants (no concrete type information from args), always
+	// apply the hint. If non-constant args are present, only apply when there is
+	// exactly one hint-matching candidate to avoid overriding clear parameter matches.
+	if cg.returnTypeHint != nil {
+		var hintMatch *overloadEntry
+
+		hintMatches := 0
+
+		for _, v := range variants {
+			if v.arity != len(argVals) {
+				continue
+			}
+
+			if v.returnType != nil && v.returnType.Equal(cg.returnTypeHint) {
+				hintMatch = v
+				hintMatches++
+			}
+		}
+
+		if hintMatch != nil && (allConstants || hintMatches == 1) {
+			return hintMatch
 		}
 	}
 

@@ -55,7 +55,9 @@ void _tin_defer_pop(int64_t n) {
 static __thread const char *_tin_panic_msg = NULL;
 
 // An immortal (rc=-1) empty string returned by _tin_recover() when not panicking.
-static const struct { int64_t rc; char c; } _tin_empty_str_sentinel = { TIN_IMMORTAL_RC, '\0' };
+// The struct layout matches TinRCHdr (16 bytes: rc + _pad) so that
+// _tin_release(ptr) computes ptr - sizeof(TinRCHdr) = &rc = TIN_IMMORTAL_RC.
+static const struct { int64_t rc; int64_t _pad; char c; } _tin_empty_str_sentinel = { TIN_IMMORTAL_RC, 0, '\0' };
 
 // Called from a deferred function to retrieve and clear the current panic message.
 // Returns an empty TinString if not currently panicking.

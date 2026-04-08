@@ -645,18 +645,37 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// TupleLit: pass the declared type so fields get the right LLVM types.
 		if tup, ok := s.Value.(*ast.TupleLit); ok && llType != nil {
 			initVal, err = cg.genTupleLit(block, tup, llType)
+		} else if fillLit, ok := s.Value.(*ast.ArrayFillLit); ok {
+			if _, isStaticLLVM := llType.(*irtypes.ArrayType); isStaticLLVM {
+				// Static fixed-size target: fill emitted after alloca creation.
+				_ = fillLit // handled in post-alloca block below
+			} else {
+				initVal, err = cg.genArrayFillLit(block, fillLit)
+			}
 		} else if arrLit, ok := s.Value.(*ast.ArrayLit); ok && s.Type != nil {
 			// ArrayLit with declared element type: coerce each element to the declared type.
 			// Handles e.g. let fns [fn{#async}(i64) i64] = [double] where elements need wrapping.
-			var targetElemType irtypes.Type
+			if _, isStaticLLVM := llType.(*irtypes.ArrayType); isStaticLLVM {
+				// Static fixed-size target: fill emitted after alloca creation.
+				_ = arrLit // handled in post-alloca block below
+			} else {
+				var targetElemType irtypes.Type
+				if at, ok2 := s.Type.(*ast.ArrayType); ok2 && at.Elem != nil {
+					targetElemType, _ = cg.tinTypeToLLVM(at.Elem)
+				}
 
-			if at, ok2 := s.Type.(*ast.ArrayType); ok2 && at.Elem != nil {
-				targetElemType, _ = cg.tinTypeToLLVM(at.Elem)
+				initVal, err = cg.genArrayLitWithElemType(block, arrLit, targetElemType)
+			}
+		} else {
+			// When an explicit type annotation is present, propagate it as a hint
+			// so overload resolution can prefer the variant whose return type matches
+			// (let binding type > concrete arg types > constant arg types).
+			if llType != nil {
+				cg.returnTypeHint = llType
 			}
 
-			initVal, err = cg.genArrayLitWithElemType(block, arrLit, targetElemType)
-		} else {
 			initVal, err = cg.genExpr(block, s.Value)
+			cg.returnTypeHint = nil
 		}
 
 		if err != nil {
@@ -758,6 +777,77 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	}
 
 	isRC := isRCTrackedType(llType)
+
+	// Static array initializers: fill the stack alloca directly.
+	// Handles both [v; N] fill literals and [e0, e1, ...] literals when the
+	// declared type is a fixed-size [T; N] array.
+	if at, isStaticAt := llType.(*irtypes.ArrayType); isStaticAt && s.Value != nil {
+		if fillLit, isFill := s.Value.(*ast.ArrayFillLit); isFill {
+			fillVal, ferr := cg.genExpr(block, fillLit.Value)
+			if ferr != nil {
+				return nil, ferr
+			}
+
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
+
+			// Zero fill: use memset for efficiency.
+			isZeroFill := false
+
+			if ic, isConst := fillLit.Value.(*ast.IntLit); isConst && ic.Value == 0 {
+				isZeroFill = true
+			}
+
+			if ic, isConst := fillLit.Value.(*ast.CharLit); isConst && ic.Value == '\000' {
+				isZeroFill = true
+			}
+
+			if isZeroFill {
+				elemBytes := llvmElemByteSize(at.ElemType)
+				totalBytes := constant.NewInt(irtypes.I64, int64(at.Len)*elemBytes)
+				dstPtr := block.NewBitCast(alloca, irtypes.I8Ptr)
+				block.NewCall(cg.ensureMemset(), dstPtr,
+					constant.NewInt(irtypes.I8, 0), totalBytes,
+					constant.NewInt(irtypes.I1, 0))
+			} else {
+				fillCoerced := cg.coerce(block, fillVal, at.ElemType)
+				for i := uint64(0); i < at.Len; i++ {
+					gep := block.NewGetElementPtr(llType, alloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, int64(i)))
+					block.NewStore(fillCoerced, gep)
+				}
+			}
+		} else if arrLit, isArr := s.Value.(*ast.ArrayLit); isArr {
+			// Static array from element list: [e0, e1, ..., eN].
+			for i, elem := range arrLit.Elems {
+				v, verr := cg.genExpr(block, elem)
+				if verr != nil {
+					return nil, verr
+				}
+
+				if cg.curBlock != nil && cg.curBlock != block {
+					block = cg.curBlock
+				}
+
+				v = cg.coerce(block, v, at.ElemType)
+				gep := block.NewGetElementPtr(llType, alloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, int64(i)))
+				block.NewStore(v, gep)
+			}
+
+			// Zero-initialize any trailing elements beyond what was specified.
+			if uint64(len(arrLit.Elems)) < at.Len {
+				for i := uint64(len(arrLit.Elems)); i < at.Len; i++ {
+					gep := block.NewGetElementPtr(llType, alloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, int64(i)))
+					block.NewStore(cg.zeroValue(at.ElemType), gep)
+				}
+			}
+		}
+		// Non-fill, non-ArrayLit static target: fall through to initVal path below.
+	}
+
 	if initVal != nil {
 		// If the init value is an empty array {i8*, i64} but the declared type
 		// is a typed fat array {T*, i64}, use a properly-typed zero value.
@@ -779,11 +869,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// box block is a fresh _tin_rc_alloc (rc=1) - it is already owned, so
 		// an extra retain would over-count and cause a leak.
 		boxedToAny := isAnyType(llType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny {
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) {
 			cg.emitRetain(block, initVal)
 		}
-	} else {
-		// Zero-initialize.
+	} else if s.Value == nil {
+		// No initializer: zero-initialize.
 		// For fixed-size arrays >= 128 bytes, use llvm.memset rather than
 		// storing a huge aggregate constant: large aggregate value stores
 		// (e.g. [65536 x i8] zeroinitializer) crash LLVM's instruction selector.
@@ -802,6 +892,8 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			block.NewStore(cg.zeroValue(llType), alloca)
 		}
 	}
+	// else: s.Value != nil && initVal == nil means a static-array fill was handled
+	// directly above (ArrayFillLit or ArrayLit targeting [T; N] alloca).
 
 	// Consume lastSliceBase: genSliceExpr sets it to the base allocation pointer
 	// (before any GEP offset) so that ARC retain/release works on the real ARC
@@ -1050,11 +1142,13 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	retSkipName := ""
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
-	} else if isCopyExpr(s.Value) {
+	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.
 		// Retain first so the caller gets one owned reference, then scope cleanup
 		// decrements the RC back to a net-neutral result.
+		// Exception: [T;N] as string calls _tin_bytes_from_buf which already
+		// allocates with RC=1 - no extra retain needed.
 		cg.emitRetain(block, val)
 	}
 
@@ -1577,6 +1671,39 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
+	// Special case: SIMD vector index assignment v[i] = x.
+	// Vectors have no addressable lanes; use insertelement + store-back.
+	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
+		vecVal, err2 := cg.genExpr(block, idxExpr.Expr)
+		if err2 == nil && vecVal != nil {
+			if vecType, isVec := vecVal.Type().(*irtypes.VectorType); isVec {
+				idxVal, err3 := cg.genExpr(block, idxExpr.Index)
+				if err3 != nil {
+					return block, err3
+				}
+
+				newElem, err4 := cg.genExpr(block, s.Value)
+				if err4 != nil {
+					return block, err4
+				}
+
+				newElem = cg.coerce(block, newElem, vecType.ElemType)
+				idx32 := cg.coerce(block, idxVal, irtypes.I32)
+				updated := block.NewInsertElement(vecVal, newElem, idx32)
+
+				// Store the updated vector back to the variable's alloca.
+				vecPtr, err5 := cg.genLValue(block, idxExpr.Expr)
+				if err5 != nil {
+					return block, err5
+				}
+
+				block.NewStore(updated, vecPtr)
+
+				return block, nil
+			}
+		}
+	}
+
 	ptr, err := cg.genLValue(block, s.Target)
 	if err != nil {
 		return block, err
@@ -1618,7 +1745,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 	if isRCTrackedType(ptrType.ElemType) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny {
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(val) {
 			cg.emitRetain(block, val)
 		}
 
@@ -1766,7 +1893,8 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 			// ARC: retain element if it is copied from an existing owner (variable,
 			// field, or index).  Without this, releasing the source variable frees
 			// the element's data while the array still holds a reference.
-			if isCopyExpr(s.Value) {
+			// Exception: [T;N] as string via _tin_bytes_from_buf is already RC=1.
+			if isCopyExpr(s.Value) && !isFreshBytesAlloc(newElem) {
 				if _, isPtr := elemT.(*irtypes.PointerType); isPtr {
 					// For pointer elements: retain the pointed-to ARC block itself.
 					ptrI8 := block.NewBitCast(newElem, irtypes.I8Ptr)

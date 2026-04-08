@@ -153,6 +153,9 @@ func printNode(n Node, depth int) string {
 
 		return fmt.Sprintf("[%s]", strings.Join(elems, ", "))
 
+	case *ArrayFillLit:
+		return fmt.Sprintf("[%s; %d]", printNode(v.Value, depth), v.Count)
+
 	// Top-level declarations
 	case *FuncDecl:
 		params := make([]string, len(v.Params))

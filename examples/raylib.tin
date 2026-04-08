@@ -1,0 +1,29 @@
+//!-lraylib
+
+use extern (
+  init_window("InitWindow") as fn(i32, i32, string) void,
+  window_should_close("WindowShouldClose") as fn() bool,
+  begin_drawing("BeginDrawing") as fn() void,
+  clear_background("ClearBackground") as fn(color) void,
+  draw_text("DrawText") as fn(string, i32, i32, i32, color) void,
+  end_drawing("EndDrawing") as fn() void,
+  close_window("CloseWindow") as fn() void
+)
+
+struct color =
+  r u8
+  g u8
+  b u8
+  a u8
+
+const BLACK = color{0, 0, 0, 255}
+const WHITE = color{255, 255, 255, 255}
+
+init_window(800, 600, "Hello Raylib")
+defer close_window()
+
+for !window_should_close():
+  begin_drawing()
+  clear_background(WHITE)
+  draw_text("Hello, Raylib!", 190, 200, 20, BLACK)
+  end_drawing()
