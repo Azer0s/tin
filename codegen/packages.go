@@ -239,15 +239,10 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin"
 
 			p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin"
-			// p3: nested layout stdlib/<parent>/<child>/<child>.tin
-			// e.g. hash::fnv -> stdlib/hash/fnv/fnv.tin
-			p3 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + "/" + pkgName + ".tin"
 			if _, e := os.Stat(p1); e == nil {
 				tinSrc = p1
 			} else if _, e := os.Stat(p2); e == nil {
 				tinSrc = p2
-			} else if _, e := os.Stat(p3); e == nil {
-				tinSrc = p3
 			} else {
 				tinSrc = ""
 			}
@@ -258,6 +253,15 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 
 	if tinSrc != "" {
 		return cg.loadPackageFromSource(pkgPath, pkgName, tinSrc)
+	}
+
+	// No direct file found for a multi-part path (e.g. hash::fnv).
+	// Load the parent module (e.g. hash) which re-exports fnv as a sub-namespace,
+	// so that the re-export propagation can make fnv::* visible to the caller.
+	if len(parts) > 1 {
+		parentPath := strings.Join(parts[:len(parts)-1], "::")
+		cg.loadPackage(parentPath)
+		return nil
 	}
 
 	mf, err := ReadModFile(modFile)
@@ -549,15 +553,13 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 
 	prevFilename := cg.filename
 
-	// Helper files loaded via use "./..." must not contain export declarations.
-	// All symbols they define are automatically embedded into the importing file's
-	// scope - no export declaration is needed or allowed. Only the single top-level
-	// package file (e.g. os.tin, sync.tin) may have an export declaration.
+	// If the file has an export declaration it is a named sub-package, not a flat
+	// helper. Delegate to loadPackageFromSource so that exports are processed
+	// correctly and sub-namespace entries (e.g. fnv::fnv1a_32) are registered.
 	for _, node := range prog.Stmts {
-		if _, ok := node.(*ast.ExportDecl); ok {
+		if exp, ok := node.(*ast.ExportDecl); ok {
 			cg.filename = prevFilename
-
-			return fmt.Errorf("use %q: helper files loaded via use \"./...\" must not contain an export declaration; only the top-level package file may export", rawPath)
+			return cg.loadPackageFromSource(rawPath, exp.AsName, srcPath)
 		}
 	}
 
@@ -1332,6 +1334,18 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			if cg.moduleScope != nil && cg.moduleScope != prevScope {
 				cg.moduleScope.set(pkgName+"."+name, entry)
 				cg.moduleScope.set(pkgName+"::"+name, entry)
+			}
+		} else {
+			// name is a re-exported sub-namespace (e.g. "fnv" exported from hash.tin).
+			// The sub-namespace entries were already populated into prevScope when the
+			// sub-package's file-path import was processed via loadPackageFromSource.
+			// Ensure they are also visible in moduleScope.
+			for key, entry := range prevScope.vars {
+				if strings.HasPrefix(key, name+"::") || strings.HasPrefix(key, name+".") {
+					if cg.moduleScope != nil && cg.moduleScope != prevScope {
+						cg.moduleScope.set(key, entry)
+					}
+				}
 			}
 		}
 	}
