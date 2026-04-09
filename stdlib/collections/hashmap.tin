@@ -1,0 +1,192 @@
+// stdlib/collections/hashmap.tin - HashMap[K,V] open-addressing hash map.
+//
+// Keys are compared by their string representation ("{k}").
+// All key types (primitives, strings, structs) are supported.
+//
+// Hash values: 0 = empty slot, 1 = tombstone, >=2 = occupied.
+// Capacity is always a power of 2; load factor triggers resize at 75%.
+// Minimum initial capacity: 8.
+//
+// Uses Tin fat arrays ([K], [V], [u64]) for ARC-safe storage - no manual
+// memory management required.
+
+use hash::xxhash3
+use "./map"
+
+fn _next_pow2(n i64) i64 =
+  let p i64 = 8
+  for p < n:
+    p = p * 2
+  return p
+
+fn _hm_hash[K](k K) u64 =
+  let h u64 = xxhash3::xxhash3("{k}")
+  if h < 2:
+    return h + 2
+  return h
+
+fn _hm_eq[K](a K, b K) bool =
+  return "{a}" == "{b}"
+
+fn _hm_empty_keys[K](cap i64) [K] =
+  let zero K
+  let result [K] = []
+  let i i64 = 0
+  for i < cap:
+    result ++= zero
+    i = i + 1
+  return result
+
+fn _hm_empty_vals[V](cap i64) [V] =
+  let zero V
+  let result [V] = []
+  let i i64 = 0
+  for i < cap:
+    result ++= zero
+    i = i + 1
+  return result
+
+fn _hm_empty_hashes(cap i64) [u64] =
+  let result [u64] = []
+  let i i64 = 0
+  for i < cap:
+    result ++= 0 as u64
+    i = i + 1
+  return result
+
+struct HashMap[K, V](Map[K, V]) =
+  _keys   [K]
+  _vals   [V]
+  _hashes [u64]
+  _len    i64
+
+  static fn new(initial_cap i64) HashMap[K, V] =
+    let cap = _next_pow2(initial_cap)
+    return HashMap[K, V]{
+      _keys:   _hm_empty_keys[K](cap),
+      _vals:   _hm_empty_vals[V](cap),
+      _hashes: _hm_empty_hashes(cap),
+      _len:    0,
+    }
+
+  fn len(this HashMap[K, V]) i64 =
+    return this._len
+
+  fn _find(this HashMap[K, V], k K, h u64) i64 =
+    let cap = len(this._hashes)
+    let mask = cap - 1
+    let slot = (h as i64) & mask
+    let first_tomb i64 = 0 - 1
+    let i i64 = 0
+    for i < cap:
+      let sh u64 = this._hashes[slot]
+      if sh == 0:
+        if first_tomb != 0 - 1:
+          return first_tomb
+        return slot
+      if sh == 1:
+        if first_tomb == 0 - 1:
+          first_tomb = slot
+      else if sh == h && _hm_eq(this._keys[slot], k):
+        return slot
+      slot = (slot + 1) & mask
+      i = i + 1
+    return 0 - 1
+
+  fn _resize(this *HashMap[K, V]) =
+    let old_keys   = this._keys
+    let old_vals   = this._vals
+    let old_hashes = this._hashes
+    let old_cap    = len(old_hashes)
+    let new_cap    = old_cap * 2
+    this._keys   = _hm_empty_keys[K](new_cap)
+    this._vals   = _hm_empty_vals[V](new_cap)
+    this._hashes = _hm_empty_hashes(new_cap)
+    this._len    = 0
+    let mask = new_cap - 1
+    let i i64 = 0
+    for i < old_cap:
+      let h u64 = old_hashes[i]
+      if h >= 2:
+        let slot = (h as i64) & mask
+        let j i64 = 0
+        for j < new_cap:
+          let sh u64 = this._hashes[slot]
+          if sh == 0 || sh == 1:
+            this._keys[slot]   = old_keys[i]
+            this._vals[slot]   = old_vals[i]
+            this._hashes[slot] = h
+            this._len = this._len + 1
+            j = new_cap
+          slot = (slot + 1) & mask
+          j = j + 1
+      i = i + 1
+
+  fn set(this *HashMap[K, V], k K, v V) =
+    let cap = len(this._hashes)
+    if this._len * 4 >= cap * 3:
+      this._resize()
+    let h u64 = _hm_hash(k)
+    let slot = this._find(k, h)
+    let old_h u64 = this._hashes[slot]
+    this._keys[slot]   = k
+    this._vals[slot]   = v
+    this._hashes[slot] = h
+    if old_h < 2:
+      this._len = this._len + 1
+
+  fn get(this HashMap[K, V], k K) V =
+    let h u64 = _hm_hash(k)
+    let slot = this._find(k, h)
+    if this._hashes[slot] == h && _hm_eq(this._keys[slot], k):
+      return this._vals[slot]
+    let zero V
+    return zero
+
+  fn get_or(this HashMap[K, V], k K, default_val V) V =
+    let h u64 = _hm_hash(k)
+    let slot = this._find(k, h)
+    if this._hashes[slot] == h && _hm_eq(this._keys[slot], k):
+      return this._vals[slot]
+    return default_val
+
+  fn has(this HashMap[K, V], k K) bool =
+    let h u64 = _hm_hash(k)
+    let slot = this._find(k, h)
+    if this._hashes[slot] == h && _hm_eq(this._keys[slot], k):
+      return true
+    return false
+
+  fn delete(this *HashMap[K, V], k K) =
+    let h u64 = _hm_hash(k)
+    let slot = this._find(k, h)
+    if this._hashes[slot] == h && _hm_eq(this._keys[slot], k):
+      let zero_k K
+      let zero_v V
+      this._keys[slot]   = zero_k
+      this._vals[slot]   = zero_v
+      this._hashes[slot] = 1
+      this._len = this._len - 1
+
+  fn keys(this HashMap[K, V]) [K] =
+    let cap = len(this._hashes)
+    let result [K] = []
+    let i i64 = 0
+    for i < cap:
+      let sh u64 = this._hashes[i]
+      if sh >= 2:
+        result ++= this._keys[i]
+      i = i + 1
+    return result
+
+  fn values(this HashMap[K, V]) [V] =
+    let cap = len(this._hashes)
+    let result [V] = []
+    let i i64 = 0
+    for i < cap:
+      let sh u64 = this._hashes[i]
+      if sh >= 2:
+        result ++= this._vals[i]
+      i = i + 1
+    return result
+

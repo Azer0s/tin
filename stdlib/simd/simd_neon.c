@@ -46,19 +46,22 @@ u32x4  _tin_simd_cmpeq_u32x4(u32x4 a,  u32x4 b)  { return (u32x4)vceqq_u32((uint
 f32x4  _tin_simd_cmpeq_f32x4(f32x4 a,  f32x4 b)  { return (f32x4)vceqq_f32((float32x4_t)a, (float32x4_t)b); }
 
 // -- movemask_u8: SSE2-style movemask emulation using NEON --
-// Standard recipe: shift each byte to contribute 1 bit, then accumulate.
+// Extract the MSB of each byte, pack into a 16-bit integer.
+// Strategy: isolate each MSB with a fixed vshrq_n_u8(v, 7) -> 0 or 1 per byte.
+// Then multiply by position weights {1,2,4,8,16,32,64,128} to place each bit
+// at its correct position.  Three rounds of vpadd_u8 accumulate into lane 0
+// (low byte = bits 0-7) and lane 1 (high byte = bits 8-15).
 
 uint32_t _tin_simd_movemask_u8x16(u8x16 a) {
-    uint8x16_t v = (uint8x16_t)a;
-    // Shift each byte right so the MSB becomes the LSB, zero out the rest
-    static const int8_t shifts[16] = { -7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0 };
-    uint8x16_t sv = vshlq_u8(v, vld1q_s8(shifts));
-    uint8x8_t lo = vget_low_u8(sv);
-    uint8x8_t hi = vget_high_u8(sv);
-    uint8x8_t paired = vpadd_u8(lo, hi);
+    static const uint8_t weight_data[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
+    uint8x16_t msbs    = vshrq_n_u8((uint8x16_t)a, 7);
+    uint8x8_t  weights = vld1_u8(weight_data);
+    uint8x8_t  lo      = vmul_u8(vget_low_u8(msbs), weights);
+    uint8x8_t  hi      = vmul_u8(vget_high_u8(msbs), weights);
+    uint8x8_t  paired  = vpadd_u8(lo, hi);
     paired = vpadd_u8(paired, paired);
     paired = vpadd_u8(paired, paired);
-    return (uint32_t)(vget_lane_u16(vreinterpret_u16_u8(paired), 0));
+    return (uint32_t)vget_lane_u16(vreinterpret_u16_u8(paired), 0);
 }
 
 // -- hadd --

@@ -1,0 +1,49 @@
+use assert
+use encoding::base64
+
+test "encode empty" =
+  assert::equals(base64::encode(""), "")
+
+test "encode padding 1" =
+  assert::equals(base64::encode("f"), "Zg==")
+
+test "encode padding 2" =
+  assert::equals(base64::encode("fo"), "Zm8=")
+
+test "encode no padding" =
+  assert::equals(base64::encode("foo"), "Zm9v")
+
+test "encode longer" =
+  assert::equals(base64::encode("Hello, World!"), "SGVsbG8sIFdvcmxkIQ==")
+
+test "encode url safe no padding" =
+  assert::equals(base64::encode_url("Hello, World!"), "SGVsbG8sIFdvcmxkIQ")
+
+test "decode empty" =
+  assert::equals(base64::decode(""), "")
+
+test "decode with padding" =
+  assert::equals(base64::decode("Zg=="), "f")
+  assert::equals(base64::decode("Zm8="), "fo")
+  assert::equals(base64::decode("Zm9v"), "foo")
+
+test "decode without padding" =
+  assert::equals(base64::decode("Zg"), "f")
+  assert::equals(base64::decode("Zm8"), "fo")
+
+test "decode url safe" =
+  assert::equals(base64::decode("SGVsbG8sIFdvcmxkIQ"), "Hello, World!")
+
+test "round trip standard" =
+  let cases [string] = ["", "f", "fo", "foo", "foob", "fooba", "foobar"]
+  let i i64 = 0
+  for i < len(cases):
+    assert::equals(base64::decode(base64::encode(cases[i])), cases[i])
+    i = i + 1
+
+test "round trip url safe" =
+  let cases [string] = ["", "f", "fo", "foo", "Hello, World!"]
+  let i i64 = 0
+  for i < len(cases):
+    assert::equals(base64::decode(base64::encode_url(cases[i])), cases[i])
+    i = i + 1

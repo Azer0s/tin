@@ -1,0 +1,14 @@
+// stdlib/collections/map.tin - Map[K, V] trait definition.
+//
+// Defines the generic map interface. Concrete implementations (e.g. HashMap)
+// implement this trait.
+
+trait Map[K, V] =
+  fn len(this Map[K, V]) i64
+  fn get(this Map[K, V], k K) V
+  fn get_or(this Map[K, V], k K, default_val V) V
+  fn has(this Map[K, V], k K) bool
+  fn set(this *Map[K, V], k K, v V)
+  fn delete(this *Map[K, V], k K)
+  fn keys(this Map[K, V]) [K]
+  fn values(this Map[K, V]) [V]

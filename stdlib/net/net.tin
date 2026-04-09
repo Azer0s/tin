@@ -1,0 +1,18 @@
+// stdlib/net - Network communication library.
+//
+// Provides:
+//   tcp  - TCP connection and server types
+//   udp  - UDP socket types
+//   unix - Unix domain socket types
+//
+// Import examples:
+//   use net::tcp
+//   use net::udp
+//   use net::unix
+//   use net
+
+use "./tcp/tcp"
+use "./udp/udp"
+use "./unix/unix"
+
+export { tcp, udp, unix } as net

@@ -565,7 +565,16 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 
 			if isCopyExpr(v) && !weakSet[fieldName] {
-				cg.emitRetain(block, val)
+				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
+					if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+						if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+							ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+							block.NewCall(cg.ensureRetain(), ptrI8)
+						}
+					}
+				} else {
+					cg.emitRetain(block, val)
+				}
 			}
 		}
 	} else {
@@ -598,7 +607,16 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			// ARC: retain RC-tracked values copied from existing owners.
 			// Weak fields are non-owning: skip retain.
 			if isCopyExpr(f.Value) && !weakSet[f.Name] {
-				cg.emitRetain(block, val)
+				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
+					if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+						if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+							ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+							block.NewCall(cg.ensureRetain(), ptrI8)
+						}
+					}
+				} else {
+					cg.emitRetain(block, val)
+				}
 			}
 		}
 	}
@@ -849,6 +867,52 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 	}
 
 	return block.NewLoad(st, alloca), nil
+}
+
+// genPtrRangeSlice handles ptr[lo..hi] on a raw pointer, returning a fat [T].
+// For *byte it calls _tin_bytes_from_buf (ARC-managed copy).
+// For other *T it builds a non-owning fat pointer {ptr+lo, hi-lo}.
+func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr ast.Node, hiExpr ast.Node) (value.Value, error) {
+	ptrVal, err := cg.genExpr(block, ptrExpr)
+	if err != nil {
+		return nil, err
+	}
+
+	loVal, err := cg.genExpr(block, loExpr)
+	if err != nil {
+		return nil, err
+	}
+
+	hiVal, err := cg.genExpr(block, hiExpr)
+	if err != nil {
+		return nil, err
+	}
+
+	loVal = cg.coerce(block, loVal, irtypes.I64)
+	hiVal = cg.coerce(block, hiVal, irtypes.I64)
+
+	pt, ok := ptrVal.Type().(*irtypes.PointerType)
+	if !ok {
+		return nil, fmt.Errorf("range slice requires a pointer, got %s", ptrVal.Type())
+	}
+
+	length := block.NewSub(hiVal, loVal)
+	startPtr := block.NewGetElementPtr(pt.ElemType, ptrVal, loVal)
+
+	// *byte -> call _tin_bytes_from_buf for an ARC-managed [byte].
+	if pt.ElemType.Equal(irtypes.I8) {
+		return block.NewCall(cg.ensureBytesFromBuf(), startPtr, length), nil
+	}
+
+	// Other pointer types: build a non-owning fat pointer {T*, i64}.
+	fatType := irtypes.NewStruct(irtypes.NewPointer(pt.ElemType), irtypes.I64)
+	alloca := block.NewAlloca(fatType)
+	ptrGep := block.NewGetElementPtr(fatType, alloca, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(startPtr, ptrGep)
+	lenGep := block.NewGetElementPtr(fatType, alloca, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(length, lenGep)
+
+	return block.NewLoad(fatType, alloca), nil
 }
 
 // genSliceExpr generates code for a slice expression arr[start:end].

@@ -21,7 +21,7 @@ use mem
 
 struct list_node[t] =
   val  t
-  next *list_node[t]    // nil = end of list
+  next weak *list_node[t]    // nil = end of list
 
   static fn cons(val t, next *list_node[t]) *list_node[t] =
     let n *list_node[t] = mem::calloc(1, sizeof(list_node[t])).(*list_node[t])
@@ -58,8 +58,8 @@ fn list_get[t](node *list_node[t], idx i64) t =
 
 struct tree_node[t] =
   val   t
-  left  *tree_node[t]
-  right *tree_node[t]
+  left  weak *tree_node[t]
+  right weak *tree_node[t]
 
   static fn leaf(v t) *tree_node[t] =
     let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])

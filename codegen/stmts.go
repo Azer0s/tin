@@ -1731,22 +1731,93 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	isWeakTarget := false
 
 	if fa, ok2 := s.Target.(*ast.FieldAccess); ok2 {
-		if ident, ok3 := fa.Expr.(*ast.Identifier); ok3 {
+		// Unwrap an explicit dereference: (*x).field -> look up x.
+		innerExpr := fa.Expr
+		if de, ok3 := innerExpr.(*ast.DerefExpr); ok3 {
+			innerExpr = de.Expr
+		}
+
+		if ident, ok3 := innerExpr.(*ast.Identifier); ok3 {
 			if se, ok4 := cg.curScope.lookup(ident.Name); ok4 {
 				if pt, ok5 := se.val.Type().(*irtypes.PointerType); ok5 {
 					parentName := cg.typeNameOf(pt.ElemType)
+					// pt.ElemType is the variable's declared type (e.g. *Node).
+					// If it is itself a pointer, unwrap one more level to reach the struct.
+					if parentName == "" {
+						if pt2, ok6 := pt.ElemType.(*irtypes.PointerType); ok6 {
+							parentName = cg.typeNameOf(pt2.ElemType)
+						}
+					}
+
 					if parentName != "" {
 						isWeakTarget = cg.structWeakFields[parentName][fa.Field]
+					}
+				}
+			}
+		} else if innerFA, ok3 := innerExpr.(*ast.FieldAccess); ok3 {
+			// Handle chained field access like (*this.head).prev:
+			// innerExpr = FieldAccess{this, "head"} -> resolve this -> get head's type.
+			baseIdent, ok4 := innerFA.Expr.(*ast.Identifier)
+			if !ok4 {
+				if de2, ok5 := innerFA.Expr.(*ast.DerefExpr); ok5 {
+					baseIdent, ok4 = de2.Expr.(*ast.Identifier)
+				}
+			}
+
+			if ok4 {
+				if se, ok5 := cg.curScope.lookup(baseIdent.Name); ok5 {
+					// se.val is *ParentStruct or **ParentStruct; unwrap to get ParentStruct name.
+					baseType := se.val.Type()
+					if pt, ok6 := baseType.(*irtypes.PointerType); ok6 {
+						baseType = pt.ElemType
+						if pt2, ok7 := baseType.(*irtypes.PointerType); ok7 {
+							baseType = pt2.ElemType
+						}
+					}
+
+					if baseSt, ok6 := baseType.(*irtypes.StructType); ok6 && baseSt.Name() != "" {
+						// Now look up the type of innerFA.Field within baseSt.
+						fieldIdx := cg.fieldIndex(baseSt.Name(), innerFA.Field)
+						if fieldIdx >= 0 && fieldIdx < len(baseSt.Fields) {
+							fieldType := baseSt.Fields[fieldIdx]
+							// Unwrap pointer to get the struct pointed to by this field.
+							if fpt, ok7 := fieldType.(*irtypes.PointerType); ok7 {
+								if innerSt, ok8 := fpt.ElemType.(*irtypes.StructType); ok8 && innerSt.Name() != "" {
+									isWeakTarget = cg.structWeakFields[innerSt.Name()][fa.Field]
+								}
+							}
+						}
 					}
 				}
 			}
 		}
 	}
 
-	if isRCTrackedType(ptrType.ElemType) && !isWeakTarget {
+	// Check if the element is a pointer to a known Tin struct (ARC-managed
+	// via &Struct{} allocation).  Only for struct FIELD assignments (e.g.
+	// this.head = n), not for arbitrary pointer dereferences (*pp = target)
+	// which are raw pointer stores, not ownership transfers.
+	isTinStructPtrElem := false
+
+	if _, isFieldTarget := s.Target.(*ast.FieldAccess); isFieldTarget {
+		if ept, ok6 := ptrType.ElemType.(*irtypes.PointerType); ok6 {
+			if innerSt, ok7 := ept.ElemType.(*irtypes.StructType); ok7 && innerSt.Name() != "" {
+				_, isTinStructPtrElem = cg.structTypes[innerSt.Name()]
+			}
+		}
+	}
+
+	if (isRCTrackedType(ptrType.ElemType) || isTinStructPtrElem) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
 		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(val) {
-			cg.emitRetain(block, val)
+			if isTinStructPtrElem {
+				// Direct _tin_retain for *TinStruct pointers (emitRetain doesn't
+				// handle these to avoid retaining borrowed parameters).
+				ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+				block.NewCall(cg.ensureRetain(), ptrI8)
+			} else {
+				cg.emitRetain(block, val)
+			}
 		}
 
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)

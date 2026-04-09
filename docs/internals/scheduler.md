@@ -257,8 +257,11 @@ Many stdlib functions (`io::sleep`, `io::write_all`, `ioutil::read_string`,
 5. Timer thread and I/O thread are stopped (`_tin_timer_shutdown()`, `_tin_async_io_shutdown()`).
 6. Process exits.
 
-Unawaited fibers still in the run queue or parked are abandoned - their
-coroutine handles are not destroyed (memory is reclaimed by the OS on process exit).
+After workers are joined, `_tin_fiber_run` iterates any entries remaining in
+the run queue and calls `_tin_coro_free` on each handle before freeing the
+queue buffer. This ensures coroutine frames for fibers that were enqueued but
+never resumed are returned to the per-thread coro pool (and ultimately freed
+when the pool is flushed) rather than leaking.
 
 ---
 

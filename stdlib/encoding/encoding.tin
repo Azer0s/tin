@@ -1,0 +1,19 @@
+// stdlib/encoding - Data encoding and decoding library.
+//
+// Provides:
+//   base16 - hex encoding/decoding
+//   base64 - Base64 standard and URL-safe encoding/decoding
+//   json   - JSON encoding and decoding
+//   yaml   - YAML encoding and decoding
+//
+// Import examples:
+//   use encoding::base16
+//   use encoding::json
+//   use encoding
+
+use "./base16/base16"
+use "./base64/base64"
+use "./json/json"
+use "./yaml/yaml"
+
+export { base16, base64, json, yaml } as encoding

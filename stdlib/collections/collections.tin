@@ -1,0 +1,16 @@
+// stdlib/collections - Generic collection types.
+//
+// Provides:
+//   List[T]       - trait for list types
+//   Map[K, V]     - trait for map types
+//   LinkedList[T] - doubly-linked list implementing List[T]
+//   HashMap[K,V]  - open-addressing hash map implementing Map[K,V]
+//
+// Import: use collections
+
+use "./list"
+use "./map"
+use "./linked_list"
+use "./hashmap"
+
+export { List, Map, LinkedList, HashMap } as collections

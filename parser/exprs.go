@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
@@ -518,7 +519,35 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				}
 			}
 
-			if p.check(lexer.COLON) {
+			// Multi-type-arg: Type[T1, T2, ...] for generic instantiation.
+			// A comma inside [] is not valid for array indexing (Tin has no 2D index),
+			// so this is unambiguously a type argument list.
+			if p.check(lexer.COMMA) {
+				typeArgs := []string{}
+				if startID, ok := start.(*ast.Identifier); ok {
+					typeArgs = append(typeArgs, startID.Name)
+				}
+
+				for p.check(lexer.COMMA) {
+					p.advance() // consume ','
+
+					arg, err3 := p.parseExpr()
+					if err3 != nil {
+						return nil, err3
+					}
+
+					if argID, ok := arg.(*ast.Identifier); ok {
+						typeArgs = append(typeArgs, argID.Name)
+					}
+				}
+
+				if _, err2 := p.expect(lexer.RBRACKET); err2 != nil {
+					return nil, err2
+				}
+				// Encode multiple type args as a comma-separated identifier so that
+				// the DCOLON and DOT postfix handlers can reconstruct the concrete name.
+				expr = &ast.IndexExpr{Expr: expr, Index: &ast.Identifier{Name: strings.Join(typeArgs, ",")}}
+			} else if p.check(lexer.COLON) {
 				p.advance() // consume :
 
 				var end ast.Node

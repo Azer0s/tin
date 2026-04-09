@@ -488,3 +488,71 @@ and release them - but those fields are now owned by the loaded copy. Only the
 outer heap block (the `_tin_rc_alloc` allocation for the pointer itself) needs
 to be freed. Calling `_tin_release` directly decrements that block's RC and
 frees it when it reaches zero, without touching the fields.
+
+---
+
+## Call argument release (`emitCallArgRelease`)
+
+Temporary values produced by a call, string interpolation, or `++` concat may
+be passed directly as function arguments without ever being stored in a named
+variable. Without explicit cleanup, these allocations would leak.
+
+`emitCallArgRelease` (`codegen/runtime.go`) is called after each call site to
+release the pre-coercion argument value when appropriate. It fires only when
+the argument is a **temporary producer** (as determined by `isTemporaryProducer`
+below); it skips arguments that are references to existing named variables.
+
+### Rules
+
+| Argument type                          | Action                                              |
+|----------------------------------------|-----------------------------------------------------|
+| `any` (post-coercion only)             | `emitRelease(post)` - box from type coercion freed  |
+| `copy(x)` annotation                  | No-op - copy semantics, caller retains ownership    |
+| RC-tracked fat type (string, array, `any`) | `emitRelease(pre)` - direct release of fat value |
+| `*TinStruct` pointer from a temporary  | `emitRelease(pre)` - heap block returned by callee  |
+| Anything else                          | No-op                                               |
+
+The `*TinStruct` case uses the `isTemporaryProducer` gate to distinguish:
+- `foo()` passed as argument - temporary heap result, release after call.
+- `&stackVar` passed as argument - stack borrow, must NOT release.
+
+### `isTemporaryProducer`
+
+Returns `true` for expressions whose result is freshly retained and has no
+other owner:
+
+- `CallExpr` (function or method call result)
+- String interpolation (`"{x} {y}"`)
+- `++` concat result
+- Non-empty array literal (`[1, 2, 3]`)
+
+---
+
+## Struct field retain (`emitStructFieldRetain`)
+
+When a struct value is **copied** (passed by value, returned, or assigned),
+the compiler calls `emitRetain` on the copy. For RC-tracked fat types (string,
+array, `any`, closures) and nested struct values, `emitRetain` handles this
+via `walkRCStructFields`.
+
+For `*TinStruct` pointer fields (e.g., a linked-list node storing a `*Node`
+pointer as a field), a plain `emitRetain` would be a no-op - pointer types do
+not flow through the fat-type path. `emitStructFieldRetain` fills this gap.
+
+`emitStructFieldRetain` is called from the `walkRCStructFields` visitor
+(retained path only) and emits `_tin_retain(field_ptr as i8*)` when the field
+is a `*TinStruct` pointer. For all other field types, it delegates to the
+regular `emitRetain`.
+
+This ensures that copying a struct containing ARC-managed pointer fields
+correctly increments the reference count of the pointed-to allocation, keeping
+the object alive for the duration of the copy's lifetime.
+
+### Why this is separate from `emitRetain`
+
+`emitRetain` is also called for function parameters of type `*TinStruct`.
+Those parameters point to existing stack-allocated or heap-allocated structs
+owned by the caller; retaining them would be incorrect (the caller is
+responsible for the allocation's lifetime). `emitStructFieldRetain` is
+called only from the field-walk path, which is triggered only when copying a
+struct value - never for parameter handling.

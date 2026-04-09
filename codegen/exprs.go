@@ -1000,8 +1000,16 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			return block.NewFDiv(left, right), nil
 		}
 
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewUDiv(left, right), nil
+		}
+
 		return block.NewSDiv(left, right), nil
 	case "%":
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewURem(left, right), nil
+		}
+
 		return block.NewSRem(left, right), nil
 	case "==":
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false)
@@ -1036,10 +1044,18 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			return block.NewFCmp(enum.FPredOLT, left, right), nil
 		}
 
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewICmp(enum.IPredULT, left, right), nil
+		}
+
 		return block.NewICmp(enum.IPredSLT, left, right), nil
 	case "<=":
 		if isFloat {
 			return block.NewFCmp(enum.FPredOLE, left, right), nil
+		}
+
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewICmp(enum.IPredULE, left, right), nil
 		}
 
 		return block.NewICmp(enum.IPredSLE, left, right), nil
@@ -1048,10 +1064,18 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			return block.NewFCmp(enum.FPredOGT, left, right), nil
 		}
 
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewICmp(enum.IPredUGT, left, right), nil
+		}
+
 		return block.NewICmp(enum.IPredSGT, left, right), nil
 	case ">=":
 		if isFloat {
 			return block.NewFCmp(enum.FPredOGE, left, right), nil
+		}
+
+		if cg.exprElemIsUnsigned(e.Left) {
+			return block.NewICmp(enum.IPredUGE, left, right), nil
 		}
 
 		return block.NewICmp(enum.IPredSGE, left, right), nil

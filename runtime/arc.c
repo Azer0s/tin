@@ -42,6 +42,19 @@ void _tin_release(void *ptr) {
     if (prev == 1) free(hdr);
 }
 
+// Decrement reference count and free; returns 1 if the block was freed (prev==1).
+// Callers use the return value to decide whether child fields need recursive release.
+// The struct value MUST be loaded before calling this function, since the block is
+// freed before returning 1.
+int64_t _tin_release_struct(void *ptr) {
+    if (!ptr) return 0;
+    TinRCHdr *hdr = _rc_hdr(ptr);
+    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return 0;
+    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    if (prev == 1) { free(hdr); return 1; }
+    return 0;
+}
+
 // Release a fat array whose elements are fat-ptr ARC objects (strings, fat arrays).
 // Decrements the outer RC; only when RC reaches 0 does it release each element
 // and free the outer block.  This ensures element release happens exactly once

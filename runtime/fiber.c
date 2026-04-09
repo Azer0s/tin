@@ -1398,7 +1398,12 @@ void _tin_fiber_run(void) {
         _fiber_cap = 0;
     }
 
-    // Free run queue.
+    // Free run queue - release any coro frames still pending in the queue
+    // (fibers abandoned at shutdown that never got a chance to run).
+    for (int64_t i = 0; i < _run_queue.count; i++) {
+        TinRunnable r = _run_queue.buf[(_run_queue.head + i) % _run_queue.cap];
+        if (r.hdl) _tin_coro_free(r.hdl);
+    }
     free(_run_queue.buf);
     _run_queue.buf = NULL;
     pthread_mutex_destroy(&_run_queue.mu);

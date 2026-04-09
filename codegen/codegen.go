@@ -143,6 +143,7 @@ type CodeGen struct {
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
 	retainFn                   *ir.Func // _tin_retain(ptr i8*)
 	releaseFn                  *ir.Func // _tin_release(ptr i8*)
+	releaseStructFn            *ir.Func // _tin_release_struct(ptr i8*) i64
 	releaseFatElemArrayFn      *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
 	releaseAnyElemArrayFn      *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
 	releaseFnElemArrayFn       *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)

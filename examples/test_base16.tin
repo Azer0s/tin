@@ -1,0 +1,36 @@
+use assert
+use encoding::base16
+
+test "encode empty" =
+  assert::equals(base16::encode(""), "")
+
+test "encode single byte" =
+  assert::equals(base16::encode("A"), "41")
+
+test "encode string" =
+  assert::equals(base16::encode("hello"), "68656c6c6f")
+
+test "encode upper" =
+  assert::equals(base16::encode_upper("hello"), "68656C6C6F")
+
+test "decode empty" =
+  assert::equals(base16::decode(""), "")
+
+test "decode lowercase" =
+  assert::equals(base16::decode("68656c6c6f"), "hello")
+
+test "decode uppercase" =
+  assert::equals(base16::decode("68656C6C6F"), "hello")
+
+test "decode zero and ff" =
+  assert::equals(len(base16::decode("00ff")), 2)
+
+test "round trip" =
+  let cases [string] = ["", "a", "hello", "Hello, World!"]
+  let i i64 = 0
+  for i < len(cases):
+    assert::equals(base16::decode(base16::encode(cases[i])), cases[i])
+    i = i + 1
+
+test "round trip upper" =
+  assert::equals(base16::decode(base16::encode_upper("hello")), "hello")

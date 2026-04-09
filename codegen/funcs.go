@@ -144,6 +144,13 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	if n.IsExtern != "" {
 		return nil
 	}
+	// Generic functions are compiled on demand; register as template and skip.
+	if len(n.TypeParams) > 0 {
+		cg.genericFuncs[n.Name] = n
+		cg.genericFuncHomeScopes[n.Name] = cg.curScope
+
+		return nil
+	}
 
 	var params []*ir.Param
 
@@ -688,6 +695,14 @@ func isCompType(typeName string) bool {
 }
 
 func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
+	// Generic functions are compiled on demand; register as template and skip.
+	if len(n.TypeParams) > 0 && n.IsExtern == "" {
+		cg.genericFuncs[n.Name] = n
+		cg.genericFuncHomeScopes[n.Name] = cg.curScope
+
+		return nil
+	}
+
 	var retType irtypes.Type = irtypes.Void
 
 	if n.RetType != nil {

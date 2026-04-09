@@ -1,0 +1,84 @@
+// stdlib/collections/linked_list.tin - LinkedList[T] implementation of List[T].
+//
+// Doubly-linked list with ARC-managed nodes. The forward chain (next) is strong;
+// back-pointers (prev) are weak to avoid reference cycles. The tail field in
+// LinkedList is strong so ARC tracks it independently from the chain.
+//
+// push_back / push_front: O(1)
+// pop_front: O(1)
+// pop_back / get: O(n)
+
+use "./list"
+
+// Node[T] is an internal doubly-linked list node.
+struct Node[T] =
+  val  T
+  next *Node[T]
+  prev weak *Node[T]
+
+// LinkedList[T] implements the List[T] trait.
+struct LinkedList[T](List[T]) =
+  head *Node[T]
+  tail *Node[T]
+  _len i64
+
+  static fn new() LinkedList[T] =
+    return LinkedList[T]{head: nil, tail: nil, _len: 0}
+
+  fn len(this LinkedList[T]) i64 =
+    return this._len
+
+  fn get(this LinkedList[T], i i64) T =
+    let cur = this.head
+    let j i64 = 0
+    for j < i:
+      cur = (*cur).next
+      j = j + 1
+    return (*cur).val
+
+  fn push_back(this *LinkedList[T], v T) =
+    let n = &Node[T]{val: v, next: nil, prev: this.tail}
+    if this.tail != nil:
+      (*this.tail).next = n
+    else:
+      this.head = n
+    this.tail = n
+    this._len = this._len + 1
+
+  fn push_front(this *LinkedList[T], v T) =
+    let n = &Node[T]{val: v, next: this.head, prev: nil}
+    if this.head != nil:
+      (*this.head).prev = n
+    else:
+      this.tail = n
+    this.head = n
+    this._len = this._len + 1
+
+  fn pop_front(this *LinkedList[T]) T =
+    let val = (*this.head).val
+    let next = (*this.head).next
+    if next != nil:
+      (*next).prev = nil
+    else:
+      this.tail = nil
+    this.head = next
+    this._len = this._len - 1
+    return val
+
+  fn pop_back(this *LinkedList[T]) T =
+    let val = (*this.tail).val
+    if this._len == 1:
+      this.head = nil
+      this.tail = nil
+      this._len = 0
+      return val
+    let cur = this.head
+    let i i64 = 1
+    for i < this._len - 1:
+      cur = (*cur).next
+      i = i + 1
+    (*cur).next = nil
+    this.tail = cur
+    this._len = this._len - 1
+    return val
+

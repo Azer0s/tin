@@ -179,20 +179,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					pre := preCoerceVals[i]
-
-					post := argVals[i]
-					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
-						cg.emitRelease(block, post)
-
-						continue
-					}
-
-					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
-						continue
-					}
-
-					cg.emitRelease(block, pre)
+					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -250,24 +237,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				preCoerce := argValsPreCoerce[i]
-
-				postCoerce := argVals[i]
-				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
-					cg.emitRelease(block, postCoerce)
-
-					continue
-				}
-
-				if !isRCTrackedType(preCoerce.Type()) {
-					continue
-				}
-
-				if isCopyExpr(astArg) {
-					continue
-				}
-
-				cg.emitRelease(block, preCoerce)
+				cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
 			}
 
 			if irtypes.IsVoid(result.Type()) {
@@ -313,12 +283,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			methodKey := staticName + "_" + fn.Field
 			// Also try the concrete monomorphized key when a type arg is present.
 			if typeArgStr != "" {
-				concreteName := staticName + "__" + typeArgStr
+				// typeArgStr may be comma-separated for multi-param generics (e.g. "string,i64").
+				// Build the canonical concrete name by joining parts with __.
+				typeArgParts := strings.Split(typeArgStr, ",")
+
+				concreteName := staticName + "__" + strings.Join(typeArgParts, "__")
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
 					if _, isGeneric := cg.genericStructsByArity[staticName]; isGeneric {
+						typeParams := make([]ast.TypeExpr, len(typeArgParts))
+						for i, p := range typeArgParts {
+							typeParams[i] = parseTypeParamStr(strings.TrimSpace(p))
+						}
+
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
-							Type: &ast.GenericType{Name: staticName, TypeParams: []ast.TypeExpr{parseTypeParamStr(typeArgStr)}},
+							Type: &ast.GenericType{Name: staticName, TypeParams: typeParams},
 						}
 						_ = cg.genTypeDecl(synthDecl)
 					}
@@ -476,24 +455,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				preCoerce := argVals[i]
-
-				postCoerce := llArgs[i+thisOff]
-				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
-					cg.emitRelease(block, postCoerce)
-
-					continue
-				}
-
-				if !isRCTrackedType(preCoerce.Type()) {
-					continue
-				}
-
-				if isCopyExpr(astArg) {
-					continue
-				}
-
-				cg.emitRelease(block, preCoerce)
+				cg.emitCallArgRelease(block, astArg, argVals[i], llArgs[i+thisOff])
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -581,20 +543,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					pre := callArgs[i]
-
-					post := llArgs[i+1]
-					if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
-						cg.emitRelease(block, post)
-
-						continue
-					}
-
-					if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
-						continue
-					}
-
-					cg.emitRelease(block, pre)
+					cg.emitCallArgRelease(block, astArg, callArgs[i], llArgs[i+1])
 				}
 
 				// ARC: release temporary struct receiver (method chain temporaries).
@@ -691,7 +640,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 
 			result := block.NewCall(callee, llArgs...)
-			// ARC: release temporary RC-tracked args (same logic as genCallExpr bottom).
+			// ARC: release temporary RC-tracked args.
 			thisOff := 1
 			if instIsStatic {
 				thisOff = 0
@@ -702,24 +651,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				preCoerce := llArgsPreCoerce[i]
-
-				postCoerce := llArgs[i+thisOff]
-				if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
-					cg.emitRelease(block, postCoerce)
-
-					continue
-				}
-
-				if !isRCTrackedType(preCoerce.Type()) {
-					continue
-				}
-
-				if isCopyExpr(astArg) {
-					continue
-				}
-
-				cg.emitRelease(block, preCoerce)
+				cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff])
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -802,24 +734,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						preCoerce := argValsPreCoerce[i]
-
-						postCoerce := argVals[i]
-						if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
-							cg.emitRelease(block, postCoerce)
-
-							continue
-						}
-
-						if !isRCTrackedType(preCoerce.Type()) {
-							continue
-						}
-
-						if isCopyExpr(astArg) {
-							continue
-						}
-
-						cg.emitRelease(block, preCoerce)
+						cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
 					}
 
 					if irtypes.IsVoid(result.Type()) {
@@ -927,20 +842,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						pre := preCoerceVals[i]
-						post := argVals[i]
-
-						if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
-							cg.emitRelease(block, post)
-
-							continue
-						}
-
-						if !isRCTrackedType(pre.Type()) || isCopyExpr(astArg) {
-							continue
-						}
-
-						cg.emitRelease(block, pre)
+						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
 					}
 
 					if irtypes.IsVoid(result2.Type()) {
@@ -1033,36 +935,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	// release them after the callee finishes.  The callee retains on entry and
 	// releases on exit, so the net rc after the call is still 1.  We drop our
 	// owning reference here to reach rc=0 and free the block.
-	argIdx := 0
-	for _, astArg := range e.Args {
-		if argIdx >= len(llArgsPreCoerce) {
+	for i, astArg := range e.Args {
+		if i >= len(llArgsPreCoerce) {
 			break
 		}
 
-		preCoerce := llArgsPreCoerce[argIdx]
-		postCoerce := llArgs[argIdx]
-		argIdx++
-
-		// Case 1: adaptArgs boxed a non-any value to any (fresh _tin_rc_alloc).
-		// The box is now owned by us; release it after the call regardless of
-		// whether the source expression was a copy (identifier) or a temporary.
-		if isAnyType(postCoerce.Type()) && !isAnyType(preCoerce.Type()) {
-			cg.emitRelease(block, postCoerce)
-
-			continue
-		}
-
-		// Case 2: pre-coerce value is RC-tracked and the argument is a temporary.
-		if !isRCTrackedType(preCoerce.Type()) {
-			continue
-		}
-
-		if isCopyExpr(astArg) {
-			// Named variable: its scope entry will release it at scope exit.
-			continue
-		}
-		// Temporary fresh allocation: release our reference.
-		cg.emitRelease(block, preCoerce)
+		cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i])
 	}
 
 	if irtypes.IsVoid(result.Type()) {
@@ -1246,6 +1124,11 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 }
 
 func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value, error) {
+	// ptr[lo..hi] - range slice on a raw pointer: produce a fat-pointer [T].
+	if bin, ok := e.Index.(*ast.BinExpr); ok && bin.Op == ".." {
+		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
+	}
+
 	arr, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
