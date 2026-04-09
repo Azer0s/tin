@@ -11,7 +11,7 @@
 
 use { loop, async } from macros
 use ioutil
-use unix
+use net::unix
 use errors
 
 async handle_conn(conn unix::Conn) =

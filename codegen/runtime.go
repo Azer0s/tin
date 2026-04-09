@@ -1432,6 +1432,16 @@ func (cg *CodeGen) ensureBytesFromBuf() *ir.Func {
 		return cg.bytesFromBufFn
 	}
 
+	// Reuse any existing declaration (e.g. from ioutil/os declaring the same
+	// extern under a different Tin name) to avoid duplicate IR declarations.
+	for _, f := range cg.mod.Funcs {
+		if f.Name() == "_tin_bytes_from_buf" {
+			cg.bytesFromBufFn = f
+
+			return f
+		}
+	}
+
 	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 	cg.bytesFromBufFn = cg.mod.NewFunc("_tin_bytes_from_buf", sliceType,
 		ir.NewParam("ptr", irtypes.I8Ptr),

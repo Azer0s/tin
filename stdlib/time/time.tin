@@ -29,7 +29,7 @@
 
 use errors
 use { Err } from errors
-use json
+use encoding::json
 
 // C helpers (private)
 fn _tin_now_ns_c() i64       = extern("_tin_now_ns_real")

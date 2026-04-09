@@ -15,8 +15,8 @@
 use { loop, async } from macros
 use io
 use ioutil
-use tcp
-use json
+use net::tcp
+use encoding::json
 use errors
 
 async handle_conn(conn tcp::Conn) =

@@ -10,7 +10,7 @@
 //   kill %1
 
 use { loop, async } from macros
-use udp
+use net::udp
 use ioutil
 use errors
 

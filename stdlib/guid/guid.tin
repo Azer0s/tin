@@ -15,7 +15,7 @@
 // Guid implements json::JsonSerializable and json::JsonDeserializable.
 // Struct fields of type Guid are encoded as JSON strings and decoded automatically.
 
-use json
+use encoding::json
 
 fn rand() i32 = extern("rand")
 

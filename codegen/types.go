@@ -326,6 +326,20 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	if idx := strings.LastIndex(name, "::"); idx >= 0 {
 		bareName = name[idx+2:]
 	}
+	// For package-qualified names (e.g. "udp::Conn"), try the canonical
+	// pkg__Name key BEFORE falling back to the bare name.  This prevents a
+	// same-named type from a later-loaded package (e.g. unix::Conn registered
+	// as the bare alias "Conn") from shadowing the intended type.
+	if bareName != name {
+		pkgQualKey := strings.ReplaceAll(name, "::", "__")
+		if st, ok := cg.structTypes[pkgQualKey]; ok {
+			return st, nil
+		}
+
+		if et, ok := cg.enumTypes[pkgQualKey]; ok {
+			return et, nil
+		}
+	}
 	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
 	if bareName != name {
 		if _, ok := cg.traits[bareName]; ok {

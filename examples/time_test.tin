@@ -5,7 +5,7 @@
 use assert
 use time
 use { Instant, Duration } from time
-use json
+use encoding::json
 use guid
 use { Guid } from guid
 use errors

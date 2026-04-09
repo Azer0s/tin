@@ -15,7 +15,7 @@
 use { loop, async } from macros
 use io
 use ioutil
-use tcp
+use net::tcp
 use errors
 
 async handle_conn(conn tcp::Conn) =
