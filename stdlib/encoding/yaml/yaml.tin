@@ -64,7 +64,7 @@ struct Value =
   ival  i64
   fval  f64
   sval  string
-  items [*Value]
+  items own [*Value]
   kkeys [string]
 
   fn is_null(this Value) bool   = return this.kind == Kind.null_v

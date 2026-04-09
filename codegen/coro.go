@@ -129,13 +129,13 @@ func (cg *CodeGen) ensureFiberRuntime() {
 	cg.fiberInitFn = cg.ensureExternDecl("_tin_fiber_init", irtypes.Void, nil, false)
 	cg.fiberRunFn = cg.ensureExternDecl("_tin_fiber_run", irtypes.Void, nil, false)
 	cg.ioInitFn = cg.ensureExternDecl("_tin_io_init", irtypes.Void, nil, false)
-	// Auto-load stdlib/sync so Future[t] and Awaitable[t] are available
+	// Auto-load sync so Future[t] and Awaitable[t] are available
 	// for spawn/await codegen without requiring an explicit `use sync`.
 	// Error is stored; if sync fails to load, wrapPidInFuture will report it.
 	cg.syncLoadErr = cg.ensureSyncModule()
 }
 
-// ensureSyncModule loads the stdlib/sync package once so that Future[t],
+// ensureSyncModule loads the sync package once so that Future[t],
 // Awaitable[t], and Unit are available in scope for fiber codegen.
 // Returns the load error so callers can report it if Future[T] wrapping later fails.
 func (cg *CodeGen) ensureSyncModule() error {

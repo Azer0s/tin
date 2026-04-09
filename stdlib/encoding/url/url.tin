@@ -1,0 +1,113 @@
+// stdlib/encoding/url - URL percent-encoding (RFC 3986).
+//
+// Unreserved characters (A-Z a-z 0-9 - _ . ~) are passed through unchanged.
+// All other bytes are percent-encoded as %XX where XX is the uppercase hex
+// value of the byte.
+//
+// decode also handles application/x-www-form-urlencoded: '+' is treated as
+// a space on decode (but spaces are encoded as %20, not '+', on encode).
+
+use assert
+
+fn hex_char(n i64) byte =
+  if n < 10:
+    return (n + 48) as byte   // '0' = 48
+  return (n + 55) as byte     // 'A' - 10 = 55
+
+// encode percent-encodes s for use in a URL.
+// Unreserved chars (RFC 3986) are left as-is; everything else becomes %XX.
+fn encode(s string) string =
+  let result = ""
+  let i i64 = 0
+  let n = len(s)
+  for i < n:
+    let c = s[i] as byte
+    let unreserved = (c >= @'A' && c <= @'Z') || (c >= @'a' && c <= @'z') || (c >= @'0' && c <= @'9') || c == @'-' || c == @'_' || c == @'.' || c == @'~'
+    if unreserved:
+      result = result ++ c
+    else:
+      let v = c as i64
+      result = result ++ @'%'
+      result = result ++ hex_char((v >> 4) & 0xF)
+      result = result ++ hex_char(v & 0xF)
+    i = i + 1
+  return result
+
+fn from_hex(c byte) i64 =
+  if c >= @'0' && c <= @'9':
+    return (c - @'0') as i64
+  if c >= @'A' && c <= @'F':
+    return ((c - @'A') as i64) + 10
+  if c >= @'a' && c <= @'f':
+    return ((c - @'a') as i64) + 10
+  return -1
+
+// decode decodes a percent-encoded string.
+// %XX sequences are decoded to the corresponding byte.
+// '+' is decoded as a space (application/x-www-form-urlencoded compatibility).
+// Invalid %XX sequences are passed through unchanged.
+fn decode(s string) string =
+  let result = ""
+  let i i64 = 0
+  let n = len(s)
+  for i < n:
+    let c = s[i] as byte
+    if c == @'%' && i + 2 < n:
+      let hi = from_hex(s[i + 1] as byte)
+      let lo = from_hex(s[i + 2] as byte)
+      if hi >= 0 && lo >= 0:
+        result = result ++ (hi * 16 + lo) as byte
+        i = i + 3
+      else:
+        result = result ++ c
+        i = i + 1
+    else if c == @'+':
+      result = result ++ @' '
+      i = i + 1
+    else:
+      result = result ++ c
+      i = i + 1
+  return result
+
+test "encode unreserved chars unchanged" =
+  assert::equals(encode("abc"), "abc")
+  assert::equals(encode("ABC"), "ABC")
+  assert::equals(encode("123"), "123")
+  assert::equals(encode("-_.~"), "-_.~")
+
+test "encode special chars" =
+  assert::equals(encode(" "), "%20")
+  assert::equals(encode("/"), "%2F")
+  assert::equals(encode("?"), "%3F")
+  assert::equals(encode("="), "%3D")
+  assert::equals(encode("&"), "%26")
+  assert::equals(encode("+"), "%2B")
+
+test "encode mixed string" =
+  assert::equals(encode("hello world"), "hello%20world")
+  assert::equals(encode("foo=bar&baz=qux"), "foo%3Dbar%26baz%3Dqux")
+  assert::equals(encode("https://example.com/path?q=1"), "https%3A%2F%2Fexample.com%2Fpath%3Fq%3D1")
+
+test "decode percent sequences" =
+  assert::equals(decode("%20"), " ")
+  assert::equals(decode("%2F"), "/")
+  assert::equals(decode("%3F"), "?")
+  assert::equals(decode("hello%20world"), "hello world")
+
+test "decode plus as space" =
+  assert::equals(decode("hello+world"), "hello world")
+  assert::equals(decode("a+b+c"), "a b c")
+
+test "decode invalid sequence passthrough" =
+  assert::equals(decode("%ZZ"), "%ZZ")
+  assert::equals(decode("%2"), "%2")
+
+test "decode lowercase hex" =
+  assert::equals(decode("%2f"), "/")
+  assert::equals(decode("%3d"), "=")
+
+test "encode then decode roundtrip" =
+  let original = "hello world! foo=bar&baz=123"
+  assert::equals(decode(encode(original)), original)
+
+export { encode, decode } as url

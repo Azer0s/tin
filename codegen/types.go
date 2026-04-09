@@ -27,6 +27,15 @@ import (
 // This guarantees that Future[sync::Unit] and Future[Unit] (inside sync)
 // coalesce to the same concrete key "Future__sync__Unit".
 func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
+	return cg.typeExprCanonicalKeyN(te, 0)
+}
+
+func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
+	if depth > 64 {
+		// Alias chain too deep (likely a cycle); return the bare type string.
+		return te.String()
+	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		name := t.Name
@@ -37,7 +46,7 @@ func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
 		// Bare name: look up in typeAliases for the canonical form.
 		// Recurse to handle alias chains (e.g. t -> Unit -> sync__Unit, or t -> [byte]).
 		if alias, ok := cg.typeAliases[name]; ok {
-			return cg.typeExprCanonicalKey(alias)
+			return cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
 
 		return name
@@ -51,14 +60,14 @@ func (cg *CodeGen) typeExprCanonicalKey(te ast.TypeExpr) string {
 
 		parts := make([]string, len(t.TypeParams))
 		for i, tp := range t.TypeParams {
-			parts[i] = cg.typeExprCanonicalKey(tp)
+			parts[i] = cg.typeExprCanonicalKeyN(tp, depth+1)
 		}
 
 		return name + "__" + strings.Join(parts, "__")
 	case *ast.PointerType:
-		return "*" + cg.typeExprCanonicalKey(t.Elem)
+		return "*" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
 	case *ast.ArrayType:
-		return "[]" + cg.typeExprCanonicalKey(t.Elem)
+		return "[]" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
 	}
 
 	return te.String()

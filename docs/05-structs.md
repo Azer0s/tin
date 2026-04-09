@@ -241,74 +241,106 @@ releases it on scope exit.
 
 ---
 
-## Weak fields
+## Weak and own fields
 
-Two structs that each hold a pointer to the other form a reference cycle.
-Tin's compiler detects cycles in the struct field graph at compile time and
-requires at least one edge in every cycle to be marked `weak`.
+Tin uses ARC (automatic reference counting) for memory management. Two structs
+that each hold a strong pointer to the other form a reference cycle: neither
+can ever reach RC == 0, so both leak. The compiler detects cycles in the struct
+field graph at compile time using Tarjan's SCC algorithm and enforces that
+every cycle is annotated with the programmer's intent.
 
-### The problem
+There are two field ownership modifiers:
 
-A doubly-linked list node needs to point both forward and backward:
+| Modifier | RC behaviour | Cycle role |
+|----------|-------------|------------|
+| *(none)* - plain strong | retain on assign, release on free | Default owning reference |
+| `weak` | no retain / no release | Non-owning back-reference; breaks ARC cycles |
+| `own` | retain on assign, release on free (same as strong) | Owning tree-edge; declares the referenced data is acyclic at runtime |
 
-```rust
-struct node =
-  value i64
-  next  *node   // forward pointer
-  prev  *node   // backward pointer - creates a cycle
-```
+---
 
-Because both fields point to `node`, the type graph has a cycle. The compiler
-rejects this:
+### `weak` - non-owning back-references
 
-```
-error: reference cycle detected: node
-  at least one field in the cycle must be marked `weak`
-```
-
-### The solution
-
-Mark the non-owning direction `weak`:
+Use `weak` when a field is a back-reference that must not keep the target
+alive. The classic example is a doubly-linked list:
 
 ```rust
-struct node =
-  value i64
-  next  *node        // strong: owns / leads the chain
-  prev  weak *node   // weak:   back-reference, does not own
+struct Node[T] =
+  val  T
+  next *Node[T]        // strong: owns the forward chain
+  prev weak *Node[T]   // weak:   back-reference, does not own
 ```
 
-`weak` goes directly before the field type. A weak field behaves as a
-non-owning pointer - no retain or release is emitted for it at runtime:
+`weak` goes directly before the field type. A weak field:
 
 - Is **not** retained when assigned.
 - Is **not** released when the struct is freed.
-- The programmer is responsible for not letting it outlive the owning side.
+- The programmer is responsible for not letting the weak reference outlive
+  the owning side.
 
-### Compiler cycle detection
+---
 
-The compiler runs Tarjan's SCC algorithm on the struct type graph. Every
-strongly-connected component that forms a cycle must satisfy:
+### `own` - tree-ownership declaration
+
+Use `own` when a struct contains children of the same type and the runtime
+data is guaranteed to form a tree (no cycles). A common example is a parsed
+AST or a JSON/YAML value tree:
+
+```rust
+struct Expr =
+  kind  ExprKind
+  left  own *Expr    // owns left child - promise: no cycles at runtime
+  right own *Expr    // owns right child
+```
+
+`own` is semantically identical to a plain strong field at runtime: the field
+is retained on assign and released on free. The only difference is at compile
+time: the cycle checker accepts a cycle that contains at least one `own` edge
+without requiring a corresponding `weak` edge.
+
+**The programmer declares a contract:** fields marked `own` will never form a
+runtime cycle. The compiler does not verify this - doing so would require
+either a full ownership type system or an O(depth) walk on every assignment.
+Violating the contract (e.g. `node.left own= node`) produces a memory leak,
+exactly as manually constructing a strong-reference cycle would in any ARC
+language.
+
+> `own` is the programmer saying "I am not a morron."
+>
+> Future work: a debug-mode build option will add a runtime acyclicity check
+> on `own` field assignments to catch contract violations during development.
+
+---
+
+### Compiler cycle detection rules
+
+Every strongly-connected component that contains a cycle must satisfy:
 
 | Cycle composition | Result |
 |---|---|
-| All strong edges | **Error** - at least one must be `weak` |
-| All weak edges | **Error** - nobody owns the structs |
-| Mix of strong and weak | **OK** |
+| All plain strong, no `weak`, no `own` | **Error** - annotate intent |
+| All `weak`, no strong, no `own` | **Error** - no owner; objects would be freed immediately |
+| At least one `weak` (any number of strong) | **OK** - classic ARC cycle-breaking |
+| At least one `own` (no `weak` needed) | **OK** - programmer declares acyclic |
 
 ```rust
-// ERROR: mutual strong references
-struct parent =
-  child *child
+// ERROR: mutual plain strong references - nobody breaks the cycle
+struct Parent =
+  child *Child
 
-struct child =
-  parent *parent
+struct Child =
+  parent *Parent
 
-// OK: one strong, one weak
-struct parent =
-  child *child
+// OK: one strong owner, one weak back-reference
+struct Parent =
+  child *Child
 
-struct child =
-  parent weak *parent
+struct Child =
+  parent weak *Parent
+
+// OK: self-referential tree type - own declares acyclic data
+struct JsonValue =
+  items own [*JsonValue]   // owns child values; data is always a tree
 ```
 
 ---

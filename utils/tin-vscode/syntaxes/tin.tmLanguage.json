@@ -155,7 +155,7 @@
         {
           "comment": "Declaration keywords",
           "name": "keyword.declaration.tin",
-          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|from|forward|override|static|virtual|weak)\\b"
+          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|from|forward|override|static|virtual|weak|own)\\b"
         },
         {
           "comment": "Expression keywords",

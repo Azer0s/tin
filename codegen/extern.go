@@ -45,6 +45,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 					// x86-64 SysV ABI: coerce to i(size*8).
 					return coerced, nil
 				}
+
 				if cg.targetIsARM64() {
 					// AAPCS64 (ARM64/Apple Silicon): all small integer structs
 					// (≤8 bytes) are zero-extended to a 64-bit register (i64).

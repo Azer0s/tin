@@ -1,0 +1,94 @@
+// own_weak.tin - demonstrates `weak` and `own` field ownership modifiers.
+//
+// Tin uses ARC (automatic reference counting).  Two structs that mutually
+// hold strong pointers to each other would never reach RC == 0 and would
+// leak.  The compiler catches this at compile time and requires every
+// detected cycle to be annotated with programmer intent.
+//
+// Two field modifiers are available:
+//
+//   weak - non-owning reference.  No retain/release is emitted.
+//          Used for back-references (parent pointers, delegates) that must
+//          not keep the target alive.
+//
+//   own  - owning tree-edge.  RC behaviour is identical to a plain strong
+//          field.  The programmer declares the referenced data forms a tree
+//          (no runtime cycles).  The compiler trusts this declaration.
+
+// ---------------------------------------------------------------------------
+// Part 1: doubly-linked list  (plain strong + weak)
+//
+// The forward chain (next) is the owning direction.  The backward pointer
+// (prev) is weak: it does not retain the node it points to.
+// ---------------------------------------------------------------------------
+
+struct ListNode =
+  val  i64
+  next *ListNode        // strong: owns the forward chain
+  prev weak *ListNode   // weak:   back-reference, does not own
+
+fn make_list(vals [i64]) *ListNode =
+  if len(vals) == 0:
+    return nil
+  let head = &ListNode{val: vals[0], next: nil, prev: nil}
+  let cur = head
+  let i i64 = 1
+  for i < len(vals):
+    let node = &ListNode{val: vals[i], next: nil, prev: cur}
+    cur.next = node
+    cur = node
+    i = i + 1
+  return head
+
+fn list_sum(head *ListNode) i64 =
+  let s i64 = 0
+  let cur = head
+  for cur != nil:
+    s = s + cur.val
+    cur = cur.next
+  return s
+
+let nums = [1, 2, 3, 4, 5]
+let head = make_list(nums)
+echo list_sum(head)   // 15
+
+// ---------------------------------------------------------------------------
+// Part 2: expression tree  (own)
+//
+// An expression tree is always acyclic: a node owns its children and
+// children never reference their parent.  Using `own` tells the compiler
+// "I promise the data forms a tree" and allows the self-referential type
+// without requiring a weak back-reference.
+// ---------------------------------------------------------------------------
+
+enum ExprKind =
+  lit_v    // leaf: literal integer
+  add_v    // binary: left + right
+  mul_v    // binary: left * right
+
+struct Expr =
+  kind  ExprKind
+  ival  i64          // used when kind == lit_v
+  left  own *Expr    // owns left child  (nil for literals)
+  right own *Expr    // owns right child (nil for literals)
+
+fn lit(n i64) *Expr =
+  return &Expr{kind: ExprKind.lit_v, ival: n, left: nil, right: nil}
+
+fn add(l *Expr, r *Expr) *Expr =
+  return &Expr{kind: ExprKind.add_v, ival: 0, left: l, right: r}
+
+fn mul(l *Expr, r *Expr) *Expr =
+  return &Expr{kind: ExprKind.mul_v, ival: 0, left: l, right: r}
+
+fn eval(e *Expr) i64 =
+  if e == nil:
+    return 0
+  match e.kind:
+    case ExprKind.lit_v: return e.ival
+    case ExprKind.add_v: return eval(e.left) + eval(e.right)
+    case ExprKind.mul_v: return eval(e.left) * eval(e.right)
+
+// Build: (2 + 3) * (4 + 1)
+let expr = mul(add(lit(2), lit(3)), add(lit(4), lit(1)))
+echo eval(expr)   // 25

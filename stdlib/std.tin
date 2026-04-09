@@ -3,6 +3,9 @@ use math
 use os
 use guid
 use assert
+use strings
+use reflect
+use mem
 
 export {
     io,

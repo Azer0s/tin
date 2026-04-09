@@ -3,7 +3,9 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -172,6 +174,13 @@ type CodeGen struct {
 	exports map[string]string
 	// importedPkgs: packageName -> true  (to avoid double-loading)
 	importedPkgs map[string]bool
+
+	// stdlibOverride: when non-empty, overrides the default <execDir>/stdlib search path.
+	// Set via --stdlib flag.
+	stdlibOverride string
+	// libsRoots: additional libs/ root directories searched after stdlib/.
+	// Default: [<execDir>/libs]. Extended via --lib-root flags.
+	libsRoots []string
 
 	// constrained generic functions
 	// constrainedFuncs: funcName -> FuncDecl template (has Constraints)
@@ -662,7 +671,35 @@ func New(filename string) *CodeGen {
 	cg.mod.TypeDefs = append(cg.mod.TypeDefs, atomType)
 	cg.initBuiltinTupleTemplates()
 
+	// Default libs root: <execDir>/libs next to the tin binary.
+	if ex, err := os.Executable(); err == nil {
+		cg.libsRoots = []string{filepath.Join(filepath.Dir(ex), "libs")}
+	}
+
 	return cg
+}
+
+// SetStdlibOverride overrides the default stdlib/ search path.
+// Used by the --stdlib CLI flag.
+func (cg *CodeGen) SetStdlibOverride(path string) { cg.stdlibOverride = path }
+
+// AddLibsRoot prepends an additional libs root directory to the search path.
+// Used by the --lib-root CLI flag.
+func (cg *CodeGen) AddLibsRoot(path string) {
+	cg.libsRoots = append([]string{path}, cg.libsRoots...)
+}
+
+// stdlibBase returns the effective stdlib directory.
+func (cg *CodeGen) stdlibBase() string {
+	if cg.stdlibOverride != "" {
+		return cg.stdlibOverride
+	}
+
+	if ex, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(ex), "stdlib")
+	}
+
+	return "stdlib"
 }
 
 // initBuiltinTupleTemplates pre-populates the Tuple generic struct templates
@@ -983,10 +1020,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 		cg.emitAtomTable()
 
-		if err := cg.writeModuleFiles(prog); err != nil {
-			return nil, err
-		}
-
 		return cg.mod, nil
 	}
 
@@ -1129,11 +1162,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// Emit the compile-time atom table and fill in atom helper function bodies.
 	cg.emitAtomTable()
-
-	// Write module file for any package exports in this source file.
-	if err := cg.writeModuleFiles(prog); err != nil {
-		return nil, err
-	}
 
 	// If no main function was generated (e.g. export-only module), emit a
 	// trivial no-op main so the binary links successfully.

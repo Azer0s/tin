@@ -1,6 +1,6 @@
 // mathlib.tin - a simple math package
-// Compile: tin build mathlib.tin -o mathlib.o
-// This produces mathlib.o (object file) AND mathlib.tin.mod (declarations).
+// Used as a local package by main.tin (placed in the same directory).
+// No pre-compilation needed: tin compiles it inline from source.
 
 fn add(a i64, b i64) i64 =
   return a + b

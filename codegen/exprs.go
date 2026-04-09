@@ -222,7 +222,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		if structName == "" {
 			if val.Type().Equal(irtypes.I64) {
 				if cg.syncLoadErr != nil {
-					return nil, fmt.Errorf("await: stdlib/sync failed to load so spawn returned a raw pid.\n"+
+					return nil, fmt.Errorf("await: sync package failed to load so spawn returned a raw pid.\n"+
 						"  Ensure the tin executable is alongside the stdlib/ directory.\n"+
 						"  Load error: %w", cg.syncLoadErr)
 				}

@@ -26,16 +26,16 @@ expression-oriented syntax. It compiles to native code via LLVM.
 
 | Document                           | Contents                                                                                       |
 |------------------------------------|------------------------------------------------------------------------------------------------|
+| [Collections](stdlib/collections.md) | Generic collections: `LinkedList[T]`, `HashMap[K,V]`, `List[T]` and `Map[K,V]` traits        |
+| [Encoding](stdlib/encoding.md)     | Encoding/decoding: `base16`, `base64`, `url`, `json`, `yaml` sub-packages                     |
 | [Errors](stdlib/errors.md)         | Error type: `Err` alias, `new`, `wrap`, `has`, `equals`                                        |
 | [Floats](stdlib/floats.md)         | IEEE 754 special values: `NaN`, `Inf`, `NegInf`, `is_nan`, `is_finite`                         |
 | [Hash](stdlib/hash.md)             | Hash functions: FNV-1a, MD5, SHA-1, xxHash3                                                    |
-| [JSON](stdlib/json.md)             | JSON encoding/decoding: `encode`, `parse`, `parse[T]`, field tags, `JsonSerializable`          |
 | [Measure](stdlib/measure.md)       | Monotonic clock: `now_us`, `now_ms` for benchmarking                                           |
 | [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types                              |
 | [Regex](stdlib/regex.md)           | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split`                    |
 | [SIMD](stdlib/simd.md)             | Portable SIMD: vector types, `splat`, `loadu`, `cmpeq`, `movemask`, arch directives            |
 | [Strings](stdlib/strings.md)       | String operations: `replace`, `split`, `join`, `trim`, `contains`, `index_of`, case conversion |
-| [YAML](stdlib/yaml.md)             | YAML encoding/decoding: `encode`, `parse`, `parse[T]`, field tags, `YamlSerializable`          |
 
 ## Quick taste
 

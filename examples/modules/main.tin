@@ -1,7 +1,5 @@
 // main.tin - uses the mathlib package
-// After building mathlib.tin:
-//   tin build main.tin -o main.o
-//   clang main.o mathlib.o -o main && ./main
+// Run: tin run main.tin  (mathlib.tin is found locally in the same directory)
 
 use mathlib
 

@@ -565,6 +565,14 @@ type StructField struct {
 	Tags      []string
 	IsForward bool
 	IsWeak    bool // non-owning: field does not retain/release its value
+	// IsOwn marks an owning tree-edge field.  At runtime it is identical to a
+	// plain strong field (retain on assign, release on free).  The difference
+	// is compile-time only: the cycle checker allows a detected cycle that
+	// contains at least one `own` edge without requiring a `weak` back-ref.
+	// The programmer declares the data reachable through this field is acyclic
+	// (forms a tree/DAG).  No runtime enforcement is performed; a future
+	// debug-mode build option will add an acyclicity check on assignment.
+	IsOwn bool
 }
 
 type EnumMember struct {

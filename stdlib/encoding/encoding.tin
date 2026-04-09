@@ -15,5 +15,6 @@ use "./base16/base16"
 use "./base64/base64"
 use "./json/json"
 use "./yaml/yaml"
+use "./url/url"
 
-export { base16, base64, json, yaml } as encoding
+export { base16, base64, json, yaml, url } as encoding

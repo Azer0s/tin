@@ -524,10 +524,10 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
 		if cg.syncLoadErr != nil {
-			return nil, fmt.Errorf("spawn: stdlib/sync failed to load: %w; ensure the tin executable is in its installed location alongside the stdlib/ directory", cg.syncLoadErr)
+			return nil, fmt.Errorf("spawn: sync package failed to load: %w; ensure the tin executable is alongside the stdlib/ directory", cg.syncLoadErr)
 		}
 
-		return nil, fmt.Errorf("spawn: Future[%s] not available - stdlib/sync could not be loaded; ensure the tin executable is in its installed location alongside the stdlib/ directory, or add `use sync` explicitly before using spawn/await", retTypeStr)
+		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded; ensure the tin executable is alongside the stdlib/ directory, or add `use sync` explicitly before using spawn/await", retTypeStr)
 	}
 
 	makeFn, ok := se.val.(*ir.Func)
@@ -1690,10 +1690,10 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
 		if cg.syncLoadErr != nil {
-			return nil, fmt.Errorf("spawn: stdlib/sync failed to load: %w", cg.syncLoadErr)
+			return nil, fmt.Errorf("spawn: sync package failed to load: %w", cg.syncLoadErr)
 		}
 
-		return nil, fmt.Errorf("spawn: Future[%s] not available - stdlib/sync could not be loaded", retTypeStr)
+		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded", retTypeStr)
 	}
 
 	makeFn, ok := se.val.(*ir.Func)

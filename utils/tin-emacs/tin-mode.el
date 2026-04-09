@@ -56,7 +56,7 @@
     "virtual" "as" "is" "forward" "override" "sizeof" "addr"
     "break" "do" "echo" "test" "typeof" "traitof" "fieldnames"
     "fieldtypes" "fieldtag" "getfield" "setfield" "pass" "isrc"
-    "var" "spawn" "await" "yield" "weak"))
+    "var" "spawn" "await" "yield" "weak" "own"))
 
 (defun tin-builtin-types ()
   "Tin built-in primitive types."

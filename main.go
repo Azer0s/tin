@@ -37,6 +37,10 @@ Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
 
+Stdlib/libs flags:
+  --stdlib PATH    override the standard library path (default: <execDir>/stdlib)
+  --lib-root PATH  add an additional package root (before default <execDir>/libs); repeatable
+
 Run/test flags:
   -v-valgrind      run binary under valgrind --leak-check=full (run, test)
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
@@ -50,6 +54,7 @@ In-source directives (at the top of the .tin file):
   //!-lNAME [arch]             arch-specific linker flag
 
   Arch tokens: x86_64, aarch64, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
+  Variables: $TIN_RUNTIME expands to <execDir>/runtime, $TIN_STDLIB expands to <execDir>/stdlib
 `
 
 // cSource represents a C source file to compile alongside the tin module,
@@ -68,6 +73,21 @@ func tinRuntimeDir() string {
 	}
 
 	return filepath.Join(filepath.Dir(ex), "runtime")
+}
+
+// stdlibDirForDirectives returns the effective stdlib path for $TIN_STDLIB expansion.
+// Uses override if provided; otherwise falls back to <execDir>/stdlib.
+func stdlibDirForDirectives(override string) string {
+	if override != "" {
+		return override
+	}
+
+	ex, err := os.Executable()
+	if err != nil {
+		return "stdlib"
+	}
+
+	return filepath.Join(filepath.Dir(ex), "stdlib")
 }
 
 // archMatches reports whether the optional [arch] qualifier in a directive
@@ -142,7 +162,7 @@ func extractArchQualifier(s string) (base, qualifier string) {
 //
 // srcDir is the directory of the .tin file; relative C source paths are
 // resolved against it. Scanning stops at the first non-comment, non-blank line.
-func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []cSource) {
+func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cSources []cSource) {
 	for _, line := range strings.SplitAfter(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
@@ -171,9 +191,11 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 
 				if len(parts) == 2 {
 					rtDir := tinRuntimeDir()
+
 					fields := strings.Fields(parts[1])
 					for i := 0; i < len(fields); i++ {
 						f := strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
+						f = strings.ReplaceAll(f, "$TIN_STDLIB", stdlibDir)
 
 						var iPath string
 
@@ -181,6 +203,7 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 							// "-I path" (space-separated)
 							i++
 							iPath = strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
+							iPath = strings.ReplaceAll(iPath, "$TIN_STDLIB", stdlibDir)
 						} else if strings.HasPrefix(f, "-I") && len(f) > 2 {
 							// "-Ipath" (no space)
 							iPath = f[2:]
@@ -252,6 +275,10 @@ func main() {
 	// Collect -cflag values and warning-suppression flags from anywhere after the file arg.
 	var extraCFlags []string
 
+	var stdlibOverride string
+
+	var extraLibsRoots []string
+
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
 
@@ -261,6 +288,16 @@ func main() {
 			if i+1 < len(os.Args) {
 				i++
 				extraCFlags = append(extraCFlags, os.Args[i])
+			}
+		case "--stdlib":
+			if i+1 < len(os.Args) {
+				i++
+				stdlibOverride = os.Args[i]
+			}
+		case "--lib-root":
+			if i+1 < len(os.Args) {
+				i++
+				extraLibsRoots = append(extraLibsRoots, os.Args[i])
 			}
 		case "-Wno-async-main":
 			noWarnAsyncMain = true
@@ -313,7 +350,7 @@ func main() {
 	}
 
 	// Collect directives declared in the source file via //! lines
-	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file))
+	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
 
 	// Lex
 	l := lexer.New(string(src))
@@ -327,7 +364,7 @@ func main() {
 	// Pre-scan for #no_parens macros from `use { } from` imports so the parser
 	// can do token substitution for them before parsing begins.
 	p := parser.New(tokens)
-	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens) {
+	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens, stdlibDirForDirectives(stdlibOverride), nil) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
 
@@ -375,6 +412,14 @@ func main() {
 		cg.SetUseDoubleForF128(true)
 	}
 
+	if stdlibOverride != "" {
+		cg.SetStdlibOverride(stdlibOverride)
+	}
+
+	for _, r := range extraLibsRoots {
+		cg.AddLibsRoot(r)
+	}
+
 	mod, cgErr := cg.Generate(prog)
 	if cgErr != nil {
 		die("codegen error: %v", cgErr)
@@ -390,7 +435,7 @@ func main() {
 			continue
 		}
 
-		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc))
+		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc), stdlibDirForDirectives(stdlibOverride))
 		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
 		fileCSources = append(fileCSources, pkgCSources...)
 	}
@@ -924,7 +969,7 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 		}
 
 		p := parser.New(tokens)
-		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens) {
+		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens, "", nil) {
 			p.RegisterNoParensMacro(name, expansion)
 		}
 
@@ -970,7 +1015,7 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 			continue // no test blocks in this file
 		}
 
-		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath))
+		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
 
 		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
@@ -984,7 +1029,7 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 				continue
 			}
 
-			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc))
+			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc), stdlibDirForDirectives(""))
 			srcLinks = append(srcLinks, pkgLinks...)
 			fCSources = append(fCSources, pkgCSrcs...)
 		}

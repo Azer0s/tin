@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
-	"github.com/Azer0s/tin/parser"
 )
 
 // Module file format
@@ -176,13 +175,4 @@ func typeExprToString(te ast.TypeExpr) string {
 	}
 
 	return ""
-}
-
-// parseTypeString re-parses a type string from a .tin.mod file.
-func parseTypeString(s string) (ast.TypeExpr, error) {
-	if s == "" {
-		return nil, nil
-	}
-
-	return parser.ParseType(s)
 }

@@ -315,7 +315,7 @@ class TinLexer : LexerBase() {
             -> TinTokenTypes.KEYWORD_CONTROL
         "fn" -> TinTokenTypes.KEYWORD_FN
         "let", "const", "var", "struct", "trait", "enum", "union", "macro",
-        "extern", "export", "use", "from", "forward", "override", "static", "virtual", "type", "weak"
+        "extern", "export", "use", "from", "forward", "override", "static", "virtual", "type", "weak", "own"
             -> TinTokenTypes.KEYWORD_DECL
         "as", "is", "sizeof", "addr", "typeof", "traitof",
         "fieldnames", "fieldtypes", "fieldtag", "getfield", "setfield", "isrc"

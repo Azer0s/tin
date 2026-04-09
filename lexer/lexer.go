@@ -76,6 +76,7 @@ const (
 	KW_YIELD
 	KW_NIL
 	KW_WEAK
+	KW_OWN
 
 	// Operators
 	PLUS      // +
@@ -158,6 +159,7 @@ var tokenNames = map[TokenType]string{
 	KW_ISRC: "isrc",
 	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield", KW_NIL: "nil",
 	KW_WEAK: "weak",
+	KW_OWN:  "own",
 	PLUS:    "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
@@ -196,6 +198,7 @@ var keywords = map[string]TokenType{
 	"isrc": KW_ISRC,
 	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD, "nil": KW_NIL,
 	"weak": KW_WEAK,
+	"own":  KW_OWN,
 	"true": BOOL_LIT, "false": BOOL_LIT,
 }
 

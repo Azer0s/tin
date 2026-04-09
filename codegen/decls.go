@@ -653,6 +653,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			Tags:      f.Tags,
 			IsForward: f.IsForward,
 			IsWeak:    f.IsWeak,
+			IsOwn:     f.IsOwn,
 		})
 	}
 

@@ -2,10 +2,53 @@ package codegen
 
 // cycles.go - compile-time cycle detection for struct reference graphs.
 //
-// Rule: every cycle in the struct type graph must have at least one strong
-// edge and at least one weak edge.
-//   - No weak edge    -> error: cycle must have at least one `weak` field
-//   - All edges weak  -> error: cycle must have at least one strong field
+// # Field ownership modifiers
+//
+// Tin fields carry one of three ownership flavors that the cycle checker
+// uses to validate safe memory management under ARC:
+//
+//   - plain strong (no keyword)
+//     Owning reference.  RC is incremented on assign and decremented on
+//     release.  May not participate in a detected type-graph cycle unless
+//     paired with at least one `weak` or `own` edge in the same SCC.
+//
+//   - weak
+//     Non-owning reference.  RC is NOT incremented; the field does not
+//     keep the target alive.  Used for back-references (parent pointers,
+//     delegates) that would otherwise create a retain cycle.
+//
+//   - own
+//     Owning tree-edge.  RC behavior is identical to a plain strong field
+//     (retain on assign, release on free).  The programmer declares that
+//     the runtime data reachable through this field forms a DAG / tree and
+//     will never contain a cycle back to the owning struct.  The compiler
+//     trusts this declaration: a detected cycle is allowed when at least
+//     one edge in the SCC is `own`.
+//
+//     NOTE: the compiler does NOT verify the acyclicity promise at compile
+//     time (that would require a full ownership / borrow-check system) or
+//     at runtime (that would require an O(depth) walk on every assignment).
+//     A future debug-mode build option may add the runtime check.  For now
+//     `own` is an explicit programmer contract: violating it (e.g. writing
+//     `node.children own= [node]`) produces a memory leak, just as manually
+//     creating a strong-reference cycle would in any ARC language.
+//
+// # Cycle validation rules
+//
+// Tarjan's SCC algorithm finds every set of mutually-referencing structs.
+// For each SCC that contains a cycle the following must hold:
+//
+//   - At least one weak edge  OR  at least one own edge:
+//     Without either, every reference is a plain strong owner and the
+//     runtime is guaranteed to leak (neither node can ever reach RC == 0).
+//
+//   - At least one strong edge (plain strong OR own):
+//     A cycle made entirely of weak edges has no owner; the referenced
+//     objects could be freed while the weak pointers still exist.
+//
+// Equivalently, a cycle is rejected only when:
+//   - all edges are plain strong (no weak, no own)  -> error: need weak or own
+//   - all edges are weak                            -> error: need a strong owner
 //
 // The graph is built from each concrete (non-generic) struct's fields.
 // Edges are added for all direct, array, and pointer references to other
@@ -22,9 +65,10 @@ import (
 type cycleEdge struct {
 	to     string // target struct name
 	isWeak bool
+	isOwn  bool
 }
 
-// checkStructCycles validates weak/strong invariants across all concrete struct
+// checkStructCycles validates ownership invariants across all concrete struct
 // declarations.  It is called once after the preregister pass so all types are
 // known.  Returns a descriptive error on the first violation found.
 func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
@@ -40,13 +84,13 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 				// direct self-reference (Node -> Node) is still added so the
 				// SCC algorithm can find it.
 				if target == d.Name {
-					edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak})
+					edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak, isOwn: f.IsOwn})
 				}
 
 				continue
 			}
 
-			edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak})
+			edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak, isOwn: f.IsOwn})
 		}
 
 		adj[d.Name] = edges
@@ -132,14 +176,15 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 			continue
 		}
 
-		// Count strong vs weak edges within the SCC.
+		// Count edge kinds within the SCC.
 		sccSet := make(map[string]bool, len(scc))
 		for _, n := range scc {
 			sccSet[n] = true
 		}
 
-		strongCount := 0
+		strongCount := 0 // plain strong (neither weak nor own)
 		weakCount := 0
+		ownCount := 0
 
 		for _, n := range scc {
 			for _, e := range adj[n] {
@@ -147,9 +192,12 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 					continue
 				}
 
-				if e.isWeak {
+				switch {
+				case e.isWeak:
 					weakCount++
-				} else {
+				case e.isOwn:
+					ownCount++
+				default:
 					strongCount++
 				}
 			}
@@ -157,17 +205,21 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 
 		cycle := strings.Join(scc, " -> ")
 
-		if weakCount == 0 {
+		// A cycle is only safe when there is at least one cycle-breaking
+		// edge (weak) or an explicit ownership declaration (own).
+		if weakCount == 0 && ownCount == 0 {
 			return fmt.Errorf(
 				"reference cycle detected: %s\n"+
-					"\tat least one field in the cycle must be marked `weak`",
+					"\tat least one field in the cycle must be marked `weak` or `own`",
 				cycle)
 		}
 
-		if strongCount == 0 {
+		// A cycle must have at least one strong owner so objects are not
+		// freed while references still exist.
+		if strongCount == 0 && ownCount == 0 {
 			return fmt.Errorf(
 				"all fields in reference cycle are weak: %s\n"+
-					"\tat least one field in the cycle must be strong",
+					"\tat least one field in the cycle must be strong (`own` or plain strong)",
 				cycle)
 		}
 	}

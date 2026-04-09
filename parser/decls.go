@@ -132,7 +132,7 @@ func (p *Parser) parseStructItem() (any, error) {
 
 		return fn, err
 	}
-	// Field: name [weak] type [forward]
+	// Field: name [weak|own] type [forward]
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
@@ -141,10 +141,15 @@ func (p *Parser) parseStructItem() (any, error) {
 	var typ ast.TypeExpr
 
 	isWeak := false
+	isOwn := false
 	isForward := false
 
 	if p.check(lexer.KW_WEAK) {
 		isWeak = true
+
+		p.advance()
+	} else if p.check(lexer.KW_OWN) {
+		isOwn = true
 
 		p.advance()
 	}
@@ -175,7 +180,7 @@ func (p *Parser) parseStructItem() (any, error) {
 		tags = append(tags, tagTok.Literal)
 	}
 
-	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, IsWeak: isWeak, Tags: tags}, nil
+	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, IsWeak: isWeak, IsOwn: isOwn, Tags: tags}, nil
 }
 
 func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {

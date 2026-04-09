@@ -940,6 +940,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						if nativeSt, err2 := cg.tinStructNativeLLVM(sName); err2 == nil {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
 							nativeAlloca := entry.NewAlloca(nativeSt)
+
 							if structBits < intTy.BitSize {
 								// Wider coercion (ARM64: i64 → struct); truncate first.
 								smallTy := irtypes.NewInt(structBits)
@@ -950,9 +951,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 								ip := entry.NewBitCast(nativeAlloca, irtypes.NewPointer(intTy))
 								entry.NewStore(rawResult, ip)
 							}
+
 							nativeResult = entry.NewLoad(nativeSt, nativeAlloca)
 						}
 					}
+
 					tinResult, err := cg.wrapNativeStructToTin(entry, nativeResult, sName)
 					if err != nil {
 						cg.curFn = prevFn

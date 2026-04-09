@@ -1,7 +1,5 @@
 // geommain.tin - uses the geomlib package (structs + functions)
-// Build steps:
-//   tin build -lib geomlib.tin -o geomlib.o
-//   tin run geommain.tin geomlib.o
+// Run: tin run geommain.tin  (geomlib.tin is found locally in the same directory)
 
 use geomlib
 

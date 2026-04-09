@@ -192,6 +192,7 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 						if nativeSt, err2 := cg.tinStructNativeLLVM(sName); err2 == nil {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
 							nativeAlloca := entry.NewAlloca(nativeSt)
+
 							if structBits < intTy.BitSize {
 								smallTy := irtypes.NewInt(structBits)
 								truncated := entry.NewTrunc(raw, smallTy)
@@ -201,9 +202,11 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 								ip := entry.NewBitCast(nativeAlloca, irtypes.NewPointer(intTy))
 								entry.NewStore(raw, ip)
 							}
+
 							nativeRaw = entry.NewLoad(nativeSt, nativeAlloca)
 						}
 					}
+
 					tinResult, convErr := cg.wrapNativeStructToTin(entry, nativeRaw, sName)
 					if convErr != nil {
 						cg.curFn = prevFn
@@ -228,300 +231,124 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 	return nil
 }
 
-// loadPackage loads a .tin.mod module file and registers all its exported
-// symbols as extern declarations in the current LLVM module.
-// pkgPath is the dot-separated import path, e.g. "io" or "std::math".
-// The file is searched relative to the directory of the source file being
-// compiled.
+// loadPackage resolves and compiles the .tin source file for the given package
+// path. Search order: stdlib/ (always first), libs/ roots, then local directory
+// next to the importing source file.
+//
+// pkgPath uses "::" as separator, e.g. "io", "std::io", "encoding::json".
+// Bare names ("io") and "std::"-prefixed names ("std::io") are equivalent and
+// both resolve into stdlib/ first.
 func (cg *CodeGen) loadPackage(pkgPath string) error {
 	if pkgPath == "" {
 		return nil
 	}
-	// Normalise path separator: "std::math" -> "std/math"
+
 	parts := strings.Split(pkgPath, "::")
-	pkgName := parts[len(parts)-1] // last segment = package name used in scope
+	pkgName := parts[len(parts)-1] // last segment
 
-	if cg.importedPkgs[pkgPath] {
-		return nil // already loaded
+	// Normalize dedup key: bare "io" == "std::io" both stored as "io".
+	stdParts := parts
+	if len(parts) > 1 && parts[0] == "std" {
+		stdParts = parts[1:]
 	}
 
-	cg.importedPkgs[pkgPath] = true
+	dedupKey := strings.Join(stdParts, "::")
 
-	// Resolve package paths.  Try multiple locations in order:
-	// 1. Relative to the source file being compiled.
-	// 2. stdlib/ directory next to the tin executable.
-	baseDir := filepath.Dir(cg.filename)
-	modFile := filepath.Join(append([]string{baseDir}, parts...)...) + ".tin.mod"
-
-	// Check for a companion .tin source file alongside the mod file.
-	// A local .tin file is only treated as a package if a .tin.mod file also
-	// exists next to it - this prevents plain example files from accidentally
-	// shadowing stdlib packages (e.g. examples/math.tin vs stdlib math).
-	// Source files take precedence over pre-compiled .tin.mod: they are
-	// compiled inline so no separate linking step is needed.
-	tinSrc := strings.TrimSuffix(modFile, ".tin.mod") + ".tin"
-	_, modExists := os.Stat(modFile)
-
-	_, srcExists := os.Stat(tinSrc)
-
-	if srcExists != nil || modExists != nil {
-		// Not a valid local package; try stdlib locations.
-		if ex, exErr := os.Executable(); exErr == nil {
-			execDir := filepath.Dir(ex)
-			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin"
-
-			p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin"
-			if _, e := os.Stat(p1); e == nil {
-				tinSrc = p1
-			} else if _, e := os.Stat(p2); e == nil {
-				tinSrc = p2
-			} else {
-				tinSrc = ""
-			}
-		} else {
-			tinSrc = ""
-		}
+	if cg.importedPkgs[dedupKey] {
+		return nil
 	}
+
+	cg.importedPkgs[dedupKey] = true
+
+	// Find the .tin source file using the 3-tier search.
+	tinSrc := resolvePackageSrc(pkgPath, cg.stdlibBase(), filepath.Dir(cg.filename), cg.libsRoots)
 
 	if tinSrc != "" {
 		return cg.loadPackageFromSource(pkgPath, pkgName, tinSrc)
 	}
 
 	// No direct file found for a multi-part path (e.g. hash::fnv).
-	// Load the parent module (e.g. hash) which re-exports fnv as a sub-namespace,
-	// so that the re-export propagation can make fnv::* visible to the caller.
+	// Load the parent module (e.g. hash) which may re-export fnv as a sub-namespace.
 	if len(parts) > 1 {
 		parentPath := strings.Join(parts[:len(parts)-1], "::")
 
 		return cg.loadPackage(parentPath)
 	}
 
-	mf, err := ReadModFile(modFile)
-	if err != nil {
-		// Fall back to stdlib/ next to the compiler executable.
-		if ex, exErr := os.Executable(); exErr == nil {
-			execDir := filepath.Dir(ex)
-			// Try <execDir>/stdlib/<parts...>.tin.mod (e.g. stdlib/io.tin.mod).
-			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin.mod"
-
-			mf, err = ReadModFile(p1)
-			if err != nil {
-				// Try <execDir>/stdlib/<pkgName>/<pkgName>.tin.mod
-				// (e.g. stdlib/io/io.tin.mod - matches the stdlib source layout).
-				p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin.mod"
-				mf, err = ReadModFile(p2)
-			}
-		}
-	}
-
-	if err != nil {
-		// Module file not found - not an error if the file simply doesn't exist
-		// yet (the user may be compiling the module for the first time).
-		return nil
-	}
-
-	// Register exported struct types so they can be used in parameter/return types.
-	for _, ms := range mf.Structs {
-		// Register the type under both the package-prefixed IR name and local name,
-		// allowing both mylib::Point and Point (when explicitly aliased) to work.
-		if _, exists := cg.structTypes[ms.IRName]; !exists {
-			st := irtypes.NewStruct()
-			st.SetName(ms.IRName)
-			// Populate fields.
-			var (
-				fieldTypes []irtypes.Type
-				fieldNames []string
-			)
-
-			for _, f := range ms.Fields {
-				te, err2 := parseTypeString(f.Type)
-				if err2 != nil {
-					return fmt.Errorf("use %s: struct %s field %s: %w", pkgPath, ms.LocalName, f.Name, err2)
-				}
-
-				ft, err2 := cg.tinTypeToLLVM(te)
-				if err2 != nil {
-					return fmt.Errorf("use %s: struct %s field %s: %w", pkgPath, ms.LocalName, f.Name, err2)
-				}
-
-				fieldTypes = append(fieldTypes, ft)
-				fieldNames = append(fieldNames, f.Name)
-			}
-
-			st.Fields = fieldTypes
-			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
-			cg.structTypes[ms.IRName] = st
-			cg.structFields[ms.IRName] = fieldNames
-			// Register under pkgName.localName as a type alias.
-			cg.typeAliases[pkgName+"::"+ms.LocalName] = &ast.SimpleType{Name: ms.IRName}
-			cg.typeAliases[pkgName+"."+ms.LocalName] = &ast.SimpleType{Name: ms.IRName}
-			// If the local name doesn't already exist, register it too.
-			if _, exists2 := cg.structTypes[ms.LocalName]; !exists2 {
-				cg.structTypes[ms.LocalName] = st
-				cg.structFields[ms.LocalName] = fieldNames
-			}
-			// Declare all struct methods as extern functions.
-			for _, mfn := range ms.Methods {
-				mparams := make([]*ir.Param, len(mfn.Params))
-				for i, p := range mfn.Params {
-					te, err2 := parseTypeString(p.Type)
-					if err2 != nil {
-						continue
-					}
-
-					pt, err2 := cg.tinTypeToLLVM(te)
-					if err2 != nil {
-						continue
-					}
-
-					mparams[i] = ir.NewParam(p.Name, pt)
-				}
-
-				var mret irtypes.Type = irtypes.Void
-
-				if mfn.RetType != "" {
-					te, err2 := parseTypeString(mfn.RetType)
-					if err2 == nil {
-						mret, _ = cg.tinTypeToLLVM(te)
-					}
-				}
-
-				irMeth := cg.mod.NewFunc(mfn.IRName, mret, mparams...)
-				irMeth.Blocks = nil
-				cg.curScope.set(mfn.IRName, &scopeEntry{val: irMeth, isAlloc: false})
-			}
-		}
-	}
-
-	// Register type aliases from the module.
-	for _, ta := range mf.Types {
-		te, err2 := parseTypeString(ta.Target)
-		if err2 != nil {
-			return fmt.Errorf("use %s: type %s: %w", pkgPath, ta.Name, err2)
-		}
-
-		cg.typeAliases[pkgName+"."+ta.Name] = te
-		cg.typeAliases[pkgName+"::"+ta.Name] = te
-		// Also register locally if not already defined.
-		if _, exists := cg.typeAliases[ta.Name]; !exists {
-			cg.typeAliases[ta.Name] = te
-		}
-	}
-
-	// Register exported functions.
-	for _, fn := range mf.Funcs {
-		scopeKey := pkgName + "." + fn.LocalName
-
-		if fn.ExternName != "" {
-			// Extern-backed function: reconstruct a FuncDecl and use the full
-			// extern-wrapper path so fat-pointer unwrapping is applied correctly.
-			var astParams []ast.Param
-
-			for _, p := range fn.Params {
-				te, err2 := parseTypeString(p.Type)
-				if err2 != nil {
-					return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
-				}
-
-				astParams = append(astParams, ast.Param{Name: p.Name, Type: te})
-			}
-
-			if fn.Variadic {
-				astParams = append(astParams, ast.Param{Name: "...", IsVarArgs: true})
-			}
-
-			var retTE ast.TypeExpr
-
-			if fn.RetType != "" {
-				var err2 error
-
-				retTE, err2 = parseTypeString(fn.RetType)
-				if err2 != nil {
-					return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
-				}
-			}
-
-			fd := &ast.FuncDecl{
-				Name:     fn.LocalName,
-				Params:   astParams,
-				RetType:  retTE,
-				IsExtern: fn.ExternName,
-			}
-			if err2 := cg.genFuncDeclAs(fd, scopeKey); err2 != nil {
-				return fmt.Errorf("use %s: %s: %w", pkgPath, fn.LocalName, err2)
-			}
-
-			continue
-		}
-
-		// Pre-compiled function: declare as external LLVM symbol by IRName.
-		params := make([]*ir.Param, len(fn.Params))
-		for i, p := range fn.Params {
-			te, err2 := parseTypeString(p.Type)
-			if err2 != nil {
-				return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
-			}
-
-			pt, err2 := cg.tinTypeToLLVM(te)
-			if err2 != nil {
-				return fmt.Errorf("use %s: param %s: %w", pkgPath, p.Name, err2)
-			}
-
-			params[i] = ir.NewParam(p.Name, pt)
-		}
-
-		var retType irtypes.Type = irtypes.Void
-
-		if fn.RetType != "" {
-			te, err2 := parseTypeString(fn.RetType)
-			if err2 != nil {
-				return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
-			}
-
-			retType, err2 = cg.tinTypeToLLVM(te)
-			if err2 != nil {
-				return fmt.Errorf("use %s: return type: %w", pkgPath, err2)
-			}
-		}
-
-		irFunc := cg.mod.NewFunc(fn.IRName, retType, params...)
-		irFunc.Sig.Variadic = fn.Variadic
-		irFunc.Blocks = nil // declaration only
-		cg.curScope.set(scopeKey, &scopeEntry{val: irFunc, isAlloc: false})
-	}
-
-	// Register exported macros from the module file.
-	// Macros are stored under pkg-qualified keys so loadPackageSelective can find them.
-	for _, mm := range mf.Macros {
-		if mm.Body == "" && len(mm.Params) == 0 {
-			continue
-		}
-
-		md := &ast.MacroDecl{
-			Name:   mm.Name + "!",
-			Tags:   mm.Tags,
-			Params: mm.Params,
-		}
-		if mm.Body != "" {
-			md.Body = &ast.BacktickLit{Content: mm.Body}
-		}
-		// Register under package-qualified keys; bare-name registration happens
-		// only when the caller does `use { macroName! } from pkg`.
-		cg.macros[pkgName+"."+mm.Name+"!"] = md
-		cg.macros[pkgName+"::"+mm.Name+"!"] = md
-		cg.macros[pkgName+"."+mm.Name] = md
-		cg.macros[pkgName+"::"+mm.Name] = md
-	}
-
-	// Handle re-exports: recursively load sub-packages.
-	for _, sub := range mf.ReExports {
-		subPath := pkgPath + "::" + sub
-		if err2 := cg.loadPackage(subPath); err2 != nil {
-			return err2
-		}
-	}
-
+	// Package not found - silently ignore (user may have a typo; errors surface
+	// when the symbol is actually used and not found in scope).
 	return nil
+}
+
+// resolvePackageSrc finds the .tin source file for pkgPath using a 3-tier search:
+// 1. stdlib/ (always searched first; bare names and std:: prefixed both resolve here)
+// 2. libs/ roots
+// 3. localDir (next to the importing source file)
+//
+// Returns the absolute path of the first match, or "" if not found.
+func resolvePackageSrc(pkgPath, stdlibBase, localDir string, libsRoots []string) string {
+	// Auto-detect defaults when not provided.
+	if stdlibBase == "" {
+		if ex, err := os.Executable(); err == nil {
+			stdlibBase = filepath.Join(filepath.Dir(ex), "stdlib")
+		}
+	}
+
+	if libsRoots == nil {
+		if ex, err := os.Executable(); err == nil {
+			libsRoots = []string{filepath.Join(filepath.Dir(ex), "libs")}
+		}
+	}
+
+	parts := strings.Split(pkgPath, "::")
+	pkgName := parts[len(parts)-1]
+
+	// For stdlib and local searches, strip a leading "std::" prefix so that
+	// "std::io" and "io" both resolve to stdlib/io.
+	stdParts := parts
+	if len(parts) > 1 && parts[0] == "std" {
+		stdParts = parts[1:]
+	}
+
+	var candidates []string
+
+	// 1. stdlib/ - always searched first.
+	if stdlibBase != "" {
+		parentParts := stdParts[:len(stdParts)-1]
+		stdDir := filepath.Join(append([]string{stdlibBase}, parentParts...)...)
+		candidates = append(candidates,
+			filepath.Join(stdDir, pkgName+".tin"),
+			filepath.Join(stdDir, pkgName, pkgName+".tin"),
+		)
+	}
+
+	// 2. libs/ roots - searched for all names using the original (non-stripped) path.
+	for _, root := range libsRoots {
+		parentParts := parts[:len(parts)-1]
+		libDir := filepath.Join(append([]string{root}, parentParts...)...)
+		candidates = append(candidates,
+			filepath.Join(libDir, pkgName+".tin"),
+			filepath.Join(libDir, pkgName, pkgName+".tin"),
+		)
+	}
+
+	// 3. Local - next to the importing source file.
+	if localDir != "" {
+		parentParts := stdParts[:len(stdParts)-1]
+		locDir := filepath.Join(append([]string{localDir}, parentParts...)...)
+		candidates = append(candidates,
+			filepath.Join(locDir, pkgName+".tin"),
+			filepath.Join(locDir, pkgName, pkgName+".tin"),
+		)
+	}
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+
+	return ""
 }
 
 // loadPackageFromFilePath handles `use "./foo.tin"` (or `use "./foo"`) imports.
@@ -572,7 +399,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	p := parser.New(tokens)
 	// Pre-scan for #no_parens macros from `use { name } from pkg` so the parser
 	// can do token substitution before parsing (same pattern as main.go).
-	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens) {
+	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
 
@@ -842,7 +669,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	p := parser.New(tokens)
 	// Pre-scan for #no_parens macros imported via `use { name } from pkg` so the
 	// parser can substitute them as bare tokens (same pattern as main.go).
-	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens) {
+	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
 
@@ -1591,7 +1418,7 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 // macroName -> backtick_expansion for any #no_parens macros that would be
 // selectively imported. Call this before Parse() so the parser can do token
 // substitution for these macros.
-func ScanImportedNoParensMacros(_ string, tokens []lexer.Token) map[string]string {
+func ScanImportedNoParensMacros(currentFile string, tokens []lexer.Token, stdlibBase string, libsRoots []string) map[string]string {
 	result := map[string]string{}
 
 	for i := 0; i < len(tokens); i++ {
@@ -1660,31 +1487,20 @@ func ScanImportedNoParensMacros(_ string, tokens []lexer.Token) map[string]strin
 			continue
 		}
 
-		// Scan the .tin source file directly for #no_parens macros.
-		pathParts := strings.Split(pkgPath, "::")
-		pkgName := pathParts[len(pathParts)-1]
-
 		nameSet := map[string]bool{}
 		for _, n := range names {
 			nameSet[strings.TrimSuffix(n, "!")] = true
 		}
 
-		if ex, exErr := os.Executable(); exErr == nil {
-			execDir := filepath.Dir(ex)
-			srcCandidates := []string{
-				filepath.Join(append([]string{execDir, "stdlib"}, pathParts...)...) + ".tin",
-				filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin",
-			}
+		localDir := ""
+		if currentFile != "" {
+			localDir = filepath.Dir(currentFile)
+		}
 
-			for _, srcFile := range srcCandidates {
-				srcBytes, readErr := os.ReadFile(srcFile)
-				if readErr != nil {
-					continue
-				}
-
+		srcFile := resolvePackageSrc(pkgPath, stdlibBase, localDir, libsRoots)
+		if srcFile != "" {
+			if srcBytes, readErr := os.ReadFile(srcFile); readErr == nil {
 				scanNoParensMacrosFromSource(srcBytes, nameSet, result)
-
-				break
 			}
 		}
 	}
@@ -2143,191 +1959,6 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 //   - Pointer-to-param:  fn foo[t](x *t)  arg: *struct  -> t=struct
 //   - Generic struct:    fn foo[t](x S[t]) arg: S__i64   -> t=i64
 //   - Pointer-to-generic fn foo[t](x *S[t]) arg: *S__i64 -> t=i64
-
-// extractBacktickBody returns the raw string from a BacktickLit node, or from
-// a ReturnStmt wrapping one. Used when emitting macros to .tin.mod.
-func extractBacktickBody(node ast.Node) (string, bool) {
-	switch n := node.(type) {
-	case *ast.BacktickLit:
-		return n.Content, true
-	case *ast.ReturnStmt:
-		if n.Value != nil {
-			return extractBacktickBody(n.Value)
-		}
-	case *ast.Block:
-		if len(n.Stmts) == 1 {
-			return extractBacktickBody(n.Stmts[0])
-		}
-	case *ast.ExprStmt:
-		return extractBacktickBody(n.Expr)
-	}
-
-	return "", false
-}
-
-// writeModuleFiles writes one .tin.mod file per ExportDecl found in prog.
-func (cg *CodeGen) writeModuleFiles(prog *ast.Program) error {
-	// Group exports by package name.
-	type exportGroup struct {
-		names []string
-	}
-
-	groups := map[string]*exportGroup{}
-
-	for _, node := range prog.Stmts {
-		exp, ok := node.(*ast.ExportDecl)
-		if !ok || exp.AsName == "" {
-			continue
-		}
-
-		g := groups[exp.AsName]
-		if g == nil {
-			g = &exportGroup{}
-			groups[exp.AsName] = g
-		}
-
-		g.names = append(g.names, exp.Names...)
-	}
-
-	if len(groups) == 0 {
-		return nil
-	}
-
-	// Collect all top-level function, struct, type, and macro declarations by name.
-	funcsDecl := map[string]*ast.FuncDecl{}
-	structsDecl := map[string]*ast.StructDecl{}
-	typesDecl := map[string]*ast.TypeDecl{}
-	macrosDecl := map[string]*ast.MacroDecl{}
-
-	for _, node := range prog.Stmts {
-		switch n := node.(type) {
-		case *ast.FuncDecl:
-			funcsDecl[n.Name] = n
-		case *ast.StructDecl:
-			structsDecl[n.Name] = n
-		case *ast.TypeDecl:
-			typesDecl[n.Name] = n
-		case *ast.MacroDecl:
-			macrosDecl[n.Name] = n
-			// Also register without trailing ! so it can be looked up by bare name.
-			bare := strings.TrimSuffix(n.Name, "!")
-			if bare != n.Name {
-				macrosDecl[bare] = n
-			}
-		}
-	}
-
-	baseDir := filepath.Dir(cg.filename)
-
-	for pkgName, g := range groups {
-		mf := &ModFile{Package: pkgName}
-
-		for _, name := range g.names {
-			// Check if it's a function.
-			if fd, ok := funcsDecl[name]; ok {
-				mfn := ModFunc{
-					LocalName:  name,
-					IRName:     pkgName + "__" + name,
-					ExternName: fd.IsExtern,
-				}
-				for _, p := range fd.Params {
-					if p.IsVarArgs {
-						mfn.Variadic = true
-
-						continue
-					}
-
-					mfn.Params = append(mfn.Params, ModParam{
-						Name: p.Name,
-						Type: typeExprToString(p.Type),
-					})
-				}
-
-				mfn.RetType = typeExprToString(fd.RetType)
-				mf.Funcs = append(mf.Funcs, mfn)
-
-				continue
-			}
-			// Check if it's a struct.
-			if sd, ok := structsDecl[name]; ok {
-				ms := ModStruct{
-					LocalName: name,
-					IRName:    name, // structs use local name (structural typing for ABI)
-				}
-				for _, f := range sd.Fields {
-					ms.Fields = append(ms.Fields, ModParam{
-						Name: f.Name,
-						Type: typeExprToString(f.Type),
-					})
-				}
-				// Include methods so importers can call them.
-				for _, m := range sd.Methods {
-					if m.IsVirtual {
-						continue
-					}
-
-					mfn := ModFunc{
-						LocalName: m.Name,
-						IRName:    name + "_" + m.Name, // e.g. Point_show
-						Variadic:  false,
-					}
-					for _, p := range m.Params {
-						mfn.Params = append(mfn.Params, ModParam{
-							Name: p.Name,
-							Type: typeExprToString(p.Type),
-						})
-					}
-
-					mfn.RetType = typeExprToString(m.RetType)
-					ms.Methods = append(ms.Methods, mfn)
-				}
-
-				mf.Structs = append(mf.Structs, ms)
-
-				continue
-			}
-			// Check if it's a type alias.
-			if td, ok := typesDecl[name]; ok {
-				mf.Types = append(mf.Types, ModTypeAlias{
-					Name:   name,
-					Target: typeExprToString(td.Type),
-				})
-
-				continue
-			}
-			// Check if it's a macro (bare name or with !).
-			md, isMacro := macrosDecl[name]
-			if !isMacro {
-				md, isMacro = macrosDecl[strings.TrimSuffix(name, "!")]
-			}
-
-			if isMacro {
-				mm := ModMacro{
-					Name:   strings.TrimSuffix(md.Name, "!"),
-					Tags:   md.Tags,
-					Params: md.Params,
-				}
-				// Extract backtick body for #no_parens macros.
-				if body, ok2 := extractBacktickBody(md.Body); ok2 {
-					mm.Body = body
-				}
-
-				mf.Macros = append(mf.Macros, mm)
-
-				continue
-			}
-			// Might be a re-exported package (e.g. export { io, math } as std).
-			mf.ReExports = append(mf.ReExports, name)
-		}
-
-		outPath := filepath.Join(baseDir, pkgName+".tin.mod")
-		if err := WriteModFile(outPath, mf); err != nil {
-			return fmt.Errorf("write module file %s: %w", outPath, err)
-		}
-	}
-
-	return nil
-}
 
 // evalConstExpr attempts to evaluate a Tin AST expression as a compile-time
 // LLVM constant integer or float. Handles literals, type casts (as), bitwise

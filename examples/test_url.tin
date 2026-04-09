@@ -1,0 +1,41 @@
+use assert
+use encoding::url
+
+test "encode unreserved chars unchanged" =
+  assert::equals(url::encode("abc"), "abc")
+  assert::equals(url::encode("ABC"), "ABC")
+  assert::equals(url::encode("123"), "123")
+  assert::equals(url::encode("-_.~"), "-_.~")
+
+test "encode special chars" =
+  assert::equals(url::encode(" "), "%20")
+  assert::equals(url::encode("/"), "%2F")
+  assert::equals(url::encode("?"), "%3F")
+  assert::equals(url::encode("="), "%3D")
+  assert::equals(url::encode("&"), "%26")
+  assert::equals(url::encode("+"), "%2B")
+
+test "encode mixed string" =
+  assert::equals(url::encode("hello world"), "hello%20world")
+  assert::equals(url::encode("foo=bar&baz=qux"), "foo%3Dbar%26baz%3Dqux")
+
+test "decode percent sequences" =
+  assert::equals(url::decode("%20"), " ")
+  assert::equals(url::decode("%2F"), "/")
+  assert::equals(url::decode("hello%20world"), "hello world")
+
+test "decode plus as space" =
+  assert::equals(url::decode("hello+world"), "hello world")
+  assert::equals(url::decode("a+b+c"), "a b c")
+
+test "decode invalid passthrough" =
+  assert::equals(url::decode("%ZZ"), "%ZZ")
+  assert::equals(url::decode("%2"), "%2")
+
+test "decode lowercase hex" =
+  assert::equals(url::decode("%2f"), "/")
+  assert::equals(url::decode("%3d"), "=")
+
+test "roundtrip" =
+  let s = "hello world! foo=bar&baz=123"
+  assert::equals(url::decode(url::encode(s)), s)

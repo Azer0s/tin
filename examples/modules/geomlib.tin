@@ -1,5 +1,5 @@
 // geomlib.tin - exports a struct type with methods
-// Compile: tin build -lib geomlib.tin -o geomlib.o
+// Used as a local package by geommain.tin (placed in the same directory).
 
 struct point =
   x i64
