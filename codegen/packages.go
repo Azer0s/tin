@@ -239,10 +239,15 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 			p1 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + ".tin"
 
 			p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin"
+			// p3: nested layout stdlib/<parent>/<child>/<child>.tin
+			// e.g. hash::fnv -> stdlib/hash/fnv/fnv.tin
+			p3 := filepath.Join(append([]string{execDir, "stdlib"}, parts...)...) + "/" + pkgName + ".tin"
 			if _, e := os.Stat(p1); e == nil {
 				tinSrc = p1
 			} else if _, e := os.Stat(p2); e == nil {
 				tinSrc = p2
+			} else if _, e := os.Stat(p3); e == nil {
+				tinSrc = p3
 			} else {
 				tinSrc = ""
 			}

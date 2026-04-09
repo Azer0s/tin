@@ -2,10 +2,10 @@
 // Run with: tin test examples/test_hash.tin
 
 use assert
-use fnv
-use md5
-use sha1
-use xxhash3
+use hash::fnv
+use hash::md5
+use hash::sha1
+use hash::xxhash3
 
 // -- FNV-1a --
 

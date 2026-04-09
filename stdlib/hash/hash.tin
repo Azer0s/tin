@@ -1,0 +1,19 @@
+// stdlib/hash - Non-cryptographic and legacy hash functions.
+//
+// Provides:
+//   fnv      - FNV-1a 32-bit and 64-bit
+//   md5      - MD5 128-bit digest (legacy/checksum use only)
+//   sha1     - SHA-1 160-bit digest (legacy/checksum use only)
+//   xxhash3  - xxHash3 64-bit (fast, high-quality)
+//
+// Import examples:
+//   use hash::xxhash3
+//   use hash::md5
+//   use hash
+
+use "./fnv/fnv"
+use "./md5/md5"
+use "./sha1/sha1"
+use "./xxhash3/xxhash3"
+
+export { fnv, md5, sha1, xxhash3 } as hash
