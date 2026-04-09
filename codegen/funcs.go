@@ -245,13 +245,13 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			st.SetName(structKey)
 			cg.structTypes[structKey] = st
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
-			// Register a permanent bare-name alias so that code referencing the
-			// short form (e.g. "Unit" inside sync, or after "use sync") resolves to
-			// the canonical name.  A later definition in user code would override.
+			// Register a bare-name alias so that code referencing the short form
+			// (e.g. "Parser" inside yaml, "Unit" inside sync) resolves to the
+			// canonical name.  Always overwrite so the currently-compiling package's
+			// definition takes precedence over a same-named type from an earlier
+			// package loaded in the same scope.
 			if cg.currentPkg != "" {
-				if _, alreadyAliased := cg.typeAliases[n.Name]; !alreadyAliased {
-					cg.typeAliases[n.Name] = &ast.SimpleType{Name: structKey}
-				}
+				cg.typeAliases[n.Name] = &ast.SimpleType{Name: structKey}
 			}
 		}
 	case *ast.EnumDecl:

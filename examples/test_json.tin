@@ -1,6 +1,6 @@
 // examples/test_json.tin - tests for the json stdlib
 use assert
-use json
+use encoding::json
 
 struct point =
   x i64

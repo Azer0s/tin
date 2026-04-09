@@ -260,8 +260,8 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	// so that the re-export propagation can make fnv::* visible to the caller.
 	if len(parts) > 1 {
 		parentPath := strings.Join(parts[:len(parts)-1], "::")
-		cg.loadPackage(parentPath)
-		return nil
+
+		return cg.loadPackage(parentPath)
 	}
 
 	mf, err := ReadModFile(modFile)
@@ -559,6 +559,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	for _, node := range prog.Stmts {
 		if exp, ok := node.(*ast.ExportDecl); ok {
 			cg.filename = prevFilename
+
 			return cg.loadPackageFromSource(rawPath, exp.AsName, srcPath)
 		}
 	}
@@ -1095,6 +1096,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			prevScope.set(pkgName+"::"+sd.Name, &scopeEntry{val: nil, isAlloc: false})
 			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: structKey}
 			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: structKey}
+			// Always update the bare-name alias to the current package's struct so
+			// that intra-package code (pass 3 bodies) resolves the correct type even
+			// when multiple packages loaded in the same scope share a type name.
+			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
 		} else if _, stOk2 := cg.structTypes[sd.Name]; stOk2 {
 			// Struct registered under bare name (e.g. from file-path import before
 			// currentPkg was set, or user-level struct).
@@ -1150,6 +1155,15 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if len(fd.TypeParams) > 0 {
 			cg.genericFuncs[fd.Name] = fd
 			cg.genericFuncHomeScopes[fd.Name] = cg.curScope // package scope for bare-name resolution
+
+			// Also register with qualified key so cross-package calls prefer the correct template
+			// when multiple packages export identically-named generics (e.g. json and yaml both
+			// export encode[T] / parse[T]).
+			if pkgName != "" {
+				qualKey := pkgName + "__" + fd.Name
+				cg.genericFuncs[qualKey] = fd
+				cg.genericFuncHomeScopes[qualKey] = cg.curScope
+			}
 
 			continue
 		}
@@ -1545,9 +1559,8 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 // macroName -> backtick_expansion for any #no_parens macros that would be
 // selectively imported. Call this before Parse() so the parser can do token
 // substitution for these macros.
-func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[string]string {
+func ScanImportedNoParensMacros(_ string, tokens []lexer.Token) map[string]string {
 	result := map[string]string{}
-	baseDir := filepath.Dir(filename)
 
 	for i := 0; i < len(tokens); i++ {
 		if tokens[i].Type != lexer.KW_USE {
@@ -1615,55 +1628,100 @@ func ScanImportedNoParensMacros(filename string, tokens []lexer.Token) map[strin
 			continue
 		}
 
-		// Try to load the .tin.mod file and find #no_parens macros.
+		// Scan the .tin source file directly for #no_parens macros.
 		pathParts := strings.Split(pkgPath, "::")
 		pkgName := pathParts[len(pathParts)-1]
 
-		// Build candidate .tin.mod paths (same logic as loadPackage).
-		modFile := filepath.Join(append([]string{baseDir}, pathParts...)...) + ".tin.mod"
-
-		var mf *ModFile
-
-		mf, _ = ReadModFile(modFile)
-		if mf == nil {
-			if ex, exErr := os.Executable(); exErr == nil {
-				execDir := filepath.Dir(ex)
-				p1 := filepath.Join(append([]string{execDir, "stdlib"}, pathParts...)...) + ".tin.mod"
-
-				mf, _ = ReadModFile(p1)
-				if mf == nil {
-					p2 := filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin.mod"
-					mf, _ = ReadModFile(p2)
-				}
-			}
-		}
-
-		if mf == nil {
-			continue
-		}
-
-		// Find requested names that are #no_parens macros.
 		nameSet := map[string]bool{}
 		for _, n := range names {
 			nameSet[strings.TrimSuffix(n, "!")] = true
 		}
 
-		for _, mm := range mf.Macros {
-			if !nameSet[mm.Name] {
-				continue
+		if ex, exErr := os.Executable(); exErr == nil {
+			execDir := filepath.Dir(ex)
+			srcCandidates := []string{
+				filepath.Join(append([]string{execDir, "stdlib"}, pathParts...)...) + ".tin",
+				filepath.Join(execDir, "stdlib", pkgName, pkgName) + ".tin",
 			}
 
-			for _, tag := range mm.Tags {
-				if tag == "no_parens" && mm.Body != "" {
-					result[mm.Name] = mm.Body
-
-					break
+			for _, srcFile := range srcCandidates {
+				srcBytes, readErr := os.ReadFile(srcFile)
+				if readErr != nil {
+					continue
 				}
+
+				scanNoParensMacrosFromSource(srcBytes, nameSet, result)
+
+				break
 			}
 		}
 	}
 
 	return result
+}
+
+// scanNoParensMacrosFromSource scans raw .tin source bytes for macro declarations
+// with a #no_parens tag, populating result with name->backtick_body for any
+// names in the nameSet. Used as a fallback when no .tin.mod file is available.
+func scanNoParensMacrosFromSource(src []byte, nameSet map[string]bool, result map[string]string) {
+	l := lexer.New(string(src))
+
+	tokens, err := l.Tokenize()
+	if err != nil {
+		return
+	}
+
+	for i := 0; i < len(tokens); i++ {
+		if tokens[i].Type != lexer.KW_MACRO {
+			continue
+		}
+
+		// Expect optional tag block: { #tag ... }
+		i++
+		if i >= len(tokens) || tokens[i].Type != lexer.LBRACE {
+			continue
+		}
+
+		var hasNoParens bool
+
+		i++
+		for i < len(tokens) && tokens[i].Type != lexer.RBRACE {
+			if tokens[i].Type == lexer.CONTROL_TAG && tokens[i].Literal == "no_parens" {
+				hasNoParens = true
+			}
+
+			i++
+		}
+
+		if i >= len(tokens) {
+			break
+		}
+
+		// Consume `}` then read macro name.
+		i++
+		if i >= len(tokens) || tokens[i].Type != lexer.IDENT {
+			continue
+		}
+
+		macroName := tokens[i].Literal
+		if !nameSet[macroName] {
+			continue
+		}
+
+		// Scan forward for `=` then a BACKTICK_LIT body.
+		for i < len(tokens) && tokens[i].Type != lexer.ASSIGN {
+			i++
+		}
+
+		i++
+		if i >= len(tokens) || tokens[i].Type != lexer.BACKTICK_LIT {
+			continue
+		}
+
+		if hasNoParens && tokens[i].Literal != "" {
+			result[macroName] = tokens[i].Literal
+		}
+	}
 }
 
 // ensureDefaultTraitMethods generates default (non-virtual) trait methods for

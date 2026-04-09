@@ -115,7 +115,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			} else if t, ok2 := cg.genericFuncs[fn.Name]; ok2 {
 				// Prefer a concrete compiled version over the template when one exists in
 				// scope (e.g. the non-generic parse() inside json::parse[T]).
-				if _, concreteOk := cg.curScope.lookup(fn.Name); !concreteOk {
+				// Also skip the generic when concrete overloads exist for this name:
+				// overloaded functions are registered with mangled names (e.g. parse__string)
+				// so the bare name lookup below would fail, but the overload resolution
+				// path handles them correctly. Using the generic template in this case
+				// causes infinite self-recursion (parse[T] calling parse[T] again).
+				_, concreteOk := cg.curScope.lookup(fn.Name)
+				_, hasOverloads := cg.overloads[fn.Name]
+
+				if !concreteOk && !hasOverloads {
 					gTmpl = t
 				}
 			}
@@ -206,7 +214,43 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 			}
 
-			best := cg.resolveOverload(variants, argVals)
+			// Prefer overload variants that exist in the most local scope to avoid
+			// cross-package interference: e.g. yaml's internal parse() should call
+			// yaml's own parse, not json's, even though both are in cg.overloads["parse"].
+			// Traverse the scope chain from innermost outward; stop at the first level
+			// that contains any matching variant (by irName in that scope's own vars).
+			localVariants := variants
+
+			for s := cg.curScope; s != nil; s = s.parent {
+				var found []*overloadEntry
+
+				for _, v := range variants {
+					entry, ok := s.vars[v.irName]
+					if !ok {
+						continue
+					}
+
+					// Skip the self-reference that genFuncDeclAs registers in the
+					// body scope (line "cg.curScope.set(scopeName, ...)").  Stopping
+					// at a self-entry would hide sibling overloads in the parent scope
+					// (e.g. fnv1a_32(*u8,i64) hidden from inside fnv1a_32(string)).
+					if cg.curFn != nil {
+						if fn, isFunc := entry.val.(*ir.Func); isFunc && fn == cg.curFn {
+							continue
+						}
+					}
+
+					found = append(found, v)
+				}
+
+				if len(found) > 0 {
+					localVariants = found
+
+					break
+				}
+			}
+
+			best := cg.resolveOverload(localVariants, argVals)
 			if best == nil {
 				return nil, fmt.Errorf("no matching overload for %s (got %d arg(s))", fn.Name, len(argVals))
 			}
@@ -710,7 +754,28 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 			}
 
-			best := cg.resolveOverload(variants, argVals)
+			// When the call is qualified (pkg::fn), restrict candidates to overloads
+			// that belong to that package so that identically-signed functions from
+			// different packages (e.g. json::parse vs yaml::parse) don't interfere.
+			filteredVariants := variants
+
+			if len(fn.Path) > 1 {
+				pkgPrefix := strings.Join(fn.Path[:len(fn.Path)-1], "__") + "__"
+
+				var pkg []*overloadEntry
+
+				for _, v := range variants {
+					if strings.HasPrefix(v.irName, pkgPrefix) {
+						pkg = append(pkg, v)
+					}
+				}
+
+				if len(pkg) > 0 {
+					filteredVariants = pkg
+				}
+			}
+
+			best := cg.resolveOverload(filteredVariants, argVals)
 			if best != nil {
 				if oEntry, oOk := cg.curScope.lookup(best.irName); oOk {
 					var ovCallee value.Value
@@ -746,6 +811,40 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 		// Generic function call without explicit type arg: infer type and monomorphize.
+		// When multiple packages export identically-named generics (e.g. json::encode and
+		// yaml::encode both map to bare "encode"), prefer the qualified key pkg__fn so the
+		// correct package's template is used.
+		qualBareName := strings.Join(fn.Path, "__")
+		if qualBareName != bareName {
+			for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
+				if tmplQ, ok := m[qualBareName]; ok {
+					// monomorphizeFunc looks up the home scope by tmpl.Name (the bare function
+					// name), but the bare-name entry may point to a different package's scope
+					// (e.g. yaml overwrote json's "encode" home scope). Temporarily fix this
+					// by setting the bare-name home scope to the qualified-key home scope
+					// before calling into the generic dispatch machinery.
+					qualHome := cg.genericFuncHomeScopes[qualBareName]
+					prevHome := cg.genericFuncHomeScopes[tmplQ.Name]
+
+					if qualHome != nil {
+						cg.genericFuncHomeScopes[tmplQ.Name] = qualHome
+					}
+
+					result, _, found, err2 := cg.callGenericFromMap(block, e.Args, qualBareName, m)
+
+					cg.genericFuncHomeScopes[tmplQ.Name] = prevHome
+
+					if err2 != nil {
+						return nil, err2
+					}
+
+					if found {
+						return result, nil
+					}
+				}
+			}
+		}
+
 		// Check genericFuncs first, then constrainedFuncs for cross-package generic calls.
 		for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
 			result, _, found, err2 := cg.callGenericFromMap(block, e.Args, bareName, m)
@@ -773,11 +872,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// Get the function name (bare or scope-qualified)
 			var funcName string
 
+			var qualFuncName string
+
 			switch inner := fn.Expr.(type) {
 			case *ast.Identifier:
 				funcName = inner.Name
 			case *ast.ScopeAccess:
 				funcName = inner.Path[len(inner.Path)-1]
+				// Build qualified key for disambiguation when multiple packages export
+				// identically-named generics (e.g. json::parse[T] vs yaml::parse[T]).
+				qualFuncName = strings.Join(inner.Path, "__")
+				if qualFuncName == funcName {
+					qualFuncName = ""
+				}
 			}
 
 			typeArgName := typeArgID.Name
@@ -804,10 +911,42 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return cg.genStructLit(block, synthLit)
 				}
 
-				// Look up the generic function template
-				tmpl, isGeneric := cg.genericFuncs[funcName]
+				// Look up the generic function template; prefer the qualified key
+				// (pkg__fn) when available so that identically-named generics in
+				// different packages don't shadow each other.
+				var tmpl *ast.FuncDecl
+
+				var isGeneric bool
+
+				usedQual := false
+
+				if qualFuncName != "" {
+					tmpl, isGeneric = cg.genericFuncs[qualFuncName]
+					if isGeneric {
+						usedQual = true
+					}
+				}
+
+				if !isGeneric {
+					tmpl, isGeneric = cg.genericFuncs[funcName]
+				}
+
 				if !isGeneric {
 					tmpl, isGeneric = cg.constrainedFuncs[funcName]
+				}
+
+				// Fix home scope: monomorphizeFunc looks up by tmpl.Name (bare name),
+				// but the bare-name entry may point to a different package's scope when
+				// two packages export identically-named generics. When we found the
+				// template via the qualified key, temporarily redirect the bare-name
+				// home scope entry to the correct package's scope.
+				var savedHome *scope
+
+				if usedQual {
+					if qualHome := cg.genericFuncHomeScopes[qualFuncName]; qualHome != nil {
+						savedHome = cg.genericFuncHomeScopes[tmpl.Name]
+						cg.genericFuncHomeScopes[tmpl.Name] = qualHome
+					}
 				}
 
 				if isGeneric && len(tmpl.TypeParams) > 0 {
@@ -815,6 +954,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					instKey := typeArgName
 
 					concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
+					if usedQual && savedHome != nil {
+						cg.genericFuncHomeScopes[tmpl.Name] = savedHome
+					}
+
 					if err2 != nil {
 						return nil, err2
 					}

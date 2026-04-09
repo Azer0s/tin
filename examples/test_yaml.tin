@@ -5,7 +5,7 @@
 // Run with: tin test examples/test_yaml.tin
 
 use assert
-use yaml
+use encoding::yaml
 
 // Typed structs for typed-parse tests.
 
