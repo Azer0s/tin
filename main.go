@@ -59,6 +59,17 @@ type cSource struct {
 	flags []string
 }
 
+// tinRuntimeDir returns the path of the runtime/ directory that ships next to
+// the tin binary.  Used to expand $TIN_RUNTIME in //!+file.c flag directives.
+func tinRuntimeDir() string {
+	ex, err := os.Executable()
+	if err != nil {
+		return "runtime"
+	}
+
+	return filepath.Join(filepath.Dir(ex), "runtime")
+}
+
 // archMatches reports whether the optional [arch] qualifier in a directive
 // matches the current platform. qualifier is the raw bracket content, e.g.
 // "x86_64" or "aarch64,darwin". Returns true when qualifier is empty (no
@@ -159,16 +170,17 @@ func parseFileDirectives(src, srcDir string) (linkerFlags []string, cSources []c
 				var extraFlags []string
 
 				if len(parts) == 2 {
+					rtDir := tinRuntimeDir()
 					fields := strings.Fields(parts[1])
 					for i := 0; i < len(fields); i++ {
-						f := fields[i]
+						f := strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
 
 						var iPath string
 
 						if f == "-I" && i+1 < len(fields) {
 							// "-I path" (space-separated)
 							i++
-							iPath = fields[i]
+							iPath = strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
 						} else if strings.HasPrefix(f, "-I") && len(f) > 2 {
 							// "-Ipath" (no space)
 							iPath = f[2:]

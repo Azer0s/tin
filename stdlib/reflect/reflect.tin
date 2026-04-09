@@ -1,4 +1,4 @@
-//!+reflect.c -- -I ../../runtime
+//!+reflect.c -- -I $TIN_RUNTIME
 
 // stdlib/reflect - Type atom inspection
 //

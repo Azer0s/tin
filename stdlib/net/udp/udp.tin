@@ -1,4 +1,4 @@
-//!+udp.c -- -I ../../../runtime
+//!+udp.c -- -I $TIN_RUNTIME
 // stdlib/net/udp - UDP socket types.
 //
 // Mirrors the tcp package but uses datagrams instead of streams:
