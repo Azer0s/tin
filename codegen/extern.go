@@ -40,8 +40,16 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 				return nil, err
 			}
 
-			if coerced := coerceNativeStructForABI(native); coerced != nil && cg.targetIsAMD64() {
-				return coerced, nil
+			if coerced := coerceNativeStructForABI(native); coerced != nil {
+				if cg.targetIsAMD64() {
+					// x86-64 SysV ABI: coerce to i(size*8).
+					return coerced, nil
+				}
+				if cg.targetIsARM64() {
+					// AAPCS64 (ARM64/Apple Silicon): all small integer structs
+					// (≤8 bytes) are zero-extended to a 64-bit register (i64).
+					return irtypes.I64, nil
+				}
 			}
 
 			return native, nil

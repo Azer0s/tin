@@ -40,7 +40,7 @@ const WIN_SCORE i32 = 7
 
 // Speeds (pixels / second)
 const PLYR_SPD f32 = 330.0
-const BOT_SPD  f32 = 270.0   // slightly slower than player -> beatable
+const BOT_SPD  f32 = 120.0   // slightly slower than player -> beatable
 
 // Keyboard codes (raylib)
 const KEY_W i32 = 87

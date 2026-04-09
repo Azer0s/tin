@@ -151,12 +151,25 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 					}
 					// If the C param was coerced to an integer (small
 					// all-integer struct), bitcast through memory.
-					if _, isInt := cParams[i].Type().(*irtypes.IntType); isInt {
+					if intTy, isInt := cParams[i].Type().(*irtypes.IntType); isInt {
 						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
-							a := entry.NewAlloca(nativeSt)
-							entry.NewStore(native, a)
-							ip := entry.NewBitCast(a, irtypes.NewPointer(cParams[i].Type()))
-							native = entry.NewLoad(cParams[i].Type(), ip)
+							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
+							if structBits < intTy.BitSize {
+								// Coerced type is wider than struct (ARM64: ≤8-byte
+								// struct → i64). Load at struct's natural bit size
+								// to avoid an out-of-bounds read, then zero-extend.
+								smallTy := irtypes.NewInt(structBits)
+								a := entry.NewAlloca(nativeSt)
+								entry.NewStore(native, a)
+								ip := entry.NewBitCast(a, irtypes.NewPointer(smallTy))
+								small := entry.NewLoad(smallTy, ip)
+								native = entry.NewZExt(small, intTy)
+							} else {
+								a := entry.NewAlloca(nativeSt)
+								entry.NewStore(native, a)
+								ip := entry.NewBitCast(a, irtypes.NewPointer(intTy))
+								native = entry.NewLoad(intTy, ip)
+							}
 						}
 					}
 
@@ -172,7 +185,26 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			} else {
 				raw := entry.NewCall(cFunc, callArgs...)
 				if sName, isStruct := cg.isNamedTinStruct(ft.RetType); isStruct {
-					tinResult, convErr := cg.wrapNativeStructToTin(entry, raw, sName)
+					// If C returned a coerced integer (ARM64: i64, AMD64: i32),
+					// convert it back to the native struct type before wrapping.
+					var nativeRaw value.Value = raw
+					if intTy, isInt := raw.Type().(*irtypes.IntType); isInt {
+						if nativeSt, err2 := cg.tinStructNativeLLVM(sName); err2 == nil {
+							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
+							nativeAlloca := entry.NewAlloca(nativeSt)
+							if structBits < intTy.BitSize {
+								smallTy := irtypes.NewInt(structBits)
+								truncated := entry.NewTrunc(raw, smallTy)
+								ip := entry.NewBitCast(nativeAlloca, irtypes.NewPointer(smallTy))
+								entry.NewStore(truncated, ip)
+							} else {
+								ip := entry.NewBitCast(nativeAlloca, irtypes.NewPointer(intTy))
+								entry.NewStore(raw, ip)
+							}
+							nativeRaw = entry.NewLoad(nativeSt, nativeAlloca)
+						}
+					}
+					tinResult, convErr := cg.wrapNativeStructToTin(entry, nativeRaw, sName)
 					if convErr != nil {
 						cg.curFn = prevFn
 						cg.curScope = prevScope

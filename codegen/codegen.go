@@ -545,6 +545,12 @@ func (cg *CodeGen) targetIsAMD64() bool {
 	return strings.HasPrefix(cg.mod.TargetTriple, "x86_64")
 }
 
+// targetIsARM64 reports whether the module's target triple is an ARM64 target.
+func (cg *CodeGen) targetIsARM64() bool {
+	return strings.HasPrefix(cg.mod.TargetTriple, "arm64") ||
+		strings.HasPrefix(cg.mod.TargetTriple, "aarch64")
+}
+
 // newModuleWithTriple creates a new LLVM IR module pre-populated with the
 // target triple that clang will actually use, preventing the
 // "overriding the module target triple" warning.
