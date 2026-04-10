@@ -1,0 +1,115 @@
+//!-lraylib
+
+use "./types"
+use "./window"
+use "./drawing"
+use "./input"
+
+// Color constants
+const BLACK      Color = Color{r:   0, g:   0, b:   0, a: 255}
+const WHITE      Color = Color{r: 255, g: 255, b: 255, a: 255}
+const RAYWHITE   Color = Color{r: 245, g: 245, b: 245, a: 255}
+const LIGHTGRAY  Color = Color{r: 200, g: 200, b: 200, a: 255}
+const GRAY       Color = Color{r: 130, g: 130, b: 130, a: 255}
+const DARKGRAY   Color = Color{r:  80, g:  80, b:  80, a: 255}
+const YELLOW     Color = Color{r: 253, g: 249, b:   0, a: 255}
+const GOLD       Color = Color{r: 255, g: 203, b:   0, a: 255}
+const ORANGE     Color = Color{r: 255, g: 161, b:   0, a: 255}
+const PINK       Color = Color{r: 255, g: 109, b: 194, a: 255}
+const RED        Color = Color{r: 230, g:  41, b:  55, a: 255}
+const MAROON     Color = Color{r: 190, g:  33, b:  55, a: 255}
+const GREEN      Color = Color{r:   0, g: 228, b:  48, a: 255}
+const LIME       Color = Color{r:   0, g: 158, b:  47, a: 255}
+const DARKGREEN  Color = Color{r:   0, g: 117, b:  44, a: 255}
+const SKYBLUE    Color = Color{r: 102, g: 191, b: 255, a: 255}
+const BLUE       Color = Color{r:   0, g: 121, b: 241, a: 255}
+const DARKBLUE   Color = Color{r:   0, g:  82, b: 172, a: 255}
+const PURPLE     Color = Color{r: 200, g: 122, b: 255, a: 255}
+const VIOLET     Color = Color{r: 135, g:  60, b: 190, a: 255}
+const DARKPURPLE Color = Color{r: 112, g:  31, b: 126, a: 255}
+const BEIGE      Color = Color{r: 211, g: 176, b: 131, a: 255}
+const BROWN      Color = Color{r: 127, g: 106, b:  79, a: 255}
+const DARKBROWN  Color = Color{r:  76, g:  63, b:  47, a: 255}
+const MAGENTA    Color = Color{r: 255, g:   0, b: 255, a: 255}
+const BLANK      Color = Color{r:   0, g:   0, b:   0, a:   0}
+
+// Key codes (GLFW key codes used by raylib)
+const KEY_NULL        i32 =   0
+const KEY_SPACE       i32 =  32
+const KEY_ENTER       i32 = 257
+const KEY_ESCAPE      i32 = 256
+const KEY_BACKSPACE   i32 = 259
+const KEY_TAB         i32 = 258
+const KEY_UP          i32 = 265
+const KEY_DOWN        i32 = 264
+const KEY_LEFT        i32 = 263
+const KEY_RIGHT       i32 = 262
+const KEY_LEFT_SHIFT  i32 = 340
+const KEY_RIGHT_SHIFT i32 = 344
+const KEY_LEFT_CTRL   i32 = 341
+const KEY_RIGHT_CTRL  i32 = 345
+const KEY_A i32 = 65
+const KEY_B i32 = 66
+const KEY_C i32 = 67
+const KEY_D i32 = 68
+const KEY_E i32 = 69
+const KEY_F i32 = 70
+const KEY_G i32 = 71
+const KEY_H i32 = 72
+const KEY_I i32 = 73
+const KEY_J i32 = 74
+const KEY_K i32 = 75
+const KEY_L i32 = 76
+const KEY_M i32 = 77
+const KEY_N i32 = 78
+const KEY_O i32 = 79
+const KEY_P i32 = 80
+const KEY_Q i32 = 81
+const KEY_R i32 = 82
+const KEY_S i32 = 83
+const KEY_T i32 = 84
+const KEY_U i32 = 85
+const KEY_V i32 = 86
+const KEY_W i32 = 87
+const KEY_X i32 = 88
+const KEY_Y i32 = 89
+const KEY_Z i32 = 90
+const KEY_ZERO  i32 = 48
+const KEY_ONE   i32 = 49
+const KEY_TWO   i32 = 50
+const KEY_THREE i32 = 51
+const KEY_FOUR  i32 = 52
+const KEY_FIVE  i32 = 53
+const KEY_SIX   i32 = 54
+const KEY_SEVEN i32 = 55
+const KEY_EIGHT i32 = 56
+const KEY_NINE  i32 = 57
+
+// Mouse button codes
+const MOUSE_BUTTON_LEFT   i32 = 0
+const MOUSE_BUTTON_RIGHT  i32 = 1
+const MOUSE_BUTTON_MIDDLE i32 = 2
+
+export {
+  Color,
+  init_window, close_window, window_should_close,
+  begin_drawing, end_drawing, set_target_fps,
+  get_screen_width, get_screen_height,
+  clear_background, draw_rectangle, draw_circle, draw_line, draw_text, draw_fps,
+  is_key_down, is_key_pressed, is_key_released, is_key_up, get_key_pressed,
+  is_mouse_button_down, is_mouse_button_pressed, get_mouse_x, get_mouse_y,
+  BLACK, WHITE, RAYWHITE, LIGHTGRAY, GRAY, DARKGRAY,
+  YELLOW, GOLD, ORANGE, PINK, RED, MAROON,
+  GREEN, LIME, DARKGREEN, SKYBLUE, BLUE, DARKBLUE,
+  PURPLE, VIOLET, DARKPURPLE, BEIGE, BROWN, DARKBROWN,
+  MAGENTA, BLANK,
+  KEY_NULL, KEY_SPACE, KEY_ENTER, KEY_ESCAPE, KEY_BACKSPACE, KEY_TAB,
+  KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+  KEY_LEFT_SHIFT, KEY_RIGHT_SHIFT, KEY_LEFT_CTRL, KEY_RIGHT_CTRL,
+  KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J,
+  KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
+  KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z,
+  KEY_ZERO, KEY_ONE, KEY_TWO, KEY_THREE, KEY_FOUR, KEY_FIVE,
+  KEY_SIX, KEY_SEVEN, KEY_EIGHT, KEY_NINE,
+  MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE
+} as raylib

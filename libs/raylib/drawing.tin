@@ -1,0 +1,6 @@
+fn clear_background(color Color) = extern("ClearBackground")
+fn draw_rectangle(pos_x i32, pos_y i32, width i32, height i32, color Color) = extern("DrawRectangle")
+fn draw_circle(center_x i32, center_y i32, radius f32, color Color) = extern("DrawCircle")
+fn draw_line(start_x i32, start_y i32, end_x i32, end_y i32, color Color) = extern("DrawLine")
+fn draw_text(text string, pos_x i32, pos_y i32, font_size i32, color Color) = extern("DrawText")
+fn draw_fps(pos_x i32, pos_y i32) = extern("DrawFPS")

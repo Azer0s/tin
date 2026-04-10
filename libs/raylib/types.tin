@@ -1,0 +1,6 @@
+// Color - 4-byte RGBA color value, coerced to i32 when passed to C functions.
+struct Color =
+  r byte
+  g byte
+  b byte
+  a byte

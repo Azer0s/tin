@@ -1977,18 +1977,100 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 // evalConstExprTyped is like evalConstExpr but uses the declared Tin type as an
 // integer-type hint so that typed constants (e.g. const T u32 = 0xd76aa478)
 // are created with the correct LLVM bit-width rather than defaulting to i64.
+// Also handles struct-literal constants (e.g. const C Color = Color{r:200,...}).
 func (cg *CodeGen) evalConstExprTyped(expr ast.Node, declType ast.TypeExpr) constant.Constant {
 	if declType != nil {
 		if llType, err := cg.tinTypeToLLVM(declType); err == nil {
-			if intType, ok := llType.(*irtypes.IntType); ok {
-				if intTyp, bigVal := cg.evalConstExprInt(expr, intType); intTyp != nil && bigVal != nil {
+			switch lt := llType.(type) {
+			case *irtypes.IntType:
+				if intTyp, bigVal := cg.evalConstExprInt(expr, lt); intTyp != nil && bigVal != nil {
 					return &constant.Int{Typ: intTyp, X: bigVal}
+				}
+
+			case *irtypes.StructType:
+				if lit, ok := expr.(*ast.StructLit); ok {
+					return cg.evalStructLitConst(lit)
 				}
 			}
 		}
 	}
 
 	return cg.evalConstExpr(expr)
+}
+
+// evalStructLitConst builds a compile-time LLVM constant for a struct literal
+// whose fields are all constant integers. Handles the full Tin struct layout:
+// { i32 type_id, vtable_ptrs..., user_field_0, ... }.
+// Returns nil if any field is non-constant or non-integer.
+func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
+	typeName := lit.TypeName
+	if typeName == "" {
+		return nil
+	}
+
+	// Resolve type alias to canonical struct name.
+	canonicalName := typeName
+	if alias, ok := cg.typeAliases[typeName]; ok {
+		if st, ok2 := alias.(*ast.SimpleType); ok2 {
+			canonicalName = st.Name
+		}
+	}
+
+	st, ok := cg.structTypes[canonicalName]
+	if !ok {
+		return nil
+	}
+
+	fieldNames := cg.structFields[canonicalName]
+	fieldLLVMTypes := cg.structFieldLLVMTypes[canonicalName]
+	typeID := cg.structTypeIDs[canonicalName]
+	numVtable := len(cg.structVtableOrder[canonicalName])
+	userOff := 1 + numVtable
+
+	// Start with all-zero constant fields matching the LLVM struct layout.
+	fields := make([]constant.Constant, len(st.Fields))
+	for i, ft := range st.Fields {
+		fields[i] = cg.zeroConstant(ft)
+	}
+
+	// Slot 0: i32 type_id.
+	fields[0] = constant.NewInt(irtypes.I32, int64(typeID))
+
+	// Evaluate each named field from the literal.
+	for _, f := range lit.Fields {
+		rawIdx := -1
+
+		for i, fn := range fieldNames {
+			if fn == f.Name {
+				rawIdx = i
+
+				break
+			}
+		}
+
+		if rawIdx < 0 || rawIdx >= len(fieldLLVMTypes) {
+			continue
+		}
+
+		llIdx := userOff + rawIdx
+		if llIdx >= len(st.Fields) {
+			continue
+		}
+
+		intType, ok2 := fieldLLVMTypes[rawIdx].(*irtypes.IntType)
+		if !ok2 {
+			return nil // non-integer fields not supported in struct constants
+		}
+
+		intTyp, bigVal := cg.evalConstExprInt(f.Value, intType)
+		if intTyp == nil {
+			return nil
+		}
+
+		fields[llIdx] = &constant.Int{Typ: intTyp, X: bigVal}
+	}
+
+	return constant.NewStruct(st, fields...)
 }
 
 func (cg *CodeGen) evalConstExpr(expr ast.Node) constant.Constant {

@@ -1098,10 +1098,15 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		// string ++ byte  /  byte ++ string: coerce the i8 operand to a 1-char string fat-ptr.
 		// The byte is stored in a stack alloca; the memcpy inside the concat path happens in the
 		// same basic block so the alloca lifetime is valid.
+		// Track coercion so we skip ARC release on the coerced side (stack, not RC-managed).
+		leftCoerced, rightCoerced := false, false
+
 		if isStringType(left.Type()) && irtypes.IsInt(right.Type()) && right.Type().(*irtypes.IntType).BitSize == 8 {
 			right = byteToStringFatPtr(block, right)
+			rightCoerced = true
 		} else if isStringType(right.Type()) && irtypes.IsInt(left.Type()) && left.Type().(*irtypes.IntType).BitSize == 8 {
 			left = byteToStringFatPtr(block, left)
+			leftCoerced = true
 		}
 		// Typed array concatenation: {T*, i64} ++ {T*, i64} -> {T*, i64}
 		// (strings {i8*, i64} are handled by the string path below)
@@ -1215,11 +1220,12 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		block.NewStore(totalLen, gep1)
 		result := block.NewLoad(fatPtrType, alloca)
 		// Release sub-expression temporaries now that the result is built.
-		if isTemporaryProducer(e.Left) {
+		// Skip byte-to-string coerced operands: their ptr is a stack alloca, not ARC-managed.
+		if isTemporaryProducer(e.Left) && !leftCoerced {
 			cg.emitRelease(block, left)
 		}
 
-		if isTemporaryProducer(e.Right) {
+		if isTemporaryProducer(e.Right) && !rightCoerced {
 			cg.emitRelease(block, right)
 		}
 

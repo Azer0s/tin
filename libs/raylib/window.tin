@@ -1,0 +1,8 @@
+fn init_window(width i32, height i32, title string) = extern("InitWindow")
+fn close_window() = extern("CloseWindow")
+fn window_should_close() bool = extern("WindowShouldClose")
+fn begin_drawing() = extern("BeginDrawing")
+fn end_drawing() = extern("EndDrawing")
+fn set_target_fps(fps i32) = extern("SetTargetFPS")
+fn get_screen_width() i32 = extern("GetScreenWidth")
+fn get_screen_height() i32 = extern("GetScreenHeight")
