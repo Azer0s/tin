@@ -819,14 +819,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			}
 		}
 
-		// AMD64 sret: structs > 16 bytes are returned via a hidden pointer
-		// argument (rdi) per the x86-64 SysV ABI. LLVM's x86-64 backend does
-		// not correctly handle struct-type returns that require sret when the
-		// function is declared as returning the struct type; it uses a 3-register
-		// return instead of the standard sret convention. Fix this by declaring
-		// the function as void-returning with an explicit sret first parameter.
+		// sret: structs > 16 bytes are returned via a hidden pointer argument.
+		// AMD64 (x86-64 SysV): hidden pointer in rdi.
+		// ARM64 (AAPCS64): hidden pointer in x8 (indirect result register).
+		// In both cases the LLVM IR uses void return + sret first parameter;
+		// the backend maps it to rdi or x8 respectively. Without this, LLVM
+		// generates incorrect multi-register returns that mismatch the C callee.
 		var cRetSRetSt *irtypes.StructType
-		if cg.targetIsAMD64() {
+
+		if cg.targetIsAMD64() || cg.targetIsARM64() {
 			if nativeSt, ok := cRetType.(*irtypes.StructType); ok && nativeStructNeedsByval(nativeSt) {
 				cRetSRetSt = nativeSt
 				sretParam := ir.NewParam(".sret", irtypes.NewPointer(nativeSt))
@@ -835,9 +836,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				cParamByval = append([]*irtypes.StructType{nil}, cParamByval...)
 				cParam2RegNative = append([]*irtypes.StructType{nil}, cParam2RegNative...)
 				cParamARM64Indirect = append([]*irtypes.StructType{nil}, cParamARM64Indirect...)
+
 				for i := range tinParamToCIdx {
 					tinParamToCIdx[i]++
 				}
+
 				cRetType = irtypes.Void
 			}
 		}
@@ -1091,7 +1094,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				if sName, isStruct := cg.isNamedTinStruct(n.RetType); isStruct {
 					// If C returned a coerced integer (ARM64: i64, AMD64: i32),
 					// convert it back to the native struct type before wrapping.
-					var nativeResult value.Value = rawResult
+					nativeResult := rawResult
 					if intTy, isInt := rawResult.Type().(*irtypes.IntType); isInt {
 						if nativeSt, err2 := cg.tinStructNativeLLVM(sName); err2 == nil {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8

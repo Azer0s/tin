@@ -579,6 +579,7 @@ func newModuleWithTriple() *ir.Module {
 	// TIN_TARGET_TRIPLE env var overrides the target triple (for testing cross-targets).
 	if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
 		mod.TargetTriple = override
+
 		return mod
 	}
 	// Compile an empty C translation unit to LLVM IR and extract the triple

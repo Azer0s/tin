@@ -494,6 +494,7 @@ func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, pos
 		if _, isLambda := astArg.(*ast.LambdaExpr); isLambda && isFatFnPtr(pre.Type()) && cg.curScope != nil {
 			alloca := block.NewAlloca(pre.Type())
 			block.NewStore(pre, alloca)
+
 			name := fmt.Sprintf(".tmpfn_%d", cg.strCount)
 			cg.strCount++
 			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isRC: true})

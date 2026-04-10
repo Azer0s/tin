@@ -69,9 +69,10 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			}
 		}
 
-		// AMD64 sret: structs > 16 bytes use a hidden sret pointer argument.
+		// sret: structs > 16 bytes use a hidden pointer argument (AMD64: rdi, ARM64: x8).
 		var pkgCRetSRetSt *irtypes.StructType
-		if cg.targetIsAMD64() {
+
+		if cg.targetIsAMD64() || cg.targetIsARM64() {
 			if nativeSt, ok := cRetType.(*irtypes.StructType); ok && nativeStructNeedsByval(nativeSt) {
 				pkgCRetSRetSt = nativeSt
 				sretParam := ir.NewParam(".sret", irtypes.NewPointer(nativeSt))
@@ -151,9 +152,11 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 			cg.curScope = newScope(prevScope)
 			entry := wrapperFn.NewBlock("entry")
 
-			// sret offset: regular args start at index 1 when AMD64 sret is used.
+			// sret offset: regular args start at index 1 when sret is used.
 			sretOff := 0
+
 			var pkgSretAlloca value.Value
+
 			if pkgCRetSRetSt != nil {
 				sretOff = 1
 			}
@@ -216,10 +219,11 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 				if pkgCRetSRetSt != nil {
 					raw = entry.NewLoad(pkgCRetSRetSt, pkgSretAlloca)
 				}
+
 				if sName, isStruct := cg.isNamedTinStruct(ft.RetType); isStruct {
 					// If C returned a coerced integer (ARM64: i64, AMD64: i32),
 					// convert it back to the native struct type before wrapping.
-					var nativeRaw value.Value = raw
+					nativeRaw := raw
 					if intTy, isInt := raw.Type().(*irtypes.IntType); isInt {
 						if nativeSt, err2 := cg.tinStructNativeLLVM(sName); err2 == nil {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
