@@ -135,3 +135,19 @@ nested_i64_dbl c_get_nested_i64_dbl(int32_t idx, int64_t id) {
     d.id       = id;
     return d;
 }
+
+// -- Section 7: struct with inline fn field --
+
+typedef struct { cb_i64 f; int64_t base; } fn_val_s;
+
+int64_t c_apply_fn_val(fn_val_s s, int64_t n) {
+    return s.f.fn(s.f.env, s.base + n);
+}
+
+// -- Section 8: struct with *fn pointer field --
+
+typedef struct { cb_i64 *f; int64_t base; } fn_ptr_s;
+
+int64_t c_apply_fn_ptr(fn_ptr_s s, int64_t n) {
+    return s.f->fn(s.f->env, s.base + n);
+}

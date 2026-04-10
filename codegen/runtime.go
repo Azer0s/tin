@@ -485,6 +485,22 @@ func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, pos
 	}
 
 	if isRCTrackedType(pre.Type()) {
+		// Lambda temporaries passed as arguments: defer the release to scope exit
+		// rather than immediately after the call. This keeps the closure env alive
+		// for the duration of the enclosing scope, which is necessary when a C
+		// function stashes the fat-fn pointer (C doesn't participate in ARC, so it
+		// cannot increment the RC; if we release here the env is freed before any
+		// subsequent call through the stashed pointer).
+		if _, isLambda := astArg.(*ast.LambdaExpr); isLambda && isFatFnPtr(pre.Type()) && cg.curScope != nil {
+			alloca := block.NewAlloca(pre.Type())
+			block.NewStore(pre, alloca)
+			name := fmt.Sprintf(".tmpfn_%d", cg.strCount)
+			cg.strCount++
+			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isRC: true})
+
+			return
+		}
+
 		cg.emitRelease(block, pre)
 
 		return

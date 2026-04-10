@@ -73,13 +73,11 @@ fn c_call_stashed(n i64) i64 = extern("c_call_stashed")
 
 test "C stashes callback and calls it later" =
   let addend i64 = 100
-  let cb fn(i64) i64 = fn(x i64) i64 = return x + addend
-  c_stash_cb(cb)
+  c_stash_cb(fn(x i64) i64 = return x + addend)
   assert::equals(c_call_stashed(7), 107)
 
 test "C stashes replaced callback, calls again" =
-  let cb fn(i64) i64 = fn(x i64) i64 = return x * 6
-  c_stash_cb(cb)
+  c_stash_cb(fn(x i64) i64 = return x * 6)
   assert::equals(c_call_stashed(7), 42)
 
 // -- 4. Chained callbacks --
@@ -165,3 +163,39 @@ test "nested struct containing struct with double pointer field" =
   assert::equals(d.inner.n, 1)
   let p = *d.inner.pp
   assert::equals(*p, 20)
+
+// -- 7. Struct with inline fn field --
+
+struct fn_val_s =
+  f    fn(i64) i64
+  base i64
+
+fn c_apply_fn_val(s fn_val_s, n i64) i64 = extern("c_apply_fn_val")
+
+test "struct with inline fn field" =
+  let s = fn_val_s{f: fn(x i64) i64 = return x * 2, base: 5}
+  assert::equals(c_apply_fn_val(s, 3), 16)
+
+test "struct with inline capturing fn field" =
+  let mul i64 = 3
+  let s = fn_val_s{f: fn(x i64) i64 = return x * mul, base: 10}
+  assert::equals(c_apply_fn_val(s, 4), 42)
+
+// -- 8. Struct with *fn pointer field --
+
+struct fn_ptr_s =
+  f    *fn(i64) i64
+  base i64
+
+fn c_apply_fn_ptr(s fn_ptr_s, n i64) i64 = extern("c_apply_fn_ptr")
+
+test "struct with *fn pointer field" =
+  let cb fn(i64) i64 = fn(x i64) i64 = return x + 1
+  let s = fn_ptr_s{f: &cb, base: 20}
+  assert::equals(c_apply_fn_ptr(s, 2), 23)
+
+test "struct with *fn pointer field, capturing lambda" =
+  let addend i64 = 100
+  let cb fn(i64) i64 = fn(x i64) i64 = return x + addend
+  let s = fn_ptr_s{f: &cb, base: 0}
+  assert::equals(c_apply_fn_ptr(s, 7), 107)
