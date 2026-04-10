@@ -34,8 +34,17 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 		// Named Tin struct: strip type_id and vtable pointers for C ABI.
 		// Small all-integer structs are further coerced to an integer register
 		// type to match x86-64 SysV ABI (clang coerces { i8, i8, i8, i8 } -> i32).
-		if _, isStruct := cg.structFieldLLVMTypes[st.Name]; isStruct {
-			native, err := cg.tinStructNativeLLVM(st.Name)
+		// Resolve type alias first (e.g. "Color" -> "raylib__Color") so that
+		// package-qualified canonical names are found in structFieldLLVMTypes.
+		structNameForExtern := st.Name
+		if alias, ok2 := cg.typeAliases[structNameForExtern]; ok2 {
+			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+				structNameForExtern = simple.Name
+			}
+		}
+
+		if _, isStruct := cg.structFieldLLVMTypes[structNameForExtern]; isStruct {
+			native, err := cg.tinStructNativeLLVM(structNameForExtern)
 			if err != nil {
 				return nil, err
 			}
@@ -69,9 +78,16 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 			}
 
 			if st, ok3 := pt.Elem.(*ast.SimpleType); ok3 {
-				_, isStruct := cg.structFieldLLVMTypes[st.Name]
+				ptrStructName := st.Name
+				if alias, ok4 := cg.typeAliases[ptrStructName]; ok4 {
+					if simple, ok5 := alias.(*ast.SimpleType); ok5 {
+						ptrStructName = simple.Name
+					}
+				}
+
+				_, isStruct := cg.structFieldLLVMTypes[ptrStructName]
 				if isStruct {
-					native, err := cg.tinStructNativeLLVM(st.Name)
+					native, err := cg.tinStructNativeLLVM(ptrStructName)
 					if err != nil {
 						return nil, err
 					}
@@ -298,8 +314,17 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 // isNamedTinStruct reports whether the TypeExpr is a named Tin struct.
 func (cg *CodeGen) isNamedTinStruct(te ast.TypeExpr) (string, bool) {
 	if st, ok := te.(*ast.SimpleType); ok {
-		if _, isStruct := cg.structFieldLLVMTypes[st.Name]; isStruct {
-			return st.Name, true
+		name := st.Name
+		// Resolve type alias so package-qualified canonical names are found
+		// (e.g. "Color" -> "raylib__Color" after `use raylib`).
+		if alias, ok2 := cg.typeAliases[name]; ok2 {
+			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+				name = simple.Name
+			}
+		}
+
+		if _, isStruct := cg.structFieldLLVMTypes[name]; isStruct {
+			return name, true
 		}
 	}
 
