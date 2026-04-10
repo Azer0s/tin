@@ -497,6 +497,56 @@ func nativeStructNeedsByval(st *irtypes.StructType) bool {
 	return nativeStructByteSize(st) > 16
 }
 
+// isNativeStructHFA checks whether the native struct is a Homogeneous
+// Floating-point Aggregate (HFA) as defined by AAPCS64: all leaf fields are
+// the same base floating-point type and there are between 1 and 4 such fields.
+// HFAs are passed in VFP registers (d0-d3 for doubles) on ARM64, regardless
+// of total size, so they must NOT be treated as byval or indirect pointer args.
+// Returns (true, count) when the struct is an HFA, (false, 0) otherwise.
+func isNativeStructHFA(st *irtypes.StructType) bool {
+	var baseKind irtypes.FloatKind
+
+	count := 0
+
+	if !collectHFALeaves(st, &baseKind, &count, true) {
+		return false
+	}
+
+	return count >= 1 && count <= 4
+}
+
+// collectHFALeaves recursively collects leaf float types in a struct.
+// All leaves must be the same float kind; any non-float leaf returns false.
+// isFirst indicates whether we haven't seen any float yet (to set baseKind).
+func collectHFALeaves(t irtypes.Type, baseKind *irtypes.FloatKind, count *int, isFirst bool) bool {
+	switch ft := t.(type) {
+	case *irtypes.FloatType:
+		if *count == 0 {
+			*baseKind = ft.Kind
+		} else if ft.Kind != *baseKind {
+			return false // mixed float kinds
+		}
+
+		*count++
+
+		return true
+
+	case *irtypes.StructType:
+		for _, f := range ft.Fields {
+			if !collectHFALeaves(f, baseKind, count, false) {
+				return false
+			}
+		}
+
+		return true
+
+	default:
+		_ = isFirst
+
+		return false // integer or pointer leaf → not an HFA
+	}
+}
+
 // nativeStructAllInteger reports whether every field in the native struct is
 // an integer type (i8, i16, i32, i64, i128). Nested structs are checked
 // recursively. Used for x86-64 SysV ABI coercion: small all-integer structs

@@ -724,7 +724,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		isVariadic := false
 
 		var cParams []*ir.Param
-		// cParamByval[i] is non-nil when cParams[i] uses byval (large struct > 16 bytes).
+		// cParamByval[i] is non-nil when cParams[i] uses byval (AMD64 large struct > 16 bytes).
 		var cParamByval []*irtypes.StructType
 		// tinParamToCIdx maps Tin parameter index (ignoring varargs) to the
 		// starting index in cParams. Normally 1:1, but 2-register struct splits
@@ -733,6 +733,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// cParam2RegNative[cIdx] is non-nil when cParams[cIdx] is the FIRST
 		// of a 2-register split pair (9-16 byte all-integer struct, AMD64/ARM64).
 		var cParam2RegNative []*irtypes.StructType
+		// cParamARM64Indirect[cIdx] is non-nil when cParams[cIdx] is a plain
+		// pointer (*T) for ARM64 non-HFA large struct indirect passing. The C
+		// function receives a pointer to a stack copy of the struct.
+		var cParamARM64Indirect []*irtypes.StructType
 
 		for _, p := range n.Params {
 			if p.IsVarArgs {
@@ -754,16 +758,34 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			tinParamToCIdx = append(tinParamToCIdx, len(cParams))
 
-			// Named Tin struct params > 16 bytes must use byval on AMD64 and ARM64.
-			// Both x86-64 SysV and AAPCS64 pass oversized structs via an implicit
-			// memory reference that LLVM represents as a byval-attributed i8* pointer.
-			if nativeSt, isNative := ct.(*irtypes.StructType); isNative && nativeStructNeedsByval(nativeSt) && (cg.targetIsAMD64() || cg.targetIsARM64()) {
+			// Large struct passing (>16 bytes) is ABI-dependent:
+			//   AMD64 x86-64 SysV: all large structs use byval (implicit pointer copy).
+			//   ARM64 AAPCS64:
+			//     - HFA (1-4 identical float fields, any size): pass directly in VFP regs.
+			//     - Non-HFA large: pass as plain *T pointer (not byval) matching AAPCS64
+			//       "composite type passed indirectly" rule without the LLVM byval alignment
+			//       complications that cause crashes on ARM64 Linux.
+			// For 9-16 byte all-integer structs, both ABIs use two integer registers.
+			nativeSt, isNativeSt := ct.(*irtypes.StructType)
+
+			if isNativeSt && nativeStructNeedsByval(nativeSt) && cg.targetIsAMD64() {
+				// AMD64: use byval for large non-HFA structs.
 				bvParam := ir.NewParam(p.Name, irtypes.I8Ptr)
 				bvParam.Attrs = append(bvParam.Attrs, ir.Byval{Typ: nativeSt})
 				cParams = append(cParams, bvParam)
 				cParamByval = append(cParamByval, nativeSt)
 				cParam2RegNative = append(cParam2RegNative, nil)
-			} else if nativeSt, isNative := ct.(*irtypes.StructType); isNative && coerceNativeStructForABI2Reg(nativeSt) && (cg.targetIsAMD64() || cg.targetIsARM64()) {
+				cParamARM64Indirect = append(cParamARM64Indirect, nil)
+			} else if isNativeSt && nativeStructNeedsByval(nativeSt) && cg.targetIsARM64() && !isNativeStructHFA(nativeSt) {
+				// ARM64 non-HFA large struct: pass as plain pointer (*T).
+				// Callee (Clang) receives the pointer in an integer register (x0/x1...).
+				// This matches AAPCS64 composite indirect passing without byval alignment issues.
+				ptrParam := ir.NewParam(p.Name, irtypes.NewPointer(nativeSt))
+				cParams = append(cParams, ptrParam)
+				cParamByval = append(cParamByval, nil)
+				cParam2RegNative = append(cParam2RegNative, nil)
+				cParamARM64Indirect = append(cParamARM64Indirect, nativeSt)
+			} else if isNativeSt && coerceNativeStructForABI2Reg(nativeSt) && (cg.targetIsAMD64() || cg.targetIsARM64()) {
 				// 9-16 byte all-integer struct: split into two i64 params.
 				// x86-64 SysV: two integer eightbytes in rdi/rsi etc.
 				// AAPCS64: two consecutive x-registers (x0/x1 etc.).
@@ -771,14 +793,18 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				cParams = append(cParams, ir.NewParam(p.Name+".lo", irtypes.I64))
 				cParamByval = append(cParamByval, nil)
 				cParam2RegNative = append(cParam2RegNative, nativeSt)
+				cParamARM64Indirect = append(cParamARM64Indirect, nil)
 
 				cParams = append(cParams, ir.NewParam(p.Name+".hi", irtypes.I64))
 				cParamByval = append(cParamByval, nil)
 				cParam2RegNative = append(cParam2RegNative, nil)
+				cParamARM64Indirect = append(cParamARM64Indirect, nil)
 			} else {
+				// Direct pass: small structs, HFA structs (ARM64 VFP regs), primitives.
 				cParams = append(cParams, ir.NewParam(p.Name, ct))
 				cParamByval = append(cParamByval, nil)
 				cParam2RegNative = append(cParam2RegNative, nil)
+				cParamARM64Indirect = append(cParamARM64Indirect, nil)
 			}
 		}
 		// Compute C-level return type.
@@ -941,13 +967,18 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 						return err
 					}
-					// For byval params (large structs > 16 bytes): alloca native struct,
-					// store the converted value, then pass a byval-attributed pointer.
+					// For byval params (AMD64 large structs > 16 bytes): alloca native
+					// struct, store the converted value, then pass a byval-attributed pointer.
 					if cParamByval[cIdx] != nil {
 						nativeAlloca := entry.NewAlloca(cParamByval[cIdx])
 						entry.NewStore(native, nativeAlloca)
 						ptr := entry.NewBitCast(nativeAlloca, irtypes.I8Ptr)
 						callArgs[cIdx] = ir.NewArg(ptr, ir.Byval{Typ: cParamByval[cIdx]})
+					} else if cParamARM64Indirect[cIdx] != nil {
+						// ARM64 non-HFA large struct: alloca + pass plain pointer.
+						nativeAlloca := entry.NewAlloca(cParamARM64Indirect[cIdx])
+						entry.NewStore(native, nativeAlloca)
+						callArgs[cIdx] = nativeAlloca
 					} else if cParam2RegNative[cIdx] != nil {
 						// 9-16 byte all-integer struct: split into two i64 halves
 						// to match clang's x86-64 SysV / AAPCS64 (i64, i64) coercion.
