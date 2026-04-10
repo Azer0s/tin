@@ -69,6 +69,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		return entry.val, nil
 	}
 	// Try struct static method: TypeName::method or TypeName[T]::method
+	// Also handles package-qualified names: pkg::TypeName[T,U]::method
 	// Scope key is "TypeName_method" (set when struct is compiled with static methods).
 	if len(e.Path) >= 2 {
 		baseName := e.Path[0]
@@ -79,7 +80,13 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 			baseName = baseName[:i]
 		}
 
-		staticKey := baseName + "_" + last
+		// Strip package qualifier (e.g. "collections::HashMap" → "HashMap") for scope lookup.
+		bareBaseName := baseName
+		if idx2 := strings.LastIndex(bareBaseName, "::"); idx2 >= 0 {
+			bareBaseName = bareBaseName[idx2+2:]
+		}
+
+		staticKey := bareBaseName + "_" + last
 
 		entry, ok = cg.curScope.lookup(staticKey)
 		if ok {
@@ -91,25 +98,33 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 
 			return entry.val, nil
 		}
-		// On-demand monomorphization: if baseName is a generic struct template and
-		// we have a concrete type param, monomorphize now and retry.
+		// On-demand monomorphization: if bareBaseName is a generic struct template
+		// and we have concrete type params, monomorphize now and retry.
+		// typeParamStr may be comma-separated for multi-param generics (e.g. "string,string").
 		if typeParamStr != "" {
-			if _, isGeneric := cg.genericStructsByArity[baseName]; isGeneric {
-				// Resolve typeParamStr through type aliases (e.g. "r" → "string" inside a
-				// generic method body where cg.typeAliases["r"] = string).
-				resolvedTypeParam := typeParamStr
-				if alias, ok2 := cg.typeAliases[typeParamStr]; ok2 {
-					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-						resolvedTypeParam = simple.Name
+			if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
+				// Split comma-separated params, resolve aliases, build concrete name.
+				rawParts := strings.Split(typeParamStr, ",")
+				resolvedParts := make([]string, len(rawParts))
+				resolvedTEs := make([]ast.TypeExpr, len(rawParts))
+
+				for i, raw := range rawParts {
+					raw = strings.TrimSpace(raw)
+					if alias, ok2 := cg.typeAliases[raw]; ok2 {
+						if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+							raw = simple.Name
+						}
 					}
+
+					resolvedParts[i] = raw
+					resolvedTEs[i] = parseTypeParamStr(raw)
 				}
 
-				concreteName := baseName + "__" + resolvedTypeParam
+				concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-					typeParamTE := parseTypeParamStr(resolvedTypeParam)
 					synthDecl := &ast.TypeDecl{
 						Name: concreteName,
-						Type: &ast.GenericType{Name: baseName, TypeParams: []ast.TypeExpr{typeParamTE}},
+						Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 					}
 					_ = cg.genTypeDecl(synthDecl)
 				}

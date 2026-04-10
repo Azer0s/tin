@@ -16,6 +16,10 @@ type Parser struct {
 	pos                    int
 	noParensMacros         map[string]string // macro name -> backtick expansion body
 	noWarnAwaitMatchGuards bool
+	// continuationDedents tracks INDENT tokens consumed inside parseBinary for
+	// multi-line operator continuations (e.g. `a && \n  b`).  skipNewlines
+	// drains these so the body INDENT of the enclosing if/for/... is visible.
+	continuationDedents int
 }
 
 // New creates a Parser over the given token slice
@@ -165,6 +169,12 @@ func (p *Parser) expect(t lexer.TokenType) (lexer.Token, error) {
 func (p *Parser) skipNewlines() {
 	for p.check(lexer.NEWLINE) {
 		p.advance()
+	}
+	// Drain any continuation DEDENTs accumulated by parseBinary so that the
+	// body INDENT of the enclosing if/for/... statement is visible next.
+	for p.continuationDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.continuationDedents--
 	}
 }
 

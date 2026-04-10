@@ -471,14 +471,9 @@ func (l *Lexer) handleLineStart() (Token, error) {
 	} else if indent < top {
 		// Pop stack until we match
 		l.indentStack = l.indentStack[:len(l.indentStack)-1]
-		// If still not matching, we'll emit more DEDENTs on subsequent calls
-		if len(l.indentStack) == 0 || indent > l.indentStack[len(l.indentStack)-1] {
-			// Inconsistent indentation
-			l.indentStack = append(l.indentStack, indent)
-		}
-		// Re-enter handleLineStart to possibly emit more DEDENTs, but reuse
-		// the already-computed indent so we don't recount past whitespace
-		if indent < l.indentStack[len(l.indentStack)-1] {
+		// Re-enter handleLineStart to possibly emit more DEDENTs or an INDENT,
+		// reusing the already-computed indent so we don't recount past whitespace.
+		if len(l.indentStack) == 0 || indent != l.indentStack[len(l.indentStack)-1] {
 			l.atLineStart = true
 			l.dedenting = true
 		}

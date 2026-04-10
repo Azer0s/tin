@@ -1120,11 +1120,23 @@ func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.F
 }
 
 func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Value, error) {
-	// Check if this is an enum member access: EnumName.Member
-	if id, ok := e.Expr.(*ast.Identifier); ok {
-		key := id.Name + "." + e.Field
+	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
+	var enumBaseName string
+
+	switch base := e.Expr.(type) {
+	case *ast.Identifier:
+		enumBaseName = base.Name
+	case *ast.ScopeAccess:
+		// pkg::EnumName.Member - use the last path element as the enum name.
+		if len(base.Path) > 0 {
+			enumBaseName = base.Path[len(base.Path)-1]
+		}
+	}
+
+	if enumBaseName != "" {
+		key := enumBaseName + "." + e.Field
 		if val, ok2 := cg.enumValues[key]; ok2 {
-			baseType := cg.enumTypes[id.Name]
+			baseType := cg.enumTypes[enumBaseName]
 			if it, ok3 := baseType.(*irtypes.IntType); ok3 {
 				return constant.NewInt(it, val), nil
 			}

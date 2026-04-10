@@ -293,6 +293,19 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 	for p.match(ops...) {
 		op := p.advance().Literal
 
+		// Line-continuation: operator at end of line.
+		// Consume NEWLINE and any INDENT tokens so the right operand can start
+		// on the next (possibly more-indented) line.  Track the consumed INDENTs
+		// so skipNewlines can drain the matching DEDENTs later.
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+
+			for p.check(lexer.INDENT) {
+				p.advance()
+				p.continuationDedents++
+			}
+		}
+
 		right, err2 := sub()
 		if err2 != nil {
 			return nil, err2
@@ -483,11 +496,20 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					expr = sa
 				}
 			} else if idx, ok2 := expr.(*ast.IndexExpr); ok2 {
-				// e.g. result[u32]::ok(42) - static method call on generic type
-				if idExpr, ok3 := idx.Expr.(*ast.Identifier); ok3 {
-					typeName := idExpr.Name
+				// e.g. result[u32]::ok(42) or pkg::Type[T,U]::method()
+				// - static method call on a generic type, with optional package qualifier.
+				var typeName string
+
+				switch inner := idx.Expr.(type) {
+				case *ast.Identifier:
+					typeName = inner.Name
+				case *ast.ScopeAccess:
+					typeName = strings.Join(inner.Path, "::")
+				}
+
+				if typeName != "" {
 					if typeArgID, ok4 := idx.Index.(*ast.Identifier); ok4 {
-						typeName = idExpr.Name + "[" + typeArgID.Name + "]"
+						typeName = typeName + "[" + typeArgID.Name + "]"
 					}
 
 					sa := &ast.ScopeAccess{Path: []string{typeName, field.Literal}}
