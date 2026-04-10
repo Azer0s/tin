@@ -114,6 +114,46 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 			return nil, err
 		}
 
+		// *cLayoutStruct params: C passes a native pointer, but the lambda body
+		// expects a Tin wrapper pointer (with c_data_ptr). Build a stack-allocated
+		// wrapper on the fly so that field accesses through the parameter work.
+		if ptrTe, isPtrType := p.Type.(*ast.PointerType); isPtrType {
+			if stTe, isSimple := ptrTe.Elem.(*ast.SimpleType); isSimple && cg.cLayoutStructs[stTe.Name] {
+				wrapperSt := cg.structTypes[stTe.Name]
+				wrapperAlloca := entry.NewAlloca(wrapperSt)
+				entry.NewStore(constant.NewZeroInitializer(wrapperSt), wrapperAlloca)
+
+				// Set type_id (field 0).
+				typeID := cg.structTypeIDs[stTe.Name]
+				typeIDGep := entry.NewGetElementPtr(wrapperSt, wrapperAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+				entry.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
+
+				// Zero vtable fields (1..userFieldOffset-1).
+				ufo := cg.userFieldOffset(stTe.Name)
+				for v := int64(1); v < int64(ufo); v++ {
+					vtGep := entry.NewGetElementPtr(wrapperSt, wrapperAlloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, v))
+					fieldType := wrapperSt.Fields[v]
+					entry.NewStore(constant.NewNull(fieldType.(*irtypes.PointerType)), vtGep)
+				}
+
+				// Store the incoming C pointer into c_data_ptr.
+				cDataIdx := int64(cg.cDataPtrIndex(stTe.Name))
+				cDataGep := entry.NewGetElementPtr(wrapperSt, wrapperAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+				i8Param := entry.NewBitCast(param, irtypes.I8Ptr)
+				entry.NewStore(i8Param, cDataGep)
+
+				// Store the wrapper address in the param alloca (type: *(*exvec_wrapper)).
+				alloca := entry.NewAlloca(pt)
+				entry.NewStore(wrapperAlloca, alloca)
+				cg.curScope.set(p.Name, &scopeEntry{val: alloca, isAlloc: true})
+
+				continue
+			}
+		}
+
 		alloca := entry.NewAlloca(pt)
 		entry.NewStore(param, alloca)
 		// ARC: retain RC-tracked params so scope-exit release is balanced.

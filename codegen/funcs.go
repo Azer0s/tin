@@ -819,6 +819,29 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			}
 		}
 
+		// AMD64 sret: structs > 16 bytes are returned via a hidden pointer
+		// argument (rdi) per the x86-64 SysV ABI. LLVM's x86-64 backend does
+		// not correctly handle struct-type returns that require sret when the
+		// function is declared as returning the struct type; it uses a 3-register
+		// return instead of the standard sret convention. Fix this by declaring
+		// the function as void-returning with an explicit sret first parameter.
+		var cRetSRetSt *irtypes.StructType
+		if cg.targetIsAMD64() {
+			if nativeSt, ok := cRetType.(*irtypes.StructType); ok && nativeStructNeedsByval(nativeSt) {
+				cRetSRetSt = nativeSt
+				sretParam := ir.NewParam(".sret", irtypes.NewPointer(nativeSt))
+				sretParam.Attrs = append(sretParam.Attrs, ir.SRet{Typ: nativeSt})
+				cParams = append([]*ir.Param{sretParam}, cParams...)
+				cParamByval = append([]*irtypes.StructType{nil}, cParamByval...)
+				cParam2RegNative = append([]*irtypes.StructType{nil}, cParam2RegNative...)
+				cParamARM64Indirect = append([]*irtypes.StructType{nil}, cParamARM64Indirect...)
+				for i := range tinParamToCIdx {
+					tinParamToCIdx[i]++
+				}
+				cRetType = irtypes.Void
+			}
+		}
+
 		// Create (or reuse) the raw C declaration with C-level types.
 		cFunc := cg.ensureExternDecl(n.IsExtern, cRetType, cParams, isVariadic)
 
@@ -931,6 +954,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			// Build C-level call args: convert struct params to native, pass others as-is.
 			callArgs := make([]value.Value, len(cParams))
+
+			// AMD64 sret: pre-allocate the result buffer and put its address at index 0.
+			var sretResultAlloca value.Value
+			if cRetSRetSt != nil {
+				sretResultAlloca = entry.NewAlloca(cRetSRetSt)
+				callArgs[0] = ir.NewArg(sretResultAlloca, ir.SRet{Typ: cRetSRetSt})
+			}
 
 			// dblPtrWritebacks records N*S (N>=2) params that need post-call write-back:
 			// after C writes (N-1)*S.native to the slot, we wrap the chain and store
@@ -1046,7 +1076,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				wrapperPIdx++
 			}
 
-			rawResult := entry.NewCall(cFunc, callArgs...)
+			rawCall := entry.NewCall(cFunc, callArgs...)
+
+			// AMD64 sret: load the actual result from the pre-allocated buffer.
+			var rawResult value.Value = rawCall
+			if cRetSRetSt != nil {
+				rawResult = entry.NewLoad(cRetSRetSt, sretResultAlloca)
+			}
 
 			// Convert result: if C returned a native struct, wrap back to Tin.
 			var finalResult value.Value

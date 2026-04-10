@@ -1,0 +1,167 @@
+//!+c_interop_exotic.c
+
+use assert
+
+// -- 1. Callbacks that receive struct pointers from C --
+
+struct exvec =
+  x i32
+  y i32
+
+fn c_ev_at(idx i32) *exvec = extern("c_ev_at")
+fn c_ev_x(p *exvec) i32 = extern("c_ev_x")
+fn c_ev_y(p *exvec) i32 = extern("c_ev_y")
+fn c_foreach_ev_ptr(cb fn(*exvec)) = extern("c_foreach_ev_ptr")
+fn c_foreach_ev_pair(cb fn(*exvec, *exvec)) = extern("c_foreach_ev_pair")
+fn c_apply_ev_int(cb fn(*exvec, i32) i64, p *exvec, n i32) i64 = extern("c_apply_ev_int")
+
+test "callback receives struct pointer from C" =
+  let sumx [i32] = [0]
+  c_foreach_ev_ptr(fn(p *exvec) = sumx[0] = sumx[0] + c_ev_x(p))
+  // 1+3+5+7 = 16
+  assert::equals(sumx[0], 16)
+
+test "callback receives struct pointer, accumulates y" =
+  let sumy [i32] = [0]
+  c_foreach_ev_ptr(fn(p *exvec) = sumy[0] = sumy[0] + c_ev_y(p))
+  // 2+4+6+8 = 20
+  assert::equals(sumy[0], 20)
+
+test "callback receives two struct pointers from C" =
+  let sum [i32] = [0]
+  c_foreach_ev_pair(fn(a *exvec, b *exvec) = sum[0] = sum[0] + c_ev_x(a) + c_ev_x(b))
+  // (1+3) + (3+5) + (5+7) = 24
+  assert::equals(sum[0], 24)
+
+test "callback with struct pointer and scalar arg" =
+  let p = c_ev_at(1)
+  let r = c_apply_ev_int(fn(v *exvec, n i32) i64 = return c_ev_x(v) * (n as i64), p, 7)
+  // g_evs[1].x * 7 = 3 * 7 = 21
+  assert::equals(r, 21)
+
+test "callback with struct pointer and scalar arg, using y" =
+  let p = c_ev_at(2)
+  let r = c_apply_ev_int(fn(v *exvec, n i32) i64 = return (c_ev_x(v) + c_ev_y(v)) * (n as i64), p, 3)
+  // (5+6) * 3 = 33
+  assert::equals(r, 33)
+
+test "callback accumulates xy sum over all points" =
+  let total [i64] = [0]
+  c_foreach_ev_ptr(fn(p *exvec) = total[0] = total[0] + (c_ev_x(p) as i64) + (c_ev_y(p) as i64))
+  // (1+2)+(3+4)+(5+6)+(7+8) = 36
+  assert::equals(total[0], 36)
+
+// -- 2. Callback pointer: C takes *fn(i64) i64 --
+
+fn c_apply_cb_ptr(cbp *fn(i64) i64, n i64) i64 = extern("c_apply_cb_ptr")
+
+fn ex_triple(x i64) i64 = return x * 3
+
+test "passing named callback by pointer to C" =
+  let cb fn(i64) i64 = ex_triple
+  assert::equals(c_apply_cb_ptr(&cb, 14), 42)
+
+test "passing capturing lambda by pointer to C" =
+  let factor i64 = 5
+  let cb fn(i64) i64 = fn(x i64) i64 = return x * factor
+  assert::equals(c_apply_cb_ptr(&cb, 8), 40)
+
+// -- 3. C stashes callback, calls it later --
+
+fn c_stash_cb(cb fn(i64) i64) = extern("c_stash_cb")
+fn c_call_stashed(n i64) i64 = extern("c_call_stashed")
+
+test "C stashes callback and calls it later" =
+  let addend i64 = 100
+  let cb fn(i64) i64 = fn(x i64) i64 = return x + addend
+  c_stash_cb(cb)
+  assert::equals(c_call_stashed(7), 107)
+
+test "C stashes replaced callback, calls again" =
+  let cb fn(i64) i64 = fn(x i64) i64 = return x * 6
+  c_stash_cb(cb)
+  assert::equals(c_call_stashed(7), 42)
+
+// -- 4. Chained callbacks --
+
+fn c_chain_cbs(f fn(i64) i64, g fn(i64) i64, n i64) i64 = extern("c_chain_cbs")
+
+test "C chains two callbacks: g(f(n))" =
+  let r = c_chain_cbs(fn(x i64) i64 = return x * 2, fn(x i64) i64 = return x + 1, 5)
+  // f(5)=10, g(10)=11
+  assert::equals(r, 11)
+
+test "C chains two capturing callbacks" =
+  let mul i64 = 3
+  let add i64 = 10
+  let r = c_chain_cbs(fn(x i64) i64 = return x * mul, fn(x i64) i64 = return x + add, 4)
+  // f(4)=12, g(12)=22
+  assert::equals(r, 22)
+
+// -- 5. Structs with i64 pointer fields --
+// Using i64 pointer fields avoids cLayout struct mismatch in field values.
+
+struct i64_ptr_pair =
+  a *i64
+  b *i64
+
+struct tagged_i64_pair =
+  ptrs i64_ptr_pair
+  tag  i32
+
+fn c_get_i64_ptr_pair(i i32, j i32) i64_ptr_pair = extern("c_get_i64_ptr_pair")
+fn c_get_tagged_i64_pair(i i32, j i32, tag i32) tagged_i64_pair = extern("c_get_tagged_i64_pair")
+
+test "struct with pointer fields returned from C" =
+  let pp = c_get_i64_ptr_pair(0, 3)
+  assert::equals(*pp.a, 10)
+  assert::equals(*pp.b, 40)
+
+test "nested struct with pointer fields" =
+  let tp = c_get_tagged_i64_pair(1, 2, 77)
+  assert::equals(*tp.ptrs.a, 20)
+  assert::equals(*tp.ptrs.b, 30)
+  assert::equals(tp.tag, 77)
+
+// -- 6. Double and triple pointer fields in nested structs --
+
+struct i64_dbl =
+  pp **i64
+  n  i32
+
+struct i64_tri =
+  ppp ***i64
+  n   i32
+
+struct nested_i64_dbl =
+  inner i64_dbl
+  id    i64
+
+fn c_get_i64_dbl(idx i32) i64_dbl = extern("c_get_i64_dbl")
+fn c_get_i64_tri() i64_tri = extern("c_get_i64_tri")
+fn c_get_nested_i64_dbl(idx i32, id i64) nested_i64_dbl = extern("c_get_nested_i64_dbl")
+
+test "struct field is double pointer to i64" =
+  let d = c_get_i64_dbl(0)
+  assert::equals(d.n, 0)
+  let p = *d.pp
+  assert::equals(*p, 10)
+
+test "struct field is double pointer, different index" =
+  let d = c_get_i64_dbl(3)
+  let p = *d.pp
+  assert::equals(*p, 40)
+
+test "struct field is triple pointer to i64" =
+  let t = c_get_i64_tri()
+  assert::equals(t.n, 3)
+  let pp = *t.ppp
+  let p  = *pp
+  assert::equals(*p, 30)
+
+test "nested struct containing struct with double pointer field" =
+  let d = c_get_nested_i64_dbl(1, 99)
+  assert::equals(d.id, 99)
+  assert::equals(d.inner.n, 1)
+  let p = *d.inner.pp
+  assert::equals(*p, 20)
