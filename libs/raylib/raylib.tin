@@ -1,4 +1,5 @@
 //!-lraylib
+//!-L/opt/homebrew/lib [darwin]
 
 use "./types"
 use "./window"
@@ -94,10 +95,10 @@ export {
   Color,
   init_window, close_window, window_should_close,
   begin_drawing, end_drawing, set_target_fps,
-  get_screen_width, get_screen_height,
+  get_screen_width, get_screen_height, get_frame_time,
   clear_background, draw_rectangle, draw_circle, draw_line, draw_text, draw_fps,
   is_key_down, is_key_pressed, is_key_released, is_key_up, get_key_pressed,
-  is_mouse_button_down, is_mouse_button_pressed, get_mouse_x, get_mouse_y,
+  is_mouse_button_down, is_mouse_button_pressed, get_mouse_x, get_mouse_y, get_random_value,
   BLACK, WHITE, RAYWHITE, LIGHTGRAY, GRAY, DARKGRAY,
   YELLOW, GOLD, ORANGE, PINK, RED, MAROON,
   GREEN, LIME, DARKGREEN, SKYBLUE, BLUE, DARKBLUE,
