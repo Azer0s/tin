@@ -725,6 +725,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		var cParams []*ir.Param
 		// cParamByval[i] is non-nil when cParams[i] uses byval (large struct > 16 bytes).
 		var cParamByval []*irtypes.StructType
+		// tinParamToCIdx maps Tin parameter index (ignoring varargs) to the
+		// starting index in cParams. Normally 1:1, but 2-register struct splits
+		// insert an extra C param so subsequent indices shift.
+		var tinParamToCIdx []int
+		// cParam2RegNative[cIdx] is non-nil when cParams[cIdx] is the FIRST
+		// of a 2-register split pair (9-16 byte all-integer struct on AMD64).
+		var cParam2RegNative []*irtypes.StructType
 
 		for _, p := range n.Params {
 			if p.IsVarArgs {
@@ -743,6 +750,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			if err != nil {
 				return err
 			}
+
+			tinParamToCIdx = append(tinParamToCIdx, len(cParams))
+
 			// Named Tin struct params > 16 bytes must use byval to match AMD64 ABI.
 			// On ARM64, LLVM handles struct-by-value calling convention automatically
 			// (HFAs go in SIMD registers, non-HFAs via memory), so byval is not used.
@@ -751,9 +761,21 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				bvParam.Attrs = append(bvParam.Attrs, ir.Byval{Typ: nativeSt})
 				cParams = append(cParams, bvParam)
 				cParamByval = append(cParamByval, nativeSt)
+				cParam2RegNative = append(cParam2RegNative, nil)
+			} else if nativeSt, isNative := ct.(*irtypes.StructType); isNative && coerceNativeStructForABI2Reg(nativeSt) && cg.targetIsAMD64() {
+				// 9-16 byte all-integer struct: split into two i64 params to match
+				// clang's x86-64 SysV coercion (e.g. { {i32,i32}, {i32,i32} } -> (i64, i64)).
+				cParams = append(cParams, ir.NewParam(p.Name+".lo", irtypes.I64))
+				cParamByval = append(cParamByval, nil)
+				cParam2RegNative = append(cParam2RegNative, nativeSt)
+
+				cParams = append(cParams, ir.NewParam(p.Name+".hi", irtypes.I64))
+				cParamByval = append(cParamByval, nil)
+				cParam2RegNative = append(cParam2RegNative, nil)
 			} else {
 				cParams = append(cParams, ir.NewParam(p.Name, ct))
 				cParamByval = append(cParamByval, nil)
+				cParam2RegNative = append(cParam2RegNative, nil)
 			}
 		}
 		// Compute C-level return type.
@@ -830,31 +852,34 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 
 		if wrapperFn == nil {
-			// Build wrapper params: use Tin-level types for struct params, C-level
-			// for all others (so call sites don't need special coerce for structs).
-			wrapperParams := make([]*ir.Param, len(cParams))
+			// Build wrapper params: one per Tin parameter (not per C param, since
+			// 2-register splits create extra C params for a single Tin param).
+			var wrapperParams []*ir.Param
 
-			tinParamIdx := 0
-			for i, cp := range cParams {
-				// Find the corresponding AST param (skip varargs already filtered out).
-				tinParam := n.Params[tinParamIdx]
-				for tinParam.IsVarArgs {
-					tinParamIdx++
-					tinParam = n.Params[tinParamIdx]
+			tinNonVarargIdx := 0
+
+			for _, p := range n.Params {
+				if p.IsVarArgs {
+					continue
 				}
 
-				if sName, isStruct := cg.isNamedTinStruct(tinParam.Type); isStruct {
-					tinType, _ := cg.tinTypeToLLVM(tinParam.Type)
-					wrapperParams[i] = ir.NewParam(sName, tinType)
-				} else if cg.isExternPtrParam(tinParam.Type) {
-					// *S param with hidden C pointer: wrapper takes Tin pointer type.
-					tinType, _ := cg.tinTypeToLLVM(tinParam.Type)
-					wrapperParams[i] = ir.NewParam(cp.Name(), tinType)
+				if vt, ok := p.Type.(*ast.SimpleType); ok && vt.Name == "..." {
+					continue
+				}
+
+				cIdx := tinParamToCIdx[tinNonVarargIdx]
+
+				if sName, isStruct := cg.isNamedTinStruct(p.Type); isStruct {
+					tinType, _ := cg.tinTypeToLLVM(p.Type)
+					wrapperParams = append(wrapperParams, ir.NewParam(sName, tinType))
+				} else if cg.isExternPtrParam(p.Type) {
+					tinType, _ := cg.tinTypeToLLVM(p.Type)
+					wrapperParams = append(wrapperParams, ir.NewParam(cParams[cIdx].Name(), tinType))
 				} else {
-					wrapperParams[i] = cp
+					wrapperParams = append(wrapperParams, cParams[cIdx])
 				}
 
-				tinParamIdx++
+				tinNonVarargIdx++
 			}
 
 			wrapperFn = cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
@@ -865,15 +890,22 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			entry := wrapperFn.NewBlock("entry")
 
 			// Build C-level call args: convert struct params to native, pass others as-is.
-			callArgs := make([]value.Value, len(wrapperFn.Params))
+			callArgs := make([]value.Value, len(cParams))
 
-			tinParamIdx = 0
-			for i, p := range wrapperFn.Params {
-				tinParam := n.Params[tinParamIdx]
-				for tinParam.IsVarArgs {
-					tinParamIdx++
-					tinParam = n.Params[tinParamIdx]
+			tinNonVarargIdx = 0
+			wrapperPIdx := 0
+
+			for _, tinParam := range n.Params {
+				if tinParam.IsVarArgs {
+					continue
 				}
+
+				if vt, ok := tinParam.Type.(*ast.SimpleType); ok && vt.Name == "..." {
+					continue
+				}
+
+				cIdx := tinParamToCIdx[tinNonVarargIdx]
+				p := wrapperFn.Params[wrapperPIdx]
 
 				if sName, isStruct := cg.isNamedTinStruct(tinParam.Type); isStruct {
 					native, err := cg.wrapStructToExtern(entry, p, sName)
@@ -885,12 +917,26 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 					}
 					// For byval params (large structs > 16 bytes): alloca native struct,
 					// store the converted value, then pass a byval-attributed pointer.
-					if cParamByval[i] != nil {
-						nativeAlloca := entry.NewAlloca(cParamByval[i])
+					if cParamByval[cIdx] != nil {
+						nativeAlloca := entry.NewAlloca(cParamByval[cIdx])
 						entry.NewStore(native, nativeAlloca)
 						ptr := entry.NewBitCast(nativeAlloca, irtypes.I8Ptr)
-						callArgs[i] = ir.NewArg(ptr, ir.Byval{Typ: cParamByval[i]})
-					} else if intTy, isInt := cParams[i].Type().(*irtypes.IntType); isInt {
+						callArgs[cIdx] = ir.NewArg(ptr, ir.Byval{Typ: cParamByval[cIdx]})
+					} else if cParam2RegNative[cIdx] != nil {
+						// 9-16 byte all-integer struct: split into two i64 halves
+						// to match clang's x86-64 SysV (i64, i64) coercion.
+						nativeSt := cParam2RegNative[cIdx]
+						a := entry.NewAlloca(nativeSt)
+						entry.NewStore(native, a)
+						loPtr := entry.NewBitCast(a, irtypes.NewPointer(irtypes.I64))
+						lo := entry.NewLoad(irtypes.I64, loPtr)
+						hiRaw := entry.NewGetElementPtr(irtypes.I8, entry.NewBitCast(a, irtypes.I8Ptr),
+							constant.NewInt(irtypes.I64, 8))
+						hiPtr := entry.NewBitCast(hiRaw, irtypes.NewPointer(irtypes.I64))
+						hi := entry.NewLoad(irtypes.I64, hiPtr)
+						callArgs[cIdx] = lo
+						callArgs[cIdx+1] = hi
+					} else if intTy, isInt := cParams[cIdx].Type().(*irtypes.IntType); isInt {
 						// Small all-integer struct coerced to integer register.
 						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
@@ -912,18 +958,19 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 							}
 						}
 
-						callArgs[i] = native
+						callArgs[cIdx] = native
 					} else {
-						callArgs[i] = native
+						callArgs[cIdx] = native
 					}
 				} else if cg.isExternPtrParam(tinParam.Type) {
 					// *S param with hidden C pointer: extract it and pass to C.
-					callArgs[i] = cg.extractCSrcPtr(entry, p, tinParam.Type, cParams[i].Type())
+					callArgs[cIdx] = cg.extractCSrcPtr(entry, p, tinParam.Type, cParams[cIdx].Type())
 				} else {
-					callArgs[i] = p
+					callArgs[cIdx] = p
 				}
 
-				tinParamIdx++
+				tinNonVarargIdx++
+				wrapperPIdx++
 			}
 
 			rawResult := entry.NewCall(cFunc, callArgs...)

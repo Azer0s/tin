@@ -478,6 +478,18 @@ func coerceNativeStructForABI(st *irtypes.StructType) irtypes.Type {
 	return irtypes.NewInt(uint64(size * 8))
 }
 
+// coerceNativeStructForABI2Reg checks whether a native struct (9-16 bytes,
+// all-integer) should be split into two i64 parameters for the x86-64 SysV
+// ABI (matching clang's (i64, i64) coercion). Returns true for such structs.
+func coerceNativeStructForABI2Reg(st *irtypes.StructType) bool {
+	size := nativeStructByteSize(st)
+	if size <= 8 || size > 16 {
+		return false
+	}
+
+	return nativeStructAllInteger(st)
+}
+
 // ensureExternDecl returns (or creates) a bare LLVM function declaration for a
 // C extern symbol. Re-uses an existing declaration if one with a matching
 // signature already exists.

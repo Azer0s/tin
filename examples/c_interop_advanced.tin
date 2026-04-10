@@ -1,0 +1,218 @@
+//!+c_interop_advanced.c
+
+use assert
+
+// -- 1. Deep nesting: 3-level by-value structs ---------------------------
+// Uses bvec2 (by-value only) to avoid cLayout conflict with pointer tests.
+
+struct bvec2 =
+  x i32
+  y i32
+
+struct bounds =
+  min bvec2
+  max bvec2
+
+struct viewport =
+  clip  bounds
+  layer i64
+  flags i64
+
+fn c_viewport_area(v viewport) i64 = extern("c_viewport_area")
+fn c_bounds_width(b bounds) i32 = extern("c_bounds_width")
+fn c_make_viewport(x1 i32, y1 i32, x2 i32, y2 i32, layer i64, flags i64) viewport = extern("c_make_viewport")
+fn c_viewport_min(v viewport) bvec2 = extern("c_viewport_min")
+
+test "3-level nested struct by value" =
+  let v = viewport{
+    clip: bounds{
+      min: bvec2{x: 10, y: 20},
+      max: bvec2{x: 110, y: 120}
+    },
+    layer: 3,
+    flags: 0xFF
+  }
+  assert::equals(c_viewport_area(v), 10000)
+
+test "2-level nested struct by value" =
+  let b = bounds{min: bvec2{x: 0, y: 0}, max: bvec2{x: 50, y: 30}}
+  assert::equals(c_bounds_width(b), 50)
+
+test "C returns 3-level nested struct" =
+  let v = c_make_viewport(5, 10, 25, 40, 7, 0xAB)
+  assert::equals(v.clip.min.x, 5)
+  assert::equals(v.clip.min.y, 10)
+  assert::equals(v.clip.max.x, 25)
+  assert::equals(v.clip.max.y, 40)
+  assert::equals(v.layer, 7)
+  assert::equals(v.flags, 0xAB)
+
+test "C returns inner nested struct" =
+  let v = c_make_viewport(3, 7, 50, 60, 1, 0)
+  let m = c_viewport_min(v)
+  assert::equals(m.x, 3)
+  assert::equals(m.y, 7)
+
+// -- 2. Single pointer (cLayoutStruct) -----------------------------------
+
+struct pvec2 =
+  x i32
+  y i32
+
+fn c_read_vec_x(p *pvec2) i32 = extern("c_read_vec_x")
+fn c_read_vec_y(p *pvec2) i32 = extern("c_read_vec_y")
+
+fn c_get_point_at(idx i32) *pvec2 = extern("c_get_point_at")
+
+test "pointer-to-struct: read via C" =
+  let p = c_get_point_at(0)
+  assert::equals(c_read_vec_x(p), 1)
+  assert::equals(c_read_vec_y(p), 2)
+
+// -- 3. Pointer-to-struct with C mutation --------------------------------
+
+struct triple =
+  a i64
+  b i64
+  c i64
+
+fn c_get_triple() *triple = extern("c_get_triple")
+fn c_set_triple(t *triple, a i64, b i64, c i64) = extern("c_set_triple")
+
+test "pointer-to-struct: read fields" =
+  let t = c_get_triple()
+  assert::equals((*t).a, 10)
+  assert::equals((*t).b, 20)
+  assert::equals((*t).c, 30)
+
+test "pointer-to-struct: C mutates, Tin observes" =
+  let t = c_get_triple()
+  c_set_triple(t, 100, 200, 300)
+  assert::equals((*t).a, 100)
+  assert::equals((*t).b, 200)
+  assert::equals((*t).c, 300)
+  c_set_triple(t, 10, 20, 30)
+
+// -- 4. Tree structure via pointers --------------------------------------
+
+struct tree_node =
+  value i64
+  left  own *tree_node
+  right own *tree_node
+
+fn c_build_tree() *tree_node = extern("c_build_tree")
+fn c_tree_sum(n *tree_node) i64 = extern("c_tree_sum")
+fn c_tree_depth(n *tree_node) i64 = extern("c_tree_depth")
+fn c_tree_value(n *tree_node) i64 = extern("c_tree_value")
+fn c_tree_left(n *tree_node) *tree_node = extern("c_tree_left")
+fn c_tree_right(n *tree_node) *tree_node = extern("c_tree_right")
+
+test "tree: sum all nodes" =
+  let root = c_build_tree()
+  // 10 + 5 + 15 + 2 + 7 + 12 + 20 = 71
+  assert::equals(c_tree_sum(root), 71)
+
+test "tree: depth" =
+  let root = c_build_tree()
+  assert::equals(c_tree_depth(root), 3)
+
+test "tree: root value" =
+  let root = c_build_tree()
+  assert::equals(c_tree_value(root), 10)
+
+test "tree: left child value" =
+  let root = c_build_tree()
+  let l = c_tree_left(root)
+  assert::equals(c_tree_value(l), 5)
+
+test "tree: right child value" =
+  let root = c_build_tree()
+  let r = c_tree_right(root)
+  assert::equals(c_tree_value(r), 15)
+
+// -- 5. Callbacks: Tin function passed to C ------------------------------
+
+fn c_apply_cb(cb fn(i64) i64, n i64) i64 = extern("c_apply_cb")
+fn c_apply2_cb(cb fn(i64, i64) i64, a i64, b i64) i64 = extern("c_apply2_cb")
+fn c_for_each(cb fn(i64), n i64) = extern("c_for_each")
+
+fn double(x i64) i64 = return x * 2
+fn add(a i64, b i64) i64 = return a + b
+fn negate(x i64) i64 = return 0 - x
+
+test "callback: named function" =
+  assert::equals(c_apply_cb(double, 21), 42)
+
+test "callback: negate" =
+  assert::equals(c_apply_cb(negate, 7), -7)
+
+test "callback: two-arg function" =
+  assert::equals(c_apply2_cb(add, 30, 12), 42)
+
+test "callback: lambda" =
+  assert::equals(c_apply_cb(fn(x i64) i64 = return x * x, 6), 36)
+
+test "callback: lambda with capture" =
+  let factor = 10
+  assert::equals(c_apply_cb(fn(x i64) i64 = return x * factor, 5), 50)
+
+test "callback: void callback called multiple times" =
+  let count [i64] = [0]
+  c_for_each(fn(i i64) = count[0] = count[0] + 1, 5)
+  assert::equals(count[0], 5)
+
+// -- 6. 4-level nested struct -------------------------------------------
+
+struct leaf =
+  v i32
+
+struct pair =
+  a leaf
+  b leaf
+
+struct tagged_pair =
+  p   pair
+  tag i32
+
+struct deep4 =
+  inner tagged_pair
+  id    i64
+
+fn c_deep4_sum(d deep4) i64 = extern("c_deep4_sum")
+fn c_make_deep4(a i32, b i32, tag i32, id i64) deep4 = extern("c_make_deep4")
+
+test "4-level nested struct to C" =
+  let d = deep4{
+    inner: tagged_pair{
+      p: pair{
+        a: leaf{v: 1},
+        b: leaf{v: 2}
+      },
+      tag: 3
+    },
+    id: 4
+  }
+  // 1 + 2 + 3 + 4 = 10
+  assert::equals(c_deep4_sum(d), 10)
+
+test "C returns 4-level nested struct" =
+  let d = c_make_deep4(10, 20, 30, 40)
+  assert::equals(d.inner.p.a.v, 10)
+  assert::equals(d.inner.p.b.v, 20)
+  assert::equals(d.inner.tag, 30)
+  assert::equals(d.id, 40)
+
+// -- 7. Array of struct pointers ----------------------------------------
+
+test "array of struct pointers" =
+  let pts [*pvec2] = [
+    c_get_point_at(0),
+    c_get_point_at(1),
+    c_get_point_at(2),
+    c_get_point_at(3)
+  ]
+  // {1,2}, {3,4}, {5,6}, {7,8}
+  assert::equals((*pts[0]).x, 1)
+  assert::equals((*pts[0]).y, 2)
+  assert::equals((*pts[1]).x, 3)
+  assert::equals((*pts[3]).y, 8)
