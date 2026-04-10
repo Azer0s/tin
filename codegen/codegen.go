@@ -576,6 +576,11 @@ func (cg *CodeGen) targetIsARM64() bool {
 // compile a trivial C snippet to LLVM IR and read the "target triple" line.
 func newModuleWithTriple() *ir.Module {
 	mod := ir.NewModule()
+	// TIN_TARGET_TRIPLE env var overrides the target triple (for testing cross-targets).
+	if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
+		mod.TargetTriple = override
+		return mod
+	}
 	// Compile an empty C translation unit to LLVM IR and extract the triple
 	// that clang actually emits.  This is the only way to get the normalised
 	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
