@@ -7,6 +7,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -730,7 +731,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// insert an extra C param so subsequent indices shift.
 		var tinParamToCIdx []int
 		// cParam2RegNative[cIdx] is non-nil when cParams[cIdx] is the FIRST
-		// of a 2-register split pair (9-16 byte all-integer struct on AMD64).
+		// of a 2-register split pair (9-16 byte all-integer struct, AMD64/ARM64).
 		var cParam2RegNative []*irtypes.StructType
 
 		for _, p := range n.Params {
@@ -753,18 +754,20 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			tinParamToCIdx = append(tinParamToCIdx, len(cParams))
 
-			// Named Tin struct params > 16 bytes must use byval to match AMD64 ABI.
-			// On ARM64, LLVM handles struct-by-value calling convention automatically
-			// (HFAs go in SIMD registers, non-HFAs via memory), so byval is not used.
-			if nativeSt, isNative := ct.(*irtypes.StructType); isNative && nativeStructNeedsByval(nativeSt) && cg.targetIsAMD64() {
+			// Named Tin struct params > 16 bytes must use byval on AMD64 and ARM64.
+			// Both x86-64 SysV and AAPCS64 pass oversized structs via an implicit
+			// memory reference that LLVM represents as a byval-attributed i8* pointer.
+			if nativeSt, isNative := ct.(*irtypes.StructType); isNative && nativeStructNeedsByval(nativeSt) && (cg.targetIsAMD64() || cg.targetIsARM64()) {
 				bvParam := ir.NewParam(p.Name, irtypes.I8Ptr)
 				bvParam.Attrs = append(bvParam.Attrs, ir.Byval{Typ: nativeSt})
 				cParams = append(cParams, bvParam)
 				cParamByval = append(cParamByval, nativeSt)
 				cParam2RegNative = append(cParam2RegNative, nil)
-			} else if nativeSt, isNative := ct.(*irtypes.StructType); isNative && coerceNativeStructForABI2Reg(nativeSt) && cg.targetIsAMD64() {
-				// 9-16 byte all-integer struct: split into two i64 params to match
-				// clang's x86-64 SysV coercion (e.g. { {i32,i32}, {i32,i32} } -> (i64, i64)).
+			} else if nativeSt, isNative := ct.(*irtypes.StructType); isNative && coerceNativeStructForABI2Reg(nativeSt) && (cg.targetIsAMD64() || cg.targetIsARM64()) {
+				// 9-16 byte all-integer struct: split into two i64 params.
+				// x86-64 SysV: two integer eightbytes in rdi/rsi etc.
+				// AAPCS64: two consecutive x-registers (x0/x1 etc.).
+				// Both ABIs represent this as (i64, i64) in LLVM IR.
 				cParams = append(cParams, ir.NewParam(p.Name+".lo", irtypes.I64))
 				cParamByval = append(cParamByval, nil)
 				cParam2RegNative = append(cParam2RegNative, nativeSt)
@@ -814,6 +817,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			// *S pointer params where S has a hidden C pointer field.
 			if cg.isExternPtrParam(p.Type) {
+				needsStructConv = true
+
+				break
+			}
+
+			// N*S output-parameter pattern: C writes (N-1)*S.native into N*S.
+			if _, _, isDbl := cg.isExternOutPtrParam(p.Type); isDbl {
 				needsStructConv = true
 
 				break
@@ -875,6 +885,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				} else if cg.isExternPtrParam(p.Type) {
 					tinType, _ := cg.tinTypeToLLVM(p.Type)
 					wrapperParams = append(wrapperParams, ir.NewParam(cParams[cIdx].Name(), tinType))
+				} else if _, _, isDbl := cg.isExternOutPtrParam(p.Type); isDbl {
+					// N*S output-parameter: wrapper receives N*%S.wrapper from Tin caller.
+					tinType, _ := cg.tinTypeToLLVM(p.Type)
+					wrapperParams = append(wrapperParams, ir.NewParam(cParams[cIdx].Name(), tinType))
 				} else {
 					wrapperParams = append(wrapperParams, cParams[cIdx])
 				}
@@ -891,6 +905,18 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 			// Build C-level call args: convert struct params to native, pass others as-is.
 			callArgs := make([]value.Value, len(cParams))
+
+			// dblPtrWritebacks records N*S (N>=2) params that need post-call write-back:
+			// after C writes (N-1)*S.native to the slot, we wrap the chain and store
+			// the result into the Tin caller's location.
+			type dblPtrWriteback struct {
+				wrapperParamIdx int
+				slot            value.Value // alloca holding (depth-1)*S.native
+				structName      string
+				depth           int // total Tin param depth N (>= 2)
+			}
+
+			var dblPtrWritebacks []dblPtrWriteback
 
 			tinNonVarargIdx = 0
 			wrapperPIdx := 0
@@ -924,7 +950,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						callArgs[cIdx] = ir.NewArg(ptr, ir.Byval{Typ: cParamByval[cIdx]})
 					} else if cParam2RegNative[cIdx] != nil {
 						// 9-16 byte all-integer struct: split into two i64 halves
-						// to match clang's x86-64 SysV (i64, i64) coercion.
+						// to match clang's x86-64 SysV / AAPCS64 (i64, i64) coercion.
 						nativeSt := cParam2RegNative[cIdx]
 						a := entry.NewAlloca(nativeSt)
 						entry.NewStore(native, a)
@@ -965,6 +991,22 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				} else if cg.isExternPtrParam(tinParam.Type) {
 					// *S param with hidden C pointer: extract it and pass to C.
 					callArgs[cIdx] = cg.extractCSrcPtr(entry, p, tinParam.Type, cParams[cIdx].Type())
+				} else if sName, depth, isDbl := cg.isExternOutPtrParam(tinParam.Type); isDbl {
+					// N*S output-parameter: allocate a (depth-1)*S.native slot.
+					// Pass &slot to C as (depth)*S.native; after the call wrap and write back.
+					nativeSt, _ := cg.tinStructNativeLLVM(sName)
+					// Build (depth-1)*S.native type for the slot content.
+					// depth >= 2, so after the loop contentType is always a pointer type.
+					var contentType irtypes.Type = nativeSt
+					for j := 0; j < depth-1; j++ {
+						contentType = irtypes.NewPointer(contentType)
+					}
+
+					contentPtrType := contentType.(*irtypes.PointerType)
+					slot := entry.NewAlloca(contentPtrType)
+					entry.NewStore(constant.NewNull(contentPtrType), slot)
+					callArgs[cIdx] = slot
+					dblPtrWritebacks = append(dblPtrWritebacks, dblPtrWriteback{wrapperPIdx, slot, sName, depth})
 				} else {
 					callArgs[cIdx] = p
 				}
@@ -1017,10 +1059,64 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				}
 			}
 
+			// Post-call write-backs for N*S output parameters (N >= 2).
+			// For each param, C may have written (N-1)*S.native into the slot.
+			// Read what C wrote; if non-null build a Tin wrapper chain and store
+			// it into the Tin caller's location; if null store null.
+			curBlock := entry
+
+			for i, wb := range dblPtrWritebacks {
+				nativeSt, _ := cg.tinStructNativeLLVM(wb.structName)
+				// Build (depth-1)*S.native type to load from slot.
+				var contentType irtypes.Type = nativeSt
+
+				for j := 0; j < wb.depth-1; j++ {
+					contentType = irtypes.NewPointer(contentType)
+				}
+
+				nativeVal := curBlock.NewLoad(contentType, wb.slot)
+
+				wbNull := wrapperFn.NewBlock(fmt.Sprintf("wb%d_null", i))
+				wbWrap := wrapperFn.NewBlock(fmt.Sprintf("wb%d_wrap", i))
+				wbDone := wrapperFn.NewBlock(fmt.Sprintf("wb%d_done", i))
+
+				isNull := curBlock.NewICmp(enum.IPredEQ,
+					curBlock.NewBitCast(nativeVal, irtypes.I8Ptr),
+					constant.NewNull(irtypes.I8Ptr))
+				curBlock.NewCondBr(isNull, wbNull, wbWrap)
+
+				// Null path: write a null of (depth-1)*S Tin type.
+				var innerTinType ast.TypeExpr = &ast.SimpleType{Name: wb.structName}
+
+				for j := 0; j < wb.depth-1; j++ {
+					innerTinType = &ast.PointerType{Elem: innerTinType}
+				}
+
+				tinPtrTypeRaw, _ := cg.tinTypeToLLVM(innerTinType)
+				tgtPt := tinPtrTypeRaw.(*irtypes.PointerType)
+				wbParam := wrapperFn.Params[wb.wrapperParamIdx]
+				wbNull.NewStore(constant.NewNull(tgtPt), wbParam)
+				wbNull.NewBr(wbDone)
+
+				// Non-null path: recursively build Tin wrapper chain for depth-1 levels.
+				wrapperVal, wbErr := cg.emitWrapNativeChain(wbWrap, nativeVal, wb.structName, wb.depth-1)
+				if wbErr != nil {
+					cg.curFn = prevFn
+					cg.curScope = prevScope
+
+					return wbErr
+				}
+
+				wbWrap.NewStore(wrapperVal, wbParam)
+				wbWrap.NewBr(wbDone)
+
+				curBlock = wbDone
+			}
+
 			if irtypes.IsVoid(retType) {
-				entry.NewRet(nil)
+				curBlock.NewRet(nil)
 			} else {
-				entry.NewRet(finalResult)
+				curBlock.NewRet(finalResult)
 			}
 
 			cg.curFn = prevFn

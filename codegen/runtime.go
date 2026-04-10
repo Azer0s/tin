@@ -685,6 +685,14 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 		return
 	}
 
+	// cLayoutStructs: user fields live in C-owned native memory via c_data_ptr
+	// (non-handover borrow) or in the RC block overflow (handover, freed with the
+	// block). In both cases Tin does not independently own those fields; releasing
+	// them would call _tin_release on raw C pointers, corrupting memory.
+	if cg.cLayoutStructs[structName] {
+		return
+	}
+
 	fieldTypes := cg.structFieldLLVMTypes[structName]
 	offset := cg.userFieldOffset(structName)
 	alloca := block.NewAlloca(st)
@@ -974,6 +982,94 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	return fn
 }
 
+// ensureHeapChainReleaseFn lazily generates a null-safe release function for a
+// depth-N cLayoutStruct pointer chain written by N*S out-param write-backs.
+//
+// For depth=1: delegates to ensureStructPtrReleaseFn (existing null-safe helper).
+// For depth>1: generates:
+//
+//	define void @structName__chain_N((N)*S.wrapper* %ptr) {
+//	entry:
+//	  br i1 (ptr==null), exit, do_release
+//	do_release:
+//	  inner = load (N-1)*S.wrapper, ptr
+//	  call @structName__chain_{N-1}(inner)
+//	  call _tin_release(bitcast ptr to i8*)
+//	  br exit
+//	exit:
+//	  ret void
+//	}
+func (cg *CodeGen) ensureHeapChainReleaseFn(structName string, depth int) *ir.Func {
+	if depth == 1 {
+		wrapperSt := cg.structTypes[structName]
+
+		return cg.ensureStructPtrReleaseFn(structName, wrapperSt)
+	}
+
+	key := fmt.Sprintf("%s__chain_%d", structName, depth)
+	if fn, ok := cg.chainReleaseFns[key]; ok {
+		return fn
+	}
+
+	// Build parameter type: (depth)*S.wrapper
+	wrapperSt := cg.structTypes[structName]
+
+	var paramType irtypes.Type = wrapperSt
+	for i := 0; i < depth; i++ {
+		paramType = irtypes.NewPointer(paramType)
+	}
+
+	fn := cg.mod.NewFunc(key, irtypes.Void, ir.NewParam("ptr", paramType))
+	cg.chainReleaseFns[key] = fn // cache before generating body (handles recursive refs)
+
+	entry := fn.NewBlock("entry")
+	doRelease := fn.NewBlock("do_release")
+	exit := fn.NewBlock("exit")
+
+	// Null guard.
+	isNull := entry.NewICmp(enum.IPredEQ,
+		entry.NewBitCast(fn.Params[0], irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(isNull, exit, doRelease)
+
+	// Load inner (depth-1)*S.wrapper.
+	innerType := paramType.(*irtypes.PointerType).ElemType
+	innerPtr := doRelease.NewLoad(innerType, fn.Params[0])
+
+	// Recursively release the inner chain.
+	innerRelFn := cg.ensureHeapChainReleaseFn(structName, depth-1)
+	doRelease.NewCall(innerRelFn, innerPtr)
+
+	// Free this RC block.
+	ptrI8 := doRelease.NewBitCast(fn.Params[0], irtypes.I8Ptr)
+	doRelease.NewCall(cg.ensureRelease(), ptrI8)
+	doRelease.NewBr(exit)
+
+	exit.NewRet(nil)
+
+	return fn
+}
+
+// cLayoutStructBaseName peels all pointer layers of a Tin AST type and returns
+// the base struct name, or "" if the type is not a pointer-to-struct chain.
+// E.g. *pvec2 -> "pvec2", **pvec2 -> "pvec2", ***pvec2 -> "pvec2".
+func cLayoutStructBaseName(te ast.TypeExpr) string {
+	cur := te
+
+	for {
+		pt, ok := cur.(*ast.PointerType)
+		if !ok {
+			return ""
+		}
+
+		if st, ok2 := pt.Elem.(*ast.SimpleType); ok2 {
+			return st.Name
+		}
+
+		cur = pt.Elem
+	}
+}
+
 // emitHeapChainRelease releases a heap-promoted pointer chain of the given depth.
 // For depth=1 (*T): loads T, releases T's ARC sub-fields, frees the RC block.
 // For depth>1 (**T, ***T, ...): recursively releases inner chains before freeing
@@ -1048,7 +1144,16 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// heap-promoting callee.  Use chain release to free all RC blocks.
 		if entry.isHeapOwned {
 			heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
-			cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+			if entry.heapOwnedDepth > 1 {
+				// depth > 1: use the null-safe chain release function.
+				structName := cLayoutStructBaseName(entry.tinType)
+				if structName != "" {
+					relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
+					block.NewCall(relFn, heapPtr)
+				}
+			} else {
+				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+			}
 
 			continue
 		}
@@ -1096,8 +1201,15 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {
 				heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
-
-				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+				if entry.heapOwnedDepth > 1 {
+					structName := cLayoutStructBaseName(entry.tinType)
+					if structName != "" {
+						relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
+						block.NewCall(relFn, heapPtr)
+					}
+				} else {
+					cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
+				}
 
 				continue
 			}

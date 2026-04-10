@@ -145,3 +145,39 @@ static pvec2 g_points[4] = {{1,2},{3,4},{5,6},{7,8}};
 pvec2 *c_get_point_at(int32_t idx) {
     return &g_points[idx];
 }
+
+// -- 8. Double pointer: c_get_vec_ptr already in section 2. ----------
+// (static pvec2 g_vec = {42, 99} and c_get_vec_ptr defined there.)
+
+// -- 9. Chained traversal helpers (use c_build_tree + c_tree_left/right) -------
+// Already defined in section 4. Needed for multi-hop tests.
+
+// -- 10. Triple pointer out-param -----------------------------------------
+
+// Static pvec2 used for triple-pointer test.
+static pvec2 g_triple_point = {77, 88};
+static pvec2 *g_triple_ptr = NULL;
+
+// c_get_pvec2_triple_ptr(out ***pvec2): C writes **pvec2.native into *out.
+void c_get_pvec2_triple_ptr(pvec2 ***out) {
+    g_triple_ptr = &g_triple_point;
+    *out = &g_triple_ptr;
+}
+
+// -- 11. Callbacks with varying argument patterns -----------------------
+
+// Callback that receives two *pvec2 pointers and returns i32 (sum of x fields).
+typedef struct { int32_t (*fn)(void *env, int32_t, int32_t); void *env; } callback_i32_2;
+
+int32_t c_apply_i32_2(callback_i32_2 cb, int32_t a, int32_t b) {
+    return cb.fn(cb.env, a, b);
+}
+
+// Sum x-fields of all g_points via callback, passing i32 each time.
+typedef struct { void (*fn)(void *env, int32_t x, int32_t y); void *env; } callback_xy;
+
+void c_for_each_point_xy(callback_xy cb) {
+    for (int32_t i = 0; i < 4; i++) {
+        cb.fn(cb.env, g_points[i].x, g_points[i].y);
+    }
+}

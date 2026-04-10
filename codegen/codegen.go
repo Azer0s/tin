@@ -160,6 +160,10 @@ type CodeGen struct {
 	// null-guards before loading/releasing the struct's ARC fields and freeing the block.
 	structPtrReleaseFns map[string]*ir.Func
 
+	// Null-safe chain release helpers for depth>1 heap-owned cLayoutStruct pointers.
+	// Key: "structName__chain_N" (depth N). Recursively releases inner chain then frees block.
+	chainReleaseFns map[string]*ir.Func
+
 	// Element retain helpers (for ++ concat when source is non-temporary).
 	retainPtrElemsFn          *ir.Func // _tin_retain_ptr_elems(data i8*, count i64)
 	retainFatElemsFn          *ir.Func // _tin_retain_fat_elems(data i8*, count i64)
@@ -664,6 +668,7 @@ func New(filename string) *CodeGen {
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
+		chainReleaseFns:          make(map[string]*ir.Func),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")

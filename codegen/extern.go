@@ -56,17 +56,39 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 			return native, nil
 		}
 	}
-	// *S where S is a named struct: pointer to C-native layout.
-	if pt, ok := te.(*ast.PointerType); ok {
-		if st, ok2 := pt.Elem.(*ast.SimpleType); ok2 {
-			if _, isStruct := cg.structFieldLLVMTypes[st.Name]; isStruct {
-				native, err := cg.tinStructNativeLLVM(st.Name)
-				if err != nil {
-					return nil, err
+	// *...*S (any depth) where S is a named struct: build chain of native pointers.
+	// *S -> *S.native, **S -> **S.native, ***S -> ***S.native, etc.
+	if _, ok := te.(*ast.PointerType); ok {
+		cur := te
+		depth := 0
+
+		for {
+			pt, ok2 := cur.(*ast.PointerType)
+			if !ok2 {
+				break
+			}
+
+			if st, ok3 := pt.Elem.(*ast.SimpleType); ok3 {
+				_, isStruct := cg.structFieldLLVMTypes[st.Name]
+				if isStruct {
+					native, err := cg.tinStructNativeLLVM(st.Name)
+					if err != nil {
+						return nil, err
+					}
+					// Build depth+1 levels of pointer to native struct.
+					var t irtypes.Type = native
+					for i := 0; i <= depth; i++ {
+						t = irtypes.NewPointer(t)
+					}
+
+					return t, nil
 				}
 
-				return irtypes.NewPointer(native), nil
+				break // *primitive - not a struct pointer chain
 			}
+
+			depth++
+			cur = pt.Elem
 		}
 	}
 	// []T (dynamic array):
@@ -389,17 +411,54 @@ func (cg *CodeGen) isExternPtrParam(te ast.TypeExpr) bool {
 	return false
 }
 
-// markPtrStructCLayout marks the struct name inside a *StructName type as
-// needing a hidden C source pointer field. Only acts on pointer-to-struct
-// types (skips primitives like *void, *i8, etc.).
-func (cg *CodeGen) markPtrStructCLayout(te ast.TypeExpr) {
-	if pt, ok := te.(*ast.PointerType); ok {
+// isExternOutPtrParam checks if te is N*StructName (N >= 2) where StructName
+// is a cLayoutStruct. Returns the struct name, total depth N, and true when
+// matched. Used for C output-parameter patterns (C writes (N-1)*S into *out).
+func (cg *CodeGen) isExternOutPtrParam(te ast.TypeExpr) (string, int, bool) {
+	depth := 0
+	cur := te
+
+	for {
+		pt, ok := cur.(*ast.PointerType)
+		if !ok {
+			return "", 0, false
+		}
+
+		depth++
+
 		if st, ok2 := pt.Elem.(*ast.SimpleType); ok2 {
-			// Only mark if it's a registered struct type (from preregister pass 1).
+			if cg.cLayoutStructs[st.Name] && depth >= 2 {
+				return st.Name, depth, true
+			}
+
+			return "", 0, false
+		}
+
+		cur = pt.Elem
+	}
+}
+
+// markPtrStructCLayout marks the struct at the base of a *...*StructName type
+// (any depth) as needing a hidden C source pointer field. Handles *S, **S,
+// ***S, etc. Skips primitives like *void, *i8.
+func (cg *CodeGen) markPtrStructCLayout(te ast.TypeExpr) {
+	cur := te
+
+	for {
+		pt, ok := cur.(*ast.PointerType)
+		if !ok {
+			return
+		}
+
+		if st, ok2 := pt.Elem.(*ast.SimpleType); ok2 {
 			if _, isStruct := cg.structTypes[st.Name]; isStruct {
 				cg.cLayoutStructs[st.Name] = true
 			}
+
+			return
 		}
+
+		cur = pt.Elem
 	}
 }
 
@@ -761,6 +820,50 @@ func (cg *CodeGen) emitStructPtrBorrow(block *ir.Block, src value.Value, tgtPt *
 	// Inline fields left zero-init; they are not used for non-handover borrows.
 
 	return tinPtr
+}
+
+// emitWrapNativeChain recursively converts a C native pointer chain into a Tin
+// wrapper chain. nativeVal has type (depth)*S.native. Returns the Tin
+// (depth)*S.wrapper pointer value.
+//
+//	depth=1: nativeVal is *S.native  -> returns *S.wrapper (borrow wrapper, heap RC=1)
+//	depth=2: nativeVal is **S.native -> loads inner *S.native, wraps depth-1,
+//	         allocates 8-byte RC block to hold inner wrapper ptr, returns **S.wrapper
+//	depth=3: nativeVal is ***S.native -> analogous recursion, returns ***S.wrapper
+//
+// For depths > 1, each intermediate pointer level is an RC-allocated heap block
+// holding the inner wrapper pointer. The scope release must free the chain via
+// ensureHeapChainReleaseFn.
+func (cg *CodeGen) emitWrapNativeChain(block *ir.Block, nativeVal value.Value, structName string, depth int) (value.Value, error) {
+	wrapperSt, ok := cg.structTypes[structName]
+	if !ok {
+		return nil, fmt.Errorf("emitWrapNativeChain: unknown struct %q", structName)
+	}
+
+	if depth == 1 {
+		wrapperPtrType := irtypes.NewPointer(wrapperSt)
+
+		return cg.emitStructPtrBorrow(block, nativeVal, wrapperPtrType, structName), nil
+	}
+
+	// depth > 1: load the inner (depth-1)*S.native from nativeVal
+	innerType := nativeVal.Type().(*irtypes.PointerType).ElemType
+	innerNativeVal := block.NewLoad(innerType, nativeVal)
+
+	// Recursively build the inner wrapper chain
+	innerWrapper, err := cg.emitWrapNativeChain(block, innerNativeVal, structName, depth-1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Allocate a 8-byte RC block to hold the inner wrapper pointer.
+	ptrSize := constant.NewInt(irtypes.I64, 8)
+	rcRaw := block.NewCall(cg.ensureRCAlloc(), ptrSize)
+	outerPtrType := irtypes.NewPointer(innerWrapper.Type())
+	outerBlockPtr := block.NewBitCast(rcRaw, outerPtrType)
+	block.NewStore(innerWrapper, outerBlockPtr)
+
+	return outerBlockPtr, nil
 }
 
 // emitStructPtrHandover handles {#handover} for a C native struct pointer return.

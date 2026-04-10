@@ -496,6 +496,12 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 			block = cg.curBlock
 		}
 
+		// After a call with N*S out-param write-backs, mark the written variables
+		// as heap-owned so scope-exit releases the borrow wrapper(s).
+		if callExpr, ok := s.Expr.(*ast.CallExpr); ok {
+			cg.markOutParamVarsHeapOwned(callExpr)
+		}
+
 		if err == nil && val != nil && isRCTrackedType(val.Type()) && isTemporaryProducer(s.Expr) {
 			// Discarded RC-tracked value from a call/concat/etc.: release our ref.
 			cg.emitRelease(block, val)
@@ -1668,6 +1674,59 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	}
 
 	return node
+}
+
+// markOutParamVarsHeapOwned marks variables passed as &varName (address-of) to
+// a call that has N*S (N>=2) write-back parameters. After such a call, varName
+// may hold a heap-allocated borrow wrapper (depth-1 chain), so it must be
+// released at scope exit. We mark isHeapOwned=true and heapOwnedDepth=N-1.
+//
+// This fixes the leak where a void-returning extern with **S out-params writes
+// a new RC-allocated borrow wrapper into the caller's *S variable, but the scope
+// release would skip it because the void function was never in heapPromotingFns.
+func (cg *CodeGen) markOutParamVarsHeapOwned(call *ast.CallExpr) {
+	for _, arg := range call.Args {
+		addrOf, ok := arg.(*ast.AddressOfExpr)
+		if !ok {
+			continue
+		}
+
+		ident, ok2 := addrOf.Expr.(*ast.Identifier)
+		if !ok2 {
+			continue
+		}
+
+		entry, ok3 := cg.curScope.lookup(ident.Name)
+		if !ok3 || entry.tinType == nil {
+			continue
+		}
+		// Count pointer levels and find cLayoutStruct base.
+		depth := 0
+		cur := entry.tinType
+
+		for {
+			pt, ptOk := cur.(*ast.PointerType)
+			if !ptOk {
+				break
+			}
+
+			depth++
+
+			if st, stOk := pt.Elem.(*ast.SimpleType); stOk {
+				if cg.cLayoutStructs[st.Name] {
+					// varName has type (depth)*S where S is cLayoutStruct.
+					// After a write-back from a (depth+1)*S param, varName holds
+					// a heap chain of depth levels.
+					entry.isHeapOwned = true
+					entry.heapOwnedDepth = depth
+				}
+
+				break
+			}
+
+			cur = pt.Elem
+		}
+	}
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
