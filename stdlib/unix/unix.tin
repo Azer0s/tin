@@ -1,4 +1,4 @@
-//!+unix.c -- -I ../../runtime
+//!+unix.c -- -I $TIN_RUNTIME
 // stdlib/unix - Unix domain socket connection and server types.
 //
 // Mirrors the tcp package but uses AF_UNIX paths instead of ports:

@@ -1,4 +1,4 @@
-//!+tcp.c -- -I ../../runtime
+//!+tcp.c -- -I $TIN_RUNTIME
 // stdlib/tcp - higher-level TCP connection and server types.
 //
 // Wraps the raw file-descriptor async I/O from stdlib/io into ergonomic

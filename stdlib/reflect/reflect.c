@@ -1,6 +1,6 @@
 // stdlib/reflect - C implementation of type-atom reflection functions
 //
-// Compile alongside reflect.tin via: //!+reflect.c -- -I ../../runtime
+// Compile alongside reflect.tin via: //!+reflect.c -- -I $TIN_RUNTIME
 // Depends on: _tin_rc_alloc, TIN_IMMORTAL_RC, TinString, TinStringArray (runtime.h)
 
 #include "runtime.h"

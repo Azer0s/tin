@@ -2,7 +2,7 @@
 //
 // Moved from runtime/net.c so that TCP socket support is an opt-in stdlib
 // package rather than always linked.  Compiled via:
-//   //!+tcp.c -- -I ../../runtime
+//   //!+tcp.c -- -I $TIN_RUNTIME
 
 #include "runtime.h"
 #include <sys/socket.h>

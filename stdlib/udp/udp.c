@@ -1,6 +1,6 @@
 // stdlib/udp - UDP socket helpers
 //
-// Compiled via: //!+udp.c -- -I ../../runtime
+// Compiled via: //!+udp.c -- -I $TIN_RUNTIME
 
 #include "runtime.h"
 #include "async_io.h"

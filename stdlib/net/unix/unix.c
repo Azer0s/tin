@@ -1,6 +1,6 @@
 // stdlib/unix - Unix domain socket helpers
 //
-// Compiled via: //!+unix.c -- -I ../../runtime
+// Compiled via: //!+unix.c -- -I $TIN_RUNTIME
 
 #include "runtime.h"
 #include <sys/socket.h>
