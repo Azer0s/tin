@@ -1,25 +1,5 @@
 use raylib
-
-fn digit_str(d i64) string =
-  if d == 0: return "0"
-  if d == 1: return "1"
-  if d == 2: return "2"
-  if d == 3: return "3"
-  if d == 4: return "4"
-  if d == 5: return "5"
-  if d == 6: return "6"
-  if d == 7: return "7"
-  if d == 8: return "8"
-  return "9"
-
-fn int_to_str(n i64) string =
-  if n == 0: return "0"
-  let s = ""
-  let v = n
-  for v > 0:
-    s = digit_str(v % 10) ++ s
-    v = v / 10
-  return s
+use str
 
 raylib::init_window(600, 640, "Snake")
 raylib::set_target_fps(60)
@@ -44,8 +24,10 @@ sy[1] = 10
 sx[2] = 10
 sy[2] = 10
 
-let fx    i64  = raylib::get_random_value(0, 19) as i64
-let fy    i64  = raylib::get_random_value(0, 19) as i64
+let (grid, _) = str::parse_int("20")
+
+let fx    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64
+let fy    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64
 let score i64  = 0
 let timer f32  = 0.0
 let speed f32  = 0.15
@@ -83,8 +65,8 @@ for !raylib::window_should_close():
     sy[1] = 10
     sx[2] = 10
     sy[2] = 10
-    fx    = raylib::get_random_value(0, 19) as i64
-    fy    = raylib::get_random_value(0, 19) as i64
+    fx    = raylib::get_random_value(0, grid as i32 - 1) as i64
+    fy    = raylib::get_random_value(0, grid as i32 - 1) as i64
     score = 0
     timer = 0.0
     alive = true
@@ -96,8 +78,8 @@ for !raylib::window_should_close():
       dx = ndx
       dy = ndy
 
-      let nx = (sx[shead] + dx + 20) % 20
-      let ny = (sy[shead] + dy + 20) % 20
+      let nx = (sx[shead] + dx + grid) % grid
+      let ny = (sy[shead] + dy + grid) % grid
 
       let ci  i64  = 0
       let hit bool = false
@@ -116,8 +98,8 @@ for !raylib::window_should_close():
         if nx == fx && ny == fy:
           slen  = slen + 1
           score = score + 10
-          fx    = raylib::get_random_value(0, 19) as i64
-          fy    = raylib::get_random_value(0, 19) as i64
+          fx    = raylib::get_random_value(0, grid as i32 - 1) as i64
+          fy    = raylib::get_random_value(0, grid as i32 - 1) as i64
 
   raylib::begin_drawing()
   raylib::clear_background(raylib::BLACK)
@@ -125,7 +107,7 @@ for !raylib::window_should_close():
   // Header bar
   raylib::draw_rectangle(0, 0, 600, header as i32, raylib::DARKGRAY)
   raylib::draw_text("SNAKE", 10, 10, 20, raylib::WHITE)
-  raylib::draw_text("Score: " ++ int_to_str(score), 220, 10, 20, raylib::YELLOW)
+  raylib::draw_text("Score: {score}", 220, 10, 20, raylib::YELLOW)
 
   // Game area
   raylib::draw_rectangle(0, header as i32, 600, 600, raylib::DARKGREEN)
