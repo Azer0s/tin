@@ -670,6 +670,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		case lexer.LPAREN:
 			// Function call - record position of the opening paren for error messages.
 			callTok := p.peek()
+
 			args, err2 := p.parseArgList()
 			if err2 != nil {
 				return nil, err2

@@ -250,6 +250,7 @@ func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Fu
 // Returns (nil, nil) if no matching method is found (caller falls through to error).
 func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.Value, structName, methodName string) (value.Value, error) {
 	irName := structName + "_" + methodName
+
 	entry, ok := cg.curScope.lookup(irName)
 	if !ok {
 		return nil, nil
@@ -268,6 +269,7 @@ func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.
 
 	// Determine receiver value to store in env.
 	recvType := sig.Params[0]
+
 	var recvVal value.Value
 
 	if pt, isPtr := recvType.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(obj.Type()) {
@@ -316,6 +318,7 @@ func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.
 	// Call the original method with receiver + forwarded params.
 	callArgs := make([]value.Value, 0, len(sig.Params))
 	callArgs = append(callArgs, receiverArg)
+
 	for i := 1; i < len(wrapFn.Params); i++ {
 		callArgs = append(callArgs, wrapFn.Params[i])
 	}

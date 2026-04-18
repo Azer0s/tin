@@ -910,6 +910,29 @@ func runDirTestsRecursive(root string, extraFlags []string, memcheck string) {
 	runFileTests(files, extraFlags, memcheck)
 }
 
+// fileHasTestBlocks does a fast byte-level scan for 'test "' so we can skip
+// files with no test blocks before attempting to lex/parse them.
+func fileHasTestBlocks(src []byte) bool {
+	needle := []byte(`test "`)
+	for i := 0; i+len(needle) <= len(src); i++ {
+		match := true
+
+		for j, b := range needle {
+			if src[i+j] != b {
+				match = false
+
+				break
+			}
+		}
+
+		if match {
+			return true
+		}
+	}
+
+	return false
+}
+
 // runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
@@ -955,6 +978,11 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 
 		src, err := os.ReadFile(fpath)
 		if err != nil {
+			continue
+		}
+
+		// Fast pre-check: skip files with no test blocks at all.
+		if !fileHasTestBlocks(src) {
 			continue
 		}
 
