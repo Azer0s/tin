@@ -271,6 +271,23 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 	return nil
 }
 
+// normalizePkgDisplayPath returns the canonical user-facing package path for
+// typeof() display names.  File-path imports ("./foo.tin") use just the bare
+// package name.  "std::" prefix is stripped so `use std::io` and `use io`
+// both display as "io".  Multi-part paths are preserved: "encoding::base16"
+// stays "encoding::base16".
+func normalizePkgDisplayPath(pkgPath, pkgName string) string {
+	if strings.ContainsAny(pkgPath, "/\\") || strings.HasSuffix(pkgPath, ".tin") {
+		return pkgName
+	}
+
+	if strings.HasPrefix(pkgPath, "std::") {
+		return pkgPath[len("std::"):]
+	}
+
+	return pkgPath
+}
+
 // loadPackage resolves and compiles the .tin source file for the given package
 // path. Search order: stdlib/ (always first), libs/ roots, then local directory
 // next to the importing source file.
@@ -735,13 +752,20 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	prevFilename := cg.filename
 	prevPkg := cg.currentPkg
+	prevPkgPath := cg.currentPkgPath
 	cg.filename = srcPath
 	// Set currentPkg so that struct preregistration and genStructDecl produce
 	// canonical "pkgName__StructName" keys/IR-names for structs defined in this
 	// package (including those brought in via `use "./..."` file-path imports).
 	cg.currentPkg = pkgName
+	// currentPkgPath is the normalized full path used for typeof() display names
+	// (e.g. "encoding::base16" instead of just "base16").
+	cg.currentPkgPath = normalizePkgDisplayPath(pkgPath, pkgName)
 
-	defer func() { cg.currentPkg = prevPkg }()
+	defer func() {
+		cg.currentPkg = prevPkg
+		cg.currentPkgPath = prevPkgPath
+	}()
 
 	for _, node := range prog.Stmts {
 		if ud, ok := node.(*ast.UseDecl); ok {

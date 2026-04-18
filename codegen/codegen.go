@@ -459,6 +459,12 @@ type CodeGen struct {
 	// Used by pkgStructKey to produce canonical LLVM struct names.
 	currentPkg string
 
+	// currentPkgPath is the fully-qualified package path being compiled
+	// (e.g. "encoding::base16", "http").  Used to build display names for
+	// typeof() so that 'encoding::base16::MyType is stable and unambiguous.
+	// "std::" prefix is stripped so `use std::io` and `use io` both give "io".
+	currentPkgPath string
+
 	// returnTypeHint is the LLVM type expected at the current call site, set by
 	// genVarDecl when the let binding has an explicit type annotation. It guides
 	// overload resolution so that e.g. `let v f32x4 = simd::splat(3.0)` picks
@@ -541,7 +547,13 @@ func (cg *CodeGen) markBreakUsed() {
 func (cg *CodeGen) pkgStructKey(name string) string {
 	if cg.currentPkg != "" {
 		key := cg.currentPkg + "__" + name
-		cg.structDisplayNames[key] = cg.currentPkg + "::" + name
+		displayPkg := cg.currentPkgPath
+
+		if displayPkg == "" {
+			displayPkg = cg.currentPkg
+		}
+
+		cg.structDisplayNames[key] = displayPkg + "::" + name
 
 		return key
 	}
