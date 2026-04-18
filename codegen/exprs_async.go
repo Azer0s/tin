@@ -277,6 +277,14 @@ func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.
 		// the closure are visible through the original binding.
 		if lv, lvErr := cg.genLValue(block, recvExpr); lvErr == nil && lv != nil {
 			recvVal = lv
+			// When recvExpr is itself a pointer variable (e.g. `let f = &Foo{}`),
+			// genLValue returns the alloca that holds *Foo (type **Foo).  The method
+			// expects *Foo, so we must load through the extra indirection.
+			if lvPt, isLvPtr := recvVal.Type().(*irtypes.PointerType); isLvPtr {
+				if lvPt.ElemType.Equal(recvType) {
+					recvVal = block.NewLoad(recvType, recvVal)
+				}
+			}
 		} else {
 			// Fall back: fresh alloca copy (mutations won't propagate).
 			alloca := block.NewAlloca(obj.Type())

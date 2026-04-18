@@ -69,3 +69,20 @@ test "bound pointer receiver method mutates via original" =
   add_fn(5)
   add_fn(3)
   assert::equals(c.get(), 8)
+
+test "bound method on heap pointer captures the pointer" =
+  let f = &counter{value: 0}
+  let add_fn = f.add
+  add_fn(10)
+  add_fn(5)
+  assert::equals(f.value, 15)
+
+test "two heap pointers with bound methods are independent" =
+  let a = &counter{value: 0}
+  let b = &counter{value: 100}
+  let add_a = a.add
+  let add_b = b.add
+  add_a(1)
+  add_b(1)
+  assert::equals(a.value, 1)
+  assert::equals(b.value, 101)
