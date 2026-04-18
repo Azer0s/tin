@@ -69,10 +69,17 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		return entry.val, nil
 	}
 	// Try struct static method: TypeName::method or TypeName[T]::method
-	// Also handles package-qualified names: pkg::TypeName[T,U]::method
+	// Also handles package-qualified names:
+	//   pkg::TypeName[T,U]::method  (2-element path, type is path[0])
+	//   pkg::TypeName::method       (3-element path, pkg=path[0], type=path[1])
 	// Scope key is "TypeName_method" (set when struct is compiled with static methods).
 	if len(e.Path) >= 2 {
 		baseName := e.Path[0]
+
+		// 3-element path: pkg::StructName::method — struct is path[1], not path[0].
+		if len(e.Path) == 3 {
+			baseName = e.Path[1]
+		}
 
 		typeParamStr := ""
 		if i := strings.Index(baseName, "["); i >= 0 {
@@ -542,7 +549,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	st, ok := cg.structTypes[typeName]
 	if !ok {
-		return nil, fmt.Errorf("unknown struct type: %s", typeName)
+		return nil, cg.nodeErr(e, "unknown struct type: %s", typeName)
 	}
 
 	// cLayoutStructs need special handling: the wrapper type has no user fields.

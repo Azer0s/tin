@@ -1,0 +1,9 @@
+// compiler_errors/wrong_arity.tin
+// Calling a function with the wrong number of arguments.
+
+fn add(a i64, b i64) i64 =
+  return a + b
+
+fn main() =
+  let x = add(1, 2, 3)
+  echo x

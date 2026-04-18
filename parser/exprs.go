@@ -433,12 +433,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					return nil, err3
 				}
 
-				expr = &ast.CallExpr{
-					Func: &ast.FieldAccess{Expr: expr, Field: field.Literal},
-					Args: args,
-				}
+				fa := ast.NewFieldAccess(expr, field.Literal, false, field.Line, field.Col)
+				expr = ast.NewCallExpr(fa, args, field.Line, field.Col)
 			} else {
-				expr = &ast.FieldAccess{Expr: expr, Field: field.Literal}
+				expr = ast.NewFieldAccess(expr, field.Literal, false, field.Line, field.Col)
 			}
 
 		case lexer.ARROW:
@@ -455,12 +453,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					return nil, err3
 				}
 
-				expr = &ast.CallExpr{
-					Func: &ast.FieldAccess{Expr: expr, Field: field.Literal, IsPtr: true},
-					Args: args,
-				}
+				fa := ast.NewFieldAccess(expr, field.Literal, true, field.Line, field.Col)
+				expr = ast.NewCallExpr(fa, args, field.Line, field.Col)
 			} else {
-				expr = &ast.FieldAccess{Expr: expr, Field: field.Literal, IsPtr: true}
+				expr = ast.NewFieldAccess(expr, field.Literal, true, field.Line, field.Col)
 			}
 
 		case lexer.DCOLON:
@@ -480,7 +476,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 						return nil, err3
 					}
 
-					expr = &ast.CallExpr{Func: sa, Args: args}
+					expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
 				} else if p.check(lexer.LBRACE) {
 					// pkg::subpkg::Type{...} - package-qualified struct literal
 					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
@@ -491,7 +487,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					expr = lit
 				}
 			} else if id, ok := expr.(*ast.Identifier); ok {
-				sa := &ast.ScopeAccess{Path: []string{id.Name, field.Literal}}
+				sa := ast.NewScopeAccess([]string{id.Name, field.Literal}, field.Line, field.Col)
 
 				if p.check(lexer.LPAREN) {
 					args, err3 := p.parseArgList()
@@ -499,7 +495,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 						return nil, err3
 					}
 
-					expr = &ast.CallExpr{Func: sa, Args: args}
+					expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
 				} else if p.check(lexer.LBRACE) {
 					// pkg::Type{...} - package-qualified struct literal
 					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
@@ -528,7 +524,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 						typeName = typeName + "[" + typeArgID.Name + "]"
 					}
 
-					sa := &ast.ScopeAccess{Path: []string{typeName, field.Literal}}
+					sa := ast.NewScopeAccess([]string{typeName, field.Literal}, field.Line, field.Col)
 
 					if p.check(lexer.LPAREN) {
 						args, err3 := p.parseArgList()
@@ -536,7 +532,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 							return nil, err3
 						}
 
-						expr = &ast.CallExpr{Func: sa, Args: args}
+						expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
 					} else {
 						expr = sa
 					}
@@ -672,13 +668,14 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			expr = &ast.CallExpr{Func: expr, Args: args}
 
 		case lexer.LPAREN:
-			// Function call
+			// Function call - record position of the opening paren for error messages.
+			callTok := p.peek()
 			args, err2 := p.parseArgList()
 			if err2 != nil {
 				return nil, err2
 			}
 
-			expr = &ast.CallExpr{Func: expr, Args: args}
+			expr = ast.NewCallExpr(expr, args, callTok.Line, callTok.Col)
 
 		case lexer.KW_AS:
 			p.advance()
@@ -1174,7 +1171,8 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		return p.parseArrayLit()
 
 	case lexer.IDENT:
-		name := p.advance().Literal
+		tok := p.advance()
+		name := tok.Literal
 		// struct literal: name{...}
 		if p.check(lexer.LBRACE) {
 			return p.parseStructLit(name)
@@ -1201,7 +1199,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			p.pos = saved
 		}
 
-		return &ast.Identifier{Name: name}, nil
+		return ast.NewIdent(name, tok.Line, tok.Col), nil
 
 	case lexer.KW_LET:
 		// inline let (for ternary macro usage)
@@ -1233,9 +1231,9 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	default:
 		// Type keywords used as identifiers / type names in expressions
 		if isTypeKeyword(tok) {
-			p.advance()
+			tok = p.advance()
 
-			return &ast.Identifier{Name: tok.Literal}, nil
+			return ast.NewIdent(tok.Literal, tok.Line, tok.Col), nil
 		}
 
 		return nil, p.errorf("unexpected token %s (%q)", tok.Type, tok.Literal)

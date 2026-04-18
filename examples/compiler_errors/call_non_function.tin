@@ -1,0 +1,7 @@
+// compiler_errors/call_non_function.tin
+// Calling a value that is not a function.
+
+fn main() =
+  let x i64 = 42
+  let y = x(10)
+  echo y

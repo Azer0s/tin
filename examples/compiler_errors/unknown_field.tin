@@ -1,0 +1,10 @@
+// compiler_errors/unknown_field.tin
+// Accessing a field that does not exist on the struct.
+
+struct Point =
+  x i64
+  y i64
+
+fn main() =
+  let p = Point{x: 1, y: 2}
+  echo p.z

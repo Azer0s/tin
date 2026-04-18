@@ -1,0 +1,71 @@
+// examples/test_bound_methods.tin - Tests for bound method closures.
+// f.method produces a closure that captures f and calls f.method(args...).
+
+use assert
+
+struct counter =
+  value i64
+
+  fn new(initial i64) counter =
+    return counter{value: initial}
+
+  fn get(this counter) i64 =
+    return this.value
+
+  fn add(this *counter, n i64) =
+    this.value = this.value + n
+
+  fn mul(this counter, n i64) i64 =
+    return this.value * n
+
+struct greeter =
+  name string
+
+  fn new(name string) greeter =
+    return greeter{name: name}
+
+  fn greet(this greeter, msg string) string =
+    return this.name ++ ": " ++ msg
+
+test "bound value method returns correct result" =
+  let c = counter::new(10)
+  let get_fn = c.get
+  assert::equals(get_fn(), 10)
+
+test "bound method with argument" =
+  let c = counter::new(5)
+  let mul_fn = c.mul
+  assert::equals(mul_fn(3), 15)
+
+test "bound method with string arg" =
+  let g = greeter::new("Alice")
+  let greet_fn = g.greet
+  assert::equals(greet_fn("hello"), "Alice: hello")
+
+test "bound method closure passed to higher-order fn" =
+  let c = counter::new(7)
+  let get_fn = c.get
+  let v = get_fn()
+  assert::equals(v, 7)
+
+test "multiple bound methods from same struct" =
+  let c = counter::new(4)
+  let get_fn = c.get
+  let mul_fn = c.mul
+  assert::equals(get_fn(), 4)
+  assert::equals(mul_fn(10), 40)
+
+test "bound method captures independent copies" =
+  let c1 = counter::new(3)
+  let c2 = counter::new(9)
+  let get1 = c1.get
+  let get2 = c2.get
+  assert::equals(get1(), 3)
+  assert::equals(get2(), 9)
+
+test "bound pointer receiver method mutates via original" =
+  let c counter = counter::new(0)
+  let add_fn = c.add
+  add_fn(5)
+  add_fn(3)
+  assert::equals(c.get(), 8)

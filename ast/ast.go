@@ -26,6 +26,13 @@ type base struct{ pos Pos }
 func (b base) Pos() Pos    { return b.pos }
 func (b base) nodeMarker() {}
 
+// makeBase returns a base with the given source position.
+// Used by the node constructors below to record locations.
+func makeBase(line, col int) base { return base{pos: Pos{Line: line, Col: col}} }
+
+// AtLine creates a Pos for use in node constructors.
+func AtLine(line, col int) Pos { return Pos{Line: line, Col: col} }
+
 // Top-level
 
 // Program is the root node
@@ -485,6 +492,31 @@ type InterpolatedString struct {
 type Identifier struct {
 	base
 	Name string
+}
+
+// NewIdent creates an Identifier with source position set.
+func NewIdent(name string, line, col int) *Identifier {
+	return &Identifier{base: makeBase(line, col), Name: name}
+}
+
+// NewCallExpr creates a CallExpr with source position set.
+func NewCallExpr(fn Node, args []Node, line, col int) *CallExpr {
+	return &CallExpr{base: makeBase(line, col), Func: fn, Args: args}
+}
+
+// NewFieldAccess creates a FieldAccess with source position set.
+func NewFieldAccess(expr Node, field string, isPtr bool, line, col int) *FieldAccess {
+	return &FieldAccess{base: makeBase(line, col), Expr: expr, Field: field, IsPtr: isPtr}
+}
+
+// NewScopeAccess creates a ScopeAccess with source position set.
+func NewScopeAccess(path []string, line, col int) *ScopeAccess {
+	return &ScopeAccess{base: makeBase(line, col), Path: path}
+}
+
+// NewBinExpr creates a BinExpr with source position set.
+func NewBinExpr(left Node, op string, right Node, line, col int) *BinExpr {
+	return &BinExpr{base: makeBase(line, col), Left: left, Op: op, Right: right}
 }
 
 type IntLit struct {

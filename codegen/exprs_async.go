@@ -244,6 +244,99 @@ func (cg *CodeGen) genClosureDtor(name string, captures []closureCapture) *ir.Fu
 	return dtorFn
 }
 
+// genBoundMethod synthesizes a closure fat-pointer for `obj.methodName` where
+// obj is of struct type structName.  The closure captures the receiver value
+// and, when called, passes it as the first argument to structName_methodName.
+// Returns (nil, nil) if no matching method is found (caller falls through to error).
+func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.Value, structName, methodName string) (value.Value, error) {
+	irName := structName + "_" + methodName
+	entry, ok := cg.curScope.lookup(irName)
+	if !ok {
+		return nil, nil
+	}
+
+	irFunc, isFunc := entry.val.(*ir.Func)
+	if !isFunc {
+		return nil, nil
+	}
+
+	// irFunc.Sig.Params[0] is the receiver; Params[1..] are the user-visible params.
+	sig := irFunc.Sig
+	if len(sig.Params) == 0 {
+		return nil, nil // unexpected: static method, no receiver
+	}
+
+	// Determine receiver value to store in env.
+	recvType := sig.Params[0]
+	var recvVal value.Value
+
+	if pt, isPtr := recvType.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(obj.Type()) {
+		// Pointer receiver: use the original variable's alloca so mutations via
+		// the closure are visible through the original binding.
+		if lv, lvErr := cg.genLValue(block, recvExpr); lvErr == nil && lv != nil {
+			recvVal = lv
+		} else {
+			// Fall back: fresh alloca copy (mutations won't propagate).
+			alloca := block.NewAlloca(obj.Type())
+			block.NewStore(obj, alloca)
+			recvVal = alloca
+		}
+	} else {
+		recvVal = obj
+	}
+
+	// Build the closure env capturing just the receiver.
+	recvCapture := closureCapture{name: "__recv", val: recvVal, llvmTy: recvVal.Type()}
+
+	var dtorFn *ir.Func
+	if isRCTrackedType(recvCapture.llvmTy) {
+		dtorFn = cg.genClosureDtor(fmt.Sprintf("bound.%s.%s.%d.dtor", structName, methodName, cg.strCount), []closureCapture{recvCapture})
+	}
+
+	envI8Ptr, envStructType := cg.buildClosureEnv(block, []closureCapture{recvCapture}, dtorFn)
+
+	// Build wrapper function: fn(i8* env, userParams...) retType
+	wrapperName := fmt.Sprintf("bound.%s.%s.%d", structName, methodName, cg.strCount)
+	cg.strCount++
+
+	wrapperParams := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
+	for i := 1; i < len(sig.Params); i++ {
+		wrapperParams = append(wrapperParams, ir.NewParam(fmt.Sprintf("p%d", i), sig.Params[i]))
+	}
+
+	wrapFn := cg.mod.NewFunc(wrapperName, sig.RetType, wrapperParams...)
+	wrapEntry := wrapFn.NewBlock("entry")
+
+	// Unpack receiver from env.
+	envTypedPtr := wrapEntry.NewBitCast(wrapFn.Params[0], irtypes.NewPointer(envStructType))
+	recvGep := wrapEntry.NewGetElementPtr(envStructType, envTypedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	receiverArg := wrapEntry.NewLoad(recvVal.Type(), recvGep)
+
+	// Call the original method with receiver + forwarded params.
+	callArgs := make([]value.Value, 0, len(sig.Params))
+	callArgs = append(callArgs, receiverArg)
+	for i := 1; i < len(wrapFn.Params); i++ {
+		callArgs = append(callArgs, wrapFn.Params[i])
+	}
+
+	result := wrapEntry.NewCall(irFunc, callArgs...)
+	if irtypes.IsVoid(result.Type()) {
+		wrapEntry.NewRet(nil)
+	} else {
+		wrapEntry.NewRet(result)
+	}
+
+	// Return fat pointer { wrapFn, envI8Ptr }.
+	fatStructType := irtypes.NewStruct(irtypes.NewPointer(wrapFn.Sig), irtypes.I8Ptr)
+	fat0 := block.NewInsertValue(constant.NewUndef(fatStructType), wrapFn, 0)
+	fat1 := block.NewInsertValue(fat0, envI8Ptr, 1)
+
+	cg.lastLambdaHadCaptures = true
+
+	return fat1, nil
+}
+
 // Interpolated string
 
 func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedString) (value.Value, error) {
@@ -1851,7 +1944,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 	case *ast.Identifier:
 		entry, ok := cg.curScope.lookup(e.Name)
 		if !ok {
-			return nil, fmt.Errorf("undefined identifier: %s", e.Name)
+			return nil, cg.nodeErr(e, "undefined identifier: %s", e.Name)
 		}
 
 		if entry.isAlloc {

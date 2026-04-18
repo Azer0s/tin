@@ -89,6 +89,11 @@ type CodeGen struct {
 	curScope    *scope
 	moduleScope *scope // root/global scope for module-level declarations
 
+	// currentPos tracks the source position of the AST node currently being
+	// compiled. Updated in genExpr and genStmt dispatch so that error messages
+	// produced deeper in the call stack can reference a meaningful location.
+	currentPos ast.Pos
+
 	// pendingDeferFnI8s holds the thunk i8* function pointers for deferred calls
 	// registered in the current function (LIFO on return).
 	pendingDeferFnI8s []value.Value

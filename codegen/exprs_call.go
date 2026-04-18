@@ -731,10 +731,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
-			return nil, fmt.Errorf("undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
+			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
 		}
 
-		return nil, fmt.Errorf("undefined method: %s.%s", structName, fn.Field)
+		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
 		// Overload resolution for cross-package calls: pkg::overloadedFn(args).
@@ -1057,13 +1057,34 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 	}
 
-	// Adapt argument types.
+	// Validate callee: must be a function pointer type.  A non-function value
+	// (e.g. calling an integer variable) should be a compile error, not a panic.
 	if f, ok := callee.(*ir.Func); ok {
 		calleeType = f.Sig
 	} else if pt, ok := callee.Type().(*irtypes.PointerType); ok {
 		if ft, ok2 := pt.ElemType.(*irtypes.FuncType); ok2 {
 			calleeType = ft
+		} else {
+			return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", pt.ElemType)
 		}
+	} else {
+		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", callee.Type())
+	}
+
+	// Arity check: non-variadic functions must receive exactly the declared number of args.
+	if calleeType != nil && !calleeType.Variadic && len(llArgs) != len(calleeType.Params) {
+		calleeName := ""
+		if f, ok := callee.(*ir.Func); ok {
+			calleeName = f.Name()
+		}
+
+		if calleeName != "" {
+			return nil, cg.nodeErr(e, "wrong number of arguments to %q: got %d, want %d",
+				calleeName, len(llArgs), len(calleeType.Params))
+		}
+
+		return nil, cg.nodeErr(e, "wrong number of arguments: got %d, want %d",
+			len(llArgs), len(calleeType.Params))
 	}
 
 	if calleeType != nil {
@@ -1204,7 +1225,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
 	}
 
 	// Handle field access on %S.native values: embedded cLayoutStruct fields.
@@ -1216,7 +1237,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(baseName, e.Field)
 		if fieldIdx < 0 {
-			return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
 		}
 
 		nativeSt := cg.nativeStructTypes[baseName]
@@ -1231,7 +1252,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
 	}
 
 	if cg.cLayoutStructs[structName] {
@@ -1241,7 +1262,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(structName, e.Field)
 		if fieldIdx < 0 {
-			return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
 		}
 
 		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
@@ -1256,7 +1277,14 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 	fieldIdx := cg.fieldIndex(structName, e.Field)
 	if fieldIdx < 0 {
-		return nil, fmt.Errorf("unknown field %s.%s", structName, e.Field)
+		// Not a struct field -- check if it is a bound method reference.
+		// `f.method` where f is of struct type Foo synthesizes a closure that
+		// captures the receiver and calls Foo_method(receiver, args...).
+		if bm, err2 := cg.genBoundMethod(block, e.Expr, obj, structName, e.Field); err2 == nil && bm != nil {
+			return bm, nil
+		}
+
+		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
 	}
 
 	// We need a pointer to the struct to do GEP.

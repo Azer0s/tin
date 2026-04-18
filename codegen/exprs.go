@@ -22,6 +22,11 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return nil, nil
 	}
 
+	// Track source position for error messages produced deeper in the call stack.
+	if p := node.Pos(); p.Line != 0 {
+		cg.currentPos = p
+	}
+
 	switch e := node.(type) {
 	case *ast.IntLit:
 		return constant.NewInt(irtypes.I64, e.Value), nil
@@ -833,7 +838,7 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Value, error) {
 	entry, ok := cg.curScope.lookup(e.Name)
 	if !ok {
-		return nil, fmt.Errorf("undefined identifier: %s", e.Name)
+		return nil, cg.nodeErr(e, "undefined identifier: %s", e.Name)
 	}
 
 	if entry.isAlloc {

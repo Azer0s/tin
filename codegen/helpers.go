@@ -109,6 +109,31 @@ func (cg *CodeGen) buildEnv(block *ir.Block, captures []closureCapture) (value.V
 	return envI8, envStructType
 }
 
+// posStr formats a source position as "filename:line:col".
+// If node is non-nil its position is used; otherwise cg.currentPos is used.
+// Returns just the filename when no line info is available.
+func (cg *CodeGen) posStr(node ast.Node) string {
+	var p ast.Pos
+	if node != nil {
+		p = node.Pos()
+	}
+
+	if p.Line == 0 {
+		p = cg.currentPos
+	}
+
+	if p.Line == 0 {
+		return cg.filename
+	}
+
+	return fmt.Sprintf("%s:%d:%d", cg.filename, p.Line, p.Col)
+}
+
+// nodeErr returns an error prefixed with the source location of node.
+func (cg *CodeGen) nodeErr(node ast.Node, format string, args ...interface{}) error {
+	return fmt.Errorf("%s: %s", cg.posStr(node), fmt.Sprintf(format, args...))
+}
+
 // buildClosureEnv heap-allocates an RC-managed env struct for lambda closure captures.
 // Layout: { i8* dtor_fn_ptr, capture_0, capture_1, ... } (dtor at field 0).
 // All RC-tracked captures are retained so the env independently owns them.

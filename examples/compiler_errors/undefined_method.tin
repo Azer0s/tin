@@ -1,0 +1,9 @@
+// compiler_errors/undefined_method.tin
+// Calling a method that does not exist on the struct.
+
+struct Cat =
+  name string
+
+fn main() =
+  let c = Cat{name: "Whiskers"}
+  echo c.speak()

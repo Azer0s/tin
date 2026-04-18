@@ -1,0 +1,5 @@
+// compiler_errors/undefined_type.tin
+// Using a type name that has not been declared.
+
+fn make() Blorp =
+  return Blorp{x: 1}

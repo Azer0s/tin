@@ -1,0 +1,5 @@
+// compiler_errors/undefined_var.tin
+// Using a variable before it is declared.
+
+fn main() =
+  echo x

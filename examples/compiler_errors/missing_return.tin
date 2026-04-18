@@ -1,0 +1,6 @@
+// compiler_errors/missing_return.tin
+// A non-void function that does not return on all paths.
+
+fn maybe(flag bool) i64 =
+  if flag:
+    return 1

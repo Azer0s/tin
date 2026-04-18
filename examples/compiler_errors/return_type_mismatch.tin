@@ -1,0 +1,5 @@
+// compiler_errors/return_type_mismatch.tin
+// Returning a value of the wrong type.
+
+fn get_name() string =
+  return 42

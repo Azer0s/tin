@@ -1,0 +1,6 @@
+// compiler_errors/pure_violation.tin
+// A #pure function that has side effects.
+
+fn{#pure} calculate(x i64) i64 =
+  echo x
+  return x * 2

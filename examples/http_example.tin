@@ -4,26 +4,37 @@
 //   tin run examples/http_example.tin
 
 use http
-use collections
 
 fn{#async} main() =
-  echo "=== HTTP GET ==="
+  echo "=== default client ==="
   let resp = await http::get("http://httpbin.org/get")
   echo resp.status
-  echo resp.headers.get("content-type")
 
-  echo "=== HTTP POST JSON ==="
-  let resp2 = await http::post_json("http://httpbin.org/post", "{\"hello\":\"world\"}")
+  echo "=== explicit request ==="
+  let req = http::Request{
+    method:  "POST",
+    url:     "http://httpbin.org/post",
+    headers: collections::HashMap[string, string]::new(1),
+    body:    "hello",
+  }
+  let resp2 = await http::send(req)
   echo resp2.status
 
-  echo "=== Custom request ==="
-  let hdrs = collections::HashMap[string, string]::new(4)
-  hdrs.set("x-custom", "tin-http")
-  let resp3 = await http::request(http::Request{
-    method:  "GET",
-    url:     "http://httpbin.org/headers",
-    headers: hdrs,
-    body:    "",
-  })
+  echo "=== custom client ==="
+  let c = http::Client::new()
+  c.set_header("x-app", "tin")
+  let resp3 = await http::get(c, "http://httpbin.org/get")
   echo resp3.status
+  let resp4 = await http::post_json(c, "http://httpbin.org/post", "{\"ok\":true}")
+  echo resp4.status
+
+  echo "=== put / patch / delete / head ==="
+  let r5 = await http::put("http://httpbin.org/put", "body")
+  echo r5.status
+  let r6 = await http::patch("http://httpbin.org/patch", "data")
+  echo r6.status
+  let r7 = await http::delete("http://httpbin.org/delete")
+  echo r7.status
+  let r8 = await http::head("http://httpbin.org/get")
+  echo r8.status
   echo "done"

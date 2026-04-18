@@ -4,7 +4,6 @@
 
 use assert
 use http
-use { Request } from http
 use collections
 
 test "parse_response handles non-chunked response" =
@@ -25,11 +24,16 @@ test "headers_complete finds separator" =
 test "Request struct construction" =
   let hdrs = collections::HashMap[string, string]::new(4)
   hdrs.set("accept", "text/plain")
-  let req = Request{method: "POST", url: "http://example.com/api", headers: hdrs, body: "data"}
+  let req = http::Request{method: "POST", url: "http://example.com/api", headers: hdrs, body: "data"}
   assert::equals(req.method, "POST")
   assert::equals(req.url, "http://example.com/api")
   assert::equals(req.body, "data")
   assert::equals(req.headers.get("accept"), "text/plain")
+
+test "Client new and set_header" =
+  let c = http::Client::new()
+  c.set_header("authorization", "Bearer tok")
+  assert::equals(c.headers.get("authorization"), "Bearer tok")
 
 test "HttpStatus enum 200" =
   let s = 200 as http::HttpStatus
