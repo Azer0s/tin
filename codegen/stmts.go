@@ -879,6 +879,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// lambda allocates a fresh env via _tin_rc_alloc (rc=1). Retaining would
 		// over-count: the single scope-exit release_closure must be the only decrement.
 		isFreshFatFn := isFatFnPtr(llType) && cg.lastLambdaHadCaptures
+
 		boxedToAny := isAnyType(llType) && !isAnyType(srcType)
 		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn {
 			cg.emitRetain(block, initVal)
@@ -945,9 +946,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// Also handles bound methods (FieldAccess -> genBoundMethod): they set
 	// lastLambdaHadCaptures=true so we must not skip the scope-exit release.
 	noReleaseClosureEnv := false
+
 	if isFatFnPtr(llType) {
 		_, isLambda := s.Value.(*ast.LambdaExpr)
 		_, isBound := s.Value.(*ast.FieldAccess)
+
 		if isLambda || isBound {
 			noReleaseClosureEnv = !cg.lastLambdaHadCaptures
 			cg.lastLambdaHadCaptures = false // consume
