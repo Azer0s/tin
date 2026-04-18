@@ -1,0 +1,71 @@
+// stdlib/unicode - Unicode codepoint (rune) utilities.
+//
+// rune is a built-in language type (alias for i32) representing a Unicode
+// codepoint (U+0000..U+10FFFF).  No import is needed to use rune as a type.
+//
+// This module provides helper functions for working with runes and UTF-8:
+//
+//   unicode::valid(r rune) bool         - is r a valid codepoint?
+//   unicode::from_rune(r rune) string   - encode a single rune as UTF-8
+//   unicode::runes(s string) [rune]     - decode string to codepoint slice
+//   unicode::encode(rs [rune]) string   - encode codepoint slice to UTF-8
+//   unicode::count(s string) i64        - count runes (not bytes) in s
+//
+// String iteration:
+//   for r rune in s:   // yields each Unicode codepoint; invalid bytes → U+FFFD
+//
+// Import: use unicode
+
+// valid reports whether r is a valid Unicode codepoint.
+// Surrogates (U+D800..U+DFFF) and values above U+10FFFF are invalid.
+fn valid(r rune) bool =
+  let v = r as i64
+  if v < 0:
+    return false
+  if v > 0x10FFFF:
+    return false
+  if v >= 0xD800 && v <= 0xDFFF:
+    return false
+  return true
+
+// from_rune encodes r as a UTF-8 string.
+// Invalid codepoints are replaced with U+FFFD (the replacement character).
+fn from_rune(r rune) string =
+  let v = r as i64
+  if !valid(r):
+    v = 0xFFFD
+  if v <= 0x7F:
+    return "" ++ (v as byte)
+  if v <= 0x7FF:
+    return "" ++ ((0xC0 | (v >> 6)) as byte) ++ ((0x80 | (v & 0x3F)) as byte)
+  if v <= 0xFFFF:
+    return "" ++ ((0xE0 | (v >> 12)) as byte) ++ ((0x80 | ((v >> 6) & 0x3F)) as byte) ++ ((0x80 | (v & 0x3F)) as byte)
+  return "" ++ ((0xF0 | (v >> 18)) as byte) ++ ((0x80 | ((v >> 12) & 0x3F)) as byte) ++ ((0x80 | ((v >> 6) & 0x3F)) as byte) ++ ((0x80 | (v & 0x3F)) as byte)
+
+// runes decodes s (UTF-8) into a slice of codepoints.
+// Invalid byte sequences are replaced with U+FFFD.
+fn runes(s string) [rune] =
+  let result [rune] = []
+  for r rune in s:
+    result ++= r
+  return result
+
+// encode encodes a slice of codepoints as a UTF-8 string.
+fn encode(rs [rune]) string =
+  let result = ""
+  let i i64 = 0
+  for i < len(rs):
+    result = result ++ from_rune(rs[i])
+    i = i + 1
+  return result
+
+// count returns the number of Unicode codepoints in s.
+// For well-formed UTF-8 this equals the number of characters; for malformed
+// input each invalid byte counts as one replacement character.
+fn count(s string) i64 =
+  let n i64 = 0
+  for r rune in s:
+    n = n + 1
+  return n
+
+export { valid, from_rune, runes, encode, count } as unicode

@@ -2430,6 +2430,15 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		return cg.genForIterTrait(block, s, iterFatPtr, instKey)
 	}
 
+	// Rune iteration over strings: for r rune in s decodes UTF-8 codepoints.
+	if s.VarType != nil {
+		if st, ok := s.VarType.(*ast.SimpleType); ok && st.Name == "rune" {
+			if isStringType(iterVal.Type()) {
+				return cg.genForInStringRunes(block, s, iterVal)
+			}
+		}
+	}
+
 	// Get element type.
 	// For string fat-pointers ({i8*, i64}), default element type is i8 (byte).
 	var elemType irtypes.Type = irtypes.I64
@@ -2536,6 +2545,180 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 
 	// ARC: release the iterator value if it was a temporary RC allocation
 	// (e.g. `for x in qsort(arr):` where qsort returns a fresh array).
+	if isRCTrackedType(iterVal.Type()) && !isCopyExpr(s.Iter) {
+		cg.emitRelease(afterBlock, iterVal)
+	}
+
+	return afterBlock, nil
+}
+
+// genForInStringRunes generates a for-in loop over a string that decodes
+// UTF-8 codepoints and yields each one as a rune (i32).  The loop variable
+// type must be "rune".  Invalid byte sequences yield U+FFFD (0xFFFD).
+func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal value.Value) (*ir.Block, error) {
+	// Extract data pointer and byte length from the string fat-ptr.
+	dataPtr := cg.extractStringPtr(block, iterVal)
+	lenVal := cg.extractStringLen(block, iterVal)
+
+	// Allocas that persist across loop iterations.
+	idxAlloca := block.NewAlloca(irtypes.I64) // current byte index
+	block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+
+	strideAlloca := block.NewAlloca(irtypes.I64) // bytes consumed this iteration
+	runeAlloca := block.NewAlloca(irtypes.I32)   // decoded codepoint (i32 = rune)
+
+	condBlock := cg.newBlock("forin.rune.cond")
+	decBlock := cg.newBlock("forin.rune.dec")
+	b1Block := cg.newBlock("forin.rune.1b")
+	mbBlock := cg.newBlock("forin.rune.mb")
+	check2Block := cg.newBlock("forin.rune.chk2")
+	seq2Block := cg.newBlock("forin.rune.2b")
+	check3Block := cg.newBlock("forin.rune.chk3")
+	bnd2Block := cg.newBlock("forin.rune.bnd2")
+	seq3Block := cg.newBlock("forin.rune.3b")
+	check4Block := cg.newBlock("forin.rune.chk4")
+	bnd3Block := cg.newBlock("forin.rune.bnd3")
+	seq4Block := cg.newBlock("forin.rune.4b")
+	bnd4Block := cg.newBlock("forin.rune.bnd4")
+	replBlock := cg.newBlock("forin.rune.repl")
+	bodyBlock := cg.newBlock("forin.rune.body")
+	afterBlock := cg.newBlock("forin.rune.after")
+
+	block.NewBr(condBlock)
+
+	// cond: i < len
+	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
+	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenVal)
+	condBlock.NewCondBr(cond, decBlock, afterBlock)
+
+	// decode: read first byte, branch on sequence type
+	b0ptr := decBlock.NewGetElementPtr(irtypes.I8, dataPtr, idx)
+	b0i8 := decBlock.NewLoad(irtypes.I8, b0ptr)
+	b0 := decBlock.NewZExt(b0i8, irtypes.I64)
+	i1 := decBlock.NewAdd(idx, constant.NewInt(irtypes.I64, 1))
+	i2 := decBlock.NewAdd(idx, constant.NewInt(irtypes.I64, 2))
+	i3 := decBlock.NewAdd(idx, constant.NewInt(irtypes.I64, 3))
+	top1 := decBlock.NewAnd(b0, constant.NewInt(irtypes.I64, 0x80))
+	isASCII := decBlock.NewICmp(enum.IPredEQ, top1, constant.NewInt(irtypes.I64, 0))
+	decBlock.NewCondBr(isASCII, b1Block, mbBlock)
+
+	// 1-byte ASCII
+	b1Block.NewStore(b1Block.NewTrunc(b0, irtypes.I32), runeAlloca)
+	b1Block.NewStore(constant.NewInt(irtypes.I64, 1), strideAlloca)
+	b1Block.NewBr(bodyBlock)
+
+	// multi-byte: check for 2-byte (b0 & 0xE0) == 0xC0
+	top3 := mbBlock.NewAnd(b0, constant.NewInt(irtypes.I64, 0xE0))
+	is2 := mbBlock.NewICmp(enum.IPredEQ, top3, constant.NewInt(irtypes.I64, 0xC0))
+	mbBlock.NewCondBr(is2, check2Block, check3Block)
+
+	// bounds check for 2-byte
+	has1 := check2Block.NewICmp(enum.IPredSLT, i1, lenVal)
+	check2Block.NewCondBr(has1, seq2Block, replBlock)
+
+	// decode 2-byte
+	b1ptr2 := seq2Block.NewGetElementPtr(irtypes.I8, dataPtr, i1)
+	b1i8 := seq2Block.NewLoad(irtypes.I8, b1ptr2)
+	b1 := seq2Block.NewZExt(b1i8, irtypes.I64)
+	hi2 := seq2Block.NewShl(seq2Block.NewAnd(b0, constant.NewInt(irtypes.I64, 0x1F)), constant.NewInt(irtypes.I64, 6))
+	lo2 := seq2Block.NewAnd(b1, constant.NewInt(irtypes.I64, 0x3F))
+	r2 := seq2Block.NewOr(hi2, lo2)
+	seq2Block.NewStore(seq2Block.NewTrunc(r2, irtypes.I32), runeAlloca)
+	seq2Block.NewStore(constant.NewInt(irtypes.I64, 2), strideAlloca)
+	seq2Block.NewBr(bodyBlock)
+
+	// check for 3-byte (b0 & 0xF0) == 0xE0
+	top4 := check3Block.NewAnd(b0, constant.NewInt(irtypes.I64, 0xF0))
+	is3 := check3Block.NewICmp(enum.IPredEQ, top4, constant.NewInt(irtypes.I64, 0xE0))
+	check3Block.NewCondBr(is3, bnd2Block, check4Block)
+
+	// bounds check for 3-byte
+	has2 := bnd2Block.NewICmp(enum.IPredSLT, i2, lenVal)
+	bnd2Block.NewCondBr(has2, seq3Block, replBlock)
+
+	// decode 3-byte
+	b1ptr3 := seq3Block.NewGetElementPtr(irtypes.I8, dataPtr, i1)
+	b1i8_3 := seq3Block.NewLoad(irtypes.I8, b1ptr3)
+	b1_3 := seq3Block.NewZExt(b1i8_3, irtypes.I64)
+	b2ptr3 := seq3Block.NewGetElementPtr(irtypes.I8, dataPtr, i2)
+	b2i8_3 := seq3Block.NewLoad(irtypes.I8, b2ptr3)
+	b2_3 := seq3Block.NewZExt(b2i8_3, irtypes.I64)
+	hi3 := seq3Block.NewShl(seq3Block.NewAnd(b0, constant.NewInt(irtypes.I64, 0x0F)), constant.NewInt(irtypes.I64, 12))
+	mid3 := seq3Block.NewShl(seq3Block.NewAnd(b1_3, constant.NewInt(irtypes.I64, 0x3F)), constant.NewInt(irtypes.I64, 6))
+	lo3 := seq3Block.NewAnd(b2_3, constant.NewInt(irtypes.I64, 0x3F))
+	r3 := seq3Block.NewOr(seq3Block.NewOr(hi3, mid3), lo3)
+	seq3Block.NewStore(seq3Block.NewTrunc(r3, irtypes.I32), runeAlloca)
+	seq3Block.NewStore(constant.NewInt(irtypes.I64, 3), strideAlloca)
+	seq3Block.NewBr(bodyBlock)
+
+	// check for 4-byte (b0 & 0xF8) == 0xF0
+	top5 := check4Block.NewAnd(b0, constant.NewInt(irtypes.I64, 0xF8))
+	is4 := check4Block.NewICmp(enum.IPredEQ, top5, constant.NewInt(irtypes.I64, 0xF0))
+	check4Block.NewCondBr(is4, bnd3Block, replBlock)
+
+	// bounds check for 4-byte
+	has3 := bnd3Block.NewICmp(enum.IPredSLT, i3, lenVal)
+	bnd3Block.NewCondBr(has3, seq4Block, bnd4Block)
+
+	// bnd4: i3 not < n means we're missing bytes for a 4-byte sequence
+	bnd4Block.NewBr(replBlock)
+
+	// decode 4-byte
+	b1ptr4 := seq4Block.NewGetElementPtr(irtypes.I8, dataPtr, i1)
+	b1i8_4 := seq4Block.NewLoad(irtypes.I8, b1ptr4)
+	b1_4 := seq4Block.NewZExt(b1i8_4, irtypes.I64)
+	b2ptr4 := seq4Block.NewGetElementPtr(irtypes.I8, dataPtr, i2)
+	b2i8_4 := seq4Block.NewLoad(irtypes.I8, b2ptr4)
+	b2_4 := seq4Block.NewZExt(b2i8_4, irtypes.I64)
+	b3ptr4 := seq4Block.NewGetElementPtr(irtypes.I8, dataPtr, i3)
+	b3i8_4 := seq4Block.NewLoad(irtypes.I8, b3ptr4)
+	b3_4 := seq4Block.NewZExt(b3i8_4, irtypes.I64)
+	hi4 := seq4Block.NewShl(seq4Block.NewAnd(b0, constant.NewInt(irtypes.I64, 0x07)), constant.NewInt(irtypes.I64, 18))
+	m4a := seq4Block.NewShl(seq4Block.NewAnd(b1_4, constant.NewInt(irtypes.I64, 0x3F)), constant.NewInt(irtypes.I64, 12))
+	m4b := seq4Block.NewShl(seq4Block.NewAnd(b2_4, constant.NewInt(irtypes.I64, 0x3F)), constant.NewInt(irtypes.I64, 6))
+	lo4 := seq4Block.NewAnd(b3_4, constant.NewInt(irtypes.I64, 0x3F))
+	r4 := seq4Block.NewOr(seq4Block.NewOr(hi4, m4a), seq4Block.NewOr(m4b, lo4))
+	seq4Block.NewStore(seq4Block.NewTrunc(r4, irtypes.I32), runeAlloca)
+	seq4Block.NewStore(constant.NewInt(irtypes.I64, 4), strideAlloca)
+	seq4Block.NewBr(bodyBlock)
+
+	// replacement character U+FFFD for invalid sequences
+	replBlock.NewStore(constant.NewInt(irtypes.I32, 0xFFFD), runeAlloca)
+	replBlock.NewStore(constant.NewInt(irtypes.I64, 1), strideAlloca)
+	replBlock.NewBr(bodyBlock)
+
+	// body: expose loop variable, run user statements
+	cg.curScope = newScope(cg.curScope)
+	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false})
+
+	cg.pushBreakTarget(afterBlock)
+
+	var bodyErr error
+
+	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
+	cg.popBreakTarget()
+	cg.emitScopeRelease(bodyBlock, cg.curScope)
+	cg.curScope = cg.curScope.parent
+
+	if bodyErr != nil {
+		return nil, bodyErr
+	}
+
+	// Increment byte index by stride.
+	if bodyBlock != nil && bodyBlock.Term == nil {
+		curIdx := bodyBlock.NewLoad(irtypes.I64, idxAlloca)
+		stride := bodyBlock.NewLoad(irtypes.I64, strideAlloca)
+		newIdx := bodyBlock.NewAdd(curIdx, stride)
+		bodyBlock.NewStore(newIdx, idxAlloca)
+
+		if cg.curFnAutoYield {
+			cg.genYieldAutoAt(bodyBlock, condBlock)
+		} else {
+			bodyBlock.NewBr(condBlock)
+		}
+	}
+
+	// Release iterator if it was a temporary.
 	if isRCTrackedType(iterVal.Type()) && !isCopyExpr(s.Iter) {
 		cg.emitRelease(afterBlock, iterVal)
 	}
