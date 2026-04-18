@@ -16,9 +16,8 @@ use sync
 use { loop } from macros
 
 // C helpers (private runtime operations with no stdlib equivalent)
-fn _tin_string_from_bytes_c(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
-fn _tin_string_data_c(s string) *byte                = extern("_tin_string_data")
-fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte]    = extern("_tin_bytes_from_buf")
+fn _tin_string_data_c(s string) *byte             = extern("_tin_string_data")
+fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 
 // ---------------------------------------------------------------------------
 // Adapters: wrap a raw fd so it works with AsyncReader / AsyncWriter overloads.
@@ -64,7 +63,7 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
       i = i + 1
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
-  let s = _tin_string_from_bytes_c(out, n)
+  let s string = _tin_bytes_from_buf_c(out, n) as string
   mem::free(tmp as *void)
   mem::free(out as *void)
   return s

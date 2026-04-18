@@ -1137,6 +1137,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			cg.emitPkgInitFns(wb)
 
 			if userMainCoroFn != nil {

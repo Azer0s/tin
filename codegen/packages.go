@@ -1207,6 +1207,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	for _, f := range cg.mod.Funcs {
 		if f.Name() == initIRName && len(f.Params) == 0 {
 			cg.pkgInitFns = append(cg.pkgInitFns, f)
+
 			break
 		}
 	}

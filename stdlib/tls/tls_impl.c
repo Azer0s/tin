@@ -25,6 +25,14 @@ typedef struct {
 
 static SSL_CTX *_g_ssl_ctx = NULL;
 
+static void _tin_tls_cleanup(void) {
+    if (_g_ssl_ctx) {
+        SSL_CTX_free(_g_ssl_ctx);
+        _g_ssl_ctx = NULL;
+    }
+    OPENSSL_cleanup();
+}
+
 // _tin_tls_init initializes the global SSL_CTX.  Called from fn init().
 void _tin_tls_init(void) {
     if (_g_ssl_ctx) return;
@@ -34,6 +42,7 @@ void _tin_tls_init(void) {
     if (!_g_ssl_ctx) return;
     SSL_CTX_set_default_verify_paths(_g_ssl_ctx);
     SSL_CTX_set_verify(_g_ssl_ctx, SSL_VERIFY_PEER, NULL);
+    atexit(_tin_tls_cleanup);
 }
 
 // _tin_tls_set_ca_file loads a PEM CA certificate into the global SSL_CTX.
