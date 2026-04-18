@@ -853,6 +853,7 @@ func byteToStringFatPtr(block *ir.Block, b value.Value) value.Value {
 
 	fatPtrType := stringFatPtrType()
 	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), byteAlloca, 0)
+
 	return block.NewInsertValue(v0, constant.NewInt(irtypes.I64, 1), 1)
 }
 

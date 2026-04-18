@@ -1362,6 +1362,7 @@ func (cg *CodeGen) buildStringFatPtr(block *ir.Block, s string) value.Value {
 	length := constant.NewInt(irtypes.I64, int64(len(s)))
 	fatPtrType := stringFatPtrType()
 	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), ptr, 0)
+
 	return block.NewInsertValue(v0, length, 1)
 }
 

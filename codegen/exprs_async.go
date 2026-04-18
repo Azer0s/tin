@@ -1913,6 +1913,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			if len(at.Fields) == 2 {
 				// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
 				elemPtrType := at.Fields[0]
+
 				dataPtr := block.NewExtractValue(arr, 0)
 				if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 					return block.NewGetElementPtr(pt.ElemType, dataPtr, idx), nil

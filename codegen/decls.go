@@ -1079,6 +1079,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			if !ok {
 				// Try overloaded variants: find the one matching the trait slot arity.
 				wantArity := len(wrapSlot.Params) - 1 // subtract self (i8*)
+
 				for _, name := range []string{qualifiedName, concreteName} {
 					if variants, hasOL := cg.overloads[name]; hasOL {
 						for _, v := range variants {
@@ -1087,11 +1088,13 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 									concreteFn = entry
 									concreteName = v.irName
 									ok = true
+
 									break
 								}
 							}
 						}
 					}
+
 					if ok {
 						break
 					}

@@ -1291,12 +1291,15 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 				if err3 != nil {
 					return nil, err3
 				}
+
 				if idx == nil {
 					return nil, nil
 				}
+
 				idx = cg.coerce(block, idx, irtypes.I64)
 				gep := block.NewGetElementPtr(at, arrPtr,
 					constant.NewInt(irtypes.I32, 0), idx)
+
 				return block.NewLoad(at.ElemType, gep), nil
 			}
 		}
@@ -1333,6 +1336,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		if len(at.Fields) == 2 {
 			// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
 			elemPtrType := at.Fields[0]
+
 			dataPtr := block.NewExtractValue(arr, 0)
 			if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 				elemGep := block.NewGetElementPtr(pt.ElemType, dataPtr, idx)
