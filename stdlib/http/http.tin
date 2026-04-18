@@ -3,6 +3,7 @@
 // Import: use http
 
 use "./http_parser"
+use "./client"
 
 export {
   HttpStatus,
@@ -10,5 +11,10 @@ export {
   HttpResponse,
   headers_complete,
   parse_request,
-  parse_response
+  parse_response,
+  Request,
+  request,
+  get,
+  post,
+  post_json,
 } as http

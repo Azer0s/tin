@@ -1,0 +1,29 @@
+// examples/http_example.tin - HTTP client demo
+//
+// Requires network access. Run with:
+//   tin run examples/http_example.tin
+
+use http
+use collections
+
+fn{#async} main() =
+  echo "=== HTTP GET ==="
+  let resp = await http::get("http://httpbin.org/get")
+  echo resp.status
+  echo resp.headers.get("content-type")
+
+  echo "=== HTTP POST JSON ==="
+  let resp2 = await http::post_json("http://httpbin.org/post", "{\"hello\":\"world\"}")
+  echo resp2.status
+
+  echo "=== Custom request ==="
+  let hdrs = collections::HashMap[string, string]::new(4)
+  hdrs.set("x-custom", "tin-http")
+  let resp3 = await http::request(http::Request{
+    method:  "GET",
+    url:     "http://httpbin.org/headers",
+    headers: hdrs,
+    body:    "",
+  })
+  echo resp3.status
+  echo "done"

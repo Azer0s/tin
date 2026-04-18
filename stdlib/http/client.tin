@@ -1,0 +1,190 @@
+// stdlib/http/client.tin - HTTP/1.x async client.
+//
+// Provides get, post, post_json, and request for making HTTP and HTTPS
+// requests. All functions return Future[HttpResponse] and must be awaited.
+//
+//   let resp = await http::get("https://httpbin.org/get")
+//   echo resp.status
+//   echo resp.body
+//
+// Sending Connection: close means the server closes after each response,
+// so _read_all can detect end-of-response by reading until EOF.
+
+use strings
+use str
+use collections
+use ioutil
+use net::tcp
+use tls
+use io
+use { loop } from macros
+use "./http_parser"
+
+// Request describes an outgoing HTTP request.
+struct Request =
+  method  string
+  url     string
+  headers collections::HashMap[string, string]
+  body    string
+
+// _parse_url splits a URL into (use_tls, host, port, path).
+// Defaults: http -> port 80, https -> port 443, path -> "/".
+fn _parse_url(url string) (bool, string, i32, string) =
+  let use_tls = false
+  let port i32 = 80
+  let rest = url
+  if strings::has_prefix(url, "https://"):
+    use_tls = true
+    port = 443
+    rest = strings::substr(url, 8, len(url))
+  else if strings::has_prefix(url, "http://"):
+    rest = strings::substr(url, 7, len(url))
+
+  let slash = strings::index_of(rest, "/")
+  let host_part = rest
+  let path = "/"
+  if slash >= 0:
+    host_part = strings::substr(rest, 0, slash)
+    path = strings::substr(rest, slash, len(rest))
+
+  let host = host_part
+  let colon = strings::index_of(host_part, ":")
+  if colon >= 0:
+    host = strings::substr(host_part, 0, colon)
+    let port_str = strings::substr(host_part, colon + 1, len(host_part))
+    let (p, perr) = str::parse_int32(port_str)
+    if perr == nil && p > 0:
+      port = p
+
+  return (use_tls, host, port, path)
+
+// _build_request serializes a request to HTTP/1.1 wire format.
+fn _build_request(method string, host string, path string, hdrs collections::HashMap[string, string], body string) string =
+  let req = method ++ " " ++ path ++ " HTTP/1.1\r\n"
+  req = req ++ "Host: " ++ host ++ "\r\n"
+  req = req ++ "Connection: close\r\n"
+  if len(body) > 0:
+    req = req ++ "Content-Length: {len(body)}\r\n"
+  let ks = hdrs.keys()
+  let i i64 = 0
+  for i < len(ks):
+    let k = ks[i]
+    req = req ++ k ++ ": " ++ hdrs.get(k) ++ "\r\n"
+    i = i + 1
+  req = req ++ "\r\n"
+  if len(body) > 0:
+    req = req ++ body
+  return req
+
+// _parse_hex parses a lowercase or uppercase hex string to i64.
+// Stops at the first non-hex character (handles chunk size extensions).
+fn _parse_hex(s string) i64 =
+  let result i64 = 0
+  let i i64 = 0
+  for i < len(s):
+    let c = s[i] as byte
+    if c >= @'0' && c <= @'9':
+      result = result * 16 + ((c - @'0') as i64)
+    else if c >= @'a' && c <= @'f':
+      result = result * 16 + (((c - @'a') as i64) + 10)
+    else if c >= @'A' && c <= @'F':
+      result = result * 16 + (((c - @'A') as i64) + 10)
+    else:
+      break
+    i = i + 1
+  return result
+
+// _decode_chunked decodes a Transfer-Encoding: chunked body.
+// Input is the raw body string from parse_response (includes chunk framing).
+fn _decode_chunked(data string) string =
+  let result = ""
+  let i i64 = 0
+  let n = len(data)
+  loop:
+    // Find the CRLF that terminates the chunk size line.
+    let j = i
+    for j < n - 1:
+      if data[j] == @'\r' && data[j+1] == @'\n':
+        break
+      j = j + 1
+    if j >= n - 1:
+      break
+    let chunk_size = _parse_hex(strings::substr(data, i, j))
+    if chunk_size <= 0:
+      break
+    i = j + 2
+    if i + chunk_size > n:
+      break
+    result = result ++ strings::substr(data, i, i + chunk_size)
+    i = i + chunk_size + 2
+  return result
+
+// _read_all reads all bytes from r until EOF, returning them as a string.
+// The caller must ensure the connection will eventually close (Connection: close).
+fn{#async} _read_all(r io::AsyncReader) string =
+  let acc = ""
+  loop:
+    let chunk = await ioutil::read_bytes(r, 4096)
+    if len(chunk) == 0:
+      break
+    let s string = chunk as string
+    acc = acc ++ s
+  return acc
+
+// do_request dials the server, sends the request, reads the full response,
+// and closes the connection.
+fn{#async} do_request(r Request) HttpResponse =
+  let (use_tls, host, port, path) = _parse_url(r.url)
+  let req_str = _build_request(r.method, host, path, r.headers, r.body)
+
+  let (conn, dial_err) = tcp::dial(host, port)
+  if dial_err != nil:
+    return HttpResponse{
+      status:  500 as HttpStatus,
+      headers: collections::HashMap[string, string]::new(1),
+    }
+
+  let raw = ""
+  if use_tls:
+    let tls_conn = await tls::connect(host, conn.fd)
+    await ioutil::write_string(tls_conn, req_str)
+    raw = await spawn _read_all(tls_conn)
+    tls_conn.close()
+  else:
+    await ioutil::write_string(conn, req_str)
+    raw = await spawn _read_all(conn)
+  conn.close()
+
+  let resp = parse_response(raw)
+  let te = strings::to_lower(resp.headers.get_or("transfer-encoding", ""))
+  if strings::contains(te, "chunked"):
+    return HttpResponse{
+      version: resp.version,
+      status:  resp.status,
+      reason:  resp.reason,
+      headers: resp.headers,
+      body:    _decode_chunked(resp.body),
+    }
+
+  return resp
+
+// request performs the HTTP(S) request described by r.
+fn request(r Request) Future[HttpResponse] =
+  return spawn do_request(r)
+
+// get performs an HTTP GET request to url.
+fn get(url string) Future[HttpResponse] =
+  let headers = collections::HashMap[string, string]::new(4)
+  return spawn do_request(Request{method: "GET", url: url, headers: headers, body: ""})
+
+// post performs an HTTP POST with a form-encoded body.
+fn post(url string, body string) Future[HttpResponse] =
+  let headers = collections::HashMap[string, string]::new(4)
+  headers.set("content-type", "application/x-www-form-urlencoded")
+  return spawn do_request(Request{method: "POST", url: url, headers: headers, body: body})
+
+// post_json performs an HTTP POST with a JSON body.
+fn post_json(url string, body string) Future[HttpResponse] =
+  let headers = collections::HashMap[string, string]::new(4)
+  headers.set("content-type", "application/json")
+  return spawn do_request(Request{method: "POST", url: url, headers: headers, body: body})

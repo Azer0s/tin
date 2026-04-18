@@ -481,6 +481,14 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					}
 
 					expr = &ast.CallExpr{Func: sa, Args: args}
+				} else if p.check(lexer.LBRACE) {
+					// pkg::subpkg::Type{...} - package-qualified struct literal
+					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
+					if err3 != nil {
+						return nil, err3
+					}
+
+					expr = lit
 				}
 			} else if id, ok := expr.(*ast.Identifier); ok {
 				sa := &ast.ScopeAccess{Path: []string{id.Name, field.Literal}}
@@ -492,6 +500,14 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					}
 
 					expr = &ast.CallExpr{Func: sa, Args: args}
+				} else if p.check(lexer.LBRACE) {
+					// pkg::Type{...} - package-qualified struct literal
+					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
+					if err3 != nil {
+						return nil, err3
+					}
+
+					expr = lit
 				} else {
 					expr = sa
 				}
@@ -569,6 +585,26 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				// Encode multiple type args as a comma-separated identifier so that
 				// the DCOLON and DOT postfix handlers can reconstruct the concrete name.
 				expr = &ast.IndexExpr{Expr: expr, Index: &ast.Identifier{Name: strings.Join(typeArgs, ",")}}
+
+				// pkg::Type[K,V]{...} - generic struct literal with package qualifier
+				if p.check(lexer.LBRACE) {
+					if idx, ok3 := expr.(*ast.IndexExpr); ok3 {
+						if baseName, ok4 := p.indexExprTypeName(idx); ok4 {
+							parsedTypeArgs := p.indexExprTypeArgs(idx)
+
+							lit, err3 := p.parseStructLit(baseName)
+							if err3 != nil {
+								return nil, err3
+							}
+
+							if sl, ok5 := lit.(*ast.StructLit); ok5 {
+								sl.TypeArgs = parsedTypeArgs
+							}
+
+							expr = lit
+						}
+					}
+				}
 			} else if p.check(lexer.COLON) {
 				p.advance() // consume :
 
@@ -594,6 +630,26 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				}
 
 				expr = &ast.IndexExpr{Expr: expr, Index: start}
+
+				// pkg::Type[T]{...} - generic struct literal with package qualifier
+				if p.check(lexer.LBRACE) {
+					if idx, ok3 := expr.(*ast.IndexExpr); ok3 {
+						if baseName, ok4 := p.indexExprTypeName(idx); ok4 {
+							parsedTypeArgs := p.indexExprTypeArgs(idx)
+
+							lit, err3 := p.parseStructLit(baseName)
+							if err3 != nil {
+								return nil, err3
+							}
+
+							if sl, ok5 := lit.(*ast.StructLit); ok5 {
+								sl.TypeArgs = parsedTypeArgs
+							}
+
+							expr = lit
+						}
+					}
+				}
 			}
 
 		case lexer.NOT:
@@ -1284,6 +1340,37 @@ func (p *Parser) parseArrayLit() (ast.Node, error) {
 	}
 
 	return &ast.ArrayLit{Elems: elems}, nil
+}
+
+// indexExprTypeName returns the base type name from an IndexExpr whose Expr is
+// an Identifier or ScopeAccess (i.e. a generic struct type). The second return
+// value is false if the Expr is not a plain type name (e.g. an array variable).
+func (p *Parser) indexExprTypeName(idx *ast.IndexExpr) (string, bool) {
+	switch inner := idx.Expr.(type) {
+	case *ast.Identifier:
+		return inner.Name, true
+	case *ast.ScopeAccess:
+		return strings.Join(inner.Path, "::"), true
+	}
+
+	return "", false
+}
+
+// indexExprTypeArgs converts the Index of an IndexExpr (which encodes type
+// args as a comma-separated Identifier string) into a []ast.TypeExpr slice.
+func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
+	if argID, ok := idx.Index.(*ast.Identifier); ok {
+		parts := strings.Split(argID.Name, ",")
+		result := make([]ast.TypeExpr, 0, len(parts))
+
+		for _, part := range parts {
+			result = append(result, &ast.SimpleType{Name: strings.TrimSpace(part)})
+		}
+
+		return result
+	}
+
+	return nil
 }
 
 func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {

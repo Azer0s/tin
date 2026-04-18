@@ -1,0 +1,66 @@
+// examples/test_http_client.tin - Tests for the HTTP client utilities.
+// Tests URL parsing, request building, and response parsing without
+// requiring network access.
+
+use assert
+use http
+use { Request } from http
+use collections
+
+test "parse_response handles non-chunked response" =
+  let raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.body, "hello")
+  assert::equals(resp.reason, "OK")
+
+test "parse_response 204 no body" =
+  let raw = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.body, "")
+
+test "headers_complete finds separator" =
+  assert::ok(http::headers_complete("HTTP/1.1 200 OK\r\n\r\n") > 0)
+  assert::equals(http::headers_complete("HTTP/1.1 200 OK\r\n"), -1)
+
+test "Request struct construction" =
+  let hdrs = collections::HashMap[string, string]::new(4)
+  hdrs.set("accept", "text/plain")
+  let req = Request{method: "POST", url: "http://example.com/api", headers: hdrs, body: "data"}
+  assert::equals(req.method, "POST")
+  assert::equals(req.url, "http://example.com/api")
+  assert::equals(req.body, "data")
+  assert::equals(req.headers.get("accept"), "text/plain")
+
+test "HttpStatus enum 200" =
+  let s = 200 as http::HttpStatus
+  assert::equals(s, http::HttpStatus.ok)
+
+test "HttpStatus enum 404" =
+  let s = 404 as http::HttpStatus
+  assert::equals(s, http::HttpStatus.not_found)
+
+test "HttpStatus enum 500" =
+  let s = 500 as http::HttpStatus
+  assert::equals(s, http::HttpStatus.internal_server_error)
+
+test "parse_response 404" =
+  let raw = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.status, http::HttpStatus.not_found)
+  assert::equals(resp.reason, "Not Found")
+
+test "parse_response version" =
+  let raw = "HTTP/1.0 200 OK\r\n\r\n"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.version, "HTTP/1.0")
+
+test "parse_response headers are lowercase" =
+  let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Custom: value\r\n\r\n"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.headers.get("content-type"), "text/html")
+  assert::equals(resp.headers.get("x-custom"), "value")
+
+test "parse_response body with content-length" =
+  let raw = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world"
+  let resp = http::parse_response(raw)
+  assert::equals(resp.body, "hello world")

@@ -501,11 +501,34 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	}
 	// Resolve through type aliases to the canonical struct name
 	// (e.g., bare "Mutex" -> "sync__Mutex" after canonical naming).
+	// Also handles package-qualified names like "http::Request" -> "http__Request"
+	// and deep paths like "net::tcp::Conn" -> "tcp::Conn" -> "tcp__Conn".
 	if _, exists := cg.structTypes[typeName]; !exists {
+		resolved := false
+
 		if alias, ok2 := cg.typeAliases[typeName]; ok2 {
 			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 				typeName = simple.Name
 				e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+				resolved = true
+			}
+		}
+
+		// For multi-level qualified names (e.g. "net::tcp::Conn"), strip leading
+		// package components one at a time until an alias is found.
+		if !resolved && strings.Contains(typeName, "::") {
+			parts := strings.Split(typeName, "::")
+			for i := 1; i < len(parts); i++ {
+				shorter := strings.Join(parts[i:], "::")
+
+				if alias, ok2 := cg.typeAliases[shorter]; ok2 {
+					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+						typeName = simple.Name
+						e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+
+						break
+					}
+				}
 			}
 		}
 	}
