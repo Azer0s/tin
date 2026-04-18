@@ -1,0 +1,156 @@
+use raylib
+
+fn digit_str(d i64) string =
+  if d == 0: return "0"
+  if d == 1: return "1"
+  if d == 2: return "2"
+  if d == 3: return "3"
+  if d == 4: return "4"
+  if d == 5: return "5"
+  if d == 6: return "6"
+  if d == 7: return "7"
+  if d == 8: return "8"
+  return "9"
+
+fn int_to_str(n i64) string =
+  if n == 0: return "0"
+  let s = ""
+  let v = n
+  for v > 0:
+    s = digit_str(v % 10) ++ s
+    v = v / 10
+  return s
+
+raylib::init_window(600, 640, "Snake")
+raylib::set_target_fps(60)
+
+let cell   i64 = 30
+let header i64 = 40
+
+// Snake as ring buffer; shead is the index of the head segment
+let sx [i64; 400]
+let sy [i64; 400]
+let shead i64 = 2
+let slen  i64 = 3
+let dx    i64 = 1
+let dy    i64 = 0
+let ndx   i64 = 1
+let ndy   i64 = 0
+
+sx[0] = 8
+sy[0] = 10
+sx[1] = 9
+sy[1] = 10
+sx[2] = 10
+sy[2] = 10
+
+let fx    i64  = raylib::get_random_value(0, 19) as i64
+let fy    i64  = raylib::get_random_value(0, 19) as i64
+let score i64  = 0
+let timer f32  = 0.0
+let speed f32  = 0.15
+let alive bool = true
+
+for !raylib::window_should_close():
+  if alive:
+    if raylib::is_key_pressed(raylib::KEY_UP) || raylib::is_key_pressed(raylib::KEY_W):
+      if dy != 1:
+        ndx = 0
+        ndy = -1
+    if raylib::is_key_pressed(raylib::KEY_DOWN) || raylib::is_key_pressed(raylib::KEY_S):
+      if dy != -1:
+        ndx = 0
+        ndy = 1
+    if raylib::is_key_pressed(raylib::KEY_LEFT) || raylib::is_key_pressed(raylib::KEY_A):
+      if dx != 1:
+        ndx = -1
+        ndy = 0
+    if raylib::is_key_pressed(raylib::KEY_RIGHT) || raylib::is_key_pressed(raylib::KEY_D):
+      if dx != -1:
+        ndx = 1
+        ndy = 0
+
+  if !alive && raylib::is_key_pressed(raylib::KEY_ENTER):
+    shead = 2
+    slen  = 3
+    dx    = 1
+    dy    = 0
+    ndx   = 1
+    ndy   = 0
+    sx[0] = 8
+    sy[0] = 10
+    sx[1] = 9
+    sy[1] = 10
+    sx[2] = 10
+    sy[2] = 10
+    fx    = raylib::get_random_value(0, 19) as i64
+    fy    = raylib::get_random_value(0, 19) as i64
+    score = 0
+    timer = 0.0
+    alive = true
+
+  if alive:
+    timer = timer + raylib::get_frame_time()
+    if timer >= speed:
+      timer = timer - speed
+      dx = ndx
+      dy = ndy
+
+      let nx = (sx[shead] + dx + 20) % 20
+      let ny = (sy[shead] + dy + 20) % 20
+
+      let ci  i64  = 0
+      let hit bool = false
+      for ci < slen - 1:
+        let ridx = (shead - ci + 400) % 400
+        if sx[ridx] == nx && sy[ridx] == ny:
+          hit = true
+        ci = ci + 1
+
+      if hit:
+        alive = false
+      else:
+        shead = (shead + 1) % 400
+        sx[shead] = nx
+        sy[shead] = ny
+        if nx == fx && ny == fy:
+          slen  = slen + 1
+          score = score + 10
+          fx    = raylib::get_random_value(0, 19) as i64
+          fy    = raylib::get_random_value(0, 19) as i64
+
+  raylib::begin_drawing()
+  raylib::clear_background(raylib::BLACK)
+
+  // Header bar
+  raylib::draw_rectangle(0, 0, 600, header as i32, raylib::DARKGRAY)
+  raylib::draw_text("SNAKE", 10, 10, 20, raylib::WHITE)
+  raylib::draw_text("Score: " ++ int_to_str(score), 220, 10, 20, raylib::YELLOW)
+
+  // Game area
+  raylib::draw_rectangle(0, header as i32, 600, 600, raylib::DARKGREEN)
+
+  // Food
+  raylib::draw_rectangle((fx * cell) as i32, (fy * cell + header) as i32, cell as i32, cell as i32, raylib::RED)
+
+  // Snake segments
+  let j i64 = 0
+  for j < slen:
+    let sidx = (shead - j + 400) % 400
+    let px = sx[sidx] * cell
+    let py = sy[sidx] * cell + header
+    if j == 0:
+      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, (cell - 2) as i32, (cell - 2) as i32, raylib::GREEN)
+    else:
+      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, (cell - 2) as i32, (cell - 2) as i32, raylib::LIME)
+    j = j + 1
+
+  if !alive:
+    raylib::draw_rectangle(100, 260, 400, 120, raylib::BLACK)
+    raylib::draw_text("GAME OVER", 185, 280, 40, raylib::RED)
+    raylib::draw_text("Press ENTER to restart", 130, 340, 20, raylib::WHITE)
+
+  raylib::draw_fps(500, 10)
+  raylib::end_drawing()
+
+raylib::close_window()
