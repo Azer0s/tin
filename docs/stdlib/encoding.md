@@ -5,9 +5,10 @@ import. Import the umbrella package to get all of them, or import a sub-package
 directly to keep the namespace clean.
 
 ```rust
-use encoding           // encoding::base16, encoding::base64, encoding::json, encoding::yaml
+use encoding           // encoding::base16, encoding::base64, encoding::url, encoding::json, encoding::yaml
 use encoding::base16   // base16::encode, base16::decode
 use encoding::base64   // base64::encode, base64::decode
+use encoding::url      // url::encode, url::decode, url::encode_query, url::parse_query
 use encoding::json     // json::encode, json::parse
 use encoding::yaml     // yaml::encode, yaml::parse
 ```
@@ -53,6 +54,39 @@ use encoding::base64
 echo base64::encode("Hello, Tin!")      // "SGVsbG8sIFRpbiE="
 echo base64::encode_url("Hello, Tin!")  // "SGVsbG8sIFRpbiE="
 echo base64::decode("SGVsbG8sIFRpbiE=") // "Hello, Tin!"
+```
+
+---
+
+## `encoding::url`
+
+URL percent-encoding and query string handling (RFC 3986).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `encode` | `(s string) string` | Percent-encode a string; only RFC 3986 unreserved chars (`A-Za-z0-9-_.~`) pass through |
+| `encode_component` | `(s string) string` | Alias for `encode` |
+| `decode` | `(s string) string` | Decode `%XX` sequences; `+` is treated as a space |
+| `encode_query` | `(params HashMap[string, string]) string` | Encode a map as a sorted query string (`key=value&...`) |
+| `parse_query` | `(s string) HashMap[string, string]` | Parse a query string into a map; keys and values are percent-decoded |
+
+```rust
+use encoding::url
+use collections
+
+echo url::encode("hello world")          // "hello%20world"
+echo url::encode("foo=bar&baz=1")        // "foo%3Dbar%26baz%3D1"
+echo url::decode("hello%20world")        // "hello world"
+echo url::decode("foo+bar")             // "foo bar"
+
+let params = collections::HashMap[string, string].new(4)
+params.set("q", "hello world")
+params.set("lang", "tin")
+echo url::encode_query(params)           // "lang=tin&q=hello%20world"
+
+let m = url::parse_query("q=hello+world&page=2")
+echo m.get("q")                          // "hello world"
+echo m.get("page")                       // "2"
 ```
 
 ---
