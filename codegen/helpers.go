@@ -134,6 +134,17 @@ func (cg *CodeGen) nodeErr(node ast.Node, format string, args ...interface{}) er
 	return fmt.Errorf("%s: %s", cg.posStr(node), fmt.Sprintf(format, args...))
 }
 
+// displayStructName returns the user-facing name for a struct canonical key.
+// Package-qualified structs like "http__Client" are presented as "http::Client".
+// Bare names (user-level structs) are returned unchanged.
+func (cg *CodeGen) displayStructName(canonicalKey string) string {
+	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
+		return dn
+	}
+
+	return canonicalKey
+}
+
 // buildClosureEnv heap-allocates an RC-managed env struct for lambda closure captures.
 // Layout: { i8* dtor_fn_ptr, capture_0, capture_1, ... } (dtor at field 0).
 // All RC-tracked captures are retained so the env independently owns them.

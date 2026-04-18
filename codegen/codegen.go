@@ -213,6 +213,13 @@ type CodeGen struct {
 	fnTypeIDs     map[string]int32 // fn signature string -> compile-time type ID
 	nextTypeID    int32            // counter; starts at 6
 
+	// structDisplayNames maps canonical struct key (e.g. "http__Client") to the
+	// fully-qualified user-facing name (e.g. "http::Client").  Only package-
+	// qualified structs have entries here; bare user-level names are their own
+	// display names.  Used by typeof() and fieldtypes() so that reflection code
+	// can match on 'http::Client instead of the opaque 'http__Client atom.
+	structDisplayNames map[string]string
+
 	// Reflection metadata.
 	// structImpls: struct name -> []trait name strings (for traitof/typeof)
 	structImpls map[string][]string
@@ -533,7 +540,10 @@ func (cg *CodeGen) markBreakUsed() {
 // the bare name is returned unchanged.
 func (cg *CodeGen) pkgStructKey(name string) string {
 	if cg.currentPkg != "" {
-		return cg.currentPkg + "__" + name
+		key := cg.currentPkg + "__" + name
+		cg.structDisplayNames[key] = cg.currentPkg + "::" + name
+
+		return key
 	}
 
 	return name
@@ -666,6 +676,7 @@ func New(filename string) *CodeGen {
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
+		structDisplayNames:       make(map[string]string),
 		structImpls:              make(map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
 		traitChainedInits:        make(map[string][]*ir.Func),

@@ -690,10 +690,26 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 
 			return Token{Type: CHAR_LIT, Literal: string(c), Line: line, Col: col}, nil
 		}
-		// It's an atom - only letters, digits, and underscores allowed
+		// It's an atom - letters, digits, underscores, and :: pkg separators allowed.
+		// e.g. 'http::Client, 'sync::Unit, 'my_pkg::MyStruct
 		var sb strings.Builder
 		for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
 			sb.WriteRune(l.advance())
+		}
+
+		// Consume optional ::Name suffixes for package-qualified type atoms.
+		for l.peek() == ':' && l.peekAt(1) == ':' {
+			next := l.peekAt(2)
+			if !unicode.IsLetter(next) && next != '_' {
+				break
+			}
+
+			sb.WriteRune(l.advance()) // first :
+			sb.WriteRune(l.advance()) // second :
+
+			for l.pos < len(l.src) && (unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
+				sb.WriteRune(l.advance())
+			}
 		}
 
 		return Token{Type: ATOM_LIT, Literal: sb.String(), Line: line, Col: col}, nil

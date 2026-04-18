@@ -238,7 +238,7 @@ func (cg *CodeGen) buildTypeIDToNameTable() map[int32]string {
 		anyTagFn:     "'fn",
 	}
 	for sn, id := range cg.structTypeIDs {
-		table[id] = "'" + sn
+		table[id] = "'" + cg.displayStructName(sn)
 	}
 
 	for sig, id := range cg.fnTypeIDs {
@@ -291,7 +291,7 @@ func (cg *CodeGen) buildTypeIDToFieldTypesTable() map[int32][]string {
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
 		for _, ft := range cg.structFieldLLVMTypes[sn] {
-			atoms = append(atoms, "'"+primitiveTypeName(ft))
+			atoms = append(atoms, "'"+cg.displayStructName(primitiveTypeName(ft)))
 		}
 
 		table[id] = atoms
@@ -323,7 +323,7 @@ func (cg *CodeGen) genTypeof(block *ir.Block, e *ast.TypeofExpr) (value.Value, e
 	}
 
 	// Compile-time: resolve the tin type name and register as an atom.
-	name := llvmTypeName(val.Type())
+	name := cg.displayStructName(llvmTypeName(val.Type()))
 
 	return cg.atomConstant(cg.registerAtom(name)), nil
 }
@@ -446,7 +446,7 @@ func (cg *CodeGen) genFieldtypes(block *ir.Block, e *ast.FieldtypesExpr) (value.
 
 	if sn != "" {
 		for _, ft := range cg.structFieldLLVMTypes[sn] {
-			atoms = append(atoms, "'"+primitiveTypeName(ft))
+			atoms = append(atoms, "'"+cg.displayStructName(primitiveTypeName(ft)))
 		}
 	}
 
