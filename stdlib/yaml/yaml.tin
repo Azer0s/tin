@@ -166,12 +166,12 @@ fn make_indent(depth i64) string =
 
 // Encoding
 
-// _yaml_encode_any[T] encodes v to YAML text with full struct type dispatch.
+// yaml_encode_any[T] encodes v to YAML text with full struct type dispatch.
 // Scalars: returns just the value text (no trailing newline).
 // Structs: returns indented block lines (each line ends with \n).
 // The phantom type T ensures the field dispatch tables are built in the
 // caller's module context, enabling nested user-defined struct encoding.
-fn _yaml_encode_any[T](v any, depth i64, _unused T) string =
+fn yaml_encode_any[T](v any, depth i64, _unused T) string =
   let t = typeof(v)
   if t == 'none:
     return "null"
@@ -201,11 +201,11 @@ fn _yaml_encode_any[T](v any, depth i64, _unused T) string =
       let fval = getfield(v, fname)
       let ft = typeof(fval)
       if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
-        out = out ++ indent ++ ykey ++ ": " ++ _yaml_encode_any[T](fval, depth, _unused) ++ "\n"
+        out = out ++ indent ++ ykey ++ ": " ++ yaml_encode_any[T](fval, depth, _unused) ++ "\n"
       else:
         let ffields = fieldnames(fval)
         if len(ffields) > 0:
-          out = out ++ indent ++ ykey ++ ":\n" ++ _yaml_encode_any[T](fval, depth+1, _unused)
+          out = out ++ indent ++ ykey ++ ":\n" ++ yaml_encode_any[T](fval, depth+1, _unused)
         else:
           out = out ++ indent ++ ykey ++ ": null\n"
     i = i + 1
@@ -244,11 +244,11 @@ fn encode[T](v T) string =
       let fval = getfield(v, fname)
       let ft = typeof(fval)
       if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
-        out = out ++ ykey ++ ": " ++ _yaml_encode_any[T](fval, 0, v) ++ "\n"
+        out = out ++ ykey ++ ": " ++ yaml_encode_any[T](fval, 0, v) ++ "\n"
       else:
         let ffields = fieldnames(fval)
         if len(ffields) > 0:
-          out = out ++ ykey ++ ":\n" ++ _yaml_encode_any[T](fval, 1, v)
+          out = out ++ ykey ++ ":\n" ++ yaml_encode_any[T](fval, 1, v)
         else:
           out = out ++ ykey ++ ": null\n"
     i = i + 1
@@ -727,10 +727,10 @@ fn parse(s string) (Value, Err) =
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
   return (*parse_node(&p, 0), nil)
 
-// _parse_nested_any[T] populates nested struct fields from a YAML Value object.
+// parse_nested_any[T] populates nested struct fields from a YAML Value object.
 // The phantom type T ensures this generic is compiled at the call site with full
 // struct type dispatch tables.
-fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
+fn parse_nested_any[T](zero any, doc Value, _unused T) any =
   let fields = fieldnames(zero)
   let ftypes = fieldtypes(zero)
   let nf = len(fields)
@@ -759,7 +759,7 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
             setfield(zero, fname, yval.sval)
         case Kind.object_v:
           let nested_zero = getfield(zero, fname)
-          let nested = _parse_nested_any[T](nested_zero, yval, _unused)
+          let nested = parse_nested_any[T](nested_zero, yval, _unused)
           setfield(zero, fname, nested)
         default:
           pass
@@ -810,7 +810,7 @@ fn parse[T](s string) (T, Err) =
               setfield(result, fname, yval.sval)
           case Kind.object_v:
             let zero_nested = getfield(result, fname)
-            let populated = _parse_nested_any[T](zero_nested, yval, result)
+            let populated = parse_nested_any[T](zero_nested, yval, result)
             setfield(result, fname, populated)
           default:
             pass

@@ -8,8 +8,8 @@ use errors
 
 // opendir/closedir are used to distinguish directories from regular files
 // without requiring a C struct (no dirent or stat struct needed).
-fn _os_opendir(path string) *void  = extern("opendir")
-fn _os_closedir(dir *void)  i32    = extern("closedir")
+fn os_opendir(path string) *void  = extern("opendir")
+fn os_closedir(dir *void)  i32    = extern("closedir")
 
 // FileInfo holds basic metadata for a file system entry.
 struct FileInfo =
@@ -18,9 +18,9 @@ struct FileInfo =
 
 // exists returns true if path names an existing file or directory.
 fn exists(path string) bool =
-  let d = _os_opendir(path)
+  let d = os_opendir(path)
   if d != nil:
-    _os_closedir(d)
+    os_closedir(d)
     return true
   let f = io::fopen(path, "rb")
   if f == nil:
@@ -30,10 +30,10 @@ fn exists(path string) bool =
 
 // is_dir returns true if path is an existing directory.
 fn is_dir(path string) bool =
-  let d = _os_opendir(path)
+  let d = os_opendir(path)
   if d == nil:
     return false
-  _os_closedir(d)
+  os_closedir(d)
   return true
 
 // file_size returns the byte size of the file at path, or -1 on error.
@@ -50,9 +50,9 @@ fn file_size(path string) i64 =
 // stat returns a FileInfo for path.
 // Returns (info, nil) on success, (zeroed info, err) on failure.
 fn stat(path string) (FileInfo, errors::Err) =
-  let d = _os_opendir(path)
+  let d = os_opendir(path)
   if d != nil:
-    _os_closedir(d)
+    os_closedir(d)
     return (FileInfo{size: 0, is_directory: true}, nil)
   let f = io::fopen(path, "rb")
   if f == nil:

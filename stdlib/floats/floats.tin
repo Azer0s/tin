@@ -12,25 +12,25 @@
 //   if floats::is_finite(x): echo "normal value"
 
 // Raw C helpers for values and predicates that require libm semantics.
-fn _nan_c()        f64 = extern("_tin_float_nan")
-fn _inf_c()        f64 = extern("_tin_float_inf")
-fn _neg_inf_c()    f64 = extern("_tin_float_neg_inf")
-fn _is_nan_c(x f64) i32 = extern("_tin_float_is_nan")
-fn _is_inf_c(x f64) i32 = extern("_tin_float_is_inf")
+fn nan_c()        f64 = extern("_tin_float_nan")
+fn inf_c()        f64 = extern("_tin_float_inf")
+fn neg_inf_c()    f64 = extern("_tin_float_neg_inf")
+fn is_nan_c(x f64) i32 = extern("_tin_float_is_nan")
+fn is_inf_c(x f64) i32 = extern("_tin_float_is_inf")
 
 // NaN returns the IEEE 754 Not-a-Number value.
 // NaN != NaN is always true; use is_nan() to test for it.
-fn NaN() f64 = return _nan_c()
+fn NaN() f64 = return nan_c()
 
 // Inf returns positive infinity.
-fn Inf() f64 = return _inf_c()
+fn Inf() f64 = return inf_c()
 
 // NegInf returns negative infinity.
-fn NegInf() f64 = return _neg_inf_c()
+fn NegInf() f64 = return neg_inf_c()
 
 // is_nan returns true if x is NaN.
 // Delegates to libc isnan() for correct unordered-comparison semantics.
-fn is_nan(x f64) bool = return _is_nan_c(x) != 0
+fn is_nan(x f64) bool = return is_nan_c(x) != 0
 
 // is_pos_inf returns true if x is positive infinity.
 // Any finite double is <= DBL_MAX (1.7976931348623157e+308).
@@ -40,7 +40,7 @@ fn is_pos_inf(x f64) bool = return x > 1.7976931348623157e+308
 fn is_neg_inf(x f64) bool = return x < -1.7976931348623157e+308
 
 // is_inf returns true if x is either positive or negative infinity.
-fn is_inf(x f64) bool = return _is_inf_c(x) != 0
+fn is_inf(x f64) bool = return is_inf_c(x) != 0
 
 // is_finite returns true if x is a normal finite number (not NaN, not Inf).
 fn is_finite(x f64) bool = return !is_nan(x) && !is_inf(x)

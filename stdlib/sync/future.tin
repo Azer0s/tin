@@ -15,7 +15,7 @@
 
 use "./awaitable"
 
-fn _tin_future_await_raw(pid i64) *void = extern("_tin_future_await_raw")
+fn tin_future_await_raw(pid i64) *void = extern("_tin_future_await_raw")
 
 // Unit - placeholder struct used as the type parameter for void async functions.
 struct Unit =
@@ -32,6 +32,6 @@ struct Future[t](Awaitable[t]) =
     return this.pid
 
   fn await_result(this Future[t]) t =
-    let raw *void = _tin_future_await_raw(this.pid)
+    let raw *void = tin_future_await_raw(this.pid)
     let typed *t = raw as *t
     return *typed

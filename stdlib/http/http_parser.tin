@@ -87,9 +87,9 @@ fn headers_complete(buf string) i64 =
     i = i + 1
   return -1
 
-// _line_end returns the index of the first \r or \n at or after pos,
+// line_end returns the index of the first \r or \n at or after pos,
 // capped at limit.
-fn _line_end(buf string, pos i64, limit i64) i64 =
+fn line_end(buf string, pos i64, limit i64) i64 =
   let i = pos
   for i < limit:
     if buf[i] == @'\r' || buf[i] == @'\n':
@@ -97,22 +97,22 @@ fn _line_end(buf string, pos i64, limit i64) i64 =
     i = i + 1
   return limit
 
-// _skip_newline advances past the \r\n or \n at pos.
-fn _skip_newline(buf string, pos i64, limit i64) i64 =
+// skip_newline advances past the \r\n or \n at pos.
+fn skip_newline(buf string, pos i64, limit i64) i64 =
   if pos < limit && buf[pos] == @'\r' && pos + 1 < limit && buf[pos+1] == @'\n':
     return pos + 2
   if pos < limit && buf[pos] == @'\n':
     return pos + 1
   return pos
 
-// _parse_headers parses header lines from buf[start..end_pos) into a HashMap.
+// parse_headers parses header lines from buf[start..end_pos) into a HashMap.
 // end_pos is the start of the blank line (i.e. the \r\n before \r\n, not
 // including the separator itself).
-fn _parse_headers(buf string, start i64, end_pos i64) collections::HashMap[string, string] =
+fn parse_headers(buf string, start i64, end_pos i64) collections::HashMap[string, string] =
   let headers = collections::HashMap[string, string]::new(16)
   let i = start
   for i < end_pos:
-    let eol = _line_end(buf, i, end_pos)
+    let eol = line_end(buf, i, end_pos)
     if eol > i:
       let line = strings::substr(buf, i, eol)
       let colon = strings::index_of(line, ":")
@@ -120,14 +120,14 @@ fn _parse_headers(buf string, start i64, end_pos i64) collections::HashMap[strin
         let k = strings::to_lower(strings::trim(strings::substr(line, 0, colon)))
         let v = strings::trim(strings::substr(line, colon + 1, len(line)))
         headers.set(k, v)
-    i = _skip_newline(buf, eol, end_pos)
+    i = skip_newline(buf, eol, end_pos)
     if i == eol:
       i = eol + 1
   return headers
 
-// _clip_body returns at most content_length bytes from body, or body itself
+// clip_body returns at most content_length bytes from body, or body itself
 // if content_length is negative (no Content-Length header).
-fn _clip_body(body string, content_length i64) string =
+fn clip_body(body string, content_length i64) string =
   if content_length < 0:
     return body
   let blen = len(body)
@@ -135,8 +135,8 @@ fn _clip_body(body string, content_length i64) string =
     return body
   return strings::substr(body, 0, content_length)
 
-// _content_length reads the "content-length" header value, or returns -1.
-fn _content_length(headers collections::HashMap[string, string]) i64 =
+// content_length reads the "content-length" header value, or returns -1.
+fn content_length(headers collections::HashMap[string, string]) i64 =
   if !headers.has("content-length"):
     return -1
   let (v, err) = str::parse_int(headers.get("content-length"))
@@ -156,7 +156,7 @@ fn parse_request(buf string) HttpRequest =
 
   // First line: METHOD path version
   let n = len(header_zone)
-  let eol = _line_end(header_zone, 0, n)
+  let eol = line_end(header_zone, 0, n)
   let first = strings::substr(header_zone, 0, eol)
   let parts = strings::split(first, " ")
 
@@ -171,14 +171,14 @@ fn parse_request(buf string) HttpRequest =
     version = parts[2]
 
   // Headers start after the first line newline
-  let hdr_start = _skip_newline(header_zone, eol, n)
+  let hdr_start = skip_newline(header_zone, eol, n)
   // end_pos for header parsing: stop before the trailing \r\n\r\n block.
   // header_zone already ends at body_start, which is after \r\n\r\n,
   // so we parse up to the end of header_zone.
-  let headers = _parse_headers(header_zone, hdr_start, n)
+  let headers = parse_headers(header_zone, hdr_start, n)
 
-  let cl = _content_length(headers)
-  let body = _clip_body(body_raw, cl)
+  let cl = content_length(headers)
+  let body = clip_body(body_raw, cl)
 
   return HttpRequest{
     method:  method,
@@ -200,7 +200,7 @@ fn parse_response(buf string) HttpResponse =
 
   // First line: HTTP/version STATUS reason phrase
   let n = len(header_zone)
-  let eol = _line_end(header_zone, 0, n)
+  let eol = line_end(header_zone, 0, n)
   let first = strings::substr(header_zone, 0, eol)
 
   // Split on first space: version | rest
@@ -221,11 +221,11 @@ fn parse_response(buf string) HttpResponse =
       let (code, _) = str::parse_int32(rest)
       status_code = code
 
-  let hdr_start = _skip_newline(header_zone, eol, n)
-  let headers = _parse_headers(header_zone, hdr_start, n)
+  let hdr_start = skip_newline(header_zone, eol, n)
+  let headers = parse_headers(header_zone, hdr_start, n)
 
-  let cl = _content_length(headers)
-  let body = _clip_body(body_raw, cl)
+  let cl = content_length(headers)
+  let body = clip_body(body_raw, cl)
 
   return HttpResponse{
     version: version,

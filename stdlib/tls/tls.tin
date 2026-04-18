@@ -22,23 +22,23 @@
 use io
 use { loop } from macros
 
-fn _tin_tls_init_c()                                       = extern("_tin_tls_init")
-fn _tin_tls_set_ca_file_c(path string) i32                 = extern("_tin_tls_set_ca_file")
-fn _tin_tls_new_c(host string, fd i32) *void               = extern("_tin_tls_new")
-fn _tin_tls_do_handshake_c(handle *void) i64               = extern("_tin_tls_do_handshake")
-fn _tin_tls_read_c(handle *void, buf *byte, n i64) i64     = extern("_tin_tls_read")
-fn _tin_tls_write_c(handle *void, buf *byte, n i64) i64    = extern("_tin_tls_write")
-fn _tin_tls_close_c(handle *void)                          = extern("_tin_tls_close")
-fn _tin_io_blocked_val_c() i64                             = extern("_tin_io_blocked_val")
+fn tin_tls_init_c()                                       = extern("_tin_tls_init")
+fn tin_tls_set_ca_file_c(path string) i32                 = extern("_tin_tls_set_ca_file")
+fn tin_tls_new_c(host string, fd i32) *void               = extern("_tin_tls_new")
+fn tin_tls_do_handshake_c(handle *void) i64               = extern("_tin_tls_do_handshake")
+fn tin_tls_read_c(handle *void, buf *byte, n i64) i64     = extern("_tin_tls_read")
+fn tin_tls_write_c(handle *void, buf *byte, n i64) i64    = extern("_tin_tls_write")
+fn tin_tls_close_c(handle *void)                          = extern("_tin_tls_close")
+fn tin_io_blocked_val_c() i64                             = extern("_tin_io_blocked_val")
 
 // fn init runs once at program startup and initializes the global SSL_CTX.
 fn init() =
-  _tin_tls_init_c()
+  tin_tls_init_c()
 
 // set_ca_file loads a PEM certificate file into the global SSL trust store.
 // Call this before connect when using self-signed or custom CA certificates.
 fn set_ca_file(path string) =
-  _tin_tls_set_ca_file_c(path)
+  tin_tls_set_ca_file_c(path)
 
 // TlsConn is an async TLS connection over a connected TCP fd.
 // Implements io::AsyncReader and io::AsyncWriter.
@@ -59,7 +59,7 @@ struct TlsConn (io::AsyncReader, io::AsyncWriter) =
   // close sends a TLS close_notify alert and frees OpenSSL state.
   // The caller is responsible for closing the underlying fd afterwards.
   fn close(this TlsConn) =
-    _tin_tls_close_c(this._handle)
+    tin_tls_close_c(this._handle)
 
 // connect wraps fd with TLS and performs the async handshake.
 // host is used for SNI and certificate verification.
@@ -68,27 +68,27 @@ fn connect(host string, fd i32) Future[TlsConn] =
   return spawn connect_impl(host, fd)
 
 fn{#async} connect_impl(host string, fd i32) TlsConn =
-  let handle  = _tin_tls_new_c(host, fd)
-  let blocked = _tin_io_blocked_val_c()
+  let handle  = tin_tls_new_c(host, fd)
+  let blocked = tin_io_blocked_val_c()
   loop:
-    let r = _tin_tls_do_handshake_c(handle)
+    let r = tin_tls_do_handshake_c(handle)
     if r != blocked:
       break
     yield
   return TlsConn{_handle: handle, fd: fd}
 
 fn{#async} tls_read_impl(handle *void, buf *byte, n i64) i64 =
-  let blocked = _tin_io_blocked_val_c()
+  let blocked = tin_io_blocked_val_c()
   loop:
-    let r = _tin_tls_read_c(handle, buf, n)
+    let r = tin_tls_read_c(handle, buf, n)
     if r != blocked:
       return r
     yield
 
 fn{#async} tls_write_impl(handle *void, buf *byte, n i64) i64 =
-  let blocked = _tin_io_blocked_val_c()
+  let blocked = tin_io_blocked_val_c()
   loop:
-    let r = _tin_tls_write_c(handle, buf, n)
+    let r = tin_tls_write_c(handle, buf, n)
     if r != blocked:
       return r
     yield

@@ -5,10 +5,10 @@
 
 use simd
 
-// _simd_find_first returns the 0-based position of the lowest set bit in a
+// simd_find_first returns the 0-based position of the lowest set bit in a
 // 16-bit movemask result.  Called only when mask != 0, so the loop always
 // terminates within 16 iterations.
-fn _simd_find_first(mask u32) i64 =
+fn simd_find_first(mask u32) i64 =
   let i i64 = 0
   for i < 16:
     if (mask >> (i as u32)) & (1 as u32) != 0:
@@ -16,8 +16,8 @@ fn _simd_find_first(mask u32) i64 =
     i = i + 1
   return 16
 
-// _simd_popcount16 counts the set bits in the lower 16 bits of mask.
-fn _simd_popcount16(mask u32) i64 =
+// simd_popcount16 counts the set bits in the lower 16 bits of mask.
+fn simd_popcount16(mask u32) i64 =
   let c i64 = 0
   let i i64 = 0
   for i < 16:
@@ -26,9 +26,9 @@ fn _simd_popcount16(mask u32) i64 =
     i = i + 1
   return c
 
-// _match_at returns true if sub matches s starting at pos.
+// match_at returns true if sub matches s starting at pos.
 // Caller must ensure pos + len(sub) <= len(s).
-fn _match_at(s string, pos i64, sub string) bool =
+fn match_at(s string, pos i64, sub string) bool =
   let m = len(sub)
   let j i64 = 0
   for j < m:
@@ -68,7 +68,7 @@ fn count(s string, sub string) i64 =
       let eq    = simd::cmpeq(chunk, needle)
       let bits  = simd::movemask(eq)
       if bits != 0:
-        c = c + _simd_popcount16(bits)
+        c = c + simd_popcount16(bits)
       i = i + 16
     // Scalar tail for remaining bytes.
     for i < n:
@@ -79,7 +79,7 @@ fn count(s string, sub string) i64 =
   let c i64 = 0
   let i i64 = 0
   for i <= n - m:
-    if _match_at(s, i, sub):
+    if match_at(s, i, sub):
       c = c + 1
       i = i + m
     else:
@@ -91,7 +91,7 @@ fn has_prefix(s string, prefix string) bool =
   let m = len(prefix)
   if m > len(s):
     return false
-  return _match_at(s, 0, prefix)
+  return match_at(s, 0, prefix)
 
 // has_suffix reports whether s ends with suffix.
 fn has_suffix(s string, suffix string) bool =
@@ -99,7 +99,7 @@ fn has_suffix(s string, suffix string) bool =
   let m = len(suffix)
   if m > n:
     return false
-  return _match_at(s, n - m, suffix)
+  return match_at(s, n - m, suffix)
 
 // index_of returns the byte index of the first occurrence of sub in s, or -1.
 fn index_of(s string, sub string) i64 =
@@ -117,7 +117,7 @@ fn index_of(s string, sub string) i64 =
       let eq    = simd::cmpeq(chunk, needle)
       let bits  = simd::movemask(eq)
       if bits != 0:
-        return i + _simd_find_first(bits)
+        return i + simd_find_first(bits)
       i = i + 16
     // Scalar tail for remaining bytes.
     for i < n:
@@ -127,7 +127,7 @@ fn index_of(s string, sub string) i64 =
     return -1
   let i i64 = 0
   for i <= n - m:
-    if _match_at(s, i, sub):
+    if match_at(s, i, sub):
       return i
     i = i + 1
   return -1
@@ -143,7 +143,7 @@ fn last_index_of(s string, sub string) i64 =
   let last i64 = -1
   let i i64 = 0
   for i <= n - m:
-    if _match_at(s, i, sub):
+    if match_at(s, i, sub):
       last = i
     i = i + 1
   return last
@@ -179,7 +179,7 @@ fn replace(s string, old string, new_str string) string =
   let result = ""
   let i i64  = 0
   for i < n:
-    if i + m <= n && _match_at(s, i, old):
+    if i + m <= n && match_at(s, i, old):
       result = result ++ new_str
       i = i + m
     else:
@@ -202,7 +202,7 @@ fn split(s string, sep string) [string] =
   let i     i64 = 0
   let start i64 = 0
   for i <= n - m:
-    if _match_at(s, i, sep):
+    if match_at(s, i, sep):
       parts ++= substr(s, start, i)
       i = i + m
       start = i

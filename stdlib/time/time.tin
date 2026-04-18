@@ -32,10 +32,10 @@ use { Err } from errors
 use encoding::json
 
 // C helpers (private)
-fn _tin_now_ns_c() i64       = extern("_tin_now_ns_real")
-fn _tin_rfc3339_c(ns i64, buf *byte) i32 = extern("_tin_instant_rfc3339")
-fn _tin_from_rfc3339_c(s string, out *i64) i32 = extern("_tin_from_rfc3339")
-fn _tin_bytes_from_raw(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
+fn tin_now_ns_c() i64       = extern("_tin_now_ns_real")
+fn tin_rfc3339_c(ns i64, buf *byte) i32 = extern("_tin_instant_rfc3339")
+fn tin_from_rfc3339_c(s string, out *i64) i32 = extern("_tin_from_rfc3339")
+fn tin_bytes_from_raw(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 
 // Duration
 
@@ -102,8 +102,8 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
   // Example: "2024-01-15T12:34:56.000000123Z"
   fn to_rfc3339(this Instant) string =
     let buf [byte; 32]
-    let n = _tin_rfc3339_c(this.ns, &buf[0])
-    return _tin_bytes_from_raw(&buf[0], n as i64) as string
+    let n = tin_rfc3339_c(this.ns, &buf[0])
+    return tin_bytes_from_raw(&buf[0], n as i64) as string
 
   // to_json implements json::JsonSerializable.
   // Returns the Instant as a JSON-encoded RFC3339 string (with surrounding quotes).
@@ -113,7 +113,7 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
   // apply_json implements json::JsonDeserializable.
   // Parses an RFC3339 string (without surrounding quotes) into this instant.
   fn apply_json(this *Instant, s string) bool =
-    let ok = _tin_from_rfc3339_c(s, &this.ns)
+    let ok = tin_from_rfc3339_c(s, &this.ns)
     return ok == 0
 
   // to_ns returns the underlying nanosecond timestamp.
@@ -146,7 +146,7 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
     return Duration{ns: later.ns - this.ns}
 
 // now returns the current wall-clock time as an Instant.
-fn now() Instant = return Instant{ns: _tin_now_ns_c()}
+fn now() Instant = return Instant{ns: tin_now_ns_c()}
 
 // from_ns creates an Instant from a nanosecond Unix timestamp.
 fn instant_from_ns(ns i64) Instant = return Instant{ns: ns}
@@ -170,7 +170,7 @@ const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
 // Fractional seconds (up to nanosecond precision) are supported.
 fn parse_rfc3339(s string) (Instant, Err) =
   let ns i64 = 0
-  let ok = _tin_from_rfc3339_c(s, &ns)
+  let ok = tin_from_rfc3339_c(s, &ns)
   if ok != 0:
     return (Instant{ns: 0}, errors::new("time: invalid RFC3339 string: " ++ s))
   return (Instant{ns: ns}, nil)

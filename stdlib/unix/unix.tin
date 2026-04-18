@@ -17,9 +17,9 @@ use errors
 use { Err } from errors
 
 // C helpers (private)
-fn _tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
-fn _tin_unix_accept_c(fd i32) i32       = extern("_tin_unix_accept")
-fn _tin_unix_connect_c(path string) i32 = extern("_tin_unix_connect")
+fn tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
+fn tin_unix_accept_c(fd i32) i32       = extern("_tin_unix_accept")
+fn tin_unix_connect_c(path string) i32 = extern("_tin_unix_connect")
 
 // Conn is a connected Unix domain socket.
 // Implements io::AsyncReader and io::AsyncWriter so it works with ioutil.
@@ -49,7 +49,7 @@ struct Server =
   // accept waits for the next connection.
   // Returns (Conn, Err) - nil Err means success.
   fn accept(this Server) (Conn, Err) =
-    let fd = _tin_unix_accept_c(this.listen_fd)
+    let fd = tin_unix_accept_c(this.listen_fd)
     if fd < 0:
       return (Conn{fd: -1}, errors::new("unix: accept failed"))
     return (Conn{fd: fd}, nil)
@@ -60,7 +60,7 @@ struct Server =
 // listen creates a Unix domain socket server at path.
 // Removes any stale socket file. Returns (Server, Err).
 fn listen(path string) (Server, Err) =
-  let fd = _tin_unix_listen_c(path)
+  let fd = tin_unix_listen_c(path)
   if fd < 0:
     return (Server{listen_fd: -1}, errors::new("unix: failed to bind {path}"))
   return (Server{listen_fd: fd}, nil)
@@ -68,7 +68,7 @@ fn listen(path string) (Server, Err) =
 // dial connects to a Unix domain socket at path.
 // Returns (Conn, Err).
 fn dial(path string) (Conn, Err) =
-  let fd = _tin_unix_connect_c(path)
+  let fd = tin_unix_connect_c(path)
   if fd < 0:
     return (Conn{fd: -1}, errors::new("unix: failed to connect to {path}"))
   return (Conn{fd: fd}, nil)

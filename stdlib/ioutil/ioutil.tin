@@ -16,8 +16,8 @@ use sync
 use { loop } from macros
 
 // C helpers (private runtime operations with no stdlib equivalent)
-fn _tin_string_data_c(s string) *byte             = extern("_tin_string_data")
-fn _tin_bytes_from_buf_c(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
+fn tin_string_data_c(s string) *byte             = extern("_tin_string_data")
+fn tin_bytes_from_buf_c(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 
 // ---------------------------------------------------------------------------
 // Adapters: wrap a raw fd so it works with AsyncReader / AsyncWriter overloads.
@@ -63,13 +63,13 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
       i = i + 1
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
-  let s string = _tin_bytes_from_buf_c(out, n) as string
+  let s string = tin_bytes_from_buf_c(out, n) as string
   mem::free(tmp as *void)
   mem::free(out as *void)
   return s
 
 fn{#async} write_string_impl(w io::AsyncWriter, s string) =
-  let ptr  = _tin_string_data_c(s)
+  let ptr  = tin_string_data_c(s)
   let n    = len(s)
   let sent i64 = 0
   loop:
@@ -86,7 +86,7 @@ fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
     let rd = await r.read(tmp + got, n - got)
     if rd <= 0: break
     got = got + rd
-  let result = _tin_bytes_from_buf_c(tmp, got)
+  let result = tin_bytes_from_buf_c(tmp, got)
   mem::free(tmp as *void)
   return result
 
@@ -113,7 +113,7 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
         break
       i = i + 1
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
-  let result = _tin_bytes_from_buf_c(out, n)
+  let result = tin_bytes_from_buf_c(out, n)
   mem::free(tmp as *void)
   mem::free(out as *void)
   return result

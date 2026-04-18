@@ -2,39 +2,39 @@
 
 // stdlib/sync - RWMutex (reader-writer lock, fiber-aware)
 
-fn _tin_frwmutex2_new() *void                       = extern("_tin_frwmutex2_new")
-fn _tin_frwmutex2_rlock_try(m *void, pid i64) i32   = extern("_tin_frwmutex2_rlock_try")
-fn _tin_frwmutex2_runlock(m *void)                  = extern("_tin_frwmutex2_runlock")
-fn _tin_frwmutex2_lock_try(m *void, pid i64) i32    = extern("_tin_frwmutex2_lock_try")
-fn _tin_frwmutex2_unlock(m *void)                   = extern("_tin_frwmutex2_unlock")
-fn _tin_frwmutex2_free(m *void)                     = extern("_tin_frwmutex2_free")
-fn _tin_current_pid_rw() i64                        = extern("_tin_current_pid")
+fn tin_frwmutex2_new() *void                       = extern("_tin_frwmutex2_new")
+fn tin_frwmutex2_rlock_try(m *void, pid i64) i32   = extern("_tin_frwmutex2_rlock_try")
+fn tin_frwmutex2_runlock(m *void)                  = extern("_tin_frwmutex2_runlock")
+fn tin_frwmutex2_lock_try(m *void, pid i64) i32    = extern("_tin_frwmutex2_lock_try")
+fn tin_frwmutex2_unlock(m *void)                   = extern("_tin_frwmutex2_unlock")
+fn tin_frwmutex2_free(m *void)                     = extern("_tin_frwmutex2_free")
+fn tin_current_pid_rw() i64                        = extern("_tin_current_pid")
 
 struct RWMutex =
   _ptr *void
 
   static fn make() RWMutex =
-    return RWMutex{_ptr: _tin_frwmutex2_new()}
+    return RWMutex{_ptr: tin_frwmutex2_new()}
 
   fn{#async #no_autoyield} read_lock(this RWMutex) =
-    let pid = _tin_current_pid_rw()
+    let pid = tin_current_pid_rw()
     for true:
-      if _tin_frwmutex2_rlock_try(this._ptr, pid) != 0:
+      if tin_frwmutex2_rlock_try(this._ptr, pid) != 0:
         return
       yield
 
   fn read_unlock(this RWMutex) =
-    _tin_frwmutex2_runlock(this._ptr)
+    tin_frwmutex2_runlock(this._ptr)
 
   fn{#async #no_autoyield} lock(this RWMutex) =
-    let pid = _tin_current_pid_rw()
+    let pid = tin_current_pid_rw()
     for true:
-      if _tin_frwmutex2_lock_try(this._ptr, pid) != 0:
+      if tin_frwmutex2_lock_try(this._ptr, pid) != 0:
         return
       yield
 
   fn unlock(this RWMutex) =
-    _tin_frwmutex2_unlock(this._ptr)
+    tin_frwmutex2_unlock(this._ptr)
 
   fn deinit(this RWMutex) =
-    _tin_frwmutex2_free(this._ptr)
+    tin_frwmutex2_free(this._ptr)

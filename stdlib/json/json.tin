@@ -181,12 +181,12 @@ fn encode_any(v any) string =
     return escape_string(v as string)
   return "null"
 
-// _encode_any[T] encodes an any value to JSON with full struct type dispatch.
+// encode_any[T] encodes an any value to JSON with full struct type dispatch.
 // The phantom type parameter T forces per-instantiation compilation at each call site,
 // which means the fieldnames(v) call inside has access to all struct types registered
 // in the caller's module - including user-defined nested struct types.
-// Call as _encode_any[T](val) from within encode[T] to encode field values.
-fn _encode_any[T](v any, _unused T) string =
+// Call as encode_any[T](val) from within encode[T] to encode field values.
+fn encode_any[T](v any, _unused T) string =
   let t = typeof(v)
 
   if t == 'none:
@@ -235,7 +235,7 @@ fn _encode_any[T](v any, _unused T) string =
     if len(jkey) > 0:
       if written > 0:
         out = out ++ ","
-      out = out ++ escape_string(jkey) ++ ":" ++ _encode_any[T](getfield(v, fname), _unused)
+      out = out ++ escape_string(jkey) ++ ":" ++ encode_any[T](getfield(v, fname), _unused)
       written = written + 1
     i = i + 1
 
@@ -281,11 +281,11 @@ fn encode[T](v T) string =
   let eti i64 = 0
   for eti < len(etraits):
     if etraits[eti] == 'JsonSerializable:
-      return _encode_any[T](v as any, v)
+      return encode_any[T](v as any, v)
     eti = eti + 1
 
   // Struct (including tuples): iterate fields via compile-time reflection on T.
-  // Uses _encode_any[T] so that nested struct fields are encoded recursively with
+  // Uses encode_any[T] so that nested struct fields are encoded recursively with
   // full struct type dispatch (handles user-defined nested struct types).
   let fields  = fieldnames(v)
   let nf      = len(fields)
@@ -303,7 +303,7 @@ fn encode[T](v T) string =
     if len(jkey) > 0:
       if written > 0:
         out = out ++ ","
-      out = out ++ escape_string(jkey) ++ ":" ++ _encode_any[T](getfield(v, fname), v)
+      out = out ++ escape_string(jkey) ++ ":" ++ encode_any[T](getfield(v, fname), v)
       written = written + 1
     i = i + 1
   return out ++ "}"
@@ -534,12 +534,12 @@ fn parse(s string) (Value, Err) =
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
   return (*parse_value(&p), nil)
 
-// _parse_nested_any[T] populates nested struct fields from a JSON Value object.
+// parse_nested_any[T] populates nested struct fields from a JSON Value object.
 // `zero` is an any-boxed zero value of the nested struct type (obtained via getfield).
 // The phantom type parameter T ensures this generic is compiled at the call site with
 // full struct type dispatch tables, so fieldnames/fieldtypes work for user-defined types.
 // Returns the updated any value with fields set from doc.
-fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
+fn parse_nested_any[T](zero any, doc Value, _unused T) any =
   let fields = fieldnames(zero)   // runtime dispatch, full tables in instantiation
   let ftypes = fieldtypes(zero)   // runtime dispatch, full tables in instantiation
   let nf = len(fields)
@@ -587,7 +587,7 @@ fn _parse_nested_any[T](zero any, doc Value, _unused T) any =
         case Kind.object_v:
           // Recursively parse deeply-nested struct objects.
           let nested_zero = getfield(zero, fname)
-          let nested = _parse_nested_any[T](nested_zero, jval, _unused)
+          let nested = parse_nested_any[T](nested_zero, jval, _unused)
           setfield(zero, fname, nested)
 
         default:
@@ -666,7 +666,7 @@ fn parse[T](s string) (T, Err) =
             // Nested struct field: get the zero-valued field as any, populate it,
             // then set it back (coerce any->FieldType is handled by setfield's coerce).
             let zero_nested = getfield(result, fname)
-            let populated = _parse_nested_any[T](zero_nested, jval, result)
+            let populated = parse_nested_any[T](zero_nested, jval, result)
             setfield(result, fname, populated)
 
           default:

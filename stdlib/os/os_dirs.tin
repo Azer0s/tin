@@ -7,13 +7,13 @@ use io
 use errors
 
 // POSIX directory / file-system operations.
-fn _os_mkdir(path string, mode i32) i32 = extern("mkdir")
-fn _os_rmdir(path string)          i32 = extern("rmdir")
-fn _os_opendir(path string) *void       = extern("opendir")
-fn _os_closedir(dir *void)  i32         = extern("closedir")
+fn os_mkdir(path string, mode i32) i32 = extern("mkdir")
+fn os_rmdir(path string)          i32 = extern("rmdir")
+fn os_opendir(path string) *void       = extern("opendir")
+fn os_closedir(dir *void)  i32         = extern("closedir")
 
 // _prefix returns the first n characters of s.
-fn _prefix(s string, n i64) string =
+fn str_prefix(s string, n i64) string =
   let out = ""
   let i i64 = 0
   for i < n:
@@ -32,13 +32,13 @@ fn mkdir(path string) errors::Err =
   let i i64 = 1
   for i <= n:
     if i == n || path[i] == @'/':
-      _os_mkdir(_prefix(path, i), 493) // 0755 = 493; ignore EEXIST
+      os_mkdir(str_prefix(path, i), 493) // 0755 = 493; ignore EEXIST
     i = i + 1
   // Verify the target directory now exists.
-  let d = _os_opendir(path)
+  let d = os_opendir(path)
   if d == nil:
     return errors::new("mkdir: failed to create directory: " ++ path)
-  _os_closedir(d)
+  os_closedir(d)
   return nil
 
 // remove removes the file at path.
@@ -52,7 +52,7 @@ fn remove(path string) errors::Err =
 // rmdir removes the empty directory at path.
 // Returns nil on success, an error if the directory is not empty or missing.
 fn rmdir(path string) errors::Err =
-  let r = _os_rmdir(path)
+  let r = os_rmdir(path)
   if r != 0:
     return errors::new("rmdir: failed: " ++ path)
   return nil

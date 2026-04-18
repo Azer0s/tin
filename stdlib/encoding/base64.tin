@@ -4,7 +4,7 @@
 //
 // Import: use encoding::base64
 
-fn _b64_rev(c byte) i64 =
+fn b64_rev(c byte) i64 =
   if c >= @'A' && c <= @'Z':
     return (c - @'A') as i64
   if c >= @'a' && c <= @'z':
@@ -17,7 +17,7 @@ fn _b64_rev(c byte) i64 =
     return 63
   return -1
 
-fn _encode_b64(s string, alpha string, pad bool) string =
+fn encode_b64(s string, alpha string, pad bool) string =
   let n = len(s)
   if n == 0:
     return ""
@@ -52,11 +52,11 @@ fn _encode_b64(s string, alpha string, pad bool) string =
 
 // encode returns the standard Base64 encoding of s (with = padding).
 fn encode(s string) string =
-  return _encode_b64(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", true)
+  return encode_b64(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", true)
 
 // encode_url returns the URL-safe Base64 encoding of s (no padding).
 fn encode_url(s string) string =
-  return _encode_b64(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", false)
+  return encode_b64(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", false)
 
 // decode decodes a Base64 string. Handles standard, URL-safe, padded or unpadded.
 fn decode(s string) string =
@@ -72,7 +72,7 @@ fn decode(s string) string =
     if c == @'=' || c == 0 as byte:
       i = n
     else:
-      let v = _b64_rev(c)
+      let v = b64_rev(c)
       if v >= 0:
         acc = (acc << 6) | v
         bits = bits + 6

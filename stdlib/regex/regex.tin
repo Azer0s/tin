@@ -25,28 +25,19 @@
 //   // result: ["1", "22", "333"]
 
 //!-lpcre
+//!+regex.c
 
 use mem
 
 // PCRE C API declarations
 
-fn _pcre_compile(pattern string, options i32, errptr **byte, erroffset *i32, tables *byte) *void = extern("pcre_compile")
+fn pcre_compile(pattern string, options i32, errptr **byte, erroffset *i32, tables *byte) *void = extern("pcre_compile")
 
-fn _pcre_exec(code *void, extra *void, subject string, length i32, startoffset i32, options i32, ovector *i32, ovecsize i32) i32 = extern("pcre_exec")
+fn pcre_exec(code *void, extra *void, subject string, length i32, startoffset i32, options i32, ovector *i32, ovecsize i32) i32 = extern("pcre_exec")
 
-fn _pcre_free_fn(ptr *void) = extern("pcre_free_fn_wrapper")
+fn pcre_free_fn(ptr *void) = extern("pcre_free_fn_wrapper")
 
-fn _pcre_capturecount(code *void, rc *i32) i32 = extern("pcre_fullinfo_capturecount")
-
-// C helper file
-//
-// A tiny shim is needed because:
-//   1. pcre_free is a function pointer variable, not a direct function.
-//   2. pcre_fullinfo has a complex variadic interface.
-//
-// These helpers are defined in regex.c (compiled via //!+regex.c).
-
-//!+regex.c
+fn pcre_capturecount(code *void, rc *i32) i32 = extern("pcre_fullinfo_capturecount")
 
 // substr extracts s[beg:end] as a string using byte-by-byte append.
 fn substr(s string, beg i64, end i64) string =
@@ -74,23 +65,23 @@ struct Match =
       return ""
     return this._groups[i]
 
-  fn _beg(this Match, i i64) i64 =
+  fn beg(this Match, i i64) i64 =
     if i < 0 || i >= len(this._begs):
       return 0
     return this._begs[i]
 
-  fn _end(this Match, i i64) i64 =
+  fn end(this Match, i i64) i64 =
     if i < 0 || i >= len(this._ends):
       return 0
     return this._ends[i]
 
 // Internal exec helper
 
-fn _exec(code *void, subject string, start i64) Match =
+fn exec_match(code *void, subject string, start i64) Match =
   let slen    = len(subject)
   let ovsize  i32 = 30          // supports up to 9 capture groups
   let ov      = mem::malloc(ovsize as i64 * 4) as *i32
-  let rc i32  = _pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
+  let rc i32  = pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
   if rc < 0:
     mem::free(ov as *void)
     return Match{_matched: false, _groups: [], _begs: [], _ends: []}
@@ -117,17 +108,21 @@ struct Regex =
   fn is_err(this Regex) bool     = return this._code == 0 as *void
   fn err_msg(this Regex) string  = return this._err_msg
 
+  fn deinit(this Regex) =
+    if this._code != 0 as *void:
+      pcre_free_fn(this._code)
+
   // exec executes the regex against subject and returns a Match.
   fn exec(this Regex, subject string) Match =
     if this._code == 0 as *void:
       return Match{_matched: false, _groups: []}
-    return _exec(this._code, subject, 0)
+    return exec_match(this._code, subject, 0)
 
   // match_at executes starting at byte offset start.
   fn match_at(this Regex, subject string, start i64) Match =
     if this._code == 0 as *void:
       return Match{_matched: false, _groups: []}
-    return _exec(this._code, subject, start)
+    return exec_match(this._code, subject, start)
 
   // find_all returns all non-overlapping matches of the full pattern in s.
   fn find_all(this Regex, s string) [string] =
@@ -137,11 +132,11 @@ struct Regex =
     let pos i64 = 0
     let slen = len(s)
     for pos <= slen:
-      let m = _exec(this._code, s, pos)
+      let m = exec_match(this._code, s, pos)
       if !m.matched():
         break
       results ++= m.group(0)
-      let end = m._end(0)
+      let end = m.end(0)
       if end <= pos:
         pos = pos + 1
       else:
@@ -155,7 +150,7 @@ struct Regex =
 fn compile(pattern string) Regex =
   let errptr  *byte = 0 as *byte
   let erroff  i32   = 0
-  let code = _pcre_compile(pattern, 0, &errptr, &erroff, 0 as *byte)
+  let code = pcre_compile(pattern, 0, &errptr, &erroff, 0 as *byte)
   if code == 0 as *void:
     let msg = "regex compile error"
     if (errptr as i64) != 0:
@@ -201,8 +196,8 @@ fn replace(pattern string, s string, repl string) string =
   let m = re.exec(s)
   if !m.matched():
     return s
-  let beg = m._beg(0)
-  let end = m._end(0)
+  let beg = m.beg(0)
+  let end = m.end(0)
   return substr(s, 0, beg) ++ repl ++ substr(s, end, len(s))
 
 // replace_all replaces all non-overlapping occurrences of pattern in s with repl.
@@ -218,8 +213,8 @@ fn replace_all(pattern string, s string, repl string) string =
     if !m.matched():
       result = result ++ substr(s, pos, slen)
       break
-    let beg = m._beg(0)
-    let end = m._end(0)
+    let beg = m.beg(0)
+    let end = m.end(0)
     result = result ++ substr(s, pos, beg) ++ repl
     if end <= pos:
       result = result ++ substr(s, pos, pos + 1)
@@ -242,8 +237,8 @@ fn split(pattern string, s string) [string] =
     if !m.matched():
       parts ++= substr(s, pos, slen)
       break
-    let beg = m._beg(0)
-    let end = m._end(0)
+    let beg = m.beg(0)
+    let end = m.end(0)
     parts ++= substr(s, pos, beg)
     if end <= pos:
       pos = pos + 1

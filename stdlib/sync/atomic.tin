@@ -2,30 +2,30 @@
 
 // stdlib/sync - AtomicI64 (lock-free 64-bit integer using C11 atomics)
 
-fn _tin_atomic_new_i64(v i64) *void              = extern("_tin_atomic_new_i64")
-fn _tin_atomic_free_i64(a *void)                  = extern("_tin_atomic_free_i64")
-fn _tin_atomic_load_i64(a *void) i64              = extern("_tin_atomic_load_i64")
-fn _tin_atomic_store_i64(a *void, v i64)          = extern("_tin_atomic_store_i64")
-fn _tin_atomic_add_i64(a *void, d i64) i64        = extern("_tin_atomic_add_i64")
-fn _tin_atomic_cas_i64(a *void, old i64, nw i64) i64 = extern("_tin_atomic_cas_i64")
+fn tin_atomic_new_i64(v i64) *void              = extern("_tin_atomic_new_i64")
+fn tin_atomic_free_i64(a *void)                  = extern("_tin_atomic_free_i64")
+fn tin_atomic_load_i64(a *void) i64              = extern("_tin_atomic_load_i64")
+fn tin_atomic_store_i64(a *void, v i64)          = extern("_tin_atomic_store_i64")
+fn tin_atomic_add_i64(a *void, d i64) i64        = extern("_tin_atomic_add_i64")
+fn tin_atomic_cas_i64(a *void, old i64, nw i64) i64 = extern("_tin_atomic_cas_i64")
 
 struct AtomicI64 =
   _ptr *void
 
   static fn make(v i64) AtomicI64 =
-    return AtomicI64{_ptr: _tin_atomic_new_i64(v)}
+    return AtomicI64{_ptr: tin_atomic_new_i64(v)}
 
   fn load(this AtomicI64) i64 =
-    return _tin_atomic_load_i64(this._ptr)
+    return tin_atomic_load_i64(this._ptr)
 
   fn store(this AtomicI64, v i64) =
-    _tin_atomic_store_i64(this._ptr, v)
+    tin_atomic_store_i64(this._ptr, v)
 
   fn add(this AtomicI64, d i64) i64 =
-    return _tin_atomic_add_i64(this._ptr, d)
+    return tin_atomic_add_i64(this._ptr, d)
 
   fn cas(this AtomicI64, old i64, nw i64) i64 =
-    return _tin_atomic_cas_i64(this._ptr, old, nw)
+    return tin_atomic_cas_i64(this._ptr, old, nw)
 
   fn deinit(this AtomicI64) =
-    _tin_atomic_free_i64(this._ptr)
+    tin_atomic_free_i64(this._ptr)

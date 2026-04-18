@@ -4,7 +4,7 @@
 // operations - no system calls, no allocation beyond string concatenation.
 
 // _substr returns the substring of s from index `from` (inclusive) to `to` (exclusive).
-fn _substr(s string, from i64, to i64) string =
+fn path_substr(s string, from i64, to i64) string =
   let out = ""
   let i i64 = from
   for i < to:
@@ -27,7 +27,7 @@ fn join(a string, b string) string =
   let a_trail = a[na - 1] == @'/'
   let b_lead = b[0] == @'/'
   if a_trail && b_lead:
-    return a ++ _substr(b, 1, nb)
+    return a ++ path_substr(b, 1, nb)
   if !a_trail && !b_lead:
     return a ++ "/" ++ b
   return a ++ b
@@ -47,7 +47,7 @@ fn basename(path string) string =
   let start i64 = end - 1
   for start > 0 && path[start - 1] != @'/':
     start = start - 1
-  return _substr(path, start, end)
+  return path_substr(path, start, end)
 
 // dirname returns the directory portion of a path.
 // dirname("/foo/bar")  -> "/foo"
@@ -72,7 +72,7 @@ fn dirname(path string) string =
   let j i64 = i
   for j > 1 && path[j - 1] == @'/':
     j = j - 1
-  return _substr(path, 0, j)
+  return path_substr(path, 0, j)
 
 // ext returns the file extension including the leading dot, or "" if none.
 // ext("foo.tin")        -> ".tin"
@@ -90,6 +90,6 @@ fn ext(path string) string =
     return ""
   if i == 0 || path[i - 1] == @'/':
     return ""
-  return _substr(path, i, n)
+  return path_substr(path, i, n)
 
 export { join, basename, dirname, ext } as paths
