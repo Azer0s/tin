@@ -1200,6 +1200,17 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
+	// After Pass 3: detect and register any `fn init()` declared in this package.
+	// init functions run at program startup after top-level var inits, in
+	// dependency order (deps compiled first means deps appended first).
+	initIRName := pkgName + "__init"
+	for _, f := range cg.mod.Funcs {
+		if f.Name() == initIRName && len(f.Params) == 0 {
+			cg.pkgInitFns = append(cg.pkgInitFns, f)
+			break
+		}
+	}
+
 	// Pass 4: register exported constants (VarDecl with IsConst=true).
 	// Simple literals are registered directly; complex constant expressions
 	// (e.g. casts, shifts, bitwise-NOT, arithmetic) are evaluated by

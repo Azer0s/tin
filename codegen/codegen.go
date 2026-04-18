@@ -418,6 +418,11 @@ type CodeGen struct {
 	// Used to emit deinits in reverse order at the end of main().
 	allTopLevelVars []topLevelVarInit
 
+	// pkgInitFns: init functions collected from packages that declare
+	// fn init(). Called at program startup after top-level var inits,
+	// in import order (dependencies before dependents).
+	pkgInitFns []*ir.Func
+
 	// ------------------------------------------------------------------
 	// Function overloading
 	// ------------------------------------------------------------------
@@ -1132,6 +1137,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err != nil {
 				return nil, err
 			}
+			cg.emitPkgInitFns(wb)
 
 			if userMainCoroFn != nil {
 				// fn{#async} main(): spawn as the first fiber and block the OS

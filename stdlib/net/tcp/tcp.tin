@@ -14,8 +14,9 @@ use errors
 use { Err } from errors
 
 // C helpers
-fn tin_tcp_listen_c(port i32) i32  = extern("_tin_tcp_listen")
-fn tin_tcp_accept_c(fd i32) i32    = extern("_tin_tcp_accept")
+fn tin_tcp_listen_c(port i32) i32          = extern("_tin_tcp_listen")
+fn tin_tcp_accept_c(fd i32) i32            = extern("_tin_tcp_accept")
+fn tin_tcp_dial_c(host string, port i32) i32 = extern("_tin_tcp_dial")
 
 struct Conn (io::AsyncReader, io::AsyncWriter) =
   fd i32
@@ -60,4 +61,12 @@ fn listen(port i32) (Server, Err) =
     return (Server{listen_fd: -1}, errors::new("tcp: failed to bind port {port}"))
   return (Server{listen_fd: fd}, nil)
 
-export { Conn, Server, listen } as tcp
+// dial connects to host:port via TCP.
+// Returns (Conn, Err) - check Err before using Conn.
+fn dial(host string, port i32) (Conn, Err) =
+  let fd = tin_tcp_dial_c(host, port)
+  if fd < 0:
+    return (Conn{fd: -1}, errors::new("tcp: dial {host}:{port} failed"))
+  return (Conn{fd: fd}, nil)
+
+export { Conn, Server, listen, dial } as tcp

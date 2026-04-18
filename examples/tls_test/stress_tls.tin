@@ -1,0 +1,53 @@
+// TLS stress test - spawns N concurrent fibers, each sending M messages.
+// Run: python3 examples/tls_test/server.py 8443
+//      tin run examples/tls_test/stress_tls.tin
+
+use { async } from macros
+use tls
+use net::tcp
+use ioutil
+use errors
+use sync
+
+async worker(id i64, msgs i64, done sync::Channel[i64]) =
+  tls::set_ca_file("examples/tls_test/cert.pem")
+  let (conn, err) = tcp::dial("127.0.0.1", 8443)
+  if errors::has(err):
+    echo "worker {id}: dial failed: {err}"
+    await done.send(1)
+    return
+
+  let tls_conn = await tls::connect("localhost", conn.fd)
+
+  let i i64 = 0
+  for i < msgs:
+    await ioutil::write_string(tls_conn, "ping {id} {i}\n")
+    let resp = await ioutil::read_string(tls_conn)
+    if resp != "ECHO: ping {id} {i}":
+      echo "worker {id} msg {i}: unexpected: {resp}"
+    i = i + 1
+
+  tls_conn.close()
+  conn.close()
+  await done.send(0)
+
+fn{#async} main() =
+  let workers  i64 = 20
+  let messages i64 = 50
+  let done = sync::Channel[i64].make(workers)
+
+  let i i64 = 0
+  for i < workers:
+    spawn worker(i, messages, done)
+    i = i + 1
+
+  let nerrors i64 = 0
+  let j i64 = 0
+  for j < workers:
+    nerrors = nerrors + (await done.recv())
+    j = j + 1
+
+  if nerrors == 0:
+    echo "PASS: stress test ok ({workers} workers x {messages} messages)"
+  else:
+    echo "FAIL: {nerrors} workers reported errors"

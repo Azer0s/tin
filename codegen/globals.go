@@ -143,6 +143,14 @@ func (cg *CodeGen) emitTopLevelVarInits(block *ir.Block) (*ir.Block, error) {
 	return block, nil
 }
 
+// emitPkgInitFns calls each package init function (declared as `fn init()`)
+// in the order they were collected (dependency order: deps before dependents).
+func (cg *CodeGen) emitPkgInitFns(block *ir.Block) {
+	for _, f := range cg.pkgInitFns {
+		block.NewCall(f)
+	}
+}
+
 // emitFiberMainWrap wraps the body of a main function with fiber init/run calls
 // when the program uses any fiber construct. The block passed in is the entry
 // block of main; it returns the block where the original main code should start.

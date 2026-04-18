@@ -81,13 +81,36 @@ echo std::math::PI
 
 ---
 
+## Package initialization - `fn init()`
+
+A package can declare an `fn init()` to run one-time setup at program startup:
+
+```rust
+// stdlib/tls/tls.tin
+fn init() =
+  _tin_tls_init_c()   // initialize the global SSL_CTX
+
+export { TlsConn, connect } as tls
+```
+
+`fn init()` is:
+- Zero arguments, returns nothing
+- Called automatically before any user code runs, after top-level variable initializations
+- Called in dependency order: if package A uses package B, B's `init` runs first
+- Idiomatic for one-time C library setup that must not be called from user code
+
+It does not need to be exported and should not be called explicitly.
+
+---
+
 ## Standard library
 
 | Package   | Description                                                                |
 |-----------|----------------------------------------------------------------------------|
 | `io`      | Console I/O, file I/O, async reads/writes, TCP sockets                     |
 | `ioutil`  | High-level line-oriented `read_string` / `write_string`                    |
-| `tcp`     | `tcp::Conn`, `tcp::Server`, `tcp::listen` - high-level TCP                 |
+| `net::tcp` | `tcp::Conn`, `tcp::Server`, `tcp::listen`, `tcp::dial` - high-level TCP   |
+| `tls`     | Async TLS client connections over OpenSSL - see [`docs/stdlib/tls.md`](stdlib/tls.md) |
 | `sync`    | `Channel[T]`, `Mutex`, `RWMutex`, `Cond`, `AtomicI64`, `Future[T]`, `Unit` |
 | `math`    | `sqrt`, `pow`, `floor`, `ceil`, `sin`, `cos`, `PI`, `E` - links `-lm`      |
 | `measure` | `now_us`, `now_ms` - monotonic clock for benchmarking                      |

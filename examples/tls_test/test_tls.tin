@@ -1,0 +1,30 @@
+// TLS client test - connects to the Python echo server and verifies round-trip.
+// Start the server first:
+//   python3 examples/tls_test/server.py 8443
+// Then run:
+//   tin run examples/tls_test/test_tls.tin
+
+use tls
+use net::tcp
+use ioutil
+use errors
+use assert
+
+fn{#async} main() =
+  // Trust our self-signed test certificate.
+  tls::set_ca_file("examples/tls_test/cert.pem")
+
+  let (conn, err) = tcp::dial("127.0.0.1", 8443)
+  if errors::has(err):
+    panic(err.message())
+
+  let tls_conn = await tls::connect("localhost", conn.fd)
+
+  await ioutil::write_string(tls_conn, "hello tls\n")
+  let resp = await ioutil::read_string(tls_conn)
+
+  assert::equals("ECHO: hello tls", resp)
+  echo "PASS: tls round-trip ok (resp={resp})"
+
+  tls_conn.close()
+  conn.close()

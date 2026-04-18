@@ -327,3 +327,38 @@ await ioutil::write_string(c, "hello\n")
 let reply = await ioutil::read_string(c)
 c.close()
 ```
+
+---
+
+## tls
+
+`stdlib/tls` wraps a connected TCP fd with TLS. `TlsConn` implements
+`io::AsyncReader` and `io::AsyncWriter`, so `ioutil` works transparently.
+See [`docs/stdlib/tls.md`](tls.md) for the full reference.
+
+```rust
+use tls
+use net::tcp
+use ioutil
+use errors
+
+fn{#async} main() =
+  let (conn, err) = tcp::dial("example.com", 443)
+  if errors::has(err): panic(err.message())
+
+  let tls_conn = await tls::connect("example.com", conn.fd)
+  await ioutil::write_string(tls_conn, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+  let resp = await ioutil::read_string(tls_conn)
+  echo resp
+
+  tls_conn.close()
+  conn.close()
+```
+
+`tcp::dial` is also new - it connects to a remote host and returns a `(Conn, Err)`:
+
+```rust
+let (conn, err) = tcp::dial("api.example.com", 443)
+if errors::has(err): panic(err.message())
+// conn.fd is a connected TCP file descriptor
+```

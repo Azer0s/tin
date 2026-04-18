@@ -7,6 +7,8 @@
 #include "runtime.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -40,5 +42,33 @@ int32_t _tin_tcp_listen(int32_t port) {
 int32_t _tin_tcp_accept(int32_t listen_fd) {
     int fd = accept((int)listen_fd, NULL, NULL);
     if (fd < 0) return -(int32_t)errno;
+    return (int32_t)fd;
+}
+
+// Connect to host:port via TCP.
+// Performs DNS resolution synchronously, then connect().
+// Returns the connected fd on success, or -errno on error.
+int32_t _tin_tcp_dial(const char *host, int32_t port) {
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int r = getaddrinfo(host, port_str, &hints, &res);
+    if (r != 0) return -EHOSTUNREACH;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        int e = errno;
+        close(fd);
+        fd = -e;
+    }
+    freeaddrinfo(res);
     return (int32_t)fd;
 }

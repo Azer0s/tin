@@ -1456,6 +1456,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	if err != nil {
 		return err
 	}
+	cg.emitPkgInitFns(entry)
 
 	for _, stmt := range stmts {
 		entry, _, err = cg.genStmt(entry, stmt)
@@ -1574,6 +1575,7 @@ func (cg *CodeGen) genTestRunner() error {
 	if err != nil {
 		return err
 	}
+	cg.emitPkgInitFns(cur)
 
 	// Call _tin_run_test for each test.
 	if cur != nil {

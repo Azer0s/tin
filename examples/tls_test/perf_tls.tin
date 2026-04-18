@@ -1,0 +1,36 @@
+// TLS performance test - measures echo round-trip throughput.
+// Run: python3 examples/tls_test/server.py 8443
+//      tin run examples/tls_test/perf_tls.tin
+
+use tls
+use net::tcp
+use ioutil
+use errors
+use io
+
+fn{#async} main() =
+  tls::set_ca_file("examples/tls_test/cert.pem")
+
+  let (conn, err) = tcp::dial("127.0.0.1", 8443)
+  if errors::has(err):
+    panic(err.message())
+
+  let tls_conn = await tls::connect("localhost", conn.fd)
+
+  let rounds i64 = 1000
+  let t0 = io::now_us()
+
+  let i i64 = 0
+  for i < rounds:
+    await ioutil::write_string(tls_conn, "ping\n")
+    await ioutil::read_string(tls_conn)
+    i = i + 1
+
+  let elapsed = io::now_us() - t0
+  let us_per_rt = elapsed / rounds
+
+  echo "{rounds} round trips in {elapsed}us"
+  echo "latency: {us_per_rt} us/rt"
+
+  tls_conn.close()
+  conn.close()
