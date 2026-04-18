@@ -364,6 +364,16 @@ type CodeGen struct {
 	// callGraph: funcName -> []callee names. Built during predeclaration.
 	callGraph map[string][]string
 
+	// funcHeuristics: function name -> heuristic analysis result.
+	// Populated by computeAutoYieldHeuristics() after colorCallGraph().
+	// Used by genCallSiteYieldFor to decide whether to emit a coro.suspend
+	// before calling a given function.
+	funcHeuristics map[string]*FuncHeuristicInfo
+
+	// verboseHeuristics enables per-function heuristic output to stderr.
+	// Activated by the -v-heuristics CLI flag.
+	verboseHeuristics bool
+
 	// Per-function coro state (valid only when genCoroFuncBody is active).
 	inCoroFn       bool
 	curFnAutoYield bool         // true in $coro variant of #async functions without #no_autoyield
@@ -575,9 +585,10 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)  { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTestMode(v bool)          { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool)   { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetUseDoubleForF128(v bool)  { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetVerboseHeuristics(v bool) { cg.verboseHeuristics = v }
 
 // HasTests reports whether the source contained at least one test block.
 // Only meaningful after Generate has been called.
@@ -700,6 +711,7 @@ func New(filename string) *CodeGen {
 		unionTypeIDs:             make(map[string]int32),
 		coroCallable:             make(map[string]bool),
 		callGraph:                make(map[string][]string),
+		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
 		funcReturnUnsigned:       make(map[string]bool),
@@ -967,6 +979,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	cg.colorCallGraph()
+	cg.computeAutoYieldHeuristics(prog)
 
 	// Pre-declare $coro variants for all colored functions so that mutual
 	// references across coro bodies resolve correctly.

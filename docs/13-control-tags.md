@@ -162,6 +162,54 @@ fn{#no_thread} init_globals() =
 
 ---
 
+### `#heavy`
+
+Forces the function to be classified as "auto-yield" by the compile-time
+heuristic pass. Any caller compiled as a `$coro` (fiber) variant will emit a
+`coro.suspend` before each call to this function.
+
+Use this when the compiler's complexity score falls below the auto-heavy
+threshold but the function is known to be expensive in practice:
+
+```rust
+fn{#heavy} custom_encoder(data string) string =
+  // hand-rolled encoding; loop score below threshold but call is costly
+  ...
+```
+
+Without the tag, the compiler auto-classifies functions based on their loop
+count, allocation count, and whether they call other heavy/recursive functions.
+See `docs/internals/codegen-auto-yield.md` for the full scoring formula.
+
+Inspect the compiler's classification with the `-v-heuristics` flag:
+
+```sh
+tin run myfile.tin -v-heuristics     # prints per-function labels to stderr
+```
+
+---
+
+### `#no_autoyield`
+
+Disables **all** automatic yield point insertion inside this function's `$coro`
+variant: both loop backedge yields and call-site yields before heavy/recursive
+callees.
+
+```rust
+fn{#async #no_autoyield} tight_inner(n i64) i64 =
+  let sum i64 = 0
+  for let i i64 = 0; i < n; i = i + 1:
+    sum = sum + i   // no yield at loop backedge
+  return sum + fib(n)   // no yield before fib even though fib is recursive
+```
+
+Use this for innermost compute loops where the yield overhead is measurable.
+The sync variant of the function is never affected (it never yields regardless).
+
+Multiple tags are space-separated: `fn{#async #no_autoyield}`.
+
+---
+
 ## Block tags
 
 Block tags appear on a `{ #tag } { body }` construct. The body is a
@@ -301,4 +349,6 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 | `#no_excl`         | macro                | Parser                           | Callable without `!` suffix                  |
 | `#no_parens`       | macro                | Parser                           | Callable without parentheses                 |
 | `#async`           | fn / method / lambda | No (enables fiber codegen)       | Runs as a cooperative green thread (fiber)   |
+| `#no_autoyield`    | fn / method / lambda | No (disables codegen)            | Suppresses auto-yield at loop backedges and call sites |
+| `#heavy`           | fn / method          | No (changes heuristic)           | Forces "auto-yield" classification; callers in `$coro` yield before calling |
 | `#handover`        | fn (extern only)     | No (changes codegen)             | Transfers ownership of returned C pointer into ARC |

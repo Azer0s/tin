@@ -44,6 +44,7 @@ Stdlib/libs flags:
 Run/test flags:
   -v-valgrind      run binary under valgrind --leak-check=full (run, test)
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
+  -v-heuristics    print auto-yield heuristics for every function to stderr
 
 In-source directives (at the top of the .tin file):
   //!-lNAME                    link with libNAME
@@ -281,6 +282,7 @@ func main() {
 
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
+	verboseHeuristics := false
 
 	for i := fileArgIdx + 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -303,6 +305,8 @@ func main() {
 			noWarnAsyncMain = true
 		case "-Wno-await-match-guards":
 			noWarnAwaitMatchGuards = true
+		case "-v-heuristics":
+			verboseHeuristics = true
 		}
 	}
 
@@ -405,6 +409,10 @@ func main() {
 
 	if noWarnAsyncMain {
 		cg.SetNoWarnAsyncMain(true)
+	}
+
+	if verboseHeuristics {
+		cg.SetVerboseHeuristics(true)
 	}
 
 	// On Apple arm64, long double == double and compiler-rt has no fp128 routines.

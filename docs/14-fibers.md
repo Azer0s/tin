@@ -303,24 +303,45 @@ fn{#async} heavy(n i64) =
 
 ## Auto-yield
 
-By default, every `{#async}` function **automatically emits a yield point at
-every loop backedge** in its `$coro` variant. This means loops cooperate with
-other fibers without any manual `yield` calls.
+Every `{#async}` function automatically emits yield points in its `$coro`
+variant at two kinds of site:
+
+1. **Loop backedges** - after every `for` loop iteration.
+2. **Call sites of heavy or recursive functions** - before every call to a
+   function the compiler classifies as "auto-yield" (score >= 30, or a member
+   of a recursive call-graph cycle).
+
+Both happen without any manual `yield` calls. The sync (non-spawned) variant
+is never affected.
 
 ```rust
-fn{#async} count_up(n i64) i64 =
+fn fib(n i64) i64 =          // recursive -> classified auto-yield
+  if n <= 1: return n
+  return fib(n - 1) + fib(n - 2)
+
+fn{#async} work(n i64) i64 =
   let sum i64 = 0
   for let i i64 = 0; i < n; i = i + 1:
-    sum = sum + i   // yields to scheduler after each iteration automatically
+    sum = sum + i             // auto-yield at each loop backedge
+  sum = sum + fib(n)          // auto-yield before fib (recursive)
   return sum
 ```
 
-The sync variant (non-spawned call) is never affected - auto-yield only applies
-inside the fiber scheduler.
+### Forcing classification with `{#heavy}`
+
+Mark a function explicitly as heavy (regardless of its complexity score) so
+that any async caller yields before invoking it:
+
+```rust
+fn{#heavy} expensive_hash(data string) u64 =
+  // manually tuned; compiler score below threshold but call is costly
+  ...
+```
 
 ### Disabling auto-yield
 
-Use `{#no_autoyield}` to disable auto-yield for a specific async function:
+Use `{#no_autoyield}` to disable **all** auto-yield (loop backedges and
+call-site yields) for a specific async function:
 
 ```rust
 fn{#async #no_autoyield} tight_loop(n i64) i64 =
@@ -330,8 +351,29 @@ fn{#async #no_autoyield} tight_loop(n i64) i64 =
   return sum
 ```
 
-Multiple tags are separated by spaces (no commas):
-`fn{#async #no_autoyield} ...`
+Multiple tags are space-separated: `fn{#async #no_autoyield}`.
+
+### Inspecting heuristics: `-v-heuristics`
+
+Pass `-v-heuristics` after the source file to print the compiler's
+classification for every function:
+
+```sh
+tin run  file.tin -v-heuristics
+tin test file.tin -v-heuristics
+tin ir   file.tin -v-heuristics
+```
+
+Output (to stderr):
+
+```
+[autoyield] fn fib         loops=0  allocs=0  calls=1  heavyCalls=0  score=2   [recursive]
+[autoyield] fn tight_loop  loops=1  allocs=0  calls=0  heavyCalls=0  score=10  [normal]
+[autoyield] fn work        loops=1  allocs=0  calls=0  heavyCalls=1  score=30  [auto-heavy]
+```
+
+Labels: `heavy` (explicit `{#heavy}` tag), `recursive` (call-graph cycle),
+`auto-heavy` (computed score >= 30), `normal` (no auto-yield inserted).
 
 ---
 

@@ -683,6 +683,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				llArgs = cg.adaptArgs(block, llArgs, calleeType)
 			}
 
+			// Auto-yield before calling a heavy or recursive method.
+			block = cg.genCallSiteYieldFor(block, methodName)
+
 			result := block.NewCall(callee, llArgs...)
 			// ARC: release temporary RC-tracked args.
 			thisOff := 1
@@ -1089,6 +1092,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 	if calleeType != nil {
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
+	}
+
+	// Auto-yield before calling a heavy or recursive Tin function.
+	// Uses the IR function name (matches funcDecls keys for user-defined Tin fns).
+	if f, ok := callee.(*ir.Func); ok {
+		block = cg.genCallSiteYieldFor(block, f.Name())
 	}
 
 	result := block.NewCall(callee, llArgs...)

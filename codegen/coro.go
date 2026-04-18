@@ -842,6 +842,60 @@ func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
 	return cg.fiberCheckPanicFn
 }
 
+// genCallSiteYield emits a coro.suspend before calling a heavy or recursive
+// function from inside a coroutine body.  Returns the block to continue
+// emitting into (the resume block after the suspend point).
+//
+// Must only be called when cg.curCoroFrame != nil and cg.curFnAutoYield is true.
+// After each resume, unhandled panics from fire-and-forget fibers are checked
+// and re-raised, matching the identical logic in genYieldAutoAt.
+//
+// cg.curBlock is set to afterBlk so that the "if cg.curBlock != block {block = cg.curBlock}"
+// pattern used in genStmt, genVarDecl, genReturn, etc. picks up the block advance.
+func (cg *CodeGen) genCallSiteYield(from *ir.Block) *ir.Block {
+	resume := cg.emitSuspendPoint(from, cg.curCoroFrame)
+
+	// Check for unhandled panics from non-awaited fibers.
+	msg := resume.NewCall(cg.ensureFiberCheckPanicFn())
+	isNotNull := resume.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	afterBlk := cg.newBlock("callsite.yield.after")
+	panicBlk := cg.newBlock("callsite.yield.panic")
+
+	resume.NewCondBr(isNotNull, panicBlk, afterBlk)
+
+	panicBlk.NewCall(cg.ensurePanicFn(), msg)
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+
+	// Signal that the current block has advanced.  Statement-level code generators
+	// (genStmt, genVarDecl, genReturn, genAssign, etc.) all check cg.curBlock after
+	// calling genExpr so they can emit subsequent instructions into the correct block.
+	cg.curBlock = afterBlk
+
+	return afterBlk
+}
+
+// genCallSiteYieldFor checks whether the named callee warrants a pre-call yield
+// and, if so, calls genCallSiteYield.  Returns the (possibly updated) block to
+// use for the actual call instruction.
+//
+// Conditions for emitting a yield:
+//   - we are inside a $coro variant (curCoroFrame != nil)
+//   - the current function allows auto-yield (curFnAutoYield)
+//   - the callee is classified as AutoYield (heavy or recursive) in funcHeuristics
+func (cg *CodeGen) genCallSiteYieldFor(block *ir.Block, calleeName string) *ir.Block {
+	if cg.curCoroFrame == nil || !cg.curFnAutoYield {
+		return block
+	}
+
+	info, ok := cg.funcHeuristics[calleeName]
+	if !ok || !info.AutoYield {
+		return block
+	}
+
+	return cg.genCallSiteYield(block)
+}
+
 // genYieldAutoAt emits an automatic yield point at the backedge of a loop.
 // `from` is the block at the end of the loop body; after yielding it resumes
 // at `header` (the loop condition or post block).

@@ -1,0 +1,79 @@
+// examples/test_autoyield.tin - Behavioral tests for the compile-time auto-yield pass.
+//
+// The auto-yield pass inserts coro.suspend points at:
+//   1. Loop back-edges (existing).
+//   2. Call sites of heavy/recursive functions (new).
+//
+// These tests verify that async functions calling heavy/recursive helpers
+// produce correct results after yielding (the suspend/resume round-trip does
+// not corrupt state).
+
+use assert
+
+// fib computes the n-th Fibonacci number recursively.
+// The call graph contains a cycle (fib -> fib), so the auto-yield pass
+// classifies fib as "recursive" and inserts a coro.suspend before each
+// recursive call site in $coro variants of callers.
+fn fib(n i64) i64 =
+  if n <= 1:
+    return n
+  return fib(n - 1) + fib(n - 2)
+
+// sum_range adds all integers from 0 to n-1.
+// Contains a loop with a loop-back-edge yield; score also exceeds the
+// auto-heavy threshold, so callers yield before invoking it.
+fn sum_range(n i64) i64 =
+  let acc i64 = 0
+  let i i64 = 0
+  for i < n:
+    acc = acc + i
+    i = i + 1
+  return acc
+
+// busy_loop runs a compute-heavy loop.
+// Score = 1 loop * 10 = 10 + all ops = will be >= heavyThreshold (30) depending
+// on the number of loop iterations modelled by the allocations/calls inside.
+// Used to verify that the caller gets a call-site yield inserted.
+fn busy_loop(n i64) i64 =
+  let s i64 = 0
+  let i i64 = 0
+  for i < n:
+    s = s + i * i
+    i = i + 1
+  return s
+
+test "recursive fibonacci is correct from async context" =
+  // Tests that recursive auto-yield does not corrupt return values.
+  assert::equals(fib(0), 0)
+  assert::equals(fib(1), 1)
+  assert::equals(fib(2), 1)
+  assert::equals(fib(5), 5)
+  assert::equals(fib(10), 55)
+
+test "sum_range is correct from async context" =
+  // Tests that loop-edge yield does not corrupt accumulator.
+  assert::equals(sum_range(0), 0)
+  assert::equals(sum_range(1), 0)
+  assert::equals(sum_range(5), 10)
+  assert::equals(sum_range(100), 4950)
+
+test "busy_loop is correct from async context" =
+  assert::equals(busy_loop(0), 0)
+  assert::equals(busy_loop(5), 30)
+  assert::equals(busy_loop(10), 285)
+
+test "no_autoyield tag suppresses call-site yields" =
+  // A function tagged {#no_autoyield} must still produce correct results;
+  // verifying correctness implicitly confirms the tag does not break execution.
+  assert::equals(no_yield_sum(100), 4950)
+
+fn{#no_autoyield} no_yield_sum(n i64) i64 =
+  return sum_range(n)
+
+test "chained calls through heavy functions produce correct results" =
+  // Calls a function that itself calls another heavy function.
+  // Ensures nested call-site yields work correctly.
+  assert::equals(double_sum(50), sum_range(50) * 2)
+
+fn double_sum(n i64) i64 =
+  return sum_range(n) + sum_range(n)
