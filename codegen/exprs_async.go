@@ -1911,13 +1911,9 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		switch at := arrType.(type) {
 		case *irtypes.StructType:
 			if len(at.Fields) == 2 {
-				alloca := block.NewAlloca(arrType)
-				block.NewStore(arr, alloca)
-				ptrGep := block.NewGetElementPtr(arrType, alloca,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+				// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
 				elemPtrType := at.Fields[0]
-
-				dataPtr := block.NewLoad(elemPtrType, ptrGep)
+				dataPtr := block.NewExtractValue(arr, 0)
 				if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 					return block.NewGetElementPtr(pt.ElemType, dataPtr, idx), nil
 				}

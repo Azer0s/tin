@@ -852,13 +852,8 @@ func byteToStringFatPtr(block *ir.Block, b value.Value) value.Value {
 	block.NewStore(b, byteAlloca)
 
 	fatPtrType := stringFatPtrType()
-	tmp := block.NewAlloca(fatPtrType)
-	block.NewStore(byteAlloca, block.NewGetElementPtr(fatPtrType, tmp,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0)))
-	block.NewStore(constant.NewInt(irtypes.I64, 1), block.NewGetElementPtr(fatPtrType, tmp,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1)))
-
-	return block.NewLoad(fatPtrType, tmp)
+	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), byteAlloca, 0)
+	return block.NewInsertValue(v0, constant.NewInt(irtypes.I64, 1), 1)
 }
 
 func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
@@ -1144,14 +1139,8 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			block.NewCall(cg.ensureMemcpy(), rightDst, rightI8Ptr, rightBytes, constant.NewInt(irtypes.I1, 0))
 
 			// Build new fat ptr {T*, i64}
-			fatAlloca := block.NewAlloca(fatType)
-			ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			block.NewStore(newPtr, ptrGep)
-			lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			block.NewStore(totalLen, lenGep)
-			result := block.NewLoad(fatType, fatAlloca)
+			v0 := block.NewInsertValue(constant.NewUndef(fatType), newPtr, 0)
+			result := block.NewInsertValue(v0, totalLen, 1)
 			// For non-temporary sources, the new buffer shares element pointers
 			// with the source array.  Retain each shared element so that releasing
 			// the source and the new buffer are independent: each holds its own RC
@@ -1211,14 +1200,8 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		block.NewStore(constant.NewInt(irtypes.I8, 0), nullByte)
 		// build {i8*, i64} fat-ptr result
 		fatPtrType := stringFatPtrType()
-		alloca := block.NewAlloca(fatPtrType)
-		gep0 := block.NewGetElementPtr(fatPtrType, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(buf, gep0)
-		gep1 := block.NewGetElementPtr(fatPtrType, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(totalLen, gep1)
-		result := block.NewLoad(fatPtrType, alloca)
+		v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), buf, 0)
+		result := block.NewInsertValue(v0, totalLen, 1)
 		// Release sub-expression temporaries now that the result is built.
 		// Skip byte-to-string coerced operands: their ptr is a stack alloca, not ARC-managed.
 		if isTemporaryProducer(e.Left) && !leftCoerced {

@@ -1361,27 +1361,13 @@ func (cg *CodeGen) buildStringFatPtr(block *ir.Block, s string) value.Value {
 	ptr := cg.newGlobalString(s)
 	length := constant.NewInt(irtypes.I64, int64(len(s)))
 	fatPtrType := stringFatPtrType()
-	alloca := block.NewAlloca(fatPtrType)
-	// store ptr into field 0
-	gep0 := block.NewGetElementPtr(fatPtrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(ptr, gep0)
-	// store length into field 1
-	gep1 := block.NewGetElementPtr(fatPtrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(length, gep1)
-
-	return block.NewLoad(fatPtrType, alloca)
+	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), ptr, 0)
+	return block.NewInsertValue(v0, length, 1)
 }
 
 // extractStringPtr extracts the i8* data pointer from a tin string fat-ptr.
 func (cg *CodeGen) extractStringPtr(block *ir.Block, fatPtr value.Value) value.Value {
-	fatPtrType := stringFatPtrType()
-	alloca := block.NewAlloca(fatPtrType)
-	block.NewStore(fatPtr, alloca)
-	gep := block.NewGetElementPtr(fatPtrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	raw := block.NewLoad(irtypes.I8Ptr, gep)
+	raw := block.NewExtractValue(fatPtr, 0)
 	// Null-safety: a zero-initialized string has data=null; treat as empty string "".
 	nullPtr := constant.NewNull(irtypes.I8Ptr)
 	emptyPtr := cg.newGlobalString("")
@@ -1392,13 +1378,7 @@ func (cg *CodeGen) extractStringPtr(block *ir.Block, fatPtr value.Value) value.V
 
 // extractStringLen extracts the i64 length from a tin string fat-ptr.
 func (cg *CodeGen) extractStringLen(block *ir.Block, fatPtr value.Value) value.Value {
-	fatPtrType := stringFatPtrType()
-	alloca := block.NewAlloca(fatPtrType)
-	block.NewStore(fatPtr, alloca)
-	gep := block.NewGetElementPtr(fatPtrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-
-	return block.NewLoad(irtypes.I64, gep)
+	return block.NewExtractValue(fatPtr, 1)
 }
 
 // panic builtin

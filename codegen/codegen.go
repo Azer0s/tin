@@ -955,6 +955,22 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// (no type_id prefix) so raw pointers can round-trip to/from C.
 	cg.scanExternPtrStructs(prog.Stmts)
 
+	// Pre-pass 2.8: register extern functions that use only built-in types.
+	// Struct method bodies may call module-level externs before those externs
+	// are processed by the Third pass (e.g. AtomicI64.make -> _tin_atomic_new_i64).
+	// predeclareFuncAs skips externs, so without this pass they are undefined
+	// when Pre-pass 3 compiles method bodies.
+	// Only externs with all-primitive types are processed here; externs that
+	// reference struct/enum types are skipped (struct types aren't registered
+	// until Pre-pass 3, so processing them now would panic).
+	for _, node := range prog.Stmts {
+		if fd, ok := node.(*ast.FuncDecl); ok && fd.IsExtern != "" && externHasPrimitiveTypes(fd) {
+			if err := cg.genFuncDecl(fd); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// Pre-pass 3: generate struct/enum/type/union declarations before anything
 	// else so that structFieldLLVMTypes is fully populated.  This is needed
 	// because use-extern declarations reference struct types for C ABI conversion
@@ -1193,4 +1209,44 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	return cg.mod, nil
+}
+
+// externHasPrimitiveTypes reports whether all parameter and return types of an
+// extern function declaration are built-in (non-struct) types.  Used by
+// Pre-pass 2.8 to determine which externs can be safely registered before
+// struct types are populated in Pre-pass 3.
+func externHasPrimitiveTypes(fd *ast.FuncDecl) bool {
+	for _, p := range fd.Params {
+		if !typeExprIsPrimitive(p.Type) {
+			return false
+		}
+	}
+
+	return typeExprIsPrimitive(fd.RetType)
+}
+
+func typeExprIsPrimitive(te ast.TypeExpr) bool {
+	if te == nil {
+		return true
+	}
+
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		switch t.Name {
+		case "i8", "i16", "i32", "i64", "i128",
+			"u8", "u16", "u32", "u64", "u128",
+			"f32", "f64", "f128",
+			"byte", "char", "bool", "string", "void",
+			"int", "uint":
+			return true
+		}
+
+		return false
+	case *ast.PointerType:
+		return typeExprIsPrimitive(t.Elem)
+	case *ast.ArrayType:
+		return typeExprIsPrimitive(t.Elem)
+	default:
+		return false
+	}
 }

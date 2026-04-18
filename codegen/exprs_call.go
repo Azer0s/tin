@@ -1180,12 +1180,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 	// Handle .len on dynamic arrays {T*, i64} and strings {i8*, i64}.
 	if e.Field == "len" && (isFatArrayPtr(objType) || isStringType(objType)) {
-		alloca := block.NewAlloca(objType)
-		block.NewStore(obj, alloca)
-		gep := block.NewGetElementPtr(objType, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-
-		return block.NewLoad(irtypes.I64, gep), nil
+		return block.NewExtractValue(obj, 1), nil
 	}
 
 	structName := cg.typeNameOf(objType)
@@ -1284,6 +1279,29 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
 	}
 
+	// For addressable fixed-size arrays: GEP directly into the original alloca
+	// without loading/copying the entire array. This is critical for arrays
+	// accessed inside loops - the load+alloca+store path allocates N*sizeof(T)
+	// bytes on the stack on every iteration, which is never freed until the
+	// function returns, causing a stack overflow over time.
+	if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil && arrPtr != nil {
+		if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+			if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 {
+				idx, err3 := cg.genExpr(block, e.Index)
+				if err3 != nil {
+					return nil, err3
+				}
+				if idx == nil {
+					return nil, nil
+				}
+				idx = cg.coerce(block, idx, irtypes.I64)
+				gep := block.NewGetElementPtr(at, arrPtr,
+					constant.NewInt(irtypes.I32, 0), idx)
+				return block.NewLoad(at.ElemType, gep), nil
+			}
+		}
+	}
+
 	arr, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
@@ -1313,14 +1331,9 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	switch at := arrType.(type) {
 	case *irtypes.StructType:
 		if len(at.Fields) == 2 {
-			// Fat pointer: {T*, i64}
+			// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
 			elemPtrType := at.Fields[0]
-			alloca := block.NewAlloca(arrType)
-			block.NewStore(arr, alloca)
-			ptrGep := block.NewGetElementPtr(arrType, alloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-
-			dataPtr := block.NewLoad(elemPtrType, ptrGep)
+			dataPtr := block.NewExtractValue(arr, 0)
 			if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
 				elemGep := block.NewGetElementPtr(pt.ElemType, dataPtr, idx)
 

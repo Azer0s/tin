@@ -677,12 +677,7 @@ func (cg *CodeGen) ensureStrlenDecl() *ir.Func {
 // extractFatPtrData extracts field 0 (the raw data pointer) from a fat-pointer
 // struct value. Works whether the value is a struct value or a pointer to one.
 func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtypes.StructType) value.Value {
-	alloca := block.NewAlloca(st)
-	block.NewStore(val, alloca)
-	gep := block.NewGetElementPtr(st, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-
-	return block.NewLoad(st.Fields[0], gep)
+	return block.NewExtractValue(val, 0)
 }
 
 // wrapFromExtern wraps a raw C return value into a Tin fat-pointer or atom.

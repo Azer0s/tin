@@ -1063,6 +1063,9 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			// Look up concrete method.
 			// First try the trait-qualified name "Struct_traitKey_method",
 			// then fall back to the plain "Struct_method".
+			// If neither is found, check the overload registry for the plain
+			// name and pick the variant whose arity matches the trait slot
+			// (len(wrapSlot.Params) - 1, since the first slot param is i8* self).
 			qualifiedName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName
 			concreteName := structKey + "_" + methodName
 
@@ -1071,6 +1074,28 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				concreteName = qualifiedName
 			} else {
 				concreteFn, ok = cg.curScope.lookup(concreteName)
+			}
+
+			if !ok {
+				// Try overloaded variants: find the one matching the trait slot arity.
+				wantArity := len(wrapSlot.Params) - 1 // subtract self (i8*)
+				for _, name := range []string{qualifiedName, concreteName} {
+					if variants, hasOL := cg.overloads[name]; hasOL {
+						for _, v := range variants {
+							if v.arity == wantArity {
+								if entry, ok2 := cg.curScope.lookup(v.irName); ok2 {
+									concreteFn = entry
+									concreteName = v.irName
+									ok = true
+									break
+								}
+							}
+						}
+					}
+					if ok {
+						break
+					}
+				}
 			}
 
 			if !ok {
