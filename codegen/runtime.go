@@ -1162,11 +1162,15 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if entry.isHeapOwned {
 			heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
 			if entry.heapOwnedDepth > 1 {
-				// depth > 1: use the null-safe chain release function.
+				// depth > 1: prefer the null-safe named-struct chain helper;
+				// fall back to inline emitHeapChainRelease for non-struct chains
+				// (e.g. **i64, ***i64).
 				structName := cLayoutStructBaseName(entry.tinType)
 				if structName != "" {
 					relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
 					block.NewCall(relFn, heapPtr)
+				} else {
+					cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 				}
 			} else {
 				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
@@ -1223,6 +1227,8 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 					if structName != "" {
 						relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
 						block.NewCall(relFn, heapPtr)
+					} else {
+						cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 					}
 				} else {
 					cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
