@@ -1284,8 +1284,14 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
 
-	// Emit DISubprogram for debug builds.
+	// Emit DISubprogram for debug builds, and seed currentPos so that the
+	// parameter allocas and first body instruction are tagged with the
+	// function declaration's line rather than line 0.
 	cg.emitDbgSubprogram(n, f, cg.filename)
+
+	if cg.debugMode && n.Pos().Line != 0 {
+		cg.currentPos = n.Pos()
+	}
 
 	// For non-void functions that contain defer stmts: alloca a {i8, retType} slot
 	// so a defer thunk can override the return value.  Skip when no defer is present
@@ -1373,8 +1379,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// For where-list bodies, set the match subject to the first parameter so
 	// that atom conditions (e.g. `where 'ok:`) compare against it.
 	prevMatchSubject := cg.matchSubject
+
 	if _, isWhere := n.Body.(*ast.WhereList); isWhere && firstParamAlloca != nil {
-		cg.matchSubject = entry.NewLoad(firstParamAlloca.ElemType, firstParamAlloca)
+		loadInst := entry.NewLoad(firstParamAlloca.ElemType, firstParamAlloca)
+		cg.attachCurrentDbgLoc(loadInst)
+		cg.matchSubject = loadInst
 	}
 
 	// Generate body (genBody ensures a terminator is added to the current block).

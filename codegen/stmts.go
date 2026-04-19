@@ -262,6 +262,12 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 	}
 
 	// Expression body: evaluate and return value.
+	// Seed currentPos from the body node's position so the ret gets the
+	// correct source line in debug builds.
+	if p := body.Pos(); p.Line != 0 {
+		cg.currentPos = p
+	}
+
 	bodyVal, err := cg.genExpr(block, body)
 	if err != nil {
 		return err
@@ -285,11 +291,13 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		bodyVal = cg.coerce(block, bodyVal, retType)
 		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, skipName)
-		block.NewRet(bodyVal)
+		retInst := block.NewRet(bodyVal)
+		cg.attachCurrentDbgLocToTerm(retInst)
 	} else {
 		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, "")
-		block.NewRet(nil)
+		retInst := block.NewRet(nil)
+		cg.attachCurrentDbgLocToTerm(retInst)
 	}
 
 	return nil
@@ -355,6 +363,12 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			return true, nil
 		}
 
+		// Seed currentPos from the clause condition's position so that the
+		// condition instructions and branch get tagged with the right line.
+		if p := clause.Cond.Pos(); p.Line != 0 {
+			cg.currentPos = p
+		}
+
 		// Evaluate condition.
 		cond, err := cg.genWhereCondition(block, clause.Cond)
 		if err != nil {
@@ -377,7 +391,8 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			elseBlock = cg.newBlock(fmt.Sprintf("where.else.%d", i))
 		}
 
-		block.NewCondBr(cond, thenBlock, elseBlock)
+		condBr := block.NewCondBr(cond, thenBlock, elseBlock)
+		cg.attachCurrentDbgLocToTerm(condBr)
 
 		// Generate then body.
 		if err := cg.genWhereBody(thenBlock, clause.Body, retType); err != nil {

@@ -805,6 +805,33 @@ func (cg *CodeGen) attachCurrentDbgLoc(inst ir.Instruction) {
 	cg.attachDbgLoc(inst, int64(cg.currentPos.Line), int64(cg.currentPos.Col))
 }
 
+// attachCurrentDbgLocToTerm attaches the current source position as a !dbg
+// location to a terminator instruction (ret, br, condbr, etc.).
+func (cg *CodeGen) attachCurrentDbgLocToTerm(term ir.Terminator) {
+	if !cg.debugMode || cg.diCurrentScope == nil || term == nil {
+		return
+	}
+
+	diLoc := &metadata.DILocation{
+		MetadataID: -1,
+		Line:       int64(cg.currentPos.Line),
+		Column:     int64(cg.currentPos.Col),
+		Scope:      cg.diCurrentScope,
+	}
+	cg.regMD(diLoc)
+
+	att := &metadata.Attachment{Name: "dbg", Node: diLoc}
+
+	switch t := term.(type) {
+	case *ir.TermRet:
+		t.Metadata = append(t.Metadata, att)
+	case *ir.TermCondBr:
+		t.Metadata = append(t.Metadata, att)
+	case *ir.TermBr:
+		t.Metadata = append(t.Metadata, att)
+	}
+}
+
 // ensureAllCallsHaveDbg walks all instructions in fn and attaches a line=0
 // !dbg location to any call instruction that is missing one.  LLVM requires
 // that every call instruction in a function that has a !dbg attachment on the
