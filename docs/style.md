@@ -1,14 +1,12 @@
 # Tin stdlib code style
 
-This document describes the formatting and style conventions used throughout
-the Tin standard library. New stdlib code should follow these rules; existing
-code is being updated to match.
+Formatting and style conventions for the Tin standard library. New stdlib code should follow these rules; existing code is being updated to match.
 
 ---
 
 ## File structure
 
-A stdlib file follows this order:
+A stdlib file is laid out in this order:
 
 ```
 1. Build directives  (//!+file.c, //!-lfoo)     -- if any
@@ -20,8 +18,7 @@ A stdlib file follows this order:
 7. Export statement
 ```
 
-One blank line separates each section. No blank lines within the directives
-block or within the import block.
+One blank line between each section. No blank lines within the directives block or within the import block.
 
 ```tin
 //!+helper.c
@@ -47,14 +44,15 @@ fn public_fn(x i32) i32 = ...
 export { public_fn } as mypkg
 ```
 
+Only import packages you actually use.
+
 ---
 
 ## Comments
 
 ### File header
 
-Every file starts with a header comment that names the package and gives a
-brief description. Usage examples belong here if the API is non-obvious.
+Every file starts with a header comment naming the package and giving a brief description. Usage examples belong here if the API is non-obvious.
 
 ```tin
 // stdlib/http - HTTP/1.x async client.
@@ -66,16 +64,12 @@ brief description. Usage examples belong here if the API is non-obvious.
 
 ### Section comments
 
-Use a plain comment line before a group of related declarations. No dashes,
-no box drawing, no decorative separators.
+A plain comment line before a group of related declarations is enough. No dashes, no box drawing.
 
 ```tin
-// Good
 // PCRE C API
-
-// Bad
-// --- PCRE C API ---
-// ---------------------------------------------------------------------------
+fn pcre_compile(...) ...
+fn pcre_exec(...) ...
 ```
 
 ### Inline comments
@@ -88,8 +82,7 @@ _groups  [string]   // captured groups: index 0 = whole match, 1+ = sub-groups
 
 ### Function doc comments
 
-Place the doc comment immediately above the function with no blank line between
-the comment and the `fn` keyword. A blank line precedes the comment:
+The doc comment sits immediately above the function with no blank line between them. A blank line precedes the comment:
 
 ```tin
 // encode returns the lowercase hex encoding of s.
@@ -99,13 +92,13 @@ fn encode(s string) string = ...
 fn encode_upper(s string) string = ...
 ```
 
+Comment what isn't obvious from the signature. Don't restate the name.
+
 ---
 
 ## Extern declarations
 
-Group related externs together. When a package has more than one logical group
-(e.g. allocation vs. operations vs. cleanup), separate the groups with a blank
-line:
+Group related externs together. Separate logical groups with a blank line:
 
 ```tin
 fn tin_fmutex2_new() *void                    = extern("_tin_fmutex2_new")
@@ -115,8 +108,7 @@ fn tin_fmutex2_try_lock(m *void, pid i64) i32 = extern("_tin_fmutex2_try_lock")
 fn tin_fmutex2_unlock(m *void)                = extern("_tin_fmutex2_unlock")
 ```
 
-When all externs form a single cohesive group (e.g. the PCRE API) they may
-appear together without internal blank lines.
+When all externs form a single cohesive group they may appear together without internal blank lines.
 
 ---
 
@@ -138,9 +130,7 @@ fn decode(s string) string =
 
 ### Fields
 
-Fields are listed compactly with no blank lines between them. Align types and
-inline comments at a consistent column when the field names are similar in
-length:
+Fields are listed compactly with no blank lines between them. Align types and inline comments at a consistent column when field names are similar in length:
 
 ```tin
 struct Match =
@@ -152,8 +142,7 @@ struct Match =
 
 ### Methods
 
-One blank line between every pair of methods (including `static fn`, `deinit`,
-and `_fiber_retain`):
+One blank line between every pair of methods (including `static fn`, `deinit`, and `_fiber_retain`). One blank line between the last field and the first method.
 
 ```tin
 struct Mutex =
@@ -176,8 +165,6 @@ struct Mutex =
     tin_fmutex2_free(this._ptr)
 ```
 
-One blank line between the last field declaration and the first method.
-
 ---
 
 ## Function bodies
@@ -197,12 +184,9 @@ fn close(fd i32) = extern("_tin_fd_close")
 
 Add a blank line between distinct logical phases. Common boundaries:
 
-- After the initial setup block (variable declarations) before the first loop
-  or major conditional
-- Between separate processing phases (e.g. integer part, fractional part,
-  exponent in a float parser)
-- Before a final cleanup/return block that is logically separate from the
-  loop above it
+- After the initial variable declarations, before the first loop or major conditional
+- Between separate processing phases (e.g. integer part, fractional part, exponent in a float parser)
+- Before a final cleanup/return block that is logically separate from the loop above it
 
 ```tin
 fn exec_match(code *void, subject string, start i64) Match =
@@ -233,8 +217,7 @@ fn exec_match(code *void, subject string, start i64) Match =
 
 ### Guard clauses
 
-Early-return guards that are short and structurally identical may be grouped
-without blank lines:
+Short, structurally identical early-return guards may be grouped without blank lines:
 
 ```tin
 fn parse_int(s string) (i64, Err) =
@@ -253,8 +236,7 @@ fn parse_int(s string) (i64, Err) =
 
 ## Export statement
 
-One blank line before the export statement. Group exports logically; a single
-line is preferred when everything fits:
+One blank line before the export statement. A single line is preferred when everything fits:
 
 ```tin
 export { encode, encode_upper, decode } as base16
@@ -269,15 +251,3 @@ export {
   atoi, atol, atof,
 } as str
 ```
-
----
-
-## What not to do
-
-- No em dashes or decorative separators in comments (`// ---`, `// ===`)
-- No trailing whitespace
-- No blank lines between `use` statements
-- No blank lines between `//!` directives
-- No `use errors` in files that don't use error types
-- Do not add comments to code that is self-explanatory; only comment things
-  that are non-obvious or document a public API
