@@ -1284,21 +1284,8 @@ func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	// Suspend the coroutine; returns the resume block.
 	resumeBlk := cg.emitSuspendPoint(block, cg.curCoroFrame)
 
-	// Check for unhandled panics from fire-and-forget fibers after each resume.
-	// Panic detection is coupled to all yield points (explicit and auto); this
-	// mirrors the identical logic in genYieldAutoAt and genCallSiteYield.
-	msg := resumeBlk.NewCall(cg.ensureFiberCheckPanicFn())
-	isNotNull := resumeBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
-	panicBlk := cg.newBlock("yield.panic")
 	doneBlk := cg.newBlock("yield.done")
-	resumeBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
-
-	panicBlk.NewCall(cg.ensurePanicFn(), msg)
-	// Do NOT release msg here - the defer thunk already balances the retain
-	// added by _tin_fiber_check_panic (same as the await.panic path; see the
-	// comment in genAwaitExpr).
-	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
-	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+	cg.emitPanicCheck(resumeBlk, doneBlk, "yield")
 
 	// Track doneBlk so genYieldAutoAt suppresses the redundant auto-yield when
 	// the loop backedge lands on this continuation block.

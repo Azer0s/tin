@@ -149,7 +149,7 @@ static pthread_mutex_t _table_mu = PTHREAD_MUTEX_INITIALIZER;
 // been read by _tin_fiber_get_panic_msg / _tin_fiber_check_panic.
 // Gives _tin_fiber_check_panic an O(1) fast-path so the loop-edge check is
 // a single atomic load in the common (no panic) case.
-static _Atomic int _has_unhandled_panics = 0;
+_Atomic int _has_unhandled_panics = 0;
 
 
 // -------------------------------------------------------------------
@@ -319,8 +319,20 @@ static _Atomic(int)     _worker_idx_counter = 0;
 
 // Forward-declared here so _lq_push/_lq_pop/_worker_push can use them;
 // definitions are in the per-worker TLS section below.
-static __thread int _is_worker     = 0;
-static __thread int _worker_lq_idx = -1;
+static __thread int      _is_worker          = 0;
+static __thread int      _worker_lq_idx      = -1;
+// Single-slot priority queue checked before the Chase-Lev deque.
+// No atomic ops needed - only the owning worker reads/writes these.
+static __thread int64_t  _worker_runnext_pid = -1;
+static __thread void    *_worker_runnext_hdl = NULL;
+static __thread TinFiber *_worker_runnext_fib = NULL;
+// _worker_selfnext: TLS slot for the currently-running fiber to re-enqueue
+// itself on an explicit yield.  Separate from runnext so that an unparked
+// fiber in runnext and the yielding fiber in selfnext can coexist without
+// either being displaced to the LQ (and its seq_cst fence).
+static __thread int64_t   _worker_selfnext_pid = -1;
+static __thread void     *_worker_selfnext_hdl = NULL;
+static __thread TinFiber *_worker_selfnext_fib = NULL;
 
 // Push to calling worker's local deque; spills to global queue when full.
 static void _lq_push(TinRunnable r, TinFiber *f) {
@@ -379,12 +391,19 @@ static int _lq_steal(int victim, TinRunnable *r, TinFiber **f) {
     return 1;
 }
 
-// Push (r, f) to local deque when on a worker, or global queue otherwise.
+// Push (r, f) to runnext when on a worker; fall through to LQ if occupied.
+// Runnext is a priority slot for unparked fibers.  When it is already occupied
+// the new fiber goes to LQ - no eviction.  Yielding fibers use _worker_selfnext
+// (a separate TLS slot) so they can self-loop without touching the LQ at all.
 static inline void _worker_push(TinRunnable r, TinFiber *f) {
-    if (_is_worker && _worker_lq_idx >= 0)
+    if (!_is_worker || _worker_lq_idx < 0) { _rq_push(r); return; }
+    if (_worker_runnext_pid < 0) {
+        _worker_runnext_pid = r.pid;
+        _worker_runnext_hdl = r.hdl;
+        _worker_runnext_fib = f;
+    } else {
         _lq_push(r, f);
-    else
-        _rq_push(r);
+    }
 }
 
 // Cold slow path: push a yielding fiber to the global queue so that a
@@ -587,12 +606,30 @@ static void *_worker_thread(void *_) {
     _is_worker       = 1;
     _tin_defer_chain = NULL;
     while (1) {
-        // 1. Local deque (lock-free, LIFO for cache locality).
-        // 2. Work-steal from a peer's deque (lock-free).
-        // 3. Global run queue (mutex + condvar, blocks when truly idle).
+        // 0. Selfnext (TLS): the currently-running fiber re-enqueued itself via
+        //    an explicit yield.  Highest priority so looping fibers cycle back
+        //    without any atomic ops (no LQ seq_cst fence, no global mutex).
+        // 1. Runnext (TLS): a fiber just unparked by channel/join/spawn.
+        // 2. Local deque (lock-free Chase-Lev, LIFO for cache locality).
+        // 3. Work-steal from a peer's deque (lock-free).
+        // 4. Global run queue (mutex + condvar, blocks when truly idle).
         TinRunnable r;
         TinFiber   *f = NULL;
-        if (!_lq_pop(&r, &f)) {
+        if (_worker_selfnext_pid >= 0) {
+            r.pid = _worker_selfnext_pid;
+            r.hdl = _worker_selfnext_hdl;
+            f     = _worker_selfnext_fib;
+            _worker_selfnext_pid = -1;
+            _worker_selfnext_hdl = NULL;
+            _worker_selfnext_fib = NULL;
+        } else if (_worker_runnext_pid >= 0) {
+            r.pid = _worker_runnext_pid;
+            r.hdl = _worker_runnext_hdl;
+            f     = _worker_runnext_fib;
+            _worker_runnext_pid = -1;
+            _worker_runnext_hdl = NULL;
+            _worker_runnext_fib = NULL;
+        } else if (!_lq_pop(&r, &f)) {
             int stolen = 0;
             int my = _worker_lq_idx;
             if (my >= 0) {
@@ -756,20 +793,25 @@ static void *_worker_thread(void *_) {
             } else if (f->status == FIBER_RUNNING) {
                 // Normal yield (_tin_fiber_yield_coro): re-enqueue.
                 //
-                // If this fiber spawned a child since its last resume, route it to
-                // the global queue so the spawned child (at the LIFO bottom of the
-                // local deque) can be picked up next.  Without this, a fiber that
-                // loops without parking starves any fire-and-forget child it spawned.
-                // _yield_to_global is noinline+cold so _rq_push stays out of the hot
-                // register-allocation context of _lq_push.
+                // Fast path: put self in _worker_selfnext for zero-overhead
+                // resume.  This is a separate TLS slot from runnext so that
+                // unparked fibers (in runnext) and the yielding fiber (in
+                // selfnext) can coexist without eviction or LQ touching.
+                // The worker loop gives selfnext higher priority so looping
+                // fibers cycle back immediately without any atomic ops.
                 int had_spawn = f->spawned_child;
                 f->spawned_child = 0;
                 f->status = FIBER_RUNNABLE;
                 _fib_unlock(f);
-                if (__builtin_expect(had_spawn, 0))
+                if (__builtin_expect(had_spawn, 0)) {
                     _yield_to_global(r);
-                else
+                } else if (_worker_selfnext_pid < 0) {
+                    _worker_selfnext_pid = r.pid;
+                    _worker_selfnext_hdl = r.hdl;
+                    _worker_selfnext_fib = f;
+                } else {
                     _lq_push(r, f);
+                }
             } else {
                 // FIBER_RUNNABLE: waker already enqueued - don't push again.
                 // FIBER_BLOCKED:  park already processed; waker will enqueue.
@@ -886,7 +928,9 @@ int64_t _tin_fiber_spawn(void *hdl) {
     // Set _spawned_unresumed so the spawner's very next yield goes to the global
     // queue instead of the local deque; this ensures the spawned fiber (at the
     // LIFO bottom) gets a chance to run rather than being starved by the spawner.
-    _worker_push((TinRunnable){ hdl, pid }, f);
+    // Spawned fibers go directly to the LQ (bypassing runnext) so unpark-based
+    // runnext hand-offs are not disturbed by rapid spawning.
+    _lq_push((TinRunnable){ hdl, pid }, f);
     if (_is_worker && _current_fib) _current_fib->spawned_child = 1;
     return pid;
 }

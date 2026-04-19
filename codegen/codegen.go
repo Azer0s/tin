@@ -372,8 +372,9 @@ type CodeGen struct {
 	fiberJoinFn        *ir.Func // _tin_fiber_join(pid i64, hdl i8*): register waiter
 	fiberGetResultFn   *ir.Func // _tin_fiber_get_result(pid i64) -> i8*
 	fiberGetPanicMsgFn *ir.Func // _tin_fiber_get_panic_msg(pid i64) -> i8* (null = ok)
-	fiberCheckPanicFn  *ir.Func // _tin_fiber_check_panic() -> i8*: unhandled panic check at yield points
-	coroTakeResultFn   *ir.Func // _tin_coro_take_result() -> i8*: for chaining
+	fiberCheckPanicFn  *ir.Func   // _tin_fiber_check_panic() -> i8*: unhandled panic check at yield points
+	panicFlagGlobal    *ir.Global // _has_unhandled_panics: fast-path flag for the two-level panic check
+	coroTakeResultFn   *ir.Func   // _tin_coro_take_result() -> i8*: for chaining
 	fiberYieldCoroFn   *ir.Func
 	fiberInitFn        *ir.Func
 	fiberRunFn         *ir.Func

@@ -852,6 +852,45 @@ func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
 	return cg.fiberCheckPanicFn
 }
 
+// ensurePanicFlagGlobal lazily declares _has_unhandled_panics as an external i32 global.
+// Used by emitPanicCheck to avoid a function call on the hot path (flag == 0 case).
+func (cg *CodeGen) ensurePanicFlagGlobal() *ir.Global {
+	if cg.panicFlagGlobal != nil {
+		return cg.panicFlagGlobal
+	}
+	g := cg.mod.NewGlobal("_has_unhandled_panics", irtypes.I32)
+	g.Linkage = enum.LinkageExternal
+	cg.panicFlagGlobal = g
+	return g
+}
+
+// emitPanicCheck emits a two-level unhandled-panic check after a coro resume point.
+//
+// Fast path (common): atomic load of _has_unhandled_panics; if zero, jump to doneBlk.
+// Slow path (rare):   call _tin_fiber_check_panic(); if null, jump to doneBlk; else panic.
+//
+// resumeBlk is terminated here. doneBlk must have no terminator yet.
+func (cg *CodeGen) emitPanicCheck(resumeBlk *ir.Block, doneBlk *ir.Block, suffix string) {
+	flagLoad := resumeBlk.NewLoad(irtypes.I32, cg.ensurePanicFlagGlobal())
+	flagLoad.Atomic = true
+	flagLoad.Ordering = enum.AtomicOrderingMonotonic
+	flagLoad.Align = 4
+	hasFlag := resumeBlk.NewICmp(enum.IPredNE, flagLoad, constant.NewInt(irtypes.I32, 0))
+	slowBlk := cg.newBlock(suffix + ".slow")
+	resumeBlk.NewCondBr(hasFlag, slowBlk, doneBlk)
+
+	msg := slowBlk.NewCall(cg.ensureFiberCheckPanicFn())
+	isNotNull := slowBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	panicBlk := cg.newBlock(suffix + ".panic")
+	slowBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
+
+	// Do NOT release msg - the defer thunk already balances the retain added by
+	// _tin_fiber_check_panic (same as the await.panic path; see genAwaitExpr).
+	panicBlk.NewCall(cg.ensurePanicFn(), msg)
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+}
+
 // genCallSiteYield emits a coro.suspend before calling a heavy or recursive
 // function from inside a coroutine body.  Returns the block to continue
 // emitting into (the resume block after the suspend point).
@@ -864,24 +903,9 @@ func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
 // pattern used in genStmt, genVarDecl, genReturn, etc. picks up the block advance.
 func (cg *CodeGen) genCallSiteYield(from *ir.Block) *ir.Block {
 	resume := cg.emitSuspendPoint(from, cg.curCoroFrame)
-
-	// Check for unhandled panics from non-awaited fibers.
-	msg := resume.NewCall(cg.ensureFiberCheckPanicFn())
-	isNotNull := resume.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
 	afterBlk := cg.newBlock("callsite.yield.after")
-	panicBlk := cg.newBlock("callsite.yield.panic")
-
-	resume.NewCondBr(isNotNull, panicBlk, afterBlk)
-
-	panicBlk.NewCall(cg.ensurePanicFn(), msg)
-	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
-	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
-
-	// Signal that the current block has advanced.  Statement-level code generators
-	// (genStmt, genVarDecl, genReturn, genAssign, etc.) all check cg.curBlock after
-	// calling genExpr so they can emit subsequent instructions into the correct block.
+	cg.emitPanicCheck(resume, afterBlk, "callsite.yield")
 	cg.curBlock = afterBlk
-
 	return afterBlk
 }
 
@@ -926,19 +950,5 @@ func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 	}
 
 	resume := cg.emitSuspendPoint(from, cg.curCoroFrame)
-
-	// Check for unhandled panics from non-awaited fibers.
-	msg := resume.NewCall(cg.ensureFiberCheckPanicFn())
-	isNotNull := resume.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
-	panicBlk := cg.newBlock("autoyield.panic")
-	resume.NewCondBr(isNotNull, panicBlk, header)
-
-	// Re-raise the panic in the current fiber. _tin_panic unwinds defers
-	// (making the panic catchable via recover()) then terminates the fiber.
-	panicBlk.NewCall(cg.ensurePanicFn(), msg)
-	// Do NOT release msg here - the defer thunk already balances the retain
-	// added by _tin_fiber_check_panic (same as the await.panic path; see the
-	// comment in genAwaitExpr).
-	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
-	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+	cg.emitPanicCheck(resume, header, "autoyield")
 }
