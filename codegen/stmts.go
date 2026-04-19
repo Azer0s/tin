@@ -196,6 +196,11 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 // differ from the incoming block when nested control-flow (if/for/match)
 // creates new merge blocks.
 func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, error) {
+	// Each { } block gets its own DWARF lexical scope so the debugger knows
+	// the extent of variables declared inside it.
+	restoreDbgScope := cg.pushLexicalBlock(b.Pos().Line)
+	defer restoreDbgScope()
+
 	var err error
 
 	for _, stmt := range b.Stmts {
@@ -396,6 +401,29 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 // genStmt generates a single statement. Returns (currentBlock, terminated, error).
 // If the block was terminated (ret/br), currentBlock may be nil.
 func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, error) {
+	// Update current source position and record block state for !dbg attachment.
+	if pos := node.Pos(); pos.Line != 0 {
+		cg.currentPos = pos
+	}
+	var dbgInstBefore int
+	if cg.debugMode && block != nil {
+		dbgInstBefore = len(block.Insts)
+	}
+
+	outBlock, term, err := cg.genStmtInner(block, node)
+
+	// Attach !dbg to the first new instruction emitted by this statement.
+	if cg.debugMode && !cg.emittingARC && block != nil && err == nil {
+		if inst := firstInstAfter(block, dbgInstBefore); inst != nil {
+			cg.attachCurrentDbgLoc(inst)
+		}
+	}
+
+	return outBlock, term, err
+}
+
+// genStmtInner is the actual dispatch body for genStmt.
+func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool, error) {
 	switch s := node.(type) {
 	case *ast.Block:
 		newBlock, term, err := cg.genBlock(block, s)
@@ -717,6 +745,9 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// All local variables are stack-allocated. Heap promotion happens lazily at
 	// the return site (genLatePromotedReturn) for variables whose addresses escape.
 	alloca := block.NewAlloca(llType)
+
+	// Emit dbg.declare for debug builds.
+	cg.emitDbgDeclare(block, alloca, s.Name, s.Pos().Line, 0, s.Type, llType)
 
 	// isHeapOwned: this variable receives the return value of a heap-promoting
 	// function (one that uses _tin_rc_alloc to return *T), or a &StructLit{} that

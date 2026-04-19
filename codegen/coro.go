@@ -579,6 +579,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	prevAutoYield := cg.curFnAutoYield
 	prevYieldResumeBlocks := cg.yieldResumeBlocks
 	prevCurBlock := cg.curBlock
+	prevDiScope := cg.diCurrentScope
 
 	cg.curBlock = nil
 	cg.yieldResumeBlocks = make(map[*ir.Block]bool)
@@ -591,6 +592,9 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.curFn = coroFn
 	cg.curScope = newScope(prevScope)
 	cg.curScope.isFunctionBoundary = true
+
+	// Emit DISubprogram for the coro function in debug builds.
+	cg.emitDbgSubprogram(n, coroFn, cg.filename)
 
 	// Emit coroutine prologue: entry -> coro.alloc -> coro.begin.
 	entryBlk := coroFn.NewBlock("entry")
@@ -720,6 +724,8 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 		alloca := bodyStart.NewAlloca(p.Type())
 		bodyStart.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
+		// Emit dbg.declare for this parameter in debug builds.
+		cg.emitDbgDeclare(bodyStart, alloca, astParam.Name, n.Pos().Line, uint64(llIdx), astParam.Type, p.Type())
 		// Parameters that have _fiber_retain called in the ramp block are co-owned
 		// by the coro (the ramp increments the C-level RC). The scope-exit release
 		// must call deinit to decrement that RC, so noDeinit must be false.
@@ -745,6 +751,9 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 		cg.emitFinalSuspend(bodyStart, frame)
 	}
 
+	// Ensure all call instructions have !dbg (required when DISubprogram is attached).
+	cg.ensureAllCallsHaveDbg(coroFn)
+
 	// Emit coroutine cleanup epilogue (coro.free + free + coro.end + ret hdl).
 	cg.emitCoroEpilogue(frame)
 
@@ -766,6 +775,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.curFnAutoYield = prevAutoYield
 	cg.yieldResumeBlocks = prevYieldResumeBlocks
 	cg.curBlock = prevCurBlock
+	cg.diCurrentScope = prevDiScope
 
 	return nil
 }

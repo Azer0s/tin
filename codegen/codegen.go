@@ -11,6 +11,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/metadata"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -297,6 +298,27 @@ type CodeGen struct {
 
 	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
 	noWarnAsyncMain bool
+
+	// ------------------------------------------------------------------
+	// Debug info (DWARF, -g flag)
+	// ------------------------------------------------------------------
+
+	// debugMode enables DWARF debug metadata emission.
+	debugMode bool
+	// diFiles: source file path -> DIFile node (cached per filename).
+	diFiles map[string]*metadata.DIFile
+	// diCU is the single compile unit for this module.
+	diCU *metadata.DICompileUnit
+	// diCurrentScope is the current DWARF scope (DISubprogram or DILexicalBlock).
+	diCurrentScope metadata.Field
+	// diTypeCache caches diTypeFor results by type name string.
+	diTypeCache map[string]metadata.Field
+	// dbgDeclareFn is the lazily declared llvm.dbg.declare intrinsic.
+	dbgDeclareFn *ir.Func
+	// emittingARC is true while emitting ARC retain/release/deinit calls.
+	// Instructions emitted in this context get line=0 !dbg so the debugger
+	// does not stop on invisible compiler-generated operations.
+	emittingARC bool
 
 	// useDoubleForF128: when true, the f128 type is lowered to f64/double instead
 	// of fp128. Used on Apple arm64 where long double == double and compiler-rt
@@ -589,6 +611,7 @@ func (cg *CodeGen) SetTestMode(v bool)          { cg.testMode = v }
 func (cg *CodeGen) SetNoWarnAsyncMain(v bool)   { cg.noWarnAsyncMain = v }
 func (cg *CodeGen) SetUseDoubleForF128(v bool)  { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetVerboseHeuristics(v bool) { cg.verboseHeuristics = v }
+func (cg *CodeGen) SetDebugMode(v bool)         { cg.debugMode = v }
 
 // HasTests reports whether the source contained at least one test block.
 // Only meaningful after Generate has been called.
@@ -724,6 +747,8 @@ func New(filename string) *CodeGen {
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
 		chainReleaseFns:          make(map[string]*ir.Func),
+		diFiles:                  make(map[string]*metadata.DIFile),
+		diTypeCache:              make(map[string]metadata.Field),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")
@@ -832,6 +857,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Initialize global scope.
 	cg.curScope = newScope(nil)
 	cg.moduleScope = cg.curScope
+
+	// Initialize DWARF debug metadata when -g is active.
+	if cg.debugMode {
+		cg.initDebugInfo()
+	}
 
 	// Register built-in special traits so structs can implement them without
 	// an explicit trait declaration in source.

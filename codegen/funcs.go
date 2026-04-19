@@ -1260,6 +1260,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevDeferThunkRetType := cg.curDeferThunkRetType
 	prevEscapingVars := cg.curFnEscapingVars
 	prevEscapingAliases := cg.curFnEscapingAliases
+	prevDiScope := cg.diCurrentScope
 	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
 	cg.pendingDeferEnvs = nil
@@ -1282,6 +1283,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
+
+	// Emit DISubprogram for debug builds.
+	cg.emitDbgSubprogram(n, f, cg.filename)
 
 	// For non-void functions that contain defer stmts: alloca a {i8, retType} slot
 	// so a defer thunk can override the return value.  Skip when no defer is present
@@ -1313,6 +1317,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curDeferThunkRetType = prevDeferThunkRetType
 		cg.curFnEscapingVars = prevEscapingVars
 		cg.curFnEscapingAliases = prevEscapingAliases
+		cg.diCurrentScope = prevDiScope
 	}()
 
 	// Register function in current scope so recursion works.
@@ -1351,6 +1356,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		entry.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
 		cg.emitRetain(entry, p)
+		// Emit dbg.declare for this parameter in debug builds.
+		cg.emitDbgDeclare(entry, alloca, astParam.Name, n.Pos().Line, uint64(llIdx), astParam.Type, p.Type())
 		// Function parameters receive a by-value copy of the caller's struct.
 		// The parameter is not the owner of the value; the caller is.  Mark
 		// noDeinit so that scope-exit release of the parameter copy does not
@@ -1374,6 +1381,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	_, bodyErr := cg.genBody(entry, n.Body, retType)
 	cg.matchSubject = prevMatchSubject
 
+	// Ensure all call instructions have !dbg (LLVM requires this when the
+	// function has a DISubprogram attached).
+	cg.ensureAllCallsHaveDbg(f)
+
 	if bodyErr != nil {
 		// Even on error, register the (partially compiled) function so it
 		// appears in scope for callers that check for it. The error typically
@@ -1393,6 +1404,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.pendingDeferEnvs = prevDeferEnvs
 	cg.curFnEscapingVars = prevEscapingVars
 	cg.curFnEscapingAliases = prevEscapingAliases
+	cg.diCurrentScope = prevDiScope
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.

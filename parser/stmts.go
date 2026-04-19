@@ -145,16 +145,19 @@ func (p *Parser) parseVarDecl() (*ast.VarDecl, error) {
 		}
 	}
 
-	_ = pos
-
-	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
+	node := &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}
+	node.SetPos(pos)
+	return node, nil
 }
 
 func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
+	pos := p.curPos()
 	p.advance() // consume return
 
 	if p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF, lexer.SEMI) {
-		return &ast.ReturnStmt{}, nil
+		node := &ast.ReturnStmt{}
+		node.SetPos(pos)
+		return node, nil
 	}
 
 	val, err := p.parseExpr()
@@ -162,7 +165,9 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 		return nil, err
 	}
 
-	return &ast.ReturnStmt{Value: val}, nil
+	node := &ast.ReturnStmt{Value: val}
+	node.SetPos(pos)
+	return node, nil
 }
 
 func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
@@ -222,6 +227,7 @@ func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {
 }
 
 func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
+	pos := p.curPos()
 	p.advance() // consume echo
 
 	val, err := p.parseExpr()
@@ -229,7 +235,9 @@ func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
 		return nil, err
 	}
 
-	return &ast.EchoStmt{Value: val}, nil
+	node := &ast.EchoStmt{Value: val}
+	node.SetPos(pos)
+	return node, nil
 }
 
 func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
@@ -1341,7 +1349,9 @@ func (p *Parser) parseLetStmt() (ast.Node, error) {
 		}
 	}
 
-	return &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}, nil
+	node := &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}
+	node.SetPos(pos)
+	return node, nil
 }
 
 // parseArrayDestructDecl parses: let [a, b] [T] = expr
@@ -1469,10 +1479,11 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 		return nil, err
 	}
 
-	_ = pos
 	_ = isConst
 
-	return &ast.ArrayDestructDecl{Names: names, ElemTypes: elemTypes, IsAny: isAny, NamedType: namedType, Value: val}, nil
+	node := &ast.ArrayDestructDecl{Names: names, ElemTypes: elemTypes, IsAny: isAny, NamedType: namedType, Value: val}
+	node.SetPos(pos)
+	return node, nil
 }
 
 // parseStructDestructDecl parses: let {x, y} TypeName = expr
@@ -1539,10 +1550,11 @@ func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.Struct
 		return nil, err
 	}
 
-	_ = pos
 	_ = isConst
 
-	return &ast.StructDestructDecl{Names: names, VarNames: varNames, StructType: structType, Value: val}, nil
+	node := &ast.StructDestructDecl{Names: names, VarNames: varNames, StructType: structType, Value: val}
+	node.SetPos(pos)
+	return node, nil
 }
 
 // parseTupleDestructDecl parses: let (x, y) = expr
@@ -1577,9 +1589,9 @@ func (p *Parser) parseTupleDestructDecl(isConst bool, pos ast.Pos) (*ast.TupleDe
 		return nil, err
 	}
 
-	_ = pos
-
-	return &ast.TupleDestructDecl{IsConst: isConst, Names: names, Value: val}, nil
+	node := &ast.TupleDestructDecl{IsConst: isConst, Names: names, Value: val}
+	node.SetPos(pos)
+	return node, nil
 }
 
 // parseTopLevelVar parses:  var name Type [= expr]

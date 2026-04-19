@@ -758,6 +758,8 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 // emitRetain emits a _tin_retain call for an ARC-tracked value.
 // For named structs, it also retains any RC-tracked fields.
 func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
+	cg.emittingARC = true
+	defer func() { cg.emittingARC = false }()
 	t := val.Type()
 	// Closure fat pointer: retain the env field (i8*). _tin_retain handles null env.
 	if isFatFnPtr(t) {
@@ -817,6 +819,8 @@ func (cg *CodeGen) emitReleaseNoDeinit(block *ir.Block, val value.Value) {
 }
 
 func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit bool) {
+	cg.emittingARC = true
+	defer func() { cg.emittingARC = false }()
 	t := val.Type()
 	// Owning pointer to a known Tin struct: delegate to the null-safe per-struct
 	// release helper so that its RC-tracked and nested-struct-pointer fields are

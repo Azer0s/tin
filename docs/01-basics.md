@@ -152,6 +152,12 @@ let abs_x = x < 0 ? 0 - x : x
 
 ## Variables
 
+`let` declares a local variable. It is always scoped to the enclosing function
+- there are no module-level `let` declarations. Statements written at the top
+level of a file are collected into an implicit `main` function, so even
+top-level `let` lines are local to that `main`. Use `var` for mutable
+package-level state (see below).
+
 Variables are declared with `let`. Types are written after the name:
 
 ```rust

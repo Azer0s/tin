@@ -256,19 +256,32 @@ func main() {
 
 	cmd := os.Args[1]
 
-	// Parse flags: -lib means compile to object file, not a binary
+	// Parse flags: -lib means compile to object file, not a binary.
+	// Scan forward from position 2 to find the first non-flag argument (the source file).
+	// Known pre-file flags: -lib (build only), -g.  Two-word flags (--stdlib PATH) are skipped.
 	libMode := false
 	fileArgIdx := 2
 
 	if cmd == "build" && len(os.Args) > 2 && os.Args[2] == "-lib" {
 		libMode = true
-
 		fileArgIdx = 3
-		if len(os.Args) <= fileArgIdx {
-			_, _ = fmt.Fprint(os.Stderr, usage)
+	}
 
-			os.Exit(1)
+	// Skip any flags that appear before the file argument.
+	for fileArgIdx < len(os.Args) {
+		a := os.Args[fileArgIdx]
+		if a == "-g" {
+			fileArgIdx++
+		} else if a == "--stdlib" || a == "--lib-root" {
+			fileArgIdx += 2
+		} else {
+			break
 		}
+	}
+
+	if fileArgIdx >= len(os.Args) {
+		_, _ = fmt.Fprint(os.Stderr, usage)
+		os.Exit(1)
 	}
 
 	file := os.Args[fileArgIdx]
@@ -283,8 +296,10 @@ func main() {
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
 	verboseHeuristics := false
+	debugBuild := false
 
-	for i := fileArgIdx + 1; i < len(os.Args); i++ {
+	// Scan all args (including those before the file) for flags.
+	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-cflag":
 			if i+1 < len(os.Args) {
@@ -307,6 +322,8 @@ func main() {
 			noWarnAwaitMatchGuards = true
 		case "-v-heuristics":
 			verboseHeuristics = true
+		case "-g":
+			debugBuild = true
 		}
 	}
 
@@ -415,6 +432,10 @@ func main() {
 		cg.SetVerboseHeuristics(true)
 	}
 
+	if debugBuild {
+		cg.SetDebugMode(true)
+	}
+
 	// On Apple arm64, long double == double and compiler-rt has no fp128 routines.
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		cg.SetUseDoubleForF128(true)
@@ -513,7 +534,7 @@ func main() {
 		}
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags); err != nil {
+		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -568,7 +589,7 @@ func main() {
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
 
-		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags); err != nil {
+		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
 		defer func(name string) {
@@ -652,7 +673,9 @@ func fixCoroAttrs(ir string) string {
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
 // cSources are C source files to compile in alongside the IR.
-func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string) error {
+// debugMode switches the final compile from -O2 to -O0 and adds -g.
+func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, debugMode ...bool) error {
+	isDebug := len(debugMode) > 0 && debugMode[0]
 	// Write IR to temp file
 	//goland:noinspection GoResourceLeak
 	llFile, err := os.CreateTemp("", "tin-*.ll")
@@ -701,10 +724,24 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			return fmt.Errorf("coro split pass failed: %w", err)
 		}
 
+		// LLVM 22's CoroSplitPass emits !DILabel nodes without the required
+		// 'line' field when debug info is active. Patch them before the next
+		// compile step to avoid "missing required field 'line'" errors.
+		if isDebug {
+			if data, readErr := os.ReadFile(splitName); readErr == nil {
+				if patched := patchMissingDILabelLine(string(data)); patched != string(data) {
+					_ = os.WriteFile(splitName, []byte(patched), 0644)
+				}
+			}
+		}
+
 		llInputFile = splitName
 	}
 
 	optLevel := "-O2"
+	if isDebug {
+		optLevel = "-O0"
+	}
 
 	// Find runtime .c alongside the tin binary
 	ex, _ := os.Executable()
@@ -833,7 +870,11 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		}
 	}()
 
-	args := []string{optLevel, llInputFile}
+	args := []string{optLevel}
+	if isDebug {
+		args = append(args, "-g")
+	}
+	args = append(args, llInputFile)
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
 	}
@@ -1203,6 +1244,24 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 	if failed > 0 || skipped > 0 {
 		os.Exit(1)
 	}
+}
+
+// patchMissingDILabelLine adds 'line: 0' to any !DILabel(...) metadata node
+// in the LLVM IR text that is missing the required 'line' field. LLVM 22's
+// CoroSplitPass emits DILabel nodes for coro resume labels without line
+// information, which causes subsequent clang invocations to fail.
+func patchMissingDILabelLine(ir string) string {
+	lines := strings.Split(ir, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "!DILabel(") && !strings.Contains(line, "line:") {
+			// Insert ", line: 0" before the closing ")" of the DILabel node.
+			idx := strings.LastIndex(line, ")")
+			if idx >= 0 {
+				lines[i] = line[:idx] + ", line: 0" + line[idx:]
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func die(format string, args ...any) {
