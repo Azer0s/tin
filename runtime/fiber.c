@@ -101,6 +101,12 @@ typedef struct {
     // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
     // provides release); read by worker after _fib_lock (acquire), safe.
     int      direct_recv_done;
+    // Set by _tin_fiber_spawn when this fiber spawns a child while running on a
+    // worker.  Cleared by the worker loop at the start of each resume and again
+    // when the yield path reads it.  Causes the first post-spawn yield to go to
+    // the global queue so the spawned child (at the LIFO bottom of the local deque)
+    // is not starved by a spawner that loops without parking.
+    int      spawned_child;
     // Per-fiber spinlock: protects status, pending_park, and pending_wakeup
     // in the park/unpark hot path.  Replacing the global _table_mu for these
     // transitions eliminates cross-core cache-line bouncing between workers
@@ -284,6 +290,115 @@ static TinRunnable _rq_pop(void) {
 }
 
 // -------------------------------------------------------------------
+// Per-worker local work-stealing deque (bounded Chase-Lev deque).
+//
+// Each worker owns one deque.  Unpark calls on a worker push directly
+// to that deque (no mutex).  When idle, a worker steals from peers
+// before blocking on the global queue.  This eliminates global-queue
+// mutex contention in high-concurrency workloads (e.g. MPMC, jitter).
+//
+// Owner   pushes/pops from bottom (LIFO for cache locality).
+// Thieves steal            from top  (FIFO to avoid contention).
+// -------------------------------------------------------------------
+
+#define WORKER_LQ_SIZE  64                    // must be power of 2
+#define WORKER_LQ_MASK  (WORKER_LQ_SIZE - 1)
+#define WORKER_MAX      256                   // max TINMAXPROCS supported
+
+typedef struct {
+    _Atomic(int64_t) top;       // steal pointer (thieves read/CAS)
+    char _pad0[56];             // keep top on its own cache line
+    _Atomic(int64_t) bottom;    // owner pointer (owner reads/writes)
+    char _pad1[56];             // keep bottom on its own cache line
+    TinRunnable      buf[WORKER_LQ_SIZE];
+    TinFiber        *fibs[WORKER_LQ_SIZE];
+} WorkerLocalQueue;
+
+static WorkerLocalQueue _worker_lqs[WORKER_MAX];
+static _Atomic(int)     _worker_idx_counter = 0;
+
+// Forward-declared here so _lq_push/_lq_pop/_worker_push can use them;
+// definitions are in the per-worker TLS section below.
+static __thread int _is_worker     = 0;
+static __thread int _worker_lq_idx = -1;
+
+// Push to calling worker's local deque; spills to global queue when full.
+static void _lq_push(TinRunnable r, TinFiber *f) {
+    int idx = _worker_lq_idx;
+    if (idx < 0 || idx >= WORKER_MAX) { _rq_push(r); return; }
+    WorkerLocalQueue *q = &_worker_lqs[idx];
+    int64_t b = atomic_load_explicit(&q->bottom, memory_order_relaxed);
+    int64_t t = atomic_load_explicit(&q->top,    memory_order_acquire);
+    if (b - t >= WORKER_LQ_SIZE) { _rq_push(r); return; }
+    q->buf [b & WORKER_LQ_MASK] = r;
+    q->fibs[b & WORKER_LQ_MASK] = f;
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+}
+
+// Pop from calling worker's local deque (LIFO). Returns 1 on success.
+static int _lq_pop(TinRunnable *r, TinFiber **f) {
+    int idx = _worker_lq_idx;
+    if (idx < 0 || idx >= WORKER_MAX) return 0;
+    WorkerLocalQueue *q = &_worker_lqs[idx];
+    int64_t b = atomic_load_explicit(&q->bottom, memory_order_relaxed) - 1;
+    atomic_store_explicit(&q->bottom, b, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+    int64_t t = atomic_load_explicit(&q->top, memory_order_relaxed);
+    if (t > b) {
+        atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+        return 0;
+    }
+    *r = q->buf [b & WORKER_LQ_MASK];
+    *f = q->fibs[b & WORKER_LQ_MASK];
+    if (t == b) {
+        if (!atomic_compare_exchange_strong_explicit(&q->top, &t, t + 1,
+                memory_order_seq_cst, memory_order_relaxed)) {
+            atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+            return 0;
+        }
+        atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+    }
+    return 1;
+}
+
+// Steal from victim worker's deque (FIFO). Returns 1 on success.
+static int _lq_steal(int victim, TinRunnable *r, TinFiber **f) {
+    if (victim < 0 || victim >= WORKER_MAX) return 0;
+    WorkerLocalQueue *q = &_worker_lqs[victim];
+    int64_t t = atomic_load_explicit(&q->top,    memory_order_acquire);
+    atomic_thread_fence(memory_order_seq_cst);
+    int64_t b = atomic_load_explicit(&q->bottom, memory_order_acquire);
+    if (t >= b) return 0;
+    *r = q->buf [t & WORKER_LQ_MASK];
+    *f = q->fibs[t & WORKER_LQ_MASK];
+    if (!atomic_compare_exchange_strong_explicit(&q->top, &t, t + 1,
+            memory_order_seq_cst, memory_order_relaxed)) {
+        return 0;
+    }
+    return 1;
+}
+
+// Push (r, f) to local deque when on a worker, or global queue otherwise.
+static inline void _worker_push(TinRunnable r, TinFiber *f) {
+    if (_is_worker && _worker_lq_idx >= 0)
+        _lq_push(r, f);
+    else
+        _rq_push(r);
+}
+
+// Cold slow path: push a yielding fiber to the global queue so that a
+// freshly spawned fire-and-forget child (sitting at the LIFO bottom of
+// the local deque) can be picked up on the next pop.  Marked noinline+cold
+// so the compiler keeps _rq_push (a mutex operation) out of the hot
+// FIBER_RUNNING yield path, preserving register allocation and inlining
+// for _lq_push there.
+__attribute__((noinline, cold))
+static void _yield_to_global(TinRunnable r) {
+    _rq_push(r);
+}
+
+// -------------------------------------------------------------------
 // LLVM coroutine resume/destroy
 // -------------------------------------------------------------------
 
@@ -316,22 +431,6 @@ static __thread void     *_coro_result   = NULL;
 // the worker loop before each fiber resume so that TLS mode cannot leak across
 // a fiber context switch to another fiber's resume on the same OS thread.
 static __thread int       _inline_result_mode = 0;
-
-// Set to 1 at the start of each worker thread; stays 0 on all other threads
-// (main thread, I/O thread, timer thread).  Used by _tin_fiber_unpark to
-// decide whether a direct runnext hand-off is safe.
-static __thread int        _is_worker      = 0;
-
-// Per-worker hot slot: populated by _tin_fiber_unpark when called from within
-// a worker thread.  The worker loop drains this before calling _rq_pop, giving
-// a zero-overhead direct hand-off to the newly-runnable fiber without going
-// through the global run queue (no mutex, no condvar).
-static __thread int64_t    _worker_runnext_pid = -1;
-static __thread void      *_worker_runnext_hdl = NULL;
-// Companion to runnext: store the TinFiber* so the worker loop can skip the
-// _table_mu lookup that otherwise happens on every dequeue.  Only valid when
-// _worker_runnext_pid >= 0.
-static __thread TinFiber  *_worker_runnext_fib = NULL;
 
 // Called by the I/O layer to access current fiber pid.
 int64_t _tin_current_pid(void) { return _current_pid; }
@@ -394,8 +493,6 @@ static inline void _fib_unlock(TinFiber *f) {
 
 // Like _tin_fiber_unpark_hdl but uses a pre-captured TinFiber* to skip the
 // _table_mu global lock entirely.  Only the per-fiber state_lock is needed.
-// Also stores the TinFiber* in _worker_runnext_fib so the worker loop can skip
-// the subsequent _table_mu lookup for the runnext case.
 void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     TinFiber *f = (TinFiber *)fib;
     if (!f) return;
@@ -403,21 +500,7 @@ void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     if (f->status == FIBER_BLOCKED) {
         f->status = FIBER_RUNNABLE;
         _fib_unlock(f);
-        if (_is_worker) {
-            if (_worker_runnext_pid < 0) {
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-            } else {
-                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-                _rq_push(old);
-            }
-        } else {
-            _rq_push((TinRunnable){ hdl, pid });
-        }
+        _worker_push((TinRunnable){ hdl, pid }, f);
         return;
     }
     if (f->status == FIBER_RUNNING) {
@@ -435,21 +518,7 @@ static void _enqueue_waiter(int64_t wpid, TinFiber *w) {
         w->status = FIBER_RUNNABLE;
         void *whdl = w->hdl;
         _fib_unlock(w);
-        if (_is_worker) {
-            if (_worker_runnext_pid < 0) {
-                _worker_runnext_pid = wpid;
-                _worker_runnext_hdl = whdl;
-                _worker_runnext_fib = w;
-            } else {
-                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                _worker_runnext_pid = wpid;
-                _worker_runnext_hdl = whdl;
-                _worker_runnext_fib = w;
-                _rq_push(old);
-            }
-        } else {
-            _rq_push((TinRunnable){ whdl, wpid });
-        }
+        _worker_push((TinRunnable){ whdl, wpid }, w);
     } else if (w->pending_join) {
         w->pending_wakeup = 1;
         _fib_unlock(w);
@@ -507,28 +576,38 @@ static _Thread_local int   _coro_pool_cnt = 0;
 
 static void *_worker_thread(void *_) {
     (void)_;
+    // Assign this worker's local deque index before setting _is_worker so
+    // _worker_push is valid as soon as the worker starts handling fibers.
+    int lq = atomic_fetch_add_explicit(&_worker_idx_counter, 1, memory_order_relaxed);
+    if (lq < WORKER_MAX) {
+        _worker_lq_idx = lq;
+        atomic_store_explicit(&_worker_lqs[lq].top,    0, memory_order_relaxed);
+        atomic_store_explicit(&_worker_lqs[lq].bottom, 0, memory_order_relaxed);
+    }
     _is_worker       = 1;
     _tin_defer_chain = NULL;
     while (1) {
-        // Drain runnext first: direct hand-off from the previous fiber's unpark
-        // call, bypassing the global run queue entirely (no mutex, no condvar).
+        // 1. Local deque (lock-free, LIFO for cache locality).
+        // 2. Work-steal from a peer's deque (lock-free).
+        // 3. Global run queue (mutex + condvar, blocks when truly idle).
         TinRunnable r;
         TinFiber   *f = NULL;
-        if (_worker_runnext_pid >= 0) {
-            r.pid = _worker_runnext_pid;
-            r.hdl = _worker_runnext_hdl;
-            f     = _worker_runnext_fib;   // pre-captured TinFiber*, no _table_mu needed
-            _worker_runnext_pid = -1;
-            _worker_runnext_hdl = NULL;
-            _worker_runnext_fib = NULL;
-        } else {
-            r = _rq_pop();
-            if (r.pid < 0) break;  // shutdown sentinel
+        if (!_lq_pop(&r, &f)) {
+            int stolen = 0;
+            int my = _worker_lq_idx;
+            if (my >= 0) {
+                for (int s = 1; s < _worker_cnt && !stolen; s++)
+                    stolen = _lq_steal((my + s) % _worker_cnt, &r, &f);
+            }
+            if (!stolen) {
+                r = _rq_pop();
+                if (r.pid < 0) break;  // shutdown sentinel
+                f = NULL;
+            }
         }
 
         if (!f) {
-            // runnext didn't carry a pre-captured TinFiber* (run-queue path or
-            // legacy unpark via _tin_fiber_unpark_hdl): fall back to table lookup.
+            // Global-queue path: no pre-captured TinFiber*, look it up.
             pthread_mutex_lock(&_table_mu);
             if (r.pid >= _fiber_cnt || !_fibers[r.pid]) {
                 pthread_mutex_unlock(&_table_mu);
@@ -553,6 +632,7 @@ static void *_worker_thread(void *_) {
         _coro_done           = 0;
         _coro_result         = NULL;
         _inline_result_mode  = 0;  // reset so inline-drive TLS cannot leak across fibers
+        f->spawned_child     = 0;  // reset: spawn-displacement only applies within one resume
 
         // Restore this fiber's defer chain so its deferred functions are only
         // visible while the fiber is executing.  Without save/restore, a second
@@ -652,17 +732,7 @@ static void *_worker_thread(void *_) {
                     // Target completed before we suspended; re-queue now.
                     f->status = FIBER_RUNNABLE;
                     _fib_unlock(f);
-                    if (_worker_runnext_pid < 0) {
-                        _worker_runnext_pid = r.pid;
-                        _worker_runnext_hdl = r.hdl;
-                        _worker_runnext_fib = f;
-                    } else {
-                        TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                        _worker_runnext_pid = r.pid;
-                        _worker_runnext_hdl = r.hdl;
-                        _worker_runnext_fib = f;
-                        _rq_push(old);
-                    }
+                    _lq_push(r, f);
                 } else {
                     // Target not yet done; block until _fire_done_waiters wakes us.
                     f->status = FIBER_BLOCKED;
@@ -677,17 +747,7 @@ static void *_worker_thread(void *_) {
                     f->pending_wakeup = 0;
                     f->status = FIBER_RUNNABLE;
                     _fib_unlock(f);
-                    if (_worker_runnext_pid < 0) {
-                        _worker_runnext_pid = r.pid;
-                        _worker_runnext_hdl = r.hdl;
-                        _worker_runnext_fib = f;
-                    } else {
-                        TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                        _worker_runnext_pid = r.pid;
-                        _worker_runnext_hdl = r.hdl;
-                        _worker_runnext_fib = f;
-                        _rq_push(old);
-                    }
+                    _lq_push(r, f);
                 } else {
                     // No wakeup yet; block until _tin_fiber_unpark fires.
                     f->status = FIBER_BLOCKED;
@@ -695,15 +755,21 @@ static void *_worker_thread(void *_) {
                 }
             } else if (f->status == FIBER_RUNNING) {
                 // Normal yield (_tin_fiber_yield_coro): re-enqueue.
+                //
+                // If this fiber spawned a child since its last resume, route it to
+                // the global queue so the spawned child (at the LIFO bottom of the
+                // local deque) can be picked up next.  Without this, a fiber that
+                // loops without parking starves any fire-and-forget child it spawned.
+                // _yield_to_global is noinline+cold so _rq_push stays out of the hot
+                // register-allocation context of _lq_push.
+                int had_spawn = f->spawned_child;
+                f->spawned_child = 0;
                 f->status = FIBER_RUNNABLE;
                 _fib_unlock(f);
-                if (_worker_runnext_pid < 0) {
-                    _worker_runnext_pid = r.pid;
-                    _worker_runnext_hdl = r.hdl;
-                    _worker_runnext_fib = f;
-                } else {
-                    _rq_push(r);
-                }
+                if (__builtin_expect(had_spawn, 0))
+                    _yield_to_global(r);
+                else
+                    _lq_push(r, f);
             } else {
                 // FIBER_RUNNABLE: waker already enqueued - don't push again.
                 // FIBER_BLOCKED:  park already processed; waker will enqueue.
@@ -816,27 +882,12 @@ int64_t _tin_fiber_spawn(void *hdl) {
     _fibers[pid] = f;
     pthread_mutex_unlock(&_table_mu);
 
-    // When spawning from a worker thread, use runnext so the new fiber runs on
-    // the same worker as the spawner.  This avoids waking idle workers and keeps
-    // cooperating fibers (e.g. ping-pong channels) on the same core, eliminating
-    // cross-core cache-line bouncing on the per-fiber state_lock.
-    // If runnext is occupied, flush the old entry to the global queue (waking
-    // a sleeping worker) and replace it with the new fiber.
-    if (_is_worker) {
-        if (_worker_runnext_pid < 0) {
-            _worker_runnext_pid = pid;
-            _worker_runnext_hdl = hdl;
-            _worker_runnext_fib = f;
-        } else {
-            TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-            _worker_runnext_pid = pid;
-            _worker_runnext_hdl = hdl;
-            _worker_runnext_fib = f;
-            _rq_push(old);
-        }
-    } else {
-        _rq_push((TinRunnable){ hdl, pid });
-    }
+    // When spawning from a worker, push to the local deque for cache locality.
+    // Set _spawned_unresumed so the spawner's very next yield goes to the global
+    // queue instead of the local deque; this ensures the spawned fiber (at the
+    // LIFO bottom) gets a chance to run rather than being starved by the spawner.
+    _worker_push((TinRunnable){ hdl, pid }, f);
+    if (_is_worker && _current_fib) _current_fib->spawned_child = 1;
     return pid;
 }
 
@@ -1219,10 +1270,8 @@ int64_t _tin_fiber_sync_await_any(int64_t *pids, int64_t n, int8_t *skip) {
 // worker fiber is running).
 //
 // Fast path (called from within a worker thread):
-//   Store the newly-runnable fiber in _worker_runnext so the calling worker
-//   picks it up on the very next loop iteration - no global run queue mutex,
-//   no condvar signal.  If runnext is already occupied, flush the old entry to
-//   the global queue and replace it with the new one.
+//   Push to the calling worker's local deque (lock-free).  The worker drains
+//   this before falling through to the global run queue.
 //
 // Slow path (called from I/O thread / timer thread / main thread):
 //   Push to the global run queue as before.
@@ -1240,21 +1289,7 @@ void _tin_fiber_unpark(int64_t pid) {
     if (f->status == FIBER_BLOCKED) {
         f->status = FIBER_RUNNABLE;
         _fib_unlock(f);
-        if (_is_worker) {
-            if (_worker_runnext_pid < 0) {
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-            } else {
-                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-                _rq_push(old);
-            }
-        } else {
-            _rq_push((TinRunnable){ hdl, pid });
-        }
+        _worker_push((TinRunnable){ hdl, pid }, f);
         return;
     }
     if (f->status == FIBER_RUNNING) {
@@ -1282,21 +1317,7 @@ void _tin_fiber_unpark_hdl(int64_t pid, void *hdl) {
     if (f->status == FIBER_BLOCKED) {
         f->status = FIBER_RUNNABLE;
         _fib_unlock(f);
-        if (_is_worker) {
-            if (_worker_runnext_pid < 0) {
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-            } else {
-                TinRunnable old = { _worker_runnext_hdl, _worker_runnext_pid };
-                _worker_runnext_pid = pid;
-                _worker_runnext_hdl = hdl;
-                _worker_runnext_fib = f;
-                _rq_push(old);
-            }
-        } else {
-            _rq_push((TinRunnable){ hdl, pid });
-        }
+        _worker_push((TinRunnable){ hdl, pid }, f);
         return;
     }
     if (f->status == FIBER_RUNNING) {

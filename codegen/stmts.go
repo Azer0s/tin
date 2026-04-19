@@ -1271,7 +1271,7 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 
 // genYieldStmt emits a yield point inside an {#async} coroutine body.
 // In the normal (non-coro) variant of the same function, yield is a no-op.
-// Returns the resume block where execution continues after being scheduled.
+// Returns the continuation block where execution resumes after the panic check.
 func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	if !cg.inCoroFn {
 		// In the sync version of an {#async} function, yield is a no-op.
@@ -1283,13 +1283,30 @@ func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	block.NewCall(cg.fiberYieldCoroFn, cg.curCoroHdl)
 	// Suspend the coroutine; returns the resume block.
 	resumeBlk := cg.emitSuspendPoint(block, cg.curCoroFrame)
-	// Track yield-resume blocks so genYieldAutoAt can suppress the redundant
-	// autoyield when the loop backedge lands on this resume block.
+
+	// Check for unhandled panics from fire-and-forget fibers after each resume.
+	// Panic detection is coupled to all yield points (explicit and auto); this
+	// mirrors the identical logic in genYieldAutoAt and genCallSiteYield.
+	msg := resumeBlk.NewCall(cg.ensureFiberCheckPanicFn())
+	isNotNull := resumeBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	panicBlk := cg.newBlock("yield.panic")
+	doneBlk := cg.newBlock("yield.done")
+	resumeBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
+
+	panicBlk.NewCall(cg.ensurePanicFn(), msg)
+	// Do NOT release msg here - the defer thunk already balances the retain
+	// added by _tin_fiber_check_panic (same as the await.panic path; see the
+	// comment in genAwaitExpr).
+	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
+	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
+
+	// Track doneBlk so genYieldAutoAt suppresses the redundant auto-yield when
+	// the loop backedge lands on this continuation block.
 	if cg.yieldResumeBlocks != nil {
-		cg.yieldResumeBlocks[resumeBlk] = true
+		cg.yieldResumeBlocks[doneBlk] = true
 	}
 
-	return resumeBlk, nil
+	return doneBlk, nil
 }
 
 // genAwaitStmt emits an await point inside an {#async} coroutine body.

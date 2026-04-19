@@ -858,7 +858,7 @@ func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
 //
 // Must only be called when cg.curCoroFrame != nil and cg.curFnAutoYield is true.
 // After each resume, unhandled panics from fire-and-forget fibers are checked
-// and re-raised, matching the identical logic in genYieldAutoAt.
+// and re-raised.
 //
 // cg.curBlock is set to afterBlk so that the "if cg.curBlock != block {block = cg.curBlock}"
 // pattern used in genStmt, genVarDecl, genReturn, etc. picks up the block advance.
@@ -917,7 +917,7 @@ func (cg *CodeGen) genCallSiteYieldFor(block *ir.Block, calleeName string) *ir.B
 // only at scheduler shutdown.
 func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 	if cg.yieldResumeBlocks[from] {
-		// `from` is the resume block of an explicit `yield` statement.
+		// `from` is the continuation block of an explicit `yield` or `await`.
 		// The fiber just executed one suspension this iteration; adding a second
 		// autoyield at the backedge would force a redundant scheduler round-trip.
 		from.NewBr(header)
