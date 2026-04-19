@@ -54,6 +54,7 @@ fn hm_empty_hashes(cap i64) [u64] =
     i = i + 1
   return result
 
+
 struct HashMap[K, V](Map[K, V]) =
   _keys   [K]
   _vals   [V]
@@ -72,6 +73,8 @@ struct HashMap[K, V](Map[K, V]) =
   fn len(this HashMap[K, V]) i64 =
     return this._len
 
+  // find returns the slot index for key k with hash h.
+  // Returns an empty/tombstone slot if the key is absent.
   fn find(this HashMap[K, V], k K, h u64) i64 =
     let cap = len(this._hashes)
     let mask = cap - 1
@@ -99,10 +102,12 @@ struct HashMap[K, V](Map[K, V]) =
     let old_hashes = this._hashes
     let old_cap    = len(old_hashes)
     let new_cap    = old_cap * 2
+
     this._keys   = hm_empty_keys[K](new_cap)
     this._vals   = hm_empty_vals[V](new_cap)
     this._hashes = hm_empty_hashes(new_cap)
     this._len    = 0
+
     let mask = new_cap - 1
     let i i64 = 0
     for i < old_cap:

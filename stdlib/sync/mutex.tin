@@ -3,10 +3,12 @@
 // stdlib/sync - Mutex (exclusive lock, fiber-aware via TinFastMutex)
 
 fn tin_fmutex2_new() *void                    = extern("_tin_fmutex2_new")
+fn tin_fmutex2_free(m *void)                  = extern("_tin_fmutex2_free")
+
 fn tin_fmutex2_try_lock(m *void, pid i64) i32 = extern("_tin_fmutex2_try_lock")
 fn tin_fmutex2_unlock(m *void)                = extern("_tin_fmutex2_unlock")
-fn tin_fmutex2_free(m *void)                  = extern("_tin_fmutex2_free")
-fn tin_current_pid_mx() i64                   = extern("_tin_current_pid")
+
+fn tin_current_pid_mx() i64 = extern("_tin_current_pid")
 
 struct Mutex =
   _ptr *void

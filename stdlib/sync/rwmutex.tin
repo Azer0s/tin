@@ -2,13 +2,16 @@
 
 // stdlib/sync - RWMutex (reader-writer lock, fiber-aware)
 
-fn tin_frwmutex2_new() *void                       = extern("_tin_frwmutex2_new")
-fn tin_frwmutex2_rlock_try(m *void, pid i64) i32   = extern("_tin_frwmutex2_rlock_try")
-fn tin_frwmutex2_runlock(m *void)                  = extern("_tin_frwmutex2_runlock")
-fn tin_frwmutex2_lock_try(m *void, pid i64) i32    = extern("_tin_frwmutex2_lock_try")
-fn tin_frwmutex2_unlock(m *void)                   = extern("_tin_frwmutex2_unlock")
-fn tin_frwmutex2_free(m *void)                     = extern("_tin_frwmutex2_free")
-fn tin_current_pid_rw() i64                        = extern("_tin_current_pid")
+fn tin_frwmutex2_new() *void                     = extern("_tin_frwmutex2_new")
+fn tin_frwmutex2_free(m *void)                   = extern("_tin_frwmutex2_free")
+
+fn tin_frwmutex2_rlock_try(m *void, pid i64) i32 = extern("_tin_frwmutex2_rlock_try")
+fn tin_frwmutex2_runlock(m *void)                = extern("_tin_frwmutex2_runlock")
+
+fn tin_frwmutex2_lock_try(m *void, pid i64) i32  = extern("_tin_frwmutex2_lock_try")
+fn tin_frwmutex2_unlock(m *void)                 = extern("_tin_frwmutex2_unlock")
+
+fn tin_current_pid_rw() i64 = extern("_tin_current_pid")
 
 struct RWMutex =
   _ptr *void

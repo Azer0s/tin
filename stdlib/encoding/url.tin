@@ -107,7 +107,8 @@ fn url_substr(s string, from i64, to i64) string =
 fn encode_query(params collections::HashMap[string, string]) string =
   let ks = params.keys()
   let n = len(ks)
-  // insertion sort keys
+
+  // Sort keys lexicographically (insertion sort).
   let i i64 = 1
   for i < n:
     let key = ks[i]
@@ -119,7 +120,8 @@ fn encode_query(params collections::HashMap[string, string]) string =
       j = j - 1
     ks[j + 1] = key
     i = i + 1
-  // build result
+
+  // Build result string.
   let result = ""
   let k i64 = 0
   for k < n:

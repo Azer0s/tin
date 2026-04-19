@@ -169,11 +169,8 @@ fn parse_request(buf string) HttpRequest =
   if len(parts) >= 3:
     version = parts[2]
 
-  // Headers start after the first line newline
+  // Headers: start after the first-line newline; parse up to end of header_zone.
   let hdr_start = skip_newline(header_zone, eol, n)
-  // end_pos for header parsing: stop before the trailing \r\n\r\n block.
-  // header_zone already ends at body_start, which is after \r\n\r\n,
-  // so we parse up to the end of header_zone.
   let headers = parse_headers(header_zone, hdr_start, n)
 
   let cl = content_length(headers)
@@ -202,7 +199,7 @@ fn parse_response(buf string) HttpResponse =
   let eol = line_end(header_zone, 0, n)
   let first = strings::substr(header_zone, 0, eol)
 
-  // Split on first space: version | rest
+  // Split on first space: version | rest; split rest on first space: code | reason
   let sp1 = strings::index_of(first, " ")
   let version = ""
   let status_code i32 = 0
@@ -210,7 +207,6 @@ fn parse_response(buf string) HttpResponse =
   if sp1 >= 0:
     version = strings::substr(first, 0, sp1)
     let rest = strings::substr(first, sp1 + 1, len(first))
-    // Split rest on first space: code | reason
     let sp2 = strings::index_of(rest, " ")
     if sp2 >= 0:
       let (code, _) = strings::parse_int32(strings::substr(rest, 0, sp2))

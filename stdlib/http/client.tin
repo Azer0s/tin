@@ -78,11 +78,14 @@ fn parse_url(url string) (bool, string, i32, string) =
 // build_request serializes a request to HTTP/1.1 wire format.
 // client_hdrs are applied first; request hdrs override them on conflict.
 fn build_request(method string, host string, path string, client_hdrs collections::HashMap[string, string], req_hdrs collections::HashMap[string, string], body string) string =
+  // Request line and fixed headers.
   let req = method ++ " " ++ path ++ " HTTP/1.1\r\n"
   req = req ++ "Host: " ++ host ++ "\r\n"
   req = req ++ "Connection: close\r\n"
   if len(body) > 0:
     req = req ++ "Content-Length: {len(body)}\r\n"
+
+  // Client-level headers (skipped if the request overrides them).
   let cks = client_hdrs.keys()
   let i i64 = 0
   for i < len(cks):
@@ -90,12 +93,15 @@ fn build_request(method string, host string, path string, client_hdrs collection
     if !req_hdrs.has(k):
       req = req ++ k ++ ": " ++ client_hdrs.get(k) ++ "\r\n"
     i = i + 1
+
+  // Per-request headers.
   let rks = req_hdrs.keys()
   let j i64 = 0
   for j < len(rks):
     let k = rks[j]
     req = req ++ k ++ ": " ++ req_hdrs.get(k) ++ "\r\n"
     j = j + 1
+
   req = req ++ "\r\n"
   if len(body) > 0:
     req = req ++ body
@@ -159,6 +165,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
   let (use_tls, host, port, path) = parse_url(r.url)
   let req_str = build_request(r.method, host, path, client.headers, r.headers, r.body)
 
+  // Dial and send.
   let (conn, dial_err) = tcp::dial(host, port)
   if dial_err != nil:
     return HttpResponse{
@@ -177,6 +184,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
     raw = await spawn read_all(conn)
   conn.close()
 
+  // Parse response and handle chunked transfer encoding.
   let resp = parse_response(raw)
   let te = strings::to_lower(resp.headers.get_or("transfer-encoding", ""))
   if strings::contains(te, "chunked"):

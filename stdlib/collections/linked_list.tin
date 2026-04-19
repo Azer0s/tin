@@ -72,6 +72,7 @@ struct LinkedList[T](List[T]) =
       this.tail = nil
       this._len = 0
       return val
+
     let cur = this.head
     let i i64 = 1
     for i < this._len - 1:

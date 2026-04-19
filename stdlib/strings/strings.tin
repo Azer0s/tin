@@ -301,11 +301,15 @@ fn parse_float(s string) (f64, Err) =
   let n = len(s)
   if n == 0:
     return (0.0, errors::new("parse_float: empty string"))
+
+  // Optional leading sign.
   let i i64 = 0
   if s[0] == @'-' || s[0] == @'+':
     i = 1
   if i >= n:
     return (0.0, errors::new("parse_float: no digits"))
+
+  // Integer part (and optional decimal point).
   let has_digit = false
   for i < n:
     let c = s[i]
@@ -319,6 +323,8 @@ fn parse_float(s string) (f64, Err) =
     else:
       return (0.0, errors::new("parse_float: invalid character"))
     i = i + 1
+
+  // Fractional part.
   for i < n:
     let c = s[i]
     if is_digit(c):
@@ -329,6 +335,8 @@ fn parse_float(s string) (f64, Err) =
     else:
       return (0.0, errors::new("parse_float: invalid character"))
     i = i + 1
+
+  // Exponent part.
   if i < n:
     if s[i] == @'-' || s[i] == @'+':
       i = i + 1
@@ -338,6 +346,7 @@ fn parse_float(s string) (f64, Err) =
       if !is_digit(s[i]):
         return (0.0, errors::new("parse_float: invalid exponent"))
       i = i + 1
+
   if !has_digit:
     return (0.0, errors::new("parse_float: no digits"))
   return (atof(s), nil)

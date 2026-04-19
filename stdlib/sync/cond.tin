@@ -4,12 +4,14 @@
 
 use "./mutex"
 
-fn tin_fcond2_new() *void                  = extern("_tin_fcond2_new")
-fn tin_fcond2_add_waiter(c *void, pid i64) = extern("_tin_fcond2_add_waiter")
-fn tin_fcond2_signal(c *void)              = extern("_tin_fcond2_signal")
-fn tin_fcond2_broadcast(c *void)           = extern("_tin_fcond2_broadcast")
-fn tin_fcond2_free(c *void)                = extern("_tin_fcond2_free")
-fn tin_current_pid_cond() i64              = extern("_tin_current_pid")
+fn tin_fcond2_new() *void                        = extern("_tin_fcond2_new")
+fn tin_fcond2_free(c *void)                      = extern("_tin_fcond2_free")
+
+fn tin_fcond2_add_waiter(c *void, pid i64)       = extern("_tin_fcond2_add_waiter")
+fn tin_fcond2_signal(c *void)                    = extern("_tin_fcond2_signal")
+fn tin_fcond2_broadcast(c *void)                 = extern("_tin_fcond2_broadcast")
+
+fn tin_current_pid_cond() i64                    = extern("_tin_current_pid")
 fn tin_fmutex2_try_lock_c(m *void, pid i64) i32 = extern("_tin_fmutex2_try_lock")
 
 struct Cond =
@@ -23,6 +25,7 @@ struct Cond =
     tin_fcond2_add_waiter(this._ptr, pid)
     mu.unlock()
     yield
+
     for true:
       if tin_fmutex2_try_lock_c(mu._ptr, pid) != 0:
         return

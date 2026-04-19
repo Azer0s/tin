@@ -77,14 +77,16 @@ struct Match =
 
 // Internal exec helper
 
+
 fn exec_match(code *void, subject string, start i64) Match =
-  let slen    = len(subject)
-  let ovsize  i32 = 30          // supports up to 9 capture groups
-  let ov      = mem::malloc(ovsize as i64 * 4) as *i32
-  let rc i32  = pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
+  let slen   = len(subject)
+  let ovsize i32 = 30          // supports up to 9 capture groups
+  let ov     = mem::malloc(ovsize as i64 * 4) as *i32
+  let rc i32 = pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
   if rc < 0:
     mem::free(ov as *void)
     return Match{_matched: false, _groups: [], _begs: [], _ends: []}
+
   let groups [string] = []
   let begs   [i64]    = []
   let ends   [i64]    = []
@@ -126,6 +128,7 @@ struct Regex =
 
   // find_all returns all non-overlapping matches of the full pattern in s.
   fn find_all(this Regex, s string) [string] =
+
     let results [string] = []
     if this._code == 0 as *void:
       return results
@@ -148,8 +151,8 @@ struct Regex =
 // compile compiles a PCRE pattern and returns a Regex.
 // Check is_err() before using.
 fn compile(pattern string) Regex =
-  let errptr  *byte = 0 as *byte
-  let erroff  i32   = 0
+  let errptr *byte = 0 as *byte
+  let erroff i32   = 0
   let code = pcre_compile(pattern, 0, &errptr, &erroff, 0 as *byte)
   if code == 0 as *void:
     let msg = "regex compile error"

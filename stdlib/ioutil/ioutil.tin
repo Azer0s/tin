@@ -45,6 +45,7 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
   let cap  i64 = 256
   let n    i64 = 0
   let done = false
+
   loop:
     if done: break
     let rd = await r.read(tmp, 4096)
@@ -61,6 +62,7 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
         done = true
         break
       i = i + 1
+
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
   let s string = tin_bytes_from_buf_c(out, n) as string
@@ -72,6 +74,7 @@ fn{#async} write_string_impl(w io::AsyncWriter, s string) =
   let ptr  = tin_string_data_c(s)
   let n    = len(s)
   let sent i64 = 0
+
   loop:
     if sent >= n: break
     let r = await w.write(ptr + sent, n - sent)
@@ -81,11 +84,13 @@ fn{#async} write_string_impl(w io::AsyncWriter, s string) =
 fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
   let tmp = mem::malloc(n) as *byte
   let got i64 = 0
+
   loop:
     if got >= n: break
     let rd = await r.read(tmp + got, n - got)
     if rd <= 0: break
     got = got + rd
+
   let result = tin_bytes_from_buf_c(tmp, got)
   mem::free(tmp as *void)
   return result
@@ -96,6 +101,7 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
   let cap  i64 = 256
   let n    i64 = 0
   let done = false
+
   loop:
     if done: break
     let rd = await r.read(tmp, 4096)
@@ -112,6 +118,7 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
         done = true
         break
       i = i + 1
+
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   let result = tin_bytes_from_buf_c(out, n)
   mem::free(tmp as *void)
@@ -124,6 +131,7 @@ fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
     return
   let ptr  = &data[0]
   let sent i64 = 0
+
   loop:
     if sent >= n: break
     let r = await w.write(ptr + sent, n - sent)
