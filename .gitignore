@@ -41,3 +41,7 @@ massif.out.*
 
 **/*.orig
 **/*.rej
+
+# Compiled tin binaries (dev builds)
+/tin_*
+/libs/
