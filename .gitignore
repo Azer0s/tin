@@ -25,6 +25,13 @@ examples/bench/channel_latency
 examples/bench/spawn_throughput
 examples/bench/yield_overhead
 examples/test_json
+examples/snake
+examples/raylib_demo
+examples/c_interop_exotic
+examples/http_example
+examples/test_http_client
+examples/io_stress/string_pipeline
+examples/stress_tests/heap_promotion
 bench/bin/
 bench/results*.md
 bench/rust/target/

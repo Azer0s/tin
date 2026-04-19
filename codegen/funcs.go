@@ -1458,6 +1458,19 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 
+	// Attach a DISubprogram so lldb/gdb can resolve `main` to the user's
+	// source file. The implicit main spans all top-level statements; use the
+	// first statement's line as the scope line.
+	mainLine := 1
+	if len(stmts) > 0 && stmts[0].Pos().Line > 0 {
+		mainLine = stmts[0].Pos().Line
+	}
+
+	prevDbgScope := cg.diCurrentScope
+	cg.emitDbgSubprogramForSynthetic(f, "main", mainLine)
+
+	defer func() { cg.diCurrentScope = prevDbgScope }()
+
 	// Emit fiber init if the program uses any fiber features.
 	entry = cg.emitFiberMainWrap(entry)
 
@@ -1488,6 +1501,8 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 		cg.emitFiberMainEnd(entry)
 		entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
+
+	cg.ensureAllCallsHaveDbg(f)
 
 	cg.curFn = prevFn
 	cg.curScope = prevScope

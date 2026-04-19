@@ -1197,6 +1197,15 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			cg.curFn = wf
 			cg.curScope = newScope(cg.curScope)
 
+			// Attach a DISubprogram so `br set -n main` in lldb/gdb lands on
+			// the wrapper and shows source. Use line 1 of the primary source
+			// file as the scope line; the real user main (compiled as
+			// _tin_user_main) carries its own DISubprogram with the exact line.
+			prevDbgScope := cg.diCurrentScope
+			cg.emitDbgSubprogramForSynthetic(wf, "main", 1)
+
+			defer func() { cg.diCurrentScope = prevDbgScope }()
+
 			// Emit fiber init + io init when the program uses fiber features.
 			wb = cg.emitFiberMainWrap(wb)
 
@@ -1263,6 +1272,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					wb.NewRet(retVal)
 				}
 			}
+
+			cg.ensureAllCallsHaveDbg(wf)
 
 			cg.curFn = prevFn
 			cg.curScope = prevScope

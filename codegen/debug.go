@@ -671,6 +671,46 @@ func (cg *CodeGen) emitDbgSubprogram(n *ast.FuncDecl, f *ir.Func, filename strin
 	return subprog
 }
 
+// emitDbgSubprogramForSynthetic creates a DISubprogram for a compiler-
+// generated function (e.g. the implicit `main` wrapping top-level statements,
+// or the test runner). Unlike emitDbgSubprogram it does not require an
+// ast.FuncDecl; the caller supplies the user-visible name and source line.
+func (cg *CodeGen) emitDbgSubprogramForSynthetic(f *ir.Func, name string, line int) *metadata.DISubprogram {
+	if !cg.debugMode || cg.diCU == nil {
+		return nil
+	}
+
+	diFile := cg.diFileFor(cg.filename)
+
+	typesTuple := &metadata.Tuple{MetadataID: -1, Fields: []metadata.Field{cg.diTypeFor("i32")}}
+	cg.regMD(typesTuple)
+
+	subroutineType := &metadata.DISubroutineType{MetadataID: -1, Types: typesTuple}
+	cg.regMD(subroutineType)
+
+	subprog := &metadata.DISubprogram{
+		MetadataID:   -1,
+		Distinct:     true,
+		Name:         name,
+		LinkageName:  f.Name(),
+		Scope:        diFile,
+		File:         diFile,
+		Line:         int64(line),
+		Type:         subroutineType,
+		IsDefinition: true,
+		ScopeLine:    int64(line),
+		Flags:        enum.DIFlagPrototyped,
+		SPFlags:      enum.DISPFlagDefinition,
+		Unit:         cg.diCU,
+	}
+	cg.regMD(subprog)
+
+	f.Metadata = append(f.Metadata, &metadata.Attachment{Name: "dbg", Node: subprog})
+	cg.diCurrentScope = subprog
+
+	return subprog
+}
+
 // emitDbgDeclare emits a call to llvm.dbg.declare for a local variable.
 // alloca is the stack alloca for the variable.
 // name is the variable name, line is the source line, argNo is the 1-based

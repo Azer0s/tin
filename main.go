@@ -893,7 +893,26 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	clang.Stdout = os.Stdout
 	clang.Stderr = os.Stderr
 
-	return clang.Run()
+	if err := clang.Run(); err != nil {
+		return err
+	}
+
+	// On macOS, clang -g emits DWARF into object files and stores a debug map
+	// in the executable pointing back at those objects. Because our pipeline
+	// uses temp .o files that are discarded, the debug map references nothing
+	// by the time lldb loads the binary. dsymutil consolidates DWARF into a
+	// .dSYM bundle beside the binary, which lldb picks up automatically.
+	if isDebug && runtime.GOOS == "darwin" && !libMode {
+		dsym := exec.Command("dsymutil", outBin)
+		dsym.Stdout = os.Stdout
+		dsym.Stderr = os.Stderr
+
+		if err := dsym.Run(); err != nil {
+			return fmt.Errorf("dsymutil failed: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // collectTinFiles recursively collects all .tin file paths under root,
