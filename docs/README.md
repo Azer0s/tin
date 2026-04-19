@@ -22,6 +22,12 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [13 - Control Tags](13-control-tags.md) | `#pure`, `#sideffect`, `#no_recurse`, `#no_thread`, `#allow_sideffect` |
 | [14 - Fibers & Channels](14-fibers.md) | `spawn`, `await`, `yield`, `await match`, `Channel[T]`, `Future[T]`, async I/O, M:N scheduler |
 
+## Contributing
+
+| Document | Contents |
+|----------|----------|
+| [Style Guide](style.md) | Code style for stdlib `.tin` files: spacing, comments, extern grouping, exports |
+
 ## Standard Library
 
 | Document                           | Contents                                                                                       |
