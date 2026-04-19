@@ -656,15 +656,16 @@ func clangMajorVersion() int {
 // produce valid IR for the installed clang version:
 //
 //  1. "presplitcoroutine" string attr -> keyword attr (required by coro-split).
-//  2. On macOS Apple Silicon with clang 21, llvm.coro.end requires i1 return
-//     type and ptr argument; patch the declaration and call sites there.
+//  2. On arm64 (both macOS and Linux), llvm.coro.end requires i1 return type
+//     and ptr argument; patch the declaration and call sites there.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
 
-	// Observed on macOS Apple Silicon (arm64) with clang 21: llvm.coro.end
-	// requires i1 return type and ptr argument (rather than void/i8*).
-	// Use a named result to avoid shifting implicit SSA slot numbering.
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && clangMajorVersion() == 21 {
+	// arm64 LLVM verifiers reject llvm.coro.end declared as void/i8*: the
+	// intrinsic's canonical signature is i1(ptr, i1, token).  Patch the
+	// declaration and call sites to match.  Use a named result (%_coroend)
+	// to avoid shifting implicit SSA slot numbering.
+	if runtime.GOARCH == "arm64" {
 		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
 		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
 	}
