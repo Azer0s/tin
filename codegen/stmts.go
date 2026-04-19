@@ -405,6 +405,7 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 	if pos := node.Pos(); pos.Line != 0 {
 		cg.currentPos = pos
 	}
+
 	var dbgInstBefore int
 	if cg.debugMode && block != nil {
 		dbgInstBefore = len(block.Insts)

@@ -42,6 +42,7 @@ func (cg *CodeGen) initDebugInfo() {
 	if err != nil {
 		absFile = cg.filename
 	}
+
 	dir := filepath.Dir(absFile)
 	base := filepath.Base(absFile)
 
@@ -64,6 +65,7 @@ func (cg *CodeGen) initDebugInfo() {
 	if cg.mod.NamedMetadataDefs == nil {
 		cg.mod.NamedMetadataDefs = make(map[string]*metadata.NamedDef)
 	}
+
 	cg.mod.NamedMetadataDefs["llvm.dbg.cu"] = &metadata.NamedDef{
 		Name:  "llvm.dbg.cu",
 		Nodes: []metadata.Node{diCU},
@@ -81,6 +83,7 @@ func (cg *CodeGen) initDebugInfo() {
 		&metadata.String{Value: "Debug Info Version"},
 		constant.NewInt(irtypes.I32, 3),
 	}}
+
 	cg.regMD(flagsTuple1)
 	cg.regMD(flagsTuple2)
 
@@ -96,17 +99,21 @@ func (cg *CodeGen) diFileFor(filename string) *metadata.DIFile {
 	if f, ok := cg.diFiles[filename]; ok {
 		return f
 	}
+
 	absFile, err := filepath.Abs(filename)
 	if err != nil {
 		absFile = filename
 	}
+
 	diFile := &metadata.DIFile{
 		MetadataID: -1,
 		Filename:   filepath.Base(absFile),
 		Directory:  filepath.Dir(absFile),
 	}
+
 	cg.diFiles[filename] = diFile
 	cg.regMD(diFile)
+
 	return diFile
 }
 
@@ -116,6 +123,7 @@ func typeExprName(te ast.TypeExpr) string {
 	if te == nil {
 		return "i64"
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		return t.Name
@@ -127,11 +135,13 @@ func typeExprName(te ast.TypeExpr) string {
 		for _, p := range t.TypeParams {
 			key += "__" + typeExprName(p)
 		}
+
 		return key
 	case *ast.ArrayType:
 		if t.Size < 0 {
 			return "[" + typeExprName(t.Elem) + "]"
 		}
+
 		return fmt.Sprintf("[%s;%d]", typeExprName(t.Elem), t.Size)
 	default:
 		return "i64"
@@ -160,8 +170,12 @@ func llvmTypeAlignBytes(t irtypes.Type) int {
 			return 2
 		case irtypes.FloatKindFloat:
 			return 4
-		default:
+		case irtypes.FloatKindDouble:
 			return 8
+		case irtypes.FloatKindFP128, irtypes.FloatKindPPC_FP128:
+			return 16
+		case irtypes.FloatKindX86_FP80:
+			return 16
 		}
 	case *irtypes.PointerType:
 		return 8
@@ -172,15 +186,19 @@ func llvmTypeAlignBytes(t irtypes.Type) int {
 	default:
 		return 8
 	}
+
+	return 8
 }
 
 func llvmStructAlignBytes(st *irtypes.StructType) int {
 	align := 1
+
 	for _, f := range st.Fields {
 		if a := llvmTypeAlignBytes(f); a > align {
 			align = a
 		}
 	}
+
 	return align
 }
 
@@ -196,41 +214,54 @@ func llvmTypeSizeBytes(t irtypes.Type) int {
 			return 2
 		case irtypes.FloatKindFloat:
 			return 4
-		default:
+		case irtypes.FloatKindDouble:
 			return 8
+		case irtypes.FloatKindFP128, irtypes.FloatKindPPC_FP128:
+			return 16
+		case irtypes.FloatKindX86_FP80:
+			return 10 // 80-bit stored in 10 bytes
 		}
 	case *irtypes.PointerType:
 		return 8
 	case *irtypes.StructType:
 		offset := 0
+
 		for _, f := range v.Fields {
 			a := llvmTypeAlignBytes(f)
 			offset = (offset + a - 1) &^ (a - 1)
 			offset += llvmTypeSizeBytes(f)
 		}
+
 		if a := llvmStructAlignBytes(v); a > 1 {
 			offset = (offset + a - 1) &^ (a - 1)
 		}
+
 		return offset
 	case *irtypes.ArrayType:
 		return int(v.Len) * llvmTypeSizeBytes(v.ElemType)
 	default:
 		return 8
 	}
+
+	return 8
 }
 
 // fieldBitOffset returns the bit offset of field at index fieldIdx in st,
 // using standard LLVM data layout alignment rules.
 func fieldBitOffset(st *irtypes.StructType, fieldIdx int) uint64 {
 	offset := 0
+
 	for i, f := range st.Fields {
 		a := llvmTypeAlignBytes(f)
 		offset = (offset + a - 1) &^ (a - 1)
+
 		if i == fieldIdx {
 			return uint64(offset * 8)
 		}
+
 		offset += llvmTypeSizeBytes(f)
 	}
+
 	return 0
 }
 
@@ -246,6 +277,7 @@ func (cg *CodeGen) diTypeFromLLVM(t irtypes.Type) metadata.Field {
 	if t == nil {
 		return cg.diTypeFor("i64")
 	}
+
 	switch v := t.(type) {
 	case *irtypes.IntType:
 		switch v.BitSize {
@@ -265,6 +297,8 @@ func (cg *CodeGen) diTypeFromLLVM(t irtypes.Type) metadata.Field {
 		case irtypes.FloatKindFloat:
 			return cg.diTypeFor("f32")
 		case irtypes.FloatKindDouble:
+			return cg.diTypeFor("f64")
+		case irtypes.FloatKindHalf, irtypes.FloatKindFP128, irtypes.FloatKindX86_FP80, irtypes.FloatKindPPC_FP128:
 			return cg.diTypeFor("f64")
 		}
 	case *irtypes.PointerType:
@@ -287,6 +321,7 @@ func (cg *CodeGen) diTypeFromLLVM(t irtypes.Type) metadata.Field {
 			}
 		}
 	}
+
 	return cg.diTypeFor("i64")
 }
 
@@ -299,6 +334,7 @@ func (cg *CodeGen) diTypeFor(tinTypeName string) metadata.Field {
 	}
 
 	var t metadata.Field
+
 	switch tinTypeName {
 	case "i8":
 		bt := &metadata.DIBasicType{MetadataID: -1, Name: "i8", Size: 8, Encoding: enum.DwarfAttEncodingSigned}
@@ -379,6 +415,7 @@ func (cg *CodeGen) diTypeFor(tinTypeName string) metadata.Field {
 	}
 
 	cg.diTypeCache[tinTypeName] = t
+
 	return t
 }
 
@@ -387,6 +424,7 @@ func (cg *CodeGen) diTypeForExpr(te ast.TypeExpr) metadata.Field {
 	if te == nil {
 		return cg.diTypeFor("i64")
 	}
+
 	return cg.diTypeFor(typeExprName(te))
 }
 
@@ -415,6 +453,7 @@ func (cg *CodeGen) diStringType() *metadata.DICompositeType {
 		Elements:   elems,
 	}
 	cg.regMD(ct)
+
 	return ct
 }
 
@@ -426,8 +465,10 @@ func (cg *CodeGen) diArrayOrSliceType(name string) metadata.Field {
 	if idx := strings.Index(inner, ";"); idx >= 0 {
 		// Fixed array: [T;N]
 		elemName := strings.TrimSpace(inner[:idx])
+
 		var count int64
-		fmt.Sscanf(strings.TrimSpace(inner[idx+1:]), "%d", &count)
+
+		_, _ = fmt.Sscanf(strings.TrimSpace(inner[idx+1:]), "%d", &count)
 
 		elemType := cg.diTypeFor(elemName)
 		// Compute element size in bits.
@@ -452,6 +493,7 @@ func (cg *CodeGen) diArrayOrSliceType(name string) metadata.Field {
 			Elements:   rangeTuple,
 		}
 		cg.regMD(ct)
+
 		return ct
 	}
 
@@ -479,6 +521,7 @@ func (cg *CodeGen) diArrayOrSliceType(name string) metadata.Field {
 		Elements:   elems,
 	}
 	cg.regMD(ct)
+
 	return ct
 }
 
@@ -506,6 +549,7 @@ func (cg *CodeGen) diStructTypeFromRegistry(structKey string, st *irtypes.Struct
 	ufo := cg.userFieldOffset(structKey)
 
 	var members []metadata.Field
+
 	for i, fieldName := range fieldNames {
 		llvmIdx := ufo + i
 		offsetBits := fieldBitOffset(st, llvmIdx)
@@ -552,6 +596,7 @@ func (cg *CodeGen) ensureDbgDeclareFn() *ir.Func {
 	if cg.dbgDeclareFn != nil {
 		return cg.dbgDeclareFn
 	}
+
 	metaTy := irtypes.Metadata
 	f := cg.mod.NewFunc("llvm.dbg.declare", irtypes.Void,
 		ir.NewParam("", metaTy),
@@ -559,6 +604,7 @@ func (cg *CodeGen) ensureDbgDeclareFn() *ir.Func {
 		ir.NewParam("", metaTy),
 	)
 	cg.dbgDeclareFn = f
+
 	return f
 }
 
@@ -581,12 +627,15 @@ func (cg *CodeGen) emitDbgSubprogram(n *ast.FuncDecl, f *ir.Func, filename strin
 	} else {
 		typeFields = append(typeFields, metadata.Null)
 	}
+
 	for _, p := range n.Params {
 		if !p.IsVarArgs {
 			typeFields = append(typeFields, cg.diTypeForExpr(p.Type))
 		}
 	}
+
 	typesTuple := &metadata.Tuple{MetadataID: -1, Fields: typeFields}
+
 	cg.regMD(typesTuple)
 
 	subroutineType := &metadata.DISubroutineType{
@@ -672,6 +721,7 @@ func (cg *CodeGen) pushLexicalBlock(line int) func() {
 	if !cg.debugMode || cg.diCurrentScope == nil {
 		return func() {}
 	}
+
 	prev := cg.diCurrentScope
 	lb := &metadata.DILexicalBlock{
 		MetadataID: -1,
@@ -682,6 +732,7 @@ func (cg *CodeGen) pushLexicalBlock(line int) func() {
 	}
 	cg.regMD(lb)
 	cg.diCurrentScope = lb
+
 	return func() { cg.diCurrentScope = prev }
 }
 
@@ -691,13 +742,16 @@ func (cg *CodeGen) attachDbgLoc(inst ir.Instruction, line, col int64) {
 	if !cg.debugMode || cg.diCurrentScope == nil {
 		return
 	}
+
 	diLoc := &metadata.DILocation{
 		MetadataID: -1,
 		Line:       line,
 		Column:     col,
 		Scope:      cg.diCurrentScope,
 	}
+
 	cg.regMD(diLoc)
+
 	attachMetadataToInst(inst, &metadata.Attachment{Name: "dbg", Node: diLoc})
 }
 
@@ -707,6 +761,7 @@ func (cg *CodeGen) attachCurrentDbgLoc(inst ir.Instruction) {
 	if !cg.debugMode || cg.diCurrentScope == nil || inst == nil {
 		return
 	}
+
 	cg.attachDbgLoc(inst, int64(cg.currentPos.Line), int64(cg.currentPos.Col))
 }
 
@@ -719,22 +774,30 @@ func (cg *CodeGen) ensureAllCallsHaveDbg(fn *ir.Func) {
 	if !cg.debugMode || cg.diCurrentScope == nil {
 		return
 	}
+
 	zeroLoc := &metadata.DILocation{MetadataID: -1, Line: 0, Scope: cg.diCurrentScope}
+
 	cg.regMD(zeroLoc)
+
 	att := &metadata.Attachment{Name: "dbg", Node: zeroLoc}
+
 	for _, block := range fn.Blocks {
 		for _, inst := range block.Insts {
 			call, ok := inst.(*ir.InstCall)
 			if !ok {
 				continue
 			}
+
 			hasDbg := false
+
 			for _, m := range call.Metadata {
 				if m.Name == "dbg" {
 					hasDbg = true
+
 					break
 				}
 			}
+
 			if !hasDbg {
 				call.Metadata = append(call.Metadata, att)
 			}
@@ -748,9 +811,11 @@ func firstInstAfter(block *ir.Block, nBefore int) ir.Instruction {
 	if block == nil {
 		return nil
 	}
+
 	if len(block.Insts) > nBefore {
 		return block.Insts[nBefore]
 	}
+
 	return nil
 }
 
@@ -762,6 +827,7 @@ func attachMetadataToInst(inst ir.Instruction, att *metadata.Attachment) {
 	if inst == nil || att == nil {
 		return
 	}
+
 	switch v := inst.(type) {
 	case *ir.InstAlloca:
 		v.Metadata = append(v.Metadata, att)

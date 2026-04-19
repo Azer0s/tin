@@ -269,18 +269,21 @@ func main() {
 
 	// Skip any flags that appear before the file argument.
 	for fileArgIdx < len(os.Args) {
-		a := os.Args[fileArgIdx]
-		if a == "-g" {
+		switch a := os.Args[fileArgIdx]; a {
+		case "-g":
 			fileArgIdx++
-		} else if a == "--stdlib" || a == "--lib-root" {
+		case "--stdlib", "--lib-root":
 			fileArgIdx += 2
-		} else {
-			break
+		default:
+			goto doneFlags
 		}
 	}
 
+doneFlags:
+
 	if fileArgIdx >= len(os.Args) {
 		_, _ = fmt.Fprint(os.Stderr, usage)
+
 		os.Exit(1)
 	}
 
@@ -874,6 +877,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	if isDebug {
 		args = append(args, "-g")
 	}
+
 	args = append(args, llInputFile)
 	if _, err := os.Stat(rtC); err == nil {
 		args = append(args, rtC)
@@ -1261,6 +1265,7 @@ func patchMissingDILabelLine(ir string) string {
 			}
 		}
 	}
+
 	return strings.Join(lines, "\n")
 }
 

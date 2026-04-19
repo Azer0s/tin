@@ -147,6 +147,7 @@ func (p *Parser) parseVarDecl() (*ast.VarDecl, error) {
 
 	node := &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -157,6 +158,7 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 	if p.match(lexer.NEWLINE, lexer.DEDENT, lexer.EOF, lexer.SEMI) {
 		node := &ast.ReturnStmt{}
 		node.SetPos(pos)
+
 		return node, nil
 	}
 
@@ -167,6 +169,7 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 
 	node := &ast.ReturnStmt{Value: val}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -237,6 +240,7 @@ func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
 
 	node := &ast.EchoStmt{Value: val}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -1351,6 +1355,7 @@ func (p *Parser) parseLetStmt() (ast.Node, error) {
 
 	node := &ast.VarDecl{Name: nameTok.Literal, Type: typ, Value: val, IsConst: isConst}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -1483,6 +1488,7 @@ func (p *Parser) parseArrayDestructDecl(isConst bool, pos ast.Pos) (*ast.ArrayDe
 
 	node := &ast.ArrayDestructDecl{Names: names, ElemTypes: elemTypes, IsAny: isAny, NamedType: namedType, Value: val}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -1554,6 +1560,7 @@ func (p *Parser) parseStructDestructDecl(isConst bool, pos ast.Pos) (*ast.Struct
 
 	node := &ast.StructDestructDecl{Names: names, VarNames: varNames, StructType: structType, Value: val}
 	node.SetPos(pos)
+
 	return node, nil
 }
 
@@ -1591,6 +1598,7 @@ func (p *Parser) parseTupleDestructDecl(isConst bool, pos ast.Pos) (*ast.TupleDe
 
 	node := &ast.TupleDestructDecl{IsConst: isConst, Names: names, Value: val}
 	node.SetPos(pos)
+
 	return node, nil
 }
 

@@ -23,9 +23,9 @@ type Node interface {
 // base embeds position; all nodes embed this
 type base struct{ pos Pos }
 
-func (b base) Pos() Pos        { return b.pos }
-func (b base) nodeMarker()     {}
-func (b *base) SetPos(p Pos)   { b.pos = p }
+func (b base) Pos() Pos      { return b.pos }
+func (b base) nodeMarker()   {}
+func (b *base) SetPos(p Pos) { b.pos = p }
 
 // makeBase returns a base with the given source position.
 // Used by the node constructors below to record locations.
