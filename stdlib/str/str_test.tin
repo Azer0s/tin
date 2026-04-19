@@ -1,12 +1,11 @@
 // stdlib/str/str_test.tin
 //
 // Tests for the str stdlib: strlen, strcmp, strncmp, strcasecmp,
-// strstr, atoi, atol, atof, parse_int, parse_int32, parse_float.
+// strstr, atoi, atol, atof.
 // Run with: tin test stdlib/str/str_test.tin
 
 use assert
 use str
-use errors
 
 // strlen
 
@@ -55,11 +54,6 @@ test "strcasecmp equal mixed case" =
 test "strcasecmp differ" =
   assert::ok(str::strcasecmp("abc", "xyz") != 0)
 
-// strstr
-
-// strstr returns a *char - tested via strchr which gives comparable results.
-// Direct null-pointer comparison omitted as the null literal is context-specific.
-
 // atoi / atol
 
 test "atoi positive" =
@@ -87,73 +81,3 @@ test "atof negative" =
 
 test "atof integer string" =
   assert::equals(str::atof("10"), 10.0)
-
-// parse_int
-
-test "parse_int positive" =
-  let (v, err) = str::parse_int("42")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 42)
-
-test "parse_int negative" =
-  let (v, err) = str::parse_int("-7")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 0 - 7)
-
-test "parse_int with plus sign" =
-  let (v, err) = str::parse_int("+5")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 5)
-
-test "parse_int empty string is error" =
-  let (_, err) = str::parse_int("")
-  assert::ok(errors::has(err))
-
-test "parse_int sign only is error" =
-  let (_, err) = str::parse_int("-")
-  assert::ok(errors::has(err))
-
-test "parse_int invalid char is error" =
-  let (_, err) = str::parse_int("12x")
-  assert::ok(errors::has(err))
-
-// parse_int32
-
-test "parse_int32 basic" =
-  let (v, err) = str::parse_int32("100")
-  assert::ok(!errors::has(err))
-  assert::equals(v as i64, 100)
-
-test "parse_int32 invalid is error" =
-  let (_, err) = str::parse_int32("abc")
-  assert::ok(errors::has(err))
-
-// parse_float
-
-test "parse_float positive" =
-  let (v, err) = str::parse_float("3.14")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 3.14)
-
-test "parse_float negative" =
-  let (v, err) = str::parse_float("-2.5")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 0.0 - 2.5)
-
-test "parse_float integer" =
-  let (v, err) = str::parse_float("10")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 10.0)
-
-test "parse_float exponent" =
-  let (v, err) = str::parse_float("1.5e2")
-  assert::ok(!errors::has(err))
-  assert::equals(v, 150.0)
-
-test "parse_float empty is error" =
-  let (_, err) = str::parse_float("")
-  assert::ok(errors::has(err))
-
-test "parse_float invalid is error" =
-  let (_, err) = str::parse_float("abc")
-  assert::ok(errors::has(err))

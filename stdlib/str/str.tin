@@ -1,159 +1,85 @@
-// stdlib/str - String utility functions
+// stdlib/str - Thin wrappers around C string.h functions.
 //
-// Wraps standard C string.h functions
-// Parameters typed as `string` have their fat-pointer automatically unwrapped
-// to char* when calling the underlying C function
-// No extra linker flags required (all in libc)
-
-use errors
-use { Err } from errors
+// Every function here is a direct 1:1 mapping of a C standard library
+// function from <string.h> or <stdio.h>. No logic, no error types, no
+// allocation beyond what the C function itself does.
+//
+// For higher-level string operations (contains, split, trim, etc.) and
+// number parsing (parse_int, parse_float, etc.) use the `strings` package.
+//
+// No extra linker flags required - all functions are in libc.
 
 // Length / comparison
 
-// strlen returns the number of bytes in s (not including the null terminator)
+// strlen returns the number of bytes in s (not including the null terminator).
 fn strlen(s string) i64 = extern("strlen")
 
-// strcmp compares two strings lexicographically
-// Returns 0 if equal, negative if a < b, positive if a > b
+// strcmp compares two strings lexicographically.
+// Returns 0 if equal, negative if a < b, positive if a > b.
 fn strcmp(a string, b string) i32 = extern("strcmp")
 
-// strncmp compares at most n bytes of two strings
+// strncmp compares at most n bytes of two strings.
 fn strncmp(a string, b string, n i64) i32 = extern("strncmp")
 
-// strcasecmp compares two strings ignoring case (POSIX extension)
+// strcasecmp compares two strings ignoring case (POSIX extension).
 fn strcasecmp(a string, b string) i32 = extern("strcasecmp")
 
 // Searching
 
-// strchr finds the first occurrence of character c in s
-// Returns a raw *char pointer (use with care)
+// strchr finds the first occurrence of character c in s.
+// Returns a raw *char pointer, or null if not found.
 fn strchr(s string, c i32) *char = extern("strchr")
 
-// strrchr finds the last occurrence of character c in s
+// strrchr finds the last occurrence of character c in s.
+// Returns a raw *char pointer, or null if not found.
 fn strrchr(s string, c i32) *char = extern("strrchr")
 
-// strstr finds the first occurrence of needle in haystack
-// Returns a raw *char pointer, or null if not found
+// strstr finds the first occurrence of needle in haystack.
+// Returns a raw *char pointer, or null if not found.
 fn strstr(haystack string, needle string) *char = extern("strstr")
 
 // Copy / concatenation
 
-// strcpy copies src (including null terminator) into dst
-// dst must be large enough to hold src. Returns dst
+// strcpy copies src (including null terminator) into dst.
+// dst must be large enough to hold src. Returns dst.
 fn strcpy(dst *char, src string) *char = extern("strcpy")
 
-// strncpy copies at most n bytes of src into dst
+// strncpy copies at most n bytes of src into dst.
 fn strncpy(dst *char, src string, n i64) *char = extern("strncpy")
 
-// strcat appends src to dst. dst must have enough space
+// strcat appends src to dst. dst must have enough space.
 fn strcat(dst *char, src string) *char = extern("strcat")
 
-// strdup duplicates s, returning a newly malloc'd copy
-// The caller must free the result
+// strdup duplicates s, returning a newly malloc'd copy.
+// The caller must free the result.
 fn strdup(s string) string = extern("strdup")
 
 // Conversion
 
-// atoi converts the string s to an i32 integer
+// atoi converts the string s to an i32 integer.
 fn atoi(s string) i32 = extern("atoi")
 
-// atol converts the string s to an i64 integer
+// atol converts the string s to an i64 integer.
 fn atol(s string) i64 = extern("atol")
 
-// atof converts the string s to an f64 floating-point value
+// atof converts the string s to an f64 floating-point value.
 fn atof(s string) f64 = extern("atof")
 
-// strtol converts s to i64, detecting the base automatically (0=auto, 10, 16, ...)
-// endptr receives a pointer to the first non-numeric character; pass null to ignore
+// strtol converts s to i64 in the given base (0=auto-detect, 10, 16, ...).
+// endptr receives a pointer to the first non-numeric character; pass null to ignore.
 fn strtol(s string, endptr **char, base i32) i64 = extern("strtol")
 
-// strtod converts s to f64
+// strtod converts s to f64.
 fn strtod(s string, endptr **char) f64 = extern("strtod")
 
-// sprintf formats a string into buf (which must be large enough)
-// Returns the number of characters written
+// sprintf formats a string into buf (which must be large enough).
+// Returns the number of characters written.
 fn sprintf(buf *char, fmt string, ...) i32 = extern("sprintf")
-
-// is_digit returns true if the byte is an ASCII digit.
-fn is_digit(c byte) bool = return c >= @'0' && c <= @'9'
-
-// parse_int parses s as a decimal i64.
-// Returns (value, Err); Err is nil on success.
-// Accepts an optional leading '-' or '+'.
-fn parse_int(s string) (i64, Err) =
-  let n = len(s)
-  if n == 0:
-    return (0, errors::new("str::parse_int: empty string"))
-  let i i64 = 0
-  if s[0] == @'-' || s[0] == @'+':
-    i = 1
-  if i >= n:
-    return (0, errors::new("str::parse_int: no digits"))
-  for i < n:
-    if !is_digit(s[i]):
-      return (0, errors::new("str::parse_int: invalid character"))
-    i = i + 1
-  return (atol(s), nil)
-
-// parse_int32 parses s as a decimal i32.
-// Returns (value, Err); Err is nil on success.
-fn parse_int32(s string) (i32, Err) =
-  let (v, err) = parse_int(s)
-  return (v as i32, err)
-
-// parse_float parses s as an f64.
-// Returns (value, Err); Err is nil on success.
-// Accepts optional leading sign, digits, decimal point, and exponent.
-fn parse_float(s string) (f64, Err) =
-  let n = len(s)
-  if n == 0:
-    return (0.0, errors::new("str::parse_float: empty string"))
-  let i i64 = 0
-  if s[0] == @'-' || s[0] == @'+':
-    i = 1
-  if i >= n:
-    return (0.0, errors::new("str::parse_float: no digits"))
-  let has_digit = false
-  for i < n:
-    let c = s[i]
-    if is_digit(c):
-      has_digit = true
-    else if c == @'.':
-      i = i + 1
-      break
-    else if c == @'e' || c == @'E':
-      break
-    else:
-      return (0.0, errors::new("str::parse_float: invalid character"))
-    i = i + 1
-  for i < n:
-    let c = s[i]
-    if is_digit(c):
-      has_digit = true
-    else if c == @'e' || c == @'E':
-      i = i + 1
-      break
-    else:
-      return (0.0, errors::new("str::parse_float: invalid character"))
-    i = i + 1
-  if i < n:
-    if s[i] == @'-' || s[i] == @'+':
-      i = i + 1
-    if i >= n:
-      return (0.0, errors::new("str::parse_float: missing exponent digits"))
-    for i < n:
-      if !is_digit(s[i]):
-        return (0.0, errors::new("str::parse_float: invalid exponent"))
-      i = i + 1
-  if !has_digit:
-    return (0.0, errors::new("str::parse_float: no digits"))
-  return (atof(s), nil)
 
 export {
   strlen, strcmp, strncmp, strcasecmp,
   strchr, strrchr, strstr,
   strcpy, strncpy, strcat, strdup,
   atoi, atol, atof, strtol, strtod,
-  sprintf,
-  parse_int, parse_int32, parse_float
+  sprintf
 } as str

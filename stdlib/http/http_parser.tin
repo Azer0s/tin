@@ -13,7 +13,6 @@
 // value caps the body length (excess bytes are ignored).
 
 use strings
-use str
 use collections
 
 // HttpStatus holds common HTTP status codes as named i32 constants.
@@ -139,7 +138,7 @@ fn clip_body(body string, content_length i64) string =
 fn content_length(headers collections::HashMap[string, string]) i64 =
   if !headers.has("content-length"):
     return -1
-  let (v, err) = str::parse_int(headers.get("content-length"))
+  let (v, err) = strings::parse_int(headers.get("content-length"))
   if err != nil:
     return -1
   return v
@@ -214,11 +213,11 @@ fn parse_response(buf string) HttpResponse =
     // Split rest on first space: code | reason
     let sp2 = strings::index_of(rest, " ")
     if sp2 >= 0:
-      let (code, _) = str::parse_int32(strings::substr(rest, 0, sp2))
+      let (code, _) = strings::parse_int32(strings::substr(rest, 0, sp2))
       status_code = code
       reason = strings::trim(strings::substr(rest, sp2 + 1, len(rest)))
     else:
-      let (code, _) = str::parse_int32(rest)
+      let (code, _) = strings::parse_int32(rest)
       status_code = code
 
   let hdr_start = skip_newline(header_zone, eol, n)

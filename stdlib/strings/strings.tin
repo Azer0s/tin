@@ -1,9 +1,14 @@
-// stdlib/strings - higher-level string operations
+// stdlib/strings - higher-level string operations and number parsing.
 //
 // All functions are implemented in pure Tin with no C helpers.
 // Single-byte search operations use a 16-byte-at-a-time SIMD fast path.
+//
+// parse_int, parse_int32, parse_float live here (not in str) because they
+// are high-level Tin functions, not thin wrappers around C string.h.
 
 use simd
+use errors
+use { Err } from errors
 
 // simd_find_first returns the 0-based position of the lowest set bit in a
 // 16-bit movemask result.  Called only when mask != 0, so the loop always
@@ -259,6 +264,84 @@ fn trim_right(s string) string =
     end = end - 1
   return substr(s, 0, end)
 
+fn atol(s string) i64 = extern("atol")
+fn atof(s string) f64 = extern("atof")
+
+// is_digit returns true if the byte is an ASCII digit.
+fn is_digit(c byte) bool = return c >= @'0' && c <= @'9'
+
+// parse_int parses s as a decimal i64.
+// Returns (value, Err); Err is nil on success.
+// Accepts an optional leading '-' or '+'.
+fn parse_int(s string) (i64, Err) =
+  let n = len(s)
+  if n == 0:
+    return (0, errors::new("parse_int: empty string"))
+  let i i64 = 0
+  if s[0] == @'-' || s[0] == @'+':
+    i = 1
+  if i >= n:
+    return (0, errors::new("parse_int: no digits"))
+  for i < n:
+    if !is_digit(s[i]):
+      return (0, errors::new("parse_int: invalid character"))
+    i = i + 1
+  return (atol(s), nil)
+
+// parse_int32 parses s as a decimal i32.
+// Returns (value, Err); Err is nil on success.
+fn parse_int32(s string) (i32, Err) =
+  let (v, err) = parse_int(s)
+  return (v as i32, err)
+
+// parse_float parses s as an f64.
+// Returns (value, Err); Err is nil on success.
+// Accepts optional leading sign, digits, decimal point, and exponent.
+fn parse_float(s string) (f64, Err) =
+  let n = len(s)
+  if n == 0:
+    return (0.0, errors::new("parse_float: empty string"))
+  let i i64 = 0
+  if s[0] == @'-' || s[0] == @'+':
+    i = 1
+  if i >= n:
+    return (0.0, errors::new("parse_float: no digits"))
+  let has_digit = false
+  for i < n:
+    let c = s[i]
+    if is_digit(c):
+      has_digit = true
+    else if c == @'.':
+      i = i + 1
+      break
+    else if c == @'e' || c == @'E':
+      break
+    else:
+      return (0.0, errors::new("parse_float: invalid character"))
+    i = i + 1
+  for i < n:
+    let c = s[i]
+    if is_digit(c):
+      has_digit = true
+    else if c == @'e' || c == @'E':
+      i = i + 1
+      break
+    else:
+      return (0.0, errors::new("parse_float: invalid character"))
+    i = i + 1
+  if i < n:
+    if s[i] == @'-' || s[i] == @'+':
+      i = i + 1
+    if i >= n:
+      return (0.0, errors::new("parse_float: missing exponent digits"))
+    for i < n:
+      if !is_digit(s[i]):
+        return (0.0, errors::new("parse_float: invalid exponent"))
+      i = i + 1
+  if !has_digit:
+    return (0.0, errors::new("parse_float: no digits"))
+  return (atof(s), nil)
+
 export {
   substr,
   contains, count,
@@ -266,5 +349,6 @@ export {
   index_of, last_index_of,
   join, repeat, replace, split,
   to_lower, to_upper,
-  trim, trim_left, trim_right
+  trim, trim_left, trim_right,
+  parse_int, parse_int32, parse_float
 } as strings

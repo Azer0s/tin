@@ -1,5 +1,5 @@
 use raylib
-use str
+use strings
 
 raylib::init_window(600, 640, "Snake")
 raylib::set_target_fps(60)
@@ -24,7 +24,7 @@ sy[1] = 10
 sx[2] = 10
 sy[2] = 10
 
-let (grid, _) = str::parse_int("20")
+let (grid, _) = strings::parse_int("20")
 
 let fx    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64
 let fy    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64

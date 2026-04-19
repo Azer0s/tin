@@ -5,6 +5,7 @@
 
 use assert
 use strings
+use errors
 
 // ----- replace ---------------------------------------------------------------
 
@@ -282,3 +283,73 @@ test "split-join round trip" =
   let parts = strings::split(s, ",")
   let rejoined = strings::join(parts, ",")
   assert::equals(rejoined, s)
+
+// ----- parse_int -------------------------------------------------------------
+
+test "parse_int positive" =
+  let (v, err) = strings::parse_int("42")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 42)
+
+test "parse_int negative" =
+  let (v, err) = strings::parse_int("-7")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 0 - 7)
+
+test "parse_int with plus sign" =
+  let (v, err) = strings::parse_int("+5")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 5)
+
+test "parse_int empty string is error" =
+  let (_, err) = strings::parse_int("")
+  assert::ok(errors::has(err))
+
+test "parse_int sign only is error" =
+  let (_, err) = strings::parse_int("-")
+  assert::ok(errors::has(err))
+
+test "parse_int invalid char is error" =
+  let (_, err) = strings::parse_int("12x")
+  assert::ok(errors::has(err))
+
+// ----- parse_int32 -----------------------------------------------------------
+
+test "parse_int32 basic" =
+  let (v, err) = strings::parse_int32("100")
+  assert::ok(!errors::has(err))
+  assert::equals(v as i64, 100)
+
+test "parse_int32 invalid is error" =
+  let (_, err) = strings::parse_int32("abc")
+  assert::ok(errors::has(err))
+
+// ----- parse_float -----------------------------------------------------------
+
+test "parse_float positive" =
+  let (v, err) = strings::parse_float("3.14")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 3.14)
+
+test "parse_float negative" =
+  let (v, err) = strings::parse_float("-2.5")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 0.0 - 2.5)
+
+test "parse_float integer" =
+  let (v, err) = strings::parse_float("10")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 10.0)
+
+test "parse_float exponent" =
+  let (v, err) = strings::parse_float("1.5e2")
+  assert::ok(!errors::has(err))
+  assert::equals(v, 150.0)
+
+test "parse_float empty is error" =
+  let (_, err) = strings::parse_float("")
+  assert::ok(errors::has(err))
+
+test "parse_float invalid is error" =
+  let (_, err) = strings::parse_float("abc")
+  assert::ok(errors::has(err))
