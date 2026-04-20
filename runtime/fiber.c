@@ -107,6 +107,24 @@ typedef struct {
     // the global queue so the spawned child (at the LIFO bottom of the local deque)
     // is not starved by a spawner that loops without parking.
     int      spawned_child;
+    // Set by _tin_fiber_mark_handoff_yield when a send did direct delivery to a
+    // recv_direct receiver (returning 2).  The yield path checks this and puts
+    // the sender into LQ instead of selfnext so the freshly-unparked receiver
+    // (already in runnext) runs immediately without contention.
+    int      handoff_yield;
+    // Per-fiber recv hint: set by _tin_set_recv_hint (called from genDirectChanRecv
+    // entry) to record which channel+out-buffer this fiber will next receive from.
+    // _tin_prepark_next_recv reads these to pre-register the fiber in that channel's
+    // recv_wq at handoff yield time so the worker goes directly to BLOCKED.
+    // Per-fiber (not TLS) so context switches don't cross-contaminate hints.
+    void    *recv_hint_ch;
+    void    *recv_hint_out;
+    // Advisory pre-registration: set by _tin_prepark_next_recv when the fiber is
+    // registered in a channel's recv_wq without calling _tin_fiber_park.  The fiber
+    // goes to LQ via handoff_yield and uses this to skip re-registration in
+    // recv_direct if data wasn't delivered before the LQ pop.  Cleared on recv
+    // fast-path, on re-park, and on fiber completion (to remove stale entry).
+    void    *preregistered_ch;
     // Per-fiber spinlock: protects status, pending_park, and pending_wakeup
     // in the park/unpark hot path.  Replacing the global _table_mu for these
     // transitions eliminates cross-core cache-line bouncing between workers
@@ -406,6 +424,44 @@ static inline void _worker_push(TinRunnable r, TinFiber *f) {
     }
 }
 
+// Per-worker FIFO handoff queue: holds fibers that yielded via handoff_yield
+// (direct-delivery sends returning 2).  Checked between runnext and the
+// Chase-Lev LQ so that upstream senders run before downstream relay fibers.
+// FIFO ordering means the fiber that did handoff_yield first (the upstream
+// sender, e.g. main) is consumed before later relay fibers, so data is
+// present in the ring buffer when a relay calls recv_direct - eliminating
+// the "LQ pop -> empty recv -> park" waste cycle in pipeline workloads.
+// No atomic ops needed: only the owning worker reads/writes this queue.
+#define HANDOFF_Q_SIZE  64
+#define HANDOFF_Q_MASK  (HANDOFF_Q_SIZE - 1)
+typedef struct {
+    TinRunnable  r[HANDOFF_Q_SIZE];
+    TinFiber    *f[HANDOFF_Q_SIZE];
+    int          head, tail;
+} HandoffQueue;
+static __thread HandoffQueue _handoff_q;
+
+static inline void _handoff_push(TinRunnable r, TinFiber *f) {
+    int t    = _handoff_q.tail;
+    int next = (t + 1) & HANDOFF_Q_MASK;
+    if (__builtin_expect(next == _handoff_q.head, 0)) {
+        _lq_push(r, f);  // overflow: fall back to LIFO LQ
+        return;
+    }
+    _handoff_q.r[t] = r;
+    _handoff_q.f[t] = f;
+    _handoff_q.tail = next;
+}
+
+static inline int _handoff_pop(TinRunnable *r, TinFiber **f) {
+    int h = _handoff_q.head;
+    if (h == _handoff_q.tail) return 0;
+    *r = _handoff_q.r[h];
+    *f = _handoff_q.f[h];
+    _handoff_q.head = (h + 1) & HANDOFF_Q_MASK;
+    return 1;
+}
+
 // Cold slow path: push a yielding fiber to the global queue so that a
 // freshly spawned fire-and-forget child (sitting at the LIFO bottom of
 // the local deque) can be picked up on the next pop.  Marked noinline+cold
@@ -474,6 +530,29 @@ void _tin_fiber_set_direct_recv(void *fib) {
     if (fib) ((TinFiber *)fib)->direct_recv_done = 1;
 }
 
+void _tin_fiber_mark_handoff_yield(void) {
+    if (_current_fib) _current_fib->handoff_yield = 1;
+}
+
+void _tin_set_recv_hint(void *ch, void *out) {
+    if (_current_fib) { _current_fib->recv_hint_ch = ch; _current_fib->recv_hint_out = out; }
+}
+void *_tin_get_recv_hint_ch(void)  { return _current_fib ? _current_fib->recv_hint_ch  : NULL; }
+void *_tin_get_recv_hint_out(void) { return _current_fib ? _current_fib->recv_hint_out : NULL; }
+void  _tin_clear_recv_hint(void) {
+    if (_current_fib) { _current_fib->recv_hint_ch = NULL; _current_fib->recv_hint_out = NULL; }
+}
+
+void  _tin_set_preregistered_ch(void *ch) {
+    if (_current_fib) _current_fib->preregistered_ch = ch;
+}
+void *_tin_get_preregistered_ch(void) {
+    return _current_fib ? _current_fib->preregistered_ch : NULL;
+}
+void  _tin_clear_preregistered_ch(void) {
+    if (_current_fib) _current_fib->preregistered_ch = NULL;
+}
+
 // -------------------------------------------------------------------
 // Worker threads
 // -------------------------------------------------------------------
@@ -511,6 +590,19 @@ static inline void _fib_unlock(TinFiber *f) {
 }
 
 // Like _tin_fiber_unpark_hdl but uses a pre-captured TinFiber* to skip the
+// Clear advisory pre-registration state after delivery (fast path).
+// Clears preregistered_ch and pending_wakeup under _fib_lock so the stale
+// advisory pending_wakeup (set by _tin_fiber_unpark_fib for RUNNABLE fibers)
+// doesn't cause a spurious re-queue on the next park.
+void _tin_clear_advisory_state(void) {
+    TinFiber *f = _current_fib;
+    if (!f || !f->preregistered_ch) return;
+    f->preregistered_ch = NULL;
+    _fib_lock(f);
+    f->pending_wakeup = 0;
+    _fib_unlock(f);
+}
+
 // _table_mu global lock entirely.  Only the per-fiber state_lock is needed.
 void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     TinFiber *f = (TinFiber *)fib;
@@ -523,6 +615,15 @@ void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
         return;
     }
     if (f->status == FIBER_RUNNING) {
+        f->pending_wakeup = 1;
+        _fib_unlock(f);
+        return;
+    }
+    // Advisory pre-registration: fiber is RUNNABLE (in LQ) but still in recv_wq.
+    // Set pending_wakeup so that if the fiber misses direct_recv_done and parks in
+    // recv_direct, the worker re-queues it (pending_park + pending_wakeup) instead
+    // of blocking, giving it a second chance to see the delivery.
+    if (f->status == FIBER_RUNNABLE && f->preregistered_ch != NULL) {
         f->pending_wakeup = 1;
         _fib_unlock(f);
         return;
@@ -588,6 +689,11 @@ static void _fire_done_waiters(TinFiber *f) {
     f->waiter_cnt = 0;
 }
 
+// Defined in stdlib/sync/channel_arc.c.  Weak so programs without channels link.
+__attribute__((weak)) void _tin_chan_remove_recv_waiter(void *ch_ptr, int64_t pid) {
+    (void)ch_ptr; (void)pid;
+}
+
 // Forward declarations for per-thread coro frame pool (defined after _worker_thread).
 #define CORO_POOL_MAX 16
 static _Thread_local void *_coro_pool[CORO_POOL_MAX];
@@ -610,9 +716,12 @@ static void *_worker_thread(void *_) {
         //    an explicit yield.  Highest priority so looping fibers cycle back
         //    without any atomic ops (no LQ seq_cst fence, no global mutex).
         // 1. Runnext (TLS): a fiber just unparked by channel/join/spawn.
-        // 2. Local deque (lock-free Chase-Lev, LIFO for cache locality).
-        // 3. Work-steal from a peer's deque (lock-free).
-        // 4. Global run queue (mutex + condvar, blocks when truly idle).
+        // 2. Handoff queue (TLS FIFO): fibers that yielded via handoff_yield.
+        //    FIFO ordering ensures upstream senders run before downstream relay
+        //    fibers, so relays find data in the ring buffer on their next recv.
+        // 3. Local deque (lock-free Chase-Lev, LIFO for cache locality).
+        // 4. Work-steal from a peer's deque (lock-free).
+        // 5. Global run queue (mutex + condvar, blocks when truly idle).
         TinRunnable r;
         TinFiber   *f = NULL;
         if (_worker_selfnext_pid >= 0) {
@@ -629,6 +738,8 @@ static void *_worker_thread(void *_) {
             _worker_runnext_pid = -1;
             _worker_runnext_hdl = NULL;
             _worker_runnext_fib = NULL;
+        } else if (_handoff_pop(&r, &f)) {
+            // handoff queue: f is already set, nothing else to do here
         } else if (!_lq_pop(&r, &f)) {
             int stolen = 0;
             int my = _worker_lq_idx;
@@ -670,6 +781,7 @@ static void *_worker_thread(void *_) {
         _coro_result         = NULL;
         _inline_result_mode  = 0;  // reset so inline-drive TLS cannot leak across fibers
         f->spawned_child     = 0;  // reset: spawn-displacement only applies within one resume
+        f->handoff_yield     = 0;  // reset: handoff only applies to the current yield
 
         // Restore this fiber's defer chain so its deferred functions are only
         // visible while the fiber is executing.  Without save/restore, a second
@@ -738,6 +850,13 @@ static void *_worker_thread(void *_) {
             // no-op.  Free the frame explicitly instead of relying on the
             // cleanup path.
             _tin_coro_free(r.hdl);
+            // Remove stale advisory recv_wq entry if the fiber completed without
+            // consuming its pre-registration (e.g. last loop iteration exited
+            // before reaching recv_direct).
+            if (f->preregistered_ch) {
+                _tin_chan_remove_recv_waiter(f->preregistered_ch, f->pid);
+                f->preregistered_ch = NULL;
+            }
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
@@ -799,12 +918,21 @@ static void *_worker_thread(void *_) {
                 // selfnext) can coexist without eviction or LQ touching.
                 // The worker loop gives selfnext higher priority so looping
                 // fibers cycle back immediately without any atomic ops.
-                int had_spawn = f->spawned_child;
+                int had_spawn   = f->spawned_child;
+                int had_handoff = f->handoff_yield;
                 f->spawned_child = 0;
+                f->handoff_yield = 0;
                 f->status = FIBER_RUNNABLE;
                 _fib_unlock(f);
                 if (__builtin_expect(had_spawn, 0)) {
                     _yield_to_global(r);
+                } else if (had_handoff) {
+                    // Direct-delivery handoff: receiver is in runnext.
+                    // Push sender to the FIFO handoff queue so upstream senders
+                    // run before downstream relay fibers (FIFO ordering ensures
+                    // the sender that pushed first is consumed first, making data
+                    // available in the ring buffer before the relay tries recv).
+                    _handoff_push(r, f);
                 } else if (_worker_selfnext_pid < 0) {
                     _worker_selfnext_pid = r.pid;
                     _worker_selfnext_hdl = r.hdl;

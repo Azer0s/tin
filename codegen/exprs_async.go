@@ -1120,13 +1120,31 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
 	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
 
-	// r == 0 → success; otherwise park and retry.
+	// r == 0 → success
+	// r == 2 → handoff: direct delivery to a waiting receiver; yield once then done
+	// otherwise → park and retry
 	isDone := checkDoneBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 0))
 	doneBlk := cg.newBlock("chan.send.done")
-	yieldBlk := cg.newBlock("chan.send.yield")
-	checkDoneBlk.NewCondBr(isDone, doneBlk, yieldBlk)
+	checkHandoffBlk := cg.newBlock("chan.send.check.handoff")
+	checkDoneBlk.NewCondBr(isDone, doneBlk, checkHandoffBlk)
 
-	// Yield: outer coro suspends until the channel has room.
+	isHandoff := checkHandoffBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 2))
+	handoffBlk := cg.newBlock("chan.send.handoff")
+	yieldBlk := cg.newBlock("chan.send.yield")
+	checkHandoffBlk.NewCondBr(isHandoff, handoffBlk, yieldBlk)
+
+	// Handoff: attempt pre-registration in the sender's next recv channel so the
+	// worker can go directly to BLOCKED after coro.suspend instead of routing via
+	// LQ.  If _tin_prepark_next_recv succeeds it sets pending_park, which takes
+	// priority over handoff_yield in the worker's yield-path check.  Either way
+	// the same coro.suspend is used; the worker picks the right path from flags.
+	preparkFn := cg.ensureExternDecl("_tin_prepark_next_recv", irtypes.I32,
+		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
+	handoffBlk.NewCall(preparkFn, pid)
+	// On resume the send is already complete - go straight to doneBlk.
+	cg.emitInlineChanSuspend("chan.send.handoff", handoffBlk, doneBlk, doneBlk)
+
+	// Park and retry: outer coro suspends until the channel has room.
 	cg.emitInlineChanSuspend("chan.send", yieldBlk, retryBlk, doneBlk)
 	// cg.curBlock == doneBlk after emitInlineChanSuspend.
 

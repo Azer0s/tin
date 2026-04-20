@@ -1,0 +1,50 @@
+// Fan-out / fan-in: main distributes 1M items across 8 worker fibers via a
+// shared input channel; workers send results to a shared output channel.
+// Tests high-concurrency channel contention with multiple producers/consumers.
+
+use sync
+use io
+use measure
+
+var g_in      sync::Channel[i64]
+var g_out     sync::Channel[i64]
+var g_elapsed i64
+
+fn{#async} worker() =
+  for true:
+    let v = await g_in.recv()
+    if v < 0:
+      return
+    await g_out.send(v * 2)
+
+fn{#async} main() =
+  let workers i64 = 8
+  let n       i64 = 1000000
+
+  g_in  = sync::Channel[i64].make(64)
+  g_out = sync::Channel[i64].make(64)
+
+  let i i64 = 0
+  for i < workers:
+    spawn worker()
+    i = i + 1
+
+  let start = measure::now_us()
+
+  i = 0
+  for i < n:
+    await g_in.send(i)
+    await g_out.recv()
+    i = i + 1
+
+  g_elapsed = measure::now_us() - start
+
+  i = 0
+  for i < workers:
+    await g_in.send(-1)
+    i = i + 1
+
+  let throughput = n * 1000000 / g_elapsed
+  echo "{n} items, {workers} workers"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "throughput: ~{throughput} items/sec"
