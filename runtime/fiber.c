@@ -80,9 +80,15 @@ typedef struct {
     // os_waiter_cnt: number of non-fiber (OS) threads currently blocked in
     // _tin_fiber_join waiting on done_cv.  Incremented (under _table_mu) before
     // releasing _table_mu for the OS-blocking wait; decremented after the wait.
-    // The fire-and-forget reclaim checks this so it never destroys done_mu/done_cv
-    // while an OS thread is still waiting on them.
+    // The ff_reclaim check reads this so it never destroys done_mu/done_cv while
+    // an OS thread is still blocking on them.  Always 0 when no OS thread waits.
     int      os_waiter_cnt;
+    // prejoined: set at spawn time (inside _table_mu) by _tin_fiber_spawn_joinable
+    // to indicate the spawner will call _tin_fiber_join.  Prevents fire-and-forget
+    // reclaim for the entire lifetime of the fiber so the spawner can safely join
+    // even if the fiber completes before _tin_fiber_join is reached.
+    // os_waiter_cnt is separate: it is 0 until the OS-blocking wait actually starts.
+    int      prejoined;
     // pending_park: set by _tin_fiber_park (called from async I/O / timer C
     // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
     // pending_join: the fiber sets pending_park, continues to its next yield,
@@ -660,6 +666,24 @@ static void _enqueue_waiter(int64_t wpid, TinFiber *w) {
     }
 }
 
+// Push pid onto the free-slot list so future spawns can reuse it.
+// Sets _fibers[pid] = NULL.  Returns 1 on success, 0 if realloc failed
+// (slot leaks until shutdown; acceptable under OOM).
+// Must be called with _table_mu held.
+static int _free_slot_push(int64_t pid) {
+    if (_free_slots_cnt >= _free_slots_cap) {
+        int64_t new_cap = _free_slots_cap ? _free_slots_cap * 2 : 64;
+        int64_t *nf = (int64_t *)realloc(_free_slots, sizeof(int64_t) * (size_t)new_cap);
+        if (nf) { _free_slots = nf; _free_slots_cap = new_cap; }
+    }
+    if (_free_slots_cnt < _free_slots_cap) {
+        _free_slots[_free_slots_cnt++] = pid;
+        _fibers[pid] = NULL;
+        return 1;
+    }
+    return 0;
+}
+
 static void _fire_done_waiters(TinFiber *f) {
     // Must be called with _table_mu held.
     for (int i = 0; i < f->waiter_cnt; i++) {
@@ -873,42 +897,32 @@ static void *_worker_thread(void *_) {
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
-            // Check for fire-and-forget BEFORE _fire_done_waiters resets waiter_cnt.
-            // If nobody registered as a waiter before completion, nobody will read
-            // the result. We can reclaim the slot immediately. Any _tin_fiber_join
-            // that arrives after we release _table_mu will see _fibers[pid]==NULL
-            // and return immediately; _tin_fiber_get_result will return NULL.
-            // All access to _fibers[pid] is guarded by _table_mu, so this is safe.
-            // Also check os_waiter_cnt: non-fiber threads waiting on done_cv must
-            // not have done_mu/done_cv destroyed under them (use-after-free/UB).
-            int had_waiters = (f->waiter_cnt > 0) || (f->os_waiter_cnt > 0);
+            // Snapshot had_waiters BEFORE _fire_done_waiters resets waiter_cnt.
+            // prejoined=1 means the spawner will call _tin_fiber_join; treat it as
+            // a waiter so ff_reclaim never races with that join.
+            // os_waiter_cnt > 0 means an OS thread is currently blocking on done_cv;
+            // we must not destroy done_mu/done_cv under it.
+            // Panicking ff fibers are not reclaimed here: panic_msg must remain
+            // readable by _tin_fiber_check_panic until shutdown.
+            int had_waiters = (f->waiter_cnt > 0) || (f->os_waiter_cnt > 0) || f->prejoined;
             _fire_done_waiters(f);
             pthread_mutex_lock(&f->done_mu);
             pthread_cond_broadcast(&f->done_cv);
             pthread_mutex_unlock(&f->done_mu);
 
-            int ff_reclaimed = 0;
+            TinFiber *ff_free = NULL;
             if (!had_waiters && !f->panic_msg) {
-                // Fire-and-forget: reclaim so long-running programs don't exhaust the table.
                 free(f->result);
                 f->result = NULL;
-                if (_free_slots_cnt >= _free_slots_cap) {
-                    int64_t new_cap = _free_slots_cap ? _free_slots_cap * 2 : 64;
-                    int64_t *nf = (int64_t *)realloc(_free_slots, sizeof(int64_t) * (size_t)new_cap);
-                    if (nf) { _free_slots = nf; _free_slots_cap = new_cap; }
-                }
-                if (_free_slots_cnt < _free_slots_cap) {
-                    _free_slots[_free_slots_cnt++] = f->pid;
-                    _fibers[f->pid] = NULL;
-                    ff_reclaimed = 1;
-                }
+                if (_free_slot_push(f->pid))
+                    ff_free = f;
             }
             pthread_mutex_unlock(&_table_mu);
 
-            if (ff_reclaimed) {
-                pthread_mutex_destroy(&f->done_mu);
-                pthread_cond_destroy(&f->done_cv);
-                free(f);
+            if (ff_free) {
+                pthread_mutex_destroy(&ff_free->done_mu);
+                pthread_cond_destroy(&ff_free->done_cv);
+                free(ff_free);
             }
         } else {
             // Fiber yielded, parked, or joined.
@@ -1050,73 +1064,13 @@ void _tin_fiber_init(void) {
     _tin_timer_init();
 }
 
-// Like _tin_fiber_spawn but sets os_waiter_cnt=1 so the fiber is never
-// fire-and-forget reclaimed before the spawning thread calls _tin_fiber_join.
-// Used by the auto-spawn codegen path for `await asyncFn()` in non-coro context:
-// the spawned fiber is always joined immediately after spawning, but a worker
-// can complete and reclaim it in the window between spawn and join.
-//
-// os_waiter_cnt is set INSIDE the _table_mu critical section and BEFORE the fiber
-// is pushed to the run queue.  This ensures the ff_reclaim check (which also runs
-// under _table_mu) always sees os_waiter_cnt >= 1 for this fiber.
-int64_t _tin_fiber_spawn_joinable(void *hdl) {
-    pthread_mutex_lock(&_table_mu);
-
-    if (!_fibers) {
-        const char *env = getenv("TINMAXFIBERS");
-        _fiber_max = (env && *env) ? (int64_t)atoi(env) : FIBER_DEFAULT_MAX;
-        if (_fiber_max <= 0) _fiber_max = FIBER_DEFAULT_MAX;
-        _fiber_cap = 256;
-        _fibers    = (TinFiber **)calloc((size_t)_fiber_cap, sizeof(TinFiber *));
-        if (!_fibers) { fputs("tin: fiber table OOM\n", stderr); exit(1); }
-        _fiber_cnt = 1;
-    }
-    int64_t pid;
-    if (_free_slots_cnt > 0) {
-        pid = _free_slots[--_free_slots_cnt];
-    } else {
-        if (_fiber_cnt >= _fiber_cap) {
-            int64_t max = (_fiber_max > 0) ? _fiber_max : FIBER_DEFAULT_MAX;
-            if (_fiber_cap >= max) {
-                pthread_mutex_unlock(&_table_mu);
-                _tin_panic("too many live fibers - raise TINMAXFIBERS");
-                return -1;
-            }
-            int64_t new_cap = _fiber_cap * 2;
-            if (new_cap > max) new_cap = max;
-            TinFiber **nf = (TinFiber **)realloc(_fibers, sizeof(TinFiber *) * (size_t)new_cap);
-            if (!nf) {
-                pthread_mutex_unlock(&_table_mu);
-                _tin_panic("fiber table OOM");
-                return -1;
-            }
-            memset(nf + _fiber_cap, 0, sizeof(TinFiber *) * (size_t)(new_cap - _fiber_cap));
-            _fibers    = nf;
-            _fiber_cap = new_cap;
-        }
-        pid = _fiber_cnt++;
-    }
-
-    TinFiber *f = (TinFiber *)calloc(1, sizeof(TinFiber));
-    if (!f) { fputs("tin: fiber alloc OOM\n", stderr); exit(1); }
-
-    f->pid          = pid;
-    f->hdl          = hdl;
-    f->status       = FIBER_RUNNABLE;
-    f->result       = NULL;
-    f->waiter_cnt   = 0;
-    f->os_waiter_cnt = 1;  // caller will join: prevent ff_reclaim until join completes
-    pthread_mutex_init(&f->done_mu, NULL);
-    pthread_cond_init(&f->done_cv,  NULL);
-    _fibers[pid] = f;
-    pthread_mutex_unlock(&_table_mu);
-
-    _lq_push((TinRunnable){ hdl, pid }, f);
-    if (_is_worker && _current_fib) _current_fib->spawned_child = 1;
-    return pid;
-}
-
-int64_t _tin_fiber_spawn(void *hdl) {
+// Allocate a fiber slot, initialize the TinFiber, and push to the run queue.
+// prejoined=1 sets f->prejoined, blocking ff_reclaim for the fiber's lifetime
+// so the spawner can safely call _tin_fiber_join even if the fiber completes
+// first.  prejoined=0 allows normal fire-and-forget reclaim at completion.
+// prejoined is set INSIDE _table_mu and BEFORE lq_push so the ff_reclaim
+// check (which also runs under _table_mu) always sees the correct value.
+static int64_t _spawn_impl(void *hdl, int prejoined) {
     pthread_mutex_lock(&_table_mu);
 
     if (!_fibers) {
@@ -1130,7 +1084,7 @@ int64_t _tin_fiber_spawn(void *hdl) {
         _fiber_cnt = 1;
     }
     // Prefer a reclaimed slot so spawning many short-lived fibers doesn't exhaust
-    // the table.  Reclaimed slots come from awaited fibers whose result was consumed.
+    // the table.  Reclaimed slots come from ff-reclaimed or get_result-reclaimed fibers.
     int64_t pid;
     if (_free_slots_cnt > 0) {
         pid = _free_slots[--_free_slots_cnt];
@@ -1160,25 +1114,27 @@ int64_t _tin_fiber_spawn(void *hdl) {
     TinFiber *f = (TinFiber *)calloc(1, sizeof(TinFiber));
     if (!f) { fputs("tin: fiber alloc OOM\n", stderr); exit(1); }
 
-    f->pid       = pid;
-    f->hdl       = hdl;
-    f->status    = FIBER_RUNNABLE;
-    f->result    = NULL;
-    f->waiter_cnt = 0;
+    // calloc zeros all fields; only set the non-zero ones explicitly.
+    f->pid      = pid;
+    f->hdl      = hdl;
+    f->status   = FIBER_RUNNABLE;
+    f->prejoined = prejoined;
     pthread_mutex_init(&f->done_mu, NULL);
     pthread_cond_init(&f->done_cv,  NULL);
     _fibers[pid] = f;
     pthread_mutex_unlock(&_table_mu);
 
-    // When spawning from a worker, push to the local deque for cache locality.
-    // Set _spawned_unresumed so the spawner's very next yield goes to the global
-    // queue instead of the local deque; this ensures the spawned fiber (at the
-    // LIFO bottom) gets a chance to run rather than being starved by the spawner.
-    // Spawned fibers go directly to the LQ (bypassing runnext) so unpark-based
-    // runnext hand-offs are not disturbed by rapid spawning.
     _lq_push((TinRunnable){ hdl, pid }, f);
     if (_is_worker && _current_fib) _current_fib->spawned_child = 1;
     return pid;
+}
+
+int64_t _tin_fiber_spawn(void *hdl) {
+    return _spawn_impl(hdl, 0);
+}
+
+int64_t _tin_fiber_spawn_joinable(void *hdl) {
+    return _spawn_impl(hdl, 1);
 }
 
 void _tin_fiber_complete(void *result) {
@@ -1316,6 +1272,10 @@ void _tin_coro_free(void *ptr) {
 // never returns NULL.
 static char _tin_unit_sentinel = 0;
 
+// Returns the result stored by _tin_fiber_complete and reclaims the fiber slot.
+// Must be called at most once per pid, after _tin_fiber_join returns and
+// _tin_fiber_get_panic_msg returns NULL (no panic).  At that point no other
+// thread accesses _fibers[pid], so freeing f after releasing _table_mu is safe.
 void *_tin_fiber_get_result(int64_t pid) {
     pthread_mutex_lock(&_table_mu);
     if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) {
@@ -1324,29 +1284,13 @@ void *_tin_fiber_get_result(int64_t pid) {
     }
     TinFiber *f = _fibers[pid];
     void *r = f->result;
-    f->result = NULL;  // prevent double-free at shutdown
-
-    // Reclaim the slot so it can be reused by future spawns. Safe because
-    // _tin_fiber_get_result is only called after _tin_fiber_join returns (fiber
-    // is FIBER_DONE) and _tin_fiber_get_panic_msg returned NULL, so no other
-    // thread accesses _fibers[pid] anymore.
-    int reclaimed = 0;
-    if (_free_slots_cnt >= _free_slots_cap) {
-        int64_t new_cap = _free_slots_cap ? _free_slots_cap * 2 : 64;
-        int64_t *nf = (int64_t *)realloc(_free_slots, sizeof(int64_t) * (size_t)new_cap);
-        if (nf) { _free_slots = nf; _free_slots_cap = new_cap; }
-    }
-    if (_free_slots_cnt < _free_slots_cap) {
-        _free_slots[_free_slots_cnt++] = pid;
-        _fibers[pid] = NULL;
-        reclaimed = 1;
-    }
+    f->result = NULL;
+    TinFiber *to_free = _free_slot_push(pid) ? f : NULL;
     pthread_mutex_unlock(&_table_mu);
-
-    if (reclaimed) {
-        pthread_mutex_destroy(&f->done_mu);
-        pthread_cond_destroy(&f->done_cv);
-        free(f);
+    if (to_free) {
+        pthread_mutex_destroy(&to_free->done_mu);
+        pthread_cond_destroy(&to_free->done_cv);
+        free(to_free);
     }
     return r;
 }
@@ -1457,16 +1401,17 @@ void _tin_fiber_join(int64_t pid, void *my_hdl) {
     }
 
     // Non-fiber context (e.g. main thread) or waiter list full: block OS thread.
-    // Increment os_waiter_cnt before releasing _table_mu so the fire-and-forget
-    // reclaim path (which checks os_waiter_cnt under _table_mu) never destroys
-    // done_mu/done_cv while this thread is still waiting on them.
+    // Increment os_waiter_cnt before releasing _table_mu so the ff_reclaim check
+    // (which reads os_waiter_cnt under _table_mu) never destroys done_mu/done_cv
+    // while this thread is blocking on them.  prejoined=1 already prevents
+    // ff_reclaim at completion; os_waiter_cnt guards the blocking window here.
     target->os_waiter_cnt++;
     pthread_mutex_lock(&target->done_mu);
     pthread_mutex_unlock(&_table_mu);
     while (target->status != FIBER_DONE)
         pthread_cond_wait(&target->done_cv, &target->done_mu);
     pthread_mutex_unlock(&target->done_mu);
-    // Decrement os_waiter_cnt now that done_mu is released.
+    // target is always non-NULL here: prejoined=1 kept it alive until now.
     pthread_mutex_lock(&_table_mu);
     if (pid > 0 && pid < _fiber_cnt && _fibers[pid])
         _fibers[pid]->os_waiter_cnt--;

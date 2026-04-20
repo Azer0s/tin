@@ -1252,11 +1252,20 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	return result, nil
 }
 
-// activeSpawnFn returns the correct spawn function for the current context.
-// Non-coro spawns (test bodies, non-async main) always use the joinable variant
-// so that explicit `let f = spawn ...; await f` cannot race with ff_reclaim.
-// Fire-and-forget spawns from non-coro context get os_waiter_cnt=1 and are
-// cleaned up at _tin_fiber_run shutdown, which is acceptable.
+// activeSpawnFn returns the spawn function for the current context.
+//
+// All !inCoroFn spawns use _tin_fiber_spawn_joinable (prejoined=1) to prevent
+// ff_reclaim between _tin_fiber_spawn returning a pid and _tin_fiber_join
+// consuming it.  The race exists for any explicit `let f = spawn ...; await f`
+// pattern in sync functions (test bodies, non-async main, sync wrappers): the
+// spawn and await are separate statements so there is no single site to detect
+// "this will be awaited".
+//
+// True fire-and-forget spawns from non-coro context (no await on the result)
+// also get prejoined=1, so their slots are not ff_reclaimed until
+// _tin_fiber_run shutdown.  This is a minor cost: non-coro fire-and-forget
+// is unusual (test bodies, non-async main), and fixing it correctly would
+// require per-slot generation counters or lookahead over the AST.
 func (cg *CodeGen) activeSpawnFn() *ir.Func {
 	if cg.spawnJoinable || !cg.inCoroFn {
 		return cg.fiberSpawnJoinableFn

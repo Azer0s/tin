@@ -17,9 +17,12 @@ void _tin_fiber_init(void);
 // Returns a unique fiber PID.
 int64_t _tin_fiber_spawn(void *hdl);
 
-// Like _tin_fiber_spawn but marks the fiber as joinable (os_waiter_cnt=1) so it
-// is never fire-and-forget reclaimed before the spawning thread calls
-// _tin_fiber_join.  Used for `await asyncFn()` in non-coroutine context.
+// Like _tin_fiber_spawn but sets prejoined=1 on the new fiber so it is never
+// fire-and-forget reclaimed before the spawning thread calls _tin_fiber_join.
+// Used for spawn expressions in non-coroutine context where the result will be
+// joined.  prejoined is independent of os_waiter_cnt (which counts OS threads
+// actively blocking on done_cv); it simply prevents ff_reclaim for the fiber's
+// entire lifetime.
 int64_t _tin_fiber_spawn_joinable(void *hdl);
 
 // Called by the coroutine body when it has finished.
