@@ -46,6 +46,9 @@ Run/test flags:
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
   -v-heuristics    print auto-yield heuristics for every function to stderr
 
+Debug flags:
+  -f-debug-fiber-slots  print fiber struct pool ramp/decay events to stderr
+
 In-source directives (at the top of the .tin file):
   //!-lNAME                    link with libNAME
   //!+file.c                   compile C source file alongside the tin module
@@ -325,6 +328,8 @@ doneFlags:
 			noWarnAwaitMatchGuards = true
 		case "-v-heuristics":
 			verboseHeuristics = true
+		case "-f-debug-fiber-slots":
+			extraCFlags = append(extraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 		case "-g":
 			debugBuild = true
 		}
@@ -342,6 +347,8 @@ doneFlags:
 			// Collect extra link flags and memory-checker flag from remaining args.
 			var extraFlags []string
 
+			var dirExtraCFlags []string
+
 			memcheck := ""
 
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
@@ -350,6 +357,8 @@ doneFlags:
 					memcheck = "valgrind"
 				} else if a == "-v-leaks" {
 					memcheck = "leaks"
+				} else if a == "-f-debug-fiber-slots" {
+					dirExtraCFlags = append(dirExtraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 				} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
 					strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 					extraFlags = append(extraFlags, a)
@@ -359,9 +368,9 @@ doneFlags:
 			validateMemcheck(memcheck)
 
 			if recursive {
-				runDirTestsRecursive(file, extraFlags, memcheck)
+				runDirTestsRecursive(file, extraFlags, dirExtraCFlags, memcheck)
 			} else {
-				runDirTests(file, extraFlags, memcheck)
+				runDirTests(file, extraFlags, dirExtraCFlags, memcheck)
 			}
 
 			return
@@ -992,9 +1001,9 @@ func memcheckCmd(memcheck, binary string) *exec.Cmd {
 
 // runDirTestsRecursive collects all .tin files under root and runs them
 // together as a single test batch with one combined summary.
-func runDirTestsRecursive(root string, extraFlags []string, memcheck string) {
+func runDirTestsRecursive(root string, extraFlags []string, extraCFlags []string, memcheck string) {
 	files := collectTinFiles(root)
-	runFileTests(files, extraFlags, memcheck)
+	runFileTests(files, extraFlags, extraCFlags, memcheck)
 }
 
 // fileHasTestBlocks does a fast byte-level scan for 'test "' so we can skip
@@ -1023,7 +1032,7 @@ func fileHasTestBlocks(src []byte) bool {
 // runDirTests runs all .tin files in dir that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.
-func runDirTests(dir string, extraFlags []string, memcheck string) {
+func runDirTests(dir string, extraFlags []string, extraCFlags []string, memcheck string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		die("cannot read directory %s: %v", dir, err)
@@ -1037,13 +1046,13 @@ func runDirTests(dir string, extraFlags []string, memcheck string) {
 		}
 	}
 
-	runFileTests(files, extraFlags, memcheck)
+	runFileTests(files, extraFlags, extraCFlags, memcheck)
 }
 
 // runFileTests runs the given .tin files that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.  memcheck is "", "valgrind", or "leaks".
-func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
+func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, memcheck string) {
 	type result struct {
 		file    string
 		passed  bool
@@ -1198,7 +1207,7 @@ func runFileTests(fpaths []string, extraFlags []string, memcheck string) {
 		}(tmp.Name())
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, nil); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags); compErr != nil {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)

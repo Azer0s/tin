@@ -188,6 +188,27 @@ static int64_t  _free_slots_cap = 0;
 // a single atomic load in the common (no panic) case.
 _Atomic int _has_unhandled_panics = 0;
 
+// Fiber struct pool: reuse TinFiber heap allocations instead of calloc/free on
+// every spawn+reclaim cycle.  FIBER_POOL_MAX caps the pool; the high-water mark
+// (_live_peak) decays toward current demand every POOL_DECAY_INTERVAL reclaims
+// so an idle period after a burst gradually releases reserved structs.
+#define FIBER_POOL_MAX      4096
+#define POOL_DECAY_INTERVAL 256
+
+static TinFiber *_fiber_pool[FIBER_POOL_MAX];
+static int64_t   _fiber_pool_cnt = 0;  // structs currently in pool
+static int64_t   _live_cnt       = 0;  // live (spawned, not yet reclaimed) fibers
+static int64_t   _live_peak      = 0;  // high-water mark of _live_cnt
+static int64_t   _reclaim_total  = 0;  // total reclaims (drives decay interval)
+
+#ifdef TIN_DEBUG_FIBER_SLOTS
+#  define _FS_LOG(...) fprintf(stderr, "[fiber-slots] " __VA_ARGS__)
+#else
+#  define _FS_LOG(...) ((void)0)
+#endif
+
+static void _fiber_struct_reclaim(TinFiber *f);
+
 
 // -------------------------------------------------------------------
 // Run queue - mutex + condvar FIFO ring buffer
@@ -910,20 +931,13 @@ static void *_worker_thread(void *_) {
             pthread_cond_broadcast(&f->done_cv);
             pthread_mutex_unlock(&f->done_mu);
 
-            TinFiber *ff_free = NULL;
             if (!had_waiters && !f->panic_msg) {
                 free(f->result);
                 f->result = NULL;
                 if (_free_slot_push(f->pid))
-                    ff_free = f;
+                    _fiber_struct_reclaim(f);
             }
             pthread_mutex_unlock(&_table_mu);
-
-            if (ff_free) {
-                pthread_mutex_destroy(&ff_free->done_mu);
-                pthread_cond_destroy(&ff_free->done_cv);
-                free(ff_free);
-            }
         } else {
             // Fiber yielded, parked, or joined.
             //
@@ -1064,6 +1078,83 @@ void _tin_fiber_init(void) {
     _tin_timer_init();
 }
 
+// Reclaim a TinFiber struct: update live-count stats, apply peak decay every
+// POOL_DECAY_INTERVAL reclaims, then pool the struct (zeroed, mutex/cond kept
+// live) or free it when the pool is full.
+// Must be called with _table_mu held.  _free_slot_push must have been called
+// before this so _fibers[f->pid] is already NULL and no other thread can reach f.
+static void _fiber_struct_reclaim(TinFiber *f) {
+    _live_cnt--;
+    _reclaim_total++;
+
+    if (_reclaim_total % POOL_DECAY_INTERVAL == 0) {
+        int64_t old_peak = _live_peak;
+        int64_t new_peak = (_live_peak + _live_cnt) / 2;
+        if (new_peak < _live_cnt) new_peak = _live_cnt;
+        _live_peak = new_peak;
+
+        // Trim the pool to the decayed high-water mark.
+        int64_t target = new_peak < FIBER_POOL_MAX ? new_peak : FIBER_POOL_MAX;
+        int64_t trimmed = 0;
+        while (_fiber_pool_cnt > target) {
+            TinFiber *old = _fiber_pool[--_fiber_pool_cnt];
+            pthread_mutex_destroy(&old->done_mu);
+            pthread_cond_destroy(&old->done_cv);
+            free(old);
+            trimmed++;
+        }
+        _FS_LOG("decay     live=%lld peak=%lld->%lld pool=%lld trimmed=%lld\n",
+                (long long)_live_cnt, (long long)old_peak, (long long)new_peak,
+                (long long)_fiber_pool_cnt, (long long)trimmed);
+    }
+
+    // Idle-transition decay: each time live_cnt drops to 1 (only the main
+    // fiber still running), apply one halving step toward the current live
+    // count.  The interval decay above fires every 256 reclaims and handles
+    // in-burst trimming, but calm periods with few fibers never accumulate
+    // enough reclaims to trigger it.  This one-step-per-batch-end path ensures
+    // the pool converges to actual sustained load over successive quiet periods
+    // regardless of how small each batch is.
+    if (_live_cnt <= 1) {
+        int64_t old_peak = _live_peak;
+        int64_t new_peak = (_live_peak + _live_cnt) / 2;
+        if (new_peak < _live_cnt) new_peak = _live_cnt;
+        _live_peak = new_peak;
+
+        int64_t target = new_peak < FIBER_POOL_MAX ? new_peak : FIBER_POOL_MAX;
+        int64_t trimmed = 0;
+        while (_fiber_pool_cnt > target) {
+            TinFiber *old = _fiber_pool[--_fiber_pool_cnt];
+            pthread_mutex_destroy(&old->done_mu);
+            pthread_cond_destroy(&old->done_cv);
+            free(old);
+            trimmed++;
+        }
+        if (trimmed > 0) {
+            _FS_LOG("idle      live=%lld peak=%lld->%lld pool=%lld trimmed=%lld\n",
+                    (long long)_live_cnt, (long long)old_peak, (long long)new_peak,
+                    (long long)_fiber_pool_cnt, (long long)trimmed);
+        }
+    }
+
+    if (_fiber_pool_cnt < FIBER_POOL_MAX) {
+        // Keep mutex/cond live; zero all other fields so reuse starts clean.
+        pthread_mutex_t saved_mu = f->done_mu;
+        pthread_cond_t  saved_cv = f->done_cv;
+        memset(f, 0, sizeof(TinFiber));
+        f->done_mu = saved_mu;
+        f->done_cv = saved_cv;
+        _fiber_pool[_fiber_pool_cnt++] = f;
+    } else {
+        _FS_LOG("pool-full live=%lld peak=%lld pool=%d/%d\n",
+                (long long)_live_cnt, (long long)_live_peak,
+                (int)_fiber_pool_cnt, FIBER_POOL_MAX);
+        pthread_mutex_destroy(&f->done_mu);
+        pthread_cond_destroy(&f->done_cv);
+        free(f);
+    }
+}
+
 // Allocate a fiber slot, initialize the TinFiber, and push to the run queue.
 // prejoined=1 sets f->prejoined, blocking ff_reclaim for the fiber's lifetime
 // so the spawner can safely call _tin_fiber_join even if the fiber completes
@@ -1111,17 +1202,29 @@ static int64_t _spawn_impl(void *hdl, int prejoined) {
         pid = _fiber_cnt++;
     }
 
-    TinFiber *f = (TinFiber *)calloc(1, sizeof(TinFiber));
-    if (!f) { fputs("tin: fiber alloc OOM\n", stderr); exit(1); }
-
-    // calloc zeros all fields; only set the non-zero ones explicitly.
-    f->pid      = pid;
-    f->hdl      = hdl;
-    f->status   = FIBER_RUNNABLE;
+    TinFiber *f;
+    if (_fiber_pool_cnt > 0) {
+        // Pool struct is already zeroed and has live mutex/cond; just set fields.
+        f = _fiber_pool[--_fiber_pool_cnt];
+    } else {
+        f = (TinFiber *)calloc(1, sizeof(TinFiber));
+        if (!f) { fputs("tin: fiber alloc OOM\n", stderr); exit(1); }
+        pthread_mutex_init(&f->done_mu, NULL);
+        pthread_cond_init(&f->done_cv,  NULL);
+    }
+    f->pid       = pid;
+    f->hdl       = hdl;
+    f->status    = FIBER_RUNNABLE;
     f->prejoined = prejoined;
-    pthread_mutex_init(&f->done_mu, NULL);
-    pthread_cond_init(&f->done_cv,  NULL);
     _fibers[pid] = f;
+
+    _live_cnt++;
+    if (_live_cnt > _live_peak) {
+        _live_peak = _live_cnt;
+        _FS_LOG("new-peak  live=%lld peak=%lld pool=%lld/%d\n",
+                (long long)_live_cnt, (long long)_live_peak,
+                (long long)_fiber_pool_cnt, FIBER_POOL_MAX);
+    }
     pthread_mutex_unlock(&_table_mu);
 
     _lq_push((TinRunnable){ hdl, pid }, f);
@@ -1285,13 +1388,9 @@ void *_tin_fiber_get_result(int64_t pid) {
     TinFiber *f = _fibers[pid];
     void *r = f->result;
     f->result = NULL;
-    TinFiber *to_free = _free_slot_push(pid) ? f : NULL;
+    if (_free_slot_push(pid))
+        _fiber_struct_reclaim(f);
     pthread_mutex_unlock(&_table_mu);
-    if (to_free) {
-        pthread_mutex_destroy(&to_free->done_mu);
-        pthread_cond_destroy(&to_free->done_cv);
-        free(to_free);
-    }
     return r;
 }
 
@@ -1694,6 +1793,13 @@ void _tin_fiber_run(void) {
     _free_slots     = NULL;
     _free_slots_cnt = 0;
     _free_slots_cap = 0;
+
+    for (int64_t i = 0; i < _fiber_pool_cnt; i++) {
+        pthread_mutex_destroy(&_fiber_pool[i]->done_mu);
+        pthread_cond_destroy(&_fiber_pool[i]->done_cv);
+        free(_fiber_pool[i]);
+    }
+    _fiber_pool_cnt = 0;
 
     // Free run queue - release any coro frames still pending in the queue
     // (fibers abandoned at shutdown that never got a chance to run).
