@@ -45,6 +45,10 @@ func main() {
 		runMPMC()
 	case "jitter":
 		runJitter()
+	case "pipeline10":
+		runPipeline10()
+	case "fanout":
+		runFanout()
 	default:
 		runPingPong()
 	}
