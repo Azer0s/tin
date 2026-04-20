@@ -308,15 +308,19 @@ func isIntLLVMType(t irtypes.Type) bool {
 // "name(type, type, ...)" on its own bullet line.
 func overloadSigList(name string, variants []*overloadEntry) string {
 	var b strings.Builder
+
 	for _, v := range variants {
 		b.WriteString("\n  ")
 		b.WriteString(name)
 		b.WriteByte('(')
+
 		if v.paramSig != "" {
 			b.WriteString(strings.ReplaceAll(v.paramSig, "__", ", "))
 		}
+
 		b.WriteByte(')')
 	}
+
 	return b.String()
 }
 

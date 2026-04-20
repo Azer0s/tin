@@ -813,6 +813,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return result, nil
 				}
 			}
+
 			if len(filteredVariants) > 0 {
 				return nil, cg.nodeErr(e,
 					"no matching overload for %s with %d argument(s); available:%s",
