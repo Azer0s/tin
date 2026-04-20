@@ -2248,7 +2248,20 @@ func (cg *CodeGen) callGenericFromMap(
 		}
 	}
 
-	concreteFunc, err := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
+	// When bareName is a qualified key (e.g. "yaml__encode"), use it as the
+	// template name so the monomorphized IR name includes the package prefix
+	// (e.g. "yaml__encode__point"). Without this, identically-named generics
+	// from different packages (json::encode and yaml::encode both have bare
+	// name "encode") would produce the same IR name and the cache would return
+	// the first-compiled version for every subsequent package's call.
+	monoTmpl := tmpl
+	if bareName != tmpl.Name {
+		copy := *tmpl
+		copy.Name = bareName
+		monoTmpl = &copy
+	}
+
+	concreteFunc, err := cg.monomorphizeFunc(monoTmpl, instKey, typeSubst)
 	if err != nil {
 		return nil, block, true, err
 	}

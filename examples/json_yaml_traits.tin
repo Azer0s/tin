@@ -1,0 +1,36 @@
+// json_yaml_traits.tin - struct implementing JsonSerializable and YamlSerializable
+
+use encoding::json
+use encoding::yaml
+
+// color holds an RGB hex string and serializes as a bare "#rrggbb" scalar
+// in both JSON (quoted) and YAML (unquoted).
+struct color(JsonSerializable, JsonDeserializable, YamlSerializable, YamlDeserializable) =
+  hex string
+
+  fn to_json(this color) string =
+    return "\"{this.hex}\""
+
+  fn apply_json(this *color, s string) bool =
+    this.hex = s
+    return true
+
+  fn to_yaml(this color) string =
+    return this.hex
+
+  fn apply_yaml(this *color, s string) bool =
+    this.hex = s
+    return true
+
+struct palette =
+  background color  @"json:background" @"yaml:background"
+  foreground color  @"json:foreground" @"yaml:foreground"
+
+let p = palette{
+  background: color{hex: "#1e1e2e"},
+  foreground: color{hex: "#cdd6f4"},
+}
+
+echo json::encode(p)
+echo yaml::encode(p)
+echo traitof(p.background)
