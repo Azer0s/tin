@@ -226,8 +226,8 @@ func (cg *CodeGen) resolveParamTypes(params []ast.Param, structName string) ([]i
 // argument values.  Selection rules (in order):
 //  1. Exact match: arity matches AND every parameter type equals the argument type.
 //     1.5. Coercible match: arity matches AND every concrete-struct arg can be coerced
-//     to the corresponding trait fat-ptr parameter (struct implements that trait).
-//  2. Arity-only match: arity matches, types are ignored (fallback).
+//     to the corresponding trait fat-ptr parameter (struct implements that trait),
+//     or integer types are widened/narrowed.
 //
 // Returns nil when no variant matches.
 func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Value) *overloadEntry {
@@ -292,12 +292,6 @@ func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Va
 			return v
 		}
 	}
-	// Pass 2: arity-only match.
-	for _, v := range variants {
-		if v.arity == len(argVals) {
-			return v
-		}
-	}
 
 	return nil
 }
@@ -307,6 +301,23 @@ func isIntLLVMType(t irtypes.Type) bool {
 	_, ok := t.(*irtypes.IntType)
 
 	return ok
+}
+
+// overloadSigList formats a slice of overload entries as a human-readable list
+// of signatures for use in error messages.  Each entry is printed as
+// "name(type, type, ...)" on its own bullet line.
+func overloadSigList(name string, variants []*overloadEntry) string {
+	var b strings.Builder
+	for _, v := range variants {
+		b.WriteString("\n  ")
+		b.WriteString(name)
+		b.WriteByte('(')
+		if v.paramSig != "" {
+			b.WriteString(strings.ReplaceAll(v.paramSig, "__", ", "))
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
 }
 
 // typesMatchCoercible returns true when every argument can be coerced to the
