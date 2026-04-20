@@ -586,8 +586,13 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 		// Expose the type alias as a bare name in the parent scope.
 		// Use the canonical struct key (e.g. "sync__Mutex") as the alias target.
+		// Skip generic structs: their templates are stored by bare name in
+		// genericStructsByArity and must not be aliased to "pkg__Name" here,
+		// or genTypeDecl will fail to find the template under the qualified key.
 		structKey := cg.pkgStructKey(sd.Name)
-		cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
+		if len(sd.TypeParams) == 0 {
+			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
+		}
 
 		// Propagate methods to prevScope so callers can call them.
 		// Methods are registered under canonicalKey_methodName in curScope.

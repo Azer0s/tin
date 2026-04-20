@@ -40,7 +40,11 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 	case *ast.SimpleType:
 		name := t.Name
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
-			// Qualified name: convert pkg::Name to pkg__Name.
+			// Qualified name: check typeAliases first (e.g. "collections::HashMap" may
+			// alias back to the bare "HashMap" used in genericStructsByArity).
+			if alias, ok := cg.typeAliases[name]; ok {
+				return cg.typeExprCanonicalKeyN(alias, depth+1)
+			}
 			return strings.ReplaceAll(name, "::", "__")
 		}
 		// Bare name: look up in typeAliases for the canonical form.
@@ -53,8 +57,12 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 	case *ast.GenericType:
 		name := t.Name
 		if strings.Contains(name, "::") {
-			// Qualified name: convert pkg::Name to pkg__Name.
-			name = strings.ReplaceAll(name, "::", "__")
+			// Qualified name: check typeAliases first (e.g. "collections::HashMap" -> "HashMap").
+			if alias, ok := cg.typeAliases[name]; ok {
+				name = cg.typeExprCanonicalKeyN(alias, depth+1)
+			} else {
+				name = strings.ReplaceAll(name, "::", "__")
+			}
 		} else if alias, ok := cg.typeAliases[name]; ok {
 			// Bare name: resolve through alias (e.g. bare "Channel" -> "sync__Channel").
 			name = cg.typeExprCanonicalKeyN(alias, depth+1)
