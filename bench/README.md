@@ -120,3 +120,10 @@ mean_ms / message_count; throughput as message_count / mean_ms.
   pool eliminating allocation overhead per task.
 - Tin MPMC variance is ~6% (σ 1.7 ms on 26.3 ms mean); the pool reaches 8
   structs (4P+4C) on the first burst and reuses them for all 1M messages.
+- Pipeline10 shows per-stage hop cost of ~57 ns (566 ns / 10 stages), slightly
+  better than the 4-stage pipeline's ~65 ns/stage, consistent with the
+  selfnext/runnext fast paths keeping hot fibers on the same worker.
+- Fanout (1 producer, 8 consumers) is bandwidth-limited by the single shared
+  run queue; Crystal's lead reflects lower green-thread wake-up cost. Go and
+  Rust both trail Tin despite being multi-threaded, reflecting the overhead of
+  their respective work distribution mechanisms at this fan ratio.
