@@ -109,7 +109,8 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		// and we have concrete type params, monomorphize now and retry.
 		// typeParamStr may be comma-separated for multi-param generics (e.g. "string,string").
 		if typeParamStr != "" {
-			if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
+			qualBaseName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: bareBaseName})
+			if _, isGeneric := cg.genericStructsByArity[qualBaseName]; isGeneric {
 				// Split comma-separated params, resolve aliases, build concrete name.
 				rawParts := strings.Split(typeParamStr, ",")
 				resolvedParts := make([]string, len(rawParts))
@@ -127,11 +128,11 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 					resolvedTEs[i] = parseTypeParamStr(raw)
 				}
 
-				concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
+				concreteName := qualBaseName + "__" + strings.Join(resolvedParts, "__")
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
 					synthDecl := &ast.TypeDecl{
 						Name: concreteName,
-						Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
+						Type: &ast.GenericType{Name: qualBaseName, TypeParams: resolvedTEs},
 					}
 					_ = cg.genTypeDecl(synthDecl)
 				}
@@ -247,8 +248,9 @@ func (cg *CodeGen) tryResolveStructTypeName(expr ast.Node) (string, string) {
 			return e.Name, ""
 		}
 
-		if _, ok := cg.genericStructsByArity[e.Name]; ok {
-			return e.Name, ""
+		qualName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: e.Name})
+		if _, ok := cg.genericStructsByArity[qualName]; ok {
+			return qualName, ""
 		}
 		// Check type alias.
 		if ta, ok := cg.typeAliases[e.Name]; ok {
@@ -470,8 +472,12 @@ func (cg *CodeGen) genArrayFillLit(block *ir.Block, e *ast.ArrayFillLit) (value.
 func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value, error) {
 	typeName := e.TypeName
 	// Generic struct literal with explicit type args: Name[T1, T2]{...}
-	// Monomorphize to the concrete name Name__T1__T2 (resolving type aliases).
+	// Monomorphize to the concrete name QualName__T1__T2 (resolving type aliases).
 	if len(e.TypeArgs) > 0 {
+		// Qualify the template name so that bare "HashMap" resolves to
+		// "collections__HashMap" and the concrete name is fully qualified.
+		qualTypeName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: typeName})
+
 		parts := make([]string, len(e.TypeArgs))
 
 		resolvedTypeArgs := make([]ast.TypeExpr, len(e.TypeArgs))
@@ -491,11 +497,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			resolvedTypeArgs[i] = resolved
 		}
 
-		concreteName := typeName + "__" + strings.Join(parts, "__")
+		concreteName := qualTypeName + "__" + strings.Join(parts, "__")
 		if _, done := cg.structTypes[concreteName]; !done {
 			synthDecl := &ast.TypeDecl{
 				Name: concreteName,
-				Type: &ast.GenericType{Name: typeName, TypeParams: resolvedTypeArgs},
+				Type: &ast.GenericType{Name: qualTypeName, TypeParams: resolvedTypeArgs},
 			}
 			if err := cg.genTypeDecl(synthDecl); err != nil {
 				return nil, err

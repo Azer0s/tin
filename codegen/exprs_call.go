@@ -911,9 +911,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if funcName != "" {
 				// Generic struct positional construction: StructName[T](field1, field2, ...)
 				// e.g. fooStruct[i32](42) where fooStruct is a generic struct template.
-				if _, isStruct := cg.genericStructsByArity[funcName]; isStruct {
+				qualFuncStructName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: funcName})
+				if _, isStruct := cg.genericStructsByArity[qualFuncStructName]; isStruct {
 					synthLit := &ast.StructLit{
-						TypeName:   funcName,
+						TypeName:   qualFuncStructName,
 						TypeArgs:   []ast.TypeExpr{&ast.SimpleType{Name: typeArgName}},
 						Positional: e.Args,
 					}

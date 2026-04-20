@@ -42,7 +42,7 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	// Overloading: if multiple functions share this base name, mangle the IR name
 	// and register the variant in the overloads map.
 	if cg.overloadedNames[n.Name] && n.IsExtern == "" && len(n.Constraints) == 0 {
-		sig := funcParamSig(n.Params)
+		sig := cg.funcParamSig(n.Params)
 		mangledName := overloadMangledName(irName, sig)
 		// Resolve LLVM param types for later call-site matching.
 		paramTypes, err := cg.resolveParamTypes(n.Params, "")
@@ -112,7 +112,7 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Overloading: if multiple methods share this base name within the struct,
 	// mangle the scope name and register the variant in the overloads map.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
-		sig := methodParamSig(m, structName)
+		sig := cg.methodParamSig(m, structName)
 		mangledKey := overloadMangledName(key, sig)
 		// Resolve param types for call-site matching (skip the 'this' receiver).
 		paramTypes, err := cg.resolveParamTypes(m.Params, structName)
@@ -229,13 +229,19 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		if len(n.TypeParams) > 0 {
 			// Generic struct - store as template keyed by arity; concrete types
 			// are created when a "type X = GenericStruct[T, R]" alias is processed.
-			// Templates are always keyed by bare name so that tinTypeToLLVM can look
-			// them up using the stripped (bare) name component.
-			if cg.genericStructsByArity[n.Name] == nil {
-				cg.genericStructsByArity[n.Name] = make(map[int]*ast.StructDecl)
+			// Templates are keyed by the canonical pkg-qualified name (e.g. "sync__Channel")
+			// so that same-named generics in different packages never collide.
+			qualName := cg.pkgStructKey(n.Name)
+			if cg.genericStructsByArity[qualName] == nil {
+				cg.genericStructsByArity[qualName] = make(map[int]*ast.StructDecl)
 			}
 
-			cg.genericStructsByArity[n.Name][len(n.TypeParams)] = n
+			cg.genericStructsByArity[qualName][len(n.TypeParams)] = n
+			// Register a bare-name alias so that code inside the package body can
+			// refer to the generic by its short name (e.g. "Channel" inside sync).
+			if cg.currentPkg != "" {
+				cg.typeAliases[n.Name] = &ast.SimpleType{Name: qualName}
+			}
 		} else {
 			// Register an opaque struct so recursive types work.
 			// Use the canonical package-prefixed name as both the map key and the
@@ -558,7 +564,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	}
 	// Overloading: if this function is part of an overload set, use the mangled name.
 	if cg.overloadedNames[n.Name] && n.IsExtern == "" && len(n.Constraints) == 0 {
-		sig := funcParamSig(n.Params)
+		sig := cg.funcParamSig(n.Params)
 		irName = overloadMangledName(irName, sig)
 	}
 
@@ -570,7 +576,7 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 	key := methodScopeName(structName, m)
 	// Overloading: use the mangled name when this method belongs to an overload set.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
-		sig := methodParamSig(m, structName)
+		sig := cg.methodParamSig(m, structName)
 
 		return cg.genFuncDeclAs(m, overloadMangledName(key, sig))
 	}

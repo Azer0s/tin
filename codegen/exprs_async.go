@@ -627,6 +627,31 @@ func (cg *CodeGen) canonicalUnitStructName() string {
 	return "Unit"
 }
 
+// canonicalFutureBaseName returns the canonical qualified base name for the
+// Future generic struct (e.g. "sync__Future" after sync is loaded).
+// Falls back to "Future" for standalone / pre-compiled scenarios.
+func (cg *CodeGen) canonicalFutureBaseName() string {
+	return cg.typeExprCanonicalKey(&ast.SimpleType{Name: "Future"})
+}
+
+// futureTypeParam extracts the type parameter string from a concrete Future
+// struct name (e.g. "sync__Future__i64" -> "i64", "Future__i64" -> "i64").
+// Returns ("", false) if structName is not a Future concrete name.
+func (cg *CodeGen) futureTypeParam(structName string) (string, bool) {
+	base := cg.canonicalFutureBaseName()
+
+	prefix := base + "__"
+	if strings.HasPrefix(structName, prefix) {
+		return strings.TrimPrefix(structName, prefix), true
+	}
+	// Also accept legacy bare "Future__" prefix (for pre-compiled scenarios).
+	if base != "Future" && strings.HasPrefix(structName, "Future__") {
+		return strings.TrimPrefix(structName, "Future__"), true
+	}
+
+	return "", false
+}
+
 // wrapPidInFuture wraps a fiber PID (i64) in a Future[T] struct value.
 // calleeName is used to look up the original return type; pass "" for void/do-block spawns.
 // Returns an error if the sync module is not available or Future[T] cannot be instantiated.
@@ -650,10 +675,12 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	retTypeStr := cg.typeExprCanonicalKey(retTypeExpr)
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
-	futureConcreteName := "Future__" + retTypeStr
+	futureBaseName := cg.canonicalFutureBaseName()
+
+	futureConcreteName := futureBaseName + "__" + retTypeStr
 	if _, exists := cg.structTypes[futureConcreteName]; !exists {
 		futureASTType := &ast.GenericType{
-			Name:       "Future",
+			Name:       futureBaseName,
 			TypeParams: []ast.TypeExpr{retTypeExpr},
 		}
 		if _, monoErr := cg.tinTypeToLLVM(futureASTType); monoErr != nil {
@@ -1854,17 +1881,19 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 	}
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
-	futureConcreteName := "Future__" + retTypeStr
+	futureBaseName := cg.canonicalFutureBaseName()
+
+	futureConcreteName := futureBaseName + "__" + retTypeStr
 	if _, exists := cg.structTypes[futureConcreteName]; !exists {
 		retTypeExpr := &ast.SimpleType{Name: retTypeStr}
 
 		futureASTType := &ast.GenericType{
-			Name:       "Future",
+			Name:       futureBaseName,
 			TypeParams: []ast.TypeExpr{retTypeExpr},
 		}
 		if _, monoErr := cg.tinTypeToLLVM(futureASTType); monoErr != nil {
 			// Try Unit as fallback (use canonical name)
-			futureConcreteName = "Future__" + cg.canonicalUnitStructName()
+			futureConcreteName = futureBaseName + "__" + cg.canonicalUnitStructName()
 		}
 	}
 

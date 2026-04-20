@@ -959,7 +959,9 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		}
 
 		sname := structNameFromValue(fval)
-		if sname == "" || len(sname) <= 8 || sname[:8] != "Future__" {
+
+		retTypeName, isFuture := cg.futureTypeParam(sname)
+		if sname == "" || !isFuture {
 			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fval.Type())
 		}
 
@@ -969,8 +971,6 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		}
 
 		pid := block.NewExtractValue(fval, uint64(pidIdx))
-
-		retTypeName := sname[8:]
 
 		var retLLVM irtypes.Type
 

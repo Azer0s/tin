@@ -38,37 +38,34 @@ type overloadEntry struct {
 }
 
 // typeExprMangle converts a Tin TypeExpr to a safe identifier fragment used
-// as part of the mangled overload name.
-func typeExprMangle(te ast.TypeExpr) string {
+// as part of the mangled overload name.  It produces fully-qualified names for
+// package types (e.g. "sync::Client" -> "sync__Client") so that same-named
+// types from different packages never produce colliding overload signatures.
+func (cg *CodeGen) typeExprMangle(te ast.TypeExpr) string {
 	if te == nil {
 		return "void"
 	}
 
 	switch t := te.(type) {
 	case *ast.SimpleType:
-		// Replace non-identifier chars with underscore.
-		return strings.Map(func(r rune) rune {
-			if r == ':' || r == '.' {
-				return '_'
-			}
-
-			return r
-		}, t.Name)
+		return cg.typeExprCanonicalKey(te)
 	case *ast.PointerType:
 		if t.IsConst {
-			return "cptr_" + typeExprMangle(t.Elem)
+			return "cptr_" + cg.typeExprMangle(t.Elem)
 		}
 
-		return "ptr_" + typeExprMangle(t.Elem)
+		return "ptr_" + cg.typeExprMangle(t.Elem)
 	case *ast.ArrayType:
-		return "arr_" + typeExprMangle(t.Elem)
+		return "arr_" + cg.typeExprMangle(t.Elem)
 	case *ast.GenericType:
-		parts := []string{t.Name}
+		name := cg.typeExprCanonicalKey(&ast.SimpleType{Name: t.Name})
+
+		parts := []string{name}
 		for _, tp := range t.TypeParams {
-			parts = append(parts, typeExprMangle(tp))
+			parts = append(parts, cg.typeExprMangle(tp))
 		}
 
-		return strings.Join(parts, "_")
+		return strings.Join(parts, "__")
 	case *ast.FuncType:
 		return "fn"
 	case *ast.VoidType:
@@ -85,7 +82,7 @@ func typeExprMangle(te ast.TypeExpr) string {
 // funcParamSig returns the mangled parameter-type signature for a function
 // declaration, e.g. "i64__string" for (n i64, s string).
 // Vararg parameters are excluded.
-func funcParamSig(params []ast.Param) string {
+func (cg *CodeGen) funcParamSig(params []ast.Param) string {
 	var parts []string
 
 	for _, p := range params {
@@ -93,7 +90,7 @@ func funcParamSig(params []ast.Param) string {
 			continue
 		}
 
-		parts = append(parts, typeExprMangle(p.Type))
+		parts = append(parts, cg.typeExprMangle(p.Type))
 	}
 
 	return strings.Join(parts, "__")
@@ -101,7 +98,7 @@ func funcParamSig(params []ast.Param) string {
 
 // methodParamSig returns the mangled parameter-type signature for a method,
 // skipping the implicit "this" first parameter.
-func methodParamSig(m *ast.FuncDecl, structName string) string {
+func (cg *CodeGen) methodParamSig(m *ast.FuncDecl, structName string) string {
 	params := m.Params
 	// Skip the first parameter if it is the "this" receiver.
 	// It may be declared as `this StructName` (value) or `this *StructName` (pointer).
@@ -118,7 +115,7 @@ func methodParamSig(m *ast.FuncDecl, structName string) string {
 		}
 	}
 
-	return funcParamSig(params)
+	return cg.funcParamSig(params)
 }
 
 // overloadMangledName returns the mangled IR name for a function/method when
