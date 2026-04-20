@@ -369,15 +369,16 @@ type CodeGen struct {
 	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
 	fiberSpawnFn         *ir.Func
 	fiberSpawnJoinableFn *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
-	// spawnJoinable: when true, activeSpawnFn() returns fiberSpawnJoinableFn.
-	// Set by the AwaitExpr handler for the auto-spawn path (`await asyncFn()` in
-	// non-coro context).  activeSpawnFn also returns fiberSpawnJoinableFn for all
-	// !inCoroFn spawns regardless of this flag; see activeSpawnFn for rationale.
-	spawnJoinable        bool
+	// spawnFireForget: when true, activeSpawnFn() returns fiberSpawnFn (prejoined=0).
+	// Set only for statement-level SpawnExprs whose result is explicitly discarded.
+	// All other spawns use fiberSpawnJoinableFn (prejoined=1) by default so that
+	// stored futures can be awaited later without racing against ff_reclaim and
+	// pid reuse.
+	spawnFireForget    bool
 	fiberCompleteFn    *ir.Func
-	fiberJoinFn        *ir.Func // _tin_fiber_join(pid i64, hdl i8*): register waiter
-	fiberGetResultFn   *ir.Func // _tin_fiber_get_result(pid i64) -> i8*
-	fiberGetPanicMsgFn *ir.Func // _tin_fiber_get_panic_msg(pid i64) -> i8* (null = ok)
+	fiberJoinFn        *ir.Func   // _tin_fiber_join(pid i64, hdl i8*): register waiter
+	fiberGetResultFn   *ir.Func   // _tin_fiber_get_result(pid i64) -> i8*
+	fiberGetPanicMsgFn *ir.Func   // _tin_fiber_get_panic_msg(pid i64) -> i8* (null = ok)
 	fiberCheckPanicFn  *ir.Func   // _tin_fiber_check_panic() -> i8*: unhandled panic check at yield points
 	panicFlagGlobal    *ir.Global // _has_unhandled_panics: fast-path flag for the two-level panic check
 	coroTakeResultFn   *ir.Func   // _tin_coro_take_result() -> i8*: for chaining
@@ -1244,7 +1245,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				}
 
 				coroHdl := wb.NewCall(userMainCoroFn, coroArgs...)
-				mainPid := wb.NewCall(cg.fiberSpawnFn, coroHdl)
+				mainPid := wb.NewCall(cg.fiberSpawnJoinableFn, coroHdl)
 				wb.NewCall(syncAwaitFn, mainPid)
 				cg.emitFiberMainEnd(wb)
 				cg.emitTopLevelVarDeinits(wb)

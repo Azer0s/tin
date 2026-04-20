@@ -860,9 +860,11 @@ func (cg *CodeGen) ensurePanicFlagGlobal() *ir.Global {
 	if cg.panicFlagGlobal != nil {
 		return cg.panicFlagGlobal
 	}
+
 	g := cg.mod.NewGlobal("_has_unhandled_panics", irtypes.I32)
 	g.Linkage = enum.LinkageExternal
 	cg.panicFlagGlobal = g
+
 	return g
 }
 
@@ -908,6 +910,7 @@ func (cg *CodeGen) genCallSiteYield(from *ir.Block) *ir.Block {
 	afterBlk := cg.newBlock("callsite.yield.after")
 	cg.emitPanicCheck(resume, afterBlk, "callsite.yield")
 	cg.curBlock = afterBlk
+
 	return afterBlk
 }
 

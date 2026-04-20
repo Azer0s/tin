@@ -1077,6 +1077,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
 	if calleeType != nil && !calleeType.Variadic && len(llArgs) != len(calleeType.Params) {
 		calleeName := ""
+
 		if f, ok := callee.(*ir.Func); ok {
 			// Convert internal IR name (pkg__fn or pkg__fn__sig) to source form (pkg::fn).
 			// Strip any overload signature suffix (last __<sig> segment) first, then

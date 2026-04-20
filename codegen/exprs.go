@@ -207,14 +207,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			}
 		}
 
-		// Auto-spawn in non-coro context: set spawnJoinable so genSpawnExpr uses
-		// _tin_fiber_spawn_joinable.  This prevents the ff_reclaim TOCTOU race
-		// between spawn and the immediately-following _tin_fiber_sync_await call.
-		if !cg.inCoroFn && futureExpr != e.Future {
-			cg.spawnJoinable = true
-		}
 		val, err := cg.genExpr(block, futureExpr)
-		cg.spawnJoinable = false
 		if err != nil {
 			return nil, err
 		}
@@ -371,10 +364,13 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return constant.NewInt(irtypes.I1, 1), nil
 		}
 
-		// Get the boxed result pointer and unbox it.
+		// Get the boxed result pointer, unbox it, then free the heap buffer.
+		// _tin_fiber_get_result transfers ownership of the malloc'd result box
+		// to the caller; the caller must free it after loading the value.
 		rawPtr := block.NewCall(cg.fiberGetResultFn, pid)
 		typedPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(retLLVM))
 		result := block.NewLoad(retLLVM, typedPtr)
+		block.NewCall(cg.ensureFree(), rawPtr)
 		cg.curBlock = block
 
 		return result, nil

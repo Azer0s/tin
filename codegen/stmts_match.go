@@ -1275,6 +1275,7 @@ func (cg *CodeGen) bindAwaitMatchSlot(block *ir.Block, c ast.AwaitMatchCase, sl 
 		rawPtr := okBlk.NewCall(cg.fiberGetResultFn, sl.pid)
 		typedPtr := okBlk.NewBitCast(rawPtr, irtypes.NewPointer(sl.retType))
 		result := okBlk.NewLoad(sl.retType, typedPtr)
+		okBlk.NewCall(cg.ensureFree(), rawPtr)
 		alloca := okBlk.NewAlloca(sl.retType)
 		okBlk.NewStore(result, alloca)
 		cg.curScope.set(c.BindName, &scopeEntry{val: alloca, isAlloc: true})

@@ -1254,23 +1254,23 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 
 // activeSpawnFn returns the spawn function for the current context.
 //
-// All !inCoroFn spawns use _tin_fiber_spawn_joinable (prejoined=1) to prevent
-// ff_reclaim between _tin_fiber_spawn returning a pid and _tin_fiber_join
-// consuming it.  The race exists for any explicit `let f = spawn ...; await f`
-// pattern in sync functions (test bodies, non-async main, sync wrappers): the
-// spawn and await are separate statements so there is no single site to detect
-// "this will be awaited".
+// All spawns use _tin_fiber_spawn_joinable (prejoined=1) by default so that a
+// spawned fiber's slot cannot be ff_reclaimed and reused before the spawner
+// calls _tin_fiber_join.  This is correct for:
+//   - stored futures: `let f = spawn fn()` or `futures ++= spawn fn()` (awaited later)
+//   - immediately awaited: `await spawn fn()` (auto-spawn path)
+//   - non-coro context: test bodies, non-async main (TOCTOU fix)
 //
-// True fire-and-forget spawns from non-coro context (no await on the result)
-// also get prejoined=1, so their slots are not ff_reclaimed until
-// _tin_fiber_run shutdown.  This is a minor cost: non-coro fire-and-forget
-// is unusual (test bodies, non-async main), and fixing it correctly would
-// require per-slot generation counters or lookahead over the AST.
+// The only exception is a statement-level spawn (ExprStmt wrapping SpawnExpr)
+// where the result is explicitly discarded.  In that case spawnFireForget=true
+// allows _tin_fiber_spawn (prejoined=0) so the fiber can be ff_reclaimed at
+// completion, keeping its slot available for reuse.
 func (cg *CodeGen) activeSpawnFn() *ir.Func {
-	if cg.spawnJoinable || !cg.inCoroFn {
-		return cg.fiberSpawnJoinableFn
+	if cg.spawnFireForget {
+		return cg.fiberSpawnFn
 	}
-	return cg.fiberSpawnFn
+
+	return cg.fiberSpawnJoinableFn
 }
 
 // genSpawnExpr generates code for `spawn callExpr`.

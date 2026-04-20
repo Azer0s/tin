@@ -533,7 +533,17 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		}
 
 		cg.curBlock = block
+
+		// Statement-level SpawnExpr: result is discarded (fire-and-forget).
+		// Mark spawnFireForget so activeSpawnFn() uses fiberSpawnFn (prejoined=0),
+		// allowing the fiber to be ff_reclaimed at completion for slot reuse.
+		if _, ok := s.Expr.(*ast.SpawnExpr); ok {
+			cg.spawnFireForget = true
+		}
+
 		val, err := cg.genExpr(block, s.Expr)
+		cg.spawnFireForget = false
+
 		// If genExpr advanced the current block (e.g. an await arg created new
 		// blocks), use the continuation block for any subsequent emission.
 		if cg.curBlock != nil && cg.curBlock != block {
