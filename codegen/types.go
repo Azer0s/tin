@@ -322,6 +322,17 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
 	if _, ok := cg.traits[name]; ok {
+		// If the trait belongs to a package, use the qualified instKey so that
+		// bare-name references (e.g. "JsonSerializable" inside json.tin) produce
+		// the same fat-ptr/vtable LLVM types as qualified references (e.g.
+		// "json::JsonSerializable" from call sites outside the package).
+		if qualInstKey, ok2 := cg.traitBareToQualInstKey[name]; ok2 {
+			fp, err := cg.buildTraitFatPtrTypeInst(name, qualInstKey, nil)
+			if err != nil {
+				return nil, err
+			}
+			return fp, nil
+		}
 		fp, err := cg.buildTraitFatPtrType(name)
 		if err != nil {
 			return nil, err
@@ -351,11 +362,11 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
 	if bareName != name {
 		if _, ok := cg.traits[bareName]; ok {
-			fp, err := cg.buildTraitFatPtrType(bareName)
+			qualInstKey := strings.ReplaceAll(name, "::", "__")
+			fp, err := cg.buildTraitFatPtrTypeInst(bareName, qualInstKey, nil)
 			if err != nil {
 				return nil, err
 			}
-
 			return fp, nil
 		}
 	}

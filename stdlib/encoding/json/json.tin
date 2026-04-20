@@ -213,7 +213,7 @@ fn encode_any_impl[T](v any, type_hint T) string =
   let vtraits = traitof(v)
   let vti i64 = 0
   for vti < len(vtraits):
-    if vtraits[vti] == 'JsonSerializable:
+    if vtraits[vti] == '"json::JsonSerializable":
       let ser = v as JsonSerializable
       return ser.to_json()
     vti = vti + 1
@@ -281,7 +281,7 @@ fn encode[T](v T) string =
   let etraits = traitof(v)
   let eti i64 = 0
   for eti < len(etraits):
-    if etraits[eti] == 'JsonSerializable:
+    if etraits[eti] == '"json::JsonSerializable":
       return encode_any_impl[T](v as any, v)
     eti = eti + 1
 
@@ -643,7 +643,7 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
             let nft = traitof(nfv)
             let nfi i64 = 0
             for nfi < len(nft):
-              if nft[nfi] == 'JsonDeserializable:
+              if nft[nfi] == '"json::JsonDeserializable":
                 let ndeser = nfv as JsonDeserializable
                 ndeser.apply_json(jval.sval)
                 setfield(zero, fname, nfv)
@@ -721,7 +721,7 @@ fn parse[T](s string) (T, Err) =
               let ftraits = traitof(fv)
               let fi i64 = 0
               for fi < len(ftraits):
-                if ftraits[fi] == 'JsonDeserializable:
+                if ftraits[fi] == '"json::JsonDeserializable":
                   let deser = fv as JsonDeserializable
                   deser.apply_json(jval.sval)
                   setfield(result, fname, fv)

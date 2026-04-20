@@ -47,7 +47,6 @@ Run/test flags:
   -v-heuristics    print auto-yield heuristics for every function to stderr
 
 Debug flags:
-  -g                    emit DWARF debug info (enables source-level debugging)
   -f-debug-fiber-slots  print fiber struct pool ramp/decay events to stderr
 
 In-source directives (at the top of the .tin file):

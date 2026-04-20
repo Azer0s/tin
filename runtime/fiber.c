@@ -1799,10 +1799,7 @@ void _tin_fiber_run(void) {
         pthread_cond_destroy(&_fiber_pool[i]->done_cv);
         free(_fiber_pool[i]);
     }
-    _fiber_pool_cnt  = 0;
-    _live_cnt        = 0;
-    _live_peak       = 0;
-    _reclaim_total   = 0;
+    _fiber_pool_cnt = 0;
 
     // Free run queue - release any coro frames still pending in the queue
     // (fibers abandoned at shutdown that never got a chance to run).

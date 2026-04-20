@@ -79,6 +79,10 @@ type CodeGen struct {
 
 	// trait registry: trait name -> TraitDecl
 	traits map[string]*ast.TraitDecl
+	// bare trait name -> qualified instKey (e.g. "JsonSerializable" -> "json__JsonSerializable")
+	// populated when a package registers a trait so that bare-name type lookups
+	// resolve to the same fat-ptr/vtable types as qualified-name lookups.
+	traitBareToQualInstKey map[string]string
 
 	// global string counter
 	strCount int
@@ -707,6 +711,7 @@ func New(filename string) *CodeGen {
 		traitVtableGlobals:     make(map[string]*ir.Global),
 		traitInstKeys:          make(map[string]string),
 		traitAsyncMethodNames:  make(map[string][]string),
+		traitBareToQualInstKey: make(map[string]string),
 		implicitConvFns:        make(map[string][]implicitConvEntry),
 		structVtableOrder:      make(map[string][]string),
 		enumValues:             make(map[string]int64),

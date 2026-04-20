@@ -252,8 +252,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(localVariants, argVals)
 			if best == nil {
-				return nil, fmt.Errorf("no matching overload for %s with %d argument(s); available:%s",
-					fn.Name, len(argVals), overloadSigList(fn.Name, localVariants))
+				return nil, fmt.Errorf("no matching overload for %s (got %d arg(s))", fn.Name, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -813,12 +812,6 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return result, nil
 				}
 			}
-
-			if len(filteredVariants) > 0 {
-				return nil, cg.nodeErr(e,
-					"no matching overload for %s with %d argument(s); available:%s",
-					bareName, len(argVals), overloadSigList(bareName, filteredVariants))
-			}
 		}
 		// Generic function call without explicit type arg: infer type and monomorphize.
 		// When multiple packages export identically-named generics (e.g. json::encode and
@@ -911,10 +904,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if funcName != "" {
 				// Generic struct positional construction: StructName[T](field1, field2, ...)
 				// e.g. fooStruct[i32](42) where fooStruct is a generic struct template.
-				qualFuncStructName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: funcName})
-				if _, isStruct := cg.genericStructsByArity[qualFuncStructName]; isStruct {
+				if _, isStruct := cg.genericStructsByArity[funcName]; isStruct {
 					synthLit := &ast.StructLit{
-						TypeName:   qualFuncStructName,
+						TypeName:   funcName,
 						TypeArgs:   []ast.TypeExpr{&ast.SimpleType{Name: typeArgName}},
 						Positional: e.Args,
 					}

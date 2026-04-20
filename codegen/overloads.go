@@ -38,34 +38,37 @@ type overloadEntry struct {
 }
 
 // typeExprMangle converts a Tin TypeExpr to a safe identifier fragment used
-// as part of the mangled overload name.  It produces fully-qualified names for
-// package types (e.g. "sync::Client" -> "sync__Client") so that same-named
-// types from different packages never produce colliding overload signatures.
-func (cg *CodeGen) typeExprMangle(te ast.TypeExpr) string {
+// as part of the mangled overload name.
+func typeExprMangle(te ast.TypeExpr) string {
 	if te == nil {
 		return "void"
 	}
 
 	switch t := te.(type) {
 	case *ast.SimpleType:
-		return cg.typeExprCanonicalKey(te)
+		// Replace non-identifier chars with underscore.
+		return strings.Map(func(r rune) rune {
+			if r == ':' || r == '.' {
+				return '_'
+			}
+
+			return r
+		}, t.Name)
 	case *ast.PointerType:
 		if t.IsConst {
-			return "cptr_" + cg.typeExprMangle(t.Elem)
+			return "cptr_" + typeExprMangle(t.Elem)
 		}
 
-		return "ptr_" + cg.typeExprMangle(t.Elem)
+		return "ptr_" + typeExprMangle(t.Elem)
 	case *ast.ArrayType:
-		return "arr_" + cg.typeExprMangle(t.Elem)
+		return "arr_" + typeExprMangle(t.Elem)
 	case *ast.GenericType:
-		name := cg.typeExprCanonicalKey(&ast.SimpleType{Name: t.Name})
-
-		parts := []string{name}
+		parts := []string{t.Name}
 		for _, tp := range t.TypeParams {
-			parts = append(parts, cg.typeExprMangle(tp))
+			parts = append(parts, typeExprMangle(tp))
 		}
 
-		return strings.Join(parts, "__")
+		return strings.Join(parts, "_")
 	case *ast.FuncType:
 		return "fn"
 	case *ast.VoidType:
@@ -82,7 +85,7 @@ func (cg *CodeGen) typeExprMangle(te ast.TypeExpr) string {
 // funcParamSig returns the mangled parameter-type signature for a function
 // declaration, e.g. "i64__string" for (n i64, s string).
 // Vararg parameters are excluded.
-func (cg *CodeGen) funcParamSig(params []ast.Param) string {
+func funcParamSig(params []ast.Param) string {
 	var parts []string
 
 	for _, p := range params {
@@ -90,7 +93,7 @@ func (cg *CodeGen) funcParamSig(params []ast.Param) string {
 			continue
 		}
 
-		parts = append(parts, cg.typeExprMangle(p.Type))
+		parts = append(parts, typeExprMangle(p.Type))
 	}
 
 	return strings.Join(parts, "__")
@@ -98,7 +101,7 @@ func (cg *CodeGen) funcParamSig(params []ast.Param) string {
 
 // methodParamSig returns the mangled parameter-type signature for a method,
 // skipping the implicit "this" first parameter.
-func (cg *CodeGen) methodParamSig(m *ast.FuncDecl, structName string) string {
+func methodParamSig(m *ast.FuncDecl, structName string) string {
 	params := m.Params
 	// Skip the first parameter if it is the "this" receiver.
 	// It may be declared as `this StructName` (value) or `this *StructName` (pointer).
@@ -115,7 +118,7 @@ func (cg *CodeGen) methodParamSig(m *ast.FuncDecl, structName string) string {
 		}
 	}
 
-	return cg.funcParamSig(params)
+	return funcParamSig(params)
 }
 
 // overloadMangledName returns the mangled IR name for a function/method when
@@ -223,8 +226,8 @@ func (cg *CodeGen) resolveParamTypes(params []ast.Param, structName string) ([]i
 // argument values.  Selection rules (in order):
 //  1. Exact match: arity matches AND every parameter type equals the argument type.
 //     1.5. Coercible match: arity matches AND every concrete-struct arg can be coerced
-//     to the corresponding trait fat-ptr parameter (struct implements that trait),
-//     or integer types are widened/narrowed.
+//     to the corresponding trait fat-ptr parameter (struct implements that trait).
+//  2. Arity-only match: arity matches, types are ignored (fallback).
 //
 // Returns nil when no variant matches.
 func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Value) *overloadEntry {
@@ -289,6 +292,12 @@ func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Va
 			return v
 		}
 	}
+	// Pass 2: arity-only match.
+	for _, v := range variants {
+		if v.arity == len(argVals) {
+			return v
+		}
+	}
 
 	return nil
 }
@@ -298,27 +307,6 @@ func isIntLLVMType(t irtypes.Type) bool {
 	_, ok := t.(*irtypes.IntType)
 
 	return ok
-}
-
-// overloadSigList formats a slice of overload entries as a human-readable list
-// of signatures for use in error messages.  Each entry is printed as
-// "name(type, type, ...)" on its own bullet line.
-func overloadSigList(name string, variants []*overloadEntry) string {
-	var b strings.Builder
-
-	for _, v := range variants {
-		b.WriteString("\n  ")
-		b.WriteString(name)
-		b.WriteByte('(')
-
-		if v.paramSig != "" {
-			b.WriteString(strings.ReplaceAll(v.paramSig, "__", ", "))
-		}
-
-		b.WriteByte(')')
-	}
-
-	return b.String()
 }
 
 // typesMatchCoercible returns true when every argument can be coerced to the

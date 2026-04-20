@@ -473,12 +473,8 @@ when the pool is flushed) rather than leaking.
 
 ## Channel Waiter Queues
 
-`stdlib/sync/channel_arc.c` implements channels as a lock-free ring buffer
-(Dmitry Vyukov's bounded MPMC queue algorithm, see
-<https://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue>)
-plus two dynamic waiter queues for fibers that block on send/recv.
-
-Each `TinChannel` has two dynamic waiter queues:
+`stdlib/sync/channel_arc.c` parks fibers that call `send` on a full channel or
+`recv` on an empty one. Each `TinChannel` has two dynamic waiter queues:
 
 ```c
 TinWaiterQueue {

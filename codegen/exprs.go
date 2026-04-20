@@ -346,8 +346,11 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		cg.curBlock = block
 
 		// Determine the Future's type parameter T so we can unbox the result.
-		// sync__Future__i64 -> retType=i64; sync__Future__Unit -> retType=Unit(void).
-		retTypeName, _ := cg.futureTypeParam(structName)
+		// Future__i64 -> retType=i64; Future__Unit -> retType=Unit(void).
+		retTypeName := ""
+		if len(structName) > 8 && structName[:8] == "Future__" {
+			retTypeName = structName[8:]
+		}
 
 		if retTypeName == "" || retTypeName == "Unit" {
 			// void result - return a sentinel i1 true so callers don't see nil.

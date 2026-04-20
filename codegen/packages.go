@@ -633,7 +633,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 
 		baseName := pkgName + "__" + fd.Name
-		sig := cg.funcParamSig(fd.Params)
+		sig := funcParamSig(fd.Params)
 		irName := overloadMangledName(baseName, sig)
 
 		cg.coroCallable[irName] = true
@@ -656,7 +656,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 			// Register in overloads map so cross-package call-site resolution works.
 			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
@@ -708,7 +708,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
 
@@ -734,7 +734,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		lookupName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			lookupName = overloadMangledName(baseName, sig)
 		}
 
@@ -899,10 +899,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
 			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 		}
-		// Generic struct templates are keyed by the qualified name "pkgName__name".
-		if _, ok := cg.genericStructsByArity[canonicalKey]; ok {
-			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: canonicalKey}
-			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: canonicalKey}
+		// Generic struct templates are always keyed by bare name.
+		if _, ok := cg.genericStructsByArity[name]; ok {
+			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
+			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 		}
 	}
 
@@ -940,7 +940,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 		prefixed := pkgName + "__" + fd.Name
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			prefixed = overloadMangledName(prefixed, sig)
 			// Register in overloads map so call-site overload resolution works.
 			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
@@ -1046,7 +1046,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
 
@@ -1081,7 +1081,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
 
@@ -1194,7 +1194,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] && fd.IsExtern == "" {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 			// Register in overloads map for cross-package call-site resolution.
 			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
@@ -1251,7 +1251,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
 
@@ -1311,7 +1311,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		irName := baseName
 
 		if cg.overloadedNames[fd.Name] && fd.IsExtern == "" {
-			sig := cg.funcParamSig(fd.Params)
+			sig := funcParamSig(fd.Params)
 			irName = overloadMangledName(baseName, sig)
 		}
 
@@ -1462,10 +1462,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			}
 		}
 
-		if _, isGeneric := cg.genericStructsByArity[canonicalKey]; isGeneric {
+		if _, isGeneric := cg.genericStructsByArity[name]; isGeneric {
 			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
-				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: canonicalKey}
-				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: canonicalKey}
+				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
+				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 			}
 		}
 	}
@@ -2072,9 +2072,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			break
 		}
 
-		qualPtName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: pt.Name})
-
-		prefix := qualPtName + "__"
+		prefix := pt.Name + "__"
 		if !strings.HasPrefix(structName, prefix) {
 			break
 		}
