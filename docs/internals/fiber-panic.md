@@ -214,6 +214,10 @@ test "recovered await-panic yields zero" =
 ## Fire-and-Forget Panic Detection
 
 Fibers that panicked but were never awaited are detected at process shutdown.
+Unlike normal ff fibers (which are reclaimed immediately at completion),
+panicking ff fibers are **not** reclaimed: `panic_msg` must remain readable
+by `_tin_fiber_check_panic` until the fiber table is torn down.
+
 `_tin_fiber_run` scans the fiber table after all workers have stopped:
 
 ```c

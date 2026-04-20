@@ -170,11 +170,79 @@ When `io::sleep(ms)` is called:
 
 ---
 
+## Fire-and-Forget Reclaim
+
+Fibers with no registered waiters at completion are **fire-and-forget (ff)**
+fibers: nobody will call `_tin_fiber_join` or `_tin_fiber_get_result`, so
+their slot can be freed immediately. Without reclaim, long-running programs
+that spawn many short-lived fire-and-forget fibers would exhaust the table.
+
+### How it works
+
+At completion (under `_table_mu`), before `_fire_done_waiters` resets `waiter_cnt`:
+
+```c
+int had_waiters = (f->waiter_cnt > 0)   // in-fiber join registered
+               || (f->os_waiter_cnt > 0) // OS thread blocking on done_cv
+               || f->prejoined;          // spawner will call _tin_fiber_join
+
+_fire_done_waiters(f);
+// ... broadcast done_cv ...
+
+if (!had_waiters && !f->panic_msg) {
+    free(f->result);
+    f->result = NULL;
+    _free_slot_push(f->pid);   // adds pid to free list, sets _fibers[pid]=NULL
+    // free f outside _table_mu
+}
+```
+
+Panicking ff fibers are NOT reclaimed here: `panic_msg` must remain readable by
+`_tin_fiber_check_panic` until shutdown (see [fiber-panic.md](fiber-panic.md)).
+
+### Slot reuse via `_free_slots`
+
+Reclaimed pids are pushed onto a `_free_slots` free list (a resizable array,
+also protected by `_table_mu`). `_tin_fiber_spawn` / `_tin_fiber_spawn_joinable`
+prefer a free-list entry over incrementing `_fiber_cnt`, so total slot usage
+is bounded by the peak concurrent fiber count rather than the total spawned.
+
+`_tin_fiber_get_result` also reclaims the slot after the caller reads the result
+(i.e., for awaited fibers that were not ff-reclaimed):
+
+```c
+void *_tin_fiber_get_result(int64_t pid) {
+    // _table_mu held
+    TinFiber *f = _fibers[pid];
+    void *r = f->result;
+    f->result = NULL;
+    TinFiber *to_free = _free_slot_push(pid) ? f : NULL;
+    // release _table_mu, then free to_free if non-NULL
+    return r;
+}
+```
+
+Must be called at most once per pid (after `_tin_fiber_join` + panic check).
+
+### `prejoined` flag
+
+Spawns from non-coroutine context (`_tin_fiber_spawn_joinable`) set
+`f->prejoined = 1` inside `_table_mu` before pushing to the run queue.
+This blocks ff_reclaim for the fiber's entire lifetime, preventing the TOCTOU
+race between `_tin_fiber_spawn_joinable` returning a pid and the caller later
+calling `_tin_fiber_join`.
+
+`os_waiter_cnt` is separate: it counts OS threads currently blocking on
+`done_cv` (0 when none are waiting). `prejoined` is a spawn-time declaration
+("the spawner will join"), while `os_waiter_cnt` is a live counter during the
+actual blocking wait. Both are set/read under `_table_mu`.
+
+---
+
 ## await spawn - Fiber Join
 
-`await spawn fn_b(args)` is the correct pattern for running an async function
-as a fiber and blocking the calling fiber until it completes. This is a
-**two-step** operation:
+`await spawn fn_b(args)` runs an async function as a fiber and blocks until it
+completes:
 
 1. `spawn fn_b(args)` starts a new fiber (pid2) and returns `Future[T]`.
 2. `await future` evaluates `future` (which implements `Awaitable[T]`) and
@@ -187,41 +255,59 @@ await spawn fn_b(args)
   │                        returns Future[T]{pid: pid2}
   │
   └─ await future       -> calls Future_await_result(future)
-                        -> calls _tin_fiber_join(pid2)
-                        -> parks calling fiber (BLOCKED)
+                        -> calls _tin_fiber_join(pid2, my_hdl)
+                        -> parks calling fiber (BLOCKED in coro context)
+                        ->   or blocks OS thread (non-coro context)
                         -> waits until pid2 reaches FIBER_DONE
-                        -> returns owned result pointer
 ```
+
+There is **no inline drive loop** - the inner fiber runs independently on any
+worker thread. The calling fiber parks (or the OS thread blocks) until done.
+
+### Spawn variants
+
+| Function | `prejoined` | Used by |
+|---|---|---|
+| `_tin_fiber_spawn` | 0 | explicit `spawn` in coroutine bodies |
+| `_tin_fiber_spawn_joinable` | 1 | all spawns in non-coro context (codegen) |
+
+Both share `_spawn_impl`; the only difference is the `prejoined` argument.
 
 ### _tin_fiber_join
 
+Two paths depending on the calling context:
+
+**In-fiber path (called from a coroutine on a worker thread):**
+
 ```c
-// Simplified
-void *_tin_fiber_join(int64_t pid) {
-    // Register calling fiber as a waiter on pid's done list, then park.
-    pthread_mutex_lock(&_table_mu);
-    TinFiber *target = _fibers[pid];
-    if (target->status == FIBER_DONE) {
-        pthread_mutex_unlock(&_table_mu);
-        return _tin_coro_take_result();  // already done
-    }
-    // Add calling fiber pid to target->waiters[], then park.
-    target->waiters[target->waiter_cnt++] = _current_pid;
-    pthread_mutex_unlock(&_table_mu);
-    _tin_fiber_park(_current_pid);       // BLOCKED until target is DONE
-    // ... resumes here after target completes ...
-    return _tin_coro_take_result();      // ownership transferred to caller
-}
+// Register calling fiber as a waiter; defer blocking via pending_join.
+target->waiters[target->waiter_cnt++] = my_pid;
+me->pending_join = 1;
+pthread_mutex_unlock(&_table_mu);
+// coro.suspend fires after this call; worker sets BLOCKED if not yet done.
 ```
 
-When pid2 reaches `FIBER_DONE`:
-1. `_tin_fiber_complete` stores the result in the result buffer.
-2. Looks up any waiting pids from the join table.
-3. Calls `_tin_fiber_unpark` for each -> back to RUNNABLE.
-4. Calling fiber resumes; `_tin_fiber_join` returns the result pointer.
+When `target` completes, `_fire_done_waiters` wakes each registered waiter by
+calling `_enqueue_waiter(wpid, w)` -> RUNNABLE.
 
-There is **no inline drive loop** - the inner fiber runs independently on any
-worker thread. The calling fiber simply parks until the target is done.
+**OS-thread path (called from non-coro context, e.g. test body or sync main):**
+
+```c
+target->os_waiter_cnt++;          // prevents done_mu/done_cv destruction
+pthread_mutex_lock(&target->done_mu);
+pthread_mutex_unlock(&_table_mu);
+while (target->status != FIBER_DONE)
+    pthread_cond_wait(&target->done_cv, &target->done_mu);
+pthread_mutex_unlock(&target->done_mu);
+// Decrement os_waiter_cnt now that done_mu is released.
+```
+
+`prejoined=1` (set by `spawn_joinable`) ensures `_fibers[pid]` is still valid
+when this path runs, even if the target completed before `_tin_fiber_join` was
+reached.
+
+After join, generated code calls `_tin_fiber_get_panic_msg` then (if no panic)
+`_tin_fiber_get_result`, which reclaims the fiber slot.
 
 ### `await` requires `Awaitable[T]`
 
@@ -296,18 +382,22 @@ handles arbitrarily many waiters correctly.
 
 All queues grow dynamically (doubling) up to a configurable cap, then panic.
 
-| Queue              | Initial | Default cap | Env var             | `=0` behaviour |
-|--------------------|---------|-------------|---------------------|----------------|
-| Fiber table        | 256     | 1M          | `TINMAXFIBERS`      | panic          |
-| Run queue          | 1024    | 1M          | `TINMAXRUNNABLES`   | **unlimited**  |
-| Timer table        | 1024    | 1M          | `TINMAXTIMERS`      | panic          |
-| IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   | panic          |
-| Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` | **unlimited**  |
-
+| Queue              | Initial | Default cap | Env var             | `=0` behaviour | Slot reuse |
+|--------------------|---------|-------------|---------------------|----------------|------------|
+| Fiber table        | 256     | 1M          | `TINMAXFIBERS`      | panic          | yes (`_free_slots`) |
+| Run queue          | 1024    | 1M          | `TINMAXRUNNABLES`   | **unlimited**  | N/A |
+| Timer table        | 1024    | 1M          | `TINMAXTIMERS`      | panic          | no |
+| IO watch table     | 256     | 64K         | `TINMAXIOWATCHES`   | panic          | no |
+| Channel waiter q.  | 8       | 64K         | `TINMAXCHANWAITERS` | **unlimited**  | N/A |
 
 `=0` means "no cap - grow forever without panicking" (restores pre-cap behaviour
 for run queue and channel waiters). Not supported for the other queues because
 their pre-cap behaviour was a silent hang rather than a safe degradation.
+
+The fiber table reuses slots via `_free_slots`: both fire-and-forget reclaim and
+`_tin_fiber_get_result` push freed pids back onto this list so future spawns can
+reuse them. This bounds peak slot usage to the number of concurrent live fibers
+rather than the total spawned over the program's lifetime.
 
 ---
 
