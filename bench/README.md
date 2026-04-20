@@ -43,62 +43,62 @@ Install via `yay -S hyperfine` or `cargo install hyperfine`.
 
 ## Results
 
-Best self-reported result observed across 5 runs. Latency and throughput are
-measured internally by each benchmark (excludes process startup time).
+Mean wall-clock time from hyperfine (2 warmup runs). Latency is computed as
+mean_ms / message_count; throughput as message_count / mean_ms.
 
 ### Pingpong - 1M round trips (lower is better)
 
-| Language | Latency / round trip |
-|----------|---------------------|
-| Crystal  | ~72 ns  |
-| **Tin**  | **~99 ns** |
-| Go       | ~268 ns |
-| Rust     | ~299 ns |
+| Language | Mean time  | Latency / round trip |
+|----------|------------|---------------------|
+| Crystal  | 74.7 ms    | ~75 ns  |
+| **Tin**  | **106.1 ms** | **~106 ns** |
+| Go       | 275.3 ms   | ~275 ns |
+| Rust     | 303.2 ms   | ~303 ns |
 
 ### Pipeline - 1M passes, 4 stages (lower is better)
 
-| Language | Latency / pass |
-|----------|---------------|
-| Crystal  | ~152 ns |
-| **Tin**  | **~252 ns** |
-| Go       | ~698 ns |
-| Rust     | ~695 ns |
+| Language | Mean time  | Latency / pass |
+|----------|------------|---------------|
+| Crystal  | 162.1 ms   | ~162 ns |
+| **Tin**  | **259.6 ms** | **~260 ns** |
+| Rust     | 703.3 ms   | ~703 ns |
+| Go       | 708.9 ms   | ~709 ns |
 
 ### Pipeline10 - 500K passes, 10 stages (lower is better)
 
-| Language | Latency / pass |
-|----------|---------------|
-| Crystal  | ~178 ns |
-| **Tin**  | **~549 ns** |
-| Go       | ~791 ns |
-| Rust     | ~754 ns |
+| Language | Mean time  | Latency / pass |
+|----------|------------|---------------|
+| Crystal  | 184.1 ms   | ~368 ns |
+| **Tin**  | **282.9 ms** | **~566 ns** |
+| Rust     | 765.5 ms   | ~1531 ns |
+| Go       | 806.2 ms   | ~1612 ns |
 
 ### MPMC - 1M messages, 4 producers + 4 consumers (higher is better)
 
-| Language | Throughput |
-|----------|-----------|
-| Crystal  | ~90M msgs/s |
-| **Tin**  | **~47M msgs/s** |
-| Go       | ~22M msgs/s |
-| Rust     | ~3.3M msgs/s |
+| Language | Mean time  | Throughput |
+|----------|------------|-----------|
+| Crystal  | 11.4 ms    | ~88M msgs/s |
+| **Tin**  | **26.3 ms**  | **~38M msgs/s** |
+| Go       | 44.7 ms    | ~22M msgs/s |
+| Rust     | 302.8 ms   | ~3.3M msgs/s |
 
 ### Jitter - 1M tasks, 8 workers, 0-3 yields (higher is better)
 
-| Language | Throughput |
-|----------|-----------|
-| **Tin**  | **~16.5M tasks/s** |
-| Go       | ~2.9M tasks/s |
-| Rust     | ~3.5M tasks/s |
-| Crystal  | ~1.2M tasks/s |
+| Language | Mean time  | Throughput |
+|----------|------------|-----------|
+| **Tin**  | **67.0 ms**  | **~14.9M tasks/s** |
+| Rust     | 288.5 ms   | ~3.5M tasks/s |
+| Go       | 345.4 ms   | ~2.9M tasks/s |
+| Crystal  | 859.2 ms   | ~1.2M tasks/s |
 
 ### Fanout - 1M items, 8 workers (higher is better)
 
-| Language | Throughput |
-|----------|-----------|
-| Crystal  | ~14M items/s |
-| **Tin**  | **~6.2M items/s** |
-| Go       | ~3.6M items/s |
-| Rust     | ~2.3M items/s |
+| Language | Mean time  | Throughput |
+|----------|------------|-----------|
+| Crystal  | 73.2 ms    | ~13.7M items/s |
+| **Tin**  | **169.2 ms** | **~5.9M items/s** |
+| Go       | 277.7 ms   | ~3.6M items/s |
+| Rust     | 435.9 ms   | ~2.3M items/s |
 
 ## Notes
 
@@ -106,18 +106,17 @@ measured internally by each benchmark (excludes process startup time).
   threads via a single shared run queue. Go uses M:N with per-P work-stealing
   queues; Crystal uses M:N green threads. Rust Tokio `current_thread` is
   single-threaded.
-- The fiber struct pool (introduced in this version) reuses `TinFiber` heap
-  allocations including live `pthread_mutex_t`/`pthread_cond_t` across
-  spawn/reclaim cycles.  This eliminates the per-spawn `calloc` +
-  `pthread_mutex_init` + `pthread_mutex_destroy` + `free` overhead that
-  dominated short-lived fiber workloads like MPMC. MPMC throughput improved
-  from ~3.5M msgs/s to ~47M msgs/s as a result.
+- The fiber struct pool reuses `TinFiber` heap allocations including live
+  `pthread_mutex_t`/`pthread_cond_t` across spawn/reclaim cycles, eliminating
+  the per-spawn `calloc` + `pthread_mutex_init` + `pthread_mutex_destroy` +
+  `free` overhead that dominated short-lived fiber workloads. MPMC throughput
+  improved from ~3.3M msgs/s (pre-pool) to ~38M msgs/s as a result.
 - Crystal's pingpong and pipeline leads come from lower green-thread
-  context-switch cost vs OS threads. Tin's ~99 ns pingpong is 2.7x faster
+  context-switch cost vs OS threads. Tin's ~106 ns pingpong is ~2.7x faster
   than Go/Rust for this workload.
 - Jitter throughput reflects scheduler resilience under irregular yield
   patterns. Tin leads here due to the Chase-Lev per-worker work-stealing
   deque (selfnext/runnext/handoff fast paths) combined with the fiber struct
-  pool.
-- Tin MPMC variance across runs is ~5% with the pool active. Peak pool
-  reaches 8 structs (4P+4C) and is reused for all 1M messages after warmup.
+  pool eliminating allocation overhead per task.
+- Tin MPMC variance is ~6% (σ 1.7 ms on 26.3 ms mean); the pool reaches 8
+  structs (4P+4C) on the first burst and reuses them for all 1M messages.
