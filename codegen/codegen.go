@@ -367,7 +367,12 @@ type CodeGen struct {
 	coroDestroyFn *ir.Func // llvm.coro.destroy - used by coroutine chaining
 
 	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
-	fiberSpawnFn       *ir.Func
+	fiberSpawnFn         *ir.Func
+	fiberSpawnJoinableFn *ir.Func // _tin_fiber_spawn_joinable: sets os_waiter_cnt=1
+	// spawnJoinable: set by the auto-await codegen path in non-coro context so that
+	// genSpawnExpr/genSpawnMethodExpr use _tin_fiber_spawn_joinable instead of
+	// _tin_fiber_spawn.  Prevents the ff_reclaim TOCTOU race between spawn and join.
+	spawnJoinable       bool
 	fiberCompleteFn    *ir.Func
 	fiberJoinFn        *ir.Func // _tin_fiber_join(pid i64, hdl i8*): register waiter
 	fiberGetResultFn   *ir.Func // _tin_fiber_get_result(pid i64) -> i8*

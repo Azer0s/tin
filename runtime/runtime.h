@@ -125,6 +125,7 @@ void    _tin_assert_abort(const char *msg);
 // -- Fiber scheduler (M:N, TINMAXPROCS worker threads)
 void    _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
+int64_t _tin_fiber_spawn_joinable(void *hdl);
 void    _tin_fiber_complete(void *result);
 void    _tin_fiber_join(int64_t pid, void *my_hdl);
 void   *_tin_fiber_get_result(int64_t pid);

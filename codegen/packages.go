@@ -617,6 +617,34 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
+	// Pass 0.8: detect overloaded function names so Pass 2/3 can mangle IR
+	// names for functions sharing the same base name (e.g. get(url) vs
+	// get(client, url)). Mirrors the same pass in loadPackageFromSource.
+	for name, flag := range scanOverloadedNames(prog.Stmts) {
+		cg.overloadedNames[name] = flag
+	}
+
+	// Pass 1.45: pre-declare $coro variants of overloaded {#async} module-level
+	// functions so that Pass 2 bodies (and callers) can chain-await them.
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) || !cg.overloadedNames[fd.Name] {
+			continue
+		}
+
+		baseName := pkgName + "__" + fd.Name
+		sig := funcParamSig(fd.Params)
+		irName := overloadMangledName(baseName, sig)
+
+		cg.coroCallable[irName] = true
+		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %q: coro predecl %s: %w", rawPath, fd.Name, preErr)
+		}
+	}
+
 	// Pass 2: predeclare non-extern functions.
 	for _, node := range prog.Stmts {
 		fd, ok := node.(*ast.FuncDecl)
@@ -624,8 +652,44 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			continue
 		}
 
-		prefixed := pkgName + "__" + fd.Name
-		if preErr := cg.predeclareFuncAs(fd, prefixed); preErr != nil {
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+			// Register in overloads map so cross-package call-site resolution works.
+			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
+			if ptErr == nil {
+				alreadyHave := false
+
+				for _, existing := range cg.overloads[fd.Name] {
+					if existing.irName == irName {
+						alreadyHave = true
+
+						break
+					}
+				}
+
+				if !alreadyHave {
+					var retType irtypes.Type
+
+					if fd.RetType != nil {
+						retType, _ = cg.tinTypeToLLVM(fd.RetType)
+					}
+
+					cg.overloads[fd.Name] = append(cg.overloads[fd.Name], &overloadEntry{
+						irName:     irName,
+						paramSig:   sig,
+						paramTypes: paramTypes,
+						arity:      len(paramTypes),
+						returnType: retType,
+					})
+				}
+			}
+		}
+
+		if preErr := cg.predeclareFuncAs(fd, irName); preErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
@@ -640,8 +704,15 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			continue
 		}
 
-		prefixed := pkgName + "__" + fd.Name
-		if compErr := cg.genFuncDeclAs(fd, prefixed); compErr != nil {
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+		}
+
+		if compErr := cg.genFuncDeclAs(fd, irName); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
@@ -659,25 +730,53 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			continue
 		}
 
-		prefixed := pkgName + "__" + fd.Name
-		if entry, ok2 := cg.curScope.lookup(prefixed); ok2 {
-			prevScope.set(fd.Name, entry)
-			// Also register under the parent package prefix (e.g. "os__stat") so that
-			// loadPackageFromSource can find and re-export this symbol under the package
-			// namespace (e.g. as "os::stat"). Without this, only the file-local prefix
-			// ("os_stat__stat") is known and the re-export lookup fails.
-			if cg.currentPkg != "" {
-				prevScope.set(cg.currentPkg+"__"+fd.Name, entry)
+		baseName := pkgName + "__" + fd.Name
+		lookupName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			lookupName = overloadMangledName(baseName, sig)
+		}
+
+		if entry, ok2 := cg.curScope.lookup(lookupName); ok2 {
+			if cg.overloadedNames[fd.Name] {
+				// Propagate the mangled variant directly so scope lookups by irName work.
+				prevScope.set(lookupName, entry)
+				// Also register a fallback under the bare and parent-prefixed names
+				// (last registered wins; callers should use cg.overloads for resolution).
+				if _, already := prevScope.vars[fd.Name]; !already {
+					prevScope.set(fd.Name, entry)
+				}
+
+				if cg.currentPkg != "" {
+					if _, already := prevScope.vars[cg.currentPkg+"__"+fd.Name]; !already {
+						prevScope.set(cg.currentPkg+"__"+fd.Name, entry)
+					}
+				}
+			} else {
+				prevScope.set(fd.Name, entry)
+				// Also register under the parent package prefix (e.g. "os__stat") so that
+				// loadPackageFromSource can find and re-export this symbol under the package
+				// namespace (e.g. as "os::stat"). Without this, only the file-local prefix
+				// ("os_stat__stat") is known and the re-export lookup fails.
+				if cg.currentPkg != "" {
+					prevScope.set(cg.currentPkg+"__"+fd.Name, entry)
+				}
 			}
 		}
 
 		// Also propagate $coro variant for {#async} functions.
-		coroKey := prefixed + "$coro"
+		coroKey := lookupName + "$coro"
 		if coroEntry, ok3 := cg.curScope.lookup(coroKey); ok3 {
-			prevScope.set(fd.Name+"$coro", coroEntry)
+			if cg.overloadedNames[fd.Name] {
+				// Propagate the mangled $coro variant for overload resolution.
+				prevScope.set(coroKey, coroEntry)
+			} else {
+				prevScope.set(fd.Name+"$coro", coroEntry)
 
-			if cg.currentPkg != "" {
-				prevScope.set(cg.currentPkg+"__"+fd.Name+"$coro", coroEntry)
+				if cg.currentPkg != "" {
+					prevScope.set(cg.currentPkg+"__"+fd.Name+"$coro", coroEntry)
+				}
 			}
 		}
 	}

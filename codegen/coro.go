@@ -115,6 +115,8 @@ func (cg *CodeGen) ensureFiberRuntime() {
 
 	cg.fiberSpawnFn = cg.ensureExternDecl("_tin_fiber_spawn", irtypes.I64,
 		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
+	cg.fiberSpawnJoinableFn = cg.ensureExternDecl("_tin_fiber_spawn_joinable", irtypes.I64,
+		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
 	cg.fiberCompleteFn = cg.ensureExternDecl("_tin_fiber_complete", irtypes.Void,
 		[]*ir.Param{ir.NewParam("res", irtypes.I8Ptr)}, false)
 	cg.fiberJoinFn = cg.ensureExternDecl("_tin_fiber_join", irtypes.Void,

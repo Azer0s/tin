@@ -1078,7 +1078,16 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	if calleeType != nil && !calleeType.Variadic && len(llArgs) != len(calleeType.Params) {
 		calleeName := ""
 		if f, ok := callee.(*ir.Func); ok {
-			calleeName = f.Name()
+			// Convert internal IR name (pkg__fn or pkg__fn__sig) to source form (pkg::fn).
+			// Strip any overload signature suffix (last __<sig> segment) first, then
+			// replace remaining __ separators with ::.
+			name := f.Name()
+			if idx := strings.Index(name, "__"); idx >= 0 {
+				base := name[:idx] + "__" + strings.SplitN(name[idx+2:], "__", 2)[0]
+				calleeName = strings.ReplaceAll(base, "__", "::")
+			} else {
+				calleeName = name
+			}
 		}
 
 		if calleeName != "" {

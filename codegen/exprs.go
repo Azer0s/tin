@@ -207,7 +207,14 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			}
 		}
 
+		// Auto-spawn in non-coro context: set spawnJoinable so genSpawnExpr uses
+		// _tin_fiber_spawn_joinable.  This prevents the ff_reclaim TOCTOU race
+		// between spawn and the immediately-following _tin_fiber_sync_await call.
+		if !cg.inCoroFn && futureExpr != e.Future {
+			cg.spawnJoinable = true
+		}
 		val, err := cg.genExpr(block, futureExpr)
+		cg.spawnJoinable = false
 		if err != nil {
 			return nil, err
 		}

@@ -17,6 +17,11 @@ void _tin_fiber_init(void);
 // Returns a unique fiber PID.
 int64_t _tin_fiber_spawn(void *hdl);
 
+// Like _tin_fiber_spawn but marks the fiber as joinable (os_waiter_cnt=1) so it
+// is never fire-and-forget reclaimed before the spawning thread calls
+// _tin_fiber_join.  Used for `await asyncFn()` in non-coroutine context.
+int64_t _tin_fiber_spawn_joinable(void *hdl);
+
 // Called by the coroutine body when it has finished.
 // result: pointer to the return value; NULL for void-returning fibers.
 // The hdl parameter was removed - LLVM's coro-elide pass can now see that

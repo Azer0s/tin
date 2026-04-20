@@ -1252,6 +1252,18 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	return result, nil
 }
 
+// activeSpawnFn returns the correct spawn function for the current context.
+// Non-coro spawns (test bodies, non-async main) always use the joinable variant
+// so that explicit `let f = spawn ...; await f` cannot race with ff_reclaim.
+// Fire-and-forget spawns from non-coro context get os_waiter_cnt=1 and are
+// cleaned up at _tin_fiber_run shutdown, which is acceptable.
+func (cg *CodeGen) activeSpawnFn() *ir.Func {
+	if cg.spawnJoinable || !cg.inCoroFn {
+		return cg.fiberSpawnJoinableFn
+	}
+	return cg.fiberSpawnFn
+}
+
 // genSpawnExpr generates code for `spawn callExpr`.
 // The callee must be a function marked {#async} (in coroCallable).
 // Returns Future[T] wrapping the fiber PID.
@@ -1469,7 +1481,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 				}
 
 				hdl := block.NewCall(fnPtr, spawnArgs...)
-				pid := block.NewCall(cg.fiberSpawnFn, hdl)
+				pid := block.NewCall(cg.activeSpawnFn(), hdl)
 				retType := cg.asyncFatPtrRetType(se.tinType)
 
 				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
@@ -1494,7 +1506,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	hdl := block.NewCall(coroFn, callArgs...)
 
 	// Spawn the fiber: pid = _tin_fiber_spawn(hdl)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	// Release temporary RC-tracked arguments after spawning.  The $coro ramp
 	// retains them before the initial suspend, so the caller's own reference
@@ -1604,7 +1616,7 @@ func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argN
 	}
 
 	hdl := block.NewCall(fnPtr, llArgs...)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	retType := cg.asyncFatPtrRetType(tinFnType)
 
@@ -1654,7 +1666,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		llArgs = cg.adaptArgs(block, llArgs, coroSlotFnType)
 
 		hdl := block.NewCall(fnPtr, llArgs...)
-		pid := block.NewCall(cg.fiberSpawnFn, hdl)
+		pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 		// Get the actual return type of the async method (not the coro wrapper's i8*).
 		// For async-only traits, traitMethodRetType returns nil (no sync slot), so we
@@ -1777,7 +1789,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	hdl2 := block.NewCall(coroFn2, coroArgs...)
-	pid2 := block.NewCall(cg.fiberSpawnFn, hdl2)
+	pid2 := block.NewCall(cg.activeSpawnFn(), hdl2)
 
 	// Release temporary RC-tracked args after spawning (same as genSpawnExpr).
 	// The receiver (coroArgs[0]) is handled separately below.
@@ -1958,7 +1970,7 @@ func (cg *CodeGen) genSpawnDoBlock(block *ir.Block, doBlock *ast.Block) (value.V
 
 	// Call the ramp function with the env pointer and spawn the fiber.
 	hdl := block.NewCall(coroFn, envI8Ptr)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	// Void do-block spawn: wrap in Future[Unit]
 
