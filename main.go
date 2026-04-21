@@ -47,10 +47,9 @@ Stdlib/libs flags:
 Run/test flags:
   -v-valgrind      run binary under valgrind --leak-check=full (run, test)
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
-  -v-heuristics    print auto-yield heuristics for every function to stderr
-
 Compiler output flags:
   -v               print compilation stages (lex, parse, codegen, link, ...)
+  -v-heuristics    print auto-yield heuristics for every function to stderr
   -v-tco           print tail call optimizations (self-TCO and mutual TCO) to stderr
 
 Debug flags:
