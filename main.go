@@ -900,19 +900,9 @@ func isAppleSilicon() bool {
 
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
 // produce valid IR for the installed clang version.
-//
 // "presplitcoroutine" must be a keyword attribute, not a string attribute.
-//
-// llvm.coro.end returned i1 in LLVM <=21 and void in LLVM 22+. Patch the
-// declaration and call sites when targeting an older clang.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
-
-	if v := clangMajorVersion(); v > 0 && v <= 21 {
-		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
-		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_tincoroend = call i1 @llvm.coro.end(ptr")
-	}
-
 	return ir
 }
 
