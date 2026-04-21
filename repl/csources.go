@@ -92,11 +92,6 @@ func (s *session) compilePkgExtras(cSrcs []pkgCSource, linkerFlags []string, out
 	rtDir := s.runtimeDir
 
 	args := []string{"-shared", "-fPIC", "-O2", "-pthread", "-I" + rtDir}
-	// On Darwin, undefined runtime symbols must be resolved at dlopen time;
-	// -undefined dynamic_lookup is the macOS equivalent of Linux's default behavior.
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-undefined", "dynamic_lookup")
-	}
 
 	for _, cs := range cSrcs {
 		args = append(args, cs.flags...)
@@ -104,6 +99,11 @@ func (s *session) compilePkgExtras(cSrcs []pkgCSource, linkerFlags []string, out
 	}
 
 	args = append(args, linkerFlags...)
+	// On Darwin, link explicitly against the runtime to satisfy the static linker.
+	if runtime.GOOS == "darwin" {
+		args = append(args, s.runtimeLib.path)
+	}
+
 	args = append(args, "-o", outSo)
 
 	out, err := exec.Command("clang", args...).CombinedOutput()

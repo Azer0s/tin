@@ -886,9 +886,9 @@ func clangMajorVersion() int {
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
 // produce valid IR for the installed clang version.
 // "presplitcoroutine" must be a keyword attribute, not a string attribute.
-// On LLVM 21 and earlier, llvm.coro.end returns i1 and takes opaque ptr args,
-// but llir emits void + i8* which LLVM 21's auto-upgrader mishandles, producing
-// "Intrinsic has incorrect return type!" errors. Patch to the expected form.
+// llvm.coro.end changed signature at LLVM 22: <= 21 uses i1 return + ptr arg,
+// >= 22 uses void return + ptr arg. llir emits the old void + i8* form; LLVM 22
+// accepts that and auto-upgrades i8* to ptr. LLVM 21 expects i1, so we patch.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
 	if v := clangMajorVersion(); v > 0 && v <= 21 {

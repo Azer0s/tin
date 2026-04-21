@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
@@ -390,11 +392,13 @@ func (s *session) compileToSo(irText, outSo string) error {
 
 	// Compile to a shared library. Undefined references to runtime symbols are
 	// resolved at dlopen time from the RTLD_GLOBAL namespace (libtin_runtime.so).
-	// On Darwin, -undefined dynamic_lookup is needed to allow undefined symbols.
-	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL, "-o", outSo}
+	// On Darwin, link explicitly against the runtime to satisfy the static linker.
+	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL}
 	if runtime.GOOS == "darwin" {
-		soArgs = append(soArgs, "-undefined", "dynamic_lookup")
+		soArgs = append(soArgs, s.runtimeLib.path)
 	}
+
+	soArgs = append(soArgs, "-o", outSo)
 
 	out, err := exec.Command("clang", soArgs...).CombinedOutput()
 	if err != nil {
@@ -461,25 +465,42 @@ func extractSrc(src string, allNodes []ast.Node, target ast.Node) string {
 	return strings.TrimSpace(result)
 }
 
-// fixCoroAttrs rewrites "presplitcoroutine" string attr to keyword attr as
-// required by the coro-split pass, and applies Apple Silicon patches.
+// fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
+// produce valid IR for the installed clang version.
+// "presplitcoroutine" must be a keyword attribute, not a string attribute.
+// llvm.coro.end changed signature at LLVM 22: <= 21 uses i1 return + ptr arg,
+// >= 22 uses void return + ptr arg. llir emits the old void + i8* form; LLVM 22
+// accepts that and auto-upgrades i8* to ptr. LLVM 21 expects i1, so we patch.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
-	if isAppleSilicon() {
+
+	if v := clangMajorVersion(); v > 0 && v <= 21 {
 		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
-		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
+		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coro_end = call i1 @llvm.coro.end(ptr")
 	}
 
 	return ir
 }
 
-func isAppleSilicon() bool {
-	data, err := os.ReadFile("/proc/cpuinfo")
+func clangMajorVersion() int {
+	out, err := exec.Command("clang", "--version").Output()
 	if err != nil {
-		return false
+		return 0
 	}
 
-	return strings.Contains(string(data), "CPU implementer\t: 0x61")
+	re := regexp.MustCompile(`version (\d+)`)
+	m := re.FindSubmatch(out)
+
+	if m == nil {
+		return 0
+	}
+
+	v, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0
+	}
+
+	return v
 }
 
 // patchMissingDILabelLine adds 'line: 0' to any !DILabel(...) metadata node
