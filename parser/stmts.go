@@ -1061,7 +1061,7 @@ func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
 
 					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, Literal: nested})
 				} else if p.isRenameBinding() {
-					// Bare IDENT not followed by expression-continuation tokens → rename.
+					// Bare IDENT not followed by expression-continuation tokens -> rename.
 					bindTo := p.advance().Literal
 					sp.Fields = append(sp.Fields, ast.StructPatternField{Name: name, BindTo: bindTo})
 				} else {

@@ -45,6 +45,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 			if alias, ok := cg.typeAliases[name]; ok {
 				return cg.typeExprCanonicalKeyN(alias, depth+1)
 			}
+
 			return strings.ReplaceAll(name, "::", "__")
 		}
 		// Bare name: look up in typeAliases for the canonical form.
@@ -339,8 +340,10 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			return fp, nil
 		}
+
 		fp, err := cg.buildTraitFatPtrType(name)
 		if err != nil {
 			return nil, err
@@ -371,10 +374,12 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	if bareName != name {
 		if _, ok := cg.traits[bareName]; ok {
 			qualInstKey := strings.ReplaceAll(name, "::", "__")
+
 			fp, err := cg.buildTraitFatPtrTypeInst(bareName, qualInstKey, nil)
 			if err != nil {
 				return nil, err
 			}
+
 			return fp, nil
 		}
 	}

@@ -339,7 +339,7 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 //   - the union of exact-length arms (guard-free) and the minimum-length
 //     intervals of rest arms (guard-free) covers all non-negative integers.
 //
-// Example: []  +  [x, ...xs]  ->  {0} ∪ [1,∞) = [0,∞)  -> exhaustive.
+// Example: []  +  [x, ...xs]  ->  {0} union [1,inf) = [0,inf)  -> exhaustive.
 func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 	if s.Default != nil {
 		return true
@@ -366,7 +366,7 @@ func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 		}
 
 		if hasRest {
-			// This arm covers [fixed, ∞).
+			// This arm covers [fixed, inf).
 			if minRestCover < 0 || fixed < minRestCover {
 				minRestCover = fixed
 			}

@@ -200,6 +200,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 				instKey = qualKey
 			}
 		}
+
 		typeSubst := map[string]irtypes.Type{}
 
 		if gt, ok2 := impl.(*ast.GenericType); ok2 {
@@ -340,8 +341,10 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	// Bare names (e.g. "JsonSerializable" when used without pkg:: prefix) are
 	// normalized to their canonical qualified form via traitBareToQualInstKey.
 	var implNames []string
+
 	for _, impl := range n.Implements {
 		dn := traitDisplayName(impl)
+
 		// If this is a bare name and we know its canonical pkg-qualified instKey,
 		// convert "json__JsonSerializable" -> "json::JsonSerializable" for the display name.
 		if idx := strings.LastIndex(dn, "::"); idx < 0 {
@@ -350,6 +353,7 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 				dn = strings.Replace(qualInstKey, "__", "::", 1)
 			}
 		}
+
 		implNames = append(implNames, dn)
 	}
 
@@ -1413,13 +1417,15 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	bodyBlock := cg.newBlock("iterfor.body")
 	afterBlock := cg.newBlock("iterfor.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: idx < len.
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	lenI64 := cg.coerce(condBlock, totalLen, irtypes.I64)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenI64)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body: call get(idx).
 	cg.curScope = newScope(cg.curScope)

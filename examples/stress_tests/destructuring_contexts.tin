@@ -197,9 +197,22 @@ test "manually decompose nested struct" =
 // ---------------------------------------------------------------------------
 
 test "destructured names can shadow outer let bindings" =
+  let outer_x i64 = 999
+  let outer_y i64 = 888
+  let v = vec2{x: 1, y: 2}
+  let {x, y} vec2 = v
+  assert::equals(outer_x, 999)
+  assert::equals(outer_y, 888)
+  assert::equals(x, 1)
+  assert::equals(y, 2)
+
+test "destructured names shadow in nested scope" =
   let x i64 = 999
   let y i64 = 888
   let v = vec2{x: 1, y: 2}
-  let {x, y} vec2 = v   // shadows outer x, y
-  assert::equals(x, 1)
-  assert::equals(y, 2)
+  if true:
+    let {x, y} vec2 = v   // shadows outer x, y in nested scope
+    assert::equals(x, 1)
+    assert::equals(y, 2)
+  assert::equals(x, 999)
+  assert::equals(y, 888)

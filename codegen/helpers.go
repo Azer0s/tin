@@ -872,7 +872,7 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 //   - A negative integer literal coercing to an unsigned integer type.
 //   - An integer literal that exceeds the maximum value for the target type.
 //
-// Float truncation (f64 → f32) is always allowed; precision loss is acceptable.
+// Float truncation (f64 -> f32) is always allowed; precision loss is acceptable.
 func checkConstantCompatible(c constant.Constant, targetType irtypes.Type) error {
 	intConst, ok := c.(*constant.Int)
 	if !ok {
@@ -887,7 +887,7 @@ func checkConstantCompatible(c constant.Constant, targetType irtypes.Type) error
 	bits := int(targetInt.BitSize)
 	val := intConst.X // *big.Int
 
-	// Negative literal → unsigned type.
+	// Negative literal -> unsigned type.
 	// In Tin, all unsigned widths are tracked as signed bit patterns in i8/i16/i32/i64.
 	// We detect "intended unsigned" by checking whether the source constant came from
 	// a clearly signed context.  For now we simply reject negative values coercing

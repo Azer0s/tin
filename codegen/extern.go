@@ -57,7 +57,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 
 				if cg.targetIsARM64() {
 					// AAPCS64 (ARM64/Apple Silicon): all small integer structs
-					// (≤8 bytes) are zero-extended to a 64-bit register (i64).
+					// (<=8 bytes) are zero-extended to a 64-bit register (i64).
 					return irtypes.I64, nil
 				}
 			}
@@ -568,7 +568,7 @@ func collectHFALeaves(t irtypes.Type, baseKind *irtypes.FloatKind, count *int, i
 	default:
 		_ = isFirst
 
-		return false // integer or pointer leaf → not an HFA
+		return false // integer or pointer leaf -> not an HFA
 	}
 }
 
@@ -697,11 +697,11 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 	// #handover: take ownership of pointer returns before any type conversion.
 	if handover {
 		if _, ok := src.(*irtypes.PointerType); ok {
-			// char* → atom: handover variant frees the input string.
+			// char* -> atom: handover variant frees the input string.
 			if isAtomType(target) {
 				return block.NewCall(cg.ensureStringToAtomHandover(), val)
 			}
-			// char* → fat-ptr string: _tin_string_handover + fat-ptr.
+			// char* -> fat-ptr string: _tin_string_handover + fat-ptr.
 			if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
 				handoverFn := cg.ensureExternDecl("_tin_string_handover", irtypes.I8Ptr,
 					[]*ir.Param{ir.NewParam("src", irtypes.I8Ptr)}, false)
@@ -730,7 +730,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 
 				return block.NewLoad(tgtSt, alloca)
 			}
-			// native_struct* → *TinStruct: load, free original, convert layout, RC-alloc.
+			// native_struct* -> *TinStruct: load, free original, convert layout, RC-alloc.
 			if tgtPt, ok2 := target.(*irtypes.PointerType); ok2 {
 				tgtName := cg.typeNameOf(tgtPt.ElemType)
 				if tgtName != "" && !strings.HasSuffix(tgtName, ".native") {

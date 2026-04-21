@@ -832,6 +832,49 @@ func (cg *CodeGen) attachCurrentDbgLocToTerm(term ir.Terminator) {
 	}
 }
 
+// attachForLoopDbg attaches the for statement's source line to:
+//   - brToCondTerm: the branch terminator that enters the condition block
+//   - condBlock: the first instruction and the terminator of the condition block
+//
+// This ensures the debugger visits the for-loop line when (re-)evaluating the
+// condition, both on first entry and on the back-edge from the loop body.
+func (cg *CodeGen) attachForLoopDbg(pos ast.Pos, brToCondTerm ir.Terminator, condBlock *ir.Block) {
+	if !cg.debugMode || cg.diCurrentScope == nil {
+		return
+	}
+
+	line := int64(pos.Line)
+	col := int64(pos.Col)
+
+	diLoc := &metadata.DILocation{MetadataID: -1, Line: line, Column: col, Scope: cg.diCurrentScope}
+	cg.regMD(diLoc)
+	att := &metadata.Attachment{Name: "dbg", Node: diLoc}
+
+	switch t := brToCondTerm.(type) {
+	case *ir.TermBr:
+		t.Metadata = append(t.Metadata, att)
+	case *ir.TermCondBr:
+		t.Metadata = append(t.Metadata, att)
+	}
+
+	if condBlock == nil {
+		return
+	}
+
+	if len(condBlock.Insts) > 0 {
+		attachMetadataToInst(condBlock.Insts[0], att)
+	}
+
+	if condBlock.Term != nil {
+		switch t := condBlock.Term.(type) {
+		case *ir.TermBr:
+			t.Metadata = append(t.Metadata, att)
+		case *ir.TermCondBr:
+			t.Metadata = append(t.Metadata, att)
+		}
+	}
+}
+
 // ensureAllCallsHaveDbg walks all instructions in fn and attaches a line=0
 // !dbg location to any call instruction that is missing one.  LLVM requires
 // that every call instruction in a function that has a !dbg attachment on the

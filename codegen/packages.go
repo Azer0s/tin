@@ -19,6 +19,8 @@ import (
 
 func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 	if !n.IsExtern {
+		cg.progress("import " + n.Path)
+
 		if n.FromSyntax {
 			return cg.loadPackageSelective(n.Path, n.Names, n.IsFile)
 		}
@@ -185,8 +187,8 @@ func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
 							if structBits < intTy.BitSize {
-								// Coerced type is wider than struct (ARM64: ≤8-byte
-								// struct → i64). Load at struct's natural bit size
+								// Coerced type is wider than struct (ARM64: <=8-byte
+								// struct -> i64). Load at struct's natural bit size
 								// to avoid an out-of-bounds read, then zero-extend.
 								smallTy := irtypes.NewInt(structBits)
 								a := entry.NewAlloca(nativeSt)

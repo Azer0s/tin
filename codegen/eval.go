@@ -89,8 +89,12 @@ func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
 	}
 
 	// Convert the result to an LLVM constant.
+	llVal, llErr := ctfeValToLLVM(result, fd, cg)
+	if llErr == nil && llVal != nil {
+		cg.progress("ctfe " + calleeName + "()")
+	}
 
-	return ctfeValToLLVM(result, fd, cg)
+	return llVal, llErr
 }
 
 // ---------------------------------------------------------------------------

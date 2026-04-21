@@ -86,6 +86,76 @@ fn factorial(n i64) i64 =
 
 ---
 
+## Tail call optimization (TCO)
+
+When a function calls itself in tail position - the recursive call is the
+very last operation before returning - Tin automatically eliminates the
+recursive call and replaces it with a loop. No stack frame is allocated for
+each recursive step, so tail-recursive functions run in O(1) stack space.
+
+TCO applies automatically. There is no annotation required.
+
+A call is in tail position when:
+
+- it is the sole expression of a `where` clause: `where cond: fn(new_args)`
+- it is the value of a `return` statement with no other work after it: `return fn(new_args)`
+
+**Factorial with accumulator (tail-recursive):**
+
+```rust
+fn fact(n u64, acc u64) u64 =
+  where n == 0: acc
+  where _: fact(n - 1, n * acc)
+
+fn factorial(n u64) u64 =
+  return fact(n, 1)
+```
+
+**Greatest common divisor:**
+
+```rust
+fn gcd(a u64, b u64) u64 =
+  where b == 0: a
+  where _: gcd(b, a % b)
+```
+
+**Fibonacci with accumulator:**
+
+```rust
+fn fib_acc(n u64, a u64, b u64) u64 =
+  where n == 0: a
+  where _: fib_acc(n - 1, b, a + b)
+
+fn fib_tco(n u64) u64 =
+  return fib_acc(n, 0, 1)
+```
+
+### Eligibility
+
+TCO is applied when all of the following hold:
+
+- The function is sync (not `{#async}`).
+- The function has no `defer` statements.
+- No parameter is an RC-tracked type (`string`, `any`, arrays, function values).
+- The body contains at least one direct self tail call.
+
+If eligibility is not met (e.g. a parameter is a string, or `defer` is
+present), the function is compiled normally with regular call frames.
+
+### Non-tail recursion
+
+A recursive call that is not in tail position is NOT optimized:
+
+```rust
+fn fib(n u32) u32 =
+  where n <= 1: n
+  where _: fib(n - 1) + fib(n - 2)  // NOT tail - two calls, then addition
+```
+
+To get TCO for fibonacci, use the accumulator form (`fib_acc` above).
+
+---
+
 ## where-clause style (pattern-matching functions)
 
 See also [02 - Control Flow](02-control-flow.md#where---pattern-matching-on-function-arguments).
