@@ -12,10 +12,15 @@
 // section is very short (just waiter-list manipulation) so it does not become
 // the bottleneck even under heavy contention.
 //
-// Missed-wakeup prevention: after incrementing recv_wq_cnt / send_wq_cnt (while
-// holding wq_fmu), do one final lf_enqueue / lf_dequeue.  If it succeeds the
-// fiber removes itself and returns data instead of parking, preventing the case
-// where a sender enqueues and reads cnt==0 BEFORE the receiver increments it.
+// Missed-wakeup prevention: after incrementing recv_wq_cnt / send_wq_cnt the
+// fiber does one final lf_enqueue / lf_dequeue.  The increment and the fast-path
+// re-check on the other side both use memory_order_seq_cst to form a total order
+// (Peterson-style): either the re-check sees the increment (and wakes the waiter)
+// or the final lf_op sees the other side's data (and the waiter never parks).
+// release/acquire is not sufficient: on ARM64, STLR (store-release) can sit in
+// the store buffer so a concurrent LDAR (load-acquire) on another core returns a
+// stale zero, causing both sides to miss each other.  On x86 (TSO) LOCK XADD is
+// already a full fence, so seq_cst compiles to identical code.
 //
 // Reference: Dmitry Vyukov, "1024cores Bounded MPMC Queue".
 
