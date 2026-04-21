@@ -75,27 +75,33 @@ compiled away (only pointer-typed values are RC-tracked).
 
 ## Future Result Ownership Transfer
 
-When a spawned fiber completes (`FIBER_DONE`), its return value is stored
-in a thread-local buffer (`_coro_result`) by `_tin_fiber_complete`.
+When a spawned fiber completes (`FIBER_DONE`), the worker loop stores the
+result in `f->result` on the `TinFiber` struct (moved from the thread-local
+`_coro_result` via `_tin_coro_take_result`).
 
-`_tin_coro_take_result()` retrieves this pointer and clears the thread-local:
+The awaiting caller retrieves the result via `_tin_fiber_get_result(pid)`:
 
 ```c
-void *_tin_coro_take_result(void) {
-    void *r = _coro_result;
-    _coro_result = NULL;
-    _coro_done   = 0;
-    return r;
+void *_tin_fiber_get_result(int64_t pid) {
+    // under _table_mu
+    TinFiber *f = _fibers[pid];
+    void *r = f->result;     // heap-allocated result box
+    f->result = NULL;
+    _free_slot_push(pid);    // reclaim slot for reuse
+    // free fiber outside lock
+    return r;                // caller owns this allocation
 }
 ```
 
-The result buffer is heap-allocated by the completed fiber. Ownership is
-transferred to the awaiting fiber via `_tin_fiber_join`.
+`Future_await_result` calls `_tin_fiber_join(pid)` (parks / blocks until
+`FIBER_DONE`), then checks for a panic via `_tin_fiber_get_panic_msg`, then
+calls `_tin_fiber_get_result` to take ownership of the result box. The result
+box is freed by the caller after unboxing the value.
 
-`Future_await_result` calls `_tin_fiber_join(pid)`, which parks the calling
-fiber until the target fiber sets `FIBER_DONE`. When the awaited fiber
-completes, `_tin_fiber_join` retrieves the result via `_tin_coro_take_result()`
-and frees the result buffer after loading the value into the caller's stack.
+`_tin_coro_take_result()` is used only by the **inline drive** path (when a
+coroutine drives an inner `$coro` directly without spawning a fiber). In that
+path the result is stored in a TLS buffer to avoid a malloc, and the outer
+coroutine reads it before calling `coro.destroy`.
 
 ---
 

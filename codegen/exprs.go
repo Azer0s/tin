@@ -160,9 +160,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// {#async} direct call handling: `await asyncFn(args)` (no explicit spawn).
 		//
 		// Two cases based on calling context:
-		//   inCoroFn == true  → inline drive: runs inner coro in this fiber's frame,
+		//   inCoroFn == true  -> inline drive: runs inner coro in this fiber's frame,
 		//                        no fiber allocation, direct park/unpark via runnext.
-		//   inCoroFn == false → auto-spawn: wrap in synthetic SpawnExpr so the regular
+		//   inCoroFn == false -> auto-spawn: wrap in synthetic SpawnExpr so the regular
 		//                        await-Future path takes over (e.g. sync wrapper body,
 		//                        or main() in non-async context).
 		futureExpr := e.Future
@@ -177,7 +177,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				if result != nil {
 					return result, nil
 				}
-				// (nil, nil) → callee $coro not in scope yet; fall through to auto-spawn.
+				// (nil, nil) -> callee $coro not in scope yet; fall through to auto-spawn.
 			}
 			// Not in coroutine (or inline drive not available): auto-spawn if async.
 			if cg.directCallHasCoroVariant(callNode) {
@@ -257,7 +257,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return nil, fmt.Errorf("await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
-		// Extract pid from Future[T] using extractvalue (no alloca → safe inside loops).
+		// Extract pid from Future[T] using extractvalue (no alloca -> safe inside loops).
 		cg.ensureFiberRuntime()
 
 		pid := block.NewExtractValue(val, uint64(pidIdx))
@@ -364,10 +364,13 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return constant.NewInt(irtypes.I1, 1), nil
 		}
 
-		// Get the boxed result pointer and unbox it.
+		// Get the boxed result pointer, unbox it, then free the heap buffer.
+		// _tin_fiber_get_result transfers ownership of the malloc'd result box
+		// to the caller; the caller must free it after loading the value.
 		rawPtr := block.NewCall(cg.fiberGetResultFn, pid)
 		typedPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(retLLVM))
 		result := block.NewLoad(retLLVM, typedPtr)
+		block.NewCall(cg.ensureFree(), rawPtr)
 		cg.curBlock = block
 
 		return result, nil

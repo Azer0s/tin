@@ -1,0 +1,65 @@
+// 10-stage pipeline: 500K messages each traverse 10 relay fibers in series.
+// More stages = more context switches per pass; tests scheduler depth.
+
+use sync
+use io
+use measure
+
+var g_elapsed i64
+
+fn{#async} relay(src sync::Channel[i64], dst sync::Channel[i64], n i64) =
+  let i i64 = 0
+  for i < n:
+    let v = await src.recv()
+    await dst.send(v + 1)
+    i = i + 1
+
+fn{#async} main() =
+  let n i64 = 500000
+
+  let ch0  = sync::Channel[i64].make(1)
+  let ch1  = sync::Channel[i64].make(1)
+  let ch2  = sync::Channel[i64].make(1)
+  let ch3  = sync::Channel[i64].make(1)
+  let ch4  = sync::Channel[i64].make(1)
+  let ch5  = sync::Channel[i64].make(1)
+  let ch6  = sync::Channel[i64].make(1)
+  let ch7  = sync::Channel[i64].make(1)
+  let ch8  = sync::Channel[i64].make(1)
+  let ch9  = sync::Channel[i64].make(1)
+  let ch10 = sync::Channel[i64].make(1)
+
+  let r0  = spawn relay(ch0,  ch1,  n)
+  let r1  = spawn relay(ch1,  ch2,  n)
+  let r2  = spawn relay(ch2,  ch3,  n)
+  let r3  = spawn relay(ch3,  ch4,  n)
+  let r4  = spawn relay(ch4,  ch5,  n)
+  let r5  = spawn relay(ch5,  ch6,  n)
+  let r6  = spawn relay(ch6,  ch7,  n)
+  let r7  = spawn relay(ch7,  ch8,  n)
+  let r8  = spawn relay(ch8,  ch9,  n)
+  let r9  = spawn relay(ch9,  ch10, n)
+
+  let start = measure::now_us()
+  let i i64 = 0
+  for i < n:
+    await ch0.send(i)
+    await ch10.recv()
+    i = i + 1
+  g_elapsed = measure::now_us() - start
+
+  await r0
+  await r1
+  await r2
+  await r3
+  await r4
+  await r5
+  await r6
+  await r7
+  await r8
+  await r9
+
+  let ns_per_pass = g_elapsed * 1000 / n
+  echo "{n} messages through 10 stages"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "latency: ~{ns_per_pass}ns / pipeline pass"

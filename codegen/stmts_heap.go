@@ -220,7 +220,7 @@ func hasDirectHeapReturn(body ast.Node, heapFns map[string]bool) bool {
 
 		switch n := node.(type) {
 		case *ast.VarDecl:
-			// let x = heap_fn() → track x as a heap variable.
+			// let x = heap_fn() -> track x as a heap variable.
 			if n.Value != nil && isHeapExpr(n.Value) {
 				heapVars[n.Name] = true
 			}

@@ -1,6 +1,8 @@
-//!+tls_impl.c -- -I $TIN_RUNTIME
+//!+tls_impl.c [linux] -- -I $TIN_RUNTIME
+//!+tls_impl.c [darwin] -- -I $TIN_RUNTIME -I $(brew --prefix openssl@3)/include
 //!-lssl
 //!-lcrypto
+//!-L$(brew --prefix openssl@3)/lib [darwin]
 // stdlib/tls - async TLS client connections backed by OpenSSL.
 //
 // TlsConn wraps an existing TCP file descriptor with TLS.  It implements

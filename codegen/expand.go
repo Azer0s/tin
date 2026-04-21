@@ -109,6 +109,8 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 					expandedArgs[i] = ea
 				}
 
+				cg.progress("macro " + strings.TrimSuffix(id.Name, "!"))
+
 				return cg.expandMacroToAST(macro, expandedArgs)
 			}
 		}

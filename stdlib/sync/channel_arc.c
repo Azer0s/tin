@@ -1,13 +1,28 @@
-// tin stdlib/sync - Full channel implementation with all state in one heap block.
+// tin stdlib/sync - Vyukov MPMC channel.
 //
-// Channel[T] in Tin is a thin wrapper around a TinChannel* (void*). Copying the
-// Tin struct copies only the pointer, so all copies share the same ring buffer,
-// mutex, and condition variables. This gives Go-channel-style reference semantics
-// within Tin's value-type system.
+// Fast path: lock-free CAS on per-slot sequence counters (no mutex in common case).
+// Slow path (full/empty): TinFastMutex waiter queues.
 //
-// Thread safety: all operations are protected by the embedded pthread mutex.
-// The `is_rc` flag is 1 when T is an RC-tracked type; retain/release is applied
-// when elements are stored into or loaded from the ring buffer.
+// The fast path scales linearly with the number of producers/consumers because
+// each producer/consumer claims a different ring slot via a CAS on enq_pos/deq_pos.
+// There is no centralized lock and no cache-line ping-pong between workers.
+//
+// Slow path: when the buffer is full (send) or empty (recv), the fiber registers
+// itself in a waiter queue protected by wq_fmu and parks.  The wq_fmu critical
+// section is very short (just waiter-list manipulation) so it does not become
+// the bottleneck even under heavy contention.
+//
+// Missed-wakeup prevention: after incrementing recv_wq_cnt / send_wq_cnt the
+// fiber does one final lf_enqueue / lf_dequeue.  The increment and the fast-path
+// re-check on the other side both use memory_order_seq_cst to form a total order
+// (Peterson-style): either the re-check sees the increment (and wakes the waiter)
+// or the final lf_op sees the other side's data (and the waiter never parks).
+// release/acquire is not sufficient: on ARM64, STLR (store-release) can sit in
+// the store buffer so a concurrent LDAR (load-acquire) on another core returns a
+// stale zero, causing both sides to miss each other.  On x86 (TSO) LOCK XADD is
+// already a full fence, so seq_cst compiles to identical code.
+//
+// Reference: Dmitry Vyukov, "1024cores Bounded MPMC Queue".
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,40 +32,36 @@
 #include <stdio.h>
 #include <stdatomic.h>
 
-// Forward-declare ARC functions from runtime.h
 void _tin_retain(void *ptr);
 void _tin_release(void *ptr);
-
-// Forward-declare panic from runtime.h
 void _tin_panic(const char *msg);
-
-// Forward-declare fiber park/unpark/hdl from fiber.h
-void    _tin_fiber_park(int64_t pid);
-void    _tin_fiber_unpark(int64_t pid);
-void    _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
-// Inline TLS reads for current coro hdl and fib - avoids function-call
-// overhead in the hot send/recv path (cross-TU, so otherwise not inlinable).
-// Eliminates 2 PLT calls + double-load of recv_waiter_cnt per park operation.
+void _tin_fiber_park(int64_t pid);
+void _tin_fiber_unpark(int64_t pid);
+void _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
 extern __thread void *_current_hdl;
 static inline void *_tin_current_coro_hdl(void) { return _current_hdl; }
-struct TinFiber;  // opaque forward; only used as void* in waiter arrays
+struct TinFiber;
 extern __thread struct TinFiber *_current_fib;
 static inline void *_tin_current_fib(void) { return (void *)_current_fib; }
-// Direct-recv flag: set by the worker loop (fiber.c) when the fiber being
-// resumed had data delivered directly to its out buffer by a sender.
-// recv_direct checks this at entry to skip mutex+dequeue on the retry path.
 extern __thread int _direct_recv_flag;
-void    _tin_fiber_set_direct_recv(void *fib);
-void    _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
+void _tin_fiber_set_direct_recv(void *fib);
+void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
+void _tin_fiber_mark_handoff_yield(void);
+void  _tin_set_recv_hint(void *ch, void *out);
+void *_tin_get_recv_hint_ch(void);
+void *_tin_get_recv_hint_out(void);
+void  _tin_clear_recv_hint(void);
+void  _tin_set_preregistered_ch(void *ch);
+void *_tin_get_preregistered_ch(void);
+void  _tin_clear_preregistered_ch(void);
+void  _tin_clear_advisory_state(void);
 
-// TinFastMutex: coroutine-aware atomic spinlock (no OS primitives in fast path).
-// Defined in runtime/fastmutex.c, included via the runtime umbrella.
 #include "../../runtime/fastmutex.h"
+
+#define TIN_CHAN_BLOCKED ((void*)(intptr_t)-1)
 
 // ---------------------------------------------------------------------------
 // Fast element copy - avoids calling library memcpy for common small sizes.
-// For 8-byte elements (int64, pointers, f64), the compiler inlines this as a
-// single 64-bit load+store, eliminating the __memcpy_avx_unaligned_erms overhead.
 // ---------------------------------------------------------------------------
 static inline void _chan_elem_copy(void *dst, const void *src, size_t sz) {
     if (__builtin_expect(sz == 8, 1))
@@ -64,25 +75,18 @@ static inline void _chan_elem_copy(void *dst, const void *src, size_t sz) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal channel control block
+// Waiter queue - grows on demand up to TINMAXCHANWAITERS.
+// outs is non-NULL for recv queues (direct-delivery target buffers).
 // ---------------------------------------------------------------------------
 
-// Sentinel returned when a channel operation parked the fiber.
-// The caller must yield immediately after receiving this.  Never a valid data pointer.
-#define TIN_CHAN_BLOCKED ((void*)(intptr_t)-1)
-
 #define TIN_CHAN_WAITERS_INIT        8
-#define TIN_CHAN_WAITERS_DEFAULT_MAX (1 << 16)  // 64K
+#define TIN_CHAN_WAITERS_DEFAULT_MAX (1 << 16)
 
-// Dynamic waiter queue: grows on demand up to _chan_waiter_max, then panics.
-// pid + hdl + fib are stored so _tin_fiber_unpark_fib can bypass _table_mu
-// entirely on the unpark hot path (only the per-fiber spinlock is needed).
-// outs is non-NULL only for recv queues (direct-delivery target buffers).
 typedef struct {
     int64_t *pids;
     void   **hdls;
     void   **fibs;
-    void   **outs;  // recv only; NULL entries = recv_blocking callers
+    void   **outs;
     int      cnt;
     int      cap;
 } TinWaiterQueue;
@@ -92,7 +96,6 @@ static pthread_once_t  _chan_waiter_once = PTHREAD_ONCE_INIT;
 
 static void _chan_waiter_init_once(void) {
     const char *env = getenv("TINMAXCHANWAITERS");
-    // 0 = unlimited (old behaviour: grow forever without panicking).
     _chan_waiter_max = (env && *env) ? atoi(env) : TIN_CHAN_WAITERS_DEFAULT_MAX;
     if (_chan_waiter_max < 0) _chan_waiter_max = TIN_CHAN_WAITERS_DEFAULT_MAX;
 }
@@ -104,8 +107,8 @@ static void _wq_alloc(TinWaiterQueue *wq, int has_outs) {
     wq->outs = has_outs
         ? (void **)calloc((size_t)TIN_CHAN_WAITERS_INIT, sizeof(void *))
         : NULL;
-    wq->cnt  = 0;
-    wq->cap  = TIN_CHAN_WAITERS_INIT;
+    wq->cnt = 0;
+    wq->cap = TIN_CHAN_WAITERS_INIT;
     if (!wq->pids || !wq->hdls || !wq->fibs || (has_outs && !wq->outs)) {
         fputs("tin: channel waiter queue OOM\n", stderr);
         exit(1);
@@ -120,8 +123,6 @@ static void _wq_free(TinWaiterQueue *wq) {
     wq->cnt = wq->cap = 0;
 }
 
-// Grow the waiter queue.  Must be called with ch->fmu held.
-// Unlocks fmu before panicking to avoid deadlock.
 static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_outs) {
     pthread_once(&_chan_waiter_once, _chan_waiter_init_once);
     if (_chan_waiter_max > 0 && wq->cap >= _chan_waiter_max) {
@@ -155,118 +156,230 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
     wq->cap = new_cap;
 }
 
-// TinChannel layout - cache-line conscious:
-//   Bytes   0..3   : ref_count      (ARC, rarely touched in fast path)
-//   Bytes   4..7   : fmu.state      (lock CAS - hit on every lock/unlock)
-//   Bytes   8..11  : fmu.wl_lock    (waiter-list spinlock - rare contended path)
-//   Bytes  12..15  : fmu.wcnt       (mutex waiter count)
-//   Bytes  16..79  : fmu.wpid[4]    (mutex waiters pids - rarely used)
-//   Bytes  80..111 : fmu.whdl[4]    (mutex waiter hdls - rarely used)
-//   - after TinFastMutex (FMUTEX_MAX_WAITERS=4 → 112 bytes total for fmu) -
-//   Bytes 112..119 : cap            (hot: read on every enqueue/dequeue check)
-//   Bytes 120..127 : elem_size
-//   Bytes 128..135 : count          (hot)
-//   Bytes 136..143 : head           (hot)
-//   Bytes 144..151 : tail           (hot)
-//   Bytes 152..153 : closed, is_rc
-//   Bytes 154+     : recv_wq, send_wq (pointers into heap), buf[]
+// ---------------------------------------------------------------------------
+// TinChannel - Vyukov MPMC ring buffer + fiber waiter queues.
 //
-// With FMUTEX_MAX_WAITERS=4 the fmu is 4+4+4+4*8+4*8 = 80 bytes.
-// The hot ring-buffer fields sit at offset ~80–152, inside the first 3 cache lines.
+// Cache-line layout:
+//   [0..N]:      ref_count + wq_fmu (waiter-queue lock, uncontended on fast path)
+//   [N..N+64]:   cap, cap_mask, elem_size, is_rc, closed, wq counters, wq pointers
+//   [aligned]:   enq_pos on its own 64-byte cache line (producer hot)
+//   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot)
+//   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters
+//   [separate]:  data_buf (cap * elem_size bytes)
+// ---------------------------------------------------------------------------
 typedef struct TinChannel {
-    atomic_int      ref_count; // number of Channel[T] struct copies alive
-    TinFastMutex    fmu;       // protects all fields below (no OS primitives)
-    int64_t         cap;
-    int64_t         cap_mask;  // cap - 1 (cap is always power-of-2); use & instead of %
-    int64_t         elem_size;
-    int64_t         count;
-    int64_t         head;
-    int64_t         tail;
-    bool            closed;
-    int             is_rc;    // whether T is RC-tracked
-    TinWaiterQueue  recv_wq;  // fibers parked waiting to receive
-    TinWaiterQueue  send_wq;  // fibers parked waiting to send
-    char            buf[];    // flexible array member: cap * elem_size bytes
+    atomic_int       ref_count;
+    TinFastMutex     wq_fmu;     // waiter-queue lock (slow path only)
+
+    int64_t          cap;
+    int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
+    int64_t          elem_size;
+    bool             closed;
+    int              is_rc;
+
+    // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
+    // path: if 0, no wakeup is needed and wq_fmu is never touched.
+    _Atomic(int32_t) recv_wq_cnt;
+    _Atomic(int32_t) send_wq_cnt;
+
+    TinWaiterQueue   recv_wq;    // protected by wq_fmu
+    TinWaiterQueue   send_wq;    // protected by wq_fmu
+
+    // Vyukov MPMC ring buffer state.
+    // enq_pos and deq_pos are on separate cache lines to prevent producer-
+    // consumer false sharing.  The 56-byte pads round each out to 64 bytes.
+    _Atomic(int64_t) enq_pos;
+    char             _pad_enq[56];
+    _Atomic(int64_t) deq_pos;
+    char             _pad_deq[56];
+
+    _Atomic(int64_t) *seq_buf;   // cap entries; seq[i] initialized to i
+    char             *data_buf;  // cap * elem_size bytes
 } TinChannel;
 
-// Allocate and initialise a new channel control block.
-// is_rc must be 1 when T is an ARC-tracked type (string, array, any) so that
-// send retains and recv transfers ownership correctly.
+// ---------------------------------------------------------------------------
+// Allocate / retain / release
+// ---------------------------------------------------------------------------
+
 void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     if (cap <= 0) cap = 1;
-    // Round cap up to the next power of 2 so head/tail wrap can use bitwise AND
-    // instead of integer division (idivq = ~30-90 cycles vs andq = 1 cycle).
+    // Round up to power of 2 for bitwise-AND wrap.
     int64_t po2 = 1;
     while (po2 < cap) po2 <<= 1;
     cap = po2;
-    size_t total = sizeof(TinChannel) + (size_t)(cap * elem_size);
-    TinChannel *ch = (TinChannel *)calloc(1, total);
+
+    TinChannel *ch = (TinChannel *)calloc(1, sizeof(TinChannel));
     if (!ch) { fputs("tin: channel alloc failed\n", stderr); exit(1); }
+
     atomic_init(&ch->ref_count, 1);
-    tin_fmutex_init(&ch->fmu);
+    tin_fmutex_init(&ch->wq_fmu);
     ch->cap       = cap;
     ch->cap_mask  = cap - 1;
     ch->elem_size = elem_size;
-    ch->count     = 0;
-    ch->head      = 0;
-    ch->tail      = 0;
     ch->closed    = false;
     ch->is_rc     = is_rc;
-    _wq_alloc(&ch->recv_wq, 1 /* has_outs */);
-    _wq_alloc(&ch->send_wq, 0 /* no outs  */);
+    atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
+    atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
+    atomic_store_explicit(&ch->enq_pos, 0, memory_order_relaxed);
+    atomic_store_explicit(&ch->deq_pos, 0, memory_order_relaxed);
+
+    // seq_buf: aligned to 64 bytes, size rounded to 64-byte multiple.
+    size_t seq_bytes = (size_t)cap * sizeof(_Atomic(int64_t));
+    seq_bytes = (seq_bytes + 63u) & ~(size_t)63u;
+    if (seq_bytes < 64) seq_bytes = 64;
+    ch->seq_buf = (_Atomic(int64_t) *)aligned_alloc(64, seq_bytes);
+    if (!ch->seq_buf) { fputs("tin: channel seq_buf alloc failed\n", stderr); exit(1); }
+    for (int64_t i = 0; i < cap; i++)
+        atomic_store_explicit(&ch->seq_buf[i], i, memory_order_relaxed);
+
+    ch->data_buf = (char *)malloc((size_t)(cap * elem_size));
+    if (!ch->data_buf) { fputs("tin: channel data_buf alloc failed\n", stderr); exit(1); }
+    if (is_rc) memset(ch->data_buf, 0, (size_t)(cap * elem_size));
+
+    _wq_alloc(&ch->recv_wq, 1);
+    _wq_alloc(&ch->send_wq, 0);
     return ch;
 }
 
-// Increment the reference count. Called when a Channel[T] value crosses a
-// fiber boundary (e.g. passed as a spawn argument) so the fiber owns its own
-// reference independent of the caller's local variable.
 void _tin_channel_retain(void *ptr) {
     if (!ptr) return;
-    TinChannel *ch = (TinChannel *)ptr;
-    atomic_fetch_add_explicit(&ch->ref_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&((TinChannel *)ptr)->ref_count, 1, memory_order_relaxed);
 }
 
-// Release one reference to the channel. When the last reference is dropped the
-// control block is destroyed and freed. Matching function for _tin_channel_retain
-// and the implicit retain performed by Channel[T].make().
 void _tin_channel_free(void *ptr) {
     TinChannel *ch = (TinChannel *)ptr;
     if (!ch) return;
-    if (atomic_fetch_sub_explicit(&ch->ref_count, 1, memory_order_acq_rel) > 1) {
-        return; // other references still alive
-    }
-    // Last reference dropped: drain buffered RC elements and destroy.
+    if (atomic_fetch_sub_explicit(&ch->ref_count, 1, memory_order_acq_rel) > 1)
+        return;
+    // Last reference: release any buffered RC elements.
     if (ch->is_rc) {
-        for (int64_t i = 0; i < ch->count; i++) {
-            int64_t slot = (ch->head + i) & ch->cap_mask;
-            void *slot_ptr = ch->buf + slot * ch->elem_size;
+        int64_t deq = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        int64_t enq = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        for (int64_t pos = deq; pos != enq; pos++) {
+            int64_t slot = pos & ch->cap_mask;
+            void *slot_ptr = ch->data_buf + slot * ch->elem_size;
             void *rc_ptr;
             memcpy(&rc_ptr, slot_ptr, sizeof(void *));
             if (rc_ptr) _tin_release(rc_ptr);
         }
     }
-    // TinFastMutex uses only atomic fields; no destructor needed.
+    free(ch->seq_buf);
+    free(ch->data_buf);
     _wq_free(&ch->recv_wq);
     _wq_free(&ch->send_wq);
     free(ch);
 }
 
 // ---------------------------------------------------------------------------
-// Per-thread scratch buffer for _tin_channel_recv_park.
+// Lock-free ring buffer operations (Vyukov algorithm).
 //
-// We use a pthread_key_t so the destructor runs when the worker thread exits,
-// freeing the buffer without any extra call from the worker loop.
+// lf_enqueue: claim a slot via CAS on enq_pos, write data, publish via seq.
+// lf_dequeue: claim a slot via CAS on deq_pos, read data, free via seq.
+//
+// Returns 1 on success, 0 on full/empty.
 // ---------------------------------------------------------------------------
 
-typedef struct RecvBuf {
-    uint8_t *data;
-    size_t   sz;
-} RecvBuf;
+static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int is_rc) {
+    int64_t pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+    for (;;) {
+        _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
+        int64_t seq = atomic_load_explicit(pseq, memory_order_acquire);
+        int64_t diff = seq - pos;
+        if (diff == 0) {
+            if (atomic_compare_exchange_weak_explicit(
+                    &ch->enq_pos, &pos, pos + 1,
+                    memory_order_relaxed, memory_order_relaxed)) {
+                void *dst = ch->data_buf + (pos & ch->cap_mask) * (int64_t)esz;
+                if (is_rc) {
+                    void *old_ptr;
+                    memcpy(&old_ptr, dst, sizeof(void *));
+                    if (old_ptr) _tin_release(old_ptr);
+                }
+                _chan_elem_copy(dst, val, esz);
+                if (is_rc) {
+                    void *new_ptr;
+                    memcpy(&new_ptr, dst, sizeof(void *));
+                    if (new_ptr) _tin_retain(new_ptr);
+                }
+                atomic_store_explicit(pseq, pos + 1, memory_order_release);
+                return 1;
+            }
+        } else if (diff < 0) {
+            return 0;  // full
+        } else {
+            pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        }
+    }
+}
+
+static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int is_rc) {
+    int64_t pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+    for (;;) {
+        _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
+        int64_t seq = atomic_load_explicit(pseq, memory_order_acquire);
+        int64_t diff = seq - (pos + 1);
+        if (diff == 0) {
+            if (atomic_compare_exchange_weak_explicit(
+                    &ch->deq_pos, &pos, pos + 1,
+                    memory_order_relaxed, memory_order_relaxed)) {
+                void *src = ch->data_buf + (pos & ch->cap_mask) * (int64_t)esz;
+                _chan_elem_copy(out, src, esz);
+                if (is_rc) memset(src, 0, esz);
+                atomic_store_explicit(pseq, pos + ch->cap, memory_order_release);
+                return 1;
+            }
+        } else if (diff < 0) {
+            return 0;  // empty
+        } else {
+            pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wake helpers: pop one waiter from wq under wq_fmu and unpark it.
+// Called after a successful fast-path enqueue/dequeue when wq_cnt > 0.
+// ---------------------------------------------------------------------------
+
+static void _wake_one_recv(TinChannel *ch) {
+    tin_fmutex_lock_spin(&ch->wq_fmu);
+    if (ch->recv_wq.cnt == 0) {
+        tin_fmutex_unlock(&ch->wq_fmu);
+        return;
+    }
+    ch->recv_wq.cnt--;
+    atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+    int64_t rpid = ch->recv_wq.pids[ch->recv_wq.cnt];
+    void   *rhdl = ch->recv_wq.hdls[ch->recv_wq.cnt];
+    void   *rfib = ch->recv_wq.fibs[ch->recv_wq.cnt];
+    tin_fmutex_unlock(&ch->wq_fmu);
+    _tin_fiber_unpark_fib(rfib, rpid, rhdl);
+}
+
+static void _wake_one_send(TinChannel *ch) {
+    tin_fmutex_lock_spin(&ch->wq_fmu);
+    if (ch->send_wq.cnt == 0) {
+        tin_fmutex_unlock(&ch->wq_fmu);
+        return;
+    }
+    ch->send_wq.cnt--;
+    atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+    int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+    void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+    void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+    tin_fmutex_unlock(&ch->wq_fmu);
+    _tin_fiber_unpark_fib(sfib, spid, shdl);
+}
+
+// ---------------------------------------------------------------------------
+// Per-thread scratch buffer for _tin_channel_recv_blocking / _tin_channel_recv_park.
+// Freed automatically when the worker thread exits.
+// ---------------------------------------------------------------------------
+
+typedef struct RecvBuf { uint8_t *data; size_t sz; } RecvBuf;
 
 static pthread_key_t  _recv_buf_key;
 static pthread_once_t _recv_buf_once = PTHREAD_ONCE_INIT;
-// TLS flag: set to 1 after _recv_buf_init_key has run on this thread.
-// Avoids calling pthread_once (a full memory barrier) on every dequeue.
 static __thread int   _recv_buf_key_ready = 0;
 
 static void _recv_buf_dtor(void *p) {
@@ -276,15 +389,9 @@ static void _recv_buf_dtor(void *p) {
     free(rb);
 }
 
-// atexit handler: pthread_key_t destructors do not run for the main thread
-// when exit() is called via return from main(). Free the main thread's buffer
-// here so valgrind and sanitizers see a clean heap at exit.
 static void _recv_buf_cleanup_atexit(void) {
     void *p = pthread_getspecific(_recv_buf_key);
-    if (p) {
-        pthread_setspecific(_recv_buf_key, NULL);
-        _recv_buf_dtor(p);
-    }
+    if (p) { pthread_setspecific(_recv_buf_key, NULL); _recv_buf_dtor(p); }
 }
 
 static void _recv_buf_init_key(void) {
@@ -301,386 +408,511 @@ static RecvBuf *_recv_buf_get(void) {
     return rb;
 }
 
-// Dequeue one element from ch into the per-thread scratch buffer.
-// Must be called with ch->fmu locked and ch->count > 0.
-// Returns pointer to the thread-local scratch buffer containing the element.
-static void *_chan_dequeue(TinChannel *ch) {
+// Dequeue into the per-thread scratch buffer.  Returns pointer on success, NULL on empty.
+static void *_lf_dequeue_tls(TinChannel *ch) {
     if (__builtin_expect(!_recv_buf_key_ready, 0)) {
         pthread_once(&_recv_buf_once, _recv_buf_init_key);
         _recv_buf_key_ready = 1;
     }
     RecvBuf *rb = _recv_buf_get();
-    // Grow scratch buffer if needed.
-    if ((size_t)ch->elem_size > rb->sz) {
-        free(rb->data);
-        rb->data = malloc((size_t)ch->elem_size);
-        rb->sz   = (size_t)ch->elem_size;
-    }
-    uint8_t *buf = rb->data;
     size_t esz = (size_t)ch->elem_size;
-    void *src = ch->buf + ch->head * esz;
-    _chan_elem_copy(buf, src, esz);
-    // Transfer ownership: zero the buffer slot so ARC doesn't double-release.
-    if (ch->is_rc) {
-        memset(src, 0, esz);
+    if (esz > rb->sz) {
+        free(rb->data);
+        rb->data = (uint8_t *)malloc(esz);
+        rb->sz   = esz;
     }
-    ch->head  = (ch->head + 1) & ch->cap_mask;
-    ch->count--;
-    return buf;
+    if (!lf_dequeue(ch, rb->data, esz, ch->is_rc)) return NULL;
+    return rb->data;
 }
 
 // ---------------------------------------------------------------------------
-// Blocking send/recv using TinFastMutex + fiber park/unpark.
+// Blocking send.
 //
-// The channel's lock (ch->fmu) is a coroutine-aware atomic spinlock.
-// Uncontended acquire is a single CAS - no OS call, no syscall.
-// When contended after a brief spin, the fiber parks into the mutex's own
-// waiter list and is resumed directly by the unlocker (runnext fast path).
+// Fast path (recv_wq_cnt == 0 and channel not full): lock-free enqueue, O(1).
+// Handoff path (recv_direct receiver parked):  direct delivery to receiver's
+//   alloca, set direct_recv_flag, unpark, mark handoff_yield, return 2.
+// Slow path (full): register in send_wq, park, return 1 (caller yields).
 //
-// Both pid AND hdl are stored in the data-waiter lists (recv_waiters /
-// send_waiters) so that the unpark hot path (_tin_fiber_unpark_hdl) can skip
-// the fiber-table lookup that _tin_fiber_unpark needs.
-//
-// Common paths (no contention, data available): 0 yields.
-// Blocked paths: 1 yield (data park) + 1 yield-free retry (dequeue).
+// Returns:
+//   0   - enqueued (fast path or recv_blocking receiver woken via ring buffer)
+//   2   - handoff: direct delivery to recv_direct receiver (caller must yield once)
+//  -1   - channel closed
+//   1   - parked or yielded; caller must yield and retry
 // ---------------------------------------------------------------------------
-
-// Blocking recv.  Returns:
-//   data pointer (per-thread scratch buf) - element dequeued
-//   NULL                                  - channel closed and empty (panic)
-//   TIN_CHAN_BLOCKED                       - fiber parked; caller must yield
-void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
-    TinChannel *ch = (TinChannel *)ptr;
-
-    void *hdl = _tin_current_coro_hdl();
-    if (!tin_fmutex_lock_coro(&ch->fmu, pid, hdl))
-        return TIN_CHAN_BLOCKED;  // parked in mutex wait queue; caller yields
-
-    if (ch->count > 0) {
-        void *data = _chan_dequeue(ch);
-        // Wake one parked sender now that there is space.
-        if (ch->send_wq.cnt > 0) {
-            ch->send_wq.cnt--;
-            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
-            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
-            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
-            tin_fmutex_unlock(&ch->fmu);
-            _tin_fiber_unpark_fib(sfib, spid, shdl);
-            return data;
-        }
-        tin_fmutex_unlock(&ch->fmu);
-        return data;
-    }
-
-    if (ch->closed) {
-        tin_fmutex_unlock(&ch->fmu);
-        return NULL;
-    }
-
-    // Channel empty: register as a data waiter and park.
-    // _tin_fiber_park uses the deferred-BLOCKED pattern (sets pending_park so
-    // the worker loop transitions to FIBER_BLOCKED after coro.suspend fires).
-    // This eliminates the double-resume race if a sender unparks us between
-    // _tin_fiber_park and the subsequent yield.
-    if (pid > 0 && hdl) {
-        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
-            _wq_grow_or_panic(&ch->recv_wq, &ch->fmu, 1);
-        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
-        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
-        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
-        ch->recv_wq.outs[ch->recv_wq.cnt] = NULL;  // recv_blocking: no direct buffer
-        ch->recv_wq.cnt++;
-        tin_fmutex_unlock(&ch->fmu);
-        _tin_fiber_park(pid);
-        return TIN_CHAN_BLOCKED;
-    }
-
-    // No pid/hdl: fall back to yield-retry.
-    tin_fmutex_unlock(&ch->fmu);
-    return TIN_CHAN_BLOCKED;
-}
-
-// Blocking send.  Returns:
-//   0   - element enqueued
-//  -1   - channel closed (caller should panic)
-//   1   - fiber parked or mutex contended; caller must yield and retry
 int _tin_channel_send_blocking(void *ptr, const void *val,
                                 int64_t elem_size, int is_rc, int64_t pid) {
     TinChannel *ch = (TinChannel *)ptr;
+    size_t esz = (size_t)elem_size;
 
+    // Fast path: no parked receivers, not closed, channel has space.
+    int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
+    if (__builtin_expect(rcnt == 0, 1)) {
+        if (lf_enqueue(ch, val, esz, is_rc)) {
+            // Check again for newly-parked receivers.
+            if (__builtin_expect(
+                    atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
+                _wake_one_recv(ch);
+            return 0;
+        }
+    }
+
+    // Slow path: either a parked receiver or the buffer is full.
     void *hdl = _tin_current_coro_hdl();
-    if (!tin_fmutex_lock_coro(&ch->fmu, pid, hdl))
-        return 1;  // parked in mutex wait queue; caller yields
+    tin_fmutex_lock_spin(&ch->wq_fmu);
 
     if (ch->closed) {
-        tin_fmutex_unlock(&ch->fmu);
+        tin_fmutex_unlock(&ch->wq_fmu);
         return -1;
     }
 
-    if (ch->count < ch->cap) {
-        size_t esz  = (size_t)elem_size;
+    // Receivers only park when the buffer is empty.  Two wakeup strategies:
+    //
+    //  cap=1 + recv_direct receiver (rout != NULL):
+    //    Direct delivery to receiver's alloca.  Receiver resumes with
+    //    _direct_recv_flag=1 and returns in 1 TLS load (no ring ops).
+    //    No handoff yield - sender parks immediately on its next recv.
+    //
+    //  cap>1 or recv_blocking receiver:
+    //    Ring-buffer enqueue.  Enables batching (sender never yields).
+    if (ch->recv_wq.cnt > 0) {
+        int idx = ch->recv_wq.cnt - 1;
+        void *rout = ch->recv_wq.outs ? ch->recv_wq.outs[idx] : NULL;
 
-        // Direct delivery: if a receiver parked via recv_direct (rout != NULL),
-        // skip the ring buffer and write directly to its out buffer.  Eliminates
-        // the receiver's retry call (2 LOCK CAS + mutex overhead).
-        // If rout == NULL the receiver used recv_blocking: enqueue to ring buffer
-        // so it can dequeue on its normal retry path, then unpark it.
-        if (ch->recv_wq.cnt > 0) {
+        if (rout && ch->cap == 1) {
+            // cap=1 recv_direct: direct delivery + handoff yield.
+            // Handoff lets the receiver run immediately; the sender parks on its
+            // next recv (which is always empty for cap=1 pipelines).
+            // This reduces round-trip parks from 2 to 1 for latency-sensitive paths.
             ch->recv_wq.cnt--;
-            int64_t rpid = ch->recv_wq.pids[ch->recv_wq.cnt];
-            void   *rhdl = ch->recv_wq.hdls[ch->recv_wq.cnt];
-            void   *rfib = ch->recv_wq.fibs[ch->recv_wq.cnt];
-            void   *rout = ch->recv_wq.outs ? ch->recv_wq.outs[ch->recv_wq.cnt] : NULL;
-            if (rout) {
-                // recv_direct receiver: write directly to its alloca.
-                _chan_elem_copy(rout, val, esz);
-                if (is_rc) {
-                    void *new_ptr;
-                    memcpy(&new_ptr, rout, sizeof(void *));
-                    if (new_ptr) _tin_retain(new_ptr);
-                }
-                tin_fmutex_unlock(&ch->fmu);
-                _tin_fiber_set_direct_recv(rfib);  // must be before unpark for ordering
-                _tin_fiber_unpark_fib(rfib, rpid, rhdl);
-                return 0;
+            atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+            int64_t rpid = ch->recv_wq.pids[idx];
+            void   *rhdl = ch->recv_wq.hdls[idx];
+            void   *rfib = ch->recv_wq.fibs[idx];
+            _chan_elem_copy(rout, val, esz);
+            if (is_rc) {
+                void *new_ptr;
+                memcpy(&new_ptr, rout, sizeof(void *));
+                if (new_ptr) _tin_retain(new_ptr);
             }
-            // recv_blocking receiver: enqueue, then wake so it can dequeue.
-            {
-                size_t tail = (size_t)ch->tail;
-                void *dest = ch->buf + tail * esz;
-                if (is_rc) {
-                    void *old_ptr;
-                    memcpy(&old_ptr, dest, sizeof(void *));
-                    if (old_ptr) _tin_release(old_ptr);
-                }
-                _chan_elem_copy(dest, val, esz);
-                if (is_rc) {
-                    void *new_ptr;
-                    memcpy(&new_ptr, dest, sizeof(void *));
-                    if (new_ptr) _tin_retain(new_ptr);
-                }
-                ch->tail  = (int64_t)((tail + 1) & (size_t)ch->cap_mask);
-                ch->count++;
-            }
-            tin_fmutex_unlock(&ch->fmu);
+            tin_fmutex_unlock(&ch->wq_fmu);
+            _tin_fiber_set_direct_recv(rfib);
+            _tin_fiber_unpark_fib(rfib, rpid, rhdl);
+            _tin_fiber_mark_handoff_yield();
+            return 2;
+        }
+
+        // Ring-buffer enqueue for all other cases.
+        int enqueued = lf_enqueue(ch, val, esz, is_rc);
+        if (enqueued) {
+            ch->recv_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+            int64_t rpid = ch->recv_wq.pids[idx];
+            void   *rhdl = ch->recv_wq.hdls[idx];
+            void   *rfib = ch->recv_wq.fibs[idx];
+            tin_fmutex_unlock(&ch->wq_fmu);
             _tin_fiber_unpark_fib(rfib, rpid, rhdl);
             return 0;
         }
-
-        // No waiting receiver: enqueue to ring buffer.
-        // Cache tail in a local so the compiler doesn't reload ch->tail after
-        // the copy (which may alias ch in its conservative aliasing analysis).
-        size_t tail = (size_t)ch->tail;
-        void *dest = ch->buf + tail * esz;
-        if (is_rc) {
-            void *old_ptr;
-            memcpy(&old_ptr, dest, sizeof(void *));
-            if (old_ptr) _tin_release(old_ptr);
+        // Enqueue failed: shouldn't happen (parked receivers imply empty buffer).
+        // Fall through to park as a safety measure.
+    } else {
+        // No parked receivers - try lf_enqueue one more time under the lock.
+        if (lf_enqueue(ch, val, esz, is_rc)) {
+            tin_fmutex_unlock(&ch->wq_fmu);
+            return 0;
         }
-        _chan_elem_copy(dest, val, esz);
-        if (is_rc) {
-            void *new_ptr;
-            memcpy(&new_ptr, dest, sizeof(void *));
-            if (new_ptr) _tin_retain(new_ptr);
-        }
-        ch->tail  = (int64_t)((tail + 1) & (size_t)ch->cap_mask);
-        ch->count++;
-        tin_fmutex_unlock(&ch->fmu);
-        return 0;
     }
 
-    // Channel full: register as a data waiter and park.
+    // Channel full: register as send waiter and park.
     if (pid > 0 && hdl) {
         if (ch->send_wq.cnt >= ch->send_wq.cap)
-            _wq_grow_or_panic(&ch->send_wq, &ch->fmu, 0);
+            _wq_grow_or_panic(&ch->send_wq, &ch->wq_fmu, 0);
         ch->send_wq.pids[ch->send_wq.cnt] = pid;
         ch->send_wq.hdls[ch->send_wq.cnt] = hdl;
         ch->send_wq.fibs[ch->send_wq.cnt] = _tin_current_fib();
         ch->send_wq.cnt++;
-        tin_fmutex_unlock(&ch->fmu);
+        atomic_fetch_add_explicit(&ch->send_wq_cnt, 1, memory_order_seq_cst);
+
+        // Final check: a consumer may have dequeued between our failed lf_enqueue
+        // and the send_wq_cnt increment, saw cnt==0, and didn't wake us.
+        if (lf_enqueue(ch, val, esz, is_rc)) {
+            ch->send_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+            tin_fmutex_unlock(&ch->wq_fmu);
+            return 0;
+        }
+
+        tin_fmutex_unlock(&ch->wq_fmu);
         _tin_fiber_park(pid);
         return 1;
     }
 
-    // No pid/hdl: fall back to yield-retry.
-    tin_fmutex_unlock(&ch->fmu);
+    tin_fmutex_unlock(&ch->wq_fmu);
     return 1;
 }
 
-// Direct recv: writes element to a caller-allocated buffer (e.g. an LLVM alloca)
-// instead of the per-thread TLS scratch buffer.  Eliminates pthread_getspecific
-// and the scratch-buffer management overhead on the hot path.
+// ---------------------------------------------------------------------------
+// Blocking recv (non-inline path via fn{#async} recv method).
 //
 // Returns:
-//   0   - element dequeued into `out`
-//  -1   - channel closed and empty (caller should panic)
-//   1   - fiber parked or mutex contended; caller must yield and retry
-int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
-    // Fast direct-delivery path: a sender already wrote the element to `out`
-    // and set _direct_recv_flag via the worker loop.  Skip mutex + dequeue.
-    if (__builtin_expect(_direct_recv_flag, 0)) {
-        _direct_recv_flag = 0;
-        return 0;
+//   data pointer (per-thread scratch buf)  - element dequeued
+//   NULL                                   - channel closed and empty
+//   TIN_CHAN_BLOCKED                        - parked; caller must yield
+// ---------------------------------------------------------------------------
+void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
+    TinChannel *ch = (TinChannel *)ptr;
+    void *hdl = _tin_current_coro_hdl();
+
+    // Fast path: no parked senders, try lock-free dequeue.
+    if (__builtin_expect(
+            atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
+        void *data = _lf_dequeue_tls(ch);
+        if (data) {
+            if (__builtin_expect(
+                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
+                _wake_one_send(ch);
+            return data;
+        }
     }
 
-    TinChannel *ch = (TinChannel *)ptr;
+    // Slow path.
+    tin_fmutex_lock_spin(&ch->wq_fmu);
 
-    void *hdl = _tin_current_coro_hdl();
-    if (!tin_fmutex_lock_coro(&ch->fmu, pid, hdl))
-        return 1;
-
-    if (ch->count > 0) {
-        // Cache head in a local so the compiler doesn't reload ch->head after
-        // the copy (which may alias ch in its conservative aliasing analysis).
-        size_t esz  = (size_t)ch->elem_size;
-        size_t head = (size_t)ch->head;
-        void *src = ch->buf + head * esz;
-        _chan_elem_copy(out, src, esz);
-        if (ch->is_rc) memset(src, 0, esz);
-        ch->head = (int64_t)((head + 1) & (size_t)ch->cap_mask);
-        ch->count--;
-
+    void *data = _lf_dequeue_tls(ch);
+    if (data) {
         if (ch->send_wq.cnt > 0) {
             ch->send_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
             int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
             void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
             void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
-            tin_fmutex_unlock(&ch->fmu);
+            tin_fmutex_unlock(&ch->wq_fmu);
             _tin_fiber_unpark_fib(sfib, spid, shdl);
-            return 0;
+            return data;
         }
-        tin_fmutex_unlock(&ch->fmu);
-        return 0;
-    }
-
-    if (ch->closed) {
-        tin_fmutex_unlock(&ch->fmu);
-        return -1;
-    }
-
-    if (pid > 0 && hdl) {
-        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
-            _wq_grow_or_panic(&ch->recv_wq, &ch->fmu, 1);
-        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
-        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
-        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
-        ch->recv_wq.outs[ch->recv_wq.cnt] = out;  // for direct delivery
-        ch->recv_wq.cnt++;
-        tin_fmutex_unlock(&ch->fmu);
-        _tin_fiber_park(pid);
-        return 1;
-    }
-
-    tin_fmutex_unlock(&ch->fmu);
-    return 1;
-}
-
-// Fiber-aware recv: try to dequeue one element from the channel.
-// pid is the calling fiber's pid (kept for compatibility; recv_blocking is preferred).
-//
-// Returns:
-//   - pointer to element data  - element was dequeued successfully
-//   - NULL                     - channel is closed and empty (caller should panic)
-//   - TIN_CHAN_BLOCKED          - channel was empty; caller should yield and retry
-//
-// Safety note on park/unpark: we intentionally do NOT call _tin_fiber_park here.
-// The yield-retry loop in recv_fiber is safe without park.
-void *_tin_channel_recv_park(void *ptr, int64_t pid) {
-    TinChannel *ch = (TinChannel *)ptr;
-    (void)pid;  // reserved for future optimization
-
-    // Atomic trylock: never blocks the OS worker thread.
-    if (!tin_fmutex_trylock(&ch->fmu))
-        return TIN_CHAN_BLOCKED;  // contended - yield and retry
-
-    if (ch->count > 0) {
-        void *data = _chan_dequeue(ch);
-        tin_fmutex_unlock(&ch->fmu);
+        tin_fmutex_unlock(&ch->wq_fmu);
         return data;
     }
 
     if (ch->closed) {
-        tin_fmutex_unlock(&ch->fmu);
-        return NULL;  // caller will panic
+        tin_fmutex_unlock(&ch->wq_fmu);
+        return NULL;
     }
 
-    // Channel is empty and open: tell caller to yield and retry.
-    tin_fmutex_unlock(&ch->fmu);
+    if (pid > 0 && hdl) {
+        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
+            _wq_grow_or_panic(&ch->recv_wq, &ch->wq_fmu, 1);
+        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
+        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
+        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
+        ch->recv_wq.outs[ch->recv_wq.cnt] = NULL;
+        ch->recv_wq.cnt++;
+        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_seq_cst);
+
+        // Final check: sender may have enqueued after our failed dequeue but
+        // before the recv_wq_cnt increment, saw cnt==0, and skipped waking us.
+        data = _lf_dequeue_tls(ch);
+        if (data) {
+            ch->recv_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+            if (ch->send_wq.cnt > 0) {
+                ch->send_wq.cnt--;
+                atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+                int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+                void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+                void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+                tin_fmutex_unlock(&ch->wq_fmu);
+                _tin_fiber_unpark_fib(sfib, spid, shdl);
+                return data;
+            }
+            tin_fmutex_unlock(&ch->wq_fmu);
+            return data;
+        }
+
+        tin_fmutex_unlock(&ch->wq_fmu);
+        _tin_fiber_park(pid);
+        return TIN_CHAN_BLOCKED;
+    }
+
+    tin_fmutex_unlock(&ch->wq_fmu);
     return TIN_CHAN_BLOCKED;
 }
 
-// Returns the sentinel value TIN_CHAN_BLOCKED cast to i64.
-// Used by Tin code to compare the return of _tin_channel_recv_park.
-int64_t _tin_channel_recv_blocked_val(void) {
-    return (int64_t)(intptr_t)TIN_CHAN_BLOCKED;  // -1
-}
-
-// Fiber-aware try-send: attempt to enqueue one element without blocking.
-// Atomic trylock so the calling OS worker thread is never parked.
+// ---------------------------------------------------------------------------
+// Direct recv (inline await recv path via genDirectChanRecv).
+// Writes element into caller-allocated `out` buffer to avoid TLS scratch overhead.
 //
 // Returns:
-//   0   - element enqueued successfully
-//   1   - channel full or mutex contended; caller should yield and retry
-//  -1   - channel is closed; caller should panic
-int _tin_channel_send_try(void *ptr, const void *val, int64_t elem_size, int is_rc) {
-    TinChannel *ch = (TinChannel *)ptr;
+//   0   - element dequeued (or directly delivered) into `out`
+//  -1   - channel closed and empty
+//   1   - parked or yielded; caller must yield and retry
+// ---------------------------------------------------------------------------
+int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
+    // Direct delivery fast path: sender already wrote to `out` and set the flag.
+    // Also clear advisory state (preregistered_ch + stale pending_wakeup).
+    if (__builtin_expect(_direct_recv_flag, 0)) {
+        _direct_recv_flag = 0;
+        _tin_clear_advisory_state();
+        return 0;
+    }
 
-    if (!tin_fmutex_trylock(&ch->fmu))
-        return 1;  // contended - yield and retry
+    TinChannel *ch = (TinChannel *)ptr;
+    size_t esz = (size_t)ch->elem_size;
+    void *hdl = _tin_current_coro_hdl();
+
+    // Fast path: no parked senders, try lock-free dequeue.
+    if (__builtin_expect(
+            atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
+        if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+            if (__builtin_expect(
+                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
+                _wake_one_send(ch);
+            return 0;
+        }
+    }
+
+    // Slow path.
+    tin_fmutex_lock_spin(&ch->wq_fmu);
+
+    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+        if (ch->send_wq.cnt > 0) {
+            ch->send_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+            tin_fmutex_unlock(&ch->wq_fmu);
+            _tin_fiber_unpark_fib(sfib, spid, shdl);
+            return 0;
+        }
+        tin_fmutex_unlock(&ch->wq_fmu);
+        return 0;
+    }
 
     if (ch->closed) {
-        tin_fmutex_unlock(&ch->fmu);
+        tin_fmutex_unlock(&ch->wq_fmu);
         return -1;
     }
 
-    if (ch->count >= ch->cap) {
-        tin_fmutex_unlock(&ch->fmu);
-        return 1;  // full - yield and retry
+    if (pid > 0 && hdl) {
+        // Advisory pre-registration: fiber was registered in recv_wq by
+        // _tin_prepark_next_recv.  Skip re-registration and just park.
+        // Keep preregistered_ch set so that spurious re-queues (from a stale
+        // pending_wakeup) retry this path instead of double-registering.
+        void *preg_ch = _tin_get_preregistered_ch();
+        if (preg_ch == ptr) {
+            tin_fmutex_unlock(&ch->wq_fmu);
+            _tin_fiber_park(pid);
+            return 1;
+        }
+
+        if (ch->recv_wq.cnt >= ch->recv_wq.cap)
+            _wq_grow_or_panic(&ch->recv_wq, &ch->wq_fmu, 1);
+        ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
+        ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
+        ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
+        ch->recv_wq.outs[ch->recv_wq.cnt] = out;
+        ch->recv_wq.cnt++;
+        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_seq_cst);
+
+        // Final check: sender may have enqueued and not woken us.
+        if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+            ch->recv_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+            if (ch->send_wq.cnt > 0) {
+                ch->send_wq.cnt--;
+                atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+                int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+                void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+                void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+                tin_fmutex_unlock(&ch->wq_fmu);
+                _tin_fiber_unpark_fib(sfib, spid, shdl);
+                return 0;
+            }
+            tin_fmutex_unlock(&ch->wq_fmu);
+            return 0;
+        }
+
+        tin_fmutex_unlock(&ch->wq_fmu);
+        _tin_fiber_park(pid);
+        return 1;
     }
 
-    void *dest = ch->buf + ch->tail * elem_size;
-    if (is_rc) {
-        void *old_ptr;
-        memcpy(&old_ptr, dest, sizeof(void *));
-        if (old_ptr) _tin_release(old_ptr);
-    }
-    memcpy(dest, val, (size_t)elem_size);
-    if (is_rc) {
-        void *new_ptr;
-        memcpy(&new_ptr, dest, sizeof(void *));
-        if (new_ptr) _tin_retain(new_ptr);
-    }
-    ch->tail  = (ch->tail + 1) & ch->cap_mask;
-    ch->count++;
-    tin_fmutex_unlock(&ch->fmu);
-    return 0;
+    tin_fmutex_unlock(&ch->wq_fmu);
+    return 1;
 }
 
-// Returns 1 if the channel is closed and empty, 0 otherwise.
+// ---------------------------------------------------------------------------
+// Pre-registration: called from genDirectChanSend handoff block (r==2) before
+// coro.suspend.  Reads _recv_hint_ch/_recv_hint_out and pre-registers the
+// current fiber in that channel's recv_wq, then calls _tin_fiber_park so the
+// worker sets BLOCKED after coro.suspend instead of routing via LQ.
+//
+// This eliminates the "wasted LQ pop" pattern in pipeline-style workloads where
+// a relay fiber's handoff yield would otherwise put it in LQ just to immediately
+// park on its next (empty) recv.
+//
+// Returns: 1 = pre-registered (pending_park set), 0 = skipped (no hint or data
+//          already available - fiber proceeds through normal handoff yield path).
+// ---------------------------------------------------------------------------
+int _tin_prepark_next_recv(int64_t pid) {
+    return 0;  // DISABLED
+    void *ch_ptr = _tin_get_recv_hint_ch();
+    void *out    = _tin_get_recv_hint_out();
+    if (!ch_ptr || !out || pid <= 0) return 0;
+    // Advisory pre-registration is only beneficial for cap=1 pipelines where the
+    // sender always uses direct delivery (not ring-buffer enqueue).  For cap>1,
+    // the ring-buffer fast path already avoids parks; advisory adds overhead.
+    TinChannel *ch_early = (TinChannel *)ch_ptr;
+    if (ch_early->cap != 1) { _tin_clear_recv_hint(); return 0; }
+
+    void *hdl = _tin_current_coro_hdl();
+    void *fib = _tin_current_fib();
+    if (!hdl || !fib) return 0;
+
+    TinChannel *ch = (TinChannel *)ch_ptr;
+    size_t esz = (size_t)ch->elem_size;
+
+    tin_fmutex_lock_spin(&ch->wq_fmu);
+
+    if (ch->closed) {
+        tin_fmutex_unlock(&ch->wq_fmu);
+        return 0;
+    }
+
+    // If data is already available, dequeue it directly into out and signal via
+    // direct_recv_done so the fiber resumes with _direct_recv_flag=1 (fast path).
+    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+        if (ch->send_wq.cnt > 0) {
+            ch->send_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+            tin_fmutex_unlock(&ch->wq_fmu);
+            _tin_fiber_unpark_fib(sfib, spid, shdl);
+        } else {
+            tin_fmutex_unlock(&ch->wq_fmu);
+        }
+        _tin_clear_recv_hint();
+        _tin_fiber_set_direct_recv(fib);
+        return 0;  // no pending_park; fiber goes via normal handoff LQ path
+    }
+
+    _tin_clear_recv_hint();
+
+    if (ch->recv_wq.cnt >= ch->recv_wq.cap)
+        _wq_grow_or_panic(&ch->recv_wq, &ch->wq_fmu, 1);
+    ch->recv_wq.pids[ch->recv_wq.cnt] = pid;
+    ch->recv_wq.hdls[ch->recv_wq.cnt] = hdl;
+    ch->recv_wq.fibs[ch->recv_wq.cnt] = fib;
+    ch->recv_wq.outs[ch->recv_wq.cnt] = out;
+    ch->recv_wq.cnt++;
+    atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_release);
+
+    // Missed-wakeup check: sender may have enqueued between our failed dequeue
+    // and the recv_wq_cnt increment.
+    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+        ch->recv_wq.cnt--;
+        atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+        if (ch->send_wq.cnt > 0) {
+            ch->send_wq.cnt--;
+            atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
+            int64_t spid = ch->send_wq.pids[ch->send_wq.cnt];
+            void   *shdl = ch->send_wq.hdls[ch->send_wq.cnt];
+            void   *sfib = ch->send_wq.fibs[ch->send_wq.cnt];
+            tin_fmutex_unlock(&ch->wq_fmu);
+            _tin_fiber_unpark_fib(sfib, spid, shdl);
+        } else {
+            tin_fmutex_unlock(&ch->wq_fmu);
+        }
+        _tin_fiber_set_direct_recv(fib);
+        return 0;  // data available; no pending_park
+    }
+
+    tin_fmutex_unlock(&ch->wq_fmu);
+    // Advisory: register without parking.  Fiber goes to LQ via handoff_yield.
+    // recv_direct will skip re-registration (preg_ch==ptr path) and just park.
+    // _coro_done cleanup removes the entry if the loop exits before recv_direct.
+    _tin_set_preregistered_ch(ch_ptr);
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Remove advisory recv_wq entry for `pid` from channel `ch_ptr`.
+// Called from fiber.c's _coro_done path when a fiber completes without
+// consuming its pre-registration (e.g. last loop iteration, loop body exited).
+// ---------------------------------------------------------------------------
+void _tin_chan_remove_recv_waiter(void *ch_ptr, int64_t pid) {
+    TinChannel *ch = (TinChannel *)ch_ptr;
+    if (!ch) return;
+    tin_fmutex_lock_spin(&ch->wq_fmu);
+    int n = ch->recv_wq.cnt;
+    for (int i = 0; i < n; i++) {
+        if (ch->recv_wq.pids[i] == pid) {
+            int last = ch->recv_wq.cnt - 1;
+            ch->recv_wq.cnt = last;
+            atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
+            if (i < last) {
+                ch->recv_wq.pids[i] = ch->recv_wq.pids[last];
+                ch->recv_wq.hdls[i] = ch->recv_wq.hdls[last];
+                ch->recv_wq.fibs[i] = ch->recv_wq.fibs[last];
+                if (ch->recv_wq.outs) ch->recv_wq.outs[i] = ch->recv_wq.outs[last];
+            }
+            break;
+        }
+    }
+    tin_fmutex_unlock(&ch->wq_fmu);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy recv_park / blocked_val / send_try (used by old async recv/send loops).
+// ---------------------------------------------------------------------------
+
+void *_tin_channel_recv_park(void *ptr, int64_t pid) {
+    TinChannel *ch = (TinChannel *)ptr;
+    (void)pid;
+    void *data = _lf_dequeue_tls(ch);
+    if (data) return data;
+    if (ch->closed) return NULL;
+    return TIN_CHAN_BLOCKED;
+}
+
+int64_t _tin_channel_recv_blocked_val(void) {
+    return (int64_t)(intptr_t)TIN_CHAN_BLOCKED;
+}
+
+int _tin_channel_send_try(void *ptr, const void *val, int64_t elem_size, int is_rc) {
+    TinChannel *ch = (TinChannel *)ptr;
+    if (ch->closed) return -1;
+    if (lf_enqueue(ch, val, (size_t)elem_size, is_rc)) return 0;
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Close and is_closed_empty.
+// ---------------------------------------------------------------------------
+
 int _tin_channel_is_closed_empty(void *ptr) {
     TinChannel *ch = (TinChannel *)ptr;
     if (!ch) return 1;
-    tin_fmutex_lock_spin(&ch->fmu);
-    int r = (ch->closed && ch->count == 0) ? 1 : 0;
-    tin_fmutex_unlock(&ch->fmu);
-    return r;
+    if (!ch->closed) return 0;
+    // Closed: check if any items remain using enq/deq positions.
+    int64_t enq = atomic_load_explicit(&ch->enq_pos, memory_order_acquire);
+    int64_t deq = atomic_load_explicit(&ch->deq_pos, memory_order_acquire);
+    return (enq == deq) ? 1 : 0;
 }
 
-// Close the channel. After this, sends return -1; pending and future recvs
-// drain remaining items then return zero values.
-// All parked waiters are unparked so they can observe the closed state.
 void _tin_channel_close(void *ptr) {
     TinChannel *ch = (TinChannel *)ptr;
     if (!ch) return;
 
-    // Collect all parked {fib, pid, hdl} triples before unlocking so we can
-    // unpark without holding ch->fmu (avoids lock-order issues with fiber.c).
-    tin_fmutex_lock_spin(&ch->fmu);
+    tin_fmutex_lock_spin(&ch->wq_fmu);
     int nwake = ch->recv_wq.cnt + ch->send_wq.cnt;
     int64_t *wake_pids = (nwake > 0) ? (int64_t *)malloc((size_t)nwake * sizeof(int64_t)) : NULL;
     void   **wake_hdls = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
     void   **wake_fibs = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
-    int      w = 0;
+    int w = 0;
 
     ch->closed = true;
     while (ch->recv_wq.cnt > 0) {
@@ -692,6 +924,7 @@ void _tin_channel_close(void *ptr) {
             w++;
         }
     }
+    atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     while (ch->send_wq.cnt > 0) {
         ch->send_wq.cnt--;
         if (wake_pids) {
@@ -701,7 +934,8 @@ void _tin_channel_close(void *ptr) {
             w++;
         }
     }
-    tin_fmutex_unlock(&ch->fmu);
+    atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
+    tin_fmutex_unlock(&ch->wq_fmu);
 
     for (int i = 0; i < w; i++)
         _tin_fiber_unpark_fib(wake_fibs[i], wake_pids[i], wake_hdls[i]);
@@ -712,8 +946,7 @@ void _tin_channel_close(void *ptr) {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy ring-buffer helpers (kept for compatibility with existing codegen)
-// These operate on a raw pre-allocated buffer, not a TinChannel control block.
+// Legacy ring-buffer helpers (kept for compatibility with existing codegen).
 // ---------------------------------------------------------------------------
 
 void _tin_chan_buf_store(void *buf, int64_t slot, const void *elem,
@@ -736,9 +969,7 @@ void _tin_chan_buf_load(const void *buf, int64_t slot, void *out,
                         int64_t elem_size, int is_rc) {
     const void *src = (const char *)buf + slot * elem_size;
     memcpy(out, src, (size_t)elem_size);
-    if (is_rc) {
-        memset((void *)src, 0, (size_t)elem_size);
-    }
+    if (is_rc) memset((void *)src, 0, (size_t)elem_size);
 }
 
 void _tin_chan_buf_drain(void *buf, int64_t cap, int64_t head, int64_t count,

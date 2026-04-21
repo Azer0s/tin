@@ -1,0 +1,59 @@
+// shadow.tin - variable shadowing and duplicate-declaration semantics
+//
+// Declaring the same name in a *nested* scope shadows the outer binding.
+// Declaring the same name in the *same* scope is a compile error.
+
+use assert
+
+// --- shadowing in nested block scopes ---
+
+fn shadow_if(x i64) i64 =
+  let result i64 = 0
+  if x > 0:
+    let result i64 = x * 2   // shadows outer `result` - OK
+    return result
+  return result
+
+fn shadow_for(n i64) i64 =
+  let sum i64 = 0
+  for let i i64 in 0..n:
+    let i i64 = 42   // shadows the loop variable - OK
+    sum = sum + i
+  return sum
+
+fn shadow_match(x i64) i64 =
+  let x i64 = x + 1   // shadows parameter x - OK
+  return x
+
+fn shadow_nested_fn() i64 =
+  let x i64 = 1
+  let f = fn() i64 =
+    let x i64 = 99   // shadows outer x in nested fn - OK
+    return x
+  return f() + x   // outer x is still 1
+
+fn shadow_consecutive_scopes(flag bool) i64 =
+  if flag:
+    let v i64 = 10
+    return v
+  if !flag:
+    let v i64 = 20   // same name as in the sibling if-block - OK (different scopes)
+    return v
+  return 0
+
+test "shadowing: if block" =
+  assert::equals(shadow_if(5), 10)
+  assert::equals(shadow_if(-1), 0)
+
+test "shadowing: for loop variable" =
+  assert::equals(shadow_for(3), 126)   // 3 * 42
+
+test "shadowing: parameter" =
+  assert::equals(shadow_match(7), 8)
+
+test "shadowing: nested function" =
+  assert::equals(shadow_nested_fn(), 100)   // 99 + 1
+
+test "shadowing: sibling scopes reuse name" =
+  assert::equals(shadow_consecutive_scopes(true), 10)
+  assert::equals(shadow_consecutive_scopes(false), 20)

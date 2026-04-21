@@ -55,3 +55,4 @@ directive with `-I /path/to/runtime` on the include path.
 | [codegen-auto-yield.md](codegen-auto-yield.md) | Auto-yield at loop backedges, `{#no_autoyield}` opt-out                                     |
 | [fiber-panic.md](fiber-panic.md)               | Fiber panic lifecycle, `await` re-raise, `defer+recover` in async fns, codegen invariants   |
 | [clayout-structs.md](clayout-structs.md)       | cLayoutStructs wrapper+native layout, c_data_ptr, non-handover/handover/literal paths       |
+| [tco.md](tco.md)                               | Tail call optimization: loop transformation, eligibility, IR shape, interception points      |

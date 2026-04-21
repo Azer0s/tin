@@ -7,17 +7,19 @@
 // State encoding (uint32_t):
 //   0  - UNLOCKED, no waiters
 //   1  - LOCKED, no waiters
-//   2  - LOCKED, at least one waiter in the embedded array
+//   2  - LOCKED, at least one waiter in the embedded array or overflow list
 //
 // Fast paths (uncontended, common case):
 //   lock:   CAS(0→1)  - single atomic op, no OS call, no wl_lock
 //   unlock: CAS(1→0)  - single atomic op, no OS call, no wl_lock
 //
 // Slow paths (contended, rare):
-//   lock:   brief spin, then add {pid,hdl} to waiter array, CAS(1→2),
+//   lock:   brief spin, then add {pid,hdl} to embedded waiter array or, if
+//           that is full, push to the overflow linked list; CAS(1→2);
 //           call _tin_fiber_park, return 0 (caller yields)
 //   unlock: CAS(1→0) fails because state==2; acquire wl_lock, pop one
-//           waiter, update state, call _tin_fiber_unpark_hdl (runnext)
+//           waiter (embedded array first, then overflow list), update state,
+//           call _tin_fiber_unpark_hdl (runnext)
 //
 // Usage in blocking channel operations:
 //
@@ -36,20 +38,29 @@
 #include <stdint.h>
 #include <stdatomic.h>
 
-// Maximum number of coroutines that can be parked in one mutex's wait queue.
-// Excess waiters fall back to the yield-retry loop (correct, just slower).
-// Keep this small so TinFastMutex fits in ≤2 cache lines (hot lock state
-// + hot channel fields must share early cache lines in TinChannel).
-#define FMUTEX_MAX_WAITERS 4
+// Maximum number of coroutines that can be parked in the embedded wait array.
+// Sized at 8 to cover a fully-loaded 4P+4C MPMC scenario without overflow.
+// Keep this small so the struct fits in ~3 cache lines; the hot fields (state,
+// wl_lock) land on the first cache line and the waiter array on the next two.
+#define FMUTEX_MAX_WAITERS 8
+
+// Node in the overflow linked list.  Allocated when all FMUTEX_MAX_WAITERS
+// embedded slots are occupied.  Freed on the unpark side.
+typedef struct TinFibWaiter {
+    int64_t pid;
+    void   *hdl;
+    struct TinFibWaiter *next;
+} TinFibWaiter;
 
 typedef struct {
     _Atomic(uint32_t) state;    // 0=unlocked, 1=locked no waiters, 2=locked has waiters
-    // Waiter array: only accessed when state == 2.
+    // Waiter array + overflow list: only accessed when state == 2.
     // Protected by wl_lock (acquired only in the slow path - never in fast unlock).
     _Atomic(uint32_t) wl_lock;
-    int64_t wpid[FMUTEX_MAX_WAITERS];
-    void   *whdl[FMUTEX_MAX_WAITERS];
-    int     wcnt;
+    int64_t      wpid[FMUTEX_MAX_WAITERS];
+    void        *whdl[FMUTEX_MAX_WAITERS];
+    int          wcnt;
+    TinFibWaiter *overflow;  // linked list for waiters beyond FMUTEX_MAX_WAITERS
 } TinFastMutex;
 
 // Zero-initialise a TinFastMutex (equivalent to = {0} but explicit).

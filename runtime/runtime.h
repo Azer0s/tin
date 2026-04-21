@@ -90,6 +90,7 @@ TinSlice _tin_bytes_from_buf(const char *ptr, int64_t len);
 
 // -- Slices
 TinSlice _tin_slice_append(TinSlice s, const void *elem, int64_t elem_size);
+TinStringArray _tin_argv_to_slice(int32_t argc, char **argv);
 TinSlice _tin_slice_concat(TinSlice a, TinSlice b, int64_t elem_size);
 int64_t  _tin_slice_len(TinSlice s);
 void    *_tin_slice_idx(TinSlice s, int64_t i, int64_t elem_size);
@@ -125,6 +126,7 @@ void    _tin_assert_abort(const char *msg);
 // -- Fiber scheduler (M:N, TINMAXPROCS worker threads)
 void    _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
+int64_t _tin_fiber_spawn_joinable(void *hdl);
 void    _tin_fiber_complete(void *result);
 void    _tin_fiber_join(int64_t pid, void *my_hdl);
 void   *_tin_fiber_get_result(int64_t pid);

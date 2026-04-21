@@ -19,5 +19,13 @@ path = "src/mpmc.rs"
 name = "bench_rust_jitter"
 path = "src/jitter.rs"
 
+[[bin]]
+name = "bench_rust_pipeline10"
+path = "src/pipeline10.rs"
+
+[[bin]]
+name = "bench_rust_fanout"
+path = "src/fanout.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync"] }

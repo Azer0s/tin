@@ -106,6 +106,8 @@ func blockHasSideEffects(b *ast.Block) bool {
 // ctfeExpandMacro compiles and runs the macro body at compile time,
 // wrapped in a typed function so that `return` works correctly.
 func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node, error) {
+	cg.progress("ctfe macro " + strings.TrimSuffix(m.Name, "!"))
+
 	retType := inferReturnType(m, args)
 	src := buildMacroSource(m, args, cg.macros, cg.importedPkgs)
 

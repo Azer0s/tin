@@ -30,6 +30,65 @@ echo c_sqrt(144.0)    // 12.0
 echo c_pow(2.0, 10.0) // 1024.0
 ```
 
+### Attaching C source files (`//!+file.c`)
+
+The `//!+file.c` directive compiles a C source file alongside the Tin program and
+links the resulting object:
+
+```rust
+//!+mylib.c
+```
+
+The path is resolved relative to the `.tin` file. Compiler flags for that
+translation unit follow `--`:
+
+```rust
+//!+impl.c -- -I/usr/local/include -DFOO=1
+```
+
+### Platform qualifiers
+
+Any `//!` directive can be restricted to a specific platform by appending
+`[linux]`, `[darwin]`, or `[windows]` before the `--` flags (or at end of line):
+
+```rust
+//!-lssl
+//!-lcrypto
+//!-L/opt/local/lib [darwin]
+//!+posix_impl.c [linux]
+//!+win_impl.c   [windows]
+```
+
+### Environment variable expansion
+
+`$VAR` tokens in directive strings are expanded using the process environment.
+Two variables are always available:
+
+| Variable        | Value                                          |
+|-----------------|------------------------------------------------|
+| `$TIN_RUNTIME`  | Path to the Tin runtime headers directory      |
+| `$TIN_STDLIB`   | Path to the Tin standard library root          |
+
+```rust
+//!+impl.c -- -I $TIN_RUNTIME
+```
+
+### Shell expression expansion (`$(cmd)`)
+
+`$(cmd args...)` tokens are evaluated by running the command in a shell and
+substituting the trimmed stdout. This is useful for locating libraries whose
+prefix is reported by a tool rather than a fixed environment variable:
+
+```rust
+//!+tls_impl.c [darwin] -- -I $TIN_RUNTIME -I $(brew --prefix openssl@3)/include
+//!-L$(brew --prefix openssl@3)/lib [darwin]
+```
+
+Shell expansion happens before field-splitting, so paths with spaces are handled
+correctly. If the command fails the token expands to an empty string; the
+compiler then produces a clear error (e.g. missing header) rather than a
+cryptic path error.
+
 ---
 
 ## Calling C functions (`extern`)

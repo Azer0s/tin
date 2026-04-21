@@ -2,6 +2,7 @@
 //
 // See fastmutex.h for the design rationale, state encoding, and usage guide.
 
+#include <stdlib.h>
 #include "runtime.h"
 #include "fastmutex.h"
 #include "fiber.h"
@@ -18,7 +19,8 @@ static inline void _fmu_relax(void) {
 void tin_fmutex_init(TinFastMutex *m) {
     atomic_store_explicit(&m->state,   0u, memory_order_relaxed);
     atomic_store_explicit(&m->wl_lock, 0u, memory_order_relaxed);
-    m->wcnt = 0;
+    m->wcnt     = 0;
+    m->overflow = NULL;
 }
 
 // Acquire the waiter-list spinlock.  Only called in contended slow paths.
@@ -55,14 +57,26 @@ int _tin_fmutex_lock_coro_slow(TinFastMutex *m, int64_t pid, void *hdl) {
     // Register under the waiter-list spinlock.
     _wl_lock(m);
 
+    int used_overflow = 0;
     if (m->wcnt >= FMUTEX_MAX_WAITERS) {
-        _wl_unlock(m);
-        return 0;  // list full: yield-retry
+        // Embedded array full: push to the overflow linked list so this fiber
+        // is still properly parked rather than spinning in a yield-retry loop.
+        TinFibWaiter *w = (TinFibWaiter *)malloc(sizeof(TinFibWaiter));
+        if (!w) {
+            // OOM: fall back to yield-retry rather than crashing.
+            _wl_unlock(m);
+            return 0;
+        }
+        w->pid      = pid;
+        w->hdl      = hdl;
+        w->next     = m->overflow;
+        m->overflow = w;
+        used_overflow = 1;
+    } else {
+        m->wpid[m->wcnt] = pid;
+        m->whdl[m->wcnt] = hdl;
+        m->wcnt++;
     }
-
-    m->wpid[m->wcnt] = pid;
-    m->whdl[m->wcnt] = hdl;
-    m->wcnt++;
 
     // Atomically transition state 1→2 to tell the unlocker "there are waiters".
     // If this CAS fails, the mutex was released while we were adding ourselves
@@ -74,7 +88,14 @@ int _tin_fmutex_lock_coro_slow(TinFastMutex *m, int64_t pid, void *hdl) {
         memory_order_acq_rel, memory_order_relaxed);
     if (!marked) {
         // Unlock already fired; undo the waiter registration.
-        m->wcnt--;
+        if (used_overflow) {
+            // Pop the node we just prepended to the overflow list.
+            TinFibWaiter *w = m->overflow;
+            m->overflow = w->next;
+            free(w);
+        } else {
+            m->wcnt--;
+        }
         _wl_unlock(m);
         return 0;  // lock is now free; caller will retry (CAS will succeed)
     }
@@ -100,24 +121,31 @@ void tin_fmutex_lock_spin(TinFastMutex *m) {
 void _tin_fmutex_unlock_slow(TinFastMutex *m) {
     // Fast CAS already failed in the inlined wrapper.
     // Slow path: state must be 2 (has waiters).
-    // Pop one waiter under wl_lock, update state, then directly resume it.
+    // Pop one waiter (embedded array first, then overflow list) under wl_lock,
+    // update state, then directly resume the fiber.
     _wl_lock(m);
 
     int64_t pid = -1;
     void   *hdl = NULL;
+
     if (m->wcnt > 0) {
+        // Pop from the embedded array (LIFO - cheapest to pop).
         m->wcnt--;
         pid = m->wpid[m->wcnt];
         hdl = m->whdl[m->wcnt];
-        // If no more waiters: transition 2→0 (unlock + clear waiters flag).
-        // If more waiters remain: stay at 2 (still locked, still has waiters).
-        // The woken waiter will contend for the lock again after re-acquiring.
-        atomic_store_explicit(&m->state, m->wcnt > 0 ? 2u : 0u,
-                              memory_order_release);
-    } else {
-        // Shouldn't happen (state==2 with wcnt==0), but be defensive.
-        atomic_store_explicit(&m->state, 0u, memory_order_release);
+    } else if (m->overflow) {
+        // Embedded array empty, drain from the overflow linked list.
+        TinFibWaiter *w = m->overflow;
+        m->overflow = w->next;
+        pid = w->pid;
+        hdl = w->hdl;
+        free(w);
     }
+
+    // If more waiters remain (array or overflow), stay at 2.
+    // Otherwise unlock: transition 2→0.
+    int has_more = (m->wcnt > 0) || (m->overflow != NULL);
+    atomic_store_explicit(&m->state, has_more ? 2u : 0u, memory_order_release);
 
     _wl_unlock(m);
 

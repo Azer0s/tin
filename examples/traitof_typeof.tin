@@ -1,0 +1,22 @@
+// traitof_typeof.tin - demonstrate traitof and typeof on a struct with traits
+
+trait printable =
+  fn to_string(this printable) string = virtual
+
+trait serializable =
+  fn serialize(this serializable) string = virtual
+
+struct point(printable, serializable) =
+  x i64
+  y i64
+
+  fn to_string(this point) string =
+    return "({this.x}, {this.y})"
+
+  fn serialize(this point) string =
+    return "{this.x},{this.y}"
+
+let p = point{x: 3, y: 7}
+
+echo typeof(p)     // 'point
+echo traitof(p)    // ['printable 'serializable]

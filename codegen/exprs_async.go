@@ -854,7 +854,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 		// slightly larger outer coro frame (pid + blocked_val spilled to frame).
 		// Channel[T].send and Channel[T].recv fast path.
 		// structName may be bare ("Channel__i64") or package-prefixed ("sync__Channel__i64").
-		if strings.Contains(structName, "Channel__") {
+		if strings.HasPrefix(structName, "Channel__") || strings.HasPrefix(structName, "sync__Channel__") {
 			if fn.Field == "send" && len(coroArgs) == 2 {
 				var sendAstArg ast.Node
 				if len(callNode.Args) >= 1 {
@@ -937,7 +937,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	//     br done ? drive.done : drive.yield
 	//   drive.yield:
 	//     sp = llvm.coro.suspend(outer) ; outer suspends
-	//     switch sp: 0 → drive.loop, 1 → cleanup
+	//     switch sp: 0 -> drive.loop, 1 -> cleanup
 	//   drive.done:
 	//     result = _tin_coro_take_result()
 	//     llvm.coro.destroy(inner)
@@ -960,7 +960,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	driveYieldBlk := cg.newBlock("coro.drive.yield")
 	driveLoopBlk.NewCondBr(done, driveDoneBlk, driveYieldBlk)
 
-	// Yield path: inner yielded → outer suspends to let inner run.
+	// Yield path: inner yielded -> outer suspends to let inner run.
 	// No _tin_fiber_yield_coro call needed (it's a no-op; worker loop
 	// handles re-enqueue when FIBER_RUNNING status after _coro_resume returns).
 	sp := driveYieldBlk.NewCall(cg.coroSuspendFn, coroNone, constant.NewInt(irtypes.I1, 0))
@@ -1042,7 +1042,7 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 //	    let r = _tin_channel_send_blocking(this._ptr, &val, sizeof(T), isrc(T), pid)
 //	    if r == -1: panic("send on closed channel")
 //	    if r == 0: return
-//	    yield   ← replaced by outer coro.suspend
+//	    yield   <- replaced by outer coro.suspend
 //
 // Eliminates 1 malloc + 1 free per send (2 per round trip).
 func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valArg value.Value, astArg ast.Node) (value.Value, error) {
@@ -1108,7 +1108,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 
 	r := retryBlk.NewCall(sendFn, chPtr, valPtr, elemSize, isRCVal, pid)
 
-	// r == -1 → channel closed → panic.
+	// r == -1 -> channel closed -> panic.
 	isClosed := retryBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, -1))
 	checkDoneBlk := cg.newBlock("chan.send.check")
 	panicBlk := cg.newBlock("chan.send.panic")
@@ -1120,13 +1120,31 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
 	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
 
-	// r == 0 → success; otherwise park and retry.
+	// r == 0 -> success
+	// r == 2 -> handoff: direct delivery to a waiting receiver; yield once then done
+	// otherwise -> park and retry
 	isDone := checkDoneBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 0))
 	doneBlk := cg.newBlock("chan.send.done")
-	yieldBlk := cg.newBlock("chan.send.yield")
-	checkDoneBlk.NewCondBr(isDone, doneBlk, yieldBlk)
+	checkHandoffBlk := cg.newBlock("chan.send.check.handoff")
+	checkDoneBlk.NewCondBr(isDone, doneBlk, checkHandoffBlk)
 
-	// Yield: outer coro suspends until the channel has room.
+	isHandoff := checkHandoffBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 2))
+	handoffBlk := cg.newBlock("chan.send.handoff")
+	yieldBlk := cg.newBlock("chan.send.yield")
+	checkHandoffBlk.NewCondBr(isHandoff, handoffBlk, yieldBlk)
+
+	// Handoff: attempt pre-registration in the sender's next recv channel so the
+	// worker can go directly to BLOCKED after coro.suspend instead of routing via
+	// LQ.  If _tin_prepark_next_recv succeeds it sets pending_park, which takes
+	// priority over handoff_yield in the worker's yield-path check.  Either way
+	// the same coro.suspend is used; the worker picks the right path from flags.
+	preparkFn := cg.ensureExternDecl("_tin_prepark_next_recv", irtypes.I32,
+		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
+	handoffBlk.NewCall(preparkFn, pid)
+	// On resume the send is already complete - go straight to doneBlk.
+	cg.emitInlineChanSuspend("chan.send.handoff", handoffBlk, doneBlk, doneBlk)
+
+	// Park and retry: outer coro suspends until the channel has room.
 	cg.emitInlineChanSuspend("chan.send", yieldBlk, retryBlk, doneBlk)
 	// cg.curBlock == doneBlk after emitInlineChanSuspend.
 
@@ -1154,7 +1172,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 //	    let r = _tin_channel_recv_blocking(this._ptr, pid)
 //	    if r == null: panic("recv on closed channel")
 //	    if (r as i64) != blocked: return *(r as *T)
-//	    yield   ← replaced by outer coro.suspend
+//	    yield   <- replaced by outer coro.suspend
 //
 // Eliminates 1 malloc + 1 free per recv (2 per round trip).
 func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemType irtypes.Type) (value.Value, error) {
@@ -1208,7 +1226,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 
 	r := retryBlk.NewCall(recvFn, chPtr, pid, outPtr)
 
-	// r == -1 → channel closed and drained → panic.
+	// r == -1 -> channel closed and drained -> panic.
 	isClosed := retryBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, -1))
 	checkBlk := cg.newBlock("chan.recv.check")
 	panicBlk := cg.newBlock("chan.recv.panic")
@@ -1219,7 +1237,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
 	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
 
-	// r == 1 → yield and retry; r == 0 → value written to outSlot.
+	// r == 1 -> yield and retry; r == 0 -> value written to outSlot.
 	isBlocked := checkBlk.NewICmp(enum.IPredEQ, r, constant.NewInt(irtypes.I32, 1))
 	doneBlk := cg.newBlock("chan.recv.done")
 	yieldBlk := cg.newBlock("chan.recv.yield")
@@ -1232,6 +1250,27 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	result := doneBlk.NewLoad(elemType, outSlot)
 
 	return result, nil
+}
+
+// activeSpawnFn returns the spawn function for the current context.
+//
+// All spawns use _tin_fiber_spawn_joinable (prejoined=1) by default so that a
+// spawned fiber's slot cannot be ff_reclaimed and reused before the spawner
+// calls _tin_fiber_join.  This is correct for:
+//   - stored futures: `let f = spawn fn()` or `futures ++= spawn fn()` (awaited later)
+//   - immediately awaited: `await spawn fn()` (auto-spawn path)
+//   - non-coro context: test bodies, non-async main (TOCTOU fix)
+//
+// The only exception is a statement-level spawn (ExprStmt wrapping SpawnExpr)
+// where the result is explicitly discarded.  In that case spawnFireForget=true
+// allows _tin_fiber_spawn (prejoined=0) so the fiber can be ff_reclaimed at
+// completion, keeping its slot available for reuse.
+func (cg *CodeGen) activeSpawnFn() *ir.Func {
+	if cg.spawnFireForget {
+		return cg.fiberSpawnFn
+	}
+
+	return cg.fiberSpawnJoinableFn
 }
 
 // genSpawnExpr generates code for `spawn callExpr`.
@@ -1451,7 +1490,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 				}
 
 				hdl := block.NewCall(fnPtr, spawnArgs...)
-				pid := block.NewCall(cg.fiberSpawnFn, hdl)
+				pid := block.NewCall(cg.activeSpawnFn(), hdl)
 				retType := cg.asyncFatPtrRetType(se.tinType)
 
 				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
@@ -1476,7 +1515,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	hdl := block.NewCall(coroFn, callArgs...)
 
 	// Spawn the fiber: pid = _tin_fiber_spawn(hdl)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	// Release temporary RC-tracked arguments after spawning.  The $coro ramp
 	// retains them before the initial suspend, so the caller's own reference
@@ -1586,7 +1625,7 @@ func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argN
 	}
 
 	hdl := block.NewCall(fnPtr, llArgs...)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	retType := cg.asyncFatPtrRetType(tinFnType)
 
@@ -1636,7 +1675,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		llArgs = cg.adaptArgs(block, llArgs, coroSlotFnType)
 
 		hdl := block.NewCall(fnPtr, llArgs...)
-		pid := block.NewCall(cg.fiberSpawnFn, hdl)
+		pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 		// Get the actual return type of the async method (not the coro wrapper's i8*).
 		// For async-only traits, traitMethodRetType returns nil (no sync slot), so we
@@ -1759,7 +1798,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	hdl2 := block.NewCall(coroFn2, coroArgs...)
-	pid2 := block.NewCall(cg.fiberSpawnFn, hdl2)
+	pid2 := block.NewCall(cg.activeSpawnFn(), hdl2)
 
 	// Release temporary RC-tracked args after spawning (same as genSpawnExpr).
 	// The receiver (coroArgs[0]) is handled separately below.
@@ -1940,7 +1979,7 @@ func (cg *CodeGen) genSpawnDoBlock(block *ir.Block, doBlock *ast.Block) (value.V
 
 	// Call the ramp function with the env pointer and spawn the fiber.
 	hdl := block.NewCall(coroFn, envI8Ptr)
-	pid := block.NewCall(cg.fiberSpawnFn, hdl)
+	pid := block.NewCall(cg.activeSpawnFn(), hdl)
 
 	// Void do-block spawn: wrap in Future[Unit]
 
@@ -2015,7 +2054,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		switch at := arrType.(type) {
 		case *irtypes.StructType:
 			if len(at.Fields) == 2 {
-				// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
+				// Fat pointer: {T*, i64} - extract data pointer directly without alloca.
 				elemPtrType := at.Fields[0]
 
 				dataPtr := block.NewExtractValue(arr, 0)
@@ -2209,7 +2248,20 @@ func (cg *CodeGen) callGenericFromMap(
 		}
 	}
 
-	concreteFunc, err := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
+	// When bareName is a qualified key (e.g. "yaml__encode"), use it as the
+	// template name so the monomorphized IR name includes the package prefix
+	// (e.g. "yaml__encode__point"). Without this, identically-named generics
+	// from different packages (json::encode and yaml::encode both have bare
+	// name "encode") would produce the same IR name and the cache would return
+	// the first-compiled version for every subsequent package's call.
+	monoTmpl := tmpl
+	if bareName != tmpl.Name {
+		copy := *tmpl
+		copy.Name = bareName
+		monoTmpl = &copy
+	}
+
+	concreteFunc, err := cg.monomorphizeFunc(monoTmpl, instKey, typeSubst)
 	if err != nil {
 		return nil, block, true, err
 	}

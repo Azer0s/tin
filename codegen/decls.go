@@ -13,13 +13,37 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// traitBaseName returns the bare name of a trait TypeExpr (ignoring type params).
-func traitBaseName(te ast.TypeExpr) string {
+// traitDisplayName returns the fully-qualified display name of a trait TypeExpr,
+// preserving the pkg::TraitName form (e.g. "json::JsonSerializable").
+// Used for traitof atoms so they match qualified atom literals consistently with typeof.
+func traitDisplayName(te ast.TypeExpr) string {
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		return t.Name
 	case *ast.GenericType:
 		return t.Name
+	}
+
+	return ""
+}
+
+// traitBaseName returns the bare (unqualified) name of a trait TypeExpr.
+func traitBaseName(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
+	case *ast.GenericType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
 	}
 
 	return ""
@@ -166,6 +190,17 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 		}
 
 		instKey := traitImplKey(impl)
+		// If traitImplKey returned a bare name (no pkg__ prefix), check if the trait
+		// belongs to a package and use the canonical qualified instKey instead.
+		// This ensures bare trait references (e.g. "struct Foo(JsonSerializable)")
+		// and qualified references (e.g. "struct Foo(json::JsonSerializable)") both
+		// produce the same vtable/fat-ptr types, so that tinTypeToLLVM and coerce agree.
+		if !strings.Contains(instKey, "__") {
+			if qualKey, ok2 := cg.traitBareToQualInstKey[instKey]; ok2 {
+				instKey = qualKey
+			}
+		}
+
 		typeSubst := map[string]irtypes.Type{}
 
 		if gt, ok2 := impl.(*ast.GenericType); ok2 {
@@ -299,12 +334,27 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 
 	cg.structFieldTags[structKey] = fieldTags
 
-	// Record which traits this struct implements (for typeof/traitof).
-	// Use the bare (package-stripped) trait name so that atom literals like
-	// 'JsonSerializable match regardless of how the trait was qualified.
+	// Record which traits this struct implements (for traitof).
+	// Store the fully-qualified display name (pkg::TraitName form, matching typeof)
+	// so that 'traitof' atoms compare consistently with qualified atom literals
+	// like '"json::JsonSerializable"'.
+	// Bare names (e.g. "JsonSerializable" when used without pkg:: prefix) are
+	// normalized to their canonical qualified form via traitBareToQualInstKey.
 	var implNames []string
+
 	for _, impl := range n.Implements {
-		implNames = append(implNames, traitImplKey(impl))
+		dn := traitDisplayName(impl)
+
+		// If this is a bare name and we know its canonical pkg-qualified instKey,
+		// convert "json__JsonSerializable" -> "json::JsonSerializable" for the display name.
+		if idx := strings.LastIndex(dn, "::"); idx < 0 {
+			if qualInstKey, ok2 := cg.traitBareToQualInstKey[dn]; ok2 {
+				// Convert "pkg__TraitName" -> "pkg::TraitName" for the display form.
+				dn = strings.Replace(qualInstKey, "__", "::", 1)
+			}
+		}
+
+		implNames = append(implNames, dn)
 	}
 
 	cg.structImpls[structKey] = implNames
@@ -592,7 +642,9 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	var tmpl *ast.StructDecl
 
 	isTmpl := false
-	if arityMap, ok := cg.genericStructsByArity[gt.Name]; ok {
+
+	qualGtName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: gt.Name})
+	if arityMap, ok := cg.genericStructsByArity[qualGtName]; ok {
 		tmpl, isTmpl = arityMap[arity]
 	}
 
@@ -759,28 +811,19 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 // buildTraitFatPtrType computes (and caches) the LLVM fat-pointer type for a
 // trait: { i8*, vtable_struct* }.  The vtable struct has one fn-ptr slot per
 // trait method, each with signature (i8* self, ...) -> ret.
-// traitImplKey returns a unique string key for a trait impl TypeExpr,
-// stripping package qualifiers so that e.g. "sync::Awaitable" and
-// "Awaitable" produce the same key.
-// For "named" -> "named"; for "iter[i64]" -> "iter_i64".
+// traitImplKey returns a unique string key for a trait impl TypeExpr.
+// Package qualifiers are converted from "::" to "__" so that
+// "sync::Awaitable" and "Awaitable" (if it is the same trait) keep distinct
+// keys per package when needed, while still being safely usable as identifiers.
+// For "named" -> "named"; for "iter[i64]" -> "iter__i64".
 func traitImplKey(te ast.TypeExpr) string {
 	switch t := te.(type) {
 	case *ast.SimpleType:
-		name := t.Name
-		if idx := strings.LastIndex(name, "::"); idx >= 0 {
-			name = name[idx+2:]
-		}
-
-		return name
+		return strings.ReplaceAll(t.Name, "::", "__")
 	case *ast.GenericType:
-		name := t.Name
-		if idx := strings.LastIndex(name, "::"); idx >= 0 {
-			name = name[idx+2:]
-		}
-
-		key := name
+		key := strings.ReplaceAll(t.Name, "::", "__")
 		for _, tp := range t.TypeParams {
-			key += "_" + traitImplKey(tp)
+			key += "__" + traitImplKey(tp)
 		}
 
 		return key
@@ -996,6 +1039,14 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		}
 
 		instKey := traitImplKey(impl)
+		// Normalize bare instKeys to their canonical qualified form so that
+		// bare trait refs ("JsonSerializable") and qualified refs ("json::JsonSerializable")
+		// use the same vtable/fat-ptr types.
+		if !strings.Contains(instKey, "__") {
+			if qualKey, ok2 := cg.traitBareToQualInstKey[instKey]; ok2 {
+				instKey = qualKey
+			}
+		}
 
 		vtableKey := structKey + "__" + instKey
 		if _, ok := cg.traitVtableGlobals[vtableKey]; ok {
@@ -1366,13 +1417,15 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	bodyBlock := cg.newBlock("iterfor.body")
 	afterBlock := cg.newBlock("iterfor.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: idx < len.
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	lenI64 := cg.coerce(condBlock, totalLen, irtypes.I64)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenI64)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body: call get(idx).
 	cg.curScope = newScope(cg.curScope)

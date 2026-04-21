@@ -339,7 +339,7 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 //   - the union of exact-length arms (guard-free) and the minimum-length
 //     intervals of rest arms (guard-free) covers all non-negative integers.
 //
-// Example: []  +  [x, ...xs]  ->  {0} ∪ [1,∞) = [0,∞)  -> exhaustive.
+// Example: []  +  [x, ...xs]  ->  {0} union [1,inf) = [0,inf)  -> exhaustive.
 func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 	if s.Default != nil {
 		return true
@@ -366,7 +366,7 @@ func (cg *CodeGen) isExhaustiveArrayMatch(s *ast.MatchStmt) bool {
 		}
 
 		if hasRest {
-			// This arm covers [fixed, ∞).
+			// This arm covers [fixed, inf).
 			if minRestCover < 0 || fixed < minRestCover {
 				minRestCover = fixed
 			}
@@ -1275,6 +1275,7 @@ func (cg *CodeGen) bindAwaitMatchSlot(block *ir.Block, c ast.AwaitMatchCase, sl 
 		rawPtr := okBlk.NewCall(cg.fiberGetResultFn, sl.pid)
 		typedPtr := okBlk.NewBitCast(rawPtr, irtypes.NewPointer(sl.retType))
 		result := okBlk.NewLoad(sl.retType, typedPtr)
+		okBlk.NewCall(cg.ensureFree(), rawPtr)
 		alloca := okBlk.NewAlloca(sl.retType)
 		okBlk.NewStore(result, alloca)
 		cg.curScope.set(c.BindName, &scopeEntry{val: alloca, isAlloc: true})

@@ -17,6 +17,14 @@ void _tin_fiber_init(void);
 // Returns a unique fiber PID.
 int64_t _tin_fiber_spawn(void *hdl);
 
+// Like _tin_fiber_spawn but sets prejoined=1 on the new fiber so it is never
+// fire-and-forget reclaimed before the spawning thread calls _tin_fiber_join.
+// Used for spawn expressions in non-coroutine context where the result will be
+// joined.  prejoined is independent of os_waiter_cnt (which counts OS threads
+// actively blocking on done_cv); it simply prevents ff_reclaim for the fiber's
+// entire lifetime.
+int64_t _tin_fiber_spawn_joinable(void *hdl);
+
 // Called by the coroutine body when it has finished.
 // result: pointer to the return value; NULL for void-returning fibers.
 // The hdl parameter was removed - LLVM's coro-elide pass can now see that
@@ -119,6 +127,25 @@ void *_tin_current_coro_hdl(void);
 // channel waiter lists to allow _tin_fiber_unpark_fib to skip _table_mu.
 void *_tin_current_fib(void);
 
+// Per-fiber recv hint accessors.  Called from genDirectChanRecv (set) and
+// _tin_prepark_next_recv (get + clear).  Per-fiber storage prevents the TLS
+// cross-contamination that occurs when a fiber suspends mid-recv and the next
+// fiber on the same worker thread reads a stale hint.
+void  _tin_set_recv_hint(void *ch, void *out);
+void *_tin_get_recv_hint_ch(void);
+void *_tin_get_recv_hint_out(void);
+void  _tin_clear_recv_hint(void);
+
+// Advisory pre-registration accessors (used by channel_arc.c).
+void  _tin_set_preregistered_ch(void *ch);
+void *_tin_get_preregistered_ch(void);
+void  _tin_clear_preregistered_ch(void);
+void  _tin_clear_advisory_state(void);
+
+// Remove a stale advisory recv_wq entry for `pid` from channel `ch_ptr`.
+// Defined in stdlib/sync/channel_arc.c; weak stub in fiber.c for channel-less builds.
+void  _tin_chan_remove_recv_waiter(void *ch_ptr, int64_t pid);
+
 // Like _tin_fiber_unpark_hdl but uses a pre-captured TinFiber* (from
 // _tin_current_fib) to bypass the global _table_mu lock entirely.
 // Only the per-fiber spinlock is acquired on the unpark hot path.
@@ -129,3 +156,9 @@ void  _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
 // Must be called BEFORE _tin_fiber_unpark_fib so the write is visible via
 // the release/acquire pair on the per-fiber state_lock.
 void  _tin_fiber_set_direct_recv(void *fib);
+
+// Called by channel_arc.c send_blocking after a direct-delivery handoff
+// (returning 2 to genDirectChanSend).  Sets handoff_yield on the current
+// fiber so the worker puts it in LQ instead of selfnext on the next yield,
+// letting the receiver (already in runnext) run immediately.
+void  _tin_fiber_mark_handoff_yield(void);

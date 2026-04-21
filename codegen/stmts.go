@@ -261,6 +261,15 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		return nil
 	}
 
+	// TCO: intercept a bare self-call expression body and rewrite as a loop-back.
+	if cg.tcoFuncName != "" {
+		if ce, ok := body.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 && ident.Name == cg.tcoFuncName {
+				return cg.emitTCOLoopBack(block, ce)
+			}
+		}
+	}
+
 	// Expression body: evaluate and return value.
 	// Seed currentPos from the body node's position so the ret gets the
 	// correct source line in debug builds.
@@ -533,7 +542,17 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		}
 
 		cg.curBlock = block
+
+		// Statement-level SpawnExpr: result is discarded (fire-and-forget).
+		// Mark spawnFireForget so activeSpawnFn() uses fiberSpawnFn (prejoined=0),
+		// allowing the fiber to be ff_reclaimed at completion for slot reuse.
+		if _, ok := s.Expr.(*ast.SpawnExpr); ok {
+			cg.spawnFireForget = true
+		}
+
 		val, err := cg.genExpr(block, s.Expr)
+		cg.spawnFireForget = false
+
 		// If genExpr advanced the current block (e.g. an await arg created new
 		// blocks), use the continuation block for any subsequent emission.
 		if cg.curBlock != nil && cg.curBlock != block {
@@ -1078,6 +1097,29 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		return cg.genCoroReturn(block, s)
 	}
 
+	// Self-TCO: intercept `return name(args...)` and rewrite as a loop-back.
+	if cg.tcoFuncName != "" && s.Value != nil {
+		if ce, ok := s.Value.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 && ident.Name == cg.tcoFuncName {
+				return cg.emitTCOLoopBack(block, ce)
+			}
+		}
+	}
+
+	// Mutual TCO: `return g(args...)` where g is a different Tin function with a
+	// compatible non-RC return type. Emit a musttail call so LLVM turns it into
+	// a sibling call, preventing stack growth in mutually-recursive cycles.
+	if cg.mutualTCOEligible && s.Value != nil &&
+		cg.curFnDeferRetAlloca == nil && len(cg.pendingDeferFnI8s) == 0 {
+		if ce, ok := s.Value.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 {
+				if callee, eligible := cg.resolveMutualTCOCallee(ident.Name); eligible {
+					return cg.emitMutualTCO(block, ce, callee)
+				}
+			}
+		}
+	}
+
 	// Inside a defer thunk: 'return val' overrides the outer function's return value
 	// by writing to the ret_slot parameter.
 	if cg.curDeferRetSlotParam != nil {
@@ -1271,7 +1313,7 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 
 // genYieldStmt emits a yield point inside an {#async} coroutine body.
 // In the normal (non-coro) variant of the same function, yield is a no-op.
-// Returns the resume block where execution continues after being scheduled.
+// Returns the continuation block where execution resumes after the panic check.
 func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	if !cg.inCoroFn {
 		// In the sync version of an {#async} function, yield is a no-op.
@@ -1283,13 +1325,17 @@ func (cg *CodeGen) genYieldStmt(block *ir.Block) (*ir.Block, error) {
 	block.NewCall(cg.fiberYieldCoroFn, cg.curCoroHdl)
 	// Suspend the coroutine; returns the resume block.
 	resumeBlk := cg.emitSuspendPoint(block, cg.curCoroFrame)
-	// Track yield-resume blocks so genYieldAutoAt can suppress the redundant
-	// autoyield when the loop backedge lands on this resume block.
+
+	doneBlk := cg.newBlock("yield.done")
+	cg.emitPanicCheck(resumeBlk, doneBlk, "yield")
+
+	// Track doneBlk so genYieldAutoAt suppresses the redundant auto-yield when
+	// the loop backedge lands on this continuation block.
 	if cg.yieldResumeBlocks != nil {
-		cg.yieldResumeBlocks[resumeBlk] = true
+		cg.yieldResumeBlocks[doneBlk] = true
 	}
 
-	return resumeBlk, nil
+	return doneBlk, nil
 }
 
 // genAwaitStmt emits an await point inside an {#async} coroutine body.
@@ -1640,6 +1686,8 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		return cg.genExpr(block, resultNode)
 	}
 	// Simple expression macros: AST substitution (fast path).
+	cg.progress("macro " + strings.TrimSuffix(macro.Name, "!"))
+
 	subst := make(map[string]ast.Node, len(macro.Params))
 	for i, p := range macro.Params {
 		subst[p] = args[i]
@@ -2299,7 +2347,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	bodyBlock := cg.newBlock("for.body")
 	afterBlock := cg.newBlock("for.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Condition - set curBlock so we can detect if await/yield changed it.
 	cg.curBlock = condBlock
@@ -2330,6 +2378,8 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	} else {
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
 	}
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body - push a fresh scope so that `let` declarations inside the loop
 	// body are tracked separately from the outer function scope.  This allows
@@ -2427,6 +2477,8 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 		condBlock.NewBr(bodyBlock)
 	}
 
+	cg.attachForLoopDbg(s.Pos(), block.Term, condBlock)
+
 	// Body
 	cg.curScope = newScope(cg.curScope)
 
@@ -2502,9 +2554,14 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 
 	// Get element type.
 	// For string fat-pointers ({i8*, i64}), default element type is i8 (byte).
+	// For fat arrays {T*, i64}, infer T from the pointer field.
 	var elemType irtypes.Type = irtypes.I64
 	if isStringType(iterVal.Type()) {
 		elemType = irtypes.I8
+	} else if isFatArrayPtr(iterVal.Type()) {
+		if pt, ok := iterVal.Type().(*irtypes.StructType).Fields[0].(*irtypes.PointerType); ok {
+			elemType = pt.ElemType
+		}
 	}
 
 	if s.VarType != nil {
@@ -2549,13 +2606,15 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	// Loop counter.
 	idxAlloca := block.NewAlloca(irtypes.I64)
 	block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: idx < len.
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	lenVal := condBlock.NewLoad(irtypes.I64, lenAlloca)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenVal)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body.
 	cg.curScope = newScope(cg.curScope)
@@ -2645,12 +2704,14 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 	bodyBlock := cg.newBlock("forin.rune.body")
 	afterBlock := cg.newBlock("forin.rune.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// cond: i < len
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenVal)
 	condBlock.NewCondBr(cond, decBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// decode: read first byte, branch on sequence type
 	b0ptr := decBlock.NewGetElementPtr(irtypes.I8, dataPtr, idx)
@@ -2817,13 +2878,15 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	bodyBlock := cg.newBlock("range.body")
 	afterBlock := cg.newBlock("range.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: i < end.
 	iVal := condBlock.NewLoad(varType, loopVar)
 	endLoad := cg.coerce(condBlock, end, varType)
 	cond := condBlock.NewICmp(enum.IPredSLT, iVal, endLoad)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body.
 	cg.curScope = newScope(cg.curScope)

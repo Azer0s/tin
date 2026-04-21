@@ -40,7 +40,12 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 	case *ast.SimpleType:
 		name := t.Name
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
-			// Qualified name: convert pkg::Name to pkg__Name.
+			// Qualified name: check typeAliases first (e.g. "collections::HashMap" may
+			// alias back to the bare "HashMap" used in genericStructsByArity).
+			if alias, ok := cg.typeAliases[name]; ok {
+				return cg.typeExprCanonicalKeyN(alias, depth+1)
+			}
+
 			return strings.ReplaceAll(name, "::", "__")
 		}
 		// Bare name: look up in typeAliases for the canonical form.
@@ -52,11 +57,18 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		return name
 	case *ast.GenericType:
 		name := t.Name
-		// Strip package qualifier from the template name to get the bare key
-		// used in genericStructsByArity (templates are always keyed by bare name).
-		if idx := strings.LastIndex(name, "::"); idx >= 0 {
-			name = name[idx+2:]
+		if strings.Contains(name, "::") {
+			// Qualified name: check typeAliases first (e.g. "collections::HashMap" -> "HashMap").
+			if alias, ok := cg.typeAliases[name]; ok {
+				name = cg.typeExprCanonicalKeyN(alias, depth+1)
+			} else {
+				name = strings.ReplaceAll(name, "::", "__")
+			}
+		} else if alias, ok := cg.typeAliases[name]; ok {
+			// Bare name: resolve through alias (e.g. bare "Channel" -> "sync__Channel").
+			name = cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
+		// else: bare name not in aliases - user-local generic struct or builtin.
 
 		parts := make([]string, len(t.TypeParams))
 		for i, tp := range t.TypeParams {
@@ -171,15 +183,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 		// On-demand monomorphization of generic struct (e.g. result[u32]).
 		// The type name may be package-qualified (e.g. "sync::Channel"); resolve
-		// using just the bare name (last component after "::") for the generic
-		// struct lookup, but use the bare name for the concrete type as well.
-		bareTypeName := t.Name
-		if idx := strings.LastIndex(t.Name, "::"); idx >= 0 {
-			bareTypeName = t.Name[idx+2:]
-		}
+		// using the fully-qualified name for the generic struct lookup.
+		qualTypeName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: t.Name})
 		// Only triggered when the type params are concrete types (not template vars).
 		arity := len(t.TypeParams)
-		if arityMap, isGenericStruct := cg.genericStructsByArity[bareTypeName]; isGenericStruct && arity > 0 {
+		if arityMap, isGenericStruct := cg.genericStructsByArity[qualTypeName]; isGenericStruct && arity > 0 {
 			if tmplStruct, hasArity := arityMap[arity]; hasArity {
 				// Build concrete name from ALL type params joined with __.
 				// Use typeExprCanonicalKey (method) to produce canonical part names
@@ -205,11 +213,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				}
 
 				if !isTemplateVar {
-					concreteName := bareTypeName + "__" + strings.Join(parts, "__")
+					concreteName := qualTypeName + "__" + strings.Join(parts, "__")
 					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
-							Type: &ast.GenericType{Name: bareTypeName, TypeParams: t.TypeParams},
+							Type: &ast.GenericType{Name: qualTypeName, TypeParams: t.TypeParams},
 						}
 						_ = cg.genTypeDecl(synthDecl) // best-effort
 					}
@@ -323,6 +331,19 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
 	if _, ok := cg.traits[name]; ok {
+		// If the trait belongs to a package, use the qualified instKey so that
+		// bare-name references (e.g. "JsonSerializable" inside json.tin) produce
+		// the same fat-ptr/vtable LLVM types as qualified references (e.g.
+		// "json::JsonSerializable" from call sites outside the package).
+		if qualInstKey, ok2 := cg.traitBareToQualInstKey[name]; ok2 {
+			fp, err := cg.buildTraitFatPtrTypeInst(name, qualInstKey, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			return fp, nil
+		}
+
 		fp, err := cg.buildTraitFatPtrType(name)
 		if err != nil {
 			return nil, err
@@ -352,7 +373,9 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
 	if bareName != name {
 		if _, ok := cg.traits[bareName]; ok {
-			fp, err := cg.buildTraitFatPtrType(bareName)
+			qualInstKey := strings.ReplaceAll(name, "::", "__")
+
+			fp, err := cg.buildTraitFatPtrTypeInst(bareName, qualInstKey, nil)
 			if err != nil {
 				return nil, err
 			}
