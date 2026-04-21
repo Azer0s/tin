@@ -87,7 +87,54 @@ func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *m
 	setupRuntime(rtLib)
 	fiberInit()
 
+	// On Darwin the static linker rejects undefined symbols, so cell .so files
+	// must be linked against every lib that provides symbols they reference.
+	// The sync module is auto-loaded for every cell (coroutines need Future[T]),
+	// so sync_helpers.c and channel_arc.c are always required - pre-compile them
+	// here so they're in s.loadedLibs before the first cell is built.
+	if runtime.GOOS == "darwin" {
+		syncSo := filepath.Join(workDir, "libtin_sync_prereq.so")
+		if err := s.buildSyncPrereq(syncSo); err != nil {
+			_ = os.RemoveAll(workDir)
+
+			return nil, fmt.Errorf("build sync prereq: %w", err)
+		}
+
+		syncLib, err := openLib(syncSo, true)
+		if err != nil {
+			_ = os.RemoveAll(workDir)
+
+			return nil, fmt.Errorf("load sync prereq: %w", err)
+		}
+
+		s.loadedLibs = append(s.loadedLibs, syncLib)
+	}
+
 	return s, nil
+}
+
+// buildSyncPrereq compiles sync_helpers.c and channel_arc.c into a shared lib.
+// On Darwin this must happen before the first cell compilation because every
+// cell auto-loads the sync module (for Future[T] / coroutine support).
+func (s *session) buildSyncPrereq(outSo string) error {
+	stdlibDir := s.stdlibOverride
+	if stdlibDir == "" {
+		if ex, err := os.Executable(); err == nil {
+			stdlibDir = filepath.Join(filepath.Dir(ex), "stdlib")
+		}
+	}
+
+	syncDir := filepath.Join(stdlibDir, "sync")
+	cSrcs := []pkgCSource{
+		{path: filepath.Join(syncDir, "sync_helpers.c")},
+		{path: filepath.Join(syncDir, "channel_arc.c")},
+	}
+
+	for _, cs := range cSrcs {
+		s.compiledCSrcPaths[cs.path] = true
+	}
+
+	return s.compilePkgExtras(cSrcs, nil, outSo)
 }
 
 func (s *session) buildRuntime(outSo string) error {
@@ -390,12 +437,15 @@ func (s *session) compileToSo(irText, outSo string) error {
 		inputLL = splitLL
 	}
 
-	// Compile to a shared library. Undefined references to runtime symbols are
-	// resolved at dlopen time from the RTLD_GLOBAL namespace (libtin_runtime.so).
-	// On Darwin, link explicitly against the runtime to satisfy the static linker.
+	// Compile to a shared library. On Linux, undefined symbols are resolved at
+	// dlopen time from the RTLD_GLOBAL namespace. On Darwin the static linker
+	// rejects undefined symbols, so link against all previously loaded libs.
 	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL}
 	if runtime.GOOS == "darwin" {
 		soArgs = append(soArgs, s.runtimeLib.path)
+		for _, lib := range s.loadedLibs {
+			soArgs = append(soArgs, lib.path)
+		}
 	}
 
 	soArgs = append(soArgs, "-o", outSo)
