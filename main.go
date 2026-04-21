@@ -160,6 +160,37 @@ func extractArchQualifier(s string) (base, qualifier string) {
 	return s, ""
 }
 
+// expandShellExprs replaces $(cmd args...) tokens in s with the trimmed stdout
+// of running that command via the shell. Tokens whose command fails are left
+// as empty strings so the caller surfaces a meaningful compiler error instead
+// of a cryptic path.
+func expandShellExprs(s string) string {
+	for {
+		start := strings.Index(s, "$(")
+		if start == -1 {
+			break
+		}
+
+		end := strings.Index(s[start+2:], ")")
+		if end == -1 {
+			break
+		}
+
+		end += start + 2
+		cmd := s[start+2 : end]
+		out, err := exec.Command("sh", "-c", cmd).Output()
+
+		var val string
+		if err == nil {
+			val = strings.TrimSpace(string(out))
+		}
+
+		s = s[:start] + val + s[end+1:]
+	}
+
+	return s
+}
+
 // parseFileDirectives scans the leading lines of src for //! directives and
 // returns linker flags and C source files to compile in.
 //
@@ -202,18 +233,26 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 				if len(parts) == 2 {
 					rtDir := tinRuntimeDir()
 
-					fields := strings.Fields(parts[1])
+					expandVars := func(s string) string {
+						s = strings.ReplaceAll(s, "$TIN_RUNTIME", rtDir)
+						s = strings.ReplaceAll(s, "$TIN_STDLIB", stdlibDir)
+						// Expand any remaining $VAR tokens from the environment.
+						return os.ExpandEnv(s)
+					}
+
+					// Expand $(cmd) expressions before field splitting so
+					// commands with spaces (e.g. "brew --prefix foo") aren't
+					// split across multiple fields.
+					fields := strings.Fields(expandShellExprs(parts[1]))
 					for i := 0; i < len(fields); i++ {
-						f := strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
-						f = strings.ReplaceAll(f, "$TIN_STDLIB", stdlibDir)
+						f := expandVars(fields[i])
 
 						var iPath string
 
 						if f == "-I" && i+1 < len(fields) {
 							// "-I path" (space-separated)
 							i++
-							iPath = strings.ReplaceAll(fields[i], "$TIN_RUNTIME", rtDir)
-							iPath = strings.ReplaceAll(iPath, "$TIN_STDLIB", stdlibDir)
+							iPath = expandVars(fields[i])
 						} else if strings.HasPrefix(f, "-I") && len(f) > 2 {
 							// "-Ipath" (no space)
 							iPath = f[2:]
@@ -236,7 +275,7 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 				// Linker flag: check for optional arch qualifier.
 				flagAndQualifier, archQualifier := extractArchQualifier(rest)
 				if archMatches(archQualifier) {
-					linkerFlags = append(linkerFlags, flagAndQualifier)
+					linkerFlags = append(linkerFlags, os.ExpandEnv(expandShellExprs(flagAndQualifier)))
 				}
 			}
 
