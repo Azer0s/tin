@@ -325,6 +325,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// are not in scope as values and would cause "undefined identifier" errors.
 		if staticName, typeArgStr := cg.tryResolveStructTypeName(fn.Expr); staticName != "" {
 			methodKey := staticName + "_" + fn.Field
+			baseStaticName := staticName // preserved for error messages before typeArgStr overwrites staticName
 			// Also try the concrete monomorphized key when a type arg is present.
 			if typeArgStr != "" {
 				// typeArgStr may be comma-separated for multi-param generics (e.g. "string,i64").
@@ -371,7 +372,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				best := cg.resolveOverload(variants, llArgs)
 				if best == nil {
-					return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", staticName, fn.Field, len(llArgs))
+					typeName := baseStaticName
+					if typeArgStr != "" {
+						typeName = baseStaticName + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
+					}
+
+					return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
 				}
 
 				oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -849,7 +855,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
-							return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", concreteName, methodField, len(olArgs))
+							return nil, fmt.Errorf("no matching overload for %s[%s]::%s (got %d arg(s))",
+								bareBaseName, strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
