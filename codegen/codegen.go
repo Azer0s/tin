@@ -650,6 +650,7 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 func (cg *CodeGen) SetTestMode(v bool)                              { cg.testMode = v }
 func (cg *CodeGen) SetNoWarnAsyncMain(v bool)                       { cg.noWarnAsyncMain = v }
 func (cg *CodeGen) SetUseDoubleForF128(v bool)                      { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTargetTriple(triple string)                   { if triple != "" { cg.mod.TargetTriple = triple } }
 func (cg *CodeGen) SetVerboseHeuristics(v bool)                     { cg.verboseHeuristics = v }
 func (cg *CodeGen) SetProgressFunc(fn func(string))                 { cg.progressFn = fn }
 func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoReportFn = fn }
