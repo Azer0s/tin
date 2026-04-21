@@ -1,0 +1,7 @@
+// compiler_errors/duplicate_var.tin
+// Declaring a variable with the same name twice in the same scope.
+
+fn main() =
+  let x i64 = 1
+  let x i64 = 2
+  echo x

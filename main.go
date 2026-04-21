@@ -40,6 +40,11 @@ Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
 
+Target flags:
+  -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
+                   Supported: linux/amd64, linux/arm64, linux/386,
+                              darwin/amd64, darwin/arm64
+
 Stdlib/libs flags:
   --stdlib PATH    override the standard library path (default: <execDir>/stdlib)
   --lib-root PATH  add an additional package root (before default <execDir>/libs); repeatable
@@ -63,7 +68,7 @@ In-source directives (at the top of the .tin file):
   //!+file.c [arch] -- FLAGS   arch-specific file with extra flags
   //!-lNAME [arch]             arch-specific linker flag
 
-  Arch tokens: x86_64, aarch64, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
+  Arch tokens: x86_64, aarch64, 386, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
   Variables: $TIN_RUNTIME expands to <execDir>/runtime, $TIN_STDLIB expands to <execDir>/stdlib
 `
 
@@ -100,17 +105,67 @@ func stdlibDirForDirectives(override string) string {
 	return filepath.Join(filepath.Dir(ex), "stdlib")
 }
 
+// targetGOOS and targetGOARCH reflect the compilation target platform.
+// They default to the host and are overridden by the -target os/arch flag.
+var (
+	targetGOOS     = runtime.GOOS
+	targetGOARCH   = runtime.GOARCH
+	explicitTarget bool
+)
+
+// verbose flags are package-level so directory-mode test runners can use them.
+var (
+	verboseProgress   bool
+	verboseHeuristics bool
+	verboseTCO        bool
+)
+
+// clangTripleForTarget returns the canonical LLVM target triple for the
+// current targetGOOS/targetGOARCH pair.
+func clangTripleForTarget() string {
+	switch targetGOOS + "/" + targetGOARCH {
+	case "linux/amd64":
+		return "x86_64-unknown-linux-gnu"
+	case "linux/arm64":
+		return "aarch64-unknown-linux-gnu"
+	case "linux/386":
+		return "i386-unknown-linux-gnu"
+	case "darwin/amd64":
+		return "x86_64-apple-macosx11.0.0"
+	case "darwin/arm64":
+		return "arm64-apple-macosx11.0.0"
+	default:
+		return ""
+	}
+}
+
+// clangTargetFlag returns {"-target", triple} when -target was explicitly
+// given, otherwise nil (host triple is used implicitly).
+func clangTargetFlag() []string {
+	if !explicitTarget {
+		return nil
+	}
+
+	t := clangTripleForTarget()
+	if t == "" {
+		return nil
+	}
+
+	return []string{"-target", t}
+}
+
 // archMatches reports whether the optional [arch] qualifier in a directive
-// matches the current platform. qualifier is the raw bracket content, e.g.
+// matches the compilation target. qualifier is the raw bracket content, e.g.
 // "x86_64" or "aarch64,darwin". Returns true when qualifier is empty (no
 // constraint) or every comma-separated token matches.
 //
 // Supported tokens:
 //
-//	x86_64   - runtime.GOARCH == "amd64"
-//	aarch64  - runtime.GOARCH == "arm64"
-//	darwin   - runtime.GOOS  == "darwin"
-//	linux    - runtime.GOOS  == "linux"
+//	x86_64   - targetGOARCH == "amd64"
+//	aarch64  - targetGOARCH == "arm64"
+//	386      - targetGOARCH == "386"
+//	darwin   - targetGOOS  == "darwin"
+//	linux    - targetGOOS  == "linux"
 func archMatches(qualifier string) bool {
 	if qualifier == "" {
 		return true
@@ -120,19 +175,23 @@ func archMatches(qualifier string) bool {
 		tok = strings.TrimSpace(tok)
 		switch tok {
 		case "x86_64":
-			if runtime.GOARCH != "amd64" {
+			if targetGOARCH != "amd64" {
 				return false
 			}
 		case "aarch64":
-			if runtime.GOARCH != "arm64" {
+			if targetGOARCH != "arm64" {
+				return false
+			}
+		case "386":
+			if targetGOARCH != "386" {
 				return false
 			}
 		case "darwin":
-			if runtime.GOOS != "darwin" {
+			if targetGOOS != "darwin" {
 				return false
 			}
 		case "linux":
-			if runtime.GOOS != "linux" {
+			if targetGOOS != "linux" {
 				return false
 			}
 		}
@@ -320,7 +379,7 @@ func main() {
 		switch a := os.Args[fileArgIdx]; a {
 		case "-g":
 			fileArgIdx++
-		case "--stdlib", "--lib-root":
+		case "--stdlib", "--lib-root", "-target":
 			fileArgIdx += 2
 		default:
 			goto doneFlags
@@ -346,9 +405,6 @@ doneFlags:
 
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
-	verboseHeuristics := false
-	verboseProgress := false
-	verboseTCO := false
 	debugBuild := false
 
 	// Scan all args (including those before the file) for flags.
@@ -383,6 +439,19 @@ doneFlags:
 			extraCFlags = append(extraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 		case "-g":
 			debugBuild = true
+		case "-target":
+			if i+1 < len(os.Args) {
+				i++
+
+				parts := strings.SplitN(os.Args[i], "/", 2)
+				if len(parts) != 2 {
+					die("-target: expected os/arch (e.g. linux/amd64, darwin/arm64)")
+				}
+
+				targetGOOS = parts[0]
+				targetGOARCH = parts[1]
+				explicitTarget = true
+			}
 		}
 	}
 
@@ -521,8 +590,14 @@ doneFlags:
 	}
 
 	// On Apple arm64, long double == double and compiler-rt has no fp128 routines.
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+	if targetGOOS == "darwin" && targetGOARCH == "arm64" {
 		cg.SetUseDoubleForF128(true)
+	}
+
+	if explicitTarget {
+		if triple := clangTripleForTarget(); triple != "" {
+			cg.SetTargetTriple(triple)
+		}
 	}
 
 	if stdlibOverride != "" {
@@ -876,7 +951,9 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			prog.step(sourceFile, "coro split")
 		}
 
-		split := exec.Command("clang", "-O1", "-S", "-emit-llvm", llInputFile, "-o", splitName)
+		splitArgs := append([]string{"-O1", "-S", "-emit-llvm"}, clangTargetFlag()...)
+		splitArgs = append(splitArgs, llInputFile, "-o", splitName)
+		split := exec.Command("clang", splitArgs...)
 		split.Stdout = os.Stdout
 
 		split.Stderr = os.Stderr
@@ -922,7 +999,9 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 		defer func() { _ = os.Remove(irObjName) }()
 
-		clangIR := exec.Command("clang", optLevel, "-c", llInputFile, "-o", irObjName)
+		irArgs := append([]string{optLevel, "-c"}, clangTargetFlag()...)
+		irArgs = append(irArgs, llInputFile, "-o", irObjName)
+		clangIR := exec.Command("clang", irArgs...)
 		clangIR.Stdout = os.Stdout
 
 		clangIR.Stderr = os.Stderr
@@ -944,7 +1023,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			_ = cObj.Close()
 
 			tmpObjs = append(tmpObjs, cObjName)
-			cArgs := []string{"-O2", "-c"}
+			cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
 
@@ -1016,7 +1095,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		_ = cObj.Close()
 
 		tmpCObjs = append(tmpCObjs, cObjName)
-		cArgs := []string{"-O2", "-c"}
+		cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
 		cArgs = append(cArgs, compileFlags...)
 		cArgs = append(cArgs, cs.path, "-o", cObjName)
 
@@ -1046,6 +1125,8 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	}()
 
 	args := []string{optLevel}
+	args = append(args, clangTargetFlag()...)
+
 	if isDebug {
 		args = append(args, "-g")
 
@@ -1241,15 +1322,23 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		cprog := &compileProgress{verbose: verboseProgress, total: 4, sourceFile: fpath}
+
+		cprog.step(fpath, "lex")
+
 		l := lexer.New(string(src))
 
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
+			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr), nil})
 
 			continue
 		}
+
+		cprog.step(fpath, "parse")
 
 		p := parser.New(tokens)
 		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens, "", nil) {
@@ -1258,14 +1347,36 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
+			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr), nil})
 
 			continue
 		}
 
+		cprog.step(fpath, "codegen")
+
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
+
+		if verboseHeuristics {
+			cg.SetVerboseHeuristics(true)
+		}
+
+		if verboseProgress {
+			cg.SetProgressFunc(func(msg string) { cprog.detail(msg) })
+		}
+
+		if verboseTCO {
+			cg.SetTCOReportFunc(func(caller, callee string) {
+				if callee == "" {
+					_, _ = fmt.Fprintf(os.Stderr, "tco: %s (self)\n", caller)
+				} else {
+					_, _ = fmt.Fprintf(os.Stderr, "tco: %s -> %s (mutual)\n", caller, callee)
+				}
+			})
+		}
 
 		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			cg.SetUseDoubleForF128(true)
@@ -1288,6 +1399,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			return err
 		}()
 		if cgErr != nil {
+			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr), nil})
 
@@ -1348,8 +1461,11 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		linkFlags := append(srcLinks, extraFlags...)
 
+		cprog.setTotal(3 + len(fCSources) + 1)
+
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
+			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
@@ -1366,7 +1482,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}(tmp.Name())
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, nil); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
+			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
@@ -1376,6 +1493,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		cprog.clear()
 		fmt.Printf("%s\n\n", fname)
 
 		run := memcheckCmd(memcheck, tmp.Name())

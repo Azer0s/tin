@@ -152,7 +152,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		}
 	}
 
-	return nil, fmt.Errorf("undefined: %s", strings.Join(e.Path, "::"))
+	return nil, cg.nodeErr(e, "undefined: %s", strings.Join(e.Path, "::"))
 }
 
 // exprToTypeParamKey converts a parsed expression node into a canonical type-key

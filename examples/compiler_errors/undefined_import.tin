@@ -1,0 +1,7 @@
+// compiler_errors/undefined_import.tin
+// Importing a package that does not exist.
+
+use "nonexistent_package"
+
+fn main() =
+  echo "hello"

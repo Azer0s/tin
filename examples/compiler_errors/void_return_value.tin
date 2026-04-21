@@ -1,0 +1,5 @@
+// compiler_errors/void_return_value.tin
+// Returning a value from a void function.
+
+fn greet(name string) =
+  return name
