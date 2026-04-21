@@ -43,8 +43,7 @@ Warning flags:
 Target flags:
   -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
                    Supported: linux/amd64, linux/arm64, linux/386,
-                              darwin/amd64, darwin/arm64,
-                              windows/amd64, windows/arm64
+                              darwin/amd64, darwin/arm64
 
 Stdlib/libs flags:
   --stdlib PATH    override the standard library path (default: <execDir>/stdlib)
@@ -69,7 +68,7 @@ In-source directives (at the top of the .tin file):
   //!+file.c [arch] -- FLAGS   arch-specific file with extra flags
   //!-lNAME [arch]             arch-specific linker flag
 
-  Arch tokens: x86_64, aarch64, 386, darwin, linux, windows  (comma = AND, e.g. [aarch64,darwin])
+  Arch tokens: x86_64, aarch64, 386, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
   Variables: $TIN_RUNTIME expands to <execDir>/runtime, $TIN_STDLIB expands to <execDir>/stdlib
 `
 
@@ -128,10 +127,6 @@ func clangTripleForTarget() string {
 		return "x86_64-apple-macosx11.0.0"
 	case "darwin/arm64":
 		return "arm64-apple-macosx11.0.0"
-	case "windows/amd64":
-		return "x86_64-pc-windows-msvc"
-	case "windows/arm64":
-		return "aarch64-pc-windows-msvc"
 	default:
 		return ""
 	}
@@ -164,7 +159,6 @@ func clangTargetFlag() []string {
 //	386      - targetGOARCH == "386"
 //	darwin   - targetGOOS  == "darwin"
 //	linux    - targetGOOS  == "linux"
-//	windows  - targetGOOS  == "windows"
 func archMatches(qualifier string) bool {
 	if qualifier == "" {
 		return true
@@ -191,10 +185,6 @@ func archMatches(qualifier string) bool {
 			}
 		case "linux":
 			if targetGOOS != "linux" {
-				return false
-			}
-		case "windows":
-			if targetGOOS != "windows" {
 				return false
 			}
 		}

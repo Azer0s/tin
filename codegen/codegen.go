@@ -520,6 +520,11 @@ type CodeGen struct {
 	// resolved LLVM param types, arity).  Populated during predeclaration.
 	overloads map[string][]*overloadEntry
 
+	// genericMethodsSetUp: concrete generic struct name -> true once its overload
+	// entries and method stubs have been predeclared (prevents double-registration
+	// when genTypeDecl is called more than once for the same concrete type).
+	genericMethodsSetUp map[string]bool
+
 	// funcReturnUnsigned: IR function name -> true when the function's return
 	// type is an unsigned integer (u8/u16/u32/u64/u128).  Populated during
 	// predeclaration so exprIsUnsigned can correctly format CallExpr results.
@@ -793,6 +798,7 @@ func New(filename string) *CodeGen {
 		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
 		overloadedNames:          make(map[string]bool),
 		overloads:                make(map[string][]*overloadEntry),
+		genericMethodsSetUp:      make(map[string]bool),
 		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),

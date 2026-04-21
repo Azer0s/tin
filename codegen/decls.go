@@ -767,28 +767,59 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	prevPkg := cg.currentPkg
 	cg.currentPkg = ""
 
-	// Pre-declare $coro variants and populate coroCallable for any {#async}
-	// methods in the concrete struct.  This mirrors what packages.go pass 1.2
-	// does for non-generic structs; without it, genStructDecl would compile
-	// recv_fiber without a $coro variant and spawn calls inside recv would fail.
-	// Done AFTER switching to moduleScope so the $coro stubs are registered
-	// in the global scope where genStructDecl / genFuncDeclAs will find them.
-	// Must be done while typeAlias substitutions (T->i64 etc.) are still active
-	// so that predeclareCoroVariant resolves param types correctly.
-	for _, m := range concrete.Methods {
-		if !isAsyncTag(m.Tags) || m.IsExtern != "" {
-			continue
+	// Detect overloaded method names and predeclare all concrete methods exactly
+	// once. This mirrors pass 1.8/1.9 for non-generic structs and is required so
+	// that overload entries in cg.overloads are registered before genStructDecl
+	// compiles method bodies and before call sites resolve variants.
+	// The guard prevents double-registration when genTypeDecl is called more than
+	// once for the same concrete type name.
+	if !cg.genericMethodsSetUp[n.Name] {
+		cg.genericMethodsSetUp[n.Name] = true
+
+		methodCounts := make(map[string]int)
+
+		for _, m := range concrete.Methods {
+			if len(m.TypeParams) > 0 || m.IsExtern != "" {
+				continue
+			}
+
+			key := methodScopeName(n.Name, m)
+			methodCounts[key]++
 		}
 
-		scopeKey := methodScopeName(n.Name, m)
-		cg.coroCallable[scopeKey] = true
+		for key, count := range methodCounts {
+			if count > 1 {
+				cg.overloadedNames[key] = true
+			}
+		}
 
-		cg.funcDecls[scopeKey] = m // so wrapPidInFuture can find the return type
-		if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
-			cg.currentPkg = prevPkg
-			cg.curScope = prevScope
+		for _, m := range concrete.Methods {
+			if len(m.TypeParams) > 0 {
+				continue
+			}
 
-			return preErr
+			if preErr := cg.predeclareMethod(n.Name, m); preErr != nil {
+				cg.currentPkg = prevPkg
+				cg.curScope = prevScope
+
+				return preErr
+			}
+
+			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
+				continue
+			}
+
+			scopeKey := methodScopeName(n.Name, m)
+			cg.coroCallable[scopeKey] = true
+
+			cg.funcDecls[scopeKey] = m
+
+			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
+				cg.currentPkg = prevPkg
+				cg.curScope = prevScope
+
+				return preErr
+			}
 		}
 	}
 

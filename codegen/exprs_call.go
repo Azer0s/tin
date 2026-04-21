@@ -353,6 +353,48 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 			}
 
+			// Overloaded static method: evaluate args first, resolve best variant.
+			if variants, hasOverloads := cg.overloads[methodKey]; hasOverloads {
+				llArgs := make([]value.Value, 0, len(e.Args))
+				for _, arg := range e.Args {
+					av, err2 := cg.genExpr(block, arg)
+					if err2 != nil {
+						return nil, err2
+					}
+
+					llArgs = append(llArgs, av)
+
+					if cg.curBlock != nil && cg.curBlock != block {
+						block = cg.curBlock
+					}
+				}
+
+				best := cg.resolveOverload(variants, llArgs)
+				if best == nil {
+					return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", staticName, fn.Field, len(llArgs))
+				}
+
+				oEntry, oOk := cg.curScope.lookup(best.irName)
+				if !oOk {
+					return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+				}
+
+				var ovCallee value.Value
+
+				if oEntry.isAlloc {
+					ptrType := oEntry.val.Type().(*irtypes.PointerType)
+					ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
+				} else {
+					ovCallee = oEntry.val
+				}
+
+				if f2, ok2 := ovCallee.(*ir.Func); ok2 {
+					llArgs = cg.adaptArgs(block, llArgs, f2.Sig)
+				}
+
+				return block.NewCall(ovCallee, llArgs...), nil
+			}
+
 			if entry, ok := cg.curScope.lookup(methodKey); ok {
 				if f, isFn := entry.val.(*ir.Func); isFn && cg.isStaticMethodIR(f, staticName) {
 					llArgs := make([]value.Value, 0, len(e.Args))
@@ -740,6 +782,100 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
+		// Static method call on a generic struct: Type[K,V]::method(args) or
+		// pkg::Type[K,V]::method(args).  The ScopeAccess path looks like
+		// ["collections::HashMap[string,string]", "new"].
+		// Resolve the concrete name and apply overload resolution when needed.
+		if len(fn.Path) >= 2 {
+			methodField := fn.Path[len(fn.Path)-1]
+			typePart := fn.Path[0]
+
+			if len(fn.Path) == 3 {
+				typePart = fn.Path[1]
+			}
+
+			typeParamStr := ""
+			if i := strings.Index(typePart, "["); i >= 0 {
+				typeParamStr = strings.TrimSuffix(typePart[i+1:], "]")
+				typePart = typePart[:i]
+			}
+
+			bareBaseName := typePart
+			if idx2 := strings.LastIndex(bareBaseName, "::"); idx2 >= 0 {
+				bareBaseName = bareBaseName[idx2+2:]
+			}
+
+			if typeParamStr != "" {
+				if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
+					rawParts := strings.Split(typeParamStr, ",")
+					resolvedParts := make([]string, len(rawParts))
+					resolvedTEs := make([]ast.TypeExpr, len(rawParts))
+
+					for i, raw := range rawParts {
+						raw = strings.TrimSpace(raw)
+						if alias, ok2 := cg.typeAliases[raw]; ok2 {
+							if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+								raw = simple.Name
+							}
+						}
+
+						resolvedParts[i] = raw
+						resolvedTEs[i] = parseTypeParamStr(raw)
+					}
+
+					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
+					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+						_ = cg.genTypeDecl(&ast.TypeDecl{
+							Name: concreteName,
+							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
+						})
+					}
+
+					concreteMethodKey := concreteName + "_" + methodField
+					if variants, hasOL := cg.overloads[concreteMethodKey]; hasOL {
+						olArgs := make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err2 := cg.genExpr(block, arg)
+							if err2 != nil {
+								return nil, err2
+							}
+
+							olArgs = append(olArgs, av)
+
+							if cg.curBlock != nil && cg.curBlock != block {
+								block = cg.curBlock
+							}
+						}
+
+						best := cg.resolveOverload(variants, olArgs)
+						if best == nil {
+							return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", concreteName, methodField, len(olArgs))
+						}
+
+						oEntry, oOk := cg.curScope.lookup(best.irName)
+						if !oOk {
+							return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+						}
+
+						var ovCallee value.Value
+
+						if oEntry.isAlloc {
+							ptrType := oEntry.val.Type().(*irtypes.PointerType)
+							ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
+						} else {
+							ovCallee = oEntry.val
+						}
+
+						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
+							olArgs = cg.adaptArgs(block, olArgs, f2.Sig)
+						}
+
+						return block.NewCall(ovCallee, olArgs...), nil
+					}
+				}
+			}
+		}
+
 		// Overload resolution for cross-package calls: pkg::overloadedFn(args).
 		bareName := fn.Path[len(fn.Path)-1]
 		if variants, hasOverloads := cg.overloads[bareName]; hasOverloads {
