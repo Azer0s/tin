@@ -445,7 +445,7 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         if (lf_enqueue(ch, val, esz, is_rc)) {
             // Check again for newly-parked receivers.
             if (__builtin_expect(
-                    atomic_load_explicit(&ch->recv_wq_cnt, memory_order_acquire) > 0, 0))
+                    atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_recv(ch);
             return 0;
         }
@@ -526,7 +526,7 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         ch->send_wq.hdls[ch->send_wq.cnt] = hdl;
         ch->send_wq.fibs[ch->send_wq.cnt] = _tin_current_fib();
         ch->send_wq.cnt++;
-        atomic_fetch_add_explicit(&ch->send_wq_cnt, 1, memory_order_release);
+        atomic_fetch_add_explicit(&ch->send_wq_cnt, 1, memory_order_seq_cst);
 
         // Final check: a consumer may have dequeued between our failed lf_enqueue
         // and the send_wq_cnt increment, saw cnt==0, and didn't wake us.
@@ -564,7 +564,7 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
         void *data = _lf_dequeue_tls(ch);
         if (data) {
             if (__builtin_expect(
-                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_acquire) > 0, 0))
+                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
             return data;
         }
@@ -602,7 +602,7 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
         ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
         ch->recv_wq.outs[ch->recv_wq.cnt] = NULL;
         ch->recv_wq.cnt++;
-        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_release);
+        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_seq_cst);
 
         // Final check: sender may have enqueued after our failed dequeue but
         // before the recv_wq_cnt increment, saw cnt==0, and skipped waking us.
@@ -660,7 +660,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         if (lf_dequeue(ch, out, esz, ch->is_rc)) {
             if (__builtin_expect(
-                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_acquire) > 0, 0))
+                    atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
             return 0;
         }
@@ -708,7 +708,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
         ch->recv_wq.fibs[ch->recv_wq.cnt] = _tin_current_fib();
         ch->recv_wq.outs[ch->recv_wq.cnt] = out;
         ch->recv_wq.cnt++;
-        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_release);
+        atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_seq_cst);
 
         // Final check: sender may have enqueued and not woken us.
         if (lf_dequeue(ch, out, esz, ch->is_rc)) {
