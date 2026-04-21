@@ -75,7 +75,7 @@ func (cg *CodeGen) applyPatternChecks(
 
 		fieldIdx := cg.fieldIndex(structName, field.Name)
 		if fieldIdx < 0 {
-			return nil, fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+			return nil, cg.nodeErr(sp, "struct pattern: unknown field %s.%s", structName, field.Name)
 		}
 
 		var fieldType irtypes.Type
@@ -170,7 +170,7 @@ func (cg *CodeGen) bindPatternFree(
 
 		fieldIdx := cg.fieldIndex(structName, field.Name)
 		if fieldIdx < 0 {
-			return fmt.Errorf("struct pattern: unknown field %s.%s", structName, field.Name)
+			return cg.nodeErr(sp, "struct pattern: unknown field %s.%s", structName, field.Name)
 		}
 
 		var (
@@ -1294,14 +1294,14 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	}
 
 	if val == nil {
-		return nil, fmt.Errorf("match .(type): nil expression")
+		return nil, cg.nodeErr(s, "match .(type): nil expression")
 	}
 
 	unionName := cg.typeNameOf(val.Type())
 
 	members, isUnion := cg.unionTypeMembers[unionName]
 	if !isUnion {
-		return nil, fmt.Errorf("match .(type) requires a tagged union type, got %s", unionName)
+		return nil, cg.nodeErr(s, "match .(type) requires a tagged union type, got %s", unionName)
 	}
 
 	st := val.Type().(*irtypes.StructType)

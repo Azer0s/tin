@@ -1,0 +1,6 @@
+// compiler_errors/undefined_function.tin
+// Calling a function that has not been declared.
+
+fn main() =
+  let result = compute(42)
+  echo result

@@ -79,7 +79,7 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 	switch v := node.(type) {
 	case *ast.EchoStmt:
 		if !allowSideEffect {
-			return fmt.Errorf("fn %s: #pure violation - echo is a side effect", fnCtx)
+			return cg.nodeErr(v, "fn %s: #pure violation - echo is a side effect", fnCtx)
 		}
 
 	case *ast.TaggedBlock:
@@ -231,12 +231,14 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 func (cg *CodeGen) checkCallPure(fnCtx string, call *ast.CallExpr, visited map[string]bool) error {
 	calleeName := resolveCalleeName(call)
 	if calleeName == "" {
-		// Cannot resolve statically (e.g. function pointer / indirect call).
-		// Purity cannot be verified - reject.
-		return fmt.Errorf("fn %s: #pure violation - indirect call through function pointer is not verifiable", fnCtx)
+		return cg.nodeErr(call, "fn %s: #pure violation - indirect call through function pointer is not verifiable", fnCtx)
 	}
 
-	return cg.isPureCallable(fnCtx, calleeName, visited)
+	if err := cg.isPureCallable(fnCtx, calleeName, visited); err != nil {
+		return cg.nodeErr(call, "%s", err.Error())
+	}
+
+	return nil
 }
 
 // isPureCallable returns nil if calleeName is safe to call from a #pure function,
@@ -512,7 +514,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 			}
 
 			if key == targetFn {
-				return fmt.Errorf("fn %s: #no_recurse violation - function calls itself", targetFn)
+				return cg.nodeErr(call, "fn %s: #no_recurse violation - function calls itself", targetFn)
 			}
 
 			if visited[key] {
@@ -536,7 +538,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 
 	// Direct match: the callee IS the no_recurse function.
 	if lookupName == targetFn {
-		return fmt.Errorf("fn %s: #no_recurse violation - function calls itself", targetFn)
+		return cg.nodeErr(call, "fn %s: #no_recurse violation - function calls itself", targetFn)
 	}
 
 	// Already explored this callee in this traversal - skip.

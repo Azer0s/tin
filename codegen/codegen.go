@@ -934,7 +934,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.progress("check declarations")
 
 	if err := checkDuplicateDecls(prog.Stmts); err != nil {
-		return nil, fmt.Errorf("semantic error: %w", err)
+		return nil, fmt.Errorf("%s:%w", cg.filename, err)
 	}
 
 	// Zero pass: collect exports and constrained generic function templates

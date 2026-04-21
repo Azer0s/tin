@@ -78,6 +78,10 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 				fnName = cg.curFn.Name()
 			}
 
+			if decl, ok := cg.funcDecls[fnName]; ok {
+				return cg.nodeErr(decl, "fn %s: not all code paths return a value", fnName)
+			}
+
 			return fmt.Errorf("fn %s: not all code paths return a value", fnName)
 		}
 
@@ -1224,8 +1228,29 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 
 	if cg.curFn != nil {
 		retType := cg.curFn.Sig.RetType
-		if !irtypes.IsVoid(retType) {
+		if irtypes.IsVoid(retType) {
+			if val != nil {
+				return cg.nodeErr(s, "void function cannot return a value")
+			}
+		} else {
 			val = cg.coerce(block, val, retType)
+			if !val.Type().Equal(retType) {
+				gotName := cg.typeNameOf(val.Type())
+				if gotName == "" {
+					gotName = val.Type().LLString()
+				}
+
+				wantName := cg.typeNameOf(retType)
+				if wantName == "" {
+					wantName = retType.LLString()
+				}
+
+				if astDecl, ok := cg.funcDecls[cg.curFn.Name()]; ok && astDecl.RetType != nil {
+					wantName = astDecl.RetType.String()
+				}
+
+				return cg.nodeErr(s, "cannot return value of type %q as %q", gotName, wantName)
+			}
 		}
 	}
 

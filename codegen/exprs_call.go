@@ -252,12 +252,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(localVariants, argVals)
 			if best == nil {
-				return nil, fmt.Errorf("no matching overload for %s (got %d arg(s))", fn.Name, len(argVals))
+				return nil, cg.nodeErr(e, "no matching overload for %s (got %d arg(s))", fn.Name, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
 			if !oOk {
-				return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+				return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
 			}
 
 			var ovCallee value.Value
@@ -293,7 +293,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
-			return nil, fmt.Errorf("undefined function: %s", fn.Name)
+			return nil, cg.nodeErr(e, "undefined function: %s", fn.Name)
 		}
 		// Warn when a {#blocking} extern is called inside an {#async} function.
 		if cg.curCoroHdl != nil {
@@ -377,12 +377,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						typeName = baseStaticName + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
 					}
 
-					return nil, fmt.Errorf("no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
+					return nil, cg.nodeErr(e, "no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
 				}
 
 				oEntry, oOk := cg.curScope.lookup(best.irName)
 				if !oOk {
-					return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+					return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
 				}
 
 				var ovCallee value.Value
@@ -481,12 +481,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
-				return nil, fmt.Errorf("no matching overload for %s.%s (got %d arg(s))", structName, fn.Field, len(argVals))
+				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", structName, fn.Field, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
 			if !oOk {
-				return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+				return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
 			}
 
 			var ovCallee value.Value
@@ -855,13 +855,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
-							return nil, fmt.Errorf("no matching overload for %s[%s]::%s (got %d arg(s))",
+							return nil, cg.nodeErr(e, "no matching overload for %s[%s]::%s (got %d arg(s))",
 								bareBaseName, strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
 						if !oOk {
-							return nil, fmt.Errorf("overload %s not found in scope", best.irName)
+							return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
 						}
 
 						var ovCallee value.Value

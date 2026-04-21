@@ -213,7 +213,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		}
 
 		if val == nil {
-			return nil, fmt.Errorf("await: expression produced no value")
+			return nil, cg.nodeErr(e, "await: expression produced no value")
 		}
 		// Refresh block in case evaluating the future expression advanced the IR
 		// insertion point (e.g. `await spawn fn(await spawn other())` where the
@@ -232,10 +232,10 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 						"  Load error: %w", cg.syncLoadErr)
 				}
 
-				return nil, fmt.Errorf("await: expression is a raw i64, not a Future[t]; use `await spawn fn(args)` which returns Future[t]")
+				return nil, cg.nodeErr(e, "await: expression is a raw i64, not a Future[t]; use `await spawn fn(args)` which returns Future[t]")
 			}
 
-			return nil, fmt.Errorf("await: expression (type %s) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
+			return nil, cg.nodeErr(e, "await: expression (type %s) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
 				val.Type())
 		}
 
@@ -254,7 +254,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				}
 			}
 
-			return nil, fmt.Errorf("await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
+			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
 		// Extract pid from Future[T] using extractvalue (no alloca -> safe inside loops).
@@ -771,29 +771,29 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 	// Validate: each arm must have exactly one expression body.
 	for i, c := range s.Cases {
 		if c.Body == nil || len(c.Body.Stmts) == 0 {
-			return nil, fmt.Errorf("match expression: case %d has no body", i)
+			return nil, cg.nodeErr(s, "match expression: case %d has no body", i)
 		}
 
 		if len(c.Body.Stmts) > 1 {
-			return nil, fmt.Errorf("match expression: case %d has multiple statements; match expressions allow exactly one expression per arm", i)
+			return nil, cg.nodeErr(s, "match expression: case %d has multiple statements; match expressions allow exactly one expression per arm", i)
 		}
 
 		if armExprNode(c.Body.Stmts[0]) == nil {
-			return nil, fmt.Errorf("match expression: case %d body is not an expression (use 'return match ...' for statement arms)", i)
+			return nil, cg.nodeErr(s, "match expression: case %d body is not an expression (use 'return match ...' for statement arms)", i)
 		}
 	}
 
 	if s.Default != nil {
 		if len(s.Default.Stmts) == 0 {
-			return nil, fmt.Errorf("match expression: default arm has no body")
+			return nil, cg.nodeErr(s, "match expression: default arm has no body")
 		}
 
 		if len(s.Default.Stmts) > 1 {
-			return nil, fmt.Errorf("match expression: default arm has multiple statements; match expressions allow exactly one expression per arm")
+			return nil, cg.nodeErr(s, "match expression: default arm has multiple statements; match expressions allow exactly one expression per arm")
 		}
 
 		if armExprNode(s.Default.Stmts[0]) == nil {
-			return nil, fmt.Errorf("match expression: default arm body is not an expression (use 'return match ...' for statement arms)")
+			return nil, cg.nodeErr(s, "match expression: default arm body is not an expression (use 'return match ...' for statement arms)")
 		}
 	}
 
@@ -819,7 +819,7 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 	}
 
 	if resType == nil {
-		return nil, fmt.Errorf("match expression: cannot infer result type; annotate the variable or use 'return match ...'")
+		return nil, cg.nodeErr(s, "match expression: cannot infer result type; annotate the variable or use 'return match ...'")
 	}
 
 	resAlloca := block.NewAlloca(resType)

@@ -113,6 +113,13 @@ var (
 	explicitTarget bool
 )
 
+// verbose flags are package-level so directory-mode test runners can use them.
+var (
+	verboseProgress   bool
+	verboseHeuristics bool
+	verboseTCO        bool
+)
+
 // clangTripleForTarget returns the canonical LLVM target triple for the
 // current targetGOOS/targetGOARCH pair.
 func clangTripleForTarget() string {
@@ -398,9 +405,6 @@ doneFlags:
 
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
-	verboseHeuristics := false
-	verboseProgress := false
-	verboseTCO := false
 	debugBuild := false
 
 	// Scan all args (including those before the file) for flags.
@@ -1318,15 +1322,22 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		cprog := &compileProgress{verbose: verboseProgress, total: 4, sourceFile: fpath}
+
+		cprog.step(fpath, "lex")
+
 		l := lexer.New(string(src))
 
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
+			cprog.clear()
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr), nil})
 
 			continue
 		}
+
+		cprog.step(fpath, "parse")
 
 		p := parser.New(tokens)
 		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens, "", nil) {
@@ -1335,14 +1346,35 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
+			cprog.clear()
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr), nil})
 
 			continue
 		}
 
+		cprog.step(fpath, "codegen")
+
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
+
+		if verboseHeuristics {
+			cg.SetVerboseHeuristics(true)
+		}
+
+		if verboseProgress {
+			cg.SetProgressFunc(func(msg string) { cprog.detail(msg) })
+		}
+
+		if verboseTCO {
+			cg.SetTCOReportFunc(func(caller, callee string) {
+				if callee == "" {
+					_, _ = fmt.Fprintf(os.Stderr, "tco: %s (self)\n", caller)
+				} else {
+					_, _ = fmt.Fprintf(os.Stderr, "tco: %s -> %s (mutual)\n", caller, callee)
+				}
+			})
+		}
 
 		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			cg.SetUseDoubleForF128(true)
@@ -1365,6 +1397,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			return err
 		}()
 		if cgErr != nil {
+			cprog.clear()
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr), nil})
 
@@ -1425,8 +1458,11 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		linkFlags := append(srcLinks, extraFlags...)
 
+		cprog.setTotal(3 + len(fCSources) + 1)
+
 		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
 		if tmpErr != nil {
+			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
@@ -1443,7 +1479,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}(tmp.Name())
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, nil); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
+			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
@@ -1453,6 +1490,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		cprog.clear()
 		fmt.Printf("%s\n\n", fname)
 
 		run := memcheckCmd(memcheck, tmp.Name())
