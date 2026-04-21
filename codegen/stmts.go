@@ -300,17 +300,26 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		skipName = ident.Name
 	}
 
+	_ = cg.emitDefers(block)
 	if !irtypes.IsVoid(retType) && bodyVal != nil {
 		bodyVal = cg.coerce(block, bodyVal, retType)
-		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, skipName)
-		retInst := block.NewRet(bodyVal)
-		cg.attachCurrentDbgLocToTerm(retInst)
+		if cg.inCoroFn {
+			cg.emitCoroComplete(block, bodyVal)
+			cg.emitFinalSuspend(block, cg.curCoroFrame)
+		} else {
+			retInst := block.NewRet(bodyVal)
+			cg.attachCurrentDbgLocToTerm(retInst)
+		}
 	} else {
-		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, "")
-		retInst := block.NewRet(nil)
-		cg.attachCurrentDbgLocToTerm(retInst)
+		if cg.inCoroFn {
+			cg.emitCoroComplete(block, nil)
+			cg.emitFinalSuspend(block, cg.curCoroFrame)
+		} else {
+			retInst := block.NewRet(nil)
+			cg.attachCurrentDbgLocToTerm(retInst)
+		}
 	}
 
 	return nil
@@ -779,6 +788,58 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 	if block == nil {
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
+	}
+
+	// REPL mode: promote top-level `let` bindings in the cell function to LLVM
+	// global variables so their values persist across subsequent cells.
+	// Static-array fill/literal allocas are skipped (they need alloca semantics).
+	isReplCellFn := cg.curFn != nil && (cg.curFn.Name() == cg.replCellFuncName ||
+		cg.curFn.Name() == cg.replCellFuncName+"$coro")
+	if cg.replMode && !s.IsConst && isReplCellFn {
+		isStaticArray := false
+		if llType != nil {
+			if _, ok := llType.(*irtypes.ArrayType); ok {
+				isStaticArray = true
+			}
+		}
+		if !isStaticArray {
+			if llType == nil {
+				llType = irtypes.I64
+			}
+			// Check the scope for a previous-cell external global first.
+			if existing, ok := cg.curScope.lookup(s.Name); ok && existing.isGlobal {
+				if g, ok2 := existing.val.(*ir.Global); ok2 && initVal != nil {
+					initVal = cg.coerce(block, initVal, g.ContentType)
+					cg.emitRetain(block, initVal)
+					block.NewStore(initVal, g)
+				}
+				return block, nil
+			}
+			// Check the persistent cell-globals map so the $coro variant of the
+			// cell function can find the global created by the non-coro variant,
+			// even after the non-coro function scope was popped.
+			if g, ok := cg.replCellGlobals[s.Name]; ok {
+				cg.curScope.set(s.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(g.ContentType), isGlobal: true})
+				if initVal != nil {
+					initVal = cg.coerce(block, initVal, g.ContentType)
+					cg.emitRetain(block, initVal)
+					block.NewStore(initVal, g)
+				}
+				return block, nil
+			}
+			g := cg.mod.NewGlobal(s.Name, llType)
+			g.Init = cg.zeroConstant(llType)
+			isRC := isRCTrackedType(llType)
+			cg.curScope.set(s.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRC, isGlobal: true})
+			cg.replCellGlobals[s.Name] = g
+			if initVal != nil {
+				initVal = cg.coerce(block, initVal, llType)
+				cg.emitRetain(block, initVal)
+				block.NewStore(initVal, g)
+			}
+			cg.replNewGlobals = append(cg.replNewGlobals, ReplGlobal{Name: s.Name, TinType: s.Type, LLVMType: llType})
+			return block, nil
+		}
 	}
 
 	// All local variables are stack-allocated. Heap promotion happens lazily at

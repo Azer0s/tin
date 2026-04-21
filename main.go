@@ -16,6 +16,7 @@ import (
 	"github.com/Azer0s/tin/codegen"
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
+	"github.com/Azer0s/tin/repl"
 )
 
 const usage = `tin - the tin language compiler
@@ -29,6 +30,7 @@ Usage:
   tin test        <file.tin|dir|dir/...>   run test blocks and report results
   tin build-test  <file.tin> [-o out]      compile test binary without running
   tin preprocess  <file.tin>               expand macros and print source to stdout
+  tin repl        [--stdlib PATH]          interactive REPL
 
 Link flags (passed after the source file):
   -lNAME           link with libNAME (e.g. -lm for libmath)
@@ -353,6 +355,28 @@ func main() {
 			"error: clang version %d is too old; tin requires clang >= 15 (the presplitcoroutine attribute was added in LLVM 15)\n", v)
 
 		os.Exit(1)
+	}
+
+	if len(os.Args) >= 2 && os.Args[1] == "repl" {
+		runtimeDir := tinRuntimeDir()
+		var stdlibOverride string
+		var libsRoots []string
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--stdlib":
+				if i+1 < len(os.Args) {
+					i++
+					stdlibOverride = os.Args[i]
+				}
+			case "--lib-root":
+				if i+1 < len(os.Args) {
+					i++
+					libsRoots = append(libsRoots, os.Args[i])
+				}
+			}
+		}
+		repl.Run(runtimeDir, stdlibOverride, libsRoots)
+		return
 	}
 
 	if len(os.Args) < 3 {

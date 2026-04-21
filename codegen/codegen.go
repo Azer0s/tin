@@ -413,6 +413,19 @@ type CodeGen struct {
 	fiberRunFn         *ir.Func
 	ioInitFn           *ir.Func
 
+	// REPL mode: when true, top-level `let` bindings are promoted to LLVM
+	// globals, main() generation is skipped, and cg.replNewGlobals is populated.
+	replMode            bool
+	replCellFuncName    string // e.g. "_repl_cell_3"
+	replNewGlobals      []ReplGlobal
+	// replExternalGlobals: globals defined by previous REPL cells.
+	// Re-injected as 'external' linkage so all cells share the canonical copy.
+	replExternalGlobals map[string]bool
+	// replCellGlobals: globals created by this cell's let-promotions.
+	// Keyed by Tin name; survives across function-scope pops so the $coro
+	// variant of the cell function can find and reuse them.
+	replCellGlobals map[string]*ir.Global
+
 	// coroCallable: set of function names that need a $coro duplicate.
 	// Built by colorCallGraph() after the predeclaration pass.
 	coroCallable map[string]bool
@@ -914,6 +927,52 @@ func (cg *CodeGen) LinkLibs() []string { return cg.linkLibs }
 // (e.g. //!+file.c) to collect C sources that need to be compiled alongside.
 func (cg *CodeGen) PackageSrcPaths() []string { return cg.pkgSrcPaths }
 
+// ReplGlobal records a top-level variable promoted from a `let` binding in
+// REPL mode. The session uses this to declare the variable as a `var` in
+// subsequent cells so the type checker can resolve cross-cell references.
+type ReplGlobal struct {
+	Name     string
+	TinType  ast.TypeExpr // from the VarDecl; nil if type was inferred
+	LLVMType irtypes.Type
+}
+
+// SetReplMode enables REPL code generation. cellFuncName is the IR name of
+// the current cell entry function (e.g. "_repl_cell_3"). In REPL mode,
+// top-level `let` bindings inside cellFuncName are promoted to LLVM globals
+// and main() generation is skipped.
+func (cg *CodeGen) SetReplMode(cellFuncName string) {
+	cg.replMode = true
+	cg.replCellFuncName = cellFuncName
+	cg.replCellGlobals = make(map[string]*ir.Global)
+}
+
+// SetReplExternalGlobals marks names as externally-defined (from prior REPL cells).
+// preregisterTopLevelVar will emit these as 'external' linkage so RTLD_GLOBAL
+// resolves them to the canonical copy instead of creating a new definition.
+func (cg *CodeGen) SetReplExternalGlobals(names []string) {
+	cg.replExternalGlobals = make(map[string]bool, len(names))
+	for _, n := range names {
+		cg.replExternalGlobals[n] = true
+	}
+}
+
+// ReplNewGlobals returns globals promoted from `let` bindings in this cell.
+func (cg *CodeGen) ReplNewGlobals() []ReplGlobal { return cg.replNewGlobals }
+
+// ReplGlobalTinTypeName returns the Tin source type name for a promoted global,
+// or "" if the type cannot be reliably reconstructed from the LLVM type.
+func (cg *CodeGen) ReplGlobalTinTypeName(g ReplGlobal) string {
+	if g.TinType != nil {
+		return g.TinType.String()
+	}
+	n := llvmTypeToTinName(g.LLVMType)
+	if n == "any" {
+		return "" // unresolvable - skip global registration
+	}
+	return n
+}
+
+
 // Generate translates the AST program into an LLVM IR module.
 func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Initialize global scope.
@@ -1217,6 +1276,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 		cg.emitAtomTable()
 
+		return cg.mod, nil
+	}
+
+	// In REPL mode the cell function is the only entry point; skip main().
+	if cg.replMode {
+		cg.emitAtomTable()
 		return cg.mod, nil
 	}
 

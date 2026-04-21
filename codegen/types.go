@@ -437,6 +437,13 @@ func llvmTypeToTinName(t irtypes.Type) string {
 			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
 				return "any"
 			}
+			// Fat array pointer: anonymous {ElemType*, i64}.
+			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok && st.Fields[1].Equal(irtypes.I64) {
+				elem := llvmTypeToTinName(pt.ElemType)
+				if elem != "" && elem != "any" {
+					return "[" + elem + "]"
+				}
+			}
 		}
 	}
 

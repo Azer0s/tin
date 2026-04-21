@@ -1489,7 +1489,6 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !exportedNames[md.Name] && !exportedNames[bareName] {
 			continue
 		}
-		// Register under pkg-qualified keys.
 		cg.macros[pkgName+"."+bareName+"!"] = md
 		cg.macros[pkgName+"::"+bareName+"!"] = md
 		cg.macros[pkgName+"."+bareName] = md
