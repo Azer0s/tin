@@ -401,6 +401,7 @@ doneFlags:
 	// Estimate total stages for progress display.
 	// Actual total is refined after codegen when package C sources are known.
 	hasPotentialCoro := strings.Contains(string(src), "spawn ") || strings.Contains(string(src), "await ")
+
 	prelimTotal := 3 + len(fileCSources) + 1 // lex+parse+codegen + C sources + link
 	if hasPotentialCoro {
 		prelimTotal++ // coro split pass
@@ -650,6 +651,7 @@ doneFlags:
 		tmp, _ := filepath.Abs(tmpRel)
 		// Collect extra link inputs, memory-checker flag, and binary args (after --).
 		var extraObjs []string
+
 		var binArgs []string
 
 		memcheck := ""
@@ -1103,9 +1105,11 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 			"--errors-for-leak-kinds=all",
 			binary,
 		}, binArgs...)
+
 		return exec.Command("valgrind", args...)
 	case "leaks":
 		args := append([]string{"--atExit", "--", binary}, binArgs...)
+
 		return exec.Command("leaks", args...)
 	default:
 		return exec.Command(binary, binArgs...)
@@ -1339,6 +1343,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		run := memcheckCmd(memcheck, tmp.Name())
 
 		var outBuf bytes.Buffer
+
 		run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 		run.Stderr = os.Stderr
 
@@ -1350,6 +1355,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		fmt.Println("------------------------------------------------")
 
 		var failedTests []string
+
 		reason := ""
 
 		if !passed {

@@ -647,12 +647,12 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)          { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)   { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetUseDoubleForF128(v bool)  { cg.useDoubleForF128 = v }
-func (cg *CodeGen) SetVerboseHeuristics(v bool) { cg.verboseHeuristics = v }
-func (cg *CodeGen) SetProgressFunc(fn func(string))                     { cg.progressFn = fn }
-func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string))     { cg.tcoReportFn = fn }
+func (cg *CodeGen) SetTestMode(v bool)                              { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool)                       { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetUseDoubleForF128(v bool)                      { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetVerboseHeuristics(v bool)                     { cg.verboseHeuristics = v }
+func (cg *CodeGen) SetProgressFunc(fn func(string))                 { cg.progressFn = fn }
+func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoReportFn = fn }
 
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
@@ -661,7 +661,7 @@ func (cg *CodeGen) progress(msg string) {
 		cg.progressFn(msg)
 	}
 }
-func (cg *CodeGen) SetDebugMode(v bool)         { cg.debugMode = v }
+func (cg *CodeGen) SetDebugMode(v bool) { cg.debugMode = v }
 
 // HasTests reports whether the source contained at least one test block.
 // Only meaningful after Generate has been called.
@@ -1313,6 +1313,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 			// Build the [string] args value from argc/argv if needed.
 			var argsSliceVal value.Value
+
 			if wantsArgs {
 				strArrType := irtypes.NewStruct(irtypes.NewPointer(stringFatPtrType()), irtypes.I64)
 				argvFn := cg.ensureExternDecl("_tin_argv_to_slice", strArrType, []*ir.Param{
@@ -1334,6 +1335,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
 
 				var coroArgs []value.Value
+
 				for i, p := range userMainCoroFn.Params {
 					if wantsArgs && i == 0 {
 						coroArgs = append(coroArgs, argsSliceVal)
@@ -1351,6 +1353,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			} else {
 				// fn main(): call synchronously (existing behavior).
 				var callArgs []value.Value
+
 				for i, p := range userMainFn.Params {
 					if wantsArgs && i == 0 {
 						callArgs = append(callArgs, argsSliceVal)

@@ -606,6 +606,7 @@ func (cg *CodeGen) resolveMutualTCOCallee(name string) (*ir.Func, bool) {
 	if len(callee.Params) != len(cg.curFn.Params) {
 		return nil, false
 	}
+
 	for i, cp := range callee.Params {
 		if !cp.Type().Equal(cg.curFn.Params[i].Type()) {
 			return nil, false
@@ -631,6 +632,7 @@ func (cg *CodeGen) emitMutualTCO(block *ir.Block, ce *ast.CallExpr, callee *ir.F
 
 	for i, arg := range ce.Args {
 		cg.curBlock = block // sync before genExpr so stale values don't misdirect block updates
+
 		v, err := cg.genExpr(block, arg)
 		if err != nil {
 			return err
@@ -671,6 +673,7 @@ func (cg *CodeGen) emitMutualTCO(block *ir.Block, ce *ast.CallExpr, callee *ir.F
 // isFutureRetType reports whether t is a Future[T] generic type.
 func isFutureRetType(t ast.TypeExpr) bool {
 	g, ok := t.(*ast.GenericType)
+
 	return ok && g.Name == "Future"
 }
 

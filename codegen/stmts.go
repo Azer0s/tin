@@ -1687,6 +1687,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 	}
 	// Simple expression macros: AST substitution (fast path).
 	cg.progress("macro " + strings.TrimSuffix(macro.Name, "!"))
+
 	subst := make(map[string]ast.Node, len(macro.Params))
 	for i, p := range macro.Params {
 		subst[p] = args[i]
