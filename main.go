@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -45,6 +48,10 @@ Run/test flags:
   -v-valgrind      run binary under valgrind --leak-check=full (run, test)
   -v-leaks         run binary under leaks --atExit (run, test; macOS only)
   -v-heuristics    print auto-yield heuristics for every function to stderr
+
+Compiler output flags:
+  -v               print compilation stages (lex, parse, codegen, link, ...)
+  -v-tco           print tail call optimizations (self-TCO and mutual TCO) to stderr
 
 Debug flags:
   -f-debug-fiber-slots  print fiber struct pool ramp/decay events to stderr
@@ -302,6 +309,8 @@ doneFlags:
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
 	verboseHeuristics := false
+	verboseProgress := false
+	verboseTCO := false
 	debugBuild := false
 
 	// Scan all args (including those before the file) for flags.
@@ -328,6 +337,10 @@ doneFlags:
 			noWarnAwaitMatchGuards = true
 		case "-v-heuristics":
 			verboseHeuristics = true
+		case "-v":
+			verboseProgress = true
+		case "-v-tco":
+			verboseTCO = true
 		case "-f-debug-fiber-slots":
 			extraCFlags = append(extraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 		case "-g":
@@ -385,7 +398,23 @@ doneFlags:
 	// Collect directives declared in the source file via //! lines
 	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
 
+	// Estimate total stages for progress display.
+	// Actual total is refined after codegen when package C sources are known.
+	hasPotentialCoro := strings.Contains(string(src), "spawn ") || strings.Contains(string(src), "await ")
+	prelimTotal := 3 + len(fileCSources) + 1 // lex+parse+codegen + C sources + link
+	if hasPotentialCoro {
+		prelimTotal++ // coro split pass
+	}
+
+	cprog := &compileProgress{
+		verbose:    verboseProgress,
+		total:      prelimTotal,
+		sourceFile: file,
+	}
+
 	// Lex
+	cprog.step(file, "lex")
+
 	l := lexer.New(string(src))
 
 	tokens, lexErr := l.Tokenize()
@@ -396,6 +425,8 @@ doneFlags:
 	// Parse
 	// Pre-scan for #no_parens macros from `use { } from` imports so the parser
 	// can do token substitution for them before parsing begins.
+	cprog.step(file, "parse")
+
 	p := parser.New(tokens)
 	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens, stdlibDirForDirectives(stdlibOverride), nil) {
 		p.RegisterNoParensMacro(name, expansion)
@@ -431,6 +462,8 @@ doneFlags:
 	}
 
 	// Codegen
+	cprog.step(file, "codegen")
+
 	cg := codegen.New(file)
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)
@@ -459,6 +492,22 @@ doneFlags:
 
 	for _, r := range extraLibsRoots {
 		cg.AddLibsRoot(r)
+	}
+
+	if verboseProgress {
+		cg.SetProgressFunc(func(msg string) {
+			cprog.detail(msg)
+		})
+	}
+
+	if verboseTCO {
+		cg.SetTCOReportFunc(func(caller, callee string) {
+			if callee == "" {
+				fmt.Fprintf(os.Stderr, "tco: %s (self)\n", caller)
+			} else {
+				fmt.Fprintf(os.Stderr, "tco: %s -> %s (mutual)\n", caller, callee)
+			}
+		})
 	}
 
 	mod, cgErr := cg.Generate(prog)
@@ -511,6 +560,19 @@ doneFlags:
 		fileLinkerFlags = deduped
 	}
 
+	// Refine progress total now that package C sources are known and we can
+	// check whether a coroutine split pass is needed.
+	{
+		hasCoro := strings.Contains(irText, "llvm.coro.")
+		actualTotal := 3 + len(fileCSources) + 1
+
+		if hasCoro {
+			actualTotal++
+		}
+
+		cprog.setTotal(actualTotal)
+	}
+
 	// Collect linker flags: //! directives in the file + codegen link directives
 	srcLinkFlags := append([]string{}, fileLinkerFlags...)
 	for _, lib := range cg.LinkLibs() {
@@ -519,6 +581,7 @@ doneFlags:
 
 	switch cmd {
 	case "ir", "ir-test":
+		cprog.clear()
 		fmt.Print(irText)
 
 	case "build":
@@ -546,9 +609,12 @@ doneFlags:
 		}
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags, debugBuild); err != nil {
+
+		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
+
+		cprog.clear()
 
 	case "build-test":
 		out := strings.TrimSuffix(file, filepath.Ext(file)) + ".test"
@@ -572,21 +638,29 @@ doneFlags:
 		}
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
-		if err := compileIR(irText, out, false, extraObjs, fileCSources, extraCFlags); err != nil {
+
+		if err := compileIR(irText, out, false, extraObjs, fileCSources, extraCFlags, cprog); err != nil {
 			die("compile error: %v", err)
 		}
+
+		cprog.clear()
 
 	case "run", "test":
 		tmpRel := strings.TrimSuffix(file, filepath.Ext(file)) + ".tin.out"
 		tmp, _ := filepath.Abs(tmpRel)
-		// Collect extra link inputs and memory-checker flag for run/test mode.
+		// Collect extra link inputs, memory-checker flag, and binary args (after --).
 		var extraObjs []string
+		var binArgs []string
 
 		memcheck := ""
 
 		for i := fileArgIdx + 1; i < len(os.Args); i++ {
 			a := os.Args[i]
-			if a == "-v-valgrind" {
+			if a == "--" {
+				binArgs = append(binArgs, os.Args[i+1:]...)
+
+				break
+			} else if a == "-v-valgrind" {
 				memcheck = "valgrind"
 			} else if a == "-v-leaks" {
 				memcheck = "leaks"
@@ -601,16 +675,19 @@ doneFlags:
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
 
-		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags, debugBuild); err != nil {
+		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
+
+		cprog.clear()
+
 		defer func(name string) {
 			_ = os.Remove(name)
 		}(tmp)
 
 		validateMemcheck(memcheck)
 
-		run := memcheckCmd(memcheck, tmp)
+		run := memcheckCmd(memcheck, tmp, binArgs...)
 		run.Stdout = os.Stdout
 		run.Stderr = os.Stderr
 
@@ -707,8 +784,9 @@ func fixCoroAttrs(ir string) string {
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
 // cSources are C source files to compile in alongside the IR.
+// prog is the optional progress tracker (nil = silent).
 // debugMode switches the final compile from -O2 to -O0 and adds -g.
-func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, debugMode ...bool) error {
+func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, prog *compileProgress, debugMode ...bool) error {
 	isDebug := len(debugMode) > 0 && debugMode[0]
 	// Write IR to temp file
 	//goland:noinspection GoResourceLeak
@@ -748,6 +826,15 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		_ = splitFile.Close()
 
 		defer func() { _ = os.Remove(splitName) }()
+
+		sourceFile := outBin
+		if prog != nil {
+			sourceFile = prog.sourceFile
+		}
+
+		if prog != nil {
+			prog.step(sourceFile, "coro split")
+		}
 
 		split := exec.Command("clang", "-O1", "-S", "-emit-llvm", llInputFile, "-o", splitName)
 		split.Stdout = os.Stdout
@@ -820,6 +907,11 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			cArgs := []string{"-O2", "-c"}
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
+
+			if prog != nil {
+				prog.step(cs.path, "compile")
+			}
+
 			clangC := exec.Command("clang", cArgs...)
 			clangC.Stdout = os.Stdout
 
@@ -842,6 +934,10 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		}()
 
 		// Merge all object files into the final output with ld -r (partial link)
+		if prog != nil {
+			prog.step(outBin, "link")
+		}
+
 		ldArgs := append([]string{"-r"}, objs...)
 		ldArgs = append(ldArgs, "-o", outBin)
 		ld := exec.Command("ld", ldArgs...)
@@ -883,6 +979,11 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		cArgs := []string{"-O2", "-c"}
 		cArgs = append(cArgs, compileFlags...)
 		cArgs = append(cArgs, cs.path, "-o", cObjName)
+
+		if prog != nil {
+			prog.step(cs.path, "compile")
+		}
+
 		clangC := exec.Command("clang", cArgs...)
 		clangC.Stdout = os.Stdout
 
@@ -927,6 +1028,10 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
 	args = append(args, "-o", outBin)
+
+	if prog != nil {
+		prog.step(outBin, "link")
+	}
 
 	clang := exec.Command("clang", args...)
 	clang.Stdout = os.Stdout
@@ -988,14 +1093,22 @@ func validateMemcheck(memcheck string) {
 }
 
 // memcheckCmd builds the exec.Cmd to run binary under the requested checker.
-func memcheckCmd(memcheck, binary string) *exec.Cmd {
+// binArgs are forwarded to the binary as its argv[1..].
+func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 	switch memcheck {
 	case "valgrind":
-		return exec.Command("valgrind", "--error-exitcode=1", "--leak-check=full", binary)
+		args := append([]string{
+			"--error-exitcode=1",
+			"--leak-check=full",
+			"--errors-for-leak-kinds=all",
+			binary,
+		}, binArgs...)
+		return exec.Command("valgrind", args...)
 	case "leaks":
-		return exec.Command("leaks", "--atExit", "--", binary)
+		args := append([]string{"--atExit", "--", binary}, binArgs...)
+		return exec.Command("leaks", args...)
 	default:
-		return exec.Command(binary)
+		return exec.Command(binary, binArgs...)
 	}
 }
 
@@ -1052,12 +1165,16 @@ func runDirTests(dir string, extraFlags []string, extraCFlags []string, memcheck
 // runFileTests runs the given .tin files that contain test blocks.
 // It prints a per-file header and aggregate summary, then exits non-zero
 // if any file has failing tests.  memcheck is "", "valgrind", or "leaks".
+// reTestFailed matches lines like "test: my test name ... FAILED"
+var reTestFailed = regexp.MustCompile(`^test: (.+) \.\.\. FAILED`)
+
 func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, memcheck string) {
 	type result struct {
-		file    string
-		passed  bool
-		skipped bool
-		reason  string
+		file        string
+		passed      bool
+		skipped     bool
+		reason      string
+		failedTests []string // individual test names that failed (empty = whole-file failure)
 	}
 
 	wd, _ := os.Getwd()
@@ -1087,7 +1204,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
-			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr)})
+			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr), nil})
 
 			continue
 		}
@@ -1100,7 +1217,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
-			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr)})
+			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr), nil})
 
 			continue
 		}
@@ -1130,7 +1247,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}()
 		if cgErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
-			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr)})
+			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr), nil})
 
 			continue
 		}
@@ -1195,7 +1312,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
 
-			results = append(results, result{fname, false, false, fmt.Sprintf("error: %v", tmpErr)})
+			results = append(results, result{fname, false, false, fmt.Sprintf("error: %v", tmpErr), nil})
 
 			continue
 		}
@@ -1207,12 +1324,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}(tmp.Name())
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags); compErr != nil {
+		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, nil); compErr != nil {
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
 			_, _ = fmt.Fprintf(os.Stderr, "  compile error: %v\n", compErr)
 
-			results = append(results, result{fname, false, false, fmt.Sprintf("compile error: %v", compErr)})
+			results = append(results, result{fname, false, false, fmt.Sprintf("compile error: %v", compErr), nil})
 
 			continue
 		}
@@ -1221,7 +1338,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		run := memcheckCmd(memcheck, tmp.Name())
 
-		run.Stdout = os.Stdout
+		var outBuf bytes.Buffer
+		run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 		run.Stderr = os.Stderr
 
 		passed := true
@@ -1231,13 +1349,24 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		fmt.Println("------------------------------------------------")
 
+		var failedTests []string
 		reason := ""
 
 		if !passed {
-			reason = "test failures"
+			for _, line := range strings.Split(outBuf.String(), "\n") {
+				if m := reTestFailed.FindStringSubmatch(line); m != nil {
+					failedTests = append(failedTests, m[1])
+				}
+			}
+
+			if len(failedTests) > 0 {
+				reason = "test failures"
+			} else {
+				reason = "process error"
+			}
 		}
 
-		results = append(results, result{fname, passed, false, reason})
+		results = append(results, result{fname, passed, false, reason, failedTests})
 	}
 
 	if len(results) == 0 {
@@ -1273,7 +1402,15 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		for _, r := range results {
 			if !r.skipped && !r.passed {
-				fmt.Printf("  %s: %s\n", r.file, r.reason)
+				if len(r.failedTests) > 0 {
+					fmt.Printf("  %s:\n", r.file)
+
+					for _, t := range r.failedTests {
+						fmt.Printf("    - %s\n", t)
+					}
+				} else {
+					fmt.Printf("  %s: %s\n", r.file, r.reason)
+				}
 			}
 		}
 	}
@@ -1313,6 +1450,8 @@ func patchMissingDILabelLine(ir string) string {
 }
 
 func die(format string, args ...any) {
+	// Clear any in-progress progress line so the error message starts cleanly.
+	_, _ = fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", progressLineWidth))
 	_, _ = fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
 
 	os.Exit(1)

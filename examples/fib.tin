@@ -5,11 +5,28 @@ fn fib(n u32) u32 =
   where n <= 1: n
   where _: fib(n - 1) + fib(n - 2)
 
+// tail-recursive fibonacci using accumulator (TCO applied automatically)
+fn fib_acc(n u64, a u64, b u64) u64 =
+  where n == 0: a
+  where _: fib_acc(n - 1, b, a + b)
+
+fn fib_tco(n u64) u64 =
+  return fib_acc(n, 0, 1)
+
 echo fib(10)
 echo fib(20)
+echo fib_tco(10)
+echo fib_tco(50)
 
 test "fibonacci" =
   assert::equals(fib(0) as i64, 0)
   assert::equals(fib(1) as i64, 1)
   assert::equals(fib(10) as i64, 55)
   assert::equals(fib(20) as i64, 6765)
+
+test "fibonacci tco" =
+  assert::equals(fib_tco(0) as i64, 0)
+  assert::equals(fib_tco(1) as i64, 1)
+  assert::equals(fib_tco(10) as i64, 55)
+  assert::equals(fib_tco(20) as i64, 6765)
+  assert::equals(fib_tco(50) as i64, 12586269025)

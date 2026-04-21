@@ -37,6 +37,18 @@ void *_tin_slice_idx(TinSlice s, int64_t i, int64_t elem_size) {
     return (char *)s.ptr + i * elem_size;
 }
 
+// Build a TinStringArray from main()'s argc/argv.
+// Each string is RC-allocated (via _tin_string_from_bytes) so ARC release works.
+// The buffer is RC-allocated so _tin_release_fat_elem_array can free it.
+TinStringArray _tin_argv_to_slice(int32_t argc, char **argv) {
+    TinString *buf = (TinString *)_tin_rc_alloc((int64_t)argc * (int64_t)sizeof(TinString));
+    for (int32_t i = 0; i < argc; i++) {
+        const char *s = argv[i];
+        buf[i] = _tin_string_from_bytes(s, (int64_t)strlen(s));
+    }
+    return (TinStringArray){ buf, (int64_t)argc };
+}
+
 // Return a sub-slice starting at index `start`.
 // Allocates a fresh ARC-managed copy (rc=1); caller owns one reference.
 TinSlice _tin_slice_subslice(TinSlice s, int64_t start, int64_t elem_size) {

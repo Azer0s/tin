@@ -76,7 +76,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 	if len(e.Path) >= 2 {
 		baseName := e.Path[0]
 
-		// 3-element path: pkg::StructName::method — struct is path[1], not path[0].
+		// 3-element path: pkg::StructName::method - struct is path[1], not path[0].
 		if len(e.Path) == 3 {
 			baseName = e.Path[1]
 		}
@@ -87,7 +87,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 			baseName = baseName[:i]
 		}
 
-		// Strip package qualifier (e.g. "collections::HashMap" → "HashMap") for scope lookup.
+		// Strip package qualifier (e.g. "collections::HashMap" -> "HashMap") for scope lookup.
 		bareBaseName := baseName
 		if idx2 := strings.LastIndex(bareBaseName, "::"); idx2 >= 0 {
 			bareBaseName = bareBaseName[idx2+2:]
@@ -1891,7 +1891,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 
 	coroEntry, ok := cg.curScope.lookup(coroName)
 	if !ok {
-		// Also try stripping a package prefix (pkg__foo → foo$coro).
+		// Also try stripping a package prefix (pkg__foo -> foo$coro).
 		if idx := strings.Index(fnName, "__"); idx >= 0 {
 			coroEntry, ok = cg.curScope.lookup(fnName[idx+2:] + "$coro")
 		}

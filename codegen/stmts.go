@@ -261,6 +261,15 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		return nil
 	}
 
+	// TCO: intercept a bare self-call expression body and rewrite as a loop-back.
+	if cg.tcoFuncName != "" {
+		if ce, ok := body.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 && ident.Name == cg.tcoFuncName {
+				return cg.emitTCOLoopBack(block, ce)
+			}
+		}
+	}
+
 	// Expression body: evaluate and return value.
 	// Seed currentPos from the body node's position so the ret gets the
 	// correct source line in debug builds.
@@ -1088,6 +1097,29 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		return cg.genCoroReturn(block, s)
 	}
 
+	// Self-TCO: intercept `return name(args...)` and rewrite as a loop-back.
+	if cg.tcoFuncName != "" && s.Value != nil {
+		if ce, ok := s.Value.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 && ident.Name == cg.tcoFuncName {
+				return cg.emitTCOLoopBack(block, ce)
+			}
+		}
+	}
+
+	// Mutual TCO: `return g(args...)` where g is a different Tin function with a
+	// compatible non-RC return type. Emit a musttail call so LLVM turns it into
+	// a sibling call, preventing stack growth in mutually-recursive cycles.
+	if cg.mutualTCOEligible && s.Value != nil &&
+		cg.curFnDeferRetAlloca == nil && len(cg.pendingDeferFnI8s) == 0 {
+		if ce, ok := s.Value.(*ast.CallExpr); ok {
+			if ident, ok2 := ce.Func.(*ast.Identifier); ok2 {
+				if callee, eligible := cg.resolveMutualTCOCallee(ident.Name); eligible {
+					return cg.emitMutualTCO(block, ce, callee)
+				}
+			}
+		}
+	}
+
 	// Inside a defer thunk: 'return val' overrides the outer function's return value
 	// by writing to the ret_slot parameter.
 	if cg.curDeferRetSlotParam != nil {
@@ -1654,6 +1686,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		return cg.genExpr(block, resultNode)
 	}
 	// Simple expression macros: AST substitution (fast path).
+	cg.progress("macro " + strings.TrimSuffix(macro.Name, "!"))
 	subst := make(map[string]ast.Node, len(macro.Params))
 	for i, p := range macro.Params {
 		subst[p] = args[i]
@@ -2313,7 +2346,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	bodyBlock := cg.newBlock("for.body")
 	afterBlock := cg.newBlock("for.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Condition - set curBlock so we can detect if await/yield changed it.
 	cg.curBlock = condBlock
@@ -2344,6 +2377,8 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	} else {
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
 	}
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body - push a fresh scope so that `let` declarations inside the loop
 	// body are tracked separately from the outer function scope.  This allows
@@ -2441,6 +2476,8 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 		condBlock.NewBr(bodyBlock)
 	}
 
+	cg.attachForLoopDbg(s.Pos(), block.Term, condBlock)
+
 	// Body
 	cg.curScope = newScope(cg.curScope)
 
@@ -2516,9 +2553,14 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 
 	// Get element type.
 	// For string fat-pointers ({i8*, i64}), default element type is i8 (byte).
+	// For fat arrays {T*, i64}, infer T from the pointer field.
 	var elemType irtypes.Type = irtypes.I64
 	if isStringType(iterVal.Type()) {
 		elemType = irtypes.I8
+	} else if isFatArrayPtr(iterVal.Type()) {
+		if pt, ok := iterVal.Type().(*irtypes.StructType).Fields[0].(*irtypes.PointerType); ok {
+			elemType = pt.ElemType
+		}
 	}
 
 	if s.VarType != nil {
@@ -2563,13 +2605,15 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	// Loop counter.
 	idxAlloca := block.NewAlloca(irtypes.I64)
 	block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: idx < len.
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	lenVal := condBlock.NewLoad(irtypes.I64, lenAlloca)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenVal)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body.
 	cg.curScope = newScope(cg.curScope)
@@ -2659,12 +2703,14 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 	bodyBlock := cg.newBlock("forin.rune.body")
 	afterBlock := cg.newBlock("forin.rune.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// cond: i < len
 	idx := condBlock.NewLoad(irtypes.I64, idxAlloca)
 	cond := condBlock.NewICmp(enum.IPredSLT, idx, lenVal)
 	condBlock.NewCondBr(cond, decBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// decode: read first byte, branch on sequence type
 	b0ptr := decBlock.NewGetElementPtr(irtypes.I8, dataPtr, idx)
@@ -2831,13 +2877,15 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	bodyBlock := cg.newBlock("range.body")
 	afterBlock := cg.newBlock("range.after")
 
-	block.NewBr(condBlock)
+	brToCond := block.NewBr(condBlock)
 
 	// Cond: i < end.
 	iVal := condBlock.NewLoad(varType, loopVar)
 	endLoad := cg.coerce(condBlock, end, varType)
 	cond := condBlock.NewICmp(enum.IPredSLT, iVal, endLoad)
 	condBlock.NewCondBr(cond, bodyBlock, afterBlock)
+
+	cg.attachForLoopDbg(s.Pos(), brToCond, condBlock)
 
 	// Body.
 	cg.curScope = newScope(cg.curScope)

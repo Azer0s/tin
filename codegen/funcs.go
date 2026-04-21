@@ -419,6 +419,261 @@ func hasDeferStmt(body ast.Node) bool {
 	return false
 }
 
+// hasSelfTailCall reports whether body contains at least one direct self-call
+// to funcName in tail position (as the sole expression of a where clause, or
+// as the value of an explicit return statement).  Nested fn/lambda bodies are
+// not descended into.
+func hasSelfTailCall(funcName string, body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	switch n := body.(type) {
+	case *ast.ReturnStmt:
+		if n == nil {
+			return false
+		}
+
+		return isSelfCallExpr(funcName, n.Value)
+	case *ast.WhereList:
+		if n == nil {
+			return false
+		}
+
+		for _, c := range n.Clauses {
+			if hasSelfTailCall(funcName, c.Body) {
+				return true
+			}
+		}
+	case *ast.Block:
+		if n == nil {
+			return false
+		}
+
+		for _, s := range n.Stmts {
+			if hasSelfTailCall(funcName, s) {
+				return true
+			}
+		}
+	case *ast.IfStmt:
+		if n == nil {
+			return false
+		}
+
+		if hasSelfTailCall(funcName, n.Then) {
+			return true
+		}
+
+		if hasSelfTailCall(funcName, n.Else) {
+			return true
+		}
+
+		for _, elif := range n.ElseIfs {
+			if hasSelfTailCall(funcName, elif.Body) {
+				return true
+			}
+		}
+	case *ast.MatchStmt:
+		if n == nil {
+			return false
+		}
+
+		for _, arm := range n.Cases {
+			if hasSelfTailCall(funcName, arm.Body) {
+				return true
+			}
+		}
+	case *ast.ExprStmt:
+		if n == nil {
+			return false
+		}
+
+		return isSelfCallExpr(funcName, n.Expr)
+	case *ast.FuncDecl, *ast.LambdaExpr:
+		return false // don't descend into nested functions
+	default:
+		return isSelfCallExpr(funcName, n)
+	}
+
+	return false
+}
+
+// isSelfCallExpr returns true if node is a direct call to funcName.
+func isSelfCallExpr(funcName string, node ast.Node) bool {
+	if node == nil {
+		return false
+	}
+
+	ce, ok := node.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	ident, ok := ce.Func.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+
+	return ident.Name == funcName
+}
+
+// emitTCOLoopBack handles a tail self-call in a TCO-eligible function:
+// it evaluates the new argument values, releases any in-scope RC locals,
+// stores the new values into the parameter allocas, and branches back to
+// the tco_loop block instead of emitting a recursive call + return.
+func (cg *CodeGen) emitTCOLoopBack(block *ir.Block, ce *ast.CallExpr) error {
+	// Evaluate all new argument values before touching any alloca so that
+	// expressions like fact(n-1, n*acc) can safely read n and acc.
+	newVals := make([]value.Value, len(cg.tcoParams))
+
+	for i, astArg := range ce.Args {
+		val, err := cg.genExpr(block, astArg)
+		if err != nil {
+			return err
+		}
+		// Sync block advance (e.g. coro chain calls can redirect cg.curBlock).
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+		// Coerce to the alloca's element type.
+		if e, ok := cg.curScope.lookup(cg.tcoParams[i]); ok && e.isAlloc {
+			if alloca, ok2 := e.val.(*ir.InstAlloca); ok2 {
+				val = cg.coerce(block, val, alloca.ElemType)
+			}
+		}
+
+		newVals[i] = val
+	}
+
+	// Release any RC-tracked locals that are live in the current scope
+	// (non-RC params are skipped automatically by emitAllScopeReleases).
+	cg.emitAllScopeReleases(block, "")
+
+	// Update the parameter allocas with the new values.
+	for i, paramName := range cg.tcoParams {
+		if e, ok := cg.curScope.lookup(paramName); ok && e.isAlloc {
+			if alloca, ok2 := e.val.(*ir.InstAlloca); ok2 {
+				block.NewStore(newVals[i], alloca)
+			}
+		}
+	}
+
+	// Branch back to the loop header.
+	block.NewBr(cg.tcoLoopTop)
+
+	return nil
+}
+
+// resolveMutualTCOCallee checks whether name refers to a Tin function that can
+// receive a musttail call from the current function. Returns the IR function and
+// true when eligible; false otherwise.
+func (cg *CodeGen) resolveMutualTCOCallee(name string) (*ir.Func, bool) {
+	if cg.curFn == nil {
+		return nil, false
+	}
+
+	entry, ok := cg.curScope.lookup(name)
+	if !ok || entry.isAlloc {
+		return nil, false
+	}
+
+	callee, ok := entry.val.(*ir.Func)
+	if !ok {
+		return nil, false
+	}
+
+	// Exclude C extern symbols (they may use different calling conventions).
+	if cg.externIRNames[callee.Name()] {
+		return nil, false
+	}
+
+	// Coroutine functions have their IR signatures transformed; skip mutual TCO.
+	if cg.inCoroFn {
+		return nil, false
+	}
+
+	// musttail requires identical return types.
+	if !callee.Sig.RetType.Equal(cg.curFn.Sig.RetType) {
+		return nil, false
+	}
+
+	// No variadic callees.
+	if callee.Sig.Variadic {
+		return nil, false
+	}
+
+	// musttail requires matching parameter counts and types (sibling call constraint).
+	if len(callee.Params) != len(cg.curFn.Params) {
+		return nil, false
+	}
+	for i, cp := range callee.Params {
+		if !cp.Type().Equal(cg.curFn.Params[i].Type()) {
+			return nil, false
+		}
+	}
+
+	// All callee params must be non-RC so scope cleanup before the call is safe.
+	for _, p := range callee.Params {
+		if isRCTrackedType(p.Type()) {
+			return nil, false
+		}
+	}
+
+	return callee, true
+}
+
+// emitMutualTCO emits a musttail call to callee and returns its result,
+// performing scope cleanup BEFORE the call so no instructions appear between
+// the musttail call and the immediately following ret.
+func (cg *CodeGen) emitMutualTCO(block *ir.Block, ce *ast.CallExpr, callee *ir.Func) error {
+	// Evaluate all argument values before releasing scope.
+	argVals := make([]value.Value, len(ce.Args))
+
+	for i, arg := range ce.Args {
+		cg.curBlock = block // sync before genExpr so stale values don't misdirect block updates
+		v, err := cg.genExpr(block, arg)
+		if err != nil {
+			return err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		if i < len(callee.Params) {
+			v = cg.coerce(block, v, callee.Params[i].Type())
+		}
+
+		argVals[i] = v
+	}
+
+	// Release all RC-tracked locals before the tail call.
+	cg.emitAllScopeReleases(block, "")
+
+	// Emit musttail call.
+	call := block.NewCall(callee, argVals...)
+	call.Tail = enum.TailMustTail
+
+	if cg.tcoReportFn != nil {
+		cg.tcoReportFn(cg.curFn.Name(), callee.Name())
+	}
+
+	// Return the call result directly (no post-processing, satisfying musttail).
+	if irtypes.IsVoid(call.Type()) {
+		block.NewRet(nil)
+	} else {
+		block.NewRet(call)
+	}
+
+	return nil
+}
+
+// isFutureRetType reports whether t is a Future[T] generic type.
+func isFutureRetType(t ast.TypeExpr) bool {
+	g, ok := t.(*ast.GenericType)
+	return ok && g.Name == "Future"
+}
+
 // bodyContainsSpawnOrAwait reports whether any node in the body (recursively)
 // is a SpawnExpr or AwaitExpr. Nested fn declarations are not descended into.
 func bodyContainsSpawnOrAwait(body []ast.Node) bool {
@@ -538,6 +793,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 		}
 
 		irName = "_tin_user_main"
+		cg.userMainDecl = n
 		// Keep `main` resolvable from Tin source (e.g. for recursion).
 		defer func() {
 			if entry, ok2 := cg.curScope.lookup("_tin_user_main"); ok2 {
@@ -564,6 +820,15 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	if cg.overloadedNames[n.Name] && n.IsExtern == "" && len(n.Constraints) == 0 {
 		sig := funcParamSig(n.Params)
 		irName = overloadMangledName(irName, sig)
+	}
+
+	if n.Body != nil || n.IsExtern != "" {
+		label := "fn " + n.Name
+		if n.IsExtern != "" {
+			label = "extern " + n.Name
+		}
+
+		cg.progress(label)
 	}
 
 	return cg.genFuncDeclAs(n, irName)
@@ -1035,8 +1300,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						if nativeSt, ok2 := native.Type().(*irtypes.StructType); ok2 {
 							structBits := uint64(nativeStructByteSize(nativeSt)) * 8
 							if structBits < intTy.BitSize {
-								// Coerced type is wider than the struct (ARM64: ≤8-byte
-								// struct → i64). Load at the struct's natural bit size
+								// Coerced type is wider than the struct (ARM64: <=8-byte
+								// struct -> i64). Load at the struct's natural bit size
 								// to avoid an out-of-bounds read, then zero-extend.
 								smallTy := irtypes.NewInt(structBits)
 								a := entry.NewAlloca(nativeSt)
@@ -1105,7 +1370,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 							nativeAlloca := entry.NewAlloca(nativeSt)
 
 							if structBits < intTy.BitSize {
-								// Wider coercion (ARM64: i64 → struct); truncate first.
+								// Wider coercion (ARM64: i64 -> struct); truncate first.
 								smallTy := irtypes.NewInt(structBits)
 								truncated := entry.NewTrunc(rawResult, smallTy)
 								ip := entry.NewBitCast(nativeAlloca, irtypes.NewPointer(smallTy))
@@ -1314,6 +1579,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 	// Always restore context, even on error paths (e.g. when genBody returns
 	// an error during on-demand monomorphization of a generic struct method).
+	prevTCOFuncName := cg.tcoFuncName
+	prevTCOLoopTop := cg.tcoLoopTop
+	prevTCOParams := cg.tcoParams
+	prevMutualTCO := cg.mutualTCOEligible
+
 	defer func() {
 		cg.curFn = prevFn
 		cg.curScope = prevScope
@@ -1328,6 +1598,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.curFnEscapingVars = prevEscapingVars
 		cg.curFnEscapingAliases = prevEscapingAliases
 		cg.diCurrentScope = prevDiScope
+		cg.tcoFuncName = prevTCOFuncName
+		cg.tcoLoopTop = prevTCOLoopTop
+		cg.tcoParams = prevTCOParams
+		cg.mutualTCOEligible = prevMutualTCO
 	}()
 
 	// Register function in current scope so recursion works.
@@ -1380,18 +1654,86 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 	}
 
+	// TCO eligibility: direct, sync, non-extern, non-overloaded function whose
+	// body contains at least one direct self tail call and has no defers. Params
+	// must all be non-RC (no strings, arrays, any, fn) so we can update allocas
+	// safely. Overloaded functions are excluded because a same-name call in the
+	// body may target a sibling overload with different parameter types, not the
+	// function itself.
+	isTCO := n.IsExtern == "" &&
+		!isAsyncTag(n.Tags) &&
+		!hasDeferStmt(n.Body) &&
+		!cg.overloadedNames[n.Name] &&
+		len(n.Params) > 0 &&
+		hasSelfTailCall(n.Name, n.Body)
+
+	if isTCO {
+		for _, astP := range n.Params {
+			if astP.IsVarArgs {
+				isTCO = false
+
+				break
+			}
+
+			if e, ok := cg.curScope.lookup(astP.Name); ok && e.isAlloc {
+				if alloca, ok2 := e.val.(*ir.InstAlloca); ok2 && isRCTrackedType(alloca.ElemType) {
+					isTCO = false
+
+					break
+				}
+			}
+		}
+	}
+
+	// startBlock is where the function body and match-subject load are emitted.
+	// For TCO functions, entry only holds param allocas then jumps to tco_loop.
+	startBlock := entry
+
+	if isTCO {
+		tcoLoop := f.NewBlock("tco_loop")
+		entry.NewBr(tcoLoop)
+
+		cg.tcoFuncName = n.Name
+		cg.tcoLoopTop = tcoLoop
+		cg.tcoParams = nil
+
+		for _, astP := range n.Params {
+			if !astP.IsVarArgs {
+				cg.tcoParams = append(cg.tcoParams, astP.Name)
+			}
+		}
+
+		startBlock = tcoLoop
+
+		if cg.tcoReportFn != nil {
+			cg.tcoReportFn(n.Name, "")
+		}
+	}
+
+	// Mutual TCO eligibility: same as self-TCO but for calls to OTHER functions.
+	// Requires non-RC return type so the musttail call result can be returned
+	// directly without retain/release between the call and the ret instruction.
+	// Async functions (including those that implicitly return Future[T]) are excluded
+	// because their IR signatures change during the coro split pass.
+	cg.mutualTCOEligible = n.IsExtern == "" &&
+		!isAsyncTag(n.Tags) &&
+		!isFutureRetType(n.RetType) &&
+		!hasDeferStmt(n.Body) &&
+		!isRCTrackedType(retType)
+
 	// For where-list bodies, set the match subject to the first parameter so
 	// that atom conditions (e.g. `where 'ok:`) compare against it.
+	// The load is placed in startBlock so it re-executes on every loop iteration.
 	prevMatchSubject := cg.matchSubject
 
 	if _, isWhere := n.Body.(*ast.WhereList); isWhere && firstParamAlloca != nil {
-		loadInst := entry.NewLoad(firstParamAlloca.ElemType, firstParamAlloca)
+		loadInst := startBlock.NewLoad(firstParamAlloca.ElemType, firstParamAlloca)
 		cg.attachCurrentDbgLoc(loadInst)
 		cg.matchSubject = loadInst
 	}
 
 	// Generate body (genBody ensures a terminator is added to the current block).
-	_, bodyErr := cg.genBody(entry, n.Body, retType)
+	_, bodyErr := cg.genBody(startBlock, n.Body, retType)
 	cg.matchSubject = prevMatchSubject
 
 	// Ensure all call instructions have !dbg (LLVM requires this when the
@@ -1418,6 +1760,9 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFnEscapingVars = prevEscapingVars
 	cg.curFnEscapingAliases = prevEscapingAliases
 	cg.diCurrentScope = prevDiScope
+	cg.tcoFuncName = prevTCOFuncName
+	cg.tcoLoopTop = prevTCOLoopTop
+	cg.tcoParams = prevTCOParams
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.
@@ -1483,6 +1828,13 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	cg.emitDbgSubprogramForSynthetic(f, "main", mainLine)
 
 	defer func() { cg.diCurrentScope = prevDbgScope }()
+
+	// Seed currentPos so that preamble instructions (fiber init, var inits)
+	// carry the first statement's source line rather than line 0. Without this
+	// `br set -n main` in lldb lands on line 0 before the user's code.
+	if cg.debugMode && len(stmts) > 0 {
+		cg.currentPos = stmts[0].Pos()
+	}
 
 	// Emit fiber init if the program uses any fiber features.
 	entry = cg.emitFiberMainWrap(entry)

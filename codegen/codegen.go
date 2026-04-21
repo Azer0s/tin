@@ -268,6 +268,24 @@ type CodeGen struct {
 	// is a pure where-list pattern match. Used to compare atom conditions.
 	matchSubject value.Value
 
+	// TCO (tail call optimization) state for the current function.
+	// tcoFuncName is the Tin name of the function being TCO'd; non-empty only
+	// while compiling a TCO-eligible function body.
+	tcoFuncName string
+	// tcoLoopTop is the "tco_loop" block that param-update branches jump back to.
+	tcoLoopTop *ir.Block
+	// tcoParams lists the parameter names in declaration order, used to locate
+	// the right alloca when rewriting a tail self-call as a loop-back.
+	tcoParams []string
+
+	// mutualTCOEligible is true while compiling a function that can emit
+	// musttail calls for mutual tail recursion (non-RC params/return, no defers).
+	mutualTCOEligible bool
+
+	// tcoReportFn is called when a TCO transformation is applied.
+	// caller is the function being compiled; callee is the target (empty for self-TCO).
+	tcoReportFn func(caller, callee string)
+
 	// strcmpFn: lazily declared C strcmp
 	strcmpFn *ir.Func
 	// anyEqFn: lazily declared _tin_any_eq runtime helper
@@ -302,6 +320,10 @@ type CodeGen struct {
 
 	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
 	noWarnAsyncMain bool
+
+	// userMainDecl is the AST node for the user's explicit fn main(), saved
+	// during genFuncDecl so the wrapper can inspect params and return type.
+	userMainDecl *ast.FuncDecl
 
 	// ------------------------------------------------------------------
 	// Debug info (DWARF, -g flag)
@@ -407,6 +429,12 @@ type CodeGen struct {
 	// verboseHeuristics enables per-function heuristic output to stderr.
 	// Activated by the -v-heuristics CLI flag.
 	verboseHeuristics bool
+
+	// progressFn, if non-nil, is called with a short human-readable message at
+	// each notable compilation event (pass boundaries, function generation,
+	// package imports, CTFE evaluations, macro expansions).
+	// Set via SetProgressFunc; used by the -v CLI flag.
+	progressFn func(string)
 
 	// Per-function coro state (valid only when genCoroFuncBody is active).
 	inCoroFn       bool
@@ -623,6 +651,16 @@ func (cg *CodeGen) SetTestMode(v bool)          { cg.testMode = v }
 func (cg *CodeGen) SetNoWarnAsyncMain(v bool)   { cg.noWarnAsyncMain = v }
 func (cg *CodeGen) SetUseDoubleForF128(v bool)  { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetVerboseHeuristics(v bool) { cg.verboseHeuristics = v }
+func (cg *CodeGen) SetProgressFunc(fn func(string))                     { cg.progressFn = fn }
+func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string))     { cg.tcoReportFn = fn }
+
+// progress fires the optional progress callback with msg.  Callers use it to
+// report named pass boundaries, per-function events, imports, CTFE, and macros.
+func (cg *CodeGen) progress(msg string) {
+	if cg.progressFn != nil {
+		cg.progressFn(msg)
+	}
+}
 func (cg *CodeGen) SetDebugMode(v bool)         { cg.debugMode = v }
 
 // HasTests reports whether the source contained at least one test block.
@@ -880,8 +918,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// an explicit trait declaration in source.
 	cg.registerBuiltinTraits()
 
+	// Duplicate-declaration pass: reject same-scope re-declarations before
+	// any IR is emitted.  Shadowing (same name in a nested scope) is allowed.
+	cg.progress("check declarations")
+
+	if err := checkDuplicateDecls(prog.Stmts); err != nil {
+		return nil, fmt.Errorf("semantic error: %w", err)
+	}
+
 	// Zero pass: collect exports and constrained generic function templates
 	// before compiling anything.
+	cg.progress("collect exports")
+
 	for _, node := range prog.Stmts {
 		if exp, ok := node.(*ast.ExportDecl); ok && exp.AsName != "" {
 			for _, name := range exp.Names {
@@ -900,6 +948,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// First pass: register struct / enum / type declarations so forward refs work.
 	// Collect concrete struct decls for the cycle check below.
+	cg.progress("register types")
+
 	var concreteStructDecls []*ast.StructDecl
 
 	for _, node := range prog.Stmts {
@@ -914,12 +964,16 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// Validate struct reference cycles: every cycle must have at least one
 	// weak edge and at least one strong edge.
+	cg.progress("check struct cycles")
+
 	if err := cg.checkStructCycles(concreteStructDecls); err != nil {
 		return nil, err
 	}
 
 	// Validate complex (block-body) macros: side-effect check.
 	// Recursive macros are allowed - the 5-second timeout handles runaway recursion.
+	cg.progress("validate macros")
+
 	for _, m := range cg.macros {
 		if isMacroComplex(m) {
 			if err := checkMacroSideEffects(m); err != nil {
@@ -947,6 +1001,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// AtomicI64 from "use sync") are registered before preregisterTopLevelVar
 	// tries to resolve types like sync::AtomicI64, and before predeclareFunc
 	// tries to resolve parameter types like sync::Channel[i64].
+	cg.progress("load packages")
+
 	for _, node := range prog.Stmts {
 		if ud, ok := node.(*ast.UseDecl); ok && !ud.IsExtern {
 			if err := cg.genUseDecl(ud); err != nil {
@@ -958,6 +1014,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Pre-pass 1.7: register top-level var declarations as LLVM globals so that
 	// all functions (predeclared in pass 2) can reference them.
 	// Must run AFTER pre-pass 1.9 so package types are available.
+	cg.progress("register globals")
+
 	for _, node := range prog.Stmts {
 		if tv, ok := node.(*ast.TopLevelVar); ok {
 			if err := cg.preregisterTopLevelVar(tv); err != nil {
@@ -973,6 +1031,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// Second pass: pre-declare all functions (signatures only) so forward calls work.
+	cg.progress("predeclare functions")
+
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok {
 			if err := cg.predeclareFunc(fd); err != nil {
@@ -1008,6 +1068,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// Build call graph and run color propagation for the #async / coro system.
+	cg.progress("build call graph")
+
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok && fd.Body != nil {
 			cg.buildCallGraphEntry(fd.Name, fd.Body)
@@ -1068,6 +1130,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// else so that structFieldLLVMTypes is fully populated.  This is needed
 	// because use-extern declarations reference struct types for C ABI conversion
 	// and may appear before the struct definition in source order.
+	cg.progress("generate type declarations")
+
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.StructDecl:
@@ -1090,6 +1154,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// Third pass: generate full function bodies and other declarations.
+	cg.progress("generate code")
+
 	var topStmts []ast.Node
 
 	for _, node := range prog.Stmts {
@@ -1201,7 +1267,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				}
 			}
 
-			wf := cg.mod.NewFunc("main", irtypes.I32)
+			// If the user's main takes a [string] parameter, expose argc/argv.
+			wantsArgs := mainTakesStringArgs(cg.userMainDecl)
+
+			var wf *ir.Func
+			if wantsArgs {
+				wf = cg.mod.NewFunc("main", irtypes.I32,
+					ir.NewParam("argc", irtypes.I32),
+					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
+				)
+			} else {
+				wf = cg.mod.NewFunc("main", irtypes.I32)
+			}
+
 			wb := wf.NewBlock("entry")
 
 			// Save context so emitTopLevelVarInits can generate expressions.
@@ -1233,6 +1311,17 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 			cg.emitPkgInitFns(wb)
 
+			// Build the [string] args value from argc/argv if needed.
+			var argsSliceVal value.Value
+			if wantsArgs {
+				strArrType := irtypes.NewStruct(irtypes.NewPointer(stringFatPtrType()), irtypes.I64)
+				argvFn := cg.ensureExternDecl("_tin_argv_to_slice", strArrType, []*ir.Param{
+					ir.NewParam("argc", irtypes.I32),
+					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
+				}, false)
+				argsSliceVal = wb.NewCall(argvFn, wf.Params[0], wf.Params[1])
+			}
+
 			if userMainCoroFn != nil {
 				// fn{#async} main(): spawn as the first fiber and block the OS
 				// main thread until it completes, then drain remaining fibers.
@@ -1245,8 +1334,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
 
 				var coroArgs []value.Value
-				for _, p := range userMainCoroFn.Params {
-					coroArgs = append(coroArgs, constant.NewZeroInitializer(p.Type()))
+				for i, p := range userMainCoroFn.Params {
+					if wantsArgs && i == 0 {
+						coroArgs = append(coroArgs, argsSliceVal)
+					} else {
+						coroArgs = append(coroArgs, constant.NewZeroInitializer(p.Type()))
+					}
 				}
 
 				coroHdl := wb.NewCall(userMainCoroFn, coroArgs...)
@@ -1258,8 +1351,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			} else {
 				// fn main(): call synchronously (existing behavior).
 				var callArgs []value.Value
-				for _, p := range userMainFn.Params {
-					callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
+				for i, p := range userMainFn.Params {
+					if wantsArgs && i == 0 {
+						callArgs = append(callArgs, argsSliceVal)
+					} else {
+						callArgs = append(callArgs, constant.NewZeroInitializer(p.Type()))
+					}
 				}
 
 				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
@@ -1315,6 +1412,23 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	return cg.mod, nil
+}
+
+// mainTakesStringArgs reports whether the user's explicit fn main has a first
+// parameter of type [string] (dynamic string array).
+func mainTakesStringArgs(n *ast.FuncDecl) bool {
+	if n == nil || len(n.Params) == 0 {
+		return false
+	}
+
+	at, ok := n.Params[0].Type.(*ast.ArrayType)
+	if !ok || at.Size >= 0 {
+		return false
+	}
+
+	st, ok2 := at.Elem.(*ast.SimpleType)
+
+	return ok2 && (st.Name == "string" || st.Name == "str")
 }
 
 // externHasPrimitiveTypes reports whether all parameter and return types of an

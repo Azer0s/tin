@@ -1,0 +1,73 @@
+// tco.tin - tail call optimization examples
+//
+// Tin automatically applies TCO to direct self-recursive tail calls in
+// eligible functions: sync, no defer, no RC-tracked params, body has at
+// least one `return name(...)` or expression-body `name(...)` in tail position.
+// The recursive call is rewritten into a loop - no stack growth.
+
+use assert
+
+// factorial with accumulator - tail-recursive
+fn fact(n u64, acc u64) u64 =
+  where n == 0: acc
+  where _: fact(n - 1, n * acc)
+
+fn factorial(n u64) u64 =
+  return fact(n, 1)
+
+// tail-recursive sum 1..n
+fn sum_acc(n i64, acc i64) i64 =
+  where n <= 0: acc
+  where _: sum_acc(n - 1, acc + n)
+
+fn sum(n i64) i64 =
+  return sum_acc(n, 0)
+
+// greatest common divisor - tail-recursive via where clauses
+fn gcd(a u64, b u64) u64 =
+  where b == 0: a
+  where _: gcd(b, a % b)
+
+// tail-recursive fibonacci using accumulator
+fn fib_acc(n u64, a u64, b u64) u64 =
+  where n == 0: a
+  where _: fib_acc(n - 1, b, a + b)
+
+fn fib_tco(n u64) u64 =
+  return fib_acc(n, 0, 1)
+
+// block body with explicit return (TCO applies to `return name(...)` form)
+fn power_of_two_gte(x u64, acc u64) u64 =
+  where acc >= x: acc
+  where _:
+    return power_of_two_gte(x, acc * 2)
+
+echo factorial(10)
+echo factorial(20)
+echo sum(100)
+echo gcd(48, 18)
+echo fib_tco(10)
+echo fib_tco(50)
+
+test "tail call optimization" =
+  assert::equals(factorial(0) as i64, 1)
+  assert::equals(factorial(1) as i64, 1)
+  assert::equals(factorial(5) as i64, 120)
+  assert::equals(factorial(10) as i64, 3628800)
+  assert::equals(factorial(20) as i64, 2432902008176640000)
+  assert::equals(sum(100) as i64, 5050)
+  assert::equals(sum(1000) as i64, 500500)
+  assert::equals(gcd(48, 18) as i64, 6)
+  assert::equals(gcd(100, 75) as i64, 25)
+  assert::equals(gcd(1071, 462) as i64, 21)
+  assert::equals(fib_tco(0) as i64, 0)
+  assert::equals(fib_tco(1) as i64, 1)
+  assert::equals(fib_tco(10) as i64, 55)
+  assert::equals(fib_tco(20) as i64, 6765)
+  assert::equals(fib_tco(50) as i64, 12586269025)
+  assert::equals(power_of_two_gte(100, 1) as i64, 128)
+  assert::equals(power_of_two_gte(256, 1) as i64, 256)
+
+test "large tail recursion depth" =
+  assert::equals(sum(100000) as i64, 5000050000)
+  assert::equals(gcd(1000000000, 999999937) as i64, 1)

@@ -162,7 +162,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return nil, err2
 				}
 				// Constant compatibility check: reject literals that can't be
-				// represented in the inferred target type (e.g. negative value → unsigned).
+				// represented in the inferred target type (e.g. negative value -> unsigned).
 				for i, argVal := range argVals {
 					if i >= len(concreteFunc.Sig.Params) {
 						break
@@ -1381,7 +1381,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	switch at := arrType.(type) {
 	case *irtypes.StructType:
 		if len(at.Fields) == 2 {
-			// Fat pointer: {T*, i64} — extract data pointer directly without alloca.
+			// Fat pointer: {T*, i64} - extract data pointer directly without alloca.
 			elemPtrType := at.Fields[0]
 
 			dataPtr := block.NewExtractValue(arr, 0)
