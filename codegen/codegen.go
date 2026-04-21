@@ -1428,7 +1428,7 @@ func mainTakesStringArgs(n *ast.FuncDecl) bool {
 
 	st, ok2 := at.Elem.(*ast.SimpleType)
 
-	return ok2 && (st.Name == "string" || st.Name == "str")
+	return ok2 && st.Name == "string"
 }
 
 // externHasPrimitiveTypes reports whether all parameter and return types of an
