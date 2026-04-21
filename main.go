@@ -1134,7 +1134,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		// path. Those files are deleted before dsymutil can run, so LLDB sees no
 		// debug info. -fstandalone-debug embeds full DWARF directly in the binary,
 		// no debug map needed.
-		if targetGOOS == "darwin" {
+		if runtime.GOOS == "darwin" {
 			args = append(args, "-fstandalone-debug")
 		}
 	}
