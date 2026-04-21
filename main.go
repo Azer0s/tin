@@ -1331,6 +1331,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		tokens, lexErr := l.Tokenize()
 		if lexErr != nil {
 			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: lex error: %v\n", fname, lexErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("lex error: %v", lexErr), nil})
 
@@ -1347,6 +1348,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		prog, parseErr := p.Parse()
 		if parseErr != nil {
 			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr), nil})
 
@@ -1398,6 +1400,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}()
 		if cgErr != nil {
 			cprog.clear()
+
 			_, _ = fmt.Fprintf(os.Stderr, "skip %s: codegen error: %v\n", fname, cgErr)
 			results = append(results, result{fname, false, true, fmt.Sprintf("codegen error: %v", cgErr), nil})
 
