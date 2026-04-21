@@ -1,8 +1,7 @@
-// stdlib/regex - Regular expression matching via PCRE
+// stdlib/regex - Regular expression matching via PCRE2
 //
-// Links against libpcre (-lpcre). Every tin file that uses this package
-// should already pick up the flag automatically via the //! directive below,
-// but you can also pass -lpcre explicitly when building.
+// Links against libpcre2-8. Every tin file that uses this package
+// picks up the flag automatically via the //! directive below.
 //
 // Usage:
 //
@@ -24,22 +23,18 @@
 //   let result = regex::find_all("\\d+", "a1 b22 c333")
 //   // result: ["1", "22", "333"]
 
-//!-lpcre
+//!-lpcre2-8
 //!+regex.c [linux]
-//!+regex.c [darwin] -- -I $(brew --prefix pcre)/include
-//!-L$(brew --prefix pcre)/lib [darwin]
+//!+regex.c [darwin] -- -I $(brew --prefix pcre2)/include
+//!-L$(brew --prefix pcre2)/lib [darwin]
 
-use mem
+// PCRE2 C shim declarations
 
-// PCRE C API declarations
-
-fn pcre_compile(pattern string, options i32, errptr **byte, erroffset *i32, tables *byte) *void = extern("pcre_compile")
-
-fn pcre_exec(code *void, extra *void, subject string, length i32, startoffset i32, options i32, ovector *i32, ovecsize i32) i32 = extern("pcre_exec")
-
-fn pcre_free_fn(ptr *void) = extern("pcre_free_fn_wrapper")
-
-fn pcre_capturecount(code *void, rc *i32) i32 = extern("pcre_fullinfo_capturecount")
+fn tin_pcre2_compile_c(pattern string) *void                                              = extern("tin_pcre2_compile")
+fn tin_pcre2_last_error_c() *byte                                                         = extern("tin_pcre2_last_error")
+fn tin_pcre2_free_c(code *void)                                                           = extern("tin_pcre2_free")
+fn tin_pcre2_exec_c(code *void, subject string, sublen i32, start i32) i32               = extern("tin_pcre2_exec")
+fn tin_pcre2_ovector_c() *i32                                                             = extern("tin_pcre2_ovector")
 
 // substr extracts s[beg:end] as a string using byte-by-byte append.
 fn substr(s string, beg i64, end i64) string =
@@ -81,14 +76,12 @@ struct Match =
 
 
 fn exec_match(code *void, subject string, start i64) Match =
-  let slen   = len(subject)
-  let ovsize i32 = 30          // supports up to 9 capture groups
-  let ov     = mem::malloc(ovsize as i64 * 4) as *i32
-  let rc i32 = pcre_exec(code, 0 as *void, subject, slen as i32, start as i32, 0, ov, ovsize)
+  let slen = len(subject)
+  let rc i32 = tin_pcre2_exec_c(code, subject, slen as i32, start as i32)
   if rc < 0:
-    mem::free(ov as *void)
     return Match{_matched: false, _groups: [], _begs: [], _ends: []}
 
+  let ov     = tin_pcre2_ovector_c()
   let groups [string] = []
   let begs   [i64]    = []
   let ends   [i64]    = []
@@ -100,7 +93,6 @@ fn exec_match(code *void, subject string, start i64) Match =
     begs   ++= beg
     ends   ++= end
     i = i + 1
-  mem::free(ov as *void)
   return Match{_matched: true, _groups: groups, _begs: begs, _ends: ends}
 
 // Compiled regex
@@ -114,7 +106,7 @@ struct Regex =
 
   fn deinit(this Regex) =
     if this._code != 0 as *void:
-      pcre_free_fn(this._code)
+      tin_pcre2_free_c(this._code)
 
   // exec executes the regex against subject and returns a Match.
   fn exec(this Regex, subject string) Match =
@@ -153,13 +145,11 @@ struct Regex =
 // compile compiles a PCRE pattern and returns a Regex.
 // Check is_err() before using.
 fn compile(pattern string) Regex =
-  let errptr *byte = 0 as *byte
-  let erroff i32   = 0
-  let code = pcre_compile(pattern, 0, &errptr, &erroff, 0 as *byte)
+  let code = tin_pcre2_compile_c(pattern)
   if code == 0 as *void:
+    let errptr = tin_pcre2_last_error_c()
     let msg = "regex compile error"
     if (errptr as i64) != 0:
-      // Build error string from C char* using byte-by-byte append.
       let msg_out = ""
       let ei i64 = 0
       for errptr[ei] != 0:
