@@ -109,8 +109,8 @@ func stdlibDirForDirectives(override string) string {
 // targetGOOS and targetGOARCH reflect the compilation target platform.
 // They default to the host and are overridden by the -target os/arch flag.
 var (
-	targetGOOS    = runtime.GOOS
-	targetGOARCH  = runtime.GOARCH
+	targetGOOS     = runtime.GOOS
+	targetGOARCH   = runtime.GOARCH
 	explicitTarget bool
 )
 
@@ -143,10 +143,13 @@ func clangTargetFlag() []string {
 	if !explicitTarget {
 		return nil
 	}
-	if t := clangTripleForTarget(); t != "" {
-		return []string{"-target", t}
+
+	t := clangTripleForTarget()
+	if t == "" {
+		return nil
 	}
-	return nil
+
+	return []string{"-target", t}
 }
 
 // archMatches reports whether the optional [arch] qualifier in a directive
@@ -445,10 +448,12 @@ doneFlags:
 		case "-target":
 			if i+1 < len(os.Args) {
 				i++
+
 				parts := strings.SplitN(os.Args[i], "/", 2)
 				if len(parts) != 2 {
 					die("-target: expected os/arch (e.g. linux/amd64, darwin/arm64)")
 				}
+
 				targetGOOS = parts[0]
 				targetGOARCH = parts[1]
 				explicitTarget = true
@@ -1127,6 +1132,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 	args := []string{optLevel}
 	args = append(args, clangTargetFlag()...)
+
 	if isDebug {
 		args = append(args, "-g")
 
