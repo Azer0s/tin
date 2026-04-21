@@ -899,23 +899,10 @@ func isAppleSilicon() bool {
 }
 
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
-// produce valid IR for the installed clang version:
-//
-//  1. "presplitcoroutine" string attr -> keyword attr (required by coro-split).
-//  2. On Apple Silicon (macOS arm64 and Asahi Linux), llvm.coro.end requires
-//     i1 return type and ptr argument; patch the declaration and call sites.
+// produce valid IR for the installed clang version.
+// "presplitcoroutine" must be a keyword attribute, not a string attribute.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
-
-	// Apple Silicon rejects llvm.coro.end declared as void/i8*: the intrinsic's
-	// canonical signature there is i1(ptr, i1, token).  Patch the declaration
-	// and call sites to match.  Use a named result (%_coroend) to avoid
-	// shifting implicit SSA slot numbering.
-	if isAppleSilicon() {
-		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
-		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
-	}
-
 	return ir
 }
 

@@ -658,6 +658,8 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 			if id, ok := expr.(*ast.Identifier); ok {
 				id.Name += "!"
+			} else if sa, ok := expr.(*ast.ScopeAccess); ok && len(sa.Path) > 0 {
+				sa.Path[len(sa.Path)-1] += "!"
 			}
 
 			args, err2 := p.parseArgList()
