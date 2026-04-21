@@ -359,8 +359,12 @@ func main() {
 
 	if len(os.Args) >= 2 && os.Args[1] == "repl" {
 		runtimeDir := tinRuntimeDir()
-		var stdlibOverride string
-		var libsRoots []string
+
+		var (
+			stdlibOverride string
+			libsRoots      []string
+		)
+
 		for i := 2; i < len(os.Args); i++ {
 			switch os.Args[i] {
 			case "--stdlib":
@@ -375,7 +379,9 @@ func main() {
 				}
 			}
 		}
+
 		repl.Run(runtimeDir, stdlibOverride, libsRoots)
+
 		return
 	}
 
@@ -877,27 +883,6 @@ func clangMajorVersion() int {
 	return major
 }
 
-// isAppleSilicon reports whether the current machine is Apple Silicon.
-// This covers both macOS arm64 and Linux arm64 running on Apple hardware
-// (e.g. Asahi Linux), but excludes generic arm64 (Graviton, RPi, etc.).
-func isAppleSilicon() bool {
-	if runtime.GOARCH != "arm64" {
-		return false
-	}
-
-	if runtime.GOOS == "darwin" {
-		return true
-	}
-
-	// On Linux, Apple CPUs report implementer code 0x61 in /proc/cpuinfo.
-	data, err := os.ReadFile("/proc/cpuinfo")
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(data), "CPU implementer\t: 0x61")
-}
-
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
 // produce valid IR for the installed clang version.
 // "presplitcoroutine" must be a keyword attribute, not a string attribute.
@@ -914,6 +899,7 @@ func fixCoroAttrs(ir string) string {
 			"call void @llvm.coro.end(i8*",
 			"%_coro_end = call i1 @llvm.coro.end(ptr")
 	}
+
 	return ir
 }
 

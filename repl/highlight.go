@@ -28,6 +28,7 @@ type highlighter struct {
 func (h *highlighter) Paint(line []rune, _ int) []rune {
 	src := string(line)
 	l := lexer.New(src)
+
 	tokens, err := l.Tokenize()
 	if err != nil || len(tokens) == 0 {
 		return line
@@ -42,7 +43,9 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 		if tok.Type != lexer.IDENT {
 			continue
 		}
+
 		isMacro := false
+
 		// Check adjacency with next ! token.
 		if i+1 < len(tokens) {
 			next := tokens[i+1]
@@ -71,7 +74,9 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 	}
 
 	runes := []rune(src)
+
 	var out []rune
+
 	pos := 0
 
 	for i, tok := range tokens {
@@ -86,19 +91,25 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 
 		// Find the token's rune offset in the source.
 		start := -1
+
 		for j := pos; j <= len(runes)-len(lit); j++ {
 			match := true
+
 			for k, r := range lit {
 				if runes[j+k] != r {
 					match = false
+
 					break
 				}
 			}
+
 			if match {
 				start = j
+
 				break
 			}
 		}
+
 		if start == -1 {
 			continue
 		}
@@ -115,7 +126,9 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 		if color != "" {
 			out = append(out, []rune(color)...)
 		}
+
 		out = append(out, lit...)
+
 		if color != "" {
 			out = append(out, []rune(ansiReset)...)
 		}
@@ -124,6 +137,7 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 	}
 
 	out = append(out, runes[pos:]...)
+
 	return out
 }
 
@@ -142,5 +156,6 @@ func colorFor(t lexer.TokenType, lit string) string {
 	case t == lexer.IDENT && builtinTypes[lit]:
 		return ansiBoldYellow
 	}
+
 	return ""
 }

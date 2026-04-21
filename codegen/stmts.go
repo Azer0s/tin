@@ -304,6 +304,7 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 	if !irtypes.IsVoid(retType) && bodyVal != nil {
 		bodyVal = cg.coerce(block, bodyVal, retType)
 		cg.emitAllScopeReleases(block, skipName)
+
 		if cg.inCoroFn {
 			cg.emitCoroComplete(block, bodyVal)
 			cg.emitFinalSuspend(block, cg.curCoroFrame)
@@ -313,6 +314,7 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		}
 	} else {
 		cg.emitAllScopeReleases(block, "")
+
 		if cg.inCoroFn {
 			cg.emitCoroComplete(block, nil)
 			cg.emitFinalSuspend(block, cg.curCoroFrame)
@@ -796,12 +798,8 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	isReplCellFn := cg.curFn != nil && (cg.curFn.Name() == cg.replCellFuncName ||
 		cg.curFn.Name() == cg.replCellFuncName+"$coro")
 	if cg.replMode && !s.IsConst && isReplCellFn {
-		isStaticArray := false
-		if llType != nil {
-			if _, ok := llType.(*irtypes.ArrayType); ok {
-				isStaticArray = true
-			}
-		}
+		_, isStaticArray := llType.(*irtypes.ArrayType)
+
 		if !isStaticArray {
 			if llType == nil {
 				llType = irtypes.I64
@@ -813,6 +811,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 					cg.emitRetain(block, initVal)
 					block.NewStore(initVal, g)
 				}
+
 				return block, nil
 			}
 			// Check the persistent cell-globals map so the $coro variant of the
@@ -820,24 +819,30 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			// even after the non-coro function scope was popped.
 			if g, ok := cg.replCellGlobals[s.Name]; ok {
 				cg.curScope.set(s.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(g.ContentType), isGlobal: true})
+
 				if initVal != nil {
 					initVal = cg.coerce(block, initVal, g.ContentType)
 					cg.emitRetain(block, initVal)
 					block.NewStore(initVal, g)
 				}
+
 				return block, nil
 			}
+
 			g := cg.mod.NewGlobal(s.Name, llType)
 			g.Init = cg.zeroConstant(llType)
 			isRC := isRCTrackedType(llType)
 			cg.curScope.set(s.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRC, isGlobal: true})
+
 			cg.replCellGlobals[s.Name] = g
 			if initVal != nil {
 				initVal = cg.coerce(block, initVal, llType)
 				cg.emitRetain(block, initVal)
 				block.NewStore(initVal, g)
 			}
+
 			cg.replNewGlobals = append(cg.replNewGlobals, ReplGlobal{Name: s.Name, TinType: s.Type, LLVMType: llType})
+
 			return block, nil
 		}
 	}

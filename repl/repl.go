@@ -1,3 +1,4 @@
+// Package repl implements the interactive REPL for the Tin language.
 package repl
 
 import (
@@ -15,6 +16,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	s, err := newSession(runtimeDir, stdlibOverride, libsRoots, macros)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: init failed: %v\n", err)
+
 		os.Exit(1)
 	}
 	defer s.close()
@@ -22,6 +24,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	in, err := newInputReader(macros)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: readline init failed: %v\n", err)
+
 		os.Exit(1)
 	}
 	defer in.close()
@@ -32,6 +35,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 		src, eof := in.readCell()
 		if eof {
 			fmt.Println()
+
 			break
 		}
 
@@ -45,6 +49,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 			if quit := handleCommand(s, src); quit {
 				break
 			}
+
 			continue
 		}
 
@@ -67,11 +72,14 @@ func handleCommand(s *session, cmd string) (quit bool) {
 	case ":list":
 		if len(s.declOrder) == 0 && len(s.globalsOrder) == 0 {
 			fmt.Println("(nothing declared)")
+
 			return
 		}
+
 		for _, k := range s.globalsOrder {
 			fmt.Printf("  %s\n", s.prevGlobals[k])
 		}
+
 		for _, k := range s.declOrder {
 			fmt.Printf("  %s\n", firstLine(s.declMap[k]))
 		}
@@ -80,6 +88,7 @@ func handleCommand(s *session, cmd string) (quit bool) {
 	default:
 		fmt.Printf("unknown command %q - type :help for commands\n", parts[0])
 	}
+
 	return false
 }
 
@@ -87,6 +96,7 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
 	}
+
 	return s
 }
 

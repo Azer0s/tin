@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
@@ -21,8 +22,8 @@ type session struct {
 
 	// prevGlobals: name -> "var name type" source for cross-cell `let` vars.
 	// Injected as TopLevelVar declarations into each subsequent compilation.
-	prevGlobals   map[string]string
-	globalsOrder  []string
+	prevGlobals  map[string]string
+	globalsOrder []string
 
 	// Loaded shared libraries (kept open so their symbols remain available).
 	loadedLibs []*lib
@@ -69,14 +70,17 @@ func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *m
 	rtSo := filepath.Join(workDir, "libtin_runtime.so")
 	if err := s.buildRuntime(rtSo); err != nil {
 		_ = os.RemoveAll(workDir)
+
 		return nil, fmt.Errorf("build runtime: %w", err)
 	}
 
 	rtLib, err := openLib(rtSo, true)
 	if err != nil {
 		_ = os.RemoveAll(workDir)
+
 		return nil, fmt.Errorf("load runtime: %w", err)
 	}
+
 	s.runtimeLib = rtLib
 	setupRuntime(rtLib)
 	fiberInit()
@@ -96,10 +100,12 @@ func (s *session) buildRuntime(outSo string) error {
 	}
 
 	cmd := exec.Command("clang", args...)
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
 	}
+
 	return nil
 }
 
@@ -123,6 +129,7 @@ func (s *session) evalCell(source string) error {
 		if !ok {
 			break
 		}
+
 		source = expanded
 	}
 
@@ -132,14 +139,16 @@ func (s *session) evalCell(source string) error {
 		return err
 	}
 
-	var cellDecls []ast.Node     // fn/struct/trait/enum/type/use/export/var
-	var cellStmts []ast.Node     // let/echo/expressions/...
+	var cellDecls []ast.Node // fn/struct/trait/enum/type/use/export/var
+
+	var cellStmts []ast.Node // let/echo/expressions/...
 
 	// Collect decl key→src pairs without registering yet; addDecl is called
 	// after a successful compile so that new declarations don't appear in both
 	// the re-parsed accumulated source AND cellDecls (which would cause duplicate
 	// TypeDef entries in the LLVM module).
 	type pendingDecl struct{ key, src string }
+
 	var pendingDecls []pendingDecl
 
 	for _, node := range cellProg.Stmts {
@@ -218,12 +227,15 @@ func (s *session) evalCell(source string) error {
 	if s.stdlibOverride != "" {
 		cg.SetStdlibOverride(s.stdlibOverride)
 	}
+
 	for _, r := range s.libsRoots {
 		cg.AddLibsRoot(r)
 	}
+
 	if cellFuncName != "" {
 		cg.SetReplMode(cellFuncName)
 	}
+
 	if len(s.globalsOrder) > 0 {
 		cg.SetReplExternalGlobals(s.globalsOrder)
 	}
@@ -259,6 +271,7 @@ func (s *session) evalCell(source string) error {
 	if err != nil {
 		return fmt.Errorf("load cell: %w", err)
 	}
+
 	s.loadedLibs = append(s.loadedLibs, cellLib)
 
 	// Register new globals for subsequent cells.
@@ -269,6 +282,7 @@ func (s *session) evalCell(source string) error {
 			if _, exists := s.prevGlobals[g.Name]; !exists {
 				s.globalsOrder = append(s.globalsOrder, g.Name)
 			}
+
 			s.prevGlobals[g.Name] = varSrc
 		}
 	}
@@ -276,14 +290,17 @@ func (s *session) evalCell(source string) error {
 	// Execute the cell function (if any).
 	if cellFuncName != "" {
 		coroSym := cellFuncName + "$coro"
+
 		coroFn, err := cellLib.lookup(coroSym)
 		if err != nil {
 			return fmt.Errorf("cell entry not found (%s): %w", coroSym, err)
 		}
+
 		runCell(coroFn)
 	}
 
 	s.cellCount++
+
 	return nil
 }
 
@@ -293,17 +310,21 @@ func (s *session) buildCombinedProgram(cellDecls, cellStmts []ast.Node, cellFunc
 	for _, key := range s.globalsOrder {
 		allSrcParts = append(allSrcParts, s.prevGlobals[key])
 	}
+
 	for _, key := range s.declOrder {
 		allSrcParts = append(allSrcParts, s.declMap[key])
 	}
 
 	combined := &ast.Program{}
+
 	if len(allSrcParts) > 0 {
 		fullSrc := strings.Join(allSrcParts, "\n")
+
 		prog, err := parseSrc(fullSrc)
 		if err != nil {
 			return nil, fmt.Errorf("context parse error: %w", err)
 		}
+
 		combined.Stmts = prog.Stmts
 	}
 
@@ -325,11 +346,14 @@ func (s *session) buildCombinedProgram(cellDecls, cellStmts []ast.Node, cellFunc
 
 func (s *session) addDecl(key, src string) {
 	isNew := false
+
 	if _, exists := s.declMap[key]; !exists {
 		s.declOrder = append(s.declOrder, key)
 		isNew = true
 	}
+
 	s.declMap[key] = src
+
 	// Register macros from newly loaded use declarations.
 	if isNew && strings.HasPrefix(key, "use__") {
 		pkgName := strings.TrimPrefix(key, "use__")
@@ -350,6 +374,7 @@ func (s *session) compileToSo(irText, outSo string) error {
 	if strings.Contains(irText, "llvm.coro.") {
 		splitLL := filepath.Join(s.workDir, fmt.Sprintf("cell%d_split.ll", s.cellCount))
 		splitArgs := []string{"-O1", "-S", "-emit-llvm", llFile, "-o", splitLL}
+
 		out, err := exec.Command("clang", splitArgs...).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("coro split: %w\n%s", err, out)
@@ -359,16 +384,23 @@ func (s *session) compileToSo(irText, outSo string) error {
 			patched := patchMissingDILabelLine(string(data))
 			_ = os.WriteFile(splitLL, []byte(patched), 0600)
 		}
+
 		inputLL = splitLL
 	}
 
 	// Compile to a shared library. Undefined references to runtime symbols are
 	// resolved at dlopen time from the RTLD_GLOBAL namespace (libtin_runtime.so).
+	// On Darwin, -undefined dynamic_lookup is needed to allow undefined symbols.
 	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL, "-o", outSo}
+	if runtime.GOOS == "darwin" {
+		soArgs = append(soArgs, "-undefined", "dynamic_lookup")
+	}
+
 	out, err := exec.Command("clang", soArgs...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("compile: %w\n%s", err, out)
 	}
+
 	return nil
 }
 
@@ -387,15 +419,19 @@ func (s *session) reset() {
 // parseSrc lexes and parses a Tin source string.
 func parseSrc(src string) (*ast.Program, error) {
 	l := lexer.New(src)
+
 	tokens, err := l.Tokenize()
 	if err != nil {
 		return nil, err
 	}
+
 	p := parser.New(tokens)
+
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return nil, parseErr
 	}
+
 	return prog, nil
 }
 
@@ -404,6 +440,7 @@ func parseSrc(src string) (*ast.Program, error) {
 func extractSrc(src string, allNodes []ast.Node, target ast.Node) string {
 	lines := strings.Split(src, "\n")
 	pos := target.Pos()
+
 	startLine := pos.Line - 1 // 1-based to 0-based
 	if startLine < 0 {
 		startLine = 0
@@ -411,6 +448,7 @@ func extractSrc(src string, allNodes []ast.Node, target ast.Node) string {
 
 	// Find the end line: either the start of the next top-level node or EOF.
 	endLine := len(lines)
+
 	for _, n := range allNodes {
 		nLine := n.Pos().Line - 1
 		if nLine > startLine && nLine < endLine {
@@ -419,6 +457,7 @@ func extractSrc(src string, allNodes []ast.Node, target ast.Node) string {
 	}
 
 	result := strings.Join(lines[startLine:endLine], "\n")
+
 	return strings.TrimSpace(result)
 }
 
@@ -430,6 +469,7 @@ func fixCoroAttrs(ir string) string {
 		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
 		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
 	}
+
 	return ir
 }
 
@@ -438,6 +478,7 @@ func isAppleSilicon() bool {
 	if err != nil {
 		return false
 	}
+
 	return strings.Contains(string(data), "CPU implementer\t: 0x61")
 }
 
@@ -451,5 +492,6 @@ func patchMissingDILabelLine(ir string) string {
 			lines[i] = line + ", line: 0)"
 		}
 	}
+
 	return strings.Join(lines, "\n")
 }

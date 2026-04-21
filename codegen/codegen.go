@@ -415,9 +415,9 @@ type CodeGen struct {
 
 	// REPL mode: when true, top-level `let` bindings are promoted to LLVM
 	// globals, main() generation is skipped, and cg.replNewGlobals is populated.
-	replMode            bool
-	replCellFuncName    string // e.g. "_repl_cell_3"
-	replNewGlobals      []ReplGlobal
+	replMode         bool
+	replCellFuncName string // e.g. "_repl_cell_3"
+	replNewGlobals   []ReplGlobal
 	// replExternalGlobals: globals defined by previous REPL cells.
 	// Re-injected as 'external' linkage so all cells share the canonical copy.
 	replExternalGlobals map[string]bool
@@ -965,13 +965,14 @@ func (cg *CodeGen) ReplGlobalTinTypeName(g ReplGlobal) string {
 	if g.TinType != nil {
 		return g.TinType.String()
 	}
+
 	n := llvmTypeToTinName(g.LLVMType)
 	if n == "any" {
 		return "" // unresolvable - skip global registration
 	}
+
 	return n
 }
-
 
 // Generate translates the AST program into an LLVM IR module.
 func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
@@ -1282,6 +1283,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	if cg.replMode {
 		cg.emitAtomTable()
+
 		return cg.mod, nil
 	}
 

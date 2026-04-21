@@ -1,3 +1,4 @@
+// Package repl implements the interactive REPL for the Tin language.
 package repl
 
 import (
@@ -20,6 +21,7 @@ type pkgCSource struct {
 // shared library with RTLD_GLOBAL so the symbols are available to cell .so files.
 func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 	var newCSources []pkgCSource
+
 	var newLinkerFlags []string
 
 	stdlibDir := s.stdlibOverride
@@ -31,12 +33,15 @@ func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 
 	seenInBatch := map[string]bool{}
 	seenFlag := map[string]bool{}
+
 	for _, srcPath := range pkgSrcPaths {
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
 			continue
 		}
+
 		srcDir := filepath.Dir(srcPath)
+
 		links, cSrcs := parsePkgDirectives(string(data), srcDir, stdlibDir)
 		for _, f := range links {
 			if !seenFlag[f] {
@@ -44,10 +49,12 @@ func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 				newLinkerFlags = append(newLinkerFlags, f)
 			}
 		}
+
 		for _, cs := range cSrcs {
 			if s.compiledCSrcPaths[cs.path] || seenInBatch[cs.path] {
 				continue
 			}
+
 			seenInBatch[cs.path] = true
 			newCSources = append(newCSources, cs)
 		}
@@ -64,6 +71,7 @@ func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 
 	// Compile all new C sources into a single extras .so.
 	extrasIdx := len(s.loadedLibs) // use current lib count as unique index
+
 	extrasSo := filepath.Join(s.workDir, fmt.Sprintf("pkgext%d.so", extrasIdx))
 	if err := s.compilePkgExtras(newCSources, newLinkerFlags, extrasSo); err != nil {
 		return err
@@ -73,7 +81,9 @@ func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 	if err != nil {
 		return fmt.Errorf("load pkg extras: %w", err)
 	}
+
 	s.loadedLibs = append(s.loadedLibs, extLib)
+
 	return nil
 }
 
@@ -82,10 +92,17 @@ func (s *session) compilePkgExtras(cSrcs []pkgCSource, linkerFlags []string, out
 	rtDir := s.runtimeDir
 
 	args := []string{"-shared", "-fPIC", "-O2", "-pthread", "-I" + rtDir}
+	// On Darwin, undefined runtime symbols must be resolved at dlopen time;
+	// -undefined dynamic_lookup is the macOS equivalent of Linux's default behavior.
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-undefined", "dynamic_lookup")
+	}
+
 	for _, cs := range cSrcs {
 		args = append(args, cs.flags...)
 		args = append(args, cs.path)
 	}
+
 	args = append(args, linkerFlags...)
 	args = append(args, "-o", outSo)
 
@@ -93,6 +110,7 @@ func (s *session) compilePkgExtras(cSrcs []pkgCSource, linkerFlags []string, out
 	if err != nil {
 		return fmt.Errorf("compile pkg extras: %w\n%s", err, out)
 	}
+
 	return nil
 }
 
@@ -103,6 +121,7 @@ func parsePkgDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cS
 		if trimmed == "" || (strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!")) {
 			continue
 		}
+
 		if !strings.HasPrefix(trimmed, "//!") {
 			break
 		}
@@ -115,12 +134,16 @@ func parsePkgDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cS
 		if strings.HasPrefix(rest, "+") {
 			spec := strings.TrimSpace(rest[1:])
 			parts := strings.SplitN(spec, " -- ", 2)
+
 			fileAndQual, archQual := extractPkgArchQualifier(strings.TrimSpace(parts[0]))
 			if !pkgArchMatches(archQual) {
 				continue
 			}
+
 			cpath := filepath.Join(srcDir, fileAndQual)
+
 			var extraFlags []string
+
 			if len(parts) == 2 {
 				expanded := expandPkgShellExprs(parts[1])
 				for _, f := range strings.Fields(expanded) {
@@ -128,17 +151,20 @@ func parsePkgDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cS
 					if ex, err := os.Executable(); err == nil {
 						f = strings.ReplaceAll(f, "$TIN_STDLIB", filepath.Join(filepath.Dir(ex), "stdlib"))
 					}
+
 					if strings.HasPrefix(f, "-I") && len(f) > 2 {
 						iPath := f[2:]
 						if !filepath.IsAbs(iPath) {
 							iPath = filepath.Join(srcDir, iPath)
 						}
+
 						extraFlags = append(extraFlags, "-I"+iPath)
 					} else {
 						extraFlags = append(extraFlags, f)
 					}
 				}
 			}
+
 			cSources = append(cSources, pkgCSource{path: cpath, flags: extraFlags})
 		} else if strings.HasPrefix(rest, "-") {
 			flag, archQual := extractPkgArchQualifier(rest)
@@ -147,6 +173,7 @@ func parsePkgDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cS
 			}
 		}
 	}
+
 	return
 }
 
@@ -155,6 +182,7 @@ func extractPkgArchQualifier(s string) (base, qualifier string) {
 	if i := strings.LastIndex(s, "["); i >= 0 && strings.HasSuffix(s, "]") {
 		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1 : len(s)-1])
 	}
+
 	return s, ""
 }
 
@@ -162,8 +190,10 @@ func pkgArchMatches(qualifier string) bool {
 	if qualifier == "" {
 		return true
 	}
+
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
+
 	for _, tok := range strings.Split(qualifier, ",") {
 		tok = strings.TrimSpace(tok)
 		switch tok {
@@ -189,6 +219,7 @@ func pkgArchMatches(qualifier string) bool {
 			}
 		}
 	}
+
 	return true
 }
 
@@ -198,18 +229,23 @@ func expandPkgShellExprs(s string) string {
 		if start == -1 {
 			break
 		}
+
 		end := strings.Index(s[start+2:], ")")
 		if end == -1 {
 			break
 		}
+
 		end += start + 2
 		cmd := s[start+2 : end]
 		out, err := exec.Command("sh", "-c", cmd).Output()
+
 		val := ""
 		if err == nil {
 			val = strings.TrimSpace(string(out))
 		}
+
 		s = s[:start] + val + s[end+1:]
 	}
+
 	return s
 }

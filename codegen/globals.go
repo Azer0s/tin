@@ -27,6 +27,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 		g := cg.mod.NewGlobal(tv.Name, lt)
 		g.Linkage = enum.LinkageExternal
 		cg.curScope.set(tv.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true})
+
 		return nil
 	}
 

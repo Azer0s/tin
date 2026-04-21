@@ -21,6 +21,7 @@ func (t *tabGuard) Do([]rune, int) ([][]rune, int) { return nil, 0 }
 func tryExpandMacro(src string, reg *macroRegistry) (string, bool) {
 	// Lex to find the macro call span.
 	l := lexer.New(src)
+
 	toks, err := l.Tokenize()
 	if err != nil {
 		return "", false
@@ -42,6 +43,7 @@ func tryExpandMacro(src string, reg *macroRegistry) (string, bool) {
 	// callText is just the bare macro call without scope prefix, so expandEntry
 	// can parse it as a standalone macro invocation.
 	callText := src[textStart:callEnd]
+
 	expandedBody, err := expandEntry(entry, callText, hasBang)
 	if err != nil {
 		return "", false
@@ -63,6 +65,7 @@ func findLastMacroCall(toks []lexer.Token, src string, reg *macroRegistry) (expr
 		if tok.Type != lexer.IDENT {
 			continue
 		}
+
 		name := tok.Literal
 		bang := false
 
@@ -77,6 +80,7 @@ func findLastMacroCall(toks []lexer.Token, src string, reg *macroRegistry) (expr
 			if !bang {
 				continue
 			}
+
 			continue
 		}
 
@@ -90,6 +94,7 @@ func findLastMacroCall(toks []lexer.Token, src string, reg *macroRegistry) (expr
 		// Walk back over any scope prefix (IDENT :: IDENT :: ...) so that the
 		// full "pkg::macro" expression is replaced, not just the bare name.
 		callByteStart := tokByteStart
+
 		for j := i - 1; j >= 1; j -= 2 {
 			if toks[j].Type == lexer.DCOLON && toks[j-1].Type == lexer.IDENT {
 				callByteStart = colToByteOffset(runes, toks[j-1].Col-1)
@@ -110,17 +115,20 @@ func findLastMacroCall(toks []lexer.Token, src string, reg *macroRegistry) (expr
 		if bang {
 			nextIdx = i + 2
 		}
+
 		if nextIdx < len(toks) && toks[nextIdx].Type == lexer.LPAREN {
 			// Find matching close paren.
 			depth := 1
+
 			j := nextIdx + 1
 			for j < len(toks) && depth > 0 {
-				switch toks[j].Type {
+				switch toks[j].Type { //nolint:exhaustive
 				case lexer.LPAREN:
 					depth++
 				case lexer.RPAREN:
 					depth--
 				}
+
 				j++
 			}
 			// j is now one past the closing paren token.
@@ -136,6 +144,7 @@ func findLastMacroCall(toks []lexer.Token, src string, reg *macroRegistry) (expr
 		bare = tok.Literal
 		hasBang = bang
 	}
+
 	return
 }
 
@@ -144,6 +153,7 @@ func colToByteOffset(runes []rune, col int) int {
 	if col < 0 || col >= len(runes) {
 		return col // approximation for ASCII
 	}
+
 	return len(string(runes[:col]))
 }
 
@@ -161,9 +171,11 @@ func expandEntry(entry macroEntry, callText string, hasBang bool) (string, error
 		if es, ok := body.(*ast.ExprStmt); ok {
 			body = es.Expr
 		}
+
 		if btl, ok := body.(*ast.BacktickLit); ok {
 			return btl.Content, nil
 		}
+
 		return ast.PrintStmt(body, 0), nil
 	}
 
@@ -173,26 +185,32 @@ func expandEntry(entry macroEntry, callText string, hasBang bool) (string, error
 	src := declSrc + "\n" + callText
 
 	l := lexer.New(src)
+
 	toks, err := l.Tokenize()
 	if err != nil {
 		return "", err
 	}
+
 	p := parser.New(toks)
+
 	prog, err := p.Parse()
 	if err != nil {
 		return "", err
 	}
+
 	if prog == nil {
 		return "", fmt.Errorf("parse returned nil")
 	}
 
 	cg := codegen.New("<expand>")
+
 	expanded, err := cg.ExpandProgramMacros(prog)
 	if err != nil {
 		return "", err
 	}
 
 	var parts []string
+
 	for _, stmt := range expanded.Stmts {
 		if _, isMacro := stmt.(*ast.MacroDecl); isMacro {
 			continue
@@ -201,15 +219,20 @@ func expandEntry(entry macroEntry, callText string, hasBang bool) (string, error
 		if es, ok := stmt.(*ast.ExprStmt); ok {
 			if ret, ok2 := es.Expr.(*ast.ReturnStmt); ok2 && ret.Value != nil {
 				parts = append(parts, ast.PrintStmt(ret.Value, 0))
+
 				continue
 			}
 		}
+
 		if ret, ok := stmt.(*ast.ReturnStmt); ok && ret.Value != nil {
 			parts = append(parts, ast.PrintStmt(ret.Value, 0))
+
 			continue
 		}
+
 		parts = append(parts, ast.PrintStmt(stmt, 0))
 	}
+
 	return strings.Join(parts, "\n"), nil
 }
 
@@ -218,26 +241,34 @@ func macroSrc(entry macroEntry) string {
 	if entry.Decl == nil {
 		return ""
 	}
+
 	m := entry.Decl
 
 	var sb strings.Builder
+
 	sb.WriteString("macro")
+
 	if len(m.Tags) > 0 {
 		sb.WriteString("{")
+
 		for i, tag := range m.Tags {
 			if i > 0 {
 				sb.WriteString(" ")
 			}
+
 			sb.WriteString("#")
 			sb.WriteString(tag)
 		}
+
 		sb.WriteString("}")
 	}
+
 	sb.WriteString(" ")
 	sb.WriteString(m.Name)
 	sb.WriteString("(")
 	sb.WriteString(strings.Join(m.Params, ", "))
 	sb.WriteString(") = ")
 	sb.WriteString(ast.PrintStmt(m.Body, 0))
+
 	return sb.String()
 }

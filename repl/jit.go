@@ -69,6 +69,7 @@ type lib struct {
 
 func openLib(path string, global bool) (*lib, error) {
 	cPath := C.CString(path)
+
 	defer C.free(unsafe.Pointer(cPath))
 
 	var handle unsafe.Pointer
@@ -77,20 +78,26 @@ func openLib(path string, global bool) (*lib, error) {
 	} else {
 		handle = C.repl_dlopen_local(cPath)
 	}
+
 	if handle == nil {
 		msg := C.GoString(C.repl_dlerror())
+
 		return nil, fmt.Errorf("dlopen %s: %s", path, msg)
 	}
+
 	return &lib{handle: handle, path: path}, nil
 }
 
 func (l *lib) lookup(name string) (unsafe.Pointer, error) {
 	cName := C.CString(name)
+
 	defer C.free(unsafe.Pointer(cName))
+
 	sym := C.repl_dlsym(l.handle, cName)
 	if sym == nil {
 		return nil, fmt.Errorf("%s: symbol %q not found", l.path, name)
 	}
+
 	return sym, nil
 }
 
