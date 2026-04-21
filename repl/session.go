@@ -30,6 +30,11 @@ type session struct {
 	// Loaded shared libraries (kept open so their symbols remain available).
 	loadedLibs []*lib
 
+	// darwinLinkLibs holds pre-compiled C libraries (sync prereq + pkgext)
+	// that cell .so files must link against explicitly on Darwin. Cell .so
+	// files are NOT included here to avoid duplicate-symbol SIGTRAPs.
+	darwinLinkLibs []*lib
+
 	// Runtime shared library (fiber scheduler, echo, etc.)
 	runtimeLib *lib
 
@@ -108,6 +113,7 @@ func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *m
 		}
 
 		s.loadedLibs = append(s.loadedLibs, syncLib)
+		s.darwinLinkLibs = append(s.darwinLinkLibs, syncLib)
 	}
 
 	return s, nil
@@ -439,13 +445,19 @@ func (s *session) compileToSo(irText, outSo string) error {
 
 	// Compile to a shared library. On Linux, undefined symbols are resolved at
 	// dlopen time from the RTLD_GLOBAL namespace. On Darwin the static linker
-	// rejects undefined symbols, so link against all previously loaded libs.
+	// rejects undefined symbols; link against the pre-compiled C libs (runtime,
+	// sync prereq, pkgext) and allow any remaining cross-cell Tin symbols (e.g.
+	// prev-cell globals) to resolve at dlopen time. Do NOT link against previous
+	// cell .so files - they redefine accumulated Tin functions and cause
+	// duplicate-symbol SIGTRAPs on macOS's strict two-level namespace dyld.
 	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL}
 	if runtime.GOOS == "darwin" {
 		soArgs = append(soArgs, s.runtimeLib.path)
-		for _, lib := range s.loadedLibs {
+		for _, lib := range s.darwinLinkLibs {
 			soArgs = append(soArgs, lib.path)
 		}
+
+		soArgs = append(soArgs, "-undefined", "dynamic_lookup")
 	}
 
 	soArgs = append(soArgs, "-o", outSo)

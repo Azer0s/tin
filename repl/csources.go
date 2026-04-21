@@ -83,6 +83,7 @@ func (s *session) ensurePkgCSources(pkgSrcPaths []string) error {
 	}
 
 	s.loadedLibs = append(s.loadedLibs, extLib)
+	s.darwinLinkLibs = append(s.darwinLinkLibs, extLib)
 
 	return nil
 }
