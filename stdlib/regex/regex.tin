@@ -25,7 +25,9 @@
 //   // result: ["1", "22", "333"]
 
 //!-lpcre
-//!+regex.c
+//!+regex.c [linux]
+//!+regex.c [darwin] -- -I $(brew --prefix pcre)/include
+//!-L$(brew --prefix pcre)/lib [darwin]
 
 use mem
 
