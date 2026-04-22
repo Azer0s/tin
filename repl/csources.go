@@ -170,7 +170,7 @@ func parsePkgDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cS
 		} else if strings.HasPrefix(rest, "-") {
 			flag, archQual := extractPkgArchQualifier(rest)
 			if pkgArchMatches(archQual) {
-				linkerFlags = append(linkerFlags, flag)
+				linkerFlags = append(linkerFlags, expandPkgShellExprs(flag))
 			}
 		}
 	}
