@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
@@ -148,7 +149,7 @@ func (s *session) buildRuntime(outSo string) error {
 	s.compiledCSrcPaths[rtC] = true
 
 	args := []string{
-		"-shared", "-fPIC", "-O2", "-pthread",
+		"-shared", "-fPIC", "-O1", "-pthread",
 		"-I" + s.runtimeDir,
 		rtC,
 		"-o", outSo,
@@ -424,26 +425,6 @@ func (s *session) compileToSo(irText, outSo string) error {
 		return err
 	}
 
-	inputLL := llFile
-
-	// If the IR uses coroutines, split them at -O1 first (LLVM 22 DCE workaround).
-	if strings.Contains(irText, "llvm.coro.") {
-		splitLL := filepath.Join(s.workDir, fmt.Sprintf("cell%d_split.ll", s.cellCount))
-		splitArgs := []string{"-O1", "-S", "-emit-llvm", llFile, "-o", splitLL}
-
-		out, err := exec.Command("clang", splitArgs...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("coro split: %w\n%s", err, out)
-		}
-		// Apply the DILabel line patch required for debug builds.
-		if data, readErr := os.ReadFile(splitLL); readErr == nil {
-			patched := patchMissingDILabelLine(string(data))
-			_ = os.WriteFile(splitLL, []byte(patched), 0600)
-		}
-
-		inputLL = splitLL
-	}
-
 	// Compile to a shared library. On Linux, undefined symbols are resolved at
 	// dlopen time from the RTLD_GLOBAL namespace. On Darwin the static linker
 	// rejects undefined symbols; link against the pre-compiled C libs (runtime,
@@ -451,7 +432,10 @@ func (s *session) compileToSo(irText, outSo string) error {
 	// prev-cell globals) to resolve at dlopen time. Do NOT link against previous
 	// cell .so files - they redefine accumulated Tin functions and cause
 	// duplicate-symbol SIGTRAPs on macOS's strict two-level namespace dyld.
-	soArgs := []string{"-shared", "-fPIC", "-O2", inputLL}
+	//
+	// O1 is the minimum level that runs the coroutine-split pass; it also avoids
+	// the LLVM 22 O2 DCE bug that eliminated coro frames before the split.
+	soArgs := []string{"-shared", "-fPIC", "-O1", llFile}
 	if runtime.GOOS == "darwin" {
 		soArgs = append(soArgs, s.runtimeLib.path)
 		for _, lib := range s.darwinLinkLibs {
@@ -591,37 +575,27 @@ func fixLinkOnceOdr(ir string) string {
 	return strings.Join(lines, "\n")
 }
 
+var (
+	clangVersionOnce  sync.Once
+	clangVersionCache int
+)
+
 func clangMajorVersion() int {
-	out, err := exec.Command("clang", "--version").Output()
-	if err != nil {
-		return 0
-	}
-
-	re := regexp.MustCompile(`version (\d+)`)
-	m := re.FindSubmatch(out)
-
-	if m == nil {
-		return 0
-	}
-
-	v, err := strconv.Atoi(string(m[1]))
-	if err != nil {
-		return 0
-	}
-
-	return v
-}
-
-// patchMissingDILabelLine adds 'line: 0' to any !DILabel(...) metadata node
-// that is missing the required 'line' field (LLVM 22 coro-split quirk).
-func patchMissingDILabelLine(ir string) string {
-	lines := strings.Split(ir, "\n")
-	for i, line := range lines {
-		if strings.Contains(line, "!DILabel(") && !strings.Contains(line, "line:") {
-			line = strings.TrimRight(line, ")")
-			lines[i] = line + ", line: 0)"
+	clangVersionOnce.Do(func() {
+		out, err := exec.Command("clang", "--version").Output()
+		if err != nil {
+			return
 		}
-	}
 
-	return strings.Join(lines, "\n")
+		re := regexp.MustCompile(`version (\d+)`)
+		m := re.FindSubmatch(out)
+
+		if m == nil {
+			return
+		}
+
+		clangVersionCache, _ = strconv.Atoi(string(m[1]))
+	})
+
+	return clangVersionCache
 }
