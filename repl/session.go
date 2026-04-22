@@ -538,8 +538,8 @@ var llLinkageKeywords = map[string]bool{
 	"extern_weak": true, "linkonce_odr": true, "weak_odr": true,
 }
 
-// fixLinkOnceOdr changes every externally-visible function definition in the IR
-// to linkonce_odr, except for REPL cell entry points.
+// fixLinkOnceOdr changes every externally-visible function and global variable
+// definition in the IR to linkonce_odr, except for REPL cell entry points.
 //
 // The REPL re-compiles all accumulated declarations in every new cell for type
 // context, producing duplicate strong symbol definitions across cell .so files.
@@ -554,22 +554,40 @@ func fixLinkOnceOdr(ir string) string {
 	lines := strings.Split(ir, "\n")
 
 	for i, line := range lines {
-		if !strings.HasPrefix(line, "define ") {
+		if strings.HasPrefix(line, "define ") {
+			rest := strings.TrimPrefix(line, "define ")
+			firstWord := rest
+			if idx := strings.IndexByte(rest, ' '); idx >= 0 {
+				firstWord = rest[:idx]
+			}
+			if llLinkageKeywords[firstWord] || strings.Contains(line, "@_repl_cell_") {
+				continue
+			}
+			lines[i] = "define linkonce_odr " + rest
 			continue
 		}
 
-		rest := strings.TrimPrefix(line, "define ")
+		// Also fix global variable/constant definitions.
+		// Lines like: @name = constant <type> <val>  or  @name = global <type> <val>
+		// that have no linkage keyword and are not external declarations.
+		if !strings.HasPrefix(line, "@") || !strings.Contains(line, " = ") {
+			continue
+		}
+		eqIdx := strings.Index(line, " = ")
+		rest := line[eqIdx+3:]
 		firstWord := rest
-
 		if idx := strings.IndexByte(rest, ' '); idx >= 0 {
 			firstWord = rest[:idx]
 		}
-
-		if llLinkageKeywords[firstWord] || strings.Contains(line, "@_repl_cell_") {
+		// Skip external declarations and already-linkaged globals.
+		if firstWord == "external" || llLinkageKeywords[firstWord] {
 			continue
 		}
-
-		lines[i] = "define linkonce_odr " + rest
+		// Only rewrite definitions that have a constant/global keyword after linkage.
+		if firstWord != "constant" && firstWord != "global" {
+			continue
+		}
+		lines[i] = line[:eqIdx] + " = linkonce_odr " + rest
 	}
 
 	return strings.Join(lines, "\n")
