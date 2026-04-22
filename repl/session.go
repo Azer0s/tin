@@ -314,6 +314,7 @@ func (s *session) evalCell(source string) error {
 
 	// Apply fixCoroAttrs before compiling.
 	irText := fixCoroAttrs(mod.String())
+	irText = fixLinkOnceOdr(irText)
 
 	// Compile the IR to a shared library.
 	cellSo := filepath.Join(s.workDir, fmt.Sprintf("cell%d.so", s.cellCount))
@@ -542,6 +543,52 @@ func fixCoroAttrs(ir string) string {
 	}
 
 	return ir
+}
+
+// llLinkageKeywords is the set of LLVM linkage keywords that may appear
+// immediately after `define`. If the first token is one of these the definition
+// already carries explicit linkage and must not be modified.
+var llLinkageKeywords = map[string]bool{
+	"private": true, "internal": true, "available_externally": true,
+	"linkonce": true, "weak": true, "common": true, "appending": true,
+	"extern_weak": true, "linkonce_odr": true, "weak_odr": true,
+}
+
+// fixLinkOnceOdr changes every externally-visible function definition in the IR
+// to linkonce_odr, except for REPL cell entry points.
+//
+// The REPL re-compiles all accumulated declarations in every new cell for type
+// context, producing duplicate strong symbol definitions across cell .so files.
+// On Darwin, dyld SIGTRAPs on duplicate strong symbols in two-level namespace
+// libraries. linkonce_odr tells dyld to silently use the first loaded definition,
+// matching Linux's first-loaded-wins behavior.
+//
+// Cell entry points (_repl_cell_N$coro) are excluded: linkonce_odr allows the
+// optimizer to discard functions with no callers in the same module, and the
+// cell entry is only called externally via dlsym.
+func fixLinkOnceOdr(ir string) string {
+	lines := strings.Split(ir, "\n")
+
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "define ") {
+			continue
+		}
+
+		rest := strings.TrimPrefix(line, "define ")
+		firstWord := rest
+
+		if idx := strings.IndexByte(rest, ' '); idx >= 0 {
+			firstWord = rest[:idx]
+		}
+
+		if llLinkageKeywords[firstWord] || strings.Contains(line, "@_repl_cell_") {
+			continue
+		}
+
+		lines[i] = "define linkonce_odr " + rest
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func clangMajorVersion() int {
