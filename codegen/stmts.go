@@ -300,17 +300,28 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 		skipName = ident.Name
 	}
 
+	_ = cg.emitDefers(block)
 	if !irtypes.IsVoid(retType) && bodyVal != nil {
 		bodyVal = cg.coerce(block, bodyVal, retType)
-		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, skipName)
-		retInst := block.NewRet(bodyVal)
-		cg.attachCurrentDbgLocToTerm(retInst)
+
+		if cg.inCoroFn {
+			cg.emitCoroComplete(block, bodyVal)
+			cg.emitFinalSuspend(block, cg.curCoroFrame)
+		} else {
+			retInst := block.NewRet(bodyVal)
+			cg.attachCurrentDbgLocToTerm(retInst)
+		}
 	} else {
-		_ = cg.emitDefers(block)
 		cg.emitAllScopeReleases(block, "")
-		retInst := block.NewRet(nil)
-		cg.attachCurrentDbgLocToTerm(retInst)
+
+		if cg.inCoroFn {
+			cg.emitCoroComplete(block, nil)
+			cg.emitFinalSuspend(block, cg.curCoroFrame)
+		} else {
+			retInst := block.NewRet(nil)
+			cg.attachCurrentDbgLocToTerm(retInst)
+		}
 	}
 
 	return nil
