@@ -1,0 +1,7 @@
+// compiler_errors/wrong_assign_type.tin
+// Initialising a typed `let` with a value of a different type. The
+// compiler must reject this with the actual vs expected type names.
+
+fn main() =
+  let n string = 42
+  echo n

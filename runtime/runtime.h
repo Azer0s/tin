@@ -95,6 +95,7 @@ TinSlice _tin_slice_concat(TinSlice a, TinSlice b, int64_t elem_size);
 int64_t  _tin_slice_len(TinSlice s);
 void    *_tin_slice_idx(TinSlice s, int64_t i, int64_t elem_size);
 TinSlice _tin_slice_subslice(TinSlice s, int64_t start, int64_t elem_size);
+TinSlice _tin_slice_convert_int(TinSlice s, int64_t src_sz, int64_t tgt_sz, int32_t src_signed);
 
 // -- Memory
 void *_tin_malloc(int64_t size);

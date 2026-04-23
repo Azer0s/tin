@@ -1,0 +1,15 @@
+// compiler_errors/struct_pattern_in_where.tin
+// Struct-pattern destructuring inside `where` is not yet supported (planned
+// for slice 2 of the where-pattern feature). The compiler should say so
+// clearly and suggest `match` as the workaround.
+
+struct Point =
+  x i32
+  y i32
+
+fn label(p Point) string =
+  where (Point{x: 0, y: 0}): "origin"
+  where (_):                 "other"
+
+fn main() =
+  echo label(Point{x: 0, y: 0})

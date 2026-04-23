@@ -288,9 +288,15 @@ func (s *session) evalCell(source string) error {
 		cg.AddLibsRoot(r)
 	}
 
-	if cellFuncName != "" {
-		cg.SetReplMode(cellFuncName)
-	}
+	// REPL mode is enabled for every cell (even ones without an entry
+	// function like cell0 = `fn fib(...)` with no top-level statements).
+	// Without this, declaration-only cells fell through to the non-REPL
+	// path and emitted a trivial `main()` which Darwin's dyld SIGTRAPs on
+	// when the resulting dylib is dlopen'd alongside the REPL binary's own
+	// main. Empty cellFuncName is acceptable: replCellFuncName stays empty
+	// and the "promote top-level lets to globals" path simply never fires
+	// for this cell (correct, since there are no such lets).
+	cg.SetReplMode(cellFuncName)
 
 	if len(s.globalsOrder) > 0 {
 		cg.SetReplExternalGlobals(s.globalsOrder)
@@ -556,14 +562,18 @@ func fixLinkOnceOdr(ir string) string {
 	for i, line := range lines {
 		if strings.HasPrefix(line, "define ") {
 			rest := strings.TrimPrefix(line, "define ")
+
 			firstWord := rest
 			if idx := strings.IndexByte(rest, ' '); idx >= 0 {
 				firstWord = rest[:idx]
 			}
+
 			if llLinkageKeywords[firstWord] || strings.Contains(line, "@_repl_cell_") {
 				continue
 			}
+
 			lines[i] = "define linkonce_odr " + rest
+
 			continue
 		}
 
@@ -573,8 +583,10 @@ func fixLinkOnceOdr(ir string) string {
 		if !strings.HasPrefix(line, "@") || !strings.Contains(line, " = ") {
 			continue
 		}
+
 		eqIdx := strings.Index(line, " = ")
 		rest := line[eqIdx+3:]
+
 		firstWord := rest
 		if idx := strings.IndexByte(rest, ' '); idx >= 0 {
 			firstWord = rest[:idx]
@@ -587,6 +599,7 @@ func fixLinkOnceOdr(ir string) string {
 		if firstWord != "constant" && firstWord != "global" {
 			continue
 		}
+
 		lines[i] = line[:eqIdx] + " = linkonce_odr " + rest
 	}
 

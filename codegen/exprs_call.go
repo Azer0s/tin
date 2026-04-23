@@ -1184,11 +1184,32 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	// Build arguments. Keep pre-coercion values for ARC temporary release.
+	// When the callee's signature is already resolved (common case for bare
+	// function names), pass each parameter's type down to arg codegen so
+	// ArrayLits are generated at the target element type directly. Without
+	// this plumbing an integer array literal takes its inferred (usually i64)
+	// element type and the call-site coerce has no way to fix up the mismatch
+	// without silent narrowing - which `coerce` now refuses.
+	var preCalleeSig *irtypes.FuncType
+
+	if f, ok := callee.(*ir.Func); ok {
+		preCalleeSig = f.Sig
+	} else if pt, ok := callee.Type().(*irtypes.PointerType); ok {
+		if ft, ok2 := pt.ElemType.(*irtypes.FuncType); ok2 {
+			preCalleeSig = ft
+		}
+	}
+
 	llArgs := make([]value.Value, 0, len(e.Args))
 
 	llArgsPreCoerce := make([]value.Value, 0, len(e.Args))
-	for _, arg := range e.Args {
-		av, err := cg.genExpr(block, arg)
+	for i, arg := range e.Args {
+		var tType irtypes.Type
+		if preCalleeSig != nil && i < len(preCalleeSig.Params) {
+			tType = preCalleeSig.Params[i]
+		}
+
+		av, err := cg.genArgWithTargetType(block, arg, tType)
 		if err != nil {
 			return nil, err
 		}
@@ -1245,6 +1266,53 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 	if calleeType != nil {
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
+
+		// Strict per-argument type check. Fires for clear mismatches
+		// (passing a string where an int is expected, etc.) and reports
+		// them with file:line and human-readable Tin type names rather
+		// than letting them fall through to LLVM-level panics.
+		//
+		// Generic monomorphizations are not specially exempted any more:
+		// dead branches in `fn enc[T](v T) string` whose runtime guard
+		// `if typeof(v) == 'string` is statically false for the current
+		// instantiation are now elided by the if-condition folder
+		// (codegen/fold.go) BEFORE this check sees them, so the type-
+		// incorrect calls in those branches no longer exist in IR.
+		//
+		// Fat-array element-type mismatches get the explicit
+		// `arg as [T]` cast hint; everything else falls through to the
+		// generic implicit-coercion allowlist in argTypeImplicitlyOK.
+		for i, arg := range llArgs {
+			if i >= len(calleeType.Params) {
+				break
+			}
+
+			pt := calleeType.Params[i]
+			if arg.Type().Equal(pt) {
+				continue
+			}
+
+			if isFatArrayPtr(arg.Type()) && isFatArrayPtr(pt) {
+				srcEl := arg.Type().(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType
+				tgtEl := pt.(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType
+
+				if !srcEl.Equal(tgtEl) && !srcEl.Equal(irtypes.I8) {
+					return nil, cg.nodeErr(e,
+						"argument %d: cannot pass [%s] where [%s] is expected; use `arg as [%s]` to convert",
+						i+1, fmtArgType(srcEl), fmtArgType(tgtEl), fmtArgType(tgtEl))
+				}
+
+				continue
+			}
+
+			if cg.argTypeImplicitlyOK(arg.Type(), pt) {
+				continue
+			}
+
+			return nil, cg.nodeErr(e,
+				"argument %d: cannot pass %s where %s is expected",
+				i+1, fmtArgType(arg.Type()), fmtArgType(pt))
+		}
 	}
 
 	// Auto-yield before calling a heavy or recursive Tin function.
@@ -1274,6 +1342,71 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	return result, nil
+}
+
+// argTypeImplicitlyOK reports whether passing a value of type src where the
+// callee expects pt is one of the runtime-compatible-but-LLVM-unequal
+// shapes the codegen tolerates. Used by the post-coerce strict type check
+// at concrete call sites.
+//
+// Allowed without further conversion (these are wrapped at runtime by the
+// callee or by emitted shim code):
+//   - target is `any`: arbitrary src is boxed by the callee glue
+//   - target is a trait fat-pointer: registered impls produce the iface
+//   - target or source is a raw C pointer (i8*) when the other side is a
+//     fat-ptr (string/byte-slice extraction for extern calls)
+//   - target accepts an implicit-conversion fn registered for src
+//   - target is a fat-fn-ptr and src is a function pointer (closure shim)
+//   - both sides are pointer types of compatible underlying shape (ABI is
+//     the pointer width either way)
+func (cg *CodeGen) argTypeImplicitlyOK(src, pt irtypes.Type) bool {
+	if isAnyType(pt) {
+		return true
+	}
+
+	if _, ok := cg.isTraitFatPtr(pt); ok {
+		return true
+	}
+
+	if isFatFnPtr(pt) {
+		return true
+	}
+	// Implicit-conversion functions registered for the target type.
+	if name := cg.typeNameOf(pt); name != "" {
+		for _, e := range cg.implicitConvFns[name] {
+			if e.srcLLVM.Equal(src) {
+				return true
+			}
+		}
+	}
+	// Raw C-pointer / fat-ptr extraction shims.
+	if _, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
+		if _, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
+			return true
+		}
+	}
+
+	if isFatPtrType(src) {
+		if _, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
+			return true
+		}
+	}
+
+	if isFatPtrType(pt) {
+		if _, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
+			return true
+		}
+	}
+	// Same-size integer types (e.g. i32 vs u32 / char vs i8): coerce
+	// returned the value unchanged because the bit width matches and the
+	// runtime ABI passes them identically.
+	if srcInt, ok := src.(*irtypes.IntType); ok {
+		if tgtInt, ok2 := pt.(*irtypes.IntType); ok2 && srcInt.BitSize == tgtInt.BitSize {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.FuncType) []value.Value {

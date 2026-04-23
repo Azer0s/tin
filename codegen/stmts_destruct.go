@@ -62,8 +62,11 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		}
 	}
 
-	// For [any] or per-slot typed: emit runtime bounds check
-	if s.IsAny {
+	// Runtime length check. Destructuring is an assertion about the array's
+	// shape: with no rest, the array must have exactly `regularCount` elements;
+	// with a rest slot, the array must have STRICTLY MORE than `regularCount`
+	// (the rest binds at least one element). On mismatch we panic.
+	{
 		arrAlloca := block.NewAlloca(arrVal.Type())
 		block.NewStore(arrVal, arrAlloca)
 		lenGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
@@ -71,15 +74,29 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		arrLen := block.NewLoad(irtypes.I64, lenGep)
 
 		needed := constant.NewInt(irtypes.I64, int64(regularCount))
-		cond := block.NewICmp(enum.IPredSLT, arrLen, needed)
+
+		var (
+			badCond value.Value
+			msgText string
+		)
+
+		if restIdx >= 0 {
+			// rest slot binds >= 1 element, so len must be > regularCount.
+			badCond = block.NewICmp(enum.IPredSLE, arrLen, needed)
+			msgText = fmt.Sprintf("array destructuring: need at least %d elements (rest binds >= 1), got fewer", regularCount+1)
+		} else {
+			// No rest: exact length match required.
+			badCond = block.NewICmp(enum.IPredNE, arrLen, needed)
+			msgText = fmt.Sprintf("array destructuring: need exactly %d elements, length differs", regularCount)
+		}
 
 		id := cg.labelCount
 		cg.labelCount++
 		panicBlock := cg.curFn.NewBlock(fmt.Sprintf("destruct.panic.%d", id))
 		okBlock := cg.curFn.NewBlock(fmt.Sprintf("destruct.ok.%d", id))
-		block.NewCondBr(cond, panicBlock, okBlock)
+		block.NewCondBr(badCond, panicBlock, okBlock)
 
-		msg := cg.newGlobalString(fmt.Sprintf("array destructuring: need %d elements, got fewer", regularCount))
+		msg := cg.newGlobalString(msgText)
 		panicBlock.NewCall(cg.ensurePanicFn(), msg)
 		// If _tin_panic returns (recover was called), clean up pending defer envs
 		// and release ARC-tracked scope variables (e.g. the array being destructured).
@@ -100,6 +117,8 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 
 		block = okBlock
 	}
+
+	_ = s.IsAny // length check now applies to both [any] and typed destructuring
 
 	// Determine uniform element LLVM type (used when ElemTypes has 1 entry or is empty)
 	var elemLLType irtypes.Type = anyFatPtrType()

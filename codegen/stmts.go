@@ -357,8 +357,111 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 	return cg.toBool(block, cond), nil
 }
 
-// genWhereList generates a chain of if/else blocks for where clauses.
+// whereMode is the kind of dispatch a where-list uses.
+type whereMode int
+
+const (
+	whereModeBool    whereMode = iota // bool guards (+ bare `_` catch-all)
+	whereModePattern                  // pattern clauses (+ bare `_` catch-all)
+)
+
+// classifyWhereList determines the dispatch mode for a where-list and
+// enforces that bool clauses and pattern clauses are not mixed. A bare `_`
+// wildcard clause (Cond == nil, Pattern == nil) is compatible with both
+// modes; it does not pin the mode.
+//
+// Returns a descriptive error when mixing is detected, pointing the user at
+// the `where (pat) if cond:` form that replaces inline bool clauses in
+// pattern mode.
+func classifyWhereList(wl *ast.WhereList) (whereMode, error) {
+	hasBool := false
+	hasPattern := false
+
+	var firstBoolPos, firstPatPos ast.Pos
+
+	for _, c := range wl.Clauses {
+		if c.Pattern != nil {
+			if !hasPattern {
+				firstPatPos = c.Pos
+			}
+
+			hasPattern = true
+
+			continue
+		}
+
+		if c.Cond != nil {
+			if !hasBool {
+				firstBoolPos = c.Pos
+			}
+
+			hasBool = true
+		}
+	}
+
+	if hasBool && hasPattern {
+		return 0, fmt.Errorf("%d:%d: cannot mix bool clauses and pattern clauses in the same where-list (bool clause here conflicts with pattern clause at %d:%d); use `where (pat) if %s:` or split into separate where-lists",
+			firstBoolPos.Line, firstBoolPos.Col,
+			firstPatPos.Line, firstPatPos.Col,
+			"cond")
+	}
+
+	if hasPattern {
+		return whereModePattern, nil
+	}
+
+	return whereModeBool, nil
+}
+
+// isCatchAllWhereClause reports whether a clause matches every input (the
+// bare `_` wildcard). Guarded wildcards are refutable and don't count.
+func isCatchAllWhereClause(c ast.WhereClause) bool {
+	return c.Cond == nil && c.Pattern == nil && c.Guard == nil
+}
+
+// genWhereList generates code for a where-list. A where-list is either all
+// bool clauses (classic chained if-else lowering) or all pattern clauses
+// (lowered as a match on the function's arg or tuple-of-args). A bare `_`
+// wildcard clause is compatible with both modes and always serves as the
+// final catch-all.
+//
+// Mixing bool clauses and pattern clauses in the same where-list is a compile
+// error: `where (x) if cond: ...` covers every case a bool clause could.
 func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irtypes.Type) (bool, error) {
+	mode, modeErr := classifyWhereList(wl)
+	if modeErr != nil {
+		return false, modeErr
+	}
+
+	if mode == whereModePattern {
+		return cg.genPatternWhereList(block, wl, retType)
+	}
+
+	cg.scanWhereForUnreachable(wl)
+
+	// Bool mode: a where-list must include a catch-all clause - either a bare
+	// `_` wildcard, or a bind-all `where (name):` pattern (treated as wildcard
+	// here since it would match any value).
+	hasWildcard := false
+
+	for _, c := range wl.Clauses {
+		if isCatchAllWhereClause(c) {
+			hasWildcard = true
+
+			break
+		}
+	}
+
+	if !hasWildcard {
+		pos := wl.Pos()
+		if len(wl.Clauses) > 0 {
+			pos = wl.Clauses[0].Pos
+		}
+
+		return false, fmt.Errorf("%d:%d: non-exhaustive where: missing wildcard clause `where _: ...`",
+			pos.Line, pos.Col)
+	}
+
 	// mergeBlock is created lazily so it only gets added to the function
 	// if actually needed (when no wildcard catches everything).
 	var mergeBlock *ir.Block
@@ -1001,6 +1104,15 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 		srcType := initVal.Type()
 		initVal = cg.coerce(block, initVal, llType)
+		// Coerce returns the value unchanged when no conversion path applies;
+		// guard NewStore so a real type mismatch produces a clean diagnostic
+		// instead of a Go panic from llir's incompatible-operand check.
+		if !initVal.Type().Equal(llType) {
+			return nil, cg.nodeErr(s,
+				"cannot assign value of type %s to %q (declared type %s)",
+				fmtArgType(initVal.Type()), s.Name, fmtArgType(llType))
+		}
+
 		block.NewStore(initVal, alloca)
 
 		// ARC: retain when copying from an existing variable (identifier).
@@ -1109,9 +1221,39 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	cg.curScope.set(s.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type})
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type}
+
+	// Capture the init expression for compile-time folding (codegen/fold.go).
+	// Subsequent assignments to the same name clear constInitExpr in
+	// genAssign / aug-assign so a mutated variable can never be folded.
+	if isFoldableInitExpr(s.Value) {
+		entry.constInitExpr = s.Value
+	}
+
+	cg.curScope.set(s.Name, entry)
 
 	return block, nil
+}
+
+// isFoldableInitExpr returns true for AST shapes the constant folder in
+// fold.go can handle. Used to decide whether to capture an init expr on
+// the scope entry. Conservative: false is always safe (just disables
+// folding for that binding).
+func isFoldableInitExpr(n ast.Node) bool {
+	switch e := n.(type) {
+	case nil:
+		return false
+	case *ast.BoolLit, *ast.AtomLit, *ast.IntLit, *ast.TypeofExpr:
+		return true
+	case *ast.Identifier:
+		return true
+	case *ast.BinExpr:
+		return isFoldableInitExpr(e.Left) && isFoldableInitExpr(e.Right)
+	case *ast.UnaryExpr:
+		return isFoldableInitExpr(e.Expr)
+	}
+
+	return false
 }
 
 // emitDefers emits all pending deferred calls in LIFO order into block.
@@ -1930,6 +2072,14 @@ func (cg *CodeGen) markOutParamVarsHeapOwned(call *ast.CallExpr) {
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
+	// Mutating an identifier invalidates any captured constant init (used
+	// by the if-condition folder). Clear it before emitting the store so
+	// later folds don't see stale information.
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+			entry.constInitExpr = nil
+		}
+	}
 	// Special case: SIMD vector index assignment v[i] = x.
 	// Vectors have no addressable lanes; use insertelement + store-back.
 	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
@@ -2100,6 +2250,13 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 }
 
 func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Block, error) {
+	// Mutating an identifier invalidates any captured constant init.
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+			entry.constInitExpr = nil
+		}
+	}
+
 	ptr, err := cg.genLValue(block, s.Target)
 	if err != nil {
 		return block, err
@@ -2260,6 +2417,13 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 }
 
 func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
+	// Mutation invalidates any captured constant init.
+	if id, ok := s.Expr.(*ast.Identifier); ok {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+			entry.constInitExpr = nil
+		}
+	}
+
 	ptr, err := cg.genLValue(block, s.Expr)
 	if err != nil {
 		return err
@@ -2287,7 +2451,89 @@ func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
 	return nil
 }
 
+// genFoldedIf emits only the live branch of an if/elif/else chain whose
+// initial cond was folded to known. The folded path is generated as a
+// straight-line block; the dead branches are dropped entirely.
+//
+// When the initial condition is true, only the `then` block is emitted
+// (subsequent elifs and else are dead).
+//
+// When the initial condition is false, the chain is "rotated": we step
+// through elifs in declaration order, folding each. The first elif whose
+// cond folds to true becomes the live branch; if any elif's cond is
+// non-foldable we abandon folding and let the regular genIf path handle
+// the remainder (rebuilding a fresh IfStmt with the unresolved tail).
+// If every cond folds to false, we emit only the else branch (or
+// fall-through when there isn't one).
+func (cg *CodeGen) genFoldedIf(block *ir.Block, s *ast.IfStmt, takeThen bool) (*ir.Block, bool, error) {
+	if takeThen {
+		return cg.genFoldedBranch(block, s.Then)
+	}
+	// Initial cond is false; consider elifs.
+	for i, elif := range s.ElseIfs {
+		v, ok := cg.foldedBoolCondition(elif.Cond)
+		if !ok {
+			// Re-fall to the runtime path with the remaining (possibly
+			// shorter) chain so the parts we did fold are still elided.
+			rest := &ast.IfStmt{
+				Cond:    elif.Cond,
+				Then:    elif.Body,
+				ElseIfs: s.ElseIfs[i+1:],
+				Else:    s.Else,
+			}
+
+			return cg.genIfRuntime(block, rest)
+		}
+
+		if v {
+			return cg.genFoldedBranch(block, elif.Body)
+		}
+	}
+	// All conds folded false; emit else if present.
+	if s.Else != nil {
+		return cg.genFoldedBranch(block, s.Else)
+	}
+	// No live branch and no else: control falls through.
+	return block, false, nil
+}
+
+// genFoldedBranch emits a body block that takes over from `block`, opens
+// a fresh scope, releases it on exit (when not already terminated), and
+// returns the post-body state in the same shape as genIf would.
+func (cg *CodeGen) genFoldedBranch(block *ir.Block, body *ast.Block) (*ir.Block, bool, error) {
+	cg.curScope = newScope(cg.curScope)
+
+	cur, term, err := cg.genBlock(block, body)
+	if cur == nil {
+		cur = block
+	}
+
+	cg.emitScopeRelease(cur, cg.curScope)
+	cg.curScope = cg.curScope.parent
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	return cur, term || cur.Term != nil, nil
+}
+
+// genIfRuntime is the original genIf, used as a fallback by genFoldedIf
+// when only a prefix of the chain folded.
+func (cg *CodeGen) genIfRuntime(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error) {
+	return cg.genIf(block, s)
+}
+
 func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error) {
+	// Try to constant-fold the condition. When it folds we elide the
+	// dead branch entirely so the strict per-arg type check at call sites
+	// doesn't trip on type-incorrect code that would never execute (the
+	// canonical case is `if typeof(v) == 'string: ... v as string` inside
+	// a monomorphized generic where T isn't string). See codegen/fold.go.
+	if v, ok := cg.foldedBoolCondition(s.Cond); ok {
+		return cg.genFoldedIf(block, s, v)
+	}
+
 	mergeBlock := cg.newBlock("if.merge")
 
 	// Reset cg.curBlock to the entry block before evaluating the condition.

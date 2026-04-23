@@ -1,0 +1,10 @@
+// compiler_errors/non_exhaustive_where.tin
+// A pattern-where missing a case. Maranget exhaustiveness should report
+// the missing length-1 list as a witness.
+
+fn s(xs [i32]) i32 =
+  where ([]):           0
+  where ([x, ...rest]): x
+
+fn main() =
+  echo s([5])

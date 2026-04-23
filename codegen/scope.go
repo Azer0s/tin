@@ -50,6 +50,14 @@ type scopeEntry struct {
 	// tinType is the declared Tin AST type for this variable (nil if unknown/inferred).
 	// Used for type-guided overload resolution and async fat-ptr return-type recovery.
 	tinType ast.TypeExpr
+	// constInitExpr captures the initializer AST of a non-mutated `let` binding
+	// when that initializer can be statically analyzed for compile-time
+	// folding. Used by tryFoldExpr to follow `let t = typeof(v)` -> 'bool /
+	// 'i64 / ... when v's static type is known. Set ONLY for bindings whose
+	// init expression is itself a fold-friendly node (typeof, atom literal,
+	// bool literal, integer literal); a later mutation invalidates this and
+	// the field is cleared by genAssign.
+	constInitExpr ast.Node
 }
 
 type scope struct {

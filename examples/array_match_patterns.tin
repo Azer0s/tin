@@ -3,22 +3,28 @@
 // Demonstrates array destructuring match patterns:
 //   - empty array []
 //   - exact-length patterns [x], [x, y], [x, y, z]
-//   - head + rest  [x, ...xs]
-//   - catch-all rest  [...xs]
-//   - unnamed rest  [x, ...]  (discard tail)
+//   - head + rest  [x, ...xs]   (rest binds >= 1 element, so length >= 2)
+//   - rest only  [...xs]        (length >= 1, since rest is non-empty)
+//   - unnamed rest  [x, ...]    (discard tail; length >= 2)
 //   - wildcards  [_, _]
 //   - guard clauses  case [x, ...] if x > 0:
 //   - match as expression
 //   - exhaustiveness detection
 //   - partial match with default:
 //   - recursive algorithms built on array patterns
+//
+// Rest semantics: a rest slot always binds at least one element. The
+// canonical exhaustive partition over a list of any length is
+//   case []:               // empty
+//   case [x]:              // singleton
+//   case [x, ...xs]:       // length >= 2
 
 use assert
 
 // ── empty / exact-length ──────────────────────────────────────────────────────
 
 test "empty array" =
-  let a [int] = []
+  let a [i64] = []
   let hit = false
   match a:
     case []:
@@ -28,7 +34,7 @@ test "empty array" =
   assert::ok(hit)
 
 test "single element binds variable" =
-  let a [int] = [42]
+  let a [i64] = [42]
   match a:
     case [x]:
       assert::equals(42, x)
@@ -36,7 +42,7 @@ test "single element binds variable" =
       assert::fails("should match single")
 
 test "two elements bind both variables" =
-  let a [int] = [10, 20]
+  let a [i64] = [10, 20]
   match a:
     case [x, y]:
       assert::equals(10, x)
@@ -45,7 +51,7 @@ test "two elements bind both variables" =
       assert::fails("should match pair")
 
 test "three elements" =
-  let a [int] = [1, 2, 3]
+  let a [i64] = [1, 2, 3]
   match a:
     case [x, y, z]:
       assert::equals(1, x)
@@ -55,7 +61,7 @@ test "three elements" =
       assert::fails("should match triple")
 
 test "exact length mismatch falls to default" =
-  let a [int] = [1, 2, 3]
+  let a [i64] = [1, 2, 3]
   let hit = false
   match a:
     case [x, y]:
@@ -67,7 +73,7 @@ test "exact length mismatch falls to default" =
 // ── wildcards ─────────────────────────────────────────────────────────────────
 
 test "wildcard discards elements" =
-  let a [int] = [7, 8]
+  let a [i64] = [7, 8]
   match a:
     case [_, _]:
       assert::ok(true)
@@ -75,7 +81,7 @@ test "wildcard discards elements" =
       assert::fails("should match pair")
 
 test "wildcard mixed with binding" =
-  let a [int] = [5, 99, 3]
+  let a [i64] = [5, 99, 3]
   match a:
     case [_, mid, _]:
       assert::equals(99, mid)
@@ -85,7 +91,7 @@ test "wildcard mixed with binding" =
 // ── rest patterns ─────────────────────────────────────────────────────────────
 
 test "head + rest binds both" =
-  let a [int] = [1, 2, 3, 4]
+  let a [i64] = [1, 2, 3, 4]
   match a:
     case [head, ...tail]:
       assert::equals(1, head)
@@ -94,7 +100,7 @@ test "head + rest binds both" =
       assert::fails("should match")
 
 test "rest slice contains correct elements" =
-  let a [int] = [10, 20, 30]
+  let a [i64] = [10, 20, 30]
   match a:
     case [_, ...rest]:
       assert::equals(2, len(rest))
@@ -104,23 +110,24 @@ test "rest slice contains correct elements" =
       assert::fails("should match")
 
 test "catch-all rest on non-empty" =
-  let a [int] = [5, 6, 7]
+  let a [i64] = [5, 6, 7]
   match a:
     case [...all]:
       assert::equals(3, len(all))
     default:
       assert::fails("should match")
 
-test "catch-all rest on empty" =
-  let a [int] = []
+test "rest does NOT match empty (use [] for that)" =
+  // `[...all]` requires len >= 1; empty arrays must be handled by `case []:`
+  let a [i64] = []
   match a:
+    case []:
+      assert::ok(true)
     case [...all]:
-      assert::equals(0, len(all))
-    default:
-      assert::fails("should match empty")
+      assert::fails("rest should not match empty under new semantics")
 
 test "unnamed rest discards tail" =
-  let a [int] = [42, 1, 2, 3]
+  let a [i64] = [42, 1, 2, 3]
   match a:
     case [first, ...]:
       assert::equals(42, first)
@@ -130,7 +137,7 @@ test "unnamed rest discards tail" =
 // ── guard clauses ─────────────────────────────────────────────────────────────
 
 test "guard passes" =
-  let a [int] = [10, 2, 3]
+  let a [i64] = [10, 2, 3]
   let hit = false
   match a:
     case [x, ...] if x > 5:
@@ -140,7 +147,7 @@ test "guard passes" =
   assert::ok(hit)
 
 test "guard fails, falls to next arm" =
-  let a [int] = [1, 2, 3]
+  let a [i64] = [1, 2, 3]
   let which = 0
   match a:
     case [x, ...] if x > 5:
@@ -152,7 +159,7 @@ test "guard fails, falls to next arm" =
   assert::equals(2, which)
 
 test "guard on exact-length pattern" =
-  let a [int] = [3, 7]
+  let a [i64] = [3, 7]
   match a:
     case [x, y] if x < y:
       assert::ok(x < y)
@@ -164,8 +171,8 @@ test "guard on exact-length pattern" =
 // ── match as expression ───────────────────────────────────────────────────────
 
 test "match expression on empty vs nonempty" =
-  let a [int] = []
-  let b [int] = [1, 2]
+  let a [i64] = []
+  let b [i64] = [1, 2]
   let la = match a:
     case []: 0
     case [...]: 1
@@ -176,7 +183,7 @@ test "match expression on empty vs nonempty" =
   assert::equals(1, lb)
 
 test "match expression binds and computes" =
-  let a [int] = [3, 4]
+  let a [i64] = [3, 4]
   let s = match a:
     case [x, y]: x + y
     case [x]:    x
@@ -186,7 +193,7 @@ test "match expression binds and computes" =
 // ── exhaustiveness ────────────────────────────────────────────────────────────
 
 // [] + [x,...xs] together cover all lengths -> exhaustive (no default needed)
-fn classify_len(a [int]) string =
+fn classify_len(a [i64]) string =
   match a:
     case []:
       return "zero"
@@ -207,7 +214,7 @@ test "exhaustive via [] + rest covers all lengths" =
 // ── partial match ─────────────────────────────────────────────────────────────
 
 test "partial match with default" =
-  let a [int] = [1, 2, 3, 4]
+  let a [i64] = [1, 2, 3, 4]
   let result = match a:
     case [x, y]: x + y
     default:     -1
@@ -215,14 +222,14 @@ test "partial match with default" =
 
 // ── recursive algorithms ──────────────────────────────────────────────────────
 
-fn arr_sum(a [int]) int =
+fn arr_sum(a [i64]) i64 =
   match a:
     case []:
       return 0
     case [x, ...xs]:
       return x + arr_sum(xs)
 
-fn arr_max(a [int], cur int) int =
+fn arr_max(a [i64], cur i64) i64 =
   match a:
     case []:
       return cur
@@ -231,8 +238,8 @@ fn arr_max(a [int], cur int) int =
         return arr_max(xs, x)
       return arr_max(xs, cur)
 
-fn arr_reverse(a [int]) [int] =
-  let out [int] = []
+fn arr_reverse(a [i64]) [i64] =
+  let out [i64] = []
   let i = len(a) - 1
   for i >= 0:
     out ++= a[i]

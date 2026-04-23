@@ -1843,14 +1843,14 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 			continue
 		}
 
-		for _, traitExpr := range c.Traits {
-			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
-				return nil, fmt.Errorf("fn %s: type %q does not satisfy constraint 'where %s is %s'",
-					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
-			}
-			// Inject any default (non-virtual) trait methods the concrete type
-			// doesn't already implement (e.g. a struct satisfying a trait via its
-			// default method without explicitly listing it in its Implements clause).
+		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
+				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
+		}
+		// Inject default (non-virtual) trait methods for every positive leaf
+		// of the bound so the instantiation has the methods it needs.
+		for _, traitExpr := range flattenPositiveTraits(c.Bound) {
 			if err := cg.ensureDefaultTraitMethods(concreteName, traitExpr); err != nil {
 				return nil, err
 			}

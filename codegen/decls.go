@@ -625,10 +625,58 @@ func substituteStructNameInBody(node ast.Node, genericName, concreteName string)
 // For simple aliases (type char = u8) the alias was already recorded in
 // preregister; this function handles the struct-monomorphization case
 // (type point = tuple[f32]) which requires actual LLVM type generation.
+// expandGenericAlias handles a TypeDecl whose RHS names a generic type
+// alias rather than a concrete struct template. It substitutes the outer
+// synthetic decl's type arguments into the alias's RHS and then calls
+// genTypeDecl on the expanded decl. Enforces the alias's where-bounds at
+// expansion time with concrete types so the error message names the
+// alias's constraint, not the underlying struct's.
+func (cg *CodeGen) expandGenericAlias(synth *ast.TypeDecl, aliasTmpl *ast.TypeDecl, aliasInstance *ast.GenericType) error {
+	subst := make(map[string]ast.TypeExpr, len(aliasTmpl.TypeParams))
+	for i, paramName := range aliasTmpl.TypeParams {
+		if i < len(aliasInstance.TypeParams) {
+			subst[paramName] = aliasInstance.TypeParams[i]
+		}
+	}
+	// Enforce the alias's own bounds before expanding.
+	for _, c := range aliasTmpl.Constraints {
+		argTE, ok := subst[c.TypeParam]
+		if !ok {
+			continue
+		}
+
+		concreteName := typeExprToString(argTE)
+		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+			return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				c.Pos.Line, c.Pos.Col, aliasTmpl.Name, concreteName, concreteName,
+				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
+		}
+	}
+	// Expand the alias RHS with the concrete substitution. The RHS is
+	// likely a GenericType (`Pair[string, T]`) whose T we substitute.
+	expandedRHS := substituteTypeInTypeExpr(aliasTmpl.Type, subst)
+
+	expandedDecl := &ast.TypeDecl{
+		Name: synth.Name,
+		Type: expandedRHS,
+	}
+
+	return cg.genTypeDecl(expandedDecl)
+}
+
 func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	// Tagged union alias: "type u = i8 | string"
 	if ut, ok := n.Type.(*ast.UnionTypeExpr); ok {
 		return cg.genTaggedUnionTypeDecl(n.Name, ut)
+	}
+	// Register generic type aliases (those with their own TypeParams) so
+	// `StrPair[i32]{...}` can resolve by substituting the alias's params
+	// into its RHS and re-monomorphizing the underlying struct.
+	// Checking for `len(n.TypeParams) > 0 && alias is generic or compound`
+	// covers the StrPair/Pair case without interfering with concrete
+	// aliases like `type BoxI32 = Box[i32]` which have no TypeParams.
+	if len(n.TypeParams) > 0 {
+		cg.genericTypeAliases[n.Name] = n
 	}
 
 	gt, ok := n.Type.(*ast.GenericType)
@@ -646,6 +694,15 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	qualGtName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: gt.Name})
 	if arityMap, ok := cg.genericStructsByArity[qualGtName]; ok {
 		tmpl, isTmpl = arityMap[arity]
+	}
+	// If the referenced name is ITSELF a generic type alias, expand it
+	// recursively: substitute the outer alias's type params into the
+	// inner alias's RHS and rerun genTypeDecl on the expanded decl. This
+	// lets a chain like `type Wrapper[T] = StrPair[T]` work.
+	if !isTmpl {
+		if aliasTmpl, isAlias := cg.genericTypeAliases[gt.Name]; isAlias && len(gt.TypeParams) == len(aliasTmpl.TypeParams) {
+			return cg.expandGenericAlias(n, aliasTmpl, gt)
+		}
 	}
 
 	if !isTmpl {
@@ -671,17 +728,45 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	for param, te := range subst {
 		typeSubst[param] = typeExprToString(te)
 	}
-
+	// Struct-template's own constraints (e.g. the template says T must be
+	// ord). These apply to any instantiation regardless of the type alias.
 	for _, c := range tmpl.Constraints {
 		concreteName, ok := typeSubst[c.TypeParam]
 		if !ok {
 			continue
 		}
 
-		for _, traitExpr := range c.Traits {
-			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
-				return fmt.Errorf("struct %s: type %q does not satisfy constraint 'where %s is %s'",
-					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
+		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+			return fmt.Errorf("%d:%d: struct %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
+				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
+		}
+	}
+	// Type-alias's own constraints. These only make sense on a concrete
+	// instantiation (e.g. StrPair[i32]), not on the template declaration
+	// where every alias type parameter is still symbolic. Detect that by
+	// checking whether any of the template's type-parameter names appears
+	// in the RHS's type arguments; if so, skip the check and let the
+	// instantiation path re-check with concrete substitutes.
+	if len(n.Constraints) > 0 && !typeArgsContainAnyOf(gt.TypeParams, n.TypeParams) {
+		aliasSubst := make(map[string]string, len(n.TypeParams))
+
+		for i, paramName := range n.TypeParams {
+			if i < len(gt.TypeParams) {
+				aliasSubst[paramName] = typeExprToString(gt.TypeParams[i])
+			}
+		}
+
+		for _, c := range n.Constraints {
+			concreteName, ok := aliasSubst[c.TypeParam]
+			if !ok {
+				continue
+			}
+
+			if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+				return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+					c.Pos.Line, c.Pos.Col, n.Name, concreteName, concreteName,
+					c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 			}
 		}
 	}

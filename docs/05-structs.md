@@ -43,7 +43,7 @@ The type name after `}` is required to tell the compiler the struct's field
 layout. Field order in the name list does not matter - each name is looked up
 by name, not position.
 
----
+--
 
 ## Methods
 
@@ -64,7 +64,7 @@ echo pete.show()   // Pete is 20 years old
 
 Methods are called with dot notation: `value.method(args)`.
 
----
+--
 
 ## fn init  -  initializer
 
@@ -89,7 +89,7 @@ let alice = person{name: "Alice", age: 30}   // prints: new person: Alice
 
 > `init` is **not** called when the struct is created via `malloc`.
 
----
+--
 
 ## fn deinit  -  destructor
 
@@ -131,7 +131,7 @@ after the outer `deinit` completes.
 > `deinit` is **not** called when the struct is boxed to `any` or when it is
 > stored as an element of a slice.  See `docs/internals/deinit.md` for details.
 
----
+--
 
 ## Static methods
 
@@ -158,7 +158,7 @@ let c2 = c.inc().inc().inc()
 echo c2.get()              // 3
 ```
 
----
+--
 
 ## Pointers to structs
 
@@ -172,7 +172,7 @@ echo pPtr->show()          // shorthand for (*pPtr).show()
 
 `->` is syntactic sugar for dereferencing a pointer and calling a method.
 
----
+--
 
 ## Generic structs
 
@@ -188,8 +188,42 @@ struct tuple[t] =
     return "first: {this.first}, second: {this.second}"
 ```
 
-Generic structs are **templates**; they are not compiled directly. They are
-only compiled when instantiated through a `type` alias.
+Generic structs are **templates**; they are not compiled directly. They
+are compiled on demand at each instantiation site - either via a `type`
+alias or directly at a struct-literal site.
+
+### Constructor inference
+
+Type arguments on a generic struct literal are optional when they can be
+inferred from the provided field values. The compiler unifies each field
+value's type against the template's declared field type to bind the
+template's type parameters:
+
+```rust
+struct Box[t] =
+  value t
+
+let a = Box{value: 42 as i32}     // Box[i32] inferred
+let b = Box{value: "hello"}       // Box[string] inferred
+let c = Box[f64]{value: 3.14}     // explicit still works
+```
+
+Multi-parameter structs work the same way, with each parameter bound by
+the first literal field that mentions it:
+
+```rust
+struct pair[a, b] =
+  a a
+  b b
+
+let p = pair{a: 1 as i32, b: "hi"}    // pair[i32, string]
+```
+
+If a type parameter can't be reached from any provided field the compiler
+emits the existing "unknown struct type" error and you should add an
+explicit `[T]` annotation. See
+[03-functions.md](03-functions.md#type-constraints) for boolean bound
+expressions (`&&`, `||`, `not`, parens) that apply equally to structs.
 
 ### Generic struct arity overloading
 
@@ -214,7 +248,7 @@ The compiler selects the correct template based on the number of type arguments
 at the instantiation site. This enables "same concept, different shapes" without
 name collisions.
 
----
+--
 
 ## Heap allocation
 
@@ -239,7 +273,7 @@ when returning the address of a named local (`return &x`): the compiler promotes
 the variable to an ARC block at the return site and the caller's variable
 releases it on scope exit.
 
----
+--
 
 ## Weak and own fields
 
@@ -252,12 +286,12 @@ every cycle is annotated with the programmer's intent.
 There are two field ownership modifiers:
 
 | Modifier | RC behaviour | Cycle role |
-|----------|-------------|------------|
+|-----|-------|------|
 | *(none)* - plain strong | retain on assign, release on free | Default owning reference |
 | `weak` | no retain / no release | Non-owning back-reference; breaks ARC cycles |
 | `own` | retain on assign, release on free (same as strong) | Owning tree-edge; declares the referenced data is acyclic at runtime |
 
----
+--
 
 ### `weak` - non-owning back-references
 
@@ -278,7 +312,7 @@ struct Node[T] =
 - The programmer is responsible for not letting the weak reference outlive
   the owning side.
 
----
+--
 
 ### `own` - tree-ownership declaration
 
@@ -310,14 +344,14 @@ language.
 > Future work: a debug-mode build option will add a runtime acyclicity check
 > on `own` field assignments to catch contract violations during development.
 
----
+--
 
 ### Compiler cycle detection rules
 
 Every strongly-connected component that contains a cycle must satisfy:
 
 | Cycle composition | Result |
-|---|---|
+|--|--|
 | All plain strong, no `weak`, no `own` | **Error** - annotate intent |
 | All `weak`, no strong, no `own` | **Error** - no owner; objects would be freed immediately |
 | At least one `weak` (any number of strong) | **OK** - classic ARC cycle-breaking |
@@ -343,7 +377,7 @@ struct JsonValue =
   items own [*JsonValue]   // owns child values; data is always a tree
 ```
 
----
+--
 
 ## type aliases
 
@@ -412,7 +446,7 @@ type mypoint = tuple[f32] override =
     return /* ... */
 ```
 
----
+--
 
 ## Field tags
 
@@ -438,7 +472,7 @@ echo fieldtag(user{}, "notes")  // '' (empty atom)
 
 See [10 - Reflection](10-reflection.md) for the full reflection API.
 
----
+--
 
 ## Traits on structs
 
@@ -457,7 +491,7 @@ let c = cat{label: "Whiskers", breed: "tabby"}
 echo c.name()    // Whiskers
 ```
 
----
+--
 
 ## Tuples
 

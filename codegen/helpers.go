@@ -658,10 +658,34 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		}
 	}
 
-	// Empty array literal {i8*, i64} -> typed fat array {T*, i64}: use zero value
-	// of the target type so the null data pointer is properly typed.
+	// Fat-array coercion is deliberately narrow: only the untyped empty-array
+	// literal ({i8*, i64} produced by `[]` with no known target element type)
+	// is silently retyped to the target's element type. Any other cross-type
+	// fat-array coercion is REJECTED here - callers must either pass the right
+	// element type to begin with (see genArrayLitWithElemType plumbing in
+	// genArgWithTargetType and call-site args), or write an explicit cast:
+	//   let xs [i64] = [1, 2, 3]
+	//   consume(xs as [i32])     // element-wise narrowing via genAsExpr
+	// Silent implicit narrowing would hide precision-loss bugs (the original
+	// motivation for removing the auto-convert path: it was converting
+	// non-empty [i64] literals to zero-length [i32] without any user feedback).
 	if isFatArrayPtr(src) && isFatArrayPtr(target) {
-		return cg.zeroValue(target)
+		srcPt := src.(*irtypes.StructType).Fields[0].(*irtypes.PointerType)
+		tgtPt := target.(*irtypes.StructType).Fields[0].(*irtypes.PointerType)
+
+		if srcPt.ElemType.Equal(tgtPt.ElemType) {
+			return val // same element type: already correct
+		}
+
+		if srcPt.ElemType.Equal(irtypes.I8) && !tgtPt.ElemType.Equal(irtypes.I8) {
+			// Empty-array literal only. The untyped {i8*, i64} form is only
+			// produced by genArrayLitWithElemType(nil) for empty literals.
+			return cg.zeroValue(target)
+		}
+		// Cross-type fat arrays (e.g. [i64] -> [i32]): leave val unchanged.
+		// adaptArgs / call-site validation reports this as a compile error with
+		// a hint about `x as [T]`.
+		return val
 	}
 
 	// %__atom -> string fat-ptr or i8*: convert via __tin_atom_to_string.
@@ -774,6 +798,98 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// Last resort: bitcast if same size.
 
 	return val
+}
+
+// convertFatArray converts a {T1*, i64} fat-array to a {T2*, i64}.
+//
+//   - Same-size element types: reinterpret the data pointer, keep the length.
+//     No copy. Covers different signedness (i32 <-> u32), pointer-type changes.
+//   - Integer elements of different size: delegates to the _tin_slice_convert_int
+//     runtime helper which allocates a fresh buffer and truncates/sign-extends
+//     element-wise. Keeping the loop in the runtime avoids introducing control
+//     flow inside `coerce`, which would break callers that use the static
+//     `block` parameter to continue emitting after the coerce returns.
+//   - Anything else (float<->int, struct repacking): returns val unchanged,
+//     which will fail LLVM verification at the call and surface loudly.
+func (cg *CodeGen) convertFatArray(block *ir.Block, val value.Value, srcSt, tgtSt *irtypes.StructType) value.Value {
+	srcPt := srcSt.Fields[0].(*irtypes.PointerType)
+	tgtPt := tgtSt.Fields[0].(*irtypes.PointerType)
+	srcElem := srcPt.ElemType
+	tgtElem := tgtPt.ElemType
+
+	srcSz := llvmTypeSize(srcElem)
+	tgtSz := llvmTypeSize(tgtElem)
+
+	// Spill to alloca and extract ptr/len.
+	srcSpill := block.NewAlloca(srcSt)
+	block.NewStore(val, srcSpill)
+	lenGep := block.NewGetElementPtr(srcSt, srcSpill,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	srcLen := block.NewLoad(irtypes.I64, lenGep)
+	ptrGep := block.NewGetElementPtr(srcSt, srcSpill,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	srcData := block.NewLoad(srcPt, ptrGep)
+
+	if srcSz == tgtSz {
+		newData := block.NewBitCast(srcData, tgtPt)
+		resAlloca := block.NewAlloca(tgtSt)
+		resPtrGep := block.NewGetElementPtr(tgtSt, resAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		block.NewStore(newData, resPtrGep)
+		resLenGep := block.NewGetElementPtr(tgtSt, resAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		block.NewStore(srcLen, resLenGep)
+
+		return block.NewLoad(tgtSt, resAlloca)
+	}
+
+	if !irtypes.IsInt(srcElem) || !irtypes.IsInt(tgtElem) {
+		return val
+	}
+
+	// Build {i8*, i64} raw slice of source and call runtime converter.
+	rawSlice := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	rawAlloca := block.NewAlloca(rawSlice)
+	rawPtrGep := block.NewGetElementPtr(rawSlice, rawAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(block.NewBitCast(srcData, irtypes.I8Ptr), rawPtrGep)
+	rawLenGep := block.NewGetElementPtr(rawSlice, rawAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(srcLen, rawLenGep)
+	rawVal := block.NewLoad(rawSlice, rawAlloca)
+
+	srcSigned := int64(1)
+	if isUnsignedIntLLVMType(srcElem) {
+		srcSigned = 0
+	}
+
+	convResult := block.NewCall(cg.ensureSliceConvertInt(), rawVal,
+		constant.NewInt(irtypes.I64, int64(srcSz)),
+		constant.NewInt(irtypes.I64, int64(tgtSz)),
+		constant.NewInt(irtypes.I32, srcSigned))
+
+	// Reinterpret {i8*, i64} result as {T2*, i64}.
+	resRawAlloca := block.NewAlloca(rawSlice)
+	block.NewStore(convResult, resRawAlloca)
+	castPtr := block.NewBitCast(resRawAlloca, irtypes.NewPointer(tgtSt))
+
+	return block.NewLoad(tgtSt, castPtr)
+}
+
+// isUnsignedIntLLVMType returns true for integer types the codegen prefers
+// to treat as unsigned when widening (e.g. u8/char/byte for the runtime's
+// signedness flag in slice conversion).
+func isUnsignedIntLLVMType(t irtypes.Type) bool {
+	// llir/ir doesn't track signedness on IntType, so infer from bit width:
+	// we conservatively treat i8 as unsigned (char/byte/u8 all lower to i8)
+	// and rely on Tin's narrowing rules on the source side. The impact is
+	// only on sign/zero extension when widening; for truncation and same-width
+	// conversions there is no difference.
+	if it, ok := t.(*irtypes.IntType); ok && it.BitSize == 8 {
+		return true
+	}
+
+	return false
 }
 
 // coerceAnyToTrait constructs a trait fat-pointer {i8* data, vtable*} from an

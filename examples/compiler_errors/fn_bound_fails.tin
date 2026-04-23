@@ -1,0 +1,11 @@
+// compiler_errors/fn_bound_fails.tin
+// Generic function with a compound bound. bool isn't ord so the function
+// monomorphization should fail with a clear message.
+
+fn sort_pair[T](a T, b T) T where T is ord && not bool =
+  where a < b: a
+  where _:     b
+
+fn main() =
+  let z = sort_pair(true, false)
+  echo z

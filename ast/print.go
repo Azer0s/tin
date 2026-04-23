@@ -383,6 +383,31 @@ func printNode(n Node, depth int) string {
 		}
 
 		return "[" + strings.Join(parts, ", ") + "]"
+	case *TuplePattern:
+		parts := make([]string, len(v.Elems))
+		for i, e := range v.Elems {
+			parts[i] = printNode(e, depth)
+		}
+
+		return "(" + strings.Join(parts, ", ") + ")"
+	case *StructPattern:
+		parts := make([]string, len(v.Fields))
+		for i, f := range v.Fields {
+			switch {
+			case f.IsWild && f.Name == "":
+				parts[i] = "_"
+			case f.IsWild:
+				parts[i] = f.Name + ": _"
+			case f.Literal != nil && f.BindTo != "":
+				parts[i] = f.Name + ": " + f.BindTo
+			case f.Literal != nil:
+				parts[i] = f.Name + ": " + printNode(f.Literal, depth)
+			default:
+				parts[i] = f.Name
+			}
+		}
+
+		return v.TypeName + "{" + strings.Join(parts, ", ") + "}"
 	default:
 		return fmt.Sprintf("/* unhandled: %T */", n)
 	}

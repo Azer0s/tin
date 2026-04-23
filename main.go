@@ -41,6 +41,12 @@ Link flags (passed after the source file):
 Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
+  -Wno-unused-match-arms   suppress warnings about unreachable match cases /
+                           where clauses (an arm whose pattern matches only
+                           values that earlier arms already cover)
+  -v-match-info            dump Maranget exhaustiveness/usefulness analysis
+                           for every match and where the compiler sees
+                           (debug aid; output goes to stderr)
 
 Target flags:
   -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
@@ -435,6 +441,8 @@ doneFlags:
 
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
+	noWarnUnusedMatchArms := false
+	verboseMatchInfo := false
 	debugBuild := false
 
 	// Scan all args (including those before the file) for flags.
@@ -459,6 +467,10 @@ doneFlags:
 			noWarnAsyncMain = true
 		case "-Wno-await-match-guards":
 			noWarnAwaitMatchGuards = true
+		case "-Wno-unused-match-arms":
+			noWarnUnusedMatchArms = true
+		case "-v-match-info":
+			verboseMatchInfo = true
 		case "-v-heuristics":
 			verboseHeuristics = true
 		case "-v":
@@ -609,6 +621,14 @@ doneFlags:
 
 	if noWarnAsyncMain {
 		cg.SetNoWarnAsyncMain(true)
+	}
+
+	if noWarnUnusedMatchArms {
+		cg.SetNoWarnUnusedMatchArms(true)
+	}
+
+	if verboseMatchInfo {
+		cg.SetVerboseMatchInfo(true)
 	}
 
 	if verboseHeuristics {

@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -345,12 +346,25 @@ func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, e
 // Used when the declared array type is known (e.g. let fns [fn{#async}(i64) i64] = [double]).
 func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, targetElemType irtypes.Type) (value.Value, error) {
 	if len(e.Elems) == 0 {
-		// Empty dynamic array: {null, 0}
-		fat := stringFatPtrType() // {i8*, i64} - reuse structure
+		// Empty dynamic array: {null, 0} typed against targetElemType when known.
+		// When no target is known the caller gets the untyped {i8*, i64} form and
+		// the coerce path later swaps it for a correctly-typed zero value.
+		var fat *irtypes.StructType
+
+		var dataNull value.Value
+
+		if targetElemType != nil {
+			fat = irtypes.NewStruct(irtypes.NewPointer(targetElemType), irtypes.I64)
+			dataNull = constant.NewNull(irtypes.NewPointer(targetElemType))
+		} else {
+			fat = stringFatPtrType() // {i8*, i64} - reuse structure
+			dataNull = constant.NewNull(irtypes.I8Ptr)
+		}
+
 		alloca := block.NewAlloca(fat)
 		ptrGep := block.NewGetElementPtr(fat, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(constant.NewNull(irtypes.I8Ptr), ptrGep)
+		block.NewStore(dataNull, ptrGep)
 		lenGep := block.NewGetElementPtr(fat, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		block.NewStore(constant.NewInt(irtypes.I64, 0), lenGep)
@@ -467,8 +481,99 @@ func (cg *CodeGen) genArrayFillLit(block *ir.Block, e *ast.ArrayFillLit) (value.
 	return block.NewLoad(fatType, fatAlloca), nil
 }
 
+// inferStructTypeArgs infers type arguments for a generic struct literal from
+// the provided field values. Each StructLit field is matched by name against
+// the template's declared fields; the field value's LLVM type is unified
+// against the declared field type to bind the template's type parameters.
+// Returns the inferred TypeExpr list on success, or (nil, false) when
+// inference is ambiguous or incomplete.
+//
+// Two-pass like inferTypeArgs for functions: runtime values first, then
+// literal constants, so a literal `1` doesn't pin T to i64 when a sibling
+// field provides a concrete i32 value.
+func (cg *CodeGen) inferStructTypeArgs(block *ir.Block, e *ast.StructLit, arityMap map[int]*ast.StructDecl) ([]ast.TypeExpr, bool) {
+	// We don't know the arity up front when there are no explicit TypeArgs.
+	// Try templates in ascending arity and return the first that yields a
+	// fully-bound substitution. In practice generics with different arities
+	// and the same name are extremely rare (Tin's genericStructsByArity is
+	// keyed on both) so this is a small search.
+	var arities []int
+	for a := range arityMap {
+		arities = append(arities, a)
+	}
+
+	sort.Ints(arities)
+
+	for _, arity := range arities {
+		tmpl := arityMap[arity]
+
+		subst := make(map[string]string)
+		fromConst := make(map[string]bool)
+
+		fieldIndex := make(map[string]ast.TypeExpr, len(tmpl.Fields))
+		for _, tf := range tmpl.Fields {
+			fieldIndex[tf.Name] = tf.Type
+		}
+
+		for pass := 0; pass < 2; pass++ {
+			for _, f := range e.Fields {
+				declType, ok := fieldIndex[f.Name]
+				if !ok {
+					continue
+				}
+
+				val, err := cg.genExpr(block, f.Value)
+				if err != nil || val == nil {
+					continue
+				}
+
+				_, isConst := val.(constant.Constant)
+				if pass == 0 && isConst {
+					continue
+				}
+
+				if pass == 1 && !isConst {
+					continue
+				}
+
+				cg.inferTypeArgsFromParamPrio(declType, val.Type(), tmpl.TypeParams, subst, fromConst, isConst)
+			}
+		}
+		// Every type parameter must be bound; otherwise inference is
+		// ambiguous and we bail to let the existing "unknown struct"
+		// error fire with a hint about missing annotations.
+		if len(subst) != len(tmpl.TypeParams) {
+			continue
+		}
+
+		inferred := make([]ast.TypeExpr, len(tmpl.TypeParams))
+		for i, tp := range tmpl.TypeParams {
+			inferred[i] = &ast.SimpleType{Name: subst[tp]}
+		}
+
+		return inferred, true
+	}
+
+	return nil, false
+}
+
 func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value, error) {
 	typeName := e.TypeName
+	// Generic struct literal WITHOUT explicit type args: `Box{value: "hi"}`
+	// -- infer type arguments from the provided field values when `Box` is
+	// a generic struct template. The inference unifies each field-value's
+	// LLVM type against the template's declared field type (which may name
+	// one of the template's type parameters). Ambiguities (no type param
+	// mentioned in any named field) fall through to the existing error.
+	if len(e.TypeArgs) == 0 {
+		if _, isConcrete := cg.structTypes[typeName]; !isConcrete {
+			if arityMap, isGeneric := cg.genericStructsByArity[typeName]; isGeneric {
+				if inferred, ok := cg.inferStructTypeArgs(block, e, arityMap); ok {
+					e = &ast.StructLit{TypeName: e.TypeName, TypeArgs: inferred, Fields: e.Fields, Positional: e.Positional}
+				}
+			}
+		}
+	}
 	// Generic struct literal with explicit type args: Name[T1, T2]{...}
 	// Monomorphize to the concrete name Name__T1__T2 (resolving type aliases).
 	if len(e.TypeArgs) > 0 {
@@ -1105,6 +1210,26 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	val, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
+	}
+
+	// Fat-array to fat-array cast: explicit element-wise conversion via the
+	// runtime helper. Only this path - `x as [i32]` - performs the conversion;
+	// implicit coerce does not (silent narrowing was hiding bugs).
+	if isFatArrayPtr(val.Type()) && isFatArrayPtr(targetType) {
+		srcSt := val.Type().(*irtypes.StructType)
+		tgtSt := targetType.(*irtypes.StructType)
+		srcPt := srcSt.Fields[0].(*irtypes.PointerType)
+		tgtPt := tgtSt.Fields[0].(*irtypes.PointerType)
+
+		if srcPt.ElemType.Equal(tgtPt.ElemType) {
+			return val, nil
+		}
+		// Empty-array literal shortcut: untyped {i8*, i64} -> typed.
+		if srcPt.ElemType.Equal(irtypes.I8) && !tgtPt.ElemType.Equal(irtypes.I8) {
+			return cg.zeroValue(targetType), nil
+		}
+
+		return cg.convertFatArray(block, val, srcSt, tgtSt), nil
 	}
 
 	// For unsigned source types, integer widening must use zext, not sext.
@@ -1970,6 +2095,18 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 // the fat-ptr's parameter count is selected and wrapped appropriately.
 // Falls through to a normal genExpr when the heuristic does not apply.
 func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targetType irtypes.Type) (value.Value, error) {
+	// Array literal with a known fat-array target: generate elements at the
+	// target element type directly so we don't need a cross-type coercion
+	// afterwards (which previously silently replaced non-empty arrays with
+	// the zero fat-array and broke every match on element types <i64).
+	if arrLit, ok := argNode.(*ast.ArrayLit); ok {
+		if st, isStruct := targetType.(*irtypes.StructType); isStruct && isFatArrayPtr(st) {
+			if pt, isPtr := st.Fields[0].(*irtypes.PointerType); isPtr {
+				return cg.genArrayLitWithElemType(block, arrLit, pt.ElemType)
+			}
+		}
+	}
+
 	if isFatFnPtr(targetType) {
 		if id, ok := argNode.(*ast.Identifier); ok {
 			if variants, hasOverloads := cg.overloads[id.Name]; hasOverloads {

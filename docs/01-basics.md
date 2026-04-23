@@ -379,11 +379,11 @@ float. Float literals (e.g. `3.14`, `1.0`, `2.5e-3`) default to `f64`.
 let x f64 = 3.14
 let y f32 = 2.5
 
-// int -> float
+// integer -> float
 let n i64 = 42
 let f = n as f64        // 42.0
 
-// float -> int (truncates toward zero)
+// float -> integer (truncates toward zero)
 let i = 3.9 as i64      // 3
 ```
 

@@ -851,6 +851,137 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 }
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.
+// typeBoundSatisfied evaluates a TypeBound expression against a concrete
+// type name. The boolean combinators short-circuit so the sub-check witness
+// is the FIRST failure on an AND chain and the LAST failure on an OR chain
+// (i.e. when every alternative failed).
+//
+// Returns (ok, witness):
+//
+//	ok == true   -> bound holds; witness is nil
+//	ok == false  -> bound failed; witness points at the failing TBAtom so
+//	                the caller can format a specific error
+func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) (bool, *ast.TBAtom) {
+	switch b := bound.(type) {
+	case *ast.TBAtom:
+		got := cg.structSatisfiesConstraint(concreteName, b.Trait)
+		if b.Neg {
+			got = !got
+		}
+
+		if got {
+			return true, nil
+		}
+
+		return false, b
+
+	case *ast.TBAnd:
+		if ok, w := cg.typeBoundSatisfied(concreteName, b.Left); !ok {
+			return false, w
+		}
+
+		if ok, w := cg.typeBoundSatisfied(concreteName, b.Right); !ok {
+			return false, w
+		}
+
+		return true, nil
+
+	case *ast.TBOr:
+		if ok, _ := cg.typeBoundSatisfied(concreteName, b.Left); ok {
+			return true, nil
+		}
+
+		if ok, _ := cg.typeBoundSatisfied(concreteName, b.Right); ok {
+			return true, nil
+		}
+		// Both sides failed; report the right-side failure (the last one
+		// tried) so the error message lists a concrete missing trait.
+		_, w := cg.typeBoundSatisfied(concreteName, b.Right)
+
+		return false, w
+	}
+
+	return true, nil
+}
+
+// typeArgsContainAnyOf reports whether any type-argument expression in args
+// references a name in the `paramNames` list as a top-level SimpleType.
+// Used to decide whether a template's type alias still has symbolic type
+// parameters (we skip constraint checks in that case).
+func typeArgsContainAnyOf(args []ast.TypeExpr, paramNames []string) bool {
+	nameSet := make(map[string]bool, len(paramNames))
+	for _, n := range paramNames {
+		nameSet[n] = true
+	}
+
+	for _, a := range args {
+		if st, ok := a.(*ast.SimpleType); ok && nameSet[st.Name] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// flattenPositiveTraits collects every non-negated leaf trait of a bound.
+// Used by the monomorphizer to inject default trait methods the concrete
+// type inherits. Negated atoms (`not X`) and OR branches are skipped since
+// they describe what the type might lack, not what it must have.
+func flattenPositiveTraits(bound ast.TypeBound) []ast.TypeExpr {
+	var out []ast.TypeExpr
+
+	var walk func(ast.TypeBound)
+
+	walk = func(b ast.TypeBound) {
+		switch v := b.(type) {
+		case *ast.TBAtom:
+			if !v.Neg {
+				out = append(out, v.Trait)
+			}
+		case *ast.TBAnd:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.TBOr:
+			// OR can't guarantee either leaf holds, so we don't inject
+			// default methods from either side.
+		}
+	}
+
+	walk(bound)
+
+	return out
+}
+
+// typeBoundString renders a TypeBound back to its source-level form so
+// constraint-violation errors echo the user's own syntax.
+func typeBoundString(bound ast.TypeBound) string {
+	switch b := bound.(type) {
+	case *ast.TBAtom:
+		s := typeExprToString(b.Trait)
+		if b.Neg {
+			return "not " + s
+		}
+
+		return s
+	case *ast.TBAnd:
+		return typeBoundStringParen(b.Left) + " && " + typeBoundStringParen(b.Right)
+	case *ast.TBOr:
+		return typeBoundStringParen(b.Left) + " || " + typeBoundStringParen(b.Right)
+	}
+
+	return "<bound>"
+}
+
+// typeBoundStringParen wraps nested And/Or bounds in parens for unambiguous
+// rendering. Atoms are rendered bare.
+func typeBoundStringParen(bound ast.TypeBound) string {
+	if _, ok := bound.(*ast.TBAtom); ok {
+		return typeBoundString(bound)
+	}
+
+	return "(" + typeBoundString(bound) + ")"
+}
+
 // structSatisfiesConstraint checks that structName satisfies a trait expression.
 // traitExpr may be a SimpleType ("labeled"), GenericType ("iter[i64]"), or a
 // type alias that expands to a union ("addable" = i8|i16|i32|...).
@@ -954,7 +1085,7 @@ func isOrdType(typeName string) bool {
 	case "i8", "i16", "i32", "i64", "i128",
 		"u8", "u16", "u32", "u64", "u128",
 		"f32", "f64", "f128",
-		"byte", "char", "int", "uint":
+		"byte", "char":
 		return true
 	}
 
@@ -975,6 +1106,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		return nil
 	}
+
+	// Build the mutated-names set for the if-condition folder. Restored
+	// after the body so nested function generations don't leak names
+	// across each other.
+	prevMutated := cg.mutatedNames
+	cg.mutatedNames = collectMutatedNames(n.Body)
+
+	defer func() {
+		cg.mutatedNames = prevMutated
+	}()
 
 	var retType irtypes.Type = irtypes.Void
 

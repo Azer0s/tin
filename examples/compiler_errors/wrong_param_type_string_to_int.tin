@@ -1,0 +1,9 @@
+// compiler_errors/wrong_param_type_string_to_int.tin
+// Passing a string where an integer is expected.
+
+fn add(a i32, b i32) i32 =
+  return a + b
+
+fn main() =
+  let r = add("hello", 5)
+  echo r

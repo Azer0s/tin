@@ -1,0 +1,12 @@
+// compiler_errors/wrong_array_element_type.tin
+// Passing an array of one element type where a different element type is
+// expected. The compiler must reject this and suggest the explicit cast,
+// since silently narrowing element-by-element would be an easy footgun.
+
+fn show32(xs [i32]) i32 =
+  return xs.len
+
+fn main() =
+  let big [i64] = [1, 2, 3]
+  let n = show32(big)
+  echo n

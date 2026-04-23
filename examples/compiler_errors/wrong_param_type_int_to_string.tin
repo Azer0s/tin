@@ -1,0 +1,9 @@
+// compiler_errors/wrong_param_type_int_to_string.tin
+// Passing an integer where a string is expected. Strict per-arg type
+// checking should report this with the actual vs expected type names.
+
+fn greet(name string) =
+  echo name
+
+fn main() =
+  greet(42)

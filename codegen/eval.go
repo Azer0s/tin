@@ -720,7 +720,7 @@ func (cg *CodeGen) resolveReturnType(fd *ast.FuncDecl) irtypes.Type {
 			return irtypes.I16
 		case "i32":
 			return irtypes.I32
-		case "i64", "int":
+		case "i64":
 			return irtypes.I64
 		case "u8":
 			return irtypes.I8

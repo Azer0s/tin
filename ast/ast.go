@@ -67,13 +67,69 @@ type FuncDecl struct {
 	IsVirtual      bool   // true for "fn f() T = virtual" in trait declarations
 }
 
-// TypeConstraint bounds a type parameter to one or more required traits
-// e.g. "where t is labeled+sized" -> {TypeParam:"t", Traits:[labeled, sized]}
-// e.g. "where t is iter[i64]"   -> {TypeParam:"t", Traits:[iter[i64]]}
+// TypeConstraint bounds a type parameter with a boolean expression of trait
+// checks (Form A from the design doc).
+//
+// Grammar (per type parameter):
+//
+//	bound := or
+//	or    := and ('||' and)*
+//	and   := unary ('&&' unary)*
+//	unary := 'not' atom | atom
+//	atom  := '(' bound ')' | <type-expr>
+//
+// Inside `where T is <bound>` each <type-expr> atom is implicitly checked
+// against T; `+` (legacy shorthand for conjunction) lowers to TBAnd chains
+// so existing programs continue to parse.
+//
+// Examples:
+//
+//	where t is ord                            -> TBAtom(ord, Neg:false)
+//	where t is labeled+sized                  -> TBAnd(TBAtom(labeled), TBAtom(sized))
+//	where t is ord && not bool                -> TBAnd(TBAtom(ord), TBAtom(bool, Neg:true))
+//	where t is i64 || f64                     -> TBOr(TBAtom(i64),   TBAtom(f64))
+//	where t is addable && (not bool || char)  -> TBAnd(TBAtom(addable),
+//	                                                    TBOr(TBAtom(bool, Neg:true),
+//	                                                         TBAtom(char)))
 type TypeConstraint struct {
+	Pos       Pos
 	TypeParam string
-	Traits    []TypeExpr // each may be SimpleType or GenericType
+	Bound     TypeBound
 }
+
+// TypeBound is the boolean expression in a TypeConstraint.
+type TypeBound interface {
+	typeBoundMarker()
+	Pos() Pos
+}
+
+// TBAtom is a leaf bound: `is <trait>` when Neg is false, `is not <trait>`
+// when true.
+type TBAtom struct {
+	NodePos Pos
+	Trait   TypeExpr // SimpleType, GenericType, or any other type expression
+	Neg     bool
+}
+
+// TBAnd is `left && right`.
+type TBAnd struct {
+	NodePos     Pos
+	Left, Right TypeBound
+}
+
+// TBOr is `left || right`.
+type TBOr struct {
+	NodePos     Pos
+	Left, Right TypeBound
+}
+
+func (*TBAtom) typeBoundMarker() {}
+func (*TBAnd) typeBoundMarker()  {}
+func (*TBOr) typeBoundMarker()   {}
+
+func (b *TBAtom) Pos() Pos { return b.NodePos }
+func (b *TBAnd) Pos() Pos  { return b.NodePos }
+func (b *TBOr) Pos() Pos   { return b.NodePos }
 
 type StructDecl struct {
 	base
@@ -99,10 +155,11 @@ type TraitDecl struct {
 
 type TypeDecl struct {
 	base
-	Name       string
-	TypeParams []string
-	Type       TypeExpr
-	Overrides  []*FuncDecl // "override = fn show ..."
+	Name        string
+	TypeParams  []string
+	Constraints []TypeConstraint // generic type constraints: where t is addable
+	Type        TypeExpr
+	Overrides   []*FuncDecl // "override = fn show ..."
 }
 
 type EnumDecl struct {
@@ -626,9 +683,19 @@ type UseImport struct {
 }
 
 type WhereClause struct {
-	Pos  Pos
-	Cond Node // nil = wildcard "_"
-	Body Node // expression or *Block
+	Pos Pos
+	// Cond: bool expression for bool-guard clauses. nil means bare "_" wildcard,
+	// which is a bool-mode catch-all (and is also accepted inside a pattern
+	// where-list as the universal catch-all).
+	Cond Node
+	// Pattern: set for pattern clauses (`where (pat): ...`). When non-nil,
+	// Cond must be nil; this is enforced in the parser. A pattern may be a
+	// literal, Identifier binder, ArrayPattern, StructPattern, or TuplePattern.
+	Pattern Node
+	// Guard: optional `if <expr>` after a pattern (`where (pat) if guard: ...`).
+	// Only valid when Pattern is non-nil.
+	Guard Node
+	Body  Node // expression or *Block
 }
 
 type ElseIfClause struct {
@@ -687,6 +754,18 @@ type ArrayPatternElement struct {
 type ArrayPattern struct {
 	base
 	Elems []ArrayPatternElement
+}
+
+// TuplePattern is used for multi-arg where-clause destructuring:
+//
+//	where (0, "hello"):      ->  TuplePattern{IntLit 0, StringLit "hello"}
+//	where (0, _, [x, ...]):  ->  TuplePattern{IntLit 0, Identifier "_", ArrayPattern}
+//
+// Single-arg patterns don't produce a TuplePattern; the parser unwraps the
+// single inner element so `where (0):` stores an IntLit directly as Pattern.
+type TuplePattern struct {
+	base
+	Elems []Node
 }
 
 type StructLitField struct {

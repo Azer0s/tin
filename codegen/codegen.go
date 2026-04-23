@@ -76,6 +76,12 @@ type CodeGen struct {
 
 	// type alias registry: alias name -> TypeExpr
 	typeAliases map[string]ast.TypeExpr
+	// genericTypeAliases stores the full TypeDecl for each generic type
+	// alias (those with TypeParams). Needed to expand calls like
+	// `StrPair[i32]{...}` - the alias substitutes its params into the RHS
+	// and re-enters monomorphization on the underlying struct. Also holds
+	// the alias's own where-clause bounds so they can fire on instantiation.
+	genericTypeAliases map[string]*ast.TypeDecl
 
 	// trait registry: trait name -> TraitDecl
 	traits map[string]*ast.TraitDecl
@@ -126,6 +132,8 @@ type CodeGen struct {
 	tinRecoverFn *ir.Func
 	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
 	sliceSubsliceFn *ir.Func
+	// sliceConvertIntFn is the lazily declared _tin_slice_convert_int extern.
+	sliceConvertIntFn *ir.Func
 	// bytesFromBufFn is the lazily declared _tin_bytes_from_buf extern.
 	bytesFromBufFn *ir.Func
 	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
@@ -320,6 +328,23 @@ type CodeGen struct {
 
 	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
 	noWarnAsyncMain bool
+
+	// noWarnUnusedMatchArms suppresses warnings for unreachable match cases /
+	// where clauses (-Wno-unused-match-arms).
+	noWarnUnusedMatchArms bool
+
+	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
+	// reachability decisions for every match / where the compiler sees.
+	// Toggled by -v-match-info; for debugging the algorithm itself.
+	verboseMatchInfo bool
+
+	// mutatedNames is the set of identifier names that are reassigned
+	// anywhere inside the current function body (including closures and
+	// defers). Populated per function body in genFuncDeclAs and consulted
+	// by the if-condition folder (codegen/fold.go) to suppress folding of
+	// identifiers whose value can change between the let binding and the
+	// if-condition evaluation site. Reset to nil between functions.
+	mutatedNames map[string]bool
 
 	// userMainDecl is the AST node for the user's explicit fn main(), saved
 	// during genFuncDecl so the wrapper can inspect params and return type.
@@ -665,9 +690,11 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)  { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTestMode(v bool)              { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool)       { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms = v }
+func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
+func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
 		cg.mod.TargetTriple = triple
@@ -777,6 +804,7 @@ func New(filename string) *CodeGen {
 		structVtableOrder:      make(map[string][]string),
 		enumValues:             make(map[string]int64),
 		enumTypes:              make(map[string]irtypes.Type),
+		genericTypeAliases:     make(map[string]*ast.TypeDecl),
 		typeAliases: map[string]ast.TypeExpr{
 			// rune is a built-in alias for i32 (Unicode codepoint, U+0000..U+10FFFF).
 			// for r rune in someString triggers UTF-8 decoding in the for-in loop.
@@ -1537,8 +1565,7 @@ func typeExprIsPrimitive(te ast.TypeExpr) bool {
 		case "i8", "i16", "i32", "i64", "i128",
 			"u8", "u16", "u32", "u64", "u128",
 			"f32", "f64", "f128",
-			"byte", "char", "bool", "string", "void",
-			"int", "uint":
+			"byte", "char", "bool", "string", "void":
 			return true
 		}
 

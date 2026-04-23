@@ -266,7 +266,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.I16, nil
 	case "i32":
 		return irtypes.I32, nil
-	case "i64", "int":
+	case "i64":
 		return irtypes.I64, nil
 	case "u8", "char", "byte":
 		return irtypes.I8, nil
@@ -274,7 +274,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.I16, nil
 	case "u32", "uint32":
 		return irtypes.I32, nil
-	case "u64", "uint", "size_t":
+	case "u64", "size_t":
 		return irtypes.I64, nil
 	case "i128":
 		return irtypes.I128, nil

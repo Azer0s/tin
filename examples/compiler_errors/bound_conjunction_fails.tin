@@ -1,0 +1,10 @@
+// compiler_errors/bound_conjunction_fails.tin
+// Compound `&&` bound. bool satisfies `not bool` is false, so the whole
+// conjunction fails with "ord" as the failing sub-check (ord fails first).
+
+struct Box[T] where T is ord && not bool =
+  value T
+
+fn main() =
+  let b = Box[bool]{value: true}
+  echo b.value

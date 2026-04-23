@@ -258,7 +258,10 @@ fn describe(xs [i64]) string =
 ```
 
 - An arm matches only if the array length equals the pattern length (for
-  exact patterns) or is at least the prefix length (for rest patterns).
+  exact patterns) or is **strictly greater** than the prefix length (for
+  rest patterns). The rest slot binds at least one element, so
+  `[x, ...rest]` matches lists of length >= 2; use `[x]` for the singleton
+  case.
 - `_` discards an element without binding it.
 - `...name` binds the tail slice starting at that position. If you do not
   need the tail, write `..._` to discard it.
@@ -267,23 +270,28 @@ fn describe(xs [i64]) string =
 ```rust
 fn head_positive(xs [i64]) bool =
   match xs:
+    case [x] if x > 0:       return true
     case [x, ..._] if x > 0: return true
-    default:                  return false
+    default:                 return false
 ```
 
 **Exhaustiveness.** A match on arrays is exhaustive (no `default` needed)
-when the set of patterns covers all possible lengths. The most common
-exhaustive combination is an exact empty pattern plus a rest pattern:
+when the set of patterns covers all possible lengths. The compiler's
+exhaustiveness analysis follows Maranget, "Warnings for pattern matching",
+*Journal of Functional Programming* 17(3), 2007, pp. 387-421
+(doi:10.1017/S0956796807006223). The canonical exhaustive partition is the
+triple `[]` + `[x]` + `[x, ...rest]`:
 
 ```rust
 fn sum(xs [i64]) i64 =
   match xs:
     case []:           return 0
+    case [x]:          return x
     case [x, ...rest]: return x + sum(rest)
 ```
 
-`[]` covers length 0; `[x, ...rest]` covers every length >= 1, so together
-they are exhaustive.
+`[]` covers length 0, `[x]` covers length 1, `[x, ...rest]` covers length
+>= 2 (rest binds at least one element), so together they are exhaustive.
 
 ---
 

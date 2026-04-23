@@ -589,8 +589,11 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 		nConst := constant.NewInt(irtypes.I64, int64(regularCount))
 
 		if restIdx >= 0 {
-			// len >= regularCount
-			lenCond = checkBlock.NewICmp(enum.IPredSGE, arrLen, nConst)
+			// Rest semantics: a rest slot binds AT LEAST ONE element, so the
+			// list must have strictly more elements than the regular slots.
+			// Use `[]` to match empty and exact-length patterns `[x]`,
+			// `[x, y]`, ... when no rest slot is needed.
+			lenCond = checkBlock.NewICmp(enum.IPredSGT, arrLen, nConst)
 		} else {
 			// len == regularCount
 			lenCond = checkBlock.NewICmp(enum.IPredEQ, arrLen, nConst)
@@ -760,6 +763,8 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	if s.IsType {
 		return cg.genMatchType(block, s)
 	}
+
+	cg.scanMatchForUnreachable(s)
 
 	// Struct-pattern match: use if-else chain dispatch.
 	for _, c := range s.Cases {

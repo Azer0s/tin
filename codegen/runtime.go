@@ -1531,6 +1531,26 @@ func (cg *CodeGen) ensureSliceSubslice() *ir.Func {
 	return cg.sliceSubsliceFn
 }
 
+// ensureSliceConvertInt lazily declares _tin_slice_convert_int(TinSlice s,
+// i64 src_sz, i64 tgt_sz, i32 src_signed) -> TinSlice.
+// Used by fat-array cross-type coercion to reallocate the buffer and convert
+// integer elements from one width to another.
+func (cg *CodeGen) ensureSliceConvertInt() *ir.Func {
+	if cg.sliceConvertIntFn != nil {
+		return cg.sliceConvertIntFn
+	}
+
+	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	cg.sliceConvertIntFn = cg.mod.NewFunc("_tin_slice_convert_int", sliceType,
+		ir.NewParam("s", sliceType),
+		ir.NewParam("src_sz", irtypes.I64),
+		ir.NewParam("tgt_sz", irtypes.I64),
+		ir.NewParam("src_signed", irtypes.I32),
+	)
+
+	return cg.sliceConvertIntFn
+}
+
 // ensureRecoverFn lazily declares the _tin_recover() -> TinString extern.
 func (cg *CodeGen) ensureRecoverFn() *ir.Func {
 	if cg.tinRecoverFn != nil {

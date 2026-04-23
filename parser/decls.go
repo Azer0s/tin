@@ -292,7 +292,17 @@ func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 		return nil, err
 	}
 
-	decl := &ast.TypeDecl{Name: nameTok.Literal, TypeParams: typeParams, Type: typ}
+	// Optional trait-bound clauses AFTER the RHS, matching struct/fn style:
+	//   type StrPair[T] = Pair[string, T] where T is ord
+	// Enforced at monomorphization time (see ensureConcreteStruct /
+	// monomorphizeFunc).
+	constraints := p.parseTypeConstraints()
+	decl := &ast.TypeDecl{
+		Name:        nameTok.Literal,
+		TypeParams:  typeParams,
+		Constraints: constraints,
+		Type:        typ,
+	}
 
 	// optional "override = fn ..."
 	if p.check(lexer.KW_OVERRIDE) {

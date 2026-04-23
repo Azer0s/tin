@@ -94,12 +94,24 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	case lexer.KW_EXPORT:
 		return p.parseExportDecl()
 	case lexer.KW_WHERE:
-		wc, err := p.parseWhereClause()
-		if err != nil {
-			return nil, err
+		wl := &ast.WhereList{}
+
+		for {
+			wc, err := p.parseWhereClause()
+			if err != nil {
+				return nil, err
+			}
+
+			wl.Clauses = append(wl.Clauses, wc)
+
+			p.skipNewlines()
+
+			if !p.check(lexer.KW_WHERE) {
+				break
+			}
 		}
 
-		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
+		return wl, nil
 	case lexer.LBRACE:
 		// { #tag } { body }  tagged block - tags not yet parsed (legacy path)
 		if p.peekAt(1).Type == lexer.CONTROL_TAG {
@@ -1029,10 +1041,12 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 }
 
 func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
+	startPos := p.curPos()
 	typeName := p.advance().Literal // consume IDENT (type name)
 	p.advance()                     // consume {
 
 	sp := &ast.StructPattern{TypeName: typeName}
+	sp.SetPos(startPos)
 
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		p.skipWhitespace()

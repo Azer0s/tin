@@ -47,13 +47,14 @@ fn split_at_midpoint(arr [i64]) @[i64, [i64], [i64]] =
 // ---------------------------------------------------------------------------
 
 test "uniform array destructuring two slots" =
-  let arr [i64] = [10, 20, 30]
+  // Fixed-length destructuring requires exact length match.
+  let arr [i64] = [10, 20]
   let [a, b] [i64] = arr
   assert::equals(a, 10)
   assert::equals(b, 20)
 
 test "uniform array destructuring three slots" =
-  let arr [i64] = [1, 2, 3, 4, 5]
+  let arr [i64] = [1, 2, 3]
   let [x, y, z] [i64] = arr
   assert::equals(x, 1)
   assert::equals(y, 2)
