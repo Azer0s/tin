@@ -810,10 +810,6 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 // Generates a compile-time strcmp chain - one comparison per field.
 // Also handles any-typed first arguments via genSetfieldOnAny (runtime struct dispatch).
 func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Value, error) {
-	if err := cg.checkSetfieldWritable(e); err != nil {
-		return nil, err
-	}
-
 	structPtr, err := cg.genLValue(block, e.Expr)
 	if err != nil {
 		return nil, err

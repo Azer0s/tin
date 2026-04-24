@@ -2,19 +2,25 @@ package codegen
 
 // Per-field const enforcement.
 //
-// A field declared `const x T` in a struct body cannot be written after the
-// struct is constructed. The check is purely compile-time: every AST site
-// that takes a field-access target for a write asks checkFieldWritable
-// before emitting IR. Construction paths (struct literal, positional init,
-// destructuring let, match bindings) never flow through these sites and
-// are therefore unaffected.
+// A field declared `const x T` in a struct body cannot be written through
+// its named identifier after the struct is constructed. This is a purely
+// compile-time, syntactic check: only AST-level writes via the named
+// field are rejected. Reflective or indirect paths (setfield, address-of
+// then pointer write) are NOT blocked - const is a lint-level tag, not a
+// runtime guarantee.
 //
 // Coverage:
 //   - AssignStmt         s.f = x
 //   - AugAssignStmt      s.f += x / -= / *= / ...
 //   - PostfixStmt        s.f++ / s.f--
-//   - SetfieldExpr       setfield(s, "f", v)
-//   - AddressOfExpr      &s.f (strict: rejected outright, matches plan)
+//
+// Deliberately NOT rejected (const is compile-time-only):
+//   - SetfieldExpr       setfield(s, "f", v)   - reflective write
+//   - AddressOfExpr      &s.f                  - address-taking itself is
+//                                                not an assignment; writes
+//                                                through the returned
+//                                                pointer bypass static
+//                                                tracking by design.
 //
 // Resolution:
 //   fa := target.(*ast.FieldAccess)
@@ -71,38 +77,4 @@ func (cg *CodeGen) parentStructNameOf(fa *ast.FieldAccess) string {
 	}
 
 	return cg.typeNameOf(t)
-}
-
-// checkSetfieldWritable validates `setfield(expr, "field", v)` when the
-// field name is a string literal. Dynamic field names (variable-held
-// strings) cannot be checked statically and fall through - the runtime
-// strcmp chain emitted by genSetfield still completes the write, but
-// catching dynamic-const violations would require a runtime check we
-// have chosen not to emit for performance reasons. Document this limit
-// in the user-facing const spec if it becomes observable.
-func (cg *CodeGen) checkSetfieldWritable(e *ast.SetfieldExpr) error {
-	lit, ok := e.Field.(*ast.StringLit)
-	if !ok {
-		return nil
-	}
-
-	t := cg.astInferType(e.Expr)
-	if t == nil {
-		return nil
-	}
-
-	if pt, ok := t.(*irtypes.PointerType); ok {
-		t = pt.ElemType
-	}
-
-	structName := cg.typeNameOf(t)
-	if structName == "" {
-		return nil
-	}
-
-	if cg.structConstFields[structName][lit.Value] {
-		return cg.nodeErr(e, "setfield: cannot assign to const field %s.%s", structName, lit.Value)
-	}
-
-	return nil
 }

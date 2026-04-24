@@ -90,3 +90,15 @@ test "const field: method reads work; method returns new value" =
   let c2 = c1.inc()
   assert::equals(c2.count, 2)
   assert::equals(c2.label(), "hits")
+
+// const is a compile-time tag: reflective and pointer-based writes still work.
+
+test "const field: setfield reflective write still works" =
+  let p = point{x: 1, y: 2, z: 3}
+  setfield(p, "x", 42)
+  assert::equals(p.x, 42)
+
+test "const field: address-of produces a readable pointer" =
+  let p = point{x: 7, y: 8, z: 9}
+  let px = &p.x
+  assert::equals(*px, 7)
