@@ -75,6 +75,78 @@ func (cg *CodeGen) foldedBoolCondition(e ast.Node) (bool, bool) {
 	return v.boolVal, true
 }
 
+// boolCondConstResult is like foldedBoolCondition but allowed to ignore
+// side effects in connective operands. Only safe for warning emission,
+// NOT for dead-branch elimination: `a && false` returns (false, true)
+// here but `a` must still execute at runtime to preserve side effects.
+//
+// Extends the strict fold with two patterns that the rewriter
+// deliberately leaves alone so operand side effects are preserved:
+//
+//	<unknown> && false  -> false
+//	<unknown> || true   -> true
+func (cg *CodeGen) boolCondConstResult(e ast.Node) (bool, bool) {
+	v := cg.tryFoldExprForWarning(e)
+	if v.kind != foldBool {
+		return false, false
+	}
+
+	return v.boolVal, true
+}
+
+// tryFoldExprForWarning mirrors tryFoldExpr but accepts the side-effect-
+// discarding connective patterns described on boolCondConstResult. It
+// recurses through itself so nested compositions like `(x && false) ||
+// (y && false)` still reduce.
+func (cg *CodeGen) tryFoldExprForWarning(n ast.Node) foldedValue {
+	if v := cg.tryFoldExpr(n); v.kind != foldUnknown {
+		return v
+	}
+
+	switch e := n.(type) {
+	case *ast.BinExpr:
+		switch {
+		case e.Op == "&&" || e.Op == "and":
+			l := cg.tryFoldExprForWarning(e.Left)
+			if l.kind == foldBool && !l.boolVal {
+				return foldedValue{kind: foldBool, boolVal: false}
+			}
+
+			r := cg.tryFoldExprForWarning(e.Right)
+			if r.kind == foldBool && !r.boolVal {
+				return foldedValue{kind: foldBool, boolVal: false}
+			}
+
+			if l.kind == foldBool && r.kind == foldBool {
+				return foldedValue{kind: foldBool, boolVal: l.boolVal && r.boolVal}
+			}
+		case e.Op == "||" || e.Op == "or":
+			l := cg.tryFoldExprForWarning(e.Left)
+			if l.kind == foldBool && l.boolVal {
+				return foldedValue{kind: foldBool, boolVal: true}
+			}
+
+			r := cg.tryFoldExprForWarning(e.Right)
+			if r.kind == foldBool && r.boolVal {
+				return foldedValue{kind: foldBool, boolVal: true}
+			}
+
+			if l.kind == foldBool && r.kind == foldBool {
+				return foldedValue{kind: foldBool, boolVal: l.boolVal || r.boolVal}
+			}
+		}
+	case *ast.UnaryExpr:
+		if e.Op == "!" || e.Op == "not" {
+			v := cg.tryFoldExprForWarning(e.Expr)
+			if v.kind == foldBool {
+				return foldedValue{kind: foldBool, boolVal: !v.boolVal}
+			}
+		}
+	}
+
+	return unknownFold()
+}
+
 // tryFoldExpr is the recursive folding driver.
 func (cg *CodeGen) tryFoldExpr(n ast.Node) foldedValue {
 	switch e := n.(type) {

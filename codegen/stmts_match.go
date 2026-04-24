@@ -947,6 +947,8 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 }
 
 func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
+	cg.prepareMatchGuards(s.Cases)
+
 	if s.IsType {
 		return cg.genMatchType(block, s)
 	}
@@ -1144,6 +1146,7 @@ func (cg *CodeGen) toConstInt(c constant.Constant, targetType irtypes.Type) *con
 // With default (Go select semantics): one non-blocking check; if nothing is
 // actionable (no future done with a passing guard), runs the default body.
 func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Block, error) {
+	cg.prepareAwaitMatchGuards(s.Cases)
 	cg.ensureFiberRuntime()
 
 	n := len(s.Futures)

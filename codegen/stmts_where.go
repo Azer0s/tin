@@ -32,6 +32,8 @@ func (cg *CodeGen) genPatternWhereList(block *ir.Block, wl *ast.WhereList, retTy
 		return false, fmt.Errorf("pattern where-clauses are only supported inside function bodies")
 	}
 
+	cg.prepareWhereGuards(wl.Clauses)
+
 	// Collect the fn argument values (from their allocas registered in scope
 	// at fn entry). In a coro fn the $coro variant has the same arg names
 	// bound in the coroutine frame; the scope lookup finds them either way.

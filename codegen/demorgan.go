@@ -283,7 +283,7 @@ func (cg *CodeGen) prepareBoolCond(e ast.Node, loc string, allowBareTrueLoop boo
 
 	simp := cg.simplifyBool(e)
 
-	v, ok := cg.foldedBoolCondition(simp)
+	v, ok := cg.boolCondConstResult(simp)
 	if !ok {
 		return simp
 	}
@@ -385,6 +385,38 @@ func (cg *CodeGen) condInvolvesTypeof(n ast.Node) bool {
 	}
 
 	return false
+}
+
+// prepareMatchGuards runs prepareBoolCond over every non-nil guard on a
+// match statement's cases. Guards are ordinary boolean expressions whose
+// always-true/false condition deserves the same diagnostic treatment as
+// if/elif/while/for/where. Mutates the slice in place.
+func (cg *CodeGen) prepareMatchGuards(cases []ast.MatchCase) {
+	for i := range cases {
+		if cases[i].Guard != nil {
+			cases[i].Guard = cg.prepareBoolCond(cases[i].Guard, "match guard", false)
+		}
+	}
+}
+
+// prepareWhereGuards is the pattern-where variant of prepareMatchGuards.
+// Runs only on WhereClause.Guard (the `if <expr>` after a pattern); the
+// bool-mode Cond field is handled directly in genWhereList.
+func (cg *CodeGen) prepareWhereGuards(clauses []ast.WhereClause) {
+	for i := range clauses {
+		if clauses[i].Guard != nil {
+			clauses[i].Guard = cg.prepareBoolCond(clauses[i].Guard, "where guard", false)
+		}
+	}
+}
+
+// prepareAwaitMatchGuards handles AwaitMatchStmt guards the same way.
+func (cg *CodeGen) prepareAwaitMatchGuards(cases []ast.AwaitMatchCase) {
+	for i := range cases {
+		if cases[i].Guard != nil {
+			cases[i].Guard = cg.prepareBoolCond(cases[i].Guard, "await guard", false)
+		}
+	}
 }
 
 // firstPos returns the earliest source position attached to any node in the
