@@ -45,6 +45,62 @@ by name, not position.
 
 --
 
+## Field mutability - `const` / `var`
+
+A field declaration may be prefixed with `const` or `var` to control whether
+it can be reassigned after construction:
+
+```rust
+struct point =
+  const x i64          // immutable after init
+  const y i64          // immutable after init
+  var   scratch i64    // explicit mutable
+  z i64                // unmarked - mutable (default)
+```
+
+Rules:
+
+- Fields default to mutable. Writing `var` is always allowed but redundant
+  unless the struct is tagged `#const@field` (see
+  [13 - Control tags](13-control-tags.md#const_field)).
+- Writing `const` rejects direct field writes at compile time. The canonical
+  forms caught are:
+
+  ```rust
+  p.x = 5            // compile error
+  p.x += 1           // compile error
+  p.x++              // compile error
+  pp->x = 5          // compile error (p pointer-dereference shorthand)
+  this.x = 5         // compile error inside a method body
+  ```
+
+- Construction paths are unaffected. Struct literals, positional init,
+  destructuring `let`, and match-arm bindings all set const fields normally.
+- Replacing the whole struct (`p = point{...}`) is a variable assignment,
+  not a field write, so it works regardless of per-field constness. The
+  binding's own mutability (`let` vs `var`) controls whether the replace
+  itself is allowed.
+
+`const` is a **compile-time tag**, not a runtime guarantee:
+
+- `setfield(p, "x", 99)` still compiles and writes the field at runtime.
+  This is the explicit reflective escape hatch.
+- `&p.x` returns a usable pointer; writes through the pointer bypass
+  static tracking by design.
+
+Combine `const` / `var` with the existing `weak` / `own` ownership
+modifiers. Ordering is `[const|var] <name> [weak|own] <type> [forward]
+[@"metadata"]`:
+
+```rust
+struct tree =
+  const value i64
+  const left  own *tree    // const + own
+  var   cache weak *tree   // var + weak
+```
+
+--
+
 ## Methods
 
 Methods are functions defined inside a `struct` block. The first parameter
