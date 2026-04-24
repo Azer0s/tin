@@ -841,6 +841,13 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Value, error) {
 	entry, ok := cg.curScope.lookup(e.Name)
 	if !ok {
+		// Nullary ADT variant: bare `None`, `Leaf`, etc.
+		if v, err := cg.genDataNullaryConstructor(block, e.Name); err != nil {
+			return nil, err
+		} else if v != nil {
+			return v, nil
+		}
+
 		return nil, cg.nodeErr(e, "undefined identifier: %s", e.Name)
 	}
 

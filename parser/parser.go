@@ -278,6 +278,12 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 
 		return nil, nil
 	case lexer.IDENT:
+		// Contextual keyword: `data Name = V0 | V1(...)` at the top level.
+		// We accept `data` as a bare IDENT in all other positions (field name,
+		// variable name, ...) to keep the surface surface area small.
+		if p.peek().Literal == "data" && p.peekAt(1).Type == lexer.IDENT {
+			return p.parseDataDecl()
+		}
 		// Check if this identifier is a #no_parens macro name.
 		// If so, expand the macro by injecting its backtick expansion as prefix tokens
 		// before the rest of the declaration.

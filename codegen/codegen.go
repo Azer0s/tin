@@ -401,6 +401,20 @@ type CodeGen struct {
 	// Same purpose as structTypeIDs/dataTypeIDs - used for any boxing and typeof.
 	unionTypeIDs map[string]int32
 
+	// ADT registry: `data T = V0 | V1(...)` declarations.
+	// Layout mirrors tagged unions: { i32 type_id, i8 tag, [N x i8] payload }.
+	// dataDecls[name]       -> the original DataDecl AST
+	// dataTypeIDs[name]     -> compile-time i32 type ID (same pool as structs/unions)
+	// dataVariants[adt][v]  -> per-variant info (tag, payload struct, fields)
+	// dataVariantLookup[v]  -> list of ADT names that declare a variant named v;
+	//                         used to resolve bare constructor references.
+	dataDecls           map[string]*ast.DataDecl
+	dataTypeIDs         map[string]int32
+	dataVariants        map[string]map[string]*dataVariantInfo
+	dataVariantLookup   map[string][]string
+	dataValueReleaseFns map[string]*ir.Func
+	dataValueRetainFns  map[string]*ir.Func
+
 	// ------------------------------------------------------------------
 	// Fiber / coroutine state
 	// ------------------------------------------------------------------
@@ -834,6 +848,12 @@ func New(filename string) *CodeGen {
 		unionTypeMembers:         make(map[string][]ast.TypeExpr),
 		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
 		unionTypeIDs:             make(map[string]int32),
+		dataDecls:                make(map[string]*ast.DataDecl),
+		dataTypeIDs:              make(map[string]int32),
+		dataVariants:             make(map[string]map[string]*dataVariantInfo),
+		dataVariantLookup:        make(map[string][]string),
+		dataValueReleaseFns:      make(map[string]*ir.Func),
+		dataValueRetainFns:       make(map[string]*ir.Func),
 		coroCallable:             make(map[string]bool),
 		callGraph:                make(map[string][]string),
 		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
@@ -1249,6 +1269,10 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err := cg.genUnionDecl(n); err != nil {
 				return nil, err
 			}
+		case *ast.DataDecl:
+			if err := cg.genDataDecl(n); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1280,6 +1304,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		case *ast.MacroDecl:
 			// Registered in preregister; no IR to emit.
 		case *ast.UnionDecl:
+			// Already processed in pre-pass 3.
+		case *ast.DataDecl:
 			// Already processed in pre-pass 3.
 		case *ast.TestDecl:
 			if cg.testMode {

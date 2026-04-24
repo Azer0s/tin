@@ -234,6 +234,168 @@ func (cg *CodeGen) bindPatternFree(
 // genStructMatch generates an if-else chain for match statements whose cases
 // use struct destructuring patterns. resAlloca is non-nil in expression mode:
 // each arm must consist of a single ExprStmt whose value is stored there.
+// genDataMatch compiles `match x: case Ctor(bindings): ...` on an ADT value.
+// Uses a tag-dispatch switch on the i8 tag field (offset 1 of the outer
+// struct). In each case block, the payload is bitcast to the variant's
+// packed struct and each field is bound into the arm scope.
+//
+// Exhaustiveness: when every variant is covered by some arm, the switch's
+// default branch is `unreachable`. Otherwise it falls through to the
+// user-supplied default, or (absent one) to afterBlock.
+func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
+	scrutinee, err := cg.genExpr(block, s.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	scrutType := scrutinee.Type()
+	if pt, ok := scrutType.(*irtypes.PointerType); ok {
+		scrutinee = block.NewLoad(pt.ElemType, scrutinee)
+		scrutType = pt.ElemType
+	}
+
+	adtName := cg.typeNameOf(scrutType)
+	if adtName == "" {
+		return nil, fmt.Errorf("genDataMatch: cannot resolve ADT name for match scrutinee (type=%v)", scrutType)
+	}
+
+	outerSt := cg.structTypes[adtName]
+	if outerSt == nil {
+		return nil, fmt.Errorf("genDataMatch: ADT %q is not registered", adtName)
+	}
+
+	scrutAlloca := block.NewAlloca(outerSt)
+	block.NewStore(scrutinee, scrutAlloca)
+
+	tagGEP := block.NewGetElementPtr(outerSt, scrutAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
+	tagI64 := block.NewZExt(tagI8, irtypes.I64)
+
+	afterBlock := cg.newBlock("match.after")
+	exhaustive := cg.isExhaustiveDataMatch(s, adtName)
+	anyFallthrough := false
+
+	defaultBlock := cg.newBlock("match.default")
+
+	var cases []*ir.Case
+
+	for i, c := range s.Cases {
+		if !cg.isDataMatchPattern(c.Pattern) {
+			return nil, fmt.Errorf("genDataMatch: non-ADT pattern in arm %d", i)
+		}
+
+		variantName := dataPatternVariantName(c.Pattern)
+
+		vi := cg.dataVariantInfoFor(adtName, variantName)
+		if vi == nil {
+			return nil, fmt.Errorf("data %s: no variant %q", adtName, variantName)
+		}
+
+		binders := dataPatternBinders(c.Pattern)
+		if len(binders) != len(vi.Fields) {
+			return nil, fmt.Errorf("data %s: case %s expects %d binding(s), got %d",
+				adtName, variantName, len(vi.Fields), len(binders))
+		}
+
+		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d.%s", i, variantName))
+		cases = append(cases, ir.NewCase(
+			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
+
+		cg.curScope = newScope(cg.curScope)
+
+		if len(vi.Fields) > 0 {
+			payloadGEP := caseBlock.NewGetElementPtr(outerSt, scrutAlloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+			payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
+
+			for fi, f := range vi.Fields {
+				name := binders[fi]
+				if name == "" || name == "_" {
+					continue
+				}
+
+				fieldPtr := caseBlock.NewGetElementPtr(vi.PayloadType, payloadPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+				fieldTy := vi.PayloadType.Fields[fi]
+				fieldVal := caseBlock.NewLoad(fieldTy, fieldPtr)
+
+				// For RC-tracked payload fields (string/array/any/fn closure),
+				// retain the value on bind so the binding has an independent
+				// RC contribution. The normal scope-exit release balances the
+				// retain, and `return s` transfers ownership cleanly via the
+				// `skipName` mechanism in genReturnStmt. Pointer-to-struct
+				// fields (e.g. `own *Tree[t]`) are bound as borrows without
+				// retain; they are shared with the scrutinee's payload.
+				rcTracked := !f.IsWeak && isRCTrackedType(fieldTy)
+				if rcTracked {
+					cg.emitRetain(caseBlock, fieldVal)
+				}
+
+				alloca := caseBlock.NewAlloca(fieldVal.Type())
+				caseBlock.NewStore(fieldVal, alloca)
+
+				entry := &scopeEntry{val: alloca, isAlloc: true}
+				if !rcTracked {
+					entry.noRelease = true
+				}
+
+				cg.curScope.set(name, entry)
+			}
+		}
+
+		if c.Guard != nil {
+			guardVal, err2 := cg.genExpr(caseBlock, c.Guard)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, err2
+			}
+
+			guardedBody := cg.newBlock(fmt.Sprintf("match.case.%d.%s.body", i, variantName))
+			caseBlock.NewCondBr(cg.toBool(caseBlock, guardVal), guardedBody, defaultBlock)
+
+			caseBlock = guardedBody
+		}
+
+		if _, err2 := cg.emitMatchArmBody(c, caseBlock, afterBlock, resAlloca, &anyFallthrough); err2 != nil {
+			cg.curScope = cg.curScope.parent
+
+			return nil, err2
+		}
+
+		cg.curScope = cg.curScope.parent
+	}
+
+	block.NewSwitch(tagI64, defaultBlock, cases...)
+
+	if s.Default != nil {
+		cg.curScope = newScope(cg.curScope)
+
+		if _, err := cg.emitMatchArmBody(ast.MatchCase{Body: s.Default}, defaultBlock, afterBlock, resAlloca, &anyFallthrough); err != nil {
+			cg.curScope = cg.curScope.parent
+
+			return nil, err
+		}
+
+		cg.curScope = cg.curScope.parent
+	} else if exhaustive {
+		defaultBlock.NewUnreachable()
+	} else {
+		defaultBlock.NewBr(afterBlock)
+
+		anyFallthrough = true
+	}
+
+	if !anyFallthrough && resAlloca == nil {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
+
+	return afterBlock, nil
+}
+
 func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
 	scrutinee, err := cg.genExpr(block, s.Expr)
 	if err != nil {
@@ -765,6 +927,13 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	}
 
 	cg.scanMatchForUnreachable(s)
+
+	// ADT match: `case Ctor(bindings):` or bare nullary-variant identifier.
+	for _, c := range s.Cases {
+		if cg.isDataMatchPattern(c.Pattern) {
+			return cg.genDataMatch(block, s, resAlloca)
+		}
+	}
 
 	// Struct-pattern match: use if-else chain dispatch.
 	for _, c := range s.Cases {

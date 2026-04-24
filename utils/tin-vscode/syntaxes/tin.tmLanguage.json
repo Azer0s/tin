@@ -23,6 +23,7 @@
     { "include": "#trait-decl" },
     { "include": "#enum-decl" },
     { "include": "#union-decl" },
+    { "include": "#data-decl" },
     { "include": "#type-decl" },
     { "include": "#function-call" },
     { "include": "#namespace-access" },
@@ -155,7 +156,7 @@
         {
           "comment": "Declaration keywords",
           "name": "keyword.declaration.tin",
-          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|macro|extern|export|use|from|forward|override|static|virtual|weak|own)\\b"
+          "match": "\\b(let|const|var|fn|type|struct|trait|enum|union|data|macro|extern|export|use|from|forward|override|static|virtual|weak|own)\\b"
         },
         {
           "comment": "Expression keywords",
@@ -253,6 +254,15 @@
       "captures": {
         "1": { "name": "keyword.declaration.tin" },
         "2": { "name": "entity.name.type.union.tin" }
+      }
+    },
+
+    "data-decl": {
+      "comment": "Data (ADT) declaration: data Name[typeparams]",
+      "match": "\\b(data)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.tin" },
+        "2": { "name": "entity.name.type.data.tin" }
       }
     },
 

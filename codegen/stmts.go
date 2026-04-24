@@ -1012,7 +1012,17 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			}
 		}
 	} else if addrOf, isAddrOf := s.Value.(*ast.AddressOfExpr); isAddrOf {
-		if _, isStructLit := addrOf.Expr.(*ast.StructLit); isStructLit && llType != nil {
+		isHeapAlloc := false
+
+		if _, isStructLit := addrOf.Expr.(*ast.StructLit); isStructLit {
+			isHeapAlloc = true
+		} else if call, isCall := addrOf.Expr.(*ast.CallExpr); isCall {
+			if id, ok := call.Func.(*ast.Identifier); ok && cg.isDataVariant(id.Name) {
+				isHeapAlloc = true
+			}
+		}
+
+		if isHeapAlloc && llType != nil {
 			depth := pointerChainDepth(llType)
 			if depth > 0 {
 				isHeapOwned = true

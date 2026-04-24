@@ -177,6 +177,29 @@ type UnionDecl struct {
 	IsNamed bool // "union u_named = as_i8 i8 | as_string string"
 }
 
+// DataDecl is an algebraic data type (sum type) with named constructors.
+//
+//	data Option[t] =
+//	  Some(t)
+//	  None
+//
+// Each variant carries zero or more positional or named fields.
+// At least one variant must carry a payload (pure-nullary shapes should
+// use `enum` instead).
+type DataDecl struct {
+	base
+	Name        string
+	TypeParams  []string
+	Constraints []TypeConstraint
+	Variants    []DataVariant
+}
+
+type DataVariant struct {
+	Pos    Pos
+	Name   string
+	Fields []StructField // empty -> nullary
+}
+
 // ArrayDestructDecl let [a, b] [T] = expr
 //
 //	let [a, b] [T1, T2] = expr  (per-slot types, implies [any] source)
@@ -454,6 +477,11 @@ type IsExpr struct {
 	Expr    Node
 	VarName string   // variable to bind matched value to
 	Type    TypeExpr // nil only if used as bare type-check
+	// Pattern is set for ADT-variant is-checks: `x is Ok(v)`.
+	// When non-nil, Type and VarName are left unset; the AST shape stored in
+	// Pattern is either *CallExpr (e.g. Ok(v)) or *Identifier (nullary like
+	// None). Codegen inspects Pattern first for ADT variant dispatch.
+	Pattern Node
 }
 
 type TypeAssertExpr struct {

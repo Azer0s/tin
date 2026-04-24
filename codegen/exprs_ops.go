@@ -1422,6 +1422,12 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 		return nil, err
 	}
 
+	// ADT variant is-check: `x is Ok(v)` or `x is None`. Produces an i1
+	// (tag-equal) plus payload bindings into the current scope.
+	if v, handled, err2 := cg.genAdtIsExpr(block, val, e); handled {
+		return v, err2
+	}
+
 	// Typed is-check: "x is v T" - check the tag and optionally bind the payload.
 	if st, ok := val.Type().(*irtypes.StructType); ok {
 		typeName := cg.typeNameOf(val.Type())

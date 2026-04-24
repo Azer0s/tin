@@ -145,6 +145,10 @@ func colorFor(t lexer.TokenType, lit string) string {
 	switch {
 	case t >= lexer.KW_LET && t <= lexer.KW_OWN:
 		return ansiBoldCyan
+	case t == lexer.IDENT && lit == "data":
+		// `data` is a contextual keyword (ADT declarations); colorise like any
+		// other declaration keyword so top-level `data Name = ...` reads as one.
+		return ansiBoldCyan
 	case t == lexer.STRING_LIT || t == lexer.CHAR_LIT || t == lexer.BACKTICK_LIT:
 		return ansiGreen
 	case t == lexer.INT_LIT || t == lexer.FLOAT_LIT:

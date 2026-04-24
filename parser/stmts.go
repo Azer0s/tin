@@ -970,13 +970,16 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 		mc.Pattern = sp
 	} else {
 		// case varName TypeExpr: OR case expr:
-		// Detect "case varName TypeName:" -- either TypeName is a built-in type token
+		// Detect "case varName TypeName:" -- either TypeName is a built-in type keyword
 		// OR it is a user-defined type (plain IDENT) followed immediately by ":".
 		// The second heuristic handles "case _ json_null:" where json_null is a struct.
+		// Note: we explicitly check for type KEYWORDS (i64, string, ...) rather than
+		// type TOKENS because tokens like "(" start ADT constructor patterns like
+		// "case Circle(r):", which must be parsed as expressions, not as var-type.
 		nextIsUserType := p.check(lexer.IDENT) &&
 			p.peekAt(1).Type == lexer.IDENT &&
 			p.peekAt(2).Type == lexer.COLON
-		if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) && !nextIsUserType {
+		if p.check(lexer.IDENT) && !isTypeKeyword(p.peekAt(1)) && !nextIsUserType {
 			// Just an expression pattern
 			mc.Pattern, _ = p.parseExpr()
 		} else if p.check(lexer.IDENT) {

@@ -694,6 +694,50 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			p.advance()
 
 			isExpr := &ast.IsExpr{Expr: expr}
+
+			// ADT constructor pattern: `x is Ok(v)`. The call-expression form
+			// is unambiguously a constructor pattern (types don't appear as
+			// `IDENT(...)` in Tin). Nullary variants like `x is None` parse
+			// through the Type path and are resolved in codegen by looking
+			// up the identifier against registered ADT variants.
+			if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
+				ctorPos := p.curPos()
+				ctorName := p.advance().Literal
+
+				if _, err2 := p.expect(lexer.LPAREN); err2 != nil {
+					return nil, err2
+				}
+
+				var args []ast.Node
+
+				for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+					arg, err2 := p.parseExpr()
+					if err2 != nil {
+						return nil, err2
+					}
+
+					args = append(args, arg)
+
+					if p.check(lexer.COMMA) {
+						p.advance()
+					}
+				}
+
+				if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
+					return nil, err2
+				}
+
+				fn := &ast.Identifier{Name: ctorName}
+				fn.SetPos(ctorPos)
+				call := &ast.CallExpr{Func: fn, Args: args}
+				call.SetPos(ctorPos)
+
+				isExpr.Pattern = call
+				expr = isExpr
+
+				continue
+			}
+
 			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
 				isExpr.VarName = p.advance().Literal
 			}

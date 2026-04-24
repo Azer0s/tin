@@ -50,7 +50,7 @@
 
 (defun tin-keywords ()
   "Tin language keywords."
-  '("let" "const" "fn" "type" "struct" "trait" "enum" "union"
+  '("let" "const" "fn" "type" "struct" "trait" "enum" "union" "data"
     "use" "from" "export" "extern" "return" "if" "else" "for" "in"
     "match" "case" "default" "defer" "where" "macro" "static"
     "virtual" "as" "is" "forward" "override" "sizeof" "addr"
@@ -142,8 +142,8 @@ Only matches NAME! (with bang); plain NAME() is left to the function-call rule."
    `("\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)!("
      (1 font-lock-function-name-face))
 
-   ;; Type declarations: struct/trait/enum/union/type [atom] Name
-   `("\\b\\(?:struct\\|trait\\|enum\\|union\\|type\\)\\(?:\\s-+atom\\)?\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
+   ;; Type declarations: struct/trait/enum/union/data/type [atom] Name
+   `("\\b\\(?:struct\\|trait\\|enum\\|union\\|data\\|type\\)\\(?:\\s-+atom\\)?\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*\\)"
      (1 font-lock-type-face))
 
    ;; Function calls: name(

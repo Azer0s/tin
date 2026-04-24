@@ -640,6 +640,18 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 		return true // anonymous struct (e.g. from external code) - be conservative
 	}
 
+	// ADT value: tag-dispatched release walks the active variant's payload.
+	// Needs a release if any variant carries an owning/ARC field.
+	if variants, ok := cg.dataVariants[structName]; ok {
+		for _, vi := range variants {
+			if variantHasReleasableField(vi) {
+				return true
+			}
+		}
+
+		return false
+	}
+
 	if cg.curScope != nil {
 		if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
 			return true
@@ -777,6 +789,14 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 		return
 	}
+	// ADT value: tag-dispatched retain walks the active variant's payload.
+	// The outer struct's declared fields {i32, i8, [N x i8]} hide the real
+	// payload layout from walkRCStructFields, so we emit a dispatch here.
+	if cg.isDataType(t) {
+		cg.emitDataValueRetain(block, val)
+
+		return
+	}
 	// Named struct: retain RC-tracked fields so copies are independent.
 	// Use emitStructFieldRetain for each field to also handle *TinStruct pointer fields.
 	cg.walkRCStructFields(block, val, func(fieldVal value.Value) {
@@ -831,6 +851,15 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 	// recursively released before the block itself is freed.
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+			if cg.isDataType(innerSt) {
+				relFn := cg.ensureDataPtrReleaseFn(innerSt.Name(), innerSt)
+				if relFn != nil {
+					block.NewCall(relFn, val)
+
+					return
+				}
+			}
+
 			relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
 			block.NewCall(relFn, val)
 
@@ -940,6 +969,15 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			}
 		}
 	}
+	// ADT value: dispatch on tag and release the active variant's owning
+	// payload fields. The outer struct holds only {i32, i8, [N x i8]} so the
+	// generic walkRCStructFields below can't see inside the payload.
+	if cg.isDataType(t) {
+		cg.emitDataValueRelease(block, val)
+
+		return
+	}
+
 	// Release RC-tracked fields and recurse into nested struct fields.
 	// Propagate skipDeinit so that parameter-copy teardown does not call deinit
 	// on nested struct fields (the caller's emitRelease already handles that).
@@ -1114,6 +1152,14 @@ func (cg *CodeGen) emitHeapChainRelease(block *ir.Block, heapPtr value.Value, de
 	// nested struct values, not *TinStruct pointer fields.
 	if depth == 1 {
 		if st, ok2 := elemType.(*irtypes.StructType); ok2 && st.Name() != "" {
+			if cg.isDataType(st) {
+				if relFn := cg.ensureDataPtrReleaseFn(st.Name(), st); relFn != nil {
+					block.NewCall(relFn, heapPtr)
+
+					return
+				}
+			}
+
 			relFn := cg.ensureStructPtrReleaseFn(st.Name(), st)
 			block.NewCall(relFn, heapPtr)
 

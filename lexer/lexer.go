@@ -77,6 +77,7 @@ const (
 	KW_NIL
 	KW_WEAK
 	KW_OWN
+	KW_DATA
 
 	// Operators
 	PLUS      // +
@@ -160,6 +161,7 @@ var tokenNames = map[TokenType]string{
 	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield", KW_NIL: "nil",
 	KW_WEAK: "weak",
 	KW_OWN:  "own",
+	KW_DATA: "data",
 	PLUS:    "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",

@@ -107,6 +107,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if fn.Name == "default" && len(e.Args) == 1 {
 			return cg.genBuiltinDefault(block, e.Args[0])
 		}
+		// ADT constructor call: `Some(42)`, `Ok(42)`, `Rgb(r, g, b)`.
+		// Only intercept when the name is a known variant AND is not shadowed
+		// by a local binding or regular function of the same name.
+		if cg.isDataVariant(fn.Name) {
+			if _, shadowed := cg.curScope.lookup(fn.Name); !shadowed {
+				if v, err := cg.genDataConstructorCall(block, fn.Name, e.Args); err != nil {
+					return nil, err
+				} else if v != nil {
+					return v, nil
+				}
+			}
+		}
 		// Check if this is a generic or constrained function call - monomorphize it.
 		{
 			var gTmpl *ast.FuncDecl
