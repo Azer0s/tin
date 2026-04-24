@@ -1,0 +1,40 @@
+// Bare-constructor inference - `Ok(x)` resolves to the ADT named by the
+// enclosing type context (let-binding annotation, function argument, return
+// type). Fully-qualified `Adt[T,U]::Ctor(...)` always works too.
+
+use assert
+
+data Result[t, e] =
+  Ok(v t)
+  Err(msg e)
+
+fn unwrap_or(r Result[i32, string], d i32) i32 =
+  match r:
+    case Ok(v):  return v
+    case Err(_): return d
+
+test "bare Ok/Err inferred from let type annotation" =
+  let a Result[i32, string] = Ok(42)
+  let b Result[i32, string] = Err("oops")
+  assert::equals(42, unwrap_or(a, 0))
+  assert::equals(99, unwrap_or(b, 99))
+
+test "bare Ok/Err inferred from call-argument position" =
+  assert::equals(42, unwrap_or(Ok(42), 0))
+  assert::equals(99, unwrap_or(Err("oops"), 99))
+
+data Box[t] =
+  Nil
+  Wrap(v t)
+
+fn unbox(b Box[string]) string =
+  match b:
+    case Nil:     return "<nil>"
+    case Wrap(v): return v
+
+test "inference across multiple concrete instances" =
+  let a Box[i64]    = Wrap(5)
+  let b Box[string] = Wrap("hi")
+  let c Box[string] = Nil
+  assert::equals("hi",    unbox(b))
+  assert::equals("<nil>", unbox(c))

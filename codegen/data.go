@@ -383,10 +383,22 @@ func splitTopLevel(s string, sep byte) []string {
 // Returns the constructed ADT value (outer struct). Returns (nil, nil) when
 // the variant cannot be resolved in the current context, so callers can fall
 // through to the normal function-call dispatch.
+//
+// Resolution order:
+//  1. When returnTypeHint is set to a known ADT struct type, prefer that ADT
+//     (used for `let x Result[i32,e] = Ok(42)` and arg-position inference).
+//  2. Otherwise, if the variant is uniquely owned by one ADT, use it.
+//  3. If generic monomorphization hasn't run yet and the variant is still
+//     ambiguous, give up (caller likely needs explicit path qualification).
 func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, args []ast.Node) (value.Value, error) {
-	adt, err := cg.resolveVariantName(variantName)
-	if err != nil {
-		return nil, err
+	adt := cg.preferAdtFromHint(variantName)
+	if adt == "" {
+		var err error
+
+		adt, err = cg.resolveVariantName(variantName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if adt == "" {
@@ -426,9 +438,14 @@ func (cg *CodeGen) genDataNullaryConstructor(block *ir.Block, variantName string
 		return nil, nil
 	}
 
-	adt, err := cg.resolveVariantName(variantName)
-	if err != nil {
-		return nil, err
+	adt := cg.preferAdtFromHint(variantName)
+	if adt == "" {
+		var err error
+
+		adt, err = cg.resolveVariantName(variantName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if adt == "" {
@@ -441,6 +458,34 @@ func (cg *CodeGen) genDataNullaryConstructor(block *ir.Block, variantName string
 	}
 
 	return cg.wrapDataVariant(block, adt, variantName, nil)
+}
+
+// preferAdtFromHint picks the ADT name that owns variantName AND matches the
+// current returnTypeHint. Used to disambiguate bare constructor calls when
+// the expected target type is known (let-bindings with annotation, function
+// arguments, return values).
+func (cg *CodeGen) preferAdtFromHint(variantName string) string {
+	if cg.returnTypeHint == nil {
+		return ""
+	}
+
+	st, ok := cg.returnTypeHint.(*irtypes.StructType)
+	if !ok {
+		return ""
+	}
+
+	hintAdt := st.Name()
+	if hintAdt == "" {
+		return ""
+	}
+
+	for _, adt := range cg.dataVariantLookup[variantName] {
+		if adt == hintAdt {
+			return adt
+		}
+	}
+
+	return ""
 }
 
 // isDataMatchPattern reports whether pat is an ADT match arm pattern:
