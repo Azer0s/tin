@@ -4,7 +4,7 @@
 // Run with: tin test stdlib/yaml/yaml_test.tin
 
 use assert
-use yaml
+use encoding::yaml
 use result
 use { unwrap_or } from result
 

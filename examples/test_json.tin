@@ -1,6 +1,8 @@
 // examples/test_json.tin - tests for the json stdlib
 use assert
 use encoding::json
+use result
+use { unwrap_or } from result
 
 struct point =
   x i64
@@ -46,66 +48,66 @@ test "encode struct with tags and skip" =
 // parse (untyped) tests
 
 test "parse null" =
-  let (v, _) = json::parse("null")
+  let v = unwrap_or(json::parse("null"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_null())
 
 test "parse true" =
-  let (v, _) = json::parse("true")
+  let v = unwrap_or(json::parse("true"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_bool())
   assert::ok(v.as_bool())
 
 test "parse false" =
-  let (v, _) = json::parse("false")
+  let v = unwrap_or(json::parse("false"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_bool())
   assert::ok(!v.as_bool())
 
 test "parse integer" =
-  let (v, _) = json::parse("42")
+  let v = unwrap_or(json::parse("42"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_int())
   assert::equals(v.as_int(), 42)
 
 test "parse negative integer" =
-  let (v, _) = json::parse("-3")
+  let v = unwrap_or(json::parse("-3"), json::Value{kind: json::Kind.null_v})
   assert::equals(v.as_int(), -3)
 
 test "parse float" =
-  let (v, _) = json::parse("3.14")
+  let v = unwrap_or(json::parse("3.14"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_float())
   assert::equals(v.as_float(), 3.14)
 
 test "parse string" =
-  let (v, _) = json::parse("\"hello\"")
+  let v = unwrap_or(json::parse("\"hello\""), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "hello")
 
 test "parse array" =
-  let (v, _) = json::parse("[1,2,3]")
+  let v = unwrap_or(json::parse("[1,2,3]"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
   assert::equals(v.index(0).as_int(), 1)
   assert::equals(v.index(2).as_int(), 3)
 
 test "parse array out of range" =
-  let (v, _) = json::parse("[1,2]")
+  let v = unwrap_or(json::parse("[1,2]"), json::Value{kind: json::Kind.null_v})
   assert::ok(v.index(5).is_null())
 
 test "parse object" =
-  let (v, _) = json::parse(obj("\"x\":10,\"y\":20"))
+  let v = unwrap_or(json::parse(obj("\"x\":10,\"y\":20")), json::Value{kind: json::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("x").as_int(), 10)
   assert::equals(v.get("y").as_int(), 20)
 
 test "parse object missing key" =
-  let (v, _) = json::parse(obj("\"a\":1"))
+  let v = unwrap_or(json::parse(obj("\"a\":1")), json::Value{kind: json::Kind.null_v})
   assert::ok(v.get("z").is_null())
 
 test "parse nested object" =
   let inner = obj("\"x\":3,\"y\":4")
-  let (v, _) = json::parse(obj("\"pt\":" ++ inner))
+  let v = unwrap_or(json::parse(obj("\"pt\":" ++ inner)), json::Value{kind: json::Kind.null_v})
   assert::equals(v.get("pt").get("x").as_int(), 3)
 
 test "parse object keys" =
-  let (v, _) = json::parse(obj("\"a\":1,\"b\":2"))
+  let v = unwrap_or(json::parse(obj("\"a\":1,\"b\":2")), json::Value{kind: json::Kind.null_v})
   let ks = v.keys()
   assert::equals(len(ks), 2)
 
@@ -113,28 +115,28 @@ test "parse object keys" =
 
 test "parse[T] struct" =
   let src = obj("\"id\":1,\"name\":\"Bob\",\"score\":7.5")
-  let (u, _) = json::parse[person](src)
+  let u = unwrap_or(json::parse[person](src), person{})
   assert::equals(u.id, 1)
   assert::equals(u.name, "Bob")
   assert::equals(u.score, 7.5)
 
 test "parse[T] ignores skipped field" =
-  let (u, _) = json::parse[person](obj("\"id\":2,\"pwd\":\"leaked\""))
+  let u = unwrap_or(json::parse[person](obj("\"id\":2,\"pwd\":\"leaked\"")), person{})
   assert::equals(u.id, 2)
   assert::equals(u.pwd, "")
 
 test "parse[T] point no tags" =
-  let (p, _) = json::parse[point](obj("\"x\":5,\"y\":9"))
+  let p = unwrap_or(json::parse[point](obj("\"x\":5,\"y\":9")), point{})
   assert::equals(p.x, 5)
   assert::equals(p.y, 9)
 
 test "parse[T] unknown keys ignored" =
-  let (p, _) = json::parse[point](obj("\"x\":1,\"z\":99,\"y\":2"))
+  let p = unwrap_or(json::parse[point](obj("\"x\":1,\"z\":99,\"y\":2")), point{})
   assert::equals(p.x, 1)
   assert::equals(p.y, 2)
 
 test "parse[T] empty object gives zero struct" =
-  let (p, _) = json::parse[point]("\{\}")
+  let p = unwrap_or(json::parse[point]("\{\}"), point{})
   assert::equals(p.x, 0)
   assert::equals(p.y, 0)
 
@@ -167,11 +169,11 @@ test "JsonSerializable in struct field encodes correctly" =
   assert::ok(strings::contains(enc, "\"count\":5"))
 
 test "JsonDeserializable populates field from JSON string" =
-  let (doc, _) = json::parse[jtagged_doc]("\{\"label\":\"parsed\",\"count\":3\}")
+  let doc = unwrap_or(json::parse[jtagged_doc]("\{\"label\":\"parsed\",\"count\":3\}"), jtagged_doc{})
   assert::equals(doc.label.value, "parsed")
   assert::equals(doc.count, 3)
 
 test "JsonDeserializable missing field leaves zero value" =
-  let (doc, _) = json::parse[jtagged_doc]("\{\"count\":7\}")
+  let doc = unwrap_or(json::parse[jtagged_doc]("\{\"count\":7\}"), jtagged_doc{})
   assert::equals(doc.label.value, "")
   assert::equals(doc.count, 7)

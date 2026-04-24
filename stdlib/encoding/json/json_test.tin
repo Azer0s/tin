@@ -4,7 +4,7 @@
 // Run with: tin test stdlib/json/json_test.tin
 
 use assert
-use json
+use encoding::json
 use result
 use { unwrap_or } from result
 

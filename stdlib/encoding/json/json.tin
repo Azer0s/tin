@@ -40,6 +40,8 @@ use str
 use errors
 use simd
 use { Err } from errors
+use result
+use { Result } from result
 
 // JsonSerializable
 
@@ -352,7 +354,7 @@ struct Parser =
         // Mixed chunk: find first non-whitespace byte.
         let i i64 = 0
         for i < 16:
-          if (mask >> (i as u32)) & (1 as u32) == 0:
+          if ((mask >> (i as u32)) & (1 as u32)) == 0:
             this.pos = this.pos + i
             return
           i = i + 1
@@ -394,7 +396,7 @@ fn parse_str(p *Parser) string =
         // Find first special byte, copy plain prefix, leave special for scalar.
         let first i64 = 0
         for first < 16:
-          if (mask >> (first as u32)) & (1 as u32) != 0:
+          if ((mask >> (first as u32)) & (1 as u32)) != 0:
             break
           first = first + 1
         let j i64 = 0
@@ -587,17 +589,30 @@ fn parse_value(p *Parser) *Value =
 
 // Public API
 
-// parse parses a JSON string and returns (Value, Err).
-// Err is nil on success. On empty input, returns (null Value, Err).
+// JsonError describes why a parse attempt failed.
 //
-//   let (v, err) = json::parse(s)
-//   if errors::has(err): panic(err.message())
-//   v.get("name").as_string()
-fn parse(s string) (Value, Err) =
+//   data JsonError =
+//     EmptyInput                // source string was empty
+//     Malformed(pos i64, msg string)
+//       // generic malformation at byte offset `pos`; `msg` is a short reason
+data JsonError =
+  EmptyInput
+  Malformed(pos i64, msg string)
+
+// parse parses a JSON string into a Value tree.
+//
+//   match json::parse(s):
+//     case Ok(v):  use(v)
+//     case Err(e): ...
+//
+// Or, when you don't care about the error:
+//
+//   let v = result::unwrap_or(json::parse(s), Value{kind: Kind.null_v})
+fn parse(s string) Result[Value, JsonError] =
   if len(s) == 0:
-    return (Value{kind: Kind.null_v}, errors::new("json: empty input"))
+    return Result[Value, JsonError]::Err(EmptyInput)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
-  return (*parse_value(&p), nil)
+  return Ok(*parse_value(&p))
 
 // parse_nested_any_impl[T] populates nested struct fields from a JSON Value object.
 // `zero` is an any-boxed zero value of the nested struct type (obtained via getfield).
@@ -671,22 +686,24 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
 //
 //   let u = json::parse[user]("{\"id\":1,\"name\":\"Alice\"}")
 //   echo u.name   // Alice
-fn parse[T](s string) (T, Err) =
-  let (doc, perr) = parse(s)
-  let result T
-  if errors::has(perr):
-    return (result, perr)
+fn parse[T](s string) Result[T, JsonError] =
+  let out T
+  let doc Value
+  match parse(s):
+    case Err(e): return Result[T, JsonError]::Err(e)
+    case Ok(d):
+      doc = d
 
   if doc.is_null():
-    return (result, nil)
-  let fields = fieldnames(result)
-  let ftypes = fieldtypes(result)
+    return Ok(out)
+  let fields = fieldnames(out)
+  let ftypes = fieldtypes(out)
   let nf     = len(fields)
   let i i64  = 0
   for i < nf:
     let fname  string = fields[i]
     let ftypei any    = ftypes[i]
-    let jkey   string = json_key(fname, fieldtag(result, fname))
+    let jkey   string = json_key(fname, fieldtag(out, fname))
 
     if len(jkey) > 0:
       let jval = doc.get(jkey)
@@ -698,49 +715,50 @@ fn parse[T](s string) (T, Err) =
 
           case Kind.int_v:
             if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
-              setfield(result, fname, jval.ival)
+              setfield(out, fname, jval.ival)
             else if ftype == 'f64:
-              setfield(result, fname, jval.ival as f64)
+              setfield(out, fname, jval.ival as f64)
 
           case Kind.float_v:
             if ftype == 'f64:
-              setfield(result, fname, jval.fval)
+              setfield(out, fname, jval.fval)
             else if ftype == 'i64:
-              setfield(result, fname, jval.fval as i64)
+              setfield(out, fname, jval.fval as i64)
 
           case Kind.bool_v:
             if ftype == 'bool:
-              setfield(result, fname, jval.bval)
+              setfield(out, fname, jval.bval)
 
           case Kind.string_v:
             if ftype == 'string:
-              setfield(result, fname, jval.sval)
+              setfield(out, fname, jval.sval)
             else:
               // JsonDeserializable: let the field type parse itself from a string.
-              let fv = getfield(result, fname)
+              let fv = getfield(out, fname)
               let ftraits = traitof(fv)
               let fi i64 = 0
               for fi < len(ftraits):
                 if ftraits[fi] == '"json::JsonDeserializable":
                   let deser = fv as JsonDeserializable
                   deser.apply_json(jval.sval)
-                  setfield(result, fname, fv)
+                  setfield(out, fname, fv)
                 fi = fi + 1
 
           case Kind.object_v:
             // Nested struct field: get the zero-valued field as any, populate it,
             // then set it back (coerce any->FieldType is handled by setfield's coerce).
-            let zero_nested = getfield(result, fname)
-            let populated = parse_nested_any_impl[T](zero_nested, jval, result)
-            setfield(result, fname, populated)
+            let zero_nested = getfield(out, fname)
+            let populated = parse_nested_any_impl[T](zero_nested, jval, out)
+            setfield(out, fname, populated)
 
           default:
             pass
 
     i = i + 1
-  return (result, nil)
+  return Ok(out)
 
 export {
   Kind, Value, parse, encode,
+  JsonError,
   JsonSerializable, JsonDeserializable,
 } as json
