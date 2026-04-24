@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -30,18 +31,101 @@ type dataVariantInfo struct {
 func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 	cg.dataDecls[n.Name] = n
 
-	// For every variant, remember that its name resolves to this ADT.
-	// Used later to resolve bare constructors like `Some(42)`.
+	if len(n.TypeParams) > 0 {
+		// Generic ADTs are emitted on-demand during monomorphization. Each
+		// concrete instance registers its own variant names in
+		// dataVariantLookup (see monomorphizeDataDecl).
+		return nil
+	}
+
+	// For non-generic ADTs, register every variant so bare constructor refs
+	// resolve without qualification.
 	for _, v := range n.Variants {
 		cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], n.Name)
 	}
 
-	if len(n.TypeParams) > 0 {
-		// Generic ADTs are emitted on-demand during monomorphization.
+	return cg.emitConcreteData(n.Name, n)
+}
+
+// monomorphizeDataDecl substitutes the template's type parameters with the
+// supplied concrete types and emits a per-instance concrete ADT under the
+// synthesized name (e.g. Option + [i32] -> Option__i32). The synthetic name
+// is also registered in dataDecls so subsequent constructor and match
+// lookups can find its variant info. Variant names are recorded in
+// dataVariantLookup tied to the concrete name; callers that use a bare
+// constructor like `Some(42)` resolve through the original (bare) name
+// entries, and the codegen uses expected-type context to pick the concrete
+// instance.
+func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeExpr, concreteName string) error {
+	if len(typeArgs) != len(tmpl.TypeParams) {
+		return fmt.Errorf("data %s: expected %d type arg(s), got %d",
+			tmpl.Name, len(tmpl.TypeParams), len(typeArgs))
+	}
+
+	subst := make(map[string]ast.TypeExpr, len(typeArgs))
+	for i, name := range tmpl.TypeParams {
+		subst[name] = typeArgs[i]
+	}
+
+	concrete := &ast.DataDecl{
+		Name:     concreteName,
+		Variants: make([]ast.DataVariant, len(tmpl.Variants)),
+	}
+
+	for vi, v := range tmpl.Variants {
+		newFields := make([]ast.StructField, len(v.Fields))
+		for fi, f := range v.Fields {
+			newFields[fi] = ast.StructField{
+				Name:      f.Name,
+				Type:      substituteTypeParams(f.Type, subst),
+				Tags:      f.Tags,
+				IsForward: f.IsForward,
+				IsWeak:    f.IsWeak,
+				IsOwn:     f.IsOwn,
+			}
+		}
+
+		concrete.Variants[vi] = ast.DataVariant{Pos: v.Pos, Name: v.Name, Fields: newFields}
+	}
+
+	cg.dataDecls[concreteName] = concrete
+
+	for _, v := range concrete.Variants {
+		cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], concreteName)
+	}
+
+	return cg.emitConcreteData(concreteName, concrete)
+}
+
+// substituteTypeParams walks a type expression replacing named type
+// parameters with their concrete bindings. Used during ADT monomorphization
+// to specialize variant field types.
+func substituteTypeParams(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.TypeExpr {
+	if te == nil {
 		return nil
 	}
 
-	return cg.emitConcreteData(n.Name, n)
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if replaced, ok := subst[t.Name]; ok {
+			return replaced
+		}
+
+		return t
+	case *ast.PointerType:
+		return &ast.PointerType{Elem: substituteTypeParams(t.Elem, subst), IsConst: t.IsConst}
+	case *ast.ArrayType:
+		return &ast.ArrayType{Elem: substituteTypeParams(t.Elem, subst), Size: t.Size}
+	case *ast.GenericType:
+		newParams := make([]ast.TypeExpr, len(t.TypeParams))
+		for i, tp := range t.TypeParams {
+			newParams[i] = substituteTypeParams(tp, subst)
+		}
+
+		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
+	}
+
+	return te
 }
 
 // emitConcreteData emits the outer tagged-union struct and the per-variant
@@ -183,6 +267,118 @@ func (cg *CodeGen) dataVariantInfoFor(adtName, variantName string) *dataVariantI
 	return nil
 }
 
+// genDataScopeCtorCall handles `Adt::Variant(args)` and `Adt[T, U]::Variant(args)`
+// style constructor calls routed through a ScopeAccess expression. Returns
+// (value, handled=true, err) when the path matches a known ADT; otherwise
+// (nil, false, nil) so the caller can fall through to struct/pkg dispatch.
+func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, args []ast.Node) (value.Value, bool, error) {
+	if len(fn.Path) < 2 {
+		return nil, false, nil
+	}
+
+	variantName := fn.Path[len(fn.Path)-1]
+	typePart := fn.Path[0]
+
+	if len(fn.Path) > 2 {
+		// Only 3-element paths (`pkg::Adt::Variant` or `Adt[T,U]::Variant`) are
+		// recognized here; anything deeper is out of scope.
+		typePart = fn.Path[len(fn.Path)-2]
+	}
+
+	typeParamStr := ""
+	if i := strings.IndexByte(typePart, '['); i >= 0 {
+		typeParamStr = typePart[i+1 : len(typePart)-1]
+		typePart = typePart[:i]
+	}
+
+	adtName := typePart
+
+	if _, ok := cg.dataDecls[adtName]; !ok {
+		return nil, false, nil
+	}
+
+	// Concrete instance: Option[i32]::Some -> concrete Option__i32.
+	if typeParamStr != "" {
+		tmpl := cg.dataDecls[adtName]
+		if tmpl == nil {
+			return nil, true, fmt.Errorf("data %s: template not found", adtName)
+		}
+
+		rawParts := splitTopLevel(typeParamStr, ',')
+		resolvedParts := make([]string, len(rawParts))
+		resolvedTEs := make([]ast.TypeExpr, len(rawParts))
+
+		for i, raw := range rawParts {
+			resolvedParts[i] = raw
+			resolvedTEs[i] = parseTypeParamStr(raw)
+		}
+
+		concreteName := adtName + "__" + strings.Join(resolvedParts, "__")
+		if _, done := cg.structTypes[concreteName]; !done {
+			if err := cg.monomorphizeDataDecl(tmpl, resolvedTEs, concreteName); err != nil {
+				return nil, true, err
+			}
+		}
+
+		adtName = concreteName
+	}
+
+	vi := cg.dataVariantInfoFor(adtName, variantName)
+	if vi == nil {
+		return nil, true, fmt.Errorf("data %s: unknown variant %q", adtName, variantName)
+	}
+
+	if len(args) != len(vi.Fields) {
+		return nil, true, fmt.Errorf("data %s: variant %s expects %d argument(s), got %d",
+			adtName, variantName, len(vi.Fields), len(args))
+	}
+
+	argVals := make([]value.Value, len(args))
+
+	for i, a := range args {
+		v, err := cg.genExpr(block, a)
+		if err != nil {
+			return nil, true, err
+		}
+
+		argVals[i] = cg.coerce(block, v, vi.PayloadType.Fields[i])
+	}
+
+	v, err := cg.wrapDataVariant(block, adtName, variantName, argVals)
+
+	return v, true, err
+}
+
+// splitTopLevel splits s on sep while respecting `[...]` nesting. Used to
+// parse ADT generic arg lists where nested brackets are possible
+// (e.g. `Option[Result[i32, string]]`).
+func splitTopLevel(s string, sep byte) []string {
+	var (
+		out   []string
+		start int
+		depth int
+	)
+
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case sep:
+			if depth == 0 {
+				out = append(out, strings.TrimSpace(s[start:i]))
+
+				start = i + 1
+			}
+		}
+	}
+
+	out = append(out, strings.TrimSpace(s[start:]))
+
+	return out
+}
+
 // genDataConstructorCall emits a call-style ADT constructor `Variant(args...)`.
 // Returns the constructed ADT value (outer struct). Returns (nil, nil) when
 // the variant cannot be resolved in the current context, so callers can fall
@@ -249,7 +445,9 @@ func (cg *CodeGen) genDataNullaryConstructor(block *ir.Block, variantName string
 
 // isDataMatchPattern reports whether pat is an ADT match arm pattern:
 // either a call `Ctor(bindings...)` on a known variant, or a bare
-// identifier naming a nullary variant.
+// identifier naming a nullary variant from some ADT. The concrete ADT is
+// resolved later from the scrutinee's type; ambiguous variant names (e.g.
+// `Empty` declared by both `Box[i64]` and `Box[string]`) are fine here.
 func (cg *CodeGen) isDataMatchPattern(pat ast.Node) bool {
 	switch p := pat.(type) {
 	case *ast.CallExpr:
@@ -259,13 +457,11 @@ func (cg *CodeGen) isDataMatchPattern(pat ast.Node) bool {
 
 		return false
 	case *ast.Identifier:
-		// Bare identifier is an ADT pattern only if it names a nullary variant.
-		if adts := cg.dataVariantLookup[p.Name]; len(adts) > 0 {
-			if adt, err := cg.resolveVariantName(p.Name); err == nil && adt != "" {
-				vi := cg.dataVariantInfoFor(adt, p.Name)
-				if vi != nil && len(vi.Fields) == 0 {
-					return true
-				}
+		// Treat as a nullary-variant pattern only if at least one registered
+		// ADT declares a nullary variant with this name.
+		for _, adt := range cg.dataVariantLookup[p.Name] {
+			if vi := cg.dataVariantInfoFor(adt, p.Name); vi != nil && len(vi.Fields) == 0 {
+				return true
 			}
 		}
 

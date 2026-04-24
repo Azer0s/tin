@@ -270,19 +270,21 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 	case *ast.DataDecl:
 		// Register an opaque struct for non-generic ADTs so forward references
 		// in function signatures resolve. Layout is filled in by genDataDecl
-		// during pre-pass 3. Generic ADTs are monomorphized on demand.
+		// during pre-pass 3. Generic ADTs are monomorphized on demand; their
+		// variant names are registered against the concrete instance at
+		// monomorphization time (see monomorphizeDataDecl).
 		if len(n.TypeParams) == 0 {
 			st := irtypes.NewStruct()
 			st.SetName(n.Name)
 			cg.structTypes[n.Name] = st
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+
+			for _, v := range n.Variants {
+				cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], n.Name)
+			}
 		}
 
 		cg.dataDecls[n.Name] = n
-
-		for _, v := range n.Variants {
-			cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], n.Name)
-		}
 	case *ast.TypeDecl:
 		// Simple type aliases (type char = u8) go straight into typeAliases.
 		// Tagged union aliases (type u = i8 | string) get a placeholder struct so

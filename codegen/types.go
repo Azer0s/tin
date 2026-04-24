@@ -187,6 +187,38 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		qualTypeName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: t.Name})
 		// Only triggered when the type params are concrete types (not template vars).
 		arity := len(t.TypeParams)
+
+		// Generic ADT: `Option[i32]`, `Result[i32, string]`, ... Monomorphize
+		// on demand to a concrete data type named <adt>__<part1>__<part2>.
+		if dd, ok2 := cg.dataDecls[t.Name]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
+			parts := make([]string, arity)
+
+			isTemplateVar := false
+
+			for i, tp := range t.TypeParams {
+				parts[i] = cg.typeExprCanonicalKey(tp)
+
+				for _, tpName := range dd.TypeParams {
+					if tpName == parts[i] {
+						isTemplateVar = true
+					}
+				}
+			}
+
+			if !isTemplateVar {
+				concreteName := t.Name + "__" + strings.Join(parts, "__")
+				if _, done := cg.structTypes[concreteName]; !done {
+					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
+						return nil, err
+					}
+				}
+
+				if st, ok3 := cg.structTypes[concreteName]; ok3 {
+					return st, nil
+				}
+			}
+		}
+
 		if arityMap, isGenericStruct := cg.genericStructsByArity[qualTypeName]; isGenericStruct && arity > 0 {
 			if tmplStruct, hasArity := arityMap[arity]; hasArity {
 				// Build concrete name from ALL type params joined with __.

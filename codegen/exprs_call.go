@@ -800,6 +800,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
+		// ADT constructor call: `Option::Some(42)` or `Option[i32]::Some(42)`
+		// and similarly `Result[i32, string]::Ok(42)`.
+		if v, handled, err := cg.genDataScopeCtorCall(block, fn, e.Args); handled {
+			return v, err
+		}
+
 		// Static method call on a generic struct: Type[K,V]::method(args) or
 		// pkg::Type[K,V]::method(args).  The ScopeAccess path looks like
 		// ["collections::HashMap[string,string]", "new"].

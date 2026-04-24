@@ -27,6 +27,11 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 			return constant.NewInt(irtypes.I32, val), nil
 		}
 	}
+
+	// Nullary ADT variant: `Option[i32]::None`, `Tree[i64]::Leaf`.
+	if v, handled, err := cg.genDataScopeCtorCall(block, e, nil); handled {
+		return v, err
+	}
 	// Try identifier lookup.
 	joined := strings.Join(e.Path, ".")
 
