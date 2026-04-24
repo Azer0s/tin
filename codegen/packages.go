@@ -573,20 +573,6 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
-	// Pass 1.5a: emit concrete layout for non-generic ADTs defined in this
-	// package. Generic ADTs are stored as templates by preregister and
-	// monomorphized on demand in consumer packages via tinTypeToLLVM.
-	for _, node := range prog.Stmts {
-		if dd, ok := node.(*ast.DataDecl); ok {
-			if compErr := cg.genDataDecl(dd); compErr != nil {
-				cg.curScope = prevScope
-				cg.filename = prevFilename
-
-				return fmt.Errorf("use %q: data %s: %w", rawPath, dd.Name, compErr)
-			}
-		}
-	}
-
 	// Pass 1.5: generate struct declarations; propagate methods to prevScope.
 	for _, node := range prog.Stmts {
 		sd, ok := node.(*ast.StructDecl)
@@ -634,6 +620,22 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
 					prevScope.set(bareCoroKey, entry)
 				}
+			}
+		}
+	}
+
+	// Pass 1.6: emit concrete layout for non-generic ADTs defined in this
+	// package, AFTER all struct layouts are finalized. The payload size
+	// computation depends on the inner struct types having complete
+	// field lists (opaque structs have size 0, which would under-size
+	// the ADT's payload buffer). Generic ADTs are monomorphized on demand.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %q: data %s: %w", rawPath, dd.Name, compErr)
 			}
 		}
 	}
@@ -1115,19 +1117,6 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 1.5a: emit concrete layout for non-generic ADTs defined in this
-	// package. Generic ADTs are monomorphized on demand.
-	for _, node := range prog.Stmts {
-		if dd, ok := node.(*ast.DataDecl); ok {
-			if compErr := cg.genDataDecl(dd); compErr != nil {
-				cg.curScope = prevScope
-				cg.filename = prevFilename
-
-				return fmt.Errorf("use %s: data %s: %w", pkgPath, dd.Name, compErr)
-			}
-		}
-	}
-
 	// Pass 1.5: generate struct declarations (field layouts + method bodies).
 	// Non-generic structs are fully compiled; generic structs are stored as
 	// templates in cg.genericStructsByArity and compiled on demand when instantiated.
@@ -1199,6 +1188,20 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// passes 2/2.5/3 can mangle IR names for overloaded functions correctly.
 	for name, flag := range scanOverloadedNames(prog.Stmts) {
 		cg.overloadedNames[name] = flag
+	}
+
+	// Pass 1.6: emit concrete layout for non-generic ADTs defined in this
+	// package, AFTER all struct layouts are finalized. See the symmetrical
+	// block in loadPackage above for rationale.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %s: data %s: %w", pkgPath, dd.Name, compErr)
+			}
+		}
 	}
 
 	// Pass 2: predeclare non-extern functions (enables mutual recursion).
@@ -2109,17 +2112,29 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 
 		innerName := strings.TrimPrefix(structName, prefix)
 
-		// Split innerName into one part per declared template arg. For a single
-		// type parameter keep the whole remainder (so i32 and collections::map
-		// stay intact). For multiple, split on `__`.
-		if len(pt.TypeParams) == 1 {
+		// Prefer the arg list recorded at monomorphization time, because type
+		// parts themselves may contain `__` (e.g. package-qualified names like
+		// json__Value). If no record exists, fall back to a `__`-split, which
+		// is correct when every arg is a bare name.
+		var parts []string
+		if recorded, ok := cg.dataInstTypeArgs[structName]; ok && len(recorded) == len(pt.TypeParams) {
+			parts = recorded
+		} else if len(pt.TypeParams) == 1 {
+			// Single type arg: the whole remainder is the arg (preserves
+			// embedded `__` from package-qualified names).
+			parts = []string{innerName}
+		} else {
+			parts = strings.Split(innerName, "__")
+		}
+
+		if len(parts) == 1 && len(pt.TypeParams) == 1 {
 			innerParam := pt.TypeParams[0]
 
 			if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
 				for _, tp := range typeParams {
 					if simpleInner.Name == tp {
 						if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
-							subst[tp] = innerName
+							subst[tp] = parts[0]
 							fromConst[tp] = isConst
 						}
 
@@ -2127,7 +2142,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 					}
 				}
 			} else {
-				if innerST, ok := cg.structTypes[innerName]; ok {
+				if innerST, ok := cg.structTypes[parts[0]]; ok {
 					cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
 				}
 			}
@@ -2135,7 +2150,6 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			break
 		}
 
-		parts := strings.Split(innerName, "__")
 		if len(parts) != len(pt.TypeParams) {
 			break
 		}

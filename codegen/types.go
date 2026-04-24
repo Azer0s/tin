@@ -213,6 +213,8 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					}
 				}
 
+				cg.dataInstTypeArgs[concreteName] = parts
+
 				if st, ok3 := cg.structTypes[concreteName]; ok3 {
 					return st, nil
 				}

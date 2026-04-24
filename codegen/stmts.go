@@ -1432,9 +1432,19 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			return err2
 		}
 	} else {
+		// Set returnTypeHint so ADT bare-constructor calls like `return Ok(x)`
+		// can resolve against the declared return type. Restore after.
+		prevHint := cg.returnTypeHint
+
+		if cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
+			cg.returnTypeHint = cg.curFn.Sig.RetType
+		}
+
 		var err2 error
 
 		val, err2 = cg.genExpr(block, s.Value)
+		cg.returnTypeHint = prevHint
+
 		if err2 != nil {
 			return err2
 		}

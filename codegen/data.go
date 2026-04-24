@@ -309,8 +309,11 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		resolvedTEs := make([]ast.TypeExpr, len(rawParts))
 
 		for i, raw := range rawParts {
-			resolvedParts[i] = raw
 			resolvedTEs[i] = parseTypeParamStr(raw)
+			// Resolve through typeAliases so names resolved in the same
+			// way as the declared function signature types, keeping the
+			// monomorphic name consistent (e.g. Value -> json__Value).
+			resolvedParts[i] = cg.typeExprCanonicalKey(resolvedTEs[i])
 		}
 
 		concreteName := adtName + "__" + strings.Join(resolvedParts, "__")

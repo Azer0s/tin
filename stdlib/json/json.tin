@@ -522,12 +522,27 @@ fn parse_value(p *Parser) *Value =
 
 // Public API
 
+// JsonError describes why a parse attempt failed. Declared but not yet used
+// in public signatures; see TODO on parse below.
+//
+//   data JsonError =
+//     EmptyInput                // source string was empty
+//     Malformed(pos i64, msg string)
+//       // generic malformation at byte offset `pos`; `msg` is a short reason
+data JsonError =
+  EmptyInput
+  Malformed(pos i64, msg string)
+
 // parse parses a JSON string and returns (Value, Err).
 // Err is nil on success. On empty input, returns (null Value, Err).
 //
 //   let (v, err) = json::parse(s)
 //   if errors::has(err): panic(err.message())
 //   v.get("name").as_string()
+//
+// TODO: switch return type to Result[Value, JsonError] once the codegen can
+// monomorphize a Result payload whose inner type is a package-local struct
+// (see task "Split Pass 1.5 for ADT layout ordering").
 fn parse(s string) (Value, Err) =
   if len(s) == 0:
     return (Value{kind: Kind.null_v}, errors::new("json: empty input"))
@@ -606,6 +621,10 @@ fn parse_nested_any[T](zero any, doc Value, _unused T) any =
 //
 //   let u = json::parse[user]("{\"id\":1,\"name\":\"Alice\"}")
 //   echo u.name   // Alice
+// TODO: switch return type to Result[T, JsonError] once the codegen can
+// monomorphize an ADT payload whose inner struct type is still being
+// laid out. See followup "split Pass 1.5 to emit struct fields before
+// ADT layout, method bodies after".
 fn parse[T](s string) (T, Err) =
   let (doc, perr) = parse(s)
   let result T
@@ -677,5 +696,6 @@ fn parse[T](s string) (T, Err) =
 
 export {
   Kind, Value, parse, encode,
+  JsonError,
   JsonSerializable, JsonDeserializable,
 } as json

@@ -414,6 +414,12 @@ type CodeGen struct {
 	dataVariantLookup   map[string][]string
 	dataValueReleaseFns map[string]*ir.Func
 	dataValueRetainFns  map[string]*ir.Func
+	// dataInstTypeArgs maps a concrete ADT instance name (e.g.
+	// "Result__json__Value__JsonError") to the resolved canonical type-arg
+	// names the instance was monomorphized with (e.g. ["json__Value",
+	// "JsonError"]). Used by inferTypeArgs to recover type arguments from a
+	// struct name whose arity cannot be recovered by splitting on `__`.
+	dataInstTypeArgs map[string][]string
 
 	// ------------------------------------------------------------------
 	// Fiber / coroutine state
@@ -854,6 +860,7 @@ func New(filename string) *CodeGen {
 		dataVariantLookup:        make(map[string][]string),
 		dataValueReleaseFns:      make(map[string]*ir.Func),
 		dataValueRetainFns:       make(map[string]*ir.Func),
+		dataInstTypeArgs:         make(map[string][]string),
 		coroCallable:             make(map[string]bool),
 		callGraph:                make(map[string][]string),
 		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
