@@ -39,6 +39,8 @@ import (
 	"fmt"
 	"strings"
 
+	irtypes "github.com/llir/llvm/ir/types"
+
 	"github.com/Azer0s/tin/ast"
 )
 
@@ -122,9 +124,17 @@ func (cg *CodeGen) pushNotInward(orig *ast.UnaryExpr, inner ast.Node) ast.Node {
 		}
 
 	case *ast.BinExpr:
-		// !(a <cmp> b) -> a <negated-cmp> b
-		if neg := negatedCmpOp(x.Op); neg != "" {
+		// !(a <cmp> b) -> a <negated-cmp> b.
+		//
+		// SOUNDNESS: this rewrite is only valid when neither operand can
+		// be a float. For IEEE floats, both `a < b` and `a >= b` return
+		// false when either operand is NaN, so `!(a < b)` (true for NaN)
+		// is NOT equivalent to `a >= b` (false for NaN). For integers
+		// there is no such discrepancy and the rewrite is a straight
+		// IR-level swap of predicate.
+		if neg := negatedCmpOp(x.Op); neg != "" && cg.canSafelyNegateCmp(x.Left, x.Right) {
 			out := &ast.BinExpr{Left: x.Left, Op: neg, Right: x.Right}
+			out.SetPos(x.Pos())
 			cg.logDemorgan(orig, "negate-cmp("+x.Op+")", orig, out)
 
 			return out
@@ -208,20 +218,15 @@ func (cg *CodeGen) simplifyConnective(orig *ast.BinExpr, left, right ast.Node) a
 		return right
 	}
 
-	if br, ok := right.(*ast.BoolLit); ok {
-		if br.Value {
-			// a || true -> true (drops `a`'s side effects; acceptable
-			// because the RHS is a constant true already evaluated
-			// textually).
-			cg.logDemorgan(orig, "absorb(_||true)", orig, right)
-
-			return right
-		}
+	if br, ok := right.(*ast.BoolLit); ok && !br.Value {
 		// a || false -> a
 		cg.logDemorgan(orig, "absorb(_||false)", orig, left)
 
 		return left
 	}
+	// a || true: NOT rewritten to `true` because `a` may have side
+	// effects (function call, mutation) which the original program
+	// evaluates before the constant-true short-circuits.
 
 	return &ast.BinExpr{Left: left, Op: orig.Op, Right: right}
 }
@@ -306,6 +311,54 @@ func (cg *CodeGen) prepareBoolCond(e ast.Node, loc string, allowBareTrueLoop boo
 	cg.emitBoolAnalysisWarning(pos, v, loc)
 
 	return simp
+}
+
+// canSafelyNegateCmp reports whether rewriting `!(a <cmp> b)` to the
+// negated-predicate form is semantically equivalent. For IEEE floats the
+// rewrite is unsound around NaN (both `a < b` and `a >= b` return false
+// for NaN, so `!(a < b)` != `a >= b`), so the rewrite is only applied
+// when both operands can be proven non-float.
+func (cg *CodeGen) canSafelyNegateCmp(a, b ast.Node) bool {
+	return cg.isNonFloatOperand(a) && cg.isNonFloatOperand(b)
+}
+
+// isNonFloatOperand reports whether n is guaranteed to evaluate to a
+// non-float value at runtime. Unknown expressions conservatively return
+// false so the rewrite stays on the safe side.
+func (cg *CodeGen) isNonFloatOperand(n ast.Node) bool {
+	switch v := n.(type) {
+	case *ast.FloatLit:
+		return false
+	case *ast.IntLit, *ast.BoolLit, *ast.CharLit, *ast.AtomLit, *ast.StringLit:
+		return true
+	case *ast.Identifier:
+		if t := cg.staticTypeOf(v); t != nil {
+			return !irtypes.IsFloat(t)
+		}
+	case *ast.UnaryExpr:
+		// `-x` / `+x` / `~x` preserve the operand's numeric domain; `!x`
+		// / `not x` produce a bool (itself non-float). Recursing on the
+		// operand gives the right answer in both cases even though the
+		// reasoning differs - keep this comment so a future reader does
+		// not split the arms incorrectly.
+		return cg.isNonFloatOperand(v.Expr)
+	case *ast.AsExpr:
+		// A cast locks the target type; only allow the rewrite when the
+		// annotation is a known non-float primitive. User aliases
+		// (e.g. `type Temp = f64`) could resolve to float at later
+		// stages, so treat unknown simple names as "could be float" and
+		// skip the rewrite.
+		if st, ok := v.Type.(*ast.SimpleType); ok {
+			switch st.Name {
+			case "i8", "i16", "i32", "i64", "i128",
+				"u8", "u16", "u32", "u64", "u128",
+				"bool", "byte", "char", "atom", "string":
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // condInvolvesTypeof reports whether the expression tree contains a

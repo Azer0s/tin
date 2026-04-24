@@ -283,6 +283,18 @@ func collectMutatedNames(root ast.Node) map[string]bool {
 			if id, ok := s.Expr.(*ast.Identifier); ok {
 				out[id.Name] = true
 			}
+		case *ast.AddressOfExpr:
+			// Taking the address of a variable exposes it to mutation via
+			// the resulting pointer (e.g. `flip(&flag)` in a caller).
+			// Treat the variable as mutated so the fold pass does not
+			// constant-propagate its initializer.
+			if id, ok := s.Expr.(*ast.Identifier); ok {
+				out[id.Name] = true
+			}
+		case *ast.AddrExpr:
+			if id, ok := s.Val.(*ast.Identifier); ok {
+				out[id.Name] = true
+			}
 		}
 	})
 

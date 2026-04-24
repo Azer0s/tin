@@ -2935,6 +2935,8 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 
 	// Cond
 	if s.Cond != nil {
+		s.Cond = cg.prepareBoolCond(s.Cond, "for", true)
+
 		cg.curBlock = condBlock
 
 		cond, err := cg.genExpr(condBlock, s.Cond)
