@@ -15,10 +15,18 @@ import (
 func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	p.advance() // consume struct
 
-	// Optional {#tags} before name
+	// Optional {#tags} before name. Tags scoped with @fn/@method/@static_fn/@field
+	// are collected separately; propagation happens in codegen.
+	var scopedTags []ast.ScopedTag
+
 	if p.check(lexer.LBRACE) {
-		moreTags := p.parseTags()
+		moreTags, moreScoped, err := p.parseStructTags()
+		if err != nil {
+			return nil, err
+		}
+
 		tags = append(tags, moreTags...)
+		scopedTags = append(scopedTags, moreScoped...)
 	}
 
 	nameTok, err := p.expect(lexer.IDENT)
@@ -67,7 +75,8 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 
 	decl := &ast.StructDecl{
 		Name: nameTok.Literal, TypeParams: typeParams,
-		Constraints: constraints, Implements: impls, Tags: tags,
+		Constraints: constraints, Implements: impls,
+		Tags: tags, ScopedTags: scopedTags,
 	}
 
 	// Parse body (fields + methods)

@@ -1190,6 +1190,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if len(sd.TypeParams) > 0 {
 				continue
 			}
+			// Propagate struct-level scoped tags (#pure@fn, etc.) onto methods
+			// BEFORE they are registered in funcDecls. The later #pure /
+			// #no_recurse check iterates funcDecls and must see the expanded
+			// tag set.
+			if err := cg.propagateStructScopedTags(sd); err != nil {
+				return nil, err
+			}
 
 			aug := cg.augmentStructFromTraits(sd)
 			for _, m := range aug.Methods {

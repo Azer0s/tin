@@ -84,6 +84,7 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 		Fields:     append([]ast.StructField{}, n.Fields...),
 		Methods:    append([]*ast.FuncDecl{}, n.Methods...),
 		Tags:       n.Tags,
+		ScopedTags: n.ScopedTags,
 	}
 
 	for _, impl := range n.Implements {
@@ -157,6 +158,13 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 	if len(n.TypeParams) > 0 {
 		return nil // generic template - only compiled when monomorphized
+	}
+
+	// Propagate struct-level scoped tags onto matching members before any
+	// tag-consuming pass runs. Idempotent: already-applied tags are not
+	// re-added.
+	if err := cg.propagateStructScopedTags(n); err != nil {
+		return err
 	}
 
 	orig := n // keep original for Implements list
@@ -826,6 +834,8 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	concrete := &ast.StructDecl{
 		Name:       n.Name,
 		Implements: concreteImpls,
+		Tags:       tmpl.Tags,
+		ScopedTags: tmpl.ScopedTags,
 	}
 	for _, f := range tmpl.Fields {
 		concrete.Fields = append(concrete.Fields, ast.StructField{
@@ -863,6 +873,13 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 
 		concrete.Methods = append(concrete.Methods, ov)
+	}
+
+	// Propagate the template's scoped tags onto the fresh concrete's
+	// members. Must happen before the pre-registration loops below that
+	// inspect m.Tags (for #async, overloads, predeclare).
+	if err := cg.propagateStructScopedTags(concrete); err != nil {
+		return err
 	}
 
 	// Register the concrete struct type (opaque first, just like preregister).

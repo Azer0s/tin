@@ -1,0 +1,70 @@
+// scoped_struct_tags.tin - Struct-level {#tag@scope} propagation.
+//
+// `#tag@scope` on a struct propagates the tag to matching members before
+// codegen. Scopes: @fn (all methods), @method (instance only),
+// @static_fn (static only), @field (all fields - today only #const).
+
+use assert
+
+// ── #pure@fn propagates #pure to every method ──
+
+struct {#pure@fn} value =
+  const x i64
+
+  fn square(this value) i64 =
+    return this.x * this.x
+
+  fn double(this value) i64 =
+    return this.x * 2
+
+test "pure@fn: pure methods compile and run" =
+  let v = value{x: 5}
+  assert::equals(v.square(), 25)
+  assert::equals(v.double(), 10)
+
+// ── Explicit member tag takes precedence over propagation. ──
+
+struct {#pure@fn} mixed =
+  const label string
+
+  fn id(this mixed) string =
+    return this.label
+
+  fn{#sideffect} announce(this mixed) =
+    echo this.label
+
+test "pure@fn: explicit #sideffect on a method overrides propagation" =
+  let m = mixed{label: "hi"}
+  assert::equals(m.id(), "hi")
+
+// ── #const@field default-flips fields to const; explicit `var` opts out. ──
+
+struct {#const@field} point =
+  x i64                // const (inherited default)
+  y i64                // const
+  var scratch i64      // explicit var - mutable
+
+test "const@field: unmarked fields are const by default" =
+  let p = point{x: 1, y: 2, scratch: 0}
+  assert::equals(p.x, 1)
+  assert::equals(p.y, 2)
+
+test "const@field: var override is mutable" =
+  let p = point{x: 10, y: 20, scratch: 0}
+  p.scratch = 42
+  assert::equals(p.scratch, 42)
+
+// ── #no_recurse@method reaches only instance methods. ──
+
+struct {#no_recurse@method} counter =
+  const initial i64
+
+  fn current(this counter) i64 =
+    return this.initial + 1
+
+  static fn zero() counter =
+    return counter{initial: 0}
+
+test "no_recurse@method: normal calls still work" =
+  let c = counter.zero()
+  assert::equals(c.current(), 1)

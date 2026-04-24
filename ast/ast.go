@@ -139,7 +139,19 @@ type StructDecl struct {
 	Fields      []StructField
 	Methods     []*FuncDecl
 	Implements  []TypeExpr // trait impls listed in parens
-	Tags        []string
+	Tags        []string   // unscoped tags (e.g. "packed"); applied to the struct itself
+	// ScopedTags are tags written with an `@scope` qualifier in the struct's
+	// `{#tag@scope}` header (e.g. `#pure@fn`). Propagation happens in codegen
+	// before any tag-consuming pass runs: members matching the scope receive
+	// the tag; existing member-level tags take precedence on conflicts.
+	ScopedTags []ScopedTag
+}
+
+// ScopedTag is a struct-level control tag tagged with a member-scope
+// qualifier. Scope is one of: "fn", "method", "static_fn", "field".
+type ScopedTag struct {
+	Name  string
+	Scope string
 }
 
 type TraitDecl struct {
