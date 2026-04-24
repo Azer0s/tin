@@ -143,6 +143,11 @@ type CodeGen struct {
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
 
+	// structConstFields: struct key -> set of field names declared as `const`.
+	// Const fields are rejected as the target of any write (plain assign,
+	// aug-assign, postfix, setfield, address-of).
+	structConstFields map[string]map[string]bool
+
 	// cLayoutStructs: struct names used as *S in extern function signatures.
 	// These structs use a wrapper layout: { i32 type_id, vtable_ptrs..., i8* c_data_ptr, inline_fields... }
 	// All field accesses go through c_data_ptr, which points to C memory (non-handover)
@@ -882,6 +887,7 @@ func New(filename string) *CodeGen {
 		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		structConstFields:        make(map[string]map[string]bool),
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),
 		packedStructs:            make(map[string]bool),

@@ -82,6 +82,8 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 				IsForward: f.IsForward,
 				IsWeak:    f.IsWeak,
 				IsOwn:     f.IsOwn,
+				IsConst:   f.IsConst,
+				IsVar:     f.IsVar,
 			}
 		}
 

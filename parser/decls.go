@@ -132,7 +132,25 @@ func (p *Parser) parseStructItem() (any, error) {
 
 		return fn, err
 	}
-	// Field: name [weak|own] type [forward]
+	// Field: [const|var] name [weak|own] type [forward]
+	//
+	// A leading `const` or `var` sets the field's mutability. We only
+	// consume it when the next token is an identifier - that keeps a plain
+	// `const` or `var` variable declaration (which can't legally appear
+	// here anyway) from being silently swallowed.
+	isConst := false
+	isVar := false
+
+	if p.check(lexer.KW_CONST) && p.peekAt(1).Type == lexer.IDENT {
+		isConst = true
+
+		p.advance()
+	} else if p.check(lexer.KW_VAR) && p.peekAt(1).Type == lexer.IDENT {
+		isVar = true
+
+		p.advance()
+	}
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
@@ -180,7 +198,16 @@ func (p *Parser) parseStructItem() (any, error) {
 		tags = append(tags, tagTok.Literal)
 	}
 
-	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, IsWeak: isWeak, IsOwn: isOwn, Tags: tags}, nil
+	return &ast.StructField{
+		Name:      nameTok.Literal,
+		Type:      typ,
+		IsForward: isForward,
+		IsWeak:    isWeak,
+		IsOwn:     isOwn,
+		IsConst:   isConst,
+		IsVar:     isVar,
+		Tags:      tags,
+	}, nil
 }
 
 func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
@@ -244,8 +271,19 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 					}
 
 					decl.Methods = append(decl.Methods, fn)
-				} else if p.check(lexer.IDENT) {
-					// forward field: "name type forward"
+				} else if p.check(lexer.IDENT) || ((p.check(lexer.KW_CONST) || p.check(lexer.KW_VAR)) && p.peekAt(1).Type == lexer.IDENT) {
+					// forward field: [const|var] name type forward
+					isConst := false
+					isVar := false
+
+					if p.check(lexer.KW_CONST) {
+						isConst = true
+						p.advance()
+					} else if p.check(lexer.KW_VAR) {
+						isVar = true
+						p.advance()
+					}
+
 					fname := p.advance().Literal
 
 					ftype, err2 := p.parseTypeExpr()
@@ -257,7 +295,12 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 						p.advance()
 					}
 
-					decl.ForwardFields = append(decl.ForwardFields, ast.StructField{Name: fname, Type: ftype})
+					decl.ForwardFields = append(decl.ForwardFields, ast.StructField{
+						Name:    fname,
+						Type:    ftype,
+						IsConst: isConst,
+						IsVar:   isVar,
+					})
 				} else {
 					p.advance() // skip unexpected tokens
 				}

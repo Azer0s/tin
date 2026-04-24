@@ -1283,6 +1283,14 @@ func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, e
 }
 
 func (cg *CodeGen) genAddrOfExpr(block *ir.Block, e *ast.AddressOfExpr) (value.Value, error) {
+	// Reject &s.f when f is const. Taking the address of a const field
+	// produces a pointer through which the caller could write, defeating
+	// the const guarantee. Strict rejection keeps the check a local
+	// syntactic one; a future read-only pointer type could relax this.
+	if err := cg.checkFieldWritable(e.Expr); err != nil {
+		return nil, err
+	}
+
 	return cg.genLValue(block, e.Expr)
 }
 

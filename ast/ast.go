@@ -691,6 +691,16 @@ type StructField struct {
 	// (forms a tree/DAG).  No runtime enforcement is performed; a future
 	// debug-mode build option will add an acyclicity check on assignment.
 	IsOwn bool
+	// IsConst marks a field as immutable after struct construction.  The parser
+	// sets this from a leading `const` keyword on the field line.  Codegen
+	// rejects writes (plain assign, aug-assign, postfix, setfield, address-of)
+	// to const fields.  Construction paths (struct literal, positional init,
+	// destructuring let, match bindings) are unaffected.  `IsVar` exists only
+	// to record that the user wrote an explicit `var` keyword, which is
+	// redundant today but carries meaning under a future `#const@field`
+	// default-flip.
+	IsConst bool
+	IsVar   bool
 }
 
 type EnumMember struct {

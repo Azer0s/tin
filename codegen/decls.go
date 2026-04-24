@@ -272,6 +272,18 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 	}
 
 	cg.structWeakFields[structKey] = weakSet
+
+	// Record const fields for this struct. Writes to these are rejected by
+	// checkFieldWritable before codegen emits a store.
+	constSet := make(map[string]bool)
+
+	for _, f := range n.Fields {
+		if f.IsConst {
+			constSet[f.Name] = true
+		}
+	}
+
+	cg.structConstFields[structKey] = constSet
 	// Assign a compile-time type ID for this struct (used by any boxing /
 	// runtime type checks).  IDs are stable within a compilation unit.
 	if _, exists := cg.structTypeIDs[structKey]; !exists {
@@ -823,6 +835,8 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			IsForward: f.IsForward,
 			IsWeak:    f.IsWeak,
 			IsOwn:     f.IsOwn,
+			IsConst:   f.IsConst,
+			IsVar:     f.IsVar,
 		})
 	}
 
