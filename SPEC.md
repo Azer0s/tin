@@ -63,6 +63,21 @@ fn main(args [string], argc u16) i32 =
     echo "{i}"
 ```
 
+### Control flow
+
+```rust
+if n < 0:
+  echo "negative"
+else if n == 0:
+  echo "zero"
+else:
+  echo "positive"
+```
+
+`else if` chains are unbounded; each branch uses Python-style indented
+bodies. `match` is covered under [Pattern matching](#pattern-matching)
+below.
+
 ### External functions
 
 ```rust
@@ -458,6 +473,43 @@ Not enforced at compile time; serves as documentation.
 fn{#no_thread} init_globals() = pass
 ```
 
+#### Other function / method tags
+
+| Tag              | Applies to           | Meaning                                              |
+|------------------|----------------------|------------------------------------------------------|
+| `#async`         | fn / method / lambda | Runs as a cooperative green thread (fiber)           |
+| `#heavy`         | fn / method          | Forces "auto-yield" classification for schedulers    |
+| `#no_autoyield`  | fn / method / lambda | Suppresses auto-yield at loop backedges and calls    |
+| `#handover`      | extern fn only       | Transfers ownership of a returned C pointer into ARC |
+
+#### Struct tags
+
+Structs accept both unscoped tags (apply to the struct itself) and
+**scoped** tags with an `@scope` qualifier that propagates the tag to
+matching members:
+
+```rust
+struct{#packed} record =                 // unscoped: struct-level
+  tag   u8
+  value u32                              // sizeof(record) = 5 (no padding)
+
+struct{#pure@fn #const@field} vec2 =     // scoped: propagates to members
+  x f64
+  y f64
+  fn magnitude(this vec2) f64 =          // inherits #pure
+    return this.x * this.x + this.y * this.y
+```
+
+Scopes: `@fn` (all methods), `@method` (instance methods only),
+`@static_fn` (static methods only), `@field` (all fields).
+
+`#const@field` flips the unmarked-field default to `const`; `var`
+opts out. Per-field `const` / `var` also work standalone - see
+[Per-field mutability](#per-field-mutability---const--var).
+
+See [docs/13-control-tags.md](docs/13-control-tags.md) for the full
+tag-scope compatibility matrix and cascade semantics.
+
 #### Macro tags
 
 | Tag          | Meaning                            |
@@ -563,15 +615,18 @@ tin test examples/                   # entire directory
 
 The `assert` stdlib (`use assert`) provides:
 
-| Function                                             | Description                       |
-|------------------------------------------------------|-----------------------------------|
-| `assert::equals(expected i64, actual i64)`           | Assert two `i64` values are equal |
-| `assert::equals_str(expected string, actual string)` | Assert two strings are equal      |
-| `assert::equals_f64(expected f64, actual f64)`       | Assert two `f64` values are equal |
-| `assert::ok(cond bool)`                              | Assert condition is true          |
-| `assert::not_ok(cond bool)`                          | Assert condition is false         |
-| `assert::not_equals(a i64, b i64)`                   | Assert two `i64` values differ    |
-| `assert::fails(msg string)`                          | Unconditionally fail with message |
+| Function                                       | Description                             |
+|------------------------------------------------|-----------------------------------------|
+| `assert::equals[t](expected t, actual t)`      | Generic equality; `t` must implement `comp` |
+| `assert::not_equals[t](a t, b t)`              | Generic inequality; `t` must implement `comp` |
+| `assert::ok(cond bool)`                        | Assert condition is true                |
+| `assert::not_ok(cond bool)`                    | Assert condition is false               |
+| `assert::fails(msg string)`                    | Unconditionally fail with message       |
+
+`assert::equals` is fully generic: it works on any type implementing the
+`comp` trait (all primitives, strings, atoms, and user types with a
+`==` overload). There are no type-specific `equals_str` / `equals_f64`
+variants - one generic function covers all cases.
 
 When an assertion fails inside `tin test`, the runner prints the failure and
 moves on to the next test (via `longjmp`). In a standalone run, `exit(1)` is
@@ -801,7 +856,209 @@ type res = @[i32, bool]
 let [code, ok] res = mixed          // code=42, ok=true
 
 // Struct destructuring
-struct point = x i64; y i64
+struct point =
+  x i64
+  y i64
 let p = point{x: 3, y: 4}
 let {x, y} point = p               // x=3, y=4
 ```
+
+---
+
+## Per-field mutability - const / var
+
+Struct fields may be prefixed with `const` or `var` to control whether
+they can be reassigned after construction. Unmarked fields default to
+mutable, matching variable semantics.
+
+```rust
+struct point =
+  const x i64           // immutable after init
+  const y i64           // immutable after init
+  var   scratch i64     // explicit mutable
+  z i64                 // unmarked - mutable (default)
+
+let p = point{x: 1, y: 2, scratch: 0, z: 5}
+p.scratch = 42          // OK
+p.x = 99                // compile error: cannot assign to const field point.x
+```
+
+`const` is a compile-time-only tag: direct writes through the field
+name are rejected (`s.f = v`, `s.f += v`, `s.f++`, method-body writes,
+pointer-dereference writes `pp->f = v`). Reflective writes
+(`setfield(s, "f", v)`) and address-taking (`&s.f`) remain allowed.
+
+The struct-level tag `#const@field` flips the default for unmarked
+fields to `const`; see [Struct tags](#struct-tags) above.
+
+See [docs/05-structs.md](docs/05-structs.md#field-mutability---const--var)
+for detailed semantics and interaction with `weak` / `own` modifiers.
+
+---
+
+## Pattern matching
+
+`match` dispatches on a value against structural patterns:
+
+```rust
+fn classify(p point) string =
+  match p:
+    case point{x: 0, y: 0}:             return "origin"
+    case point{x: 0, y}:                return "y-axis at {y}"
+    case point{x, y: 0}:                return "x-axis at {x}"
+    case point{x, y} if x == y:         return "diagonal"
+    case point{x, y}:                   return "({x}, {y})"
+```
+
+Pattern kinds: struct `Type{field: lit, bound}`, array `[x, y]` /
+`[x, ...tail]`, tuple `(a, b)`, ADT constructor `Ok(v)`, literal,
+identifier (bind), `_` (wildcard). Guards (`if expr`) further filter
+any arm. Exhaustiveness uses Maranget's algorithm; a `default` arm or
+a catch-all pattern is required only when the compiler cannot prove
+completeness.
+
+`match` also works as an expression (single-expr arms only):
+
+```rust
+let label = match p:
+  case point{x: 0, y: 0}:   "origin"
+  case point{x, y} if x==y: "diagonal"
+  case point{x, y}:         "other"
+```
+
+### `where` pattern clauses
+
+Inside a function body `where` can replace a match by pattern-dispatching
+on the function's arguments:
+
+```rust
+fn sign(n i64) i64 =
+  where (0):  0
+  where (n) if n > 0:  1
+  where _:  -1
+```
+
+See [docs/02-control-flow.md](docs/02-control-flow.md) for the full
+pattern grammar and [docs/04-collections.md](docs/04-collections.md)
+for array patterns.
+
+---
+
+## Algebraic data types
+
+`data` declares a tagged sum type. Variants may be nullary, positional,
+or named:
+
+```rust
+data Shape =
+  Dot
+  Circle(radius f64)
+  Rect(width f64, height f64)
+  Rgb(r i64, g i64, b i64)
+
+fn area(s Shape) f64 =
+  match s:
+    case Dot:           return 0.0
+    case Circle(r):     return r * r * 3.14
+    case Rect(w, h):    return w * h
+    case Rgb(_, _, _):  return 0.0
+```
+
+Generic ADTs parameterise over types:
+
+```rust
+data Result[t, e] =
+  Ok(val t)
+  Err(msg e)
+
+fn lookup(k string) Result[i64, string] =
+  if k == "answer": return Ok(42)
+  return Err("not found")
+```
+
+ADT fields may use `own` to declare acyclic recursion:
+
+```rust
+data Tree[t] =
+  Leaf
+  Node(val t, left own *Tree[t], right own *Tree[t])
+```
+
+Maranget exhaustiveness applies: the compiler verifies every variant
+is covered (or rejects the match with a specific missing-variant).
+
+Cross-module ADTs work through `use { Result, Ok, Err } from result`
+(the canonical `stdlib/result` package ships Result and Option).
+
+---
+
+## Fibers, async, and channels
+
+Tin has stackless coroutines with cooperative scheduling. A function
+tagged `#async` runs as a fiber; callers use `spawn` to launch it and
+`await` to collect the result.
+
+```rust
+fn{#async} worker(n i64) i64 =
+  yield                          // voluntary reschedule
+  return n * 2
+
+fn main() =
+  let f = spawn worker(21)
+  echo await f                   // 42
+```
+
+The compiler auto-inserts yield points at loop backedges and before
+calls to heavy or recursive callees; `#no_autoyield` disables this
+per-function, and `#heavy` forces a callee to be classified as
+yield-before.
+
+`await match` selects among multiple in-flight futures:
+
+```rust
+await match [fa, fb, fc]:
+  case [x, _, _]:  echo "fa fired: {x}"
+  case [_, y, _]:  echo "fb fired: {y}"
+  case [_, _, z] if z > 0:  echo "fc positive: {z}"
+  default:         echo "nothing ready"
+```
+
+The `sync` stdlib provides channels (`Channel[T]`, bounded + unbounded),
+mutexes (`Mutex`), and atomics (`Atomic[T]`). See
+[docs/14-fibers.md](docs/14-fibers.md) for the full model, scheduler
+contract, and performance notes.
+
+---
+
+## Reflection builtins
+
+Tin ships five zero-ceremony reflection builtins that operate on any
+struct value (including values boxed as `any`):
+
+| Builtin                        | Returns              | Meaning                              |
+|--------------------------------|----------------------|--------------------------------------|
+| `typeof(v)`                    | `atom`               | Runtime type as an atom              |
+| `traitof(v)`                   | `[atom]`             | List of implemented trait names      |
+| `fieldnames(v)`                | `[atom]`             | User-visible field names, in order   |
+| `fieldtypes(v)`                | `[atom]`             | Field types (matches `fieldnames`)   |
+| `fieldtag(v, "fieldName")`     | `atom`               | The `@"..."` metadata tag for a field |
+| `getfield(v, "fieldName")`     | `any`                | Read a field dynamically             |
+| `setfield(v, "fieldName", x)`  | -                    | Write a field dynamically            |
+
+```rust
+struct user =
+  id    i64    @"primary_key"
+  email string @"unique"
+
+let u = user{id: 1, email: "a@b.c"}
+echo typeof(u)              // 'user
+echo fieldtag(u, "id")      // 'primary_key
+echo fieldnames(u)          // ['id, 'email]
+echo getfield(u, "email")   // a@b.c
+setfield(u, "id", 42)
+```
+
+`getfield` / `setfield` on a concrete struct lower to a direct GEP
++ load/store; on an `any` value, a runtime dispatch chain selects the
+correct struct layout. See [docs/10-reflection.md](docs/10-reflection.md)
+for the full API.
