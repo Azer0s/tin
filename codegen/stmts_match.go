@@ -276,9 +276,26 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	exhaustive := cg.isExhaustiveDataMatch(s, adtName)
 	anyFallthrough := false
 
+	if !exhaustive && s.Default == nil {
+		_, witness := cg.marangetCheckMatchExhaustive(s)
+		if witness == "" {
+			witness = "<unknown variant>"
+		}
+
+		pos := s.Pos()
+		if pos.Line == 0 && len(s.Cases) > 0 {
+			pos = s.Cases[0].Pos
+		}
+
+		return nil, fmt.Errorf("%d:%d: non-exhaustive match on %s: no arm matches %s; add the missing variant or a `default:` arm",
+			pos.Line, pos.Col, adtName, witness)
+	}
+
 	defaultBlock := cg.newBlock("match.default")
 
 	var cases []*ir.Case
+
+	seenTags := make(map[int8]bool, len(s.Cases))
 
 	for i, c := range s.Cases {
 		if !cg.isDataMatchPattern(c.Pattern) {
@@ -297,6 +314,14 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 			return nil, fmt.Errorf("data %s: case %s expects %d binding(s), got %d",
 				adtName, variantName, len(vi.Fields), len(binders))
 		}
+
+		if seenTags[vi.Tag] {
+			// Arm is unreachable (Maranget already warned). Skip so we don't
+			// emit a duplicate switch case and fail at llc.
+			continue
+		}
+
+		seenTags[vi.Tag] = true
 
 		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d.%s", i, variantName))
 		cases = append(cases, ir.NewCase(

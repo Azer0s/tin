@@ -44,7 +44,7 @@ func (cg *CodeGen) scanWhereForUnreachable(wl *ast.WhereList) {
 
 	arity := cg.whereArity(wl)
 	for i := range wl.Clauses {
-		if !marangetWhereArmUseful(wl, i, arity) {
+		if !cg.marangetWhereArmUseful(wl, i, arity) {
 			cg.emitUnreachableArmWarning(wl.Clauses[i].Pos, "where clause")
 		}
 	}
@@ -83,24 +83,14 @@ func (cg *CodeGen) scanMatchForUnreachable(s *ast.MatchStmt) {
 		return
 	}
 
-	// ADT matches have their own exhaustiveness path (isExhaustiveDataMatch)
-	// and the default nodeToMPat conversion collapses nullary variants to
-	// wildcards, producing false-positive unreachable warnings. Skip the
-	// generic scan until nodeToMPat understands data-variant constructors.
-	for _, c := range s.Cases {
-		if cg.isDataMatchPattern(c.Pattern) {
-			return
-		}
-	}
-
 	for i := range s.Cases {
-		if !marangetMatchArmUseful(s, i) {
+		if !cg.marangetMatchArmUseful(s, i) {
 			cg.emitUnreachableArmWarning(s.Cases[i].Pos, "match case")
 		}
 	}
 
 	if s.Default != nil {
-		if !marangetMatchDefaultUseful(s) {
+		if !cg.marangetMatchDefaultUseful(s) {
 			cg.emitUnreachableArmWarning(s.Pos(), "match default")
 		}
 	}

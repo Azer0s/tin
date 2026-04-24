@@ -112,11 +112,22 @@ type mStruct struct {
 	fields map[string]mPat
 }
 
+// mData matches an ADT variant (`case Ok(v):`, `case EmptyInput:`). args is
+// the positional list of sub-patterns (nullary variants have len(args)==0).
+// adtName is the concrete ADT type name (e.g. "Option__i64") and variant is
+// the variant name ("Some", "Ok", ...).
+type mData struct {
+	adtName string
+	variant string
+	args    []mPat
+}
+
 func (mWild) mIsPat()    {}
 func (*mLit) mIsPat()    {}
 func (*mArr) mIsPat()    {}
 func (*mStruct) mIsPat() {}
 func (*mOpaque) mIsPat() {}
+func (*mData) mIsPat()   {}
 
 type mLitKind int
 
@@ -136,11 +147,19 @@ const (
 // representation. Unknown shapes become mWild conservatively (treats the
 // arm as catch-everything, suppressing both unreachable and non-exhaustive
 // reports for that column rather than producing false positives).
-func nodeToMPat(n ast.Node) mPat {
+func (cg *CodeGen) nodeToMPat(n ast.Node) mPat {
 	switch p := n.(type) {
 	case nil:
 		return mWild{}
 	case *ast.Identifier:
+		// A bare identifier is a binder (wildcard) UNLESS it names a
+		// nullary ADT variant, in which case it is a data constructor.
+		if cg != nil && cg.isDataVariant(p.Name) {
+			adt := cg.adtForVariant(p.Name)
+
+			return &mData{adtName: adt, variant: p.Name}
+		}
+
 		return mWild{}
 	case *ast.IntLit:
 		return &mLit{kind: mLitInt, intVal: p.Value}
@@ -152,6 +171,18 @@ func nodeToMPat(n ast.Node) mPat {
 		return &mLit{kind: mLitBool, boolVal: p.Value}
 	case *ast.AtomLit:
 		return &mLit{kind: mLitAtom, atomVal: p.Name}
+	case *ast.CallExpr:
+		// ADT constructor pattern: `case Ok(v):`, `case Malformed(p, m):`.
+		if id, ok := p.Func.(*ast.Identifier); ok && cg != nil && cg.isDataVariant(id.Name) {
+			adt := cg.adtForVariant(id.Name)
+			args := make([]mPat, len(p.Args))
+
+			for i, a := range p.Args {
+				args[i] = cg.nodeToMPat(a)
+			}
+
+			return &mData{adtName: adt, variant: id.Name, args: args}
+		}
 	case *ast.ArrayPattern:
 		var elems []mPat
 
@@ -186,6 +217,25 @@ func nodeToMPat(n ast.Node) mPat {
 	return &mOpaque{tag: opaqueTag(n)}
 }
 
+// adtForVariant picks a concrete registered ADT name that declares the given
+// variant. When a variant name is shared by multiple ADTs (e.g. a generic
+// `Result` monomorphised into multiple instances), we prefer a variant lookup
+// entry that looks concrete (no unresolved type-parameter suffix). The name
+// is only used for completeness bookkeeping; codegen resolves the ADT from
+// the scrutinee's type independently.
+func (cg *CodeGen) adtForVariant(variant string) string {
+	if cg == nil {
+		return ""
+	}
+
+	adts := cg.dataVariantLookup[variant]
+	if len(adts) == 0 {
+		return ""
+	}
+
+	return adts[0]
+}
+
 // opaqueTag renders an AST node into a stable string used as the equality
 // key for opaque constructors. Different concrete patterns must produce
 // different strings.
@@ -202,7 +252,7 @@ func opaqueTag(n ast.Node) string {
 // TuplePattern). guarded == true makes the row Wild^N for the priors-cover
 // check (a guarded arm cannot be relied on to cover anything) but the arm
 // itself is always considered useful (we cannot prove it dead).
-func wherePatternToRow(c ast.WhereClause, arity int) (row []mPat, guarded bool) {
+func (cg *CodeGen) wherePatternToRow(c ast.WhereClause, arity int) (row []mPat, guarded bool) {
 	if c.Guard != nil {
 		guarded = true
 	}
@@ -229,7 +279,7 @@ func wherePatternToRow(c ast.WhereClause, arity int) (row []mPat, guarded bool) 
 
 		row = make([]mPat, arity)
 		for i, e := range tp.Elems {
-			row[i] = nodeToMPat(e)
+			row[i] = cg.nodeToMPat(e)
 		}
 
 		return
@@ -242,12 +292,12 @@ func wherePatternToRow(c ast.WhereClause, arity int) (row []mPat, guarded bool) 
 		return
 	}
 
-	row = []mPat{nodeToMPat(c.Pattern)}
+	row = []mPat{cg.nodeToMPat(c.Pattern)}
 
 	return
 }
 
-func matchCaseToRow(c ast.MatchCase) (row []mPat, guarded bool) {
+func (cg *CodeGen) matchCaseToRow(c ast.MatchCase) (row []mPat, guarded bool) {
 	if c.Guard != nil {
 		guarded = true
 	}
@@ -269,13 +319,13 @@ func matchCaseToRow(c ast.MatchCase) (row []mPat, guarded bool) {
 	if tp, ok := c.Pattern.(*ast.TuplePattern); ok {
 		row = make([]mPat, len(tp.Elems))
 		for i, e := range tp.Elems {
-			row[i] = nodeToMPat(e)
+			row[i] = cg.nodeToMPat(e)
 		}
 
 		return
 	}
 
-	row = []mPat{nodeToMPat(c.Pattern)}
+	row = []mPat{cg.nodeToMPat(c.Pattern)}
 
 	return
 }
@@ -317,6 +367,9 @@ type mCtor struct {
 	stName    string
 	stFields  []string // canonical field-name order
 	opaqueTag string   // for mcOpaque
+	adtName   string   // for mcData: concrete ADT type name
+	variant   string   // for mcData: variant name
+	adtArity  int      // for mcData: number of positional payload fields
 }
 
 type mCtorKind int
@@ -327,6 +380,7 @@ const (
 	mcArrRest
 	mcStruct
 	mcOpaque
+	mcData
 )
 
 // arity returns the number of columns Specialize will produce when
@@ -346,6 +400,8 @@ func (c mCtor) arity() int {
 		return len(c.stFields)
 	case mcOpaque:
 		return 0
+	case mcData:
+		return c.adtArity
 	}
 
 	return 0
@@ -380,6 +436,8 @@ func (c mCtor) eq(o mCtor) bool {
 		return c.stName == o.stName
 	case mcOpaque:
 		return c.opaqueTag == o.opaqueTag
+	case mcData:
+		return c.adtName == o.adtName && c.variant == o.variant
 	}
 
 	return false
@@ -413,6 +471,8 @@ func headCtor(p mPat) *mCtor {
 		return &mCtor{kind: mcStruct, stName: v.typeName, stFields: names}
 	case *mOpaque:
 		return &mCtor{kind: mcOpaque, opaqueTag: v.tag}
+	case *mData:
+		return &mCtor{kind: mcData, adtName: v.adtName, variant: v.variant, adtArity: len(v.args)}
 	}
 
 	return nil
@@ -450,7 +510,7 @@ func columnCtors(M [][]mPat) []mCtor {
 // exhaust the column's domain. When incomplete, it returns a "missing"
 // constructor that witness building uses to construct a concrete uncovered
 // value at this column.
-func completeSignature(ctors []mCtor) (complete bool, missing mCtor) {
+func (cg *CodeGen) completeSignature(ctors []mCtor) (complete bool, missing mCtor) {
 	if len(ctors) == 0 {
 		// No concrete head appears in column 0 - either the matrix is
 		// empty, or every prior row has a wildcard at column 0. In either
@@ -553,6 +613,48 @@ func completeSignature(ctors []mCtor) (complete bool, missing mCtor) {
 		// incomplete; the witness reuses one of the seen tags as a
 		// placeholder.
 		return false, missingFor(first)
+
+	case mcData:
+		// ADT completeness: the column is complete iff the seen variants
+		// cover every variant declared by the ADT. All ctors at this column
+		// must refer to the same ADT type. cg.dataVariants[adtName] is the
+		// authoritative variant set.
+		adtName := first.adtName
+		seen := make(map[string]bool, len(ctors))
+
+		for _, c := range ctors {
+			if c.kind != mcData {
+				return false, missingFor(first)
+			}
+
+			if c.adtName != adtName {
+				return false, missingFor(first)
+			}
+
+			seen[c.variant] = true
+		}
+
+		if cg == nil {
+			return false, missingFor(first)
+		}
+
+		variants := cg.dataVariants[adtName]
+		if variants == nil {
+			return false, missingFor(first)
+		}
+
+		for vname := range variants {
+			if !seen[vname] {
+				missing = mCtor{
+					kind: mcData, adtName: adtName,
+					variant: vname, adtArity: len(variants[vname].Fields),
+				}
+
+				return false, missing
+			}
+		}
+
+		return true, missing
 	}
 
 	return false, missingFor(first)
@@ -583,6 +685,11 @@ func missingFor(any mCtor) mCtor {
 		return mCtor{kind: mcStruct, stName: any.stName, stFields: any.stFields}
 	case mcOpaque:
 		return mCtor{kind: mcOpaque, opaqueTag: "<other-" + any.opaqueTag + ">"}
+	case mcData:
+		// Fallback when completeSignature couldn't resolve the ADT. The
+		// witness-printer just needs some variant name that is clearly not
+		// one of the seen ones.
+		return mCtor{kind: mcData, adtName: any.adtName, variant: "<other-" + any.variant + ">"}
 	}
 
 	return mCtor{kind: mcLit, litKind: mLitInt}
@@ -740,6 +847,21 @@ func specialize(M [][]mPat, c mCtor) [][]mPat {
 			}
 
 			out = append(out, append([]mPat{}, rest...))
+		case *mData:
+			if c.kind != mcData || c.adtName != p.adtName || c.variant != p.variant {
+				continue
+			}
+			// Expand the variant's positional payload fields as new columns.
+			exp := make([]mPat, c.adtArity)
+			for i := 0; i < c.adtArity; i++ {
+				if i < len(p.args) {
+					exp[i] = p.args[i]
+				} else {
+					exp[i] = mWild{}
+				}
+			}
+
+			out = append(out, append(exp, rest...))
 		}
 	}
 
@@ -774,7 +896,7 @@ type witnessVal struct {
 // M. When q is fully wild, this is the inverse of exhaustiveness. The
 // witness, when q is found useful, is a concrete value q matches and no row
 // of M does.
-func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
+func (cg *CodeGen) useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 	// Base cases following Maranget §3.1.
 	if len(q) == 0 {
 		// The matrix has no rows iff the empty pattern is useful. (No
@@ -796,7 +918,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 	switch p := head.(type) {
 	case mWild:
 		ctors := columnCtors(M)
-		complete, missing := completeSignature(ctors)
+		complete, missing := cg.completeSignature(ctors)
 
 		if complete {
 			// Try each constructor: q is useful iff any specialised
@@ -806,7 +928,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 				a := c.arity()
 				expanded := append(wildRow(a), rest...)
 
-				ok, w := useful(specialize(M, c), expanded)
+				ok, w := cg.useful(specialize(M, c), expanded)
 				if ok {
 					return true, prependChildren(c, w)
 				}
@@ -816,7 +938,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 		}
 		// Incomplete signature: the witness uses the missing constructor
 		// for column 0 and recurses on the default submatrix for the rest.
-		ok, w := useful(defaultMatrix(M), rest)
+		ok, w := cg.useful(defaultMatrix(M), rest)
 		if !ok {
 			return false, nil
 		}
@@ -841,7 +963,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 	case *mLit:
 		c := mCtor{kind: mcLit, litKind: p.kind, intVal: p.intVal, floatVal: p.floatVal, strVal: p.strVal, boolVal: p.boolVal, atomVal: p.atomVal}
 
-		ok, w := useful(specialize(M, c), rest)
+		ok, w := cg.useful(specialize(M, c), rest)
 		if !ok {
 			return false, nil
 		}
@@ -859,7 +981,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 
 		expanded := append(append([]mPat{}, p.elems...), rest...)
 
-		ok, w := useful(specialize(M, c), expanded)
+		ok, w := cg.useful(specialize(M, c), expanded)
 		if !ok {
 			return false, nil
 		}
@@ -883,7 +1005,7 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 
 		expanded = append(expanded, rest...)
 
-		ok, w := useful(specialize(M, c), expanded)
+		ok, w := cg.useful(specialize(M, c), expanded)
 		if !ok {
 			return false, nil
 		}
@@ -893,7 +1015,18 @@ func useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 	case *mOpaque:
 		c := mCtor{kind: mcOpaque, opaqueTag: p.tag}
 
-		ok, w := useful(specialize(M, c), rest)
+		ok, w := cg.useful(specialize(M, c), rest)
+		if !ok {
+			return false, nil
+		}
+
+		return true, prependWitness(c, w)
+
+	case *mData:
+		c := mCtor{kind: mcData, adtName: p.adtName, variant: p.variant, adtArity: len(p.args)}
+		expanded := append(append([]mPat{}, p.args...), rest...)
+
+		ok, w := cg.useful(specialize(M, c), expanded)
 		if !ok {
 			return false, nil
 		}
@@ -1024,6 +1157,17 @@ func (w *witnessVal) String() string {
 		return w.ctor.stName + "{" + strings.Join(fields, ", ") + "}"
 	case mcOpaque:
 		return w.ctor.opaqueTag
+	case mcData:
+		if len(w.args) == 0 {
+			return w.ctor.variant
+		}
+
+		parts := make([]string, len(w.args))
+		for i, a := range w.args {
+			parts[i] = a.String()
+		}
+
+		return w.ctor.variant + "(" + strings.Join(parts, ", ") + ")"
 	}
 
 	return "_"
@@ -1035,12 +1179,12 @@ func (w *witnessVal) String() string {
 
 // marangetCheckWhereExhaustive returns (ok, witnessString). When ok is false
 // the witness describes a value the where-list fails to cover.
-func marangetCheckWhereExhaustive(wl *ast.WhereList, arity int) (bool, string) {
-	M := buildWhereMatrix(wl, arity)
+func (cg *CodeGen) marangetCheckWhereExhaustive(wl *ast.WhereList, arity int) (bool, string) {
+	M := cg.buildWhereMatrix(wl, arity)
 
 	q := wildRow(arity)
 
-	ok, w := useful(M, q)
+	ok, w := cg.useful(M, q)
 	if !ok {
 		return true, ""
 	}
@@ -1050,7 +1194,7 @@ func marangetCheckWhereExhaustive(wl *ast.WhereList, arity int) (bool, string) {
 
 // marangetCheckMatchExhaustive runs the same analysis on a match statement.
 // arity is 1 for normal match (the scrutinee).
-func marangetCheckMatchExhaustive(s *ast.MatchStmt) (bool, string) {
+func (cg *CodeGen) marangetCheckMatchExhaustive(s *ast.MatchStmt) (bool, string) {
 	if s == nil {
 		return true, ""
 	}
@@ -1059,11 +1203,11 @@ func marangetCheckMatchExhaustive(s *ast.MatchStmt) (bool, string) {
 		return true, ""
 	}
 
-	M := buildMatchMatrix(s)
+	M := cg.buildMatchMatrix(s)
 
 	q := wildRow(1)
 
-	ok, w := useful(M, q)
+	ok, w := cg.useful(M, q)
 	if !ok {
 		return true, ""
 	}
@@ -1072,8 +1216,8 @@ func marangetCheckMatchExhaustive(s *ast.MatchStmt) (bool, string) {
 }
 
 // marangetWhereArmUseful: is arm i of wl useful w.r.t. arms 0..i-1?
-func marangetWhereArmUseful(wl *ast.WhereList, idx, arity int) bool {
-	row, guarded := wherePatternToRow(wl.Clauses[idx], arity)
+func (cg *CodeGen) marangetWhereArmUseful(wl *ast.WhereList, idx, arity int) bool {
+	row, guarded := cg.wherePatternToRow(wl.Clauses[idx], arity)
 	if guarded {
 		return true
 	}
@@ -1081,7 +1225,7 @@ func marangetWhereArmUseful(wl *ast.WhereList, idx, arity int) bool {
 	M := make([][]mPat, 0, idx)
 
 	for i := 0; i < idx; i++ {
-		r, g := wherePatternToRow(wl.Clauses[i], arity)
+		r, g := cg.wherePatternToRow(wl.Clauses[i], arity)
 		if g {
 			continue // guarded prior cannot shadow anything
 		}
@@ -1089,13 +1233,13 @@ func marangetWhereArmUseful(wl *ast.WhereList, idx, arity int) bool {
 		M = append(M, r)
 	}
 
-	ok, _ := useful(M, row)
+	ok, _ := cg.useful(M, row)
 
 	return ok
 }
 
-func marangetMatchArmUseful(s *ast.MatchStmt, idx int) bool {
-	row, guarded := matchCaseToRow(s.Cases[idx])
+func (cg *CodeGen) marangetMatchArmUseful(s *ast.MatchStmt, idx int) bool {
+	row, guarded := cg.matchCaseToRow(s.Cases[idx])
 	if guarded {
 		return true
 	}
@@ -1103,7 +1247,7 @@ func marangetMatchArmUseful(s *ast.MatchStmt, idx int) bool {
 	M := make([][]mPat, 0, idx)
 
 	for i := 0; i < idx; i++ {
-		r, g := matchCaseToRow(s.Cases[i])
+		r, g := cg.matchCaseToRow(s.Cases[i])
 		if g {
 			continue
 		}
@@ -1111,17 +1255,17 @@ func marangetMatchArmUseful(s *ast.MatchStmt, idx int) bool {
 		M = append(M, r)
 	}
 
-	ok, _ := useful(M, row)
+	ok, _ := cg.useful(M, row)
 
 	return ok
 }
 
-func marangetMatchDefaultUseful(s *ast.MatchStmt) bool {
-	M := buildMatchMatrix(s)
+func (cg *CodeGen) marangetMatchDefaultUseful(s *ast.MatchStmt) bool {
+	M := cg.buildMatchMatrix(s)
 
 	q := wildRow(1)
 
-	ok, _ := useful(M, q)
+	ok, _ := cg.useful(M, q)
 
 	return ok
 }
@@ -1131,7 +1275,7 @@ func marangetMatchDefaultUseful(s *ast.MatchStmt) bool {
 // reachability of subsequent arms, and when assessing exhaustiveness they
 // are similarly dropped because the catch-all rule already requires an
 // unguarded catch-all).
-func buildWhereMatrix(wl *ast.WhereList, arity int) [][]mPat {
+func (cg *CodeGen) buildWhereMatrix(wl *ast.WhereList, arity int) [][]mPat {
 	if wl == nil {
 		return nil
 	}
@@ -1139,7 +1283,7 @@ func buildWhereMatrix(wl *ast.WhereList, arity int) [][]mPat {
 	var M [][]mPat
 
 	for _, c := range wl.Clauses {
-		row, guarded := wherePatternToRow(c, arity)
+		row, guarded := cg.wherePatternToRow(c, arity)
 		if guarded {
 			continue
 		}
@@ -1150,11 +1294,11 @@ func buildWhereMatrix(wl *ast.WhereList, arity int) [][]mPat {
 	return M
 }
 
-func buildMatchMatrix(s *ast.MatchStmt) [][]mPat {
+func (cg *CodeGen) buildMatchMatrix(s *ast.MatchStmt) [][]mPat {
 	var M [][]mPat
 
 	for _, c := range s.Cases {
-		row, guarded := matchCaseToRow(c)
+		row, guarded := cg.matchCaseToRow(c)
 		if guarded {
 			continue
 		}
@@ -1240,6 +1384,17 @@ func patStr(p mPat) string {
 		}
 
 		return v.typeName + "{" + strings.Join(fs, ", ") + "}"
+	case *mData:
+		if len(v.args) == 0 {
+			return v.variant
+		}
+
+		parts := make([]string, len(v.args))
+		for i, a := range v.args {
+			parts[i] = patStr(a)
+		}
+
+		return v.variant + "(" + strings.Join(parts, ", ") + ")"
 	}
 
 	return "?"
@@ -1262,12 +1417,12 @@ func (cg *CodeGen) dumpMatchInfo(s *ast.MatchStmt, label string) {
 	_, _ = fmt.Fprintf(cg.matchInfoSink(), "  arity=1, cases=%d, default=%v\n", len(s.Cases), s.Default != nil)
 
 	for i, c := range s.Cases {
-		row, guarded := matchCaseToRow(c)
+		row, guarded := cg.matchCaseToRow(c)
 		marker := "ok"
 
 		if guarded {
 			marker = "guarded"
-		} else if !marangetMatchArmUseful(s, i) {
+		} else if !cg.marangetMatchArmUseful(s, i) {
 			marker = "UNREACHABLE"
 		}
 
@@ -1276,14 +1431,14 @@ func (cg *CodeGen) dumpMatchInfo(s *ast.MatchStmt, label string) {
 
 	if s.Default != nil {
 		marker := "ok"
-		if !marangetMatchDefaultUseful(s) {
+		if !cg.marangetMatchDefaultUseful(s) {
 			marker = "UNREACHABLE"
 		}
 
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  default     %s\n", marker)
 	}
 
-	if ok, w := marangetCheckMatchExhaustive(s); !ok {
+	if ok, w := cg.marangetCheckMatchExhaustive(s); !ok {
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  exhaustive: NO   missing witness: %s\n", w)
 	} else {
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  exhaustive: YES\n")
@@ -1303,19 +1458,19 @@ func (cg *CodeGen) dumpWhereInfo(wl *ast.WhereList, label string) {
 	_, _ = fmt.Fprintf(cg.matchInfoSink(), "  arity=%d, clauses=%d\n", arity, len(wl.Clauses))
 
 	for i, c := range wl.Clauses {
-		row, guarded := wherePatternToRow(c, arity)
+		row, guarded := cg.wherePatternToRow(c, arity)
 		marker := "ok"
 
 		if guarded {
 			marker = "guarded"
-		} else if !marangetWhereArmUseful(wl, i, arity) {
+		} else if !cg.marangetWhereArmUseful(wl, i, arity) {
 			marker = "UNREACHABLE"
 		}
 
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  clause[%d] %-12s %s\n", i, marker, rowStr(row))
 	}
 
-	if ok, w := marangetCheckWhereExhaustive(wl, arity); !ok {
+	if ok, w := cg.marangetCheckWhereExhaustive(wl, arity); !ok {
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  exhaustive: NO   missing witness: %s\n", w)
 	} else {
 		_, _ = fmt.Fprintf(cg.matchInfoSink(), "  exhaustive: YES\n")

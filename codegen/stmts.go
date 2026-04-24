@@ -97,6 +97,35 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 	}
 	switch b := body.(type) {
 	case *ast.Block:
+		// Tail-expression match: when the body block contains exactly one
+		// statement and that statement is a MatchStmt whose arms each yield
+		// a single expression, compile the match in expression mode so the
+		// arm values propagate as the function's return value.
+		if !irtypes.IsVoid(retType) && len(b.Stmts) == 1 {
+			if ms, ok := b.Stmts[0].(*ast.MatchStmt); ok && tailMatchUsableAsExpr(ms) {
+				val, err := cg.genMatchAsExpr(block, ms)
+				if err != nil {
+					return false, err
+				}
+
+				curBlock := cg.curBlock
+				if curBlock == nil {
+					curBlock = block
+				}
+
+				if val != nil {
+					val = cg.coerce(curBlock, val, retType)
+					emitTerminator(curBlock, val, "")
+				} else {
+					if err := addDefaultRet(curBlock); err != nil {
+						return false, err
+					}
+				}
+
+				return true, nil
+			}
+		}
+
 		newBlock, term, err := cg.genBlock(block, b)
 		if err != nil {
 			return false, err
@@ -157,6 +186,32 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 	case *ast.ReturnStmt, *ast.EchoStmt, *ast.AssignStmt, *ast.PostfixStmt,
 		*ast.VarDecl, *ast.IfStmt, *ast.ForStmt, *ast.MatchStmt, *ast.DeferStmt,
 		*ast.AwaitMatchStmt:
+		// Tail match in a value-returning function: each arm provides the
+		// result expression, e.g. `fn f(x) T = match x: case A: 1 case B: 2`.
+		// Compile in expression mode so the arm bodies materialise the
+		// function result rather than running as statements with no value.
+		if ms, ok := b.(*ast.MatchStmt); ok && !irtypes.IsVoid(retType) && tailMatchUsableAsExpr(ms) {
+			val, err := cg.genMatchAsExpr(block, ms)
+			if err != nil {
+				return false, err
+			}
+
+			curBlock := cg.curBlock
+			if curBlock == nil {
+				curBlock = block
+			}
+
+			if val != nil {
+				val = cg.coerce(curBlock, val, retType)
+				emitTerminator(curBlock, val, "")
+			} else {
+				if err := addDefaultRet(curBlock); err != nil {
+					return false, err
+				}
+			}
+
+			return true, nil
+		}
 		// Single statement body (e.g. fn foo() T = return expr)
 		newBlock, terminated, err := cg.genStmt(block, body)
 		if err != nil {
@@ -192,6 +247,50 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 
 		return true, nil
 	}
+}
+
+// tailMatchUsableAsExpr reports whether a MatchStmt can be compiled via
+// genMatchAsExpr as the tail of a value-returning function body. Each arm
+// (and the default) must contain exactly one *expression* statement (an
+// ast.ExprStmt) whose value is the arm's result. Arms that use explicit
+// `return`, nested matches, conditionals, etc. fall through to the regular
+// statement path so those statements keep working as before.
+func tailMatchUsableAsExpr(s *ast.MatchStmt) bool {
+	if s == nil {
+		return false
+	}
+
+	if s.IsType {
+		// `match v.(type):` arms commonly use explicit return; keep the
+		// statement-mode compilation path for tagged-union dispatch.
+		return false
+	}
+
+	if len(s.Cases) == 0 {
+		return false
+	}
+
+	armIsBareExpr := func(body *ast.Block) bool {
+		if body == nil || len(body.Stmts) != 1 {
+			return false
+		}
+
+		_, ok := body.Stmts[0].(*ast.ExprStmt)
+
+		return ok
+	}
+
+	for _, c := range s.Cases {
+		if !armIsBareExpr(c.Body) {
+			return false
+		}
+	}
+
+	if s.Default != nil && !armIsBareExpr(s.Default) {
+		return false
+	}
+
+	return true
 }
 
 // genBlock generates a sequence of statements in the given block.

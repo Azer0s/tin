@@ -76,7 +76,7 @@ func (cg *CodeGen) genPatternWhereList(block *ir.Block, wl *ast.WhereList, retTy
 	// Exhaustiveness: full Maranget check (codegen/maranget.go). When the
 	// arms structurally cover every input, no explicit catch-all is needed;
 	// otherwise we surface a witness value the arms fail to match.
-	if ok, witness := marangetCheckWhereExhaustive(wl, arity); !ok {
+	if ok, witness := cg.marangetCheckWhereExhaustive(wl, arity); !ok {
 		pos := wl.Pos()
 		if len(wl.Clauses) > 0 {
 			pos = wl.Clauses[0].Pos
