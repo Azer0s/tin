@@ -5,6 +5,8 @@
 
 use assert
 use yaml
+use result
+use { unwrap_or } from result
 
 // Module-level structs used across multiple tests.
 
@@ -95,74 +97,74 @@ test "encode nested struct" =
 // Untyped parsing
 
 test "parse empty string returns null" =
-  let (v, _) = yaml::parse("")
+  let v = unwrap_or(yaml::parse(""), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_null())
 
 test "parse null keyword" =
-  let (v, _) = yaml::parse("null")
+  let v = unwrap_or(yaml::parse("null"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_null())
 
 test "parse tilde null" =
-  let (v, _) = yaml::parse("~")
+  let v = unwrap_or(yaml::parse("~"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_null())
 
 test "parse bool true" =
-  let (v, _) = yaml::parse("true")
+  let v = unwrap_or(yaml::parse("true"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_bool())
   assert::ok(v.as_bool())
 
 test "parse bool false" =
-  let (v, _) = yaml::parse("false")
+  let v = unwrap_or(yaml::parse("false"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_bool())
   assert::not_ok(v.as_bool())
 
 test "parse integer" =
-  let (v, _) = yaml::parse("42")
+  let v = unwrap_or(yaml::parse("42"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_int())
   assert::equals(v.as_int(), 42)
 
 test "parse negative integer" =
-  let (v, _) = yaml::parse("-7")
+  let v = unwrap_or(yaml::parse("-7"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_int())
   assert::equals(v.as_int(), 0 - 7)
 
 test "parse float" =
-  let (v, _) = yaml::parse("3.14")
+  let v = unwrap_or(yaml::parse("3.14"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_float())
   assert::equals(v.as_float(), 3.14)
 
 test "parse plain string" =
-  let (v, _) = yaml::parse("hello")
+  let v = unwrap_or(yaml::parse("hello"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "hello")
 
 test "parse double-quoted string" =
-  let (v, _) = yaml::parse("\"hello world\"")
+  let v = unwrap_or(yaml::parse("\"hello world\""), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "hello world")
 
 test "parse quoted string with escape sequences" =
-  let (v, _) = yaml::parse("\"line1\\nline2\"")
+  let v = unwrap_or(yaml::parse("\"line1\\nline2\""), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "line1\nline2")
 
 test "parse block mapping" =
-  let (v, _) = yaml::parse("name: alice\nage: 30\n")
+  let v = unwrap_or(yaml::parse("name: alice\nage: 30\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("name").as_string(), "alice")
   assert::equals(v.get("age").as_int(), 30)
 
 test "parse block mapping missing key returns null" =
-  let (v, _) = yaml::parse("x: 1\n")
+  let v = unwrap_or(yaml::parse("x: 1\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.get("missing").is_null())
 
 test "parse block mapping keys" =
-  let (v, _) = yaml::parse("a: 1\nb: 2\n")
+  let v = unwrap_or(yaml::parse("a: 1\nb: 2\n"), yaml::Value{kind: yaml::Kind.null_v})
   let ks = v.keys()
   assert::equals(len(ks), 2)
 
 test "parse block sequence of integers" =
-  let (v, _) = yaml::parse("- 10\n- 20\n- 30\n")
+  let v = unwrap_or(yaml::parse("- 10\n- 20\n- 30\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
   assert::equals(v.index(0).as_int(), 10)
@@ -170,7 +172,7 @@ test "parse block sequence of integers" =
   assert::equals(v.index(2).as_int(), 30)
 
 test "parse block sequence of strings" =
-  let (v, _) = yaml::parse("- apple\n- banana\n- cherry\n")
+  let v = unwrap_or(yaml::parse("- apple\n- banana\n- cherry\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
   assert::equals(v.index(0).as_string(), "apple")
@@ -178,12 +180,12 @@ test "parse block sequence of strings" =
   assert::equals(v.index(2).as_string(), "cherry")
 
 test "parse array out of bounds returns null" =
-  let (v, _) = yaml::parse("- 1\n- 2\n")
+  let v = unwrap_or(yaml::parse("- 1\n- 2\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.index(5).is_null())
 
 test "parse nested block mapping" =
   let s = "origin:\n  x: 3\n  y: 4\nsize:\n  x: 100\n  y: 50\n"
-  let (v, _) = yaml::parse(s)
+  let v = unwrap_or(yaml::parse(s), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   let origin = v.get("origin")
   assert::ok(origin.is_object())
@@ -194,89 +196,89 @@ test "parse nested block mapping" =
   assert::equals(size.get("y").as_int(), 50)
 
 test "parse flow mapping" =
-  let (v, _) = yaml::parse("\{x: 1, y: 2\}")
+  let v = unwrap_or(yaml::parse("\{x: 1, y: 2\}"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("x").as_int(), 1)
   assert::equals(v.get("y").as_int(), 2)
 
 test "parse flow sequence" =
-  let (v, _) = yaml::parse("[1, 2, 3]")
+  let v = unwrap_or(yaml::parse("[1, 2, 3]"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
   assert::equals(v.index(0).as_int(), 1)
   assert::equals(v.index(2).as_int(), 3)
 
 test "parse empty flow sequence" =
-  let (v, _) = yaml::parse("[]")
+  let v = unwrap_or(yaml::parse("[]"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 0)
 
 test "parse empty flow mapping" =
-  let (v, _) = yaml::parse("\{\}")
+  let v = unwrap_or(yaml::parse("\{\}"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(len(v.keys()), 0)
 
 test "parse document with leading blank lines" =
-  let (v, _) = yaml::parse("\n\nname: bob\n")
+  let v = unwrap_or(yaml::parse("\n\nname: bob\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("name").as_string(), "bob")
 
 test "parse document with comment lines" =
-  let (v, _) = yaml::parse("# a comment\nval: 42\n")
+  let v = unwrap_or(yaml::parse("# a comment\nval: 42\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("val").as_int(), 42)
 
 test "parse document start marker" =
-  let (v, _) = yaml::parse("---\nname: alice\n")
+  let v = unwrap_or(yaml::parse("---\nname: alice\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("name").as_string(), "alice")
 
 test "parse inline comment on value line" =
-  let (v, _) = yaml::parse("x: 99  # the answer\n")
+  let v = unwrap_or(yaml::parse("x: 99  # the answer\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("x").as_int(), 99)
 
 test "parse block mapping with bool and float fields" =
-  let (v, _) = yaml::parse("enabled: true\nrate: 1.5\n")
+  let v = unwrap_or(yaml::parse("enabled: true\nrate: 1.5\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.get("enabled").as_bool())
   assert::equals(v.get("rate").as_float(), 1.5)
 
 test "parse block mapping with quoted string value" =
-  let (v, _) = yaml::parse("msg: \"hello, world\"\n")
+  let v = unwrap_or(yaml::parse("msg: \"hello, world\"\n"), yaml::Value{kind: yaml::Kind.null_v})
   assert::ok(v.is_object())
   assert::equals(v.get("msg").as_string(), "hello, world")
 
 // Typed parsing
 
 test "typed parse basic struct" =
-  let (c, _) = yaml::parse[yt_coord]("x: 5\ny: 9\n")
+  let c = unwrap_or(yaml::parse[yt_coord]("x: 5\ny: 9\n"), yt_coord{})
   assert::equals(c.x, 5)
   assert::equals(c.y, 9)
 
 test "typed parse with yaml tag" =
-  let (u, _) = yaml::parse[yt_api_user]("user_id: 7\ndisplay_name: bob\n")
+  let u = unwrap_or(yaml::parse[yt_api_user]("user_id: 7\ndisplay_name: bob\n"), yt_api_user{})
   assert::equals(u.id, 7)
   assert::equals(u.name, "bob")
 
 test "typed parse unknown keys ignored" =
-  let (s, _) = yaml::parse[yt_simple]("x: 3\nextra: ignored\n")
+  let s = unwrap_or(yaml::parse[yt_simple]("x: 3\nextra: ignored\n"), yt_simple{})
   assert::equals(s.x, 3)
 
 test "typed parse float field" =
-  let (m, _) = yaml::parse[yt_measure]("val: 2.5\n")
+  let m = unwrap_or(yaml::parse[yt_measure]("val: 2.5\n"), yt_measure{})
   assert::equals(m.val, 2.5)
 
 test "typed parse bool field" =
-  let (f, _) = yaml::parse[yt_flags]("enabled: true\n")
+  let f = unwrap_or(yaml::parse[yt_flags]("enabled: true\n"), yt_flags{})
   assert::ok(f.enabled)
 
 test "typed parse string field" =
-  let (g, _) = yaml::parse[yt_greeting]("msg: hi there\n")
+  let g = unwrap_or(yaml::parse[yt_greeting]("msg: hi there\n"), yt_greeting{})
   assert::equals(g.msg, "hi there")
 
 test "typed parse nested struct" =
   let s = "origin:\n  x: 3\n  y: 4\nsize:\n  x: 100\n  y: 50\n"
-  let (r, _) = yaml::parse[yt_rect](s)
+  let r = unwrap_or(yaml::parse[yt_rect](s), yt_rect{})
   assert::equals(r.origin.x, 3)
   assert::equals(r.origin.y, 4)
   assert::equals(r.size.x, 100)

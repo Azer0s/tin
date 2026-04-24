@@ -1258,10 +1258,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// and may appear before the struct definition in source order.
 	cg.progress("generate type declarations")
 
+	// Phase A: struct field layouts (no methods yet); plus enum/type/union
+	// declarations whose field types may reference structs.
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.StructDecl:
-			if err := cg.genStructDecl(n); err != nil {
+			if err := cg.genStructLayout(n); err != nil {
 				return nil, err
 			}
 		case *ast.EnumDecl:
@@ -1276,8 +1278,24 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err := cg.genUnionDecl(n); err != nil {
 				return nil, err
 			}
-		case *ast.DataDecl:
+		}
+	}
+
+	// Phase B: ADT layouts now that every struct field type is known, so
+	// generic ADTs like Result[LocalStruct, Err] get the correct payload
+	// size rather than a placeholder [1 x i8].
+	for _, node := range prog.Stmts {
+		if n, ok := node.(*ast.DataDecl); ok {
 			if err := cg.genDataDecl(n); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Phase C: struct method bodies, trait chain shims, and vtables.
+	for _, node := range prog.Stmts {
+		if n, ok := node.(*ast.StructDecl); ok {
+			if err := cg.genStructMethods(n); err != nil {
 				return nil, err
 			}
 		}

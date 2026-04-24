@@ -141,6 +141,20 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 }
 
 func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
+	if err := cg.genStructLayout(n); err != nil {
+		return err
+	}
+
+	return cg.genStructMethods(n)
+}
+
+// genStructLayout emits the struct's LLVM type definition and records all
+// field-level metadata (types, names, tags, vtables, trait-impl list). No
+// method body is compiled. Split out of genStructDecl so the package-load
+// pipeline can compile field layouts BEFORE ADT payloads are sized, which
+// fixes the "ADT payload baked in as [1 x i8] because inner struct was
+// still opaque" bug.
+func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 	if len(n.TypeParams) > 0 {
 		return nil // generic template - only compiled when monomorphized
 	}
@@ -358,6 +372,24 @@ func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
 	}
 
 	cg.structImpls[structKey] = implNames
+
+	return nil
+}
+
+// genStructMethods emits method bodies, trait-chain shims, and vtable
+// wrappers for a non-generic struct. Must be called after genStructLayout
+// for the same declaration AND after ADT layouts are emitted, so that any
+// ADT types referenced in method bodies (e.g. Result[T, E] with T a
+// package-local struct) see fully-laid-out inner types.
+func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
+	if len(n.TypeParams) > 0 {
+		return nil
+	}
+
+	orig := n
+	n = cg.augmentStructFromTraits(n)
+	n.Implements = orig.Implements
+	structKey := cg.pkgStructKey(n.Name)
 
 	// Generate methods as top-level functions with struct-qualified names.
 	// Methods with their own TypeParams (e.g. map_opt[r]) are stored as templates

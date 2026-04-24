@@ -191,7 +191,15 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 // wrapDataVariant constructs a value for an ADT variant: sets the type_id,
 // writes the tag byte, and stores the packed payload struct into the payload
 // buffer. Returns a loaded struct value (the ADT's outer type).
-func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string, args []value.Value) (value.Value, error) {
+//
+// retainMask, if non-nil, parallels args: a `true` entry means the i'th arg
+// originates from an existing owner (variable, field access, etc.) and the
+// ADT must take its own retain so the scope-exit release of the originating
+// owner does not dangle the ADT's pointer. Fresh-literal/call-result args
+// already carry RC=1 that is transferred into the ADT, so their entries
+// should be `false` (no retain). Callers that cannot distinguish may pass
+// nil, which is equivalent to all-false (literal semantics).
+func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string, args []value.Value, retainMask []bool) (value.Value, error) {
 	vars := cg.dataVariants[adtName]
 	if vars == nil {
 		return nil, fmt.Errorf("data %s: not registered", adtName)
@@ -230,6 +238,16 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 		for i, arg := range args {
 			fieldPtr := block.NewGetElementPtr(vi.PayloadType, payloadPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			// Retain only when the caller told us the arg comes from an
+			// existing owner whose scope-exit release would otherwise dangle
+			// the ADT's copy. Fresh literals / call results already hold the
+			// single retain that transfers into the payload.
+			f := vi.Fields[i]
+
+			if !f.IsWeak && retainMask != nil && i < len(retainMask) && retainMask[i] {
+				cg.emitStructFieldRetain(block, arg)
+			}
+
 			block.NewStore(arg, fieldPtr)
 		}
 	}
@@ -337,6 +355,7 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 	}
 
 	argVals := make([]value.Value, len(args))
+	retainMask := make([]bool, len(args))
 
 	for i, a := range args {
 		v, err := cg.genExpr(block, a)
@@ -345,9 +364,10 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		}
 
 		argVals[i] = cg.coerce(block, v, vi.PayloadType.Fields[i])
+		retainMask[i] = isCopyExpr(a)
 	}
 
-	v, err := cg.wrapDataVariant(block, adtName, variantName, argVals)
+	v, err := cg.wrapDataVariant(block, adtName, variantName, argVals, retainMask)
 
 	return v, true, err
 }
@@ -419,6 +439,7 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 	}
 
 	argVals := make([]value.Value, len(args))
+	retainMask := make([]bool, len(args))
 
 	for i, a := range args {
 		v, err2 := cg.genExpr(block, a)
@@ -428,9 +449,10 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 
 		expected := vi.PayloadType.Fields[i]
 		argVals[i] = cg.coerce(block, v, expected)
+		retainMask[i] = isCopyExpr(a)
 	}
 
-	return cg.wrapDataVariant(block, adt, variantName, argVals)
+	return cg.wrapDataVariant(block, adt, variantName, argVals, retainMask)
 }
 
 // genDataNullaryConstructor emits a value expression for a nullary variant
@@ -460,7 +482,7 @@ func (cg *CodeGen) genDataNullaryConstructor(block *ir.Block, variantName string
 		return nil, nil
 	}
 
-	return cg.wrapDataVariant(block, adt, variantName, nil)
+	return cg.wrapDataVariant(block, adt, variantName, nil, nil)
 }
 
 // preferAdtFromHint picks the ADT name that owns variantName AND matches the
