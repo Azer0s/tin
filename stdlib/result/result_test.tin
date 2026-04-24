@@ -1,0 +1,37 @@
+use assert
+use result
+
+test "Result Ok/Err via match" =
+  let a Result[i32, string] = Ok(42)
+  let b Result[i32, string] = Err("nope")
+
+  match a:
+    case Ok(v):  assert::equals(42, v)
+    case Err(_): assert::fails("expected Ok")
+
+  match b:
+    case Ok(_):  assert::fails("expected Err")
+    case Err(e): assert::equals("nope", e)
+
+test "is_ok / is_err" =
+  let a Result[i32, string] = Ok(1)
+  let b Result[i32, string] = Err("e")
+  assert::ok(result::is_ok(a))
+  assert::not_ok(result::is_ok(b))
+  assert::ok(result::is_err(b))
+  assert::not_ok(result::is_err(a))
+
+test "unwrap_or" =
+  let a Result[i64, string] = Ok(5)
+  let b Result[i64, string] = Err("e")
+  assert::equals(5,  result::unwrap_or(a, 99))
+  assert::equals(99, result::unwrap_or(b, 99))
+
+test "Option Some/None + helpers" =
+  let a Option[i64] = Some(10)
+  let b Option[i64] = None
+
+  assert::ok(result::is_some(a))
+  assert::ok(result::is_none(b))
+  assert::equals(10, result::option_or(a, 0))
+  assert::equals(0,  result::option_or(b, 0))

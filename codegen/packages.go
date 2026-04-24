@@ -508,7 +508,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// Pass 0.5: preregister struct/enum/type/trait nodes.
 	for _, node := range prog.Stmts {
 		switch node.(type) {
-		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl:
+		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl, *ast.DataDecl:
 			if preErr := cg.preregister(node); preErr != nil {
 				cg.curScope = prevScope
 				cg.filename = prevFilename
@@ -569,6 +569,20 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 				cg.filename = prevFilename
 
 				return fmt.Errorf("use %q: struct %s method %s coro predecl: %w", rawPath, sd.Name, m.Name, preErr)
+			}
+		}
+	}
+
+	// Pass 1.5a: emit concrete layout for non-generic ADTs defined in this
+	// package. Generic ADTs are stored as templates by preregister and
+	// monomorphized on demand in consumer packages via tinTypeToLLVM.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %q: data %s: %w", rawPath, dd.Name, compErr)
 			}
 		}
 	}
@@ -921,7 +935,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// resolve type names inside function signatures and struct field types.
 	for _, node := range prog.Stmts {
 		switch node.(type) {
-		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl:
+		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl, *ast.DataDecl:
 			if preErr := cg.preregister(node); preErr != nil {
 				cg.curScope = prevScope
 				cg.filename = prevFilename
@@ -1098,6 +1112,19 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.filename = prevFilename
 
 			return fmt.Errorf("use %s: early coro predecl %s: %w", pkgPath, fd.Name, preErr)
+		}
+	}
+
+	// Pass 1.5a: emit concrete layout for non-generic ADTs defined in this
+	// package. Generic ADTs are monomorphized on demand.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %s: data %s: %w", pkgPath, dd.Name, compErr)
+			}
 		}
 	}
 
@@ -2065,10 +2092,6 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			cg.inferTypeArgsFromParamPrio(pt.Elem, ptr.ElemType, typeParams, subst, fromConst, isConst)
 		}
 	case *ast.GenericType:
-		if len(pt.TypeParams) != 1 {
-			break
-		}
-
 		structName := ""
 
 		if st, ok2 := argType.(*irtypes.StructType); ok2 {
@@ -2085,22 +2108,55 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 		}
 
 		innerName := strings.TrimPrefix(structName, prefix)
-		innerParam := pt.TypeParams[0]
 
-		if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
+		// Split innerName into one part per declared template arg. For a single
+		// type parameter keep the whole remainder (so i32 and collections::map
+		// stay intact). For multiple, split on `__`.
+		if len(pt.TypeParams) == 1 {
+			innerParam := pt.TypeParams[0]
+
+			if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
+				for _, tp := range typeParams {
+					if simpleInner.Name == tp {
+						if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
+							subst[tp] = innerName
+							fromConst[tp] = isConst
+						}
+
+						break
+					}
+				}
+			} else {
+				if innerST, ok := cg.structTypes[innerName]; ok {
+					cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
+				}
+			}
+
+			break
+		}
+
+		parts := strings.Split(innerName, "__")
+		if len(parts) != len(pt.TypeParams) {
+			break
+		}
+
+		for i, innerParam := range pt.TypeParams {
+			part := parts[i]
+			simpleInner, ok := innerParam.(*ast.SimpleType)
+
+			if !ok {
+				continue
+			}
+
 			for _, tp := range typeParams {
 				if simpleInner.Name == tp {
 					if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
-						subst[tp] = innerName
+						subst[tp] = part
 						fromConst[tp] = isConst
 					}
 
 					break
 				}
-			}
-		} else {
-			if innerST, ok := cg.structTypes[innerName]; ok {
-				cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
 			}
 		}
 	case *ast.ArrayType:
