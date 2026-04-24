@@ -44,9 +44,15 @@ Warning flags:
   -Wno-unused-match-arms   suppress warnings about unreachable match cases /
                            where clauses (an arm whose pattern matches only
                            values that earlier arms already cover)
+  -Wno-bool-analysis       suppress "condition is always true/false" warnings
+                           emitted when an if/elif/while/where condition
+                           folds to a compile-time constant
   -v-match-info            dump Maranget exhaustiveness/usefulness analysis
                            for every match and where the compiler sees
                            (debug aid; output goes to stderr)
+  -v-demorgan              print each De Morgan / boolean simplification the
+                           compiler applies to an if/elif/while/where/for
+                           condition (debug aid; output goes to stderr)
 
 Target flags:
   -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
@@ -442,7 +448,9 @@ doneFlags:
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
 	noWarnUnusedMatchArms := false
+	noWarnBoolAnalysis := false
 	verboseMatchInfo := false
+	verboseDemorgan := false
 	debugBuild := false
 
 	// Scan all args (including those before the file) for flags.
@@ -469,8 +477,12 @@ doneFlags:
 			noWarnAwaitMatchGuards = true
 		case "-Wno-unused-match-arms":
 			noWarnUnusedMatchArms = true
+		case "-Wno-bool-analysis":
+			noWarnBoolAnalysis = true
 		case "-v-match-info":
 			verboseMatchInfo = true
+		case "-v-demorgan":
+			verboseDemorgan = true
 		case "-v-heuristics":
 			verboseHeuristics = true
 		case "-v":
@@ -629,6 +641,14 @@ doneFlags:
 
 	if verboseMatchInfo {
 		cg.SetVerboseMatchInfo(true)
+	}
+
+	if noWarnBoolAnalysis {
+		cg.SetNoWarnBoolAnalysis(true)
+	}
+
+	if verboseDemorgan {
+		cg.SetVerboseDemorgan(true)
 	}
 
 	if verboseHeuristics {

@@ -2088,6 +2088,9 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferEnvs = nil
 		cg.labelCount = 0
 
+		prevMutated := cg.mutatedNames
+		cg.mutatedNames = collectMutatedNames(td.Body)
+
 		terminated, err := cg.genBody(entry, td.Body, irtypes.Void)
 		if err != nil {
 			return fmt.Errorf("test %q: %w", td.Desc, err)
@@ -2109,6 +2112,7 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferFnI8s = prevDeferFnI8s
 		cg.pendingDeferFrames = prevDeferFrames
 		cg.pendingDeferEnvs = prevDeferEnvs
+		cg.mutatedNames = prevMutated
 
 		testFuncs[i] = fn
 	}

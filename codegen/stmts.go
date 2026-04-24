@@ -536,6 +536,15 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 		return cg.genPatternWhereList(block, wl, retType)
 	}
 
+	// Simplify each bool clause's condition first; an "always true/false"
+	// warning is emitted when the result folds to a constant. Clauses with
+	// no Cond (bare `where _:` wildcard) are left alone.
+	for i := range wl.Clauses {
+		if wl.Clauses[i].Cond != nil {
+			wl.Clauses[i].Cond = cg.prepareBoolCond(wl.Clauses[i].Cond, "where", false)
+		}
+	}
+
 	cg.scanWhereForUnreachable(wl)
 
 	// Bool mode: a where-list must include a catch-all clause - either a bare
@@ -2644,6 +2653,13 @@ func (cg *CodeGen) genIfRuntime(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool
 }
 
 func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error) {
+	// Simplify the condition (De Morgan, double-negation, comparison
+	// inversion, bool-literal absorption) and emit an "always true/false"
+	// warning when the simplified form folds to a constant.
+	s.Cond = cg.prepareBoolCond(s.Cond, "if", false)
+	for i := range s.ElseIfs {
+		s.ElseIfs[i].Cond = cg.prepareBoolCond(s.ElseIfs[i].Cond, "elif", false)
+	}
 	// Try to constant-fold the condition. When it folds we elide the
 	// dead branch entirely so the strict per-arg type check at call sites
 	// doesn't trip on type-incorrect code that would never execute (the
@@ -2799,6 +2815,10 @@ func (cg *CodeGen) genFor(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
 
 // genForWhile generates a condition-only while-style loop: for <cond>: body
 func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
+	// Simplify the condition. Allow a bare `for true:` infinite-loop idiom
+	// to stay quiet; any other fold-to-constant case emits the warning.
+	s.Cond = cg.prepareBoolCond(s.Cond, "for", true)
+
 	condBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	afterBlock := cg.newBlock("for.after")

@@ -338,6 +338,16 @@ type CodeGen struct {
 	// Toggled by -v-match-info; for debugging the algorithm itself.
 	verboseMatchInfo bool
 
+	// noWarnBoolAnalysis suppresses "condition is always true/false"
+	// warnings emitted when an if/elif/while/where/for-condition folds to
+	// a constant. Toggled by -Wno-bool-analysis.
+	noWarnBoolAnalysis bool
+
+	// verboseDemorgan prints each boolean simplification the compiler
+	// applies (De Morgan push-inward, double-negation elim, comparison
+	// negation, bool-literal absorption). Toggled by -v-demorgan.
+	verboseDemorgan bool
+
 	// mutatedNames is the set of identifier names that are reassigned
 	// anywhere inside the current function body (including closures and
 	// defers). Populated per function body in genFuncDeclAs and consulted
@@ -714,6 +724,8 @@ func (cg *CodeGen) SetTestMode(v bool)              { cg.testMode = v }
 func (cg *CodeGen) SetNoWarnAsyncMain(v bool)       { cg.noWarnAsyncMain = v }
 func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms = v }
 func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
+func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool)    { cg.noWarnBoolAnalysis = v }
+func (cg *CodeGen) SetVerboseDemorgan(v bool)       { cg.verboseDemorgan = v }
 func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
