@@ -185,6 +185,8 @@ typedef void *(*tin_alloc_fn)(size_t);
 void  tin_set_extern_alloc(tin_alloc_fn fn);   // NULL resets to malloc
 void *tin_extern_alloc(size_t n);
 void  _tin_runtime_init_once(void);            // idempotent; safe to call concurrently
+TinString tin_interop_str_in(const char *cstr);  // C string -> ARC Tin string (caller releases)
+char     *tin_interop_str_out(TinString s);     // Tin string -> C buffer via extern_alloc
 
 // -- Reflect (stdlib/reflect/reflect.c - linked in when reflect module is used)
 const char   *_tin_reflect_kind(const char *atom);

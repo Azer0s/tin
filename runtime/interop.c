@@ -19,8 +19,10 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
 
 extern void _tin_fiber_init(void);
+extern void *_tin_rc_alloc(int64_t size);
 
 typedef void *(*tin_alloc_fn)(size_t);
 
@@ -39,6 +41,46 @@ void *tin_extern_alloc(size_t n) {
     }
 
     return ((tin_alloc_fn)(void *)slot)(n);
+}
+
+// String marshaling helpers used by the C wrappers emitted for #interop
+// functions whose signature involves Tin strings.
+
+// Marshal a C string into a fresh ARC-managed Tin string. Caller is
+// responsible for releasing the resulting buffer after the internal
+// call returns.
+TinString tin_interop_str_in(const char *cstr) {
+    if (!cstr) {
+        char *buf = (char *)_tin_rc_alloc(1);
+        if (buf) buf[0] = '\0';
+
+        return (TinString){buf, 0};
+    }
+
+    int64_t len = (int64_t)strlen(cstr);
+    char *buf = (char *)_tin_rc_alloc(len + 1);
+    if (!buf) return (TinString){NULL, 0};
+
+    memcpy(buf, cstr, (size_t)len);
+    buf[len] = '\0';
+
+    return (TinString){buf, len};
+}
+
+// Marshal a Tin string out to the C side via the user-configurable
+// allocator. The returned buffer is NUL-terminated and contains
+// `s.len + 1` bytes. Returns NULL on OOM (allocator returned NULL).
+char *tin_interop_str_out(TinString s) {
+    char *out = (char *)tin_extern_alloc((size_t)(s.len + 1));
+    if (!out) return NULL;
+
+    if (s.len > 0) {
+        memcpy(out, s.ptr, (size_t)s.len);
+    }
+
+    out[s.len] = '\0';
+
+    return out;
 }
 
 // Init state machine: 0 = uninit, 1 = in-progress, 2 = done. Single

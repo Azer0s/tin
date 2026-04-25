@@ -260,9 +260,20 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 
 // emitInteropWrapperFor emits a single wrapper. Assumes the validation
 // pass already proved the signature is wrappable.
+//
+// Marshaling layer:
+//   - string param: wrapper takes `const char*`, calls
+//     tin_interop_str_in to copy into an ARC Tin string, passes the
+//     fat pointer to the internal entry, releases after the call.
+//   - string return: internal returns a Tin string, wrapper calls
+//     tin_interop_str_out to copy via tin_extern_alloc, releases the
+//     Tin string, returns the C pointer.
+//   - everything else: pass-through (primitives, pointers).
+//
+// Fat-array marshaling is deferred to a later phase because it
+// reshapes the wrapper signature (param arity changes; return shape
+// adopts out-params).
 func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
-	// Resolve the internal entry point - registered under the bare
-	// scope name even though its IR symbol is mangled.
 	entry, ok := cg.curScope.lookup(fn.Name)
 	if !ok {
 		return cg.nodeErr(fn, "fn %s: #interop wrapper cannot find internal entry point", fn.Name)
@@ -273,51 +284,180 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		return cg.nodeErr(fn, "fn %s: #interop entry resolved to non-function value", fn.Name)
 	}
 
-	// Build the wrapper signature mirroring the Tin signature. For the
-	// primitives + pointers slice we emit the wrapper params with the
-	// same LLVM types as the entry; future marshaling layers will
-	// remap individual params.
+	// Build the wrapper's C-ABI signature, remapping per-param.
 	wrapperParams := make([]*ir.Param, 0, len(fn.Params))
+	paramKinds := make([]string, 0, len(fn.Params))
 
 	for _, p := range fn.Params {
-		pt, err := cg.tinTypeToLLVM(p.Type)
-		if err != nil {
-			return err
+		kind := classifyInteropParam(p.Type)
+		paramKinds = append(paramKinds, kind)
+
+		var llTy irtypes.Type
+
+		switch kind {
+		case "string":
+			llTy = irtypes.I8Ptr
+		default:
+			t, err := cg.tinTypeToLLVM(p.Type)
+			if err != nil {
+				return err
+			}
+
+			llTy = t
 		}
 
-		wrapperParams = append(wrapperParams, ir.NewParam(p.Name, pt))
+		wrapperParams = append(wrapperParams, ir.NewParam(p.Name, llTy))
 	}
+
+	retKind := classifyInteropReturn(fn.RetType)
 
 	var retType irtypes.Type = irtypes.Void
 
-	if fn.RetType != nil {
-		t, err := cg.tinTypeToLLVM(fn.RetType)
-		if err != nil {
-			return err
-		}
+	switch retKind {
+	case "void":
+		retType = irtypes.Void
+	case "string":
+		retType = irtypes.I8Ptr
+	default:
+		if fn.RetType != nil {
+			t, err := cg.tinTypeToLLVM(fn.RetType)
+			if err != nil {
+				return err
+			}
 
-		retType = t
+			retType = t
+		}
 	}
 
 	wrapper := cg.mod.NewFunc(fn.Name, retType, wrapperParams...)
+	block := wrapper.NewBlock("entry")
+	block.NewCall(cg.ensureRuntimeInitOnce())
 
-	entryBlock := wrapper.NewBlock("entry")
-	entryBlock.NewCall(cg.ensureRuntimeInitOnce())
-
+	// Per-arg marshaling. We track Tin strings created here so we can
+	// release them after the internal call returns.
 	args := make([]value.Value, len(wrapperParams))
+
+	var stringTemps []value.Value
+
 	for i, p := range wrapperParams {
-		args[i] = p
+		switch paramKinds[i] {
+		case "string":
+			tinStr := block.NewCall(cg.ensureInteropStrIn(), p)
+			args[i] = tinStr
+
+			ptrField := block.NewExtractValue(tinStr, 0)
+			stringTemps = append(stringTemps, ptrField)
+		default:
+			args[i] = p
+		}
+	}
+
+	// Call the internal entry.
+	var rawRet value.Value
+
+	if internalFn.Sig.RetType.Equal(irtypes.Void) {
+		block.NewCall(internalFn, args...)
+	} else {
+		rawRet = block.NewCall(internalFn, args...)
+	}
+
+	// Marshal the return value out to C.
+	var (
+		finalRet value.Value
+		retTinPtr value.Value // ARC ptr to release after extraction
+	)
+
+	switch retKind {
+	case "string":
+		// rawRet is the Tin string struct; copy out to C buffer.
+		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
+		retTinPtr = block.NewExtractValue(rawRet, 0)
+	default:
+		finalRet = rawRet
+	}
+
+	// Release any temporary Tin strings we created on the C-input side.
+	releaseFn := cg.ensureRelease()
+
+	for _, ptr := range stringTemps {
+		block.NewCall(releaseFn, ptr)
+	}
+	// Release the returned Tin string after we've copied it out.
+	if retTinPtr != nil {
+		block.NewCall(releaseFn, retTinPtr)
 	}
 
 	if retType.Equal(irtypes.Void) {
-		entryBlock.NewCall(internalFn, args...)
-		entryBlock.NewRet(nil)
+		block.NewRet(nil)
 	} else {
-		result := entryBlock.NewCall(internalFn, args...)
-		entryBlock.NewRet(result)
+		block.NewRet(finalRet)
 	}
 
 	return nil
+}
+
+// classifyInteropParam returns "string" for the Tin string type and
+// "" (passthrough) for primitives / pointers / everything else the
+// validator has already accepted.
+func classifyInteropParam(t ast.TypeExpr) string {
+	if st, ok := t.(*ast.SimpleType); ok && st.Name == "string" {
+		return "string"
+	}
+
+	return ""
+}
+
+// classifyInteropReturn returns "void" for nil / void, "string" for
+// string returns, and "" for everything else.
+func classifyInteropReturn(t ast.TypeExpr) string {
+	if t == nil {
+		return "void"
+	}
+
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "void":
+			return "void"
+		case "string":
+			return "string"
+		}
+	}
+
+	return ""
+}
+
+// ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)`.
+func (cg *CodeGen) ensureInteropStrIn() *ir.Func {
+	const name = "tin_interop_str_in"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	f := cg.mod.NewFunc(name, stringFatPtrType(),
+		ir.NewParam("cstr", irtypes.I8Ptr))
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
+}
+
+// ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)`.
+func (cg *CodeGen) ensureInteropStrOut() *ir.Func {
+	const name = "tin_interop_str_out"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	f := cg.mod.NewFunc(name, irtypes.I8Ptr,
+		ir.NewParam("s", stringFatPtrType()))
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
 }
 
 // ensureRuntimeInitOnce returns the IR declaration for the runtime
