@@ -7,7 +7,7 @@ package codegen
 // a shape we will actually be able to wrap; codegen for the wrapper
 // itself comes in a later phase.
 //
-// Restrictions enforced here (Phase A):
+// Phase A (declaration-level):
 //   - Cannot also be `#async` (an async fn is a coroutine; C cannot drive one)
 //   - Return type must not contain `Future[T]` (no way for C to await)
 //   - No parameter type may contain `any` (no stable C representation)
@@ -18,7 +18,13 @@ package codegen
 //   - Two `#interop` functions sharing a name are rejected here rather
 //     than letting the linker speak.
 //
-// Type whitelisting for the boundary (Phase B) is a separate pass.
+// Phase B (type whitelist):
+//   - Each parameter must be a primitive, pointer, `string`, or fat
+//     array `[T]`.
+//   - Return type must be a primitive, pointer, `string`, fat array,
+//     or `void`.
+//   - Anything else (struct, trait object, ADT, union, fn, tuple)
+//     rejected with a per-position diagnostic.
 
 import (
 	"github.com/Azer0s/tin/ast"
@@ -102,9 +108,108 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s which contains `any`; no stable C representation exists for boxed values",
 				fn.Name, p.Name, p.Type)
 		}
+
+		if reason := interopTypeReason(p.Type, false); reason != "" {
+			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s; %s",
+				fn.Name, p.Name, p.Type, reason)
+		}
+	}
+
+	if fn.RetType != nil {
+		if reason := interopTypeReason(fn.RetType, true); reason != "" {
+			return cg.nodeErr(fn, "fn %s: #interop return type %s; %s",
+				fn.Name, fn.RetType, reason)
+		}
 	}
 
 	return nil
+}
+
+// interopAllowedPrimitives lists the SimpleType names that pass through
+// the FFI boundary unchanged. Includes the explicit numeric/bool/char
+// set plus a small set of canonical aliases (`size_t`, `uint32`) the
+// language doc treats as bare types in interop contexts.
+var interopAllowedPrimitives = map[string]bool{
+	"i8": true, "i16": true, "i32": true, "i64": true,
+	"u8": true, "u16": true, "u32": true, "u64": true,
+	"f32": true, "f64": true,
+	"bool":  true,
+	"char":  true,
+	"byte":  true,
+	"size_t": true,
+	"uint32": true,
+}
+
+// interopTypeReason returns "" when t is allowed at an interop
+// boundary, or a short reason string otherwise. isReturn loosens the
+// rule for `void`. The reason is plugged into the diagnostic message
+// at the call site so the user sees both the offending type and a
+// pointer at why.
+func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
+	if t == nil {
+		if isReturn {
+			return "" // void
+		}
+
+		return "void parameters are not representable"
+	}
+
+	switch v := t.(type) {
+	case *ast.SimpleType:
+		switch {
+		case interopAllowedPrimitives[v.Name]:
+			return ""
+		case v.Name == "string":
+			return ""
+		case v.Name == "void":
+			if isReturn {
+				return ""
+			}
+
+			return "void parameters are not representable"
+		case v.Name == "any":
+			// Already caught by the typeExprContains pass; keep the
+			// message consistent here too.
+			return "`any` is not C-representable"
+		case v.Name == "atom":
+			return "`atom` has no stable C representation in v1"
+		}
+		// Unknown SimpleType - treat as a user struct/trait/ADT name.
+		// v1 disallows all named types at the boundary; users wanting
+		// struct interop should pass *Struct explicitly.
+		return "v1 does not allow named user types at the interop boundary; pass a pointer (*" + v.Name + ") instead"
+
+	case *ast.PointerType:
+		return "" // any *T is fine - opaque to Tin's marshalling
+
+	case *ast.ArrayType:
+		// Fat arrays [T]: v1 allows; size != -1 (fixed-size [T;N]) is
+		// rejected because there is no clean C ABI for a Tin
+		// fixed-size value array distinct from `T*`.
+		if v.Size != -1 {
+			return "fixed-size arrays are not representable; use a fat array [T] or a pointer *T"
+		}
+
+		if reason := interopTypeReason(v.Elem, false); reason != "" {
+			return "array element type rejected: " + reason
+		}
+
+		return ""
+
+	case *ast.GenericType:
+		return "generic types like " + v.Name + "[T] are not representable"
+
+	case *ast.FuncType:
+		return "fn-typed values (closures, function pointers) are not representable; use a *void with a hand-written shim if needed"
+
+	case *ast.TupleArrayType:
+		return "tuple-array destructuring types (@[...]) are not representable"
+
+	case *ast.UnionTypeExpr:
+		return "union types are not representable"
+	}
+
+	return "type is not allowed at the interop boundary in v1"
 }
 
 // typeExprContains returns true when the type tree rooted at t names

@@ -95,6 +95,98 @@ fn{#interop} dup(b i32) i32 = return b
 fn main() i64 = return 0
 '
 
+# ─── Phase B: type whitelist enforcement ──────────────────────────────
+
+# ── struct param rejected (use pointer instead) ──
+assert_err "struct param rejected" "named user types at the interop boundary" '
+struct point =
+  x i32
+
+fn{#interop} bad(p point) i32 = return p.x
+
+fn main() i64 = return 0
+'
+
+# ── struct return rejected (use pointer instead) ──
+assert_err "struct return rejected" "named user types at the interop boundary" '
+struct point =
+  x i32
+
+fn{#interop} bad() point = return point{x: 1}
+
+fn main() i64 = return 0
+'
+
+# ── fixed-size array rejected ──
+assert_err "fixed-size array rejected" "fixed-size arrays are not representable" '
+fn{#interop} bad(xs [i32; 4]) i32 = return xs[0]
+
+fn main() i64 = return 0
+'
+
+# ── atom rejected ──
+assert_err "atom param rejected" "atom" '
+fn{#interop} bad(a atom) i32 = return 0
+
+fn main() i64 = return 0
+'
+
+# ── fn-typed param rejected (closure/fn pointer) ──
+assert_err "fn-typed param rejected" "fn-typed values" '
+fn{#interop} bad(f fn(i32) i32) i32 = return f(0)
+
+fn main() i64 = return 0
+'
+
+# ── union return rejected ──
+assert_err "union return rejected" "union types are not representable" '
+fn{#interop} bad() i32 | f64 = return 0
+
+fn main() i64 = return 0
+'
+
+# ─── Phase B positive: pointer to user struct is fine ─────────────────
+
+assert_ok() {
+  local name=$1
+  local src=$2
+  local tmp
+  tmp=$(mktemp --suffix=.tin)
+  printf '%s\n' "$src" > "$tmp"
+  local out
+  out=$(./tin run "$tmp" 2>&1 || true)
+  rm -f "$tmp"
+  if [[ "$out" == *"#interop"* ]] && [[ "$out" == *"error"* || "$out" == *"violation"* ]]; then
+    printf '  FAIL  %s\n' "$name"
+    printf '        unexpected interop error: %s\n' "${out:0:300}"
+    fail=$((fail + 1))
+  else
+    printf '  ok    %s\n' "$name"
+    pass=$((pass + 1))
+  fi
+}
+
+assert_ok "*Struct param accepted" '
+struct point =
+  x i32
+
+fn{#interop} good(p *point) i32 = return (*p).x
+
+fn main() i64 = return 0
+'
+
+assert_ok "string param accepted" '
+fn{#interop} good(s string) i32 = return len(s) as i32
+
+fn main() i64 = return 0
+'
+
+assert_ok "fat array param accepted" '
+fn{#interop} good(xs [i32]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
 echo
 printf "#interop validation tests: %d passed, %d failed\n" "$pass" "$fail"
 if (( fail > 0 )); then
