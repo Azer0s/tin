@@ -180,6 +180,12 @@ void *_tin_ptr_handover(void *src, size_t elem_size); // RC-ify any C pointer
 typedef struct { int32_t tag; void *ptr; } _TinAny;
 int64_t _tin_any_eq(_TinAny a, _TinAny b);
 
+// -- C-interop boundary helpers (runtime/interop.c)
+typedef void *(*tin_alloc_fn)(size_t);
+void  tin_set_extern_alloc(tin_alloc_fn fn);   // NULL resets to malloc
+void *tin_extern_alloc(size_t n);
+void  _tin_runtime_init_once(void);            // idempotent; safe to call concurrently
+
 // -- Reflect (stdlib/reflect/reflect.c - linked in when reflect module is used)
 const char   *_tin_reflect_kind(const char *atom);
 int64_t       _tin_reflect_is_ptr(const char *atom);

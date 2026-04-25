@@ -30,3 +30,4 @@ __attribute__((constructor)) static void _tin_stdout_init(void) {
 #include "timer.c"     // fiber sleep / timer support
 #include "net.c"       // TCP socket helpers
 #include "time.c"      // _tin_now_ms / _tin_now_us monotonic clock
+#include "interop.c"   // C-callable boundary helpers (#interop wrappers)
