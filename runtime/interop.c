@@ -106,6 +106,35 @@ TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) 
     return (TinSlice){buf, len};
 }
 
+// Marshal a Tin slice out to the C side via tin_extern_alloc. The
+// caller passes pointers to the data and length out-slots; the
+// function fills them and returns 0 on success or 1 on OOM. On OOM
+// *out_data is NULL and *out_len is 0 so the caller has well-defined
+// state.
+int tin_interop_slice_out(TinSlice s, int64_t elem_size,
+                          void **out_data, int64_t *out_len) {
+    if (out_len) *out_len = s.len;
+
+    if (s.len <= 0) {
+        if (out_data) *out_data = NULL;
+        return 0;
+    }
+
+    int64_t bytes = s.len * elem_size;
+    void *out = tin_extern_alloc((size_t)bytes);
+    if (!out) {
+        if (out_data) *out_data = NULL;
+        if (out_len) *out_len = 0;
+        return 1;
+    }
+
+    memcpy(out, s.ptr, (size_t)bytes);
+
+    if (out_data) *out_data = out;
+
+    return 0;
+}
+
 // Init state machine: 0 = uninit, 1 = in-progress, 2 = done. Single
 // CAS from 0 -> 1 wins the race; the loser spins until state == 2.
 static atomic_int _tin_rt_initialized = 0;

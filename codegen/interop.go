@@ -328,13 +328,33 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 	retKind := classifyInteropReturn(fn.RetType)
 
-	var retType irtypes.Type = irtypes.Void
+	var (
+		retType        irtypes.Type = irtypes.Void
+		sliceElemSize  uint64
+		sliceElemLLVM  irtypes.Type
+	)
 
 	switch retKind {
 	case "void":
 		retType = irtypes.Void
 	case "string":
 		retType = irtypes.I8Ptr
+	case "slice":
+		// Reshape: status return + two trailing out-params.
+		at := fn.RetType.(*ast.ArrayType)
+
+		elemTy, err := cg.tinTypeToLLVM(at.Elem)
+		if err != nil {
+			return err
+		}
+
+		sliceElemLLVM = elemTy
+		sliceElemSize = llvmTypeSize(elemTy)
+		retType = irtypes.I32
+
+		wrapperParams = append(wrapperParams,
+			ir.NewParam("out_data", irtypes.NewPointer(irtypes.NewPointer(elemTy))),
+			ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
 	default:
 		if fn.RetType != nil {
 			t, err := cg.tinTypeToLLVM(fn.RetType)
@@ -429,9 +449,41 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 	switch retKind {
 	case "string":
-		// rawRet is the Tin string struct; copy out to C buffer.
 		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
 		retTinPtr = block.NewExtractValue(rawRet, 0)
+	case "slice":
+		// Pull out the typed-slice fields and rebuild as the i8*-typed
+		// slice the runtime helper expects. Then call slice_out which
+		// fills the user's out-params and returns 0/1.
+		typedData := block.NewExtractValue(rawRet, 0)
+		lenVal := block.NewExtractValue(rawRet, 1)
+		dataI8 := block.NewBitCast(typedData, irtypes.I8Ptr)
+
+		rawSliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+		alloca := block.NewAlloca(rawSliceTy)
+		ptrField := block.NewGetElementPtr(rawSliceTy, alloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 0))
+		lenField := block.NewGetElementPtr(rawSliceTy, alloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 1))
+		block.NewStore(dataI8, ptrField)
+		block.NewStore(lenVal, lenField)
+		rawSlice := block.NewLoad(rawSliceTy, alloca)
+
+		// out_data and out_len are the last two wrapper params.
+		outData := wrapperParams[len(wrapperParams)-2]
+		outLen := wrapperParams[len(wrapperParams)-1]
+		// out_data is T**; cast to i8** for the helper.
+		outDataI8 := block.NewBitCast(outData, irtypes.NewPointer(irtypes.I8Ptr))
+		elemSize := constant.NewInt(irtypes.I64, int64(sliceElemSize))
+		_ = sliceElemLLVM
+
+		finalRet = block.NewCall(cg.ensureInteropSliceOut(),
+			rawSlice, elemSize, outDataI8, outLen)
+
+		// Release the typed data buffer Tin allocated for the slice.
+		retTinPtr = dataI8
 	default:
 		finalRet = rawRet
 	}
@@ -473,8 +525,8 @@ func classifyInteropParam(t ast.TypeExpr) string {
 	return ""
 }
 
-// classifyInteropReturn returns "void" for nil / void, "string" for
-// string returns, and "" for everything else.
+// classifyInteropReturn returns the marshaling shape for a Tin return
+// type. "void" / "string" / "slice" / "" (passthrough).
 func classifyInteropReturn(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
@@ -487,6 +539,10 @@ func classifyInteropReturn(t ast.TypeExpr) string {
 		case "string":
 			return "string"
 		}
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		return "slice"
 	}
 
 	return ""
@@ -544,6 +600,30 @@ func (cg *CodeGen) ensureInteropSliceIn() *ir.Func {
 		ir.NewParam("data", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64),
 		ir.NewParam("elem_size", irtypes.I64))
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
+}
+
+// ensureInteropSliceOut declares
+// `i32 tin_interop_slice_out(TinSlice, i64 elem_size, i8** out_data,
+// i64* out_len)`.
+func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
+	const name = "tin_interop_slice_out"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+
+	f := cg.mod.NewFunc(name, irtypes.I32,
+		ir.NewParam("s", sliceTy),
+		ir.NewParam("elem_size", irtypes.I64),
+		ir.NewParam("out_data", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
 	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
 
 	return f

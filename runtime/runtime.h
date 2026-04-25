@@ -188,6 +188,8 @@ void  _tin_runtime_init_once(void);            // idempotent; safe to call concu
 TinString tin_interop_str_in(const char *cstr);  // C string -> ARC Tin string (caller releases)
 char     *tin_interop_str_out(TinString s);     // Tin string -> C buffer via extern_alloc
 TinSlice  tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size);
+int       tin_interop_slice_out(TinSlice s, int64_t elem_size,
+                                void **out_data, int64_t *out_len);
 
 // -- Reflect (stdlib/reflect/reflect.c - linked in when reflect module is used)
 const char   *_tin_reflect_kind(const char *atom);
