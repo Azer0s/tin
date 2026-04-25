@@ -29,6 +29,7 @@ package codegen
 import (
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -195,6 +196,13 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 			return "fixed-size arrays are not representable; use a fat array [T] or a pointer *T"
 		}
 
+		if elemSt, ok := v.Elem.(*ast.SimpleType); ok && elemSt.Name == "bool" {
+			// [bool] would force a per-element i1<->i8 conversion the
+			// memcpy-based marshaler does not perform. Reject for v1;
+			// users wanting bool arrays should use [u8].
+			return "[bool] is not supported at the interop boundary; use [u8] (0 = false, non-zero = true) instead"
+		}
+
 		if reason := interopTypeReason(v.Elem, false); reason != "" {
 			return "array element type rejected: " + reason
 		}
@@ -234,16 +242,11 @@ func programHasInteropFunc(stmts []ast.Node) bool {
 // emitInteropWrappers walks the program for #interop-tagged functions
 // and emits a C-callable wrapper for each. The wrapper:
 //   1. Calls _tin_runtime_init_once() (idempotent).
-//   2. Forwards each argument to the Tin-internal entry point.
-//   3. Returns the result.
-//
-// For v1-simple (primitives + pointers), no marshaling is needed -
-// arguments and return values pass through unchanged. The wrapper is
-// otherwise identical to the entry point, which makes it safe to
-// expose as a bare C symbol.
-//
-// Future extensions for string / fat-array marshaling will plug in
-// here without changing the call-site contract.
+//   2. Marshals each argument from its C ABI shape to the Tin shape
+//      (string, fat array, bool widening; primitives passthrough).
+//   3. Calls the Tin-internal entry point.
+//   4. Marshals the return value back to a C-friendly shape.
+//   5. Releases any temporary ARC allocations created at the boundary.
 func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 	for _, node := range stmts {
 		fn, ok := node.(*ast.FuncDecl)
@@ -263,17 +266,13 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 // pass already proved the signature is wrappable.
 //
 // Marshaling layer:
-//   - string param: wrapper takes `const char*`, calls
-//     tin_interop_str_in to copy into an ARC Tin string, passes the
-//     fat pointer to the internal entry, releases after the call.
-//   - string return: internal returns a Tin string, wrapper calls
-//     tin_interop_str_out to copy via tin_extern_alloc, releases the
-//     Tin string, returns the C pointer.
-//   - everything else: pass-through (primitives, pointers).
-//
-// Fat-array marshaling is deferred to a later phase because it
-// reshapes the wrapper signature (param arity changes; return shape
-// adopts out-params).
+//   - string param: C `const char*` -> ARC TinString (released after).
+//   - string return: TinString -> C buffer via tin_extern_alloc.
+//   - slice [T] param: C (T*, i64) -> ARC TinSlice (released after).
+//   - slice [T] return: TinSlice -> C out-params via tin_extern_alloc;
+//     wrapper return becomes i32 status (0=OK, nonzero=OOM).
+//   - bool: C uint8_t -> i1 (icmp ne 0); reverse for returns.
+//   - everything else: passthrough (primitives, pointers).
 func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	entry, ok := cg.curScope.lookup(fn.Name)
 	if !ok {
@@ -316,6 +315,11 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			wrapperParams = append(wrapperParams,
 				ir.NewParam(p.Name, irtypes.NewPointer(elemTy)),
 				ir.NewParam(p.Name+"_len", irtypes.I64))
+		case "bool":
+			// C `_Bool` / `uint8_t` is a full byte; Tin `bool` is i1.
+			// Take the byte at the boundary, truncate to i1 before
+			// passing to the internal entry.
+			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, irtypes.I8))
 		default:
 			t, err := cg.tinTypeToLLVM(p.Type)
 			if err != nil {
@@ -329,9 +333,8 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	retKind := classifyInteropReturn(fn.RetType)
 
 	var (
-		retType        irtypes.Type = irtypes.Void
-		sliceElemSize  uint64
-		sliceElemLLVM  irtypes.Type
+		retType       irtypes.Type = irtypes.Void
+		sliceElemSize uint64
 	)
 
 	switch retKind {
@@ -339,6 +342,10 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		retType = irtypes.Void
 	case "string":
 		retType = irtypes.I8Ptr
+	case "bool":
+		// Match C's byte-sized bool ABI; we zero-extend the i1 from
+		// the internal call into this i8.
+		retType = irtypes.I8
 	case "slice":
 		// Reshape: status return + two trailing out-params.
 		at := fn.RetType.(*ast.ArrayType)
@@ -348,7 +355,6 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			return err
 		}
 
-		sliceElemLLVM = elemTy
 		sliceElemSize = llvmTypeSize(elemTy)
 		retType = irtypes.I32
 
@@ -389,6 +395,18 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 			ptrField := block.NewExtractValue(tinStr, 0)
 			allocatedTemps = append(allocatedTemps, ptrField)
+		case "bool":
+			b := wrapperParams[wrapperIdx]
+			wrapperIdx++
+
+			// Truncate the byte to i1 (Tin's bool); semantically this
+			// matches C's "non-zero is true" rule because LLVM trunc to
+			// i1 takes the low bit, but combined with `cmp ne 0` would
+			// be more faithful. Use icmp ne 0 for clarity and to
+			// preserve the C semantic that 0x02 is true.
+			zero := constant.NewInt(irtypes.I8, 0)
+			i1Val := block.NewICmp(enum.IPredNE, b, zero)
+			args = append(args, i1Val)
 		case "slice":
 			dataPtr := wrapperParams[wrapperIdx]
 			lenVal := wrapperParams[wrapperIdx+1]
@@ -451,6 +469,9 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	case "string":
 		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
 		retTinPtr = block.NewExtractValue(rawRet, 0)
+	case "bool":
+		// Zero-extend the internal i1 to i8 for the C ABI.
+		finalRet = block.NewZExt(rawRet, irtypes.I8)
 	case "slice":
 		// Pull out the typed-slice fields and rebuild as the i8*-typed
 		// slice the runtime helper expects. Then call slice_out which
@@ -477,7 +498,6 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		// out_data is T**; cast to i8** for the helper.
 		outDataI8 := block.NewBitCast(outData, irtypes.NewPointer(irtypes.I8Ptr))
 		elemSize := constant.NewInt(irtypes.I64, int64(sliceElemSize))
-		_ = sliceElemLLVM
 
 		finalRet = block.NewCall(cg.ensureInteropSliceOut(),
 			rawSlice, elemSize, outDataI8, outLen)
@@ -512,10 +532,16 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 // parameter type. Recognized:
 //   "string" - Tin string fat pointer
 //   "slice"  - Tin fat array [T]
+//   "bool"   - Tin bool (i1) widened to/from C uint8_t
 //   ""       - passthrough (primitives, pointers, packed structs)
 func classifyInteropParam(t ast.TypeExpr) string {
-	if st, ok := t.(*ast.SimpleType); ok && st.Name == "string" {
-		return "string"
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			return "string"
+		case "bool":
+			return "bool"
+		}
 	}
 
 	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
@@ -526,7 +552,7 @@ func classifyInteropParam(t ast.TypeExpr) string {
 }
 
 // classifyInteropReturn returns the marshaling shape for a Tin return
-// type. "void" / "string" / "slice" / "" (passthrough).
+// type. "void" / "string" / "slice" / "bool" / "" (passthrough).
 func classifyInteropReturn(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
@@ -538,6 +564,8 @@ func classifyInteropReturn(t ast.TypeExpr) string {
 			return "void"
 		case "string":
 			return "string"
+		case "bool":
+			return "bool"
 		}
 	}
 

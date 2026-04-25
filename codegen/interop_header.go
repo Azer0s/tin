@@ -130,53 +130,66 @@ func cParamList(fn *ast.FuncDecl) ([]string, []string) {
 }
 
 // cTypeName maps Tin scalar / pointer types to their C-equivalent
-// declaration spelling. Best-effort: anything outside the interop
-// whitelist is reported as `void *` so the header still compiles, but
-// such cases should have been rejected by the validator earlier.
+// declaration spelling. Anything outside the interop whitelist
+// renders as `void *` (single pointer) so the emitted header stays
+// self-contained - users can cast on the C side.
 func cTypeName(t ast.TypeExpr) string {
-	switch v := t.(type) {
-	case *ast.SimpleType:
-		switch v.Name {
-		case "i8":
-			return "int8_t"
-		case "i16":
-			return "int16_t"
-		case "i32":
-			return "int32_t"
-		case "i64":
-			return "int64_t"
-		case "u8":
-			return "uint8_t"
-		case "u16":
-			return "uint16_t"
-		case "u32":
-			return "uint32_t"
-		case "u64", "size_t":
-			return "uint64_t"
-		case "uint32":
-			return "uint32_t"
-		case "f32":
-			return "float"
-		case "f64":
-			return "double"
-		case "bool":
-			return "uint8_t"
-		case "char", "byte":
-			return "char"
-		case "void":
-			return "void"
+	if name, ok := primitiveCName(t); ok {
+		return name
+	}
+
+	if pt, ok := t.(*ast.PointerType); ok {
+		if name, ok := primitiveCName(pt.Elem); ok {
+			return name + " *"
 		}
 
+		// Pointer to anything we can't render in pure C (user struct,
+		// trait, ADT, generic). Collapse to a single opaque void *
+		// rather than emit "Foo *" for an undefined Foo.
 		return "void *"
-	case *ast.PointerType:
-		if st, ok := v.Elem.(*ast.SimpleType); ok && st.Name == "void" {
-			return "void *"
-		}
-
-		return cTypeName(v.Elem) + " *"
 	}
 
 	return "void *"
+}
+
+// primitiveCName returns the C spelling for a Tin SimpleType when the
+// name maps to a stable C primitive, plus an ok flag.
+func primitiveCName(t ast.TypeExpr) (string, bool) {
+	st, ok := t.(*ast.SimpleType)
+	if !ok {
+		return "", false
+	}
+
+	switch st.Name {
+	case "i8":
+		return "int8_t", true
+	case "i16":
+		return "int16_t", true
+	case "i32":
+		return "int32_t", true
+	case "i64":
+		return "int64_t", true
+	case "u8":
+		return "uint8_t", true
+	case "u16":
+		return "uint16_t", true
+	case "u32", "uint32":
+		return "uint32_t", true
+	case "u64", "size_t":
+		return "uint64_t", true
+	case "f32":
+		return "float", true
+	case "f64":
+		return "double", true
+	case "bool":
+		return "uint8_t", true
+	case "char", "byte":
+		return "char", true
+	case "void":
+		return "void", true
+	}
+
+	return "", false
 }
 
 // tinSignatureString renders the Tin signature back into the comment

@@ -145,6 +145,13 @@ fn{#interop} bad() i32 | f64 = return 0
 fn main() i64 = return 0
 '
 
+# ── [bool] arrays rejected (i1 vs i8 ABI ambiguity) ──
+assert_err "[bool] param rejected" "[bool] is not supported" '
+fn{#interop} bad(xs [bool]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
 # ─── Phase B positive: pointer to user struct is fine ─────────────────
 
 assert_ok() {
