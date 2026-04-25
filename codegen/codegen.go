@@ -1375,6 +1375,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Emit C-callable wrappers for #interop functions. Done after the
+	// third pass so all internal entry points exist as IR functions
+	// the wrapper can reference.
+	if err := cg.emitInteropWrappers(prog.Stmts); err != nil {
+		return nil, err
+	}
+
 	// In test mode, generate test functions and a test-runner main.
 	// Top-level statements that would form the implicit main are intentionally
 	// not executed - only test blocks run.
@@ -1594,7 +1601,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	if !hasMain {
+	if !hasMain && !programHasInteropFunc(prog.Stmts) {
+		// No user main and no #interop functions: emit an empty main so
+		// the linker has an entry point. When #interop functions exist
+		// the program is being built as a library; skip the synthetic
+		// main so the C consumer can provide its own.
 		wf := cg.mod.NewFunc("main", irtypes.I32)
 		wb := wf.NewBlock("entry")
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))

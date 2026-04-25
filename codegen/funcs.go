@@ -185,6 +185,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	if cg.externIRNames[scopeName] {
 		irName = "_tin__" + scopeName
 	}
+	// #interop reserves the bare name for the C-callable wrapper emitted
+	// in a later pass; the Tin entry point gets a hidden symbol. The
+	// scope still resolves the bare name to the entry point so Tin
+	// internal callers go through the unwrapped function (avoiding the
+	// init / marshal overhead).
+	if hasTag(n.Tags, "interop") {
+		irName = "__tin_interop_" + scopeName
+	}
 	// Check if already declared under the (possibly mangled) IR name.
 	if existing, ok := cg.curScope.vars[irName]; ok {
 		if _, isFunc := existing.val.(*ir.Func); isFunc {

@@ -27,6 +27,10 @@ package codegen
 //     rejected with a per-position diagnostic.
 
 import (
+	"github.com/llir/llvm/ir"
+	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
+
 	"github.com/Azer0s/tin/ast"
 )
 
@@ -210,6 +214,127 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 	}
 
 	return "type is not allowed at the interop boundary in v1"
+}
+
+// programHasInteropFunc reports whether any top-level function in the
+// program is tagged `#interop`. Used by the synthetic-main suppression
+// in codegen so library-mode programs don't ship an unwanted main
+// symbol that would collide with the C consumer's entry point.
+func programHasInteropFunc(stmts []ast.Node) bool {
+	for _, node := range stmts {
+		if fn, ok := node.(*ast.FuncDecl); ok && hasTag(fn.Tags, "interop") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// emitInteropWrappers walks the program for #interop-tagged functions
+// and emits a C-callable wrapper for each. The wrapper:
+//   1. Calls _tin_runtime_init_once() (idempotent).
+//   2. Forwards each argument to the Tin-internal entry point.
+//   3. Returns the result.
+//
+// For v1-simple (primitives + pointers), no marshaling is needed -
+// arguments and return values pass through unchanged. The wrapper is
+// otherwise identical to the entry point, which makes it safe to
+// expose as a bare C symbol.
+//
+// Future extensions for string / fat-array marshaling will plug in
+// here without changing the call-site contract.
+func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
+	for _, node := range stmts {
+		fn, ok := node.(*ast.FuncDecl)
+		if !ok || !hasTag(fn.Tags, "interop") {
+			continue
+		}
+
+		if err := cg.emitInteropWrapperFor(fn); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// emitInteropWrapperFor emits a single wrapper. Assumes the validation
+// pass already proved the signature is wrappable.
+func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
+	// Resolve the internal entry point - registered under the bare
+	// scope name even though its IR symbol is mangled.
+	entry, ok := cg.curScope.lookup(fn.Name)
+	if !ok {
+		return cg.nodeErr(fn, "fn %s: #interop wrapper cannot find internal entry point", fn.Name)
+	}
+
+	internalFn, ok := entry.val.(*ir.Func)
+	if !ok {
+		return cg.nodeErr(fn, "fn %s: #interop entry resolved to non-function value", fn.Name)
+	}
+
+	// Build the wrapper signature mirroring the Tin signature. For the
+	// primitives + pointers slice we emit the wrapper params with the
+	// same LLVM types as the entry; future marshaling layers will
+	// remap individual params.
+	wrapperParams := make([]*ir.Param, 0, len(fn.Params))
+
+	for _, p := range fn.Params {
+		pt, err := cg.tinTypeToLLVM(p.Type)
+		if err != nil {
+			return err
+		}
+
+		wrapperParams = append(wrapperParams, ir.NewParam(p.Name, pt))
+	}
+
+	var retType irtypes.Type = irtypes.Void
+
+	if fn.RetType != nil {
+		t, err := cg.tinTypeToLLVM(fn.RetType)
+		if err != nil {
+			return err
+		}
+
+		retType = t
+	}
+
+	wrapper := cg.mod.NewFunc(fn.Name, retType, wrapperParams...)
+
+	entryBlock := wrapper.NewBlock("entry")
+	entryBlock.NewCall(cg.ensureRuntimeInitOnce())
+
+	args := make([]value.Value, len(wrapperParams))
+	for i, p := range wrapperParams {
+		args[i] = p
+	}
+
+	if retType.Equal(irtypes.Void) {
+		entryBlock.NewCall(internalFn, args...)
+		entryBlock.NewRet(nil)
+	} else {
+		result := entryBlock.NewCall(internalFn, args...)
+		entryBlock.NewRet(result)
+	}
+
+	return nil
+}
+
+// ensureRuntimeInitOnce returns the IR declaration for the runtime
+// init helper, declaring it lazily on first use.
+func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
+	const name = "_tin_runtime_init_once"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	f := cg.mod.NewFunc(name, irtypes.Void)
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
 }
 
 // typeExprContains returns true when the type tree rooted at t names
