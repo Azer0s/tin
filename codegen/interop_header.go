@@ -31,9 +31,12 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 	b.WriteString("#include <stddef.h>\n\n")
 	b.WriteString("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
 
-	// Allocator-callback declaration. Optional for callers, but
-	// always emitted so the typedef is available even when no #interop
-	// function returns a string or slice.
+	// Allocator-callback + runtime-init declarations. Always emitted so
+	// the typedefs are available even when no #interop function uses
+	// them directly.
+	b.WriteString("/* Optional: explicitly bring up the runtime before any #interop call.\n")
+	b.WriteString("   Idempotent; the wrapper preamble calls it on every entry. */\n")
+	b.WriteString("void tin_runtime_init(void);\n\n")
 	b.WriteString("/* Allocator hook used when #interop returns string / [T]. */\n")
 	b.WriteString("typedef void *(*tin_alloc_fn)(size_t);\n")
 	b.WriteString("void tin_set_extern_alloc(tin_alloc_fn fn);\n\n")

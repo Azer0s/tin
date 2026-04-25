@@ -660,7 +660,7 @@ func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
 // ensureRuntimeInitOnce returns the IR declaration for the runtime
 // init helper, declaring it lazily on first use.
 func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
-	const name = "_tin_runtime_init_once"
+	const name = "tin_runtime_init"
 
 	if entry, ok := cg.curScope.lookup(name); ok {
 		if f, isFn := entry.val.(*ir.Func); isFn {

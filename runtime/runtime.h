@@ -184,7 +184,7 @@ int64_t _tin_any_eq(_TinAny a, _TinAny b);
 typedef void *(*tin_alloc_fn)(size_t);
 void  tin_set_extern_alloc(tin_alloc_fn fn);   // NULL resets to malloc
 void *tin_extern_alloc(size_t n);
-void  _tin_runtime_init_once(void);            // idempotent; safe to call concurrently
+void  tin_runtime_init(void);                  // idempotent; safe to call concurrently
 TinString tin_interop_str_in(const char *cstr);  // C string -> ARC Tin string (caller releases)
 char     *tin_interop_str_out(TinString s);     // Tin string -> C buffer via extern_alloc
 TinSlice  tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size);

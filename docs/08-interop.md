@@ -537,11 +537,18 @@ If the allocator returns NULL the wrapper signals OOM:
 ### Spawning fibers
 
 `#interop` functions may spawn fibers. The runtime starts a worker
-pool on first call (`_tin_runtime_init_once`); spawned fibers run on
-that pool and may outlive the wrapper invocation. The wrapper itself
+pool on first call (`tin_runtime_init`); spawned fibers run on that
+pool and may outlive the wrapper invocation. The wrapper itself
 returns as soon as the Tin body returns - it does not wait for
 spawned-and-not-awaited fibers. Use `await` inside the body if you
 need to block until a fiber completes.
+
+C code may call `tin_runtime_init()` directly to control init timing
+(e.g., to set up a custom allocator before any Tin code runs):
+
+```c
+void tin_runtime_init(void);   // idempotent, thread-safe
+```
 
 `#interop` cannot itself be `#async`, since C has no way to drive a
 coroutine.

@@ -17,6 +17,7 @@
 // worker pool). Subsequent calls are cheap atomic-load no-ops.
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -24,16 +25,25 @@
 extern void _tin_fiber_init(void);
 extern void *_tin_rc_alloc(int64_t size);
 
+// TIN_API marks a symbol exported across the C-interop boundary.
+// Surfaces past `-fvisibility=hidden` shared-library builds; on
+// platforms without GCC-style attributes it expands to nothing.
+#if defined(__GNUC__) || defined(__clang__)
+#define TIN_API __attribute__((visibility("default")))
+#else
+#define TIN_API
+#endif
+
 typedef void *(*tin_alloc_fn)(size_t);
 
 static atomic_intptr_t _tin_extern_alloc_fn = (intptr_t)0;
 
-void tin_set_extern_alloc(tin_alloc_fn fn) {
+TIN_API void tin_set_extern_alloc(tin_alloc_fn fn) {
     atomic_store_explicit(&_tin_extern_alloc_fn,
                           (intptr_t)(void *)fn, memory_order_release);
 }
 
-void *tin_extern_alloc(size_t n) {
+TIN_API void *tin_extern_alloc(size_t n) {
     intptr_t slot = atomic_load_explicit(&_tin_extern_alloc_fn,
                                          memory_order_acquire);
     if (slot == 0) {
@@ -49,7 +59,7 @@ void *tin_extern_alloc(size_t n) {
 // Marshal a C string into a fresh ARC-managed Tin string. Caller is
 // responsible for releasing the resulting buffer after the internal
 // call returns.
-TinString tin_interop_str_in(const char *cstr) {
+TIN_API TinString tin_interop_str_in(const char *cstr) {
     if (!cstr) {
         char *buf = (char *)_tin_rc_alloc(1);
         if (buf) buf[0] = '\0';
@@ -70,7 +80,7 @@ TinString tin_interop_str_in(const char *cstr) {
 // Marshal a Tin string out to the C side via the user-configurable
 // allocator. The returned buffer is NUL-terminated and contains
 // `s.len + 1` bytes. Returns NULL on OOM (allocator returned NULL).
-char *tin_interop_str_out(TinString s) {
+TIN_API char *tin_interop_str_out(TinString s) {
     char *out = (char *)tin_extern_alloc((size_t)(s.len + 1));
     if (!out) return NULL;
 
@@ -83,11 +93,22 @@ char *tin_interop_str_out(TinString s) {
     return out;
 }
 
+// safe_mul64 multiplies two non-negative int64s and reports overflow.
+// Used to guard slice-allocation sizes against hostile or buggy inputs;
+// silent overflow on the multiplication would translate into a too-small
+// alloc and a buffer overrun in the subsequent memcpy.
+static int safe_mul64(int64_t a, int64_t b, int64_t *out) {
+    if (a < 0 || b < 0) return -1;
+    if (a != 0 && b > INT64_MAX / a) return -1;
+    *out = a * b;
+    return 0;
+}
+
 // Marshal a C array (data + len) into a fresh ARC-managed Tin slice.
 // elem_size is the bytewidth of the element type; it is supplied by
 // the wrapper at codegen time because Tin's slice carries no runtime
 // type tag.
-TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) {
+TIN_API TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) {
     if (len <= 0) {
         char *buf = (char *)_tin_rc_alloc(1);
         if (buf) buf[0] = '\0';
@@ -95,7 +116,11 @@ TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) 
         return (TinSlice){buf, 0};
     }
 
-    int64_t bytes = len * elem_size;
+    int64_t bytes;
+    if (safe_mul64(len, elem_size, &bytes) != 0) {
+        return (TinSlice){NULL, 0};
+    }
+
     void *buf = _tin_rc_alloc(bytes);
     if (!buf) return (TinSlice){NULL, 0};
 
@@ -108,11 +133,11 @@ TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) 
 
 // Marshal a Tin slice out to the C side via tin_extern_alloc. The
 // caller passes pointers to the data and length out-slots; the
-// function fills them and returns 0 on success or 1 on OOM. On OOM
-// *out_data is NULL and *out_len is 0 so the caller has well-defined
-// state.
-int tin_interop_slice_out(TinSlice s, int64_t elem_size,
-                          void **out_data, int64_t *out_len) {
+// function fills them and returns 0 on success or 1 on OOM/overflow.
+// On failure *out_data is NULL and *out_len is 0 so the caller has
+// well-defined state.
+TIN_API int tin_interop_slice_out(TinSlice s, int64_t elem_size,
+                                  void **out_data, int64_t *out_len) {
     if (out_len) *out_len = s.len;
 
     if (s.len <= 0) {
@@ -120,7 +145,13 @@ int tin_interop_slice_out(TinSlice s, int64_t elem_size,
         return 0;
     }
 
-    int64_t bytes = s.len * elem_size;
+    int64_t bytes;
+    if (safe_mul64(s.len, elem_size, &bytes) != 0) {
+        if (out_data) *out_data = NULL;
+        if (out_len) *out_len = 0;
+        return 1;
+    }
+
     void *out = tin_extern_alloc((size_t)bytes);
     if (!out) {
         if (out_data) *out_data = NULL;
@@ -139,7 +170,12 @@ int tin_interop_slice_out(TinSlice s, int64_t elem_size,
 // CAS from 0 -> 1 wins the race; the loser spins until state == 2.
 static atomic_int _tin_rt_initialized = 0;
 
-void _tin_runtime_init_once(void) {
+// tin_runtime_init brings the Tin runtime up if it has not been
+// brought up yet. Idempotent and safe under concurrent first-callers.
+// The wrapper preamble for every #interop function calls this on
+// entry; C code that wants to control init timing (e.g., set up an
+// allocator before any Tin code runs) can also call it directly.
+TIN_API void tin_runtime_init(void) {
     int s = atomic_load_explicit(&_tin_rt_initialized, memory_order_acquire);
     if (s == 2) {
         return;
@@ -150,15 +186,14 @@ void _tin_runtime_init_once(void) {
                                                 &expected, 1,
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
-        // Winner: do the actual init.
         _tin_fiber_init();
         atomic_store_explicit(&_tin_rt_initialized, 2, memory_order_release);
 
         return;
     }
-    // Loser: another thread is initializing. Spin until done. Cheap
-    // because init runs once per process and is fast.
+    // Loser of the init race: spin until the winner publishes state=2.
+    // Init runs once per process and is fast; no syscalls in this loop.
     while (atomic_load_explicit(&_tin_rt_initialized, memory_order_acquire) != 2) {
-        // intentionally tight; init is brief
+        /* intentionally tight */
     }
 }
