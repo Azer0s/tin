@@ -439,5 +439,127 @@ correctly on values returned through function pointers.
 
 ---
 
+## Calling Tin from C (`#interop`)
+
+A Tin function tagged `#interop` is exported under its bare name as a
+C-callable symbol. The compiler emits a wrapper that:
+
+1. Lazily initialises the Tin runtime on first call (atomic, idempotent).
+2. Marshals each parameter from its C ABI shape to the Tin
+   representation.
+3. Calls the Tin-internal entry point.
+4. Marshals the return value back to a C-friendly shape.
+5. Releases any temporary ARC allocations created at the boundary.
+
+```rust
+fn{#interop} add(a i32, b i32) i32 = return a + b
+
+fn{#interop} greet(name string) string =
+  return "hello, " ++ name ++ "!"
+
+fn{#interop} sum(xs [i32]) i32 =
+  let total i32 = 0
+  for let v i32 in xs:
+    total += v
+  return total
+```
+
+```c
+// driver.c
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int32_t      add(int32_t a, int32_t b);
+const char  *greet(const char *name);
+int32_t      sum(const int32_t *xs, int64_t xs_len);
+
+int main(void) {
+    printf("%d\n", add(2, 3));
+    const char *g = greet("World");
+    printf("%s\n", g);
+    free((void *)g);
+    int32_t arr[] = {1, 2, 3, 4};
+    printf("%d\n", sum(arr, 4));
+    return 0;
+}
+```
+
+### Building a Tin library
+
+```bash
+tin build -lib mylib.tin -o mylib.o --emit-header=mylib.h
+cc -c runtime/runtime.c -o runtime.o
+cc driver.c mylib.o runtime.o -o driver -lpthread
+```
+
+`-lib` produces an object file with no `main`, no automatic linking.
+`--emit-header=PATH` writes a `.h` file declaring every `#interop`
+function.
+
+### Type mapping at the boundary
+
+| Tin type             | C ABI shape (param)                     | C ABI shape (return)                              |
+|----------------------|-----------------------------------------|---------------------------------------------------|
+| `i8`..`i64`, `u8`..`u64` | matching `intN_t` / `uintN_t`       | matching `intN_t` / `uintN_t`                     |
+| `f32`, `f64`         | `float`, `double`                       | `float`, `double`                                 |
+| `bool`               | `uint8_t`                               | `uint8_t`                                         |
+| `*T`, `*void`        | `T*`, `void*` (passthrough)             | `T*`, `void*` (passthrough)                       |
+| `string`             | `const char*` (NULL maps to empty)      | `const char*` (caller frees with extern_alloc's matching free) |
+| `[T]` fat array      | splits into `const T* xs, int64_t xs_len` | reshapes to status return + out-params `T** out_data, int64_t* out_len` |
+
+The validation pass rejects any other parameter or return type with a
+specific message at the function declaration site. Methods, generics,
+extern declarations, `#async`, `Future[T]` returns, `any` parameters,
+and the reserved name `main` are all rejected at compile time. See
+[13 - Control tags](13-control-tags.md#interop) for the full
+restriction list.
+
+### Returned strings and arrays - allocator hook
+
+Strings and fat arrays returned from `#interop` are copied into a
+caller-owned buffer via the user-configurable allocator. The default
+is `malloc(3)`; replace it with `tin_set_extern_alloc`:
+
+```c
+typedef void *(*tin_alloc_fn)(size_t);
+void tin_set_extern_alloc(tin_alloc_fn fn);   // NULL resets to malloc
+```
+
+The matching free is whatever pairs with the user's allocator (default
+`malloc` / `free`; for arena allocators, the arena's own lifecycle).
+
+If the allocator returns NULL the wrapper signals OOM:
+- String returns yield NULL.
+- Slice returns set `*out_data = NULL`, `*out_len = 0`, and return a
+  non-zero status.
+
+### Spawning fibers
+
+`#interop` functions may spawn fibers. The runtime starts a worker
+pool on first call (`_tin_runtime_init_once`); spawned fibers run on
+that pool and may outlive the wrapper invocation. The wrapper itself
+returns as soon as the Tin body returns - it does not wait for
+spawned-and-not-awaited fibers. Use `await` inside the body if you
+need to block until a fiber completes.
+
+`#interop` cannot itself be `#async`, since C has no way to drive a
+coroutine.
+
+### Header generation
+
+`tin build --emit-header=PATH` produces a single `.h` file with:
+
+- Include guards derived from the path.
+- An `extern "C"` block for C++ consumers.
+- Forward declarations for `tin_set_extern_alloc` plus its function
+  pointer typedef.
+- One prototype per `#interop` function, with the original Tin
+  signature reproduced in a leading comment for traceability.
+
+Re-run the flag whenever signatures change; the file is overwritten.
+
+---
+
 For packages, imports, and the standard library overview, see
 [09 - Packages](09-packages.md).

@@ -165,6 +165,66 @@ fn{#no_thread} init_globals() =
 
 ---
 
+### `#interop` <a id="interop"></a>
+
+Marks a function as C-callable. The compiler emits a wrapper under
+the bare function name (the Tin entry point gets a hidden mangled
+symbol) that lazy-initialises the runtime, marshals C ABI types to
+Tin types, calls the entry point, and marshals the return value back
+to C. See [08 - C Interop](08-interop.md#calling-tin-from-c-interop)
+for the full type-mapping table, allocator hook, and end-to-end build
+recipe.
+
+```rust
+fn{#interop} add(a i32, b i32) i32 = return a + b
+fn{#interop} greet(name string) string = return "hello, " ++ name
+fn{#interop} sum(xs [i32]) i32 =
+  let t i32 = 0
+  for let v i32 in xs:
+    t += v
+  return t
+```
+
+```c
+int32_t      add(int32_t a, int32_t b);
+const char  *greet(const char *name);
+int32_t      sum(const int32_t *xs, int64_t xs_len);
+```
+
+**Restrictions** (rejected at compile time):
+
+- Cannot also be `#async` - C cannot drive a coroutine.
+- Return type must not contain `Future[T]`.
+- No parameter type may contain `any`.
+- Cannot be a generic function (no concrete C symbol exists).
+- Cannot be a struct method (top-level functions only in v1).
+- Cannot be `extern` (already C, no wrapper needed).
+- Cannot be named `main` (would clobber the binary's entry point).
+- Two `#interop` functions sharing a name are rejected at the
+  declaration site rather than waiting for the linker to complain.
+
+**Allowed parameter types**: primitives, pointers, `string`, fat array
+`[T]`, plus packed cLayoutStructs through pointers.
+
+**Allowed return types**: primitives, pointers, packed cLayoutStructs
+through pointers, `string` (via the `tin_extern_alloc` callback), and
+fat array `[T]` (reshaped to status return + out-params).
+
+**Strings and arrays returned to C** are copied via the user's
+`tin_set_extern_alloc` callback (default `malloc`). The C caller owns
+the buffer and frees it with whatever pairs with that allocator.
+
+**Spawning fibers** is allowed. The wrapper does not wait for them;
+spawned fibers run on the runtime worker pool and may outlive the
+wrapper. Use `await` if you need to block until completion.
+
+**Header generation**: pass `--emit-header=foo.h` to `tin build`. The
+generator emits include guards, an `extern "C"` block, the allocator
+typedef + setter, and one prototype per `#interop` function with the
+original Tin signature in a leading comment.
+
+---
+
 ### `#heavy`
 
 Forces the function to be classified as "auto-yield" by the compile-time
@@ -495,6 +555,7 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 | `#no_autoyield`    | fn / method / lambda    | No (disables codegen)            | Suppresses auto-yield at loop backedges and call sites |
 | `#heavy`           | fn / method             | No (changes heuristic)           | Forces "auto-yield" classification; callers in `$coro` yield before calling |
 | `#handover`        | fn (extern only)        | No (changes codegen)             | Transfers ownership of returned C pointer into ARC |
+| `#interop`         | top-level fn            | Yes  -  signature whitelist      | Emits a C-callable wrapper alongside the Tin entry point |
 | `#packed`          | struct (unscoped)       | Yes (layout)                     | Fields laid out contiguously, no alignment padding |
 | `#<tag>@fn`        | struct (scoped)         | Propagation + tag's own check    | Propagates `#<tag>` to every method (instance + static) |
 | `#<tag>@method`    | struct (scoped)         | Propagation + tag's own check    | Propagates `#<tag>` to every instance method |

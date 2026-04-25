@@ -481,6 +481,7 @@ fn{#no_thread} init_globals() = pass
 | `#heavy`         | fn / method          | Forces "auto-yield" classification for schedulers    |
 | `#no_autoyield`  | fn / method / lambda | Suppresses auto-yield at loop backedges and calls    |
 | `#handover`      | extern fn only       | Transfers ownership of a returned C pointer into ARC |
+| `#interop`       | top-level fn         | Emits a C-callable wrapper; see [08 - C Interop](docs/08-interop.md#calling-tin-from-c-interop) |
 
 #### Struct tags
 
