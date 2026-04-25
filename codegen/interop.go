@@ -28,6 +28,7 @@ package codegen
 
 import (
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -285,28 +286,44 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	}
 
 	// Build the wrapper's C-ABI signature, remapping per-param.
+	// Each Tin param can expand into 1 or more wrapper params:
+	//   primitive / pointer -> 1 wrapper param (passthrough)
+	//   string              -> 1 wrapper param (i8*)
+	//   slice [T]           -> 2 wrapper params (T*, i64)
 	wrapperParams := make([]*ir.Param, 0, len(fn.Params))
 	paramKinds := make([]string, 0, len(fn.Params))
+	// For slice params, we capture the per-param elem byte size so the
+	// runtime helper sees the right copy length.
+	sliceElemSizes := make(map[int]uint64)
 
-	for _, p := range fn.Params {
+	for paramIdx, p := range fn.Params {
 		kind := classifyInteropParam(p.Type)
 		paramKinds = append(paramKinds, kind)
 
-		var llTy irtypes.Type
-
 		switch kind {
 		case "string":
-			llTy = irtypes.I8Ptr
+			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, irtypes.I8Ptr))
+		case "slice":
+			at := p.Type.(*ast.ArrayType)
+
+			elemTy, err := cg.tinTypeToLLVM(at.Elem)
+			if err != nil {
+				return err
+			}
+
+			sliceElemSizes[paramIdx] = llvmTypeSize(elemTy)
+
+			wrapperParams = append(wrapperParams,
+				ir.NewParam(p.Name, irtypes.NewPointer(elemTy)),
+				ir.NewParam(p.Name+"_len", irtypes.I64))
 		default:
 			t, err := cg.tinTypeToLLVM(p.Type)
 			if err != nil {
 				return err
 			}
 
-			llTy = t
+			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, t))
 		}
-
-		wrapperParams = append(wrapperParams, ir.NewParam(p.Name, llTy))
 	}
 
 	retKind := classifyInteropReturn(fn.RetType)
@@ -333,22 +350,65 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	block := wrapper.NewBlock("entry")
 	block.NewCall(cg.ensureRuntimeInitOnce())
 
-	// Per-arg marshaling. We track Tin strings created here so we can
-	// release them after the internal call returns.
-	args := make([]value.Value, len(wrapperParams))
+	// Per-arg marshaling. We track Tin temporaries (strings, slices)
+	// created here so we can release them after the internal call.
+	args := make([]value.Value, 0, len(fn.Params))
 
-	var stringTemps []value.Value
+	var allocatedTemps []value.Value
 
-	for i, p := range wrapperParams {
-		switch paramKinds[i] {
+	wrapperIdx := 0
+
+	for paramIdx, kind := range paramKinds {
+		switch kind {
 		case "string":
-			tinStr := block.NewCall(cg.ensureInteropStrIn(), p)
-			args[i] = tinStr
+			cstr := wrapperParams[wrapperIdx]
+			wrapperIdx++
+
+			tinStr := block.NewCall(cg.ensureInteropStrIn(), cstr)
+			args = append(args, tinStr)
 
 			ptrField := block.NewExtractValue(tinStr, 0)
-			stringTemps = append(stringTemps, ptrField)
+			allocatedTemps = append(allocatedTemps, ptrField)
+		case "slice":
+			dataPtr := wrapperParams[wrapperIdx]
+			lenVal := wrapperParams[wrapperIdx+1]
+			wrapperIdx += 2
+
+			// Cast the typed C pointer to i8* for the runtime call.
+			dataI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
+			elemSize := constant.NewInt(irtypes.I64, int64(sliceElemSizes[paramIdx]))
+			rawSlice := block.NewCall(cg.ensureInteropSliceIn(), dataI8, lenVal, elemSize)
+
+			// rawSlice is {i8*, i64}. The internal expects {T*, i64}.
+			// Extract, bitcast the pointer, and reassemble.
+			internalSliceTy, err := cg.tinTypeToLLVM(fn.Params[paramIdx].Type)
+			if err != nil {
+				return err
+			}
+
+			st := internalSliceTy.(*irtypes.StructType)
+			rawData := block.NewExtractValue(rawSlice, 0)
+			rawLen := block.NewExtractValue(rawSlice, 1)
+			typedData := block.NewBitCast(rawData, st.Fields[0])
+
+			alloca := block.NewAlloca(st)
+			ptrField := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 0))
+			lenField := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 1))
+			block.NewStore(typedData, ptrField)
+			block.NewStore(rawLen, lenField)
+			loaded := block.NewLoad(st, alloca)
+			args = append(args, loaded)
+
+			allocatedTemps = append(allocatedTemps, rawData)
 		default:
-			args[i] = p
+			p := wrapperParams[wrapperIdx]
+			wrapperIdx++
+
+			args = append(args, p)
 		}
 	}
 
@@ -376,10 +436,10 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		finalRet = rawRet
 	}
 
-	// Release any temporary Tin strings we created on the C-input side.
+	// Release any temporary Tin allocations we created for params.
 	releaseFn := cg.ensureRelease()
 
-	for _, ptr := range stringTemps {
+	for _, ptr := range allocatedTemps {
 		block.NewCall(releaseFn, ptr)
 	}
 	// Release the returned Tin string after we've copied it out.
@@ -396,12 +456,18 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	return nil
 }
 
-// classifyInteropParam returns "string" for the Tin string type and
-// "" (passthrough) for primitives / pointers / everything else the
-// validator has already accepted.
+// classifyInteropParam returns the marshaling shape for a Tin
+// parameter type. Recognized:
+//   "string" - Tin string fat pointer
+//   "slice"  - Tin fat array [T]
+//   ""       - passthrough (primitives, pointers, packed structs)
 func classifyInteropParam(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok && st.Name == "string" {
 		return "string"
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		return "slice"
 	}
 
 	return ""
@@ -455,6 +521,29 @@ func (cg *CodeGen) ensureInteropStrOut() *ir.Func {
 
 	f := cg.mod.NewFunc(name, irtypes.I8Ptr,
 		ir.NewParam("s", stringFatPtrType()))
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
+}
+
+// ensureInteropSliceIn declares
+// `TinSlice tin_interop_slice_in(i8*, i64, i64)`. The third arg is
+// the per-element byte size, baked into the call from the wrapper.
+func (cg *CodeGen) ensureInteropSliceIn() *ir.Func {
+	const name = "tin_interop_slice_in"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+
+	f := cg.mod.NewFunc(name, sliceTy,
+		ir.NewParam("data", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("elem_size", irtypes.I64))
 	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
 
 	return f

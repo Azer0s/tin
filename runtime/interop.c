@@ -83,6 +83,29 @@ char *tin_interop_str_out(TinString s) {
     return out;
 }
 
+// Marshal a C array (data + len) into a fresh ARC-managed Tin slice.
+// elem_size is the bytewidth of the element type; it is supplied by
+// the wrapper at codegen time because Tin's slice carries no runtime
+// type tag.
+TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size) {
+    if (len <= 0) {
+        char *buf = (char *)_tin_rc_alloc(1);
+        if (buf) buf[0] = '\0';
+
+        return (TinSlice){buf, 0};
+    }
+
+    int64_t bytes = len * elem_size;
+    void *buf = _tin_rc_alloc(bytes);
+    if (!buf) return (TinSlice){NULL, 0};
+
+    if (data) {
+        memcpy(buf, data, (size_t)bytes);
+    }
+
+    return (TinSlice){buf, len};
+}
+
 // Init state machine: 0 = uninit, 1 = in-progress, 2 = done. Single
 // CAS from 0 -> 1 wins the race; the loser spins until state == 2.
 static atomic_int _tin_rt_initialized = 0;
