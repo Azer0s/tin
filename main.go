@@ -452,6 +452,7 @@ doneFlags:
 	verboseMatchInfo := false
 	verboseDemorgan := false
 	debugBuild := false
+	emitHeaderPath := ""
 
 	// Scan all args (including those before the file) for flags.
 	for i := 2; i < len(os.Args); i++ {
@@ -505,6 +506,13 @@ doneFlags:
 				targetGOOS = parts[0]
 				targetGOARCH = parts[1]
 				explicitTarget = true
+			}
+		default:
+			// Recognise --emit-header=<path> as a single token; the rest
+			// of the loop ignores unknown args so they pass through to
+			// the linker / clang driver.
+			if strings.HasPrefix(os.Args[i], "--emit-header=") {
+				emitHeaderPath = strings.TrimPrefix(os.Args[i], "--emit-header=")
 			}
 		}
 	}
@@ -668,6 +676,10 @@ doneFlags:
 		if triple := clangTripleForTarget(); triple != "" {
 			cg.SetTargetTriple(triple)
 		}
+	}
+
+	if emitHeaderPath != "" {
+		cg.SetEmitHeaderPath(emitHeaderPath)
 	}
 
 	if stdlibOverride != "" {

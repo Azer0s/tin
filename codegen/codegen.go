@@ -353,6 +353,11 @@ type CodeGen struct {
 	// negation, bool-literal absorption). Toggled by -v-demorgan.
 	verboseDemorgan bool
 
+	// emitHeaderPath, when non-empty, instructs codegen to write a C
+	// header file listing every #interop function's prototype. Toggled
+	// by --emit-header=<path>.
+	emitHeaderPath string
+
 	// mutatedNames is the set of identifier names that are reassigned
 	// anywhere inside the current function body (including closures and
 	// defers). Populated per function body in genFuncDeclAs and consulted
@@ -731,6 +736,7 @@ func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms =
 func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
 func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool)    { cg.noWarnBoolAnalysis = v }
 func (cg *CodeGen) SetVerboseDemorgan(v bool)       { cg.verboseDemorgan = v }
+func (cg *CodeGen) SetEmitHeaderPath(p string)      { cg.emitHeaderPath = p }
 func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
@@ -1380,6 +1386,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// the wrapper can reference.
 	if err := cg.emitInteropWrappers(prog.Stmts); err != nil {
 		return nil, err
+	}
+
+	if cg.emitHeaderPath != "" {
+		if err := cg.writeInteropHeader(prog.Stmts); err != nil {
+			return nil, err
+		}
 	}
 
 	// In test mode, generate test functions and a test-runner main.
