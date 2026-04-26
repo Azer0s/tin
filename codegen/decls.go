@@ -415,6 +415,9 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 	// method bodies, so that intra-struct cross-method calls (e.g. another method
 	// calling `this.measure()` against `fn iter::measure(this Foo)`) can resolve
 	// `Foo_measure` to the qualified impl while the body is being compiled.
+	// (For top-level structs, methods are already predeclared via predeclareMethod;
+	// for package structs they aren't yet, so this pre-pass is a no-op there and
+	// the post-pass below catches them.)
 	cg.registerPlainMethodAliases(structKey, n.Methods)
 
 	// Generate methods as top-level functions with struct-qualified names.
@@ -432,6 +435,12 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 			return err
 		}
 	}
+
+	// Re-run alias registration AFTER bodies are generated. For package structs
+	// methods are predeclared+bodied inline in genStructMethod, so the pre-pass
+	// above couldn't see them yet. This pass picks up the now-registered
+	// qualified names and exposes them under their bare aliases.
+	cg.registerPlainMethodAliases(structKey, n.Methods)
 
 	// Trait init/deinit chaining: for each implemented trait, if the trait defines
 	// fn init/deinit with a default body AND the struct overrides that method,

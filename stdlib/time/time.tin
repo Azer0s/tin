@@ -107,12 +107,12 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
 
   // to_json implements json::JsonSerializable.
   // Returns the Instant as a JSON-encoded RFC3339 string (with surrounding quotes).
-  fn to_json(this Instant) string =
+  fn JsonSerializable::to_json(this Instant) string =
     return "\"" ++ this.to_rfc3339() ++ "\""
 
   // apply_json implements json::JsonDeserializable.
   // Parses an RFC3339 string (without surrounding quotes) into this instant.
-  fn apply_json(this *Instant, s string) bool =
+  fn JsonDeserializable::apply_json(this *Instant, s string) bool =
     let ok = tin_from_rfc3339_c(s, &this.ns)
     return ok == 0
 

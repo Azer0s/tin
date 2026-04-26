@@ -78,7 +78,7 @@ struct HashMap[K, V](Map[K, V]) =
       _len:    0,
     }
 
-  fn len(this HashMap[K, V]) i64 =
+  fn Map::len(this HashMap[K, V]) i64 =
     return this._len
 
   // find returns the slot index for key k with hash h.
@@ -135,7 +135,7 @@ struct HashMap[K, V](Map[K, V]) =
           j = j + 1
       i = i + 1
 
-  fn set(this *HashMap[K, V], k K, v V) =
+  fn Map::set(this *HashMap[K, V], k K, v V) =
     let cap = len(this._hashes)
     if this._len * 4 >= cap * 3:
       this.resize()
@@ -148,7 +148,7 @@ struct HashMap[K, V](Map[K, V]) =
     if old_h < 2:
       this._len = this._len + 1
 
-  fn get(this HashMap[K, V], k K) V =
+  fn Map::get(this HashMap[K, V], k K) V =
     let h u64 = hm_hash(k)
     let slot = this.find(k, h)
     if this._hashes[slot] == h && hm_eq(this._keys[slot], k):
@@ -156,21 +156,21 @@ struct HashMap[K, V](Map[K, V]) =
     let zero V
     return zero
 
-  fn get_or(this HashMap[K, V], k K, default_val V) V =
+  fn Map::get_or(this HashMap[K, V], k K, default_val V) V =
     let h u64 = hm_hash(k)
     let slot = this.find(k, h)
     if this._hashes[slot] == h && hm_eq(this._keys[slot], k):
       return this._vals[slot]
     return default_val
 
-  fn has(this HashMap[K, V], k K) bool =
+  fn Map::has(this HashMap[K, V], k K) bool =
     let h u64 = hm_hash(k)
     let slot = this.find(k, h)
     if this._hashes[slot] == h && hm_eq(this._keys[slot], k):
       return true
     return false
 
-  fn delete(this *HashMap[K, V], k K) =
+  fn Map::delete(this *HashMap[K, V], k K) =
     let h u64 = hm_hash(k)
     let slot = this.find(k, h)
     if this._hashes[slot] == h && hm_eq(this._keys[slot], k):
@@ -181,7 +181,7 @@ struct HashMap[K, V](Map[K, V]) =
       this._hashes[slot] = 1
       this._len = this._len - 1
 
-  fn keys(this HashMap[K, V]) [K] =
+  fn Map::keys(this HashMap[K, V]) [K] =
     let cap = len(this._hashes)
     let result [K] = []
     let i i64 = 0
@@ -192,7 +192,7 @@ struct HashMap[K, V](Map[K, V]) =
       i = i + 1
     return result
 
-  fn values(this HashMap[K, V]) [V] =
+  fn Map::values(this HashMap[K, V]) [V] =
     let cap = len(this._hashes)
     let result [V] = []
     let i i64 = 0

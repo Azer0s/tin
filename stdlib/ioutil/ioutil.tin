@@ -26,13 +26,13 @@ fn tin_bytes_from_buf_c(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 struct FdReader (io::AsyncReader) =
   fd i32
 
-  fn read(this FdReader, buf *byte, n i64) Future[i64] =
+  fn AsyncReader::read(this FdReader, buf *byte, n i64) Future[i64] =
     return spawn io::async_read(this.fd, buf, n)
 
 struct FdWriter (io::AsyncWriter) =
   fd i32
 
-  fn write(this FdWriter, buf *byte, n i64) Future[i64] =
+  fn AsyncWriter::write(this FdWriter, buf *byte, n i64) Future[i64] =
     return spawn io::async_write(this.fd, buf, n)
 
 // ---------------------------------------------------------------------------

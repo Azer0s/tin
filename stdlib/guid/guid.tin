@@ -25,12 +25,12 @@ struct Guid(json::JsonSerializable, json::JsonDeserializable) =
 
   // to_json implements json::JsonSerializable.
   // Returns the GUID as a JSON-encoded string (with surrounding quotes).
-  fn to_json(this Guid) string =
+  fn JsonSerializable::to_json(this Guid) string =
     return "\"" ++ this.value ++ "\""
 
   // apply_json implements json::JsonDeserializable.
   // Sets the GUID value from a string (the unescaped JSON string value).
-  fn apply_json(this *Guid, s string) bool =
+  fn JsonDeserializable::apply_json(this *Guid, s string) bool =
     this.value = s
     return true
 

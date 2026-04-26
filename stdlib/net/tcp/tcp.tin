@@ -23,12 +23,12 @@ struct Conn (io::AsyncReader, io::AsyncWriter) =
 
   // read reads up to n bytes from the connection into buf.
   // Returns Future[i64] - use `await conn.read(buf, n)`.
-  fn read(this Conn, buf *byte, n i64) Future[i64] =
+  fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
     return spawn io::async_read(this.fd, buf, n)
 
   // write writes up to n bytes from buf to the connection.
   // Returns Future[i64] - use `await conn.write(buf, n)`.
-  fn write(this Conn, buf *byte, n i64) Future[i64] =
+  fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
     return spawn io::async_write(this.fd, buf, n)
 
   fn close(this Conn) =

@@ -50,12 +50,12 @@ struct TlsConn (io::AsyncReader, io::AsyncWriter) =
 
   // read reads up to n bytes from the TLS stream.
   // Returns Future[i64] - use `await conn.read(buf, n)` or pass to ioutil.
-  fn read(this TlsConn, buf *byte, n i64) Future[i64] =
+  fn AsyncReader::read(this TlsConn, buf *byte, n i64) Future[i64] =
     return spawn tls_read_impl(this._handle, buf, n)
 
   // write writes up to n bytes to the TLS stream.
   // Returns Future[i64] - use `await conn.write(buf, n)` or pass to ioutil.
-  fn write(this TlsConn, buf *byte, n i64) Future[i64] =
+  fn AsyncWriter::write(this TlsConn, buf *byte, n i64) Future[i64] =
     return spawn tls_write_impl(this._handle, buf, n)
 
   // close sends a TLS close_notify alert and frees OpenSSL state.

@@ -100,13 +100,13 @@ struct Conn (io::AsyncReader, io::AsyncWriter) =
   // read implements io::AsyncReader.
   // Accept-based: serves bytes from the received datagram, returns 0 at EOF.
   // Dial-based: reads from the connected UDP socket.
-  fn read(this Conn, buf *byte, n i64) Future[i64] =
+  fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
     if len(this.data_buf) > 0:
       return spawn read_buf_impl(this.data_buf, this.read_pos, buf, n)
     return spawn io::async_read(this.fd, buf, n)
 
   // write sends buf[0..n] to the peer (AsyncWriter interface).
-  fn write(this Conn, buf *byte, n i64) Future[i64] =
+  fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
     return spawn send_to_raw_impl(this.fd, buf, n, this.host, this.port)
 
   // write sends data to the peer (slice convenience overload).
