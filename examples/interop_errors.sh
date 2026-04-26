@@ -131,9 +131,16 @@ fn{#interop} bad(a atom) i32 = return 0
 fn main() i64 = return 0
 '
 
-# ── fn-typed param rejected (closure/fn pointer) ──
-assert_err "fn-typed param rejected" "fn-typed values" '
-fn{#interop} bad(f fn(i32) i32) i32 = return f(0)
+# ── fn-typed return rejected (callback returns are not supported) ──
+assert_err "fn-typed return rejected" "fn-typed return values are not supported" '
+fn{#interop} bad() fn(i32) i32 = return fn(x i32) i32 = return x
+
+fn main() i64 = return 0
+'
+
+# ── callback with non-primitive inner type rejected ──
+assert_err "callback with string inner rejected" "callback inner type" '
+fn{#interop} bad(cb fn(string) i32) i32 = return cb("x")
 
 fn main() i64 = return 0
 '

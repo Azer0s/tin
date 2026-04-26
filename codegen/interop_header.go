@@ -117,6 +117,11 @@ func cParamList(fn *ast.FuncDecl) ([]string, []string) {
 			continue
 		}
 
+		if ft, ok := p.Type.(*ast.FuncType); ok {
+			out = append(out, cCallbackDecl(ft, p.Name))
+			continue
+		}
+
 		out = append(out, fmt.Sprintf("%s %s", cTypeName(p.Type), p.Name))
 	}
 
@@ -130,6 +135,26 @@ func cParamList(fn *ast.FuncDecl) ([]string, []string) {
 	}
 
 	return out, extras
+}
+
+// cCallbackDecl renders a callback parameter declaration in C
+// function-pointer syntax: `R (*name)(A1, A2, ...)`.
+func cCallbackDecl(ft *ast.FuncType, name string) string {
+	ret := "void"
+	if ft.RetType != nil {
+		ret = cTypeName(ft.RetType)
+	}
+
+	parts := make([]string, 0, len(ft.Params))
+	for _, p := range ft.Params {
+		parts = append(parts, cTypeName(p))
+	}
+
+	if len(parts) == 0 {
+		parts = []string{"void"}
+	}
+
+	return fmt.Sprintf("%s (*%s)(%s)", ret, name, strings.Join(parts, ", "))
 }
 
 // cTypeName maps Tin scalar / pointer types to their C-equivalent

@@ -27,6 +27,7 @@ package codegen
 //     rejected with a per-position diagnostic.
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -148,6 +149,41 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 	}
 
 	return nil
+}
+
+// callbackInnerReason restricts the param/return types allowed inside
+// a callback signature crossing the interop boundary. Only primitives
+// and `*void` / `*<primitive>` work because the per-signature thunk
+// emitted in codegen does not marshal complex types.
+func callbackInnerReason(t ast.TypeExpr) string {
+	if t == nil {
+		return ""
+	}
+
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch {
+		case interopAllowedPrimitives[st.Name]:
+			return ""
+		case st.Name == "void":
+			return ""
+		case st.Name == "bool":
+			return "callback bool params are not supported (i1 vs i8 ABI)"
+		}
+
+		return "callback inner type " + st.Name + " is not a primitive"
+	}
+
+	if pt, ok := t.(*ast.PointerType); ok {
+		if elem, ok := pt.Elem.(*ast.SimpleType); ok {
+			if elem.Name == "void" || interopAllowedPrimitives[elem.Name] || elem.Name == "char" || elem.Name == "byte" {
+				return ""
+			}
+		}
+
+		return "callback pointer inner type must be void or a primitive"
+	}
+
+	return "callback inner type is not allowed"
 }
 
 // interopElemTypeReason restricts the element type allowed inside a
@@ -285,7 +321,26 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		return "generic types like " + v.Name + "[T] are not representable"
 
 	case *ast.FuncType:
-		return "fn-typed values (closures, function pointers) are not representable; use a *void with a hand-written shim if needed"
+		// Callbacks: only allowed as parameters today, and only with
+		// primitive/pointer-shaped sub-signatures. The wrapper boxes
+		// the raw C fn pointer into a per-signature thunk.
+		if isReturn {
+			return "fn-typed return values are not supported"
+		}
+
+		for _, pt := range v.Params {
+			if r := callbackInnerReason(pt); r != "" {
+				return "callback parameter type rejected: " + r
+			}
+		}
+
+		if v.RetType != nil {
+			if r := callbackInnerReason(v.RetType); r != "" {
+				return "callback return type rejected: " + r
+			}
+		}
+
+		return ""
 
 	case *ast.TupleArrayType:
 		return "tuple-array destructuring types (@[...]) are not representable"
@@ -392,6 +447,9 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			// Take the byte at the boundary, truncate to i1 before
 			// passing to the internal entry.
 			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, irtypes.I8))
+		case "callback":
+			// Wrapper takes the raw C function pointer as i8*.
+			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, irtypes.I8Ptr))
 		default:
 			t, err := cg.tinTypeToLLVM(p.Type)
 			if err != nil {
@@ -479,6 +537,61 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			zero := constant.NewInt(irtypes.I8, 0)
 			i1Val := block.NewICmp(enum.IPredNE, b, zero)
 			args = append(args, i1Val)
+		case "callback":
+			rawCb := wrapperParams[wrapperIdx]
+			wrapperIdx++
+
+			ft := fn.Params[paramIdx].Type.(*ast.FuncType)
+			thunk, err := cg.getOrCreateCallbackThunk(ft)
+			if err != nil {
+				return err
+			}
+			// Build an ARC-managed env block: 16 bytes layout
+			//   offset 0: destructor fn (NULL)
+			//   offset 8: raw C fn pointer (read by the thunk)
+			// The destructor slot is required because Tin's
+			// _tin_release_closure unconditionally invokes whatever
+			// pointer it finds at env+0 when rc reaches zero.
+			envI8 := block.NewCall(cg.ensureRCAlloc(),
+				constant.NewInt(irtypes.I64, 16))
+
+			i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr)
+
+			dtorSlot := block.NewBitCast(envI8, i8PtrPtr)
+			block.NewStore(constant.NewNull(irtypes.I8Ptr), dtorSlot)
+
+			fnSlotPtr := block.NewGetElementPtr(irtypes.I8, envI8,
+				constant.NewInt(irtypes.I32, 8))
+			fnSlotPtrCast := block.NewBitCast(fnSlotPtr, i8PtrPtr)
+			block.NewStore(rawCb, fnSlotPtrCast)
+
+			// Build the Tin fat fn-ptr `{thunk, env}`.
+			fatTy, err := cg.tinTypeToLLVM(ft)
+			if err != nil {
+				return err
+			}
+
+			st := fatTy.(*irtypes.StructType)
+
+			alloca := block.NewAlloca(st)
+			fnFieldPtr := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 0))
+			envFieldPtr := block.NewGetElementPtr(st, alloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 1))
+
+			thunkCast := block.NewBitCast(thunk, st.Fields[0])
+			block.NewStore(thunkCast, fnFieldPtr)
+			block.NewStore(envI8, envFieldPtr)
+
+			loaded := block.NewLoad(st, alloca)
+			args = append(args, loaded)
+
+			// The internal entry retains+releases env per Tin's
+			// fn-arg convention; we drop our originating reference
+			// after the call so the env block is freed at rc=0.
+			allocatedTemps = append(allocatedTemps, envI8)
 		case "slice":
 			dataPtr := wrapperParams[wrapperIdx]
 			lenVal := wrapperParams[wrapperIdx+1]
@@ -602,10 +715,11 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 // classifyInteropParam returns the marshaling shape for a Tin
 // parameter type. Recognized:
-//   "string" - Tin string fat pointer
-//   "slice"  - Tin fat array [T]
-//   "bool"   - Tin bool (i1) widened to/from C uint8_t
-//   ""       - passthrough (primitives, pointers, packed structs)
+//   "string"   - Tin string fat pointer
+//   "slice"    - Tin fat array [T]
+//   "bool"     - Tin bool (i1) widened to/from C uint8_t
+//   "callback" - fn(...) typed; wrapped via per-signature thunk
+//   ""         - passthrough (primitives, pointers, packed structs)
 func classifyInteropParam(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch st.Name {
@@ -618,6 +732,10 @@ func classifyInteropParam(t ast.TypeExpr) string {
 
 	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
 		return "slice"
+	}
+
+	if _, ok := t.(*ast.FuncType); ok {
+		return "callback"
 	}
 
 	return ""
@@ -727,6 +845,125 @@ func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
 	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
 
 	return f
+}
+
+// getOrCreateCallbackThunk returns a Tin-calling-convention thunk for
+// the given callback signature. The thunk receives `i8* env` first
+// (Tin's fat fn-ptr ABI), bitcasts env back to the raw C function
+// pointer, and tail-calls it with the user args. One thunk is
+// emitted per unique signature and cached on the codegen.
+func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) {
+	llRet := irtypes.Type(irtypes.Void)
+
+	if ft.RetType != nil {
+		t, err := cg.tinTypeToLLVM(ft.RetType)
+		if err != nil {
+			return nil, err
+		}
+
+		llRet = t
+	}
+
+	llParams := make([]irtypes.Type, len(ft.Params))
+
+	for i, p := range ft.Params {
+		t, err := cg.tinTypeToLLVM(p)
+		if err != nil {
+			return nil, err
+		}
+
+		llParams[i] = t
+	}
+
+	key := callbackSigKey(llRet, llParams)
+
+	if cg.interopCbThunks == nil {
+		cg.interopCbThunks = make(map[string]*ir.Func)
+	}
+
+	if f, ok := cg.interopCbThunks[key]; ok {
+		return f, nil
+	}
+
+	thunkName := "__tin_interop_cb_thunk_" + key
+
+	thunkParams := make([]*ir.Param, 0, len(llParams)+1)
+	thunkParams = append(thunkParams, ir.NewParam("env", irtypes.I8Ptr))
+
+	for i, t := range llParams {
+		thunkParams = append(thunkParams, ir.NewParam(fmt.Sprintf("a%d", i), t))
+	}
+
+	thunk := cg.mod.NewFunc(thunkName, llRet, thunkParams...)
+	thunk.Linkage = enum.LinkageInternal
+
+	tb := thunk.NewBlock("entry")
+
+	// env layout (matches the wrapper allocation):
+	//   offset 0: destructor (NULL, ignored here)
+	//   offset 8: raw C fn pointer
+	rawFnTy := irtypes.NewFunc(llRet, llParams...)
+	rawFnPtrTy := irtypes.NewPointer(rawFnTy)
+
+	fnSlot := tb.NewGetElementPtr(irtypes.I8, thunkParams[0],
+		constant.NewInt(irtypes.I32, 8))
+	fnSlotCast := tb.NewBitCast(fnSlot, irtypes.NewPointer(rawFnPtrTy))
+	rawFn := tb.NewLoad(rawFnPtrTy, fnSlotCast)
+
+	args := make([]value.Value, len(llParams))
+	for i := range llParams {
+		args[i] = thunkParams[i+1]
+	}
+
+	if llRet.Equal(irtypes.Void) {
+		tb.NewCall(rawFn, args...)
+		tb.NewRet(nil)
+	} else {
+		r := tb.NewCall(rawFn, args...)
+		tb.NewRet(r)
+	}
+
+	cg.interopCbThunks[key] = thunk
+
+	return thunk, nil
+}
+
+// callbackSigKey is a stable string used both as a cache key and as
+// the suffix on the thunk's IR name.
+func callbackSigKey(ret irtypes.Type, params []irtypes.Type) string {
+	var sb strings.Builder
+
+	sb.WriteString(sanitizeIRTypeName(ret))
+
+	for _, p := range params {
+		sb.WriteString("_")
+		sb.WriteString(sanitizeIRTypeName(p))
+	}
+
+	return sb.String()
+}
+
+// sanitizeIRTypeName turns an IR type into a short identifier-safe
+// fragment for embedding in symbol names.
+func sanitizeIRTypeName(t irtypes.Type) string {
+	if t.Equal(irtypes.Void) {
+		return "void"
+	}
+
+	s := t.String()
+
+	var b strings.Builder
+
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+
+	return b.String()
 }
 
 // ensureRuntimeInitOnce returns the IR declaration for the runtime

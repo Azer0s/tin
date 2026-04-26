@@ -358,6 +358,11 @@ type CodeGen struct {
 	// by --emit-header=<path>.
 	emitHeaderPath string
 
+	// interopCbThunks caches per-signature thunks emitted to bridge
+	// raw C function pointers into Tin's fat fn-ptr calling convention.
+	// Keyed by sanitised (ret, params) signature.
+	interopCbThunks map[string]*ir.Func
+
 	// mutatedNames is the set of identifier names that are reassigned
 	// anywhere inside the current function body (including closures and
 	// defers). Populated per function body in genFuncDeclAs and consulted
