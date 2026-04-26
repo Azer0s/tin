@@ -987,6 +987,19 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 	}
 
+	// Reject operators on user-defined struct types here. Today the
+	// arithmetic / comparison switch below would otherwise call NewAdd /
+	// NewICmp on a struct value, producing invalid LLVM ("integer constant
+	// must have integer type" or worse). When operator overloading lands
+	// (Phase 3 of docs/plans/operator-overloading.md) this is where the
+	// trait-dispatch lookup happens; until then it's a clean compile error.
+	// Anonymous structs (fat pointers, strings, fat arrays) keep their
+	// existing fall-through paths inside the switch.
+	if isStructType(lt) || isStructType(rt) {
+		return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
+			e.Op, lt, rt)
+	}
+
 	switch e.Op {
 	case "+":
 		if isFloat {
@@ -1231,7 +1244,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		return result, nil
 	}
 
-	return constant.NewInt(irtypes.I64, 0), nil
+	// No primitive / built-in lowering matched. Until operator overloading
+	// lands (docs/plans/operator-overloading.md), there is no user hook
+	// either; reject loudly instead of silently producing 0. Phase 0 of
+	// that plan exists because the previous silent-zero fall-through hid
+	// real bugs at every callsite.
+	return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
+		e.Op, left.Type(), right.Type())
 }
 
 // genEqNeqExpr implements shared handling for == and != operators.

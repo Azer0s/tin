@@ -1698,5 +1698,8 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return block.NewLoad(at.ElemType, gep), nil
 	}
 
-	return nil, nil
+	// No built-in indexing applies. Until the index trait lands
+	// (docs/plans/operator-overloading.md, Phase 4), reject loudly
+	// instead of returning nil and letting the caller crash later.
+	return nil, cg.nodeErr(e, "type %s does not support index expressions", arrType)
 }
