@@ -69,25 +69,44 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 }
 
 // traitQualifierKey converts a trait qualifier string like "iter[char]" or
-// "io::AsyncReader" into a safe identifier segment like "iter_char" or
-// "io__AsyncReader" for use in scope/IR names.
+// "io::AsyncReader" into a safe identifier segment ("iter__char" /
+// "io__AsyncReader") for use in scope/IR names. The output mirrors
+// traitImplKey on the equivalent ast.TypeExpr so a user-written qualifier
+// (`fn iter[i64]::get`) produces the same scope name as the impl-list entry
+// `(iter[i64])`.
 func traitQualifierKey(q string) string {
 	out := make([]byte, 0, len(q))
+
 	for i := 0; i < len(q); i++ {
 		c := q[i]
 		switch c {
 		case ':':
-			// Map "::" → "__"; a stray single ':' (shouldn't occur) becomes '_'.
-			out = append(out, '_')
-		case '[', ']', ',', ' ':
-			if len(out) > 0 && out[len(out)-1] != '_' {
+			// Map "::" -> "__"; runs of `:` collapse via the dedup below.
+			if len(out) == 0 || out[len(out)-1] != '_' {
+				out = append(out, '_')
+			} else if len(out) >= 2 && out[len(out)-2] == '_' {
+				// already "__"; skip
+			} else {
 				out = append(out, '_')
 			}
+		case '[', ',':
+			// Boundary between trait/method name and a type-arg, or between
+			// type-args. Encode as "__" to match traitImplKey output.
+			if len(out) > 0 {
+				// Trim a single trailing underscore so we always emit exactly "__".
+				if out[len(out)-1] == '_' && (len(out) < 2 || out[len(out)-2] != '_') {
+					out = out[:len(out)-1]
+				}
+
+				out = append(out, '_', '_')
+			}
+		case ']', ' ':
+			// Closing bracket and stray spaces are dropped.
 		default:
 			out = append(out, c)
 		}
 	}
-	// Trim trailing underscore.
+	// Trim trailing underscore(s).
 	for len(out) > 0 && out[len(out)-1] == '_' {
 		out = out[:len(out)-1]
 	}

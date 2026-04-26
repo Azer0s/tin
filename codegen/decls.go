@@ -117,6 +117,12 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 			if !structHasMethod(aug, m.Name) {
 				// Bind "this" parameter to this struct type.
 				injected := *m
+				// Mark the injected method as a trait impl so methodScopeName
+				// produces "Struct_<trait>_<method>" (matching what the vtable
+				// wrapper looks up). Without this, default-bodied trait methods
+				// would be predeclared under the bare name and the wrapper's
+				// qualified lookup would miss them.
+				injected.TraitQualifier = name
 
 				ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: n.Name}}
 				if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
@@ -614,13 +620,17 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
 	return &ast.FuncDecl{
-		Name:       m.Name,
-		TypeParams: m.TypeParams,
-		Params:     newParams,
-		RetType:    newRet,
-		Body:       newBody,
-		Tags:       m.Tags,
-		IsStatic:   m.IsStatic,
+		Name:           m.Name,
+		TraitQualifier: m.TraitQualifier,
+		TypeParams:     m.TypeParams,
+		Constraints:    m.Constraints,
+		Params:         newParams,
+		RetType:        newRet,
+		Body:           newBody,
+		Tags:           m.Tags,
+		IsStatic:       m.IsStatic,
+		IsExtern:       m.IsExtern,
+		IsVirtual:      m.IsVirtual,
 	}
 }
 
@@ -1329,6 +1339,18 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		// "iter__i64". Used by both sync and $coro wrapper lookups.
 		bareKey := traitQualifierKey(bareTraitImplKey(impl))
 
+		// Trait methods with default bodies (non-virtual) keep accepting the bare
+		// override form `fn methodName(this Foo)` — that's how init/deinit
+		// chaining works and how struct-side overrides for any default-bodied
+		// trait method are written. Virtual methods MUST be qualified.
+		isDefaultBodied := map[string]bool{}
+
+		for _, tm := range td.Methods {
+			if !tm.IsVirtual && tm.Body != nil {
+				isDefaultBodied[tm.Name] = true
+			}
+		}
+
 		for i, methodName := range methodNames {
 			wrapSlot := vtableSt.Fields[i].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			wrapperName := structKey + "__" + instKey + "__" + methodName
@@ -1349,31 +1371,50 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			// Look up concrete method. The qualified scope name uses the bare
 			// trait name (module prefix stripped) so that fn AsyncReader::read
 			// and fn io::AsyncReader::read both resolve when the struct lists
-			// either form. Two stages, in priority order:
-			//   1. qualifiedName  - "Struct_<traitBaseKey>_method" (Phase 1 form)
-			//   2. concreteName   - bare "Struct_method" (legacy bare-name fallback;
-			//                       removed once stdlib + examples migrated)
+			// either form. registerPlainMethodAliases also wires up the bare
+			// alias (Struct_method -> Struct_<trait>_method) so user code that
+			// calls the method without qualification still resolves; the vtable
+			// wrapper, however, requires the qualified form so a bare-named
+			// method that happens to share the trait method's name does not
+			// silently bind.
+			// Scope-name forms accepted, in priority order:
+			//   1. qualifiedName     - includes type args ("Struct_iter__i64_method")
+			//                          for explicit `fn iter[i64]::method` impls.
+			//   2. baseQualifiedName - no type args ("Struct_iter_method") for the
+			//                          common `fn iter::method` form which covers
+			//                          all instantiations the struct lists.
+			//   3. bareName          - "Struct_method" — only accepted when the trait
+			//                          method has a default body (init/deinit chain
+			//                          pattern, override of any default-bodied method).
+			//                          Virtual methods must be qualified.
 			qualifiedName := structKey + "_" + bareKey + "_" + methodName
-			concreteName := structKey + "_" + methodName
+			baseQualifiedName := structKey + "_" + traitName + "_" + methodName
+			bareName := structKey + "_" + methodName
 
 			concreteFn, ok := cg.curScope.lookup(qualifiedName)
-			if ok {
-				concreteName = qualifiedName
-			} else {
-				concreteFn, ok = cg.curScope.lookup(concreteName)
+			if !ok && baseQualifiedName != qualifiedName {
+				concreteFn, ok = cg.curScope.lookup(baseQualifiedName)
+			}
+
+			if !ok && isDefaultBodied[methodName] {
+				concreteFn, ok = cg.curScope.lookup(bareName)
 			}
 
 			if !ok {
-				// Try overloaded variants: find the one matching the trait slot arity.
+				// Try overloaded variants of either qualified name (matching arity).
 				wantArity := len(wrapSlot.Params) - 1 // subtract self (i8*)
 
-				for _, name := range []string{qualifiedName, concreteName} {
+				candidateNames := []string{qualifiedName, baseQualifiedName}
+				if isDefaultBodied[methodName] {
+					candidateNames = append(candidateNames, bareName)
+				}
+
+				for _, name := range candidateNames {
 					if variants, hasOL := cg.overloads[name]; hasOL {
 						for _, v := range variants {
 							if v.arity == wantArity {
 								if entry, ok2 := cg.curScope.lookup(v.irName); ok2 {
 									concreteFn = entry
-									concreteName = v.irName
 									ok = true
 
 									break
@@ -1389,7 +1430,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			}
 
 			if !ok {
-				return fmt.Errorf("trait vtable: missing concrete method %s (also tried %s)", concreteName, qualifiedName)
+				return fmt.Errorf("trait vtable: struct %s does not implement %s.%s; expected fn %s::%s(this %s, ...)",
+					structKey, traitName, methodName, traitName, methodName, structKey)
 			}
 
 			concreteFunc := concreteFn.val.(*ir.Func)
@@ -1472,15 +1514,21 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			// sync wrapper: bare trait name (module prefix stripped) for the
 			// qualified key.
 			qualifiedCoroName := structKey + "_" + bareKey + "_" + methodName + "$coro"
-			plainCoroName := structKey + "_" + methodName + "$coro"
+			baseQualifiedCoroName := structKey + "_" + traitName + "_" + methodName + "$coro"
+			bareCoroName := structKey + "_" + methodName + "$coro"
 
 			concreteCoro, ok2 := cg.curScope.lookup(qualifiedCoroName)
-			if !ok2 {
-				concreteCoro, ok2 = cg.curScope.lookup(plainCoroName)
+			if !ok2 && baseQualifiedCoroName != qualifiedCoroName {
+				concreteCoro, ok2 = cg.curScope.lookup(baseQualifiedCoroName)
+			}
+
+			if !ok2 && isDefaultBodied[methodName] {
+				concreteCoro, ok2 = cg.curScope.lookup(bareCoroName)
 			}
 
 			if !ok2 {
-				return fmt.Errorf("trait vtable: missing $coro method %s (also tried %s)", plainCoroName, qualifiedCoroName)
+				return fmt.Errorf("trait vtable: struct %s does not implement async %s.%s; expected fn %s::%s(this %s, ...) {#async}",
+					structKey, traitName, methodName, traitName, methodName, structKey)
 			}
 
 			concreteCoroFn := concreteCoro.val.(*ir.Func)
