@@ -550,6 +550,101 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 	}
 }
 
+// checkAllTraitImplsComplete walks every struct declaration and verifies each
+// listed trait's virtual methods have a matching qualified impl. Default-bodied
+// methods stay optional. Generic struct templates and `implicit` (special trait)
+// are skipped — templates are only checked on monomorphization, and implicit
+// has its own resolution pathway via implicitConvFns.
+func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
+	for _, node := range stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok || len(sd.TypeParams) > 0 || len(sd.Implements) == 0 {
+			continue
+		}
+
+		structKey := cg.pkgStructKey(sd.Name)
+		// Build set of qualified scope names predeclared for this struct.
+		// We check membership rather than scope-lookup because scope contains
+		// many other entries that aren't methods of this struct.
+		methodNames := map[string]bool{}
+
+		for _, m := range sd.Methods {
+			methodNames[methodScopeName(structKey, m)] = true
+			methodNames[structKey+"_"+m.Name] = true
+		}
+
+		var missing []string
+
+		for _, impl := range sd.Implements {
+			traitName := traitBaseName(impl)
+			if _, ok2 := cg.traits[traitName]; !ok2 {
+				if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
+					traitName = traitName[idx+2:]
+				}
+			}
+
+			if traitName == "implicit" {
+				continue
+			}
+
+			td, ok2 := cg.traits[traitName]
+			if !ok2 {
+				continue
+			}
+
+			if td.IsAlias {
+				// For as-fn aliases, the impl is `fn ::T(...)` (predeclared as
+				// `Struct_T_T` per Phase 1 parser convention) or the trait's own
+				// default if it has one.
+				wantQual := structKey + "_" + traitName + "_" + traitName
+				wantBare := structKey + "_" + traitName
+
+				if methodNames[wantQual] || methodNames[wantBare] {
+					continue
+				}
+
+				missing = append(missing, fmt.Sprintf("fn ::%s(this %s, ...)", traitName, sd.Name))
+
+				continue
+			}
+
+			for _, m := range td.Methods {
+				// Default-bodied methods are optional.
+				if !m.IsVirtual && m.Body != nil {
+					continue
+				}
+
+				wantQual := structKey + "_" + traitName + "_" + m.Name
+				wantQualWithArgs := structKey + "_" + traitQualifierKey(bareTraitImplKey(impl)) + "_" + m.Name
+
+				if methodNames[wantQual] || methodNames[wantQualWithArgs] {
+					continue
+				}
+
+				missing = append(missing,
+					fmt.Sprintf("fn %s::%s(this %s, ...)", traitName, m.Name, sd.Name))
+			}
+		}
+
+		if len(missing) > 0 {
+			return cg.nodeErr(sd, "struct %s declares trait(s) %s but does not implement: %s",
+				sd.Name, traitListDisplay(sd.Implements), strings.Join(missing, "; "))
+		}
+	}
+
+	return nil
+}
+
+// traitListDisplay formats a struct's Implements list for diagnostics.
+func traitListDisplay(impls []ast.TypeExpr) string {
+	parts := make([]string, len(impls))
+	for i, t := range impls {
+		parts[i] = traitDisplayName(t)
+	}
+
+	return strings.Join(parts, ", ")
+}
+
 // Type-alias / monomorphization
 
 // substituteTypeInTypeExpr replaces named type parameters in a TypeExpr

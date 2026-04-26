@@ -1230,6 +1230,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Validate trait-impl completeness: every struct that declares (T1, T2, ...)
+	// must provide qualified impls for each virtual method of each listed trait.
+	// Default-bodied methods (e.g. labeled.label) remain optional. Reports all
+	// missing impls per struct in one error so users can fix them in one pass.
+	if err := cg.checkAllTraitImplsComplete(prog.Stmts); err != nil {
+		return nil, err
+	}
+
 	// Validate #pure functions: transitive side-effect check.
 	// Validate #no_recurse functions: transitive call-graph cycle check.
 	// Both run after predeclaration so all function signatures and tags are known.
