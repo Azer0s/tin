@@ -98,7 +98,7 @@ fn main() i64 = return 0
 # ─── Phase B: type whitelist enforcement ──────────────────────────────
 
 # ── struct param rejected (use pointer instead) ──
-assert_err "struct param rejected" "named user types at the interop boundary" '
+assert_err "struct param rejected" "only allows #packed user structs" '
 struct point =
   x i32
 
@@ -108,7 +108,7 @@ fn main() i64 = return 0
 '
 
 # ── struct return rejected (use pointer instead) ──
-assert_err "struct return rejected" "named user types at the interop boundary" '
+assert_err "struct return rejected" "only allows #packed user structs" '
 struct point =
   x i32
 
@@ -141,6 +141,17 @@ fn main() i64 = return 0
 # ── callback with non-primitive inner type rejected ──
 assert_err "callback with string inner rejected" "callback inner type" '
 fn{#interop} bad(cb fn(string) i32) i32 = return cb("x")
+
+fn main() i64 = return 0
+'
+
+# ── packed by-value: large naturally-aligned struct rejected ──
+assert_err "large naturally-aligned packed struct rejected" "too large for v1 by-value interop" '
+struct {#packed} big =
+  a i64
+  b i64
+
+fn{#interop} f(p big) i64 = return p.a + p.b
 
 fn main() i64 = return 0
 '
@@ -235,6 +246,26 @@ fn main() i64 = return 0
 
 assert_ok "fat array param accepted" '
 fn{#interop} good(xs [i32]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
+assert_ok "packed by-value pt accepted (i64 ABI)" '
+struct {#packed} pt =
+  x i32
+  y i32
+
+fn{#interop} sum_pt(p pt) i32 = return p.x + p.y
+
+fn main() i64 = return 0
+'
+
+assert_ok "packed by-value small accepted (byval ABI)" '
+struct {#packed} small =
+  a u8
+  b u16
+
+fn{#interop} sum_small(p small) i32 = return (p.a as i32) + (p.b as i32)
 
 fn main() i64 = return 0
 '

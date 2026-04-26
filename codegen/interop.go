@@ -299,18 +299,16 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		case v.Name == "atom":
 			return "`atom` has no stable C representation in v1"
 		}
-		// Pass-by-value user structs (packed or not) are not
-		// representable today: the C ABI for struct args (SysV's
-		// classification rules, hidden sret pointers, etc.) does not
-		// match LLVM's default lowering for aggregate types, so the
-		// wrapper would silently disagree with the C caller about how
-		// the struct sits in registers. Force users to pass a *void
-		// opaque handle and cast inside Tin instead.
+		// Allow #packed structs by value: the wrapper applies SysV's
+		// struct-coercion rules so the C-side struct ABI agrees with
+		// what LLVM emits for our wrapper signature. Non-packed user
+		// structs would carry vtable pointers and field padding that
+		// C cannot anticipate, so they remain rejected.
 		if cg.interopPackedStructs[v.Name] {
-			return "pass-by-value user structs are not supported at the interop boundary; pass *void as an opaque handle (struct " + v.Name + " is #packed but the C ABI for struct values does not match Tin's LLVM lowering)"
+			return ""
 		}
 
-		return "v1 does not allow named user types at the interop boundary; pass *void as an opaque handle and cast inside Tin"
+		return "v1 only allows #packed user structs at the interop boundary; pass *void as an opaque handle for non-packed structs"
 
 	case *ast.PointerType:
 		// Allow *void, *<primitive>, or *<another-pointer>. Reject
@@ -484,6 +482,29 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		case "callback":
 			// Wrapper takes the raw C function pointer as i8*.
 			wrapperParams = append(wrapperParams, ir.NewParam(p.Name, irtypes.I8Ptr))
+		case "packed":
+			structName := p.Type.(*ast.SimpleType).Name
+
+			shape, _, err := cg.packedABIShape(structName)
+			if err != nil {
+				return err
+			}
+
+			switch shape {
+			case "i8", "i16", "i32", "i64":
+				wrapperParams = append(wrapperParams,
+					ir.NewParam(p.Name, abiIntegerType(shape)))
+			case "two_i64":
+				wrapperParams = append(wrapperParams,
+					ir.NewParam(p.Name+".lo", irtypes.I64),
+					ir.NewParam(p.Name+".hi", irtypes.I64))
+			case "byval":
+				rawTy := cg.packedUserStructType(structName)
+
+				bv := ir.NewParam(p.Name, irtypes.I8Ptr)
+				bv.Attrs = append(bv.Attrs, ir.Byval{Typ: rawTy})
+				wrapperParams = append(wrapperParams, bv)
+			}
 		default:
 			t, err := cg.tinTypeToLLVM(p.Type)
 			if err != nil {
@@ -510,6 +531,31 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		// Match C's byte-sized bool ABI; we zero-extend the i1 from
 		// the internal call into this i8.
 		retType = irtypes.I8
+	case "packed":
+		structName := fn.RetType.(*ast.SimpleType).Name
+
+		shape, _, err := cg.packedABIShape(structName)
+		if err != nil {
+			return err
+		}
+
+		switch shape {
+		case "i8", "i16", "i32", "i64":
+			retType = abiIntegerType(shape)
+		case "two_i64":
+			retType = irtypes.NewStruct(irtypes.I64, irtypes.I64)
+		case "byval":
+			// sret hidden first param; the wrapper's nominal return
+			// is void. The sret target is the user-fields-only struct
+			// type so the wrapper signature matches the C ABI for the
+			// equivalent packed struct.
+			rawTy := cg.packedUserStructType(structName)
+
+			sret := ir.NewParam(".sret", irtypes.NewPointer(rawTy))
+			sret.Attrs = append(sret.Attrs, ir.SRet{Typ: rawTy})
+			wrapperParams = append([]*ir.Param{sret}, wrapperParams...)
+			retType = irtypes.Void
+		}
 	case "slice":
 		// Reshape: status return + two trailing out-params.
 		at := fn.RetType.(*ast.ArrayType)
@@ -546,7 +592,13 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 	var allocatedTemps []value.Value
 
+	// Skip past the prepended sret slot when the return is byval.
 	wrapperIdx := 0
+	if retKind == "packed" {
+		if shape, _, _ := cg.packedABIShape(fn.RetType.(*ast.SimpleType).Name); shape == "byval" {
+			wrapperIdx = 1
+		}
+	}
 
 	for paramIdx, kind := range paramKinds {
 		switch kind {
@@ -571,6 +623,63 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			zero := constant.NewInt(irtypes.I8, 0)
 			i1Val := block.NewICmp(enum.IPredNE, b, zero)
 			args = append(args, i1Val)
+		case "packed":
+			structName := fn.Params[paramIdx].Type.(*ast.SimpleType).Name
+
+			shape, _, err := cg.packedABIShape(structName)
+			if err != nil {
+				return err
+			}
+
+			tinTy, err := cg.tinTypeToLLVM(fn.Params[paramIdx].Type)
+			if err != nil {
+				return err
+			}
+
+			tinAlloca := block.NewAlloca(tinTy)
+
+			// Init type_id at field 0.
+			tid := constant.NewInt(irtypes.I32, int64(cg.structTypeIDs[structName]))
+			tidSlot := block.NewGetElementPtr(tinTy, tinAlloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 0))
+			block.NewStore(tid, tidSlot)
+
+			userOffBytes := cg.userFieldsByteOffset(structName)
+			tinAllocaI8 := block.NewBitCast(tinAlloca, irtypes.I8Ptr)
+			userBase := block.NewGetElementPtr(irtypes.I8, tinAllocaI8,
+				constant.NewInt(irtypes.I64, int64(userOffBytes)))
+
+			switch shape {
+			case "i8", "i16", "i32", "i64":
+				v := wrapperParams[wrapperIdx]
+				wrapperIdx++
+
+				slot := block.NewBitCast(userBase, irtypes.NewPointer(abiIntegerType(shape)))
+				block.NewStore(v, slot)
+			case "two_i64":
+				lo := wrapperParams[wrapperIdx]
+				hi := wrapperParams[wrapperIdx+1]
+				wrapperIdx += 2
+
+				loSlot := block.NewBitCast(userBase, irtypes.NewPointer(irtypes.I64))
+				block.NewStore(lo, loSlot)
+
+				hiBase := block.NewGetElementPtr(irtypes.I8, userBase,
+					constant.NewInt(irtypes.I64, 8))
+				hiSlot := block.NewBitCast(hiBase, irtypes.NewPointer(irtypes.I64))
+				block.NewStore(hi, hiSlot)
+			case "byval":
+				bvParam := wrapperParams[wrapperIdx]
+				wrapperIdx++
+
+				// memcpy the user-fields region from the byval ptr.
+				_, totalSize, _ := cg.packedABIShape(structName)
+				cg.emitMemcpy(block, userBase, bvParam, int64(totalSize))
+			}
+
+			loaded := block.NewLoad(tinTy, tinAlloca)
+			args = append(args, loaded)
 		case "callback":
 			rawCb := wrapperParams[wrapperIdx]
 			wrapperIdx++
@@ -691,6 +800,53 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	case "bool":
 		// Zero-extend the internal i1 to i8 for the C ABI.
 		finalRet = block.NewZExt(rawRet, irtypes.I8)
+	case "packed":
+		structName := fn.RetType.(*ast.SimpleType).Name
+
+		shape, totalSize, err := cg.packedABIShape(structName)
+		if err != nil {
+			return err
+		}
+
+		tinTy, _ := cg.tinTypeToLLVM(fn.RetType)
+		tinAlloca := block.NewAlloca(tinTy)
+		block.NewStore(rawRet, tinAlloca)
+
+		userOffBytes := cg.userFieldsByteOffset(structName)
+		tinAllocaI8 := block.NewBitCast(tinAlloca, irtypes.I8Ptr)
+		userBase := block.NewGetElementPtr(irtypes.I8, tinAllocaI8,
+			constant.NewInt(irtypes.I64, int64(userOffBytes)))
+
+		switch shape {
+		case "i8", "i16", "i32", "i64":
+			slot := block.NewBitCast(userBase, irtypes.NewPointer(abiIntegerType(shape)))
+			finalRet = block.NewLoad(abiIntegerType(shape), slot)
+		case "two_i64":
+			loSlot := block.NewBitCast(userBase, irtypes.NewPointer(irtypes.I64))
+			lo := block.NewLoad(irtypes.I64, loSlot)
+
+			hiBase := block.NewGetElementPtr(irtypes.I8, userBase,
+				constant.NewInt(irtypes.I64, 8))
+			hiSlot := block.NewBitCast(hiBase, irtypes.NewPointer(irtypes.I64))
+			hi := block.NewLoad(irtypes.I64, hiSlot)
+
+			pairTy := irtypes.NewStruct(irtypes.I64, irtypes.I64)
+			pairAlloca := block.NewAlloca(pairTy)
+			loP := block.NewGetElementPtr(pairTy, pairAlloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 0))
+			hiP := block.NewGetElementPtr(pairTy, pairAlloca,
+				constant.NewInt(irtypes.I32, 0),
+				constant.NewInt(irtypes.I32, 1))
+			block.NewStore(lo, loP)
+			block.NewStore(hi, hiP)
+			finalRet = block.NewLoad(pairTy, pairAlloca)
+		case "byval":
+			// sret: copy user fields into the caller-provided slot.
+			sretParam := wrapperParams[0] // sret was prepended
+			cg.emitMemcpy(block, sretParam, userBase, int64(totalSize))
+			// finalRet stays nil; we ret void below.
+		}
 	case "slice":
 		// Pull out the typed-slice fields and rebuild as the i8*-typed
 		// slice the runtime helper expects. Then call slice_out which
@@ -753,6 +909,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 //   "slice"    - Tin fat array [T]
 //   "bool"     - Tin bool (i1) widened to/from C uint8_t
 //   "callback" - fn(...) typed; wrapped via per-signature thunk
+//   "packed"   - by-value #packed user struct
 //   ""         - passthrough (primitives, pointers)
 func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok {
@@ -761,6 +918,10 @@ func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 			return "string"
 		case "bool":
 			return "bool"
+		}
+
+		if cg.interopPackedStructs[st.Name] {
+			return "packed"
 		}
 	}
 
@@ -776,7 +937,7 @@ func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 }
 
 // classifyInteropReturn returns the marshaling shape for a Tin return
-// type. "void" / "string" / "slice" / "bool" / "" (passthrough).
+// type. "void" / "string" / "slice" / "bool" / "packed" / "" (passthrough).
 func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
@@ -791,6 +952,10 @@ func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 		case "bool":
 			return "bool"
 		}
+
+		if cg.interopPackedStructs[st.Name] {
+			return "packed"
+		}
 	}
 
 	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
@@ -798,6 +963,144 @@ func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 	}
 
 	return ""
+}
+
+// packedABIShape categorises a #packed Tin struct for the SysV
+// x86_64 / AAPCS64 boundary:
+//   "i8" / "i16" / "i32" / "i64": all fields naturally align AND total
+//                                 size <= 8 - clang would coerce to
+//                                 the matching integer register.
+//   "two_i64":                    same but 9-16 bytes.
+//   "byval":                      anything else (mixed alignment, or
+//                                 size > 16). Passed via byval ptr,
+//                                 returned via sret hidden ptr.
+// Returns ("", err) if the struct is not eligible (e.g. has trait
+// vtables - the wrapper would not know how to fill them).
+func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
+	if cg.vtableOffset(structName) != 0 {
+		return "", 0, fmt.Errorf("packed struct %s implements traits; pass-by-value at the interop boundary requires no vtable pointers", structName)
+	}
+
+	userTypes := cg.structFieldLLVMTypes[structName]
+	if userTypes == nil {
+		return "", 0, fmt.Errorf("packed struct %s: layout not yet computed", structName)
+	}
+
+	size := 0
+	for _, t := range userTypes {
+		size += int(llvmTypeSize(t))
+	}
+
+	if size == 0 {
+		return "", 0, fmt.Errorf("packed struct %s has zero size", structName)
+	}
+	// Single-register coercion: works when the packed layout matches
+	// the natural (non-packed) byte layout AND the struct fits in one
+	// integer eightbyte. Both LLVM and clang lower it to the same
+	// integer type so the cross-language ABI agrees.
+	if size <= 8 && naturallyAligned(userTypes) {
+		switch size {
+		case 1:
+			return "i8", size, nil
+		case 2:
+			return "i16", size, nil
+		case 3, 4:
+			return "i32", size, nil
+		case 5, 6, 7, 8:
+			return "i64", size, nil
+		}
+	}
+	// Non-natural alignment of any size: clang uses byval/sret.
+	if !naturallyAligned(userTypes) {
+		return "byval", size, nil
+	}
+
+	return "", size, fmt.Errorf("packed struct %s (%d bytes, naturally aligned) is too large for v1 by-value interop; pass *%s instead", structName, size, structName)
+}
+
+// naturallyAligned reports whether a packed list of LLVM types would
+// have the SAME byte layout under natural alignment - i.e. packed
+// would not actually change anything. When true, clang treats the
+// struct the same as its non-packed counterpart and chooses register
+// passing for small sizes; when false, clang chooses byval.
+func naturallyAligned(types []irtypes.Type) bool {
+	off := uint64(0)
+
+	for _, t := range types {
+		sz, align := llvmTypeSizeAlign(t)
+		if align == 0 {
+			align = 1
+		}
+
+		if off%align != 0 {
+			return false
+		}
+
+		off += sz
+	}
+
+	return true
+}
+
+// abiIntegerType returns the LLVM integer type matching one of the
+// integer ABI shapes ("i8".."i64").
+func abiIntegerType(shape string) irtypes.Type {
+	switch shape {
+	case "i8":
+		return irtypes.I8
+	case "i16":
+		return irtypes.I16
+	case "i32":
+		return irtypes.I32
+	case "i64":
+		return irtypes.I64
+	}
+
+	return nil
+}
+
+// userFieldsByteOffset returns the byte offset where a struct's user
+// fields start, accounting for the i32 type_id at index 0 and any
+// vtable pointer slots. For #packed structs (no padding), this is the
+// offset our register-coerced ABI shape stores into.
+func (cg *CodeGen) userFieldsByteOffset(structName string) int {
+	off := 4 // i32 type_id
+	for range cg.structVtableOrder[structName] {
+		off += 8 // each vtable pointer is 8 bytes on 64-bit targets
+	}
+
+	return off
+}
+
+// packedUserStructType returns a packed LLVM struct type containing
+// just the user fields of a #packed Tin struct. Used as the byval/sret
+// target type so the wrapper signature matches what clang would emit
+// for the equivalent C `__attribute__((packed))` struct argument.
+func (cg *CodeGen) packedUserStructType(structName string) *irtypes.StructType {
+	st := irtypes.NewStruct(cg.structFieldLLVMTypes[structName]...)
+	st.Packed = true
+
+	return st
+}
+
+// emitMemcpy emits a `llvm.memcpy.p0i8.p0i8.i64(dst, src, n, false)`
+// call. dst and src are bitcast to i8* if needed.
+func (cg *CodeGen) emitMemcpy(block *ir.Block, dst, src value.Value, n int64) {
+	dstI8 := dst
+	srcI8 := src
+
+	if _, ok := dst.Type().(*irtypes.PointerType); ok && !dst.Type().Equal(irtypes.I8Ptr) {
+		dstI8 = block.NewBitCast(dst, irtypes.I8Ptr)
+	}
+
+	if _, ok := src.Type().(*irtypes.PointerType); ok && !src.Type().Equal(irtypes.I8Ptr) {
+		srcI8 = block.NewBitCast(src, irtypes.I8Ptr)
+	}
+
+	block.NewCall(cg.ensureMemcpy(),
+		dstI8, srcI8,
+		constant.NewInt(irtypes.I64, n),
+		constant.NewInt(irtypes.I1, 0))
 }
 
 // ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)`.

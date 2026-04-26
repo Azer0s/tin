@@ -548,12 +548,39 @@ void *p = make_point(1, 2);
 tin_release(p);   // free the Tin-allocated block, NULL-safe
 ```
 
-Pass-by-value user structs (including `#packed`) are rejected at the
-`#interop` boundary. The C ABI for struct values follows
-classification rules (SysV's INTEGER/SSE/MEMORY classes, AArch64
-HVA/HFA, etc.) that LLVM aggregate types do not match generically. To
-expose struct data to C, return a `*void` opaque handle as above and
-provide `#interop` accessors for each field.
+Pass-by-value `#packed` structs **are supported**, with size
+limitations dictated by the SysV x86_64 ABI:
+
+- Naturally-aligned packed structs of **≤ 8 bytes** travel in a single
+  integer register (e.g. `struct{#packed} pt = x i32; y i32` → `i64`).
+- Packed structs whose layout would have padding under natural
+  alignment travel via byval pointer / sret hidden return slot (e.g.
+  `struct{#packed} small = a u8; b u16; c u8` → byval).
+- Naturally-aligned packed structs **larger than 8 bytes** are
+  rejected today (the multi-eightbyte coercion clang emits is
+  content-dependent and not implemented in v1). Pass them via
+  `*void` instead.
+
+The emitted header declares each used `#packed` Tin struct as a C
+`typedef struct __attribute__((packed)) { ... } Name;` so callers can
+construct values directly:
+
+```rust
+struct {#packed} pt =
+  x i32
+  y i32
+
+fn{#interop} make_pt(x i32, y i32) pt = return pt{x: x, y: y}
+fn{#interop} sum_pt(p pt) i32 = return p.x + p.y
+```
+
+```c
+pt p = make_pt(7, 11);
+printf("%d\n", sum_pt(p));  // 18
+```
+
+Non-`#packed` user structs remain rejected — they carry trait vtable
+pointers and field padding that have no stable C representation.
 
 NULL passed to a `#interop` function expecting a non-NULL pointer
 will segfault inside the Tin body. Treat all pointer params as

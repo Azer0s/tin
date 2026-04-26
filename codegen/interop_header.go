@@ -31,6 +31,11 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 	b.WriteString("#include <stddef.h>\n\n")
 	b.WriteString("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
 
+	// Emit C struct typedefs for every #packed struct that appears in
+	// any #interop signature (param or return). Users get a layout
+	// matching the wrapper's expected one without hand-writing it.
+	cg.writePackedStructTypedefs(&b, stmts)
+
 	// Allocator-callback + runtime-init declarations. Always emitted so
 	// the typedefs are available even when no #interop function uses
 	// them directly.
@@ -50,7 +55,7 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 			continue
 		}
 
-		writeInteropPrototype(&b, fn)
+		cg.writeInteropPrototype(&b, fn)
 	}
 
 	b.WriteString("\n#ifdef __cplusplus\n}\n#endif\n")
@@ -65,9 +70,9 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 
 // writeInteropPrototype renders one C prototype + an inline comment
 // echoing the original Tin signature.
-func writeInteropPrototype(b *strings.Builder, fn *ast.FuncDecl) {
-	retC := cReturnType(fn.RetType)
-	cParams, sliceReturnExtras := cParamList(fn)
+func (cg *CodeGen) writeInteropPrototype(b *strings.Builder, fn *ast.FuncDecl) {
+	retC := cg.cReturnType(fn.RetType)
+	cParams, sliceReturnExtras := cg.cParamList(fn)
 
 	allParams := cParams
 	allParams = append(allParams, sliceReturnExtras...)
@@ -82,8 +87,9 @@ func writeInteropPrototype(b *strings.Builder, fn *ast.FuncDecl) {
 
 // cReturnType maps the Tin return type to its C wrapper return.
 // Slice returns become `int` (the status return). String returns
-// become `const char*`. Everything else uses cTypeName.
-func cReturnType(t ast.TypeExpr) string {
+// become `const char*`. Packed structs use the typedef'd struct name.
+// Everything else uses cTypeName.
+func (cg *CodeGen) cReturnType(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
 	}
@@ -92,8 +98,14 @@ func cReturnType(t ast.TypeExpr) string {
 		return "int"
 	}
 
-	if st, ok := t.(*ast.SimpleType); ok && st.Name == "string" {
-		return "const char *"
+	if st, ok := t.(*ast.SimpleType); ok {
+		if st.Name == "string" {
+			return "const char *"
+		}
+
+		if cg.interopPackedStructs[st.Name] {
+			return st.Name
+		}
 	}
 
 	return cTypeName(t)
@@ -102,7 +114,7 @@ func cReturnType(t ast.TypeExpr) string {
 // cParamList builds the C parameter list and any extra trailing
 // out-params required by a slice return (matches the wrapper IR
 // signature).
-func cParamList(fn *ast.FuncDecl) ([]string, []string) {
+func (cg *CodeGen) cParamList(fn *ast.FuncDecl) ([]string, []string) {
 	out := make([]string, 0, len(fn.Params))
 
 	for _, p := range fn.Params {
@@ -117,6 +129,11 @@ func cParamList(fn *ast.FuncDecl) ([]string, []string) {
 
 		if st, ok := p.Type.(*ast.SimpleType); ok && st.Name == "string" {
 			out = append(out, fmt.Sprintf("const char *%s", p.Name))
+			continue
+		}
+
+		if st, ok := p.Type.(*ast.SimpleType); ok && cg.interopPackedStructs[st.Name] {
+			out = append(out, fmt.Sprintf("%s %s", st.Name, p.Name))
 			continue
 		}
 
@@ -138,6 +155,61 @@ func cParamList(fn *ast.FuncDecl) ([]string, []string) {
 	}
 
 	return out, extras
+}
+
+// writePackedStructTypedefs scans all #interop signatures, finds the
+// #packed user struct names referenced by value, and emits a C
+// `typedef struct __attribute__((packed)) { ... } Name;` for each so
+// the user's C code can declare and pass values directly.
+func (cg *CodeGen) writePackedStructTypedefs(b *strings.Builder, stmts []ast.Node) {
+	used := map[string]bool{}
+
+	addIfPacked := func(t ast.TypeExpr) {
+		if t == nil {
+			return
+		}
+
+		st, ok := t.(*ast.SimpleType)
+		if !ok || !cg.interopPackedStructs[st.Name] {
+			return
+		}
+
+		used[st.Name] = true
+	}
+
+	for _, node := range stmts {
+		fn, ok := node.(*ast.FuncDecl)
+		if !ok || !hasTag(fn.Tags, "interop") {
+			continue
+		}
+
+		for _, p := range fn.Params {
+			addIfPacked(p.Type)
+		}
+
+		addIfPacked(fn.RetType)
+	}
+
+	if len(used) == 0 {
+		return
+	}
+
+	b.WriteString("/* #packed Tin structs surfaced at the interop boundary. */\n")
+
+	for _, node := range stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok || !used[sd.Name] {
+			continue
+		}
+
+		b.WriteString("typedef struct __attribute__((packed)) {\n")
+
+		for _, f := range sd.Fields {
+			b.WriteString("    " + cTypeName(f.Type) + " " + f.Name + ";\n")
+		}
+
+		b.WriteString("} " + sd.Name + ";\n\n")
+	}
 }
 
 // cCallbackDecl renders a callback parameter declaration in C
