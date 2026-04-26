@@ -143,6 +143,7 @@ func applyMemberTag(existing *[]string, tagName string) {
 		a, b := pair[0], pair[1]
 
 		conflictingPartner := ""
+
 		switch tagName {
 		case a:
 			conflictingPartner = b

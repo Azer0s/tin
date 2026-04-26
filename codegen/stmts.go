@@ -188,7 +188,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		*ast.AwaitMatchStmt:
 		// Tail match in a value-returning function: each arm provides the
 		// result expression, e.g. `fn f(x) T = match x: case A: 1 case B: 2`.
-		// Compile in expression mode so the arm bodies materialise the
+		// Compile in expression mode so the arm bodies materialize the
 		// function result rather than running as statements with no value.
 		if ms, ok := b.(*ast.MatchStmt); ok && !irtypes.IsVoid(retType) && tailMatchUsableAsExpr(ms) {
 			val, err := cg.genMatchAsExpr(block, ms)

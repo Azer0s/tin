@@ -278,9 +278,9 @@ var interopAllowedPrimitives = map[string]bool{
 	"i8": true, "i16": true, "i32": true, "i64": true,
 	"u8": true, "u16": true, "u32": true, "u64": true,
 	"f32": true, "f64": true,
-	"bool":  true,
-	"char":  true,
-	"byte":  true,
+	"bool":   true,
+	"char":   true,
+	"byte":   true,
 	"size_t": true,
 	"uint32": true,
 }
@@ -426,12 +426,12 @@ func programHasInteropFunc(stmts []ast.Node) bool {
 
 // emitInteropWrappers walks the program for #interop-tagged functions
 // and emits a C-callable wrapper for each. The wrapper:
-//   1. Calls _tin_runtime_init_once() (idempotent).
-//   2. Marshals each argument from its C ABI shape to the Tin shape
-//      (string, fat array, bool widening; primitives passthrough).
-//   3. Calls the Tin-internal entry point.
-//   4. Marshals the return value back to a C-friendly shape.
-//   5. Releases any temporary ARC allocations created at the boundary.
+//  1. Calls _tin_runtime_init_once() (idempotent).
+//  2. Marshals each argument from its C ABI shape to the Tin shape
+//     (string, fat array, bool widening; primitives passthrough).
+//  3. Calls the Tin-internal entry point.
+//  4. Marshals the return value back to a C-friendly shape.
+//  5. Releases any temporary ARC allocations created at the boundary.
 func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 	for _, node := range stmts {
 		fn, ok := node.(*ast.FuncDecl)
@@ -657,6 +657,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 	// Skip past the prepended sret slot when the return is byval.
 	wrapperIdx := 0
+
 	if retKind == "packed" {
 		if shape, _, _ := cg.packedABIShape(fn.RetType.(*ast.SimpleType).Name); shape == "byval" {
 			wrapperIdx = 1
@@ -767,6 +768,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			wrapperIdx++
 
 			ft := fn.Params[paramIdx].Type.(*ast.FuncType)
+
 			thunk, err := cg.getOrCreateCallbackThunk(ft)
 			if err != nil {
 				return err
@@ -871,7 +873,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 	// Marshal the return value out to C.
 	var (
-		finalRet value.Value
+		finalRet  value.Value
 		retTinPtr value.Value // ARC ptr to release after extraction
 	)
 
@@ -892,6 +894,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
 
 		ftRet := fn.RetType.(*ast.FuncType)
+
 		disp, err := cg.getOrCreateClosureDispatcher(ftRet)
 		if err != nil {
 			return err
@@ -1035,12 +1038,13 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 // classifyInteropParam returns the marshaling shape for a Tin
 // parameter type. Recognized:
-//   "string"   - Tin string fat pointer
-//   "slice"    - Tin fat array [T]
-//   "bool"     - Tin bool (i1) widened to/from C uint8_t
-//   "callback" - fn(...) typed; wrapped via per-signature thunk
-//   "packed"   - by-value #packed user struct
-//   ""         - passthrough (primitives, pointers)
+//
+//	"string"   - Tin string fat pointer
+//	"slice"    - Tin fat array [T]
+//	"bool"     - Tin bool (i1) widened to/from C uint8_t
+//	"callback" - fn(...) typed; wrapped via per-signature thunk
+//	"packed"   - by-value #packed user struct
+//	""         - passthrough (primitives, pointers)
 func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch st.Name {
@@ -1100,15 +1104,17 @@ func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 	return ""
 }
 
-// packedABIShape categorises a #packed Tin struct for the SysV
+// packedABIShape categorizes a #packed Tin struct for the SysV
 // x86_64 / AAPCS64 boundary:
-//   "i8" / "i16" / "i32" / "i64": all fields naturally align AND total
-//                                 size <= 8 - clang would coerce to
-//                                 the matching integer register.
-//   "two_i64":                    same but 9-16 bytes.
-//   "byval":                      anything else (mixed alignment, or
-//                                 size > 16). Passed via byval ptr,
-//                                 returned via sret hidden ptr.
+//
+//	"i8" / "i16" / "i32" / "i64": all fields naturally align AND total
+//	                              size <= 8 - clang would coerce to
+//	                              the matching integer register.
+//	"two_i64":                    same but 9-16 bytes.
+//	"byval":                      anything else (mixed alignment, or
+//	                              size > 16). Passed via byval ptr,
+//	                              returned via sret hidden ptr.
+//
 // Returns ("", err) if the struct is not eligible (e.g. has trait
 // vtables - the wrapper would not know how to fill them).
 func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
@@ -1139,6 +1145,13 @@ func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
 				return "f32", size, nil
 			case irtypes.FloatKindDouble:
 				return "f64", size, nil
+			case irtypes.FloatKindHalf,
+				irtypes.FloatKindFP128,
+				irtypes.FloatKindX86_FP80,
+				irtypes.FloatKindPPC_FP128:
+				// f16/f128/x86_fp80/ppc_fp128 don't have a SSE single-
+				// register ABI fast-path here; fall through to the
+				// generic integer-eightbyte handling below.
 			}
 		}
 	}
@@ -1189,6 +1202,7 @@ func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
 //   - sole float field -> that float type (SSE class)
 //   - any mix or multi-integer -> integer of the chunk's used byte count
 //   - multiple floats in one chunk -> reject (vector ABI not in v1)
+//
 // Returns (lo type, hi type, error).
 func classifyTwoEightbytes(userTypes []irtypes.Type, structName string) (irtypes.Type, irtypes.Type, error) {
 	type fieldRange struct {
@@ -1578,6 +1592,7 @@ func cParamExpansion(t ast.TypeExpr, tinTy irtypes.Type) []irtypes.Type {
 	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
 		// Slice: T* + i64 length.
 		fatStruct := tinTy.(*irtypes.StructType)
+
 		return []irtypes.Type{fatStruct.Fields[0], irtypes.I64}
 	}
 
@@ -1615,6 +1630,7 @@ func (cg *CodeGen) marshalTinToCInThunk(b *ir.Block, p *ir.Param, t ast.TypeExpr
 			// NUL-terminated by construction so it doubles as a
 			// const char*.
 			dataPtr := b.NewExtractValue(p, 0)
+
 			return []value.Value{dataPtr}
 		case "bool":
 			return []value.Value{b.NewZExt(p, irtypes.I8)}
@@ -1844,6 +1860,7 @@ func (cg *CodeGen) marshalCToTinForDispatch(b *ir.Block, pieces []*ir.Param,
 		case "string":
 			tinStr := b.NewCall(cg.ensureInteropStrIn(), pieces[0])
 			temp := b.NewExtractValue(tinStr, 0)
+
 			return tinStr, temp
 		case "bool":
 			return b.NewICmp(enum.IPredNE, pieces[0], constant.NewInt(irtypes.I8, 0)), nil
@@ -1907,6 +1924,7 @@ func (cg *CodeGen) marshalTinToCForDispatch(b *ir.Block, v value.Value,
 				// after we've copied its bytes into the C buffer.
 				ptr := b.NewExtractValue(v, 0)
 				b.NewCall(cg.ensureRelease(), ptr)
+
 				return out
 			case "bool":
 				return b.NewZExt(v, irtypes.I8)
@@ -2041,4 +2059,3 @@ func typeExprContains(t ast.TypeExpr, name string) bool {
 
 	return false
 }
-

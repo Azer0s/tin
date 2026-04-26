@@ -360,14 +360,14 @@ type CodeGen struct {
 
 	// interopCbThunks caches per-signature thunks emitted to bridge
 	// raw C function pointers into Tin's fat fn-ptr calling convention.
-	// Keyed by sanitised (ret, params) signature.
+	// Keyed by sanitized (ret, params) signature.
 	interopCbThunks map[string]*ir.Func
 
 	// interopDispatchers caches per-signature dispatchers used to
 	// invoke a Tin closure returned to C through a mmap'd trampoline.
 	// The dispatcher's first IR instruction reads %r10 (set by the
 	// trampoline) to recover the fat-fn-ptr address, then tail-calls
-	// fn(env, args...). Keyed by sanitised (ret, params) signature.
+	// fn(env, args...). Keyed by sanitized (ret, params) signature.
 	interopDispatchers map[string]*ir.Func
 
 	// interopPackedStructs is the set of `#packed` struct names

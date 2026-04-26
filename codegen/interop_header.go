@@ -66,9 +66,11 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 	cbTypedefs := cg.collectCallbackReturnTypedefs(stmts)
 	if len(cbTypedefs) > 0 {
 		b.WriteString("/* Function-pointer typedefs for #interop callback returns. */\n")
+
 		for _, td := range cbTypedefs {
 			b.WriteString(td.line + "\n")
 		}
+
 		b.WriteString("\n")
 	}
 
@@ -158,16 +160,19 @@ func (cg *CodeGen) cParamList(fn *ast.FuncDecl) ([]string, []string) {
 
 		if st, ok := p.Type.(*ast.SimpleType); ok && st.Name == "string" {
 			out = append(out, fmt.Sprintf("const char *%s", p.Name))
+
 			continue
 		}
 
 		if st, ok := p.Type.(*ast.SimpleType); ok && cg.interopPackedStructs[st.Name] {
 			out = append(out, fmt.Sprintf("%s %s", st.Name, p.Name))
+
 			continue
 		}
 
 		if ft, ok := p.Type.(*ast.FuncType); ok {
 			out = append(out, cCallbackDecl(ft, p.Name))
+
 			continue
 		}
 

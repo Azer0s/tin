@@ -287,9 +287,11 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 
 					if p.check(lexer.KW_CONST) {
 						isConst = true
+
 						p.advance()
 					} else if p.check(lexer.KW_VAR) {
 						isVar = true
+
 						p.advance()
 					}
 

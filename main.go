@@ -508,7 +508,7 @@ doneFlags:
 				explicitTarget = true
 			}
 		default:
-			// Recognise --emit-header=<path> as a single token; the rest
+			// Recognize --emit-header=<path> as a single token; the rest
 			// of the loop ignores unknown args so they pass through to
 			// the linker / clang driver.
 			if strings.HasPrefix(os.Args[i], "--emit-header=") {

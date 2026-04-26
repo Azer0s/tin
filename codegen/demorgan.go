@@ -146,6 +146,7 @@ func (cg *CodeGen) pushNotInward(orig *ast.UnaryExpr, inner ast.Node) ast.Node {
 			leftNeg.SetPos(orig.Pos())
 			rightNeg := &ast.UnaryExpr{Op: orig.Op, Expr: x.Right}
 			rightNeg.SetPos(orig.Pos())
+
 			notL := cg.simplifyBool(leftNeg)
 			notR := cg.simplifyBool(rightNeg)
 
@@ -245,7 +246,7 @@ func (cg *CodeGen) logDemorgan(origin ast.Node, rule string, before, after ast.N
 	b := strings.TrimSpace(ast.PrintExpr(before))
 	a := strings.TrimSpace(ast.PrintExpr(after))
 
-	fmt.Fprintf(cg.matchInfoSink(), "[demorgan] %s:%d:%d %s: %s => %s\n",
+	_, _ = fmt.Fprintf(cg.matchInfoSink(), "[demorgan] %s:%d:%d %s: %s => %s\n",
 		file, pos.Line, pos.Col, rule, b, a)
 }
 
@@ -261,7 +262,7 @@ func (cg *CodeGen) emitBoolAnalysisWarning(pos ast.Pos, value bool, loc string) 
 		truth = "false"
 	}
 
-	fmt.Fprintf(cg.matchInfoSink(),
+	_, _ = fmt.Fprintf(cg.matchInfoSink(),
 		"%s:%d:%d: warning: %s condition is always %s\n",
 		cg.filenameForDiag(), pos.Line, pos.Col, loc, truth)
 }

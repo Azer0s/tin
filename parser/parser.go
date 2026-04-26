@@ -350,8 +350,8 @@ func (p *Parser) parseTags() []string {
 // Unknown scope names produce a parse error at the struct decl site.
 func (p *Parser) parseStructTags() ([]string, []ast.ScopedTag, error) {
 	var (
-		tags    []string
-		scoped  []ast.ScopedTag
+		tags   []string
+		scoped []ast.ScopedTag
 	)
 
 	if !p.check(lexer.LBRACE) {
@@ -397,7 +397,7 @@ func (p *Parser) parseStructTags() ([]string, []ast.ScopedTag, error) {
 }
 
 // isValidStructTagScope reports whether s names one of the member
-// scopes recognised on a struct's {#tag@scope} header. Kept in sync
+// scopes recognized on a struct's {#tag@scope} header. Kept in sync
 // with the propagation table in codegen.
 func isValidStructTagScope(s string) bool {
 	switch s {

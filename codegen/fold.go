@@ -105,8 +105,8 @@ func (cg *CodeGen) tryFoldExprForWarning(n ast.Node) foldedValue {
 
 	switch e := n.(type) {
 	case *ast.BinExpr:
-		switch {
-		case e.Op == "&&" || e.Op == "and":
+		switch e.Op {
+		case "&&", "and":
 			l := cg.tryFoldExprForWarning(e.Left)
 			if l.kind == foldBool && !l.boolVal {
 				return foldedValue{kind: foldBool, boolVal: false}
@@ -120,7 +120,7 @@ func (cg *CodeGen) tryFoldExprForWarning(n ast.Node) foldedValue {
 			if l.kind == foldBool && r.kind == foldBool {
 				return foldedValue{kind: foldBool, boolVal: l.boolVal && r.boolVal}
 			}
-		case e.Op == "||" || e.Op == "or":
+		case "||", "or":
 			l := cg.tryFoldExprForWarning(e.Left)
 			if l.kind == foldBool && l.boolVal {
 				return foldedValue{kind: foldBool, boolVal: true}
