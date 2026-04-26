@@ -139,8 +139,11 @@ fn main() i64 = return 0
 '
 
 # ── callback with non-primitive inner type rejected ──
-assert_err "callback with string inner rejected" "is not a primitive C type" '
-fn{#interop} bad(cb fn(string) i32) i32 = return cb("x")
+# callbacks with string and [T] inner now SUPPORTED via thunk marshaling
+# (the corresponding positive tests live below)
+
+assert_err "callback returning slice rejected" "fat array" '
+fn{#interop} bad(cb fn() [i32]) i32 = return 0
 
 fn main() i64 = return 0
 '
@@ -224,11 +227,11 @@ fn{#interop} good(p *void) i32 =
 fn main() i64 = return 0
 '
 
-assert_err "*Struct rejected (use *void)" "unsafe at the interop boundary" '
+assert_ok "*Struct accepted (rendered as void* in header)" '
 struct point =
   x i32
 
-fn{#interop} bad(p *point) i32 = return (*p).x
+fn{#interop} good(p *point) i32 = return (*p).x
 
 fn main() i64 = return 0
 '
@@ -263,6 +266,18 @@ fn main() i64 = return 0
 
 assert_ok "[bool] accepted (1-byte-per-element)" '
 fn{#interop} count(xs [bool]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
+assert_ok "callback with string param and return accepted" '
+fn{#interop} good(cb fn(string) string, n string) string = return cb(n)
+
+fn main() i64 = return 0
+'
+
+assert_ok "callback with slice param accepted" '
+fn{#interop} good(cb fn([i32]) i32, xs [i32]) i32 = return cb(xs)
 
 fn main() i64 = return 0
 '

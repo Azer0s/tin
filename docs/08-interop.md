@@ -515,26 +515,34 @@ and the reserved name `main` are all rejected at compile time. See
 [13 - Control tags](13-control-tags.md#interop) for the full
 restriction list.
 
-### Pointer-to-struct: use `*void`, not `*MyStruct`
+### Pointer-to-struct semantics
 
 Tin user structs carry a hidden `i32 type_id` prefix (and possibly
-vtable pointers). C cannot construct one with the right layout, so a
-C-allocated `MyStruct *` passed to a `#interop` function reading
-`p->x` would silently read **the wrong field**. To prevent this trap,
-the validator rejects pointer-to-named-struct in `#interop` signatures
-and asks for `*void` instead:
+vtable pointers). C cannot construct one with the right layout, so
+the wrapper renders any `*MyStruct` parameter / return as `void*` in
+the emitted header. The pointer round-trips correctly **as long as
+it was originally produced by Tin**:
 
 ```rust
-fn{#interop} make_point(x i32, y i32) *void =
-  return (&point{x: x, y: y}) as *void
+fn{#interop} make_point(x i32, y i32) *point =
+  return &point{x: x, y: y}
 
-fn{#interop} get_x(p *void) i32 = return (p as *point).x
+fn{#interop} get_x(p *point) i32 = return (*p).x
 ```
 
-The C side sees these as opaque `void *` handles. As long as the
-pointer was originally produced by Tin (e.g. returned from another
-`#interop` call), reads work correctly. C must NOT allocate the
-struct itself.
+```c
+void *make_point(int32_t x, int32_t y);   // header renders *point as void*
+int32_t get_x(void *p);
+
+void *p = make_point(7, 11);
+printf("%d\n", get_x(p));  // 7
+tin_release(p);
+```
+
+`*void` and `*MyStruct` produce the same C-side signature; pick
+whichever reads better in your Tin code. **C must NOT allocate the
+struct itself** - the type_id prefix would be wrong and field reads
+would silently return garbage.
 
 **Lifetime caveat for `*void` returns from `#interop`.** A pointer
 returned from `&Foo{...}` is ARC-allocated with refcount 1. The
@@ -649,6 +657,13 @@ Restrictions:
 - `bool` is allowed; the thunk converts between Tin's i1 and C's
   uint8_t (matching `_Bool`/C23 `bool`, both 1 byte) on each call.
 - Callbacks are accepted only as parameters, not as return types.
+  Tin's `fn(...)T` type is a fat `{ fn, env }` pair while a C
+  function pointer has no env slot, so wrapping an arbitrary Tin
+  closure into a stable C fn pointer would need either JIT
+  trampolines (libffi) or a new "bare C fn ptr" type in the language.
+  As a workaround, return a `*void` opaque handle to your Tin
+  closure and provide a separate `#interop` entry that takes the
+  handle plus the call args.
 
 ### Spawning fibers
 

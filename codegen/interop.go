@@ -179,12 +179,20 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 }
 
 // callbackInnerReason restricts the param/return types allowed inside
-// a callback signature crossing the interop boundary. Only primitives
-// and `*void` / `*<primitive>` work because the per-signature thunk
-// emitted in codegen does not marshal complex types. The returned
-// reason is plugged in after `callback parameter ` / `callback return `
-// at the call site, so phrase the message to read naturally either way.
+// a callback signature crossing the interop boundary. Primitives,
+// pointers to primitives, `string`, and `[T]` (param-only) are
+// supported by per-signature thunk marshaling. Other aggregates are
+// rejected. The returned reason is plugged in after `callback
+// parameter ` / `callback return ` at the call site.
 func callbackInnerReason(t ast.TypeExpr) string {
+	return callbackInnerReasonFor(t, false)
+}
+
+func callbackInnerReasonReturn(t ast.TypeExpr) string {
+	return callbackInnerReasonFor(t, true)
+}
+
+func callbackInnerReasonFor(t ast.TypeExpr, isReturn bool) string {
 	if t == nil {
 		return ""
 	}
@@ -194,6 +202,8 @@ func callbackInnerReason(t ast.TypeExpr) string {
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "void":
+			return ""
+		case st.Name == "string":
 			return ""
 		}
 
@@ -208,6 +218,19 @@ func callbackInnerReason(t ast.TypeExpr) string {
 		}
 
 		return "pointer must be *void or a pointer to a primitive"
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		if isReturn {
+			return "fat array [T] is not supported as a callback return (would need out-params; not representable in a single fn-pointer signature)"
+		}
+		// Restrict element type to primitives / pointers - same as
+		// outer #interop slice rules.
+		if r := interopElemTypeReason(at.Elem); r != "" {
+			return "fat array element type " + at.Elem.String() + ": " + r
+		}
+
+		return ""
 	}
 
 	return "type is not allowed inside a callback signature"
@@ -319,8 +342,13 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 			if elem.Name == "void" || interopAllowedPrimitives[elem.Name] || elem.Name == "char" || elem.Name == "byte" {
 				return ""
 			}
-
-			return "*" + elem.Name + " is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use *void as an opaque handle"
+			// Allow *NamedUserType. The header generator renders it
+			// as void* so C cannot accidentally dereference, and the
+			// pointer round-trips correctly as long as it was
+			// originally produced by Tin (e.g. returned from an
+			// #interop function that constructed it). Documented in
+			// docs/08-interop.md.
+			return ""
 		case *ast.PointerType:
 			return cg.interopTypeReason(v.Elem, false)
 		}
@@ -364,7 +392,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		}
 
 		if v.RetType != nil {
-			if r := callbackInnerReason(v.RetType); r != "" {
+			if r := callbackInnerReasonReturn(v.RetType); r != "" {
 				return "callback return " + r
 			}
 		}
@@ -1400,10 +1428,11 @@ func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
 // getOrCreateCallbackThunk returns a Tin-calling-convention thunk for
 // the given callback signature. The thunk receives `i8* env` first
 // (Tin's fat fn-ptr ABI), reads the raw C function pointer from env,
-// converts each argument from its Tin shape to its C ABI shape (the
-// only difference today is bool: Tin i1 vs C uint8_t), calls the C
-// function, converts the return back to Tin shape, and returns. One
-// thunk is emitted per unique Tin signature and cached on the codegen.
+// marshals each Tin-shape argument into its C ABI shape (bool: i1->i8;
+// string: TinString -> const char*; slice: TinSlice -> (T*, len) split;
+// primitives passthrough), calls the C function, marshals the return
+// back to Tin shape, and returns. One thunk is emitted per unique Tin
+// signature and cached on the codegen.
 func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) {
 	// Tin-side LLVM types (what the thunk's signature exposes).
 	tinRet := irtypes.Type(irtypes.Void)
@@ -1427,15 +1456,20 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 
 		tinParams[i] = t
 	}
-	// C-side LLVM types (what env is bitcast to). Today only bool
-	// (i1 in Tin / i8 in C) differs. Keep the maps parallel to the
-	// Tin shape so per-position conversion is straightforward.
-	cRet := cTypeOfTinForCallback(tinRet)
-	cParams := make([]irtypes.Type, len(tinParams))
+	// C-side LLVM signature: each Tin param expands into 1 or 2 C
+	// args depending on its kind (slices split into ptr+len). The
+	// return is always one value (slice returns are rejected by the
+	// validator above).
+	cParams := make([]irtypes.Type, 0, len(tinParams))
+	cExpansion := make([]int, len(tinParams)) // number of C args per Tin param
 
-	for i, tt := range tinParams {
-		cParams[i] = cTypeOfTinForCallback(tt)
+	for i, p := range ft.Params {
+		expand := cParamExpansion(p, tinParams[i])
+		cExpansion[i] = len(expand)
+		cParams = append(cParams, expand...)
 	}
+
+	cRet := cReturnLLVM(ft.RetType, tinRet)
 
 	key := callbackSigKey(tinRet, tinParams)
 
@@ -1472,9 +1506,14 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 	fnSlotCast := tb.NewBitCast(fnSlot, irtypes.NewPointer(rawFnPtrTy))
 	rawFn := tb.NewLoad(rawFnPtrTy, fnSlotCast)
 
-	args := make([]value.Value, len(cParams))
-	for i := range cParams {
-		args[i] = tinToCInThunk(tb, thunkParams[i+1], tinParams[i], cParams[i])
+	// Per-arg marshaling. Each Tin-shape thunk param becomes one or
+	// two C-shape values for the inner call.
+	args := make([]value.Value, 0, len(cParams))
+
+	for i, p := range ft.Params {
+		pieces := cg.marshalTinToCInThunk(tb, thunkParams[i+1], p, tinParams[i])
+		args = append(args, pieces...)
+		_ = cExpansion[i] // documented above; only used for clarity
 	}
 
 	if cRet.Equal(irtypes.Void) {
@@ -1482,7 +1521,8 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 		tb.NewRet(nil)
 	} else {
 		r := tb.NewCall(rawFn, args...)
-		tb.NewRet(cToTinInThunk(tb, r, cRet, tinRet))
+		ret := cg.marshalCToTinInThunk(tb, r, ft.RetType, cRet, tinRet)
+		tb.NewRet(ret)
 	}
 
 	cg.interopCbThunks[key] = thunk
@@ -1490,34 +1530,90 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 	return thunk, nil
 }
 
-// cTypeOfTinForCallback maps a Tin-side LLVM type to the C-side LLVM
-// type clang would use for the same position in a callback signature.
-// Today the only difference is bool (Tin i1 -> C i8); everything else
-// passes through.
-func cTypeOfTinForCallback(t irtypes.Type) irtypes.Type {
-	if t.Equal(irtypes.I1) {
-		return irtypes.I8
+// cParamExpansion returns the LLVM types each Tin callback parameter
+// expands into on the C side. Strings shrink to const char* (i8*);
+// slices expand to (T*, i64) two args; bool widens to i8; everything
+// else passes through.
+func cParamExpansion(t ast.TypeExpr, tinTy irtypes.Type) []irtypes.Type {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			return []irtypes.Type{irtypes.I8Ptr}
+		case "bool":
+			return []irtypes.Type{irtypes.I8}
+		}
 	}
 
-	return t
-}
-
-// tinToCInThunk converts a Tin-shape value to its C-shape counterpart
-// at the thunk's call site. Only bool needs work (zext i1 -> i8);
-// everything else is a no-op.
-func tinToCInThunk(b *ir.Block, v value.Value, tinTy, cTy irtypes.Type) value.Value {
-	if tinTy.Equal(irtypes.I1) && cTy.Equal(irtypes.I8) {
-		return b.NewZExt(v, irtypes.I8)
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		// Slice: T* + i64 length.
+		fatStruct := tinTy.(*irtypes.StructType)
+		return []irtypes.Type{fatStruct.Fields[0], irtypes.I64}
 	}
 
-	return v
+	return []irtypes.Type{tinTy}
 }
 
-// cToTinInThunk converts a C-shape return value back to Tin shape.
-// Only bool needs work (icmp ne 0); everything else is a no-op.
-func cToTinInThunk(b *ir.Block, v value.Value, cTy, tinTy irtypes.Type) value.Value {
-	if tinTy.Equal(irtypes.I1) && cTy.Equal(irtypes.I8) {
-		return b.NewICmp(enum.IPredNE, v, constant.NewInt(irtypes.I8, 0))
+// cReturnLLVM returns the C-side LLVM return type for a callback.
+// Strings become i8* (the thunk copies into a Tin string on the way
+// back). Bool becomes i8. Everything else passes through.
+func cReturnLLVM(ret ast.TypeExpr, tinRet irtypes.Type) irtypes.Type {
+	if ret == nil {
+		return irtypes.Void
+	}
+
+	if st, ok := ret.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			return irtypes.I8Ptr
+		case "bool":
+			return irtypes.I8
+		}
+	}
+
+	return tinRet
+}
+
+// marshalTinToCInThunk converts one Tin-shape thunk parameter into the
+// 1-or-2 C-shape values expected by the underlying C function. Side
+// effects: emits IR into block.
+func (cg *CodeGen) marshalTinToCInThunk(b *ir.Block, p *ir.Param, t ast.TypeExpr, tinTy irtypes.Type) []value.Value {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			// Extract the data pointer; the Tin string is
+			// NUL-terminated by construction so it doubles as a
+			// const char*.
+			dataPtr := b.NewExtractValue(p, 0)
+			return []value.Value{dataPtr}
+		case "bool":
+			return []value.Value{b.NewZExt(p, irtypes.I8)}
+		}
+	}
+
+	if _, ok := t.(*ast.ArrayType); ok {
+		dataPtr := b.NewExtractValue(p, 0)
+		lenVal := b.NewExtractValue(p, 1)
+
+		return []value.Value{dataPtr, lenVal}
+	}
+
+	return []value.Value{p}
+}
+
+// marshalCToTinInThunk converts the C-side return value back to its
+// Tin shape. Strings get copied into a fresh ARC Tin string; bool
+// gets icmp'd; everything else passes through.
+func (cg *CodeGen) marshalCToTinInThunk(b *ir.Block, v value.Value, ret ast.TypeExpr, cTy, tinTy irtypes.Type) value.Value {
+	if ret != nil {
+		if st, ok := ret.(*ast.SimpleType); ok {
+			switch st.Name {
+			case "string":
+				// v is i8* from C. Copy into a Tin ARC string.
+				return b.NewCall(cg.ensureInteropStrIn(), v)
+			case "bool":
+				return b.NewICmp(enum.IPredNE, v, constant.NewInt(irtypes.I8, 0))
+			}
+		}
 	}
 
 	return v
