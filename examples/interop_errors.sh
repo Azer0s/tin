@@ -42,7 +42,7 @@ fn main() i64 = return 0
 '
 
 # ── return type cannot contain Future[T] ──
-assert_err "Future return rejected" "contains \`Future[T]\`" '
+assert_err "Future return rejected" "contains Future[T]" '
 use sync
 
 fn{#interop} bad(n i32) Future[i32] =
@@ -52,7 +52,7 @@ fn main() i64 = return 0
 '
 
 # ── any parameter rejected ──
-assert_err "any param rejected" "\`any\` is not C-representable" '
+assert_err "any param rejected" "any type is not C-representable" '
 fn{#interop} bad(x any) i32 = return 0
 
 fn main() i64 = return 0

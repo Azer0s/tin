@@ -147,18 +147,18 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 	}
 
 	if strings.HasPrefix(fn.Name, "__tin_interop_") {
-		return cg.nodeErr(fn, "fn %s: #interop function names cannot start with `__tin_interop_` (reserved internal-symbol prefix)",
+		return cg.nodeErr(fn, "fn %s: #interop function names cannot start with __tin_interop_ (reserved internal-symbol prefix)",
 			fn.Name)
 	}
 
 	if typeExprContains(fn.RetType, "Future") {
-		return cg.nodeErr(fn, "fn %s: #interop return type contains `Future[T]`; C has no way to await",
+		return cg.nodeErr(fn, "fn %s: #interop return type contains Future[T]; C has no way to await",
 			fn.Name)
 	}
 
 	for _, p := range fn.Params {
 		if typeExprContains(p.Type, "any") {
-			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s; `any` is not C-representable - no stable layout exists for boxed values",
+			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s; the any type is not C-representable - no stable layout exists for boxed values",
 				fn.Name, p.Name, p.Type)
 		}
 
@@ -196,14 +196,14 @@ func callbackInnerReason(t ast.TypeExpr) string {
 			// the wrapper marshals C uint8_t<->Tin i1 at the outer
 			// boundary but the per-signature thunk does no such
 			// conversion for callback args/returns.
-			return "type `bool` is not supported (i1 vs i8 ABI ambiguity); use `u8` instead"
+			return "type bool is not supported (i1 vs i8 ABI ambiguity); use u8 instead"
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "void":
 			return ""
 		}
 
-		return "type `" + st.Name + "` is not a primitive C type"
+		return "type " + st.Name + " is not a primitive C type"
 	}
 
 	if pt, ok := t.(*ast.PointerType); ok {
@@ -213,7 +213,7 @@ func callbackInnerReason(t ast.TypeExpr) string {
 			}
 		}
 
-		return "pointer must be `*void` or `*<primitive>`"
+		return "pointer must be *void or a pointer to a primitive"
 	}
 
 	return "type is not allowed inside a callback signature"
@@ -232,17 +232,17 @@ func interopElemTypeReason(t ast.TypeExpr) string {
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "string":
-			return "Tin strings are ARC-managed fat pointers; a raw byte copy would produce dangling references in the callee. Pass strings individually or model the array C-side as `const char* const*`."
+			return "Tin strings are ARC-managed fat pointers; a raw byte copy would produce dangling references in the callee - pass strings individually, or model the array C-side as const char* const*"
 		case st.Name == "atom":
-			return "`atom` has no stable C representation"
+			return "atom has no stable C representation"
 		case st.Name == "any":
-			return "`any` is not C-representable"
+			return "any is not C-representable"
 		case st.Name == "void":
-			return "`[void]` is not representable"
+			return "[void] is not representable"
 		}
 		// Named user type (struct / trait / ADT) - no stable C layout
 		// guarantee, often ARC-managed inside.
-		return "named user types are not representable as fat-array elements; use `[u8]` as a payload or pass items individually"
+		return "named user types are not representable as fat-array elements; use [u8] as a payload or pass items individually"
 	}
 
 	if _, ok := t.(*ast.PointerType); ok {
@@ -301,9 +301,9 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		case v.Name == "any":
 			// Already caught by the typeExprContains pass; keep the
 			// message consistent here too.
-			return "`any` is not C-representable"
+			return "any is not C-representable"
 		case v.Name == "atom":
-			return "`atom` has no stable C representation"
+			return "atom has no stable C representation"
 		}
 		// Allow #packed structs by value: the wrapper applies SysV's
 		// struct-coercion rules so the C-side struct ABI agrees with
@@ -314,7 +314,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 			return ""
 		}
 
-		return "named user types must be either `*void` (opaque handle) or `struct{#packed}` for pass-by-value at the interop boundary"
+		return "named user types must be either *void (opaque handle) or struct{#packed} for pass-by-value at the interop boundary"
 
 	case *ast.PointerType:
 		// Allow *void, *<primitive>, or *<another-pointer>. Reject
@@ -329,19 +329,19 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 				return ""
 			}
 
-			return "`*" + elem.Name + "` is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use `*void` as an opaque handle"
+			return "*" + elem.Name + " is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use *void as an opaque handle"
 		case *ast.PointerType:
 			return cg.interopTypeReason(v.Elem, false)
 		}
 
-		return "this pointer type is not safe at the interop boundary; use `*void` as an opaque handle"
+		return "this pointer type is not safe at the interop boundary; use *void as an opaque handle"
 
 	case *ast.ArrayType:
 		// Fat arrays [T]: v1 allows; size != -1 (fixed-size [T;N]) is
 		// rejected because there is no clean C ABI for a Tin
 		// fixed-size value array distinct from `T*`.
 		if v.Size != -1 {
-			return "fixed-size arrays are not representable; use a fat array `[T]` or a pointer `*T`"
+			return "fixed-size arrays are not representable; use a fat array [T] or a pointer *T"
 		}
 		// The marshaler does a raw memcpy of `len * sizeof(T)` bytes
 		// across the C/Tin boundary. That is only safe when T has no
@@ -356,7 +356,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		return ""
 
 	case *ast.GenericType:
-		return "generic types like `" + v.Name + "[T]` are not representable"
+		return "generic types like " + v.Name + "[T] are not representable"
 
 	case *ast.FuncType:
 		// Callbacks: only allowed as parameters today, and only with
@@ -381,7 +381,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		return ""
 
 	case *ast.TupleArrayType:
-		return "tuple-array destructuring types (`@[...]`) are not representable"
+		return "tuple-array destructuring types (@[...]) are not representable"
 
 	case *ast.UnionTypeExpr:
 		return "union types are not representable"
