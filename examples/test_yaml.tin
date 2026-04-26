@@ -221,10 +221,10 @@ use strings
 struct ytag(YamlSerializable, YamlDeserializable) =
   value string
 
-  fn to_yaml(this ytag) string =
+  fn YamlSerializable::to_yaml(this ytag) string =
     return this.value
 
-  fn apply_yaml(this *ytag, s string) bool =
+  fn YamlDeserializable::apply_yaml(this *ytag, s string) bool =
     this.value = s
     return true
 

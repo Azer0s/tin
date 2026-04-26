@@ -49,13 +49,13 @@ struct widget(labeled, measurable, comparable, summarizable, named_size) =
   size_field i64
   color      string
 
-  fn label(this widget) string =
+  fn labeled::label(this widget) string =
     return "{this.name_field}/{this.color}"
 
-  fn measure(this widget) i64 =
+  fn measurable::measure(this widget) i64 =
     return this.size_field * this.size_field
 
-  fn compare_to(this widget, other i64) i64 =
+  fn comparable::compare_to(this widget, other i64) i64 =
     let m = this.measure()
     if m < other:
       return 0 - 1
@@ -63,20 +63,20 @@ struct widget(labeled, measurable, comparable, summarizable, named_size) =
       return 1
     return 0
 
-  fn summary(this widget) string =
+  fn summarizable::summary(this widget) string =
     return "widget[{this.name_field}, size={this.size_field}, color={this.color}]"
 
 struct gadget(labeled, measurable, comparable, named_size) =
   name_field string
   size_field i64
 
-  fn label(this gadget) string =
+  fn labeled::label(this gadget) string =
     return "gadget:{this.name_field}"
 
-  fn measure(this gadget) i64 =
+  fn measurable::measure(this gadget) i64 =
     return this.size_field * 2
 
-  fn compare_to(this gadget, other i64) i64 =
+  fn comparable::compare_to(this gadget, other i64) i64 =
     let m = this.measure()
     if m < other:
       return 0 - 1

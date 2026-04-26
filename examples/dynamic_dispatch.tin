@@ -14,25 +14,25 @@ trait mover =
 struct dog(speaker, mover) =
   name string
 
-  fn speak(this dog) string =
+  fn speaker::speak(this dog) string =
     return "Woof! I am {this.name}"
 
-  fn move(this dog) string =
+  fn mover::move(this dog) string =
     return "{this.name} runs"
 
 struct cat(speaker, mover) =
   name string
 
-  fn speak(this cat) string =
+  fn speaker::speak(this cat) string =
     return "Meow! I am {this.name}"
 
-  fn move(this cat) string =
+  fn mover::move(this cat) string =
     return "{this.name} slinks"
 
 struct robot(speaker) =
   id string
 
-  fn speak(this robot) string =
+  fn speaker::speak(this robot) string =
     return "Beep boop, I am {this.id}"
 
 // Generic functions constrained by traits - monomorphized at each call site.

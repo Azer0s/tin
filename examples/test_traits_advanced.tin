@@ -12,12 +12,12 @@ trait greeter =
 
 struct person(greeter) =
   name string
-  fn greet(this person) string =
+  fn greeter::greet(this person) string =
     return "Hello, I am {this.name}"
 
 struct bot(greeter) =
   model string
-  fn greet(this bot) string =
+  fn greeter::greet(this bot) string =
     return "Beep, I am model {this.model}"
 
 test "trait fat pointer dispatch - person" =

@@ -27,10 +27,10 @@ struct int_list(iter[i64], display, labeled) =
   val i64
   count i64
 
-  fn len(this int_list) i64 =
+  fn iter::len(this int_list) i64 =
     return this.count
 
-  fn get(this int_list, i i64) i64 =
+  fn iter::get(this int_list, i i64) i64 =
     if i == 0:
       return this.val
     return 0
@@ -44,10 +44,10 @@ struct pair(iter[i64], display, labeled) =
   a i64
   b i64
 
-  fn len(this pair) i64 =
+  fn iter::len(this pair) i64 =
     return 2
 
-  fn get(this pair, i i64) i64 =
+  fn iter::get(this pair, i i64) i64 =
     if i == 0:
       return this.a
     return this.b

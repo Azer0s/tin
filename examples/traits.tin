@@ -29,17 +29,17 @@ trait greetable =
 struct animal(named, greetable, describable) =
   species string
 
-  fn describe(this animal) string =
+  fn describable::describe(this animal) string =
     return "{this.label} is a {this.species}"
 
 // Another struct implementing all three traits with its own greet.
 struct robot(named, greetable, describable) =
   model string
 
-  fn describe(this robot) string =
+  fn describable::describe(this robot) string =
     return "{this.label} is robot model {this.model}"
 
-  fn greet(this robot) string =
+  fn greetable::greet(this robot) string =
     return "Beep boop, I am {this.name()}"
 
 let cat = animal{label: "Whiskers", species: "cat"}

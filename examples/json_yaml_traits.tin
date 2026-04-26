@@ -8,17 +8,17 @@ use encoding::yaml
 struct color(JsonSerializable, JsonDeserializable, YamlSerializable, YamlDeserializable) =
   hex string
 
-  fn to_json(this color) string =
+  fn JsonSerializable::to_json(this color) string =
     return "\"{this.hex}\""
 
-  fn apply_json(this *color, s string) bool =
+  fn JsonDeserializable::apply_json(this *color, s string) bool =
     this.hex = s
     return true
 
-  fn to_yaml(this color) string =
+  fn YamlSerializable::to_yaml(this color) string =
     return this.hex
 
-  fn apply_yaml(this *color, s string) bool =
+  fn YamlDeserializable::apply_yaml(this *color, s string) bool =
     this.hex = s
     return true
 

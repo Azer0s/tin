@@ -411,6 +411,12 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 	n.Implements = orig.Implements
 	structKey := cg.pkgStructKey(n.Name)
 
+	// Register plain-name aliases for trait-qualified methods BEFORE generating
+	// method bodies, so that intra-struct cross-method calls (e.g. another method
+	// calling `this.measure()` against `fn iter::measure(this Foo)`) can resolve
+	// `Foo_measure` to the qualified impl while the body is being compiled.
+	cg.registerPlainMethodAliases(structKey, n.Methods)
+
 	// Generate methods as top-level functions with struct-qualified names.
 	// Methods with their own TypeParams (e.g. map_opt[r]) are stored as templates
 	// and monomorphized on-demand at call sites.
@@ -485,43 +491,48 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 		}
 	}
 
-	// For qualified methods (e.g. fn iter[char]::idx), also register them
-	// under the plain name (e.g. struct_idx) when no other method with that
-	// plain name already exists. This lets non-disambiguated call sites work.
-	plainMethodNames := map[string]bool{}
-
-	for _, m := range n.Methods {
-		if m.TraitQualifier == "" {
-			plainMethodNames[m.Name] = true
-		}
-	}
-
-	for _, m := range n.Methods {
-		if m.TraitQualifier == "" {
-			continue
-		}
-
-		if plainMethodNames[m.Name] {
-			continue // a plain method already covers this name
-		}
-
-		plainName := structKey + "_" + m.Name
-		if _, exists := cg.curScope.lookup(plainName); !exists {
-			qualName := methodScopeName(structKey, m)
-			if entry, ok := cg.curScope.lookup(qualName); ok {
-				cg.curScope.set(plainName, entry)
-
-				plainMethodNames[m.Name] = true // mark so only first qualifier wins
-			}
-		}
-	}
-
 	// Generate vtable wrappers and global constants for each implemented trait.
 	if err := cg.genTraitVtables(n); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// registerPlainMethodAliases walks methods and aliases each trait-qualified
+// method (e.g. fn iter::get on struct Foo, predeclared as Foo_iter_get) under
+// its plain name (Foo_get) so that bare call sites resolve. If a plain method
+// of the same name exists, it wins; if multiple qualified methods share a
+// plain name, the first one wins.
+func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.FuncDecl) {
+	plainMethodNames := map[string]bool{}
+
+	for _, m := range methods {
+		if m.TraitQualifier == "" {
+			plainMethodNames[m.Name] = true
+		}
+	}
+
+	for _, m := range methods {
+		if m.TraitQualifier == "" {
+			continue
+		}
+
+		if plainMethodNames[m.Name] {
+			continue
+		}
+
+		plainName := structKey + "_" + m.Name
+		if _, exists := cg.curScope.lookup(plainName); exists {
+			continue
+		}
+
+		qualName := methodScopeName(structKey, m)
+		if entry, ok := cg.curScope.lookup(qualName); ok {
+			cg.curScope.set(plainName, entry)
+			plainMethodNames[m.Name] = true
+		}
+	}
 }
 
 // Type-alias / monomorphization

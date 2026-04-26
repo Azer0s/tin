@@ -23,19 +23,19 @@ trait speak =
 struct dog(speak) =
   tag i64
 
-  fn sound(this dog) string =
+  fn speak::sound(this dog) string =
     return "Woof!"
 
-  fn label(this dog) string =
+  fn speak::label(this dog) string =
     return "dog"
 
 struct cat(speak) =
   tag i64
 
-  fn sound(this cat) string =
+  fn speak::sound(this cat) string =
     return "Meow!"
 
-  fn label(this cat) string =
+  fn speak::label(this cat) string =
     return "cat"
 
 // Generic constrained dispatch

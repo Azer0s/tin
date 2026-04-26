@@ -20,10 +20,10 @@ struct point(labeled, sized) =
   x i64
   y i64
 
-  fn label(this point) string =
+  fn labeled::label(this point) string =
     return "point"
 
-  fn size(this point) i64 =
+  fn sized::size(this point) i64 =
     return 2
 
 struct color =
