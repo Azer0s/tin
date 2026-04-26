@@ -1,0 +1,9 @@
+// compiler_errors/pattern_type_mismatch.tin
+// A pattern literal of the wrong kind for the matched argument.
+
+fn classify(s string) string =
+  where (0): "zero"
+  where (_): "other"
+
+fn main() =
+  echo classify("hello")

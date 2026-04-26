@@ -1,0 +1,104 @@
+// const_fields.tin - Per-field const / var mutability modifier.
+//
+// A field declared `const` cannot be written after the struct is
+// constructed. Construction paths (struct literal, positional init,
+// destructuring let, match bindings) still work normally.
+
+use assert
+
+struct point =
+  const x i64
+  const y i64
+  z i64
+
+struct tagged =
+  const id i64
+  var status i64
+
+test "const field: reads work normally" =
+  let p = point{x: 3, y: 4, z: 5}
+  assert::equals(p.x, 3)
+  assert::equals(p.y, 4)
+  assert::equals(p.z, 5)
+
+test "const field: positional literal construction works" =
+  let p = point{1, 2, 3}
+  assert::equals(p.x, 1)
+  assert::equals(p.y, 2)
+  assert::equals(p.z, 3)
+
+test "const field: mutable siblings are assignable" =
+  let p = point{x: 1, y: 2, z: 10}
+  p.z = 99
+  assert::equals(p.z, 99)
+  assert::equals(p.x, 1)
+  assert::equals(p.y, 2)
+
+test "var field: explicit var behaves like unmarked" =
+  let t = tagged{id: 42, status: 0}
+  t.status = 7
+  assert::equals(t.status, 7)
+  assert::equals(t.id, 42)
+
+test "const field: whole struct replacement still allowed" =
+  let p point = point{x: 1, y: 2, z: 3}
+  p = point{x: 10, y: 20, z: 30}
+  assert::equals(p.x, 10)
+  assert::equals(p.y, 20)
+  assert::equals(p.z, 30)
+
+test "const field: destructuring let reads both const and var fields" =
+  let p = point{x: 7, y: 8, z: 9}
+  let {x, y, z} point = p
+  assert::equals(x, 7)
+  assert::equals(y, 8)
+  assert::equals(z, 9)
+
+// Generic struct with const field - monomorphization must preserve IsConst.
+
+struct Box[t] =
+  const value t
+
+type IntBox = Box[i64]
+type StrBox = Box[string]
+
+test "generic const field: reads work after monomorphization" =
+  let b IntBox = IntBox{value: 42}
+  assert::equals(b.value, 42)
+
+test "generic const field: different instantiations independent" =
+  let b1 IntBox = IntBox{value: 7}
+  let b2 StrBox = StrBox{value: "hello"}
+  assert::equals(b1.value, 7)
+  assert::equals(b2.value, "hello")
+
+// Method call on a struct with mixed const / mutable fields.
+
+struct counter =
+  const name string
+  count i64
+
+  fn inc(this counter) counter =
+    return counter{name: this.name, count: this.count + 1}
+
+  fn label(this counter) string =
+    return this.name
+
+test "const field: method reads work; method returns new value" =
+  let c = counter{name: "hits", count: 0}
+  let c1 = c.inc()
+  let c2 = c1.inc()
+  assert::equals(c2.count, 2)
+  assert::equals(c2.label(), "hits")
+
+// const is a compile-time tag: reflective and pointer-based writes still work.
+
+test "const field: setfield reflective write still works" =
+  let p = point{x: 1, y: 2, z: 3}
+  setfield(p, "x", 42)
+  assert::equals(p.x, 42)
+
+test "const field: address-of produces a readable pointer" =
+  let p = point{x: 7, y: 8, z: 9}
+  let px = &p.x
+  assert::equals(*px, 7)

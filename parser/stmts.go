@@ -94,12 +94,24 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	case lexer.KW_EXPORT:
 		return p.parseExportDecl()
 	case lexer.KW_WHERE:
-		wc, err := p.parseWhereClause()
-		if err != nil {
-			return nil, err
+		wl := &ast.WhereList{}
+
+		for {
+			wc, err := p.parseWhereClause()
+			if err != nil {
+				return nil, err
+			}
+
+			wl.Clauses = append(wl.Clauses, wc)
+
+			p.skipNewlines()
+
+			if !p.check(lexer.KW_WHERE) {
+				break
+			}
 		}
 
-		return &ast.WhereList{Clauses: []ast.WhereClause{wc}}, nil
+		return wl, nil
 	case lexer.LBRACE:
 		// { #tag } { body }  tagged block - tags not yet parsed (legacy path)
 		if p.peekAt(1).Type == lexer.CONTROL_TAG {
@@ -958,13 +970,16 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 		mc.Pattern = sp
 	} else {
 		// case varName TypeExpr: OR case expr:
-		// Detect "case varName TypeName:" -- either TypeName is a built-in type token
+		// Detect "case varName TypeName:" -- either TypeName is a built-in type keyword
 		// OR it is a user-defined type (plain IDENT) followed immediately by ":".
 		// The second heuristic handles "case _ json_null:" where json_null is a struct.
+		// Note: we explicitly check for type KEYWORDS (i64, string, ...) rather than
+		// type TOKENS because tokens like "(" start ADT constructor patterns like
+		// "case Circle(r):", which must be parsed as expressions, not as var-type.
 		nextIsUserType := p.check(lexer.IDENT) &&
 			p.peekAt(1).Type == lexer.IDENT &&
 			p.peekAt(2).Type == lexer.COLON
-		if p.check(lexer.IDENT) && !isTypeToken(p.peekAt(1)) && !nextIsUserType {
+		if p.check(lexer.IDENT) && !isTypeKeyword(p.peekAt(1)) && !nextIsUserType {
 			// Just an expression pattern
 			mc.Pattern, _ = p.parseExpr()
 		} else if p.check(lexer.IDENT) {
@@ -1029,10 +1044,12 @@ func (p *Parser) parseMatchCase() (ast.MatchCase, error) {
 }
 
 func (p *Parser) parseStructPattern() (*ast.StructPattern, error) {
+	startPos := p.curPos()
 	typeName := p.advance().Literal // consume IDENT (type name)
 	p.advance()                     // consume {
 
 	sp := &ast.StructPattern{TypeName: typeName}
+	sp.SetPos(startPos)
 
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		p.skipWhitespace()

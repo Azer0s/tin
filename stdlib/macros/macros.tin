@@ -15,10 +15,10 @@ macro{#no_parens #no_excl} loop() = `for true`
 macro{#no_parens #no_excl} async() = `fn{#async}`
 
 // todo!() - panic with "not yet implemented" at the call site.
-macro todo!() = `_tin_panic("not yet implemented")`
+macro todo!() = `panic("not yet implemented")`
 
 // unreachable!() - panic indicating code should never be reached.
-macro unreachable!() = `_tin_panic("unreachable")`
+macro unreachable!() = `panic("unreachable")`
 
 // min!(a, b) - minimum of two comparable values.
 macro min!(a, b) = return a < b ? a : b

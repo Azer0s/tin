@@ -291,7 +291,8 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 	}
 
 	for p.match(ops...) {
-		op := p.advance().Literal
+		opTok := p.advance()
+		op := opTok.Literal
 
 		// Line-continuation: operator at end of line.
 		// Consume NEWLINE and any INDENT tokens so the right operand can start
@@ -311,7 +312,9 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 			return nil, err2
 		}
 
-		left = &ast.BinExpr{Left: left, Op: op, Right: right}
+		be := &ast.BinExpr{Left: left, Op: op, Right: right}
+		be.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+		left = be
 	}
 
 	return left, nil
@@ -319,14 +322,18 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 
 func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.match(lexer.NOT, lexer.MINUS, lexer.TILDE) {
-		op := p.advance().Literal
+		opTok := p.advance()
+		op := opTok.Literal
 
 		expr, err := p.parseUnary()
 		if err != nil {
 			return nil, err
 		}
 
-		return &ast.UnaryExpr{Op: op, Expr: expr}, nil
+		ue := &ast.UnaryExpr{Op: op, Expr: expr}
+		ue.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+
+		return ue, nil
 	}
 	// Dereference: *expr
 	if p.check(lexer.STAR) {
@@ -658,6 +665,8 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 			if id, ok := expr.(*ast.Identifier); ok {
 				id.Name += "!"
+			} else if sa, ok := expr.(*ast.ScopeAccess); ok && len(sa.Path) > 0 {
+				sa.Path[len(sa.Path)-1] += "!"
 			}
 
 			args, err2 := p.parseArgList()
@@ -692,6 +701,50 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			p.advance()
 
 			isExpr := &ast.IsExpr{Expr: expr}
+
+			// ADT constructor pattern: `x is Ok(v)`. The call-expression form
+			// is unambiguously a constructor pattern (types don't appear as
+			// `IDENT(...)` in Tin). Nullary variants like `x is None` parse
+			// through the Type path and are resolved in codegen by looking
+			// up the identifier against registered ADT variants.
+			if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
+				ctorPos := p.curPos()
+				ctorName := p.advance().Literal
+
+				if _, err2 := p.expect(lexer.LPAREN); err2 != nil {
+					return nil, err2
+				}
+
+				var args []ast.Node
+
+				for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+					arg, err2 := p.parseExpr()
+					if err2 != nil {
+						return nil, err2
+					}
+
+					args = append(args, arg)
+
+					if p.check(lexer.COMMA) {
+						p.advance()
+					}
+				}
+
+				if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
+					return nil, err2
+				}
+
+				fn := &ast.Identifier{Name: ctorName}
+				fn.SetPos(ctorPos)
+				call := &ast.CallExpr{Func: fn, Args: args}
+				call.SetPos(ctorPos)
+
+				isExpr.Pattern = call
+				expr = isExpr
+
+				continue
+			}
+
 			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
 				isExpr.VarName = p.advance().Literal
 			}
@@ -842,7 +895,10 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.BOOL_LIT:
 		p.advance()
 
-		return &ast.BoolLit{Value: tok.Literal == "true"}, nil
+		b := &ast.BoolLit{Value: tok.Literal == "true"}
+		b.SetPos(ast.Pos{Line: tok.Line, Col: tok.Col})
+
+		return b, nil
 
 	case lexer.ATOM_LIT:
 		p.advance()

@@ -553,8 +553,7 @@ func isTypeKeyword(tok lexer.Token) bool {
 		"u8", "u16", "u32", "u64",
 		"f32", "f64",
 		"bool", "char", "string", "atom", "any",
-		"void", "uint32", "size_t",
-		"int", "uint":
+		"void", "uint32", "size_t":
 		return true
 	default:
 		return false

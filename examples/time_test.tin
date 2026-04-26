@@ -9,6 +9,7 @@ use encoding::json
 use guid
 use { Guid } from guid
 use errors
+use result
 
 // ---- Duration arithmetic ----
 
@@ -198,16 +199,20 @@ struct event_with_time =
 
 test "json::parse Instant field from RFC3339 string" =
   let s = "\{\"name\":\"hello\",\"created_at\":\"1970-01-01T00:00:00.000000000Z\"\}"
-  let (ev, err) = json::parse[event_with_time](s)
-  assert::not_ok(errors::has(err))
-  assert::equals(ev.name, "hello")
-  assert::equals(ev.created_at.ns, 0)
+  match json::parse[event_with_time](s):
+    case Ok(ev):
+      assert::equals(ev.name, "hello")
+      assert::equals(ev.created_at.ns, 0)
+    case Err(_):
+      assert::ok(false)
 
 test "json::parse Instant field non-zero" =
   let s = "\{\"name\":\"test\",\"created_at\":\"2024-01-15T12:34:56Z\"\}"
-  let (ev, err) = json::parse[event_with_time](s)
-  assert::not_ok(errors::has(err))
-  assert::equals(ev.created_at.ns, 1705322096000000000)
+  match json::parse[event_with_time](s):
+    case Ok(ev):
+      assert::equals(ev.created_at.ns, 1705322096000000000)
+    case Err(_):
+      assert::ok(false)
 
 // ---- Guid struct ----
 
@@ -236,10 +241,12 @@ struct entity_with_guid =
 
 test "json::parse Guid field" =
   let s = "\{\"id\":\"my-guid-value\",\"name\":\"Alice\"\}"
-  let (e, err) = json::parse[entity_with_guid](s)
-  assert::not_ok(errors::has(err))
-  assert::equals(e.id.value, "my-guid-value")
-  assert::equals(e.name, "Alice")
+  match json::parse[entity_with_guid](s):
+    case Ok(e):
+      assert::equals(e.id.value, "my-guid-value")
+      assert::equals(e.name, "Alice")
+    case Err(_):
+      assert::ok(false)
 
 test "json::encode struct with Guid field" =
   let e = entity_with_guid{id: Guid{value: "test-id"}, name: "Bob"}

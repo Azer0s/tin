@@ -1,0 +1,11 @@
+// compiler_errors/empty_where_pattern.tin
+// `where ():` is an empty tuple pattern; Tin has no zero-ary unit value
+// so this is rejected at parse time with a hint to use `where _:` for a
+// catch-all.
+
+fn f(n i32) i32 =
+  where (): 0
+  where _:  1
+
+fn main() =
+  echo f(0)

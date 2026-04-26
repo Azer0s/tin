@@ -1,0 +1,59 @@
+// Generic ADTs - Option[t], Result[t, e], generic Tree[t].
+// Covers:
+//   - monomorphization on demand
+//   - explicit path-qualified construction: Option[i64]::Some(42)
+//   - match + where-is on concrete instances
+//   - ARC across generic instances
+
+use assert
+
+data Option[t] =
+  None
+  Some(v t)
+
+fn opt_or(o Option[i64], d i64) i64 =
+  match o:
+    case None:    return d
+    case Some(v): return v
+
+test "Option[i64] explicit qualification" =
+  let a Option[i64] = Option[i64]::Some(42)
+  let b Option[i64] = Option[i64]::None
+  assert::equals(42, opt_or(a, 0))
+  assert::equals(99, opt_or(b, 99))
+
+data Result[t, e] =
+  Ok(v t)
+  Err(msg e)
+
+fn result_or(r Result[i32, string], d i32) i32 =
+  match r:
+    case Ok(v):   return v
+    case Err(_):  return d
+
+test "Result[i32, string] success + failure" =
+  let a Result[i32, string] = Result[i32, string]::Ok(5)
+  let b Result[i32, string] = Result[i32, string]::Err("bad input")
+  assert::equals(5,  result_or(a, 0))
+  assert::equals(99, result_or(b, 99))
+
+// Different monomorphic instances don't collide.
+data Box[t] =
+  Empty
+  Wrap(v t)
+
+fn unbox_i64(b Box[i64]) i64 =
+  match b:
+    case Empty:    return 0
+    case Wrap(v):  return v
+
+fn unbox_str(b Box[string]) string =
+  match b:
+    case Empty:    return "none"
+    case Wrap(v):  return v
+
+test "separate monomorphic Box instances" =
+  assert::equals(42,     unbox_i64(Box[i64]::Wrap(42)))
+  assert::equals("hi",   unbox_str(Box[string]::Wrap("hi")))
+  assert::equals(0,      unbox_i64(Box[i64]::Empty))
+  assert::equals("none", unbox_str(Box[string]::Empty))

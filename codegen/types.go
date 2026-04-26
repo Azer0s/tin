@@ -187,6 +187,40 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		qualTypeName := cg.typeExprCanonicalKey(&ast.SimpleType{Name: t.Name})
 		// Only triggered when the type params are concrete types (not template vars).
 		arity := len(t.TypeParams)
+
+		// Generic ADT: `Option[i32]`, `Result[i32, string]`, ... Monomorphize
+		// on demand to a concrete data type named <adt>__<part1>__<part2>.
+		if dd, ok2 := cg.dataDecls[t.Name]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
+			parts := make([]string, arity)
+
+			isTemplateVar := false
+
+			for i, tp := range t.TypeParams {
+				parts[i] = cg.typeExprCanonicalKey(tp)
+
+				for _, tpName := range dd.TypeParams {
+					if tpName == parts[i] {
+						isTemplateVar = true
+					}
+				}
+			}
+
+			if !isTemplateVar {
+				concreteName := t.Name + "__" + strings.Join(parts, "__")
+				if _, done := cg.structTypes[concreteName]; !done {
+					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
+						return nil, err
+					}
+				}
+
+				cg.dataInstTypeArgs[concreteName] = parts
+
+				if st, ok3 := cg.structTypes[concreteName]; ok3 {
+					return st, nil
+				}
+			}
+		}
+
 		if arityMap, isGenericStruct := cg.genericStructsByArity[qualTypeName]; isGenericStruct && arity > 0 {
 			if tmplStruct, hasArity := arityMap[arity]; hasArity {
 				// Build concrete name from ALL type params joined with __.
@@ -266,7 +300,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.I16, nil
 	case "i32":
 		return irtypes.I32, nil
-	case "i64", "int":
+	case "i64":
 		return irtypes.I64, nil
 	case "u8", "char", "byte":
 		return irtypes.I8, nil
@@ -274,7 +308,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.I16, nil
 	case "u32", "uint32":
 		return irtypes.I32, nil
-	case "u64", "uint", "size_t":
+	case "u64", "size_t":
 		return irtypes.I64, nil
 	case "i128":
 		return irtypes.I128, nil
@@ -436,6 +470,13 @@ func llvmTypeToTinName(t irtypes.Type) string {
 
 			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
 				return "any"
+			}
+			// Fat array pointer: anonymous {ElemType*, i64}.
+			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok && st.Fields[1].Equal(irtypes.I64) {
+				elem := llvmTypeToTinName(pt.ElemType)
+				if elem != "" && elem != "any" {
+					return "[" + elem + "]"
+				}
 			}
 		}
 	}

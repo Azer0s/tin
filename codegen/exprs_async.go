@@ -2199,6 +2199,35 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		block.NewStore(val, typedPtr)
 
 		return typedPtr, nil
+
+	case *ast.CallExpr:
+		// &Variant(args) where Variant is an ADT constructor: construct the
+		// ADT value, heap-allocate an RC block, and return a typed pointer.
+		// Same rules as &StructLit{}.
+		if id, ok := e.Func.(*ast.Identifier); ok && cg.isDataVariant(id.Name) {
+			val, err := cg.genDataConstructorCall(block, id.Name, e.Args)
+			if err != nil {
+				return nil, err
+			}
+
+			if val == nil {
+				return nil, fmt.Errorf("&%s: could not resolve ADT variant", id.Name)
+			}
+
+			st, ok2 := val.Type().(*irtypes.StructType)
+			if !ok2 {
+				return nil, fmt.Errorf("&%s: ADT wrap did not produce a struct value", id.Name)
+			}
+
+			nullPtr := constant.NewNull(irtypes.NewPointer(st))
+			gepOne := block.NewGetElementPtr(st, nullPtr, constant.NewInt(irtypes.I32, 1))
+			sz := block.NewPtrToInt(gepOne, irtypes.I64)
+			heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+			typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(st))
+			block.NewStore(val, typedPtr)
+
+			return typedPtr, nil
+		}
 	}
 
 	return nil, fmt.Errorf("not an lvalue: %T", node)

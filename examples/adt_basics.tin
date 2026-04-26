@@ -1,0 +1,80 @@
+// Basic non-generic ADTs: declaration, construction, match, where-patterns,
+// and tag-dispatched ARC release. Covers:
+//   - nullary variants, positional variants, named-field variants
+//   - match arm with constructor binders
+//   - where-pattern with `x is Ctor(b, ...)` (borrows; cannot return bindings)
+//   - value-level payload (string fields, int fields)
+//   - pointer-level payload (own *Self recursive trees)
+
+use assert
+
+data Shape =
+  Dot
+  Circle(radius f64)
+  Rect(width f64, height f64)
+  Rgb(r i64, g i64, b i64)
+
+fn area(s Shape) f64 =
+  match s:
+    case Dot:          return 0.0
+    case Circle(r):    return r * r * 3.14
+    case Rect(w, h):   return w * h
+    case Rgb(a, b, c): return (a + b + c) as f64
+
+test "nullary + positional + named-field variants" =
+  assert::equals(0.0,  area(Dot))
+  assert::equals(78.5, area(Circle(5.0)))
+  assert::equals(12.0, area(Rect(3.0, 4.0)))
+  assert::equals(6.0,  area(Rgb(1, 2, 3)))
+
+data Msg =
+  Empty
+  Text(s string)
+  Pair(a string, b string)
+
+// match-arm bindings retain RC-tracked fields, so `return s` is safe.
+fn first_of(m Msg) string =
+  match m:
+    case Empty:         return "<empty>"
+    case Text(s):       return s
+    case Pair(a, b):    return a
+
+test "rc-tracked string payloads via match" =
+  assert::equals("<empty>", first_of(Empty))
+  assert::equals("hi",      first_of(Text("hi")))
+  assert::equals("foo",     first_of(Pair("foo", "bar")))
+
+// where-pattern bindings are borrows; they're fine for immediate reads (echo,
+// length, comparisons) but the binding must not be returned as-is. Stick to
+// `match` when you need to transfer an RC-tracked field to the caller.
+fn has_content(m Msg) bool =
+  where m is Text(s):    return len(s) > 0
+  where m is Pair(a, _): return len(a) > 0
+  where m is Empty:      return false
+  where _:               return false
+
+test "where-is borrows for read-only dispatch" =
+  assert::ok(has_content(Text("x")))
+  assert::ok(has_content(Pair("x", "y")))
+  assert::not_ok(has_content(Empty))
+  assert::not_ok(has_content(Text("")))
+
+// Recursive ADT via own-pointer back-edges
+data IntTree =
+  Leaf
+  Node(v i64, left own *IntTree, right own *IntTree)
+
+fn sum(t *IntTree) i64 =
+  if t == nil:
+    return 0
+  match *t:
+    case Leaf:          return 0
+    case Node(v, l, r): return v + sum(l) + sum(r)
+
+test "own-pointer recursive tree" =
+  let t = &Node(
+    1,
+    &Node(2, nil, nil),
+    &Node(3, nil, &Node(4, nil, nil))
+  )
+  assert::equals(10, sum(t))

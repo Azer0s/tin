@@ -283,7 +283,7 @@ class TinLexer : LexerBase() {
         if (kwToken != null) {
             contextHint = when (word) {
                 "fn"                                         -> { contextDepth = 0; HINT_AFTER_FN }
-                "struct", "trait", "enum", "union", "type"  -> HINT_AFTER_TYPE_KW
+                "struct", "trait", "enum", "union", "data", "type"  -> HINT_AFTER_TYPE_KW
                 "atom" -> if (contextHint == HINT_AFTER_TYPE_KW) HINT_AFTER_TYPE_KW else HINT_NONE
                 else   -> HINT_NONE
             }
@@ -314,7 +314,7 @@ class TinLexer : LexerBase() {
         "break", "return", "do", "defer", "where", "yield", "await", "spawn"
             -> TinTokenTypes.KEYWORD_CONTROL
         "fn" -> TinTokenTypes.KEYWORD_FN
-        "let", "const", "var", "struct", "trait", "enum", "union", "macro",
+        "let", "const", "var", "struct", "trait", "enum", "union", "data", "macro",
         "extern", "export", "use", "from", "forward", "override", "static", "virtual", "type", "weak", "own"
             -> TinTokenTypes.KEYWORD_DECL
         "as", "is", "sizeof", "addr", "typeof", "traitof",

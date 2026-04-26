@@ -1,0 +1,10 @@
+// compiler_errors/bound_disjunction_fails.tin
+// Neither branch of `i32 || i64` matches string. The reported sub-check is
+// the right-hand side of the disjunction (the last one tried before failing).
+
+struct Num[T] where T is i32 || i64 =
+  value T
+
+fn main() =
+  let n = Num[string]{value: "x"}
+  echo n.value

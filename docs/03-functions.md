@@ -61,7 +61,7 @@ fn greet(name string) =
   echo "Hello, {name}!"
 ```
 
----
+--
 
 ## Single-expression functions
 
@@ -71,7 +71,7 @@ When the body is a single expression the block can be written inline:
 fn square(n i64) i64 = return n * n
 ```
 
----
+--
 
 ## Recursion
 
@@ -84,7 +84,7 @@ fn factorial(n i64) i64 =
   return n * factorial(n - 1)
 ```
 
----
+--
 
 ## Tail call optimization (TCO)
 
@@ -154,11 +154,19 @@ fn fib(n u32) u32 =
 
 To get TCO for fibonacci, use the accumulator form (`fib_acc` above).
 
----
+--
 
 ## where-clause style (pattern-matching functions)
 
-See also [02 - Control Flow](02-control-flow.md#where---pattern-matching-on-function-arguments).
+See also [02 - Control Flow](02-control-flow.md#where--pattern-matching-on-function-arguments).
+
+A `where`-bodied function dispatches on its arguments. Each clause chooses a
+branch; the first matching clause runs.
+
+### Bool-guard clauses
+
+A bool expression selects the branch when truthy. `where _:` is the universal
+catch-all. A where-list that relies on bool clauses must include `where _:`.
 
 ```rust
 fn gcd(a i64, b i64) i64 =
@@ -166,7 +174,122 @@ fn gcd(a i64, b i64) i64 =
   where _: gcd(b, a % b)
 ```
 
----
+### Pattern clauses
+
+`where (pattern):` matches the function's argument(s) against a pattern. The
+parentheses are required and distinguish pattern mode from bool mode.
+Patterns may be literals, identifiers (binders), `_` (wildcard),
+array-destructuring `[x, ...xs]`, and (for multi-arg functions) a tuple of
+the above. Bindings introduced by a pattern are in scope for the clause body.
+
+```rust
+fn fib(n i32) i32 =
+  where (0): 0
+  where (1): 1
+  where (n): fib(n - 2) + fib(n - 1)
+```
+
+Multi-argument functions use a tuple pattern; each slot corresponds to one
+argument in order.
+
+```rust
+fn foo(a i32, b string) bool =
+  where (0, _):       true
+  where (1, "hello"): true
+  where (_, _):       false
+```
+
+Array destructuring works exactly as in `match`. The rest slot in
+`[x, ...rest]` always binds at least one element, so `[x, ...rest]` matches
+lists of length >= 2. Use `[x]` for the singleton case explicitly:
+
+```rust
+fn sum(xs [i32]) i32 =
+  where ([]):           0
+  where ([x]):          x                       // singleton
+  where ([x, ...rest]): x + sum(rest)           // length >= 2
+  where _:              0
+```
+
+### Guards on patterns
+
+A pattern may carry a postfix `if` guard (same syntax as `match case`). The
+pattern's bindings are in scope for the guard.
+
+```rust
+fn sign(n i32) string =
+  where (0):          "zero"
+  where (n) if n < 0: "neg"
+  where (n) if n > 0: "pos"
+  where _:            "unreachable"
+```
+
+### Rules
+
+- **No mixing.** A single where-list is either all bool clauses or all pattern
+  clauses (bare `where _:` works in both). Mixing is a compile error pointing
+  at the conflicting clauses and suggesting `where (pat) if cond:` as the fix.
+- **Exhaustiveness.** Bool mode requires `where _:` because boolean
+  predicates aren't structurally analysable. Pattern mode is checked by
+  the Maranget exhaustiveness algorithm (Maranget, 2007 - see
+  `codegen/maranget.go` for the citation): the canonical triple
+  `where ([]): ... where ([x]): ... where ([x, ...xs]):` is recognised as
+  covering every list, `where (true): ... where (false):` covers every
+  bool, etc. - no explicit catch-all needed. When the patterns leave gaps,
+  the compiler reports the missing case with a concrete witness:
+  ```
+  non-exhaustive where: no clause matches [_]; add the missing case or a
+  catch-all `where _:`
+  ```
+  Guards make a pattern refutable, so a guarded clause never counts as a
+  structural cover. Adding a `where _:` to an already-exhaustive list is
+  not an error but produces an "unreachable where clause" warning
+  (suppress with `-Wno-unused-match-arms`).
+- **Arity match.** A single-arg function's clause patterns must each be a
+  single pattern (no tuple). A multi-arg function's clause patterns must each
+  be a tuple with exactly as many slots as the function has arguments.
+- **Pattern binding shadows the arg name** for the clause scope. In the
+  pattern `(n)` on a function whose argument is also `n`, the pattern rebinds
+  it (same value); on a function whose argument is `a`, writing `where (n):`
+  binds `n` and hides `a` in that clause.
+- **Guard scope.** In `where (pat) if guard:`, the names bound by `pat` are
+  in scope for both `guard` and the body. The same scoping rule as `match
+  case <pat> if guard:`.
+- **Struct patterns in `where` are not yet implemented** (planned). The
+  compiler emits a clear "struct patterns in where-clauses are not yet
+  supported (planned for slice 2); use `match` for now" diagnostic. Until
+  then, dispatch on a struct-typed argument inside a regular `match`
+  expression and use `where` for the bool/array/tuple/literal patterns it
+  already supports.
+- **`where ():` is a parse error.** Tin has no zero-ary unit value, so an
+  empty pattern tuple is rejected at parse time with a hint to use
+  `where _:` if a catch-all is what you want.
+
+### Exhaustiveness algorithm and citation
+
+Pattern-where exhaustiveness is decided by the algorithm from Luc Maranget,
+"Warnings for pattern matching", *Journal of Functional Programming*,
+vol. 17 no. 3, 2007, pp. 387-421, doi:10.1017/S0956796807006223
+(http://moscova.inria.fr/~maranget/papers/warn/warn.pdf). The same
+algorithm runs for `match` reachability warnings.
+
+For debugging the analysis itself, build with `-v-match-info` and the
+compiler will print, on stderr, the pattern matrix it built for every
+`match` and `where`, the per-arm reachability marker (`ok` / `guarded` /
+`UNREACHABLE`), and the final exhaustiveness verdict (`YES` or `NO ...
+missing witness: <value>`). Pair with `-Wno-unused-match-arms` to silence
+the user-facing warning while keeping the trace.
+
+### Slice status (current)
+
+Pattern-where ships with literal patterns (integer, float, string,
+bool, atom), identifier binders, `_` wildcards, `ArrayPattern` (`[]`,
+`[x]`, `[x, ...rest]`, `[_, ...]`, ...), and top-level `TuplePattern`
+for multi-arg dispatch. Struct patterns (`Type{field: pat, ...}`) inside
+`where` are recognised by the parser but rejected by codegen with the
+diagnostic noted above; full struct support is a planned follow-up.
+
+--
 
 ## Generic functions
 
@@ -213,8 +336,8 @@ fn contains[t](haystack [t], needle t) bool where t is comp =
 The two built-in constraints are:
 
 | Constraint | Satisfied by | Operators available |
-|------------|-------------|---------------------|
-| `ord` | All integer types (`i8`..`i128`, `u8`..`u128`), float types (`f32`, `f64`, `f128`), `byte`, `char`, `int`, `uint` | `<`, `<=`, `>`, `>=` (and by inclusion all `comp` operators) |
+|------|-------|-----------|
+| `ord` | All integer types (`i8`..`i128`, `u8`..`u128`), float types (`f32`, `f64`, `f128`), `byte`, `char` | `<`, `<=`, `>`, `>=` (and by inclusion all `comp` operators) |
 | `comp` | Everything `ord` accepts, plus `string` and `bool` | `==`, `!=` |
 
 `comp` is a superset of `ord`: every `ord` type also satisfies `comp`.
@@ -238,7 +361,110 @@ fn print_all[t](items [t]) where t is display =
     echo item.display()
 ```
 
----
+### Boolean bound expressions
+
+A bound is a boolean expression over trait checks, not just a single trait
+name. The grammar per type parameter is:
+
+```
+bound := or
+or    := and ('||' and)*
+and   := unary ('&&' unary | '+' unary)*
+unary := 'not' atom | atom
+atom  := '(' bound ')' | <type-or-trait-name>
+```
+
+- `&&` / `||` combine constraints with the obvious semantics.
+- `not <trait>` excludes types that satisfy the trait.
+- `+` is legacy shorthand for `&&` (both `T is A+B` and `T is A && B` work).
+- Each atom is checked against the enclosing type parameter - no need to
+  repeat `T is` inside the expression.
+
+```rust
+fn max3[T](a T, b T, c T) T where T is ord && not bool = ...
+fn num_op[T](x T) T  where T is i32 || i64        = ...
+fn fancy[T](x T)     where T is ord && (not bool && not f64) = ...
+```
+
+Multiple type parameters can be bounded independently by separating with a
+comma or a new `where`:
+
+```rust
+fn combine[A, B](a A, b B) where A is comp, B is comp = ...
+fn combine[A, B](a A, b B) where A is comp where B is comp = ...
+```
+
+When a bound fails at monomorphization the compiler points at the clause
+and names the failing sub-check:
+
+```
+.../foo.tin:7:23: fn sort_pair[bool]: type "bool" does not satisfy constraint
+`where T is ord && not bool` (failing sub-check: `ord`)
+```
+
+### Bounds on type aliases
+
+A generic `type` declaration can attach a `where` clause. It's checked
+when the alias is used with a concrete type:
+
+```rust
+struct Pair[A, B] =
+  a A
+  b B
+
+type StrPair[T] = Pair[string, T] where T is ord && not bool
+
+let p = StrPair[i32]{a: "hi", b: 42}   // ok
+let q = StrPair[bool]{a: "hi", b: true} // error: T=bool fails `not bool`
+```
+
+Generic aliases resolve to their underlying struct at instantiation -
+`StrPair[i32]{...}` expands to `Pair[string, i32]{...}` at codegen after
+the alias's bounds are satisfied. Both alias bounds and the underlying
+struct's bounds are enforced (a bound failing on either side fires with
+the same `failing sub-check` error shape).
+
+### Constructor inference for generic structs
+
+Explicit type arguments are optional on a struct literal when they can be
+inferred from the field values. The compiler unifies each provided field
+value's type against the declared field type to bind the template's type
+parameters:
+
+```rust
+struct Box[T] =
+  value T
+
+let a = Box{value: 42 as i32}     // Box[i32] inferred
+let b = Box{value: "hello"}       // Box[string] inferred
+let c = Box[f64]{value: 3.14}     // explicit also works
+```
+
+Multi-parameter structs work the same way, with each type parameter bound
+by the first field in the literal that mentions it:
+
+```rust
+struct Pair[A, B] =
+  a A
+  b B
+
+let p = Pair{a: 1 as i32, b: "hi"}    // Pair[i32, string]
+```
+
+Inference requires every type parameter to be reachable from the provided
+fields. If a parameter is ambiguous (never mentioned by a literal field)
+you get the existing "unknown struct type" error and should add an
+explicit `[T]` annotation. Bound checks fire against the *inferred* type:
+
+```rust
+struct Num[T] where T is i32 || i64 =
+  value T
+
+let n = Num{value: "x"}    // error: type "string" does not satisfy
+                           // constraint `where T is i32 || i64`
+```
+
+--
 
 ## Closures / Lambdas
 
@@ -361,7 +587,7 @@ fn compose(f fn(i64) i64, g fn(i64) i64) fn(i64) i64 =
   return fn(x i64) i64 = return f(g(x))
 ```
 
----
+--
 
 ## The `pass` keyword
 
@@ -390,7 +616,7 @@ for let i i64 in 0..n :
 
 `pass` has no runtime effect; the compiler simply ignores it.
 
----
+--
 
 ## Higher-order functions (curried style)
 
@@ -422,7 +648,7 @@ let evens = nums |> filter(fn(i i64) bool = return i % 2 == 0)
 let sum   = nums |> reduce(fn(acc i64, i i64) i64 = return acc + i, 0)
 ```
 
----
+--
 
 ## The pipe operator `|>`
 
@@ -448,7 +674,7 @@ let sum = nums |> reduce(fn(acc i64, i i64) i64 = return acc + i, 0)
 echo sum   // 15
 ```
 
----
+--
 
 ## Variadic functions
 
@@ -461,7 +687,7 @@ fn printf(format string, args ...) i32 =
 
 Variadic parameters are typically used with `extern` C functions.
 
----
+--
 
 ## Static methods
 
@@ -480,7 +706,7 @@ let c = counter.new()
 
 See [05 - Structs](05-structs.md) for the full struct method system.
 
----
+--
 
 ## Function overloading
 
@@ -565,7 +791,7 @@ The compiler internally mangles overloaded names using the parameter-type
 signature:
 
 | Declaration                         | Internal IR name          |
-|-------------------------------------|---------------------------|
+|-------------------|--------------|
 | `fn foo(n i64)`                     | `foo__i64`                |
 | `fn foo(s string)`                  | `foo__string`             |
 | `fn foo(n i64, s string)`           | `foo__i64__string`        |
@@ -583,7 +809,7 @@ Non-overloaded functions keep their plain names and are unaffected.
 - The return type alone does **not** distinguish overloads - parameter types and
   arity are the only discriminators.
 
----
+--
 
 ## Defer return value override
 
@@ -613,7 +839,7 @@ fn multi() i64 =
 echo multi()  // 1
 ```
 
----
+--
 
 ### `defer (fn() *T = ...)()` - pointer-based override
 
@@ -640,7 +866,7 @@ echo maybe_override(true)   // 99  (overridden)
 echo maybe_override(false)  // 1   (not overridden)
 ```
 
----
+--
 
 ### Defer return with `recover()`
 

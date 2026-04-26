@@ -19,7 +19,7 @@ static const char *_tin_primitives[] = {
     "i8","i16","i32","i64","i128",
     "u8","u16","u32","u64","u128",
     "f32","f64","f128",
-    "bool","string","char","void","atom","byte","int",NULL
+    "bool","string","char","void","atom","byte",NULL
 };
 
 static int _tin_is_primitive_name(const char *s) {

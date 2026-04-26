@@ -16,6 +16,7 @@ import (
 	"github.com/Azer0s/tin/codegen"
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
+	"github.com/Azer0s/tin/repl"
 )
 
 const usage = `tin - the tin language compiler
@@ -29,6 +30,7 @@ Usage:
   tin test        <file.tin|dir|dir/...>   run test blocks and report results
   tin build-test  <file.tin> [-o out]      compile test binary without running
   tin preprocess  <file.tin>               expand macros and print source to stdout
+  tin repl        [--stdlib PATH]          interactive REPL
 
 Link flags (passed after the source file):
   -lNAME           link with libNAME (e.g. -lm for libmath)
@@ -39,6 +41,18 @@ Link flags (passed after the source file):
 Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
+  -Wno-unused-match-arms   suppress warnings about unreachable match cases /
+                           where clauses (an arm whose pattern matches only
+                           values that earlier arms already cover)
+  -Wno-bool-analysis       suppress "condition is always true/false" warnings
+                           emitted when an if/elif/while/where condition
+                           folds to a compile-time constant
+  -v-match-info            dump Maranget exhaustiveness/usefulness analysis
+                           for every match and where the compiler sees
+                           (debug aid; output goes to stderr)
+  -v-demorgan              print each De Morgan / boolean simplification the
+                           compiler applies to an if/elif/while/where/for
+                           condition (debug aid; output goes to stderr)
 
 Target flags:
   -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
@@ -355,6 +369,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(os.Args) >= 2 && os.Args[1] == "repl" {
+		runtimeDir := tinRuntimeDir()
+
+		var (
+			stdlibOverride string
+			libsRoots      []string
+		)
+
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--stdlib":
+				if i+1 < len(os.Args) {
+					i++
+					stdlibOverride = os.Args[i]
+				}
+			case "--lib-root":
+				if i+1 < len(os.Args) {
+					i++
+					libsRoots = append(libsRoots, os.Args[i])
+				}
+			}
+		}
+
+		repl.Run(runtimeDir, stdlibOverride, libsRoots)
+
+		return
+	}
+
 	if len(os.Args) < 3 {
 		_, _ = fmt.Fprint(os.Stderr, usage)
 
@@ -405,7 +447,12 @@ doneFlags:
 
 	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
+	noWarnUnusedMatchArms := false
+	noWarnBoolAnalysis := false
+	verboseMatchInfo := false
+	verboseDemorgan := false
 	debugBuild := false
+	emitHeaderPath := ""
 
 	// Scan all args (including those before the file) for flags.
 	for i := 2; i < len(os.Args); i++ {
@@ -429,6 +476,14 @@ doneFlags:
 			noWarnAsyncMain = true
 		case "-Wno-await-match-guards":
 			noWarnAwaitMatchGuards = true
+		case "-Wno-unused-match-arms":
+			noWarnUnusedMatchArms = true
+		case "-Wno-bool-analysis":
+			noWarnBoolAnalysis = true
+		case "-v-match-info":
+			verboseMatchInfo = true
+		case "-v-demorgan":
+			verboseDemorgan = true
 		case "-v-heuristics":
 			verboseHeuristics = true
 		case "-v":
@@ -451,6 +506,13 @@ doneFlags:
 				targetGOOS = parts[0]
 				targetGOARCH = parts[1]
 				explicitTarget = true
+			}
+		default:
+			// Recognize --emit-header=<path> as a single token; the rest
+			// of the loop ignores unknown args so they pass through to
+			// the linker / clang driver.
+			if strings.HasPrefix(os.Args[i], "--emit-header=") {
+				emitHeaderPath = strings.TrimPrefix(os.Args[i], "--emit-header=")
 			}
 		}
 	}
@@ -581,6 +643,22 @@ doneFlags:
 		cg.SetNoWarnAsyncMain(true)
 	}
 
+	if noWarnUnusedMatchArms {
+		cg.SetNoWarnUnusedMatchArms(true)
+	}
+
+	if verboseMatchInfo {
+		cg.SetVerboseMatchInfo(true)
+	}
+
+	if noWarnBoolAnalysis {
+		cg.SetNoWarnBoolAnalysis(true)
+	}
+
+	if verboseDemorgan {
+		cg.SetVerboseDemorgan(true)
+	}
+
 	if verboseHeuristics {
 		cg.SetVerboseHeuristics(true)
 	}
@@ -598,6 +676,10 @@ doneFlags:
 		if triple := clangTripleForTarget(); triple != "" {
 			cg.SetTargetTriple(triple)
 		}
+	}
+
+	if emitHeaderPath != "" {
+		cg.SetEmitHeaderPath(emitHeaderPath)
 	}
 
 	if stdlibOverride != "" {
@@ -853,43 +935,21 @@ func clangMajorVersion() int {
 	return major
 }
 
-// isAppleSilicon reports whether the current machine is Apple Silicon.
-// This covers both macOS arm64 and Linux arm64 running on Apple hardware
-// (e.g. Asahi Linux), but excludes generic arm64 (Graviton, RPi, etc.).
-func isAppleSilicon() bool {
-	if runtime.GOARCH != "arm64" {
-		return false
-	}
-
-	if runtime.GOOS == "darwin" {
-		return true
-	}
-
-	// On Linux, Apple CPUs report implementer code 0x61 in /proc/cpuinfo.
-	data, err := os.ReadFile("/proc/cpuinfo")
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(data), "CPU implementer\t: 0x61")
-}
-
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
-// produce valid IR for the installed clang version:
-//
-//  1. "presplitcoroutine" string attr -> keyword attr (required by coro-split).
-//  2. On Apple Silicon (macOS arm64 and Asahi Linux), llvm.coro.end requires
-//     i1 return type and ptr argument; patch the declaration and call sites.
+// produce valid IR for the installed clang version.
+// "presplitcoroutine" must be a keyword attribute, not a string attribute.
+// llvm.coro.end changed signature at LLVM 22: <= 21 uses i1 return + ptr arg,
+// >= 22 uses void return + ptr arg. llir emits the old void + i8* form; LLVM 22
+// accepts that and auto-upgrades i8* to ptr. LLVM 21 expects i1, so we patch.
 func fixCoroAttrs(ir string) string {
 	ir = strings.ReplaceAll(ir, `"presplitcoroutine"`, "presplitcoroutine")
-
-	// Apple Silicon rejects llvm.coro.end declared as void/i8*: the intrinsic's
-	// canonical signature there is i1(ptr, i1, token).  Patch the declaration
-	// and call sites to match.  Use a named result (%_coroend) to avoid
-	// shifting implicit SSA slot numbering.
-	if isAppleSilicon() {
-		ir = strings.ReplaceAll(ir, "declare void @llvm.coro.end(i8*", "declare i1 @llvm.coro.end(ptr")
-		ir = strings.ReplaceAll(ir, "call void @llvm.coro.end(i8*", "%_coroend = call i1 @llvm.coro.end(ptr")
+	if v := clangMajorVersion(); v > 0 && v <= 21 {
+		ir = strings.ReplaceAll(ir,
+			"declare void @llvm.coro.end(i8*",
+			"declare i1 @llvm.coro.end(ptr")
+		ir = strings.ReplaceAll(ir,
+			"call void @llvm.coro.end(i8*",
+			"%_coro_end = call i1 @llvm.coro.end(ptr")
 	}
 
 	return ir

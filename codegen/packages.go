@@ -508,7 +508,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// Pass 0.5: preregister struct/enum/type/trait nodes.
 	for _, node := range prog.Stmts {
 		switch node.(type) {
-		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl:
+		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl, *ast.DataDecl:
 			if preErr := cg.preregister(node); preErr != nil {
 				cg.curScope = prevScope
 				cg.filename = prevFilename
@@ -573,14 +573,17 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
-	// Pass 1.5: generate struct declarations; propagate methods to prevScope.
+	// Pass 1.5a: emit struct LAYOUTS for every non-generic struct in this
+	// package, expose type aliases. Method bodies are deferred until Pass
+	// 1.5b so that ADT layouts (Pass 1.6) can see completed inner struct
+	// layouts before any ADT payload size is baked into the IR.
 	for _, node := range prog.Stmts {
 		sd, ok := node.(*ast.StructDecl)
 		if !ok {
 			continue
 		}
 
-		if compErr := cg.genStructDecl(sd); compErr != nil {
+		if compErr := cg.genStructLayout(sd); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
@@ -591,10 +594,45 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		// Skip generic structs: their templates are stored by bare name in
 		// genericStructsByArity and must not be aliased to "pkg__Name" here,
 		// or genTypeDecl will fail to find the template under the qualified key.
-		structKey := cg.pkgStructKey(sd.Name)
 		if len(sd.TypeParams) == 0 {
-			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
+			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: cg.pkgStructKey(sd.Name)}
 		}
+	}
+
+	// Pass 1.6: emit concrete layout for non-generic ADTs defined in this
+	// package, AFTER all struct layouts are finalized. The payload size
+	// computation depends on the inner struct types having complete
+	// field lists (opaque structs have size 0, which would under-size
+	// the ADT's payload buffer). Generic ADTs are monomorphized on demand.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %q: data %s: %w", rawPath, dd.Name, compErr)
+			}
+		}
+	}
+
+	// Pass 1.5b: emit struct METHODS now that every struct + ADT layout is
+	// complete. Any tinTypeToLLVM call a method body makes on a generic ADT
+	// like Result[LocalStruct, Err] will therefore monomorphise with the
+	// correct payload size instead of a placeholder [1 x i8].
+	for _, node := range prog.Stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok {
+			continue
+		}
+
+		if compErr := cg.genStructMethods(sd); compErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %q: struct %s methods: %w", rawPath, sd.Name, compErr)
+		}
+
+		structKey := cg.pkgStructKey(sd.Name)
 
 		// Propagate methods to prevScope so callers can call them.
 		// Methods are registered under canonicalKey_methodName in curScope.
@@ -921,7 +959,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// resolve type names inside function signatures and struct field types.
 	for _, node := range prog.Stmts {
 		switch node.(type) {
-		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl:
+		case *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl, *ast.TraitDecl, *ast.UnionDecl, *ast.DataDecl:
 			if preErr := cg.preregister(node); preErr != nil {
 				cg.curScope = prevScope
 				cg.filename = prevFilename
@@ -1007,110 +1045,16 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 1.2: mark {#async} struct methods as coro-callable and pre-declare
-	// their $coro variants BEFORE genStructDecl generates method bodies.
-	// This is needed so that genStructDecl -> genStructMethod -> genFuncDeclAs
-	// generates $coro variants for async methods, which are then available
-	// when genTraitVtables tries to build vtable global constants.
-	for _, node := range prog.Stmts {
-		sd, ok := node.(*ast.StructDecl)
-		if !ok || len(sd.TypeParams) > 0 {
-			continue
-		}
-
-		for _, m := range sd.Methods {
-			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
-				continue
-			}
-			// Build the scope key for this method (same as genStructMethod/methodScopeName).
-			// Use canonical struct key so it matches what genStructDecl registers.
-			scopeKey := methodScopeName(pkgName+"__"+sd.Name, m)
-			cg.coroCallable[scopeKey] = true
-			// Predeclare the $coro variant so it's registered in scope before vtable gen.
-			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
-				cg.curScope = prevScope
-				cg.filename = prevFilename
-
-				return fmt.Errorf("use %s: struct %s method %s coro predecl: %w", pkgPath, sd.Name, m.Name, preErr)
-			}
-		}
-	}
-
-	// Pass 1.4: detect overloaded function names and predeclare non-extern
-	// functions BEFORE struct methods are compiled, so that struct methods can
-	// call module-level helper functions defined later in the same file.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
-		cg.overloadedNames[name] = flag
-	}
-
-	for _, node := range prog.Stmts {
-		fd, ok := node.(*ast.FuncDecl)
-		if !ok || fd.IsExtern != "" || len(fd.TypeParams) > 0 || len(fd.Constraints) > 0 {
-			continue
-		}
-
-		baseName := pkgName + "__" + fd.Name
-		irName := baseName
-
-		if cg.overloadedNames[fd.Name] {
-			sig := funcParamSig(fd.Params)
-			irName = overloadMangledName(baseName, sig)
-		}
-
-		if preErr := cg.predeclareFuncAs(fd, irName); preErr != nil {
-			cg.curScope = prevScope
-			cg.filename = prevFilename
-
-			return fmt.Errorf("use %s: predeclare %s: %w", pkgPath, fd.Name, preErr)
-		}
-		// Register in funcDecls so wrapPidInFuture can resolve return types for
-		// package-loaded {#async} functions (e.g. [byte]-returning stdlib helpers).
-		if _, already := cg.funcDecls[fd.Name]; !already {
-			cg.funcDecls[fd.Name] = fd
-		}
-		// Also register the bare local name so struct methods can call it.
-		if entry, ok2 := cg.curScope.lookup(irName); ok2 {
-			if _, already := cg.curScope.vars[fd.Name]; !already {
-				cg.curScope.set(fd.Name, entry)
-			}
-		}
-	}
-
-	// Pass 1.45: predeclare $coro variants for module-level {#async} functions
-	// before Pass 1.5 compiles struct methods (which may spawn them).
-	for _, node := range prog.Stmts {
-		fd, ok := node.(*ast.FuncDecl)
-		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) {
-			continue
-		}
-
-		baseName := pkgName + "__" + fd.Name
-		irName := baseName
-
-		if cg.overloadedNames[fd.Name] {
-			sig := funcParamSig(fd.Params)
-			irName = overloadMangledName(baseName, sig)
-		}
-
-		cg.coroCallable[irName] = true
-		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
-			cg.curScope = prevScope
-			cg.filename = prevFilename
-
-			return fmt.Errorf("use %s: early coro predecl %s: %w", pkgPath, fd.Name, preErr)
-		}
-	}
-
-	// Pass 1.5: generate struct declarations (field layouts + method bodies).
-	// Non-generic structs are fully compiled; generic structs are stored as
-	// templates in cg.genericStructsByArity and compiled on demand when instantiated.
+	// Pass 1.5a: emit struct LAYOUTS (field types only, no method bodies)
+	// and register the type aliases. Method bodies are deferred to Pass 1.5b
+	// so that Pass 1.6's ADT layouts see fully-laid-out inner structs.
 	for _, node := range prog.Stmts {
 		sd, ok := node.(*ast.StructDecl)
 		if !ok {
 			continue
 		}
 
-		if compErr := cg.genStructDecl(sd); compErr != nil {
+		if compErr := cg.genStructLayout(sd); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
@@ -1139,9 +1083,137 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
 			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
 		}
+	}
+
+	// Pre-pass 1.8: detect overloaded function names in this package so that
+	// passes 2/2.5/3 can mangle IR names for overloaded functions correctly.
+	for name, flag := range scanOverloadedNames(prog.Stmts) {
+		cg.overloadedNames[name] = flag
+	}
+
+	// Pass 1.6: emit concrete layout for non-generic ADTs defined in this
+	// package, AFTER all struct layouts are finalized. See the symmetrical
+	// block in loadPackage above for rationale.
+	for _, node := range prog.Stmts {
+		if dd, ok := node.(*ast.DataDecl); ok {
+			if compErr := cg.genDataDecl(dd); compErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %s: data %s: %w", pkgPath, dd.Name, compErr)
+			}
+		}
+	}
+
+	// Pass 1.2: mark {#async} struct methods as coro-callable and pre-declare
+	// their $coro variants BEFORE genStructMethods generates method bodies.
+	// This is needed so that genTraitVtables can build vtable global constants
+	// referencing the $coro variants. Placed AFTER Pass 1.6 so that any ADT
+	// return types on async methods monomorphise with correct payload size.
+	for _, node := range prog.Stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok || len(sd.TypeParams) > 0 {
+			continue
+		}
+
+		for _, m := range sd.Methods {
+			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
+				continue
+			}
+
+			scopeKey := methodScopeName(pkgName+"__"+sd.Name, m)
+			cg.coroCallable[scopeKey] = true
+
+			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
+				cg.curScope = prevScope
+				cg.filename = prevFilename
+
+				return fmt.Errorf("use %s: struct %s method %s coro predecl: %w", pkgPath, sd.Name, m.Name, preErr)
+			}
+		}
+	}
+
+	// Pass 1.4: predeclare non-extern module-level functions so that struct
+	// methods compiled in Pass 1.5b can call them. Placed AFTER Pass 1.6 so
+	// function signatures referencing ADTs like Result[LocalStruct, Err]
+	// monomorphise with the correct payload size.
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok || fd.IsExtern != "" || len(fd.TypeParams) > 0 || len(fd.Constraints) > 0 {
+			continue
+		}
+
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+		}
+
+		if preErr := cg.predeclareFuncAs(fd, irName); preErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: predeclare %s: %w", pkgPath, fd.Name, preErr)
+		}
+
+		if _, already := cg.funcDecls[fd.Name]; !already {
+			cg.funcDecls[fd.Name] = fd
+		}
+
+		if entry, ok2 := cg.curScope.lookup(irName); ok2 {
+			if _, already := cg.curScope.vars[fd.Name]; !already {
+				cg.curScope.set(fd.Name, entry)
+			}
+		}
+	}
+
+	// Pass 1.45: predeclare $coro variants for module-level {#async} functions
+	// before Pass 1.5b compiles struct methods (which may spawn them).
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) {
+			continue
+		}
+
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+		}
+
+		cg.coroCallable[irName] = true
+		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: early coro predecl %s: %w", pkgPath, fd.Name, preErr)
+		}
+	}
+
+	// Pass 1.5b: emit struct METHOD bodies now that every struct + ADT
+	// layout in this package is final. This ordering is what lets method
+	// bodies that use ADTs like Result[LocalStruct, Err] monomorphise with
+	// the correct payload size.
+	for _, node := range prog.Stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok {
+			continue
+		}
+
+		if compErr := cg.genStructMethods(sd); compErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: struct %s methods: %w", pkgPath, sd.Name, compErr)
+		}
+
+		structKey := pkgName + "__" + sd.Name
 		// Propagate all methods to prevScope so that method calls on values of
 		// this struct type (loaded by the caller) can be resolved.
-		// Methods were registered under structKey (canonical), so use that prefix.
 		for _, m := range sd.Methods {
 			methodKey := structKey + "_" + m.Name
 			if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
@@ -1166,12 +1238,6 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				}
 			}
 		}
-	}
-
-	// Pre-pass 1.8: detect overloaded function names in this package so that
-	// passes 2/2.5/3 can mangle IR names for overloaded functions correctly.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
-		cg.overloadedNames[name] = flag
 	}
 
 	// Pass 2: predeclare non-extern functions (enables mutual recursion).
@@ -1489,7 +1555,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		if !exportedNames[md.Name] && !exportedNames[bareName] {
 			continue
 		}
-		// Register under pkg-qualified keys.
+
 		cg.macros[pkgName+"."+bareName+"!"] = md
 		cg.macros[pkgName+"::"+bareName+"!"] = md
 		cg.macros[pkgName+"."+bareName] = md
@@ -1843,14 +1909,14 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 			continue
 		}
 
-		for _, traitExpr := range c.Traits {
-			if !cg.structSatisfiesConstraint(concreteName, traitExpr) {
-				return nil, fmt.Errorf("fn %s: type %q does not satisfy constraint 'where %s is %s'",
-					tmpl.Name, concreteName, c.TypeParam, typeExprToString(traitExpr))
-			}
-			// Inject any default (non-virtual) trait methods the concrete type
-			// doesn't already implement (e.g. a struct satisfying a trait via its
-			// default method without explicitly listing it in its Implements clause).
+		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
+				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
+		}
+		// Inject default (non-virtual) trait methods for every positive leaf
+		// of the bound so the instantiation has the methods it needs.
+		for _, traitExpr := range flattenPositiveTraits(c.Bound) {
 			if err := cg.ensureDefaultTraitMethods(concreteName, traitExpr); err != nil {
 				return nil, err
 			}
@@ -2065,10 +2131,6 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			cg.inferTypeArgsFromParamPrio(pt.Elem, ptr.ElemType, typeParams, subst, fromConst, isConst)
 		}
 	case *ast.GenericType:
-		if len(pt.TypeParams) != 1 {
-			break
-		}
-
 		structName := ""
 
 		if st, ok2 := argType.(*irtypes.StructType); ok2 {
@@ -2085,22 +2147,66 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 		}
 
 		innerName := strings.TrimPrefix(structName, prefix)
-		innerParam := pt.TypeParams[0]
 
-		if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
+		// Prefer the arg list recorded at monomorphization time, because type
+		// parts themselves may contain `__` (e.g. package-qualified names like
+		// json__Value). If no record exists, fall back to a `__`-split, which
+		// is correct when every arg is a bare name.
+		var parts []string
+		if recorded, ok := cg.dataInstTypeArgs[structName]; ok && len(recorded) == len(pt.TypeParams) {
+			parts = recorded
+		} else if len(pt.TypeParams) == 1 {
+			// Single type arg: the whole remainder is the arg (preserves
+			// embedded `__` from package-qualified names).
+			parts = []string{innerName}
+		} else {
+			parts = strings.Split(innerName, "__")
+		}
+
+		if len(parts) == 1 && len(pt.TypeParams) == 1 {
+			innerParam := pt.TypeParams[0]
+
+			if simpleInner, ok := innerParam.(*ast.SimpleType); ok {
+				for _, tp := range typeParams {
+					if simpleInner.Name == tp {
+						if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
+							subst[tp] = parts[0]
+							fromConst[tp] = isConst
+						}
+
+						break
+					}
+				}
+			} else {
+				if innerST, ok := cg.structTypes[parts[0]]; ok {
+					cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
+				}
+			}
+
+			break
+		}
+
+		if len(parts) != len(pt.TypeParams) {
+			break
+		}
+
+		for i, innerParam := range pt.TypeParams {
+			part := parts[i]
+			simpleInner, ok := innerParam.(*ast.SimpleType)
+
+			if !ok {
+				continue
+			}
+
 			for _, tp := range typeParams {
 				if simpleInner.Name == tp {
 					if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
-						subst[tp] = innerName
+						subst[tp] = part
 						fromConst[tp] = isConst
 					}
 
 					break
 				}
-			}
-		} else {
-			if innerST, ok := cg.structTypes[innerName]; ok {
-				cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
 			}
 		}
 	case *ast.ArrayType:

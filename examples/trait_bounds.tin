@@ -1,0 +1,99 @@
+// examples/trait_bounds.tin
+//
+// Trait-bound expressions (Form A): per type parameter, the RHS of `is`
+// is a boolean expression with `&&`, `||`, `not`, parens, and atoms that
+// are trait / type names. Legacy `+` is kept as shorthand for `&&`.
+//
+// Also exercises generic struct-constructor inference: `Box{value: 42}`
+// infers `Box[i32]` / `Box[i64]` from the field value without an explicit
+// `[T]` annotation.
+
+use assert
+
+// -- Simple conjunction via + (legacy) --------------------------------------
+
+struct BoxOrd[T] where T is ord =
+  value T
+
+test "constructor inference picks i64 for Box{value: literal}" =
+  let b = BoxOrd{value: 42}
+  assert::equals(42, b.value)
+
+test "explicit type arg still works alongside inference" =
+  let b = BoxOrd[i32]{value: 42}
+  assert::equals(42, b.value)
+
+// -- Conjunction with && ----------------------------------------------------
+
+struct BoxOrdNotBool[T] where T is ord && not bool =
+  value T
+
+test "ord AND not bool accepts i32" =
+  let b = BoxOrdNotBool{value: 42 as i32}
+  assert::equals(42, b.value)
+
+// -- Disjunction -----------------------------------------------------------
+
+struct I32orI64[T] where T is i32 || i64 =
+  value T
+
+test "disjunction accepts i32 branch" =
+  let a = I32orI64[i32]{value: 1}
+  assert::equals(1, a.value)
+
+test "disjunction accepts i64 branch" =
+  let b = I32orI64[i64]{value: 2}
+  assert::equals(2, b.value)
+
+// -- Negation --------------------------------------------------------------
+
+struct NotBool[T] where T is not bool =
+  value T
+
+test "negation accepts non-bool" =
+  let a = NotBool{value: 42 as i32}
+  assert::equals(42, a.value)
+
+// -- Parens and mixed operators --------------------------------------------
+
+struct Complex[T] where T is ord && (not bool && not f64) =
+  value T
+
+test "complex compound bound accepts i32" =
+  let b = Complex[i32]{value: 42}
+  assert::equals(42, b.value)
+
+// -- Multiple type parameters with independent bounds ----------------------
+
+struct PairComp[A, B] where A is comp, B is comp =
+  a A
+  b B
+
+test "multi-param bounds are independent" =
+  // both comp: i32 supports ==, string supports ==.
+  let p = PairComp{a: 1 as i32, b: "hi"}
+  assert::equals(1,    p.a)
+  assert::equals("hi", p.b)
+
+// -- Generic type alias ----------------------------------------------------
+
+struct Pair[A, B] =
+  a A
+  b B
+
+type StrPair[T] = Pair[string, T] where T is ord && not bool
+
+test "generic type alias used as struct literal" =
+  let p = StrPair[i32]{a: "hi", b: 42}
+  assert::equals("hi", p.a)
+  assert::equals(42,   p.b)
+
+// -- Generic function with compound bound ----------------------------------
+
+fn max3[T](a T, b T, c T) T where T is ord && not bool =
+  where a >= b && a >= c: a
+  where b >= c:           b
+  where _:                c
+
+test "generic function with compound bound" =
+  assert::equals(9, max3(3 as i32, 9 as i32, 5 as i32))

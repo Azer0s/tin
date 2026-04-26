@@ -95,6 +95,7 @@ TinSlice _tin_slice_concat(TinSlice a, TinSlice b, int64_t elem_size);
 int64_t  _tin_slice_len(TinSlice s);
 void    *_tin_slice_idx(TinSlice s, int64_t i, int64_t elem_size);
 TinSlice _tin_slice_subslice(TinSlice s, int64_t start, int64_t elem_size);
+TinSlice _tin_slice_convert_int(TinSlice s, int64_t src_sz, int64_t tgt_sz, int32_t src_signed);
 
 // -- Memory
 void *_tin_malloc(int64_t size);
@@ -178,6 +179,27 @@ void *_tin_ptr_handover(void *src, size_t elem_size); // RC-ify any C pointer
 // -- Any equality
 typedef struct { int32_t tag; void *ptr; } _TinAny;
 int64_t _tin_any_eq(_TinAny a, _TinAny b);
+
+// -- C-interop boundary helpers (runtime/interop.c)
+typedef void *(*tin_alloc_fn)(size_t);
+void  tin_set_extern_alloc(tin_alloc_fn fn);   // NULL resets to malloc
+void *tin_extern_alloc(size_t n);
+void  tin_runtime_init(void);                  // idempotent; safe to call concurrently
+void  tin_release(void *ptr);                  // drop one ARC ref (for #interop *void returns)
+TinString tin_interop_str_in(const char *cstr);  // C string -> ARC Tin string (caller releases)
+char     *tin_interop_str_out(TinString s);     // Tin string -> C buffer via extern_alloc
+TinSlice  tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size);
+int       tin_interop_slice_out(TinSlice s, int64_t elem_size,
+                                void **out_data, int64_t *out_len);
+
+// Closure-return trampoline allocator (runtime/interop_trampoline.c).
+// tin_make_trampoline returns a stable C-callable function pointer
+// that, when invoked, calls `fn(env, args...)`. Use
+// tin_interop_closure_free to release the trampoline when the C side
+// is done with it; any trampolines still alive at process exit are
+// munmap'd via an atexit handler so leak detectors stay quiet.
+void *tin_make_trampoline(void *fn, void *env, void *dispatcher);
+void  tin_interop_closure_free(void *tramp);
 
 // -- Reflect (stdlib/reflect/reflect.c - linked in when reflect module is used)
 const char   *_tin_reflect_kind(const char *atom);

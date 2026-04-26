@@ -1,0 +1,12 @@
+// compiler_errors/mixed_where_clauses.tin
+// A where-list cannot mix bool-guard and pattern clauses; the compiler
+// should pinpoint both clauses and suggest the `where (pat) if cond:`
+// form that subsumes inline bool clauses inside pattern mode.
+
+fn f(n i32) i32 =
+  where n < 0: -1
+  where (0):   0
+  where _:     1
+
+fn main() =
+  echo f(5)

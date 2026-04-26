@@ -1,0 +1,10 @@
+// compiler_errors/where_arity_mismatch.tin
+// A multi-arg function whose pattern clauses use a single-pattern (no
+// tuple). The compiler should explain the expected tuple shape.
+
+fn dispatch(a i32, b i32) i32 =
+  where (0): 0
+  where (n): n
+
+fn main() =
+  echo dispatch(0, 0)

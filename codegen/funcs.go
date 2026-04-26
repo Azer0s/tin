@@ -185,6 +185,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	if cg.externIRNames[scopeName] {
 		irName = "_tin__" + scopeName
 	}
+	// #interop reserves the bare name for the C-callable wrapper emitted
+	// in a later pass; the Tin entry point gets a hidden symbol. The
+	// scope still resolves the bare name to the entry point so Tin
+	// internal callers go through the unwrapped function (avoiding the
+	// init / marshal overhead).
+	if hasTag(n.Tags, "interop") {
+		irName = "__tin_interop_" + scopeName
+	}
 	// Check if already declared under the (possibly mangled) IR name.
 	if existing, ok := cg.curScope.vars[irName]; ok {
 		if _, isFunc := existing.val.(*ir.Func); isFunc {
@@ -267,6 +275,24 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		st.SetName(n.Name)
 		cg.structTypes[n.Name] = st
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+	case *ast.DataDecl:
+		// Register an opaque struct for non-generic ADTs so forward references
+		// in function signatures resolve. Layout is filled in by genDataDecl
+		// during pre-pass 3. Generic ADTs are monomorphized on demand; their
+		// variant names are registered against the concrete instance at
+		// monomorphization time (see monomorphizeDataDecl).
+		if len(n.TypeParams) == 0 {
+			st := irtypes.NewStruct()
+			st.SetName(n.Name)
+			cg.structTypes[n.Name] = st
+			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+
+			for _, v := range n.Variants {
+				cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], n.Name)
+			}
+		}
+
+		cg.dataDecls[n.Name] = n
 	case *ast.TypeDecl:
 		// Simple type aliases (type char = u8) go straight into typeAliases.
 		// Tagged union aliases (type u = i8 | string) get a placeholder struct so
@@ -851,6 +877,137 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 }
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.
+// typeBoundSatisfied evaluates a TypeBound expression against a concrete
+// type name. The boolean combinators short-circuit so the sub-check witness
+// is the FIRST failure on an AND chain and the LAST failure on an OR chain
+// (i.e. when every alternative failed).
+//
+// Returns (ok, witness):
+//
+//	ok == true   -> bound holds; witness is nil
+//	ok == false  -> bound failed; witness points at the failing TBAtom so
+//	                the caller can format a specific error
+func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) (bool, *ast.TBAtom) {
+	switch b := bound.(type) {
+	case *ast.TBAtom:
+		got := cg.structSatisfiesConstraint(concreteName, b.Trait)
+		if b.Neg {
+			got = !got
+		}
+
+		if got {
+			return true, nil
+		}
+
+		return false, b
+
+	case *ast.TBAnd:
+		if ok, w := cg.typeBoundSatisfied(concreteName, b.Left); !ok {
+			return false, w
+		}
+
+		if ok, w := cg.typeBoundSatisfied(concreteName, b.Right); !ok {
+			return false, w
+		}
+
+		return true, nil
+
+	case *ast.TBOr:
+		if ok, _ := cg.typeBoundSatisfied(concreteName, b.Left); ok {
+			return true, nil
+		}
+
+		if ok, _ := cg.typeBoundSatisfied(concreteName, b.Right); ok {
+			return true, nil
+		}
+		// Both sides failed; report the right-side failure (the last one
+		// tried) so the error message lists a concrete missing trait.
+		_, w := cg.typeBoundSatisfied(concreteName, b.Right)
+
+		return false, w
+	}
+
+	return true, nil
+}
+
+// typeArgsContainAnyOf reports whether any type-argument expression in args
+// references a name in the `paramNames` list as a top-level SimpleType.
+// Used to decide whether a template's type alias still has symbolic type
+// parameters (we skip constraint checks in that case).
+func typeArgsContainAnyOf(args []ast.TypeExpr, paramNames []string) bool {
+	nameSet := make(map[string]bool, len(paramNames))
+	for _, n := range paramNames {
+		nameSet[n] = true
+	}
+
+	for _, a := range args {
+		if st, ok := a.(*ast.SimpleType); ok && nameSet[st.Name] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// flattenPositiveTraits collects every non-negated leaf trait of a bound.
+// Used by the monomorphizer to inject default trait methods the concrete
+// type inherits. Negated atoms (`not X`) and OR branches are skipped since
+// they describe what the type might lack, not what it must have.
+func flattenPositiveTraits(bound ast.TypeBound) []ast.TypeExpr {
+	var out []ast.TypeExpr
+
+	var walk func(ast.TypeBound)
+
+	walk = func(b ast.TypeBound) {
+		switch v := b.(type) {
+		case *ast.TBAtom:
+			if !v.Neg {
+				out = append(out, v.Trait)
+			}
+		case *ast.TBAnd:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.TBOr:
+			// OR can't guarantee either leaf holds, so we don't inject
+			// default methods from either side.
+		}
+	}
+
+	walk(bound)
+
+	return out
+}
+
+// typeBoundString renders a TypeBound back to its source-level form so
+// constraint-violation errors echo the user's own syntax.
+func typeBoundString(bound ast.TypeBound) string {
+	switch b := bound.(type) {
+	case *ast.TBAtom:
+		s := typeExprToString(b.Trait)
+		if b.Neg {
+			return "not " + s
+		}
+
+		return s
+	case *ast.TBAnd:
+		return typeBoundStringParen(b.Left) + " && " + typeBoundStringParen(b.Right)
+	case *ast.TBOr:
+		return typeBoundStringParen(b.Left) + " || " + typeBoundStringParen(b.Right)
+	}
+
+	return "<bound>"
+}
+
+// typeBoundStringParen wraps nested And/Or bounds in parens for unambiguous
+// rendering. Atoms are rendered bare.
+func typeBoundStringParen(bound ast.TypeBound) string {
+	if _, ok := bound.(*ast.TBAtom); ok {
+		return typeBoundString(bound)
+	}
+
+	return "(" + typeBoundString(bound) + ")"
+}
+
 // structSatisfiesConstraint checks that structName satisfies a trait expression.
 // traitExpr may be a SimpleType ("labeled"), GenericType ("iter[i64]"), or a
 // type alias that expands to a union ("addable" = i8|i16|i32|...).
@@ -954,7 +1111,7 @@ func isOrdType(typeName string) bool {
 	case "i8", "i16", "i32", "i64", "i128",
 		"u8", "u16", "u32", "u64", "u128",
 		"f32", "f64", "f128",
-		"byte", "char", "int", "uint":
+		"byte", "char":
 		return true
 	}
 
@@ -975,6 +1132,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		return nil
 	}
+
+	// Build the mutated-names set for the if-condition folder. Restored
+	// after the body so nested function generations don't leak names
+	// across each other.
+	prevMutated := cg.mutatedNames
+	cg.mutatedNames = collectMutatedNames(n.Body)
+
+	defer func() {
+		cg.mutatedNames = prevMutated
+	}()
 
 	var retType irtypes.Type = irtypes.Void
 
@@ -1929,6 +2096,9 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferEnvs = nil
 		cg.labelCount = 0
 
+		prevMutated := cg.mutatedNames
+		cg.mutatedNames = collectMutatedNames(td.Body)
+
 		terminated, err := cg.genBody(entry, td.Body, irtypes.Void)
 		if err != nil {
 			return fmt.Errorf("test %q: %w", td.Desc, err)
@@ -1950,6 +2120,7 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferFnI8s = prevDeferFnI8s
 		cg.pendingDeferFrames = prevDeferFrames
 		cg.pendingDeferEnvs = prevDeferEnvs
+		cg.mutatedNames = prevMutated
 
 		testFuncs[i] = fn
 	}

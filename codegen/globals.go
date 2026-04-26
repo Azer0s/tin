@@ -5,6 +5,7 @@ package codegen
 import (
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
@@ -18,6 +19,16 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	lt, err := cg.tinTypeToLLVM(tv.Type)
 	if err != nil {
 		return err
+	}
+
+	// In REPL mode, globals from previous cells must be external references so
+	// RTLD_GLOBAL resolves them to the canonical first-loaded copy, not a new zero copy.
+	if cg.replMode && cg.replExternalGlobals[tv.Name] {
+		g := cg.mod.NewGlobal(tv.Name, lt)
+		g.Linkage = enum.LinkageExternal
+		cg.curScope.set(tv.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true})
+
+		return nil
 	}
 
 	// Determine whether the initializer is a compile-time constant.

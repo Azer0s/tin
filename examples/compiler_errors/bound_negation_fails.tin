@@ -1,0 +1,9 @@
+// compiler_errors/bound_negation_fails.tin
+// `not bool` is violated by passing bool directly.
+
+struct NotBool[T] where T is not bool =
+  value T
+
+fn main() =
+  let b = NotBool[bool]{value: true}
+  echo b.value

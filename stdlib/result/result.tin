@@ -1,0 +1,63 @@
+// result - the standard Result and Option ADTs.
+//
+// Result[t, e] represents either a successful value (`Ok(v)`) or a failure
+// (`Err(msg)`). Option[t] represents either a value (`Some(v)`) or absence
+// (`None`).
+//
+// Typical usage:
+//
+//   fn parse_i64(s string) Result[i64, string] = ...
+//
+//   match parse_i64("42"):
+//     case Ok(n):  echo "got {n}"
+//     case Err(e): echo "error: {e}"
+//
+//   let n = unwrap_or(parse_i64("??"), -1)
+//
+// Bare constructors (`Ok(x)`, `Err(m)`, `Some(x)`, `None`) are inferred from
+// the target type when it is known (let-annotations, function arguments,
+// function returns); otherwise qualify explicitly, e.g. `Result[i64,string]::Ok(42)`.
+
+data Result[t, e] =
+  Ok(v t)
+  Err(msg e)
+
+data Option[t] =
+  None
+  Some(v t)
+
+// is_ok reports whether the Result is an Ok value.
+fn is_ok[t, e](r Result[t, e]) bool =
+  match r:
+    case Ok(_):  return true
+    case Err(_): return false
+
+// is_err reports whether the Result is an Err value.
+fn is_err[t, e](r Result[t, e]) bool =
+  match r:
+    case Ok(_):  return false
+    case Err(_): return true
+
+// unwrap_or returns the Ok value or d when r is Err.
+fn unwrap_or[t, e](r Result[t, e], d t) t =
+  match r:
+    case Ok(v):  return v
+    case Err(_): return d
+
+// is_some reports whether the Option holds a value.
+fn is_some[t](o Option[t]) bool =
+  match o:
+    case Some(_): return true
+    case None:    return false
+
+// is_none reports whether the Option is empty.
+fn is_none[t](o Option[t]) bool =
+  match o:
+    case Some(_): return false
+    case None:    return true
+
+// option_or returns the Some value or d when o is None.
+fn option_or[t](o Option[t], d t) t =
+  match o:
+    case Some(v): return v
+    case None:    return d

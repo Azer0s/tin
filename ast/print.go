@@ -247,6 +247,36 @@ func printNode(n Node, depth int) string {
 		}
 
 		return strings.Join(lines, "\n")
+	case *DataDecl:
+		var lines []string
+
+		params := ""
+		if len(v.TypeParams) > 0 {
+			params = "[" + strings.Join(v.TypeParams, ", ") + "]"
+		}
+
+		lines = append(lines, fmt.Sprintf("%sdata %s%s =", ind(depth), v.Name, params))
+
+		for _, vr := range v.Variants {
+			if len(vr.Fields) == 0 {
+				lines = append(lines, fmt.Sprintf("%s%s", ind(depth+1), vr.Name))
+
+				continue
+			}
+
+			parts := make([]string, len(vr.Fields))
+			for i, f := range vr.Fields {
+				if f.Name != "" {
+					parts[i] = f.Name + " " + f.Type.String()
+				} else {
+					parts[i] = f.Type.String()
+				}
+			}
+
+			lines = append(lines, fmt.Sprintf("%s%s(%s)", ind(depth+1), vr.Name, strings.Join(parts, ", ")))
+		}
+
+		return strings.Join(lines, "\n")
 	case *TypeDecl:
 		return fmt.Sprintf("%stype %s = %s", ind(depth), v.Name, v.Type.String())
 	case *TestDecl:
@@ -383,6 +413,31 @@ func printNode(n Node, depth int) string {
 		}
 
 		return "[" + strings.Join(parts, ", ") + "]"
+	case *TuplePattern:
+		parts := make([]string, len(v.Elems))
+		for i, e := range v.Elems {
+			parts[i] = printNode(e, depth)
+		}
+
+		return "(" + strings.Join(parts, ", ") + ")"
+	case *StructPattern:
+		parts := make([]string, len(v.Fields))
+		for i, f := range v.Fields {
+			switch {
+			case f.IsWild && f.Name == "":
+				parts[i] = "_"
+			case f.IsWild:
+				parts[i] = f.Name + ": _"
+			case f.Literal != nil && f.BindTo != "":
+				parts[i] = f.Name + ": " + f.BindTo
+			case f.Literal != nil:
+				parts[i] = f.Name + ": " + printNode(f.Literal, depth)
+			default:
+				parts[i] = f.Name
+			}
+		}
+
+		return v.TypeName + "{" + strings.Join(parts, ", ") + "}"
 	default:
 		return fmt.Sprintf("/* unhandled: %T */", n)
 	}

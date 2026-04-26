@@ -247,10 +247,12 @@ func (cg *CodeGen) genEcho(block *ir.Block, s *ast.EchoStmt) (*ir.Block, error) 
 
 		var fmtStr value.Value
 		if it.BitSize == 1 {
-			// bool: print 0 or 1 via printf
-			fmtStr = cg.newGlobalString("%d\n")
-			zext := block.NewZExt(val, irtypes.I32)
-			block.NewCall(printf, fmtStr, zext)
+			// bool: print "true" or "false" via printf and a select.
+			fmtStr = cg.newGlobalString("%s\n")
+			trueStr := cg.newGlobalString("true")
+			falseStr := cg.newGlobalString("false")
+			selected := block.NewSelect(val, trueStr, falseStr)
+			block.NewCall(printf, fmtStr, selected)
 
 			return block, nil
 		}

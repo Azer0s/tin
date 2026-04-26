@@ -12,7 +12,8 @@ struct point =
 type coord = @[i32, bool]
 
 test "uniform array destructuring" =
-  let arr [i64] = [10, 20, 30]
+  // `let [a, b]` requires arr.len == 2 exactly under the strict semantics.
+  let arr [i64] = [10, 20]
   let [a, b] [i64] = arr
   assert::equals(a, 10)
   assert::equals(b, 20)

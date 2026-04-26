@@ -67,13 +67,69 @@ type FuncDecl struct {
 	IsVirtual      bool   // true for "fn f() T = virtual" in trait declarations
 }
 
-// TypeConstraint bounds a type parameter to one or more required traits
-// e.g. "where t is labeled+sized" -> {TypeParam:"t", Traits:[labeled, sized]}
-// e.g. "where t is iter[i64]"   -> {TypeParam:"t", Traits:[iter[i64]]}
+// TypeConstraint bounds a type parameter with a boolean expression of trait
+// checks (Form A from the design doc).
+//
+// Grammar (per type parameter):
+//
+//	bound := or
+//	or    := and ('||' and)*
+//	and   := unary ('&&' unary)*
+//	unary := 'not' atom | atom
+//	atom  := '(' bound ')' | <type-expr>
+//
+// Inside `where T is <bound>` each <type-expr> atom is implicitly checked
+// against T; `+` (legacy shorthand for conjunction) lowers to TBAnd chains
+// so existing programs continue to parse.
+//
+// Examples:
+//
+//	where t is ord                            -> TBAtom(ord, Neg:false)
+//	where t is labeled+sized                  -> TBAnd(TBAtom(labeled), TBAtom(sized))
+//	where t is ord && not bool                -> TBAnd(TBAtom(ord), TBAtom(bool, Neg:true))
+//	where t is i64 || f64                     -> TBOr(TBAtom(i64),   TBAtom(f64))
+//	where t is addable && (not bool || char)  -> TBAnd(TBAtom(addable),
+//	                                                    TBOr(TBAtom(bool, Neg:true),
+//	                                                         TBAtom(char)))
 type TypeConstraint struct {
+	Pos       Pos
 	TypeParam string
-	Traits    []TypeExpr // each may be SimpleType or GenericType
+	Bound     TypeBound
 }
+
+// TypeBound is the boolean expression in a TypeConstraint.
+type TypeBound interface {
+	typeBoundMarker()
+	Pos() Pos
+}
+
+// TBAtom is a leaf bound: `is <trait>` when Neg is false, `is not <trait>`
+// when true.
+type TBAtom struct {
+	NodePos Pos
+	Trait   TypeExpr // SimpleType, GenericType, or any other type expression
+	Neg     bool
+}
+
+// TBAnd is `left && right`.
+type TBAnd struct {
+	NodePos     Pos
+	Left, Right TypeBound
+}
+
+// TBOr is `left || right`.
+type TBOr struct {
+	NodePos     Pos
+	Left, Right TypeBound
+}
+
+func (*TBAtom) typeBoundMarker() {}
+func (*TBAnd) typeBoundMarker()  {}
+func (*TBOr) typeBoundMarker()   {}
+
+func (b *TBAtom) Pos() Pos { return b.NodePos }
+func (b *TBAnd) Pos() Pos  { return b.NodePos }
+func (b *TBOr) Pos() Pos   { return b.NodePos }
 
 type StructDecl struct {
 	base
@@ -83,7 +139,19 @@ type StructDecl struct {
 	Fields      []StructField
 	Methods     []*FuncDecl
 	Implements  []TypeExpr // trait impls listed in parens
-	Tags        []string
+	Tags        []string   // unscoped tags (e.g. "packed"); applied to the struct itself
+	// ScopedTags are tags written with an `@scope` qualifier in the struct's
+	// `{#tag@scope}` header (e.g. `#pure@fn`). Propagation happens in codegen
+	// before any tag-consuming pass runs: members matching the scope receive
+	// the tag; existing member-level tags take precedence on conflicts.
+	ScopedTags []ScopedTag
+}
+
+// ScopedTag is a struct-level control tag tagged with a member-scope
+// qualifier. Scope is one of: "fn", "method", "static_fn", "field".
+type ScopedTag struct {
+	Name  string
+	Scope string
 }
 
 type TraitDecl struct {
@@ -99,10 +167,11 @@ type TraitDecl struct {
 
 type TypeDecl struct {
 	base
-	Name       string
-	TypeParams []string
-	Type       TypeExpr
-	Overrides  []*FuncDecl // "override = fn show ..."
+	Name        string
+	TypeParams  []string
+	Constraints []TypeConstraint // generic type constraints: where t is addable
+	Type        TypeExpr
+	Overrides   []*FuncDecl // "override = fn show ..."
 }
 
 type EnumDecl struct {
@@ -118,6 +187,29 @@ type UnionDecl struct {
 	Name    string
 	Members []UnionMember
 	IsNamed bool // "union u_named = as_i8 i8 | as_string string"
+}
+
+// DataDecl is an algebraic data type (sum type) with named constructors.
+//
+//	data Option[t] =
+//	  Some(t)
+//	  None
+//
+// Each variant carries zero or more positional or named fields.
+// At least one variant must carry a payload (pure-nullary shapes should
+// use `enum` instead).
+type DataDecl struct {
+	base
+	Name        string
+	TypeParams  []string
+	Constraints []TypeConstraint
+	Variants    []DataVariant
+}
+
+type DataVariant struct {
+	Pos    Pos
+	Name   string
+	Fields []StructField // empty -> nullary
 }
 
 // ArrayDestructDecl let [a, b] [T] = expr
@@ -397,6 +489,11 @@ type IsExpr struct {
 	Expr    Node
 	VarName string   // variable to bind matched value to
 	Type    TypeExpr // nil only if used as bare type-check
+	// Pattern is set for ADT-variant is-checks: `x is Ok(v)`.
+	// When non-nil, Type and VarName are left unset; the AST shape stored in
+	// Pattern is either *CallExpr (e.g. Ok(v)) or *Identifier (nullary like
+	// None). Codegen inspects Pattern first for ADT variant dispatch.
+	Pattern Node
 }
 
 type TypeAssertExpr struct {
@@ -606,6 +703,16 @@ type StructField struct {
 	// (forms a tree/DAG).  No runtime enforcement is performed; a future
 	// debug-mode build option will add an acyclicity check on assignment.
 	IsOwn bool
+	// IsConst marks a field as immutable after struct construction.  The parser
+	// sets this from a leading `const` keyword on the field line.  Codegen
+	// rejects writes (plain assign, aug-assign, postfix, setfield, address-of)
+	// to const fields.  Construction paths (struct literal, positional init,
+	// destructuring let, match bindings) are unaffected.  `IsVar` exists only
+	// to record that the user wrote an explicit `var` keyword, which is
+	// redundant today but carries meaning under a future `#const@field`
+	// default-flip.
+	IsConst bool
+	IsVar   bool
 }
 
 type EnumMember struct {
@@ -626,9 +733,19 @@ type UseImport struct {
 }
 
 type WhereClause struct {
-	Pos  Pos
-	Cond Node // nil = wildcard "_"
-	Body Node // expression or *Block
+	Pos Pos
+	// Cond: bool expression for bool-guard clauses. nil means bare "_" wildcard,
+	// which is a bool-mode catch-all (and is also accepted inside a pattern
+	// where-list as the universal catch-all).
+	Cond Node
+	// Pattern: set for pattern clauses (`where (pat): ...`). When non-nil,
+	// Cond must be nil; this is enforced in the parser. A pattern may be a
+	// literal, Identifier binder, ArrayPattern, StructPattern, or TuplePattern.
+	Pattern Node
+	// Guard: optional `if <expr>` after a pattern (`where (pat) if guard: ...`).
+	// Only valid when Pattern is non-nil.
+	Guard Node
+	Body  Node // expression or *Block
 }
 
 type ElseIfClause struct {
@@ -687,6 +804,18 @@ type ArrayPatternElement struct {
 type ArrayPattern struct {
 	base
 	Elems []ArrayPatternElement
+}
+
+// TuplePattern is used for multi-arg where-clause destructuring:
+//
+//	where (0, "hello"):      ->  TuplePattern{IntLit 0, StringLit "hello"}
+//	where (0, _, [x, ...]):  ->  TuplePattern{IntLit 0, Identifier "_", ArrayPattern}
+//
+// Single-arg patterns don't produce a TuplePattern; the parser unwraps the
+// single inner element so `where (0):` stores an IntLit directly as Pattern.
+type TuplePattern struct {
+	base
+	Elems []Node
 }
 
 type StructLitField struct {

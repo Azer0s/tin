@@ -1,0 +1,274 @@
+// examples/pattern_where.tin
+//
+// Demonstrates pattern matching in `where` clauses:
+//   - literal patterns:      where (0):, where ("hello"):, where (true):, where ('red):
+//   - binder patterns:       where (n):  (shadows the arg name)
+//   - wildcard patterns:     where (_):  and the bare `where _:`
+//   - guards:                where (n) if n > 0:
+//   - multi-arg tuples:      where (0, "x"):, where (_, _):
+//   - array patterns:        where ([]):, where ([x]):, where ([x, ...rest]):
+//                              (rest binds >= 1 element, so [x, ...rest] is len >= 2;
+//                               the [], [x], [x, ...rest] triple partitions all lists)
+//   - pattern-bound rest:    where ([_, ...tail]):
+//   - mixing is forbidden:   bool clauses + pattern clauses in one where-list
+//   - exhaustiveness:        a catch-all clause (bare `_` or bind-all) is required
+
+use assert
+
+// -- Literal patterns (integers) --------------------------------------------
+
+fn int_lit(n i32) string =
+  where (0): "zero"
+  where (1): "one"
+  where (42): "the answer"
+  where (_): "other"
+
+test "int literal patterns" =
+  assert::equals("zero",       int_lit(0))
+  assert::equals("one",        int_lit(1))
+  assert::equals("the answer", int_lit(42))
+  assert::equals("other",      int_lit(5))
+  assert::equals("other",      int_lit(-1))
+
+// -- Literal patterns (strings) ---------------------------------------------
+
+fn greet(s string) string =
+  where ("hello"): "hi"
+  where ("bye"):   "later"
+  where (_):       "??"
+
+test "string literal patterns" =
+  assert::equals("hi",    greet("hello"))
+  assert::equals("later", greet("bye"))
+  assert::equals("??",    greet("anything"))
+
+// -- Literal patterns (bool) -------------------------------------------------
+
+fn yn(b bool) string =
+  where (true):  "yes"
+  where (false): "no"
+
+test "bool literal patterns" =
+  assert::equals("yes", yn(true))
+  assert::equals("no",  yn(false))
+
+// -- Literal patterns (atoms) ------------------------------------------------
+
+fn color(a atom) string =
+  where ('red):   "R"
+  where ('green): "G"
+  where ('blue):  "B"
+  where (_):      "?"
+
+test "atom literal patterns" =
+  assert::equals("R", color('red))
+  assert::equals("G", color('green))
+  assert::equals("B", color('blue))
+  assert::equals("?", color('yellow))
+
+// -- Literal patterns (floats) ----------------------------------------------
+
+fn pi_ish(x f64) string =
+  where (3.14): "pi"
+  where (_):    "other"
+
+test "float literal patterns" =
+  assert::equals("pi",    pi_ish(3.14))
+  assert::equals("other", pi_ish(1.0))
+
+// -- Binder patterns + wildcard ---------------------------------------------
+
+fn identity(n i32) i32 =
+  where (n): n
+
+test "binder pattern always matches" =
+  assert::equals(42,  identity(42))
+  assert::equals(-7,  identity(-7))
+  assert::equals(0,   identity(0))
+
+fn shadowing(n i32) i32 =
+  where (m): m + 1
+
+test "binder pattern shadows arg name" =
+  assert::equals(11, shadowing(10))
+
+// -- Pattern-level wildcard + bare `_` catch-all ----------------------------
+
+fn classify_paren(n i32) string =
+  where (0): "zero"
+  where (_): "nonzero"
+
+fn classify_bare(n i32) string =
+  where (0): "zero"
+  where _:   "nonzero"
+
+test "paren vs bare wildcard equivalent" =
+  assert::equals("zero",    classify_paren(0))
+  assert::equals("nonzero", classify_paren(5))
+  assert::equals("zero",    classify_bare(0))
+  assert::equals("nonzero", classify_bare(5))
+
+// -- Guards ------------------------------------------------------------------
+
+fn sign(n i32) string =
+  where (0):          "zero"
+  where (n) if n < 0: "neg"
+  where (n) if n > 0: "pos"
+  where (_):          "unreachable"
+
+test "guarded pattern clauses" =
+  assert::equals("zero", sign(0))
+  assert::equals("neg",  sign(-5))
+  assert::equals("pos",  sign(7))
+
+// -- Recursive fib (pattern form) -------------------------------------------
+
+fn fib(n i32) i32 =
+  where (0): 0
+  where (1): 1
+  where (n): fib(n - 2) + fib(n - 1)
+
+test "fib via pattern where" =
+  assert::equals(0,  fib(0))
+  assert::equals(1,  fib(1))
+  assert::equals(1,  fib(2))
+  assert::equals(2,  fib(3))
+  assert::equals(55, fib(10))
+
+// -- Multi-arg tuple patterns -----------------------------------------------
+
+fn dispatch2(a i32, b string) string =
+  where (0, _):       "zero-any"
+  where (1, "hello"): "one-hello"
+  where (1, "bye"):   "one-bye"
+  where (1, _):       "one-other"
+  where (_, _):       "other"
+
+test "2-arg tuple dispatch" =
+  assert::equals("zero-any",  dispatch2(0, "x"))
+  assert::equals("one-hello", dispatch2(1, "hello"))
+  assert::equals("one-bye",   dispatch2(1, "bye"))
+  assert::equals("one-other", dispatch2(1, "misc"))
+  assert::equals("other",     dispatch2(2, "hello"))
+
+fn tuple3(a i32, b i32, c i32) i32 =
+  where (0, 0, 0): 0
+  where (1, _, _): 100
+  where (_, 1, _): 200
+  where (_, _, 1): 300
+  where (_, _, _): -1
+
+test "3-arg tuple dispatch" =
+  assert::equals(0,   tuple3(0, 0, 0))
+  assert::equals(100, tuple3(1, 9, 9))
+  assert::equals(200, tuple3(9, 1, 9))
+  assert::equals(300, tuple3(9, 9, 1))
+  assert::equals(-1,  tuple3(2, 3, 4))
+
+fn tuple_bind(a i32, b i32) i32 =
+  where (x, y): x * 10 + y
+
+test "tuple pattern with binders" =
+  assert::equals(37, tuple_bind(3, 7))
+
+// -- Array patterns ----------------------------------------------------------
+
+fn arr_describe(xs [i32]) string =
+  where ([]):              "empty"
+  where ([x]):             "one"
+  where ([x, y]):          "two"
+  where ([x, y, z]):       "three"
+  where ([x, ...rest]):    "many"
+
+test "array patterns by length" =
+  let a [i32] = []
+  let b [i32] = [1]
+  let c [i32] = [1, 2]
+  let d [i32] = [1, 2, 3]
+  let e [i32] = [1, 2, 3, 4, 5]
+  assert::equals("empty", arr_describe(a))
+  assert::equals("one",   arr_describe(b))
+  assert::equals("two",   arr_describe(c))
+  assert::equals("three", arr_describe(d))
+  assert::equals("many",  arr_describe(e))
+
+fn arr_sum(xs [i32]) i32 =
+  // Cons-with-non-empty-rest semantics: [x, ...rest] needs rest >= 1, so a
+  // singleton is handled by [x]. The triple [], [x], [x, ...rest] is
+  // structurally exhaustive (recognised by the Maranget check).
+  where ([]):           0
+  where ([x]):          x
+  where ([x, ...rest]): x + arr_sum(rest)
+
+test "recursive sum via array pattern" =
+  assert::equals(0,  arr_sum([]))
+  assert::equals(5,  arr_sum([5]))
+  assert::equals(10, arr_sum([1, 2, 3, 4]))
+
+fn arr_head(xs [i32]) i32 =
+  where ([]):       -1
+  where ([x]):      x
+  where ([x, ...]): x
+
+test "head via array pattern, rest discarded" =
+  assert::equals(-1, arr_head([]))
+  assert::equals(42, arr_head([42]))
+  assert::equals(7,  arr_head([7, 99, 100]))
+
+fn arr_second(xs [i32]) i32 =
+  where ([_, y, ...]): y
+  where (_):           -1
+
+test "second element via wildcards in array pattern" =
+  assert::equals(-1, arr_second([]))
+  assert::equals(-1, arr_second([1]))
+  assert::equals(20, arr_second([10, 20, 30]))
+
+// -- Pattern binding used in guard -----------------------------------------
+
+fn first_pos(xs [i32]) i32 =
+  where ([]):                     -1
+  where ([x]) if x > 0:           x
+  where ([x]):                    -1
+  where ([x, ...]) if x > 0:      x
+  where ([x, ...rest]):           first_pos(rest)
+
+test "pattern binding flows into guard" =
+  assert::equals(-1, first_pos([]))
+  assert::equals(5,  first_pos([5]))
+  assert::equals(-1, first_pos([-3, -2, -1]))
+  assert::equals(7,  first_pos([-1, -2, 7, 9]))
+
+// -- qsort (the motivating example) -----------------------------------------
+
+fn qsort(xs [i32]) [i32] =
+  where ([]):            []
+  where ([x]):           [x]
+  where ([x, ...rest]):
+    let lower [i32] = []
+    let upper [i32] = []
+    for let e i32 in rest:
+      if e < x:
+        lower ++= e
+      if e >= x:
+        upper ++= e
+    return qsort(lower) ++ [x] ++ qsort(upper)
+
+test "qsort via pattern where" =
+  let a = qsort([3, 1, 4, 1, 5, 9, 2, 6])
+  assert::equals(8, a.len)
+  assert::equals(1, a[0])
+  assert::equals(1, a[1])
+  assert::equals(2, a[2])
+  assert::equals(3, a[3])
+  assert::equals(4, a[4])
+  assert::equals(5, a[5])
+  assert::equals(6, a[6])
+  assert::equals(9, a[7])
+
+test "qsort empty + singleton" =
+  let e = qsort([])
+  assert::equals(0, e.len)
+  let s = qsort([42])
+  assert::equals(1, s.len)
+  assert::equals(42, s[0])

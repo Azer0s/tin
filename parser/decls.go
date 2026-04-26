@@ -15,10 +15,18 @@ import (
 func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	p.advance() // consume struct
 
-	// Optional {#tags} before name
+	// Optional {#tags} before name. Tags scoped with @fn/@method/@static_fn/@field
+	// are collected separately; propagation happens in codegen.
+	var scopedTags []ast.ScopedTag
+
 	if p.check(lexer.LBRACE) {
-		moreTags := p.parseTags()
+		moreTags, moreScoped, err := p.parseStructTags()
+		if err != nil {
+			return nil, err
+		}
+
 		tags = append(tags, moreTags...)
+		scopedTags = append(scopedTags, moreScoped...)
 	}
 
 	nameTok, err := p.expect(lexer.IDENT)
@@ -67,7 +75,8 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 
 	decl := &ast.StructDecl{
 		Name: nameTok.Literal, TypeParams: typeParams,
-		Constraints: constraints, Implements: impls, Tags: tags,
+		Constraints: constraints, Implements: impls,
+		Tags: tags, ScopedTags: scopedTags,
 	}
 
 	// Parse body (fields + methods)
@@ -132,7 +141,25 @@ func (p *Parser) parseStructItem() (any, error) {
 
 		return fn, err
 	}
-	// Field: name [weak|own] type [forward]
+	// Field: [const|var] name [weak|own] type [forward]
+	//
+	// A leading `const` or `var` sets the field's mutability. We only
+	// consume it when the next token is an identifier - that keeps a plain
+	// `const` or `var` variable declaration (which can't legally appear
+	// here anyway) from being silently swallowed.
+	isConst := false
+	isVar := false
+
+	if p.check(lexer.KW_CONST) && p.peekAt(1).Type == lexer.IDENT {
+		isConst = true
+
+		p.advance()
+	} else if p.check(lexer.KW_VAR) && p.peekAt(1).Type == lexer.IDENT {
+		isVar = true
+
+		p.advance()
+	}
+
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
@@ -180,7 +207,16 @@ func (p *Parser) parseStructItem() (any, error) {
 		tags = append(tags, tagTok.Literal)
 	}
 
-	return &ast.StructField{Name: nameTok.Literal, Type: typ, IsForward: isForward, IsWeak: isWeak, IsOwn: isOwn, Tags: tags}, nil
+	return &ast.StructField{
+		Name:      nameTok.Literal,
+		Type:      typ,
+		IsForward: isForward,
+		IsWeak:    isWeak,
+		IsOwn:     isOwn,
+		IsConst:   isConst,
+		IsVar:     isVar,
+		Tags:      tags,
+	}, nil
 }
 
 func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
@@ -244,8 +280,21 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 					}
 
 					decl.Methods = append(decl.Methods, fn)
-				} else if p.check(lexer.IDENT) {
-					// forward field: "name type forward"
+				} else if p.check(lexer.IDENT) || ((p.check(lexer.KW_CONST) || p.check(lexer.KW_VAR)) && p.peekAt(1).Type == lexer.IDENT) {
+					// forward field: [const|var] name type forward
+					isConst := false
+					isVar := false
+
+					if p.check(lexer.KW_CONST) {
+						isConst = true
+
+						p.advance()
+					} else if p.check(lexer.KW_VAR) {
+						isVar = true
+
+						p.advance()
+					}
+
 					fname := p.advance().Literal
 
 					ftype, err2 := p.parseTypeExpr()
@@ -257,7 +306,12 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 						p.advance()
 					}
 
-					decl.ForwardFields = append(decl.ForwardFields, ast.StructField{Name: fname, Type: ftype})
+					decl.ForwardFields = append(decl.ForwardFields, ast.StructField{
+						Name:    fname,
+						Type:    ftype,
+						IsConst: isConst,
+						IsVar:   isVar,
+					})
 				} else {
 					p.advance() // skip unexpected tokens
 				}
@@ -292,7 +346,17 @@ func (p *Parser) parseTypeDecl() (*ast.TypeDecl, error) {
 		return nil, err
 	}
 
-	decl := &ast.TypeDecl{Name: nameTok.Literal, TypeParams: typeParams, Type: typ}
+	// Optional trait-bound clauses AFTER the RHS, matching struct/fn style:
+	//   type StrPair[T] = Pair[string, T] where T is ord
+	// Enforced at monomorphization time (see ensureConcreteStruct /
+	// monomorphizeFunc).
+	constraints := p.parseTypeConstraints()
+	decl := &ast.TypeDecl{
+		Name:        nameTok.Literal,
+		TypeParams:  typeParams,
+		Constraints: constraints,
+		Type:        typ,
+	}
 
 	// optional "override = fn ..."
 	if p.check(lexer.KW_OVERRIDE) {
@@ -469,6 +533,196 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 	}
 
 	return decl, nil
+}
+
+// parseDataDecl parses an ADT declaration:
+//
+//	data Name[t, u] where t is ord =
+//	  Variant0
+//	  Variant1(t)
+//	  Variant2(name type, name type)
+//
+// At least one variant must carry a payload; pure-nullary ADTs are
+// rejected in favor of `enum`.
+func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
+	// `data` is a contextual keyword: we expect IDENT("data") here.
+	p.advance() // consume "data" IDENT
+
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+
+	typeParams, _ := p.parseTypeParams()
+
+	constraints := p.parseTypeConstraints()
+
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+
+	decl := &ast.DataDecl{
+		Name:        nameTok.Literal,
+		TypeParams:  typeParams,
+		Constraints: constraints,
+	}
+
+	if !p.check(lexer.NEWLINE) {
+		return nil, fmt.Errorf("%s: data %s: expected newline after '='", p.peek().String(), decl.Name)
+	}
+
+	p.advance()
+	p.skipNewlines()
+
+	if !p.check(lexer.INDENT) {
+		return nil, fmt.Errorf("%s: data %s: expected indented variant list", p.peek().String(), decl.Name)
+	}
+
+	p.advance()
+	p.skipNewlines()
+
+	anyPayload := false
+
+	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+		v, err2 := p.parseDataVariant()
+		if err2 != nil {
+			return nil, err2
+		}
+
+		if len(v.Fields) > 0 {
+			anyPayload = true
+		}
+
+		decl.Variants = append(decl.Variants, v)
+
+		p.skipNewlines()
+	}
+
+	if p.check(lexer.DEDENT) {
+		p.advance()
+	}
+
+	if len(decl.Variants) == 0 {
+		return nil, fmt.Errorf("data %s: at least one variant is required", decl.Name)
+	}
+
+	if !anyPayload {
+		return nil, fmt.Errorf("data %s: at least one variant must carry a payload; use `enum` for pure-nullary sums", decl.Name)
+	}
+
+	return decl, nil
+}
+
+func (p *Parser) parseDataVariant() (ast.DataVariant, error) {
+	pos := p.peek()
+
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return ast.DataVariant{}, err
+	}
+
+	v := ast.DataVariant{
+		Pos:  ast.Pos{Line: pos.Line, Col: pos.Col},
+		Name: nameTok.Literal,
+	}
+
+	if !p.check(lexer.LPAREN) {
+		return v, nil
+	}
+
+	p.advance()
+	p.skipWhitespace()
+
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		f, err2 := p.parseDataVariantField()
+		if err2 != nil {
+			return v, err2
+		}
+
+		v.Fields = append(v.Fields, f)
+
+		p.skipWhitespace()
+
+		if p.check(lexer.COMMA) {
+			p.advance()
+			p.skipWhitespace()
+		}
+	}
+
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return v, err
+	}
+
+	return v, nil
+}
+
+// parseDataVariantField parses one field of a data variant: either a bare
+// type (positional) or `name [own|weak] type` (named).
+func (p *Parser) parseDataVariantField() (ast.StructField, error) {
+	if p.isNamedDataField() {
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return ast.StructField{}, err
+		}
+
+		var isWeak, isOwn bool
+
+		if p.check(lexer.KW_WEAK) {
+			isWeak = true
+
+			p.advance()
+		} else if p.check(lexer.KW_OWN) {
+			isOwn = true
+
+			p.advance()
+		}
+
+		typ, err := p.parseTypeExpr()
+		if err != nil {
+			return ast.StructField{}, err
+		}
+
+		return ast.StructField{Name: nameTok.Literal, Type: typ, IsWeak: isWeak, IsOwn: isOwn}, nil
+	}
+
+	var isWeak, isOwn bool
+
+	if p.check(lexer.KW_WEAK) {
+		isWeak = true
+
+		p.advance()
+	} else if p.check(lexer.KW_OWN) {
+		isOwn = true
+
+		p.advance()
+	}
+
+	typ, err := p.parseTypeExpr()
+	if err != nil {
+		return ast.StructField{}, err
+	}
+
+	return ast.StructField{Type: typ, IsWeak: isWeak, IsOwn: isOwn}, nil
+}
+
+// isNamedDataField returns true when the next tokens look like `name type`
+// rather than a bare type. Named form: IDENT followed by KW_OWN, KW_WEAK,
+// another IDENT, STAR, LBRACKET, or a primitive-type keyword.
+func (p *Parser) isNamedDataField() bool {
+	if !p.check(lexer.IDENT) {
+		return false
+	}
+
+	next := p.peekAt(1)
+
+	switch next.Type {
+	case lexer.KW_OWN, lexer.KW_WEAK, lexer.STAR, lexer.LBRACKET:
+		return true
+	case lexer.IDENT:
+		return true
+	}
+
+	return isTypeKeyword(next)
 }
 
 func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {

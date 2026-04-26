@@ -278,6 +278,12 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 
 		return nil, nil
 	case lexer.IDENT:
+		// Contextual keyword: `data Name = V0 | V1(...)` at the top level.
+		// We accept `data` as a bare IDENT in all other positions (field name,
+		// variable name, ...) to keep the surface surface area small.
+		if p.peek().Literal == "data" && p.peekAt(1).Type == lexer.IDENT {
+			return p.parseDataDecl()
+		}
 		// Check if this identifier is a #no_parens macro name.
 		// If so, expand the macro by injecting its backtick expansion as prefix tokens
 		// before the rest of the declaration.
@@ -335,4 +341,69 @@ func (p *Parser) parseTags() []string {
 	}
 
 	return tags
+}
+
+// parseStructTags is the struct-decl variant of parseTags: it preserves
+// the optional `@scope` qualifier after each tag. Unscoped tags go into
+// the first return value (for compatibility with hasTag consumers);
+// scoped tags go into the second return value for codegen propagation.
+// Unknown scope names produce a parse error at the struct decl site.
+func (p *Parser) parseStructTags() ([]string, []ast.ScopedTag, error) {
+	var (
+		tags   []string
+		scoped []ast.ScopedTag
+	)
+
+	if !p.check(lexer.LBRACE) {
+		return nil, nil, nil
+	}
+
+	saved := p.pos
+	p.advance() // consume {
+
+	if !p.check(lexer.CONTROL_TAG) {
+		p.pos = saved
+
+		return nil, nil, nil
+	}
+
+	for p.check(lexer.CONTROL_TAG) {
+		tagTok := p.advance()
+		name := tagTok.Literal
+
+		if p.check(lexer.AT) {
+			p.advance()
+			// Scope name may collide with a reserved keyword (notably `fn`),
+			// so accept any non-whitespace token and dispatch on its literal.
+			scopeTok := p.advance()
+			scope := scopeTok.Literal
+
+			if !isValidStructTagScope(scope) {
+				return nil, nil, fmt.Errorf("%d:%d: unknown struct tag scope @%s (valid: @fn, @method, @static_fn, @field)",
+					scopeTok.Line, scopeTok.Col, scope)
+			}
+
+			scoped = append(scoped, ast.ScopedTag{Name: name, Scope: scope})
+		} else {
+			tags = append(tags, name)
+		}
+	}
+
+	if p.check(lexer.RBRACE) {
+		p.advance()
+	}
+
+	return tags, scoped, nil
+}
+
+// isValidStructTagScope reports whether s names one of the member
+// scopes recognized on a struct's {#tag@scope} header. Kept in sync
+// with the propagation table in codegen.
+func isValidStructTagScope(s string) bool {
+	switch s {
+	case "fn", "method", "static_fn", "field":
+		return true
+	}
+
+	return false
 }

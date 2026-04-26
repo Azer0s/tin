@@ -76,6 +76,12 @@ type CodeGen struct {
 
 	// type alias registry: alias name -> TypeExpr
 	typeAliases map[string]ast.TypeExpr
+	// genericTypeAliases stores the full TypeDecl for each generic type
+	// alias (those with TypeParams). Needed to expand calls like
+	// `StrPair[i32]{...}` - the alias substitutes its params into the RHS
+	// and re-enters monomorphization on the underlying struct. Also holds
+	// the alias's own where-clause bounds so they can fire on instantiation.
+	genericTypeAliases map[string]*ast.TypeDecl
 
 	// trait registry: trait name -> TraitDecl
 	traits map[string]*ast.TraitDecl
@@ -126,6 +132,8 @@ type CodeGen struct {
 	tinRecoverFn *ir.Func
 	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
 	sliceSubsliceFn *ir.Func
+	// sliceConvertIntFn is the lazily declared _tin_slice_convert_int extern.
+	sliceConvertIntFn *ir.Func
 	// bytesFromBufFn is the lazily declared _tin_bytes_from_buf extern.
 	bytesFromBufFn *ir.Func
 	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
@@ -134,6 +142,11 @@ type CodeGen struct {
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
+
+	// structConstFields: struct key -> set of field names declared as `const`.
+	// Const fields are rejected as the target of any write (plain assign,
+	// aug-assign, postfix, setfield, address-of).
+	structConstFields map[string]map[string]bool
 
 	// cLayoutStructs: struct names used as *S in extern function signatures.
 	// These structs use a wrapper layout: { i32 type_id, vtable_ptrs..., i8* c_data_ptr, inline_fields... }
@@ -321,6 +334,55 @@ type CodeGen struct {
 	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
 	noWarnAsyncMain bool
 
+	// noWarnUnusedMatchArms suppresses warnings for unreachable match cases /
+	// where clauses (-Wno-unused-match-arms).
+	noWarnUnusedMatchArms bool
+
+	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
+	// reachability decisions for every match / where the compiler sees.
+	// Toggled by -v-match-info; for debugging the algorithm itself.
+	verboseMatchInfo bool
+
+	// noWarnBoolAnalysis suppresses "condition is always true/false"
+	// warnings emitted when an if/elif/while/where/for-condition folds to
+	// a constant. Toggled by -Wno-bool-analysis.
+	noWarnBoolAnalysis bool
+
+	// verboseDemorgan prints each boolean simplification the compiler
+	// applies (De Morgan push-inward, double-negation elim, comparison
+	// negation, bool-literal absorption). Toggled by -v-demorgan.
+	verboseDemorgan bool
+
+	// emitHeaderPath, when non-empty, instructs codegen to write a C
+	// header file listing every #interop function's prototype. Toggled
+	// by --emit-header=<path>.
+	emitHeaderPath string
+
+	// interopCbThunks caches per-signature thunks emitted to bridge
+	// raw C function pointers into Tin's fat fn-ptr calling convention.
+	// Keyed by sanitized (ret, params) signature.
+	interopCbThunks map[string]*ir.Func
+
+	// interopDispatchers caches per-signature dispatchers used to
+	// invoke a Tin closure returned to C through a mmap'd trampoline.
+	// The dispatcher's first IR instruction reads %r10 (set by the
+	// trampoline) to recover the fat-fn-ptr address, then tail-calls
+	// fn(env, args...). Keyed by sanitized (ret, params) signature.
+	interopDispatchers map[string]*ir.Func
+
+	// interopPackedStructs is the set of `#packed` struct names
+	// reachable from the program. Populated by checkAllInteropFuncs;
+	// consulted by the validator and the wrapper emitter.
+	interopPackedStructs map[string]bool
+
+	// mutatedNames is the set of identifier names that are reassigned
+	// anywhere inside the current function body (including closures and
+	// defers). Populated per function body in genFuncDeclAs and consulted
+	// by the if-condition folder (codegen/fold.go) to suppress folding of
+	// identifiers whose value can change between the let binding and the
+	// if-condition evaluation site. Reset to nil between functions.
+	mutatedNames map[string]bool
+
 	// userMainDecl is the AST node for the user's explicit fn main(), saved
 	// during genFuncDecl so the wrapper can inspect params and return type.
 	userMainDecl *ast.FuncDecl
@@ -376,6 +438,26 @@ type CodeGen struct {
 	// Same purpose as structTypeIDs/dataTypeIDs - used for any boxing and typeof.
 	unionTypeIDs map[string]int32
 
+	// ADT registry: `data T = V0 | V1(...)` declarations.
+	// Layout mirrors tagged unions: { i32 type_id, i8 tag, [N x i8] payload }.
+	// dataDecls[name]       -> the original DataDecl AST
+	// dataTypeIDs[name]     -> compile-time i32 type ID (same pool as structs/unions)
+	// dataVariants[adt][v]  -> per-variant info (tag, payload struct, fields)
+	// dataVariantLookup[v]  -> list of ADT names that declare a variant named v;
+	//                         used to resolve bare constructor references.
+	dataDecls           map[string]*ast.DataDecl
+	dataTypeIDs         map[string]int32
+	dataVariants        map[string]map[string]*dataVariantInfo
+	dataVariantLookup   map[string][]string
+	dataValueReleaseFns map[string]*ir.Func
+	dataValueRetainFns  map[string]*ir.Func
+	// dataInstTypeArgs maps a concrete ADT instance name (e.g.
+	// "Result__json__Value__JsonError") to the resolved canonical type-arg
+	// names the instance was monomorphized with (e.g. ["json__Value",
+	// "JsonError"]). Used by inferTypeArgs to recover type arguments from a
+	// struct name whose arity cannot be recovered by splitting on `__`.
+	dataInstTypeArgs map[string][]string
+
 	// ------------------------------------------------------------------
 	// Fiber / coroutine state
 	// ------------------------------------------------------------------
@@ -412,6 +494,19 @@ type CodeGen struct {
 	fiberInitFn        *ir.Func
 	fiberRunFn         *ir.Func
 	ioInitFn           *ir.Func
+
+	// REPL mode: when true, top-level `let` bindings are promoted to LLVM
+	// globals, main() generation is skipped, and cg.replNewGlobals is populated.
+	replMode         bool
+	replCellFuncName string // e.g. "_repl_cell_3"
+	replNewGlobals   []ReplGlobal
+	// replExternalGlobals: globals defined by previous REPL cells.
+	// Re-injected as 'external' linkage so all cells share the canonical copy.
+	replExternalGlobals map[string]bool
+	// replCellGlobals: globals created by this cell's let-promotions.
+	// Keyed by Tin name; survives across function-scope pops so the $coro
+	// variant of the cell function can find and reuse them.
+	replCellGlobals map[string]*ir.Global
 
 	// coroCallable: set of function names that need a $coro duplicate.
 	// Built by colorCallGraph() after the predeclaration pass.
@@ -652,9 +747,14 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)  { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTestMode(v bool)              { cg.testMode = v }
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool)       { cg.noWarnAsyncMain = v }
+func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms = v }
+func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
+func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool)    { cg.noWarnBoolAnalysis = v }
+func (cg *CodeGen) SetVerboseDemorgan(v bool)       { cg.verboseDemorgan = v }
+func (cg *CodeGen) SetEmitHeaderPath(p string)      { cg.emitHeaderPath = p }
+func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
 		cg.mod.TargetTriple = triple
@@ -764,6 +864,7 @@ func New(filename string) *CodeGen {
 		structVtableOrder:      make(map[string][]string),
 		enumValues:             make(map[string]int64),
 		enumTypes:              make(map[string]irtypes.Type),
+		genericTypeAliases:     make(map[string]*ast.TypeDecl),
 		typeAliases: map[string]ast.TypeExpr{
 			// rune is a built-in alias for i32 (Unicode codepoint, U+0000..U+10FFFF).
 			// for r rune in someString triggers UTF-8 decoding in the for-in loop.
@@ -793,6 +894,13 @@ func New(filename string) *CodeGen {
 		unionTypeMembers:         make(map[string][]ast.TypeExpr),
 		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
 		unionTypeIDs:             make(map[string]int32),
+		dataDecls:                make(map[string]*ast.DataDecl),
+		dataTypeIDs:              make(map[string]int32),
+		dataVariants:             make(map[string]map[string]*dataVariantInfo),
+		dataVariantLookup:        make(map[string][]string),
+		dataValueReleaseFns:      make(map[string]*ir.Func),
+		dataValueRetainFns:       make(map[string]*ir.Func),
+		dataInstTypeArgs:         make(map[string][]string),
 		coroCallable:             make(map[string]bool),
 		callGraph:                make(map[string][]string),
 		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
@@ -802,6 +910,7 @@ func New(filename string) *CodeGen {
 		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		structConstFields:        make(map[string]map[string]bool),
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),
 		packedStructs:            make(map[string]bool),
@@ -913,6 +1022,53 @@ func (cg *CodeGen) LinkLibs() []string { return cg.linkLibs }
 // as packages during codegen. The caller can scan these for //! directives
 // (e.g. //!+file.c) to collect C sources that need to be compiled alongside.
 func (cg *CodeGen) PackageSrcPaths() []string { return cg.pkgSrcPaths }
+
+// ReplGlobal records a top-level variable promoted from a `let` binding in
+// REPL mode. The session uses this to declare the variable as a `var` in
+// subsequent cells so the type checker can resolve cross-cell references.
+type ReplGlobal struct {
+	Name     string
+	TinType  ast.TypeExpr // from the VarDecl; nil if type was inferred
+	LLVMType irtypes.Type
+}
+
+// SetReplMode enables REPL code generation. cellFuncName is the IR name of
+// the current cell entry function (e.g. "_repl_cell_3"). In REPL mode,
+// top-level `let` bindings inside cellFuncName are promoted to LLVM globals
+// and main() generation is skipped.
+func (cg *CodeGen) SetReplMode(cellFuncName string) {
+	cg.replMode = true
+	cg.replCellFuncName = cellFuncName
+	cg.replCellGlobals = make(map[string]*ir.Global)
+}
+
+// SetReplExternalGlobals marks names as externally-defined (from prior REPL cells).
+// preregisterTopLevelVar will emit these as 'external' linkage so RTLD_GLOBAL
+// resolves them to the canonical copy instead of creating a new definition.
+func (cg *CodeGen) SetReplExternalGlobals(names []string) {
+	cg.replExternalGlobals = make(map[string]bool, len(names))
+	for _, n := range names {
+		cg.replExternalGlobals[n] = true
+	}
+}
+
+// ReplNewGlobals returns globals promoted from `let` bindings in this cell.
+func (cg *CodeGen) ReplNewGlobals() []ReplGlobal { return cg.replNewGlobals }
+
+// ReplGlobalTinTypeName returns the Tin source type name for a promoted global,
+// or "" if the type cannot be reliably reconstructed from the LLVM type.
+func (cg *CodeGen) ReplGlobalTinTypeName(g ReplGlobal) string {
+	if g.TinType != nil {
+		return g.TinType.String()
+	}
+
+	n := llvmTypeToTinName(g.LLVMType)
+	if n == "any" {
+		return "" // unresolvable - skip global registration
+	}
+
+	return n
+}
 
 // Generate translates the AST program into an LLVM IR module.
 func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
@@ -1057,6 +1213,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if len(sd.TypeParams) > 0 {
 				continue
 			}
+			// Propagate struct-level scoped tags (#pure@fn, etc.) onto methods
+			// BEFORE they are registered in funcDecls. The later #pure /
+			// #no_recurse check iterates funcDecls and must see the expanded
+			// tag set.
+			if err := cg.propagateStructScopedTags(sd); err != nil {
+				return nil, err
+			}
 
 			aug := cg.augmentStructFromTraits(sd)
 			for _, m := range aug.Methods {
@@ -1075,6 +1238,10 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	if err := cg.checkAllNoRecurseFuncs(); err != nil {
+		return nil, err
+	}
+
+	if err := cg.checkAllInteropFuncs(prog.Stmts); err != nil {
 		return nil, err
 	}
 
@@ -1143,10 +1310,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// and may appear before the struct definition in source order.
 	cg.progress("generate type declarations")
 
+	// Phase A: struct field layouts (no methods yet); plus enum/type/union
+	// declarations whose field types may reference structs.
 	for _, node := range prog.Stmts {
 		switch n := node.(type) {
 		case *ast.StructDecl:
-			if err := cg.genStructDecl(n); err != nil {
+			if err := cg.genStructLayout(n); err != nil {
 				return nil, err
 			}
 		case *ast.EnumDecl:
@@ -1159,6 +1328,26 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			}
 		case *ast.UnionDecl:
 			if err := cg.genUnionDecl(n); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Phase B: ADT layouts now that every struct field type is known, so
+	// generic ADTs like Result[LocalStruct, Err] get the correct payload
+	// size rather than a placeholder [1 x i8].
+	for _, node := range prog.Stmts {
+		if n, ok := node.(*ast.DataDecl); ok {
+			if err := cg.genDataDecl(n); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Phase C: struct method bodies, trait chain shims, and vtables.
+	for _, node := range prog.Stmts {
+		if n, ok := node.(*ast.StructDecl); ok {
+			if err := cg.genStructMethods(n); err != nil {
 				return nil, err
 			}
 		}
@@ -1193,6 +1382,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Registered in preregister; no IR to emit.
 		case *ast.UnionDecl:
 			// Already processed in pre-pass 3.
+		case *ast.DataDecl:
+			// Already processed in pre-pass 3.
 		case *ast.TestDecl:
 			if cg.testMode {
 				cg.testDecls = append(cg.testDecls, n)
@@ -1207,6 +1398,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Emit C-callable wrappers for #interop functions. Done after the
+	// third pass so all internal entry points exist as IR functions
+	// the wrapper can reference.
+	if err := cg.emitInteropWrappers(prog.Stmts); err != nil {
+		return nil, err
+	}
+
+	if cg.emitHeaderPath != "" {
+		if err := cg.writeInteropHeader(prog.Stmts); err != nil {
+			return nil, err
+		}
+	}
+
 	// In test mode, generate test functions and a test-runner main.
 	// Top-level statements that would form the implicit main are intentionally
 	// not executed - only test blocks run.
@@ -1215,6 +1419,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			return nil, err
 		}
 
+		cg.emitAtomTable()
+
+		return cg.mod, nil
+	}
+
+	// In REPL mode the cell function is the only entry point; skip main().
+	if cg.replMode {
 		cg.emitAtomTable()
 
 		return cg.mod, nil
@@ -1419,7 +1630,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	if !hasMain {
+	if !hasMain && !programHasInteropFunc(prog.Stmts) {
+		// No user main and no #interop functions: emit an empty main so
+		// the linker has an entry point. When #interop functions exist
+		// the program is being built as a library; skip the synthetic
+		// main so the C consumer can provide its own.
 		wf := cg.mod.NewFunc("main", irtypes.I32)
 		wb := wf.NewBlock("entry")
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
@@ -1470,8 +1685,7 @@ func typeExprIsPrimitive(te ast.TypeExpr) bool {
 		case "i8", "i16", "i32", "i64", "i128",
 			"u8", "u16", "u32", "u64", "u128",
 			"f32", "f64", "f128",
-			"byte", "char", "bool", "string", "void",
-			"int", "uint":
+			"byte", "char", "bool", "string", "void":
 			return true
 		}
 

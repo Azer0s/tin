@@ -7,7 +7,7 @@ RUN go build .
 FROM ubuntu:latest
 WORKDIR /app
 RUN apt update && apt upgrade -y
-RUN apt install -y clang
+RUN apt install -y clang libssl-dev
 COPY --from=builder /app/runtime /app/runtime
 COPY --from=builder /app/tin /app
 COPY --from=builder /app/examples /app/examples

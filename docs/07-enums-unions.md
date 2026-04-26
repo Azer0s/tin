@@ -249,3 +249,121 @@ let b u8  = c.as_r     // read same bytes as u8
 
 > Native unions have no tag - reading from the "wrong" field reinterprets
 > bytes silently. Use tagged unions (`type x = T | U`) for safe sum types.
+
+---
+
+## Algebraic data types (`data`)
+
+A `data` declaration defines a sum type whose variants are named
+constructors, each carrying zero or more positional or named fields. This is
+the right tool when two outcomes share the same underlying type but
+different meanings (e.g. `Ok(i32)` vs `Err(i32)`) - something a tagged union
+cannot express.
+
+```rust
+data Option[t] =
+  None
+  Some(v t)
+
+data Result[t, e] =
+  Ok(v t)
+  Err(msg e)
+
+data Shape =
+  Dot
+  Circle(radius f64)
+  Rect(width f64, height f64)
+```
+
+### Requirements
+
+- At least one variant must carry a payload. Pure-nullary sums belong in
+  `enum`.
+- `data` is a *contextual* keyword: it only introduces a declaration when it
+  appears where a top-level decl is expected. Anywhere else (field name,
+  variable name) it parses as a plain identifier.
+
+### Construction
+
+```rust
+let a Option[i64] = Option[i64]::Some(42)   // fully qualified
+let b Option[i64] = Some(42)                // inferred from let annotation
+let r Result[i32, string] = Ok(42)          // inferred from let annotation
+
+fn unwrap(r Result[i32, string], d i32) i32 = ...
+
+unwrap(Ok(42), 0)                           // inferred from argument position
+```
+
+Inference rule for bare `Ctor(...)`:
+
+1. If an expected type is known at the call site (let-binding annotation,
+   function argument, function return) AND the expected type is a known
+   ADT whose variants include `Ctor`, use it.
+2. Otherwise, if exactly one ADT in scope declares `Ctor`, use it.
+3. Otherwise, the compiler asks you to qualify (`Adt[...]::Ctor(...)`).
+
+### Pattern matching
+
+```rust
+match r:
+  case Ok(v):   echo "ok: {v}"
+  case Err(m):  echo "error: {m}"
+
+// where-patterns reuse the same constructor syntax
+fn unwrap_or(r Result[i32, string], d i32) i32 =
+  where r is Ok(v):  return v
+  where r is Err(_): return d
+```
+
+Match arms exhaustively covering every variant are recognised without a
+`default`. Match-arm bindings of RC-tracked fields (string, array, closure,
+any) are retained on entry and released on exit, so `return v` transfers
+ownership cleanly.
+
+`where x is Ctor(b, ...)` bindings are *borrows*: they avoid the retain so
+they cannot be returned as-is. Prefer `match` when you need to hand an
+owning field back to the caller.
+
+### Recursive ADTs
+
+Recursive variants use `own *Self` (or `weak *Self` for back-edges):
+
+```rust
+data Tree[t] =
+  Leaf
+  Node(v t, left own *Tree[t], right own *Tree[t])
+
+data DList[t] =
+  DNil
+  DCons(v t, next own *DList[t], prev weak *DList[t])
+```
+
+ARC rules are identical to struct fields: owning pointers are released when
+the ADT value is freed, dispatched by the tag; weak references don't
+contribute to the retain count.
+
+### Runtime layout
+
+ADT values share the tagged-union layout:
+
+```
+{ i32 type_id, i8 tag, [max_payload_size x i8] payload }
+```
+
+- `tag` is the ordinal index of the active variant (0-based, declaration
+  order).
+- `payload` holds the active variant's packed field struct; unused variants
+  pad out to the largest payload size.
+- `type_id` is a compile-time constant shared with structs/unions, used by
+  `typeof` and `any` boxing.
+
+### `data` vs `type = A | B | C`
+
+- **Tagged union** (`type num = i64 | f64`): discriminated by the *type*
+  of the stored value. Test with `is T` or `match x.(type)`.
+- **ADT** (`data Kind = ...`): discriminated by *constructor name*. Test
+  with `is Ctor(...)` or `match x: case Ctor(...)`.
+
+They compile to the same runtime shape, so interop through `any` boxing is
+uniform.

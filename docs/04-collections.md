@@ -66,6 +66,29 @@ let s = "hello"
 echo s.len    // 5
 ```
 
+### Element type must match
+
+An array of one element type cannot be silently passed where a different
+element type is expected. The compiler rejects it with a message suggesting
+the explicit cast:
+
+```rust
+fn consume(xs [i32]) void = ...
+
+let wide [i64] = [100, 200, 300]
+consume(wide)          // error: cannot pass [i64] where [i32] is expected;
+                       //        use `arg as [i32]` to convert
+consume(wide as [i32]) // ok: element-wise narrowing (truncates on overflow)
+```
+
+Array literals are context-sensitive: `consume([1, 2, 3])` works without any
+cast because the literal is generated at the target element type directly.
+The cast only applies when the source is a typed variable or expression.
+
+`[T1] as [T2]` allocates a fresh buffer and converts each element (truncate
+on narrowing, sign-extend on widening for signed sources). Same-width
+conversions like `[i32] as [u32]` are a zero-cost pointer reinterpretation.
+
 ### Implementation note
 
 Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len` builtin
@@ -82,10 +105,14 @@ statement.
 All slots have the same element type:
 
 ```rust
-let arr [i64] = [10, 20, 30]
+let arr [i64] = [10, 20]
 let [a, b] [i64] = arr
 // a == 10, b == 20
 ```
+
+A fixed-length destructuring pattern requires the array length to match
+exactly. `let [a, b] = arr` panics at runtime if `arr.len != 2`. To bind
+the first N elements of a longer array, use a rest slot.
 
 #### Per-slot typed destructuring from `[any]`
 
@@ -112,6 +139,12 @@ let [x, ...xs] [i64] = arr
 
 Only the two-name form `[first, ...rest]` is supported. The rest variable
 holds a sub-slice (a fresh copy) of the remaining elements.
+
+The rest slot **must bind at least one element**: `let [x, ...xs] = arr`
+panics at runtime if `arr.len < 2`. The same rule applies to rest patterns
+in `match` and `where` (see [02-control-flow](02-control-flow.md)). To
+match an empty array use `[]`; to bind a singleton use `[x]`. The exhaustive
+partition for a list of any length is `[]` + `[x]` + `[x, ...xs]`.
 
 #### Named type alias for per-slot destructuring
 
