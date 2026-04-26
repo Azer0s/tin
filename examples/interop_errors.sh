@@ -201,11 +201,21 @@ assert_ok() {
   fi
 }
 
-assert_ok "*Struct param accepted" '
+assert_ok "*void opaque handle accepted" '
 struct point =
   x i32
 
-fn{#interop} good(p *point) i32 = return (*p).x
+fn{#interop} good(p *void) i32 =
+  return (p as *point).x
+
+fn main() i64 = return 0
+'
+
+assert_err "*Struct rejected (use *void)" "unsafe at the interop boundary" '
+struct point =
+  x i32
+
+fn{#interop} bad(p *point) i32 = return (*p).x
 
 fn main() i64 = return 0
 '

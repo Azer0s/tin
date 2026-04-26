@@ -503,10 +503,10 @@ function.
 |----------------------|-----------------------------------------|---------------------------------------------------|
 | `i8`..`i64`, `u8`..`u64` | matching `intN_t` / `uintN_t`       | matching `intN_t` / `uintN_t`                     |
 | `f32`, `f64`         | `float`, `double`                       | `float`, `double`                                 |
-| `bool`               | `uint8_t`                               | `uint8_t`                                         |
-| `*T`, `*void`        | `T*`, `void*` (passthrough)             | `T*`, `void*` (passthrough)                       |
-| `string`             | `const char*` (NULL maps to empty)      | `const char*` (caller frees with extern_alloc's matching free) |
-| `[T]` fat array      | splits into `const T* xs, int64_t xs_len` | reshapes to status return + out-params `T** out_data, int64_t* out_len` |
+| `bool`               | `uint8_t` (non-zero = true)             | `uint8_t`                                         |
+| `*<primitive>`, `*void` | `T*`, `void*` (passthrough)          | `T*`, `void*` (passthrough)                       |
+| `string`             | `const char*` (NULL maps to empty)      | `const char*` (caller frees via extern_alloc's matching free) |
+| `[T]` fat array, T = primitive or `*X` | splits into `const T* xs, int64_t xs_len` | reshapes to status return + out-params `T** out_data, int64_t* out_len` |
 
 The validation pass rejects any other parameter or return type with a
 specific message at the function declaration site. Methods, generics,
@@ -514,6 +514,46 @@ extern declarations, `#async`, `Future[T]` returns, `any` parameters,
 and the reserved name `main` are all rejected at compile time. See
 [13 - Control tags](13-control-tags.md#interop) for the full
 restriction list.
+
+### Pointer-to-struct: use `*void`, not `*MyStruct`
+
+Tin user structs carry a hidden `i32 type_id` prefix (and possibly
+vtable pointers). C cannot construct one with the right layout, so a
+C-allocated `MyStruct *` passed to a `#interop` function reading
+`p->x` would silently read **the wrong field**. To prevent this trap,
+the validator rejects pointer-to-named-struct in `#interop` signatures
+and asks for `*void` instead:
+
+```rust
+fn{#interop} make_point(x i32, y i32) *void =
+  return (&point{x: x, y: y}) as *void
+
+fn{#interop} get_x(p *void) i32 = return (p as *point).x
+```
+
+The C side sees these as opaque `void *` handles. As long as the
+pointer was originally produced by Tin (e.g. returned from another
+`#interop` call), reads work correctly. C must NOT allocate the
+struct itself.
+
+**Lifetime caveat for `*void` returns from `#interop`.** A pointer
+returned from `&Foo{...}` is ARC-allocated with refcount 1. The
+wrapper does not release it on the way out, so the C caller becomes
+the sole owner of that reference. The runtime exports
+`_tin_release(void *)` for explicit cleanup; without it the block
+leaks for the process lifetime.
+
+```c
+extern void _tin_release(void *p);
+
+void *p = make_point(1, 2);
+/* ... use p ... */
+_tin_release(p);   // free the Tin-allocated block
+```
+
+NULL passed to a `#interop` function expecting a non-NULL pointer
+will segfault inside the Tin body. Treat all pointer params as
+non-nullable unless your Tin code explicitly checks.
 
 ### Returned strings and arrays - allocator hook
 

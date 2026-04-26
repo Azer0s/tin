@@ -238,11 +238,29 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		}
 		// Unknown SimpleType - treat as a user struct/trait/ADT name.
 		// v1 disallows all named types at the boundary; users wanting
-		// struct interop should pass *Struct explicitly.
-		return "v1 does not allow named user types at the interop boundary; pass a pointer (*" + v.Name + ") instead"
+		// struct interop should pass *void (opaque handle) and cast
+		// inside Tin via `as *MyStruct`.
+		return "v1 does not allow named user types at the interop boundary; pass *void as an opaque handle and cast inside Tin"
 
 	case *ast.PointerType:
-		return "" // any *T is fine - opaque to Tin's marshalling
+		// Allow *void, *<primitive>, or *<another-pointer>. Reject
+		// pointer-to-named-struct: Tin's struct layout has a hidden
+		// type_id prefix (and possibly vtable pointers) that C cannot
+		// know about, so a C-allocated struct passed by pointer would
+		// silently read wrong fields. Force users into *void for
+		// struct handles.
+		switch elem := v.Elem.(type) {
+		case *ast.SimpleType:
+			if elem.Name == "void" || interopAllowedPrimitives[elem.Name] || elem.Name == "char" || elem.Name == "byte" {
+				return ""
+			}
+
+			return "*" + elem.Name + " is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use *void as an opaque handle"
+		case *ast.PointerType:
+			return interopTypeReason(v.Elem, false)
+		}
+
+		return "pointer-to-this-type is not safe at the interop boundary; use *void as an opaque handle"
 
 	case *ast.ArrayType:
 		// Fat arrays [T]: v1 allows; size != -1 (fixed-size [T;N]) is
