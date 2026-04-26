@@ -93,6 +93,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			// Set TraitQualifier so this is treated as a qualified trait impl.
 			// Includes any module prefix the user wrote, joined with "::".
 			traitQualifier = ""
+
 			for i, seg := range segments {
 				if i > 0 {
 					traitQualifier += "::"

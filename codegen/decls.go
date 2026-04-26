@@ -545,6 +545,7 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 		qualName := methodScopeName(structKey, m)
 		if entry, ok := cg.curScope.lookup(qualName); ok {
 			cg.curScope.set(plainName, entry)
+
 			plainMethodNames[m.Name] = true
 		}
 	}
