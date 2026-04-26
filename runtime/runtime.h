@@ -192,6 +192,15 @@ TinSlice  tin_interop_slice_in(const void *data, int64_t len, int64_t elem_size)
 int       tin_interop_slice_out(TinSlice s, int64_t elem_size,
                                 void **out_data, int64_t *out_len);
 
+// Closure-return trampoline allocator (runtime/interop_trampoline.c).
+// tin_make_trampoline returns a stable C-callable function pointer
+// that, when invoked, calls `fn(env, args...)`. Use
+// tin_interop_closure_free to release the trampoline when the C side
+// is done with it; any trampolines still alive at process exit are
+// munmap'd via an atexit handler so leak detectors stay quiet.
+void *tin_make_trampoline(void *fn, void *env, void *dispatcher);
+void  tin_interop_closure_free(void *tramp);
+
 // -- Reflect (stdlib/reflect/reflect.c - linked in when reflect module is used)
 const char   *_tin_reflect_kind(const char *atom);
 int64_t       _tin_reflect_is_ptr(const char *atom);
