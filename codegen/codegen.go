@@ -363,6 +363,13 @@ type CodeGen struct {
 	// Keyed by sanitised (ret, params) signature.
 	interopCbThunks map[string]*ir.Func
 
+	// interopDispatchers caches per-signature dispatchers used to
+	// invoke a Tin closure returned to C through a mmap'd trampoline.
+	// The dispatcher's first IR instruction reads %r10 (set by the
+	// trampoline) to recover the fat-fn-ptr address, then tail-calls
+	// fn(env, args...). Keyed by sanitised (ret, params) signature.
+	interopDispatchers map[string]*ir.Func
+
 	// interopPackedStructs is the set of `#packed` struct names
 	// reachable from the program. Populated by checkAllInteropFuncs;
 	// consulted by the validator and the wrapper emitter.

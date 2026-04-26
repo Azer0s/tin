@@ -656,14 +656,67 @@ Restrictions:
   marshal each call across the boundary, which v1 does not implement.
 - `bool` is allowed; the thunk converts between Tin's i1 and C's
   uint8_t (matching `_Bool`/C23 `bool`, both 1 byte) on each call.
-- Callbacks are accepted only as parameters, not as return types.
-  Tin's `fn(...)T` type is a fat `{ fn, env }` pair while a C
-  function pointer has no env slot, so wrapping an arbitrary Tin
-  closure into a stable C fn pointer would need either JIT
-  trampolines (libffi) or a new "bare C fn ptr" type in the language.
-  As a workaround, return a `*void` opaque handle to your Tin
-  closure and provide a separate `#interop` entry that takes the
-  handle plus the call args.
+
+### Function-pointer returns (closures back to C)
+
+A `#interop` function may also **return** a `fn(args...) ret` value.
+The wrapper hands C a stable function pointer backed by a per-instance
+trampoline (a small mmap'd stub) that captures the Tin closure's
+environment and tail-jumps to a per-signature dispatcher. C calls the
+returned pointer like any other function pointer; each Tin closure
+gets its own pointer, so multiple instances coexist without sharing
+state.
+
+```rust
+fn{#interop} make_adder(base i64) fn(i64) i64 =
+  return fn(x i64) i64 = return base + x
+```
+
+The emitted header pre-declares one typedef per unique callback-return
+signature, then uses it as the wrapper's return type. Names follow
+`tin_cb_<ret>_from_<args>_t` using Tin's own type spellings (e.g.
+`i64`, `string`, `bool`, `slice_i64`):
+
+```c
+typedef int64_t (*tin_cb_i64_from_i64_t)(int64_t);
+tin_cb_i64_from_i64_t make_adder(int64_t base);
+```
+
+Other examples:
+- `fn() i64`        -> `tin_cb_i64_from_void_t`
+- `fn(string) string` -> `tin_cb_string_from_string_t`
+- `fn(i64) bool`    -> `tin_cb_bool_from_i64_t`
+- `fn([i64]) i64`   -> `tin_cb_i64_from_slice_i64_t`
+- `fn(*i64) void`   -> `tin_cb_void_from_i64ptr_t`
+
+C usage:
+
+```c
+tin_cb_i64_from_i64_t add5  = make_adder(5);
+tin_cb_i64_from_i64_t add42 = make_adder(42);
+printf("%lld %lld\n", (long long)add5(10), (long long)add42(10));  // 15 52
+tin_interop_closure_free(add5);
+tin_interop_closure_free(add42);
+```
+
+`tin_interop_closure_free` releases the trampoline slot and drops the
+captured environment's ARC reference (so any captured strings, slices,
+or structs hit their normal Tin destructors). It is NULL-safe and
+ignores pointers that are not Tin trampolines, so a single C-side
+release routine can be wired through it. Trampolines that survive
+process exit are munmap'd by an atexit handler so leak detectors stay
+quiet.
+
+Inner-signature restrictions match callback parameters: primitives,
+pointers to primitives, `string`, `bool`. Closure-return signatures
+that include `string` or `bool` get the same C-side widening / NUL-
+terminated marshaling as callback-parameter thunks, applied in the
+opposite direction inside the dispatcher.
+
+Concurrency: invoking the same trampoline from multiple threads is
+safe (it just reads the captured pointers and forwards). Calling
+`tin_interop_closure_free` while another thread is invoking the same
+trampoline is a use-after-free.
 
 ### Spawning fibers
 

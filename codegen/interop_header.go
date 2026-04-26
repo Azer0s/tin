@@ -49,6 +49,29 @@ func (cg *CodeGen) writeInteropHeader(stmts []ast.Node) error {
 	b.WriteString("typedef void *(*tin_alloc_fn)(size_t);\n")
 	b.WriteString("void tin_set_extern_alloc(tin_alloc_fn fn);\n\n")
 
+	// fn-pointer-returning #interop functions hand back a per-instance
+	// trampoline. The user calls tin_interop_closure_free on it when
+	// done so the slot and its captured env are released. NULL-safe.
+	if anyCallbackReturn(stmts) {
+		b.WriteString("/* Release a function pointer returned by an #interop callback-returning\n")
+		b.WriteString("   function. Frees the trampoline slot and drops the captured env's\n")
+		b.WriteString("   ARC reference. NULL-safe; ignores pointers that are not Tin\n")
+		b.WriteString("   trampolines. */\n")
+		b.WriteString("void tin_interop_closure_free(void *tramp);\n\n")
+	}
+
+	// Pre-emit one typedef per unique callback-return signature so the
+	// prototypes can spell the return type as `tin_cb_<sig>_t` instead
+	// of the unreadable inline `R (*name(args))(cb_args)` form.
+	cbTypedefs := cg.collectCallbackReturnTypedefs(stmts)
+	if len(cbTypedefs) > 0 {
+		b.WriteString("/* Function-pointer typedefs for #interop callback returns. */\n")
+		for _, td := range cbTypedefs {
+			b.WriteString(td.line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	for _, node := range stmts {
 		fn, ok := node.(*ast.FuncDecl)
 		if !ok || !hasTag(fn.Tags, "interop") {
@@ -88,7 +111,9 @@ func (cg *CodeGen) writeInteropPrototype(b *strings.Builder, fn *ast.FuncDecl) {
 // cReturnType maps the Tin return type to its C wrapper return.
 // Slice returns become `int` (the status return). String returns
 // become `const char*`. Packed structs use the typedef'd struct name.
-// Everything else uses cTypeName.
+// Function-pointer returns use the per-signature `tin_cb_<sig>_t`
+// typedef pre-emitted at the top of the header. Everything else uses
+// cTypeName.
 func (cg *CodeGen) cReturnType(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
@@ -106,6 +131,10 @@ func (cg *CodeGen) cReturnType(t ast.TypeExpr) string {
 		if cg.interopPackedStructs[st.Name] {
 			return st.Name
 		}
+	}
+
+	if ft, ok := t.(*ast.FuncType); ok {
+		return callbackReturnTypedefName(ft)
 	}
 
 	return cTypeName(t)
@@ -230,6 +259,206 @@ func cCallbackDecl(ft *ast.FuncType, name string) string {
 	}
 
 	return fmt.Sprintf("%s (*%s)(%s)", ret, name, strings.Join(parts, ", "))
+}
+
+type callbackTypedef struct {
+	name string
+	line string
+}
+
+// anyCallbackReturn reports whether any #interop function in the
+// program returns a function pointer.
+func anyCallbackReturn(stmts []ast.Node) bool {
+	for _, node := range stmts {
+		fn, ok := node.(*ast.FuncDecl)
+		if !ok || !hasTag(fn.Tags, "interop") {
+			continue
+		}
+
+		if _, ok := fn.RetType.(*ast.FuncType); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// collectCallbackReturnTypedefs walks all #interop functions and
+// returns one C typedef per unique callback-return signature. Each
+// typedef has the form `typedef R (*tin_cb_<sig>_t)(A1, A2, ...);` so
+// the wrapper prototype can use `tin_cb_<sig>_t` as a clean return
+// type instead of the inline function-pointer syntax.
+func (cg *CodeGen) collectCallbackReturnTypedefs(stmts []ast.Node) []callbackTypedef {
+	seen := map[string]bool{}
+	out := []callbackTypedef{}
+
+	for _, node := range stmts {
+		fn, ok := node.(*ast.FuncDecl)
+		if !ok || !hasTag(fn.Tags, "interop") {
+			continue
+		}
+
+		ft, ok := fn.RetType.(*ast.FuncType)
+		if !ok {
+			continue
+		}
+
+		name := callbackReturnTypedefName(ft)
+		if seen[name] {
+			continue
+		}
+
+		seen[name] = true
+
+		// Match the dispatcher's C-side signature: bool widens to
+		// uint8_t, string returns/params become const char*, slice
+		// params split into (T *data, int64_t len). String returns
+		// from the closure are emitted as `const char *` so the user
+		// can read the bytes without casting.
+		ret := "void"
+		if ft.RetType != nil {
+			ret = cReturnSpellingForCallback(ft.RetType)
+		}
+
+		parts := make([]string, 0, len(ft.Params))
+		for _, p := range ft.Params {
+			parts = append(parts, cParamSpellingForCallback(p)...)
+		}
+
+		if len(parts) == 0 {
+			parts = []string{"void"}
+		}
+
+		out = append(out, callbackTypedef{
+			name: name,
+			line: fmt.Sprintf("typedef %s (*%s)(%s);", ret, name, strings.Join(parts, ", ")),
+		})
+	}
+
+	return out
+}
+
+// cParamSpellingForCallback maps a Tin callback param type to the
+// 1-or-2 C type spellings the dispatcher will receive. Mirrors
+// cParamExpansion (codegen) so the typedef and the dispatcher signature
+// stay byte-compatible.
+func cParamSpellingForCallback(t ast.TypeExpr) []string {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			return []string{"const char *"}
+		case "bool":
+			return []string{"uint8_t"}
+		}
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		return []string{cTypeName(at.Elem) + " *", "int64_t"}
+	}
+
+	return []string{cTypeName(t)}
+}
+
+// cReturnSpellingForCallback maps a Tin callback return type to the
+// C type spelling the dispatcher returns. Mirrors cReturnLLVM.
+func cReturnSpellingForCallback(t ast.TypeExpr) string {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			return "const char *"
+		case "bool":
+			return "uint8_t"
+		}
+	}
+
+	return cTypeName(t)
+}
+
+// callbackReturnTypedefName builds a stable, readable typedef name
+// from a Tin callback signature using Tin type spellings (i64, string,
+// bool, ...) joined by `_from_`. A function returning the type pointer
+// reads naturally:
+//
+//	fn() i64                    -> tin_cb_i64_from_void_t
+//	fn(i64) i64                 -> tin_cb_i64_from_i64_t
+//	fn(i64, i64) i64            -> tin_cb_i64_from_i64_i64_t
+//	fn(string) string           -> tin_cb_string_from_string_t
+//	fn(i64) bool                -> tin_cb_bool_from_i64_t
+//	fn([i64]) i64               -> tin_cb_i64_from_slice_i64_t
+//	fn(*i64) void               -> tin_cb_void_from_i64ptr_t
+//
+// Names are derived from the Tin AST so they stay aligned with what
+// the user wrote, not the C ABI shape. The typedef body still spells
+// out the C ABI types via cParamSpellingForCallback / cReturnSpellingForCallback.
+func callbackReturnTypedefName(ft *ast.FuncType) string {
+	var sb strings.Builder
+
+	sb.WriteString("tin_cb_")
+
+	if ft.RetType == nil {
+		sb.WriteString("void")
+	} else {
+		sb.WriteString(tinTypeNameToken(ft.RetType))
+	}
+
+	sb.WriteString("_from_")
+
+	if len(ft.Params) == 0 {
+		sb.WriteString("void")
+	} else {
+		for i, p := range ft.Params {
+			if i > 0 {
+				sb.WriteString("_")
+			}
+
+			sb.WriteString(tinTypeNameToken(p))
+		}
+	}
+
+	sb.WriteString("_t")
+
+	return sb.String()
+}
+
+// tinTypeNameToken returns a single C-identifier token that names the
+// given Tin type using Tin's own spelling. Used when constructing the
+// readable callback typedef names.
+//
+//	i32, i64, u8, f64, bool, string, void, char, byte -> as-is
+//	*T   -> "<T>ptr" recursively (e.g. *i64 -> "i64ptr", *void -> "voidptr")
+//	[T]  -> "slice_<T>" (e.g. [i64] -> "slice_i64")
+//	other -> "opaque" (the typedef body already widens to `void *`)
+func tinTypeNameToken(t ast.TypeExpr) string {
+	if t == nil {
+		return "void"
+	}
+
+	if st, ok := t.(*ast.SimpleType); ok {
+		// Tin's own primitive spellings are already valid C identifiers,
+		// so we can pass them through directly. Anything else falls
+		// back to "opaque".
+		switch st.Name {
+		case "i8", "i16", "i32", "i64",
+			"u8", "u16", "u32", "u64",
+			"f32", "f64",
+			"bool", "string", "void",
+			"char", "byte",
+			"int", "uint", "size_t":
+			return st.Name
+		}
+
+		return "opaque"
+	}
+
+	if pt, ok := t.(*ast.PointerType); ok {
+		return tinTypeNameToken(pt.Elem) + "ptr"
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		return "slice_" + tinTypeNameToken(at.Elem)
+	}
+
+	return "opaque"
 }
 
 // cTypeName maps Tin scalar / pointer types to their C-equivalent

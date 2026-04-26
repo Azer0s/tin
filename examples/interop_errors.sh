@@ -131,9 +131,16 @@ fn{#interop} bad(a atom) i32 = return 0
 fn main() i64 = return 0
 '
 
-# ── fn-typed return rejected (callback returns are not supported) ──
-assert_err "fn-typed return rejected" "function-pointer returns are not supported" '
-fn{#interop} bad() fn(i32) i32 = return fn(x i32) i32 = return x
+# fn-typed returns are now SUPPORTED via per-instance mmap'd
+# trampolines + per-signature dispatcher. Positive coverage lives in
+# examples/interop_closure_returns.sh.
+
+# ── callback returning struct is still rejected (no thunk for it) ──
+assert_err "fn-typed return with struct rejected" "is not a primitive C type" '
+struct point =
+  x i32
+
+fn{#interop} bad() fn() point = return fn() point = return point{x: 1}
 
 fn main() i64 = return 0
 '

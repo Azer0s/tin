@@ -38,6 +38,12 @@
 #include <sys/mman.h>
 #include <pthread.h>
 
+// Forward decl from arc.c. Closure envs created by Tin are ARC blocks
+// with a destructor at offset 0; _tin_release_closure invokes the
+// destructor when rc reaches 0 to release captured RC values, then
+// frees the block. NULL-safe.
+extern void _tin_release_closure(void *env);
+
 // ---------------------------------------------------------------------------
 // Page / slot bookkeeping.
 // ---------------------------------------------------------------------------
@@ -56,7 +62,10 @@ typedef struct TrampPage {
     int32_t free_head;            // index of first free slot, or -1
     int32_t free_count;           // count of free slots in this page
     uint32_t magic;               // identifies our pages on tin_release_callback
-    uint64_t _align;              // pad to a multiple of TRAMP_SLOT_SIZE
+    uint64_t in_use;              // bit i set when slot i is allocated; used
+                                  // to detect double-free without scanning
+                                  // the free-list. TRAMP_SLOTS <= 63 today,
+                                  // so a single uint64_t suffices.
     uint8_t  body[];              // TRAMP_SLOTS slots, each TRAMP_SLOT_SIZE bytes
 } TrampPage;
 
@@ -65,6 +74,13 @@ typedef struct TrampPage {
     ((TRAMP_PAGE_SIZE - offsetof(TrampPage, body)) / TRAMP_SLOT_SIZE)
 
 #define TRAMP_PAGE_MAGIC 0x54436250u // "TCbp" - tin callback page
+
+// The double-free guard uses one bit per slot in `in_use`; if a future
+// page-size bump or slot-size shrink lifts TRAMP_SLOTS past 64, the
+// bitmap silently truncates and slots beyond 63 lose double-free
+// protection. Catch that at compile time.
+_Static_assert(TRAMP_SLOTS <= 64,
+               "in_use bitmap is uint64_t; TRAMP_SLOTS must fit in 64 bits");
 
 static inline uint8_t *slot_addr_in_page(TrampPage *p, int32_t idx) {
     return p->body + idx * TRAMP_SLOT_SIZE;
@@ -127,31 +143,29 @@ static size_t emit_trampoline_x86_64(uint8_t *code,
 static size_t emit_trampoline_aarch64(uint8_t *code,
                                       void *closure_data_ptr,
                                       void *dispatcher) {
-    // ARM64: load closure ptr into x16 (IP0, scratch), then dispatcher
-    // address into x17, then BR x17.
+    // ARM64 layout (28 bytes total):
+    //   code+0  ldr x16, [pc, #12]   ; load closure ptr from literal #1
+    //   code+4  ldr x17, [pc, #12]   ; load dispatcher from literal #2
+    //   code+8  br  x17              ; tail-jump to dispatcher
+    //   code+12 .quad closure_data_ptr   (literal #1)
+    //   code+20 .quad dispatcher         (literal #2)
     //
-    // We use literal pools placed after the branch:
-    //   ldr  x16, =closure_data_ptr   ; pc-relative load
-    //   ldr  x17, =dispatcher
-    //   br   x17
-    //   .quad closure_data_ptr        ; literal #1
-    //   .quad dispatcher              ; literal #2
+    // ldr (literal) encoding for 64-bit reg:
+    //   opcode = 0x58000000 | (imm19 << 5) | Rt
+    //   imm19  = (target_addr - pc_of_ldr) / 4
     //
-    // ldr x16, [pc, #8]:    58 00 00 50  (encoded little-endian)
-    // ldr x17, [pc, #12]:   58 00 00 58
-    // br  x17:              80 02 1f d6
-    // -> 12 bytes of code, then 16 bytes of literals = 28 total.
+    // For ldr x16 at code+0 reading from code+12 -> imm19 = 12/4 = 3.
+    // For ldr x17 at code+4 reading from code+20 -> imm19 = 16/4 = 4.
+    //
+    // x16/x17 are AAPCS64 IP0/IP1 ("intra-procedure-call scratch"),
+    // never used to pass arguments, so they survive the BR into the
+    // dispatcher. The dispatcher reads x16 via inline asm to recover
+    // the closure-data pointer.
 
     uint32_t inst[3];
-    // ldr x16, [pc, #8]   -> opcode 58000050
-    inst[0] = 0x58000050;
-    // ldr x17, [pc, #12]  -> opcode 580000d1 (actually 0x58000071)
-    // Encoding: 01 011 0 00 imm19 Rt; for ldr (literal) 64-bit:
-    // opcode = 0x58000000 | (imm19 << 5) | Rt
-    // imm19 = byte_offset / 4
-    inst[0] = 0x58000000 | ((8 / 4) << 5) | 16; // ldr x16, [pc, #8]
-    inst[1] = 0x58000000 | ((12 / 4) << 5) | 17; // ldr x17, [pc, #12]
-    inst[2] = 0xd61f0220; // br x17 (encoded: D6 1F 02 20)
+    inst[0] = 0x58000000 | ((uint32_t)3 << 5) | 16; // ldr x16, [pc, #12]
+    inst[1] = 0x58000000 | ((uint32_t)4 << 5) | 17; // ldr x17, [pc, #16]
+    inst[2] = 0xd61f0220;                            // br x17
 
     memcpy(code + 0,  &inst[0], 4);
     memcpy(code + 4,  &inst[1], 4);
@@ -189,22 +203,45 @@ static size_t      _tramp_all_pages_cap;
 static int         _tramp_atexit_installed;
 
 // At process exit munmap every page we ever allocated so leak
-// detectors stay quiet. Called via atexit() the first time we
-// allocate a page.
+// detectors stay quiet. Also releases the captured env of any
+// still-live trampoline the C caller forgot to free, so leaked
+// closures get their dtors run and any RC-tracked captures hit zero.
+// Called via atexit() the first time we allocate a page.
 static void atexit_release_all_pages(void) {
+    // Snapshot under the lock, then release env / munmap outside the
+    // lock: env dtors are user-defined and may take other locks or
+    // even allocate (which would deadlock if we held _tramp_mu).
     pthread_mutex_lock(&_tramp_mu);
 
-    for (size_t i = 0; i < _tramp_all_pages_len; i++) {
-        munmap(_tramp_all_pages[i], TRAMP_PAGE_SIZE);
-    }
+    TrampPage **pages = _tramp_all_pages;
+    size_t      n     = _tramp_all_pages_len;
 
-    free(_tramp_all_pages);
     _tramp_all_pages = NULL;
     _tramp_all_pages_len = 0;
     _tramp_all_pages_cap = 0;
     _tramp_freelist = NULL;
 
     pthread_mutex_unlock(&_tramp_mu);
+
+    for (size_t i = 0; i < n; i++) {
+        TrampPage *p = pages[i];
+
+        for (uint32_t idx = 0; idx < TRAMP_SLOTS; idx++) {
+            if ((p->in_use & (((uint64_t)1) << idx)) == 0) continue;
+
+            void **data = (void **)slot_addr_in_page(p, (int32_t)idx);
+            void  *env  = data[1];
+            // Scrub before release in case the dtor somehow re-enters
+            // and re-walks this slot.
+            data[0] = NULL;
+            data[1] = NULL;
+            _tin_release_closure(env);
+        }
+
+        munmap(p, TRAMP_PAGE_SIZE);
+    }
+
+    free(pages);
 }
 
 static TrampPage *new_page(void) {
@@ -220,9 +257,11 @@ static TrampPage *new_page(void) {
     p->free_head = 0;
     p->free_count = TRAMP_SLOTS;
     p->magic = TRAMP_PAGE_MAGIC;
+    p->in_use = 0;
 
-    for (int32_t i = 0; i < TRAMP_SLOTS; i++) {
-        slot_set_free_next(p, i, (i + 1 < TRAMP_SLOTS) ? (i + 1) : -1);
+    for (uint32_t i = 0; i < TRAMP_SLOTS; i++) {
+        slot_set_free_next(p, (int32_t)i,
+                           ((i + 1) < TRAMP_SLOTS) ? (int32_t)(i + 1) : -1);
     }
 
     // Append to the all-pages registry for atexit cleanup.
@@ -267,6 +306,9 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
         TrampPage *p = new_page();
         if (!p) {
             pthread_mutex_unlock(&_tramp_mu);
+            // Drop the ref the caller transferred to us. Without this
+            // the env block leaks for every OOM. NULL-safe.
+            _tin_release_closure(env);
             return NULL;
         }
 
@@ -277,6 +319,7 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
     int32_t idx = p->free_head;
     p->free_head = slot_free_next(p, idx);
     p->free_count--;
+    p->in_use |= ((uint64_t)1) << idx;
 
     if (p->free_head == -1) {
         // Page is now full; remove from free-list.
@@ -306,22 +349,88 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
     return code;
 }
 
+// is_known_page reports whether p is the base of a page we allocated.
+// Linear scan over _tramp_all_pages: free is not on a hot path, the
+// list is short (one entry per 4KB of trampolines, and even a heavy
+// app rarely tops a few MB of trampolines), and skipping the scan
+// would require dereferencing `p->magic` from an arbitrary
+// page-aligned address - i.e. could SEGV on a guard page.
+//
+// Caller must hold _tramp_mu (the registry is mutated under the lock).
+static int is_known_page(TrampPage *p) {
+    for (size_t i = 0; i < _tramp_all_pages_len; i++) {
+        if (_tramp_all_pages[i] == p) return 1;
+    }
+
+    return 0;
+}
+
 void tin_interop_closure_free(void *tramp) {
     if (!tramp) return;
 
-    // tramp points to the code area, which is at offset
-    // TRAMP_DATA_BYTES inside the slot.
+    // tramp must point INTO the body region of a known page, at a
+    // slot-aligned offset (TRAMP_DATA_BYTES into a slot). Anything
+    // else - libc fn pointer, stack address, an interior byte of a
+    // valid slot, a NULL+small-offset - is silently ignored so a
+    // generic C-side cleanup routine can route everything through
+    // this one entry point without first proving the pointer is ours.
     uint8_t *slot = (uint8_t *)tramp - TRAMP_DATA_BYTES;
     TrampPage *p = page_of_slot(slot);
-    if (p->magic != TRAMP_PAGE_MAGIC) {
-        // Not one of our trampolines - silently ignore so the C
-        // caller can route everything through this one entry point.
+
+    pthread_mutex_lock(&_tramp_mu);
+
+    if (!is_known_page(p)) {
+        // Not one of our pages. Bail without dereferencing p (which
+        // could be an unmapped/guard page).
+        pthread_mutex_unlock(&_tramp_mu);
         return;
     }
 
-    int32_t idx = (int32_t)((slot - p->body) / TRAMP_SLOT_SIZE);
+    if (p->magic != TRAMP_PAGE_MAGIC) {
+        // Belt-and-braces: registered page should always have the
+        // magic; if not, something has badly corrupted the page.
+        pthread_mutex_unlock(&_tramp_mu);
+        return;
+    }
 
-    pthread_mutex_lock(&_tramp_mu);
+    // The slot must lie inside the body region at a SLOT_SIZE-aligned
+    // offset, i.e. tramp = page + offsetof(body) + idx*SLOT + DATA_BYTES.
+    if (slot < p->body) {
+        pthread_mutex_unlock(&_tramp_mu);
+        return;
+    }
+
+    size_t off = (size_t)(slot - p->body);
+    if ((off % TRAMP_SLOT_SIZE) != 0 || (off / TRAMP_SLOT_SIZE) >= TRAMP_SLOTS) {
+        pthread_mutex_unlock(&_tramp_mu);
+        return;
+    }
+
+    int32_t idx = (int32_t)(off / TRAMP_SLOT_SIZE);
+    uint64_t bit = ((uint64_t)1) << idx;
+
+    if ((p->in_use & bit) == 0) {
+        // Double-free or release of a never-allocated slot. Silently
+        // ignore: pushing the slot onto the free-list a second time
+        // would corrupt the list (next two allocs would return the
+        // same address) and double-release env would corrupt ARC.
+        pthread_mutex_unlock(&_tramp_mu);
+        return;
+    }
+
+    p->in_use &= ~bit;
+
+    // Snapshot env BEFORE handing the slot back to the free-list, but
+    // AFTER confirming this is a first free. Released outside the
+    // mutex: the closure dtor may run user-defined Tin deinit code
+    // which can allocate, take other locks, or transitively allocate
+    // another trampoline.
+    void **data = (void **)slot;
+    void *env = data[1];
+    // Scrub so a use-after-free of the trampoline pointer crashes
+    // loudly instead of jumping through stale bytes.
+    data[0] = NULL;
+    data[1] = NULL;
 
     if (p->free_count == 0) {
         // Page was full and not on the free-list; reinsert.
@@ -340,4 +449,7 @@ void tin_interop_closure_free(void *tramp) {
     // lock-and-mutate only.
 
     pthread_mutex_unlock(&_tramp_mu);
+
+    // Release the captured env after dropping the lock.
+    _tin_release_closure(env);
 }

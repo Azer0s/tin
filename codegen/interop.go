@@ -378,13 +378,14 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		return "generic types like " + v.Name + "[T] are not representable"
 
 	case *ast.FuncType:
-		// Callbacks: only allowed as parameters today, and only with
-		// primitive/pointer-shaped sub-signatures. The wrapper boxes
-		// the raw C fn pointer into a per-signature thunk.
-		if isReturn {
-			return "function-pointer returns are not supported; only callback parameters are wrapped"
-		}
-
+		// Callbacks at the boundary:
+		//   * As a parameter: wrapper boxes the raw C fn pointer into a
+		//     Tin fat fn-ptr backed by a per-signature thunk.
+		//   * As a return: wrapper extracts the Tin closure's {fn, env}
+		//     and hands C a per-instance trampoline that captures env
+		//     and tail-jumps to a per-signature dispatcher.
+		// Both directions share the same sub-signature restrictions:
+		// only primitive/pointer-shaped param/return types.
 		for _, pt := range v.Params {
 			if r := callbackInnerReason(pt); r != "" {
 				return "callback parameter " + r
@@ -569,6 +570,10 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	case "void":
 		retType = irtypes.Void
 	case "string":
+		retType = irtypes.I8Ptr
+	case "callback":
+		// Wrapper hands C a function-pointer-shaped i8*; the user casts
+		// to the appropriate `R (*)(args)` typedef on their side.
 		retType = irtypes.I8Ptr
 	case "bool":
 		// Match C's byte-sized bool ABI; we zero-extend the i1 from
@@ -874,6 +879,27 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	case "string":
 		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
 		retTinPtr = block.NewExtractValue(rawRet, 0)
+	case "callback":
+		// rawRet is the Tin fat fn-ptr {fn, env}. We OWN one ARC ref on
+		// env (Tin convention for fat-fn-ptr returns); transfer it to
+		// the trampoline (no retain, no release here -
+		// tin_interop_closure_free will release env when the user frees
+		// the trampoline). Pass the raw fn pointer to the dispatcher,
+		// which reads (fn, env) back out of the trampoline slot.
+		fnRaw := block.NewExtractValue(rawRet, 0)
+		envRaw := block.NewExtractValue(rawRet, 1)
+
+		fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
+
+		ftRet := fn.RetType.(*ast.FuncType)
+		disp, err := cg.getOrCreateClosureDispatcher(ftRet)
+		if err != nil {
+			return err
+		}
+
+		dispI8 := block.NewBitCast(disp, irtypes.I8Ptr)
+
+		finalRet = block.NewCall(cg.ensureMakeTrampoline(), fnI8, envRaw, dispI8)
 	case "bool":
 		// Zero-extend the internal i1 to i8 for the C ABI.
 		finalRet = block.NewZExt(rawRet, irtypes.I8)
@@ -1041,7 +1067,8 @@ func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 }
 
 // classifyInteropReturn returns the marshaling shape for a Tin return
-// type. "void" / "string" / "slice" / "bool" / "packed" / "" (passthrough).
+// type. "void" / "string" / "slice" / "bool" / "packed" /
+// "callback" (Tin closure -> mmap'd C trampoline) / "" (passthrough).
 func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
@@ -1064,6 +1091,10 @@ func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 
 	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
 		return "slice"
+	}
+
+	if _, ok := t.(*ast.FuncType); ok {
+		return "callback"
 	}
 
 	return ""
@@ -1619,6 +1650,273 @@ func (cg *CodeGen) marshalCToTinInThunk(b *ir.Block, v value.Value, ret ast.Type
 	return v
 }
 
+// getOrCreateClosureDispatcher returns the per-signature dispatcher
+// that the runtime trampoline tail-jumps to when a Tin closure
+// returned through `#interop` is invoked from C. The dispatcher takes
+// the C-shape arguments the trampoline was called with, marshals them
+// to Tin shape (mirror of getOrCreateCallbackThunk; same direction as
+// emitInteropWrapperFor's per-arg handling), then calls the captured
+// Tin fn(env, tin_args...). The Tin return is then marshaled back to
+// the C-shape return.
+//
+// Closure-data lookup uses a scratch register set by the trampoline:
+// %r10 on x86_64, x16 (IP0) on AArch64. Both are caller-saved and not
+// used by the SysV/AAPCS64 ABIs to pass arguments, so they survive the
+// trampoline's indirect jump into the dispatcher untouched. The
+// dispatcher's FIRST IR instruction MUST be the inline-asm read of
+// that register: any earlier instruction (alloca, marshaling call)
+// risks the prologue or register allocator clobbering the scratch.
+// The asm is marked SideEffect so LLVM may not sink/CSE it.
+//
+// FRAGILE: standard x86_64/aarch64 prologues do not touch r10/x16,
+// but stack-protector instrumentation, sanitizers (ASan/MSan), or any
+// future LLVM pass that inserts work BEFORE entry-block IR could
+// clobber the scratch register. This module must not be built with
+// -fstack-protector / -fsanitize=*; the runtime trampoline contract
+// assumes the scratch register survives end-to-end. If a future
+// codegen change starts attaching such attributes, those attributes
+// must be explicitly suppressed for dispatchers.
+//
+// One dispatcher per unique Tin signature; cached on cg.
+func (cg *CodeGen) getOrCreateClosureDispatcher(ft *ast.FuncType) (*ir.Func, error) {
+	tinRet := irtypes.Type(irtypes.Void)
+
+	if ft.RetType != nil {
+		t, err := cg.tinTypeToLLVM(ft.RetType)
+		if err != nil {
+			return nil, err
+		}
+
+		tinRet = t
+	}
+
+	tinParams := make([]irtypes.Type, len(ft.Params))
+
+	for i, p := range ft.Params {
+		t, err := cg.tinTypeToLLVM(p)
+		if err != nil {
+			return nil, err
+		}
+
+		tinParams[i] = t
+	}
+
+	// C-side dispatcher signature: each Tin param expands into 1 or 2
+	// C params (slices split into ptr+len). Reuse the same expansion
+	// rules as the callback-param thunk so the C ABI surfaces match.
+	cParams := make([]irtypes.Type, 0, len(tinParams))
+	cExpansion := make([]int, len(tinParams))
+
+	for i, p := range ft.Params {
+		expand := cParamExpansion(p, tinParams[i])
+		cExpansion[i] = len(expand)
+		cParams = append(cParams, expand...)
+	}
+
+	cRet := cReturnLLVM(ft.RetType, tinRet)
+
+	key := callbackSigKey(tinRet, tinParams)
+
+	if cg.interopDispatchers == nil {
+		cg.interopDispatchers = make(map[string]*ir.Func)
+	}
+
+	if f, ok := cg.interopDispatchers[key]; ok {
+		return f, nil
+	}
+
+	dispName := "__tin_interop_closure_dispatch_" + key
+
+	dispParams := make([]*ir.Param, len(cParams))
+	for i, t := range cParams {
+		dispParams[i] = ir.NewParam(fmt.Sprintf("a%d", i), t)
+	}
+
+	disp := cg.mod.NewFunc(dispName, cRet, dispParams...)
+	disp.Linkage = enum.LinkageInternal
+
+	tb := disp.NewBlock("entry")
+
+	// Read the trampoline scratch register FIRST. Anything prior risks
+	// clobbering it (function prologue is fine; calls and most
+	// instructions can spill into r10/x16). SideEffect prevents CSE /
+	// sinking; the resulting SSA value is then safe to use anywhere.
+	asmFnTy := irtypes.NewFunc(irtypes.I8Ptr)
+
+	var asm *ir.InlineAsm
+
+	if cg.targetIsARM64() {
+		asm = ir.NewInlineAsm(irtypes.NewPointer(asmFnTy), "mov $0, x16", "=r")
+	} else {
+		asm = ir.NewInlineAsm(irtypes.NewPointer(asmFnTy), "movq %r10, $0", "=r")
+	}
+
+	asm.SideEffect = true
+	cp := tb.NewCall(asm)
+
+	// cp points to a 16-byte block: { i8* fn, i8* env }.
+	fatTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	fatPtr := tb.NewBitCast(cp, irtypes.NewPointer(fatTy))
+
+	fnSlot := tb.NewGetElementPtr(fatTy, fatPtr,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	envSlot := tb.NewGetElementPtr(fatTy, fatPtr,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 1))
+
+	fnRaw := tb.NewLoad(irtypes.I8Ptr, fnSlot)
+	env := tb.NewLoad(irtypes.I8Ptr, envSlot)
+
+	// Marshal each Tin param's C-shape value(s) back to its Tin shape.
+	// Track ARC temporaries (Tin strings / slices we freshly allocated
+	// to wrap C inputs) so we can release them after the inner call.
+	// Without this, every closure invocation would leak one block per
+	// string/slice arg.
+	cIdx := 0
+	tinArgs := make([]value.Value, 0, len(tinParams)+1)
+	tinArgs = append(tinArgs, env)
+
+	var allocatedTemps []value.Value
+
+	for i, p := range ft.Params {
+		pieces := dispParams[cIdx : cIdx+cExpansion[i]]
+		cIdx += cExpansion[i]
+
+		v, temp := cg.marshalCToTinForDispatch(tb, pieces, p, tinParams[i])
+		tinArgs = append(tinArgs, v)
+
+		if temp != nil {
+			allocatedTemps = append(allocatedTemps, temp)
+		}
+	}
+
+	// Inner Tin signature: ret_ty (i8* env, tin_params...).
+	innerParams := append([]irtypes.Type{irtypes.I8Ptr}, tinParams...)
+	innerFnTy := irtypes.NewFunc(tinRet, innerParams...)
+	fnTyped := tb.NewBitCast(fnRaw, irtypes.NewPointer(innerFnTy))
+
+	releaseFn := cg.ensureRelease()
+
+	if cRet.Equal(irtypes.Void) {
+		tb.NewCall(fnTyped, tinArgs...)
+
+		for _, t := range allocatedTemps {
+			tb.NewCall(releaseFn, t)
+		}
+
+		tb.NewRet(nil)
+	} else {
+		tinRetVal := tb.NewCall(fnTyped, tinArgs...)
+
+		for _, t := range allocatedTemps {
+			tb.NewCall(releaseFn, t)
+		}
+
+		cRetVal := cg.marshalTinToCForDispatch(tb, tinRetVal, ft.RetType, tinRet, cRet)
+		tb.NewRet(cRetVal)
+	}
+
+	cg.interopDispatchers[key] = disp
+
+	return disp, nil
+}
+
+// marshalCToTinForDispatch is the dispatcher counterpart to
+// marshalTinToCInThunk: it takes the 1-or-2 C-shape parameter values
+// the trampoline received and rebuilds a single Tin-shape value plus
+// (optionally) a pointer the caller must release after the inner Tin
+// call returns.
+//
+//   - string: i8* (NUL-terminated C string) -> TinString via
+//     tin_interop_str_in (allocates RC string; data ptr returned for
+//     post-call release).
+//   - bool: i8 -> i1 via icmp ne 0 (no temp).
+//   - slice: (T*, i64) -> RC-headed Tin slice via tin_interop_slice_in
+//     (the raw C pointer cannot be passed straight through because the
+//     callee may retain/release it expecting an RC header at -16).
+//     The fresh data pointer is returned for post-call release.
+//   - everything else: passthrough (no temp).
+func (cg *CodeGen) marshalCToTinForDispatch(b *ir.Block, pieces []*ir.Param,
+	t ast.TypeExpr, tinTy irtypes.Type) (value.Value, value.Value) {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch st.Name {
+		case "string":
+			tinStr := b.NewCall(cg.ensureInteropStrIn(), pieces[0])
+			temp := b.NewExtractValue(tinStr, 0)
+			return tinStr, temp
+		case "bool":
+			return b.NewICmp(enum.IPredNE, pieces[0], constant.NewInt(irtypes.I8, 0)), nil
+		}
+	}
+
+	if at, ok := t.(*ast.ArrayType); ok && at.Size < 0 {
+		// Allocate a fresh RC-headed Tin slice that copies the C-side
+		// (T*, i64) so the inner Tin callee sees the slice's data
+		// pointer as something it can safely retain/release.
+		elemTy, err := cg.tinTypeToLLVM(at.Elem)
+		if err != nil {
+			// Validation already rejected unsupported element types;
+			// surface unexpected errors as a panic during codegen so a
+			// silently malformed dispatcher never ships.
+			panic(fmt.Sprintf("dispatcher slice marshal: %v", err))
+		}
+
+		dataI8 := b.NewBitCast(pieces[0], irtypes.I8Ptr)
+		elemSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(elemTy)))
+		rawSlice := b.NewCall(cg.ensureInteropSliceIn(), dataI8, pieces[1], elemSize)
+
+		// rawSlice is {i8*, i64}. The internal Tin closure expects
+		// {T*, i64}; bitcast the data field and reassemble.
+		st := tinTy.(*irtypes.StructType)
+		rawData := b.NewExtractValue(rawSlice, 0)
+		rawLen := b.NewExtractValue(rawSlice, 1)
+		typedData := b.NewBitCast(rawData, st.Fields[0])
+
+		alloca := b.NewAlloca(st)
+		ptrField := b.NewGetElementPtr(st, alloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 0))
+		lenField := b.NewGetElementPtr(st, alloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 1))
+		b.NewStore(typedData, ptrField)
+		b.NewStore(rawLen, lenField)
+
+		return b.NewLoad(st, alloca), rawData
+	}
+
+	return pieces[0], nil
+}
+
+// marshalTinToCForDispatch is the dispatcher counterpart to
+// marshalCToTinInThunk: takes the Tin return value and produces the
+// C-shape return.
+//
+//   - string: TinString -> i8* (NUL-terminated C string) via tin_interop_str_out
+//   - bool:   i1 -> i8 via zext
+//   - everything else: passthrough.
+func (cg *CodeGen) marshalTinToCForDispatch(b *ir.Block, v value.Value,
+	ret ast.TypeExpr, tinTy, cTy irtypes.Type) value.Value {
+	if ret != nil {
+		if st, ok := ret.(*ast.SimpleType); ok {
+			switch st.Name {
+			case "string":
+				out := b.NewCall(cg.ensureInteropStrOut(), v)
+				// Release the Tin string returned by the inner closure
+				// after we've copied its bytes into the C buffer.
+				ptr := b.NewExtractValue(v, 0)
+				b.NewCall(cg.ensureRelease(), ptr)
+				return out
+			case "bool":
+				return b.NewZExt(v, irtypes.I8)
+			}
+		}
+	}
+
+	return v
+}
+
 // callbackSigKey is a stable string used both as a cache key and as
 // the suffix on the thunk's IR name.
 func callbackSigKey(ret irtypes.Type, params []irtypes.Type) string {
@@ -1669,6 +1967,30 @@ func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
 	}
 
 	f := cg.mod.NewFunc(name, irtypes.Void)
+	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+
+	return f
+}
+
+// ensureMakeTrampoline declares
+// `i8* tin_make_trampoline(i8* fn, i8* env, i8* dispatcher)`. The
+// runtime allocates a slot in an mmap'd executable page, stores
+// (fn, env) in the slot's data area, writes the per-arch trampoline
+// machine code in the slot's code area, and returns the address of
+// the code (the value the C caller will use as a function pointer).
+func (cg *CodeGen) ensureMakeTrampoline() *ir.Func {
+	const name = "tin_make_trampoline"
+
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			return f
+		}
+	}
+
+	f := cg.mod.NewFunc(name, irtypes.I8Ptr,
+		ir.NewParam("fn", irtypes.I8Ptr),
+		ir.NewParam("env", irtypes.I8Ptr),
+		ir.NewParam("dispatcher", irtypes.I8Ptr))
 	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
 
 	return f

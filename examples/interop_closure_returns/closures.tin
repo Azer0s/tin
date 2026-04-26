@@ -1,0 +1,24 @@
+// #interop functions that return closures back to C. Each one is
+// invoked from harness.c through the per-instance trampoline the
+// wrapper installs.
+
+fn{#interop} make_adder(base i64) fn(i64) i64 =
+  return fn(x i64) i64 = return base + x
+
+fn{#interop} make_counter() fn() i64 =
+  let cell [i64] = [0]
+  return fn() i64 =
+    cell[0] = cell[0] + 1
+    return cell[0]
+
+fn{#interop} make_multiplier(k i64) fn(i64) i64 =
+  return fn(x i64) i64 = return x * k
+
+fn{#interop} make_greeter(prefix string) fn(string) string =
+  return fn(name string) string = return prefix ++ " " ++ name
+
+fn{#interop} make_predicate(threshold i64) fn(i64) bool =
+  return fn(x i64) bool = return x > threshold
+
+fn{#interop} make_strlen() fn(string) i64 =
+  return fn(s string) i64 = return len(s)
