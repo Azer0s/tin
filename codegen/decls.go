@@ -1011,6 +1011,38 @@ func traitImplKey(te ast.TypeExpr) string {
 	return "unknown"
 }
 
+// bareTraitImplKey is like traitImplKey but strips the module prefix from the
+// outer trait name only ("io::AsyncReader" -> "AsyncReader",
+// "iter[json::Value]" -> "iter__json__Value"). Used to derive the scope-name
+// suffix that methodScopeName produces from a user-written trait qualifier
+// like "fn AsyncReader::read", so the vtable wrapper can resolve impls written
+// without the module prefix.
+func bareTraitImplKey(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
+	case *ast.GenericType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		key := name
+		for _, tp := range t.TypeParams {
+			key += "__" + traitImplKey(tp)
+		}
+
+		return key
+	}
+
+	return "unknown"
+}
+
 // resolveTypeWithSubst converts a TypeExpr to LLVM type, substituting any
 
 // buildTraitFatPtrType computes (and caches) the fat-pointer type for a
@@ -1273,6 +1305,10 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		// Generate one wrapper per trait method.
 		var wrappers []constant.Constant
 
+		// Bare-name key for matching qualified impls, e.g. "AsyncReader" or
+		// "iter__i64". Used by both sync and $coro wrapper lookups.
+		bareKey := traitQualifierKey(bareTraitImplKey(impl))
+
 		for i, methodName := range methodNames {
 			wrapSlot := vtableSt.Fields[i].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			wrapperName := structKey + "__" + instKey + "__" + methodName
@@ -1290,13 +1326,14 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
 			selfVal := entry.NewLoad(structSt, selfPtr)
 
-			// Look up concrete method.
-			// First try the trait-qualified name "Struct_traitKey_method",
-			// then fall back to the plain "Struct_method".
-			// If neither is found, check the overload registry for the plain
-			// name and pick the variant whose arity matches the trait slot
-			// (len(wrapSlot.Params) - 1, since the first slot param is i8* self).
-			qualifiedName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName
+			// Look up concrete method. The qualified scope name uses the bare
+			// trait name (module prefix stripped) so that fn AsyncReader::read
+			// and fn io::AsyncReader::read both resolve when the struct lists
+			// either form. Two stages, in priority order:
+			//   1. qualifiedName  - "Struct_<traitBaseKey>_method" (Phase 1 form)
+			//   2. concreteName   - bare "Struct_method" (legacy bare-name fallback;
+			//                       removed once stdlib + examples migrated)
+			qualifiedName := structKey + "_" + bareKey + "_" + methodName
 			concreteName := structKey + "_" + methodName
 
 			concreteFn, ok := cg.curScope.lookup(qualifiedName)
@@ -1411,9 +1448,10 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
 			selfVal := entry.NewLoad(structSt, selfPtr)
 
-			// Look up the concrete $coro method.
-			// Try trait-qualified name first, then plain name.
-			qualifiedCoroName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName + "$coro"
+			// Look up the concrete $coro method. Same canonicalisation as the
+			// sync wrapper: bare trait name (module prefix stripped) for the
+			// qualified key.
+			qualifiedCoroName := structKey + "_" + bareKey + "_" + methodName + "$coro"
 			plainCoroName := structKey + "_" + methodName + "$coro"
 
 			concreteCoro, ok2 := cg.curScope.lookup(qualifiedCoroName)

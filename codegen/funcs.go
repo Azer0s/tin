@@ -68,13 +68,17 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	return cg.predeclareFuncAs(n, irName)
 }
 
-// traitQualifierKey converts a trait qualifier string like "iter[char]" into a
-// safe identifier segment like "iter_char" for use in scope/IR names.
+// traitQualifierKey converts a trait qualifier string like "iter[char]" or
+// "io::AsyncReader" into a safe identifier segment like "iter_char" or
+// "io__AsyncReader" for use in scope/IR names.
 func traitQualifierKey(q string) string {
 	out := make([]byte, 0, len(q))
 	for i := 0; i < len(q); i++ {
 		c := q[i]
 		switch c {
+		case ':':
+			// Map "::" → "__"; a stray single ':' (shouldn't occur) becomes '_'.
+			out = append(out, '_')
 		case '[', ']', ',', ' ':
 			if len(out) > 0 && out[len(out)-1] != '_' {
 				out = append(out, '_')
@@ -91,12 +95,30 @@ func traitQualifierKey(q string) string {
 	return string(out)
 }
 
+// stripQualifierModule drops a leading "module::" prefix (or chain of them)
+// from a trait qualifier so that "io::AsyncReader" canonicalises to just
+// "AsyncReader". Type-arg suffixes are preserved: "io::Reader[byte]" -> "Reader[byte]".
+func stripQualifierModule(q string) string {
+	idx := strings.LastIndex(q, "::")
+	if idx < 0 {
+		return q
+	}
+
+	return q[idx+2:]
+}
+
 // methodScopeName returns the IR/scope name for a struct method.
 // For plain methods: "StructName_methodName".
 // For trait-qualified methods: "StructName_traitKey_methodName".
+//
+// The trait qualifier is canonicalised to its base name (module prefix
+// stripped) so that "fn io::AsyncReader::read" and "fn AsyncReader::read"
+// produce the same scope name.
 func methodScopeName(structName string, m *ast.FuncDecl) string {
 	if m.TraitQualifier != "" {
-		return structName + "_" + traitQualifierKey(m.TraitQualifier) + "_" + m.Name
+		bare := stripQualifierModule(m.TraitQualifier)
+
+		return structName + "_" + traitQualifierKey(bare) + "_" + m.Name
 	}
 
 	return structName + "_" + m.Name
@@ -1052,14 +1074,14 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return traitName == structName
 	}
 
-	instKey := traitImplKey(traitExpr)
+	bareKey := traitQualifierKey(bareTraitImplKey(traitExpr))
 
 	for _, m := range td.Methods {
 		if !m.IsVirtual {
 			continue
 		}
 
-		qualName := structName + "_" + traitQualifierKey(instKey) + "_" + m.Name
+		qualName := structName + "_" + bareKey + "_" + m.Name
 		plainName := structName + "_" + m.Name
 		_, hasQual := cg.curScope.lookup(qualName)
 

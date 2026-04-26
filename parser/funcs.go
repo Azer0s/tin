@@ -23,69 +23,138 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 
 	// Optional name (lambdas are anonymous)
 	// Forms:
-	//   fn name(...)            - regular method
-	//   fn ::name(...)          - alias-trait implementation
-	//   fn trait::method(...)   - qualified trait-method implementation
-	//   fn trait[T]::method(...)- generic qualified implementation
+	//   fn name(...)                     - regular method
+	//   fn ::trait(...)                  - alias-trait implementation
+	//   fn ::module::trait(...)          - module-qualified alias-trait impl
+	//   fn trait::method(...)            - multi-method trait impl
+	//   fn module::trait::method(...)    - module-qualified multi-method impl
+	//   fn trait[T]::method(...)         - generic qualified impl
+	//   fn module::trait[T]::method(...) - module-qualified generic impl
 	var (
 		name           string
 		traitQualifier string
 	)
 
+	// Helper: collect bracketed type-args verbatim, returning the literal string.
+	// Returns "" if no '[' is present at the current position.
+	collectTypeArgs := func() string {
+		if !p.check(lexer.LBRACKET) {
+			return ""
+		}
+
+		start := p.pos
+		depth := 0
+
+		for p.pos < len(p.tokens) {
+			t := p.tokens[p.pos]
+			if t.Type == lexer.LBRACKET {
+				depth++
+			} else if t.Type == lexer.RBRACKET {
+				depth--
+				if depth == 0 {
+					p.pos++ // consume ]
+
+					break
+				}
+			} else if t.Type == lexer.EOF {
+				break
+			}
+
+			p.pos++
+		}
+
+		out := ""
+		for i := start; i < p.pos; i++ {
+			out += p.tokens[i].Literal
+		}
+
+		return out
+	}
+
 	if p.check(lexer.DCOLON) {
-		p.advance() // consume ::
-		// Alias-trait impl: ::traitName (may carry type arg: ::implicit[[char]])
-		if p.check(lexer.IDENT) {
-			name = p.advance().Literal
+		p.advance() // consume leading ::
+		// Alias-trait impl: collect (IDENT::)* IDENT (the last IDENT is both the
+		// trait name and, by convention, the method name for as-fn traits).
+		segments := []string{}
+
+		for p.check(lexer.IDENT) {
+			segments = append(segments, p.advance().Literal)
+			if p.check(lexer.DCOLON) {
+				p.advance()
+
+				continue
+			}
+
+			break
+		}
+
+		if len(segments) > 0 {
+			name = segments[len(segments)-1]
+			// Set TraitQualifier so this is treated as a qualified trait impl.
+			// Includes any module prefix the user wrote, joined with "::".
+			traitQualifier = ""
+			for i, seg := range segments {
+				if i > 0 {
+					traitQualifier += "::"
+				}
+
+				traitQualifier += seg
+			}
+			// Optional type args after the trait name: ::implicit[[char]]
+			if ta := collectTypeArgs(); ta != "" {
+				traitQualifier += ta
+			}
 		}
 	} else if p.check(lexer.IDENT) {
 		saved := p.pos
-		candidate := p.advance().Literal
-		// Collect optional type arguments: [T, ...]
-		typeArgStr := ""
+		// Collect leading module/trait segments. A segment is an intermediate
+		// IDENT that is followed by `::` (i.e. another segment continues). The
+		// final IDENT (which is NOT followed by `::`) is either the trait name
+		// (qualified form) or the plain fn name, decided once we see what
+		// follows it.
+		segments := []string{p.advance().Literal}
 
-		if p.check(lexer.LBRACKET) {
-			start := p.pos
-			depth := 0
-
-			for p.pos < len(p.tokens) {
-				t := p.tokens[p.pos]
-				if t.Type == lexer.LBRACKET {
-					depth++
-				} else if t.Type == lexer.RBRACKET {
-					depth--
-					if depth == 0 {
-						p.pos++ // consume ]
-
-						break
-					}
-				} else if t.Type == lexer.EOF {
-					break
-				}
-
-				p.pos++
-			}
-
-			for i := start; i < p.pos; i++ {
-				typeArgStr += p.tokens[i].Literal
-			}
+		for p.check(lexer.DCOLON) && p.peekAt(1).Type == lexer.IDENT && p.peekAt(2).Type == lexer.DCOLON {
+			p.advance() // consume intermediate ::
+			segments = append(segments, p.advance().Literal)
 		}
 
-		if p.check(lexer.DCOLON) {
-			// traitname[args]::method
-			p.advance() // consume ::
+		// Optional type args bind to the LAST segment (the trait name when in
+		// qualified form, or the bare fn name otherwise).
+		typeArgStr := collectTypeArgs()
 
-			if typeArgStr != "" {
-				traitQualifier = candidate + typeArgStr
+		if p.check(lexer.DCOLON) && p.peekAt(1).Type == lexer.IDENT {
+			// Qualified form: <segments>[args]::method
+			p.advance() // consume final ::
+
+			traitName := segments[len(segments)-1]
+			modulePrefix := ""
+
+			for i, s := range segments[:len(segments)-1] {
+				if i > 0 {
+					modulePrefix += "::"
+				}
+
+				modulePrefix += s
+			}
+
+			if modulePrefix != "" {
+				traitQualifier = modulePrefix + "::" + traitName
 			} else {
-				traitQualifier = candidate
+				traitQualifier = traitName
 			}
 
-			if p.check(lexer.IDENT) {
-				name = p.advance().Literal
-			}
+			traitQualifier += typeArgStr
+
+			name = p.advance().Literal
+		} else if len(segments) > 1 || typeArgStr != "" {
+			// Saw multi-segment or type args without a trailing `::method`.
+			// Restore and parse as a plain fn name; downstream will surface any
+			// real syntax error.
+			p.pos = saved
+			name = p.advance().Literal
 		} else {
-			// plain name - restore and re-read cleanly
+			// Plain name - restore and re-read cleanly to keep position semantics.
 			p.pos = saved
 			name = p.advance().Literal
 		}
