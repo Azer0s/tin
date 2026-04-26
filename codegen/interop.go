@@ -191,12 +191,6 @@ func callbackInnerReason(t ast.TypeExpr) string {
 
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch {
-		case st.Name == "bool":
-			// bool MUST be checked before the primitive whitelist;
-			// the wrapper marshals C uint8_t<->Tin i1 at the outer
-			// boundary but the per-signature thunk does no such
-			// conversion for callback args/returns.
-			return "type bool is not supported (i1 vs i8 ABI ambiguity); use u8 instead"
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "void":
@@ -1225,11 +1219,14 @@ func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
 
 // getOrCreateCallbackThunk returns a Tin-calling-convention thunk for
 // the given callback signature. The thunk receives `i8* env` first
-// (Tin's fat fn-ptr ABI), bitcasts env back to the raw C function
-// pointer, and tail-calls it with the user args. One thunk is
-// emitted per unique signature and cached on the codegen.
+// (Tin's fat fn-ptr ABI), reads the raw C function pointer from env,
+// converts each argument from its Tin shape to its C ABI shape (the
+// only difference today is bool: Tin i1 vs C uint8_t), calls the C
+// function, converts the return back to Tin shape, and returns. One
+// thunk is emitted per unique Tin signature and cached on the codegen.
 func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) {
-	llRet := irtypes.Type(irtypes.Void)
+	// Tin-side LLVM types (what the thunk's signature exposes).
+	tinRet := irtypes.Type(irtypes.Void)
 
 	if ft.RetType != nil {
 		t, err := cg.tinTypeToLLVM(ft.RetType)
@@ -1237,10 +1234,10 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 			return nil, err
 		}
 
-		llRet = t
+		tinRet = t
 	}
 
-	llParams := make([]irtypes.Type, len(ft.Params))
+	tinParams := make([]irtypes.Type, len(ft.Params))
 
 	for i, p := range ft.Params {
 		t, err := cg.tinTypeToLLVM(p)
@@ -1248,10 +1245,19 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 			return nil, err
 		}
 
-		llParams[i] = t
+		tinParams[i] = t
+	}
+	// C-side LLVM types (what env is bitcast to). Today only bool
+	// (i1 in Tin / i8 in C) differs. Keep the maps parallel to the
+	// Tin shape so per-position conversion is straightforward.
+	cRet := cTypeOfTinForCallback(tinRet)
+	cParams := make([]irtypes.Type, len(tinParams))
+
+	for i, tt := range tinParams {
+		cParams[i] = cTypeOfTinForCallback(tt)
 	}
 
-	key := callbackSigKey(llRet, llParams)
+	key := callbackSigKey(tinRet, tinParams)
 
 	if cg.interopCbThunks == nil {
 		cg.interopCbThunks = make(map[string]*ir.Func)
@@ -1263,14 +1269,14 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 
 	thunkName := "__tin_interop_cb_thunk_" + key
 
-	thunkParams := make([]*ir.Param, 0, len(llParams)+1)
+	thunkParams := make([]*ir.Param, 0, len(tinParams)+1)
 	thunkParams = append(thunkParams, ir.NewParam("env", irtypes.I8Ptr))
 
-	for i, t := range llParams {
+	for i, t := range tinParams {
 		thunkParams = append(thunkParams, ir.NewParam(fmt.Sprintf("a%d", i), t))
 	}
 
-	thunk := cg.mod.NewFunc(thunkName, llRet, thunkParams...)
+	thunk := cg.mod.NewFunc(thunkName, tinRet, thunkParams...)
 	thunk.Linkage = enum.LinkageInternal
 
 	tb := thunk.NewBlock("entry")
@@ -1278,7 +1284,7 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 	// env layout (matches the wrapper allocation):
 	//   offset 0: destructor (NULL, ignored here)
 	//   offset 8: raw C fn pointer
-	rawFnTy := irtypes.NewFunc(llRet, llParams...)
+	rawFnTy := irtypes.NewFunc(cRet, cParams...)
 	rawFnPtrTy := irtypes.NewPointer(rawFnTy)
 
 	fnSlot := tb.NewGetElementPtr(irtypes.I8, thunkParams[0],
@@ -1286,22 +1292,55 @@ func (cg *CodeGen) getOrCreateCallbackThunk(ft *ast.FuncType) (*ir.Func, error) 
 	fnSlotCast := tb.NewBitCast(fnSlot, irtypes.NewPointer(rawFnPtrTy))
 	rawFn := tb.NewLoad(rawFnPtrTy, fnSlotCast)
 
-	args := make([]value.Value, len(llParams))
-	for i := range llParams {
-		args[i] = thunkParams[i+1]
+	args := make([]value.Value, len(cParams))
+	for i := range cParams {
+		args[i] = tinToCInThunk(tb, thunkParams[i+1], tinParams[i], cParams[i])
 	}
 
-	if llRet.Equal(irtypes.Void) {
+	if cRet.Equal(irtypes.Void) {
 		tb.NewCall(rawFn, args...)
 		tb.NewRet(nil)
 	} else {
 		r := tb.NewCall(rawFn, args...)
-		tb.NewRet(r)
+		tb.NewRet(cToTinInThunk(tb, r, cRet, tinRet))
 	}
 
 	cg.interopCbThunks[key] = thunk
 
 	return thunk, nil
+}
+
+// cTypeOfTinForCallback maps a Tin-side LLVM type to the C-side LLVM
+// type clang would use for the same position in a callback signature.
+// Today the only difference is bool (Tin i1 -> C i8); everything else
+// passes through.
+func cTypeOfTinForCallback(t irtypes.Type) irtypes.Type {
+	if t.Equal(irtypes.I1) {
+		return irtypes.I8
+	}
+
+	return t
+}
+
+// tinToCInThunk converts a Tin-shape value to its C-shape counterpart
+// at the thunk's call site. Only bool needs work (zext i1 -> i8);
+// everything else is a no-op.
+func tinToCInThunk(b *ir.Block, v value.Value, tinTy, cTy irtypes.Type) value.Value {
+	if tinTy.Equal(irtypes.I1) && cTy.Equal(irtypes.I8) {
+		return b.NewZExt(v, irtypes.I8)
+	}
+
+	return v
+}
+
+// cToTinInThunk converts a C-shape return value back to Tin shape.
+// Only bool needs work (icmp ne 0); everything else is a no-op.
+func cToTinInThunk(b *ir.Block, v value.Value, cTy, tinTy irtypes.Type) value.Value {
+	if tinTy.Equal(irtypes.I1) && cTy.Equal(irtypes.I8) {
+		return b.NewICmp(enum.IPredNE, v, constant.NewInt(irtypes.I8, 0))
+	}
+
+	return v
 }
 
 // callbackSigKey is a stable string used both as a cache key and as

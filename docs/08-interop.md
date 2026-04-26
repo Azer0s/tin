@@ -629,11 +629,12 @@ int32_t fold(int32_t (*cb)(int32_t, int32_t), int32_t init, int32_t n);
 ```
 
 Restrictions:
-- Callback parameter and return types must be primitives (no `bool`)
-  or pointers to primitives. Strings, slices, structs, and other
-  aggregates inside a callback signature are rejected: the thunk
-  would have to marshal each call across the boundary, which v1 does
-  not implement.
+- Callback parameter and return types must be primitives or pointers
+  to primitives. Strings, slices, structs, and other aggregates
+  inside a callback signature are rejected: the thunk would have to
+  marshal each call across the boundary, which v1 does not implement.
+- `bool` is allowed; the thunk converts between Tin's i1 and C's
+  uint8_t (matching `_Bool`/C23 `bool`, both 1 byte) on each call.
 - Callbacks are accepted only as parameters, not as return types.
 
 ### Spawning fibers

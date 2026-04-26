@@ -145,11 +145,6 @@ fn{#interop} bad(cb fn(string) i32) i32 = return cb("x")
 fn main() i64 = return 0
 '
 
-assert_err "callback with bool inner rejected" "i1 vs i8 ABI ambiguity" '
-fn{#interop} bad(cb fn(bool) bool) i32 = return 0
-
-fn main() i64 = return 0
-'
 
 # ── packed by-value: large naturally-aligned struct rejected ──
 assert_err "large naturally-aligned packed struct rejected" "too large for v1 by-value interop" '
@@ -262,6 +257,12 @@ struct {#packed} pt =
   y i32
 
 fn{#interop} sum_pt(p pt) i32 = return p.x + p.y
+
+fn main() i64 = return 0
+'
+
+assert_ok "callback with bool inner accepted (i1<->i8 conversion)" '
+fn{#interop} good(cb fn(bool) bool) i32 = return 0
 
 fn main() i64 = return 0
 '
