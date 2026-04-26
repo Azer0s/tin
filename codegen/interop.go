@@ -152,13 +152,13 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 	}
 
 	if typeExprContains(fn.RetType, "Future") {
-		return cg.nodeErr(fn, "fn %s: #interop return type must not contain Future[T]; C has no way to await",
+		return cg.nodeErr(fn, "fn %s: #interop return type contains `Future[T]`; C has no way to await",
 			fn.Name)
 	}
 
 	for _, p := range fn.Params {
 		if typeExprContains(p.Type, "any") {
-			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s which contains `any`; no stable C representation exists for boxed values",
+			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s; `any` is not C-representable - no stable layout exists for boxed values",
 				fn.Name, p.Name, p.Type)
 		}
 
@@ -181,7 +181,9 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 // callbackInnerReason restricts the param/return types allowed inside
 // a callback signature crossing the interop boundary. Only primitives
 // and `*void` / `*<primitive>` work because the per-signature thunk
-// emitted in codegen does not marshal complex types.
+// emitted in codegen does not marshal complex types. The returned
+// reason is plugged in after `callback parameter ` / `callback return `
+// at the call site, so phrase the message to read naturally either way.
 func callbackInnerReason(t ast.TypeExpr) string {
 	if t == nil {
 		return ""
@@ -189,15 +191,19 @@ func callbackInnerReason(t ast.TypeExpr) string {
 
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch {
+		case st.Name == "bool":
+			// bool MUST be checked before the primitive whitelist;
+			// the wrapper marshals C uint8_t<->Tin i1 at the outer
+			// boundary but the per-signature thunk does no such
+			// conversion for callback args/returns.
+			return "type `bool` is not supported (i1 vs i8 ABI ambiguity); use `u8` instead"
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "void":
 			return ""
-		case st.Name == "bool":
-			return "callback bool params are not supported (i1 vs i8 ABI)"
 		}
 
-		return "callback inner type " + st.Name + " is not a primitive"
+		return "type `" + st.Name + "` is not a primitive C type"
 	}
 
 	if pt, ok := t.(*ast.PointerType); ok {
@@ -207,10 +213,10 @@ func callbackInnerReason(t ast.TypeExpr) string {
 			}
 		}
 
-		return "callback pointer inner type must be void or a primitive"
+		return "pointer must be `*void` or `*<primitive>`"
 	}
 
-	return "callback inner type is not allowed"
+	return "type is not allowed inside a callback signature"
 }
 
 // interopElemTypeReason restricts the element type allowed inside a
@@ -228,15 +234,15 @@ func interopElemTypeReason(t ast.TypeExpr) string {
 		case st.Name == "string":
 			return "Tin strings are ARC-managed fat pointers; a raw byte copy would produce dangling references in the callee. Pass strings individually or model the array C-side as `const char* const*`."
 		case st.Name == "atom":
-			return "atom has no stable C representation"
+			return "`atom` has no stable C representation"
 		case st.Name == "any":
-			return "any is not C-representable"
+			return "`any` is not C-representable"
 		case st.Name == "void":
-			return "[void] is not representable"
+			return "`[void]` is not representable"
 		}
 		// Named user type (struct / trait / ADT) - no stable C layout
 		// guarantee, often ARC-managed inside.
-		return "named user types are not representable as array elements; use a [u8] payload or pass items individually"
+		return "named user types are not representable as fat-array elements; use `[u8]` as a payload or pass items individually"
 	}
 
 	if _, ok := t.(*ast.PointerType); ok {
@@ -297,7 +303,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 			// message consistent here too.
 			return "`any` is not C-representable"
 		case v.Name == "atom":
-			return "`atom` has no stable C representation in v1"
+			return "`atom` has no stable C representation"
 		}
 		// Allow #packed structs by value: the wrapper applies SysV's
 		// struct-coercion rules so the C-side struct ABI agrees with
@@ -308,7 +314,7 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 			return ""
 		}
 
-		return "v1 only allows #packed user structs at the interop boundary; pass *void as an opaque handle for non-packed structs"
+		return "named user types must be either `*void` (opaque handle) or `struct{#packed}` for pass-by-value at the interop boundary"
 
 	case *ast.PointerType:
 		// Allow *void, *<primitive>, or *<another-pointer>. Reject
@@ -323,19 +329,19 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 				return ""
 			}
 
-			return "*" + elem.Name + " is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use *void as an opaque handle"
+			return "`*" + elem.Name + "` is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use `*void` as an opaque handle"
 		case *ast.PointerType:
 			return cg.interopTypeReason(v.Elem, false)
 		}
 
-		return "pointer-to-this-type is not safe at the interop boundary; use *void as an opaque handle"
+		return "this pointer type is not safe at the interop boundary; use `*void` as an opaque handle"
 
 	case *ast.ArrayType:
 		// Fat arrays [T]: v1 allows; size != -1 (fixed-size [T;N]) is
 		// rejected because there is no clean C ABI for a Tin
 		// fixed-size value array distinct from `T*`.
 		if v.Size != -1 {
-			return "fixed-size arrays are not representable; use a fat array [T] or a pointer *T"
+			return "fixed-size arrays are not representable; use a fat array `[T]` or a pointer `*T`"
 		}
 		// The marshaler does a raw memcpy of `len * sizeof(T)` bytes
 		// across the C/Tin boundary. That is only safe when T has no
@@ -350,32 +356,32 @@ func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		return ""
 
 	case *ast.GenericType:
-		return "generic types like " + v.Name + "[T] are not representable"
+		return "generic types like `" + v.Name + "[T]` are not representable"
 
 	case *ast.FuncType:
 		// Callbacks: only allowed as parameters today, and only with
 		// primitive/pointer-shaped sub-signatures. The wrapper boxes
 		// the raw C fn pointer into a per-signature thunk.
 		if isReturn {
-			return "fn-typed return values are not supported"
+			return "function-pointer returns are not supported; only callback parameters are wrapped"
 		}
 
 		for _, pt := range v.Params {
 			if r := callbackInnerReason(pt); r != "" {
-				return "callback parameter type rejected: " + r
+				return "callback parameter " + r
 			}
 		}
 
 		if v.RetType != nil {
 			if r := callbackInnerReason(v.RetType); r != "" {
-				return "callback return type rejected: " + r
+				return "callback return " + r
 			}
 		}
 
 		return ""
 
 	case *ast.TupleArrayType:
-		return "tuple-array destructuring types (@[...]) are not representable"
+		return "tuple-array destructuring types (`@[...]`) are not representable"
 
 	case *ast.UnionTypeExpr:
 		return "union types are not representable"
@@ -487,13 +493,13 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 			shape, _, err := cg.packedABIShape(structName)
 			if err != nil {
-				return err
+				return cg.nodeErr(fn, "fn %s: #interop parameter %q: %v", fn.Name, p.Name, err)
 			}
 
 			switch shape {
-			case "i8", "i16", "i32", "i64":
+			case "i8", "i16", "i32", "i64", "f32", "f64":
 				wrapperParams = append(wrapperParams,
-					ir.NewParam(p.Name, abiIntegerType(shape)))
+					ir.NewParam(p.Name, abiRegisterType(shape)))
 			case "two_i64":
 				wrapperParams = append(wrapperParams,
 					ir.NewParam(p.Name+".lo", irtypes.I64),
@@ -536,12 +542,12 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 		shape, _, err := cg.packedABIShape(structName)
 		if err != nil {
-			return err
+			return cg.nodeErr(fn, "fn %s: #interop return: %v", fn.Name, err)
 		}
 
 		switch shape {
-		case "i8", "i16", "i32", "i64":
-			retType = abiIntegerType(shape)
+		case "i8", "i16", "i32", "i64", "f32", "f64":
+			retType = abiRegisterType(shape)
 		case "two_i64":
 			retType = irtypes.NewStruct(irtypes.I64, irtypes.I64)
 		case "byval":
@@ -628,7 +634,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 			shape, _, err := cg.packedABIShape(structName)
 			if err != nil {
-				return err
+				return cg.nodeErr(fn, "fn %s: #interop parameter %q: %v", fn.Name, fn.Params[paramIdx].Name, err)
 			}
 
 			tinTy, err := cg.tinTypeToLLVM(fn.Params[paramIdx].Type)
@@ -651,11 +657,11 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 				constant.NewInt(irtypes.I64, int64(userOffBytes)))
 
 			switch shape {
-			case "i8", "i16", "i32", "i64":
+			case "i8", "i16", "i32", "i64", "f32", "f64":
 				v := wrapperParams[wrapperIdx]
 				wrapperIdx++
 
-				slot := block.NewBitCast(userBase, irtypes.NewPointer(abiIntegerType(shape)))
+				slot := block.NewBitCast(userBase, irtypes.NewPointer(abiRegisterType(shape)))
 				block.NewStore(v, slot)
 			case "two_i64":
 				lo := wrapperParams[wrapperIdx]
@@ -805,7 +811,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 		shape, totalSize, err := cg.packedABIShape(structName)
 		if err != nil {
-			return err
+			return cg.nodeErr(fn, "fn %s: #interop return: %v", fn.Name, err)
 		}
 
 		tinTy, _ := cg.tinTypeToLLVM(fn.RetType)
@@ -818,9 +824,9 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			constant.NewInt(irtypes.I64, int64(userOffBytes)))
 
 		switch shape {
-		case "i8", "i16", "i32", "i64":
-			slot := block.NewBitCast(userBase, irtypes.NewPointer(abiIntegerType(shape)))
-			finalRet = block.NewLoad(abiIntegerType(shape), slot)
+		case "i8", "i16", "i32", "i64", "f32", "f64":
+			slot := block.NewBitCast(userBase, irtypes.NewPointer(abiRegisterType(shape)))
+			finalRet = block.NewLoad(abiRegisterType(shape), slot)
 		case "two_i64":
 			loSlot := block.NewBitCast(userBase, irtypes.NewPointer(irtypes.I64))
 			lo := block.NewLoad(irtypes.I64, loSlot)
@@ -994,8 +1000,26 @@ func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
 	if size == 0 {
 		return "", 0, fmt.Errorf("packed struct %s has zero size", structName)
 	}
-	// Single-register coercion: works when the packed layout matches
-	// the natural (non-packed) byte layout AND the struct fits in one
+	// SSE-class single field: clang lowers a struct holding exactly
+	// one f32/f64 to the bare float/double ABI (XMM register). Match
+	// it so the cross-language signature lines up.
+	if size <= 8 && naturallyAligned(userTypes) && len(userTypes) == 1 {
+		if irtypes.IsFloat(userTypes[0]) {
+			switch userTypes[0].(*irtypes.FloatType).Kind {
+			case irtypes.FloatKindFloat:
+				return "f32", size, nil
+			case irtypes.FloatKindDouble:
+				return "f64", size, nil
+			}
+		}
+	}
+	// Multi-float same-eightbyte (e.g. 2x f32) would need <2 x float>
+	// vector ABI; not implemented in v1.
+	if size <= 8 && naturallyAligned(userTypes) && allFloatFields(userTypes) && len(userTypes) > 1 {
+		return "", size, fmt.Errorf("packed struct %s contains multiple float fields in one eightbyte; v1 does not implement the SSE vector ABI - pass *%s instead", structName, structName)
+	}
+	// Single-register integer coercion: works when the packed layout
+	// matches the natural byte layout AND the struct fits in one
 	// integer eightbyte. Both LLVM and clang lower it to the same
 	// integer type so the cross-language ABI agrees.
 	if size <= 8 && naturallyAligned(userTypes) {
@@ -1016,6 +1040,17 @@ func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
 	}
 
 	return "", size, fmt.Errorf("packed struct %s (%d bytes, naturally aligned) is too large for v1 by-value interop; pass *%s instead", structName, size, structName)
+}
+
+// allFloatFields reports whether every field is a float type.
+func allFloatFields(types []irtypes.Type) bool {
+	for _, t := range types {
+		if !irtypes.IsFloat(t) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // naturallyAligned reports whether a packed list of LLVM types would
@@ -1042,9 +1077,9 @@ func naturallyAligned(types []irtypes.Type) bool {
 	return true
 }
 
-// abiIntegerType returns the LLVM integer type matching one of the
-// integer ABI shapes ("i8".."i64").
-func abiIntegerType(shape string) irtypes.Type {
+// abiRegisterType returns the LLVM type matching one of the
+// register-passed ABI shapes ("i8".."i64", "f32", "f64").
+func abiRegisterType(shape string) irtypes.Type {
 	switch shape {
 	case "i8":
 		return irtypes.I8
@@ -1054,6 +1089,10 @@ func abiIntegerType(shape string) irtypes.Type {
 		return irtypes.I32
 	case "i64":
 		return irtypes.I64
+	case "f32":
+		return irtypes.Float
+	case "f64":
+		return irtypes.Double
 	}
 
 	return nil

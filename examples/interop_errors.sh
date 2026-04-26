@@ -42,7 +42,7 @@ fn main() i64 = return 0
 '
 
 # ── return type cannot contain Future[T] ──
-assert_err "Future return rejected" "must not contain Future[T]" '
+assert_err "Future return rejected" "contains \`Future[T]\`" '
 use sync
 
 fn{#interop} bad(n i32) Future[i32] =
@@ -52,7 +52,7 @@ fn main() i64 = return 0
 '
 
 # ── any parameter rejected ──
-assert_err "any param rejected" "contains \`any\`" '
+assert_err "any param rejected" "\`any\` is not C-representable" '
 fn{#interop} bad(x any) i32 = return 0
 
 fn main() i64 = return 0
@@ -98,7 +98,7 @@ fn main() i64 = return 0
 # ─── Phase B: type whitelist enforcement ──────────────────────────────
 
 # ── struct param rejected (use pointer instead) ──
-assert_err "struct param rejected" "only allows #packed user structs" '
+assert_err "struct param rejected" "named user types must be either" '
 struct point =
   x i32
 
@@ -108,7 +108,7 @@ fn main() i64 = return 0
 '
 
 # ── struct return rejected (use pointer instead) ──
-assert_err "struct return rejected" "only allows #packed user structs" '
+assert_err "struct return rejected" "named user types must be either" '
 struct point =
   x i32
 
@@ -132,15 +132,21 @@ fn main() i64 = return 0
 '
 
 # ── fn-typed return rejected (callback returns are not supported) ──
-assert_err "fn-typed return rejected" "fn-typed return values are not supported" '
+assert_err "fn-typed return rejected" "function-pointer returns are not supported" '
 fn{#interop} bad() fn(i32) i32 = return fn(x i32) i32 = return x
 
 fn main() i64 = return 0
 '
 
 # ── callback with non-primitive inner type rejected ──
-assert_err "callback with string inner rejected" "callback inner type" '
+assert_err "callback with string inner rejected" "is not a primitive C type" '
 fn{#interop} bad(cb fn(string) i32) i32 = return cb("x")
+
+fn main() i64 = return 0
+'
+
+assert_err "callback with bool inner rejected" "i1 vs i8 ABI ambiguity" '
+fn{#interop} bad(cb fn(bool) bool) i32 = return 0
 
 fn main() i64 = return 0
 '
