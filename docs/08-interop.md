@@ -505,7 +505,7 @@ function.
 | `f32`, `f64`         | `float`, `double`                       | `float`, `double`                                 |
 | `bool`               | `uint8_t` (non-zero = true)             | `uint8_t`                                         |
 | `*<primitive>`, `*void` | `T*`, `void*` (passthrough)          | `T*`, `void*` (passthrough)                       |
-| `string`             | `const char*` (NULL maps to empty)      | `const char*` (caller frees via extern_alloc's matching free) |
+| `string`             | `const char*` (NUL-terminated; `strlen` on entry) | `const char*` (caller frees via extern_alloc's matching free) |
 | `[T]` fat array, T = primitive or `*X` | splits into `const T* xs, int64_t xs_len` | reshapes to status return + out-params `T** out_data, int64_t* out_len` |
 
 The validation pass rejects any other parameter or return type with a
@@ -585,6 +585,19 @@ pointers and field padding that have no stable C representation.
 NULL passed to a `#interop` function expecting a non-NULL pointer
 will segfault inside the Tin body. Treat all pointer params as
 non-nullable unless your Tin code explicitly checks.
+
+### Strings and embedded NUL bytes
+
+`string` parameters use C convention: the wrapper computes the length
+with `strlen` on entry, so any embedded `\0` truncates the value seen
+by the Tin side. For binary data or strings with deliberate NUL bytes,
+use `[u8]` instead - the C signature becomes `(const uint8_t* xs,
+int64_t xs_len)` and the byte buffer crosses the boundary intact.
+
+```rust
+fn{#interop} hash(buf [u8]) i64 = ...   // binary-safe; len is explicit
+fn{#interop} greet(name string) string = ...   // NUL-terminated, strlen-bounded
+```
 
 ### Returned strings and arrays - allocator hook
 

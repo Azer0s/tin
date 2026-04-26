@@ -146,13 +146,13 @@ fn main() i64 = return 0
 '
 
 
-# ── packed by-value: large naturally-aligned struct rejected ──
-assert_err "large naturally-aligned packed struct rejected" "too large for v1 by-value interop" '
-struct {#packed} big =
-  a i64
-  b i64
+# ── packed by-value: multi-float in one eightbyte rejected (vector ABI) ──
+assert_err "multi-float eightbyte rejected" "SSE vector ABI" '
+struct {#packed} ff =
+  a f32
+  b f32
 
-fn{#interop} f(p big) i64 = return p.a + p.b
+fn{#interop} f(p ff) f32 = return p.a
 
 fn main() i64 = return 0
 '
@@ -164,12 +164,6 @@ fn{#interop} bad() i32 | f64 = return 0
 fn main() i64 = return 0
 '
 
-# ── [bool] arrays rejected (i1 vs i8 ABI ambiguity) ──
-assert_err "[bool] param rejected" "[bool] forces a per-element" '
-fn{#interop} bad(xs [bool]) i32 = return xs.len as i32
-
-fn main() i64 = return 0
-'
 
 # ── [string] rejected (ARC-managed elements would dangle) ──
 assert_err "[string] param rejected" "Tin strings are ARC-managed" '
@@ -263,6 +257,12 @@ fn main() i64 = return 0
 
 assert_ok "callback with bool inner accepted (i1<->i8 conversion)" '
 fn{#interop} good(cb fn(bool) bool) i32 = return 0
+
+fn main() i64 = return 0
+'
+
+assert_ok "[bool] accepted (1-byte-per-element)" '
+fn{#interop} count(xs [bool]) i32 = return xs.len as i32
 
 fn main() i64 = return 0
 '

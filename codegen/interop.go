@@ -216,13 +216,10 @@ func callbackInnerReason(t ast.TypeExpr) string {
 // interopElemTypeReason restricts the element type allowed inside a
 // fat array `[T]` at the boundary. Only primitives and pointers can
 // safely cross via memcpy. Reject everything else with a friendly
-// message. Boolean elements are rejected separately because of the
-// i1<->i8 ABI mismatch.
+// message.
 func interopElemTypeReason(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch {
-		case st.Name == "bool":
-			return "[bool] forces a per-element i1/i8 conversion the marshaler does not perform; use [u8] (0 = false, non-zero = true) instead"
 		case interopAllowedPrimitives[st.Name]:
 			return ""
 		case st.Name == "string":
@@ -494,16 +491,34 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 			case "i8", "i16", "i32", "i64", "f32", "f64":
 				wrapperParams = append(wrapperParams,
 					ir.NewParam(p.Name, abiRegisterType(shape)))
-			case "two_i64":
+			case "two_eightbyte":
+				loTy, hiTy, err := classifyTwoEightbytes(
+					cg.structFieldLLVMTypes[structName], structName)
+				if err != nil {
+					return cg.nodeErr(fn, "fn %s: #interop parameter %q: %v", fn.Name, p.Name, err)
+				}
+
 				wrapperParams = append(wrapperParams,
-					ir.NewParam(p.Name+".lo", irtypes.I64),
-					ir.NewParam(p.Name+".hi", irtypes.I64))
+					ir.NewParam(p.Name+".lo", loTy))
+				if hiTy != nil {
+					wrapperParams = append(wrapperParams,
+						ir.NewParam(p.Name+".hi", hiTy))
+				}
 			case "byval":
 				rawTy := cg.packedUserStructType(structName)
 
-				bv := ir.NewParam(p.Name, irtypes.I8Ptr)
-				bv.Attrs = append(bv.Attrs, ir.Byval{Typ: rawTy})
-				wrapperParams = append(wrapperParams, bv)
+				if cg.targetIsARM64() {
+					// AAPCS64 passes large composites indirectly via a
+					// plain *T register; LLVM's byval attribute can
+					// trip alignment crashes here, so mirror the
+					// existing extern-call convention.
+					wrapperParams = append(wrapperParams,
+						ir.NewParam(p.Name, irtypes.NewPointer(rawTy)))
+				} else {
+					bv := ir.NewParam(p.Name, irtypes.I8Ptr)
+					bv.Attrs = append(bv.Attrs, ir.Byval{Typ: rawTy})
+					wrapperParams = append(wrapperParams, bv)
+				}
 			}
 		default:
 			t, err := cg.tinTypeToLLVM(p.Type)
@@ -542,17 +557,32 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		switch shape {
 		case "i8", "i16", "i32", "i64", "f32", "f64":
 			retType = abiRegisterType(shape)
-		case "two_i64":
-			retType = irtypes.NewStruct(irtypes.I64, irtypes.I64)
+		case "two_eightbyte":
+			loTy, hiTy, err := classifyTwoEightbytes(
+				cg.structFieldLLVMTypes[structName], structName)
+			if err != nil {
+				return cg.nodeErr(fn, "fn %s: #interop return: %v", fn.Name, err)
+			}
+
+			if hiTy != nil {
+				retType = irtypes.NewStruct(loTy, hiTy)
+			} else {
+				retType = loTy
+			}
 		case "byval":
 			// sret hidden first param; the wrapper's nominal return
 			// is void. The sret target is the user-fields-only struct
 			// type so the wrapper signature matches the C ABI for the
-			// equivalent packed struct.
+			// equivalent packed struct. AMD64 uses an explicit sret
+			// attribute; ARM64 (AAPCS64) just takes a plain pointer
+			// which the backend wires to x8.
 			rawTy := cg.packedUserStructType(structName)
 
 			sret := ir.NewParam(".sret", irtypes.NewPointer(rawTy))
-			sret.Attrs = append(sret.Attrs, ir.SRet{Typ: rawTy})
+			if !cg.targetIsARM64() {
+				sret.Attrs = append(sret.Attrs, ir.SRet{Typ: rawTy})
+			}
+
 			wrapperParams = append([]*ir.Param{sret}, wrapperParams...)
 			retType = irtypes.Void
 		}
@@ -657,6 +687,25 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 
 				slot := block.NewBitCast(userBase, irtypes.NewPointer(abiRegisterType(shape)))
 				block.NewStore(v, slot)
+			case "two_eightbyte":
+				loTy, hiTy, _ := classifyTwoEightbytes(
+					cg.structFieldLLVMTypes[structName], structName)
+
+				lo := wrapperParams[wrapperIdx]
+				wrapperIdx++
+
+				loSlot := block.NewBitCast(userBase, irtypes.NewPointer(loTy))
+				block.NewStore(lo, loSlot)
+
+				if hiTy != nil {
+					hi := wrapperParams[wrapperIdx]
+					wrapperIdx++
+
+					hiBase := block.NewGetElementPtr(irtypes.I8, userBase,
+						constant.NewInt(irtypes.I64, 8))
+					hiSlot := block.NewBitCast(hiBase, irtypes.NewPointer(hiTy))
+					block.NewStore(hi, hiSlot)
+				}
 			case "two_i64":
 				lo := wrapperParams[wrapperIdx]
 				hi := wrapperParams[wrapperIdx+1]
@@ -821,6 +870,33 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		case "i8", "i16", "i32", "i64", "f32", "f64":
 			slot := block.NewBitCast(userBase, irtypes.NewPointer(abiRegisterType(shape)))
 			finalRet = block.NewLoad(abiRegisterType(shape), slot)
+		case "two_eightbyte":
+			loTy, hiTy, _ := classifyTwoEightbytes(
+				cg.structFieldLLVMTypes[structName], structName)
+
+			loSlot := block.NewBitCast(userBase, irtypes.NewPointer(loTy))
+			lo := block.NewLoad(loTy, loSlot)
+
+			if hiTy == nil {
+				finalRet = lo
+			} else {
+				hiBase := block.NewGetElementPtr(irtypes.I8, userBase,
+					constant.NewInt(irtypes.I64, 8))
+				hiSlot := block.NewBitCast(hiBase, irtypes.NewPointer(hiTy))
+				hi := block.NewLoad(hiTy, hiSlot)
+
+				pairTy := irtypes.NewStruct(loTy, hiTy)
+				pairAlloca := block.NewAlloca(pairTy)
+				loP := block.NewGetElementPtr(pairTy, pairAlloca,
+					constant.NewInt(irtypes.I32, 0),
+					constant.NewInt(irtypes.I32, 0))
+				hiP := block.NewGetElementPtr(pairTy, pairAlloca,
+					constant.NewInt(irtypes.I32, 0),
+					constant.NewInt(irtypes.I32, 1))
+				block.NewStore(lo, loP)
+				block.NewStore(hi, hiP)
+				finalRet = block.NewLoad(pairTy, pairAlloca)
+			}
 		case "two_i64":
 			loSlot := block.NewBitCast(userBase, irtypes.NewPointer(irtypes.I64))
 			lo := block.NewLoad(irtypes.I64, loSlot)
@@ -1028,12 +1104,116 @@ func (cg *CodeGen) packedABIShape(structName string) (string, int, error) {
 			return "i64", size, nil
 		}
 	}
+	// Two-eightbyte coercion (9-16 byte naturally-aligned structs).
+	// Each chunk gets its own LLVM type matching what clang would emit.
+	// Multi-float-per-eightbyte (would need <2 x float> vector ABI) is
+	// rejected here.
+	if size > 8 && size <= 16 && naturallyAligned(userTypes) {
+		_, _, err := classifyTwoEightbytes(userTypes, structName)
+		if err != nil {
+			return "", size, err
+		}
+
+		return "two_eightbyte", size, nil
+	}
 	// Non-natural alignment of any size: clang uses byval/sret.
 	if !naturallyAligned(userTypes) {
 		return "byval", size, nil
 	}
 
-	return "", size, fmt.Errorf("packed struct %s (%d bytes, naturally aligned) is too large for v1 by-value interop; pass *%s instead", structName, size, structName)
+	return "byval", size, nil
+}
+
+// classifyTwoEightbytes decides the LLVM type clang would assign to
+// each of the two 8-byte chunks of a 9-16 byte naturally-aligned
+// packed struct. For each chunk:
+//   - sole float field -> that float type (SSE class)
+//   - any mix or multi-integer -> integer of the chunk's used byte count
+//   - multiple floats in one chunk -> reject (vector ABI not in v1)
+// Returns (lo type, hi type, error).
+func classifyTwoEightbytes(userTypes []irtypes.Type, structName string) (irtypes.Type, irtypes.Type, error) {
+	type fieldRange struct {
+		ty       irtypes.Type
+		off, end int
+	}
+
+	off := 0
+	fields := make([]fieldRange, len(userTypes))
+
+	for i, t := range userTypes {
+		sz := int(llvmTypeSize(t))
+		fields[i] = fieldRange{ty: t, off: off, end: off + sz}
+		off += sz
+	}
+
+	totalSize := off
+
+	classify := func(lo, hi int) (irtypes.Type, error) {
+		// Collect fields that overlap [lo, hi).
+		var inChunk []fieldRange
+
+		for _, f := range fields {
+			if f.off < hi && f.end > lo {
+				inChunk = append(inChunk, f)
+			}
+		}
+
+		if len(inChunk) == 0 {
+			return nil, nil
+		}
+		// Float-only chunks: clang uses float/double if a single
+		// float field fills the chunk; otherwise vector (rejected).
+		floatCount := 0
+
+		for _, f := range inChunk {
+			if irtypes.IsFloat(f.ty) {
+				floatCount++
+			}
+		}
+
+		if floatCount > 0 && floatCount == len(inChunk) {
+			if len(inChunk) > 1 {
+				return nil, fmt.Errorf("packed struct %s has multiple float fields in one eightbyte; v1 does not implement the SSE vector ABI - pass *%s instead", structName, structName)
+			}
+
+			return inChunk[0].ty, nil
+		}
+		// Mixed or all-integer: use iN where N = chunk's used bytes.
+		usedBits := (hi - lo) * 8
+
+		// For the trailing chunk, the actual data may not fill the
+		// full eightbyte; clang emits the integer type matching the
+		// real used size (e.g. i32 for the trailing 4 bytes of a
+		// 12-byte struct).
+		if hi > totalSize {
+			usedBits = (totalSize - lo) * 8
+		}
+
+		switch usedBits {
+		case 8:
+			return irtypes.I8, nil
+		case 16:
+			return irtypes.I16, nil
+		case 24, 32:
+			return irtypes.I32, nil
+		case 40, 48, 56, 64:
+			return irtypes.I64, nil
+		}
+
+		return nil, fmt.Errorf("packed struct %s: unable to coerce eightbyte covering %d bits", structName, usedBits)
+	}
+
+	loTy, err := classify(0, 8)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hiTy, err := classify(8, 16)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return loTy, hiTy, nil
 }
 
 // allFloatFields reports whether every field is a float type.
