@@ -539,17 +539,21 @@ struct itself.
 **Lifetime caveat for `*void` returns from `#interop`.** A pointer
 returned from `&Foo{...}` is ARC-allocated with refcount 1. The
 wrapper does not release it on the way out, so the C caller becomes
-the sole owner of that reference. The runtime exports
-`_tin_release(void *)` for explicit cleanup; without it the block
-leaks for the process lifetime.
+the sole owner of that reference. Use the runtime helper
+`tin_release` (declared in the emitted header) to drop it:
 
 ```c
-extern void _tin_release(void *p);
-
 void *p = make_point(1, 2);
 /* ... use p ... */
-_tin_release(p);   // free the Tin-allocated block
+tin_release(p);   // free the Tin-allocated block, NULL-safe
 ```
+
+Pass-by-value user structs (including `#packed`) are rejected at the
+`#interop` boundary. The C ABI for struct values follows
+classification rules (SysV's INTEGER/SSE/MEMORY classes, AArch64
+HVA/HFA, etc.) that LLVM aggregate types do not match generically. To
+expose struct data to C, return a `*void` opaque handle as above and
+provide `#interop` accessors for each field.
 
 NULL passed to a `#interop` function expecting a non-NULL pointer
 will segfault inside the Tin body. Treat all pointer params as
@@ -573,6 +577,37 @@ If the allocator returns NULL the wrapper signals OOM:
 - String returns yield NULL.
 - Slice returns set `*out_data = NULL`, `*out_len = 0`, and return a
   non-zero status.
+
+### Function-pointer callbacks
+
+A `#interop` parameter typed `fn(args...) ret` accepts a raw C
+function pointer. The wrapper boxes the C callback into Tin's fat
+fn-ptr representation through an internally-emitted thunk, so Tin can
+call it back like any other closure.
+
+```rust
+fn{#interop} apply(cb fn(i32) i32, x i32) i32 = return cb(x)
+fn{#interop} fold(cb fn(i32, i32) i32, init i32, n i32) i32 =
+  let acc i32 = init
+  for let i i32 = 1; i <= n; i++:
+    acc = cb(acc, i)
+  return acc
+```
+
+The emitted header declares the callback in C function-pointer syntax:
+
+```c
+int32_t apply(int32_t (*cb)(int32_t), int32_t x);
+int32_t fold(int32_t (*cb)(int32_t, int32_t), int32_t init, int32_t n);
+```
+
+Restrictions:
+- Callback parameter and return types must be primitives (no `bool`)
+  or pointers to primitives. Strings, slices, structs, and other
+  aggregates inside a callback signature are rejected: the thunk
+  would have to marshal each call across the boundary, which v1 does
+  not implement.
+- Callbacks are accepted only as parameters, not as return types.
 
 ### Spawning fibers
 

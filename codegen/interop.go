@@ -50,6 +50,7 @@ import (
 var reservedInteropNames = map[string]bool{
 	"main":                  true,
 	"tin_runtime_init":      true,
+	"tin_release":           true,
 	"tin_set_extern_alloc":  true,
 	"tin_extern_alloc":      true,
 	"tin_interop_str_in":    true,
@@ -63,6 +64,11 @@ var reservedInteropNames = map[string]bool{
 // from top-level functions so the diagnostic can say "method" rather
 // than "function" for a method-level violation.
 func (cg *CodeGen) checkAllInteropFuncs(stmts []ast.Node) error {
+	// Pre-scan for #packed struct declarations so the validator can
+	// allow them at the boundary (the wrapper rebuilds a Tin-layout
+	// instance from the C-layout the caller provided).
+	cg.interopPackedStructs = collectPackedStructNames(stmts)
+
 	seen := make(map[string]bool)
 
 	for _, node := range stmts {
@@ -93,6 +99,27 @@ func (cg *CodeGen) checkAllInteropFuncs(stmts []ast.Node) error {
 	}
 
 	return nil
+}
+
+// collectPackedStructNames returns the set of struct names declared
+// with the `#packed` tag. Used by the interop validator to allow
+// pass-by-value packed structs at the boundary (the wrapper rebuilds
+// the Tin-layout from the C-layout the caller provides).
+func collectPackedStructNames(stmts []ast.Node) map[string]bool {
+	out := map[string]bool{}
+
+	for _, node := range stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok {
+			continue
+		}
+
+		if hasTag(sd.Tags, "packed") {
+			out[sd.Name] = true
+		}
+	}
+
+	return out
 }
 
 // validateInteropFunc runs all per-declaration checks. The order is
@@ -135,14 +162,14 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 				fn.Name, p.Name, p.Type)
 		}
 
-		if reason := interopTypeReason(p.Type, false); reason != "" {
+		if reason := cg.interopTypeReason(p.Type, false); reason != "" {
 			return cg.nodeErr(fn, "fn %s: #interop parameter %q has type %s; %s",
 				fn.Name, p.Name, p.Type, reason)
 		}
 	}
 
 	if fn.RetType != nil {
-		if reason := interopTypeReason(fn.RetType, true); reason != "" {
+		if reason := cg.interopTypeReason(fn.RetType, true); reason != "" {
 			return cg.nodeErr(fn, "fn %s: #interop return type %s; %s",
 				fn.Name, fn.RetType, reason)
 		}
@@ -243,7 +270,7 @@ var interopAllowedPrimitives = map[string]bool{
 // rule for `void`. The reason is plugged into the diagnostic message
 // at the call site so the user sees both the offending type and a
 // pointer at why.
-func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
+func (cg *CodeGen) interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 	if t == nil {
 		if isReturn {
 			return "" // void
@@ -272,10 +299,17 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		case v.Name == "atom":
 			return "`atom` has no stable C representation in v1"
 		}
-		// Unknown SimpleType - treat as a user struct/trait/ADT name.
-		// v1 disallows all named types at the boundary; users wanting
-		// struct interop should pass *void (opaque handle) and cast
-		// inside Tin via `as *MyStruct`.
+		// Pass-by-value user structs (packed or not) are not
+		// representable today: the C ABI for struct args (SysV's
+		// classification rules, hidden sret pointers, etc.) does not
+		// match LLVM's default lowering for aggregate types, so the
+		// wrapper would silently disagree with the C caller about how
+		// the struct sits in registers. Force users to pass a *void
+		// opaque handle and cast inside Tin instead.
+		if cg.interopPackedStructs[v.Name] {
+			return "pass-by-value user structs are not supported at the interop boundary; pass *void as an opaque handle (struct " + v.Name + " is #packed but the C ABI for struct values does not match Tin's LLVM lowering)"
+		}
+
 		return "v1 does not allow named user types at the interop boundary; pass *void as an opaque handle and cast inside Tin"
 
 	case *ast.PointerType:
@@ -293,7 +327,7 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 
 			return "*" + elem.Name + " is unsafe at the interop boundary because Tin's struct layout has a hidden type_id prefix; use *void as an opaque handle"
 		case *ast.PointerType:
-			return interopTypeReason(v.Elem, false)
+			return cg.interopTypeReason(v.Elem, false)
 		}
 
 		return "pointer-to-this-type is not safe at the interop boundary; use *void as an opaque handle"
@@ -423,7 +457,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	sliceElemSizes := make(map[int]uint64)
 
 	for paramIdx, p := range fn.Params {
-		kind := classifyInteropParam(p.Type)
+		kind := cg.classifyInteropParam(p.Type)
 		paramKinds = append(paramKinds, kind)
 
 		switch kind {
@@ -460,7 +494,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		}
 	}
 
-	retKind := classifyInteropReturn(fn.RetType)
+	retKind := cg.classifyInteropReturn(fn.RetType)
 
 	var (
 		retType       irtypes.Type = irtypes.Void
@@ -719,8 +753,8 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 //   "slice"    - Tin fat array [T]
 //   "bool"     - Tin bool (i1) widened to/from C uint8_t
 //   "callback" - fn(...) typed; wrapped via per-signature thunk
-//   ""         - passthrough (primitives, pointers, packed structs)
-func classifyInteropParam(t ast.TypeExpr) string {
+//   ""         - passthrough (primitives, pointers)
+func (cg *CodeGen) classifyInteropParam(t ast.TypeExpr) string {
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch st.Name {
 		case "string":
@@ -743,7 +777,7 @@ func classifyInteropParam(t ast.TypeExpr) string {
 
 // classifyInteropReturn returns the marshaling shape for a Tin return
 // type. "void" / "string" / "slice" / "bool" / "" (passthrough).
-func classifyInteropReturn(t ast.TypeExpr) string {
+func (cg *CodeGen) classifyInteropReturn(t ast.TypeExpr) string {
 	if t == nil {
 		return "void"
 	}

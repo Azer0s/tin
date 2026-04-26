@@ -24,6 +24,7 @@
 
 extern void _tin_fiber_init(void);
 extern void *_tin_rc_alloc(int64_t size);
+extern void _tin_release(void *ptr);
 
 // TIN_API marks a symbol exported across the C-interop boundary.
 // Surfaces past `-fvisibility=hidden` shared-library builds; on
@@ -175,6 +176,14 @@ static atomic_int _tin_rt_initialized = 0;
 // The wrapper preamble for every #interop function calls this on
 // entry; C code that wants to control init timing (e.g., set up an
 // allocator before any Tin code runs) can also call it directly.
+// tin_release drops one ARC reference to a pointer returned from a
+// `#interop` function (typically a `*void` opaque handle). Use this
+// to reclaim Tin-allocated blocks the C side received from `#interop`
+// returns. NULL-safe.
+TIN_API void tin_release(void *ptr) {
+    _tin_release(ptr);
+}
+
 TIN_API void tin_runtime_init(void) {
     int s = atomic_load_explicit(&_tin_rt_initialized, memory_order_acquire);
     if (s == 2) {

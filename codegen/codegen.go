@@ -363,6 +363,11 @@ type CodeGen struct {
 	// Keyed by sanitised (ret, params) signature.
 	interopCbThunks map[string]*ir.Func
 
+	// interopPackedStructs is the set of `#packed` struct names
+	// reachable from the program. Populated by checkAllInteropFuncs;
+	// consulted by the validator and the wrapper emitter.
+	interopPackedStructs map[string]bool
+
 	// mutatedNames is the set of identifier names that are reassigned
 	// anywhere inside the current function body (including closures and
 	// defers). Populated per function body in genFuncDeclAs and consulted
