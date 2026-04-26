@@ -27,6 +27,8 @@ package codegen
 //     rejected with a per-position diagnostic.
 
 import (
+	"strings"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -36,11 +38,23 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// reservedInteropNames are symbols whose external collision would break
-// linking or surprise the user. `main` is the obvious one; expand as
-// concrete cases come up.
+// reservedInteropNames are symbols whose external collision would
+// either break linking or, worse, silently shadow a runtime helper.
+// `main` is the obvious one; the `tin_*` set covers the public C
+// boundary helpers shipped in runtime/interop.c. Note: any name with
+// the `__tin_interop_` prefix would also collide with a wrapper's
+// hidden internal symbol, but matching by prefix lives in
+// validateInteropFunc since it is structural rather than a fixed
+// list.
 var reservedInteropNames = map[string]bool{
-	"main": true,
+	"main":                  true,
+	"tin_runtime_init":      true,
+	"tin_set_extern_alloc":  true,
+	"tin_extern_alloc":      true,
+	"tin_interop_str_in":    true,
+	"tin_interop_str_out":   true,
+	"tin_interop_slice_in":  true,
+	"tin_interop_slice_out": true,
 }
 
 // checkAllInteropFuncs walks the program AST and validates every
@@ -100,8 +114,13 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 	}
 
 	if reservedInteropNames[fn.Name] {
-		return cg.nodeErr(fn, "fn %s: #interop functions cannot use the reserved name %q",
+		return cg.nodeErr(fn, "fn %s: #interop functions cannot use the reserved name %q (would clash with a runtime symbol)",
 			fn.Name, fn.Name)
+	}
+
+	if strings.HasPrefix(fn.Name, "__tin_interop_") {
+		return cg.nodeErr(fn, "fn %s: #interop function names cannot start with `__tin_interop_` (reserved internal-symbol prefix)",
+			fn.Name)
 	}
 
 	if typeExprContains(fn.RetType, "Future") {
@@ -129,6 +148,43 @@ func (cg *CodeGen) validateInteropFunc(fn *ast.FuncDecl) error {
 	}
 
 	return nil
+}
+
+// interopElemTypeReason restricts the element type allowed inside a
+// fat array `[T]` at the boundary. Only primitives and pointers can
+// safely cross via memcpy. Reject everything else with a friendly
+// message. Boolean elements are rejected separately because of the
+// i1<->i8 ABI mismatch.
+func interopElemTypeReason(t ast.TypeExpr) string {
+	if st, ok := t.(*ast.SimpleType); ok {
+		switch {
+		case st.Name == "bool":
+			return "[bool] forces a per-element i1/i8 conversion the marshaler does not perform; use [u8] (0 = false, non-zero = true) instead"
+		case interopAllowedPrimitives[st.Name]:
+			return ""
+		case st.Name == "string":
+			return "Tin strings are ARC-managed fat pointers; a raw byte copy would produce dangling references in the callee. Pass strings individually or model the array C-side as `const char* const*`."
+		case st.Name == "atom":
+			return "atom has no stable C representation"
+		case st.Name == "any":
+			return "any is not C-representable"
+		case st.Name == "void":
+			return "[void] is not representable"
+		}
+		// Named user type (struct / trait / ADT) - no stable C layout
+		// guarantee, often ARC-managed inside.
+		return "named user types are not representable as array elements; use a [u8] payload or pass items individually"
+	}
+
+	if _, ok := t.(*ast.PointerType); ok {
+		return "" // [*T] is OK - pointers are 8 bytes, no ARC.
+	}
+
+	if _, ok := t.(*ast.ArrayType); ok {
+		return "nested fat arrays are ARC-managed; a raw byte copy would produce dangling references in the callee"
+	}
+
+	return "type is not allowed as a fat-array element"
 }
 
 // interopAllowedPrimitives lists the SimpleType names that pass through
@@ -195,16 +251,14 @@ func interopTypeReason(t ast.TypeExpr, isReturn bool) string {
 		if v.Size != -1 {
 			return "fixed-size arrays are not representable; use a fat array [T] or a pointer *T"
 		}
-
-		if elemSt, ok := v.Elem.(*ast.SimpleType); ok && elemSt.Name == "bool" {
-			// [bool] would force a per-element i1<->i8 conversion the
-			// memcpy-based marshaler does not perform. Reject for v1;
-			// users wanting bool arrays should use [u8].
-			return "[bool] is not supported at the interop boundary; use [u8] (0 = false, non-zero = true) instead"
-		}
-
-		if reason := interopTypeReason(v.Elem, false); reason != "" {
-			return "array element type rejected: " + reason
+		// The marshaler does a raw memcpy of `len * sizeof(T)` bytes
+		// across the C/Tin boundary. That is only safe when T has no
+		// ARC headers - i.e. T is a primitive or pointer. Strings,
+		// nested slices, structs, ADTs, etc. would be copied as
+		// shallow byte blobs without retain/release, producing
+		// dangling-pointer crashes the moment Tin touches them.
+		if reason := interopElemTypeReason(v.Elem); reason != "" {
+			return "array element type " + v.Elem.String() + " is not safe to memcpy across the boundary: " + reason
 		}
 
 		return ""

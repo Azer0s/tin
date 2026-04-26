@@ -146,8 +146,36 @@ fn main() i64 = return 0
 '
 
 # ── [bool] arrays rejected (i1 vs i8 ABI ambiguity) ──
-assert_err "[bool] param rejected" "[bool] is not supported" '
+assert_err "[bool] param rejected" "[bool] forces a per-element" '
 fn{#interop} bad(xs [bool]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
+# ── [string] rejected (ARC-managed elements would dangle) ──
+assert_err "[string] param rejected" "Tin strings are ARC-managed" '
+fn{#interop} bad(xs [string]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
+# ── [[T]] rejected (nested fat arrays would dangle) ──
+assert_err "[[i32]] param rejected" "nested fat arrays are ARC-managed" '
+fn{#interop} bad(xs [[i32]]) i32 = return xs.len as i32
+
+fn main() i64 = return 0
+'
+
+# ── tin_runtime_init reserved (would shadow the runtime helper) ──
+assert_err "tin_runtime_init name reserved" "would clash with a runtime symbol" '
+fn{#interop} tin_runtime_init(x i32) i32 = return x
+
+fn main() i64 = return 0
+'
+
+# ── __tin_interop_ prefix reserved (internal-symbol prefix) ──
+assert_err "__tin_interop_ prefix reserved" "reserved internal-symbol prefix" '
+fn{#interop} __tin_interop_foo(x i32) i32 = return x
 
 fn main() i64 = return 0
 '
