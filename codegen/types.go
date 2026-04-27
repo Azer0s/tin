@@ -438,6 +438,78 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 // Used when building Tuple concrete names from element types.
 // For named struct types, uses the LLVM struct name directly.
 // Falls back to "any" for types that don't have a canonical mapping.
+// demangleStructName converts an LLVM-level struct name back to user-facing
+// Tin syntax. The convention used elsewhere in codegen is:
+//
+//	`pkg__Name`         -> `pkg::Name`
+//	`Name__t1__t2`      -> `Name[t1, t2]`        (generic instantiation)
+//	`pkg__Name__t1__t2` -> `pkg::Name[t1, t2]`
+//
+// The package prefix and generic type-args use the same `__` separator, so
+// the demangler relies on heuristic: lowercase first segment is treated as
+// a package, uppercase-first as the type. Returns "" if the name doesn't
+// look mangled (no `__`).
+func demangleStructName(s string) string {
+	if !strings.Contains(s, "__") {
+		return ""
+	}
+
+	parts := strings.Split(s, "__")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// First lowercase-led segment is a package qualifier.
+	pkg := ""
+
+	if startsLower(parts[0]) {
+		pkg = parts[0]
+		parts = parts[1:]
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	base := parts[0]
+	args := parts[1:]
+
+	var sb strings.Builder
+
+	if pkg != "" {
+		sb.WriteString(pkg)
+		sb.WriteString("::")
+	}
+
+	sb.WriteString(base)
+
+	if len(args) > 0 {
+		sb.WriteByte('[')
+
+		for i, a := range args {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+
+			sb.WriteString(a)
+		}
+
+		sb.WriteByte(']')
+	}
+
+	return sb.String()
+}
+
+func startsLower(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	c := s[0]
+
+	return c >= 'a' && c <= 'z'
+}
+
 func llvmTypeToTinName(t irtypes.Type) string {
 	switch t {
 	case irtypes.I1:
@@ -458,6 +530,15 @@ func llvmTypeToTinName(t irtypes.Type) string {
 
 	if st, ok := t.(*irtypes.StructType); ok {
 		if n := st.Name(); n != "" {
+			// Demangle package-qualified or generic-instantiated names so the
+			// REPL can re-parse them as Tin types: `sync__Channel__string`
+			// becomes `sync::Channel[string]`. Without this, the next REPL
+			// cell sees a bare identifier `Channel__string` that the parser
+			// accepts but no method/trait can be resolved against.
+			if demangled := demangleStructName(n); demangled != "" {
+				return demangled
+			}
+
 			return n
 		}
 		// Anonymous struct - detect by shape:
