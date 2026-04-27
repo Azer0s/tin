@@ -408,15 +408,44 @@ func (s *session) inspectModule(pkgName string) bool {
 		return true
 	}
 
-	data, err := os.ReadFile(src)
-	if err != nil {
-		fmt.Printf("module %s\n", pkgName)
+	// Determine which symbols the package exports. The entry .tin holds the
+	// `export {...} as pkg` declaration; the actual decls may live in sibling
+	// files (e.g. sync.tin re-exports symbols defined in mutex.tin etc.).
+	exported := exportedNames(src, pkgName)
+	if len(exported) == 0 {
+		fmt.Printf("module %s (no exports)\n", pkgName)
 
 		return true
 	}
 
-	fns, structs, enums := scanModuleExports(string(data), pkgName)
-	if len(fns) == 0 && len(structs) == 0 && len(enums) == 0 {
+	var (
+		fns, structs, traits, enums []string
+		seenFn                      = map[string]bool{}
+	)
+
+	for _, p := range siblingTinFiles(src) {
+		data, err := os.ReadFile(p) //nolint:gosec
+		if err != nil {
+			continue
+		}
+
+		f, st, tr, en := collectExportedDecls(string(data), pkgName, exported)
+		structs = append(structs, st...)
+		traits = append(traits, tr...)
+		enums = append(enums, en...)
+
+		for _, sig := range f {
+			if seenFn[sig] {
+				continue
+			}
+
+			seenFn[sig] = true
+
+			fns = append(fns, sig)
+		}
+	}
+
+	if len(fns) == 0 && len(structs) == 0 && len(traits) == 0 && len(enums) == 0 {
 		fmt.Printf("module %s (no exports)\n", pkgName)
 
 		return true
@@ -429,6 +458,14 @@ func (s *session) inspectModule(pkgName string) bool {
 
 		for _, s := range structs {
 			fmt.Printf("  struct %s\n", s)
+		}
+	}
+
+	if len(traits) > 0 {
+		sort.Strings(traits)
+
+		for _, t := range traits {
+			fmt.Printf("  trait %s\n", t)
 		}
 	}
 
@@ -551,31 +588,42 @@ func (s *session) registerModuleMacros(pkgName string) {
 	}
 }
 
-// scanModuleExports parses a .tin source file and returns exported symbols.
-func scanModuleExports(src, pkgName string) (fns, structs, enums []string) {
-	l := lexer.New(src)
-
-	tokens, err := l.Tokenize()
-	if err != nil {
-		return
-	}
-
-	p := parser.New(tokens)
-
-	prog, err := p.Parse()
-	if err != nil {
-		return
-	}
-
-	// Collect what's exported.
+// exportedNames returns the symbols listed in any `export {...} as pkgName`
+// declarations in the file at entryPath. Returns an empty map if the file
+// can't be parsed.
+func exportedNames(entryPath, pkgName string) map[string]bool {
 	exported := map[string]bool{}
 
+	data, err := os.ReadFile(entryPath) //nolint:gosec
+	if err != nil {
+		return exported
+	}
+
+	prog, perr := parseSrc(string(data))
+	if perr != nil {
+		return exported
+	}
+
 	for _, node := range prog.Stmts {
-		if exp, ok := node.(*ast.ExportDecl); ok && exp.AsName == pkgName {
-			for _, name := range exp.Names {
-				exported[name] = true
-			}
+		exp, ok := node.(*ast.ExportDecl)
+		if !ok || exp.AsName != pkgName {
+			continue
 		}
+
+		for _, name := range exp.Names {
+			exported[name] = true
+		}
+	}
+
+	return exported
+}
+
+// collectExportedDecls scans src for top-level decls whose name appears in
+// `exported`, returning them as formatted signatures grouped by kind.
+func collectExportedDecls(src, pkgName string, exported map[string]bool) (fns, structs, traits, enums []string) {
+	prog, err := parseSrc(src)
+	if err != nil {
+		return
 	}
 
 	for _, node := range prog.Stmts {
@@ -598,6 +646,12 @@ func scanModuleExports(src, pkgName string) (fns, structs, enums []string) {
 			}
 
 			structs = append(structs, n.Name)
+		case *ast.TraitDecl:
+			if !exported[n.Name] {
+				continue
+			}
+
+			traits = append(traits, n.Name)
 		case *ast.EnumDecl:
 			if !exported[n.Name] {
 				continue
