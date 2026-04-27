@@ -2333,6 +2333,32 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		}
 	}
 
+	// Heap-owned pointer reassign: when the target is an Identifier whose
+	// scope entry was marked isHeapOwned (e.g. `let head = make_chain(...)`
+	// returning *Node), the binding owns the chain and reassigning must
+	// release the prior chain before the new value overwrites it. Mirrors
+	// what emitScopeRelease does at scope exit.
+	//
+	// Only applied to Identifier targets: FieldAccess writes are handled by
+	// the isTinStructPtrElem branch below (with its own retain logic), and
+	// pointer dereferences are raw stores by design.
+	if id, isId := s.Target.(*ast.Identifier); isId {
+		if entry, ok := cg.curScope.lookup(id.Name); ok && entry.isHeapOwned {
+			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+			if entry.heapOwnedDepth > 1 {
+				structName := cLayoutStructBaseName(entry.tinType)
+				if structName != "" {
+					relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
+					block.NewCall(relFn, oldVal)
+				} else {
+					cg.emitHeapChainRelease(block, oldVal, entry.heapOwnedDepth)
+				}
+			} else {
+				cg.emitHeapChainRelease(block, oldVal, entry.heapOwnedDepth)
+			}
+		}
+	}
+
 	// Check if the element is a pointer to a known Tin struct (ARC-managed
 	// via &Struct{} allocation).  Only for struct FIELD assignments (e.g.
 	// this.head = n), not for arbitrary pointer dereferences (*pp = target)
