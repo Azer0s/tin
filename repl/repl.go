@@ -26,7 +26,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string, preloadFile stri
 	}
 	defer s.close()
 
-	in, err := newInputReader(macros, opTraits)
+	in, err := newInputReader(macros, opTraits, s)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: readline init failed: %v\n", err)
 

@@ -35,13 +35,13 @@ type inputReader struct {
 	macros *macroRegistry
 }
 
-func newInputReader(macros *macroRegistry, opTraits *opTraitRegistry) (*inputReader, error) {
+func newInputReader(macros *macroRegistry, opTraits *opTraitRegistry, s *session) (*inputReader, error) {
 	cfg := &readline.Config{
 		Prompt:                 "tin> ",
 		HistoryFile:            "/tmp/tin-repl-history",
 		DisableAutoSaveHistory: true,
 		Painter:                &highlighter{macros: macros, opTraits: opTraits},
-		AutoComplete:           &tabGuard{},
+		AutoComplete:           &completer{s: s},
 		Listener:               macroTabListener(macros),
 	}
 

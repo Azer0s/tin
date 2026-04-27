@@ -10,12 +10,6 @@ import (
 	"github.com/Azer0s/tin/parser"
 )
 
-// tabGuard is an AutoCompleter that does nothing but prevents the terminal
-// bell when Tab is pressed (readline rings the bell if AutoComplete is nil).
-type tabGuard struct{}
-
-func (t *tabGuard) Do([]rune, int) ([][]rune, int) { return nil, 0 }
-
 // tryExpandMacro attempts to find and expand the outermost (or last) macro
 // call in src. Returns the fully expanded line and true on success.
 func tryExpandMacro(src string, reg *macroRegistry) (string, bool) {
