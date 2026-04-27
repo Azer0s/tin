@@ -12,6 +12,35 @@ import (
 	"github.com/Azer0s/tin/parser"
 )
 
+// inspectDecl prints the source of a session-level declaration (struct,
+// trait, enum, type alias, or fn) when the user types its bare name in
+// the REPL. Returns true if a matching decl was found.
+//
+// The keys checked match what evalCell saves in declMap:
+//   - structs/fns: name itself
+//   - traits/enums/types: prefixed with "trait__" / "enum__" / "type__"
+func (s *session) inspectDecl(name string) bool {
+	candidates := []struct{ key, kind string }{
+		{name, ""},
+		{"trait__" + name, "trait"},
+		{"enum__" + name, "enum"},
+		{"type__" + name, "type"},
+	}
+
+	for _, c := range candidates {
+		src, ok := s.declMap[c.key]
+		if !ok {
+			continue
+		}
+
+		fmt.Println(strings.TrimSpace(src))
+
+		return true
+	}
+
+	return false
+}
+
 // inspectModule prints exported symbols from a loaded module.
 // Returns true if the module was found and inspected.
 func (s *session) inspectModule(pkgName string) bool {

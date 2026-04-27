@@ -250,10 +250,16 @@ func (s *session) evalCell(source string) error {
 
 	// Namespace inspection: if the cell is a single bare identifier that names
 	// a loaded `use` module, print its exported symbols and return early.
+	// Also handles known struct/trait/enum/type/fn names: prints the saved
+	// declaration source instead of trying to compile a bare ident expression.
 	if len(cellDecls) == 0 && len(cellStmts) == 1 {
 		if es, ok := cellStmts[0].(*ast.ExprStmt); ok {
 			if id, ok := es.Expr.(*ast.Identifier); ok {
 				if s.inspectModule(id.Name) {
+					return nil
+				}
+
+				if s.inspectDecl(id.Name) {
 					return nil
 				}
 			}
