@@ -1,0 +1,32 @@
+use assert
+
+// Regression: reassigning a struct that owns RC-tracked fields without an
+// explicit deinit must release the old value's fields. Run under valgrind to
+// confirm there are no leaks.
+
+struct Tag =
+  s string
+
+test "plain reassign frees previous string" =
+  let dyn = "init" ++ "_dyn"
+  let a = Tag{s: dyn}
+  let new_str = a.s ++ "_concat"
+  a = Tag{s: new_str}
+  assert::equals("init_dyn_concat", a.s)
+
+struct Wrap =
+  inner Tag
+
+test "nested struct reassign frees inner field" =
+  let s1 = "first" ++ "_dyn"
+  let w = Wrap{inner: Tag{s: s1}}
+  let s2 = w.inner.s ++ "_again"
+  w = Wrap{inner: Tag{s: s2}}
+  assert::equals("first_dyn_again", w.inner.s)
+
+test "loop reassign in dynamic context" =
+  let acc = Tag{s: "0" ++ ""}
+  for let i i64 = 0; i < 5; i += 1:
+    let next = acc.s ++ "+1"
+    acc = Tag{s: next}
+  assert::equals("0+1+1+1+1+1", acc.s)

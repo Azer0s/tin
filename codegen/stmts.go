@@ -2363,15 +2363,13 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)
 		cg.emitRelease(block, oldVal)
 	} else if !isWeakTarget {
-		// Struct types with an explicit deinit method own external resources
-		// (e.g. Mutex._ptr, Channel._ptr). Deinit the old value before
-		// overwriting so those resources are not leaked.
-		structName := cg.typeNameOf(ptrType.ElemType)
-		if structName != "" && cg.curScope != nil {
-			if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
-				oldVal := block.NewLoad(ptrType.ElemType, ptr)
-				cg.emitRelease(block, oldVal)
-			}
+		// Struct values: release the previous value if it has any RC-tracked
+		// fields (string, [T], any, fn, nested struct) or an explicit deinit.
+		// Without this the old value's RC fields leak whenever a struct is
+		// reassigned. Mirrors the gate used by emitScopeRelease.
+		if cg.typeNameOf(ptrType.ElemType) != "" && cg.elemNeedsRelease(ptrType.ElemType) {
+			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+			cg.emitRelease(block, oldVal)
 		}
 	}
 
@@ -2428,7 +2426,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 					// Release the previous value before overwriting so any
 					// RC-tracked fields (strings, fat arrays, ...) are not
 					// leaked. Mirrors the regular assign path above.
-					if isRCTrackedType(elemType) {
+					if cg.elemNeedsRelease(elemType) {
 						cg.emitRelease(block, current)
 					}
 
