@@ -2,7 +2,6 @@ package codegen
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -879,12 +878,11 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// can generate a proper C `i32 @main()` wrapper that passes default args
 	// and returns the result (or 0 for void).
 	if n.Name == "main" && !n.IsStatic {
-		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) && !cg.noWarnAsyncMain {
-			_, _ = fmt.Fprintf(os.Stderr,
-				"tin: warning: main() uses 'spawn' or 'await' but is not marked async.\n"+
-					"    Each await in a non-async main() creates a temporary fiber, which is slower\n"+
-					"    and bypasses inline channel optimizations.\n"+
-					"    Fix: change 'fn main()' to 'fn{#async} main()'\n")
+		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) {
+			cg.warn(DiagAsyncMain, n.Pos(),
+				"main() uses 'spawn' or 'await' but is not marked async; "+
+					"each await creates a temporary fiber, which is slower and bypasses "+
+					"inline channel optimizations. Fix: change 'fn main()' to 'fn{#async} main()'")
 		}
 
 		irName = "_tin_user_main"
@@ -2067,12 +2065,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 // genImplicitMain creates a main() function containing the top-level statements.
 func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
-	if bodyContainsSpawnOrAwait(stmts) && !cg.noWarnAsyncMain {
-		_, _ = fmt.Fprintf(os.Stderr,
-			"tin: warning: top-level statements use 'spawn' or 'await' but there is no async main().\n"+
-				"    Each await at the top level creates a temporary fiber, which is slower\n"+
-				"    and bypasses inline channel optimizations.\n"+
-				"    Fix: wrap your code in 'fn{#async} main() = ...' instead\n")
+	if bodyContainsSpawnOrAwait(stmts) && len(stmts) > 0 {
+		cg.warn(DiagAsyncMain, stmts[0].Pos(),
+			"top-level statements use 'spawn' or 'await' but there is no async main(); "+
+				"each await at the top level creates a temporary fiber, which is slower and "+
+				"bypasses inline channel optimizations. Fix: wrap your code in 'fn{#async} main() = ...' instead")
 	}
 
 	f := cg.mod.NewFunc("main", irtypes.I32)

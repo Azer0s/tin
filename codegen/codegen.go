@@ -341,22 +341,22 @@ type CodeGen struct {
 	testMode  bool
 	testDecls []*ast.TestDecl
 
-	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
-	noWarnAsyncMain bool
+	// diags tracks per-warning suppression / escalation preferences. Keyed
+	// by canonical diagnostic name (see codegen/diag.go for constants).
+	diags map[string]*diagState
 
-	// noWarnUnusedMatchArms suppresses warnings for unreachable match cases /
-	// where clauses (-Wno-unused-match-arms).
-	noWarnUnusedMatchArms bool
+	// allWarnsAsErrors escalates every diagnostic emitted via warn() to a
+	// hard error. Toggled by -Werror.
+	allWarnsAsErrors bool
+
+	// hadWarnError records that at least one diagnostic was promoted to an
+	// error. Inspected by Generate's caller to fail the build.
+	hadWarnError bool
 
 	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
 	// reachability decisions for every match / where the compiler sees.
 	// Toggled by -fdump-match-info; for debugging the algorithm itself.
 	verboseMatchInfo bool
-
-	// noWarnBoolAnalysis suppresses "condition is always true/false"
-	// warnings emitted when an if/elif/while/where/for-condition folds to
-	// a constant. Toggled by -Wno-bool-analysis.
-	noWarnBoolAnalysis bool
 
 	// verboseDemorgan prints each boolean simplification the compiler
 	// applies (De Morgan push-inward, double-negation elim, comparison
@@ -757,14 +757,33 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)              { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)       { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms = v }
-func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
-func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool)    { cg.noWarnBoolAnalysis = v }
-func (cg *CodeGen) SetVerboseDemorgan(v bool)       { cg.verboseDemorgan = v }
-func (cg *CodeGen) SetEmitHeaderPath(p string)      { cg.emitHeaderPath = p }
-func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
+func (cg *CodeGen) SetVerboseMatchInfo(v bool) { cg.verboseMatchInfo = v }
+
+// SetNoWarnAsyncMain is the -Wno-async-main hook (kept for back-compat with
+// existing callers; new code should use SetWarnSuppress(DiagAsyncMain)).
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagAsyncMain)
+	}
+}
+
+// SetNoWarnUnusedMatchArms is the -Wno-unused-match-arms hook.
+func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagUnusedMatchArms)
+	}
+}
+
+// SetNoWarnBoolAnalysis is the -Wno-bool-analysis hook.
+func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagBoolAnalysis)
+	}
+}
+func (cg *CodeGen) SetVerboseDemorgan(v bool)  { cg.verboseDemorgan = v }
+func (cg *CodeGen) SetEmitHeaderPath(p string) { cg.emitHeaderPath = p }
+func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
 		cg.mod.TargetTriple = triple

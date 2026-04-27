@@ -251,20 +251,14 @@ func (cg *CodeGen) logDemorgan(origin ast.Node, rule string, before, after ast.N
 }
 
 // emitBoolAnalysisWarning prints "condition is always true/false" to stderr.
-// Suppressed by -Wno-bool-analysis.
+// Suppressed by -Wno-bool-analysis; escalatable via -Werror=bool-analysis.
 func (cg *CodeGen) emitBoolAnalysisWarning(pos ast.Pos, value bool, loc string) {
-	if cg.noWarnBoolAnalysis {
-		return
-	}
-
 	truth := "true"
 	if !value {
 		truth = "false"
 	}
 
-	_, _ = fmt.Fprintf(cg.matchInfoSink(),
-		"%s:%d:%d: warning: %s condition is always %s\n",
-		cg.filenameForDiag(), pos.Line, pos.Col, loc, truth)
+	cg.warn(DiagBoolAnalysis, pos, "%s condition is always %s", loc, truth)
 }
 
 // prepareBoolCond runs De Morgan simplification on a boolean condition and

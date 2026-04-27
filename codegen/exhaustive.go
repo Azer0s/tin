@@ -1,29 +1,17 @@
 package codegen
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/Azer0s/tin/ast"
 )
 
 // emitUnreachableArmWarning prints a warning to stderr when an arm of a
 // match or where list is provably unreachable. The message includes the
 // source position of the offending arm and a short hint about the rule
-// that fired. Suppressed by -Wno-unused-match-arms.
+// that fired. Suppressed by -Wno-unused-match-arms; escalatable via
+// -Werror=unused-match-arms.
 func (cg *CodeGen) emitUnreachableArmWarning(pos ast.Pos, kind string) {
-	if cg.noWarnUnusedMatchArms {
-		return
-	}
-
-	file := cg.filename
-	if file == "" {
-		file = "<repl>"
-	}
-
-	_, _ = fmt.Fprintf(os.Stderr,
-		"%s:%d:%d: warning: unreachable %s: previous arms cover every value this arm matches\n",
-		file, pos.Line, pos.Col, kind)
+	cg.warn(DiagUnusedMatchArms, pos,
+		"unreachable %s: previous arms cover every value this arm matches", kind)
 }
 
 // scanWhereForUnreachable walks the where clauses in declaration order,
@@ -38,7 +26,7 @@ func (cg *CodeGen) scanWhereForUnreachable(wl *ast.WhereList) {
 		cg.dumpWhereInfo(wl, "where-list")
 	}
 
-	if cg.noWarnUnusedMatchArms {
+	if cg.diagSuppressed(DiagUnusedMatchArms) {
 		return
 	}
 
@@ -79,7 +67,7 @@ func (cg *CodeGen) scanMatchForUnreachable(s *ast.MatchStmt) {
 		cg.dumpMatchInfo(s, "match")
 	}
 
-	if cg.noWarnUnusedMatchArms {
+	if cg.diagSuppressed(DiagUnusedMatchArms) {
 		return
 	}
 

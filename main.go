@@ -42,6 +42,10 @@ Link flags (passed after the source file):
   --cflag FLAG     pass FLAG to clang (repeatable, e.g. --cflag -fsanitize=address)
 
 Warning flags:
+  -Werror                  treat every compiler warning as an error
+  -Werror=<name>           treat the named warning as an error
+                           (e.g. -Werror=array-bounds, -Werror=bool-analysis)
+  -Wno-<name>              suppress the named warning entirely
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
   -Wno-await-match-guards  suppress warning about guards in await-match arms
   -Wno-unused-match-arms   suppress warnings about unreachable match cases /
@@ -50,6 +54,15 @@ Warning flags:
   -Wno-bool-analysis       suppress "condition is always true/false" warnings
                            emitted when an if/elif/while/where condition
                            folds to a compile-time constant
+  -Wno-array-bounds        suppress "index N is out of bounds" warnings emitted
+                           when both the index and the array length are known
+                           at compile time
+  -Wno-self-assign         suppress "no-op self-assignment" warnings (x = x)
+  -Wno-discarded-pure-call suppress "discarded result of pure call" warnings
+  -Wno-unreachable-code    suppress "unreachable code after return/panic" warnings
+  -Wno-tautological-pointer-cmp
+                           suppress "comparison is always true/false" warnings
+                           on a pointer that is statically non-nil
   -fdump-match-info        dump Maranget exhaustiveness/usefulness analysis
                            for every match and where the compiler sees
                            (debug aid; output goes to stderr)
@@ -464,18 +477,22 @@ doneFlags:
 
 	var extraLibsRoots []string
 
-	noWarnAsyncMain := false
 	noWarnAwaitMatchGuards := false
-	noWarnUnusedMatchArms := false
-	noWarnBoolAnalysis := false
 	verboseMatchInfo := false
 	verboseDemorgan := false
 	debugBuild := false
 	emitHeaderPath := ""
+	allWarnsAsErrors := false
+
+	var (
+		warnSuppress []string // -Wno-<name> targets
+		warnAsErrors []string // -Werror=<name> targets
+	)
 
 	// Scan all args (including those before the file) for flags.
 	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
+		a := os.Args[i]
+		switch a {
 		case "--cflag":
 			if i+1 < len(os.Args) {
 				i++
@@ -491,14 +508,8 @@ doneFlags:
 				i++
 				extraLibsRoots = append(extraLibsRoots, os.Args[i])
 			}
-		case "-Wno-async-main":
-			noWarnAsyncMain = true
-		case "-Wno-await-match-guards":
-			noWarnAwaitMatchGuards = true
-		case "-Wno-unused-match-arms":
-			noWarnUnusedMatchArms = true
-		case "-Wno-bool-analysis":
-			noWarnBoolAnalysis = true
+		case "-Werror":
+			allWarnsAsErrors = true
 		case "-fdump-match-info":
 			verboseMatchInfo = true
 		case "-fdump-demorgan":
@@ -527,11 +538,18 @@ doneFlags:
 				explicitTarget = true
 			}
 		default:
-			// Recognize --emit-header=<path> as a single token; the rest
-			// of the loop ignores unknown args so they pass through to
-			// the linker / clang driver.
-			if strings.HasPrefix(os.Args[i], "--emit-header=") {
-				emitHeaderPath = strings.TrimPrefix(os.Args[i], "--emit-header=")
+			switch {
+			case strings.HasPrefix(a, "-Wno-"):
+				name := strings.TrimPrefix(a, "-Wno-")
+				warnSuppress = append(warnSuppress, name)
+
+				if name == "await-match-guards" {
+					noWarnAwaitMatchGuards = true
+				}
+			case strings.HasPrefix(a, "-Werror="):
+				warnAsErrors = append(warnAsErrors, strings.TrimPrefix(a, "-Werror="))
+			case strings.HasPrefix(a, "--emit-header="):
+				emitHeaderPath = strings.TrimPrefix(a, "--emit-header=")
 			}
 		}
 	}
@@ -681,20 +699,20 @@ doneFlags:
 		cg.SetTestMode(true)
 	}
 
-	if noWarnAsyncMain {
-		cg.SetNoWarnAsyncMain(true)
+	for _, name := range warnSuppress {
+		cg.SetWarnSuppress(name)
 	}
 
-	if noWarnUnusedMatchArms {
-		cg.SetNoWarnUnusedMatchArms(true)
+	for _, name := range warnAsErrors {
+		cg.SetWarnAsError(name)
+	}
+
+	if allWarnsAsErrors {
+		cg.SetAllWarnsAsErrors()
 	}
 
 	if verboseMatchInfo {
 		cg.SetVerboseMatchInfo(true)
-	}
-
-	if noWarnBoolAnalysis {
-		cg.SetNoWarnBoolAnalysis(true)
 	}
 
 	if verboseDemorgan {
@@ -751,6 +769,10 @@ doneFlags:
 	mod, cgErr := cg.Generate(prog)
 	if cgErr != nil {
 		die("codegen error: %v", cgErr)
+	}
+
+	if cg.HadWarnError() {
+		die("warnings treated as errors")
 	}
 
 	irText := fixCoroAttrs(mod.String())
