@@ -30,7 +30,7 @@ Usage:
   tin test        <file.tin|dir|dir/...>   run test blocks and report results
   tin build-test  <file.tin> [-o out]      compile test binary without running
   tin preprocess  <file.tin>               expand macros and print source to stdout
-  tin repl        [--stdlib PATH]          interactive REPL
+  tin repl        [--stdlib PATH] [file.tin]  interactive REPL (preloads file)
 
 Link flags (passed after the source file):
   -lNAME           link with libNAME (e.g. -lm for libmath)
@@ -375,6 +375,7 @@ func main() {
 		var (
 			stdlibOverride string
 			libsRoots      []string
+			preloadFile    string
 		)
 
 		for i := 2; i < len(os.Args); i++ {
@@ -389,10 +390,18 @@ func main() {
 					i++
 					libsRoots = append(libsRoots, os.Args[i])
 				}
+			default:
+				// First non-flag positional arg is a .tin file to preload:
+				// its declarations are loaded into the session and any top-
+				// level statements (plus `main()` if defined) execute before
+				// the interactive prompt appears.
+				if preloadFile == "" && !strings.HasPrefix(os.Args[i], "-") {
+					preloadFile = os.Args[i]
+				}
 			}
 		}
 
-		repl.Run(runtimeDir, stdlibOverride, libsRoots)
+		repl.Run(runtimeDir, stdlibOverride, libsRoots, preloadFile)
 
 		return
 	}
