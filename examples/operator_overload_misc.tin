@@ -1,0 +1,95 @@
+use assert
+
+// Cover the operators that the main vec3 example doesn't:
+//   - unary `!`  -> not[ret]
+//   - binary `++` -> concat[rhs, ret]
+//   - binary `*` -> mul (and commutative swap)
+//   - binary `/` `%` -> div, mod (non-commutative)
+//   - `<` `<=` `>` `>=` via ord
+
+struct Flag(not[Flag]) =
+  v bool
+
+  fn ::not(this Flag) Flag = return Flag{v: this.v == false}
+
+test "unary ! dispatches to not" =
+  let t = Flag{v: true}
+  let f = !t
+  assert::equals(false, f.v)
+
+  let g = !f
+  assert::equals(true, g.v)
+
+struct Path(concat[Path, Path]) =
+  s string
+
+  fn ::concat(this Path, other Path) Path =
+    return Path{s: this.s ++ "/" ++ other.s}
+
+test "binary ++ dispatches to concat" =
+  let a = Path{s: "etc"}
+  let b = Path{s: "passwd"}
+  let c = a ++ b
+  assert::equals("etc/passwd", c.s)
+
+struct Scaled(mul[i64, Scaled]) =
+  v i64
+
+  fn ::mul(this Scaled, k i64) Scaled = return Scaled{v: this.v * k}
+
+test "Scaled * i64 dispatches to mul" =
+  let s = Scaled{v: 5}
+  let r = s * 3
+  assert::equals(15, r.v)
+
+test "i64 * Scaled commutes" =
+  let s = Scaled{v: 5}
+  let r = 3 * s
+  assert::equals(15, r.v)
+
+struct Counter(sub[Counter, Counter], div[i64, i64], mod[i64, i64]) =
+  v i64
+
+  fn ::sub(this Counter, other Counter) Counter = return Counter{v: this.v - other.v}
+  fn ::div(this Counter, k i64) i64             = return this.v / k
+  fn ::mod(this Counter, k i64) i64             = return this.v % k
+
+test "non-commutative ops" =
+  let a = Counter{v: 100}
+  let b = Counter{v: 30}
+  let s = a - b
+  assert::equals(70, s.v)
+  assert::equals(20, a / 5)
+  assert::equals(2, a % 7)
+
+struct Box(ord[Box]) =
+  size i64
+
+  // ord returns i64: <0 / 0 / >0 like strcmp.
+  fn ::ord(this Box, other Box) i64 = return this.size - other.size
+
+struct Acc(add[Acc, Acc]) =
+  v i64
+  fn ::add(this Acc, other Acc) Acc = return Acc{v: this.v + other.v}
+
+test "compound += desugars through add" =
+  let a = Acc{v: 1}
+  let b = Acc{v: 10}
+  a += b
+  assert::equals(11, a.v)
+  a += b
+  assert::equals(21, a.v)
+
+test "ord drives < <= > >=" =
+  let a = Box{size: 3}
+  let b = Box{size: 7}
+  assert::equals(true, a < b)
+  assert::equals(true, a <= b)
+  assert::equals(false, a > b)
+  assert::equals(false, a >= b)
+
+  let c = Box{size: 7}
+  assert::equals(false, b < c)
+  assert::equals(true, b <= c)
+  assert::equals(false, b > c)
+  assert::equals(true, b >= c)

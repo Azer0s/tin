@@ -1,0 +1,19 @@
+use assert
+
+struct Box(add[Box, Box]) =
+  v i64
+  fn ::add(this *Box, other Box) Box = return Box{v: this.v + other.v}
+
+test "pointer-receiver add" =
+  let a = Box{v: 5}
+  let b = Box{v: 10}
+  let c = a + b
+  assert::equals(15, c.v)
+
+test "pointer-receiver add via +=" =
+  let a = Box{v: 1}
+  let b = Box{v: 2}
+  a += b
+  assert::equals(3, a.v)
+  a += b
+  assert::equals(5, a.v)

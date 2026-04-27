@@ -31,7 +31,7 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 	if isStructType(val.Type()) {
 		if traitName, isOp := unaryOpTraitName(e.Op); isOp {
 			structName := cg.typeNameOf(val.Type())
-			if fn := cg.lookupOpMethod(structName, traitName, 0); fn != nil {
+			if fn := cg.lookupOpMethod(structName, traitName, nil); fn != nil {
 				return cg.emitOpDispatch(block, fn, val, nil)
 			}
 

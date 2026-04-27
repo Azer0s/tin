@@ -2411,6 +2411,38 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
+
+	// Operator overloading: `a OP= b` on a user struct desugars to
+	// `a = a.OP(b)` via the corresponding op trait. Falls through to the
+	// primitive switch when the LHS is not a struct.
+	if isStructType(elemType) {
+		if traitName := compoundAssignTraitName(s.Op); traitName != "" {
+			structName := cg.typeNameOf(elemType)
+			if fn := cg.lookupOpMethod(structName, traitName, []irtypes.Type{rhs.Type()}); fn != nil {
+				res, derr := cg.emitOpDispatch(block, fn, current, []value.Value{rhs})
+				if derr != nil {
+					return block, derr
+				}
+
+				if res != nil {
+					// Release the previous value before overwriting so any
+					// RC-tracked fields (strings, fat arrays, ...) are not
+					// leaked. Mirrors the regular assign path above.
+					if isRCTrackedType(elemType) {
+						cg.emitRelease(block, current)
+					}
+
+					block.NewStore(cg.coerce(block, res, elemType), ptr)
+				}
+
+				return block, nil
+			}
+
+			return block, cg.nodeErr(s, "compound assignment %q is not defined for operands of type %s and %s",
+				s.Op, elemType, rhs.Type())
+		}
+	}
+
 	// For ++= the rhs is an element to append, not the container type.
 	// Save the raw rhs for use in the ++= case; other ops coerce rhs to
 	// the container/element type (which is the same for scalar types).

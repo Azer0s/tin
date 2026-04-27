@@ -150,15 +150,21 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Register in funcDecls so that #pure tag checking applies to methods too.
 	key := methodScopeName(structName, m)
 	cg.funcDecls[key] = m
+
+	var (
+		err    error
+		irName string
+	)
+
 	// Overloading: if multiple methods share this base name within the struct,
 	// mangle the scope name and register the variant in the overloads map.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
 		mangledKey := overloadMangledName(key, sig)
 		// Resolve param types for call-site matching (skip the 'this' receiver).
-		paramTypes, err := cg.resolveParamTypes(m.Params, structName)
-		if err != nil {
-			return err
+		paramTypes, perr := cg.resolveParamTypes(m.Params, structName)
+		if perr != nil {
+			return perr
 		}
 
 		var retType irtypes.Type
@@ -174,10 +180,29 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 			returnType: retType,
 		})
 
-		return cg.predeclareFuncAs(m, mangledKey)
+		err = cg.predeclareFuncAs(m, mangledKey)
+		irName = mangledKey
+	} else {
+		err = cg.predeclareFuncAs(m, key)
+		irName = key
 	}
 
-	return cg.predeclareFuncAs(m, key)
+	if err != nil {
+		return err
+	}
+
+	// Operator overloading: index struct methods that implement built-in op
+	// traits so genBinExpr / genUnaryExpr can dispatch to the right variant
+	// when a struct overloads the same op for multiple right-hand types.
+	if traitName := extractOpTraitName(m.TraitQualifier); traitName != "" {
+		if entry, ok := cg.curScope.lookup(irName); ok {
+			if fn, ok := entry.val.(*ir.Func); ok {
+				cg.recordOpTraitImpl(structName, traitName, fn)
+			}
+		}
+	}
+
+	return nil
 }
 
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.

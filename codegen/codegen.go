@@ -85,6 +85,16 @@ type CodeGen struct {
 
 	// trait registry: trait name -> TraitDecl
 	traits map[string]*ast.TraitDecl
+
+	// opTraitImpls indexes built-in operator-trait method impls per struct so
+	// that lookupOpMethod can pick the right variant when a struct implements
+	// the same op trait for multiple right-hand types (e.g. Vec3 implementing
+	// both add[Vec3, Vec3] and add[f64, Vec3]).
+	//
+	// Keyed by structKey + "/" + traitName ("Vec3/add"). Entries are appended
+	// in source order; lookup picks the first whose non-receiver param types
+	// match the call site's argument types exactly.
+	opTraitImpls map[string][]opTraitImplEntry
 	// bare trait name -> qualified instKey (e.g. "JsonSerializable" -> "json__JsonSerializable")
 	// populated when a package registers a trait so that bare-name type lookups
 	// resolve to the same fat-ptr/vtable types as qualified-name lookups.
@@ -871,6 +881,7 @@ func New(filename string) *CodeGen {
 			"rune": &ast.SimpleType{Name: "i32"},
 		},
 		traits:                   make(map[string]*ast.TraitDecl),
+		opTraitImpls:             make(map[string][]opTraitImplEntry),
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
 		constrainedFuncs:         make(map[string]*ast.FuncDecl),

@@ -1,0 +1,19 @@
+use assert
+
+struct Box(ord[Box]) =
+  v i64
+  fn ::ord(this Box, other Box) i64 = return this.v - other.v
+
+fn pickMin[t](a t, b t) t where t is ord =
+  if a < b:
+    return a
+  return b
+
+test "where t is ord with struct" =
+  let a = Box{v: 5}
+  let b = Box{v: 3}
+  let m = pickMin(a, b)
+  assert::equals(3, m.v)
+
+test "where t is ord with primitive" =
+  assert::equals(3, pickMin(5, 3))

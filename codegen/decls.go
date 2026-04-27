@@ -1579,7 +1579,10 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 					entry.NewRet(result)
 				}
 			} else {
-				entry.NewRet(result)
+				// Coerce return value to wrapper signature if needed (e.g. user
+				// impl returns i32 but the trait alias signature says i64).
+				ret := cg.coerce(entry, result, wrapSlot.RetType)
+				entry.NewRet(ret)
 			}
 
 			wrappers = append(wrappers, wrapFn)
