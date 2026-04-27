@@ -789,6 +789,15 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		// as heap-owned so scope-exit releases the borrow wrapper(s).
 		if callExpr, ok := s.Expr.(*ast.CallExpr); ok {
 			cg.markOutParamVarsHeapOwned(callExpr)
+
+			// Discarded result of a non-void call: warn (default-off via
+			// -Wunused-result / -Wall). Spawn/await results were already
+			// short-circuited above; this only fires for plain calls.
+			if val != nil && !isVoidType(val.Type()) {
+				cg.warn(DiagUnusedResult, callExpr.Pos(),
+					"discarded result of call to %s; use `_ = ...` to silence",
+					callDisplayName(callExpr))
+			}
 		}
 
 		if err == nil && val != nil && isRCTrackedType(val.Type()) && isTemporaryProducer(s.Expr) {
@@ -2220,6 +2229,17 @@ func (cg *CodeGen) markOutParamVarsHeapOwned(call *ast.CallExpr) {
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
+	// `_ = expr` is the explicit discard form: evaluate expr for its side
+	// effects and throw away the result. Acts like an ExprStmt without
+	// triggering the discarded-result warning.
+	if id, ok := s.Target.(*ast.Identifier); ok && id.Name == "_" {
+		if _, err := cg.genExpr(block, s.Value); err != nil {
+			return block, err
+		}
+
+		return block, nil
+	}
+
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
 	}

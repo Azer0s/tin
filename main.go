@@ -23,73 +23,69 @@ import (
 
 const usage = `tin - the tin language compiler
 
-Usage:
-  tin run         <file.tin>               compile and execute
-  tin build       <file.tin> [-o out]      compile to native binary
-  tin build       --lib <file.tin> [-o out] compile to object file (library)
-  tin ir          <file.tin> [-o out]      emit LLVM IR (default: stdout)
-  tin ir-test     <file.tin> [-o out]      emit test-mode LLVM IR
-  tin test        <file.tin|dir|dir/...>   run test blocks and report results
-  tin build-test  <file.tin> [-o out]      compile test binary without running
-  tin preprocess  <file.tin>               expand macros and print source to stdout
+Subcommands:
+  tin run         <file.tin>                  compile and execute
+  tin build       <file.tin> [-o out]         compile to native binary
+  tin build       --lib <file.tin> [-o out]   compile to object file (library)
+  tin test        <file.tin|dir|dir/...>      run test blocks and report results
+  tin build-test  <file.tin> [-o out]         compile test binary without running
+  tin ir          <file.tin> [-o out]         emit LLVM IR (default: stdout)
+  tin ir-test     <file.tin> [-o out]         emit test-mode LLVM IR
+  tin preprocess  <file.tin>                  expand macros and print source to stdout
   tin repl        [--stdlib PATH] [file.tin]  interactive REPL (preloads file)
-  tin clean                                delete the local .build/ cache
+  tin clean                                   delete the local .build/ cache
 
-Link flags (passed after the source file):
-  -lNAME           link with libNAME (e.g. -lm for libmath)
-  -LDIR            add DIR to the library search path
-  file.o / file.a  link with extra object or archive file
-  --cflag FLAG     pass FLAG to clang (repeatable, e.g. --cflag -fsanitize=address)
+Output:
+  -o PATH                  write binary / object file to PATH
+  -g                       emit debug info (-O0 + -g)
+  --emit-header=PATH       emit a C header for #interop functions
 
-Warning flags:
-  -Werror                  treat every compiler warning as an error
+Source / library:
+  --stdlib PATH            override the stdlib path (default: <execDir>/stdlib)
+  --lib-root PATH          add a package root, repeatable (before default <execDir>/libs)
+  --cflag FLAG             pass FLAG to clang, repeatable (e.g. --cflag -fsanitize=address)
+  -lNAME / -LDIR           link with libNAME / add DIR to lib search path
+  file.o / file.a          link with extra object or archive file
+
+Target:
+  -target os/arch          cross-compile (linux/{amd64,arm64,386}, darwin/{amd64,arm64})
+
+Run / test:
+  --valgrind               run binary under valgrind --leak-check=full
+  --leaks                  run binary under leaks --atExit (macOS only)
+
+Warnings (all warnings carry a name; -Werror=<name> escalates one):
+  -Wall                    enable hygiene checks: unused-let, unused-result
+  -Wpedantic               enable -Wall plus unused-param
+  -W<name>                 enable a default-off warning (e.g. -Wunused-let)
+  -Wno-<name>              silence a warning entirely
+  -Werror                  treat every warning as an error
   -Werror=<name>           treat the named warning as an error
-                           (e.g. -Werror=array-bounds, -Werror=bool-analysis)
-  -Wno-<name>              suppress the named warning entirely
-  -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
-  -Wno-await-match-guards  suppress warning about guards in await-match arms
-  -Wno-unused-match-arms   suppress warnings about unreachable match cases /
-                           where clauses (an arm whose pattern matches only
-                           values that earlier arms already cover)
-  -Wno-bool-analysis       suppress "condition is always true/false" warnings
-                           emitted when an if/elif/while/where condition
-                           folds to a compile-time constant
-  -Wno-array-bounds        suppress "index N is out of bounds" warnings emitted
-                           when both the index and the array length are known
-                           at compile time
-  -Wno-self-assign         suppress "no-op self-assignment" warnings (x = x)
-  -Wno-discarded-pure-call suppress "discarded result of pure call" warnings
-  -Wno-unreachable-code    suppress "unreachable code after return/panic" warnings
-  -Wno-tautological-pointer-cmp
-                           suppress "comparison is always true/false" warnings
-                           on a pointer that is statically non-nil
-  -fdump-match-info        dump Maranget exhaustiveness/usefulness analysis
-                           for every match and where the compiler sees
-                           (debug aid; output goes to stderr)
-  -fdump-demorgan          print each De Morgan / boolean simplification the
-                           compiler applies to an if/elif/while/where/for
-                           condition (debug aid; output goes to stderr)
 
-Target flags:
-  -target os/arch  cross-compile for the given target (e.g. linux/amd64, darwin/arm64)
-                   Supported: linux/amd64, linux/arm64, linux/386,
-                              darwin/amd64, darwin/arm64
+  Default-on:
+    array-bounds                index out of bounds for known-length array
+    async-main                  main() uses spawn/await but is not #async
+    await-match-guards          guard clauses in await-match arms
+    bool-analysis               condition that folds to true/false at compile time
+    deref-nil                   dereference of literal nil
+    div-by-zero / shift-overflow  arithmetic that's UB at runtime
+    self-assign                 x = x
+    tautological-pointer-cmp    comparing a non-nil pointer against nil
+    unreachable-code            statements after return / panic / infinite loop
+    unused-match-arms           unreachable match case / where clause
 
-Stdlib/libs flags:
-  --stdlib PATH    override the standard library path (default: <execDir>/stdlib)
-  --lib-root PATH  add an additional package root (before default <execDir>/libs); repeatable
+  Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
+    unused-let                  let-binding that is never read
+    unused-result               discarded result of a non-void call
+    unused-param                fn parameter that is never read
 
-Run/test flags:
-  --valgrind       run binary under valgrind --leak-check=full (run, test)
-  --leaks          run binary under leaks --atExit (run, test; macOS only)
-
-Compiler output flags:
-  -v               print compilation stages (lex, parse, codegen, link, ...)
-  -fdump-heuristics  print auto-yield heuristics for every function to stderr
-  -fdump-tco         print tail call optimizations (self-TCO and mutual TCO) to stderr
-
-Debug flags:
-  -fdebug-fiber-slots  print fiber struct pool ramp/decay events to stderr
+Diagnostic dumps (debug aids; output to stderr):
+  -v                       print compilation stages (lex, parse, codegen, link, ...)
+  -fdump-match-info        Maranget pattern matrix and per-arm reachability
+  -fdump-demorgan          each De Morgan / boolean simplification rewrite
+  -fdump-heuristics        auto-yield heuristics for every function
+  -fdump-tco               tail-call optimizations (self-TCO and mutual TCO)
+  -fdebug-fiber-slots      fiber struct pool ramp/decay events
 
 In-source directives (at the top of the .tin file):
   //!-lNAME                    link with libNAME
@@ -100,7 +96,7 @@ In-source directives (at the top of the .tin file):
   //!-lNAME [arch]             arch-specific linker flag
 
   Arch tokens: x86_64, aarch64, 386, darwin, linux  (comma = AND, e.g. [aarch64,darwin])
-  Variables: $TIN_RUNTIME expands to <execDir>/runtime, $TIN_STDLIB expands to <execDir>/stdlib
+  Variables: $TIN_RUNTIME expands to <execDir>/runtime, $TIN_STDLIB to <execDir>/stdlib
 `
 
 // cSource represents a C source file to compile alongside the tin module,
@@ -483,10 +479,13 @@ doneFlags:
 	debugBuild := false
 	emitHeaderPath := ""
 	allWarnsAsErrors := false
+	wAll := false
+	wPedantic := false
 
 	var (
 		warnSuppress []string // -Wno-<name> targets
 		warnAsErrors []string // -Werror=<name> targets
+		warnEnable   []string // -W<name> opt-ins for default-off diags
 	)
 
 	// Scan all args (including those before the file) for flags.
@@ -510,6 +509,10 @@ doneFlags:
 			}
 		case "-Werror":
 			allWarnsAsErrors = true
+		case "-Wall":
+			wAll = true
+		case "-Wpedantic":
+			wPedantic = true
 		case "-fdump-match-info":
 			verboseMatchInfo = true
 		case "-fdump-demorgan":
@@ -548,6 +551,9 @@ doneFlags:
 				}
 			case strings.HasPrefix(a, "-Werror="):
 				warnAsErrors = append(warnAsErrors, strings.TrimPrefix(a, "-Werror="))
+			case strings.HasPrefix(a, "-W") && len(a) > 2:
+				// `-W<name>` opts in to a default-off warning.
+				warnEnable = append(warnEnable, strings.TrimPrefix(a, "-W"))
 			case strings.HasPrefix(a, "--emit-header="):
 				emitHeaderPath = strings.TrimPrefix(a, "--emit-header=")
 			}
@@ -697,6 +703,16 @@ doneFlags:
 	cg := codegen.New(file)
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)
+	}
+
+	if wPedantic {
+		cg.SetWPedantic()
+	} else if wAll {
+		cg.SetWAll()
+	}
+
+	for _, name := range warnEnable {
+		cg.SetWarnEnable(name)
 	}
 
 	for _, name := range warnSuppress {

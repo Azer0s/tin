@@ -1338,6 +1338,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		return nil, err
 	}
 
+	cg.checkAllUnused(prog)
+
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")
 

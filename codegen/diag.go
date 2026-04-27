@@ -27,12 +27,35 @@ const (
 	DiagSelfAssign        = "self-assign"
 	DiagDiscardedPureCall = "discarded-pure-call"
 	DiagUnsafeRequired    = "unsafe-required"
+	DiagUnusedLet         = "unused-let"
+	DiagUnusedParam       = "unused-param"
+	DiagUnusedResult      = "unused-result"
 )
+
+// defaultOffWarnings lists diagnostics that are silent by default and only
+// fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
+var defaultOffWarnings = map[string]bool{
+	DiagUnusedLet:    true,
+	DiagUnusedParam:  true,
+	DiagUnusedResult: true,
+}
+
+// wallWarnings is the set of diagnostics that -Wall enables on top of the
+// always-on safety warnings. Mirrors the clang/gcc convention: useful
+// hygiene checks that don't usually produce false positives in idiomatic
+// code.
+var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult}
+
+// wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
+// These can produce noise in code that follows trait-conformance patterns
+// (unused parameters required by an interface), so they're opt-in.
+var wpedanticWarnings = []string{DiagUnusedParam}
 
 // diagState tracks the user's preferences for one named warning.
 type diagState struct {
 	suppressed bool // -Wno-<name>
 	asError    bool // -Werror=<name>
+	enabled    bool // -W<name>, -Wall, -Wpedantic (opt-in for default-off diags)
 }
 
 // SetWarnSuppress silences the named warning (-Wno-<name>).
@@ -40,13 +63,37 @@ func (cg *CodeGen) SetWarnSuppress(name string) {
 	cg.ensureDiag(name).suppressed = true
 }
 
+// SetWarnEnable opts in to a default-off warning (-W<name>).
+func (cg *CodeGen) SetWarnEnable(name string) {
+	cg.ensureDiag(name).enabled = true
+}
+
 // SetWarnAsError escalates the named warning to a hard error (-Werror=<name>).
+// Also implicitly enables it if it was default-off.
 func (cg *CodeGen) SetWarnAsError(name string) {
-	cg.ensureDiag(name).asError = true
+	d := cg.ensureDiag(name)
+	d.asError = true
+	d.enabled = true
 }
 
 // SetAllWarnsAsErrors escalates every warning to a hard error (-Werror).
 func (cg *CodeGen) SetAllWarnsAsErrors() { cg.allWarnsAsErrors = true }
+
+// SetWAll enables the -Wall family of warnings.
+func (cg *CodeGen) SetWAll() {
+	for _, n := range wallWarnings {
+		cg.SetWarnEnable(n)
+	}
+}
+
+// SetWPedantic enables -Wall plus the more pedantic checks.
+func (cg *CodeGen) SetWPedantic() {
+	cg.SetWAll()
+
+	for _, n := range wpedanticWarnings {
+		cg.SetWarnEnable(n)
+	}
+}
 
 // HadWarnError reports whether any warning was promoted to an error during
 // codegen. The caller should fail the build when this is true.
@@ -139,8 +186,17 @@ func (cg *CodeGen) warn(name string, pos ast.Pos, format string, args ...any) {
 		return
 	}
 
+	s := cg.diags[name]
+	if defaultOffWarnings[name] {
+		// Default-off warnings only fire when the user opted in via
+		// -W<name>, -Wall, -Wpedantic, or -Werror=<name>.
+		if s == nil || !s.enabled {
+			return
+		}
+	}
+
 	asError := cg.allWarnsAsErrors
-	if s := cg.diags[name]; s != nil && s.asError {
+	if s != nil && s.asError {
 		asError = true
 	}
 
