@@ -213,12 +213,24 @@ func (p *Parser) Parse() (*ast.Program, error) {
 	p.skipSemisAndNewlines()
 
 	for !p.check(lexer.EOF) {
+		startPos := p.curPos()
+
 		node, err := p.parseTopLevel()
 		if err != nil {
 			return nil, err
 		}
 
 		if node != nil {
+			// Ensure every top-level node carries a position. Individual
+			// parse* helpers don't always SetPos on the returned node, which
+			// makes the REPL's source-extraction (extractSrc in repl/) fall
+			// back to "the whole file" when boundaries aren't computable.
+			if sp, ok := node.(interface{ SetPos(ast.Pos) }); ok {
+				if node.Pos().Line == 0 {
+					sp.SetPos(startPos)
+				}
+			}
+
 			prog.Stmts = append(prog.Stmts, node)
 		}
 

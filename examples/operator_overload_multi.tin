@@ -1,0 +1,31 @@
+use assert
+
+// Multi-impl on the same struct: `add` for both Vec3+Vec3 and Vec3+f64.
+// Tests that lookupOpMethod picks the variant whose 2nd parameter type
+// matches the rhs operand type.
+
+struct Vec3(add[Vec3, Vec3], add[f64, Vec3]) =
+  x f64
+  y f64
+  z f64
+
+  fn add[Vec3, Vec3]::add(this Vec3, other Vec3) Vec3 =
+    return Vec3{x: this.x + other.x, y: this.y + other.y, z: this.z + other.z}
+
+  fn add[f64, Vec3]::add(this Vec3, k f64) Vec3 =
+    return Vec3{x: this.x + k, y: this.y + k, z: this.z + k}
+
+test "vec + vec uses Vec3 impl" =
+  let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
+  let b = Vec3{x: 4.0, y: 5.0, z: 6.0}
+  let c = a + b
+  assert::equals(5.0, c.x)
+  assert::equals(7.0, c.y)
+  assert::equals(9.0, c.z)
+
+test "vec + scalar uses f64 impl" =
+  let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
+  let c = a + 10.0
+  assert::equals(11.0, c.x)
+  assert::equals(12.0, c.y)
+  assert::equals(13.0, c.z)

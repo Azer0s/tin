@@ -119,7 +119,7 @@ struct {#packed} sensor(measurable) =
   lo u8
   hi u16
 
-  fn measure(this sensor) i64 =
+  fn measurable::measure(this sensor) i64 =
     return (this.hi as i64) * 256 + (this.lo as i64)
 
 fn call_measure(s measurable) i64 =

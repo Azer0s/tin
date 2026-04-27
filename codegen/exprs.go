@@ -987,6 +987,20 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 	}
 
+	// Operator overloading dispatch (Phase 3): if either operand is a user
+	// struct that implements the corresponding built-in operator trait, lower
+	// to a method call. Falls through to the primitive path when neither
+	// operand is a struct, and to the Phase 0 error gate when a struct
+	// operand has no matching impl.
+	if isStructType(lt) || isStructType(rt) {
+		if res, dispatched, derr := cg.dispatchBinOp(block, e, left, right, lt, rt); dispatched {
+			return res, derr
+		}
+
+		return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
+			e.Op, lt, rt)
+	}
+
 	switch e.Op {
 	case "+":
 		if isFloat {
@@ -1231,7 +1245,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		return result, nil
 	}
 
-	return constant.NewInt(irtypes.I64, 0), nil
+	// No primitive / built-in lowering matched. Until operator overloading
+	// lands (docs/plans/operator-overloading.md), there is no user hook
+	// either; reject loudly instead of silently producing 0. Phase 0 of
+	// that plan exists because the previous silent-zero fall-through hid
+	// real bugs at every callsite.
+	return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
+		e.Op, left.Type(), right.Type())
 }
 
 // genEqNeqExpr implements shared handling for == and != operators.

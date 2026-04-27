@@ -34,10 +34,10 @@ struct int_range(iter[i64]) =
   start_val i64
   end_val   i64
 
-  fn len(this int_range) i64 =
+  fn iter::len(this int_range) i64 =
     return this.end_val - this.start_val
 
-  fn get(this int_range, i i64) i64 =
+  fn iter::get(this int_range, i i64) i64 =
     return this.start_val + i
 
 let r = int_range{start_val: 1, end_val: 6}   // represents [1,2,3,4,5]
@@ -50,10 +50,10 @@ for let n i64 in r:
 struct countdown(iter[i64], print) =
   from_val i64
 
-  fn len(this countdown) i64 =
+  fn iter::len(this countdown) i64 =
     return this.from_val
 
-  fn get(this countdown, i i64) i64 =
+  fn iter::get(this countdown, i i64) i64 =
     return this.from_val - i
 
   fn ::print(this countdown) string =

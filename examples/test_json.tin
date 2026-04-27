@@ -147,10 +147,10 @@ use strings
 struct jtag(JsonSerializable, JsonDeserializable) =
   value string
 
-  fn to_json(this jtag) string =
+  fn JsonSerializable::to_json(this jtag) string =
     return "\"{this.value}\""
 
-  fn apply_json(this *jtag, s string) bool =
+  fn JsonDeserializable::apply_json(this *jtag, s string) bool =
     this.value = s
     return true
 

@@ -26,10 +26,10 @@ struct rect(drawable, resizable) =
   w i64
   h i64
 
-  fn draw(this rect) string =
+  fn drawable::draw(this rect) string =
     return "rect"
 
-  fn resize(this rect, factor i64) i64 =
+  fn resizable::resize(this rect, factor i64) i64 =
     return this.w * factor * this.h * factor
 
 struct point =

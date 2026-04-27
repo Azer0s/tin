@@ -68,22 +68,45 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	return cg.predeclareFuncAs(n, irName)
 }
 
-// traitQualifierKey converts a trait qualifier string like "iter[char]" into a
-// safe identifier segment like "iter_char" for use in scope/IR names.
+// traitQualifierKey converts a trait qualifier string like "iter[char]" or
+// "io::AsyncReader" into a safe identifier segment ("iter__char" /
+// "io__AsyncReader") for use in scope/IR names. The output mirrors
+// traitImplKey on the equivalent ast.TypeExpr so a user-written qualifier
+// (`fn iter[i64]::get`) produces the same scope name as the impl-list entry
+// `(iter[i64])`.
 func traitQualifierKey(q string) string {
 	out := make([]byte, 0, len(q))
+
 	for i := 0; i < len(q); i++ {
 		c := q[i]
 		switch c {
-		case '[', ']', ',', ' ':
-			if len(out) > 0 && out[len(out)-1] != '_' {
+		case ':':
+			// Map "::" -> "__"; runs of `:` collapse via the dedup below.
+			if len(out) == 0 || out[len(out)-1] != '_' {
+				out = append(out, '_')
+			} else if len(out) >= 2 && out[len(out)-2] == '_' {
+				// already "__"; skip
+			} else {
 				out = append(out, '_')
 			}
+		case '[', ',':
+			// Boundary between trait/method name and a type-arg, or between
+			// type-args. Encode as "__" to match traitImplKey output.
+			if len(out) > 0 {
+				// Trim a single trailing underscore so we always emit exactly "__".
+				if out[len(out)-1] == '_' && (len(out) < 2 || out[len(out)-2] != '_') {
+					out = out[:len(out)-1]
+				}
+
+				out = append(out, '_', '_')
+			}
+		case ']', ' ':
+			// Closing bracket and stray spaces are dropped.
 		default:
 			out = append(out, c)
 		}
 	}
-	// Trim trailing underscore.
+	// Trim trailing underscore(s).
 	for len(out) > 0 && out[len(out)-1] == '_' {
 		out = out[:len(out)-1]
 	}
@@ -91,12 +114,30 @@ func traitQualifierKey(q string) string {
 	return string(out)
 }
 
+// stripQualifierModule drops a leading "module::" prefix (or chain of them)
+// from a trait qualifier so that "io::AsyncReader" canonicalises to just
+// "AsyncReader". Type-arg suffixes are preserved: "io::Reader[byte]" -> "Reader[byte]".
+func stripQualifierModule(q string) string {
+	idx := strings.LastIndex(q, "::")
+	if idx < 0 {
+		return q
+	}
+
+	return q[idx+2:]
+}
+
 // methodScopeName returns the IR/scope name for a struct method.
 // For plain methods: "StructName_methodName".
 // For trait-qualified methods: "StructName_traitKey_methodName".
+//
+// The trait qualifier is canonicalised to its base name (module prefix
+// stripped) so that "fn io::AsyncReader::read" and "fn AsyncReader::read"
+// produce the same scope name.
 func methodScopeName(structName string, m *ast.FuncDecl) string {
 	if m.TraitQualifier != "" {
-		return structName + "_" + traitQualifierKey(m.TraitQualifier) + "_" + m.Name
+		bare := stripQualifierModule(m.TraitQualifier)
+
+		return structName + "_" + traitQualifierKey(bare) + "_" + m.Name
 	}
 
 	return structName + "_" + m.Name
@@ -109,15 +150,21 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Register in funcDecls so that #pure tag checking applies to methods too.
 	key := methodScopeName(structName, m)
 	cg.funcDecls[key] = m
+
+	var (
+		err    error
+		irName string
+	)
+
 	// Overloading: if multiple methods share this base name within the struct,
 	// mangle the scope name and register the variant in the overloads map.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
 		mangledKey := overloadMangledName(key, sig)
 		// Resolve param types for call-site matching (skip the 'this' receiver).
-		paramTypes, err := cg.resolveParamTypes(m.Params, structName)
-		if err != nil {
-			return err
+		paramTypes, perr := cg.resolveParamTypes(m.Params, structName)
+		if perr != nil {
+			return perr
 		}
 
 		var retType irtypes.Type
@@ -133,10 +180,29 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 			returnType: retType,
 		})
 
-		return cg.predeclareFuncAs(m, mangledKey)
+		err = cg.predeclareFuncAs(m, mangledKey)
+		irName = mangledKey
+	} else {
+		err = cg.predeclareFuncAs(m, key)
+		irName = key
 	}
 
-	return cg.predeclareFuncAs(m, key)
+	if err != nil {
+		return err
+	}
+
+	// Operator overloading: index struct methods that implement built-in op
+	// traits so genBinExpr / genUnaryExpr can dispatch to the right variant
+	// when a struct overloads the same op for multiple right-hand types.
+	if traitName := extractOpTraitName(m.TraitQualifier); traitName != "" {
+		if entry, ok := cg.curScope.lookup(irName); ok {
+			if fn, ok := entry.val.(*ir.Func); ok {
+				cg.recordOpTraitImpl(structName, traitName, fn)
+			}
+		}
+	}
+
+	return nil
 }
 
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.
@@ -1023,14 +1089,15 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return false
 	}
 
-	// Built-in type-set constraints.
-	// "ord": ordered types that support <, <=, >, >= (all integer and float types).
-	// "comp": comparable types that support ==, != (integers, floats, and string).
-	switch traitName {
-	case "ord":
-		return isOrdType(structName)
-	case "comp":
-		return isCompType(structName)
+	// Built-in type-set shortcut for ord/comp on primitive types. Falls through
+	// to the trait-impl path for non-primitives so user-defined ord/comp impls
+	// can also satisfy these constraints.
+	if traitName == "ord" && isOrdType(structName) {
+		return true
+	}
+
+	if traitName == "comp" && isCompType(structName) {
+		return true
 	}
 
 	// If the name is a tagged union type, check whether structName is one of
@@ -1052,14 +1119,44 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return traitName == structName
 	}
 
-	instKey := traitImplKey(traitExpr)
+	// Where-shorthand: a bare reference to a single-type-param trait defaults
+	// its parameter to the constrained type variable. So `where t is ord`
+	// means `where t is ord[t]`. Multi-param traits (e.g. add[rhs, ret])
+	// require explicit args.
+	if _, isSimple := traitExpr.(*ast.SimpleType); isSimple && len(td.TypeParams) == 1 {
+		traitExpr = &ast.GenericType{
+			Name:       traitName,
+			TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: structName}},
+		}
+	}
+
+	bareKey := traitQualifierKey(bareTraitImplKey(traitExpr))
+
+	if td.IsAlias {
+		// Alias-form trait: the single method name equals the trait name.
+		// Accept any of: explicit-args qualified form, base trait-name form,
+		// or the plain alias registered by registerPlainMethodAliases.
+		candidates := []string{
+			structName + "_" + bareKey + "_" + traitName,
+			structName + "_" + traitName + "_" + traitName,
+			structName + "_" + traitName,
+		}
+
+		for _, c := range candidates {
+			if _, found := cg.curScope.lookup(c); found {
+				return true
+			}
+		}
+
+		return false
+	}
 
 	for _, m := range td.Methods {
 		if !m.IsVirtual {
 			continue
 		}
 
-		qualName := structName + "_" + traitQualifierKey(instKey) + "_" + m.Name
+		qualName := structName + "_" + bareKey + "_" + m.Name
 		plainName := structName + "_" + m.Name
 		_, hasQual := cg.curScope.lookup(qualName)
 

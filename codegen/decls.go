@@ -117,6 +117,12 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 			if !structHasMethod(aug, m.Name) {
 				// Bind "this" parameter to this struct type.
 				injected := *m
+				// Mark the injected method as a trait impl so methodScopeName
+				// produces "Struct_<trait>_<method>" (matching what the vtable
+				// wrapper looks up). Without this, default-bodied trait methods
+				// would be predeclared under the bare name and the wrapper's
+				// qualified lookup would miss them.
+				injected.TraitQualifier = name
 
 				ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: n.Name}}
 				if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
@@ -411,6 +417,15 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 	n.Implements = orig.Implements
 	structKey := cg.pkgStructKey(n.Name)
 
+	// Register plain-name aliases for trait-qualified methods BEFORE generating
+	// method bodies, so that intra-struct cross-method calls (e.g. another method
+	// calling `this.measure()` against `fn iter::measure(this Foo)`) can resolve
+	// `Foo_measure` to the qualified impl while the body is being compiled.
+	// (For top-level structs, methods are already predeclared via predeclareMethod;
+	// for package structs they aren't yet, so this pre-pass is a no-op there and
+	// the post-pass below catches them.)
+	cg.registerPlainMethodAliases(structKey, n.Methods)
+
 	// Generate methods as top-level functions with struct-qualified names.
 	// Methods with their own TypeParams (e.g. map_opt[r]) are stored as templates
 	// and monomorphized on-demand at call sites.
@@ -426,6 +441,12 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 			return err
 		}
 	}
+
+	// Re-run alias registration AFTER bodies are generated. For package structs
+	// methods are predeclared+bodied inline in genStructMethod, so the pre-pass
+	// above couldn't see them yet. This pass picks up the now-registered
+	// qualified names and exposes them under their bare aliases.
+	cg.registerPlainMethodAliases(structKey, n.Methods)
 
 	// Trait init/deinit chaining: for each implemented trait, if the trait defines
 	// fn init/deinit with a default body AND the struct overrides that method,
@@ -485,43 +506,144 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 		}
 	}
 
-	// For qualified methods (e.g. fn iter[char]::idx), also register them
-	// under the plain name (e.g. struct_idx) when no other method with that
-	// plain name already exists. This lets non-disambiguated call sites work.
-	plainMethodNames := map[string]bool{}
-
-	for _, m := range n.Methods {
-		if m.TraitQualifier == "" {
-			plainMethodNames[m.Name] = true
-		}
-	}
-
-	for _, m := range n.Methods {
-		if m.TraitQualifier == "" {
-			continue
-		}
-
-		if plainMethodNames[m.Name] {
-			continue // a plain method already covers this name
-		}
-
-		plainName := structKey + "_" + m.Name
-		if _, exists := cg.curScope.lookup(plainName); !exists {
-			qualName := methodScopeName(structKey, m)
-			if entry, ok := cg.curScope.lookup(qualName); ok {
-				cg.curScope.set(plainName, entry)
-
-				plainMethodNames[m.Name] = true // mark so only first qualifier wins
-			}
-		}
-	}
-
 	// Generate vtable wrappers and global constants for each implemented trait.
 	if err := cg.genTraitVtables(n); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// registerPlainMethodAliases walks methods and aliases each trait-qualified
+// method (e.g. fn iter::get on struct Foo, predeclared as Foo_iter_get) under
+// its plain name (Foo_get) so that bare call sites resolve. If a plain method
+// of the same name exists, it wins; if multiple qualified methods share a
+// plain name, the first one wins.
+func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.FuncDecl) {
+	plainMethodNames := map[string]bool{}
+
+	for _, m := range methods {
+		if m.TraitQualifier == "" {
+			plainMethodNames[m.Name] = true
+		}
+	}
+
+	for _, m := range methods {
+		if m.TraitQualifier == "" {
+			continue
+		}
+
+		if plainMethodNames[m.Name] {
+			continue
+		}
+
+		plainName := structKey + "_" + m.Name
+		if _, exists := cg.curScope.lookup(plainName); exists {
+			continue
+		}
+
+		qualName := methodScopeName(structKey, m)
+		if entry, ok := cg.curScope.lookup(qualName); ok {
+			cg.curScope.set(plainName, entry)
+
+			plainMethodNames[m.Name] = true
+		}
+	}
+}
+
+// checkAllTraitImplsComplete walks every struct declaration and verifies each
+// listed trait's virtual methods have a matching qualified impl. Default-bodied
+// methods stay optional. Generic struct templates and `implicit` (special trait)
+// are skipped — templates are only checked on monomorphization, and implicit
+// has its own resolution pathway via implicitConvFns.
+func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
+	for _, node := range stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok || len(sd.TypeParams) > 0 || len(sd.Implements) == 0 {
+			continue
+		}
+
+		structKey := cg.pkgStructKey(sd.Name)
+		// Build set of qualified scope names predeclared for this struct.
+		// We check membership rather than scope-lookup because scope contains
+		// many other entries that aren't methods of this struct.
+		methodNames := map[string]bool{}
+
+		for _, m := range sd.Methods {
+			methodNames[methodScopeName(structKey, m)] = true
+			methodNames[structKey+"_"+m.Name] = true
+		}
+
+		var missing []string
+
+		for _, impl := range sd.Implements {
+			traitName := traitBaseName(impl)
+			if _, ok2 := cg.traits[traitName]; !ok2 {
+				if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
+					traitName = traitName[idx+2:]
+				}
+			}
+
+			if traitName == "implicit" {
+				continue
+			}
+
+			td, ok2 := cg.traits[traitName]
+			if !ok2 {
+				continue
+			}
+
+			if td.IsAlias {
+				// For as-fn aliases, the impl is `fn ::T(...)` (predeclared as
+				// `Struct_T_T` per Phase 1 parser convention) or the trait's own
+				// default if it has one.
+				wantQual := structKey + "_" + traitName + "_" + traitName
+				wantBare := structKey + "_" + traitName
+
+				if methodNames[wantQual] || methodNames[wantBare] {
+					continue
+				}
+
+				missing = append(missing, fmt.Sprintf("fn ::%s(this %s, ...)", traitName, sd.Name))
+
+				continue
+			}
+
+			for _, m := range td.Methods {
+				// Default-bodied methods are optional.
+				if !m.IsVirtual && m.Body != nil {
+					continue
+				}
+
+				wantQual := structKey + "_" + traitName + "_" + m.Name
+				wantQualWithArgs := structKey + "_" + traitQualifierKey(bareTraitImplKey(impl)) + "_" + m.Name
+
+				if methodNames[wantQual] || methodNames[wantQualWithArgs] {
+					continue
+				}
+
+				missing = append(missing,
+					fmt.Sprintf("fn %s::%s(this %s, ...)", traitName, m.Name, sd.Name))
+			}
+		}
+
+		if len(missing) > 0 {
+			return cg.nodeErr(sd, "struct %s declares trait(s) %s but does not implement: %s",
+				sd.Name, traitListDisplay(sd.Implements), strings.Join(missing, "; "))
+		}
+	}
+
+	return nil
+}
+
+// traitListDisplay formats a struct's Implements list for diagnostics.
+func traitListDisplay(impls []ast.TypeExpr) string {
+	parts := make([]string, len(impls))
+	for i, t := range impls {
+		parts[i] = traitDisplayName(t)
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 // Type-alias / monomorphization
@@ -594,13 +716,17 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
 	return &ast.FuncDecl{
-		Name:       m.Name,
-		TypeParams: m.TypeParams,
-		Params:     newParams,
-		RetType:    newRet,
-		Body:       newBody,
-		Tags:       m.Tags,
-		IsStatic:   m.IsStatic,
+		Name:           m.Name,
+		TraitQualifier: m.TraitQualifier,
+		TypeParams:     m.TypeParams,
+		Constraints:    m.Constraints,
+		Params:         newParams,
+		RetType:        newRet,
+		Body:           newBody,
+		Tags:           m.Tags,
+		IsStatic:       m.IsStatic,
+		IsExtern:       m.IsExtern,
+		IsVirtual:      m.IsVirtual,
 	}
 }
 
@@ -1011,6 +1137,38 @@ func traitImplKey(te ast.TypeExpr) string {
 	return "unknown"
 }
 
+// bareTraitImplKey is like traitImplKey but strips the module prefix from the
+// outer trait name only ("io::AsyncReader" -> "AsyncReader",
+// "iter[json::Value]" -> "iter__json__Value"). Used to derive the scope-name
+// suffix that methodScopeName produces from a user-written trait qualifier
+// like "fn AsyncReader::read", so the vtable wrapper can resolve impls written
+// without the module prefix.
+func bareTraitImplKey(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
+	case *ast.GenericType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		key := name
+		for _, tp := range t.TypeParams {
+			key += "__" + traitImplKey(tp)
+		}
+
+		return key
+	}
+
+	return "unknown"
+}
+
 // resolveTypeWithSubst converts a TypeExpr to LLVM type, substituting any
 
 // buildTraitFatPtrType computes (and caches) the fat-pointer type for a
@@ -1273,6 +1431,22 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		// Generate one wrapper per trait method.
 		var wrappers []constant.Constant
 
+		// Bare-name key for matching qualified impls, e.g. "AsyncReader" or
+		// "iter__i64". Used by both sync and $coro wrapper lookups.
+		bareKey := traitQualifierKey(bareTraitImplKey(impl))
+
+		// Trait methods with default bodies (non-virtual) keep accepting the bare
+		// override form `fn methodName(this Foo)` — that's how init/deinit
+		// chaining works and how struct-side overrides for any default-bodied
+		// trait method are written. Virtual methods MUST be qualified.
+		isDefaultBodied := map[string]bool{}
+
+		for _, tm := range td.Methods {
+			if !tm.IsVirtual && tm.Body != nil {
+				isDefaultBodied[tm.Name] = true
+			}
+		}
+
 		for i, methodName := range methodNames {
 			wrapSlot := vtableSt.Fields[i].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			wrapperName := structKey + "__" + instKey + "__" + methodName
@@ -1290,33 +1464,53 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
 			selfVal := entry.NewLoad(structSt, selfPtr)
 
-			// Look up concrete method.
-			// First try the trait-qualified name "Struct_traitKey_method",
-			// then fall back to the plain "Struct_method".
-			// If neither is found, check the overload registry for the plain
-			// name and pick the variant whose arity matches the trait slot
-			// (len(wrapSlot.Params) - 1, since the first slot param is i8* self).
-			qualifiedName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName
-			concreteName := structKey + "_" + methodName
+			// Look up concrete method. The qualified scope name uses the bare
+			// trait name (module prefix stripped) so that fn AsyncReader::read
+			// and fn io::AsyncReader::read both resolve when the struct lists
+			// either form. registerPlainMethodAliases also wires up the bare
+			// alias (Struct_method -> Struct_<trait>_method) so user code that
+			// calls the method without qualification still resolves; the vtable
+			// wrapper, however, requires the qualified form so a bare-named
+			// method that happens to share the trait method's name does not
+			// silently bind.
+			// Scope-name forms accepted, in priority order:
+			//   1. qualifiedName     - includes type args ("Struct_iter__i64_method")
+			//                          for explicit `fn iter[i64]::method` impls.
+			//   2. baseQualifiedName - no type args ("Struct_iter_method") for the
+			//                          common `fn iter::method` form which covers
+			//                          all instantiations the struct lists.
+			//   3. bareName          - "Struct_method" — only accepted when the trait
+			//                          method has a default body (init/deinit chain
+			//                          pattern, override of any default-bodied method).
+			//                          Virtual methods must be qualified.
+			qualifiedName := structKey + "_" + bareKey + "_" + methodName
+			baseQualifiedName := structKey + "_" + traitName + "_" + methodName
+			bareName := structKey + "_" + methodName
 
 			concreteFn, ok := cg.curScope.lookup(qualifiedName)
-			if ok {
-				concreteName = qualifiedName
-			} else {
-				concreteFn, ok = cg.curScope.lookup(concreteName)
+			if !ok && baseQualifiedName != qualifiedName {
+				concreteFn, ok = cg.curScope.lookup(baseQualifiedName)
+			}
+
+			if !ok && isDefaultBodied[methodName] {
+				concreteFn, ok = cg.curScope.lookup(bareName)
 			}
 
 			if !ok {
-				// Try overloaded variants: find the one matching the trait slot arity.
+				// Try overloaded variants of either qualified name (matching arity).
 				wantArity := len(wrapSlot.Params) - 1 // subtract self (i8*)
 
-				for _, name := range []string{qualifiedName, concreteName} {
+				candidateNames := []string{qualifiedName, baseQualifiedName}
+				if isDefaultBodied[methodName] {
+					candidateNames = append(candidateNames, bareName)
+				}
+
+				for _, name := range candidateNames {
 					if variants, hasOL := cg.overloads[name]; hasOL {
 						for _, v := range variants {
 							if v.arity == wantArity {
 								if entry, ok2 := cg.curScope.lookup(v.irName); ok2 {
 									concreteFn = entry
-									concreteName = v.irName
 									ok = true
 
 									break
@@ -1332,7 +1526,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			}
 
 			if !ok {
-				return fmt.Errorf("trait vtable: missing concrete method %s (also tried %s)", concreteName, qualifiedName)
+				return fmt.Errorf("trait vtable: struct %s does not implement %s.%s; expected fn %s::%s(this %s, ...)",
+					structKey, traitName, methodName, traitName, methodName, structKey)
 			}
 
 			concreteFunc := concreteFn.val.(*ir.Func)
@@ -1384,7 +1579,10 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 					entry.NewRet(result)
 				}
 			} else {
-				entry.NewRet(result)
+				// Coerce return value to wrapper signature if needed (e.g. user
+				// impl returns i32 but the trait alias signature says i64).
+				ret := cg.coerce(entry, result, wrapSlot.RetType)
+				entry.NewRet(ret)
 			}
 
 			wrappers = append(wrappers, wrapFn)
@@ -1411,18 +1609,25 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
 			selfVal := entry.NewLoad(structSt, selfPtr)
 
-			// Look up the concrete $coro method.
-			// Try trait-qualified name first, then plain name.
-			qualifiedCoroName := structKey + "_" + traitQualifierKey(instKey) + "_" + methodName + "$coro"
-			plainCoroName := structKey + "_" + methodName + "$coro"
+			// Look up the concrete $coro method. Same canonicalisation as the
+			// sync wrapper: bare trait name (module prefix stripped) for the
+			// qualified key.
+			qualifiedCoroName := structKey + "_" + bareKey + "_" + methodName + "$coro"
+			baseQualifiedCoroName := structKey + "_" + traitName + "_" + methodName + "$coro"
+			bareCoroName := structKey + "_" + methodName + "$coro"
 
 			concreteCoro, ok2 := cg.curScope.lookup(qualifiedCoroName)
-			if !ok2 {
-				concreteCoro, ok2 = cg.curScope.lookup(plainCoroName)
+			if !ok2 && baseQualifiedCoroName != qualifiedCoroName {
+				concreteCoro, ok2 = cg.curScope.lookup(baseQualifiedCoroName)
+			}
+
+			if !ok2 && isDefaultBodied[methodName] {
+				concreteCoro, ok2 = cg.curScope.lookup(bareCoroName)
 			}
 
 			if !ok2 {
-				return fmt.Errorf("trait vtable: missing $coro method %s (also tried %s)", plainCoroName, qualifiedCoroName)
+				return fmt.Errorf("trait vtable: struct %s does not implement async %s.%s; expected fn %s::%s(this %s, ...) {#async}",
+					structKey, traitName, methodName, traitName, methodName, structKey)
 			}
 
 			concreteCoroFn := concreteCoro.val.(*ir.Func)

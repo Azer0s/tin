@@ -10,10 +10,10 @@ struct point(printable, serializable) =
   x i64
   y i64
 
-  fn to_string(this point) string =
+  fn printable::to_string(this point) string =
     return "({this.x}, {this.y})"
 
-  fn serialize(this point) string =
+  fn serializable::serialize(this point) string =
     return "{this.x},{this.y}"
 
 let p = point{x: 3, y: 7}

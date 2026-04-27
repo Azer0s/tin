@@ -1,0 +1,97 @@
+use assert
+
+// Recursive self-referential structs: linked list and binary tree. Both must
+// release every node when the root drops. Run under valgrind.
+
+// ---------- linked list ----------
+
+struct Node =
+  val  i64
+  s    string
+  next own *Node
+
+fn make_chain(n i64) *Node =
+  if n == 0:
+    return nil
+  let s = "node-" ++ "x"
+  return &Node{val: n, s: s, next: make_chain(n - 1)}
+
+fn chain_len(head *Node) i64 =
+  let count i64 = 0
+  let cur = head
+  for cur != nil:
+    count = count + 1
+    cur = cur.next
+  return count
+
+test "linked list of 100 nodes drops cleanly" =
+  let head = make_chain(100)
+  assert::equals(100, chain_len(head))
+
+test "linked list reassign frees prior chain" =
+  let head = make_chain(50)
+  head = make_chain(75)
+  assert::equals(75, chain_len(head))
+
+// ---------- binary tree ----------
+
+struct Tree =
+  val   i64
+  s     string
+  left  own *Tree
+  right own *Tree
+
+fn make_tree(depth i64) *Tree =
+  if depth == 0:
+    return nil
+  let label = "n" ++ "-deep"
+  return &Tree{
+    val:   depth,
+    s:     label,
+    left:  make_tree(depth - 1),
+    right: make_tree(depth - 1),
+  }
+
+fn tree_size(t *Tree) i64 =
+  if t == nil:
+    return 0
+  return 1 + tree_size(t.left) + tree_size(t.right)
+
+test "binary tree depth 8 (255 nodes) drops cleanly" =
+  let root = make_tree(8)
+  assert::equals(255, tree_size(root))
+
+test "tree reassign frees prior tree" =
+  let root = make_tree(5)
+  root = make_tree(7)
+  assert::equals(127, tree_size(root))
+
+// ---------- mixed: tree of trees of strings ----------
+
+struct Inner =
+  s string
+  child *Tree
+
+struct Outer =
+  label string
+  forest [*Tree]
+  inner Inner
+
+fn make_forest(n i64, d i64) [*Tree] =
+  let acc [*Tree] = []
+  for let i i64 = 0; i < n; i += 1:
+    acc ++= make_tree(d)
+  return acc
+
+test "forest of trees inside outer drops cleanly" =
+  let o = Outer{
+    label: "root" ++ "_lbl",
+    forest: make_forest(4, 4),
+    inner: Inner{s: "inner" ++ "_str", child: make_tree(5)},
+  }
+  let total i64 = 0
+  for t in o.forest:
+    total = total + tree_size(t)
+  total = total + tree_size(o.inner.child)
+  // 4 trees of depth 4 = 4 * 15 = 60; plus inner depth 5 = 31. Total = 91.
+  assert::equals(91, total)

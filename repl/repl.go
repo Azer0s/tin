@@ -5,15 +5,20 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Azer0s/tin/ast"
 )
 
 // Run starts the interactive REPL. runtimeDir is the path to runtime/,
-// stdlibOverride is an optional stdlib path override, and libsRoots are
-// additional package roots.
-func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
+// stdlibOverride is an optional stdlib path override, libsRoots are
+// additional package roots, and preloadFile (if non-empty) is a .tin file
+// whose declarations are loaded into the session and whose top-level
+// statements (plus `main()` if defined) run before the interactive prompt.
+func Run(runtimeDir, stdlibOverride string, libsRoots []string, preloadFile string) {
 	macros := newMacroRegistry()
+	opTraits := newOpTraitRegistry()
 
-	s, err := newSession(runtimeDir, stdlibOverride, libsRoots, macros)
+	s, err := newSession(runtimeDir, stdlibOverride, libsRoots, macros, opTraits)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: init failed: %v\n", err)
 
@@ -21,7 +26,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	}
 	defer s.close()
 
-	in, err := newInputReader(macros)
+	in, err := newInputReader(macros, opTraits)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: readline init failed: %v\n", err)
 
@@ -30,6 +35,12 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	defer in.close()
 
 	fmt.Println("tin repl - type :help for commands, Ctrl-D to exit")
+
+	if preloadFile != "" {
+		if err := preload(s, preloadFile); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "repl: preload %s: %v\n", preloadFile, err)
+		}
+	}
 
 	for {
 		src, eof := in.readCell()
@@ -111,3 +122,45 @@ Input:
   Press Enter twice on an empty line to submit a multi-line cell.
   Ctrl-D exits the REPL.
 `
+
+// preload reads a .tin file, registers its declarations in the session,
+// and runs its top-level statements as the first cell. If the file defines
+// `fn main()`, a follow-up `main()` cell is appended so the binary-style
+// entry point also runs (matching `tin run`).
+//
+// Test blocks are filtered out — they only run under `tin test`.
+func preload(s *session, path string) error {
+	src, err := os.ReadFile(path) //nolint:gosec
+	if err != nil {
+		return err
+	}
+
+	if err := s.evalCell(string(src)); err != nil {
+		return err
+	}
+
+	// Run main() if the file defined one and there were no top-level stmts
+	// that already drove the program.
+	prog, perr := parseSrc(string(src))
+	if perr != nil {
+		return nil
+	}
+
+	hasMain := false
+
+	for _, n := range prog.Stmts {
+		if fd, ok := n.(*ast.FuncDecl); ok && fd.Name == "main" {
+			hasMain = true
+
+			break
+		}
+	}
+
+	if hasMain {
+		if err := s.evalCell("main()"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

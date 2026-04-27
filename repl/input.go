@@ -35,12 +35,12 @@ type inputReader struct {
 	macros *macroRegistry
 }
 
-func newInputReader(macros *macroRegistry) (*inputReader, error) {
+func newInputReader(macros *macroRegistry, opTraits *opTraitRegistry) (*inputReader, error) {
 	cfg := &readline.Config{
 		Prompt:                 "tin> ",
 		HistoryFile:            "/tmp/tin-repl-history",
 		DisableAutoSaveHistory: true,
-		Painter:                &highlighter{macros: macros},
+		Painter:                &highlighter{macros: macros, opTraits: opTraits},
 		AutoComplete:           &tabGuard{},
 		Listener:               macroTabListener(macros),
 	}
@@ -59,6 +59,10 @@ func (r *inputReader) close() {
 
 // readCell reads a complete cell from the user, handling multi-line input.
 // Returns (source, false) on success, ("", true) when the user signals EOF.
+//
+// The continuation prompt is `... ` (Python convention) - just one trailing
+// space, so it doesn't visually impersonate indentation. The user types
+// their own indentation; pasted content keeps whatever indentation it had.
 func (r *inputReader) readCell() (string, bool) {
 	r.rl.SetPrompt("tin> ")
 
@@ -109,7 +113,7 @@ func (r *inputReader) readCell() (string, bool) {
 		if last == ':' || last == '=' {
 			multiLine = true
 
-			r.rl.SetPrompt("...   ")
+			r.rl.SetPrompt("... ")
 
 			lines = append(lines, line)
 

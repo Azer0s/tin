@@ -2333,6 +2333,33 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		}
 	}
 
+	// Heap-owned pointer reassign: when the target is an Identifier whose
+	// scope entry was marked isHeapOwned (e.g. `let head = make_chain(...)`
+	// returning *Node), the binding owns the chain and reassigning must
+	// release the prior chain before the new value overwrites it. Mirrors
+	// what emitScopeRelease does at scope exit.
+	//
+	// Only applied to Identifier targets: FieldAccess writes are handled by
+	// the isTinStructPtrElem branch below (with its own retain logic), and
+	// pointer dereferences are raw stores by design.
+	if id, isID := s.Target.(*ast.Identifier); isID {
+		if entry, ok := cg.curScope.lookup(id.Name); ok && entry.isHeapOwned {
+			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+
+			if entry.heapOwnedDepth > 1 {
+				structName := cLayoutStructBaseName(entry.tinType)
+				if structName != "" {
+					relFn := cg.ensureHeapChainReleaseFn(structName, entry.heapOwnedDepth)
+					block.NewCall(relFn, oldVal)
+				} else {
+					cg.emitHeapChainRelease(block, oldVal, entry.heapOwnedDepth)
+				}
+			} else {
+				cg.emitHeapChainRelease(block, oldVal, entry.heapOwnedDepth)
+			}
+		}
+	}
+
 	// Check if the element is a pointer to a known Tin struct (ARC-managed
 	// via &Struct{} allocation).  Only for struct FIELD assignments (e.g.
 	// this.head = n), not for arbitrary pointer dereferences (*pp = target)
@@ -2363,15 +2390,13 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		oldVal := block.NewLoad(ptrType.ElemType, ptr)
 		cg.emitRelease(block, oldVal)
 	} else if !isWeakTarget {
-		// Struct types with an explicit deinit method own external resources
-		// (e.g. Mutex._ptr, Channel._ptr). Deinit the old value before
-		// overwriting so those resources are not leaked.
-		structName := cg.typeNameOf(ptrType.ElemType)
-		if structName != "" && cg.curScope != nil {
-			if _, hasDeinit := cg.curScope.lookup(structName + "_deinit"); hasDeinit {
-				oldVal := block.NewLoad(ptrType.ElemType, ptr)
-				cg.emitRelease(block, oldVal)
-			}
+		// Struct values: release the previous value if it has any RC-tracked
+		// fields (string, [T], any, fn, nested struct) or an explicit deinit.
+		// Without this the old value's RC fields leak whenever a struct is
+		// reassigned. Mirrors the gate used by emitScopeRelease.
+		if cg.typeNameOf(ptrType.ElemType) != "" && cg.elemNeedsRelease(ptrType.ElemType) {
+			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+			cg.emitRelease(block, oldVal)
 		}
 	}
 
@@ -2411,6 +2436,38 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
+
+	// Operator overloading: `a OP= b` on a user struct desugars to
+	// `a = a.OP(b)` via the corresponding op trait. Falls through to the
+	// primitive switch when the LHS is not a struct.
+	if isStructType(elemType) {
+		if traitName := compoundAssignTraitName(s.Op); traitName != "" {
+			structName := cg.typeNameOf(elemType)
+			if fn := cg.lookupOpMethod(structName, traitName, []irtypes.Type{rhs.Type()}); fn != nil {
+				res, derr := cg.emitOpDispatch(block, fn, current, []value.Value{rhs})
+				if derr != nil {
+					return block, derr
+				}
+
+				if res != nil {
+					// Release the previous value before overwriting so any
+					// RC-tracked fields (strings, fat arrays, ...) are not
+					// leaked. Mirrors the regular assign path above.
+					if cg.elemNeedsRelease(elemType) {
+						cg.emitRelease(block, current)
+					}
+
+					block.NewStore(cg.coerce(block, res, elemType), ptr)
+				}
+
+				return block, nil
+			}
+
+			return block, cg.nodeErr(s, "compound assignment %q is not defined for operands of type %s and %s",
+				s.Op, elemType, rhs.Type())
+		}
+	}
+
 	// For ++= the rhs is an element to append, not the container type.
 	// Save the raw rhs for use in the ++= case; other ops coerce rhs to
 	// the container/element type (which is the same for scalar types).

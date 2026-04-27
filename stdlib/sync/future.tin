@@ -31,7 +31,7 @@ struct Future[t](Awaitable[t]) =
   fn pid_val(this Future[t]) i64 =
     return this.pid
 
-  fn await_result(this Future[t]) t =
+  fn Awaitable::await_result(this Future[t]) t =
     let raw *void = tin_future_await_raw(this.pid)
     let typed *t = raw as *t
     return *typed

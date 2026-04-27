@@ -23,6 +23,22 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 		return nil, nil
 	}
 
+	// Operator overloading dispatch (Phase 3): if the operand is a user
+	// struct that implements the corresponding built-in unary operator trait,
+	// lower to a method call. Falls through to the primitive switch
+	// otherwise; primitive structs (any, string, fat array) are excluded by
+	// isStructType.
+	if isStructType(val.Type()) {
+		if traitName, isOp := unaryOpTraitName(e.Op); isOp {
+			structName := cg.typeNameOf(val.Type())
+			if fn := cg.lookupOpMethod(structName, traitName, nil); fn != nil {
+				return cg.emitOpDispatch(block, fn, val, nil)
+			}
+
+			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, val.Type())
+		}
+	}
+
 	switch e.Op {
 	case "-":
 		if irtypes.IsFloat(val.Type()) {
@@ -1698,5 +1714,8 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return block.NewLoad(at.ElemType, gep), nil
 	}
 
-	return nil, nil
+	// No built-in indexing applies. Until the index trait lands
+	// (docs/plans/operator-overloading.md, Phase 4), reject loudly
+	// instead of returning nil and letting the caller crash later.
+	return nil, cg.nodeErr(e, "type %s does not support index expressions", arrType)
 }
