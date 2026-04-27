@@ -257,6 +257,7 @@ func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
 }
 
 func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
+	startTok := p.peek()
 	p.advance() // consume if
 
 	cond, err := p.parseExpr()
@@ -293,6 +294,7 @@ func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
 	}
 
 	stmt := &ast.IfStmt{Cond: cond, Then: thenBlock}
+	stmt.SetPos(ast.Pos{Line: startTok.Line, Col: startTok.Col})
 
 	// else / else if
 	p.skipNewlines()
