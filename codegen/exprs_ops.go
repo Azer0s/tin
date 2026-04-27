@@ -2223,3 +2223,196 @@ func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast
 
 	return result, nil
 }
+
+// binOpTraitName maps a binary operator token to its operator-trait name.
+// Returns "" if op has no trait dispatch (e.g. `&&`, `||`, `<<`, `>>`).
+func binOpTraitName(op string) string {
+	switch op {
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "*":
+		return "mul"
+	case "/":
+		return "div"
+	case "%":
+		return "mod"
+	case "++":
+		return "concat"
+	case "==", "!=":
+		return "comp"
+	case "<", "<=", ">", ">=":
+		return "ord"
+	}
+
+	return ""
+}
+
+// unaryOpTraitName maps a unary operator token to its operator-trait name.
+// Returns ("", false) if op has no trait dispatch.
+func unaryOpTraitName(op string) (string, bool) {
+	switch op {
+	case "-":
+		return "neg", true
+	case "+":
+		return "pos", true
+	case "!":
+		return "not", true
+	}
+
+	return "", false
+}
+
+// binOpIsCommutative reports whether op is mathematically commutative for
+// asymmetric primitive+struct dispatch. `==` is symmetric in result; `+` and
+// `*` are commutative for the cases users typically expect (Vec + scalar).
+// Non-commutative ops require the user to provide the explicit `struct OP prim`
+// form themselves.
+func binOpIsCommutative(op string) bool {
+	switch op {
+	case "+", "*", "==", "!=":
+		return true
+	}
+
+	return false
+}
+
+// lookupOpMethod resolves a struct method that implements a built-in operator
+// trait. Returns nil if no impl is registered.
+//
+//	`arity` is the user-visible argument count excluding the receiver.
+func (cg *CodeGen) lookupOpMethod(structName, traitName string, arity int) *ir.Func {
+	tryName := func(name string) *ir.Func {
+		if entry, ok := cg.curScope.lookup(name); ok {
+			if fn, ok := entry.val.(*ir.Func); ok {
+				if len(fn.Sig.Params) == arity+1 {
+					return fn
+				}
+			}
+		}
+
+		if variants, hasOL := cg.overloads[name]; hasOL {
+			for _, v := range variants {
+				if v.arity != arity {
+					continue
+				}
+
+				if entry, ok := cg.curScope.lookup(v.irName); ok {
+					if fn, ok := entry.val.(*ir.Func); ok {
+						return fn
+					}
+				}
+			}
+		}
+
+		return nil
+	}
+
+	if fn := tryName(structName + "_" + traitName + "_" + traitName); fn != nil {
+		return fn
+	}
+
+	if fn := tryName(structName + "_" + traitName); fn != nil {
+		return fn
+	}
+
+	return nil
+}
+
+// emitOpDispatch emits a call to a previously-resolved operator-trait impl.
+// `recv` is the receiver value; `args` are the user-visible operands. The
+// receiver is adapted to value-vs-pointer to match the method signature.
+func (cg *CodeGen) emitOpDispatch(block *ir.Block, fn *ir.Func, recv value.Value, args []value.Value) (value.Value, error) {
+	sig := fn.Sig
+	if len(sig.Params) == 0 {
+		return nil, fmt.Errorf("operator dispatch: method %s has no receiver", fn.Name())
+	}
+
+	recvParam := sig.Params[0]
+
+	var recvArg value.Value
+
+	if pt, isPtr := recvParam.(*irtypes.PointerType); isPtr && pt.ElemType.Equal(recv.Type()) {
+		alloca := block.NewAlloca(recv.Type())
+		block.NewStore(recv, alloca)
+		recvArg = alloca
+	} else {
+		recvArg = recv
+	}
+
+	callArgs := make([]value.Value, 0, len(args)+1)
+	callArgs = append(callArgs, recvArg)
+	callArgs = append(callArgs, args...)
+
+	callArgs = cg.adaptArgs(block, callArgs, sig)
+	result := block.NewCall(fn, callArgs...)
+
+	if irtypes.IsVoid(result.Type()) {
+		return nil, nil
+	}
+
+	return result, nil
+}
+
+// dispatchBinOp tries to lower a struct-operand binary expression to an
+// operator-trait method call. Returns (result, true, nil) on success;
+// (nil, false, nil) when no impl exists; (nil, true, err) on error.
+func (cg *CodeGen) dispatchBinOp(block *ir.Block, e *ast.BinExpr, left, right value.Value, lt, rt irtypes.Type) (value.Value, bool, error) {
+	traitName := binOpTraitName(e.Op)
+	if traitName == "" {
+		return nil, false, nil
+	}
+
+	if isStructType(lt) {
+		structName := cg.typeNameOf(lt)
+		if fn := cg.lookupOpMethod(structName, traitName, 1); fn != nil {
+			res, err := cg.emitOpDispatch(block, fn, left, []value.Value{right})
+			if err != nil {
+				return nil, true, err
+			}
+
+			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
+		}
+	}
+
+	if isStructType(rt) && !isStructType(lt) && binOpIsCommutative(e.Op) {
+		structName := cg.typeNameOf(rt)
+		if fn := cg.lookupOpMethod(structName, traitName, 1); fn != nil {
+			res, err := cg.emitOpDispatch(block, fn, right, []value.Value{left})
+			if err != nil {
+				return nil, true, err
+			}
+
+			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
+		}
+	}
+
+	return nil, false, nil
+}
+
+// finishBinOpDispatch post-processes the impl-method result for operators
+// whose Tin semantics differ from the trait method's raw return value.
+//
+//	`!=`     : negate the bool returned by `comp`.
+//	`<,<=,>,>=` : compare the i64 returned by `ord` against 0.
+func (cg *CodeGen) finishBinOpDispatch(block *ir.Block, op string, res value.Value) value.Value {
+	if res == nil {
+		return res
+	}
+
+	switch op {
+	case "!=":
+		return block.NewICmp(enum.IPredEQ, res, constant.NewBool(false))
+	case "<":
+		return block.NewICmp(enum.IPredSLT, res, constant.NewInt(irtypes.I64, 0))
+	case "<=":
+		return block.NewICmp(enum.IPredSLE, res, constant.NewInt(irtypes.I64, 0))
+	case ">":
+		return block.NewICmp(enum.IPredSGT, res, constant.NewInt(irtypes.I64, 0))
+	case ">=":
+		return block.NewICmp(enum.IPredSGE, res, constant.NewInt(irtypes.I64, 0))
+	}
+
+	return res
+}

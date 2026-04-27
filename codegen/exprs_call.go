@@ -23,6 +23,22 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 		return nil, nil
 	}
 
+	// Operator overloading dispatch (Phase 3): if the operand is a user
+	// struct that implements the corresponding built-in unary operator trait,
+	// lower to a method call. Falls through to the primitive switch
+	// otherwise; primitive structs (any, string, fat array) are excluded by
+	// isStructType.
+	if isStructType(val.Type()) {
+		if traitName, isOp := unaryOpTraitName(e.Op); isOp {
+			structName := cg.typeNameOf(val.Type())
+			if fn := cg.lookupOpMethod(structName, traitName, 0); fn != nil {
+				return cg.emitOpDispatch(block, fn, val, nil)
+			}
+
+			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, val.Type())
+		}
+	}
+
 	switch e.Op {
 	case "-":
 		if irtypes.IsFloat(val.Type()) {

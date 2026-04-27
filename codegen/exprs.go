@@ -987,15 +987,16 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 	}
 
-	// Reject operators on user-defined struct types here. Today the
-	// arithmetic / comparison switch below would otherwise call NewAdd /
-	// NewICmp on a struct value, producing invalid LLVM ("integer constant
-	// must have integer type" or worse). When operator overloading lands
-	// (Phase 3 of docs/plans/operator-overloading.md) this is where the
-	// trait-dispatch lookup happens; until then it's a clean compile error.
-	// Anonymous structs (fat pointers, strings, fat arrays) keep their
-	// existing fall-through paths inside the switch.
+	// Operator overloading dispatch (Phase 3): if either operand is a user
+	// struct that implements the corresponding built-in operator trait, lower
+	// to a method call. Falls through to the primitive path when neither
+	// operand is a struct, and to the Phase 0 error gate when a struct
+	// operand has no matching impl.
 	if isStructType(lt) || isStructType(rt) {
+		if res, dispatched, derr := cg.dispatchBinOp(block, e, left, right, lt, rt); dispatched {
+			return res, derr
+		}
+
 		return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
 			e.Op, lt, rt)
 	}

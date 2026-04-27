@@ -1013,6 +1013,55 @@ func (cg *CodeGen) registerBuiltinTraits() {
 	}
 }
 
+// registerBuiltinOpTraits pre-populates cg.traits with synthetic alias-form
+// declarations for the built-in operator traits. Each is a single-method
+// `as fn` trait whose method name equals the trait name.
+//
+// User code implements an operator trait with `fn ::<trait>(this T, ...) ret`.
+// genBinExpr / genUnaryExpr then dispatch operator expressions through the
+// usual trait-impl lookup (traitImplKey).
+func (cg *CodeGen) registerBuiltinOpTraits() {
+	mk := func(name string, typeParams []string, params []ast.TypeExpr, ret ast.TypeExpr) {
+		if _, ok := cg.traits[name]; ok {
+			return // user (or earlier pass) already declared
+		}
+
+		cg.traits[name] = &ast.TraitDecl{
+			Name:       name,
+			TypeParams: typeParams,
+			IsAlias:    true,
+			AliasType: &ast.FuncType{
+				Params:  params,
+				RetType: ret,
+			},
+		}
+	}
+
+	t := func(n string) ast.TypeExpr { return &ast.SimpleType{Name: n} }
+
+	// Binary arithmetic: trait <op>[rhs, ret] as fn(rhs) ret
+	for _, n := range []string{"add", "sub", "mul", "div", "mod", "concat"} {
+		mk(n, []string{"rhs", "ret"}, []ast.TypeExpr{t("rhs")}, t("ret"))
+	}
+
+	// Unary: trait <op>[ret] as fn() ret
+	for _, n := range []string{"neg", "pos", "not"} {
+		mk(n, []string{"ret"}, nil, t("ret"))
+	}
+
+	// Comparison: comp[rhs] as fn(rhs) bool
+	mk("comp", []string{"rhs"}, []ast.TypeExpr{t("rhs")}, t("bool"))
+
+	// Ordering: ord[rhs] as fn(rhs) i64  (negative/zero/positive)
+	mk("ord", []string{"rhs"}, []ast.TypeExpr{t("rhs")}, t("i64"))
+
+	// Index: index[key, ret] as fn(key) ret
+	mk("index", []string{"key", "ret"}, []ast.TypeExpr{t("key")}, t("ret"))
+
+	// Index-assign: index_set[key, val] as fn(key, val)
+	mk("index_set", []string{"key", "val"}, []ast.TypeExpr{t("key"), t("val")}, nil)
+}
+
 // LinkLibs returns the list of libraries that source-level directives
 // requested to link against (e.g. from `use extern` lib entries).
 // The caller should pass these as -l<lib> flags to the linker.
@@ -1084,6 +1133,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Register built-in special traits so structs can implement them without
 	// an explicit trait declaration in source.
 	cg.registerBuiltinTraits()
+	cg.registerBuiltinOpTraits()
 
 	// Duplicate-declaration pass: reject same-scope re-declarations before
 	// any IR is emitted.  Shadowing (same name in a nested scope) is allowed.

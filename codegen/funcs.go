@@ -1064,14 +1064,15 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return false
 	}
 
-	// Built-in type-set constraints.
-	// "ord": ordered types that support <, <=, >, >= (all integer and float types).
-	// "comp": comparable types that support ==, != (integers, floats, and string).
-	switch traitName {
-	case "ord":
-		return isOrdType(structName)
-	case "comp":
-		return isCompType(structName)
+	// Built-in type-set shortcut for ord/comp on primitive types. Falls through
+	// to the trait-impl path for non-primitives so user-defined ord/comp impls
+	// can also satisfy these constraints.
+	if traitName == "ord" && isOrdType(structName) {
+		return true
+	}
+
+	if traitName == "comp" && isCompType(structName) {
+		return true
 	}
 
 	// If the name is a tagged union type, check whether structName is one of
@@ -1093,7 +1094,37 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return traitName == structName
 	}
 
+	// Where-shorthand: a bare reference to a single-type-param trait defaults
+	// its parameter to the constrained type variable. So `where t is ord`
+	// means `where t is ord[t]`. Multi-param traits (e.g. add[rhs, ret])
+	// require explicit args.
+	if _, isSimple := traitExpr.(*ast.SimpleType); isSimple && len(td.TypeParams) == 1 {
+		traitExpr = &ast.GenericType{
+			Name:       traitName,
+			TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: structName}},
+		}
+	}
+
 	bareKey := traitQualifierKey(bareTraitImplKey(traitExpr))
+
+	if td.IsAlias {
+		// Alias-form trait: the single method name equals the trait name.
+		// Accept any of: explicit-args qualified form, base trait-name form,
+		// or the plain alias registered by registerPlainMethodAliases.
+		candidates := []string{
+			structName + "_" + bareKey + "_" + traitName,
+			structName + "_" + traitName + "_" + traitName,
+			structName + "_" + traitName,
+		}
+
+		for _, c := range candidates {
+			if _, found := cg.curScope.lookup(c); found {
+				return true
+			}
+		}
+
+		return false
+	}
 
 	for _, m := range td.Methods {
 		if !m.IsVirtual {
