@@ -353,15 +353,15 @@ fn{#async #no_autoyield} tight_loop(n i64) i64 =
 
 Multiple tags are space-separated: `fn{#async #no_autoyield}`.
 
-### Inspecting heuristics: `-v-heuristics`
+### Inspecting heuristics: `-fdump-heuristics`
 
-Pass `-v-heuristics` after the source file to print the compiler's
+Pass `-fdump-heuristics` after the source file to print the compiler's
 classification for every function:
 
 ```sh
-tin run  file.tin -v-heuristics
-tin test file.tin -v-heuristics
-tin ir   file.tin -v-heuristics
+tin run  file.tin -fdump-heuristics
+tin test file.tin -fdump-heuristics
+tin ir   file.tin -fdump-heuristics
 ```
 
 Output (to stderr):

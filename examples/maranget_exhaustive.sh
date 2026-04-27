@@ -3,7 +3,7 @@
 #   1. Patterns that structurally cover every input no longer need a catch-all.
 #   2. Non-exhaustive cases produce a witness in the error message.
 #   3. The same algorithm runs for both `match` and `where`.
-#   4. -v-match-info dumps the matrix and verdict for debugging.
+#   4. -fdump-match-info dumps the matrix and verdict for debugging.
 #
 # Usage (from the repo root):
 #   go build -o tin . && bash examples/maranget_exhaustive.sh
@@ -123,8 +123,8 @@ fn d(xs [i32]) i32 =
 echo d([5])
 '
 
-# 6. -v-match-info dumps the matrix.
-run_run "-v-match-info dumps the verdict" "contains" "[match-info]" "-v-match-info" '
+# 6. -fdump-match-info dumps the matrix.
+run_run "-fdump-match-info dumps the verdict" "contains" "[match-info]" "-fdump-match-info" '
 fn d(xs [i32]) string =
   where ([]): "e"
   where ([x]): "1"
@@ -133,7 +133,7 @@ fn d(xs [i32]) string =
 echo d([])
 '
 
-run_run "-v-match-info reports YES exhaustive" "contains" "exhaustive: YES" "-v-match-info" '
+run_run "-fdump-match-info reports YES exhaustive" "contains" "exhaustive: YES" "-fdump-match-info" '
 fn d(xs [i32]) string =
   where ([]): "e"
   where ([x]): "1"

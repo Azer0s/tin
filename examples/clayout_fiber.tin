@@ -10,7 +10,7 @@
 // last reference drops the block is freed - no leak, no double-free.
 //
 // Run with: tin test examples/clayout_fiber.tin
-//           tin test examples/clayout_fiber.tin -v-valgrind
+//           tin test examples/clayout_fiber.tin --valgrind
 
 //!+clayout_fiber.c
 

@@ -244,10 +244,10 @@ Without the tag, the compiler auto-classifies functions based on their loop
 count, allocation count, and whether they call other heavy/recursive functions.
 See `docs/internals/codegen-auto-yield.md` for the full scoring formula.
 
-Inspect the compiler's classification with the `-v-heuristics` flag:
+Inspect the compiler's classification with the `-fdump-heuristics` flag:
 
 ```sh
-tin run myfile.tin -v-heuristics     # prints per-function labels to stderr
+tin run myfile.tin -fdump-heuristics     # prints per-function labels to stderr
 ```
 
 ---

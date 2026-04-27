@@ -273,7 +273,7 @@ vol. 17 no. 3, 2007, pp. 387-421, doi:10.1017/S0956796807006223
 (http://moscova.inria.fr/~maranget/papers/warn/warn.pdf). The same
 algorithm runs for `match` reachability warnings.
 
-For debugging the analysis itself, build with `-v-match-info` and the
+For debugging the analysis itself, build with `-fdump-match-info` and the
 compiler will print, on stderr, the pattern matrix it built for every
 `match` and `where`, the per-arm reachability marker (`ok` / `guarded` /
 `UNREACHABLE`), and the final exhaustiveness verdict (`YES` or `NO ...

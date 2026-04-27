@@ -111,3 +111,11 @@ go build .
 That's it. `./tin run file.tin` to compile and execute, `./tin test dir/` to run
 test blocks, or `./tin repl` for the interactive REPL (optionally `./tin repl
 file.tin` to preload a file's declarations).
+
+`tin run` and `tin test` cache the compiled binary under
+`.build/<run|test>/<file>_<md5>/`, alongside an `sbom.txt` listing every
+file the build pulled in (entry source, imported package sources, `//!+`
+C sources) with its MD5. Subsequent invocations skip lex/parse/codegen if
+the entry source MD5 still names a cache dir AND every file recorded in
+that dir's `sbom.txt` still hashes the same. Wipe the cache with
+`tin clean`.

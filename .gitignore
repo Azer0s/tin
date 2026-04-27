@@ -6,6 +6,9 @@
 tin_old
 *.tin.out
 
+# tin run build cache
+.build/
+
 # test binaries
 *.test
 

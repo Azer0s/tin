@@ -222,15 +222,15 @@ Any caller in a `$coro` context will get a yield inserted before calling it.
 
 ---
 
-## Verbose output: `-v-heuristics`
+## Verbose output: `-fdump-heuristics`
 
-Pass `-v-heuristics` after the source file to print one line per function to
+Pass `-fdump-heuristics` after the source file to print one line per function to
 stderr:
 
 ```
-tin ir file.tin -v-heuristics
-tin run file.tin -v-heuristics
-tin test file.tin -v-heuristics
+tin ir file.tin -fdump-heuristics
+tin run file.tin -fdump-heuristics
+tin test file.tin -fdump-heuristics
 ```
 
 Output format:

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,19 +26,20 @@ const usage = `tin - the tin language compiler
 Usage:
   tin run         <file.tin>               compile and execute
   tin build       <file.tin> [-o out]      compile to native binary
-  tin build       -lib <file.tin> [-o out] compile to object file (library)
+  tin build       --lib <file.tin> [-o out] compile to object file (library)
   tin ir          <file.tin> [-o out]      emit LLVM IR (default: stdout)
   tin ir-test     <file.tin> [-o out]      emit test-mode LLVM IR
   tin test        <file.tin|dir|dir/...>   run test blocks and report results
   tin build-test  <file.tin> [-o out]      compile test binary without running
   tin preprocess  <file.tin>               expand macros and print source to stdout
   tin repl        [--stdlib PATH] [file.tin]  interactive REPL (preloads file)
+  tin clean                                delete the local .build/ cache
 
 Link flags (passed after the source file):
   -lNAME           link with libNAME (e.g. -lm for libmath)
   -LDIR            add DIR to the library search path
   file.o / file.a  link with extra object or archive file
-  -cflag FLAG      pass FLAG to clang (repeatable, e.g. -cflag -fsanitize=address)
+  --cflag FLAG     pass FLAG to clang (repeatable, e.g. --cflag -fsanitize=address)
 
 Warning flags:
   -Wno-async-main          suppress "main() uses spawn/await but is not async" warning
@@ -47,10 +50,10 @@ Warning flags:
   -Wno-bool-analysis       suppress "condition is always true/false" warnings
                            emitted when an if/elif/while/where condition
                            folds to a compile-time constant
-  -v-match-info            dump Maranget exhaustiveness/usefulness analysis
+  -fdump-match-info        dump Maranget exhaustiveness/usefulness analysis
                            for every match and where the compiler sees
                            (debug aid; output goes to stderr)
-  -v-demorgan              print each De Morgan / boolean simplification the
+  -fdump-demorgan          print each De Morgan / boolean simplification the
                            compiler applies to an if/elif/while/where/for
                            condition (debug aid; output goes to stderr)
 
@@ -64,15 +67,16 @@ Stdlib/libs flags:
   --lib-root PATH  add an additional package root (before default <execDir>/libs); repeatable
 
 Run/test flags:
-  -v-valgrind      run binary under valgrind --leak-check=full (run, test)
-  -v-leaks         run binary under leaks --atExit (run, test; macOS only)
+  --valgrind       run binary under valgrind --leak-check=full (run, test)
+  --leaks          run binary under leaks --atExit (run, test; macOS only)
+
 Compiler output flags:
   -v               print compilation stages (lex, parse, codegen, link, ...)
-  -v-heuristics    print auto-yield heuristics for every function to stderr
-  -v-tco           print tail call optimizations (self-TCO and mutual TCO) to stderr
+  -fdump-heuristics  print auto-yield heuristics for every function to stderr
+  -fdump-tco         print tail call optimizations (self-TCO and mutual TCO) to stderr
 
 Debug flags:
-  -f-debug-fiber-slots  print fiber struct pool ramp/decay events to stderr
+  -fdebug-fiber-slots  print fiber struct pool ramp/decay events to stderr
 
 In-source directives (at the top of the .tin file):
   //!-lNAME                    link with libNAME
@@ -406,6 +410,12 @@ func main() {
 		return
 	}
 
+	if len(os.Args) >= 2 && os.Args[1] == "clean" {
+		runClean()
+
+		return
+	}
+
 	if len(os.Args) < 3 {
 		_, _ = fmt.Fprint(os.Stderr, usage)
 
@@ -414,13 +424,13 @@ func main() {
 
 	cmd := os.Args[1]
 
-	// Parse flags: -lib means compile to object file, not a binary.
+	// Parse flags: --lib means compile to object file, not a binary.
 	// Scan forward from position 2 to find the first non-flag argument (the source file).
-	// Known pre-file flags: -lib (build only), -g.  Two-word flags (--stdlib PATH) are skipped.
+	// Known pre-file flags: --lib (build only), -g.  Two-word flags (--stdlib PATH) are skipped.
 	libMode := false
 	fileArgIdx := 2
 
-	if cmd == "build" && len(os.Args) > 2 && os.Args[2] == "-lib" {
+	if cmd == "build" && len(os.Args) > 2 && os.Args[2] == "--lib" {
 		libMode = true
 		fileArgIdx = 3
 	}
@@ -447,7 +457,7 @@ doneFlags:
 
 	file := os.Args[fileArgIdx]
 
-	// Collect -cflag values and warning-suppression flags from anywhere after the file arg.
+	// Collect --cflag values and warning-suppression flags from anywhere after the file arg.
 	var extraCFlags []string
 
 	var stdlibOverride string
@@ -466,7 +476,7 @@ doneFlags:
 	// Scan all args (including those before the file) for flags.
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
-		case "-cflag":
+		case "--cflag":
 			if i+1 < len(os.Args) {
 				i++
 				extraCFlags = append(extraCFlags, os.Args[i])
@@ -489,17 +499,17 @@ doneFlags:
 			noWarnUnusedMatchArms = true
 		case "-Wno-bool-analysis":
 			noWarnBoolAnalysis = true
-		case "-v-match-info":
+		case "-fdump-match-info":
 			verboseMatchInfo = true
-		case "-v-demorgan":
+		case "-fdump-demorgan":
 			verboseDemorgan = true
-		case "-v-heuristics":
+		case "-fdump-heuristics":
 			verboseHeuristics = true
 		case "-v":
 			verboseProgress = true
-		case "-v-tco":
+		case "-fdump-tco":
 			verboseTCO = true
-		case "-f-debug-fiber-slots":
+		case "-fdebug-fiber-slots":
 			extraCFlags = append(extraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 		case "-g":
 			debugBuild = true
@@ -544,11 +554,11 @@ doneFlags:
 
 			for i := fileArgIdx + 1; i < len(os.Args); i++ {
 				a := os.Args[i]
-				if a == "-v-valgrind" {
+				if a == "--valgrind" {
 					memcheck = "valgrind"
-				} else if a == "-v-leaks" {
+				} else if a == "--leaks" {
 					memcheck = "leaks"
-				} else if a == "-f-debug-fiber-slots" {
+				} else if a == "-fdebug-fiber-slots" {
 					dirExtraCFlags = append(dirExtraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 				} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") ||
 					strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
@@ -571,6 +581,29 @@ doneFlags:
 	src, err := os.ReadFile(file)
 	if err != nil {
 		die("error reading file: %v", err)
+	}
+
+	// `tin run` and single-file `tin test` cache the compiled binary at
+	// .build/<mode>/<dunder>_<md5>/bin (relative to CWD). On a cache hit -
+	// the source MD5 names an existing dir AND every file recorded in its
+	// sbom.txt still hashes the same - we skip lex/parse/codegen entirely
+	// and exec the cached binary.
+	var (
+		runCacheDir     string
+		runCacheBinPath string
+	)
+
+	if cmd == "run" || cmd == "test" {
+		runCacheDir = cacheBinDir(cmd, file, src)
+		runCacheBinPath = filepath.Join(runCacheDir, "bin")
+
+		if _, statErr := os.Stat(runCacheBinPath); statErr == nil && sbomMatches(runCacheDir) {
+			memcheck, binArgs := parseRunArgs(fileArgIdx)
+			validateMemcheck(memcheck)
+			execRunBinary(runCacheBinPath, memcheck, binArgs)
+
+			return
+		}
 	}
 
 	// Collect directives declared in the source file via //! lines
@@ -804,7 +837,7 @@ doneFlags:
 				if i < len(os.Args) {
 					out = os.Args[i]
 				}
-			} else if a == "-cflag" {
+			} else if a == "--cflag" {
 				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
@@ -833,7 +866,7 @@ doneFlags:
 				if i < len(os.Args) {
 					out = os.Args[i]
 				}
-			} else if a == "-cflag" {
+			} else if a == "--cflag" {
 				i++ // value already collected above
 			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
 				extraObjs = append(extraObjs, a)
@@ -851,60 +884,28 @@ doneFlags:
 		cprog.clear()
 
 	case "run", "test":
-		tmpRel := strings.TrimSuffix(file, filepath.Ext(file)) + ".tin.out"
-		tmp, _ := filepath.Abs(tmpRel)
-		// Collect extra link inputs, memory-checker flag, and binary args (after --).
-		var extraObjs []string
+		extraObjs := collectExtraObjs(fileArgIdx)
+		extraObjs = append(srcLinkFlags, extraObjs...)
+		memcheck, binArgs := parseRunArgs(fileArgIdx)
 
-		var binArgs []string
+		cleanStaleCacheEntries(cmd, file)
 
-		memcheck := ""
-
-		for i := fileArgIdx + 1; i < len(os.Args); i++ {
-			a := os.Args[i]
-			if a == "--" {
-				binArgs = append(binArgs, os.Args[i+1:]...)
-
-				break
-			} else if a == "-v-valgrind" {
-				memcheck = "valgrind"
-			} else if a == "-v-leaks" {
-				memcheck = "leaks"
-			} else if a == "-cflag" {
-				i++ // value already collected above
-			} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
-				extraObjs = append(extraObjs, a)
-			} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") {
-				extraObjs = append(extraObjs, a)
-			}
+		if err := os.MkdirAll(runCacheDir, 0o755); err != nil {
+			die("cache dir: %v", err)
 		}
 
-		extraObjs = append(srcLinkFlags, extraObjs...)
-
-		if err := compileIR(irText, tmp, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
+		if err := compileIR(irText, runCacheBinPath, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
+		}
+
+		if err := writeBuildSBOM(runCacheDir, file, src, buildDeps(cg, fileCSources)); err != nil {
+			die("sbom write: %v", err)
 		}
 
 		cprog.clear()
 
-		defer func(name string) {
-			_ = os.Remove(name)
-		}(tmp)
-
 		validateMemcheck(memcheck)
-
-		run := memcheckCmd(memcheck, tmp, binArgs...)
-		run.Stdout = os.Stdout
-		run.Stderr = os.Stderr
-
-		if err := run.Run(); err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				os.Exit(exitErr.ExitCode())
-			}
-
-			die("run error: %v", err)
-		}
+		execRunBinary(runCacheBinPath, memcheck, binArgs)
 
 	default:
 		_, _ = fmt.Fprint(os.Stderr, usage)
@@ -1272,12 +1273,12 @@ func validateMemcheck(memcheck string) {
 	case "valgrind":
 		if runtime.GOOS == "darwin" {
 			if _, err := exec.LookPath("valgrind"); err != nil {
-				die("valgrind is not supported on macOS; did you mean -v-leaks?")
+				die("valgrind is not supported on macOS; did you mean --leaks?")
 			}
 		}
 	case "leaks":
 		if runtime.GOOS != "darwin" {
-			die("leaks is a macOS-only tool; did you mean -v-valgrind?")
+			die("leaks is a macOS-only tool; did you mean --valgrind?")
 		}
 	}
 }
@@ -1388,6 +1389,49 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		// Fast pre-check: skip files with no test blocks at all.
 		if !fileHasTestBlocks(src) {
+			continue
+		}
+
+		// Cache lookup: if the test binary is already built and every dep
+		// recorded in its SBOM still hashes the same, run the cached binary
+		// directly and skip lex/parse/codegen for this file.
+		cacheDir := cacheBinDir("test", fpath, src)
+		cachedBin := filepath.Join(cacheDir, "bin")
+
+		if _, statErr := os.Stat(cachedBin); statErr == nil && sbomMatches(cacheDir) {
+			fmt.Printf("%s\n\n", fname)
+
+			run := memcheckCmd(memcheck, cachedBin)
+
+			var outBuf bytes.Buffer
+
+			run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			run.Stderr = os.Stderr
+
+			passed := run.Run() == nil
+
+			fmt.Println("------------------------------------------------")
+
+			var failedTests []string
+
+			reason := ""
+
+			if !passed {
+				for _, line := range strings.Split(outBuf.String(), "\n") {
+					if m := reTestFailed.FindStringSubmatch(line); m != nil {
+						failedTests = append(failedTests, m[1])
+					}
+				}
+
+				if len(failedTests) > 0 {
+					reason = "test failures"
+				} else {
+					reason = "process error"
+				}
+			}
+
+			results = append(results, result{fname, passed, false, reason, failedTests})
+
 			continue
 		}
 
@@ -1532,26 +1576,21 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		cprog.setTotal(3 + len(fCSources) + 1)
 
-		tmp, tmpErr := os.CreateTemp("", "tin-test-*.out")
-		if tmpErr != nil {
+		cleanStaleCacheEntries("test", fpath)
+
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
-			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", tmpErr)
+			_, _ = fmt.Fprintf(os.Stderr, "  error: %v\n", err)
 
-			results = append(results, result{fname, false, false, fmt.Sprintf("error: %v", tmpErr), nil})
+			results = append(results, result{fname, false, false, fmt.Sprintf("error: %v", err), nil})
 
 			continue
 		}
 
-		_ = tmp.Close()
-		//goland:noinspection GoDeferInLoop
-		defer func(name string) {
-			_ = os.Remove(name)
-		}(tmp.Name())
-
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, tmp.Name(), false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
+		if compErr := compileIR(irText, cachedBin, false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
 			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 
@@ -1562,10 +1601,21 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		if err := writeBuildSBOM(cacheDir, fpath, src, buildDeps(cg, fCSources)); err != nil {
+			cprog.clear()
+			fmt.Printf("\n=== FAIL %s ===\n", fname)
+
+			_, _ = fmt.Fprintf(os.Stderr, "  sbom write: %v\n", err)
+
+			results = append(results, result{fname, false, false, fmt.Sprintf("sbom write: %v", err), nil})
+
+			continue
+		}
+
 		cprog.clear()
 		fmt.Printf("%s\n\n", fname)
 
-		run := memcheckCmd(memcheck, tmp.Name())
+		run := memcheckCmd(memcheck, cachedBin)
 
 		var outBuf bytes.Buffer
 
@@ -1686,4 +1736,190 @@ func die(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
 
 	os.Exit(1)
+}
+
+// cacheBinDir returns ".build/<mode>/<dunder>_<md5>" under CWD, where
+// <dunder> is the cleaned source path with `/` replaced by `__` and <md5>
+// is the hex MD5 of the source bytes. mode is "run" or "test".
+//
+// The cache dir is the lookup key. Inside it lives `bin` (the compiled
+// binary) and `sbom.txt` (an SBOM listing every dep file with its MD5 -
+// see writeBuildSBOM / sbomMatches).
+func cacheBinDir(mode, file string, src []byte) string {
+	cleaned := filepath.ToSlash(filepath.Clean(file))
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	dunder := strings.ReplaceAll(cleaned, "/", "__")
+
+	sum := md5.Sum(src)
+
+	return filepath.Join(".build", mode, fmt.Sprintf("%s_%s", dunder, hex.EncodeToString(sum[:])))
+}
+
+// sbomMatches reports whether every file recorded in <cacheDir>/sbom.txt
+// still hashes to the same MD5. A missing or unreadable SBOM means "no
+// match" so the build is rerun.
+func sbomMatches(cacheDir string) bool {
+	data, err := os.ReadFile(filepath.Join(cacheDir, "sbom.txt"))
+	if err != nil {
+		return false
+	}
+
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		// "<md5>  <path>" - same shape as `md5sum` output.
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) != 2 {
+			return false
+		}
+
+		body, err := os.ReadFile(parts[1])
+		if err != nil {
+			return false
+		}
+
+		sum := md5.Sum(body)
+		if hex.EncodeToString(sum[:]) != parts[0] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// writeBuildSBOM records the entry source file plus every transitive
+// dependency the build pulled in (imported package .tin sources and any
+// `//!+file.c` C sources) under <cacheDir>/sbom.txt. On the next run
+// sbomMatches re-hashes each path and refuses the cache if anything
+// changed.
+func writeBuildSBOM(cacheDir, entryFile string, entrySrc []byte, depPaths []string) error {
+	seen := map[string]bool{entryFile: true}
+
+	var sb strings.Builder
+
+	entrySum := md5.Sum(entrySrc)
+	fmt.Fprintf(&sb, "%s  %s\n", hex.EncodeToString(entrySum[:]), entryFile)
+
+	for _, p := range depPaths {
+		if seen[p] {
+			continue
+		}
+
+		seen[p] = true
+
+		body, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+
+		sum := md5.Sum(body)
+		fmt.Fprintf(&sb, "%s  %s\n", hex.EncodeToString(sum[:]), p)
+	}
+
+	return os.WriteFile(filepath.Join(cacheDir, "sbom.txt"), []byte(sb.String()), 0o644)
+}
+
+// cleanStaleCacheEntries removes every subdirectory of .build/<mode>/ whose
+// name starts with "<dunder>_" - they're all stale candidates for the
+// current source. Called before recreating the fresh cache dir on a miss
+// so old binaries from prior builds don't pile up.
+func cleanStaleCacheEntries(mode, file string) {
+	cleaned := filepath.ToSlash(filepath.Clean(file))
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	dunder := strings.ReplaceAll(cleaned, "/", "__")
+
+	base := filepath.Join(".build", mode)
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+
+	prefix := dunder + "_"
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+
+		_ = os.RemoveAll(filepath.Join(base, e.Name()))
+	}
+}
+
+// buildDeps gathers the dep file paths that should appear in the SBOM,
+// drawing from imported package source files and the //!+file.c C sources
+// pulled in for this build. The entry file is added separately by
+// writeBuildSBOM.
+func buildDeps(cg *codegen.CodeGen, cSources []cSource) []string {
+	out := append([]string{}, cg.PackageSrcPaths()...)
+
+	for _, c := range cSources {
+		out = append(out, c.path)
+	}
+
+	return out
+}
+
+// parseRunArgs scans os.Args after fileArgIdx for the run/test memcheck flag
+// and the binary's argv (the part after `--`).
+func parseRunArgs(fileArgIdx int) (memcheck string, binArgs []string) {
+	for i := fileArgIdx + 1; i < len(os.Args); i++ {
+		a := os.Args[i]
+		if a == "--" {
+			binArgs = append(binArgs, os.Args[i+1:]...)
+
+			break
+		} else if a == "--valgrind" {
+			memcheck = "valgrind"
+		} else if a == "--leaks" {
+			memcheck = "leaks"
+		}
+	}
+
+	return memcheck, binArgs
+}
+
+// collectExtraObjs scans os.Args after fileArgIdx for extra link inputs:
+// .o / .a files and -l / -L flags.
+func collectExtraObjs(fileArgIdx int) []string {
+	var out []string
+
+	for i := fileArgIdx + 1; i < len(os.Args); i++ {
+		a := os.Args[i]
+		if a == "--" {
+			break
+		} else if a == "--cflag" {
+			i++ // value already collected upstream
+		} else if strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") {
+			out = append(out, a)
+		} else if strings.HasPrefix(a, "-l") || strings.HasPrefix(a, "-L") {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+// execRunBinary runs `bin` (under memcheck if set) and exits with its status.
+func execRunBinary(bin, memcheck string, binArgs []string) {
+	run := memcheckCmd(memcheck, bin, binArgs...)
+	run.Stdout = os.Stdout
+	run.Stderr = os.Stderr
+
+	if err := run.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+
+		die("run error: %v", err)
+	}
+}
+
+// runClean removes the .build/ cache directory in the current working
+// directory. Silent on success; no-op if .build/ does not exist.
+func runClean() {
+	if err := os.RemoveAll(".build"); err != nil {
+		die("clean: %v", err)
+	}
 }

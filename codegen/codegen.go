@@ -350,7 +350,7 @@ type CodeGen struct {
 
 	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
 	// reachability decisions for every match / where the compiler sees.
-	// Toggled by -v-match-info; for debugging the algorithm itself.
+	// Toggled by -fdump-match-info; for debugging the algorithm itself.
 	verboseMatchInfo bool
 
 	// noWarnBoolAnalysis suppresses "condition is always true/false"
@@ -360,7 +360,7 @@ type CodeGen struct {
 
 	// verboseDemorgan prints each boolean simplification the compiler
 	// applies (De Morgan push-inward, double-negation elim, comparison
-	// negation, bool-literal absorption). Toggled by -v-demorgan.
+	// negation, bool-literal absorption). Toggled by -fdump-demorgan.
 	verboseDemorgan bool
 
 	// emitHeaderPath, when non-empty, instructs codegen to write a C
@@ -532,7 +532,7 @@ type CodeGen struct {
 	funcHeuristics map[string]*FuncHeuristicInfo
 
 	// verboseHeuristics enables per-function heuristic output to stderr.
-	// Activated by the -v-heuristics CLI flag.
+	// Activated by the -fdump-heuristics CLI flag.
 	verboseHeuristics bool
 
 	// progressFn, if non-nil, is called with a short human-readable message at

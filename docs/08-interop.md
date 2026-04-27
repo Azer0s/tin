@@ -488,12 +488,12 @@ int main(void) {
 ### Building a Tin library
 
 ```bash
-tin build -lib mylib.tin -o mylib.o --emit-header=mylib.h
+tin build --lib mylib.tin -o mylib.o --emit-header=mylib.h
 cc -c runtime/runtime.c -o runtime.o
 cc driver.c mylib.o runtime.o -o driver -lpthread
 ```
 
-`-lib` produces an object file with no `main`, no automatic linking.
+`--lib` produces an object file with no `main`, no automatic linking.
 `--emit-header=PATH` writes a `.h` file declaring every `#interop`
 function.
 

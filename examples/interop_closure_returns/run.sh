@@ -53,7 +53,7 @@ cp "$src_dir/harness.c"    "$work/harness.c"
 
 cd "$work"
 
-if ! "$tin_bin" build -lib closures.tin -o closures.o --emit-header=closures.h >/tmp/build_log 2>&1; then
+if ! "$tin_bin" build --lib closures.tin -o closures.o --emit-header=closures.h >/tmp/build_log 2>&1; then
   printf 'tin build failed:\n'
   cat /tmp/build_log
   exit 1

@@ -53,9 +53,9 @@ package codegen
 //   - Loop back-edges (existing behavior in genYieldAutoAt).
 //   - Call-site yields (checked via cg.curFnAutoYield in genCallSiteYieldFor).
 //
-// -v-heuristics output
+// -fdump-heuristics output
 // ====================
-// When cg.verboseHeuristics is true (set via -v-heuristics CLI flag), one line
+// When cg.verboseHeuristics is true (set via -fdump-heuristics CLI flag), one line
 // is printed to stderr per function:
 //
 //   [autoyield] fn <name>  loops=N allocs=N calls=N heavyCalls=N  score=N  [label]

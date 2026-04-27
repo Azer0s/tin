@@ -266,7 +266,7 @@ The pool shrinks from 2001 to 23 over the full sequence - no manual tuning neede
 
 ### Debug flag
 
-Compile with `-f-debug-fiber-slots` (or `-DTIN_DEBUG_FIBER_SLOTS=1` directly)
+Compile with `-fdebug-fiber-slots` (or `-DTIN_DEBUG_FIBER_SLOTS=1` directly)
 to print pool events to stderr:
 
 ```

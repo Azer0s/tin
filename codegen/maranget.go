@@ -1334,7 +1334,7 @@ func sortStrings(s []string) {
 }
 
 // ----------------------------------------------------------------------------
-// Debug dumping (-v-match-info)
+// Debug dumping (-fdump-match-info)
 // ----------------------------------------------------------------------------
 
 // patStr renders an mPat for debug dumps.
@@ -1477,7 +1477,7 @@ func (cg *CodeGen) dumpWhereInfo(wl *ast.WhereList, label string) {
 	}
 }
 
-// matchInfoSink returns the writer used for -v-match-info output. Stderr
+// matchInfoSink returns the writer used for -fdump-match-info output. Stderr
 // keeps it cleanly separated from program stdout.
 func (cg *CodeGen) matchInfoSink() *os.File { return os.Stderr }
 

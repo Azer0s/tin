@@ -232,7 +232,7 @@ func (cg *CodeGen) simplifyConnective(orig *ast.BinExpr, left, right ast.Node) a
 	return &ast.BinExpr{Left: left, Op: orig.Op, Right: right}
 }
 
-// logDemorgan records one rewrite to stderr when -v-demorgan is active.
+// logDemorgan records one rewrite to stderr when -fdump-demorgan is active.
 // Positions come from the original node so the user can locate the site in
 // their source.
 func (cg *CodeGen) logDemorgan(origin ast.Node, rule string, before, after ast.Node) {
