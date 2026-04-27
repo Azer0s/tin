@@ -632,7 +632,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					return nil, err2
 				}
 
-				expr = &ast.IndexExpr{Expr: expr, Index: start}
+				idxExpr := &ast.IndexExpr{Expr: expr, Index: start}
+				idxExpr.SetPos(expr.Pos())
+				expr = idxExpr
 
 				// pkg::Type[T]{...} - generic struct literal with package qualifier
 				if p.check(lexer.LBRACE) {

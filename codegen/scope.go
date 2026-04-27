@@ -50,6 +50,10 @@ type scopeEntry struct {
 	// tinType is the declared Tin AST type for this variable (nil if unknown/inferred).
 	// Used for type-guided overload resolution and async fat-ptr return-type recovery.
 	tinType ast.TypeExpr
+	// staticArrayLen records the compile-time element count of an array /
+	// string `let` initializer (ArrayLit, ArrayFillLit, StringLit). 0 means
+	// unknown. A later mutation invalidates this and clears the field.
+	staticArrayLen int64
 	// constInitExpr captures the initializer AST of a non-mutated `let` binding
 	// when that initializer can be statically analyzed for compile-time
 	// folding. Used by tryFoldExpr to follow `let t = typeof(v)` -> 'bool /

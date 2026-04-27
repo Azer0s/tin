@@ -1636,6 +1636,10 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
 	}
 
+	if length, ok := cg.staticArrayLen(e.Expr); ok {
+		cg.checkConstIndexBounds(e, length)
+	}
+
 	// For addressable fixed-size arrays: GEP directly into the original alloca
 	// without loading/copying the entire array. This is critical for arrays
 	// accessed inside loops - the load+alloca+store path allocates N*sizeof(T)
