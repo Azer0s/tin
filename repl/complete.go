@@ -9,9 +9,17 @@ import (
 )
 
 // completer implements readline.AutoCompleter for the REPL. Tab fires after
-// `pkg::` to list a package's exports, and after `obj.` to list methods on
-// the receiver's type. Falls back to no completions for other contexts so
-// the user can still type freely.
+// a `::` or `.` separator and offers candidate suffixes based on what the
+// receiver expression resolves to:
+//
+//	pkg::partial             -> exported names of the package
+//	Struct::partial          -> static methods of a session struct
+//	pkg::Struct::partial     -> static methods of Struct from pkg
+//	obj.partial              -> instance methods/fields of obj's type
+//	Type.partial             -> static methods (also accepted via .)
+//	pkg::Type.partial        -> static methods of Type from pkg
+//	pkg::Type[T...].partial  -> static methods of Type from pkg (any nesting)
+//	obj.field.partial        -> methods/fields of field's type (chained)
 type completer struct{ s *session }
 
 // Do is called by readline when Tab is pressed. line[:pos] is the buffer up
@@ -24,98 +32,234 @@ func (c *completer) Do(line []rune, pos int) ([][]rune, int) {
 
 	src := string(line[:pos])
 
-	if cands, n := c.completeScope(src); cands != nil {
-		return cands, n
+	end := len(src)
+	partialStart := end
+
+	for partialStart > 0 && isIdentByte(src[partialStart-1]) {
+		partialStart--
 	}
 
-	if cands, n := c.completeField(src); cands != nil {
-		return cands, n
+	partial := src[partialStart:end]
+	partialLen := len([]rune(partial))
+
+	if partialStart >= 2 && src[partialStart-2:partialStart] == "::" {
+		recv := strings.TrimSpace(src[walkReceiverBack(src, partialStart-2) : partialStart-2])
+		if recv == "" {
+			return nil, 0
+		}
+
+		cands := c.completeAfterScope(recv, partial)
+		if cands == nil {
+			return nil, 0
+		}
+
+		return cands, partialLen
+	}
+
+	if partialStart >= 1 && src[partialStart-1] == '.' {
+		recv := strings.TrimSpace(src[walkReceiverBack(src, partialStart-1) : partialStart-1])
+		if recv == "" {
+			return nil, 0
+		}
+
+		cands := c.completeAfterDot(recv, partial)
+		if cands == nil {
+			return nil, 0
+		}
+
+		return cands, partialLen
 	}
 
 	return nil, 0
 }
 
-// completeScope handles `pkg::partial` -> {exported names of pkg starting with partial}.
-func (c *completer) completeScope(src string) ([][]rune, int) {
-	// Walk backwards through trailing identifier characters to get `partial`.
-	end := len(src)
-	partialStart := end
+// walkReceiverBack walks backwards from `end` over a receiver expression
+// (identifier chars, balanced [...], `::` chains, and `.` chains) and
+// returns the start byte offset.
+func walkReceiverBack(src string, end int) int {
+	i := end
+	for i > 0 {
+		c := src[i-1]
 
-	for partialStart > 0 && isIdentByte(src[partialStart-1]) {
-		partialStart--
+		switch {
+		case isIdentByte(c):
+			i--
+		case c == ']':
+			depth := 1
+			j := i - 2
+
+			for j >= 0 && depth > 0 {
+				switch src[j] {
+				case ']':
+					depth++
+				case '[':
+					depth--
+				}
+
+				j--
+			}
+
+			if depth != 0 {
+				return i
+			}
+
+			i = j + 1
+		case c == ':' && i >= 2 && src[i-2] == ':':
+			i -= 2
+		case c == '.':
+			i--
+		default:
+			return i
+		}
 	}
 
-	partial := src[partialStart:end]
-
-	// Expect "::" immediately before the partial.
-	if partialStart < 2 || src[partialStart-2:partialStart] != "::" {
-		return nil, 0
-	}
-	// Walk backwards over the package name.
-	pkgEnd := partialStart - 2
-	pkgStart := pkgEnd
-
-	for pkgStart > 0 && isIdentByte(src[pkgStart-1]) {
-		pkgStart--
-	}
-
-	pkgName := src[pkgStart:pkgEnd]
-	if pkgName == "" {
-		return nil, 0
-	}
-
-	// Either a known module (`use pkg`) or a known struct (for static fns).
-	exports := c.scopeMembersForName(pkgName)
-	if len(exports) == 0 {
-		return nil, 0
-	}
-
-	return filterAndOrder(exports, partial), len([]rune(partial))
+	return i
 }
 
-// completeField handles `obj.partial` -> {method/field names on obj's type}.
-func (c *completer) completeField(src string) ([][]rune, int) {
-	end := len(src)
-	partialStart := end
-
-	for partialStart > 0 && isIdentByte(src[partialStart-1]) {
-		partialStart--
+// completeAfterScope handles `recv::partial`. recv may be `pkg`, `Type`,
+// `pkg::Type`, possibly with trailing `[generics]`.
+func (c *completer) completeAfterScope(recv, partial string) [][]rune {
+	pkg, name := splitLastScope(stripGenericsTail(recv))
+	if name == "" {
+		return filterAndOrder(c.scopeMembersForName(pkg), partial)
 	}
 
-	partial := src[partialStart:end]
-
-	if partialStart < 1 || src[partialStart-1] != '.' {
-		return nil, 0
-	}
-
-	objEnd := partialStart - 1
-	objStart := objEnd
-
-	for objStart > 0 && isIdentByte(src[objStart-1]) {
-		objStart--
-	}
-
-	objName := src[objStart:objEnd]
-	if objName == "" {
-		return nil, 0
-	}
-
-	typeName := c.s.typeNameOfGlobal(objName)
-	if typeName == "" {
-		return nil, 0
-	}
-
-	members := c.s.methodsAndFieldsOf(typeName)
-	if len(members) == 0 {
-		return nil, 0
-	}
-
-	return filterAndOrder(members, partial), len([]rune(partial))
+	return filterAndOrder(c.staticMethodsOf(pkg, name), partial)
 }
 
-// scopeMembersForName returns the exported symbol names available under
-// `name::` - either the exports of a `use`d package or the static methods
-// of a known struct.
+// completeAfterDot handles `recv.partial`.
+func (c *completer) completeAfterDot(recv, partial string) [][]rune {
+	if dotIdx := lastTopLevelDot(recv); dotIdx >= 0 {
+		head := recv[:dotIdx]
+		field := recv[dotIdx+1:]
+
+		baseType := c.typeOfReceiver(head)
+		if baseType == "" {
+			return nil
+		}
+
+		fieldType := c.s.typeOfStructField(baseType, field)
+		if fieldType == "" {
+			return nil
+		}
+
+		return filterAndOrder(c.s.methodsAndFieldsOf(fieldType), partial)
+	}
+
+	pkg, name := splitLastScope(stripGenericsTail(recv))
+	if name != "" {
+		return filterAndOrder(c.staticMethodsOf(pkg, name), partial)
+	}
+
+	if typeName := c.s.typeNameOfGlobal(pkg); typeName != "" {
+		return filterAndOrder(c.s.methodsAndFieldsOf(typeName), partial)
+	}
+
+	if statics := c.staticMethodsOf("", pkg); len(statics) > 0 {
+		return filterAndOrder(statics, partial)
+	}
+
+	return nil
+}
+
+// typeOfReceiver returns the bare struct name of a receiver expression.
+// Resolves identifiers via prevGlobals, type-name expressions to their bare
+// name (stripped of generics and module prefix), and chained field access
+// recursively.
+func (c *completer) typeOfReceiver(recv string) string {
+	recv = strings.TrimSpace(recv)
+	if recv == "" {
+		return ""
+	}
+
+	if dotIdx := lastTopLevelDot(recv); dotIdx >= 0 {
+		head := recv[:dotIdx]
+		field := recv[dotIdx+1:]
+
+		baseType := c.typeOfReceiver(head)
+		if baseType == "" {
+			return ""
+		}
+
+		return c.s.typeOfStructField(baseType, field)
+	}
+
+	pkg, name := splitLastScope(stripGenericsTail(recv))
+	if name == "" {
+		if t := c.s.typeNameOfGlobal(pkg); t != "" {
+			return t
+		}
+
+		if _, ok := c.s.declMap[pkg]; ok {
+			return pkg
+		}
+
+		return ""
+	}
+
+	return name
+}
+
+// stripGenericsTail strips a trailing balanced [...] from src.
+func stripGenericsTail(src string) string {
+	src = strings.TrimSpace(src)
+	if !strings.HasSuffix(src, "]") {
+		return src
+	}
+
+	depth := 1
+	i := len(src) - 2
+
+	for i >= 0 && depth > 0 {
+		switch src[i] {
+		case ']':
+			depth++
+		case '[':
+			depth--
+		}
+
+		i--
+	}
+
+	if depth != 0 {
+		return src
+	}
+
+	return strings.TrimSpace(src[:i+1])
+}
+
+// splitLastScope splits "a::b" into ("a", "b") and "x" into ("x", "").
+func splitLastScope(s string) (pkg, name string) {
+	if i := strings.LastIndex(s, "::"); i >= 0 {
+		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+2:])
+	}
+
+	return strings.TrimSpace(s), ""
+}
+
+// lastTopLevelDot returns the byte index of the last `.` not inside [...],
+// or -1 if none.
+func lastTopLevelDot(s string) int {
+	depth := 0
+
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ']':
+			depth++
+		case '[':
+			depth--
+		case '.':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// scopeMembersForName returns the names available under `name::` - either
+// the exports of a `use`d package or the static methods of a known struct.
 func (c *completer) scopeMembersForName(name string) []string {
 	if c.s == nil {
 		return nil
@@ -130,29 +274,161 @@ func (c *completer) scopeMembersForName(name string) []string {
 		}
 	}
 
-	// Struct static methods: name might be a session struct.
-	if src, ok := c.s.declMap[name]; ok {
-		prog, err := parseSrc(src)
-		if err != nil {
-			return nil
+	return c.staticMethodsOf("", name)
+}
+
+// staticMethodsOf returns the static method names of struct `name`. With
+// pkg=="" the lookup is done against the session declMap; otherwise the
+// package's source files are walked.
+func (c *completer) staticMethodsOf(pkg, name string) []string {
+	if name == "" {
+		return nil
+	}
+
+	src := c.structDeclSrc(pkg, name)
+	if src == "" {
+		return nil
+	}
+
+	prog, err := parseSrc(src)
+	if err != nil {
+		return nil
+	}
+
+	for _, n := range prog.Stmts {
+		sd, ok := n.(*ast.StructDecl)
+		if !ok || sd.Name != name {
+			continue
 		}
 
-		for _, n := range prog.Stmts {
-			if sd, ok := n.(*ast.StructDecl); ok && sd.Name == name {
-				var out []string
+		var out []string
 
-				for _, m := range sd.Methods {
-					if m.IsStatic {
-						out = append(out, m.Name)
-					}
-				}
+		for _, m := range sd.Methods {
+			if m.IsStatic {
+				out = append(out, m.Name)
+			}
+		}
 
-				return out
+		return out
+	}
+
+	return nil
+}
+
+// structDeclSrc returns the source containing the declaration of struct
+// `name`. With pkg=="" the session declMap is consulted, otherwise the
+// package's sibling .tin files are walked.
+func (c *completer) structDeclSrc(pkg, name string) string {
+	if pkg == "" {
+		return c.s.declMap[name]
+	}
+
+	entry := c.s.findModuleSrc(pkg)
+	if entry == "" {
+		return ""
+	}
+
+	for _, p := range siblingTinFiles(entry) {
+		data, err := os.ReadFile(p) //nolint:gosec
+		if err != nil {
+			continue
+		}
+
+		if hasStructNamed(string(data), name) {
+			return string(data)
+		}
+	}
+
+	return ""
+}
+
+func hasStructNamed(src, name string) bool {
+	prog, err := parseSrc(src)
+	if err != nil {
+		return false
+	}
+
+	for _, n := range prog.Stmts {
+		if sd, ok := n.(*ast.StructDecl); ok && sd.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+// typeOfStructField returns the bare struct name of the field `fieldName`
+// declared on struct `structName`, looked up across the session and any
+// loaded package directories.
+func (s *session) typeOfStructField(structName, fieldName string) string {
+	if structName == "" || fieldName == "" {
+		return ""
+	}
+
+	srcs := []string{s.declMap[structName]}
+	for _, key := range s.declOrder {
+		if !strings.HasPrefix(key, "use__") {
+			continue
+		}
+
+		pkgName := strings.TrimPrefix(key, "use__")
+
+		entry := s.findModuleSrc(pkgName)
+		if entry == "" {
+			continue
+		}
+
+		for _, p := range siblingTinFiles(entry) {
+			data, err := os.ReadFile(p) //nolint:gosec
+			if err == nil {
+				srcs = append(srcs, string(data))
 			}
 		}
 	}
 
-	return nil
+	for _, src := range srcs {
+		if src == "" {
+			continue
+		}
+
+		prog, err := parseSrc(src)
+		if err != nil {
+			continue
+		}
+
+		for _, n := range prog.Stmts {
+			sd, ok := n.(*ast.StructDecl)
+			if !ok || sd.Name != structName {
+				continue
+			}
+
+			for _, f := range sd.Fields {
+				if f.Name == fieldName && f.Type != nil {
+					return canonicalTypeName(f.Type.String())
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// canonicalTypeName converts a Tin-printed type string (e.g.
+// "sync::Channel[string]" or "*Box") to the bare struct name.
+func canonicalTypeName(t string) string {
+	t = strings.TrimSpace(t)
+
+	if i := strings.IndexByte(t, '['); i >= 0 {
+		t = t[:i]
+	}
+
+	t = strings.TrimLeft(t, "*")
+
+	if i := strings.LastIndex(t, "::"); i >= 0 {
+		t = t[i+2:]
+	}
+
+	return t
 }
 
 // typeNameOfGlobal returns the bare struct name (e.g. "Channel") of a
@@ -162,44 +438,29 @@ func (s *session) typeNameOfGlobal(name string) string {
 	if !ok {
 		return ""
 	}
-	// Saved form: "var <name> <type>" -- take everything after the second space.
+
 	parts := strings.SplitN(src, " ", 3)
 	if len(parts) < 3 {
 		return ""
 	}
 
-	t := strings.TrimSpace(parts[2])
-	// Strip generic type-args ("Channel[string]" -> "Channel").
-	if idx := strings.IndexByte(t, '['); idx >= 0 {
-		t = t[:idx]
-	}
-	// Strip leading pointer markers.
-	t = strings.TrimLeft(t, "*")
-	// Strip module prefix ("sync::Channel" -> "Channel").
-	if idx := strings.LastIndex(t, "::"); idx >= 0 {
-		t = t[idx+2:]
-	}
-
-	return t
+	return canonicalTypeName(parts[2])
 }
 
-// methodsAndFieldsOf returns the field and method names declared on a struct
-// known to the session - either via a session-level struct decl or via a
+// methodsAndFieldsOf returns the field and method names declared on a
+// struct known to the session - either via a session-level decl or via a
 // loaded package.
 func (s *session) methodsAndFieldsOf(structName string) []string {
 	if structName == "" {
 		return nil
 	}
-	// Check session-level decl first.
+
 	if src, ok := s.declMap[structName]; ok {
 		if names := scanStructMembers(src, structName); len(names) > 0 {
 			return names
 		}
 	}
-	// Fall back to package-loaded structs. A package's entry .tin often only
-	// re-exports symbols defined in sibling files (e.g. sync.tin re-exports
-	// Channel from channel.tin), so walk all .tin files under the package
-	// directory.
+
 	for _, key := range s.declOrder {
 		if !strings.HasPrefix(key, "use__") {
 			continue
@@ -257,7 +518,6 @@ func siblingTinFiles(entry string) []string {
 	return out
 }
 
-// filepathDir returns everything before the last "/" in p, or "." if none.
 func filepathDir(p string) string {
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		return p[:i]
@@ -267,9 +527,7 @@ func filepathDir(p string) string {
 }
 
 // moduleExportNames parses a module source and returns the bare names listed
-// in any `export { ... } as <pkgName>` declaration. This works whether or
-// not the declared symbols live in the same file (e.g. sync.tin only
-// re-exports symbols defined in mutex.tin, channel.tin, etc.).
+// in any `export { ... } as <pkgName>` declaration.
 func moduleExportNames(src, pkgName string) []string {
 	prog, err := parseSrc(src)
 	if err != nil {
@@ -384,7 +642,6 @@ func filterAndOrder(all []string, partial string) [][]rune {
 	return res
 }
 
-// isIdentByte reports whether c is part of a Tin identifier (ASCII).
 func isIdentByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') ||
 		(c >= 'A' && c <= 'Z') ||
