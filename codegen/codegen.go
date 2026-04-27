@@ -353,6 +353,11 @@ type CodeGen struct {
 	// error. Inspected by Generate's caller to fail the build.
 	hadWarnError bool
 
+	// unsafeDepth tracks lexical nesting of `{#unsafe} { ... }` blocks.
+	// Operations like raw pointer arithmetic and `addr(int_literal)` are
+	// rejected with a compile error when this is zero.
+	unsafeDepth int
+
 	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
 	// reachability decisions for every match / where the compiler sees.
 	// Toggled by -fdump-match-info; for debugging the algorithm itself.

@@ -895,6 +895,12 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		return block, false, nil
 
 	case *ast.TaggedBlock:
+		if hasTag(s.Tags, "unsafe") {
+			cg.unsafeDepth++
+
+			defer func() { cg.unsafeDepth-- }()
+		}
+
 		return cg.genStmt(block, s.Body)
 
 	default:

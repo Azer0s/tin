@@ -1274,6 +1274,11 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, error) {
 	// addr(N) where N is an integer literal: treat as inttoptr cast (raw address).
 	if il, ok := e.Val.(*ast.IntLit); ok {
+		if cg.unsafeDepth == 0 {
+			return nil, cg.nodeErr(e,
+				"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
+		}
+
 		v := constant.NewInt(irtypes.I64, il.Value)
 
 		return block.NewIntToPtr(v, irtypes.I8Ptr), nil

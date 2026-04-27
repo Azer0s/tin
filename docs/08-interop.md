@@ -278,10 +278,16 @@ echo **pp        // 100
 
 ### Pointer arithmetic
 
+Pointer arithmetic and `addr(int_literal)` are unsafe operations and must be
+wrapped in an `{#unsafe} { ... }` block. Outside such a block the compiler
+rejects them with an error.
+
 ```rust
-let video_mem *char = addr(0xB8000).(*char)
-*video_mem = 'H'
-video_mem += 1
+{ #unsafe } {
+  let video_mem *char = addr(0xB8000).(*char)
+  *video_mem = 'H'
+  video_mem += 1
+}
 ```
 
 `addr(N)` interprets an integer as an address (bare-metal / embedded use).

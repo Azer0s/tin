@@ -323,6 +323,26 @@ fn{#pure} guarded(n i64) i64 =
   return n * n
 ```
 
+### `#unsafe`
+
+Raw-pointer operations are rejected at compile time outside an `{#unsafe}`
+block. The block opts the inner code in to two things:
+
+- **Pointer arithmetic** - `ptr + n` / `ptr - n` (any `*T` plus an integer).
+- **`addr(int_literal)`** - interpreting a constant integer as a raw address.
+
+```rust
+fn write_from(buf *byte, n i64) =
+  { #unsafe } {
+    let head = buf + 0
+    let tail = buf + n
+    // ... use head/tail ...
+  }
+```
+
+The check is lexical: nested calls do not inherit the unsafe context. Each
+function must declare its own `{#unsafe}` block where it does pointer work.
+
 ---
 
 ## Struct tags
@@ -549,6 +569,7 @@ self-calls are evaluated at compile time rather than emitted as runtime calls.
 | `#no_recurse`      | fn / method / lambda    | Yes  -  transitive AST walk      | Must not call itself (at any depth)          |
 | `#no_thread`       | fn / method / lambda    | No (advisory)                    | Unsafe for concurrent use                    |
 | `#allow_sideffect` | block                   | Yes  -  suppresses `#pure` check | Permits side effects in this block           |
+| `#unsafe`          | block                   | Yes  -  required for raw pointer ops | Permits pointer arithmetic and `addr(int)` |
 | `#no_excl`         | macro                   | Parser                           | Callable without `!` suffix                  |
 | `#no_parens`       | macro                   | Parser                           | Callable without parentheses                 |
 | `#async`           | fn / method / lambda    | No (enables fiber codegen)       | Runs as a cooperative green thread (fiber)   |

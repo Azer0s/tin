@@ -212,12 +212,14 @@ fn subsequences[t](l [t]) [[t]] =
 
 ```rust
 fn write_string(color i32, s string) =
-  let video_mem *char = addr(0xB8000).(*char)
-  for let c char in s:
-    *video_mem = c
-    video_mem += 1
-    *video_mem = color
-    video_mem += 1
+  { #unsafe } {
+    let video_mem *char = addr(0xB8000).(*char)
+    for let c char in s:
+      *video_mem = c
+      video_mem += 1
+      *video_mem = color
+      video_mem += 1
+  }
 ```
 
 ### Iterators & traits

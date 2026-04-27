@@ -77,9 +77,11 @@ fn{#async} write_string_impl(w io::AsyncWriter, s string) =
 
   loop:
     if sent >= n: break
-    let r = await w.write(ptr + sent, n - sent)
-    if r <= 0: break
-    sent = sent + r
+    { #unsafe } {
+      let r = await w.write(ptr + sent, n - sent)
+      if r <= 0: break
+      sent = sent + r
+    }
 
 fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
   let tmp = mem::malloc(n) as *byte
@@ -87,9 +89,11 @@ fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
 
   loop:
     if got >= n: break
-    let rd = await r.read(tmp + got, n - got)
-    if rd <= 0: break
-    got = got + rd
+    { #unsafe } {
+      let rd = await r.read(tmp + got, n - got)
+      if rd <= 0: break
+      got = got + rd
+    }
 
   let result = tin_bytes_from_buf_c(tmp, got)
   mem::free(tmp as *void)
@@ -134,9 +138,11 @@ fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
 
   loop:
     if sent >= n: break
-    let r = await w.write(ptr + sent, n - sent)
-    if r <= 0: break
-    sent = sent + r
+    { #unsafe } {
+      let r = await w.write(ptr + sent, n - sent)
+      if r <= 0: break
+      sent = sent + r
+    }
 
 // ---------------------------------------------------------------------------
 // Public API

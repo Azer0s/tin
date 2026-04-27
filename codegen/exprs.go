@@ -972,6 +972,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 	// Pointer arithmetic: ptr + int -> getelementptr; ptr - int -> getelementptr with negation.
 	if ptrType, isPtr := lt.(*irtypes.PointerType); isPtr && irtypes.IsInt(rt) {
+		switch e.Op {
+		case "+", "-":
+			if cg.unsafeDepth == 0 {
+				return nil, cg.nodeErr(e,
+					"pointer arithmetic requires an `{#unsafe}` block")
+			}
+		}
 		// Ensure the index is i64.
 		if rt.(*irtypes.IntType).BitSize < 64 {
 			right = block.NewSExt(right, irtypes.I64)
