@@ -470,5 +470,13 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 		walkAST(v.Index, visit)
 	case *ast.FieldAccess:
 		walkAST(v.Expr, visit)
+	case *ast.TestDecl:
+		walkAST(v.Body, visit)
+	case *ast.StructDecl:
+		for _, m := range v.Methods {
+			walkAST(m, visit)
+		}
+	case *ast.TaggedBlock:
+		walkAST(v.Body, visit)
 	}
 }

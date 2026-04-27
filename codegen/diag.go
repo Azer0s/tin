@@ -31,6 +31,12 @@ const (
 	DiagUnusedLet         = "unused-let"
 	DiagUnusedParam       = "unused-param"
 	DiagUnusedResult      = "unused-result"
+	DiagUnusedImport      = "unused-import"
+	DiagIdenticalOperands = "identical-operands"
+	DiagUselessCast       = "useless-cast"
+	DiagAlwaysTrueFalse   = "tautological-int-cmp"
+	DiagLargeStackAlloc   = "large-stack-alloc"
+	DiagUselessIdentity   = "useless-arith-identity"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only

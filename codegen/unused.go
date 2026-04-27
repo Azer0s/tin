@@ -62,6 +62,9 @@ func callDisplayName(c *ast.CallExpr) string {
 // checkAllUnused walks every top-level FuncDecl (including struct methods)
 // and emits unused-let / unused-param warnings for names that are never
 // read in the body. Default-off; gated by -W<name>, -Wall, -Wpedantic.
+//
+// Also runs the unused-import scan over top-level UseDecls, which is
+// default-on (a stale `use` is essentially dead weight in the file).
 func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
 	for _, n := range prog.Stmts {
 		switch v := n.(type) {
@@ -73,6 +76,91 @@ func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
 			}
 		}
 	}
+
+	cg.checkUnusedImports(prog)
+}
+
+// checkUnusedImports warns for `use pkg` / `use { name } from pkg` /
+// `use "./file"` declarations whose imported names are never referenced
+// anywhere else in the program.
+func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
+	// Collect every name referenced anywhere - identifiers, scope-access
+	// roots (pkg::), and field-access roots (pkg.).
+	used := map[string]bool{}
+
+	visit := func(n ast.Node) {
+		switch v := n.(type) {
+		case *ast.Identifier:
+			used[v.Name] = true
+		case *ast.ScopeAccess:
+			if len(v.Path) > 0 {
+				used[v.Path[0]] = true
+			}
+		case *ast.FieldAccess:
+			if id, ok := v.Expr.(*ast.Identifier); ok {
+				used[id.Name] = true
+			}
+		}
+	}
+
+	for _, n := range prog.Stmts {
+		walkAST(n, visit)
+	}
+
+	for _, n := range prog.Stmts {
+		ud, ok := n.(*ast.UseDecl)
+		if !ok || ud.IsExtern {
+			continue
+		}
+
+		if ud.FromSyntax && len(ud.Names) > 0 {
+			// `use { a, b } from pkg`: each name lands in scope directly.
+			for _, name := range ud.Names {
+				if !used[name] {
+					cg.warn(DiagUnusedImport, ud.Pos(),
+						"imported name %q is never used", name)
+				}
+			}
+
+			continue
+		}
+
+		// `use pkg` / `use "./file"` brings the package handle into scope
+		// under its base name (last `::` or `/` segment).
+		base := importBaseName(ud.Path)
+		if base == "" || used[base] {
+			continue
+		}
+
+		cg.warn(DiagUnusedImport, ud.Pos(),
+			"import %q is never used", base)
+	}
+}
+
+// importBaseName returns the bare identifier under which a `use` declaration
+// is referenced. For `use io` it's "io"; for `use std::math` it's "math";
+// for `use "./foo/bar"` it's "bar".
+func importBaseName(path string) string {
+	clean := path
+	if i := lastIndexAny(clean, "/:"); i >= 0 {
+		clean = clean[i+1:]
+	}
+
+	return clean
+}
+
+func lastIndexAny(s, chars string) int {
+	out := -1
+
+	for i := 0; i < len(s); i++ {
+		for j := 0; j < len(chars); j++ {
+			if s[i] == chars[j] && i > out {
+				out = i
+			}
+		}
+	}
+
+	return out
 }
 
 func (cg *CodeGen) checkUnusedInFunc(fn *ast.FuncDecl) {
