@@ -50,6 +50,10 @@ type session struct {
 	// Shared macro registry (also held by the inputReader's highlighter/completer).
 	macros *macroRegistry
 
+	// Shared operator-trait registry: tracks which built-in op traits have
+	// been implemented in this session. Read by the highlighter.
+	opTraits *opTraitRegistry
+
 	// compiledCSrcPaths tracks C source files already compiled into pkg extras .so files.
 	compiledCSrcPaths map[string]bool
 
@@ -57,7 +61,7 @@ type session struct {
 }
 
 // newSession creates a new session and compiles the runtime shared library.
-func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *macroRegistry) (*session, error) {
+func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *macroRegistry, opTraits *opTraitRegistry) (*session, error) {
 	workDir, err := os.MkdirTemp("", "tin-repl-*")
 	if err != nil {
 		return nil, fmt.Errorf("cannot create work dir: %w", err)
@@ -71,6 +75,7 @@ func newSession(runtimeDir, stdlibOverride string, libsRoots []string, macros *m
 		stdlibOverride:    stdlibOverride,
 		libsRoots:         libsRoots,
 		macros:            macros,
+		opTraits:          opTraits,
 		compiledCSrcPaths: make(map[string]bool),
 	}
 
@@ -215,6 +220,10 @@ func (s *session) evalCell(source string) error {
 		case *ast.StructDecl:
 			pendingDecls = append(pendingDecls, pendingDecl{n.Name, extractSrc(source, cellProg.Stmts, node)})
 			cellDecls = append(cellDecls, node)
+
+			if s.opTraits != nil {
+				s.opTraits.recordImpls(n.Implements)
+			}
 		case *ast.TraitDecl:
 			pendingDecls = append(pendingDecls, pendingDecl{"trait__" + n.Name, extractSrc(source, cellProg.Stmts, node)})
 			cellDecls = append(cellDecls, node)

@@ -12,8 +12,9 @@ import (
 // additional package roots.
 func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	macros := newMacroRegistry()
+	opTraits := newOpTraitRegistry()
 
-	s, err := newSession(runtimeDir, stdlibOverride, libsRoots, macros)
+	s, err := newSession(runtimeDir, stdlibOverride, libsRoots, macros, opTraits)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: init failed: %v\n", err)
 
@@ -21,7 +22,7 @@ func Run(runtimeDir, stdlibOverride string, libsRoots []string) {
 	}
 	defer s.close()
 
-	in, err := newInputReader(macros)
+	in, err := newInputReader(macros, opTraits)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "repl: readline init failed: %v\n", err)
 

@@ -12,6 +12,7 @@ const (
 	ansiBoldYellow = "\033[1;33m"
 	ansiMagenta    = "\033[35m"
 	ansiCyan       = "\033[36m"
+	ansiBoldBlue   = "\033[1;34m"
 )
 
 var builtinTypes = map[string]bool{
@@ -22,7 +23,8 @@ var builtinTypes = map[string]bool{
 }
 
 type highlighter struct {
-	macros *macroRegistry
+	macros   *macroRegistry
+	opTraits *opTraitRegistry
 }
 
 func (h *highlighter) Paint(line []rune, _ int) []rune {
@@ -117,9 +119,13 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 		out = append(out, runes[pos:start]...)
 
 		var color string
-		if isMacroPart[i] {
+
+		switch {
+		case isMacroPart[i]:
 			color = ansiYellow
-		} else {
+		case h.isOverloadedOp(tok.Type):
+			color = ansiBoldBlue
+		default:
 			color = colorFor(tok.Type, tok.Literal)
 		}
 
@@ -139,6 +145,56 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 	out = append(out, runes[pos:]...)
 
 	return out
+}
+
+// isOverloadedOp reports whether tokenType is an operator whose corresponding
+// built-in trait has been implemented in this REPL session. The mapping
+// matches binOpTraitName / unaryOpTraitName in codegen — keep them in sync.
+//
+// `[`/`]` are left alone here: they appear in type-arg lists and array
+// literals far more often than in indexing, so painting them based on
+// `index`/`index_set` overload state would be visually noisy.
+func (h *highlighter) isOverloadedOp(tokenType lexer.TokenType) bool {
+	if h.opTraits == nil {
+		return false
+	}
+
+	traits := opTraitsForToken(tokenType)
+	for _, name := range traits {
+		if h.opTraits.isOverloaded(name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// opTraitsForToken returns the trait names whose impl makes a given operator
+// token "overloaded". Some tokens can dispatch through multiple traits
+// (e.g. `==` -> comp; `<` -> ord; binary `+` -> add; unary `+` -> pos).
+func opTraitsForToken(t lexer.TokenType) []string {
+	switch t {
+	case lexer.PLUS, lexer.PLUSEQ:
+		return []string{"add", "pos"}
+	case lexer.MINUS, lexer.MINUSEQ:
+		return []string{"sub", "neg"}
+	case lexer.STAR, lexer.STAREQ:
+		return []string{"mul"}
+	case lexer.SLASH, lexer.SLASHEQ:
+		return []string{"div"}
+	case lexer.PERCENT, lexer.PERCENTEQ:
+		return []string{"mod"}
+	case lexer.NOT:
+		return []string{"not"}
+	case lexer.EQEQ, lexer.NEQ:
+		return []string{"comp"}
+	case lexer.LT, lexer.LTEQ, lexer.GT, lexer.GTEQ:
+		return []string{"ord"}
+	case lexer.INC:
+		return []string{"concat"}
+	}
+
+	return nil
 }
 
 func colorFor(t lexer.TokenType, lit string) string {
