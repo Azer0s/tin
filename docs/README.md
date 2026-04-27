@@ -98,3 +98,16 @@ fn main() =
   echo await ch.recv()   // "result from fiber 1" or "2", whichever finishes first
   echo await ch.recv()
 ```
+
+## Get started
+
+Prerequisites: `clang` and LLVM 21 or newer on `PATH`.
+
+```sh
+go build .
+./tin
+```
+
+That's it. `./tin run file.tin` to compile and execute, `./tin test dir/` to run
+test blocks, or `./tin repl` for the interactive REPL (optionally `./tin repl
+file.tin` to preload a file's declarations).
