@@ -230,6 +230,29 @@ echo pPtr->show()          // shorthand for (*pPtr).show()
 
 --
 
+## Operator overloading
+
+Built-in operators (`+ - * / % == < > [] ++ ! +=` etc.) on a struct dispatch
+through alias traits (`add`, `sub`, `mul`, `comp`, `ord`, `index`, ...). To
+overload an operator, list the trait in the implements list and provide the
+impl in qualified form:
+
+```rust
+struct Vec3(add[Vec3, Vec3]) =
+  x f64
+  y f64
+  z f64
+
+  fn ::add(this Vec3, other Vec3) Vec3 =
+    return Vec3{x: this.x + other.x, y: this.y + other.y, z: this.z + other.z}
+```
+
+See `docs/06-traits.md` (Operator overloading) for the full trait table,
+multi-impl resolution, commutative swap, where-clause shorthand, and
+compound-assignment semantics.
+
+--
+
 ## Generic structs
 
 A struct can be parameterised over one or more type parameters, written in
