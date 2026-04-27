@@ -1243,6 +1243,13 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		sBits := val.Type().(*irtypes.IntType).BitSize
 
 		tBits := targetType.(*irtypes.IntType).BitSize
+
+		// Truncation: warn if the source folds to a constant that doesn't
+		// fit the destination type. Caller may have written `let x i32 = 1<<33`.
+		if sBits > tBits {
+			cg.checkCastTruncatesConst(e, tBits, cg.exprElemIsUnsigned(e.Expr))
+		}
+
 		if sBits < tBits {
 			// IntLit values are always non-negative as written in source code.
 			// Large literals (e.g. 18446744073709551615) that exceed i64::MAX are

@@ -187,6 +187,45 @@ func isStaticallyNonNil(n ast.Node) bool {
 	return false
 }
 
+// checkCastTruncatesConst warns when an `as` cast narrows a constant
+// integer that does not fit the destination's `tBits` width. Signed/unsigned
+// is taken from the source expression.
+func (cg *CodeGen) checkCastTruncatesConst(e *ast.AsExpr, tBits uint64, srcUnsigned bool) {
+	v := cg.tryFoldExpr(e.Expr)
+	if v.kind != foldInt {
+		return
+	}
+
+	var (
+		minOK int64
+		maxOK int64
+	)
+
+	if srcUnsigned || tBits == 64 {
+		minOK = 0
+	} else {
+		minOK = -(int64(1) << (tBits - 1))
+	}
+
+	if srcUnsigned {
+		if tBits >= 64 {
+			return
+		}
+
+		maxOK = (int64(1) << tBits) - 1
+	} else {
+		maxOK = (int64(1) << (tBits - 1)) - 1
+	}
+
+	if v.intVal >= minOK && v.intVal <= maxOK {
+		return
+	}
+
+	cg.warn(DiagCastTrunc, e.Pos(),
+		"constant %d does not fit in i%d (range %d..%d)",
+		v.intVal, tBits, minOK, maxOK)
+}
+
 // checkShiftAmount errors out when a shift's right-hand operand folds to a
 // constant >= the bit width of the left operand. The hardware behavior is
 // implementation-defined / UB so we refuse to lower it.

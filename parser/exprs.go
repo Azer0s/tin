@@ -697,7 +697,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				return nil, err2
 			}
 
-			expr = &ast.AsExpr{Expr: expr, Type: typ}
+			asExpr := &ast.AsExpr{Expr: expr, Type: typ}
+			asExpr.SetPos(expr.Pos())
+			expr = asExpr
 
 		case lexer.KW_IS:
 			p.advance()
