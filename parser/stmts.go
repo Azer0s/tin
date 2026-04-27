@@ -1284,7 +1284,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 			return nil, err2
 		}
 
-		return &ast.AssignStmt{Target: expr, Value: val}, nil
+		stmt := &ast.AssignStmt{Target: expr, Value: val}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	// Augmented assignment +=, -=, *=, /=, %=, ++=
@@ -1296,7 +1299,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 			return nil, err2
 		}
 
-		return &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}, nil
+		stmt := &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	return &ast.ExprStmt{Expr: expr}, nil

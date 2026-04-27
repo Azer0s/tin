@@ -1028,6 +1028,10 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewMul(left, right), nil
 	case "/":
+		if v := cg.tryFoldExpr(e.Right); v.kind == foldInt && v.intVal == 0 {
+			return nil, cg.nodeErr(e, "division by zero")
+		}
+
 		if isFloat {
 			return block.NewFDiv(left, right), nil
 		}
@@ -1038,12 +1042,18 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewSDiv(left, right), nil
 	case "%":
+		if v := cg.tryFoldExpr(e.Right); v.kind == foldInt && v.intVal == 0 {
+			return nil, cg.nodeErr(e, "modulo by zero")
+		}
+
 		if cg.exprElemIsUnsigned(e.Left) {
 			return block.NewURem(left, right), nil
 		}
 
 		return block.NewSRem(left, right), nil
 	case "==":
+		cg.checkTautologicalNilCmp(e, false)
+
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false)
 		// Release temporary string operands after comparison (e.g., fn() == fn()).
 		if isFatPtrType(lt) {
@@ -1058,6 +1068,8 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return result, nil
 	case "!=":
+		cg.checkTautologicalNilCmp(e, true)
+
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true)
 		// Release temporary string operands after comparison (e.g., fn() != fn()).
 		if isFatPtrType(lt) {
@@ -1118,8 +1130,15 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case "^":
 		return block.NewXor(left, right), nil
 	case "<<":
+		if err := cg.checkShiftAmount(e, left); err != nil {
+			return nil, err
+		}
+
 		return block.NewShl(left, right), nil
 	case ">>":
+		if err := cg.checkShiftAmount(e, left); err != nil {
+			return nil, err
+		}
 		// Use logical (zero-fill) right shift for unsigned types.
 		if cg.exprElemIsUnsigned(e.Left) {
 			return block.NewLShr(left, right), nil

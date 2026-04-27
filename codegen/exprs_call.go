@@ -1470,6 +1470,10 @@ func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.F
 }
 
 func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Value, error) {
+	if _, isNil := e.Expr.(*ast.NilLit); isNil {
+		return nil, cg.nodeErr(e, "field access on nil literal")
+	}
+
 	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
 	var enumBaseName string
 

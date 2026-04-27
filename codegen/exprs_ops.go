@@ -1292,6 +1292,10 @@ func (cg *CodeGen) genAddrOfExpr(block *ir.Block, e *ast.AddressOfExpr) (value.V
 }
 
 func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value, error) {
+	if _, isNil := e.Expr.(*ast.NilLit); isNil {
+		return nil, cg.nodeErr(e, "dereferencing nil literal")
+	}
+
 	val, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err

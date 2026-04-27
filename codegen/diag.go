@@ -5,6 +5,7 @@ import (
 	"os"
 
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 
 	"github.com/Azer0s/tin/ast"
 )
@@ -142,6 +143,74 @@ func (cg *CodeGen) checkConstIndexBounds(e *ast.IndexExpr, length int64) {
 
 	cg.warn(DiagArrayBounds, e.Pos(),
 		"index %d is out of bounds for array of length %d", v.intVal, length)
+}
+
+// checkTautologicalNilCmp warns when one side of an `==` / `!=` is the
+// literal `nil` and the other is an expression that's statically non-nil
+// (currently: an &x address-of).
+func (cg *CodeGen) checkTautologicalNilCmp(e *ast.BinExpr, notEqual bool) {
+	_, lNil := e.Left.(*ast.NilLit)
+	_, rNil := e.Right.(*ast.NilLit)
+
+	var nonNil ast.Node
+
+	switch {
+	case lNil && !rNil:
+		nonNil = e.Right
+	case rNil && !lNil:
+		nonNil = e.Left
+	default:
+		return
+	}
+
+	if !isStaticallyNonNil(nonNil) {
+		return
+	}
+
+	truth := "false"
+	if notEqual {
+		truth = "true"
+	}
+
+	cg.warn(DiagTautologicalCmp, e.Pos(),
+		"comparison is always %s: operand is statically non-nil", truth)
+}
+
+// isStaticallyNonNil reports whether n is an expression that the compiler
+// can prove is never nil.
+func isStaticallyNonNil(n ast.Node) bool {
+	switch n.(type) {
+	case *ast.AddressOfExpr:
+		return true
+	}
+
+	return false
+}
+
+// checkShiftAmount errors out when a shift's right-hand operand folds to a
+// constant >= the bit width of the left operand. The hardware behavior is
+// implementation-defined / UB so we refuse to lower it.
+func (cg *CodeGen) checkShiftAmount(e *ast.BinExpr, left value.Value) error {
+	v := cg.tryFoldExpr(e.Right)
+	if v.kind != foldInt {
+		return nil
+	}
+
+	it, ok := left.Type().(*irtypes.IntType)
+	if !ok {
+		return nil
+	}
+
+	if v.intVal < 0 {
+		return cg.nodeErr(e, "shift by negative amount %d", v.intVal)
+	}
+
+	if v.intVal >= int64(it.BitSize) {
+		return cg.nodeErr(e, "shift by %d is >= width of %s (%d bits)",
+			v.intVal, it, it.BitSize)
+	}
+
+	return nil
 }
 
 // staticArrayLen tries to recover the compile-time length of `expr` as the

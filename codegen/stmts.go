@@ -306,7 +306,7 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 
 	var err error
 
-	for _, stmt := range b.Stmts {
+	for i, stmt := range b.Stmts {
 		if block == nil {
 			panic(fmt.Sprintf("genBlock: block nil before stmt %T", stmt))
 		}
@@ -319,11 +319,40 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 		}
 
 		if terminated || block == nil {
+			// Warn about any statements following a terminator. We point at
+			// the first dead statement so the user can locate the unreachable
+			// region quickly.
+			if i+1 < len(b.Stmts) {
+				cg.warn(DiagUnreachableCode, b.Stmts[i+1].Pos(),
+					"unreachable code after %s", terminatorKind(stmt))
+			}
+
 			return nil, true, nil
 		}
 	}
 
 	return block, false, nil
+}
+
+// terminatorKind returns a short human-readable name for a control-flow
+// terminator statement, used in the unreachable-code warning.
+func terminatorKind(stmt ast.Node) string {
+	switch stmt.(type) {
+	case *ast.ReturnStmt:
+		return "return"
+	case *ast.BreakStmt:
+		return "break"
+	}
+
+	if call, ok := stmt.(*ast.ExprStmt); ok {
+		if c, ok2 := call.Expr.(*ast.CallExpr); ok2 {
+			if id, ok3 := c.Func.(*ast.Identifier); ok3 && id.Name == "panic" {
+				return "panic"
+			}
+		}
+	}
+
+	return "terminator"
 }
 
 // isStmtNode reports whether an AST node is inherently a statement (not an
@@ -794,9 +823,15 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 			// -Wunused-result / -Wall). Spawn/await results were already
 			// short-circuited above; this only fires for plain calls.
 			if val != nil && !isVoidType(val.Type()) {
-				cg.warn(DiagUnusedResult, callExpr.Pos(),
-					"discarded result of call to %s; use `_ = ...` to silence",
-					callDisplayName(callExpr))
+				if cg.isCalleePure(callExpr) {
+					cg.warn(DiagDiscardedPureCall, callExpr.Pos(),
+						"discarded result of pure call to %s has no effect",
+						callDisplayName(callExpr))
+				} else {
+					cg.warn(DiagUnusedResult, callExpr.Pos(),
+						"discarded result of call to %s; use `_ = ...` to silence",
+						callDisplayName(callExpr))
+				}
 			}
 		}
 
@@ -2238,6 +2273,13 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		}
 
 		return block, nil
+	}
+	// Detect `x = x` self-assign: same identifier on both sides.
+	if tid, ok := s.Target.(*ast.Identifier); ok {
+		if vid, ok2 := s.Value.(*ast.Identifier); ok2 && tid.Name == vid.Name {
+			cg.warn(DiagSelfAssign, s.Pos(),
+				"self-assignment %q has no effect", tid.Name)
+		}
 	}
 
 	if err := cg.checkFieldWritable(s.Target); err != nil {

@@ -24,6 +24,28 @@ func isVoidType(t irtypes.Type) bool {
 	return false
 }
 
+// isCalleePure reports whether a CallExpr's target function is tagged
+// `#pure`. Pure calls have no observable side effects, so discarding their
+// result is always a mistake (the call could be deleted entirely).
+func (cg *CodeGen) isCalleePure(c *ast.CallExpr) bool {
+	id, ok := c.Func.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	// Built-ins like len/sizeof are inherently pure.
+	if isPureBuiltin(id.Name) {
+		return true
+	}
+
+	for _, fd := range cg.funcDecls {
+		if fd.Name == id.Name && hasTag(fd.Tags, "pure") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // callDisplayName returns a short human-readable description of a call site
 // for use in diagnostic messages.
 func callDisplayName(c *ast.CallExpr) string {
