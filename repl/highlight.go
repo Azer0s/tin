@@ -173,7 +173,7 @@ func (h *highlighter) isOverloadedOp(tokenType lexer.TokenType) bool {
 // token "overloaded". Some tokens can dispatch through multiple traits
 // (e.g. `==` -> comp; `<` -> ord; binary `+` -> add; unary `+` -> pos).
 func opTraitsForToken(t lexer.TokenType) []string {
-	switch t {
+	switch t { //nolint:exhaustive
 	case lexer.PLUS, lexer.PLUSEQ:
 		return []string{"add", "pos"}
 	case lexer.MINUS, lexer.MINUSEQ:

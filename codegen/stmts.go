@@ -2342,9 +2342,10 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// Only applied to Identifier targets: FieldAccess writes are handled by
 	// the isTinStructPtrElem branch below (with its own retain logic), and
 	// pointer dereferences are raw stores by design.
-	if id, isId := s.Target.(*ast.Identifier); isId {
+	if id, isID := s.Target.(*ast.Identifier); isID {
 		if entry, ok := cg.curScope.lookup(id.Name); ok && entry.isHeapOwned {
 			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+
 			if entry.heapOwnedDepth > 1 {
 				structName := cLayoutStructBaseName(entry.tinType)
 				if structName != "" {

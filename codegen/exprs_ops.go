@@ -2280,7 +2280,7 @@ func isBuiltinOpTraitName(name string) bool {
 }
 
 // extractOpTraitName returns the trait base name from a method's TraitQualifier
-// when that method is recognised as an op-trait impl (e.g. "add[Vec3, Vec3]"
+// when that method is recognized as an op-trait impl (e.g. "add[Vec3, Vec3]"
 // -> "add"). Returns "" if the qualifier is not an op-trait reference.
 func extractOpTraitName(traitQualifier string) string {
 	if traitQualifier == "" {
