@@ -270,9 +270,191 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 
 	case *ast.WhereList:
 		for _, c := range v.Clauses {
+			if c.Cond != nil {
+				if err := cg.walkPureNode(fnCtx, c.Cond, allowSideEffect, visited, locals); err != nil {
+					return err
+				}
+			}
+
 			if err := cg.walkPureNode(fnCtx, c.Body, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
+		}
+
+	case *ast.MatchStmt:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		for _, c := range v.Cases {
+			caseLocals := cloneLocals(locals)
+			if c.VarName != "" {
+				caseLocals[c.VarName] = true
+			}
+
+			if err := cg.walkPureNode(fnCtx, c.Pattern, allowSideEffect, visited, caseLocals); err != nil {
+				return err
+			}
+
+			if c.Guard != nil {
+				if err := cg.walkPureNode(fnCtx, c.Guard, allowSideEffect, visited, caseLocals); err != nil {
+					return err
+				}
+			}
+
+			if c.Body != nil {
+				if err := cg.walkPureNode(fnCtx, c.Body, allowSideEffect, visited, caseLocals); err != nil {
+					return err
+				}
+			}
+		}
+
+		if v.Default != nil {
+			if err := cg.walkPureNode(fnCtx, v.Default, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.StructLit:
+		for _, f := range v.Fields {
+			if err := cg.walkPureNode(fnCtx, f.Value, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+		for _, p := range v.Positional {
+			if err := cg.walkPureNode(fnCtx, p, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.ArrayLit:
+		for _, e := range v.Elems {
+			if err := cg.walkPureNode(fnCtx, e, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.ArrayFillLit:
+		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals)
+
+	case *ast.TupleLit:
+		for _, e := range v.Elems {
+			if err := cg.walkPureNode(fnCtx, e, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.RangeExpr:
+		if err := cg.walkPureNode(fnCtx, v.Start, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.End, allowSideEffect, visited, locals)
+
+	case *ast.SliceExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		if err := cg.walkPureNode(fnCtx, v.Start, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.End, allowSideEffect, visited, locals)
+
+	case *ast.InterpolatedString:
+		for _, p := range v.Parts {
+			if !p.IsExpr {
+				continue
+			}
+
+			if err := cg.walkPureNode(fnCtx, p.Expr, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.IsExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+		// Note: v.Pattern may bind v.VarName in the surrounding scope, but
+		// the binding is only visible to the consequent branch which the
+		// IfStmt handler will walk after this expression returns.
+
+	case *ast.AsExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.TypeAssertExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.TypeofExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.AddrExpr:
+		return cg.walkPureNode(fnCtx, v.Val, allowSideEffect, visited, locals)
+
+	case *ast.DerefExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.AddressOfExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.PostfixStmt:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.PipeExpr:
+		if err := cg.walkPureNode(fnCtx, v.Left, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Right, allowSideEffect, visited, locals)
+
+	case *ast.GetfieldExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals)
+
+	case *ast.SetfieldExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		if err := cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Val, allowSideEffect, visited, locals)
+
+	case *ast.LambdaExpr:
+		// A lambda body referenced inside a #pure function is itself opaque
+		// to the static checker (it may close over arbitrary state). Reject
+		// to be conservative; users can move the body into a separate #pure
+		// function if they need static folding.
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - lambda expressions are not verifiable", fnCtx)
+		}
+
+	case *ast.SpawnExpr:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - spawn launches a fiber (side effect)", fnCtx)
+		}
+
+	case *ast.AwaitExpr:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - await blocks on a fiber (side effect)", fnCtx)
+		}
+
+	case *ast.YieldStmt:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - yield is a side effect", fnCtx)
+		}
+
+	case *ast.AwaitMatchStmt:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - await match is a side effect", fnCtx)
 		}
 	}
 

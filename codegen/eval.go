@@ -215,6 +215,23 @@ func evalBodyRaw(body ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) 
 	}
 }
 
+// evalBranch runs a nested block (then/else arm of an IfStmt, body of a for
+// loop, etc.) and merges mutations to outer-scope variables back into env.
+// New bindings introduced inside the branch are discarded so they don't leak.
+// ctfeReturn (and any other error) is propagated unchanged.
+func evalBranch(blk *ast.Block, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
+	inner := copyEnv(env)
+
+	val, err := evalBlock(blk, inner, cg, depth)
+	for k := range env {
+		if cv, ok := inner[k]; ok {
+			env[k] = cv
+		}
+	}
+
+	return val, err
+}
+
 // evalBlock runs a list of statements. A ctfeReturn sentinel from any
 // statement aborts the block and is propagated unchanged to the caller; only
 // evalBody unwraps it. This ensures `return` inside an if/for/where branch
@@ -480,7 +497,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		}
 
 		if cond.b {
-			return evalBlock(v.Then, copyEnv(env), cg, depth)
+			return evalBranch(v.Then, env, cg, depth)
 		}
 
 		for _, ei := range v.ElseIfs {
@@ -494,12 +511,12 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 			}
 
 			if eCond.b {
-				return evalBlock(ei.Body, copyEnv(env), cg, depth)
+				return evalBranch(ei.Body, env, cg, depth)
 			}
 		}
 
 		if v.Else != nil {
-			return evalBlock(v.Else, copyEnv(env), cg, depth)
+			return evalBranch(v.Else, env, cg, depth)
 		}
 
 		return ctfeVal{kind: "i64"}, nil
