@@ -26,8 +26,20 @@ package codegen
 //     condition folds to a constant after substituting locals.
 
 import (
+	"math/big"
+	"strconv"
+
 	"github.com/Azer0s/tin/ast"
 )
+
+// floatPair holds a float-valued constant in two parallel forms: the IEEE
+// 754 result (what runtime arithmetic produces) and the exact rational
+// (what arbitrary-precision arithmetic produces). Used to detect comparisons
+// where the two disagree, like 0.1 + 0.2 == 0.3.
+type floatPair struct {
+	ieee  float64
+	exact *big.Rat
+}
 
 // nilFact is the per-variable abstract value for nil tracking.
 type nilFact int
@@ -115,19 +127,21 @@ type interval struct {
 
 // dfState captures the abstract state at one program point.
 type dfState struct {
-	nil   map[string]nilFact
-	cnst  map[string]constFact
-	freed map[string]bool     // variable was passed to deinit()
-	intv  map[string]interval // integer interval per variable
-	dead  bool                // true means control-flow can't reach this point
+	nil    map[string]nilFact
+	cnst   map[string]constFact
+	freed  map[string]bool       // variable was passed to deinit()
+	intv   map[string]interval   // integer interval per variable
+	floats map[string]*floatPair // exact + IEEE float pair per variable
+	dead   bool                  // true means control-flow can't reach this point
 }
 
 func newDFState() *dfState {
 	return &dfState{
-		nil:   map[string]nilFact{},
-		cnst:  map[string]constFact{},
-		freed: map[string]bool{},
-		intv:  map[string]interval{},
+		nil:    map[string]nilFact{},
+		cnst:   map[string]constFact{},
+		freed:  map[string]bool{},
+		intv:   map[string]interval{},
+		floats: map[string]*floatPair{},
 	}
 }
 
@@ -149,6 +163,10 @@ func (s *dfState) clone() *dfState {
 
 	for k, v := range s.intv {
 		out.intv[k] = v
+	}
+
+	for k, v := range s.floats {
+		out.floats[k] = v
 	}
 
 	return out
@@ -211,6 +229,13 @@ func mergeStates(a, b *dfState) *dfState {
 	for k, v := range a.intv {
 		if w, ok := b.intv[k]; ok {
 			out.intv[k] = unionInterval(v, w)
+		}
+	}
+	// Floats: keep only when both branches agree on the exact rational.
+	// Disagreement means the join can't honestly claim either value.
+	for k, v := range a.floats {
+		if w, ok := b.floats[k]; ok && v.exact.Cmp(w.exact) == 0 && v.ieee == w.ieee {
+			out.floats[k] = v
 		}
 	}
 
@@ -429,6 +454,10 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.intv[v.Name] = iv
 		}
 
+		if fp := dfFoldFloat(v.Value, st); fp != nil {
+			st.floats[v.Name] = fp
+		}
+
 		return st
 
 	case *ast.AssignStmt:
@@ -445,6 +474,12 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			} else {
 				delete(st.intv, id.Name)
 			}
+
+			if fp := dfFoldFloat(v.Value, st); fp != nil {
+				st.floats[id.Name] = fp
+			} else {
+				delete(st.floats, id.Name)
+			}
 		}
 
 		return st
@@ -460,6 +495,7 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.nil[id.Name] = nilBottom
 
 			delete(st.intv, id.Name)
+			delete(st.floats, id.Name)
 		}
 
 		return st
@@ -674,8 +710,128 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 						"field access on %q after deinit on this path", id.Name)
 				}
 			}
+		case *ast.BinExpr:
+			cg.dfCheckFloatPrecision(e, st)
 		}
 	})
+}
+
+// dfCheckFloatPrecision flags `==` / `!=` whose two sides are float
+// expressions that disagree under IEEE 754 but agree under exact
+// arithmetic (the 0.1 + 0.2 == 0.3 trap), threading let-bindings through
+// the dataflow state so it works on variables, not just literals.
+func (cg *CodeGen) dfCheckFloatPrecision(e *ast.BinExpr, st *dfState) {
+	if e.Op != "==" && e.Op != "!=" {
+		return
+	}
+
+	lhs := dfFoldFloat(e.Left, st)
+	if lhs == nil {
+		return
+	}
+
+	rhs := dfFoldFloat(e.Right, st)
+	if rhs == nil {
+		return
+	}
+
+	floatEq := lhs.ieee == rhs.ieee
+	exactEq := lhs.exact.Cmp(rhs.exact) == 0
+
+	if floatEq == exactEq {
+		return
+	}
+
+	ieeeResult := floatEq
+	exactResult := exactEq
+
+	if e.Op == "!=" {
+		ieeeResult = !ieeeResult
+		exactResult = !exactResult
+	}
+
+	cg.warn(DiagFloatPrecision, e.Pos(),
+		"%q evaluates to %v under IEEE 754 but %v under exact arithmetic; "+
+			"use `abs(a - b) < eps` instead",
+		e.Op, ieeeResult, exactResult)
+}
+
+// dfFoldFloat folds an expression to a (IEEE, exact) float pair under the
+// given state. Handles FloatLit, IntLit, the four arithmetic ops, unary
+// minus, and Identifier (via the state's tracked floats). Returns nil for
+// anything we can't statically resolve.
+func dfFoldFloat(n ast.Node, st *dfState) *floatPair {
+	switch e := n.(type) {
+	case *ast.FloatLit:
+		return floatPairFromLit(e.Value)
+	case *ast.IntLit:
+		// Integer literals participate in mixed expressions like `x + 1`.
+		return &floatPair{
+			ieee:  float64(e.Value),
+			exact: new(big.Rat).SetInt64(e.Value),
+		}
+	case *ast.Identifier:
+		if fp, ok := st.floats[e.Name]; ok {
+			return fp
+		}
+	case *ast.UnaryExpr:
+		if e.Op != "-" {
+			return nil
+		}
+
+		inner := dfFoldFloat(e.Expr, st)
+		if inner == nil {
+			return nil
+		}
+
+		return &floatPair{
+			ieee:  -inner.ieee,
+			exact: new(big.Rat).Neg(inner.exact),
+		}
+	case *ast.BinExpr:
+		l := dfFoldFloat(e.Left, st)
+		if l == nil {
+			return nil
+		}
+
+		r := dfFoldFloat(e.Right, st)
+		if r == nil {
+			return nil
+		}
+
+		out := new(big.Rat)
+
+		switch e.Op {
+		case "+":
+			return &floatPair{ieee: l.ieee + r.ieee, exact: out.Add(l.exact, r.exact)}
+		case "-":
+			return &floatPair{ieee: l.ieee - r.ieee, exact: out.Sub(l.exact, r.exact)}
+		case "*":
+			return &floatPair{ieee: l.ieee * r.ieee, exact: out.Mul(l.exact, r.exact)}
+		case "/":
+			if r.ieee == 0 || r.exact.Sign() == 0 {
+				return nil
+			}
+
+			return &floatPair{ieee: l.ieee / r.ieee, exact: out.Quo(l.exact, r.exact)}
+		}
+	}
+
+	return nil
+}
+
+// floatPairFromLit builds a (IEEE, exact) pair from a float literal value.
+// Routes through shortest-decimal so 0.1 maps to the exact 1/10 rather
+// than the IEEE-rounded approximation.
+func floatPairFromLit(f float64) *floatPair {
+	r := new(big.Rat)
+
+	s := strconv.FormatFloat(f, 'g', -1, 64)
+	if _, ok := r.SetString(s); !ok {
+		return nil
+	}
+
+	return &floatPair{ieee: f, exact: r}
 }
 
 // isDeinitCall returns the variable name being deinitialised when expr

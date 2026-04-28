@@ -5,9 +5,6 @@ package codegen
 // beyond what the existing scope already knows.
 
 import (
-	"math/big"
-	"strconv"
-
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
@@ -30,7 +27,6 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 				cg.checkIdenticalOperands(e)
 				cg.checkArithIdentity(e)
 				cg.checkFloatEqual(e)
-				cg.checkFloatPrecision(e)
 			case *ast.AsExpr:
 				cg.checkUselessCast(e)
 			case *ast.IfStmt:
@@ -250,112 +246,6 @@ func (cg *CodeGen) exprIsFloat(expr ast.Node) bool {
 	}
 
 	return irtypes.IsFloat(t)
-}
-
-// checkFloatPrecision flags `==` / `!=` whose two sides are constant float
-// expressions that disagree under IEEE arithmetic but would compare equal
-// under exact rational arithmetic. The classic 0.1 + 0.2 == 0.3 trap.
-//
-// We fold both sides twice: once with float64 (the runtime semantics) and
-// once with big.Rat parsed from each literal's shortest-decimal
-// representation (the user's mental model). A disagreement between the
-// two outcomes is the signal to warn.
-func (cg *CodeGen) checkFloatPrecision(e *ast.BinExpr) {
-	if e.Op != "==" && e.Op != "!=" {
-		return
-	}
-
-	lf, lr, lok := tryFoldFloat(e.Left)
-	if !lok {
-		return
-	}
-
-	rf, rr, rok := tryFoldFloat(e.Right)
-	if !rok {
-		return
-	}
-
-	floatEq := lf == rf
-	ratEq := lr.Cmp(rr) == 0
-
-	if floatEq == ratEq {
-		return
-	}
-
-	ieeeResult := floatEq
-	exactResult := ratEq
-
-	if e.Op == "!=" {
-		ieeeResult = !ieeeResult
-		exactResult = !exactResult
-	}
-
-	cg.warn(DiagFloatPrecision, e.Pos(),
-		"%q evaluates to %v under IEEE 754 but %v under exact arithmetic; "+
-			"use `abs(a - b) < eps` instead",
-		e.Op, ieeeResult, exactResult)
-}
-
-// tryFoldFloat folds a float-valued expression to (float64, *big.Rat, ok).
-// Handles FloatLit and the four arithmetic ops on folded operands. Returns
-// !ok for anything we can't statically resolve (identifiers, calls, etc.).
-func tryFoldFloat(n ast.Node) (float64, *big.Rat, bool) {
-	switch e := n.(type) {
-	case *ast.FloatLit:
-		f := e.Value
-		// Use the shortest-decimal text so 0.1's rational really is 1/10
-		// rather than the bit-exact float-64 value.
-		r := new(big.Rat)
-
-		s := strconv.FormatFloat(f, 'g', -1, 64)
-		if _, ok := r.SetString(s); !ok {
-			return 0, nil, false
-		}
-
-		return f, r, true
-
-	case *ast.UnaryExpr:
-		if e.Op != "-" {
-			return 0, nil, false
-		}
-
-		f, r, ok := tryFoldFloat(e.Expr)
-		if !ok {
-			return 0, nil, false
-		}
-
-		return -f, new(big.Rat).Neg(r), true
-
-	case *ast.BinExpr:
-		lf, lr, lok := tryFoldFloat(e.Left)
-		if !lok {
-			return 0, nil, false
-		}
-
-		rf, rr, rok := tryFoldFloat(e.Right)
-		if !rok {
-			return 0, nil, false
-		}
-
-		out := new(big.Rat)
-
-		switch e.Op {
-		case "+":
-			return lf + rf, out.Add(lr, rr), true
-		case "-":
-			return lf - rf, out.Sub(lr, rr), true
-		case "*":
-			return lf * rf, out.Mul(lr, rr), true
-		case "/":
-			if rf == 0 || rr.Sign() == 0 {
-				return 0, nil, false
-			}
-
-			return lf / rf, out.Quo(lr, rr), true
-		}
-	}
-
-	return 0, nil, false
 }
 
 // astEqual reports whether two AST nodes are syntactically identical for
