@@ -55,7 +55,9 @@ Target:
 Run / test:
   --valgrind               run binary under valgrind --leak-check=full
   --leaks                  run binary under leaks --atExit (macOS only)
-  -j N                     parallel jobs for the per-fn .so cache pipeline (default GOMAXPROCS)
+  -j N                     parallel TUs for clang compile (default GOMAXPROCS)
+  -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0).
+                           Tip: -O0 can compile rtti-heavy tests ~90x faster.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
   -Wall                    enable hygiene checks: unused-let, unused-result
@@ -153,6 +155,18 @@ var (
 // jobs controls per-fn parallel compilation in the pure-fn .so cache pipeline.
 // 0 means "use runtime.GOMAXPROCS(0)"; -j 1 forces serial execution.
 var jobs int
+
+// optLevelOverride is the -O flag value (0/1/2/3/s) supplied on the command
+// line, or "" when the user did not pass -O. When non-empty it overrides the
+// default optLevel chosen by compileIR.
+var optLevelOverride string
+
+// testFastCompile is intended for a future default where `tin test` builds
+// with -O0 (~18x faster on the full suite). Currently off because at least
+// one stdlib pattern (recursive array slicing in arr_sum) leaks memory at
+// -O0 without optimizer-driven TCO/cleanup. Once that's fixed, flip this
+// to true for `tin test`. Until then, users can pass -O0 explicitly.
+var testFastCompile bool
 
 // clangTripleForTarget returns the canonical LLVM target triple for the
 // current targetGOOS/targetGOARCH pair.
@@ -453,12 +467,20 @@ func main() {
 
 	// Skip any flags that appear before the file argument.
 	for fileArgIdx < len(os.Args) {
-		switch a := os.Args[fileArgIdx]; a {
+		a := os.Args[fileArgIdx]
+		switch a {
 		case "-g":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j":
 			fileArgIdx += 2
 		default:
+			// -O0..-O3, -Os, -Oz are single-token flags.
+			if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Os" || a == "-Oz" {
+				fileArgIdx++
+
+				continue
+			}
+
 			goto doneFlags
 		}
 	}
@@ -558,6 +580,8 @@ doneFlags:
 
 				jobs = n
 			}
+		case "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz":
+			optLevelOverride = a
 		default:
 			switch {
 			case strings.HasPrefix(a, "-Wno-"):
@@ -1060,12 +1084,19 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 	llInputFile := llFile.Name()
 
+	finalOpt := chooseOptLevel(isDebug)
+
 	// LLVM 22's -O2 optimizer breaks coroutine yield paths: the "suspended"
 	// default arm of coro.suspend in the resume function is marked unreachable,
 	// causing backward DCE to remove the `store index; ret void` that the
 	// scheduler depends on.  Work around by splitting coroutines at -O1 first
 	// (which produces correct yield paths), then running -O2 on the split IR.
-	if strings.Contains(ir, "llvm.coro.") {
+	//
+	// Only needed when the final compile goes through aggressive optimization
+	// (-O2/-O3); at -O0/-O1 the broken pass is not exercised and we skip the
+	// split, which can otherwise cost a minute or more on coroutine-heavy IR.
+	needsCoroSplit := finalOpt == "-O2" || finalOpt == "-O3"
+	if needsCoroSplit && strings.Contains(ir, "llvm.coro.") {
 		splitFile, err := os.CreateTemp("", "tin-split-*.ll")
 		if err != nil {
 			return fmt.Errorf("cannot create temp file for coro split: %w", err)
@@ -1111,10 +1142,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		llInputFile = splitName
 	}
 
-	optLevel := "-O2"
-	if isDebug {
-		optLevel = "-O0"
-	}
+	optLevel := chooseOptLevel(isDebug)
 
 	// Find runtime .c alongside the tin binary
 	ex, _ := os.Executable()
@@ -1361,6 +1389,31 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	}
 
 	return nil
+}
+
+// chooseOptLevel returns the clang optimization flag for this build. Order of
+// precedence:
+//
+//  1. -O<n> on the command line wins unconditionally.
+//  2. -g (debug) selects -O0 so the debugger sees source as written.
+//  3. `tin test` / `tin build-test` / `tin ir-test` default to -O0 because
+//     optimization buys nothing for test correctness and can take 100x longer
+//     than codegen itself on large IR.
+//  4. Otherwise -O2.
+func chooseOptLevel(isDebug bool) string {
+	if optLevelOverride != "" {
+		return optLevelOverride
+	}
+
+	if isDebug {
+		return "-O0"
+	}
+
+	if testFastCompile {
+		return "-O0"
+	}
+
+	return "-O2"
 }
 
 // parallelJobs returns the per-process compile concurrency. Honours the -j flag
