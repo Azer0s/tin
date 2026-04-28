@@ -137,6 +137,88 @@ func TestCtfeFnHashCycle(t *testing.T) {
 	}
 }
 
+// TestSliceIRForFunc: target define is preserved, every other define becomes a declare.
+func TestSliceIRForFunc(t *testing.T) {
+	full := `target triple = "x86_64-pc-linux-gnu"
+
+%struct.Foo = type { i64, i8* }
+
+@global = constant i64 42
+
+declare void @runtime_release(i8* %p)
+
+define i64 @other(i64 %n) alwaysinline readnone nounwind {
+entry:
+	%0 = mul i64 %n, 3
+	ret i64 %0
+}
+
+define i64 @target(i64 %x) {
+entry:
+	%0 = call i64 @other(i64 %x)
+	ret i64 %0
+}
+`
+
+	out := sliceIRForFunc(full, "target")
+	if out == "" {
+		t.Fatalf("slice returned empty for present function")
+	}
+
+	mustContain(t, out, "define i64 @target(i64 %x)")
+	mustContain(t, out, "declare i64 @other(i64 %n) alwaysinline readnone nounwind")
+	mustContain(t, out, "@global = constant")
+	mustContain(t, out, "%struct.Foo = type")
+	mustContain(t, out, `target triple = "x86_64-pc-linux-gnu"`)
+	mustContain(t, out, "declare void @runtime_release")
+	// the *original* `define i64 @other` body must NOT be in the slice.
+	if strings.Contains(out, "%0 = mul i64 %n, 3") {
+		t.Fatalf("non-target define body leaked into slice:\n%s", out)
+	}
+}
+
+// TestSliceIRForFuncMissing: returns "" when the target define is absent.
+func TestSliceIRForFuncMissing(t *testing.T) {
+	full := `target triple = "x86_64-pc-linux-gnu"
+
+define i64 @other(i64 %n) {
+entry:
+	ret i64 %n
+}
+`
+
+	if out := sliceIRForFunc(full, "missing"); out != "" {
+		t.Fatalf("expected empty slice for missing function, got:\n%s", out)
+	}
+}
+
+// TestExtractDefineName covers a few real shapes seen in Tin's IR.
+func TestExtractDefineName(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"define i64 @foo(i64 %n) {", "foo"},
+		{"define void @assert__ok(i1 %cond) {", "assert__ok"},
+		{"define i64 @safe_add(i64 %a, i64 %b) alwaysinline readnone nounwind {", "safe_add"},
+		{"define { i8*, i64 } @returns_string() {", "returns_string"},
+		{"; comment line", ""},
+	}
+
+	for _, c := range cases {
+		if got := extractDefineName(c.in); got != c.want {
+			t.Errorf("extractDefineName(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func mustContain(t *testing.T, haystack, needle string) {
+	t.Helper()
+
+	if !strings.Contains(haystack, needle) {
+		t.Fatalf("expected slice to contain %q\n--- slice ---\n%s", needle, haystack)
+	}
+}
+
 // helpers
 
 func makeFuncDecl(name, ret string, params []ast.Param, body ast.Node) *ast.FuncDecl {

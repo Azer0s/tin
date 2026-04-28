@@ -958,6 +958,15 @@ doneFlags:
 			die("sbom write: %v", err)
 		}
 
+		// Phase C2: emit per-fn .so files for #pure functions (opt-in via env)
+		// so the cache is ready for the dlopen-based dispatch path that lands
+		// in Phase C3. Off by default to keep default builds fast.
+		if pureFnCacheEnabled() {
+			if err := emitPureFnCache(cg, cprog); err != nil {
+				die("pure-fn cache: %v", err)
+			}
+		}
+
 		cprog.clear()
 
 		validateMemcheck(memcheck)
@@ -1362,6 +1371,93 @@ func parallelJobs() int {
 	}
 
 	return runtime.GOMAXPROCS(0)
+}
+
+// pureFnCacheRoot is the on-disk root for the per-fn .so cache populated by
+// the Phase C2 pipeline. Mirrors the codegen-side ctfeCacheDir helper so
+// main.go can read/write the cache without importing internal codegen state.
+const pureFnCacheRoot = ".build/pure-fn"
+
+// pureFnCacheEnabled reports whether the per-fn .so cache should be emitted
+// for this build. Off by default; toggle with TIN_PURE_FN_CACHE=1 until the
+// dispatch wiring (Phase C3) is in place and we can promote it to always-on.
+func pureFnCacheEnabled() bool {
+	return os.Getenv("TIN_PURE_FN_CACHE") == "1"
+}
+
+// emitPureFnCache walks the #pure artefacts produced by codegen, skips those
+// already cached on disk, and compiles the rest in parallel via the same
+// worker pool sized by -j.
+func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
+	artefacts := cg.PureFnsForCache()
+	if len(artefacts) == 0 {
+		return nil
+	}
+
+	type pendingFn struct {
+		artefact codegen.PureFnArtefact
+		llPath   string
+		soPath   string
+	}
+
+	var pending []pendingFn
+
+	for _, a := range artefacts {
+		dir := filepath.Join(pureFnCacheRoot, a.Hash)
+
+		soPath := filepath.Join(dir, "bin.so")
+		if info, err := os.Stat(soPath); err == nil && !info.IsDir() && info.Size() > 0 {
+			continue // already cached
+		}
+
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+
+		llFile, err := os.CreateTemp("", "tin-purefn-*.ll")
+		if err != nil {
+			return fmt.Errorf("temp .ll: %w", err)
+		}
+
+		if _, err := llFile.WriteString(a.IRText); err != nil {
+			_ = llFile.Close()
+			_ = os.Remove(llFile.Name())
+
+			return fmt.Errorf("write .ll: %w", err)
+		}
+
+		_ = llFile.Close()
+
+		pending = append(pending, pendingFn{
+			artefact: a,
+			llPath:   llFile.Name(),
+			soPath:   soPath,
+		})
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	defer func() {
+		for _, p := range pending {
+			_ = os.Remove(p.llPath)
+		}
+	}()
+
+	if prog != nil {
+		prog.step("pure-fn cache", fmt.Sprintf("emit (%d fns)", len(pending)))
+	}
+
+	var jobsList []compileJob
+
+	for _, p := range pending {
+		args := append([]string{"-shared", "-fPIC", "-O2"}, clangTargetFlag()...)
+		args = append(args, p.llPath, "-o", p.soPath)
+		jobsList = append(jobsList, compileJob{desc: p.artefact.Name, args: args})
+	}
+
+	return runParallelClang(jobsList)
 }
 
 // csrcCacheRoot is the directory holding cached .o files for runtime.c and
