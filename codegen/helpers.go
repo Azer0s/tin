@@ -145,6 +145,31 @@ func (cg *CodeGen) displayStructName(canonicalKey string) string {
 	return canonicalKey
 }
 
+// tinTypeDisplay returns a user-facing description of an LLVM type using
+// Tin syntax: `decimal::Value` rather than the internal `%decimal__Value`,
+// `*Box` rather than `%Box*`, and so on. Used in diagnostic strings so
+// errors don't leak the package-mangling scheme back at the user.
+func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
+	if t == nil {
+		return "void"
+	}
+
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		return "*" + cg.tinTypeDisplay(pt.ElemType)
+	}
+
+	if at, ok := t.(*irtypes.ArrayType); ok {
+		return "[" + cg.tinTypeDisplay(at.ElemType) + "]"
+	}
+
+	name := llvmTypeName(t)
+	if dn, ok := cg.structDisplayNames[name]; ok {
+		return dn
+	}
+
+	return name
+}
+
 // buildClosureEnv heap-allocates an RC-managed env struct for lambda closure captures.
 // Layout: { i8* dtor_fn_ptr, capture_0, capture_1, ... } (dtor at field 0).
 // All RC-tracked captures are retained so the env independently owns them.

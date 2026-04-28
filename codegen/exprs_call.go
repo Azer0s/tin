@@ -35,7 +35,7 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 				return cg.emitOpDispatch(block, fn, val, nil)
 			}
 
-			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, val.Type())
+			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, cg.tinTypeDisplay(val.Type()))
 		}
 	}
 

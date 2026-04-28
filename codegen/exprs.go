@@ -1005,7 +1005,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 
 		return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
-			e.Op, lt, rt)
+			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
 	}
 
 	switch e.Op {
@@ -1277,7 +1277,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	// that plan exists because the previous silent-zero fall-through hid
 	// real bugs at every callsite.
 	return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
-		e.Op, left.Type(), right.Type())
+		e.Op, cg.tinTypeDisplay(left.Type()), cg.tinTypeDisplay(right.Type()))
 }
 
 // genEqNeqExpr implements shared handling for == and != operators.
