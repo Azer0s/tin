@@ -321,6 +321,12 @@ type CodeGen struct {
 	// Used by the #pure transitive side-effect checker.
 	funcDecls map[string]*ast.FuncDecl
 
+	// ctfeCache memoizes the result of tryEvalPureCallToCtfeVal keyed by a
+	// fingerprint of (function name, argument values). A repeated call with
+	// the same args during one compilation unit reuses the prior result
+	// rather than re-walking the body. Cleared per Generate() invocation.
+	ctfeCache map[string]ctfeMemoEntry
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
@@ -915,6 +921,7 @@ func New(filename string) *CodeGen {
 		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
+		ctfeCache:                make(map[string]ctfeMemoEntry),
 		externTLSVars:            make(map[string]*ir.Global),
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
@@ -1263,19 +1270,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	// Pre-pass 1.7: register top-level var declarations as LLVM globals so that
-	// all functions (predeclared in pass 2) can reference them.
-	// Must run AFTER pre-pass 1.9 so package types are available.
-	cg.progress("register globals")
-
-	for _, node := range prog.Stmts {
-		if tv, ok := node.(*ast.TopLevelVar); ok {
-			if err := cg.preregisterTopLevelVar(tv); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	// Pre-pass 1.8: detect overloaded function/method base names so that
 	// predeclareFunc and predeclareMethod can mangle their IR names.
 	for name, flag := range scanOverloadedNames(prog.Stmts) {
@@ -1449,6 +1443,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	for _, node := range prog.Stmts {
 		if n, ok := node.(*ast.StructDecl); ok {
 			if err := cg.genStructMethods(n); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Pass 2.5: register top-level var declarations as LLVM globals. Runs
+	// AFTER pass 2 (function predeclaration) so initializer fold can call
+	// pure functions via funcDecls (e.g. `var x i64 = pure_fn(7) + 1`).
+	cg.progress("register globals")
+
+	for _, node := range prog.Stmts {
+		if tv, ok := node.(*ast.TopLevelVar); ok {
+			if err := cg.preregisterTopLevelVar(tv); err != nil {
 				return nil, err
 			}
 		}

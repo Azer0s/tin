@@ -173,8 +173,31 @@ func (cg *CodeGen) tryFoldExpr(n ast.Node) foldedValue {
 
 	case *ast.UnaryExpr:
 		return cg.tryFoldUnaryExpr(e)
+
+	case *ast.CallExpr:
+		return cg.tryFoldPureCall(e)
 	}
 
+	return unknownFold()
+}
+
+// tryFoldPureCall reuses the AST evaluator behind tryEvalPureCall to fold
+// a call to a `#pure #no_recurse` function whose arguments are themselves
+// constants. Returns unknownFold() for any case the evaluator can't handle
+// (non-pure callee, runtime args, unsupported body shape).
+func (cg *CodeGen) tryFoldPureCall(call *ast.CallExpr) foldedValue {
+	val, _, ok := cg.tryEvalPureCallToCtfeVal(call)
+	if !ok {
+		return unknownFold()
+	}
+
+	switch val.kind {
+	case "i64":
+		return foldedValue{kind: foldInt, intVal: val.i}
+	case "bool":
+		return foldedValue{kind: foldBool, boolVal: val.b}
+	}
+	// f64 and string can't ride in foldedValue today; ignore.
 	return unknownFold()
 }
 

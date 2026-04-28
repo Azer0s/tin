@@ -50,51 +50,118 @@ const maxCTFEDepth = 256
 // constant LLVM value that replaces the call instruction. Returns nil (and no
 // error) if the call cannot be evaluated at compile time.
 func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
-	// Only simple identifier callees (no method/scope/ptr calls).
-	calleeName := resolveCalleeName(call)
-	if calleeName == "" || strings.Contains(calleeName, "::") || strings.HasPrefix(calleeName, ".") {
-		return nil, nil
-	}
-
-	fd, ok := cg.funcDecls[calleeName]
+	val, fd, ok := cg.tryEvalPureCallToCtfeVal(call)
 	if !ok {
 		return nil, nil
 	}
 
-	if !hasTag(fd.Tags, "pure") || !hasTag(fd.Tags, "no_recurse") {
-		return nil, nil
-	}
-	// Generic functions are not evaluated (type substitution not handled).
-	if len(fd.TypeParams) > 0 {
-		return nil, nil
+	llVal, llErr := ctfeValToLLVM(val, fd, cg)
+	if llErr == nil && llVal != nil {
+		cg.progress("ctfe " + fd.Name + "()")
 	}
 
-	// Try to evaluate each argument.
+	return llVal, llErr
+}
+
+// ctfeMemoEntry caches a CTFE result. ok=false means the call was attempted
+// and failed; we cache that too so repeated bail-outs are cheap.
+type ctfeMemoEntry struct {
+	val ctfeVal
+	fd  *ast.FuncDecl
+	ok  bool
+}
+
+// ctfeCacheKey builds a stable string fingerprint of (callee, arg values).
+// Args that aren't constants make the call un-cacheable; we return "" then
+// and the caller skips the cache.
+func ctfeCacheKey(calleeName string, args []ctfeVal) string {
+	var b strings.Builder
+	b.WriteString(calleeName)
+	b.WriteByte('|')
+
+	for _, a := range args {
+		b.WriteString(a.kind)
+		b.WriteByte(':')
+
+		switch a.kind {
+		case "i64":
+			fmt.Fprintf(&b, "%d", a.i)
+		case "f64":
+			fmt.Fprintf(&b, "%v", a.f)
+		case "bool":
+			if a.b {
+				b.WriteByte('1')
+			} else {
+				b.WriteByte('0')
+			}
+		case "string":
+			b.WriteString(a.s)
+		}
+
+		b.WriteByte(',')
+	}
+
+	return b.String()
+}
+
+// tryEvalPureCallToCtfeVal is the shared core: it gates on #pure / #no_recurse,
+// evaluates args through the AST interpreter, and runs the body. Returns the
+// raw ctfeVal so callers that don't need an LLVM value (e.g. tryFoldExpr) can
+// avoid round-tripping through the IR. Returns ok=false on any failure.
+//
+// Memoizes successful and failed evaluations in cg.ctfeCache keyed on
+// (function name, argument fingerprint). A given pure call with literal args
+// hits the body walker exactly once per compilation unit; subsequent calls
+// reuse the cached result.
+func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.FuncDecl, bool) {
+	calleeName := resolveCalleeName(call)
+	if calleeName == "" || strings.Contains(calleeName, "::") || strings.HasPrefix(calleeName, ".") {
+		return ctfeVal{}, nil, false
+	}
+
+	fd, ok := cg.funcDecls[calleeName]
+	if !ok {
+		return ctfeVal{}, nil, false
+	}
+
+	if !hasTag(fd.Tags, "pure") || !hasTag(fd.Tags, "no_recurse") {
+		return ctfeVal{}, nil, false
+	}
+
+	if len(fd.TypeParams) > 0 {
+		return ctfeVal{}, nil, false
+	}
+
 	env := make(map[string]ctfeVal)
+	argVals := make([]ctfeVal, 0, len(call.Args))
+
 	for i, argNode := range call.Args {
 		val, err := evalNode(argNode, env, cg, 0)
 		if err != nil {
-			return nil, nil // argument not constant - fall back to normal codegen
+			return ctfeVal{}, nil, false
 		}
+
+		argVals = append(argVals, val)
 
 		if i < len(fd.Params) {
 			env[fd.Params[i].Name] = val
 		}
 	}
 
-	// Evaluate the function body.
+	cacheKey := ctfeCacheKey(calleeName, argVals)
+	if cached, hit := cg.ctfeCache[cacheKey]; hit {
+		return cached.val, cached.fd, cached.ok
+	}
+
 	result, err := evalBody(fd.Body, env, cg, 0)
 	if err != nil {
-		return nil, nil // evaluation failed - fall back to normal codegen
+		cg.ctfeCache[cacheKey] = ctfeMemoEntry{ok: false}
+		return ctfeVal{}, nil, false
 	}
 
-	// Convert the result to an LLVM constant.
-	llVal, llErr := ctfeValToLLVM(result, fd, cg)
-	if llErr == nil && llVal != nil {
-		cg.progress("ctfe " + calleeName + "()")
-	}
+	cg.ctfeCache[cacheKey] = ctfeMemoEntry{val: result, fd: fd, ok: true}
 
-	return llVal, llErr
+	return result, fd, true
 }
 
 // ---------------------------------------------------------------------------
@@ -114,8 +181,20 @@ func evalBody(body ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	case *ast.WhereList:
 		return evalWhereList(v, env, cg, depth)
 	default:
-		// Single-expression body.
-		return evalNode(body, env, cg, depth)
+		// Single-statement / single-expression body. A bare `return X` here
+		// surfaces as a ctfeReturn sentinel; unwrap it so callers see the
+		// payload rather than an error.
+		val, err := evalNode(body, env, cg, depth)
+		if err != nil {
+			var ret ctfeReturn
+			if errors.As(err, &ret) {
+				return ret.val, nil
+			}
+
+			return ctfeVal{}, err
+		}
+
+		return val, nil
 	}
 }
 
