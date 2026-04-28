@@ -179,53 +179,55 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 
 // evalBody evaluates a function body (Block, WhereList, or expression) and
 // returns the result. Returns errNotConst if the body cannot be fully evaluated.
+//
+// evalBody is the only frame that unwraps the ctfeReturn sentinel. evalBlock
+// and evalIf propagate it upward so that an early `return` inside a nested
+// if/for branch correctly aborts every enclosing block until reaching the
+// function-body frame.
 func evalBody(body ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	if depth > maxCTFEDepth {
 		return ctfeVal{}, errNotConst
 	}
 
+	val, err := evalBodyRaw(body, env, cg, depth)
+	if err != nil {
+		var ret ctfeReturn
+		if errors.As(err, &ret) {
+			return ret.val, nil
+		}
+
+		return ctfeVal{}, err
+	}
+
+	return val, nil
+}
+
+// evalBodyRaw is evalBody without the ctfeReturn unwrap; it dispatches on the
+// body shape and forwards every error (including ctfeReturn) to its caller.
+func evalBodyRaw(body ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	switch v := body.(type) {
 	case *ast.Block:
 		return evalBlock(v, copyEnv(env), cg, depth)
 	case *ast.WhereList:
 		return evalWhereList(v, env, cg, depth)
 	default:
-		// Single-statement / single-expression body. A bare `return X` here
-		// surfaces as a ctfeReturn sentinel; unwrap it so callers see the
-		// payload rather than an error.
-		val, err := evalNode(body, env, cg, depth)
-		if err != nil {
-			var ret ctfeReturn
-			if errors.As(err, &ret) {
-				return ret.val, nil
-			}
-
-			return ctfeVal{}, err
-		}
-
-		return val, nil
+		return evalNode(body, env, cg, depth)
 	}
 }
 
-// evalBlock runs a list of statements, propagating the first return value.
+// evalBlock runs a list of statements. A ctfeReturn sentinel from any
+// statement aborts the block and is propagated unchanged to the caller; only
+// evalBody unwraps it. This ensures `return` inside an if/for/where branch
+// correctly short-circuits every enclosing block frame.
 func evalBlock(blk *ast.Block, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	if blk == nil {
 		return ctfeVal{kind: "i64"}, nil
 	}
 
 	for _, stmt := range blk.Stmts {
-		val, err := evalNode(stmt, env, cg, depth)
-		if err != nil {
-			// Unwrap return sentinel.
-			var ret ctfeReturn
-			if errors.As(err, &ret) {
-				return ret.val, nil
-			}
-
+		if _, err := evalNode(stmt, env, cg, depth); err != nil {
 			return ctfeVal{}, err
 		}
-
-		_ = val
 	}
 
 	return ctfeVal{kind: "i64"}, nil

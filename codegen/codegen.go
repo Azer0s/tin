@@ -618,6 +618,12 @@ type CodeGen struct {
 	// Used to emit deinits in reverse order at the end of main().
 	allTopLevelVars []topLevelVarInit
 
+	// topLevelVarBareNames: bare (un-mangled) names of every top-level `var`
+	// across the entry program and all imported packages. Used by the #pure
+	// soundness check to reject reads/writes of mutable globals from a #pure
+	// body. Populated lazily before checkAllPureFuncs runs.
+	topLevelVarBareNames map[string]bool
+
 	// pkgInitFns: init functions collected from packages that declare
 	// fn init(). Called at program startup after top-level var inits,
 	// in import order (dependencies before dependents).
@@ -1315,6 +1321,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// missing impls per struct in one error so users can fix them in one pass.
 	if err := cg.checkAllTraitImplsComplete(prog.Stmts); err != nil {
 		return nil, err
+	}
+
+	// Collect entry-program top-level var bare names (pkg-imported vars are
+	// already registered via Pre-pass 1.9). The pure-check below uses this set
+	// to reject reads/writes of mutable globals from #pure bodies.
+	if cg.topLevelVarBareNames == nil {
+		cg.topLevelVarBareNames = map[string]bool{}
+	}
+
+	for _, node := range prog.Stmts {
+		if tv, ok := node.(*ast.TopLevelVar); ok {
+			cg.topLevelVarBareNames[tv.Name] = true
+		}
 	}
 
 	// Validate #pure functions: transitive side-effect check.
