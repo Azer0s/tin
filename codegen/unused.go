@@ -65,7 +65,15 @@ func callDisplayName(c *ast.CallExpr) string {
 //
 // Also runs the unused-import scan over top-level UseDecls, which is
 // default-on (a stale `use` is essentially dead weight in the file).
+//
+// All scans are no-ops in REPL mode: each cell only sees its own
+// statements, so a `let` or `use` defined in one cell looks unused even
+// when later cells will reference it.
 func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
+	if cg.replMode {
+		return
+	}
+
 	for _, n := range prog.Stmts {
 		switch v := n.(type) {
 		case *ast.FuncDecl:
@@ -82,8 +90,14 @@ func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
 
 // checkUnusedImports warns for `use pkg` / `use { name } from pkg` /
 // `use "./file"` declarations whose imported names are never referenced
-// anywhere else in the program.
+// anywhere else in the program. Skipped in REPL mode where each cell sees
+// only its own statements - a `use` in cell N legitimately gets used in
+// cell N+1.
 func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
+	if cg.replMode {
+		return
+	}
+
 	// Collect every name referenced anywhere - identifiers, scope-access
 	// roots (pkg::), and field-access roots (pkg.).
 	used := map[string]bool{}
