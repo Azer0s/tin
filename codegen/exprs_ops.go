@@ -1027,12 +1027,12 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 // genPtrRangeSlice handles ptr[lo..hi] on a raw pointer, returning a fat [T].
 // For *byte it calls _tin_bytes_from_buf (ARC-managed copy).
 // For other *T it builds a non-owning fat pointer {ptr+lo, hi-lo}.
+//
+// If ptrExpr resolves to a fixed-size array `[T; N]` (an addressable
+// alloca), the array is implicitly decayed to its first-element pointer
+// so `buf[0..n]` reads as `(&buf[0])[0..n]` - the natural way to splice
+// out an ARC-managed slice without a separate `&` and an extern call.
 func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr ast.Node, hiExpr ast.Node) (value.Value, error) {
-	ptrVal, err := cg.genExpr(block, ptrExpr)
-	if err != nil {
-		return nil, err
-	}
-
 	loVal, err := cg.genExpr(block, loExpr)
 	if err != nil {
 		return nil, err
@@ -1045,6 +1045,29 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 
 	loVal = cg.coerce(block, loVal, irtypes.I64)
 	hiVal = cg.coerce(block, hiVal, irtypes.I64)
+
+	// Try the lvalue path first: a fixed-size array decays to a pointer
+	// to its element type. Falls back to the rvalue path for raw *T or
+	// non-addressable expressions.
+	var ptrVal value.Value
+
+	if arrPtr, lvErr := cg.genLValue(block, ptrExpr); lvErr == nil && arrPtr != nil {
+		if pt2, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+			if at, ok2 := pt2.ElemType.(*irtypes.ArrayType); ok2 {
+				ptrVal = block.NewGetElementPtr(at, arrPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			}
+		}
+	}
+
+	if ptrVal == nil {
+		v, err2 := cg.genExpr(block, ptrExpr)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		ptrVal = v
+	}
 
 	pt, ok := ptrVal.Type().(*irtypes.PointerType)
 	if !ok {
