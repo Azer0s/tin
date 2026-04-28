@@ -12,8 +12,8 @@ fn{#async} slow_str(s string) string =
 test "await match single future" =
   let a = spawn slow_int(7)
   let got i64 = 0
-  await match [a]:
-    case [x]:
+  await match (a):
+    case (x):
       got = x
   assert::equals(7, got)
 
@@ -21,10 +21,10 @@ test "await match two futures" =
   let a = spawn slow_int(42)
   let b = spawn slow_int(99)
   let got i64 = 0
-  await match [a, b]:
-    case [x, _]:
+  await match (a, b):
+    case (x, _):
       got = x
-    case [_, y]:
+    case (_, y):
       got = y
   assert::ok(got > 0)
 
@@ -33,18 +33,18 @@ test "await match heterogeneous" =
   let b = spawn slow_str("hello")
   let int_got i64 = 0
   let str_got = ""
-  await match [a, b]:
-    case [n, _]:
+  await match (a, b):
+    case (n, _):
       int_got = n
-    case [_, s]:
+    case (_, s):
       str_got = s
   let either = int_got + len(str_got)
   assert::ok(either > 0)
 
 test "await match default" =
   let a = spawn slow_int(1)
-  await match [a]:
-    case [x]:
+  await match (a):
+    case (x):
       assert::equals(1, x)
     default:
       assert::ok(true)
@@ -53,14 +53,14 @@ test "await match guard" =
   let a = spawn slow_int(10)
   let b = spawn slow_int(20)
   let got i64 = 0
-  await match [a, b]:
-    case [x, _] if x > 5:
+  await match (a, b):
+    case (x, _) if x > 5:
       got = x
-    case [x, _]:
+    case (x, _):
       got = -1
-    case [_, y] if y > 5:
+    case (_, y) if y > 5:
       got = y
-    case [_, y]:
+    case (_, y):
       got = -2
   assert::ok(got > 0)
 
