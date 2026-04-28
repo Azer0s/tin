@@ -43,6 +43,7 @@ const (
 	DiagImpossibleRange   = "impossible-range"
 	DiagUseAfterDeinit    = "use-after-deinit"
 	DiagDoubleDeinit      = "double-deinit"
+	DiagFloatPrecision    = "float-precision"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
