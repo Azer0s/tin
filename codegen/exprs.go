@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -29,6 +30,18 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 	switch e := node.(type) {
 	case *ast.IntLit:
+		if e.Big != nil {
+			// 128 bits = at most u128 range; values above that don't fit
+			// either i128 or u128 and would silently wrap inside LLVM.
+			if e.Big.BitLen() > 128 {
+				return nil, cg.nodeErr(e,
+					"integer literal %s exceeds i128/u128 range; use a string-based bignum library for larger values",
+					e.Big.String())
+			}
+
+			return &constant.Int{Typ: irtypes.I128, X: new(big.Int).Set(e.Big)}, nil
+		}
+
 		return constant.NewInt(irtypes.I64, e.Value), nil
 
 	case *ast.FloatLit:
@@ -677,6 +690,10 @@ func (s *syntheticValue) String() string     { return "%synthetic" }
 func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
 	switch e := node.(type) {
 	case *ast.IntLit:
+		if e.Big != nil {
+			return irtypes.I128
+		}
+
 		return irtypes.I64
 	case *ast.FloatLit:
 		return irtypes.Double

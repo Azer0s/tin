@@ -189,6 +189,11 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	switch v := node.(type) {
 	// --- Literals ---
 	case *ast.IntLit:
+		if v.Big != nil {
+			// ctfeVal stores i64; cannot represent oversized literal.
+			return ctfeVal{}, errNotConst
+		}
+
 		return ctfeVal{kind: "i64", i: v.Value}, nil
 	case *ast.FloatLit:
 		return ctfeVal{kind: "f64", f: v.Value}, nil

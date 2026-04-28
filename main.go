@@ -1203,7 +1203,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		_ = cObj.Close()
 
 		tmpCObjs = append(tmpCObjs, cObjName)
-		cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
+		cArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 		cArgs = append(cArgs, compileFlags...)
 		cArgs = append(cArgs, cs.path, "-o", cObjName)
 
@@ -1245,6 +1245,16 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		if runtime.GOOS == "darwin" {
 			args = append(args, "-fstandalone-debug")
 		}
+	}
+
+	// Place every function/global in its own section, then ask the linker to
+	// drop sections whose symbols are never reached from the entry point. This
+	// strips unused stdlib helpers pulled in by `use std` but never called.
+	args = append(args, "-ffunction-sections", "-fdata-sections")
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-Wl,-dead_strip")
+	} else {
+		args = append(args, "-Wl,--gc-sections")
 	}
 
 	args = append(args, llInputFile)

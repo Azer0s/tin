@@ -45,6 +45,48 @@ test "i128 negative values" =
   assert::ok(x < 0)
 
 // ============================================================
+// auto-upgrade: literals exceeding i64/u64 default to i128
+// ============================================================
+
+test "literal exceeding u64 auto-upgrades to i128" =
+  let x = 99999999999999999999
+  assert::equals(99999999999999999999 as i128, x)
+
+test "negative oversized literal auto-upgrades to i128" =
+  let x = -99999999999999999999
+  assert::equals(-99999999999999999999 as i128, x)
+
+test "auto-upgraded literal in i128 init (no `as` needed)" =
+  let x i128 = 99999999999999999999
+  assert::equals(99999999999999999999 as i128, x)
+
+test "auto-upgraded literal in arithmetic" =
+  let a = 99999999999999999999 + 1
+  assert::equals(100000000000000000000 as i128, a)
+
+test "hex literal exceeding u64 auto-upgrades" =
+  let x = 0x10000000000000000
+  assert::equals(18446744073709551616 as i128, x)
+
+test "match against oversized i128 literal" =
+  let x i128 = 99999999999999999999
+  let label = "?"
+  match x:
+    case 99999999999999999999:
+      label = "match"
+    default:
+      label = "default"
+  assert::equals("match", label)
+
+fn classify_huge(x i128) string =
+  where (99999999999999999999): "huge"
+  where (_): "other"
+
+test "where pattern against oversized i128 literal" =
+  assert::equals("huge", classify_huge(99999999999999999999))
+  assert::equals("other", classify_huge(42 as i128))
+
+// ============================================================
 // i128 large values
 // ============================================================
 

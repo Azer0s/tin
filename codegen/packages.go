@@ -982,6 +982,24 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.overloadedNames[name] = flag
 	}
 
+	// Pass 0.7: register top-level var declarations in the package as LLVM
+	// globals so that the package's functions (predeclared in pass 2) can
+	// reference them by bare name. Exported vars also become reachable to
+	// the caller as `pkg::name` / `pkg.name`.
+	for _, node := range prog.Stmts {
+		tv, ok := node.(*ast.TopLevelVar)
+		if !ok {
+			continue
+		}
+
+		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
+		}
+	}
+
 	// Pass 1: compile extern-backed functions first so their names are in scope
 	// before non-extern bodies reference them.
 	for _, node := range prog.Stmts {
@@ -2400,10 +2418,19 @@ func (cg *CodeGen) evalConstExprInt(expr ast.Node, hint *irtypes.IntType) (*irty
 	case *ast.IntLit:
 		typ := hint
 		if typ == nil {
-			typ = irtypes.I64
+			if e.Big != nil {
+				typ = irtypes.I128
+			} else {
+				typ = irtypes.I64
+			}
 		}
 
-		raw := big.NewInt(e.Value)
+		var raw *big.Int
+		if e.Big != nil {
+			raw = new(big.Int).Set(e.Big)
+		} else {
+			raw = big.NewInt(e.Value)
+		}
 
 		return typ, normIntBig(raw, uint(typ.BitSize))
 

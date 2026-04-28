@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -1123,6 +1124,14 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 func (cg *CodeGen) toConstInt(c constant.Constant, targetType irtypes.Type) *constant.Int {
 	if ci, ok := c.(*constant.Int); ok {
 		if it, ok2 := targetType.(*irtypes.IntType); ok2 {
+			// Preserve the full big.Int magnitude when the target is at least
+			// as wide as the source (e.g. i128 case against an i128 switch
+			// expression). Calling X.Int64() here would silently truncate
+			// 99999999999999999999 to its bottom 64 bits.
+			if uint(it.BitSize) >= uint(ci.Typ.BitSize) {
+				return &constant.Int{Typ: it, X: new(big.Int).Set(ci.X)}
+			}
+
 			return constant.NewInt(it, ci.X.Int64())
 		}
 

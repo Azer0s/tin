@@ -155,6 +155,11 @@ func (cg *CodeGen) tryFoldExpr(n ast.Node) foldedValue {
 	case *ast.AtomLit:
 		return foldedValue{kind: foldAtom, atomVal: e.Name}
 	case *ast.IntLit:
+		if e.Big != nil {
+			// foldedValue stores i64; bail rather than silently truncate.
+			return unknownFold()
+		}
+
 		return foldedValue{kind: foldInt, intVal: e.Value}
 
 	case *ast.TypeofExpr:

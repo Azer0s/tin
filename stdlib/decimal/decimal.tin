@@ -60,14 +60,16 @@ struct Value(
   fn ::mul(this Value, other Value) Value =
     return Value{coeff: this.coeff * other.coeff, scale: this.scale + other.scale}
 
-  // div produces up to ~18 significant digits of precision.
+  // div produces up to ~18 significant digits of precision. Trailing
+  // zeros are normalized away so `1.5 / 0.5` returns Value{3, 0} rather
+  // than {3e17, 17}.
   fn ::div(this Value, other Value) Value =
     let extra i32 = 18 - this.scale
     if extra < 0:
       extra = 0
     let factor = pow10(extra)
     let new_coeff = (this.coeff * factor) / other.coeff
-    return Value{coeff: new_coeff, scale: this.scale + extra - other.scale}
+    return normalize(Value{coeff: new_coeff, scale: this.scale + extra - other.scale})
 
   fn ::neg(this Value) Value =
     return Value{coeff: -this.coeff, scale: this.scale}
@@ -104,6 +106,18 @@ struct Value(
   // length matches scale).
   fn ::print(this Value) string =
     return format_impl(this)
+
+// normalize strips trailing factors of 10 from coeff while decrementing
+// scale, so that values like {coeff: 30, scale: 1} collapse to {3, 0}.
+// Equality already ignores representation via align(), but keeping div
+// results compact prevents pow10 from overflowing on later operations.
+fn normalize(v Value) Value =
+  let coeff = v.coeff
+  let scale = v.scale
+  for coeff != 0 && scale > 0 && coeff % 10 == 0:
+    coeff = coeff / 10
+    scale = scale - 1
+  return Value{coeff: coeff, scale: scale}
 
 // align returns a, b at the same scale. The lower-scale operand is lifted
 // to match the higher one; the higher operand is unchanged.

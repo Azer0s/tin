@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -391,7 +392,11 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 
 		switch lit := n.Value.(type) {
 		case *ast.IntLit:
-			cv = constant.NewInt(irtypes.I64, lit.Value)
+			if lit.Big != nil {
+				cv = &constant.Int{Typ: irtypes.I128, X: new(big.Int).Set(lit.Big)}
+			} else {
+				cv = constant.NewInt(irtypes.I64, lit.Value)
+			}
 		case *ast.FloatLit:
 			cv = constant.NewFloat(irtypes.Double, lit.Value)
 		case *ast.BoolLit:
@@ -723,17 +728,24 @@ func (cg *CodeGen) resolveMutualTCOCallee(name string) (*ir.Func, bool) {
 	return callee, true
 }
 
-// hasAllocaInsts reports whether fn's entry block currently contains any
-// alloca instructions. Used to gate mutual TCO so musttail isn't requested
-// from a frame that LLVM cannot pop.
+// hasAllocaInsts reports whether fn currently contains any alloca
+// instructions in any of its emitted blocks. Used to gate mutual TCO so
+// musttail isn't requested from a frame that LLVM cannot pop.
+//
+// We scan every block, not just the entry, because allocas can be added
+// past the call site (e.g. a deferred string interp builds an alloca in
+// a successor block) and any live alloca anywhere in the function would
+// keep LLVM from rewriting the musttail into a real tail jump.
 func hasAllocaInsts(fn *ir.Func) bool {
-	if fn == nil || len(fn.Blocks) == 0 {
+	if fn == nil {
 		return false
 	}
 
-	for _, inst := range fn.Blocks[0].Insts {
-		if _, ok := inst.(*ir.InstAlloca); ok {
-			return true
+	for _, blk := range fn.Blocks {
+		for _, inst := range blk.Insts {
+			if _, ok := inst.(*ir.InstAlloca); ok {
+				return true
+			}
 		}
 	}
 
@@ -1285,8 +1297,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevMutated := cg.mutatedNames
 	cg.mutatedNames = collectMutatedNames(n.Body)
 
+	// {#unsafe} is a lexical block scope - a function defined inside an
+	// unsafe block must NOT inherit the depth into its body. Reset the
+	// counter on every function-body boundary and restore on exit.
+	prevUnsafe := cg.unsafeDepth
+	cg.unsafeDepth = 0
+
 	defer func() {
 		cg.mutatedNames = prevMutated
+		cg.unsafeDepth = prevUnsafe
 	}()
 
 	var retType irtypes.Type = irtypes.Void

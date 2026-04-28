@@ -260,8 +260,19 @@ func astEqual(a, b ast.Node) bool {
 		return ok && x.Name == y.Name
 	case *ast.IntLit:
 		y, ok := b.(*ast.IntLit)
+		if !ok {
+			return false
+		}
 
-		return ok && x.Value == y.Value
+		if (x.Big == nil) != (y.Big == nil) {
+			return false
+		}
+
+		if x.Big != nil {
+			return x.Big.Cmp(y.Big) == 0
+		}
+
+		return x.Value == y.Value
 	case *ast.BoolLit:
 		y, ok := b.(*ast.BoolLit)
 

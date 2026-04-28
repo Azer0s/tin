@@ -147,19 +147,39 @@ func (cg *CodeGen) displayStructName(canonicalKey string) string {
 
 // tinTypeDisplay returns a user-facing description of an LLVM type using
 // Tin syntax: `decimal::Value` rather than the internal `%decimal__Value`,
-// `*Box` rather than `%Box*`, and so on. Used in diagnostic strings so
-// errors don't leak the package-mangling scheme back at the user.
+// `*Box` rather than `%Box*`, `[decimal::Value]` for fat arrays, and so
+// on. Used in diagnostic strings so errors don't leak the package-mangling
+// scheme back at the user.
 func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
 	if t == nil {
 		return "void"
 	}
 
-	if pt, ok := t.(*irtypes.PointerType); ok {
-		return "*" + cg.tinTypeDisplay(pt.ElemType)
-	}
+	switch tt := t.(type) {
+	case *irtypes.PointerType:
+		return "*" + cg.tinTypeDisplay(tt.ElemType)
+	case *irtypes.ArrayType:
+		return "[" + cg.tinTypeDisplay(tt.ElemType) + "]"
+	case *irtypes.VectorType:
+		return cg.tinTypeDisplay(tt.ElemType) + "x" + fmt.Sprintf("%d", tt.Len)
+	case *irtypes.StructType:
+		// Anonymous structs that the compiler uses for fat pointers: surface
+		// them as the user-facing equivalent.
+		if tt.Name() == "" {
+			if isStringType(tt) {
+				return "string"
+			}
 
-	if at, ok := t.(*irtypes.ArrayType); ok {
-		return "[" + cg.tinTypeDisplay(at.ElemType) + "]"
+			if isAnyType(tt) {
+				return "any"
+			}
+
+			if isFatArrayPtr(tt) && len(tt.Fields) == 2 {
+				if pt, ok := tt.Fields[0].(*irtypes.PointerType); ok {
+					return "[" + cg.tinTypeDisplay(pt.ElemType) + "]"
+				}
+			}
+		}
 	}
 
 	name := llvmTypeName(t)

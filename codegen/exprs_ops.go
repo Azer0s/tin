@@ -1309,6 +1309,11 @@ func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, e
 				"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
 		}
 
+		if il.Big != nil {
+			return nil, cg.nodeErr(e,
+				"addr(int_literal) target must fit in 64 bits (got %s)", il.Big.String())
+		}
+
 		v := constant.NewInt(irtypes.I64, il.Value)
 
 		return block.NewIntToPtr(v, irtypes.I8Ptr), nil

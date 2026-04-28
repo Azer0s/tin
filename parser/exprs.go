@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -562,6 +563,17 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		switch p.peek().Type {
 		case lexer.DOT:
 			p.advance()
+			// Trailing dot continuation: `foo.` <newline> `  bar()`. Skip
+			// NEWLINE + optional INDENT after the dot so the identifier on
+			// the next line completes the field access. Mirror of the leading-
+			// dot continuation handled above the switch.
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				if p.check(lexer.INDENT) {
+					p.advance()
+					indentConsumed++
+				}
+			}
 			// .(Type) or .(type)
 			if p.check(lexer.LPAREN) {
 				p.advance()
@@ -611,6 +623,13 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.ARROW:
 			p.advance()
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				if p.check(lexer.INDENT) {
+					p.advance()
+					indentConsumed++
+				}
+			}
 
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
@@ -631,6 +650,13 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.DCOLON:
 			p.advance()
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+				if p.check(lexer.INDENT) {
+					p.advance()
+					indentConsumed++
+				}
+			}
 
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
@@ -937,6 +963,56 @@ func (p *Parser) parseArgList() ([]ast.Node, error) {
 	return args, nil
 }
 
+// parseIntLitToken converts the textual form of an integer literal into an
+// ast.IntLit. Two encodings coexist:
+//
+//   - Within u64 range: stored in IntLit.Value as the i64 bit pattern. This
+//     preserves existing behavior for hex constants like 0xffffffffffffffff
+//     (-1 as i64, 18446744073709551615 as u64) where the variable's declared
+//     type decides signedness.
+//   - Above u64 range: IntLit.Big is set to the exact magnitude, and Value
+//     keeps the bottom 64 bits as a fallback. Codegen reads Big to emit an
+//     i128 constant (auto-upgrade); paths that ignore Big see the truncated
+//     bottom 64 bits, matching the behavior of explicit truncation.
+func parseIntLitToken(lit string) *ast.IntLit {
+	if v, err := strconv.ParseInt(lit, 0, 64); err == nil {
+		return &ast.IntLit{Value: v}
+	}
+
+	if uv, err := strconv.ParseUint(lit, 0, 64); err == nil {
+		return &ast.IntLit{Value: int64(uv)}
+	}
+
+	// Exceeds u64. Parse as big.Int (handles 0x prefix) and stash both the
+	// big magnitude and a bit-truncated i64 view.
+	base := 10
+
+	s := lit
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		base = 16
+		s = s[2:]
+	} else if strings.HasPrefix(s, "0b") || strings.HasPrefix(s, "0B") {
+		base = 2
+		s = s[2:]
+	} else if strings.HasPrefix(s, "0o") || strings.HasPrefix(s, "0O") {
+		base = 8
+		s = s[2:]
+	}
+
+	bigVal, ok := new(big.Int).SetString(s, base)
+	if !ok {
+		// Lexer should have rejected malformed digits already; fall back to
+		// zero rather than panicking in the And() below.
+		return &ast.IntLit{Value: 0}
+	}
+
+	low := new(big.Int).And(bigVal, mask64).Int64()
+
+	return &ast.IntLit{Value: low, Big: bigVal}
+}
+
+var mask64 = new(big.Int).SetUint64(^uint64(0))
+
 func (p *Parser) parsePrimary() (ast.Node, error) {
 	tok := p.peek()
 	pos := p.curPos()
@@ -946,18 +1022,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.INT_LIT:
 		p.advance()
 
-		v, err := strconv.ParseInt(tok.Literal, 0, 64)
-		if err != nil {
-			// Large hex/decimal literals that exceed max int64 (e.g. u64 constants
-			// like 0xffffffffffffffff): parse as uint64 and reinterpret bits as int64.
-			// The LLVM IR constant stores the bits unchanged; signedness is determined
-			// by the declared variable type, not the literal.
-			if uv, uerr := strconv.ParseUint(tok.Literal, 0, 64); uerr == nil {
-				v = int64(uv)
-			}
-		}
-
-		return &ast.IntLit{Value: v}, nil
+		return parseIntLitToken(tok.Literal), nil
 
 	case lexer.FLOAT_LIT:
 		p.advance()
@@ -995,14 +1060,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		case lexer.INT_LIT:
 			p.advance()
 
-			v, err := strconv.ParseInt(next.Literal, 0, 64)
-			if err != nil {
-				if uv, uerr := strconv.ParseUint(next.Literal, 0, 64); uerr == nil {
-					v = int64(uv)
-				}
-			}
-
-			return &ast.IntLit{Value: v}, nil
+			return parseIntLitToken(next.Literal), nil
 		default:
 			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
 				next.Line, next.Literal)

@@ -52,6 +52,13 @@ test "negation" =
   let n = -a
   assert::equals(-314, n.coeff)
 
+test "division normalizes trailing zeros" =
+  let a = decimal::from("1.5")
+  let b = decimal::from("0.5")
+  let c = a / b
+  assert::equals(3, c.coeff)
+  assert::equals(0 as i32, c.scale)
+
 test "ord operators" =
   let a = decimal::from("1.0")
   let b = decimal::from("2.0")

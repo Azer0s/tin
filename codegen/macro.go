@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,6 +14,19 @@ import (
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
 )
+
+// intLitAsFloat converts an IntLit to its closest float64 representation.
+// For values exceeding i64 the conversion uses the Big magnitude (with
+// precision loss inherent to float64); otherwise it uses Value directly.
+func intLitAsFloat(il *ast.IntLit) float64 {
+	if il.Big != nil {
+		f, _ := new(big.Float).SetInt(il.Big).Float64()
+
+		return f
+	}
+
+	return float64(il.Value)
+}
 
 // macroTimeout is the maximum wall-clock time allowed for one CTFE macro
 // execution (compilation + run).  Defaults to 5 s; override via the
@@ -194,12 +208,12 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 		}
 		// If we got an IntLit, promote it to FloatLit (echo 1.0 -> "1")
 		if il, ok := node.(*ast.IntLit); ok {
-			return &ast.FloatLit{Value: float64(il.Value)}, nil
+			return &ast.FloatLit{Value: intLitAsFloat(il)}, nil
 		}
 		// UnaryExpr(-IntLit) -> promote to negative FloatLit
 		if ue, ok := node.(*ast.UnaryExpr); ok && ue.Op == "-" {
 			if il, ok2 := ue.Expr.(*ast.IntLit); ok2 {
-				return &ast.FloatLit{Value: -float64(il.Value)}, nil
+				return &ast.FloatLit{Value: -intLitAsFloat(il)}, nil
 			}
 		}
 
@@ -218,8 +232,12 @@ func parseCtfeResult(result, retType, macroName, src string) (ast.Node, error) {
 // inferArgType returns the tin type name for an argument expression.
 // Used to generate typed function parameters in the CTFE wrapper.
 func inferArgType(arg ast.Node) string {
-	switch arg.(type) {
+	switch v := arg.(type) {
 	case *ast.IntLit:
+		if v.Big != nil {
+			return "i128"
+		}
+
 		return "i64"
 	case *ast.FloatLit:
 		return "f64"
@@ -336,6 +354,10 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 	switch v := n.(type) {
 	case *ast.IntLit:
+		if v.Big != nil {
+			return "i128"
+		}
+
 		return "i64"
 	case *ast.FloatLit:
 		return "f64"
