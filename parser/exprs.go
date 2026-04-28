@@ -428,21 +428,14 @@ func (p *Parser) applyPostfixCasts(expr ast.Node) (ast.Node, error) {
 		var (
 			next ast.Node
 			err  error
-			ok   bool
 		)
 
 		switch p.peek().Type {
 		case lexer.KW_AS:
 			next, err = p.parseAsSuffix(expr)
-			ok = true
 		case lexer.KW_IS:
 			next, err = p.parseIsSuffix(expr)
-			ok = true
 		default:
-			return expr, nil
-		}
-
-		if !ok {
 			return expr, nil
 		}
 

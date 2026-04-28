@@ -2422,27 +2422,11 @@ func binOpIsCommutative(op string) bool {
 // `argTypes` are the LLVM types of the user-visible operands (one for binary,
 // none for unary). The receiver is implicit and not included.
 //
-// Op-trait impls are recorded keyed by the bare struct name (e.g. "Value")
-// because predeclareMethod runs with currentPkg cleared. The struct's LLVM
-// type, however, retains the package mangling ("decimal__Value"). Try the
-// caller's name first; if that misses, retry with the package prefix
-// stripped so cross-module dispatch resolves to the same impl.
+// Both top-level and package-loaded structs register impls under the full
+// canonical struct name (`Box` vs. `decimal__Value`); the lookup key here
+// matches whatever `typeNameOf(operand)` returns at the call site so the
+// two always agree.
 func (cg *CodeGen) lookupOpMethod(structName, traitName string, argTypes []irtypes.Type) *ir.Func {
-	if fn := cg.lookupOpMethodExact(structName, traitName, argTypes); fn != nil {
-		return fn
-	}
-
-	if i := strings.Index(structName, "__"); i > 0 {
-		bare := structName[i+2:]
-		if fn := cg.lookupOpMethodExact(bare, traitName, argTypes); fn != nil {
-			return fn
-		}
-	}
-
-	return nil
-}
-
-func (cg *CodeGen) lookupOpMethodExact(structName, traitName string, argTypes []irtypes.Type) *ir.Func {
 	key := structName + "/" + traitName
 
 	for _, e := range cg.opTraitImpls[key] {

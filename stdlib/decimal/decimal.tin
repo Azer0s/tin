@@ -20,9 +20,13 @@ use { Err } from errors
 use errors
 
 
-// pow10 returns 10^n as i64. Caller's responsibility to keep n small enough
-// to avoid overflow (n <= 18 fits in i64).
+// pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
+// range overflow i64 and the function panics rather than silently
+// returning a corrupted scale factor that would propagate as a wrong
+// answer.
 fn pow10(n i32) i64 =
+  if n < 0 || n > 18:
+    panic("decimal: scale {n} out of range [0, 18]; combined coefficient/scale products would overflow i64")
   let r i64 = 1
   let i i32 = 0
   for i < n:
@@ -181,13 +185,18 @@ fn parse_impl(s string) Value =
 // through f64. Iterates printf precision from 1 to 17 and stops at the
 // first precision where atof reproduces the original IEEE bit pattern.
 // This matches Go's strconv.FormatFloat(_, 'g', -1, 64).
+//
+// Non-finite inputs (NaN, +Inf, -Inf) panic - decimal has no representation
+// for them, and silently rounding to zero would mask the bug at the call
+// site. Callers who handle non-finites explicitly should test before
+// converting (`floats::is_nan(x)`, `floats::is_pos_inf(x)`, ...).
 fn from_f64_impl(x f64) Value =
   if x != x:
-    return Value{coeff: 0, scale: 0}     // NaN: collapse to 0; users should pass a string
+    panic("decimal::from(f64): NaN cannot be represented as a decimal")
   if x > 1.7976931348623157e+308:
-    return Value{coeff: 0, scale: 0}     // +Inf
+    panic("decimal::from(f64): +Inf cannot be represented as a decimal")
   if x < -1.7976931348623157e+308:
-    return Value{coeff: 0, scale: 0}     // -Inf
+    panic("decimal::from(f64): -Inf cannot be represented as a decimal")
   let buf [byte; 64]
   let prec i32 = 1
   for prec <= 17:

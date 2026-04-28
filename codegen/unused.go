@@ -167,6 +167,12 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			}
 
 			visitType(v.RetType)
+		case *ast.LambdaExpr:
+			for _, p := range v.Params {
+				visitType(p.Type)
+			}
+
+			visitType(v.RetType)
 		case *ast.VarDecl:
 			visitType(v.Type)
 		case *ast.StructDecl:
@@ -174,6 +180,8 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 				visitType(f.Type)
 			}
 		case *ast.AsExpr:
+			visitType(v.Type)
+		case *ast.IsExpr:
 			visitType(v.Type)
 		}
 	}

@@ -665,7 +665,11 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// Pass 0.8: detect overloaded function names so Pass 2/3 can mangle IR
 	// names for functions sharing the same base name (e.g. get(url) vs
 	// get(client, url)). Mirrors the same pass in loadPackageFromSource.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	// File imports inherit the enclosing package context (cg.currentPkg),
+	// so struct method keys must be scanned under that prefix or
+	// overloads on the imported file's structs won't be mangled and end
+	// up colliding under their bare scope name.
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, cg.currentPkg) {
 		cg.overloadedNames[name] = flag
 	}
 
