@@ -1344,6 +1344,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	cg.runAndersen(prog)
 
+	cg.runAstChecks(prog)
+
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")
 

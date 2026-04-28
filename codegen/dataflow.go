@@ -107,15 +107,17 @@ func mergeConst(a, b constFact) constFact {
 
 // dfState captures the abstract state at one program point.
 type dfState struct {
-	nil  map[string]nilFact
-	cnst map[string]constFact
-	dead bool // true means control-flow can't reach this point
+	nil   map[string]nilFact
+	cnst  map[string]constFact
+	freed map[string]bool // variable was passed to deinit()
+	dead  bool            // true means control-flow can't reach this point
 }
 
 func newDFState() *dfState {
 	return &dfState{
-		nil:  map[string]nilFact{},
-		cnst: map[string]constFact{},
+		nil:   map[string]nilFact{},
+		cnst:  map[string]constFact{},
+		freed: map[string]bool{},
 	}
 }
 
@@ -129,6 +131,10 @@ func (s *dfState) clone() *dfState {
 
 	for k, v := range s.cnst {
 		out.cnst[k] = v
+	}
+
+	for k, v := range s.freed {
+		out.freed[k] = v
 	}
 
 	return out
@@ -170,6 +176,20 @@ func mergeStates(a, b *dfState) *dfState {
 	for k, v := range b.cnst {
 		if _, ok := out.cnst[k]; !ok {
 			out.cnst[k] = v
+		}
+	}
+	// freed: if either branch freed the var, treat as freed at the join.
+	// This is the "may-be-freed" semantics that catches use-after-deinit
+	// even when only one branch did the deinit.
+	for k, v := range a.freed {
+		if v {
+			out.freed[k] = true
+		}
+	}
+
+	for k, v := range b.freed {
+		if v {
+			out.freed[k] = true
 		}
 	}
 
@@ -295,6 +315,7 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st = st.clone()
 			st.nil[id.Name] = cg.dfNilOf(v.Value, st)
 			st.cnst[id.Name] = cg.dfEval(v.Value, st)
+			delete(st.freed, id.Name) // reassign clears freed state
 		}
 
 		return st
@@ -313,6 +334,19 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 		return st
 
 	case *ast.ExprStmt:
+		if name, ok := isDeinitCall(v.Expr); ok {
+			st = st.clone()
+
+			if st.freed[name] {
+				cg.warn(DiagDoubleDeinit, v.Expr.Pos(),
+					"deinit on %q which has already been deinitialised on this path", name)
+			}
+
+			st.freed[name] = true
+
+			return st
+		}
+
 		cg.dfCheckExpr(v.Expr, st)
 
 		return st
@@ -473,8 +507,9 @@ func (cg *CodeGen) dfWalkMatch(s *ast.MatchStmt, st *dfState) *dfState {
 	return merged
 }
 
-// dfCheckExpr looks for nil-deref / nil-field-access patterns inside expr
-// using the current state. The walk is non-state-modifying.
+// dfCheckExpr looks for nil-deref, nil-field-access, and use-after-deinit
+// patterns inside expr using the current state. The walk is non-state-
+// modifying.
 func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 	if expr == nil || st == nil {
 		return
@@ -488,6 +523,11 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 					cg.warn(DiagDerefNil, e.Pos(),
 						"dereferencing %q which is statically nil at this point", id.Name)
 				}
+
+				if st.freed[id.Name] {
+					cg.warn(DiagUseAfterDeinit, e.Pos(),
+						"dereference of %q after deinit on this path", id.Name)
+				}
 			}
 		case *ast.FieldAccess:
 			if id, ok := e.Expr.(*ast.Identifier); ok {
@@ -495,9 +535,40 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 					cg.warn(DiagDerefNil, e.Pos(),
 						"field access on %q which is statically nil at this point", id.Name)
 				}
+
+				if st.freed[id.Name] {
+					cg.warn(DiagUseAfterDeinit, e.Pos(),
+						"field access on %q after deinit on this path", id.Name)
+				}
 			}
 		}
 	})
+}
+
+// isDeinitCall returns the variable name being deinitialised when expr
+// matches `x.deinit()` or `(*x).deinit()`. The second form is what shows
+// up after parsing the typical `(*ptr).deinit()` syntax.
+func isDeinitCall(expr ast.Node) (string, bool) {
+	c, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+
+	fa, ok := c.Func.(*ast.FieldAccess)
+	if !ok || fa.Field != "deinit" {
+		return "", false
+	}
+
+	switch r := fa.Expr.(type) {
+	case *ast.Identifier:
+		return r.Name, true
+	case *ast.DerefExpr:
+		if id, ok := r.Expr.(*ast.Identifier); ok {
+			return id.Name, true
+		}
+	}
+
+	return "", false
 }
 
 // dfNilOf returns the nil-state of an expression evaluated under st.

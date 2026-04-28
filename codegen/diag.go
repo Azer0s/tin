@@ -37,6 +37,12 @@ const (
 	DiagAlwaysTrueFalse   = "tautological-int-cmp"
 	DiagLargeStackAlloc   = "large-stack-alloc"
 	DiagUselessIdentity   = "useless-arith-identity"
+	DiagFloatEqual        = "float-equal"
+	DiagEmptyBody         = "empty-body"
+	DiagInfiniteRecursion = "infinite-recursion"
+	DiagImpossibleRange   = "impossible-range"
+	DiagUseAfterDeinit    = "use-after-deinit"
+	DiagDoubleDeinit      = "double-deinit"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
@@ -45,13 +51,14 @@ var defaultOffWarnings = map[string]bool{
 	DiagUnusedLet:    true,
 	DiagUnusedParam:  true,
 	DiagUnusedResult: true,
+	DiagFloatEqual:   true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
 // always-on safety warnings. Mirrors the clang/gcc convention: useful
 // hygiene checks that don't usually produce false positives in idiomatic
 // code.
-var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult}
+var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual}
 
 // wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
 // These can produce noise in code that follows trait-conformance patterns
