@@ -124,7 +124,16 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 		return ctfeVal{}, nil, false
 	}
 
-	if !hasTag(fd.Tags, "pure") || !hasTag(fd.Tags, "no_recurse") {
+	// #pure is the user-facing contract; the evaluator's 256-frame depth
+	// limit (see maxCTFEDepth) bounds recursion safely, so we no longer
+	// require the explicit #no_recurse tag.
+	if !hasTag(fd.Tags, "pure") {
+		return ctfeVal{}, nil, false
+	}
+
+	// Functions with a {#allow_sideffect} block can't be CTFE'd: the block
+	// must run for its side effects and the evaluator can't simulate them.
+	if bodyHasAllowSideffect(fd.Body) {
 		return ctfeVal{}, nil, false
 	}
 

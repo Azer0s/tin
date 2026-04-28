@@ -275,6 +275,12 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
 
+	// #pure functions get LLVM attributes that unblock the optimizer:
+	// alwaysinline so call sites disappear; readnone + nounwind when the
+	// body has no {#allow_sideffect} escape hatch, letting LLVM hoist /
+	// CSE / dead-store-eliminate around the call.
+	cg.applyPureFuncAttrs(f, n)
+
 	if n.RetType != nil && isUnsignedTinType(n.RetType) {
 		cg.funcReturnUnsigned[irName] = true
 	}
@@ -293,6 +299,54 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	}
 
 	return nil
+}
+
+// applyPureFuncAttrs sets LLVM function attributes on f based on the Tin
+// function's purity annotation:
+//
+//   - #pure → alwaysinline (always; the inliner will substitute the body
+//     at every call site so LLVM's optimizer sees the math directly).
+//   - #pure with no {#allow_sideffect} block in the body → readnone +
+//     nounwind. This tells LLVM the call has no observable side effects
+//     and can be CSE'd, hoisted out of loops, or DCE'd when its result is
+//     unused.
+//
+// Functions that contain at least one {#allow_sideffect} block keep the
+// alwaysinline hint but skip readnone (the block may touch memory, log,
+// etc.). Non-#pure functions get neither attribute and remain at LLVM's
+// default heuristics.
+func (cg *CodeGen) applyPureFuncAttrs(f *ir.Func, n *ast.FuncDecl) {
+	if !hasTag(n.Tags, "pure") {
+		return
+	}
+
+	f.FuncAttrs = append(f.FuncAttrs, enum.FuncAttrAlwaysInline)
+
+	if !bodyHasAllowSideffect(n.Body) {
+		f.FuncAttrs = append(f.FuncAttrs,
+			enum.FuncAttrReadNone,
+			enum.FuncAttrNoUnwind,
+		)
+	}
+}
+
+// bodyHasAllowSideffect walks an AST subtree looking for any TaggedBlock
+// carrying the `allow_sideffect` tag. Used to decide whether a #pure
+// function's body is strictly pure or has an escape hatch.
+func bodyHasAllowSideffect(body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+
+	walkAST(body, func(n ast.Node) {
+		if tb, ok := n.(*ast.TaggedBlock); ok && hasTag(tb.Tags, "allow_sideffect") {
+			found = true
+		}
+	})
+
+	return found
 }
 
 // Pre-registration pass
