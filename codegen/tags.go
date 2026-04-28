@@ -110,6 +110,11 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 	case *ast.ScopeAccess:
 		// pkg::name read: reject if it resolves to a mutable top-level var in
 		// any package. The bare name is the last path segment.
+		//
+		// This is a heuristic: a false positive occurs only when one package
+		// exports a function (or other identifier) whose bare name matches a
+		// `var` declared in a different package. In practice the cross-pkg
+		// collision is rare; users hitting it can rename one of the two.
 		if !allowSideEffect && len(v.Path) > 0 {
 			last := v.Path[len(v.Path)-1]
 			if cg.topLevelVarBareNames[last] {
@@ -456,6 +461,27 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 		if !allowSideEffect {
 			return cg.nodeErr(v, "fn %s: #pure violation - await match is a side effect", fnCtx)
 		}
+
+	case *ast.DefaultExpr:
+		if v.OfExpr != nil {
+			return cg.walkPureNode(fnCtx, v.OfExpr, allowSideEffect, visited, locals)
+		}
+
+	case *ast.FieldnamesExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.FieldtypesExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.FieldtagExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals)
+
+	case *ast.TraitofExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
 	}
 
 	return nil
