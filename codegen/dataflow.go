@@ -9,7 +9,7 @@ package codegen
 //   - SCCP-style constant propagation for integer and boolean locals.
 //     Lattice elements are TOP (uninitialised), CONST(c), or BOTTOM (varying).
 //
-//   - Nil tracking for pointer / RC-typed locals, an Andersen-style
+//   - Nil tracking for pointer / RC-typed locals, an Andersen's-style
 //     "may-point-to" set restricted to two abstract addresses: NIL and
 //     NON_NIL. Per-variable lattice: TOP, NIL, NON_NIL, BOTTOM (could be
 //     either).

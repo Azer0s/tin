@@ -1,11 +1,11 @@
 package codegen
 
-// Whole-program Andersen-style points-to analysis.
+// Whole-program Andersen's-style points-to analysis.
 //
 // The goal is interprocedural: an intraprocedural pass already knows that
 // `let p *T = nil; *p` derefs nil, but it can't see through
-// `let p = make_nothing(); *p` when the callee always returns nil. Andersen
-// solves that.
+// `let p = make_nothing(); *p` when the callee always returns nil.
+// Andersen's analysis solves that.
 //
 // Algorithm (inclusion-based, context-insensitive):
 //
@@ -27,7 +27,7 @@ package codegen
 //      `*p` / `p.field` is provably nil and gets a hard warning.
 //
 // This complements the intraprocedural dataflow pass: that one is precise
-// inside a single function's CFG; Andersen widens the picture across calls.
+// inside a single function's CFG; Andersen's widens the picture across calls.
 
 import (
 	"github.com/Azer0s/tin/ast"
@@ -232,12 +232,12 @@ func (cg *CodeGen) scanAndersenDerefs(fn *ast.FuncDecl, pts map[ptVar]map[ptToke
 		case *ast.DerefExpr:
 			if id, ok := e.Expr.(*ast.Identifier); ok && provesNil(id.Name) {
 				cg.warn(DiagDerefNil, e.Pos(),
-					"dereferencing %q which Andersen analysis proves only points to nil", id.Name)
+					"dereferencing %q which static analysis proves only points to nil", id.Name)
 			}
 		case *ast.FieldAccess:
 			if id, ok := e.Expr.(*ast.Identifier); ok && provesNil(id.Name) {
 				cg.warn(DiagDerefNil, e.Pos(),
-					"field access on %q which Andersen analysis proves only points to nil", id.Name)
+					"field access on %q which static analysis proves only points to nil", id.Name)
 			}
 		}
 	})
