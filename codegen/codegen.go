@@ -327,6 +327,11 @@ type CodeGen struct {
 	// rather than re-walking the body. Cleared per Generate() invocation.
 	ctfeCache map[string]ctfeMemoEntry
 
+	// ctfeFnHashes memoizes the Merkle hash for each #pure FuncDecl. Used
+	// by the on-disk pure-fn cache (.build/pure-fn/<hash>/) so the recursive
+	// hash walk visits each function at most once per compilation.
+	ctfeFnHashes ctfeFnHashCache
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
