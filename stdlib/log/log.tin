@@ -1,0 +1,185 @@
+// stdlib/log - leveled logging with text or JSON output.
+//
+// Two concrete loggers, each with its own emit:
+//   - `TextLogger`: human-readable single line, optional ANSI color.
+//   - `JsonLogger`: one JSON object per line for log shippers / ELK / loki.
+//
+// Pick one at construction; both expose the same `debug/info/warn/error/
+// fatal` methods, so callers stay backend-agnostic. All entries write to
+// stderr in a single write(2) so multi-fiber output stays line-atomic.
+//
+// ## Quick start
+//
+//   use log
+//
+//   let l = log::text(log::LEVEL_INFO, log::COLOR_AUTO)
+//   l.info("server started")
+//   l.warn("disk usage high")
+//
+//   let p = log::json(log::LEVEL_INFO)
+//   p.error("connect failed")
+//
+// Five levels: DEBUG, INFO, WARN, ERROR, FATAL. FATAL prints then exits(1).
+
+use time
+
+fn isatty_c(fd i32) i32 = extern("isatty")
+fn write_c(fd i32, buf *byte, n i64) i64 = extern("write")
+fn exit_c(code i32) = extern("exit")
+
+const LEVEL_DEBUG i32 = 0
+const LEVEL_INFO  i32 = 1
+const LEVEL_WARN  i32 = 2
+const LEVEL_ERROR i32 = 3
+const LEVEL_FATAL i32 = 4
+
+const COLOR_AUTO i32 = 0
+const COLOR_ON   i32 = 1
+const COLOR_OFF  i32 = 2
+
+// TextLogger writes one human-readable line per entry: timestamp, level,
+// message. Level is colorized when stderr is a TTY (or COLOR_ON forced).
+struct TextLogger =
+  level i32
+  color i32
+
+  fn debug(this TextLogger, msg string) = text_emit(this, 0 as i32, msg)
+  fn info (this TextLogger, msg string) = text_emit(this, 1 as i32, msg)
+  fn warn (this TextLogger, msg string) = text_emit(this, 2 as i32, msg)
+  fn error(this TextLogger, msg string) = text_emit(this, 3 as i32, msg)
+  fn fatal(this TextLogger, msg string) =
+    text_emit(this, 4 as i32, msg)
+    exit_c(1)
+
+// JsonLogger writes one JSON object per line. Use for log shippers.
+struct JsonLogger =
+  level i32
+
+  fn debug(this JsonLogger, msg string) = json_emit(this, 0 as i32, msg)
+  fn info (this JsonLogger, msg string) = json_emit(this, 1 as i32, msg)
+  fn warn (this JsonLogger, msg string) = json_emit(this, 2 as i32, msg)
+  fn error(this JsonLogger, msg string) = json_emit(this, 3 as i32, msg)
+  fn fatal(this JsonLogger, msg string) =
+    json_emit(this, 4 as i32, msg)
+    exit_c(1)
+
+// text constructs a TextLogger.
+fn text(lvl i32, color i32) TextLogger =
+  return TextLogger{level: lvl, color: color}
+
+// json constructs a JsonLogger.
+fn json(lvl i32) JsonLogger =
+  return JsonLogger{level: lvl}
+
+fn text_emit(l TextLogger, lvl i32, msg string) =
+  if lvl < l.level:
+    return
+  let line = render_text(lvl, msg, resolve_color(l.color))
+  write_line(line)
+
+fn json_emit(l JsonLogger, lvl i32, msg string) =
+  if lvl < l.level:
+    return
+  let line = render_json(lvl, msg)
+  write_line(line)
+
+fn resolve_color(c i32) bool =
+  if c == COLOR_ON:  return true
+  if c == COLOR_OFF: return false
+  return isatty_c(2) == 1
+
+fn write_line(line string) =
+  let bytes = line as [byte]
+  let _ = write_c(2, &bytes[0], len(bytes))
+
+// esc_byte is an ANSI ESC (0x1b) as a one-byte string. Tin's string
+// literals don't decode \x escapes, so we build the byte explicitly.
+fn esc_byte() string =
+  let b [byte; 1]
+  b[0] = 0x1b as byte
+  return b[0..1] as string
+
+fn render_text(lvl i32, msg string, color bool) string =
+  let ts = time::now().to_rfc3339()
+  let lvl_str = level_token_padded(lvl)
+  if color:
+    let esc = esc_byte()
+    lvl_str = esc ++ "[" ++ level_color(lvl) ++ "m" ++ lvl_str ++ esc ++ "[0m"
+  return ts ++ " " ++ lvl_str ++ " " ++ msg ++ "\n"
+
+fn render_json(lvl i32, msg string) string =
+  let ts = time::now().to_rfc3339()
+  let body string = "\{\"time\":\""
+  body = body ++ ts
+  body = body ++ "\",\"level\":\""
+  body = body ++ level_name(lvl)
+  body = body ++ "\",\"msg\":\""
+  body = body ++ escape_json(msg)
+  body = body ++ "\"\}\n"
+  return body
+
+fn level_token_padded(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "DEBUG"
+  if lvl == LEVEL_INFO:  return "INFO "
+  if lvl == LEVEL_WARN:  return "WARN "
+  if lvl == LEVEL_ERROR: return "ERROR"
+  if lvl == LEVEL_FATAL: return "FATAL"
+  return "?    "
+
+fn level_name(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "debug"
+  if lvl == LEVEL_INFO:  return "info"
+  if lvl == LEVEL_WARN:  return "warn"
+  if lvl == LEVEL_ERROR: return "error"
+  if lvl == LEVEL_FATAL: return "fatal"
+  return "?"
+
+fn level_color(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "36"     // cyan
+  if lvl == LEVEL_INFO:  return "32"     // green
+  if lvl == LEVEL_WARN:  return "33"     // yellow
+  if lvl == LEVEL_ERROR: return "31"     // red
+  if lvl == LEVEL_FATAL: return "1;31"   // bold red
+  return "0"
+
+fn escape_json(s string) string =
+  let n = len(s)
+  let out [byte; 4096]
+  let oi i64 = 0
+  let i i64 = 0
+  for i < n:
+    if oi >= 4090:
+      break
+    let c = s[i]
+    if c == @'\"':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'\"' as byte
+      oi = oi + 2
+    else if c == @'\\':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'\\' as byte
+      oi = oi + 2
+    else if c == @'\n':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'n' as byte
+      oi = oi + 2
+    else if c == @'\r':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'r' as byte
+      oi = oi + 2
+    else if c == @'\t':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'t' as byte
+      oi = oi + 2
+    else:
+      out[oi] = c as byte
+      oi = oi + 1
+    i = i + 1
+  return out[0..oi] as string
+
+export {
+  LEVEL_DEBUG, LEVEL_INFO, LEVEL_WARN, LEVEL_ERROR, LEVEL_FATAL,
+  COLOR_AUTO, COLOR_ON, COLOR_OFF,
+  TextLogger, JsonLogger,
+  text, json,
+} as log

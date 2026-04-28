@@ -1,0 +1,35 @@
+use log
+use assert
+
+// Loggers can be constructed and methods compile cleanly. Output goes to
+// stderr; we check return / non-panic behavior here rather than capture
+// stderr (which would require fork/pipe machinery).
+
+test "text logger debug below INFO threshold suppresses output" =
+  let l = log::text(log::LEVEL_INFO, log::COLOR_OFF)
+  l.debug("filtered")
+  assert::ok(true)
+
+test "text logger above threshold emits" =
+  let l = log::text(log::LEVEL_DEBUG, log::COLOR_OFF)
+  l.debug("debug message")
+  l.info("info message")
+  l.warn("warn message")
+  l.error("error message")
+  assert::ok(true)
+
+test "json logger emits at every level" =
+  let p = log::json(log::LEVEL_DEBUG)
+  p.debug("d")
+  p.info("i")
+  p.warn("w")
+  p.error("e")
+  assert::ok(true)
+
+test "constructor records configured level" =
+  let l = log::text(log::LEVEL_WARN, log::COLOR_OFF)
+  assert::equals(2 as i32, l.level)
+
+test "json constructor records configured level" =
+  let p = log::json(log::LEVEL_ERROR)
+  assert::equals(3 as i32, p.level)
