@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
@@ -53,6 +55,7 @@ Target:
 Run / test:
   --valgrind               run binary under valgrind --leak-check=full
   --leaks                  run binary under leaks --atExit (macOS only)
+  -j N                     parallel jobs for the per-fn .so cache pipeline (default GOMAXPROCS)
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
   -Wall                    enable hygiene checks: unused-let, unused-result
@@ -146,6 +149,10 @@ var (
 	verboseHeuristics bool
 	verboseTCO        bool
 )
+
+// jobs controls per-fn parallel compilation in the pure-fn .so cache pipeline.
+// 0 means "use runtime.GOMAXPROCS(0)"; -j 1 forces serial execution.
+var jobs int
 
 // clangTripleForTarget returns the canonical LLVM target triple for the
 // current targetGOOS/targetGOARCH pair.
@@ -449,7 +456,7 @@ func main() {
 		switch a := os.Args[fileArgIdx]; a {
 		case "-g":
 			fileArgIdx++
-		case "--stdlib", "--lib-root", "-target":
+		case "--stdlib", "--lib-root", "-target", "-j":
 			fileArgIdx += 2
 		default:
 			goto doneFlags
@@ -539,6 +546,17 @@ doneFlags:
 				targetGOOS = parts[0]
 				targetGOARCH = parts[1]
 				explicitTarget = true
+			}
+		case "-j":
+			if i+1 < len(os.Args) {
+				i++
+
+				n, err := strconv.Atoi(os.Args[i])
+				if err != nil || n < 1 {
+					die("-j: expected positive integer (got %q)", os.Args[i])
+				}
+
+				jobs = n
 			}
 		default:
 			switch {
@@ -1174,15 +1192,89 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		return ld.Run()
 	}
 
-	// Compile each cSource at -O2 (always safe: C files never contain coro
-	// intrinsics, so -O2 is correct and avoids the -O1 penalty forced on the IR).
-	// Linker flags (-l/-L) are separated out and passed only at link time.
+	// Split the compile and link phases so each translation unit (IR, runtime.c,
+	// any //!+file.c sources) compiles to its own .o in parallel; the final
+	// clang invocation only links. This converts the dominant single-threaded
+	// clang call into N parallel -c calls + one fast link, scaling with -j.
 	var (
-		tmpCObjs     []string
-		cObjPaths    []string
-		cLinkerFlags []string
+		tmpObjs      []string  // every temp .o we own; cleaned up on return
+		linkInputs   []string  // .o files passed to the link step (in stable order)
+		cLinkerFlags []string  // -l/-L flags pulled out of //!+file.c directives
 	)
 
+	defer func() {
+		for _, f := range tmpObjs {
+			_ = os.Remove(f)
+		}
+	}()
+
+	mkObj := func(prefix string) (string, error) {
+		f, err := os.CreateTemp("", prefix+"-*.o")
+		if err != nil {
+			return "", fmt.Errorf("cannot create temp object file: %w", err)
+		}
+
+		name := f.Name()
+		_ = f.Close()
+		tmpObjs = append(tmpObjs, name)
+
+		return name, nil
+	}
+
+	var jobsList []compileJob
+
+	// IR -> ir.o
+	irObjName, err := mkObj("tin-ir")
+	if err != nil {
+		return err
+	}
+
+	linkInputs = append(linkInputs, irObjName)
+	{
+		a := append([]string{optLevel, "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+
+		if isDebug {
+			a = append(a, "-g")
+
+			if runtime.GOOS == "darwin" {
+				a = append(a, "-fstandalone-debug")
+			}
+		}
+
+		a = append(a, llInputFile, "-o", irObjName)
+		jobsList = append(jobsList, compileJob{desc: filepath.Base(llInputFile), args: a})
+	}
+
+	// runtime.c -> runtime.o (only if rtC exists alongside the tin binary).
+	// Globally cached across every Tin compile on this platform: the runtime
+	// is identical for every program, so compiling it once per content+flags
+	// hash saves ~400ms per invocation when the suite of tests is rebuilt.
+	if _, statErr := os.Stat(rtC); statErr == nil {
+		rtArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+
+		if isDebug {
+			rtArgs = append(rtArgs, "-g")
+
+			if runtime.GOOS == "darwin" {
+				rtArgs = append(rtArgs, "-fstandalone-debug")
+			}
+		}
+
+		cachedPath, hit, err := csrcCacheLookup(rtC, rtArgs)
+		if err != nil {
+			return err
+		}
+
+		linkInputs = append(linkInputs, cachedPath)
+		if !hit {
+			rtArgs = append(rtArgs, rtC, "-o", cachedPath)
+			jobsList = append(jobsList, compileJob{desc: "runtime.c", args: rtArgs})
+		}
+	}
+
+	// Each //!+file.c at -O2; -l/-L flags pulled out for the link step.
+	// Cached globally (same .c content + flags == same .o, regardless of which
+	// .tin program imports it).
 	for _, cs := range cSources {
 		var compileFlags []string
 
@@ -1194,62 +1286,46 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			}
 		}
 
-		cObj, tmpErr := os.CreateTemp("", "tin-c-*.o")
-		if tmpErr != nil {
-			return fmt.Errorf("cannot create temp object file: %w", tmpErr)
-		}
+		baseArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+		baseArgs = append(baseArgs, compileFlags...)
 
-		cObjName := cObj.Name()
-		_ = cObj.Close()
-
-		tmpCObjs = append(tmpCObjs, cObjName)
-		cArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
-		cArgs = append(cArgs, compileFlags...)
-		cArgs = append(cArgs, cs.path, "-o", cObjName)
-
-		if prog != nil {
-			prog.step(cs.path, "compile")
-		}
-
-		clangC := exec.Command("clang", cArgs...)
-		clangC.Stdout = os.Stdout
-
-		clangC.Stderr = os.Stderr
-		if err := clangC.Run(); err != nil {
-			for _, f := range tmpCObjs {
-				_ = os.Remove(f)
-			}
-
+		cachedPath, hit, err := csrcCacheLookup(cs.path, baseArgs)
+		if err != nil {
 			return err
 		}
 
-		cObjPaths = append(cObjPaths, cObjName)
+		linkInputs = append(linkInputs, cachedPath)
+		if hit {
+			continue
+		}
+
+		a := append([]string{}, baseArgs...)
+		a = append(a, cs.path, "-o", cachedPath)
+		jobsList = append(jobsList, compileJob{desc: filepath.Base(cs.path), args: a})
 	}
 
-	defer func() {
-		for _, f := range tmpCObjs {
-			_ = os.Remove(f)
-		}
-	}()
+	if prog != nil {
+		prog.step(outBin, fmt.Sprintf("compile (%d TUs)", len(jobsList)))
+	}
 
+	// Run all -c jobs in parallel. parallelJobs() honours -j; default is GOMAXPROCS.
+	if err := runParallelClang(jobsList); err != nil {
+		return err
+	}
+
+	// Link step: pull every compiled .o into one binary. The link itself is fast
+	// because clang sees only object files and skips parsing/optimization.
 	args := []string{optLevel}
 	args = append(args, clangTargetFlag()...)
 
 	if isDebug {
 		args = append(args, "-g")
 
-		// On macOS, clang -g emits a debug map that references temp .o files by
-		// path. Those files are deleted before dsymutil can run, so LLDB sees no
-		// debug info. -fstandalone-debug embeds full DWARF directly in the binary,
-		// no debug map needed.
 		if runtime.GOOS == "darwin" {
 			args = append(args, "-fstandalone-debug")
 		}
 	}
 
-	// Place every function/global in its own section, then ask the linker to
-	// drop sections whose symbols are never reached from the entry point. This
-	// strips unused stdlib helpers pulled in by `use std` but never called.
 	args = append(args, "-ffunction-sections", "-fdata-sections")
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-Wl,-dead_strip")
@@ -1257,12 +1333,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		args = append(args, "-Wl,--gc-sections")
 	}
 
-	args = append(args, llInputFile)
-	if _, err := os.Stat(rtC); err == nil {
-		args = append(args, rtC)
-	}
-
-	args = append(args, cObjPaths...)
+	args = append(args, linkInputs...)
 	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
@@ -1278,6 +1349,111 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 	if err := clang.Run(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// parallelJobs returns the per-process compile concurrency. Honours the -j flag
+// when set; otherwise uses runtime.GOMAXPROCS(0).
+func parallelJobs() int {
+	if jobs > 0 {
+		return jobs
+	}
+
+	return runtime.GOMAXPROCS(0)
+}
+
+// csrcCacheRoot is the directory holding cached .o files for runtime.c and
+// for every //!+file.c source. Keyed by content+flags MD5 so that the same
+// file compiled with the same flags reuses the .o across every Tin compile.
+const csrcCacheRoot = ".build/csrc"
+
+// csrcCacheLookup returns the cache path for compiling srcPath with the given
+// args. The returned path always exists in the cache layout (the parent dir
+// is created if needed); hit==true when a previously-built .o is already on
+// disk and can be reused without recompiling, hit==false when the caller
+// must produce the .o at the returned path.
+//
+// The cache key is sha256 of (file content + the canonical clang argv), so a
+// flag change (e.g. -g, -fsanitize=address) produces a fresh entry rather
+// than reusing a stale optimized .o.
+func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
+	body, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", false, fmt.Errorf("csrc cache: %w", err)
+	}
+
+	sum := md5.New()
+	sum.Write(body)
+
+	for _, a := range args {
+		sum.Write([]byte{0})
+		sum.Write([]byte(a))
+	}
+
+	key := hex.EncodeToString(sum.Sum(nil))
+	dir := filepath.Join(csrcCacheRoot, key[:2])
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, fmt.Errorf("csrc cache: %w", err)
+	}
+
+	objPath := filepath.Join(dir, key+".o")
+	if info, err := os.Stat(objPath); err == nil && !info.IsDir() && info.Size() > 0 {
+		return objPath, true, nil
+	}
+
+	return objPath, false, nil
+}
+
+// compileJob describes a single `clang ...` invocation that runParallelClang
+// can fan out. desc is shown to the user via progress / error messages; args
+// are passed verbatim (no shell escaping).
+type compileJob struct {
+	desc string
+	args []string
+}
+
+// runParallelClang fans out a list of independent `clang ...` invocations
+// across a worker pool sized by parallelJobs(). It returns the first error it
+// observes; remaining jobs are awaited so temp files have predictable lifetimes.
+func runParallelClang(jobsList []compileJob) error {
+	if len(jobsList) == 0 {
+		return nil
+	}
+
+	workers := parallelJobs()
+	if workers > len(jobsList) {
+		workers = len(jobsList)
+	}
+
+	sem := make(chan struct{}, workers)
+	errs := make([]error, len(jobsList))
+
+	var wg sync.WaitGroup
+
+	for i := range jobsList {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			cmd := exec.Command("clang", jobsList[i].args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			errs[i] = cmd.Run()
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			return fmt.Errorf("clang %s: %w", jobsList[i].desc, err)
+		}
 	}
 
 	return nil
@@ -1964,10 +2140,28 @@ func execRunBinary(bin, memcheck string, binArgs []string) {
 	}
 }
 
-// runClean removes the .build/ cache directory in the current working
-// directory. Silent on success; no-op if .build/ does not exist.
+// runClean removes per-program cache directories under .build/ but preserves
+// the content-addressed C-source cache at .build/csrc/. The csrc cache stores
+// runtime.c and stdlib //!+file.c objects keyed by sha of (content + flags),
+// so it never goes stale; wiping it just forces a slow re-compile of the
+// runtime on the next build. Silent on success; no-op if .build/ is missing.
 func runClean() {
-	if err := os.RemoveAll(".build"); err != nil {
+	entries, err := os.ReadDir(".build")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+
 		die("clean: %v", err)
+	}
+
+	for _, e := range entries {
+		if e.Name() == "csrc" {
+			continue
+		}
+
+		if err := os.RemoveAll(filepath.Join(".build", e.Name())); err != nil {
+			die("clean: %v", err)
+		}
 	}
 }
