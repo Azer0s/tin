@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"strings"
+
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
@@ -99,8 +101,53 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 	}
 
 	// Collect every name referenced anywhere - identifiers, scope-access
-	// roots (pkg::), and field-access roots (pkg.).
+	// roots (pkg::), field-access roots (pkg.), and type expressions
+	// embedded in fn signatures, let declarations, and struct fields
+	// (so `fn show(v decimal::Value)` counts decimal as used).
 	used := map[string]bool{}
+
+	var visitType func(t ast.TypeExpr)
+
+	visitType = func(t ast.TypeExpr) {
+		if t == nil {
+			return
+		}
+
+		switch tt := t.(type) {
+		case *ast.SimpleType:
+			name := tt.Name
+			if idx := strings.Index(name, "::"); idx >= 0 {
+				name = name[:idx]
+			}
+
+			used[name] = true
+		case *ast.GenericType:
+			name := tt.Name
+			if idx := strings.Index(name, "::"); idx >= 0 {
+				name = name[:idx]
+			}
+
+			used[name] = true
+
+			for _, p := range tt.TypeParams {
+				visitType(p)
+			}
+		case *ast.PointerType:
+			visitType(tt.Elem)
+		case *ast.ArrayType:
+			visitType(tt.Elem)
+		case *ast.FuncType:
+			for _, p := range tt.Params {
+				visitType(p)
+			}
+
+			visitType(tt.RetType)
+		case *ast.UnionTypeExpr:
+			for _, p := range tt.Types {
+				visitType(p)
+			}
+		}
+	}
 
 	visit := func(n ast.Node) {
 		switch v := n.(type) {
@@ -114,6 +161,20 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			if id, ok := v.Expr.(*ast.Identifier); ok {
 				used[id.Name] = true
 			}
+		case *ast.FuncDecl:
+			for _, p := range v.Params {
+				visitType(p.Type)
+			}
+
+			visitType(v.RetType)
+		case *ast.VarDecl:
+			visitType(v.Type)
+		case *ast.StructDecl:
+			for _, f := range v.Fields {
+				visitType(f.Type)
+			}
+		case *ast.AsExpr:
+			visitType(v.Type)
 		}
 	}
 

@@ -971,7 +971,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	// Pre-pass 0.8: detect overloaded function names BEFORE Pass 1 so that extern
 	// overloads (e.g. fn splat(v f32) / fn splat(v f64)) get mangled IR names.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	// Pass the package name so struct method keys are pkg-qualified, otherwise
+	// overloads on stdlib structs (multiple `static fn ::implicit(...)` etc.)
+	// would never get marked as overloaded under the package-prefixed scope.
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, pkgName) {
 		cg.overloadedNames[name] = flag
 	}
 
@@ -1087,7 +1090,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	// Pre-pass 1.8: detect overloaded function names in this package so that
 	// passes 2/2.5/3 can mangle IR names for overloaded functions correctly.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, pkgName) {
 		cg.overloadedNames[name] = flag
 	}
 

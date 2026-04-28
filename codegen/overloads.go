@@ -138,9 +138,16 @@ func overloadMangledName(baseName, sig string) string {
 // For top-level functions the key is the function name.
 // For struct methods the key is "StructName_methodName".
 func scanOverloadedNames(nodes []ast.Node) map[string]bool {
-	// Count occurrences of each name (excluding constrained generics).
-	// Extern functions ARE included so that packages with multiple extern overloads
-	// (e.g. splat(f32) and splat(f64)) get their IR names mangled correctly.
+	return scanOverloadedNamesPkg(nodes, "")
+}
+
+// scanOverloadedNamesPkg counts duplicate method names per struct using the
+// package-qualified struct key (`pkg__Name_method`) when a package context
+// is active. Without this, methods on stdlib structs that share a name
+// (e.g. five `static fn ::implicit(...)` overloads on decimal::Value) end
+// up keyed by their bare struct name and never get marked as overloads in
+// the package-loaded scope, which breaks IR-name mangling.
+func scanOverloadedNamesPkg(nodes []ast.Node, pkgName string) map[string]bool {
 	counts := make(map[string]int)
 
 	for _, node := range nodes {
@@ -156,12 +163,17 @@ func scanOverloadedNames(nodes []ast.Node) map[string]bool {
 				continue // generic templates handled separately
 			}
 
+			structName := n.Name
+			if pkgName != "" {
+				structName = pkgName + "__" + structName
+			}
+
 			for _, m := range n.Methods {
 				if m.IsExtern != "" {
 					continue
 				}
 
-				key := methodScopeName(n.Name, m)
+				key := methodScopeName(structName, m)
 				counts[key]++
 			}
 		}
