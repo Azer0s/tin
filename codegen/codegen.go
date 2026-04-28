@@ -1458,23 +1458,25 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	// Phase C: struct method bodies, trait chain shims, and vtables.
-	for _, node := range prog.Stmts {
-		if n, ok := node.(*ast.StructDecl); ok {
-			if err := cg.genStructMethods(n); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	// Pass 2.5: register top-level var declarations as LLVM globals. Runs
 	// AFTER pass 2 (function predeclaration) so initializer fold can call
-	// pure functions via funcDecls (e.g. `var x i64 = pure_fn(7) + 1`).
+	// pure functions via funcDecls (e.g. `var x i64 = pure_fn(7) + 1`), and
+	// BEFORE struct method bodies are generated so methods can reference
+	// module-scoped vars by bare name.
 	cg.progress("register globals")
 
 	for _, node := range prog.Stmts {
 		if tv, ok := node.(*ast.TopLevelVar); ok {
 			if err := cg.preregisterTopLevelVar(tv); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Phase C: struct method bodies, trait chain shims, and vtables.
+	for _, node := range prog.Stmts {
+		if n, ok := node.(*ast.StructDecl); ok {
+			if err := cg.genStructMethods(n); err != nil {
 				return nil, err
 			}
 		}
