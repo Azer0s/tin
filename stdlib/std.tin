@@ -6,6 +6,7 @@ use assert
 use strings
 use reflect
 use mem
+use decimal
 
 export {
     io,
@@ -15,5 +16,6 @@ export {
     assert,
     strings,
     reflect,
-    mem
+    mem,
+    decimal
 } as std
