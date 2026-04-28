@@ -105,12 +105,21 @@ func mergeConst(a, b constFact) constFact {
 	return cBotFact()
 }
 
+// interval is a closed integer range [lo, hi]. `set` distinguishes "no
+// information" from a real range. The lattice meet is union; narrowing
+// happens through dedicated helpers driven by branch conditions.
+type interval struct {
+	lo, hi int64
+	set    bool
+}
+
 // dfState captures the abstract state at one program point.
 type dfState struct {
 	nil   map[string]nilFact
 	cnst  map[string]constFact
-	freed map[string]bool // variable was passed to deinit()
-	dead  bool            // true means control-flow can't reach this point
+	freed map[string]bool     // variable was passed to deinit()
+	intv  map[string]interval // integer interval per variable
+	dead  bool                // true means control-flow can't reach this point
 }
 
 func newDFState() *dfState {
@@ -118,6 +127,7 @@ func newDFState() *dfState {
 		nil:   map[string]nilFact{},
 		cnst:  map[string]constFact{},
 		freed: map[string]bool{},
+		intv:  map[string]interval{},
 	}
 }
 
@@ -135,6 +145,10 @@ func (s *dfState) clone() *dfState {
 
 	for k, v := range s.freed {
 		out.freed[k] = v
+	}
+
+	for k, v := range s.intv {
+		out.intv[k] = v
 	}
 
 	return out
@@ -192,6 +206,33 @@ func mergeStates(a, b *dfState) *dfState {
 			out.freed[k] = true
 		}
 	}
+	// Interval: union the two ranges. A variable known only in one branch
+	// is unknown after the join (union with the implicit unknown side).
+	for k, v := range a.intv {
+		if w, ok := b.intv[k]; ok {
+			out.intv[k] = unionInterval(v, w)
+		}
+	}
+
+	return out
+}
+
+// unionInterval is the lattice meet for the interval analysis: the
+// smallest range containing both inputs. Either operand being unset means
+// the result is unset (we lost information).
+func unionInterval(a, b interval) interval {
+	if !a.set || !b.set {
+		return interval{}
+	}
+
+	out := interval{set: true, lo: a.lo, hi: a.hi}
+	if b.lo < out.lo {
+		out.lo = b.lo
+	}
+
+	if b.hi > out.hi {
+		out.hi = b.hi
+	}
 
 	return out
 }
@@ -228,6 +269,17 @@ func statesEqual(a, b *dfState) bool {
 		}
 	}
 
+	if len(a.intv) != len(b.intv) {
+		return false
+	}
+
+	for k, v := range a.intv {
+		w, ok := b.intv[k]
+		if !ok || w != v {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -252,16 +304,83 @@ func (cg *CodeGen) dfAnalyzeFunc(fn *ast.FuncDecl) {
 	}
 
 	// Entry state: parameters are BOTTOM (could be anything from caller).
+	// Their interval is seeded from the declared type, so a `u8` parameter
+	// starts in [0, 255] - that's how `u8 < 0` falls out as always-false
+	// without any further analysis.
 	st := newDFState()
 
 	for _, p := range fn.Params {
-		if p.Name != "" && p.Name != "_" {
-			st.nil[p.Name] = nilBottom
-			st.cnst[p.Name] = cBotFact()
+		if p.Name == "" || p.Name == "_" {
+			continue
+		}
+
+		st.nil[p.Name] = nilBottom
+		st.cnst[p.Name] = cBotFact()
+
+		if iv := intervalForTinType(p.Type); iv.set {
+			st.intv[p.Name] = iv
 		}
 	}
 
 	cg.dfWalkAny(fn.Body, st)
+}
+
+// intervalForTinType returns the integer range that a variable of type t
+// is guaranteed to fall in. Returns the unset interval for non-integer or
+// 64-bit-unsigned types (the latter doesn't fit in a Go int64).
+func intervalForTinType(t ast.TypeExpr) interval {
+	st, ok := t.(*ast.SimpleType)
+	if !ok {
+		return interval{}
+	}
+
+	switch st.Name {
+	case "i8":
+		return interval{set: true, lo: -128, hi: 127}
+	case "u8", "byte", "char":
+		return interval{set: true, lo: 0, hi: 255}
+	case "i16":
+		return interval{set: true, lo: -32768, hi: 32767}
+	case "u16":
+		return interval{set: true, lo: 0, hi: 65535}
+	case "i32":
+		return interval{set: true, lo: -2147483648, hi: 2147483647}
+	case "u32":
+		return interval{set: true, lo: 0, hi: 4294967295}
+	case "i64":
+		return interval{set: true, lo: -9223372036854775808, hi: 9223372036854775807}
+	}
+
+	return interval{}
+}
+
+// dfIntervalForBinding chooses the interval for `let <name> [type] = value`.
+// Prefers the value's interval (it's a tighter bound), falling back to the
+// declared type's range when the value's interval is unknown.
+func (cg *CodeGen) dfIntervalForBinding(declType ast.TypeExpr, value ast.Node, st *dfState) interval {
+	if iv := cg.intervalOf(value, st); iv.set {
+		return iv
+	}
+
+	return intervalForTinType(declType)
+}
+
+// intervalOf returns the abstract interval of expr under st.
+func (cg *CodeGen) intervalOf(expr ast.Node, st *dfState) interval {
+	if expr == nil {
+		return interval{}
+	}
+
+	switch e := expr.(type) {
+	case *ast.IntLit:
+		return interval{set: true, lo: e.Value, hi: e.Value}
+	case *ast.Identifier:
+		if v, ok := st.intv[e.Name]; ok {
+			return v
+		}
+	}
+
+	return interval{}
 }
 
 // dfWalkAny dispatches a node to dfWalkBlock for *Block or dfWalkStmt for
@@ -306,6 +425,10 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 		st.nil[v.Name] = cg.dfNilOf(v.Value, st)
 		st.cnst[v.Name] = cg.dfEval(v.Value, st)
 
+		if iv := cg.dfIntervalForBinding(v.Type, v.Value, st); iv.set {
+			st.intv[v.Name] = iv
+		}
+
 		return st
 
 	case *ast.AssignStmt:
@@ -316,6 +439,12 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.nil[id.Name] = cg.dfNilOf(v.Value, st)
 			st.cnst[id.Name] = cg.dfEval(v.Value, st)
 			delete(st.freed, id.Name) // reassign clears freed state
+
+			if iv := cg.intervalOf(v.Value, st); iv.set {
+				st.intv[id.Name] = iv
+			} else {
+				delete(st.intv, id.Name)
+			}
 		}
 
 		return st
@@ -329,6 +458,8 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st = st.clone()
 			st.cnst[id.Name] = cBotFact()
 			st.nil[id.Name] = nilBottom
+
+			delete(st.intv, id.Name)
 		}
 
 		return st
@@ -402,6 +533,8 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 // per-arm state for the common `p == nil` / `p != nil` shape.
 func (cg *CodeGen) dfWalkIf(s *ast.IfStmt, st *dfState) *dfState {
 	cg.dfCheckExpr(s.Cond, st)
+
+	cg.checkImpossibleCmp(s.Cond, st)
 
 	// Flow-sensitive constant condition warning.
 	if v := cg.dfEval(s.Cond, st); v.kind == cBool {
@@ -721,35 +854,315 @@ func narrowOnCond(cond ast.Node, st *dfState) (thenSt, elseSt *dfState) {
 		return
 	}
 
+	// Nil narrowing for `p == nil` / `p != nil`.
+	if bin.Op == "==" || bin.Op == "!=" {
+		var name string
+
+		if id, ok := bin.Left.(*ast.Identifier); ok {
+			if _, isNil := bin.Right.(*ast.NilLit); isNil {
+				name = id.Name
+			}
+		} else if id, ok := bin.Right.(*ast.Identifier); ok {
+			if _, isNil := bin.Left.(*ast.NilLit); isNil {
+				name = id.Name
+			}
+		}
+
+		if name != "" {
+			if bin.Op == "==" {
+				thenSt.nil[name] = nilIsNil
+				elseSt.nil[name] = nilNonNil
+			} else {
+				thenSt.nil[name] = nilNonNil
+				elseSt.nil[name] = nilIsNil
+			}
+
+			return
+		}
+	}
+
+	// Integer-interval narrowing: `x op c` (or `c op x`) where one side is
+	// an identifier we track and the other a constant.
 	switch bin.Op {
-	case "==", "!=":
+	case "<", "<=", ">", ">=", "==", "!=":
 	default:
 		return
 	}
 
-	var name string
+	var (
+		name string
+		c    int64
+		op   string
+	)
 
 	if id, ok := bin.Left.(*ast.Identifier); ok {
-		if _, isNil := bin.Right.(*ast.NilLit); isNil {
-			name = id.Name
+		iv := constIntOf(bin.Right)
+		if !iv.set {
+			return
 		}
+
+		name = id.Name
+		c = iv.lo
+		op = bin.Op
 	} else if id, ok := bin.Right.(*ast.Identifier); ok {
-		if _, isNil := bin.Left.(*ast.NilLit); isNil {
-			name = id.Name
+		iv := constIntOf(bin.Left)
+		if !iv.set {
+			return
 		}
+
+		name = id.Name
+		c = iv.lo
+		op = flipOp(bin.Op)
 	}
 
 	if name == "" {
 		return
 	}
 
-	if bin.Op == "==" {
-		thenSt.nil[name] = nilIsNil
-		elseSt.nil[name] = nilNonNil
-	} else {
-		thenSt.nil[name] = nilNonNil
-		elseSt.nil[name] = nilIsNil
+	cur, ok := st.intv[name]
+	if !ok || !cur.set {
+		return
+	}
+
+	thenIv, elseIv := narrowIntervalCmp(cur, op, c)
+	if thenIv.set {
+		thenSt.intv[name] = thenIv
+	}
+
+	if elseIv.set {
+		elseSt.intv[name] = elseIv
 	}
 
 	return
+}
+
+// constIntOf returns the IntLit value of an expression as a single-point
+// interval, or unset if it's not a literal int.
+func constIntOf(n ast.Node) interval {
+	if il, ok := n.(*ast.IntLit); ok {
+		return interval{set: true, lo: il.Value, hi: il.Value}
+	}
+
+	return interval{}
+}
+
+// flipOp swaps a comparison operator so that `c op x` becomes `x op' c`.
+func flipOp(op string) string {
+	switch op {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	}
+
+	return op
+}
+
+// narrowIntervalCmp refines the interval of `x` given the branch
+// `x op c` is taken (then) or not taken (else). Returns the refined
+// (then, else) intervals; an unset interval means "no information".
+func narrowIntervalCmp(x interval, op string, c int64) (thenIv, elseIv interval) {
+	if !x.set {
+		return interval{}, interval{}
+	}
+
+	switch op {
+	case "<":
+		thenIv = clipInterval(x, x.lo, c-1)
+		elseIv = clipInterval(x, c, x.hi)
+	case "<=":
+		thenIv = clipInterval(x, x.lo, c)
+		elseIv = clipInterval(x, c+1, x.hi)
+	case ">":
+		thenIv = clipInterval(x, c+1, x.hi)
+		elseIv = clipInterval(x, x.lo, c)
+	case ">=":
+		thenIv = clipInterval(x, c, x.hi)
+		elseIv = clipInterval(x, x.lo, c-1)
+	case "==":
+		thenIv = clipInterval(x, c, c)
+		elseIv = x // can't refine the else side from a single point
+	case "!=":
+		thenIv = x
+		elseIv = clipInterval(x, c, c)
+	}
+
+	return
+}
+
+// checkImpossibleCmp emits a warning when an integer comparison evaluates
+// to a constant under the current interval state. Catches:
+//
+//	let x u8 = ... ; if x < 0:        // u8 is in [0,255], always false
+//	if x >= 5 && x < 5:               // narrowed RHS is empty
+//	if x == 100:  /* x ∈ [0, 50] */   // never holds
+//
+// For `A && B` the right conjunct is checked under the state where A is
+// known to hold, so a contradiction with the narrowed state (the second
+// example above) gets caught.
+func (cg *CodeGen) checkImpossibleCmp(cond ast.Node, st *dfState) {
+	cg.checkImpossibleCmpIn(cond, st)
+}
+
+func (cg *CodeGen) checkImpossibleCmpIn(cond ast.Node, st *dfState) *dfState {
+	if bin, ok := cond.(*ast.BinExpr); ok {
+		switch bin.Op {
+		case "&&":
+			leftThen := cg.checkImpossibleCmpIn(bin.Left, st)
+			if leftThen == nil {
+				leftThen = st
+			}
+
+			cg.checkImpossibleCmpIn(bin.Right, leftThen)
+
+			return leftThen
+		case "||":
+			cg.checkImpossibleCmpIn(bin.Left, st)
+			cg.checkImpossibleCmpIn(bin.Right, st)
+
+			return st
+		}
+	}
+
+	cg.checkSingleCmp(cond, st)
+
+	thenSt, _ := narrowOnCond(cond, st)
+
+	return thenSt
+}
+
+// checkSingleCmp handles a non-compound comparison. Emits the
+// impossible-range warning if the result is determinate.
+func (cg *CodeGen) checkSingleCmp(cond ast.Node, st *dfState) {
+	bin, ok := cond.(*ast.BinExpr)
+	if !ok {
+		return
+	}
+
+	switch bin.Op {
+	case "<", "<=", ">", ">=", "==", "!=":
+	default:
+		return
+	}
+
+	var (
+		name string
+		c    int64
+		op   string
+	)
+
+	if id, ok := bin.Left.(*ast.Identifier); ok {
+		iv := constIntOf(bin.Right)
+		if !iv.set {
+			return
+		}
+
+		name = id.Name
+		c = iv.lo
+		op = bin.Op
+	} else if id, ok := bin.Right.(*ast.Identifier); ok {
+		iv := constIntOf(bin.Left)
+		if !iv.set {
+			return
+		}
+
+		name = id.Name
+		c = iv.lo
+		op = flipOp(bin.Op)
+	} else {
+		return
+	}
+
+	cur, ok := st.intv[name]
+	if !ok || !cur.set {
+		return
+	}
+
+	if always, val := cmpAlwaysHolds(cur, op, c); always {
+		cg.warn(DiagImpossibleRange, bin.Pos(),
+			"comparison %q is always %v: %s ∈ [%d, %d]",
+			op, val, name, cur.lo, cur.hi)
+	}
+}
+
+// cmpAlwaysHolds reports whether `x op c` evaluates to a constant given
+// x's interval. Returns (true, value) when fully determined.
+func cmpAlwaysHolds(x interval, op string, c int64) (always, value bool) {
+	switch op {
+	case "<":
+		if x.hi < c {
+			return true, true
+		}
+
+		if x.lo >= c {
+			return true, false
+		}
+	case "<=":
+		if x.hi <= c {
+			return true, true
+		}
+
+		if x.lo > c {
+			return true, false
+		}
+	case ">":
+		if x.lo > c {
+			return true, true
+		}
+
+		if x.hi <= c {
+			return true, false
+		}
+	case ">=":
+		if x.lo >= c {
+			return true, true
+		}
+
+		if x.hi < c {
+			return true, false
+		}
+	case "==":
+		if x.lo == c && x.hi == c {
+			return true, true
+		}
+
+		if c < x.lo || c > x.hi {
+			return true, false
+		}
+	case "!=":
+		if c < x.lo || c > x.hi {
+			return true, true
+		}
+
+		if x.lo == c && x.hi == c {
+			return true, false
+		}
+	}
+
+	return false, false
+}
+
+// clipInterval returns x ∩ [lo, hi], or unset if the result is empty.
+func clipInterval(x interval, lo, hi int64) interval {
+	if !x.set {
+		return interval{}
+	}
+
+	if lo < x.lo {
+		lo = x.lo
+	}
+
+	if hi > x.hi {
+		hi = x.hi
+	}
+
+	if lo > hi {
+		return interval{}
+	}
+
+	return interval{set: true, lo: lo, hi: hi}
 }
