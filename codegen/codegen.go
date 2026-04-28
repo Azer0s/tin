@@ -1342,6 +1342,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	cg.runDataflow(prog)
 
+	cg.runAndersen(prog)
+
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")
 
