@@ -711,7 +711,33 @@ func (cg *CodeGen) resolveMutualTCOCallee(name string) (*ir.Func, bool) {
 		}
 	}
 
+	// LLVM's musttail tail-call elimination refuses any caller whose frame
+	// still has live allocas at the call site. A trivial pass-through fn
+	// like `fn from(v f64) Value = return from_f64_impl(v)` spills `v` to
+	// an alloca first, which is enough to break musttail. Skip when we can
+	// see allocas in the caller's entry block.
+	if hasAllocaInsts(cg.curFn) {
+		return nil, false
+	}
+
 	return callee, true
+}
+
+// hasAllocaInsts reports whether fn's entry block currently contains any
+// alloca instructions. Used to gate mutual TCO so musttail isn't requested
+// from a frame that LLVM cannot pop.
+func hasAllocaInsts(fn *ir.Func) bool {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return false
+	}
+
+	for _, inst := range fn.Blocks[0].Insts {
+		if _, ok := inst.(*ir.InstAlloca); ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // emitMutualTCO emits a musttail call to callee and returns its result,
@@ -930,14 +956,39 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 // genStructMethod generates a struct method body using a struct-qualified IR name.
 func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 	key := methodScopeName(structName, m)
+
+	var irName string
+
 	// Overloading: use the mangled name when this method belongs to an overload set.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
+		irName = overloadMangledName(key, sig)
 
-		return cg.genFuncDeclAs(m, overloadMangledName(key, sig))
+		if err := cg.genFuncDeclAs(m, irName); err != nil {
+			return err
+		}
+	} else {
+		irName = key
+
+		if err := cg.genFuncDeclAs(m, irName); err != nil {
+			return err
+		}
 	}
 
-	return cg.genFuncDeclAs(m, key)
+	// Index op-trait impls so genBinExpr / genUnaryExpr can dispatch to
+	// methods declared inside imported packages. Without this, structs
+	// loaded via `use pkg` would only have their op-trait impls visible
+	// when the struct is declared at top level (where predeclareMethod
+	// runs the same registration).
+	if traitName := extractOpTraitName(m.TraitQualifier); traitName != "" {
+		if entry, ok := cg.curScope.lookup(irName); ok {
+			if fn, ok2 := entry.val.(*ir.Func); ok2 {
+				cg.recordOpTraitImpl(structName, traitName, fn)
+			}
+		}
+	}
+
+	return nil
 }
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.

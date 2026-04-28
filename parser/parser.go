@@ -20,6 +20,11 @@ type Parser struct {
 	// multi-line operator continuations (e.g. `a && \n  b`).  skipNewlines
 	// drains these so the body INDENT of the enclosing if/for/... is visible.
 	continuationDedents int
+	// suppressPostfixCast > 0 means parsePostfix should NOT consume `as` /
+	// `is` postfix casts. Used by `&` / `*` operand parsing so the cast
+	// attaches to the enclosing pointer expression (`(&x) as T`) instead
+	// of the inner operand (`&(x as T)`).
+	suppressPostfixCast int
 }
 
 // New creates a Parser over the given token slice

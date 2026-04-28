@@ -320,6 +320,16 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 	return left, nil
 }
 
+// parseUnary handles prefix unary operators. `-x as T`, `!x as T`, and
+// `~x as T` keep their long-standing meaning of `-(x as T)` / `!(x as T)`
+// / `~(x as T)`: the inner `as` cast happens first, so out-of-range
+// literals like `-9999999999999999999 as i128` widen before negating.
+//
+// Pointer-shape operators (`&`, `*`) are different. There the user almost
+// always means "cast the result of the address-of" rather than "take the
+// address of an AsExpr" (the latter isn't an lvalue and produced a
+// codegen error). So those bind TIGHTER than `as` / `is` and any postfix
+// cast applies to the wrapping expression.
 func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.match(lexer.NOT, lexer.MINUS, lexer.TILDE) {
 		opTok := p.advance()
@@ -339,18 +349,48 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.check(lexer.STAR) {
 		p.advance()
 
-		expr, err := p.parseUnary()
+		expr, err := p.parsePointerOperand()
+		if err != nil {
+			return nil, err
+		}
+
+		return p.applyPostfixCasts(&ast.DerefExpr{Expr: expr})
+	}
+	// Address-of: &expr
+	if p.check(lexer.AMP) {
+		p.advance()
+
+		expr, err := p.parsePointerOperand()
+		if err != nil {
+			return nil, err
+		}
+
+		return p.applyPostfixCasts(&ast.AddressOfExpr{Expr: expr})
+	}
+
+	return p.parsePostfix()
+}
+
+// parsePointerOperand parses the operand of a `&` or `*` so that
+// chained pointer ops still nest (`**p`, `&&x`) but a postfix `as` /
+// `is` does NOT get consumed at the inner level. The outer caller wraps
+// the resulting unary node and then offers the cast a chance.
+func (p *Parser) parsePointerOperand() (ast.Node, error) {
+	if p.check(lexer.STAR) {
+		p.advance()
+
+		expr, err := p.parsePointerOperand()
 		if err != nil {
 			return nil, err
 		}
 
 		return &ast.DerefExpr{Expr: expr}, nil
 	}
-	// Address-of: &expr
+
 	if p.check(lexer.AMP) {
 		p.advance()
 
-		expr, err := p.parseUnary()
+		expr, err := p.parsePointerOperand()
 		if err != nil {
 			return nil, err
 		}
@@ -358,7 +398,137 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 		return &ast.AddressOfExpr{Expr: expr}, nil
 	}
 
+	return p.parsePostfixNoCast()
+}
+
+// parsePostfixNoCast is the same suffix walk parsePostfix runs (member
+// access, calls, indexing, struct lit, type assert, method-chain INDENT
+// continuation) but stops when it sees `as` or `is`. Used by `&` / `*`
+// so the cast attaches to the enclosing unary expression instead.
+//
+// The suppression counter is at the parser level rather than threaded
+// through arguments, so it transparently survives parsePrimary's recursive
+// dispatch (BinExpr, etc.). Sub-expressions inside parens reset the counter
+// (see parsePrimary's `(` handler) so legitimate inner casts like
+// `*(r as *T)` still parse: the outer `*` doesn't consume `as`, but the
+// paren-wrapped inner expression sees a fresh counter.
+func (p *Parser) parsePostfixNoCast() (ast.Node, error) {
+	p.suppressPostfixCast++
+
+	defer func() { p.suppressPostfixCast-- }()
+
 	return p.parsePostfix()
+}
+
+// applyPostfixCasts wraps `expr` in any chain of `as T` / `is T` postfix
+// casts that immediately follow. Used by parseUnary's `&` / `*` arms so
+// `&x as T` becomes `(&x) as T`.
+func (p *Parser) applyPostfixCasts(expr ast.Node) (ast.Node, error) {
+	for {
+		var (
+			next ast.Node
+			err  error
+			ok   bool
+		)
+
+		switch p.peek().Type {
+		case lexer.KW_AS:
+			next, err = p.parseAsSuffix(expr)
+			ok = true
+		case lexer.KW_IS:
+			next, err = p.parseIsSuffix(expr)
+			ok = true
+		default:
+			return expr, nil
+		}
+
+		if !ok {
+			return expr, nil
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		expr = next
+	}
+}
+
+// parseAsSuffix parses `as <type>` and wraps `expr` in an AsExpr.
+// Caller must have just peeked KW_AS.
+func (p *Parser) parseAsSuffix(expr ast.Node) (ast.Node, error) {
+	p.advance() // consume `as`
+
+	typ, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	asExpr := &ast.AsExpr{Expr: expr, Type: typ}
+	asExpr.SetPos(expr.Pos())
+
+	return asExpr, nil
+}
+
+// parseIsSuffix parses `is <type>` / `is <name> <type>` /
+// `is <Variant>(args...)` and wraps `expr` in an IsExpr. Caller must
+// have just peeked KW_IS.
+func (p *Parser) parseIsSuffix(expr ast.Node) (ast.Node, error) {
+	p.advance() // consume `is`
+
+	isExpr := &ast.IsExpr{Expr: expr}
+
+	if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
+		ctorPos := p.curPos()
+		ctorName := p.advance().Literal
+
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+
+		var args []ast.Node
+
+		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			arg, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			args = append(args, arg)
+
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+
+		fn := &ast.Identifier{Name: ctorName}
+		fn.SetPos(ctorPos)
+		call := &ast.CallExpr{Func: fn, Args: args}
+		call.SetPos(ctorPos)
+
+		isExpr.Pattern = call
+
+		return isExpr, nil
+	}
+
+	if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
+		isExpr.VarName = p.advance().Literal
+	}
+
+	if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
+		var err error
+
+		isExpr.Type, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return isExpr, nil
 }
 
 func (p *Parser) parsePostfix() (ast.Node, error) {
@@ -690,79 +860,28 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			expr = ast.NewCallExpr(expr, args, callTok.Line, callTok.Col)
 
 		case lexer.KW_AS:
-			p.advance()
-
-			typ, err2 := p.parseTypeExpr()
-			if err2 != nil {
-				return nil, err2
+			if p.suppressPostfixCast > 0 {
+				return expr, nil
 			}
 
-			asExpr := &ast.AsExpr{Expr: expr, Type: typ}
-			asExpr.SetPos(expr.Pos())
-			expr = asExpr
+			next, err := p.parseAsSuffix(expr)
+			if err != nil {
+				return nil, err
+			}
+
+			expr = next
 
 		case lexer.KW_IS:
-			p.advance()
-
-			isExpr := &ast.IsExpr{Expr: expr}
-
-			// ADT constructor pattern: `x is Ok(v)`. The call-expression form
-			// is unambiguously a constructor pattern (types don't appear as
-			// `IDENT(...)` in Tin). Nullary variants like `x is None` parse
-			// through the Type path and are resolved in codegen by looking
-			// up the identifier against registered ADT variants.
-			if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
-				ctorPos := p.curPos()
-				ctorName := p.advance().Literal
-
-				if _, err2 := p.expect(lexer.LPAREN); err2 != nil {
-					return nil, err2
-				}
-
-				var args []ast.Node
-
-				for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-					arg, err2 := p.parseExpr()
-					if err2 != nil {
-						return nil, err2
-					}
-
-					args = append(args, arg)
-
-					if p.check(lexer.COMMA) {
-						p.advance()
-					}
-				}
-
-				if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
-					return nil, err2
-				}
-
-				fn := &ast.Identifier{Name: ctorName}
-				fn.SetPos(ctorPos)
-				call := &ast.CallExpr{Func: fn, Args: args}
-				call.SetPos(ctorPos)
-
-				isExpr.Pattern = call
-				expr = isExpr
-
-				continue
+			if p.suppressPostfixCast > 0 {
+				return expr, nil
 			}
 
-			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
-				isExpr.VarName = p.advance().Literal
+			next, err := p.parseIsSuffix(expr)
+			if err != nil {
+				return nil, err
 			}
 
-			if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
-				var err2 error
-
-				isExpr.Type, err2 = p.parseTypeExpr()
-				if err2 != nil {
-					return nil, err2
-				}
-			}
-
-			expr = isExpr
+			expr = next
 
 		default:
 			// Consume any pending DEDENTs from method-chain INDENT continuation.
@@ -1166,6 +1285,13 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.LPAREN:
 		p.advance()
+		// Reset the postfix-cast suppression for the inner expression: a
+		// `*(r as *T)` should let the inner `r as *T` parse normally; the
+		// suppression only affects the outer pointer operator.
+		savedSuppress := p.suppressPostfixCast
+		p.suppressPostfixCast = 0
+
+		defer func() { p.suppressPostfixCast = savedSuppress }()
 		// Block expression: (let x = ...; expr) - produced by CTFE macro splices.
 		// Parsed as a sequence of statements terminated by ')'; the last statement
 		// must be an expression whose value is returned.
