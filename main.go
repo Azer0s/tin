@@ -161,11 +161,11 @@ var jobs int
 // default optLevel chosen by compileIR.
 var optLevelOverride string
 
-// testFastCompile is intended for a future default where `tin test` builds
-// with -O0 (~18x faster on the full suite). Currently off because at least
-// one stdlib pattern (recursive array slicing in arr_sum) leaks memory at
-// -O0 without optimizer-driven TCO/cleanup. Once that's fixed, flip this
-// to true for `tin test`. Until then, users can pass -O0 explicitly.
+// testFastCompile is set true for `tin test` / `tin build-test` / `tin ir-test`
+// so they default to -O0. Optimization passes can dominate compile time on
+// large IR (>1m on rtti-heavy tests at -O2 vs ~1s at -O0) while contributing
+// nothing to test-correctness signal. Pass -O2 (or any -O flag) explicitly to
+// override.
 var testFastCompile bool
 
 // clangTripleForTarget returns the canonical LLVM target triple for the
@@ -453,6 +453,14 @@ func main() {
 	}
 
 	cmd := os.Args[1]
+
+	// `tin test` / `tin build-test` / `tin ir-test` default to -O0: optimization
+	// passes can dominate compile time on large IR (>1m on rtti-heavy tests at
+	// -O2 vs ~1s at -O0) while contributing nothing to test correctness. Pass
+	// -O2 (or any -O flag) explicitly to override.
+	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
+		testFastCompile = true
+	}
 
 	// Parse flags: --lib means compile to object file, not a binary.
 	// Scan forward from position 2 to find the first non-flag argument (the source file).
