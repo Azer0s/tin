@@ -332,6 +332,12 @@ type CodeGen struct {
 	// hash walk visits each function at most once per compilation.
 	ctfeFnHashes ctfeFnHashCache
 
+	// pureFnShims tracks which #pure functions had a `__tin_pure_shim_<name>`
+	// emitted by emitPureFnCtfeShims. The per-fn .so cache emit consults
+	// this set so the slicer knows to (a) include the shim in the slice and
+	// (b) promote its linkage from internal to external for dlsym.
+	pureFnShims map[string]bool
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
@@ -1536,6 +1542,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// third pass so all internal entry points exist as IR functions
 	// the wrapper can reference.
 	if err := cg.emitInteropWrappers(prog.Stmts); err != nil {
+		return nil, err
+	}
+
+	// Emit a parallel #interop-style shim for every wrappable #pure function
+	// so the per-fn .so cache (Phase C2) has a single uniform dispatch
+	// surface for cgo. The shim shares emitInteropWrapperFor's marshal
+	// logic — string/slice/bool widening all go through the same helpers
+	// the user-tagged #interop pipeline uses. Shim symbol is
+	// `__tin_pure_shim_<fn_name>` so it never collides with the function
+	// itself; in the main binary the shim has internal linkage and clang
+	// DCEs it; the cache slicer promotes it to external for dlsym.
+	if err := cg.emitPureFnCtfeShims(); err != nil {
 		return nil, err
 	}
 

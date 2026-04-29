@@ -10,13 +10,94 @@ package codegen
 // `define` block intact. The result is a valid stand-alone module that
 // references its callees as external symbols, ready to be resolved at
 // dlopen time.
+//
+// Each per-fn slice contains both the original Tin function (with its
+// internal Tin-ABI) and a parallel `__tin_pure_shim_<name>` C-callable
+// wrapper produced by emitPureFnCtfeShims. dlsym hits the shim, which
+// reuses the existing #interop marshal helpers (tin_interop_str_in/out,
+// tin_interop_slice_in/out, bool widening) before delegating to the
+// internal entry — the same path the user-tagged #interop pipeline uses.
 
 import (
 	"fmt"
 	"strings"
 
+	"github.com/llir/llvm/ir/enum"
+
 	"github.com/Azer0s/tin/ast"
 )
+
+// pureFnShimPrefix names the auto-generated #interop-style wrapper attached
+// to every wrappable #pure function for CTFE dispatch. Symbol pattern:
+// `__tin_pure_shim_<fn_name>`. Distinct from the user-facing #interop
+// wrapper symbol so we never collide with the original function name.
+const pureFnShimPrefix = "__tin_pure_shim_"
+
+// pureFnShimName returns the deterministic dispatch symbol for fn.
+func pureFnShimName(fnName string) string { return pureFnShimPrefix + fnName }
+
+// emitPureFnCtfeShims walks every #pure function declared in the program
+// and, when its signature passes the #interop validator, emits a
+// `__tin_pure_shim_<name>` wrapper alongside it. The shim re-uses
+// emitInteropWrapperWithName so the marshal logic stays in one place.
+//
+// In the main binary the shim has internal linkage (clang DCEs it as
+// dead code at -O2 because nothing in main references the shim symbol);
+// in the per-fn .so cache slice the slicer promotes it to external so
+// dlsym can find it.
+func (cg *CodeGen) emitPureFnCtfeShims() error {
+	if cg.pureFnShims == nil {
+		cg.pureFnShims = map[string]bool{}
+	}
+
+	for name, fd := range cg.funcDecls {
+		if !hasTag(fd.Tags, "pure") {
+			continue
+		}
+		// Methods are surfaced under names like "Struct_method"; the
+		// #interop pipeline rejects struct methods (v1) so we follow
+		// suit and skip them here too.
+		if strings.Contains(name, "_") && fd.TraitQualifier != "" {
+			continue
+		}
+		// User already tagged it #interop — wrapper already emitted by
+		// emitInteropWrappers under the bare name; reuse THAT one.
+		if hasTag(fd.Tags, "interop") {
+			cg.pureFnShims[name] = true
+
+			continue
+		}
+		// Skip generic / async / extern fns — validateInteropFunc would
+		// reject them anyway. Cheap pre-checks let us avoid building the
+		// wrapper for impossible cases.
+		if len(fd.TypeParams) > 0 || hasTag(fd.Tags, "async") || fd.IsExtern != "" {
+			continue
+		}
+		// Run the full #interop validator to gate types we can actually
+		// wrap. Failures are non-fatal — the fn just doesn't get a CTFE
+		// shim, and the dispatch path silently falls back to AST eval.
+		if err := cg.validateInteropFunc(fd); err != nil {
+			continue
+		}
+
+		shimName := pureFnShimName(name)
+		if err := cg.emitInteropWrapperWithName(fd, shimName); err != nil {
+			return fmt.Errorf("ctfe shim for %q: %w", name, err)
+		}
+		// Mark the shim internal so clang DCEs it from the main binary.
+		// The slicer promotes it back to external for the per-fn .so.
+		for _, f := range cg.mod.Funcs {
+			if f.Name() == shimName {
+				f.Linkage = enum.LinkageInternal
+				break
+			}
+		}
+
+		cg.pureFnShims[name] = true
+	}
+
+	return nil
+}
 
 // PureFnArtefact is one slice of the compilation output ready to be cached
 // and dispatched independently. Name is the user-visible function name (the
@@ -63,15 +144,25 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 			continue
 		}
 
-		ir := sliceIRForFunc(full, name)
+		// Slice the original function plus, when present, the
+		// `__tin_pure_shim_<name>` C-callable entry that dlsym will find.
+		// Skip cache emission entirely if no shim exists (the function's
+		// signature wasn't wrappable; CTFE dispatch would have nothing
+		// to call).
+		shimName := pureFnShimName(name)
+		if !cg.pureFnShims[name] {
+			continue
+		}
+
+		ir := sliceIRForFuncs(full, []string{name, shimName})
 		if ir == "" {
 			continue
 		}
 
-		// The function must be reachable from outside the .so for dlsym to
-		// find it. Promote its define from the default `internal` linkage
-		// (set during main codegen) back to external/default visibility.
-		ir = promoteSymbolToExternal(ir, name)
+		// The shim must be reachable from outside the .so for dlsym to
+		// find it. The original Tin entry stays internal (called only
+		// from the shim within the .so).
+		ir = promoteSymbolToExternal(ir, shimName)
 
 		out = append(out, PureFnArtefact{
 			Name:   name,
@@ -83,52 +174,67 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 	return out
 }
 
-// canI64Adapter reports whether fd's full signature is expressible through
-// the primitive-only cgo dispatch entries (i1/i8/i16/i32/i64 — signed and
-// unsigned in source). Floats/strings/arrays/structs need to route through
-// emitInteropWrapperFor's marshal helpers and are out of scope for this
-// shape gate.
-func canI64Adapter(fd *ast.FuncDecl) bool {
-	if fd.RetType == nil {
-		return false
+// sliceIRForFuncs is sliceIRForFunc generalized to keep multiple functions'
+// definitions intact while still converting every other `define` block to a
+// `declare`. Used by the per-fn .so emit to keep the original Tin entry
+// alongside its `__tin_pure_shim_<name>` wrapper.
+func sliceIRForFuncs(fullIR string, targets []string) string {
+	keep := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		keep[t] = true
 	}
 
-	if i64BackingType(fd.RetType) == "" {
-		return false
-	}
+	var (
+		out         strings.Builder
+		inDefine    bool
+		isTarget    bool
+		curBody     strings.Builder
+		curSig      string
+		foundAny    bool
+	)
 
-	for _, p := range fd.Params {
-		if i64BackingType(p.Type) == "" {
-			return false
+	for _, line := range strings.Split(fullIR, "\n") {
+		if !inDefine {
+			if strings.HasPrefix(line, "define ") {
+				inDefine = true
+				curSig = line
+				curBody.Reset()
+				curBody.WriteString(line)
+				curBody.WriteByte('\n')
+				isTarget = keep[extractDefineName(line)]
+
+				if isTarget {
+					foundAny = true
+				}
+
+				continue
+			}
+
+			out.WriteString(line)
+			out.WriteByte('\n')
+
+			continue
+		}
+
+		curBody.WriteString(line)
+		curBody.WriteByte('\n')
+
+		if line == "}" {
+			inDefine = false
+			if isTarget {
+				out.WriteString(curBody.String())
+			} else {
+				out.WriteString(defineToDeclare(curSig))
+				out.WriteByte('\n')
+			}
 		}
 	}
 
-	return true
-}
-
-// i64BackingType returns the LLVM IR type name for a Tin type that fits in an
-// i64 register (i1 / i8 / i16 / i32 / i64 — including unsigned variants).
-// Returns "" for types we cannot dispatch through the i64 cgo entries.
-func i64BackingType(t ast.TypeExpr) string {
-	st, ok := t.(*ast.SimpleType)
-	if !ok {
+	if !foundAny {
 		return ""
 	}
 
-	switch st.Name {
-	case "bool":
-		return "i1"
-	case "i8", "u8", "byte", "char":
-		return "i8"
-	case "i16", "u16":
-		return "i16"
-	case "i32", "u32":
-		return "i32"
-	case "i64", "u64":
-		return "i64"
-	}
-
-	return ""
+	return out.String()
 }
 
 // promoteSymbolToExternal drops the `internal` linkage qualifier from the

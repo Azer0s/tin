@@ -459,6 +459,15 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 //   - bool: C uint8_t -> i1 (icmp ne 0); reverse for returns.
 //   - everything else: passthrough (primitives, pointers).
 func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
+	return cg.emitInteropWrapperWithName(fn, fn.Name)
+}
+
+// emitInteropWrapperWithName is emitInteropWrapperFor with an explicit
+// wrapper symbol name. Lets the CTFE per-fn cache emit a parallel shim
+// (`__tin_pure_shim_<name>`) without colliding with the internal Tin
+// entry that already occupies the bare name when the function was not
+// originally tagged #interop.
+func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName string) error {
 	entry, ok := cg.curScope.lookup(fn.Name)
 	if !ok {
 		return cg.nodeErr(fn, "fn %s: #interop wrapper cannot find internal entry point", fn.Name)
@@ -645,7 +654,7 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		}
 	}
 
-	wrapper := cg.mod.NewFunc(fn.Name, retType, wrapperParams...)
+	wrapper := cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
 	block := wrapper.NewBlock("entry")
 	block.NewCall(cg.ensureRuntimeInitOnce())
 

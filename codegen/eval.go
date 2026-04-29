@@ -187,20 +187,11 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 }
 
 // tryDispatchPureCall attempts the tier-2 fallback: dlopen the .so cached at
-// .build/pure-fn/<merkle>/bin.so, dlsym its tin_ctfe_<merkle> adapter, and
-// invoke the function with the given args. Returns ok=false silently when
-// any step is unavailable (no cache, signature outside the i64 marshal,
-// hash unresolvable). Successful dispatch returns an i64 / bool ctfeVal.
-//
-// The bridge currently supports only i64-fits args/return (i1/i8/i16/i32/i64
-// and their unsigned counterparts). Floats / strings / arrays / structs need
-// a richer marshal protocol — they will land once we route through
-// emitInteropWrapperFor instead of the bespoke i64 adapter.
+// .build/pure-fn/<merkle>/bin.so, dlsym its `__tin_pure_shim_<name>` entry,
+// and invoke the function via libffi using the shim's actual signature.
+// Returns ok=false silently when any step is unavailable (no cache, type
+// outside the libffi marshal subset, hash unresolvable).
 func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctfeVal, bool) {
-	if !canI64Adapter(fd) {
-		return ctfeVal{}, false
-	}
-
 	hash := cg.ctfeFnHash(fd)
 	if hash == "" {
 		return ctfeVal{}, false
@@ -210,41 +201,12 @@ func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctf
 		return ctfeVal{}, false
 	}
 
-	args := make([]int64, len(argVals))
-
-	for i, v := range argVals {
-		switch v.kind {
-		case "i64":
-			args[i] = v.i
-		case "bool":
-			if v.b {
-				args[i] = 1
-			}
-		default:
-			// Float / string / unsupported - the marshal protocol cannot
-			// carry it through the i64 adapter.
-			return ctfeVal{}, false
-		}
-	}
-
-	h, err := LoadPureFn(hash, fd.Name)
+	h, err := LoadPureFn(hash, "__tin_pure_shim_"+fd.Name)
 	if err != nil {
 		return ctfeVal{}, false
 	}
 
-	result, err := InvokePureFn(h, args)
-	if err != nil {
-		return ctfeVal{}, false
-	}
-
-	// The adapter zero-extends narrower returns into i64. For bool returns
-	// we reconstruct the user-visible kind so downstream consumers see the
-	// right type.
-	if simple, ok := fd.RetType.(*ast.SimpleType); ok && simple.Name == "bool" {
-		return ctfeVal{kind: "bool", b: result != 0}, true
-	}
-
-	return ctfeVal{kind: "i64", i: result}, true
+	return InvokePureShim(h, fd, argVals)
 }
 
 // ---------------------------------------------------------------------------
