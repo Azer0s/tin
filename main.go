@@ -932,6 +932,15 @@ doneFlags:
 			die("compile error: %v", err)
 		}
 
+		// Phase C2/C4: opt-in per-fn .so cache. Drives nothing in the user
+		// binary itself (the wrapper symbols stay internal-linkage and clang
+		// DCEs them); the cache is for tier-2 CTFE dispatch on rebuilds.
+		if pureFnCacheEnabled() {
+			if err := emitPureFnCache(cg, cprog); err != nil {
+				die("pure-fn cache: %v", err)
+			}
+		}
+
 		cprog.clear()
 
 	case "build-test":

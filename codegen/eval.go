@@ -18,12 +18,20 @@ import (
 // ---------------------------------------------------------------------------
 
 // ctfeVal holds a single compile-time constant value produced by CTFE.
+//
+// Slice-typed CTFE values use kind="slice"; the elemKind names the element
+// scalar (one of i64/f64/bool/string) and elems carries the homogeneous
+// per-element ctfeVal payload. Slices flow into tier-2 dispatch via the
+// libffi shim; expansion to the wrapper's (T*, i64) C-ABI shape happens at
+// the marshal boundary using cg.classifyInteropParam.
 type ctfeVal struct {
-	kind string // "i64", "f64", "bool", "string"
-	i    int64
-	f    float64
-	b    bool
-	s    string
+	kind     string // "i64", "f64", "bool", "string", "slice"
+	i        int64
+	f        float64
+	b        bool
+	s        string
+	elemKind string     // for kind=="slice": element scalar kind
+	elems    []ctfeVal  // for kind=="slice": homogeneous element payload
 }
 
 // ctfeReturn is a sentinel used to carry a return value out of evalBody.
@@ -346,6 +354,35 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 		return ctfeVal{kind: "string", s: v.Value}, nil
 	case *ast.CharLit:
 		return ctfeVal{kind: "i64", i: int64(v.Value)}, nil
+
+	case *ast.ArrayLit:
+		// Evaluate every element; require they share a single scalar kind so
+		// the slice can be marshalled through the (T*, i64) wrapper boundary.
+		// Mixed-kind arrays (e.g. union of i64+string) bail to AST-eval failure.
+		if len(v.Elems) == 0 {
+			return ctfeVal{kind: "slice", elemKind: "i64", elems: nil}, nil
+		}
+
+		elems := make([]ctfeVal, 0, len(v.Elems))
+
+		var elemKind string
+
+		for _, e := range v.Elems {
+			ev, err := evalNode(e, env, cg, depth)
+			if err != nil {
+				return ctfeVal{}, err
+			}
+
+			if elemKind == "" {
+				elemKind = ev.kind
+			} else if ev.kind != elemKind {
+				return ctfeVal{}, errNotConst
+			}
+
+			elems = append(elems, ev)
+		}
+
+		return ctfeVal{kind: "slice", elemKind: elemKind, elems: elems}, nil
 
 	// --- Variables ---
 	case *ast.Identifier:
