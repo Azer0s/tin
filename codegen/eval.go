@@ -597,6 +597,50 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	case *ast.ForStmt:
 		return evalForStmt(v, env, cg, depth)
 
+	case *ast.MatchStmt:
+		// Evaluate the discriminant, then walk cases looking for a literal-
+		// pattern match. Type-pattern (`case _ T:`) and struct-pattern arms
+		// can't be modelled without runtime type info; we bail to errNotConst
+		// and let the runtime path handle them.
+		disc, err := evalNode(v.Expr, env, cg, depth)
+		if err != nil {
+			return ctfeVal{}, err
+		}
+
+		for _, c := range v.Cases {
+			matched, err := matchCtfePattern(c.Pattern, disc, env, cg, depth)
+			if err != nil {
+				return ctfeVal{}, err
+			}
+
+			if !matched {
+				continue
+			}
+
+			if c.Guard != nil {
+				gv, gerr := evalNode(c.Guard, env, cg, depth)
+				if gerr != nil {
+					return ctfeVal{}, gerr
+				}
+
+				if gv.kind != "bool" || !gv.b {
+					continue
+				}
+			}
+
+			if c.VarName != "" {
+				env[c.VarName] = disc
+			}
+
+			return evalBranch(c.Body, env, cg, depth)
+		}
+
+		if v.Default != nil {
+			return evalBranch(v.Default, env, cg, depth)
+		}
+
+		return ctfeVal{}, errNotConst
+
 	// --- Block / tagged block ---
 	case *ast.Block:
 		return evalBlock(v, copyEnv(env), cg, depth)
@@ -741,6 +785,43 @@ func evalCallExpr(call *ast.CallExpr, env map[string]ctfeVal, cg *CodeGen, depth
 // ---------------------------------------------------------------------------
 // Binary operator evaluation
 // ---------------------------------------------------------------------------
+
+// matchCtfePattern reports whether pat matches disc at compile time.
+// Supports literal patterns (IntLit / StringLit / BoolLit / FloatLit /
+// CharLit) and the wildcard "_" pattern. Anything richer (struct
+// destructuring, type-test arms, ADT variants) returns false silently —
+// the caller treats it as "not foldable" and skips that case.
+func matchCtfePattern(pat ast.Node, disc ctfeVal, env map[string]ctfeVal, cg *CodeGen, depth int) (bool, error) {
+	if pat == nil {
+		return true, nil
+	}
+
+	if _, ok := pat.(*ast.WildcardExpr); ok {
+		return true, nil
+	}
+
+	pv, err := evalNode(pat, env, cg, depth)
+	if err != nil {
+		return false, err
+	}
+
+	if pv.kind != disc.kind {
+		return false, nil
+	}
+
+	switch disc.kind {
+	case "i64":
+		return pv.i == disc.i, nil
+	case "f64":
+		return pv.f == disc.f, nil
+	case "bool":
+		return pv.b == disc.b, nil
+	case "string":
+		return pv.s == disc.s, nil
+	}
+
+	return false, nil
+}
 
 func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 	// Integer arithmetic.
