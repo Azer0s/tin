@@ -88,6 +88,18 @@ func nodeHasSideEffects(node ast.Node) bool {
 		return blockHasSideEffects(v.Else)
 	case *ast.ForStmt:
 		return nodeHasSideEffects(v.Cond) || blockHasSideEffects(v.Body)
+	case *ast.MatchStmt:
+		if nodeHasSideEffects(v.Expr) {
+			return true
+		}
+
+		for _, c := range v.Cases {
+			if blockHasSideEffects(c.Body) || nodeHasSideEffects(c.Guard) {
+				return true
+			}
+		}
+
+		return blockHasSideEffects(v.Default)
 	case *ast.ReturnStmt:
 		return nodeHasSideEffects(v.Value)
 	case *ast.AssignStmt:
@@ -170,6 +182,15 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 
 	result := strings.TrimSpace(string(out))
 	if result == "" {
+		// An empty string IS a legal result for a string-returning macro
+		// (e.g. repeat_str!("ab", 0) → ""). Treating empty stdout as an
+		// error there would make every "no-op" path of a string macro
+		// fail. For non-string return types, no output still indicates
+		// the body never reached its `return`, which is a real error.
+		if retType == "string" {
+			return &ast.StringLit{Value: ""}, nil
+		}
+
 		return nil, fmt.Errorf("macro %s: produced no output\nGenerated source:\n%s", m.Name, src)
 	}
 
@@ -245,6 +266,16 @@ func inferArgType(arg ast.Node) string {
 		return "bool"
 	case *ast.StringLit:
 		return "string"
+	case *ast.UnaryExpr:
+		// `-1` parses as UnaryExpr("-", IntLit(1)); the macro should see
+		// it as the numeric literal it represents, not as a string code
+		// fragment. Same for `-1.5`. Without this case the wrapper fn
+		// gets typed `string` and the body's arithmetic on it fails.
+		if v != nil && (v.Op == "-" || v.Op == "+" || v.Op == "!") {
+			return inferArgType(v.Expr)
+		}
+
+		return "string"
 	default:
 		// Complex expressions (calls, field accesses, etc.) are code fragments:
 		// pass them as strings containing the source text so they can be spliced
@@ -256,9 +287,16 @@ func inferArgType(arg ast.Node) string {
 // isCodeFragmentArg returns true when the arg is not a simple literal and
 // should therefore be passed to the CTFE subprocess as a quoted source string.
 func isCodeFragmentArg(arg ast.Node) bool {
-	switch arg.(type) {
+	switch v := arg.(type) {
 	case *ast.IntLit, *ast.FloatLit, *ast.BoolLit, *ast.StringLit:
 		return false
+	case *ast.UnaryExpr:
+		// Same recursion as inferArgType: `-1` is a literal, not a fragment.
+		if v != nil && (v.Op == "-" || v.Op == "+" || v.Op == "!") {
+			return isCodeFragmentArg(v.Expr)
+		}
+
+		return true
 	default:
 		return true
 	}
@@ -345,12 +383,34 @@ func findReturnTypeInNode(node ast.Node, paramTypes map[string]string) string {
 		if v.Body != nil {
 			return findReturnTypeInNode(v.Body, paramTypes)
 		}
+	case *ast.MatchStmt:
+		// Walk every arm; the first arm whose body returns a typed value
+		// wins. Default arm is checked too.
+		for _, c := range v.Cases {
+			if c.Body != nil {
+				if t := findReturnTypeInNode(c.Body, paramTypes); t != "" {
+					return t
+				}
+			}
+		}
+
+		if v.Default != nil {
+			if t := findReturnTypeInNode(v.Default, paramTypes); t != "" {
+				return t
+			}
+		}
 	}
 
 	return ""
 }
 
 // typeOfExpr returns a tin type string for a simple expression node.
+// Returns "" when the type cannot be determined from the expression alone
+// (e.g. a reference to a local `let` whose declaration we'd need to walk
+// the surrounding scope to find). Callers treat "" as "fall through to
+// the next disambiguation layer" (typically inferReturnType's
+// args-based fallback). Returning a wrong-but-non-empty type here would
+// short-circuit the fallback and mistype the generated wrapper fn.
 func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 	switch v := n.(type) {
 	case *ast.IntLit:
@@ -371,7 +431,21 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 		if t, ok := paramTypes[v.Name]; ok {
 			return t
 		}
+		// Local var or shadowed name — defer to the caller's fallback.
+		return ""
 	case *ast.BinExpr:
+		switch v.Op {
+		case "++":
+			return "string"
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+			// Boolean-producing operators carry their own result type
+			// regardless of operand types. Without this case the walker
+			// would mistakenly inherit "i64"/"string"/... from the
+			// operand and tag the macro wrapper with the wrong return
+			// type, then fail at codegen with a type mismatch.
+			return "bool"
+		}
+
 		if t := typeOfExpr(v.Left, paramTypes); t != "" {
 			return t
 		}
@@ -385,7 +459,7 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 		}
 	}
 
-	return "i64" // conservative default
+	return ""
 }
 
 // paramType returns the resolved type for the i-th macro parameter.

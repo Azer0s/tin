@@ -377,6 +377,8 @@ func printNode(n Node, depth int) string {
 		return printIfStmt(v, depth)
 	case *ForStmt:
 		return printForStmt(v, depth)
+	case *MatchStmt:
+		return printMatchStmt(v, depth)
 	case *Block:
 		return printBlockInline(v, depth)
 	// Phase 0 - top-level var
@@ -513,6 +515,72 @@ func printForStmt(v *ForStmt, depth int) string {
 	}
 
 	sb.WriteString(printBlockBody(v.Body, depth+1))
+
+	return sb.String()
+}
+
+// printMatchStmt renders a value-match. The macro CTFE pipeline relies on
+// this so a CTFE macro body can use `match expr: case pat: ...` and have
+// the AST round-trip through tin source text on its way to the helper
+// subprocess. Type-match (`match e.(type)`) and patterns more elaborate
+// than a literal/binding/wildcard fall back to the unhandled placeholder
+// — the upstream typeOfExpr already restricts CTFE returns to scalar
+// shapes, so a pattern that doesn't print is one we wouldn't be able to
+// evaluate anyway.
+func printMatchStmt(v *MatchStmt, depth int) string {
+	if v == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	prefix := "match"
+	if v.IsType {
+		// Type-match has a different surface (`match e.(type)`); we don't
+		// emit it because the macro CTFE wrapper has no type tag plumbing.
+		// Leaving it unhandled surfaces a clear error at the typer rather
+		// than a silently wrong fold.
+		return fmt.Sprintf("/* unhandled: type-match %T */", v)
+	}
+
+	_, _ = fmt.Fprintf(&sb, "%s %s:\n", prefix, printNode(v.Expr, depth))
+
+	for i, c := range v.Cases {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+
+		sb.WriteString(ind(depth + 1))
+		sb.WriteString("case ")
+
+		switch {
+		case c.Pattern == nil && c.VarName != "":
+			// `case i T:` with no literal pattern — bind only.
+			sb.WriteString(c.VarName)
+			if c.VarType != nil {
+				sb.WriteString(" ")
+				sb.WriteString(c.VarType.String())
+			}
+		case c.Pattern != nil:
+			sb.WriteString(printNode(c.Pattern, depth+1))
+		default:
+			sb.WriteString("_")
+		}
+
+		if c.Guard != nil {
+			_, _ = fmt.Fprintf(&sb, " if %s", printNode(c.Guard, depth+1))
+		}
+
+		sb.WriteString(":\n")
+		sb.WriteString(printBlockBody(c.Body, depth+2))
+	}
+
+	if v.Default != nil {
+		sb.WriteString("\n")
+		sb.WriteString(ind(depth + 1))
+		sb.WriteString("default:\n")
+		sb.WriteString(printBlockBody(v.Default, depth+2))
+	}
 
 	return sb.String()
 }
