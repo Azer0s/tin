@@ -56,8 +56,7 @@ Run / test:
   --valgrind               run binary under valgrind --leak-check=full
   --leaks                  run binary under leaks --atExit (macOS only)
   -j N                     parallel TUs for clang compile (default GOMAXPROCS)
-  -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0).
-                           Tip: -O0 can compile rtti-heavy tests ~90x faster.
+  -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0)
   --fast                   shortcut for -O0 — useful for tin test when the suite is bottlenecked
                            on optimization passes. Explicit -O<n> takes precedence.
 
