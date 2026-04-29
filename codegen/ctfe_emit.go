@@ -19,24 +19,21 @@ import (
 )
 
 // PureFnArtefact is one slice of the compilation output ready to be cached
-// and dispatched independently. Name is the user-visible function name; Hash
-// is the Merkle key (.build/pure-fn/<Hash>/bin.so); IRText is the
-// self-contained sub-module .ll text the linker compiles.
+// and dispatched independently. Name is the user-visible function name (the
+// dlsym symbol exported by the .so); Hash is the Merkle key
+// (.build/pure-fn/<Hash>/bin.so); IRText is the self-contained sub-module
+// .ll text the linker compiles.
 //
-// AdapterSym is the name of the uniform-signature dispatch entry point
-// emitted into the same .so when the function's params/return are all
-// 64-bit-or-narrower integer types. Empty when no adapter was emitted
-// (the caller must skip dlopen-dispatch for that fn). Adapter signature:
-//
-//	int64_t AdapterSym(int64_t* args, int64_t nargs)
-//
-// — args is a caller-owned buffer of nargs i64 values, the function call
-// is performed, and the i64 result is returned.
+// The function is exported with its native C-ABI signature — the same one
+// the #interop wrapper machinery would produce for primitive params and
+// returns. Callers dispatch via cgo shape entries (see ctfe_dispatch.go);
+// non-primitive args/returns will eventually route through the full
+// emitInteropWrapperFor pipeline (string, slice, bool widening) instead of
+// reinventing marshalling here.
 type PureFnArtefact struct {
-	Name       string
-	Hash       string
-	IRText     string
-	AdapterSym string
+	Name   string
+	Hash   string
+	IRText string
 }
 
 // PureFnsForCache walks every #pure function declared in the program and
@@ -71,80 +68,26 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 			continue
 		}
 
-		adapterSym, adapterIR := buildI64Adapter(fd, hash)
-		if adapterIR != "" {
-			ir += adapterIR
-		}
+		// The function must be reachable from outside the .so for dlsym to
+		// find it. Promote its define from the default `internal` linkage
+		// (set during main codegen) back to external/default visibility.
+		ir = promoteSymbolToExternal(ir, name)
 
 		out = append(out, PureFnArtefact{
-			Name:       name,
-			Hash:       hash,
-			IRText:     ir,
-			AdapterSym: adapterSym,
+			Name:   name,
+			Hash:   hash,
+			IRText: ir,
 		})
 	}
 
 	return out
 }
 
-// buildI64Adapter returns the symbol name and the LLVM IR text for a uniform
-// dispatch trampoline that calls fd via the standard tin_ctfe protocol:
-//
-//	int64_t tin_ctfe_<hash>(int64_t* args, int64_t nargs)
-//
-// Only emitted when every parameter type and the return type fit in i64
-// (i8/i16/i32/i64 plus their unsigned counterparts and bool). Returns
-// ("", "") when fd's signature is outside that subset (string, struct,
-// float, etc.) — callers will fall back to non-dispatched evaluation.
-//
-// The adapter is intentionally tiny: load each arg from the args buffer,
-// truncate or zero-extend to the param type, call the function, extend the
-// result back to i64. clang inlines through it at -O2 in the cached .so.
-func buildI64Adapter(fd *ast.FuncDecl, hash string) (string, string) {
-	if !canI64Adapter(fd) {
-		return "", ""
-	}
-
-	sym := "tin_ctfe_" + hash
-
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "\ndefine i64 @%s(i64* %%args, i64 %%nargs) {\nentry:\n", sym)
-
-	var callArgs []string
-	for i, p := range fd.Params {
-		argTy := i64BackingType(p.Type)
-		fmt.Fprintf(&b, "\t%%a%d_ptr = getelementptr i64, i64* %%args, i64 %d\n", i, i)
-		fmt.Fprintf(&b, "\t%%a%d_i64 = load i64, i64* %%a%d_ptr\n", i, i)
-
-		if argTy == "i64" {
-			callArgs = append(callArgs, fmt.Sprintf("i64 %%a%d_i64", i))
-		} else {
-			fmt.Fprintf(&b, "\t%%a%d = trunc i64 %%a%d_i64 to %s\n", i, i, argTy)
-			callArgs = append(callArgs, fmt.Sprintf("%s %%a%d", argTy, i))
-		}
-	}
-
-	retTy := i64BackingType(fd.RetType)
-	fmt.Fprintf(&b, "\t%%result = call %s @%s(%s)\n", retTy, fd.Name, strings.Join(callArgs, ", "))
-
-	if retTy == "i64" {
-		b.WriteString("\tret i64 %result\n")
-	} else {
-		fmt.Fprintf(&b, "\t%%result_i64 = zext %s %%result to i64\n", retTy)
-		b.WriteString("\tret i64 %result_i64\n")
-	}
-
-	b.WriteString("}\n")
-
-	return sym, b.String()
-}
-
-// canI64Adapter reports whether fd's full signature is expressible as the
-// uniform tin_ctfe (i64*, i64) -> i64 protocol. We accept i1/i8/i16/i32/i64
-// (signed and unsigned in source) plus a non-void return; floats/strings/
-// arrays/structs require richer marshalling and are out of scope for the
-// MVP adapter.
+// canI64Adapter reports whether fd's full signature is expressible through
+// the primitive-only cgo dispatch entries (i1/i8/i16/i32/i64 — signed and
+// unsigned in source). Floats/strings/arrays/structs need to route through
+// emitInteropWrapperFor's marshal helpers and are out of scope for this
+// shape gate.
 func canI64Adapter(fd *ast.FuncDecl) bool {
 	if fd.RetType == nil {
 		return false
@@ -165,8 +108,7 @@ func canI64Adapter(fd *ast.FuncDecl) bool {
 
 // i64BackingType returns the LLVM IR type name for a Tin type that fits in an
 // i64 register (i1 / i8 / i16 / i32 / i64 — including unsigned variants).
-// Returns "" for types we cannot dispatch through the i64 adapter (float,
-// string, struct, array, pointer, void, ...).
+// Returns "" for types we cannot dispatch through the i64 cgo entries.
 func i64BackingType(t ast.TypeExpr) string {
 	st, ok := t.(*ast.SimpleType)
 	if !ok {
@@ -187,6 +129,37 @@ func i64BackingType(t ast.TypeExpr) string {
 	}
 
 	return ""
+}
+
+// promoteSymbolToExternal drops the `internal` linkage qualifier from the
+// `define` line of fnName so dlsym can find it after compile. No-op when
+// the function is already external.
+func promoteSymbolToExternal(ir, fnName string) string {
+	needle := "define internal "
+
+	for i := 0; i+len(needle) <= len(ir); {
+		idx := strings.Index(ir[i:], needle)
+		if idx < 0 {
+			break
+		}
+
+		idx += i
+
+		// Inspect the rest of the define line for `@<fnName>(`.
+		eol := strings.IndexByte(ir[idx:], '\n')
+		if eol < 0 {
+			eol = len(ir) - idx
+		}
+
+		line := ir[idx : idx+eol]
+		if strings.Contains(line, " @"+fnName+"(") {
+			return ir[:idx] + "define " + ir[idx+len(needle):]
+		}
+
+		i = idx + eol
+	}
+
+	return ir
 }
 
 // sliceIRForFunc returns a valid stand-alone LLVM IR module containing only
@@ -273,12 +246,26 @@ func extractDefineName(line string) string {
 
 // defineToDeclare converts a function definition signature line ending in
 // `{` into a `declare` line. Drops the trailing `{` (and any whitespace
-// before it) and rewrites the leading `define` keyword.
+// before it) and rewrites the leading `define` keyword. Linkage qualifiers
+// like `internal` / `private` are illegal on `declare` lines and are
+// stripped here.
 func defineToDeclare(sig string) string {
 	sig = strings.TrimRight(sig, " \t")
 	sig = strings.TrimSuffix(sig, "{")
 	sig = strings.TrimRight(sig, " \t")
 	sig = strings.Replace(sig, "define ", "declare ", 1)
+
+	// Strip any linkage qualifier that is legal on define but not declare.
+	for _, qual := range []string{
+		"declare internal ", "declare private ", "declare external ",
+		"declare weak ", "declare linkonce ", "declare linkonce_odr ",
+		"declare weak_odr ", "declare appending ", "declare common ",
+	} {
+		if strings.HasPrefix(sig, qual) {
+			sig = "declare " + sig[len(qual):]
+			break
+		}
+	}
 
 	return sig
 }

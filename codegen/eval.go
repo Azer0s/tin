@@ -227,12 +227,15 @@ func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctf
 		}
 	}
 
-	h, err := LoadPureFn(hash, "tin_ctfe_"+hash)
+	h, err := LoadPureFn(hash, fd.Name)
 	if err != nil {
 		return ctfeVal{}, false
 	}
 
-	result := InvokePureFn(h, args)
+	result, err := InvokePureFn(h, args)
+	if err != nil {
+		return ctfeVal{}, false
+	}
 
 	// The adapter zero-extends narrower returns into i64. For bool returns
 	// we reconstruct the user-visible kind so downstream consumers see the
