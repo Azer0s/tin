@@ -10,7 +10,6 @@
 // must properly retain the new value and release the old one.
 
 use assert
-use mem
 
 // structs
 

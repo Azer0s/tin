@@ -296,6 +296,11 @@ type MacroDecl struct {
 type Block struct {
 	base
 	Stmts []Node
+	// IsExplicitPass reports whether the source contained a `pass` keyword
+	// as the entire block body. Lets diagnostics like -Wempty-body
+	// distinguish "user wrote pass on purpose" from "user left the body
+	// blank by mistake".
+	IsExplicitPass bool
 }
 
 type ReturnStmt struct {

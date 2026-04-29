@@ -235,9 +235,14 @@ func (cg *CodeGen) checkCastTruncatesConst(e *ast.AsExpr, tBits uint64, srcUnsig
 		return
 	}
 
+	prefix := "i"
+	if srcUnsigned {
+		prefix = "u"
+	}
+
 	cg.warn(DiagCastTrunc, e.Pos(),
-		"constant %d does not fit in i%d (range %d..%d)",
-		v.intVal, tBits, minOK, maxOK)
+		"constant %d does not fit in %s%d (range %d..%d)",
+		v.intVal, prefix, tBits, minOK, maxOK)
 }
 
 // checkShiftAmount errors out when a shift's right-hand operand folds to a

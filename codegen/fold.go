@@ -506,5 +506,64 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 		}
 	case *ast.TaggedBlock:
 		walkAST(v.Body, visit)
+	case *ast.AwaitExpr:
+		walkAST(v.Future, visit)
+	case *ast.SpawnExpr:
+		walkAST(v.Call, visit)
+		walkAST(v.DoBlock, visit)
+	case *ast.AwaitMatchStmt:
+		for _, fut := range v.Futures {
+			walkAST(fut, visit)
+		}
+
+		for _, c := range v.Cases {
+			walkAST(c.Guard, visit)
+			walkAST(c.Body, visit)
+		}
+
+		walkAST(v.Default, visit)
+	case *ast.TernaryExpr:
+		walkAST(v.Cond, visit)
+		walkAST(v.Then, visit)
+		walkAST(v.Else, visit)
+	case *ast.ArrayLit:
+		for _, e := range v.Elems {
+			walkAST(e, visit)
+		}
+	case *ast.ArrayFillLit:
+		walkAST(v.Value, visit)
+	case *ast.TupleLit:
+		for _, e := range v.Elems {
+			walkAST(e, visit)
+		}
+	case *ast.StructLit:
+		for _, f := range v.Fields {
+			walkAST(f.Value, visit)
+		}
+
+		for _, p := range v.Positional {
+			walkAST(p, visit)
+		}
+	case *ast.RangeExpr:
+		walkAST(v.Start, visit)
+		walkAST(v.End, visit)
+	case *ast.SliceExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Start, visit)
+		walkAST(v.End, visit)
+	case *ast.AsExpr:
+		walkAST(v.Expr, visit)
+	case *ast.IsExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Pattern, visit)
+	case *ast.InterpolatedString:
+		for _, p := range v.Parts {
+			if p.IsExpr {
+				walkAST(p.Expr, visit)
+			}
+		}
+	case *ast.PipeExpr:
+		walkAST(v.Left, visit)
+		walkAST(v.Right, visit)
 	}
 }

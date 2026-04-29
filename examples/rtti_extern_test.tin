@@ -12,7 +12,6 @@ use assert
 //   9. Edge cases: null/zero values, nested types, recursive fns
 
 use io
-use mem
 
 // Traits and structs used throughout
 

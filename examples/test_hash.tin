@@ -79,7 +79,8 @@ test "xxhash3 deterministic" =
 
 test "xxhash3 empty string does not crash" =
   let h = xxhash3::xxhash3("")
-  assert::ok(h == h)
+  let h2 = xxhash3::xxhash3("")
+  assert::ok(h == h2)
 
 test "xxhash3 different inputs differ" =
   assert::ok(xxhash3::xxhash3("hello") != xxhash3::xxhash3("world"))

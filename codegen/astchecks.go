@@ -226,13 +226,14 @@ func (cg *CodeGen) checkUselessCast(e *ast.AsExpr) {
 }
 
 // checkEmptyIfBody flags `if x: { }` or `else: { }` where the block is
-// empty. Almost always an unfinished edit.
+// empty. Almost always an unfinished edit. An explicit `pass` keyword is
+// the user telling us the empty body is intentional, so we suppress.
 func (cg *CodeGen) checkEmptyIfBody(s *ast.IfStmt) {
-	if s.Then != nil && len(s.Then.Stmts) == 0 {
+	if s.Then != nil && len(s.Then.Stmts) == 0 && !s.Then.IsExplicitPass {
 		cg.warn(DiagEmptyBody, s.Pos(), "empty `if` body")
 	}
 
-	if s.Else != nil && len(s.Else.Stmts) == 0 {
+	if s.Else != nil && len(s.Else.Stmts) == 0 && !s.Else.IsExplicitPass {
 		cg.warn(DiagEmptyBody, s.Pos(), "empty `else` body")
 	}
 }

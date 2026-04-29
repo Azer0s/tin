@@ -1269,8 +1269,13 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 
 		// Truncation: warn if the source folds to a constant that doesn't
 		// fit the destination type. Caller may have written `let x i32 = 1<<33`.
+		// We pin the legal range by the DESTINATION signedness — `0xC3 as
+		// byte` is a perfectly valid u8 (195) even though 0xC3 was lexed as
+		// a signed i64 literal. Falling back to the source's signedness only
+		// when the dest is itself a signed integer type.
 		if sBits > tBits {
-			cg.checkCastTruncatesConst(e, tBits, cg.exprElemIsUnsigned(e.Expr))
+			isUnsigned := isUnsignedTinType(e.Type) || cg.exprElemIsUnsigned(e.Expr)
+			cg.checkCastTruncatesConst(e, tBits, isUnsigned)
 		}
 
 		if sBits < tBits {

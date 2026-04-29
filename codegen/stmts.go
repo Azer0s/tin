@@ -319,10 +319,15 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 		}
 
 		if terminated || block == nil {
-			// Warn about any statements following a terminator. We point at
-			// the first dead statement so the user can locate the unreachable
-			// region quickly.
-			if i+1 < len(b.Stmts) {
+			// Warn about any statements following an explicit terminator
+			// (return / break / panic-style call). We deliberately skip the
+			// warning when the terminator is structural — an `if` chain that
+			// the analyzer/folder discovered always returns, a `for` whose
+			// condition collapsed away, a match that exhausts every arm —
+			// because the source code is still branching as written; "dead"
+			// is a property of the monomorphized callsite (e.g. typeof(v) ==
+			// 'i64 in encode[T]) rather than user-visible mistake.
+			if i+1 < len(b.Stmts) && isExplicitTerminator(stmt) {
 				cg.warn(DiagUnreachableCode, b.Stmts[i+1].Pos(),
 					"unreachable code after %s", terminatorKind(stmt))
 			}
@@ -332,6 +337,27 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 	}
 
 	return block, false, nil
+}
+
+// isExplicitTerminator reports whether stmt is a syntactic control-flow
+// terminator (return, break, panic-style call). Structural constructs like
+// if / for / match that the analyzer happens to discover always-terminate
+// after monomorphization don't count — issuing -Wunreachable-code on
+// "the rest of an if/elif chain whose typeof(v) ==' branches were folded
+// down to one live path" is noise, not a useful diagnostic.
+func isExplicitTerminator(stmt ast.Node) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt, *ast.BreakStmt:
+		return true
+	case *ast.ExprStmt:
+		if call, ok := s.Expr.(*ast.CallExpr); ok {
+			if id, ok2 := call.Func.(*ast.Identifier); ok2 && id.Name == "panic" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // terminatorKind returns a short human-readable name for a control-flow

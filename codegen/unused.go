@@ -155,7 +155,15 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			used[v.Name] = true
 		case *ast.ScopeAccess:
 			if len(v.Path) > 0 {
-				used[v.Path[0]] = true
+				// Generic-type method calls fold the type-arg list into the
+				// first path segment, e.g. ScopeAccess{Path: ["pkg::T[U]",
+				// "method"]}. Split on "::" to recover the import root.
+				root := v.Path[0]
+				if idx := strings.Index(root, "::"); idx >= 0 {
+					root = root[:idx]
+				}
+
+				used[root] = true
 			}
 		case *ast.FieldAccess:
 			if id, ok := v.Expr.(*ast.Identifier); ok {
