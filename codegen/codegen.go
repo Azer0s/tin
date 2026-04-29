@@ -338,6 +338,38 @@ type CodeGen struct {
 	// (b) promote its linkage from internal to external for dlsym.
 	pureFnShims map[string]bool
 
+	// pureFoldDisabled, when true, makes tryEvalPureCall a no-op so the
+	// generator emits the call as a runtime invocation. Driven by the
+	// `--no-pure-fold` CLI flag. Useful when a faulty #pure body would
+	// hang or panic the evaluator at compile time, or when comparing
+	// optimized vs unoptimized binaries during compiler debugging.
+	pureFoldDisabled bool
+
+	// pureFoldBudget caps the total node-evaluation work spent on a
+	// single top-level #pure call (sum across all loops, recursion, and
+	// nested call expansions). When the budget is exhausted the
+	// evaluator returns errNotConst and the call falls back to runtime
+	// dispatch — same outcome as a non-foldable signature, but reached
+	// safely instead of pathologically. 0 means "use the default"
+	// (defaultPureFoldBudget); negative values are forbidden.
+	pureFoldBudget int
+
+	// topLevelVarPos records the source position where each top-level
+	// `let`/`var`/`const` was declared, keyed by name. Populated as
+	// declarations are processed in Generate; consumed by the
+	// `sourcepos(symbol)` builtin to resolve a symbol's definition site
+	// when no AST node is in hand. Nested scopes don't go in here —
+	// scopeEntry.declPos covers locals separately.
+	topLevelVarPos map[string]ast.Pos
+
+	// pureFoldBudgetRemaining tracks how many evalNode visits are still
+	// allowed for the currently-evaluating top-level #pure call. The
+	// counter is reset at every entry into tryEvalPureCallToCtfeVal and
+	// decremented once per evalNode call. When it hits zero the
+	// evaluator unwinds with errCTFEBudget. Not goroutine-safe — codegen
+	// is single-threaded by construction.
+	pureFoldBudgetRemaining int
+
 	// shimMod hosts every CTFE shim (the wrappers emitPureFnCtfeShims
 	// produces). Kept entirely separate from cg.mod so the user binary's
 	// IR never carries shim definitions; the per-fn .so emit combines
@@ -840,6 +872,29 @@ func (cg *CodeGen) SetVerboseHeuristics(v bool)                     { cg.verbose
 func (cg *CodeGen) SetProgressFunc(fn func(string))                 { cg.progressFn = fn }
 func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoReportFn = fn }
 
+// SetPureFoldDisabled toggles compile-time evaluation of #pure calls.
+// When true, both tier-1 (AST evaluator) and tier-2 (cached .so dispatch)
+// are short-circuited, and every #pure call codegens as a regular runtime
+// invocation. The user-visible behavior of #pure (purity contract,
+// alwaysinline, readnone, no_recurse depth limit) is unchanged — only
+// the constant-folding optimization is suppressed. Driven by the
+// `--no-pure-fold` CLI flag.
+func (cg *CodeGen) SetPureFoldDisabled(v bool) { cg.pureFoldDisabled = v }
+
+// SetPureFoldBudget overrides the per-call evaluation budget cap used by
+// the CTFE evaluator. Pass 0 to keep the default (defaultPureFoldBudget);
+// any negative value is treated as 0. Each call to evalNode consumes one
+// unit; the budget is reset at the top-level entry into the evaluator.
+// On exhaustion the call falls back to runtime evaluation just as if
+// the body weren't foldable.
+func (cg *CodeGen) SetPureFoldBudget(n int) {
+	if n < 0 {
+		n = 0
+	}
+
+	cg.pureFoldBudget = n
+}
+
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
 func (cg *CodeGen) progress(msg string) {
@@ -958,6 +1013,7 @@ func New(filename string) *CodeGen {
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
 		ctfeCache:                make(map[string]ctfeMemoEntry),
+		topLevelVarPos:           make(map[string]ast.Pos),
 		externTLSVars:            make(map[string]*ir.Global),
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
@@ -1500,6 +1556,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			if err := cg.preregisterTopLevelVar(tv); err != nil {
 				return nil, err
 			}
+			// Record the declaration position so `sourcepos(my_top_var)`
+			// can resolve back to the originating let/var/const line.
+			cg.topLevelVarPos[tv.Name] = tv.Pos()
 		}
 	}
 

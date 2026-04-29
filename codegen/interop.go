@@ -707,7 +707,14 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 
 	wrapper := cg.activeModule().NewFunc(wrapperName, retType, wrapperParams...)
 	block := wrapper.NewBlock("entry")
-	block.NewCall(cg.ensureRuntimeInitOnce())
+	// Skip the tin_runtime_init bootstrap when emitting into the CTFE
+	// shim module: the dispatcher (Tin compiler) doesn't link the runtime
+	// so the symbol is unresolvable, and CTFE invocations don't need a
+	// fiber scheduler. For real #interop wrappers (target = cg.mod) the
+	// init call stays as before.
+	if cg.activeModule() == cg.mod {
+		block.NewCall(cg.ensureRuntimeInitOnce())
+	}
 
 	// Per-arg marshaling. We track Tin temporaries (strings, slices)
 	// created here so we can release them after the internal call.

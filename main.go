@@ -59,6 +59,11 @@ Run / test:
   -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0)
   --fast                   shortcut for -O0 — useful for tin test when the suite is bottlenecked
                            on optimization passes. Explicit -O<n> takes precedence.
+  --no-pure-fold           disable compile-time evaluation of #pure calls; emit them as runtime
+                           invocations. Same as -fno-pure-fold. Useful when a faulty #pure body
+                           hangs the evaluator or when comparing folded vs unfolded codegen.
+  --pure-fold-budget=N     cap node visits per top-level #pure call (default 1_000_000). On
+                           exhaustion the call falls back to runtime emission. 0 = use default.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
   -Wall                    enable hygiene checks: unused-let, unused-result
@@ -84,6 +89,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     unused-let                  let-binding that is never read
     unused-result               discarded result of a non-void call
     unused-param                fn parameter that is never read
+    builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)
@@ -470,13 +476,20 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g", "--fast":
+		case "-g", "--fast", "--no-pure-fold", "-fno-pure-fold":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j":
 			fileArgIdx += 2
 		default:
 			// -O0..-O3, -Os, -Oz are single-token flags.
 			if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Os" || a == "-Oz" {
+				fileArgIdx++
+
+				continue
+			}
+
+			// `--pure-fold-budget=N` is a single-token "key=value" flag.
+			if strings.HasPrefix(a, "--pure-fold-budget=") {
 				fileArgIdx++
 
 				continue
@@ -511,6 +524,8 @@ doneFlags:
 	allWarnsAsErrors := false
 	wAll := false
 	wPedantic := false
+	noPureFold := false
+	pureFoldBudget := 0 // 0 = use codegen default
 
 	var (
 		warnSuppress []string // -Wno-<name> targets
@@ -583,6 +598,8 @@ doneFlags:
 			}
 		case "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz":
 			optLevelOverride = a
+		case "--no-pure-fold", "-fno-pure-fold":
+			noPureFold = true
 		case "--fast":
 			// Shortcut for `tin test`: drop the optimization level so the
 			// LLVM passes that dominate compile time on rtti-heavy /
@@ -607,6 +624,15 @@ doneFlags:
 				warnEnable = append(warnEnable, strings.TrimPrefix(a, "-W"))
 			case strings.HasPrefix(a, "--emit-header="):
 				emitHeaderPath = strings.TrimPrefix(a, "--emit-header=")
+			case strings.HasPrefix(a, "--pure-fold-budget="):
+				raw := strings.TrimPrefix(a, "--pure-fold-budget=")
+
+				n, perr := strconv.Atoi(raw)
+				if perr != nil || n < 0 {
+					die("--pure-fold-budget: expected non-negative integer (got %q)", raw)
+				}
+
+				pureFoldBudget = n
 			}
 		}
 	}
@@ -754,6 +780,14 @@ doneFlags:
 	cg := codegen.New(file)
 	if cmd == "test" || cmd == "build-test" || cmd == "ir-test" {
 		cg.SetTestMode(true)
+	}
+
+	if noPureFold {
+		cg.SetPureFoldDisabled(true)
+	}
+
+	if pureFoldBudget > 0 {
+		cg.SetPureFoldBudget(pureFoldBudget)
 	}
 
 	if wPedantic {
@@ -1322,8 +1356,12 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 		linkInputs = append(linkInputs, cachedPath)
 		if !hit {
-			rtArgs = append(rtArgs, rtC, "-o", cachedPath)
-			jobsList = append(jobsList, compileJob{desc: "runtime.c", args: rtArgs})
+			tempPath := cachedPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+
+			rtArgs = append(rtArgs, rtC, "-o", tempPath)
+			jobsList = append(jobsList, compileJob{
+				desc: "runtime.c", args: rtArgs, renameTo: cachedPath,
+			})
 		}
 	}
 
@@ -1354,9 +1392,13 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			continue
 		}
 
+		tempPath := cachedPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+
 		a := append([]string{}, baseArgs...)
-		a = append(a, cs.path, "-o", cachedPath)
-		jobsList = append(jobsList, compileJob{desc: filepath.Base(cs.path), args: a})
+		a = append(a, cs.path, "-o", tempPath)
+		jobsList = append(jobsList, compileJob{
+			desc: filepath.Base(cs.path), args: a, renameTo: cachedPath,
+		})
 	}
 
 	if prog != nil {
@@ -1527,13 +1569,38 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 
 	var jobsList []compileJob
 
-	for _, p := range pending {
+	for i := range pending {
+		// Write to a unique temp path then rename: prevents concurrent
+		// `tin` processes (or this process's parallel jobs) from
+		// half-writing the same final .so. The runner does the rename
+		// atomically once the clang call succeeds.
+		tempSo := pending[i].soPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+
 		args := append([]string{"-shared", "-fPIC", "-O2"}, clangTargetFlag()...)
-		args = append(args, p.llPath, "-o", p.soPath)
-		jobsList = append(jobsList, compileJob{desc: p.artefact.Name, args: args})
+		args = append(args, pending[i].llPath, "-o", tempSo)
+		jobsList = append(jobsList, compileJob{
+			desc:     pending[i].artefact.Name,
+			args:     args,
+			renameTo: pending[i].soPath,
+		})
 	}
 
-	return runParallelClang(jobsList)
+	if err := runParallelClang(jobsList); err != nil {
+		return err
+	}
+
+	// Each .so is now in place — record its (hash -> shim name) manifest so
+	// LoadPureFn can flag a future lookup whose Merkle hash matches but
+	// whose expected shim symbol diverged (catches stale entries from a
+	// hash-function change or a developer mistake).
+	for i := range pending {
+		shim := codegen.PureFnShimName(pending[i].artefact.Name)
+		if err := codegen.WritePureFnCacheManifest(pending[i].artefact.Hash, shim); err != nil {
+			return fmt.Errorf("manifest for %s: %w", pending[i].artefact.Name, err)
+		}
+	}
+
+	return nil
 }
 
 // csrcCacheRoot is the directory holding cached .o files for runtime.c and
@@ -1581,10 +1648,14 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 
 // compileJob describes a single `clang ...` invocation that runParallelClang
 // can fan out. desc is shown to the user via progress / error messages; args
-// are passed verbatim (no shell escaping).
+// are passed verbatim (no shell escaping). When renameTo is non-empty, the
+// runner renames the just-produced output (the path that appears as the -o
+// target inside args) to renameTo on success — so concurrent `tin` processes
+// can't half-write the same shared cache entry.
 type compileJob struct {
-	desc string
-	args []string
+	desc     string
+	args     []string
+	renameTo string
 }
 
 // runParallelClang fans out a list of independent `clang ...` invocations
@@ -1628,7 +1699,39 @@ func runParallelClang(jobsList []compileJob) error {
 		}
 	}
 
+	// Promote each job's temp output to its final cache path. Rename is
+	// atomic on the same filesystem, so a second concurrent process
+	// reading the cache either sees the previous file or the fresh one,
+	// never a partial write.
+	for _, j := range jobsList {
+		if j.renameTo == "" {
+			continue
+		}
+
+		tempPath := outputPathFromArgs(j.args)
+		if tempPath == "" || tempPath == j.renameTo {
+			continue
+		}
+
+		if err := os.Rename(tempPath, j.renameTo); err != nil {
+			return fmt.Errorf("atomic rename %s -> %s: %w", tempPath, j.renameTo, err)
+		}
+	}
+
 	return nil
+}
+
+// outputPathFromArgs scans a clang argv for the value of the -o flag and
+// returns it (empty if no -o is present). Used by runParallelClang to find
+// the file we just wrote so it can be renamed into the final cache slot.
+func outputPathFromArgs(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-o" {
+			return args[i+1]
+		}
+	}
+
+	return ""
 }
 
 // collectTinFiles recursively collects all .tin file paths under root,
@@ -2313,10 +2416,20 @@ func execRunBinary(bin, memcheck string, binArgs []string) {
 }
 
 // runClean removes per-program cache directories under .build/ but preserves
-// the content-addressed C-source cache at .build/csrc/. The csrc cache stores
-// runtime.c and stdlib //!+file.c objects keyed by sha of (content + flags),
-// so it never goes stale; wiping it just forces a slow re-compile of the
-// runtime on the next build. Silent on success; no-op if .build/ is missing.
+// the two content-addressed caches that never go stale:
+//
+//   .build/csrc/    - runtime.c and stdlib //!+file.c objects keyed by
+//                     sha(content + flags); wiping forces a slow rebuild
+//                     of every C source for no observable correctness gain.
+//   .build/pure-fn/ - per-function CTFE shared objects keyed by Merkle
+//                     hash of the #pure function and its dependencies;
+//                     wiping forces every #pure call to re-emit + re-link
+//                     a .so on the next compile.
+//
+// Both caches are immutable once written (their key encodes their inputs),
+// so a stale entry is never possible — only orphaned entries from removed
+// code, which cost tens of KB and are cheap to ignore. Silent on success;
+// no-op if .build/ is missing.
 func runClean() {
 	entries, err := os.ReadDir(".build")
 	if err != nil {
@@ -2328,7 +2441,7 @@ func runClean() {
 	}
 
 	for _, e := range entries {
-		if e.Name() == "csrc" {
+		if e.Name() == "csrc" || e.Name() == "pure-fn" {
 			continue
 		}
 

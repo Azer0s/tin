@@ -127,6 +127,13 @@ const pureFnShimPrefix = "__tin_pure_shim_"
 // pureFnShimName returns the deterministic dispatch symbol for fn.
 func pureFnShimName(fnName string) string { return pureFnShimPrefix + fnName }
 
+// PureFnShimName is the public alias of pureFnShimName for callers outside
+// the codegen package (main.go's cache emitter). Centralising this avoids
+// the `__tin_pure_shim_<name>` literal getting duplicated across files
+// where one rename would silently desynchronise the cache lookup against
+// the emitted symbol.
+func PureFnShimName(fnName string) string { return pureFnShimName(fnName) }
+
 // emitPureFnCtfeShims walks every #pure function declared in the program
 // and, when its signature passes the #interop validator, emits a
 // `__tin_pure_shim_<name>` wrapper alongside it. The shim re-uses
@@ -299,6 +306,13 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 // `declare` line whose symbol is already defined OR previously declared in
 // either half (LLVM rejects two declares for the same symbol when their
 // attribute lists differ even slightly).
+//
+// When the two halves disagree on the signature/attribute text of a
+// duplicate declare we panic instead of silently picking the first: this
+// is an internal-invariant violation (both halves come from the same
+// wrapper-emit machinery, so they MUST emit identical declares for shared
+// runtime helpers) and silent divergence here can produce a .so whose
+// caller and callee disagree on calling convention.
 func mergeSliceModules(mainSlice, shimSlice string) string {
 	// Collect every symbol that already has a `define` in either half;
 	// shim-side declares for those names are pure duplicates.
@@ -314,9 +328,10 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 
 	var b strings.Builder
 
-	// Track declare names we've already emitted so a second declare with
-	// the same symbol gets dropped.
-	declared := map[string]bool{}
+	// Track the full text of declares we've emitted so a second declare
+	// for the same symbol can be compared against the first instead of
+	// dropped blindly.
+	declared := map[string]string{}
 
 	emit := func(line string) {
 		trimmed := strings.TrimSpace(line)
@@ -333,11 +348,20 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 		case strings.HasPrefix(trimmed, "declare "):
 			name := extractDeclareName(line)
 			if name != "" {
-				if defined[name] || declared[name] {
+				if defined[name] {
 					return
 				}
 
-				declared[name] = true
+				if prev, seen := declared[name]; seen {
+					if normaliseDeclare(prev) != normaliseDeclare(line) {
+						panic(fmt.Sprintf("ctfe shim merge: divergent declares for %s\n  first:  %s\n  second: %s",
+							name, strings.TrimSpace(prev), strings.TrimSpace(line)))
+					}
+
+					return
+				}
+
+				declared[name] = line
 			}
 		}
 
@@ -351,6 +375,44 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 
 	for _, line := range strings.Split(shimSlice, "\n") {
 		emit(line)
+	}
+
+	return b.String()
+}
+
+// normaliseDeclare returns a comparable form of an LLVM declare line by
+// collapsing whitespace runs AND truncating at the closing paren of the
+// argument list. Attribute lists (`alwaysinline readnone nounwind` etc.)
+// after that paren are advisory annotations the IR builder attaches to
+// some sides of an emit but not others — they don't affect calling
+// convention or ABI, so an attribute-only divergence is NOT a sign of a
+// bug. By contrast, a divergence in return type or arg types between
+// the two halves WOULD produce a wrong .so, and the panic surrounding
+// this comparison catches that.
+func normaliseDeclare(line string) string {
+	trimmed := strings.TrimSpace(line)
+
+	if rparen := strings.LastIndexByte(trimmed, ')'); rparen >= 0 {
+		trimmed = trimmed[:rparen+1]
+	}
+
+	var b strings.Builder
+
+	prevSpace := false
+
+	for _, r := range trimmed {
+		if r == ' ' || r == '\t' {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+
+			continue
+		}
+
+		prevSpace = false
+
+		b.WriteRune(r)
 	}
 
 	return b.String()
@@ -553,28 +615,73 @@ func extractDefineName(line string) string {
 
 // defineToDeclare converts a function definition signature line ending in
 // `{` into a `declare` line. Drops the trailing `{` (and any whitespace
-// before it) and rewrites the leading `define` keyword. Linkage qualifiers
-// like `internal` / `private` are illegal on `declare` lines and are
-// stripped here.
+// before it) and rewrites the leading `define` keyword.
+//
+// LLVM's grammar permits these tokens between `define` and the return
+// type, in any order:
+//
+//   linkage:        internal private external weak linkonce linkonce_odr
+//                   weak_odr appending common available_externally
+//                   extern_weak
+//   visibility:     hidden protected
+//   DLL storage:    dllimport dllexport
+//   thread-locals:  thread_local
+//   preemption:     dso_local dso_preemptable
+//
+// All of these are LEGAL on a define and ILLEGAL on a declare. We sweep
+// every contiguous prefix-token of that set off the rewritten declare
+// line so the slicer can't produce LLVM IR that fails to parse.
 func defineToDeclare(sig string) string {
 	sig = strings.TrimRight(sig, " \t")
 	sig = strings.TrimSuffix(sig, "{")
 	sig = strings.TrimRight(sig, " \t")
 	sig = strings.Replace(sig, "define ", "declare ", 1)
 
-	// Strip any linkage qualifier that is legal on define but not declare.
-	for _, qual := range []string{
-		"declare internal ", "declare private ", "declare external ",
-		"declare weak ", "declare linkonce ", "declare linkonce_odr ",
-		"declare weak_odr ", "declare appending ", "declare common ",
-	} {
-		if strings.HasPrefix(sig, qual) {
-			sig = "declare " + sig[len(qual):]
+	// Iteratively strip qualifier tokens that follow `declare ` until we
+	// hit something that isn't on the disallowed list (the return type,
+	// or an attribute group / dllimport-style with arguments).
+	const prefix = "declare "
+
+	rest := strings.TrimPrefix(sig, prefix)
+	for {
+		// Peel off the next whitespace-delimited token.
+		end := 0
+		for end < len(rest) && rest[end] != ' ' && rest[end] != '\t' {
+			end++
+		}
+
+		token := rest[:end]
+		if !isDefineOnlyQualifier(token) {
 			break
 		}
+		// Skip the token + its trailing whitespace.
+		i := end
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+			i++
+		}
+
+		rest = rest[i:]
 	}
 
-	return sig
+	return prefix + rest
+}
+
+// isDefineOnlyQualifier reports whether tok is a function-definition
+// qualifier that LLVM rejects on `declare`.
+func isDefineOnlyQualifier(tok string) bool {
+	switch tok {
+	case "internal", "private", "external",
+		"weak", "linkonce", "linkonce_odr",
+		"weak_odr", "appending", "common",
+		"available_externally", "extern_weak",
+		"hidden", "protected",
+		"dllimport", "dllexport",
+		"thread_local",
+		"dso_local", "dso_preemptable":
+		return true
+	}
+
+	return false
 }
 
 // debugDumpFingerprint is exposed only to ease diagnosing hash mismatches:

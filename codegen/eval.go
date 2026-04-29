@@ -42,12 +42,26 @@ func (r ctfeReturn) Error() string { return "ctfe-return" }
 // errNotConst signals that an expression is not a compile-time constant.
 var errNotConst = errors.New("not a compile-time constant")
 
+// errCTFEBudget signals the per-call evaluation budget was exhausted. The
+// caller treats it identically to errNotConst (the call falls back to
+// runtime emission); the distinct value lets internal call sites tell
+// "structurally not foldable" from "complexity ceiling reached" when
+// surfacing diagnostics.
+var errCTFEBudget = errors.New("CTFE budget exhausted")
+
 // maxCTFEIter is the maximum number of loop iterations during CTFE to prevent
 // infinite loops when the loop bound is not statically knowable.
 const maxCTFEIter = 100_000
 
 // maxCTFEDepth is the maximum call-stack depth during CTFE.
 const maxCTFEDepth = 256
+
+// defaultPureFoldBudget is the default per-call node-evaluation budget.
+// One million covers any reasonable compile-time computation (factorial of
+// 20, fib(30), small interpreter loops) while keeping a runaway #pure body
+// from hanging the compiler. Override via cg.SetPureFoldBudget or the
+// `--pure-fold-budget=N` CLI flag.
+const defaultPureFoldBudget = 1_000_000
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -57,7 +71,15 @@ const maxCTFEDepth = 256
 // whose arguments are all compile-time constants. On success it returns the
 // constant LLVM value that replaces the call instruction. Returns nil (and no
 // error) if the call cannot be evaluated at compile time.
+//
+// Honors the cg.pureFoldDisabled flag: a `--no-pure-fold` build skips the
+// evaluator entirely, leaving the original CallExpr to codegen as a
+// runtime call.
 func (cg *CodeGen) tryEvalPureCall(call *ast.CallExpr) (value.Value, error) {
+	if cg.pureFoldDisabled {
+		return nil, nil
+	}
+
 	val, fd, ok := cg.tryEvalPureCallToCtfeVal(call)
 	if !ok {
 		return nil, nil
@@ -122,6 +144,14 @@ func ctfeCacheKey(calleeName string, args []ctfeVal) string {
 // hits the body walker exactly once per compilation unit; subsequent calls
 // reuse the cached result.
 func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.FuncDecl, bool) {
+	// Gate ALL fold paths (tryEvalPureCall, tryFoldPureCall, BinExpr/UnaryExpr
+	// recursive folds) on the `--no-pure-fold` flag. The setter lives on the
+	// shared core so a single check covers both the LLVM-emit fold driver
+	// and the warning-only fold used by static analysis.
+	if cg.pureFoldDisabled {
+		return ctfeVal{}, nil, false
+	}
+
 	calleeName := resolveCalleeName(call)
 	if calleeName == "" || strings.Contains(calleeName, "::") || strings.HasPrefix(calleeName, ".") {
 		return ctfeVal{}, nil, false
@@ -151,6 +181,17 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 
 	env := make(map[string]ctfeVal)
 	argVals := make([]ctfeVal, 0, len(call.Args))
+
+	// Reset the per-call complexity budget. Argument evaluation participates
+	// in the budget too: a caller passing a #pure(arg) whose `arg` itself
+	// expands into a multi-million-node fold must not bypass the limit by
+	// virtue of being an argument rather than a body.
+	budget := cg.pureFoldBudget
+	if budget <= 0 {
+		budget = defaultPureFoldBudget
+	}
+
+	cg.pureFoldBudgetRemaining = budget
 
 	for i, argNode := range call.Args {
 		val, err := evalNode(argNode, env, cg, 0)
@@ -209,7 +250,7 @@ func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctf
 		return ctfeVal{}, false
 	}
 
-	h, err := LoadPureFn(hash, "__tin_pure_shim_"+fd.Name)
+	h, err := LoadPureFn(hash, pureFnShimName(fd.Name))
 	if err != nil {
 		return ctfeVal{}, false
 	}
@@ -335,6 +376,19 @@ func evalWhereList(wl *ast.WhereList, env map[string]ctfeVal, cg *CodeGen, depth
 func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	if node == nil {
 		return ctfeVal{kind: "i64"}, nil
+	}
+
+	// Per-call complexity budget. The counter is set in
+	// tryEvalPureCallToCtfeVal at top-level entry; nested calls share the
+	// remaining budget so a recursive walk that explodes node-count gets
+	// caught. When exhausted we unwind exactly like errNotConst, but with
+	// the distinct errCTFEBudget so call sites can tell the two apart.
+	if cg != nil {
+		if cg.pureFoldBudgetRemaining <= 0 {
+			return ctfeVal{}, errCTFEBudget
+		}
+
+		cg.pureFoldBudgetRemaining--
 	}
 
 	switch v := node.(type) {

@@ -67,10 +67,11 @@ func (cg *CodeGen) ctfeFnHashRec(fd *ast.FuncDecl, visiting map[*ast.FuncDecl]bo
 	}
 
 	if visiting[fd] {
-		// Recursive cycle: break with a cycle-marker derived from the name so
-		// the merkle hash is still stable across runs. The fully-resolved
-		// hash for fd will be stored once the outer frame finishes.
-		return "cycle:" + fd.Name
+		// Recursive cycle: break with a cycle-marker that captures the
+		// function identity AND the depth at which the back-edge appears,
+		// so two distinct cycle topologies (`f -> f` versus `f -> g -> f`)
+		// can't accidentally collapse to the same marker.
+		return fmt.Sprintf("cycle:%s@%d", fd.Name, len(visiting))
 	}
 
 	visiting[fd] = true
@@ -395,6 +396,33 @@ func ctfeCacheHit(hash string) bool {
 	info, err := os.Stat(filepath.Join(ctfeCacheDir(hash), "bin.so"))
 
 	return err == nil && !info.IsDir()
+}
+
+// WritePureFnCacheManifest records (hash -> shim symbol name) alongside
+// bin.so so a stale or hash-collided entry can be detected on lookup.
+// SHA-256 collisions are astronomically unlikely; the manifest mostly
+// catches developer mistakes (e.g. a stale cache from a code state where
+// two distinct fns hashed the same after a hash-function change). Read
+// with readCacheManifest.
+func WritePureFnCacheManifest(hash, shimName string) error {
+	dir := ctfeCacheDir(hash)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(dir, "name"), []byte(shimName), 0o644)
+}
+
+// readCacheManifest returns the shim symbol name recorded in the manifest,
+// or "" if the manifest doesn't exist (legacy cache entry from before we
+// wrote one, or a hand-crafted entry from a test).
+func readCacheManifest(hash string) string {
+	data, err := os.ReadFile(filepath.Join(ctfeCacheDir(hash), "name"))
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(data))
 }
 
 // ctfeCacheEnsureDir creates ".build/pure-fn/<hash>/" if missing and

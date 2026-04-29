@@ -39,6 +39,21 @@ static int tin_ffi_invoke(
     ffi_call(&cif, FFI_FN(fn), result_buf, avals);
     return 0;
 }
+
+// tin_dispatch_free releases p via free_fn if non-NULL, else libc free.
+// We bounce through this single point so the dispatcher's string-return
+// branch can hand back a tin_extern_alloc'd buffer to the runtime's
+// configured deallocator without re-implementing the trampoline in cgo
+// each time.
+typedef void (*tin_extern_free_fn)(void *);
+static void tin_dispatch_free(void *free_fn, void *p) {
+    if (!p) return;
+    if (free_fn) {
+        ((tin_extern_free_fn)free_fn)(p);
+        return;
+    }
+    free(p);
+}
 */
 import "C"
 
@@ -54,9 +69,17 @@ import (
 // pureFnHandle holds the dlopen handle and the resolved shim symbol for a
 // single cached .so. Both pointers stay valid for the life of the process;
 // we never dlclose so callers can reuse the handle without synchronizing.
+//
+// freeFn is the .so's `tin_extern_free` if it exposes one (i.e. the .so
+// embeds runtime/interop.c). Otherwise it's nil and the dispatcher falls
+// back to libc free for string returns. We MUST NOT mix free implementations
+// with tin_extern_alloc: a #pure shim that returns a string allocates via
+// the runtime's configured tin_alloc_fn, which a non-malloc deployment can
+// override — in that case calling libc free corrupts the heap.
 type pureFnHandle struct {
 	handle unsafe.Pointer // dlopen result
 	sym    unsafe.Pointer // dlsym(__tin_pure_shim_<name>)
+	freeFn unsafe.Pointer // dlsym(tin_extern_free), nil if not exported
 }
 
 var (
@@ -76,11 +99,29 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 		return h, nil
 	}
 
+	// Verify the (hash -> shim) binding the cache claims. An empty manifest
+	// means a legacy/hand-crafted entry (e.g. test fixtures) — accept it
+	// for backward compatibility. A non-empty mismatch means we'd be about
+	// to dlopen a .so whose symbol pedigree disagrees with what the
+	// caller expected; refuse instead of returning a wrong handle.
+	if recorded := readCacheManifest(hash); recorded != "" && recorded != shimName {
+		return nil, fmt.Errorf("pure-fn cache manifest mismatch for %s: cache holds %s, caller expected %s", hash, recorded, shimName)
+	}
+
 	soPath := ctfeCacheBinPath(hash)
 	cPath := C.CString(soPath)
 	defer C.free(unsafe.Pointer(cPath))
 
-	handle := C.dlopen(cPath, C.RTLD_NOW|C.RTLD_LOCAL)
+	// RTLD_LAZY: defer extern-symbol resolution until first call. The
+	// emitInteropWrapperFor wrapper body references runtime helpers
+	// (tin_runtime_init, tin_interop_str_in, ...) that the Tin COMPILER
+	// binary doesn't link. With RTLD_NOW the entire dlopen would fail at
+	// load time even for primitive #pure fns whose wrapper happens to
+	// call tin_runtime_init in its preamble. With RTLD_LAZY the load
+	// succeeds, and only ACTUAL invocation of an unresolved symbol traps
+	// — which the libffi dispatcher would catch via ffi_call's stub if
+	// it ever fired (it doesn't for i64/f64/bool round-trips).
+	handle := C.dlopen(cPath, C.RTLD_LAZY|C.RTLD_LOCAL)
 	if handle == nil {
 		return nil, fmt.Errorf("dlopen %s: %s", soPath, C.GoString(C.dlerror()))
 	}
@@ -90,10 +131,32 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 
 	sym := C.dlsym(handle, cSym)
 	if sym == nil {
-		return nil, fmt.Errorf("dlsym %s: %s", shimName, C.GoString(C.dlerror()))
+		// Close the handle we just opened so a missing symbol doesn't leak
+		// the dlopen state. Read dlerror BEFORE dlclose: some libcs reset
+		// the per-thread error string on dlclose.
+		errMsg := C.GoString(C.dlerror())
+		C.dlclose(handle)
+
+		return nil, fmt.Errorf("dlsym %s: %s", shimName, errMsg)
 	}
 
-	h := &pureFnHandle{handle: unsafe.Pointer(handle), sym: unsafe.Pointer(sym)}
+	// Best-effort lookup of tin_extern_free so the dispatcher can release
+	// string-return buffers via the runtime's configured deallocator. May
+	// be nil for .so's that don't embed runtime/interop.c — the dispatcher
+	// falls back to libc free in that case (correct as long as the runtime
+	// hasn't been pointed at a non-malloc allocator). Clear dlerror first
+	// so a stale message from an unrelated lookup doesn't leak through if
+	// this dlsym returns NULL legitimately.
+	C.dlerror()
+	cFreeName := C.CString("tin_extern_free")
+	freeSym := C.dlsym(handle, cFreeName)
+	C.free(unsafe.Pointer(cFreeName))
+
+	h := &pureFnHandle{
+		handle: unsafe.Pointer(handle),
+		sym:    unsafe.Pointer(sym),
+		freeFn: unsafe.Pointer(freeSym),
+	}
 	pureFnHandles[hash] = h
 
 	return h, nil
@@ -235,7 +298,14 @@ func InvokePureShim(h *pureFnHandle, fd *ast.FuncDecl, args []ctfeVal) (ctfeVal,
 	}
 
 	// Result buffer sized for the largest primitive we support; libffi
-	// requires at least sizeof(long) so we always allocate 16 bytes.
+	// requires at least sizeof(ffi_arg) (== sizeof(long)) so 16 bytes is
+	// always enough on the LP64 / LLP64 targets Tin supports (x86_64 and
+	// arm64). The narrow-int return reads below assume LITTLE-ENDIAN: on a
+	// big-endian host, libffi promotes a returned i32 into the high half
+	// of the 64-bit ffi_arg slot, so reading byte 0 as int32 would yield
+	// zero. Tin's supported targets are all little-endian; if a big-endian
+	// port is added, switch the narrow-int reads below to read the full
+	// ffi_arg cell and then truncate.
 	var resultBuf [16]byte
 
 	var atypesPtr **C.ffi_type
@@ -290,15 +360,18 @@ func InvokePureShim(h *pureFnHandle, fd *ast.FuncDecl, args []ctfeVal) (ctfeVal,
 		return ctfeVal{kind: "f64", f: *(*float64)(unsafe.Pointer(&resultBuf[0]))}, true
 	case "string":
 		// The shim returned a heap-allocated char* via tin_extern_alloc.
-		// We copy into a Go string and free the C buffer; downstream CTFE
-		// callers don't need to know the result was ever raw memory.
+		// We copy into a Go string and release the C buffer through the
+		// runtime's matching deallocator (h.freeFn = tin_extern_free if
+		// the .so exposes it, else libc free). MUST go through the
+		// configured deallocator: a non-malloc allocator's metadata
+		// would corrupt if we called libc free directly.
 		cStr := *(**C.char)(unsafe.Pointer(&resultBuf[0]))
 		if cStr == nil {
 			return ctfeVal{kind: "string", s: ""}, true
 		}
 
 		s := C.GoString(cStr)
-		C.free(unsafe.Pointer(cStr))
+		C.tin_dispatch_free(h.freeFn, unsafe.Pointer(cStr))
 
 		return ctfeVal{kind: "string", s: s}, true
 	}
