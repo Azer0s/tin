@@ -433,6 +433,8 @@ func programHasInteropFunc(stmts []ast.Node) bool {
 //  4. Marshals the return value back to a C-friendly shape.
 //  5. Releases any temporary ARC allocations created at the boundary.
 func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
+	var wrappers []*ir.Func
+
 	for _, node := range stmts {
 		fn, ok := node.(*ast.FuncDecl)
 		if !ok || !hasTag(fn.Tags, "interop") {
@@ -442,9 +444,50 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 		if err := cg.emitInteropWrapperFor(fn); err != nil {
 			return err
 		}
+
+		// Capture the just-emitted wrapper so we can pin it against
+		// -Wl,--gc-sections below. Even at external linkage the linker
+		// will drop a wrapper whose only Tin caller was constant-folded
+		// (typical for #pure #interop functions); @llvm.used keeps it.
+		for _, f := range cg.mod.Funcs {
+			if f.Name() == fn.Name {
+				wrappers = append(wrappers, f)
+
+				break
+			}
+		}
 	}
 
+	cg.pinInteropWrappers(wrappers)
+
 	return nil
+}
+
+// pinInteropWrappers emits an `@llvm.used` global listing every #interop
+// wrapper. This appending-linkage symbol is honoured by both the LLVM
+// optimizer and the system linker (GNU ld --gc-sections, ld64
+// -dead_strip, lld), preventing them from DCEing wrappers whose only
+// in-program caller was eliminated by CTFE folding or other optimization
+// passes. The user's contract is "this function is callable from C";
+// linker DCE breaks that contract.
+func (cg *CodeGen) pinInteropWrappers(wrappers []*ir.Func) {
+	if len(wrappers) == 0 {
+		return
+	}
+
+	i8Ptr := irtypes.I8Ptr
+
+	entries := make([]constant.Constant, len(wrappers))
+	for i, f := range wrappers {
+		entries[i] = constant.NewBitCast(f, i8Ptr)
+	}
+
+	arrTy := irtypes.NewArray(uint64(len(wrappers)), i8Ptr)
+	init := constant.NewArray(arrTy, entries...)
+
+	used := cg.mod.NewGlobalDef("llvm.used", init)
+	used.Linkage = enum.LinkageAppending
+	used.Section = "llvm.metadata"
 }
 
 // emitInteropWrapperFor emits a single wrapper. Assumes the validation
