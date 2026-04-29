@@ -22,10 +22,101 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/enum"
+	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
 )
+
+// activeModule returns the LLVM module that should receive new IR objects.
+// Outside CTFE shim emission this is always cg.mod (the user binary).
+// During emitPureFnCtfeShims it is swapped to cg.shimMod so the shims and
+// every supporting `declare` they emit land there instead, leaving cg.mod
+// unaware of the CTFE pipeline.
+func (cg *CodeGen) activeModule() *ir.Module {
+	if cg.activeMod != nil {
+		return cg.activeMod
+	}
+
+	return cg.mod
+}
+
+// ensureShimMod lazily creates the CTFE shim module. Same target triple as
+// cg.mod so clang can compile both halves of a per-fn .so together.
+func (cg *CodeGen) ensureShimMod() *ir.Module {
+	if cg.shimMod == nil {
+		cg.shimMod = ir.NewModule()
+		cg.shimMod.TargetTriple = cg.mod.TargetTriple
+		cg.shimMod.DataLayout = cg.mod.DataLayout
+	}
+
+	return cg.shimMod
+}
+
+// declareInActive returns a `declare` of src's signature inside the active
+// module. Used by the CTFE shim emit when the wrapper (in cg.shimMod) needs
+// to reference a function whose definition lives in cg.mod. Subsequent
+// calls for the same name in the same active module return the cached
+// declare so we never emit duplicates.
+func (cg *CodeGen) declareInActive(src *ir.Func) *ir.Func {
+	target := cg.activeModule()
+	if target == src.Parent {
+		return src
+	}
+
+	if cg.runtimeHelperCache == nil {
+		cg.runtimeHelperCache = map[*ir.Module]map[string]*ir.Func{}
+	}
+
+	perMod, ok := cg.runtimeHelperCache[target]
+	if !ok {
+		perMod = map[string]*ir.Func{}
+		cg.runtimeHelperCache[target] = perMod
+	}
+
+	if f, ok := perMod[src.Name()]; ok {
+		return f
+	}
+
+	params := make([]*ir.Param, len(src.Params))
+	for i, p := range src.Params {
+		params[i] = ir.NewParam(p.Name(), p.Type())
+	}
+
+	f := target.NewFunc(src.Name(), src.Sig.RetType, params...)
+	perMod[src.Name()] = f
+
+	return f
+}
+
+// ensureRuntimeHelper looks up (or declares) a runtime-helper function in
+// the active module. Each target module gets its own declare so the wrapper
+// body's call-sites resolve to a function in the SAME module. Replaces the
+// scope-cached single-module pattern that used to live in interop.go's
+// ensureXxx helpers.
+func (cg *CodeGen) ensureRuntimeHelper(name string, retType irtypes.Type, params ...*ir.Param) *ir.Func {
+	target := cg.activeModule()
+
+	if cg.runtimeHelperCache == nil {
+		cg.runtimeHelperCache = map[*ir.Module]map[string]*ir.Func{}
+	}
+
+	perMod, ok := cg.runtimeHelperCache[target]
+	if !ok {
+		perMod = map[string]*ir.Func{}
+		cg.runtimeHelperCache[target] = perMod
+	}
+
+	if f, ok := perMod[name]; ok {
+		return f
+	}
+
+	f := target.NewFunc(name, retType, params...)
+	perMod[name] = f
+
+	return f
+}
 
 // pureFnShimPrefix names the auto-generated #interop-style wrapper attached
 // to every wrappable #pure function for CTFE dispatch. Symbol pattern:
@@ -49,6 +140,11 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 	if cg.pureFnShims == nil {
 		cg.pureFnShims = map[string]bool{}
 	}
+
+	// Route every NewFunc/NewGlobal inside emitInteropWrapperWithName and
+	// the ensureXxx helpers into a sibling shim module instead of cg.mod.
+	cg.activeMod = cg.ensureShimMod()
+	defer func() { cg.activeMod = nil }()
 
 	for name, fd := range cg.funcDecls {
 		if !hasTag(fd.Tags, "pure") {
@@ -84,9 +180,10 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 		if err := cg.emitInteropWrapperWithName(fd, shimName); err != nil {
 			return fmt.Errorf("ctfe shim for %q: %w", name, err)
 		}
-		// Mark the shim internal so clang DCEs it from the main binary.
-		// The slicer promotes it back to external for the per-fn .so.
-		for _, f := range cg.mod.Funcs {
+		// Shim lives in cg.shimMod (we routed activeMod above); the
+		// sibling module is compiled into the per-fn .so. The slicer
+		// promotes the shim's linkage to external so dlsym resolves it.
+		for _, f := range cg.shimMod.Funcs {
 			if f.Name() == shimName {
 				f.Linkage = enum.LinkageInternal
 				break
@@ -121,12 +218,26 @@ type PureFnArtefact struct {
 // returns one PureFnArtefact per fn. Fns whose Merkle hash cannot be computed
 // (generic, references unresolvable callees) are skipped silently — the AST
 // evaluator + main binary already cover the same fold path.
+//
+// The cache slice combines two source-of-truth modules:
+//   - cg.mod:     definition of the original Tin internal entry, plus
+//                 every type/global/declare it transitively references
+//   - cg.shimMod: the `__tin_pure_shim_<name>` wrapper produced by
+//                 emitPureFnCtfeShims, with its own redeclares of
+//                 runtime helpers and the internal-entry forward decl
+//
+// The result is a self-contained .ll the linker compiles into one .so.
 func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 	if cg.mod == nil {
 		return nil
 	}
 
-	full := cg.mod.String()
+	mainText := cg.mod.String()
+
+	shimText := ""
+	if cg.shimMod != nil {
+		shimText = cg.shimMod.String()
+	}
 
 	var out []PureFnArtefact
 
@@ -144,24 +255,33 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 			continue
 		}
 
-		// Slice the original function plus, when present, the
-		// `__tin_pure_shim_<name>` C-callable entry that dlsym will find.
-		// Skip cache emission entirely if no shim exists (the function's
-		// signature wasn't wrappable; CTFE dispatch would have nothing
-		// to call).
 		shimName := pureFnShimName(name)
 		if !cg.pureFnShims[name] {
 			continue
 		}
 
-		ir := sliceIRForFuncs(full, []string{name, shimName})
-		if ir == "" {
+		// Slice the internal Tin entry out of cg.mod (plus everything
+		// reachable). The shim itself is in cg.shimMod, NOT cg.mod, so
+		// the slicer never sees it from this side.
+		mainSlice := sliceIRForFuncs(mainText, []string{name})
+		if mainSlice == "" {
 			continue
 		}
 
-		// The shim must be reachable from outside the .so for dlsym to
-		// find it. The original Tin entry stays internal (called only
-		// from the shim within the .so).
+		// Slice the shim out of shimMod. Because the shim's `define`
+		// references the internal entry via a forward declare we already
+		// emitted into shimMod (see declareInActive in emitInteropWrapperWithName),
+		// the slicer keeps that declare too.
+		shimSlice := sliceIRForFuncs(shimText, []string{shimName})
+		if shimSlice == "" {
+			continue
+		}
+
+		// Combine. The forward declare for the internal entry that
+		// shimSlice carries collides with mainSlice's `define` for the
+		// same symbol — strip the duplicate `declare` line. Same for
+		// any runtime-helper declares both halves emit independently.
+		ir := mergeSliceModules(mainSlice, shimSlice)
 		ir = promoteSymbolToExternal(ir, shimName)
 
 		out = append(out, PureFnArtefact{
@@ -172,6 +292,87 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 	}
 
 	return out
+}
+
+// mergeSliceModules concatenates two LLVM IR module texts into a single
+// valid .ll. Drops duplicate target triple / datalayout headers, and any
+// `declare` line whose symbol is already defined OR previously declared in
+// either half (LLVM rejects two declares for the same symbol when their
+// attribute lists differ even slightly).
+func mergeSliceModules(mainSlice, shimSlice string) string {
+	// Collect every symbol that already has a `define` in either half;
+	// shim-side declares for those names are pure duplicates.
+	defined := map[string]bool{}
+
+	for _, line := range strings.Split(mainSlice+"\n"+shimSlice, "\n") {
+		if strings.HasPrefix(line, "define ") {
+			if name := extractDefineName(line); name != "" {
+				defined[name] = true
+			}
+		}
+	}
+
+	var b strings.Builder
+
+	// Track declare names we've already emitted so a second declare with
+	// the same symbol gets dropped.
+	declared := map[string]bool{}
+
+	emit := func(line string) {
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case strings.HasPrefix(trimmed, "target triple"),
+			strings.HasPrefix(trimmed, "target datalayout"):
+			if b.Len() == 0 {
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+
+			return
+		case strings.HasPrefix(trimmed, "declare "):
+			name := extractDeclareName(line)
+			if name != "" {
+				if defined[name] || declared[name] {
+					return
+				}
+
+				declared[name] = true
+			}
+		}
+
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+
+	for _, line := range strings.Split(mainSlice, "\n") {
+		emit(line)
+	}
+
+	for _, line := range strings.Split(shimSlice, "\n") {
+		emit(line)
+	}
+
+	return b.String()
+}
+
+// extractDeclareName pulls the symbol name out of a `declare` line such as
+//
+//	declare i64 @foo(i64) alwaysinline
+func extractDeclareName(line string) string {
+	at := strings.Index(line, " @")
+	if at < 0 {
+		return ""
+	}
+
+	rest := line[at+2:]
+
+	end := strings.IndexAny(rest, "( \t")
+	if end < 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(rest[:end])
 }
 
 // sliceIRForFuncs is sliceIRForFunc generalized to keep multiple functions'

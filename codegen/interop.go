@@ -478,6 +478,14 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		return cg.nodeErr(fn, "fn %s: #interop entry resolved to non-function value", fn.Name)
 	}
 
+	// When the active emit target is a sibling module (CTFE shimMod),
+	// internalFn lives in cg.mod and is unreachable from the wrapper's
+	// blocks. Mirror it as a `declare` in the active module so calls
+	// resolve at link time.
+	if active := cg.activeModule(); active != cg.mod {
+		internalFn = cg.declareInActive(internalFn)
+	}
+
 	// Build the wrapper's C-ABI signature, remapping per-param.
 	// Each Tin param can expand into 1 or more wrapper params:
 	//   primitive / pointer -> 1 wrapper param (passthrough)
@@ -654,7 +662,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		}
 	}
 
-	wrapper := cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
+	wrapper := cg.activeModule().NewFunc(wrapperName, retType, wrapperParams...)
 	block := wrapper.NewBlock("entry")
 	block.NewCall(cg.ensureRuntimeInitOnce())
 
@@ -1398,85 +1406,47 @@ func (cg *CodeGen) emitMemcpy(block *ir.Block, dst, src value.Value, n int64) {
 		constant.NewInt(irtypes.I1, 0))
 }
 
-// ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)`.
+// ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)` in the
+// active LLVM module (cg.mod by default; cg.shimMod during CTFE shim emit).
 func (cg *CodeGen) ensureInteropStrIn() *ir.Func {
-	const name = "tin_interop_str_in"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, stringFatPtrType(),
+	return cg.ensureRuntimeHelper("tin_interop_str_in",
+		stringFatPtrType(),
 		ir.NewParam("cstr", irtypes.I8Ptr))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
-// ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)`.
+// ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)` in the
+// active LLVM module.
 func (cg *CodeGen) ensureInteropStrOut() *ir.Func {
-	const name = "tin_interop_str_out"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, irtypes.I8Ptr,
+	return cg.ensureRuntimeHelper("tin_interop_str_out",
+		irtypes.I8Ptr,
 		ir.NewParam("s", stringFatPtrType()))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // ensureInteropSliceIn declares
-// `TinSlice tin_interop_slice_in(i8*, i64, i64)`. The third arg is
-// the per-element byte size, baked into the call from the wrapper.
+// `TinSlice tin_interop_slice_in(i8* data, i64 len, i64 elem_size)` in the
+// active LLVM module.
 func (cg *CodeGen) ensureInteropSliceIn() *ir.Func {
-	const name = "tin_interop_slice_in"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
 	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 
-	f := cg.mod.NewFunc(name, sliceTy,
+	return cg.ensureRuntimeHelper("tin_interop_slice_in",
+		sliceTy,
 		ir.NewParam("data", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64),
 		ir.NewParam("elem_size", irtypes.I64))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // ensureInteropSliceOut declares
 // `i32 tin_interop_slice_out(TinSlice, i64 elem_size, i8** out_data,
-// i64* out_len)`.
+// i64* out_len)` in the active LLVM module.
 func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
-	const name = "tin_interop_slice_out"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
 	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 
-	f := cg.mod.NewFunc(name, irtypes.I32,
+	return cg.ensureRuntimeHelper("tin_interop_slice_out",
+		irtypes.I32,
 		ir.NewParam("s", sliceTy),
 		ir.NewParam("elem_size", irtypes.I64),
 		ir.NewParam("out_data", irtypes.NewPointer(irtypes.I8Ptr)),
 		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // getOrCreateCallbackThunk returns a Tin-calling-convention thunk for
@@ -1983,20 +1953,9 @@ func sanitizeIRTypeName(t irtypes.Type) string {
 }
 
 // ensureRuntimeInitOnce returns the IR declaration for the runtime
-// init helper, declaring it lazily on first use.
+// init helper, declaring it lazily on first use in the active module.
 func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
-	const name = "tin_runtime_init"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, irtypes.Void)
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
+	return cg.ensureRuntimeHelper("tin_runtime_init", irtypes.Void)
 }
 
 // ensureMakeTrampoline declares

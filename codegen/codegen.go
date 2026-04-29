@@ -338,6 +338,25 @@ type CodeGen struct {
 	// (b) promote its linkage from internal to external for dlsym.
 	pureFnShims map[string]bool
 
+	// shimMod hosts every CTFE shim (the wrappers emitPureFnCtfeShims
+	// produces). Kept entirely separate from cg.mod so the user binary's
+	// IR never carries shim definitions; the per-fn .so emit combines
+	// shimMod's text with sliced cg.mod text.
+	shimMod *ir.Module
+
+	// activeMod points at the module currently receiving NewFunc/NewGlobal
+	// calls from interop.go. Equal to cg.mod outside shim emission;
+	// swapped to shimMod for the duration of emitPureFnCtfeShims so the
+	// wrapper machinery writes into the CTFE module instead.
+	activeMod *ir.Module
+
+	// runtimeHelperCache memoizes the `declare` for each runtime-helper
+	// symbol (tin_interop_str_in, tin_runtime_init_once, etc.) per target
+	// module. ensureXxx in interop.go consults this so the same wrapper
+	// body can be emitted into either cg.mod or shimMod and end up calling
+	// declares that live in the same module.
+	runtimeHelperCache map[*ir.Module]map[string]*ir.Func
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool

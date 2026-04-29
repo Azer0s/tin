@@ -1490,6 +1490,11 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 
 		_ = llFile.Close()
 
+		if dumpDir := os.Getenv("TIN_DUMP_SHIM"); dumpDir != "" {
+			_ = os.MkdirAll(dumpDir, 0o755)
+			_ = os.WriteFile(filepath.Join(dumpDir, a.Name+".ll"), []byte(a.IRText), 0o644)
+		}
+
 		pending = append(pending, pendingFn{
 			artefact: a,
 			llPath:   llFile.Name(),
