@@ -163,14 +163,85 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 	}
 
 	result, err := evalBody(fd.Body, env, cg, 0)
-	if err != nil {
-		cg.ctfeCache[cacheKey] = ctfeMemoEntry{ok: false}
-		return ctfeVal{}, nil, false
+	if err == nil {
+		cg.ctfeCache[cacheKey] = ctfeMemoEntry{val: result, fd: fd, ok: true}
+
+		return result, fd, true
 	}
 
-	cg.ctfeCache[cacheKey] = ctfeMemoEntry{val: result, fd: fd, ok: true}
+	// Tier-1 (AST evaluator) failed. Try tier-2 (dispatch through the
+	// pre-compiled .so) before giving up. Only fires when the cache is
+	// populated (TIN_PURE_FN_CACHE=1) AND the function's signature fits
+	// the i64 marshal protocol — string/float/struct types need the
+	// #interop wrapper machinery and are out of scope until we tie the
+	// cache emit into emitInteropWrapperFor.
+	if dispatchVal, ok := cg.tryDispatchPureCall(fd, argVals); ok {
+		cg.ctfeCache[cacheKey] = ctfeMemoEntry{val: dispatchVal, fd: fd, ok: true}
 
-	return result, fd, true
+		return dispatchVal, fd, true
+	}
+
+	cg.ctfeCache[cacheKey] = ctfeMemoEntry{ok: false}
+
+	return ctfeVal{}, nil, false
+}
+
+// tryDispatchPureCall attempts the tier-2 fallback: dlopen the .so cached at
+// .build/pure-fn/<merkle>/bin.so, dlsym its tin_ctfe_<merkle> adapter, and
+// invoke the function with the given args. Returns ok=false silently when
+// any step is unavailable (no cache, signature outside the i64 marshal,
+// hash unresolvable). Successful dispatch returns an i64 / bool ctfeVal.
+//
+// The bridge currently supports only i64-fits args/return (i1/i8/i16/i32/i64
+// and their unsigned counterparts). Floats / strings / arrays / structs need
+// a richer marshal protocol — they will land once we route through
+// emitInteropWrapperFor instead of the bespoke i64 adapter.
+func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctfeVal, bool) {
+	if !canI64Adapter(fd) {
+		return ctfeVal{}, false
+	}
+
+	hash := cg.ctfeFnHash(fd)
+	if hash == "" {
+		return ctfeVal{}, false
+	}
+
+	if !ctfeCacheHit(hash) {
+		return ctfeVal{}, false
+	}
+
+	args := make([]int64, len(argVals))
+
+	for i, v := range argVals {
+		switch v.kind {
+		case "i64":
+			args[i] = v.i
+		case "bool":
+			if v.b {
+				args[i] = 1
+			}
+		default:
+			// Float / string / unsupported - the marshal protocol cannot
+			// carry it through the i64 adapter.
+			return ctfeVal{}, false
+		}
+	}
+
+	h, err := LoadPureFn(hash, "tin_ctfe_"+hash)
+	if err != nil {
+		return ctfeVal{}, false
+	}
+
+	result := InvokePureFn(h, args)
+
+	// The adapter zero-extends narrower returns into i64. For bool returns
+	// we reconstruct the user-visible kind so downstream consumers see the
+	// right type.
+	if simple, ok := fd.RetType.(*ast.SimpleType); ok && simple.Name == "bool" {
+		return ctfeVal{kind: "bool", b: result != 0}, true
+	}
+
+	return ctfeVal{kind: "i64", i: result}, true
 }
 
 // ---------------------------------------------------------------------------
