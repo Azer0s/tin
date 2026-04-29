@@ -58,6 +58,8 @@ Run / test:
   -j N                     parallel TUs for clang compile (default GOMAXPROCS)
   -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0).
                            Tip: -O0 can compile rtti-heavy tests ~90x faster.
+  --fast                   shortcut for -O0 — useful for tin test when the suite is bottlenecked
+                           on optimization passes. Explicit -O<n> takes precedence.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
   -Wall                    enable hygiene checks: unused-let, unused-result
@@ -469,7 +471,7 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g":
+		case "-g", "--fast":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j":
 			fileArgIdx += 2
@@ -582,6 +584,14 @@ doneFlags:
 			}
 		case "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz":
 			optLevelOverride = a
+		case "--fast":
+			// Shortcut for `tin test`: drop the optimization level so the
+			// LLVM passes that dominate compile time on rtti-heavy /
+			// fiber-heavy IR don't run. Verified ~10x suite speedup at the
+			// cost of slower test-runtime execution. Explicit -O<n> wins.
+			if optLevelOverride == "" {
+				optLevelOverride = "-O0"
+			}
 		default:
 			switch {
 			case strings.HasPrefix(a, "-Wno-"):
