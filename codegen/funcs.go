@@ -275,6 +275,17 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
 
+	// Mark Tin-user functions as `internal` so clang can DCE them at -O2
+	// when no caller survives optimization, instead of carrying their full
+	// optimized body all the way through to the linker's section GC. The
+	// only escape hatches are #interop wrappers (which keep the bare name
+	// externally callable - emitted separately by emitInteropWrapperFor)
+	// and CTFE per-fn .so artefacts, which mark exports back to default
+	// visibility on a per-symbol basis.
+	if !hasTag(n.Tags, "interop") {
+		f.Linkage = enum.LinkageInternal
+	}
+
 	// #pure functions get LLVM attributes that unblock the optimizer:
 	// alwaysinline so call sites disappear; readnone + nounwind when the
 	// body has no {#allow_sideffect} escape hatch, letting LLVM hoist /

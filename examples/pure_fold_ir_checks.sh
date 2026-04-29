@@ -113,14 +113,15 @@ fn main() i64 = return traced(4)
 '
 
 # alwaysinline + readnone + nounwind attributes are emitted for strict #pure.
-assert_ir "strict #pure gets alwaysinline+readnone+nounwind" 'define i64 @sq.*alwaysinline readnone nounwind' '' '
+# (linkage keyword `internal` is unrelated to the optimizer hints.)
+assert_ir "strict #pure gets alwaysinline+readnone+nounwind" 'define [a-z ]*i64 @sq.*alwaysinline readnone nounwind' '' '
 fn{#pure} sq(n i64) i64 = return n * n
 
 fn main() i64 = return sq(7)
 '
 
 # #pure with #allow_sideffect gets alwaysinline only (no readnone).
-assert_ir "#pure + allow_sideffect: alwaysinline without readnone" 'define i64 @noisy.* alwaysinline \{' 'define i64 @noisy.*readnone' '
+assert_ir "#pure + allow_sideffect: alwaysinline without readnone" 'define [a-z ]*i64 @noisy.* alwaysinline \{' 'define [a-z ]*i64 @noisy.*readnone' '
 fn{#pure} noisy(n i64) i64 =
   { #allow_sideffect } { echo "n={n}" }
   return n + 1
