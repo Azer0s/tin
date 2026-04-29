@@ -44,15 +44,23 @@ const (
 	DiagUseAfterDeinit    = "use-after-deinit"
 	DiagDoubleDeinit      = "double-deinit"
 	DiagFloatPrecision    = "float-precision"
+	// DiagBuiltinShadow fires when a local binding (let/var/param/nested-fn)
+	// reuses the name of a recognised compile-time builtin. The shadow
+	// itself is legal — `sourcepos` and friends are opted into by name and
+	// the lexical scope wins as expected — but it can mask a typo and
+	// silently disable the builtin in a region of code, which is hard to
+	// debug after the fact. Default-off, opt-in via -W<name> or -Wpedantic.
+	DiagBuiltinShadow     = "builtin-shadow"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
 // fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
 var defaultOffWarnings = map[string]bool{
-	DiagUnusedLet:    true,
-	DiagUnusedParam:  true,
-	DiagUnusedResult: true,
-	DiagFloatEqual:   true,
+	DiagUnusedLet:     true,
+	DiagUnusedParam:   true,
+	DiagUnusedResult:  true,
+	DiagFloatEqual:    true,
+	DiagBuiltinShadow: true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
@@ -64,7 +72,7 @@ var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual}
 // wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
 // These can produce noise in code that follows trait-conformance patterns
 // (unused parameters required by an interface), so they're opt-in.
-var wpedanticWarnings = []string{DiagUnusedParam}
+var wpedanticWarnings = []string{DiagUnusedParam, DiagBuiltinShadow}
 
 // diagState tracks the user's preferences for one named warning.
 type diagState struct {

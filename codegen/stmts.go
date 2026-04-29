@@ -1438,7 +1438,9 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		entry.staticArrayLen = int64(len(v.Value))
 	}
 
+	entry.declPos = s.Pos()
 	cg.curScope.set(s.Name, entry)
+	cg.warnIfBuiltinShadow("let", s.Name, s.Pos())
 
 	return block, nil
 }
@@ -3289,7 +3291,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	}
 
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC})
+		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
+		cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 	}
 
 	var bodyErr error
@@ -3466,7 +3469,8 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 
 	// body: expose loop variable, run user statements
 	cg.curScope = newScope(cg.curScope)
-	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false})
+	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos()})
+	cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 
 	cg.pushBreakTarget(afterBlock)
 
@@ -3546,7 +3550,8 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	// Body.
 	cg.curScope = newScope(cg.curScope)
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true})
+		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos()})
+		cg.warnIfBuiltinShadow("for", s.VarName, s.Pos())
 	}
 
 	var bodyErr error

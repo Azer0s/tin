@@ -54,6 +54,14 @@ type scopeEntry struct {
 	// string `let` initializer (ArrayLit, ArrayFillLit, StringLit). 0 means
 	// unknown. A later mutation invalidates this and clears the field.
 	staticArrayLen int64
+	// declPos is the source position of the original binding for this
+	// entry. Set by the let/var/param decl sites that have access to the
+	// AST node; left as the zero Pos for synthetic bindings (e.g. compiler
+	// scaffolding, monomorphization, where-pattern destructuring) where
+	// "where it was declared in source" isn't meaningful. Consumed by
+	// `sourcepos(symbol)` to report the binding location.
+	declPos ast.Pos
+
 	// constInitExpr captures the initializer AST of a non-mutated `let` binding
 	// when that initializer can be statically analyzed for compile-time
 	// folding. Used by tryFoldExpr to follow `let t = typeof(v)` -> 'bool /

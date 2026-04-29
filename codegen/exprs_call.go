@@ -123,6 +123,17 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if fn.Name == "default" && len(e.Args) == 1 {
 			return cg.genBuiltinDefault(block, e.Args[0])
 		}
+		// Built-in: sourcepos(symbol_or_expr) - returns the atom for
+		// "<file>:<line>:<col>" of the argument. Recognised only when
+		// the name "sourcepos" is not lexically shadowed; otherwise the
+		// shadowing binding wins and we fall through to ordinary call
+		// resolution (which will likely error if the shadow isn't a
+		// callable, exactly as the user expects).
+		if fn.Name == "sourcepos" && len(e.Args) == 1 {
+			if _, shadowed := cg.curScope.lookup("sourcepos"); !shadowed {
+				return cg.genBuiltinSourcepos(block, e.Args[0], e.Pos())
+			}
+		}
 		// ADT constructor call: `Some(42)`, `Ok(42)`, `Rgb(r, g, b)`.
 		// Only intercept when the name is a known variant AND is not shadowed
 		// by a local binding or regular function of the same name.

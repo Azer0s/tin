@@ -378,9 +378,11 @@ func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
 }
 
 func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
+	pos := p.curPos()
 	p.advance() // consume for
 
 	stmt := &ast.ForStmt{}
+	stmt.SetPos(pos)
 
 	// Shorthand for-in without 'let': for c in iter: / for c T in iter:
 	// Detect: IDENT [IDENT|type] KW_IN ...
