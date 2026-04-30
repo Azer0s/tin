@@ -1202,14 +1202,18 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		return
 	}
 
-	for _, entry := range s.vars {
+	// LIFO release in declaration order. eachReverse keeps the IR
+	// deterministic across runs (Go map iteration is randomized) and
+	// matches the natural "last declared, first torn down" ordering
+	// for stack-allocated locals.
+	s.eachReverse(func(_ string, entry *scopeEntry) {
 		if !entry.isAlloc || entry.noRelease {
-			continue
+			return
 		}
 
 		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 		if !ok {
-			continue
+			return
 		}
 		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
 		// heap-promoting callee.  Use chain release to free all RC blocks.
@@ -1230,19 +1234,19 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 				cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 			}
 
-			continue
+			return
 		}
 		// Slice variables store the base allocation pointer separately so that
 		// ARC release hits the real ARC header rather than an interior pointer.
 		if entry.basePtr != nil {
 			block.NewCall(cg.ensureRelease(), entry.basePtr)
 
-			continue
+			return
 		}
 
 		elemType := ptrType.ElemType
 		if !cg.elemNeedsRelease(elemType) {
-			continue
+			return
 		}
 
 		loaded := block.NewLoad(elemType, entry.val)
@@ -1251,7 +1255,7 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		} else {
 			cg.emitRelease(block, loaded)
 		}
-	}
+	})
 }
 
 // emitAllScopeReleases emits _tin_release for all ARC-tracked variables in
@@ -1264,14 +1268,15 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 
 	s := cg.curScope
 	for s != nil {
-		for name, entry := range s.vars {
+		// LIFO across this scope's vars; same rationale as emitScopeRelease.
+		s.eachReverse(func(name string, entry *scopeEntry) {
 			if name == skipName || !entry.isAlloc || entry.isGlobal || entry.noRelease {
-				continue
+				return
 			}
 
 			ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 			if !ok {
-				continue
+				return
 			}
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {
@@ -1288,18 +1293,18 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 					cg.emitHeapChainRelease(block, heapPtr, entry.heapOwnedDepth)
 				}
 
-				continue
+				return
 			}
 			// Slice variables: release the base allocation pointer, not the fat-ptr.
 			if entry.basePtr != nil {
 				block.NewCall(cg.ensureRelease(), entry.basePtr)
 
-				continue
+				return
 			}
 
 			elemType := ptrType.ElemType
 			if !cg.elemNeedsRelease(elemType) {
-				continue
+				return
 			}
 
 			loaded := block.NewLoad(elemType, entry.val)
@@ -1308,7 +1313,7 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			} else {
 				cg.emitRelease(block, loaded)
 			}
-		}
+		})
 
 		if s.isFunctionBoundary {
 			break

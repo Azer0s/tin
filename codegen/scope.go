@@ -74,6 +74,7 @@ type scopeEntry struct {
 
 type scope struct {
 	vars               map[string]*scopeEntry
+	names              []string // insertion order of `vars` keys; never randomized.
 	parent             *scope
 	isFunctionBoundary bool // if true, emitAllScopeReleases stops here and does not release parent vars
 }
@@ -95,5 +96,33 @@ func (s *scope) lookup(name string) (*scopeEntry, bool) {
 }
 
 func (s *scope) set(name string, e *scopeEntry) {
+	if _, existed := s.vars[name]; !existed {
+		s.names = append(s.names, name)
+	}
+
 	s.vars[name] = e
+}
+
+// each iterates the scope's entries in insertion order. Use this instead of
+// `range s.vars` whenever iteration order can leak into IR text - Go map
+// iteration is randomized per process, which would break the
+// content-addressed mono cache and the byte-identical-IR CI gate.
+func (s *scope) each(fn func(name string, e *scopeEntry)) {
+	for _, name := range s.names {
+		if e, ok := s.vars[name]; ok {
+			fn(name, e)
+		}
+	}
+}
+
+// eachReverse walks insertion order back-to-front. Used by emitScopeRelease
+// so ARC release happens LIFO (a variable that captured a reference to an
+// earlier-declared one is torn down first).
+func (s *scope) eachReverse(fn func(name string, e *scopeEntry)) {
+	for i := len(s.names) - 1; i >= 0; i-- {
+		name := s.names[i]
+		if e, ok := s.vars[name]; ok {
+			fn(name, e)
+		}
+	}
 }

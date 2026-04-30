@@ -1527,13 +1527,13 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			// The sub-namespace entries were already populated into prevScope when the
 			// sub-package's file-path import was processed via loadPackageFromSource.
 			// Ensure they are also visible in moduleScope.
-			for key, entry := range prevScope.vars {
+			prevScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, name+"::") || strings.HasPrefix(key, name+".") {
 					if cg.moduleScope != nil && cg.moduleScope != prevScope {
 						cg.moduleScope.set(key, entry)
 					}
 				}
-			}
+			})
 		}
 	}
 
@@ -1582,11 +1582,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			}
 			// Propagate any methods found in our child scope to prevScope.
 			// Methods are registered under the canonical key.
-			for key, entry := range cg.curScope.vars {
+			cg.curScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, canonicalKey+"_") {
 					prevScope.set(key, entry)
 				}
-			}
+			})
 		} else if _, isStruct2 := cg.structTypes[name]; isStruct2 {
 			// Bare-name struct (e.g. file-path import that ran before currentPkg was set).
 			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
@@ -1594,11 +1594,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 			}
 
-			for key, entry := range cg.curScope.vars {
+			cg.curScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, name+"_") {
 					prevScope.set(key, entry)
 				}
-			}
+			})
 		}
 
 		if _, isGeneric := cg.genericStructsByArity[name]; isGeneric {

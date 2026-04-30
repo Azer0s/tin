@@ -969,7 +969,9 @@ func (cg *CodeGen) coerceAnyToTrait(block *ir.Block, anyVal value.Value, instKey
 	// Build select chain: type_id -> correct vtable pointer.
 	var vtableResult value.Value = constant.NewNull(vtablePtrType)
 
-	for sn, typeID := range cg.structTypeIDs {
+	for _, st0 := range cg.sortedStructTypeIDs() {
+		sn := st0.name
+		typeID := st0.id
 		vtableKey := sn + "__" + instKey
 
 		vg, hasVtable := cg.traitVtableGlobals[vtableKey]
