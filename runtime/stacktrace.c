@@ -135,6 +135,22 @@ static const Dwfl_Callbacks _tin_dwfl_cb = {
     .debuginfo_path = &_tin_dwfl_dbgpath,
 };
 
+// dwfl_session_atexit calls dwfl_end on the process-wide libdwfl session at
+// program shutdown. libdw caches DIE units in a tsearch tree (per-CU,
+// allocated lazily by __libdw_intern_next_unit) that lives on the heap with
+// no public destructor of its own; dwfl_end is the only documented way to
+// flush them. Without this hook valgrind reports 100s-1000s of bytes
+// "possibly lost" inside libdw_findcu/dwarf_get_units for any program that
+// resolved a single stacktrace frame.
+static void dwfl_session_atexit(void) {
+    pthread_mutex_lock(&_tin_dwfl_mu);
+    if (_tin_dwfl != NULL) {
+        dwfl_end(_tin_dwfl);
+        _tin_dwfl = NULL;
+    }
+    pthread_mutex_unlock(&_tin_dwfl_mu);
+}
+
 static Dwfl *dwfl_session(void) {
     if (atomic_load_explicit(&_tin_dwfl_tried, memory_order_acquire)) {
         return _tin_dwfl;
@@ -149,6 +165,13 @@ static Dwfl *dwfl_session(void) {
                 dwfl_end(d);
                 d = NULL;
             }
+        }
+        if (d != NULL) {
+            // Register the teardown hook on first successful init only; atexit
+            // is process-wide so a second registration would call dwfl_end
+            // twice. Failure to register is non-fatal: we'd lose the libdw
+            // cache flush at shutdown but resolution still works.
+            (void)atexit(dwfl_session_atexit);
         }
         // Publish _tin_dwfl FIRST, then release-store the flag so any
         // reader that observes _tried == 1 also observes the d store.
@@ -397,8 +420,19 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     if (cap < TIN_ST_MIN_CAP) cap = TIN_ST_MIN_CAP;
     if (cap > TIN_ST_MAX_CAP) cap = TIN_ST_MAX_CAP;
 
+    // Zero-init both the machine context and the cursor: unw_getcontext
+    // captures the live register file but leaves padding/unused slots
+    // untouched, and unw_init_local likewise initialises only the cursor
+    // fields its arch backend consumes. libunwind later steps the cursor
+    // by reading whatever is in those slots (apply_reg_state at
+    // Gparser.c:936 in particular), so leftover stack garbage there
+    // shows up as "uninitialised value" reads under valgrind. The zero
+    // init makes the unwind deterministic and silences the warnings
+    // without changing the resolved frame addresses.
     unw_context_t ctx;
     unw_cursor_t  cur;
+    memset(&ctx, 0, sizeof ctx);
+    memset(&cur, 0, sizeof cur);
     if (unw_getcontext(&ctx) < 0) return 0;
     if (unw_init_local(&cur, &ctx) < 0) return 0;
 
@@ -407,7 +441,7 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     // which is the first frame we want to emit.
     if (unw_step(&cur) <= 0) return 0;
 
-    int32_t n = 0;
+    int32_t n      = 0;
     int     walked = 0;
     do {
         if (n >= cap || walked >= TIN_ST_WALK_LIMIT) break;
