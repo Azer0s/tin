@@ -92,10 +92,16 @@ if [[ "$valgrind_mode" -eq 1 ]]; then
     vg_out=$(valgrind --leak-check=full --error-exitcode=99 ./harness 2>&1)
     vg_rc=$?
 
-    definitely=$(echo "$vg_out" | sed -n 's/.*definitely lost: \([0-9,]*\) bytes.*/\1/p')
-    indirectly=$(echo "$vg_out" | sed -n 's/.*indirectly lost: \([0-9,]*\) bytes.*/\1/p')
-    check "valgrind: 0 definitely lost" "$definitely" "0"
-    check "valgrind: 0 indirectly lost" "$indirectly" "0"
+    # Valgrind elides the LEAK SUMMARY when the program is fully
+    # clean ("All heap blocks were freed -- no leaks are possible"),
+    # so a missing line means 0, not undefined.
+    leak_n() {
+      local n
+      n=$(echo "$vg_out" | sed -n "s/.*$1 lost: \([0-9,]*\) bytes.*/\1/p")
+      echo "${n:-0}"
+    }
+    check "valgrind: 0 definitely lost" "$(leak_n definitely)" "0"
+    check "valgrind: 0 indirectly lost" "$(leak_n indirectly)" "0"
     if [[ "$vg_rc" -ne 0 && "$vg_rc" -ne 99 ]]; then
       printf '  FAIL  valgrind run produced unexpected exit code %d\n' "$vg_rc"
       fail=$((fail + 1))

@@ -23,8 +23,22 @@
 #include <string.h>
 
 extern void _tin_fiber_init(void);
+extern void _tin_fiber_run(void);
 extern void *_tin_rc_alloc(int64_t size);
 extern void _tin_release(void *ptr);
+
+// _tin_runtime_atexit drains the worker pool, joins the IO/timer
+// threads, and frees the fiber/runqueue/IO/timer state that
+// _tin_fiber_init lazily allocated. Registered from tin_runtime_init,
+// which runs only on the #interop entry path: ordinary `tin run`
+// programs reach _tin_fiber_run directly from the codegen-emitted
+// main() and don't need an atexit shim. Calling _tin_fiber_run twice
+// is safe (it bails immediately when _workers == NULL after the
+// first teardown), so no extra coordination is needed if a future
+// codegen change accidentally double-registers.
+static void _tin_runtime_atexit(void) {
+    _tin_fiber_run();
+}
 
 // TIN_API marks a symbol exported across the C-interop boundary.
 // Surfaces past `-fvisibility=hidden` shared-library builds; on
@@ -222,6 +236,12 @@ TIN_API void tin_runtime_init(void) {
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
         _tin_fiber_init();
+        // Register the teardown hook only on the winning init path so
+        // atexit isn't called twice if multiple threads race here. atexit
+        // failure is non-fatal: we'd lose the runtime cleanup at exit
+        // (still-reachable allocations on a dying process), but
+        // functional behaviour is unaffected.
+        (void)atexit(_tin_runtime_atexit);
         atomic_store_explicit(&_tin_rt_initialized, 2, memory_order_release);
 
         return;
