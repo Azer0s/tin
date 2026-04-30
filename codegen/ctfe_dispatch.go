@@ -13,15 +13,15 @@ package codegen
 // no more bespoke i64 adapter — one path covers i64 / f64 / bool / string.
 
 /*
-#cgo linux  LDFLAGS: -ldl -lffi
-// macOS: libffi is keg-only Homebrew on both arches. Adding both
-// prefixes (Apple Silicon /opt/homebrew, Intel /usr/local) lets the
-// build work without pkg-config; clang silently ignores -I/-L paths
-// that don't exist on the current machine, so only the active one
-// resolves. Users with a custom prefix (MacPorts, manual install) can
-// override via CGO_CFLAGS / CGO_LDFLAGS.
-#cgo darwin CFLAGS:  -I/opt/homebrew/opt/libffi/include -I/usr/local/opt/libffi/include
-#cgo darwin LDFLAGS: -L/opt/homebrew/opt/libffi/lib -L/usr/local/opt/libffi/lib -lffi
+#cgo linux LDFLAGS: -ldl -lffi
+// macOS: libffi is keg-only Homebrew. Pick the prefix per-arch so the
+// linker doesn't warn about non-existent -L paths (clang is silent on
+// stray -I, but ld64 warns on stray -L). Users with a custom prefix
+// (MacPorts, manual install) can override via CGO_CFLAGS / CGO_LDFLAGS.
+#cgo darwin,arm64  CFLAGS:  -I/opt/homebrew/opt/libffi/include
+#cgo darwin,arm64  LDFLAGS: -L/opt/homebrew/opt/libffi/lib -lffi
+#cgo darwin,amd64  CFLAGS:  -I/usr/local/opt/libffi/include
+#cgo darwin,amd64  LDFLAGS: -L/usr/local/opt/libffi/lib -lffi
 
 #include <dlfcn.h>
 #include <ffi.h>
