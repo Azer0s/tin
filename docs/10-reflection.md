@@ -367,6 +367,149 @@ echo p.y    // 2
 
 ---
 
+## sourcepos and stacktrace builtins
+
+Two builtins return source-position atoms with a shared format. They
+compose with `reflect::SrcPos` (below) for typed access to symbol /
+file / line / column.
+
+### sourcepos
+
+`sourcepos(expr?)` returns an atom describing the source position of
+its argument, resolved at **compile time** with no runtime cost. The
+atom shape is `'"<symbol>@<file>:<line>:<col>"` for identifiers and
+`'"<file>:<line>:<col>"` for non-identifier expressions:
+
+```rust
+fn handler(req string) string = return req
+
+echo sourcepos(handler)    // 'handler@src/server.tin:1:1
+echo sourcepos(42 + 7)     // 'src/server.tin:5:14   - bare position
+echo sourcepos()           // 'enclosing_fn@src/server.tin:6:6
+```
+
+`sourcepos()` with no argument resolves to the call-site, which is
+how the [`log`](stdlib/log.md) macros capture the line that wrote each
+entry.
+
+Compile-time only: the arg is never evaluated. Shadowing a sourcepos
+arg with a local binding still resolves to the binding's declaration
+position. The compiler emits a `-Wbuiltin-shadow` warning when a
+local rebinds the name `sourcepos` (default-off).
+
+### stacktrace
+
+`stacktrace(cap?, opts?)` returns `[atom]` - the live call chain at
+the point of call, walked with libunwind and resolved with libdwfl
+(Linux/FreeBSD) or dladdr (macOS, runtime helper symbols only):
+
+```rust
+fn{#no_inline} probe() [atom] = return stacktrace()
+
+let frames = probe()
+for let f atom in frames:
+  echo f
+// 'probe@src/app.tin:1:24
+// 'main@src/app.tin:5:14
+// '"libc.so.6:__libc_start_main+0x8b"
+// ...
+```
+
+| Argument | Type        | Default | Meaning                                     |
+|----------|-------------|---------|---------------------------------------------|
+| `cap`    | `i64`       | 64      | Max frames returned. Clamped to [1, 1024].  |
+| `opts`   | `[atom]`    | `[]`    | Filter atoms applied during the walk.       |
+
+Filter atoms (literal array required - codegen folds to a constant):
+
+| Atom            | Effect                                                       |
+|-----------------|--------------------------------------------------------------|
+| `'hide_libc`    | Drop frames in libc, libpthread, libsystem.                  |
+| `'hide_unknown` | Drop frames that resolved to `??+0x<addr>`.                  |
+| `'hide_runtime` | Drop frames whose symbol begins with `_tin_`.                |
+| `'hide_main`    | Drop the `main` / `_start` / `__libc_start_*` tail.          |
+
+```rust
+let user_frames = stacktrace(16, ['hide_libc, 'hide_main])
+```
+
+Cross-fiber capture: a frame from a spawned fiber renders as the live
+top-of-stack frames followed by `<spawn-of>:` prefixed frames captured
+at spawn time:
+
+```
+'inner@worker.tin:8:3
+'"<spawn-of>:main@server.tin:42:5"
+```
+
+Atom format degrades gracefully when debug info is unavailable:
+
+| Resolution available           | Atom shape                                       |
+|--------------------------------|--------------------------------------------------|
+| symbol + libdwfl line          | `'"sym@file:line:col"`                           |
+| line only (no symbol)          | `'"file:line:col"`                               |
+| symbol only (lib frame)        | `'"libname.so:sym+0x<offset>"`                   |
+| symbol only (main binary)      | `'"sym+0x<offset>"`                              |
+| neither                        | `'"??+0x<addr>"`                                 |
+
+Reachability gating: the compiler scans the AST for `stacktrace()` and
+only links libunwind/libdw and emits unwind tables (`-funwind-tables`,
+`-gline-tables-only`, `-rdynamic`) when at least one call is reachable.
+Programs that never reference `stacktrace()` pay zero binary-size or
+link-time cost.
+
+> **Linker requirement:** `-lunwind` (LLVM libunwind) on every Linux
+> binary that uses `stacktrace()`; `-ldw` (elfutils) for the
+> file:line:col upgrade. macOS auto-links libunwind via libSystem and
+> has no elfutils, so frames degrade to `sym+0x<offset>` form.
+
+---
+
+## Parsing source positions
+
+`reflect::SrcPos` decodes any atom emitted by `sourcepos` or
+`stacktrace` into a typed struct:
+
+```rust
+use reflect
+
+let p = reflect::parse(sourcepos(handler))
+echo p.symbol    // "handler"
+echo p.file      // "src/server.tin"
+echo p.line      // 1
+echo p.col       // 1
+```
+
+Fields populated based on what the atom contains:
+
+| Field      | Type     | Description                                       |
+|------------|----------|---------------------------------------------------|
+| `symbol`   | string   | Function name; "" if anonymous                    |
+| `file`     | string   | Source path; "" if symbol-only frame              |
+| `line`     | i64      | 1-based line; 0 if absent                         |
+| `col`      | i64      | 1-based column; 0 if absent                       |
+| `lib`      | string   | Shared-lib basename (e.g. `libssl.so.3`); "" if not in a lib |
+| `offset`   | i64      | Byte offset within symbol; 0 for file:line:col-only |
+| `address`  | i64      | Raw IP for `??+0x<addr>` frames; 0 otherwise      |
+| `spawn_of` | bool     | true for the `<spawn-of>:...` prefix on frozen spawn frames |
+
+Use this to programmatically filter or group log lines and stack
+frames by source location:
+
+```rust
+use reflect
+
+fn from_user_code(f atom) bool =
+  let p = reflect::parse(f)
+  return p.file != "" && !strings::has_prefix(p.symbol, "_tin_")
+
+for let f atom in stacktrace():
+  if from_user_code(f):
+    echo f
+```
+
+---
+
 ## Full example
 
 ```rust
