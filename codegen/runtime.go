@@ -644,7 +644,7 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 	// Needs a release if any variant carries an owning/ARC field.
 	if variants, ok := cg.dataVariants[structName]; ok {
 		for _, vi := range variants {
-			if variantHasReleasableField(vi) {
+			if cg.variantHasReleasableField(vi) {
 				return true
 			}
 		}

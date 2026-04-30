@@ -2523,7 +2523,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		// fields (string, [T], any, fn, nested struct) or an explicit deinit.
 		// Without this the old value's RC fields leak whenever a struct is
 		// reassigned. Mirrors the gate used by emitScopeRelease.
+		//
+		// On the same gate, retain the NEW value's RC fields when it's a
+		// borrowed copy of another binding (isCopyExpr): without the
+		// retain, both the source binding and this slot release the same
+		// underlying buffers when their scopes exit. Fresh callee-returned
+		// structs (isFreshBytesAlloc) already carry an unbalanced retain
+		// from the callee, so we move ownership instead of retaining.
 		if cg.typeNameOf(ptrType.ElemType) != "" && cg.elemNeedsRelease(ptrType.ElemType) {
+			if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
+				cg.emitRetain(block, val)
+			}
 			oldVal := block.NewLoad(ptrType.ElemType, ptr)
 			cg.emitRelease(block, oldVal)
 		}

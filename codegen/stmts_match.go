@@ -268,6 +268,28 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	scrutAlloca := block.NewAlloca(outerSt)
 	block.NewStore(scrutinee, scrutAlloca)
 
+	// Wrap arm processing in a synthetic "scrutinee scope" only when
+	// the scrutinee was an OWNED expression (CallExpr, ++ concat,
+	// interpolated string, fresh array literal) AND the ADT carries
+	// owning fields. The owned-expression result was transferred to us
+	// at RC=1 with nothing else holding it, so without a release-on-
+	// exit it leaks (the original time_test bug:
+	// `match json::parse(s): Ok(ev) -> ...`).
+	//
+	// For BORROWED scrutinees (Identifier / FieldAccess / DerefExpr of
+	// a named variable / IndexExpr), the original owner still holds
+	// the +1 RC and will release it at its own scope exit. Adding our
+	// own release here would double-free; this is what regressed
+	// adt_basics' `sum(t *IntTree)` recursion when we tried to retain
+	// then release uniformly.
+	wantScrutRelease := !isCopyExpr(s.Expr) && cg.elemNeedsRelease(outerSt)
+
+	matchScrutScope := newScope(cg.curScope)
+	if wantScrutRelease {
+		matchScrutScope.set("__match_scrut", &scopeEntry{val: scrutAlloca, isAlloc: true})
+	}
+	cg.curScope = matchScrutScope
+
 	tagGEP := block.NewGetElementPtr(outerSt, scrutAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
@@ -353,16 +375,31 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 				// `skipName` mechanism in genReturnStmt. Pointer-to-struct
 				// fields (e.g. `own *Tree[t]`) are bound as borrows without
 				// retain; they are shared with the scrutinee's payload.
+				//
+				// For embedded named structs whose payload itself contains
+				// RC fields (e.g. Result.Ok(event_with_time) where
+				// event_with_time has a string), the scope-exit semantics
+				// are the same as a borrow only when the scrutinee will be
+				// released by matchScrutScope (the OWNED scrutinee path).
+				// In that case the per-arm release MUST fire so two paths
+				// (binding scope + scrutinee scope) don't both decrement.
+				// We mirror the predicate by retaining + releasing
+				// symmetrically only when wantScrutRelease was set.
 				rcTracked := !f.IsWeak && isRCTrackedType(fieldTy)
+				owningStruct := !f.IsWeak && wantScrutRelease &&
+					!isRCTrackedType(fieldTy) && cg.elemNeedsRelease(fieldTy)
+
 				if rcTracked {
 					cg.emitRetain(caseBlock, fieldVal)
+				} else if owningStruct {
+					cg.emitStructFieldRetain(caseBlock, fieldVal)
 				}
 
 				alloca := caseBlock.NewAlloca(fieldVal.Type())
 				caseBlock.NewStore(fieldVal, alloca)
 
 				entry := &scopeEntry{val: alloca, isAlloc: true}
-				if !rcTracked {
+				if !rcTracked && !owningStruct {
 					entry.noRelease = true
 				}
 
@@ -412,6 +449,18 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 		anyFallthrough = true
 	}
+
+	// Release the scrutinee's owned ARC fields on the merged exit
+	// path. Returns inside an arm already drained matchScrutScope via
+	// emitAllScopeReleases (the synthetic scope sits above each arm
+	// scope), so this only fires when control falls through to
+	// afterBlock. matchScrutScope is only populated when the scrutinee
+	// was owned (see wantScrutRelease above); for borrowed scrutinees
+	// the scope is empty and emitScopeRelease is a no-op.
+	if anyFallthrough {
+		cg.emitScopeRelease(afterBlock, matchScrutScope)
+	}
+	cg.curScope = matchScrutScope.parent
 
 	if !anyFallthrough && resAlloca == nil {
 		afterBlock.NewUnreachable()
