@@ -407,6 +407,18 @@ type CodeGen struct {
 	// declares that live in the same module.
 	runtimeHelperCache map[*ir.Module]map[string]*ir.Func
 
+	// pkgMods maps Tin package name -> per-pkg LLVM module. Lazily populated
+	// by pkgMod() in pkgmod.go. Foundation for incremental compilation
+	// step 2: each pkg eventually gets its own .ll/.o so the build can
+	// parallelize and cache per pkg. Empty until call sites start routing.
+	pkgMods map[string]*ir.Module
+
+	// echoedTypes tracks which named struct types have already been echoed
+	// into a given target module by echoTypeInActive. Per (module, typeName)
+	// idempotence prevents duplicate TypeDef entries when multiple call
+	// sites cross-reference the same type from a foreign pkg module.
+	echoedTypes map[*ir.Module]map[string]bool
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
