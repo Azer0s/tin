@@ -51,6 +51,12 @@ Source / library:
 
 Target:
   -target os/arch          cross-compile (linux/{amd64,arm64,386}, darwin/{amd64,arm64})
+  --macos-sdk PATH         macOS SDK root (auto-detected from xcrun /
+                           ~/.darling / Xcode CLT; required for -target darwin
+                           when the host is not macOS)
+  --linux-sysroot PATH     Linux rootfs (with usr/include + usr/lib for the
+                           target arch); required for -target linux when the
+                           host is not Linux
 
 Run / test:
   --valgrind               run binary under valgrind --leak-check=full
@@ -152,6 +158,20 @@ var (
 	explicitTarget bool
 )
 
+// macosSDKOverride is the explicit `--macos-sdk PATH` value. Empty
+// means "auto-detect" — see macosSDKPath() for the resolution chain.
+// Required when cross-compiling Linux -> Darwin so clang can find the
+// Darwin SDK headers (malloc/malloc.h, libunwind.h, system frameworks).
+var macosSDKOverride string
+
+// linuxSysrootOverride is the explicit `--linux-sysroot PATH` value.
+// Required when cross-compiling Darwin -> Linux so clang can find
+// glibc/musl headers, ld-linux*, and libdw / libunwind for stacktrace.
+// Auto-detection picks well-known paths (Homebrew x86_64-linux-gnu /
+// Docker rootfs mounts) but on macOS hosts the user almost always has
+// to provide one.
+var linuxSysrootOverride string
+
 // verbose flags are package-level so directory-mode test runners can use them.
 var (
 	verboseProgress   bool
@@ -194,8 +214,16 @@ func clangTripleForTarget() string {
 	}
 }
 
-// clangTargetFlag returns {"-target", triple} when -target was explicitly
-// given, otherwise nil (host triple is used implicitly).
+// clangTargetFlag returns the cross-compile flags for an explicit
+// -target invocation: `-target <triple>` plus, on darwin, an
+// `-isysroot <macOS SDK path>` so clang can find the Darwin headers
+// (malloc/malloc.h, libunwind.h, etc). Returns nil when no
+// cross-compile is requested (host triple is used implicitly).
+//
+// The SDK path is taken from -macos-sdk if given, then $TIN_MACOS_SDK,
+// then well-known locations (Xcode CommandLineTools, Darling install).
+// If none is found we fall through to bare `-target` and let clang
+// produce a clear "header not found" error rather than guessing.
 func clangTargetFlag() []string {
 	if !explicitTarget {
 		return nil
@@ -206,7 +234,120 @@ func clangTargetFlag() []string {
 		return nil
 	}
 
-	return []string{"-target", t}
+	flags := []string{"-target", t}
+
+	switch targetGOOS {
+	case "darwin":
+		// Cross-compiling to Darwin from any host: clang needs the
+		// macOS SDK so it can find malloc/malloc.h, libunwind.h, and
+		// the Mach-O system frameworks. Native Apple clang on macOS
+		// finds it automatically via xcrun, so this is mostly a
+		// concern when host != Darwin.
+		if sdk := macosSDKPath(); sdk != "" {
+			flags = append(flags, "-isysroot", sdk)
+		}
+	case "linux":
+		// Cross-compiling to Linux from a non-Linux host (typically
+		// macOS) needs a sysroot with glibc/musl headers + the
+		// dynamic linker. Skip when host is already Linux — clang
+		// already knows where /usr/include lives.
+		if runtime.GOOS != "linux" {
+			if sysroot := linuxSysrootPath(); sysroot != "" {
+				flags = append(flags, "--sysroot", sysroot)
+			}
+		}
+	}
+
+	return flags
+}
+
+// hostClangTargetFlag returns the cross-compile flags for a HOST-arch
+// build, deliberately ignoring -target. Used by emitPureFnCache: per-fn
+// .so files are dlopen'd by the running tin process during CTFE, so they
+// must match the host's ABI even when the user asked for a Darwin
+// cross-compile. Returns nil so clang uses its built-in default triple
+// (which IS the host triple).
+func hostClangTargetFlag() []string { return nil }
+
+// macosSDKPath returns the path to a macOS SDK (the directory whose
+// usr/include holds Darwin headers). Resolved in this order:
+//  1. -macos-sdk CLI flag
+//  2. $TIN_MACOS_SDK env var
+//  3. xcrun --show-sdk-path on Darwin hosts (or via Darling on Linux)
+//  4. Well-known locations: Xcode CommandLineTools, Darling install
+//
+// Returns "" when no SDK is found; clang will then error with a clear
+// "header not found" message rather than producing weird link failures.
+func macosSDKPath() string {
+	if macosSDKOverride != "" {
+		return macosSDKOverride
+	}
+	if env := os.Getenv("TIN_MACOS_SDK"); env != "" {
+		return env
+	}
+	if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" {
+			if _, statErr := os.Stat(p); statErr == nil {
+				return p
+			}
+		}
+	}
+	candidates := []string{
+		"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+		"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		// Darling mounts the macOS / at $HOME/.darling/. The SDK shows
+		// up at the same path inside that prefix when CommandLineTools
+		// is installed via `darling shell -- xcode-select --install`.
+		candidates = append(candidates,
+			filepath.Join(home, ".darling/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+
+	return ""
+}
+
+// linuxSysrootPath returns the path to a Linux rootfs (the directory
+// whose usr/include holds glibc/musl headers and whose usr/lib has the
+// target-arch dynamic linker). Resolution order:
+//  1. --linux-sysroot CLI flag
+//  2. $TIN_LINUX_SYSROOT env var
+//  3. Well-known Homebrew cross-toolchain paths (x86_64-linux-gnu)
+//  4. /opt/cross/<arch>-linux-gnu (osxcross-style)
+//
+// Returns "" when no sysroot is found; clang will then error with
+// "stdio.h: not found" or similar, which is clear enough.
+func linuxSysrootPath() string {
+	if linuxSysrootOverride != "" {
+		return linuxSysrootOverride
+	}
+	if env := os.Getenv("TIN_LINUX_SYSROOT"); env != "" {
+		return env
+	}
+	arch := targetGOARCH
+	switch arch {
+	case "amd64":
+		arch = "x86_64"
+	case "arm64":
+		arch = "aarch64"
+	}
+	candidates := []string{
+		"/opt/cross/" + arch + "-linux-gnu",
+		"/usr/local/" + arch + "-linux-gnu",
+		"/opt/homebrew/" + arch + "-linux-gnu",
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+
+	return ""
 }
 
 // archMatches reports whether the optional [arch] qualifier in a directive
@@ -585,6 +726,16 @@ doneFlags:
 				targetGOARCH = parts[1]
 				explicitTarget = true
 			}
+		case "--macos-sdk":
+			if i+1 < len(os.Args) {
+				i++
+				macosSDKOverride = os.Args[i]
+			}
+		case "--linux-sysroot":
+			if i+1 < len(os.Args) {
+				i++
+				linuxSysrootOverride = os.Args[i]
+			}
 		case "-j":
 			if i+1 < len(os.Args) {
 				i++
@@ -876,6 +1027,12 @@ doneFlags:
 		die("warnings treated as errors")
 	}
 
+	// Latch the stacktrace flag for the upcoming compileIR call. Phase 6
+	// of docs/plans/stacktrace-libunwind.md gates `-lunwind` / `-rdynamic`
+	// / `-DTIN_STACKTRACE` on this; programs that never reference
+	// stacktrace() get the unmodified clang argv (and a smaller binary).
+	stacktraceLinkActive = cg.StacktraceUsed()
+
 	irText := fixCoroAttrs(mod.String())
 
 	// Collect C sources and linker flags from loaded package source files.
@@ -1106,6 +1263,17 @@ func fixCoroAttrs(ir string) string {
 	return ir
 }
 
+// stacktraceLinkFlag is the link-time toggle that promotes user fns to
+// the dynsym (Linux ELF only) and pulls in libunwind. Phase 6 of
+// docs/plans/stacktrace-libunwind.md gates these on cg.StacktraceUsed();
+// the global below is set in main() before each compileIR call.
+//
+// We can't thread a bool param through compileIR without rewriting its
+// signature in five places, so a process-global suffices: the compiler
+// is invoked once per build and the flag is decided after Generate()
+// returns.
+var stacktraceLinkActive bool
+
 // compileIR writes the LLVM IR to a temp .ll file and invokes clang.
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
@@ -1183,7 +1351,10 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		// LLVM 22's CoroSplitPass emits !DILabel nodes without the required
 		// 'line' field when debug info is active. Patch them before the next
 		// compile step to avoid "missing required field 'line'" errors.
-		if isDebug {
+		// stacktraceLinkActive flips on `-gline-tables-only` for the IR
+		// compile, so the patch also has to run in that mode even when the
+		// user didn't pass -g explicitly.
+		if isDebug || stacktraceLinkActive {
 			if data, readErr := os.ReadFile(splitName); readErr == nil {
 				if patched := patchMissingDILabelLine(string(data)); patched != string(data) {
 					_ = os.WriteFile(splitName, []byte(patched), 0644)
@@ -1286,9 +1457,9 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	// clang invocation only links. This converts the dominant single-threaded
 	// clang call into N parallel -c calls + one fast link, scaling with -j.
 	var (
-		tmpObjs      []string  // every temp .o we own; cleaned up on return
-		linkInputs   []string  // .o files passed to the link step (in stable order)
-		cLinkerFlags []string  // -l/-L flags pulled out of //!+file.c directives
+		tmpObjs      []string // every temp .o we own; cleaned up on return
+		linkInputs   []string // .o files passed to the link step (in stable order)
+		cLinkerFlags []string // -l/-L flags pulled out of //!+file.c directives
 	)
 
 	defer func() {
@@ -1325,9 +1496,31 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		if isDebug {
 			a = append(a, "-g")
 
-			if runtime.GOOS == "darwin" {
+			if targetGOOS == "darwin" {
 				a = append(a, "-fstandalone-debug")
 			}
+		}
+
+		// libunwind needs frame info to walk Tin user code; emit unwind
+		// tables only when stacktrace() is reachable. clang's default on
+		// x86_64 Linux IS to emit `.eh_frame`, so the negative path needs
+		// to be explicit — otherwise default builds keep paying the
+		// 5-10% binary-size tax for unwind info nothing reads. (Phase 6,
+		// docs/plans/stacktrace-libunwind.md.)
+		//
+		// When stacktrace is reachable we also emit `.debug_line` so the
+		// runtime can resolve IPs to file:line:col via libdwfl, matching
+		// the atom format produced by the compile-time `sourcepos()`
+		// builtin. -gline-tables-only is the cheap variant of -g that
+		// keeps just the line table; full -g (already implied by
+		// isDebug) supersedes this so we don't add it then.
+		if stacktraceLinkActive {
+			a = append(a, "-funwind-tables", "-fasynchronous-unwind-tables")
+			if !isDebug {
+				a = append(a, "-gline-tables-only")
+			}
+		} else {
+			a = append(a, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
 		}
 
 		a = append(a, llInputFile, "-o", irObjName)
@@ -1344,9 +1537,30 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		if isDebug {
 			rtArgs = append(rtArgs, "-g")
 
-			if runtime.GOOS == "darwin" {
+			if targetGOOS == "darwin" {
 				rtArgs = append(rtArgs, "-fstandalone-debug")
 			}
+		}
+
+		// runtime/stacktrace.c gates its libunwind-using body on
+		// TIN_STACKTRACE so programs that don't use stacktrace() don't
+		// incur the libunwind link dependency. The csrc cache key
+		// includes the canonical argv, so this define naturally produces
+		// two distinct cached .o entries (one with the stub, one with
+		// the real walk) instead of cross-contaminating a single cache slot.
+		// Mirror the unwind-table + line-info flags so libdwfl can map
+		// runtime fns (`_worker_thread`, `_tin_fiber_*`) to their
+		// fiber.c / arc.c source lines in captured traces. Without
+		// `-gline-tables-only` runtime helpers render as `sym+0x<off>`
+		// while user code shows `sym@file:line:col`, which is jarring.
+		if stacktraceLinkActive {
+			rtArgs = append(rtArgs, "-DTIN_STACKTRACE=1",
+				"-funwind-tables", "-fasynchronous-unwind-tables")
+			if !isDebug {
+				rtArgs = append(rtArgs, "-gline-tables-only")
+			}
+		} else {
+			rtArgs = append(rtArgs, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
 		}
 
 		cachedPath, hit, err := csrcCacheLookup(rtC, rtArgs)
@@ -1405,7 +1619,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		prog.step(outBin, fmt.Sprintf("compile (%d TUs)", len(jobsList)))
 	}
 
-	// Run all -c jobs in parallel. parallelJobs() honours -j; default is GOMAXPROCS.
+	// Run all -c jobs in parallel. parallelJobs() honors -j; default is GOMAXPROCS.
 	if err := runParallelClang(jobsList); err != nil {
 		return err
 	}
@@ -1418,22 +1632,55 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	if isDebug {
 		args = append(args, "-g")
 
-		if runtime.GOOS == "darwin" {
+		if targetGOOS == "darwin" {
 			args = append(args, "-fstandalone-debug")
 		}
 	}
 
 	args = append(args, "-ffunction-sections", "-fdata-sections")
-	if runtime.GOOS == "darwin" {
+	// Linker dead-code-stripping flag (per-target) plus (for
+	// cross-compile) the linker selection. lld is invoked via
+	// `-fuse-ld=lld` and dispatches to ld64.lld for Mach-O / ld.lld
+	// for ELF. The host's default linker only handles its native
+	// format, so we explicitly opt into lld whenever host != target.
+	if targetGOOS == "darwin" {
 		args = append(args, "-Wl,-dead_strip")
 	} else {
 		args = append(args, "-Wl,--gc-sections")
+	}
+	if runtime.GOOS != targetGOOS {
+		args = append(args, "-fuse-ld=lld")
 	}
 
 	args = append(args, linkInputs...)
 	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
+	// Conditional libunwind / dynsym wiring (see Phase 6 in
+	// docs/plans/stacktrace-libunwind.md). Only programs that reference
+	// `stacktrace()` pay the binary-size cost of dynsym promotion and
+	// the libunwind dependency; default builds stay lean.
+	//
+	// Linux/FreeBSD: link `-lunwind` (LLVM libunwind) AND `-ldw`
+	// (elfutils libdwfl). The runtime uses libunwind to walk frames
+	// and libdwfl to map IPs to "file:line:col", matching the atom
+	// format the compile-time `sourcepos()` builtin emits. `-rdynamic`
+	// promotes Tin user fns to the dynsym so dladdr can resolve them.
+	//
+	// macOS: libunwind is bundled into libSystem and is auto-linked by
+	// every clang invocation — passing an explicit `-lunwind` makes
+	// ld64 fail with "library not found." elfutils has no Mach-O
+	// equivalent, so `-ldw` is omitted and stacktrace.c's
+	// TIN_ST_HAVE_LIBDW gate falls back to dladdr-only resolution
+	// ("symbol+0x<off>", no source coords). dyld already keeps local
+	// symbols visible to dladdr until `strip` removes them, so
+	// `-rdynamic` is also unnecessary.
+	// Use TARGET OS, not host OS — when cross-compiling Linux -> Darwin
+	// the produced binary should NOT carry -lunwind/-ldw/-rdynamic
+	// (those would either fail the link or fail at load time on Mach-O).
+	if stacktraceLinkActive && targetGOOS != "darwin" {
+		args = append(args, "-lunwind", "-ldw", "-rdynamic")
+	}
 	args = append(args, "-o", outBin)
 
 	if prog != nil {
@@ -1476,7 +1723,7 @@ func chooseOptLevel(isDebug bool) string {
 	return "-O2"
 }
 
-// parallelJobs returns the per-process compile concurrency. Honours the -j flag
+// parallelJobs returns the per-process compile concurrency. Honors the -j flag
 // when set; otherwise uses runtime.GOMAXPROCS(0).
 func parallelJobs() int {
 	if jobs > 0 {
@@ -1498,24 +1745,24 @@ func pureFnCacheEnabled() bool {
 	return os.Getenv("TIN_PURE_FN_CACHE") == "1"
 }
 
-// emitPureFnCache walks the #pure artefacts produced by codegen, skips those
+// emitPureFnCache walks the #pure artifacts produced by codegen, skips those
 // already cached on disk, and compiles the rest in parallel via the same
 // worker pool sized by -j.
 func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
-	artefacts := cg.PureFnsForCache()
-	if len(artefacts) == 0 {
+	artifacts := cg.PureFnsForCache()
+	if len(artifacts) == 0 {
 		return nil
 	}
 
 	type pendingFn struct {
-		artefact codegen.PureFnArtefact
+		artifact codegen.PureFnArtifact
 		llPath   string
 		soPath   string
 	}
 
 	var pending []pendingFn
 
-	for _, a := range artefacts {
+	for _, a := range artifacts {
 		dir := filepath.Join(pureFnCacheRoot, a.Hash)
 
 		soPath := filepath.Join(dir, "bin.so")
@@ -1547,7 +1794,7 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 		}
 
 		pending = append(pending, pendingFn{
-			artefact: a,
+			artifact: a,
 			llPath:   llFile.Name(),
 			soPath:   soPath,
 		})
@@ -1576,10 +1823,26 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 		// atomically once the clang call succeeds.
 		tempSo := pending[i].soPath + fmt.Sprintf(".tmp.%d", os.Getpid())
 
-		args := append([]string{"-shared", "-fPIC", "-O2"}, clangTargetFlag()...)
+		// Per-fn .so files are dlopen'd by the running tin process
+		// during CTFE evaluation. They MUST match the host's ABI even
+		// when the user asked for a Darwin cross-compile — loading a
+		// Mach-O .dylib into a Linux ELF process would fail at the
+		// dlopen call. Use hostClangTargetFlag() (which returns nil)
+		// instead of clangTargetFlag() so clang picks the host triple
+		// regardless of -target.
+		//
+		// `-Wno-override-module` silences clang's complaint that the
+		// IR module's target triple (set by codegen for the user's
+		// requested target) doesn't match the host triple we're
+		// compiling for. The override is intentional: CTFE shims live
+		// in the host process, not in the produced binary.
+		args := append([]string{
+			"-shared", "-fPIC", "-O2",
+			"-Wno-override-module",
+		}, hostClangTargetFlag()...)
 		args = append(args, pending[i].llPath, "-o", tempSo)
 		jobsList = append(jobsList, compileJob{
-			desc:     pending[i].artefact.Name,
+			desc:     pending[i].artifact.Name,
 			args:     args,
 			renameTo: pending[i].soPath,
 		})
@@ -1594,9 +1857,9 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 	// whose expected shim symbol diverged (catches stale entries from a
 	// hash-function change or a developer mistake).
 	for i := range pending {
-		shim := codegen.PureFnShimName(pending[i].artefact.Name)
-		if err := codegen.WritePureFnCacheManifest(pending[i].artefact.Hash, shim); err != nil {
-			return fmt.Errorf("manifest for %s: %w", pending[i].artefact.Name, err)
+		shim := codegen.PureFnShimName(pending[i].artifact.Name)
+		if err := codegen.WritePureFnCacheManifest(pending[i].artifact.Hash, shim); err != nil {
+			return fmt.Errorf("manifest for %s: %w", pending[i].artifact.Name, err)
 		}
 	}
 
@@ -1770,7 +2033,7 @@ func collectTinFiles(root string) []string {
 func validateMemcheck(memcheck string) {
 	switch memcheck {
 	case "valgrind":
-		if runtime.GOOS == "darwin" {
+		if targetGOOS == "darwin" {
 			if _, err := exec.LookPath("valgrind"); err != nil {
 				die("valgrind is not supported on macOS; did you mean --leaks?")
 			}
@@ -2087,6 +2350,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			continue
 		}
+
+		stacktraceLinkActive = cg.StacktraceUsed()
 
 		irText := fixCoroAttrs(mod.String())
 		if compErr := compileIR(irText, cachedBin, false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
@@ -2418,13 +2683,13 @@ func execRunBinary(bin, memcheck string, binArgs []string) {
 // runClean removes per-program cache directories under .build/ but preserves
 // the two content-addressed caches that never go stale:
 //
-//   .build/csrc/    - runtime.c and stdlib //!+file.c objects keyed by
-//                     sha(content + flags); wiping forces a slow rebuild
-//                     of every C source for no observable correctness gain.
-//   .build/pure-fn/ - per-function CTFE shared objects keyed by Merkle
-//                     hash of the #pure function and its dependencies;
-//                     wiping forces every #pure call to re-emit + re-link
-//                     a .so on the next compile.
+//	.build/csrc/    - runtime.c and stdlib //!+file.c objects keyed by
+//	                  sha(content + flags); wiping forces a slow rebuild
+//	                  of every C source for no observable correctness gain.
+//	.build/pure-fn/ - per-function CTFE shared objects keyed by Merkle
+//	                  hash of the #pure function and its dependencies;
+//	                  wiping forces every #pure call to re-emit + re-link
+//	                  a .so on the next compile.
 //
 // Both caches are immutable once written (their key encodes their inputs),
 // so a stale entry is never possible — only orphaned entries from removed
