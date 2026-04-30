@@ -31,7 +31,7 @@ package codegen
 //   - UnaryExpr with `not` on a foldable bool
 //
 // Anything outside this set returns "unknown" and the caller falls back to
-// runtime evaluation. Folding is a best-effort optimisation: returning
+// runtime evaluation. Folding is a best-effort optimization: returning
 // unknown is always safe.
 
 import (
@@ -565,5 +565,45 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 	case *ast.PipeExpr:
 		walkAST(v.Left, visit)
 		walkAST(v.Right, visit)
+	// Address / deref / type-introspection / reflection-builtin nodes:
+	// each wraps a single expression. Without these cases, callers
+	// like detectStacktraceUsage and retagMacroBody would silently
+	// miss a stacktrace() / sourcepos() call buried under e.g.
+	// `&stacktrace()` (AddrExpr) or `sizeof(stacktrace())` (SizeofExpr).
+	case *ast.TypeAssertExpr:
+		walkAST(v.Expr, visit)
+	// SizeofExpr / IsRCExpr take a TypeExpr (no Node child), so no
+	// further recursion. Listed for completeness in this comment.
+	case *ast.TraitofExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldnamesExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldtypesExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldtagExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+	case *ast.GetfieldExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+	case *ast.SetfieldExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+		walkAST(v.Val, visit)
+	case *ast.AddrExpr:
+		walkAST(v.Val, visit)
+	case *ast.DerefExpr:
+		walkAST(v.Expr, visit)
+	case *ast.AddressOfExpr:
+		walkAST(v.Expr, visit)
+	// Top-level decls whose initializers can contain expression trees.
+	// MacroDecl bodies need walking so detectStacktraceUsage finds
+	// stacktrace() calls referenced ONLY through a macro body — without
+	// this the gate stays off, linkage stays internal, and every Tin
+	// frame in the eventual trace renders as ??+0x<addr>.
+	case *ast.MacroDecl:
+		walkAST(v.Body, visit)
+	case *ast.TopLevelVar:
+		walkAST(v.Value, visit)
 	}
 }

@@ -128,7 +128,6 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 
 	cSym := C.CString(shimName)
 	defer C.free(unsafe.Pointer(cSym))
-
 	sym := C.dlsym(handle, cSym)
 	if sym == nil {
 		// Close the handle we just opened so a missing symbol doesn't leak
@@ -153,9 +152,9 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 	C.free(unsafe.Pointer(cFreeName))
 
 	h := &pureFnHandle{
-		handle: unsafe.Pointer(handle),
-		sym:    unsafe.Pointer(sym),
-		freeFn: unsafe.Pointer(freeSym),
+		handle: handle,
+		sym:    sym,
+		freeFn: freeSym,
 	}
 	pureFnHandles[hash] = h
 
@@ -163,7 +162,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 }
 
 // InvokePureShim calls the cached shim with the supplied ctfeVal args and
-// returns the unmarshalled ctfeVal result. Signature information comes from
+// returns the unmarshaled ctfeVal result. Signature information comes from
 // fd (param + return Tin types); libffi handles the calling convention.
 //
 // Supported types:

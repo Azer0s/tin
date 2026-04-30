@@ -1569,7 +1569,9 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	}
 
 	// Pass 5: register exported macros under pkg-qualified keys so that
-	// loadPackageSelective can find and re-register them as bare names.
+	// loadPackageSelective can find and re-register them as bare names,
+	// and so qualified call sites (`log::info!(...)`) resolve via the
+	// ScopeAccess macro path in genCallExpr.
 	for _, node := range prog.Stmts {
 		md, ok := node.(*ast.MacroDecl)
 		if !ok {
@@ -2507,7 +2509,7 @@ func (cg *CodeGen) evalConstExprInt(expr ast.Node, hint *irtypes.IntType) (*irty
 	return nil, nil
 }
 
-// normIntBig normalises a *big.Int to the signed two's-complement range
+// normIntBig normalizes a *big.Int to the signed two's-complement range
 // for an N-bit integer type: masks to N bits, then sign-extends from bit N-1.
 // This ensures that e.g. (1 << 127) becomes -2^127 (I128_MIN) when bits==128.
 func normIntBig(x *big.Int, bits uint) *big.Int {

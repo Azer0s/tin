@@ -464,7 +464,7 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 }
 
 // pinInteropWrappers emits an `@llvm.used` global listing every #interop
-// wrapper. This appending-linkage symbol is honoured by both the LLVM
+// wrapper. This appending-linkage symbol is honored by both the LLVM
 // optimizer and the system linker (GNU ld --gc-sections, ld64
 // -dead_strip, lld), preventing them from DCEing wrappers whose only
 // in-program caller was eliminated by CTFE folding or other optimization

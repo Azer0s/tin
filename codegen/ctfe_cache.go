@@ -14,7 +14,7 @@ package codegen
 // requiring a separate SBOM file: the hash IS the invalidation key.
 //
 // This file owns the cache layout and hash computation only. CTFE dispatch
-// (dlopen / cgo / marshalling) lives in a follow-up file.
+// (dlopen / cgo / marshaling) lives in a follow-up file.
 
 import (
 	"crypto/sha256"
@@ -147,7 +147,7 @@ func (cg *CodeGen) ctfeDirectCallees(fd *ast.FuncDecl) []*ast.FuncDecl {
 // captures every byte-level difference relevant to behavior: signature,
 // tags, parameter names/types, return type, and a deterministic walk of
 // the body. The output is stable across compiler runs; small details
-// (whitespace, formatting) in the original source are normalised away.
+// (whitespace, formatting) in the original source are normalized away.
 func ctfeFnFingerprint(fd *ast.FuncDecl) string {
 	var b strings.Builder
 
@@ -386,7 +386,7 @@ func ctfeCacheDir(hash string) string {
 }
 
 // ctfeCacheHit reports whether the cache entry for hash is complete and
-// usable. The directory layout expects exactly one artefact (bin.so) and
+// usable. The directory layout expects exactly one artifact (bin.so) and
 // the hash itself is the invalidation key.
 func ctfeCacheHit(hash string) bool {
 	if hash == "" {
@@ -423,18 +423,6 @@ func readCacheManifest(hash string) string {
 	}
 
 	return strings.TrimSpace(string(data))
-}
-
-// ctfeCacheEnsureDir creates ".build/pure-fn/<hash>/" if missing and
-// returns the absolute path. Used by the compile pipeline before writing
-// bin.so / fingerprint files.
-func ctfeCacheEnsureDir(hash string) (string, error) {
-	dir := ctfeCacheDir(hash)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-
-	return dir, nil
 }
 
 // ctfeCacheBinPath returns ".build/pure-fn/<hash>/bin.so".

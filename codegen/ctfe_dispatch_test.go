@@ -91,6 +91,7 @@ entry:
 		got, ok := InvokePureShim(h, fd, []ctfeVal{{kind: "i64", i: c.in}})
 		if !ok {
 			t.Errorf("InvokePureShim(cube, %d): not ok", c.in)
+
 			continue
 		}
 
@@ -101,7 +102,7 @@ entry:
 }
 
 // TestPureFnRoundTripMultiArg drives a 3-arg shim — exercises libffi
-// argument vector marshalling beyond a single value.
+// argument vector marshaling beyond a single value.
 func TestPureFnRoundTripMultiArg(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not on PATH")
@@ -159,6 +160,7 @@ entry:
 		})
 		if !ok {
 			t.Errorf("clamp(%d,%d,%d): not ok", c.v, c.lo, c.hi)
+
 			continue
 		}
 

@@ -30,8 +30,8 @@ type ctfeVal struct {
 	f        float64
 	b        bool
 	s        string
-	elemKind string     // for kind=="slice": element scalar kind
-	elems    []ctfeVal  // for kind=="slice": homogeneous element payload
+	elemKind string    // for kind=="slice": element scalar kind
+	elems    []ctfeVal // for kind=="slice": homogeneous element payload
 }
 
 // ctfeReturn is a sentinel used to carry a return value out of evalBody.
@@ -411,7 +411,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 	case *ast.ArrayLit:
 		// Evaluate every element; require they share a single scalar kind so
-		// the slice can be marshalled through the (T*, i64) wrapper boundary.
+		// the slice can be marshaled through the (T*, i64) wrapper boundary.
 		// Mixed-kind arrays (e.g. union of i64+string) bail to AST-eval failure.
 		if len(v.Elems) == 0 {
 			return ctfeVal{kind: "slice", elemKind: "i64", elems: nil}, nil
@@ -654,7 +654,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	case *ast.MatchStmt:
 		// Evaluate the discriminant, then walk cases looking for a literal-
 		// pattern match. Type-pattern (`case _ T:`) and struct-pattern arms
-		// can't be modelled without runtime type info; we bail to errNotConst
+		// can't be modeled without runtime type info; we bail to errNotConst
 		// and let the runtime path handle them.
 		disc, err := evalNode(v.Expr, env, cg, depth)
 		if err != nil {

@@ -718,10 +718,19 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 
 	outBlock, term, err := cg.genStmtInner(block, node)
 
-	// Attach !dbg to the first new instruction emitted by this statement.
+	// Attach !dbg to every new instruction emitted by this statement.
+	// Without covering all of them, intermediate calls (e.g. the
+	// runtime helper inside `let frames = stacktrace()` or `return f()`
+	// where f is a closure) only pick up the catch-all `line:0`
+	// metadata from ensureAllCallsHaveDbg, which makes libdwfl resolve
+	// them to "file:0:0" at runtime — the wrong cell for tools that
+	// match the stacktrace atoms against sourcepos atoms. Attaching to
+	// every new instruction is also what `clang -g` does on hand-
+	// written C, so this brings Tin's debug info into line with the
+	// expectation set by the toolchain.
 	if cg.debugMode && !cg.emittingARC && block != nil && err == nil {
-		if inst := firstInstAfter(block, dbgInstBefore); inst != nil {
-			cg.attachCurrentDbgLoc(inst)
+		for i := dbgInstBefore; i < len(block.Insts); i++ {
+			cg.attachCurrentDbgLoc(block.Insts[i])
 		}
 	}
 
@@ -2124,7 +2133,11 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 //   - Complex macros (block body): CTFE - compile to a temp binary, run with timeout,
 //     parse stdout as the expansion result.
 //   - Simple macros (expression body): AST substitution - fast, no subprocess.
-func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast.Node) (value.Value, error) {
+//
+// callPos is the source position of the macro CALL site - used to retag
+// macro-body nodes so codegen-time pos lookups (sourcepos in particular)
+// report the caller's location, not the macro definition line.
+func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast.Node, callPos ast.Pos) (value.Value, error) {
 	if len(args) != len(macro.Params) {
 		return nil, fmt.Errorf("macro %s: expected %d args, got %d",
 			macro.Name, len(macro.Params), len(args))
@@ -2135,6 +2148,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		if err != nil {
 			return nil, err
 		}
+		retagMacroBody(resultNode, args, callPos)
 
 		return cg.genExpr(block, resultNode)
 	}
@@ -2165,9 +2179,12 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		}
 		// Substitute params into the parsed tree (backtick was an opaque string).
 		node = substituteMacroNode(node, subst)
+		retagMacroBody(node, args, callPos)
 
 		return cg.genExpr(block, node)
 	}
+
+	retagMacroBody(expanded, args, callPos)
 
 	return cg.genExpr(block, expanded)
 }

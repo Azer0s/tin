@@ -7,7 +7,7 @@ package codegen
 // The lattice combines three pieces:
 //
 //   - SCCP-style constant propagation for integer and boolean locals.
-//     Lattice elements are TOP (uninitialised), CONST(c), or BOTTOM (varying).
+//     Lattice elements are TOP (uninitialized), CONST(c), or BOTTOM (varying).
 //
 //   - Nil tracking for pointer / RC-typed locals, an Andersen's-style
 //     "may-point-to" set restricted to two abstract addresses: NIL and
@@ -45,7 +45,7 @@ type floatPair struct {
 type nilFact int
 
 const (
-	nilTop    nilFact = iota // unreachable / uninitialised
+	nilTop    nilFact = iota // unreachable / uninitialized
 	nilIsNil                 // statically nil
 	nilNonNil                // statically non-nil
 	nilBottom                // could be either
@@ -506,7 +506,7 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 
 			if st.freed[name] {
 				cg.warn(DiagDoubleDeinit, v.Expr.Pos(),
-					"deinit on %q which has already been deinitialised on this path", name)
+					"deinit on %q which has already been deinitialized on this path", name)
 			}
 
 			st.freed[name] = true
@@ -834,7 +834,7 @@ func floatPairFromLit(f float64) *floatPair {
 	return &floatPair{ieee: f, exact: r}
 }
 
-// isDeinitCall returns the variable name being deinitialised when expr
+// isDeinitCall returns the variable name being deinitialized when expr
 // matches `x.deinit()` or `(*x).deinit()`. The second form is what shows
 // up after parsing the typical `(*ptr).deinit()` syntax.
 func isDeinitCall(expr ast.Node) (string, bool) {

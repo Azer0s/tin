@@ -25,8 +25,6 @@ import (
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
-
-	"github.com/Azer0s/tin/ast"
 )
 
 // activeModule returns the LLVM module that should receive new IR objects.
@@ -128,7 +126,7 @@ const pureFnShimPrefix = "__tin_pure_shim_"
 func pureFnShimName(fnName string) string { return pureFnShimPrefix + fnName }
 
 // PureFnShimName is the public alias of pureFnShimName for callers outside
-// the codegen package (main.go's cache emitter). Centralising this avoids
+// the codegen package (main.go's cache emitter). Centralizing this avoids
 // the `__tin_pure_shim_<name>` literal getting duplicated across files
 // where one rename would silently desynchronise the cache lookup against
 // the emitted symbol.
@@ -193,6 +191,7 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 		for _, f := range cg.shimMod.Funcs {
 			if f.Name() == shimName {
 				f.Linkage = enum.LinkageInternal
+
 				break
 			}
 		}
@@ -203,7 +202,7 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 	return nil
 }
 
-// PureFnArtefact is one slice of the compilation output ready to be cached
+// PureFnArtifact is one slice of the compilation output ready to be cached
 // and dispatched independently. Name is the user-visible function name (the
 // dlsym symbol exported by the .so); Hash is the Merkle key
 // (.build/pure-fn/<Hash>/bin.so); IRText is the self-contained sub-module
@@ -214,27 +213,27 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 // returns. Callers dispatch via cgo shape entries (see ctfe_dispatch.go);
 // non-primitive args/returns will eventually route through the full
 // emitInteropWrapperFor pipeline (string, slice, bool widening) instead of
-// reinventing marshalling here.
-type PureFnArtefact struct {
+// reinventing marshaling here.
+type PureFnArtifact struct {
 	Name   string
 	Hash   string
 	IRText string
 }
 
 // PureFnsForCache walks every #pure function declared in the program and
-// returns one PureFnArtefact per fn. Fns whose Merkle hash cannot be computed
+// returns one PureFnArtifact per fn. Fns whose Merkle hash cannot be computed
 // (generic, references unresolvable callees) are skipped silently — the AST
 // evaluator + main binary already cover the same fold path.
 //
 // The cache slice combines two source-of-truth modules:
 //   - cg.mod:     definition of the original Tin internal entry, plus
-//                 every type/global/declare it transitively references
+//     every type/global/declare it transitively references
 //   - cg.shimMod: the `__tin_pure_shim_<name>` wrapper produced by
-//                 emitPureFnCtfeShims, with its own redeclares of
-//                 runtime helpers and the internal-entry forward decl
+//     emitPureFnCtfeShims, with its own redeclares of
+//     runtime helpers and the internal-entry forward decl
 //
 // The result is a self-contained .ll the linker compiles into one .so.
-func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
+func (cg *CodeGen) PureFnsForCache() []PureFnArtifact {
 	if cg.mod == nil {
 		return nil
 	}
@@ -246,7 +245,7 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 		shimText = cg.shimMod.String()
 	}
 
-	var out []PureFnArtefact
+	var out []PureFnArtifact
 
 	for name, fd := range cg.funcDecls {
 		if !hasTag(fd.Tags, "pure") {
@@ -291,7 +290,7 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtefact {
 		ir := mergeSliceModules(mainSlice, shimSlice)
 		ir = promoteSymbolToExternal(ir, shimName)
 
-		out = append(out, PureFnArtefact{
+		out = append(out, PureFnArtifact{
 			Name:   name,
 			Hash:   hash,
 			IRText: ir,
@@ -353,7 +352,7 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 				}
 
 				if prev, seen := declared[name]; seen {
-					if normaliseDeclare(prev) != normaliseDeclare(line) {
+					if normalizeDeclare(prev) != normalizeDeclare(line) {
 						panic(fmt.Sprintf("ctfe shim merge: divergent declares for %s\n  first:  %s\n  second: %s",
 							name, strings.TrimSpace(prev), strings.TrimSpace(line)))
 					}
@@ -380,7 +379,7 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 	return b.String()
 }
 
-// normaliseDeclare returns a comparable form of an LLVM declare line by
+// normalizeDeclare returns a comparable form of an LLVM declare line by
 // collapsing whitespace runs AND truncating at the closing paren of the
 // argument list. Attribute lists (`alwaysinline readnone nounwind` etc.)
 // after that paren are advisory annotations the IR builder attaches to
@@ -389,7 +388,7 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 // bug. By contrast, a divergence in return type or arg types between
 // the two halves WOULD produce a wrong .so, and the panic surrounding
 // this comparison catches that.
-func normaliseDeclare(line string) string {
+func normalizeDeclare(line string) string {
 	trimmed := strings.TrimSpace(line)
 
 	if rparen := strings.LastIndexByte(trimmed, ')'); rparen >= 0 {
@@ -448,12 +447,12 @@ func sliceIRForFuncs(fullIR string, targets []string) string {
 	}
 
 	var (
-		out         strings.Builder
-		inDefine    bool
-		isTarget    bool
-		curBody     strings.Builder
-		curSig      string
-		foundAny    bool
+		out      strings.Builder
+		inDefine bool
+		isTarget bool
+		curBody  strings.Builder
+		curSig   string
+		foundAny bool
 	)
 
 	for _, line := range strings.Split(fullIR, "\n") {
@@ -620,13 +619,13 @@ func extractDefineName(line string) string {
 // LLVM's grammar permits these tokens between `define` and the return
 // type, in any order:
 //
-//   linkage:        internal private external weak linkonce linkonce_odr
-//                   weak_odr appending common available_externally
-//                   extern_weak
-//   visibility:     hidden protected
-//   DLL storage:    dllimport dllexport
-//   thread-locals:  thread_local
-//   preemption:     dso_local dso_preemptable
+//	linkage:        internal private external weak linkonce linkonce_odr
+//	                weak_odr appending common available_externally
+//	                extern_weak
+//	visibility:     hidden protected
+//	DLL storage:    dllimport dllexport
+//	thread-locals:  thread_local
+//	preemption:     dso_local dso_preemptable
 //
 // All of these are LEGAL on a define and ILLEGAL on a declare. We sweep
 // every contiguous prefix-token of that set off the rewritten declare
@@ -682,11 +681,4 @@ func isDefineOnlyQualifier(tok string) bool {
 	}
 
 	return false
-}
-
-// debugDumpFingerprint is exposed only to ease diagnosing hash mismatches:
-// returns the canonical fingerprint text for fd, suitable for diffing against
-// another build. Not used in the production cache path.
-func (cg *CodeGen) debugDumpFingerprint(fd *ast.FuncDecl) string {
-	return fmt.Sprintf("hash=%s\n%s", cg.ctfeFnHash(fd), ctfeFnFingerprint(fd))
 }

@@ -102,7 +102,7 @@ func WriteModFile(filename string, mf *ModFile) error {
 	return os.WriteFile(filename, data, 0o644)
 }
 
-// ReadModFile reads and deserialises a .tin.mod file.
+// ReadModFile reads and deserializes a .tin.mod file.
 func ReadModFile(filename string) (*ModFile, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
