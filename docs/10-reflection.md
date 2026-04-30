@@ -467,13 +467,14 @@ link-time cost.
 
 ## Parsing source positions
 
-`reflect::SrcPos` decodes any atom emitted by `sourcepos` or
-`stacktrace` into a typed struct:
+Atom parsing for `sourcepos` and `stacktrace` lives in
+[`stdlib/source`](stdlib/source.md), not in `reflect`. `source::parse_sourcepos`
+decodes any atom shape either builtin emits into a typed `SrcPos` struct:
 
 ```rust
-use reflect
+use source
 
-let p = reflect::parse(sourcepos(handler))
+let p = source::parse_sourcepos(sourcepos(handler))
 echo p.symbol    // "handler"
 echo p.file      // "src/server.tin"
 echo p.line      // 1
@@ -497,10 +498,11 @@ Use this to programmatically filter or group log lines and stack
 frames by source location:
 
 ```rust
-use reflect
+use source
+use strings
 
 fn from_user_code(f atom) bool =
-  let p = reflect::parse(f)
+  let p = source::parse_sourcepos(f)
   return p.file != "" && !strings::has_prefix(p.symbol, "_tin_")
 
 for let f atom in stacktrace():

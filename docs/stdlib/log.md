@@ -130,8 +130,8 @@ log::info!(l, "started")    // src/server.tin:42:3
 Internally each macro expands to `l.<level>_at(sourcepos(), msg)`; the
 compiler retags the macro body's `sourcepos()` to point at the caller's
 site (see [12 - Macros](../12-macros.md)). The atom format matches what
-[`reflect::SrcPos`](../10-reflection.md#sourcepos-and-stacktrace-builtins)
-parses, so log lines can be re-ingested for filtering by source location.
+[`source::parse_sourcepos`](source.md) decodes, so log lines can be
+re-ingested for filtering by source location.
 
 ---
 

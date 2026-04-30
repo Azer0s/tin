@@ -37,6 +37,7 @@ use reflect
 use regex
 use result
 use simd
+use source
 use str
 use strings
 use sync
@@ -71,6 +72,7 @@ export {
     regex,
     result,
     simd,
+    source,
     str,
     strings,
     sync,

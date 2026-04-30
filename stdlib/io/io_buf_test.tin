@@ -13,14 +13,21 @@ const O_RDONLY i32 = 0
 // Uses stdio fopen("wb") so the O_CREAT|O_TRUNC|O_WRONLY semantics are
 // portable across Linux and macOS (raw open(2) flag values diverge:
 // e.g. 0x40 is O_CREAT on Linux but O_ASYNC on macOS).
+//
+// Unlinks any leftover at the path first - earlier versions of this
+// test used raw open() with hardcoded Linux flags and could create
+// files with surprising attributes on macOS that block subsequent
+// fopen("wb"). Unconditional unlink wipes any such leftover.
 fn write_temp(name string, contents string) string =
   let path = "/tmp/" ++ name
+  let _ = unlink_c(path)
   let f = io::fopen(path, "wb")
   if f == nil:
     panic("write_temp: fopen failed for {path}")
   let bytes = contents as [byte]
   let _ = io::fwrite(&bytes[0] as *void, 1 as i64, len(bytes), f)
   let _ = io::fclose(f)
+
   return path
 
 test "read_line returns three lines" =
