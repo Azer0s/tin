@@ -20,6 +20,24 @@
 //   _tin_fiber_complete(hdl, result)     mark done, wake waiters
 //   _tin_fiber_run()                     drain run queue; join all workers
 //   _tin_fiber_init()                    spawn worker threads
+//
+// Orphaned fibers and shutdown leaks (intentional):
+//   Tin matches Go's goroutine semantics: a spawned fiber whose Future is
+//   dropped without await keeps running, possibly to completion, possibly
+//   not - and any coro frame still allocated when the process exits is
+//   abandoned. valgrind reports these as "definitely lost"; that report
+//   is accurate but not a bug to fix at this layer. The programmer chose
+//   to orphan the fiber by not awaiting it; we don't second-guess that.
+//
+//   The most common path that surfaces this is `await match (a, b): ...`
+//   firing for one arm and dropping the others' Futures. See
+//   examples/await_match.tin for the explicit-await pattern that drains
+//   them when valgrind cleanliness matters.
+//
+//   Go's measurement story is cleaner only because Go uses mmap-backed
+//   arenas for goroutine stacks - those are invisible to valgrind's
+//   malloc/free tracking. Tin uses libc malloc for coro frames, so the
+//   same orphan shows up as a leak at the libc layer.
 
 #include "runtime.h"
 #include "fiber.h"
