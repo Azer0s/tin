@@ -341,16 +341,25 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	}
 
 	// No direct file found for a multi-part path (e.g. hash::fnv).
-	// Load the parent module (e.g. hash) which may re-export fnv as a sub-namespace.
+	// Load the parent module (e.g. hash) which may re-export fnv as a
+	// sub-namespace. If even the parent doesn't exist, surface a clear
+	// error pointing at the original path (closer to the user's intent
+	// than the parent name).
 	if len(parts) > 1 {
 		parentPath := strings.Join(parts[:len(parts)-1], "::")
+		if err := cg.loadPackage(parentPath); err != nil {
+			return fmt.Errorf("package not found: %s (also tried parent %s)", pkgPath, parentPath)
+		}
 
-		return cg.loadPackage(parentPath)
+		return nil
 	}
 
-	// Package not found - silently ignore (user may have a typo; errors surface
-	// when the symbol is actually used and not found in scope).
-	return nil
+	// Package not found at all. Pre-2026 the compiler silently ignored
+	// these on the theory "errors surface when the symbol is used", but
+	// imports for side effects (macros, top-level inits, runtime
+	// registrations) never reference a symbol, and typos in the REPL
+	// went undetected. Hard error is the safe default.
+	return fmt.Errorf("package not found: %s", pkgPath)
 }
 
 // resolvePackageSrc finds the .tin source file for pkgPath using a 3-tier search:
