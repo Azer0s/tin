@@ -858,35 +858,23 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
-		// Macro call through a qualified path (e.g. `log::info!(l, "x")`).
-		// The parser stores the trailing `!` on the LAST path element, so
-		// the lookup keys are `pkg::name!` / `pkg.name!` (and the same
-		// without the trailing `!` for the no-excl form). cg.macros is
-		// populated by packages.go's pass-5 with these exact keys when a
-		// package exports the macro.
-		//
-		// For 3+ segment paths the first segment may be a re-export
-		// alias (e.g. `std::log::info!` where `std.tin` re-exports
-		// `log`). Try the full path first, then progressively drop the
-		// leading segment - mirrors the same fallback in genScopeAccess
-		// for non-macro identifier lookups.
+		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
+		// `std::log::info!(l, "x")`, etc.). The parser stores the trailing
+		// `!` on the LAST path element. cg.macros is populated by
+		// packages.go's pass-5 with the immediate `pkg::name!` keys, and
+		// pass-6 cascades those under every re-export alias's namespace,
+		// so a single lookup on the literal joined path resolves at any
+		// re-export depth.
 		if len(fn.Path) >= 2 {
-			tries := [][]string{fn.Path}
-			if len(fn.Path) >= 3 {
-				tries = append(tries, fn.Path[1:])
-			}
-
-			for _, path := range tries {
-				fullKey := strings.Join(path, "::")
-				altKey := strings.Join(path, ".")
-				for _, key := range []string{fullKey, altKey} {
-					if macro, ok := cg.macros[key]; ok {
+			fullKey := strings.Join(fn.Path, "::")
+			altKey := strings.Join(fn.Path, ".")
+			for _, key := range []string{fullKey, altKey} {
+				if macro, ok := cg.macros[key]; ok {
+					return cg.expandMacro(block, macro, e.Args, fn.Pos())
+				}
+				if strings.HasSuffix(key, "!") {
+					if macro, ok := cg.macros[key[:len(key)-1]]; ok {
 						return cg.expandMacro(block, macro, e.Args, fn.Pos())
-					}
-					if strings.HasSuffix(key, "!") {
-						if macro, ok := cg.macros[key[:len(key)-1]]; ok {
-							return cg.expandMacro(block, macro, e.Args, fn.Pos())
-						}
 					}
 				}
 			}

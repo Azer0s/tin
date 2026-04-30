@@ -1607,6 +1607,34 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.macros[pkgName+"::"+bareName] = md
 	}
 
+	// Pass 6: propagate re-exported child packages' macros under this
+	// package's namespace. When std.tin says `export { log } as std`,
+	// log's `info!` (registered as `log::info!` by its own load) needs
+	// to also resolve under `std::log::info!`. Iterate every macro key
+	// that begins with an exported child name and clone it under the
+	// current pkg's prefix. This composes naturally for arbitrary
+	// re-export depth: an outer umbrella exporting std then sees the
+	// freshly-added `std::log::info!` keys and clones them again as
+	// `outer::std::log::info!`. No lookup-time path stripping needed.
+	if len(exportedNames) > 0 {
+		// Snapshot keys first - mutating the map while iterating is undefined.
+		original := make(map[string]*ast.MacroDecl, len(cg.macros))
+		for k, v := range cg.macros {
+			original[k] = v
+		}
+
+		for k, md := range original {
+			for child := range exportedNames {
+				for _, sep := range []string{"::", "."} {
+					prefix := child + sep
+					if strings.HasPrefix(k, prefix) {
+						cg.macros[pkgName+sep+k] = md
+					}
+				}
+			}
+		}
+	}
+
 	cg.curScope = prevScope
 	cg.filename = prevFilename
 
