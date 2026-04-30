@@ -861,11 +861,29 @@ doneFlags:
 	// Collect directives declared in the source file via //! lines
 	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
 
-	// Estimate total stages for progress display.
-	// Actual total is refined after codegen when package C sources are known.
-	hasPotentialCoro := strings.Contains(string(src), "spawn ") || strings.Contains(string(src), "await ")
+	// Estimate total stages for progress display. Mirrors the actual
+	// step shape so the post-codegen setTotal call refines without
+	// jumping. Default (binary) mode: lex+parse+codegen + batched
+	// compile + link = 5. --lib mode: lex+parse+codegen + per-TU
+	// compile + ld -r merge.
+	//
+	// Coro detection here is conservative: any explicit spawn/await OR
+	// any `use` declaration triggers it, because imported stdlib packages
+	// (sync, ioutil, http, ...) very commonly emit coroutine IR even
+	// when the user's own code never says spawn. Without this, every
+	// `use std` program would see /5 jump to /6 mid-progress.
+	hasPotentialCoro := strings.Contains(string(src), "spawn ") ||
+		strings.Contains(string(src), "await ") ||
+		strings.Contains(string(src), "\nuse ") ||
+		strings.HasPrefix(string(src), "use ")
 
-	prelimTotal := 3 + len(fileCSources) + 1 // lex+parse+codegen + C sources + link
+	var prelimTotal int
+	if libMode {
+		prelimTotal = 3 + len(fileCSources) + 1
+	} else {
+		prelimTotal = 3 + 1 + 1
+	}
+
 	if hasPotentialCoro {
 		prelimTotal++ // coro split pass
 	}
@@ -1079,10 +1097,25 @@ doneFlags:
 	}
 
 	// Refine progress total now that package C sources are known and we can
-	// check whether a coroutine split pass is needed.
+	// check whether a coroutine split pass is needed. The shape of the
+	// remaining pipeline differs between modes:
+	//
+	//   - default (binary):  one batched "compile (N TUs)" step, one link
+	//   - --lib (object):    one step per C source, one ld -r merge
+	//
+	// The earlier prelimTotal estimate could only see file-level //!+ C
+	// sources (zero for most programs); after codegen we also have stdlib
+	// runtime C sources, so the count would shoot up. Mirror the shape of
+	// the actual step calls so the denominator stops jumping mid-progress.
 	{
 		hasCoro := strings.Contains(irText, "llvm.coro.")
-		actualTotal := 3 + len(fileCSources) + 1
+
+		var actualTotal int
+		if libMode {
+			actualTotal = 3 + len(fileCSources) + 1 // lex+parse+codegen + per-TU + ld -r
+		} else {
+			actualTotal = 3 + 1 + 1 // lex+parse+codegen + batched compile + link
+		}
 
 		if hasCoro {
 			actualTotal++
