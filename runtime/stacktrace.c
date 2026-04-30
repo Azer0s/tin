@@ -1,4 +1,4 @@
-// tin runtime - stacktrace capture (LLVM libunwind backed)
+// tin runtime - stacktrace capture (frame-pointer walker)
 //
 // API contract:
 //   int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags)
@@ -9,18 +9,41 @@
 //     - never panics; on total failure returns 0
 //
 // Atom format: each frame renders as "symbol@file:line:col" when
-// libdwfl + libunwind/dladdr both resolve. Without line info: just
+// libdwfl + dladdr both resolve. Without line info: just
 // "symbol+0x<offset>". Without symbol or line info: "??+0x<addr>".
 // Frozen spawn frames carry a "<spawn-of>:" prefix.
 //
-// The whole libunwind/libdwfl/dladdr path is gated on TIN_STACKTRACE
-// so programs that never call stacktrace() do not pull in the
-// libunwind / libdw link dependencies. Phase 6 of
-// docs/plans/stacktrace-libunwind.md sets this define from main.go
-// conditional on cg.StacktraceUsed(), which in turn is fed by the
-// AST pre-pass detectStacktraceUsage. Programs that don't use
-// stacktrace() get the stub branch below; programs that do get the
-// real walk and link with -lunwind/-ldw/-rdynamic.
+// Walking strategy: we follow the frame-pointer chain (rbp on x86_64,
+// x29 on aarch64). Codegen emits `frame-pointer="all"` on every IR
+// function (see codegen/codegen.go applyStacktracePostPass), so every
+// Tin frame has a valid `[fp+0] = saved_fp, [fp+8] = return_ip`
+// layout. This avoids libunwind entirely - libunwind 1.8.x ships with
+// CONSERVATIVE_CHECKS=1 baked in, which probes memory readability via
+// `syscall(SYS_write, pipe_fd, addr, 1)`; valgrind flags those as
+// reads of unaddressable bytes (the writeable end of the probe pipe is
+// the kernel, not us, so the bytes are conceptually fine but the
+// instrumentation can't tell).
+//
+// Trade-off (FP walking vs libunwind .eh_frame walking): every frame
+// in the chain MUST preserve the frame pointer. Tin frames do (codegen
+// post-pass). The Tin runtime C does (main.go passes
+// -fno-omit-frame-pointer when stacktraceLinkActive). User C code
+// reachable via #interop callbacks does NOT by default - if a Tin
+// stacktrace passes through user C code that was built with the usual
+// `-O2` (which omits frame pointers on x86_64 Linux), the walk
+// terminates at the first such frame and the chain truncates. Users
+// who want stacktrace() to walk through their own C must build that C
+// with `-fno-omit-frame-pointer`. libunwind's .eh_frame walking would
+// have handled this transparently, but the valgrind issue above made
+// it impractical.
+//
+// The whole libdwfl/dladdr path is gated on TIN_STACKTRACE so programs
+// that never call stacktrace() do not pull in the libdw link
+// dependency. Phase 6 of docs/plans/stacktrace-libunwind.md sets this
+// define from main.go conditional on cg.StacktraceUsed(), which in
+// turn is fed by the AST pre-pass detectStacktraceUsage. Programs
+// that don't use stacktrace() get the stub branch below; programs
+// that do get the real walk and link with -ldw/-rdynamic.
 
 #include "runtime.h"
 
@@ -34,9 +57,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
 
 // libdwfl (elfutils) is Linux/FreeBSD-only. macOS ships no equivalent;
 // when targeting Darwin we drop the line-info pass and fall back to
@@ -63,7 +83,7 @@
 // when filtering is active so dropped frames don't eat the user's cap.
 #define TIN_ST_MIN_CAP    1
 #define TIN_ST_MAX_CAP    1024
-#define TIN_ST_WALK_LIMIT 256  // hard upper bound on libunwind iterations
+#define TIN_ST_WALK_LIMIT 256  // hard upper bound on fp_walk iterations
 
 // Per-IP atom-code cache. Without this, a hot stacktrace path would hit
 // _tin_learn_atom (process-wide mutex + linked-list scan) once per frame
@@ -96,6 +116,100 @@ static __thread struct {
     int32_t   atom_code;
 } _tin_st_cache[TIN_ST_CACHE_SLOTS];
 
+// fp_get reads the current frame pointer (rbp on x86_64, x29 on
+// aarch64). Marked always_inline so the value seen is the caller's
+// frame, not fp_get's own; if the compiler ever decides not to inline
+// despite the hint, the result still lands at fp_get itself which
+// fp_walk's first iteration discards harmlessly.
+#if defined(__x86_64__)
+static __attribute__((always_inline)) inline uintptr_t fp_get(void) {
+    uintptr_t fp;
+    __asm__ volatile ("movq %%rbp, %0" : "=r"(fp));
+    return fp;
+}
+#elif defined(__aarch64__)
+static __attribute__((always_inline)) inline uintptr_t fp_get(void) {
+    uintptr_t fp;
+    __asm__ volatile ("mov %0, x29" : "=r"(fp));
+    return fp;
+}
+#else
+static inline uintptr_t fp_get(void) { return 0; }
+#endif
+
+// thread_stack_bounds yields the [lo, hi) address range of the current
+// thread's stack. Used by fp_walk to detect a chain that wandered off
+// into a foreign mapping (a return address overwritten by a buffer
+// overrun, an alloca that smashed an old fp, etc) before we dereference
+// garbage. Returns 0 on failure - fp_walk falls back to a "trust the
+// chain until it hits 0 or fails an alignment check" mode.
+static int thread_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;
+    void  *base = NULL;
+    size_t size = 0;
+    int    ok   = (pthread_attr_getstack(&attr, &base, &size) == 0);
+    pthread_attr_destroy(&attr);
+    if (!ok || base == NULL || size == 0) return 0;
+    *lo = (uintptr_t)base;
+    *hi = (uintptr_t)base + size;
+    return 1;
+}
+
+// fp_walk traverses the frame-pointer chain starting at `start_fp`
+// and writes up to `cap` return addresses into `out`. Each frame's
+// layout is `[fp+0] = saved_caller_fp, [fp+sizeof(void*)] = ret_ip` -
+// this is the AAPCS64 convention on aarch64 and the
+// frame-pointer-preserving convention on x86_64 (`-fno-omit-frame-pointer`
+// or LLVM's "frame-pointer"="all" attribute, which codegen always
+// emits when stacktrace is in use).
+//
+// Tail calls: with `frame-pointer="all"`, LLVM emits the rbp/x29
+// pop (or `ldp x29,x30,[sp]`) BEFORE the tail `jmp`/`b`, so the
+// tail-caller's frame is properly torn down. The chain therefore
+// skips tail-call ancestors and reports the tail-callee's frame
+// linked directly to its grand-caller. That's the expected
+// behaviour of any FP-based unwinder; we just document it here so
+// "where did the intermediate frame go?" has an answer.
+//
+// The walk stops on any of:
+//   - reached cap (caller's responsibility, we just bound by it)
+//   - fp == 0 (chain terminator on every supported ABI)
+//   - fp misaligned (corruption / wrong ABI guess)
+//   - fp outside [lo, hi) when bounds were available
+//   - fp didn't grow monotonically up (corruption / fp re-use)
+//
+// Stack bounds are queried once per call. Multi-fiber programs
+// switch threads under us during a single call only if a fiber
+// yields mid-resolution, which we don't; so the bounds stay valid
+// for the duration of fp_walk.
+static int fp_walk(uintptr_t start_fp, uintptr_t *out, int cap) {
+    uintptr_t lo = 0, hi = (uintptr_t)-1;
+    int have_bounds = thread_stack_bounds(&lo, &hi);
+
+    int       n       = 0;
+    uintptr_t fp      = start_fp;
+    uintptr_t prev_fp = 0;
+    while (n < cap) {
+        if (fp == 0) break;
+        if (fp & (sizeof(void *) - 1)) break;
+        if (have_bounds && (fp < lo || fp + 2 * sizeof(void *) > hi)) break;
+        // Frame pointers walk toward higher addresses (stack grows
+        // down, callers live above callees). A non-monotonic chain
+        // means we've fallen out of valid frames and would loop or
+        // wander into garbage.
+        if (prev_fp != 0 && fp <= prev_fp) break;
+
+        uintptr_t next_fp = ((uintptr_t *)fp)[0];
+        uintptr_t ret_ip  = ((uintptr_t *)fp)[1];
+        if (ret_ip == 0) break;
+        out[n++] = ret_ip;
+        prev_fp = fp;
+        fp      = next_fp;
+    }
+    return n;
+}
+
 #ifdef TIN_ST_HAVE_LIBDW
 
 // libdwfl session, lazily initialised on first stacktrace call.
@@ -125,14 +239,40 @@ static __thread struct {
 #include <stdatomic.h>
 
 static Dwfl              *_tin_dwfl       = NULL;
-static char              *_tin_dwfl_dbgpath = NULL;
 static pthread_mutex_t    _tin_dwfl_mu    = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int         _tin_dwfl_tried = 0;
 
+// find_debuginfo_no_debuginfod replaces dwfl_standard_find_debuginfo so
+// that libdwfl never falls through to debuginfod for modules without
+// local .debug data (typically stripped libc / libpthread). The
+// standard callback's debuginfod fallback dlopens libdebuginfod.so.1,
+// whose `debuginfod_begin` unconditionally calls `curl_global_init`,
+// which in turn pulls in libcurl -> ngtcp2 -> libssl/libcrypto plus a
+// pile of OpenSSL provider state. Those allocations are intentionally
+// leaked by their respective libraries (no public destructor) and
+// surface under valgrind as ~40 KiB of still-reachable blocks (23
+// distinct loss records).
+//
+// We don't need network-backed debug info: Tin's own frames have
+// .debug_line embedded directly via -gline-tables-only, and libc
+// frames degrade gracefully to "symbol+0x<off>" without it. Returning
+// -1 immediately tells libdwfl "no separate .debug file available";
+// the embedded debug data is still returned from .debug_line lookups
+// in the main module.
+static int find_debuginfo_no_debuginfod(Dwfl_Module *mod, void **userdata,
+        const char *modname, Dwarf_Addr base, const char *file_name,
+        const char *debuglink_file, GElf_Word debuglink_crc,
+        char **debuginfo_file_name) {
+    (void)mod; (void)userdata; (void)modname; (void)base;
+    (void)file_name; (void)debuglink_file; (void)debuglink_crc;
+    (void)debuginfo_file_name;
+    return -1;
+}
+
 static const Dwfl_Callbacks _tin_dwfl_cb = {
     .find_elf       = dwfl_linux_proc_find_elf,
-    .find_debuginfo = dwfl_standard_find_debuginfo,
-    .debuginfo_path = &_tin_dwfl_dbgpath,
+    .find_debuginfo = find_debuginfo_no_debuginfod,
+    .debuginfo_path = NULL,
 };
 
 // dwfl_session_atexit calls dwfl_end on the process-wide libdwfl session at
@@ -191,8 +331,7 @@ static void *dwfl_session(void) { return NULL; }
 
 #endif  // TIN_ST_HAVE_LIBDW
 
-static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of,
-                                          unw_cursor_t *cur);
+static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of);
 
 // is_shared_lib_path classifies dli_fname as belonging to a shared lib
 // (.so on Linux/BSD, .dylib on macOS, versioned ".so." anywhere) vs the
@@ -269,40 +408,28 @@ static int frame_decision(int32_t flags, const char *lib_path,
 // should not write this frame.
 //
 // Resolution priority for the atom name:
-//   1. libdwfl line + libunwind/dladdr symbol -> "symbol@file:line:col"
-//   2. line only                              -> "file:line:col"
-//   3. symbol only                            -> "<lib>:symbol+0x<off>" or "symbol+0x<off>"
-//   4. neither                                -> "??+0x<addr>"
+//   1. libdwfl line + dladdr symbol -> "symbol@file:line:col"
+//   2. line only                    -> "file:line:col"
+//   3. symbol only                  -> "<lib>:symbol+0x<off>" or "symbol+0x<off>"
+//   4. neither                      -> "??+0x<addr>"
 //
 // Frozen spawn frames get a leading "<spawn-of>:" prefix so consumers
 // can filter by either prefix.
 //
-// `cur` is non-NULL for live-stack frames — there libunwind can give
-// us a symbol name as a fallback; spawn-of frames have no live cursor
-// and rely on dladdr alone.
-static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags,
-                              unw_cursor_t *cur) {
+// Symbol resolution is dladdr-only since dropping libunwind. main.go
+// links the binary with `-rdynamic`, which copies all defined symbols
+// into .dynsym, so dladdr finds user functions and tin_test_*
+// trampolines just as well as libunwind's _Uelf64_get_proc_name did.
+static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
     char buf[TIN_ST_BUFSZ];
     const char *spawn_pfx = spawn_of ? "<spawn-of>:" : "";
 
-    // Always pull lib path + symbol from dladdr; both feed the
-    // filter decision and the atom string.
     Dl_info info;
     int have_dli = dladdr((void *)ip, &info);
 
-    char         sym_buf[TIN_ST_BUFSZ];
-    const char  *sym_name = NULL;
-    unsigned long off = 0;
-
-    if (cur != NULL) {
-        unw_word_t uw_off = 0;
-        if (unw_get_proc_name(cur, sym_buf, sizeof sym_buf, &uw_off) == 0
-            && sym_buf[0] != '\0') {
-            sym_name = sym_buf;
-            off = (unsigned long)uw_off;
-        }
-    }
-    if (sym_name == NULL && have_dli && info.dli_sname) {
+    const char   *sym_name = NULL;
+    unsigned long off      = 0;
+    if (have_dli && info.dli_sname) {
         sym_name = info.dli_sname;
         off = (unsigned long)ip - (unsigned long)info.dli_saddr;
     }
@@ -393,8 +520,7 @@ static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags,
 // because they hit a different runtime path before consulting the
 // cache (the filter decision is keyed off the resolved frame, not the
 // cached atom).
-static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of,
-                                          unw_cursor_t *cur) {
+static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of) {
     uintptr_t key  = (ip << 1) | (uintptr_t)(spawn_of & 1);
     uint32_t  slot = (uint32_t)((key * 0x9E3779B97F4A7C15ULL) >> 56)
                      & (TIN_ST_CACHE_SLOTS - 1);
@@ -403,13 +529,13 @@ static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of,
     // CRC32 of 0 for some string — testing `atom_code != 0` would
     // re-resolve those forever. Test on key instead: a real cache key
     // is `(ip << 1) | spawn_of`, which is 0 only if ip == 0 (impossible
-    // — libunwind would have failed earlier).
+    // - fp_walk filters those out before calling).
     if (_tin_st_cache[slot].key == key && key != 0) {
         return _tin_st_cache[slot].atom_code;
     }
     // No filtering at the cache layer: the cache always stores the
     // unfiltered atom. The caller pre-filters when flags are non-zero.
-    int32_t code = resolve_frame(ip, spawn_of, /*flags=*/0, cur);
+    int32_t code = resolve_frame(ip, spawn_of, /*flags=*/0);
     _tin_st_cache[slot].key       = key;
     _tin_st_cache[slot].atom_code = code;
     return code;
@@ -420,64 +546,58 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     if (cap < TIN_ST_MIN_CAP) cap = TIN_ST_MIN_CAP;
     if (cap > TIN_ST_MAX_CAP) cap = TIN_ST_MAX_CAP;
 
-    // Zero-init both the machine context and the cursor: unw_getcontext
-    // captures the live register file but leaves padding/unused slots
-    // untouched, and unw_init_local likewise initialises only the cursor
-    // fields its arch backend consumes. libunwind later steps the cursor
-    // by reading whatever is in those slots (apply_reg_state at
-    // Gparser.c:936 in particular), so leftover stack garbage there
-    // shows up as "uninitialised value" reads under valgrind. The zero
-    // init makes the unwind deterministic and silences the warnings
-    // without changing the resolved frame addresses.
-    unw_context_t ctx;
-    unw_cursor_t  cur;
-    memset(&ctx, 0, sizeof ctx);
-    memset(&cur, 0, sizeof cur);
-    if (unw_getcontext(&ctx) < 0) return 0;
-    if (unw_init_local(&cur, &ctx) < 0) return 0;
+#if !defined(__x86_64__) && !defined(__aarch64__)
+    // No FP-walker on this arch (32-bit ARM, RISC-V, etc).
+    // Stacktrace returns empty; the rest of the runtime keeps working.
+    (void)out; (void)flags;
+    return 0;
+#else
+    // Buffer the raw IPs first, then resolve. We over-walk past `cap`
+    // when filtering is active so dropped frames don't eat the user's
+    // requested count, but never past TIN_ST_WALK_LIMIT.
+    uintptr_t ips[TIN_ST_WALK_LIMIT];
+    int       walk_cap = cap > TIN_ST_WALK_LIMIT ? TIN_ST_WALK_LIMIT : cap;
+    if (flags != 0) walk_cap = TIN_ST_WALK_LIMIT;  // keep walking past filtered frames
 
-    // unw_init_local lands on tin_capture_stacktrace itself; one step
-    // moves us to the caller (the user fn that invoked stacktrace()),
-    // which is the first frame we want to emit.
-    if (unw_step(&cur) <= 0) return 0;
+    // fp_walk reads `[my_fp+sizeof(void*)]` which is the return
+    // address THIS function will return to - i.e. an instruction
+    // inside our caller (the user code that wrote stacktrace()).
+    // So ips[0] is already the first user-visible frame; no skip
+    // needed. The same holds with the always_inline wrapper around
+    // stacktrace(): codegen lowers it to a direct call to
+    // tin_capture_stacktrace, so the caller's frame is the user fn.
+    int raw_n = fp_walk(fp_get(), ips, walk_cap);
 
-    int32_t n      = 0;
-    int     walked = 0;
-    do {
-        if (n >= cap || walked >= TIN_ST_WALK_LIMIT) break;
-        walked++;
-        unw_word_t raw;
-        if (unw_get_reg(&cur, UNW_REG_IP, &raw) < 0) break;
-
+    int32_t n = 0;
+    for (int i = 0; i < raw_n && n < cap; i++) {
         // IP-minus-1 lands inside the call instruction itself, not
-        // the return address that follows it.
-        uintptr_t ip = (uintptr_t)raw - 1;
-
-        // When filtering is active we re-resolve so frame_decision
-        // can inspect the symbol/lib metadata; the cache only stores
-        // the unfiltered atom, so a kept frame still benefits.
-        int32_t code;
+        // the return address that follows it. dladdr+libdwfl both
+        // tolerate either, but the inside-call form gives the
+        // correct line number for the call site.
+        uintptr_t ip = ips[i] - 1;
+        int32_t   code;
         if (flags != 0) {
-            code = resolve_frame(ip, /*spawn_of=*/0, flags, &cur);
-            if (code == 0) continue;  // filtered out
+            code = resolve_frame(ip, /*spawn_of=*/0, flags);
+            if (code == 0) continue;
         } else {
-            code = resolve_and_intern_cached(ip, /*spawn_of=*/0, &cur);
+            code = resolve_and_intern_cached(ip, /*spawn_of=*/0);
         }
         out[n++] = code;
-    } while (unw_step(&cur) > 0);
+    }
 
     // Append the spawn chain. Each parent contributes exactly one
     // frame. Filtering applies the same way.
     uintptr_t ip; int64_t parent_pid, parent_gen;
     if (_tin_fiber_spawn_info(0, 0, &ip, &parent_pid, &parent_gen)) {
+        int walked = 0;
         while (ip != 0 && n < cap && walked < TIN_ST_WALK_LIMIT) {
             walked++;
             int32_t code;
             if (flags != 0) {
-                code = resolve_frame(ip - 1, /*spawn_of=*/1, flags, NULL);
+                code = resolve_frame(ip - 1, /*spawn_of=*/1, flags);
                 if (code != 0) out[n++] = code;
             } else {
-                out[n++] = resolve_and_intern_cached(ip - 1, /*spawn_of=*/1, NULL);
+                out[n++] = resolve_and_intern_cached(ip - 1, /*spawn_of=*/1);
             }
 
             if (parent_pid == 0) break;
@@ -489,6 +609,7 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     }
 
     return n;
+#endif
 }
 
 #else  // TIN_STACKTRACE

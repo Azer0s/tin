@@ -1715,6 +1715,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 
 		cg.emitAtomTable()
+		cg.applyStacktracePostPass()
 
 		return cg.mod, nil
 	}
@@ -1722,6 +1723,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	if cg.replMode {
 		cg.emitAtomTable()
+		cg.applyStacktracePostPass()
 
 		return cg.mod, nil
 	}
@@ -1935,7 +1937,40 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
+	cg.applyStacktracePostPass()
+
 	return cg.mod, nil
+}
+
+// applyStacktracePostPass walks every emitted function and tags it with
+// `frame-pointer="all"` when the program references stacktrace(). Required
+// for the runtime's frame-pointer walker (runtime/stacktrace.c, fp_walk)
+// to step through every Tin frame: LLVM at -O2 otherwise elides %rbp
+// setup on leaf / short functions and the FP walk skips them.
+//
+// Must be the LAST step in Generate so it covers everything that
+// cg.mod.NewFunc has produced - user fns, atom helpers, ADT release/retain
+// helpers, coro splits, lambda thunks, test runners, REPL cells. The
+// helper is shared across the three Generate exit branches (test runner,
+// REPL, normal main) so none of them slip past the tagging.
+//
+// clang's `-fno-omit-frame-pointer` cmd-line flag does NOT propagate into
+// IR-compiled functions; it only sets the default for code clang
+// generates from C source. Function attributes embedded in the IR are
+// the only mechanism that survives the IR -> object pipeline.
+func (cg *CodeGen) applyStacktracePostPass() {
+	if !cg.stacktraceUsed {
+		return
+	}
+
+	for _, f := range cg.mod.Funcs {
+		if f.Blocks == nil {
+			continue // declarations don't carry codegen attributes
+		}
+
+		f.FuncAttrs = append(f.FuncAttrs,
+			ir.AttrPair{Key: "frame-pointer", Value: "all"})
+	}
 }
 
 // mainTakesStringArgs reports whether the user's explicit fn main has a first

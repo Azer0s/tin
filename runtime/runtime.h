@@ -188,10 +188,10 @@ int32_t     _tin_learn_atom(const char *str);
 const char *_tin_rt_atom_to_str(int32_t code);
 int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but frees str when done
 
-// -- Stacktrace capture (LLVM libunwind backed; see docs/plans/stacktrace-libunwind.md)
+// -- Stacktrace capture (frame-pointer walker; see docs/plans/stacktrace-libunwind.md)
 // Writes up to `cap` interned atom codes into `out` (must be cap*sizeof(int32_t)
 // bytes); returns the number actually written. Never panics; on total failure
-// (NULL out, cap < 1, or unwinder init failure) returns 0.
+// (NULL out, cap < 1, or unsupported arch) returns 0.
 //
 // `flags` is a bitfield of TIN_ST_HIDE_* constants (see below). Frames matching
 // any active filter are dropped before the cap is applied, so a filtered call

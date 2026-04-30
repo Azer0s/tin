@@ -1542,12 +1542,12 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			}
 		}
 
-		// libunwind needs frame info to walk Tin user code; emit unwind
-		// tables only when stacktrace() is reachable. clang's default on
-		// x86_64 Linux IS to emit `.eh_frame`, so the negative path needs
-		// to be explicit — otherwise default builds keep paying the
-		// 5-10% binary-size tax for unwind info nothing reads. (Phase 6,
-		// docs/plans/stacktrace-libunwind.md.)
+		// .eh_frame helps external tools (gdb, perf) walk Tin frames
+		// even though Tin's own stacktrace() now uses an FP walker
+		// (see runtime/stacktrace.c). Default builds keep paying the
+		// 5-10% binary-size tax for unwind info nothing reads on Linux
+		// x86_64, so emit the negative path explicitly when stacktrace
+		// isn't reachable. (Phase 6, docs/plans/stacktrace-libunwind.md.)
 		//
 		// When stacktrace is reachable we also emit `.debug_line` so the
 		// runtime can resolve IPs to file:line:col via libdwfl, matching
@@ -1583,19 +1583,30 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			}
 		}
 
-		// runtime/stacktrace.c gates its libunwind-using body on
+		// runtime/stacktrace.c gates its FP-walker + libdwfl body on
 		// TIN_STACKTRACE so programs that don't use stacktrace() don't
-		// incur the libunwind link dependency. The csrc cache key
-		// includes the canonical argv, so this define naturally produces
-		// two distinct cached .o entries (one with the stub, one with
-		// the real walk) instead of cross-contaminating a single cache slot.
+		// incur the libdw link dependency. The csrc cache key includes
+		// the canonical argv, so this define naturally produces two
+		// distinct cached .o entries (one with the stub, one with the
+		// real walk) instead of cross-contaminating a single cache slot.
 		// Mirror the unwind-table + line-info flags so libdwfl can map
 		// runtime fns (`_worker_thread`, `_tin_fiber_*`) to their
 		// fiber.c / arc.c source lines in captured traces. Without
 		// `-gline-tables-only` runtime helpers render as `sym+0x<off>`
 		// while user code shows `sym@file:line:col`, which is jarring.
 		if stacktraceLinkActive {
+			// -fno-omit-frame-pointer is REQUIRED for the FP walker:
+			// stacktrace.c reads rbp/x29 via inline asm and walks the
+			// saved-fp chain. Without this flag clang's Linux x86_64
+			// default omits the frame pointer setup, so rbp is
+			// whatever the caller's general-purpose state is (often 0
+			// from the kernel-cleared startup) and the walk dies on
+			// the first iteration. Tin user code already gets
+			// `frame-pointer="all"` via codegen.applyStacktracePostPass,
+			// but the runtime C is compiled separately and needs the
+			// equivalent here.
 			rtArgs = append(rtArgs, "-DTIN_STACKTRACE=1",
+				"-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer",
 				"-funwind-tables", "-fasynchronous-unwind-tables")
 			if !isDebug {
 				rtArgs = append(rtArgs, "-gline-tables-only")
@@ -1699,30 +1710,29 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
-	// Conditional libunwind / dynsym wiring (see Phase 6 in
+	// Conditional libdwfl / dynsym wiring (see Phase 6 in
 	// docs/plans/stacktrace-libunwind.md). Only programs that reference
 	// `stacktrace()` pay the binary-size cost of dynsym promotion and
-	// the libunwind dependency; default builds stay lean.
+	// the libdw dependency; default builds stay lean.
 	//
-	// Linux/FreeBSD: link `-lunwind` (LLVM libunwind) AND `-ldw`
-	// (elfutils libdwfl). The runtime uses libunwind to walk frames
-	// and libdwfl to map IPs to "file:line:col", matching the atom
-	// format the compile-time `sourcepos()` builtin emits. `-rdynamic`
-	// promotes Tin user fns to the dynsym so dladdr can resolve them.
+	// Linux/FreeBSD: link `-ldw` (elfutils libdwfl). The runtime walks
+	// frames itself via the saved frame-pointer chain (codegen emits
+	// `frame-pointer="all"` on every IR fn when stacktrace is in use)
+	// and uses libdwfl to map IPs to "file:line:col", matching the
+	// atom format the compile-time `sourcepos()` builtin emits.
+	// `-rdynamic` promotes Tin user fns to the dynsym so dladdr can
+	// resolve them.
 	//
-	// macOS: libunwind is bundled into libSystem and is auto-linked by
-	// every clang invocation — passing an explicit `-lunwind` makes
-	// ld64 fail with "library not found." elfutils has no Mach-O
-	// equivalent, so `-ldw` is omitted and stacktrace.c's
-	// TIN_ST_HAVE_LIBDW gate falls back to dladdr-only resolution
-	// ("symbol+0x<off>", no source coords). dyld already keeps local
-	// symbols visible to dladdr until `strip` removes them, so
-	// `-rdynamic` is also unnecessary.
+	// macOS: elfutils has no Mach-O equivalent, so `-ldw` is omitted
+	// and stacktrace.c's TIN_ST_HAVE_LIBDW gate falls back to
+	// dladdr-only resolution ("symbol+0x<off>", no source coords).
+	// dyld already keeps local symbols visible to dladdr until `strip`
+	// removes them, so `-rdynamic` is also unnecessary.
 	// Use TARGET OS, not host OS — when cross-compiling Linux -> Darwin
-	// the produced binary should NOT carry -lunwind/-ldw/-rdynamic
+	// the produced binary should NOT carry -ldw/-rdynamic
 	// (those would either fail the link or fail at load time on Mach-O).
 	if stacktraceLinkActive && targetGOOS != "darwin" {
-		args = append(args, "-lunwind", "-ldw", "-rdynamic")
+		args = append(args, "-ldw", "-rdynamic")
 	}
 
 	args = append(args, "-o", outBin)
