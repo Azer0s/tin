@@ -8,12 +8,8 @@
 // instead of importing every module individually. Nested aggregator
 // modules (`std::encoding`, `std::net`) re-export their own children,
 // so `std::encoding::json`, `std::net::tcp`, etc. work transitively.
-//
-// Macros (e.g. `log::info!`, `loop`) cannot currently be resolved
-// through a package re-export: the macro registry keys on the bare
-// name (`info!`), not the qualified path (`std::log::info!`). Use the
-// underlying `info_at(sourcepos(), msg)` call directly when going
-// through `std`, or `use log` directly to get the macro.
+// Macros are exported the same way: `std::log::info!(l, "msg")`
+// resolves to log's `info!` macro and retags to the macro call site.
 
 use assert
 use collections

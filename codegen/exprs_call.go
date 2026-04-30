@@ -864,16 +864,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// without the trailing `!` for the no-excl form). cg.macros is
 		// populated by packages.go's pass-5 with these exact keys when a
 		// package exports the macro.
+		//
+		// For 3+ segment paths the first segment may be a re-export
+		// alias (e.g. `std::log::info!` where `std.tin` re-exports
+		// `log`). Try the full path first, then progressively drop the
+		// leading segment - mirrors the same fallback in genScopeAccess
+		// for non-macro identifier lookups.
 		if len(fn.Path) >= 2 {
-			fullKey := strings.Join(fn.Path, "::")
-			altKey := strings.Join(fn.Path, ".")
-			for _, key := range []string{fullKey, altKey} {
-				if macro, ok := cg.macros[key]; ok {
-					return cg.expandMacro(block, macro, e.Args, fn.Pos())
-				}
-				if strings.HasSuffix(key, "!") {
-					if macro, ok := cg.macros[key[:len(key)-1]]; ok {
+			tries := [][]string{fn.Path}
+			if len(fn.Path) >= 3 {
+				tries = append(tries, fn.Path[1:])
+			}
+
+			for _, path := range tries {
+				fullKey := strings.Join(path, "::")
+				altKey := strings.Join(path, ".")
+				for _, key := range []string{fullKey, altKey} {
+					if macro, ok := cg.macros[key]; ok {
 						return cg.expandMacro(block, macro, e.Args, fn.Pos())
+					}
+					if strings.HasSuffix(key, "!") {
+						if macro, ok := cg.macros[key[:len(key)-1]]; ok {
+							return cg.expandMacro(block, macro, e.Args, fn.Pos())
+						}
 					}
 				}
 			}
