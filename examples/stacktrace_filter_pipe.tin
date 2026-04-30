@@ -1,0 +1,61 @@
+// stacktrace_filter_pipe.tin - filter a stacktrace through the pipe
+// operator using source::parse_sourcepos to keep only user-code frames.
+//
+// Demonstrates the recipe documented in docs/stdlib/source.md:
+//   1. capture frames (`stacktrace()`),
+//   2. parse each via `source::parse_sourcepos`,
+//   3. filter out shared-lib frames (libc, libsystem, etc.) and any
+//      frame the runtime couldn't resolve at all,
+//   4. print what survives.
+//
+// Compare the two prints below: the unfiltered walk includes the libc
+// startup tail (__libc_start_main, _start) that nothing user-facing
+// cares about; the filtered walk keeps only frames that resolved to a
+// real source file outside any shared library.
+use source
+use io
+
+fn filter[t](pred fn(i t) bool) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let out [t] = []
+    for let x t in xs:
+      if pred(x):
+        out ++= x
+    return out
+
+fn{#no_inline} probe() [atom] = return stacktrace()
+
+fn in_user_code(f atom) bool =
+  let p = source::parse_sourcepos(f)
+  if source::is_unknown(p): return false
+  if source::is_in_lib(p):  return false
+  return p.file != ""
+
+fn print_frames(label string, fs [atom]) =
+  let _ = io::printf("=== %s (%lld frames) ===\n", label, len(fs))
+  for let f atom in fs:
+    let _ = io::printf("  %s\n", f as string)
+
+fn main() i64 =
+  let raw = probe()
+  print_frames("unfiltered", raw)
+
+  raw
+    |> filter(in_user_code)
+    |> fn(fs [atom]) =
+         print_frames("filtered (in_user_code)", fs)
+
+  return 0
+
+use assert
+
+test "pipe + in_user_code drops a strict subset of the trace" =
+  // A normal main-driven binary always has a libc startup tail
+  // (__libc_start_main, _start, ...) that in_user_code rejects, so
+  // the filtered slice must be strictly shorter than the raw walk.
+  // Asserting strict-subset (rather than an exact count) keeps this
+  // robust across glibc / Mach-O / kernel-level frame variations.
+  let raw = probe()
+  let kept = raw |> filter(in_user_code)
+  assert::ok(len(kept) >= 1)
+  assert::ok(len(kept) < len(raw))
