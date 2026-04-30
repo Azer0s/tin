@@ -100,9 +100,16 @@ and macOS libsystem; older glibc needs `-lpthread` explicit).
 
 | Builtin | Adds |
 |---|---|
-| `stacktrace()` | `-lunwind` everywhere; `-ldw` (elfutils) on Linux/FreeBSD for `file:line:col` resolution |
+| `stacktrace()` | `-ldw` (elfutils) on Linux/FreeBSD for `file:line:col` resolution; nothing extra on macOS |
 
-elfutils (`libdw`) is Linux/FreeBSD only — macOS has no equivalent
+`stacktrace()` walks the saved frame-pointer chain (rbp on x86_64,
+x29 on aarch64), so any C code that should appear in a Tin trace
+must be built with `-fno-omit-frame-pointer` - the runtime adds it
+to its own translation units, and Tin's codegen tags every IR
+function with `frame-pointer="all"`, but third-party `#interop`
+callers compiled with the usual `-O2` will be invisible to the walk.
+
+elfutils (`libdw`) is Linux/FreeBSD only - macOS has no equivalent
 shipped. On Darwin the runtime falls back to dladdr-only resolution
 (`<symbol>+0x<offset>` per frame, no source coords). Pipe through
 `atos` or `llvm-symbolizer` post-hoc when you need source positions.
@@ -111,14 +118,13 @@ shipped. On Darwin the runtime falls back to dladdr-only resolution
 
 ```sh
 # Debian / Ubuntu
-sudo apt install clang llvm libffi-dev libpcre2-dev libssl-dev libunwind-dev libdw-dev
+sudo apt install clang llvm libffi-dev libpcre2-dev libssl-dev libdw-dev
 
 # Arch
-sudo pacman -S clang llvm libffi pcre2 openssl libunwind elfutils
+sudo pacman -S clang llvm libffi pcre2 openssl elfutils
 
 # macOS (Homebrew)
 brew install llvm libffi pcre2 openssl@3
-# libunwind ships with the Xcode toolchain (LLVM's libunwind, not GNU's).
 # elfutils is not packaged on macOS; stacktrace falls back to symbol+offset.
 ```
 

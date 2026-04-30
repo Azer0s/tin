@@ -400,8 +400,9 @@ local rebinds the name `sourcepos` (default-off).
 ### stacktrace
 
 `stacktrace(cap?, opts?)` returns `[atom]` - the live call chain at
-the point of call, walked with libunwind and resolved with libdwfl
-(Linux/FreeBSD) or dladdr (macOS, runtime helper symbols only):
+the point of call, walked via the saved frame-pointer chain (rbp on
+x86_64, x29 on aarch64) and resolved with libdwfl (Linux/FreeBSD) or
+dladdr (macOS, runtime helper symbols only):
 
 ```rust
 fn{#no_inline} probe() [atom] = return stacktrace()
@@ -453,15 +454,22 @@ Atom format degrades gracefully when debug info is unavailable:
 | neither                        | `'"??+0x<addr>"`                                 |
 
 Reachability gating: the compiler scans the AST for `stacktrace()` and
-only links libunwind/libdw and emits unwind tables (`-funwind-tables`,
-`-gline-tables-only`, `-rdynamic`) when at least one call is reachable.
-Programs that never reference `stacktrace()` pay zero binary-size or
-link-time cost.
+only links libdw and emits unwind tables (`-funwind-tables`,
+`-gline-tables-only`, `-rdynamic`, `-fno-omit-frame-pointer`) when at
+least one call is reachable. Programs that never reference
+`stacktrace()` pay zero binary-size or link-time cost.
 
-> **Linker requirement:** `-lunwind` (LLVM libunwind) on every Linux
-> binary that uses `stacktrace()`; `-ldw` (elfutils) for the
-> file:line:col upgrade. macOS auto-links libunwind via libSystem and
-> has no elfutils, so frames degrade to `sym+0x<offset>` form.
+> **Linker requirement:** `-ldw` (elfutils libdwfl) on every Linux
+> binary that uses `stacktrace()` for the file:line:col upgrade.
+> macOS has no elfutils, so frames degrade to `sym+0x<offset>` form.
+
+> **Frame-pointer requirement:** the walker follows the saved-fp
+> chain, so any C compilation unit reachable from a Tin trace must be
+> built with `-fno-omit-frame-pointer`. Tin codegen tags every IR
+> function with `frame-pointer="all"` and the runtime sets the C flag
+> on its own translation units; only third-party C reached via
+> `#interop` callbacks is at risk. A frame whose caller omitted fp
+> truncates the trace at that point.
 
 ---
 

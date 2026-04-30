@@ -155,29 +155,25 @@ func (s *session) buildRuntime(outSo string) error {
 
 	// REPL builds the runtime with stacktrace support unconditionally so
 	// any cell can call `stacktrace()` without rebuilding the shared
-	// library. The build-time cost is a single libunwind (+libdw on
-	// Linux) link step; programs compiled outside the REPL still pay
-	// the conditional cost via cg.StacktraceUsed (Phase 6 of
-	// docs/plans/stacktrace-libunwind.md). -funwind-tables and
+	// library. The runtime walks frames via the saved-fp chain (see
+	// runtime/stacktrace.c) so -fno-omit-frame-pointer is mandatory:
+	// without it the runtime's own functions skip the rbp setup and
+	// the FP walker bails on its first iteration. -funwind-tables /
 	// -gline-tables-only round it out so libdwfl can resolve runtime
-	// frames to file:line:col when they appear in a trace. macOS lacks
-	// elfutils so the libdwfl path is Linux/FreeBSD only; on Darwin we
-	// build with libunwind alone and stacktrace falls back to
-	// dladdr-only "symbol+0x<off>" resolution.
+	// frames to "file:line:col" when they appear in a trace. macOS
+	// lacks elfutils so libdw is Linux/FreeBSD only; on Darwin
+	// stacktrace falls back to dladdr-only "symbol+0x<off>".
 	args := []string{
 		"-shared", "-fPIC", "-O1", "-pthread",
 		"-DTIN_STACKTRACE=1",
+		"-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer",
 		"-funwind-tables", "-fasynchronous-unwind-tables",
 		"-gline-tables-only",
 		"-I" + s.runtimeDir,
 		rtC,
 	}
-	// Linux/FreeBSD: explicit `-lunwind` (LLVM libunwind) and `-ldw`
-	// (elfutils libdwfl). macOS auto-links libunwind via libSystem and
-	// has no elfutils, so both flags are dropped — passing -lunwind
-	// explicitly makes ld64 fail with "library not found".
 	if runtime.GOOS != "darwin" {
-		args = append(args, "-lunwind", "-ldw")
+		args = append(args, "-ldw")
 	}
 
 	args = append(args, "-o", outSo)

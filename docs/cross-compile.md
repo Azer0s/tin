@@ -36,9 +36,8 @@ on Linux, or directly on macOS / Linux.
 ## Targeting Darwin (any host)
 
 Cross-compiling to Darwin needs the **macOS SDK** so clang can find
-Darwin headers (`malloc/malloc.h`, `libunwind.h`, system frameworks)
-and the `lld` Mach-O linker. The compiler resolves the SDK in this
-order:
+Darwin headers (`malloc/malloc.h`, system frameworks) and the `lld`
+Mach-O linker. The compiler resolves the SDK in this order:
 
 1. `--macos-sdk PATH` flag
 2. `$TIN_MACOS_SDK` environment variable
@@ -65,7 +64,7 @@ On macOS hosts the SDK is auto-detected via `xcrun` - no flag needed.
 
 Cross-compiling to Linux from macOS needs a **Linux sysroot** with
 glibc/musl headers, `ld-linux*`, and the libraries Tin links against
-(libunwind, libdw, libpcre2, etc.). Resolution order:
+(libdw, libpcre2, etc.). Resolution order:
 
 1. `--linux-sysroot PATH` flag
 2. `$TIN_LINUX_SYSROOT` environment variable
