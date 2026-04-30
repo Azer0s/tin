@@ -1,0 +1,31 @@
+// stacktrace_fiber_grandparent.tin - 3-deep spawn chain.
+//
+// Verifies _tin_fiber_spawn_info's pid+generation walk traverses
+// multiple parents instead of stopping at the first one. fiber A is
+// spawned from main, A spawns B, B captures the trace. B's chain must
+// include both A's spawn site AND main's spawn site, in that order
+// (child -> parent -> grandparent).
+//
+// Termination: if the walk loop incorrectly cleared parent_pid after
+// the first hop (e.g. recorded the wrong field at spawn time) the
+// trace would only have one <spawn-of>: entry. Two spawn-ofs is the
+// minimum proof that grandparent traversal works.
+use assert
+use strings
+
+fn{#async} grandchild() [atom] = return stacktrace()
+
+fn{#async} child() [atom] = return await spawn grandchild()
+
+test "stacktrace from a 3-deep fiber chain reports both ancestors" =
+  let frames [atom] = await spawn child()
+
+  // Count <spawn-of>: entries. Should be at least 2: one for the spawn
+  // site in child(), one for the spawn site in the test body.
+  let spawn_of_count i64 = 0
+  for let f atom in frames:
+    let s string = f as string
+    if strings::contains(s, "<spawn-of>:"):
+      spawn_of_count = spawn_of_count + 1
+
+  assert::ok(spawn_of_count >= 2)

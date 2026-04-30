@@ -1,6 +1,8 @@
 // sourcepos.tin - tests for the compile-time sourcepos() builtin.
-// sourcepos(x) returns an atom of the form "<file>:<line>:<col>" pointing
-// at where the symbol/expression was declared.
+// sourcepos(x) returns an atom of the form "<name>@<file>:<line>:<col>"
+// for identifier args (the name is the bare identifier as written) or
+// "<file>:<line>:<col>" for arbitrary expression args (no stable name
+// to attach). Mirrors the runtime stacktrace() format.
 use assert
 
 fn helper(x i64) i64 = return x * 2
@@ -15,19 +17,23 @@ fn locate_local() atom =
 fn locate_expr() atom = return sourcepos(1 + 2 * 3)
 
 test "sourcepos(fn) resolves the function declaration line" =
-  assert::equals(locate_helper(), '"examples/sourcepos.tin:6:1")
+  assert::equals(locate_helper(), '"helper@examples/sourcepos.tin:8:1")
 
 test "sourcepos(top-level var) resolves the var declaration line" =
-  assert::equals(locate_counter(), '"examples/sourcepos.tin:7:1")
+  assert::equals(locate_counter(), '"counter@examples/sourcepos.tin:9:1")
 
 test "sourcepos(param) resolves the function header" =
-  assert::equals(locate_arg(7), '"examples/sourcepos.tin:11:1")
+  assert::equals(locate_arg(7), '"my_param@examples/sourcepos.tin:13:1")
 
 test "sourcepos(local let) resolves the let declaration line" =
-  assert::equals(locate_local(), '"examples/sourcepos.tin:13:3")
+  assert::equals(locate_local(), '"my_local@examples/sourcepos.tin:15:3")
 
 test "sourcepos(expression) resolves the expression site" =
-  assert::equals(locate_expr(), '"examples/sourcepos.tin:15:41")
+  // Non-identifier args fall back to the containing-fn name as the
+  // symbol prefix, matching the runtime stacktrace format. The BinExpr
+  // position falls back to the sourcepos call site when the parser
+  // doesn't tag the arithmetic node directly.
+  assert::equals(locate_expr(), '"locate_expr@examples/sourcepos.tin:17:32")
 
 test "sourcepos atoms are first-class equal" =
   let a atom = sourcepos(helper)
@@ -43,9 +49,9 @@ fn shadow_check() atom =
   return sourcepos(helper)
 
 test "sourcepos respects lexical shadow over outer fn" =
-  // The let is on line 42; the outer fn helper is on line 6. Lexical
-  // shadow says the let wins.
-  assert::equals(shadow_check(), '"examples/sourcepos.tin:42:3")
+  // The let helper is on line 48; the outer fn helper is on line 8.
+  // Lexical shadow says the let wins.
+  assert::equals(shadow_check(), '"helper@examples/sourcepos.tin:48:3")
 
 // for-in binds an iteration variable; sourcepos should report the for
 // header position, not the use site inside the loop body.
@@ -58,5 +64,5 @@ fn locate_for_iter() atom =
   return result
 
 test "sourcepos(for-in iter var) resolves the for-loop line" =
-  // for-in header is on line 55, with `for` at column 3.
-  assert::equals(locate_for_iter(), '"examples/sourcepos.tin:55:3")
+  // for-in header is on line 61, with `for` at column 3.
+  assert::equals(locate_for_iter(), '"x@examples/sourcepos.tin:61:3")

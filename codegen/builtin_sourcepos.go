@@ -46,7 +46,40 @@ import (
 // literals fail on paths containing those chars, e.g. on Windows).
 func (cg *CodeGen) genBuiltinSourcepos(_ *ir.Block, arg ast.Node, callPos ast.Pos) (value.Value, error) {
 	pos := cg.resolveSourcePos(arg, callPos)
-	name := `"` + fmt.Sprintf("%s:%d:%d", cg.filenameForDiag(), pos.Line, pos.Col) + `"`
+	posStr := fmt.Sprintf("%s:%d:%d", cg.filenameForDiag(), pos.Line, pos.Col)
+
+	// Prefix with a symbol so the atom mirrors the runtime stacktrace
+	// "<symbol>@<file>:<line>:<col>" shape. Three cases:
+	//   sourcepos(my_fn)  -> "my_fn@..."     (identifier as written)
+	//   sourcepos(<expr>) -> "<containing_fn>@..."  (no name to attach)
+	//   sourcepos()       -> "<containing_fn>@..."  (typical no-arg form,
+	//                                                 useful inside macros
+	//                                                 after retagMacroBody)
+	// For module-level expressions where cg.curFn is nil, drop the prefix.
+	//
+	// IR-name vs user-name policy: the containing-fn arm uses
+	// cg.curFn.Name() which is the IR-mangled symbol (e.g.
+	// `_tin_user_main`, `pkg__fn`, `name__sig` for overloads). This is
+	// INTENTIONAL — runtime stacktrace() also reports IR-mangled names
+	// (because dladdr/libunwind look them up by ELF symbol), so a
+	// `sourcepos(...)` atom captured at compile time string-matches
+	// the runtime trace's frame for the same call site. Demangling
+	// would break that join. The identifier-arg arm keeps the
+	// user-source name because the user wrote it directly; readers
+	// expect to see what they typed.
+	sym := ""
+	if id, ok := arg.(*ast.Identifier); ok {
+		sym = id.Name
+	} else if cg.curFn != nil {
+		sym = cg.curFn.Name()
+	}
+
+	var name string
+	if sym != "" {
+		name = `"` + sym + "@" + posStr + `"`
+	} else {
+		name = `"` + posStr + `"`
+	}
 
 	return cg.atomConstant(cg.registerAtom(name)), nil
 }

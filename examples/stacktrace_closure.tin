@@ -1,0 +1,30 @@
+// stacktrace_closure.tin - stacktrace inside a closure invoked by a
+// higher-order helper.
+//
+// Closures compile to a synthetic body fn plus an env fat-pointer.
+// libdwfl resolves both the closure body and `apply` to file:line:col
+// using the .debug_line tables, so every Tin frame in the trace should
+// share the same source path (this file). What we assert is therefore
+// the weaker invariant: at least two distinct frames in this file
+// appear in the trace — proof that libunwind walked through the
+// closure into apply.
+use assert
+use strings
+
+fn{#no_inline} apply(f fn() [atom]) [atom] = return f()
+
+test "stacktrace inside a closure surfaces frames in this file" =
+  let frames [atom] = apply(fn() [atom] = return stacktrace())
+  assert::ok(len(frames) >= 2)
+
+  // libdwfl resolves apply (and the closure body, when its line table
+  // entry survives lowering) to file:line:col. Closure-body symbol
+  // resolution is best-effort because the codegen names them
+  // `lambda.<id>`; what we actually rely on is that *something* in the
+  // trace points back to this source file.
+  let in_file_count i64 = 0
+  for let f atom in frames:
+    let s string = f as string
+    if strings::contains(s, "stacktrace_closure.tin:"):
+      in_file_count = in_file_count + 1
+  assert::ok(in_file_count >= 1)

@@ -1,10 +1,10 @@
 package codegen
 
 // builtins.go - the single source of truth for which names the compiler
-// recognises as compile-time / runtime builtins, plus the helper that
+// recognizes as compile-time / runtime builtins, plus the helper that
 // raises DiagBuiltinShadow when a local binding masks one.
 //
-// Any new builtin recognised in genCallExpr (or anywhere else) MUST be
+// Any new builtin recognized in genCallExpr (or anywhere else) MUST be
 // added to compileTimeBuiltins so the shadow-warning pass and any future
 // "list available builtins" tooling see it. Forgetting to add a name
 // here doesn't break correctness — the warning is opt-in — but it does
@@ -30,7 +30,7 @@ var compileTimeBuiltins = map[string]bool{
 }
 
 // IsCompileTimeBuiltin reports whether name is one of the compiler's
-// recognised builtins. Used by the shadow-warning hook and any future
+// recognized builtins. Used by the shadow-warning hook and any future
 // reflection/diagnostic tooling that needs to enumerate builtins.
 func IsCompileTimeBuiltin(name string) bool {
 	return compileTimeBuiltins[name]

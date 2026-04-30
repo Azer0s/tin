@@ -280,9 +280,16 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// optimized body all the way through to the linker's section GC. The
 	// only escape hatches are #interop wrappers (which keep the bare name
 	// externally callable - emitted separately by emitInteropWrapperFor)
-	// and CTFE per-fn .so artefacts, which mark exports back to default
+	// and CTFE per-fn .so artifacts, which mark exports back to default
 	// visibility on a per-symbol basis.
-	if !hasTag(n.Tags, "interop") {
+	//
+	// stacktrace() is the third escape hatch: when reachable in the program
+	// (cg.stacktraceUsed, set by detectStacktraceUsage before any fn is
+	// emitted), Tin user fns must keep external linkage so `-rdynamic`
+	// can export them to the dynamic symbol table for dladdr to resolve.
+	// STB_LOCAL symbols never reach the dynsym regardless of -rdynamic,
+	// so without this gate every Tin frame would render as `??+0xADDR`.
+	if !hasTag(n.Tags, "interop") && !cg.stacktraceUsed {
 		f.Linkage = enum.LinkageInternal
 	}
 
@@ -291,6 +298,28 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// body has no {#allow_sideffect} escape hatch, letting LLVM hoist /
 	// CSE / dead-store-eliminate around the call.
 	cg.applyPureFuncAttrs(f, n)
+
+	// #no_inline forces the LLVM `noinline` attribute. The inliner
+	// otherwise treats one-shot internal-linkage callees as free to
+	// merge into their caller (and tail-position calls as free to
+	// share the caller's stack frame), which makes them invisible to
+	// libunwind. Mostly useful as a stacktrace-test stability knob:
+	// without this, asserting on a fn's name in a captured trace is
+	// a wager against the optimizer.
+	if hasTag(n.Tags, "no_inline") {
+		f.FuncAttrs = append(f.FuncAttrs,
+			enum.FuncAttrNoInline,
+			// disable-tail-calls keeps the frame on the stack rather
+			// than letting LLVM convert `return f()` into a `jmp` that
+			// erases this fn from the unwind chain. Must be a keyed
+			// AttrPair, NOT AttrString — AttrString would emit the
+			// whole `disable-tail-calls="true"` as one quoted string
+			// attribute name, which LLVM stores as an unrecognized
+			// attribute and silently ignores. AttrPair produces the
+			// canonical `"disable-tail-calls"="true"` shape.
+			ir.AttrPair{Key: "disable-tail-calls", Value: "true"},
+		)
+	}
 
 	if n.RetType != nil && isUnsignedTinType(n.RetType) {
 		cg.funcReturnUnsigned[irName] = true

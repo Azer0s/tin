@@ -1,0 +1,53 @@
+// stacktrace_format.tin - verify the stacktrace atom format matches
+// sourcepos() output for user-fn frames.
+//
+// Both builtins emit "<symbol>@<file>:<line>:<col>" atoms (or the bare
+// "<file>:<line>:<col>" form for sourcepos on non-identifier args).
+// runtime/stacktrace.c gets the symbol from libunwind/dladdr and the
+// file:line:col from libdwfl's .debug_line tables; sourcepos has both
+// at compile time. A frame captured at a known source line should
+// match the corresponding sourcepos atom.
+//
+// Frames in auto-generated runtime helpers (the test wrapper, main(),
+// libc internals) lack matching debug info in some build modes and
+// fall back to "<symbol>+0x<offset>" — those aren't asserted here.
+use assert
+use strings
+
+fn{#no_inline} probe() [atom] = return stacktrace()
+
+test "user-fn frame resolves to symbol@file:line:col matching sourcepos format" =
+  let frames [atom] = probe()
+
+  // The first frame is `probe` itself. Its atom must contain the
+  // symbol-prefix and source-file basename. Without libdwfl + line
+  // tables this would render as "probe+0x1f" and the @-prefix check
+  // would fail.
+  let top string = frames[0] as string
+  assert::ok(strings::contains(top, "probe@"))
+  assert::ok(strings::contains(top, "stacktrace_format.tin:"))
+
+test "stacktrace and sourcepos atoms share the symbol@file:line:col shape" =
+  // sourcepos(probe) resolves at compile time to the fn's decl site,
+  // emitting "probe@<file>:<line>:<col>". Stacktrace's resolution is
+  // runtime via libdwfl; a successful walk produces the same shape.
+  let pos atom = sourcepos(probe)
+  let frames [atom] = probe()
+  let pos_str string = pos as string
+  let live_str string = frames[0] as string
+  assert::ok(strings::contains(pos_str, "probe@"))
+  assert::ok(strings::contains(live_str, "probe@"))
+
+test "stacktrace(cap, opts) accepts a literal opts array" =
+  // hide_libc + hide_main strips the libc/start tail, leaving just
+  // user/runtime frames. We don't care about the precise count; only
+  // that the call returns *something* and parses cleanly. Asserting
+  // on len is the cheapest regression sentinel for codegen breakage.
+  let frames [atom] = stacktrace(8, ['hide_libc, 'hide_main])
+  assert::ok(len(frames) >= 1)
+
+test "hide_unknown drops ??+0x frames" =
+  let frames [atom] = stacktrace(64, ['hide_unknown])
+  for let f atom in frames:
+    let s string = f as string
+    assert::ok(!strings::contains(s, "??+0x"))

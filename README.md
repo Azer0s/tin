@@ -96,17 +96,30 @@ and macOS libsystem; older glibc needs `-lpthread` explicit).
 | `tls`            | `-lssl -lcrypto` (OpenSSL >= 3) |
 | `simd`           | `-msse4.2` on x86_64, NEON on aarch64 |
 
+**Builtins - only if used:**
+
+| Builtin | Adds |
+|---|---|
+| `stacktrace()` | `-lunwind` everywhere; `-ldw` (elfutils) on Linux/FreeBSD for `file:line:col` resolution |
+
+elfutils (`libdw`) is Linux/FreeBSD only — macOS has no equivalent
+shipped. On Darwin the runtime falls back to dladdr-only resolution
+(`<symbol>+0x<offset>` per frame, no source coords). Pipe through
+`atos` or `llvm-symbolizer` post-hoc when you need source positions.
+
 ### Distro install hints
 
 ```sh
 # Debian / Ubuntu
-sudo apt install clang llvm libffi-dev libpcre2-dev libssl-dev
+sudo apt install clang llvm libffi-dev libpcre2-dev libssl-dev libunwind-dev libdw-dev
 
 # Arch
-sudo pacman -S clang llvm libffi pcre2 openssl
+sudo pacman -S clang llvm libffi pcre2 openssl libunwind elfutils
 
 # macOS (Homebrew)
 brew install llvm libffi pcre2 openssl@3
+# libunwind ships with the Xcode toolchain (LLVM's libunwind, not GNU's).
+# elfutils is not packaged on macOS; stacktrace falls back to symbol+offset.
 ```
 
 ## License

@@ -153,12 +153,33 @@ func (s *session) buildRuntime(outSo string) error {
 	rtC := filepath.Join(s.runtimeDir, "runtime.c")
 	s.compiledCSrcPaths[rtC] = true
 
+	// REPL builds the runtime with stacktrace support unconditionally so
+	// any cell can call `stacktrace()` without rebuilding the shared
+	// library. The build-time cost is a single libunwind (+libdw on
+	// Linux) link step; programs compiled outside the REPL still pay
+	// the conditional cost via cg.StacktraceUsed (Phase 6 of
+	// docs/plans/stacktrace-libunwind.md). -funwind-tables and
+	// -gline-tables-only round it out so libdwfl can resolve runtime
+	// frames to file:line:col when they appear in a trace. macOS lacks
+	// elfutils so the libdwfl path is Linux/FreeBSD only; on Darwin we
+	// build with libunwind alone and stacktrace falls back to
+	// dladdr-only "symbol+0x<off>" resolution.
 	args := []string{
 		"-shared", "-fPIC", "-O1", "-pthread",
+		"-DTIN_STACKTRACE=1",
+		"-funwind-tables", "-fasynchronous-unwind-tables",
+		"-gline-tables-only",
 		"-I" + s.runtimeDir,
 		rtC,
-		"-o", outSo,
 	}
+	// Linux/FreeBSD: explicit `-lunwind` (LLVM libunwind) and `-ldw`
+	// (elfutils libdwfl). macOS auto-links libunwind via libSystem and
+	// has no elfutils, so both flags are dropped — passing -lunwind
+	// explicitly makes ld64 fail with "library not found".
+	if runtime.GOOS != "darwin" {
+		args = append(args, "-lunwind", "-ldw")
+	}
+	args = append(args, "-o", outSo)
 
 	cmd := exec.Command("clang", args...)
 
@@ -338,9 +359,12 @@ func (s *session) evalCell(source string) error {
 	irText := fixCoroAttrs(mod.String())
 	irText = fixLinkOnceOdr(irText)
 
-	// Compile the IR to a shared library.
+	// Compile the IR to a shared library. When the cell's codegen
+	// recognized a `stacktrace()` builtin, route through the variant
+	// that emits unwind tables and line info so libdwfl can resolve
+	// the cell's frames at runtime.
 	cellSo := filepath.Join(s.workDir, fmt.Sprintf("cell%d.so", s.cellCount))
-	if err := s.compileToSo(irText, cellSo); err != nil {
+	if err := s.compileToSo(irText, cellSo, cg.StacktraceUsed()); err != nil {
 		return err
 	}
 
@@ -440,7 +464,7 @@ func (s *session) addDecl(key, src string) {
 }
 
 // compileToSo compiles LLVM IR to a shared library via clang.
-func (s *session) compileToSo(irText, outSo string) error {
+func (s *session) compileToSo(irText, outSo string, stacktraceUsed bool) error {
 	llFile := filepath.Join(s.workDir, fmt.Sprintf("cell%d.ll", s.cellCount))
 	if err := os.WriteFile(llFile, []byte(irText), 0600); err != nil {
 		return err
@@ -457,6 +481,22 @@ func (s *session) compileToSo(irText, outSo string) error {
 	// O1 is the minimum level that runs the coroutine-split pass; it also avoids
 	// the LLVM 22 O2 DCE bug that eliminated coro frames before the split.
 	soArgs := []string{"-shared", "-fPIC", "-O1", llFile}
+	if stacktraceUsed {
+		// Match the conditional flags compileIR uses for stacktrace-using
+		// programs: unwind tables so libunwind can walk the cell's frames,
+		// line tables so libdwfl can map IPs to file:line:col, and
+		// (Linux only) `--export-dynamic` so the cell's symbols join the
+		// dynsym for dladdr fallback. macOS ld64 doesn't accept
+		// --export-dynamic; cell .so symbols already reach dyld's
+		// resolver via RTLD_GLOBAL on Darwin.
+		soArgs = append(soArgs,
+			"-funwind-tables", "-fasynchronous-unwind-tables",
+			"-gline-tables-only",
+		)
+		if runtime.GOOS != "darwin" {
+			soArgs = append(soArgs, "-Wl,--export-dynamic")
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		soArgs = append(soArgs, s.runtimeLib.path)
 		for _, lib := range s.darwinLinkLibs {

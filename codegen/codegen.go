@@ -345,6 +345,14 @@ type CodeGen struct {
 	// optimized vs unoptimized binaries during compiler debugging.
 	pureFoldDisabled bool
 
+	// stacktraceUsed is set when codegen recognizes a `stacktrace()`
+	// builtin call. main.go branches on the post-Generate value to decide
+	// whether to emit unwind tables, link libunwind, and pass `-rdynamic`
+	// (see docs/plans/stacktrace-libunwind.md "Conditional unwind-table
+	// emission"). When false the program pays zero binary-size or runtime
+	// cost for stacktrace-related machinery.
+	stacktraceUsed bool
+
 	// pureFoldBudget caps the total node-evaluation work spent on a
 	// single top-level #pure call (sum across all loops, recursion, and
 	// nested call expansions). When the budget is exhausted the
@@ -558,8 +566,11 @@ type CodeGen struct {
 	coroDestroyFn *ir.Func // llvm.coro.destroy - used by coroutine chaining
 
 	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
-	fiberSpawnFn         *ir.Func
-	fiberSpawnJoinableFn *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
+	fiberSpawnFn              *ir.Func
+	fiberSpawnJoinableFn      *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
+	fiberSpawnChainFn         *ir.Func // _tin_fiber_spawn_chain: stacktrace-aware (Phase 4)
+	fiberSpawnJoinableChainFn *ir.Func // _tin_fiber_spawn_joinable_chain: prejoined+stacktrace
+	llvmReturnAddressFn       *ir.Func // llvm.returnaddress intrinsic for spawn-site IP capture
 	// spawnFireForget: when true, activeSpawnFn() returns fiberSpawnFn (prejoined=0).
 	// Set only for statement-level SpawnExprs whose result is explicitly discarded.
 	// All other spawns use fiberSpawnJoinableFn (prejoined=1) by default so that
@@ -895,6 +906,14 @@ func (cg *CodeGen) SetPureFoldBudget(n int) {
 	cg.pureFoldBudget = n
 }
 
+// StacktraceUsed reports whether any reachable call site referenced the
+// `stacktrace()` builtin. main.go consults this after Generate() returns
+// to decide whether to link libunwind, emit unwind tables, and pass
+// `-rdynamic` (the conditional-emission story in
+// docs/plans/stacktrace-libunwind.md). Stable through the rest of the
+// build; once set true it stays true.
+func (cg *CodeGen) StacktraceUsed() bool { return cg.stacktraceUsed }
+
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
 func (cg *CodeGen) progress(msg string) {
@@ -926,7 +945,7 @@ func (cg *CodeGen) targetIsARM64() bool {
 // "overriding the module target triple" warning.
 //
 // clang -dumpmachine (and llc --version) return the darwin-style triple
-// (e.g. arm64-apple-darwin25.1.0) but clang normalises it to the macosx-style
+// (e.g. arm64-apple-darwin25.1.0) but clang normalizes it to the macosx-style
 // triple (e.g. arm64-apple-macosx26.0.0) when compiling LLVM IR.  Setting a
 // darwin-style triple in the module therefore always triggers the override
 // warning.  The only reliable way to get the exact string clang will use is to
@@ -940,7 +959,7 @@ func newModuleWithTriple() *ir.Module {
 		return mod
 	}
 	// Compile an empty C translation unit to LLVM IR and extract the triple
-	// that clang actually emits.  This is the only way to get the normalised
+	// that clang actually emits.  This is the only way to get the normalized
 	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
 	if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
 		Output(); err == nil {
@@ -1259,11 +1278,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.curScope = newScope(nil)
 	cg.moduleScope = cg.curScope
 
-	// Initialize DWARF debug metadata when -g is active.
-	if cg.debugMode {
-		cg.initDebugInfo()
-	}
-
 	// Register built-in special traits so structs can implement them without
 	// an explicit trait declaration in source.
 	cg.registerBuiltinTraits()
@@ -1275,6 +1289,33 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	if err := checkDuplicateDecls(prog.Stmts); err != nil {
 		return nil, fmt.Errorf("%s:%w", cg.filename, err)
+	}
+
+	// Stacktrace usage detection: scan for `stacktrace(` calls before any
+	// fn is emitted so funcs.go knows whether to keep Tin user fns at
+	// internal linkage (default) or promote them to external (so dladdr
+	// can resolve them after `-rdynamic` exports them to the dynsym).
+	// Empirical check: STB_LOCAL symbols never reach the dynamic symbol
+	// table regardless of `-rdynamic`, so promotion is mandatory when
+	// stacktrace is reachable. Doing the scan here, after dup-decl checks
+	// but before any other pass, keeps every later codegen path observing
+	// a single consistent value of cg.stacktraceUsed.
+	//
+	// Must precede initDebugInfo: when stacktrace is reachable we flip
+	// debugMode on so DWARF line tables get emitted into the IR (clang's
+	// `-gline-tables-only` flag then preserves only `.debug_line`, which
+	// libdwfl reads at runtime to map IPs to "file:line:col"). Without
+	// this flip, the runtime resolver would always fall through to the
+	// dladdr "<symbol>+<offset>" form for Tin user code.
+	cg.detectStacktraceUsage(prog.Stmts)
+	if cg.stacktraceUsed && !cg.debugMode {
+		cg.debugMode = true
+	}
+
+	// Initialize DWARF debug metadata when -g is active OR stacktrace
+	// is reachable (which implicitly needs line info for IP resolution).
+	if cg.debugMode {
+		cg.initDebugInfo()
 	}
 
 	// Zero pass: collect exports and constrained generic function templates

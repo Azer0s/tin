@@ -42,14 +42,36 @@ func (cg *CodeGen) ExpandProgramMacros(prog *ast.Program) (*ast.Program, error) 
 
 // expandMacroToAST expands one macro call and returns the resulting AST node.
 // It reuses the existing CTFE and substitution machinery.
-func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.Node, error) {
+//
+// callPos is the source position of the macro CALL site. Macro-body
+// nodes (those not substituted in from a caller-supplied arg) are
+// retagged with this position so that codegen-time pos lookups -
+// most importantly `sourcepos()` - report the macro caller's location
+// rather than the line of the macro definition. Caller-arg subtrees
+// keep their original positions, so `sourcepos(caller_var)` still
+// resolves to the caller_var's binding site.
+func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node, callPos ast.Pos) (ast.Node, error) {
 	if len(args) != len(macro.Params) {
 		return nil, fmt.Errorf("macro %s: expected %d args, got %d",
 			macro.Name, len(macro.Params), len(args))
 	}
 	// Complex macros (block body): CTFE path - returns ast.Node directly.
+	// The CTFE result is freshly-parsed from a temp-file expansion, so
+	// every node has positions in /tmp/tin_macro_*.tin. Retag to the
+	// macro call site so sourcepos() / diagnostics report something
+	// useful. Caller-arg subtrees can't be recovered through the CTFE
+	// boundary (args are serialized through stdout) so the preserve
+	// set is empty and every node gets the call-site position. This
+	// is the right outcome - CTFE macros are conceptually "evaluated
+	// then inlined" with no preserved arg identity.
 	if isMacroComplex(macro) {
-		return cg.ctfeExpandMacro(macro, args)
+		expanded, err := cg.ctfeExpandMacro(macro, args)
+		if err != nil {
+			return nil, err
+		}
+		retagMacroBody(expanded, args, callPos)
+
+		return expanded, nil
 	}
 	// Simple macros: AST substitution.
 	subst := make(map[string]ast.Node, len(macro.Params))
@@ -70,11 +92,57 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node) (ast.
 			return nil, fmt.Errorf("macro %s: backtick parse error: %w", macro.Name, err)
 		}
 		// Params are not yet substituted (backtick is an opaque string); do it now.
-
-		return substituteMacroNode(node, subst), nil
+		expanded = substituteMacroNode(node, subst)
 	}
 
+	retagMacroBody(expanded, args, callPos)
+
 	return expanded, nil
+}
+
+// retagMacroBody rewrites every Pos in `expanded` to callPos EXCEPT
+// for nodes reachable from a caller-supplied argument subtree. This
+// makes sourcepos() and any other pos-keyed lookup inside a macro body
+// report the macro CALL site (the user's mental model: macros inline
+// at the call site), while caller-passed arguments retain their own
+// positions so `sourcepos(caller_var)` still works correctly.
+//
+// Identification is by node-pointer identity: substituteMacroNode
+// returns caller-arg subtrees by reference (no copy), so collecting
+// every reachable pointer from `args` gives us the exact set of nodes
+// that must NOT be retagged. New nodes created during substitution
+// (BinExpr, CallExpr clones, etc.) and pure macro-body nodes both get
+// callPos.
+//
+// IN-PLACE MUTATION CAVEAT: substituteMacroNode does NOT clone leaf
+// macro-body Identifiers (only structural nodes like BinExpr/CallExpr
+// get a fresh copy). The same macro-body Identifier pointer is
+// returned by every expansion of the same macro. retagMacroBody then
+// SetPos's that shared pointer to the current call site, overwriting
+// whatever the previous expansion of the same macro stored. This is
+// safe IFF the IR for a macro's expansion is fully emitted (positions
+// captured, atom literals registered, DILocations attached) BEFORE the
+// next expansion runs — which is the current invariant: codegen calls
+// genExpr on the expanded body inline. Any future code that reads
+// `node.Pos()` LAZILY (after expansion completes) on a macro-body
+// node would observe the most recent call site, not the originating
+// one. If that becomes a problem, deep-clone the body in
+// substituteMacroNode (preserving caller-arg identity).
+func retagMacroBody(expanded ast.Node, args []ast.Node, callPos ast.Pos) {
+	preserve := make(map[ast.Node]struct{})
+	for _, a := range args {
+		walkAST(a, func(n ast.Node) { preserve[n] = struct{}{} })
+	}
+	walkAST(expanded, func(n ast.Node) {
+		if _, keep := preserve[n]; keep {
+			return
+		}
+		// SetPos is on *base; only nodes whose value type embeds *base
+		// implement the interface. Every concrete AST node satisfies it.
+		if s, ok := n.(interface{ SetPos(ast.Pos) }); ok {
+			s.SetPos(callPos)
+		}
+	})
 }
 
 // expandNodeMacros recursively walks node, expanding any macro calls it finds.
@@ -111,7 +179,7 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 
 				cg.progress("macro " + strings.TrimSuffix(id.Name, "!"))
 
-				return cg.expandMacroToAST(macro, expandedArgs)
+				return cg.expandMacroToAST(macro, expandedArgs, n.Pos())
 			}
 		}
 		// Regular call: recurse into args.

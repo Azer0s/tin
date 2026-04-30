@@ -1,0 +1,23 @@
+// stacktrace_phase2.tin - smoke test for the libunwind-backed walk.
+//
+// Verifies the basic property that stacktrace() returns one entry per
+// live frame on the calling thread's stack. We assert on length only —
+// the exact atom names include compile-dependent offsets like "+0x1e",
+// and asserting on those couples the test to clang's output. Frame
+// presence is enough for Phase 2.
+//
+// Both helper fns carry #no_inline so the optimizer can't collapse them
+// into a single frame at -O2; without that, the walk would correctly
+// report a shorter trace and the length assertion below would tighten
+// arbitrarily.
+use assert
+
+fn{#no_inline} probe_inner() [atom] = return stacktrace()
+fn{#no_inline} probe_outer() [atom] = return probe_inner()
+
+test "stacktrace() walks the live stack across multiple Tin frames" =
+  let frames [atom] = probe_outer()
+  // Expect at minimum: probe_inner, probe_outer, the test runner wrapper,
+  // and main. A stricter equality check on names would lock the test to
+  // clang's symbol-mangling choices.
+  assert::ok(len(frames) >= 4)

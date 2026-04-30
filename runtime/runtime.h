@@ -64,8 +64,15 @@ void _tin_print_newline(void);
 // For fp128 we use mode(TF) - GCC/Clang's TFmode - which maps directly to
 // LLVM fp128 on all supported architectures (x86-64, Linux AArch64) without
 // needing __float128 (x86-only extension) or _Float128 (requires glibc header).
-// Apple arm64 does not support TF mode; fall back to long double (64-bit there).
-#if defined(__APPLE__) && defined(__aarch64__)
+// Apple clang (both x86_64 and arm64) does not support TF mode at all
+// — long double is 80-bit on Intel macOS and 64-bit on arm64 macOS,
+// neither of which is the 128-bit IEEE binary128 the rest of the
+// runtime expects. Fall back to long double on every Apple target;
+// the f128 echo / cstr helpers degrade to lower precision but link
+// cleanly. (TF mode works fine on Linux/glibc and FreeBSD with both
+// gcc and clang, where binary128 is implemented via compiler-rt /
+// libgcc soft-float helpers.)
+#if defined(__APPLE__)
 typedef long double tin_fp128_t;
 #else
 typedef float tin_fp128_t __attribute__((mode(TF)));
@@ -128,6 +135,24 @@ void    _tin_assert_abort(const char *msg);
 void    _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
 int64_t _tin_fiber_spawn_joinable(void *hdl);
+// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+// caller_ip is the spawn-site llvm.returnaddress(0); the runtime captures
+// the current fiber's pid+generation as the new fiber's parent for safe
+// chain walks. Programs without stacktrace() never call these.
+int64_t _tin_fiber_spawn_chain(void *hdl, uintptr_t caller_ip);
+int64_t _tin_fiber_spawn_joinable_chain(void *hdl, uintptr_t caller_ip);
+// Spawn-chain walk helper used by tin_capture_stacktrace. When pid == 0
+// (and expected_gen == 0): reads the CURRENT fiber's spawn info; the gen
+// check is skipped because the running fiber's slot can't be reclaimed
+// while it's executing. When pid > 0: looks up _fibers[pid] and compares
+// generation; mismatch terminates the chain so we never deref a recycled
+// fiber's data as if it were the original. Returns 1 when out_* are valid,
+// 0 to stop walking. Walking iteratively with this helper keeps the
+// TinFiber layout private to fiber.c.
+int     _tin_fiber_spawn_info(int64_t pid, int64_t expected_gen,
+                              uintptr_t *out_caller_ip,
+                              int64_t   *out_parent_pid,
+                              int64_t   *out_parent_gen);
 void    _tin_fiber_complete(void *result);
 void    _tin_fiber_join(int64_t pid, void *my_hdl);
 void   *_tin_fiber_get_result(int64_t pid);
@@ -162,6 +187,21 @@ void    _tin_fd_close(int32_t fd);
 int32_t     _tin_learn_atom(const char *str);
 const char *_tin_rt_atom_to_str(int32_t code);
 int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but frees str when done
+
+// -- Stacktrace capture (LLVM libunwind backed; see docs/plans/stacktrace-libunwind.md)
+// Writes up to `cap` interned atom codes into `out` (must be cap*sizeof(int32_t)
+// bytes); returns the number actually written. Never panics; on total failure
+// (NULL out, cap < 1, or unwinder init failure) returns 0.
+//
+// `flags` is a bitfield of TIN_ST_HIDE_* constants (see below). Frames matching
+// any active filter are dropped before the cap is applied, so a filtered call
+// returns up to `cap` frames that survived filtering. flags=0 disables all
+// filtering and gives the raw walk.
+#define TIN_ST_HIDE_LIBC    0x1   // drop frames in libc / libpthread / libsystem
+#define TIN_ST_HIDE_UNKNOWN 0x2   // drop frames that resolved to "??+0x<addr>"
+#define TIN_ST_HIDE_RUNTIME 0x4   // drop frames whose symbol starts with "_tin_"
+#define TIN_ST_HIDE_MAIN    0x8   // drop the main() / _start / __libc_start_* tail
+int32_t     tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags);
 
 // -- #handover: take ownership of a C pointer returned by an extern function.
 // Platform-specific malloc size detection used by arc.c / atom.c.

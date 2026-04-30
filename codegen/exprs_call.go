@@ -86,24 +86,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// Macro expansion: check before scope lookup.
 		macroName := fn.Name
 		if macro, ok := cg.macros[macroName]; ok {
-			return cg.expandMacro(block, macro, e.Args)
+			return cg.expandMacro(block, macro, e.Args, fn.Pos())
 		}
 		// Also check with trailing ! stripped (for macro! call syntax).
 		if strings.HasSuffix(fn.Name, "!") {
 			baseName := fn.Name[:len(fn.Name)-1]
 			if macro, ok := cg.macros[baseName+"!"]; ok {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 
 			if macro, ok := cg.macros[baseName]; ok {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
 		// #no_excl: allow calling macro! as plain function name (without !).
 		// Only applies when the macro has the "no_excl" tag.
 		if !strings.HasSuffix(fn.Name, "!") {
 			if macro, ok := cg.macros[fn.Name+"!"]; ok && macroHasTag(macro, "no_excl") {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
 		// Built-in: len(expr)
@@ -124,14 +124,45 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			return cg.genBuiltinDefault(block, e.Args[0])
 		}
 		// Built-in: sourcepos(symbol_or_expr) - returns the atom for
-		// "<file>:<line>:<col>" of the argument. Recognised only when
-		// the name "sourcepos" is not lexically shadowed; otherwise the
-		// shadowing binding wins and we fall through to ordinary call
-		// resolution (which will likely error if the shadow isn't a
-		// callable, exactly as the user expects).
-		if fn.Name == "sourcepos" && len(e.Args) == 1 {
+		// "<name>@<file>:<line>:<col>" (identifier arg) or
+		// "<file>:<line>:<col>" (expression arg or no arg). Recognized
+		// only when the name "sourcepos" is not lexically shadowed;
+		// otherwise the shadowing binding wins and we fall through.
+		//
+		// The no-arg form is the natural call site form: useful inside
+		// a macro body where retagMacroBody has already pointed every
+		// node to the macro CALL site, so `sourcepos()` returns the
+		// caller's position without needing an arg to thread through.
+		if fn.Name == "sourcepos" && len(e.Args) <= 1 {
 			if _, shadowed := cg.curScope.lookup("sourcepos"); !shadowed {
-				return cg.genBuiltinSourcepos(block, e.Args[0], e.Pos())
+				var arg ast.Node
+				if len(e.Args) == 1 {
+					arg = e.Args[0]
+				}
+				// fn.Pos() rather than e.Pos(): the parser doesn't
+				// always tag the CallExpr itself, but the function-name
+				// identifier is reliably tagged by the lexer. After
+				// macro retag the identifier reflects the macro CALL
+				// site, which is exactly what sourcepos() needs.
+				return cg.genBuiltinSourcepos(block, arg, fn.Pos())
+			}
+		}
+		// Built-in: stacktrace([cap [, opts]]) - returns [atom] of the
+		// live call stack, top-of-stack first. Optional cap clamps the
+		// trace length (runtime saturates to [1, 1024]); optional opts
+		// is a literal `[atom]` of TIN_ST_HIDE_* filter atoms (parsed
+		// at codegen). Same shadow rule as sourcepos.
+		if fn.Name == "stacktrace" && len(e.Args) <= 2 {
+			if _, shadowed := cg.curScope.lookup("stacktrace"); !shadowed {
+				var capArg, optsArg ast.Node
+				if len(e.Args) >= 1 {
+					capArg = e.Args[0]
+				}
+				if len(e.Args) == 2 {
+					optsArg = e.Args[1]
+				}
+
+				return cg.genBuiltinStacktrace(block, capArg, optsArg, e.Pos())
 			}
 		}
 		// ADT constructor call: `Some(42)`, `Ok(42)`, `Rgb(r, g, b)`.
@@ -827,6 +858,27 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
+		// Macro call through a qualified path (e.g. `log::info!(l, "x")`).
+		// The parser stores the trailing `!` on the LAST path element, so
+		// the lookup keys are `pkg::name!` / `pkg.name!` (and the same
+		// without the trailing `!` for the no-excl form). cg.macros is
+		// populated by packages.go's pass-5 with these exact keys when a
+		// package exports the macro.
+		if len(fn.Path) >= 2 {
+			fullKey := strings.Join(fn.Path, "::")
+			altKey := strings.Join(fn.Path, ".")
+			for _, key := range []string{fullKey, altKey} {
+				if macro, ok := cg.macros[key]; ok {
+					return cg.expandMacro(block, macro, e.Args, fn.Pos())
+				}
+				if strings.HasSuffix(key, "!") {
+					if macro, ok := cg.macros[key[:len(key)-1]]; ok {
+						return cg.expandMacro(block, macro, e.Args, fn.Pos())
+					}
+				}
+			}
+		}
+
 		// ADT constructor call: `Option::Some(42)` or `Option[i32]::Some(42)`
 		// and similarly `Result[i32, string]::Ok(42)`.
 		if v, handled, err := cg.genDataScopeCtorCall(block, fn, e.Args); handled {
