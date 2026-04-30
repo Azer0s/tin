@@ -859,6 +859,24 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 // packages be written in pure Tin (with only the truly native bits remaining in
 // runtime.c) without requiring a separate linking step.
 func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error {
+	// Dedup by absolute source path. The caller-side `cg.importedPkgs`
+	// map keys on the import path string, which differs between
+	// `use net::tcp` ("net::tcp"), `use "./tcp/tcp"` ("file:<path>"),
+	// and `use tcp` ("tcp") even when all three resolve to the same
+	// .tin file. Without this guard the same package source gets
+	// compiled twice into the LLVM module, causing function and
+	// struct redefinition errors. Tracked separately from importedPkgs
+	// so the macro CTFE shell, which iterates importedPkgs to emit
+	// `use <pkg>` lines, never sees raw file paths.
+	absPath, absErr := filepath.Abs(srcPath)
+	if absErr == nil {
+		if cg.loadedSrcPaths[absPath] {
+			return nil
+		}
+
+		cg.loadedSrcPaths[absPath] = true
+	}
+
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("use %s: read source: %w", pkgPath, err)

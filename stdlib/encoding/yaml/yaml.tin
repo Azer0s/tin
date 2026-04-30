@@ -770,7 +770,7 @@ data YamlError =
 //     case Err(e): ...
 fn parse(s string) Result[Value, YamlError] =
   if len(s) == 0:
-    return Result[Value, YamlError]::Err(EmptyInput)
+    return Result[Value, YamlError]::Err(YamlError::EmptyInput)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
   return Ok(*parse_node(&p, 0))
 

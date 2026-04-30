@@ -610,7 +610,7 @@ data JsonError =
 //   let v = result::unwrap_or(json::parse(s), Value{kind: Kind.null_v})
 fn parse(s string) Result[Value, JsonError] =
   if len(s) == 0:
-    return Result[Value, JsonError]::Err(EmptyInput)
+    return Result[Value, JsonError]::Err(JsonError::EmptyInput)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
   return Ok(*parse_value(&p))
 

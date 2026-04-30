@@ -211,6 +211,11 @@ type CodeGen struct {
 	exports map[string]string
 	// importedPkgs: packageName -> true  (to avoid double-loading)
 	importedPkgs map[string]bool
+	// loadedSrcPaths: absolute .tin file path -> true. Separate from
+	// importedPkgs because the macro CTFE shell iterates importedPkgs
+	// to emit `use <pkg>` lines; mixing file-path keys in there would
+	// emit nonsense imports.
+	loadedSrcPaths map[string]bool
 
 	// stdlibOverride: when non-empty, overrides the default <execDir>/stdlib search path.
 	// Set via --stdlib flag.
@@ -1024,6 +1029,7 @@ func New(filename string) *CodeGen {
 		opTraitImpls:             make(map[string][]opTraitImplEntry),
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
+		loadedSrcPaths:           make(map[string]bool),
 		constrainedFuncs:         make(map[string]*ast.FuncDecl),
 		genericFuncs:             make(map[string]*ast.FuncDecl),
 		genericFuncHomeScopes:    make(map[string]*scope),
