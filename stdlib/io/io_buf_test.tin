@@ -1,24 +1,26 @@
 use io
 use assert
 
+// open_c with O_RDONLY (= 0 on every Unix) is portable; only the
+// create/truncate flags differ between Linux and macOS, so writes go
+// through stdio fopen instead of raw open(2).
 fn open_c(path string, flags i32, mode i32) i32 = extern("open")
 fn unlink_c(path string) i32 = extern("unlink")
 
 const O_RDONLY i32 = 0
-const O_WRONLY i32 = 1
-const O_CREAT  i32 = 64    // 0x40 on linux
-const O_TRUNC  i32 = 512   // 0x200 on linux
-const MODE_RW  i32 = 0o644
 
 // write_temp writes contents to a fresh temp file and returns its path.
+// Uses stdio fopen("wb") so the O_CREAT|O_TRUNC|O_WRONLY semantics are
+// portable across Linux and macOS (raw open(2) flag values diverge:
+// e.g. 0x40 is O_CREAT on Linux but O_ASYNC on macOS).
 fn write_temp(name string, contents string) string =
   let path = "/tmp/" ++ name
-  let fd = open_c(path, O_WRONLY | O_CREAT | O_TRUNC, MODE_RW)
-  if fd < 0:
-    panic("write_temp: open failed for {path}")
+  let f = io::fopen(path, "wb")
+  if f == nil:
+    panic("write_temp: fopen failed for {path}")
   let bytes = contents as [byte]
-  let _ = io::write_sync(fd, &bytes[0], len(bytes))
-  io::close(fd)
+  let _ = io::fwrite(&bytes[0] as *void, 1 as i64, len(bytes), f)
+  let _ = io::fclose(f)
   return path
 
 test "read_line returns three lines" =
