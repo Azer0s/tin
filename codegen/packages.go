@@ -19,7 +19,21 @@ import (
 
 func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 	if !n.IsExtern {
-		cg.progress("import " + n.Path)
+		// genUseDecl is reached twice per UseDecl - once during the
+		// dedicated "load packages" pass, again when codegen iterates
+		// top-level statements. The actual load is dedup'd by
+		// importedPkgs / loadedSrcPaths, but the progress message has
+		// no such guard. Track per-codegen-run so each import surfaces
+		// exactly once in the -v stream.
+		if cg.reportedImports == nil {
+			cg.reportedImports = make(map[string]bool)
+		}
+
+		if !cg.reportedImports[n.Path] {
+			cg.reportedImports[n.Path] = true
+
+			cg.progress("import " + n.Path)
+		}
 
 		if n.FromSyntax {
 			return cg.loadPackageSelective(n.Path, n.Names, n.IsFile)
@@ -327,16 +341,25 @@ func (cg *CodeGen) loadPackage(pkgPath string) error {
 	}
 
 	// No direct file found for a multi-part path (e.g. hash::fnv).
-	// Load the parent module (e.g. hash) which may re-export fnv as a sub-namespace.
+	// Load the parent module (e.g. hash) which may re-export fnv as a
+	// sub-namespace. If even the parent doesn't exist, surface a clear
+	// error pointing at the original path (closer to the user's intent
+	// than the parent name).
 	if len(parts) > 1 {
 		parentPath := strings.Join(parts[:len(parts)-1], "::")
+		if err := cg.loadPackage(parentPath); err != nil {
+			return fmt.Errorf("package not found: %s (also tried parent %s)", pkgPath, parentPath)
+		}
 
-		return cg.loadPackage(parentPath)
+		return nil
 	}
 
-	// Package not found - silently ignore (user may have a typo; errors surface
-	// when the symbol is actually used and not found in scope).
-	return nil
+	// Package not found at all. Pre-2026 the compiler silently ignored
+	// these on the theory "errors surface when the symbol is used", but
+	// imports for side effects (macros, top-level inits, runtime
+	// registrations) never reference a symbol, and typos in the REPL
+	// went undetected. Hard error is the safe default.
+	return fmt.Errorf("package not found: %s", pkgPath)
 }
 
 // resolvePackageSrc finds the .tin source file for pkgPath using a 3-tier search:
@@ -665,7 +688,11 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// Pass 0.8: detect overloaded function names so Pass 2/3 can mangle IR
 	// names for functions sharing the same base name (e.g. get(url) vs
 	// get(client, url)). Mirrors the same pass in loadPackageFromSource.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	// File imports inherit the enclosing package context (cg.currentPkg),
+	// so struct method keys must be scanned under that prefix or
+	// overloads on the imported file's structs won't be mangled and end
+	// up colliding under their bare scope name.
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, cg.currentPkg) {
 		cg.overloadedNames[name] = flag
 	}
 
@@ -855,6 +882,24 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 // packages be written in pure Tin (with only the truly native bits remaining in
 // runtime.c) without requiring a separate linking step.
 func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error {
+	// Dedup by absolute source path. The caller-side `cg.importedPkgs`
+	// map keys on the import path string, which differs between
+	// `use net::tcp` ("net::tcp"), `use "./tcp/tcp"` ("file:<path>"),
+	// and `use tcp` ("tcp") even when all three resolve to the same
+	// .tin file. Without this guard the same package source gets
+	// compiled twice into the LLVM module, causing function and
+	// struct redefinition errors. Tracked separately from importedPkgs
+	// so the macro CTFE shell, which iterates importedPkgs to emit
+	// `use <pkg>` lines, never sees raw file paths.
+	absPath, absErr := filepath.Abs(srcPath)
+	if absErr == nil {
+		if cg.loadedSrcPaths[absPath] {
+			return nil
+		}
+
+		cg.loadedSrcPaths[absPath] = true
+	}
+
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("use %s: read source: %w", pkgPath, err)
@@ -971,8 +1016,29 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	// Pre-pass 0.8: detect overloaded function names BEFORE Pass 1 so that extern
 	// overloads (e.g. fn splat(v f32) / fn splat(v f64)) get mangled IR names.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	// Pass the package name so struct method keys are pkg-qualified, otherwise
+	// overloads on stdlib structs (multiple `static fn ::implicit(...)` etc.)
+	// would never get marked as overloaded under the package-prefixed scope.
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, pkgName) {
 		cg.overloadedNames[name] = flag
+	}
+
+	// Pass 0.7: register top-level var declarations in the package as LLVM
+	// globals so that the package's functions (predeclared in pass 2) can
+	// reference them by bare name. Exported vars also become reachable to
+	// the caller as `pkg::name` / `pkg.name`.
+	for _, node := range prog.Stmts {
+		tv, ok := node.(*ast.TopLevelVar)
+		if !ok {
+			continue
+		}
+
+		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
+		}
 	}
 
 	// Pass 1: compile extern-backed functions first so their names are in scope
@@ -1087,7 +1153,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	// Pre-pass 1.8: detect overloaded function names in this package so that
 	// passes 2/2.5/3 can mangle IR names for overloaded functions correctly.
-	for name, flag := range scanOverloadedNames(prog.Stmts) {
+	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, pkgName) {
 		cg.overloadedNames[name] = flag
 	}
 
@@ -1544,7 +1610,9 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	}
 
 	// Pass 5: register exported macros under pkg-qualified keys so that
-	// loadPackageSelective can find and re-register them as bare names.
+	// loadPackageSelective can find and re-register them as bare names,
+	// and so qualified call sites (`log::info!(...)`) resolve via the
+	// ScopeAccess macro path in genCallExpr.
 	for _, node := range prog.Stmts {
 		md, ok := node.(*ast.MacroDecl)
 		if !ok {
@@ -1560,6 +1628,44 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.macros[pkgName+"::"+bareName+"!"] = md
 		cg.macros[pkgName+"."+bareName] = md
 		cg.macros[pkgName+"::"+bareName] = md
+	}
+
+	// Pass 6: propagate re-exported child packages' macros under this
+	// package's namespace. When std.tin says `export { log } as std`,
+	// log's `info!` (registered as `log::info!` by its own load) needs
+	// to also resolve under `std::log::info!`. Iterate every macro key
+	// that begins with an exported child name and clone it under the
+	// current pkg's prefix. This composes naturally for arbitrary
+	// re-export depth: an outer umbrella exporting std then sees the
+	// freshly-added `std::log::info!` keys and clones them again as
+	// `outer::std::log::info!`. No lookup-time path stripping needed.
+	if len(exportedNames) > 0 {
+		// Snapshot keys first - mutating the map while iterating is undefined.
+		original := make(map[string]*ast.MacroDecl, len(cg.macros))
+		for k, v := range cg.macros {
+			original[k] = v
+		}
+
+		cascaded := 0
+
+		for k, md := range original {
+			for child := range exportedNames {
+				for _, sep := range []string{"::", "."} {
+					prefix := child + sep
+					if strings.HasPrefix(k, prefix) {
+						newKey := pkgName + sep + k
+						if _, already := cg.macros[newKey]; !already {
+							cg.macros[newKey] = md
+							cascaded++
+						}
+					}
+				}
+			}
+		}
+
+		if cascaded > 0 {
+			cg.progress(fmt.Sprintf("cascade re-exports %s (%d macros)", pkgName, cascaded))
+		}
 	}
 
 	cg.curScope = prevScope
@@ -2393,10 +2499,19 @@ func (cg *CodeGen) evalConstExprInt(expr ast.Node, hint *irtypes.IntType) (*irty
 	case *ast.IntLit:
 		typ := hint
 		if typ == nil {
-			typ = irtypes.I64
+			if e.Big != nil {
+				typ = irtypes.I128
+			} else {
+				typ = irtypes.I64
+			}
 		}
 
-		raw := big.NewInt(e.Value)
+		var raw *big.Int
+		if e.Big != nil {
+			raw = new(big.Int).Set(e.Big)
+		} else {
+			raw = big.NewInt(e.Value)
+		}
 
 		return typ, normIntBig(raw, uint(typ.BitSize))
 
@@ -2473,7 +2588,7 @@ func (cg *CodeGen) evalConstExprInt(expr ast.Node, hint *irtypes.IntType) (*irty
 	return nil, nil
 }
 
-// normIntBig normalises a *big.Int to the signed two's-complement range
+// normIntBig normalizes a *big.Int to the signed two's-complement range
 // for an N-bit integer type: masks to N bits, then sign-extends from bit N-1.
 // This ensures that e.g. (1 << 127) becomes -2^127 (I128_MIN) when bits==128.
 func normIntBig(x *big.Int, bits uint) *big.Int {

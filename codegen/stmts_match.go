@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -776,11 +777,19 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 		nConst := constant.NewInt(irtypes.I64, int64(regularCount))
 
 		if restIdx >= 0 {
-			// Rest semantics: a rest slot binds AT LEAST ONE element, so the
-			// list must have strictly more elements than the regular slots.
-			// Use `[]` to match empty and exact-length patterns `[x]`,
-			// `[x, y]`, ... when no rest slot is needed.
-			lenCond = checkBlock.NewICmp(enum.IPredSGT, arrLen, nConst)
+			// Rest semantics: the rest slot may bind zero or more elements, so
+			// `[x, ...xs]` matches `[3]` (x=3, xs=[]). The only constraint is
+			// that the array must have at least `regularCount` elements AND be
+			// non-empty (so `[...xs]` does not overlap with `[]`).
+			//
+			// Use `[]` to match the empty array; use exact-length patterns
+			// `[x]`, `[x, y]`, ... when no rest slot is needed.
+			minLen := int64(regularCount)
+			if minLen < 1 {
+				minLen = 1
+			}
+
+			lenCond = checkBlock.NewICmp(enum.IPredSGE, arrLen, constant.NewInt(irtypes.I64, minLen))
 		} else {
 			// len == regularCount
 			lenCond = checkBlock.NewICmp(enum.IPredEQ, arrLen, nConst)
@@ -1123,6 +1132,14 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 func (cg *CodeGen) toConstInt(c constant.Constant, targetType irtypes.Type) *constant.Int {
 	if ci, ok := c.(*constant.Int); ok {
 		if it, ok2 := targetType.(*irtypes.IntType); ok2 {
+			// Preserve the full big.Int magnitude when the target is at least
+			// as wide as the source (e.g. i128 case against an i128 switch
+			// expression). Calling X.Int64() here would silently truncate
+			// 99999999999999999999 to its bottom 64 bits.
+			if uint(it.BitSize) >= uint(ci.Typ.BitSize) {
+				return &constant.Int{Typ: it, X: new(big.Int).Set(ci.X)}
+			}
+
 			return constant.NewInt(it, ci.X.Int64())
 		}
 

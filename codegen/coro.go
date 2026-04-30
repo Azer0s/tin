@@ -117,6 +117,20 @@ func (cg *CodeGen) ensureFiberRuntime() {
 		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
 	cg.fiberSpawnJoinableFn = cg.ensureExternDecl("_tin_fiber_spawn_joinable", irtypes.I64,
 		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
+	// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+	// Codegen routes here only when cg.stacktraceUsed; the runtime captures
+	// _current_fib's pid+generation as the new fiber's parent so a later
+	// stacktrace() can walk the spawn chain across fiber boundaries.
+	cg.fiberSpawnChainFn = cg.ensureExternDecl("_tin_fiber_spawn_chain", irtypes.I64,
+		[]*ir.Param{
+			ir.NewParam("hdl", irtypes.I8Ptr),
+			ir.NewParam("caller_ip", irtypes.I64),
+		}, false)
+	cg.fiberSpawnJoinableChainFn = cg.ensureExternDecl("_tin_fiber_spawn_joinable_chain", irtypes.I64,
+		[]*ir.Param{
+			ir.NewParam("hdl", irtypes.I8Ptr),
+			ir.NewParam("caller_ip", irtypes.I64),
+		}, false)
 	cg.fiberCompleteFn = cg.ensureExternDecl("_tin_fiber_complete", irtypes.Void,
 		[]*ir.Param{ir.NewParam("res", irtypes.I8Ptr)}, false)
 	cg.fiberJoinFn = cg.ensureExternDecl("_tin_fiber_join", irtypes.Void,

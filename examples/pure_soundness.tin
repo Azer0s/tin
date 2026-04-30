@@ -1,0 +1,79 @@
+// pure_soundness.tin - exercises the #pure soundness story.
+//
+// Coverage:
+//   1. Recursive #pure functions fold at compile time (depth-limit suffices).
+//   2. Memoised CTFE: many call sites with the same args fold once and reuse.
+//   3. #pure with a {#allow_sideffect} block does NOT fold (runtime call).
+//   4. Local variables / parameters that share a name with a top-level var
+//      are not mistaken for the global (shadowing works).
+//
+// Negative cases (compile-time rejections) live in pure_soundness_errors.sh.
+
+use assert
+
+// 1. Recursive #pure - factorial / fibonacci. With phase B2 #no_recurse is no
+//    longer required, so these fold purely on the back of #pure + the 256-frame
+//    depth limit on the CTFE evaluator.
+
+fn{#pure} fact(n i64) i64 =
+  if n <= 1:
+    return 1
+  return n * fact(n - 1)
+
+fn{#pure} fib(n i64) i64 =
+  if n < 2:
+    return n
+  return fib(n - 1) + fib(n - 2)
+
+test "pure recursion: factorial" =
+  assert::equals(fact(0), 1)
+  assert::equals(fact(5), 120)
+  assert::equals(fact(10), 3628800)
+
+test "pure recursion: fibonacci" =
+  assert::equals(fib(0), 0)
+  assert::equals(fib(1), 1)
+  assert::equals(fib(10), 55)
+  assert::equals(fib(20), 6765)
+
+// 2. Memoisation - fact(8) is evaluated once and reused across many call
+//    sites. The test passes purely on result correctness; the speed-up is
+//    observed at compile time.
+
+fn{#pure} step(n i64) i64 = return fact(n) + n
+
+test "pure memo: many call sites with same arg" =
+  assert::equals(step(8), 40328)
+  assert::equals(step(8), 40328)
+  assert::equals(step(8), 40328)
+  assert::equals(step(8), 40328)
+  assert::equals(step(8), 40328)
+
+// 3. #pure with {#allow_sideffect} must NOT fold. The block is opaque to
+//    CTFE; the call survives to runtime and the side effect is observable.
+
+fn{#pure} traced_square(n i64) i64 =
+  let r i64 = n * n
+  { #allow_sideffect } {
+    echo "traced_square({n}) = {r}"
+  }
+  return r
+
+test "pure + allow_sideffect: NOT folded (runtime call)" =
+  assert::equals(traced_square(4), 16)
+
+// 4. Shadowing - a parameter named the same as a top-level var is fine.
+
+var counter i64 = 1000
+
+fn{#pure} square_of(counter i64) i64 = return counter * counter
+
+fn{#pure} square_with_shadow(n i64) i64 =
+  let counter i64 = n + 1
+  return counter * counter
+
+test "pure shadowing: parameter named like top-level var" =
+  assert::equals(square_of(7), 49)
+
+test "pure shadowing: local let named like top-level var" =
+  assert::equals(square_with_shadow(6), 49)

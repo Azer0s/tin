@@ -1,0 +1,101 @@
+use io
+use assert
+
+// open_c with O_RDONLY (= 0 on every Unix) is portable; only the
+// create/truncate flags differ between Linux and macOS, so writes go
+// through stdio fopen instead of raw open(2).
+fn open_c(path string, flags i32, mode i32) i32 = extern("open")
+fn unlink_c(path string) i32 = extern("unlink")
+
+const O_RDONLY i32 = 0
+
+// write_temp writes contents to a fresh temp file and returns its path.
+// Uses stdio fopen("wb") so the O_CREAT|O_TRUNC|O_WRONLY semantics are
+// portable across Linux and macOS (raw open(2) flag values diverge:
+// e.g. 0x40 is O_CREAT on Linux but O_ASYNC on macOS).
+//
+// Unlinks any leftover at the path first - earlier versions of this
+// test used raw open() with hardcoded Linux flags and could create
+// files with surprising attributes on macOS that block subsequent
+// fopen("wb"). Unconditional unlink wipes any such leftover.
+fn write_temp(name string, contents string) string =
+  let path = "/tmp/" ++ name
+  let _ = unlink_c(path)
+  let f = io::fopen(path, "wb")
+  if f == nil:
+    panic("write_temp: fopen failed for {path}")
+  let bytes = contents as [byte]
+  let _ = io::fwrite(&bytes[0] as *void, 1 as i64, len(bytes), f)
+  let _ = io::fclose(f)
+
+  return path
+
+test "read_line returns three lines" =
+  let path = write_temp("io_buf_t1", "alpha\nbeta\ngamma\n")
+  let fd = open_c(path, O_RDONLY, 0 as i32)
+  let r = io::bufreader(fd)
+  let (a, ok1) = r.read_line()
+  let (b, ok2) = r.read_line()
+  let (c, ok3) = r.read_line()
+  let (_, ok4) = r.read_line()
+  assert::ok(ok1)
+  assert::ok(ok2)
+  assert::ok(ok3)
+  assert::ok(!ok4)
+  assert::equals("alpha", a)
+  assert::equals("beta", b)
+  assert::equals("gamma", c)
+  io::close(fd)
+  let _ = unlink_c(path)
+
+test "read_line treats unterminated final line as a line" =
+  let path = write_temp("io_buf_t2", "first\nsecond")
+  let fd = open_c(path, O_RDONLY, 0 as i32)
+  let r = io::bufreader(fd)
+  let (a, ok1) = r.read_line()
+  let (b, ok2) = r.read_line()
+  let (_, ok3) = r.read_line()
+  assert::ok(ok1)
+  assert::ok(ok2)
+  assert::ok(!ok3)
+  assert::equals("first", a)
+  assert::equals("second", b)
+  io::close(fd)
+  let _ = unlink_c(path)
+
+test "read_byte returns each byte then false on EOF" =
+  let path = write_temp("io_buf_t3", "ab")
+  let fd = open_c(path, O_RDONLY, 0 as i32)
+  let r = io::bufreader(fd)
+  let (a, ok1) = r.read_byte()
+  let (b, ok2) = r.read_byte()
+  let (_, ok3) = r.read_byte()
+  assert::ok(ok1)
+  assert::ok(ok2)
+  assert::ok(!ok3)
+  assert::equals(@'a' as byte, a)
+  assert::equals(@'b' as byte, b)
+  io::close(fd)
+  let _ = unlink_c(path)
+
+test "read_until uses custom delimiter" =
+  let path = write_temp("io_buf_t4", "one,two,three,")
+  let fd = open_c(path, O_RDONLY, 0 as i32)
+  let r = io::bufreader(fd)
+  let (a, _) = r.read_until(@',' as byte)
+  let (b, _) = r.read_until(@',' as byte)
+  let (c, _) = r.read_until(@',' as byte)
+  assert::equals("one", a)
+  assert::equals("two", b)
+  assert::equals("three", c)
+  io::close(fd)
+  let _ = unlink_c(path)
+
+test "empty file returns false on first read_line" =
+  let path = write_temp("io_buf_t5", "")
+  let fd = open_c(path, O_RDONLY, 0 as i32)
+  let r = io::bufreader(fd)
+  let (_, ok) = r.read_line()
+  assert::ok(!ok)
+  io::close(fd)
+  let _ = unlink_c(path)

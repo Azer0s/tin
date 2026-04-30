@@ -53,7 +53,7 @@ package codegen
 // recursion: when the algorithm decides a wildcard is useful at a column
 // because the signature is incomplete, the witness adopts a "missing"
 // constructor for that column; otherwise it adopts the constructor whose
-// specialised submatrix produced the witness. See witnessFor.
+// specialized submatrix produced the witness. See witnessFor.
 
 import (
 	"fmt"
@@ -808,7 +808,7 @@ func specialize(M [][]mPat, c mCtor) [][]mPat {
 					// Note: this is a known approximation; alternatively
 					// the column could be split into one mcArrExact-K
 					// constructor per discrete K and the rest-arms would
-					// then specialise into each. For Tin's typical pattern
+					// then specialize into each. For Tin's typical pattern
 					// shapes this approximation only leaks usefulness in
 					// arms that mix exact and rest patterns at the same
 					// column, which is rare.
@@ -921,7 +921,7 @@ func (cg *CodeGen) useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
 		complete, missing := cg.completeSignature(ctors)
 
 		if complete {
-			// Try each constructor: q is useful iff any specialised
+			// Try each constructor: q is useful iff any specialized
 			// submatrix admits a useful wildcard row at the prepended
 			// columns.
 			for _, c := range ctors {
@@ -1065,10 +1065,10 @@ func prependWitness(c mCtor, rest *witnessVal) *witnessVal {
 	return w
 }
 
-// prependChildren is used when the algorithm specialised on every
+// prependChildren is used when the algorithm specialized on every
 // constructor of a complete signature (the wildcard branch). The witness
 // returned by the recursive useful call already holds args for the
-// specialised columns + the rest columns; we strip the first `a` of them
+// specialized columns + the rest columns; we strip the first `a` of them
 // and attach them as children of c, then keep the tail columns as siblings.
 func prependChildren(c mCtor, rest *witnessVal) *witnessVal {
 	a := c.arity()

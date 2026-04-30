@@ -154,6 +154,25 @@ typedef struct {
     // causing the second fiber's panic to accidentally consume the first fiber's
     // recover() entry.
     TinDeferEntry *saved_defer_chain;
+    // Spawn-chain capture for cross-fiber stacktrace() (Phase 4 of
+    // docs/plans/stacktrace-libunwind.md). spawn_caller_ip is the
+    // llvm.returnaddress(0) snapshot at the spawn site that produced
+    // this fiber. spawn_parent_pid/spawn_parent_gen identify the parent
+    // fiber WITHOUT a raw pointer, so a stacktrace from this fiber can
+    // safely traverse the chain even after the parent has been reclaimed:
+    // _fibers[parent_pid] is consulted at walk time, and a generation
+    // mismatch terminates the chain instead of dereferencing reused
+    // memory. `generation` increments on every reclaim, so a recycled
+    // slot never carries the same (pid, gen) pair as before.
+    //
+    // All four fields are written under _table_mu at spawn time and
+    // read-only for the rest of the fiber's life. The OS thread's
+    // bootstrap fiber leaves them zeroed (no parent), terminating the
+    // walk at main.
+    uintptr_t            spawn_caller_ip;
+    int64_t              spawn_parent_pid;
+    int64_t              spawn_parent_gen;
+    int64_t              generation;
 } TinFiber;
 
 // TinAnyWaiter - shared state for _tin_fiber_join_any.
@@ -1141,9 +1160,17 @@ static void _fiber_struct_reclaim(TinFiber *f) {
         // Keep mutex/cond live; zero all other fields so reuse starts clean.
         pthread_mutex_t saved_mu = f->done_mu;
         pthread_cond_t  saved_cv = f->done_cv;
+        // Bump generation BEFORE the memset so the pre-reclaim value is
+        // preserved through. Stacktrace's parent-chain walk uses (pid,
+        // generation) to detect a reused slot: a child fiber that records
+        // generation N as its parent will see generation N+1 on reuse and
+        // safely terminate the walk instead of dereferencing the recycled
+        // fiber's data as if it were the original.
+        int64_t next_gen = f->generation + 1;
         memset(f, 0, sizeof(TinFiber));
         f->done_mu = saved_mu;
         f->done_cv = saved_cv;
+        f->generation = next_gen;
         _fiber_pool[_fiber_pool_cnt++] = f;
     } else {
         _FS_LOG("pool-full live=%lld peak=%lld pool=%d/%d\n",
@@ -1161,7 +1188,13 @@ static void _fiber_struct_reclaim(TinFiber *f) {
 // first.  prejoined=0 allows normal fire-and-forget reclaim at completion.
 // prejoined is set INSIDE _table_mu and BEFORE lq_push so the ff_reclaim
 // check (which also runs under _table_mu) always sees the correct value.
-static int64_t _spawn_impl(void *hdl, int prejoined) {
+// _spawn_impl creates a new fiber and pushes it onto the run queue.
+// caller_ip is non-zero ONLY when the call site emitted the stacktrace-
+// chain spawn variant (cg.stacktraceUsed); in that case the runtime
+// captures _current_fib's pid+generation as the new fiber's parent so a
+// later stacktrace() inside the child can walk the spawn chain. Programs
+// that don't use stacktrace pass caller_ip=0 and skip the bookkeeping.
+static int64_t _spawn_impl(void *hdl, int prejoined, uintptr_t caller_ip) {
     pthread_mutex_lock(&_table_mu);
 
     if (!_fibers) {
@@ -1216,6 +1249,25 @@ static int64_t _spawn_impl(void *hdl, int prejoined) {
     f->hdl       = hdl;
     f->status    = FIBER_RUNNABLE;
     f->prejoined = prejoined;
+
+    // Spawn-chain capture (Phase 4 of docs/plans/stacktrace-libunwind.md).
+    // Only populated when the spawn site asked for it; programs without
+    // any reachable stacktrace() leave the fields at zero (the bootstrap
+    // default), terminating the walk at this fiber.
+    //
+    // _current_fib may be NULL when the spawn happens from the OS thread
+    // outside any fiber (e.g. `spawn` from the test runner / main).
+    // In that case we still record caller_ip so the child's own spawn-of
+    // frame resolves correctly; parent_pid/_gen stay zero and the chain
+    // walk terminates after this fiber's contribution.
+    if (caller_ip != 0) {
+        f->spawn_caller_ip = caller_ip;
+        if (_current_fib != NULL) {
+            f->spawn_parent_pid = _current_fib->pid;
+            f->spawn_parent_gen = _current_fib->generation;
+        }
+    }
+
     _fibers[pid] = f;
 
     _live_cnt++;
@@ -1233,11 +1285,71 @@ static int64_t _spawn_impl(void *hdl, int prejoined) {
 }
 
 int64_t _tin_fiber_spawn(void *hdl) {
-    return _spawn_impl(hdl, 0);
+    return _spawn_impl(hdl, 0, 0);
 }
 
 int64_t _tin_fiber_spawn_joinable(void *hdl) {
-    return _spawn_impl(hdl, 1);
+    return _spawn_impl(hdl, 1, 0);
+}
+
+// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+// Codegen routes to these instead of the bare _tin_fiber_spawn{,_joinable}
+// when cg.stacktraceUsed; the extra caller_ip arg is the user fn's
+// llvm.returnaddress(0) at the spawn statement, which gets recorded on
+// the new fiber so a later stacktrace() can resolve the spawn site.
+int64_t _tin_fiber_spawn_chain(void *hdl, uintptr_t caller_ip) {
+    return _spawn_impl(hdl, 0, caller_ip);
+}
+
+int64_t _tin_fiber_spawn_joinable_chain(void *hdl, uintptr_t caller_ip) {
+    return _spawn_impl(hdl, 1, caller_ip);
+}
+
+// _tin_fiber_spawn_info exposes a fiber's spawn-chain record for the
+// libunwind-backed stacktrace walker. See runtime.h for the contract.
+int _tin_fiber_spawn_info(int64_t pid, int64_t expected_gen,
+                          uintptr_t *out_caller_ip,
+                          int64_t   *out_parent_pid,
+                          int64_t   *out_parent_gen) {
+    TinFiber *f = NULL;
+
+    if (pid == 0) {
+        // Current-fiber path: no _table_mu needed because the current
+        // fiber's slot is owned by this thread for the duration of this
+        // call (it's actively running). spawn_* are write-once at
+        // construction; reads are ABA-safe.
+        f = _current_fib;
+        if (f == NULL) return 0;
+    } else {
+        // Cross-fiber lookup: take _table_mu so we don't race with a
+        // concurrent reclaim. The slot might be empty, hold a different
+        // fiber (recycled), or hold the original fiber post-reclaim
+        // (generation differs). Each case returns 0.
+        pthread_mutex_lock(&_table_mu);
+        if (pid < 0 || pid >= _fiber_cap) {
+            pthread_mutex_unlock(&_table_mu);
+            return 0;
+        }
+        TinFiber *cand = _fibers[pid];
+        if (cand == NULL || cand->generation != expected_gen) {
+            pthread_mutex_unlock(&_table_mu);
+            return 0;
+        }
+        // Snapshot under the lock so we don't race with a concurrent
+        // reclaim that's about to memset the struct between our read of
+        // generation and our reads of spawn_*.
+        if (out_caller_ip)  *out_caller_ip  = cand->spawn_caller_ip;
+        if (out_parent_pid) *out_parent_pid = cand->spawn_parent_pid;
+        if (out_parent_gen) *out_parent_gen = cand->spawn_parent_gen;
+        pthread_mutex_unlock(&_table_mu);
+        return 1;
+    }
+
+    // Current-fiber branch: no lock needed.
+    if (out_caller_ip)  *out_caller_ip  = f->spawn_caller_ip;
+    if (out_parent_pid) *out_parent_pid = f->spawn_parent_pid;
+    if (out_parent_gen) *out_parent_gen = f->spawn_parent_gen;
+    return 1;
 }
 
 void _tin_fiber_complete(void *result) {

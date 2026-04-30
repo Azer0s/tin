@@ -776,17 +776,17 @@ fn{#async} main() =
   let a = spawn slow(1)
   let b = spawn slow(2)
 
-  await match [a, b]:
-    case [x, _]:   echo "a finished first: {x}"
-    case [_, y]:   echo "b finished first: {y}"
+  await match (a, b):
+    case (x, _):   echo "a finished first: {x}"
+    case (_, y):   echo "b finished first: {y}"
 ```
 
 ### Syntax
 
 ```
-await match [expr, expr, ...]:
-  case [slot, slot, ...]:          body
-  case [slot, slot, ...] if guard: body
+await match (expr, expr, ...):
+  case (slot, slot, ...):          body
+  case (slot, slot, ...) if guard: body
   default:                         body
 ```
 
@@ -827,10 +827,10 @@ polls all futures once and dispatches to the first arm whose future is done
 and guard passes. If nothing is actionable, `default` runs immediately.
 
 ```rust
-await match [a, b, c]:
-  case [x, _, _] if x > 0: echo "a done: {x}"
-  case [_, y, _]:           echo "b done: {y}"
-  case [_, _, z]:           echo "c done: {z}"
+await match (a, b, c):
+  case (x, _, _) if x > 0: echo "a done: {x}"
+  case (_, y, _):           echo "b done: {y}"
+  case (_, _, z):           echo "c done: {z}"
   default:                  echo "nothing ready yet"
 ```
 
@@ -845,11 +845,11 @@ let a = spawn slow(10)
 let b = spawn slow(20)
 let got i64 = 0
 
-await match [a, b]:
-  case [x, _] if x > 5:  got = x
-  case [x, _]:            got = -1   // unguarded fallback for a
-  case [_, y] if y > 5:  got = y
-  case [_, y]:            got = -2   // unguarded fallback for b
+await match (a, b):
+  case (x, _) if x > 5:  got = x
+  case (x, _):            got = -1   // unguarded fallback for a
+  case (_, y) if y > 5:  got = y
+  case (_, y):            got = -2   // unguarded fallback for b
 ```
 
 ---

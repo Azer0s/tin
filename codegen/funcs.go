@@ -2,7 +2,7 @@ package codegen
 
 import (
 	"fmt"
-	"os"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -275,6 +275,52 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
 
+	// Mark Tin-user functions as `internal` so clang can DCE them at -O2
+	// when no caller survives optimization, instead of carrying their full
+	// optimized body all the way through to the linker's section GC. The
+	// only escape hatches are #interop wrappers (which keep the bare name
+	// externally callable - emitted separately by emitInteropWrapperFor)
+	// and CTFE per-fn .so artifacts, which mark exports back to default
+	// visibility on a per-symbol basis.
+	//
+	// stacktrace() is the third escape hatch: when reachable in the program
+	// (cg.stacktraceUsed, set by detectStacktraceUsage before any fn is
+	// emitted), Tin user fns must keep external linkage so `-rdynamic`
+	// can export them to the dynamic symbol table for dladdr to resolve.
+	// STB_LOCAL symbols never reach the dynsym regardless of -rdynamic,
+	// so without this gate every Tin frame would render as `??+0xADDR`.
+	if !hasTag(n.Tags, "interop") && !cg.stacktraceUsed {
+		f.Linkage = enum.LinkageInternal
+	}
+
+	// #pure functions get LLVM attributes that unblock the optimizer:
+	// alwaysinline so call sites disappear; readnone + nounwind when the
+	// body has no {#allow_sideffect} escape hatch, letting LLVM hoist /
+	// CSE / dead-store-eliminate around the call.
+	cg.applyPureFuncAttrs(f, n)
+
+	// #no_inline forces the LLVM `noinline` attribute. The inliner
+	// otherwise treats one-shot internal-linkage callees as free to
+	// merge into their caller (and tail-position calls as free to
+	// share the caller's stack frame), which makes them invisible to
+	// libunwind. Mostly useful as a stacktrace-test stability knob:
+	// without this, asserting on a fn's name in a captured trace is
+	// a wager against the optimizer.
+	if hasTag(n.Tags, "no_inline") {
+		f.FuncAttrs = append(f.FuncAttrs,
+			enum.FuncAttrNoInline,
+			// disable-tail-calls keeps the frame on the stack rather
+			// than letting LLVM convert `return f()` into a `jmp` that
+			// erases this fn from the unwind chain. Must be a keyed
+			// AttrPair, NOT AttrString — AttrString would emit the
+			// whole `disable-tail-calls="true"` as one quoted string
+			// attribute name, which LLVM stores as an unrecognized
+			// attribute and silently ignores. AttrPair produces the
+			// canonical `"disable-tail-calls"="true"` shape.
+			ir.AttrPair{Key: "disable-tail-calls", Value: "true"},
+		)
+	}
+
 	if n.RetType != nil && isUnsignedTinType(n.RetType) {
 		cg.funcReturnUnsigned[irName] = true
 	}
@@ -293,6 +339,54 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	}
 
 	return nil
+}
+
+// applyPureFuncAttrs sets LLVM function attributes on f based on the Tin
+// function's purity annotation:
+//
+//   - #pure → alwaysinline (always; the inliner will substitute the body
+//     at every call site so LLVM's optimizer sees the math directly).
+//   - #pure with no {#allow_sideffect} block in the body → readnone +
+//     nounwind. This tells LLVM the call has no observable side effects
+//     and can be CSE'd, hoisted out of loops, or DCE'd when its result is
+//     unused.
+//
+// Functions that contain at least one {#allow_sideffect} block keep the
+// alwaysinline hint but skip readnone (the block may touch memory, log,
+// etc.). Non-#pure functions get neither attribute and remain at LLVM's
+// default heuristics.
+func (cg *CodeGen) applyPureFuncAttrs(f *ir.Func, n *ast.FuncDecl) {
+	if !hasTag(n.Tags, "pure") {
+		return
+	}
+
+	f.FuncAttrs = append(f.FuncAttrs, enum.FuncAttrAlwaysInline)
+
+	if !bodyHasAllowSideffect(n.Body) {
+		f.FuncAttrs = append(f.FuncAttrs,
+			enum.FuncAttrReadNone,
+			enum.FuncAttrNoUnwind,
+		)
+	}
+}
+
+// bodyHasAllowSideffect walks an AST subtree looking for any TaggedBlock
+// carrying the `allow_sideffect` tag. Used to decide whether a #pure
+// function's body is strictly pure or has an escape hatch.
+func bodyHasAllowSideffect(body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+
+	walkAST(body, func(n ast.Node) {
+		if tb, ok := n.(*ast.TaggedBlock); ok && hasTag(tb.Tags, "allow_sideffect") {
+			found = true
+		}
+	})
+
+	return found
 }
 
 // Pre-registration pass
@@ -392,7 +486,11 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 
 		switch lit := n.Value.(type) {
 		case *ast.IntLit:
-			cv = constant.NewInt(irtypes.I64, lit.Value)
+			if lit.Big != nil {
+				cv = &constant.Int{Typ: irtypes.I128, X: new(big.Int).Set(lit.Big)}
+			} else {
+				cv = constant.NewInt(irtypes.I64, lit.Value)
+			}
 		case *ast.FloatLit:
 			cv = constant.NewFloat(irtypes.Double, lit.Value)
 		case *ast.BoolLit:
@@ -712,7 +810,40 @@ func (cg *CodeGen) resolveMutualTCOCallee(name string) (*ir.Func, bool) {
 		}
 	}
 
+	// LLVM's musttail tail-call elimination refuses any caller whose frame
+	// still has live allocas at the call site. A trivial pass-through fn
+	// like `fn from(v f64) Value = return from_f64_impl(v)` spills `v` to
+	// an alloca first, which is enough to break musttail. Skip when we can
+	// see allocas in the caller's entry block.
+	if hasAllocaInsts(cg.curFn) {
+		return nil, false
+	}
+
 	return callee, true
+}
+
+// hasAllocaInsts reports whether fn currently contains any alloca
+// instructions in any of its emitted blocks. Used to gate mutual TCO so
+// musttail isn't requested from a frame that LLVM cannot pop.
+//
+// We scan every block, not just the entry, because allocas can be added
+// past the call site (e.g. a deferred string interp builds an alloca in
+// a successor block) and any live alloca anywhere in the function would
+// keep LLVM from rewriting the musttail into a real tail jump.
+func hasAllocaInsts(fn *ir.Func) bool {
+	if fn == nil {
+		return false
+	}
+
+	for _, blk := range fn.Blocks {
+		for _, inst := range blk.Insts {
+			if _, ok := inst.(*ir.InstAlloca); ok {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // emitMutualTCO emits a musttail call to callee and returns its result,
@@ -879,12 +1010,11 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// can generate a proper C `i32 @main()` wrapper that passes default args
 	// and returns the result (or 0 for void).
 	if n.Name == "main" && !n.IsStatic {
-		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) && !cg.noWarnAsyncMain {
-			_, _ = fmt.Fprintf(os.Stderr,
-				"tin: warning: main() uses 'spawn' or 'await' but is not marked async.\n"+
-					"    Each await in a non-async main() creates a temporary fiber, which is slower\n"+
-					"    and bypasses inline channel optimizations.\n"+
-					"    Fix: change 'fn main()' to 'fn{#async} main()'\n")
+		if !isAsyncTag(n.Tags) && bodyContainsSpawnOrAwait([]ast.Node{n.Body}) {
+			cg.warn(DiagAsyncMain, n.Pos(),
+				"main() uses 'spawn' or 'await' but is not marked async; "+
+					"each await creates a temporary fiber, which is slower and bypasses "+
+					"inline channel optimizations. Fix: change 'fn main()' to 'fn{#async} main()'")
 		}
 
 		irName = "_tin_user_main"
@@ -932,14 +1062,39 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 // genStructMethod generates a struct method body using a struct-qualified IR name.
 func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 	key := methodScopeName(structName, m)
+
+	var irName string
+
 	// Overloading: use the mangled name when this method belongs to an overload set.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
+		irName = overloadMangledName(key, sig)
 
-		return cg.genFuncDeclAs(m, overloadMangledName(key, sig))
+		if err := cg.genFuncDeclAs(m, irName); err != nil {
+			return err
+		}
+	} else {
+		irName = key
+
+		if err := cg.genFuncDeclAs(m, irName); err != nil {
+			return err
+		}
 	}
 
-	return cg.genFuncDeclAs(m, key)
+	// Index op-trait impls so genBinExpr / genUnaryExpr can dispatch to
+	// methods declared inside imported packages. Without this, structs
+	// loaded via `use pkg` would only have their op-trait impls visible
+	// when the struct is declared at top level (where predeclareMethod
+	// runs the same registration).
+	if traitName := extractOpTraitName(m.TraitQualifier); traitName != "" {
+		if entry, ok := cg.curScope.lookup(irName); ok {
+			if fn, ok2 := entry.val.(*ir.Func); ok2 {
+				cg.recordOpTraitImpl(structName, traitName, fn)
+			}
+		}
+	}
+
+	return nil
 }
 
 // genFuncDeclAs generates a function using scopeName as the IR/scope name.
@@ -1236,8 +1391,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevMutated := cg.mutatedNames
 	cg.mutatedNames = collectMutatedNames(n.Body)
 
+	// {#unsafe} is a lexical block scope - a function defined inside an
+	// unsafe block must NOT inherit the depth into its body. Reset the
+	// counter on every function-body boundary and restore on exit.
+	prevUnsafe := cg.unsafeDepth
+	cg.unsafeDepth = 0
+
 	defer func() {
 		cg.mutatedNames = prevMutated
+		cg.unsafeDepth = prevUnsafe
 	}()
 
 	var retType irtypes.Type = irtypes.Void
@@ -1914,7 +2076,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type, declPos: n.Pos()})
+		cg.warnIfBuiltinShadow("param", astParam.Name, n.Pos())
 
 		if llIdx == 1 {
 			firstParamAlloca = alloca
@@ -2067,12 +2230,11 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 // genImplicitMain creates a main() function containing the top-level statements.
 func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
-	if bodyContainsSpawnOrAwait(stmts) && !cg.noWarnAsyncMain {
-		_, _ = fmt.Fprintf(os.Stderr,
-			"tin: warning: top-level statements use 'spawn' or 'await' but there is no async main().\n"+
-				"    Each await at the top level creates a temporary fiber, which is slower\n"+
-				"    and bypasses inline channel optimizations.\n"+
-				"    Fix: wrap your code in 'fn{#async} main() = ...' instead\n")
+	if bodyContainsSpawnOrAwait(stmts) && len(stmts) > 0 {
+		cg.warn(DiagAsyncMain, stmts[0].Pos(),
+			"top-level statements use 'spawn' or 'await' but there is no async main(); "+
+				"each await at the top level creates a temporary fiber, which is slower and "+
+				"bypasses inline channel optimizations. Fix: wrap your code in 'fn{#async} main() = ...' instead")
 	}
 
 	f := cg.mod.NewFunc("main", irtypes.I32)

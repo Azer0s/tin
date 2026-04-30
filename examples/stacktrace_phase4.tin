@@ -1,0 +1,33 @@
+// stacktrace_phase4.tin - cross-fiber spawn-chain capture.
+//
+// A fiber spawned from main calls stacktrace(); the trace must contain
+// the live frames of the fiber AND a `<spawn-of>:` frame pointing back
+// at the spawn site. Without spawn-chain capture the trace would
+// silently end at the fiber's bottom and hide everything above it.
+//
+// Fiber frames resolve via libunwind's unw_get_proc_name (which reads
+// .symtab and so sees the LLVM-generated `$coro.resume/.destroy/.cleanup`
+// clones with internal linkage). The dladdr-only fallback would render
+// those as `??+0x...`, which the assertion below would catch.
+use assert
+use strings
+
+fn{#async} child() [atom] = return stacktrace()
+
+test "stacktrace inside a spawned fiber appends a <spawn-of>: frame" =
+  let frames [atom] = await spawn child()
+
+  // At least the child fiber's coro frame plus a spawn-of entry.
+  assert::ok(len(frames) >= 2)
+
+  // Verify a live fiber frame resolved via unw_get_proc_name. Without
+  // the symtab-aware resolver this would be "??+0x..." since CoroSplit
+  // emits resume/destroy/cleanup at internal linkage.
+  let live string = frames[0] as string
+  assert::ok(!strings::has_prefix(live, "'\"??+"))
+
+  // Verify the spawn-of frame sits at the bottom of the trace. The
+  // top-level test runner spawns the test body as a fiber, so the
+  // chain entry points back there.
+  let last string = frames[len(frames) - 1] as string
+  assert::ok(strings::contains(last, "<spawn-of>:"))

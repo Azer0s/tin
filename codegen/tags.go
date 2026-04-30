@@ -59,19 +59,39 @@ func (cg *CodeGen) checkAllPureFuncs() error {
 // checkPureBody verifies that fn is actually pure by walking its body.
 // A function is pure if it contains no echo statements, no calls to
 // #sideffect or extern functions, no indirect (function-pointer) calls,
-// and no calls to unverifiable external package functions -
-// except inside #allow_sideffect blocks.
+// no calls to unverifiable external package functions, and no reads or
+// writes of mutable top-level `var` globals - except inside
+// #allow_sideffect blocks.
 func (cg *CodeGen) checkPureBody(fn *ast.FuncDecl) error {
 	visited := make(map[string]bool)
 
-	return cg.walkPureNode(fn.Name, fn.Body, false, visited)
+	locals := make(map[string]bool, len(fn.Params))
+	for _, p := range fn.Params {
+		locals[p.Name] = true
+	}
+
+	return cg.walkPureNode(fn.Name, fn.Body, false, visited, locals)
+}
+
+// cloneLocals returns a shallow copy of locals so a child scope can extend
+// its bindings without leaking them back to siblings of its enclosing scope.
+func cloneLocals(locals map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(locals))
+	for k, v := range locals {
+		out[k] = v
+	}
+
+	return out
 }
 
 // walkPureNode walks an AST node looking for side-effect violations.
 // fnCtx is the name of the #pure function being checked (for error messages).
 // allowSideEffect is true when we're inside an #allow_sideffect block.
 // visited prevents infinite recursion when following the call graph.
-func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect bool, visited map[string]bool) error {
+// locals tracks identifiers introduced by params, let-bindings, and for-iter
+// vars so that an Identifier read can be matched against the top-level var
+// set without false positives when a local shadows a global of the same name.
+func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect bool, visited map[string]bool, locals map[string]bool) error {
 	if node == nil {
 		return nil
 	}
@@ -82,11 +102,31 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 			return cg.nodeErr(v, "fn %s: #pure violation - echo is a side effect", fnCtx)
 		}
 
+	case *ast.Identifier:
+		if !allowSideEffect && cg.topLevelVarBareNames[v.Name] && !locals[v.Name] {
+			return cg.nodeErr(v, "fn %s: #pure violation - reads mutable top-level var %q", fnCtx, v.Name)
+		}
+
+	case *ast.ScopeAccess:
+		// pkg::name read: reject if it resolves to a mutable top-level var in
+		// any package. The bare name is the last path segment.
+		//
+		// This is a heuristic: a false positive occurs only when one package
+		// exports a function (or other identifier) whose bare name matches a
+		// `var` declared in a different package. In practice the cross-pkg
+		// collision is rare; users hitting it can rename one of the two.
+		if !allowSideEffect && len(v.Path) > 0 {
+			last := v.Path[len(v.Path)-1]
+			if cg.topLevelVarBareNames[last] {
+				return cg.nodeErr(v, "fn %s: #pure violation - reads mutable top-level var %q", fnCtx, last)
+			}
+		}
+
 	case *ast.TaggedBlock:
 		// #allow_sideffect block: permit side effects inside
 		inner := allowSideEffect || hasTag(v.Tags, "allow_sideffect")
 
-		return cg.walkPureNode(fnCtx, v.Body, inner, visited)
+		return cg.walkPureNode(fnCtx, v.Body, inner, visited, locals)
 
 	case *ast.CallExpr:
 		if !allowSideEffect {
@@ -96,129 +136,352 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 		}
 		// Also walk argument expressions
 		for _, arg := range v.Args {
-			if err := cg.walkPureNode(fnCtx, arg, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, arg, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
 		}
 
 	case *ast.Block:
+		// Each block establishes its own scope: clone locals so let-bindings
+		// introduced inside this block do not escape to enclosing siblings.
+		blockLocals := cloneLocals(locals)
 		for _, s := range v.Stmts {
-			if err := cg.walkPureNode(fnCtx, s, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, s, allowSideEffect, visited, blockLocals); err != nil {
 				return err
 			}
 		}
 
 	case *ast.IfStmt:
-		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
 		if v.Then != nil {
-			if err := cg.walkPureNode(fnCtx, v.Then, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, v.Then, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
 		}
 
 		for _, ei := range v.ElseIfs {
-			if err := cg.walkPureNode(fnCtx, ei.Cond, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, ei.Cond, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
 
 			if ei.Body != nil {
-				if err := cg.walkPureNode(fnCtx, ei.Body, allowSideEffect, visited); err != nil {
+				if err := cg.walkPureNode(fnCtx, ei.Body, allowSideEffect, visited, locals); err != nil {
 					return err
 				}
 			}
 		}
 
 		if v.Else != nil {
-			if err := cg.walkPureNode(fnCtx, v.Else, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, v.Else, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
 		}
 
 	case *ast.ForStmt:
-		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited); err != nil {
+		// For-loops introduce their iter var (and any C-style init) in a fresh
+		// scope that does not leak past the loop.
+		forLocals := cloneLocals(locals)
+		if v.VarName != "" {
+			forLocals[v.VarName] = true
+		}
+
+		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited, forLocals); err != nil {
 			return err
 		}
 
-		if err := cg.walkPureNode(fnCtx, v.Init, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Init, allowSideEffect, visited, forLocals); err != nil {
 			return err
 		}
 
-		if err := cg.walkPureNode(fnCtx, v.Post, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Post, allowSideEffect, visited, forLocals); err != nil {
 			return err
 		}
 
-		if err := cg.walkPureNode(fnCtx, v.Iter, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Iter, allowSideEffect, visited, forLocals); err != nil {
 			return err
 		}
 
 		if v.Body != nil {
-			if err := cg.walkPureNode(fnCtx, v.Body, allowSideEffect, visited); err != nil {
+			if err := cg.walkPureNode(fnCtx, v.Body, allowSideEffect, visited, forLocals); err != nil {
 				return err
 			}
 		}
 
 	case *ast.ReturnStmt:
-		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals)
 
 	case *ast.AssignStmt:
-		if err := cg.walkPureNode(fnCtx, v.Target, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Target, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
-		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals)
 
 	case *ast.AugAssignStmt:
-		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
+		if err := cg.walkPureNode(fnCtx, v.Target, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals)
 
 	case *ast.VarDecl:
-		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited)
+		// Walk the initializer in the OLD scope, then introduce the binding so
+		// `let x = x` reads the outer x but later refs see the new local.
+		if err := cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		locals[v.Name] = true
 
 	case *ast.ExprStmt:
-		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
 
 	case *ast.BinExpr:
-		if err := cg.walkPureNode(fnCtx, v.Left, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Left, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
-		return cg.walkPureNode(fnCtx, v.Right, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Right, allowSideEffect, visited, locals)
 
 	case *ast.UnaryExpr:
-		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
 
 	case *ast.TernaryExpr:
-		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Cond, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
-		if err := cg.walkPureNode(fnCtx, v.Then, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Then, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
-		return cg.walkPureNode(fnCtx, v.Else, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Else, allowSideEffect, visited, locals)
 
 	case *ast.FieldAccess:
-		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
 
 	case *ast.IndexExpr:
-		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited); err != nil {
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
 			return err
 		}
 
-		return cg.walkPureNode(fnCtx, v.Index, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Index, allowSideEffect, visited, locals)
 
 	case *ast.DeferStmt:
-		return cg.walkPureNode(fnCtx, v.Call, allowSideEffect, visited)
+		return cg.walkPureNode(fnCtx, v.Call, allowSideEffect, visited, locals)
 
 	case *ast.WhereList:
 		for _, c := range v.Clauses {
-			if err := cg.walkPureNode(fnCtx, c.Body, allowSideEffect, visited); err != nil {
+			if c.Cond != nil {
+				if err := cg.walkPureNode(fnCtx, c.Cond, allowSideEffect, visited, locals); err != nil {
+					return err
+				}
+			}
+
+			if err := cg.walkPureNode(fnCtx, c.Body, allowSideEffect, visited, locals); err != nil {
 				return err
 			}
 		}
+
+	case *ast.MatchStmt:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		for _, c := range v.Cases {
+			caseLocals := cloneLocals(locals)
+			if c.VarName != "" {
+				caseLocals[c.VarName] = true
+			}
+
+			if err := cg.walkPureNode(fnCtx, c.Pattern, allowSideEffect, visited, caseLocals); err != nil {
+				return err
+			}
+
+			if c.Guard != nil {
+				if err := cg.walkPureNode(fnCtx, c.Guard, allowSideEffect, visited, caseLocals); err != nil {
+					return err
+				}
+			}
+
+			if c.Body != nil {
+				if err := cg.walkPureNode(fnCtx, c.Body, allowSideEffect, visited, caseLocals); err != nil {
+					return err
+				}
+			}
+		}
+
+		if v.Default != nil {
+			if err := cg.walkPureNode(fnCtx, v.Default, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.StructLit:
+		for _, f := range v.Fields {
+			if err := cg.walkPureNode(fnCtx, f.Value, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+		for _, p := range v.Positional {
+			if err := cg.walkPureNode(fnCtx, p, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.ArrayLit:
+		for _, e := range v.Elems {
+			if err := cg.walkPureNode(fnCtx, e, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.ArrayFillLit:
+		return cg.walkPureNode(fnCtx, v.Value, allowSideEffect, visited, locals)
+
+	case *ast.TupleLit:
+		for _, e := range v.Elems {
+			if err := cg.walkPureNode(fnCtx, e, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.RangeExpr:
+		if err := cg.walkPureNode(fnCtx, v.Start, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.End, allowSideEffect, visited, locals)
+
+	case *ast.SliceExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		if err := cg.walkPureNode(fnCtx, v.Start, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.End, allowSideEffect, visited, locals)
+
+	case *ast.InterpolatedString:
+		for _, p := range v.Parts {
+			if !p.IsExpr {
+				continue
+			}
+
+			if err := cg.walkPureNode(fnCtx, p.Expr, allowSideEffect, visited, locals); err != nil {
+				return err
+			}
+		}
+
+	case *ast.IsExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+		// Note: v.Pattern may bind v.VarName in the surrounding scope, but
+		// the binding is only visible to the consequent branch which the
+		// IfStmt handler will walk after this expression returns.
+
+	case *ast.AsExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.TypeAssertExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.TypeofExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.AddrExpr:
+		return cg.walkPureNode(fnCtx, v.Val, allowSideEffect, visited, locals)
+
+	case *ast.DerefExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.AddressOfExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.PostfixStmt:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.PipeExpr:
+		if err := cg.walkPureNode(fnCtx, v.Left, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Right, allowSideEffect, visited, locals)
+
+	case *ast.GetfieldExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals)
+
+	case *ast.SetfieldExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		if err := cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Val, allowSideEffect, visited, locals)
+
+	case *ast.LambdaExpr:
+		// A lambda body referenced inside a #pure function is itself opaque
+		// to the static checker (it may close over arbitrary state). Reject
+		// to be conservative; users can move the body into a separate #pure
+		// function if they need static folding.
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - lambda expressions are not verifiable", fnCtx)
+		}
+
+	case *ast.SpawnExpr:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - spawn launches a fiber (side effect)", fnCtx)
+		}
+
+	case *ast.AwaitExpr:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - await blocks on a fiber (side effect)", fnCtx)
+		}
+
+	case *ast.YieldStmt:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - yield is a side effect", fnCtx)
+		}
+
+	case *ast.AwaitMatchStmt:
+		if !allowSideEffect {
+			return cg.nodeErr(v, "fn %s: #pure violation - await match is a side effect", fnCtx)
+		}
+
+	case *ast.DefaultExpr:
+		if v.OfExpr != nil {
+			return cg.walkPureNode(fnCtx, v.OfExpr, allowSideEffect, visited, locals)
+		}
+
+	case *ast.FieldnamesExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.FieldtypesExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
+
+	case *ast.FieldtagExpr:
+		if err := cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals); err != nil {
+			return err
+		}
+
+		return cg.walkPureNode(fnCtx, v.Field, allowSideEffect, visited, locals)
+
+	case *ast.TraitofExpr:
+		return cg.walkPureNode(fnCtx, v.Expr, allowSideEffect, visited, locals)
 	}
 
 	return nil
@@ -275,7 +538,13 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 			}
 
 			visited[key] = true
-			if err := cg.walkPureNode(fnCtx, fd.Body, false, visited); err != nil {
+
+			calleeLocals := make(map[string]bool, len(fd.Params))
+			for _, p := range fd.Params {
+				calleeLocals[p.Name] = true
+			}
+
+			if err := cg.walkPureNode(fnCtx, fd.Body, false, visited, calleeLocals); err != nil {
 				return err
 			}
 		}
@@ -317,9 +586,14 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 		return fmt.Errorf("fn %s: #pure violation - calls extern function %q", fnCtx, calleeName)
 	}
 
-	// Transitively check the callee's body
+	// Transitively check the callee's body. Seed locals from the callee's own
+	// params so reads of its parameters are not mistaken for global reads.
+	calleeLocals := make(map[string]bool, len(fd.Params))
+	for _, p := range fd.Params {
+		calleeLocals[p.Name] = true
+	}
 
-	return cg.walkPureNode(fnCtx, fd.Body, false, visited)
+	return cg.walkPureNode(fnCtx, fd.Body, false, visited, calleeLocals)
 }
 
 // ---------------------------------------------------------------------------

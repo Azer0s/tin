@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -269,7 +270,15 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
 		}
 
-		cst := constant.NewInt(arg.llvmTyp.(*irtypes.IntType), p.Value)
+		argInt := arg.llvmTyp.(*irtypes.IntType)
+
+		var cst *constant.Int
+		if p.Big != nil {
+			cst = &constant.Int{Typ: argInt, X: new(big.Int).Set(p.Big)}
+		} else {
+			cst = constant.NewInt(argInt, p.Value)
+		}
+
 		cond := block.NewICmp(enum.IPredEQ, arg.val, cst)
 		next := cg.newBlock("where.pat.litok")
 		block.NewCondBr(cond, next, failBlock)

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -320,6 +321,16 @@ func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenTyp
 	return left, nil
 }
 
+// parseUnary handles prefix unary operators. `-x as T`, `!x as T`, and
+// `~x as T` keep their long-standing meaning of `-(x as T)` / `!(x as T)`
+// / `~(x as T)`: the inner `as` cast happens first, so out-of-range
+// literals like `-9999999999999999999 as i128` widen before negating.
+//
+// Pointer-shape operators (`&`, `*`) are different. There the user almost
+// always means "cast the result of the address-of" rather than "take the
+// address of an AsExpr" (the latter isn't an lvalue and produced a
+// codegen error). So those bind TIGHTER than `as` / `is` and any postfix
+// cast applies to the wrapping expression.
 func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.match(lexer.NOT, lexer.MINUS, lexer.TILDE) {
 		opTok := p.advance()
@@ -339,18 +350,48 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	if p.check(lexer.STAR) {
 		p.advance()
 
-		expr, err := p.parseUnary()
+		expr, err := p.parsePointerOperand()
+		if err != nil {
+			return nil, err
+		}
+
+		return p.applyPostfixCasts(&ast.DerefExpr{Expr: expr})
+	}
+	// Address-of: &expr
+	if p.check(lexer.AMP) {
+		p.advance()
+
+		expr, err := p.parsePointerOperand()
+		if err != nil {
+			return nil, err
+		}
+
+		return p.applyPostfixCasts(&ast.AddressOfExpr{Expr: expr})
+	}
+
+	return p.parsePostfix()
+}
+
+// parsePointerOperand parses the operand of a `&` or `*` so that
+// chained pointer ops still nest (`**p`, `&&x`) but a postfix `as` /
+// `is` does NOT get consumed at the inner level. The outer caller wraps
+// the resulting unary node and then offers the cast a chance.
+func (p *Parser) parsePointerOperand() (ast.Node, error) {
+	if p.check(lexer.STAR) {
+		p.advance()
+
+		expr, err := p.parsePointerOperand()
 		if err != nil {
 			return nil, err
 		}
 
 		return &ast.DerefExpr{Expr: expr}, nil
 	}
-	// Address-of: &expr
+
 	if p.check(lexer.AMP) {
 		p.advance()
 
-		expr, err := p.parseUnary()
+		expr, err := p.parsePointerOperand()
 		if err != nil {
 			return nil, err
 		}
@@ -358,7 +399,130 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 		return &ast.AddressOfExpr{Expr: expr}, nil
 	}
 
+	return p.parsePostfixNoCast()
+}
+
+// parsePostfixNoCast is the same suffix walk parsePostfix runs (member
+// access, calls, indexing, struct lit, type assert, method-chain INDENT
+// continuation) but stops when it sees `as` or `is`. Used by `&` / `*`
+// so the cast attaches to the enclosing unary expression instead.
+//
+// The suppression counter is at the parser level rather than threaded
+// through arguments, so it transparently survives parsePrimary's recursive
+// dispatch (BinExpr, etc.). Sub-expressions inside parens reset the counter
+// (see parsePrimary's `(` handler) so legitimate inner casts like
+// `*(r as *T)` still parse: the outer `*` doesn't consume `as`, but the
+// paren-wrapped inner expression sees a fresh counter.
+func (p *Parser) parsePostfixNoCast() (ast.Node, error) {
+	p.suppressPostfixCast++
+
+	defer func() { p.suppressPostfixCast-- }()
+
 	return p.parsePostfix()
+}
+
+// applyPostfixCasts wraps `expr` in any chain of `as T` / `is T` postfix
+// casts that immediately follow. Used by parseUnary's `&` / `*` arms so
+// `&x as T` becomes `(&x) as T`.
+func (p *Parser) applyPostfixCasts(expr ast.Node) (ast.Node, error) {
+	for {
+		var (
+			next ast.Node
+			err  error
+		)
+
+		switch p.peek().Type {
+		case lexer.KW_AS:
+			next, err = p.parseAsSuffix(expr)
+		case lexer.KW_IS:
+			next, err = p.parseIsSuffix(expr)
+		default:
+			return expr, nil
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		expr = next
+	}
+}
+
+// parseAsSuffix parses `as <type>` and wraps `expr` in an AsExpr.
+// Caller must have just peeked KW_AS.
+func (p *Parser) parseAsSuffix(expr ast.Node) (ast.Node, error) {
+	p.advance() // consume `as`
+
+	typ, err := p.parseTypeExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	asExpr := &ast.AsExpr{Expr: expr, Type: typ}
+	asExpr.SetPos(expr.Pos())
+
+	return asExpr, nil
+}
+
+// parseIsSuffix parses `is <type>` / `is <name> <type>` /
+// `is <Variant>(args...)` and wraps `expr` in an IsExpr. Caller must
+// have just peeked KW_IS.
+func (p *Parser) parseIsSuffix(expr ast.Node) (ast.Node, error) {
+	p.advance() // consume `is`
+
+	isExpr := &ast.IsExpr{Expr: expr}
+
+	if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
+		ctorPos := p.curPos()
+		ctorName := p.advance().Literal
+
+		if _, err := p.expect(lexer.LPAREN); err != nil {
+			return nil, err
+		}
+
+		var args []ast.Node
+
+		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			arg, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			args = append(args, arg)
+
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+
+		fn := &ast.Identifier{Name: ctorName}
+		fn.SetPos(ctorPos)
+		call := &ast.CallExpr{Func: fn, Args: args}
+		call.SetPos(ctorPos)
+
+		isExpr.Pattern = call
+
+		return isExpr, nil
+	}
+
+	if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
+		isExpr.VarName = p.advance().Literal
+	}
+
+	if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
+		var err error
+
+		isExpr.Type, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return isExpr, nil
 }
 
 func (p *Parser) parsePostfix() (ast.Node, error) {
@@ -399,6 +563,19 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		switch p.peek().Type {
 		case lexer.DOT:
 			p.advance()
+			// Trailing dot continuation: `foo.` <newline> `  bar()`. Skip
+			// NEWLINE + optional INDENT after the dot so the identifier on
+			// the next line completes the field access. Mirror of the leading-
+			// dot continuation handled above the switch.
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+
+				if p.check(lexer.INDENT) {
+					p.advance()
+
+					indentConsumed++
+				}
+			}
 			// .(Type) or .(type)
 			if p.check(lexer.LPAREN) {
 				p.advance()
@@ -449,6 +626,16 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 		case lexer.ARROW:
 			p.advance()
 
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+
+				if p.check(lexer.INDENT) {
+					p.advance()
+
+					indentConsumed++
+				}
+			}
+
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
 				return nil, err2
@@ -468,6 +655,16 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.DCOLON:
 			p.advance()
+
+			if p.check(lexer.NEWLINE) {
+				p.advance()
+
+				if p.check(lexer.INDENT) {
+					p.advance()
+
+					indentConsumed++
+				}
+			}
 
 			field, err2 := p.expect(lexer.IDENT)
 			if err2 != nil {
@@ -632,7 +829,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					return nil, err2
 				}
 
-				expr = &ast.IndexExpr{Expr: expr, Index: start}
+				idxExpr := &ast.IndexExpr{Expr: expr, Index: start}
+				idxExpr.SetPos(expr.Pos())
+				expr = idxExpr
 
 				// pkg::Type[T]{...} - generic struct literal with package qualifier
 				if p.check(lexer.LBRACE) {
@@ -688,77 +887,28 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			expr = ast.NewCallExpr(expr, args, callTok.Line, callTok.Col)
 
 		case lexer.KW_AS:
-			p.advance()
-
-			typ, err2 := p.parseTypeExpr()
-			if err2 != nil {
-				return nil, err2
+			if p.suppressPostfixCast > 0 {
+				return expr, nil
 			}
 
-			expr = &ast.AsExpr{Expr: expr, Type: typ}
+			next, err := p.parseAsSuffix(expr)
+			if err != nil {
+				return nil, err
+			}
+
+			expr = next
 
 		case lexer.KW_IS:
-			p.advance()
-
-			isExpr := &ast.IsExpr{Expr: expr}
-
-			// ADT constructor pattern: `x is Ok(v)`. The call-expression form
-			// is unambiguously a constructor pattern (types don't appear as
-			// `IDENT(...)` in Tin). Nullary variants like `x is None` parse
-			// through the Type path and are resolved in codegen by looking
-			// up the identifier against registered ADT variants.
-			if p.check(lexer.IDENT) && p.peekAt(1).Type == lexer.LPAREN {
-				ctorPos := p.curPos()
-				ctorName := p.advance().Literal
-
-				if _, err2 := p.expect(lexer.LPAREN); err2 != nil {
-					return nil, err2
-				}
-
-				var args []ast.Node
-
-				for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-					arg, err2 := p.parseExpr()
-					if err2 != nil {
-						return nil, err2
-					}
-
-					args = append(args, arg)
-
-					if p.check(lexer.COMMA) {
-						p.advance()
-					}
-				}
-
-				if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
-					return nil, err2
-				}
-
-				fn := &ast.Identifier{Name: ctorName}
-				fn.SetPos(ctorPos)
-				call := &ast.CallExpr{Func: fn, Args: args}
-				call.SetPos(ctorPos)
-
-				isExpr.Pattern = call
-				expr = isExpr
-
-				continue
+			if p.suppressPostfixCast > 0 {
+				return expr, nil
 			}
 
-			if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
-				isExpr.VarName = p.advance().Literal
+			next, err := p.parseIsSuffix(expr)
+			if err != nil {
+				return nil, err
 			}
 
-			if !p.match(lexer.NEWLINE, lexer.COLON, lexer.EOF) {
-				var err2 error
-
-				isExpr.Type, err2 = p.parseTypeExpr()
-				if err2 != nil {
-					return nil, err2
-				}
-			}
-
-			expr = isExpr
+			expr = next
 
 		default:
 			// Consume any pending DEDENTs from method-chain INDENT continuation.
@@ -821,6 +971,56 @@ func (p *Parser) parseArgList() ([]ast.Node, error) {
 	return args, nil
 }
 
+// parseIntLitToken converts the textual form of an integer literal into an
+// ast.IntLit. Two encodings coexist:
+//
+//   - Within u64 range: stored in IntLit.Value as the i64 bit pattern. This
+//     preserves existing behavior for hex constants like 0xffffffffffffffff
+//     (-1 as i64, 18446744073709551615 as u64) where the variable's declared
+//     type decides signedness.
+//   - Above u64 range: IntLit.Big is set to the exact magnitude, and Value
+//     keeps the bottom 64 bits as a fallback. Codegen reads Big to emit an
+//     i128 constant (auto-upgrade); paths that ignore Big see the truncated
+//     bottom 64 bits, matching the behavior of explicit truncation.
+func parseIntLitToken(lit string) *ast.IntLit {
+	if v, err := strconv.ParseInt(lit, 0, 64); err == nil {
+		return &ast.IntLit{Value: v}
+	}
+
+	if uv, err := strconv.ParseUint(lit, 0, 64); err == nil {
+		return &ast.IntLit{Value: int64(uv)}
+	}
+
+	// Exceeds u64. Parse as big.Int (handles 0x prefix) and stash both the
+	// big magnitude and a bit-truncated i64 view.
+	base := 10
+
+	s := lit
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		base = 16
+		s = s[2:]
+	} else if strings.HasPrefix(s, "0b") || strings.HasPrefix(s, "0B") {
+		base = 2
+		s = s[2:]
+	} else if strings.HasPrefix(s, "0o") || strings.HasPrefix(s, "0O") {
+		base = 8
+		s = s[2:]
+	}
+
+	bigVal, ok := new(big.Int).SetString(s, base)
+	if !ok {
+		// Lexer should have rejected malformed digits already; fall back to
+		// zero rather than panicking in the And() below.
+		return &ast.IntLit{Value: 0}
+	}
+
+	low := new(big.Int).And(bigVal, mask64).Int64()
+
+	return &ast.IntLit{Value: low, Big: bigVal}
+}
+
+var mask64 = new(big.Int).SetUint64(^uint64(0))
+
 func (p *Parser) parsePrimary() (ast.Node, error) {
 	tok := p.peek()
 	pos := p.curPos()
@@ -830,18 +1030,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.INT_LIT:
 		p.advance()
 
-		v, err := strconv.ParseInt(tok.Literal, 0, 64)
-		if err != nil {
-			// Large hex/decimal literals that exceed max int64 (e.g. u64 constants
-			// like 0xffffffffffffffff): parse as uint64 and reinterpret bits as int64.
-			// The LLVM IR constant stores the bits unchanged; signedness is determined
-			// by the declared variable type, not the literal.
-			if uv, uerr := strconv.ParseUint(tok.Literal, 0, 64); uerr == nil {
-				v = int64(uv)
-			}
-		}
-
-		return &ast.IntLit{Value: v}, nil
+		return parseIntLitToken(tok.Literal), nil
 
 	case lexer.FLOAT_LIT:
 		p.advance()
@@ -879,14 +1068,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		case lexer.INT_LIT:
 			p.advance()
 
-			v, err := strconv.ParseInt(next.Literal, 0, 64)
-			if err != nil {
-				if uv, uerr := strconv.ParseUint(next.Literal, 0, 64); uerr == nil {
-					v = int64(uv)
-				}
-			}
-
-			return &ast.IntLit{Value: v}, nil
+			return parseIntLitToken(next.Literal), nil
 		default:
 			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
 				next.Line, next.Literal)
@@ -1162,6 +1344,13 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.LPAREN:
 		p.advance()
+		// Reset the postfix-cast suppression for the inner expression: a
+		// `*(r as *T)` should let the inner `r as *T` parse normally; the
+		// suppression only affects the outer pointer operator.
+		savedSuppress := p.suppressPostfixCast
+		p.suppressPostfixCast = 0
+
+		defer func() { p.suppressPostfixCast = savedSuppress }()
 		// Block expression: (let x = ...; expr) - produced by CTFE macro splices.
 		// Parsed as a sequence of statements terminated by ')'; the last statement
 		// must be an expression whose value is returned.

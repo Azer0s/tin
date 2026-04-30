@@ -1,0 +1,230 @@
+// stdlib/encoding/csv - RFC 4180 CSV reader and writer.
+//
+// Handles the core RFC 4180 grammar: fields separated by `delim` (default
+// comma), records separated by LF or CRLF, fields optionally enclosed in
+// double quotes, and a literal quote inside a quoted field encoded as `""`.
+// Embedded commas and newlines are allowed inside quoted fields.
+//
+// ## Quick start
+//
+//   use encoding::csv
+//
+//   let text = "name,age\nAlice,30\nBob,25\n"
+//   let rows = csv::parse(text)
+//   echo rows[1][0]    // "Alice"
+//
+//   let out = csv::encode([
+//     ["name", "age"],
+//     ["Alice", "30"],
+//     ["Bob, the second", "25"],
+//   ])
+//   echo out
+//
+// Streaming form for large inputs:
+//
+//   let r = csv::reader(text)
+//   let (row, ok) = r.next()
+//   for ok:
+//     // ... process row ([string]) ...
+//     let (next_row, next_ok) = r.next()
+//     row = next_row
+//     ok = next_ok
+//
+// Configurable delimiter for tab-separated values:
+//
+//   let r = csv::reader_with(text, @'\t' as byte)
+//
+// ## Notes
+//
+// - The parser tolerates a missing trailing newline.
+// - Empty lines between rows produce a single empty field (matching how
+//   `awk -F,` parses them); pre-strip them if you need true skips.
+// - Field count per row is whatever the input had; rows can disagree in
+//   width and the caller must validate.
+
+use str
+
+const MAX_FIELDS_PER_ROW i64 = 256
+
+// Reader streams rows from a CSV source string. Construct with
+// `csv::reader(text)` or `csv::reader_with(text, delim)` and call
+// `.next()` until it returns ok=false.
+struct Reader =
+  src   string
+  pos   i64
+  delim byte
+  done  bool
+
+  // next returns the next row and ok=true. On EOF returns
+  // ([empty], false).
+  fn next(this *Reader) ([string], bool) =
+    if this.done:
+      let empty [string] = []
+      return (empty, false)
+    if this.pos >= len(this.src):
+      this.done = true
+      let empty [string] = []
+      return (empty, false)
+    let row [string] = []
+    let in_quoted = false
+    let cur = ""
+    let n = len(this.src)
+    let row_done = false
+    let just_started_field = true
+    for !row_done:
+      if this.pos >= n:
+        // EOF terminates the current row.
+        row ++= cur
+        this.done = true
+        row_done = true
+      else:
+        let c = this.src[this.pos]
+        if in_quoted:
+          if c == @'\"':
+            // Look at next char: another quote means escaped quote, else end.
+            if this.pos + 1 < n && this.src[this.pos + 1] == @'\"':
+              cur = cur ++ @'\"'
+              this.pos = this.pos + 2
+            else:
+              in_quoted = false
+              this.pos = this.pos + 1
+          else:
+            cur = cur ++ c
+            this.pos = this.pos + 1
+        else:
+          if c == this.delim:
+            row ++= cur
+            cur = ""
+            this.pos = this.pos + 1
+            just_started_field = true
+          else if c == @'\n':
+            row ++= cur
+            this.pos = this.pos + 1
+            row_done = true
+          else if c == @'\r':
+            // CRLF: skip the \n that should follow. A bare CR ends the row too.
+            row ++= cur
+            this.pos = this.pos + 1
+            if this.pos < n && this.src[this.pos] == @'\n':
+              this.pos = this.pos + 1
+            row_done = true
+          else if c == @'\"' && just_started_field:
+            // Quoted field opens only at the start of a fresh field (i.e.
+            // immediately after the delimiter or the start of the row).
+            in_quoted = true
+            this.pos = this.pos + 1
+            just_started_field = false
+          else:
+            cur = cur ++ c
+            this.pos = this.pos + 1
+            just_started_field = false
+    return (row, true)
+
+// reader constructs a Reader using `,` as the field delimiter.
+fn reader(src string) Reader =
+  return Reader{src: src, pos: 0, delim: @',' as byte, done: false}
+
+// reader_with constructs a Reader with a caller-supplied delimiter.
+fn reader_with(src string, delim byte) Reader =
+  return Reader{src: src, pos: 0, delim: delim, done: false}
+
+// parse reads every row from src and returns them. Equivalent to draining
+// a reader; suitable for files that fit comfortably in memory.
+fn parse(src string) [[string]] =
+  return parse_with(src, @',' as byte)
+
+fn parse_with(src string, delim byte) [[string]] =
+  let r = Reader{src: src, pos: 0, delim: delim, done: false}
+  let rows [[string]] = []
+  let keep = true
+  for keep:
+    let (row, ok) = r.next()
+    if !ok:
+      keep = false
+    else:
+      rows ++= row
+  return rows
+
+// encode renders rows to a single CSV string with `,` as the delimiter
+// and `\n` between records. Fields containing commas, quotes, or newlines
+// are wrapped in `"..."` and internal quotes are doubled.
+fn encode(rows [[string]]) string =
+  return encode_with(rows, @',' as byte)
+
+fn encode_with(rows [[string]], delim byte) string =
+  let out = ""
+  let nr = len(rows)
+  let i i64 = 0
+  for i < nr:
+    let row = rows[i]
+    let nf = len(row)
+    let j i64 = 0
+    for j < nf:
+      if j > 0:
+        out = out ++ delim
+      out = out ++ encode_field(row[j], delim)
+      j = j + 1
+    out = out ++ "\n"
+    i = i + 1
+  return out
+
+// encode_field returns the CSV-encoded form of a single field. Quotes the
+// field and doubles internal quotes when needed; otherwise returns the
+// input unchanged.
+fn encode_field(s string, delim byte) string =
+  if !needs_quoting(s, delim):
+    return s
+  let n = len(s)
+  let out = "\""
+  let i i64 = 0
+  for i < n:
+    let c = s[i]
+    if c == @'\"':
+      out = out ++ "\"\""
+    else:
+      out = out ++ c
+    i = i + 1
+  out = out ++ "\""
+  return out
+
+// needs_quoting reports whether s must be wrapped in `"..."` to round-trip
+// through the parser. True if it contains the delimiter, a double quote, a
+// CR, or an LF.
+fn needs_quoting(s string, delim byte) bool =
+  let n = len(s)
+  let i i64 = 0
+  for i < n:
+    let c = s[i]
+    if c == delim || c == @'\"' || c == @'\n' || c == @'\r':
+      return true
+    i = i + 1
+  return false
+
+// Writer accumulates rows in memory and exposes them as a string. For very
+// large outputs prefer streaming: emit each row directly via encode_with.
+struct Writer =
+  rows [[string]]
+  delim byte
+
+  fn row(this *Writer, fields [string]) =
+    this.rows ++= fields
+
+  fn to_string(this *Writer) string =
+    return encode_with(this.rows, this.delim)
+
+// writer constructs a Writer with the default `,` delimiter.
+fn writer() Writer =
+  let empty [[string]] = []
+  return Writer{rows: empty, delim: @',' as byte}
+
+// writer_with constructs a Writer with a caller-supplied delimiter.
+fn writer_with(delim byte) Writer =
+  let empty [[string]] = []
+  return Writer{rows: empty, delim: delim}
+
+export {
+  Reader, reader, reader_with,
+  Writer, writer, writer_with,
+  parse, parse_with,
+  encode, encode_with, encode_field,
+} as csv

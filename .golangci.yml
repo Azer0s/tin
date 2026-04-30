@@ -87,10 +87,13 @@ linters:
       - linters: [exhaustive]
         path: "parser/"
 
-      # repl/jit.go uses CGo; the linter misreports nlreturn column numbers for
-      # deferred CGo calls due to the implicit C-to-Go trampoline expansion.
+      # repl/jit.go and codegen/ctfe_dispatch.go use CGo; the linter misreports
+      # nlreturn column numbers for deferred CGo calls due to the implicit
+      # C-to-Go trampoline expansion.
       - linters: [nlreturn]
         path: "repl/jit.go"
+      - linters: [nlreturn]
+        path: "codegen/ctfe_dispatch.go"
 
 formatters:
   enable:

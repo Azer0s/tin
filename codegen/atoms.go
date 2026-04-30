@@ -189,57 +189,60 @@ func (cg *CodeGen) buildAtomToStringBody(fn *ir.Func, tableGlobal *ir.Global, co
 
 	entry := fn.NewBlock("entry")
 
-	if len(cg.atomOrder) == 0 {
-		retAlloca := entry.NewAlloca(strType)
-		entry.NewStore(zeroStr, retAlloca)
-		entry.NewRet(entry.NewLoad(strType, retAlloca))
-
-		return
-	}
-
-	loopHeader := fn.NewBlock("loop.header")
-	loopBody := fn.NewBlock("loop.body")
-	found := fn.NewBlock("found")
-	loopCont := fn.NewBlock("loop.continue")
-	loopExit := fn.NewBlock("loop.exit")
-
-	// entry: load count, init i = 0
-	countVal := entry.NewLoad(irtypes.I64, countGlobal)
-	iAlloca := entry.NewAlloca(irtypes.I64)
-	entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
-	entry.NewBr(loopHeader)
-
-	// loop.header: if i == count goto exit else goto body
-	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
-	done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
-	loopHeader.NewCondBr(done, loopExit, loopBody)
-
-	// loop.body: compare table[i].code with input code
-	i64z := constant.NewInt(irtypes.I64, 0)
+	// Even when the static table is empty, the runtime atom table can
+	// still hold names registered through _tin_learn_atom (e.g. by the
+	// stacktrace runtime when no source-level atom literals exist), so
+	// the static-miss block (now renamed `static.miss`) remains the
+	// only return path even in that case.
+	staticMiss := fn.NewBlock("static.miss")
 	i32z := constant.NewInt(irtypes.I32, 0)
 	i32o := constant.NewInt(irtypes.I32, 1)
-	gepCode := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
-	entryCode := loopBody.NewLoad(irtypes.I32, gepCode)
-	match := loopBody.NewICmp(enum.IPredEQ, entryCode, codeParam)
-	loopBody.NewCondBr(match, found, loopCont)
 
-	// found: load table[i].str, compute strlen, build fat-ptr, return
-	gepStr := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
-	strPtr := found.NewLoad(irtypes.I8Ptr, gepStr)
-	length := found.NewCall(cg.ensureStrlenDecl(), strPtr)
-	fatAlloca := found.NewAlloca(strType)
-	gep0 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32z)
-	found.NewStore(strPtr, gep0)
-	gep1 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32o)
-	found.NewStore(length, gep1)
-	found.NewRet(found.NewLoad(strType, fatAlloca))
+	if len(cg.atomOrder) == 0 {
+		entry.NewBr(staticMiss)
+	} else {
+		loopHeader := fn.NewBlock("loop.header")
+		loopBody := fn.NewBlock("loop.body")
+		found := fn.NewBlock("found")
+		loopCont := fn.NewBlock("loop.continue")
 
-	// loop.continue: i++, back to header
-	iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
-	loopCont.NewStore(iNext, iAlloca)
-	loopCont.NewBr(loopHeader)
+		// entry: load count, init i = 0
+		countVal := entry.NewLoad(irtypes.I64, countGlobal)
+		iAlloca := entry.NewAlloca(irtypes.I64)
+		entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+		entry.NewBr(loopHeader)
 
-	// static.miss (was loop.exit): check runtime table via _tin_rt_atom_to_str
+		// loop.header: if i == count goto exit else goto body
+		iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+		done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
+		loopHeader.NewCondBr(done, staticMiss, loopBody)
+
+		// loop.body: compare table[i].code with input code
+		i64z := constant.NewInt(irtypes.I64, 0)
+		gepCode := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
+		entryCode := loopBody.NewLoad(irtypes.I32, gepCode)
+		match := loopBody.NewICmp(enum.IPredEQ, entryCode, codeParam)
+		loopBody.NewCondBr(match, found, loopCont)
+
+		// found: load table[i].str, compute strlen, build fat-ptr, return
+		gepStr := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
+		strPtr := found.NewLoad(irtypes.I8Ptr, gepStr)
+		length := found.NewCall(cg.ensureStrlenDecl(), strPtr)
+		fatAlloca := found.NewAlloca(strType)
+		gep0 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32z)
+		found.NewStore(strPtr, gep0)
+		gep1 := found.NewGetElementPtr(strType, fatAlloca, i32z, i32o)
+		found.NewStore(length, gep1)
+		found.NewRet(found.NewLoad(strType, fatAlloca))
+
+		// loop.continue: i++, back to header
+		iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
+		loopCont.NewStore(iNext, iAlloca)
+		loopCont.NewBr(loopHeader)
+	}
+
+	// Local alias so the rest of the function reads naturally.
+	loopExit := staticMiss
 	rtPtr := loopExit.NewCall(cg.ensureRtAtomToStr(), codeParam)
 	rtFound := fn.NewBlock("rt.found")
 	retZero := fn.NewBlock("ret.zero")
@@ -270,62 +273,65 @@ func (cg *CodeGen) buildStringToAtomBody(fn *ir.Func, tableGlobal *ir.Global, co
 
 	entry := fn.NewBlock("entry")
 
-	if len(cg.atomOrder) == 0 {
-		retAlloca := entry.NewAlloca(cg.atomType)
-		entry.NewStore(zeroAtom, retAlloca)
-		entry.NewRet(entry.NewLoad(cg.atomType, retAlloca))
+	// Even when the static table is empty, runtime atoms can still come
+	// in via _tin_learn_atom (e.g. the libunwind-backed stacktrace
+	// runtime registers atoms whose names contain colons / pluses that
+	// don't appear in the source as literals). Skip the static loop and
+	// drop straight into the rt.miss block in that case so the runtime
+	// fallback still produces the right code.
+	staticMiss := fn.NewBlock("static.miss")
+	i32z := constant.NewInt(irtypes.I32, 0)
 
-		return
+	if len(cg.atomOrder) == 0 {
+		entry.NewBr(staticMiss)
+	} else {
+		loopHeader := fn.NewBlock("loop.header")
+		loopBody := fn.NewBlock("loop.body")
+		found := fn.NewBlock("found")
+		loopCont := fn.NewBlock("loop.continue")
+
+		// entry
+		countVal := entry.NewLoad(irtypes.I64, countGlobal)
+		iAlloca := entry.NewAlloca(irtypes.I64)
+		entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+		entry.NewBr(loopHeader)
+
+		// loop.header
+		iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+		done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
+		loopHeader.NewCondBr(done, staticMiss, loopBody)
+
+		// loop.body: strcmp(input, table[i].str)
+		i64z := constant.NewInt(irtypes.I64, 0)
+		i32o := constant.NewInt(irtypes.I32, 1)
+		gepStr := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
+		tableStr := loopBody.NewLoad(irtypes.I8Ptr, gepStr)
+		cmpResult := loopBody.NewCall(cg.ensureStrcmp(), ptrParam, tableStr)
+		match := loopBody.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+		loopBody.NewCondBr(match, found, loopCont)
+
+		// found: load table[i].code, build %__atom, return
+		gepCode := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
+		code := found.NewLoad(irtypes.I32, gepCode)
+		atomAlloca := found.NewAlloca(cg.atomType)
+		found.NewStore(zeroAtom, atomAlloca)
+		atomGep := found.NewGetElementPtr(cg.atomType, atomAlloca, i32z, i32z)
+		found.NewStore(code, atomGep)
+		found.NewRet(found.NewLoad(cg.atomType, atomAlloca))
+
+		// loop.continue: i++
+		iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
+		loopCont.NewStore(iNext, iAlloca)
+		loopCont.NewBr(loopHeader)
 	}
 
-	loopHeader := fn.NewBlock("loop.header")
-	loopBody := fn.NewBlock("loop.body")
-	found := fn.NewBlock("found")
-	loopCont := fn.NewBlock("loop.continue")
-	loopExit := fn.NewBlock("loop.exit")
-
-	// entry
-	countVal := entry.NewLoad(irtypes.I64, countGlobal)
-	iAlloca := entry.NewAlloca(irtypes.I64)
-	entry.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
-	entry.NewBr(loopHeader)
-
-	// loop.header
-	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
-	done := loopHeader.NewICmp(enum.IPredEQ, iVal, countVal)
-	loopHeader.NewCondBr(done, loopExit, loopBody)
-
-	// loop.body: strcmp(input, table[i].str)
-	i64z := constant.NewInt(irtypes.I64, 0)
-	i32z := constant.NewInt(irtypes.I32, 0)
-	i32o := constant.NewInt(irtypes.I32, 1)
-	gepStr := loopBody.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32o)
-	tableStr := loopBody.NewLoad(irtypes.I8Ptr, gepStr)
-	cmpResult := loopBody.NewCall(cg.ensureStrcmp(), ptrParam, tableStr)
-	match := loopBody.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
-	loopBody.NewCondBr(match, found, loopCont)
-
-	// found: load table[i].code, build %__atom, return
-	gepCode := found.NewGetElementPtr(tableArrType, tableGlobal, i64z, iVal, i32z)
-	code := found.NewLoad(irtypes.I32, gepCode)
-	atomAlloca := found.NewAlloca(cg.atomType)
-	found.NewStore(zeroAtom, atomAlloca)
-	atomGep := found.NewGetElementPtr(cg.atomType, atomAlloca, i32z, i32z)
-	found.NewStore(code, atomGep)
-	found.NewRet(found.NewLoad(cg.atomType, atomAlloca))
-
-	// loop.continue: i++
-	iNext := loopCont.NewAdd(iVal, constant.NewInt(irtypes.I64, 1))
-	loopCont.NewStore(iNext, iAlloca)
-	loopCont.NewBr(loopHeader)
-
-	// static.miss (was loop.exit): fall back to runtime - learn the atom
-	rtCode := loopExit.NewCall(cg.ensureLearnAtom(), ptrParam)
-	rtAtomAlloca := loopExit.NewAlloca(cg.atomType)
-	loopExit.NewStore(zeroAtom, rtAtomAlloca)
-	rtAtomGep := loopExit.NewGetElementPtr(cg.atomType, rtAtomAlloca, i32z, i32z)
-	loopExit.NewStore(rtCode, rtAtomGep)
-	loopExit.NewRet(loopExit.NewLoad(cg.atomType, rtAtomAlloca))
+	// static.miss: fall back to runtime - learn the atom via _tin_learn_atom.
+	rtCode := staticMiss.NewCall(cg.ensureLearnAtom(), ptrParam)
+	rtAtomAlloca := staticMiss.NewAlloca(cg.atomType)
+	staticMiss.NewStore(zeroAtom, rtAtomAlloca)
+	rtAtomGep := staticMiss.NewGetElementPtr(cg.atomType, rtAtomAlloca, i32z, i32z)
+	staticMiss.NewStore(rtCode, rtAtomGep)
+	staticMiss.NewRet(staticMiss.NewLoad(cg.atomType, rtAtomAlloca))
 }
 
 // buildStringToAtomHandoverBody generates the body of __tin_string_to_atom_handover.

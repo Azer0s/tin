@@ -306,7 +306,7 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 
 	var err error
 
-	for _, stmt := range b.Stmts {
+	for i, stmt := range b.Stmts {
 		if block == nil {
 			panic(fmt.Sprintf("genBlock: block nil before stmt %T", stmt))
 		}
@@ -319,11 +319,66 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 		}
 
 		if terminated || block == nil {
+			// Warn about any statements following an explicit terminator
+			// (return / break / panic-style call). We deliberately skip the
+			// warning when the terminator is structural — an `if` chain that
+			// the analyzer/folder discovered always returns, a `for` whose
+			// condition collapsed away, a match that exhausts every arm —
+			// because the source code is still branching as written; "dead"
+			// is a property of the monomorphized callsite (e.g. typeof(v) ==
+			// 'i64 in encode[T]) rather than user-visible mistake.
+			if i+1 < len(b.Stmts) && isExplicitTerminator(stmt) {
+				cg.warn(DiagUnreachableCode, b.Stmts[i+1].Pos(),
+					"unreachable code after %s", terminatorKind(stmt))
+			}
+
 			return nil, true, nil
 		}
 	}
 
 	return block, false, nil
+}
+
+// isExplicitTerminator reports whether stmt is a syntactic control-flow
+// terminator (return, break, panic-style call). Structural constructs like
+// if / for / match that the analyzer happens to discover always-terminate
+// after monomorphization don't count — issuing -Wunreachable-code on
+// "the rest of an if/elif chain whose typeof(v) ==' branches were folded
+// down to one live path" is noise, not a useful diagnostic.
+func isExplicitTerminator(stmt ast.Node) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt, *ast.BreakStmt:
+		return true
+	case *ast.ExprStmt:
+		if call, ok := s.Expr.(*ast.CallExpr); ok {
+			if id, ok2 := call.Func.(*ast.Identifier); ok2 && id.Name == "panic" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// terminatorKind returns a short human-readable name for a control-flow
+// terminator statement, used in the unreachable-code warning.
+func terminatorKind(stmt ast.Node) string {
+	switch stmt.(type) {
+	case *ast.ReturnStmt:
+		return "return"
+	case *ast.BreakStmt:
+		return "break"
+	}
+
+	if call, ok := stmt.(*ast.ExprStmt); ok {
+		if c, ok2 := call.Expr.(*ast.CallExpr); ok2 {
+			if id, ok3 := c.Func.(*ast.Identifier); ok3 && id.Name == "panic" {
+				return "panic"
+			}
+		}
+	}
+
+	return "terminator"
 }
 
 // isStmtNode reports whether an AST node is inherently a statement (not an
@@ -663,10 +718,19 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 
 	outBlock, term, err := cg.genStmtInner(block, node)
 
-	// Attach !dbg to the first new instruction emitted by this statement.
+	// Attach !dbg to every new instruction emitted by this statement.
+	// Without covering all of them, intermediate calls (e.g. the
+	// runtime helper inside `let frames = stacktrace()` or `return f()`
+	// where f is a closure) only pick up the catch-all `line:0`
+	// metadata from ensureAllCallsHaveDbg, which makes libdwfl resolve
+	// them to "file:0:0" at runtime — the wrong cell for tools that
+	// match the stacktrace atoms against sourcepos atoms. Attaching to
+	// every new instruction is also what `clang -g` does on hand-
+	// written C, so this brings Tin's debug info into line with the
+	// expectation set by the toolchain.
 	if cg.debugMode && !cg.emittingARC && block != nil && err == nil {
-		if inst := firstInstAfter(block, dbgInstBefore); inst != nil {
-			cg.attachCurrentDbgLoc(inst)
+		for i := dbgInstBefore; i < len(block.Insts); i++ {
+			cg.attachCurrentDbgLoc(block.Insts[i])
 		}
 	}
 
@@ -789,6 +853,21 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		// as heap-owned so scope-exit releases the borrow wrapper(s).
 		if callExpr, ok := s.Expr.(*ast.CallExpr); ok {
 			cg.markOutParamVarsHeapOwned(callExpr)
+
+			// Discarded result of a non-void call: warn (default-off via
+			// -Wunused-result / -Wall). Spawn/await results were already
+			// short-circuited above; this only fires for plain calls.
+			if val != nil && !isVoidType(val.Type()) {
+				if cg.isCalleePure(callExpr) {
+					cg.warn(DiagDiscardedPureCall, callExpr.Pos(),
+						"discarded result of pure call to %s has no effect",
+						callDisplayName(callExpr))
+				} else {
+					cg.warn(DiagUnusedResult, callExpr.Pos(),
+						"discarded result of call to %s; use `_ = ...` to silence",
+						callDisplayName(callExpr))
+				}
+			}
 		}
 
 		if err == nil && val != nil && isRCTrackedType(val.Type()) && isTemporaryProducer(s.Expr) {
@@ -895,6 +974,12 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		return block, false, nil
 
 	case *ast.TaggedBlock:
+		if hasTag(s.Tags, "unsafe") {
+			cg.unsafeDepth++
+
+			defer func() { cg.unsafeDepth-- }()
+		}
+
 		return cg.genStmt(block, s.Body)
 
 	default:
@@ -1348,7 +1433,23 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		entry.constInitExpr = s.Value
 	}
 
+	// Record the literal length of array / string initializers so the
+	// array-bounds checker can warn on out-of-range constant indices into
+	// `let xs = [1, 2, 3]; xs[5]` and similar.
+	switch v := s.Value.(type) {
+	case *ast.ArrayLit:
+		entry.staticArrayLen = int64(len(v.Elems))
+	case *ast.ArrayFillLit:
+		if v.Count >= 0 {
+			entry.staticArrayLen = int64(v.Count)
+		}
+	case *ast.StringLit:
+		entry.staticArrayLen = int64(len(v.Value))
+	}
+
+	entry.declPos = s.Pos()
 	cg.curScope.set(s.Name, entry)
+	cg.warnIfBuiltinShadow("let", s.Name, s.Pos())
 
 	return block, nil
 }
@@ -2032,7 +2133,11 @@ func (cg *CodeGen) genBuiltinDefault(block *ir.Block, arg ast.Node) (value.Value
 //   - Complex macros (block body): CTFE - compile to a temp binary, run with timeout,
 //     parse stdout as the expansion result.
 //   - Simple macros (expression body): AST substitution - fast, no subprocess.
-func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast.Node) (value.Value, error) {
+//
+// callPos is the source position of the macro CALL site - used to retag
+// macro-body nodes so codegen-time pos lookups (sourcepos in particular)
+// report the caller's location, not the macro definition line.
+func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast.Node, callPos ast.Pos) (value.Value, error) {
 	if len(args) != len(macro.Params) {
 		return nil, fmt.Errorf("macro %s: expected %d args, got %d",
 			macro.Name, len(macro.Params), len(args))
@@ -2043,6 +2148,8 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		if err != nil {
 			return nil, err
 		}
+
+		retagMacroBody(resultNode, args, callPos)
 
 		return cg.genExpr(block, resultNode)
 	}
@@ -2073,9 +2180,12 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		}
 		// Substitute params into the parsed tree (backtick was an opaque string).
 		node = substituteMacroNode(node, subst)
+		retagMacroBody(node, args, callPos)
 
 		return cg.genExpr(block, node)
 	}
+
+	retagMacroBody(expanded, args, callPos)
 
 	return cg.genExpr(block, expanded)
 }
@@ -2200,6 +2310,24 @@ func (cg *CodeGen) markOutParamVarsHeapOwned(call *ast.CallExpr) {
 }
 
 func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, error) {
+	// `_ = expr` is the explicit discard form: evaluate expr for its side
+	// effects and throw away the result. Acts like an ExprStmt without
+	// triggering the discarded-result warning.
+	if id, ok := s.Target.(*ast.Identifier); ok && id.Name == "_" {
+		if _, err := cg.genExpr(block, s.Value); err != nil {
+			return block, err
+		}
+
+		return block, nil
+	}
+	// Detect `x = x` self-assign: same identifier on both sides.
+	if tid, ok := s.Target.(*ast.Identifier); ok {
+		if vid, ok2 := s.Value.(*ast.Identifier); ok2 && tid.Name == vid.Name {
+			cg.warn(DiagSelfAssign, s.Pos(),
+				"self-assignment %q has no effect", tid.Name)
+		}
+	}
+
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
 	}
@@ -2207,8 +2335,9 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// by the if-condition folder). Clear it before emitting the store so
 	// later folds don't see stale information.
 	if id, ok := s.Target.(*ast.Identifier); ok {
-		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
 			entry.constInitExpr = nil
+			entry.staticArrayLen = 0
 		}
 	}
 	// Special case: SIMD vector index assignment v[i] = x.
@@ -2411,8 +2540,9 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	}
 	// Mutating an identifier invalidates any captured constant init.
 	if id, ok := s.Target.(*ast.Identifier); ok {
-		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
 			entry.constInitExpr = nil
+			entry.staticArrayLen = 0
 		}
 	}
 
@@ -2613,8 +2743,9 @@ func (cg *CodeGen) genPostfix(block *ir.Block, s *ast.PostfixStmt) error {
 	}
 	// Mutation invalidates any captured constant init.
 	if id, ok := s.Expr.(*ast.Identifier); ok {
-		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.constInitExpr != nil {
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
 			entry.constInitExpr = nil
+			entry.staticArrayLen = 0
 		}
 	}
 
@@ -3178,7 +3309,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	}
 
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC})
+		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
+		cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 	}
 
 	var bodyErr error
@@ -3355,7 +3487,8 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 
 	// body: expose loop variable, run user statements
 	cg.curScope = newScope(cg.curScope)
-	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false})
+	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos()})
+	cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 
 	cg.pushBreakTarget(afterBlock)
 
@@ -3435,7 +3568,8 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	// Body.
 	cg.curScope = newScope(cg.curScope)
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true})
+		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos()})
+		cg.warnIfBuiltinShadow("for", s.VarName, s.Pos())
 	}
 
 	var bodyErr error

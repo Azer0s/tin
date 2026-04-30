@@ -211,6 +211,16 @@ type CodeGen struct {
 	exports map[string]string
 	// importedPkgs: packageName -> true  (to avoid double-loading)
 	importedPkgs map[string]bool
+	// loadedSrcPaths: absolute .tin file path -> true. Separate from
+	// importedPkgs because the macro CTFE shell iterates importedPkgs
+	// to emit `use <pkg>` lines; mixing file-path keys in there would
+	// emit nonsense imports.
+	loadedSrcPaths map[string]bool
+	// reportedImports tracks which `use <path>` declarations have
+	// surfaced via cg.progress already. genUseDecl runs twice per
+	// UseDecl (load pass + codegen iteration); without this guard the
+	// -v stream would show every import twice.
+	reportedImports map[string]bool
 
 	// stdlibOverride: when non-empty, overrides the default <execDir>/stdlib search path.
 	// Set via --stdlib flag.
@@ -321,6 +331,82 @@ type CodeGen struct {
 	// Used by the #pure transitive side-effect checker.
 	funcDecls map[string]*ast.FuncDecl
 
+	// ctfeCache memoizes the result of tryEvalPureCallToCtfeVal keyed by a
+	// fingerprint of (function name, argument values). A repeated call with
+	// the same args during one compilation unit reuses the prior result
+	// rather than re-walking the body. Cleared per Generate() invocation.
+	ctfeCache map[string]ctfeMemoEntry
+
+	// ctfeFnHashes memoizes the Merkle hash for each #pure FuncDecl. Used
+	// by the on-disk pure-fn cache (.build/pure-fn/<hash>/) so the recursive
+	// hash walk visits each function at most once per compilation.
+	ctfeFnHashes ctfeFnHashCache
+
+	// pureFnShims tracks which #pure functions had a `__tin_pure_shim_<name>`
+	// emitted by emitPureFnCtfeShims. The per-fn .so cache emit consults
+	// this set so the slicer knows to (a) include the shim in the slice and
+	// (b) promote its linkage from internal to external for dlsym.
+	pureFnShims map[string]bool
+
+	// pureFoldDisabled, when true, makes tryEvalPureCall a no-op so the
+	// generator emits the call as a runtime invocation. Driven by the
+	// `--no-pure-fold` CLI flag. Useful when a faulty #pure body would
+	// hang or panic the evaluator at compile time, or when comparing
+	// optimized vs unoptimized binaries during compiler debugging.
+	pureFoldDisabled bool
+
+	// stacktraceUsed is set when codegen recognizes a `stacktrace()`
+	// builtin call. main.go branches on the post-Generate value to decide
+	// whether to emit unwind tables, link libunwind, and pass `-rdynamic`
+	// (see docs/plans/stacktrace-libunwind.md "Conditional unwind-table
+	// emission"). When false the program pays zero binary-size or runtime
+	// cost for stacktrace-related machinery.
+	stacktraceUsed bool
+
+	// pureFoldBudget caps the total node-evaluation work spent on a
+	// single top-level #pure call (sum across all loops, recursion, and
+	// nested call expansions). When the budget is exhausted the
+	// evaluator returns errNotConst and the call falls back to runtime
+	// dispatch — same outcome as a non-foldable signature, but reached
+	// safely instead of pathologically. 0 means "use the default"
+	// (defaultPureFoldBudget); negative values are forbidden.
+	pureFoldBudget int
+
+	// topLevelVarPos records the source position where each top-level
+	// `let`/`var`/`const` was declared, keyed by name. Populated as
+	// declarations are processed in Generate; consumed by the
+	// `sourcepos(symbol)` builtin to resolve a symbol's definition site
+	// when no AST node is in hand. Nested scopes don't go in here —
+	// scopeEntry.declPos covers locals separately.
+	topLevelVarPos map[string]ast.Pos
+
+	// pureFoldBudgetRemaining tracks how many evalNode visits are still
+	// allowed for the currently-evaluating top-level #pure call. The
+	// counter is reset at every entry into tryEvalPureCallToCtfeVal and
+	// decremented once per evalNode call. When it hits zero the
+	// evaluator unwinds with errCTFEBudget. Not goroutine-safe — codegen
+	// is single-threaded by construction.
+	pureFoldBudgetRemaining int
+
+	// shimMod hosts every CTFE shim (the wrappers emitPureFnCtfeShims
+	// produces). Kept entirely separate from cg.mod so the user binary's
+	// IR never carries shim definitions; the per-fn .so emit combines
+	// shimMod's text with sliced cg.mod text.
+	shimMod *ir.Module
+
+	// activeMod points at the module currently receiving NewFunc/NewGlobal
+	// calls from interop.go. Equal to cg.mod outside shim emission;
+	// swapped to shimMod for the duration of emitPureFnCtfeShims so the
+	// wrapper machinery writes into the CTFE module instead.
+	activeMod *ir.Module
+
+	// runtimeHelperCache memoizes the `declare` for each runtime-helper
+	// symbol (tin_interop_str_in, tin_runtime_init_once, etc.) per target
+	// module. ensureXxx in interop.go consults this so the same wrapper
+	// body can be emitted into either cg.mod or shimMod and end up calling
+	// declares that live in the same module.
+	runtimeHelperCache map[*ir.Module]map[string]*ir.Func
+
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
@@ -341,22 +427,27 @@ type CodeGen struct {
 	testMode  bool
 	testDecls []*ast.TestDecl
 
-	// noWarnAsyncMain suppresses the "main() uses spawn/await but is not async" warnings.
-	noWarnAsyncMain bool
+	// diags tracks per-warning suppression / escalation preferences. Keyed
+	// by canonical diagnostic name (see codegen/diag.go for constants).
+	diags map[string]*diagState
 
-	// noWarnUnusedMatchArms suppresses warnings for unreachable match cases /
-	// where clauses (-Wno-unused-match-arms).
-	noWarnUnusedMatchArms bool
+	// allWarnsAsErrors escalates every diagnostic emitted via warn() to a
+	// hard error. Toggled by -Werror.
+	allWarnsAsErrors bool
+
+	// hadWarnError records that at least one diagnostic was promoted to an
+	// error. Inspected by Generate's caller to fail the build.
+	hadWarnError bool
+
+	// unsafeDepth tracks lexical nesting of `{#unsafe} { ... }` blocks.
+	// Operations like raw pointer arithmetic and `addr(int_literal)` are
+	// rejected with a compile error when this is zero.
+	unsafeDepth int
 
 	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
 	// reachability decisions for every match / where the compiler sees.
 	// Toggled by -fdump-match-info; for debugging the algorithm itself.
 	verboseMatchInfo bool
-
-	// noWarnBoolAnalysis suppresses "condition is always true/false"
-	// warnings emitted when an if/elif/while/where/for-condition folds to
-	// a constant. Toggled by -Wno-bool-analysis.
-	noWarnBoolAnalysis bool
 
 	// verboseDemorgan prints each boolean simplification the compiler
 	// applies (De Morgan push-inward, double-negation elim, comparison
@@ -485,8 +576,11 @@ type CodeGen struct {
 	coroDestroyFn *ir.Func // llvm.coro.destroy - used by coroutine chaining
 
 	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
-	fiberSpawnFn         *ir.Func
-	fiberSpawnJoinableFn *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
+	fiberSpawnFn              *ir.Func
+	fiberSpawnJoinableFn      *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
+	fiberSpawnChainFn         *ir.Func // _tin_fiber_spawn_chain: stacktrace-aware (Phase 4)
+	fiberSpawnJoinableChainFn *ir.Func // _tin_fiber_spawn_joinable_chain: prejoined+stacktrace
+	llvmReturnAddressFn       *ir.Func // llvm.returnaddress intrinsic for spawn-site IP capture
 	// spawnFireForget: when true, activeSpawnFn() returns fiberSpawnFn (prejoined=0).
 	// Set only for statement-level SpawnExprs whose result is explicitly discarded.
 	// All other spawns use fiberSpawnJoinableFn (prejoined=1) by default so that
@@ -606,6 +700,12 @@ type CodeGen struct {
 	// allTopLevelVars: ALL top-level var declarations in declaration order.
 	// Used to emit deinits in reverse order at the end of main().
 	allTopLevelVars []topLevelVarInit
+
+	// topLevelVarBareNames: bare (un-mangled) names of every top-level `var`
+	// across the entry program and all imported packages. Used by the #pure
+	// soundness check to reject reads/writes of mutable globals from a #pure
+	// body. Populated lazily before checkAllPureFuncs runs.
+	topLevelVarBareNames map[string]bool
 
 	// pkgInitFns: init functions collected from packages that declare
 	// fn init(). Called at program startup after top-level var inits,
@@ -757,14 +857,33 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
-func (cg *CodeGen) SetTestMode(v bool)              { cg.testMode = v }
-func (cg *CodeGen) SetNoWarnAsyncMain(v bool)       { cg.noWarnAsyncMain = v }
-func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) { cg.noWarnUnusedMatchArms = v }
-func (cg *CodeGen) SetVerboseMatchInfo(v bool)      { cg.verboseMatchInfo = v }
-func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool)    { cg.noWarnBoolAnalysis = v }
-func (cg *CodeGen) SetVerboseDemorgan(v bool)       { cg.verboseDemorgan = v }
-func (cg *CodeGen) SetEmitHeaderPath(p string)      { cg.emitHeaderPath = p }
-func (cg *CodeGen) SetUseDoubleForF128(v bool)      { cg.useDoubleForF128 = v }
+func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
+func (cg *CodeGen) SetVerboseMatchInfo(v bool) { cg.verboseMatchInfo = v }
+
+// SetNoWarnAsyncMain is the -Wno-async-main hook (kept for back-compat with
+// existing callers; new code should use SetWarnSuppress(DiagAsyncMain)).
+func (cg *CodeGen) SetNoWarnAsyncMain(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagAsyncMain)
+	}
+}
+
+// SetNoWarnUnusedMatchArms is the -Wno-unused-match-arms hook.
+func (cg *CodeGen) SetNoWarnUnusedMatchArms(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagUnusedMatchArms)
+	}
+}
+
+// SetNoWarnBoolAnalysis is the -Wno-bool-analysis hook.
+func (cg *CodeGen) SetNoWarnBoolAnalysis(v bool) {
+	if v {
+		cg.SetWarnSuppress(DiagBoolAnalysis)
+	}
+}
+func (cg *CodeGen) SetVerboseDemorgan(v bool)  { cg.verboseDemorgan = v }
+func (cg *CodeGen) SetEmitHeaderPath(p string) { cg.emitHeaderPath = p }
+func (cg *CodeGen) SetUseDoubleForF128(v bool) { cg.useDoubleForF128 = v }
 func (cg *CodeGen) SetTargetTriple(triple string) {
 	if triple != "" {
 		cg.mod.TargetTriple = triple
@@ -773,6 +892,37 @@ func (cg *CodeGen) SetTargetTriple(triple string) {
 func (cg *CodeGen) SetVerboseHeuristics(v bool)                     { cg.verboseHeuristics = v }
 func (cg *CodeGen) SetProgressFunc(fn func(string))                 { cg.progressFn = fn }
 func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoReportFn = fn }
+
+// SetPureFoldDisabled toggles compile-time evaluation of #pure calls.
+// When true, both tier-1 (AST evaluator) and tier-2 (cached .so dispatch)
+// are short-circuited, and every #pure call codegens as a regular runtime
+// invocation. The user-visible behavior of #pure (purity contract,
+// alwaysinline, readnone, no_recurse depth limit) is unchanged — only
+// the constant-folding optimization is suppressed. Driven by the
+// `--no-pure-fold` CLI flag.
+func (cg *CodeGen) SetPureFoldDisabled(v bool) { cg.pureFoldDisabled = v }
+
+// SetPureFoldBudget overrides the per-call evaluation budget cap used by
+// the CTFE evaluator. Pass 0 to keep the default (defaultPureFoldBudget);
+// any negative value is treated as 0. Each call to evalNode consumes one
+// unit; the budget is reset at the top-level entry into the evaluator.
+// On exhaustion the call falls back to runtime evaluation just as if
+// the body weren't foldable.
+func (cg *CodeGen) SetPureFoldBudget(n int) {
+	if n < 0 {
+		n = 0
+	}
+
+	cg.pureFoldBudget = n
+}
+
+// StacktraceUsed reports whether any reachable call site referenced the
+// `stacktrace()` builtin. main.go consults this after Generate() returns
+// to decide whether to link libunwind, emit unwind tables, and pass
+// `-rdynamic` (the conditional-emission story in
+// docs/plans/stacktrace-libunwind.md). Stable through the rest of the
+// build; once set true it stays true.
+func (cg *CodeGen) StacktraceUsed() bool { return cg.stacktraceUsed }
 
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
@@ -805,7 +955,7 @@ func (cg *CodeGen) targetIsARM64() bool {
 // "overriding the module target triple" warning.
 //
 // clang -dumpmachine (and llc --version) return the darwin-style triple
-// (e.g. arm64-apple-darwin25.1.0) but clang normalises it to the macosx-style
+// (e.g. arm64-apple-darwin25.1.0) but clang normalizes it to the macosx-style
 // triple (e.g. arm64-apple-macosx26.0.0) when compiling LLVM IR.  Setting a
 // darwin-style triple in the module therefore always triggers the override
 // warning.  The only reliable way to get the exact string clang will use is to
@@ -819,7 +969,7 @@ func newModuleWithTriple() *ir.Module {
 		return mod
 	}
 	// Compile an empty C translation unit to LLVM IR and extract the triple
-	// that clang actually emits.  This is the only way to get the normalised
+	// that clang actually emits.  This is the only way to get the normalized
 	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
 	if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
 		Output(); err == nil {
@@ -884,6 +1034,7 @@ func New(filename string) *CodeGen {
 		opTraitImpls:             make(map[string][]opTraitImplEntry),
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
+		loadedSrcPaths:           make(map[string]bool),
 		constrainedFuncs:         make(map[string]*ast.FuncDecl),
 		genericFuncs:             make(map[string]*ast.FuncDecl),
 		genericFuncHomeScopes:    make(map[string]*scope),
@@ -891,6 +1042,8 @@ func New(filename string) *CodeGen {
 		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
+		ctfeCache:                make(map[string]ctfeMemoEntry),
+		topLevelVarPos:           make(map[string]ast.Pos),
 		externTLSVars:            make(map[string]*ir.Global),
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
@@ -1136,11 +1289,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.curScope = newScope(nil)
 	cg.moduleScope = cg.curScope
 
-	// Initialize DWARF debug metadata when -g is active.
-	if cg.debugMode {
-		cg.initDebugInfo()
-	}
-
 	// Register built-in special traits so structs can implement them without
 	// an explicit trait declaration in source.
 	cg.registerBuiltinTraits()
@@ -1152,6 +1300,34 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	if err := checkDuplicateDecls(prog.Stmts); err != nil {
 		return nil, fmt.Errorf("%s:%w", cg.filename, err)
+	}
+
+	// Stacktrace usage detection: scan for `stacktrace(` calls before any
+	// fn is emitted so funcs.go knows whether to keep Tin user fns at
+	// internal linkage (default) or promote them to external (so dladdr
+	// can resolve them after `-rdynamic` exports them to the dynsym).
+	// Empirical check: STB_LOCAL symbols never reach the dynamic symbol
+	// table regardless of `-rdynamic`, so promotion is mandatory when
+	// stacktrace is reachable. Doing the scan here, after dup-decl checks
+	// but before any other pass, keeps every later codegen path observing
+	// a single consistent value of cg.stacktraceUsed.
+	//
+	// Must precede initDebugInfo: when stacktrace is reachable we flip
+	// debugMode on so DWARF line tables get emitted into the IR (clang's
+	// `-gline-tables-only` flag then preserves only `.debug_line`, which
+	// libdwfl reads at runtime to map IPs to "file:line:col"). Without
+	// this flip, the runtime resolver would always fall through to the
+	// dladdr "<symbol>+<offset>" form for Tin user code.
+	cg.detectStacktraceUsage(prog.Stmts)
+
+	if cg.stacktraceUsed && !cg.debugMode {
+		cg.debugMode = true
+	}
+
+	// Initialize DWARF debug metadata when -g is active OR stacktrace
+	// is reachable (which implicitly needs line info for IP resolution).
+	if cg.debugMode {
+		cg.initDebugInfo()
 	}
 
 	// Zero pass: collect exports and constrained generic function templates
@@ -1239,19 +1415,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
-	// Pre-pass 1.7: register top-level var declarations as LLVM globals so that
-	// all functions (predeclared in pass 2) can reference them.
-	// Must run AFTER pre-pass 1.9 so package types are available.
-	cg.progress("register globals")
-
-	for _, node := range prog.Stmts {
-		if tv, ok := node.(*ast.TopLevelVar); ok {
-			if err := cg.preregisterTopLevelVar(tv); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	// Pre-pass 1.8: detect overloaded function/method base names so that
 	// predeclareFunc and predeclareMethod can mangle their IR names.
 	for name, flag := range scanOverloadedNames(prog.Stmts) {
@@ -1299,6 +1462,19 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		return nil, err
 	}
 
+	// Collect entry-program top-level var bare names (pkg-imported vars are
+	// already registered via Pre-pass 1.9). The pure-check below uses this set
+	// to reject reads/writes of mutable globals from #pure bodies.
+	if cg.topLevelVarBareNames == nil {
+		cg.topLevelVarBareNames = map[string]bool{}
+	}
+
+	for _, node := range prog.Stmts {
+		if tv, ok := node.(*ast.TopLevelVar); ok {
+			cg.topLevelVarBareNames[tv.Name] = true
+		}
+	}
+
 	// Validate #pure functions: transitive side-effect check.
 	// Validate #no_recurse functions: transitive call-graph cycle check.
 	// Both run after predeclaration so all function signatures and tags are known.
@@ -1313,6 +1489,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if err := cg.checkAllInteropFuncs(prog.Stmts); err != nil {
 		return nil, err
 	}
+
+	cg.checkAllUnused(prog)
+
+	cg.runDataflow(prog)
+
+	cg.runAndersen(prog)
+
+	cg.runAstChecks(prog)
 
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")
@@ -1413,6 +1597,24 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Pass 2.5: register top-level var declarations as LLVM globals. Runs
+	// AFTER pass 2 (function predeclaration) so initializer fold can call
+	// pure functions via funcDecls (e.g. `var x i64 = pure_fn(7) + 1`), and
+	// BEFORE struct method bodies are generated so methods can reference
+	// module-scoped vars by bare name.
+	cg.progress("register globals")
+
+	for _, node := range prog.Stmts {
+		if tv, ok := node.(*ast.TopLevelVar); ok {
+			if err := cg.preregisterTopLevelVar(tv); err != nil {
+				return nil, err
+			}
+			// Record the declaration position so `sourcepos(my_top_var)`
+			// can resolve back to the originating let/var/const line.
+			cg.topLevelVarPos[tv.Name] = tv.Pos()
+		}
+	}
+
 	// Phase C: struct method bodies, trait chain shims, and vtables.
 	for _, node := range prog.Stmts {
 		if n, ok := node.(*ast.StructDecl); ok {
@@ -1471,6 +1673,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// third pass so all internal entry points exist as IR functions
 	// the wrapper can reference.
 	if err := cg.emitInteropWrappers(prog.Stmts); err != nil {
+		return nil, err
+	}
+
+	// Emit a parallel #interop-style shim for every wrappable #pure function
+	// so the per-fn .so cache (Phase C2) has a single uniform dispatch
+	// surface for cgo. The shim shares emitInteropWrapperFor's marshal
+	// logic — string/slice/bool widening all go through the same helpers
+	// the user-tagged #interop pipeline uses. Shim symbol is
+	// `__tin_pure_shim_<fn_name>` so it never collides with the function
+	// itself; in the main binary the shim has internal linkage and clang
+	// DCEs it; the cache slicer promotes it to external for dlsym.
+	if err := cg.emitPureFnCtfeShims(); err != nil {
 		return nil, err
 	}
 

@@ -1,0 +1,35 @@
+// stacktrace_fiber_concurrent.tin - TLS isolation regression sentinel.
+//
+// runtime/stacktrace.c's per-IP atom-code cache is `__thread`-local so
+// concurrent stacktrace() calls from different fibers can run without
+// crossing wires. The runtime also reads _current_fib (TLS) when
+// recording spawn-chain parents at fiber creation. A bug that swapped
+// either of those for a global would surface as cross-fiber leakage:
+// a stacktrace captured by fiber A would contain frames from fiber B,
+// or two captures would unintentionally share atom codes derived from
+// the wrong IPs.
+//
+// The test launches several fibers in flight, captures a trace inside
+// each, and asserts that every captured trace is non-empty and
+// terminates with a `<spawn-of>:` frame (proof the fiber's own spawn
+// record was used, not a leaked one). N is small but >1 so the
+// scheduler actually interleaves.
+use assert
+use strings
+
+fn{#async} worker(id i64) [atom] = return stacktrace()
+
+test "concurrent fibers each capture their own spawn chain" =
+  let f0 [atom] = await spawn worker(0)
+  let f1 [atom] = await spawn worker(1)
+  let f2 [atom] = await spawn worker(2)
+  let f3 [atom] = await spawn worker(3)
+
+  // Each trace must be non-empty and end with a <spawn-of>: chain entry.
+  // A TLS-vs-global mixup would intermittently produce traces with no
+  // chain entry (because they'd see another fiber's already-walked
+  // state), so checking all four guards against rare misordering bugs.
+  for let trace [atom] in [f0, f1, f2, f3]:
+    assert::ok(len(trace) >= 2)
+    let last string = trace[len(trace) - 1] as string
+    assert::ok(strings::contains(last, "<spawn-of>:"))

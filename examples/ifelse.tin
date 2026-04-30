@@ -29,14 +29,12 @@ test "if/else - true branch" =
 test "if/else - false branch" =
   assert::equals(sign(0), "neg or zero")
 
-//  if / else - empty else body
+//  if / no-else - r stays as-is when n >= lo
 
 fn{#pure} clamp_low(n i64, lo i64) i64 =
   let r i64 = n
   if n < lo:
     r = lo
-  else:
-    // intentionally empty - r stays as-is
   return r
 
 test "if/else empty else - clamps when below" =

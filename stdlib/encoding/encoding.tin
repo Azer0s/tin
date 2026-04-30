@@ -3,18 +3,21 @@
 // Provides:
 //   base16 - hex encoding/decoding
 //   base64 - Base64 standard and URL-safe encoding/decoding
+//   csv    - RFC 4180 CSV reader/writer
 //   json   - JSON encoding and decoding
 //   yaml   - YAML encoding and decoding
 //
 // Import examples:
 //   use encoding::base16
+//   use encoding::csv
 //   use encoding::json
 //   use encoding
 
 use "./base16/base16"
 use "./base64/base64"
+use "./csv/csv"
 use "./json/json"
 use "./yaml/yaml"
 use "./url/url"
 
-export { base16, base64, json, yaml, url } as encoding
+export { base16, base64, csv, json, yaml, url } as encoding

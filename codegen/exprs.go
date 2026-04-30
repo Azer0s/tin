@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -29,6 +30,18 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 	switch e := node.(type) {
 	case *ast.IntLit:
+		if e.Big != nil {
+			// 128 bits = at most u128 range; values above that don't fit
+			// either i128 or u128 and would silently wrap inside LLVM.
+			if e.Big.BitLen() > 128 {
+				return nil, cg.nodeErr(e,
+					"integer literal %s exceeds i128/u128 range; use a string-based bignum library for larger values",
+					e.Big.String())
+			}
+
+			return &constant.Int{Typ: irtypes.I128, X: new(big.Int).Set(e.Big)}, nil
+		}
+
 		return constant.NewInt(irtypes.I64, e.Value), nil
 
 	case *ast.FloatLit:
@@ -677,6 +690,10 @@ func (s *syntheticValue) String() string     { return "%synthetic" }
 func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
 	switch e := node.(type) {
 	case *ast.IntLit:
+		if e.Big != nil {
+			return irtypes.I128
+		}
+
 		return irtypes.I64
 	case *ast.FloatLit:
 		return irtypes.Double
@@ -972,6 +989,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 	// Pointer arithmetic: ptr + int -> getelementptr; ptr - int -> getelementptr with negation.
 	if ptrType, isPtr := lt.(*irtypes.PointerType); isPtr && irtypes.IsInt(rt) {
+		switch e.Op {
+		case "+", "-":
+			if cg.unsafeDepth == 0 {
+				return nil, cg.nodeErr(e,
+					"pointer arithmetic requires an `{#unsafe}` block")
+			}
+		}
 		// Ensure the index is i64.
 		if rt.(*irtypes.IntType).BitSize < 64 {
 			right = block.NewSExt(right, irtypes.I64)
@@ -998,7 +1022,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 
 		return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
-			e.Op, lt, rt)
+			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
 	}
 
 	switch e.Op {
@@ -1021,6 +1045,10 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewMul(left, right), nil
 	case "/":
+		if v := cg.tryFoldExpr(e.Right); v.kind == foldInt && v.intVal == 0 {
+			return nil, cg.nodeErr(e, "division by zero")
+		}
+
 		if isFloat {
 			return block.NewFDiv(left, right), nil
 		}
@@ -1031,12 +1059,18 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return block.NewSDiv(left, right), nil
 	case "%":
+		if v := cg.tryFoldExpr(e.Right); v.kind == foldInt && v.intVal == 0 {
+			return nil, cg.nodeErr(e, "modulo by zero")
+		}
+
 		if cg.exprElemIsUnsigned(e.Left) {
 			return block.NewURem(left, right), nil
 		}
 
 		return block.NewSRem(left, right), nil
 	case "==":
+		cg.checkTautologicalNilCmp(e, false)
+
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false)
 		// Release temporary string operands after comparison (e.g., fn() == fn()).
 		if isFatPtrType(lt) {
@@ -1051,6 +1085,8 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 		return result, nil
 	case "!=":
+		cg.checkTautologicalNilCmp(e, true)
+
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true)
 		// Release temporary string operands after comparison (e.g., fn() != fn()).
 		if isFatPtrType(lt) {
@@ -1111,8 +1147,15 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case "^":
 		return block.NewXor(left, right), nil
 	case "<<":
+		if err := cg.checkShiftAmount(e, left); err != nil {
+			return nil, err
+		}
+
 		return block.NewShl(left, right), nil
 	case ">>":
+		if err := cg.checkShiftAmount(e, left); err != nil {
+			return nil, err
+		}
 		// Use logical (zero-fill) right shift for unsigned types.
 		if cg.exprElemIsUnsigned(e.Left) {
 			return block.NewLShr(left, right), nil
@@ -1251,7 +1294,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	// that plan exists because the previous silent-zero fall-through hid
 	// real bugs at every callsite.
 	return nil, cg.nodeErr(e, "binary operator %q is not defined for operands of type %s and %s",
-		e.Op, left.Type(), right.Type())
+		e.Op, cg.tinTypeDisplay(left.Type()), cg.tinTypeDisplay(right.Type()))
 }
 
 // genEqNeqExpr implements shared handling for == and != operators.

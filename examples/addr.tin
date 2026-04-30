@@ -17,11 +17,16 @@ test "pointer write-back" =
   assert::equals(a, 2)
 
 test "addr integer to pointer" =
-  // addr(N) interprets an integer as a raw address; casting back to i64 recovers the value
-  let p *void = addr(0xDEAD)
-  let n i64 = p as i64
-  assert::equals(n, 0xDEAD)
+  // addr(N) interprets an integer as a raw address; casting back to i64 recovers the value.
+  // Raw-address creation is unsafe and must be wrapped in `{#unsafe} { ... }`.
+  { #unsafe } {
+    let p *void = addr(0xDEAD)
+    let n i64 = p as i64
+    assert::equals(n, 0xDEAD)
+  }
 
 test "addr with hex literal" =
-  let p *void = addr(0xFF00)
-  assert::equals(p as i64, 0xFF00)
+  { #unsafe } {
+    let p *void = addr(0xFF00)
+    assert::equals(p as i64, 0xFF00)
+  }

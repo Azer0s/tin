@@ -22,7 +22,10 @@ jobs:
           cache: true
 
       - name: Install clang (required by tin codegen)
-        run: sudo apt-get update -qq && sudo apt-get install -y clang valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
+          clang --version
 
       - name: Build compiler
         run: go build -o tin .
@@ -141,7 +144,10 @@ jobs:
           cache: true
 
       - name: Install clang and valgrind
-        run: sudo apt-get update -qq && sudo apt-get install -y clang valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
+          clang --version
 
       - name: Build compiler
         run: go build -o tin .

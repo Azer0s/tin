@@ -1,0 +1,304 @@
+// stdlib/flag - command-line argument parser.
+//
+// Define flags up front, then call `parse(args)` to populate them. Each
+// flag holds a typed value plus help text; reading a flag's `value` after
+// parse gives the user-supplied or default value. Positional arguments
+// (those not preceded by `-...`) are returned for the caller to handle.
+//
+// ## Quick start
+//
+//   use flag
+//
+//   fn main(args [string]) =
+//     let verbose = flag::bool("verbose", false, "verbose output")
+//     let port    = flag::int("port", 8080, "listen port")
+//     let name    = flag::str("name", "anon", "user name")
+//
+//     let positional = flag::parse(args)
+//     if verbose.value:
+//       echo "starting on port {port.value} as {name.value}"
+//
+// Supported syntax:
+//   --key value         long, space-separated
+//   --key=value         long, equals
+//   -k value            short (one-letter form)
+//   -k=value            short, equals
+//   --key               bool flag, sets to true
+//   -h, --help          auto-prints usage and exits(0)
+//
+// Flags appear in any order; positional args are anything not consumed by
+// flag parsing. A `--` token forces all subsequent tokens to be positional.
+
+use str
+
+const KIND_BOOL i32 = 0
+const KIND_INT  i32 = 1
+const KIND_STR  i32 = 2
+const KIND_F64  i32 = 3
+
+// FlagBool is a bool-valued flag. value is mutated in place by parse.
+struct FlagBool =
+  name string
+  help string
+  value bool
+
+  fn set_default(this *FlagBool, v bool) =
+    this.value = v
+
+// FlagInt is an i64-valued flag.
+struct FlagInt =
+  name string
+  help string
+  value i64
+
+  fn set_default(this *FlagInt, v i64) =
+    this.value = v
+
+// FlagStr is a string-valued flag.
+struct FlagStr =
+  name string
+  help string
+  value string
+
+  fn set_default(this *FlagStr, v string) =
+    this.value = v
+
+// FlagF64 is a float-valued flag.
+struct FlagF64 =
+  name string
+  help string
+  value f64
+
+  fn set_default(this *FlagF64, v f64) =
+    this.value = v
+
+// Module-global registry of flags. Stored as fixed-size arrays + counters
+// so the storage lives in the BSS segment, not on a stack frame whose
+// memory is reused after the registering function returns.
+const MAX_FLAGS i64 = 64
+
+var bool_flags [*FlagBool; 64]
+var bool_count i64
+var int_flags  [*FlagInt; 64]
+var int_count  i64
+var str_flags  [*FlagStr; 64]
+var str_count  i64
+var f64_flags  [*FlagF64; 64]
+var f64_count  i64
+
+// bool defines a new bool flag and returns its (heap-allocated) FlagBool.
+fn bool(name string, default_val bool, help string) *FlagBool =
+  if bool_count >= MAX_FLAGS:
+    panic("flag: too many bool flags (max 64)")
+  let f = &FlagBool{name: name, help: help, value: default_val}
+  bool_flags[bool_count] = f
+  bool_count = bool_count + 1
+  return f
+
+// int defines an i64 flag.
+fn int(name string, default_val i64, help string) *FlagInt =
+  if int_count >= MAX_FLAGS:
+    panic("flag: too many int flags (max 64)")
+  let f = &FlagInt{name: name, help: help, value: default_val}
+  int_flags[int_count] = f
+  int_count = int_count + 1
+  return f
+
+// str defines a string flag.
+fn str(name string, default_val string, help string) *FlagStr =
+  if str_count >= MAX_FLAGS:
+    panic("flag: too many str flags (max 64)")
+  let f = &FlagStr{name: name, help: help, value: default_val}
+  str_flags[str_count] = f
+  str_count = str_count + 1
+  return f
+
+// f64 defines a float flag.
+fn f64(name string, default_val f64, help string) *FlagF64 =
+  if f64_count >= MAX_FLAGS:
+    panic("flag: too many f64 flags (max 64)")
+  let f = &FlagF64{name: name, help: help, value: default_val}
+  f64_flags[f64_count] = f
+  f64_count = f64_count + 1
+  return f
+
+// parse walks args (skipping argv[0]) and assigns values to registered
+// flags. Returns the positional arguments (anything not consumed by flag
+// parsing). On --help / -h, prints usage and exits(0); on a malformed
+// flag, prints an error to stderr and exits(2).
+fn parse(args [string]) [string] =
+  let n = len(args)
+  let pos [string; 256]
+  let pi i64 = 0
+  let i i64 = 1
+  let saw_double_dash = false
+  for i < n:
+    let arg = args[i]
+    if saw_double_dash:
+      pos[pi] = arg
+      pi = pi + 1
+      i = i + 1
+    else if arg == "--":
+      saw_double_dash = true
+      i = i + 1
+    else if arg == "-h" || arg == "--help":
+      print_usage()
+      exit_proc(0 as i32)
+    else if !is_flag_arg(arg):
+      pos[pi] = arg
+      pi = pi + 1
+      i = i + 1
+    else:
+      let consumed = apply_flag(args, i)
+      if consumed == 0:
+        echo "flag: unknown option {arg}"
+        exit_proc(2 as i32)
+      i = i + consumed
+  return pos[0..pi] as [string]
+
+fn is_flag_arg(s string) bool =
+  let n = len(s)
+  if n < 2:
+    return false
+  return s[0] == @'-'
+
+// apply_flag interprets args[i] (and possibly args[i+1]) as a flag set.
+// Returns the number of args consumed (1 or 2), or 0 if the flag name
+// isn't recognized.
+fn apply_flag(args [string], i i64) i64 =
+  let arg = args[i]
+  let n = len(args)
+  // Strip leading dashes.
+  let off i64 = 1
+  if len(arg) >= 2 && arg[1] == @'-':
+    off = 2
+  // Split on '=' if present.
+  let eq = index_byte(arg, @'=')
+  let name string
+  let inline_val string
+  let has_inline = false
+  if eq >= 0:
+    name = substr(arg, off, eq)
+    inline_val = substr(arg, eq + 1, len(arg))
+    has_inline = true
+  else:
+    name = substr(arg, off, len(arg))
+
+  // Bool flags: presence implies true; --name=false / --name=0 explicit off.
+  let bi i64 = 0
+  for bi < bool_count:
+    if bool_flags[bi].name == name:
+      if has_inline:
+        bool_flags[bi].value = parse_bool_str(inline_val)
+        return 1
+      bool_flags[bi].value = true
+      return 1
+    bi = bi + 1
+
+  // Int flags.
+  let ii i64 = 0
+  for ii < int_count:
+    if int_flags[ii].name == name:
+      if has_inline:
+        int_flags[ii].value = str::atol(inline_val)
+        return 1
+      if i + 1 >= n:
+        echo "flag: --{name} requires a value"
+        exit_proc(2 as i32)
+      int_flags[ii].value = str::atol(args[i + 1])
+      return 2
+    ii = ii + 1
+
+  // String flags.
+  let si i64 = 0
+  for si < str_count:
+    if str_flags[si].name == name:
+      if has_inline:
+        str_flags[si].value = inline_val
+        return 1
+      if i + 1 >= n:
+        echo "flag: --{name} requires a value"
+        exit_proc(2 as i32)
+      str_flags[si].value = args[i + 1]
+      return 2
+    si = si + 1
+
+  // F64 flags.
+  let fi i64 = 0
+  for fi < f64_count:
+    if f64_flags[fi].name == name:
+      if has_inline:
+        f64_flags[fi].value = str::atof(inline_val)
+        return 1
+      if i + 1 >= n:
+        echo "flag: --{name} requires a value"
+        exit_proc(2 as i32)
+      f64_flags[fi].value = str::atof(args[i + 1])
+      return 2
+    fi = fi + 1
+
+  return 0
+
+fn parse_bool_str(s string) bool =
+  if s == "true":  return true
+  if s == "1":     return true
+  if s == "yes":   return true
+  if s == "on":    return true
+  return false
+
+// substr returns s[from..to) as a fresh string.
+fn substr(s string, from i64, to i64) string =
+  let out = ""
+  let i i64 = from
+  for i < to:
+    out = out ++ s[i]
+    i = i + 1
+  return out
+
+// index_byte returns the index of the first occurrence of b in s, or -1.
+fn index_byte(s string, b char) i64 =
+  let n = len(s)
+  let i i64 = 0
+  for i < n:
+    if s[i] == b:
+      return i
+    i = i + 1
+  return -1
+
+// print_usage writes the auto-generated usage block to stderr.
+fn print_usage() =
+  echo "Usage: <program> [flags] [args...]"
+  echo ""
+  echo "Flags:"
+  let bi i64 = 0
+  for bi < bool_count:
+    let bf = bool_flags[bi]
+    let dval = "false"
+    if bf.value:
+      dval = "true"
+    echo "  --{bf.name}  {bf.help} (default: {dval})"
+    bi = bi + 1
+  let ii i64 = 0
+  for ii < int_count:
+    let ifl = int_flags[ii]
+    echo "  --{ifl.name}  {ifl.help} (default: {ifl.value})"
+    ii = ii + 1
+  let si i64 = 0
+  for si < str_count:
+    let sfl = str_flags[si]
+    echo "  --{sfl.name}  {sfl.help} (default: {sfl.value})"
+    si = si + 1
+  let fi i64 = 0
+  for fi < f64_count:
+    let ffl = f64_flags[fi]
+    echo "  --{ffl.name}  {ffl.help} (default: {ffl.value})"
+    fi = fi + 1
+  echo "  -h, --help            show this help and exit"
+
+fn exit_proc(code i32) = extern("exit")
+
+export {
+  FlagBool, FlagInt, FlagStr, FlagF64,
+  bool, int, str, f64,
+  parse, print_usage,
+} as flag

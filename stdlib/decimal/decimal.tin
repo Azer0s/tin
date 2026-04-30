@@ -1,0 +1,267 @@
+// stdlib/decimal - exact decimal arithmetic backed by (coefficient, scale).
+//
+// `Value` represents `coefficient * 10^(-scale)`. Arithmetic is performed by
+// aligning scales so there is no IEEE 754 rounding for sums or differences
+// of typical user input. Use `decimal::from(...)` to convert from any
+// numeric type or from a literal string; the result implements operator
+// overloads, `comp` / `ord`, and the `print` trait so values flow through
+// echo / `"{...}"` interpolation directly.
+//
+//   use decimal
+//
+//   let total decimal::Value = decimal::from("0.1") + decimal::from("0.2")
+//   echo total                // 0.3 - exact
+//
+// For floats, `decimal::from(f)` uses the shortest-round-trip decimal
+// representation of `f`; passing a string keeps the user's literal exact.
+
+use str
+use { Err } from errors
+use errors
+
+
+// pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
+// range overflow i64 and the function panics rather than silently
+// returning a corrupted scale factor that would propagate as a wrong
+// answer.
+fn pow10(n i32) i64 =
+  if n < 0 || n > 18:
+    panic("decimal: scale {n} out of range [0, 18]; combined coefficient/scale products would overflow i64")
+  let r i64 = 1
+  let i i32 = 0
+  for i < n:
+    r = r * 10
+    i = i + 1
+  return r
+
+// Value is a fixed-point decimal with i64 coefficient and i32 scale.
+// (coeff, scale) -> coeff * 10^(-scale). Equality compares values, not
+// representations: 1.0 (coeff=10, scale=1) and 1 (coeff=1, scale=0) compare
+// equal because align() lifts the lower-scale operand.
+struct Value(
+  add[Value, Value], sub[Value, Value], mul[Value, Value], div[Value, Value],
+  neg[Value], comp[Value], ord[Value],
+  implicit[i32], implicit[i64], implicit[f32], implicit[f64], implicit[string],
+  print
+) =
+  coeff i64
+  scale i32
+
+  // Operator overloads.
+
+  fn ::add(this Value, other Value) Value =
+    let (a, b) = align(this, other)
+    return Value{coeff: a.coeff + b.coeff, scale: a.scale}
+
+  fn ::sub(this Value, other Value) Value =
+    let (a, b) = align(this, other)
+    return Value{coeff: a.coeff - b.coeff, scale: a.scale}
+
+  fn ::mul(this Value, other Value) Value =
+    return Value{coeff: this.coeff * other.coeff, scale: this.scale + other.scale}
+
+  // div produces up to ~18 significant digits of precision. Trailing
+  // zeros are normalized away so `1.5 / 0.5` returns Value{3, 0} rather
+  // than {3e17, 17}.
+  fn ::div(this Value, other Value) Value =
+    let extra i32 = 18 - this.scale
+    if extra < 0:
+      extra = 0
+    let factor = pow10(extra)
+    let new_coeff = (this.coeff * factor) / other.coeff
+    return normalize(Value{coeff: new_coeff, scale: this.scale + extra - other.scale})
+
+  fn ::neg(this Value) Value =
+    return Value{coeff: -this.coeff, scale: this.scale}
+
+  fn ::comp(this Value, other Value) bool =
+    let (a, b) = align(this, other)
+    return a.coeff == b.coeff
+
+  // ord returns negative / zero / positive following strcmp convention.
+  fn ::ord(this Value, other Value) i64 =
+    let (a, b) = align(this, other)
+    return a.coeff - b.coeff
+
+  // Implicit conversions: any numeric or string flowing into a Value lands
+  // here. The static fns mirror the top-level decimal::from(...) overloads.
+
+  static fn ::implicit(v i32) Value =
+    return Value{coeff: v as i64, scale: 0}
+
+  static fn ::implicit(v i64) Value =
+    return Value{coeff: v, scale: 0}
+
+  static fn ::implicit(v f32) Value =
+    return from_f64_impl(v as f64)
+
+  static fn ::implicit(v f64) Value =
+    return from_f64_impl(v)
+
+  static fn ::implicit(s string) Value =
+    return parse_impl(s)
+
+  // print: format as a decimal string. coeff and scale are reduced to a
+  // canonical (no leading zeros in the integer part, the fractional part
+  // length matches scale).
+  fn ::print(this Value) string =
+    return format_impl(this)
+
+// normalize strips trailing factors of 10 from coeff while decrementing
+// scale, so that values like {coeff: 30, scale: 1} collapse to {3, 0}.
+// Equality already ignores representation via align(), but keeping div
+// results compact prevents pow10 from overflowing on later operations.
+fn normalize(v Value) Value =
+  let coeff = v.coeff
+  let scale = v.scale
+  for coeff != 0 && scale > 0 && coeff % 10 == 0:
+    coeff = coeff / 10
+    scale = scale - 1
+  return Value{coeff: coeff, scale: scale}
+
+// align returns a, b at the same scale. The lower-scale operand is lifted
+// to match the higher one; the higher operand is unchanged.
+fn align(a Value, b Value) (Value, Value) =
+  if a.scale == b.scale:
+    return (a, b)
+  if a.scale > b.scale:
+    let factor = pow10(a.scale - b.scale)
+    return (a, Value{coeff: b.coeff * factor, scale: a.scale})
+  let factor = pow10(b.scale - a.scale)
+  return (Value{coeff: a.coeff * factor, scale: b.scale}, b)
+
+// Top-level overloaded `from`. Each variant produces a fresh Value with
+// no IEEE rounding for integer / string inputs and shortest-round-trip for
+// floats.
+fn from(v i32) Value =
+  return Value{coeff: v as i64, scale: 0}
+
+fn from(v i64) Value =
+  return Value{coeff: v, scale: 0}
+
+fn from(v f32) Value =
+  return from_f64_impl(v as f64)
+
+fn from(v f64) Value =
+  return from_f64_impl(v)
+
+fn from(s string) Value =
+  return parse_impl(s)
+
+// parse converts a decimal string to a Value. Accepts an optional leading
+// `-`, digits, and an optional `.<digits>` fractional part. Anything else
+// produces (zero, error).
+fn parse(s string) (Value, Err) =
+  let n = len(s)
+  if n == 0:
+    return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: empty string"))
+  let neg = false
+  let i i64 = 0
+  if s[0] == @'-':
+    neg = true
+    i = 1
+  else if s[0] == @'+':
+    i = 1
+  let coeff i64 = 0
+  let scale i32 = 0
+  let seen_dot = false
+  let seen_digit = false
+  for i < n:
+    let c = s[i]
+    if c == @'.':
+      if seen_dot:
+        return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: extra '.'"))
+      seen_dot = true
+    else if c >= @'0' && c <= @'9':
+      coeff = coeff * 10 + ((c - @'0') as i64)
+      seen_digit = true
+      if seen_dot:
+        scale = scale + 1
+    else:
+      return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: invalid character"))
+    i = i + 1
+  if !seen_digit:
+    return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: no digits"))
+  if neg:
+    coeff = -coeff
+  return (Value{coeff: coeff, scale: scale}, nil)
+
+// parse_impl is the ::implicit / from(string) variant that panics on
+// malformed input rather than returning an error tuple. Callers who want
+// graceful handling should use decimal::parse(s).
+fn parse_impl(s string) Value =
+  let (v, err) = parse(s)
+  if err != nil:
+    panic("decimal::from(string): {err}")
+  return v
+
+// from_f64_impl produces a Value whose decimal representation round-trips
+// through f64. Iterates printf precision from 1 to 17 and stops at the
+// first precision where atof reproduces the original IEEE bit pattern.
+// This matches Go's strconv.FormatFloat(_, 'g', -1, 64).
+//
+// Non-finite inputs (NaN, +Inf, -Inf) panic - decimal has no representation
+// for them, and silently rounding to zero would mask the bug at the call
+// site. Callers who handle non-finites explicitly should test before
+// converting (`floats::is_nan(x)`, `floats::is_pos_inf(x)`, ...).
+fn from_f64_impl(x f64) Value =
+  if x != x:
+    panic("decimal::from(f64): NaN cannot be represented as a decimal")
+  if x > 1.7976931348623157e+308:
+    panic("decimal::from(f64): +Inf cannot be represented as a decimal")
+  if x < -1.7976931348623157e+308:
+    panic("decimal::from(f64): -Inf cannot be represented as a decimal")
+  let buf [byte; 64]
+  let prec i32 = 1
+  for prec <= 17:
+    let n = str::sprintf(&buf[0] as *char, "%.*g", prec, x)
+    let s = buf[0..n as i64] as string
+    if str::atof(s) == x:
+      return parse_impl(s)
+    prec = prec + 1
+  // Fallback: 17g always round-trips for normal doubles.
+  let n = str::sprintf(&buf[0] as *char, "%.17g", x)
+  return parse_impl(buf[0..n as i64] as string)
+
+// format_impl renders a Value as a canonical decimal string. Empty
+// fractional part for scale=0; trailing zeros are NOT stripped so the
+// scale information survives round-trip through print/parse.
+fn format_impl(v Value) string =
+  let coeff = v.coeff
+  let neg = coeff < 0
+  if neg:
+    coeff = -coeff
+  let body string = "{coeff}"
+  if v.scale == 0:
+    if neg:
+      return "-" ++ body
+    return body
+  let n = len(body)
+  let s = v.scale as i64
+  if n <= s:
+    let pad = repeat_char(@'0', s - n + 1)
+    body = pad ++ body
+  let new_n = len(body)
+  let int_end = new_n - s
+  let int_part = body[0:int_end]
+  let frac_part = body[int_end:new_n]
+  let result = int_part ++ "." ++ frac_part
+  if neg:
+    return "-" ++ result
+  return result
+
+fn repeat_char(c char, n i64) string =
+  let out [byte; 64]
+  let i i64 = 0
+  for i < n:
+    if i >= 64:
+      break
+    out[i] = c as byte
+    i = i + 1
+  return out[0..i] as string
+
+export {
+  Value,
+  from,
+  parse,
+} as decimal

@@ -31,7 +31,7 @@ package codegen
 //   - UnaryExpr with `not` on a foldable bool
 //
 // Anything outside this set returns "unknown" and the caller falls back to
-// runtime evaluation. Folding is a best-effort optimisation: returning
+// runtime evaluation. Folding is a best-effort optimization: returning
 // unknown is always safe.
 
 import (
@@ -155,6 +155,11 @@ func (cg *CodeGen) tryFoldExpr(n ast.Node) foldedValue {
 	case *ast.AtomLit:
 		return foldedValue{kind: foldAtom, atomVal: e.Name}
 	case *ast.IntLit:
+		if e.Big != nil {
+			// foldedValue stores i64; bail rather than silently truncate.
+			return unknownFold()
+		}
+
 		return foldedValue{kind: foldInt, intVal: e.Value}
 
 	case *ast.TypeofExpr:
@@ -168,8 +173,31 @@ func (cg *CodeGen) tryFoldExpr(n ast.Node) foldedValue {
 
 	case *ast.UnaryExpr:
 		return cg.tryFoldUnaryExpr(e)
+
+	case *ast.CallExpr:
+		return cg.tryFoldPureCall(e)
 	}
 
+	return unknownFold()
+}
+
+// tryFoldPureCall reuses the AST evaluator behind tryEvalPureCall to fold
+// a call to a `#pure #no_recurse` function whose arguments are themselves
+// constants. Returns unknownFold() for any case the evaluator can't handle
+// (non-pure callee, runtime args, unsupported body shape).
+func (cg *CodeGen) tryFoldPureCall(call *ast.CallExpr) foldedValue {
+	val, _, ok := cg.tryEvalPureCallToCtfeVal(call)
+	if !ok {
+		return unknownFold()
+	}
+
+	switch val.kind {
+	case "i64":
+		return foldedValue{kind: foldInt, intVal: val.i}
+	case "bool":
+		return foldedValue{kind: foldBool, boolVal: val.b}
+	}
+	// f64 and string can't ride in foldedValue today; ignore.
 	return unknownFold()
 }
 
@@ -470,5 +498,112 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 		walkAST(v.Index, visit)
 	case *ast.FieldAccess:
 		walkAST(v.Expr, visit)
+	case *ast.TestDecl:
+		walkAST(v.Body, visit)
+	case *ast.StructDecl:
+		for _, m := range v.Methods {
+			walkAST(m, visit)
+		}
+	case *ast.TaggedBlock:
+		walkAST(v.Body, visit)
+	case *ast.AwaitExpr:
+		walkAST(v.Future, visit)
+	case *ast.SpawnExpr:
+		walkAST(v.Call, visit)
+		walkAST(v.DoBlock, visit)
+	case *ast.AwaitMatchStmt:
+		for _, fut := range v.Futures {
+			walkAST(fut, visit)
+		}
+
+		for _, c := range v.Cases {
+			walkAST(c.Guard, visit)
+			walkAST(c.Body, visit)
+		}
+
+		walkAST(v.Default, visit)
+	case *ast.TernaryExpr:
+		walkAST(v.Cond, visit)
+		walkAST(v.Then, visit)
+		walkAST(v.Else, visit)
+	case *ast.ArrayLit:
+		for _, e := range v.Elems {
+			walkAST(e, visit)
+		}
+	case *ast.ArrayFillLit:
+		walkAST(v.Value, visit)
+	case *ast.TupleLit:
+		for _, e := range v.Elems {
+			walkAST(e, visit)
+		}
+	case *ast.StructLit:
+		for _, f := range v.Fields {
+			walkAST(f.Value, visit)
+		}
+
+		for _, p := range v.Positional {
+			walkAST(p, visit)
+		}
+	case *ast.RangeExpr:
+		walkAST(v.Start, visit)
+		walkAST(v.End, visit)
+	case *ast.SliceExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Start, visit)
+		walkAST(v.End, visit)
+	case *ast.AsExpr:
+		walkAST(v.Expr, visit)
+	case *ast.IsExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Pattern, visit)
+	case *ast.InterpolatedString:
+		for _, p := range v.Parts {
+			if p.IsExpr {
+				walkAST(p.Expr, visit)
+			}
+		}
+	case *ast.PipeExpr:
+		walkAST(v.Left, visit)
+		walkAST(v.Right, visit)
+	// Address / deref / type-introspection / reflection-builtin nodes:
+	// each wraps a single expression. Without these cases, callers
+	// like detectStacktraceUsage and retagMacroBody would silently
+	// miss a stacktrace() / sourcepos() call buried under e.g.
+	// `&stacktrace()` (AddrExpr) or `sizeof(stacktrace())` (SizeofExpr).
+	case *ast.TypeAssertExpr:
+		walkAST(v.Expr, visit)
+	// SizeofExpr / IsRCExpr take a TypeExpr (no Node child), so no
+	// further recursion. Listed for completeness in this comment.
+	case *ast.TraitofExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldnamesExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldtypesExpr:
+		walkAST(v.Expr, visit)
+	case *ast.FieldtagExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+	case *ast.GetfieldExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+	case *ast.SetfieldExpr:
+		walkAST(v.Expr, visit)
+		walkAST(v.Field, visit)
+		walkAST(v.Val, visit)
+	case *ast.AddrExpr:
+		walkAST(v.Val, visit)
+	case *ast.DerefExpr:
+		walkAST(v.Expr, visit)
+	case *ast.AddressOfExpr:
+		walkAST(v.Expr, visit)
+	// Top-level decls whose initializers can contain expression trees.
+	// MacroDecl bodies need walking so detectStacktraceUsage finds
+	// stacktrace() calls referenced ONLY through a macro body — without
+	// this the gate stays off, linkage stays internal, and every Tin
+	// frame in the eventual trace renders as ??+0x<addr>.
+	case *ast.MacroDecl:
+		walkAST(v.Body, visit)
+	case *ast.TopLevelVar:
+		walkAST(v.Value, visit)
 	}
 }

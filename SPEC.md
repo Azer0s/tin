@@ -43,7 +43,7 @@ let perms i64 = 0o755        // octal
 let flags i64 = 0b10100011   // binary
 ```
 
-All integer literals are `i64` by default and coerce automatically to narrower types.
+All integer literals are `i64` by default and coerce automatically to narrower types. Literals exceeding the `u64` range auto-upgrade to `i128`, so `let x = 99999999999999999999` infers `i128` without an explicit `as i128` cast.
 
 ---
 
@@ -212,12 +212,14 @@ fn subsequences[t](l [t]) [[t]] =
 
 ```rust
 fn write_string(color i32, s string) =
-  let video_mem *char = addr(0xB8000).(*char)
-  for let c char in s:
-    *video_mem = c
-    video_mem += 1
-    *video_mem = color
-    video_mem += 1
+  { #unsafe } {
+    let video_mem *char = addr(0xB8000).(*char)
+    for let c char in s:
+      *video_mem = c
+      video_mem += 1
+      *video_mem = color
+      video_mem += 1
+  }
 ```
 
 ### Iterators & traits

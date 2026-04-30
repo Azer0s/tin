@@ -10,7 +10,6 @@ use errors
 // C runtime helpers for string/byte conversions (already in the runtime).
 fn tin_str_from_bytes(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
 fn tin_str_data(s string) *byte                = extern("_tin_string_data")
-fn tin_bytes_from_raw(ptr *byte, n i64) [byte] = extern("_tin_bytes_from_buf")
 
 // read_file reads the entire contents of path and returns it as a string.
 // Returns ("", err) on failure.
@@ -24,7 +23,7 @@ fn read_file(path string) (string, errors::Err) =
   let buf = mem::malloc(sz + 1) as *byte
   let n = io::fread(buf as *void, 1, sz, f)
   io::fclose(f)
-  let s = tin_bytes_from_raw(buf, n) as string
+  let s = buf[0..n] as string
   mem::free(buf as *void)
   return (s, nil)
 
@@ -34,7 +33,7 @@ fn read_file_bytes(path string) ([byte], errors::Err) =
   let f = io::fopen(path, "rb")
   if f == nil:
     let tmp = mem::malloc(1) as *byte
-    let empty = tin_bytes_from_raw(tmp, 0)
+    let empty = tmp[0..0]
     mem::free(tmp as *void)
     return (empty, errors::new("read_file_bytes: cannot open: " ++ path))
   io::fseek(f, 0, 2)
@@ -43,7 +42,7 @@ fn read_file_bytes(path string) ([byte], errors::Err) =
   let buf = mem::malloc(sz + 1) as *byte
   let n = io::fread(buf as *void, 1, sz, f)
   io::fclose(f)
-  let result = tin_bytes_from_raw(buf, n)
+  let result = buf[0..n]
   mem::free(buf as *void)
   return (result, nil)
 

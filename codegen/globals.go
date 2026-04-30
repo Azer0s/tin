@@ -3,6 +3,8 @@ package codegen
 // globals.go - top-level variable (var) and fiber-init codegen.
 
 import (
+	"math/big"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -10,6 +12,66 @@ import (
 
 	"github.com/Azer0s/tin/ast"
 )
+
+// preregisterPkgTopLevelVar is the package-aware variant. It mirrors
+// preregisterTopLevelVar but uses an IR name of `pkg__name` and binds the
+// scope entry under the bare `name` so the package's own functions can
+// reference it. When `name` is in exportedNames, the parent scope also
+// gets `pkg::name` / `pkg.name` aliases.
+func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string, exportedNames map[string]bool, parentScope *scope) error {
+	lt, err := cg.tinTypeToLLVM(tv.Type)
+	if err != nil {
+		return err
+	}
+
+	var initVal constant.Constant
+	if tv.Value != nil {
+		initVal = cg.tryConstantFold(tv.Value, lt)
+	}
+
+	if initVal == nil {
+		initVal = cg.zeroConstant(lt)
+	}
+
+	irName := pkgName + "__" + tv.Name
+
+	g := cg.mod.NewGlobal(irName, lt)
+	g.Init = initVal
+
+	entry := &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true}
+	cg.curScope.set(tv.Name, entry)
+
+	if cg.topLevelVarBareNames == nil {
+		cg.topLevelVarBareNames = map[string]bool{}
+	}
+
+	cg.topLevelVarBareNames[tv.Name] = true
+
+	if exportedNames[tv.Name] && parentScope != nil {
+		parentScope.set(pkgName+"::"+tv.Name, entry)
+		parentScope.set(pkgName+"."+tv.Name, entry)
+
+		if cg.moduleScope != nil && cg.moduleScope != parentScope {
+			cg.moduleScope.set(pkgName+"::"+tv.Name, entry)
+			cg.moduleScope.set(pkgName+"."+tv.Name, entry)
+		}
+	}
+
+	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
+		name:   irName,
+		global: g,
+	})
+
+	if tv.Value != nil && cg.tryConstantFold(tv.Value, lt) == nil {
+		cg.topLevelVarInits = append(cg.topLevelVarInits, topLevelVarInit{
+			name:     irName,
+			global:   g,
+			initExpr: tv.Value,
+		})
+	}
+
+	return nil
+}
 
 // preregisterTopLevelVar declares a top-level `var name Type [= expr]` as an
 // LLVM global with a zeroinitializer. If the initializer is a runtime
@@ -48,6 +110,12 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// isGlobal=true prevents per-function scope release from deiniting the global.
 	cg.curScope.set(tv.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true})
 
+	if cg.topLevelVarBareNames == nil {
+		cg.topLevelVarBareNames = map[string]bool{}
+	}
+
+	cg.topLevelVarBareNames[tv.Name] = true
+
 	// Track every top-level var for deinit-at-exit (regardless of init type).
 	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
 		name:   tv.Name,
@@ -81,10 +149,19 @@ func (cg *CodeGen) emitTopLevelVarDeinits(block *ir.Block) {
 
 // tryConstantFold attempts to evaluate an AST node as a compile-time constant.
 // Returns nil if the expression cannot be folded at compile time.
+//
+// First tries the literal-only fast path (covers the common case at zero AST-
+// walker cost), then falls back to the full AST evaluator for anything more
+// complex (BinExpr / UnaryExpr / pure-fn calls / identifiers bound to consts).
 func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant.Constant {
 	switch v := n.(type) {
 	case *ast.IntLit:
-		c := constant.NewInt(irtypes.I64, v.Value)
+		var c constant.Constant
+		if v.Big != nil {
+			c = &constant.Int{Typ: irtypes.I128, X: new(big.Int).Set(v.Big)}
+		} else {
+			c = constant.NewInt(irtypes.I64, v.Value)
+		}
 
 		return cg.constCoerce(c, targetType).(constant.Constant)
 	case *ast.FloatLit:
@@ -108,6 +185,52 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		}
 
 		return nil
+	}
+
+	// Fallback: route through the AST evaluator. This picks up BinExpr,
+	// UnaryExpr, AsExpr, identifiers bound to const, and #pure call results.
+	return cg.evalAsConstant(n, targetType)
+}
+
+// evalAsConstant runs the CTFE AST evaluator on n and returns the resulting
+// LLVM constant coerced to targetType, or nil if the evaluator can't reduce n
+// to a literal of i64 / f64 / bool kind.
+func (cg *CodeGen) evalAsConstant(n ast.Node, targetType irtypes.Type) constant.Constant {
+	if n == nil {
+		return nil
+	}
+
+	val, err := evalNode(n, map[string]ctfeVal{}, cg, 0)
+	if err != nil {
+		return nil
+	}
+
+	switch val.kind {
+	case "i64":
+		c := constant.NewInt(irtypes.I64, val.i)
+
+		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
+		if !ok {
+			return nil
+		}
+
+		return coerced
+	case "f64":
+		c := constant.NewFloat(irtypes.Double, val.f)
+
+		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
+		if !ok {
+			return nil
+		}
+
+		return coerced
+	case "bool":
+		b := int64(0)
+		if val.b {
+			b = 1
+		}
+
+		return constant.NewInt(irtypes.I1, b)
 	}
 
 	return nil

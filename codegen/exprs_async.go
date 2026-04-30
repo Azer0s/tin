@@ -1266,11 +1266,59 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 // allows _tin_fiber_spawn (prejoined=0) so the fiber can be ff_reclaimed at
 // completion, keeping its slot available for reuse.
 func (cg *CodeGen) activeSpawnFn() *ir.Func {
+	if cg.stacktraceUsed {
+		// Stacktrace-aware spawn variants (Phase 4 of
+		// docs/plans/stacktrace-libunwind.md). The runtime signature
+		// adds a uintptr_t caller_ip at the end; emitSpawnCall is
+		// responsible for materializing it via llvm.returnaddress(0).
+		if cg.spawnFireForget {
+			return cg.fiberSpawnChainFn
+		}
+
+		return cg.fiberSpawnJoinableChainFn
+	}
+
 	if cg.spawnFireForget {
 		return cg.fiberSpawnFn
 	}
 
 	return cg.fiberSpawnJoinableFn
+}
+
+// ensureLLVMReturnAddress lazily declares the i8*(i32) returnaddress
+// intrinsic used at spawn sites to capture the caller's IP for the
+// stacktrace spawn-chain (Phase 4). Reusing one declaration across
+// every spawn site keeps cg.mod's intrinsic list deduplicated.
+func (cg *CodeGen) ensureLLVMReturnAddress() *ir.Func {
+	if cg.llvmReturnAddressFn != nil {
+		return cg.llvmReturnAddressFn
+	}
+
+	f := cg.mod.NewFunc("llvm.returnaddress", irtypes.I8Ptr,
+		ir.NewParam("level", irtypes.I32))
+	f.Blocks = nil
+	cg.llvmReturnAddressFn = f
+
+	return f
+}
+
+// emitSpawnCall is the single call-site entry point for fiber spawning.
+// It selects the appropriate runtime variant via activeSpawnFn and, when
+// stacktrace is reachable, materializes llvm.returnaddress(0) at the call
+// site so the runtime can record this spawn's caller IP. Without this
+// indirection, every spawn site would need to duplicate the
+// stacktraceUsed branch.
+func (cg *CodeGen) emitSpawnCall(block *ir.Block, hdl value.Value) value.Value {
+	fn := cg.activeSpawnFn()
+	if !cg.stacktraceUsed {
+		return block.NewCall(fn, hdl)
+	}
+
+	retAddr := block.NewCall(cg.ensureLLVMReturnAddress(),
+		constant.NewInt(irtypes.I32, 0))
+	addrI64 := block.NewPtrToInt(retAddr, irtypes.I64)
+
+	return block.NewCall(fn, hdl, addrI64)
 }
 
 // genSpawnExpr generates code for `spawn callExpr`.
@@ -1490,7 +1538,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 				}
 
 				hdl := block.NewCall(fnPtr, spawnArgs...)
-				pid := block.NewCall(cg.activeSpawnFn(), hdl)
+				pid := cg.emitSpawnCall(block, hdl)
 				retType := cg.asyncFatPtrRetType(se.tinType)
 
 				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
@@ -1515,7 +1563,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 	hdl := block.NewCall(coroFn, callArgs...)
 
 	// Spawn the fiber: pid = _tin_fiber_spawn(hdl)
-	pid := block.NewCall(cg.activeSpawnFn(), hdl)
+	pid := cg.emitSpawnCall(block, hdl)
 
 	// Release temporary RC-tracked arguments after spawning.  The $coro ramp
 	// retains them before the initial suspend, so the caller's own reference
@@ -1625,7 +1673,7 @@ func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argN
 	}
 
 	hdl := block.NewCall(fnPtr, llArgs...)
-	pid := block.NewCall(cg.activeSpawnFn(), hdl)
+	pid := cg.emitSpawnCall(block, hdl)
 
 	retType := cg.asyncFatPtrRetType(tinFnType)
 
@@ -1675,7 +1723,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		llArgs = cg.adaptArgs(block, llArgs, coroSlotFnType)
 
 		hdl := block.NewCall(fnPtr, llArgs...)
-		pid := block.NewCall(cg.activeSpawnFn(), hdl)
+		pid := cg.emitSpawnCall(block, hdl)
 
 		// Get the actual return type of the async method (not the coro wrapper's i8*).
 		// For async-only traits, traitMethodRetType returns nil (no sync slot), so we
@@ -1798,7 +1846,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	hdl2 := block.NewCall(coroFn2, coroArgs...)
-	pid2 := block.NewCall(cg.activeSpawnFn(), hdl2)
+	pid2 := cg.emitSpawnCall(block, hdl2)
 
 	// Release temporary RC-tracked args after spawning (same as genSpawnExpr).
 	// The receiver (coroArgs[0]) is handled separately below.
@@ -1979,7 +2027,7 @@ func (cg *CodeGen) genSpawnDoBlock(block *ir.Block, doBlock *ast.Block) (value.V
 
 	// Call the ramp function with the env pointer and spawn the fiber.
 	hdl := block.NewCall(coroFn, envI8Ptr)
-	pid := block.NewCall(cg.activeSpawnFn(), hdl)
+	pid := cg.emitSpawnCall(block, hdl)
 
 	// Void do-block spawn: wrap in Future[Unit]
 

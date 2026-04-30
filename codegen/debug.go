@@ -18,6 +18,7 @@ package codegen
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -777,7 +778,12 @@ func (cg *CodeGen) pushLexicalBlock(line int) func() {
 }
 
 // attachDbgLoc attaches a DILocation !dbg metadata to an instruction.
-// line/col 0 means "compiler-generated, don't stop here".
+// line/col 0 means "compiler-generated, don't stop here". Idempotency
+// for !dbg specifically is enforced inside attachMetadataToInst, so the
+// broadened "attach to every new instruction" loop in genStmt
+// (stmts.go) and explicit per-call attaches (e.g. genBuiltinStacktrace)
+// coexist without producing the LLVM-verifier-rejected "multiple !dbg
+// attachments per instruction" error.
 func (cg *CodeGen) attachDbgLoc(inst ir.Instruction, line, col int64) {
 	if !cg.debugMode || cg.diCurrentScope == nil {
 		return
@@ -915,26 +921,62 @@ func (cg *CodeGen) ensureAllCallsHaveDbg(fn *ir.Func) {
 	}
 }
 
-// firstInstAfter returns the first instruction in block that was added after
-// nBefore instructions were already in the block, or nil if none was added.
-func firstInstAfter(block *ir.Block, nBefore int) ir.Instruction {
-	if block == nil {
-		return nil
+// instHasMetadata reports whether inst already carries a metadata
+// attachment with the given name. Reads the `Metadata` field via
+// reflection so we don't have to mirror the 55-case type switch in
+// attachMetadataToInst — every concrete llir/llvm instruction type
+// embeds the attachment slice as a field literally named `Metadata`.
+//
+// Defensive against future llir/llvm changes that might rename or
+// retype the field: any reflect.Kind mismatch returns false (treated
+// as "no existing dbg") rather than panicking.
+func instHasMetadata(inst ir.Instruction, name string) bool {
+	if inst == nil {
+		return false
 	}
 
-	if len(block.Insts) > nBefore {
-		return block.Insts[nBefore]
+	v := reflect.ValueOf(inst)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
 	}
 
-	return nil
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+
+	field := v.FieldByName("Metadata")
+	if !field.IsValid() || field.Kind() != reflect.Slice {
+		return false
+	}
+
+	for i := 0; i < field.Len(); i++ {
+		att, ok := field.Index(i).Interface().(*metadata.Attachment)
+		if ok && att != nil && att.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // attachMetadataToInst attaches a metadata attachment to any concrete
-// instruction type.  Because ir.Instruction is an interface and the embedded
-// ir.Metadata value field is not accessible through the interface, a type
-// switch over all concrete instruction types is required.
+// instruction type.  Because ir.Instruction is an interface and the
+// embedded ir.Metadata value field is not accessible through the
+// interface, a type switch over all concrete instruction types is
+// required.
+//
+// `!dbg` attachments are deduped per LLVM LangRef ("Only one !dbg
+// attachment is allowed per instruction"). Without this, the broadened
+// genStmt attach-loop and explicit per-call attaches (e.g. in
+// genBuiltinStacktrace) would race to attach two DILocations and
+// produce verifier-rejected IR. The dedup is gated to `dbg` only; all
+// other attachment kinds (tbaa, range, llvm.loop, etc.) still append.
 func attachMetadataToInst(inst ir.Instruction, att *metadata.Attachment) {
 	if inst == nil || att == nil {
+		return
+	}
+
+	if att.Name == "dbg" && instHasMetadata(inst, "dbg") {
 		return
 	}
 

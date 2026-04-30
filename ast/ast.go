@@ -2,7 +2,10 @@
 // Every node carries source position information for error reporting
 package ast
 
-import "fmt"
+import (
+	"fmt"
+	"math/big"
+)
 
 // Pos is a source position
 type Pos struct {
@@ -293,6 +296,11 @@ type MacroDecl struct {
 type Block struct {
 	base
 	Stmts []Node
+	// IsExplicitPass reports whether the source contained a `pass` keyword
+	// as the entire block body. Lets diagnostics like -Wempty-body
+	// distinguish "user wrote pass on purpose" from "user left the body
+	// blank by mistake".
+	IsExplicitPass bool
 }
 
 type ReturnStmt struct {
@@ -620,6 +628,11 @@ func NewBinExpr(left Node, op string, right Node, line, col int) *BinExpr {
 type IntLit struct {
 	base
 	Value int64
+	// Big is set only when the source literal exceeds u64 range. It carries
+	// the exact (non-negative) magnitude so codegen can emit an i128 constant
+	// without truncating. Value still holds the bottom 64 bits as a fallback
+	// for AST consumers (interval analysis, fold, etc.) that don't check Big.
+	Big *big.Int
 }
 
 type FloatLit struct {

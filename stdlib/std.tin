@@ -1,19 +1,82 @@
-use io
-use math
-use os
-use guid
+// stdlib/std - umbrella that re-exports every top-level stdlib module
+// under the `std::` namespace. Lets a program write
+//
+//   use std
+//   let l = std::log::text()
+//   echo std::strings::trim("  hi  ")
+//
+// instead of importing every module individually. Nested aggregator
+// modules (`std::encoding`, `std::net`) re-export their own children,
+// so `std::encoding::json`, `std::net::tcp`, etc. work transitively.
+// Macros are exported the same way: `std::log::info!(l, "msg")`
+// resolves to log's `info!` macro and retags to the macro call site.
+
 use assert
-use strings
-use reflect
+use collections
+use decimal
+use encoding
+use errors
+use flag
+use floats
+use guid
+use hash
+use http
+use io
+use ioutil
+use limits
+use log
+use macros
+use math
+use measure
 use mem
+use net
+use os
+use paths
+use rand
+use reflect
+use regex
+use result
+use simd
+use source
+use str
+use strings
+use sync
+use time
+use tls
+use unicode
 
 export {
-    io,
-    math,
-    os,
-    guid,
     assert,
-    strings,
+    collections,
+    decimal,
+    encoding,
+    errors,
+    flag,
+    floats,
+    guid,
+    hash,
+    http,
+    io,
+    ioutil,
+    limits,
+    log,
+    macros,
+    math,
+    measure,
+    mem,
+    net,
+    os,
+    paths,
+    rand,
     reflect,
-    mem
+    regex,
+    result,
+    simd,
+    source,
+    str,
+    strings,
+    sync,
+    time,
+    tls,
+    unicode
 } as std

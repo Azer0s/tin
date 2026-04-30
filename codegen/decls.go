@@ -1345,7 +1345,18 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 						}
 
 						if paramLLVM.Equal(srcLLVM) {
-							if fnEntry, ok2 := cg.curScope.lookup(methodScopeName(structKey, m)); ok2 {
+							// Multiple `static fn ::implicit(...)` impls share the
+							// same scope key and get overload-mangled. Look up by
+							// the mangled name when this method is in the overload
+							// set, otherwise the bare key.
+							key := methodScopeName(structKey, m)
+
+							lookupName := key
+							if cg.overloadedNames[key] {
+								lookupName = overloadMangledName(key, methodParamSig(m, structKey))
+							}
+
+							if fnEntry, ok2 := cg.curScope.lookup(lookupName); ok2 {
 								if fn, ok3 := fnEntry.val.(*ir.Func); ok3 {
 									cg.implicitConvFns[structKey] = append(
 										cg.implicitConvFns[structKey],

@@ -1,0 +1,295 @@
+// stdlib/log - leveled logging with text or JSON output.
+//
+// Two concrete loggers, each with its own emit:
+//   - `TextLogger`: human-readable single line, optional ANSI color.
+//   - `JsonLogger`: one JSON object per line for log shippers / ELK / loki.
+//
+// Construct with `log::text()` or `log::json()` and chain builder
+// methods to configure. The level macros (`log::debug!/info!/warn!/
+// error!/fatal!`) inject the call-site `sourcepos()` automatically:
+//
+//   use log
+//
+//   let l = log::text()
+//     .level(log::LEVEL_INFO)
+//     .color(log::COLOR_AUTO)
+//   log::info!(l, "server started")
+//   log::warn!(l, "disk usage high")
+//
+//   let p = log::json().level(log::LEVEL_INFO).hide_pos()
+//   log::error!(p, "connect failed")
+//
+// The macros pass `sourcepos()` (no arg) which after macro retag points
+// at the macro CALL site, so each log line carries the file:line:col of
+// where it was written rather than the macro definition. Five levels:
+// DEBUG, INFO, WARN, ERROR, FATAL. FATAL prints then exits(1).
+
+use time
+use strings
+
+fn isatty_c(fd i32) i32 = extern("isatty")
+fn write_c(fd i32, buf *byte, n i64) i64 = extern("write")
+fn exit_c(code i32) = extern("exit")
+
+const LEVEL_DEBUG i32 = 0
+const LEVEL_INFO  i32 = 1
+const LEVEL_WARN  i32 = 2
+const LEVEL_ERROR i32 = 3
+const LEVEL_FATAL i32 = 4
+
+const COLOR_AUTO i32 = 0
+const COLOR_ON   i32 = 1
+const COLOR_OFF  i32 = 2
+
+// TextLogger writes one human-readable line per entry: timestamp, level,
+// position, message. Level is colorized when stderr is a TTY (or
+// COLOR_ON forced). Use the matching log::*! macros so the call-site
+// position is attached automatically.
+//
+// All builder methods return a NEW logger with the field changed; the
+// original is untouched. Chain freely: `log::text().level(...).color(...)`.
+struct TextLogger =
+  level_    i32
+  color_    i32
+  show_pos_ bool
+
+  fn debug_at(this TextLogger, pos atom, msg string) = text_emit(this, 0 as i32, pos, msg)
+  fn info_at (this TextLogger, pos atom, msg string) = text_emit(this, 1 as i32, pos, msg)
+  fn warn_at (this TextLogger, pos atom, msg string) = text_emit(this, 2 as i32, pos, msg)
+  fn error_at(this TextLogger, pos atom, msg string) = text_emit(this, 3 as i32, pos, msg)
+  fn fatal_at(this TextLogger, pos atom, msg string) =
+    text_emit(this, 4 as i32, pos, msg)
+    exit_c(1)
+
+  fn level(this TextLogger, lvl i32) TextLogger =
+    return TextLogger{level_: lvl, color_: this.color_, show_pos_: this.show_pos_}
+  fn color(this TextLogger, c i32) TextLogger =
+    return TextLogger{level_: this.level_, color_: c, show_pos_: this.show_pos_}
+  fn hide_pos(this TextLogger) TextLogger =
+    return TextLogger{level_: this.level_, color_: this.color_, show_pos_: false}
+  fn show_pos(this TextLogger) TextLogger =
+    return TextLogger{level_: this.level_, color_: this.color_, show_pos_: true}
+
+// JsonLogger writes one JSON object per line. Use for log shippers.
+struct JsonLogger =
+  level_    i32
+  show_pos_ bool
+
+  fn debug_at(this JsonLogger, pos atom, msg string) = json_emit(this, 0 as i32, pos, msg)
+  fn info_at (this JsonLogger, pos atom, msg string) = json_emit(this, 1 as i32, pos, msg)
+  fn warn_at (this JsonLogger, pos atom, msg string) = json_emit(this, 2 as i32, pos, msg)
+  fn error_at(this JsonLogger, pos atom, msg string) = json_emit(this, 3 as i32, pos, msg)
+  fn fatal_at(this JsonLogger, pos atom, msg string) =
+    json_emit(this, 4 as i32, pos, msg)
+    exit_c(1)
+
+  fn level(this JsonLogger, lvl i32) JsonLogger =
+    return JsonLogger{level_: lvl, show_pos_: this.show_pos_}
+  fn hide_pos(this JsonLogger) JsonLogger =
+    return JsonLogger{level_: this.level_, show_pos_: false}
+  fn show_pos(this JsonLogger) JsonLogger =
+    return JsonLogger{level_: this.level_, show_pos_: true}
+
+// text starts a TextLogger builder. Defaults: LEVEL_INFO, COLOR_AUTO,
+// position visible. Override with chain methods:
+//   log::text().level(log::LEVEL_DEBUG).color(log::COLOR_OFF).hide_pos()
+fn text() TextLogger =
+  return TextLogger{level_: LEVEL_INFO, color_: COLOR_AUTO, show_pos_: true}
+
+// json starts a JsonLogger builder. Defaults: LEVEL_INFO, position
+// visible (most JSON consumers want source context).
+fn json() JsonLogger =
+  return JsonLogger{level_: LEVEL_INFO, show_pos_: true}
+
+// User-facing level macros. Each expands to a method call on the given
+// logger with `sourcepos()` injected as the first arg. Because retag-
+// MacroBody points the macro body's `sourcepos()` at the caller's site,
+// every log line records the line that wrote it - not the macro
+// definition. Works for both TextLogger and JsonLogger thanks to
+// Tin's per-type method dispatch on `_at`.
+macro debug!(l, msg) = l.debug_at(sourcepos(), msg)
+macro info!(l, msg)  = l.info_at(sourcepos(), msg)
+macro warn!(l, msg)  = l.warn_at(sourcepos(), msg)
+macro error!(l, msg) = l.error_at(sourcepos(), msg)
+macro fatal!(l, msg) = l.fatal_at(sourcepos(), msg)
+
+fn text_emit(l TextLogger, lvl i32, pos atom, msg string) =
+  if lvl < l.level_:
+    return
+  let line = render_text(lvl, pos, msg, resolve_color(l.color_), l.show_pos_)
+  write_line(line)
+
+fn json_emit(l JsonLogger, lvl i32, pos atom, msg string) =
+  if lvl < l.level_:
+    return
+  let line = render_json(lvl, pos, msg, l.show_pos_)
+  write_line(line)
+
+fn resolve_color(c i32) bool =
+  if c == COLOR_ON:  return true
+  if c == COLOR_OFF: return false
+  return isatty_c(2) == 1
+
+fn write_line(line string) =
+  let bytes = line as [byte]
+  let _ = write_c(2, &bytes[0], len(bytes))
+
+// esc_byte is an ANSI ESC (0x1b) as a one-byte string. Tin's string
+// literals don't decode \x escapes, so we build the byte explicitly.
+fn esc_byte() string =
+  let b [byte; 1]
+  b[0] = 0x1b as byte
+  return b[0..1] as string
+
+// strip_atom_quotes removes the lexer's complex-atom wrapping double
+// quotes so the rendered output has just `symbol@file:line:col`
+// instead of `"symbol@file:line:col"`. Necessary because atoms whose
+// names contain colons or `@` get wrapped on registration so that the
+// lexer can round-trip them as `'"name"` literals.
+fn strip_atom_quotes(s string) string =
+  let n = len(s)
+  if n < 2: return s
+  if s[0] != @'\"': return s
+  if s[n - 1] != @'\"': return s
+  return strings::substr(s, 1 as i64, n - 1)
+
+fn render_text(lvl i32, pos atom, msg string, color bool, show_pos bool) string =
+  let ts = time::now().to_rfc3339()
+  let lvl_str = level_token_padded(lvl)
+  if color:
+    let esc = esc_byte()
+    lvl_str = esc ++ "[" ++ level_color(lvl) ++ "m" ++ lvl_str ++ esc ++ "[0m"
+  if show_pos:
+    return ts ++ " " ++ lvl_str ++ " " ++ strip_atom_quotes(pos as string) ++ " " ++ msg ++ "\n"
+  return ts ++ " " ++ lvl_str ++ " " ++ msg ++ "\n"
+
+fn render_json(lvl i32, pos atom, msg string, show_pos bool) string =
+  let ts = time::now().to_rfc3339()
+  let body string = "\{\"time\":\""
+  body = body ++ ts
+  body = body ++ "\",\"level\":\""
+  body = body ++ level_name(lvl)
+  if show_pos:
+    body = body ++ "\",\"src\":\""
+    body = body ++ escape_json(strip_atom_quotes(pos as string))
+  body = body ++ "\",\"msg\":\""
+  body = body ++ escape_json(msg)
+  body = body ++ "\"\}\n"
+  return body
+
+fn level_token_padded(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "DEBUG"
+  if lvl == LEVEL_INFO:  return "INFO "
+  if lvl == LEVEL_WARN:  return "WARN "
+  if lvl == LEVEL_ERROR: return "ERROR"
+  if lvl == LEVEL_FATAL: return "FATAL"
+  return "?    "
+
+fn level_name(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "debug"
+  if lvl == LEVEL_INFO:  return "info"
+  if lvl == LEVEL_WARN:  return "warn"
+  if lvl == LEVEL_ERROR: return "error"
+  if lvl == LEVEL_FATAL: return "fatal"
+  return "?"
+
+fn level_color(lvl i32) string =
+  if lvl == LEVEL_DEBUG: return "36"     // cyan
+  if lvl == LEVEL_INFO:  return "32"     // green
+  if lvl == LEVEL_WARN:  return "33"     // yellow
+  if lvl == LEVEL_ERROR: return "31"     // red
+  if lvl == LEVEL_FATAL: return "1;31"   // bold red
+  return "0"
+
+// hex_digit returns the ASCII hex char (0-9, a-f) for n in [0, 16).
+fn hex_digit(n i64) byte =
+  if n < 10: return ((@'0' as i64) + n) as byte
+  return ((@'a' as i64) + n - 10) as byte
+
+// escape_json escapes s for use as a JSON string value. Per RFC 8259
+// every byte in 0x00-0x1F MUST be escaped (most as \uXXXX, with the
+// short forms \\ \" \n \r \t \b \f for the well-known controls).
+//
+// The output buffer is fixed-size so very long messages are truncated
+// to keep this an allocation-free hot path. We reserve 12 bytes of
+// tail headroom: 6 for the largest single escape (\uXXXX) plus 6 for
+// the literal "...TRUNC" sentinel appended on truncation so consumers
+// can spot when content was lost.
+fn escape_json(s string) string =
+  let n = len(s)
+  let out [byte; 4096]
+  let cap i64 = 4084   // leave room for one max-escape (\uXXXX) plus sentinel
+  let oi i64 = 0
+  let i i64 = 0
+  let truncated bool = false
+  for i < n:
+    if oi >= cap:
+      truncated = true
+      break
+    let c = s[i]
+    if c == @'\"':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'\"' as byte
+      oi = oi + 2
+    else if c == @'\\':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'\\' as byte
+      oi = oi + 2
+    else if c == @'\n':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'n' as byte
+      oi = oi + 2
+    else if c == @'\r':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'r' as byte
+      oi = oi + 2
+    else if c == @'\t':
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'t' as byte
+      oi = oi + 2
+    else if c == 0x08 as byte:
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'b' as byte
+      oi = oi + 2
+    else if c == 0x0c as byte:
+      out[oi] = @'\\' as byte
+      out[oi + 1] = @'f' as byte
+      oi = oi + 2
+    else if (c as i64) < 0x20:
+      // Generic control byte (NUL, VT, etc.): \u00XX six-byte form.
+      // Strict JSON parsers (jq, serde_json, Python's json) reject
+      // unescaped 0x00-0x1F bytes outright; emitting them as literal
+      // would corrupt every log line containing terminal escapes,
+      // raw protocol bytes, or unsanitised exception text.
+      out[oi]     = @'\\' as byte
+      out[oi + 1] = @'u' as byte
+      out[oi + 2] = @'0' as byte
+      out[oi + 3] = @'0' as byte
+      out[oi + 4] = hex_digit(((c as i64) >> 4) & 0xf as i64)
+      out[oi + 5] = hex_digit((c as i64) & 0xf as i64)
+      oi = oi + 6
+    else:
+      out[oi] = c as byte
+      oi = oi + 1
+    i = i + 1
+  if truncated:
+    // Append a literal sentinel so log shippers can flag dropped
+    // content. 8 bytes inside the 12-byte tail headroom we reserved.
+    out[oi]     = @'.' as byte
+    out[oi + 1] = @'.' as byte
+    out[oi + 2] = @'.' as byte
+    out[oi + 3] = @'T' as byte
+    out[oi + 4] = @'R' as byte
+    out[oi + 5] = @'U' as byte
+    out[oi + 6] = @'N' as byte
+    out[oi + 7] = @'C' as byte
+    oi = oi + 8
+  return out[0..oi] as string
+
+export {
+  LEVEL_DEBUG, LEVEL_INFO, LEVEL_WARN, LEVEL_ERROR, LEVEL_FATAL,
+  COLOR_AUTO, COLOR_ON, COLOR_OFF,
+  TextLogger, JsonLogger,
+  text, json,
+  debug!, info!, warn!, error!, fatal!,
+} as log

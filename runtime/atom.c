@@ -59,22 +59,44 @@ int32_t _tin_learn_atom_handover(char *str) {
         }
     }
     int32_t code = (int32_t)_tin_crc32_str(str);
+    if (code == 0) code = 1;
     int collision;
+    int spins = 0;
     do {
         collision = 0;
         for (TinRtAtomNode *n = _tin_rt_atom_head; n; n = n->next) {
             if (n->code == code && strcmp(n->str, str) != 0) {
                 code++;
+                if (code == 0) code = 1;
                 collision = 1;
+                if (++spins > (1 << 24)) {
+                    pthread_mutex_unlock(&_tin_rt_atom_mu);
+                    if (sz > 0) free(str);
+                    fputs("tin: runtime atom table exhausted\n", stderr);
+                    exit(1);
+                }
                 break;
             }
         }
     } while (collision);
     TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
+    if (hdr == NULL) {
+        pthread_mutex_unlock(&_tin_rt_atom_mu);
+        if (sz > 0) free(str);
+        fputs("tin: atom OOM\n", stderr);
+        exit(1);
+    }
     hdr->rc = TIN_IMMORTAL_RC;
     char *s = (char *)(hdr + 1);
     memcpy(s, str, copy_len);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
+    if (node == NULL) {
+        free(hdr);
+        pthread_mutex_unlock(&_tin_rt_atom_mu);
+        if (sz > 0) free(str);
+        fputs("tin: atom OOM\n", stderr);
+        exit(1);
+    }
     node->code = code;
     node->hdr  = hdr;
     node->str  = s;
@@ -112,27 +134,51 @@ int32_t _tin_learn_atom(const char *str) {
             return code;
         }
     }
-    /* Compute code with collision resolution */
+    /* Compute code with collision resolution. Skip 0 (reserved as
+     * "no atom" sentinel by the per-IP TLS cache in stacktrace.c) and
+     * cap iterations: in the unreachable case where 2^31 distinct
+     * codes are taken we'd otherwise spin forever. */
     int32_t code = (int32_t)_tin_crc32_str(str);
+    if (code == 0) code = 1;
     int collision;
+    int spins = 0;
     do {
         collision = 0;
         for (TinRtAtomNode *n = _tin_rt_atom_head; n; n = n->next) {
             if (n->code == code && strcmp(n->str, str) != 0) {
                 code++;
+                if (code == 0) code = 1;
                 collision = 1;
+                if (++spins > (1 << 24)) {
+                    pthread_mutex_unlock(&_tin_rt_atom_mu);
+                    fputs("tin: runtime atom table exhausted\n", stderr);
+                    exit(1);
+                }
                 break;
             }
         }
     } while (collision);
     /* Prepend a new node; allocate the string as an immortal ARC block so
-     * that _tin_retain/_tin_release on it are safe no-ops. */
+     * that _tin_retain/_tin_release on it are safe no-ops. malloc may
+     * fail under stress (eg lots of distinct stacktrace frames); abort
+     * cleanly rather than dereferencing NULL inside the lock. */
     size_t len = strlen(str);
     TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + len + 1);
+    if (hdr == NULL) {
+        pthread_mutex_unlock(&_tin_rt_atom_mu);
+        fputs("tin: atom OOM\n", stderr);
+        exit(1);
+    }
     hdr->rc = TIN_IMMORTAL_RC;
     char *s = (char *)(hdr + 1);
     memcpy(s, str, len + 1);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
+    if (node == NULL) {
+        free(hdr);
+        pthread_mutex_unlock(&_tin_rt_atom_mu);
+        fputs("tin: atom OOM\n", stderr);
+        exit(1);
+    }
     node->code = code;
     node->hdr  = hdr;
     node->str  = s;

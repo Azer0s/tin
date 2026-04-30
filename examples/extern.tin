@@ -4,10 +4,8 @@
 // automatically unwraps the fat-pointer to a raw C pointer before the call.
 // When it returns `string`, the result is wrapped back into a fat-pointer using
 // C's strlen to determine the length.
-//
-// Build/test with -lm for the math functions:
-//   tin build extern.tin -lm
-//   tin test  extern.tin -lm
+
+//!-lm
 use assert
 
 // String functions

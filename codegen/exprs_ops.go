@@ -1027,12 +1027,12 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 // genPtrRangeSlice handles ptr[lo..hi] on a raw pointer, returning a fat [T].
 // For *byte it calls _tin_bytes_from_buf (ARC-managed copy).
 // For other *T it builds a non-owning fat pointer {ptr+lo, hi-lo}.
+//
+// If ptrExpr resolves to a fixed-size array `[T; N]` (an addressable
+// alloca), the array is implicitly decayed to its first-element pointer
+// so `buf[0..n]` reads as `(&buf[0])[0..n]` - the natural way to splice
+// out an ARC-managed slice without a separate `&` and an extern call.
 func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr ast.Node, hiExpr ast.Node) (value.Value, error) {
-	ptrVal, err := cg.genExpr(block, ptrExpr)
-	if err != nil {
-		return nil, err
-	}
-
 	loVal, err := cg.genExpr(block, loExpr)
 	if err != nil {
 		return nil, err
@@ -1045,6 +1045,29 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 
 	loVal = cg.coerce(block, loVal, irtypes.I64)
 	hiVal = cg.coerce(block, hiVal, irtypes.I64)
+
+	// Try the lvalue path first: a fixed-size array decays to a pointer
+	// to its element type. Falls back to the rvalue path for raw *T or
+	// non-addressable expressions.
+	var ptrVal value.Value
+
+	if arrPtr, lvErr := cg.genLValue(block, ptrExpr); lvErr == nil && arrPtr != nil {
+		if pt2, ok := arrPtr.Type().(*irtypes.PointerType); ok {
+			if at, ok2 := pt2.ElemType.(*irtypes.ArrayType); ok2 {
+				ptrVal = block.NewGetElementPtr(at, arrPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			}
+		}
+	}
+
+	if ptrVal == nil {
+		v, err2 := cg.genExpr(block, ptrExpr)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		ptrVal = v
+	}
 
 	pt, ok := ptrVal.Type().(*irtypes.PointerType)
 	if !ok {
@@ -1243,6 +1266,18 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		sBits := val.Type().(*irtypes.IntType).BitSize
 
 		tBits := targetType.(*irtypes.IntType).BitSize
+
+		// Truncation: warn if the source folds to a constant that doesn't
+		// fit the destination type. Caller may have written `let x i32 = 1<<33`.
+		// We pin the legal range by the DESTINATION signedness — `0xC3 as
+		// byte` is a perfectly valid u8 (195) even though 0xC3 was lexed as
+		// a signed i64 literal. Falling back to the source's signedness only
+		// when the dest is itself a signed integer type.
+		if sBits > tBits {
+			isUnsigned := isUnsignedTinType(e.Type) || cg.exprElemIsUnsigned(e.Expr)
+			cg.checkCastTruncatesConst(e, tBits, isUnsigned)
+		}
+
 		if sBits < tBits {
 			// IntLit values are always non-negative as written in source code.
 			// Large literals (e.g. 18446744073709551615) that exceed i64::MAX are
@@ -1274,6 +1309,16 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, error) {
 	// addr(N) where N is an integer literal: treat as inttoptr cast (raw address).
 	if il, ok := e.Val.(*ast.IntLit); ok {
+		if cg.unsafeDepth == 0 {
+			return nil, cg.nodeErr(e,
+				"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
+		}
+
+		if il.Big != nil {
+			return nil, cg.nodeErr(e,
+				"addr(int_literal) target must fit in 64 bits (got %s)", il.Big.String())
+		}
+
 		v := constant.NewInt(irtypes.I64, il.Value)
 
 		return block.NewIntToPtr(v, irtypes.I8Ptr), nil
@@ -1287,6 +1332,10 @@ func (cg *CodeGen) genAddrOfExpr(block *ir.Block, e *ast.AddressOfExpr) (value.V
 }
 
 func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value, error) {
+	if _, isNil := e.Expr.(*ast.NilLit); isNil {
+		return nil, cg.nodeErr(e, "dereferencing nil literal")
+	}
+
 	val, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
@@ -2382,6 +2431,11 @@ func binOpIsCommutative(op string) bool {
 //
 // `argTypes` are the LLVM types of the user-visible operands (one for binary,
 // none for unary). The receiver is implicit and not included.
+//
+// Both top-level and package-loaded structs register impls under the full
+// canonical struct name (`Box` vs. `decimal__Value`); the lookup key here
+// matches whatever `typeNameOf(operand)` returns at the call site so the
+// two always agree.
 func (cg *CodeGen) lookupOpMethod(structName, traitName string, argTypes []irtypes.Type) *ir.Func {
 	key := structName + "/" + traitName
 

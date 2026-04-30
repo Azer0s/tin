@@ -36,11 +36,24 @@ extern void _tin_release(void *ptr);
 #endif
 
 typedef void *(*tin_alloc_fn)(size_t);
+typedef void  (*tin_free_fn)(void *);
 
 static atomic_intptr_t _tin_extern_alloc_fn = (intptr_t)0;
+static atomic_intptr_t _tin_extern_free_fn  = (intptr_t)0;
 
 TIN_API void tin_set_extern_alloc(tin_alloc_fn fn) {
     atomic_store_explicit(&_tin_extern_alloc_fn,
+                          (intptr_t)(void *)fn, memory_order_release);
+}
+
+// Pair `tin_set_extern_alloc` so consumers that swap in a custom allocator
+// can also swap in a matching deallocator. Callers of `tin_extern_alloc`
+// that need to release the buffer (e.g. the CTFE compile-time dispatch
+// when consuming a #pure #interop string return) MUST go through
+// `tin_extern_free` rather than libc free; otherwise a non-malloc
+// allocator's metadata gets corrupted.
+TIN_API void tin_set_extern_free(tin_free_fn fn) {
+    atomic_store_explicit(&_tin_extern_free_fn,
                           (intptr_t)(void *)fn, memory_order_release);
 }
 
@@ -52,6 +65,19 @@ TIN_API void *tin_extern_alloc(size_t n) {
     }
 
     return ((tin_alloc_fn)(void *)slot)(n);
+}
+
+TIN_API void tin_extern_free(void *p) {
+    if (!p) return;
+
+    intptr_t slot = atomic_load_explicit(&_tin_extern_free_fn,
+                                         memory_order_acquire);
+    if (slot == 0) {
+        free(p);
+        return;
+    }
+
+    ((tin_free_fn)(void *)slot)(p);
 }
 
 // String marshaling helpers used by the C wrappers emitted for #interop

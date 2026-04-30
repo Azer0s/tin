@@ -1,0 +1,38 @@
+// stacktrace_phase5.tin - cap argument and per-IP TLS atom cache.
+//
+// stacktrace(n) clamps the returned trace to at most n frames, and
+// repeated calls from the same call site MUST return the same atom
+// codes (cache hit). Functional regression sentinel for the cache;
+// the perf benefit is observed via bench/, not here.
+use assert
+
+fn{#no_inline} probe() [atom] = return stacktrace(2)
+
+test "stacktrace(cap) caps returned length" =
+  let frames [atom] = probe()
+  assert::ok(len(frames) <= 2)
+  assert::ok(len(frames) >= 1)
+
+fn{#no_inline} loop_capture() [atom] = return stacktrace()
+
+test "repeated calls from one site return identical atom codes (cache hit)" =
+  // Two calls from the SAME call site (the call inside loop_capture)
+  // produce the same return-address IP, so the per-IP cache returns
+  // identical atom codes. Calling stacktrace twice from different
+  // source positions would naturally produce different IPs and atoms,
+  // so the helper exists to keep the call-site IP stable.
+  let a [atom] = loop_capture()
+  let b [atom] = loop_capture()
+  // loop_capture's own frame (index 0) has identical IP across the two
+  // calls because the call to stacktrace() lives at one source location;
+  // its caller's frame differs (the two `let` bindings are at distinct
+  // return addresses in the test body), so we only compare frame 0.
+  assert::ok(len(a) >= 1)
+  assert::equals(len(a), len(b))
+  assert::equals(a[0], b[0])
+
+test "stacktrace(0) saturates to >= 1 frame instead of returning empty" =
+  // Runtime clamps cap to [1, 1024]; codegen passes the i64 through
+  // unchanged, so a 0 still hits the runtime and gets bumped to 1.
+  let frames [atom] = stacktrace(0)
+  assert::ok(len(frames) >= 1)

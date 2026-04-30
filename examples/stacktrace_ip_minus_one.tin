@@ -1,0 +1,39 @@
+// stacktrace_ip_minus_one.tin - regression sentinel for the IP-1 fix.
+//
+// libunwind's UNW_REG_IP returns the *return address* on every frame
+// past the cursor's initial position, i.e. the instruction AFTER the
+// call. If the call sits right at the end of a function's machine
+// code, that return address falls into the next function in memory
+// layout and libdwfl reports the line of THAT function instead.
+//
+// runtime/stacktrace.c subtracts 1 from each emitted frame's IP so
+// libdwfl lands inside the call instruction itself. Without it, the
+// frame for outer_helper's call site would routinely resolve to a line
+// in the function declared immediately after outer_helper in the
+// source — line 23 specifically (where the call site lives) is the
+// stable reference point we assert on.
+use assert
+use strings
+
+fn{#no_inline} inner_helper() [atom] = return stacktrace()
+fn{#no_inline} outer_helper() [atom] = return inner_helper()
+
+test "the immediate caller's frame resolves to the caller's source line" =
+  let frames [atom] = outer_helper()
+  assert::ok(len(frames) >= 2)
+  // frame[0] is inner_helper's call to stacktrace; frame[1] is the
+  // call instruction inside outer_helper. Both atoms must carry the
+  // expected symbol — that's resolution-agnostic and proves the walk
+  // landed where it should. The file:line:col upgrade depends on
+  // libdwfl being able to parse clang's DWARF (works on Arch with
+  // libdw 0.193+; broken on Ubuntu 24.04 with libdw 0.190). We only
+  // assert the IP-1 effect on file resolution when at least one frame
+  // shows the upgraded `@<file>:<line>:<col>` shape — broken libdwfl
+  // would silently weaken this regression sentinel otherwise.
+  let f0 string = frames[0] as string
+  let f1 string = frames[1] as string
+  assert::ok(strings::contains(f0, "inner_helper"))
+  assert::ok(strings::contains(f1, "outer_helper"))
+  if strings::contains(f0, "@") && strings::contains(f1, "@"):
+    assert::ok(strings::contains(f0, "stacktrace_ip_minus_one.tin:"))
+    assert::ok(strings::contains(f1, "stacktrace_ip_minus_one.tin:"))

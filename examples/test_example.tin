@@ -18,7 +18,8 @@ test "string concatenation" =
   assert::equals("foo" ++ "bar", "foobar")
 
 test "boolean assertions" =
-  assert::ok(1 == 1)
+  let one i64 = 1
+  assert::ok(one == 1)
   assert::ok(2 > 1)
   assert::not_ok(1 == 2)
 

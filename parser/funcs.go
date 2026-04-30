@@ -705,6 +705,12 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 
 	p.skipSemisAndNewlines()
 
+	// Track whether the only thing in the block was a `pass` keyword so the
+	// downstream -Wempty-body diagnostic doesn't fire on intentionally-empty
+	// blocks. parseStatement returns (nil, nil) for `pass`; we sense it by
+	// peeking the lexer state.
+	sawPassOnly := false
+
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
 		// A comma at block level signals we're inside a struct literal field value
 		// (e.g. `fn(x) = return x,` where `,` is the struct field separator).
@@ -713,6 +719,8 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 			break
 		}
 
+		isPass := p.check(lexer.KW_PASS)
+
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
@@ -720,9 +728,16 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 
 		if stmt != nil {
 			b.Stmts = append(b.Stmts, stmt)
+			sawPassOnly = false
+		} else if isPass {
+			sawPassOnly = sawPassOnly || len(b.Stmts) == 0
 		}
 
 		p.skipSemisAndNewlines()
+	}
+
+	if sawPassOnly && len(b.Stmts) == 0 {
+		b.IsExplicitPass = true
 	}
 
 	if p.check(lexer.DEDENT) {

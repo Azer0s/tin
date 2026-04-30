@@ -1,7 +1,6 @@
 // examples/test_json.tin - tests for the json stdlib
 use assert
 use encoding::json
-use result
 use { unwrap_or } from result
 
 struct point =

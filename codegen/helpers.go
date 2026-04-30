@@ -145,6 +145,51 @@ func (cg *CodeGen) displayStructName(canonicalKey string) string {
 	return canonicalKey
 }
 
+// tinTypeDisplay returns a user-facing description of an LLVM type using
+// Tin syntax: `decimal::Value` rather than the internal `%decimal__Value`,
+// `*Box` rather than `%Box*`, `[decimal::Value]` for fat arrays, and so
+// on. Used in diagnostic strings so errors don't leak the package-mangling
+// scheme back at the user.
+func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
+	if t == nil {
+		return "void"
+	}
+
+	switch tt := t.(type) {
+	case *irtypes.PointerType:
+		return "*" + cg.tinTypeDisplay(tt.ElemType)
+	case *irtypes.ArrayType:
+		return "[" + cg.tinTypeDisplay(tt.ElemType) + "]"
+	case *irtypes.VectorType:
+		return cg.tinTypeDisplay(tt.ElemType) + "x" + fmt.Sprintf("%d", tt.Len)
+	case *irtypes.StructType:
+		// Anonymous structs that the compiler uses for fat pointers: surface
+		// them as the user-facing equivalent.
+		if tt.Name() == "" {
+			if isStringType(tt) {
+				return "string"
+			}
+
+			if isAnyType(tt) {
+				return "any"
+			}
+
+			if isFatArrayPtr(tt) && len(tt.Fields) == 2 {
+				if pt, ok := tt.Fields[0].(*irtypes.PointerType); ok {
+					return "[" + cg.tinTypeDisplay(pt.ElemType) + "]"
+				}
+			}
+		}
+	}
+
+	name := llvmTypeName(t)
+	if dn, ok := cg.structDisplayNames[name]; ok {
+		return dn
+	}
+
+	return name
+}
+
 // buildClosureEnv heap-allocates an RC-managed env struct for lambda closure captures.
 // Layout: { i8* dtor_fn_ptr, capture_0, capture_1, ... } (dtor at field 0).
 // All RC-tracked captures are retained so the env independently owns them.

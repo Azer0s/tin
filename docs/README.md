@@ -16,11 +16,17 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [07 - Enums & Unions](07-enums-unions.md) | Integer enums, atom enums, tagged unions, native C unions |
 | [08 - C Interop](08-interop.md) | `extern`, pointers, C struct interop, linker directives (`//!`) |
 | [09 - Packages](09-packages.md) | `use`/`export`, package resolution, standard library overview |
-| [10 - Reflection](10-reflection.md) | Atoms, `any` type, `typeof`, `traitof`, `fieldnames`, `getfield`, `setfield` |
+| [10 - Reflection](10-reflection.md) | Atoms, `any` type, `typeof`, `traitof`, `fieldnames`, `getfield`, `setfield`, `sourcepos`, `stacktrace` |
 | [11 - Testing](11-testing.md) | `test` blocks, `assert` stdlib, `tin test` command |
 | [12 - Macros](12-macros.md) | Simple macros (AST substitution), CTFE macros, backtick code-splice literals |
 | [13 - Control Tags](13-control-tags.md) | `#pure`, `#sideffect`, `#no_recurse`, `#no_thread`, `#allow_sideffect` |
 | [14 - Fibers & Channels](14-fibers.md) | `spawn`, `await`, `yield`, `await match`, `Channel[T]`, `Future[T]`, async I/O, M:N scheduler |
+
+## Tooling
+
+| Document | Contents |
+|----------|----------|
+| [Cross-compilation](cross-compile.md) | Build Linux/Darwin binaries from any host: `-target`, sysroot/SDK autodetect, lld, CTFE caching |
 
 ## Contributing
 
@@ -37,7 +43,9 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [Errors](stdlib/errors.md)         | Error type: `Err` alias, `new`, `wrap`, `has`, `equals`                                        |
 | [Floats](stdlib/floats.md)         | IEEE 754 special values: `NaN`, `Inf`, `NegInf`, `is_nan`, `is_finite`                         |
 | [Hash](stdlib/hash.md)             | Hash functions: FNV-1a, MD5, SHA-1, xxHash3                                                    |
+| [Log](stdlib/log.md)               | Leveled logging with text or JSON output, ANSI color, call-site source positions               |
 | [Measure](stdlib/measure.md)       | Monotonic clock: `now_us`, `now_ms` for benchmarking                                           |
+| [Source](stdlib/source.md)         | Parse `sourcepos` / `stacktrace` atoms into `SrcPos { symbol, file, line, col, lib, ... }`     |
 | [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types                              |
 | [Regex](stdlib/regex.md)           | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split`                    |
 | [SIMD](stdlib/simd.md)             | Portable SIMD: vector types, `splat`, `loadu`, `cmpeq`, `movemask`, arch directives            |

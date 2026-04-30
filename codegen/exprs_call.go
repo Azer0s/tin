@@ -35,7 +35,7 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 				return cg.emitOpDispatch(block, fn, val, nil)
 			}
 
-			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, val.Type())
+			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, cg.tinTypeDisplay(val.Type()))
 		}
 	}
 
@@ -86,24 +86,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// Macro expansion: check before scope lookup.
 		macroName := fn.Name
 		if macro, ok := cg.macros[macroName]; ok {
-			return cg.expandMacro(block, macro, e.Args)
+			return cg.expandMacro(block, macro, e.Args, fn.Pos())
 		}
 		// Also check with trailing ! stripped (for macro! call syntax).
 		if strings.HasSuffix(fn.Name, "!") {
 			baseName := fn.Name[:len(fn.Name)-1]
 			if macro, ok := cg.macros[baseName+"!"]; ok {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 
 			if macro, ok := cg.macros[baseName]; ok {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
 		// #no_excl: allow calling macro! as plain function name (without !).
 		// Only applies when the macro has the "no_excl" tag.
 		if !strings.HasSuffix(fn.Name, "!") {
 			if macro, ok := cg.macros[fn.Name+"!"]; ok && macroHasTag(macro, "no_excl") {
-				return cg.expandMacro(block, macro, e.Args)
+				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
 		// Built-in: len(expr)
@@ -122,6 +122,49 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// Used in generic code to produce a typed zero without knowing the concrete type.
 		if fn.Name == "default" && len(e.Args) == 1 {
 			return cg.genBuiltinDefault(block, e.Args[0])
+		}
+		// Built-in: sourcepos(symbol_or_expr) - returns the atom for
+		// "<name>@<file>:<line>:<col>" (identifier arg) or
+		// "<file>:<line>:<col>" (expression arg or no arg). Recognized
+		// only when the name "sourcepos" is not lexically shadowed;
+		// otherwise the shadowing binding wins and we fall through.
+		//
+		// The no-arg form is the natural call site form: useful inside
+		// a macro body where retagMacroBody has already pointed every
+		// node to the macro CALL site, so `sourcepos()` returns the
+		// caller's position without needing an arg to thread through.
+		if fn.Name == "sourcepos" && len(e.Args) <= 1 {
+			if _, shadowed := cg.curScope.lookup("sourcepos"); !shadowed {
+				var arg ast.Node
+				if len(e.Args) == 1 {
+					arg = e.Args[0]
+				}
+				// fn.Pos() rather than e.Pos(): the parser doesn't
+				// always tag the CallExpr itself, but the function-name
+				// identifier is reliably tagged by the lexer. After
+				// macro retag the identifier reflects the macro CALL
+				// site, which is exactly what sourcepos() needs.
+				return cg.genBuiltinSourcepos(block, arg, fn.Pos())
+			}
+		}
+		// Built-in: stacktrace([cap [, opts]]) - returns [atom] of the
+		// live call stack, top-of-stack first. Optional cap clamps the
+		// trace length (runtime saturates to [1, 1024]); optional opts
+		// is a literal `[atom]` of TIN_ST_HIDE_* filter atoms (parsed
+		// at codegen). Same shadow rule as sourcepos.
+		if fn.Name == "stacktrace" && len(e.Args) <= 2 {
+			if _, shadowed := cg.curScope.lookup("stacktrace"); !shadowed {
+				var capArg, optsArg ast.Node
+				if len(e.Args) >= 1 {
+					capArg = e.Args[0]
+				}
+
+				if len(e.Args) == 2 {
+					optsArg = e.Args[1]
+				}
+
+				return cg.genBuiltinStacktrace(block, capArg, optsArg, e.Pos())
+			}
 		}
 		// ADT constructor call: `Some(42)`, `Ok(42)`, `Rgb(r, g, b)`.
 		// Only intercept when the name is a known variant AND is not shadowed
@@ -816,6 +859,30 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
 
 	case *ast.ScopeAccess:
+		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
+		// `std::log::info!(l, "x")`, etc.). The parser stores the trailing
+		// `!` on the LAST path element. cg.macros is populated by
+		// packages.go's pass-5 with the immediate `pkg::name!` keys, and
+		// pass-6 cascades those under every re-export alias's namespace,
+		// so a single lookup on the literal joined path resolves at any
+		// re-export depth.
+		if len(fn.Path) >= 2 {
+			fullKey := strings.Join(fn.Path, "::")
+
+			altKey := strings.Join(fn.Path, ".")
+			for _, key := range []string{fullKey, altKey} {
+				if macro, ok := cg.macros[key]; ok {
+					return cg.expandMacro(block, macro, e.Args, fn.Pos())
+				}
+
+				if strings.HasSuffix(key, "!") {
+					if macro, ok := cg.macros[key[:len(key)-1]]; ok {
+						return cg.expandMacro(block, macro, e.Args, fn.Pos())
+					}
+				}
+			}
+		}
+
 		// ADT constructor call: `Option::Some(42)` or `Option[i32]::Some(42)`
 		// and similarly `Result[i32, string]::Ok(42)`.
 		if v, handled, err := cg.genDataScopeCtorCall(block, fn, e.Args); handled {
@@ -1470,6 +1537,10 @@ func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.F
 }
 
 func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Value, error) {
+	if _, isNil := e.Expr.(*ast.NilLit); isNil {
+		return nil, cg.nodeErr(e, "field access on nil literal")
+	}
+
 	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
 	var enumBaseName string
 
@@ -1634,6 +1705,10 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	// ptr[lo..hi] - range slice on a raw pointer: produce a fat-pointer [T].
 	if bin, ok := e.Index.(*ast.BinExpr); ok && bin.Op == ".." {
 		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
+	}
+
+	if length, ok := cg.staticArrayLen(e.Expr); ok {
+		cg.checkConstIndexBounds(e, length)
 	}
 
 	// For addressable fixed-size arrays: GEP directly into the original alloca

@@ -257,6 +257,7 @@ func (p *Parser) parseEchoStmt() (*ast.EchoStmt, error) {
 }
 
 func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
+	startTok := p.peek()
 	p.advance() // consume if
 
 	cond, err := p.parseExpr()
@@ -293,6 +294,7 @@ func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
 	}
 
 	stmt := &ast.IfStmt{Cond: cond, Then: thenBlock}
+	stmt.SetPos(ast.Pos{Line: startTok.Line, Col: startTok.Col})
 
 	// else / else if
 	p.skipNewlines()
@@ -376,9 +378,11 @@ func (p *Parser) parseIfStmt() (*ast.IfStmt, error) {
 }
 
 func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
+	pos := p.curPos()
 	p.advance() // consume for
 
 	stmt := &ast.ForStmt{}
+	stmt.SetPos(pos)
 
 	// Shorthand for-in without 'let': for c in iter: / for c T in iter:
 	// Detect: IDENT [IDENT|type] KW_IN ...
@@ -678,33 +682,33 @@ func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
 
 // parseAwaitMatchStmt parses:
 //
-//	await match [e1, e2, e3]:
-//	  case [x, _, _]: body
-//	  case [_, y, _] if guard: body
+//	await match (e1, e2, e3):
+//	  case (x, _, _): body
+//	  case (_, y, _) if guard: body
 //	  default: body
 //
-// The bracket list is parsed as a positional awaitable list, NOT an array literal.
-// Compiler errors are emitted for non-literal array syntax, wrong pattern lengths,
-// and invalid patterns (zero or multiple bindings per case).
+// The paren list is a positional awaitable tuple, NOT a tuple literal.
+// Compiler errors are emitted for non-literal tuple syntax, wrong pattern
+// lengths, and invalid patterns (zero or multiple bindings per case).
 func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	awaitPos := p.peek() // position of "await" keyword
 	p.advance()          // consume "await"
 	p.advance()          // consume "match"
 
-	// Require inline array literal.
-	if !p.check(lexer.LBRACKET) {
-		return nil, fmt.Errorf("await match requires an inline array literal [...]; variable and computed arrays are not yet supported (at %d:%d)",
+	// Require inline tuple literal.
+	if !p.check(lexer.LPAREN) {
+		return nil, fmt.Errorf("await match requires an inline tuple (...); variable and computed tuples are not yet supported (at %d:%d)",
 			p.peek().Line, p.peek().Col)
 	}
 
-	p.advance() // consume "["
+	p.advance() // consume "("
 
 	var futures []ast.Node
 
-	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		p.skipWhitespace()
 
-		if p.check(lexer.RBRACKET) {
+		if p.check(lexer.RPAREN) {
 			break
 		}
 
@@ -722,12 +726,12 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		}
 	}
 
-	if _, err := p.expect(lexer.RBRACKET); err != nil {
+	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
 
 	if len(futures) == 0 {
-		return nil, fmt.Errorf("await match requires at least one future in the array literal")
+		return nil, fmt.Errorf("await match requires at least one future in the tuple")
 	}
 
 	if _, err := p.expect(lexer.COLON); err != nil {
@@ -818,7 +822,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	return stmt, nil
 }
 
-// parseAwaitMatchCase parses one "case [x, _, _] if guard: body" arm.
+// parseAwaitMatchCase parses one "case (x, _, _) if guard: body" arm.
 // nFutures is the expected pattern length for validation.
 func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 	pos := p.curPos()
@@ -827,13 +831,13 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 		return ast.AwaitMatchCase{}, err
 	}
 
-	// Must be an array pattern.
-	if !p.check(lexer.LBRACKET) {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match case must use an array pattern [...] (at %d:%d)",
+	// Must be a tuple pattern.
+	if !p.check(lexer.LPAREN) {
+		return ast.AwaitMatchCase{}, fmt.Errorf("await match case must use a tuple pattern (...) (at %d:%d)",
 			p.peek().Line, p.peek().Col)
 	}
 
-	p.advance() // consume "["
+	p.advance() // consume "("
 
 	type slot struct {
 		name   string
@@ -842,10 +846,10 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 	var slots []slot
 
-	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		p.skipWhitespace()
 
-		if p.check(lexer.RBRACKET) {
+		if p.check(lexer.RPAREN) {
 			break
 		}
 
@@ -868,13 +872,13 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 		}
 	}
 
-	if _, err := p.expect(lexer.RBRACKET); err != nil {
+	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return ast.AwaitMatchCase{}, err
 	}
 
 	// Validate pattern length.
 	if len(slots) != nFutures {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match pattern length %d does not match futures array length %d",
+		return ast.AwaitMatchCase{}, fmt.Errorf("await match pattern length %d does not match futures tuple length %d",
 			len(slots), nFutures)
 	}
 
@@ -1284,7 +1288,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 			return nil, err2
 		}
 
-		return &ast.AssignStmt{Target: expr, Value: val}, nil
+		stmt := &ast.AssignStmt{Target: expr, Value: val}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	// Augmented assignment +=, -=, *=, /=, %=, ++=
@@ -1296,7 +1303,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 			return nil, err2
 		}
 
-		return &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}, nil
+		stmt := &ast.AugAssignStmt{Target: expr, Op: aug, Value: val}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	return &ast.ExprStmt{Expr: expr}, nil

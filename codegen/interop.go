@@ -433,6 +433,8 @@ func programHasInteropFunc(stmts []ast.Node) bool {
 //  4. Marshals the return value back to a C-friendly shape.
 //  5. Releases any temporary ARC allocations created at the boundary.
 func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
+	var wrappers []*ir.Func
+
 	for _, node := range stmts {
 		fn, ok := node.(*ast.FuncDecl)
 		if !ok || !hasTag(fn.Tags, "interop") {
@@ -442,9 +444,50 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 		if err := cg.emitInteropWrapperFor(fn); err != nil {
 			return err
 		}
+
+		// Capture the just-emitted wrapper so we can pin it against
+		// -Wl,--gc-sections below. Even at external linkage the linker
+		// will drop a wrapper whose only Tin caller was constant-folded
+		// (typical for #pure #interop functions); @llvm.used keeps it.
+		for _, f := range cg.mod.Funcs {
+			if f.Name() == fn.Name {
+				wrappers = append(wrappers, f)
+
+				break
+			}
+		}
 	}
 
+	cg.pinInteropWrappers(wrappers)
+
 	return nil
+}
+
+// pinInteropWrappers emits an `@llvm.used` global listing every #interop
+// wrapper. This appending-linkage symbol is honored by both the LLVM
+// optimizer and the system linker (GNU ld --gc-sections, ld64
+// -dead_strip, lld), preventing them from DCEing wrappers whose only
+// in-program caller was eliminated by CTFE folding or other optimization
+// passes. The user's contract is "this function is callable from C";
+// linker DCE breaks that contract.
+func (cg *CodeGen) pinInteropWrappers(wrappers []*ir.Func) {
+	if len(wrappers) == 0 {
+		return
+	}
+
+	i8Ptr := irtypes.I8Ptr
+
+	entries := make([]constant.Constant, len(wrappers))
+	for i, f := range wrappers {
+		entries[i] = constant.NewBitCast(f, i8Ptr)
+	}
+
+	arrTy := irtypes.NewArray(uint64(len(wrappers)), i8Ptr)
+	init := constant.NewArray(arrTy, entries...)
+
+	used := cg.mod.NewGlobalDef("llvm.used", init)
+	used.Linkage = enum.LinkageAppending
+	used.Section = "llvm.metadata"
 }
 
 // emitInteropWrapperFor emits a single wrapper. Assumes the validation
@@ -459,6 +502,15 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 //   - bool: C uint8_t -> i1 (icmp ne 0); reverse for returns.
 //   - everything else: passthrough (primitives, pointers).
 func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
+	return cg.emitInteropWrapperWithName(fn, fn.Name)
+}
+
+// emitInteropWrapperWithName is emitInteropWrapperFor with an explicit
+// wrapper symbol name. Lets the CTFE per-fn cache emit a parallel shim
+// (`__tin_pure_shim_<name>`) without colliding with the internal Tin
+// entry that already occupies the bare name when the function was not
+// originally tagged #interop.
+func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName string) error {
 	entry, ok := cg.curScope.lookup(fn.Name)
 	if !ok {
 		return cg.nodeErr(fn, "fn %s: #interop wrapper cannot find internal entry point", fn.Name)
@@ -467,6 +519,14 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 	internalFn, ok := entry.val.(*ir.Func)
 	if !ok {
 		return cg.nodeErr(fn, "fn %s: #interop entry resolved to non-function value", fn.Name)
+	}
+
+	// When the active emit target is a sibling module (CTFE shimMod),
+	// internalFn lives in cg.mod and is unreachable from the wrapper's
+	// blocks. Mirror it as a `declare` in the active module so calls
+	// resolve at link time.
+	if active := cg.activeModule(); active != cg.mod {
+		internalFn = cg.declareInActive(internalFn)
 	}
 
 	// Build the wrapper's C-ABI signature, remapping per-param.
@@ -645,9 +705,16 @@ func (cg *CodeGen) emitInteropWrapperFor(fn *ast.FuncDecl) error {
 		}
 	}
 
-	wrapper := cg.mod.NewFunc(fn.Name, retType, wrapperParams...)
+	wrapper := cg.activeModule().NewFunc(wrapperName, retType, wrapperParams...)
 	block := wrapper.NewBlock("entry")
-	block.NewCall(cg.ensureRuntimeInitOnce())
+	// Skip the tin_runtime_init bootstrap when emitting into the CTFE
+	// shim module: the dispatcher (Tin compiler) doesn't link the runtime
+	// so the symbol is unresolvable, and CTFE invocations don't need a
+	// fiber scheduler. For real #interop wrappers (target = cg.mod) the
+	// init call stays as before.
+	if cg.activeModule() == cg.mod {
+		block.NewCall(cg.ensureRuntimeInitOnce())
+	}
 
 	// Per-arg marshaling. We track Tin temporaries (strings, slices)
 	// created here so we can release them after the internal call.
@@ -1389,85 +1456,47 @@ func (cg *CodeGen) emitMemcpy(block *ir.Block, dst, src value.Value, n int64) {
 		constant.NewInt(irtypes.I1, 0))
 }
 
-// ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)`.
+// ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)` in the
+// active LLVM module (cg.mod by default; cg.shimMod during CTFE shim emit).
 func (cg *CodeGen) ensureInteropStrIn() *ir.Func {
-	const name = "tin_interop_str_in"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, stringFatPtrType(),
+	return cg.ensureRuntimeHelper("tin_interop_str_in",
+		stringFatPtrType(),
 		ir.NewParam("cstr", irtypes.I8Ptr))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
-// ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)`.
+// ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)` in the
+// active LLVM module.
 func (cg *CodeGen) ensureInteropStrOut() *ir.Func {
-	const name = "tin_interop_str_out"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, irtypes.I8Ptr,
+	return cg.ensureRuntimeHelper("tin_interop_str_out",
+		irtypes.I8Ptr,
 		ir.NewParam("s", stringFatPtrType()))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // ensureInteropSliceIn declares
-// `TinSlice tin_interop_slice_in(i8*, i64, i64)`. The third arg is
-// the per-element byte size, baked into the call from the wrapper.
+// `TinSlice tin_interop_slice_in(i8* data, i64 len, i64 elem_size)` in the
+// active LLVM module.
 func (cg *CodeGen) ensureInteropSliceIn() *ir.Func {
-	const name = "tin_interop_slice_in"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
 	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 
-	f := cg.mod.NewFunc(name, sliceTy,
+	return cg.ensureRuntimeHelper("tin_interop_slice_in",
+		sliceTy,
 		ir.NewParam("data", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64),
 		ir.NewParam("elem_size", irtypes.I64))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // ensureInteropSliceOut declares
 // `i32 tin_interop_slice_out(TinSlice, i64 elem_size, i8** out_data,
-// i64* out_len)`.
+// i64* out_len)` in the active LLVM module.
 func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
-	const name = "tin_interop_slice_out"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
 	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
 
-	f := cg.mod.NewFunc(name, irtypes.I32,
+	return cg.ensureRuntimeHelper("tin_interop_slice_out",
+		irtypes.I32,
 		ir.NewParam("s", sliceTy),
 		ir.NewParam("elem_size", irtypes.I64),
 		ir.NewParam("out_data", irtypes.NewPointer(irtypes.I8Ptr)),
 		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
 }
 
 // getOrCreateCallbackThunk returns a Tin-calling-convention thunk for
@@ -1974,20 +2003,9 @@ func sanitizeIRTypeName(t irtypes.Type) string {
 }
 
 // ensureRuntimeInitOnce returns the IR declaration for the runtime
-// init helper, declaring it lazily on first use.
+// init helper, declaring it lazily on first use in the active module.
 func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
-	const name = "tin_runtime_init"
-
-	if entry, ok := cg.curScope.lookup(name); ok {
-		if f, isFn := entry.val.(*ir.Func); isFn {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, irtypes.Void)
-	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
-
-	return f
+	return cg.ensureRuntimeHelper("tin_runtime_init", irtypes.Void)
 }
 
 // ensureMakeTrampoline declares
