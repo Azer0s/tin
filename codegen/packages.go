@@ -2322,14 +2322,38 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			}
 		}
 	case *ast.FuncType:
-		if !isFatFnPtr(argType) {
-			break
-		}
+		// Two argType shapes are accepted:
+		//   1. Fat-fn-ptr {fn(i8*, ...)*, i8*}  - a wrapped closure
+		//   2. Raw func pointer fn(...)*       - a bare named function
+		// reference (e.g. `is_pos` passed directly to `filter(is_pos)`)
+		// before any closure shim is built. Falling through on shape (2)
+		// would skip inference and leave subst[t] unset, causing the
+		// caller to monomorphize with the literal type-param name (e.g.
+		// `@filter__t`) - all callers would then share one IR instance
+		// and read its slice with the wrong stride for any element type
+		// that doesn't happen to be 8 bytes (atom struct{i32}, i32 array,
+		// etc).
+		var (
+			innerFnType *irtypes.FuncType
+			envOffset   int
+		)
 
-		st := argType.(*irtypes.StructType)
-
-		innerFnType, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
-		if !ok {
+		if isFatFnPtr(argType) {
+			st := argType.(*irtypes.StructType)
+			fn, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+			if !ok {
+				break
+			}
+			innerFnType = fn
+			envOffset = 1 // skip the i8* env in fat-fn-ptr inner sig
+		} else if rawPtr, ok := argType.(*irtypes.PointerType); ok {
+			fn, ok2 := rawPtr.ElemType.(*irtypes.FuncType)
+			if !ok2 {
+				break
+			}
+			innerFnType = fn
+			envOffset = 0 // raw fn pointer carries no env slot
+		} else {
 			break
 		}
 
@@ -2338,7 +2362,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 		}
 
 		for i, astParam := range pt.Params {
-			llIdx := i + 1
+			llIdx := i + envOffset
 
 			if llIdx < len(innerFnType.Params) {
 				cg.inferTypeArgsFromParamPrio(astParam, innerFnType.Params[llIdx], typeParams, subst, fromConst, isConst)

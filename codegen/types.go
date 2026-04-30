@@ -356,8 +356,14 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	case "string":
 		// fat pointer: {i8*, i64}
 		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
-	case "atom":
+	case "atom", "__atom":
 		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
+		// Both spellings appear: user-facing Tin code uses `atom`, while
+		// generic monomorphization records the LLVM struct name (`__atom`)
+		// in the typeAliases substitution map. Without `__atom` here, an
+		// inferred `t = __atom` substitution falls through to the default
+		// i64 case, which silently misaligns generic slice strides for
+		// atom arrays.
 		return cg.atomType, nil
 	case "any":
 		// fat pointer: {i8*, i32}  (type-tagged box)

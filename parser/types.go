@@ -233,8 +233,23 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 	}
 
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-		// optional param name (ignored in type)
-		if p.check(lexer.IDENT) && isTypeToken(p.peekAt(1)) {
+		// Optional param name (ignored in type). The lookahead picks
+		// up two cases:
+		//   1. IDENT followed by a builtin/sigil type token (`*`, `[`,
+		//      `const`, `(`, or a builtin keyword like `i64`) - covered
+		//      by isTypeToken.
+		//   2. IDENT followed by another IDENT - the second IDENT must
+		//      be the type, since two unnamed adjacent type names
+		//      without a comma would be a syntax error anyway. This
+		//      case matters for generic params (`fn(i t) bool` with
+		//      `t` as a type parameter) and user-defined struct types
+		//      (`fn(box Box)`); without it, the parser saw both as
+		//      separate types and propagated a 2-arg fn-type into
+		//      generic inference, which left the type variable
+		//      unresolved (`@filter__t` stays generic, slice element
+		//      stride defaults to i64, atom/i32 element arrays read
+		//      OOB).
+		if p.check(lexer.IDENT) && (isTypeToken(p.peekAt(1)) || p.peekAt(1).Type == lexer.IDENT) {
 			p.advance() // skip name
 		}
 
