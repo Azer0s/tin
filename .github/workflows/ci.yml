@@ -24,13 +24,7 @@ jobs:
       - name: Install clang (required by tin codegen)
         run: |
           sudo apt-get update -qq
-          # Ubuntu 22.04's `clang` meta-package points at clang-14 which
-          # lacks the `presplitcoroutine` attribute Tin's codegen requires
-          # (added in LLVM 15). Install clang-15 explicitly and link it
-          # as the default `clang`/`clang++`.
-          sudo apt-get install -y clang-15 valgrind libunwind-dev libdw-dev
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
           clang --version
 
       - name: Build compiler
@@ -152,9 +146,7 @@ jobs:
       - name: Install clang and valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang-15 valgrind libunwind-dev libdw-dev
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
           clang --version
 
       - name: Build compiler

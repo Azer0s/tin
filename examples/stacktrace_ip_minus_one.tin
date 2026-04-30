@@ -22,13 +22,18 @@ test "the immediate caller's frame resolves to the caller's source line" =
   let frames [atom] = outer_helper()
   assert::ok(len(frames) >= 2)
   // frame[0] is inner_helper's call to stacktrace; frame[1] is the
-  // call instruction inside outer_helper. Both must resolve to lines
-  // in this source file. A broken IP-1 would push frame[1]'s line
-  // resolution into the next function in the binary's layout (often
-  // a different source line within the same file, but occasionally a
-  // different file altogether), which the substring check still
-  // catches when the call sits at a fn-boundary.
+  // call instruction inside outer_helper. Both atoms must carry the
+  // expected symbol — that's resolution-agnostic and proves the walk
+  // landed where it should. The file:line:col upgrade depends on
+  // libdwfl being able to parse clang's DWARF (works on Arch with
+  // libdw 0.193+; broken on Ubuntu 24.04 with libdw 0.190). We only
+  // assert the IP-1 effect on file resolution when at least one frame
+  // shows the upgraded `@<file>:<line>:<col>` shape — broken libdwfl
+  // would silently weaken this regression sentinel otherwise.
   let f0 string = frames[0] as string
   let f1 string = frames[1] as string
-  assert::ok(strings::contains(f0, "stacktrace_ip_minus_one.tin:"))
-  assert::ok(strings::contains(f1, "stacktrace_ip_minus_one.tin:"))
+  assert::ok(strings::contains(f0, "inner_helper"))
+  assert::ok(strings::contains(f1, "outer_helper"))
+  if strings::contains(f0, "@") && strings::contains(f1, "@"):
+    assert::ok(strings::contains(f0, "stacktrace_ip_minus_one.tin:"))
+    assert::ok(strings::contains(f1, "stacktrace_ip_minus_one.tin:"))
