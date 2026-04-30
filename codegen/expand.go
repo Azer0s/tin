@@ -69,6 +69,7 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node, callP
 		if err != nil {
 			return nil, err
 		}
+
 		retagMacroBody(expanded, args, callPos)
 
 		return expanded, nil
@@ -130,9 +131,11 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node, callP
 // substituteMacroNode (preserving caller-arg identity).
 func retagMacroBody(expanded ast.Node, args []ast.Node, callPos ast.Pos) {
 	preserve := make(map[ast.Node]struct{})
+
 	for _, a := range args {
 		walkAST(a, func(n ast.Node) { preserve[n] = struct{}{} })
 	}
+
 	walkAST(expanded, func(n ast.Node) {
 		if _, keep := preserve[n]; keep {
 			return

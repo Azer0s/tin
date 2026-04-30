@@ -78,6 +78,7 @@ func (cg *CodeGen) ctfeFnHashRec(fd *ast.FuncDecl, visiting map[*ast.FuncDecl]bo
 	defer delete(visiting, fd)
 
 	var depHashes []string
+
 	for _, dep := range cg.ctfeDirectCallees(fd) {
 		h := cg.ctfeFnHashRec(dep, visiting)
 		if h == "" {
@@ -199,6 +200,7 @@ func writeNodeFingerprint(b *strings.Builder, n ast.Node, depth int) {
 	switch v := n.(type) {
 	case *ast.Block:
 		b.WriteString("Block\n")
+
 		for _, s := range v.Stmts {
 			writeNodeFingerprint(b, s, depth+1)
 		}
@@ -296,6 +298,7 @@ func writeNodeFingerprint(b *strings.Builder, n ast.Node, depth int) {
 		b.WriteString("Wild\n")
 	case *ast.ArrayLit:
 		fmt.Fprintf(b, "Array %d\n", len(v.Elems))
+
 		for _, e := range v.Elems {
 			writeNodeFingerprint(b, e, depth+1)
 		}
@@ -304,11 +307,13 @@ func writeNodeFingerprint(b *strings.Builder, n ast.Node, depth int) {
 		writeNodeFingerprint(b, v.Value, depth+1)
 	case *ast.TupleLit:
 		fmt.Fprintf(b, "Tuple %d\n", len(v.Elems))
+
 		for _, e := range v.Elems {
 			writeNodeFingerprint(b, e, depth+1)
 		}
 	case *ast.StructLit:
 		fmt.Fprintf(b, "StructLit %s\n", v.TypeName)
+
 		for _, f := range v.Fields {
 			fmt.Fprintf(b, " field %s\n", f.Name)
 			writeNodeFingerprint(b, f.Value, depth+1)
@@ -338,6 +343,7 @@ func writeNodeFingerprint(b *strings.Builder, n ast.Node, depth int) {
 		writeNodeFingerprint(b, v.Body, depth+1)
 	case *ast.WhereList:
 		fmt.Fprintf(b, "Where %d\n", len(v.Clauses))
+
 		for _, c := range v.Clauses {
 			indent()
 			b.WriteString(" clause\n")
@@ -363,8 +369,10 @@ func writeNodeFingerprint(b *strings.Builder, n ast.Node, depth int) {
 		}
 	case *ast.InterpolatedString:
 		fmt.Fprintf(b, "Interp %d\n", len(v.Parts))
+
 		for _, p := range v.Parts {
 			indent()
+
 			if p.IsExpr {
 				fmt.Fprintf(b, " expr fmt=%s\n", p.Format)
 				writeNodeFingerprint(b, p.Expr, depth+2)

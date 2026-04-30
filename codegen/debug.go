@@ -934,17 +934,21 @@ func instHasMetadata(inst ir.Instruction, name string) bool {
 	if inst == nil {
 		return false
 	}
+
 	v := reflect.ValueOf(inst)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
+
 	if v.Kind() != reflect.Struct {
 		return false
 	}
+
 	field := v.FieldByName("Metadata")
 	if !field.IsValid() || field.Kind() != reflect.Slice {
 		return false
 	}
+
 	for i := 0; i < field.Len(); i++ {
 		att, ok := field.Index(i).Interface().(*metadata.Attachment)
 		if ok && att != nil && att.Name == name {

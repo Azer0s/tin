@@ -569,8 +569,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			// dot continuation handled above the switch.
 			if p.check(lexer.NEWLINE) {
 				p.advance()
+
 				if p.check(lexer.INDENT) {
 					p.advance()
+
 					indentConsumed++
 				}
 			}
@@ -623,10 +625,13 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.ARROW:
 			p.advance()
+
 			if p.check(lexer.NEWLINE) {
 				p.advance()
+
 				if p.check(lexer.INDENT) {
 					p.advance()
+
 					indentConsumed++
 				}
 			}
@@ -650,10 +655,13 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 		case lexer.DCOLON:
 			p.advance()
+
 			if p.check(lexer.NEWLINE) {
 				p.advance()
+
 				if p.check(lexer.INDENT) {
 					p.advance()
+
 					indentConsumed++
 				}
 			}

@@ -149,6 +149,7 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 	// Route every NewFunc/NewGlobal inside emitInteropWrapperWithName and
 	// the ensureXxx helpers into a sibling shim module instead of cg.mod.
 	cg.activeMod = cg.ensureShimMod()
+
 	defer func() { cg.activeMod = nil }()
 
 	for name, fd := range cg.funcDecls {
@@ -403,6 +404,7 @@ func normalizeDeclare(line string) string {
 		if r == ' ' || r == '\t' {
 			if !prevSpace {
 				b.WriteByte(' ')
+
 				prevSpace = true
 			}
 
@@ -460,9 +462,11 @@ func sliceIRForFuncs(fullIR string, targets []string) string {
 			if strings.HasPrefix(line, "define ") {
 				inDefine = true
 				curSig = line
+
 				curBody.Reset()
 				curBody.WriteString(line)
 				curBody.WriteByte('\n')
+
 				isTarget = keep[extractDefineName(line)]
 
 				if isTarget {
@@ -483,6 +487,7 @@ func sliceIRForFuncs(fullIR string, targets []string) string {
 
 		if line == "}" {
 			inDefine = false
+
 			if isTarget {
 				out.WriteString(curBody.String())
 			} else {
@@ -549,6 +554,7 @@ func sliceIRForFunc(fullIR, targetFn string) string {
 			if strings.HasPrefix(line, "define ") {
 				inDefine = true
 				curSig = line
+
 				curBody.Reset()
 				curBody.WriteString(line)
 				curBody.WriteByte('\n')
@@ -575,6 +581,7 @@ func sliceIRForFunc(fullIR, targetFn string) string {
 
 		if line == "}" {
 			inDefine = false
+
 			if isTarget {
 				out.WriteString(curBody.String())
 			} else {
@@ -642,6 +649,7 @@ func defineToDeclare(sig string) string {
 	const prefix = "declare "
 
 	rest := strings.TrimPrefix(sig, prefix)
+
 	for {
 		// Peel off the next whitespace-delimited token.
 		end := 0

@@ -81,23 +81,28 @@ func (cg *CodeGen) detectStacktraceUsage(stmts []ast.Node) {
 	if topLevelShadowsName(stmts, "stacktrace") {
 		return
 	}
+
 	for _, s := range stmts {
 		walkAST(s, func(n ast.Node) {
 			if cg.stacktraceUsed {
 				return
 			}
+
 			ce, ok := n.(*ast.CallExpr)
 			if !ok {
 				return
 			}
+
 			id, ok := ce.Func.(*ast.Identifier)
 			if !ok {
 				return
 			}
+
 			if id.Name == "stacktrace" {
 				cg.stacktraceUsed = true
 			}
 		})
+
 		if cg.stacktraceUsed {
 			return
 		}
@@ -165,22 +170,26 @@ func (cg *CodeGen) parseStacktraceOpts(arg ast.Node) (int32, error) {
 	}
 
 	var flags int32
+
 	for _, e := range lit.Elems {
 		atomLit, ok := e.(*ast.AtomLit)
 		if !ok {
 			return 0, cg.nodeErr(e, "stacktrace: opts entries must be atom literals (got %T)", e)
 		}
+
 		bit, ok := stacktraceFlagBits[atomLit.Name]
 		if !ok {
 			known := make([]string, 0, len(stacktraceFlagBits))
 			for k := range stacktraceFlagBits {
 				known = append(known, "'"+k)
 			}
+
 			sort.Strings(known) // stable diag output for tests + readers
 
 			return 0, cg.nodeErr(atomLit, "stacktrace: unknown opt %q (known: %s)",
 				"'"+atomLit.Name, strings.Join(known, ", "))
 		}
+
 		flags |= bit
 	}
 
@@ -222,23 +231,28 @@ func (cg *CodeGen) genBuiltinStacktrace(block *ir.Block, capArg, optsArg ast.Nod
 		capValue = constant.NewInt(irtypes.I32, int64(stacktraceDefaultCap))
 	} else {
 		bufSlots = int64(stacktraceMaxCap)
+
 		argVal, err := cg.genExpr(block, capArg)
 		if err != nil {
 			return nil, err
 		}
+
 		if cg.curBlock != nil && cg.curBlock != block {
 			block = cg.curBlock
 		}
+
 		capValue = cg.coerce(block, argVal, irtypes.I32)
 	}
 
 	// Parse the optional opts array literal into a constant flag bitfield.
 	var flags int32
+
 	if optsArg != nil {
 		f, err := cg.parseStacktraceOpts(optsArg)
 		if err != nil {
 			return nil, err
 		}
+
 		flags = f
 	}
 

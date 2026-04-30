@@ -158,6 +158,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if len(e.Args) >= 1 {
 					capArg = e.Args[0]
 				}
+
 				if len(e.Args) == 2 {
 					optsArg = e.Args[1]
 				}
@@ -867,11 +868,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		// re-export depth.
 		if len(fn.Path) >= 2 {
 			fullKey := strings.Join(fn.Path, "::")
+
 			altKey := strings.Join(fn.Path, ".")
 			for _, key := range []string{fullKey, altKey} {
 				if macro, ok := cg.macros[key]; ok {
 					return cg.expandMacro(block, macro, e.Args, fn.Pos())
 				}
+
 				if strings.HasSuffix(key, "!") {
 					if macro, ok := cg.macros[key[:len(key)-1]]; ok {
 						return cg.expandMacro(block, macro, e.Args, fn.Pos())

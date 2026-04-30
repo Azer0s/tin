@@ -47,7 +47,9 @@ entry:
 	stageSO(t, tmp, hash, ir)
 
 	wd, _ := os.Getwd()
+
 	defer func() { _ = os.Chdir(wd) }()
+
 	_ = os.Chdir(tmp)
 
 	h, err := LoadPureFn(hash, "__tin_pure_shim_sum")
@@ -101,7 +103,9 @@ entry:
 	stageSO(t, tmp, hash, ir)
 
 	wd, _ := os.Getwd()
+
 	defer func() { _ = os.Chdir(wd) }()
+
 	_ = os.Chdir(tmp)
 
 	// First attempt with a name that doesn't exist — must error and clean up.

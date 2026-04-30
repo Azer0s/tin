@@ -179,6 +179,7 @@ func (s *session) buildRuntime(outSo string) error {
 	if runtime.GOOS != "darwin" {
 		args = append(args, "-lunwind", "-ldw")
 	}
+
 	args = append(args, "-o", outSo)
 
 	cmd := exec.Command("clang", args...)
@@ -497,6 +498,7 @@ func (s *session) compileToSo(irText, outSo string, stacktraceUsed bool) error {
 			soArgs = append(soArgs, "-Wl,--export-dynamic")
 		}
 	}
+
 	if runtime.GOOS == "darwin" {
 		soArgs = append(soArgs, s.runtimeLib.path)
 		for _, lib := range s.darwinLinkLibs {

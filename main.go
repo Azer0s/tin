@@ -282,9 +282,11 @@ func macosSDKPath() string {
 	if macosSDKOverride != "" {
 		return macosSDKOverride
 	}
+
 	if env := os.Getenv("TIN_MACOS_SDK"); env != "" {
 		return env
 	}
+
 	if out, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
 		if p := strings.TrimSpace(string(out)); p != "" {
 			if _, statErr := os.Stat(p); statErr == nil {
@@ -292,6 +294,7 @@ func macosSDKPath() string {
 			}
 		}
 	}
+
 	candidates := []string{
 		"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
 		"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
@@ -303,6 +306,7 @@ func macosSDKPath() string {
 		candidates = append(candidates,
 			filepath.Join(home, ".darling/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
 	}
+
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
 			return c
@@ -326,9 +330,11 @@ func linuxSysrootPath() string {
 	if linuxSysrootOverride != "" {
 		return linuxSysrootOverride
 	}
+
 	if env := os.Getenv("TIN_LINUX_SYSROOT"); env != "" {
 		return env
 	}
+
 	arch := targetGOARCH
 	switch arch {
 	case "amd64":
@@ -336,6 +342,7 @@ func linuxSysrootPath() string {
 	case "arm64":
 		arch = "aarch64"
 	}
+
 	candidates := []string{
 		"/opt/cross/" + arch + "-linux-gnu",
 		"/usr/local/" + arch + "-linux-gnu",
@@ -1509,6 +1516,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 		name := f.Name()
 		_ = f.Close()
+
 		tmpObjs = append(tmpObjs, name)
 
 		return name, nil
@@ -1635,6 +1643,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		}
 
 		linkInputs = append(linkInputs, cachedPath)
+
 		if hit {
 			continue
 		}
@@ -1681,6 +1690,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	} else {
 		args = append(args, "-Wl,--gc-sections")
 	}
+
 	if runtime.GOOS != targetGOOS {
 		args = append(args, "-fuse-ld=lld")
 	}
@@ -1714,6 +1724,7 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	if stacktraceLinkActive && targetGOOS != "darwin" {
 		args = append(args, "-lunwind", "-ldw", "-rdynamic")
 	}
+
 	args = append(args, "-o", outBin)
 
 	if prog != nil {
@@ -1974,6 +1985,7 @@ func runParallelClang(jobsList []compileJob) error {
 
 	for i := range jobsList {
 		wg.Add(1)
+
 		sem <- struct{}{}
 
 		go func(i int) {

@@ -1293,6 +1293,7 @@ func (cg *CodeGen) ensureLLVMReturnAddress() *ir.Func {
 	if cg.llvmReturnAddressFn != nil {
 		return cg.llvmReturnAddressFn
 	}
+
 	f := cg.mod.NewFunc("llvm.returnaddress", irtypes.I8Ptr,
 		ir.NewParam("level", irtypes.I32))
 	f.Blocks = nil
@@ -1312,6 +1313,7 @@ func (cg *CodeGen) emitSpawnCall(block *ir.Block, hdl value.Value) value.Value {
 	if !cg.stacktraceUsed {
 		return block.NewCall(fn, hdl)
 	}
+
 	retAddr := block.NewCall(cg.ensureLLVMReturnAddress(),
 		constant.NewInt(irtypes.I32, 0))
 	addrI64 := block.NewPtrToInt(retAddr, irtypes.I64)

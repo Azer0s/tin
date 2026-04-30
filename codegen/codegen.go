@@ -1319,6 +1319,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// this flip, the runtime resolver would always fall through to the
 	// dladdr "<symbol>+<offset>" form for Tin user code.
 	cg.detectStacktraceUsage(prog.Stmts)
+
 	if cg.stacktraceUsed && !cg.debugMode {
 		cg.debugMode = true
 	}

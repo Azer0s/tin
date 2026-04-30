@@ -535,6 +535,7 @@ func printMatchStmt(v *MatchStmt, depth int) string {
 	var sb strings.Builder
 
 	prefix := "match"
+
 	if v.IsType {
 		// Type-match has a different surface (`match e.(type)`); we don't
 		// emit it because the macro CTFE wrapper has no type tag plumbing.
@@ -557,6 +558,7 @@ func printMatchStmt(v *MatchStmt, depth int) string {
 		case c.Pattern == nil && c.VarName != "":
 			// `case i T:` with no literal pattern — bind only.
 			sb.WriteString(c.VarName)
+
 			if c.VarType != nil {
 				sb.WriteString(" ")
 				sb.WriteString(c.VarType.String())

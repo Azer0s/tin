@@ -60,6 +60,7 @@ entry:
 	}
 
 	wd, _ := os.Getwd()
+
 	defer func() { _ = os.Chdir(wd) }()
 
 	if err := os.Chdir(tmp); err != nil {
@@ -125,7 +126,9 @@ entry:
 	stageSO(t, tmp, hash, ir)
 
 	wd, _ := os.Getwd()
+
 	defer func() { _ = os.Chdir(wd) }()
+
 	_ = os.Chdir(tmp)
 
 	h, err := LoadPureFn(hash, "__tin_pure_shim_clamp")
@@ -191,7 +194,9 @@ entry:
 	stageSO(t, tmp, hash, ir)
 
 	wd, _ := os.Getwd()
+
 	defer func() { _ = os.Chdir(wd) }()
+
 	_ = os.Chdir(tmp)
 
 	h, err := LoadPureFn(hash, "__tin_pure_shim_dscale")

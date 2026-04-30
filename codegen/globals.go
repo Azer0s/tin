@@ -208,6 +208,7 @@ func (cg *CodeGen) evalAsConstant(n ast.Node, targetType irtypes.Type) constant.
 	switch val.kind {
 	case "i64":
 		c := constant.NewInt(irtypes.I64, val.i)
+
 		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
 		if !ok {
 			return nil
@@ -216,6 +217,7 @@ func (cg *CodeGen) evalAsConstant(n ast.Node, targetType irtypes.Type) constant.
 		return coerced
 	case "f64":
 		c := constant.NewFloat(irtypes.Double, val.f)
+
 		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
 		if !ok {
 			return nil

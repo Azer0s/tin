@@ -29,12 +29,7 @@ linters:
     - revive        # configurable style linter (modern golint replacement)
     - dupl          # duplicate code blocks
     - nlreturn      # require blank line before return statements
-    # wsl_v5 disabled in 2026-04-30 hardening: produces noisy, debatable
-    # warnings (e.g. "no shared variables above append") that don't catch
-    # real bugs. Re-enable after a dedicated whitespace-only cleanup pass
-    # that addresses the ~30 pre-existing violations across parser/, codegen/,
-    # and main.go.
-    # - wsl_v5      # whitespace linter (blank lines around blocks)
+    - wsl_v5        # whitespace linter (blank lines around blocks)
 
   settings:
     errorlint:

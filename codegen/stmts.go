@@ -2148,6 +2148,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 		if err != nil {
 			return nil, err
 		}
+
 		retagMacroBody(resultNode, args, callPos)
 
 		return cg.genExpr(block, resultNode)
