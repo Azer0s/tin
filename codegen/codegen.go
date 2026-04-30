@@ -216,6 +216,11 @@ type CodeGen struct {
 	// to emit `use <pkg>` lines; mixing file-path keys in there would
 	// emit nonsense imports.
 	loadedSrcPaths map[string]bool
+	// reportedImports tracks which `use <path>` declarations have
+	// surfaced via cg.progress already. genUseDecl runs twice per
+	// UseDecl (load pass + codegen iteration); without this guard the
+	// -v stream would show every import twice.
+	reportedImports map[string]bool
 
 	// stdlibOverride: when non-empty, overrides the default <execDir>/stdlib search path.
 	// Set via --stdlib flag.

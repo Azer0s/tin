@@ -19,7 +19,21 @@ import (
 
 func (cg *CodeGen) genUseDecl(n *ast.UseDecl) error {
 	if !n.IsExtern {
-		cg.progress("import " + n.Path)
+		// genUseDecl is reached twice per UseDecl - once during the
+		// dedicated "load packages" pass, again when codegen iterates
+		// top-level statements. The actual load is dedup'd by
+		// importedPkgs / loadedSrcPaths, but the progress message has
+		// no such guard. Track per-codegen-run so each import surfaces
+		// exactly once in the -v stream.
+		if cg.reportedImports == nil {
+			cg.reportedImports = make(map[string]bool)
+		}
+
+		if !cg.reportedImports[n.Path] {
+			cg.reportedImports[n.Path] = true
+
+			cg.progress("import " + n.Path)
+		}
 
 		if n.FromSyntax {
 			return cg.loadPackageSelective(n.Path, n.Names, n.IsFile)
@@ -1623,15 +1637,25 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			original[k] = v
 		}
 
+		cascaded := 0
+
 		for k, md := range original {
 			for child := range exportedNames {
 				for _, sep := range []string{"::", "."} {
 					prefix := child + sep
 					if strings.HasPrefix(k, prefix) {
-						cg.macros[pkgName+sep+k] = md
+						newKey := pkgName + sep + k
+						if _, already := cg.macros[newKey]; !already {
+							cg.macros[newKey] = md
+							cascaded++
+						}
 					}
 				}
 			}
+		}
+
+		if cascaded > 0 {
+			cg.progress(fmt.Sprintf("cascade re-exports %s (%d macros)", pkgName, cascaded))
 		}
 	}
 
