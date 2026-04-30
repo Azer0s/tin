@@ -14,7 +14,14 @@ package codegen
 
 /*
 #cgo linux  LDFLAGS: -ldl -lffi
-#cgo darwin LDFLAGS: -lffi
+// macOS: libffi is keg-only Homebrew on both arches. Adding both
+// prefixes (Apple Silicon /opt/homebrew, Intel /usr/local) lets the
+// build work without pkg-config; clang silently ignores -I/-L paths
+// that don't exist on the current machine, so only the active one
+// resolves. Users with a custom prefix (MacPorts, manual install) can
+// override via CGO_CFLAGS / CGO_LDFLAGS.
+#cgo darwin CFLAGS:  -I/opt/homebrew/opt/libffi/include -I/usr/local/opt/libffi/include
+#cgo darwin LDFLAGS: -L/opt/homebrew/opt/libffi/lib -L/usr/local/opt/libffi/lib -lffi
 
 #include <dlfcn.h>
 #include <ffi.h>
