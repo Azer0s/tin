@@ -143,7 +143,20 @@ static inline uintptr_t fp_get(void) { return 0; }
 // overrun, an alloca that smashed an old fp, etc) before we dereference
 // garbage. Returns 0 on failure - fp_walk falls back to a "trust the
 // chain until it hits 0 or fails an alignment check" mode.
+//
+// macOS exposes pthread_get_stackaddr_np / pthread_get_stacksize_np
+// directly; glibc / musl require pthread_getattr_np + pthread_attr_getstack.
+// pthread_get_stackaddr_np returns the highest address (top of the
+// stack, which grows down), so we subtract size to get the low end.
 static int thread_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
+#if defined(__APPLE__)
+    void *top = pthread_get_stackaddr_np(pthread_self());
+    size_t size = pthread_get_stacksize_np(pthread_self());
+    if (top == NULL || size == 0) return 0;
+    *hi = (uintptr_t)top;
+    *lo = *hi - size;
+    return 1;
+#else
     pthread_attr_t attr;
     if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;
     void  *base = NULL;
@@ -154,6 +167,7 @@ static int thread_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
     *lo = (uintptr_t)base;
     *hi = (uintptr_t)base + size;
     return 1;
+#endif
 }
 
 // fp_walk traverses the frame-pointer chain starting at `start_fp`
