@@ -116,14 +116,20 @@ fn filter[t](pred fn(i t) bool) fn([t]) [t] =
     return out
 ```
 
-filter and print frames in your own source files only:
+filter and print frames in your own code, dropping the libc / libsystem
+tail. The predicate keeps frames that resolved to *something* (symbol or
+file) and aren't inside a shared library; this works identically on
+Linux (where libdwfl gives full `file:line:col`) and macOS (where there
+is no libdwfl and frames are `symbol+0x<offset>` with `file == ""`):
 
 ```rust
 use source
 
 fn in_user_code(f atom) bool =
   let p = source::parse_sourcepos(f)
-  return p.file != "" && !source::is_in_lib(p)
+  if source::is_unknown(p): return false
+  if source::is_in_lib(p):  return false
+  return source::is_resolved(p)
 
 stacktrace()
   |> filter(in_user_code)
