@@ -992,6 +992,57 @@ func (cg *CodeGen) SetPureFoldBudget(n int) {
 // build; once set true it stays true.
 func (cg *CodeGen) StacktraceUsed() bool { return cg.stacktraceUsed }
 
+// PkgModules returns per-package LLVM modules (excluding cg.mod) in
+// deterministic alphabetical name order. Empty when no `use` decls
+// loaded any pkg, OR when mergeRoutedPkgMods has folded everything
+// back into cg.mod (which happens at the end of Generate today).
+//
+// main.go uses this to drive per-pkg .o compilation in parallel; the
+// linker then combines them with cg.mod into the final binary.
+// Currently returns nil because the merge step still folds everything
+// into cg.mod for the legacy single-module compile path; once main.go
+// is wired to compile each module separately, the merge step gets
+// removed and this returns the live per-pkg modules.
+func (cg *CodeGen) PkgModules() []*ir.Module {
+	if len(cg.pkgMods) == 0 {
+		return nil
+	}
+
+	out := make([]*ir.Module, 0, len(cg.pkgMods))
+	for _, name := range cg.pkgModNames() {
+		if m := cg.pkgMods[name]; m != nil && hasPkgContent(m) {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
+// PkgModuleNames returns the names paired with PkgModules() in the
+// same order. Used by the build driver to label per-pkg .ll / .o
+// artifacts.
+func (cg *CodeGen) PkgModuleNames() []string {
+	if len(cg.pkgMods) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(cg.pkgMods))
+	for _, name := range cg.pkgModNames() {
+		if m := cg.pkgMods[name]; m != nil && hasPkgContent(m) {
+			out = append(out, name)
+		}
+	}
+
+	return out
+}
+
+// hasPkgContent reports whether m carries any IR worth compiling. Pkg
+// modules that only declared types (everything DCE'd away) skip the
+// per-pkg .o emit so we don't waste a clang invocation on a no-op.
+func hasPkgContent(m *ir.Module) bool {
+	return len(m.Funcs) > 0 || len(m.Globals) > 0 || len(m.Aliases) > 0
+}
+
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
 func (cg *CodeGen) progress(msg string) {

@@ -22,7 +22,10 @@ import (
 	"sort"
 
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // EntryPkgName is the sentinel package name used to route IR for the
@@ -192,6 +195,193 @@ func (cg *CodeGen) debugDumpUnterminated() {
 	check("cg.mod", cg.mod)
 	for _, name := range cg.pkgModNames() {
 		check("pkg:"+name, cg.pkgMods[name])
+	}
+}
+
+// addCrossModuleDeclares walks each per-pkg module's IR and adds
+// `declare`-style stubs for any function or global referenced from
+// inside that module but defined in a different module. Required for
+// per-pkg .o compile: without an explicit declare in the consumer's
+// IR, the LLVM verifier rejects the cross-module reference.
+//
+// Symbols searched: every operand of every instruction (call callee,
+// fn pointer, GEP base, load/store ptr) plus every global initializer
+// (vtable globals reference fn pointers via constant exprs). For each
+// operand pointing to a fn / global that lives in a different module,
+// emit a matching declare/extern global into the consumer module.
+// Idempotent per (consumer, symbol) via a per-module declared-set.
+//
+// This is the prerequisite for stripping mergeRoutedPkgMods: once
+// every per-pkg module is self-sufficient (declares everything it
+// references but doesn't define), main.go can serialize each pkg
+// module to its own .ll and compile in parallel.
+func (cg *CodeGen) addCrossModuleDeclares() {
+	if len(cg.pkgMods) == 0 {
+		return
+	}
+
+	// Build a global-pointer -> owning-module index by walking every
+	// module's Globals once. *ir.Global has no Parent field (unlike
+	// *ir.Func), so module ownership has to be reconstructed from the
+	// containers.
+	globalOwner := map[*ir.Global]*ir.Module{}
+	for _, g := range cg.mod.Globals {
+		globalOwner[g] = cg.mod
+	}
+	for _, name := range cg.pkgModNames() {
+		m := cg.pkgMods[name]
+		if m == nil {
+			continue
+		}
+
+		for _, g := range m.Globals {
+			globalOwner[g] = m
+		}
+	}
+
+	for _, name := range cg.pkgModNames() {
+		m := cg.pkgMods[name]
+		if m == nil {
+			continue
+		}
+
+		cg.addCrossModuleDeclaresFor(m, globalOwner)
+	}
+}
+
+// addCrossModuleDeclaresFor processes a single consumer module.
+// declaredFuncs / declaredGlobals track which extern symbols already
+// have a declare in this module so repeated references don't append
+// duplicates.
+func (cg *CodeGen) addCrossModuleDeclaresFor(m *ir.Module, globalOwner map[*ir.Global]*ir.Module) {
+	declaredFuncs := map[string]bool{}
+	for _, f := range m.Funcs {
+		declaredFuncs[f.Name()] = true
+	}
+
+	declaredGlobals := map[string]bool{}
+	for _, g := range m.Globals {
+		declaredGlobals[g.Name()] = true
+	}
+
+	// Helper: ensure decl exists for an external function reference.
+	declareFunc := func(extFn *ir.Func) {
+		if extFn == nil || extFn.Parent == m || declaredFuncs[extFn.Name()] {
+			return
+		}
+
+		params := make([]*ir.Param, len(extFn.Params))
+		for i, p := range extFn.Params {
+			params[i] = ir.NewParam(p.Name(), p.Type())
+		}
+
+		decl := m.NewFunc(extFn.Name(), extFn.Sig.RetType, params...)
+		decl.Sig.Variadic = extFn.Sig.Variadic
+		decl.Blocks = nil // declare-only
+		declaredFuncs[extFn.Name()] = true
+	}
+
+	// Helper: ensure decl exists for an external global reference.
+	declareGlobal := func(extG *ir.Global) {
+		if extG == nil || globalOwner[extG] == m || declaredGlobals[extG.Name()] {
+			return
+		}
+
+		decl := m.NewGlobal(extG.Name(), extG.ContentType)
+		decl.Linkage = enum.LinkageExternal
+		decl.Immutable = extG.Immutable
+		declaredGlobals[extG.Name()] = true
+	}
+
+	// Walk every instruction in every block of every fn defined in m.
+	for _, f := range m.Funcs {
+		for _, bb := range f.Blocks {
+			for _, inst := range bb.Insts {
+				walkInstOperands(inst, declareFunc, declareGlobal)
+			}
+
+			if bb.Term != nil {
+				walkTermOperands(bb.Term, declareFunc, declareGlobal)
+			}
+		}
+	}
+
+	// Also walk global initializers — vtable globals reference fn
+	// pointers via constant expressions.
+	for _, g := range m.Globals {
+		if g.Init != nil {
+			walkConstant(g.Init, declareFunc, declareGlobal)
+		}
+	}
+}
+
+// walkInstOperands inspects every operand of inst and calls the
+// appropriate declare callback for any *ir.Func or *ir.Global it sees.
+// Operands include the call callee, GEP base, load/store ptr, etc.
+func walkInstOperands(inst ir.Instruction, df func(*ir.Func), dg func(*ir.Global)) {
+	for _, op := range inst.Operands() {
+		walkValue(*op, df, dg)
+	}
+}
+
+// walkTermOperands does the same for terminators (br, condbr, ret).
+func walkTermOperands(term ir.Terminator, df func(*ir.Func), dg func(*ir.Global)) {
+	for _, op := range term.Operands() {
+		walkValue(*op, df, dg)
+	}
+}
+
+// walkValue dispatches on a value's runtime type, recursing into
+// constant expressions to find embedded fn / global references.
+func walkValue(v value.Value, df func(*ir.Func), dg func(*ir.Global)) {
+	switch x := v.(type) {
+	case *ir.Func:
+		df(x)
+	case *ir.Global:
+		dg(x)
+	case constant.Constant:
+		walkConstant(x, df, dg)
+	}
+}
+
+// walkConstant unwraps constant expressions (bitcast, GEP, ptrtoint,
+// trunc, sub, struct, array, blockaddress) to find leaf fn / global
+// references inside.
+func walkConstant(c constant.Constant, df func(*ir.Func), dg func(*ir.Global)) {
+	switch x := c.(type) {
+	case *ir.Func:
+		df(x)
+	case *ir.Global:
+		dg(x)
+	case *constant.ExprBitCast:
+		walkConstant(x.From, df, dg)
+	case *constant.ExprGetElementPtr:
+		walkConstant(x.Src, df, dg)
+		for _, idx := range x.Indices {
+			walkConstant(idx, df, dg)
+		}
+	case *constant.ExprPtrToInt:
+		walkConstant(x.From, df, dg)
+	case *constant.ExprIntToPtr:
+		walkConstant(x.From, df, dg)
+	case *constant.ExprTrunc:
+		walkConstant(x.From, df, dg)
+	case *constant.ExprSub:
+		walkConstant(x.X, df, dg)
+		walkConstant(x.Y, df, dg)
+	case *constant.Struct:
+		for _, field := range x.Fields {
+			walkConstant(field, df, dg)
+		}
+	case *constant.Array:
+		for _, elem := range x.Elems {
+			walkConstant(elem, df, dg)
+		}
+	case *constant.BlockAddress:
+		// blockaddress's Func is a Constant (the parent fn).
+		if fn, ok := x.Func.(*ir.Func); ok {
+			df(fn)
+		}
 	}
 }
 
