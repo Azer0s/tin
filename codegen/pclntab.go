@@ -331,7 +331,13 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 		id := cg.pclntabSeq
 		cg.pclntabSeq++
 
-		hdr := cg.mod.NewGlobalDef(
+		// Route hdr into the fn's owning module so blockaddress refs are
+		// valid (LLVM forbids blockaddress in another module than the
+		// fn). For the no-source marker case there's no blockaddress,
+		// but keeping the convention simplifies the resolver assumption
+		// "every hdr is in the same .o as the fn it points to."
+		hdrMod := fnHomeModule(fn, cg.mod)
+		hdr := hdrMod.NewGlobalDef(
 			fmt.Sprintf("__tin_pcln_hdr.%d", id),
 			hdrInit,
 		)
@@ -388,9 +394,15 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 	id := cg.pclntabSeq
 	cg.pclntabSeq++
 
+	// Route the pcs / hdr / strings into the fn's OWNING module.
+	// blockaddress(@fn, %bb) is only valid in the same module as @fn
+	// (LLVM rejects it in a declaration). Pcs hold blockaddresses, so
+	// the pcs global must live where the fn body lives.
+	hdrMod := fnHomeModule(fn, cg.mod)
+
 	pcArrTy := irtypes.NewArray(uint64(len(pcEntries)), cg.pclntabPCEntryType())
 	pcArrInit := constant.NewArray(pcArrTy, pcEntries...)
-	pcArr := cg.mod.NewGlobalDef(
+	pcArr := hdrMod.NewGlobalDef(
 		fmt.Sprintf("__tin_pcs.%d", id),
 		pcArrInit,
 	)
@@ -405,8 +417,8 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 
 	name := cg.unmangleTinName(fn.Name())
 	file := cg.fnSourceFile(fn)
-	namePtr, nameLen := cg.pclntabString(name)
-	filePtr, fileLen := cg.pclntabString(file)
+	namePtr, nameLen := cg.pclntabStringInMod(hdrMod, name)
+	filePtr, fileLen := cg.pclntabStringInMod(hdrMod, file)
 
 	hdrInit := constant.NewStruct(cg.pclntabFnHdrType(),
 		constant.NewBitCast(fn, irtypes.I8Ptr),
@@ -417,7 +429,7 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 		pcArrPtr,
 		constant.NewInt(irtypes.I32, int64(len(pcEntries))),
 	)
-	hdr := cg.mod.NewGlobalDef(
+	hdr := hdrMod.NewGlobalDef(
 		fmt.Sprintf("__tin_pcln_hdr.%d", id),
 		hdrInit,
 	)
@@ -433,6 +445,58 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 	hdr.Linkage = enum.LinkageInternal
 
 	cg.pclntabHdrs = append(cg.pclntabHdrs, hdr)
+}
+
+// fnHomeModule returns the LLVM module that defines fn. fn.Parent is
+// set by llir/llvm when fn is added via Module.NewFunc; for any fn
+// codegen creates, it always reflects the owning module. Falls back to
+// fallback if Parent is somehow nil (defensive — shouldn't happen for
+// fns codegen produced).
+func fnHomeModule(fn *ir.Func, fallback *ir.Module) *ir.Module {
+	if fn != nil && fn.Parent != nil {
+		return fn.Parent
+	}
+
+	return fallback
+}
+
+// pclntabStringInMod interns a UTF-8 string into mod and returns
+// (i8* to first byte, byte length). Per-module dedup so each pkg
+// module pays for its own copies; cross-module dedup happens at link
+// time via weak_odr (same as runtime/newGlobalString).
+func (cg *CodeGen) pclntabStringInMod(mod *ir.Module, s string) (constant.Constant, int) {
+	if cg.pclntabStringPoolPerMod == nil {
+		cg.pclntabStringPoolPerMod = map[*ir.Module]map[string]pclntabStringEntry{}
+	}
+
+	perMod, ok := cg.pclntabStringPoolPerMod[mod]
+	if !ok {
+		perMod = map[string]pclntabStringEntry{}
+		cg.pclntabStringPoolPerMod[mod] = perMod
+	}
+
+	if g, ok := perMod[s]; ok {
+		return g.ptr, g.len
+	}
+
+	data := []byte(s)
+	arrTy := irtypes.NewArray(uint64(len(data)), irtypes.I8)
+	ca := constant.NewCharArray(data)
+
+	g := mod.NewGlobalDef(fmt.Sprintf("__tin_pcln_s.%d", cg.pclntabSeq), ca)
+	g.Linkage = enum.LinkagePrivate
+	g.Immutable = true
+	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
+
+	cg.pclntabSeq++
+
+	gep := constant.NewGetElementPtr(arrTy, g,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	gep.InBounds = true
+
+	perMod[s] = pclntabStringEntry{ptr: gep, len: len(data)}
+
+	return gep, len(data)
 }
 
 // pclntabString interns a UTF-8 string into a private global and returns

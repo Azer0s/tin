@@ -1060,6 +1060,12 @@ doneFlags:
 
 	irText := fixCoroAttrs(mod.String())
 
+	// Per-pkg IRs: each imported package compiled into its own .ll/.o
+	// in parallel. finalizePerPkgModules ran inside cg.Generate to add
+	// cross-module declares + shared TypeDefs, so each pkg's .ll is a
+	// self-contained LLVM IR module.
+	pkgIRTexts := collectPkgIRs(cg)
+
 	// Collect C sources and linker flags from loaded package source files.
 	// Packages may declare //!+file.c directives that need to be compiled in.
 	for _, pkgSrc := range cg.PackageSrcPaths() {
@@ -1168,7 +1174,7 @@ doneFlags:
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
 
-		if err := compileIR(irText, out, libMode, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
+		if err := compileIRWithPkgs(irText, pkgIRTexts, out, libMode, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -1206,7 +1212,7 @@ doneFlags:
 
 		extraObjs = append(srcLinkFlags, extraObjs...)
 
-		if err := compileIR(irText, out, false, extraObjs, fileCSources, extraCFlags, cprog); err != nil {
+		if err := compileIRWithPkgs(irText, pkgIRTexts, out, false, extraObjs, fileCSources, extraCFlags, cprog); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -1223,7 +1229,7 @@ doneFlags:
 			die("cache dir: %v", err)
 		}
 
-		if err := compileIR(irText, runCacheBinPath, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
+		if err := compileIRWithPkgs(irText, pkgIRTexts, runCacheBinPath, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
 		}
 
@@ -1315,12 +1321,55 @@ func fixCoroAttrs(ir string) string {
 var stacktraceLinkActive bool
 
 // compileIR writes the LLVM IR to a temp .ll file and invokes clang.
+// namedIR pairs a stable label (used in temp-file names + progress
+// reporting) with the LLVM IR text for one compilation unit. Used by
+// compileIR's per-pkg path: the entry IR (cg.mod) is one TU, and each
+// imported package's *ir.Module is an additional TU compiled in
+// parallel into its own `.o` and linked alongside.
+type namedIR struct {
+	label  string
+	irText string
+}
+
+// collectPkgIRs serializes every per-pkg LLVM module the codegen built
+// (excluding cg.mod itself, which is serialized separately) and returns
+// them as namedIR entries for compileIRWithPkgs. Sanitizes pkg names
+// for use in temp filenames (`::` -> `_`, etc.).
+func collectPkgIRs(cg *codegen.CodeGen) []namedIR {
+	mods := cg.PkgModules()
+	if len(mods) == 0 {
+		return nil
+	}
+
+	names := cg.PkgModuleNames()
+
+	out := make([]namedIR, 0, len(mods))
+	for i, m := range mods {
+		label := strings.NewReplacer("::", "_", "/", "_", " ", "_").Replace(names[i])
+		out = append(out, namedIR{
+			label:  label,
+			irText: fixCoroAttrs(m.String()),
+		})
+	}
+
+	return out
+}
+
 // If libMode is true, compile to an object file with -c (no linking).
 // extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
 // cSources are C source files to compile in alongside the IR.
 // prog is the optional progress tracker (nil = silent).
 // debugMode switches the final compile from -O2 to -O0 and adds -g.
 func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, prog *compileProgress, debugMode ...bool) error {
+	return compileIRWithPkgs(ir, nil, outBin, libMode, extraObjs, cSources, extraCFlags, prog, debugMode...)
+}
+
+// compileIRWithPkgs is the multi-IR variant of compileIR. `pkgIRs` is
+// one IR text per imported package; each is written to its own `.ll`,
+// compiled to a `.o` in parallel with the entry IR + runtime.c, and
+// added to the link inputs. When pkgIRs is empty this is identical to
+// the legacy single-IR path.
+func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, prog *compileProgress, debugMode ...bool) error {
 	isDebug := len(debugMode) > 0 && debugMode[0]
 	// Write IR to temp file
 	//goland:noinspection GoResourceLeak
@@ -1564,6 +1613,61 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 
 		a = append(a, llInputFile, "-o", irObjName)
 		jobsList = append(jobsList, compileJob{desc: filepath.Base(llInputFile), args: a})
+	}
+
+	// Per-pkg IR -> per-pkg .o. Each imported package's *ir.Module gets
+	// its own .ll + clang -c invocation, run in parallel with the entry
+	// IR / runtime.c jobs. The .o files are added to linkInputs so the
+	// final clang link picks them up. With cross-module declares
+	// (codegen/pkgmod.go addCrossModuleDeclares) and shared TypeDefs
+	// (echoSharedTypeDefs), each pkg .ll is self-sufficient — its
+	// cross-pkg references resolve at link time, not at compile time.
+	for _, pkg := range pkgIRs {
+		if dir := os.Getenv("TIN_DUMP_PKG_IR_DIR"); dir != "" {
+			_ = os.MkdirAll(dir, 0o755)
+			_ = os.WriteFile(filepath.Join(dir, pkg.label+".ll"), []byte(pkg.irText), 0o644)
+		}
+
+		pkgLL, err := os.CreateTemp("", "tin-pkg-"+pkg.label+"-*.ll")
+		if err != nil {
+			return fmt.Errorf("cannot create temp pkg .ll: %w", err)
+		}
+
+		pkgLLName := pkgLL.Name()
+		if _, err := pkgLL.WriteString(pkg.irText); err != nil {
+			_ = pkgLL.Close()
+			_ = os.Remove(pkgLLName)
+			return err
+		}
+
+		_ = pkgLL.Close()
+
+		defer func(name string) { _ = os.Remove(name) }(pkgLLName)
+
+		pkgObj, err := mkObj("tin-pkg-" + pkg.label)
+		if err != nil {
+			return err
+		}
+
+		linkInputs = append(linkInputs, pkgObj)
+
+		a := append([]string{optLevel, "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+
+		if isDebug {
+			a = append(a, "-g")
+			if targetGOOS == "darwin" {
+				a = append(a, "-fstandalone-debug")
+			}
+		}
+
+		if stacktraceLinkActive {
+			a = append(a, "-funwind-tables", "-fasynchronous-unwind-tables")
+		} else {
+			a = append(a, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
+		}
+
+		a = append(a, pkgLLName, "-o", pkgObj)
+		jobsList = append(jobsList, compileJob{desc: "pkg:" + pkg.label, args: a})
 	}
 
 	// runtime.c -> runtime.o (only if rtC exists alongside the tin binary).
@@ -2404,7 +2508,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		stacktraceLinkActive = cg.StacktraceUsed()
 
 		irText := fixCoroAttrs(mod.String())
-		if compErr := compileIR(irText, cachedBin, false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
+		pkgIRTexts := collectPkgIRs(cg)
+		if compErr := compileIRWithPkgs(irText, pkgIRTexts, cachedBin, false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
 			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)
 

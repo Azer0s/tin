@@ -102,6 +102,13 @@ type CodeGen struct {
 
 	// global string counter
 	strCount int
+	// stringPool memoizes content-hashed string globals per active
+	// module so the same literal in the same module reuses a single
+	// global. Cross-module dedup is handled by linkonce_odr at link
+	// time. Required for per-pkg compile: each pkg module needs its
+	// own copies of any string it references (private-linkage strings
+	// can't cross object boundaries).
+	stringPool map[*ir.Module]map[string]value.Value
 	// general-purpose block label counter
 	labelCount int
 
@@ -390,7 +397,8 @@ type CodeGen struct {
 	// collisions are impossible - a single monotonic ID just keeps the
 	// state minimal.
 	pclntabSeq        int
-	pclntabStringPool map[string]pclntabStringEntry  // dedup interned strings within this module
+	pclntabStringPool       map[string]pclntabStringEntry          // dedup interned strings within this module
+	pclntabStringPoolPerMod map[*ir.Module]map[string]pclntabStringEntry // per-fn-module string pools
 	pclntabCtorFn     *ir.Func                       // ctor created in pre-marker phase, finalized after
 	fnSourceFiles     map[string]string              // ir-fn-name -> source .tin path
 	// fnDisplayNames maps mangled IR names back to user-readable Tin names
@@ -1828,9 +1836,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 
 		cg.emitAtomTable()
-		cg.mergeRoutedPkgMods()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
+		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
 	}
@@ -1838,9 +1846,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	if cg.replMode {
 		cg.emitAtomTable()
-		cg.mergeRoutedPkgMods()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
+		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
 	}
@@ -2055,9 +2063,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	cg.debugDumpUnterminated()
-	cg.mergeRoutedPkgMods()
 	cg.applyStacktracePostPass()
 	cg.applyPclntabPostPass()
+	cg.finalizePerPkgModules()
 
 	return cg.mod, nil
 }

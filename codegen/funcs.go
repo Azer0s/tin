@@ -295,9 +295,17 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// can export them to the dynamic symbol table for dladdr to resolve.
 	// STB_LOCAL symbols never reach the dynsym regardless of -rdynamic,
 	// so without this gate every Tin frame would render as `??+0xADDR`.
-	if !hasTag(n.Tags, "interop") && !cg.stacktraceUsed {
-		f.Linkage = enum.LinkageInternal
-	}
+	//
+	// Per-pkg compile (incremental compilation step 2) is the fourth
+	// escape hatch: when each pkg compiles to its own .o, a fn defined
+	// in pkg A and called from pkg B must be linker-visible to B's .o.
+	// Internal-linkage symbols are STB_LOCAL and don't cross object
+	// boundaries, so cross-pkg calls need external linkage. We always
+	// route user fns through per-pkg modules now (predeclareFuncAs
+	// uses cg.activeModule()), so external linkage is the safe default;
+	// linker DCE (--gc-sections) still strips unused symbols.
+	_ = n
+	// f.Linkage stays at the default (external).
 
 	// #pure functions get LLVM attributes that unblock the optimizer:
 	// alwaysinline so call sites disappear; readnone + nounwind when the

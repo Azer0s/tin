@@ -4,6 +4,7 @@ package codegen
 // global string constants, and lazily-declared runtime/C functions.
 
 import (
+	"crypto/sha1"
 	"fmt"
 
 	"github.com/llir/llvm/ir"
@@ -278,8 +279,8 @@ func (cg *CodeGen) ensureElemRetainHelper(t irtypes.Type) *ir.Func {
 
 	name := "__tin_retain_elem_" + key
 	param := ir.NewParam("elem", irtypes.I8Ptr)
-	fn := cg.mod.NewFunc(name, irtypes.Void, param)
-	fn.Linkage = enum.LinkagePrivate
+	fn := cg.activeModule().NewFunc(name, irtypes.Void, param)
+	fn.Linkage = enum.LinkageWeakODR
 	// Pre-register to handle recursive types.
 	cg.elemRetainHelpers[key] = fn
 
@@ -384,8 +385,8 @@ func (cg *CodeGen) ensureElemReleaseHelper(t irtypes.Type) *ir.Func {
 
 	helperName := "__tin_release_" + key + "_elem"
 	param := ir.NewParam("elem_ptr", irtypes.I8Ptr)
-	fn := cg.mod.NewFunc(helperName, irtypes.Void, param)
-	fn.Linkage = enum.LinkagePrivate
+	fn := cg.activeModule().NewFunc(helperName, irtypes.Void, param)
+	fn.Linkage = enum.LinkageWeakODR
 
 	// Register BEFORE generating the body to break potential recursion.
 	cg.elemReleaseHelpers[key] = fn
@@ -1013,7 +1014,7 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 
 	ptrType := irtypes.NewPointer(st)
 	fnName := structName + "__release_ptr"
-	fn := cg.mod.NewFunc(fnName, irtypes.Void, ir.NewParam("ptr", ptrType))
+	fn := cg.activeModule().NewFunc(fnName, irtypes.Void, ir.NewParam("ptr", ptrType))
 	// Cache before generating body to handle any hypothetical recursive reference.
 	cg.structPtrReleaseFns[structName] = fn
 
@@ -1082,7 +1083,7 @@ func (cg *CodeGen) ensureHeapChainReleaseFn(structName string, depth int) *ir.Fu
 		paramType = irtypes.NewPointer(paramType)
 	}
 
-	fn := cg.mod.NewFunc(key, irtypes.Void, ir.NewParam("ptr", paramType))
+	fn := cg.activeModule().NewFunc(key, irtypes.Void, ir.NewParam("ptr", paramType))
 	cg.chainReleaseFns[key] = fn // cache before generating body (handles recursive refs)
 
 	entry := fn.NewBlock("entry")
@@ -1406,9 +1407,40 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	hdrStructType := irtypes.NewStruct(irtypes.I64, irtypes.I64, arrType)
 	hdrConst := constant.NewStruct(hdrStructType, immortalRC, pad, ca)
 
-	g := cg.mod.NewGlobalDef(fmt.Sprintf("str.%d", cg.strCount), hdrConst)
+	// Route through activeModule so the string lives in the same per-pkg
+	// module that references it. linkonce_odr linkage with a content-
+	// hashed symbol name means the LINKER deduplicates identical
+	// strings across object boundaries. Without it, per-pkg compile
+	// would either (a) link-fail when a fn moves modules between mono
+	// instantiations and references a string defined elsewhere, or
+	// (b) duplicate every string per pkg with no dedup.
+	//
+	// The hash is content-only: two `str.N` symbols with the same
+	// payload across modules collide on the same symbol name and
+	// linkonce_odr keeps one definition. unnamed_addr lets the
+	// optimizer merge identical string globals within a module too.
+	hash := sha1.Sum([]byte(s))
+	symName := fmt.Sprintf("__tin_str_%x", hash[:8])
+
+	if cg.stringPool == nil {
+		cg.stringPool = map[*ir.Module]map[string]value.Value{}
+	}
+
+	mod := cg.activeModule()
+
+	perMod, ok := cg.stringPool[mod]
+	if !ok {
+		perMod = map[string]value.Value{}
+		cg.stringPool[mod] = perMod
+	}
+
+	if cached, ok := perMod[symName]; ok {
+		return cached
+	}
+
+	g := mod.NewGlobalDef(symName, hdrConst)
 	g.Immutable = true
-	g.Linkage = enum.LinkagePrivate
+	g.Linkage = enum.LinkageWeakODR
 	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
 	cg.strCount++
 
@@ -1417,6 +1449,8 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	i32_2 := constant.NewInt(irtypes.I32, 2)
 	gep := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_2, i32_0)
 	gep.InBounds = true
+
+	perMod[symName] = gep
 
 	return gep
 }

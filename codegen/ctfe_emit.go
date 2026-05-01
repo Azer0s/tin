@@ -239,7 +239,16 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtifact {
 		return nil
 	}
 
+	// Per-pkg compile (incremental compilation step 2) routes #pure fns
+	// into per-pkg modules, so the slicer needs to see ALL of cg.mod
+	// PLUS every per-pkg module's IR text. Concatenating gives the
+	// slicer one search target; the slicer is line-oriented so doubled
+	// `target triple` / `datalayout` headers don't confuse it (they
+	// match across modules).
 	mainText := cg.mod.String()
+	for _, m := range cg.PkgModules() {
+		mainText += "\n" + m.String()
+	}
 
 	shimText := ""
 	if cg.shimMod != nil {
@@ -473,6 +482,17 @@ func sliceIRForFuncs(fullIR string, targets []string) string {
 					foundAny = true
 				}
 
+				continue
+			}
+
+			// Drop alias lines: aliases reference whole-program entry
+			// points (e.g. `@main = alias i32 (), i32 ()* @_tin_c_main`)
+			// that the per-fn slice intentionally doesn't define. LLVM
+			// rejects an alias whose aliasee isn't a definition in the
+			// same module, so passing them through would error out the
+			// per-fn .so compile.
+			if strings.HasPrefix(strings.TrimSpace(line), "@") &&
+				strings.Contains(line, "= alias ") {
 				continue
 			}
 

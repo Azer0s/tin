@@ -239,6 +239,11 @@ func (cg *CodeGen) addCrossModuleDeclares() {
 		}
 	}
 
+	// Process cg.mod too — entry-program main / runtime helpers
+	// frequently reference per-pkg fns (e.g. `assert::not_ok` from
+	// inside a test body that codegen emitted directly into cg.mod).
+	cg.addCrossModuleDeclaresFor(cg.mod, globalOwner)
+
 	for _, name := range cg.pkgModNames() {
 		m := cg.pkgMods[name]
 		if m == nil {
@@ -383,6 +388,62 @@ func walkConstant(c constant.Constant, df func(*ir.Func), dg func(*ir.Global)) {
 			df(fn)
 		}
 	}
+}
+
+// echoSharedTypeDefs copies cg.mod.TypeDefs into every per-pkg module.
+// LLVM type identity is per-module: a `%MyStruct*` in pkg B's IR is
+// only meaningful if B's TypeDefs also defines `%MyStruct`. Without
+// the echo, the assembler errors on unresolved type references when
+// each pkg compiles separately.
+//
+// Over-copying (every pkg gets every type, even ones it doesn't use)
+// is safe: typedefs are zero-cost at runtime, the linker dedups
+// identical layouts, and dead-typedef pruning is a clang concern not
+// ours. The cost is a few extra bytes in each .ll text, dwarfed by
+// the actual code.
+//
+// Idempotent per (pkg-module, typedef): repeat calls don't add
+// duplicates because the per-pkg dedup set is rebuilt each time.
+func (cg *CodeGen) echoSharedTypeDefs() {
+	if len(cg.pkgMods) == 0 || len(cg.mod.TypeDefs) == 0 {
+		return
+	}
+
+	for _, name := range cg.pkgModNames() {
+		m := cg.pkgMods[name]
+		if m == nil {
+			continue
+		}
+
+		have := map[irtypes.Type]bool{}
+		for _, t := range m.TypeDefs {
+			have[t] = true
+		}
+
+		for _, t := range cg.mod.TypeDefs {
+			if !have[t] {
+				m.TypeDefs = append(m.TypeDefs, t)
+				have[t] = true
+			}
+		}
+	}
+}
+
+// finalizePerPkgModules prepares every per-pkg module for independent
+// compilation: adds cross-module declares for any fn/global referenced
+// from a pkg module but defined elsewhere, then echoes the shared
+// TypeDefs so each pkg module is type-self-sufficient.
+//
+// Replaces mergeRoutedPkgMods on the parallel-compile path. After
+// this runs, each per-pkg module is a self-contained LLVM IR module
+// that can be serialized and compiled to its own `.o`.
+func (cg *CodeGen) finalizePerPkgModules() {
+	if len(cg.pkgMods) == 0 {
+		return
+	}
+
+	cg.echoSharedTypeDefs()
+	cg.addCrossModuleDeclares()
 }
 
 // mergeRoutedPkgMods folds every per-pkg module's content back into
