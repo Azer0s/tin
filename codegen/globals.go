@@ -35,7 +35,7 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 
 	irName := pkgName + "__" + tv.Name
 
-	g := cg.mod.NewGlobal(irName, lt)
+	g := cg.activeModule().NewGlobal(irName, lt)
 	g.Init = initVal
 
 	entry := &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true}
@@ -86,7 +86,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// In REPL mode, globals from previous cells must be external references so
 	// RTLD_GLOBAL resolves them to the canonical first-loaded copy, not a new zero copy.
 	if cg.replMode && cg.replExternalGlobals[tv.Name] {
-		g := cg.mod.NewGlobal(tv.Name, lt)
+		g := cg.activeModule().NewGlobal(tv.Name, lt)
 		g.Linkage = enum.LinkageExternal
 		cg.curScope.set(tv.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true})
 
@@ -103,7 +103,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 		initVal = cg.zeroConstant(lt)
 	}
 
-	g := cg.mod.NewGlobal(tv.Name, lt)
+	g := cg.activeModule().NewGlobal(tv.Name, lt)
 	g.Init = initVal
 
 	// Register in global scope as a pointer (alloc-style) so that loads/stores work.
