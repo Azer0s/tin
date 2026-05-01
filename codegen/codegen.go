@@ -270,11 +270,18 @@ type CodeGen struct {
 	structImpls map[string][]string
 
 	// implEntriesByMod tracks the per-module impl-section globals so the
-	// finalizer can emit one @llvm.compiler.used per module pinning them.
-	// Populated by emitImplSectionEntry, drained by finalizeImplSection
+	// finalizer can pin them via @llvm.used. Populated by
+	// emitImplSectionEntry, drained by finalizeImplSection
 	// (codegen/reflect_table.go).
 	implEntriesByMod map[*ir.Module][]*ir.Global
 	implEntriesSeen  map[string]bool
+
+	// llvmUsedRoots is the per-module list of globals that need to be
+	// pinned in @llvm.used so the linker doesn't dead-strip them. LLVM
+	// rejects multiple @llvm.used per module, so every emitter (pclntab,
+	// reflect_table, future ones) appends here and a single pass at the
+	// end of Generate materializes one global per module.
+	llvmUsedRoots map[*ir.Module][]*ir.Global
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
 	structFieldLLVMTypes map[string][]irtypes.Type
 
@@ -1843,8 +1850,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
-		cg.applyPclntabPostPass()
 		cg.finalizeImplSection()
+		cg.applyPclntabPostPass()
+		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
@@ -1854,8 +1862,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if cg.replMode {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
-		cg.applyPclntabPostPass()
 		cg.finalizeImplSection()
+		cg.applyPclntabPostPass()
+		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
@@ -2072,8 +2081,9 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	cg.debugDumpUnterminated()
 	cg.applyStacktracePostPass()
-	cg.applyPclntabPostPass()
 	cg.finalizeImplSection()
+	cg.applyPclntabPostPass()
+	cg.emitLlvmUsedRoots()
 	cg.finalizePerPkgModules()
 
 	return cg.mod, nil

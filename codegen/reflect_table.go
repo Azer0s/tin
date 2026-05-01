@@ -108,28 +108,53 @@ func (cg *CodeGen) emitImplSectionEntry(structKey, traitName string) {
 	cg.implEntriesByMod[mod] = append(cg.implEntriesByMod[mod], entryG)
 }
 
-// finalizeImplSection emits one @llvm.compiler.used per pkg module so
-// linker dead-strip leaves the impl entries alone. Call once after all
-// pkg codegen has run, before module serialization.
+// finalizeImplSection forwards every emitted impl entry to the shared
+// per-module @llvm.used roots list (cg.llvmUsedRoots). The actual
+// emit-one-global-per-module step happens in emitLlvmUsedRoots so the
+// pclntab post-pass and any future emitters can also contribute
+// without colliding (LLVM rejects multiple @llvm.used per module).
 func (cg *CodeGen) finalizeImplSection() {
 	for mod, entries := range cg.implEntriesByMod {
-		if len(entries) == 0 {
+		for _, g := range entries {
+			cg.registerLlvmUsed(mod, g)
+		}
+	}
+}
+
+// registerLlvmUsed appends g to mod's pending llvm.used roots. Idempotent
+// per (module, symbol).
+func (cg *CodeGen) registerLlvmUsed(mod *ir.Module, g *ir.Global) {
+	if cg.llvmUsedRoots == nil {
+		cg.llvmUsedRoots = map[*ir.Module][]*ir.Global{}
+	}
+
+	for _, existing := range cg.llvmUsedRoots[mod] {
+		if existing == g {
+			return
+		}
+	}
+
+	cg.llvmUsedRoots[mod] = append(cg.llvmUsedRoots[mod], g)
+}
+
+// emitLlvmUsedRoots materializes the per-module @llvm.used global from
+// every root collected via registerLlvmUsed. Must be the LAST step in
+// codegen (after every emitter that would call registerLlvmUsed) so
+// nothing is missed and no two @llvm.used collide in the same module.
+func (cg *CodeGen) emitLlvmUsedRoots() {
+	for mod, roots := range cg.llvmUsedRoots {
+		if len(roots) == 0 {
 			continue
 		}
 
-		used := make([]constant.Constant, 0, len(entries))
-		for _, g := range entries {
+		used := make([]constant.Constant, 0, len(roots))
+		for _, g := range roots {
 			used = append(used, constant.NewBitCast(g, irtypes.I8Ptr))
 		}
 
 		usedArrTy := irtypes.NewArray(uint64(len(used)), irtypes.I8Ptr)
 		usedInit := constant.NewArray(usedArrTy, used...)
 
-		// llvm.used (NOT llvm.compiler.used) is the form the linker honors:
-		// --gc-sections (lld) and -dead_strip (ld64) treat every symbol
-		// listed here as a GC root, so the section data survives even when
-		// no IR code names it. compiler.used only protects from optimizer
-		// passes, not from the linker.
 		usedG := mod.NewGlobalDef("llvm.used", usedInit)
 		usedG.Linkage = enum.LinkageAppending
 		usedG.Section = "llvm.metadata"

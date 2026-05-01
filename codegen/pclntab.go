@@ -593,23 +593,21 @@ func (cg *CodeGen) createPclntabConstructorFn() {
 
 // finalizePclntabConstructor pins all emitted headers (including the
 // constructor's own marker, added by the loop after createPclntab-
-// ConstructorFn) via @llvm.used and registers the constructor with
-// @llvm.global_ctors so it fires at image-load time.
+// ConstructorFn) via the shared @llvm.used registry, and registers the
+// constructor with @llvm.global_ctors so it fires at image-load time.
+//
+// The actual @llvm.used global is emitted later by emitLlvmUsedRoots
+// so other code that also needs to pin globals (codegen/reflect_table.go)
+// can share the same per-module global rather than collide on a
+// duplicate @llvm.used definition.
 func (cg *CodeGen) finalizePclntabConstructor() {
 	if cg.pclntabCtorFn == nil || len(cg.pclntabHdrs) == 0 {
 		return
 	}
 
-	used := make([]constant.Constant, 0, len(cg.pclntabHdrs))
 	for _, hdr := range cg.pclntabHdrs {
-		used = append(used, constant.NewBitCast(hdr, irtypes.I8Ptr))
+		cg.registerLlvmUsed(cg.mod, hdr)
 	}
-
-	usedArrTy := irtypes.NewArray(uint64(len(used)), irtypes.I8Ptr)
-	usedInit := constant.NewArray(usedArrTy, used...)
-	usedG := cg.mod.NewGlobalDef("llvm.used", usedInit)
-	usedG.Linkage = enum.LinkageAppending
-	usedG.Section = "llvm.metadata"
 
 	ctorFnPtrTy := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
 	ctorTy := irtypes.NewStruct(
