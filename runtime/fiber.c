@@ -54,9 +54,7 @@
 // per-fiber defer chain around _coro_resume.
 extern __thread TinDeferEntry *_tin_defer_chain;
 
-// -------------------------------------------------------------------
 // Fiber status
-// -------------------------------------------------------------------
 
 typedef enum {
     FIBER_RUNNABLE = 0,
@@ -65,9 +63,7 @@ typedef enum {
     FIBER_DONE     = 3
 } FiberStatus;
 
-// -------------------------------------------------------------------
 // TinFiber - heap-allocated so embedded mutexes/condvars never move
-// -------------------------------------------------------------------
 
 #define FIBER_MAX_WAITERS 8
 
@@ -247,9 +243,7 @@ static int64_t   _reclaim_total  = 0;  // total reclaims (drives decay interval)
 static void _fiber_struct_reclaim(TinFiber *f);
 
 
-// -------------------------------------------------------------------
 // Run queue - mutex + condvar FIFO ring buffer
-// -------------------------------------------------------------------
 
 typedef struct { void *hdl; int64_t pid; } TinRunnable;
 
@@ -384,7 +378,6 @@ static TinRunnable _rq_pop(void) {
     return r;
 }
 
-// -------------------------------------------------------------------
 // Per-worker local work-stealing deque (bounded Chase-Lev deque).
 //
 // Each worker owns one deque.  Unpark calls on a worker push directly
@@ -394,7 +387,6 @@ static TinRunnable _rq_pop(void) {
 //
 // Owner   pushes/pops from bottom (LIFO for cache locality).
 // Thieves steal            from top  (FIFO to avoid contention).
-// -------------------------------------------------------------------
 
 #define WORKER_LQ_SIZE  64                    // must be power of 2
 #define WORKER_LQ_MASK  (WORKER_LQ_SIZE - 1)
@@ -550,9 +542,7 @@ static void _yield_to_global(TinRunnable r) {
     _rq_push(r);
 }
 
-// -------------------------------------------------------------------
 // LLVM coroutine resume/destroy
-// -------------------------------------------------------------------
 
 static inline void _coro_resume(void *hdl) {
     typedef void (*CoroFn)(void *);
@@ -564,9 +554,7 @@ static inline void _coro_destroy(void *hdl) {
     ((CoroFn *)hdl)[1](hdl);
 }
 
-// -------------------------------------------------------------------
 // Per-worker thread-locals
-// -------------------------------------------------------------------
 
 __thread int64_t  _current_pid    = -1;
 __thread void     *_current_hdl   = NULL;  // coro handle of running fiber
@@ -630,9 +618,7 @@ void  _tin_clear_preregistered_ch(void) {
     if (_current_fib) _current_fib->preregistered_ch = NULL;
 }
 
-// -------------------------------------------------------------------
 // Worker threads
-// -------------------------------------------------------------------
 
 static pthread_t *_workers    = NULL;
 static int        _worker_cnt = 0;
@@ -1066,9 +1052,7 @@ static void *_worker_thread(void *_) {
     return NULL;
 }
 
-// -------------------------------------------------------------------
 // Public API
-// -------------------------------------------------------------------
 
 void _tin_fiber_init(void) {
     pthread_mutex_lock(&_table_mu);
@@ -1393,14 +1377,13 @@ void *_tin_coro_take_result(void) {
     return r;
 }
 
-// ---------------------------------------------------------------------------
 // Inline-drive result buffer - zero-malloc result storage for await.
 //
 // When genInlineAsyncDrive drives an inner $coro directly (no fiber spawn),
 // the inner$coro's emitCoroComplete should NOT heap-allocate the result box,
 // because:
 //  1. The outer coroutine reads the result immediately (before coro.destroy).
-//  2. The inner$coro runs on the same OS thread as the outer → TLS is safe.
+//  2. The inner$coro runs on the same OS thread as the outer -> TLS is safe.
 //  3. Avoiding the malloc lets LLVM's coro-elide promote inner frames to the
 //     outer coroutine frame (stack-allocated when coro-elide works).
 //
@@ -1420,7 +1403,6 @@ void *_tin_coro_take_result(void) {
 //
 // Maximum result size that fits in the TLS buffer.  Types larger than this
 // fall back to malloc (rare - most return types are scalars or small structs).
-// ---------------------------------------------------------------------------
 #define INLINE_RESULT_BUF_SIZE 256
 
 static _Thread_local char _inline_result_buf[INLINE_RESULT_BUF_SIZE];
@@ -1451,7 +1433,6 @@ void _tin_inline_result_free(void *ptr) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Coroutine frame pool - eliminates per-operation malloc/free on the hot path.
 //
 // _tin_coro_malloc(size) is called from emitCoroPrologue instead of malloc().
@@ -1464,9 +1445,8 @@ void _tin_inline_result_free(void *ptr) {
 // returns it to the per-thread pool.  Null (coro-elided / stack frame) is a no-op.
 //
 // Pool layout (per-thread):
-//   _coro_pool[0..cnt-1]  – LLVM frame pointers (raw_alloc + 8)
+//   _coro_pool[0..cnt-1]  - LLVM frame pointers (raw_alloc + 8)
 //   Lookup: linear scan checking *(int64_t*)(ptr - 8) == requested size.
-// ---------------------------------------------------------------------------
 void *_tin_coro_malloc(int64_t size) {
     // Fast path: search pool for a frame of the exact size.
     for (int i = _coro_pool_cnt - 1; i >= 0; i--) {
@@ -1647,9 +1627,7 @@ void _tin_fiber_join(int64_t pid, void *my_hdl) {
     pthread_mutex_unlock(&_table_mu);
 }
 
-// ---------------------------------------------------------------------------
 // await match runtime support
-// ---------------------------------------------------------------------------
 
 // _tin_fiber_poll_any: non-blocking check.
 // Returns the index of the first FIBER_DONE pid in pids[0..n-1], or -1.

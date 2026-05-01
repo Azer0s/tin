@@ -8,14 +8,12 @@
 // Thread-local so each fiber (OS thread) has its own independent defer stack.
 __thread TinDeferEntry *_tin_defer_chain = NULL;
 
-// ---------------------------------------------------------------------------
 // Fiber panic interception
 //
 // The worker loop sets _fiber_panic_catching = true before calling _coro_resume.
 // If _tin_panic() reaches the exit(1) path while catching is active, it stores
 // the message in _fiber_panic_caught and returns instead of exiting.
 // The worker loop reads _fiber_panic_caught after _coro_resume returns.
-// ---------------------------------------------------------------------------
 
 static __thread bool        _fiber_panic_catching = false;
 static __thread const char *_fiber_panic_caught   = NULL;

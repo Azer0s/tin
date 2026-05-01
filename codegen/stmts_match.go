@@ -1292,7 +1292,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 	skipPtr := block.NewGetElementPtr(skipType, skipAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 
-	// --- WITH default: one non-blocking poll pass ---
+	// WITH default: one non-blocking poll pass
 	if s.Default != nil {
 		defaultBlock := cg.newBlock("awmatch.default")
 
@@ -1380,7 +1380,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		return afterBlock, nil
 	}
 
-	// --- WITHOUT default: blocking loop ---
+	// WITHOUT default: blocking loop
 	// Loop: join_any -> poll -> dispatch; re-loop if guard fails; panic if exhausted.
 
 	// anyWaiterType mirrors TinAnyWaiter in fiber.c:
@@ -1409,7 +1409,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 	loopBlock := cg.newBlock("awmatch.loop")
 	block.NewBr(loopBlock)
 
-	// === loop body ===
+	// loop body
 	var resumeBlock *ir.Block
 
 	if cg.inCoroFn {

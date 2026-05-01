@@ -318,7 +318,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			// disable-tail-calls keeps the frame on the stack rather
 			// than letting LLVM convert `return f()` into a `jmp` that
 			// erases this fn from the unwind chain. Must be a keyed
-			// AttrPair, NOT AttrString — AttrString would emit the
+			// AttrPair, NOT AttrString - AttrString would emit the
 			// whole `disable-tail-calls="true"` as one quoted string
 			// attribute name, which LLVM stores as an unrecognized
 			// attribute and silently ignores. AttrPair produces the
@@ -350,9 +350,9 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 // applyPureFuncAttrs sets LLVM function attributes on f based on the Tin
 // function's purity annotation:
 //
-//   - #pure → alwaysinline (always; the inliner will substitute the body
+//   - #pure -> alwaysinline (always; the inliner will substitute the body
 //     at every call site so LLVM's optimizer sees the math directly).
-//   - #pure with no {#allow_sideffect} block in the body → readnone +
+//   - #pure with no {#allow_sideffect} block in the body -> readnone +
 //     nounwind. This tells LLVM the call has no observable side effects
 //     and can be CSE'd, hoisted out of loops, or DCE'd when its result is
 //     unused.

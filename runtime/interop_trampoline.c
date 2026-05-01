@@ -44,9 +44,7 @@
 // frees the block. NULL-safe.
 extern void _tin_release_closure(void *env);
 
-// ---------------------------------------------------------------------------
 // Page / slot bookkeeping.
-// ---------------------------------------------------------------------------
 
 #define TRAMP_PAGE_SIZE  4096
 #define TRAMP_SLOT_SIZE  64
@@ -107,9 +105,7 @@ static inline TrampPage *page_of_slot(uint8_t *slot) {
     return (TrampPage *)base;
 }
 
-// ---------------------------------------------------------------------------
 // Per-arch trampoline body emitter.
-// ---------------------------------------------------------------------------
 //
 // Writes the machine bytes for a trampoline that:
 //   1. Loads `closure_data_ptr` into the scratch register the
@@ -188,9 +184,7 @@ static size_t emit_trampoline(uint8_t *code, void *closure_data_ptr, void *dispa
 #endif
 }
 
-// ---------------------------------------------------------------------------
 // Page allocator.
-// ---------------------------------------------------------------------------
 
 static pthread_mutex_t _tramp_mu = PTHREAD_MUTEX_INITIALIZER;
 static TrampPage *_tramp_freelist;

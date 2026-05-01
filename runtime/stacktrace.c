@@ -19,7 +19,7 @@
 // x29 on aarch64). Codegen emits `frame-pointer="all"` on every IR
 // function (see codegen/codegen.go applyStacktracePostPass), so every
 // Tin frame has a valid `[fp+0] = saved_fp, [fp+8] = return_ip`
-// layout. This avoids libunwind entirely — libunwind 1.8.x ships with
+// layout. This avoids libunwind entirely - libunwind 1.8.x ships with
 // CONSERVATIVE_CHECKS=1 baked in, which probes memory readability via
 // `syscall(SYS_write, pipe_fd, addr, 1)`; valgrind flags those as
 // reads of unaddressable bytes.
@@ -100,7 +100,7 @@
 // Direct-mapped open-addressed table with 256 slots: 16-byte entries
 // give a 4 KiB TLS region per thread that ever calls stacktrace.
 // Threads that never call stacktrace never touch this region (lazy
-// zero-page mapping in glibc). Hash collisions overwrite — a
+// zero-page mapping in glibc). Hash collisions overwrite - a
 // pathological access pattern thrashes but never corrupts.
 //
 // Hash: 64-bit golden ratio (Knuth's multiplicative). Top byte selected
@@ -272,7 +272,7 @@ static int is_main_entry(const char *sym) {
 //
 // `lib_path` is dli_fname (or NULL). `sym` is the resolved symbol name
 // (or NULL when only address is known). `unresolved` is set when both
-// pclntab and dladdr came up empty — i.e. the frame would render as
+// pclntab and dladdr came up empty - i.e. the frame would render as
 // "??+0x<addr>".
 static int frame_decision(int32_t flags, const char *lib_path,
                           const char *sym, int unresolved) {
@@ -282,7 +282,7 @@ static int frame_decision(int32_t flags, const char *lib_path,
         && strncmp(sym, "_tin_", 5) == 0
         // Tin codegen renames the user's `fn main` to `_tin_user_main`
         // (avoids collision with the C-side entry point). It's USER
-        // code, not runtime — never hide it under HIDE_RUNTIME or the
+        // code, not runtime - never hide it under HIDE_RUNTIME or the
         // user loses the root frame of every filtered trace.
         && strcmp(sym, "_tin_user_main") != 0) return 0;
     if ((flags & TIN_ST_HIDE_MAIN) && is_main_entry(sym)) return 0;
@@ -322,7 +322,7 @@ static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
 
     // pclntab lookup: produces (name, file, line, col) for any IP that
     // landed in a Tin function (main binary OR any dlopen'd image).
-    // Misses for libc / runtime helpers / foreign C — those fall
+    // Misses for libc / runtime helpers / foreign C - those fall
     // through to the dladdr formatter below.
     const char *pcl_name     = NULL;
     const char *pcl_file     = NULL;
@@ -425,7 +425,7 @@ static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of) {
                      & (TIN_ST_CACHE_SLOTS - 1);
     // Empty slots have key=0 (BSS-initialised TLS). A real cache entry
     // can have atom_code=0 if _tin_learn_atom happens to compute a
-    // CRC32 of 0 for some string — testing `atom_code != 0` would
+    // CRC32 of 0 for some string - testing `atom_code != 0` would
     // re-resolve those forever. Test on key instead: a real cache key
     // is `(ip << 1) | spawn_of`, which is 0 only if ip == 0 (impossible
     // - fp_walk filters those out before calling).

@@ -65,7 +65,7 @@ void _tin_print_newline(void);
 // LLVM fp128 on all supported architectures (x86-64, Linux AArch64) without
 // needing __float128 (x86-only extension) or _Float128 (requires glibc header).
 // Apple clang (both x86_64 and arm64) does not support TF mode at all
-// — long double is 80-bit on Intel macOS and 64-bit on arm64 macOS,
+// - long double is 80-bit on Intel macOS and 64-bit on arm64 macOS,
 // neither of which is the 128-bit IEEE binary128 the rest of the
 // runtime expects. Fall back to long double on every Apple target;
 // the f128 echo / cstr helpers degrade to lower precision but link

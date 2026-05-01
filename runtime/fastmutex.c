@@ -78,7 +78,7 @@ int _tin_fmutex_lock_coro_slow(TinFastMutex *m, int64_t pid, void *hdl) {
         m->wcnt++;
     }
 
-    // Atomically transition state 1→2 to tell the unlocker "there are waiters".
+    // Atomically transition state 1->2 to tell the unlocker "there are waiters".
     // If this CAS fails, the mutex was released while we were adding ourselves
     // (state became 0).  Remove the entry we just added and tell the caller to
     // retry - the lock is now free so the next CAS will succeed.
@@ -143,7 +143,7 @@ void _tin_fmutex_unlock_slow(TinFastMutex *m) {
     }
 
     // If more waiters remain (array or overflow), stay at 2.
-    // Otherwise unlock: transition 2→0.
+    // Otherwise unlock: transition 2->0.
     int has_more = (m->wcnt > 0) || (m->overflow != NULL);
     atomic_store_explicit(&m->state, has_more ? 2u : 0u, memory_order_release);
 

@@ -63,7 +63,7 @@ Run / test:
   --leaks                  run binary under leaks --atExit (macOS only)
   -j N                     parallel TUs for clang compile (default GOMAXPROCS)
   -O0|-O1|-O2|-O3|-Os|-Oz  override clang optimization level (default -O2; -g implies -O0)
-  --fast                   shortcut for -O0 — useful for tin test when the suite is bottlenecked
+  --fast                   shortcut for -O0 - useful for tin test when the suite is bottlenecked
                            on optimization passes. Explicit -O<n> takes precedence.
   --no-pure-fold           disable compile-time evaluation of #pure calls; emit them as runtime
                            invocations. Same as -fno-pure-fold. Useful when a faulty #pure body
@@ -159,7 +159,7 @@ var (
 )
 
 // macosSDKOverride is the explicit `--macos-sdk PATH` value. Empty
-// means "auto-detect" — see macosSDKPath() for the resolution chain.
+// means "auto-detect" - see macosSDKPath() for the resolution chain.
 // Required when cross-compiling Linux -> Darwin so clang can find the
 // Darwin SDK headers (malloc/malloc.h, libunwind.h, system frameworks).
 var macosSDKOverride string
@@ -190,7 +190,7 @@ var optLevelOverride string
 
 // testFastCompile is reserved for an opt-in "fast tests" mode that defaults
 // `tin test` to -O0 (~10x suite speedup). Currently off because the win was
-// largely subsumed by the internal-linkage DCE change — clang at -O2 now
+// largely subsumed by the internal-linkage DCE change - clang at -O2 now
 // drops dead stdlib early in compile rather than carrying it through every
 // optimizer pass. Users wanting -O0 can pass it explicitly.
 var testFastCompile bool
@@ -249,7 +249,7 @@ func clangTargetFlag() []string {
 	case "linux":
 		// Cross-compiling to Linux from a non-Linux host (typically
 		// macOS) needs a sysroot with glibc/musl headers + the
-		// dynamic linker. Skip when host is already Linux — clang
+		// dynamic linker. Skip when host is already Linux - clang
 		// already knows where /usr/include lives.
 		if runtime.GOOS != "linux" {
 			if sysroot := linuxSysrootPath(); sysroot != "" {
@@ -1713,8 +1713,8 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	// `-rdynamic` promotes Tin user fns into the dynamic symbol table
 	// so dladdr can recover symbol names for IPs that fall outside the
 	// pclntab table (typically: runtime helpers, third-party C, libc).
-	// pclntab itself doesn't need dynsym — it stores names directly in
-	// .rodata and resolves via in-image section lookup — but the
+	// pclntab itself doesn't need dynsym - it stores names directly in
+	// .rodata and resolves via in-image section lookup - but the
 	// dladdr fallback in resolve_frame still does, otherwise frames in
 	// non-Tin code render as `??+0x<addr>` instead of `<lib>:sym+0x<off>`.
 	//
@@ -1874,7 +1874,7 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 
 		// Per-fn .so files are dlopen'd by the running tin process
 		// during CTFE evaluation. They MUST match the host's ABI even
-		// when the user asked for a Darwin cross-compile — loading a
+		// when the user asked for a Darwin cross-compile - loading a
 		// Mach-O .dylib into a Linux ELF process would fail at the
 		// dlopen call. Use hostClangTargetFlag() (which returns nil)
 		// instead of clangTargetFlag() so clang picks the host triple
@@ -1901,7 +1901,7 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 		return err
 	}
 
-	// Each .so is now in place — record its (hash -> shim name) manifest so
+	// Each .so is now in place - record its (hash -> shim name) manifest so
 	// LoadPureFn can flag a future lookup whose Merkle hash matches but
 	// whose expected shim symbol diverged (catches stale entries from a
 	// hash-function change or a developer mistake).
@@ -1962,7 +1962,7 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 // can fan out. desc is shown to the user via progress / error messages; args
 // are passed verbatim (no shell escaping). When renameTo is non-empty, the
 // runner renames the just-produced output (the path that appears as the -o
-// target inside args) to renameTo on success — so concurrent `tin` processes
+// target inside args) to renameTo on success - so concurrent `tin` processes
 // can't half-write the same shared cache entry.
 type compileJob struct {
 	desc     string
@@ -2742,7 +2742,7 @@ func execRunBinary(bin, memcheck string, binArgs []string) {
 //	                  a .so on the next compile.
 //
 // Both caches are immutable once written (their key encodes their inputs),
-// so a stale entry is never possible — only orphaned entries from removed
+// so a stale entry is never possible - only orphaned entries from removed
 // code, which cost tens of KB and are cheap to ignore. Silent on success;
 // no-op if .build/ is missing.
 func runClean() {

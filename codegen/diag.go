@@ -46,8 +46,8 @@ const (
 	DiagFloatPrecision    = "float-precision"
 	// DiagBuiltinShadow fires when a local binding (let/var/param/nested-fn)
 	// reuses the name of a recognized compile-time builtin. The shadow
-	// itself is legal — `sourcepos` and friends are opted into by name and
-	// the lexical scope wins as expected — but it can mask a typo and
+	// itself is legal - `sourcepos` and friends are opted into by name and
+	// the lexical scope wins as expected - but it can mask a typo and
 	// silently disable the builtin in a region of code, which is hard to
 	// debug after the fact. Default-off, opt-in via -W<name> or -Wpedantic.
 	DiagBuiltinShadow = "builtin-shadow"

@@ -183,7 +183,7 @@ func (cg *CodeGen) ctfeExpandMacro(m *ast.MacroDecl, args []ast.Node) (ast.Node,
 	result := strings.TrimSpace(string(out))
 	if result == "" {
 		// An empty string IS a legal result for a string-returning macro
-		// (e.g. repeat_str!("ab", 0) → ""). Treating empty stdout as an
+		// (e.g. repeat_str!("ab", 0) -> ""). Treating empty stdout as an
 		// error there would make every "no-op" path of a string macro
 		// fail. For non-string return types, no output still indicates
 		// the body never reached its `return`, which is a real error.
@@ -431,7 +431,7 @@ func typeOfExpr(n ast.Node, paramTypes map[string]string) string {
 		if t, ok := paramTypes[v.Name]; ok {
 			return t
 		}
-		// Local var or shadowed name — defer to the caller's fallback.
+		// Local var or shadowed name - defer to the caller's fallback.
 		return ""
 	case *ast.BinExpr:
 		switch v.Op {

@@ -622,9 +622,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }
 
-// --------------------------------------------------------------------------
 // Fiber expression helpers
-// --------------------------------------------------------------------------
 
 // canonicalUnitStructName returns the LLVM struct name for the sync Unit type.
 // After canonical naming, this is "sync__Unit" when sync was loaded from source.
@@ -945,7 +943,6 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// Does NOT run the body; body starts on the first coro.resume call.
 	innerHdl := block.NewCall(coroFn, coroArgs...)
 
-	// ---------------------------------------------------------------
 	// Drive loop:
 	//   drive.loop:
 	//     _tin_inline_result_mode_begin()   ; arm TLS result buffer for inner coro
@@ -959,7 +956,6 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	//     result = _tin_coro_take_result()
 	//     llvm.coro.destroy(inner)
 	//     _tin_inline_result_mode_end()
-	// ---------------------------------------------------------------
 	// mode_begin is placed at the TOP of driveLoopBlk so it fires before EVERY
 	// coro.resume - including re-entries after the outer fiber was parked and
 	// resumed (at which point the worker loop reset _inline_result_mode to 0).

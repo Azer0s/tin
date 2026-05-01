@@ -58,8 +58,9 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 	}
 
 	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
-		name:   irName,
-		global: g,
+		name:    irName,
+		global:  g,
+		pkgName: pkgName,
 	})
 
 	if tv.Value != nil && cg.tryConstantFold(tv.Value, lt) == nil {
@@ -67,6 +68,7 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 			name:     irName,
 			global:   g,
 			initExpr: tv.Value,
+			pkgName:  pkgName,
 		})
 	}
 
@@ -117,9 +119,11 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	cg.topLevelVarBareNames[tv.Name] = true
 
 	// Track every top-level var for deinit-at-exit (regardless of init type).
+	// pkgName is cg.currentPkg (empty for entry program top-level vars).
 	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
-		name:   tv.Name,
-		global: g,
+		name:    tv.Name,
+		global:  g,
+		pkgName: cg.currentPkg,
 	})
 
 	// If the initializer needs runtime evaluation, queue it.
@@ -127,6 +131,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 		cg.topLevelVarInits = append(cg.topLevelVarInits, topLevelVarInit{
 			name:     tv.Name,
 			global:   g,
+			pkgName:  cg.currentPkg,
 			initExpr: tv.Value,
 		})
 	}
@@ -182,7 +187,7 @@ func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
 }
 
 // emitDeinitAllAtexit registers _tin_deinit_all via libc atexit() so the
-// deinit sequence fires on every clean process exit — including
+// deinit sequence fires on every clean process exit - including
 // `exit(N)` from anywhere in the program. Without this hook, deinits
 // only run when user main falls through to the wrapper's tail; an
 // `os::exit(1)` from inside a fiber bypasses the entire teardown.

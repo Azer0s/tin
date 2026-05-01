@@ -49,7 +49,7 @@ import (
 //
 // We store the absolute address rather than a (pc_addr - fn_start)
 // offset because PIC code (`-fPIC`, used for REPL cells and CTFE
-// shims) cannot represent the cross-label subtraction at link time —
+// shims) cannot represent the cross-label subtraction at link time -
 // the assembler errors with "Cannot represent a difference across
 // sections". The runtime computes the offset on demand.
 func (cg *CodeGen) pclntabPCEntryType() *irtypes.StructType {
@@ -75,7 +75,7 @@ func (cg *CodeGen) pclntabPCEntryType() *irtypes.StructType {
 //	  i32 npcs }           ; 0 for marker-only headers (no source pos)
 //
 // The runtime computes max_pc_addr per-fn at registration time from the
-// sorted pcs[] — no need to pre-bake it into the header.
+// sorted pcs[] - no need to pre-bake it into the header.
 func (cg *CodeGen) pclntabFnHdrType() *irtypes.StructType {
 	if cg.pclntabHdrType == nil {
 		pcArrPtr := irtypes.NewPointer(cg.pclntabPCEntryType())
@@ -177,7 +177,7 @@ func (cg *CodeGen) applyPclntabPostPass() {
 // pclntab entry. The optimizer is constrained to keep these blocks
 // distinct (and not merge them with predecessors) once a blockaddress
 // reference exists, but it can still reorder unrelated instructions
-// within each block — the only cost is a per-call unconditional branch
+// within each block - the only cost is a per-call unconditional branch
 // that codegen folds to a fall-through label in the final machine code.
 //
 // PHI fixup: when a block is split, its terminator (the one that
@@ -236,7 +236,7 @@ func (cg *CodeGen) splitOneBlockAtCalls(bb *ir.Block) []*ir.Block {
 	// original terminator to the tail block; if there isn't one, we'd
 	// produce an unterminated tail and crash llir/llvm at serialize
 	// time. An unterminated bb means IR construction left it open
-	// (typically transient mid-emission state) — leaving it alone is
+	// (typically transient mid-emission state) - leaving it alone is
 	// correct: the unsplit form is no worse than the broken split form,
 	// and the original codegen path will close it later.
 	if bb.Term == nil {
@@ -244,7 +244,7 @@ func (cg *CodeGen) splitOneBlockAtCalls(bb *ir.Block) []*ir.Block {
 	}
 
 	// Find the first split point past index 0. If none, bb is unchanged.
-	// Skip leading PHI nodes — they must remain at the top of their
+	// Skip leading PHI nodes - they must remain at the top of their
 	// containing block (LLVM rule: phi precedes any non-phi instruction).
 	insts := bb.Insts
 	firstNonPhi := 0
@@ -304,7 +304,7 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 	// source-tracked fn (typical: the C-side `main` wrapper sits right
 	// after `_tin_user_main` in the binary). With its own header, the
 	// binary search finds the wrapper directly, the per-fn PC table
-	// is empty, and the resolver returns "no source" — falling through
+	// is empty, and the resolver returns "no source" - falling through
 	// to dladdr's `main+0x<off>` fallback at the right level.
 	hasSource := cg.fnSourceFiles != nil
 	if hasSource {
@@ -377,7 +377,7 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 
 	if len(pcEntries) == 0 {
 		// Function has no source-attributable IRs (compiler-generated
-		// helper, all dbg loc=0). Skip — saves a header for thunks the
+		// helper, all dbg loc=0). Skip - saves a header for thunks the
 		// user never sees in a trace.
 		return
 	}
@@ -508,7 +508,7 @@ func (cg *CodeGen) firstInstSourcePos(bb *ir.Block) (int, int, bool) {
 // (added to cg.mod.Funcs) without yet wiring it into @llvm.global_ctors.
 // We split this from finalizePclntabConstructor so the marker-emit loop
 // in applyPclntabPostPass picks the constructor up and emits a marker
-// header for it — preventing misattribution of any IP that lands in the
+// header for it - preventing misattribution of any IP that lands in the
 // constructor at runtime.
 func (cg *CodeGen) createPclntabConstructorFn() {
 	if cg.pclntabCtorFn != nil {
@@ -603,7 +603,7 @@ type pclntabStringEntry struct {
 // human-readable form for display in stacktraces. Resolution order:
 //
 //  1. Look up cg.fnDisplayNames (populated at predeclare time from AST
-//     context — pkg, struct receiver, original method name). This is the
+//     context - pkg, struct receiver, original method name). This is the
 //     source of truth when the IR fn was emitted from a Tin FuncDecl.
 //  2. Fall back to a heuristic transform for IR fns we never recorded
 //     a display name for (compiler-generated thunks, monomorphized
@@ -658,7 +658,7 @@ func unmangleTinNameHeuristic(name string) string {
 //     (we register the base fn's display; the $coro IR fn is stored
 //     separately when codegen creates it).
 //
-// We DON'T attempt to demangle generic instantiation suffixes here —
+// We DON'T attempt to demangle generic instantiation suffixes here -
 // monomorphizeFunc creates a fresh FuncDecl with name `tmpl__inst` that
 // re-enters predeclare; the recursive call records its own (already-
 // mangled) form. A future pass could capture the type-arg substitution
@@ -681,7 +681,7 @@ func (cg *CodeGen) recordFnDisplayName(irName string, n *ast.FuncDecl) {
 	}
 
 	// Strip a leading `pkg__` prefix from the receiver struct name when
-	// the same pkg is already going to be emitted as the qualifier — the
+	// the same pkg is already going to be emitted as the qualifier - the
 	// receiver names imported from another package come pre-qualified
 	// (e.g. `sync__AtomicI64`) and we don't want the package to appear
 	// twice (`sync::sync__AtomicI64.deinit`).
@@ -694,8 +694,8 @@ func (cg *CodeGen) recordFnDisplayName(irName string, n *ast.FuncDecl) {
 	// segment using `::` (matching Tin source syntax) so that the
 	// stdlib source parser (which splits the atom on `@` and never on
 	// spaces) sees a clean identifier in the symbol field. Without
-	// this disambiguation, all `read` methods on `MyReader` —
-	// intrinsic plus each trait impl — would render identically and
+	// this disambiguation, all `read` methods on `MyReader` -
+	// intrinsic plus each trait impl - would render identically and
 	// collide in trace consumers that key on symbol name.
 	var symBase string
 	if n.TraitQualifier != "" {

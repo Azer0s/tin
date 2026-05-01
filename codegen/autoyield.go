@@ -3,7 +3,6 @@ package codegen
 // autoyield.go - Compile-time auto-yield analysis for {#async} coroutines.
 //
 // Automatic preemption strategy
-// ==============================
 // The Tin async runtime uses cooperative scheduling: fibers yield control
 // explicitly via suspend points, and the scheduler round-robins the ready queue.
 // Without enough yield points a compute-bound coroutine monopolises its worker
@@ -25,7 +24,6 @@ package codegen
 // Users who need tighter control can annotate hot inner loops with {#no_autoyield}.
 //
 // Heuristic classification
-// ========================
 // Each Tin function receives a ComplexScore:
 //
 //   score = loopCount      * loopWeight      (10 per loop)
@@ -48,13 +46,11 @@ package codegen
 //   Pass 3: DFS on callGraph to detect recursive cycles.
 //
 // Suppressing auto-yield
-// ======================
 // Tagging a function {#no_autoyield} disables all auto-yield inside it:
 //   - Loop back-edges (existing behavior in genYieldAutoAt).
 //   - Call-site yields (checked via cg.curFnAutoYield in genCallSiteYieldFor).
 //
 // -fdump-heuristics output
-// ====================
 // When cg.verboseHeuristics is true (set via -fdump-heuristics CLI flag), one line
 // is printed to stderr per function:
 //
@@ -359,7 +355,7 @@ func (cg *CodeGen) computeAutoYieldHeuristics(prog *ast.Program) {
 		knownFns[name] = true
 	}
 
-	// --- Pass 1: raw AST metrics + explicit {#heavy} detection ---
+	// Pass 1: raw AST metrics + explicit {#heavy} detection
 
 	type pass1Result struct {
 		stats   bodyStats
@@ -394,7 +390,7 @@ func (cg *CodeGen) computeAutoYieldHeuristics(prog *ast.Program) {
 		pass1[name] = r
 	}
 
-	// --- Pass 2: refine using caller/callee heaviness ---
+	// Pass 2: refine using caller/callee heaviness
 	// Re-classify each function's calls as heavy vs normal based on pass-1 results.
 
 	for _, name := range fnNames {
@@ -436,7 +432,7 @@ func (cg *CodeGen) computeAutoYieldHeuristics(prog *ast.Program) {
 		cg.funcHeuristics[name] = info
 	}
 
-	// --- Pass 3: detect recursive cycles ---
+	// Pass 3: detect recursive cycles
 
 	recursive := detectRecursiveFunctions(cg.callGraph, knownFns)
 
@@ -446,7 +442,7 @@ func (cg *CodeGen) computeAutoYieldHeuristics(prog *ast.Program) {
 		info.AutoYield = info.IsHeavy || info.IsRecursive
 	}
 
-	// --- Verbose output ---
+	// Verbose output
 
 	if !cg.verboseHeuristics {
 		return

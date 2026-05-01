@@ -13,9 +13,7 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// ---------------------------------------------------------------------------
 // Compile-time value type
-// ---------------------------------------------------------------------------
 
 // ctfeVal holds a single compile-time constant value produced by CTFE.
 //
@@ -63,9 +61,7 @@ const maxCTFEDepth = 256
 // `--pure-fold-budget=N` CLI flag.
 const defaultPureFoldBudget = 1_000_000
 
-// ---------------------------------------------------------------------------
 // Entry point
-// ---------------------------------------------------------------------------
 
 // tryEvalPureCall attempts to evaluate a call to a #pure #no_recurse function
 // whose arguments are all compile-time constants. On success it returns the
@@ -221,7 +217,7 @@ func (cg *CodeGen) tryEvalPureCallToCtfeVal(call *ast.CallExpr) (ctfeVal, *ast.F
 	// Tier-1 (AST evaluator) failed. Try tier-2 (dispatch through the
 	// pre-compiled .so) before giving up. Only fires when the cache is
 	// populated (TIN_PURE_FN_CACHE=1) AND the function's signature fits
-	// the i64 marshal protocol — string/float/struct types need the
+	// the i64 marshal protocol - string/float/struct types need the
 	// #interop wrapper machinery and are out of scope until we tie the
 	// cache emit into emitInteropWrapperFor.
 	if dispatchVal, ok := cg.tryDispatchPureCall(fd, argVals); ok {
@@ -258,9 +254,7 @@ func (cg *CodeGen) tryDispatchPureCall(fd *ast.FuncDecl, argVals []ctfeVal) (ctf
 	return InvokePureShim(h, fd, argVals)
 }
 
-// ---------------------------------------------------------------------------
 // Body evaluator
-// ---------------------------------------------------------------------------
 
 // evalBody evaluates a function body (Block, WhereList, or expression) and
 // returns the result. Returns errNotConst if the body cannot be fully evaluated.
@@ -365,9 +359,7 @@ func evalWhereList(wl *ast.WhereList, env map[string]ctfeVal, cg *CodeGen, depth
 	return ctfeVal{kind: "i64"}, nil
 }
 
-// ---------------------------------------------------------------------------
 // Node evaluator
-// ---------------------------------------------------------------------------
 
 // evalNode evaluates any AST node as a statement or expression.
 // For statement nodes (VarDecl, AssignStmt, etc.) it mutates env and returns zero.
@@ -392,7 +384,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	}
 
 	switch v := node.(type) {
-	// --- Literals ---
+	// Literals
 	case *ast.IntLit:
 		if v.Big != nil {
 			// ctfeVal stores i64; cannot represent oversized literal.
@@ -438,7 +430,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return ctfeVal{kind: "slice", elemKind: elemKind, elems: elems}, nil
 
-	// --- Variables ---
+	// Variables
 	case *ast.Identifier:
 		if cv, ok := env[v.Name]; ok {
 			return cv, nil
@@ -446,7 +438,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return ctfeVal{}, errNotConst
 
-	// --- Declarations / assignments (mutate env) ---
+	// Declarations / assignments (mutate env)
 	case *ast.VarDecl:
 		if v.Value != nil {
 			val, err := evalNode(v.Value, env, cg, depth)
@@ -551,7 +543,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return ctfeVal{}, errNotConst
 
-	// --- Binary expressions ---
+	// Binary expressions
 	case *ast.BinExpr:
 		// Short-circuit for &&/||
 		if v.Op == "&&" || v.Op == "||" {
@@ -587,7 +579,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return evalBinOp(left, v.Op, right)
 
-	// --- Ternary ---
+	// Ternary
 	case *ast.TernaryExpr:
 		cond, err := evalNode(v.Cond, env, cg, depth)
 		if err != nil {
@@ -604,7 +596,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return evalNode(v.Else, env, cg, depth)
 
-	// --- Control flow ---
+	// Control flow
 	case *ast.ReturnStmt:
 		val, err := evalNode(v.Value, env, cg, depth)
 		if err != nil {
@@ -695,7 +687,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return ctfeVal{}, errNotConst
 
-	// --- Block / tagged block ---
+	// Block / tagged block
 	case *ast.Block:
 		return evalBlock(v, copyEnv(env), cg, depth)
 
@@ -707,19 +699,19 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 
 		return evalNode(v.Body, env, cg, depth)
 
-	// --- Calls ---
+	// Calls
 	case *ast.CallExpr:
 		return evalCallExpr(v, env, cg, depth)
 
-	// --- Where list (expression-position where) ---
+	// Where list (expression-position where)
 	case *ast.WhereList:
 		return evalWhereList(v, env, cg, depth)
 
-	// --- Wrapper statements ---
+	// Wrapper statements
 	case *ast.ExprStmt:
 		return evalNode(v.Expr, env, cg, depth)
 
-	// --- Echo: #pure functions cannot echo; bail anyway to be safe ---
+	// Echo: #pure functions cannot echo; bail anyway to be safe
 	case *ast.EchoStmt:
 		return ctfeVal{}, errNotConst
 
@@ -729,9 +721,7 @@ func evalNode(node ast.Node, env map[string]ctfeVal, cg *CodeGen, depth int) (ct
 	}
 }
 
-// ---------------------------------------------------------------------------
 // For loop
-// ---------------------------------------------------------------------------
 
 func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	local := copyEnv(env)
@@ -796,9 +786,7 @@ func evalForStmt(v *ast.ForStmt, env map[string]ctfeVal, cg *CodeGen, depth int)
 	return ctfeVal{}, errNotConst
 }
 
-// ---------------------------------------------------------------------------
 // Calls
-// ---------------------------------------------------------------------------
 
 func evalCallExpr(call *ast.CallExpr, env map[string]ctfeVal, cg *CodeGen, depth int) (ctfeVal, error) {
 	if depth >= maxCTFEDepth {
@@ -836,14 +824,12 @@ func evalCallExpr(call *ast.CallExpr, env map[string]ctfeVal, cg *CodeGen, depth
 	return evalBody(fd.Body, callEnv, cg, depth+1)
 }
 
-// ---------------------------------------------------------------------------
 // Binary operator evaluation
-// ---------------------------------------------------------------------------
 
 // matchCtfePattern reports whether pat matches disc at compile time.
 // Supports literal patterns (IntLit / StringLit / BoolLit / FloatLit /
 // CharLit) and the wildcard "_" pattern. Anything richer (struct
-// destructuring, type-test arms, ADT variants) returns false silently —
+// destructuring, type-test arms, ADT variants) returns false silently -
 // the caller treats it as "not foldable" and skips that case.
 func matchCtfePattern(pat ast.Node, disc ctfeVal, env map[string]ctfeVal, cg *CodeGen, depth int) (bool, error) {
 	if pat == nil {
@@ -983,9 +969,7 @@ func evalBinOp(left ctfeVal, op string, right ctfeVal) (ctfeVal, error) {
 	return ctfeVal{}, errNotConst
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 // copyEnv copies an environment so inner scopes don't leak into outer scopes.
 func copyEnv(env map[string]ctfeVal) map[string]ctfeVal {

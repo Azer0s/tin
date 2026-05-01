@@ -806,7 +806,7 @@ func (cg *CodeGen) attachDbgLoc(inst ir.Instruction, line, col int64) {
 // (when pclntab is in use). The two paths are independent: pclntab's
 // per-fn PC tables are built from instLineCol; DWARF sections are emitted
 // from the !dbg attachments. Release builds with stacktrace get the side
-// map only — no DWARF.
+// map only - no DWARF.
 func (cg *CodeGen) attachCurrentDbgLoc(inst ir.Instruction) {
 	if inst == nil {
 		return
@@ -836,7 +836,7 @@ func (cg *CodeGen) attachCurrentDbgLocToTerm(term ir.Terminator) {
 
 	// Terminators don't go into the per-fn PC table (the table is keyed
 	// by basic-block start; the terminator is the BB's last
-	// instruction). So no instLineCol entry here — just the !dbg
+	// instruction). So no instLineCol entry here - just the !dbg
 	// attachment for -g consumers.
 
 	if !cg.debugMode || cg.diCurrentScope == nil {
@@ -953,7 +953,7 @@ func (cg *CodeGen) ensureAllCallsHaveDbg(fn *ir.Func) {
 // instruction line/col tracking through every codegen path.
 //
 // Walks the Metadata slice via reflection to dodge the 55-case type
-// switch — every concrete llir/llvm instruction type embeds Metadata as
+// switch - every concrete llir/llvm instruction type embeds Metadata as
 // a field literally named "Metadata".
 func instDbgLineCol(inst ir.Instruction) (int, int, bool) {
 	if inst == nil {
@@ -985,7 +985,7 @@ func instDbgLineCol(inst ir.Instruction) (int, int, bool) {
 			continue
 		}
 
-		// Skip line=0 entries — those are codegen's
+		// Skip line=0 entries - those are codegen's
 		// "compiler-generated" placeholder for instructions emitted
 		// outside genStmt (ARC sequences, fiber preamble). Carrying
 		// these into pclntab would render frames as "fn@file:0:0".
@@ -1002,7 +1002,7 @@ func instDbgLineCol(inst ir.Instruction) (int, int, bool) {
 // instHasMetadata reports whether inst already carries a metadata
 // attachment with the given name. Reads the `Metadata` field via
 // reflection so we don't have to mirror the 55-case type switch in
-// attachMetadataToInst — every concrete llir/llvm instruction type
+// attachMetadataToInst - every concrete llir/llvm instruction type
 // embeds the attachment slice as a field literally named `Metadata`.
 //
 // Defensive against future llir/llvm changes that might rename or

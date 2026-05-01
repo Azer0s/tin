@@ -10,7 +10,7 @@ package codegen
 // at runtime; we describe the shim's signature with ffi_type pointers
 // derived from fd.Params + fd.RetType, marshal each ctfeVal into a raw
 // argument cell, and unmarshal the result. No more per-arity cgo stubs,
-// no more bespoke i64 adapter — one path covers i64 / f64 / bool / string.
+// no more bespoke i64 adapter - one path covers i64 / f64 / bool / string.
 
 /*
 #cgo linux LDFLAGS: -ldl -lffi
@@ -82,7 +82,7 @@ import (
 // back to libc free for string returns. We MUST NOT mix free implementations
 // with tin_extern_alloc: a #pure shim that returns a string allocates via
 // the runtime's configured tin_alloc_fn, which a non-malloc deployment can
-// override — in that case calling libc free corrupts the heap.
+// override - in that case calling libc free corrupts the heap.
 type pureFnHandle struct {
 	handle unsafe.Pointer // dlopen result
 	sym    unsafe.Pointer // dlsym(__tin_pure_shim_<name>)
@@ -107,7 +107,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 	}
 
 	// Verify the (hash -> shim) binding the cache claims. An empty manifest
-	// means a legacy/hand-crafted entry (e.g. test fixtures) — accept it
+	// means a legacy/hand-crafted entry (e.g. test fixtures) - accept it
 	// for backward compatibility. A non-empty mismatch means we'd be about
 	// to dlopen a .so whose symbol pedigree disagrees with what the
 	// caller expected; refuse instead of returning a wrong handle.
@@ -126,7 +126,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 	// load time even for primitive #pure fns whose wrapper happens to
 	// call tin_runtime_init in its preamble. With RTLD_LAZY the load
 	// succeeds, and only ACTUAL invocation of an unresolved symbol traps
-	// — which the libffi dispatcher would catch via ffi_call's stub if
+	// - which the libffi dispatcher would catch via ffi_call's stub if
 	// it ever fired (it doesn't for i64/f64/bool round-trips).
 	handle := C.dlopen(cPath, C.RTLD_LAZY|C.RTLD_LOCAL)
 	if handle == nil {
@@ -148,7 +148,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 
 	// Best-effort lookup of tin_extern_free so the dispatcher can release
 	// string-return buffers via the runtime's configured deallocator. May
-	// be nil for .so's that don't embed runtime/interop.c — the dispatcher
+	// be nil for .so's that don't embed runtime/interop.c - the dispatcher
 	// falls back to libc free in that case (correct as long as the runtime
 	// hasn't been pointed at a non-malloc allocator). Clear dlerror first
 	// so a stale message from an unrelated lookup doesn't leak through if
@@ -180,7 +180,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 //	          via tin_extern_alloc (we copy + free here)
 //
 // Returns ok=false silently for any signature element outside that subset
-// — the caller falls back to AST evaluation.
+// - the caller falls back to AST evaluation.
 func InvokePureShim(h *pureFnHandle, fd *ast.FuncDecl, args []ctfeVal) (ctfeVal, bool) {
 	if fd == nil || fd.RetType == nil {
 		return ctfeVal{}, false

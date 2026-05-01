@@ -387,7 +387,7 @@ type CodeGen struct {
 	// every pclntab-internal symbol (hdr, pcs, string pool entries, split
 	// block labels). Names are namespaced by their PREFIX (`__tin_pcln_hdr.`,
 	// `__tin_pcs.`, `__tin_pcln_s.`, `<bb>.split.`), so cross-kind ID
-	// collisions are impossible — a single monotonic ID just keeps the
+	// collisions are impossible - a single monotonic ID just keeps the
 	// state minimal.
 	pclntabSeq        int
 	pclntabStringPool map[string]pclntabStringEntry  // dedup interned strings within this module
@@ -413,7 +413,7 @@ type CodeGen struct {
 	// single top-level #pure call (sum across all loops, recursion, and
 	// nested call expansions). When the budget is exhausted the
 	// evaluator returns errNotConst and the call falls back to runtime
-	// dispatch — same outcome as a non-foldable signature, but reached
+	// dispatch - same outcome as a non-foldable signature, but reached
 	// safely instead of pathologically. 0 means "use the default"
 	// (defaultPureFoldBudget); negative values are forbidden.
 	pureFoldBudget int
@@ -422,7 +422,7 @@ type CodeGen struct {
 	// `let`/`var`/`const` was declared, keyed by name. Populated as
 	// declarations are processed in Generate; consumed by the
 	// `sourcepos(symbol)` builtin to resolve a symbol's definition site
-	// when no AST node is in hand. Nested scopes don't go in here —
+	// when no AST node is in hand. Nested scopes don't go in here -
 	// scopeEntry.declPos covers locals separately.
 	topLevelVarPos map[string]ast.Pos
 
@@ -430,7 +430,7 @@ type CodeGen struct {
 	// allowed for the currently-evaluating top-level #pure call. The
 	// counter is reset at every entry into tryEvalPureCallToCtfeVal and
 	// decremented once per evalNode call. When it hits zero the
-	// evaluator unwinds with errCTFEBudget. Not goroutine-safe — codegen
+	// evaluator unwinds with errCTFEBudget. Not goroutine-safe - codegen
 	// is single-threaded by construction.
 	pureFoldBudgetRemaining int
 
@@ -546,9 +546,7 @@ type CodeGen struct {
 	// during genFuncDecl so the wrapper can inspect params and return type.
 	userMainDecl *ast.FuncDecl
 
-	// ------------------------------------------------------------------
 	// Debug info (DWARF, -g flag)
-	// ------------------------------------------------------------------
 
 	// debugMode enables DWARF debug metadata emission.
 	debugMode bool
@@ -617,9 +615,7 @@ type CodeGen struct {
 	// struct name whose arity cannot be recovered by splitting on `__`.
 	dataInstTypeArgs map[string][]string
 
-	// ------------------------------------------------------------------
 	// Fiber / coroutine state
-	// ------------------------------------------------------------------
 
 	// LLVM coroutine intrinsics (lazily declared by ensureCoroIntrinsics).
 	coroIDFn      *ir.Func
@@ -780,9 +776,7 @@ type CodeGen struct {
 	// in import order (dependencies before dependents).
 	pkgInitFns []*ir.Func
 
-	// ------------------------------------------------------------------
 	// Function overloading
-	// ------------------------------------------------------------------
 
 	// overloadedNames: base name (or "StructName_method") -> true when multiple
 	// definitions with the same name exist in the current module.
@@ -823,10 +817,16 @@ type CodeGen struct {
 }
 
 // topLevelVarInit holds a deferred runtime initializer for a top-level var.
+// pkgName is "" for the entry program's own top-level vars, or the
+// importing pkg name (e.g. "sync", "io") for vars declared inside an
+// imported pkg's source. Used by emitDeinitAllFn to group deinits per
+// pkg so the dispatcher can call `_tin_deinit_<pkg>` in reverse topo
+// order rather than walking a flat list.
 type topLevelVarInit struct {
 	name     string
 	global   *ir.Global
 	initExpr ast.Node
+	pkgName  string
 }
 
 // pushBreakTarget pushes afterBlock onto the break stack before generating a
@@ -965,7 +965,7 @@ func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoRepo
 // When true, both tier-1 (AST evaluator) and tier-2 (cached .so dispatch)
 // are short-circuited, and every #pure call codegens as a regular runtime
 // invocation. The user-visible behavior of #pure (purity contract,
-// alwaysinline, readnone, no_recurse depth limit) is unchanged — only
+// alwaysinline, readnone, no_recurse depth limit) is unchanged - only
 // the constant-folding optimization is suppressed. Driven by the
 // `--no-pure-fold` CLI flag.
 func (cg *CodeGen) SetPureFoldDisabled(v bool) { cg.pureFoldDisabled = v }
@@ -1391,7 +1391,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// pclntabUsed mirrors stacktraceUsed for now. It controls the
 	// per-instruction line/col side-map (cg.instLineCol) that the
 	// pclntab post-pass reads to build per-fn PC tables. Unlike
-	// debugMode, enabling this does NOT pull in DWARF emission —
+	// debugMode, enabling this does NOT pull in DWARF emission -
 	// release builds get pclntab WITHOUT bloating the binary with
 	// .debug_info / .debug_line / .debug_str sections that nothing
 	// reads. -g (debugMode) still emits full DWARF for lldb / gdb.
@@ -1753,7 +1753,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Emit a parallel #interop-style shim for every wrappable #pure function
 	// so the per-fn .so cache (Phase C2) has a single uniform dispatch
 	// surface for cgo. The shim shares emitInteropWrapperFor's marshal
-	// logic — string/slice/bool widening all go through the same helpers
+	// logic - string/slice/bool widening all go through the same helpers
 	// the user-tagged #interop pipeline uses. Shim symbol is
 	// `__tin_pure_shim_<fn_name>` so it never collides with the function
 	// itself; in the main binary the shim has internal linkage and clang
@@ -1880,7 +1880,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Register the deinit dispatcher with libc atexit BEFORE
 			// running user code. atexit guarantees the deinits fire on
 			// every clean exit path (return-from-main, libc exit(N),
-			// any fn call to std::os::exit) — not only the
+			// any fn call to std::os::exit) - not only the
 			// fall-through-from-main path the inline emit covers.
 			wb = cg.emitDeinitAllAtexit(wb)
 
@@ -2024,7 +2024,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 //
 // LLVM aliases are handled by both ld.lld and GNU ld; on Mach-O the
 // convention is the same alias syntax via `--defsym` equivalent.
-// Returns the wrapper *ir.Func — the alias is internal bookkeeping.
+// Returns the wrapper *ir.Func - the alias is internal bookkeeping.
 func (cg *CodeGen) newCMainWrapper(withArgs bool) *ir.Func {
 	var wf *ir.Func
 	if withArgs {

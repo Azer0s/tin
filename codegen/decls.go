@@ -554,7 +554,7 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 // checkAllTraitImplsComplete walks every struct declaration and verifies each
 // listed trait's virtual methods have a matching qualified impl. Default-bodied
 // methods stay optional. Generic struct templates and `implicit` (special trait)
-// are skipped — templates are only checked on monomorphization, and implicit
+// are skipped - templates are only checked on monomorphization, and implicit
 // has its own resolution pathway via implicitConvFns.
 func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 	for _, node := range stmts {
@@ -1447,7 +1447,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		bareKey := traitQualifierKey(bareTraitImplKey(impl))
 
 		// Trait methods with default bodies (non-virtual) keep accepting the bare
-		// override form `fn methodName(this Foo)` — that's how init/deinit
+		// override form `fn methodName(this Foo)` - that's how init/deinit
 		// chaining works and how struct-side overrides for any default-bodied
 		// trait method are written. Virtual methods MUST be qualified.
 		isDefaultBodied := map[string]bool{}
@@ -1490,7 +1490,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			//   2. baseQualifiedName - no type args ("Struct_iter_method") for the
 			//                          common `fn iter::method` form which covers
 			//                          all instantiations the struct lists.
-			//   3. bareName          - "Struct_method" — only accepted when the trait
+			//   3. bareName          - "Struct_method" - only accepted when the trait
 			//                          method has a default body (init/deinit chain
 			//                          pattern, override of any default-bodied method).
 			//                          Virtual methods must be qualified.

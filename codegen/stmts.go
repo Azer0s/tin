@@ -321,9 +321,9 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 		if terminated || block == nil {
 			// Warn about any statements following an explicit terminator
 			// (return / break / panic-style call). We deliberately skip the
-			// warning when the terminator is structural — an `if` chain that
+			// warning when the terminator is structural - an `if` chain that
 			// the analyzer/folder discovered always returns, a `for` whose
-			// condition collapsed away, a match that exhausts every arm —
+			// condition collapsed away, a match that exhausts every arm -
 			// because the source code is still branching as written; "dead"
 			// is a property of the monomorphized callsite (e.g. typeof(v) ==
 			// 'i64 in encode[T]) rather than user-visible mistake.
@@ -342,7 +342,7 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 // isExplicitTerminator reports whether stmt is a syntactic control-flow
 // terminator (return, break, panic-style call). Structural constructs like
 // if / for / match that the analyzer happens to discover always-terminate
-// after monomorphization don't count — issuing -Wunreachable-code on
+// after monomorphization don't count - issuing -Wunreachable-code on
 // "the rest of an if/elif chain whose typeof(v) ==' branches were folded
 // down to one live path" is noise, not a useful diagnostic.
 func isExplicitTerminator(stmt ast.Node) bool {

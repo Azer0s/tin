@@ -9,7 +9,7 @@ package codegen
 // activeMod swap-pointer pattern; once the primitives prove sound, call
 // sites get migrated wave by wave (globals -> declares -> bodies -> vtables).
 //
-// Contract: byte-identical IR text post-split is NOT a goal — the sum of
+// Contract: byte-identical IR text post-split is NOT a goal - the sum of
 // per-pkg modules is allowed to differ in section ordering or temp-name
 // numbering from the legacy single-module text. The hard contract is a
 // bit-identical linked binary across runs (already enforced by the
@@ -142,7 +142,7 @@ func (cg *CodeGen) debugPkgMods() string {
 
 // allFuncs iterates every function defined by codegen so far across
 // cg.mod and every per-pkg module. Used by passes that need to walk
-// "every fn in the program" — e.g. coro variant emission, the
+// "every fn in the program" - e.g. coro variant emission, the
 // stacktrace post-pass, the user-main / has-main lookup. Today this is
 // equivalent to iterating cg.mod.Funcs (no call site routes to per-pkg
 // modules yet); after the routing flip lands, callers that use this
@@ -204,7 +204,7 @@ func (cg *CodeGen) debugDumpUnterminated() {
 // original parent (an llir/llvm Func's Parent field), but llir/llvm's
 // LLString walks cg.mod's slices directly, so the serialized output is
 // the union as if everything had been emitted into cg.mod from the
-// start. This is a transient bridge — once every emit site routes
+// start. This is a transient bridge - once every emit site routes
 // through activeModule() and the build pipeline compiles per-pkg .o
 // files separately, this merge goes away and pkg modules feed clang
 // directly.

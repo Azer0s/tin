@@ -123,7 +123,7 @@ func (cg *CodeGen) expandMacroToAST(macro *ast.MacroDecl, args []ast.Node, callP
 // whatever the previous expansion of the same macro stored. This is
 // safe IFF the IR for a macro's expansion is fully emitted (positions
 // captured, atom literals registered, DILocations attached) BEFORE the
-// next expansion runs — which is the current invariant: codegen calls
+// next expansion runs - which is the current invariant: codegen calls
 // genExpr on the expanded body inline. Any future code that reads
 // `node.Pos()` LAZILY (after expansion completes) on a macro-body
 // node would observe the most recent call site, not the originating

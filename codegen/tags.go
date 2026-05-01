@@ -38,9 +38,7 @@ func isPureBuiltin(name string) bool {
 	return pureBuiltins[name]
 }
 
-// ---------------------------------------------------------------------------
 // #pure enforcement
-// ---------------------------------------------------------------------------
 
 // checkAllPureFuncs validates every #pure-tagged function in funcDecls.
 // Called after the predeclaration pass so all function signatures are known.
@@ -596,9 +594,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 	return cg.walkPureNode(fnCtx, fd.Body, false, visited, calleeLocals)
 }
 
-// ---------------------------------------------------------------------------
 // #no_recurse enforcement (transitive)
-// ---------------------------------------------------------------------------
 
 // checkAllNoRecurseFuncs validates every #no_recurse-tagged function in funcDecls.
 // Detects recursion transitively through any depth of call chain.
@@ -833,9 +829,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 	return cg.walkNoRecurseNode(targetFn, fd.Body, visited)
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 // resolveCalleeName extracts the function name string from a CallExpr's Func field,
 // returning "" if it cannot be determined statically (e.g. function pointer).

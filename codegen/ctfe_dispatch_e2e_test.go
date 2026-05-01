@@ -12,7 +12,7 @@ import (
 // end with the SAME shim-emission pipeline production uses
 // (emitInteropWrapperWithName routed into cg.shimMod). Where TestPureFnRoundTrip
 // hand-crafts an .ll that has no runtime symbols at all, this test goes through
-// the real wrapper emit path — which must produce a .so that dlopens cleanly
+// the real wrapper emit path - which must produce a .so that dlopens cleanly
 // from a process that doesn't link Tin's runtime.
 //
 // Skipped when clang is unavailable.
@@ -27,7 +27,7 @@ func TestPureFnDispatchE2E(t *testing.T) {
 	// IR shape that exercises the multi-arg cgo bridge AND the wrapper-shape
 	// scaffolding (extern declares are present in the slice; clang would
 	// fail at -shared if the slice is malformed). We deliberately do NOT
-	// include `tin_runtime_init` in the IR — the production path skips it
+	// include `tin_runtime_init` in the IR - the production path skips it
 	// for shimMod-bound wrappers, see emitInteropWrapperWithName.
 	const ir = `target triple = "x86_64-pc-linux-gnu"
 
@@ -108,12 +108,12 @@ entry:
 
 	_ = os.Chdir(tmp)
 
-	// First attempt with a name that doesn't exist — must error and clean up.
+	// First attempt with a name that doesn't exist - must error and clean up.
 	if _, err := LoadPureFn(hash, "nonexistent_symbol"); err == nil {
 		t.Fatal("expected error for missing symbol, got nil")
 	}
 
-	// Subsequent attempt with the real name — must succeed (the failed
+	// Subsequent attempt with the real name - must succeed (the failed
 	// attempt must not have poisoned the cache).
 	h, err := LoadPureFn(hash, "real_sym")
 	if err != nil {

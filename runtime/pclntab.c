@@ -31,7 +31,7 @@
 //   linker resolves to a fixed `.long X-Y` because both symbols land
 //   in the same .text section (`-ffunction-sections` keeps them within
 //   the per-fn section, but the relative distance is invariant under
-//   ASLR — the kernel slides every text mapping by the same delta).
+//   ASLR - the kernel slides every text mapping by the same delta).
 //
 // Concurrency:
 //   - Registration: takes _tin_pclntab_mu.
@@ -71,7 +71,7 @@
 //     dladdr + getsectiondata to find the section.
 //
 // This pattern works whether the runtime is linked into the same image
-// or only into the main binary — every image's constructor passes its
+// or only into the main binary - every image's constructor passes its
 // OWN section data, so the registrar resolves correctly per call even
 // when called from a dlopen'd .so back into the main binary's runtime.
 #if defined(__APPLE__)
@@ -84,7 +84,7 @@
 //
 // Ranges are kept separately from the flattened header array because the
 // flattening pass may re-run on each new dlopen and the original ranges
-// give us a stable input. Storage grows dynamically — no silent drop
+// give us a stable input. Storage grows dynamically - no silent drop
 // when a long REPL session loads many cells.
 typedef struct {
     const TinPclnFnHdr *start;
@@ -115,7 +115,7 @@ static _Atomic(int)                 _sorted_count = 0;
 //
 // The sorted-pcs heap allocation is reused across resorts via the
 // per-hdr cache below. Each PclnFnSlot holds a pointer to the cache
-// entry rather than owning its sorted_pcs — so re-registering doesn't
+// entry rather than owning its sorted_pcs - so re-registering doesn't
 // re-allocate or re-sort already-known hdrs.
 struct PclnHdrCache {
     const TinPclnFnHdr *hdr;
@@ -215,7 +215,7 @@ static int _pcln_resort_cmp(const void *a, const void *b) {
 // _pcln_retired holds the previous _sorted array between resorts. Two
 // generations are kept alive at any time (current + retired); the
 // generation BEFORE the retired one gets freed when a new resort runs.
-// This bounds leakage to 2× the largest sort table, vs. unbounded under
+// This bounds leakage to 2x the largest sort table, vs. unbounded under
 // the previous "leak everything" scheme.
 static PclnFnSlot *_pcln_retired = NULL;
 
@@ -239,7 +239,7 @@ static void _pcln_resort(void) {
 
     PclnFnSlot *arr = (PclnFnSlot *)malloc((size_t)total * sizeof(PclnFnSlot));
     if (arr == NULL) {
-        // OOM — leave previous _sorted in place; readers keep working
+        // OOM - leave previous _sorted in place; readers keep working
         // for already-resolvable IPs.
         return;
     }
@@ -248,7 +248,7 @@ static void _pcln_resort(void) {
     for (int i = 0; i < _pcln_range_count; i++) {
         for (const TinPclnFnHdr *h = _pcln_ranges[i].start; h < _pcln_ranges[i].end; h++) {
             PclnHdrCache *e = _hdr_cache_intern(h);
-            if (e == NULL) continue;  // OOM — drop this entry
+            if (e == NULL) continue;  // OOM - drop this entry
             arr[k++].cache = e;
         }
     }
@@ -258,7 +258,7 @@ static void _pcln_resort(void) {
     // Publish new sorted view. Free the prev-prev generation. The prev
     // (retired) generation may still be in use by readers between the
     // atomic_load and binary-search; we don't free it now. Next call
-    // will free it (by which point any reader using it has finished —
+    // will free it (by which point any reader using it has finished -
     // resort happens only on dlopen, which is infrequent compared to
     // a binary search).
     PclnFnSlot *prev = atomic_load_explicit(&_sorted, memory_order_acquire);
@@ -336,8 +336,8 @@ static void _pcln_register_range(const TinPclnFnHdr *start, const TinPclnFnHdr *
 // passes its own address as `marker`; we use dladdr to find the
 // image and getsectiondata for the section bounds.
 // _pcln_atexit frees process-wide pclntab state at shutdown so valgrind
-// sees a clean exit. Not strictly required for correctness — the OS
-// reclaims all memory when the process exits — but a clean valgrind
+// sees a clean exit. Not strictly required for correctness - the OS
+// reclaims all memory when the process exits - but a clean valgrind
 // report is the project convention.
 //
 // Idempotent: caller (atexit) runs it exactly once. We zero pointers
@@ -391,7 +391,7 @@ void _tin_pclntab_register_image(const TinPclnFnHdr *start,
                                  const void *marker) {
     // Arm the atexit cleanup on first registration. Cmpxchg makes this
     // race-safe even if the first two cells' constructors happen to
-    // race here (which they don't in practice — dlopen serializes — but
+    // race here (which they don't in practice - dlopen serializes - but
     // costs nothing to make airtight).
     int expected = 0;
     if (atomic_compare_exchange_strong(&_pcln_atexit_armed, &expected, 1)) {
@@ -437,7 +437,7 @@ void _tin_pclntab_register_image(const TinPclnFnHdr *start,
 // to this Tin function (probably inter-fn padding or a foreign symbol
 // the linker placed in the same section gap).
 //
-// The slack accounts for the post-call sled — between the last
+// The slack accounts for the post-call sled - between the last
 // recorded BB and the function's last instruction, we can have ARC
 // release sequences, an epilogue, alignment NOPs, etc. 4 KiB is
 // generous; tighter bounds would risk false misattribution on
@@ -523,7 +523,7 @@ int _tin_pclntab_resolve(uintptr_t ip,
 
     // Misattribution defence. The matched slot has the largest fn_start
     // <= ip, but ip may be past the matched fn's actual end (typical
-    // case: ip is in code that's not in pclntab — a CTFE-emitted
+    // case: ip is in code that's not in pclntab - a CTFE-emitted
     // helper, a non-Tin C trampoline, or the codegen-emitted
     // constructor). Two upper bounds:
     //   - max_pc_addr + slack: covers the trailing ARC release sled

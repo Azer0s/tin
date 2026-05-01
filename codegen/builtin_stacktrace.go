@@ -74,7 +74,7 @@ var stacktraceFlagBits = map[string]int32{
 // if any top-level fn / var / const named `stacktrace` exists, the
 // user is shadowing on purpose and we skip the gate.
 //
-// Conservative by design — a `stacktrace` call inside dead code (an
+// Conservative by design - a `stacktrace` call inside dead code (an
 // `if false:` branch, an unreachable `where` arm) still flips the flag.
 // False positives only cost binary size, never correctness.
 func (cg *CodeGen) detectStacktraceUsage(stmts []ast.Node) {
@@ -112,7 +112,7 @@ func (cg *CodeGen) detectStacktraceUsage(stmts []ast.Node) {
 // topLevelShadowsName reports whether `prog.Stmts` defines a fn / var /
 // const at module scope under the given name. Used by
 // detectStacktraceUsage to skip the gate when the user has shadowed
-// the builtin — without this, an unrelated `fn stacktrace(...)` in
+// the builtin - without this, an unrelated `fn stacktrace(...)` in
 // user code would falsely promote linkage and link libunwind.
 func topLevelShadowsName(stmts []ast.Node, name string) bool {
 	for _, s := range stmts {

@@ -955,7 +955,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// later (incremental compilation step 2) each pkg can be compiled to
 	// its own .o in parallel. Today we still merge everything back into
 	// cg.mod at the end of Generate via mergeRoutedPkgMods, so the build
-	// pipeline is unchanged — the routing just exercises the per-pkg
+	// pipeline is unchanged - the routing just exercises the per-pkg
 	// scaffolding so we can spot bugs before flipping the parallel
 	// compile on.
 	cg.activeMod = cg.pkgMod(pkgName)
@@ -2157,7 +2157,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	cg.curScope = prevScope
 
 	// Find the compiled function (now has a body). Walk allFuncs() so we
-	// see fns in per-pkg modules too — the body emit went via the same
+	// see fns in per-pkg modules too - the body emit went via the same
 	// activeModule() routing as the forward declaration above.
 	var compiled *ir.Func
 

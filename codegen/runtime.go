@@ -205,7 +205,7 @@ func (cg *CodeGen) ensureReleasePtrElemArray() *ir.Func {
 	return cg.releasePtrElemArrayFn
 }
 
-// --- Element retain helpers (for ++ concat from non-temporary sources) ---
+// Element retain helpers (for ++ concat from non-temporary sources)
 
 func (cg *CodeGen) ensureRetainPtrElems() *ir.Func {
 	if cg.retainPtrElemsFn != nil {
@@ -1660,7 +1660,6 @@ func (cg *CodeGen) ensureSnprintf() *ir.Func {
 	return cg.sprintfFn
 }
 
-// ---------------------------------------------------------------------------
 // 128-bit echo / format helpers
 
 // ensureEchoI128 lazily declares _tin_echo_i128(i128) void.

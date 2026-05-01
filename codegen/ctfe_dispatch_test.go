@@ -102,7 +102,7 @@ entry:
 	}
 }
 
-// TestPureFnRoundTripMultiArg drives a 3-arg shim — exercises libffi
+// TestPureFnRoundTripMultiArg drives a 3-arg shim - exercises libffi
 // argument vector marshaling beyond a single value.
 func TestPureFnRoundTripMultiArg(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {

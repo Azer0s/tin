@@ -19,9 +19,7 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// --------------------------------------------------------------------------
 // token type: LLVM pseudo-type used only by llvm.coro.* intrinsics
-// --------------------------------------------------------------------------
 
 type coroTokenType struct{}
 
@@ -47,9 +45,7 @@ func (v *coroNoneVal) String() string     { return "token none" }
 
 var coroNone value.Value = &coroNoneVal{}
 
-// --------------------------------------------------------------------------
 // Lazy intrinsic / runtime declarations
-// --------------------------------------------------------------------------
 
 func (cg *CodeGen) ensureCoroIntrinsics() {
 	if cg.coroIDFn != nil {
@@ -164,9 +160,7 @@ func (cg *CodeGen) ensureSyncModule() error {
 	return cg.loadPackage("sync")
 }
 
-// --------------------------------------------------------------------------
 // Coroutine prologue helper
-// --------------------------------------------------------------------------
 
 type coroFrame struct {
 	hdl             value.Value // i8* coroutine handle
@@ -276,9 +270,7 @@ func (cg *CodeGen) emitFinalSuspend(block *ir.Block, frame *coroFrame) {
 	block.NewBr(frame.finalSuspendBlk)
 }
 
-// --------------------------------------------------------------------------
 // Callgraph coloring
-// --------------------------------------------------------------------------
 
 // isAsyncTag returns true when tags contains "async".
 func isAsyncTag(tags []string) bool {
@@ -455,9 +447,7 @@ func (cg *CodeGen) colorCallGraph() {
 	}
 }
 
-// --------------------------------------------------------------------------
 // $coro variant predeclaration
-// --------------------------------------------------------------------------
 
 // predeclareCoroVariant pre-declares "name$coro(...) i8*" on the module so
 // that call sites inside other coro functions can forward-reference it.
@@ -494,9 +484,7 @@ func (cg *CodeGen) predeclareCoroVariant(n *ast.FuncDecl, tinName string, hasEnv
 	return nil
 }
 
-// --------------------------------------------------------------------------
 // $coro body generation helpers
-// --------------------------------------------------------------------------
 
 // llvmSizeOf returns the size of an LLVM type as an i64 value using the GEP
 // null-pointer trick: sizeof(T) = ptrtoint(GEP (T*)null, 1).
