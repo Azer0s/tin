@@ -686,29 +686,32 @@ func (cg *CodeGen) recordFnDisplayName(irName string, n *ast.FuncDecl) {
 		recv = recv[len(cg.currentPkg)+2:]
 	}
 
-	// Trait-qualified methods (e.g. `fn iter[i64]::next` impl on a
-	// struct): annotate the display name with the trait so users can
-	// distinguish from a same-named method in another trait or the
-	// type's own intrinsic methods.
-	traitTag := ""
+	// Trait-qualified methods get their trait baked into the symbol
+	// segment using `::` (matching Tin source syntax) so that the
+	// stdlib source parser (which splits the atom on `@` and never on
+	// spaces) sees a clean identifier in the symbol field. Without
+	// this disambiguation, all `read` methods on `MyReader` —
+	// intrinsic plus each trait impl — would render identically and
+	// collide in trace consumers that key on symbol name.
+	var symBase string
 	if n.TraitQualifier != "" {
-		traitTag = " (impl " + n.TraitQualifier + ")"
+		symBase = n.TraitQualifier + "::" + srcName
+	} else {
+		symBase = srcName
 	}
 
 	var display string
 
 	switch {
 	case recv != "" && cg.currentPkg != "":
-		display = cg.currentPkg + "::" + recv + "." + srcName
+		display = cg.currentPkg + "::" + recv + "." + symBase
 	case recv != "":
-		display = recv + "." + srcName
+		display = recv + "." + symBase
 	case cg.currentPkg != "":
-		display = cg.currentPkg + "::" + srcName
+		display = cg.currentPkg + "::" + symBase
 	default:
-		display = srcName
+		display = symBase
 	}
-
-	display += traitTag
 
 	cg.fnDisplayNames[irName] = display
 
