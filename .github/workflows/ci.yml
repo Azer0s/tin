@@ -101,13 +101,15 @@ jobs:
             "/tmp/tin_arc_${name}"
           done
 
-      # TINMAXPROCS=2 pins the fiber worker count for the echo-server
-      # stress tests. Without it, GH Actions' cgroup CPU accounting can
+      # TINMAXPROCS=2 pins the fiber worker count for the TCP echo-server
+      # stress test. Without it, GH Actions' cgroup CPU accounting can
       # make sysconf(_SC_NPROCESSORS_ONLN) return 1, and the M:N
       # scheduler has a known wake-loss race under nworkers=1
       # (see docs/plans/protothread-scheduler.md). Pinning to 2 keeps
       # CI deterministic until the single-threaded protothread driver
-      # lands.
+      # lands. UDP and Unix tests don't get the pin: their concurrent-
+      # client tests spawn many clients and benefit from the runner's
+      # natural worker count.
       - name: Run echo server stress test
         env:
           TINMAXPROCS: "2"
@@ -116,15 +118,11 @@ jobs:
           python3 examples/echo_server/stress_test.py
 
       - name: Run UDP echo server stress test
-        env:
-          TINMAXPROCS: "2"
         run: |
           ./tin build examples/udp_echo_server/udp_echo_server.tin -o /tmp/udp_echo_server -lm
           TIN_UDP_SERVER=/tmp/udp_echo_server python3 examples/udp_echo_server/stress_test.py
 
       - name: Run Unix socket echo server stress test
-        env:
-          TINMAXPROCS: "2"
         run: |
           ./tin build examples/unix_echo_server/unix_echo_server.tin -o /tmp/unix_echo_server -lm
           TIN_UNIX_SERVER=/tmp/unix_echo_server python3 examples/unix_echo_server/stress_test.py
@@ -242,15 +240,11 @@ jobs:
           python3 examples/echo_server/stress_test.py || true
 
       - name: Run UDP echo server stress test (quarantined; see ci.yml comment)
-        env:
-          TINMAXPROCS: "2"
         run: |
           ./tin build examples/udp_echo_server/udp_echo_server.tin -o /tmp/udp_echo_server -lm
           TIN_UDP_SERVER=/tmp/udp_echo_server python3 examples/udp_echo_server/stress_test.py || true
 
       - name: Run Unix socket echo server stress test (quarantined; see ci.yml comment)
-        env:
-          TINMAXPROCS: "2"
         run: |
           ./tin build examples/unix_echo_server/unix_echo_server.tin -o /tmp/unix_echo_server -lm
           TIN_UNIX_SERVER=/tmp/unix_echo_server python3 examples/unix_echo_server/stress_test.py
