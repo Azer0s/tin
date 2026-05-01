@@ -147,6 +147,85 @@ func (cg *CodeGen) emitTopLevelVarDeinits(block *ir.Block) {
 	}
 }
 
+// emitDeinitAllFn lazily synthesizes `void _tin_deinit_all(void)` in
+// cg.mod containing the same RC release sequence as emitTopLevelVarDeinits.
+// Returns nil when there are no top-level vars to release (no deinit needed).
+//
+// Step 3 of incremental compilation: extracting the deinit sequence into
+// its own fn is the prerequisite for `atexit(_tin_deinit_all)` registration
+// in the C wrapper, which makes deinits run on EVERY clean exit path
+// (return-from-main, libc `exit(N)`, panic-with-recover) rather than
+// only the fall-through-from-main path the inline emit covers today.
+//
+// The dispatcher LIVES in cg.mod (not a per-pkg module) because it's a
+// whole-program artifact: it iterates every top-level var across every
+// imported pkg in reverse declaration order. Per-pkg `_tin_deinit_<pkg>`
+// fns + topo dispatcher come in a follow-up commit.
+func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
+	if len(cg.allTopLevelVars) == 0 {
+		return nil
+	}
+
+	if cg.deinitAllFn != nil {
+		return cg.deinitAllFn
+	}
+
+	fn := cg.mod.NewFunc("_tin_deinit_all", irtypes.Void)
+	fn.Linkage = enum.LinkageInternal
+	entry := fn.NewBlock("entry")
+	cg.emitTopLevelVarDeinits(entry)
+	entry.NewRet(nil)
+
+	cg.deinitAllFn = fn
+
+	return fn
+}
+
+// emitDeinitAllAtexit registers _tin_deinit_all via libc atexit() so the
+// deinit sequence fires on every clean process exit — including
+// `exit(N)` from anywhere in the program. Without this hook, deinits
+// only run when user main falls through to the wrapper's tail; an
+// `os::exit(1)` from inside a fiber bypasses the entire teardown.
+//
+// Returns the new "current block" the caller should continue emitting
+// into (the post-cmp continuation). The arming check is a single
+// load + compare-and-branch; if armed already, skip the atexit call
+// (idempotency guard against double-registration when a #interop-mode
+// build calls tin_runtime_init from C twice).
+//
+// Caller emits this BEFORE user main runs in the C wrapper.
+func (cg *CodeGen) emitDeinitAllAtexit(block *ir.Block) *ir.Block {
+	deinitFn := cg.emitDeinitAllFn()
+	if deinitFn == nil {
+		return block
+	}
+
+	if cg.atexitFn == nil {
+		atexitFnTy := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
+		cg.atexitFn = cg.ensureExternDecl("atexit", irtypes.I32,
+			[]*ir.Param{ir.NewParam("fn", atexitFnTy)}, false)
+	}
+
+	if cg.deinitArmedGlobal == nil {
+		cg.deinitArmedGlobal = cg.mod.NewGlobalDef("_tin_deinit_armed",
+			constant.NewInt(irtypes.I32, 0))
+		cg.deinitArmedGlobal.Linkage = enum.LinkageInternal
+	}
+
+	armed := block.NewLoad(irtypes.I32, cg.deinitArmedGlobal)
+	notArmed := block.NewICmp(enum.IPredEQ, armed, constant.NewInt(irtypes.I32, 0))
+
+	armBlk := cg.curFn.NewBlock("deinit.arm")
+	contBlk := cg.curFn.NewBlock("deinit.cont")
+	block.NewCondBr(notArmed, armBlk, contBlk)
+
+	armBlk.NewStore(constant.NewInt(irtypes.I32, 1), cg.deinitArmedGlobal)
+	armBlk.NewCall(cg.atexitFn, deinitFn)
+	armBlk.NewBr(contBlk)
+
+	return contBlk
+}
+
 // tryConstantFold attempts to evaluate an AST node as a compile-time constant.
 // Returns nil if the expression cannot be folded at compile time.
 //

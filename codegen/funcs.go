@@ -2303,6 +2303,10 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	// Emit fiber init if the program uses any fiber features.
 	entry = cg.emitFiberMainWrap(entry)
 
+	// Register the deinit dispatcher with libc atexit BEFORE running
+	// any user code. See codegen.go's main wrapper for rationale.
+	entry = cg.emitDeinitAllAtexit(entry)
+
 	// Emit top-level var runtime initializations (deferred from pre-pass 1.7).
 	var err error
 
@@ -2431,6 +2435,11 @@ func (cg *CodeGen) genTestRunner() error {
 	// Initialize fiber runtime (workers + I/O thread) so tests can use spawn/await.
 	cur := cg.emitFiberMainWrap(entry)
 
+	// Register the deinit dispatcher with libc atexit BEFORE running
+	// any test code (matches the pattern in genImplicitMain / the
+	// codegen.go main wrapper).
+	cur = cg.emitDeinitAllAtexit(cur)
+
 	// Initialize top-level var globals so tests can reference them.
 	cur, err = cg.emitTopLevelVarInits(cur)
 	if err != nil {
@@ -2453,8 +2462,9 @@ func (cg *CodeGen) genTestRunner() error {
 		// Release RC-tracked locals (e.g. from topLevelVarInits).
 		cg.emitAllScopeReleases(cur, "")
 
-		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.
-		cg.emitTopLevelVarDeinits(cur)
+		// Deinit top-level globals: registered with atexit at the top
+		// of the test runner main; runs automatically on clean exit.
+		// Inline emit removed (was duplicating the atexit hook).
 
 		// Call _tin_test_finish(N) -> i64 exit code.
 		total := constant.NewInt(irtypes.I64, int64(len(cg.testDecls)))

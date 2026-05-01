@@ -759,6 +759,16 @@ type CodeGen struct {
 	// Used to emit deinits in reverse order at the end of main().
 	allTopLevelVars []topLevelVarInit
 
+	// deinitAllFn / deinitArmedGlobal / atexitFn back the
+	// `_tin_deinit_all` dispatcher registered via atexit() in the C
+	// wrapper main. Lazily emitted by emitDeinitAllFn /
+	// emitDeinitAllAtexit. Without this, top-level var deinits only
+	// run on fall-through-from-main; with it, deinits run on any
+	// clean-exit path (return, libc exit(N), etc.).
+	deinitAllFn       *ir.Func
+	deinitArmedGlobal *ir.Global
+	atexitFn          *ir.Func
+
 	// topLevelVarBareNames: bare (un-mangled) names of every top-level `var`
 	// across the entry program and all imported packages. Used by the #pure
 	// soundness check to reject reads/writes of mutable globals from a #pure
@@ -1867,6 +1877,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// Emit fiber init + io init when the program uses fiber features.
 			wb = cg.emitFiberMainWrap(wb)
 
+			// Register the deinit dispatcher with libc atexit BEFORE
+			// running user code. atexit guarantees the deinits fire on
+			// every clean exit path (return-from-main, libc exit(N),
+			// any fn call to std::os::exit) — not only the
+			// fall-through-from-main path the inline emit covers.
+			wb = cg.emitDeinitAllAtexit(wb)
+
 			// Emit runtime initializers for top-level var declarations before
 			// any fiber runs so that globals are valid from the start.
 			var err error
@@ -1915,7 +1932,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				mainPid := wb.NewCall(cg.fiberSpawnJoinableFn, coroHdl)
 				wb.NewCall(syncAwaitFn, mainPid)
 				cg.emitFiberMainEnd(wb)
-				cg.emitTopLevelVarDeinits(wb)
+				// Deinits run via atexit(_tin_deinit_all); no inline
+				// emit needed here.
 				wb.NewRet(constant.NewInt(irtypes.I32, 0))
 			} else {
 				// fn main(): call synchronously (existing behavior).
@@ -1932,12 +1950,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
 				if retIsVoid {
 					wb.NewCall(userMainFn, callArgs...)
-					cg.emitTopLevelVarDeinits(wb)
+					// Deinits run via atexit(_tin_deinit_all).
 					cg.emitFiberMainEnd(wb)
 					wb.NewRet(constant.NewInt(irtypes.I32, 0))
 				} else {
 					ret := wb.NewCall(userMainFn, callArgs...)
-					cg.emitTopLevelVarDeinits(wb)
+					// Deinits run via atexit(_tin_deinit_all).
 					cg.emitFiberMainEnd(wb)
 					// Coerce return value to i32 if needed.
 					var retVal value.Value = ret
