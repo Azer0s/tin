@@ -101,17 +101,31 @@ jobs:
             "/tmp/tin_arc_${name}"
           done
 
+      # TINMAXPROCS=4 forces 4 fiber-worker OS threads for the echo
+      # server tests. Without this, GH Actions' cgroup CPU accounting
+      # can return as low as 1 from sysconf(_SC_NPROCESSORS_ONLN), and
+      # the echo_server_bad client exposes fragility under
+      # single-fiber-worker scheduling (read/write fibers can starve
+      # the I/O thread on a saturated runner). The server isn't designed
+      # for nworkers=1; the test exists to exercise the normal multi-
+      # worker flow.
       - name: Run echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/echo_server/echo_server_bad.tin -o /tmp/echo_server_bad
           python3 examples/echo_server/stress_test.py
 
       - name: Run UDP echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/udp_echo_server/udp_echo_server.tin -o /tmp/udp_echo_server -lm
           TIN_UDP_SERVER=/tmp/udp_echo_server python3 examples/udp_echo_server/stress_test.py
 
       - name: Run Unix socket echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/unix_echo_server/unix_echo_server.tin -o /tmp/unix_echo_server -lm
           TIN_UNIX_SERVER=/tmp/unix_echo_server python3 examples/unix_echo_server/stress_test.py
@@ -210,16 +224,22 @@ jobs:
           done
 
       - name: Run echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/echo_server/echo_server_bad.tin -o /tmp/echo_server_bad
           python3 examples/echo_server/stress_test.py
 
       - name: Run UDP echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/udp_echo_server/udp_echo_server.tin -o /tmp/udp_echo_server -lm
           TIN_UDP_SERVER=/tmp/udp_echo_server python3 examples/udp_echo_server/stress_test.py
 
       - name: Run Unix socket echo server stress test
+        env:
+          TINMAXPROCS: "4"
         run: |
           ./tin build examples/unix_echo_server/unix_echo_server.tin -o /tmp/unix_echo_server -lm
           TIN_UNIX_SERVER=/tmp/unix_echo_server python3 examples/unix_echo_server/stress_test.py

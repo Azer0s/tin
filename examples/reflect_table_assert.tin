@@ -1,0 +1,36 @@
+// Step 4 verification: the link-time reflection table walker reads
+// every `impl Trait for Struct` the compiler emitted into the
+// `tin_impl` section. This test pairs the runtime walker count
+// (queried via _tin_impl_total_entries) with the known
+// compile-time impl count for the structs declared below.
+
+use assert
+
+trait greeter =
+  fn greet(this greeter) string = virtual
+
+trait countable =
+  fn count(this countable) i64 = virtual
+
+struct cat(greeter, countable) =
+  name string
+  meows i64
+  fn greeter::greet(this cat) string = return "meow {this.name}"
+  fn countable::count(this cat) i64 = return this.meows
+
+struct dog(greeter, countable) =
+  name string
+  barks i64
+  fn greeter::greet(this dog) string = return "woof {this.name}"
+  fn countable::count(this dog) i64 = return this.barks
+
+fn impl_total() i32 = extern("_tin_impl_total_entries")
+
+test "link-time impl table records every (struct, trait) pair" =
+  let total = impl_total()
+  assert::equals(4 as i32, total)
+
+test "traitof on cat returns greeter and countable" =
+  let c = cat{name: "Whiskers", meows: 3}
+  let traits = traitof(c)
+  assert::equals(2, len(traits))
