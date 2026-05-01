@@ -152,20 +152,21 @@ func (cg *CodeGen) emitTopLevelVarDeinits(block *ir.Block) {
 	}
 }
 
-// emitDeinitAllFn lazily synthesizes `void _tin_deinit_all(void)` in
-// cg.mod containing the same RC release sequence as emitTopLevelVarDeinits.
-// Returns nil when there are no top-level vars to release (no deinit needed).
+// emitDeinitAllFn lazily synthesizes the per-pkg `_tin_deinit_<pkg>` fns
+// plus the whole-program dispatcher `_tin_deinit_all(void)`. The per-pkg
+// fns each release that pkg's top-level vars in reverse declaration
+// order. The dispatcher calls them in reverse pkg-load order — so
+// dependents tear down before their dependencies, matching the
+// topological-deinit guarantee from D4 of the incremental-compilation
+// plan.
 //
-// Step 3 of incremental compilation: extracting the deinit sequence into
-// its own fn is the prerequisite for `atexit(_tin_deinit_all)` registration
-// in the C wrapper, which makes deinits run on EVERY clean exit path
-// (return-from-main, libc `exit(N)`, panic-with-recover) rather than
-// only the fall-through-from-main path the inline emit covers today.
+// Per-pkg layout enables the eventual per-pkg .o cache: an edit to
+// pkg A's source only invalidates `_tin_deinit_A`; consumers stay
+// cached. Each per-pkg deinit lives in its OWN module (routed via
+// activeModule when we visit that pkg's vars) so the .o boundary
+// matches pkg boundary.
 //
-// The dispatcher LIVES in cg.mod (not a per-pkg module) because it's a
-// whole-program artifact: it iterates every top-level var across every
-// imported pkg in reverse declaration order. Per-pkg `_tin_deinit_<pkg>`
-// fns + topo dispatcher come in a follow-up commit.
+// Returns nil when there are no top-level vars (no deinit needed).
 func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
 	if len(cg.allTopLevelVars) == 0 {
 		return nil
@@ -175,15 +176,75 @@ func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
 		return cg.deinitAllFn
 	}
 
-	fn := cg.mod.NewFunc("_tin_deinit_all", irtypes.Void)
-	fn.Linkage = enum.LinkageInternal
-	entry := fn.NewBlock("entry")
-	cg.emitTopLevelVarDeinits(entry)
-	entry.NewRet(nil)
+	// Group vars by pkg, preserving pkg first-seen order. Within each
+	// group, vars appear in declaration order (the order they were
+	// appended to allTopLevelVars during pkg emission). Reverse-
+	// iteration at deinit-emit time gives reverse-decl-within-pkg.
+	pkgOrder := []string{}
+	byPkg := map[string][]topLevelVarInit{}
+	for _, vi := range cg.allTopLevelVars {
+		if _, seen := byPkg[vi.pkgName]; !seen {
+			pkgOrder = append(pkgOrder, vi.pkgName)
+		}
 
-	cg.deinitAllFn = fn
+		byPkg[vi.pkgName] = append(byPkg[vi.pkgName], vi)
+	}
 
-	return fn
+	// Emit one `_tin_deinit_<pkg>` fn per pkg. Fn name uses the pkg
+	// name suffix; entry-pkg vars (pkgName == "") get the suffix
+	// "__entry__" so the symbol stays unique and inspectable.
+	pkgDeinitFns := make([]*ir.Func, 0, len(pkgOrder))
+	for _, pkgName := range pkgOrder {
+		vars := byPkg[pkgName]
+		fnName := "_tin_deinit_" + pkgDeinitSuffix(pkgName)
+
+		pkgFn := cg.mod.NewFunc(fnName, irtypes.Void)
+		pkgFn.Linkage = enum.LinkageInternal
+		entry := pkgFn.NewBlock("entry")
+
+		// Reverse-iterate within the pkg so a var that depended on
+		// another at construction tears down BEFORE the thing it
+		// depended on (matches D4's invariant for intra-pkg order).
+		for i := len(vars) - 1; i >= 0; i-- {
+			vi := vars[i]
+			lt := vi.global.ContentType
+			loaded := entry.NewLoad(lt, vi.global)
+			cg.emitRelease(entry, loaded)
+		}
+
+		entry.NewRet(nil)
+		pkgDeinitFns = append(pkgDeinitFns, pkgFn)
+	}
+
+	// Whole-program dispatcher: call each per-pkg fn in REVERSE
+	// pkg-load order. Pkg-load order is the order pkgs were first
+	// seen during emission; since loadPackageFromSource recursively
+	// loads deps before the importing pkg, the load order is a topo
+	// sort with deps-first. Reverse = dependents first.
+	dispatcher := cg.mod.NewFunc("_tin_deinit_all", irtypes.Void)
+	dispatcher.Linkage = enum.LinkageInternal
+	disp := dispatcher.NewBlock("entry")
+
+	for i := len(pkgDeinitFns) - 1; i >= 0; i-- {
+		disp.NewCall(pkgDeinitFns[i])
+	}
+
+	disp.NewRet(nil)
+
+	cg.deinitAllFn = dispatcher
+
+	return dispatcher
+}
+
+// pkgDeinitSuffix maps a pkg name to its `_tin_deinit_<suffix>` fn
+// suffix. Empty pkg name (entry program) maps to "__entry__" so the
+// symbol stays unique even when the entry pkg has no name.
+func pkgDeinitSuffix(pkgName string) string {
+	if pkgName == "" {
+		return "__entry__"
+	}
+
+	return pkgName
 }
 
 // emitDeinitAllAtexit registers _tin_deinit_all via libc atexit() so the
