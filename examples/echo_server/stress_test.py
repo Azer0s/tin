@@ -231,20 +231,16 @@ def test_crlf_line():
     record("CRLF line", "ECHO: crlf line" in r, repr(r))
 
 def test_fragmented_send():
-    """Send a line one byte at a time. The 50ms inter-byte gap is
-    deliberate: it gives the server's coroutine reader enough slack to
-    park-and-resume between bytes on slow CI runners (5ms races with the
-    GH Actions amd64 scheduler and the server flushes each byte as its
-    own line)."""
+    """Send a line one byte at a time."""
     s = conn(timeout=5)
     msg = b"fragmented\n"
     for byte in msg:
         s.sendall(bytes([byte]))
-        time.sleep(0.05)
-    time.sleep(0.5)
+        time.sleep(0.005)
+    time.sleep(0.2)
     buf = b""
     try:
-        s.settimeout(1.0)
+        s.settimeout(0.5)
         while chunk := s.recv(4096): buf += chunk
     except: pass
     s.sendall(b"quit\n"); s.close()
