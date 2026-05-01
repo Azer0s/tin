@@ -148,18 +148,6 @@ int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx) {
     return b->atoms[idx];
 }
 
-// Query: total number of (type_id, trait) pairs across the whole table.
-// Sum across buckets. Exists primarily so test code can verify the link-
-// time section walker actually saw the impls the compiler emitted.
-int32_t _tin_impl_total_entries(void) {
-    _tin_build_impl_table();
-    int32_t total = 0;
-    for (int32_t i = 0; i < _tin_impl_bucket_n; i++) {
-        total += _tin_impl_buckets[i].count;
-    }
-    return total;
-}
-
 __attribute__((destructor)) static void _tin_impl_table_cleanup(void) {
     for (int32_t i = 0; i < _tin_impl_bucket_n; i++) {
         free(_tin_impl_buckets[i].atoms);

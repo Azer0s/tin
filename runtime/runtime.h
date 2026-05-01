@@ -196,7 +196,6 @@ int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but fre
 void    _tin_build_impl_table(void);
 int32_t _tin_impl_count_for_type(int32_t type_id);
 int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx);
-int32_t _tin_impl_total_entries(void); // sum across all type_ids; for tests
 
 // -- Stacktrace capture (frame-pointer walker; see docs/plans/stacktrace-libunwind.md)
 // Writes up to `cap` interned atom codes into `out` (must be cap*sizeof(int32_t)
