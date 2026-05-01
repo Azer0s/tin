@@ -344,7 +344,7 @@ def test_throughput():
 
 def start_server():
     import subprocess, os
-    # stdout → /dev/null: echo json::encode(line) would block on a capped pipe
+    # stdout -> /dev/null: echo json::encode(line) would block on a capped pipe
     # once cumulative output exceeds the pipe buffer (~64KB), hanging the server.
     devnull = open(os.devnull, "wb")
     proc = subprocess.Popen(
@@ -352,7 +352,16 @@ def start_server():
         stdout=devnull, stderr=devnull,
         preexec_fn=os.setsid,
     )
-    time.sleep(0.5)
+    # Poll the listen socket until it's actually accepting connections.
+    # On slow CI runners (arm64 in particular) a fixed 0.5s sleep races with
+    # the server's tcp::listen() call and the first batch of connections
+    # gets RST/refused. Give the bind+listen up to 5 seconds, then proceed.
+    for _ in range(500):
+        try:
+            with socket.create_connection((HOST, PORT), timeout=0.1):
+                return proc
+        except OSError:
+            time.sleep(0.01)
     return proc
 
 def stop_server(proc):
