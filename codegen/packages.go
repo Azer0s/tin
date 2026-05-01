@@ -2355,10 +2355,12 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 
 		if isFatFnPtr(argType) {
 			st := argType.(*irtypes.StructType)
+
 			fn, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 			if !ok {
 				break
 			}
+
 			innerFnType = fn
 			envOffset = 1 // skip the i8* env in fat-fn-ptr inner sig
 		} else if rawPtr, ok := argType.(*irtypes.PointerType); ok {
@@ -2366,6 +2368,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			if !ok2 {
 				break
 			}
+
 			innerFnType = fn
 			envOffset = 0 // raw fn pointer carries no env slot
 		} else {

@@ -111,6 +111,7 @@ func (cg *CodeGen) pclntabSectionName() string {
 // Used to switch ELF/Mach-O specifics (section naming, constructor code).
 func (cg *CodeGen) targetIsDarwin() bool {
 	t := cg.mod.TargetTriple
+
 	return strings.Contains(t, "darwin") ||
 		strings.Contains(t, "macos") ||
 		strings.Contains(t, "ios") ||
@@ -248,6 +249,7 @@ func (cg *CodeGen) splitOneBlockAtCalls(bb *ir.Block) []*ir.Block {
 	// containing block (LLVM rule: phi precedes any non-phi instruction).
 	insts := bb.Insts
 	firstNonPhi := 0
+
 	for firstNonPhi < len(insts) {
 		if _, isPhi := insts[firstNonPhi].(*ir.InstPhi); !isPhi {
 			break
@@ -499,38 +501,6 @@ func (cg *CodeGen) pclntabStringInMod(mod *ir.Module, s string) (constant.Consta
 	return gep, len(data)
 }
 
-// pclntabString interns a UTF-8 string into a private global and returns
-// (i8* to first byte, byte length). Reuses an existing global when the
-// same content was interned earlier in this module.
-func (cg *CodeGen) pclntabString(s string) (constant.Constant, int) {
-	if g, ok := cg.pclntabStringPool[s]; ok {
-		return g.ptr, g.len
-	}
-
-	if cg.pclntabStringPool == nil {
-		cg.pclntabStringPool = map[string]pclntabStringEntry{}
-	}
-
-	data := []byte(s)
-	arrTy := irtypes.NewArray(uint64(len(data)), irtypes.I8)
-	ca := constant.NewCharArray(data)
-
-	g := cg.mod.NewGlobalDef(fmt.Sprintf("__tin_pcln_s.%d", cg.pclntabSeq), ca)
-	g.Linkage = enum.LinkagePrivate
-	g.Immutable = true
-	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
-
-	cg.pclntabSeq++
-
-	gep := constant.NewGetElementPtr(arrTy, g,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	gep.InBounds = true
-
-	cg.pclntabStringPool[s] = pclntabStringEntry{ptr: gep, len: len(data)}
-
-	return gep, len(data)
-}
-
 // fnSourceFile returns the source file path for an LLVM function. Best
 // effort: when the fn was not emitted from a .tin source (compiler-
 // synthesized helper), returns "<runtime>".
@@ -595,8 +565,10 @@ func (cg *CodeGen) createPclntabConstructorFn() {
 	ctor.Linkage = enum.LinkageInternal
 	entry := ctor.NewBlock("entry")
 
-	var startArg, endArg constant.Constant
-	var markerArg constant.Constant
+	var (
+		startArg, endArg constant.Constant
+		markerArg        constant.Constant
+	)
 
 	if cg.targetIsDarwin() {
 		startArg = constant.NewNull(hdrPtr)
@@ -672,12 +644,12 @@ type pclntabStringEntry struct {
 //  2. Fall back to a heuristic transform for IR fns we never recorded
 //     a display name for (compiler-generated thunks, monomorphized
 //     generics whose template wasn't predeclared, $coro variants):
-//       - `_tin_user_main` -> `main`
-//       - leading `_tin_` / `__tin_` (runtime helpers) -> kept as-is
-//       - `name$coro` -> recurse on `name` then append `$coro`
-//       - generic-mono `tmpl__inst` is best-effort: stays as `tmpl::inst`
-//         since we can't distinguish it from a pkg-qualified name without
-//         the AST.
+//     - `_tin_user_main` -> `main`
+//     - leading `_tin_` / `__tin_` (runtime helpers) -> kept as-is
+//     - `name$coro` -> recurse on `name` then append `$coro`
+//     - generic-mono `tmpl__inst` is best-effort: stays as `tmpl::inst`
+//     since we can't distinguish it from a pkg-qualified name without
+//     the AST.
 func (cg *CodeGen) unmangleTinName(name string) string {
 	if cg.fnDisplayNames != nil {
 		if d, ok := cg.fnDisplayNames[name]; ok {
@@ -702,6 +674,7 @@ func unmangleTinNameHeuristic(name string) string {
 
 	if strings.HasSuffix(name, "$coro") {
 		base := name[:len(name)-len("$coro")]
+
 		return unmangleTinNameHeuristic(base) + "$coro"
 	}
 

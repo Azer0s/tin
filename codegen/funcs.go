@@ -1085,6 +1085,7 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 	// the bare method name.
 	prevRecv := cg.curMethodReceiverStruct
 	cg.curMethodReceiverStruct = structName
+
 	defer func() { cg.curMethodReceiverStruct = prevRecv }()
 
 	// Overloading: use the mangled name when this method belongs to an overload set.

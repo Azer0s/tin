@@ -1355,15 +1355,6 @@ func collectPkgIRs(cg *codegen.CodeGen) []namedIR {
 	return out
 }
 
-// If libMode is true, compile to an object file with -c (no linking).
-// extraObjs are additional .o/.a files and -l/-L flags to pass to the linker.
-// cSources are C source files to compile in alongside the IR.
-// prog is the optional progress tracker (nil = silent).
-// debugMode switches the final compile from -O2 to -O0 and adds -g.
-func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []cSource, extraCFlags []string, prog *compileProgress, debugMode ...bool) error {
-	return compileIRWithPkgs(ir, nil, outBin, libMode, extraObjs, cSources, extraCFlags, prog, debugMode...)
-}
-
 // compileIRWithPkgs is the multi-IR variant of compileIR. `pkgIRs` is
 // one IR text per imported package; each is written to its own `.ll`,
 // compiled to a `.o` in parallel with the entry IR + runtime.c, and
@@ -1637,6 +1628,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		if _, err := pkgLL.WriteString(pkg.irText); err != nil {
 			_ = pkgLL.Close()
 			_ = os.Remove(pkgLLName)
+
 			return err
 		}
 
@@ -2509,6 +2501,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		irText := fixCoroAttrs(mod.String())
 		pkgIRTexts := collectPkgIRs(cg)
+
 		if compErr := compileIRWithPkgs(irText, pkgIRTexts, cachedBin, false, linkFlags, fCSources, extraCFlags, cprog); compErr != nil {
 			cprog.clear()
 			fmt.Printf("\n=== FAIL %s ===\n", fname)

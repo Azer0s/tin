@@ -139,19 +139,6 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	return nil
 }
 
-// emitTopLevelVarDeinits releases/deinits all top-level globals in reverse
-// declaration order. Call this in the main wrapper just before program exit.
-// For primitive types (i64, bool, etc.) emitRelease is a no-op, so it is safe
-// to call unconditionally on every global.
-func (cg *CodeGen) emitTopLevelVarDeinits(block *ir.Block) {
-	for i := len(cg.allTopLevelVars) - 1; i >= 0; i-- {
-		vi := cg.allTopLevelVars[i]
-		lt := vi.global.ContentType
-		loaded := block.NewLoad(lt, vi.global)
-		cg.emitRelease(block, loaded)
-	}
-}
-
 // emitDeinitAllFn lazily synthesizes the per-pkg `_tin_deinit_<pkg>` fns
 // plus the whole-program dispatcher `_tin_deinit_all(void)`. The per-pkg
 // fns each release that pkg's top-level vars in reverse declaration
@@ -182,6 +169,7 @@ func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
 	// iteration at deinit-emit time gives reverse-decl-within-pkg.
 	pkgOrder := []string{}
 	byPkg := map[string][]topLevelVarInit{}
+
 	for _, vi := range cg.allTopLevelVars {
 		if _, seen := byPkg[vi.pkgName]; !seen {
 			pkgOrder = append(pkgOrder, vi.pkgName)
@@ -213,6 +201,7 @@ func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
 		}
 
 		entry.NewRet(nil)
+
 		pkgDeinitFns = append(pkgDeinitFns, pkgFn)
 	}
 

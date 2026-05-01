@@ -401,8 +401,11 @@ local rebinds the name `sourcepos` (default-off).
 
 `stacktrace(cap?, opts?)` returns `[atom]` - the live call chain at
 the point of call, walked via the saved frame-pointer chain (rbp on
-x86_64, x29 on aarch64) and resolved with libdwfl (Linux/FreeBSD) or
-dladdr (macOS, runtime helper symbols only):
+x86_64, x29 on aarch64) and resolved against a custom `__tin_pclntab`
+section that codegen emits alongside the program text. No libdwfl /
+elfutils dependency on any platform; the same path works on Linux,
+FreeBSD, and macOS. Library frames (libc, libpthread, etc.) fall back
+to `dladdr` for symbol-only resolution:
 
 ```rust
 fn{#no_inline} probe() [atom] = return stacktrace()
@@ -447,21 +450,23 @@ Atom format degrades gracefully when debug info is unavailable:
 
 | Resolution available           | Atom shape                                       |
 |--------------------------------|--------------------------------------------------|
-| symbol + libdwfl line          | `'"sym@file:line:col"`                           |
+| symbol + pclntab line          | `'"sym@file:line:col"`                           |
 | line only (no symbol)          | `'"file:line:col"`                               |
 | symbol only (lib frame)        | `'"libname.so:sym+0x<offset>"`                   |
 | symbol only (main binary)      | `'"sym+0x<offset>"`                              |
 | neither                        | `'"??+0x<addr>"`                                 |
 
 Reachability gating: the compiler scans the AST for `stacktrace()` and
-only links libdw and emits unwind tables (`-funwind-tables`,
-`-gline-tables-only`, `-rdynamic`, `-fno-omit-frame-pointer`) when at
+only emits the `__tin_pclntab` section and unwind tables
+(`-funwind-tables`, `-rdynamic`, `-fno-omit-frame-pointer`) when at
 least one call is reachable. Programs that never reference
 `stacktrace()` pay zero binary-size or link-time cost.
 
-> **Linker requirement:** `-ldw` (elfutils libdwfl) on every Linux
-> binary that uses `stacktrace()` for the file:line:col upgrade.
-> macOS has no elfutils, so frames degrade to `sym+0x<offset>` form.
+> **No external library dependency.** `file:line:col` resolution
+> comes from the in-binary `__tin_pclntab` section the compiler
+> emits; no elfutils / libdw / libdwfl link is required on any
+> platform. Library frames (libc, libpthread, etc.) still rely on
+> `dladdr` for symbol-only resolution.
 
 > **Frame-pointer requirement:** the walker follows the saved-fp
 > chain, so any C compilation unit reachable from a Tin trace must be

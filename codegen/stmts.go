@@ -712,6 +712,7 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 	}
 
 	var dbgInstBefore int
+
 	wantPosTrack := (cg.debugMode || cg.pclntabUsed) && block != nil
 	if wantPosTrack {
 		dbgInstBefore = len(block.Insts)
@@ -2535,6 +2536,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 			if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
 				cg.emitRetain(block, val)
 			}
+
 			oldVal := block.NewLoad(ptrType.ElemType, ptr)
 			cg.emitRelease(block, oldVal)
 		}

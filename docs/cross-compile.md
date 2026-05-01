@@ -64,7 +64,7 @@ On macOS hosts the SDK is auto-detected via `xcrun` - no flag needed.
 
 Cross-compiling to Linux from macOS needs a **Linux sysroot** with
 glibc/musl headers, `ld-linux*`, and the libraries Tin links against
-(libdw, libpcre2, etc.). Resolution order:
+(libpcre2, openssl, libffi, etc.). Resolution order:
 
 1. `--linux-sysroot PATH` flag
 2. `$TIN_LINUX_SYSROOT` environment variable

@@ -387,20 +387,19 @@ type CodeGen struct {
 	// over !dbg metadata) to anchor per-call PC entries.
 	instLineCol map[ir.Instruction]ast.Pos
 
-	pclntabPCType     *irtypes.StructType            // {i32 pc_off, i32 line, i32 col}
-	pclntabHdrType    *irtypes.StructType            // per-fn header
-	pclntabHdrs       []*ir.Global                   // emitted hdrs (pinned via @llvm.used)
+	pclntabPCType  *irtypes.StructType // {i32 pc_off, i32 line, i32 col}
+	pclntabHdrType *irtypes.StructType // per-fn header
+	pclntabHdrs    []*ir.Global        // emitted hdrs (pinned via @llvm.used)
 	// pclntabSeq is a single monotonic counter feeding suffix numbers for
 	// every pclntab-internal symbol (hdr, pcs, string pool entries, split
 	// block labels). Names are namespaced by their PREFIX (`__tin_pcln_hdr.`,
 	// `__tin_pcs.`, `__tin_pcln_s.`, `<bb>.split.`), so cross-kind ID
 	// collisions are impossible - a single monotonic ID just keeps the
 	// state minimal.
-	pclntabSeq        int
-	pclntabStringPool       map[string]pclntabStringEntry          // dedup interned strings within this module
+	pclntabSeq              int
 	pclntabStringPoolPerMod map[*ir.Module]map[string]pclntabStringEntry // per-fn-module string pools
-	pclntabCtorFn     *ir.Func                       // ctor created in pre-marker phase, finalized after
-	fnSourceFiles     map[string]string              // ir-fn-name -> source .tin path
+	pclntabCtorFn           *ir.Func                                     // ctor created in pre-marker phase, finalized after
+	fnSourceFiles           map[string]string                            // ir-fn-name -> source .tin path
 	// fnDisplayNames maps mangled IR names back to user-readable Tin names
 	// for stacktrace display. Populated at predeclare time so the original
 	// AST context (package, struct receiver, generic type-args) is in hand.

@@ -288,6 +288,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	if wantScrutRelease {
 		matchScrutScope.set("__match_scrut", &scopeEntry{val: scrutAlloca, isAlloc: true})
 	}
+
 	cg.curScope = matchScrutScope
 
 	tagGEP := block.NewGetElementPtr(outerSt, scrutAlloca,
@@ -460,6 +461,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	if anyFallthrough {
 		cg.emitScopeRelease(afterBlock, matchScrutScope)
 	}
+
 	cg.curScope = matchScrutScope.parent
 
 	if !anyFallthrough && resAlloca == nil {

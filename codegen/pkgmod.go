@@ -179,6 +179,7 @@ func (cg *CodeGen) allFuncs() []*ir.Func {
 // terminators across cg.mod and per-pkg modules. Used to bisect
 // per-pkg routing bugs that surface as llir/llvm serialization
 // panics ("missing terminator in basic block").
+//
 //goland:noinspection GoUnusedFunction
 func (cg *CodeGen) debugDumpUnterminated() {
 	check := func(prefix string, m *ir.Module) {
@@ -193,6 +194,7 @@ func (cg *CodeGen) debugDumpUnterminated() {
 	}
 
 	check("cg.mod", cg.mod)
+
 	for _, name := range cg.pkgModNames() {
 		check("pkg:"+name, cg.pkgMods[name])
 	}
@@ -228,6 +230,7 @@ func (cg *CodeGen) addCrossModuleDeclares() {
 	for _, g := range cg.mod.Globals {
 		globalOwner[g] = cg.mod
 	}
+
 	for _, name := range cg.pkgModNames() {
 		m := cg.pkgMods[name]
 		if m == nil {
@@ -362,6 +365,7 @@ func walkConstant(c constant.Constant, df func(*ir.Func), dg func(*ir.Global)) {
 		walkConstant(x.From, df, dg)
 	case *constant.ExprGetElementPtr:
 		walkConstant(x.Src, df, dg)
+
 		for _, idx := range x.Indices {
 			walkConstant(idx, df, dg)
 		}
@@ -444,44 +448,4 @@ func (cg *CodeGen) finalizePerPkgModules() {
 
 	cg.echoSharedTypeDefs()
 	cg.addCrossModuleDeclares()
-}
-
-// mergeRoutedPkgMods folds every per-pkg module's content back into
-// cg.mod so the existing single-module serialization path keeps working
-// while we migrate call sites off cg.mod one wave at a time.
-//
-// Each pkg module's funcs / globals / typedefs / aliases are appended
-// to cg.mod's slices; pkg-mod IR objects continue to point to their
-// original parent (an llir/llvm Func's Parent field), but llir/llvm's
-// LLString walks cg.mod's slices directly, so the serialized output is
-// the union as if everything had been emitted into cg.mod from the
-// start. This is a transient bridge - once every emit site routes
-// through activeModule() and the build pipeline compiles per-pkg .o
-// files separately, this merge goes away and pkg modules feed clang
-// directly.
-//
-// Idempotent: pkg modules that get merged once are cleared so a second
-// call (e.g. test mode + REPL mode entering Generate's exit branches in
-// turn) doesn't double-append.
-func (cg *CodeGen) mergeRoutedPkgMods() {
-	if len(cg.pkgMods) == 0 {
-		return
-	}
-
-	for _, name := range cg.pkgModNames() {
-		m := cg.pkgMods[name]
-		if m == nil {
-			continue
-		}
-
-		cg.mod.Funcs = append(cg.mod.Funcs, m.Funcs...)
-		cg.mod.Globals = append(cg.mod.Globals, m.Globals...)
-		cg.mod.TypeDefs = append(cg.mod.TypeDefs, m.TypeDefs...)
-		cg.mod.Aliases = append(cg.mod.Aliases, m.Aliases...)
-
-		m.Funcs = nil
-		m.Globals = nil
-		m.TypeDefs = nil
-		m.Aliases = nil
-	}
 }
