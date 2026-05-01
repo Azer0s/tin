@@ -129,18 +129,12 @@ if __name__ == "__main__":
         [bin_path],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    # Poll the UDP listen socket until it actually echoes - 0.3s fixed
-    # sleep races the bind+recvfrom on slow CI runners (act/docker).
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    probe.settimeout(0.1)
-    for _ in range(100):
-        try:
-            probe.sendto(b"__ready_probe__\n", ("127.0.0.1", PORT))
-            probe.recvfrom(4096)
-            break
-        except OSError:
-            time.sleep(0.05)
-    probe.close()
+    # 1.0s gives the server time to bind + start its accept loop on
+    # slow CI runners (real GH Actions amd64 has shown 0.3s races).
+    # An active probe (UDP recvfrom round-trip) was tried earlier but
+    # left the server in a state where the next test's recvfrom timed
+    # out, so we use a fixed sleep that doesn't talk to the server.
+    time.sleep(1.0)
 
     try:
         test_basic_echo()
