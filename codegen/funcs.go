@@ -2266,7 +2266,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 				"bypasses inline channel optimizations. Fix: wrap your code in 'fn{#async} main() = ...' instead")
 	}
 
-	f := cg.mod.NewFunc("main", irtypes.I32)
+	f := cg.newCMainWrapper(false)
 	entry := f.NewBlock("entry")
 
 	prevFn := cg.curFn
@@ -2414,7 +2414,7 @@ func (cg *CodeGen) genTestRunner() error {
 	}
 
 	// Generate main().
-	mainFn := cg.mod.NewFunc("main", irtypes.I32)
+	mainFn := cg.newCMainWrapper(false)
 	entry := mainFn.NewBlock("entry")
 
 	prevFn := cg.curFn

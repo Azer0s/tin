@@ -272,8 +272,8 @@ func (cg *CodeGen) splitOneBlockAtCalls(bb *ir.Block) []*ir.Block {
 
 	// Form the tail: everything from splitAt onward, plus the original
 	// terminator. Recurse on the tail to handle subsequent calls.
-	tail := ir.NewBlock(fmt.Sprintf("%s.split.%d", bb.Name(), cg.pclntabSplitCount))
-	cg.pclntabSplitCount++
+	tail := ir.NewBlock(fmt.Sprintf("%s.split.%d", bb.Name(), cg.pclntabSeq))
+	cg.pclntabSeq++
 
 	tail.Insts = append([]ir.Instruction{}, insts[splitAt:]...)
 	tail.Term = bb.Term
@@ -328,8 +328,11 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 			constant.NewNull(irtypes.NewPointer(cg.pclntabPCEntryType())),
 			constant.NewInt(irtypes.I32, 0),
 		)
+		id := cg.pclntabSeq
+		cg.pclntabSeq++
+
 		hdr := cg.mod.NewGlobalDef(
-			fmt.Sprintf("__tin_pcln_hdr.%d", cg.pclntabHdrCount),
+			fmt.Sprintf("__tin_pcln_hdr.%d", id),
 			hdrInit,
 		)
 		hdr.Section = cg.pclntabSectionName()
@@ -338,7 +341,6 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 		hdr.Linkage = enum.LinkageInternal
 
 		cg.pclntabHdrs = append(cg.pclntabHdrs, hdr)
-		cg.pclntabHdrCount++
 
 		return
 	}
@@ -383,10 +385,13 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 	// Per-fn PC table global. Use private linkage so it stays inside this
 	// translation unit and gets DCE'd along with the fn header it backs
 	// (linker --gc-sections traces the header -> table reference).
+	id := cg.pclntabSeq
+	cg.pclntabSeq++
+
 	pcArrTy := irtypes.NewArray(uint64(len(pcEntries)), cg.pclntabPCEntryType())
 	pcArrInit := constant.NewArray(pcArrTy, pcEntries...)
 	pcArr := cg.mod.NewGlobalDef(
-		fmt.Sprintf("__tin_pcs.%d", cg.pclntabHdrCount),
+		fmt.Sprintf("__tin_pcs.%d", id),
 		pcArrInit,
 	)
 	pcArr.Linkage = enum.LinkagePrivate
@@ -413,7 +418,7 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 		constant.NewInt(irtypes.I32, int64(len(pcEntries))),
 	)
 	hdr := cg.mod.NewGlobalDef(
-		fmt.Sprintf("__tin_pcln_hdr.%d", cg.pclntabHdrCount),
+		fmt.Sprintf("__tin_pcln_hdr.%d", id),
 		hdrInit,
 	)
 	hdr.Section = cg.pclntabSectionName()
@@ -424,11 +429,10 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 	// cross-TU collisions when the same module gets compiled into both
 	// the main binary and a REPL cell). The section content still goes
 	// into tin_pclntab; --gc-sections pruning is countered by appending
-	// to @llvm.used in emitPclntabConstructor.
+	// to @llvm.used in finalizePclntabConstructor.
 	hdr.Linkage = enum.LinkageInternal
 
 	cg.pclntabHdrs = append(cg.pclntabHdrs, hdr)
-	cg.pclntabHdrCount++
 }
 
 // pclntabString interns a UTF-8 string into a private global and returns
@@ -447,12 +451,12 @@ func (cg *CodeGen) pclntabString(s string) (constant.Constant, int) {
 	arrTy := irtypes.NewArray(uint64(len(data)), irtypes.I8)
 	ca := constant.NewCharArray(data)
 
-	g := cg.mod.NewGlobalDef(fmt.Sprintf("__tin_pcln_s.%d", cg.pclntabStrCount), ca)
+	g := cg.mod.NewGlobalDef(fmt.Sprintf("__tin_pcln_s.%d", cg.pclntabSeq), ca)
 	g.Linkage = enum.LinkagePrivate
 	g.Immutable = true
 	g.UnnamedAddr = enum.UnnamedAddrUnnamedAddr
 
-	cg.pclntabStrCount++
+	cg.pclntabSeq++
 
 	gep := constant.NewGetElementPtr(arrTy, g,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))

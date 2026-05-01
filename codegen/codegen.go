@@ -383,9 +383,13 @@ type CodeGen struct {
 	pclntabPCType     *irtypes.StructType            // {i32 pc_off, i32 line, i32 col}
 	pclntabHdrType    *irtypes.StructType            // per-fn header
 	pclntabHdrs       []*ir.Global                   // emitted hdrs (pinned via @llvm.used)
-	pclntabHdrCount   int                            // monotonic suffix for hdr / pcs symbol names
-	pclntabStrCount   int                            // monotonic suffix for interned strings
-	pclntabSplitCount int                            // monotonic suffix for split-block labels
+	// pclntabSeq is a single monotonic counter feeding suffix numbers for
+	// every pclntab-internal symbol (hdr, pcs, string pool entries, split
+	// block labels). Names are namespaced by their PREFIX (`__tin_pcln_hdr.`,
+	// `__tin_pcs.`, `__tin_pcln_s.`, `<bb>.split.`), so cross-kind ID
+	// collisions are impossible — a single monotonic ID just keeps the
+	// state minimal.
+	pclntabSeq        int
 	pclntabStringPool map[string]pclntabStringEntry  // dedup interned strings within this module
 	pclntabCtorFn     *ir.Func                       // ctor created in pre-marker phase, finalized after
 	fnSourceFiles     map[string]string              // ir-fn-name -> source .tin path
@@ -1784,7 +1788,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		hasmain := false
 
 		for _, f := range cg.mod.Funcs {
-			if f.Name() == "main" {
+			if f.Name() == "_tin_c_main" {
 				hasmain = true
 
 				break
@@ -1816,7 +1820,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		hasMain := false
 
 		for _, f := range cg.mod.Funcs {
-			if f.Name() == "main" {
+			if f.Name() == "_tin_c_main" {
 				hasMain = true
 
 				break
@@ -1839,15 +1843,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// If the user's main takes a [string] parameter, expose argc/argv.
 			wantsArgs := mainTakesStringArgs(cg.userMainDecl)
 
-			var wf *ir.Func
-			if wantsArgs {
-				wf = cg.mod.NewFunc("main", irtypes.I32,
-					ir.NewParam("argc", irtypes.I32),
-					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
-				)
-			} else {
-				wf = cg.mod.NewFunc("main", irtypes.I32)
-			}
+			wf := cg.newCMainWrapper(wantsArgs)
 
 			wb := wf.NewBlock("entry")
 
@@ -1970,7 +1966,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	hasMain := false
 
 	for _, f := range cg.mod.Funcs {
-		if f.Name() == "main" {
+		if f.Name() == "_tin_c_main" {
 			hasMain = true
 
 			break
@@ -1982,7 +1978,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		// the linker has an entry point. When #interop functions exist
 		// the program is being built as a library; skip the synthetic
 		// main so the C consumer can provide its own.
-		wf := cg.mod.NewFunc("main", irtypes.I32)
+		wf := cg.newCMainWrapper(false)
 		wb := wf.NewBlock("entry")
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
@@ -1991,6 +1987,36 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.applyPclntabPostPass()
 
 	return cg.mod, nil
+}
+
+// newCMainWrapper creates the C-side entry-point function under the IR
+// name `_tin_c_main`, plus an `@main` alias so libc / `__libc_start_main`
+// still finds the conventional entry symbol. The rename keeps stacktrace
+// frames inside the wrapper distinct from the user's `fn main` (compiled
+// as `_tin_user_main` and displayed as `main`); without the rename, the
+// trace would show two consecutive `main`-named frames and confuse
+// readers about which is which.
+//
+// `withArgs` controls whether the wrapper takes the libc (argc, argv)
+// signature; the caller decides based on the user main's parameter list.
+//
+// LLVM aliases are handled by both ld.lld and GNU ld; on Mach-O the
+// convention is the same alias syntax via `--defsym` equivalent.
+// Returns the wrapper *ir.Func — the alias is internal bookkeeping.
+func (cg *CodeGen) newCMainWrapper(withArgs bool) *ir.Func {
+	var wf *ir.Func
+	if withArgs {
+		wf = cg.mod.NewFunc("_tin_c_main", irtypes.I32,
+			ir.NewParam("argc", irtypes.I32),
+			ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
+		)
+	} else {
+		wf = cg.mod.NewFunc("_tin_c_main", irtypes.I32)
+	}
+
+	cg.mod.Aliases = append(cg.mod.Aliases, ir.NewAlias("main", wf))
+
+	return wf
 }
 
 // applyStacktracePostPass walks every emitted function and tags it with
