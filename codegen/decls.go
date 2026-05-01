@@ -399,6 +399,14 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 
 	cg.structImpls[structKey] = implNames
 
+	// Materialize each impl as a section entry for the link-time
+	// reflection table walker (D1, codegen/reflect_table.go +
+	// runtime/reflect_table.c). Routed to the active pkg module so each
+	// pkg's impls land in its own .o.
+	for _, tn := range implNames {
+		cg.emitImplSectionEntry(structKey, tn)
+	}
+
 	return nil
 }
 

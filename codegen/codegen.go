@@ -268,6 +268,13 @@ type CodeGen struct {
 	// Reflection metadata.
 	// structImpls: struct name -> []trait name strings (for traitof/typeof)
 	structImpls map[string][]string
+
+	// implEntriesByMod tracks the per-module impl-section globals so the
+	// finalizer can emit one @llvm.compiler.used per module pinning them.
+	// Populated by emitImplSectionEntry, drained by finalizeImplSection
+	// (codegen/reflect_table.go).
+	implEntriesByMod map[*ir.Module][]*ir.Global
+	implEntriesSeen  map[string]bool
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
 	structFieldLLVMTypes map[string][]irtypes.Type
 
@@ -1837,6 +1844,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
+		cg.finalizeImplSection()
 		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
@@ -1847,6 +1855,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
+		cg.finalizeImplSection()
 		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
@@ -2064,6 +2073,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.debugDumpUnterminated()
 	cg.applyStacktracePostPass()
 	cg.applyPclntabPostPass()
+	cg.finalizeImplSection()
 	cg.finalizePerPkgModules()
 
 	return cg.mod, nil
