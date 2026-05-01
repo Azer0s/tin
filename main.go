@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1628,6 +1629,39 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			_ = os.WriteFile(filepath.Join(dir, pkg.label+".ll"), []byte(pkg.irText), 0o644)
 		}
 
+		// Compose the canonical clang argv FIRST so the cache key reflects
+		// every compile flag. We pass placeholders for the input/output
+		// paths since the cache key only cares about content+flags, not
+		// the exact temp-file names.
+		flagsForKey := append([]string{optLevel, "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+
+		if isDebug {
+			flagsForKey = append(flagsForKey, "-g")
+
+			if targetGOOS == "darwin" {
+				flagsForKey = append(flagsForKey, "-fstandalone-debug")
+			}
+		}
+
+		if stacktraceLinkActive {
+			flagsForKey = append(flagsForKey, "-funwind-tables", "-fasynchronous-unwind-tables")
+		} else {
+			flagsForKey = append(flagsForKey, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
+		}
+
+		// Step 7: per-pkg .o cache. Skip clang -c entirely when this
+		// pkg's IR + flags hash matches a previously-built object.
+		cachedObj, hit, cacheErr := pkgCacheLookup(pkg.irText, flagsForKey)
+		if cacheErr != nil {
+			return cacheErr
+		}
+
+		linkInputs = append(linkInputs, cachedObj)
+
+		if hit {
+			continue
+		}
+
 		pkgLL, err := os.CreateTemp("", "tin-pkg-"+pkg.label+"-*.ll")
 		if err != nil {
 			return fmt.Errorf("cannot create temp pkg .ll: %w", err)
@@ -1645,30 +1679,17 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		defer func(name string) { _ = os.Remove(name) }(pkgLLName)
 
-		pkgObj, err := mkObj("tin-pkg-" + pkg.label)
-		if err != nil {
-			return err
-		}
+		// Compile to a temp path and rename atomically into the cache so
+		// concurrent `tin` runs don't see a half-written .o.
+		tempObj := cachedObj + fmt.Sprintf(".tmp.%d", os.Getpid())
 
-		linkInputs = append(linkInputs, pkgObj)
-
-		a := append([]string{optLevel, "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
-
-		if isDebug {
-			a = append(a, "-g")
-			if targetGOOS == "darwin" {
-				a = append(a, "-fstandalone-debug")
-			}
-		}
-
-		if stacktraceLinkActive {
-			a = append(a, "-funwind-tables", "-fasynchronous-unwind-tables")
-		} else {
-			a = append(a, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
-		}
-
-		a = append(a, pkgLLName, "-o", pkgObj)
-		jobsList = append(jobsList, compileJob{desc: "pkg:" + pkg.label, args: a})
+		a := append([]string{}, flagsForKey...)
+		a = append(a, pkgLLName, "-o", tempObj)
+		jobsList = append(jobsList, compileJob{
+			desc:     "pkg:" + pkg.label,
+			args:     a,
+			renameTo: cachedObj,
+		})
 	}
 
 	// runtime.c -> runtime.o (only if rtC exists alongside the tin binary).
@@ -2027,6 +2048,50 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 // for every //!+file.c source. Keyed by content+flags MD5 so that the same
 // file compiled with the same flags reuses the .o across every Tin compile.
 const csrcCacheRoot = ".build/csrc"
+
+// pkgCacheRoot is the directory holding cached per-pkg .o files. Step 7
+// of docs/plans/incremental-compilation.md: each pkg's IR text + its
+// canonical clang argv produce a SHA-256 key under .build/pkg/<key>/pkg.o.
+// On hit the clang -c invocation is skipped entirely. Unlike `.build/run`
+// (whole-program-keyed), this caches PER pkg, so an edit to pkg A doesn't
+// invalidate pkg B's .o. Adds one disk-I/O per pkg per build, in exchange
+// for skipping clang -c on every cached pkg.
+const pkgCacheRoot = ".build/pkg"
+
+// pkgCacheLookup returns the cache path for compiling a per-pkg .ll
+// content with the given args. Returns (path, hit, err): on hit, path
+// already exists and the caller should add it to linkInputs and skip
+// clang. On miss, the caller must produce the .o at path; the cache
+// dir is pre-created.
+//
+// Key composition: SHA-256 of (irText || NUL-separated argv). Includes
+// every clang flag so that an opt-level / target / debug change
+// produces a fresh entry. The caller's irText is the per-pkg
+// serialized LLVM IR after every codegen pass (echoed types, cross-
+// module declares, etc.) so any IR change invalidates the cache.
+func pkgCacheLookup(irText string, args []string) (string, bool, error) {
+	sum := sha256.New()
+	sum.Write([]byte(irText))
+
+	for _, a := range args {
+		sum.Write([]byte{0})
+		sum.Write([]byte(a))
+	}
+
+	key := hex.EncodeToString(sum.Sum(nil))
+	dir := filepath.Join(pkgCacheRoot, key[:2])
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, fmt.Errorf("pkg cache: %w", err)
+	}
+
+	objPath := filepath.Join(dir, key+".o")
+	if info, err := os.Stat(objPath); err == nil && !info.IsDir() && info.Size() > 0 {
+		return objPath, true, nil
+	}
+
+	return objPath, false, nil
+}
 
 // csrcCacheLookup returns the cache path for compiling srcPath with the given
 // args. The returned path always exists in the cache layout (the parent dir
@@ -2866,7 +2931,14 @@ func runClean() {
 	}
 
 	for _, e := range entries {
-		if e.Name() == "csrc" || e.Name() == "pure-fn" {
+		// Preserve content-addressed caches: csrc (runtime + //!+file.c
+		// objects), pure-fn (CTFE per-fn .so), pkg (per-pkg .o under
+		// step 7 of incremental compilation). These are pure caches:
+		// hits never reuse stale entries because the key includes the
+		// content + every flag, so leaving them speeds up subsequent
+		// builds without correctness risk. Whole-program artifacts
+		// like .build/run/ and .build/test/ get wiped.
+		if e.Name() == "csrc" || e.Name() == "pure-fn" || e.Name() == "pkg" {
 			continue
 		}
 
