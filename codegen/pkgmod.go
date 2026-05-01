@@ -218,14 +218,15 @@ func (cg *CodeGen) debugDumpUnterminated() {
 // references but doesn't define), main.go can serialize each pkg
 // module to its own .ll and compile in parallel.
 func (cg *CodeGen) addCrossModuleDeclares() {
-	if len(cg.pkgMods) == 0 {
+	if len(cg.pkgMods) == 0 && len(cg.monoMods) == 0 {
 		return
 	}
 
 	// Build a global-pointer -> owning-module index by walking every
 	// module's Globals once. *ir.Global has no Parent field (unlike
 	// *ir.Func), so module ownership has to be reconstructed from the
-	// containers.
+	// containers. Mono modules (step 5) participate alongside per-pkg
+	// modules.
 	globalOwner := map[*ir.Global]*ir.Module{}
 	for _, g := range cg.mod.Globals {
 		globalOwner[g] = cg.mod
@@ -242,6 +243,12 @@ func (cg *CodeGen) addCrossModuleDeclares() {
 		}
 	}
 
+	for _, m := range cg.monoMods {
+		for _, g := range m.Globals {
+			globalOwner[g] = m
+		}
+	}
+
 	// Process cg.mod too — entry-program main / runtime helpers
 	// frequently reference per-pkg fns (e.g. `assert::not_ok` from
 	// inside a test body that codegen emitted directly into cg.mod).
@@ -253,6 +260,13 @@ func (cg *CodeGen) addCrossModuleDeclares() {
 			continue
 		}
 
+		cg.addCrossModuleDeclaresFor(m, globalOwner)
+	}
+
+	// Mono modules need cross-module declares too: their relocated fn
+	// bodies still reference strings, vtables, and other helpers that
+	// live in the original pkg modules.
+	for _, m := range cg.monoMods {
 		cg.addCrossModuleDeclaresFor(m, globalOwner)
 	}
 }
@@ -278,9 +292,22 @@ func (cg *CodeGen) addCrossModuleDeclaresFor(m *ir.Module, globalOwner map[*ir.G
 			return
 		}
 
+		// LLVM requires distinct param names within a function (or all
+		// empty / numeric defaults). Anonymous params from intrinsics
+		// (e.g. @llvm.coro.id) all serialize as "0" via p.Name(), which
+		// collide on declare; synthesize unique p<i> names instead so
+		// the declare verifies.
+		used := map[string]bool{}
 		params := make([]*ir.Param, len(extFn.Params))
+
 		for i, p := range extFn.Params {
-			params[i] = ir.NewParam(p.Name(), p.Type())
+			name := p.Name()
+			if name == "" || used[name] {
+				name = fmt.Sprintf("p%d", i)
+			}
+
+			used[name] = true
+			params[i] = ir.NewParam(name, p.Type())
 		}
 
 		decl := m.NewFunc(extFn.Name(), extFn.Sig.RetType, params...)
@@ -293,6 +320,17 @@ func (cg *CodeGen) addCrossModuleDeclaresFor(m *ir.Module, globalOwner map[*ir.G
 	declareGlobal := func(extG *ir.Global) {
 		if extG == nil || globalOwner[extG] == m || declaredGlobals[extG.Name()] {
 			return
+		}
+
+		// Internal / private globals in the source module are STB_LOCAL
+		// and don't cross object boundaries; cross-module references
+		// would fail to link. Promote the source linkage to weak_odr
+		// so the symbol is exported by the source .o, then emit an
+		// external declare in the consumer.
+		if extG.Linkage == enum.LinkageInternal ||
+			extG.Linkage == enum.LinkagePrivate ||
+			extG.Linkage == enum.LinkageNone {
+			extG.Linkage = enum.LinkageWeakODR
 		}
 
 		decl := m.NewGlobal(extG.Name(), extG.ContentType)
@@ -409,14 +447,17 @@ func walkConstant(c constant.Constant, df func(*ir.Func), dg func(*ir.Global)) {
 // Idempotent per (pkg-module, typedef): repeat calls don't add
 // duplicates because the per-pkg dedup set is rebuilt each time.
 func (cg *CodeGen) echoSharedTypeDefs() {
-	if len(cg.pkgMods) == 0 || len(cg.mod.TypeDefs) == 0 {
+	if len(cg.mod.TypeDefs) == 0 {
 		return
 	}
 
-	for _, name := range cg.pkgModNames() {
-		m := cg.pkgMods[name]
+	if len(cg.pkgMods) == 0 && len(cg.monoMods) == 0 {
+		return
+	}
+
+	echo := func(m *ir.Module) {
 		if m == nil {
-			continue
+			return
 		}
 
 		have := map[irtypes.Type]bool{}
@@ -430,6 +471,14 @@ func (cg *CodeGen) echoSharedTypeDefs() {
 				have[t] = true
 			}
 		}
+	}
+
+	for _, name := range cg.pkgModNames() {
+		echo(cg.pkgMods[name])
+	}
+
+	for _, m := range cg.monoMods {
+		echo(m)
 	}
 }
 

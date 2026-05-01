@@ -1335,20 +1335,42 @@ type namedIR struct {
 // collectPkgIRs serializes every per-pkg LLVM module the codegen built
 // (excluding cg.mod itself, which is serialized separately) and returns
 // them as namedIR entries for compileIRWithPkgs. Sanitizes pkg names
-// for use in temp filenames (`::` -> `_`, etc.).
+// for use in temp filenames (`::` -> `_`, etc.). Also appends the
+// content-addressed mono modules (step 5 of incremental compilation):
+// each carries one or more monomorphized fn bodies and gets compiled
+// to its own .build/mono/<hash>/bin.o so distinct consumers of the
+// same `parse[Point]` instantiation share one cached object.
 func collectPkgIRs(cg *codegen.CodeGen) []namedIR {
 	mods := cg.PkgModules()
-	if len(mods) == 0 {
+	names := cg.PkgModuleNames()
+	monoMods := cg.MonoModules()
+	monoHashes := cg.MonoModuleHashes()
+
+	if len(mods) == 0 && len(monoMods) == 0 {
 		return nil
 	}
 
-	names := cg.PkgModuleNames()
+	out := make([]namedIR, 0, len(mods)+len(monoMods))
 
-	out := make([]namedIR, 0, len(mods))
 	for i, m := range mods {
 		label := strings.NewReplacer("::", "_", "/", "_", " ", "_").Replace(names[i])
 		out = append(out, namedIR{
 			label:  label,
+			irText: fixCoroAttrs(m.String()),
+		})
+	}
+
+	for i, m := range monoMods {
+		// Tag mono modules so the build progress / temp-file names are
+		// distinguishable from per-pkg ones. The hash prefix is the
+		// content-addressed key already; truncate for readability.
+		short := monoHashes[i]
+		if len(short) > 12 {
+			short = short[:12]
+		}
+
+		out = append(out, namedIR{
+			label:  "mono_" + short,
 			irText: fixCoroAttrs(m.String()),
 		})
 	}

@@ -282,6 +282,13 @@ type CodeGen struct {
 	// reflect_table, future ones) appends here and a single pass at the
 	// end of Generate materializes one global per module.
 	llvmUsedRoots map[*ir.Module][]*ir.Global
+
+	// monoMods holds dedicated content-addressed modules carrying
+	// monomorphized fn bodies (step 5 of incremental compilation).
+	// Keyed by mono_hash; populated by extractMonoModules during
+	// finalize. main.go reads these via MonoModules() to drive
+	// .build/mono/<hash>/bin.o caching.
+	monoMods map[string]*ir.Module
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
 	structFieldLLVMTypes map[string][]irtypes.Type
 
@@ -1851,6 +1858,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.finalizeImplSection()
+		// extractMonoModules MUST run before applyPclntabPostPass:
+		// pclntab emits blockaddress(@fn, %bb) constants and lld
+		// rejects them when @fn is only a declare. Moving mono fns
+		// first lets pclntab route the pcs entry into the same mono
+		// module where the fn definition now lives.
+		cg.extractMonoModules()
 		cg.applyPclntabPostPass()
 		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
@@ -1863,6 +1876,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.finalizeImplSection()
+		// extractMonoModules MUST run before applyPclntabPostPass:
+		// pclntab emits blockaddress(@fn, %bb) constants and lld
+		// rejects them when @fn is only a declare. Moving mono fns
+		// first lets pclntab route the pcs entry into the same mono
+		// module where the fn definition now lives.
+		cg.extractMonoModules()
 		cg.applyPclntabPostPass()
 		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
