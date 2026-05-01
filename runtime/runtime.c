@@ -41,3 +41,4 @@ __attribute__((constructor)) static void _tin_stdout_init(void) {
 #include "interop_trampoline.c"  // mmap'd per-instance closure trampolines
 #include "pclntab.c"   // PC -> file:line:col table (replaces libdw / DWARF)
 #include "stacktrace.c" // stacktrace() builtin support (FP walker + pclntab)
+#include "reflect_table.c" // link-time `tin_impl` walker (D1)

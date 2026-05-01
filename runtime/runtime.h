@@ -188,6 +188,15 @@ int32_t     _tin_learn_atom(const char *str);
 const char *_tin_rt_atom_to_str(int32_t code);
 int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but frees str when done
 
+// -- Link-time reflection table (impl trait for struct).
+// Materialized by the compiler: each `impl T for S` becomes one entry in the
+// `tin_impl` (ELF) / `__DATA,__tin_impl` (Mach-O) custom section. Runtime
+// walks the section once on first call and folds each entry into the
+// (type_id -> [trait_atom]) table queried by traitof and friends.
+void    _tin_build_impl_table(void);
+int32_t _tin_impl_count_for_type(int32_t type_id);
+int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx);
+
 // -- Stacktrace capture (frame-pointer walker; see docs/plans/stacktrace-libunwind.md)
 // Writes up to `cap` interned atom codes into `out` (must be cap*sizeof(int32_t)
 // bytes); returns the number actually written. Never panics; on total failure
