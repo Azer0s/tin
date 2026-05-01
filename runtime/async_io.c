@@ -55,35 +55,68 @@ static void _set_nonblocking(int fd) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Add or update a watch entry.  Must be called with _io_watch_mu held.
-// Returns 1 on success, 0 if the table is full or OOM.
+// Watch-table semantics: each entry is keyed by (fd, events) so a fiber
+// parking for read on fd 8 and another fiber parking for write on the
+// same fd 8 coexist as TWO entries. The original keying-by-fd-only
+// collapsed concurrent read+write parkers into one and lost the older
+// one's wakeup, manifesting as UDP server hangs when handle_conn's
+// async_write parked on the same fd as main's recv_from_impl read.
+//
+// events bits: 1 = read (EPOLLIN), 2 = write (EPOLLOUT). The two values
+// are kept disjoint so per-direction lookup in the I/O thread is a
+// trivial mask check.
 static int _io_watch_add_locked(int fd, int64_t pid, int events) {
     for (int i = 0; i < _io_watch_len; i++) {
-        if (_io_watches[i].fd == fd) {
-            _io_watches[i].pid    = pid;
-            _io_watches[i].events = events;
+        if (_io_watches[i].fd == fd && _io_watches[i].events == events) {
+            // Same direction on same fd: replace pid (latest parker
+            // wins; in practice only one fiber should be parked on a
+            // given (fd, direction) at a time).
+            _io_watches[i].pid = pid;
             return 1;
         }
     }
+
     if (_io_watch_len >= _io_watch_cap) {
         if (_io_watch_cap >= _io_watch_max) return 0;
+
         int new_cap = _io_watch_cap * 2;
         if (new_cap > _io_watch_max) new_cap = _io_watch_max;
+
         TinIOWatch *nw = (TinIOWatch *)realloc(_io_watches, (size_t)new_cap * sizeof(TinIOWatch));
         if (!nw) return 0;
+
         _io_watches    = nw;
         _io_watch_cap  = new_cap;
     }
+
     _io_watches[_io_watch_len++] = (TinIOWatch){ fd, pid, events };
     return 1;
+}
+
+// _io_combined_events_locked returns the OR of every event bit currently
+// registered for fd. Used so a single epoll registration can carry both
+// EPOLLIN and EPOLLOUT when read and write watches coexist on one fd.
+// Caller must hold _io_watch_mu.
+static int _io_combined_events_locked(int fd) {
+    int combined = 0;
+
+    for (int i = 0; i < _io_watch_len; i++) {
+        if (_io_watches[i].fd == fd) combined |= _io_watches[i].events;
+    }
+
+    return combined;
 }
 
 // Register fd for the given events and park the current fiber.
 static void _io_park(int fd, int64_t pid, int read_not_write) {
     int events = read_not_write ? 1 : 2;
+    int combined = 0;
 
     pthread_mutex_lock(&_io_watch_mu);
+
     int ok = _io_watch_add_locked(fd, pid, events);
+    if (ok) combined = _io_combined_events_locked(fd);
+
     pthread_mutex_unlock(&_io_watch_mu);
 
     if (!ok) {
@@ -94,16 +127,25 @@ static void _io_park(int fd, int64_t pid, int read_not_write) {
 #if defined(__linux__)
     if (_epoll_fd >= 0) {
         struct epoll_event ev;
-        ev.events  = read_not_write
-                     ? (uint32_t)(EPOLLIN  | EPOLLET | EPOLLONESHOT)
-                     : (uint32_t)(EPOLLOUT | EPOLLET | EPOLLONESHOT);
+        // Combined mask covers every direction currently parked on fd,
+        // so EPOLL_CTL_MOD never accidentally removes the OTHER
+        // direction. Without this, parking write on a fd that already
+        // had a read watch would overwrite the read registration and
+        // the read parker would never wake.
+        uint32_t mask = (uint32_t)(EPOLLET | EPOLLONESHOT);
+        if (combined & 1) mask |= EPOLLIN;
+        if (combined & 2) mask |= EPOLLOUT;
+        ev.events  = mask;
         ev.data.fd = fd;
-        // Use MOD if already registered; ADD otherwise.  Ignore errors.
+
         if (epoll_ctl(_epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0)
             epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, fd, &ev);
     }
 #elif defined(__APPLE__) || defined(__FreeBSD__)
     if (_kqueue_fd >= 0) {
+        // kqueue tracks read and write filters as separate events, so
+        // the per-direction registration is naturally independent and
+        // doesn't need the combined-mask treatment epoll requires.
         struct kevent kev;
         int filter = read_not_write ? EVFILT_READ : EVFILT_WRITE;
         EV_SET(&kev, (uintptr_t)fd, filter, EV_ADD | EV_ONESHOT, 0, 0, (void *)(intptr_t)pid);
@@ -118,50 +160,114 @@ static void _io_park(int fd, int64_t pid, int read_not_write) {
 }
 
 // I/O thread: polls for events and wakes blocked fibers.
+//
+// Per-direction dispatch: an epoll event for fd 8 may carry EPOLLIN,
+// EPOLLOUT, or both. For each direction that fired we look up the
+// matching (fd, events) watch entry and unpark exactly that fiber.
+// After consuming, if any direction remains parked on the fd, we
+// re-arm epoll with the remaining mask (EPOLLONESHOT only disarms
+// what just fired; the leftover direction needs a fresh registration).
 static void *_io_thread_fn(void *_) {
     (void)_;
+
     while (!_io_shutdown) {
 #if defined(__linux__)
         if (_epoll_fd < 0) { usleep(5000); continue; }
+
         struct epoll_event evs[64];
         int n = epoll_wait(_epoll_fd, evs, 64, 5);
+
         for (int i = 0; i < n; i++) {
             int fd = evs[i].data.fd;
-            int64_t pid = -1;
+            uint32_t fired = evs[i].events;
+
+            int64_t read_pid = -1;
+            int64_t write_pid = -1;
+            int remaining = 0;
+
             pthread_mutex_lock(&_io_watch_mu);
-            for (int j = 0; j < _io_watch_len; j++) {
-                if (_io_watches[j].fd == fd) {
-                    pid = _io_watches[j].pid;
-                    // Remove watch (EPOLLONESHOT already disarmed kernel side).
-                    _io_watches[j] = _io_watches[--_io_watch_len];
-                    break;
+
+            // Pop the read watch if read fired.
+            if (fired & (EPOLLIN | EPOLLERR | EPOLLHUP)) {
+                for (int j = 0; j < _io_watch_len; j++) {
+                    if (_io_watches[j].fd == fd && _io_watches[j].events == 1) {
+                        read_pid = _io_watches[j].pid;
+                        _io_watches[j] = _io_watches[--_io_watch_len];
+
+                        break;
+                    }
                 }
             }
+
+            // Pop the write watch if write fired.
+            if (fired & (EPOLLOUT | EPOLLERR | EPOLLHUP)) {
+                for (int j = 0; j < _io_watch_len; j++) {
+                    if (_io_watches[j].fd == fd && _io_watches[j].events == 2) {
+                        write_pid = _io_watches[j].pid;
+                        _io_watches[j] = _io_watches[--_io_watch_len];
+
+                        break;
+                    }
+                }
+            }
+
+            // Compute leftover direction(s) still parked on fd so we
+            // can re-arm epoll. EPOLLONESHOT disables the whole fd
+            // registration after a single delivery; without re-arming,
+            // a parker on the OTHER direction would never wake.
+            remaining = _io_combined_events_locked(fd);
+
             pthread_mutex_unlock(&_io_watch_mu);
-            if (pid >= 0) _tin_fiber_unpark(pid);
+
+            if (remaining != 0) {
+                struct epoll_event re;
+                uint32_t mask = (uint32_t)(EPOLLET | EPOLLONESHOT);
+
+                if (remaining & 1) mask |= EPOLLIN;
+                if (remaining & 2) mask |= EPOLLOUT;
+
+                re.events  = mask;
+                re.data.fd = fd;
+                epoll_ctl(_epoll_fd, EPOLL_CTL_MOD, fd, &re);
+            }
+
+            if (read_pid >= 0)  _tin_fiber_unpark(read_pid);
+            if (write_pid >= 0) _tin_fiber_unpark(write_pid);
         }
 #elif defined(__APPLE__) || defined(__FreeBSD__)
         if (_kqueue_fd < 0) { usleep(5000); continue; }
+
         struct timespec ts = { 0, 5000000L }; // 5ms
         struct kevent evs[64];
         int n = kevent(_kqueue_fd, NULL, 0, evs, 64, &ts);
+
         for (int i = 0; i < n; i++) {
             int64_t pid = (int64_t)(intptr_t)evs[i].udata;
             int fd = (int)evs[i].ident;
+            int wantedEvents = (evs[i].filter == EVFILT_READ) ? 1 : 2;
+
             pthread_mutex_lock(&_io_watch_mu);
+
+            // kqueue events are already per-direction (separate filters
+            // for EVFILT_READ vs EVFILT_WRITE), so match (fd, events)
+            // exactly to remove the right entry.
             for (int j = 0; j < _io_watch_len; j++) {
-                if (_io_watches[j].fd == fd) {
+                if (_io_watches[j].fd == fd && _io_watches[j].events == wantedEvents) {
                     _io_watches[j] = _io_watches[--_io_watch_len];
+
                     break;
                 }
             }
+
             pthread_mutex_unlock(&_io_watch_mu);
+
             if (pid >= 0) _tin_fiber_unpark(pid);
         }
 #else
         usleep(5000);
 #endif
     }
+
     return NULL;
 }
 

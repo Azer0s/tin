@@ -37,17 +37,11 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
   let port i32     = 0
   loop:
     let r = tin_udp_recvfrom_c(fd, &buf[0], 65536, &host, &port)
-    if r == blocked:
-      yield
-    if r < 0:
-      // Hard error from recvfrom; surface as zero-length so accept_impl
-      // can return an Err to the caller.
-      return (buf[0:0], host, port)
-    if r > 0:
-      return (buf[0:r], host, port)
-    // r == 0: empty datagram. Skip it (some kernels deliver them, some
-    // don't; either way an empty payload is meaningless to the echo-
-    // style API). Continue the recv loop without producing a Conn.
+    if r != blocked:
+      let sz = r
+      if sz < 0: sz = 0
+      return (buf[0:sz], host, port)
+    yield
 
 // read_buf_impl copies bytes from a received datagram into out, advancing the cursor.
 // Returns 0 when all bytes have been consumed (signals EOF to AsyncReader callers).
