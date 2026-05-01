@@ -1595,15 +1595,6 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 	linkInputs = append(linkInputs, irObjName)
 	{
-		// -flto=thin makes the .o files contain LLVM bitcode (with ELF/Mach-O
-		// wrappers) so the link step can run cross-TU inlining + dead-code
-		// elimination. Required because per-pkg compile (step 2 of
-		// docs/plans/incremental-compilation.md) cuts cross-pkg call chains
-		// into separate TUs, which the legacy single-TU pipeline used to
-		// inline freely; that lost inlining surfaced as a fragmented-read
-		// race in echo_server stress tests on amd64 GH Actions runners.
-		// ThinLTO restores the cross-TU view at link time without
-		// reverting per-pkg compilation.
 		a := append([]string{optLevel, "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 
 		if isDebug {
@@ -1821,11 +1812,9 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		return err
 	}
 
-	// Link step: pull every compiled .o into one binary. With -flto=thin
-	// passed at compile time, the .o files contain LLVM bitcode and the
-	// link step runs the ThinLTO pipeline (parallel cross-TU inlining +
-	// global dead-code elimination), restoring the cross-pkg optimization
-	// view that the per-pkg compile split removed at the IR level.
+	// Link step: pull every compiled .o into one binary. The link itself
+	// is fast because clang sees only object files and skips parsing /
+	// optimization.
 	args := []string{optLevel}
 	args = append(args, clangTargetFlag()...)
 
