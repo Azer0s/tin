@@ -1512,7 +1512,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			_ = cObj.Close()
 
 			tmpObjs = append(tmpObjs, cObjName)
-			cArgs := append([]string{"-O2", "-c", "-flto=thin"}, clangTargetFlag()...)
+			cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
 
@@ -1604,7 +1604,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		// race in echo_server stress tests on amd64 GH Actions runners.
 		// ThinLTO restores the cross-TU view at link time without
 		// reverting per-pkg compilation.
-		a := append([]string{optLevel, "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+		a := append([]string{optLevel, "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 
 		if isDebug {
 			a = append(a, "-g")
@@ -1655,7 +1655,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		// every compile flag. We pass placeholders for the input/output
 		// paths since the cache key only cares about content+flags, not
 		// the exact temp-file names.
-		flagsForKey := append([]string{optLevel, "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+		flagsForKey := append([]string{optLevel, "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 
 		if isDebug {
 			flagsForKey = append(flagsForKey, "-g")
@@ -1719,7 +1719,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	// is identical for every program, so compiling it once per content+flags
 	// hash saves ~400ms per invocation when the suite of tests is rebuilt.
 	if _, statErr := os.Stat(rtC); statErr == nil {
-		rtArgs := append([]string{"-O2", "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+		rtArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 
 		if isDebug {
 			rtArgs = append(rtArgs, "-g")
@@ -1789,7 +1789,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			}
 		}
 
-		baseArgs := append([]string{"-O2", "-c", "-flto=thin", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
+		baseArgs := append([]string{"-O2", "-c", "-ffunction-sections", "-fdata-sections"}, clangTargetFlag()...)
 		baseArgs = append(baseArgs, compileFlags...)
 
 		cachedPath, hit, err := csrcCacheLookup(cs.path, baseArgs)
@@ -1826,7 +1826,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	// link step runs the ThinLTO pipeline (parallel cross-TU inlining +
 	// global dead-code elimination), restoring the cross-pkg optimization
 	// view that the per-pkg compile split removed at the IR level.
-	args := []string{optLevel, "-flto=thin"}
+	args := []string{optLevel}
 	args = append(args, clangTargetFlag()...)
 
 	if isDebug {
