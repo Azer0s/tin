@@ -712,23 +712,24 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 	}
 
 	var dbgInstBefore int
-	if cg.debugMode && block != nil {
+	wantPosTrack := (cg.debugMode || cg.pclntabUsed) && block != nil
+	if wantPosTrack {
 		dbgInstBefore = len(block.Insts)
 	}
 
 	outBlock, term, err := cg.genStmtInner(block, node)
 
-	// Attach !dbg to every new instruction emitted by this statement.
-	// Without covering all of them, intermediate calls (e.g. the
-	// runtime helper inside `let frames = stacktrace()` or `return f()`
-	// where f is a closure) only pick up the catch-all `line:0`
-	// metadata from ensureAllCallsHaveDbg, which makes libdwfl resolve
-	// them to "file:0:0" at runtime — the wrong cell for tools that
-	// match the stacktrace atoms against sourcepos atoms. Attaching to
-	// every new instruction is also what `clang -g` does on hand-
-	// written C, so this brings Tin's debug info into line with the
-	// expectation set by the toolchain.
-	if cg.debugMode && !cg.emittingARC && block != nil && err == nil {
+	// Attach source-position info to every new instruction emitted by
+	// this statement. Two consumers:
+	//   - debug builds (-g): attachCurrentDbgLoc adds !dbg DILocation
+	//     metadata, materialized as DWARF .debug_line for lldb / gdb.
+	//   - pclntab (always when stacktrace is reachable): the same call
+	//     populates cg.instLineCol; pclntab.go's post-pass reads from
+	//     there to anchor per-call PC entries.
+	// Both paths share the attach helper but are independently gated
+	// inside attachCurrentDbgLoc, so release-with-stacktrace gets the
+	// side map only and emits no DWARF.
+	if wantPosTrack && !cg.emittingARC && err == nil {
 		for i := dbgInstBefore; i < len(block.Insts); i++ {
 			cg.attachCurrentDbgLoc(block.Insts[i])
 		}

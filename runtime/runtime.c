@@ -39,4 +39,5 @@ __attribute__((constructor)) static void _tin_stdout_init(void) {
 #include "time.c"      // _tin_now_ms / _tin_now_us monotonic clock
 #include "interop.c"   // C-callable boundary helpers (#interop wrappers)
 #include "interop_trampoline.c"  // mmap'd per-instance closure trampolines
-#include "stacktrace.c" // stacktrace() builtin support (FP walker + libdwfl, see docs/plans/stacktrace-libunwind.md)
+#include "pclntab.c"   // PC -> file:line:col table (replaces libdw / DWARF)
+#include "stacktrace.c" // stacktrace() builtin support (FP walker + pclntab)

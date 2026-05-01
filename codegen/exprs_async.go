@@ -98,6 +98,23 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	f := cg.mod.NewFunc(name, retType, llParams...)
 	entry := f.NewBlock("entry")
 
+	// Record source file + display name so pclntab attributes lambda
+	// frames to the user's source file with a sensible synthetic name
+	// (e.g. `<lambda>@file:line:col` instead of `lambda.0+0x21`).
+	if cg.filename != "" {
+		if cg.fnSourceFiles == nil {
+			cg.fnSourceFiles = map[string]string{}
+		}
+
+		cg.fnSourceFiles[f.Name()] = cg.filename
+	}
+
+	if cg.fnDisplayNames == nil {
+		cg.fnDisplayNames = map[string]string{}
+	}
+
+	cg.fnDisplayNames[f.Name()] = "<lambda>"
+
 	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env inside the lambda body.

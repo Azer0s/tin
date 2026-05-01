@@ -1549,17 +1549,15 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 		// x86_64, so emit the negative path explicitly when stacktrace
 		// isn't reachable. (Phase 6, docs/plans/stacktrace-libunwind.md.)
 		//
-		// When stacktrace is reachable we also emit `.debug_line` so the
-		// runtime can resolve IPs to file:line:col via libdwfl, matching
-		// the atom format produced by the compile-time `sourcepos()`
-		// builtin. -gline-tables-only is the cheap variant of -g that
-		// keeps just the line table; full -g (already implied by
-		// isDebug) supersedes this so we don't add it then.
+		// Source line resolution no longer goes through DWARF: the
+		// codegen post-pass (codegen/pclntab.go) emits a custom
+		// `tin_pclntab` section that runtime/pclntab.c reads directly,
+		// so we don't need `-gline-tables-only` even when stacktrace
+		// is reachable. -g still emits full DWARF (the explicit `-g`
+		// branch above) for lldb / gdb consumers, but stacktrace itself
+		// uses pclntab in every build.
 		if stacktraceLinkActive {
 			a = append(a, "-funwind-tables", "-fasynchronous-unwind-tables")
-			if !isDebug {
-				a = append(a, "-gline-tables-only")
-			}
 		} else {
 			a = append(a, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
 		}
@@ -1583,17 +1581,18 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			}
 		}
 
-		// runtime/stacktrace.c gates its FP-walker + libdwfl body on
-		// TIN_STACKTRACE so programs that don't use stacktrace() don't
-		// incur the libdw link dependency. The csrc cache key includes
-		// the canonical argv, so this define naturally produces two
-		// distinct cached .o entries (one with the stub, one with the
-		// real walk) instead of cross-contaminating a single cache slot.
-		// Mirror the unwind-table + line-info flags so libdwfl can map
-		// runtime fns (`_worker_thread`, `_tin_fiber_*`) to their
-		// fiber.c / arc.c source lines in captured traces. Without
-		// `-gline-tables-only` runtime helpers render as `sym+0x<off>`
-		// while user code shows `sym@file:line:col`, which is jarring.
+		// runtime/stacktrace.c gates its FP-walker body on TIN_STACKTRACE
+		// so programs that don't use stacktrace() don't incur the
+		// resolver code or the pclntab section overhead. The csrc cache
+		// key includes the canonical argv, so this define naturally
+		// produces two distinct cached .o entries (one with the stub,
+		// one with the real walk) instead of cross-contaminating a
+		// single cache slot.
+		//
+		// Source-line resolution comes from runtime/pclntab.c (always
+		// linked via the umbrella) reading the codegen-emitted
+		// `tin_pclntab` section. No DWARF / libdw involved at runtime,
+		// so no `-gline-tables-only` here either.
 		if stacktraceLinkActive {
 			// -fno-omit-frame-pointer is REQUIRED for the FP walker:
 			// stacktrace.c reads rbp/x29 via inline asm and walks the
@@ -1608,9 +1607,6 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 			rtArgs = append(rtArgs, "-DTIN_STACKTRACE=1",
 				"-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer",
 				"-funwind-tables", "-fasynchronous-unwind-tables")
-			if !isDebug {
-				rtArgs = append(rtArgs, "-gline-tables-only")
-			}
 		} else {
 			rtArgs = append(rtArgs, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
 		}
@@ -1710,29 +1706,28 @@ func compileIR(ir, outBin string, libMode bool, extraObjs []string, cSources []c
 	args = append(args, cLinkerFlags...)
 	args = append(args, extraObjs...)
 	args = append(args, extraCFlags...)
-	// Conditional libdwfl / dynsym wiring (see Phase 6 in
-	// docs/plans/stacktrace-libunwind.md). Only programs that reference
-	// `stacktrace()` pay the binary-size cost of dynsym promotion and
-	// the libdw dependency; default builds stay lean.
+	// Conditional dynsym wiring. Only programs that reference
+	// `stacktrace()` pay the binary-size cost of dynsym promotion;
+	// default builds stay lean.
 	//
-	// Linux/FreeBSD: link `-ldw` (elfutils libdwfl). The runtime walks
-	// frames itself via the saved frame-pointer chain (codegen emits
-	// `frame-pointer="all"` on every IR fn when stacktrace is in use)
-	// and uses libdwfl to map IPs to "file:line:col", matching the
-	// atom format the compile-time `sourcepos()` builtin emits.
-	// `-rdynamic` promotes Tin user fns to the dynsym so dladdr can
-	// resolve them.
+	// `-rdynamic` promotes Tin user fns into the dynamic symbol table
+	// so dladdr can recover symbol names for IPs that fall outside the
+	// pclntab table (typically: runtime helpers, third-party C, libc).
+	// pclntab itself doesn't need dynsym — it stores names directly in
+	// .rodata and resolves via in-image section lookup — but the
+	// dladdr fallback in resolve_frame still does, otherwise frames in
+	// non-Tin code render as `??+0x<addr>` instead of `<lib>:sym+0x<off>`.
 	//
-	// macOS: elfutils has no Mach-O equivalent, so `-ldw` is omitted
-	// and stacktrace.c's TIN_ST_HAVE_LIBDW gate falls back to
-	// dladdr-only resolution ("symbol+0x<off>", no source coords).
-	// dyld already keeps local symbols visible to dladdr until `strip`
-	// removes them, so `-rdynamic` is also unnecessary.
-	// Use TARGET OS, not host OS — when cross-compiling Linux -> Darwin
-	// the produced binary should NOT carry -ldw/-rdynamic
-	// (those would either fail the link or fail at load time on Mach-O).
+	// macOS: dyld already keeps local symbols visible to dladdr until
+	// `strip` removes them, so `-rdynamic` is unnecessary on the
+	// Mach-O target.
+	//
+	// libdw / -ldw is GONE: the pclntab path in runtime/pclntab.c is
+	// the sole source-line resolver in every build (release + -g).
+	// -g still emits full DWARF for lldb / gdb, but stacktrace.c never
+	// reads it.
 	if stacktraceLinkActive && targetGOOS != "darwin" {
-		args = append(args, "-ldw", "-rdynamic")
+		args = append(args, "-rdynamic")
 	}
 
 	args = append(args, "-o", outBin)

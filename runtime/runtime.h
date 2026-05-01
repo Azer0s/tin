@@ -203,6 +203,66 @@ int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but fre
 #define TIN_ST_HIDE_MAIN    0x8   // drop the main() / _start / __libc_start_* tail
 int32_t     tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags);
 
+// -- pclntab (PC -> file:line:col table; see runtime/pclntab.c)
+//
+// Replaces the libdw / DWARF dependency for stacktrace symbol resolution.
+// Codegen emits one TinPclnFnHdr per Tin function into the `tin_pclntab`
+// section (Linux) / `__TIN,__pclntab` (Mach-O). At image load time a
+// __attribute__((constructor)) per image calls _tin_pclntab_register_self
+// which finds its image's section bounds and adds them to the process-
+// wide table. Lookup is done by tin_pclntab_resolve.
+//
+// Layout MUST match codegen/pclntab.go pclntabFnHdrType().
+//
+// pc_addr stores an absolute address (resolved by ld.so / dyld at load
+// time under ASLR), not an offset. The runtime computes
+// `pc_addr - fn_start` on demand. We store absolute pointers because
+// PIC code (REPL cells / CTFE shims compiled with `-fPIC`) cannot
+// represent the link-time `blockaddress(@fn,%bb) - @fn` subtraction;
+// the assembler errors with "Cannot represent a difference across
+// sections". Trading 4 extra bytes per entry for portability.
+typedef struct {
+    const void *pc_addr; // absolute address of the BB start
+    uint32_t    line;
+    uint32_t    col;
+} TinPclnPC;
+
+typedef struct {
+    const void      *fn_start;   // bitcast of fn pointer at link time
+    const char      *name;       // points into .rodata (NOT NUL-terminated)
+    const char      *file;       // points into .rodata (NOT NUL-terminated)
+    uint32_t         name_len;
+    uint32_t         file_len;
+    const TinPclnPC *pcs;        // NULL when this is a marker-only header
+    uint32_t         npcs;       // 0 for marker-only headers
+} TinPclnFnHdr;
+
+// Register a per-image pclntab range. Invoked from each loaded image's
+// codegen-emitted __tin_pclntab_ctor at load time. The args are
+// per-image and let one helper resolve different sections per call:
+//
+//   ELF (Linux / FreeBSD): start/end are linker-synthesized
+//     __start_/__stop_tin_pclntab references local to THIS image; the
+//     marker arg is NULL.
+//
+//   Mach-O (macOS): start/end are NULL; the marker arg is any address
+//     in this image (the constructor passes its own address). The
+//     runtime uses dladdr+getsectiondata to find the section bounds.
+//
+// Idempotent; safe to call from any image's constructor.
+void _tin_pclntab_register_image(const TinPclnFnHdr *start,
+                                 const TinPclnFnHdr *end,
+                                 const void *marker);
+
+// Resolve an instruction pointer to (name, file, line, col). Returns 1 on
+// match, 0 on miss. Output strings are NOT NUL-terminated; use the
+// matching length fields. Safe to call from any thread; non-blocking after
+// first call (sort happens once under a mutex; readers go lock-free).
+int _tin_pclntab_resolve(uintptr_t ip,
+                         const char **name, uint32_t *name_len,
+                         const char **file, uint32_t *file_len,
+                         uint32_t *line, uint32_t *col);
+
 // -- #handover: take ownership of a C pointer returned by an extern function.
 // Platform-specific malloc size detection used by arc.c / atom.c.
 #ifdef __APPLE__

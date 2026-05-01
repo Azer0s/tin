@@ -1,4 +1,4 @@
-// tin runtime - stacktrace capture (frame-pointer walker)
+// tin runtime - stacktrace capture (frame-pointer walker + pclntab)
 //
 // API contract:
 //   int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags)
@@ -8,21 +8,21 @@
 //     - returns the number actually written
 //     - never panics; on total failure returns 0
 //
-// Atom format: each frame renders as "symbol@file:line:col" when
-// libdwfl + dladdr both resolve. Without line info: just
-// "symbol+0x<offset>". Without symbol or line info: "??+0x<addr>".
-// Frozen spawn frames carry a "<spawn-of>:" prefix.
+// Atom format: each frame renders as "symbol@file:line:col" when the
+// PC pclntab table covers the IP. Frames in non-Tin code (libc,
+// runtime helpers built without pclntab metadata) fall through to
+// dladdr-only resolution: "<lib>:symbol+0x<off>" or "??+0x<addr>"
+// when even dladdr comes up empty. Frozen spawn frames carry a
+// "<spawn-of>:" prefix.
 //
 // Walking strategy: we follow the frame-pointer chain (rbp on x86_64,
 // x29 on aarch64). Codegen emits `frame-pointer="all"` on every IR
 // function (see codegen/codegen.go applyStacktracePostPass), so every
 // Tin frame has a valid `[fp+0] = saved_fp, [fp+8] = return_ip`
-// layout. This avoids libunwind entirely - libunwind 1.8.x ships with
+// layout. This avoids libunwind entirely — libunwind 1.8.x ships with
 // CONSERVATIVE_CHECKS=1 baked in, which probes memory readability via
 // `syscall(SYS_write, pipe_fd, addr, 1)`; valgrind flags those as
-// reads of unaddressable bytes (the writeable end of the probe pipe is
-// the kernel, not us, so the bytes are conceptually fine but the
-// instrumentation can't tell).
+// reads of unaddressable bytes.
 //
 // Trade-off (FP walking vs libunwind .eh_frame walking): every frame
 // in the chain MUST preserve the frame pointer. Tin frames do (codegen
@@ -33,17 +33,20 @@
 // `-O2` (which omits frame pointers on x86_64 Linux), the walk
 // terminates at the first such frame and the chain truncates. Users
 // who want stacktrace() to walk through their own C must build that C
-// with `-fno-omit-frame-pointer`. libunwind's .eh_frame walking would
-// have handled this transparently, but the valgrind issue above made
-// it impractical.
+// with `-fno-omit-frame-pointer`.
 //
-// The whole libdwfl/dladdr path is gated on TIN_STACKTRACE so programs
-// that never call stacktrace() do not pull in the libdw link
-// dependency. Phase 6 of docs/plans/stacktrace-libunwind.md sets this
-// define from main.go conditional on cg.StacktraceUsed(), which in
-// turn is fed by the AST pre-pass detectStacktraceUsage. Programs
-// that don't use stacktrace() get the stub branch below; programs
-// that do get the real walk and link with -ldw/-rdynamic.
+// Source-position resolution: pclntab.c reads a custom binary section
+// emitted by the codegen post-pass (codegen/pclntab.go). One header
+// per Tin function maps fn_start -> {name, file, [pc_off, line, col]}.
+// Lookup is O(log n) over both the per-image fn list and per-fn PC
+// table. No DWARF, no libdw, no debuginfod.
+//
+// The whole pclntab path is gated on TIN_STACKTRACE so programs that
+// never call stacktrace() don't pay any binary-size cost. Phase 6 of
+// docs/plans/stacktrace-libunwind.md sets this define from main.go
+// conditional on cg.StacktraceUsed(), which in turn is fed by the AST
+// pre-pass detectStacktraceUsage. Programs that don't use stacktrace()
+// get the stub branch below.
 
 #include "runtime.h"
 
@@ -57,14 +60,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-
-// libdwfl (elfutils) is Linux/FreeBSD-only. macOS ships no equivalent;
-// when targeting Darwin we drop the line-info pass and fall back to
-// dladdr-only resolution ("symbol+0x<off>", no source coords).
-#if defined(__linux__) || defined(__FreeBSD__)
-#  define TIN_ST_HAVE_LIBDW 1
-#  include <elfutils/libdwfl.h>
-#endif
 
 // Per-frame buffer for the formatted "symbol@file:line:col" /
 // "<sym>+0x<off>" atom name. 512 bytes is overkill for typical paths
@@ -224,134 +219,12 @@ static int fp_walk(uintptr_t start_fp, uintptr_t *out, int cap) {
     return n;
 }
 
-#ifdef TIN_ST_HAVE_LIBDW
-
-// libdwfl session, lazily initialised on first stacktrace call.
-// dwfl_begin / dwfl_linux_proc_report walk /proc/self/maps to discover
-// every loaded module and their .debug_line tables. The session itself
-// is process-wide and read-only after initialisation, so we share it
-// across threads with a mutex around the (rare) init step.
-//
-// Concurrency: the fast path reads `_tin_dwfl_tried` with acquire
-// semantics, paired with a release store on the slow path AFTER
-// `_tin_dwfl` is published. Without the acquire/release pair, a
-// reader on a weakly-ordered architecture (AArch64) could observe
-// `_tin_dwfl_tried == 1` while still seeing a stale `_tin_dwfl ==
-// NULL`, dropping every line-info lookup on that thread.
-//
-// stdatomic.h gives us the proper relaxed-acq-rel pair without
-// needing a mutex on the hot path.
-//
-// Known limitation: the dwfl session is a one-shot snapshot of
-// /proc/self/maps. Modules loaded later via `dlopen` don't get a
-// `.debug_line` lookup; their frames render with symbol+offset only.
-// Modules unloaded with `dlclose` AFTER first stacktrace call leave
-// stale entries in the per-IP atom cache, which can produce wrong
-// resolutions for IPs in addresses since reused. Tin's runtime
-// largely doesn't dlclose, but the CTFE per-fn cache occasionally
-// does. Acknowledged as out-of-scope for now.
-#include <stdatomic.h>
-
-static Dwfl              *_tin_dwfl       = NULL;
-static pthread_mutex_t    _tin_dwfl_mu    = PTHREAD_MUTEX_INITIALIZER;
-static atomic_int         _tin_dwfl_tried = 0;
-
-// find_debuginfo_no_debuginfod replaces dwfl_standard_find_debuginfo so
-// that libdwfl never falls through to debuginfod for modules without
-// local .debug data (typically stripped libc / libpthread). The
-// standard callback's debuginfod fallback dlopens libdebuginfod.so.1,
-// whose `debuginfod_begin` unconditionally calls `curl_global_init`,
-// which in turn pulls in libcurl -> ngtcp2 -> libssl/libcrypto plus a
-// pile of OpenSSL provider state. Those allocations are intentionally
-// leaked by their respective libraries (no public destructor) and
-// surface under valgrind as ~40 KiB of still-reachable blocks (23
-// distinct loss records).
-//
-// We don't need network-backed debug info: Tin's own frames have
-// .debug_line embedded directly via -gline-tables-only, and libc
-// frames degrade gracefully to "symbol+0x<off>" without it. Returning
-// -1 immediately tells libdwfl "no separate .debug file available";
-// the embedded debug data is still returned from .debug_line lookups
-// in the main module.
-static int find_debuginfo_no_debuginfod(Dwfl_Module *mod, void **userdata,
-        const char *modname, Dwarf_Addr base, const char *file_name,
-        const char *debuglink_file, GElf_Word debuglink_crc,
-        char **debuginfo_file_name) {
-    (void)mod; (void)userdata; (void)modname; (void)base;
-    (void)file_name; (void)debuglink_file; (void)debuglink_crc;
-    (void)debuginfo_file_name;
-    return -1;
-}
-
-static const Dwfl_Callbacks _tin_dwfl_cb = {
-    .find_elf       = dwfl_linux_proc_find_elf,
-    .find_debuginfo = find_debuginfo_no_debuginfod,
-    .debuginfo_path = NULL,
-};
-
-// dwfl_session_atexit calls dwfl_end on the process-wide libdwfl session at
-// program shutdown. libdw caches DIE units in a tsearch tree (per-CU,
-// allocated lazily by __libdw_intern_next_unit) that lives on the heap with
-// no public destructor of its own; dwfl_end is the only documented way to
-// flush them. Without this hook valgrind reports 100s-1000s of bytes
-// "possibly lost" inside libdw_findcu/dwarf_get_units for any program that
-// resolved a single stacktrace frame.
-static void dwfl_session_atexit(void) {
-    pthread_mutex_lock(&_tin_dwfl_mu);
-    if (_tin_dwfl != NULL) {
-        dwfl_end(_tin_dwfl);
-        _tin_dwfl = NULL;
-    }
-    pthread_mutex_unlock(&_tin_dwfl_mu);
-}
-
-static Dwfl *dwfl_session(void) {
-    if (atomic_load_explicit(&_tin_dwfl_tried, memory_order_acquire)) {
-        return _tin_dwfl;
-    }
-
-    pthread_mutex_lock(&_tin_dwfl_mu);
-    if (!atomic_load_explicit(&_tin_dwfl_tried, memory_order_relaxed)) {
-        Dwfl *d = dwfl_begin(&_tin_dwfl_cb);
-        if (d != NULL) {
-            if (dwfl_linux_proc_report(d, getpid()) != 0
-                || dwfl_report_end(d, NULL, NULL) != 0) {
-                dwfl_end(d);
-                d = NULL;
-            }
-        }
-        if (d != NULL) {
-            // Register the teardown hook on first successful init only; atexit
-            // is process-wide so a second registration would call dwfl_end
-            // twice. Failure to register is non-fatal: we'd lose the libdw
-            // cache flush at shutdown but resolution still works.
-            (void)atexit(dwfl_session_atexit);
-        }
-        // Publish _tin_dwfl FIRST, then release-store the flag so any
-        // reader that observes _tried == 1 also observes the d store.
-        _tin_dwfl = d;
-        atomic_store_explicit(&_tin_dwfl_tried, 1, memory_order_release);
-    }
-    pthread_mutex_unlock(&_tin_dwfl_mu);
-    return _tin_dwfl;
-}
-
-#else  // TIN_ST_HAVE_LIBDW
-
-// Stub for platforms without elfutils (macOS). Stacktrace falls back
-// to dladdr-only resolution; resolve_frame's libdwfl branch never
-// produces a hit so the format degrades to "symbol+0x<off>".
-static void *dwfl_session(void) { return NULL; }
-
-#endif  // TIN_ST_HAVE_LIBDW
-
 static int32_t resolve_and_intern_cached(uintptr_t ip, int spawn_of);
 
 // is_shared_lib_path classifies dli_fname as belonging to a shared lib
 // (.so on Linux/BSD, .dylib on macOS, versioned ".so." anywhere) vs the
-// main binary. Used by the dladdr fallback path when libdwfl can't
-// resolve an IP; libdw / dwfl don't surface "is this the executable"
-// directly, so we detect by extension.
+// main binary. Used by the dladdr fallback path when pclntab can't
+// resolve an IP (e.g. libc, third-party C libraries).
 static int is_shared_lib_path(const char *path) {
     if (!path) return 0;
     size_t len = strlen(path);
@@ -399,7 +272,7 @@ static int is_main_entry(const char *sym) {
 //
 // `lib_path` is dli_fname (or NULL). `sym` is the resolved symbol name
 // (or NULL when only address is known). `unresolved` is set when both
-// libdwfl and dladdr came up empty — i.e. the frame would render as
+// pclntab and dladdr came up empty — i.e. the frame would render as
 // "??+0x<addr>".
 static int frame_decision(int32_t flags, const char *lib_path,
                           const char *sym, int unresolved) {
@@ -422,18 +295,17 @@ static int frame_decision(int32_t flags, const char *lib_path,
 // should not write this frame.
 //
 // Resolution priority for the atom name:
-//   1. libdwfl line + dladdr symbol -> "symbol@file:line:col"
-//   2. line only                    -> "file:line:col"
-//   3. symbol only                  -> "<lib>:symbol+0x<off>" or "symbol+0x<off>"
-//   4. neither                      -> "??+0x<addr>"
+//   1. pclntab hit                  -> "symbol@file:line:col"
+//   2. dladdr only                  -> "<lib>:symbol+0x<off>" or "symbol+0x<off>"
+//   3. neither                      -> "??+0x<addr>"
 //
 // Frozen spawn frames get a leading "<spawn-of>:" prefix so consumers
 // can filter by either prefix.
 //
-// Symbol resolution is dladdr-only since dropping libunwind. main.go
-// links the binary with `-rdynamic`, which copies all defined symbols
-// into .dynsym, so dladdr finds user functions and tin_test_*
-// trampolines just as well as libunwind's _Uelf64_get_proc_name did.
+// Note: the HIDE_LIBC filter still needs dli_fname to classify the
+// IP's containing module, so we always run dladdr regardless of
+// pclntab outcome. dladdr is fast (no allocation, no I/O) so the cost
+// is negligible.
 static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
     char buf[TIN_ST_BUFSZ];
     const char *spawn_pfx = spawn_of ? "<spawn-of>:" : "";
@@ -448,29 +320,42 @@ static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
         off = (unsigned long)ip - (unsigned long)info.dli_saddr;
     }
 
-    // libdwfl line lookup (may produce file:line:col). Only available
-    // on platforms with elfutils (see TIN_ST_HAVE_LIBDW above); on
-    // macOS this branch is compiled out and `src` stays NULL so the
-    // formatter falls through to the symbol+offset path.
-    const char *src    = NULL;
-    int         lineno = 0;
-    int         colno  = 0;
-#ifdef TIN_ST_HAVE_LIBDW
-    Dwfl *d = dwfl_session();
-    if (d != NULL) {
-        Dwfl_Module *mod  = dwfl_addrmodule(d, (Dwarf_Addr)ip);
-        Dwfl_Line   *line = mod ? dwfl_module_getsrc(mod, (Dwarf_Addr)ip) : NULL;
-        if (line) {
-            src = dwfl_lineinfo(line, NULL, &lineno, &colno, NULL, NULL);
-        }
-    }
-#endif
+    // pclntab lookup: produces (name, file, line, col) for any IP that
+    // landed in a Tin function (main binary OR any dlopen'd image).
+    // Misses for libc / runtime helpers / foreign C — those fall
+    // through to the dladdr formatter below.
+    const char *pcl_name     = NULL;
+    const char *pcl_file     = NULL;
+    uint32_t    pcl_name_len = 0;
+    uint32_t    pcl_file_len = 0;
+    uint32_t    pcl_line     = 0;
+    uint32_t    pcl_col      = 0;
+    int         have_pcl = _tin_pclntab_resolve(ip,
+        &pcl_name, &pcl_name_len, &pcl_file, &pcl_file_len,
+        &pcl_line, &pcl_col);
 
     // Decide whether to keep this frame given the active filters.
-    int unresolved = (sym_name == NULL && src == NULL);
-    if (flags != 0 && !frame_decision(flags,
-            have_dli ? info.dli_fname : NULL, sym_name, unresolved)) {
-        return 0;
+    // pclntab name takes priority over dladdr for filter classification
+    // (HIDE_RUNTIME / HIDE_MAIN), since pclntab gives us the original
+    // Tin name even when dladdr's dynsym lookup returned a mangled or
+    // exported alias.
+    const char *filter_sym = sym_name;
+    int unresolved = (pcl_name == NULL && sym_name == NULL);
+    if (flags != 0) {
+        // pclntab strings are not NUL-terminated; copy into a stack
+        // buffer for the filter check (interned name strings stay
+        // bounded by the longest Tin identifier, comfortably under
+        // 256 chars).
+        char pcl_name_z[256];
+        if (pcl_name && pcl_name_len < sizeof(pcl_name_z)) {
+            memcpy(pcl_name_z, pcl_name, pcl_name_len);
+            pcl_name_z[pcl_name_len] = '\0';
+            filter_sym = pcl_name_z;
+        }
+        if (!frame_decision(flags,
+                have_dli ? info.dli_fname : NULL, filter_sym, unresolved)) {
+            return 0;
+        }
     }
 
     // Format the atom according to resolution coverage. Atoms whose
@@ -478,12 +363,12 @@ static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
     // atom" branch, so they need surrounding quotes for round-trip
     // equality with hand-written '"name"' literals.
     int written;
-    if (sym_name && src) {
-        written = snprintf(buf, sizeof buf, "\"%s%s@%s:%d:%d\"",
-            spawn_pfx, sym_name, src, lineno, colno);
-    } else if (src) {
-        written = snprintf(buf, sizeof buf, "\"%s%s:%d:%d\"",
-            spawn_pfx, src, lineno, colno);
+    if (have_pcl) {
+        written = snprintf(buf, sizeof buf, "\"%s%.*s@%.*s:%u:%u\"",
+            spawn_pfx,
+            (int)pcl_name_len, pcl_name,
+            (int)pcl_file_len, pcl_file,
+            pcl_line, pcl_col);
     } else if (sym_name) {
         const int in_lib = have_dli && is_shared_lib_path(info.dli_fname);
         if (in_lib) {
@@ -585,7 +470,7 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     int32_t n = 0;
     for (int i = 0; i < raw_n && n < cap; i++) {
         // IP-minus-1 lands inside the call instruction itself, not
-        // the return address that follows it. dladdr+libdwfl both
+        // the return address that follows it. dladdr+pclntab both
         // tolerate either, but the inside-call form gives the
         // correct line number for the call site.
         uintptr_t ip = ips[i] - 1;
@@ -633,5 +518,10 @@ int32_t tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags) {
     (void)out; (void)cap; (void)flags;
     return 0;
 }
+
+// pclntab readers always link in (the registrar is referenced from any
+// image that contains a constructor); when stacktrace is unused, no
+// caller invokes _tin_pclntab_resolve and the function is DCE'd. The
+// readers themselves live in pclntab.c and don't reference stacktrace.
 
 #endif  // TIN_STACKTRACE

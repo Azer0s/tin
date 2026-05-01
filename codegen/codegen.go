@@ -363,6 +363,48 @@ type CodeGen struct {
 	// cost for stacktrace-related machinery.
 	stacktraceUsed bool
 
+	// pclntab state: emitted at the end of Generate (applyPclntabPostPass)
+	// when stacktraceUsed is true. Replaces the libdw / DWARF dependency
+	// for stacktrace symbol resolution with a Go-style PC -> file:line:col
+	// table embedded in a custom binary section. See codegen/pclntab.go.
+	// pclntabUsed is set when stacktrace is reachable (mirrors
+	// stacktraceUsed). Distinct from debugMode: pclntabUsed only
+	// enables per-inst line:col capture into instLineCol, while
+	// debugMode also emits DICompileUnit / DISubprogram / DILocation
+	// nodes that materialize as DWARF sections in the final binary.
+	pclntabUsed bool
+
+	// instLineCol stores per-instruction (line, col) source positions
+	// captured at attach time even when debug mode is off. Pclntab's
+	// post-pass walks fn.Blocks and reads from this map (preferring it
+	// over !dbg metadata) to anchor per-call PC entries.
+	instLineCol map[ir.Instruction]ast.Pos
+
+	pclntabPCType     *irtypes.StructType            // {i32 pc_off, i32 line, i32 col}
+	pclntabHdrType    *irtypes.StructType            // per-fn header
+	pclntabHdrs       []*ir.Global                   // emitted hdrs (pinned via @llvm.used)
+	pclntabHdrCount   int                            // monotonic suffix for hdr / pcs symbol names
+	pclntabStrCount   int                            // monotonic suffix for interned strings
+	pclntabSplitCount int                            // monotonic suffix for split-block labels
+	pclntabStringPool map[string]pclntabStringEntry  // dedup interned strings within this module
+	pclntabCtorFn     *ir.Func                       // ctor created in pre-marker phase, finalized after
+	fnSourceFiles     map[string]string              // ir-fn-name -> source .tin path
+	// fnDisplayNames maps mangled IR names back to user-readable Tin names
+	// for stacktrace display. Populated at predeclare time so the original
+	// AST context (package, struct receiver, generic type-args) is in hand.
+	// Format examples:
+	//   "sync__AtomicI64_deinit" -> "sync::AtomicI64.deinit"
+	//   "make__i64"              -> "make[i64]"
+	//   "_tin_user_main"         -> "main"
+	//   "foo$coro"               -> "foo$coro"  (passthrough for $coro variants;
+	//                                            display layer keeps the marker)
+	fnDisplayNames map[string]string
+
+	// curMethodReceiverStruct is the struct name when the codegen flow is
+	// emitting a struct method (genStructMethod sets it; helpers used by
+	// fn-emit pick it up). Empty when the current fn is not a method.
+	curMethodReceiverStruct string
+
 	// pureFoldBudget caps the total node-evaluation work spent on a
 	// single top-level #pure call (sum across all loops, recursion, and
 	// nested call expansions). When the budget is exhausted the
@@ -1332,12 +1374,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// dladdr "<symbol>+<offset>" form for Tin user code.
 	cg.detectStacktraceUsage(prog.Stmts)
 
-	if cg.stacktraceUsed && !cg.debugMode {
-		cg.debugMode = true
-	}
+	// pclntabUsed mirrors stacktraceUsed for now. It controls the
+	// per-instruction line/col side-map (cg.instLineCol) that the
+	// pclntab post-pass reads to build per-fn PC tables. Unlike
+	// debugMode, enabling this does NOT pull in DWARF emission —
+	// release builds get pclntab WITHOUT bloating the binary with
+	// .debug_info / .debug_line / .debug_str sections that nothing
+	// reads. -g (debugMode) still emits full DWARF for lldb / gdb.
+	cg.pclntabUsed = cg.stacktraceUsed
 
-	// Initialize DWARF debug metadata when -g is active OR stacktrace
-	// is reachable (which implicitly needs line info for IP resolution).
+	// Initialize DWARF debug metadata only when -g is active. pclntab
+	// captures source positions through cg.instLineCol instead, so the
+	// runtime resolver works without a DICompileUnit graph in the IR.
 	if cg.debugMode {
 		cg.initDebugInfo()
 	}
@@ -1716,6 +1764,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
+		cg.applyPclntabPostPass()
 
 		return cg.mod, nil
 	}
@@ -1724,6 +1773,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	if cg.replMode {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
+		cg.applyPclntabPostPass()
 
 		return cg.mod, nil
 	}
@@ -1938,6 +1988,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	cg.applyStacktracePostPass()
+	cg.applyPclntabPostPass()
 
 	return cg.mod, nil
 }

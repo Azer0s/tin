@@ -1065,6 +1065,14 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 
 	var irName string
 
+	// Save / restore the receiver struct so genFuncDecl's display-name
+	// recording (recordFnDisplayName, called from inside genFuncDeclAs)
+	// renders the user-visible form `Struct.method` instead of just
+	// the bare method name.
+	prevRecv := cg.curMethodReceiverStruct
+	cg.curMethodReceiverStruct = structName
+	defer func() { cg.curMethodReceiverStruct = prevRecv }()
+
 	// Overloading: use the mangled name when this method belongs to an overload set.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
@@ -1981,6 +1989,27 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
+
+	// Record the source file for this fn. pclntab.go uses this at the
+	// post-pass to emit per-fn header entries with correct file paths
+	// even when imports from other files were processed earlier (which
+	// would leave cg.filename pointing at a different .tin source).
+	if f != nil && cg.filename != "" {
+		if cg.fnSourceFiles == nil {
+			cg.fnSourceFiles = map[string]string{}
+		}
+
+		cg.fnSourceFiles[f.Name()] = cg.filename
+	}
+
+	// Record the user-visible display name (`pkg::name` for top-level
+	// fns, `pkg::Struct.method` when cg.curMethodReceiverStruct is set
+	// before calling here). pclntab.go's unmangleTinName consults this
+	// map at trace render time so users see source-level names instead
+	// of IR-mangled ones (`sync__AtomicI64_deinit` vs `sync::AtomicI64.deinit`).
+	if f != nil && f.Name() != "" {
+		cg.recordFnDisplayName(f.Name(), n)
+	}
 
 	// Emit DISubprogram for debug builds, and seed currentPos so that the
 	// parameter allocas and first body instruction are tagged with the
