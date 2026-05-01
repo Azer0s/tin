@@ -211,13 +211,12 @@ static void *_io_thread_fn(void *_) {
                 }
             }
 
-            // Compute leftover direction(s) still parked on fd so we
-            // can re-arm epoll. EPOLLONESHOT disables the whole fd
-            // registration after a single delivery; without re-arming,
-            // a parker on the OTHER direction would never wake.
+            // Compute leftover direction(s) still parked on fd and
+            // re-arm epoll INSIDE the lock so a concurrent _io_park
+            // for the same fd can't race the registration. Without
+            // this, the racing _io_park's MOD could happen first,
+            // then this re-arm clobbers it back to a stale mask.
             remaining = _io_combined_events_locked(fd);
-
-            pthread_mutex_unlock(&_io_watch_mu);
 
             if (remaining != 0) {
                 struct epoll_event re;
@@ -230,6 +229,8 @@ static void *_io_thread_fn(void *_) {
                 re.data.fd = fd;
                 epoll_ctl(_epoll_fd, EPOLL_CTL_MOD, fd, &re);
             }
+
+            pthread_mutex_unlock(&_io_watch_mu);
 
             if (read_pid >= 0)  _tin_fiber_unpark(read_pid);
             if (write_pid >= 0) _tin_fiber_unpark(write_pid);
