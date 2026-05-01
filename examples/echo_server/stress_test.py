@@ -355,10 +355,12 @@ def start_server():
     import subprocess, os
     # stdout -> /dev/null: echo json::encode(line) would block on a capped pipe
     # once cumulative output exceeds the pipe buffer (~64KB), hanging the server.
+    # stderr -> file: panics, asan reports, etc. surface in CI logs at exit.
     devnull = open(os.devnull, "wb")
+    err_log = open("/tmp/echo_server_stderr.log", "wb")
     proc = subprocess.Popen(
         ["/tmp/echo_server_bad"],
-        stdout=devnull, stderr=devnull,
+        stdout=devnull, stderr=err_log,
         preexec_fn=os.setsid,
     )
     # Poll the listen socket until it's actually accepting connections.
@@ -441,4 +443,13 @@ if __name__ == "__main__":
         print("Failed tests:")
         for f in FAIL:
             print(f"  - {f}")
+        # Surface server stderr so CI logs reveal panics / asan reports.
+        try:
+            with open("/tmp/echo_server_stderr.log", "rb") as f:
+                err = f.read()
+                if err:
+                    print("\n=== server stderr ===")
+                    print(err.decode(errors="replace"))
+        except OSError:
+            pass
     sys.exit(0 if not FAIL else 1)
