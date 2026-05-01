@@ -129,7 +129,18 @@ if __name__ == "__main__":
         [bin_path],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    time.sleep(0.3)
+    # Poll the UDP listen socket until it actually echoes - 0.3s fixed
+    # sleep races the bind+recvfrom on slow CI runners (act/docker).
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.settimeout(0.1)
+    for _ in range(100):
+        try:
+            probe.sendto(b"__ready_probe__\n", ("127.0.0.1", PORT))
+            probe.recvfrom(4096)
+            break
+        except OSError:
+            time.sleep(0.05)
+    probe.close()
 
     try:
         test_basic_echo()
