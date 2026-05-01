@@ -1998,7 +1998,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 	// Reuse cached shim if already generated.
 	var shim *ir.Func
 
-	for _, fn := range cg.mod.Funcs {
+	for _, fn := range cg.allFuncs() {
 		if fn.Name() == shimName {
 			shim = fn
 
@@ -2097,7 +2097,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 	// Reuse cached shim.
 	var shim *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == shimName {
 			shim = f
 

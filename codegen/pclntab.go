@@ -133,7 +133,7 @@ func (cg *CodeGen) applyPclntabPostPass() {
 		return
 	}
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Blocks == nil {
 			continue
 		}
@@ -148,7 +148,7 @@ func (cg *CodeGen) applyPclntabPostPass() {
 	// attributed to the closest preceding fn in the binary search.
 	cg.createPclntabConstructorFn()
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Blocks == nil {
 			continue
 		}

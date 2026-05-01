@@ -1767,6 +1767,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 
 		cg.emitAtomTable()
+		cg.mergeRoutedPkgMods()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
 
@@ -1776,6 +1777,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	if cg.replMode {
 		cg.emitAtomTable()
+		cg.mergeRoutedPkgMods()
 		cg.applyStacktracePostPass()
 		cg.applyPclntabPostPass()
 
@@ -1787,7 +1789,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		// Check if main is already defined.
 		hasmain := false
 
-		for _, f := range cg.mod.Funcs {
+		for _, f := range cg.allFuncs() {
 			if f.Name() == "_tin_c_main" {
 				hasmain = true
 
@@ -1807,7 +1809,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// calls it and returns 0 so the process exits cleanly.
 	var userMainFn *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == "_tin_user_main" {
 			userMainFn = f
 
@@ -1819,7 +1821,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		// Only add the wrapper if there is no `i32 @main` already.
 		hasMain := false
 
-		for _, f := range cg.mod.Funcs {
+		for _, f := range cg.allFuncs() {
 			if f.Name() == "_tin_c_main" {
 				hasMain = true
 
@@ -1832,7 +1834,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// $coro ramp and main should run as the first fiber.
 			var userMainCoroFn *ir.Func
 
-			for _, f := range cg.mod.Funcs {
+			for _, f := range cg.allFuncs() {
 				if f.Name() == "_tin_user_main$coro" {
 					userMainCoroFn = f
 
@@ -1965,7 +1967,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// trivial no-op main so the binary links successfully.
 	hasMain := false
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == "_tin_c_main" {
 			hasMain = true
 
@@ -1983,6 +1985,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
+	cg.mergeRoutedPkgMods()
 	cg.applyStacktracePostPass()
 	cg.applyPclntabPostPass()
 
@@ -2040,7 +2043,7 @@ func (cg *CodeGen) applyStacktracePostPass() {
 		return
 	}
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Blocks == nil {
 			continue // declarations don't carry codegen attributes
 		}

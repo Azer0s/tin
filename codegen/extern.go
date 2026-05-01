@@ -628,7 +628,7 @@ func coerceNativeStructForABI2Reg(st *irtypes.StructType) bool {
 // C extern symbol. Re-uses an existing declaration if one with a matching
 // signature already exists.
 func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params []*ir.Param, variadic bool) *ir.Func {
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == cName {
 			return f
 		}

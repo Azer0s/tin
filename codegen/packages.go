@@ -942,6 +942,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	prevFilename := cg.filename
 	prevPkg := cg.currentPkg
 	prevPkgPath := cg.currentPkgPath
+	prevActive := cg.activeMod
 	cg.filename = srcPath
 	// Set currentPkg so that struct preregistration and genStructDecl produce
 	// canonical "pkgName__StructName" keys/IR-names for structs defined in this
@@ -950,10 +951,19 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// currentPkgPath is the normalized full path used for typeof() display names
 	// (e.g. "encoding::base16" instead of just "base16").
 	cg.currentPkgPath = normalizePkgDisplayPath(pkgPath, pkgName)
+	// Route IR object creation into this package's per-pkg LLVM module so
+	// later (incremental compilation step 2) each pkg can be compiled to
+	// its own .o in parallel. Today we still merge everything back into
+	// cg.mod at the end of Generate via mergeRoutedPkgMods, so the build
+	// pipeline is unchanged — the routing just exercises the per-pkg
+	// scaffolding so we can spot bugs before flipping the parallel
+	// compile on.
+	cg.activeMod = cg.pkgMod(pkgName)
 
 	defer func() {
 		cg.currentPkg = prevPkg
 		cg.currentPkgPath = prevPkgPath
+		cg.activeMod = prevActive
 	}()
 
 	for _, node := range prog.Stmts {

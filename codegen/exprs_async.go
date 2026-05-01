@@ -1520,7 +1520,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 				resolvedCalleeName = monoName
 				// Find the $coro variant in the module (generated as side effect).
-				for _, f := range cg.mod.Funcs {
+				for _, f := range cg.allFuncs() {
 					if f.Name() == coroName {
 						coroFn = f
 						cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})

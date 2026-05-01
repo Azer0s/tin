@@ -96,7 +96,7 @@ func (cg *CodeGen) ensureCoroIntrinsics() {
 
 // ensureIntrinsic declares an LLVM intrinsic on the module (declaration only).
 func (cg *CodeGen) ensureIntrinsic(name string, ret irtypes.Type, params []*ir.Param) *ir.Func {
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == name {
 			return f
 		}

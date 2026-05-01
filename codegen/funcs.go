@@ -271,6 +271,22 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		}
 	}
 	// Add function to module (declaration) using the IR name.
+	//
+	// NOT YET routed through cg.activeModule(). The routing scaffolding
+	// (loadPackageFromSource sets cg.activeMod = cg.pkgMod(pkgName);
+	// allFuncs() helper walks both cg.mod and pkg modules) is in place,
+	// but flipping this one site to activeModule() exposes a remaining
+	// breakage in stdlib (e.g. http_parser.tin): a synthesized init-
+	// pattern fn for HashMap[string, string] ends up in a per-pkg
+	// module with a partial entry block + no terminator. Likely cause:
+	// some intra-codegen path creates a sibling stub via cg.mod.NewFunc
+	// (not yet routed) and the stub-vs-real-fn duality leaves one of
+	// them unfinished.
+	//
+	// Next session: trace the HashMap[string,string] init synthesis,
+	// migrate that emit path to activeModule() too, then re-flip this
+	// site. Once a single end-to-end emit pipeline routes consistently,
+	// remove the cg.mod fallback entirely.
 	f := cg.mod.NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
@@ -1611,7 +1627,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		var wrapperFn *ir.Func
 
-		for _, f := range cg.mod.Funcs {
+		for _, f := range cg.allFuncs() {
 			if f.Name() == wrapperName {
 				wrapperFn = f
 

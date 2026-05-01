@@ -449,7 +449,7 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 		// -Wl,--gc-sections below. Even at external linkage the linker
 		// will drop a wrapper whose only Tin caller was constant-folded
 		// (typical for #pure #interop functions); @llvm.used keeps it.
-		for _, f := range cg.mod.Funcs {
+		for _, f := range cg.allFuncs() {
 			if f.Name() == fn.Name {
 				wrappers = append(wrappers, f)
 
