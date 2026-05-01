@@ -2119,7 +2119,10 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	}
 	// Register the forward declaration immediately in constrainedFuncInstances so
 	// that any re-entrant monomorphizeFunc call for the same irName returns it.
-	for _, f := range cg.mod.Funcs {
+	// Walk allFuncs() (cg.mod + per-pkg modules) because predeclareFuncAs routes
+	// new fns through cg.activeModule(), which lands them in the per-pkg module
+	// for the package currently being compiled.
+	for _, f := range cg.allFuncs() {
 		if f.Name() == irName {
 			cg.constrainedFuncInstances[irName] = f
 
@@ -2153,10 +2156,12 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	cg.curScope = prevScope
 
-	// Find the compiled function (now has a body).
+	// Find the compiled function (now has a body). Walk allFuncs() so we
+	// see fns in per-pkg modules too — the body emit went via the same
+	// activeModule() routing as the forward declaration above.
 	var compiled *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == irName {
 			compiled = f
 

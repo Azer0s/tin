@@ -18,6 +18,7 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"sort"
 
 	"github.com/llir/llvm/ir"
@@ -169,6 +170,29 @@ func (cg *CodeGen) allFuncs() []*ir.Func {
 	}
 
 	return out
+}
+
+// debugDumpUnterminated prints names of fns whose blocks lack
+// terminators across cg.mod and per-pkg modules. Used to bisect
+// per-pkg routing bugs that surface as llir/llvm serialization
+// panics ("missing terminator in basic block").
+//goland:noinspection GoUnusedFunction
+func (cg *CodeGen) debugDumpUnterminated() {
+	check := func(prefix string, m *ir.Module) {
+		for _, f := range m.Funcs {
+			for _, bb := range f.Blocks {
+				if bb.Term == nil {
+					fmt.Fprintf(os.Stderr, "[unterminated] mod=%s fn=%s bb=%s insts=%d\n",
+						prefix, f.Name(), bb.Name(), len(bb.Insts))
+				}
+			}
+		}
+	}
+
+	check("cg.mod", cg.mod)
+	for _, name := range cg.pkgModNames() {
+		check("pkg:"+name, cg.pkgMods[name])
+	}
 }
 
 // mergeRoutedPkgMods folds every per-pkg module's content back into

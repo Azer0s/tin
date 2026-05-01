@@ -1985,6 +1985,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
+	cg.debugDumpUnterminated()
 	cg.mergeRoutedPkgMods()
 	cg.applyStacktracePostPass()
 	cg.applyPclntabPostPass()

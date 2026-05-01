@@ -270,24 +270,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			return nil // already declared
 		}
 	}
-	// Add function to module (declaration) using the IR name.
-	//
-	// NOT YET routed through cg.activeModule(). The routing scaffolding
-	// (loadPackageFromSource sets cg.activeMod = cg.pkgMod(pkgName);
-	// allFuncs() helper walks both cg.mod and pkg modules) is in place,
-	// but flipping this one site to activeModule() exposes a remaining
-	// breakage in stdlib (e.g. http_parser.tin): a synthesized init-
-	// pattern fn for HashMap[string, string] ends up in a per-pkg
-	// module with a partial entry block + no terminator. Likely cause:
-	// some intra-codegen path creates a sibling stub via cg.mod.NewFunc
-	// (not yet routed) and the stub-vs-real-fn duality leaves one of
-	// them unfinished.
-	//
-	// Next session: trace the HashMap[string,string] init synthesis,
-	// migrate that emit path to activeModule() too, then re-flip this
-	// site. Once a single end-to-end emit pipeline routes consistently,
-	// remove the cg.mod fallback entirely.
-	f := cg.mod.NewFunc(irName, retType, params...)
+	// Route fn creation through activeModule() so each pkg's user fns
+	// land in its per-pkg LLVM module. cg.activeMod is set by
+	// loadPackageFromSource; outside of pkg loading it's nil and
+	// activeModule() returns cg.mod (the entry pkg / runtime helpers).
+	// mergeRoutedPkgMods folds per-pkg modules back into cg.mod at end-
+	// of-Generate today; a future commit replaces the merge with
+	// parallel per-pkg .o compilation.
+	f := cg.activeModule().NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
 
