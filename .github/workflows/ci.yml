@@ -118,11 +118,15 @@ jobs:
           python3 examples/echo_server/stress_test.py
 
       - name: Run UDP echo server stress test
+        env:
+          TINMAXPROCS: "2"
         run: |
           ./tin build examples/udp_echo_server/udp_echo_server.tin -o /tmp/udp_echo_server -lm
           TIN_UDP_SERVER=/tmp/udp_echo_server python3 examples/udp_echo_server/stress_test.py
 
       - name: Run Unix socket echo server stress test
+        env:
+          TINMAXPROCS: "2"
         run: |
           ./tin build examples/unix_echo_server/unix_echo_server.tin -o /tmp/unix_echo_server -lm
           TIN_UNIX_SERVER=/tmp/unix_echo_server python3 examples/unix_echo_server/stress_test.py
