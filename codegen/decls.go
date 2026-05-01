@@ -1435,7 +1435,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		// Pre-declare the vtable global with a zero initializer so that wrappers
 		// generating fat-ptr return values can reference it before it is filled in.
 		// Its initializer will be set to the real vtable constant after wrappers are built.
-		preDeclaredVtableGlobal := cg.mod.NewGlobal(vtableKey+"_vtable_data", vtableSt)
+		preDeclaredVtableGlobal := cg.activeModule().NewGlobal(vtableKey+"_vtable_data", vtableSt)
 		preDeclaredVtableGlobal.Immutable = true
 		cg.traitVtableGlobals[vtableKey] = preDeclaredVtableGlobal
 
@@ -1468,7 +1468,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), wrapSlot.Params[pi])
 			}
 
-			wrapFn := cg.mod.NewFunc(wrapperName, wrapSlot.RetType, wrapParams...)
+			wrapFn := cg.activeModule().NewFunc(wrapperName, wrapSlot.RetType, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
 			// Cast i8* self -> structType*, load struct value.
@@ -1614,7 +1614,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), coroSlot.Params[pi])
 			}
 
-			wrapFn := cg.mod.NewFunc(wrapperName, irtypes.I8Ptr, wrapParams...)
+			wrapFn := cg.activeModule().NewFunc(wrapperName, irtypes.I8Ptr, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
@@ -1662,7 +1662,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			preVtable.Init = vtableConst
 			preVtable.Immutable = true
 		} else {
-			vtableGlobal := cg.mod.NewGlobalDef(vtableKey+"_vtable_data", vtableConst)
+			vtableGlobal := cg.activeModule().NewGlobalDef(vtableKey+"_vtable_data", vtableConst)
 			vtableGlobal.Immutable = true
 			cg.traitVtableGlobals[vtableKey] = vtableGlobal
 		}
