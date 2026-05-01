@@ -3588,6 +3588,15 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
+
+	// ARC: release loop-body-local RC vars before the back-edge so per-
+	// iteration `let` bindings don't leak. Mirrors genForIn / genForCStyle.
+	// Must run BEFORE we restore cg.curScope so emitScopeRelease still
+	// sees the body scope.
+	if bodyBlock != nil && bodyBlock.Term == nil {
+		cg.emitScopeRelease(bodyBlock, cg.curScope)
+	}
+
 	cg.curScope = cg.curScope.parent
 
 	if bodyErr != nil {
