@@ -1,21 +1,25 @@
-// tin stdlib/sync - Fiber-aware synchronization primitives + AtomicI64
+// tin stdlib/sync - Fiber-aware synchronization primitives + Atomic[t]
 //
 // Mutex, RWMutex, and Cond are built on TinFastMutex (runtime/fastmutex.h)
 // rather than pthreads.  TinFastMutex parks contended fibers via
 // _tin_fiber_park / _tin_fiber_unpark_hdl instead of blocking the OS thread,
 // so these primitives are safe to use from fiber-scheduled coroutines.
 //
-// AtomicI64 uses C11 __atomic builtins; no OS primitives needed.
+// Atomic[t] for primitive t uses C11 __atomic builtins; for non-primitive
+// t it falls back to a TinFastMutex-protected heap copy. Selection happens
+// at compile time via where guards on the Atomic struct's methods.
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sched.h>
 
 // Fiber park / unpark (runtime/fiber.c)
 void    _tin_fiber_park(int64_t pid);
 void    _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
+int64_t _tin_current_pid(void);
 
 // Current coroutine handle (TLS, runtime/fiber.c)
 extern __thread void *_current_hdl;
@@ -274,4 +278,73 @@ int64_t _tin_atomic_cas_i64(void *a, int64_t old_val, int64_t new_val) {
     __atomic_compare_exchange_n((int64_t *)a, &old_val, new_val,
         0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return old_val;
+}
+
+// ---------------------------------------------------------------------------
+// Atomic[t] for non-primitive t: spinlock-protected single-cell heap copy.
+// Layout: { atomic_uint lock; int64_t size; uint8_t payload[size] }
+// load/store memcpy under a CAS-based spinlock; the critical section is
+// a single memcpy, so contention windows are tiny and a yield-free spin
+// is fine. The payload is shallow-copied; ARC-tracked types keep their
+// refcount stable because the compiler emits retain/release around the
+// surrounding Tin-level assignment.
+//
+// Why a CAS spinlock and NOT TinFastMutex: this code path is reached
+// from value-type contexts (let x = atomic.load()) that aren't always
+// running on a fiber-scheduled coroutine. TinFastMutex's try_lock parks
+// the caller as a fiber on contention, which deadlocks the test runner
+// when no scheduler is pumping. A bare spinlock avoids that and
+// matches the granularity (single struct copy).
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    _Atomic unsigned int lock;
+    int64_t              size;
+    char                 payload[];
+} _tin_atomic_obj;
+
+static inline void _tin_atomic_obj_lock(_tin_atomic_obj *o) {
+    unsigned int expected;
+    for (;;) {
+        expected = 0u;
+        if (atomic_compare_exchange_weak_explicit(&o->lock, &expected, 1u,
+                memory_order_acquire, memory_order_relaxed)) {
+            return;
+        }
+        sched_yield();
+    }
+}
+
+static inline void _tin_atomic_obj_unlock(_tin_atomic_obj *o) {
+    atomic_store_explicit(&o->lock, 0u, memory_order_release);
+}
+
+void *_tin_atomic_obj_new(int64_t size) {
+    if (size <= 0) { fputs("tin: atomic_obj_new: non-positive size\n", stderr); exit(1); }
+    _tin_atomic_obj *o = (_tin_atomic_obj *)malloc(sizeof(_tin_atomic_obj) + (size_t)size);
+    if (!o) { fputs("tin: atomic_obj_new: alloc failed\n", stderr); exit(1); }
+    atomic_store_explicit(&o->lock, 0u, memory_order_relaxed);
+    o->size = size;
+    memset(o->payload, 0, (size_t)size);
+
+    return o;
+}
+
+void _tin_atomic_obj_free(void *p) {
+    if (!p) return;
+    free(p);
+}
+
+void _tin_atomic_obj_load(void *p, void *out) {
+    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
+    _tin_atomic_obj_lock(o);
+    memcpy(out, o->payload, (size_t)o->size);
+    _tin_atomic_obj_unlock(o);
+}
+
+void _tin_atomic_obj_store(void *p, void *src) {
+    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
+    _tin_atomic_obj_lock(o);
+    memcpy(o->payload, src, (size_t)o->size);
+    _tin_atomic_obj_unlock(o);
 }

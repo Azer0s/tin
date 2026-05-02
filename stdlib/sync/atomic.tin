@@ -1,32 +1,91 @@
 //!+sync_helpers.c
 
-// stdlib/sync - AtomicI64 (lock-free 64-bit integer using C11 atomics)
+// stdlib/sync - Atomic[t]: thread-safe single-cell storage.
+//
+// One generic struct, two implementations selected at instantiation time
+// by the where guards on each method:
+//
+//   * `t is primitive` (i*, u*, f*, bool): lock-free C11 __atomic
+//     builtins. Storage is a heap i64 slot; load/store reinterpret t as
+//     i64. add/cas additionally require `t is numeric` (no bool).
+//
+//   * `t is not primitive` (any other t): mutex-protected heap copy.
+//     load/store memcpy under a TinFastMutex. add/cas are not exposed —
+//     they have no meaning on arbitrary structs.
+//
+// Calling cas/add on Atomic[bool] (or any non-numeric primitive) is a
+// compile-time error: the methods are dead-stripped from the concrete
+// struct at instantiation, and the call site emits a diagnostic
+// pointing at the failing `where t is numeric` guard.
+//
+// Type-equality bounds (`t is i64`) match only the literal primitive
+// type and cannot be satisfied by a user struct that happens to
+// implement an `ord` trait — so the constraint is an actual gate, not
+// an opt-in. Likewise `t is primitive` only holds for the listed
+// primitives below.
 
-fn tin_atomic_new_i64(v i64) *void               = extern("_tin_atomic_new_i64")
-fn tin_atomic_free_i64(a *void)                  = extern("_tin_atomic_free_i64")
+type numeric = i64 | u64 | f64 | i32 | u32 | f32 | i16 | u16 | i8 | u8
+type primitive = i64 | u64 | f64 | i32 | u32 | f32 | i16 | u16 | i8 | u8 | bool
 
-fn tin_atomic_load_i64(a *void) i64              = extern("_tin_atomic_load_i64")
-fn tin_atomic_store_i64(a *void, v i64)          = extern("_tin_atomic_store_i64")
-fn tin_atomic_add_i64(a *void, d i64) i64        = extern("_tin_atomic_add_i64")
-fn tin_atomic_cas_i64(a *void, old i64, nw i64) i64 = extern("_tin_atomic_cas_i64")
+// Lock-free 64-bit primitives (existing C runtime).
+fn tin_atomic_new_64(v i64) *void                   = extern("_tin_atomic_new_i64")
+fn tin_atomic_free_64(a *void)                      = extern("_tin_atomic_free_i64")
+fn tin_atomic_load_64(a *void) i64                  = extern("_tin_atomic_load_i64")
+fn tin_atomic_store_64(a *void, v i64)              = extern("_tin_atomic_store_i64")
+fn tin_atomic_add_64(a *void, d i64) i64            = extern("_tin_atomic_add_i64")
+fn tin_atomic_cas_64(a *void, old i64, nw i64) i64  = extern("_tin_atomic_cas_i64")
 
-struct AtomicI64 =
+// Mutex-backed object slot (new C runtime helpers).
+fn tin_atomic_obj_new(size i64) *void               = extern("_tin_atomic_obj_new")
+fn tin_atomic_obj_free(p *void)                     = extern("_tin_atomic_obj_free")
+fn tin_atomic_obj_load(p *void, out *void)          = extern("_tin_atomic_obj_load")
+fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_store")
+
+struct Atomic[t] =
   _ptr *void
 
-  static fn make(v i64) AtomicI64 =
-    return AtomicI64{_ptr: tin_atomic_new_i64(v)}
+  // make: two impls. Compile-time selected by t.
 
-  fn load(this AtomicI64) i64 =
-    return tin_atomic_load_i64(this._ptr)
+  static fn make(v t) Atomic[t] where t is primitive =
+    return Atomic[t]{_ptr: tin_atomic_new_64(v as i64)}
 
-  fn store(this AtomicI64, v i64) =
-    tin_atomic_store_i64(this._ptr, v)
+  static fn make(v t) Atomic[t] where t is not primitive =
+    let p = tin_atomic_obj_new(sizeof(t))
+    tin_atomic_obj_store(p, &v as *void)
+    return Atomic[t]{_ptr: p}
 
-  fn add(this AtomicI64, d i64) i64 =
-    return tin_atomic_add_i64(this._ptr, d)
+  // load / store: same dual-impl pattern.
 
-  fn cas(this AtomicI64, old i64, nw i64) i64 =
-    return tin_atomic_cas_i64(this._ptr, old, nw)
+  fn load(this Atomic[t]) t where t is primitive =
+    return tin_atomic_load_64(this._ptr) as t
 
-  fn deinit(this AtomicI64) =
-    tin_atomic_free_i64(this._ptr)
+  fn load(this Atomic[t]) t where t is not primitive =
+    let out t  // zero-initialized stack slot
+    let outp *void = &out as *void
+    tin_atomic_obj_load(this._ptr, outp)
+    return out
+
+  fn store(this Atomic[t], v t) where t is primitive =
+    tin_atomic_store_64(this._ptr, v as i64)
+
+  fn store(this Atomic[t], v t) where t is not primitive =
+    let vp *void = &v as *void
+    tin_atomic_obj_store(this._ptr, vp)
+
+  // add and cas: numeric only. Calling on a non-numeric (bool / non-
+  // primitive) instantiation is a compile error that points at the
+  // failing where guard.
+
+  fn add(this Atomic[t], d t) t where t is numeric =
+    return tin_atomic_add_64(this._ptr, d as i64) as t
+
+  fn cas(this Atomic[t], old t, nw t) t where t is numeric =
+    return tin_atomic_cas_64(this._ptr, old as i64, nw as i64) as t
+
+  // deinit: same dual-impl pattern; chooses the right free.
+
+  fn deinit(this Atomic[t]) where t is primitive =
+    tin_atomic_free_64(this._ptr)
+
+  fn deinit(this Atomic[t]) where t is not primitive =
+    tin_atomic_obj_free(this._ptr)

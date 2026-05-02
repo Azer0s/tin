@@ -132,40 +132,71 @@ test "mutex reacquirable after unlock" =
 // AtomicI64
 
 test "atomic make and load initial value" =
-  let a = sync::AtomicI64.make(42)
+  let a = sync::Atomic[i64].make(42)
   assert::equals(a.load(), 42)
 
 test "atomic store and load" =
-  let a = sync::AtomicI64.make(0)
+  let a = sync::Atomic[i64].make(0)
   a.store(99)
   assert::equals(a.load(), 99)
 
 test "atomic add returns new value" =
-  let a = sync::AtomicI64.make(10)
+  let a = sync::Atomic[i64].make(10)
   let newval = a.add(5)
   assert::equals(newval, 15)
   assert::equals(a.load(), 15)
 
 test "atomic add negative" =
-  let a = sync::AtomicI64.make(10)
+  let a = sync::Atomic[i64].make(10)
   a.add(0 - 3)
   assert::equals(a.load(), 7)
 
 test "atomic cas success returns old" =
-  let a = sync::AtomicI64.make(10)
+  let a = sync::Atomic[i64].make(10)
   let prev = a.cas(10, 20)
   assert::equals(prev, 10)
   assert::equals(a.load(), 20)
 
 test "atomic cas failure leaves value unchanged" =
-  let a = sync::AtomicI64.make(10)
+  let a = sync::Atomic[i64].make(10)
   let prev = a.cas(99, 20)
   assert::equals(prev, 10)
   assert::equals(a.load(), 10)
 
 test "atomic multiple adds" =
-  let a = sync::AtomicI64.make(0)
+  let a = sync::Atomic[i64].make(0)
   a.add(1)
   a.add(2)
   a.add(3)
   assert::equals(a.load(), 6)
+
+// Atomic[t] for non-primitive t (mutex-protected dual impl).
+// One generic struct, two implementations selected at compile time
+// by where guards on the methods. add/cas are dead-stripped from
+// the non-primitive instantiation; calling them on Atomic[Point]
+// would emit a clean compile error pointing at `where t is numeric`.
+
+struct AtomicPoint =
+  x i64
+  y i64
+
+test "atomic struct: make + load" =
+  let a = sync::Atomic[AtomicPoint].make(AtomicPoint{x: 3, y: 4})
+  let p = a.load()
+  assert::equals(p.x, 3)
+  assert::equals(p.y, 4)
+
+test "atomic struct: store" =
+  let a = sync::Atomic[AtomicPoint].make(AtomicPoint{x: 0, y: 0})
+  a.store(AtomicPoint{x: 10, y: 20})
+  let p = a.load()
+  assert::equals(p.x, 10)
+  assert::equals(p.y, 20)
+
+test "atomic bool: load + store work, add/cas were stripped" =
+  // load/store survive the where guard; add/cas would be a compile
+  // error because their `where t is numeric` clause excludes bool.
+  let b = sync::Atomic[bool].make(false)
+  assert::equals(b.load(), false)
+  b.store(true)
+  assert::equals(b.load(), true)

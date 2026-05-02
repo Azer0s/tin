@@ -473,11 +473,23 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		// forward references work; full layout is filled in genTypeDecl.
 		// Struct-monomorphization aliases (type point = tuple[f32]) are handled
 		// in genTypeDecl so that all struct templates are known first.
-		if _, isUnion := n.Type.(*ast.UnionTypeExpr); isUnion {
-			st := irtypes.NewStruct()
-			st.SetName(n.Name)
-			cg.structTypes[n.Name] = st
-			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+		if ut, isUnion := n.Type.(*ast.UnionTypeExpr); isUnion {
+			if _, exists := cg.structTypes[n.Name]; !exists {
+				st := irtypes.NewStruct()
+				st.SetName(n.Name)
+				cg.structTypes[n.Name] = st
+				cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+			}
+			// Populate unionTypeMembers here so that downstream constraint
+			// checks (`where t is X` against a tagged-union alias) work
+			// even when the TypeDecl was declared in an imported package
+			// — packages.go doesn't run pass-2's genTypeDecl, so without
+			// this preregister write the membership is invisible across
+			// package boundaries and method-level where guards silently
+			// dead-strip every method.
+			if _, already := cg.unionTypeMembers[n.Name]; !already {
+				cg.unionTypeMembers[n.Name] = ut.Types
+			}
 		} else if _, isGeneric := n.Type.(*ast.GenericType); !isGeneric {
 			cg.typeAliases[n.Name] = n.Type
 		}
@@ -1172,6 +1184,38 @@ func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) 
 	}
 
 	return true, nil
+}
+
+// methodConstraintWitness reports whether every where-clause on a generic
+// struct method holds under the given type-parameter substitution. Returns
+// an empty string when all constraints hold (the method survives), or a
+// human-readable description of the FIRST failing constraint when it
+// doesn't (the method is dead-stripped from the concrete struct).
+//
+// A method with no Constraints always survives (unchanged surface for
+// existing struct methods).
+func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string]string) string {
+	if len(m.Constraints) == 0 {
+		return ""
+	}
+
+	for _, c := range m.Constraints {
+		concreteName, ok := typeSubst[c.TypeParam]
+		if !ok {
+			// The constraint references a type-param that isn't part
+			// of the struct's substitution (e.g. a method-level
+			// generic that hasn't been instantiated yet). Defer to
+			// the call-site path, which already validates these.
+			continue
+		}
+
+		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
+			return fmt.Sprintf("`where %s is %s` (failing sub-check: `%s` for %s = %q)",
+				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness), c.TypeParam, concreteName)
+		}
+	}
+
+	return ""
 }
 
 // typeArgsContainAnyOf reports whether any type-argument expression in args

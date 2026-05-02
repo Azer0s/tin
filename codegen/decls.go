@@ -996,9 +996,27 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			concrete.Methods = append(concrete.Methods, ov)
 
 			delete(overrideSet, m.Name)
-		} else {
-			concrete.Methods = append(concrete.Methods, substituteMethod(m, tmpl.Name, n.Name, subst))
+
+			continue
 		}
+
+		// Method-level where guards: a method on a generic struct whose
+		// `where t is X` clause does NOT hold for the concrete
+		// instantiation is dead-stripped from this concrete struct.
+		// Calling the method on the wrong instantiation then produces
+		// the dead-strip diagnostic at the call site (see emitDeadStripError)
+		// pointing at the failing constraint.
+		if witness := cg.methodConstraintWitness(m, typeSubst); witness != "" {
+			if cg.deadStrippedMethods[n.Name] == nil {
+				cg.deadStrippedMethods[n.Name] = make(map[string]string)
+			}
+
+			cg.deadStrippedMethods[n.Name][m.Name] = witness
+
+			continue
+		}
+
+		concrete.Methods = append(concrete.Methods, substituteMethod(m, tmpl.Name, n.Name, subst))
 	}
 	// Any overrides that don't shadow a template method are appended.
 	for _, ov := range n.Overrides {

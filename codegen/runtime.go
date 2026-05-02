@@ -988,8 +988,18 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			deinitName := structName + "_deinit"
 			if entry, ok := cg.curScope.lookup(deinitName); ok {
 				if fn, ok2 := entry.val.(*ir.Func); ok2 {
-					args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
-					block.NewCall(fn, args...)
+					// Guard: the deinit's `this` param type must match
+					// the value being released. Without this we silently
+					// fall into a function that bit-reinterprets `val`
+					// as a different struct (a real bug seen with
+					// Atomic[t]'s dual-impl deinit when a field load
+					// has type T but the struct has been monomorphized
+					// to Atomic__T and the static lookup picks the
+					// outer deinit).
+					if len(fn.Sig.Params) > 0 && fn.Sig.Params[0].Equal(val.Type()) {
+						args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
+						block.NewCall(fn, args...)
+					}
 				}
 			}
 			// Call chained trait deinit methods (for traits that also define fn deinit).

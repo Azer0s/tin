@@ -4,7 +4,9 @@
 //   Mutex        - exclusive lock (fiber-aware, parks instead of blocking OS thread)
 //   RWMutex      - reader-writer lock (fiber-aware)
 //   Cond         - condition variable (fiber-aware)
-//   AtomicI64    - lock-free 64-bit integer (C11 atomics)
+//   Atomic[t]    - lock-free atomic for primitive types (C11 atomics).
+//                  add/cas only available on numeric t (i*, u*, f*); on
+//                  Atomic[bool] only load/store/make are exposed.
 //   Channel[T]   - bounded FIFO channel (ring buffer + Mutex + Cond)
 //   Awaitable[t] - trait for types that can be awaited with `await`
 //   Future[t]    - typed result from `spawn`; implements Awaitable[t]
@@ -18,4 +20,4 @@ use "./awaitable"
 use "./future"
 use "./channel"
 
-export { Mutex, RWMutex, Cond, AtomicI64, Channel, Awaitable, Future, Unit } as sync
+export { Mutex, RWMutex, Cond, Atomic, Channel, Awaitable, Future, Unit } as sync

@@ -425,7 +425,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							Name: concreteName,
 							Type: &ast.GenericType{Name: staticName, TypeParams: typeParams},
 						}
-						_ = cg.genTypeDecl(synthDecl)
+						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
+							return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+						}
 					}
 				}
 
@@ -862,6 +864,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
+		if witness, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
+			return nil, cg.nodeErr(e, "method %s.%s is not available on this instantiation: %s",
+				structName, fn.Field, witness)
+		}
+
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
 			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
 		}
@@ -942,10 +949,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
 					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-						_ = cg.genTypeDecl(&ast.TypeDecl{
+						if mErr := cg.genTypeDecl(&ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
-						})
+						}); mErr != nil {
+							return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+						}
 					}
 
 					concreteMethodKey := concreteName + "_" + methodField

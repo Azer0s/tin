@@ -139,7 +139,10 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 						Name: concreteName,
 						Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 					}
-					_ = cg.genTypeDecl(synthDecl)
+
+					if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
+						return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+					}
 				}
 
 				concreteStaticKey := concreteName + "_" + last
