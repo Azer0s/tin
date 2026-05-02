@@ -1340,8 +1340,16 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			cg.suppressIfaceScopeRelease = true
 		}
 
+		cg.coerceLastErr = nil
 		initVal = cg.coerce(block, initVal, llType)
 		cg.suppressIfaceScopeRelease = prevSuppress
+
+		// If coerce stashed a richer diagnostic (e.g. trait
+		// pointer-receiver-vs-value-source rejection), surface that
+		// instead of the generic type-mismatch fall-through.
+		if cg.coerceLastErr != nil {
+			return nil, cg.nodeErr(s, "%v", cg.coerceLastErr)
+		}
 		// Coerce returns the value unchanged when no conversion path applies;
 		// guard NewStore so a real type mismatch produces a clean diagnostic
 		// instead of a Go panic from llir's incompatible-operand check.

@@ -278,6 +278,14 @@ type CodeGen struct {
 	// structImpls: struct name -> []trait name strings (for traitof/typeof)
 	structImpls map[string][]string
 
+	// coerceLastErr stashes a positioned error from the most recent
+	// coerce() call when the inner trait/iface coercion path wanted
+	// to reject the user's input. coerce() itself returns Value (87+
+	// call sites; not refactoring that signature) so the error has
+	// to ride out-of-band. genVarDecl + co clear and check this
+	// after each coerce() invocation. Cleared on read.
+	coerceLastErr error
+
 	// deadStrippedMethods records methods that were dropped during
 	// generic-struct monomorphization because their `where t is X`
 	// guard didn't hold for the concrete instantiation. Keyed by

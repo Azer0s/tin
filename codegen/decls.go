@@ -1929,8 +1929,143 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 // concrete struct value or pointer, given the target instKey (e.g. "named" or "iter_i64").
 // If structVal is already a *struct (e.g. from malloc), the heap pointer is
 // used directly as the data pointer instead of allocating new stack space.
+// traitPointerReceiverMethods returns the method names of trait `instKey`
+// whose `this` receiver is a pointer (`*Self` or `*Trait[...]`).
+// Returns nil for unknown traits or traits with all-value receivers.
+//
+// Used by coerceToTrait to reject value-form coercion when the trait
+// has any pointer-receiver method — that combination silently mutates
+// a heap copy and the user almost certainly meant `let a *T = &b`.
+func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
+	bareTraitName := bareTraitNameFromKey(instKey)
+
+	td, ok := cg.traits[bareTraitName]
+	if !ok {
+		return nil
+	}
+
+	var ptrMethods []string
+
+	for _, m := range td.Methods {
+		if len(m.Params) == 0 {
+			continue
+		}
+
+		first := m.Params[0]
+		if first.Name != "this" {
+			continue
+		}
+
+		if _, isPtr := first.Type.(*ast.PointerType); isPtr {
+			ptrMethods = append(ptrMethods, m.Name)
+		}
+	}
+
+	return ptrMethods
+}
+
+// traitDisplayName renders an instKey ("Reader", "Awaitable__i64") as
+// the user-visible source form ("Reader", "Awaitable[i64]"). Same
+// shape as prettyStructName but kept separate because traits use a
+// different mangling pipeline.
+func (cg *CodeGen) traitDisplayName(instKey string) string {
+	return prettyStructName(instKey)
+}
+
+// bareTraitNameFromKey strips the "__T1__T2..." instantiation suffix
+// off an instKey, returning the bare trait name registered in
+// cg.traits. For non-generic traits the key is already bare, so this
+// is a no-op.
+func bareTraitNameFromKey(instKey string) string {
+	if i := strings.Index(instKey, "__"); i >= 0 {
+		return instKey[:i]
+	}
+
+	return instKey
+}
+
+// buildPtrToTraitBorrow lowers `let a *Trait = &b` (or any other coerce
+// where target is `*FatPtr` and source is `*Struct`). Builds a stack-
+// temporary fat ptr `{cast(structPtr, i8*), vtable}` and returns its
+// address — a true borrow, mutations via *a propagate to *structPtr.
+//
+// Returns nil when the struct doesn't implement the trait or the fat-
+// ptr type isn't registered; the caller falls through to the generic
+// coerce path (which currently emits a wrong bitcast — that's the
+// fallback we're trying to replace).
+//
+// Lifetime: stack-temp lives for the enclosing function frame. Same
+// gotcha as returning `*T` of any local — Tin does not statically
+// prevent it, but it doesn't catch fire on common in-frame uses
+// (which is what the user's `let a *T = &b; (*a).foo(); echo b` test
+// exercises).
+func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value, traitName string, fatPtrType irtypes.Type) value.Value {
+	pt, ok := structPtr.Type().(*irtypes.PointerType)
+	if !ok {
+		return nil
+	}
+
+	structName := cg.typeNameOf(pt.ElemType)
+	if structName == "" {
+		return nil
+	}
+
+	vtableKey := structName + "__" + traitName
+
+	vtableGlobal, ok := cg.traitVtableGlobals[vtableKey]
+	if !ok {
+		return nil
+	}
+
+	fatPtrSt, ok := fatPtrType.(*irtypes.StructType)
+	if !ok {
+		return nil
+	}
+
+	// Stack-temp for the fat ptr; data field points at the source
+	// struct directly (no copy).
+	temp := block.NewAlloca(fatPtrSt)
+
+	dataGEP := block.NewGetElementPtr(fatPtrSt, temp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dataI8 := block.NewBitCast(structPtr, irtypes.I8Ptr)
+	block.NewStore(dataI8, dataGEP)
+
+	vtableGEP := block.NewGetElementPtr(fatPtrSt, temp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(vtableGlobal, vtableGEP)
+
+	return temp
+}
+
 func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey string) (value.Value, error) {
 	structType := structVal.Type()
+
+	// Receiver/source mismatch: if the trait has any pointer-receiver
+	// methods, value-form coercion `let f Trait = b` would silently
+	// mutate a heap copy. Stash the diagnostic on cg.coerceLastErr so
+	// the caller (genVarDecl, etc.) can surface it positioned at the
+	// user's source line — coerce() itself returns Value with no error
+	// channel and is called from 87+ sites we don't want to touch.
+	//
+	// Pointer-source coercions (`let f Trait = &b`, also still a
+	// value-iface but with a pointer source) keep the same heap-copy
+	// semantics — Tin's `Trait` is always Go-like, only `*Trait` is
+	// the borrow form.
+	if _, isPtr := structType.(*irtypes.PointerType); !isPtr {
+		if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
+			err := fmt.Errorf(
+				"trait %s has pointer-receiver methods (%s); value coercion would silently mutate a heap copy. "+
+					"Use `let a *%s = &b` to mutate the original, or rewrite the trait's receivers to %s if a copy is intended",
+				cg.traitDisplayName(instKey),
+				strings.Join(missing, ", "),
+				cg.traitDisplayName(instKey),
+				cg.traitDisplayName(instKey))
+			cg.coerceLastErr = err
+
+			return nil, err
+		}
+	}
 
 	var (
 		dataPtr      value.Value

@@ -681,6 +681,29 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		}
 	}
 
+	// Pointer-to-trait fat-pointer: `let a *Fooable = &b` where b is a
+	// struct that implements Fooable. Source is `*Struct`, target is
+	// `*FatPtr`. Build a stack-temp fat ptr {data: &b, vtable: vtable},
+	// return its address. The fat ptr borrows &b directly so methods
+	// called via *a mutate b. Lifetime is caller-managed: b must
+	// outlive the *Trait the same way any other `*T` borrow does.
+	//
+	// Without this path, llir auto-emits a wrong bitcast `*Box ->
+	// *Fooable_iface` that reinterprets Box's first field (i32 type_id)
+	// as the fat-ptr's i8* data field — methods called via the bogus
+	// fat ptr then dereference garbage and segfault.
+	if tgtPt, ok := target.(*irtypes.PointerType); ok {
+		if traitName, isTrait := cg.isTraitFatPtr(tgtPt.ElemType); isTrait {
+			if srcPt, isPtr := src.(*irtypes.PointerType); isPtr {
+				if _, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
+						return result
+					}
+				}
+			}
+		}
+	}
+
 	// implicit[T] conversion: struct S implements implicit[T], call static fn.
 	if targetName := cg.typeNameOf(target); targetName != "" {
 		for _, entry := range cg.implicitConvFns[targetName] {
