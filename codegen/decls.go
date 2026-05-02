@@ -184,6 +184,26 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		cg.packedStructs[structKey] = true
 	}
 
+	if hasTag(n.Tags, "no_copy") {
+		cg.noCopyStructs[structKey] = true
+	}
+
+	if hasTag(n.Tags, "closed") {
+		cg.closedStructs[structKey] = true
+	}
+
+	// #no_copy fields would let the containing struct's copy alias the
+	// no-copy cell — defeats the whole point. Reject at decl time so the
+	// programmer is told to switch to `*S` before any code depends on it.
+	for _, f := range n.Fields {
+		if name := cg.noCopyValueTypeName(f.Type); name != "" {
+			return cg.nodeErr(n,
+				"struct %s field %q has type %s which is #no_copy: copying %s would alias the cell. Use *%s instead",
+				prettyStructName(structKey), f.Name, prettyStructName(name),
+				prettyStructName(structKey), prettyStructName(name))
+		}
+	}
+
 	st, ok := cg.structTypes[structKey]
 	if !ok {
 		st = irtypes.NewStruct()

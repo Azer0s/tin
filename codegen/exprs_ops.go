@@ -689,6 +689,15 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		return nil, cg.nodeErr(e, "unknown struct type: %s", typeName)
 	}
 
+	// #closed enforcement: a closed struct's literal `S{...}` may only
+	// appear inside one of S's own static methods. External callers must go
+	// through the constructor — that's the whole point of #closed.
+	if cg.closedStructs[typeName] && !cg.curFnOwnsStruct(typeName) {
+		return nil, cg.nodeErr(e,
+			"%s is #closed: construct via one of its static methods (e.g. %s.alloc(...)) — direct struct literals are not allowed outside the type's own methods",
+			prettyStructName(typeName), prettyStructName(typeName))
+	}
+
 	// cLayoutStructs need special handling: the wrapper type has no user fields.
 	// We stack-allocate both the wrapper and native data, then wire c_data_ptr.
 	if cg.cLayoutStructs[typeName] {

@@ -455,6 +455,104 @@ func (cg *CodeGen) emitGenericFatArrayRelease(block *ir.Block, val value.Value, 
 	block.NewCall(cg.ensureForeachStructElemRelease(), dataPtrI8, length, elemSize, releaseFnI8)
 }
 
+// curFnOwnsStruct reports whether the current function being emitted is a
+// method of structName (template or any of its monomorphized instances).
+// Used to gate the #closed struct-literal check: only the struct's own
+// methods may construct it directly.
+func (cg *CodeGen) curFnOwnsStruct(structName string) bool {
+	if cg.curFn == nil {
+		return false
+	}
+
+	fnName := cg.curFn.Name()
+	// The IR-name produced by methodScopeKey is "<StructName>_<methodName>"
+	// for plain methods or "<StructName>_<traitKey>_<methodName>" for
+	// trait-qualified ones. After monomorphization the struct name is
+	// "<Bare>__<typeArgs>" (Bare carries the same #closed tag in noCopyStructs/
+	// closedStructs since genStructDecl is re-run on the concrete decl).
+	// "<StructName>$coro" is the async-method coro variant; trim the suffix.
+	if strings.HasSuffix(fnName, "$coro") {
+		fnName = strings.TrimSuffix(fnName, "$coro")
+	}
+
+	prefix := structName + "_"
+	if strings.HasPrefix(fnName, prefix) {
+		return true
+	}
+	// Bare (template) name match: e.g. fn "RcCell_alloc" inside a still-
+	// generic body, before monomorphization renames it.
+	if idx := strings.Index(structName, "__"); idx >= 0 {
+		bare := structName[:idx]
+		if strings.HasPrefix(fnName, bare+"_") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// noCopyValueTypeName resolves te through type aliases and reports the bare
+// struct name when te names a #no_copy struct in *value* (non-pointer) form.
+// Pointer-to-no-copy is fine (pointer copies are RC-tracked retains), so a
+// PointerType immediately returns "". Used to reject #no_copy values in
+// let-bindings, function params, return types, and struct fields.
+func (cg *CodeGen) noCopyValueTypeName(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case nil:
+		return ""
+	case *ast.PointerType:
+		return ""
+	case *ast.ArrayType:
+		return ""
+	case *ast.SimpleType:
+		name := t.Name
+		// Walk alias chain.
+		for i := 0; i < 32; i++ {
+			if cg.noCopyStructs[name] {
+				return name
+			}
+
+			alias, ok := cg.typeAliases[name]
+			if !ok {
+				break
+			}
+
+			st, ok2 := alias.(*ast.SimpleType)
+			if !ok2 {
+				return cg.noCopyValueTypeName(alias)
+			}
+
+			if st.Name == name {
+				break
+			}
+
+			name = st.Name
+		}
+		// Qualified package name (foo::Bar): strip prefix and try again.
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			return cg.noCopyValueTypeName(&ast.SimpleType{Name: name[idx+2:]})
+		}
+
+		return ""
+	case *ast.GenericType:
+		concrete := cg.typeExprCanonicalKey(t)
+		if cg.noCopyStructs[concrete] {
+			return concrete
+		}
+		// Template name is registered when the struct decl declared #no_copy.
+		bare := t.Name
+		if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+			bare = bare[idx+2:]
+		}
+
+		if cg.noCopyStructs[bare] {
+			return concrete
+		}
+	}
+
+	return ""
+}
+
 // isBadFatPtrArithmetic reports whether op applied to operands of types lt/rt
 // would silently fall through to an integer arith on a fat-pointer struct
 // — `string + string` and the like. The fat-pointer types are LLVM-anonymous

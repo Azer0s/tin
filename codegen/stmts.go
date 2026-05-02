@@ -1104,6 +1104,15 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
 	}
 
+	// #no_copy enforcement: a let-binding cannot hold a value of a #no_copy
+	// struct, since a subsequent reference would alias the underlying cell.
+	// `*S` is fine — pointer copies just retain.
+	if name := cg.typeNameOf(llType); name != "" && cg.noCopyStructs[name] {
+		return nil, cg.nodeErr(s,
+			"%s is #no_copy: bind a *%s instead — value-form let aliases the cell and double-frees on scope exit",
+			prettyStructName(name), prettyStructName(name))
+	}
+
 	// REPL mode: promote top-level `let` bindings in the cell function to LLVM
 	// global variables so their values persist across subsequent cells.
 	// Static-array fill/literal allocas are skipped (they need alloca semantics).

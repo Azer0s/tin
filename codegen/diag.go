@@ -44,6 +44,15 @@ const (
 	DiagUseAfterDeinit    = "use-after-deinit"
 	DiagDoubleDeinit      = "double-deinit"
 	DiagFloatPrecision    = "float-precision"
+	// DiagUnwrappedCResource fires on a struct field whose value transitively
+	// touches an extern boundary (returned from / passed to a C function) and
+	// has the shape of a C-managed resource (raw *void, pointer to an opaque
+	// extern struct, i64 named like an fd, or i64 returned by a known fd-
+	// returning POSIX function) when the field is not wrapped in *RcCell[T]
+	// (or another #no_copy wrapper). Without the wrapper, copying the
+	// containing struct would alias the resource and the second drop would
+	// double-free / double-close.
+	DiagUnwrappedCResource = "unwrapped-c-resource"
 	// DiagBuiltinShadow fires when a local binding (let/var/param/nested-fn)
 	// reuses the name of a recognized compile-time builtin. The shadow
 	// itself is legal - `sourcepos` and friends are opted into by name and

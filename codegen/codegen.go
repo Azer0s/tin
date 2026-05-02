@@ -190,6 +190,17 @@ type CodeGen struct {
 	// For regular structs: the full LLVM struct type is packed.
 	packedStructs map[string]bool
 
+	// noCopyStructs: struct names declared with the {#no_copy} tag. Value
+	// copies of these are rejected at compile time (let b = a, by-value
+	// param/return, struct-lit field of value type). Holding *S is fine —
+	// pointer copies just retain the cell.
+	noCopyStructs map[string]bool
+
+	// closedStructs: struct names declared with the {#closed} tag. Their
+	// struct literal `S{...}` may only appear inside their own static
+	// methods, so external code is forced through a constructor.
+	closedStructs map[string]bool
+
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
 	retainFn                   *ir.Func // _tin_retain(ptr i8*)
@@ -1253,6 +1264,8 @@ func New(filename string) *CodeGen {
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),
 		packedStructs:            make(map[string]bool),
+		noCopyStructs:            make(map[string]bool),
+		closedStructs:            make(map[string]bool),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),

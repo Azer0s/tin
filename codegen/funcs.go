@@ -225,6 +225,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		if p.IsVarArgs {
 			continue // varargs is not an LLVM-level named parameter
 		}
+		// Reject by-value #no_copy params: passing such a value would shallow-
+		// copy the cell pointer and the callee's scope-exit drop would race
+		// with the caller's. Use *S instead.
+		if name := cg.noCopyValueTypeName(p.Type); name != "" {
+			return cg.nodeErr(n,
+				"function %s parameter %q has type %s which is #no_copy: pass *%s instead",
+				n.Name, p.Name, prettyStructName(name), prettyStructName(name))
+		}
 
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
@@ -237,6 +245,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	var retType irtypes.Type = irtypes.Void
 
 	if n.RetType != nil {
+		// Returning a #no_copy by value would force the caller to bind it,
+		// which is also forbidden. Constructors must return *S.
+		if name := cg.noCopyValueTypeName(n.RetType); name != "" {
+			return cg.nodeErr(n,
+				"function %s returns %s by value, but %s is #no_copy: return *%s instead",
+				n.Name, prettyStructName(name), prettyStructName(name), prettyStructName(name))
+		}
+
 		var err error
 
 		retType, err = cg.tinTypeToLLVM(n.RetType)
