@@ -6,6 +6,7 @@ package codegen
 import (
 	"crypto/sha1"
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -463,6 +464,34 @@ func isRCTrackedType(t irtypes.Type) bool {
 	return isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t)
 }
 
+// isTraitFatPtrShape detects the universal trait fat-pointer struct shape
+// `{i8*, ptr-to-named-struct}` whose second field's pointee struct name ends
+// in `_vtable`. Used by codegen sites that need to release iface storage
+// without access to the full *CodeGen state (e.g. genForIterTrait emitting
+// the iter loop's exit-block release).
+func isTraitFatPtrShape(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 {
+		return false
+	}
+
+	if st.Fields[0] != irtypes.I8Ptr {
+		return false
+	}
+
+	pt, ok := st.Fields[1].(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	innerSt, ok := pt.ElemType.(*irtypes.StructType)
+	if !ok {
+		return false
+	}
+
+	return innerSt.Name() != "" && strings.HasSuffix(innerSt.Name(), "_vtable")
+}
+
 // emitCallArgRelease releases a temporary call argument after a call returns.
 // pre is the argument value before coercion; post is the value after coercion.
 // astArg is the corresponding AST expression.
@@ -783,7 +812,6 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 		return
 	}
-
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRetain(), rcPtr)
@@ -967,6 +995,14 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			for _, traitDeinitFn := range cg.traitChainedDeinits[structName] {
 				args := cg.adaptArgs(block, []value.Value{val}, traitDeinitFn.Sig)
 				block.NewCall(traitDeinitFn, args...)
+				// Release iface temporaries adaptArgs constructed via
+				// coerceToTrait (heap-alloc); see twin comment in
+				// genStructLit's traitChainedInits loop.
+				for _, a := range args {
+					if isTraitFatPtrShape(a.Type()) {
+						cg.emitRelease(block, a)
+					}
+				}
 			}
 		}
 	}

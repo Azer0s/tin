@@ -3227,8 +3227,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	}
 
 	// iter[t] trait: struct (or fat-ptr) implementing iter[T] - use vtable.
-	if iterFatPtr, instKey, ok := cg.tryCoerceToIter(block, iterVal); ok {
-		return cg.genForIterTrait(block, s, iterFatPtr, instKey)
+	if iterFatPtr, instKey, ok, ownsData := cg.tryCoerceToIter(block, iterVal); ok {
+		return cg.genForIterTrait(block, s, iterFatPtr, instKey, ownsData)
 	}
 
 	// Rune iteration over strings: for r rune in s decodes UTF-8 codepoints.

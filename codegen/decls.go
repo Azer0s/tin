@@ -1711,8 +1711,11 @@ func (cg *CodeGen) isTraitFatPtr(t irtypes.Type) (string, bool) {
 
 // tryCoerceToIter detects whether iterVal implements iter[T] (either already a
 // fat pointer or a concrete struct with an iter vtable) and returns the fat
-// pointer and instKey if so.
-func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.Value, string, bool) {
+// pointer and instKey if so. The fourth return is `ownsData`: true when this
+// call materialized a fresh value-source heap allocation in the iface's data
+// ptr (so the caller is responsible for releasing it), false when iterVal
+// was already a fat pointer or a borrowed pointer source.
+func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.Value, string, bool, bool) {
 	// Case 1: already a trait fat pointer.
 	if instKey, ok := cg.isTraitFatPtr(iterVal.Type()); ok {
 		baseTrait := instKey
@@ -1721,17 +1724,23 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		}
 
 		if baseTrait == "iter" {
-			return iterVal, instKey, true
+			return iterVal, instKey, true, false
 		}
 
-		return nil, "", false
+		return nil, "", false, false
 	}
 
 	// Case 2: concrete struct that has an iter[T] vtable registered.
 	structName := cg.typeNameOf(iterVal.Type())
 	if structName == "" {
-		return nil, "", false
+		return nil, "", false, false
 	}
+
+	// Determine ownership: pointer-source iterVals stay borrowed (the *T
+	// owner manages the storage), value-source iterVals are heap-allocated
+	// fresh by coerceToTrait and the caller owns the new ARC ref.
+	_, isPointerSource := iterVal.Type().(*irtypes.PointerType)
+	ownsData := !isPointerSource
 
 	for vtableKey := range cg.traitVtableGlobals {
 		// vtableKey format: "structName__instKey"
@@ -1756,16 +1765,16 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 			continue
 		}
 
-		return fatPtr, instKey, true
+		return fatPtr, instKey, true, ownsData
 	}
 
-	return nil, "", false
+	return nil, "", false, false
 }
 
 // genForIterTrait generates a for-in loop over a value that implements iter[T].
 // It calls len() (vtable slot 0) for the count, and get(i) (vtable slot 1) for
 // each element.
-func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr value.Value, instKey string) (*ir.Block, error) {
+func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr value.Value, instKey string, ownsData bool) (*ir.Block, error) {
 	baseTrait := instKey
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
@@ -1806,6 +1815,13 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	// Extract components of fat pointer.
 	dataPtr := block.NewExtractValue(iterFatPtr, 0)
 	vtablePtr := block.NewExtractValue(iterFatPtr, 1)
+
+	// The iterFatPtr was constructed by tryCoerceToIter -> coerceToTrait,
+	// which heap-allocates the source struct via _tin_rc_alloc when the
+	// iter value is by-value (not already a pointer). The for-loop owns
+	// that ARC reference and must release it on exit so the storage is
+	// reclaimed. Without this, every for-in over a value-typed iter
+	// leaked the heap-allocated source.
 
 	// Call len().
 	lenFnType := vtableSt.Fields[lenSlot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
@@ -1869,6 +1885,15 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 		}
 	}
 
+	// Release the iter iface's data ptr at loop exit if we own it (i.e.,
+	// tryCoerceToIter heap-allocated it from a value-source struct).
+	// Pointer-source iterVals are borrowed and the original *T owner
+	// handles cleanup — releasing here would corrupt non-RC malloc'd
+	// blocks (see malloc_dispatch.tin pattern).
+	if ownsData {
+		afterBlock.NewCall(cg.ensureRelease(), dataPtr)
+	}
+
 	return afterBlock, nil
 }
 
@@ -1885,7 +1910,15 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	)
 
 	if pt, ok := structType.(*irtypes.PointerType); ok {
-		// Already a pointer (e.g. from malloc + bitcast). Use it directly.
+		// Already a pointer (e.g. from `&T{...}` or mem::malloc + cast).
+		// Use it directly — pointer-receiver methods need the iface to
+		// share the original's memory so mutations are visible. Lifetime
+		// belongs to the original *T owner; iface just borrows. The
+		// callers we currently emit explicit iface releases for
+		// (genForIterTrait, traitChain init/deinit) only fire for
+		// value-source ifaces because the pointer-source iface's data
+		// ptr might be a non-RC malloc'd block where _tin_release would
+		// corrupt — see malloc_dispatch.tin.
 		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
 		concreteType = pt.ElemType
 	} else {
