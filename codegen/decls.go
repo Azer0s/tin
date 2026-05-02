@@ -1889,10 +1889,25 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
 		concreteType = pt.ElemType
 	} else {
-		// Value type: alloca to get a stable pointer.
-		alloca := block.NewAlloca(structType)
-		block.NewStore(structVal, alloca)
-		dataPtr = block.NewBitCast(alloca, irtypes.I8Ptr)
+		// Heap-allocate the source struct so the iface's `this` pointer
+		// survives across coroutine suspends. A stack alloca here would die
+		// the moment the constructing coroutine suspends (the resume
+		// function's stack frame is freed on suspend), and any spawned
+		// fiber that captured the iface would later read freed memory —
+		// which on AArch64 reliably corrupts (the next worker-stack frame
+		// overwrites it), and on AMD64 happens to look intact under most
+		// scheduling but isn't guaranteed.
+		//
+		// _tin_rc_alloc gives us an ARC header so existing release paths
+		// reclaim the storage when the iface goes out of scope.
+		szGEP := block.NewGetElementPtr(structType,
+			constant.NewNull(irtypes.NewPointer(structType)),
+			constant.NewInt(irtypes.I32, 1))
+		szInt := block.NewPtrToInt(szGEP, irtypes.I64)
+		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
+		typedPtr := block.NewBitCast(heapPtr, irtypes.NewPointer(structType))
+		block.NewStore(structVal, typedPtr)
+		dataPtr = heapPtr
 		concreteType = structType
 	}
 
