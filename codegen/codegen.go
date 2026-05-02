@@ -281,13 +281,12 @@ type CodeGen struct {
 	// deadStrippedMethods records methods that were dropped during
 	// generic-struct monomorphization because their `where t is X`
 	// guard didn't hold for the concrete instantiation. Keyed by
-	// concrete struct name → method name → human-readable witness
-	// of which constraint failed. Consumed by call-site error
-	// reporting so "undefined method" can point at the actual
-	// reason (e.g. "method `cas` is not available on Atomic[bool]
-	// because the constraint `where t is numeric` is not satisfied")
-	// instead of the generic "method not found".
-	deadStrippedMethods map[string]map[string]string
+	// concrete struct name → method name → list of witnesses (one
+	// per stripped impl, since a method can have multiple where-
+	// guarded overloads). Consumed by call-site error reporting so
+	// "undefined method" can list every failing constraint instead
+	// of the generic "method not found".
+	deadStrippedMethods map[string]map[string][]string
 
 	// implEntriesByMod tracks the per-module impl-section globals so the
 	// finalizer can pin them via @llvm.used. Populated by
@@ -1217,7 +1216,7 @@ func New(filename string) *CodeGen {
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
 		structDisplayNames:       make(map[string]string),
 		structImpls:              make(map[string][]string),
-		deadStrippedMethods:      make(map[string]map[string]string),
+		deadStrippedMethods:      make(map[string]map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
 		traitChainedInits:        make(map[string][]*ir.Func),
 		traitChainedDeinits:      make(map[string][]*ir.Func),

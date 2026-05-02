@@ -864,9 +864,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
-		if witness, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
-			return nil, cg.nodeErr(e, "method %s.%s is not available on this instantiation: %s",
-				structName, fn.Field, witness)
+		if witnesses, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
+			return nil, cg.nodeErr(e, "method %s.%s is not available on this instantiation:\n%s",
+				structName, fn.Field, formatStripWitnesses(witnesses))
 		}
 
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {

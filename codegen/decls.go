@@ -1005,13 +1005,15 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		// instantiation is dead-stripped from this concrete struct.
 		// Calling the method on the wrong instantiation then produces
 		// the dead-strip diagnostic at the call site (see emitDeadStripError)
-		// pointing at the failing constraint.
+		// listing every failing constraint — one entry per stripped
+		// overload, since the same method name can have multiple
+		// where-guarded variants.
 		if witness := cg.methodConstraintWitness(m, typeSubst); witness != "" {
 			if cg.deadStrippedMethods[n.Name] == nil {
-				cg.deadStrippedMethods[n.Name] = make(map[string]string)
+				cg.deadStrippedMethods[n.Name] = make(map[string][]string)
 			}
 
-			cg.deadStrippedMethods[n.Name][m.Name] = witness
+			cg.deadStrippedMethods[n.Name][m.Name] = append(cg.deadStrippedMethods[n.Name][m.Name], witness)
 
 			continue
 		}

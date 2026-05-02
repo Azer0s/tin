@@ -1186,14 +1186,49 @@ func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) 
 	return true, nil
 }
 
+// formatStripWitnesses renders a list of dead-strip witnesses (one per
+// stripped overload) as an indented multi-line block. Single-witness
+// case stays on one line; multi-witness case lists each as a bullet
+// so the diagnostic shows EVERY failing constraint, not just the last
+// one to be evaluated.
+func formatStripWitnesses(witnesses []string) string {
+	if len(witnesses) == 0 {
+		return ""
+	}
+
+	if len(witnesses) == 1 {
+		return "  " + witnesses[0]
+	}
+
+	var sb strings.Builder
+
+	fmt.Fprintf(&sb, "  %d candidate impls, none matched:\n", len(witnesses))
+
+	for i, w := range witnesses {
+		sb.WriteString("    ")
+		fmt.Fprintf(&sb, "[%d] %s", i+1, w)
+
+		if i+1 < len(witnesses) {
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
 // methodConstraintWitness reports whether every where-clause on a generic
 // struct method holds under the given type-parameter substitution. Returns
 // an empty string when all constraints hold (the method survives), or a
 // human-readable description of the FIRST failing constraint when it
 // doesn't (the method is dead-stripped from the concrete struct).
 //
-// A method with no Constraints always survives (unchanged surface for
-// existing struct methods).
+// The returned witness format depends on the bound's shape so the
+// diagnostic stays informative:
+//   - pure leaf:      `where t is X` (t = "Y")
+//   - AND with miss:  `where t is X && Z` failed at `Z` (t = "Y")
+//   - OR all fail:    `where t is X || Z` matches neither (t = "Y")
+//
+// A method with no Constraints always survives.
 func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string]string) string {
 	if len(m.Constraints) == 0 {
 		return ""
@@ -1209,13 +1244,71 @@ func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string
 			continue
 		}
 
-		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return fmt.Sprintf("`where %s is %s` (failing sub-check: `%s` for %s = %q)",
-				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness), c.TypeParam, concreteName)
+		ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound)
+		if ok {
+			continue
 		}
+
+		full := typeBoundString(c.Bound)
+
+		// Single-leaf bound (`where t is X`). Two flavors:
+		//   - X is a tagged union alias (`type intish = i32 | i64`):
+		//     the user really wrote a multi-alternative bound through
+		//     the alias. Treat as OR for the purposes of wording.
+		//   - X is anything else (literal type, trait): compact form
+		//     since pointing at the bound twice is noise.
+		if leaf, isLeaf := c.Bound.(*ast.TBAtom); isLeaf && !leaf.Neg {
+			leafName := ""
+
+			switch tt := leaf.Trait.(type) {
+			case *ast.SimpleType:
+				leafName = tt.Name
+			case *ast.GenericType:
+				leafName = tt.Name
+			}
+
+			if _, isUnion := cg.unionTypeMembers[leafName]; isUnion {
+				return fmt.Sprintf("`where %s is %s` (%s = %q matches none)",
+					c.TypeParam, full, c.TypeParam, concreteName)
+			}
+
+			return fmt.Sprintf("`where %s is %s` (%s = %q)",
+				c.TypeParam, full, c.TypeParam, concreteName)
+		}
+
+		// Pure-OR bound (no AND nodes): the concrete type matched
+		// no alternative, so saying "failed at <last leaf>" is
+		// misleading — every alternative was equally tried. Format
+		// without a sub-check pointer.
+		if isPureOrBound(c.Bound) {
+			return fmt.Sprintf("`where %s is %s` (%s = %q matches none)",
+				c.TypeParam, full, c.TypeParam, concreteName)
+		}
+
+		// Mixed AND/OR bound — pointing at the failing AND-conjunct
+		// is genuinely informative: that's the specific missing
+		// requirement.
+		return fmt.Sprintf("`where %s is %s` failed at `%s` (%s = %q)",
+			c.TypeParam, full, typeBoundString(witness), c.TypeParam, concreteName)
 	}
 
 	return ""
+}
+
+// isPureOrBound reports whether b is built only from atoms and OR
+// nodes (no AND). Used by the witness formatter to choose between
+// "failed at sub-check" and "matches none of" wording.
+func isPureOrBound(b ast.TypeBound) bool {
+	switch v := b.(type) {
+	case *ast.TBAtom:
+		return true
+	case *ast.TBOr:
+		return isPureOrBound(v.Left) && isPureOrBound(v.Right)
+	case *ast.TBAnd:
+		return false
+	}
+
+	return true
 }
 
 // typeArgsContainAnyOf reports whether any type-argument expression in args
