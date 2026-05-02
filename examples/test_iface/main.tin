@@ -1,8 +1,0 @@
-use mypkg
-
-fn{#async} main() =
-  let rd = mypkg::MyReader{fd: 42}
-  let p = &rd as *byte
-  echo "[main] rd addr={p as i64} rd.fd={rd.fd}"
-  let r = await spawn mypkg::call_iface(rd)
-  echo "result={r}"
