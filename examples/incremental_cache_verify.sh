@@ -107,6 +107,57 @@ n_after_clean=$(find .build/pkg -name '*.o' 2>/dev/null | wc -l)
 [[ $n_after_clean -eq $n_before_clean ]]
 check "tin clean preserves .build/pkg ($n_before_clean kept)" $?
 
+# 6. Cold build is deterministic: two cold builds produce byte-identical
+# binaries. Catches non-deterministic ordering in codegen / link.
+rm -rf .build /tmp/inc_a /tmp/inc_b
+./tin build "$work/a.tin" -o /tmp/inc_a >/dev/null 2>&1
+md5_a=$(md5sum /tmp/inc_a | awk '{print $1}')
+rm -rf .build
+./tin build "$work/a.tin" -o /tmp/inc_b >/dev/null 2>&1
+md5_b=$(md5sum /tmp/inc_b | awk '{print $1}')
+[[ "$md5_a" == "$md5_b" ]]
+check "two cold builds produce byte-identical binaries ($md5_a)" $?
+
+# 7. Run/test cache invalidates on compiler binary change. The SBOM
+# records a synthetic __tin_binary__ entry hashing the running tin
+# binary; sbomMatches refuses the cache when it differs. Without this
+# a fresh tin with a codegen fix would silently reuse stale binaries
+# built by the buggy compiler. We can't easily re-link tin during the
+# script, so verify the SBOM contains the entry as a structural check.
+cat > "$work/r.tin" << 'TINEOF'
+fn main() i64 = return 0
+test "noop" = if 1 == 0: panic("nope")
+TINEOF
+./tin test "$work/r.tin" >/dev/null 2>&1
+sbom_path=$(find .build/test -name 'sbom.txt' -newer "$work/r.tin" 2>/dev/null | head -1)
+if [[ -z "$sbom_path" ]]; then
+  sbom_path=$(find .build/test -name 'sbom.txt' 2>/dev/null | head -1)
+fi
+grep -q '^[0-9a-f]\{32\}  __tin_binary__$' "$sbom_path" 2>/dev/null
+check "test cache SBOM includes __tin_binary__ entry" $?
+
+# 8. Concurrent builds of the same source share the cache safely. Race
+# four builds; all should succeed and produce byte-identical output.
+rm -rf .build
+pids=()
+for i in 1 2 3 4; do
+  (./tin build "$work/a.tin" -o "/tmp/inc_p$i" >/dev/null 2>&1) &
+  pids+=($!)
+done
+race_rc=0
+for p in "${pids[@]}"; do
+  wait "$p" || race_rc=1
+done
+md5_p=$(md5sum /tmp/inc_p1 | awk '{print $1}')
+md5_match=true
+for i in 2 3 4; do
+  this=$(md5sum "/tmp/inc_p$i" 2>/dev/null | awk '{print $1}')
+  [[ "$this" == "$md5_p" ]] || md5_match=false
+done
+[[ $race_rc -eq 0 && "$md5_match" == "true" ]]
+check "4 concurrent builds succeed and produce identical binaries" $?
+rm -f /tmp/inc_p*
+
 echo
 echo "incremental cache verify: $pass passed, $fail failed"
 

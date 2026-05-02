@@ -2832,6 +2832,55 @@ func cacheBinDir(mode, file string, src []byte) string {
 	return filepath.Join(".build", mode, fmt.Sprintf("%s_%s", dunder, hex.EncodeToString(sum[:])))
 }
 
+// sbomBinaryMarker is a sentinel "path" recorded in sbom.txt for the
+// compiler binary itself. sbomMatches recognizes it and compares against
+// tinBinaryHash() instead of trying to open the literal name as a file.
+// Without this, a fresh tin binary with a codegen fix would silently
+// reuse cached binaries built by the buggy compiler — the symptom that
+// surfaced in the u64-mod fix audit.
+const sbomBinaryMarker = "__tin_binary__"
+
+var (
+	tinBinaryHashCache string
+	tinBinaryHashOnce  sync.Once
+)
+
+// tinBinaryHash returns the hex MD5 of the running compiler binary,
+// memoized for the process lifetime. Used by writeBuildSBOM and
+// sbomMatches to invalidate run/test cache entries when the compiler
+// itself has changed.
+//
+// On unrecoverable error (no executable path, can't read it) returns a
+// per-process sentinel that includes the PID and start time; the value
+// changes every invocation so a cache slot written under a failed-hash
+// build is never silently reused under another. A warning is printed.
+func tinBinaryHash() string {
+	tinBinaryHashOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			tinBinaryHashCache = fmt.Sprintf("UNAVAIL-pid%d-%d", os.Getpid(), time.Now().UnixNano())
+
+			fmt.Fprintf(os.Stderr, "warning: tin: can't determine compiler executable for cache key (%v); cache invalidation on compiler change disabled, every build will miss\n", err)
+
+			return
+		}
+
+		body, err := os.ReadFile(exe)
+		if err != nil {
+			tinBinaryHashCache = fmt.Sprintf("UNAVAIL-pid%d-%d", os.Getpid(), time.Now().UnixNano())
+
+			fmt.Fprintf(os.Stderr, "warning: tin: can't read compiler binary %s for cache key (%v); cache invalidation on compiler change disabled, every build will miss\n", exe, err)
+
+			return
+		}
+
+		sum := md5.Sum(body)
+		tinBinaryHashCache = hex.EncodeToString(sum[:])
+	})
+
+	return tinBinaryHashCache
+}
+
 // sbomMatches reports whether every file recorded in <cacheDir>/sbom.txt
 // still hashes to the same MD5. A missing or unreadable SBOM means "no
 // match" so the build is rerun.
@@ -2849,6 +2898,14 @@ func sbomMatches(cacheDir string) bool {
 		parts := strings.SplitN(line, "  ", 2)
 		if len(parts) != 2 {
 			return false
+		}
+
+		if parts[1] == sbomBinaryMarker {
+			if tinBinaryHash() != parts[0] {
+				return false
+			}
+
+			continue
 		}
 
 		body, err := os.ReadFile(parts[1])
@@ -2870,10 +2927,18 @@ func sbomMatches(cacheDir string) bool {
 // `//!+file.c` C sources) under <cacheDir>/sbom.txt. On the next run
 // sbomMatches re-hashes each path and refuses the cache if anything
 // changed.
+//
+// The first line is a synthetic entry for the compiler binary
+// (sbomBinaryMarker) so a rebuilt tin invalidates every cache entry it
+// would otherwise have reused.
 func writeBuildSBOM(cacheDir, entryFile string, entrySrc []byte, depPaths []string) error {
 	seen := map[string]bool{entryFile: true}
 
 	var sb strings.Builder
+
+	if h := tinBinaryHash(); h != "" {
+		fmt.Fprintf(&sb, "%s  %s\n", h, sbomBinaryMarker)
+	}
 
 	entrySum := md5.Sum(entrySrc)
 	fmt.Fprintf(&sb, "%s  %s\n", hex.EncodeToString(entrySum[:]), entryFile)
