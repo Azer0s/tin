@@ -96,13 +96,16 @@ fn heap_no_deinit_test() =
 //    Defers run before deinit for the same scope.
 // ---------------------------------------------------------------------------
 
-fn defer_vs_deinit() [string] =
+fn defer_vs_deinit() =
   event_log = []
   let r = resource{id: 5}
   defer do:
     log_event("deferred")
-  // At end of scope: defer fires first, then r.deinit
-  return event_log
+  // At end of scope: defer fires first, then r.deinit. event_log
+  // (a global) is read after the call to observe both events; we
+  // can't return event_log directly because Tin fat arrays capture
+  // (ptr, len) at return time, freezing the snapshot before defer
+  // and deinit run.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -150,9 +153,9 @@ test "heap allocation does not trigger deinit" =
   assert::equals(len(event_log), 0)
 
 test "defer fires before deinit" =
-  let log = defer_vs_deinit()
+  defer_vs_deinit()
   // Expected: init:5, then at end of scope: defer fires ("deferred"), then deinit:5
-  assert::ok(len(log) >= 3)
-  assert::equals(log[0], "init:5")
-  assert::equals(log[1], "deferred")
-  assert::equals(log[2], "deinit:5")
+  assert::ok(len(event_log) >= 3)
+  assert::equals(event_log[0], "init:5")
+  assert::equals(event_log[1], "deferred")
+  assert::equals(event_log[2], "deinit:5")

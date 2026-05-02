@@ -1,0 +1,27 @@
+use { loop, async } from macros
+use io
+use ioutil
+use net::tcp
+use errors
+
+async handle_conn(conn tcp::Conn) =
+  defer io::close(conn.fd)
+  echo "[iface] entered fd={conn.fd}"
+  let rd = ioutil::FdReader{fd: conn.fd}
+  let line = await ioutil::read_string(rd)
+  echo "[iface] line='{line}' len={len(line)}"
+  if len(line) > 0:
+    let wr = ioutil::FdWriter{fd: conn.fd}
+    await ioutil::write_string(wr, "ECHO: {line}\n")
+  echo "[iface] done"
+
+fn{#async} main() =
+  let (srv, err) = tcp::listen(8080)
+  if errors::has(err):
+    panic(err.message())
+  echo "listening on :8080"
+  loop:
+    let (c, cerr) = srv.accept()
+    if errors::has(cerr):
+      break
+    spawn handle_conn(c)
