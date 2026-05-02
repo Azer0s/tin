@@ -2042,29 +2042,26 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	structType := structVal.Type()
 
 	// Receiver/source mismatch: if the trait has any pointer-receiver
-	// methods, value-form coercion `let f Trait = b` would silently
-	// mutate a heap copy. Stash the diagnostic on cg.coerceLastErr so
-	// the caller (genVarDecl, etc.) can surface it positioned at the
-	// user's source line — coerce() itself returns Value with no error
-	// channel and is called from 87+ sites we don't want to touch.
+	// methods, target=value-trait coercion would silently mutate a heap
+	// copy regardless of whether the source was `b` or `&b` — Tin's
+	// `Trait` always heap-copies. Reject both. The user must use
+	// `let a *Trait = &b` to get a real borrow.
 	//
-	// Pointer-source coercions (`let f Trait = &b`, also still a
-	// value-iface but with a pointer source) keep the same heap-copy
-	// semantics — Tin's `Trait` is always Go-like, only `*Trait` is
-	// the borrow form.
-	if _, isPtr := structType.(*irtypes.PointerType); !isPtr {
-		if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
-			err := fmt.Errorf(
-				"trait %s has pointer-receiver methods (%s); value coercion would silently mutate a heap copy. "+
-					"Use `let a *%s = &b` to mutate the original, or rewrite the trait's receivers to %s if a copy is intended",
-				cg.traitDisplayName(instKey),
-				strings.Join(missing, ", "),
-				cg.traitDisplayName(instKey),
-				cg.traitDisplayName(instKey))
-			cg.coerceLastErr = err
+	// Stash the diagnostic on cg.coerceLastErr so the caller
+	// (genVarDecl, etc.) can surface it positioned at the user's
+	// source line — coerce() itself returns Value with no error
+	// channel and is called from 87+ sites we don't want to touch.
+	if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
+		err := fmt.Errorf(
+			"trait %s has pointer-receiver methods (%s); value-form coercion silently mutates a heap copy. "+
+				"Use `let a *%s = &b` to mutate the original, or rewrite the trait's receivers to %s if a copy is intended",
+			cg.traitDisplayName(instKey),
+			strings.Join(missing, ", "),
+			cg.traitDisplayName(instKey),
+			cg.traitDisplayName(instKey))
+		cg.coerceLastErr = err
 
-			return nil, err
-		}
+		return nil, err
 	}
 
 	var (

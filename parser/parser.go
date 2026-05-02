@@ -25,6 +25,15 @@ type Parser struct {
 	// attaches to the enclosing pointer expression (`(&x) as T`) instead
 	// of the inner operand (`&(x as T)`).
 	suppressPostfixCast int
+	// pendingLambdaDedents counts trailing DEDENT tokens that belong to
+	// a lambda body that exited early via the RPAREN-break in parseBlock
+	// (the `f(fn(p) = stmt; stmt)` shape with `)` on the last body line).
+	// The lambda's INDENT was consumed but the matching DEDENT arrives
+	// later (after the call's `)` is consumed by the outer arg parser);
+	// without this counter the DEDENT pops the OUTER scope instead.
+	// skipNewlines / parseBlock loop check + decrement when DEDENT shows
+	// up.
+	pendingLambdaDedents int
 }
 
 // New creates a Parser over the given token slice
@@ -181,11 +190,27 @@ func (p *Parser) skipNewlines() {
 		p.advance()
 		p.continuationDedents--
 	}
+	// Drain owed lambda-DEDENTs: when parseBlock broke early on RPAREN
+	// (multi-line lambda body that ends with `)` on the last stmt), the
+	// matching DEDENT arrives after the call's `)` is consumed. Without
+	// this drain, the outer block's parseBlock loop sees the DEDENT and
+	// pops its own scope prematurely.
+	for p.pendingLambdaDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.pendingLambdaDedents--
+	}
 }
 
 func (p *Parser) skipSemisAndNewlines() {
 	for p.check(lexer.NEWLINE) || p.check(lexer.SEMI) {
 		p.advance()
+	}
+	// Same lambda-DEDENT drain as in skipNewlines — parseBlock's main
+	// loop calls this after each stmt and would otherwise see the owed
+	// DEDENT and exit the wrong scope.
+	for p.pendingLambdaDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.pendingLambdaDedents--
 	}
 }
 

@@ -2,66 +2,98 @@
 
 // stdlib/sync - Atomic[t]: thread-safe single-cell storage.
 //
-// One generic struct, two implementations selected at instantiation time
-// by the where guards on each method:
+// One generic struct, multiple implementations selected at instantiation
+// time by the where guards on each method:
 //
-//   * `t is primitive` (i*, u*, f*, bool): lock-free C11 __atomic
-//     builtins. Storage is a heap i64 slot; load/store reinterpret t as
-//     i64. add/cas additionally require `t is numeric` (no bool).
+//   * 8-byte primitives (i64, u64, f64): lock-free 64-bit C11 atomics.
+//   * 4-byte primitives (i32, u32, f32): lock-free 32-bit C11 atomics.
+//   * 2-byte primitives (i16, u16):      lock-free 16-bit C11 atomics.
+//   * 1-byte primitives (i8, u8, bool):  lock-free 8-bit C11 atomics.
+//   * non-primitives:                    spinlock-protected heap copy.
 //
-//   * `t is not primitive` (any other t): mutex-protected heap copy.
-//     load/store memcpy under a TinFastMutex. add/cas are not exposed —
-//     they have no meaning on arbitrary structs.
+// add and cas additionally require `t is numeric` (excludes bool, f32,
+// f64). Atomic int-add on a float bit pattern would corrupt the value;
+// atomic add on bool isn't meaningful. Calling them on the wrong t is
+// a compile-time error pointing at the failing where guard.
 //
-// Calling cas/add on Atomic[bool] (or any non-numeric primitive) is a
-// compile-time error: the methods are dead-stripped from the concrete
-// struct at instantiation, and the call site emits a diagnostic
-// pointing at the failing `where t is numeric` guard.
+// Storage is `sizeof(t)` bytes for primitives so each atomic operation
+// runs at the natural width and wraps at the right boundary. Floats
+// round-trip via bit pattern (the user-typed value's bytes are stored
+// directly, not value-converted to int).
 //
-// Type-equality bounds (`t is i64`) match only the literal primitive
-// type and cannot be satisfied by a user struct that happens to
-// implement an `ord` trait — so the constraint is an actual gate, not
-// an opt-in. Likewise `t is primitive` only holds for the listed
-// primitives below.
+// For non-primitive t (struct slots), call `.for_locked(fn)` to read or
+// mutate the protected value while the lock is held; load/store work
+// for snapshot semantics.
 
-// numeric is the gate for `add` (integer arithmetic only) — atomic
-// integer add on the bit pattern of a float is meaningless, so floats
-// are excluded.
+// Numeric types — gate for add/cas. Floats and bool excluded (no
+// meaningful atomic int-add or compare for them).
 type numeric = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8
 
-// primitive is the gate for load/store/new/cas/deinit. Includes floats
-// (bit-pattern atomic load/store works fine) and bool. cas via bit-
-// pattern compare-and-swap is well-defined for every primitive.
+// Width subgroups for per-width atomic dispatch.
+type w8 = i64 | u64 | f64
+type w4 = i32 | u32 | f32
+type w2 = i16 | u16
+type w1 = i8 | u8 | bool
 type primitive = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8 | f64 | f32 | bool
 
-// Lock-free 64-bit primitives (existing C runtime). Bytewise variants
-// for sub-64-bit types — load/store memcpy `sizeof(t)` bytes between
-// the user's value slot and the i64 atomic slot's low bytes, so
-// floats round-trip via bit pattern (not value conversion).
-fn tin_atomic_new_64(v i64) *void                       = extern("_tin_atomic_new_i64")
-fn tin_atomic_free_64(a *void)                          = extern("_tin_atomic_free_i64")
-fn tin_atomic_load_64(a *void) i64                      = extern("_tin_atomic_load_i64")
-fn tin_atomic_store_64(a *void, v i64)                  = extern("_tin_atomic_store_i64")
-fn tin_atomic_add_64(a *void, d i64) i64                = extern("_tin_atomic_add_i64")
-fn tin_atomic_cas_64(a *void, old i64, nw i64) i64      = extern("_tin_atomic_cas_i64")
-fn tin_atomic_load_bits(a *void, out *void, sz i64)     = extern("_tin_atomic_load_bits")
-fn tin_atomic_store_bits(a *void, src *void, sz i64)    = extern("_tin_atomic_store_bits")
+// Generic slot allocator (calloc-zero) for primitives.
+fn tin_atomic_alloc(size i64) *void                  = extern("_tin_atomic_alloc")
+fn tin_atomic_free(p *void)                          = extern("_tin_atomic_free")
 
-// Mutex-backed object slot (new C runtime helpers).
-fn tin_atomic_obj_new(size i64) *void               = extern("_tin_atomic_obj_new")
-fn tin_atomic_obj_free(p *void)                     = extern("_tin_atomic_obj_free")
-fn tin_atomic_obj_load(p *void, out *void)          = extern("_tin_atomic_obj_load")
+// Per-width load/store.
+fn tin_atomic_load_64(a *void, out *void)            = extern("_tin_atomic_load_64")
+fn tin_atomic_load_32(a *void, out *void)            = extern("_tin_atomic_load_32")
+fn tin_atomic_load_16(a *void, out *void)            = extern("_tin_atomic_load_16")
+fn tin_atomic_load_8(a *void, out *void)             = extern("_tin_atomic_load_8")
+fn tin_atomic_store_64(a *void, src *void)           = extern("_tin_atomic_store_64")
+fn tin_atomic_store_32(a *void, src *void)           = extern("_tin_atomic_store_32")
+fn tin_atomic_store_16(a *void, src *void)           = extern("_tin_atomic_store_16")
+fn tin_atomic_store_8(a *void, src *void)            = extern("_tin_atomic_store_8")
+
+// Per-width add/cas.
+fn tin_atomic_add_i64(a *void, d i64) i64            = extern("_tin_atomic_add_i64")
+fn tin_atomic_add_i32(a *void, d i32) i32            = extern("_tin_atomic_add_i32")
+fn tin_atomic_add_i16(a *void, d i16) i16            = extern("_tin_atomic_add_i16")
+fn tin_atomic_add_i8(a *void, d i8) i8               = extern("_tin_atomic_add_i8")
+fn tin_atomic_cas_i64(a *void, old i64, nw i64) i64  = extern("_tin_atomic_cas_i64")
+fn tin_atomic_cas_i32(a *void, old i32, nw i32) i32  = extern("_tin_atomic_cas_i32")
+fn tin_atomic_cas_i16(a *void, old i16, nw i16) i16  = extern("_tin_atomic_cas_i16")
+fn tin_atomic_cas_i8(a *void, old i8, nw i8) i8      = extern("_tin_atomic_cas_i8")
+
+// Mutex-backed slot for non-primitive t.
+fn tin_atomic_obj_new(size i64) *void                = extern("_tin_atomic_obj_new")
+fn tin_atomic_obj_free(p *void)                      = extern("_tin_atomic_obj_free")
+fn tin_atomic_obj_load(p *void, out *void)           = extern("_tin_atomic_obj_load")
 fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_store")
+
+// Lock/unlock helpers for the for_locked callback path. Exposed so
+// Tin can call the user's callback between lock and unlock.
+fn tin_atomic_obj_lock(p *void) *void                = extern("_tin_atomic_obj_lock_payload")
+fn tin_atomic_obj_unlock(p *void)                    = extern("_tin_atomic_obj_unlock")
 
 struct Atomic[t] =
   _ptr *void
 
-  // new: two impls. Compile-time selected by t.
+  // --- new ----------------------------------------------------------
 
-  static fn new(v t) Atomic[t] where t is primitive =
-    let p = tin_atomic_new_64(0)
-    let vp *void = &v as *void
-    tin_atomic_store_bits(p, vp, sizeof(t))
+  static fn new(v t) Atomic[t] where t is w8 =
+    let p = tin_atomic_alloc(8)
+    tin_atomic_store_64(p, &v as *void)
+    return Atomic[t]{_ptr: p}
+
+  static fn new(v t) Atomic[t] where t is w4 =
+    let p = tin_atomic_alloc(4)
+    tin_atomic_store_32(p, &v as *void)
+    return Atomic[t]{_ptr: p}
+
+  static fn new(v t) Atomic[t] where t is w2 =
+    let p = tin_atomic_alloc(2)
+    tin_atomic_store_16(p, &v as *void)
+    return Atomic[t]{_ptr: p}
+
+  static fn new(v t) Atomic[t] where t is w1 =
+    let p = tin_atomic_alloc(1)
+    tin_atomic_store_8(p, &v as *void)
     return Atomic[t]{_ptr: p}
 
   static fn new(v t) Atomic[t] where t is not primitive =
@@ -69,49 +101,99 @@ struct Atomic[t] =
     tin_atomic_obj_store(p, &v as *void)
     return Atomic[t]{_ptr: p}
 
-  // load / store: bit-reinterpret via memcpy of sizeof(t) bytes so
-  // floats round-trip correctly (a value-cast `as i64` would convert
-  // 3.14 to 3 instead of preserving the bit pattern).
+  // --- load ---------------------------------------------------------
 
-  fn load(this Atomic[t]) t where t is primitive =
+  fn load(this Atomic[t]) t where t is w8 =
     let out t
-    let outp *void = &out as *void
-    tin_atomic_load_bits(this._ptr, outp, sizeof(t))
+    tin_atomic_load_64(this._ptr, &out as *void)
+    return out
+
+  fn load(this Atomic[t]) t where t is w4 =
+    let out t
+    tin_atomic_load_32(this._ptr, &out as *void)
+    return out
+
+  fn load(this Atomic[t]) t where t is w2 =
+    let out t
+    tin_atomic_load_16(this._ptr, &out as *void)
+    return out
+
+  fn load(this Atomic[t]) t where t is w1 =
+    let out t
+    tin_atomic_load_8(this._ptr, &out as *void)
     return out
 
   fn load(this Atomic[t]) t where t is not primitive =
-    let out t  // zero-initialized stack slot
-    let outp *void = &out as *void
-    tin_atomic_obj_load(this._ptr, outp)
+    let out t
+    tin_atomic_obj_load(this._ptr, &out as *void)
     return out
 
-  fn store(this Atomic[t], v t) where t is primitive =
-    let vp *void = &v as *void
-    tin_atomic_store_bits(this._ptr, vp, sizeof(t))
+  // --- store --------------------------------------------------------
+
+  fn store(this Atomic[t], v t) where t is w8 =
+    tin_atomic_store_64(this._ptr, &v as *void)
+
+  fn store(this Atomic[t], v t) where t is w4 =
+    tin_atomic_store_32(this._ptr, &v as *void)
+
+  fn store(this Atomic[t], v t) where t is w2 =
+    tin_atomic_store_16(this._ptr, &v as *void)
+
+  fn store(this Atomic[t], v t) where t is w1 =
+    tin_atomic_store_8(this._ptr, &v as *void)
 
   fn store(this Atomic[t], v t) where t is not primitive =
-    let vp *void = &v as *void
-    tin_atomic_obj_store(this._ptr, vp)
+    tin_atomic_obj_store(this._ptr, &v as *void)
 
-  // add: integer types only. Atomic float-add isn't a hardware
-  // primitive and integer-add on float bits would corrupt the value.
+  // --- add: numeric only, per-width ---------------------------------
 
-  fn add(this Atomic[t], d t) t where t is numeric =
-    return tin_atomic_add_64(this._ptr, d as i64) as t
+  fn add(this Atomic[t], d t) t where t is i64 || u64 =
+    return tin_atomic_add_i64(this._ptr, d as i64) as t
 
-  // cas: integer compare-and-swap. Returns the previous value
-  // (so the caller can branch on prev == old to detect success).
-  // Restricted to integer types — atomic float CAS via bit pattern
-  // is well-defined but requires a different C helper; revisit if
-  // needed.
+  fn add(this Atomic[t], d t) t where t is i32 || u32 =
+    return tin_atomic_add_i32(this._ptr, d as i32) as t
 
-  fn cas(this Atomic[t], old t, nw t) t where t is numeric =
-    return tin_atomic_cas_64(this._ptr, old as i64, nw as i64) as t
+  fn add(this Atomic[t], d t) t where t is i16 || u16 =
+    return tin_atomic_add_i16(this._ptr, d as i16) as t
 
-  // deinit: same dual-impl pattern; chooses the right free.
+  fn add(this Atomic[t], d t) t where t is i8 || u8 =
+    return tin_atomic_add_i8(this._ptr, d as i8) as t
+
+  // --- cas: numeric only, per-width ---------------------------------
+
+  fn cas(this Atomic[t], old t, nw t) t where t is i64 || u64 =
+    return tin_atomic_cas_i64(this._ptr, old as i64, nw as i64) as t
+
+  fn cas(this Atomic[t], old t, nw t) t where t is i32 || u32 =
+    return tin_atomic_cas_i32(this._ptr, old as i32, nw as i32) as t
+
+  fn cas(this Atomic[t], old t, nw t) t where t is i16 || u16 =
+    return tin_atomic_cas_i16(this._ptr, old as i16, nw as i16) as t
+
+  fn cas(this Atomic[t], old t, nw t) t where t is i8 || u8 =
+    return tin_atomic_cas_i8(this._ptr, old as i8, nw as i8) as t
+
+  // --- for_locked: non-primitive only -------------------------------
+  //
+  // Run a callback with the protected value held under the lock.
+  // The callback receives `*t`; mutations through the pointer are
+  // visible to subsequent load() callers. Atomicity is maintained
+  // because the lock is held for the duration of the callback.
+  //
+  // Only available on the spinlock-backed instantiation (non-
+  // primitive t). For primitive t use load/store/add/cas; the lock-
+  // free C11 atomics don't have the concept of an arbitrary
+  // user-defined critical section.
+
+  fn for_locked(this Atomic[t], f fn(*t)) where t is not primitive =
+    let payload *void = tin_atomic_obj_lock(this._ptr)
+    f(payload as *t)
+    tin_atomic_obj_unlock(this._ptr)
+
+  // --- deinit -------------------------------------------------------
 
   fn deinit(this Atomic[t]) where t is primitive =
-    tin_atomic_free_64(this._ptr)
+    tin_atomic_free(this._ptr)
 
   fn deinit(this Atomic[t]) where t is not primitive =
     tin_atomic_obj_free(this._ptr)

@@ -280,25 +280,84 @@ int64_t _tin_atomic_cas_i64(void *a, int64_t old_val, int64_t new_val) {
     return old_val;
 }
 
-// Bit-pattern load/store for sub-i64 primitives: the user's value
-// occupies `sz` bytes (1, 2, 4, or 8). Atomic load/store of the full
-// i64 slot, then memcpy `sz` bytes between the user's slot and the
-// low bytes of the i64 buffer.
-//
-// Used so that floats round-trip via bit pattern (a value-cast
-// `as i64` would convert 3.14 to 3 instead of preserving the IEEE
-// 754 layout). Integer types could go through `as i64` but use this
-// path too so the codegen stays uniform across t.
+// Per-width atomic helpers for primitive Atomic[t]. The slot allocator
+// returns sizeof(t) bytes; the Tin side picks the right helper via
+// where-guard dispatch so each call goes to a function whose argument
+// types match the natural integer width — no runtime size switch.
 
-void _tin_atomic_load_bits(void *a, void *out, int64_t sz) {
-    int64_t loaded = __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
-    memcpy(out, &loaded, (size_t)sz);
+void *_tin_atomic_alloc(int64_t size) {
+    void *p = calloc(1, (size_t)size);
+    if (!p) { fputs("tin: atomic alloc failed\n", stderr); exit(1); }
+    return p;
+}
+void _tin_atomic_free(void *a) { free(a); }
+
+// load: __atomic_load_n on a typed pointer issues the right-width MOV
+// with the requested memory order. The memcpy from the local temp to
+// the user's `out` slot is a non-atomic byte copy — the atomicity
+// guarantee comes from the load itself.
+void _tin_atomic_load_64(void *a, void *out) {
+    int64_t v = __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
+    memcpy(out, &v, 8);
+}
+void _tin_atomic_load_32(void *a, void *out) {
+    int32_t v = __atomic_load_n((int32_t *)a, __ATOMIC_ACQUIRE);
+    memcpy(out, &v, 4);
+}
+void _tin_atomic_load_16(void *a, void *out) {
+    int16_t v = __atomic_load_n((int16_t *)a, __ATOMIC_ACQUIRE);
+    memcpy(out, &v, 2);
+}
+void _tin_atomic_load_8(void *a, void *out) {
+    int8_t v = __atomic_load_n((int8_t *)a, __ATOMIC_ACQUIRE);
+    memcpy(out, &v, 1);
 }
 
-void _tin_atomic_store_bits(void *a, void *src, int64_t sz) {
-    int64_t buf = 0;
-    memcpy(&buf, src, (size_t)sz);
-    __atomic_store_n((int64_t *)a, buf, __ATOMIC_RELEASE);
+void _tin_atomic_store_64(void *a, void *src) {
+    int64_t v; memcpy(&v, src, 8);
+    __atomic_store_n((int64_t *)a, v, __ATOMIC_RELEASE);
+}
+void _tin_atomic_store_32(void *a, void *src) {
+    int32_t v; memcpy(&v, src, 4);
+    __atomic_store_n((int32_t *)a, v, __ATOMIC_RELEASE);
+}
+void _tin_atomic_store_16(void *a, void *src) {
+    int16_t v; memcpy(&v, src, 2);
+    __atomic_store_n((int16_t *)a, v, __ATOMIC_RELEASE);
+}
+void _tin_atomic_store_8(void *a, void *src) {
+    int8_t v; memcpy(&v, src, 1);
+    __atomic_store_n((int8_t *)a, v, __ATOMIC_RELEASE);
+}
+
+// add: per-width fetch-add. Returns the new value (post-add), matching
+// the existing _tin_atomic_add_i64 signature.
+int32_t _tin_atomic_add_i32(void *a, int32_t d) {
+    return __atomic_fetch_add((int32_t *)a, d, __ATOMIC_ACQ_REL) + d;
+}
+int16_t _tin_atomic_add_i16(void *a, int16_t d) {
+    return __atomic_fetch_add((int16_t *)a, d, __ATOMIC_ACQ_REL) + d;
+}
+int8_t _tin_atomic_add_i8(void *a, int8_t d) {
+    return __atomic_fetch_add((int8_t *)a, d, __ATOMIC_ACQ_REL) + d;
+}
+
+// cas: per-width compare-and-swap. Returns the previous value (so the
+// caller can branch on prev == old to detect success).
+int32_t _tin_atomic_cas_i32(void *a, int32_t old_val, int32_t new_val) {
+    __atomic_compare_exchange_n((int32_t *)a, &old_val, new_val,
+        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return old_val;
+}
+int16_t _tin_atomic_cas_i16(void *a, int16_t old_val, int16_t new_val) {
+    __atomic_compare_exchange_n((int16_t *)a, &old_val, new_val,
+        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return old_val;
+}
+int8_t _tin_atomic_cas_i8(void *a, int8_t old_val, int8_t new_val) {
+    __atomic_compare_exchange_n((int8_t *)a, &old_val, new_val,
+        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return old_val;
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +395,7 @@ static inline void _tin_atomic_obj_lock(_tin_atomic_obj *o) {
     }
 }
 
-static inline void _tin_atomic_obj_unlock(_tin_atomic_obj *o) {
+static inline void _tin_atomic_obj_spin_unlock(_tin_atomic_obj *o) {
     atomic_store_explicit(&o->lock, 0u, memory_order_release);
 }
 
@@ -360,12 +419,30 @@ void _tin_atomic_obj_load(void *p, void *out) {
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
     _tin_atomic_obj_lock(o);
     memcpy(out, o->payload, (size_t)o->size);
-    _tin_atomic_obj_unlock(o);
+    _tin_atomic_obj_spin_unlock(o);
 }
 
 void _tin_atomic_obj_store(void *p, void *src) {
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
     _tin_atomic_obj_lock(o);
     memcpy(o->payload, src, (size_t)o->size);
-    _tin_atomic_obj_unlock(o);
+    _tin_atomic_obj_spin_unlock(o);
+}
+
+// Locking primitives for for_locked. The Tin side calls
+// _tin_atomic_obj_lock_payload to acquire the spinlock and receive a
+// pointer into the protected payload, runs its callback, then calls
+// _tin_atomic_obj_unlock to release. Splits the lock/unlock so the
+// user's callback runs INSIDE the critical section.
+void *_tin_atomic_obj_lock_payload(void *p) {
+    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
+    _tin_atomic_obj_lock(o);
+    return o->payload;
+}
+
+// Public wrapper for the unlock — same body as the static inline above
+// but exposed as a regular extern symbol the Tin extern can bind to.
+void _tin_atomic_obj_unlock(void *p) {
+    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
+    atomic_store_explicit(&o->lock, 0u, memory_order_release);
 }

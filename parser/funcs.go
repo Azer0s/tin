@@ -718,6 +718,33 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 		if p.check(lexer.COMMA) {
 			break
 		}
+		// A closing paren mid-block: we're inside the body of a
+		// lambda that lives in a call argument list, e.g.
+		//   f(fn(p) =
+		//     stmt
+		//     stmt)
+		// Break without consuming so the outer call's argv parser
+		// sees its `)`. The lambda body's matching DEDENT arrives
+		// AFTER the `)` is consumed by the outer parser; without
+		// the pendingLambdaDedents counter, that DEDENT would pop
+		// the calling scope (e.g. main's body) and cut everything
+		// after the call out. The counter tells skipNewlines /
+		// the next parseBlock loop iteration to swallow it.
+		if p.check(lexer.RPAREN) {
+			p.pendingLambdaDedents++
+
+			break
+		}
+		// Eat owed lambda-DEDENTs that landed at the start of this
+		// loop iteration before we could process them. Same scope
+		// fix as above, just from the consumer side.
+		if p.check(lexer.DEDENT) && p.pendingLambdaDedents > 0 {
+			p.advance()
+			p.pendingLambdaDedents--
+			p.skipSemisAndNewlines()
+
+			continue
+		}
 
 		isPass := p.check(lexer.KW_PASS)
 

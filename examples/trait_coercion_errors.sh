@@ -62,7 +62,7 @@ echo "trait coercion: hard-error + borrow semantics"
 
 # 1. Hard-error: value coercion rejected when trait has *Self method.
 assert_err 'value form into pointer-receiver trait is rejected' \
-  'value coercion would silently mutate a heap copy' '
+  'value-form coercion silently mutates a heap copy' '
 trait Fooable =
   fn foo(this *Fooable, n i64) = virtual
 
@@ -74,6 +74,18 @@ fn main() i64 =
   let b = Box{v: 0}
   let f Fooable = b
   return 0
+'
+
+# 1b. The same rule fires for `let f Trait = &b` — pointer source still
+# heap-copies through coerceToTrait when the target is value-form Trait.
+assert_err 'pointer source into value-form Trait also rejected' \
+  'value-form coercion silently mutates a heap copy' '
+trait Fooable =
+  fn foo(this *Fooable, n i64) = virtual
+struct Box (Fooable) =
+  v i64
+  fn Fooable::foo(this *Box, n i64) = this.v = n
+fn main() i64 = let b = Box{v: 0}; let f Fooable = &b; return 0
 '
 
 # 2. Hard-error message includes the failing method name(s).
@@ -130,6 +142,32 @@ fn main() i64 =
   let s = Source{v: 7}
   let r Readable = s
   echo "r.read() = {r.read()}"
+  return 0
+'
+
+
+# 6. Atomic[t].for_locked accepts a multi-line anon lambda whose last
+# statement carries the call's `)` on the same line. The parser
+# defers the lambda body's DEDENT so it doesn't pop the surrounding
+# scope (regression for the original "for_locked won't parse" bug).
+assert_runs 'Atomic.for_locked accepts indented multi-stmt anon lambda' \
+  'count=2 total=300' '
+use sync
+
+struct Stats =
+  count i64
+  total i64
+
+fn main() i64 =
+  let s = sync::Atomic[Stats].new(Stats{count: 0, total: 0})
+  s.for_locked(fn(p *Stats) =
+    p.count = p.count + 1
+    p.total = p.total + 100)
+  s.for_locked(fn(p *Stats) =
+    p.count = p.count + 1
+    p.total = p.total + 200)
+  let snap = s.load()
+  echo "count={snap.count} total={snap.total}"
   return 0
 '
 
