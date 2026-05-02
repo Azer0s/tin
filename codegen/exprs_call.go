@@ -908,7 +908,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		// Static method call on a generic struct: Type[K,V]::method(args) or
 		// pkg::Type[K,V]::method(args).  The ScopeAccess path looks like
-		// ["collections::HashMap[string,string]", "new"].
+		// ["collections::HashMap[string,string]", "make"].
 		// Resolve the concrete name and apply overload resolution when needed.
 		if len(fn.Path) >= 2 {
 			methodField := fn.Path[len(fn.Path)-1]

@@ -41,7 +41,7 @@ Import only specific names to avoid pulling the whole namespace into scope:
 use { Channel, Atomic } from sync
 
 let ch = Channel[i64].make(8)
-let c  = Atomic[i64].make(0)
+let c  = Atomic[i64].new(0)
 ```
 
 ### File imports
@@ -191,8 +191,8 @@ directly with `ioutil`.
 use sync
 
 let ch  = sync::Channel[i64].make(8)   // bounded channel, cap 8
-let mu  = sync::Mutex.make()
-let cnt = sync::Atomic[i64].make(0)
+let mu  = sync::Mutex.new()
+let cnt = sync::Atomic[i64].new(0)
 ```
 
 See [14 - Fibers & Channels](14-fibers.md) for fiber and channel usage.

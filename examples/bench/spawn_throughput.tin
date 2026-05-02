@@ -25,7 +25,7 @@ fn{#async} worker() =
 
 fn{#async} main() =
   let n i64 = 100000
-  g_counter = sync::Atomic[i64].make(0)
+  g_counter = sync::Atomic[i64].new(0)
   g_done = sync::Channel[i64].make(n)
 
   let start_ms = _tin_now_ms()

@@ -22,7 +22,7 @@ test "headers_complete finds separator" =
   assert::equals(http::headers_complete("HTTP/1.1 200 OK\r\n"), -1)
 
 test "Request struct construction" =
-  let hdrs = collections::HashMap[string, string]::new(4)
+  let hdrs = collections::HashMap[string, string]::make(4)
   hdrs.set("accept", "text/plain")
   let req = http::Request{method: "POST", url: "http://example.com/api", headers: hdrs, body: "data"}
   assert::equals(req.method, "POST")

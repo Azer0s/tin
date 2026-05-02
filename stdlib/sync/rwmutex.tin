@@ -16,7 +16,7 @@ fn tin_current_pid_rw() i64 = extern("_tin_current_pid")
 struct RWMutex =
   _ptr *void
 
-  static fn make() RWMutex =
+  static fn new() RWMutex =
     return RWMutex{_ptr: tin_frwmutex2_new()}
 
   fn{#async #no_autoyield} read_lock(this RWMutex) =

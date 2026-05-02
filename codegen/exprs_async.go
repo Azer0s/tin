@@ -676,9 +676,9 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 		}
 	}
 
-	// Call Future[T].make(pid) to construct the struct value properly
+	// Call Future[T].new(pid) to construct the struct value properly
 	// (sets type_id, vtable pointer, and pid field).
-	makeFnName := futureConcreteName + "_make"
+	makeFnName := futureConcreteName + "_new"
 
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
@@ -1929,7 +1929,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 		}
 	}
 
-	makeFnName := futureConcreteName + "_make"
+	makeFnName := futureConcreteName + "_new"
 
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {

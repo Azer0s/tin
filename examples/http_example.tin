@@ -29,7 +29,7 @@ fn{#async} main() =
   let req = http::Request{
     method:  "POST",
     url:     "http://httpbin.org/post",
-    headers: collections::HashMap[string, string]::new(1),
+    headers: collections::HashMap[string, string]::make(1),
     body:    "hello",
   }
   let resp2 = await http::send(req)

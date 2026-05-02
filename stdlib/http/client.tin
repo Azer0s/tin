@@ -31,7 +31,7 @@ struct Client =
 
   static fn new() Client =
     return Client{
-      headers: collections::HashMap[string, string]::new(4),
+      headers: collections::HashMap[string, string]::make(4),
     }
 
   fn set_header(this *Client, k string, v string) =
@@ -170,7 +170,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
   if dial_err != nil:
     return HttpResponse{
       status:  500 as HttpStatus,
-      headers: collections::HashMap[string, string]::new(1),
+      headers: collections::HashMap[string, string]::make(1),
     }
 
   let raw = ""
@@ -200,7 +200,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
 
 // empty_client returns a zero-header Client without allocation.
 fn empty_client() Client =
-  return Client{headers: collections::HashMap[string, string]::new(1)}
+  return Client{headers: collections::HashMap[string, string]::make(1)}
 
 // send performs the request r using the default client.
 fn send(r Request) Future[HttpResponse] =
@@ -212,74 +212,74 @@ fn send(client Client, r Request) Future[HttpResponse] =
 
 // get performs an HTTP GET using the default client.
 fn get(url string) Future[HttpResponse] =
-  let req = Request{method: "GET", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "GET", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(empty_client(), req)
 
 // get performs an HTTP GET using the provided client.
 fn get(client Client, url string) Future[HttpResponse] =
-  let req = Request{method: "GET", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "GET", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(client, req)
 
 // post performs an HTTP POST using the default client.
 fn post(url string, body string) Future[HttpResponse] =
-  let req = Request{method: "POST", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "POST", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(empty_client(), req)
 
 // post performs an HTTP POST using the provided client.
 fn post(client Client, url string, body string) Future[HttpResponse] =
-  let req = Request{method: "POST", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "POST", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(client, req)
 
 // post_json performs an HTTP POST with a JSON body using the default client.
 fn post_json(url string, body string) Future[HttpResponse] =
-  let hdrs = collections::HashMap[string, string]::new(2)
+  let hdrs = collections::HashMap[string, string]::make(2)
   hdrs.set("content-type", "application/json")
   let req = Request{method: "POST", url: url, headers: hdrs, body: body}
   return spawn do_with_client(empty_client(), req)
 
 // post_json performs an HTTP POST with a JSON body using the provided client.
 fn post_json(client Client, url string, body string) Future[HttpResponse] =
-  let hdrs = collections::HashMap[string, string]::new(2)
+  let hdrs = collections::HashMap[string, string]::make(2)
   hdrs.set("content-type", "application/json")
   let req = Request{method: "POST", url: url, headers: hdrs, body: body}
   return spawn do_with_client(client, req)
 
 // put performs an HTTP PUT using the default client.
 fn put(url string, body string) Future[HttpResponse] =
-  let req = Request{method: "PUT", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "PUT", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(empty_client(), req)
 
 // put performs an HTTP PUT using the provided client.
 fn put(client Client, url string, body string) Future[HttpResponse] =
-  let req = Request{method: "PUT", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "PUT", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(client, req)
 
 // patch performs an HTTP PATCH using the default client.
 fn patch(url string, body string) Future[HttpResponse] =
-  let req = Request{method: "PATCH", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "PATCH", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(empty_client(), req)
 
 // patch performs an HTTP PATCH using the provided client.
 fn patch(client Client, url string, body string) Future[HttpResponse] =
-  let req = Request{method: "PATCH", url: url, headers: collections::HashMap[string, string]::new(1), body: body}
+  let req = Request{method: "PATCH", url: url, headers: collections::HashMap[string, string]::make(1), body: body}
   return spawn do_with_client(client, req)
 
 // delete performs an HTTP DELETE using the default client.
 fn delete(url string) Future[HttpResponse] =
-  let req = Request{method: "DELETE", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "DELETE", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(empty_client(), req)
 
 // delete performs an HTTP DELETE using the provided client.
 fn delete(client Client, url string) Future[HttpResponse] =
-  let req = Request{method: "DELETE", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "DELETE", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(client, req)
 
 // head performs an HTTP HEAD using the default client.
 fn head(url string) Future[HttpResponse] =
-  let req = Request{method: "HEAD", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "HEAD", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(empty_client(), req)
 
 // head performs an HTTP HEAD using the provided client.
 fn head(client Client, url string) Future[HttpResponse] =
-  let req = Request{method: "HEAD", url: url, headers: collections::HashMap[string, string]::new(1), body: ""}
+  let req = Request{method: "HEAD", url: url, headers: collections::HashMap[string, string]::make(1), body: ""}
   return spawn do_with_client(client, req)

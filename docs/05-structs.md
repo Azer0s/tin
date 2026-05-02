@@ -337,7 +337,7 @@ struct Atomic[t] =
 Trying to call a stripped method:
 
 ```rust
-let b = sync::Atomic[bool].make(false)
+let b = sync::Atomic[bool].new(false)
 let _ = b.cas(false, true)
 //      ^^^^^
 // error: Atomic[bool].cas doesn't match where t is numeric

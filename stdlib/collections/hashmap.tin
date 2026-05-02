@@ -61,7 +61,7 @@ struct HashMap[K, V](Map[K, V]) =
   _hashes [u64]
   _len    i64
 
-  static fn new() HashMap[K, V] =
+  static fn make() HashMap[K, V] =
     return HashMap[K, V]{
       _keys:   hm_empty_keys[K](8),
       _vals:   hm_empty_vals[V](8),
@@ -69,7 +69,7 @@ struct HashMap[K, V](Map[K, V]) =
       _len:    0,
     }
 
-  static fn new(initial_cap i64) HashMap[K, V] =
+  static fn make(initial_cap i64) HashMap[K, V] =
     let cap = next_pow2(initial_cap)
     return HashMap[K, V]{
       _keys:   hm_empty_keys[K](cap),

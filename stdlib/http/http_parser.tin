@@ -108,7 +108,7 @@ fn skip_newline(buf string, pos i64, limit i64) i64 =
 // end_pos is the start of the blank line (i.e. the \r\n before \r\n, not
 // including the separator itself).
 fn parse_headers(buf string, start i64, end_pos i64) collections::HashMap[string, string] =
-  let headers = collections::HashMap[string, string]::new(16)
+  let headers = collections::HashMap[string, string]::make(16)
   let i = start
   for i < end_pos:
     let eol = line_end(buf, i, end_pos)

@@ -53,7 +53,7 @@ and `get` are O(n).
 ### Construction
 
 ```rust
-let l = collections::LinkedList[i64].new()
+let l = collections::LinkedList[i64].make()
 ```
 
 ### Methods
@@ -73,7 +73,7 @@ let l = collections::LinkedList[i64].new()
 ```rust
 use collections
 
-let l = collections::LinkedList[string].new()
+let l = collections::LinkedList[string].make()
 l.push_back("a")
 l.push_back("b")
 l.push_front("z")
@@ -96,7 +96,7 @@ to the next power of 2).
 ### Construction
 
 ```rust
-let m = collections::HashMap[string, i64].new(initial_cap)
+let m = collections::HashMap[string, i64].make(initial_cap)
 ```
 
 `initial_cap` is rounded up to the nearest power of 2, minimum 8.
@@ -120,7 +120,7 @@ let m = collections::HashMap[string, i64].new(initial_cap)
 ```rust
 use collections
 
-let m = collections::HashMap[string, i64].new(8)
+let m = collections::HashMap[string, i64].make(8)
 m.set("apples", 3)
 m.set("bananas", 5)
 echo m.get("apples")           // 3
@@ -136,7 +136,7 @@ echo len(ks)                   // 1
 ### Integer keys
 
 ```rust
-let m = collections::HashMap[i64, string].new(8)
+let m = collections::HashMap[i64, string].make(8)
 m.set(1, "one")
 m.set(42, "forty-two")
 echo m.get(42)    // forty-two

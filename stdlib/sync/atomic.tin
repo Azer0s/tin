@@ -44,12 +44,12 @@ fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_s
 struct Atomic[t] =
   _ptr *void
 
-  // make: two impls. Compile-time selected by t.
+  // new: two impls. Compile-time selected by t.
 
-  static fn make(v t) Atomic[t] where t is primitive =
+  static fn new(v t) Atomic[t] where t is primitive =
     return Atomic[t]{_ptr: tin_atomic_new_64(v as i64)}
 
-  static fn make(v t) Atomic[t] where t is not primitive =
+  static fn new(v t) Atomic[t] where t is not primitive =
     let p = tin_atomic_obj_new(sizeof(t))
     tin_atomic_obj_store(p, &v as *void)
     return Atomic[t]{_ptr: p}

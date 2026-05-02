@@ -116,13 +116,13 @@ test "channel bool false" =
 // Mutex
 
 test "mutex lock and unlock" =
-  let m = sync::Mutex.make()
+  let m = sync::Mutex.new()
   await m.lock()
   m.unlock()
   assert::ok(true)
 
 test "mutex reacquirable after unlock" =
-  let m = sync::Mutex.make()
+  let m = sync::Mutex.new()
   await m.lock()
   m.unlock()
   await m.lock()
@@ -132,39 +132,39 @@ test "mutex reacquirable after unlock" =
 // AtomicI64
 
 test "atomic make and load initial value" =
-  let a = sync::Atomic[i64].make(42)
+  let a = sync::Atomic[i64].new(42)
   assert::equals(a.load(), 42)
 
 test "atomic store and load" =
-  let a = sync::Atomic[i64].make(0)
+  let a = sync::Atomic[i64].new(0)
   a.store(99)
   assert::equals(a.load(), 99)
 
 test "atomic add returns new value" =
-  let a = sync::Atomic[i64].make(10)
+  let a = sync::Atomic[i64].new(10)
   let newval = a.add(5)
   assert::equals(newval, 15)
   assert::equals(a.load(), 15)
 
 test "atomic add negative" =
-  let a = sync::Atomic[i64].make(10)
+  let a = sync::Atomic[i64].new(10)
   a.add(0 - 3)
   assert::equals(a.load(), 7)
 
 test "atomic cas success returns old" =
-  let a = sync::Atomic[i64].make(10)
+  let a = sync::Atomic[i64].new(10)
   let prev = a.cas(10, 20)
   assert::equals(prev, 10)
   assert::equals(a.load(), 20)
 
 test "atomic cas failure leaves value unchanged" =
-  let a = sync::Atomic[i64].make(10)
+  let a = sync::Atomic[i64].new(10)
   let prev = a.cas(99, 20)
   assert::equals(prev, 10)
   assert::equals(a.load(), 10)
 
 test "atomic multiple adds" =
-  let a = sync::Atomic[i64].make(0)
+  let a = sync::Atomic[i64].new(0)
   a.add(1)
   a.add(2)
   a.add(3)
@@ -181,13 +181,13 @@ struct AtomicPoint =
   y i64
 
 test "atomic struct: make + load" =
-  let a = sync::Atomic[AtomicPoint].make(AtomicPoint{x: 3, y: 4})
+  let a = sync::Atomic[AtomicPoint].new(AtomicPoint{x: 3, y: 4})
   let p = a.load()
   assert::equals(p.x, 3)
   assert::equals(p.y, 4)
 
 test "atomic struct: store" =
-  let a = sync::Atomic[AtomicPoint].make(AtomicPoint{x: 0, y: 0})
+  let a = sync::Atomic[AtomicPoint].new(AtomicPoint{x: 0, y: 0})
   a.store(AtomicPoint{x: 10, y: 20})
   let p = a.load()
   assert::equals(p.x, 10)
@@ -196,7 +196,7 @@ test "atomic struct: store" =
 test "atomic bool: load + store work, add/cas were stripped" =
   // load/store survive the where guard; add/cas would be a compile
   // error because their `where t is numeric` clause excludes bool.
-  let b = sync::Atomic[bool].make(false)
+  let b = sync::Atomic[bool].new(false)
   assert::equals(b.load(), false)
   b.store(true)
   assert::equals(b.load(), true)

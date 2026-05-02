@@ -17,7 +17,7 @@ fn tin_fmutex2_try_lock_c(m *void, pid i64) i32 = extern("_tin_fmutex2_try_lock"
 struct Cond =
   _ptr *void
 
-  static fn make() Cond =
+  static fn new() Cond =
     return Cond{_ptr: tin_fcond2_new()}
 
   fn{#async #no_autoyield} wait(this Cond, mu Mutex) =

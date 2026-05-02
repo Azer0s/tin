@@ -79,7 +79,7 @@ echo url::encode("foo=bar&baz=1")        // "foo%3Dbar%26baz%3D1"
 echo url::decode("hello%20world")        // "hello world"
 echo url::decode("foo+bar")             // "foo bar"
 
-let params = collections::HashMap[string, string].new(4)
+let params = collections::HashMap[string, string].make(4)
 params.set("q", "hello world")
 params.set("lang", "tin")
 echo url::encode_query(params)           // "lang=tin&q=hello%20world"
