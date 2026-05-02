@@ -199,6 +199,15 @@ var tempCacheCounter uint64
 // default optLevel chosen by compileIR.
 var optLevelOverride string
 
+// debugBuild and extraCFlags are populated by main() during arg parsing
+// and read by buildFlagsHash() to mix the invocation-time settings into
+// the binary cache key. Without these the cache would silently reuse a
+// non-debug `-O2` build for a `-g` request, or vice versa.
+var (
+	debugBuild  bool
+	extraCFlags []string
+)
+
 // testFastCompile is reserved for an opt-in "fast tests" mode that defaults
 // `tin test` to -O0 (~10x suite speedup). Currently off because the win was
 // largely subsumed by the internal-linkage DCE change - clang at -O2 now
@@ -669,7 +678,11 @@ doneFlags:
 	file := os.Args[fileArgIdx]
 
 	// Collect --cflag values and warning-suppression flags from anywhere after the file arg.
-	var extraCFlags []string
+	// extraCFlags and debugBuild are package-level (declared near
+	// optLevelOverride) so buildFlagsHash() can mix them into the cache
+	// key; main() resets them per-invocation here.
+	extraCFlags = nil
+	debugBuild = false
 
 	var stdlibOverride string
 
@@ -678,7 +691,6 @@ doneFlags:
 	noWarnAwaitMatchGuards := false
 	verboseMatchInfo := false
 	verboseDemorgan := false
-	debugBuild := false
 	emitHeaderPath := ""
 	allWarnsAsErrors := false
 	wAll := false
@@ -873,6 +885,30 @@ doneFlags:
 			execRunBinary(runCacheBinPath, memcheck, binArgs)
 
 			return
+		}
+	}
+
+	// `tin build` shares the same content-addressed cache: when the SBOM
+	// for this source still hashes the same as a prior build, copy the
+	// cached binary to the user's -o path (or default name) and skip
+	// codegen + clang + link entirely. Without this, every `tin build`
+	// pays the full link cost even when nothing changed — which on
+	// rtti_extern is ~3.5s of thinLTO link work per warm rebuild.
+	if cmd == "build" && !libMode {
+		buildOut := defaultBuildOutPath(file, libMode)
+		if v := lookupOArg(fileArgIdx); v != "" {
+			buildOut = v
+		}
+
+		buildCacheDir := cacheBinDir("build", file, src)
+		buildCacheBin := filepath.Join(buildCacheDir, "bin")
+
+		if _, statErr := os.Stat(buildCacheBin); statErr == nil && sbomMatches(buildCacheDir) {
+			if err := copyAndChmodExec(buildCacheBin, buildOut); err == nil {
+				return
+			}
+			// Copy failed (e.g. cross-device, perms): fall through to a
+			// full rebuild rather than fail the user's build.
 		}
 	}
 
@@ -1187,6 +1223,17 @@ doneFlags:
 
 		if err := compileIRWithPkgs(irText, pkgIRTexts, out, libMode, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			die("compile error: %v", err)
+		}
+
+		// Populate the build-cache slot so the next `tin build` of the
+		// same source short-circuits via copy. Mirrors the run/test
+		// cache write that fires after a successful binary build.
+		if !libMode {
+			buildCacheDir := cacheBinDir("build", file, src)
+			if mkErr := os.MkdirAll(buildCacheDir, 0o755); mkErr == nil {
+				_ = copyAndChmodExec(out, filepath.Join(buildCacheDir, "bin"))
+				_ = writeBuildSBOM(buildCacheDir, file, src, buildDeps(cg, fileCSources))
+			}
 		}
 
 		// Phase C2/C4: opt-in per-fn .so cache. Drives nothing in the user
@@ -2882,13 +2929,60 @@ func die(format string, args ...any) {
 	os.Exit(1)
 }
 
-// cacheBinDir returns ".build/<mode>/<dunder>_<md5>" under CWD, where
-// <dunder> is the cleaned source path with `/` replaced by `__` and <md5>
-// is the hex MD5 of the source bytes. mode is "run" or "test".
+// defaultBuildOutPath mirrors the implicit `tin build` output naming:
+// `foo/bar.tin` → `foo/bar` (or `bar.o` in --lib mode). Used by the
+// build-cache check to know where to copy the cached binary when the
+// user did not pass -o.
+func defaultBuildOutPath(file string, libMode bool) string {
+	out := strings.TrimSuffix(file, filepath.Ext(file))
+	if libMode {
+		out += ".o"
+	}
+
+	return out
+}
+
+// lookupOArg scans the trailing argv (everything after the source-file
+// arg index) for `-o PATH` and returns PATH, or "" if absent. Used by
+// the build-cache pre-check to know the user's output path before the
+// main build switch parses it itself.
+func lookupOArg(fileArgIdx int) string {
+	for i := fileArgIdx + 1; i < len(os.Args); i++ {
+		if os.Args[i] == "-o" && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+	}
+
+	return ""
+}
+
+// copyAndChmodExec copies src to dst and marks dst executable. Used by
+// the `tin build` cache hit path to materialize the cached binary at
+// the user's chosen -o path. Atomic-rename is overkill here — the dst
+// path is usually a fresh user-chosen location, not a shared slot.
+func copyAndChmodExec(src, dst string) error {
+	body, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(dst, body, 0o755); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// cacheBinDir returns ".build/<mode>/<dunder>_<srcmd5>_<flagshash>" under
+// CWD, where <dunder> is the cleaned source path with `/` replaced by
+// `__`, <srcmd5> hashes the source bytes, and <flagshash> hashes the
+// invocation-time settings that change the produced binary (opt level,
+// debug, target triple, extra cflags). Mode is "run", "test", or "build".
 //
 // The cache dir is the lookup key. Inside it lives `bin` (the compiled
 // binary) and `sbom.txt` (an SBOM listing every dep file with its MD5 -
-// see writeBuildSBOM / sbomMatches).
+// see writeBuildSBOM / sbomMatches). Without the flagshash, an `-O0`
+// rebuild would silently reuse an `-O2` cached binary.
 func cacheBinDir(mode, file string, src []byte) string {
 	cleaned := filepath.ToSlash(filepath.Clean(file))
 	cleaned = strings.TrimPrefix(cleaned, "/")
@@ -2896,7 +2990,48 @@ func cacheBinDir(mode, file string, src []byte) string {
 
 	sum := md5.Sum(src)
 
-	return filepath.Join(".build", mode, fmt.Sprintf("%s_%s", dunder, hex.EncodeToString(sum[:])))
+	return filepath.Join(".build", mode, fmt.Sprintf("%s_%s_%s", dunder, hex.EncodeToString(sum[:]), buildFlagsHash()))
+}
+
+// buildFlagsHash hashes the invocation-time settings that change the
+// produced binary's identity but aren't part of the source bytes.
+// Memoized at first call (per process). Inputs:
+//   - optLevel (e.g. "-O0", "-O2")
+//   - debugBuild (-g)
+//   - target os/arch
+//   - extraCFlags (--cflag forwards)
+//
+// Returned as 8 hex chars for a short, stable suffix on the cache path.
+var (
+	buildFlagsHashCache string
+	buildFlagsHashOnce  sync.Once
+)
+
+func buildFlagsHash() string {
+	buildFlagsHashOnce.Do(func() {
+		h := md5.New()
+		h.Write([]byte(optLevelOverride))
+		h.Write([]byte{0})
+
+		if debugBuild {
+			h.Write([]byte{1})
+		}
+
+		h.Write([]byte{0})
+		h.Write([]byte(targetGOOS))
+		h.Write([]byte{0})
+		h.Write([]byte(targetGOARCH))
+
+		for _, f := range extraCFlags {
+			h.Write([]byte{0})
+			h.Write([]byte(f))
+		}
+
+		sum := h.Sum(nil)
+		buildFlagsHashCache = hex.EncodeToString(sum[:4])
+	})
+
+	return buildFlagsHashCache
 }
 
 // sbomBinaryMarker is a sentinel "path" recorded in sbom.txt for the
