@@ -23,6 +23,16 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 		return nil, nil
 	}
 
+	// genExpr may have advanced cg.curBlock through short-circuit && / ||.
+	// The unary op (xor, fneg, sub, load) consumes `val` (often a phi
+	// rooted in a merge block) and must be emitted there, not in the
+	// stale input block. Without this `!(a || b)` lowers to an `xor`
+	// in `entry` that uses a phi defined later in the merge — invalid
+	// SSA: "Instruction does not dominate all uses".
+	if cg.curBlock != nil {
+		block = cg.curBlock
+	}
+
 	// Operator overloading dispatch (Phase 3): if the operand is a user
 	// struct that implements the corresponding built-in unary operator trait,
 	// lower to a method call. Falls through to the primitive switch

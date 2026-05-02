@@ -143,3 +143,31 @@ test "for cond with && iterates the right number of times" =
   assert::equals(for_and_count(10, 5), 5)
   assert::equals(for_and_count(0, 5), 0)
   assert::equals(for_and_count(7, 7), 7)
+
+// Unary `!` over an && / || result must consume the merge-block phi from
+// the merge block, not the (terminated) input block. Regression for the
+// dominance bug `!(false || true)` triggered after the && fix landed.
+
+fn negated_or(a bool, b bool) bool = return !(a || b)
+fn negated_and(a bool, b bool) bool = return !(a && b)
+
+test "unary not over short-circuit or" =
+  assert::equals(negated_or(true, true), false)
+  assert::equals(negated_or(false, true), false)
+  assert::equals(negated_or(false, false), true)
+
+test "unary not over short-circuit and" =
+  assert::equals(negated_and(true, true), false)
+  assert::equals(negated_and(true, false), true)
+  assert::equals(negated_and(false, false), true)
+
+// u64 % u64 cast through `as i64` must lower to urem regardless of how
+// the LHS is built (identifier, expression, function-call result).
+// Regression: exprElemIsUnsigned previously had no CallExpr case, so
+// `(fn_returning_u64() % span) as i64` fell through to srem.
+
+fn make_u64(x u64) u64 = return x
+
+test "u64 % u64 from fn-call result, cast as i64" =
+  let r i64 = (make_u64(18446744073709551615 as u64) % (100 as u64)) as i64
+  assert::equals(r, 15)
