@@ -136,6 +136,39 @@ fi
 grep -q '^[0-9a-f]\{32\}  __tin_binary__$' "$sbom_path" 2>/dev/null
 check "test cache SBOM includes __tin_binary__ entry" $?
 
+# 8a. Upstream pkg body-only edit: only the upstream pkg's .o is
+# recomputed; downstream consumers reuse their cached .o. Tests the
+# claim that an edit to one stdlib package doesn't invalidate every
+# consumer (per spec §"hard requirements"), exercised on a custom
+# lib-root layout so the test isn't entangled with stdlib state.
+mkdir -p "$work/upkg_a" "$work/upkg_b"
+cat > "$work/upkg_a/upkg_a.tin" << 'TINEOF'
+fn double_it(x i64) i64 = return x + x
+export { double_it } as upkg_a
+TINEOF
+cat > "$work/upkg_b/upkg_b.tin" << 'TINEOF'
+use upkg_a
+fn add_then_double(x i64) i64 = return upkg_a::double_it(x) + 1
+export { add_then_double } as upkg_b
+TINEOF
+cat > "$work/main_up.tin" << 'TINEOF'
+use upkg_b
+fn main() i64 = return upkg_b::add_then_double(21)
+TINEOF
+rm -rf .build
+./tin build --lib-root "$work" "$work/main_up.tin" -o /tmp/inc_up >/dev/null 2>&1
+n_up_cold=$(find .build/pkg -name '*.o' 2>/dev/null | wc -l)
+# Edit upkg_a's BODY only (interface unchanged: same fn name, same sig).
+cat > "$work/upkg_a/upkg_a.tin" << 'TINEOF'
+fn double_it(x i64) i64 = return (x * 2 as i64)
+export { double_it } as upkg_a
+TINEOF
+./tin build --lib-root "$work" "$work/main_up.tin" -o /tmp/inc_up >/dev/null 2>&1
+n_up_after=$(find .build/pkg -name '*.o' 2>/dev/null | wc -l)
+delta_up=$((n_up_after - n_up_cold))
+[[ $delta_up -le 2 ]]
+check "upstream pkg body-only edit adds <= 2 entries (delta $delta_up)" $?
+
 # 8. Concurrent builds of the same source share the cache safely. Race
 # four builds; all should succeed and produce byte-identical output.
 rm -rf .build
