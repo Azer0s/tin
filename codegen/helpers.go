@@ -1119,6 +1119,13 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 		return constant.NewNull(t.(*irtypes.PointerType))
 	case irtypes.IsStruct(t):
 		st := t.(*irtypes.StructType)
+		// Opaque (forward-declared) struct: NewStruct(st) would emit `{}`
+		// (an empty struct literal), which clang rejects when st actually
+		// has fields elsewhere. zeroinitializer is type-shape agnostic and
+		// expands lazily to whatever shape st settles into.
+		if len(st.Fields) == 0 {
+			return constant.NewZeroInitializer(st)
+		}
 
 		fields := make([]constant.Constant, len(st.Fields))
 		for i, f := range st.Fields {
