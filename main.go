@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
@@ -1823,8 +1824,23 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	}
 
 	// Run all -c jobs in parallel. parallelJobs() honors -j; default is GOMAXPROCS.
-	if err := runParallelClang(jobsList); err != nil {
-		return err
+	parStart := time.Now()
+
+	var parCb func(string, string, time.Duration)
+
+	if prog != nil {
+		prog.parallelStart(len(jobsList))
+		parCb = prog.parallelEvent
+	}
+
+	parErr := runParallelClang(jobsList, parCb)
+
+	if prog != nil {
+		prog.parallelEnd(time.Since(parStart))
+	}
+
+	if parErr != nil {
+		return parErr
 	}
 
 	// Link step: pull every compiled .o into one binary. With -flto=thin
@@ -2053,8 +2069,23 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 		})
 	}
 
-	if err := runParallelClang(jobsList); err != nil {
-		return err
+	parStart := time.Now()
+
+	var parCb func(string, string, time.Duration)
+
+	if prog != nil {
+		prog.parallelStart(len(jobsList))
+		parCb = prog.parallelEvent
+	}
+
+	parErr := runParallelClang(jobsList, parCb)
+
+	if prog != nil {
+		prog.parallelEnd(time.Since(parStart))
+	}
+
+	if parErr != nil {
+		return parErr
 	}
 
 	// Each .so is now in place - record its (hash -> shim name) manifest so
@@ -2187,7 +2218,13 @@ type compileJob struct {
 // runParallelClang fans out a list of independent `clang ...` invocations
 // across a worker pool sized by parallelJobs(). It returns the first error it
 // observes; remaining jobs are awaited so temp files have predictable lifetimes.
-func runParallelClang(jobsList []compileJob) error {
+//
+// onJobEvent (optional) receives lifecycle notifications - one "start" when a
+// worker picks a job up, one "done" with elapsed time when it finishes. The
+// callback is invoked from worker goroutines and must be safe for concurrent
+// use; compileProgress.parallelEvent serializes its writes via an internal
+// mutex so call sites don't need to.
+func runParallelClang(jobsList []compileJob, onJobEvent func(desc, kind string, elapsed time.Duration)) error {
 	if len(jobsList) == 0 {
 		return nil
 	}
@@ -2211,10 +2248,20 @@ func runParallelClang(jobsList []compileJob) error {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			start := time.Now()
+
+			if onJobEvent != nil {
+				onJobEvent(jobsList[i].desc, "start", 0)
+			}
+
 			cmd := exec.Command("clang", jobsList[i].args...)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			errs[i] = cmd.Run()
+
+			if onJobEvent != nil {
+				onJobEvent(jobsList[i].desc, "done", time.Since(start))
+			}
 		}(i)
 	}
 
