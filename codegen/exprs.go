@@ -18,10 +18,21 @@ import (
 // Expression generation
 
 // genExpr generates code for an expression and returns the resulting value.
+//
+// Contract: on return, cg.curBlock points to the block where the next
+// instruction should be emitted. If the expression contains control flow
+// (await / yield / short-circuit && / ||) it may differ from `block`.
+// Callers that emit follow-up instructions (toBool, NewCondBr, NewStore,
+// etc.) must use cg.curBlock, not the input `block`.
 func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) {
 	if node == nil {
 		return nil, nil
 	}
+
+	// Establish the post-call invariant: if the expression doesn't advance
+	// control flow, cg.curBlock equals the input block on return; if it
+	// does (await/yield/&&/||), the handler updates it.
+	cg.curBlock = block
 
 	// Track source position for error messages produced deeper in the call stack.
 	if p := node.Pos(); p.Line != 0 {
@@ -1392,47 +1403,79 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 	return block.NewICmp(pred, left, right)
 }
 
+// genLogicalAnd emits short-circuit `A && B` as `if A { B } else { false }`.
+// The RHS evaluates only when LHS is true. cg.curBlock is updated to the
+// merge block on return so the caller continues emitting there. Callers that
+// reference `block` (the input) post-call would target a terminated block;
+// they must use cg.curBlock instead.
 func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
-	// genExpr does not thread the current block through return values, so we
-	// cannot use real branches here (the caller would keep using the original
-	// block which is already terminated, leaving the merge block without a
-	// terminator).  Use `select` instead: semantics are identical for pure
-	// operands, and side-effectful short-circuit can be revisited later.
+	cg.curBlock = block
+
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		return nil, err
 	}
 
-	leftBool := cg.toBool(block, left)
+	leftEnd := cg.curBlock
+	leftBool := cg.toBool(leftEnd, left)
 
-	right, err := cg.genExpr(block, e.Right)
+	rhsBlock := cg.newBlock("and.rhs")
+	mergeBlock := cg.newBlock("and.merge")
+	leftEnd.NewCondBr(leftBool, rhsBlock, mergeBlock)
+
+	cg.curBlock = rhsBlock
+
+	right, err := cg.genExpr(rhsBlock, e.Right)
 	if err != nil {
 		return nil, err
 	}
 
-	rightBool := cg.toBool(block, right)
+	rightEnd := cg.curBlock
+	rightBool := cg.toBool(rightEnd, right)
+	rightEnd.NewBr(mergeBlock)
 
-	// true && x = x;  false && _ = false
+	phi := mergeBlock.NewPhi(
+		ir.NewIncoming(constant.NewInt(irtypes.I1, 0), leftEnd),
+		ir.NewIncoming(rightBool, rightEnd),
+	)
+	cg.curBlock = mergeBlock
 
-	return block.NewSelect(leftBool, rightBool, constant.NewInt(irtypes.I1, 0)), nil
+	return phi, nil
 }
 
+// genLogicalOr emits short-circuit `A || B` as `if A { true } else { B }`.
+// Symmetric to genLogicalAnd; see that function's note about cg.curBlock.
 func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
+	cg.curBlock = block
+
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		return nil, err
 	}
 
-	leftBool := cg.toBool(block, left)
+	leftEnd := cg.curBlock
+	leftBool := cg.toBool(leftEnd, left)
 
-	right, err := cg.genExpr(block, e.Right)
+	rhsBlock := cg.newBlock("or.rhs")
+	mergeBlock := cg.newBlock("or.merge")
+	leftEnd.NewCondBr(leftBool, mergeBlock, rhsBlock)
+
+	cg.curBlock = rhsBlock
+
+	right, err := cg.genExpr(rhsBlock, e.Right)
 	if err != nil {
 		return nil, err
 	}
 
-	rightBool := cg.toBool(block, right)
+	rightEnd := cg.curBlock
+	rightBool := cg.toBool(rightEnd, right)
+	rightEnd.NewBr(mergeBlock)
 
-	// false || x = x;  true || _ = true
+	phi := mergeBlock.NewPhi(
+		ir.NewIncoming(constant.NewInt(irtypes.I1, 1), leftEnd),
+		ir.NewIncoming(rightBool, rightEnd),
+	)
+	cg.curBlock = mergeBlock
 
-	return block.NewSelect(leftBool, constant.NewInt(irtypes.I1, 1), rightBool), nil
+	return phi, nil
 }

@@ -503,12 +503,19 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 		return block.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0)), nil
 	}
 
+	cg.curBlock = block
+
 	cond, err := cg.genExpr(block, condNode)
 	if err != nil {
 		return nil, err
 	}
 
-	return cg.toBool(block, cond), nil
+	end := block
+	if cg.curBlock != nil {
+		end = cg.curBlock
+	}
+
+	return cg.toBool(end, cond), nil
 }
 
 // whereMode is the kind of dispatch a where-list uses.
@@ -664,12 +671,15 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 		if err != nil {
 			return false, err
 		}
-		// Reset cg.curBlock after condition evaluation.  genBinExpr (which
-		// evaluates the condition) sets cg.curBlock = block (the condition's
-		// entry block) as a baseline for its internal block-refresh logic.
-		// That stale value must not leak into the then/else body code-gen,
-		// where block-refresh checks would misfire and redirect instruction
-		// emission to the condition's block instead of the branch block.
+		// Pick up curBlock so the cond-branch goes into the post-cond
+		// block (advanced when the cond contained short-circuit && / ||).
+		condEnd := block
+		if cg.curBlock != nil {
+			condEnd = cg.curBlock
+		}
+		// Reset cg.curBlock so the then/else body code-gen starts fresh
+		// from its own block; otherwise stale curBlock from the condition
+		// would leak into the body's block-refresh logic.
 		cg.curBlock = nil
 
 		thenBlock := cg.newBlock(fmt.Sprintf("where.then.%d", i))
@@ -681,7 +691,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			elseBlock = cg.newBlock(fmt.Sprintf("where.else.%d", i))
 		}
 
-		condBr := block.NewCondBr(cond, thenBlock, elseBlock)
+		condBr := condEnd.NewCondBr(cond, thenBlock, elseBlock)
 		cg.attachCurrentDbgLocToTerm(condBr)
 
 		// Generate then body.
@@ -2917,7 +2927,15 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		return nil, false, err
 	}
 
-	cond = cg.toBool(block, cond)
+	// genExpr may have advanced cg.curBlock through short-circuit && / ||
+	// (genLogicalAnd/Or update curBlock to their merge block). Continue
+	// emitting the cond-branch in that block, not the original.
+	condEnd := block
+	if cg.curBlock != nil {
+		condEnd = cg.curBlock
+	}
+
+	cond = cg.toBool(condEnd, cond)
 
 	thenBlock := cg.newBlock("if.then")
 
@@ -2928,7 +2946,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		elseStart = mergeBlock
 	}
 
-	block.NewCondBr(cond, thenBlock, elseStart)
+	condEnd.NewCondBr(cond, thenBlock, elseStart)
 
 	// Then branch.
 	cg.curScope = newScope(cg.curScope)
@@ -2968,9 +2986,15 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 			return nil, false, err
 		}
 
-		elifCond = cg.toBool(currentElse, elifCond)
+		// Pick up curBlock in case the elif's cond was short-circuited.
+		elifCondEnd := currentElse
+		if cg.curBlock != nil {
+			elifCondEnd = cg.curBlock
+		}
+
+		elifCond = cg.toBool(elifCondEnd, elifCond)
 		elifThen := cg.newBlock("elif.then")
-		currentElse.NewCondBr(elifCond, elifThen, nextBlock)
+		elifCondEnd.NewCondBr(elifCond, elifThen, nextBlock)
 
 		cg.curScope = newScope(cg.curScope)
 

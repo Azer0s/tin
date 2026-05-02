@@ -62,10 +62,8 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
         break
       i = i + 1
 
-  if delim != 0 && n > 0:
-    if out[n-1] == delim: n = n - 1
-  if delim != 0 && n > 0:
-    if out[n-1] == @'\r': n = n - 1
+  if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
+  if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
   let s string = out[0..n] as string
   mem::free(tmp as *void)
   mem::free(out as *void)
@@ -124,8 +122,7 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
         break
       i = i + 1
 
-  if delim != 0 && n > 0:
-    if out[n-1] == delim: n = n - 1
+  if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   let result = out[0..n]
   mem::free(tmp as *void)
   mem::free(out as *void)
