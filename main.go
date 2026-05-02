@@ -2107,6 +2107,36 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 // file compiled with the same flags reuses the .o across every Tin compile.
 const csrcCacheRoot = ".build/csrc"
 
+var (
+	clangVersionCache string
+	clangVersionOnce  sync.Once
+)
+
+// clangVersion returns the first line of `clang --version` output,
+// memoized for the process lifetime. Mixed into pkg/csrc cache keys so
+// a clang upgrade busts the cache. On error returns a per-process
+// sentinel (PID + start ns) so cache slots written under failure are
+// never reused — same defensive shape as tinBinaryHash.
+func clangVersion() string {
+	clangVersionOnce.Do(func() {
+		out, err := exec.Command("clang", "--version").Output()
+		if err != nil {
+			clangVersionCache = fmt.Sprintf("UNAVAIL-pid%d-%d", os.Getpid(), time.Now().UnixNano())
+
+			fmt.Fprintf(os.Stderr, "warning: tin: can't read clang --version (%v); cache invalidation on toolchain change disabled, every build will miss\n", err)
+
+			return
+		}
+		// First line is e.g. "clang version 22.1.3 (...)" — keep just
+		// the version triple so a same-version build with a different
+		// install path or distro packaging still hits the cache.
+		first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+		clangVersionCache = first
+	})
+
+	return clangVersionCache
+}
+
 // pkgCacheRoot is the directory holding cached per-pkg .o files. Step 7
 // of docs/plans/incremental-compilation.md: each pkg's IR text + its
 // canonical clang argv produce a SHA-256 key under .build/pkg/<key>/pkg.o.
@@ -2122,11 +2152,12 @@ const pkgCacheRoot = ".build/pkg"
 // clang. On miss, the caller must produce the .o at path; the cache
 // dir is pre-created.
 //
-// Key composition: SHA-256 of (irText || NUL-separated argv). Includes
-// every clang flag so that an opt-level / target / debug change
-// produces a fresh entry. The caller's irText is the per-pkg
-// serialized LLVM IR after every codegen pass (echoed types, cross-
-// module declares, etc.) so any IR change invalidates the cache.
+// Key composition: SHA-256 of (irText || NUL-separated argv || host arch
+// || clang version banner). Includes every clang flag so that an
+// opt-level / target / debug change produces a fresh entry; includes
+// the clang version so a clang upgrade (e.g. 22 -> 23 with codegen
+// fixes) invalidates every cache slot rather than reusing .o produced
+// by the older toolchain.
 func pkgCacheLookup(irText string, args []string) (string, bool, error) {
 	sum := sha256.New()
 	sum.Write([]byte(irText))
@@ -2144,6 +2175,13 @@ func pkgCacheLookup(irText string, args []string) (string, bool, error) {
 	// and ld would error on the architecture mismatch.
 	sum.Write([]byte{0})
 	sum.Write([]byte(runtime.GOOS + "-" + runtime.GOARCH))
+
+	// Include the clang version banner so a toolchain upgrade busts
+	// every prior cache slot. Without this, a clang 22 -> 23 upgrade
+	// silently reuses .o files built by clang 22, missing any codegen
+	// fixes the new clang would apply.
+	sum.Write([]byte{0})
+	sum.Write([]byte(clangVersion()))
 
 	key := hex.EncodeToString(sum.Sum(nil))
 	dir := filepath.Join(pkgCacheRoot, key[:2])
@@ -2184,9 +2222,12 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 	}
 
 	// See pkgCacheLookup for rationale: native compiles omit -target so
-	// amd64 and arm64 hosts produce identical args. Disambiguate by host.
+	// amd64 and arm64 hosts produce identical args. Disambiguate by host
+	// arch and clang version banner.
 	sum.Write([]byte{0})
 	sum.Write([]byte(runtime.GOOS + "-" + runtime.GOARCH))
+	sum.Write([]byte{0})
+	sum.Write([]byte(clangVersion()))
 
 	key := hex.EncodeToString(sum.Sum(nil))
 	dir := filepath.Join(csrcCacheRoot, key[:2])
