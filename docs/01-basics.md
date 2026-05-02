@@ -218,7 +218,8 @@ fn handle() =
   TotalRequests = TotalRequests + 1
 ```
 
-For variables shared across concurrent fibers, use `sync::AtomicI64` or a
+For variables shared across concurrent fibers, use `sync::Atomic[i64]`
+(or any other primitive: `Atomic[bool]`, `Atomic[f64]`, etc.) or a
 `sync::Mutex` - plain `var` declarations are not thread-safe.
 
 ---

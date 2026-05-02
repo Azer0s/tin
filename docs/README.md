@@ -120,10 +120,81 @@ That's it. `./tin run file.tin` to compile and execute, `./tin test dir/` to run
 test blocks, or `./tin repl` for the interactive REPL (optionally `./tin repl
 file.tin` to preload a file's declarations).
 
-`tin run` and `tin test` cache the compiled binary under
-`.build/<run|test>/<file>_<md5>/`, alongside an `sbom.txt` listing every
-file the build pulled in (entry source, imported package sources, `//!+`
-C sources) with its MD5. Subsequent invocations skip lex/parse/codegen if
-the entry source MD5 still names a cache dir AND every file recorded in
-that dir's `sbom.txt` still hashes the same. Wipe the cache with
-`tin clean`.
+## Incremental compilation
+
+Tin's build pipeline is content-addressed end to end. There are three
+cache layers, each serving a different recompile pattern:
+
+### 1. Final-binary cache (`tin run`, `tin test`, `tin build`)
+
+All three subcommands cache the compiled binary under
+`.build/<mode>/<file>_<src_md5>_<flags_hash>/`, alongside an
+`sbom.txt` listing every file the build pulled in (entry source,
+imported package sources, `//!+` C sources, the **compiler binary
+itself**) with its MD5.
+
+Subsequent invocations skip lex/parse/codegen entirely if the entry
+source MD5 still names a cache dir AND every file recorded in that
+dir's `sbom.txt` still hashes the same. The `flags_hash` covers
+`-O0/-O2`, `-g`, `-target os/arch`, and `--cflag` forwards, so an
+`-O0` rebuild won't silently reuse an `-O2` binary.
+
+`tin run`/`tin test` exec the cached binary directly. `tin build`
+copies it to the user's `-o` path. A typical hot rebuild of a
+medium program is ~30-50 ms (read + copy), down from several seconds
+of thinLTO link work.
+
+### 2. Per-package object cache (`.build/pkg/`)
+
+Each imported package is compiled to its own `.o` file keyed by
+SHA-256 of the package's IR text + canonical clang argv + host arch
++ clang version. The slot also stores `.iface.json` + `.iface_hash`
+(the interface manifest — exported function signatures, struct
+shapes, trait impls).
+
+Effect: editing one package only invalidates that package's `.o`.
+Downstream consumers' IR is unchanged (their imports' interfaces
+didn't change), so their `.o` slots still hit. The link step still
+runs, but per-pkg compile is parallelized via clang's worker pool
+(`-j N`, default GOMAXPROCS).
+
+### 3. C-source cache (`.build/csrc/`)
+
+`runtime.c` and every `//!+file.c` source compile to a `.o` keyed
+by file content + flags + host arch + clang version. Globally shared
+across every Tin compile on the machine; saves ~400 ms per invocation
+on warm cache.
+
+### Cleanup
+
+`tin clean` wipes per-program artifacts (`.build/run/`, `.build/test/`,
+`.build/build/`). The content-addressed caches (`.build/pkg/`,
+`.build/csrc/`, `.build/pure-fn/`) are preserved on purpose — they
+can never serve a stale entry because the key includes everything
+that affects the output. Manually `rm -rf .build/` to nuke everything.
+
+### Verification
+
+`bash examples/incremental_cache_verify.sh` runs 10 invariant checks
+(cold/warm equivalence, `-O0` vs `-O2` cache key separation,
+edit-only-one-file isolation, byte-identical determinism, concurrent
+build safety, upstream-pkg-body-edit isolation, etc.). CI runs this
+on every push.
+
+### Build observability
+
+`-v` prints per-stage progress to stderr. During the parallel compile
+phase, each clang job emits start/done events with elapsed time so
+you can see what's actually running:
+
+```
+[5/6] hello.tin                  compile (44 TUs)
+[par 1/44] pkg:assert start
+[par 2/44] pkg:json start
+...
+[par 1/44] pkg:assert done 30ms
+...
+[par] 44 jobs done in 296ms
+[6/6] hello                      link  3651ms
+done in 4215ms
+```
