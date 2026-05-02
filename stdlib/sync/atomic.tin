@@ -24,16 +24,28 @@
 // an opt-in. Likewise `t is primitive` only holds for the listed
 // primitives below.
 
-type numeric = i64 | u64 | f64 | i32 | u32 | f32 | i16 | u16 | i8 | u8
-type primitive = i64 | u64 | f64 | i32 | u32 | f32 | i16 | u16 | i8 | u8 | bool
+// numeric is the gate for `add` (integer arithmetic only) — atomic
+// integer add on the bit pattern of a float is meaningless, so floats
+// are excluded.
+type numeric = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8
 
-// Lock-free 64-bit primitives (existing C runtime).
-fn tin_atomic_new_64(v i64) *void                   = extern("_tin_atomic_new_i64")
-fn tin_atomic_free_64(a *void)                      = extern("_tin_atomic_free_i64")
-fn tin_atomic_load_64(a *void) i64                  = extern("_tin_atomic_load_i64")
-fn tin_atomic_store_64(a *void, v i64)              = extern("_tin_atomic_store_i64")
-fn tin_atomic_add_64(a *void, d i64) i64            = extern("_tin_atomic_add_i64")
-fn tin_atomic_cas_64(a *void, old i64, nw i64) i64  = extern("_tin_atomic_cas_i64")
+// primitive is the gate for load/store/new/cas/deinit. Includes floats
+// (bit-pattern atomic load/store works fine) and bool. cas via bit-
+// pattern compare-and-swap is well-defined for every primitive.
+type primitive = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8 | f64 | f32 | bool
+
+// Lock-free 64-bit primitives (existing C runtime). Bytewise variants
+// for sub-64-bit types — load/store memcpy `sizeof(t)` bytes between
+// the user's value slot and the i64 atomic slot's low bytes, so
+// floats round-trip via bit pattern (not value conversion).
+fn tin_atomic_new_64(v i64) *void                       = extern("_tin_atomic_new_i64")
+fn tin_atomic_free_64(a *void)                          = extern("_tin_atomic_free_i64")
+fn tin_atomic_load_64(a *void) i64                      = extern("_tin_atomic_load_i64")
+fn tin_atomic_store_64(a *void, v i64)                  = extern("_tin_atomic_store_i64")
+fn tin_atomic_add_64(a *void, d i64) i64                = extern("_tin_atomic_add_i64")
+fn tin_atomic_cas_64(a *void, old i64, nw i64) i64      = extern("_tin_atomic_cas_i64")
+fn tin_atomic_load_bits(a *void, out *void, sz i64)     = extern("_tin_atomic_load_bits")
+fn tin_atomic_store_bits(a *void, src *void, sz i64)    = extern("_tin_atomic_store_bits")
 
 // Mutex-backed object slot (new C runtime helpers).
 fn tin_atomic_obj_new(size i64) *void               = extern("_tin_atomic_obj_new")
@@ -47,17 +59,25 @@ struct Atomic[t] =
   // new: two impls. Compile-time selected by t.
 
   static fn new(v t) Atomic[t] where t is primitive =
-    return Atomic[t]{_ptr: tin_atomic_new_64(v as i64)}
+    let p = tin_atomic_new_64(0)
+    let vp *void = &v as *void
+    tin_atomic_store_bits(p, vp, sizeof(t))
+    return Atomic[t]{_ptr: p}
 
   static fn new(v t) Atomic[t] where t is not primitive =
     let p = tin_atomic_obj_new(sizeof(t))
     tin_atomic_obj_store(p, &v as *void)
     return Atomic[t]{_ptr: p}
 
-  // load / store: same dual-impl pattern.
+  // load / store: bit-reinterpret via memcpy of sizeof(t) bytes so
+  // floats round-trip correctly (a value-cast `as i64` would convert
+  // 3.14 to 3 instead of preserving the bit pattern).
 
   fn load(this Atomic[t]) t where t is primitive =
-    return tin_atomic_load_64(this._ptr) as t
+    let out t
+    let outp *void = &out as *void
+    tin_atomic_load_bits(this._ptr, outp, sizeof(t))
+    return out
 
   fn load(this Atomic[t]) t where t is not primitive =
     let out t  // zero-initialized stack slot
@@ -66,18 +86,24 @@ struct Atomic[t] =
     return out
 
   fn store(this Atomic[t], v t) where t is primitive =
-    tin_atomic_store_64(this._ptr, v as i64)
+    let vp *void = &v as *void
+    tin_atomic_store_bits(this._ptr, vp, sizeof(t))
 
   fn store(this Atomic[t], v t) where t is not primitive =
     let vp *void = &v as *void
     tin_atomic_obj_store(this._ptr, vp)
 
-  // add and cas: numeric only. Calling on a non-numeric (bool / non-
-  // primitive) instantiation is a compile error that points at the
-  // failing where guard.
+  // add: integer types only. Atomic float-add isn't a hardware
+  // primitive and integer-add on float bits would corrupt the value.
 
   fn add(this Atomic[t], d t) t where t is numeric =
     return tin_atomic_add_64(this._ptr, d as i64) as t
+
+  // cas: integer compare-and-swap. Returns the previous value
+  // (so the caller can branch on prev == old to detect success).
+  // Restricted to integer types — atomic float CAS via bit pattern
+  // is well-defined but requires a different C helper; revisit if
+  // needed.
 
   fn cas(this Atomic[t], old t, nw t) t where t is numeric =
     return tin_atomic_cas_64(this._ptr, old as i64, nw as i64) as t

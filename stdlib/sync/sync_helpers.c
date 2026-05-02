@@ -280,6 +280,27 @@ int64_t _tin_atomic_cas_i64(void *a, int64_t old_val, int64_t new_val) {
     return old_val;
 }
 
+// Bit-pattern load/store for sub-i64 primitives: the user's value
+// occupies `sz` bytes (1, 2, 4, or 8). Atomic load/store of the full
+// i64 slot, then memcpy `sz` bytes between the user's slot and the
+// low bytes of the i64 buffer.
+//
+// Used so that floats round-trip via bit pattern (a value-cast
+// `as i64` would convert 3.14 to 3 instead of preserving the IEEE
+// 754 layout). Integer types could go through `as i64` but use this
+// path too so the codegen stays uniform across t.
+
+void _tin_atomic_load_bits(void *a, void *out, int64_t sz) {
+    int64_t loaded = __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
+    memcpy(out, &loaded, (size_t)sz);
+}
+
+void _tin_atomic_store_bits(void *a, void *src, int64_t sz) {
+    int64_t buf = 0;
+    memcpy(&buf, src, (size_t)sz);
+    __atomic_store_n((int64_t *)a, buf, __ATOMIC_RELEASE);
+}
+
 // ---------------------------------------------------------------------------
 // Atomic[t] for non-primitive t: spinlock-protected single-cell heap copy.
 // Layout: { atomic_uint lock; int64_t size; uint8_t payload[size] }
