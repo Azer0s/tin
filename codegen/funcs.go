@@ -227,11 +227,15 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		}
 		// Reject by-value #no_copy params: passing such a value would shallow-
 		// copy the cell pointer and the callee's scope-exit drop would race
-		// with the caller's. Use *S instead.
-		if name := cg.noCopyValueTypeName(p.Type); name != "" {
-			return cg.nodeErr(n,
-				"function %s parameter %q has type %s which is #no_copy: pass *%s instead",
-				n.Name, p.Name, prettyStructName(name), prettyStructName(name))
+		// with the caller's. Use *S instead. The receiver name `this` is
+		// exempt — Tin's deinit convention is `fn deinit(this S)` and the
+		// receiver is the unique owner about to be torn down, not a copy.
+		if p.Name != "this" {
+			if name := cg.noCopyValueTypeName(p.Type); name != "" {
+				return cg.nodeErr(n,
+					"function %s parameter %q has type %s which is #no_copy: pass *%s instead",
+					n.Name, p.Name, prettyStructName(name), prettyStructName(name))
+			}
 		}
 
 		pt, err := cg.tinTypeToLLVM(p.Type)

@@ -1190,6 +1190,14 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			calleeName = fn.Name
 		case *ast.ScopeAccess:
 			calleeName = strings.Join(fn.Path, "__")
+		case *ast.FieldAccess:
+			// Static method call written with dot syntax — `S.alloc(...)` or
+			// `Generic[T].alloc(...)` (via FieldAccess on Identifier or
+			// IndexExpr respectively). Resolve to the IR function name so
+			// heapPromotingFns lookup matches.
+			if name := cg.staticCallIRName(fn); name != "" {
+				calleeName = name
+			}
 		}
 
 		if calleeName != "" && llType != nil {

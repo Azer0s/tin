@@ -455,6 +455,29 @@ func (cg *CodeGen) emitGenericFatArrayRelease(block *ir.Block, val value.Value, 
 	block.NewCall(cg.ensureForeachStructElemRelease(), dataPtrI8, length, elemSize, releaseFnI8)
 }
 
+// staticCallIRName collapses a FieldAccess of the shape `Type.method` or
+// `Type[T,U].method` (or qualified `pkg::Type[T].method`) into the IR
+// function name the static method was emitted under, so callers can
+// look it up in registries like heapPromotingFns.
+func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
+	bareName, typeArg := cg.tryResolveStructTypeName(fn.Expr)
+	if bareName == "" {
+		return ""
+	}
+
+	concrete := bareName
+	if typeArg != "" {
+		parts := strings.Split(typeArg, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+
+		concrete = bareName + "__" + strings.Join(parts, "__")
+	}
+
+	return concrete + "_" + fn.Field
+}
+
 // curFnOwnsStruct reports whether the current function being emitted is a
 // method of structName (template or any of its monomorphized instances).
 // Used to gate the #closed struct-literal check: only the struct's own
