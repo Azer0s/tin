@@ -485,6 +485,12 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 // When the condition is an AtomLit and a match subject is set, it emits a
 // comparison against the subject.
 func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.Value, error) {
+	// Establish the post-call invariant up front: if a path below doesn't
+	// advance control flow, the caller's `cg.curBlock != nil` check will
+	// correctly resolve to `block` rather than picking up a stale value
+	// from a prior call.
+	cg.curBlock = block
+
 	if atomNode, ok := condNode.(*ast.AtomLit); ok && cg.matchSubject != nil {
 		subjectType := cg.matchSubject.Type()
 		if isAtomType(subjectType) {
@@ -502,8 +508,6 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 
 		return block.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0)), nil
 	}
-
-	cg.curBlock = block
 
 	cond, err := cg.genExpr(block, condNode)
 	if err != nil {

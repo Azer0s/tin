@@ -1409,43 +1409,20 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 // reference `block` (the input) post-call would target a terminated block;
 // they must use cg.curBlock instead.
 func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
-	cg.curBlock = block
-
-	left, err := cg.genExpr(block, e.Left)
-	if err != nil {
-		return nil, err
-	}
-
-	leftEnd := cg.curBlock
-	leftBool := cg.toBool(leftEnd, left)
-
-	rhsBlock := cg.newBlock("and.rhs")
-	mergeBlock := cg.newBlock("and.merge")
-	leftEnd.NewCondBr(leftBool, rhsBlock, mergeBlock)
-
-	cg.curBlock = rhsBlock
-
-	right, err := cg.genExpr(rhsBlock, e.Right)
-	if err != nil {
-		return nil, err
-	}
-
-	rightEnd := cg.curBlock
-	rightBool := cg.toBool(rightEnd, right)
-	rightEnd.NewBr(mergeBlock)
-
-	phi := mergeBlock.NewPhi(
-		ir.NewIncoming(constant.NewInt(irtypes.I1, 0), leftEnd),
-		ir.NewIncoming(rightBool, rightEnd),
-	)
-	cg.curBlock = mergeBlock
-
-	return phi, nil
+	return cg.genShortCircuit(block, e, false)
 }
 
 // genLogicalOr emits short-circuit `A || B` as `if A { true } else { B }`.
 // Symmetric to genLogicalAnd; see that function's note about cg.curBlock.
 func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
+	return cg.genShortCircuit(block, e, true)
+}
+
+// genShortCircuit lowers a logical && or || with proper short-circuit
+// semantics. shortVal is the value the operator returns when the LHS
+// already determines the result: false for &&, true for ||. The RHS
+// is evaluated only when the LHS does NOT short-circuit.
+func (cg *CodeGen) genShortCircuit(block *ir.Block, e *ast.BinExpr, shortVal bool) (value.Value, error) {
 	cg.curBlock = block
 
 	left, err := cg.genExpr(block, e.Left)
@@ -1456,9 +1433,23 @@ func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, e
 	leftEnd := cg.curBlock
 	leftBool := cg.toBool(leftEnd, left)
 
-	rhsBlock := cg.newBlock("or.rhs")
-	mergeBlock := cg.newBlock("or.merge")
-	leftEnd.NewCondBr(leftBool, mergeBlock, rhsBlock)
+	var label string
+	if shortVal {
+		label = "or"
+	} else {
+		label = "and"
+	}
+
+	rhsBlock := cg.newBlock(label + ".rhs")
+	mergeBlock := cg.newBlock(label + ".merge")
+
+	if shortVal {
+		// `A || B`: short-circuit to merge when A is true.
+		leftEnd.NewCondBr(leftBool, mergeBlock, rhsBlock)
+	} else {
+		// `A && B`: short-circuit to merge when A is false.
+		leftEnd.NewCondBr(leftBool, rhsBlock, mergeBlock)
+	}
 
 	cg.curBlock = rhsBlock
 
@@ -1471,8 +1462,15 @@ func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, e
 	rightBool := cg.toBool(rightEnd, right)
 	rightEnd.NewBr(mergeBlock)
 
+	var shortConst constant.Constant
+	if shortVal {
+		shortConst = constant.NewInt(irtypes.I1, 1)
+	} else {
+		shortConst = constant.NewInt(irtypes.I1, 0)
+	}
+
 	phi := mergeBlock.NewPhi(
-		ir.NewIncoming(constant.NewInt(irtypes.I1, 1), leftEnd),
+		ir.NewIncoming(shortConst, leftEnd),
 		ir.NewIncoming(rightBool, rightEnd),
 	)
 	cg.curBlock = mergeBlock
