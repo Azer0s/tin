@@ -812,6 +812,7 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 		return
 	}
+
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRetain(), rcPtr)

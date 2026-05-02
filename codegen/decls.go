@@ -1940,6 +1940,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
 		typedPtr := block.NewBitCast(heapPtr, irtypes.NewPointer(structType))
 		block.NewStore(structVal, typedPtr)
+
 		dataPtr = heapPtr
 		concreteType = structType
 	}
