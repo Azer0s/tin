@@ -35,14 +35,17 @@ echo "  rust..."
 (cd "$SCRIPT_DIR/rust" && cargo build --release -q)
 for bin in bench_rust bench_rust_pipeline bench_rust_mpmc bench_rust_jitter bench_rust_pipeline10 bench_rust_fanout; do
     cp "$SCRIPT_DIR/rust/target/release/$bin" "$BIN_DIR/$bin"
+    chmod +x "$BIN_DIR/$bin"
 done
 cp "$BIN_DIR/bench_rust" "$BIN_DIR/bench_rust_bench"
+chmod +x "$BIN_DIR/bench_rust_bench"
 
 echo "  tin..."
 for bench in bench pipeline mpmc jitter pipeline10 fanout; do
     "$ROOT_DIR/tin" build "$SCRIPT_DIR/tin/${bench}.tin" -o "$BIN_DIR/bench_tin_${bench}"
 done
 cp "$BIN_DIR/bench_tin_bench" "$BIN_DIR/bench_tin"
+chmod +x "$BIN_DIR/bench_tin"
 
 echo ""
 

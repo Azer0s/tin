@@ -2958,8 +2958,10 @@ func lookupOArg(fileArgIdx int) string {
 
 // copyAndChmodExec copies src to dst and marks dst executable. Used by
 // the `tin build` cache hit path to materialize the cached binary at
-// the user's chosen -o path. Atomic-rename is overkill here — the dst
-// path is usually a fresh user-chosen location, not a shared slot.
+// the user's chosen -o path. The explicit Chmod handles the case where
+// dst already exists at non-exec perms — os.WriteFile honors the mode
+// arg only when CREATING a new file, so without the follow-up Chmod a
+// stale 0644 dst from an earlier run would silently keep its perms.
 func copyAndChmodExec(src, dst string) error {
 	body, err := os.ReadFile(src)
 	if err != nil {
@@ -2970,7 +2972,7 @@ func copyAndChmodExec(src, dst string) error {
 		return err
 	}
 
-	return nil
+	return os.Chmod(dst, 0o755)
 }
 
 // cacheBinDir returns ".build/<mode>/<dunder>_<srcmd5>_<flagshash>" under
