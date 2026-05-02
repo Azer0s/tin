@@ -124,3 +124,22 @@ test "mixed and-or evaluates only what is needed" =
   assert::equals(mixed_chain(false), 0)
   // a=true: bump_false runs (hits=1, returns false), then bump runs (hits=2, returns true) -> 102
   assert::equals(mixed_chain(true), 102)
+
+// `for cond:` with && in cond: regression for the back-edge bug. If the
+// loop's back-edge points at the && merge block instead of the stable
+// loop header, the body becomes an unrecorded phi predecessor and the
+// cond reads undef on iteration 2+, typically infinite-looping under -O2.
+
+fn for_and_count(n i64, limit i64) i64 =
+  let i i64 = 0
+  let count i64 = 0
+  for i < n && i < limit:
+    count = count + 1
+    i = i + 1
+  return count
+
+test "for cond with && iterates the right number of times" =
+  assert::equals(for_and_count(5, 10), 5)
+  assert::equals(for_and_count(10, 5), 5)
+  assert::equals(for_and_count(0, 5), 0)
+  assert::equals(for_and_count(7, 7), 7)

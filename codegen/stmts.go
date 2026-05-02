@@ -3080,11 +3080,20 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	// to stay quiet; any other fold-to-constant case emits the warning.
 	s.Cond = cg.prepareBoolCond(s.Cond, "for", true)
 
-	condBlock := cg.newBlock("for.cond")
+	headerBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	afterBlock := cg.newBlock("for.after")
 
-	brToCond := block.NewBr(condBlock)
+	// headerBlock is the loop's stable back-edge target; condBlock may
+	// advance through short-circuit && / || in the cond expression
+	// (genShortCircuit moves cg.curBlock to its merge block). The
+	// back-edge from the body must point at headerBlock, NOT the
+	// advanced condBlock — otherwise the body becomes a third
+	// predecessor of the && merge block whose phi has no incoming for
+	// it, producing undef cond on the next iteration (= infinite loop).
+	condBlock := headerBlock
+
+	brToCond := block.NewBr(headerBlock)
 
 	// Condition - set curBlock so we can detect if await/yield changed it.
 	cg.curBlock = condBlock
@@ -3140,10 +3149,12 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 		// Release loop-body-local RC vars before jumping back to the condition.
 		cg.emitScopeRelease(endBody, cg.curScope)
 
+		// Back-edge to the stable loop header, not the (possibly advanced)
+		// cond eval block — see headerBlock comment above.
 		if cg.curFnAutoYield {
-			cg.genYieldAutoAt(endBody, condBlock)
+			cg.genYieldAutoAt(endBody, headerBlock)
 		} else {
-			endBody.NewBr(condBlock)
+			endBody.NewBr(headerBlock)
 		}
 	}
 
