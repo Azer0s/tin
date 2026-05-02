@@ -1711,21 +1711,24 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		} else {
 			val = cg.coerce(block, val, retType)
 			if !val.Type().Equal(retType) {
-				gotName := cg.typeNameOf(val.Type())
+				// Render in user-facing source syntax (`string`, not
+				// `{ i8*, i64 }`); fall back to typeNameOf only when
+				// tinTypeDisplay can't recognize the shape.
+				gotName := cg.tinTypeDisplay(val.Type())
 				if gotName == "" {
-					gotName = val.Type().LLString()
+					gotName = cg.typeNameOf(val.Type())
 				}
 
-				wantName := cg.typeNameOf(retType)
+				wantName := cg.tinTypeDisplay(retType)
 				if wantName == "" {
-					wantName = retType.LLString()
+					wantName = cg.typeNameOf(retType)
 				}
 
 				if astDecl, ok := cg.funcDecls[cg.curFn.Name()]; ok && astDecl.RetType != nil {
 					wantName = astDecl.RetType.String()
 				}
 
-				return cg.nodeErr(s, "cannot return value of type %q as %q", gotName, wantName)
+				return cg.nodeErr(s, "cannot return value of type %s as %s", gotName, wantName)
 			}
 		}
 	}

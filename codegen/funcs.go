@@ -1187,33 +1187,39 @@ func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) 
 }
 
 // formatStripWitnesses renders a list of dead-strip witnesses (one per
-// stripped overload) as an indented multi-line block. Single-witness
-// case stays on one line; multi-witness case lists each as a bullet
-// so the diagnostic shows EVERY failing constraint, not just the last
-// one to be evaluated.
+// stripped overload) for inline use in a single-line error message.
+// Single witness: "doesn't match <bound>". Multi: "doesn't match any
+// of: <bound>, <bound>, ...".
 func formatStripWitnesses(witnesses []string) string {
 	if len(witnesses) == 0 {
 		return ""
 	}
 
 	if len(witnesses) == 1 {
-		return "  " + witnesses[0]
+		return "doesn't match " + witnesses[0]
 	}
 
-	var sb strings.Builder
+	return "doesn't match any of: " + strings.Join(witnesses, ", ")
+}
 
-	fmt.Fprintf(&sb, "  %d candidate impls, none matched:\n", len(witnesses))
-
-	for i, w := range witnesses {
-		sb.WriteString("    ")
-		fmt.Fprintf(&sb, "[%d] %s", i+1, w)
-
-		if i+1 < len(witnesses) {
-			sb.WriteString("\n")
-		}
+// prettyStructName renders an IR-mangled generic instantiation name
+// (e.g. "Box__bool", "Channel__string") back into the source-syntax
+// form ("Box[bool]", "Channel[string]"). Multi-arg generics use the
+// double-underscore separator inside the brackets too:
+// "HashMap__string__i64" -> "HashMap[string, i64]".
+//
+// Plain (non-generic) struct names pass through unchanged.
+func prettyStructName(s string) string {
+	idx := strings.Index(s, "__")
+	if idx < 0 {
+		return s
 	}
 
-	return sb.String()
+	base := s[:idx]
+	rest := s[idx+2:]
+	args := strings.ReplaceAll(rest, "__", ", ")
+
+	return base + "[" + args + "]"
 }
 
 // methodConstraintWitness reports whether every where-clause on a generic
@@ -1251,45 +1257,19 @@ func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string
 
 		full := typeBoundString(c.Bound)
 
-		// Single-leaf bound (`where t is X`). Two flavors:
-		//   - X is a tagged union alias (`type intish = i32 | i64`):
-		//     the user really wrote a multi-alternative bound through
-		//     the alias. Treat as OR for the purposes of wording.
-		//   - X is anything else (literal type, trait): compact form
-		//     since pointing at the bound twice is noise.
-		if leaf, isLeaf := c.Bound.(*ast.TBAtom); isLeaf && !leaf.Neg {
-			leafName := ""
-
-			switch tt := leaf.Trait.(type) {
-			case *ast.SimpleType:
-				leafName = tt.Name
-			case *ast.GenericType:
-				leafName = tt.Name
-			}
-
-			if _, isUnion := cg.unionTypeMembers[leafName]; isUnion {
-				return fmt.Sprintf("`where %s is %s` (%s = %q matches none)",
-					c.TypeParam, full, c.TypeParam, concreteName)
-			}
-
-			return fmt.Sprintf("`where %s is %s` (%s = %q)",
-				c.TypeParam, full, c.TypeParam, concreteName)
-		}
-
-		// Pure-OR bound (no AND nodes): the concrete type matched
-		// no alternative, so saying "failed at <last leaf>" is
-		// misleading — every alternative was equally tried. Format
-		// without a sub-check pointer.
-		if isPureOrBound(c.Bound) {
-			return fmt.Sprintf("`where %s is %s` (%s = %q matches none)",
-				c.TypeParam, full, c.TypeParam, concreteName)
-		}
-
 		// Mixed AND/OR bound — pointing at the failing AND-conjunct
 		// is genuinely informative: that's the specific missing
 		// requirement.
-		return fmt.Sprintf("`where %s is %s` failed at `%s` (%s = %q)",
-			c.TypeParam, full, typeBoundString(witness), c.TypeParam, concreteName)
+		if !isPureOrBound(c.Bound) {
+			return fmt.Sprintf("where %s is %s (missing %s)",
+				c.TypeParam, full, typeBoundString(witness))
+		}
+
+		// Single-leaf or pure-OR bound: the bound itself describes
+		// the requirement; the concrete type didn't satisfy it.
+		_ = concreteName
+
+		return fmt.Sprintf("where %s is %s", c.TypeParam, full)
 	}
 
 	return ""

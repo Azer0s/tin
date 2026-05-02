@@ -41,9 +41,10 @@ assert_err() {
 
 echo "method-level where guards: dead-strip diagnostics"
 
+
 # 1. Single leaf bound (`where t is i64`).
-assert_err 'leaf bound failure mentions concrete type' \
-  '`where t is i64` (t = "bool")' '
+assert_err 'leaf bound failure: pretty struct name + bound' \
+  "Box[bool].just_i64 doesn't match where t is i64" '
 struct Box[t] =
   v t
 
@@ -56,9 +57,9 @@ fn main() i64 =
   return b.just_i64()
 '
 
-# 2. AND bound — points at the failing conjunct.
+# 2. AND bound — points at the failing conjunct via "(missing X)".
 assert_err 'AND bound failure points at failing conjunct' \
-  'failed at `Sized`' '
+  '(missing Sized)' '
 trait Sized =
   fn size(this *Sized) i64 = virtual
 
@@ -74,9 +75,9 @@ fn main() i64 =
   return b.measure()
 '
 
-# 3. OR / union-alias bound — "matches none" rather than misleading "failed at <last>".
-assert_err 'OR bound failure says "matches none"' \
-  'matches none' '
+# 3. OR / union-alias bound — bound name appears in the message.
+assert_err 'OR bound failure shows the bound' \
+  "doesn't match where t is intish" '
 type intish = i32 | i64
 
 struct Box[t] =
@@ -91,9 +92,9 @@ fn main() i64 =
   return b.run()
 '
 
-# 4. Multiple impls, none satisfied — lists every candidate.
+# 4. Multiple impls, none satisfied — listed via "any of:".
 assert_err 'multi-impl failure lists every candidate' \
-  'candidate impls, none matched' '
+  "doesn't match any of: where t is intish, where t is floatish" '
 type intish = i32 | i64
 type floatish = f32 | f64
 
