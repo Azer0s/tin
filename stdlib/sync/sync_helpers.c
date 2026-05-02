@@ -360,6 +360,13 @@ int8_t _tin_atomic_cas_i8(void *a, int8_t old_val, int8_t new_val) {
     return old_val;
 }
 
+// External ARC primitives (defined in runtime/runtime.c). Used by the
+// non-primitive Atomic path when the protected payload is itself an
+// ARC-tracked type (string, fat array, any) — store retains the new
+// value and releases the old, load retains so the caller owns RC=1.
+void _tin_retain(void *ptr);
+void _tin_release(void *ptr);
+
 // ---------------------------------------------------------------------------
 // Atomic[t] for non-primitive t: spinlock-protected single-cell heap copy.
 // Layout: { atomic_uint lock; int64_t size; uint8_t payload[size] }
@@ -380,6 +387,7 @@ int8_t _tin_atomic_cas_i8(void *a, int8_t old_val, int8_t new_val) {
 typedef struct {
     _Atomic unsigned int lock;
     int64_t              size;
+    int                  is_rc;
     char                 payload[];
 } _tin_atomic_obj;
 
@@ -399,32 +407,68 @@ static inline void _tin_atomic_obj_spin_unlock(_tin_atomic_obj *o) {
     atomic_store_explicit(&o->lock, 0u, memory_order_release);
 }
 
-void *_tin_atomic_obj_new(int64_t size) {
+void *_tin_atomic_obj_new(int64_t size, int is_rc) {
     if (size <= 0) { fputs("tin: atomic_obj_new: non-positive size\n", stderr); exit(1); }
     _tin_atomic_obj *o = (_tin_atomic_obj *)malloc(sizeof(_tin_atomic_obj) + (size_t)size);
     if (!o) { fputs("tin: atomic_obj_new: alloc failed\n", stderr); exit(1); }
     atomic_store_explicit(&o->lock, 0u, memory_order_relaxed);
-    o->size = size;
+    o->size  = size;
+    o->is_rc = is_rc;
     memset(o->payload, 0, (size_t)size);
 
     return o;
 }
 
+// rc_data_ptr extracts the ARC heap data pointer from the payload's
+// representation of t. For a string or fat array the payload is
+// {i8 *data, i64 len}; the data ptr is at offset 0.
+//
+// Tin's Channel uses the same shape: any ARC-tracked element type
+// has its retainable pointer at offset 0 of the value's bytes.
+static inline void *_atomic_obj_rc_data(_tin_atomic_obj *o) {
+    void *p;
+    memcpy(&p, o->payload, sizeof(void *));
+
+    return p;
+}
+
 void _tin_atomic_obj_free(void *p) {
     if (!p) return;
-    free(p);
+    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
+    // Drop the retained payload before freeing the slot itself.
+    if (o->is_rc) {
+        void *rc = _atomic_obj_rc_data(o);
+        if (rc) _tin_release(rc);
+    }
+    free(o);
 }
 
 void _tin_atomic_obj_load(void *p, void *out) {
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
     _tin_atomic_obj_lock(o);
     memcpy(out, o->payload, (size_t)o->size);
+    // Retain on extract: caller owns RC=1, balanced by their normal
+    // scope-exit release. Same protocol as Channel.recv.
+    if (o->is_rc) {
+        void *rc;
+        memcpy(&rc, out, sizeof(void *));
+        if (rc) _tin_retain(rc);
+    }
     _tin_atomic_obj_spin_unlock(o);
 }
 
 void _tin_atomic_obj_store(void *p, void *src) {
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
     _tin_atomic_obj_lock(o);
+    if (o->is_rc) {
+        // Release the previous payload's RC before overwriting.
+        void *old_rc = _atomic_obj_rc_data(o);
+        // Retain the new value's RC so the slot owns it.
+        void *new_rc;
+        memcpy(&new_rc, src, sizeof(void *));
+        if (new_rc) _tin_retain(new_rc);
+        if (old_rc) _tin_release(old_rc);
+    }
     memcpy(o->payload, src, (size_t)o->size);
     _tin_atomic_obj_spin_unlock(o);
 }

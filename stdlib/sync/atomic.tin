@@ -60,8 +60,12 @@ fn tin_atomic_cas_i32(a *void, old i32, nw i32) i32  = extern("_tin_atomic_cas_i
 fn tin_atomic_cas_i16(a *void, old i16, nw i16) i16  = extern("_tin_atomic_cas_i16")
 fn tin_atomic_cas_i8(a *void, old i8, nw i8) i8      = extern("_tin_atomic_cas_i8")
 
-// Mutex-backed slot for non-primitive t.
-fn tin_atomic_obj_new(size i64) *void                = extern("_tin_atomic_obj_new")
+// Mutex-backed slot for non-primitive t. is_rc tells the C side
+// whether the payload is an ARC-tracked type (string, fat array, any,
+// trait fat ptr) so store/load do retain/release on insert/extract —
+// without it the slot would leak the previous payload and hand out
+// dangling references on load. Same protocol Channel uses.
+fn tin_atomic_obj_new(size i64, is_rc i32) *void     = extern("_tin_atomic_obj_new")
 fn tin_atomic_obj_free(p *void)                      = extern("_tin_atomic_obj_free")
 fn tin_atomic_obj_load(p *void, out *void)           = extern("_tin_atomic_obj_load")
 fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_store")
@@ -97,7 +101,7 @@ struct Atomic[t] =
     return Atomic[t]{_ptr: p}
 
   static fn new(v t) Atomic[t] where t is not primitive =
-    let p = tin_atomic_obj_new(sizeof(t))
+    let p = tin_atomic_obj_new(sizeof(t), isrc(t))
     tin_atomic_obj_store(p, &v as *void)
     return Atomic[t]{_ptr: p}
 
