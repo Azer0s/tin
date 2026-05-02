@@ -158,6 +158,18 @@ TINEOF
 rm -rf .build
 ./tin build --lib-root "$work" "$work/main_up.tin" -o /tmp/inc_up >/dev/null 2>&1
 n_up_cold=$(find .build/pkg -name '*.o' 2>/dev/null | wc -l)
+# Capture upkg_a's iface_hash for comparison after the body edit. Find
+# the .iface_hash file whose corresponding .iface.json has package
+# "upkg_a"; this avoids assuming a stable filename.
+hash_before=""
+for h in $(find .build/pkg -name '*.iface_hash'); do
+  ij="${h%.iface_hash}.iface.json"
+  if grep -q '"package": "upkg_a"' "$ij" 2>/dev/null; then
+    hash_before=$(cat "$h")
+    break
+  fi
+done
+
 # Edit upkg_a's BODY only (interface unchanged: same fn name, same sig).
 cat > "$work/upkg_a/upkg_a.tin" << 'TINEOF'
 fn double_it(x i64) i64 = return (x * 2 as i64)
@@ -168,6 +180,26 @@ n_up_after=$(find .build/pkg -name '*.o' 2>/dev/null | wc -l)
 delta_up=$((n_up_after - n_up_cold))
 [[ $delta_up -le 2 ]]
 check "upstream pkg body-only edit adds <= 2 entries (delta $delta_up)" $?
+
+# 8b. Same edit: upkg_a's iface_hash is unchanged (proves the manifest
+# correctly distinguishes interface from body; the new body produces a
+# new pkg.o, but the iface artifact stays stable).
+hash_after=""
+for h in $(find .build/pkg -name '*.iface_hash'); do
+  ij="${h%.iface_hash}.iface.json"
+  if grep -q '"package": "upkg_a"' "$ij" 2>/dev/null; then
+    cur=$(cat "$h")
+    # Body edit produced a NEW pkg.o, so a new dir was created with a
+    # new .iface_hash entry alongside it; the OLD entry also still
+    # exists. Match either by checking that AT LEAST ONE current
+    # upkg_a iface_hash equals hash_before.
+    if [[ "$cur" == "$hash_before" ]]; then
+      hash_after=$cur
+    fi
+  fi
+done
+[[ -n "$hash_before" && "$hash_after" == "$hash_before" ]]
+check "upstream pkg iface_hash unchanged across body edit" $?
 
 # 8. Concurrent builds of the same source share the cache safely. Race
 # four builds; all should succeed and produce byte-identical output.

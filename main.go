@@ -1340,6 +1340,12 @@ var stacktraceLinkActive bool
 type namedIR struct {
 	label  string
 	irText string
+	// iface is the per-package interface manifest computed at codegen
+	// time; nil for mono modules (anonymous instantiations have no
+	// addressable iface) and empty packages. Written next to pkg.o in
+	// the per-pkg cache (.iface.json + .iface_hash) so downstream
+	// tooling can inspect what shape this pkg presents.
+	iface *codegen.PkgIface
 }
 
 // collectPkgIRs serializes every per-pkg LLVM module the codegen built
@@ -1367,6 +1373,7 @@ func collectPkgIRs(cg *codegen.CodeGen) []namedIR {
 		out = append(out, namedIR{
 			label:  label,
 			irText: fixCoroAttrs(m.String()),
+			iface:  cg.BuildPkgIface(names[i]),
 		})
 	}
 
@@ -1680,6 +1687,25 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		}
 
 		linkInputs = append(linkInputs, cachedObj)
+
+		// Step 6 (D6): write per-pkg iface manifest next to the cache slot
+		// so downstream consumers and tooling can inspect what shape this
+		// pkg presents. The manifest is content-addressed alongside pkg.o
+		// (same dir, same key prefix) so a cache hit also serves up the
+		// matching iface.json. Idempotent — overwrite is a no-op on warm
+		// rebuilds since the input is byte-identical.
+		if pkg.iface != nil {
+			ifacePath := strings.TrimSuffix(cachedObj, ".o") + ".iface.json"
+			hashPath := strings.TrimSuffix(cachedObj, ".o") + ".iface_hash"
+
+			if body, mErr := pkg.iface.MarshalCanonical(); mErr == nil {
+				_ = os.WriteFile(ifacePath, body, 0o644)
+			}
+
+			if h, hErr := pkg.iface.IfaceHash(); hErr == nil {
+				_ = os.WriteFile(hashPath, []byte(h), 0o644)
+			}
+		}
 
 		if hit {
 			continue
