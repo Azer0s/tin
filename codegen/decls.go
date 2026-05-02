@@ -899,6 +899,35 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		return nil
 	}
 
+	// Concrete generic alias (no type params on the alias itself, like
+	// `type GI = G[i64]`): instead of building a duplicate struct named
+	// GI, monomorphize G[i64] under its canonical name (G__i64) and
+	// register GI as an alias for that canonical name. Without this,
+	// `let outer = G[GI]{v: inner}` would resolve GI as a fresh struct
+	// distinct from G__i64 and the store would type-mismatch on inner.
+	//
+	// Skip when the alias declaration carries method overrides — those
+	// overrides need to live on a distinct struct (the alias name), so
+	// keep the existing monomorphize-as-separate-struct path for that
+	// case. See examples/type_alias.tin "override show method".
+	if len(n.TypeParams) == 0 && len(n.Overrides) == 0 {
+		canonicalName := cg.typeExprCanonicalKey(gt)
+		if canonicalName != n.Name {
+			if _, alreadyDone := cg.structTypes[canonicalName]; !alreadyDone {
+				if err := cg.genTypeDecl(&ast.TypeDecl{
+					Name: canonicalName,
+					Type: gt,
+				}); err != nil {
+					return err
+				}
+			}
+
+			cg.typeAliases[n.Name] = &ast.SimpleType{Name: canonicalName}
+
+			return nil
+		}
+	}
+
 	// Build type-parameter substitution: tmpl.TypeParams[i] -> gt.TypeParams[i]
 	subst := make(map[string]ast.TypeExpr)
 

@@ -712,8 +712,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					expr = sa
 				}
 			} else if idx, ok2 := expr.(*ast.IndexExpr); ok2 {
-				// e.g. result[u32]::ok(42) or pkg::Type[T,U]::method()
-				// - static method call on a generic type, with optional package qualifier.
+				// e.g. result[u32]::ok(42), pkg::Type[T,U]::method(),
+				// or G[G[i64]].make(...) where the type arg is itself a
+				// generic instantiation (nested IndexExpr).
 				var typeName string
 
 				switch inner := idx.Expr.(type) {
@@ -724,8 +725,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				}
 
 				if typeName != "" {
-					if typeArgID, ok4 := idx.Index.(*ast.Identifier); ok4 {
-						typeName = typeName + "[" + typeArgID.Name + "]"
+					argStr := typeNodeToString(idx.Index)
+					if argStr != "" {
+						typeName = typeName + "[" + argStr + "]"
 					}
 
 					sa := ast.NewScopeAccess([]string{typeName, field.Literal}, field.Line, field.Col)
@@ -1601,10 +1603,12 @@ func (p *Parser) indexExprTypeName(idx *ast.IndexExpr) (string, bool) {
 }
 
 // indexExprTypeArgs converts the Index of an IndexExpr (which encodes type
-// args as a comma-separated Identifier string) into a []ast.TypeExpr slice.
+// args as a comma-separated Identifier string for the simple case, or as a
+// nested IndexExpr / ScopeAccess for nested generics) into a []ast.TypeExpr.
 func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
-	if argID, ok := idx.Index.(*ast.Identifier); ok {
-		parts := strings.Split(argID.Name, ",")
+	switch ix := idx.Index.(type) {
+	case *ast.Identifier:
+		parts := strings.Split(ix.Name, ",")
 		result := make([]ast.TypeExpr, 0, len(parts))
 
 		for _, part := range parts {
@@ -1612,6 +1616,82 @@ func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
 		}
 
 		return result
+	}
+
+	// Single non-Identifier type arg: convert via the generic node→type-expr
+	// path (covers nested IndexExpr like `G[i64]` and qualified names).
+	if te := typeNodeToTypeExpr(idx.Index); te != nil {
+		return []ast.TypeExpr{te}
+	}
+
+	return nil
+}
+
+// typeNodeToString converts an AST node that names a type (Identifier,
+// ScopeAccess, IndexExpr) into its source-level string. Nested generics
+// like `G[i64]` round-trip as `G[i64]`. Returns "" if the node isn't a
+// recognized type-naming shape.
+func typeNodeToString(n ast.Node) string {
+	switch v := n.(type) {
+	case *ast.Identifier:
+		return v.Name
+	case *ast.ScopeAccess:
+		return strings.Join(v.Path, "::")
+	case *ast.IndexExpr:
+		base := typeNodeToString(v.Expr)
+		if base == "" {
+			return ""
+		}
+
+		argStr := typeNodeToString(v.Index)
+		if argStr == "" {
+			return ""
+		}
+
+		return base + "[" + argStr + "]"
+	}
+
+	return ""
+}
+
+// typeNodeToTypeExpr lifts a type-shaped AST node (as parsed in expression
+// position) into a TypeExpr. Mirrors typeNodeToString but produces the
+// structured type rather than its source form.
+func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
+	switch v := n.(type) {
+	case *ast.Identifier:
+		return &ast.SimpleType{Name: v.Name}
+	case *ast.ScopeAccess:
+		return &ast.SimpleType{Name: strings.Join(v.Path, "::")}
+	case *ast.IndexExpr:
+		baseName := ""
+		switch be := v.Expr.(type) {
+		case *ast.Identifier:
+			baseName = be.Name
+		case *ast.ScopeAccess:
+			baseName = strings.Join(be.Path, "::")
+		}
+
+		if baseName == "" {
+			return nil
+		}
+
+		params := []ast.TypeExpr{}
+		// Multi-arg encoding: comma-joined identifier.
+		if argID, ok := v.Index.(*ast.Identifier); ok && strings.Contains(argID.Name, ",") {
+			for _, part := range strings.Split(argID.Name, ",") {
+				params = append(params, &ast.SimpleType{Name: strings.TrimSpace(part)})
+			}
+		} else {
+			inner := typeNodeToTypeExpr(v.Index)
+			if inner == nil {
+				return nil
+			}
+
+			params = append(params, inner)
+		}
+
+		return &ast.GenericType{Name: baseName, TypeParams: params}
 	}
 
 	return nil

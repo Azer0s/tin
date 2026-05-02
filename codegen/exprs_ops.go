@@ -191,6 +191,30 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 		// []T represented as an empty array literal of one element - best-effort.
 	case *ast.ScopeAccess:
 		return strings.Join(n.Path, "::")
+	case *ast.IndexExpr:
+		// Nested generic type arg, e.g. `G[G[i64]].make(...)`: the inner
+		// `G[i64]` parses as IndexExpr. Recurse to produce the canonical
+		// `G__i64` key so the outer instantiation finds the right struct.
+		baseKey := cg.exprToTypeParamKey(n.Expr)
+		if baseKey == "" {
+			return ""
+		}
+		// Comma-encoded multi-arg case from the parser (e.g. `K,V`).
+		if argID, ok := n.Index.(*ast.Identifier); ok && strings.Contains(argID.Name, ",") {
+			parts := []string{baseKey}
+			for _, raw := range strings.Split(argID.Name, ",") {
+				parts = append(parts, strings.TrimSpace(raw))
+			}
+
+			return strings.Join(parts, "__")
+		}
+
+		argKey := cg.exprToTypeParamKey(n.Index)
+		if argKey == "" {
+			return ""
+		}
+
+		return baseKey + "__" + argKey
 	}
 
 	return ""

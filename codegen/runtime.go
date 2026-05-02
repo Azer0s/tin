@@ -455,6 +455,26 @@ func (cg *CodeGen) emitGenericFatArrayRelease(block *ir.Block, val value.Value, 
 	block.NewCall(cg.ensureForeachStructElemRelease(), dataPtrI8, length, elemSize, releaseFnI8)
 }
 
+// isBadFatPtrArithmetic reports whether op applied to operands of types lt/rt
+// would silently fall through to an integer arith on a fat-pointer struct
+// — `string + string` and the like. The fat-pointer types are LLVM-anonymous
+// structs (`{i8*, i64}`) so they slip past isStructType's user-struct check
+// and get fed to NewAdd, which clang rejects at the IR level. Catching the
+// shape here turns it into a positioned Tin diagnostic.
+func (cg *CodeGen) isBadFatPtrArithmetic(op string, lt, rt irtypes.Type) bool {
+	switch op {
+	case "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>":
+	default:
+		return false
+	}
+
+	bad := func(t irtypes.Type) bool {
+		return isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t)
+	}
+
+	return bad(lt) || bad(rt)
+}
+
 // isRCTrackedType returns true for types whose heap data is ARC-managed:
 //   - strings      {i8*, i64}           - ptr is either immortal (-1 sentinel) or rc-alloc'd
 //   - fat arrays   {T*,  i64}           - ptr is always rc-alloc'd

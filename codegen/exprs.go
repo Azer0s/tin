@@ -1042,6 +1042,25 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
 	}
 
+	// Reject arithmetic on string / fat-ptr operands before falling into the
+	// integer add/sub paths below — without this, `s1 + s2` would emit
+	// `add { i8*, i64 }` which clang rejects with a confusing low-level
+	// error instead of a Tin-level diagnostic. The right concat operator
+	// for strings is `++`; surface that in the message.
+	if cg.isBadFatPtrArithmetic(e.Op, lt, rt) {
+		hint := ""
+		if e.Op == "+" && isStringType(lt) && isStringType(rt) {
+			hint = " (use %q to concatenate strings)"
+			return nil, cg.nodeErr(e,
+				"binary operator %q is not defined for operands of type %s and %s"+hint,
+				e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt), "++")
+		}
+
+		return nil, cg.nodeErr(e,
+			"binary operator %q is not defined for operands of type %s and %s",
+			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
+	}
+
 	switch e.Op {
 	case "+":
 		if isFloat {
@@ -1317,8 +1336,12 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 // genEqNeqExpr implements shared handling for == and != operators.
 func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt irtypes.Type, isFloat bool, notEqual bool) value.Value {
 	if isFloat {
+		// IEEE 754 NaN: x == x is false, x != x is true. OEQ matches the
+		// first (false on NaN); UNE the second (true on NaN). Using ONE
+		// for != would silently fold `x != x` to false, breaking the
+		// canonical NaN test pattern.
 		if notEqual {
-			return block.NewFCmp(enum.FPredONE, left, right)
+			return block.NewFCmp(enum.FPredUNE, left, right)
 		}
 
 		return block.NewFCmp(enum.FPredOEQ, left, right)
