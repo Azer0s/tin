@@ -461,7 +461,39 @@ func (cg *CodeGen) emitGenericFatArrayRelease(block *ir.Block, val value.Value, 
 //   - any          {i32, i8*}           - ptr is rc-alloc'd (boxed value)
 //   - fat fn ptrs  {fn(i8*,...)*, i8*}  - env (field 1) is rc-alloc'd (null for named-fn wrappers)
 func isRCTrackedType(t irtypes.Type) bool {
-	return isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t)
+	return rcKindOf(t) != rcKindNone
+}
+
+// RC-tracking kinds emitted by `isrc(T)`. The C runtime (Channel,
+// Atomic) reads this to decide where the retainable pointer sits inside
+// each value of T, and which release entry-point to use. Keeping the
+// kinds here mirrored in runtime/arc.h would be ideal but the runtime C
+// uses bare ints; the values are part of the ABI between the compiler
+// and the runtime so they MUST NOT be renumbered.
+type rcKind int32
+
+const (
+	rcKindNone       rcKind = 0 // no RC management needed
+	rcKindLeadingPtr rcKind = 1 // string / fat array / trait fat ptr / named struct ptr — retain ptr at offset 0
+	rcKindAny        rcKind = 2 // any: {i32 tag, i8* ptr} — release via _tin_release_any(tag, ptr@8)
+	rcKindFn         rcKind = 3 // fat fn ptr: {fn*, env*} — release via _tin_release_closure(env@8)
+)
+
+// rcKindOf classifies an LLVM type by where its retainable pointer
+// (if any) sits inside the value. See rcKind comments.
+func rcKindOf(t irtypes.Type) rcKind {
+	switch {
+	case t == nil:
+		return rcKindNone
+	case isAnyType(t):
+		return rcKindAny
+	case isFatFnPtr(t):
+		return rcKindFn
+	case isStringType(t), isFatArrayPtr(t), isTraitFatPtrShape(t):
+		return rcKindLeadingPtr
+	}
+
+	return rcKindNone
 }
 
 // isTraitFatPtrShape detects the universal trait fat-pointer struct shape

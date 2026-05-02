@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <sched.h>
+#include <pthread.h>
 
 // Fiber park / unpark (runtime/fiber.c)
 void    _tin_fiber_park(int64_t pid);
@@ -362,10 +363,71 @@ int8_t _tin_atomic_cas_i8(void *a, int8_t old_val, int8_t new_val) {
 
 // External ARC primitives (defined in runtime/runtime.c). Used by the
 // non-primitive Atomic path when the protected payload is itself an
-// ARC-tracked type (string, fat array, any) — store retains the new
-// value and releases the old, load retains so the caller owns RC=1.
+// ARC-tracked type — store retains the new value and releases the old,
+// load retains so the caller owns RC=1. The kind discriminator picks
+// the right shape (string/array vs any vs fn) to find the retainable
+// pointer inside the payload bytes.
 void _tin_retain(void *ptr);
 void _tin_release(void *ptr);
+void _tin_release_any(int32_t tag, void *data);
+void _tin_release_closure(void *env);
+
+// Mirrors codegen/runtime.go rcKind. Keep in sync.
+#define TIN_RC_NONE         0
+#define TIN_RC_LEADING_PTR  1
+#define TIN_RC_ANY          2
+#define TIN_RC_FN           3
+
+typedef struct { int32_t tag; void *ptr; } TinAnyVal;
+typedef struct { void   *fn;  void *env; } TinFnVal;
+
+// rc_retain_slot retains the payload pointer at the right offset for kind.
+static inline void rc_retain_slot(void *slot, int kind) {
+    if (kind == TIN_RC_NONE || !slot) return;
+
+    switch (kind) {
+    case TIN_RC_LEADING_PTR: {
+        void *p; memcpy(&p, slot, sizeof(void *));
+        if (p) _tin_retain(p);
+        break;
+    }
+    case TIN_RC_ANY: {
+        TinAnyVal a; memcpy(&a, slot, sizeof(a));
+        if (a.ptr) _tin_retain(a.ptr);
+        break;
+    }
+    case TIN_RC_FN: {
+        TinFnVal f; memcpy(&f, slot, sizeof(f));
+        if (f.env) _tin_retain(f.env);
+        break;
+    }
+    }
+}
+
+// rc_release_slot releases the payload at the right offset for kind,
+// using the type-specific release entry-point so any/fn cleanups run
+// (e.g. closure dtors for captured RC values).
+static inline void rc_release_slot(void *slot, int kind) {
+    if (kind == TIN_RC_NONE || !slot) return;
+
+    switch (kind) {
+    case TIN_RC_LEADING_PTR: {
+        void *p; memcpy(&p, slot, sizeof(void *));
+        if (p) _tin_release(p);
+        break;
+    }
+    case TIN_RC_ANY: {
+        TinAnyVal a; memcpy(&a, slot, sizeof(a));
+        if (a.ptr) _tin_release_any(a.tag, a.ptr);
+        break;
+    }
+    case TIN_RC_FN: {
+        TinFnVal f; memcpy(&f, slot, sizeof(f));
+        if (f.env) _tin_release_closure(f.env);
+        break;
+    }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Atomic[t] for non-primitive t: spinlock-protected single-cell heap copy.
@@ -384,19 +446,44 @@ void _tin_release(void *ptr);
 // matches the granularity (single struct copy).
 // ---------------------------------------------------------------------------
 
+// owner_id: 0 = unlocked, otherwise the atomic-lock owner. We mix fiber
+// pid and OS-thread id into a single i64 so the lock works whether we
+// are inside a fiber-scheduled coroutine (pid >= 0) or on a bare thread
+// (pid == -1, fall back to pthread_self with the high bit set so the
+// two id spaces never collide).
 typedef struct {
-    _Atomic unsigned int lock;
+    _Atomic int64_t      owner;
+    int32_t              depth;
     int64_t              size;
-    int                  is_rc;
+    int                  rc_kind;
     char                 payload[];
 } _tin_atomic_obj;
 
+static inline int64_t _atomic_obj_self_id(void) {
+    int64_t pid = _tin_current_pid();
+    if (pid >= 0) return pid + 1;            // shift so pid 0 != unlocked
+    return ((int64_t)1 << 62) | (int64_t)(uintptr_t)pthread_self();
+}
+
+// Lock allows reentry from the SAME fiber (or thread, when no fiber is
+// scheduled): a re-entering call simply bumps depth and returns. Without
+// this, calling for_locked from inside a for_locked callback on the same
+// Atomic deadlocks. Cross-fiber contention spins (the critical section
+// is a single memcpy on the fast path; nested user callbacks may run
+// longer but those holders never block — they yield via sched_yield).
 static inline void _tin_atomic_obj_lock(_tin_atomic_obj *o) {
-    unsigned int expected;
+    int64_t self = _atomic_obj_self_id();
+    int64_t expected;
     for (;;) {
-        expected = 0u;
-        if (atomic_compare_exchange_weak_explicit(&o->lock, &expected, 1u,
+        expected = 0;
+        if (atomic_compare_exchange_weak_explicit(&o->owner, &expected, self,
                 memory_order_acquire, memory_order_relaxed)) {
+            o->depth = 1;
+            return;
+        }
+        // Already locked. If WE own it, recurse.
+        if (atomic_load_explicit(&o->owner, memory_order_relaxed) == self) {
+            o->depth++;
             return;
         }
         sched_yield();
@@ -404,42 +491,27 @@ static inline void _tin_atomic_obj_lock(_tin_atomic_obj *o) {
 }
 
 static inline void _tin_atomic_obj_spin_unlock(_tin_atomic_obj *o) {
-    atomic_store_explicit(&o->lock, 0u, memory_order_release);
+    if (--o->depth > 0) return;
+    atomic_store_explicit(&o->owner, 0, memory_order_release);
 }
 
-void *_tin_atomic_obj_new(int64_t size, int is_rc) {
+void *_tin_atomic_obj_new(int64_t size, int rc_kind) {
     if (size <= 0) { fputs("tin: atomic_obj_new: non-positive size\n", stderr); exit(1); }
     _tin_atomic_obj *o = (_tin_atomic_obj *)malloc(sizeof(_tin_atomic_obj) + (size_t)size);
     if (!o) { fputs("tin: atomic_obj_new: alloc failed\n", stderr); exit(1); }
-    atomic_store_explicit(&o->lock, 0u, memory_order_relaxed);
-    o->size  = size;
-    o->is_rc = is_rc;
+    atomic_store_explicit(&o->owner, 0, memory_order_relaxed);
+    o->depth   = 0;
+    o->size    = size;
+    o->rc_kind = rc_kind;
     memset(o->payload, 0, (size_t)size);
 
     return o;
 }
 
-// rc_data_ptr extracts the ARC heap data pointer from the payload's
-// representation of t. For a string or fat array the payload is
-// {i8 *data, i64 len}; the data ptr is at offset 0.
-//
-// Tin's Channel uses the same shape: any ARC-tracked element type
-// has its retainable pointer at offset 0 of the value's bytes.
-static inline void *_atomic_obj_rc_data(_tin_atomic_obj *o) {
-    void *p;
-    memcpy(&p, o->payload, sizeof(void *));
-
-    return p;
-}
-
 void _tin_atomic_obj_free(void *p) {
     if (!p) return;
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
-    // Drop the retained payload before freeing the slot itself.
-    if (o->is_rc) {
-        void *rc = _atomic_obj_rc_data(o);
-        if (rc) _tin_release(rc);
-    }
+    rc_release_slot(o->payload, o->rc_kind);
     free(o);
 }
 
@@ -449,26 +521,16 @@ void _tin_atomic_obj_load(void *p, void *out) {
     memcpy(out, o->payload, (size_t)o->size);
     // Retain on extract: caller owns RC=1, balanced by their normal
     // scope-exit release. Same protocol as Channel.recv.
-    if (o->is_rc) {
-        void *rc;
-        memcpy(&rc, out, sizeof(void *));
-        if (rc) _tin_retain(rc);
-    }
+    rc_retain_slot(out, o->rc_kind);
     _tin_atomic_obj_spin_unlock(o);
 }
 
 void _tin_atomic_obj_store(void *p, void *src) {
     _tin_atomic_obj *o = (_tin_atomic_obj *)p;
     _tin_atomic_obj_lock(o);
-    if (o->is_rc) {
-        // Release the previous payload's RC before overwriting.
-        void *old_rc = _atomic_obj_rc_data(o);
-        // Retain the new value's RC so the slot owns it.
-        void *new_rc;
-        memcpy(&new_rc, src, sizeof(void *));
-        if (new_rc) _tin_retain(new_rc);
-        if (old_rc) _tin_release(old_rc);
-    }
+    // Retain new before releasing old in case they alias the same payload.
+    rc_retain_slot(src, o->rc_kind);
+    rc_release_slot(o->payload, o->rc_kind);
     memcpy(o->payload, src, (size_t)o->size);
     _tin_atomic_obj_spin_unlock(o);
 }
@@ -487,6 +549,5 @@ void *_tin_atomic_obj_lock_payload(void *p) {
 // Public wrapper for the unlock — same body as the static inline above
 // but exposed as a regular extern symbol the Tin extern can bind to.
 void _tin_atomic_obj_unlock(void *p) {
-    _tin_atomic_obj *o = (_tin_atomic_obj *)p;
-    atomic_store_explicit(&o->lock, 0u, memory_order_release);
+    _tin_atomic_obj_spin_unlock((_tin_atomic_obj *)p);
 }

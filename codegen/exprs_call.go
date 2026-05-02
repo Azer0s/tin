@@ -477,11 +477,26 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					ovCallee = oEntry.val
 				}
 
+				preCoerceVals := append([]value.Value(nil), llArgs...)
 				if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 					llArgs = cg.adaptArgs(block, llArgs, f2.Sig)
 				}
 
-				return block.NewCall(ovCallee, llArgs...), nil
+				result := block.NewCall(ovCallee, llArgs...)
+
+				for i, astArg := range e.Args {
+					if i >= len(preCoerceVals) || i >= len(llArgs) {
+						break
+					}
+
+					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+				}
+
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+
+				return result, nil
 			}
 
 			if entry, ok := cg.curScope.lookup(methodKey); ok {
@@ -500,9 +515,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 
+					preCoerceVals := append([]value.Value(nil), llArgs...)
 					llArgs = cg.adaptArgs(block, llArgs, f.Sig)
 
-					return block.NewCall(f, llArgs...), nil
+					result := block.NewCall(f, llArgs...)
+
+					for i, astArg := range e.Args {
+						if i >= len(preCoerceVals) || i >= len(llArgs) {
+							break
+						}
+
+						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+					}
+
+					if irtypes.IsVoid(result.Type()) {
+						return nil, nil
+					}
+
+					return result, nil
 				}
 			}
 		}
@@ -993,11 +1023,28 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							ovCallee = oEntry.val
 						}
 
+						preCoerceVals := append([]value.Value(nil), olArgs...)
 						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 							olArgs = cg.adaptArgs(block, olArgs, f2.Sig)
 						}
 
-						return block.NewCall(ovCallee, olArgs...), nil
+						result := block.NewCall(ovCallee, olArgs...)
+						// ARC: release temporary RC-tracked arguments (boxed-to-any temps,
+						// fresh string concats, etc.) so generic static methods don't leak
+						// the values their callers passed in. Mirrors the other call paths.
+						for i, astArg := range e.Args {
+							if i >= len(preCoerceVals) || i >= len(olArgs) {
+								break
+							}
+
+							cg.emitCallArgRelease(block, astArg, preCoerceVals[i], olArgs[i])
+						}
+
+						if irtypes.IsVoid(result.Type()) {
+							return nil, nil
+						}
+
+						return result, nil
 					}
 				}
 			}

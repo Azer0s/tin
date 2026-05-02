@@ -499,9 +499,19 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return block.NewPtrToInt(gepOne, irtypes.I64), nil
 
 	case *ast.IsRCExpr:
-		// Compile-time constant: 1 if T is ARC-tracked (string / array / any), 0 otherwise.
+		// Compile-time RC kind for T. Encodes both whether T needs ARC
+		// management and where in T's bytes the retainable pointer sits, so
+		// the C runtime (Channel, Atomic) can dispatch without knowing the
+		// Tin type.
+		//
+		//   0 = not RC
+		//   1 = leading pointer at offset 0 (string, fat array, trait fat ptr)
+		//   2 = any: {i32 tag, i8* ptr} — ptr at offset 8, release with
+		//       _tin_release_any so closure-typed `any` values free their env
+		//   3 = fn fat ptr: {fn*, env*} — env at offset 8, release with
+		//       _tin_release_closure
 		if e.Type == nil {
-			return constant.NewInt(irtypes.I32, 0), nil
+			return constant.NewInt(irtypes.I32, int64(rcKindNone)), nil
 		}
 
 		lt, err := cg.tinTypeToLLVM(e.Type)
@@ -509,11 +519,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return nil, err
 		}
 
-		if isRCTrackedType(lt) {
-			return constant.NewInt(irtypes.I32, 1), nil
-		}
-
-		return constant.NewInt(irtypes.I32, 0), nil
+		return constant.NewInt(irtypes.I32, int64(rcKindOf(lt))), nil
 
 	case *ast.TypeAssertExpr:
 		inner, err := cg.genExpr(block, e.Expr)
