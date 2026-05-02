@@ -994,14 +994,21 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			}
 			// Call chained trait deinit methods (for traits that also define fn deinit).
 			for _, traitDeinitFn := range cg.traitChainedDeinits[structName] {
+				// Suppress coerceToTrait's deferred scope-exit release;
+				// we emit a tighter release immediately after the call.
+				prevSuppress := cg.suppressIfaceScopeRelease
+				cg.suppressIfaceScopeRelease = true
+
 				args := cg.adaptArgs(block, []value.Value{val}, traitDeinitFn.Sig)
+				cg.suppressIfaceScopeRelease = prevSuppress
+
 				block.NewCall(traitDeinitFn, args...)
 				// Release iface temporaries adaptArgs constructed via
-				// coerceToTrait (heap-alloc); see twin comment in
-				// genStructLit's traitChainedInits loop.
+				// coerceToTrait; see twin comment in genStructLit.
 				for _, a := range args {
 					if isTraitFatPtrShape(a.Type()) {
-						cg.emitRelease(block, a)
+						dataField := block.NewExtractValue(a, 0)
+						block.NewCall(cg.ensureRelease(), dataField)
 					}
 				}
 			}
@@ -1253,6 +1260,17 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if !ok {
 			return
 		}
+
+		// Synthetic alloca holding a raw i8* heap ptr that needs releasing
+		// (e.g. iface temporaries from coerceToTrait used inline as call
+		// arguments). Load and release; no struct walk needed.
+		if entry.releaseRawPtr {
+			loadedPtr := block.NewLoad(ptrType.ElemType, entry.val)
+			block.NewCall(cg.ensureRelease(), loadedPtr)
+
+			return
+		}
+
 		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
 		// heap-promoting callee.  Use chain release to free all RC blocks.
 		if entry.isHeapOwned {
@@ -1283,6 +1301,19 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		}
 
 		elemType := ptrType.ElemType
+
+		// Trait-iface let-bindings whose data ptr we heap-allocated
+		// during coerceToTrait need an explicit _tin_release on the
+		// data field at scope exit. The struct itself has no other
+		// RC-tracked fields and elemNeedsRelease would skip it.
+		if entry.ownsIfaceData && isTraitFatPtrShape(elemType) {
+			loaded := block.NewLoad(elemType, entry.val)
+			dataField := block.NewExtractValue(loaded, 0)
+			block.NewCall(cg.ensureRelease(), dataField)
+
+			return
+		}
+
 		if !cg.elemNeedsRelease(elemType) {
 			return
 		}
@@ -1316,6 +1347,13 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			if !ok {
 				return
 			}
+			// Synthetic alloca holding a raw i8* heap ptr; see emitScopeRelease.
+			if entry.releaseRawPtr {
+				loadedPtr := block.NewLoad(ptrType.ElemType, entry.val)
+				block.NewCall(cg.ensureRelease(), loadedPtr)
+
+				return
+			}
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {
 				heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
@@ -1341,6 +1379,18 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			}
 
 			elemType := ptrType.ElemType
+
+			// Trait-iface let-bindings owning their heap-allocated data:
+			// release the iface's data ptr explicitly. See twin handling
+			// in emitScopeRelease.
+			if entry.ownsIfaceData && isTraitFatPtrShape(elemType) {
+				loaded := block.NewLoad(elemType, entry.val)
+				dataField := block.NewExtractValue(loaded, 0)
+				block.NewCall(cg.ensureRelease(), dataField)
+
+				return
+			}
+
 			if !cg.elemNeedsRelease(elemType) {
 				return
 			}

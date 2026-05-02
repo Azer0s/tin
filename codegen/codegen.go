@@ -102,6 +102,15 @@ type CodeGen struct {
 
 	// global string counter
 	strCount int
+
+	// suppressIfaceScopeRelease tells coerceToTrait to skip registering its
+	// heap-allocated iface data ptr for deferred scope-exit release. Used by
+	// call sites that handle the release directly (let-binding's
+	// ownsIfaceData path, genForIterTrait's loop-exit release, the
+	// trait init/deinit chain wrappers in genStructLit / emitReleaseInner)
+	// so the data ptr isn't released twice. Stack-discipline: callers must
+	// save the prior value, set true, call coerceToTrait, restore.
+	suppressIfaceScopeRelease bool
 	// stringPool memoizes content-hashed string globals per active
 	// module so the same literal in the same module reuses a single
 	// global. Cross-module dedup is handled by linkonce_odr at link

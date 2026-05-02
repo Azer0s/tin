@@ -1298,6 +1298,13 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// Non-fill, non-ArrayLit static target: fall through to initVal path below.
 	}
 
+	// ownsIfaceData: trait-iface let-bindings always own a fresh
+	// _tin_rc_alloc'd data ptr from coerceToTrait (both value-source and
+	// pointer-source coerceToTrait branches heap-copy the source struct).
+	// emitScopeRelease (runtime.go) uses the flag to emit the matching
+	// _tin_release at scope exit so the iface storage is reclaimed.
+	var ownsIfaceData bool
+
 	if initVal != nil {
 		// If the init value is an empty array {i8*, i64} but the declared type
 		// is a typed fat array {T*, i64}, use a properly-typed zero value.
@@ -1308,7 +1315,19 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 
 		srcType := initVal.Type()
+
+		ownsIfaceData = isTraitFatPtrShape(llType) && !isTraitFatPtrShape(srcType)
+
+		// Suppress coerceToTrait's deferred scope-exit release when this
+		// let-binding will own the iface and emit its own release via
+		// the scope entry's ownsIfaceData flag (see emitScopeRelease).
+		prevSuppress := cg.suppressIfaceScopeRelease
+		if ownsIfaceData {
+			cg.suppressIfaceScopeRelease = true
+		}
+
 		initVal = cg.coerce(block, initVal, llType)
+		cg.suppressIfaceScopeRelease = prevSuppress
 		// Coerce returns the value unchanged when no conversion path applies;
 		// guard NewStore so a real type mismatch produces a clean diagnostic
 		// instead of a Go panic from llir's incompatible-operand check.
@@ -1334,7 +1353,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		isFreshFatFn := isFatFnPtr(llType) && cg.lastLambdaHadCaptures
 
 		boxedToAny := isAnyType(llType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn {
+		// Trait coercion already minted a fresh _tin_rc_alloc'd data ptr
+		// (rc=1) inside coerceToTrait; the let-binding owns it via
+		// ownsIfaceData. An emitRetain here would over-count and leak.
+		freshIface := ownsIfaceData
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface {
 			cg.emitRetain(block, initVal)
 		}
 	} else if s.Value == nil {
@@ -1426,7 +1449,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData}
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in
@@ -3111,10 +3134,14 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 }
 
 func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
-	condBlock := cg.newBlock("for.cond")
+	headerBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	postBlock := cg.newBlock("for.post")
 	afterBlock := cg.newBlock("for.after")
+
+	// headerBlock is the loop's stable back-edge target; condBlock may
+	// advance through short-circuit && / || in the cond expression.
+	condBlock := headerBlock
 
 	// Init: push a scope so the loop variable is scoped to the loop.
 	cg.curScope = newScope(cg.curScope)
@@ -3196,10 +3223,12 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 	}
 
 	if postBlock.Term == nil {
+		// Back-edge to the stable loop header, not the (possibly advanced)
+		// cond eval block.
 		if cg.curFnAutoYield {
-			cg.genYieldAutoAt(postBlock, condBlock)
+			cg.genYieldAutoAt(postBlock, headerBlock)
 		} else {
-			postBlock.NewBr(condBlock)
+			postBlock.NewBr(headerBlock)
 		}
 	}
 

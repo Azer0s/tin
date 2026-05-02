@@ -791,15 +791,24 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	// Call chained trait init methods (for traits that also define fn init).
 	for _, traitInitFn := range cg.traitChainedInits[e.TypeName] {
+		// Suppress coerceToTrait's deferred scope-exit release: we emit
+		// our own release after the call so the iface temporary lives
+		// only as long as the trait init invocation.
+		prevSuppress := cg.suppressIfaceScopeRelease
+		cg.suppressIfaceScopeRelease = true
+
 		args := cg.adaptArgs(block, []value.Value{result}, traitInitFn.Sig)
+		cg.suppressIfaceScopeRelease = prevSuppress
+
 		block.NewCall(traitInitFn, args...)
 		// Release any iface temporaries adaptArgs constructed via
-		// coerceToTrait (heap-alloc via _tin_rc_alloc). Without this the
-		// init iface leaks on every struct construction whose trait
-		// chain runs init/deinit through the iface ABI.
+		// coerceToTrait. Without this the init iface leaks on every
+		// struct construction whose trait chain runs init/deinit
+		// through the iface ABI.
 		for _, a := range args {
 			if isTraitFatPtrShape(a.Type()) {
-				cg.emitRelease(block, a)
+				dataField := block.NewExtractValue(a, 0)
+				block.NewCall(cg.ensureRelease(), dataField)
 			}
 		}
 	}

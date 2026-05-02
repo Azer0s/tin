@@ -70,6 +70,23 @@ type scopeEntry struct {
 	// bool literal, integer literal); a later mutation invalidates this and
 	// the field is cleared by genAssign.
 	constInitExpr ast.Node
+
+	// ownsIfaceData is true for trait-iface let-bindings whose data ptr was
+	// freshly heap-allocated by coerceToTrait. emitScopeRelease emits an
+	// extra _tin_release on the iface's data field for these so the heap
+	// block is reclaimed. Both value-source and pointer-source coerceToTrait
+	// branches heap-copy the source struct now, so every value-to-iface
+	// let-binding sets this flag.
+	ownsIfaceData bool
+
+	// releaseRawPtr is set on synthetic alloca entries that hold a raw i8*
+	// heap pointer (e.g. anonymous iface temporaries from coerceToTrait
+	// passed inline as call arguments). emitScopeRelease loads the pointer
+	// and calls _tin_release on it. Used to defer cleanup of intermediate
+	// heap blocks until the enclosing scope exits, after any spawned
+	// fiber that captured the pointer has had a chance to complete via
+	// the scope's await.
+	releaseRawPtr bool
 }
 
 type scope struct {

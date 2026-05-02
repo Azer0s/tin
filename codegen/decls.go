@@ -1736,11 +1736,10 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		return nil, "", false, false
 	}
 
-	// Determine ownership: pointer-source iterVals stay borrowed (the *T
-	// owner manages the storage), value-source iterVals are heap-allocated
-	// fresh by coerceToTrait and the caller owns the new ARC ref.
-	_, isPointerSource := iterVal.Type().(*irtypes.PointerType)
-	ownsData := !isPointerSource
+	// coerceToTrait heap-allocates the iface data ptr unconditionally
+	// (both value-source and pointer-source branches), so the caller
+	// always owns the resulting ARC ref and must release it on loop exit.
+	ownsData := true
 
 	for vtableKey := range cg.traitVtableGlobals {
 		// vtableKey format: "structName__instKey"
@@ -1759,8 +1758,17 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		if baseTrait != "iter" {
 			continue
 		}
-		// Coerce to iter fat pointer.
+		// Coerce to iter fat pointer. Suppress the deferred scope-exit
+		// release that coerceToTrait would otherwise register —
+		// genForIterTrait emits its own release at the loop's exit
+		// block, scoped tightly to the iteration rather than the
+		// surrounding fn.
+		prevSuppress := cg.suppressIfaceScopeRelease
+		cg.suppressIfaceScopeRelease = true
+
 		fatPtr, err := cg.coerceToTrait(block, iterVal, instKey)
+		cg.suppressIfaceScopeRelease = prevSuppress
+
 		if err != nil {
 			continue
 		}
@@ -1910,17 +1918,31 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	)
 
 	if pt, ok := structType.(*irtypes.PointerType); ok {
-		// Already a pointer (e.g. from `&T{...}` or mem::malloc + cast).
-		// Use it directly — pointer-receiver methods need the iface to
-		// share the original's memory so mutations are visible. Lifetime
-		// belongs to the original *T owner; iface just borrows. The
-		// callers we currently emit explicit iface releases for
-		// (genForIterTrait, traitChain init/deinit) only fire for
-		// value-source ifaces because the pointer-source iface's data
-		// ptr might be a non-RC malloc'd block where _tin_release would
-		// corrupt — see malloc_dispatch.tin.
-		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
-		concreteType = pt.ElemType
+		// Pointer source (e.g. *T from `&T{...}` or mem::malloc + cast).
+		// Copy the pointee into a fresh _tin_rc_alloc so the iface always
+		// owns its own ARC-tracked storage. We can't safely retain the
+		// source pointer here because we don't know whether it has an
+		// RC header (`&T{...}` does, `mem::malloc(sizeof(T))` does not),
+		// and _tin_retain on a non-RC pointer corrupts the previous
+		// 16 bytes. Copying gives uniform iface release semantics across
+		// every coercion source. Tradeoff: pointer-receiver methods
+		// dispatched through the iface mutate the heap copy, not the
+		// original *T — code that relies on mutation visibility through
+		// the iface must call methods directly on the *T (or use the
+		// value-source `let var iface_T = struct_value` pattern, which
+		// has the same heap-copy semantics).
+		structSt := pt.ElemType
+		szGEP := block.NewGetElementPtr(structSt,
+			constant.NewNull(irtypes.NewPointer(structSt)),
+			constant.NewInt(irtypes.I32, 1))
+		szInt := block.NewPtrToInt(szGEP, irtypes.I64)
+		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
+		typedDst := block.NewBitCast(heapPtr, irtypes.NewPointer(structSt))
+		srcVal := block.NewLoad(structSt, structVal)
+		block.NewStore(srcVal, typedDst)
+
+		dataPtr = heapPtr
+		concreteType = structSt
 	} else {
 		// Heap-allocate the source struct so the iface's `this` pointer
 		// survives across coroutine suspends. A stack alloca here would die
@@ -1969,6 +1991,31 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	vtableGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(vtableGlobal, vtableGep)
+
+	// Defer the heap-block release to the enclosing scope's exit. We
+	// can't release immediately after this call returns because spawn'd
+	// fibers in the callee may still be using the data ptr at that
+	// point; we can't release at iface-temporary-end because temporaries
+	// have no precise scope. Tying the release to the calling scope
+	// handles both: the scope's `await` must complete before the scope
+	// exits, which guarantees every captured ptr has been read by then.
+	//
+	// Skip the synthetic entry when the iface is being constructed for
+	// a let-binding (the let entry's ownsIfaceData flag handles release
+	// directly), for a for-iter loop (genForIterTrait emits its own
+	// release at loop exit), or for a trait init/deinit chain call
+	// (genStructLit / emitReleaseInner emit their own tighter release).
+	// Those callers pre-mark cg.suppressIfaceScopeRelease.
+	if cg.curScope != nil && !cg.suppressIfaceScopeRelease {
+		ptrSlot := block.NewAlloca(irtypes.I8Ptr)
+		block.NewStore(dataPtr, ptrSlot)
+
+		name := fmt.Sprintf(".iface_data_%d", cg.strCount)
+		cg.strCount++
+		cg.curScope.set(name, &scopeEntry{
+			val: ptrSlot, isAlloc: true, releaseRawPtr: true,
+		})
+	}
 
 	return block.NewLoad(fatPtrType, ifaceAlloca), nil
 }
