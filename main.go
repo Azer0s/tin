@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
@@ -183,6 +184,14 @@ var (
 // jobs controls per-fn parallel compilation in the pure-fn .so cache pipeline.
 // 0 means "use runtime.GOMAXPROCS(0)"; -j 1 forces serial execution.
 var jobs int
+
+// tempCacheCounter disambiguates concurrent temp-file names. Multiple goroutines
+// inside one `tin test` invocation race to populate the same content-hashed
+// cache slot when two test files share a generic instantiation; the PID alone
+// (os.Getpid()) is identical for all of them, so the .o.tmp.PID path collides
+// and clang fails with "permission denied" on the partial file. Adding an
+// atomic counter to the suffix makes each goroutine's temp path unique.
+var tempCacheCounter uint64
 
 // optLevelOverride is the -O flag value (0/1/2/3/s) supplied on the command
 // line, or "" when the user did not pass -O. When non-empty it overrides the
@@ -1693,8 +1702,14 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		defer func(name string) { _ = os.Remove(name) }(pkgLLName)
 
 		// Compile to a temp path and rename atomically into the cache so
-		// concurrent `tin` runs don't see a half-written .o.
-		tempObj := cachedObj + fmt.Sprintf(".tmp.%d", os.Getpid())
+		// concurrent `tin` runs don't see a half-written .o. The PID alone
+		// isn't sufficient when several goroutines inside the same process
+		// race to compile the same content-hashed cache slot (mono modules
+		// are content-addressed, so two test files using the same generic
+		// instantiation hash to the same slot). An atomic counter
+		// disambiguates them within the process.
+		tempObj := cachedObj + fmt.Sprintf(".tmp.%d.%d",
+			os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
 
 		a := append([]string{}, flagsForKey...)
 		a = append(a, pkgLLName, "-o", tempObj)
@@ -1757,7 +1772,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		linkInputs = append(linkInputs, cachedPath)
 		if !hit {
-			tempPath := cachedPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+			tempPath := cachedPath + fmt.Sprintf(".tmp.%d.%d", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
 
 			rtArgs = append(rtArgs, rtC, "-o", tempPath)
 			jobsList = append(jobsList, compileJob{
@@ -1794,7 +1809,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			continue
 		}
 
-		tempPath := cachedPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+		tempPath := cachedPath + fmt.Sprintf(".tmp.%d.%d", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
 
 		a := append([]string{}, baseArgs...)
 		a = append(a, cs.path, "-o", tempPath)
@@ -2011,7 +2026,7 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 		// `tin` processes (or this process's parallel jobs) from
 		// half-writing the same final .so. The runner does the rename
 		// atomically once the clang call succeeds.
-		tempSo := pending[i].soPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+		tempSo := pending[i].soPath + fmt.Sprintf(".tmp.%d.%d", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
 
 		// Per-fn .so files are dlopen'd by the running tin process
 		// during CTFE evaluation. They MUST match the host's ABI even
@@ -2090,6 +2105,15 @@ func pkgCacheLookup(irText string, args []string) (string, bool, error) {
 		sum.Write([]byte(a))
 	}
 
+	// Include host arch in the key so an amd64 host and arm64 host (e.g.
+	// running the same source tree via a docker --platform mount) don't
+	// share the same .o cache slot. clangTargetFlag() returns nil for
+	// native compiles, leaving the args identical across archs — without
+	// this disambiguator, the second host would link the first host's .o
+	// and ld would error on the architecture mismatch.
+	sum.Write([]byte{0})
+	sum.Write([]byte(runtime.GOOS + "-" + runtime.GOARCH))
+
 	key := hex.EncodeToString(sum.Sum(nil))
 	dir := filepath.Join(pkgCacheRoot, key[:2])
 
@@ -2127,6 +2151,11 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 		sum.Write([]byte{0})
 		sum.Write([]byte(a))
 	}
+
+	// See pkgCacheLookup for rationale: native compiles omit -target so
+	// amd64 and arm64 hosts produce identical args. Disambiguate by host.
+	sum.Write([]byte{0})
+	sum.Write([]byte(runtime.GOOS + "-" + runtime.GOARCH))
 
 	key := hex.EncodeToString(sum.Sum(nil))
 	dir := filepath.Join(csrcCacheRoot, key[:2])
