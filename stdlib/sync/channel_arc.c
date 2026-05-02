@@ -224,11 +224,19 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     atomic_store_explicit(&ch->deq_pos, 0, memory_order_relaxed);
 
     // seq_buf: aligned to 64 bytes, size rounded to 64-byte multiple.
+    // posix_memalign instead of C11 aligned_alloc — the latter is gated
+    // behind macOS 10.15 deployment target in Apple's SDK and breaks
+    // cross-compile to darwin from older toolchains.
     size_t seq_bytes = (size_t)cap * sizeof(_Atomic(int64_t));
     seq_bytes = (seq_bytes + 63u) & ~(size_t)63u;
     if (seq_bytes < 64) seq_bytes = 64;
-    ch->seq_buf = (_Atomic(int64_t) *)aligned_alloc(64, seq_bytes);
-    if (!ch->seq_buf) { fputs("tin: channel seq_buf alloc failed\n", stderr); exit(1); }
+
+    void *seq_raw = NULL;
+    if (posix_memalign(&seq_raw, 64, seq_bytes) != 0 || seq_raw == NULL) {
+        fputs("tin: channel seq_buf alloc failed\n", stderr); exit(1);
+    }
+
+    ch->seq_buf = (_Atomic(int64_t) *)seq_raw;
     for (int64_t i = 0; i < cap; i++)
         atomic_store_explicit(&ch->seq_buf[i], i, memory_order_relaxed);
 
