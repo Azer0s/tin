@@ -1417,32 +1417,45 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// bodies compiled in Pass 3 can reference them by name.  This mirrors
 	// what Pass 4 does for exported names but covers the full set so that
 	// internal helpers (e.g. parse using RFC3339) can access the same values.
-	for _, node := range prog.Stmts {
-		vd, ok := node.(*ast.VarDecl)
-		if !ok || !vd.IsConst {
-			continue
-		}
-
-		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
+	//
+	// Both *ast.VarDecl{IsConst:true} (block-level form, retained for
+	// historical packages that didn't migrate) and *ast.TopLevelVar
+	// {IsConst:true} (the canonical form after the parser routes
+	// module-scope const through parseTopLevelLetConst) are accepted.
+	registerPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		constVal := cg.evalConstExprTyped(value, typ)
 		if constVal == nil {
-			continue
+			return
 		}
 
 		stn := ""
 		isUnsigned := false
 
-		if vd.Type != nil {
-			stn = scalar8BitTypeName(vd.Type)
+		if typ != nil {
+			stn = scalar8BitTypeName(typ)
 
 			if stn == "" {
-				stn = scalar128BitTypeName(vd.Type)
+				stn = scalar128BitTypeName(typ)
 			}
 
-			isUnsigned = isUnsignedTinType(vd.Type)
+			isUnsigned = isUnsignedTinType(typ)
 		}
 
 		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
-		cg.curScope.set(vd.Name, entry)
+		cg.curScope.set(name, entry)
+	}
+
+	for _, node := range prog.Stmts {
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
+		}
 	}
 
 	// Pass 3: compile non-extern function bodies.
@@ -1484,40 +1497,54 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 4: register exported constants (VarDecl with IsConst=true).
-	// Simple literals are registered directly; complex constant expressions
-	// (e.g. casts, shifts, bitwise-NOT, arithmetic) are evaluated by
-	// evalConstExpr so that limits like I128_MIN/U128_MAX are propagated.
-	for _, node := range prog.Stmts {
-		vd, ok := node.(*ast.VarDecl)
-		if !ok || !vd.IsConst || !exportedNames[vd.Name] {
-			continue
+	// Pass 4: register exported constants. Accepts both *ast.VarDecl
+	// {IsConst:true} (legacy block-form) and *ast.TopLevelVar
+	// {IsConst:true} (canonical module-scope form). Simple literals
+	// register directly; complex constant expressions (casts, shifts,
+	// bitwise-NOT, arithmetic, #pure call results) flow through
+	// evalConstExprTyped so that limits like I128_MIN / U128_MAX
+	// propagate as inline constants instead of zero-init globals.
+	exportPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		if !exportedNames[name] {
+			return
 		}
 
-		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
+		constVal := cg.evalConstExprTyped(value, typ)
 		if constVal == nil {
-			continue
+			return
 		}
 
-		// Carry type metadata so echo/interpolation know about u128 etc.
 		stn := ""
 
 		isUnsigned := false
 
-		if vd.Type != nil {
-			stn = scalar8BitTypeName(vd.Type)
+		if typ != nil {
+			stn = scalar8BitTypeName(typ)
 
 			if stn == "" {
-				stn = scalar128BitTypeName(vd.Type)
+				stn = scalar128BitTypeName(typ)
 			}
 
-			isUnsigned = isUnsignedTinType(vd.Type)
+			isUnsigned = isUnsignedTinType(typ)
 		}
 
 		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
-		cg.curScope.set(vd.Name, entry)
-		prevScope.set(pkgName+"."+vd.Name, entry)
-		prevScope.set(pkgName+"::"+vd.Name, entry)
+		cg.curScope.set(name, entry)
+		prevScope.set(pkgName+"."+name, entry)
+		prevScope.set(pkgName+"::"+name, entry)
+	}
+
+	for _, node := range prog.Stmts {
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				exportPkgConst(d.Name, d.Value, d.Type)
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				exportPkgConst(d.Name, d.Value, d.Type)
+			}
+		}
 	}
 
 	// Propagate only exported symbols up to the caller's scope.

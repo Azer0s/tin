@@ -1426,7 +1426,11 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.LBRACKET:
 		return p.parseArrayLit()
 
-	case lexer.IDENT:
+	case lexer.IDENT, lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		// KW_FORWARD / KW_OVERRIDE are *contextual* keywords -- they
+		// only have meaning inside struct field declarations. Accept
+		// them as plain identifiers in expression position so calls
+		// like `forward(p)` and types named `override` work.
 		tok := p.advance()
 		name := tok.Literal
 		// struct literal: name{...}

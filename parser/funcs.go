@@ -106,13 +106,18 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 				traitQualifier += ta
 			}
 		}
-	} else if p.check(lexer.IDENT) {
+	} else if p.check(lexer.IDENT) || isContextualNameKeyword(p.peek()) {
 		saved := p.pos
 		// Collect leading module/trait segments. A segment is an intermediate
 		// IDENT that is followed by `::` (i.e. another segment continues). The
 		// final IDENT (which is NOT followed by `::`) is either the trait name
 		// (qualified form) or the plain fn name, decided once we see what
 		// follows it.
+		//
+		// Some KW_* tokens (KW_FORWARD, KW_OVERRIDE) are *contextual* --
+		// they only act as keywords inside struct field declarations and
+		// are otherwise plain identifiers. Allow them as the leading
+		// segment of a function name so `fn forward(...)` works.
 		segments := []string{p.advance().Literal}
 
 		for p.check(lexer.DCOLON) && p.peekAt(1).Type == lexer.IDENT && p.peekAt(2).Type == lexer.DCOLON {
@@ -780,4 +785,19 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	}
 
 	return b, nil
+}
+
+// isContextualNameKeyword reports whether tok is a KW_* token that
+// also doubles as a valid identifier in name-position contexts (fn
+// names, struct/method names, etc.). The lexer eagerly tokenizes
+// these as keywords because they have meaning in struct-field syntax
+// (`forward`, `override`), but the language treats them as plain
+// identifiers everywhere else.
+func isContextualNameKeyword(tok lexer.Token) bool {
+	switch tok.Type {
+	case lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		return true
+	}
+
+	return false
 }
