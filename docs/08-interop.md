@@ -89,6 +89,29 @@ correctly. If the command fails the token expands to an empty string; the
 compiler then produces a clear error (e.g. missing header) rather than a
 cryptic path error.
 
+### Local diagnostic suppression (`//!-Wno-...`)
+
+Place `//!-Wno-<name>` on a comment line directly above any
+declaration to silence the named warning for *that one declaration*.
+Blank lines and regular `//` comments between the directive and the
+declaration are allowed.
+
+```rust
+struct Channel[T] =
+  // Channel deliberately bypasses rc::Cell because the inline
+  // send/recv path needs a single GEP+load. Sharing across copies
+  // is provided by the C-level ref_count.
+  //!-Wno-unwrapped-c-resource
+  _ptr *void
+```
+
+Multiple comma-separated names are supported:
+`//!-Wno-foo,bar`. The directive only affects the next declaration --
+it does not propagate further.
+
+This is per-source-file and per-line; for project-wide suppression
+use the `-Wno-<name>` command-line flag instead.
+
 ---
 
 ## Calling C functions (`extern`)

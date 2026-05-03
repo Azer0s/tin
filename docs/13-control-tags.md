@@ -375,6 +375,55 @@ struct{#packed} record =
 The compiler emits `align 1` annotations on field loads/stores so
 unaligned access stays correct on all targets.
 
+### `#no_copy` (struct-level)
+
+Reject value-form bindings of this struct anywhere code could later
+copy them. The compiler errors at:
+
+- `let b = a` where `a` is a value of the `#no_copy` struct.
+- by-value function parameters and return types of the `#no_copy` type.
+- struct fields whose type is the `#no_copy` value (would let a copy
+  of the containing struct alias the cell).
+
+The receiver `this` of a method on the same struct is exempt -- a
+deinit on `this S` is not a copy, it is the unique owner about to be
+torn down.
+
+Pointer form `*S` of a `#no_copy` type is fine: pointer copies are
+just retains, and the cell is freed on the last release.
+
+Used by `rc::Cell[T]` so that the only way to hold the cell is via
+`*Cell[T]`. See [stdlib/rc](stdlib/rc.md) for the wrapper this enables.
+
+```rust
+struct {#no_copy} Cell[T] = ...
+let c = Cell[i64].alloc(7, dtor)   // *Cell[i64], OK
+let v Cell[i64] = ...              // error: Cell is #no_copy
+let d = c                          // *Cell[i64] copy: OK (retain)
+```
+
+### `#closed` (struct-level)
+
+Reject struct-literal use (`S{...}`) outside the struct's own static
+methods. External code is forced through a constructor; this lets the
+type maintain invariants the struct-literal syntax would otherwise let
+the user bypass.
+
+```rust
+struct {#closed} Cell[T] =
+  ...
+  static fn alloc(...) *Cell[T] = return &Cell[T]{...}  // OK, inside Cell
+
+fn main() i64 =
+  let c = Cell[i64]{...}   // error: Cell is #closed
+  let c = Cell[i64].alloc(...)   // OK
+  return 0
+```
+
+Often paired with `#no_copy` for refcounted handles where the only
+correct constructor needs to do C-side allocation and register a
+destructor.
+
 ### Scoped tag syntax
 
 `#tag@scope` on a struct declaration applies `#tag` to every member
