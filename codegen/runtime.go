@@ -478,6 +478,95 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 	return concrete + "_" + fn.Field
 }
 
+// bindingOwnsHeapIfaceData reports whether s's let-binding holds a *Trait
+// fat-ptr value whose `data` field is an escape-promoted heap block. Two
+// shapes qualify:
+//
+//   1. Direct: `let p *Trait = &b` where b is in cg.curFnEscapingVars.
+//      buildPtrToTraitBorrow heap-allocs the iface here; b's heap block
+//      becomes iface.data.
+//   2. Forwarded: `let s = make()` where make() was recorded as
+//      fnReturnsOwningIface — make's body created an owning iface and
+//      returned it. The flag must hop across the call so the caller's
+//      scope-exit can release both the iface and its data.
+//
+// Returns true on either shape so emitScopeRelease cascades through the
+// data field on drop.
+//
+// The let's type annotation is intentionally NOT consulted: type
+// inference often leaves s.Type nil for `let s = make()` so we instead
+// rely on the value's shape (AddressOfExpr → declared trait, CallExpr →
+// callee return type lookup).
+func (cg *CodeGen) bindingOwnsHeapIfaceData(s *ast.VarDecl) bool {
+	if s == nil || s.Value == nil {
+		return false
+	}
+
+	switch v := s.Value.(type) {
+	case *ast.AddressOfExpr:
+		// `let p *Trait = &b`: only meaningful if the declared type is
+		// *Trait. Without that we'd be guessing about iface coercion.
+		if !cg.declTypeIsTraitPtr(s.Type) {
+			return false
+		}
+
+		if id, ok := v.Expr.(*ast.Identifier); ok {
+			return cg.curFnEscapingVars[id.Name]
+		}
+	case *ast.CallExpr:
+		name := resolveCalleeName(v)
+		if name == "" {
+			return false
+		}
+
+		bare := name
+		if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+			bare = bare[idx+2:]
+		}
+
+		if cg.fnReturnsOwningIface[bare] {
+			return true
+		}
+		// IR-name match (mangled): tries the function as registered in
+		// scope to recover the irName the callee was emitted under.
+		if cg.curScope != nil {
+			if entry, ok := cg.curScope.lookup(bare); ok {
+				if f, ok2 := entry.val.(interface{ Name() string }); ok2 {
+					if cg.fnReturnsOwningIface[f.Name()] {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// declTypeIsTraitPtr reports whether te names `*Trait` for some declared
+// trait. Used to decide whether the binding's value can sensibly be an
+// owning-iface fat ptr.
+func (cg *CodeGen) declTypeIsTraitPtr(te ast.TypeExpr) bool {
+	pt, ok := te.(*ast.PointerType)
+	if !ok {
+		return false
+	}
+
+	st, ok := pt.Elem.(*ast.SimpleType)
+	if !ok {
+		return false
+	}
+
+	name := st.Name
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		name = name[idx+2:]
+	}
+
+	_, isTrait := cg.traits[name]
+
+	return isTrait
+}
+
 // markOwningRawPtrField records that fieldName on structName receives an
 // owning heap pointer. Triggered by genStructLit (and assignment paths) when
 // the value being stored is `&Identifier` and the identifier is in
@@ -1542,6 +1631,37 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
+		// Owning *Trait whose iface heap block carries escape-promoted
+		// data: release the data field first, then fall through to the
+		// standard isHeapOwned/struct-ptr cleanup that frees the iface
+		// block. entry.val is `**iface` (alloca holding the iface ptr);
+		// two loads to reach the iface struct, then extract data field.
+		if entry.ownsHeapIfaceData {
+			ifacePtrType := ptrType.ElemType
+			if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
+				ifacePtr := block.NewLoad(ifacePtrType, entry.val)
+				ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
+				dataField := block.NewExtractValue(ifaceVal, 0)
+				block.NewCall(cg.ensureRelease(), dataField)
+			}
+		}
+
+		// Owning *Trait whose iface heap block carries escape-promoted
+		// data: release the data field first, then fall through to the
+		// standard isHeapOwned cleanup that frees the iface block.
+		// Without this the iface is freed but its data ptr leaks — the
+		// source local was heap-promoted by escape analysis and its
+		// scope-exit release was skipped (it's now owned by this iface).
+		if entry.ownsHeapIfaceData {
+			ifacePtrType := ptrType.ElemType
+			if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
+				ifacePtr := block.NewLoad(ifacePtrType, entry.val)
+				ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
+				dataField := block.NewExtractValue(ifaceVal, 0)
+				block.NewCall(cg.ensureRelease(), dataField)
+			}
+		}
+
 		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
 		// heap-promoting callee.  Use chain release to free all RC blocks.
 		if entry.isHeapOwned {
@@ -1624,6 +1744,18 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				block.NewCall(cg.ensureRelease(), loadedPtr)
 
 				return
+			}
+			// Owning *Trait whose iface block carries escape-promoted data:
+			// release the data field before falling through to the iface
+			// block release. Mirrors the emitScopeRelease branch.
+			if entry.ownsHeapIfaceData {
+				ifacePtrType := ptrType.ElemType
+				if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
+					ifacePtr := block.NewLoad(ifacePtrType, entry.val)
+					ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
+					dataField := block.NewExtractValue(ifaceVal, 0)
+					block.NewCall(cg.ensureRelease(), dataField)
+				}
 			}
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {

@@ -1511,7 +1511,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s)}
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in
@@ -1610,6 +1610,18 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 }
 
 func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
+	// Propagate "owning iface" up the call graph: if we're returning a
+	// binding that we know carries an escape-promoted iface data block,
+	// flag this function so callers' let-bindings inherit
+	// ownsHeapIfaceData (see bindingOwnsHeapIfaceData).
+	if cg.curFn != nil && s.Value != nil {
+		if id, ok := s.Value.(*ast.Identifier); ok {
+			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.ownsHeapIfaceData {
+				cg.fnReturnsOwningIface[cg.curFn.Name()] = true
+			}
+		}
+	}
+
 	// In a coroutine body, return is replaced by _tin_fiber_complete + final suspend.
 	if cg.inCoroFn {
 		return cg.genCoroReturn(block, s)

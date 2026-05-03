@@ -2087,6 +2087,15 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 	sz := cg.llvmSizeOf(block, fatPtrSt)
 	heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
 	temp := block.NewBitCast(heapI8, irtypes.NewPointer(fatPtrSt))
+	// Record that the current function returns a *Trait whose data is an
+	// escape-promoted heap block. The flag rides up to callers via
+	// fnReturnsOwningIface so their let-binding releases data on drop.
+	// (We don't have the source AST here, so the most conservative
+	// option is "every buildPtrToTraitBorrow caller in a fn with any
+	// escaping var owns its iface data" — which is the common case.)
+	if cg.curFn != nil && len(cg.curFnEscapingVars) > 0 {
+		cg.fnReturnsOwningIface[cg.curFn.Name()] = true
+	}
 
 	dataGEP := block.NewGetElementPtr(fatPtrSt, temp,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))

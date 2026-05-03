@@ -173,6 +173,13 @@ type CodeGen struct {
 	// globally on `*T` types) keeps borrow-style `*T` fields untouched.
 	structOwningRawPtrFields map[string]map[string]bool
 
+	// fnReturnsOwningIface: set of function names that return a *Trait fat
+	// ptr whose `data` field carries an escape-promoted heap block. Set
+	// inside buildPtrToTraitBorrow when the source is in escapingVars; read
+	// by genVarDecl so `let s = make()` flags the binding for cascade-
+	// release of both the iface heap block and its data field.
+	fnReturnsOwningIface map[string]bool
+
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
@@ -1285,6 +1292,7 @@ func New(filename string) *CodeGen {
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
 		structOwningRawPtrFields: make(map[string]map[string]bool),
+		fnReturnsOwningIface:     make(map[string]bool),
 		structConstFields:        make(map[string]map[string]bool),
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),
