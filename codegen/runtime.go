@@ -2319,6 +2319,21 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 			continue
 		}
 
+		// Only #no_copy wrappers (rc::Cell and friends) get a per-type
+		// any-release dispatch. For ordinary structs, boxing into `any`
+		// does not retain inner RC fields, so calling the per-struct
+		// release helper from any-release would double-free those
+		// fields when the original variable also releases. Leaks-but-
+		// doesn't-crash is the existing semantics for non-#no_copy.
+		bareName := structName
+		if idx := strings.LastIndex(structName, "__"); idx > 0 {
+			bareName = structName[idx+2:]
+		}
+
+		if !cg.noCopyStructs[structName] && !cg.noCopyStructs[bareName] {
+			continue
+		}
+
 		if !cg.structHasRelease(structName, st) {
 			continue
 		}
