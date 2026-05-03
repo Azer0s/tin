@@ -713,6 +713,10 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 		return nil, err
 	}
 
+	p.blockDepth++
+
+	defer func() { p.blockDepth-- }()
+
 	b := &ast.Block{}
 	_ = pos
 

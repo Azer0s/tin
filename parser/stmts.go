@@ -45,6 +45,18 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 
 	switch p.peek().Type {
 	case lexer.KW_VAR:
+		// `var` is module-scope only -- it declares a global with
+		// runtime-init semantics and outlives the program. A
+		// block-level `var` would silently produce a TopLevelVar
+		// whose binding leaks out of scope, so flag it here with a
+		// targeted suggestion.
+		if p.blockDepth > 0 {
+			tok := p.peek()
+
+			return nil, fmt.Errorf("%d:%d: `var` is module-scope only; use `let` for a mutable local binding, or move the `var` declaration to the top level",
+				tok.Line, tok.Col)
+		}
+
 		return p.parseTopLevelVar()
 	case lexer.KW_SPAWN:
 		return p.parseSpawnExprStmt()

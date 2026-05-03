@@ -34,6 +34,12 @@ type Parser struct {
 	// skipNewlines / parseBlock loop check + decrement when DEDENT shows
 	// up.
 	pendingLambdaDedents int
+	// blockDepth counts how many block scopes are currently open.
+	// Bumped by parseBlock at entry, decremented at exit. Lets
+	// parseStatement reject `var` (which is module-scope only) with
+	// a clear diagnostic instead of silently producing a TopLevelVar
+	// whose binding leaks out of scope.
+	blockDepth int
 }
 
 // New creates a Parser over the given token slice
