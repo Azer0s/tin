@@ -51,7 +51,61 @@ for let s string in items:
   echo s
 ```
 
-Any array can be iterated with `in`.
+Any array can be iterated with `in`. The loop variable holds a *copy*
+of each element -- assignments to it do not propagate back to the
+source array.
+
+### Mutating-loop with `for ref`
+
+Use `for ref` when you want each iteration's variable to ALIAS the
+source slot rather than hold a copy. Assignments to the variable
+mutate the underlying array in place:
+
+```rust
+let xs = [1, 2, 3]
+for ref x in xs:
+  x += 10
+echo xs   // [11, 12, 13]
+```
+
+Replacing an RC-tracked element (string, fat array, `any`, `*Struct`)
+through `ref` releases the previous value and retains the new one,
+so no leaks and no double-free regardless of how the array later
+drops:
+
+```rust
+let labels = ["a", "b", "c"]
+for ref s in labels:
+  s = s ++ "!"
+echo labels   // ["a!", "b!", "c!"]
+```
+
+`for ref` works the same way when the array lives behind any number
+of indirections, e.g. as a struct field, returned from a function,
+or both:
+
+```rust
+struct Holder = xs [i64]
+fn make() Holder = return Holder{xs: [10, 20, 30]}
+
+let h = make()
+for ref x in h.xs:
+  x += 1
+echo h.xs   // [11, 21, 31]
+```
+
+`for ref` is rejected on inputs that don't have writable slots:
+
+- Ranges (`for ref x in 0..5:`) -- a range produces values, not
+  storage.
+- `const` arrays (`const xs = [1,2,3]; for ref x in xs:`) -- the
+  binding is immutable; drop the `const` to allow mutation.
+
+### Const arrays cannot be element-assigned
+
+`const xs[i] = ...` and `const xs[i] += ...` are also rejected at
+compile time, mirroring the read-only-storage guarantee top-level
+`const` already provides.
 
 ### String iteration
 

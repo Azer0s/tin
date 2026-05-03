@@ -1526,7 +1526,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s)}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), declaredConst: s.IsConst, declaredLet: !s.IsConst}
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in
@@ -3358,6 +3358,36 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 }
 
 func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
+	// `for ref` rejects ranges -- a range produces values, not slots,
+	// so there's nothing for ref to alias.
+	if s.IsRef {
+		if _, isRange := s.Iter.(*ast.RangeExpr); isRange {
+			return nil, cg.nodeErr(s, "for ref: cannot ref-iterate a range; range produces values, not slots")
+		}
+
+		if bin, ok := s.Iter.(*ast.BinExpr); ok && bin.Op == ".." {
+			return nil, cg.nodeErr(s, "for ref: cannot ref-iterate a range; range produces values, not slots")
+		}
+
+		// Reject ref-iteration over a `const` array (top-level or
+		// block-level). Top-level consts live in read-only storage;
+		// block-level consts are immutable by language convention.
+		// Mutable bindings (`let` block-level, `var` top-level) are
+		// fine -- ref aliases their slots.
+		if id, ok := s.Iter.(*ast.Identifier); ok {
+			if cg.topLevelConstNames[id.Name] {
+				return nil, cg.nodeErr(s, "for ref: cannot ref-iterate top-level const %q (immutable storage)", id.Name)
+			}
+
+			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
+				if entry.declaredConst {
+					return nil, cg.nodeErr(s, "for ref: cannot ref-iterate %q because it was declared with const; drop the const if you need to mutate elements",
+						id.Name)
+				}
+			}
+		}
+	}
+
 	// Check if iter is a RangeExpr or a BinExpr with op ".." (start..end).
 	if rng, ok := s.Iter.(*ast.RangeExpr); ok {
 		return cg.genForRange(block, s, rng)
@@ -3456,21 +3486,44 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	bodyIdx := bodyBlock.NewLoad(irtypes.I64, idxAlloca)
 	bodyPtr := bodyBlock.NewLoad(irtypes.NewPointer(elemType), ptrAlloca)
 	elemGep := bodyBlock.NewGetElementPtr(elemType, bodyPtr, bodyIdx)
-	elemVal := bodyBlock.NewLoad(elemType, elemGep)
-
-	// Register loop variable.
-	elemAlloca := bodyBlock.NewAlloca(elemType)
-	bodyBlock.NewStore(elemVal, elemAlloca)
 
 	isElemRC := isRCTrackedType(elemType)
-	// ARC: each iteration copies an element - retain to claim ownership.
-	if isElemRC {
-		cg.emitRetain(bodyBlock, elemVal)
-	}
 
-	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
-		cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+	if s.IsRef {
+		// `for ref` registers the slot's GEP as the scope binding's
+		// alloca. Reads through the binding load from the slot;
+		// writes (`x = newval`, `x += 1`) store back, so the array
+		// is mutated in place. genAssignStmt's release-old + retain-
+		// new path handles RC fields correctly: the old slot value
+		// gets released before the new one is written, matching the
+		// invariant that the slot owns the RC for its element.
+		if s.VarName != "" {
+			cg.curScope.set(s.VarName, &scopeEntry{
+				val: elemGep, isAlloc: true, isRC: isElemRC,
+				declPos: s.Pos(),
+				// noRelease=true: the slot lives in the source
+				// array, not in scope-local storage. Releasing
+				// here would double-free when the array drops.
+				noRelease: true,
+			})
+			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+		}
+	} else {
+		// Per-iteration COPY semantics (the historical default):
+		// load the element, store into a fresh alloca, retain RC
+		// to claim ownership, scope-exit releases.
+		elemVal := bodyBlock.NewLoad(elemType, elemGep)
+		elemAlloca := bodyBlock.NewAlloca(elemType)
+		bodyBlock.NewStore(elemVal, elemAlloca)
+
+		if isElemRC {
+			cg.emitRetain(bodyBlock, elemVal)
+		}
+
+		if s.VarName != "" {
+			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
+			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+		}
 	}
 
 	var bodyErr error

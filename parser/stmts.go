@@ -384,6 +384,65 @@ func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
 	stmt := &ast.ForStmt{}
 	stmt.SetPos(pos)
 
+	// for ref name in iter: -- the loop variable aliases each slot of
+	// `iter` instead of taking a per-iteration copy. Assignments inside
+	// the body mutate the underlying array. Only valid over a mutable,
+	// directly-indexable iter; ranges and `let`/`const` arrays are
+	// rejected at codegen time.
+	if p.check(lexer.KW_REF) {
+		p.advance() // consume ref
+
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+
+		stmt.VarName = nameTok.Literal
+		stmt.IsRef = true
+
+		if _, err := p.expect(lexer.KW_IN); err != nil {
+			return nil, err
+		}
+
+		stmt.Kind = ast.ForIn
+
+		var iterErr error
+
+		stmt.Iter, iterErr = p.parseExpr()
+		if iterErr != nil {
+			return nil, iterErr
+		}
+
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			p.skipNewlines()
+
+			if p.check(lexer.INDENT) {
+				var bodyErr error
+
+				stmt.Body, bodyErr = p.parseBlock()
+				if bodyErr != nil {
+					return nil, bodyErr
+				}
+			} else {
+				stmt.Body = &ast.Block{}
+			}
+		} else {
+			s, err2 := p.parseStatement()
+			if err2 != nil {
+				return nil, err2
+			}
+
+			stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
+		}
+
+		return stmt, nil
+	}
+
 	// Shorthand for-in without 'let': for c in iter: / for c T in iter:
 	// Detect: IDENT [IDENT|type] KW_IN ...
 	if !p.check(lexer.KW_LET) && p.check(lexer.IDENT) {

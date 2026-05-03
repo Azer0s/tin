@@ -325,14 +325,22 @@ type IfStmt struct {
 
 // ForStmt covers all three for variants:
 //
-//	C-style:  for let i T ; cond ; post : body
-//	For-in:   for let i T in iter : body
-//	For-range: for let i T in start..end : body  (handled as for-in over range)
+//	C-style:    for let i T ; cond ; post : body
+//	For-in:     for let i T in iter : body
+//	For-in-ref: for ref i in iter : body  (i aliases the slot, not a copy)
+//	For-range:  for let i T in start..end : body  (handled as for-in over range)
 type ForStmt struct {
 	base
 	Kind    ForKind
 	VarName string
 	VarType TypeExpr
+	// IsRef is set when the loop was declared as `for ref name in iter`.
+	// The loop variable aliases the underlying storage of each element
+	// rather than holding a per-iteration copy, so assignments inside
+	// the body mutate the source array. Only valid for for-in over a
+	// mutable, directly-indexable iter (rejects ranges and `let`/`const`
+	// arrays at codegen time).
+	IsRef bool
 	// C-style
 	Init Node
 	Cond Node

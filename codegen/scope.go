@@ -62,6 +62,15 @@ type scopeEntry struct {
 	// `sourcepos(symbol)` to report the binding location.
 	declPos ast.Pos
 
+	// declaredConst / declaredLet record whether the binding's source-
+	// level keyword was `const` / `let`. Used by `for ref` to refuse
+	// aliasing into immutable storage. `var` bindings have both flags
+	// false (the default). Synthetic bindings without a source keyword
+	// also have both false; ref-iteration over those is allowed because
+	// the compiler vouches for them being writable storage.
+	declaredConst bool
+	declaredLet   bool
+
 	// constInitExpr captures the initializer AST of a non-mutated `let` binding
 	// when that initializer can be statically analyzed for compile-time
 	// folding. Used by tryFoldExpr to follow `let t = typeof(v)` -> 'bool /
@@ -159,5 +168,20 @@ func (s *scope) eachReverse(fn func(name string, e *scopeEntry)) {
 		if e, ok := s.vars[name]; ok {
 			fn(name, e)
 		}
+	}
+}
+
+// declKind returns the source-level keyword ("let" / "const" / "var")
+// corresponding to this entry's declaredConst / declaredLet flags.
+// Used by diagnostics that need to mention how the user spelled the
+// declaration. Returns "var" as the fallback when neither flag is set.
+func (e *scopeEntry) declKind() string {
+	switch {
+	case e.declaredConst:
+		return "const"
+	case e.declaredLet:
+		return "let"
+	default:
+		return "var"
 	}
 }
