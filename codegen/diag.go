@@ -61,6 +61,14 @@ const (
 	// silently disable the builtin in a region of code, which is hard to
 	// debug after the fact. Default-off, opt-in via -W<name> or -Wpedantic.
 	DiagBuiltinShadow = "builtin-shadow"
+	// DiagWriteToConst fires when a write reaches a top-level const
+	// through a pointer alias. Top-level consts are placed in read-only
+	// storage; writing through them is undefined behavior the way
+	// modifying a `const` global in C is. The check tracks bindings
+	// derived from `&const_name` (and aliases of those bindings), and
+	// warns when the program later assigns through the deref or passes
+	// the pointer to a function that would mutate it.
+	DiagWriteToConst = "write-to-const"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only

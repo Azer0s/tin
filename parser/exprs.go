@@ -348,6 +348,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	}
 	// Dereference: *expr
 	if p.check(lexer.STAR) {
+		pos := p.curPos()
 		p.advance()
 
 		expr, err := p.parsePointerOperand()
@@ -355,10 +356,14 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 			return nil, err
 		}
 
-		return p.applyPostfixCasts(&ast.DerefExpr{Expr: expr})
+		d := &ast.DerefExpr{Expr: expr}
+		d.SetPos(pos)
+
+		return p.applyPostfixCasts(d)
 	}
 	// Address-of: &expr
 	if p.check(lexer.AMP) {
+		pos := p.curPos()
 		p.advance()
 
 		expr, err := p.parsePointerOperand()
@@ -366,7 +371,10 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 			return nil, err
 		}
 
-		return p.applyPostfixCasts(&ast.AddressOfExpr{Expr: expr})
+		a := &ast.AddressOfExpr{Expr: expr}
+		a.SetPos(pos)
+
+		return p.applyPostfixCasts(a)
 	}
 
 	return p.parsePostfix()

@@ -2223,6 +2223,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// (computeFnsTouchingExtern needs it for transitive propagation).
 	cg.checkAllUnwrappedCResources(prog)
 
+	// Static analysis: warn on writes that reach a top-level `const`
+	// through a pointer alias. Top-level consts live in read-only
+	// storage so the write is undefined behavior.
+	cg.checkAllWritesToTopLevelConst(prog)
+
 	return cg.mod, nil
 }
 

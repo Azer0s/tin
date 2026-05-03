@@ -85,7 +85,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// statically obvious type get inference; complex expressions still
 	// require an explicit annotation.
 	if tv.Type == nil && tv.Value != nil {
-		tv.Type = inferTopLevelVarType(tv.Value)
+		tv.Type = cg.inferTopLevelVarType(tv.Value)
 	}
 
 	if tv.Type == nil {
@@ -112,6 +112,21 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	var initVal constant.Constant
 	if tv.Value != nil {
 		initVal = cg.tryConstantFold(tv.Value, lt)
+	}
+
+	// Top-level `const` MUST be CTFE-evaluable. Literals and #pure
+	// function calls already fold via tryConstantFold; anything else
+	// (impure call, runtime expression) falls through here as nil and
+	// would otherwise be silently zero-initialized + run-time-init,
+	// which contradicts the "actual constant" guarantee a top-level
+	// const offers. Reject it explicitly. Top-level `var` is allowed
+	// to use runtime init -- it is mutable storage by design.
+	if tv.IsConst && tv.Value != nil && initVal == nil {
+		return cg.nodeErr(tv,
+			"top-level const %q has a non-compile-time initializer; "+
+				"the right-hand side must be a literal, an arithmetic / cast / identifier reference, "+
+				"or a call to a #pure function. For runtime-evaluated module-scoped state use `var`.",
+			tv.Name)
 	}
 
 	if initVal == nil {
@@ -360,7 +375,35 @@ func (cg *CodeGen) evalAsConstant(n ast.Node, targetType irtypes.Type) constant.
 		return nil
 	}
 
-	val, err := evalNode(n, map[string]ctfeVal{}, cg, 0)
+	// Seed the per-call CTFE budget. Without this the very first
+	// evalNode call sees pureFoldBudgetRemaining == 0 and bails out
+	// with errCTFEBudget, so even trivial expressions like `1 + 2`
+	// fail to fold from a non-call context.
+	budget := cg.pureFoldBudget
+	if budget <= 0 {
+		budget = defaultPureFoldBudget
+	}
+
+	cg.pureFoldBudgetRemaining = budget
+
+	env := map[string]ctfeVal{}
+
+	// Seed env with previously-resolved top-level consts so chained
+	// references (`const B = A + 1`) can fold in declaration order.
+	// scopeEntryToCtfeVal handles both inline-constant entries (package
+	// const path) and isAlloc=true LLVM globals whose Init slot already
+	// holds the folded constant.
+	if cg.curScope != nil {
+		for name := range cg.topLevelVarBareNames {
+			if entry, ok := cg.curScope.lookup(name); ok {
+				if v, ok2 := scopeEntryToCtfeVal(entry); ok2 {
+					env[name] = v
+				}
+			}
+		}
+	}
+
+	val, err := evalNode(n, env, cg, 0)
 	if err != nil {
 		return nil
 	}
@@ -469,11 +512,41 @@ func (cg *CodeGen) emitFiberMainEnd(block *ir.Block) {
 	block.NewCall(cg.fiberRunFn)
 }
 
-// inferTopLevelVarType returns a TypeExpr inferred from the literal form
-// of an initializer expression, or nil when no obvious type exists.
-// Only literal forms (Int/Float/Bool/String) are inferred at the top
-// level - anything more complex requires an explicit annotation so the
+// inferTopLevelVarType returns a TypeExpr inferred from the initializer's
+// shape, or nil when no type can be obviously deduced. Recognized:
+//
+//   - literal forms (Int/Float/Bool/String).
+//   - calls to known top-level functions whose return type is declared.
+//
+// Anything more complex still requires an explicit annotation so the
 // global's LLVM type is unambiguous before any user code runs.
+func (cg *CodeGen) inferTopLevelVarType(n ast.Node) ast.TypeExpr {
+	switch v := n.(type) {
+	case *ast.IntLit:
+		return &ast.SimpleType{Name: "i64"}
+	case *ast.FloatLit:
+		return &ast.SimpleType{Name: "f64"}
+	case *ast.BoolLit:
+		return &ast.SimpleType{Name: "bool"}
+	case *ast.StringLit:
+		return &ast.SimpleType{Name: "string"}
+	case *ast.CallExpr:
+		// `const X = pure_fn(...)`: resolve the callee through funcDecls
+		// and pick up its declared return type. Lets users skip the
+		// explicit annotation when the call-time RHS already commits
+		// to a concrete type.
+		if id, ok := v.Func.(*ast.Identifier); ok {
+			if fd, ok2 := cg.funcDecls[id.Name]; ok2 && fd.RetType != nil {
+				return fd.RetType
+			}
+		}
+	}
+
+	return nil
+}
+
+// inferTopLevelVarType is the function-free wrapper kept for callers
+// that don't have a *CodeGen handy.
 func inferTopLevelVarType(n ast.Node) ast.TypeExpr {
 	switch n.(type) {
 	case *ast.IntLit:
@@ -497,4 +570,51 @@ func topLevelVarKindWord(tv *ast.TopLevelVar) string {
 	}
 
 	return "var"
+}
+
+// scopeEntryToCtfeVal extracts a ctfeVal from a scope entry. Handles
+// both inline constants (package consts registered as direct values)
+// AND LLVM globals whose Init slot already holds a fold result -- the
+// latter is the path that lets `const B = A + 1` see A's value when
+// preregisterTopLevelVar processes B after A.
+func scopeEntryToCtfeVal(e *scopeEntry) (ctfeVal, bool) {
+	if e == nil || e.val == nil {
+		return ctfeVal{}, false
+	}
+
+	var c constant.Constant
+
+	if e.isAlloc {
+		if g, ok := e.val.(*ir.Global); ok && g.Init != nil {
+			c = g.Init
+		} else {
+			return ctfeVal{}, false
+		}
+	} else {
+		cc, ok := e.val.(constant.Constant)
+		if !ok {
+			return ctfeVal{}, false
+		}
+
+		c = cc
+	}
+
+	switch v := c.(type) {
+	case *constant.Int:
+		if !v.X.IsInt64() {
+			return ctfeVal{}, false
+		}
+
+		if v.Typ.BitSize == 1 {
+			return ctfeVal{kind: "bool", b: v.X.Sign() != 0}, true
+		}
+
+		return ctfeVal{kind: "i64", i: v.X.Int64()}, true
+	case *constant.Float:
+		fv, _ := v.X.Float64()
+
+		return ctfeVal{kind: "f64", f: fv}, true
+	}
+
+	return ctfeVal{}, false
 }
