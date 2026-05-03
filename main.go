@@ -571,6 +571,11 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 }
 
 func main() {
+	// Default ANSI color on when stderr is a terminal -- matches what
+	// rustc and clang do. Overridable via --color={always,never,auto}
+	// later in arg parsing.
+	codegen.AnsiEnabled = isStderrTTY()
+
 	if v := clangMajorVersion(); v > 0 && v < 15 {
 		_, _ = fmt.Fprintf(os.Stderr,
 			"error: clang version %d is too old; tin requires clang >= 15 (the presplitcoroutine attribute was added in LLVM 15)\n", v)
@@ -646,7 +651,7 @@ func main() {
 		switch a {
 		case "-g", "--fast", "--no-pure-fold", "-fno-pure-fold":
 			fileArgIdx++
-		case "--stdlib", "--lib-root", "-target", "-j":
+		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
 		default:
 			// -O0..-O3, -Os, -Oz are single-token flags.
@@ -712,6 +717,37 @@ doneFlags:
 			if i+1 < len(os.Args) {
 				i++
 				extraCFlags = append(extraCFlags, os.Args[i])
+			}
+		case "--color":
+			// --color=<auto|always|never>. Defaults to `auto` which
+			// turns ANSI escapes on when stderr is a terminal. The
+			// snippet renderer is on by default; use --error-format=
+			// plain to opt out of multi-line snippets entirely.
+			if i+1 < len(os.Args) {
+				i++
+
+				switch os.Args[i] {
+				case "always":
+					codegen.AnsiEnabled = true
+				case "never":
+					codegen.AnsiEnabled = false
+				case "auto":
+					codegen.AnsiEnabled = isStderrTTY()
+				}
+			}
+		case "--error-format":
+			// --error-format=<rust|plain>. `plain` reverts to the
+			// legacy single-line `file:line:col: msg` output, useful
+			// for editor integrations that grep error positions.
+			if i+1 < len(os.Args) {
+				i++
+
+				switch os.Args[i] {
+				case "plain":
+					codegen.SnippetEnabled = false
+				case "rust":
+					codegen.SnippetEnabled = true
+				}
 			}
 		case "--stdlib":
 			if i+1 < len(os.Args) {
@@ -2935,9 +2971,40 @@ func patchMissingDILabelLine(ir string) string {
 func die(format string, args ...any) {
 	// Clear any in-progress progress line so the error message starts cleanly.
 	_, _ = fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", progressLineWidth))
-	_, _ = fmt.Fprintf(os.Stderr, "tin: "+format+"\n", args...)
+
+	msg := fmt.Sprintf(format, args...)
+
+	// The legacy form was `tin: <format>` -- e.g. `tin: codegen error:
+	// foo.tin:5:3: undefined identifier`. The snippet renderer parses
+	// `file:line:col: ...` into a Rust-style block, so strip the
+	// repeated `tin:` prefix before handing it over and re-emit only
+	// the prefix when no snippet pattern matched (= raw render).
+	rendered := codegen.RenderDiagnostic(stripTinPrefix(msg))
+	if rendered == stripTinPrefix(msg) {
+		_, _ = fmt.Fprintf(os.Stderr, "tin: %s\n", msg)
+	} else {
+		_, _ = fmt.Fprintln(os.Stderr, rendered)
+	}
 
 	os.Exit(1)
+}
+
+// stripTinPrefix removes the legacy "tin: <kind> error: " preamble so
+// the snippet renderer sees the bare `file:line:col: ...` shape it
+// expects. Returns the input unchanged when no preamble is present.
+func stripTinPrefix(s string) string {
+	for _, p := range []string{
+		"codegen error: ",
+		"parse error: ",
+		"compile error: ",
+		"link error: ",
+	} {
+		if strings.HasPrefix(s, p) {
+			return s[len(p):]
+		}
+	}
+
+	return s
 }
 
 // defaultBuildOutPath mirrors the implicit `tin build` output naming:
@@ -3354,4 +3421,17 @@ func runClean() {
 			die("clean: %v", err)
 		}
 	}
+}
+
+// isStderrTTY reports whether stderr is connected to a terminal.
+// Used by --color=auto to enable ANSI escapes in the snippet
+// renderer. golang.org/x/term would be more portable; the bare stat()
+// check works on POSIX which is the only target Tin runs on today.
+func isStderrTTY() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }

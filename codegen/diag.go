@@ -473,6 +473,8 @@ func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, arg
 
 	msg := fmt.Sprintf(format, args...)
 
-	_, _ = fmt.Fprintf(os.Stderr, "%s:%d:%d: %s: %s [-W%s]\n",
+	raw := fmt.Sprintf("%s:%d:%d: %s: %s [-W%s]",
 		file, pos.Line, pos.Col, severity, msg, name)
+
+	_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 }
