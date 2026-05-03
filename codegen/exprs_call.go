@@ -558,14 +558,23 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		// Trait fat-pointer dispatch: if obj is {i8*, vtable*}, use vtable.
 		if traitName, ok := cg.isTraitFatPtr(objVal.Type()); ok {
-			return cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
+			result, err := cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
+			if err != nil {
+				return nil, cg.nodeErr(e, "%v", err)
+			}
+
+			return result, nil
 		}
 		// Auto-deref: *TraitFatPtr -> load the fat pointer and dispatch through vtable.
 		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
 			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
 				loaded := block.NewLoad(pt.ElemType, objVal)
+				result, err := cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+				if err != nil {
+					return nil, cg.nodeErr(e, "%v", err)
+				}
 
-				return cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+				return result, nil
 			}
 		}
 

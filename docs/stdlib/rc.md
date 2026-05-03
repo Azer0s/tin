@@ -15,18 +15,17 @@ pointer and the second `deinit` would double-free.
 ```rust
 use rc
 
-fn close_fd(p i64) = posix::close(p)
+fn close_handle(p i64) = echo "destructor fired"
 
 fn main() i64 =
-  let fd = posix::open("/etc/hosts", 0)
-  let cell *rc::Cell[i64] = rc::Cell[i64].alloc(fd, close_fd)
+  let cell *rc::Cell[i64] = rc::Cell[i64].alloc(42, close_handle)
 
-  // copies retain the cell, drops release. close_fd runs once.
+  // copies retain the cell, drops release. close_handle runs once.
   let a = cell
   let b = a
-  echo a.payload()       // fd
-  echo b.payload()       // fd
-  return 0               // close_fd(fd) fires now -- one call only
+  echo a.payload()       // 42
+  echo b.payload()       // 42
+  return 0               // "destructor fired" prints once
 ```
 
 ## API

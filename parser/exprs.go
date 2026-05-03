@@ -1496,8 +1496,61 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			return ast.NewIdent(tok.Literal, tok.Line, tok.Col), nil
 		}
 
-		return nil, p.errorf("unexpected token %s (%q)", tok.Type, tok.Literal)
+		return nil, p.errorf("unexpected token %s here; %s", describeToken(tok), suggestForToken(tok))
 	}
+}
+
+// describeToken renders a token for diagnostics: keyword tokens use
+// their source spelling ("var", "switch"), punctuation uses the
+// literal symbol, and structural tokens get a friendly name.
+func describeToken(tok lexer.Token) string {
+	switch tok.Type {
+	case lexer.NEWLINE:
+		return "end of line"
+	case lexer.INDENT:
+		return "an indented block"
+	case lexer.DEDENT:
+		return "a dedent"
+	case lexer.EOF:
+		return "end of file"
+	case lexer.IDENT:
+		return fmt.Sprintf("identifier %q", tok.Literal)
+	}
+
+	if tok.Literal != "" {
+		return fmt.Sprintf("%q", tok.Literal)
+	}
+
+	return tok.Type.String()
+}
+
+// suggestForToken produces a one-line tip pointing the user at the
+// likely typo or alternative when a token shows up in an unexpected
+// position. Returns "expected an expression" as a generic fallback.
+func suggestForToken(tok lexer.Token) string {
+	switch tok.Literal {
+	case "switch":
+		return "did you mean `match`?"
+	case "elif", "elseif":
+		return "use `else if` instead"
+	case "while":
+		return "use `for cond:` for a conditional loop"
+	case "func", "function", "def":
+		return "use `fn`"
+	}
+
+	switch tok.Type {
+	case lexer.COMMA:
+		return "trailing comma not allowed here"
+	case lexer.INDENT:
+		return "unexpected indentation; the previous line probably needs a `:` or this block is mis-aligned"
+	case lexer.DEDENT:
+		return "the block ended sooner than expected"
+	case lexer.NEWLINE:
+		return "expected the rest of an expression on this line"
+	}
+
+	return "expected an expression"
 }
 
 func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {

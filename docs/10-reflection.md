@@ -256,7 +256,7 @@ Pointer and array field types include nested type information:
 ```rust
 struct node =
   val  i64
-  next *node
+  next own *node
 
 let types = fieldtypes(node{val: 0, next: nil})
 echo types[0]       // 'i64
@@ -281,7 +281,7 @@ let u = user{id: 1, name: "Alice", bio: ""}
 
 echo fieldtag(u, "id")    // 'primary_key
 echo fieldtag(u, "name")  // 'required
-echo fieldtag(u, "bio")   // '' (empty atom - no tag)
+echo fieldtag(u, "bio")   // '   (empty atom - no tag)
 ```
 
 Field tags are stored in a compile-time global map with no runtime overhead

@@ -79,7 +79,20 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 		Tags: tags, ScopedTags: scopedTags,
 	}
 
-	// Parse body (fields + methods)
+	// Parse body (fields + methods). Tin requires the body to be on
+	// indented lines after the `=` -- inline shapes like
+	// `struct point = x i64` or `struct A = b B` aren't supported.
+	// Without this guard, the parser silently produced an empty
+	// struct AND left the rest of the line as dangling tokens that
+	// downstream parsing then misinterpreted as top-level statements,
+	// surfacing an unrelated "implicit/explicit main" diagnostic.
+	if !p.check(lexer.NEWLINE) && !p.check(lexer.EOF) {
+		tok := p.peek()
+
+		return nil, fmt.Errorf("%d:%d: struct %s: body must start on the next line, indented; inline `struct Name = field type` is not supported -- write each field on its own indented line",
+			tok.Line, tok.Col, nameTok.Literal)
+	}
+
 	if p.check(lexer.NEWLINE) {
 		p.advance()
 		p.skipNewlines()
@@ -264,6 +277,25 @@ func (p *Parser) parseTraitDecl() (*ast.TraitDecl, error) {
 	}
 
 	p.advance() // consume =
+
+	// Single-line trait body: `trait X = fn name(...) = virtual` or
+	// `trait X = const|var name type forward`. The legacy parser
+	// silently dropped these by only handling the indented-block
+	// form, which made `trait X = fn set(this *X) = virtual` produce
+	// a trait with no methods -- coerceToTrait's pointer-receiver
+	// rejection then never fired.
+	if !p.check(lexer.NEWLINE) {
+		if p.check(lexer.KW_FN) {
+			fn, err2 := p.parseFuncDecl(nil, false)
+			if err2 != nil {
+				return nil, err2
+			}
+
+			decl.Methods = append(decl.Methods, fn)
+
+			return decl, nil
+		}
+	}
 
 	if p.check(lexer.NEWLINE) {
 		p.advance()

@@ -1087,14 +1087,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
+	// Track whether we ever had a declared annotation. The struct-fallback
+	// override below must NOT fire for user-declared `i64` -- only for
+	// the implicit i64-fallback case where no annotation was given.
+	hadDeclaredType := s.Type != nil
+
 	if llType == nil {
 		llType = irtypes.I64
 	}
 
-	// If llType is the i64 fallback (unresolved generic/alias) and the init
-	// value has a concrete struct type, use the init value's type instead.
-	// This handles: let t GenericType = expr  where GenericType resolves to a concrete struct.
-	if initVal != nil && llType.Equal(irtypes.I64) {
+	// Generic-alias resolution: when the declared type is missing AND
+	// the init value has a concrete struct type, use that. This handles
+	// `let t = expr` where expr returns a Generic[T] resolved struct.
+	// Skip when an explicit annotation is present -- the type-mismatch
+	// check below should fire instead.
+	if !hadDeclaredType && initVal != nil && llType.Equal(irtypes.I64) {
 		if _, isStruct := initVal.Type().(*irtypes.StructType); isStruct {
 			llType = initVal.Type()
 		}
@@ -1724,6 +1731,15 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	}
 
 	if s.Value == nil {
+		// Bare `return` in a non-void function: emit a Tin diagnostic
+		// here instead of letting NewRet(nil) reach LLVM and surface as
+		// a clang IR-level "value doesn't match function result type"
+		// error from a temp .ll file.
+		if cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
+			return cg.nodeErr(s, "function returns %s but the return statement has no value",
+				fmtArgType(cg.curFn.Sig.RetType))
+		}
+
 		if err := cg.emitDefers(block); err != nil {
 			return err
 		}
@@ -1784,6 +1800,13 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				return cg.nodeErr(s, "void function cannot return a value")
 			}
 		} else {
+			// Bare `return` in a non-void function: catch here with a
+			// targeted Tin diagnostic instead of letting LLVM emit
+			// `ret void` and surface a clang IR-level error.
+			if val == nil {
+				return cg.nodeErr(s, "function returns %s but the return statement has no value", fmtArgType(retType))
+			}
+
 			val = cg.coerce(block, val, retType)
 			if !val.Type().Equal(retType) {
 				// Render in user-facing source syntax (Foo[i64], not
@@ -2449,6 +2472,20 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
 	}
+	// Reject direct assignment to a `const` binding, top-level or block-
+	// scope. Without this, `const X i64 = 10; X = 99` silently compiles
+	// and writes to the read-only global -- LLVM's `constant` qualifier
+	// then makes the store unreachable, so the original value persists
+	// AND the user is silently lied to about whether the write happened.
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if cg.topLevelConstNames[id.Name] {
+			return block, cg.nodeErr(s, "cannot assign to top-level const %q (immutable storage)", id.Name)
+		}
+
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
+			return block, cg.nodeErr(s, "cannot assign to const %q; drop the const if you need to mutate", id.Name)
+		}
+	}
 	// Mutating an identifier invalidates any captured constant init (used
 	// by the if-condition folder). Clear it before emitting the store so
 	// later folds don't see stale information.
@@ -2666,6 +2703,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Block, error) {
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
+	}
+	// Reject compound-assign to a `const` binding (same reason as
+	// genAssign -- the underlying global lives in read-only storage).
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if cg.topLevelConstNames[id.Name] {
+			return block, cg.nodeErr(s, "cannot %s top-level const %q (immutable storage)", s.Op, id.Name)
+		}
+
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
+			return block, cg.nodeErr(s, "cannot %s const %q; drop the const if you need to mutate", s.Op, id.Name)
+		}
 	}
 	// Mutating an identifier invalidates any captured constant init.
 	if id, ok := s.Target.(*ast.Identifier); ok {

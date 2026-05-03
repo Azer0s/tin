@@ -60,7 +60,7 @@ let l = collections::LinkedList[i64].make()
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `new` | `() LinkedList[T]` | Create an empty list |
+| `make` | `() LinkedList[T]` | Create an empty list |
 | `len` | `(this LinkedList[T]) i64` | Number of elements |
 | `get` | `(this LinkedList[T], i i64) T` | Element at index `i` (no bounds check) |
 | `push_back` | `(this *LinkedList[T], v T)` | Append to the end |
@@ -105,7 +105,7 @@ let m = collections::HashMap[string, i64].make(initial_cap)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `new` | `(initial_cap i64) HashMap[K, V]` | Create with initial capacity |
+| `make` | `(initial_cap i64) HashMap[K, V]` | Create with initial capacity (also `make()` with default cap) |
 | `len` | `(this HashMap[K, V]) i64` | Number of entries |
 | `get` | `(this HashMap[K, V], k K) V` | Value for key, or zero value if absent |
 | `get_or` | `(this HashMap[K, V], k K, default_val V) V` | Value for key, or `default_val` |
