@@ -213,6 +213,58 @@ match a.(type):
     echo "other"
 ```
 
+### Tagged unions as generic type arguments
+
+`type X = A | B` plays two roles:
+
+1. A **tagged-union type** when you have a value of it. The value carries a
+   tag and is laid out as `{ i8 tag, payload }`.
+2. A **type-set alias** when used in a where-guard. `where t is X` is
+   satisfied by any structural variant of X.
+
+Both meanings are preserved when X appears as a generic type argument. A
+generic instantiated with X stores the **literal tagged union** (with the
+tag), not one of the underlying variants:
+
+```rust
+use sync
+
+type num = i64 | f64
+
+let a num = 42
+let atom = sync::Atomic[num].new(a)   // Atomic stores num, not i64
+let v = atom.load()                   // v is num, tag preserved
+
+match v.(type):
+  case n i64: echo "i64 {n}"
+  case f f64: echo "f64 {f}"
+```
+
+### Where-guards over tagged unions
+
+`where t is X` matches **either** the literal X or any of its structural
+variants, so a single overload can cover both forms:
+
+```rust
+type num = i64 | f64
+
+struct Box[t] =
+  v t
+  fn show(this Box[t]) string where t is num =
+    match this.v.(type):
+      case n i64: return "i64 {n}"
+      case f f64: return "f64 {f}"
+
+let b1 = Box[num]{v: 42 as num}    // t = num   -> matches `where t is num`
+let b2 = Box[i64]{v: 7}            // t = i64   -> also matches (i64 is a variant of num)
+let b3 = Box[f64]{v: 3.14}         // t = f64   -> also matches
+```
+
+Inside a `where t is X` body, `t` is only known to be one of X's variants -
+it has no single concrete type. Use `match v.(type)` to recover the
+concrete variant. The compiler will not let you call type-specific operations
+on a `t`-typed value without one.
+
 ---
 
 ## Native C unions
