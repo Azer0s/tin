@@ -340,7 +340,7 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 
 	concreteName := structNameFromValue(val)
 	if concreteName == "" {
-		return nil, fmt.Errorf("tuple destructuring: expected a Tuple struct value, got %s", val.Type())
+		return nil, fmt.Errorf("tuple destructuring: expected a Tuple struct value, got %s", fmtArgType(val.Type()))
 	}
 
 	llType, ok := cg.structTypes[concreteName]

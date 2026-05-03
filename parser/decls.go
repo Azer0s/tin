@@ -608,7 +608,7 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	}
 
 	if !anyPayload {
-		return nil, fmt.Errorf("data %s: at least one variant must carry a payload; use `enum` for pure-nullary sums", decl.Name)
+		return nil, fmt.Errorf("data %s: at least one variant must carry a payload; use \"enum\" for pure-nullary sums", decl.Name)
 	}
 
 	return decl, nil

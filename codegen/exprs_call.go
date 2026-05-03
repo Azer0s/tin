@@ -1406,7 +1406,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", pt.ElemType)
 		}
 	} else {
-		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", callee.Type())
+		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", fmtArgType(callee.Type()))
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.

@@ -1230,7 +1230,7 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 
 	pt, ok := ptrVal.Type().(*irtypes.PointerType)
 	if !ok {
-		return nil, fmt.Errorf("range slice requires a pointer, got %s", ptrVal.Type())
+		return nil, fmt.Errorf("range slice requires a pointer, got %s", fmtArgType(ptrVal.Type()))
 	}
 
 	length := block.NewSub(hiVal, loVal)
@@ -1301,7 +1301,7 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 	// Only fat-pointer arrays {T*, i64} are supported for slicing.
 	arrType, ok := arrVal.Type().(*irtypes.StructType)
 	if !ok || len(arrType.Fields) < 2 {
-		return nil, fmt.Errorf("slice expression requires a fat-array type, got %s", arrVal.Type())
+		return nil, fmt.Errorf("slice expression requires a fat-array type, got %s", fmtArgType(arrVal.Type()))
 	}
 
 	ptrField := arrType.Fields[0]

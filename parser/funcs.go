@@ -462,7 +462,7 @@ func (p *Parser) parseTypeBoundUnary() (ast.TypeBound, error) {
 		// eval time isn't worth the complexity here. Use a synthesized atom
 		// referencing a negation of the parenthesised sub-tree via a
 		// special helper. For now we only allow `not` on atoms (leaves).
-		return nil, fmt.Errorf("%d:%d: `not` in a type bound must apply to a trait name, not a parenthesised expression",
+		return nil, fmt.Errorf("%d:%d: \"not\" in a type bound must apply to a trait name, not a parenthesised expression",
 			pos.Line, pos.Col)
 	}
 
@@ -627,7 +627,7 @@ func (p *Parser) parseWherePattern() (ast.Node, error) {
 	}
 
 	if p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: empty where pattern `()` is not allowed; use `where _:` for a catch-all",
+		return nil, fmt.Errorf("%d:%d: empty where pattern \"()\" is not allowed; use \"where _:\" for a catch-all",
 			openPos.Line, openPos.Col)
 	}
 

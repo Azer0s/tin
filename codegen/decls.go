@@ -2586,15 +2586,39 @@ func paramSig(m *ast.FuncDecl) string {
 
 // ambiguousMethodError formats the multi-overload diagnostic for a
 // concrete struct whose where-guards left two same-signature methods
-// alive after monomorphization.
+// alive after monomorphization. Each "declared at" entry shows the
+// originating file:line:col so the user can find the colliding decls
+// even when the struct's methods live in a different file from the
+// instantiation site (e.g. user-file `Atomic[i64]` referencing two
+// stdlib overloads).
 func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDecl) error {
 	first := methods[0]
 
+	// Methods always live with their struct: look up the originating
+	// file via the same registry the per-line `//!-Wno-` lookup uses.
+	declFile := cg.lookupTemplateFile(structName)
+	if declFile == "" {
+		// Strip monomorphization suffix and try again with the bare
+		// template name (Box__i64 -> Box).
+		bare := structName
+		if idx := strings.Index(structName, "__"); idx > 0 {
+			bare = structName[:idx]
+		}
+
+		declFile = cg.lookupTemplateFile(bare)
+	}
+
+	if declFile == "" {
+		declFile = cg.filename
+	}
+
 	var details strings.Builder
+
+	pretty := prettyStructName(structName)
 
 	for _, m := range methods {
 		details.WriteString("\n  - ")
-		details.WriteString(prettyStructName(structName))
+		details.WriteString(pretty)
 		details.WriteByte('.')
 		details.WriteString(m.Name)
 		details.WriteString(" with ")
@@ -2615,12 +2639,12 @@ func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDe
 		}
 
 		details.WriteString(" (declared at ")
-		details.WriteString(fmt.Sprintf("%d:%d", m.Pos().Line, m.Pos().Col))
+		details.WriteString(fmt.Sprintf("%s:%d:%d", declFile, m.Pos().Line, m.Pos().Col))
 		details.WriteByte(')')
 	}
 
 	return cg.nodeErr(first,
 		"%s.%s is ambiguous for this instantiation: %d overloads with the same signature satisfy their where-guards. Drop the redundant guard, or distinguish the overloads by parameter type:%s",
-		prettyStructName(structName), first.Name,
+		pretty, first.Name,
 		len(methods), details.String())
 }

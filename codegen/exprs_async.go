@@ -1756,7 +1756,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	if structName == "" {
-		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", objVal.Type())
+		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", fmtArgType(objVal.Type()))
 	}
 
 	// Check if fa.Field is an async fat-fn-ptr struct field (not a method).

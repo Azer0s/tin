@@ -775,7 +775,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 	}
 
 	if !isFatArrayPtr(scrutinee.Type()) {
-		return nil, fmt.Errorf("array pattern match requires an array type, got %s", scrutinee.Type())
+		return nil, fmt.Errorf("array pattern match requires an array type, got %s", fmtArgType(scrutinee.Type()))
 	}
 
 	arrType := scrutinee.Type().(*irtypes.StructType)
@@ -1230,7 +1230,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 
 		sname := structNameFromValue(fval)
 		if sname == "" || len(sname) <= 8 || sname[:8] != "Future__" {
-			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fval.Type())
+			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fmtArgType(fval.Type()))
 		}
 
 		pidIdx := cg.fieldIndex(sname, "pid")
