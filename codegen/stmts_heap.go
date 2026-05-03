@@ -56,9 +56,19 @@ func walkForAliases(node ast.Node, aliases map[string]string) {
 	switch n := node.(type) {
 	case *ast.VarDecl:
 		if n.Value != nil {
-			if addrOf, ok := n.Value.(*ast.AddressOfExpr); ok {
-				if ident, ok2 := addrOf.Expr.(*ast.Identifier); ok2 {
+			switch v := n.Value.(type) {
+			case *ast.AddressOfExpr:
+				// `let alias = &ident`: alias targets ident's storage.
+				if ident, ok := v.Expr.(*ast.Identifier); ok {
 					aliases[n.Name] = ident.Name
+				}
+			case *ast.Identifier:
+				// `let alias2 = alias1`: alias2 walks back through alias1
+				// to whatever alias1 ultimately targets. Only record when
+				// alias1 is itself in the chain — otherwise the binding
+				// is just a value copy with no escape implications.
+				if src, ok := aliases[v.Name]; ok {
+					aliases[n.Name] = src
 				}
 			}
 		}
