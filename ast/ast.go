@@ -844,12 +844,15 @@ type StringPart struct {
 	Format string // printf-style specifier without leading %, e.g. "08x", ".2f" (empty = default)
 }
 
-// TopLevelVar is a mutable module-scoped variable: var name Type [= expr]
+// TopLevelVar is a module-scoped binding: var/let/const name [Type] [= expr].
+// IsConst is true when the source used `let` or `const`; the binding is
+// immutable from user code (writes are rejected).
 type TopLevelVar struct {
 	base
-	Name  string
-	Type  TypeExpr
-	Value Node // nil = zero-initialized
+	Name    string
+	Type    TypeExpr
+	Value   Node // nil = zero-initialized
+	IsConst bool
 }
 
 // SpawnExpr spawns a fiber: spawn expr  or  spawn do: block

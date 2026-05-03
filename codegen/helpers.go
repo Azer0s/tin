@@ -1037,6 +1037,21 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 			return constant.NewInt(target.(*irtypes.IntType), ci.X.Int64())
 		}
 	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
+		if cf, ok2 := c.(*constant.Float); ok2 {
+			fv, _ := cf.X.Float64()
+			ft := target.(*irtypes.FloatType)
+
+			// Round through float32 when narrowing so the resulting
+			// constant is exactly representable in 32 bits. Without
+			// this, big.NewFloat gives a 53-bit value that emits as a
+			// hex literal LLVM rejects for `float` globals.
+			if ft.Kind == irtypes.FloatKindFloat {
+				fv = float64(float32(fv))
+			}
+
+			return constant.NewFloat(ft, fv)
+		}
+
 		return c
 	case irtypes.IsInt(src) && irtypes.IsFloat(target):
 		if ci, ok2 := c.(*constant.Int); ok2 {

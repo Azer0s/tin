@@ -1657,6 +1657,43 @@ func (p *Parser) parseTopLevelVar() (*ast.TopLevelVar, error) {
 	return &ast.TopLevelVar{Name: nameTok.Literal, Type: typ, Value: val}, nil
 }
 
+// parseTopLevelLetConst parses module-scoped:  let|const name [Type] [= expr]
+// Producing a TopLevelVar with IsConst=true makes the binding a global
+// constant rather than a statement folded into the implicit main.
+func (p *Parser) parseTopLevelLetConst() (*ast.TopLevelVar, error) {
+	pos := p.curPos()
+	p.advance() // consume let/const
+
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+
+	var typ ast.TypeExpr
+	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.SEMI) {
+		typ, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var val ast.Node
+
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+
+		val, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tv := &ast.TopLevelVar{Name: nameTok.Literal, Type: typ, Value: val, IsConst: true}
+	tv.SetPos(pos)
+
+	return tv, nil
+}
+
 // parseSpawnExprStmt parses a spawn statement (spawn expr or spawn do: block).
 // Returns a *ast.SpawnExpr wrapped in an ExprStmt.
 func (p *Parser) parseSpawnExprStmt() (ast.Node, error) {

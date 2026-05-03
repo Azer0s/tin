@@ -311,6 +311,16 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 		return p.parseExportDecl()
 	case lexer.KW_TEST:
 		return p.parseTestDecl()
+	case lexer.KW_CONST:
+		// Module-scope `const` is a TU-level binding (a global, like
+		// `var`), NOT a statement folded into the implicit main.
+		// Routing through TopLevelVar makes the binding visible to
+		// every function in the file -- including a user-defined
+		// `fn main()` -- and stops it from suppressing the user main
+		// via the implicit-main path.
+		// Module-scope `let`, by contrast, IS part of the implicit
+		// main and falls through to the statement parser below.
+		return p.parseTopLevelLetConst()
 	case lexer.KW_STATIC:
 		p.advance()
 

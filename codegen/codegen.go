@@ -1975,6 +1975,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	// If there are top-level statements, wrap them in main().
 	if len(topStmts) > 0 {
+		// Top-level imperative statements form an implicit main. If the
+		// user also wrote `fn main()`, both would emit an `i32 @main`
+		// wrapper -- the implicit one wins and the user main is never
+		// called. Error out so the user picks one model.
+		// (Top-level `const` and `var` are TU-level decls and don't
+		// reach topStmts, so this only fires for actual statements.)
+		if cg.userMainDecl != nil {
+			return nil, cg.nodeErr(topStmts[0],
+				"top-level statements cannot coexist with an explicit fn main(); "+
+					"move the statement inside main, or remove fn main() to use the implicit-main form")
+		}
+
 		// Check if main is already defined.
 		hasmain := false
 
