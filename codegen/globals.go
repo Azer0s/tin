@@ -136,13 +136,27 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// which contradicts the "actual constant" guarantee a top-level
 	// const offers. Reject it explicitly. Top-level `var` is allowed
 	// to use runtime init -- it is mutable storage by design.
-	if tv.IsConst && tv.Value != nil && initVal == nil {
+	//
+	// FP128 and Half are excepted because llir mis-emits the literal
+	// hex in the wrong byte order for those widths; tryConstantFold
+	// returns nil for them by design, and the global is initialized
+	// at startup via fpext from a Double constant. Const semantics
+	// still hold (the global is `Immutable` and lives in `.rodata`),
+	// it's just initialized in the C-main wrapper instead of inline.
+	if tv.IsConst && tv.Value != nil && initVal == nil && !isExtendedFloatType(lt) {
 		return cg.nodeErr(tv,
 			"top-level const %q has a non-compile-time initializer; "+
 				"the right-hand side must be a literal, an arithmetic / cast / identifier reference, "+
 				"or a call to a #pure function. For runtime-evaluated module-scoped state use `var`.",
 			tv.Name)
 	}
+
+	// initVal == nil at this point only for the FP128/Half exception
+	// (other shapes already errored above when IsConst is set). Track
+	// whether the const will be runtime-initialized so we know NOT to
+	// mark the global immutable -- LLVM's `constant` qualifier elides
+	// the startup store as UB.
+	needsRuntimeInit := tv.IsConst && initVal == nil
 
 	if initVal == nil {
 		initVal = cg.zeroConstant(lt)
@@ -158,7 +172,12 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// source level; the LLVM `constant` qualifier is the belt-and-
 	// suspenders backstop for cases the static pass can't see (FFI,
 	// inline asm, runtime-routed pointers).
-	if tv.IsConst {
+	//
+	// FP128 / Half consts can't take this path because their value
+	// is computed at startup via fpext (see the
+	// isExtendedFloatType exception above); marking the global
+	// immutable would let the optimizer elide that store.
+	if tv.IsConst && !needsRuntimeInit {
 		g.Immutable = true
 	}
 
@@ -397,8 +416,60 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 	}
 
 	// Fallback: route through the AST evaluator. This picks up BinExpr,
-	// UnaryExpr, AsExpr, identifiers bound to const, and #pure call results.
-	return cg.evalAsConstant(n, targetType)
+	// UnaryExpr, identifiers bound to const, and #pure call results.
+	if c := cg.evalAsConstant(n, targetType); c != nil {
+		return c
+	}
+
+	// Last resort: the package-side evaluator (`evalConstExprTyped`).
+	// Stronger than `evalAsConstant` for cast / shift / bitwise-NOT
+	// expressions over u8..u128 widths, and the only path that yields
+	// a *big.Int-backed `constant.Int` for 128-bit consts -- which is
+	// why the limits stdlib's `U128_MAX = ~(0 as u128)` and friends
+	// only fold via this path. Map the LLVM target back to a Tin
+	// TypeExpr the package evaluator understands.
+	if tinType := llvmTypeToTinTypeExpr(targetType); tinType != nil {
+		if c := cg.evalConstExprTyped(n, tinType); c != nil {
+			return c
+		}
+	}
+
+	return nil
+}
+
+// llvmTypeToTinTypeExpr maps the integer / float widths we care about
+// for top-level const folding back to a Tin TypeExpr so the package-
+// side evaluator (`evalConstExprTyped`) can be reused from the entry-
+// program path. Returns nil for shapes the evaluator doesn't model.
+func llvmTypeToTinTypeExpr(t irtypes.Type) ast.TypeExpr {
+	switch v := t.(type) {
+	case *irtypes.IntType:
+		switch v.BitSize {
+		case 1:
+			return &ast.SimpleType{Name: "bool"}
+		case 8:
+			return &ast.SimpleType{Name: "i8"}
+		case 16:
+			return &ast.SimpleType{Name: "i16"}
+		case 32:
+			return &ast.SimpleType{Name: "i32"}
+		case 64:
+			return &ast.SimpleType{Name: "i64"}
+		case 128:
+			return &ast.SimpleType{Name: "i128"}
+		}
+	case *irtypes.FloatType:
+		switch v.Kind { //nolint:exhaustive // half/X86_FP80/PPC_FP128 are unused by tin
+		case irtypes.FloatKindFloat:
+			return &ast.SimpleType{Name: "f32"}
+		case irtypes.FloatKindDouble:
+			return &ast.SimpleType{Name: "f64"}
+		case irtypes.FloatKindFP128:
+			return &ast.SimpleType{Name: "f128"}
+		}
+	}
+
+	return nil
 }
 
 // evalAsConstant runs the CTFE AST evaluator on n and returns the resulting
@@ -550,6 +621,9 @@ func (cg *CodeGen) emitFiberMainEnd(block *ir.Block) {
 // shape, or nil when no type can be obviously deduced. Recognized:
 //
 //   - literal forms (Int/Float/Bool/String).
+//   - AsExpr: the cast's target type wins.
+//   - UnaryExpr / BinExpr: recurse on operands; the unified type
+//     (i64+i64 -> i64, f64+f64 -> f64, etc.) is the result.
 //   - calls to known top-level functions whose return type is declared.
 //
 // Anything more complex still requires an explicit annotation so the
@@ -564,6 +638,27 @@ func (cg *CodeGen) inferTopLevelVarType(n ast.Node) ast.TypeExpr {
 		return &ast.SimpleType{Name: "bool"}
 	case *ast.StringLit:
 		return &ast.SimpleType{Name: "string"}
+	case *ast.AsExpr:
+		// `const X = expr as TargetType` -- the cast's target wins
+		// regardless of what expr would have inferred to. Covers
+		// `const X = -1 as u64`.
+		return v.Type
+	case *ast.UnaryExpr:
+		return cg.inferTopLevelVarType(v.Expr)
+	case *ast.BinExpr:
+		// Both sides should infer to the same concrete type for the
+		// expression to be well-typed; pick whichever side resolves
+		// first. Comparison operators always produce bool.
+		switch v.Op {
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+			return &ast.SimpleType{Name: "bool"}
+		}
+
+		if t := cg.inferTopLevelVarType(v.Left); t != nil {
+			return t
+		}
+
+		return cg.inferTopLevelVarType(v.Right)
 	case *ast.CallExpr:
 		// `const X = pure_fn(...)`: resolve the callee through funcDecls
 		// and pick up its declared return type. Lets users skip the
@@ -651,4 +746,16 @@ func scopeEntryToCtfeVal(e *scopeEntry) (ctfeVal, bool) {
 	}
 
 	return ctfeVal{}, false
+}
+
+// isExtendedFloatType reports whether t is fp128 or half -- the two
+// float widths llir mis-emits. Top-level const initializers of these
+// widths are deferred to runtime fpext from a Double constant.
+func isExtendedFloatType(t irtypes.Type) bool {
+	ft, ok := t.(*irtypes.FloatType)
+	if !ok {
+		return false
+	}
+
+	return ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf
 }
