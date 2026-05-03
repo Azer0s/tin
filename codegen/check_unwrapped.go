@@ -151,6 +151,14 @@ func (cg *CodeGen) computeFnsTouchingExtern() {
 // the originating source file for `//!-Wno-` lookups.
 func (cg *CodeGen) checkStructUnwrappedCResources(structKey string, sd *ast.StructDecl) {
 	for _, f := range sd.Fields {
+		// Weak fields are explicitly non-owning -- the user has told the
+		// compiler this pointer is a borrow, not a managed handle, and
+		// scope-exit already skips retain/release for them. Don't
+		// second-guess.
+		if f.IsWeak {
+			continue
+		}
+
 		shape := cg.cResourceFieldShape(f.Type, f.Name)
 		if shape == "" {
 			continue
