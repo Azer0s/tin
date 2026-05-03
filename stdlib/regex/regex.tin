@@ -95,41 +95,49 @@ fn exec_match(code *void, subject string, start i64) Match =
     i = i + 1
   return Match{_matched: true, _groups: groups, _begs: begs, _ends: ends}
 
+use rc
+
 // Compiled regex
+//
+// Holds the PCRE2 handle behind an rc::Cell so copies of Regex share
+// ownership of the C cell instead of double-freeing on the second drop.
+// On compile error _cell stores a null payload — tin_pcre2_free is null-
+// safe and the user code checks is_err() before any exec.
 
 struct Regex =
-  _code    *void    // pcre* handle (None on compile error)
-  _err_msg string   // non-empty on error
+  _cell    *rc::Cell[*void]
+  _err_msg string
 
-  fn is_err(this Regex) bool     = return this._code == 0 as *void
+  fn code(this Regex) *void = return this._cell.payload()
+
+  fn is_err(this Regex) bool     = return this.code() == 0 as *void
   fn err_msg(this Regex) string  = return this._err_msg
-
-  fn deinit(this Regex) =
-    if this._code != 0 as *void:
-      tin_pcre2_free_c(this._code)
 
   // exec executes the regex against subject and returns a Match.
   fn exec(this Regex, subject string) Match =
-    if this._code == 0 as *void:
+    let c = this.code()
+    if c == 0 as *void:
       return Match{_matched: false, _groups: []}
-    return exec_match(this._code, subject, 0)
+    return exec_match(c, subject, 0)
 
   // match_at executes starting at byte offset start.
   fn match_at(this Regex, subject string, start i64) Match =
-    if this._code == 0 as *void:
+    let c = this.code()
+    if c == 0 as *void:
       return Match{_matched: false, _groups: []}
-    return exec_match(this._code, subject, start)
+    return exec_match(c, subject, start)
 
   // find_all returns all non-overlapping matches of the full pattern in s.
   fn find_all(this Regex, s string) [string] =
 
     let results [string] = []
-    if this._code == 0 as *void:
+    let c = this.code()
+    if c == 0 as *void:
       return results
     let pos i64 = 0
     let slen = len(s)
     for pos <= slen:
-      let m = exec_match(this._code, s, pos)
+      let m = exec_match(c, s, pos)
       if !m.matched():
         break
       results ++= m.group(0)
@@ -156,8 +164,8 @@ fn compile(pattern string) Regex =
         msg_out = msg_out ++ errptr[ei]
         ei = ei + 1
       msg = msg_out
-    return Regex{_code: 0 as *void, _err_msg: msg}
-  return Regex{_code: code, _err_msg: ""}
+    return Regex{_cell: rc::Cell[*void].alloc(0 as *void, tin_pcre2_free_c), _err_msg: msg}
+  return Regex{_cell: rc::Cell[*void].alloc(code, tin_pcre2_free_c), _err_msg: ""}
 
 // matches returns true if pattern matches anywhere in s.
 fn matches(pattern string, s string) bool =

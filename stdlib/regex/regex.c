@@ -29,7 +29,10 @@ void *tin_pcre2_compile(const char *pattern) {
 
 const char *tin_pcre2_last_error(void) { return _errbuf; }
 
-void tin_pcre2_free(void *code) { pcre2_code_free((pcre2_code *)code); }
+void tin_pcre2_free(void *code) {
+    if (!code) return;
+    pcre2_code_free((pcre2_code *)code);
+}
 
 int32_t tin_pcre2_capturecount(void *code) {
     uint32_t count = 0;
