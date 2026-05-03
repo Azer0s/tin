@@ -686,7 +686,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 			return nil, fmt.Errorf("spawn: sync package failed to load: %w; ensure the tin executable is alongside the stdlib/ directory", cg.syncLoadErr)
 		}
 
-		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded; ensure the tin executable is alongside the stdlib/ directory, or add `use sync` explicitly before using spawn/await", retTypeStr)
+		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded; ensure the tin executable is alongside the stdlib/ directory, or add \"use sync\" explicitly before using spawn/await", retTypeStr)
 	}
 
 	makeFn, ok := se.val.(*ir.Func)
@@ -1096,10 +1096,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// sizeof(T) and is_rc - compile-time constants.
 	elemSize := cg.llvmSizeOf(block, elemType)
 
-	isRCVal := constant.NewInt(irtypes.I32, 0)
-	if isRCTrackedType(elemType) {
-		isRCVal = constant.NewInt(irtypes.I32, 1)
-	}
+	isRCVal := constant.NewInt(irtypes.I32, int64(channelRCKindOf(elemType)))
 
 	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.

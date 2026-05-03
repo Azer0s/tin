@@ -2026,7 +2026,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		}
 
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}

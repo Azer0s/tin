@@ -311,7 +311,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 			pos = s.Cases[0].Pos
 		}
 
-		return nil, fmt.Errorf("%d:%d: non-exhaustive match on %s: no arm matches %s; add the missing variant or a `default:` arm",
+		return nil, fmt.Errorf("%d:%d: non-exhaustive match on %s: no arm matches %s; add the missing variant or a \"default:\" arm",
 			pos.Line, pos.Col, adtName, witness)
 	}
 

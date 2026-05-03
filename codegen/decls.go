@@ -751,7 +751,7 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newRet := substituteTypeInTypeExpr(m.RetType, subst)
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
-	return &ast.FuncDecl{
+	out := &ast.FuncDecl{
 		Name:           m.Name,
 		TraitQualifier: m.TraitQualifier,
 		TypeParams:     m.TypeParams,
@@ -764,6 +764,9 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 		IsExtern:       m.IsExtern,
 		IsVirtual:      m.IsVirtual,
 	}
+	out.SetPos(m.Pos())
+
+	return out
 }
 
 // substituteStructNameInBody walks the AST body and replaces any StructLit
@@ -861,7 +864,7 @@ func (cg *CodeGen) expandGenericAlias(synth *ast.TypeDecl, aliasTmpl *ast.TypeDe
 
 		concreteName := typeExprToString(argTE)
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, aliasTmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}
@@ -980,7 +983,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return fmt.Errorf("%d:%d: struct %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return fmt.Errorf("%d:%d: struct %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}
@@ -1007,7 +1010,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			}
 
 			if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-				return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 					c.Pos.Line, c.Pos.Col, n.Name, concreteName, concreteName,
 					c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 			}
@@ -1085,6 +1088,15 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 
 		concrete.Methods = append(concrete.Methods, ov)
+	}
+
+	// Where-guard ambiguity check: if two methods share the same name and
+	// signature and BOTH satisfied their where-guards for this concrete
+	// instantiation, the call site can't pick between them -- without
+	// this check the user gets a misleading "no matching overload" error
+	// at the call site instead.
+	if amb := findAmbiguousMethods(concrete.Methods); amb != nil {
+		return cg.ambiguousMethodError(n.Name, amb)
 	}
 
 	// Propagate the template's scoped tags onto the fresh concrete's
@@ -2517,4 +2529,98 @@ func (cg *CodeGen) lookupTemplateFile(tmplName string) string {
 	}
 
 	return ""
+}
+
+// findAmbiguousMethods returns a slice of methods that collide with
+// another in the set: same name AND same parameter-type signature.
+// Returns nil when every (name, signature) pair is unique.
+//
+// Two methods with identical signatures only ever survive
+// monomorphization together when both their where-guards held for the
+// concrete type substitution -- a genuine ambiguity the user must
+// resolve at source.
+func findAmbiguousMethods(methods []*ast.FuncDecl) []*ast.FuncDecl {
+	type key struct {
+		name string
+		sig  string
+	}
+
+	groups := make(map[key][]*ast.FuncDecl, len(methods))
+
+	for _, m := range methods {
+		if m.IsExtern != "" {
+			continue
+		}
+
+		sig := paramSig(m)
+		k := key{name: m.Name, sig: sig}
+		groups[k] = append(groups[k], m)
+	}
+
+	for _, g := range groups {
+		if len(g) > 1 {
+			return g
+		}
+	}
+
+	return nil
+}
+
+// paramSig returns a signature string built from each parameter's type
+// (rendered via typeExprText so package-qualified names line up). The
+// receiver `this` is included since it carries the concrete struct
+// type that distinguishes overloads across struct boundaries.
+func paramSig(m *ast.FuncDecl) string {
+	var b strings.Builder
+
+	for i, p := range m.Params {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+
+		b.WriteString(typeExprText(p.Type))
+	}
+
+	return b.String()
+}
+
+// ambiguousMethodError formats the multi-overload diagnostic for a
+// concrete struct whose where-guards left two same-signature methods
+// alive after monomorphization.
+func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDecl) error {
+	first := methods[0]
+
+	var details strings.Builder
+
+	for _, m := range methods {
+		details.WriteString("\n  - ")
+		details.WriteString(prettyStructName(structName))
+		details.WriteByte('.')
+		details.WriteString(m.Name)
+		details.WriteString(" with ")
+
+		if len(m.Constraints) == 0 {
+			details.WriteString("no where-guard (always satisfies)")
+		} else {
+			for i, c := range m.Constraints {
+				if i > 0 {
+					details.WriteString(" and ")
+				}
+
+				details.WriteString("where ")
+				details.WriteString(c.TypeParam)
+				details.WriteString(" is ")
+				details.WriteString(typeBoundString(c.Bound))
+			}
+		}
+
+		details.WriteString(" (declared at ")
+		details.WriteString(fmt.Sprintf("%d:%d", m.Pos().Line, m.Pos().Col))
+		details.WriteByte(')')
+	}
+
+	return cg.nodeErr(first,
+		"%s.%s is ambiguous for this instantiation: %d overloads with the same signature satisfy their where-guards. Drop the redundant guard, or distinguish the overloads by parameter type:%s",
+		prettyStructName(structName), first.Name,
+		len(methods), details.String())
 }

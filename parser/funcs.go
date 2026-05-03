@@ -190,12 +190,15 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		if p.check(lexer.KW_VIRTUAL) {
 			p.advance() // consume "virtual"
 
-			return &ast.FuncDecl{
+			fd := &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
 				RetType: retType, Tags: tags, IsStatic: isStatic,
 				IsVirtual: true,
-			}, nil
+			}
+			fd.SetPos(pos)
+
+			return fd, nil
 		}
 
 		if p.check(lexer.KW_EXTERN) {
@@ -218,12 +221,15 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			// Allow trailing tags after extern("sym"): e.g. extern("read") {#blocking}
 			tags = append(tags, p.parseTags()...)
 
-			return &ast.FuncDecl{
+			fd := &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
 				RetType: retType, Tags: tags, IsStatic: isStatic,
 				IsExtern: sym,
-			}, nil
+			}
+			fd.SetPos(pos)
+
+			return fd, nil
 		}
 
 		body, err := p.parseFuncBody()
@@ -231,23 +237,25 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			return nil, err
 		}
 
-		_ = pos
-
-		return &ast.FuncDecl{
+		fd := &ast.FuncDecl{
 			Name: name, TraitQualifier: traitQualifier,
 			TypeParams: typeParams, Constraints: constraints, Params: params,
 			RetType: retType, Body: body, Tags: tags, IsStatic: isStatic,
-		}, nil
+		}
+		fd.SetPos(pos)
+
+		return fd, nil
 	}
 
 	// fn with no body (forward declaration / extern / trait virtual)
-	_ = pos
-
-	return &ast.FuncDecl{
+	fd := &ast.FuncDecl{
 		Name: name, TraitQualifier: traitQualifier,
 		TypeParams: typeParams, Constraints: constraints, Params: params,
 		RetType: retType, Tags: tags, IsStatic: isStatic,
-	}, nil
+	}
+	fd.SetPos(pos)
+
+	return fd, nil
 }
 
 // parseFuncBody parses the body after the `=` sign

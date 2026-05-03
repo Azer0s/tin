@@ -256,10 +256,10 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 						"  Load error: %w", cg.syncLoadErr)
 				}
 
-				return nil, cg.nodeErr(e, "await: expression is a raw i64, not a Future[t]; use `await spawn fn(args)` which returns Future[t]")
+				return nil, cg.nodeErr(e, "await: expression is a raw i64, not a Future[t]; use \"await spawn fn(args)\" which returns Future[t]")
 			}
 
-			return nil, cg.nodeErr(e, "await: expression (type %s) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
+			return nil, cg.nodeErr(e, "await: expression (type %s) does not implement Awaitable[t]; use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
 				val.Type())
 		}
 
@@ -278,7 +278,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				}
 			}
 
-			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
+			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement Awaitable[t]; use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
 		// Extract pid from Future[T] using extractvalue (no alloca -> safe inside loops).
@@ -519,7 +519,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return nil, err
 		}
 
-		return constant.NewInt(irtypes.I32, int64(rcKindOf(lt))), nil
+		return constant.NewInt(irtypes.I32, int64(channelRCKindOf(lt))), nil
 
 	case *ast.TypeAssertExpr:
 		inner, err := cg.genExpr(block, e.Expr)

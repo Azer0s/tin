@@ -62,7 +62,7 @@ func (cg *CodeGen) genPatternWhereList(block *ir.Block, wl *ast.WhereList, retTy
 			}
 		} else {
 			if _, isTuple := c.Pattern.(*ast.TuplePattern); !isTuple {
-				return false, fmt.Errorf("%d:%d: function takes %d arguments but clause has a single-pattern (expected a %d-element tuple like `where (p1, p2, ...):`)",
+				return false, fmt.Errorf("%d:%d: function takes %d arguments but clause has a single-pattern (expected a %d-element tuple like \"where (p1, p2, ...):\")",
 					c.Pos.Line, c.Pos.Col, arity, arity)
 			}
 
@@ -86,7 +86,7 @@ func (cg *CodeGen) genPatternWhereList(block *ir.Block, wl *ast.WhereList, retTy
 			pos = wl.Clauses[0].Pos
 		}
 
-		return false, fmt.Errorf("%d:%d: non-exhaustive where: no clause matches %s; add the missing case or a catch-all `where _:`",
+		return false, fmt.Errorf("%d:%d: non-exhaustive where: no clause matches %s; add the missing case or a catch-all \"where _:\"",
 			pos.Line, pos.Col, witness)
 	}
 
@@ -355,7 +355,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 		return cg.emitWhereArrayPatternTest(block, p, arg, failBlock)
 
 	case *ast.StructPattern:
-		return nil, fmt.Errorf("%d:%d: struct patterns in where-clauses are not yet supported (planned for slice 2); use `match` for now",
+		return nil, fmt.Errorf("%d:%d: struct patterns in where-clauses are not yet supported (planned for slice 2); use \"match\" for now",
 			p.Pos().Line, p.Pos().Col)
 
 	case *ast.TuplePattern:
@@ -365,11 +365,11 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.TupleLit:
 		// Parenthesised comma expressions aren't patterns. This catches
 		// accidental nested-tuple usage like `where ((0, 0), _):`.
-		return nil, fmt.Errorf("%d:%d: nested tuple patterns are not supported (inner `(...)` with commas is not a pattern; flatten to a single top-level tuple)",
+		return nil, fmt.Errorf("%d:%d: nested tuple patterns are not supported (inner \"(...)\" with commas is not a pattern; flatten to a single top-level tuple)",
 			p.Pos().Line, p.Pos().Col)
 	}
 
-	return nil, fmt.Errorf("%d:%d: unsupported pattern in where-clause: expressions like `%T` are not valid patterns (use a bool-guard `where <expr>:` clause instead, or rewrite as `where (pat) if <expr>:`)",
+	return nil, fmt.Errorf("%d:%d: unsupported pattern in where-clause: expressions of kind %T are not valid patterns (use a bool-guard \"where <expr>:\" clause instead, or rewrite as \"where (pat) if <expr>:\")",
 		pat.Pos().Line, pat.Pos().Col, pat)
 }
 

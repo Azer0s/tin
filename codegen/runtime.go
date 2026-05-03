@@ -791,6 +791,26 @@ func rcKindOf(t irtypes.Type) rcKind {
 	return rcKindNone
 }
 
+// channelRCKindOf is the channel/atomic-specific variant of rcKindOf.
+// It additionally classifies pointer-to-named-struct as leading-ptr so
+// Channel[*S] / Atomic[*S] retain the slot on enqueue. The non-channel
+// rcKindOf must NOT do this -- many other callers (struct-field ARC
+// machinery, scope release) already treat *S correctly via per-struct
+// release helpers and would double-free if marked as leading-ptr here.
+func channelRCKindOf(t irtypes.Type) rcKind {
+	if k := rcKindOf(t); k != rcKindNone {
+		return k
+	}
+
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+			return rcKindLeadingPtr
+		}
+	}
+
+	return rcKindNone
+}
+
 // isTraitFatPtrShape detects the universal trait fat-pointer struct shape
 // `{i8*, ptr-to-named-struct}` whose second field's pointee struct name ends
 // in `_vtable`. Used by codegen sites that need to release iface storage

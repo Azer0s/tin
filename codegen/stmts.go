@@ -565,7 +565,7 @@ func classifyWhereList(wl *ast.WhereList) (whereMode, error) {
 	}
 
 	if hasBool && hasPattern {
-		return 0, fmt.Errorf("%d:%d: cannot mix bool clauses and pattern clauses in the same where-list (bool clause here conflicts with pattern clause at %d:%d); use `where (pat) if %s:` or split into separate where-lists",
+		return 0, fmt.Errorf("%d:%d: cannot mix bool clauses and pattern clauses in the same where-list (bool clause here conflicts with pattern clause at %d:%d); use \"where (pat) if %s:\" or split into separate where-lists",
 			firstBoolPos.Line, firstBoolPos.Col,
 			firstPatPos.Line, firstPatPos.Col,
 			"cond")
@@ -632,7 +632,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			pos = wl.Clauses[0].Pos
 		}
 
-		return false, fmt.Errorf("%d:%d: non-exhaustive where: missing wildcard clause `where _: ...`",
+		return false, fmt.Errorf("%d:%d: non-exhaustive where: missing wildcard clause \"where _: ...\"",
 			pos.Line, pos.Col)
 	}
 
