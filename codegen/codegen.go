@@ -180,6 +180,14 @@ type CodeGen struct {
 	// release of both the iface heap block and its data field.
 	fnReturnsOwningIface map[string]bool
 
+	// fnsTouchingExtern: closure of functions that call an extern directly
+	// or transitively reach one through the call graph. Computed once after
+	// all functions are loaded, consulted by checkAllUnwrappedCResources to
+	// flag struct fields whose value passes through a Tin call which itself
+	// hits an extern (depth >1, beyond intra-struct dispatch). nil until
+	// the fixpoint runs.
+	fnsTouchingExtern map[string]bool
+
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
@@ -1727,8 +1735,6 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	cg.runAstChecks(prog)
 
-	cg.checkAllUnwrappedCResources(prog)
-
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")
 
@@ -2182,6 +2188,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.applyPclntabPostPass()
 	cg.emitLlvmUsedRoots()
 	cg.finalizePerPkgModules()
+
+	// -Wunwrapped-c-resource: walks every struct (incl. stdlib) for raw
+	// C resource fields whose value crosses an extern boundary. Runs at
+	// the very end so all struct decls are registered (genStructDecl
+	// populates structDeclsByName lazily) and the call graph is built
+	// (computeFnsTouchingExtern needs it for transitive propagation).
+	cg.checkAllUnwrappedCResources(prog)
 
 	return cg.mod, nil
 }

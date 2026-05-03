@@ -56,11 +56,15 @@ var posixFdReturning = map[string]bool{
 // during compilation, including stdlib. Walking stdlib structs is what
 // lets the warning catch the canonical pattern (Channel/Mutex/...) and
 // what lets stdlib authors silence it locally with `//!-Wno-...`.
-// Cheap: one pass per struct, one pass per method body.
+// Cheap: one pass per struct, one pass per method body, plus an
+// upfront fixpoint over the call graph to compute the transitive
+// extern-touching set.
 func (cg *CodeGen) checkAllUnwrappedCResources(prog *ast.Program) {
 	if cg.diagSuppressed(DiagUnwrappedCResource) {
 		return
 	}
+
+	cg.computeFnsTouchingExtern()
 
 	for name, sd := range cg.structDeclsByName {
 		if sd == nil {
@@ -68,6 +72,76 @@ func (cg *CodeGen) checkAllUnwrappedCResources(prog *ast.Program) {
 		}
 
 		cg.checkStructUnwrappedCResources(name, sd)
+	}
+}
+
+// computeFnsTouchingExtern populates cg.fnsTouchingExtern with every
+// function that reaches an extern call through any depth of Tin call
+// chain. Standard worklist fixpoint over cg.callGraph: seed with funcs
+// that directly call an extern, then propagate to all callers until
+// nothing changes.
+func (cg *CodeGen) computeFnsTouchingExtern() {
+	if cg.fnsTouchingExtern != nil {
+		return
+	}
+
+	cg.fnsTouchingExtern = make(map[string]bool)
+
+	// Seed: extern decls themselves (they ARE the extern), plus any Tin
+	// function whose body has at least one direct extern call.
+	for name, fd := range cg.funcDecls {
+		if fd == nil {
+			continue
+		}
+
+		if fd.IsExtern != "" {
+			cg.fnsTouchingExtern[name] = true
+
+			continue
+		}
+
+		if fd.Body == nil {
+			continue
+		}
+
+		walkAST(fd.Body, func(n ast.Node) {
+			if cg.fnsTouchingExtern[name] {
+				return
+			}
+
+			if call, ok := n.(*ast.CallExpr); ok && cg.callIsExtern(call) {
+				cg.fnsTouchingExtern[name] = true
+			}
+		})
+	}
+
+	// Propagate: any caller of a touching-fn is itself touching.
+	// callGraph maps caller -> []callee; flip it once for the worklist.
+	callers := map[string][]string{}
+	for caller, callees := range cg.callGraph {
+		for _, c := range callees {
+			callers[c] = append(callers[c], caller)
+		}
+	}
+
+	worklist := make([]string, 0, len(cg.fnsTouchingExtern))
+	for name := range cg.fnsTouchingExtern {
+		worklist = append(worklist, name)
+	}
+
+	for len(worklist) > 0 {
+		fn := worklist[len(worklist)-1]
+		worklist = worklist[:len(worklist)-1]
+
+		for _, caller := range callers[fn] {
+			if cg.fnsTouchingExtern[caller] {
+				continue
+			}
+
+			cg.fnsTouchingExtern[caller] = true
+
+			worklist = append(worklist, caller)
+		}
 	}
 }
 
@@ -200,10 +274,17 @@ func matchesStructName(litName, sdName string) bool {
 }
 
 // methodTouchesFieldViaExtern walks m's body looking for the field's
-// value crossing an extern boundary. depth caps the inter-method
-// recursion so a misbehaving call cycle can't loop forever.
-func (cg *CodeGen) methodTouchesFieldViaExtern(structName string, m *ast.FuncDecl, fieldName string, depth int) bool {
-	if m == nil || m.Body == nil || depth > 4 {
+// value crossing an extern boundary, in either direction:
+//   - field passed as an argument to an extern (or to any Tin function
+//     that transitively reaches an extern), or
+//   - field initialized from a call whose return value transitively
+//     comes from an extern.
+//
+// "Transitively" is whatever cg.fnsTouchingExtern's fixpoint determined.
+// No depth bound is needed — the call-graph closure was computed once
+// up front, and we only walk this method's body.
+func (cg *CodeGen) methodTouchesFieldViaExtern(structName string, m *ast.FuncDecl, fieldName string, _ int) bool {
+	if m == nil || m.Body == nil {
 		return false
 	}
 
@@ -221,22 +302,15 @@ func (cg *CodeGen) methodTouchesFieldViaExtern(structName string, m *ast.FuncDec
 
 		switch e := n.(type) {
 		case *ast.CallExpr:
-			if cg.callIsExtern(e) {
+			// Any call (extern OR Tin call that reaches an extern) where
+			// our field is an argument counts as the field crossing the
+			// boundary.
+			if cg.callTouchesExtern(e) {
 				for _, a := range e.Args {
 					if cg.exprReadsField(a, receiver, fieldName) {
 						hit = true
 
 						return
-					}
-				}
-
-				return
-			}
-			// Tin-level call — descend one level.
-			if depth+1 <= 4 {
-				if calleeM := cg.lookupStructMethod(structName, e); calleeM != nil {
-					if cg.methodTouchesFieldViaExtern(structName, calleeM, fieldName, depth+1) {
-						hit = true
 					}
 				}
 			}
@@ -264,6 +338,56 @@ func (cg *CodeGen) methodTouchesFieldViaExtern(structName string, m *ast.FuncDec
 	return hit
 }
 
+// callTouchesExtern reports whether the call resolves (best-effort) to a
+// function that itself calls an extern, OR transitively reaches one
+// through cg.fnsTouchingExtern. Equivalent to callIsExtern when the
+// callee is itself an extern decl.
+func (cg *CodeGen) callTouchesExtern(call *ast.CallExpr) bool {
+	if cg.callIsExtern(call) {
+		return true
+	}
+
+	name := resolveCalleeName(call)
+	if name == "" {
+		return false
+	}
+
+	bare := name
+	if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+		bare = bare[idx+2:]
+	}
+
+	bare = strings.TrimPrefix(bare, ".")
+
+	if cg.fnsTouchingExtern[bare] {
+		return true
+	}
+	// Fall back to the IR name when scope resolves the bare to a wrapper.
+	if cg.moduleScope != nil {
+		if entry, ok := cg.moduleScope.lookup(bare); ok && entry != nil {
+			if f, ok2 := entry.val.(interface{ Name() string }); ok2 {
+				if cg.fnsTouchingExtern[f.Name()] {
+					return true
+				}
+			}
+		}
+	}
+	// Method-style "." prefix from resolveCalleeName: scan registered
+	// struct-method keys whose suffix matches.
+	if strings.HasPrefix(name, ".") {
+		methodName := strings.TrimPrefix(name, ".")
+
+		suffix := "_" + methodName
+		for k := range cg.fnsTouchingExtern {
+			if strings.HasSuffix(k, suffix) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // exprReadsField reports whether expr is `receiver.field` (FieldAccess
 // reading the named field on the receiver parameter).
 func (cg *CodeGen) exprReadsField(expr ast.Node, receiver, field string) bool {
@@ -285,16 +409,16 @@ func (cg *CodeGen) exprReadsField(expr ast.Node, receiver, field string) bool {
 	return false
 }
 
-// exprIsExternProduced reports whether expr is (or contains) a direct
-// call to an extern function. Conservative — only the outer call is
-// examined.
+// exprIsExternProduced reports whether expr is a call whose return value
+// transitively comes from an extern. Direct extern call → true; Tin
+// function call where the callee is in cg.fnsTouchingExtern → true.
 func (cg *CodeGen) exprIsExternProduced(expr ast.Node) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 
-	return cg.callIsExtern(call)
+	return cg.callTouchesExtern(call)
 }
 
 // callIsExtern reports whether the given call resolves (best-effort)
@@ -339,19 +463,6 @@ func (cg *CodeGen) callIsExtern(call *ast.CallExpr) bool {
 	}
 
 	return false
-}
-
-// lookupStructMethod resolves a method call like `this.helper()` to
-// the struct method's FuncDecl, if any.
-func (cg *CodeGen) lookupStructMethod(structName string, call *ast.CallExpr) *ast.FuncDecl {
-	fa, ok := call.Func.(*ast.FieldAccess)
-	if !ok {
-		return nil
-	}
-
-	key := structName + "_" + fa.Field
-
-	return cg.funcDecls[key]
 }
 
 // cResourceWrapHint produces a one-line "use *rc::Cell[T]" hint
