@@ -113,24 +113,20 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		}
 		// On-demand monomorphization: if bareBaseName is a generic struct template
 		// and we have concrete type params, monomorphize now and retry.
-		// typeParamStr may be comma-separated for multi-param generics (e.g. "string,string").
+		// typeParamStr may be comma-separated for multi-param generics (e.g.
+		// "string,string"); each piece can itself be a nested generic
+		// (`*rc::Cell[i64]`), a type alias, or a qualified name. Parse each
+		// to a TypeExpr first so the canonical-key step handles all shapes
+		// (alias chains, pointers, packages) uniformly.
 		if typeParamStr != "" {
 			if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
-				// Split comma-separated params, resolve aliases, build concrete name.
-				rawParts := strings.Split(typeParamStr, ",")
+				rawParts := splitTopLevelTypeArgs(typeParamStr)
 				resolvedParts := make([]string, len(rawParts))
 				resolvedTEs := make([]ast.TypeExpr, len(rawParts))
 
-				for i, raw := range rawParts {
-					raw = strings.TrimSpace(raw)
-					if alias, ok2 := cg.typeAliases[raw]; ok2 {
-						if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-							raw = simple.Name
-						}
-					}
-
-					resolvedParts[i] = raw
-					resolvedTEs[i] = parseTypeParamStr(raw)
+				for i, te := range rawParts {
+					resolvedParts[i] = cg.typeExprCanonicalKey(te)
+					resolvedTEs[i] = te
 				}
 
 				concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
@@ -190,7 +186,17 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 	case *ast.ArrayLit:
 		// []T represented as an empty array literal of one element - best-effort.
 	case *ast.ScopeAccess:
-		return strings.Join(n.Path, "::")
+		// Strip the package qualifier so the key matches the canonical
+		// monomorphized struct name (e.g. `rc::Cell` -> `Cell`, since
+		// genStructDecl registers concrete instances under `Cell__T`).
+		// Keeping the prefix would produce `rc::Cell__T` which never
+		// matches an existing struct.
+		name := strings.Join(n.Path, "::")
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
 	case *ast.IndexExpr:
 		// Nested generic type arg, e.g. `G[G[i64]].make(...)`: the inner
 		// `G[i64]` parses as IndexExpr. Recurse to produce the canonical
@@ -247,16 +253,28 @@ func (cg *CodeGen) chanElemTypeFromName(structName string) irtypes.Type {
 	return lt
 }
 
-// parseTypeParamStr converts a canonical type-key string (as produced by
-// typeExprCanonicalKey) back into an ast.TypeExpr for use in synthetic decls.
-// Examples:
+// parseTypeParamStr converts a type-key string (as produced by
+// typeExprCanonicalKey or by the parser's typeNodeToString for static
+// method calls) back into an ast.TypeExpr.
 //
-//	"*foo"  -> &ast.PointerType{Elem: &ast.SimpleType{Name: "foo"}}
-//	"[]foo" -> &ast.ArrayType{Elem: &ast.SimpleType{Name: "foo"}, Size: -1}
-//	"foo"   -> &ast.SimpleType{Name: "foo"}
+// Supported shapes:
 //
-// Handles recursive nesting (e.g. "*[]foo" -> PointerType{ArrayType{...}}).
+//	"foo"             -> SimpleType{"foo"}
+//	"*foo"            -> PointerType{SimpleType{"foo"}}
+//	"[]foo"           -> ArrayType{SimpleType{"foo"}}
+//	"pkg::foo"        -> SimpleType{"pkg::foo"}    (handed off as-is)
+//	"foo[bar]"        -> GenericType{"foo", [SimpleType{"bar"}]}
+//	"foo[bar,baz]"    -> GenericType{"foo", [SimpleType{"bar"}, SimpleType{"baz"}]}
+//	"*pkg::foo[bar]"  -> PointerType{GenericType{"pkg::foo", [SimpleType{"bar"}]}}
+//
+// Composes recursively, so any combination of *, [], pkg::, and [...]
+// resolves correctly. Whitespace inside the brackets is trimmed per arg.
 func parseTypeParamStr(s string) ast.TypeExpr {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return &ast.SimpleType{Name: ""}
+	}
+
 	if strings.HasPrefix(s, "*") {
 		return &ast.PointerType{Elem: parseTypeParamStr(s[1:])}
 	}
@@ -264,8 +282,65 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 	if strings.HasPrefix(s, "[]") {
 		return &ast.ArrayType{Elem: parseTypeParamStr(s[2:]), Size: -1}
 	}
+	// Look for the FIRST top-level `[` so we can split base[args]. Bracket
+	// depth tracking keeps `Cell[*rc::Cell[i64]]` from splitting at the
+	// inner `[`.
+	depth := 0
+
+	for i, c := range s {
+		switch c {
+		case '[':
+			if depth == 0 {
+				inner := s[i+1:]
+				if !strings.HasSuffix(inner, "]") {
+					return &ast.SimpleType{Name: s}
+				}
+
+				inner = inner[:len(inner)-1]
+				baseName := s[:i]
+
+				return &ast.GenericType{Name: baseName, TypeParams: splitTopLevelTypeArgs(inner)}
+			}
+
+			depth++
+		case ']':
+			depth--
+		}
+	}
 
 	return &ast.SimpleType{Name: s}
+}
+
+// splitTopLevelTypeArgs splits a comma-separated type-arg list while
+// respecting nested `[...]` groups, then parses each piece. Used by
+// parseTypeParamStr to handle multi-arg generics that may themselves
+// contain commas inside their own bracket lists (e.g.
+// `HashMap[string, List[i64]]`).
+func splitTopLevelTypeArgs(s string) []ast.TypeExpr {
+	var out []ast.TypeExpr
+
+	depth := 0
+	start := 0
+
+	for i, c := range s {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, parseTypeParamStr(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	if start < len(s) {
+		out = append(out, parseTypeParamStr(s[start:]))
+	}
+
+	return out
 }
 
 // tryResolveStructTypeName tries to interpret expr as a struct (or generic struct)

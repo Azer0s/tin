@@ -409,21 +409,27 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			baseStaticName := staticName // preserved for error messages before typeArgStr overwrites staticName
 			// Also try the concrete monomorphized key when a type arg is present.
 			if typeArgStr != "" {
-				// typeArgStr may be comma-separated for multi-param generics (e.g. "string,i64").
-				// Build the canonical concrete name by joining parts with __.
-				typeArgParts := strings.Split(typeArgStr, ",")
+				// Each part can itself be a nested generic, a pointer/array,
+				// a qualified name, or a type alias. Parse via the same
+				// type-key string parser the canonical machinery uses, then
+				// run typeExprCanonicalKey to resolve aliases (so e.g.
+				// `type Ptr = *i64; Atomic[Ptr].new(...)` instantiates as
+				// `Atomic__*i64`, the same struct `Atomic[*i64].new(...)`
+				// would). splitTopLevelTypeArgs respects bracket depth so
+				// inner commas (`HashMap[K, List[i64]]`) don't split wrong.
+				typeArgTEs := splitTopLevelTypeArgs(typeArgStr)
+				resolvedParts := make([]string, len(typeArgTEs))
 
-				concreteName := staticName + "__" + strings.Join(typeArgParts, "__")
+				for i, te := range typeArgTEs {
+					resolvedParts[i] = cg.typeExprCanonicalKey(te)
+				}
+
+				concreteName := staticName + "__" + strings.Join(resolvedParts, "__")
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
 					if _, isGeneric := cg.genericStructsByArity[staticName]; isGeneric {
-						typeParams := make([]ast.TypeExpr, len(typeArgParts))
-						for i, p := range typeArgParts {
-							typeParams[i] = parseTypeParamStr(strings.TrimSpace(p))
-						}
-
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
-							Type: &ast.GenericType{Name: staticName, TypeParams: typeParams},
+							Type: &ast.GenericType{Name: staticName, TypeParams: typeArgTEs},
 						}
 						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
 							return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
@@ -961,20 +967,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			if typeParamStr != "" {
 				if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
-					rawParts := strings.Split(typeParamStr, ",")
+					// Each piece of typeParamStr can be a nested generic
+					// (`*rc::Cell[i64]`), a type alias, or a qualified
+					// name. Parse to a TypeExpr first so the canonical-
+					// key step handles all shapes (alias chains, pointers,
+					// packages) uniformly.
+					rawParts := splitTopLevelTypeArgs(typeParamStr)
 					resolvedParts := make([]string, len(rawParts))
 					resolvedTEs := make([]ast.TypeExpr, len(rawParts))
 
-					for i, raw := range rawParts {
-						raw = strings.TrimSpace(raw)
-						if alias, ok2 := cg.typeAliases[raw]; ok2 {
-							if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-								raw = simple.Name
-							}
-						}
-
-						resolvedParts[i] = raw
-						resolvedTEs[i] = parseTypeParamStr(raw)
+					for i, te := range rawParts {
+						resolvedParts[i] = cg.typeExprCanonicalKey(te)
+						resolvedTEs[i] = te
 					}
 
 					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
