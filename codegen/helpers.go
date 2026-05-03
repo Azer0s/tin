@@ -473,6 +473,18 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
 			if fnType, isFnType := pt.ElemType.(*irtypes.FuncType); isFnType {
 				tag = cg.ensureFnTypeID(fnSigName(fnType, false))
+			} else if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+				// Pointer-to-named-struct: prefer the struct's type_id so
+				// the any-release dispatch routes through the struct's
+				// per-type release helper (which calls deinit). Falls
+				// back to anyTagPtr for unknown structs.
+				if id, ok4 := cg.structTypeIDs[innerSt.Name()]; ok4 {
+					tag = id
+				} else if id, ok4 := cg.unionTypeIDs[innerSt.Name()]; ok4 {
+					tag = id
+				} else {
+					tag = anyTagPtr
+				}
 			} else {
 				tag = anyTagPtr
 			}

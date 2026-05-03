@@ -700,7 +700,12 @@ func (cg *CodeGen) noCopyValueTypeName(te ast.TypeExpr) string {
 		if cg.noCopyStructs[concrete] {
 			return concrete
 		}
-		// Template name is registered when the struct decl declared #no_copy.
+		// Template name is registered under multiple keys depending on
+		// the package context where the decl was processed. Try the
+		// bare name first (covers user-level decls), then the package-
+		// qualified key, then sweep for any "<pkg>__<bare>" entry as
+		// a final fallback so pkg::Generic[T] field types in OTHER
+		// packages still trip the check.
 		bare := t.Name
 		if idx := strings.LastIndex(bare, "::"); idx >= 0 {
 			bare = bare[idx+2:]
@@ -708,6 +713,17 @@ func (cg *CodeGen) noCopyValueTypeName(te ast.TypeExpr) string {
 
 		if cg.noCopyStructs[bare] {
 			return concrete
+		}
+
+		if pkgKey := cg.pkgStructKey(bare); pkgKey != bare && cg.noCopyStructs[pkgKey] {
+			return concrete
+		}
+
+		suffix := "__" + bare
+		for k := range cg.noCopyStructs {
+			if strings.HasSuffix(k, suffix) {
+				return concrete
+			}
 		}
 	}
 
@@ -2267,4 +2283,83 @@ func (cg *CodeGen) ensureF128ToCstr() *ir.Func {
 		[]*ir.Param{ir.NewParam("v", irtypes.FP128)}, false)
 
 	return cg.f128ToCstrFn
+}
+
+// emitAnyDispatchRegistrations emits calls to _tin_register_any_release
+// for every struct that has a release helper (deinit or RC-tracked
+// fields). Without this, an any-boxed *Cell or other struct with a
+// custom destructor would skip its deinit entirely on scope exit -- the
+// generic _tin_release_any path only frees the heap block.
+//
+// Returns the (possibly new) block at which subsequent code should
+// continue emitting.
+func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
+	if block == nil {
+		return block
+	}
+
+	// One-shot: only the first wrapper that calls in emits the
+	// registrations. Subsequent calls (from genTestRunner /
+	// genImplicitMain when both happen to fire) are no-ops.
+	if cg.anyDispatchEmitted {
+		return block
+	}
+
+	cg.anyDispatchEmitted = true
+
+	regFn := cg.ensureExternDecl("_tin_register_any_release", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("type_id", irtypes.I32),
+			ir.NewParam("fn", irtypes.I8Ptr),
+		}, false)
+
+	for structName, typeID := range cg.structTypeIDs {
+		st, ok := cg.structTypes[structName]
+		if !ok {
+			continue
+		}
+
+		if !cg.structHasRelease(structName, st) {
+			continue
+		}
+
+		relFn := cg.ensureStructPtrReleaseFn(structName, st)
+		if relFn == nil {
+			continue
+		}
+
+		fnI8 := block.NewBitCast(relFn, irtypes.I8Ptr)
+		block.NewCall(regFn, constant.NewInt(irtypes.I32, int64(typeID)), fnI8)
+	}
+
+	return block
+}
+
+// structHasRelease reports whether struct named structName has a
+// per-struct release helper worth dispatching to from the any-release
+// path. True when the struct has a deinit or owns RC-tracked fields.
+func (cg *CodeGen) structHasRelease(structName string, st *irtypes.StructType) bool {
+	if cg.curScope != nil {
+		if _, has := cg.curScope.lookup(structName + "_deinit"); has {
+			return true
+		}
+	}
+
+	for _, ft := range cg.structFieldLLVMTypes[structName] {
+		if isRCTrackedType(ft) {
+			return true
+		}
+
+		if pt, ok := ft.(*irtypes.PointerType); ok {
+			if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+					return true
+				}
+			}
+		}
+	}
+
+	_ = st
+
+	return false
 }

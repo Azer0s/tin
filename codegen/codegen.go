@@ -227,6 +227,11 @@ type CodeGen struct {
 	// struct literal `S{...}` may only appear inside their own static
 	// methods, so external code is forced through a constructor.
 	closedStructs map[string]bool
+	// anyDispatchEmitted: true once the per-type-id any-release dispatch
+	// table has been registered with the runtime. Set by
+	// emitAnyDispatchRegistrations so the C-main wrapper, the test
+	// runner, and the implicit-main path don't double-emit the calls.
+	anyDispatchEmitted bool
 
 	// localDiagSuppressions: per-file `//!-Wno-<name>` directives keyed
 	// by source line. Lazily populated on the first warning emitted for
@@ -2079,6 +2084,11 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// any fn call to std::os::exit) - not only the
 			// fall-through-from-main path the inline emit covers.
 			wb = cg.emitDeinitAllAtexit(wb)
+
+			// Register per-type-id any-release helpers so that any-boxed
+			// structs run their deinit on scope exit instead of just
+			// freeing the heap block.
+			wb = cg.emitAnyDispatchRegistrations(wb)
 
 			// Emit runtime initializers for top-level var declarations before
 			// any fiber runs so that globals are valid from the start.

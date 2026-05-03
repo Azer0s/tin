@@ -259,8 +259,37 @@ void *_tin_ptr_handover(void *src, size_t elem_size) {
 // reaches 0 releases the env via _tin_release_closure then frees the block.
 // For all other tags, behaves like _tin_release(data).
 // anyTagFn = 5 matches the constant in codegen/types.go.
+
+// Per-type-id deinit dispatch. Codegen calls _tin_register_any_release at
+// startup for every struct that has a deinit (or owns RC fields), so any-
+// boxed structs route through their per-struct release helper. Without
+// this the heap block was freed but the struct's deinit was skipped --
+// e.g. an rc::Cell stored in `any` would silently leak its underlying C
+// resource.
+typedef void (*TinAnyRelease)(void *);
+#define TIN_ANY_DISPATCH_MAX 4096
+static TinAnyRelease _tin_any_release_table[TIN_ANY_DISPATCH_MAX];
+
+void _tin_register_any_release(int32_t type_id, TinAnyRelease fn) {
+    if (type_id >= 0 && type_id < TIN_ANY_DISPATCH_MAX) {
+        _tin_any_release_table[type_id] = fn;
+    }
+}
+
 void _tin_release_any(int32_t tag, void *data) {
     if (!data) return;
+
+    // Per-type-id dispatch: the registered helper handles the full
+    // teardown (RC dec + deinit + field release + free) so we return
+    // before falling through to the generic free below.
+    if (tag >= 6 && tag < TIN_ANY_DISPATCH_MAX) {
+        TinAnyRelease fn = _tin_any_release_table[tag];
+        if (fn) {
+            fn(data);
+            return;
+        }
+    }
+
     TinRCHdr *hdr = _rc_hdr(data);
     if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
     int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);

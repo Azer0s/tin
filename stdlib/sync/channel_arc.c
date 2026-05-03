@@ -235,7 +235,7 @@ typedef struct TinChannel {
     int64_t          cap;
     int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
     int64_t          elem_size;
-    bool             closed;
+    atomic_bool      closed;
     int              rc_kind;
 
     // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
@@ -277,7 +277,7 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     ch->cap       = cap;
     ch->cap_mask  = cap - 1;
     ch->elem_size = elem_size;
-    ch->closed    = false;
+    atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
     ch->rc_kind   = rc_kind;
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
@@ -510,6 +510,15 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
                                 int64_t elem_size, int rc_kind, int64_t pid) {
     TinChannel *ch = (TinChannel *)ptr;
     size_t esz = (size_t)elem_size;
+
+    // Closed check has to happen on the fast path too.  Skipping it here
+    // (and only checking inside the slow path lock) lets a closed channel
+    // silently buffer values when there's room, contradicting the
+    // "send on closed channel panics" contract documented in channel.tin.
+    // The load is acquire-ordered so close()'s store is visible.
+    if (__builtin_expect(atomic_load_explicit(&ch->closed, memory_order_acquire), 0)) {
+        return -1;
+    }
 
     // Fast path: no parked receivers, not closed, channel has space.
     int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
@@ -979,7 +988,7 @@ void _tin_channel_close(void *ptr) {
     void   **wake_fibs = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
     int w = 0;
 
-    ch->closed = true;
+    atomic_store_explicit(&ch->closed, true, memory_order_release);
     while (ch->recv_wq.cnt > 0) {
         ch->recv_wq.cnt--;
         if (wake_pids) {

@@ -1287,8 +1287,19 @@ doneFlags:
 			die("cache dir: %v", err)
 		}
 
-		if err := compileIRWithPkgs(irText, pkgIRTexts, runCacheBinPath, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
+		// Write to a per-PID temp path then atomic-rename, so a
+		// concurrent `tin run` of the same source can never observe
+		// (or exec) a half-written binary. ETXTBSY otherwise: process
+		// A holds the binary open for write while process B execs it.
+		runCacheBinTmp := fmt.Sprintf("%s.tmp.%d", runCacheBinPath, os.Getpid())
+		if err := compileIRWithPkgs(irText, pkgIRTexts, runCacheBinTmp, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
+			_ = os.Remove(runCacheBinTmp)
 			die("compile error: %v", err)
+		}
+
+		if err := os.Rename(runCacheBinTmp, runCacheBinPath); err != nil {
+			_ = os.Remove(runCacheBinTmp)
+			die("cache rename: %v", err)
 		}
 
 		if err := writeBuildSBOM(runCacheDir, file, src, buildDeps(cg, fileCSources)); err != nil {
@@ -3029,6 +3040,16 @@ func buildFlagsHash() string {
 			h.Write([]byte(f))
 		}
 
+		// Sysroot / SDK overrides change linkage and header search
+		// paths, so they must invalidate the cache. Includes the
+		// resolved path (auto-detected or explicit), not just the
+		// override flag, so a TIN_MACOS_SDK env-var swap is also
+		// detected.
+		h.Write([]byte{0})
+		h.Write([]byte(macosSDKPath()))
+		h.Write([]byte{0})
+		h.Write([]byte(linuxSysrootPath()))
+
 		sum := h.Sum(nil)
 		buildFlagsHashCache = hex.EncodeToString(sum[:4])
 	})
@@ -3166,11 +3187,22 @@ func writeBuildSBOM(cacheDir, entryFile string, entrySrc []byte, depPaths []stri
 	return os.WriteFile(filepath.Join(cacheDir, "sbom.txt"), []byte(sb.String()), 0o644)
 }
 
-// cleanStaleCacheEntries removes every subdirectory of .build/<mode>/ whose
-// name starts with "<dunder>_" - they're all stale candidates for the
-// current source. Called before recreating the fresh cache dir on a miss
-// so old binaries from prior builds don't pile up.
+// cleanStaleCacheEntries removes every subdirectory of .build/<mode>/
+// whose name starts with "<dunder>_<srcmd5>_" -- those are stale
+// flagshash slots for THIS source-content. Slots for other content
+// MD5s are kept so unrelated entries don't get nuked. Slots for the
+// SAME flagshash are also kept so toggling -O0/-O2/-O0 doesn't force
+// a cold rebuild every time.
+//
+// Called before recreating the fresh cache dir on a miss so old
+// binaries from prior builds (different content, same source path)
+// don't pile up.
 func cleanStaleCacheEntries(mode, file string) {
+	src, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+
 	cleaned := filepath.ToSlash(filepath.Clean(file))
 	cleaned = strings.TrimPrefix(cleaned, "/")
 	dunder := strings.ReplaceAll(cleaned, "/", "__")
@@ -3182,13 +3214,32 @@ func cleanStaleCacheEntries(mode, file string) {
 		return
 	}
 
+	srcSum := md5.Sum(src)
+	srcHex := hex.EncodeToString(srcSum[:])
+	keepBase := fmt.Sprintf("%s_%s_%s", dunder, srcHex, buildFlagsHash())
+
+	// Drop slots for the same source path that have a DIFFERENT source
+	// content MD5 (they came from prior file contents and will never be
+	// reused). Keep flagshash siblings of the current source content so
+	// users can toggle -O0/-O2 without paying cold-rebuild cost each time.
 	prefix := dunder + "_"
+	keepContentPrefix := dunder + "_" + srcHex + "_"
+
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+		if !e.IsDir() {
 			continue
 		}
 
-		_ = os.RemoveAll(filepath.Join(base, e.Name()))
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+
+		if name == keepBase || strings.HasPrefix(name, keepContentPrefix) {
+			continue
+		}
+
+		_ = os.RemoveAll(filepath.Join(base, name))
 	}
 }
 

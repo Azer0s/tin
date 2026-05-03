@@ -428,6 +428,23 @@ func bodyHasAllowSideffect(body ast.Node) bool {
 func (cg *CodeGen) preregister(node ast.Node) error {
 	switch n := node.(type) {
 	case *ast.StructDecl:
+		// Tag-driven side maps must populate during preregister (pass 1)
+		// so later passes can consult them. genStructLayout (pass 3 phase
+		// A) used to be the only writer, but predeclareFuncAs (pass 2)
+		// also needs to see #no_copy to reject by-value parameters and
+		// returns -- previously those slipped through and only let-binding
+		// rejection caught them. Mirror the writes here for both bare and
+		// pkg-qualified keys so cross-package lookups work.
+		if hasTag(n.Tags, "no_copy") {
+			cg.noCopyStructs[n.Name] = true
+			cg.noCopyStructs[cg.pkgStructKey(n.Name)] = true
+		}
+
+		if hasTag(n.Tags, "closed") {
+			cg.closedStructs[n.Name] = true
+			cg.closedStructs[cg.pkgStructKey(n.Name)] = true
+		}
+
 		if len(n.TypeParams) > 0 {
 			// Generic struct - store as template keyed by arity; concrete types
 			// are created when a "type X = GenericStruct[T, R]" alias is processed.
@@ -2470,6 +2487,11 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 	// any user code. See codegen.go's main wrapper for rationale.
 	entry = cg.emitDeinitAllAtexit(entry)
 
+	// Register per-type-id any-release helpers so that any-boxed
+	// structs run their deinit on scope exit instead of just freeing
+	// the heap block.
+	entry = cg.emitAnyDispatchRegistrations(entry)
+
 	// Emit top-level var runtime initializations (deferred from pre-pass 1.7).
 	var err error
 
@@ -2602,6 +2624,10 @@ func (cg *CodeGen) genTestRunner() error {
 	// any test code (matches the pattern in genImplicitMain / the
 	// codegen.go main wrapper).
 	cur = cg.emitDeinitAllAtexit(cur)
+
+	// Register per-type-id any-release helpers so that any-boxed
+	// structs in tests run their deinit on scope exit.
+	cur = cg.emitAnyDispatchRegistrations(cur)
 
 	// Initialize top-level var globals so tests can reference them.
 	cur, err = cg.emitTopLevelVarInits(cur)
