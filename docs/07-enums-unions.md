@@ -265,6 +265,33 @@ it has no single concrete type. Use `match v.(type)` to recover the
 concrete variant. The compiler will not let you call type-specific operations
 on a `t`-typed value without one.
 
+### Compile-time match resolution
+
+When the generic is instantiated with a **single concrete variant** (e.g.
+`Box[i64]` for `where t is num`), `match v.(type)` is statically
+resolvable. The compiler keeps only the arm whose type matches the
+substituted `t` and dead-strips the rest -- no tag load, no switch, no
+branch. The arms for unreachable variants don't even reach the IR.
+
+```rust
+let bi = Box[i64]{v: 42}
+echo bi.show()   // emits the i64 arm body only; the f64 arm is gone
+
+let bn = Box[num]{v: 42 as num}
+echo bn.show()   // emits the full tag-dispatched switch (real tagged union)
+```
+
+If no arm matches the concrete type:
+
+- with a `default:` arm, the default body becomes the only emitted code.
+- without a `default:` arm, the compiler errors out -- the user wrote a
+  match that proves the instantiation is wrong (e.g. `Box[bool]` for a
+  `where t is num` body matching only i64/f64).
+
+This means `match v.(type)` inside a where-guarded function is free at
+runtime when the type-arg is concrete and pays only for the variants you
+actually write when the type-arg is the literal tagged union.
+
 ---
 
 ## Native C unions
