@@ -1192,7 +1192,14 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	// template's source. Override so per-line `//!-Wno-` directives on
 	// the template (e.g. Channel's _ptr field) silence the diagnostic
 	// for every monomorphization.
-	if tmplFile := cg.structDeclFiles[cg.pkgStructKey(tmpl.Name)]; tmplFile != "" {
+	//
+	// The template was originally registered under its OWN package's key
+	// (e.g. "sync__Channel"), but currentPkg has been restored to the
+	// instantiating context. Look up the template by both the
+	// current-pkg-prefixed key and the bare name, then sweep for any
+	// "<pkg>__<tmplName>" entry as a final fallback so cross-package
+	// generic instantiations also pick up the template's source path.
+	if tmplFile := cg.lookupTemplateFile(tmpl.Name); tmplFile != "" {
 		cg.structDeclFiles[concrete.Name] = tmplFile
 	}
 
@@ -2474,4 +2481,40 @@ func (cg *CodeGen) wrapNativeUnion(block *ir.Block, val value.Value, targetSt *i
 	block.NewStore(storedVal, valPtr)
 
 	return block.NewLoad(targetSt, alloca)
+}
+
+// lookupTemplateFile resolves the source-file path that originally
+// declared a generic struct template. Empty string when not found.
+func (cg *CodeGen) lookupTemplateFile(tmplName string) string {
+	// Generic templates are tagged at preregister time -- every
+	// monomorphization shares the same source.
+	if f := cg.genericStructTmplFiles[tmplName]; f != "" {
+		return f
+	}
+
+	if f := cg.genericStructTmplFiles[cg.pkgStructKey(tmplName)]; f != "" {
+		return f
+	}
+
+	// Non-generic structs go through structDeclFiles only.
+	if f := cg.structDeclFiles[cg.pkgStructKey(tmplName)]; f != "" {
+		return f
+	}
+
+	if f := cg.structDeclFiles[tmplName]; f != "" {
+		return f
+	}
+
+	suffix := "__" + tmplName
+	for k, v := range cg.structDeclFiles {
+		if v == "" {
+			continue
+		}
+
+		if strings.HasSuffix(k, suffix) {
+			return v
+		}
+	}
+
+	return ""
 }

@@ -665,6 +665,13 @@ func (cg *CodeGen) inferStructTypeArgs(block *ir.Block, e *ast.StructLit, arityM
 }
 
 func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value, error) {
+	// Capture the original source position before any rewrite below. The
+	// rewrites construct fresh StructLit nodes without a Pos, which would
+	// otherwise leak through to error messages as "0:0" or whatever
+	// cg.currentPos last held (typically the position of an unrelated
+	// monomorphized method body).
+	origPos := e.Pos()
+
 	typeName := e.TypeName
 	// Generic struct literal WITHOUT explicit type args: `Box{value: "hi"}`
 	// -- infer type arguments from the provided field values when `Box` is
@@ -676,7 +683,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		if _, isConcrete := cg.structTypes[typeName]; !isConcrete {
 			if arityMap, isGeneric := cg.genericStructsByArity[typeName]; isGeneric {
 				if inferred, ok := cg.inferStructTypeArgs(block, e, arityMap); ok {
-					e = &ast.StructLit{TypeName: e.TypeName, TypeArgs: inferred, Fields: e.Fields, Positional: e.Positional}
+					next := &ast.StructLit{TypeName: e.TypeName, TypeArgs: inferred, Fields: e.Fields, Positional: e.Positional}
+					next.SetPos(origPos)
+					e = next
 				}
 			}
 		}
@@ -716,7 +725,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 		typeName = concreteName
 		// Rewrite the StructLit to use the concrete name for the rest of genStructLit.
-		e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+		next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+		next.SetPos(origPos)
+		e = next
 	}
 	// Resolve through type aliases to the canonical struct name
 	// (e.g., bare "Mutex" -> "sync__Mutex" after canonical naming).
@@ -728,7 +739,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		if alias, ok2 := cg.typeAliases[typeName]; ok2 {
 			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 				typeName = simple.Name
-				e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+				next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+				next.SetPos(origPos)
+				e = next
 				resolved = true
 			}
 		}
@@ -743,7 +756,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				if alias, ok2 := cg.typeAliases[shorter]; ok2 {
 					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 						typeName = simple.Name
-						e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+						next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+						next.SetPos(origPos)
+						e = next
 
 						break
 					}
@@ -768,9 +783,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// appear inside one of S's own static methods. External callers must go
 	// through the constructor -- that's the whole point of #closed.
 	if cg.closedStructs[typeName] && !cg.curFnOwnsStruct(typeName) {
+		hint := cg.closedConstructorHint(typeName)
+
 		return nil, cg.nodeErr(e,
-			"%s is #closed: construct via one of its static methods (e.g. %s.alloc(...)) -- direct struct literals are not allowed outside the type's own methods",
-			prettyStructName(typeName), prettyStructName(typeName))
+			"%s is #closed: construct via one of its static methods (%s) -- direct struct literals are not allowed outside the type's own methods",
+			prettyStructName(typeName), hint)
 	}
 
 	// cLayoutStructs need special handling: the wrapper type has no user fields.
@@ -2708,4 +2725,40 @@ func (cg *CodeGen) finishBinOpDispatch(block *ir.Block, op string, res value.Val
 	}
 
 	return res
+}
+
+// closedConstructorHint returns a comma-joined list of "<TypeName>.<m>(...)"
+// for every static method of typeName, so the #closed diagnostic shows
+// the actual entry points the user should call.
+func (cg *CodeGen) closedConstructorHint(typeName string) string {
+	pretty := prettyStructName(typeName)
+
+	sd := cg.structDeclsByName[typeName]
+	if sd == nil {
+		// Try the bare name in case typeName is a monomorphized form
+		// (Cell__i64) and the decl was registered under "Cell".
+		if idx := strings.Index(typeName, "__"); idx > 0 {
+			sd = cg.structDeclsByName[typeName[:idx]]
+		}
+	}
+
+	if sd == nil {
+		return "use a static constructor instead of a struct literal"
+	}
+
+	var names []string
+
+	for _, m := range sd.Methods {
+		if !m.IsStatic {
+			continue
+		}
+
+		names = append(names, fmt.Sprintf("%s.%s(...)", pretty, m.Name))
+	}
+
+	if len(names) == 0 {
+		return "use a static constructor instead of a struct literal"
+	}
+
+	return "e.g. " + strings.Join(names, " or ")
 }

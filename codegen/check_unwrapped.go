@@ -179,7 +179,16 @@ func (cg *CodeGen) checkStructUnwrappedCResources(structKey string, sd *ast.Stru
 			pos = sd.Pos()
 		}
 
-		cg.warnInFile(cg.structDeclFiles[structKey], DiagUnwrappedCResource, pos,
+		// Use the registered file for this struct key when present;
+		// fall back to a template lookup so monomorphized concrete
+		// names (e.g. Channel__i64) inherit the template's source file
+		// for `//!-Wno-` lookup.
+		file := cg.structDeclFiles[structKey]
+		if file == "" {
+			file = cg.lookupTemplateFile(sd.Name)
+		}
+
+		cg.warnInFile(file, DiagUnwrappedCResource, pos,
 			"struct %s field %q (%s) crosses an extern boundary unwrapped -- "+
 				"copies of %s will alias the resource and double-free on scope exit. %s",
 			prettyStructName(sd.Name), f.Name, shape,
@@ -479,9 +488,9 @@ func (cg *CodeGen) callIsExtern(call *ast.CallExpr) bool {
 func (cg *CodeGen) cResourceWrapHint(shape string, te ast.TypeExpr, fieldName string) string {
 	switch shape {
 	case "*void":
-		return "Wrap with `*rc::Cell[*void]` (or another #no_copy wrapper) so copies bump a refcount."
+		return "Wrap with *rc::Cell[*void] (or another #no_copy wrapper) so copies bump a refcount."
 	case "i64 fd":
-		return "Wrap with `*rc::Cell[i64]` and a closer destructor so copies share the descriptor lifetime."
+		return "Wrap with *rc::Cell[i64] and a closer destructor so copies share the descriptor lifetime."
 	}
 
 	return "Wrap with a #no_copy refcount cell so copies share ownership safely."

@@ -438,6 +438,17 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			}
 
 			cg.genericStructsByArity[n.Name][len(n.TypeParams)] = n
+
+			// Tag the template's source file so monomorphizations can
+			// inherit it for `//!-Wno-` lookup. Without this, every
+			// `Channel[T]` instantiated in user code would lose the
+			// suppression that lives in stdlib/sync/channel.tin.
+			if cg.filename != "" {
+				cg.genericStructTmplFiles[n.Name] = cg.filename
+				if cg.currentPkg != "" {
+					cg.genericStructTmplFiles[cg.currentPkg+"__"+n.Name] = cg.filename
+				}
+			}
 		} else {
 			// Register an opaque struct so recursive types work.
 			// Use the canonical package-prefixed name as both the map key and the

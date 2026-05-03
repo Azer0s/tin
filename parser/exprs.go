@@ -1698,10 +1698,12 @@ func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
 }
 
 func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
+	pos := p.curPos()
 	p.advance() // consume {
 	p.skipWhitespace()
 
 	lit := &ast.StructLit{TypeName: typeName}
+	lit.SetPos(pos)
 
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		// Named: "name: value" or positional: "value"

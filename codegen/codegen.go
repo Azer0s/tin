@@ -50,6 +50,10 @@ type CodeGen struct {
 	structFieldTinTypes map[string][]ast.TypeExpr
 	// generic struct templates: name -> arity -> AST node (not compiled directly)
 	genericStructsByArity map[string]map[int]*ast.StructDecl
+	// genericStructTmplFiles: source file each template was registered
+	// from. Used by monomorphization to inherit per-line `//!-Wno-`
+	// directives from the template's source file.
+	genericStructTmplFiles map[string]string
 
 	// trait vtable struct types: instKey -> LLVM struct type for vtable
 	// instKey = traitName for non-generic, "traitName_typeArg" for generic
@@ -1237,6 +1241,7 @@ func New(filename string) *CodeGen {
 		structFieldTags:        make(map[string]map[string]string),
 		structFieldTinTypes:    make(map[string][]ast.TypeExpr),
 		genericStructsByArity:  make(map[string]map[int]*ast.StructDecl),
+		genericStructTmplFiles: make(map[string]string),
 		traitVtableStructTypes: make(map[string]*irtypes.StructType),
 		traitFatPtrTypes:       make(map[string]*irtypes.StructType),
 		traitMethodOrder:       make(map[string][]string),

@@ -1913,15 +1913,15 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 	return afterBlock, nil
 }
 
-// concreteTypeDisplay renders an LLVM type for diagnostics. Falls back
-// to the LLVM type's own String() when the codegen-side struct-name
-// lookup yields nothing (which it does for every primitive).
+// concreteTypeDisplay renders an LLVM type for diagnostics, preferring
+// the source-syntax form ("Box[i64]", "[i64]", "*Foo") over the raw
+// LLVM string ("%Box__i64", "{ i8*, i64 }", "%Foo*").
 func concreteTypeDisplay(cg *CodeGen, t irtypes.Type) string {
 	if name := cg.typeNameOf(t); name != "" {
-		return name
+		return prettyStructName(name)
 	}
 
-	return t.String()
+	return fmtArgType(t)
 }
 
 // genMatchConcreteFallthrough is retained for API stability; new logic

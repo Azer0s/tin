@@ -1469,8 +1469,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				if !srcEl.Equal(tgtEl) && !srcEl.Equal(irtypes.I8) {
 					return nil, cg.nodeErr(e,
-						"argument %d: cannot pass [%s] where [%s] is expected; use `arg as [%s]` to convert",
-						i+1, fmtArgType(srcEl), fmtArgType(tgtEl), fmtArgType(tgtEl))
+						"argument %d: cannot pass [%s] where [%s] is expected; use %q to convert",
+						i+1, fmtArgType(srcEl), fmtArgType(tgtEl),
+						"arg as ["+fmtArgType(tgtEl)+"]")
 				}
 
 				continue

@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -495,6 +496,10 @@ func whereClauseArity(pat ast.Node) (int, ast.Node) {
 // error messages read naturally. Strings, bools, and ints/floats get their
 // source-level names; everything else falls back to the LLVM form.
 func fmtArgType(t irtypes.Type) string {
+	if t == nil {
+		return "<nil>"
+	}
+
 	if isFatArrayPtr(t) {
 		st := t.(*irtypes.StructType)
 		elem := st.Fields[0].(*irtypes.PointerType).ElemType
@@ -521,6 +526,8 @@ func fmtArgType(t irtypes.Type) string {
 
 	if ft, ok := t.(*irtypes.FloatType); ok {
 		switch ft.Kind { //nolint:exhaustive // half/X86_FP80/PPC_FP128 are unused by tin
+		case irtypes.FloatKindHalf:
+			return "f16"
 		case irtypes.FloatKindFloat:
 			return "f32"
 		case irtypes.FloatKindDouble:
@@ -528,6 +535,36 @@ func fmtArgType(t irtypes.Type) string {
 		case irtypes.FloatKindFP128:
 			return "f128"
 		}
+	}
+
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		// Opaque pointer in modern LLVM: print as *void.
+		if pt.ElemType == nil {
+			return "*void"
+		}
+
+		return "*" + fmtArgType(pt.ElemType)
+	}
+
+	if at, ok := t.(*irtypes.ArrayType); ok {
+		return fmt.Sprintf("[%d x %s]", at.Len, fmtArgType(at.ElemType))
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok {
+		if name := st.Name(); name != "" {
+			return prettyStructName(name)
+		}
+		// Anonymous tuple-like struct: render as (T1, T2, ...).
+		parts := make([]string, len(st.Fields))
+		for i, f := range st.Fields {
+			parts[i] = fmtArgType(f)
+		}
+
+		return "(" + strings.Join(parts, ", ") + ")"
+	}
+
+	if _, ok := t.(*irtypes.VoidType); ok {
+		return "void"
 	}
 
 	return t.String()
