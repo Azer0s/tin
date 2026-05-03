@@ -38,6 +38,13 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 	g := cg.activeModule().NewGlobal(irName, lt)
 	g.Init = initVal
 
+	// Mirror the entry-program path: top-level `const` becomes an
+	// LLVM `constant` global, not `global`, so the read-only storage
+	// guarantee holds across packages too.
+	if tv.IsConst {
+		g.Immutable = true
+	}
+
 	entry := &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true}
 	cg.curScope.set(tv.Name, entry)
 
@@ -135,6 +142,17 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 
 	g := cg.activeModule().NewGlobal(tv.Name, lt)
 	g.Init = initVal
+
+	// Top-level `const` is placed in read-only storage so the runtime
+	// genuinely cannot modify it -- writes through an aliased pointer
+	// segfault rather than silently mutating the value. The compile-
+	// time -Wwrite-to-const pass catches the obvious cases at the
+	// source level; the LLVM `constant` qualifier is the belt-and-
+	// suspenders backstop for cases the static pass can't see (FFI,
+	// inline asm, runtime-routed pointers).
+	if tv.IsConst {
+		g.Immutable = true
+	}
 
 	// Register in global scope as a pointer (alloc-style) so that loads/stores work.
 	// isGlobal=true prevents per-function scope release from deiniting the global.
