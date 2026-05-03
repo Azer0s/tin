@@ -478,6 +478,55 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 	return concrete + "_" + fn.Field
 }
 
+// markOwningRawPtrField records that fieldName on structName receives an
+// owning heap pointer. Triggered by genStructLit (and assignment paths) when
+// the value being stored is `&Identifier` and the identifier is in
+// cg.curFnEscapingVars — i.e. the local was already heap-promoted by escape
+// analysis and the receiving struct is now the sole owner. The struct's
+// release helper consults this map to cascade _tin_release through the
+// field on drop.
+//
+// Only `*T` raw pointer fields where T is NOT itself a Tin struct are
+// recorded — Tin's existing per-struct release machinery already cascades
+// through `*TinStruct` fields, RC-tracked fat ptrs (string, fat array,
+// any, fn closure), and nested structs.
+func (cg *CodeGen) markOwningRawPtrField(structName, fieldName string, valueExpr ast.Node, valueLLType irtypes.Type) {
+	if structName == "" || fieldName == "" {
+		return
+	}
+
+	addr, ok := valueExpr.(*ast.AddressOfExpr)
+	if !ok {
+		return
+	}
+
+	id, ok := addr.Expr.(*ast.Identifier)
+	if !ok {
+		return
+	}
+
+	if !cg.curFnEscapingVars[id.Name] {
+		return
+	}
+
+	pt, ok := valueLLType.(*irtypes.PointerType)
+	if !ok {
+		return
+	}
+	// Tin struct pointer: existing structPtrReleaseFn already cascades.
+	if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+		if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+			return
+		}
+	}
+
+	if cg.structOwningRawPtrFields[structName] == nil {
+		cg.structOwningRawPtrFields[structName] = make(map[string]bool)
+	}
+
+	cg.structOwningRawPtrFields[structName][fieldName] = true
+}
+
 // curFnOwnsStruct reports whether the current function being emitted is a
 // method of structName (template or any of its monomorphized instances).
 // Used to gate the #closed struct-literal check: only the struct's own
@@ -933,6 +982,8 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	fieldNames := cg.structFields[structName]
 	weakSet := cg.structWeakFields[structName]
 
+	owningRawPtrFields := cg.structOwningRawPtrFields[structName]
+
 	for i, ft := range fieldTypes {
 		_, isNestedStruct := ft.(*irtypes.StructType)
 
@@ -945,8 +996,18 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 				_, isTinStructPtr = cg.structTypes[innerSt.Name()]
 			}
 		}
+		// Owning raw pointer field — registered when escape-promoted local
+		// flowed in here. Walk it like any other RC-tracked field so the
+		// per-struct release helper cascades _tin_release through it.
+		isOwningRawPtr := false
 
-		if !isRCTrackedType(ft) && !isNestedStruct && !isTinStructPtr {
+		if i < len(fieldNames) && owningRawPtrFields[fieldNames[i]] {
+			if _, isPtr := ft.(*irtypes.PointerType); isPtr {
+				isOwningRawPtr = true
+			}
+		}
+
+		if !isRCTrackedType(ft) && !isNestedStruct && !isTinStructPtr && !isOwningRawPtr {
 			continue
 		}
 		// Weak fields are non-owning: skip retain/release entirely.
@@ -964,6 +1025,17 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(offset+i)))
 			fieldVal = block.NewLoad(ft, gep)
+		}
+
+		// Owning raw pointer to a non-Tin-struct heap block (escape-promoted
+		// local recorded via markOwningRawPtrField). Decrement RC directly;
+		// the standard emitRelease path doesn't know how to release a bare
+		// `*T` field because Tin treats *T as a borrow elsewhere.
+		if isOwningRawPtr {
+			ptrI8 := block.NewBitCast(fieldVal, irtypes.I8Ptr)
+			block.NewCall(cg.ensureRelease(), ptrI8)
+
+			continue
 		}
 
 		visit(fieldVal)

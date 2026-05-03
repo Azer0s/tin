@@ -165,6 +165,14 @@ type CodeGen struct {
 	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
 	memsetFn *ir.Func
 
+	// structOwningRawPtrFields: struct key -> set of `*T` raw-pointer field
+	// names that have been observed receiving the address of an early-heap-
+	// promoted local. The struct's release helper cascades _tin_release
+	// through each such field on drop, balancing the heap allocation done
+	// when the local was promoted. Recording it per-struct (rather than
+	// globally on `*T` types) keeps borrow-style `*T` fields untouched.
+	structOwningRawPtrFields map[string]map[string]bool
+
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
@@ -1276,6 +1284,7 @@ func New(filename string) *CodeGen {
 		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		structOwningRawPtrFields: make(map[string]map[string]bool),
 		structConstFields:        make(map[string]map[string]bool),
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),

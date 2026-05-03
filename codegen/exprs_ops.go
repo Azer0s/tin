@@ -754,6 +754,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			if i < len(fieldNames) {
 				fieldName = fieldNames[i]
 			}
+			// Track owning raw `*T` fields (see field-named branch below for
+			// the rationale).
+			if !weakSet[fieldName] && fieldName != "" {
+				cg.markOwningRawPtrField(typeName, fieldName, v, val.Type())
+			}
 
 			if isCopyExpr(v) && !weakSet[fieldName] {
 				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
@@ -795,6 +800,14 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
 			block.NewStore(val, gep)
+			// `&escape_promoted_local` flowing into a raw `*T` field — the
+			// local was heap-allocated by escape analysis, and Tin would
+			// otherwise leak the heap block when the containing struct
+			// drops (no owner left). Mark this struct/field pair as
+			// owning so the per-struct release helper cascades through it.
+			if !weakSet[f.Name] {
+				cg.markOwningRawPtrField(typeName, f.Name, f.Value, val.Type())
+			}
 			// ARC: retain RC-tracked values copied from existing owners.
 			// Weak fields are non-owning: skip retain.
 			if isCopyExpr(f.Value) && !weakSet[f.Name] {
