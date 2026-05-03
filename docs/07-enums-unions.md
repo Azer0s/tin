@@ -79,8 +79,11 @@ clause is optional. The compiler detects this and does not require a trailing
 `return` after the match:
 
 ```rust
-type direction = enum:
-  north, south, east, west
+enum direction =
+  north
+  south
+  east
+  west
 
 fn direction_name(d direction) string =
   match d:

@@ -1415,9 +1415,15 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return true
 	}
 
-	// If the name is a tagged union type, check whether structName is one of
-	// its variants (recursively, since unions can contain other unions).
+	// If the name is a tagged union type, the literal tagged-union type
+	// itself satisfies the bound (`where t is num` matches t = num, the
+	// whole union value), and so does any of its structural variants
+	// (`where t is num` matches t = i64 when num = i64 | f64).
 	if members, ok := cg.unionTypeMembers[traitName]; ok {
+		if structName == traitName {
+			return true
+		}
+
 		for _, member := range members {
 			if cg.typeExprContains(member, structName) {
 				return true
