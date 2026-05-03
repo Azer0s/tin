@@ -884,6 +884,10 @@ type CodeGen struct {
 	// soundness check to reject reads/writes of mutable globals from a #pure
 	// body. Populated lazily before checkAllPureFuncs runs.
 	topLevelVarBareNames map[string]bool
+	// topLevelConstNames is the subset of topLevelVarBareNames whose
+	// declarations were `const` (not `var`). Read by #pure verification
+	// to skip the "reads mutable top-level var" diagnostic for consts.
+	topLevelConstNames map[string]bool
 
 	// pkgInitFns: init functions collected from packages that declare
 	// fn init(). Called at program startup after top-level var inits,
@@ -1716,9 +1720,16 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.topLevelVarBareNames = map[string]bool{}
 	}
 
+	if cg.topLevelConstNames == nil {
+		cg.topLevelConstNames = map[string]bool{}
+	}
+
 	for _, node := range prog.Stmts {
 		if tv, ok := node.(*ast.TopLevelVar); ok {
 			cg.topLevelVarBareNames[tv.Name] = true
+			if tv.IsConst {
+				cg.topLevelConstNames[tv.Name] = true
+			}
 		}
 	}
 

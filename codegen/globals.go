@@ -54,6 +54,14 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 
 	cg.topLevelVarBareNames[tv.Name] = true
 
+	if tv.IsConst {
+		if cg.topLevelConstNames == nil {
+			cg.topLevelConstNames = map[string]bool{}
+		}
+
+		cg.topLevelConstNames[tv.Name] = true
+	}
+
 	if exportedNames[tv.Name] && parentScope != nil {
 		parentScope.set(pkgName+"::"+tv.Name, entry)
 		parentScope.set(pkgName+"."+tv.Name, entry)
@@ -163,6 +171,14 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	}
 
 	cg.topLevelVarBareNames[tv.Name] = true
+
+	if tv.IsConst {
+		if cg.topLevelConstNames == nil {
+			cg.topLevelConstNames = map[string]bool{}
+		}
+
+		cg.topLevelConstNames[tv.Name] = true
+	}
 
 	// Track every top-level var for deinit-at-exit (regardless of init type).
 	// pkgName is cg.currentPkg (empty for entry program top-level vars).

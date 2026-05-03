@@ -1276,7 +1276,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 	if p.check(lexer.INC) {
 		op := p.advance().Literal
 
-		return &ast.PostfixStmt{Expr: expr, Op: op}, nil
+		stmt := &ast.PostfixStmt{Expr: expr, Op: op}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	// Assignment =

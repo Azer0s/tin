@@ -188,6 +188,13 @@ func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
 		return dn
 	}
 
+	// De-mangle monomorphized generic struct names (Box__i64 -> Box[i64]),
+	// matching the rendering used by fmtArgType. Without this, named
+	// struct types fell through as raw LLVM symbols.
+	if pretty := prettyStructName(name); pretty != name {
+		return pretty
+	}
+
 	return name
 }
 

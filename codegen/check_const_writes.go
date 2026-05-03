@@ -441,6 +441,14 @@ func (cg *CodeGen) checkFuncForConstWrites(
 			walk(v.Expr)
 		case *ast.DerefExpr:
 			walk(v.Expr)
+		case *ast.LambdaExpr:
+			// Recurse into lambda bodies. The taint set is intentionally
+			// not propagated across the closure boundary -- captured
+			// outer bindings would need an explicit alias inside the
+			// lambda to reactivate detection. This matches Go's vet:
+			// pointer-to-const writes inside a closure are flagged when
+			// the closure itself takes a pointer-to-const.
+			walk(v.Body)
 		}
 	}
 

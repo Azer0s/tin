@@ -137,7 +137,7 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 					}
 
 					if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
-						return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+						return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
 					}
 				}
 

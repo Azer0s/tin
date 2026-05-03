@@ -1278,6 +1278,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				heapOwnedDepth = depth
 			}
 		}
+	} else if _, isAwait := s.Value.(*ast.AwaitExpr); isAwait && llType != nil {
+		// `let c = await expr` where expr returns a *NamedStruct
+		// always transfers RC ownership to the caller -- the producer
+		// (channel/atomic/whatever) retained a slot, the await
+		// dequeues + clears the slot, and the awaiter is now the
+		// owner. Without this isHeapOwned flag the binding would skip
+		// scope-exit release_ptr and leak the dequeued value.
+		if pt, isPtr := llType.(*irtypes.PointerType); isPtr {
+			if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+					isHeapOwned = true
+					heapOwnedDepth = pointerChainDepth(llType)
+				}
+			}
+		}
 	}
 
 	isRC := isRCTrackedType(llType)
@@ -1771,17 +1786,18 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		} else {
 			val = cg.coerce(block, val, retType)
 			if !val.Type().Equal(retType) {
-				// Render in user-facing source syntax (`string`, not
-				// `{ i8*, i64 }`); fall back to typeNameOf only when
-				// tinTypeDisplay can't recognize the shape.
-				gotName := cg.tinTypeDisplay(val.Type())
-				if gotName == "" {
-					gotName = cg.typeNameOf(val.Type())
+				// Render in user-facing source syntax (Foo[i64], not
+				// the LLVM-mangled %Foo__i64). fmtArgType handles every
+				// common shape; fall back to prettyStructName via the
+				// raw struct name only when fmtArgType yields nothing.
+				gotName := fmtArgType(val.Type())
+				if gotName == "" || gotName == "<nil>" {
+					gotName = prettyStructName(cg.typeNameOf(val.Type()))
 				}
 
-				wantName := cg.tinTypeDisplay(retType)
-				if wantName == "" {
-					wantName = cg.typeNameOf(retType)
+				wantName := fmtArgType(retType)
+				if wantName == "" || wantName == "<nil>" {
+					wantName = prettyStructName(cg.typeNameOf(retType))
 				}
 
 				if astDecl, ok := cg.funcDecls[cg.curFn.Name()]; ok && astDecl.RetType != nil {

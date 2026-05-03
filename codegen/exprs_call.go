@@ -432,7 +432,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							Type: &ast.GenericType{Name: staticName, TypeParams: typeArgTEs},
 						}
 						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
 						}
 					}
 				}
@@ -987,7 +987,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							Name: concreteName,
 							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 						}); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", concreteName, mErr)
+							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
 						}
 					}
 

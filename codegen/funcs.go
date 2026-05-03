@@ -2162,7 +2162,29 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curDeferThunkRetType = nil
 
 	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
-	if len(cg.curFnEscapingVars) > 0 || hasDirectHeapReturn(n.Body, cg.heapPromotingFns) {
+
+	heapPromoting := len(cg.curFnEscapingVars) > 0 || hasDirectHeapReturn(n.Body, cg.heapPromotingFns)
+
+	// Functions that return *NamedStruct transfer RC ownership to the
+	// caller -- the most common cases are constructor-like methods
+	// (`Cell.alloc`), container reads (`Channel.recv`, `Atomic.load`,
+	// `List.pop`), and parser/builder helpers. Mark them as heap-
+	// promoting so the call-site let-binding gets isHeapOwned=true and
+	// release_ptr fires at scope exit. Without this, `let c = ch.recv()`
+	// where ch is `Channel[*Cell[i64]]` would leak every dequeued cell.
+	if !heapPromoting && n.RetType != nil {
+		if rt, terr := cg.tinTypeToLLVM(n.RetType); terr == nil {
+			if pt, isPtr := rt.(*irtypes.PointerType); isPtr {
+				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+					if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+						heapPromoting = true
+					}
+				}
+			}
+		}
+	}
+
+	if heapPromoting {
 		cg.heapPromotingFns[scopeName] = true
 		// Also store under the actual IR function name (which may include a
 		// parameter-type suffix, e.g. "json__parse_value__ptr_Parser") so that
