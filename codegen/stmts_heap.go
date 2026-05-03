@@ -140,7 +140,7 @@ func walkForEscapes(node ast.Node, aliases map[string]string, escaping map[strin
 
 // markEscapeVal marks variables in aliases that escape via the given return value.
 // Handles identifiers, address-of expressions, tuples, and struct literals
-// containing those — `return &Box{p: &x}` recursively walks the struct
+// containing those -- `return &Box{p: &x}` recursively walks the struct
 // initializers and marks &x's source as escaping. Alias chains are followed
 // transitively: if `ppx = &px` and `px = &x`, returning ppx marks both px
 // and x as escaping.

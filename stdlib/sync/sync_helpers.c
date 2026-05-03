@@ -284,7 +284,7 @@ int64_t _tin_atomic_cas_i64(void *a, int64_t old_val, int64_t new_val) {
 // Per-width atomic helpers for primitive Atomic[t]. The slot allocator
 // returns sizeof(t) bytes; the Tin side picks the right helper via
 // where-guard dispatch so each call goes to a function whose argument
-// types match the natural integer width — no runtime size switch.
+// types match the natural integer width -- no runtime size switch.
 
 void *_tin_atomic_alloc(int64_t size) {
     void *p = calloc(1, (size_t)size);
@@ -295,7 +295,7 @@ void _tin_atomic_free(void *a) { free(a); }
 
 // load: __atomic_load_n on a typed pointer issues the right-width MOV
 // with the requested memory order. The memcpy from the local temp to
-// the user's `out` slot is a non-atomic byte copy — the atomicity
+// the user's `out` slot is a non-atomic byte copy -- the atomicity
 // guarantee comes from the load itself.
 void _tin_atomic_load_64(void *a, void *out) {
     int64_t v = __atomic_load_n((int64_t *)a, __ATOMIC_ACQUIRE);
@@ -363,7 +363,7 @@ int8_t _tin_atomic_cas_i8(void *a, int8_t old_val, int8_t new_val) {
 
 // External ARC primitives (defined in runtime/runtime.c). Used by the
 // non-primitive Atomic path when the protected payload is itself an
-// ARC-tracked type — store retains the new value and releases the old,
+// ARC-tracked type -- store retains the new value and releases the old,
 // load retains so the caller owns RC=1. The kind discriminator picks
 // the right shape (string/array vs any vs fn) to find the retainable
 // pointer inside the payload bytes.
@@ -470,7 +470,7 @@ static inline int64_t _atomic_obj_self_id(void) {
 // this, calling for_locked from inside a for_locked callback on the same
 // Atomic deadlocks. Cross-fiber contention spins (the critical section
 // is a single memcpy on the fast path; nested user callbacks may run
-// longer but those holders never block — they yield via sched_yield).
+// longer but those holders never block -- they yield via sched_yield).
 static inline void _tin_atomic_obj_lock(_tin_atomic_obj *o) {
     int64_t self = _atomic_obj_self_id();
     int64_t expected;
@@ -546,7 +546,7 @@ void *_tin_atomic_obj_lock_payload(void *p) {
     return o->payload;
 }
 
-// Public wrapper for the unlock — same body as the static inline above
+// Public wrapper for the unlock -- same body as the static inline above
 // but exposed as a regular extern symbol the Tin extern can bind to.
 void _tin_atomic_obj_unlock(void *p) {
     _tin_atomic_obj_spin_unlock((_tin_atomic_obj *)p);

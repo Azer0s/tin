@@ -53,8 +53,8 @@ struct Channel[T] =
   // hardcodes a single GEP+load to recover the TinChannel pointer.
   // Going through Cell would force an extra load (Cell.payload) on
   // every send and recv. Sharing across copies is provided by the
-  // C-level ref_count in TinChannel — bump on _fiber_retain, drop on
-  // deinit — which keeps the hot path branch-free.
+  // C-level ref_count in TinChannel -- bump on _fiber_retain, drop on
+  // deinit -- which keeps the hot path branch-free.
   //!-Wno-unwrapped-c-resource
   _ptr *void
 

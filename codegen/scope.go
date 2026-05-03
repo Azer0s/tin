@@ -101,7 +101,7 @@ type scopeEntry struct {
 	// function that returned a *Trait whose `data` field is an escape-
 	// promoted heap pointer (the callee's source `&b` came from an
 	// escaping local). On scope exit, the iface block is released as
-	// usual AND the data field is released too — neither would happen
+	// usual AND the data field is released too -- neither would happen
 	// otherwise because nothing in the iface struct's static layout
 	// reveals that data points at heap memory.
 	ownsHeapIfaceData bool

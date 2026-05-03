@@ -285,7 +285,7 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     atomic_store_explicit(&ch->deq_pos, 0, memory_order_relaxed);
 
     // seq_buf: aligned to 64 bytes, size rounded to 64-byte multiple.
-    // posix_memalign instead of C11 aligned_alloc — the latter is gated
+    // posix_memalign instead of C11 aligned_alloc -- the latter is gated
     // behind macOS 10.15 deployment target in Apple's SDK and breaks
     // cross-compile to darwin from older toolchains.
     size_t seq_bytes = (size_t)cap * sizeof(_Atomic(int64_t));

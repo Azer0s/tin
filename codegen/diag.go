@@ -424,7 +424,7 @@ func (cg *CodeGen) warn(name string, pos ast.Pos, format string, args ...any) {
 
 // warnInFile is like warn but lets the caller pin the originating source
 // file explicitly. Post-passes that walk decls from cross-package state
-// must use this — cg.filename moves around during compilation, so the
+// must use this -- cg.filename moves around during compilation, so the
 // implicit filenameForDiag may not match the file the directive lives
 // in. Empty file falls back to cg.filenameForDiag().
 func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, args ...any) {

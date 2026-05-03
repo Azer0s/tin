@@ -101,7 +101,7 @@ use rc
 //
 // Holds the PCRE2 handle behind an rc::Cell so copies of Regex share
 // ownership of the C cell instead of double-freeing on the second drop.
-// On compile error _cell stores a null payload — tin_pcre2_free is null-
+// On compile error _cell stores a null payload -- tin_pcre2_free is null-
 // safe and the user code checks is_err() before any exec.
 
 struct Regex =

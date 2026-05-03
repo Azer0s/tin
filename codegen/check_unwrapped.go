@@ -13,7 +13,7 @@ import (
 // named like an fd / returned by a known fd-returning POSIX function)
 // AND whose value transitively crosses an extern boundary AND is not
 // already wrapped in a `#no_copy` struct (e.g. *rc::Cell[T]) is a
-// double-free / double-close waiting to happen — copying the containing
+// double-free / double-close waiting to happen -- copying the containing
 // Tin struct silently shares ownership of the resource, and both
 // scope-exit drops will run the cleanup. The wrapper makes the sharing
 // reference-counted; the warning nudges new code toward it.
@@ -172,7 +172,7 @@ func (cg *CodeGen) checkStructUnwrappedCResources(structKey string, sd *ast.Stru
 		}
 
 		cg.warnInFile(cg.structDeclFiles[structKey], DiagUnwrappedCResource, pos,
-			"struct %s field %q (%s) crosses an extern boundary unwrapped — "+
+			"struct %s field %q (%s) crosses an extern boundary unwrapped -- "+
 				"copies of %s will alias the resource and double-free on scope exit. %s",
 			prettyStructName(sd.Name), f.Name, shape,
 			prettyStructName(sd.Name), hint)
@@ -188,7 +188,7 @@ func (cg *CodeGen) cResourceFieldShape(te ast.TypeExpr, fieldName string) string
 
 	switch t := te.(type) {
 	case *ast.PointerType:
-		// *void — by far the most common case.
+		// *void -- by far the most common case.
 		if st, ok := t.Elem.(*ast.SimpleType); ok && st.Name == "void" {
 			return "*void"
 		}
@@ -225,7 +225,7 @@ func (cg *CodeGen) fieldTypeIsWrapped(te ast.TypeExpr) bool {
 
 // isOpaqueExternStruct reports whether name refers to a struct that
 // has been declared extern (i.e. the body lives in C and Tin holds
-// a pointer to it). For now only `void` qualifies — extending to
+// a pointer to it). For now only `void` qualifies -- extending to
 // arbitrary opaque C structs needs an extern-struct registry that
 // Tin doesn't currently maintain. Most C-handle fields use `*void`
 // already.
@@ -281,7 +281,7 @@ func matchesStructName(litName, sdName string) bool {
 //     comes from an extern.
 //
 // "Transitively" is whatever cg.fnsTouchingExtern's fixpoint determined.
-// No depth bound is needed — the call-graph closure was computed once
+// No depth bound is needed -- the call-graph closure was computed once
 // up front, and we only walk this method's body.
 func (cg *CodeGen) methodTouchesFieldViaExtern(structName string, m *ast.FuncDecl, fieldName string, _ int) bool {
 	if m == nil || m.Body == nil {
@@ -410,8 +410,8 @@ func (cg *CodeGen) exprReadsField(expr ast.Node, receiver, field string) bool {
 }
 
 // exprIsExternProduced reports whether expr is a call whose return value
-// transitively comes from an extern. Direct extern call → true; Tin
-// function call where the callee is in cg.fnsTouchingExtern → true.
+// transitively comes from an extern. Direct extern call -> true; Tin
+// function call where the callee is in cg.fnsTouchingExtern -> true.
 func (cg *CodeGen) exprIsExternProduced(expr ast.Node) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {

@@ -1618,7 +1618,7 @@ func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
 		return result
 	}
 
-	// Single non-Identifier type arg: convert via the generic node→type-expr
+	// Single non-Identifier type arg: convert via the generic node->type-expr
 	// path (covers nested IndexExpr like `G[i64]` and qualified names).
 	if te := typeNodeToTypeExpr(idx.Index); te != nil {
 		return []ast.TypeExpr{te}

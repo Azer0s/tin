@@ -228,7 +228,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		// Reject by-value #no_copy params: passing such a value would shallow-
 		// copy the cell pointer and the callee's scope-exit drop would race
 		// with the caller's. Use *S instead. The receiver name `this` is
-		// exempt — Tin's deinit convention is `fn deinit(this S)` and the
+		// exempt -- Tin's deinit convention is `fn deinit(this S)` and the
 		// receiver is the unique owner about to be torn down, not a copy.
 		if p.Name != "this" {
 			if name := cg.noCopyValueTypeName(p.Type); name != "" {
@@ -503,7 +503,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			// Populate unionTypeMembers here so that downstream constraint
 			// checks (`where t is X` against a tagged-union alias) work
 			// even when the TypeDecl was declared in an imported package
-			// — packages.go doesn't run pass-2's genTypeDecl, so without
+			// -- packages.go doesn't run pass-2's genTypeDecl, so without
 			// this preregister write the membership is invisible across
 			// package boundaries and method-level where guards silently
 			// dead-strip every method.
@@ -1277,7 +1277,7 @@ func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string
 
 		full := typeBoundString(c.Bound)
 
-		// Mixed AND/OR bound — pointing at the failing AND-conjunct
+		// Mixed AND/OR bound -- pointing at the failing AND-conjunct
 		// is genuinely informative: that's the specific missing
 		// requirement.
 		if !isPureOrBound(c.Bound) {

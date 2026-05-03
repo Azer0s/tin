@@ -506,9 +506,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		//
 		//   0 = not RC
 		//   1 = leading pointer at offset 0 (string, fat array, trait fat ptr)
-		//   2 = any: {i32 tag, i8* ptr} — ptr at offset 8, release with
+		//   2 = any: {i32 tag, i8* ptr} -- ptr at offset 8, release with
 		//       _tin_release_any so closure-typed `any` values free their env
-		//   3 = fn fat ptr: {fn*, env*} — env at offset 8, release with
+		//   3 = fn fat ptr: {fn*, env*} -- env at offset 8, release with
 		//       _tin_release_closure
 		if e.Type == nil {
 			return constant.NewInt(irtypes.I32, int64(rcKindNone)), nil
@@ -1043,7 +1043,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	}
 
 	// Reject arithmetic on string / fat-ptr operands before falling into the
-	// integer add/sub paths below — without this, `s1 + s2` would emit
+	// integer add/sub paths below -- without this, `s1 + s2` would emit
 	// `add { i8*, i64 }` which clang rejects with a confusing low-level
 	// error instead of a Tin-level diagnostic. The right concat operator
 	// for strings is `++`; surface that in the message.

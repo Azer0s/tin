@@ -486,7 +486,7 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 //      buildPtrToTraitBorrow heap-allocs the iface here; b's heap block
 //      becomes iface.data.
 //   2. Forwarded: `let s = make()` where make() was recorded as
-//      fnReturnsOwningIface — make's body created an owning iface and
+//      fnReturnsOwningIface -- make's body created an owning iface and
 //      returned it. The flag must hop across the call so the caller's
 //      scope-exit can release both the iface and its data.
 //
@@ -495,7 +495,7 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 //
 // The let's type annotation is intentionally NOT consulted: type
 // inference often leaves s.Type nil for `let s = make()` so we instead
-// rely on the value's shape (AddressOfExpr → declared trait, CallExpr →
+// rely on the value's shape (AddressOfExpr -> declared trait, CallExpr ->
 // callee return type lookup).
 func (cg *CodeGen) bindingOwnsHeapIfaceData(s *ast.VarDecl) bool {
 	if s == nil || s.Value == nil {
@@ -570,13 +570,13 @@ func (cg *CodeGen) declTypeIsTraitPtr(te ast.TypeExpr) bool {
 // markOwningRawPtrField records that fieldName on structName receives an
 // owning heap pointer. Triggered by genStructLit (and assignment paths) when
 // the value being stored is `&Identifier` and the identifier is in
-// cg.curFnEscapingVars — i.e. the local was already heap-promoted by escape
+// cg.curFnEscapingVars -- i.e. the local was already heap-promoted by escape
 // analysis and the receiving struct is now the sole owner. The struct's
 // release helper consults this map to cascade _tin_release through the
 // field on drop.
 //
 // Only `*T` raw pointer fields where T is NOT itself a Tin struct are
-// recorded — Tin's existing per-struct release machinery already cascades
+// recorded -- Tin's existing per-struct release machinery already cascades
 // through `*TinStruct` fields, RC-tracked fat ptrs (string, fat array,
 // any, fn closure), and nested structs.
 func (cg *CodeGen) markOwningRawPtrField(structName, fieldName string, valueExpr ast.Node, valueLLType irtypes.Type) {
@@ -716,7 +716,7 @@ func (cg *CodeGen) noCopyValueTypeName(te ast.TypeExpr) string {
 
 // isBadFatPtrArithmetic reports whether op applied to operands of types lt/rt
 // would silently fall through to an integer arith on a fat-pointer struct
-// — `string + string` and the like. The fat-pointer types are LLVM-anonymous
+// -- `string + string` and the like. The fat-pointer types are LLVM-anonymous
 // structs (`{i8*, i64}`) so they slip past isStructType's user-struct check
 // and get fed to NewAdd, which clang rejects at the IR level. Catching the
 // shape here turns it into a positioned Tin diagnostic.
@@ -753,9 +753,9 @@ type rcKind int32
 
 const (
 	rcKindNone       rcKind = 0 // no RC management needed
-	rcKindLeadingPtr rcKind = 1 // string / fat array / trait fat ptr / named struct ptr — retain ptr at offset 0
-	rcKindAny        rcKind = 2 // any: {i32 tag, i8* ptr} — release via _tin_release_any(tag, ptr@8)
-	rcKindFn         rcKind = 3 // fat fn ptr: {fn*, env*} — release via _tin_release_closure(env@8)
+	rcKindLeadingPtr rcKind = 1 // string / fat array / trait fat ptr / named struct ptr -- retain ptr at offset 0
+	rcKindAny        rcKind = 2 // any: {i32 tag, i8* ptr} -- release via _tin_release_any(tag, ptr@8)
+	rcKindFn         rcKind = 3 // fat fn ptr: {fn*, env*} -- release via _tin_release_closure(env@8)
 )
 
 // rcKindOf classifies an LLVM type by where its retainable pointer
@@ -1085,7 +1085,7 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 				_, isTinStructPtr = cg.structTypes[innerSt.Name()]
 			}
 		}
-		// Owning raw pointer field — registered when escape-promoted local
+		// Owning raw pointer field -- registered when escape-promoted local
 		// flowed in here. Walk it like any other RC-tracked field so the
 		// per-struct release helper cascades _tin_release through it.
 		isOwningRawPtr := false
@@ -1618,14 +1618,14 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// Early-heap-promoted local: entry.val is the heap pointer itself
 		// (allocated via _tin_rc_alloc at let-decl time because escape
 		// analysis flagged the binding). The heap block now belongs to
-		// whatever escape sink took the address — return value, struct
-		// field, *Trait coerce, channel send, spawn arg — so the local
+		// whatever escape sink took the address -- return value, struct
+		// field, *Trait coerce, channel send, spawn arg -- so the local
 		// scope MUST NOT free it on exit. Caller-side release happens
 		// through the receiving owner's drop chain.
 		//
 		// (Known follow-up: when the receiving owner is a raw `*T` field
 		// of a Tin struct, Tin's per-struct release helper doesn't yet
-		// cascade through it, so the heap block leaks. Tracked separately —
+		// cascade through it, so the heap block leaks. Tracked separately --
 		// this branch only avoids the use-after-free.)
 		if entry.isEarlyHeap {
 			return
@@ -1634,7 +1634,7 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// Owning *Trait whose iface heap block carries escape-promoted
 		// data: release the data field first, then fall through to the
 		// standard isHeapOwned cleanup that frees the iface block.
-		// Without this the iface is freed but its data ptr leaks — the
+		// Without this the iface is freed but its data ptr leaks -- the
 		// source local was heap-promoted by escape analysis and its
 		// scope-exit release was skipped (it's now owned by this iface).
 		// entry.val is `**iface` (alloca holding the iface ptr); two

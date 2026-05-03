@@ -28,13 +28,13 @@
 // Copy semantics: Atomic[t] holds an *rc::Cell[*void] for the underlying
 // C cell, so `let b = a` is a refcount bump (both share the cell) and
 // the underlying allocation is freed exactly once when the last owner
-// drops. No bespoke deinit on Atomic — Cell's destructor wires the
+// drops. No bespoke deinit on Atomic -- Cell's destructor wires the
 // per-impl free function (tin_atomic_free for the lock-free path,
 // tin_atomic_obj_free for the obj path).
 
 use rc
 
-// Numeric types — gate for add/cas. Floats and bool excluded (no
+// Numeric types -- gate for add/cas. Floats and bool excluded (no
 // meaningful atomic int-add or compare for them).
 type numeric = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8
 
@@ -85,7 +85,7 @@ fn tin_atomic_obj_unlock(p *void)                    = extern("_tin_atomic_obj_u
 struct Atomic[t] =
   _cell *rc::Cell[*void]
 
-  // ptr borrows the underlying C cell. Pure forwarding — keeps every
+  // ptr borrows the underlying C cell. Pure forwarding -- keeps every
   // load/store/add/cas/for_locked one line and the compiler can fold
   // the chain.
   fn ptr(this Atomic[t]) *void = return this._cell.payload()

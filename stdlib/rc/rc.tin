@@ -1,7 +1,7 @@
 // stdlib/rc - Refcounted wrapper for shared, owning handles to a single value.
 //
 // Cell[T] gives a Tin-managed reference count to a value that the
-// compiler otherwise can't track — typically a raw C pointer. Hold the
+// compiler otherwise can't track -- typically a raw C pointer. Hold the
 // cell as `*Cell[T]`: pointer copies retain, scope-exit releases, and
 // the user-supplied destructor runs exactly once when the last reference
 // drops. Atomic, Channel, Mutex, etc. wrap their C cells with Cell so
@@ -34,7 +34,7 @@ struct {#no_copy #closed} Cell[T] =
     return this._payload
 
   // retain bumps the cell's refcount. Used when something outside Tin's
-  // automatic field-ARC takes a fresh handle on the cell — e.g. the
+  // automatic field-ARC takes a fresh handle on the cell -- e.g. the
   // fiber spawn machinery copies a containing struct via raw frame
   // memcpy rather than a let-binding.
   fn retain(this *Cell[T]) =

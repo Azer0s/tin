@@ -201,7 +201,7 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 	}
 
 	// #no_copy fields would let the containing struct's copy alias the
-	// no-copy cell — defeats the whole point. Reject at decl time so the
+	// no-copy cell -- defeats the whole point. Reject at decl time so the
 	// programmer is told to switch to `*S` before any code depends on it.
 	for _, f := range n.Fields {
 		if name := cg.noCopyValueTypeName(f.Type); name != "" {
@@ -934,7 +934,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	// `let outer = G[GI]{v: inner}` would resolve GI as a fresh struct
 	// distinct from G__i64 and the store would type-mismatch on inner.
 	//
-	// Skip when the alias declaration carries method overrides — those
+	// Skip when the alias declaration carries method overrides -- those
 	// overrides need to live on a distinct struct (the alias name), so
 	// keep the existing monomorphize-as-separate-struct path for that
 	// case. See examples/type_alias.tin "override show method".
@@ -1030,6 +1030,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	}
 	for _, f := range tmpl.Fields {
 		concrete.Fields = append(concrete.Fields, ast.StructField{
+			Pos:       f.Pos,
 			Name:      f.Name,
 			Type:      substituteTypeInTypeExpr(f.Type, subst),
 			Tags:      f.Tags,
@@ -1062,7 +1063,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		// instantiation is dead-stripped from this concrete struct.
 		// Calling the method on the wrong instantiation then produces
 		// the dead-strip diagnostic at the call site (see emitDeadStripError)
-		// listing every failing constraint — one entry per stripped
+		// listing every failing constraint -- one entry per stripped
 		// overload, since the same method name can have multiple
 		// where-guarded variants.
 		if witness := cg.methodConstraintWitness(m, typeSubst); witness != "" {
@@ -1185,6 +1186,15 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	err := cg.genStructDecl(concrete)
 	cg.currentPkg = prevPkg
 	cg.curScope = prevScope
+
+	// genStructDecl tagged structDeclFiles[concrete.Name] with cg.filename
+	// -- but cg.filename here is whoever instantiated the generic, NOT the
+	// template's source. Override so per-line `//!-Wno-` directives on
+	// the template (e.g. Channel's _ptr field) silence the diagnostic
+	// for every monomorphization.
+	if tmplFile := cg.structDeclFiles[cg.pkgStructKey(tmpl.Name)]; tmplFile != "" {
+		cg.structDeclFiles[concrete.Name] = tmplFile
+	}
 
 	// Restore previous type aliases (removes the T->string etc. temporaries).
 	for param := range subst {
@@ -1836,7 +1846,7 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 			continue
 		}
 		// Coerce to iter fat pointer. Suppress the deferred scope-exit
-		// release that coerceToTrait would otherwise register —
+		// release that coerceToTrait would otherwise register --
 		// genForIterTrait emits its own release at the loop's exit
 		// block, scoped tightly to the iteration rather than the
 		// surrounding fn.
@@ -1973,7 +1983,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	// Release the iter iface's data ptr at loop exit if we own it (i.e.,
 	// tryCoerceToIter heap-allocated it from a value-source struct).
 	// Pointer-source iterVals are borrowed and the original *T owner
-	// handles cleanup — releasing here would corrupt non-RC malloc'd
+	// handles cleanup -- releasing here would corrupt non-RC malloc'd
 	// blocks (see malloc_dispatch.tin pattern).
 	if ownsData {
 		afterBlock.NewCall(cg.ensureRelease(), dataPtr)
@@ -1991,7 +2001,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 // Returns nil for unknown traits or traits with all-value receivers.
 //
 // Used by coerceToTrait to reject value-form coercion when the trait
-// has any pointer-receiver method — that combination silently mutates
+// has any pointer-receiver method -- that combination silently mutates
 // a heap copy and the user almost certainly meant `let a *T = &b`.
 func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
 	bareTraitName := bareTraitNameFromKey(instKey)
@@ -2044,15 +2054,15 @@ func bareTraitNameFromKey(instKey string) string {
 // buildPtrToTraitBorrow lowers `let a *Trait = &b` (or any other coerce
 // where target is `*FatPtr` and source is `*Struct`). Builds a stack-
 // temporary fat ptr `{cast(structPtr, i8*), vtable}` and returns its
-// address — a true borrow, mutations via *a propagate to *structPtr.
+// address -- a true borrow, mutations via *a propagate to *structPtr.
 //
 // Returns nil when the struct doesn't implement the trait or the fat-
 // ptr type isn't registered; the caller falls through to the generic
-// coerce path (which currently emits a wrong bitcast — that's the
+// coerce path (which currently emits a wrong bitcast -- that's the
 // fallback we're trying to replace).
 //
 // Lifetime: stack-temp lives for the enclosing function frame. Same
-// gotcha as returning `*T` of any local — Tin does not statically
+// gotcha as returning `*T` of any local -- Tin does not statically
 // prevent it, but it doesn't catch fire on common in-frame uses
 // (which is what the user's `let a *T = &b; (*a).foo(); echo b` test
 // exercises).
@@ -2092,7 +2102,7 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 	// fnReturnsOwningIface so their let-binding releases data on drop.
 	// (We don't have the source AST here, so the most conservative
 	// option is "every buildPtrToTraitBorrow caller in a fn with any
-	// escaping var owns its iface data" — which is the common case.)
+	// escaping var owns its iface data" -- which is the common case.)
 	if cg.curFn != nil && len(cg.curFnEscapingVars) > 0 {
 		cg.fnReturnsOwningIface[cg.curFn.Name()] = true
 	}
@@ -2114,13 +2124,13 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 	// Receiver/source mismatch: if the trait has any pointer-receiver
 	// methods, target=value-trait coercion would silently mutate a heap
-	// copy regardless of whether the source was `b` or `&b` — Tin's
+	// copy regardless of whether the source was `b` or `&b` -- Tin's
 	// `Trait` always heap-copies. Reject both. The user must use
 	// `let a *Trait = &b` to get a real borrow.
 	//
 	// Stash the diagnostic on cg.coerceLastErr so the caller
 	// (genVarDecl, etc.) can surface it positioned at the user's
-	// source line — coerce() itself returns Value with no error
+	// source line -- coerce() itself returns Value with no error
 	// channel and is called from 87+ sites we don't want to touch.
 	if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
 		err := fmt.Errorf(
@@ -2150,7 +2160,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		// 16 bytes. Copying gives uniform iface release semantics across
 		// every coercion source. Tradeoff: pointer-receiver methods
 		// dispatched through the iface mutate the heap copy, not the
-		// original *T — code that relies on mutation visibility through
+		// original *T -- code that relies on mutation visibility through
 		// the iface must call methods directly on the *T (or use the
 		// value-source `let var iface_T = struct_value` pattern, which
 		// has the same heap-copy semantics).
@@ -2171,7 +2181,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		// survives across coroutine suspends. A stack alloca here would die
 		// the moment the constructing coroutine suspends (the resume
 		// function's stack frame is freed on suspend), and any spawned
-		// fiber that captured the iface would later read freed memory —
+		// fiber that captured the iface would later read freed memory --
 		// which on AArch64 reliably corrupts (the next worker-stack frame
 		// overwrites it), and on AMD64 happens to look intact under most
 		// scheduling but isn't guaranteed.

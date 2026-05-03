@@ -690,7 +690,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	//
 	// Without this path, llir auto-emits a wrong bitcast `*Box ->
 	// *Fooable_iface` that reinterprets Box's first field (i32 type_id)
-	// as the fat-ptr's i8* data field — methods called via the bogus
+	// as the fat-ptr's i8* data field -- methods called via the bogus
 	// fat ptr then dereference garbage and segfault.
 	if tgtPt, ok := target.(*irtypes.PointerType); ok {
 		if traitName, isTrait := cg.isTraitFatPtr(tgtPt.ElemType); isTrait {

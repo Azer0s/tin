@@ -215,7 +215,7 @@ type CodeGen struct {
 
 	// noCopyStructs: struct names declared with the {#no_copy} tag. Value
 	// copies of these are rejected at compile time (let b = a, by-value
-	// param/return, struct-lit field of value type). Holding *S is fine —
+	// param/return, struct-lit field of value type). Holding *S is fine --
 	// pointer copies just retain the cell.
 	noCopyStructs map[string]bool
 
@@ -233,7 +233,7 @@ type CodeGen struct {
 	// structDeclsByName: every concrete struct AST seen during compilation,
 	// keyed by structKey. Used by post-passes (e.g. checkAllUnwrappedCResources)
 	// that need to walk fields and methods of stdlib structs in addition to
-	// the user's own — funcDecls covers methods but not the originating decl
+	// the user's own -- funcDecls covers methods but not the originating decl
 	// + field positions, which the warning needs.
 	structDeclsByName map[string]*ast.StructDecl
 	// structDeclFiles: source path each structDeclsByName entry came from,
@@ -339,7 +339,7 @@ type CodeGen struct {
 	// deadStrippedMethods records methods that were dropped during
 	// generic-struct monomorphization because their `where t is X`
 	// guard didn't hold for the concrete instantiation. Keyed by
-	// concrete struct name → method name → list of witnesses (one
+	// concrete struct name -> method name -> list of witnesses (one
 	// per stripped impl, since a method can have multiple where-
 	// guarded overloads). Consumed by call-site error reporting so
 	// "undefined method" can list every failing constraint instead

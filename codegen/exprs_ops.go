@@ -691,10 +691,10 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	// #closed enforcement: a closed struct's literal `S{...}` may only
 	// appear inside one of S's own static methods. External callers must go
-	// through the constructor — that's the whole point of #closed.
+	// through the constructor -- that's the whole point of #closed.
 	if cg.closedStructs[typeName] && !cg.curFnOwnsStruct(typeName) {
 		return nil, cg.nodeErr(e,
-			"%s is #closed: construct via one of its static methods (e.g. %s.alloc(...)) — direct struct literals are not allowed outside the type's own methods",
+			"%s is #closed: construct via one of its static methods (e.g. %s.alloc(...)) -- direct struct literals are not allowed outside the type's own methods",
 			prettyStructName(typeName), prettyStructName(typeName))
 	}
 
@@ -800,7 +800,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
 			block.NewStore(val, gep)
-			// `&escape_promoted_local` flowing into a raw `*T` field — the
+			// `&escape_promoted_local` flowing into a raw `*T` field -- the
 			// local was heap-allocated by escape analysis, and Tin would
 			// otherwise leak the heap block when the containing struct
 			// drops (no owner left). Mark this struct/field pair as

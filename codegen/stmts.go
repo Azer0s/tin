@@ -1106,10 +1106,10 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 	// #no_copy enforcement: a let-binding cannot hold a value of a #no_copy
 	// struct, since a subsequent reference would alias the underlying cell.
-	// `*S` is fine — pointer copies just retain.
+	// `*S` is fine -- pointer copies just retain.
 	if name := cg.typeNameOf(llType); name != "" && cg.noCopyStructs[name] {
 		return nil, cg.nodeErr(s,
-			"%s is #no_copy: bind a *%s instead — value-form let aliases the cell and double-frees on scope exit",
+			"%s is #no_copy: bind a *%s instead -- value-form let aliases the cell and double-frees on scope exit",
 			prettyStructName(name), prettyStructName(name))
 	}
 
@@ -1170,8 +1170,8 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 	// Local variables are stack-allocated by default. When escape analysis
 	// (cg.curFnEscapingVars) flagged this binding as having `&x` reach an
-	// escape sink — return, struct-field of escaping struct, *Trait coerce,
-	// channel send, spawn arg, etc. — heap-allocate it via _tin_rc_alloc
+	// escape sink -- return, struct-field of escaping struct, *Trait coerce,
+	// channel send, spawn arg, etc. -- heap-allocate it via _tin_rc_alloc
 	// instead so &x is a stable pointer outliving the frame. entry.val
 	// becomes the heap pointer directly (same LLVM type as a stack alloca:
 	// `*T`), so every later `genLValue(Ident)` returns the heap pointer
@@ -1192,7 +1192,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		alloca = block.NewAlloca(llType)
 	}
 
-	// Emit dbg.declare for debug builds. Stack allocas only — heap-promoted
+	// Emit dbg.declare for debug builds. Stack allocas only -- heap-promoted
 	// vars don't have an alloca to attach the dbg.declare intrinsic to.
 	if stackAlloca, ok := alloca.(*ir.InstAlloca); ok {
 		cg.emitDbgDeclare(block, stackAlloca, s.Name, s.Pos().Line, 0, s.Type, llType)
@@ -1214,7 +1214,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		case *ast.ScopeAccess:
 			calleeName = strings.Join(fn.Path, "__")
 		case *ast.FieldAccess:
-			// Static method call written with dot syntax — `S.alloc(...)` or
+			// Static method call written with dot syntax -- `S.alloc(...)` or
 			// `Generic[T].alloc(...)` (via FieldAccess on Identifier or
 			// IndexExpr respectively). Resolve to the IR function name so
 			// heapPromotingFns lookup matches.
@@ -3151,7 +3151,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	// advance through short-circuit && / || in the cond expression
 	// (genShortCircuit moves cg.curBlock to its merge block). The
 	// back-edge from the body must point at headerBlock, NOT the
-	// advanced condBlock — otherwise the body becomes a third
+	// advanced condBlock -- otherwise the body becomes a third
 	// predecessor of the && merge block whose phi has no incoming for
 	// it, producing undef cond on the next iteration (= infinite loop).
 	condBlock := headerBlock
@@ -3213,7 +3213,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 		cg.emitScopeRelease(endBody, cg.curScope)
 
 		// Back-edge to the stable loop header, not the (possibly advanced)
-		// cond eval block — see headerBlock comment above.
+		// cond eval block -- see headerBlock comment above.
 		if cg.curFnAutoYield {
 			cg.genYieldAutoAt(endBody, headerBlock)
 		} else {
