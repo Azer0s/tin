@@ -1633,25 +1633,12 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 
 		// Owning *Trait whose iface heap block carries escape-promoted
 		// data: release the data field first, then fall through to the
-		// standard isHeapOwned/struct-ptr cleanup that frees the iface
-		// block. entry.val is `**iface` (alloca holding the iface ptr);
-		// two loads to reach the iface struct, then extract data field.
-		if entry.ownsHeapIfaceData {
-			ifacePtrType := ptrType.ElemType
-			if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
-				ifacePtr := block.NewLoad(ifacePtrType, entry.val)
-				ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
-				dataField := block.NewExtractValue(ifaceVal, 0)
-				block.NewCall(cg.ensureRelease(), dataField)
-			}
-		}
-
-		// Owning *Trait whose iface heap block carries escape-promoted
-		// data: release the data field first, then fall through to the
 		// standard isHeapOwned cleanup that frees the iface block.
 		// Without this the iface is freed but its data ptr leaks — the
 		// source local was heap-promoted by escape analysis and its
 		// scope-exit release was skipped (it's now owned by this iface).
+		// entry.val is `**iface` (alloca holding the iface ptr); two
+		// loads to reach the iface struct, then extract data field.
 		if entry.ownsHeapIfaceData {
 			ifacePtrType := ptrType.ElemType
 			if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
