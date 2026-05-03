@@ -29,7 +29,7 @@ test "addition is correct" =
   assert::equals(add(-1, 1), 0)
 
 test "string concatenation" =
-  assert::equals_str("foo" ++ "bar", "foobar")
+  assert::equals("foo" ++ "bar", "foobar")
 
 test "boolean assertions" =
   assert::ok(1 == 1)
@@ -84,41 +84,27 @@ the `assert::` namespace.
 
 ### assert::equals
 
-Asserts that two `i64` values are equal:
+Generic equality assertion. One overload covers every comparable type
+-- ints of any width, floats, bools, strings, atoms, structs that
+implement `==`. The compiler picks the right comparison from the
+argument types; you do not write per-type asserts.
 
 ```rust
-assert::equals(expected i64, actual i64)
+assert::equals(expected, actual)
 ```
 
 ```rust
-assert::equals(add(2, 3), 5)
-assert::equals(len([1, 2, 3]), 3)
+assert::equals(add(2, 3), 5)              // i64
+assert::equals(len([1, 2, 3]), 3)         // i64
+assert::equals(greet("world"), "Hello, world")  // string
+assert::equals("foo" ++ "bar", "foobar")  // string
+assert::equals(compute_pi(), 3.14)        // f64
+assert::equals(point{x: 1, y: 2}, point{x: 1, y: 2})  // struct
 ```
 
-### assert::equals_str
-
-Asserts that two strings are equal:
-
-```rust
-assert::equals_str(expected string, actual string)
-```
-
-```rust
-assert::equals_str(greet("world"), "Hello, world")
-assert::equals_str("foo" ++ "bar", "foobar")
-```
-
-### assert::equals_f64
-
-Asserts that two `f64` values are equal:
-
-```rust
-assert::equals_f64(expected f64, actual f64)
-```
-
-```rust
-assert::equals_f64(3.14, compute_pi())
-```
+The legacy `equals_str` / `equals_f64` / `equals_i64` per-type
+helpers were removed -- everything routes through the generic
+`equals` now.
 
 ### assert::ok
 
@@ -227,8 +213,8 @@ test "addition is correct" =
   assert::equals(add(-1, 1), 0)
 
 test "string concatenation" =
-  assert::equals_str(greet("world"), "Hello, world")
-  assert::equals_str("foo" ++ "bar", "foobar")
+  assert::equals(greet("world"), "Hello, world")
+  assert::equals("foo" ++ "bar", "foobar")
 
 test "boolean assertions" =
   assert::ok(1 == 1)

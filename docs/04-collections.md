@@ -177,8 +177,13 @@ for let i i64 = 0; i < len(pairs); i += 2:
 Struct fields that are themselves structs can be accessed with chained `.`:
 
 ```rust
-struct vec2 = x f64; y f64
-struct rect = origin vec2; size vec2
+struct vec2 =
+  x f64
+  y f64
+
+struct rect =
+  origin vec2
+  size   vec2
 
 let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}
 echo r.origin.x    // 1
@@ -268,16 +273,23 @@ Fixed-size arrays are mostly used in low-level / `extern` code.
 
 ## Strings as arrays
 
-`string` is internally `[char]` (an array of `u8`). You can use array
-indexing and iteration on strings:
+`string` is internally a fat pointer over UTF-8 bytes (`{i8*, i64}`).
+You can use array indexing and iteration:
 
 ```rust
 let hello = "hello"
-let first_char = hello[0]   // 'h' as u8
+let first_char = hello[0]   // 104 -- ASCII 'h' as i8
 
-for let c char in hello:
-  echo "{c}"
+for let b i8 in hello:
+  echo "{b}"   // 104 101 108 108 111 (one per line)
 ```
+
+For decoded Unicode codepoints (multi-byte UTF-8 sequences as a single
+`rune`), use `for let r rune in s:` -- see "String iteration" in
+[02-control-flow](02-control-flow.md). To render bytes as characters
+in `echo`, cast the whole string to `[char]` first; that selects the
+char-format dispatch for the array, see "Byte-array echo formats"
+below.
 
 String literals can be concatenated with `++`:
 
