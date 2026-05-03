@@ -192,6 +192,14 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		cg.closedStructs[structKey] = true
 	}
 
+	// Record the AST decl + originating file so post-passes (warning checks,
+	// reflection helpers) can walk fields and bodies for any struct, not just
+	// those in the top-level program.
+	cg.structDeclsByName[structKey] = n
+	if cg.filename != "" {
+		cg.structDeclFiles[structKey] = cg.filename
+	}
+
 	// #no_copy fields would let the containing struct's copy alias the
 	// no-copy cell — defeats the whole point. Reject at decl time so the
 	// programmer is told to switch to `*S` before any code depends on it.

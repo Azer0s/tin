@@ -33,8 +33,17 @@ struct {#no_copy #closed} Cell[T] =
   fn payload(this *Cell[T]) T =
     return this._payload
 
+  // retain bumps the cell's refcount. Used when something outside Tin's
+  // automatic field-ARC takes a fresh handle on the cell — e.g. the
+  // fiber spawn machinery copies a containing struct via raw frame
+  // memcpy rather than a let-binding.
+  fn retain(this *Cell[T]) =
+    tin_rc_retain(this as *void)
+
   // deinit fires on the last release. Calling user dtor here means the
   // C-managed resource is cleaned up before the cell's heap block goes
   // back to the allocator.
   fn deinit(this Cell[T]) =
     this._dtor(this._payload)
+
+fn tin_rc_retain(p *void) = extern("_tin_retain")

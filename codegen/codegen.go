@@ -201,6 +201,22 @@ type CodeGen struct {
 	// methods, so external code is forced through a constructor.
 	closedStructs map[string]bool
 
+	// localDiagSuppressions: per-file `//!-Wno-<name>` directives keyed
+	// by source line. Lazily populated on the first warning emitted for
+	// a given file. The directive lives on the comment line(s) directly
+	// preceding the declaration the user wants to silence.
+	localDiagSuppressions map[string]map[int]map[string]bool
+
+	// structDeclsByName: every concrete struct AST seen during compilation,
+	// keyed by structKey. Used by post-passes (e.g. checkAllUnwrappedCResources)
+	// that need to walk fields and methods of stdlib structs in addition to
+	// the user's own — funcDecls covers methods but not the originating decl
+	// + field positions, which the warning needs.
+	structDeclsByName map[string]*ast.StructDecl
+	// structDeclFiles: source path each structDeclsByName entry came from,
+	// so warnings on stdlib decls find their //!-Wno- suppressions.
+	structDeclFiles map[string]string
+
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
 	retainFn                   *ir.Func // _tin_retain(ptr i8*)
@@ -1266,6 +1282,8 @@ func New(filename string) *CodeGen {
 		packedStructs:            make(map[string]bool),
 		noCopyStructs:            make(map[string]bool),
 		closedStructs:            make(map[string]bool),
+		structDeclsByName:        make(map[string]*ast.StructDecl),
+		structDeclFiles:          make(map[string]string),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
@@ -1691,6 +1709,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.runAndersen(prog)
 
 	cg.runAstChecks(prog)
+
+	cg.checkAllUnwrappedCResources(prog)
 
 	// Build call graph and run color propagation for the #async / coro system.
 	cg.progress("build call graph")

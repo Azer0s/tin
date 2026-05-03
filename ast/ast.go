@@ -703,6 +703,7 @@ type Param struct {
 }
 
 type StructField struct {
+	Pos       Pos
 	Name      string
 	Type      TypeExpr
 	Tags      []string

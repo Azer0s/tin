@@ -208,6 +208,7 @@ func (p *Parser) parseStructItem() (any, error) {
 	}
 
 	return &ast.StructField{
+		Pos:       ast.Pos{Line: nameTok.Line, Col: nameTok.Col},
 		Name:      nameTok.Literal,
 		Type:      typ,
 		IsForward: isForward,
