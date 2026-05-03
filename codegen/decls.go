@@ -2612,39 +2612,64 @@ func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDe
 		declFile = cg.filename
 	}
 
-	var details strings.Builder
-
 	pretty := prettyStructName(structName)
 
+	// Anchor the diagnostic at the call site that triggered
+	// monomorphization (cg.currentPos). The user wants to see WHERE
+	// they wrote the ambiguous call -- the overload definitions
+	// themselves are listed as bullets so they can find each
+	// definition to fix.
+	var details strings.Builder
 	for _, m := range methods {
-		details.WriteString("\n  - ")
+		details.WriteString("\n  candidate: ")
 		details.WriteString(pretty)
 		details.WriteByte('.')
 		details.WriteString(m.Name)
 		details.WriteString(" with ")
-
-		if len(m.Constraints) == 0 {
-			details.WriteString("no where-guard (always satisfies)")
-		} else {
-			for i, c := range m.Constraints {
-				if i > 0 {
-					details.WriteString(" and ")
-				}
-
-				details.WriteString("where ")
-				details.WriteString(c.TypeParam)
-				details.WriteString(" is ")
-				details.WriteString(typeBoundString(c.Bound))
-			}
-		}
-
+		details.WriteString(whereGuardSummary(m.Constraints))
 		details.WriteString(" (declared at ")
 		details.WriteString(fmt.Sprintf("%s:%d:%d", declFile, m.Pos().Line, m.Pos().Col))
 		details.WriteByte(')')
 	}
 
-	return cg.nodeErr(first,
-		"%s.%s is ambiguous for this instantiation: %d overloads with the same signature satisfy their where-guards. Drop the redundant guard, or distinguish the overloads by parameter type:%s",
+	// Anchor at the call site (cg.currentPos) so the user sees WHERE
+	// they wrote the ambiguous call. Falls back to the first overload
+	// when no call-site position is in flight (e.g. monomorphization
+	// triggered by a type alias rather than a method call).
+	anchorFile := cg.filenameForDiag()
+	anchorPos := cg.currentPos
+
+	if anchorPos.Line == 0 {
+		anchorPos = first.Pos()
+		anchorFile = declFile
+	}
+
+	return fmt.Errorf("%s:%d:%d: %s.%s is ambiguous for this instantiation: %d overloads with the same signature satisfy their where-guards. Drop the redundant guard, or distinguish by parameter type.%s",
+		anchorFile, anchorPos.Line, anchorPos.Col,
 		pretty, first.Name,
 		len(methods), details.String())
+}
+
+// whereGuardSummary renders a method's where-clauses as
+// "where t is X and r is Y" (or "no where-guard" when the method has
+// none) for use in ambiguity / dead-strip diagnostics.
+func whereGuardSummary(cs []ast.TypeConstraint) string {
+	if len(cs) == 0 {
+		return "no where-guard"
+	}
+
+	var b strings.Builder
+
+	for i, c := range cs {
+		if i > 0 {
+			b.WriteString(" and ")
+		}
+
+		b.WriteString("where ")
+		b.WriteString(c.TypeParam)
+		b.WriteString(" is ")
+		b.WriteString(typeBoundString(c.Bound))
+	}
+
+	return b.String()
 }
