@@ -139,9 +139,11 @@ func walkForEscapes(node ast.Node, aliases map[string]string, escaping map[strin
 }
 
 // markEscapeVal marks variables in aliases that escape via the given return value.
-// Handles identifiers, address-of expressions, and tuples containing those.
-// Alias chains are followed transitively: if `ppx = &px` and `px = &x`, returning
-// ppx marks both px and x as escaping.
+// Handles identifiers, address-of expressions, tuples, and struct literals
+// containing those — `return &Box{p: &x}` recursively walks the struct
+// initializers and marks &x's source as escaping. Alias chains are followed
+// transitively: if `ppx = &px` and `px = &x`, returning ppx marks both px
+// and x as escaping.
 func markEscapeVal(val ast.Node, aliases map[string]string, escaping map[string]bool) {
 	if val == nil {
 		return
@@ -152,6 +154,18 @@ func markEscapeVal(val ast.Node, aliases map[string]string, escaping map[string]
 		if ident, ok := rv.Expr.(*ast.Identifier); ok {
 			markEscapeChain(ident.Name, aliases, escaping)
 		}
+		// `return &StructLit{...}`: also walk the struct's field initializers.
+		// The struct itself is heap-promoted via existing &StructLit handling;
+		// any `&local` inside its fields would otherwise stay stack-allocated
+		// and dangle once the function returns.
+		if sl, ok := rv.Expr.(*ast.StructLit); ok {
+			markEscapeStructLit(sl, aliases, escaping)
+		}
+	case *ast.StructLit:
+		// `return Struct{...}` (by value): same as above, the struct's
+		// returned fields outlive the frame, so any &local inside them
+		// must be promoted.
+		markEscapeStructLit(rv, aliases, escaping)
 	case *ast.Identifier:
 		if src, ok := aliases[rv.Name]; ok {
 			markEscapeChain(src, aliases, escaping)
@@ -160,6 +174,19 @@ func markEscapeVal(val ast.Node, aliases map[string]string, escaping map[string]
 		for _, elem := range rv.Elems {
 			markEscapeVal(elem, aliases, escaping)
 		}
+	}
+}
+
+// markEscapeStructLit walks every field initializer of sl, treating each
+// as if it were itself a return value: an &Identifier or alias-of-&Ident
+// in any field marks the underlying var as escaping.
+func markEscapeStructLit(sl *ast.StructLit, aliases map[string]string, escaping map[string]bool) {
+	for _, f := range sl.Fields {
+		markEscapeVal(f.Value, aliases, escaping)
+	}
+
+	for _, p := range sl.Positional {
+		markEscapeVal(p, aliases, escaping)
 	}
 }
 

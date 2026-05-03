@@ -1168,12 +1168,35 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	// All local variables are stack-allocated. Heap promotion happens lazily at
-	// the return site (genLatePromotedReturn) for variables whose addresses escape.
-	alloca := block.NewAlloca(llType)
+	// Local variables are stack-allocated by default. When escape analysis
+	// (cg.curFnEscapingVars) flagged this binding as having `&x` reach an
+	// escape sink — return, struct-field of escaping struct, *Trait coerce,
+	// channel send, spawn arg, etc. — heap-allocate it via _tin_rc_alloc
+	// instead so &x is a stable pointer outliving the frame. entry.val
+	// becomes the heap pointer directly (same LLVM type as a stack alloca:
+	// `*T`), so every later `genLValue(Ident)` returns the heap pointer
+	// without extra indirection. Scope-exit emits _tin_release on entry.val
+	// (see emitScopeRelease's isEarlyHeap branch).
+	earlyHeap := cg.curFnEscapingVars[s.Name]
 
-	// Emit dbg.declare for debug builds.
-	cg.emitDbgDeclare(block, alloca, s.Name, s.Pos().Line, 0, s.Type, llType)
+	var alloca value.Value
+
+	if earlyHeap {
+		sz := cg.llvmSizeOf(block, llType)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		alloca = block.NewBitCast(heapI8, irtypes.NewPointer(llType))
+		// Zero-init the heap block so reads of unwritten fields aren't
+		// uninitialized (mirrors what alloca's caller relies on).
+		block.NewStore(cg.zeroValue(llType), alloca)
+	} else {
+		alloca = block.NewAlloca(llType)
+	}
+
+	// Emit dbg.declare for debug builds. Stack allocas only — heap-promoted
+	// vars don't have an alloca to attach the dbg.declare intrinsic to.
+	if stackAlloca, ok := alloca.(*ir.InstAlloca); ok {
+		cg.emitDbgDeclare(block, stackAlloca, s.Name, s.Pos().Line, 0, s.Type, llType)
+	}
 
 	// isHeapOwned: this variable receives the return value of a heap-promoting
 	// function (one that uses _tin_rc_alloc to return *T), or a &StructLit{} that
@@ -1488,7 +1511,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap}
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in

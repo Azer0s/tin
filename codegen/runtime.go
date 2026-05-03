@@ -1454,6 +1454,22 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
+		// Early-heap-promoted local: entry.val is the heap pointer itself
+		// (allocated via _tin_rc_alloc at let-decl time because escape
+		// analysis flagged the binding). The heap block now belongs to
+		// whatever escape sink took the address — return value, struct
+		// field, *Trait coerce, channel send, spawn arg — so the local
+		// scope MUST NOT free it on exit. Caller-side release happens
+		// through the receiving owner's drop chain.
+		//
+		// (Known follow-up: when the receiving owner is a raw `*T` field
+		// of a Tin struct, Tin's per-struct release helper doesn't yet
+		// cascade through it, so the heap block leaks. Tracked separately —
+		// this branch only avoids the use-after-free.)
+		if entry.isEarlyHeap {
+			return
+		}
+
 		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
 		// heap-promoting callee.  Use chain release to free all RC blocks.
 		if entry.isHeapOwned {

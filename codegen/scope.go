@@ -87,6 +87,15 @@ type scopeEntry struct {
 	// fiber that captured the pointer has had a chance to complete via
 	// the scope's await.
 	releaseRawPtr bool
+
+	// isEarlyHeap is true when this `let` binding's storage was allocated
+	// via _tin_rc_alloc instead of stack alloca because escape analysis
+	// determined that the variable's address would outlive the function
+	// frame. entry.val IS the heap pointer (typed *T), so &x naturally
+	// produces a stable heap pointer and reads/writes through it work
+	// without any extra indirection. Scope-exit calls _tin_release on
+	// entry.val to drop the heap block.
+	isEarlyHeap bool
 }
 
 type scope struct {

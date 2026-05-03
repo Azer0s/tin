@@ -2079,9 +2079,14 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 		return nil
 	}
 
-	// Stack-temp for the fat ptr; data field points at the source
-	// struct directly (no copy).
-	temp := block.NewAlloca(fatPtrSt)
+	// The fat ptr struct lives on the heap so a `*Trait` value can outlive
+	// the frame that built it (e.g. returned, sent down a channel, captured
+	// by an escaping closure). Stack-allocating here would dangle on every
+	// such use; the few extra bytes per coerce are noise. data field points
+	// at the source struct directly (no copy of the underlying value).
+	sz := cg.llvmSizeOf(block, fatPtrSt)
+	heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+	temp := block.NewBitCast(heapI8, irtypes.NewPointer(fatPtrSt))
 
 	dataGEP := block.NewGetElementPtr(fatPtrSt, temp,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
