@@ -3,7 +3,6 @@ package codegen
 import (
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -476,29 +475,20 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 				tag = cg.ensureFnTypeID(fnSigName(fnType, false))
 			} else if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
 				// Pointer-to-named-struct: route through the struct's
-				// type_id ONLY for #no_copy (Cell-style) wrappers where
-				// the C-managed resource lives in `_dtor` and only the
-				// struct's release helper (which calls deinit) cleans
-				// it up. For ordinary heap structs, the generic ARC
-				// already releases the heap block AND its child fields
-				// via emitRelease's per-struct path on the let-binding
-				// side, so adding a second release via any-dispatch
+				// type_id whenever boxing is safe -- i.e. when
+				// emitAnyDispatchRegistrations will register a per-
+				// type-id helper for this struct (#no_copy wrappers
+				// or deinit-only-with-primitive-fields). For other
+				// shapes (RC-tracked field content, ADTs, etc.) the
+				// dispatch is intentionally skipped because boxing
+				// doesn't retain inner field RCs and re-releasing
 				// would double-free.
 				name := innerSt.Name()
 				id, hasID := cg.structTypeIDs[name]
 
-				bareName := name
-				if idx := strings.LastIndex(name, "__"); idx > 0 {
-					bareName = name[idx+2:]
-				}
-
-				if hasID && (cg.noCopyStructs[name] || cg.noCopyStructs[bareName]) {
+				if hasID && cg.structEligibleForAnyDispatch(name, innerSt) {
 					tag = id
 
-					// Boxing a #no_copy pointer (Cell-style) into `any`
-					// creates a second owner of the cell. Retain so the
-					// any-release path can decrement back to zero
-					// without racing the let-binding's release.
 					ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
 					block.NewCall(cg.ensureRetain(), ptrI8)
 				} else {

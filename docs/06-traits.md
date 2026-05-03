@@ -484,11 +484,24 @@ directly. Methods called through `*a` operate on `b`'s storage —
 mutations propagate. `b` must outlive `a` (same gotcha as any other
 `*T` borrow).
 
-The `->` operator is sugar for the deref-then-dispatch idiom:
+### `Trait = &b` — value-form coercion of a borrow
 
 ```rust
-echo a->foo()     // same as (*a).foo()
+let b = Box{v: 5}
+let f Fooable = &b   // borrow form coerced into a value-form trait
+echo f.label()       // dispatches through &b's storage
 ```
+
+When the right-hand side is `&b` (or any `*T`), the value-form trait
+slot stores the borrow's data pointer in its data field directly --
+no heap copy, no extra allocation. Read-only methods see the live
+state of `b`. Mutations through `f` would still hit `b`'s storage,
+but the same value/pointer-receiver rule from the next section
+applies: a trait with any `*Self` method rejects this form, push
+you to the explicit `*Fooable` borrow.
+
+This form is convenient when an API takes `Fooable` by value but
+you want to avoid the heap copy.
 
 ### Why both forms? Why does the choice matter?
 

@@ -2339,22 +2339,7 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 			continue
 		}
 
-		// Only #no_copy wrappers (rc::Cell and friends) get a per-type
-		// any-release dispatch. For ordinary structs, boxing into `any`
-		// does not retain inner RC fields, so calling the per-struct
-		// release helper from any-release would double-free those
-		// fields when the original variable also releases. Leaks-but-
-		// doesn't-crash is the existing semantics for non-#no_copy.
-		bareName := structName
-		if idx := strings.LastIndex(structName, "__"); idx > 0 {
-			bareName = structName[idx+2:]
-		}
-
-		if !cg.noCopyStructs[structName] && !cg.noCopyStructs[bareName] {
-			continue
-		}
-
-		if !cg.structHasRelease(structName, st) {
+		if !cg.structEligibleForAnyDispatch(structName, st) {
 			continue
 		}
 
@@ -2368,6 +2353,61 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 	}
 
 	return block
+}
+
+// structEligibleForAnyDispatch returns true when boxing a *NamedStruct
+// of structName into `any` should run that struct's release_ptr (which
+// fires deinit and releases child fields) when the any drops.
+//
+// Eligible:
+//   - #no_copy wrappers (rc::Cell, etc.)
+//   - structs that declare a `deinit` method (the user opted into
+//     custom destruction; we run their deinit when an any drops the
+//     last owner)
+//
+// Excluded:
+//   - data types (ADTs) -- their release goes through a variant-
+//     dispatched data_release_val path, not the struct release_ptr.
+//   - structs with only auto-RC fields (no deinit) -- the field-ARC
+//     machinery on the let-binding side already covers cleanup; the
+//     any path falls through to the generic _tin_release which still
+//     decrements RC correctly without re-running field releases.
+//
+// The boxToAny pointer-case must agree with this predicate so the
+// retain-on-box and the dispatch registration stay in sync.
+func (cg *CodeGen) structEligibleForAnyDispatch(structName string, st *irtypes.StructType) bool {
+	if !cg.structHasRelease(structName, st) {
+		return false
+	}
+
+	if cg.isDataType(st) {
+		return false
+	}
+
+	bareName := structName
+	if idx := strings.LastIndex(structName, "__"); idx > 0 {
+		bareName = structName[idx+2:]
+	}
+
+	if cg.noCopyStructs[structName] || cg.noCopyStructs[bareName] {
+		return true
+	}
+
+	return cg.structHasDeinitMethod(structName)
+}
+
+// structHasDeinitMethod reports whether structName declares a deinit
+// method. Used by structEligibleForAnyDispatch to opt structs into
+// per-type-id any-release dispatch when the user has explicitly
+// requested custom destruction.
+func (cg *CodeGen) structHasDeinitMethod(structName string) bool {
+	if cg.curScope == nil {
+		return false
+	}
+
+	_, ok := cg.curScope.lookup(structName + "_deinit")
+
+	return ok
 }
 
 // structHasRelease reports whether struct named structName has a
