@@ -85,7 +85,9 @@ of indirections, e.g. as a struct field, returned from a function,
 or both:
 
 ```rust
-struct Holder = xs [i64]
+struct Holder =
+  xs [i64]
+
 fn make() Holder = return Holder{xs: [10, 20, 30]}
 
 let h = make()

@@ -124,34 +124,37 @@ enum atom weather =
   'cloudy
 ```
 
-Access members directly - they are plain atom values:
+Access members directly - they are plain atom values. Use `atom` as the
+binding type (the enum name is only the declaration grouping):
 
 ```rust
-let s status = 'ok
+let s atom = 'ok
 ```
 
 ### Pattern matching with `where`
 
-The natural way to dispatch on atom enums is `where`:
+The natural way to dispatch on atom enums is `where`. Functions take the
+parameter as type `atom`, and the compiler currently requires a `where _`
+wildcard fallback even when every named atom is covered:
 
 ```rust
-fn describe(s status) string =
+fn describe(s atom) string =
   where 'ok:  return "all good"
   where 'err: return "error occurred"
+  where _:    return "unknown"
 
-fn weather_msg(w weather) string =
+fn weather_msg(w atom) string =
   where 'sunny: return "bring sunglasses"
   where 'rainy: return "bring an umbrella"
   where _:      return "check the forecast"
 ```
 
-`match` works too:
+> Atom values are stored as runtime-interned identities (parameter type
+> `atom`), not as the enum's underlying integer. Using the enum name
+> (`status`, `weather`) as a variable or parameter type binds an i32
+> slot and will not accept atom literals.
 
-```rust
-match s:
-  case 'ok:  echo "ok"
-  case 'err: echo "error"
-```
+`match` over atoms is not supported - use `where` clauses for atom dispatch.
 
 ### Standalone atoms
 
@@ -392,10 +395,13 @@ match r:
   case Ok(v):   echo "ok: {v}"
   case Err(m):  echo "error: {m}"
 
-// where-patterns reuse the same constructor syntax
+// where-patterns reuse the same constructor syntax;
+// where-clauses always require a `where _` fallback even when every
+// variant is handled
 fn unwrap_or(r Result[i32, string], d i32) i32 =
   where r is Ok(v):  return v
   where r is Err(_): return d
+  where _:           return d
 ```
 
 Match arms exhaustively covering every variant are recognised without a
