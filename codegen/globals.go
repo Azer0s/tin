@@ -80,6 +80,19 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 // expression (non-constant), it is deferred to topLevelVarInits so that it can
 // be emitted at the top of main().
 func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
+	// Infer the declared type from the initializer when no annotation
+	// is present (e.g. `const X = 10`). Only literal forms with a
+	// statically obvious type get inference; complex expressions still
+	// require an explicit annotation.
+	if tv.Type == nil && tv.Value != nil {
+		tv.Type = inferTopLevelVarType(tv.Value)
+	}
+
+	if tv.Type == nil {
+		return cg.nodeErr(tv, "top-level %s requires either a type annotation or an initializer with an obvious type",
+			topLevelVarKindWord(tv))
+	}
+
 	lt, err := cg.tinTypeToLLVM(tv.Type)
 	if err != nil {
 		return err
@@ -299,9 +312,22 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 
 		return cg.constCoerce(c, targetType).(constant.Constant)
 	case *ast.FloatLit:
+		// FP128 / Half: llir mis-orders the two 64-bit halves on
+		// emit, so any constant we synthesize prints as garbage.
+		// Return nil to defer to runtime init via fpext.
+		if ft, isF := targetType.(*irtypes.FloatType); isF &&
+			(ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf) {
+			return nil
+		}
+
 		c := constant.NewFloat(irtypes.Double, v.Value)
 
-		return cg.constCoerce(c, targetType).(constant.Constant)
+		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
+		if !ok {
+			return nil
+		}
+
+		return coerced
 	case *ast.BoolLit:
 		if v.Value {
 			return constant.NewInt(irtypes.I1, 1)
@@ -441,4 +467,34 @@ func (cg *CodeGen) emitFiberMainEnd(block *ir.Block) {
 	}
 
 	block.NewCall(cg.fiberRunFn)
+}
+
+// inferTopLevelVarType returns a TypeExpr inferred from the literal form
+// of an initializer expression, or nil when no obvious type exists.
+// Only literal forms (Int/Float/Bool/String) are inferred at the top
+// level - anything more complex requires an explicit annotation so the
+// global's LLVM type is unambiguous before any user code runs.
+func inferTopLevelVarType(n ast.Node) ast.TypeExpr {
+	switch n.(type) {
+	case *ast.IntLit:
+		return &ast.SimpleType{Name: "i64"}
+	case *ast.FloatLit:
+		return &ast.SimpleType{Name: "f64"}
+	case *ast.BoolLit:
+		return &ast.SimpleType{Name: "bool"}
+	case *ast.StringLit:
+		return &ast.SimpleType{Name: "string"}
+	}
+
+	return nil
+}
+
+// topLevelVarKindWord returns the source-keyword form ("const" / "var")
+// for a TopLevelVar so error messages match what the user wrote.
+func topLevelVarKindWord(tv *ast.TopLevelVar) string {
+	if tv.IsConst {
+		return "const"
+	}
+
+	return "var"
 }

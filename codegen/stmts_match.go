@@ -1760,10 +1760,15 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 // genMatchTypeConcrete handles `match v.(type)` when v is a concrete
 // (non-tagged-union) type. This happens when a generic with `where t is X`
 // is instantiated with a single variant of X (e.g. Box[i64] for
-// `where t is num`). The arm whose type matches val's type is the only
-// one that can execute; the others are dead at compile time.
+// `where t is num`). Arms whose declared type doesn't match val's type
+// are dead at compile time; the surviving arms (all of the same type)
+// are emitted in order with guards chaining: a guard miss on arm N
+// falls through to arm N+1, and the final unguarded arm (or default)
+// catches any leftover.
 func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val value.Value) (*ir.Block, error) {
 	valLLVM := val.Type()
+
+	matching := make([]ast.MatchCase, 0, len(s.Cases))
 
 	for _, c := range s.Cases {
 		var targetType ast.TypeExpr
@@ -1783,25 +1788,56 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 			continue
 		}
 
+		matching = append(matching, c)
+	}
+
+	if len(matching) == 0 {
+		if s.Default != nil {
+			cg.curScope = newScope(cg.curScope)
+			block, _, err := cg.genStmt(block, s.Default)
+			cg.emitScopeRelease(block, cg.curScope)
+			cg.curScope = cg.curScope.parent
+
+			return block, err
+		}
+
+		return nil, cg.nodeErr(s, "match .(type) on concrete type %s: no case matches",
+			concreteTypeDisplay(cg, valLLVM))
+	}
+
+	afterBlock := cg.newBlock("match.concrete.after")
+	anyFallthrough := false
+	cur := block
+
+	for i, c := range matching {
+		isLast := i == len(matching)-1
+
 		cg.curScope = newScope(cg.curScope)
 
 		if c.VarName != "" {
-			alloca := block.NewAlloca(valLLVM)
-			block.NewStore(val, alloca)
+			alloca := cur.NewAlloca(valLLVM)
+			cur.NewStore(val, alloca)
 			cg.curScope.set(c.VarName, &scopeEntry{val: alloca, isAlloc: true})
 		}
 
 		if c.Guard != nil {
-			guardVal, err2 := cg.genExpr(block, c.Guard)
+			guardVal, err2 := cg.genExpr(cur, c.Guard)
 			if err2 != nil {
 				cg.curScope = cg.curScope.parent
 
 				return nil, err2
 			}
 
-			bodyBlock := cg.newBlock("match.concrete.body")
-			fallBlock := cg.newBlock("match.concrete.fall")
-			block.NewCondBr(cg.toBool(block, guardVal), bodyBlock, fallBlock)
+			bodyBlock := cg.newBlock(fmt.Sprintf("match.concrete.body.%d", i))
+
+			var nextBlock *ir.Block
+			if isLast {
+				nextBlock = cg.newBlock(fmt.Sprintf("match.concrete.fall.%d", i))
+			} else {
+				nextBlock = cg.newBlock(fmt.Sprintf("match.concrete.next.%d", i))
+			}
+
+			cur.NewCondBr(cg.toBool(cur, guardVal), bodyBlock, nextBlock)
 
 			bodyEnd, _, err3 := cg.genStmt(bodyBlock, c.Body)
 			cg.emitScopeRelease(bodyEnd, cg.curScope)
@@ -1811,45 +1847,85 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 				return nil, err3
 			}
 
-			afterBlock := cg.newBlock("match.concrete.after")
-
 			if bodyEnd != nil && bodyEnd.Term == nil {
 				bodyEnd.NewBr(afterBlock)
+				anyFallthrough = true
 			}
 
-			fallEnd, err4 := cg.genMatchConcreteFallthrough(fallBlock, s)
-			if err4 != nil {
-				return nil, err4
-			}
+			cur = nextBlock
 
-			if fallEnd != nil && fallEnd.Term == nil {
-				fallEnd.NewBr(afterBlock)
-			}
-
-			return afterBlock, nil
+			continue
 		}
 
-		block, _, err = cg.genStmt(block, c.Body)
-		cg.emitScopeRelease(block, cg.curScope)
+		// Unguarded arm: this commits, no further arms can run.
+		bodyEnd, _, err := cg.genStmt(cur, c.Body)
+		cg.emitScopeRelease(bodyEnd, cg.curScope)
 		cg.curScope = cg.curScope.parent
 
-		return block, err
+		if err != nil {
+			return nil, err
+		}
+
+		if bodyEnd != nil && bodyEnd.Term == nil {
+			bodyEnd.NewBr(afterBlock)
+			anyFallthrough = true
+		}
+
+		if !isLast {
+			// Subsequent arms are unreachable.
+			cur = nil
+
+			break
+		}
+
+		cur = nil
 	}
 
-	if s.Default != nil {
-		cg.curScope = newScope(cg.curScope)
-		block, _, err := cg.genStmt(block, s.Default)
-		cg.emitScopeRelease(block, cg.curScope)
-		cg.curScope = cg.curScope.parent
+	// If the last guarded arm failed its guard, `cur` still holds the
+	// fall-through block. Emit default into it (or just branch to after).
+	if cur != nil {
+		if s.Default != nil {
+			cg.curScope = newScope(cg.curScope)
+			defEnd, _, err := cg.genStmt(cur, s.Default)
+			cg.emitScopeRelease(defEnd, cg.curScope)
+			cg.curScope = cg.curScope.parent
 
-		return block, err
+			if err != nil {
+				return nil, err
+			}
+
+			if defEnd != nil && defEnd.Term == nil {
+				defEnd.NewBr(afterBlock)
+				anyFallthrough = true
+			}
+		} else {
+			cur.NewBr(afterBlock)
+			anyFallthrough = true
+		}
 	}
 
-	return nil, cg.nodeErr(s, "match .(type) on concrete type %s: no case matches", cg.typeNameOf(valLLVM))
+	if !anyFallthrough {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
+
+	return afterBlock, nil
 }
 
-// genMatchConcreteFallthrough handles the post-guard-failure path for a
-// concrete-type match: try the default if any, else fall through.
+// concreteTypeDisplay renders an LLVM type for diagnostics. Falls back
+// to the LLVM type's own String() when the codegen-side struct-name
+// lookup yields nothing (which it does for every primitive).
+func concreteTypeDisplay(cg *CodeGen, t irtypes.Type) string {
+	if name := cg.typeNameOf(t); name != "" {
+		return name
+	}
+
+	return t.String()
+}
+
+// genMatchConcreteFallthrough is retained for API stability; new logic
+// inlines the default handling into genMatchTypeConcrete.
 func (cg *CodeGen) genMatchConcreteFallthrough(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
 	if s.Default == nil {
 		return block, nil

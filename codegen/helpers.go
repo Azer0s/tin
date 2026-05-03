@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -1038,18 +1039,34 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 		}
 	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
 		if cf, ok2 := c.(*constant.Float); ok2 {
-			fv, _ := cf.X.Float64()
 			ft := target.(*irtypes.FloatType)
+			fv, _ := cf.X.Float64()
 
-			// Round through float32 when narrowing so the resulting
-			// constant is exactly representable in 32 bits. Without
-			// this, big.NewFloat gives a 53-bit value that emits as a
-			// hex literal LLVM rejects for `float` globals.
-			if ft.Kind == irtypes.FloatKindFloat {
-				fv = float64(float32(fv))
+			// FP128 / Half: llir emits the hex literal with the two
+			// 64-bit halves in the WRONG order versus what LLVM expects
+			// (high-first vs low-first), producing wildly wrong values.
+			// Return nil so the caller falls back to runtime init via
+			// fpext from a Double constant.
+			if ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf {
+				return nil
 			}
 
-			return constant.NewFloat(ft, fv)
+			f := constant.NewFloat(ft, fv)
+
+			// Re-snap the big.Float to the target kind's precision so
+			// the emitter writes a literal LLVM accepts for the target
+			// type. Without this, narrowing to `float` hits the
+			// non-exact path in llir and produces a hex literal whose
+			// trailing bits clang rejects.
+			f.X = new(big.Float).SetPrec(uint(floatPrec(ft.Kind))).SetFloat64(fv)
+
+			// For single-precision specifically, round through float32
+			// so the value is guaranteed bit-exactly representable.
+			if ft.Kind == irtypes.FloatKindFloat {
+				f.X = new(big.Float).SetPrec(24).SetFloat64(float64(float32(fv)))
+			}
+
+			return f
 		}
 
 		return c
@@ -1120,6 +1137,24 @@ func floatBits(t *irtypes.FloatType) int {
 		return 128
 	default:
 		return 64
+	}
+}
+
+// floatPrec returns the IEEE 754 mantissa precision for a float kind, in
+// the format big.Float expects via SetPrec (significand bits including
+// the implicit leading 1).
+func floatPrec(k irtypes.FloatKind) int {
+	switch k { //nolint:exhaustive // X86_FP80/PPC_FP128 are not used by tin
+	case irtypes.FloatKindHalf:
+		return 11
+	case irtypes.FloatKindFloat:
+		return 24
+	case irtypes.FloatKindDouble:
+		return 53
+	case irtypes.FloatKindFP128:
+		return 113
+	default:
+		return 53
 	}
 }
 
