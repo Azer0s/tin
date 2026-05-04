@@ -592,6 +592,11 @@ func main() {
 		codegen.AnsiEnabled = true
 	}
 
+	// Verify the LLVM toolchain (clang + opt) is available before any
+	// path that needs it. Prints a per-distro install hint and exits
+	// on miss; warm runs short-circuit via per-tool marker files.
+	requireTools()
+
 	// Prime the disk-cached host-info so subsequent helpers (target
 	// triple detection in codegen, version banner in cache keys, link
 	// probe) never re-spawn clang on a warm machine.
