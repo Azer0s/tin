@@ -1628,10 +1628,13 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		defer func() { _ = os.Remove(irObjName) }()
 
-		if err := compileIRToObj(llInputFile, irObjName, compileIROpts{
-			optLevel:    optLevel,
-			targetFlags: clangTargetFlag(),
-		}); err != nil {
+		irArgs := append([]string{optLevel, "-c"}, clangTargetFlag()...)
+		irArgs = append(irArgs, llInputFile, "-o", irObjName)
+		clangIR := exec.Command("clang", irArgs...)
+		clangIR.Stdout = os.Stdout
+		clangIR.Stderr = os.Stderr
+
+		if err := clangIR.Run(); err != nil {
 			return err
 		}
 
@@ -1649,7 +1652,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			_ = cObj.Close()
 
 			tmpObjs = append(tmpObjs, cObjName)
-			cArgs := append([]string{"-O2", "-c", "-flto=thin"}, clangTargetFlag()...)
+			cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
 
