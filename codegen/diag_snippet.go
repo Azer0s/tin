@@ -54,11 +54,11 @@ func ansi(code, s string) string {
 	return code + s + ansiReset
 }
 
-func ansiBoldText(s string) string  { return ansi(ansiBold, s) }
-func ansiRedText(s string) string   { return ansi(ansiRed, s) }
+func ansiBoldText(s string) string   { return ansi(ansiBold, s) }
+func ansiRedText(s string) string    { return ansi(ansiRed, s) }
 func ansiYellowText(s string) string { return ansi(ansiYellow, s) }
-func ansiCyanText(s string) string  { return ansi(ansiCyan, s) }
-func ansiDimText(s string) string   { return ansi(ansiDim, s) }
+func ansiCyanText(s string) string   { return ansi(ansiCyan, s) }
+func ansiDimText(s string) string    { return ansi(ansiDim, s) }
 
 // diagHeader matches the standard `file:line:col[-endcol]: ...`
 // prefix produced by every codegen / parser error. The file group
@@ -165,9 +165,11 @@ func formatHeader(level, msg, flag string, file string, lineNum, col int) string
 	var b strings.Builder
 
 	colorize := ansiRedText
-	if level == "warning" {
+
+	switch level {
+	case "warning":
 		colorize = ansiYellowText
-	} else if level == "note" {
+	case "note":
 		colorize = ansiCyanText
 	}
 
@@ -183,7 +185,7 @@ func formatHeader(level, msg, flag string, file string, lineNum, col int) string
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat(" ", numWidth(lineNum)+1))
 	b.WriteString(ansiCyanText("--> "))
-	b.WriteString(fmt.Sprintf("%s:%d:%d", file, lineNum, col))
+	fmt.Fprintf(&b, "%s:%d:%d", file, lineNum, col)
 
 	return b.String()
 }
@@ -227,7 +229,7 @@ func formatSnippet(level, msg, flag, file string, lineNum, col, endCol int, sour
 
 	b.WriteString(gutter)
 	b.WriteString(ansiCyanText("--> "))
-	b.WriteString(fmt.Sprintf("%s:%d:%d\n", file, lineNum, col))
+	fmt.Fprintf(&b, "%s:%d:%d\n", file, lineNum, col)
 
 	b.WriteString(gutter)
 	b.WriteString(ansiCyanText("|\n"))
@@ -293,10 +295,12 @@ func caretSpan(source string, col int) int {
 			ch := source[col-1+n]
 			if ch == '\\' && col-1+n+1 < len(source) {
 				n += 2 // skip the escaped char as a unit
+
 				continue
 			}
 
 			n++
+
 			if ch == quote {
 				break
 			}

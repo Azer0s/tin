@@ -35,11 +35,11 @@ type hostToolchainInfo struct {
 	ClangMtime int64  `json:"clang_mtime_unix_ns"`
 
 	// Cached probe results.
-	ClangVersion       string `json:"clang_version"`        // first line of `clang --version`
-	ClangMajorVersion  int    `json:"clang_major"`          // parsed major number
-	TargetTriple       string `json:"target_triple"`        // from `clang -x c - -S -emit-llvm -o -`
-	HostOS             string `json:"host_os"`
-	HostArch           string `json:"host_arch"`
+	ClangVersion      string `json:"clang_version"` // first line of `clang --version`
+	ClangMajorVersion int    `json:"clang_major"`   // parsed major number
+	TargetTriple      string `json:"target_triple"` // from `clang -x c - -S -emit-llvm -o -`
+	HostOS            string `json:"host_os"`
+	HostArch          string `json:"host_arch"`
 }
 
 var (
@@ -162,6 +162,7 @@ func probeClangVersionInto(info *hostToolchainInfo) {
 	}
 
 	s := string(out)
+
 	first := s
 	if idx := indexByte(s, '\n'); idx >= 0 {
 		first = s[:idx]
@@ -281,6 +282,7 @@ func splitLines(s string) []string {
 	var out []string
 
 	start := 0
+
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\n' {
 			out = append(out, s[start:i])

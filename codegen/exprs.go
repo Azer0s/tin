@@ -1051,6 +1051,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		hint := ""
 		if e.Op == "+" && isStringType(lt) && isStringType(rt) {
 			hint = " (use %q to concatenate strings)"
+
 			return nil, cg.nodeErr(e,
 				"binary operator %q is not defined for operands of type %s and %s"+hint,
 				e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt), "++")

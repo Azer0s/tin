@@ -1357,11 +1357,13 @@ doneFlags:
 		runCacheBinTmp := fmt.Sprintf("%s.tmp.%d", runCacheBinPath, os.Getpid())
 		if err := compileIRWithPkgs(irText, pkgIRTexts, runCacheBinTmp, false, extraObjs, fileCSources, extraCFlags, cprog, debugBuild); err != nil {
 			_ = os.Remove(runCacheBinTmp)
+
 			die("compile error: %v", err)
 		}
 
 		if err := os.Rename(runCacheBinTmp, runCacheBinPath); err != nil {
 			_ = os.Remove(runCacheBinTmp)
+
 			die("cache rename: %v", err)
 		}
 
@@ -3117,7 +3119,6 @@ func buildFlagsHash() string {
 		h.Write([]byte(macosSDKPath()))
 		h.Write([]byte{0})
 		h.Write([]byte(linuxSysrootPath()))
-
 
 		sum := h.Sum(nil)
 		buildFlagsHashCache = hex.EncodeToString(sum[:4])

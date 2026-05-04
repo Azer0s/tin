@@ -26,14 +26,9 @@ import (
 // Kept minimal and additive so call sites can default-zero fields they
 // don't need. ltoMode is "thin" or "" (no LTO).
 type compileIROpts struct {
-	optLevel        string // -O0/-O1/-O2/-O3
-	ltoMode         string // "thin" or ""
-	debug           bool
-	functionSecs    bool   // -ffunction-sections
-	dataSecs        bool   // -fdata-sections
-	noUnwindTables  bool   // -fno-unwind-tables -fno-asynchronous-unwind-tables
-	gLineTablesOnly bool   // -gline-tables-only (stacktrace path)
-	targetFlags     []string
+	optLevel    string // -O0/-O1/-O2/-O3
+	ltoMode     string // "thin" or ""
+	targetFlags []string
 }
 
 type linkOpts struct {
@@ -43,8 +38,8 @@ type linkOpts struct {
 	standaloneDebugMacOS bool
 	functionSecs         bool
 	dataSecs             bool
-	gcSections           bool   // -Wl,--gc-sections / -Wl,-dead_strip
-	useLld               bool   // -fuse-ld=lld (cross-compile)
+	gcSections           bool // -Wl,--gc-sections / -Wl,-dead_strip
+	useLld               bool // -fuse-ld=lld (cross-compile)
 	rdynamic             bool
 	targetGOOS           string
 	targetFlags          []string
@@ -131,7 +126,7 @@ func linkBinary(inputs []string, outBin string, opts linkOpts) error {
 
 	prefix := entry.prefix
 	if opts.targetGOOS != "darwin" {
-		prefix = forceBuildIdSha1(prefix)
+		prefix = forceBuildIDSha1(prefix)
 	}
 
 	argv := append([]string{}, prefix...)
@@ -155,11 +150,11 @@ func linkBinary(inputs []string, outBin string, opts linkOpts) error {
 	return nil
 }
 
-// forceBuildIdSha1 rewrites any `--build-id` (default: timestamp hash)
+// forceBuildIDSha1 rewrites any `--build-id` (default: timestamp hash)
 // into `--build-id=sha1` so the note is content-derived and stable
 // across rebuilds. Leaves an explicit `--build-id=...` choice alone.
 // ELF-only -- callers skip this on Mach-O.
-func forceBuildIdSha1(args []string) []string {
+func forceBuildIDSha1(args []string) []string {
 	out := make([]string, 0, len(args))
 	for _, a := range args {
 		if a == "--build-id" {
@@ -216,32 +211,40 @@ func lldArgvFor(opts linkOpts) *lldArgvEntry {
 		useLld:   opts.useLld,
 	}
 
-	lldArgvCacheMu.Lock()
-	entry, ok := lldArgvCache[key]
-	lldArgvCacheMu.Unlock()
-
-	if ok {
+	if entry, ok := lookupLldArgv(key); ok {
 		return entry
 	}
 
 	if disk := readLldArgvFromDisk(key); disk != nil {
-		lldArgvCacheMu.Lock()
-		lldArgvCache[key] = disk
-		lldArgvCacheMu.Unlock()
+		storeLldArgv(key, disk)
 
 		return disk
 	}
 
-	entry = probeLldArgv(opts)
+	entry := probeLldArgv(opts)
 	if entry.err == nil {
 		writeLldArgvToDisk(key, entry)
 	}
 
-	lldArgvCacheMu.Lock()
-	lldArgvCache[key] = entry
-	lldArgvCacheMu.Unlock()
+	storeLldArgv(key, entry)
 
 	return entry
+}
+
+func lookupLldArgv(key lldArgvKey) (*lldArgvEntry, bool) {
+	lldArgvCacheMu.Lock()
+	defer lldArgvCacheMu.Unlock()
+
+	e, ok := lldArgvCache[key]
+
+	return e, ok
+}
+
+func storeLldArgv(key lldArgvKey, entry *lldArgvEntry) {
+	lldArgvCacheMu.Lock()
+	defer lldArgvCacheMu.Unlock()
+
+	lldArgvCache[key] = entry
 }
 
 // lldProbeCacheDir is the on-disk cache root for linker-argv probe
@@ -285,6 +288,7 @@ func readLldArgvFromDisk(k lldArgvKey) *lldArgvEntry {
 
 	pf := strings.Split(strings.TrimRight(parts[1], "\n"), "\n")
 	sf := strings.Split(strings.TrimRight(parts[2], "\n"), "\n")
+
 	if len(pf) == 1 && pf[0] == "" {
 		pf = nil
 	}
@@ -536,7 +540,7 @@ func isClangTempForBase(t, base string) bool {
 	}
 
 	for _, c := range rest {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}

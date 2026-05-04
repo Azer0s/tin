@@ -2518,6 +2518,7 @@ func (cg *CodeGen) lookupTemplateFile(tmplName string) string {
 	}
 
 	suffix := "__" + tmplName
+
 	for k, v := range cg.structDeclFiles {
 		if v == "" {
 			continue
@@ -2628,7 +2629,7 @@ func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDe
 		details.WriteString(" with ")
 		details.WriteString(whereGuardSummary(m.Constraints))
 		details.WriteString(" (declared at ")
-		details.WriteString(fmt.Sprintf("%s:%d:%d", declFile, m.Pos().Line, m.Pos().Col))
+		fmt.Fprintf(&details, "%s:%d:%d", declFile, m.Pos().Line, m.Pos().Col)
 		details.WriteByte(')')
 	}
 

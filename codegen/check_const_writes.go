@@ -19,7 +19,7 @@ package codegen
 //      "may-mutate" set per function name.
 //
 //   2. Body pass: for each function, mark every binding tainted that
-//      is initialised from `&top_level_const` or aliases another
+//      is initialized from `&top_level_const` or aliases another
 //      tainted binding. Warn when:
 //      - `*p = ...`, `*p += ...`, `*p++` is performed on a tainted p,
 //        or
@@ -165,6 +165,7 @@ func scanMutatingParams(fn *ast.FuncDecl, mutators map[string]map[int]bool) map[
 	}
 
 	var walk func(node ast.Node)
+
 	walk = func(node ast.Node) {
 		switch v := node.(type) {
 		case *ast.Block:
@@ -224,6 +225,7 @@ func scanMutatingParams(fn *ast.FuncDecl, mutators map[string]map[int]bool) map[
 			walk(v.Body)
 		case *ast.MatchStmt:
 			walk(v.Expr)
+
 			for _, c := range v.Cases {
 				walk(c.Body)
 			}
@@ -311,6 +313,7 @@ func (cg *CodeGen) checkFuncForConstWrites(
 	tainted := map[string]bool{}
 
 	var walk func(node ast.Node)
+
 	walk = func(node ast.Node) {
 		switch v := node.(type) {
 		case *ast.Block:
@@ -384,6 +387,7 @@ func (cg *CodeGen) checkFuncForConstWrites(
 			walk(v.Body)
 		case *ast.MatchStmt:
 			walk(v.Expr)
+
 			for _, c := range v.Cases {
 				walk(c.Body)
 			}

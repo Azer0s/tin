@@ -118,6 +118,7 @@ func (cg *CodeGen) computeFnsTouchingExtern() {
 	// Propagate: any caller of a touching-fn is itself touching.
 	// callGraph maps caller -> []callee; flip it once for the worklist.
 	callers := map[string][]string{}
+
 	for caller, callees := range cg.callGraph {
 		for _, c := range callees {
 			callers[c] = append(callers[c], caller)

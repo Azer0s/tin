@@ -674,23 +674,6 @@ func (cg *CodeGen) inferTopLevelVarType(n ast.Node) ast.TypeExpr {
 	return nil
 }
 
-// inferTopLevelVarType is the function-free wrapper kept for callers
-// that don't have a *CodeGen handy.
-func inferTopLevelVarType(n ast.Node) ast.TypeExpr {
-	switch n.(type) {
-	case *ast.IntLit:
-		return &ast.SimpleType{Name: "i64"}
-	case *ast.FloatLit:
-		return &ast.SimpleType{Name: "f64"}
-	case *ast.BoolLit:
-		return &ast.SimpleType{Name: "bool"}
-	case *ast.StringLit:
-		return &ast.SimpleType{Name: "string"}
-	}
-
-	return nil
-}
-
 // topLevelVarKindWord returns the source-keyword form ("const" / "var")
 // for a TopLevelVar so error messages match what the user wrote.
 func topLevelVarKindWord(tv *ast.TopLevelVar) string {

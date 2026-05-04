@@ -1735,6 +1735,7 @@ func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
 		return &ast.SimpleType{Name: strings.Join(v.Path, "::")}
 	case *ast.IndexExpr:
 		baseName := ""
+
 		switch be := v.Expr.(type) {
 		case *ast.Identifier:
 			baseName = be.Name

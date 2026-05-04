@@ -14,8 +14,8 @@ import (
 type Parser struct {
 	tokens                 []lexer.Token
 	pos                    int
-	file                   string // source file path; prepended to every error so the snippet renderer can locate the line
-	warnings               []string // raw `file:L:C: warning: msg [-Wname]` lines, drained by the caller through Warnings()
+	file                   string            // source file path; prepended to every error so the snippet renderer can locate the line
+	warnings               []string          // raw `file:L:C: warning: msg [-Wname]` lines, drained by the caller through Warnings()
 	noParensMacros         map[string]string // macro name -> backtick expansion body
 	noWarnAwaitMatchGuards bool
 	// continuationDedents tracks INDENT tokens consumed inside parseBinary for
@@ -56,7 +56,7 @@ func New(tokens []lexer.Token, file string) *Parser {
 
 // errAt returns an error tagged with the parser's source file plus the
 // given line/column, in the canonical `file:L:C: msg` shape that
-// codegen.RenderDiagnostic recognises.
+// codegen.RenderDiagnostic recognizes.
 func (p *Parser) errAt(line, col int, format string, args ...any) error {
 	return fmt.Errorf("%s:%d:%d: "+format, append([]any{p.file, line, col}, args...)...)
 }

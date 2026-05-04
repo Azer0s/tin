@@ -466,6 +466,7 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 	}
 
 	concrete := bareName
+
 	if typeArg != "" {
 		parts := strings.Split(typeArg, ",")
 		for i := range parts {
@@ -482,13 +483,13 @@ func (cg *CodeGen) staticCallIRName(fn *ast.FieldAccess) string {
 // fat-ptr value whose `data` field is an escape-promoted heap block. Two
 // shapes qualify:
 //
-//   1. Direct: `let p *Trait = &b` where b is in cg.curFnEscapingVars.
-//      buildPtrToTraitBorrow heap-allocs the iface here; b's heap block
-//      becomes iface.data.
-//   2. Forwarded: `let s = make()` where make() was recorded as
-//      fnReturnsOwningIface -- make's body created an owning iface and
-//      returned it. The flag must hop across the call so the caller's
-//      scope-exit can release both the iface and its data.
+//  1. Direct: `let p *Trait = &b` where b is in cg.curFnEscapingVars.
+//     buildPtrToTraitBorrow heap-allocs the iface here; b's heap block
+//     becomes iface.data.
+//  2. Forwarded: `let s = make()` where make() was recorded as
+//     fnReturnsOwningIface -- make's body created an owning iface and
+//     returned it. The flag must hop across the call so the caller's
+//     scope-exit can release both the iface and its data.
 //
 // Returns true on either shape so emitScopeRelease cascades through the
 // data field on drop.
@@ -632,9 +633,7 @@ func (cg *CodeGen) curFnOwnsStruct(structName string) bool {
 	// "<Bare>__<typeArgs>" (Bare carries the same #closed tag in noCopyStructs/
 	// closedStructs since genStructDecl is re-run on the concrete decl).
 	// "<StructName>$coro" is the async-method coro variant; trim the suffix.
-	if strings.HasSuffix(fnName, "$coro") {
-		fnName = strings.TrimSuffix(fnName, "$coro")
-	}
+	fnName = strings.TrimSuffix(fnName, "$coro")
 
 	prefix := structName + "_"
 	if strings.HasPrefix(fnName, prefix) {

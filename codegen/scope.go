@@ -170,18 +170,3 @@ func (s *scope) eachReverse(fn func(name string, e *scopeEntry)) {
 		}
 	}
 }
-
-// declKind returns the source-level keyword ("let" / "const" / "var")
-// corresponding to this entry's declaredConst / declaredLet flags.
-// Used by diagnostics that need to mention how the user spelled the
-// declaration. Returns "var" as the fallback when neither flag is set.
-func (e *scopeEntry) declKind() string {
-	switch {
-	case e.declaredConst:
-		return "const"
-	case e.declaredLet:
-		return "let"
-	default:
-		return "var"
-	}
-}

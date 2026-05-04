@@ -1849,6 +1849,7 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 
 			if bodyEnd != nil && bodyEnd.Term == nil {
 				bodyEnd.NewBr(afterBlock)
+
 				anyFallthrough = true
 			}
 
@@ -1868,6 +1869,7 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 
 		if bodyEnd != nil && bodyEnd.Term == nil {
 			bodyEnd.NewBr(afterBlock)
+
 			anyFallthrough = true
 		}
 
@@ -1896,10 +1898,12 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 
 			if defEnd != nil && defEnd.Term == nil {
 				defEnd.NewBr(afterBlock)
+
 				anyFallthrough = true
 			}
 		} else {
 			cur.NewBr(afterBlock)
+
 			anyFallthrough = true
 		}
 	}
@@ -1922,19 +1926,4 @@ func concreteTypeDisplay(cg *CodeGen, t irtypes.Type) string {
 	}
 
 	return fmtArgType(t)
-}
-
-// genMatchConcreteFallthrough is retained for API stability; new logic
-// inlines the default handling into genMatchTypeConcrete.
-func (cg *CodeGen) genMatchConcreteFallthrough(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error) {
-	if s.Default == nil {
-		return block, nil
-	}
-
-	cg.curScope = newScope(cg.curScope)
-	block, _, err := cg.genStmt(block, s.Default)
-	cg.emitScopeRelease(block, cg.curScope)
-	cg.curScope = cg.curScope.parent
-
-	return block, err
 }

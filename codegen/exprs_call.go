@@ -568,6 +568,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
 			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
 				loaded := block.NewLoad(pt.ElemType, objVal)
+
 				result, err := cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
 				if err != nil {
 					return nil, cg.nodeErr(e, "%v", err)
