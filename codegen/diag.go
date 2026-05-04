@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
@@ -44,13 +45,30 @@ const (
 	DiagUseAfterDeinit    = "use-after-deinit"
 	DiagDoubleDeinit      = "double-deinit"
 	DiagFloatPrecision    = "float-precision"
+	// DiagUnwrappedCResource fires on a struct field whose value transitively
+	// touches an extern boundary (returned from / passed to a C function) and
+	// has the shape of a C-managed resource (raw *void, pointer to an opaque
+	// extern struct, i64 named like an fd, or i64 returned by a known fd-
+	// returning POSIX function) when the field is not wrapped in *RcCell[T]
+	// (or another #no_copy wrapper). Without the wrapper, copying the
+	// containing struct would alias the resource and the second drop would
+	// double-free / double-close.
+	DiagUnwrappedCResource = "unwrapped-c-resource"
 	// DiagBuiltinShadow fires when a local binding (let/var/param/nested-fn)
 	// reuses the name of a recognized compile-time builtin. The shadow
-	// itself is legal — `sourcepos` and friends are opted into by name and
-	// the lexical scope wins as expected — but it can mask a typo and
+	// itself is legal - `sourcepos` and friends are opted into by name and
+	// the lexical scope wins as expected - but it can mask a typo and
 	// silently disable the builtin in a region of code, which is hard to
 	// debug after the fact. Default-off, opt-in via -W<name> or -Wpedantic.
 	DiagBuiltinShadow = "builtin-shadow"
+	// DiagWriteToConst fires when a write reaches a top-level const
+	// through a pointer alias. Top-level consts are placed in read-only
+	// storage; writing through them is undefined behavior the way
+	// modifying a `const` global in C is. The check tracks bindings
+	// derived from `&const_name` (and aliases of those bindings), and
+	// warns when the program later assigns through the deref or passes
+	// the pointer to a function that would mutate it.
+	DiagWriteToConst = "write-to-const"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
@@ -121,6 +139,98 @@ func (cg *CodeGen) SetWPedantic() {
 // HadWarnError reports whether any warning was promoted to an error during
 // codegen. The caller should fail the build when this is true.
 func (cg *CodeGen) HadWarnError() bool { return cg.hadWarnError }
+
+// localSuppression reports whether file:line carries a `//!-Wno-<name>`
+// directive on the comment line(s) immediately preceding it. The map is
+// built lazily from the on-disk source the first time a warning queries
+// it, so files we never warn about cost nothing.
+//
+// Multiple comma-separated names per directive are supported:
+//
+//	//!-Wno-unwrapped-c-resource,no-copy
+//	struct {#packed} ff = ...
+func (cg *CodeGen) localSuppression(file string, line int, name string) bool {
+	if file == "" || line <= 0 {
+		return false
+	}
+
+	fileMap, ok := cg.localDiagSuppressions[file]
+	if !ok {
+		fileMap = scanLocalSuppressionsFromFile(file)
+
+		if cg.localDiagSuppressions == nil {
+			cg.localDiagSuppressions = map[string]map[int]map[string]bool{}
+		}
+
+		cg.localDiagSuppressions[file] = fileMap
+	}
+
+	if fileMap == nil {
+		return false
+	}
+
+	return fileMap[line][name]
+}
+
+// scanLocalSuppressionsFromFile reads file once and returns a line ->
+// suppressed-name set. Returns nil on read error so callers behave as if
+// no suppressions exist.
+func scanLocalSuppressionsFromFile(file string) map[int]map[string]bool {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+
+	return scanLocalSuppressionsFromSource(string(data))
+}
+
+// scanLocalSuppressionsFromSource is the pure parser: walks src once,
+// collects pending `//!-Wno-...` names, and attaches them to the line
+// number of the next non-comment, non-blank line. Blank-line gaps and
+// regular `//` comments don't break the chain.
+func scanLocalSuppressionsFromSource(src string) map[int]map[string]bool {
+	out := map[int]map[string]bool{}
+
+	var pending []string
+
+	const dirPrefix = "//!-Wno-"
+
+	for i, line := range strings.Split(src, "\n") {
+		lineNum := i + 1
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, dirPrefix) {
+			body := strings.TrimSpace(trimmed[len(dirPrefix):])
+			for _, raw := range strings.Split(body, ",") {
+				if n := strings.TrimSpace(raw); n != "" {
+					pending = append(pending, n)
+				}
+			}
+
+			continue
+		}
+
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		if len(pending) > 0 {
+			set := out[lineNum]
+			if set == nil {
+				set = map[string]bool{}
+				out[lineNum] = set
+			}
+
+			for _, n := range pending {
+				set[n] = true
+			}
+
+			pending = nil
+		}
+	}
+
+	return out
+}
 
 func (cg *CodeGen) ensureDiag(name string) *diagState {
 	if cg.diags == nil {
@@ -317,7 +427,26 @@ func (cg *CodeGen) staticArrayLen(expr ast.Node) (int64, bool) {
 }
 
 func (cg *CodeGen) warn(name string, pos ast.Pos, format string, args ...any) {
+	cg.warnInFile("", name, pos, format, args...)
+}
+
+// warnInFile is like warn but lets the caller pin the originating source
+// file explicitly. Post-passes that walk decls from cross-package state
+// must use this -- cg.filename moves around during compilation, so the
+// implicit filenameForDiag may not match the file the directive lives
+// in. Empty file falls back to cg.filenameForDiag().
+func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, args ...any) {
+	if file == "" {
+		file = cg.filenameForDiag()
+	}
+
 	if cg.diagSuppressed(name) {
+		return
+	}
+	// Local suppression via `//!-Wno-<name>` on the line above the
+	// warning's source position. Lets a struct field or fn declaration
+	// opt out of one specific diagnostic without globally silencing it.
+	if cg.localSuppression(file, pos.Line, name) {
 		return
 	}
 
@@ -344,6 +473,8 @@ func (cg *CodeGen) warn(name string, pos ast.Pos, format string, args ...any) {
 
 	msg := fmt.Sprintf(format, args...)
 
-	_, _ = fmt.Fprintf(os.Stderr, "%s:%d:%d: %s: %s [-W%s]\n",
-		cg.filenameForDiag(), pos.Line, pos.Col, severity, msg, name)
+	raw := fmt.Sprintf("%s:%d:%d: %s: %s [-W%s]",
+		file, pos.Line, pos.Col, severity, msg, name)
+
+	_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 }

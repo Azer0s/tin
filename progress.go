@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,16 @@ type compileProgress struct {
 	currentStage string    // top-level stage name (e.g. "codegen")
 	stageStart   time.Time // when currentStage began
 	overallStart time.Time // when the first step() fired
+
+	// parallel-job tracking. parallelEvent is called from worker
+	// goroutines inside runParallelClang; parMu serializes stderr writes
+	// so the per-job lines don't interleave. activeJobs is the set of
+	// currently-running job descriptions, used to render the TTY status
+	// line as a compact "running: a, b, c (3/N)" summary.
+	parMu      sync.Mutex
+	activeJobs map[string]bool
+	parTotal   int
+	parDone    int
 }
 
 func (p *compileProgress) detectTTY() {
@@ -150,4 +161,119 @@ func formatElapsed(d time.Duration) string {
 	}
 
 	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+// parallelStart prepares the progress instance for a parallel-jobs phase
+// of size total. The current sequential stage line (if any in non-TTY
+// mode) is closed out so per-job lines aren't appended onto its trailing
+// elapsed-time placeholder.
+func (p *compileProgress) parallelStart(total int) {
+	if !p.verbose {
+		return
+	}
+
+	p.parMu.Lock()
+	defer p.parMu.Unlock()
+
+	p.parTotal = total
+	p.parDone = 0
+	p.activeJobs = make(map[string]bool, total)
+
+	if !p.isTTY && p.currentStage != "" {
+		// Close out the pending step()'s "  <elapsed>" line so the
+		// per-job lines below it start on their own line.
+		fmt.Fprintln(os.Stderr)
+
+		p.currentStage = ""
+	}
+}
+
+// parallelEvent is the runParallelClang callback. kind is "start" or
+// "done"; for "done", elapsed is the wall time the job took. Safe to
+// call from worker goroutines (parMu serializes stderr writes).
+//
+// Render strategy:
+//   - non-TTY: one line per event; "start" prints `[par] desc start`,
+//     "done" prints `[par] desc done <elapsed>`. Easy to grep in CI logs.
+//   - TTY: in-place status line summarizing the active set,
+//     `running 3/N: foo, bar, baz`. "done" lines are not printed
+//     individually; the counter advances and dropped jobs disappear.
+func (p *compileProgress) parallelEvent(desc, kind string, elapsed time.Duration) {
+	if !p.verbose {
+		return
+	}
+
+	p.parMu.Lock()
+	defer p.parMu.Unlock()
+
+	switch kind {
+	case "start":
+		if p.activeJobs == nil {
+			p.activeJobs = make(map[string]bool)
+		}
+
+		p.activeJobs[desc] = true
+	case "done":
+		delete(p.activeJobs, desc)
+		p.parDone++
+	}
+
+	if p.isTTY {
+		p.renderParallelLine()
+	} else if kind == "start" {
+		fmt.Fprintf(os.Stderr, "[par %d/%d] %s start\n", p.parDone+len(p.activeJobs), p.parTotal, desc)
+	} else {
+		fmt.Fprintf(os.Stderr, "[par %d/%d] %s done %s\n", p.parDone, p.parTotal, desc, formatElapsed(elapsed))
+	}
+}
+
+// renderParallelLine paints a TTY-friendly summary of the active job
+// set. Caller must hold parMu.
+func (p *compileProgress) renderParallelLine() {
+	descs := make([]string, 0, len(p.activeJobs))
+	for d := range p.activeJobs {
+		descs = append(descs, d)
+	}
+	// Sort for stable display; map iteration order is randomized.
+	for i := 1; i < len(descs); i++ {
+		for j := i; j > 0 && descs[j-1] > descs[j]; j-- {
+			descs[j-1], descs[j] = descs[j], descs[j-1]
+		}
+	}
+
+	body := strings.Join(descs, ", ")
+	msg := fmt.Sprintf("running %d/%d: %s", p.parDone+len(descs), p.parTotal, body)
+
+	if len(msg) > progressLineWidth {
+		msg = msg[:progressLineWidth-3] + "..."
+	}
+
+	pad := ""
+	if len(msg) < progressLineWidth {
+		pad = strings.Repeat(" ", progressLineWidth-len(msg))
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "\r%s%s", msg, pad)
+}
+
+// parallelEnd closes out a parallel section. TTY: erases the running
+// line so the next sequential step() starts clean. Non-TTY: prints a
+// closing summary with the parallel-section wall time.
+func (p *compileProgress) parallelEnd(elapsed time.Duration) {
+	if !p.verbose {
+		return
+	}
+
+	p.parMu.Lock()
+	defer p.parMu.Unlock()
+
+	if p.isTTY {
+		_, _ = fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", progressLineWidth))
+	} else {
+		fmt.Fprintf(os.Stderr, "[par] %d jobs done in %s\n", p.parTotal, formatElapsed(elapsed))
+	}
+
+	p.activeJobs = nil
+	p.parTotal = 0
+	p.parDone = 0
 }

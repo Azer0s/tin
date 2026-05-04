@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -13,6 +14,28 @@ import (
 )
 
 // Reflection builtins
+
+// sortedStructTypeIDs returns the (struct name, type id) pairs of every
+// registered struct, sorted by struct name. Use this anywhere IR emission
+// would otherwise iterate `cg.structTypeIDs` directly - Go map iteration
+// is randomized per process, which would make codegen output non-
+// deterministic and break the byte-identical-IR property the
+// content-addressed mono cache relies on.
+type structTypeID struct {
+	name string
+	id   int32
+}
+
+func (cg *CodeGen) sortedStructTypeIDs() []structTypeID {
+	out := make([]structTypeID, 0, len(cg.structTypeIDs))
+	for sn, id := range cg.structTypeIDs {
+		out = append(out, structTypeID{name: sn, id: id})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+
+	return out
+}
 
 // structNameFromValue returns the LLVM named struct name for a value's type,
 // or "" if the value is not a named struct.
@@ -200,7 +223,18 @@ func (cg *CodeGen) runtimeAtomSelectByTypeID(block *ir.Block, typeIDVal value.Va
 	table map[int32]string, defaultAtom value.Value) value.Value {
 	result := defaultAtom
 
-	for id, atomStr := range table {
+	// Iterate by ascending type_id - map iteration is randomized in Go
+	// and registerAtom calls in a different order shift the resulting
+	// @str.NN / @atoms.NN globals around.
+	ids := make([]int32, 0, len(table))
+	for id := range table {
+		ids = append(ids, id)
+	}
+
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, id := range ids {
+		atomStr := table[id]
 		isMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(id)))
 		// Strip leading apostrophe to get the atom name.
 		name := atomStr
@@ -408,7 +442,18 @@ func (cg *CodeGen) runtimeAtomArraySelectByTypeID(block *ir.Block, typeIDVal val
 	resultAlloca := block.NewAlloca(fatType)
 	block.NewStore(def, resultAlloca)
 
-	for id, atomStrs := range table {
+	// Iterate by ascending type_id so the emitted @atoms.NN globals land
+	// in a deterministic order. Map iteration is randomized in Go and
+	// would otherwise break the byte-identical-IR property.
+	ids := make([]int32, 0, len(table))
+	for id := range table {
+		ids = append(ids, id)
+	}
+
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, id := range ids {
+		atomStrs := table[id]
 		isMatch := block.NewICmp(enum.IPredEQ, typeIDVal, constant.NewInt(irtypes.I32, int64(id)))
 		candidate := cg.buildAtomArray(block, atomStrs)
 		current := block.NewLoad(fatType, resultAlloca)
@@ -583,7 +628,10 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 	// Collect all boxes so we can release non-selected ones after selection.
 	var allBoxes []value.Value
 
-	for sn, typeID := range cg.structTypeIDs {
+	for _, st0 := range cg.sortedStructTypeIDs() {
+		sn := st0.name
+		typeID := st0.id
+
 		st := cg.structTypes[sn]
 		if st == nil {
 			continue
@@ -739,7 +787,10 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 	strcmp := cg.ensureStrcmp()
 	fieldNamePtr := cg.extractStringPtr(block, fieldNameVal)
 
-	for sn, typeID := range cg.structTypeIDs {
+	for _, st0 := range cg.sortedStructTypeIDs() {
+		sn := st0.name
+		typeID := st0.id
+
 		st := cg.structTypes[sn]
 		if st == nil {
 			continue

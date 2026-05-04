@@ -48,8 +48,8 @@ variables and top-level `var` globals:
 var g_mu sync::Mutex
 
 fn{#async} setup() =
-  g_mu = sync::Mutex.make()   // first call: deinit(zero_mutex) -> free(null), safe
-  g_mu = sync::Mutex.make()   // second call: deinit(old_mutex) -> free(old._ptr)
+  g_mu = sync::Mutex.new()   // first call: deinit(zero_mutex) -> free(null), safe
+  g_mu = sync::Mutex.new()   // second call: deinit(old_mutex) -> free(old._ptr)
 ```
 
 The check is: if `typeNameOf(target.ElemType)` yields a non-empty name and

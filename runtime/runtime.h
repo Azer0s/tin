@@ -65,7 +65,7 @@ void _tin_print_newline(void);
 // LLVM fp128 on all supported architectures (x86-64, Linux AArch64) without
 // needing __float128 (x86-only extension) or _Float128 (requires glibc header).
 // Apple clang (both x86_64 and arm64) does not support TF mode at all
-// — long double is 80-bit on Intel macOS and 64-bit on arm64 macOS,
+// - long double is 80-bit on Intel macOS and 64-bit on arm64 macOS,
 // neither of which is the 128-bit IEEE binary128 the rest of the
 // runtime expects. Fall back to long double on every Apple target;
 // the f128 echo / cstr helpers degrade to lower precision but link
@@ -188,10 +188,20 @@ int32_t     _tin_learn_atom(const char *str);
 const char *_tin_rt_atom_to_str(int32_t code);
 int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but frees str when done
 
-// -- Stacktrace capture (LLVM libunwind backed; see docs/plans/stacktrace-libunwind.md)
+// -- Link-time reflection table (impl trait for struct).
+// Materialized by the compiler: each `impl T for S` becomes one entry in the
+// `tin_impl` (ELF) / `__DATA,__tin_impl` (Mach-O) custom section. Runtime
+// walks the section once on first call and folds each entry into the
+// (type_id -> [trait_atom]) table queried by traitof and friends.
+void    _tin_build_impl_table(void);
+int32_t _tin_impl_count_for_type(int32_t type_id);
+int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx);
+int32_t _tin_impl_total_entries(void); // sum across all type_ids; for tests
+
+// -- Stacktrace capture (frame-pointer walker; see docs/plans/stacktrace-libunwind.md)
 // Writes up to `cap` interned atom codes into `out` (must be cap*sizeof(int32_t)
 // bytes); returns the number actually written. Never panics; on total failure
-// (NULL out, cap < 1, or unwinder init failure) returns 0.
+// (NULL out, cap < 1, or unsupported arch) returns 0.
 //
 // `flags` is a bitfield of TIN_ST_HIDE_* constants (see below). Frames matching
 // any active filter are dropped before the cap is applied, so a filtered call
@@ -202,6 +212,66 @@ int32_t     _tin_learn_atom_handover(char *str); // like _tin_learn_atom but fre
 #define TIN_ST_HIDE_RUNTIME 0x4   // drop frames whose symbol starts with "_tin_"
 #define TIN_ST_HIDE_MAIN    0x8   // drop the main() / _start / __libc_start_* tail
 int32_t     tin_capture_stacktrace(int32_t *out, int32_t cap, int32_t flags);
+
+// -- pclntab (PC -> file:line:col table; see runtime/pclntab.c)
+//
+// Replaces the libdw / DWARF dependency for stacktrace symbol resolution.
+// Codegen emits one TinPclnFnHdr per Tin function into the `tin_pclntab`
+// section (Linux) / `__TIN,__pclntab` (Mach-O). At image load time a
+// __attribute__((constructor)) per image calls _tin_pclntab_register_self
+// which finds its image's section bounds and adds them to the process-
+// wide table. Lookup is done by tin_pclntab_resolve.
+//
+// Layout MUST match codegen/pclntab.go pclntabFnHdrType().
+//
+// pc_addr stores an absolute address (resolved by ld.so / dyld at load
+// time under ASLR), not an offset. The runtime computes
+// `pc_addr - fn_start` on demand. We store absolute pointers because
+// PIC code (REPL cells / CTFE shims compiled with `-fPIC`) cannot
+// represent the link-time `blockaddress(@fn,%bb) - @fn` subtraction;
+// the assembler errors with "Cannot represent a difference across
+// sections". Trading 4 extra bytes per entry for portability.
+typedef struct {
+    const void *pc_addr; // absolute address of the BB start
+    uint32_t    line;
+    uint32_t    col;
+} TinPclnPC;
+
+typedef struct {
+    const void      *fn_start;   // bitcast of fn pointer at link time
+    const char      *name;       // points into .rodata (NOT NUL-terminated)
+    const char      *file;       // points into .rodata (NOT NUL-terminated)
+    uint32_t         name_len;
+    uint32_t         file_len;
+    const TinPclnPC *pcs;        // NULL when this is a marker-only header
+    uint32_t         npcs;       // 0 for marker-only headers
+} TinPclnFnHdr;
+
+// Register a per-image pclntab range. Invoked from each loaded image's
+// codegen-emitted __tin_pclntab_ctor at load time. The args are
+// per-image and let one helper resolve different sections per call:
+//
+//   ELF (Linux / FreeBSD): start/end are linker-synthesized
+//     __start_/__stop_tin_pclntab references local to THIS image; the
+//     marker arg is NULL.
+//
+//   Mach-O (macOS): start/end are NULL; the marker arg is any address
+//     in this image (the constructor passes its own address). The
+//     runtime uses dladdr+getsectiondata to find the section bounds.
+//
+// Idempotent; safe to call from any image's constructor.
+void _tin_pclntab_register_image(const TinPclnFnHdr *start,
+                                 const TinPclnFnHdr *end,
+                                 const void *marker);
+
+// Resolve an instruction pointer to (name, file, line, col). Returns 1 on
+// match, 0 on miss. Output strings are NOT NUL-terminated; use the
+// matching length fields. Safe to call from any thread; non-blocking after
+// first call (sort happens once under a mutex; readers go lock-free).
+int _tin_pclntab_resolve(uintptr_t ip,
+                         const char **name, uint32_t *name_len,
+                         const char **file, uint32_t *file_len,
+                         uint32_t *line, uint32_t *col);
 
 // -- #handover: take ownership of a C pointer returned by an extern function.
 // Platform-specific malloc size detection used by arc.c / atom.c.

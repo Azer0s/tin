@@ -46,8 +46,8 @@ type system, fibers, macros, control tags, and C interop in depth.
 
 ## Getting started
 
-Prerequisites: clang + LLVM 17+, Go 1.25+, libffi. See
-[Dependencies](#dependencies) for the full list.
+Prerequisites: clang + LLVM tools (`opt`, `llc`, `ld.lld`) 17+, Go 1.25+,
+libffi. See [Dependencies](#dependencies) for the full list.
 
 ```sh
 git clone <this-repo>
@@ -81,8 +81,15 @@ For tighter loops on the test suite: `tin test --fast path/...` drops to
 
 ## Dependencies
 
-**Build-time:** clang + LLVM 17+, Go 1.25+, libffi. On Linux you also
-need libdl (implicit on macOS).
+**Build-time:** clang (for C source) + LLVM tools (`opt`, `ld.lld` --
+the `lld` package on most distros) 17+, Go 1.25+, libffi. On Linux you
+also need libdl (implicit on macOS).
+
+The IR pipeline runs through `opt` and `ld.lld` directly; clang is only
+invoked for C-source compilation (runtime, `simd_x86.c`, user `//!+`
+sources) and for tooling probes (target-triple detection, link-args
+discovery). Both tool sets must be the same LLVM major version so the
+bitcode they exchange stays compatible.
 
 **Runtime base:** libc, libpthread (already inside libc on glibc >= 2.34
 and macOS libsystem; older glibc needs `-lpthread` explicit).
@@ -96,30 +103,18 @@ and macOS libsystem; older glibc needs `-lpthread` explicit).
 | `tls`            | `-lssl -lcrypto` (OpenSSL >= 3) |
 | `simd`           | `-msse4.2` on x86_64, NEON on aarch64 |
 
-**Builtins - only if used:**
-
-| Builtin | Adds |
-|---|---|
-| `stacktrace()` | `-lunwind` everywhere; `-ldw` (elfutils) on Linux/FreeBSD for `file:line:col` resolution |
-
-elfutils (`libdw`) is Linux/FreeBSD only — macOS has no equivalent
-shipped. On Darwin the runtime falls back to dladdr-only resolution
-(`<symbol>+0x<offset>` per frame, no source coords). Pipe through
-`atos` or `llvm-symbolizer` post-hoc when you need source positions.
-
 ### Distro install hints
 
 ```sh
 # Debian / Ubuntu
-sudo apt install clang llvm libffi-dev libpcre2-dev libssl-dev libunwind-dev libdw-dev
+sudo apt install clang lld llvm libffi-dev libpcre2-dev libssl-dev
 
 # Arch
-sudo pacman -S clang llvm libffi pcre2 openssl libunwind elfutils
+sudo pacman -S clang lld llvm libffi pcre2 openssl
 
-# macOS (Homebrew)
+# macOS (Homebrew). Homebrew's `llvm` formula bundles clang, opt and
+# ld64.lld together.
 brew install llvm libffi pcre2 openssl@3
-# libunwind ships with the Xcode toolchain (LLVM's libunwind, not GNU's).
-# elfutils is not packaged on macOS; stacktrace falls back to symbol+offset.
 ```
 
 ## License

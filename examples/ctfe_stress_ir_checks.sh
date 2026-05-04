@@ -25,7 +25,7 @@ assert_main() {
   local forbid=$3
   local src=$4
   local tmp ir main
-  tmp=$(mktemp --suffix=.tin)
+  tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   ir=$(./tin ir "$tmp" 2>&1 || true)
   rm -f "$tmp"

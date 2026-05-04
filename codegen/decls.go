@@ -184,6 +184,34 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		cg.packedStructs[structKey] = true
 	}
 
+	if hasTag(n.Tags, "no_copy") {
+		cg.noCopyStructs[structKey] = true
+	}
+
+	if hasTag(n.Tags, "closed") {
+		cg.closedStructs[structKey] = true
+	}
+
+	// Record the AST decl + originating file so post-passes (warning checks,
+	// reflection helpers) can walk fields and bodies for any struct, not just
+	// those in the top-level program.
+	cg.structDeclsByName[structKey] = n
+	if cg.filename != "" {
+		cg.structDeclFiles[structKey] = cg.filename
+	}
+
+	// #no_copy fields would let the containing struct's copy alias the
+	// no-copy cell -- defeats the whole point. Reject at decl time so the
+	// programmer is told to switch to `*S` before any code depends on it.
+	for _, f := range n.Fields {
+		if name := cg.noCopyValueTypeName(f.Type); name != "" {
+			return cg.nodeErr(n,
+				"struct %s field %q has type %s which is #no_copy: copying %s would alias the cell. Use *%s instead",
+				prettyStructName(structKey), f.Name, prettyStructName(name),
+				prettyStructName(structKey), prettyStructName(name))
+		}
+	}
+
 	st, ok := cg.structTypes[structKey]
 	if !ok {
 		st = irtypes.NewStruct()
@@ -399,6 +427,14 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 
 	cg.structImpls[structKey] = implNames
 
+	// Materialize each impl as a section entry for the link-time
+	// reflection table walker (D1, codegen/reflect_table.go +
+	// runtime/reflect_table.c). Routed to the active pkg module so each
+	// pkg's impls land in its own .o.
+	for _, tn := range implNames {
+		cg.emitImplSectionEntry(structKey, tn)
+	}
+
 	return nil
 }
 
@@ -554,7 +590,7 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 // checkAllTraitImplsComplete walks every struct declaration and verifies each
 // listed trait's virtual methods have a matching qualified impl. Default-bodied
 // methods stay optional. Generic struct templates and `implicit` (special trait)
-// are skipped — templates are only checked on monomorphization, and implicit
+// are skipped - templates are only checked on monomorphization, and implicit
 // has its own resolution pathway via implicitConvFns.
 func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 	for _, node := range stmts {
@@ -715,7 +751,7 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newRet := substituteTypeInTypeExpr(m.RetType, subst)
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
-	return &ast.FuncDecl{
+	out := &ast.FuncDecl{
 		Name:           m.Name,
 		TraitQualifier: m.TraitQualifier,
 		TypeParams:     m.TypeParams,
@@ -728,6 +764,9 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 		IsExtern:       m.IsExtern,
 		IsVirtual:      m.IsVirtual,
 	}
+	out.SetPos(m.Pos())
+
+	return out
 }
 
 // substituteStructNameInBody walks the AST body and replaces any StructLit
@@ -825,7 +864,7 @@ func (cg *CodeGen) expandGenericAlias(synth *ast.TypeDecl, aliasTmpl *ast.TypeDe
 
 		concreteName := typeExprToString(argTE)
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, aliasTmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}
@@ -891,6 +930,35 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		return nil
 	}
 
+	// Concrete generic alias (no type params on the alias itself, like
+	// `type GI = G[i64]`): instead of building a duplicate struct named
+	// GI, monomorphize G[i64] under its canonical name (G__i64) and
+	// register GI as an alias for that canonical name. Without this,
+	// `let outer = G[GI]{v: inner}` would resolve GI as a fresh struct
+	// distinct from G__i64 and the store would type-mismatch on inner.
+	//
+	// Skip when the alias declaration carries method overrides -- those
+	// overrides need to live on a distinct struct (the alias name), so
+	// keep the existing monomorphize-as-separate-struct path for that
+	// case. See examples/type_alias.tin "override show method".
+	if len(n.TypeParams) == 0 && len(n.Overrides) == 0 {
+		canonicalName := cg.typeExprCanonicalKey(gt)
+		if canonicalName != n.Name {
+			if _, alreadyDone := cg.structTypes[canonicalName]; !alreadyDone {
+				if err := cg.genTypeDecl(&ast.TypeDecl{
+					Name: canonicalName,
+					Type: gt,
+				}); err != nil {
+					return err
+				}
+			}
+
+			cg.typeAliases[n.Name] = &ast.SimpleType{Name: canonicalName}
+
+			return nil
+		}
+	}
+
 	// Build type-parameter substitution: tmpl.TypeParams[i] -> gt.TypeParams[i]
 	subst := make(map[string]ast.TypeExpr)
 
@@ -915,7 +983,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return fmt.Errorf("%d:%d: struct %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return fmt.Errorf("%d:%d: struct %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}
@@ -942,7 +1010,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			}
 
 			if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-				return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+				return fmt.Errorf("%d:%d: type %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 					c.Pos.Line, c.Pos.Col, n.Name, concreteName, concreteName,
 					c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 			}
@@ -965,6 +1033,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	}
 	for _, f := range tmpl.Fields {
 		concrete.Fields = append(concrete.Fields, ast.StructField{
+			Pos:       f.Pos,
 			Name:      f.Name,
 			Type:      substituteTypeInTypeExpr(f.Type, subst),
 			Tags:      f.Tags,
@@ -988,9 +1057,29 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 			concrete.Methods = append(concrete.Methods, ov)
 
 			delete(overrideSet, m.Name)
-		} else {
-			concrete.Methods = append(concrete.Methods, substituteMethod(m, tmpl.Name, n.Name, subst))
+
+			continue
 		}
+
+		// Method-level where guards: a method on a generic struct whose
+		// `where t is X` clause does NOT hold for the concrete
+		// instantiation is dead-stripped from this concrete struct.
+		// Calling the method on the wrong instantiation then produces
+		// the dead-strip diagnostic at the call site (see emitDeadStripError)
+		// listing every failing constraint -- one entry per stripped
+		// overload, since the same method name can have multiple
+		// where-guarded variants.
+		if witness := cg.methodConstraintWitness(m, typeSubst); witness != "" {
+			if cg.deadStrippedMethods[n.Name] == nil {
+				cg.deadStrippedMethods[n.Name] = make(map[string][]string)
+			}
+
+			cg.deadStrippedMethods[n.Name][m.Name] = append(cg.deadStrippedMethods[n.Name][m.Name], witness)
+
+			continue
+		}
+
+		concrete.Methods = append(concrete.Methods, substituteMethod(m, tmpl.Name, n.Name, subst))
 	}
 	// Any overrides that don't shadow a template method are appended.
 	for _, ov := range n.Overrides {
@@ -999,6 +1088,15 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 
 		concrete.Methods = append(concrete.Methods, ov)
+	}
+
+	// Where-guard ambiguity check: if two methods share the same name and
+	// signature and BOTH satisfied their where-guards for this concrete
+	// instantiation, the call site can't pick between them -- without
+	// this check the user gets a misleading "no matching overload" error
+	// at the call site instead.
+	if amb := findAmbiguousMethods(concrete.Methods); amb != nil {
+		return cg.ambiguousMethodError(n.Name, amb)
 	}
 
 	// Propagate the template's scoped tags onto the fresh concrete's
@@ -1100,6 +1198,22 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	err := cg.genStructDecl(concrete)
 	cg.currentPkg = prevPkg
 	cg.curScope = prevScope
+
+	// genStructDecl tagged structDeclFiles[concrete.Name] with cg.filename
+	// -- but cg.filename here is whoever instantiated the generic, NOT the
+	// template's source. Override so per-line `//!-Wno-` directives on
+	// the template (e.g. Channel's _ptr field) silence the diagnostic
+	// for every monomorphization.
+	//
+	// The template was originally registered under its OWN package's key
+	// (e.g. "sync__Channel"), but currentPkg has been restored to the
+	// instantiating context. Look up the template by both the
+	// current-pkg-prefixed key and the bare name, then sweep for any
+	// "<pkg>__<tmplName>" entry as a final fallback so cross-package
+	// generic instantiations also pick up the template's source path.
+	if tmplFile := cg.lookupTemplateFile(tmpl.Name); tmplFile != "" {
+		cg.structDeclFiles[concrete.Name] = tmplFile
+	}
 
 	// Restore previous type aliases (removes the T->string etc. temporaries).
 	for param := range subst {
@@ -1435,7 +1549,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		// Pre-declare the vtable global with a zero initializer so that wrappers
 		// generating fat-ptr return values can reference it before it is filled in.
 		// Its initializer will be set to the real vtable constant after wrappers are built.
-		preDeclaredVtableGlobal := cg.mod.NewGlobal(vtableKey+"_vtable_data", vtableSt)
+		preDeclaredVtableGlobal := cg.activeModule().NewGlobal(vtableKey+"_vtable_data", vtableSt)
 		preDeclaredVtableGlobal.Immutable = true
 		cg.traitVtableGlobals[vtableKey] = preDeclaredVtableGlobal
 
@@ -1447,7 +1561,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		bareKey := traitQualifierKey(bareTraitImplKey(impl))
 
 		// Trait methods with default bodies (non-virtual) keep accepting the bare
-		// override form `fn methodName(this Foo)` — that's how init/deinit
+		// override form `fn methodName(this Foo)` - that's how init/deinit
 		// chaining works and how struct-side overrides for any default-bodied
 		// trait method are written. Virtual methods MUST be qualified.
 		isDefaultBodied := map[string]bool{}
@@ -1468,7 +1582,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), wrapSlot.Params[pi])
 			}
 
-			wrapFn := cg.mod.NewFunc(wrapperName, wrapSlot.RetType, wrapParams...)
+			wrapFn := cg.activeModule().NewFunc(wrapperName, wrapSlot.RetType, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
 			// Cast i8* self -> structType*, load struct value.
@@ -1490,7 +1604,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			//   2. baseQualifiedName - no type args ("Struct_iter_method") for the
 			//                          common `fn iter::method` form which covers
 			//                          all instantiations the struct lists.
-			//   3. bareName          - "Struct_method" — only accepted when the trait
+			//   3. bareName          - "Struct_method" - only accepted when the trait
 			//                          method has a default body (init/deinit chain
 			//                          pattern, override of any default-bodied method).
 			//                          Virtual methods must be qualified.
@@ -1614,7 +1728,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				wrapParams[pi] = ir.NewParam(fmt.Sprintf("a%d", pi), coroSlot.Params[pi])
 			}
 
-			wrapFn := cg.mod.NewFunc(wrapperName, irtypes.I8Ptr, wrapParams...)
+			wrapFn := cg.activeModule().NewFunc(wrapperName, irtypes.I8Ptr, wrapParams...)
 
 			entry := wrapFn.NewBlock("entry")
 			selfPtr := entry.NewBitCast(wrapParams[0], structPtrType)
@@ -1662,7 +1776,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			preVtable.Init = vtableConst
 			preVtable.Immutable = true
 		} else {
-			vtableGlobal := cg.mod.NewGlobalDef(vtableKey+"_vtable_data", vtableConst)
+			vtableGlobal := cg.activeModule().NewGlobalDef(vtableKey+"_vtable_data", vtableConst)
 			vtableGlobal.Immutable = true
 			cg.traitVtableGlobals[vtableKey] = vtableGlobal
 		}
@@ -1703,8 +1817,11 @@ func (cg *CodeGen) isTraitFatPtr(t irtypes.Type) (string, bool) {
 
 // tryCoerceToIter detects whether iterVal implements iter[T] (either already a
 // fat pointer or a concrete struct with an iter vtable) and returns the fat
-// pointer and instKey if so.
-func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.Value, string, bool) {
+// pointer and instKey if so. The fourth return is `ownsData`: true when this
+// call materialized a fresh value-source heap allocation in the iface's data
+// ptr (so the caller is responsible for releasing it), false when iterVal
+// was already a fat pointer or a borrowed pointer source.
+func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.Value, string, bool, bool) {
 	// Case 1: already a trait fat pointer.
 	if instKey, ok := cg.isTraitFatPtr(iterVal.Type()); ok {
 		baseTrait := instKey
@@ -1713,17 +1830,22 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		}
 
 		if baseTrait == "iter" {
-			return iterVal, instKey, true
+			return iterVal, instKey, true, false
 		}
 
-		return nil, "", false
+		return nil, "", false, false
 	}
 
 	// Case 2: concrete struct that has an iter[T] vtable registered.
 	structName := cg.typeNameOf(iterVal.Type())
 	if structName == "" {
-		return nil, "", false
+		return nil, "", false, false
 	}
+
+	// coerceToTrait heap-allocates the iface data ptr unconditionally
+	// (both value-source and pointer-source branches), so the caller
+	// always owns the resulting ARC ref and must release it on loop exit.
+	ownsData := true
 
 	for vtableKey := range cg.traitVtableGlobals {
 		// vtableKey format: "structName__instKey"
@@ -1742,22 +1864,31 @@ func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.
 		if baseTrait != "iter" {
 			continue
 		}
-		// Coerce to iter fat pointer.
+		// Coerce to iter fat pointer. Suppress the deferred scope-exit
+		// release that coerceToTrait would otherwise register --
+		// genForIterTrait emits its own release at the loop's exit
+		// block, scoped tightly to the iteration rather than the
+		// surrounding fn.
+		prevSuppress := cg.suppressIfaceScopeRelease
+		cg.suppressIfaceScopeRelease = true
+
 		fatPtr, err := cg.coerceToTrait(block, iterVal, instKey)
+		cg.suppressIfaceScopeRelease = prevSuppress
+
 		if err != nil {
 			continue
 		}
 
-		return fatPtr, instKey, true
+		return fatPtr, instKey, true, ownsData
 	}
 
-	return nil, "", false
+	return nil, "", false, false
 }
 
 // genForIterTrait generates a for-in loop over a value that implements iter[T].
 // It calls len() (vtable slot 0) for the count, and get(i) (vtable slot 1) for
 // each element.
-func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr value.Value, instKey string) (*ir.Block, error) {
+func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr value.Value, instKey string, ownsData bool) (*ir.Block, error) {
 	baseTrait := instKey
 	if base, ok := cg.traitInstKeys[instKey]; ok {
 		baseTrait = base
@@ -1798,6 +1929,13 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	// Extract components of fat pointer.
 	dataPtr := block.NewExtractValue(iterFatPtr, 0)
 	vtablePtr := block.NewExtractValue(iterFatPtr, 1)
+
+	// The iterFatPtr was constructed by tryCoerceToIter -> coerceToTrait,
+	// which heap-allocates the source struct via _tin_rc_alloc when the
+	// iter value is by-value (not already a pointer). The for-loop owns
+	// that ARC reference and must release it on exit so the storage is
+	// reclaimed. Without this, every for-in over a value-typed iter
+	// leaked the heap-allocated source.
 
 	// Call len().
 	lenFnType := vtableSt.Fields[lenSlot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
@@ -1861,6 +1999,15 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 		}
 	}
 
+	// Release the iter iface's data ptr at loop exit if we own it (i.e.,
+	// tryCoerceToIter heap-allocated it from a value-source struct).
+	// Pointer-source iterVals are borrowed and the original *T owner
+	// handles cleanup -- releasing here would corrupt non-RC malloc'd
+	// blocks (see malloc_dispatch.tin pattern).
+	if ownsData {
+		afterBlock.NewCall(cg.ensureRelease(), dataPtr)
+	}
+
 	return afterBlock, nil
 }
 
@@ -1868,8 +2015,154 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 // concrete struct value or pointer, given the target instKey (e.g. "named" or "iter_i64").
 // If structVal is already a *struct (e.g. from malloc), the heap pointer is
 // used directly as the data pointer instead of allocating new stack space.
+// traitPointerReceiverMethods returns the method names of trait `instKey`
+// whose `this` receiver is a pointer (`*Self` or `*Trait[...]`).
+// Returns nil for unknown traits or traits with all-value receivers.
+//
+// Used by coerceToTrait to reject value-form coercion when the trait
+// has any pointer-receiver method -- that combination silently mutates
+// a heap copy and the user almost certainly meant `let a *T = &b`.
+func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
+	bareTraitName := bareTraitNameFromKey(instKey)
+
+	td, ok := cg.traits[bareTraitName]
+	if !ok {
+		return nil
+	}
+
+	var ptrMethods []string
+
+	for _, m := range td.Methods {
+		if len(m.Params) == 0 {
+			continue
+		}
+
+		first := m.Params[0]
+		if first.Name != "this" {
+			continue
+		}
+
+		if _, isPtr := first.Type.(*ast.PointerType); isPtr {
+			ptrMethods = append(ptrMethods, m.Name)
+		}
+	}
+
+	return ptrMethods
+}
+
+// traitDisplayName renders an instKey ("Reader", "Awaitable__i64") as
+// the user-visible source form ("Reader", "Awaitable[i64]"). Same
+// shape as prettyStructName but kept separate because traits use a
+// different mangling pipeline.
+func (cg *CodeGen) traitDisplayName(instKey string) string {
+	return prettyStructName(instKey)
+}
+
+// bareTraitNameFromKey strips the "__T1__T2..." instantiation suffix
+// off an instKey, returning the bare trait name registered in
+// cg.traits. For non-generic traits the key is already bare, so this
+// is a no-op.
+func bareTraitNameFromKey(instKey string) string {
+	if i := strings.Index(instKey, "__"); i >= 0 {
+		return instKey[:i]
+	}
+
+	return instKey
+}
+
+// buildPtrToTraitBorrow lowers `let a *Trait = &b` (or any other coerce
+// where target is `*FatPtr` and source is `*Struct`). Builds a stack-
+// temporary fat ptr `{cast(structPtr, i8*), vtable}` and returns its
+// address -- a true borrow, mutations via *a propagate to *structPtr.
+//
+// Returns nil when the struct doesn't implement the trait or the fat-
+// ptr type isn't registered; the caller falls through to the generic
+// coerce path (which currently emits a wrong bitcast -- that's the
+// fallback we're trying to replace).
+//
+// Lifetime: stack-temp lives for the enclosing function frame. Same
+// gotcha as returning `*T` of any local -- Tin does not statically
+// prevent it, but it doesn't catch fire on common in-frame uses
+// (which is what the user's `let a *T = &b; (*a).foo(); echo b` test
+// exercises).
+func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value, traitName string, fatPtrType irtypes.Type) value.Value {
+	pt, ok := structPtr.Type().(*irtypes.PointerType)
+	if !ok {
+		return nil
+	}
+
+	structName := cg.typeNameOf(pt.ElemType)
+	if structName == "" {
+		return nil
+	}
+
+	vtableKey := structName + "__" + traitName
+
+	vtableGlobal, ok := cg.traitVtableGlobals[vtableKey]
+	if !ok {
+		return nil
+	}
+
+	fatPtrSt, ok := fatPtrType.(*irtypes.StructType)
+	if !ok {
+		return nil
+	}
+
+	// The fat ptr struct lives on the heap so a `*Trait` value can outlive
+	// the frame that built it (e.g. returned, sent down a channel, captured
+	// by an escaping closure). Stack-allocating here would dangle on every
+	// such use; the few extra bytes per coerce are noise. data field points
+	// at the source struct directly (no copy of the underlying value).
+	sz := cg.llvmSizeOf(block, fatPtrSt)
+	heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+	temp := block.NewBitCast(heapI8, irtypes.NewPointer(fatPtrSt))
+	// Record that the current function returns a *Trait whose data is an
+	// escape-promoted heap block. The flag rides up to callers via
+	// fnReturnsOwningIface so their let-binding releases data on drop.
+	// (We don't have the source AST here, so the most conservative
+	// option is "every buildPtrToTraitBorrow caller in a fn with any
+	// escaping var owns its iface data" -- which is the common case.)
+	if cg.curFn != nil && len(cg.curFnEscapingVars) > 0 {
+		cg.fnReturnsOwningIface[cg.curFn.Name()] = true
+	}
+
+	dataGEP := block.NewGetElementPtr(fatPtrSt, temp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dataI8 := block.NewBitCast(structPtr, irtypes.I8Ptr)
+	block.NewStore(dataI8, dataGEP)
+
+	vtableGEP := block.NewGetElementPtr(fatPtrSt, temp,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(vtableGlobal, vtableGEP)
+
+	return temp
+}
+
 func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey string) (value.Value, error) {
 	structType := structVal.Type()
+
+	// Receiver/source mismatch: if the trait has any pointer-receiver
+	// methods, target=value-trait coercion would silently mutate a heap
+	// copy regardless of whether the source was `b` or `&b` -- Tin's
+	// `Trait` always heap-copies. Reject both. The user must use
+	// `let a *Trait = &b` to get a real borrow.
+	//
+	// Stash the diagnostic on cg.coerceLastErr so the caller
+	// (genVarDecl, etc.) can surface it positioned at the user's
+	// source line -- coerce() itself returns Value with no error
+	// channel and is called from 87+ sites we don't want to touch.
+	if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
+		err := fmt.Errorf(
+			"trait %s has pointer-receiver methods (%s); value-form coercion silently mutates a heap copy. "+
+				"Use `let a *%s = &b` to mutate the original, or rewrite the trait's receivers to %s if a copy is intended",
+			cg.traitDisplayName(instKey),
+			strings.Join(missing, ", "),
+			cg.traitDisplayName(instKey),
+			cg.traitDisplayName(instKey))
+		cg.coerceLastErr = err
+
+		return nil, err
+	}
 
 	var (
 		dataPtr      value.Value
@@ -1877,14 +2170,52 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	)
 
 	if pt, ok := structType.(*irtypes.PointerType); ok {
-		// Already a pointer (e.g. from malloc + bitcast). Use it directly.
-		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
-		concreteType = pt.ElemType
+		// Pointer source (e.g. *T from `&T{...}` or mem::malloc + cast).
+		// Copy the pointee into a fresh _tin_rc_alloc so the iface always
+		// owns its own ARC-tracked storage. We can't safely retain the
+		// source pointer here because we don't know whether it has an
+		// RC header (`&T{...}` does, `mem::malloc(sizeof(T))` does not),
+		// and _tin_retain on a non-RC pointer corrupts the previous
+		// 16 bytes. Copying gives uniform iface release semantics across
+		// every coercion source. Tradeoff: pointer-receiver methods
+		// dispatched through the iface mutate the heap copy, not the
+		// original *T -- code that relies on mutation visibility through
+		// the iface must call methods directly on the *T (or use the
+		// value-source `let var iface_T = struct_value` pattern, which
+		// has the same heap-copy semantics).
+		structSt := pt.ElemType
+		szGEP := block.NewGetElementPtr(structSt,
+			constant.NewNull(irtypes.NewPointer(structSt)),
+			constant.NewInt(irtypes.I32, 1))
+		szInt := block.NewPtrToInt(szGEP, irtypes.I64)
+		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
+		typedDst := block.NewBitCast(heapPtr, irtypes.NewPointer(structSt))
+		srcVal := block.NewLoad(structSt, structVal)
+		block.NewStore(srcVal, typedDst)
+
+		dataPtr = heapPtr
+		concreteType = structSt
 	} else {
-		// Value type: alloca to get a stable pointer.
-		alloca := block.NewAlloca(structType)
-		block.NewStore(structVal, alloca)
-		dataPtr = block.NewBitCast(alloca, irtypes.I8Ptr)
+		// Heap-allocate the source struct so the iface's `this` pointer
+		// survives across coroutine suspends. A stack alloca here would die
+		// the moment the constructing coroutine suspends (the resume
+		// function's stack frame is freed on suspend), and any spawned
+		// fiber that captured the iface would later read freed memory --
+		// which on AArch64 reliably corrupts (the next worker-stack frame
+		// overwrites it), and on AMD64 happens to look intact under most
+		// scheduling but isn't guaranteed.
+		//
+		// _tin_rc_alloc gives us an ARC header so existing release paths
+		// reclaim the storage when the iface goes out of scope.
+		szGEP := block.NewGetElementPtr(structType,
+			constant.NewNull(irtypes.NewPointer(structType)),
+			constant.NewInt(irtypes.I32, 1))
+		szInt := block.NewPtrToInt(szGEP, irtypes.I64)
+		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
+		typedPtr := block.NewBitCast(heapPtr, irtypes.NewPointer(structType))
+		block.NewStore(structVal, typedPtr)
+
+		dataPtr = heapPtr
 		concreteType = structType
 	}
 
@@ -1912,6 +2243,31 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	vtableGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	block.NewStore(vtableGlobal, vtableGep)
+
+	// Defer the heap-block release to the enclosing scope's exit. We
+	// can't release immediately after this call returns because spawn'd
+	// fibers in the callee may still be using the data ptr at that
+	// point; we can't release at iface-temporary-end because temporaries
+	// have no precise scope. Tying the release to the calling scope
+	// handles both: the scope's `await` must complete before the scope
+	// exits, which guarantees every captured ptr has been read by then.
+	//
+	// Skip the synthetic entry when the iface is being constructed for
+	// a let-binding (the let entry's ownsIfaceData flag handles release
+	// directly), for a for-iter loop (genForIterTrait emits its own
+	// release at loop exit), or for a trait init/deinit chain call
+	// (genStructLit / emitReleaseInner emit their own tighter release).
+	// Those callers pre-mark cg.suppressIfaceScopeRelease.
+	if cg.curScope != nil && !cg.suppressIfaceScopeRelease {
+		ptrSlot := block.NewAlloca(irtypes.I8Ptr)
+		block.NewStore(dataPtr, ptrSlot)
+
+		name := fmt.Sprintf(".iface_data_%d", cg.strCount)
+		cg.strCount++
+		cg.curScope.set(name, &scopeEntry{
+			val: ptrSlot, isAlloc: true, releaseRawPtr: true,
+		})
+	}
 
 	return block.NewLoad(fatPtrType, ifaceAlloca), nil
 }
@@ -2137,4 +2493,184 @@ func (cg *CodeGen) wrapNativeUnion(block *ir.Block, val value.Value, targetSt *i
 	block.NewStore(storedVal, valPtr)
 
 	return block.NewLoad(targetSt, alloca)
+}
+
+// lookupTemplateFile resolves the source-file path that originally
+// declared a generic struct template. Empty string when not found.
+func (cg *CodeGen) lookupTemplateFile(tmplName string) string {
+	// Generic templates are tagged at preregister time -- every
+	// monomorphization shares the same source.
+	if f := cg.genericStructTmplFiles[tmplName]; f != "" {
+		return f
+	}
+
+	if f := cg.genericStructTmplFiles[cg.pkgStructKey(tmplName)]; f != "" {
+		return f
+	}
+
+	// Non-generic structs go through structDeclFiles only.
+	if f := cg.structDeclFiles[cg.pkgStructKey(tmplName)]; f != "" {
+		return f
+	}
+
+	if f := cg.structDeclFiles[tmplName]; f != "" {
+		return f
+	}
+
+	suffix := "__" + tmplName
+
+	for k, v := range cg.structDeclFiles {
+		if v == "" {
+			continue
+		}
+
+		if strings.HasSuffix(k, suffix) {
+			return v
+		}
+	}
+
+	return ""
+}
+
+// findAmbiguousMethods returns a slice of methods that collide with
+// another in the set: same name AND same parameter-type signature.
+// Returns nil when every (name, signature) pair is unique.
+//
+// Two methods with identical signatures only ever survive
+// monomorphization together when both their where-guards held for the
+// concrete type substitution -- a genuine ambiguity the user must
+// resolve at source.
+func findAmbiguousMethods(methods []*ast.FuncDecl) []*ast.FuncDecl {
+	type key struct {
+		name string
+		sig  string
+	}
+
+	groups := make(map[key][]*ast.FuncDecl, len(methods))
+
+	for _, m := range methods {
+		if m.IsExtern != "" {
+			continue
+		}
+
+		sig := paramSig(m)
+		k := key{name: m.Name, sig: sig}
+		groups[k] = append(groups[k], m)
+	}
+
+	for _, g := range groups {
+		if len(g) > 1 {
+			return g
+		}
+	}
+
+	return nil
+}
+
+// paramSig returns a signature string built from each parameter's type
+// (rendered via typeExprText so package-qualified names line up). The
+// receiver `this` is included since it carries the concrete struct
+// type that distinguishes overloads across struct boundaries.
+func paramSig(m *ast.FuncDecl) string {
+	var b strings.Builder
+
+	for i, p := range m.Params {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+
+		b.WriteString(typeExprText(p.Type))
+	}
+
+	return b.String()
+}
+
+// ambiguousMethodError formats the multi-overload diagnostic for a
+// concrete struct whose where-guards left two same-signature methods
+// alive after monomorphization. Each "declared at" entry shows the
+// originating file:line:col so the user can find the colliding decls
+// even when the struct's methods live in a different file from the
+// instantiation site (e.g. user-file `Atomic[i64]` referencing two
+// stdlib overloads).
+func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDecl) error {
+	first := methods[0]
+
+	// Methods always live with their struct: look up the originating
+	// file via the same registry the per-line `//!-Wno-` lookup uses.
+	declFile := cg.lookupTemplateFile(structName)
+	if declFile == "" {
+		// Strip monomorphization suffix and try again with the bare
+		// template name (Box__i64 -> Box).
+		bare := structName
+		if idx := strings.Index(structName, "__"); idx > 0 {
+			bare = structName[:idx]
+		}
+
+		declFile = cg.lookupTemplateFile(bare)
+	}
+
+	if declFile == "" {
+		declFile = cg.filename
+	}
+
+	pretty := prettyStructName(structName)
+
+	// Anchor the diagnostic at the call site that triggered
+	// monomorphization (cg.currentPos). The user wants to see WHERE
+	// they wrote the ambiguous call -- the overload definitions
+	// themselves are listed as bullets so they can find each
+	// definition to fix.
+	var details strings.Builder
+	for _, m := range methods {
+		details.WriteString("\n  candidate: ")
+		details.WriteString(pretty)
+		details.WriteByte('.')
+		details.WriteString(m.Name)
+		details.WriteString(" with ")
+		details.WriteString(whereGuardSummary(m.Constraints))
+		details.WriteString(" (declared at ")
+		fmt.Fprintf(&details, "%s:%d:%d", declFile, m.Pos().Line, m.Pos().Col)
+		details.WriteByte(')')
+	}
+
+	// Anchor at the call site (cg.currentPos) so the user sees WHERE
+	// they wrote the ambiguous call. Falls back to the first overload
+	// when no call-site position is in flight (e.g. monomorphization
+	// triggered by a type alias rather than a method call).
+	anchorFile := cg.filenameForDiag()
+	anchorPos := cg.currentPos
+
+	if anchorPos.Line == 0 {
+		anchorPos = first.Pos()
+		anchorFile = declFile
+	}
+
+	return fmt.Errorf("%s:%d:%d: %s.%s is ambiguous for this instantiation: %d overloads with the same signature satisfy their where-guards. Drop the redundant guard, or distinguish by parameter type.%s",
+		anchorFile, anchorPos.Line, anchorPos.Col,
+		pretty, first.Name,
+		len(methods), details.String())
+}
+
+// whereGuardSummary renders a method's where-clauses as
+// "where t is X and r is Y" (or "no where-guard" when the method has
+// none) for use in ambiguity / dead-strip diagnostics.
+func whereGuardSummary(cs []ast.TypeConstraint) string {
+	if len(cs) == 0 {
+		return "no where-guard"
+	}
+
+	var b strings.Builder
+
+	for i, c := range cs {
+		if i > 0 {
+			b.WriteString(" and ")
+		}
+
+		b.WriteString("where ")
+		b.WriteString(c.TypeParam)
+		b.WriteString(" is ")
+		b.WriteString(typeBoundString(c.Bound))
+	}
+
+	return b.String()
 }

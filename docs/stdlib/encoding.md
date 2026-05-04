@@ -30,7 +30,7 @@ default; `encode_upper` produces uppercase.
 use encoding::base16
 
 echo base16::encode("Hi!")         // "486921"
-echo base16::encode_upper("Hi!")   // "486921" -> "486921" (uppercase: "486921")
+echo base16::encode_upper("Hi!")   // "486921" (no alpha digits in this input)
 echo base16::decode("486921")      // "Hi!"
 ```
 
@@ -39,20 +39,20 @@ echo base16::decode("486921")      // "Hi!"
 ## `encoding::base64`
 
 Base-64 encoding and decoding. Standard alphabet uses `+` and `/`; URL-safe
-alphabet uses `-` and `_`. Both variants pad output with `=` to a multiple of
-4 characters.
+alphabet uses `-` and `_`. The standard variant pads output with `=` to a
+multiple of 4 characters; the URL-safe variant is unpadded.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `encode` | `(s string) string` | Standard base-64 encode (`+/` alphabet, padded) |
-| `encode_url` | `(s string) string` | URL-safe base-64 encode (`-_` alphabet, padded) |
+| `encode_url` | `(s string) string` | URL-safe base-64 encode (`-_` alphabet, no padding) |
 | `decode` | `(s string) string` | Decode standard or URL-safe base-64; skips unknown characters |
 
 ```rust
 use encoding::base64
 
 echo base64::encode("Hello, Tin!")      // "SGVsbG8sIFRpbiE="
-echo base64::encode_url("Hello, Tin!")  // "SGVsbG8sIFRpbiE="
+echo base64::encode_url("Hello, Tin!")  // "SGVsbG8sIFRpbiE"
 echo base64::decode("SGVsbG8sIFRpbiE=") // "Hello, Tin!"
 ```
 
@@ -79,7 +79,7 @@ echo url::encode("foo=bar&baz=1")        // "foo%3Dbar%26baz%3D1"
 echo url::decode("hello%20world")        // "hello world"
 echo url::decode("foo+bar")             // "foo bar"
 
-let params = collections::HashMap[string, string].new(4)
+let params = collections::HashMap[string, string].make(4)
 params.set("q", "hello world")
 params.set("lang", "tin")
 echo url::encode_query(params)           // "lang=tin&q=hello%20world"

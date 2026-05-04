@@ -478,7 +478,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		return fmt.Errorf("use %q: lex: %w", rawPath, lexErr)
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros from `use { name } from pkg` so the parser
 	// can do token substitution before parsing (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
@@ -488,6 +488,10 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %q: parse: %w", rawPath, parseErr)
+	}
+
+	for _, raw := range p.Warnings() {
+		_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 	}
 
 	cg.pkgSrcPaths = append(cg.pkgSrcPaths, srcPath)
@@ -912,7 +916,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		return fmt.Errorf("use %s: lex: %w", pkgPath, lexErr)
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros imported via `use { name } from pkg` so the
 	// parser can substitute them as bare tokens (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
@@ -922,6 +926,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %s: parse: %w", pkgPath, parseErr)
+	}
+
+	for _, raw := range p.Warnings() {
+		_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 	}
 
 	// Collect exported names from the package.
@@ -942,6 +950,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	prevFilename := cg.filename
 	prevPkg := cg.currentPkg
 	prevPkgPath := cg.currentPkgPath
+	prevActive := cg.activeMod
 	cg.filename = srcPath
 	// Set currentPkg so that struct preregistration and genStructDecl produce
 	// canonical "pkgName__StructName" keys/IR-names for structs defined in this
@@ -950,10 +959,19 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// currentPkgPath is the normalized full path used for typeof() display names
 	// (e.g. "encoding::base16" instead of just "base16").
 	cg.currentPkgPath = normalizePkgDisplayPath(pkgPath, pkgName)
+	// Route IR object creation into this package's per-pkg LLVM module so
+	// later (incremental compilation step 2) each pkg can be compiled to
+	// its own .o in parallel. Today we still merge everything back into
+	// cg.mod at the end of Generate via mergeRoutedPkgMods, so the build
+	// pipeline is unchanged - the routing just exercises the per-pkg
+	// scaffolding so we can spot bugs before flipping the parallel
+	// compile on.
+	cg.activeMod = cg.pkgMod(pkgName)
 
 	defer func() {
 		cg.currentPkg = prevPkg
 		cg.currentPkgPath = prevPkgPath
+		cg.activeMod = prevActive
 	}()
 
 	for _, node := range prog.Stmts {
@@ -1407,32 +1425,45 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	// bodies compiled in Pass 3 can reference them by name.  This mirrors
 	// what Pass 4 does for exported names but covers the full set so that
 	// internal helpers (e.g. parse using RFC3339) can access the same values.
-	for _, node := range prog.Stmts {
-		vd, ok := node.(*ast.VarDecl)
-		if !ok || !vd.IsConst {
-			continue
-		}
-
-		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
+	//
+	// Both *ast.VarDecl{IsConst:true} (block-level form, retained for
+	// historical packages that didn't migrate) and *ast.TopLevelVar
+	// {IsConst:true} (the canonical form after the parser routes
+	// module-scope const through parseTopLevelLetConst) are accepted.
+	registerPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		constVal := cg.evalConstExprTyped(value, typ)
 		if constVal == nil {
-			continue
+			return
 		}
 
 		stn := ""
 		isUnsigned := false
 
-		if vd.Type != nil {
-			stn = scalar8BitTypeName(vd.Type)
+		if typ != nil {
+			stn = scalar8BitTypeName(typ)
 
 			if stn == "" {
-				stn = scalar128BitTypeName(vd.Type)
+				stn = scalar128BitTypeName(typ)
 			}
 
-			isUnsigned = isUnsignedTinType(vd.Type)
+			isUnsigned = isUnsignedTinType(typ)
 		}
 
 		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
-		cg.curScope.set(vd.Name, entry)
+		cg.curScope.set(name, entry)
+	}
+
+	for _, node := range prog.Stmts {
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
+		}
 	}
 
 	// Pass 3: compile non-extern function bodies.
@@ -1474,40 +1505,54 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 4: register exported constants (VarDecl with IsConst=true).
-	// Simple literals are registered directly; complex constant expressions
-	// (e.g. casts, shifts, bitwise-NOT, arithmetic) are evaluated by
-	// evalConstExpr so that limits like I128_MIN/U128_MAX are propagated.
-	for _, node := range prog.Stmts {
-		vd, ok := node.(*ast.VarDecl)
-		if !ok || !vd.IsConst || !exportedNames[vd.Name] {
-			continue
+	// Pass 4: register exported constants. Accepts both *ast.VarDecl
+	// {IsConst:true} (legacy block-form) and *ast.TopLevelVar
+	// {IsConst:true} (canonical module-scope form). Simple literals
+	// register directly; complex constant expressions (casts, shifts,
+	// bitwise-NOT, arithmetic, #pure call results) flow through
+	// evalConstExprTyped so that limits like I128_MIN / U128_MAX
+	// propagate as inline constants instead of zero-init globals.
+	exportPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		if !exportedNames[name] {
+			return
 		}
 
-		constVal := cg.evalConstExprTyped(vd.Value, vd.Type)
+		constVal := cg.evalConstExprTyped(value, typ)
 		if constVal == nil {
-			continue
+			return
 		}
 
-		// Carry type metadata so echo/interpolation know about u128 etc.
 		stn := ""
 
 		isUnsigned := false
 
-		if vd.Type != nil {
-			stn = scalar8BitTypeName(vd.Type)
+		if typ != nil {
+			stn = scalar8BitTypeName(typ)
 
 			if stn == "" {
-				stn = scalar128BitTypeName(vd.Type)
+				stn = scalar128BitTypeName(typ)
 			}
 
-			isUnsigned = isUnsignedTinType(vd.Type)
+			isUnsigned = isUnsignedTinType(typ)
 		}
 
 		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
-		cg.curScope.set(vd.Name, entry)
-		prevScope.set(pkgName+"."+vd.Name, entry)
-		prevScope.set(pkgName+"::"+vd.Name, entry)
+		cg.curScope.set(name, entry)
+		prevScope.set(pkgName+"."+name, entry)
+		prevScope.set(pkgName+"::"+name, entry)
+	}
+
+	for _, node := range prog.Stmts {
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				exportPkgConst(d.Name, d.Value, d.Type)
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				exportPkgConst(d.Name, d.Value, d.Type)
+			}
+		}
 	}
 
 	// Propagate only exported symbols up to the caller's scope.
@@ -1527,13 +1572,13 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			// The sub-namespace entries were already populated into prevScope when the
 			// sub-package's file-path import was processed via loadPackageFromSource.
 			// Ensure they are also visible in moduleScope.
-			for key, entry := range prevScope.vars {
+			prevScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, name+"::") || strings.HasPrefix(key, name+".") {
 					if cg.moduleScope != nil && cg.moduleScope != prevScope {
 						cg.moduleScope.set(key, entry)
 					}
 				}
-			}
+			})
 		}
 	}
 
@@ -1582,11 +1627,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			}
 			// Propagate any methods found in our child scope to prevScope.
 			// Methods are registered under the canonical key.
-			for key, entry := range cg.curScope.vars {
+			cg.curScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, canonicalKey+"_") {
 					prevScope.set(key, entry)
 				}
-			}
+			})
 		} else if _, isStruct2 := cg.structTypes[name]; isStruct2 {
 			// Bare-name struct (e.g. file-path import that ran before currentPkg was set).
 			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
@@ -1594,11 +1639,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
 			}
 
-			for key, entry := range cg.curScope.vars {
+			cg.curScope.each(func(key string, entry *scopeEntry) {
 				if strings.HasPrefix(key, name+"_") {
 					prevScope.set(key, entry)
 				}
-			}
+			})
 		}
 
 		if _, isGeneric := cg.genericStructsByArity[name]; isGeneric {
@@ -2016,7 +2061,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		}
 
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
-			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint `where %s is %s` (failing sub-check: `%s`)",
+			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
 				c.Pos.Line, c.Pos.Col, tmpl.Name, concreteName, concreteName,
 				c.TypeParam, typeBoundString(c.Bound), typeBoundString(witness))
 		}
@@ -2109,7 +2154,10 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	}
 	// Register the forward declaration immediately in constrainedFuncInstances so
 	// that any re-entrant monomorphizeFunc call for the same irName returns it.
-	for _, f := range cg.mod.Funcs {
+	// Walk allFuncs() (cg.mod + per-pkg modules) because predeclareFuncAs routes
+	// new fns through cg.activeModule(), which lands them in the per-pkg module
+	// for the package currently being compiled.
+	for _, f := range cg.allFuncs() {
 		if f.Name() == irName {
 			cg.constrainedFuncInstances[irName] = f
 
@@ -2143,10 +2191,12 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 
 	cg.curScope = prevScope
 
-	// Find the compiled function (now has a body).
+	// Find the compiled function (now has a body). Walk allFuncs() so we
+	// see fns in per-pkg modules too - the body emit went via the same
+	// activeModule() routing as the forward declaration above.
 	var compiled *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == irName {
 			compiled = f
 
@@ -2322,14 +2372,41 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			}
 		}
 	case *ast.FuncType:
-		if !isFatFnPtr(argType) {
-			break
-		}
+		// Two argType shapes are accepted:
+		//   1. Fat-fn-ptr {fn(i8*, ...)*, i8*}  - a wrapped closure
+		//   2. Raw func pointer fn(...)*       - a bare named function
+		// reference (e.g. `is_pos` passed directly to `filter(is_pos)`)
+		// before any closure shim is built. Falling through on shape (2)
+		// would skip inference and leave subst[t] unset, causing the
+		// caller to monomorphize with the literal type-param name (e.g.
+		// `@filter__t`) - all callers would then share one IR instance
+		// and read its slice with the wrong stride for any element type
+		// that doesn't happen to be 8 bytes (atom struct{i32}, i32 array,
+		// etc).
+		var (
+			innerFnType *irtypes.FuncType
+			envOffset   int
+		)
 
-		st := argType.(*irtypes.StructType)
+		if isFatFnPtr(argType) {
+			st := argType.(*irtypes.StructType)
 
-		innerFnType, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
-		if !ok {
+			fn, ok := st.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+			if !ok {
+				break
+			}
+
+			innerFnType = fn
+			envOffset = 1 // skip the i8* env in fat-fn-ptr inner sig
+		} else if rawPtr, ok := argType.(*irtypes.PointerType); ok {
+			fn, ok2 := rawPtr.ElemType.(*irtypes.FuncType)
+			if !ok2 {
+				break
+			}
+
+			innerFnType = fn
+			envOffset = 0 // raw fn pointer carries no env slot
+		} else {
 			break
 		}
 
@@ -2338,7 +2415,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 		}
 
 		for i, astParam := range pt.Params {
-			llIdx := i + 1
+			llIdx := i + envOffset
 
 			if llIdx < len(innerFnType.Params) {
 				cg.inferTypeArgsFromParamPrio(astParam, innerFnType.Params[llIdx], typeParams, subst, fromConst, isConst)

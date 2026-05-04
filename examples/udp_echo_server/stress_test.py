@@ -125,11 +125,25 @@ def test_throughput():
 
 if __name__ == "__main__":
     bin_path = os.environ.get("TIN_UDP_SERVER", "/tmp/udp_echo_server")
+    # Pipe stdout/stderr so CI logs surface any panic / "listening" line
+    # the server prints. DEVNULL silently swallowed everything before, so
+    # CI failures showed only "TimeoutError" with no insight into whether
+    # the server even bound.
     server = subprocess.Popen(
         [bin_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    time.sleep(0.3)
+    # 1.0s gives the server time to bind + start its accept loop on
+    # slow CI runners.
+    time.sleep(1.0)
+
+    # Verify the server is actually alive before testing.
+    if server.poll() is not None:
+        out, err = server.communicate(timeout=1)
+        print(f"ERROR: server exited with code {server.returncode}")
+        print(f"stdout: {out!r}")
+        print(f"stderr: {err!r}")
+        sys.exit(1)
 
     try:
         test_basic_echo()
@@ -141,7 +155,13 @@ if __name__ == "__main__":
         test_throughput()
     finally:
         server.terminate()
-        server.wait()
+        try:
+            out, err = server.communicate(timeout=2)
+            if out: print(f"server stdout:\n{out.decode(errors='replace')}")
+            if err: print(f"server stderr:\n{err.decode(errors='replace')}")
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
 
     print(f"\nPASSED: {len(PASS)}  FAILED: {len(FAIL)}")
     if FAIL:

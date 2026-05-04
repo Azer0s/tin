@@ -35,28 +35,44 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// checkFieldWritable returns a diagnostic when target is a FieldAccess
-// whose struct declares the field `const`. Other target kinds (plain
-// Identifier, IndexExpr, DerefExpr, etc.) are not the concern of this
-// check and return nil.
+// checkFieldWritable returns a diagnostic when the assignment target
+// resolves to immutable storage. Two shapes are checked:
 //
-// False negatives are possible when astInferType cannot resolve the parent
-// type (e.g. deeply generic contexts); this errs on the side of letting
-// code through. Soundness in the common case (named-struct method bodies,
-// local-variable assignments) is what matters for the user experience.
+//   - FieldAccess into a struct whose field is declared `const`.
+//   - IndexExpr into a `const` array (top-level or block-level).
+//     Element assignments through such an array would mutate read-
+//     only storage; reject at compile time.
+//
+// Other target kinds (plain Identifier, DerefExpr, etc.) are not the
+// concern of this check and return nil.
+//
+// False negatives are possible when astInferType cannot resolve the
+// parent type (e.g. deeply generic contexts); this errs on the side of
+// letting code through. Soundness in the common case (named-struct
+// method bodies, local-variable assignments) is what matters for the
+// user experience.
 func (cg *CodeGen) checkFieldWritable(target ast.Node) error {
-	fa, ok := target.(*ast.FieldAccess)
-	if !ok {
-		return nil
-	}
+	switch t := target.(type) {
+	case *ast.FieldAccess:
+		structName := cg.parentStructNameOf(t)
+		if structName == "" {
+			return nil
+		}
 
-	structName := cg.parentStructNameOf(fa)
-	if structName == "" {
-		return nil
-	}
+		if cg.structConstFields[structName][t.Field] {
+			return cg.nodeErr(t, "cannot assign to const field %s.%s", cg.diagStructName(structName), t.Field)
+		}
 
-	if cg.structConstFields[structName][fa.Field] {
-		return cg.nodeErr(fa, "cannot assign to const field %s.%s", structName, fa.Field)
+	case *ast.IndexExpr:
+		if id, ok := t.Expr.(*ast.Identifier); ok {
+			if cg.topLevelConstNames[id.Name] {
+				return cg.nodeErr(t, "cannot assign to element of top-level const %q (immutable storage)", id.Name)
+			}
+
+			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
+				return cg.nodeErr(t, "cannot assign to element of const %q; drop the const if you need to mutate elements", id.Name)
+			}
+		}
 	}
 
 	return nil

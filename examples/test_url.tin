@@ -43,7 +43,7 @@ test "roundtrip" =
   assert::equals(url::decode(url::encode(s)), s)
 
 test "encode_query both keys present" =
-  let m = collections::HashMap[string, string].new(4)
+  let m = collections::HashMap[string, string].make(4)
   m.set("b", "2")
   m.set("a", "1")
   let qs = url::encode_query(m)
@@ -51,7 +51,7 @@ test "encode_query both keys present" =
   assert::ok(strings::index_of(qs, "b=2") >= 0)
 
 test "encode_query keys sorted" =
-  let m = collections::HashMap[string, string].new(4)
+  let m = collections::HashMap[string, string].make(4)
   m.set("z", "last")
   m.set("a", "first")
   m.set("m", "mid")
@@ -63,13 +63,13 @@ test "encode_query keys sorted" =
   assert::ok(mi < zi)
 
 test "encode_query encodes special chars in values" =
-  let m = collections::HashMap[string, string].new(4)
+  let m = collections::HashMap[string, string].make(4)
   m.set("q", "hello world")
   let qs = url::encode_query(m)
   assert::equals(qs, "q=hello%20world")
 
 test "encode_query empty map" =
-  let m = collections::HashMap[string, string].new(4)
+  let m = collections::HashMap[string, string].make(4)
   assert::equals(url::encode_query(m), "")
 
 test "parse_query basic" =
@@ -99,7 +99,7 @@ test "parse_query no value" =
   assert::equals(m.len(), 1)
 
 test "parse_query round trip" =
-  let m = collections::HashMap[string, string].new(4)
+  let m = collections::HashMap[string, string].make(4)
   m.set("hello world", "a b")
   m.set("x", "100%25")
   let qs = url::encode_query(m)

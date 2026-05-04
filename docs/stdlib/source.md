@@ -144,7 +144,7 @@ stacktrace()
 use source
 use collections
 
-let count = collections::HashMap[string, i64].new()
+let count = collections::HashMap[string, i64].make()
 for let line string in log_lines:
   let p = source::parse_sourcepos(line as atom)
   if p.file != "":

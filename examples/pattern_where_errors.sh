@@ -17,7 +17,7 @@ assert_err() {
   local name=$1
   local want=$2
   local src=$3
-  local tmp=$(mktemp --suffix=.tin)
+  local tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   local out
   out=$(./tin run "$tmp" 2>&1 || true)

@@ -1,6 +1,14 @@
 //!+sync_helpers.c
 
 // stdlib/sync - Mutex (exclusive lock, fiber-aware via TinFastMutex)
+//
+// The underlying TinFastMutex cell is owned by an rc::Cell, so copying
+// the Tin Mutex value (struct copy, fiber spawn arg) bumps a refcount
+// and the cell is freed exactly once when the last owner drops. The
+// extra Cell.payload() load on every lock/unlock is trivial next to
+// the CAS / syscall the lock itself performs.
+
+use rc
 
 fn tin_fmutex2_new() *void                    = extern("_tin_fmutex2_new")
 fn tin_fmutex2_free(m *void)                  = extern("_tin_fmutex2_free")
@@ -11,20 +19,19 @@ fn tin_fmutex2_unlock(m *void)                = extern("_tin_fmutex2_unlock")
 fn tin_current_pid_mx() i64 = extern("_tin_current_pid")
 
 struct Mutex =
-  _ptr *void
+  _cell *rc::Cell[*void]
 
-  static fn make() Mutex =
-    return Mutex{_ptr: tin_fmutex2_new()}
+  fn ptr(this Mutex) *void = return this._cell.payload()
+
+  static fn new() Mutex =
+    return Mutex{_cell: rc::Cell[*void].alloc(tin_fmutex2_new(), tin_fmutex2_free)}
 
   fn{#async #no_autoyield} lock(this Mutex) =
     let pid = tin_current_pid_mx()
     for true:
-      if tin_fmutex2_try_lock(this._ptr, pid) != 0:
+      if tin_fmutex2_try_lock(this.ptr(), pid) != 0:
         return
       yield
 
   fn unlock(this Mutex) =
-    tin_fmutex2_unlock(this._ptr)
-
-  fn deinit(this Mutex) =
-    tin_fmutex2_free(this._ptr)
+    tin_fmutex2_unlock(this.ptr())

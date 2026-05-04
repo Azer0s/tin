@@ -452,27 +452,83 @@ dispatch. See `docs/internals/values.md` for the full LLVM layout details.
 
 ---
 
-## Trait fat pointers (`*TraitName`)
+## Trait coercion: value vs pointer
 
-A trait value can be held as a pointer using the `*TraitName` type. Dereferencing
-or calling methods through a `*TraitName` pointer works via the `->` operator,
-which loads the fat pointer and dispatches through the vtable:
+Tin gives you two ways to hold a struct as a trait, and they have
+different semantics. Pick the one you want at the `let` site.
+
+### `Trait` (value form) — copy
 
 ```rust
-trait greeter =
-  fn greet(this greeter) string = virtual
-
-struct person(greeter) =
-  name string
-  fn greet(this person) string = return "Hello, I am {this.name}"
-
-let p = person{name: "Alice"}
-let gp *greeter = &p          // pointer to fat pointer
-echo gp->greet()              // "Hello, I am Alice"
+let f Fooable = b
 ```
 
-The `->` operator automatically dereferences `*TraitName` to get the fat pointer,
-then dispatches via the vtable.
+The struct `b` is **heap-copied** into a fresh allocation owned by `f`.
+`f` and `b` are independent storage from this point on. Mutations
+through `f` do not affect `b`. The copy is released when `f` goes out
+of scope.
+
+This matches Go's interface assignment. Predictable, safe across coroutine
+suspends, no lifetime concerns.
+
+### `*Trait` (pointer form) — borrow
+
+```rust
+let a *Fooable = &b
+(*a).foo(2)
+echo b.v        // mutated
+```
+
+`a` is a pointer to a fat pointer whose data field aliases `&b`
+directly. Methods called through `*a` operate on `b`'s storage —
+mutations propagate. `b` must outlive `a` (same gotcha as any other
+`*T` borrow).
+
+### `Trait = &b` — value-form coercion of a borrow
+
+```rust
+let b = Box{v: 5}
+let f Fooable = &b   // borrow form coerced into a value-form trait
+echo f.label()       // dispatches through &b's storage
+```
+
+When the right-hand side is `&b` (or any `*T`), the value-form trait
+slot stores the borrow's data pointer in its data field directly --
+no heap copy, no extra allocation. Read-only methods see the live
+state of `b`. Mutations through `f` would still hit `b`'s storage,
+but the same value/pointer-receiver rule from the next section
+applies: a trait with any `*Self` method rejects this form, push
+you to the explicit `*Fooable` borrow.
+
+This form is convenient when an API takes `Fooable` by value but
+you want to avoid the heap copy.
+
+### Why both forms? Why does the choice matter?
+
+Because `Trait` always copies, calling a `*Self` method via a value-form
+trait would silently mutate the heap copy and the caller would never
+see the change. To prevent that footgun, the compiler **rejects** value
+coercion when the trait has any pointer-receiver method:
+
+```rust
+trait Fooable =
+  fn foo(this *Fooable, n i64) = virtual    // pointer receiver
+
+struct Box (Fooable) =
+  v i64
+  fn Fooable::foo(this *Box, n i64) = this.v = n
+
+let b = Box{v: 0}
+let f Fooable = b
+//  ^^^^^^^^^^^^^
+// error: trait Fooable has pointer-receiver methods (foo);
+// value coercion would silently mutate a heap copy.
+// Use `let a *Fooable = &b` to mutate the original, or rewrite
+// the trait's receivers to Fooable if a copy is intended
+```
+
+Read-only traits (all methods take `Self`) accept both forms — the
+copy semantics are fine because there's nothing to mutate.
 
 ---
 

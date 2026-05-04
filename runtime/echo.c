@@ -52,7 +52,6 @@ void _tin_print_char(uint8_t v) { putchar(v); }
 void _tin_print_string(TinString s) { printf("%.*s", (int)s.len, s.ptr); }
 void _tin_print_newline(void)   { putchar('\n'); }
 
-// ---------------------------------------------------------------------------
 // 128-bit integer helpers
 //
 // GCC and Clang both support __int128 / unsigned __int128 on x86-64.
@@ -112,7 +111,6 @@ const char *_tin_u128_to_cstr(unsigned __int128 v) {
     return buf;
 }
 
-// ---------------------------------------------------------------------------
 // f128 helpers
 //
 // tin_fp128_t is declared in runtime.h as __attribute__((mode(TF))), which

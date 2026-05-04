@@ -88,7 +88,12 @@ func (cg *CodeGen) exprByte8Type(node ast.Node) string {
 
 // exprElemIsUnsigned returns true when the AST expression produces an unsigned
 // integer value, including array/pointer indexing into unsigned element types.
-// Used by genAsExpr to choose zext vs sext when widening integer values.
+// Used by genAsExpr to choose zext vs sext when widening integer values, and
+// by genBinExpr to choose urem/udiv/ult etc. when the LHS is unsigned.
+//
+// Keep CallExpr / ParenExpr handled here — without them, patterns like
+// `(fn_returning_u64() % span) as i64` fall through to srem because the
+// LHS Tin type can't be inferred from the AST shape alone.
 func (cg *CodeGen) exprElemIsUnsigned(node ast.Node) bool {
 	switch n := node.(type) {
 	case *ast.Identifier:
@@ -125,6 +130,25 @@ func (cg *CodeGen) exprElemIsUnsigned(node ast.Node) bool {
 		// Arithmetic/bitwise binary ops propagate unsigned-ness from the left operand.
 		// E.g. (s0 ^ s4) as u64 must zext when s0 is u32.
 		return cg.exprElemIsUnsigned(n.Left)
+	case *ast.CallExpr:
+		// Look up the callee in scope and consult the registered return-
+		// signedness map, mirroring exprIsUnsigned.
+		var calleeName string
+
+		switch c := n.Func.(type) {
+		case *ast.Identifier:
+			calleeName = c.Name
+		case *ast.ScopeAccess:
+			calleeName = strings.Join(c.Path, "::")
+		}
+
+		if calleeName != "" {
+			if se, ok := cg.curScope.lookup(calleeName); ok {
+				if f, ok2 := se.val.(*ir.Func); ok2 {
+					return cg.funcReturnUnsigned[f.Name()]
+				}
+			}
+		}
 	}
 
 	return false

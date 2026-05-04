@@ -35,8 +35,15 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 
 	irName := pkgName + "__" + tv.Name
 
-	g := cg.mod.NewGlobal(irName, lt)
+	g := cg.activeModule().NewGlobal(irName, lt)
 	g.Init = initVal
+
+	// Mirror the entry-program path: top-level `const` becomes an
+	// LLVM `constant` global, not `global`, so the read-only storage
+	// guarantee holds across packages too.
+	if tv.IsConst {
+		g.Immutable = true
+	}
 
 	entry := &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true}
 	cg.curScope.set(tv.Name, entry)
@@ -46,6 +53,14 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 	}
 
 	cg.topLevelVarBareNames[tv.Name] = true
+
+	if tv.IsConst {
+		if cg.topLevelConstNames == nil {
+			cg.topLevelConstNames = map[string]bool{}
+		}
+
+		cg.topLevelConstNames[tv.Name] = true
+	}
 
 	if exportedNames[tv.Name] && parentScope != nil {
 		parentScope.set(pkgName+"::"+tv.Name, entry)
@@ -58,8 +73,9 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 	}
 
 	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
-		name:   irName,
-		global: g,
+		name:    irName,
+		global:  g,
+		pkgName: pkgName,
 	})
 
 	if tv.Value != nil && cg.tryConstantFold(tv.Value, lt) == nil {
@@ -67,6 +83,7 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 			name:     irName,
 			global:   g,
 			initExpr: tv.Value,
+			pkgName:  pkgName,
 		})
 	}
 
@@ -78,6 +95,19 @@ func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string
 // expression (non-constant), it is deferred to topLevelVarInits so that it can
 // be emitted at the top of main().
 func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
+	// Infer the declared type from the initializer when no annotation
+	// is present (e.g. `const X = 10`). Only literal forms with a
+	// statically obvious type get inference; complex expressions still
+	// require an explicit annotation.
+	if tv.Type == nil && tv.Value != nil {
+		tv.Type = cg.inferTopLevelVarType(tv.Value)
+	}
+
+	if tv.Type == nil {
+		return cg.nodeErr(tv, "top-level %s requires either a type annotation or an initializer with an obvious type",
+			topLevelVarKindWord(tv))
+	}
+
 	lt, err := cg.tinTypeToLLVM(tv.Type)
 	if err != nil {
 		return err
@@ -86,7 +116,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	// In REPL mode, globals from previous cells must be external references so
 	// RTLD_GLOBAL resolves them to the canonical first-loaded copy, not a new zero copy.
 	if cg.replMode && cg.replExternalGlobals[tv.Name] {
-		g := cg.mod.NewGlobal(tv.Name, lt)
+		g := cg.activeModule().NewGlobal(tv.Name, lt)
 		g.Linkage = enum.LinkageExternal
 		cg.curScope.set(tv.Name, &scopeEntry{val: g, isAlloc: true, isRC: isRCTrackedType(lt), isGlobal: true})
 
@@ -99,12 +129,57 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 		initVal = cg.tryConstantFold(tv.Value, lt)
 	}
 
+	// Top-level `const` MUST be CTFE-evaluable. Literals and #pure
+	// function calls already fold via tryConstantFold; anything else
+	// (impure call, runtime expression) falls through here as nil and
+	// would otherwise be silently zero-initialized + run-time-init,
+	// which contradicts the "actual constant" guarantee a top-level
+	// const offers. Reject it explicitly. Top-level `var` is allowed
+	// to use runtime init -- it is mutable storage by design.
+	//
+	// FP128 and Half are excepted because llir mis-emits the literal
+	// hex in the wrong byte order for those widths; tryConstantFold
+	// returns nil for them by design, and the global is initialized
+	// at startup via fpext from a Double constant. Const semantics
+	// still hold (the global is `Immutable` and lives in `.rodata`),
+	// it's just initialized in the C-main wrapper instead of inline.
+	if tv.IsConst && tv.Value != nil && initVal == nil && !isExtendedFloatType(lt) {
+		return cg.nodeErr(tv,
+			"top-level const %q has a non-compile-time initializer; "+
+				"the right-hand side must be a literal, an arithmetic / cast / identifier reference, "+
+				"or a call to a #pure function. For runtime-evaluated module-scoped state use `var`.",
+			tv.Name)
+	}
+
+	// initVal == nil at this point only for the FP128/Half exception
+	// (other shapes already errored above when IsConst is set). Track
+	// whether the const will be runtime-initialized so we know NOT to
+	// mark the global immutable -- LLVM's `constant` qualifier elides
+	// the startup store as UB.
+	needsRuntimeInit := tv.IsConst && initVal == nil
+
 	if initVal == nil {
 		initVal = cg.zeroConstant(lt)
 	}
 
-	g := cg.mod.NewGlobal(tv.Name, lt)
+	g := cg.activeModule().NewGlobal(tv.Name, lt)
 	g.Init = initVal
+
+	// Top-level `const` is placed in read-only storage so the runtime
+	// genuinely cannot modify it -- writes through an aliased pointer
+	// segfault rather than silently mutating the value. The compile-
+	// time -Wwrite-to-const pass catches the obvious cases at the
+	// source level; the LLVM `constant` qualifier is the belt-and-
+	// suspenders backstop for cases the static pass can't see (FFI,
+	// inline asm, runtime-routed pointers).
+	//
+	// FP128 / Half consts can't take this path because their value
+	// is computed at startup via fpext (see the
+	// isExtendedFloatType exception above); marking the global
+	// immutable would let the optimizer elide that store.
+	if tv.IsConst && !needsRuntimeInit {
+		g.Immutable = true
+	}
 
 	// Register in global scope as a pointer (alloc-style) so that loads/stores work.
 	// isGlobal=true prevents per-function scope release from deiniting the global.
@@ -116,10 +191,20 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 
 	cg.topLevelVarBareNames[tv.Name] = true
 
+	if tv.IsConst {
+		if cg.topLevelConstNames == nil {
+			cg.topLevelConstNames = map[string]bool{}
+		}
+
+		cg.topLevelConstNames[tv.Name] = true
+	}
+
 	// Track every top-level var for deinit-at-exit (regardless of init type).
+	// pkgName is cg.currentPkg (empty for entry program top-level vars).
 	cg.allTopLevelVars = append(cg.allTopLevelVars, topLevelVarInit{
-		name:   tv.Name,
-		global: g,
+		name:    tv.Name,
+		global:  g,
+		pkgName: cg.currentPkg,
 	})
 
 	// If the initializer needs runtime evaluation, queue it.
@@ -127,6 +212,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 		cg.topLevelVarInits = append(cg.topLevelVarInits, topLevelVarInit{
 			name:     tv.Name,
 			global:   g,
+			pkgName:  cg.currentPkg,
 			initExpr: tv.Value,
 		})
 	}
@@ -134,17 +220,146 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 	return nil
 }
 
-// emitTopLevelVarDeinits releases/deinits all top-level globals in reverse
-// declaration order. Call this in the main wrapper just before program exit.
-// For primitive types (i64, bool, etc.) emitRelease is a no-op, so it is safe
-// to call unconditionally on every global.
-func (cg *CodeGen) emitTopLevelVarDeinits(block *ir.Block) {
-	for i := len(cg.allTopLevelVars) - 1; i >= 0; i-- {
-		vi := cg.allTopLevelVars[i]
-		lt := vi.global.ContentType
-		loaded := block.NewLoad(lt, vi.global)
-		cg.emitRelease(block, loaded)
+// emitDeinitAllFn lazily synthesizes the per-pkg `_tin_deinit_<pkg>` fns
+// plus the whole-program dispatcher `_tin_deinit_all(void)`. The per-pkg
+// fns each release that pkg's top-level vars in reverse declaration
+// order. The dispatcher calls them in reverse pkg-load order — so
+// dependents tear down before their dependencies, matching the
+// topological-deinit guarantee from D4 of the incremental-compilation
+// plan.
+//
+// Per-pkg layout enables the eventual per-pkg .o cache: an edit to
+// pkg A's source only invalidates `_tin_deinit_A`; consumers stay
+// cached. Each per-pkg deinit lives in its OWN module (routed via
+// activeModule when we visit that pkg's vars) so the .o boundary
+// matches pkg boundary.
+//
+// Returns nil when there are no top-level vars (no deinit needed).
+func (cg *CodeGen) emitDeinitAllFn() *ir.Func {
+	if len(cg.allTopLevelVars) == 0 {
+		return nil
 	}
+
+	if cg.deinitAllFn != nil {
+		return cg.deinitAllFn
+	}
+
+	// Group vars by pkg, preserving pkg first-seen order. Within each
+	// group, vars appear in declaration order (the order they were
+	// appended to allTopLevelVars during pkg emission). Reverse-
+	// iteration at deinit-emit time gives reverse-decl-within-pkg.
+	pkgOrder := []string{}
+	byPkg := map[string][]topLevelVarInit{}
+
+	for _, vi := range cg.allTopLevelVars {
+		if _, seen := byPkg[vi.pkgName]; !seen {
+			pkgOrder = append(pkgOrder, vi.pkgName)
+		}
+
+		byPkg[vi.pkgName] = append(byPkg[vi.pkgName], vi)
+	}
+
+	// Emit one `_tin_deinit_<pkg>` fn per pkg. Fn name uses the pkg
+	// name suffix; entry-pkg vars (pkgName == "") get the suffix
+	// "__entry__" so the symbol stays unique and inspectable.
+	pkgDeinitFns := make([]*ir.Func, 0, len(pkgOrder))
+	for _, pkgName := range pkgOrder {
+		vars := byPkg[pkgName]
+		fnName := "_tin_deinit_" + pkgDeinitSuffix(pkgName)
+
+		pkgFn := cg.mod.NewFunc(fnName, irtypes.Void)
+		pkgFn.Linkage = enum.LinkageInternal
+		entry := pkgFn.NewBlock("entry")
+
+		// Reverse-iterate within the pkg so a var that depended on
+		// another at construction tears down BEFORE the thing it
+		// depended on (matches D4's invariant for intra-pkg order).
+		for i := len(vars) - 1; i >= 0; i-- {
+			vi := vars[i]
+			lt := vi.global.ContentType
+			loaded := entry.NewLoad(lt, vi.global)
+			cg.emitRelease(entry, loaded)
+		}
+
+		entry.NewRet(nil)
+
+		pkgDeinitFns = append(pkgDeinitFns, pkgFn)
+	}
+
+	// Whole-program dispatcher: call each per-pkg fn in REVERSE
+	// pkg-load order. Pkg-load order is the order pkgs were first
+	// seen during emission; since loadPackageFromSource recursively
+	// loads deps before the importing pkg, the load order is a topo
+	// sort with deps-first. Reverse = dependents first.
+	dispatcher := cg.mod.NewFunc("_tin_deinit_all", irtypes.Void)
+	dispatcher.Linkage = enum.LinkageInternal
+	disp := dispatcher.NewBlock("entry")
+
+	for i := len(pkgDeinitFns) - 1; i >= 0; i-- {
+		disp.NewCall(pkgDeinitFns[i])
+	}
+
+	disp.NewRet(nil)
+
+	cg.deinitAllFn = dispatcher
+
+	return dispatcher
+}
+
+// pkgDeinitSuffix maps a pkg name to its `_tin_deinit_<suffix>` fn
+// suffix. Empty pkg name (entry program) maps to "__entry__" so the
+// symbol stays unique even when the entry pkg has no name.
+func pkgDeinitSuffix(pkgName string) string {
+	if pkgName == "" {
+		return "__entry__"
+	}
+
+	return pkgName
+}
+
+// emitDeinitAllAtexit registers _tin_deinit_all via libc atexit() so the
+// deinit sequence fires on every clean process exit - including
+// `exit(N)` from anywhere in the program. Without this hook, deinits
+// only run when user main falls through to the wrapper's tail; an
+// `os::exit(1)` from inside a fiber bypasses the entire teardown.
+//
+// Returns the new "current block" the caller should continue emitting
+// into (the post-cmp continuation). The arming check is a single
+// load + compare-and-branch; if armed already, skip the atexit call
+// (idempotency guard against double-registration when a #interop-mode
+// build calls tin_runtime_init from C twice).
+//
+// Caller emits this BEFORE user main runs in the C wrapper.
+func (cg *CodeGen) emitDeinitAllAtexit(block *ir.Block) *ir.Block {
+	deinitFn := cg.emitDeinitAllFn()
+	if deinitFn == nil {
+		return block
+	}
+
+	if cg.atexitFn == nil {
+		atexitFnTy := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
+		cg.atexitFn = cg.ensureExternDecl("atexit", irtypes.I32,
+			[]*ir.Param{ir.NewParam("fn", atexitFnTy)}, false)
+	}
+
+	if cg.deinitArmedGlobal == nil {
+		cg.deinitArmedGlobal = cg.mod.NewGlobalDef("_tin_deinit_armed",
+			constant.NewInt(irtypes.I32, 0))
+		cg.deinitArmedGlobal.Linkage = enum.LinkageInternal
+	}
+
+	armed := block.NewLoad(irtypes.I32, cg.deinitArmedGlobal)
+	notArmed := block.NewICmp(enum.IPredEQ, armed, constant.NewInt(irtypes.I32, 0))
+
+	armBlk := cg.curFn.NewBlock("deinit.arm")
+	contBlk := cg.curFn.NewBlock("deinit.cont")
+	block.NewCondBr(notArmed, armBlk, contBlk)
+
+	armBlk.NewStore(constant.NewInt(irtypes.I32, 1), cg.deinitArmedGlobal)
+	armBlk.NewCall(cg.atexitFn, deinitFn)
+	armBlk.NewBr(contBlk)
+
+	return contBlk
 }
 
 // tryConstantFold attempts to evaluate an AST node as a compile-time constant.
@@ -165,9 +380,22 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 
 		return cg.constCoerce(c, targetType).(constant.Constant)
 	case *ast.FloatLit:
+		// FP128 / Half: llir mis-orders the two 64-bit halves on
+		// emit, so any constant we synthesize prints as garbage.
+		// Return nil to defer to runtime init via fpext.
+		if ft, isF := targetType.(*irtypes.FloatType); isF &&
+			(ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf) {
+			return nil
+		}
+
 		c := constant.NewFloat(irtypes.Double, v.Value)
 
-		return cg.constCoerce(c, targetType).(constant.Constant)
+		coerced, ok := cg.constCoerce(c, targetType).(constant.Constant)
+		if !ok {
+			return nil
+		}
+
+		return coerced
 	case *ast.BoolLit:
 		if v.Value {
 			return constant.NewInt(irtypes.I1, 1)
@@ -188,8 +416,60 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 	}
 
 	// Fallback: route through the AST evaluator. This picks up BinExpr,
-	// UnaryExpr, AsExpr, identifiers bound to const, and #pure call results.
-	return cg.evalAsConstant(n, targetType)
+	// UnaryExpr, identifiers bound to const, and #pure call results.
+	if c := cg.evalAsConstant(n, targetType); c != nil {
+		return c
+	}
+
+	// Last resort: the package-side evaluator (`evalConstExprTyped`).
+	// Stronger than `evalAsConstant` for cast / shift / bitwise-NOT
+	// expressions over u8..u128 widths, and the only path that yields
+	// a *big.Int-backed `constant.Int` for 128-bit consts -- which is
+	// why the limits stdlib's `U128_MAX = ~(0 as u128)` and friends
+	// only fold via this path. Map the LLVM target back to a Tin
+	// TypeExpr the package evaluator understands.
+	if tinType := llvmTypeToTinTypeExpr(targetType); tinType != nil {
+		if c := cg.evalConstExprTyped(n, tinType); c != nil {
+			return c
+		}
+	}
+
+	return nil
+}
+
+// llvmTypeToTinTypeExpr maps the integer / float widths we care about
+// for top-level const folding back to a Tin TypeExpr so the package-
+// side evaluator (`evalConstExprTyped`) can be reused from the entry-
+// program path. Returns nil for shapes the evaluator doesn't model.
+func llvmTypeToTinTypeExpr(t irtypes.Type) ast.TypeExpr {
+	switch v := t.(type) {
+	case *irtypes.IntType:
+		switch v.BitSize {
+		case 1:
+			return &ast.SimpleType{Name: "bool"}
+		case 8:
+			return &ast.SimpleType{Name: "i8"}
+		case 16:
+			return &ast.SimpleType{Name: "i16"}
+		case 32:
+			return &ast.SimpleType{Name: "i32"}
+		case 64:
+			return &ast.SimpleType{Name: "i64"}
+		case 128:
+			return &ast.SimpleType{Name: "i128"}
+		}
+	case *irtypes.FloatType:
+		switch v.Kind { //nolint:exhaustive // half/X86_FP80/PPC_FP128 are unused by tin
+		case irtypes.FloatKindFloat:
+			return &ast.SimpleType{Name: "f32"}
+		case irtypes.FloatKindDouble:
+			return &ast.SimpleType{Name: "f64"}
+		case irtypes.FloatKindFP128:
+			return &ast.SimpleType{Name: "f128"}
+		}
+	}
+
+	return nil
 }
 
 // evalAsConstant runs the CTFE AST evaluator on n and returns the resulting
@@ -200,7 +480,35 @@ func (cg *CodeGen) evalAsConstant(n ast.Node, targetType irtypes.Type) constant.
 		return nil
 	}
 
-	val, err := evalNode(n, map[string]ctfeVal{}, cg, 0)
+	// Seed the per-call CTFE budget. Without this the very first
+	// evalNode call sees pureFoldBudgetRemaining == 0 and bails out
+	// with errCTFEBudget, so even trivial expressions like `1 + 2`
+	// fail to fold from a non-call context.
+	budget := cg.pureFoldBudget
+	if budget <= 0 {
+		budget = defaultPureFoldBudget
+	}
+
+	cg.pureFoldBudgetRemaining = budget
+
+	env := map[string]ctfeVal{}
+
+	// Seed env with previously-resolved top-level consts so chained
+	// references (`const B = A + 1`) can fold in declaration order.
+	// scopeEntryToCtfeVal handles both inline-constant entries (package
+	// const path) and isAlloc=true LLVM globals whose Init slot already
+	// holds the folded constant.
+	if cg.curScope != nil {
+		for name := range cg.topLevelVarBareNames {
+			if entry, ok := cg.curScope.lookup(name); ok {
+				if v, ok2 := scopeEntryToCtfeVal(entry); ok2 {
+					env[name] = v
+				}
+			}
+		}
+	}
+
+	val, err := evalNode(n, env, cg, 0)
 	if err != nil {
 		return nil
 	}
@@ -307,4 +615,130 @@ func (cg *CodeGen) emitFiberMainEnd(block *ir.Block) {
 	}
 
 	block.NewCall(cg.fiberRunFn)
+}
+
+// inferTopLevelVarType returns a TypeExpr inferred from the initializer's
+// shape, or nil when no type can be obviously deduced. Recognized:
+//
+//   - literal forms (Int/Float/Bool/String).
+//   - AsExpr: the cast's target type wins.
+//   - UnaryExpr / BinExpr: recurse on operands; the unified type
+//     (i64+i64 -> i64, f64+f64 -> f64, etc.) is the result.
+//   - calls to known top-level functions whose return type is declared.
+//
+// Anything more complex still requires an explicit annotation so the
+// global's LLVM type is unambiguous before any user code runs.
+func (cg *CodeGen) inferTopLevelVarType(n ast.Node) ast.TypeExpr {
+	switch v := n.(type) {
+	case *ast.IntLit:
+		return &ast.SimpleType{Name: "i64"}
+	case *ast.FloatLit:
+		return &ast.SimpleType{Name: "f64"}
+	case *ast.BoolLit:
+		return &ast.SimpleType{Name: "bool"}
+	case *ast.StringLit:
+		return &ast.SimpleType{Name: "string"}
+	case *ast.AsExpr:
+		// `const X = expr as TargetType` -- the cast's target wins
+		// regardless of what expr would have inferred to. Covers
+		// `const X = -1 as u64`.
+		return v.Type
+	case *ast.UnaryExpr:
+		return cg.inferTopLevelVarType(v.Expr)
+	case *ast.BinExpr:
+		// Both sides should infer to the same concrete type for the
+		// expression to be well-typed; pick whichever side resolves
+		// first. Comparison operators always produce bool.
+		switch v.Op {
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+			return &ast.SimpleType{Name: "bool"}
+		}
+
+		if t := cg.inferTopLevelVarType(v.Left); t != nil {
+			return t
+		}
+
+		return cg.inferTopLevelVarType(v.Right)
+	case *ast.CallExpr:
+		// `const X = pure_fn(...)`: resolve the callee through funcDecls
+		// and pick up its declared return type. Lets users skip the
+		// explicit annotation when the call-time RHS already commits
+		// to a concrete type.
+		if id, ok := v.Func.(*ast.Identifier); ok {
+			if fd, ok2 := cg.funcDecls[id.Name]; ok2 && fd.RetType != nil {
+				return fd.RetType
+			}
+		}
+	}
+
+	return nil
+}
+
+// topLevelVarKindWord returns the source-keyword form ("const" / "var")
+// for a TopLevelVar so error messages match what the user wrote.
+func topLevelVarKindWord(tv *ast.TopLevelVar) string {
+	if tv.IsConst {
+		return "const"
+	}
+
+	return "var"
+}
+
+// scopeEntryToCtfeVal extracts a ctfeVal from a scope entry. Handles
+// both inline constants (package consts registered as direct values)
+// AND LLVM globals whose Init slot already holds a fold result -- the
+// latter is the path that lets `const B = A + 1` see A's value when
+// preregisterTopLevelVar processes B after A.
+func scopeEntryToCtfeVal(e *scopeEntry) (ctfeVal, bool) {
+	if e == nil || e.val == nil {
+		return ctfeVal{}, false
+	}
+
+	var c constant.Constant
+
+	if e.isAlloc {
+		if g, ok := e.val.(*ir.Global); ok && g.Init != nil {
+			c = g.Init
+		} else {
+			return ctfeVal{}, false
+		}
+	} else {
+		cc, ok := e.val.(constant.Constant)
+		if !ok {
+			return ctfeVal{}, false
+		}
+
+		c = cc
+	}
+
+	switch v := c.(type) {
+	case *constant.Int:
+		if !v.X.IsInt64() {
+			return ctfeVal{}, false
+		}
+
+		if v.Typ.BitSize == 1 {
+			return ctfeVal{kind: "bool", b: v.X.Sign() != 0}, true
+		}
+
+		return ctfeVal{kind: "i64", i: v.X.Int64()}, true
+	case *constant.Float:
+		fv, _ := v.X.Float64()
+
+		return ctfeVal{kind: "f64", f: fv}, true
+	}
+
+	return ctfeVal{}, false
+}
+
+// isExtendedFloatType reports whether t is fp128 or half -- the two
+// float widths llir mis-emits. Top-level const initializers of these
+// widths are deferred to runtime fpext from a Double constant.
+func isExtendedFloatType(t irtypes.Type) bool {
+	ft, ok := t.(*irtypes.FloatType)
+	if !ok {
+		return false
+	}
+
+	return ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf
 }

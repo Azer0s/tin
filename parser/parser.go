@@ -14,6 +14,8 @@ import (
 type Parser struct {
 	tokens                 []lexer.Token
 	pos                    int
+	file                   string            // source file path; prepended to every error so the snippet renderer can locate the line
+	warnings               []string          // raw `file:L:C: warning: msg [-Wname]` lines, drained by the caller through Warnings()
 	noParensMacros         map[string]string // macro name -> backtick expansion body
 	noWarnAwaitMatchGuards bool
 	// continuationDedents tracks INDENT tokens consumed inside parseBinary for
@@ -25,15 +27,60 @@ type Parser struct {
 	// attaches to the enclosing pointer expression (`(&x) as T`) instead
 	// of the inner operand (`&(x as T)`).
 	suppressPostfixCast int
+	// pendingLambdaDedents counts trailing DEDENT tokens that belong to
+	// a lambda body that exited early via the RPAREN-break in parseBlock
+	// (the `f(fn(p) = stmt; stmt)` shape with `)` on the last body line).
+	// The lambda's INDENT was consumed but the matching DEDENT arrives
+	// later (after the call's `)` is consumed by the outer arg parser);
+	// without this counter the DEDENT pops the OUTER scope instead.
+	// skipNewlines / parseBlock loop check + decrement when DEDENT shows
+	// up.
+	pendingLambdaDedents int
+	// blockDepth counts how many block scopes are currently open.
+	// Bumped by parseBlock at entry, decremented at exit. Lets
+	// parseStatement reject `var` (which is module-scope only) with
+	// a clear diagnostic instead of silently producing a TopLevelVar
+	// whose binding leaks out of scope.
+	blockDepth int
 }
 
-// New creates a Parser over the given token slice
-func New(tokens []lexer.Token) *Parser {
-	p := &Parser{tokens: tokens, noParensMacros: map[string]string{}}
+// New creates a Parser over the given token slice. The file path is
+// prepended to every error message so the snippet renderer can locate
+// the offending source line; pass "" for unknown / synthetic input.
+func New(tokens []lexer.Token, file string) *Parser {
+	p := &Parser{tokens: tokens, file: file, noParensMacros: map[string]string{}}
 	p.collectNoParensMacros()
 
 	return p
 }
+
+// errAt returns an error tagged with the parser's source file plus the
+// given line/column, in the canonical `file:L:C: msg` shape that
+// codegen.RenderDiagnostic recognizes.
+func (p *Parser) errAt(line, col int, format string, args ...any) error {
+	return fmt.Errorf("%s:%d:%d: "+format, append([]any{p.file, line, col}, args...)...)
+}
+
+// errAtTok is errAt sourced from a token's position. Saves callers
+// from repeating `t.Line, t.Col` everywhere.
+func (p *Parser) errAtTok(t lexer.Token, format string, args ...any) error {
+	return p.errAt(t.Line, t.Col, format, args...)
+}
+
+// warnAt records a warning at line/col. The string is stored in the
+// canonical `file:L:C: warning: msg [-Wname]` shape so the caller can
+// hand it straight to a Rust-style snippet renderer (see codegen.
+// RenderDiagnostic) without further normalisation.
+func (p *Parser) warnAt(line, col int, name, format string, args ...any) {
+	body := fmt.Sprintf(format, args...)
+	p.warnings = append(p.warnings,
+		fmt.Sprintf("%s:%d:%d: warning: %s [-W%s]", p.file, line, col, body, name))
+}
+
+// Warnings returns the list of parser-emitted warnings recorded during
+// the last Parse() call. Each entry is a `file:L:C: warning: msg
+// [-Wname]` string ready for codegen.RenderDiagnostic.
+func (p *Parser) Warnings() []string { return p.warnings }
 
 // SetNoWarnAwaitMatchGuards suppresses the "all await match arms have guards" warning.
 func (p *Parser) SetNoWarnAwaitMatchGuards(v bool) { p.noWarnAwaitMatchGuards = v }
@@ -164,8 +211,8 @@ func (p *Parser) match(ts ...lexer.TokenType) bool {
 func (p *Parser) expect(t lexer.TokenType) (lexer.Token, error) {
 	tok := p.peek()
 	if tok.Type != t {
-		return tok, fmt.Errorf("expected %s, got %s (%q) at %d:%d",
-			t, tok.Type, tok.Literal, tok.Line, tok.Col)
+		return tok, p.errAtTok(tok, "expected %s, got %s (%q)",
+			t, tok.Type, tok.Literal)
 	}
 
 	return p.advance(), nil
@@ -181,11 +228,27 @@ func (p *Parser) skipNewlines() {
 		p.advance()
 		p.continuationDedents--
 	}
+	// Drain owed lambda-DEDENTs: when parseBlock broke early on RPAREN
+	// (multi-line lambda body that ends with `)` on the last stmt), the
+	// matching DEDENT arrives after the call's `)` is consumed. Without
+	// this drain, the outer block's parseBlock loop sees the DEDENT and
+	// pops its own scope prematurely.
+	for p.pendingLambdaDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.pendingLambdaDedents--
+	}
 }
 
 func (p *Parser) skipSemisAndNewlines() {
 	for p.check(lexer.NEWLINE) || p.check(lexer.SEMI) {
 		p.advance()
+	}
+	// Same lambda-DEDENT drain as in skipNewlines — parseBlock's main
+	// loop calls this after each stmt and would otherwise see the owed
+	// DEDENT and exit the wrong scope.
+	for p.pendingLambdaDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.pendingLambdaDedents--
 	}
 }
 
@@ -204,9 +267,7 @@ func (p *Parser) curPos() ast.Pos {
 }
 
 func (p *Parser) errorf(f string, a ...any) error {
-	t := p.peek()
-
-	return fmt.Errorf(f+" (at %d:%d)", append(a, t.Line, t.Col)...)
+	return p.errAtTok(p.peek(), f, a...)
 }
 
 // Entry point
@@ -286,6 +347,16 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 		return p.parseExportDecl()
 	case lexer.KW_TEST:
 		return p.parseTestDecl()
+	case lexer.KW_CONST:
+		// Module-scope `const` is a TU-level binding (a global, like
+		// `var`), NOT a statement folded into the implicit main.
+		// Routing through TopLevelVar makes the binding visible to
+		// every function in the file -- including a user-defined
+		// `fn main()` -- and stops it from suppressing the user main
+		// via the implicit-main path.
+		// Module-scope `let`, by contrast, IS part of the implicit
+		// main and falls through to the statement parser below.
+		return p.parseTopLevelLetConst()
 	case lexer.KW_STATIC:
 		p.advance()
 
@@ -396,8 +467,7 @@ func (p *Parser) parseStructTags() ([]string, []ast.ScopedTag, error) {
 			scope := scopeTok.Literal
 
 			if !isValidStructTagScope(scope) {
-				return nil, nil, fmt.Errorf("%d:%d: unknown struct tag scope @%s (valid: @fn, @method, @static_fn, @field)",
-					scopeTok.Line, scopeTok.Col, scope)
+				return nil, nil, p.errAtTok(scopeTok, "unknown struct tag scope @%s (valid: @fn, @method, @static_fn, @field)", scope)
 			}
 
 			scoped = append(scoped, ast.ScopedTag{Name: name, Scope: scope})

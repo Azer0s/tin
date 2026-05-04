@@ -61,13 +61,16 @@ so_count=$(find .build/pure-fn -name 'bin.so' 2>/dev/null | wc -l)
 [[ "$so_count" -ge 5 ]]
 check "cache populated >= 5 .so files (got $so_count)" $?
 
-# Each .so exports __tin_pure_shim_<name>.
+# Each .so exports __tin_pure_shim_<name>. macOS prepends an extra
+# underscore to every symbol (so the C-side `__tin_pure_shim_foo`
+# becomes `___tin_pure_shim_foo` in nm output); the regex tolerates 2
+# or 3 leading underscores accordingly.
 expected_shims="square_i64 clamp fact both hypot_sq"
 missing=""
 for fn in $expected_shims; do
   found=0
   for so in .build/pure-fn/*/bin.so; do
-    if nm -D "$so" 2>/dev/null | grep -q " T __tin_pure_shim_$fn\$"; then
+    if nm "$so" 2>/dev/null | grep -E " T _{2,3}tin_pure_shim_$fn\$" >/dev/null; then
       found=1
       break
     fi
@@ -80,11 +83,20 @@ done
 [[ -z "$missing" ]]
 check "all expected shim symbols exported (missing:$missing)" $?
 
-# Each .so links cleanly (no unresolved-symbol errors when -ldl + libc are linked).
+# Each .so re-links cleanly. On Linux ld.bfd supports the
+# --unresolved-symbols flag; on macOS Apple's ld doesn't, so we let
+# clang drive the link (-fuse-ld=lld where available, plain clang
+# otherwise) and just check the exit status.
 broken=0
 for so in .build/pure-fn/*/bin.so; do
-  if ! ld -shared -o /dev/null --unresolved-symbols=ignore-all "$so" 2>/dev/null; then
-    broken=$((broken + 1))
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if ! clang -shared -undefined dynamic_lookup -o /dev/null "$so" 2>/dev/null; then
+      broken=$((broken + 1))
+    fi
+  else
+    if ! ld -shared -o /dev/null --unresolved-symbols=ignore-all "$so" 2>/dev/null; then
+      broken=$((broken + 1))
+    fi
   fi
 done
 
@@ -93,7 +105,7 @@ check "every cached .so re-links cleanly ($broken broken)" $?
 
 # The user binary itself does NOT contain shim symbols (Phase C7
 # guarantees shims live exclusively in cg.shimMod, not cg.mod).
-leak=$(nm "$work/dispatch_bin" 2>/dev/null | grep -E "__tin_pure_shim_|__tin_interop_" | wc -l)
+leak=$(nm "$work/dispatch_bin" 2>/dev/null | grep -E "_{1,2}_tin_pure_shim_|_{1,2}_tin_interop_" | wc -l)
 
 [[ "$leak" -eq 0 ]]
 check "main binary carries zero shim symbols (leaked $leak)" $?

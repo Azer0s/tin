@@ -18,10 +18,21 @@ import (
 // Expression generation
 
 // genExpr generates code for an expression and returns the resulting value.
+//
+// Contract: on return, cg.curBlock points to the block where the next
+// instruction should be emitted. If the expression contains control flow
+// (await / yield / short-circuit && / ||) it may differ from `block`.
+// Callers that emit follow-up instructions (toBool, NewCondBr, NewStore,
+// etc.) must use cg.curBlock, not the input `block`.
 func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) {
 	if node == nil {
 		return nil, nil
 	}
+
+	// Establish the post-call invariant: if the expression doesn't advance
+	// control flow, cg.curBlock equals the input block on return; if it
+	// does (await/yield/&&/||), the handler updates it.
+	cg.curBlock = block
 
 	// Track source position for error messages produced deeper in the call stack.
 	if p := node.Pos(); p.Line != 0 {
@@ -245,10 +256,10 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 						"  Load error: %w", cg.syncLoadErr)
 				}
 
-				return nil, cg.nodeErr(e, "await: expression is a raw i64, not a Future[t]; use `await spawn fn(args)` which returns Future[t]")
+				return nil, cg.nodeErr(e, "await: expression is a raw i64, not a Future[t]; use \"await spawn fn(args)\" which returns Future[t]")
 			}
 
-			return nil, cg.nodeErr(e, "await: expression (type %s) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
+			return nil, cg.nodeErr(e, "await: expression (type %s) does not implement Awaitable[t]; use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] (e.g. fn f() Future[t] = spawn ...)",
 				val.Type())
 		}
 
@@ -267,7 +278,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				}
 			}
 
-			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement Awaitable[t]; use `await spawn fn(args)` to run fn as a fiber, or have the function return Future[t] directly", structName)
+			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement Awaitable[t]; use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
 		// Extract pid from Future[T] using extractvalue (no alloca -> safe inside loops).
@@ -488,9 +499,19 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return block.NewPtrToInt(gepOne, irtypes.I64), nil
 
 	case *ast.IsRCExpr:
-		// Compile-time constant: 1 if T is ARC-tracked (string / array / any), 0 otherwise.
+		// Compile-time RC kind for T. Encodes both whether T needs ARC
+		// management and where in T's bytes the retainable pointer sits, so
+		// the C runtime (Channel, Atomic) can dispatch without knowing the
+		// Tin type.
+		//
+		//   0 = not RC
+		//   1 = leading pointer at offset 0 (string, fat array, trait fat ptr)
+		//   2 = any: {i32 tag, i8* ptr} -- ptr at offset 8, release with
+		//       _tin_release_any so closure-typed `any` values free their env
+		//   3 = fn fat ptr: {fn*, env*} -- env at offset 8, release with
+		//       _tin_release_closure
 		if e.Type == nil {
-			return constant.NewInt(irtypes.I32, 0), nil
+			return constant.NewInt(irtypes.I32, int64(rcKindNone)), nil
 		}
 
 		lt, err := cg.tinTypeToLLVM(e.Type)
@@ -498,11 +519,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			return nil, err
 		}
 
-		if isRCTrackedType(lt) {
-			return constant.NewInt(irtypes.I32, 1), nil
-		}
-
-		return constant.NewInt(irtypes.I32, 0), nil
+		return constant.NewInt(irtypes.I32, int64(channelRCKindOf(lt))), nil
 
 	case *ast.TypeAssertExpr:
 		inner, err := cg.genExpr(block, e.Expr)
@@ -1025,6 +1042,26 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
 	}
 
+	// Reject arithmetic on string / fat-ptr operands before falling into the
+	// integer add/sub paths below -- without this, `s1 + s2` would emit
+	// `add { i8*, i64 }` which clang rejects with a confusing low-level
+	// error instead of a Tin-level diagnostic. The right concat operator
+	// for strings is `++`; surface that in the message.
+	if cg.isBadFatPtrArithmetic(e.Op, lt, rt) {
+		hint := ""
+		if e.Op == "+" && isStringType(lt) && isStringType(rt) {
+			hint = " (use %q to concatenate strings)"
+
+			return nil, cg.nodeErr(e,
+				"binary operator %q is not defined for operands of type %s and %s"+hint,
+				e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt), "++")
+		}
+
+		return nil, cg.nodeErr(e,
+			"binary operator %q is not defined for operands of type %s and %s",
+			e.Op, cg.tinTypeDisplay(lt), cg.tinTypeDisplay(rt))
+	}
+
 	switch e.Op {
 	case "+":
 		if isFloat {
@@ -1300,8 +1337,12 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 // genEqNeqExpr implements shared handling for == and != operators.
 func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt irtypes.Type, isFloat bool, notEqual bool) value.Value {
 	if isFloat {
+		// IEEE 754 NaN: x == x is false, x != x is true. OEQ matches the
+		// first (false on NaN); UNE the second (true on NaN). Using ONE
+		// for != would silently fold `x != x` to false, breaking the
+		// canonical NaN test pattern.
 		if notEqual {
-			return block.NewFCmp(enum.FPredONE, left, right)
+			return block.NewFCmp(enum.FPredUNE, left, right)
 		}
 
 		return block.NewFCmp(enum.FPredOEQ, left, right)
@@ -1392,47 +1433,77 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 	return block.NewICmp(pred, left, right)
 }
 
+// genLogicalAnd emits short-circuit `A && B` as `if A { B } else { false }`.
+// The RHS evaluates only when LHS is true. cg.curBlock is updated to the
+// merge block on return so the caller continues emitting there. Callers that
+// reference `block` (the input) post-call would target a terminated block;
+// they must use cg.curBlock instead.
 func (cg *CodeGen) genLogicalAnd(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
-	// genExpr does not thread the current block through return values, so we
-	// cannot use real branches here (the caller would keep using the original
-	// block which is already terminated, leaving the merge block without a
-	// terminator).  Use `select` instead: semantics are identical for pure
-	// operands, and side-effectful short-circuit can be revisited later.
-	left, err := cg.genExpr(block, e.Left)
-	if err != nil {
-		return nil, err
-	}
-
-	leftBool := cg.toBool(block, left)
-
-	right, err := cg.genExpr(block, e.Right)
-	if err != nil {
-		return nil, err
-	}
-
-	rightBool := cg.toBool(block, right)
-
-	// true && x = x;  false && _ = false
-
-	return block.NewSelect(leftBool, rightBool, constant.NewInt(irtypes.I1, 0)), nil
+	return cg.genShortCircuit(block, e, false)
 }
 
+// genLogicalOr emits short-circuit `A || B` as `if A { true } else { B }`.
+// Symmetric to genLogicalAnd; see that function's note about cg.curBlock.
 func (cg *CodeGen) genLogicalOr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
+	return cg.genShortCircuit(block, e, true)
+}
+
+// genShortCircuit lowers a logical && or || with proper short-circuit
+// semantics. shortVal is the value the operator returns when the LHS
+// already determines the result: false for &&, true for ||. The RHS
+// is evaluated only when the LHS does NOT short-circuit.
+func (cg *CodeGen) genShortCircuit(block *ir.Block, e *ast.BinExpr, shortVal bool) (value.Value, error) {
+	cg.curBlock = block
+
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		return nil, err
 	}
 
-	leftBool := cg.toBool(block, left)
+	leftEnd := cg.curBlock
+	leftBool := cg.toBool(leftEnd, left)
 
-	right, err := cg.genExpr(block, e.Right)
+	var label string
+	if shortVal {
+		label = "or"
+	} else {
+		label = "and"
+	}
+
+	rhsBlock := cg.newBlock(label + ".rhs")
+	mergeBlock := cg.newBlock(label + ".merge")
+
+	if shortVal {
+		// `A || B`: short-circuit to merge when A is true.
+		leftEnd.NewCondBr(leftBool, mergeBlock, rhsBlock)
+	} else {
+		// `A && B`: short-circuit to merge when A is false.
+		leftEnd.NewCondBr(leftBool, rhsBlock, mergeBlock)
+	}
+
+	cg.curBlock = rhsBlock
+
+	right, err := cg.genExpr(rhsBlock, e.Right)
 	if err != nil {
 		return nil, err
 	}
 
-	rightBool := cg.toBool(block, right)
+	rightEnd := cg.curBlock
+	rightBool := cg.toBool(rightEnd, right)
+	rightEnd.NewBr(mergeBlock)
 
-	// false || x = x;  true || _ = true
+	var shortConst constant.Constant
+	if shortVal {
+		shortConst = constant.NewInt(irtypes.I1, 1)
+	} else {
+		shortConst = constant.NewInt(irtypes.I1, 0)
+	}
 
-	return block.NewSelect(leftBool, constant.NewInt(irtypes.I1, 1), rightBool), nil
+	phi := mergeBlock.NewPhi(
+		ir.NewIncoming(shortConst, leftEnd),
+		ir.NewIncoming(rightBool, rightEnd),
+	)
+	cg.curBlock = mergeBlock
+
+	return phi, nil
 }

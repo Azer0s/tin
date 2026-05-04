@@ -2,6 +2,8 @@ package codegen
 
 import (
 	"fmt"
+	"math/big"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -134,12 +136,79 @@ func (cg *CodeGen) nodeErr(node ast.Node, format string, args ...interface{}) er
 	return fmt.Errorf("%s: %s", cg.posStr(node), fmt.Sprintf(format, args...))
 }
 
+// nodeErrSpan is nodeErr with an explicit end column, so the snippet
+// renderer underlines the entire `[startCol, endCol]` range instead of
+// applying its identifier/operator heuristic. Use when the offending
+// region is wider than a single token (e.g. a whole call site, a let
+// declaration spanning the line).
+//
+// endCol is 1-indexed and inclusive. When endCol <= startCol the range
+// degrades to a single-column caret -- callers can pass a sentinel
+// like `len(line)` to extend to end-of-line.
+func (cg *CodeGen) nodeErrSpan(node ast.Node, endCol int, format string, args ...interface{}) error {
+	var p ast.Pos
+	if node != nil {
+		p = node.Pos()
+	}
+
+	if p.Line == 0 {
+		p = cg.currentPos
+	}
+
+	if p.Line == 0 {
+		return fmt.Errorf("%s: %s", cg.filename, fmt.Sprintf(format, args...))
+	}
+
+	if endCol <= p.Col {
+		return fmt.Errorf("%s:%d:%d: %s", cg.filename, p.Line, p.Col, fmt.Sprintf(format, args...))
+	}
+
+	return fmt.Errorf("%s:%d:%d-%d: %s", cg.filename, p.Line, p.Col, endCol, fmt.Sprintf(format, args...))
+}
+
+// sourceLineEndCol returns the 1-indexed end column of `lineNum` in
+// the current source file. Used for "underline to end-of-line" spans
+// (e.g. let declarations whose AST node only carries the start
+// position). Returns 0 when the file isn't readable -- the caller
+// should fall back to a single-column caret.
+func (cg *CodeGen) sourceLineEndCol(lineNum int) int {
+	if cg.filename == "" || lineNum <= 0 {
+		return 0
+	}
+
+	src, ok := readSourceLine(cg.filename, lineNum)
+	if !ok {
+		return 0
+	}
+	// Strip trailing whitespace so the caret doesn't extend over
+	// blank padding the user can't see.
+	src = strings.TrimRight(src, " \t")
+
+	return len(src)
+}
+
 // displayStructName returns the user-facing name for a struct canonical key.
 // Package-qualified structs like "http__Client" are presented as "http::Client".
 // Bare names (user-level structs) are returned unchanged.
 func (cg *CodeGen) displayStructName(canonicalKey string) string {
 	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
 		return dn
+	}
+
+	return canonicalKey
+}
+
+// diagStructName is displayStructName plus a fallback that de-mangles
+// generic monomorphizations (`Box__i64` -> `Box[i64]`) so diagnostics
+// read as Tin source. Reflection helpers (typeof, etc.) keep the raw
+// canonical key via displayStructName -- it doubles as a stable id.
+func (cg *CodeGen) diagStructName(canonicalKey string) string {
+	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
+		return dn
+	}
+
+	if pretty := prettyStructName(canonicalKey); pretty != canonicalKey {
+		return pretty
 	}
 
 	return canonicalKey
@@ -185,6 +254,13 @@ func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
 	name := llvmTypeName(t)
 	if dn, ok := cg.structDisplayNames[name]; ok {
 		return dn
+	}
+
+	// De-mangle monomorphized generic struct names (Box__i64 -> Box[i64]),
+	// matching the rendering used by fmtArgType. Without this, named
+	// struct types fell through as raw LLVM symbols.
+	if pretty := prettyStructName(name); pretty != name {
+		return pretty
 	}
 
 	return name
@@ -472,6 +548,27 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
 			if fnType, isFnType := pt.ElemType.(*irtypes.FuncType); isFnType {
 				tag = cg.ensureFnTypeID(fnSigName(fnType, false))
+			} else if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+				// Pointer-to-named-struct: route through the struct's
+				// type_id whenever boxing is safe -- i.e. when
+				// emitAnyDispatchRegistrations will register a per-
+				// type-id helper for this struct (#no_copy wrappers
+				// or deinit-only-with-primitive-fields). For other
+				// shapes (RC-tracked field content, ADTs, etc.) the
+				// dispatch is intentionally skipped because boxing
+				// doesn't retain inner field RCs and re-releasing
+				// would double-free.
+				name := innerSt.Name()
+				id, hasID := cg.structTypeIDs[name]
+
+				if hasID && cg.structEligibleForAnyDispatch(name, innerSt) {
+					tag = id
+
+					ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRetain(), ptrI8)
+				} else {
+					tag = anyTagPtr
+				}
 			} else {
 				tag = anyTagPtr
 			}
@@ -676,6 +773,29 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 				result, err := cg.coerceToTrait(block, val, traitName)
 				if err == nil {
 					return result
+				}
+			}
+		}
+	}
+
+	// Pointer-to-trait fat-pointer: `let a *Fooable = &b` where b is a
+	// struct that implements Fooable. Source is `*Struct`, target is
+	// `*FatPtr`. Build a stack-temp fat ptr {data: &b, vtable: vtable},
+	// return its address. The fat ptr borrows &b directly so methods
+	// called via *a mutate b. Lifetime is caller-managed: b must
+	// outlive the *Trait the same way any other `*T` borrow does.
+	//
+	// Without this path, llir auto-emits a wrong bitcast `*Box ->
+	// *Fooable_iface` that reinterprets Box's first field (i32 type_id)
+	// as the fat-ptr's i8* data field -- methods called via the bogus
+	// fat ptr then dereference garbage and segfault.
+	if tgtPt, ok := target.(*irtypes.PointerType); ok {
+		if traitName, isTrait := cg.isTraitFatPtr(tgtPt.ElemType); isTrait {
+			if srcPt, isPtr := src.(*irtypes.PointerType); isPtr {
+				if _, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
+						return result
+					}
 				}
 			}
 		}
@@ -969,7 +1089,9 @@ func (cg *CodeGen) coerceAnyToTrait(block *ir.Block, anyVal value.Value, instKey
 	// Build select chain: type_id -> correct vtable pointer.
 	var vtableResult value.Value = constant.NewNull(vtablePtrType)
 
-	for sn, typeID := range cg.structTypeIDs {
+	for _, st0 := range cg.sortedStructTypeIDs() {
+		sn := st0.name
+		typeID := st0.id
 		vtableKey := sn + "__" + instKey
 
 		vg, hasVtable := cg.traitVtableGlobals[vtableKey]
@@ -1012,6 +1134,37 @@ func (cg *CodeGen) constCoerce(v value.Value, target irtypes.Type) value.Value {
 			return constant.NewInt(target.(*irtypes.IntType), ci.X.Int64())
 		}
 	case irtypes.IsFloat(src) && irtypes.IsFloat(target):
+		if cf, ok2 := c.(*constant.Float); ok2 {
+			ft := target.(*irtypes.FloatType)
+			fv, _ := cf.X.Float64()
+
+			// FP128 / Half: llir emits the hex literal with the two
+			// 64-bit halves in the WRONG order versus what LLVM expects
+			// (high-first vs low-first), producing wildly wrong values.
+			// Return nil so the caller falls back to runtime init via
+			// fpext from a Double constant.
+			if ft.Kind == irtypes.FloatKindFP128 || ft.Kind == irtypes.FloatKindHalf {
+				return nil
+			}
+
+			f := constant.NewFloat(ft, fv)
+
+			// Re-snap the big.Float to the target kind's precision so
+			// the emitter writes a literal LLVM accepts for the target
+			// type. Without this, narrowing to `float` hits the
+			// non-exact path in llir and produces a hex literal whose
+			// trailing bits clang rejects.
+			f.X = new(big.Float).SetPrec(uint(floatPrec(ft.Kind))).SetFloat64(fv)
+
+			// For single-precision specifically, round through float32
+			// so the value is guaranteed bit-exactly representable.
+			if ft.Kind == irtypes.FloatKindFloat {
+				f.X = new(big.Float).SetPrec(24).SetFloat64(float64(float32(fv)))
+			}
+
+			return f
+		}
+
 		return c
 	case irtypes.IsInt(src) && irtypes.IsFloat(target):
 		if ci, ok2 := c.(*constant.Int); ok2 {
@@ -1083,6 +1236,24 @@ func floatBits(t *irtypes.FloatType) int {
 	}
 }
 
+// floatPrec returns the IEEE 754 mantissa precision for a float kind, in
+// the format big.Float expects via SetPrec (significand bits including
+// the implicit leading 1).
+func floatPrec(k irtypes.FloatKind) int {
+	switch k { //nolint:exhaustive // X86_FP80/PPC_FP128 are not used by tin
+	case irtypes.FloatKindHalf:
+		return 11
+	case irtypes.FloatKindFloat:
+		return 24
+	case irtypes.FloatKindDouble:
+		return 53
+	case irtypes.FloatKindFP128:
+		return 113
+	default:
+		return 53
+	}
+}
+
 // zeroValue returns the zero constant for a given type.
 func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 	switch {
@@ -1094,6 +1265,13 @@ func (cg *CodeGen) zeroValue(t irtypes.Type) value.Value {
 		return constant.NewNull(t.(*irtypes.PointerType))
 	case irtypes.IsStruct(t):
 		st := t.(*irtypes.StructType)
+		// Opaque (forward-declared) struct: NewStruct(st) would emit `{}`
+		// (an empty struct literal), which clang rejects when st actually
+		// has fields elsewhere. zeroinitializer is type-shape agnostic and
+		// expands lazily to whatever shape st settles into.
+		if len(st.Fields) == 0 {
+			return constant.NewZeroInitializer(st)
+		}
 
 		fields := make([]constant.Constant, len(st.Fields))
 		for i, f := range st.Fields {

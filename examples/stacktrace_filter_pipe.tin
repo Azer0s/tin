@@ -25,15 +25,17 @@ fn filter[t](pred fn(i t) bool) fn([t]) [t] =
 
 fn{#no_inline} probe() [atom] = return stacktrace()
 
-// Keep frames that have ANY identifying info (symbol or file) and are
-// NOT inside a shared library. Works on both Linux (libdwfl resolves
-// file:line:col) and macOS (no elfutils, frames are bare symbol+offset
-// with empty `file`) - the libc / libsystem tail is dropped via
-// `is_in_lib` on both platforms.
+// Keep frames that have ANY identifying info (symbol or file), are
+// NOT inside a shared library, and are NOT the libc/dyld program-entry
+// tail. The is_program_entry check is what makes the recipe portable:
+// on Linux dladdr returns libc.so.6 for __libc_start_main so is_in_lib
+// already catches it, but on macOS dladdr returns the program binary
+// (no .dylib suffix) for `start` and `main`, so they pass is_in_lib.
 fn in_user_code(f atom) bool =
   let p = source::parse_sourcepos(f)
-  if source::is_unknown(p): return false
-  if source::is_in_lib(p):  return false
+  if source::is_unknown(p):       return false
+  if source::is_in_lib(p):        return false
+  if source::is_program_entry(p): return false
   return source::is_resolved(p)
 
 fn print_frames(label string, fs [atom]) =

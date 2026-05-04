@@ -34,7 +34,68 @@
 
 void _tin_retain(void *ptr);
 void _tin_release(void *ptr);
+void _tin_release_any(int32_t tag, void *data);
+void _tin_release_closure(void *env);
 void _tin_panic(const char *msg);
+
+// rc_kind values must mirror codegen/runtime.go rcKind. Channel uses
+// the kind discriminator to pick the right shape inside each slot:
+//   0 = none, 1 = leading-pointer, 2 = any (ptr@8), 3 = fn (env@8)
+#define TIN_RC_NONE         0
+#define TIN_RC_LEADING_PTR  1
+#define TIN_RC_ANY          2
+#define TIN_RC_FN           3
+
+typedef struct { int32_t tag; void *ptr; } TinAnyVal;
+typedef struct { void   *fn;  void *env; } TinFnVal;
+
+// rc_retain_slot retains the payload pointer at the right offset for kind.
+static inline void rc_retain_slot(void *slot, int kind) {
+    if (kind == TIN_RC_NONE || !slot) return;
+
+    switch (kind) {
+    case TIN_RC_LEADING_PTR: {
+        void *p; memcpy(&p, slot, sizeof(void *));
+        if (p) _tin_retain(p);
+        break;
+    }
+    case TIN_RC_ANY: {
+        TinAnyVal a; memcpy(&a, slot, sizeof(a));
+        if (a.ptr) _tin_retain(a.ptr);
+        break;
+    }
+    case TIN_RC_FN: {
+        TinFnVal f; memcpy(&f, slot, sizeof(f));
+        if (f.env) _tin_retain(f.env);
+        break;
+    }
+    }
+}
+
+// rc_release_slot releases the payload at the right offset for kind,
+// dispatching to type-specific entry-points so closures inside any /
+// fn release their captured env via the right deinit chain.
+static inline void rc_release_slot(void *slot, int kind) {
+    if (kind == TIN_RC_NONE || !slot) return;
+
+    switch (kind) {
+    case TIN_RC_LEADING_PTR: {
+        void *p; memcpy(&p, slot, sizeof(void *));
+        if (p) _tin_release(p);
+        break;
+    }
+    case TIN_RC_ANY: {
+        TinAnyVal a; memcpy(&a, slot, sizeof(a));
+        if (a.ptr) _tin_release_any(a.tag, a.ptr);
+        break;
+    }
+    case TIN_RC_FN: {
+        TinFnVal f; memcpy(&f, slot, sizeof(f));
+        if (f.env) _tin_release_closure(f.env);
+        break;
+    }
+    }
+}
 void _tin_fiber_park(int64_t pid);
 void _tin_fiber_unpark(int64_t pid);
 void _tin_fiber_unpark_hdl(int64_t pid, void *hdl);
@@ -161,7 +222,7 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
 //
 // Cache-line layout:
 //   [0..N]:      ref_count + wq_fmu (waiter-queue lock, uncontended on fast path)
-//   [N..N+64]:   cap, cap_mask, elem_size, is_rc, closed, wq counters, wq pointers
+//   [N..N+64]:   cap, cap_mask, elem_size, rc_kind, closed, wq counters, wq pointers
 //   [aligned]:   enq_pos on its own 64-byte cache line (producer hot)
 //   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot)
 //   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters
@@ -174,8 +235,8 @@ typedef struct TinChannel {
     int64_t          cap;
     int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
     int64_t          elem_size;
-    bool             closed;
-    int              is_rc;
+    atomic_bool      closed;
+    int              rc_kind;
 
     // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
     // path: if 0, no wakeup is needed and wq_fmu is never touched.
@@ -201,7 +262,7 @@ typedef struct TinChannel {
 // Allocate / retain / release
 // ---------------------------------------------------------------------------
 
-void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
+void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     if (cap <= 0) cap = 1;
     // Round up to power of 2 for bitwise-AND wrap.
     int64_t po2 = 1;
@@ -216,25 +277,33 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int is_rc) {
     ch->cap       = cap;
     ch->cap_mask  = cap - 1;
     ch->elem_size = elem_size;
-    ch->closed    = false;
-    ch->is_rc     = is_rc;
+    atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
+    ch->rc_kind   = rc_kind;
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->enq_pos, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->deq_pos, 0, memory_order_relaxed);
 
     // seq_buf: aligned to 64 bytes, size rounded to 64-byte multiple.
+    // posix_memalign instead of C11 aligned_alloc -- the latter is gated
+    // behind macOS 10.15 deployment target in Apple's SDK and breaks
+    // cross-compile to darwin from older toolchains.
     size_t seq_bytes = (size_t)cap * sizeof(_Atomic(int64_t));
     seq_bytes = (seq_bytes + 63u) & ~(size_t)63u;
     if (seq_bytes < 64) seq_bytes = 64;
-    ch->seq_buf = (_Atomic(int64_t) *)aligned_alloc(64, seq_bytes);
-    if (!ch->seq_buf) { fputs("tin: channel seq_buf alloc failed\n", stderr); exit(1); }
+
+    void *seq_raw = NULL;
+    if (posix_memalign(&seq_raw, 64, seq_bytes) != 0 || seq_raw == NULL) {
+        fputs("tin: channel seq_buf alloc failed\n", stderr); exit(1);
+    }
+
+    ch->seq_buf = (_Atomic(int64_t) *)seq_raw;
     for (int64_t i = 0; i < cap; i++)
         atomic_store_explicit(&ch->seq_buf[i], i, memory_order_relaxed);
 
     ch->data_buf = (char *)malloc((size_t)(cap * elem_size));
     if (!ch->data_buf) { fputs("tin: channel data_buf alloc failed\n", stderr); exit(1); }
-    if (is_rc) memset(ch->data_buf, 0, (size_t)(cap * elem_size));
+    if (rc_kind != TIN_RC_NONE) memset(ch->data_buf, 0, (size_t)(cap * elem_size));
 
     _wq_alloc(&ch->recv_wq, 1);
     _wq_alloc(&ch->send_wq, 0);
@@ -252,15 +321,13 @@ void _tin_channel_free(void *ptr) {
     if (atomic_fetch_sub_explicit(&ch->ref_count, 1, memory_order_acq_rel) > 1)
         return;
     // Last reference: release any buffered RC elements.
-    if (ch->is_rc) {
+    if (ch->rc_kind != TIN_RC_NONE) {
         int64_t deq = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
         int64_t enq = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
         for (int64_t pos = deq; pos != enq; pos++) {
             int64_t slot = pos & ch->cap_mask;
             void *slot_ptr = ch->data_buf + slot * ch->elem_size;
-            void *rc_ptr;
-            memcpy(&rc_ptr, slot_ptr, sizeof(void *));
-            if (rc_ptr) _tin_release(rc_ptr);
+            rc_release_slot(slot_ptr, ch->rc_kind);
         }
     }
     free(ch->seq_buf);
@@ -279,7 +346,7 @@ void _tin_channel_free(void *ptr) {
 // Returns 1 on success, 0 on full/empty.
 // ---------------------------------------------------------------------------
 
-static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int is_rc) {
+static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc_kind) {
     int64_t pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
@@ -290,17 +357,13 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int is
                     &ch->enq_pos, &pos, pos + 1,
                     memory_order_relaxed, memory_order_relaxed)) {
                 void *dst = ch->data_buf + (pos & ch->cap_mask) * (int64_t)esz;
-                if (is_rc) {
-                    void *old_ptr;
-                    memcpy(&old_ptr, dst, sizeof(void *));
-                    if (old_ptr) _tin_release(old_ptr);
-                }
+                // Release stale slot then copy + retain new payload. Doing
+                // it in this order keeps RC math correct even if val and
+                // dst alias (rc_retain_slot reads val's payload pointer
+                // before _chan_elem_copy clobbers dst).
+                rc_release_slot(dst, rc_kind);
                 _chan_elem_copy(dst, val, esz);
-                if (is_rc) {
-                    void *new_ptr;
-                    memcpy(&new_ptr, dst, sizeof(void *));
-                    if (new_ptr) _tin_retain(new_ptr);
-                }
+                rc_retain_slot(dst, rc_kind);
                 atomic_store_explicit(pseq, pos + 1, memory_order_release);
                 return 1;
             }
@@ -312,7 +375,7 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int is
     }
 }
 
-static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int is_rc) {
+static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind) {
     int64_t pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
@@ -324,7 +387,11 @@ static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int is_rc) {
                     memory_order_relaxed, memory_order_relaxed)) {
                 void *src = ch->data_buf + (pos & ch->cap_mask) * (int64_t)esz;
                 _chan_elem_copy(out, src, esz);
-                if (is_rc) memset(src, 0, esz);
+                // Hand ownership to the consumer: the slot transfers its
+                // RC to `out` (no retain needed, the slot's retain becomes
+                // out's retain). Zero the slot so a future _tin_channel_free
+                // doesn't double-release.
+                if (rc_kind != TIN_RC_NONE) memset(src, 0, esz);
                 atomic_store_explicit(pseq, pos + ch->cap, memory_order_release);
                 return 1;
             }
@@ -421,7 +488,7 @@ static void *_lf_dequeue_tls(TinChannel *ch) {
         rb->data = (uint8_t *)malloc(esz);
         rb->sz   = esz;
     }
-    if (!lf_dequeue(ch, rb->data, esz, ch->is_rc)) return NULL;
+    if (!lf_dequeue(ch, rb->data, esz, ch->rc_kind)) return NULL;
     return rb->data;
 }
 
@@ -440,14 +507,23 @@ static void *_lf_dequeue_tls(TinChannel *ch) {
 //   1   - parked or yielded; caller must yield and retry
 // ---------------------------------------------------------------------------
 int _tin_channel_send_blocking(void *ptr, const void *val,
-                                int64_t elem_size, int is_rc, int64_t pid) {
+                                int64_t elem_size, int rc_kind, int64_t pid) {
     TinChannel *ch = (TinChannel *)ptr;
     size_t esz = (size_t)elem_size;
+
+    // Closed check has to happen on the fast path too.  Skipping it here
+    // (and only checking inside the slow path lock) lets a closed channel
+    // silently buffer values when there's room, contradicting the
+    // "send on closed channel panics" contract documented in channel.tin.
+    // The load is acquire-ordered so close()'s store is visible.
+    if (__builtin_expect(atomic_load_explicit(&ch->closed, memory_order_acquire), 0)) {
+        return -1;
+    }
 
     // Fast path: no parked receivers, not closed, channel has space.
     int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
     if (__builtin_expect(rcnt == 0, 1)) {
-        if (lf_enqueue(ch, val, esz, is_rc)) {
+        if (lf_enqueue(ch, val, esz, rc_kind)) {
             // Check again for newly-parked receivers.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
@@ -489,11 +565,9 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
             void   *rhdl = ch->recv_wq.hdls[idx];
             void   *rfib = ch->recv_wq.fibs[idx];
             _chan_elem_copy(rout, val, esz);
-            if (is_rc) {
-                void *new_ptr;
-                memcpy(&new_ptr, rout, sizeof(void *));
-                if (new_ptr) _tin_retain(new_ptr);
-            }
+            // Direct delivery skips the slot, so retain the payload here
+            // for the receiver's RC=1.
+            rc_retain_slot(rout, rc_kind);
             tin_fmutex_unlock(&ch->wq_fmu);
             _tin_fiber_set_direct_recv(rfib);
             _tin_fiber_unpark_fib(rfib, rpid, rhdl);
@@ -502,7 +576,7 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         }
 
         // Ring-buffer enqueue for all other cases.
-        int enqueued = lf_enqueue(ch, val, esz, is_rc);
+        int enqueued = lf_enqueue(ch, val, esz, rc_kind);
         if (enqueued) {
             ch->recv_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
@@ -517,7 +591,7 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         // Fall through to park as a safety measure.
     } else {
         // No parked receivers - try lf_enqueue one more time under the lock.
-        if (lf_enqueue(ch, val, esz, is_rc)) {
+        if (lf_enqueue(ch, val, esz, rc_kind)) {
             tin_fmutex_unlock(&ch->wq_fmu);
             return 0;
         }
@@ -535,7 +609,7 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
 
         // Final check: a consumer may have dequeued between our failed lf_enqueue
         // and the send_wq_cnt increment, saw cnt==0, and didn't wake us.
-        if (lf_enqueue(ch, val, esz, is_rc)) {
+        if (lf_enqueue(ch, val, esz, rc_kind)) {
             ch->send_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
             tin_fmutex_unlock(&ch->wq_fmu);
@@ -663,7 +737,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
     // Fast path: no parked senders, try lock-free dequeue.
     if (__builtin_expect(
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
-        if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+        if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
@@ -674,7 +748,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
     // Slow path.
     tin_fmutex_lock_spin(&ch->wq_fmu);
 
-    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+    if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
         if (ch->send_wq.cnt > 0) {
             ch->send_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
@@ -716,7 +790,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
         atomic_fetch_add_explicit(&ch->recv_wq_cnt, 1, memory_order_seq_cst);
 
         // Final check: sender may have enqueued and not woken us.
-        if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+        if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
             ch->recv_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
             if (ch->send_wq.cnt > 0) {
@@ -782,7 +856,7 @@ int _tin_prepark_next_recv(int64_t pid) {
 
     // If data is already available, dequeue it directly into out and signal via
     // direct_recv_done so the fiber resumes with _direct_recv_flag=1 (fast path).
-    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+    if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
         if (ch->send_wq.cnt > 0) {
             ch->send_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->send_wq_cnt, 1, memory_order_relaxed);
@@ -812,7 +886,7 @@ int _tin_prepark_next_recv(int64_t pid) {
 
     // Missed-wakeup check: sender may have enqueued between our failed dequeue
     // and the recv_wq_cnt increment.
-    if (lf_dequeue(ch, out, esz, ch->is_rc)) {
+    if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
         ch->recv_wq.cnt--;
         atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
         if (ch->send_wq.cnt > 0) {
@@ -882,10 +956,10 @@ int64_t _tin_channel_recv_blocked_val(void) {
     return (int64_t)(intptr_t)TIN_CHAN_BLOCKED;
 }
 
-int _tin_channel_send_try(void *ptr, const void *val, int64_t elem_size, int is_rc) {
+int _tin_channel_send_try(void *ptr, const void *val, int64_t elem_size, int rc_kind) {
     TinChannel *ch = (TinChannel *)ptr;
     if (ch->closed) return -1;
-    if (lf_enqueue(ch, val, (size_t)elem_size, is_rc)) return 0;
+    if (lf_enqueue(ch, val, (size_t)elem_size, rc_kind)) return 0;
     return 1;
 }
 
@@ -914,7 +988,7 @@ void _tin_channel_close(void *ptr) {
     void   **wake_fibs = (nwake > 0) ? (void   **)malloc((size_t)nwake * sizeof(void *))  : NULL;
     int w = 0;
 
-    ch->closed = true;
+    atomic_store_explicit(&ch->closed, true, memory_order_release);
     while (ch->recv_wq.cnt > 0) {
         ch->recv_wq.cnt--;
         if (wake_pids) {
@@ -950,36 +1024,26 @@ void _tin_channel_close(void *ptr) {
 // ---------------------------------------------------------------------------
 
 void _tin_chan_buf_store(void *buf, int64_t slot, const void *elem,
-                         int64_t elem_size, int is_rc) {
+                         int64_t elem_size, int rc_kind) {
     void *dest = (char *)buf + slot * elem_size;
-    if (is_rc) {
-        void *old_ptr;
-        memcpy(&old_ptr, dest, sizeof(void *));
-        if (old_ptr) _tin_release(old_ptr);
-    }
+    rc_release_slot(dest, rc_kind);
     memcpy(dest, elem, (size_t)elem_size);
-    if (is_rc) {
-        void *new_ptr;
-        memcpy(&new_ptr, dest, sizeof(void *));
-        if (new_ptr) _tin_retain(new_ptr);
-    }
+    rc_retain_slot(dest, rc_kind);
 }
 
 void _tin_chan_buf_load(const void *buf, int64_t slot, void *out,
-                        int64_t elem_size, int is_rc) {
+                        int64_t elem_size, int rc_kind) {
     const void *src = (const char *)buf + slot * elem_size;
     memcpy(out, src, (size_t)elem_size);
-    if (is_rc) memset((void *)src, 0, (size_t)elem_size);
+    if (rc_kind != TIN_RC_NONE) memset((void *)src, 0, (size_t)elem_size);
 }
 
 void _tin_chan_buf_drain(void *buf, int64_t cap, int64_t head, int64_t count,
-                         int64_t elem_size, int is_rc) {
-    if (!is_rc) return;
+                         int64_t elem_size, int rc_kind) {
+    if (rc_kind == TIN_RC_NONE) return;
     for (int64_t i = 0; i < count; i++) {
         int64_t slot = (head + i) % cap;
         void *slot_ptr = (char *)buf + slot * elem_size;
-        void *rc_ptr;
-        memcpy(&rc_ptr, slot_ptr, sizeof(void *));
-        if (rc_ptr) _tin_release(rc_ptr);
+        rc_release_slot(slot_ptr, rc_kind);
     }
 }

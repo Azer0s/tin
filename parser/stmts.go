@@ -45,6 +45,18 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 
 	switch p.peek().Type {
 	case lexer.KW_VAR:
+		// `var` is module-scope only -- it declares a global with
+		// runtime-init semantics and outlives the program. A
+		// block-level `var` would silently produce a TopLevelVar
+		// whose binding leaks out of scope, so flag it here with a
+		// targeted suggestion.
+		if p.blockDepth > 0 {
+			tok := p.peek()
+
+			return nil, p.errAtTok(tok, "%q is module-scope only; use %q for a mutable local binding, or move the %q declaration to the top level",
+				"var", "let", "var")
+		}
+
 		return p.parseTopLevelVar()
 	case lexer.KW_SPAWN:
 		return p.parseSpawnExprStmt()
@@ -384,6 +396,65 @@ func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
 	stmt := &ast.ForStmt{}
 	stmt.SetPos(pos)
 
+	// for ref name in iter: -- the loop variable aliases each slot of
+	// `iter` instead of taking a per-iteration copy. Assignments inside
+	// the body mutate the underlying array. Only valid over a mutable,
+	// directly-indexable iter; ranges and `let`/`const` arrays are
+	// rejected at codegen time.
+	if p.check(lexer.KW_REF) {
+		p.advance() // consume ref
+
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+
+		stmt.VarName = nameTok.Literal
+		stmt.IsRef = true
+
+		if _, err := p.expect(lexer.KW_IN); err != nil {
+			return nil, err
+		}
+
+		stmt.Kind = ast.ForIn
+
+		var iterErr error
+
+		stmt.Iter, iterErr = p.parseExpr()
+		if iterErr != nil {
+			return nil, iterErr
+		}
+
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+
+		if p.check(lexer.NEWLINE) {
+			p.advance()
+			p.skipNewlines()
+
+			if p.check(lexer.INDENT) {
+				var bodyErr error
+
+				stmt.Body, bodyErr = p.parseBlock()
+				if bodyErr != nil {
+					return nil, bodyErr
+				}
+			} else {
+				stmt.Body = &ast.Block{}
+			}
+		} else {
+			s, err2 := p.parseStatement()
+			if err2 != nil {
+				return nil, err2
+			}
+
+			stmt.Body = &ast.Block{Stmts: []ast.Node{s}}
+		}
+
+		return stmt, nil
+	}
+
 	// Shorthand for-in without 'let': for c in iter: / for c T in iter:
 	// Detect: IDENT [IDENT|type] KW_IN ...
 	if !p.check(lexer.KW_LET) && p.check(lexer.IDENT) {
@@ -697,8 +768,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 
 	// Require inline tuple literal.
 	if !p.check(lexer.LPAREN) {
-		return nil, fmt.Errorf("await match requires an inline tuple (...); variable and computed tuples are not yet supported (at %d:%d)",
-			p.peek().Line, p.peek().Col)
+		return nil, p.errAtTok(p.peek(), "await match requires an inline tuple (...); variable and computed tuples are not yet supported")
 	}
 
 	p.advance() // consume "("
@@ -731,7 +801,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	}
 
 	if len(futures) == 0 {
-		return nil, fmt.Errorf("await match requires at least one future in the tuple")
+		return nil, p.errAtTok(awaitPos, "await match requires at least one future in the tuple")
 	}
 
 	if _, err := p.expect(lexer.COLON); err != nil {
@@ -747,7 +817,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	p.skipNewlines()
 
 	if !p.check(lexer.INDENT) {
-		return nil, fmt.Errorf("expected indented block after await match")
+		return nil, p.errAtTok(p.peek(), "expected indented block after await match")
 	}
 
 	p.advance() // consume INDENT
@@ -814,8 +884,8 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		}
 
 		if allGuarded {
-			fmt.Printf("%d:%d: warning: every await match arm has a guard and there is no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm or remove at least one guard, or suppress with -Wno-await-match-guards\n",
-				awaitPos.Line, awaitPos.Col)
+			p.warnAt(awaitPos.Line, awaitPos.Col, "await-match-guards",
+				"every await match arm has a guard and there is no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm or remove at least one guard")
 		}
 	}
 
@@ -833,8 +903,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 	// Must be a tuple pattern.
 	if !p.check(lexer.LPAREN) {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match case must use a tuple pattern (...) (at %d:%d)",
-			p.peek().Line, p.peek().Col)
+		return ast.AwaitMatchCase{}, p.errAtTok(p.peek(), "await match case must use a tuple pattern (...)")
 	}
 
 	p.advance() // consume "("
@@ -861,8 +930,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 			name := p.advance().Literal
 			slots = append(slots, slot{name: name})
 		} else {
-			return ast.AwaitMatchCase{}, fmt.Errorf("unexpected token in await match pattern: %s (at %d:%d)",
-				p.peek().Type, p.peek().Line, p.peek().Col)
+			return ast.AwaitMatchCase{}, p.errAtTok(p.peek(), "unexpected token in await match pattern: %s", p.peek().Type)
 		}
 
 		p.skipWhitespace()
@@ -878,7 +946,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 	// Validate pattern length.
 	if len(slots) != nFutures {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match pattern length %d does not match futures tuple length %d",
+		return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match pattern length %d does not match futures tuple length %d",
 			len(slots), nFutures)
 	}
 
@@ -888,7 +956,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 	for i, s := range slots {
 		if !s.isWild {
 			if bindIdx >= 0 {
-				return ast.AwaitMatchCase{}, fmt.Errorf("await match case must have exactly one binding slot; found multiple non-wildcard slots")
+				return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match case must have exactly one binding slot; found multiple non-wildcard slots")
 			}
 
 			bindIdx = i
@@ -896,7 +964,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 	}
 
 	if bindIdx < 0 {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match case has no binding slot; use 'default:' for an unconditional arm")
+		return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match case has no binding slot; use 'default:' for an unconditional arm")
 	}
 
 	mc := ast.AwaitMatchCase{
@@ -1162,7 +1230,7 @@ func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
 
 			ap.Elems = append(ap.Elems, elem)
 		} else {
-			return nil, fmt.Errorf("unexpected token in array pattern: %s", p.peek().Type)
+			return nil, p.errAtTok(p.peek(), "unexpected token in array pattern: %s", p.peek().Type)
 		}
 
 		p.skipWhitespace()
@@ -1276,7 +1344,10 @@ func (p *Parser) parseExprStatement() (ast.Node, error) {
 	if p.check(lexer.INC) {
 		op := p.advance().Literal
 
-		return &ast.PostfixStmt{Expr: expr, Op: op}, nil
+		stmt := &ast.PostfixStmt{Expr: expr, Op: op}
+		stmt.SetPos(expr.Pos())
+
+		return stmt, nil
 	}
 
 	// Assignment =
@@ -1655,6 +1726,43 @@ func (p *Parser) parseTopLevelVar() (*ast.TopLevelVar, error) {
 	}
 
 	return &ast.TopLevelVar{Name: nameTok.Literal, Type: typ, Value: val}, nil
+}
+
+// parseTopLevelLetConst parses module-scoped:  let|const name [Type] [= expr]
+// Producing a TopLevelVar with IsConst=true makes the binding a global
+// constant rather than a statement folded into the implicit main.
+func (p *Parser) parseTopLevelLetConst() (*ast.TopLevelVar, error) {
+	pos := p.curPos()
+	p.advance() // consume let/const
+
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+
+	var typ ast.TypeExpr
+	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.SEMI) {
+		typ, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var val ast.Node
+
+	if p.check(lexer.ASSIGN) {
+		p.advance()
+
+		val, err = p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tv := &ast.TopLevelVar{Name: nameTok.Literal, Type: typ, Value: val, IsConst: true}
+	tv.SetPos(pos)
+
+	return tv, nil
 }
 
 // parseSpawnExprStmt parses a spawn statement (spawn expr or spawn do: block).

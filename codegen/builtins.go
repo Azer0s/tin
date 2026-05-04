@@ -7,7 +7,7 @@ package codegen
 // Any new builtin recognized in genCallExpr (or anywhere else) MUST be
 // added to compileTimeBuiltins so the shadow-warning pass and any future
 // "list available builtins" tooling see it. Forgetting to add a name
-// here doesn't break correctness — the warning is opt-in — but it does
+// here doesn't break correctness - the warning is opt-in - but it does
 // silently weaken -Wpedantic.
 
 import (

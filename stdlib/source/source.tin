@@ -241,10 +241,24 @@ fn is_resolved(p SrcPos) bool =
 // (lib basename present). Useful for filtering libc / vendor frames.
 fn is_in_lib(p SrcPos) bool = return p.lib != ""
 
+// is_program_entry reports whether the symbol is one of the standard
+// program-entry / loader frames that bracket every user trace. On Linux
+// these usually surface as `libc.so.6:__libc_start_main+0xN` (so
+// `is_in_lib` already drops them) but on macOS dladdr returns the
+// program binary itself (no .dylib suffix), so they pass `is_in_lib`.
+// Use this alongside `is_in_lib` when filtering out the system tail
+// in an OS-agnostic way.
+fn is_program_entry(p SrcPos) bool =
+  if p.symbol == "main": return true
+  if p.symbol == "_start": return true
+  if p.symbol == "start": return true
+  if strings::has_prefix(p.symbol, "__libc_start"): return true
+  return false
+
 // is_unknown reports whether the atom was the "??+0x<addr>" sentinel.
 fn is_unknown(p SrcPos) bool =
   return p.symbol == "" && p.file == "" && p.address != 0 as i64
 
 export {
-  SrcPos, parse_sourcepos, is_resolved, is_in_lib, is_unknown
+  SrcPos, parse_sourcepos, is_resolved, is_in_lib, is_program_entry, is_unknown
 } as source

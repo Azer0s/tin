@@ -19,7 +19,7 @@ run_case() {
   local extra_flag=$4
   local src=$5
 
-  local tmp=$(mktemp --suffix=.tin)
+  local tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
 
   local stderr_out

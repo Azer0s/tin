@@ -17,7 +17,7 @@ assert_err() {
   local want=$2
   local src=$3
   local tmp
-  tmp=$(mktemp --suffix=.tin)
+  tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   local out
   out=$(./tin run "$tmp" 2>&1 || true)
@@ -37,7 +37,7 @@ assert_ok() {
   local name=$1
   local src=$2
   local tmp
-  tmp=$(mktemp --suffix=.tin)
+  tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   local out
   out=$(./tin run "$tmp" 2>&1 || true)
@@ -120,7 +120,7 @@ fn main() i64 =
 '
 
 # ── generic struct monomorphization preserves const-ness ──
-assert_err "generic monomorph" "cannot assign to const field IntBox.value" '
+assert_err "generic monomorph" "cannot assign to const field Box[i64].value" '
 struct Box[t] =
   const value t
 

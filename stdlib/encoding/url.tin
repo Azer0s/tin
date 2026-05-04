@@ -156,7 +156,7 @@ fn parse_segment(m *collections::HashMap[string, string], s string, from i64, to
 // HashMap[string,string].  Keys and values are percent-decoded; `+` is
 // treated as a space.  Duplicate keys keep the last value.
 fn parse_query(s string) collections::HashMap[string, string] =
-  let m = collections::HashMap[string, string].new(8)
+  let m = collections::HashMap[string, string].make(8)
   let n = len(s)
   if n == 0:
     return m

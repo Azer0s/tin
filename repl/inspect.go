@@ -541,7 +541,7 @@ func (s *session) registerModuleMacros(pkgName string) {
 		return
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, "<repl>")
 
 	prog, err := p.Parse()
 	if err != nil {

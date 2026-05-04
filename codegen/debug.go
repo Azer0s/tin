@@ -802,9 +802,25 @@ func (cg *CodeGen) attachDbgLoc(inst ir.Instruction, line, col int64) {
 }
 
 // attachCurrentDbgLoc attaches the current source position as a !dbg location
-// to inst.  Used for visible statements.
+// to inst (when -g is active) AND records the position in cg.instLineCol
+// (when pclntab is in use). The two paths are independent: pclntab's
+// per-fn PC tables are built from instLineCol; DWARF sections are emitted
+// from the !dbg attachments. Release builds with stacktrace get the side
+// map only - no DWARF.
 func (cg *CodeGen) attachCurrentDbgLoc(inst ir.Instruction) {
-	if !cg.debugMode || cg.diCurrentScope == nil || inst == nil {
+	if inst == nil {
+		return
+	}
+
+	if cg.pclntabUsed && cg.currentPos.Line != 0 {
+		if cg.instLineCol == nil {
+			cg.instLineCol = map[ir.Instruction]ast.Pos{}
+		}
+
+		cg.instLineCol[inst] = cg.currentPos
+	}
+
+	if !cg.debugMode || cg.diCurrentScope == nil {
 		return
 	}
 
@@ -814,7 +830,16 @@ func (cg *CodeGen) attachCurrentDbgLoc(inst ir.Instruction) {
 // attachCurrentDbgLocToTerm attaches the current source position as a !dbg
 // location to a terminator instruction (ret, br, condbr, etc.).
 func (cg *CodeGen) attachCurrentDbgLocToTerm(term ir.Terminator) {
-	if !cg.debugMode || cg.diCurrentScope == nil || term == nil {
+	if term == nil {
+		return
+	}
+
+	// Terminators don't go into the per-fn PC table (the table is keyed
+	// by basic-block start; the terminator is the BB's last
+	// instruction). So no instLineCol entry here - just the !dbg
+	// attachment for -g consumers.
+
+	if !cg.debugMode || cg.diCurrentScope == nil {
 		return
 	}
 
@@ -921,10 +946,63 @@ func (cg *CodeGen) ensureAllCallsHaveDbg(fn *ir.Func) {
 	}
 }
 
+// instDbgLineCol returns the (line, col) of the !dbg DILocation attached
+// to inst, plus ok=true. Returns (0, 0, false) when no dbg attachment
+// exists or the attachment node isn't a DILocation. Used by pclntab.go to
+// build a per-call source-position table without having to thread per-
+// instruction line/col tracking through every codegen path.
+//
+// Walks the Metadata slice via reflection to dodge the 55-case type
+// switch - every concrete llir/llvm instruction type embeds Metadata as
+// a field literally named "Metadata".
+func instDbgLineCol(inst ir.Instruction) (int, int, bool) {
+	if inst == nil {
+		return 0, 0, false
+	}
+
+	v := reflect.ValueOf(inst)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return 0, 0, false
+	}
+
+	field := v.FieldByName("Metadata")
+	if !field.IsValid() || field.Kind() != reflect.Slice {
+		return 0, 0, false
+	}
+
+	for i := 0; i < field.Len(); i++ {
+		att, ok := field.Index(i).Interface().(*metadata.Attachment)
+		if !ok || att == nil || att.Name != "dbg" {
+			continue
+		}
+
+		loc, ok := att.Node.(*metadata.DILocation)
+		if !ok || loc == nil {
+			continue
+		}
+
+		// Skip line=0 entries - those are codegen's
+		// "compiler-generated" placeholder for instructions emitted
+		// outside genStmt (ARC sequences, fiber preamble). Carrying
+		// these into pclntab would render frames as "fn@file:0:0".
+		if loc.Line == 0 {
+			continue
+		}
+
+		return int(loc.Line), int(loc.Column), true
+	}
+
+	return 0, 0, false
+}
+
 // instHasMetadata reports whether inst already carries a metadata
 // attachment with the given name. Reads the `Metadata` field via
 // reflection so we don't have to mirror the 55-case type switch in
-// attachMetadataToInst — every concrete llir/llvm instruction type
+// attachMetadataToInst - every concrete llir/llvm instruction type
 // embeds the attachment slice as a field literally named `Metadata`.
 //
 // Defensive against future llir/llvm changes that might rename or

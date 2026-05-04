@@ -113,24 +113,20 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 		}
 		// On-demand monomorphization: if bareBaseName is a generic struct template
 		// and we have concrete type params, monomorphize now and retry.
-		// typeParamStr may be comma-separated for multi-param generics (e.g. "string,string").
+		// typeParamStr may be comma-separated for multi-param generics (e.g.
+		// "string,string"); each piece can itself be a nested generic
+		// (`*rc::Cell[i64]`), a type alias, or a qualified name. Parse each
+		// to a TypeExpr first so the canonical-key step handles all shapes
+		// (alias chains, pointers, packages) uniformly.
 		if typeParamStr != "" {
 			if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
-				// Split comma-separated params, resolve aliases, build concrete name.
-				rawParts := strings.Split(typeParamStr, ",")
+				rawParts := splitTopLevelTypeArgs(typeParamStr)
 				resolvedParts := make([]string, len(rawParts))
 				resolvedTEs := make([]ast.TypeExpr, len(rawParts))
 
-				for i, raw := range rawParts {
-					raw = strings.TrimSpace(raw)
-					if alias, ok2 := cg.typeAliases[raw]; ok2 {
-						if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-							raw = simple.Name
-						}
-					}
-
-					resolvedParts[i] = raw
-					resolvedTEs[i] = parseTypeParamStr(raw)
+				for i, te := range rawParts {
+					resolvedParts[i] = cg.typeExprCanonicalKey(te)
+					resolvedTEs[i] = te
 				}
 
 				concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
@@ -139,7 +135,10 @@ func (cg *CodeGen) genScopeAccess(block *ir.Block, e *ast.ScopeAccess) (value.Va
 						Name: concreteName,
 						Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 					}
-					_ = cg.genTypeDecl(synthDecl)
+
+					if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
+						return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+					}
 				}
 
 				concreteStaticKey := concreteName + "_" + last
@@ -187,7 +186,41 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 	case *ast.ArrayLit:
 		// []T represented as an empty array literal of one element - best-effort.
 	case *ast.ScopeAccess:
-		return strings.Join(n.Path, "::")
+		// Strip the package qualifier so the key matches the canonical
+		// monomorphized struct name (e.g. `rc::Cell` -> `Cell`, since
+		// genStructDecl registers concrete instances under `Cell__T`).
+		// Keeping the prefix would produce `rc::Cell__T` which never
+		// matches an existing struct.
+		name := strings.Join(n.Path, "::")
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name
+	case *ast.IndexExpr:
+		// Nested generic type arg, e.g. `G[G[i64]].make(...)`: the inner
+		// `G[i64]` parses as IndexExpr. Recurse to produce the canonical
+		// `G__i64` key so the outer instantiation finds the right struct.
+		baseKey := cg.exprToTypeParamKey(n.Expr)
+		if baseKey == "" {
+			return ""
+		}
+		// Comma-encoded multi-arg case from the parser (e.g. `K,V`).
+		if argID, ok := n.Index.(*ast.Identifier); ok && strings.Contains(argID.Name, ",") {
+			parts := []string{baseKey}
+			for _, raw := range strings.Split(argID.Name, ",") {
+				parts = append(parts, strings.TrimSpace(raw))
+			}
+
+			return strings.Join(parts, "__")
+		}
+
+		argKey := cg.exprToTypeParamKey(n.Index)
+		if argKey == "" {
+			return ""
+		}
+
+		return baseKey + "__" + argKey
 	}
 
 	return ""
@@ -220,16 +253,28 @@ func (cg *CodeGen) chanElemTypeFromName(structName string) irtypes.Type {
 	return lt
 }
 
-// parseTypeParamStr converts a canonical type-key string (as produced by
-// typeExprCanonicalKey) back into an ast.TypeExpr for use in synthetic decls.
-// Examples:
+// parseTypeParamStr converts a type-key string (as produced by
+// typeExprCanonicalKey or by the parser's typeNodeToString for static
+// method calls) back into an ast.TypeExpr.
 //
-//	"*foo"  -> &ast.PointerType{Elem: &ast.SimpleType{Name: "foo"}}
-//	"[]foo" -> &ast.ArrayType{Elem: &ast.SimpleType{Name: "foo"}, Size: -1}
-//	"foo"   -> &ast.SimpleType{Name: "foo"}
+// Supported shapes:
 //
-// Handles recursive nesting (e.g. "*[]foo" -> PointerType{ArrayType{...}}).
+//	"foo"             -> SimpleType{"foo"}
+//	"*foo"            -> PointerType{SimpleType{"foo"}}
+//	"[]foo"           -> ArrayType{SimpleType{"foo"}}
+//	"pkg::foo"        -> SimpleType{"pkg::foo"}    (handed off as-is)
+//	"foo[bar]"        -> GenericType{"foo", [SimpleType{"bar"}]}
+//	"foo[bar,baz]"    -> GenericType{"foo", [SimpleType{"bar"}, SimpleType{"baz"}]}
+//	"*pkg::foo[bar]"  -> PointerType{GenericType{"pkg::foo", [SimpleType{"bar"}]}}
+//
+// Composes recursively, so any combination of *, [], pkg::, and [...]
+// resolves correctly. Whitespace inside the brackets is trimmed per arg.
 func parseTypeParamStr(s string) ast.TypeExpr {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return &ast.SimpleType{Name: ""}
+	}
+
 	if strings.HasPrefix(s, "*") {
 		return &ast.PointerType{Elem: parseTypeParamStr(s[1:])}
 	}
@@ -237,8 +282,65 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 	if strings.HasPrefix(s, "[]") {
 		return &ast.ArrayType{Elem: parseTypeParamStr(s[2:]), Size: -1}
 	}
+	// Look for the FIRST top-level `[` so we can split base[args]. Bracket
+	// depth tracking keeps `Cell[*rc::Cell[i64]]` from splitting at the
+	// inner `[`.
+	depth := 0
+
+	for i, c := range s {
+		switch c {
+		case '[':
+			if depth == 0 {
+				inner := s[i+1:]
+				if !strings.HasSuffix(inner, "]") {
+					return &ast.SimpleType{Name: s}
+				}
+
+				inner = inner[:len(inner)-1]
+				baseName := s[:i]
+
+				return &ast.GenericType{Name: baseName, TypeParams: splitTopLevelTypeArgs(inner)}
+			}
+
+			depth++
+		case ']':
+			depth--
+		}
+	}
 
 	return &ast.SimpleType{Name: s}
+}
+
+// splitTopLevelTypeArgs splits a comma-separated type-arg list while
+// respecting nested `[...]` groups, then parses each piece. Used by
+// parseTypeParamStr to handle multi-arg generics that may themselves
+// contain commas inside their own bracket lists (e.g.
+// `HashMap[string, List[i64]]`).
+func splitTopLevelTypeArgs(s string) []ast.TypeExpr {
+	var out []ast.TypeExpr
+
+	depth := 0
+	start := 0
+
+	for i, c := range s {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, parseTypeParamStr(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	if start < len(s) {
+		out = append(out, parseTypeParamStr(s[start:]))
+	}
+
+	return out
 }
 
 // tryResolveStructTypeName tries to interpret expr as a struct (or generic struct)
@@ -563,6 +665,13 @@ func (cg *CodeGen) inferStructTypeArgs(block *ir.Block, e *ast.StructLit, arityM
 }
 
 func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value, error) {
+	// Capture the original source position before any rewrite below. The
+	// rewrites construct fresh StructLit nodes without a Pos, which would
+	// otherwise leak through to error messages as "0:0" or whatever
+	// cg.currentPos last held (typically the position of an unrelated
+	// monomorphized method body).
+	origPos := e.Pos()
+
 	typeName := e.TypeName
 	// Generic struct literal WITHOUT explicit type args: `Box{value: "hi"}`
 	// -- infer type arguments from the provided field values when `Box` is
@@ -574,7 +683,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		if _, isConcrete := cg.structTypes[typeName]; !isConcrete {
 			if arityMap, isGeneric := cg.genericStructsByArity[typeName]; isGeneric {
 				if inferred, ok := cg.inferStructTypeArgs(block, e, arityMap); ok {
-					e = &ast.StructLit{TypeName: e.TypeName, TypeArgs: inferred, Fields: e.Fields, Positional: e.Positional}
+					next := &ast.StructLit{TypeName: e.TypeName, TypeArgs: inferred, Fields: e.Fields, Positional: e.Positional}
+					next.SetPos(origPos)
+					e = next
 				}
 			}
 		}
@@ -614,7 +725,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 		typeName = concreteName
 		// Rewrite the StructLit to use the concrete name for the rest of genStructLit.
-		e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+		next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+		next.SetPos(origPos)
+		e = next
 	}
 	// Resolve through type aliases to the canonical struct name
 	// (e.g., bare "Mutex" -> "sync__Mutex" after canonical naming).
@@ -626,7 +739,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 		if alias, ok2 := cg.typeAliases[typeName]; ok2 {
 			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 				typeName = simple.Name
-				e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+				next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+				next.SetPos(origPos)
+				e = next
 				resolved = true
 			}
 		}
@@ -641,7 +756,9 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				if alias, ok2 := cg.typeAliases[shorter]; ok2 {
 					if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 						typeName = simple.Name
-						e = &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+						next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+						next.SetPos(origPos)
+						e = next
 
 						break
 					}
@@ -660,6 +777,17 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	st, ok := cg.structTypes[typeName]
 	if !ok {
 		return nil, cg.nodeErr(e, "unknown struct type: %s", typeName)
+	}
+
+	// #closed enforcement: a closed struct's literal `S{...}` may only
+	// appear inside one of S's own static methods. External callers must go
+	// through the constructor -- that's the whole point of #closed.
+	if cg.closedStructs[typeName] && !cg.curFnOwnsStruct(typeName) {
+		hint := cg.closedConstructorHint(typeName)
+
+		return nil, cg.nodeErr(e,
+			"%s is #closed: construct via one of its static methods (%s) -- direct struct literals are not allowed outside the type's own methods",
+			prettyStructName(typeName), hint)
 	}
 
 	// cLayoutStructs need special handling: the wrapper type has no user fields.
@@ -718,6 +846,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			if i < len(fieldNames) {
 				fieldName = fieldNames[i]
 			}
+			// Track owning raw `*T` fields (see field-named branch below for
+			// the rationale).
+			if !weakSet[fieldName] && fieldName != "" {
+				cg.markOwningRawPtrField(typeName, fieldName, v, val.Type())
+			}
 
 			if isCopyExpr(v) && !weakSet[fieldName] {
 				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
@@ -759,6 +892,14 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 			val = cg.coerce(block, val, st.Fields[idx])
 			block.NewStore(val, gep)
+			// `&escape_promoted_local` flowing into a raw `*T` field -- the
+			// local was heap-allocated by escape analysis, and Tin would
+			// otherwise leak the heap block when the containing struct
+			// drops (no owner left). Mark this struct/field pair as
+			// owning so the per-struct release helper cascades through it.
+			if !weakSet[f.Name] {
+				cg.markOwningRawPtrField(typeName, f.Name, f.Value, val.Type())
+			}
 			// ARC: retain RC-tracked values copied from existing owners.
 			// Weak fields are non-owning: skip retain.
 			if isCopyExpr(f.Value) && !weakSet[f.Name] {
@@ -791,8 +932,26 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	// Call chained trait init methods (for traits that also define fn init).
 	for _, traitInitFn := range cg.traitChainedInits[e.TypeName] {
+		// Suppress coerceToTrait's deferred scope-exit release: we emit
+		// our own release after the call so the iface temporary lives
+		// only as long as the trait init invocation.
+		prevSuppress := cg.suppressIfaceScopeRelease
+		cg.suppressIfaceScopeRelease = true
+
 		args := cg.adaptArgs(block, []value.Value{result}, traitInitFn.Sig)
+		cg.suppressIfaceScopeRelease = prevSuppress
+
 		block.NewCall(traitInitFn, args...)
+		// Release any iface temporaries adaptArgs constructed via
+		// coerceToTrait. Without this the init iface leaks on every
+		// struct construction whose trait chain runs init/deinit
+		// through the iface ABI.
+		for _, a := range args {
+			if isTraitFatPtrShape(a.Type()) {
+				dataField := block.NewExtractValue(a, 0)
+				block.NewCall(cg.ensureRelease(), dataField)
+			}
+		}
 	}
 
 	return result, nil
@@ -986,6 +1145,30 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		}
 	}
 
+	// genTypeDecl may have registered concreteName as a typeAlias to
+	// a canonical-key form (e.g. `Tuple__udp::Conn__*errors::Error`
+	// -> `Tuple__udp__Conn__*errors__Error`). Follow the alias chain
+	// (with a safety bound) before looking up the struct type so
+	// multi-hop aliases also resolve. The 64-step cap mirrors
+	// typeExprCanonicalKeyN's recursion guard.
+	for i := 0; i < 64; i++ {
+		alias, ok := cg.typeAliases[concreteName]
+		if !ok {
+			break
+		}
+
+		st, isSimple := alias.(*ast.SimpleType)
+		if !isSimple {
+			break
+		}
+
+		if st.Name == concreteName {
+			break
+		}
+
+		concreteName = st.Name
+	}
+
 	st, ok := cg.structTypes[concreteName]
 	if !ok {
 		return nil, fmt.Errorf("failed to monomorphize Tuple type %q", concreteName)
@@ -1071,7 +1254,7 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 
 	pt, ok := ptrVal.Type().(*irtypes.PointerType)
 	if !ok {
-		return nil, fmt.Errorf("range slice requires a pointer, got %s", ptrVal.Type())
+		return nil, fmt.Errorf("range slice requires a pointer, got %s", fmtArgType(ptrVal.Type()))
 	}
 
 	length := block.NewSub(hiVal, loVal)
@@ -1142,7 +1325,7 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 	// Only fat-pointer arrays {T*, i64} are supported for slicing.
 	arrType, ok := arrVal.Type().(*irtypes.StructType)
 	if !ok || len(arrType.Fields) < 2 {
-		return nil, fmt.Errorf("slice expression requires a fat-array type, got %s", arrVal.Type())
+		return nil, fmt.Errorf("slice expression requires a fat-array type, got %s", fmtArgType(arrVal.Type()))
 	}
 
 	ptrField := arrType.Fields[0]
@@ -1269,7 +1452,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 
 		// Truncation: warn if the source folds to a constant that doesn't
 		// fit the destination type. Caller may have written `let x i32 = 1<<33`.
-		// We pin the legal range by the DESTINATION signedness — `0xC3 as
+		// We pin the legal range by the DESTINATION signedness - `0xC3 as
 		// byte` is a perfectly valid u8 (195) even though 0xC3 was lexed as
 		// a signed i64 literal. Falling back to the source's signedness only
 		// when the dest is itself a signed integer type.
@@ -1998,7 +2181,7 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 	// Reuse cached shim if already generated.
 	var shim *ir.Func
 
-	for _, fn := range cg.mod.Funcs {
+	for _, fn := range cg.allFuncs() {
 		if fn.Name() == shimName {
 			shim = fn
 
@@ -2097,7 +2280,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 	// Reuse cached shim.
 	var shim *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == shimName {
 			shim = f
 
@@ -2566,4 +2749,40 @@ func (cg *CodeGen) finishBinOpDispatch(block *ir.Block, op string, res value.Val
 	}
 
 	return res
+}
+
+// closedConstructorHint returns a comma-joined list of "<TypeName>.<m>(...)"
+// for every static method of typeName, so the #closed diagnostic shows
+// the actual entry points the user should call.
+func (cg *CodeGen) closedConstructorHint(typeName string) string {
+	pretty := prettyStructName(typeName)
+
+	sd := cg.structDeclsByName[typeName]
+	if sd == nil {
+		// Try the bare name in case typeName is a monomorphized form
+		// (Cell__i64) and the decl was registered under "Cell".
+		if idx := strings.Index(typeName, "__"); idx > 0 {
+			sd = cg.structDeclsByName[typeName[:idx]]
+		}
+	}
+
+	if sd == nil {
+		return "use a static constructor instead of a struct literal"
+	}
+
+	var names []string
+
+	for _, m := range sd.Methods {
+		if !m.IsStatic {
+			continue
+		}
+
+		names = append(names, fmt.Sprintf("%s.%s(...)", pretty, m.Name))
+	}
+
+	if len(names) == 0 {
+		return "use a static constructor instead of a struct literal"
+	}
+
+	return "e.g. " + strings.Join(names, " or ")
 }

@@ -321,9 +321,9 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 		if terminated || block == nil {
 			// Warn about any statements following an explicit terminator
 			// (return / break / panic-style call). We deliberately skip the
-			// warning when the terminator is structural — an `if` chain that
+			// warning when the terminator is structural - an `if` chain that
 			// the analyzer/folder discovered always returns, a `for` whose
-			// condition collapsed away, a match that exhausts every arm —
+			// condition collapsed away, a match that exhausts every arm -
 			// because the source code is still branching as written; "dead"
 			// is a property of the monomorphized callsite (e.g. typeof(v) ==
 			// 'i64 in encode[T]) rather than user-visible mistake.
@@ -342,7 +342,7 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 // isExplicitTerminator reports whether stmt is a syntactic control-flow
 // terminator (return, break, panic-style call). Structural constructs like
 // if / for / match that the analyzer happens to discover always-terminate
-// after monomorphization don't count — issuing -Wunreachable-code on
+// after monomorphization don't count - issuing -Wunreachable-code on
 // "the rest of an if/elif chain whose typeof(v) ==' branches were folded
 // down to one live path" is noise, not a useful diagnostic.
 func isExplicitTerminator(stmt ast.Node) bool {
@@ -485,6 +485,12 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 // When the condition is an AtomLit and a match subject is set, it emits a
 // comparison against the subject.
 func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.Value, error) {
+	// Establish the post-call invariant up front: if a path below doesn't
+	// advance control flow, the caller's `cg.curBlock != nil` check will
+	// correctly resolve to `block` rather than picking up a stale value
+	// from a prior call.
+	cg.curBlock = block
+
 	if atomNode, ok := condNode.(*ast.AtomLit); ok && cg.matchSubject != nil {
 		subjectType := cg.matchSubject.Type()
 		if isAtomType(subjectType) {
@@ -508,7 +514,12 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 		return nil, err
 	}
 
-	return cg.toBool(block, cond), nil
+	end := block
+	if cg.curBlock != nil {
+		end = cg.curBlock
+	}
+
+	return cg.toBool(end, cond), nil
 }
 
 // whereMode is the kind of dispatch a where-list uses.
@@ -554,7 +565,7 @@ func classifyWhereList(wl *ast.WhereList) (whereMode, error) {
 	}
 
 	if hasBool && hasPattern {
-		return 0, fmt.Errorf("%d:%d: cannot mix bool clauses and pattern clauses in the same where-list (bool clause here conflicts with pattern clause at %d:%d); use `where (pat) if %s:` or split into separate where-lists",
+		return 0, fmt.Errorf("%d:%d: cannot mix bool clauses and pattern clauses in the same where-list (bool clause here conflicts with pattern clause at %d:%d); use \"where (pat) if %s:\" or split into separate where-lists",
 			firstBoolPos.Line, firstBoolPos.Col,
 			firstPatPos.Line, firstPatPos.Col,
 			"cond")
@@ -621,7 +632,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			pos = wl.Clauses[0].Pos
 		}
 
-		return false, fmt.Errorf("%d:%d: non-exhaustive where: missing wildcard clause `where _: ...`",
+		return false, fmt.Errorf("%d:%d: non-exhaustive where: missing wildcard clause \"where _: ...\"",
 			pos.Line, pos.Col)
 	}
 
@@ -664,12 +675,15 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 		if err != nil {
 			return false, err
 		}
-		// Reset cg.curBlock after condition evaluation.  genBinExpr (which
-		// evaluates the condition) sets cg.curBlock = block (the condition's
-		// entry block) as a baseline for its internal block-refresh logic.
-		// That stale value must not leak into the then/else body code-gen,
-		// where block-refresh checks would misfire and redirect instruction
-		// emission to the condition's block instead of the branch block.
+		// Pick up curBlock so the cond-branch goes into the post-cond
+		// block (advanced when the cond contained short-circuit && / ||).
+		condEnd := block
+		if cg.curBlock != nil {
+			condEnd = cg.curBlock
+		}
+		// Reset cg.curBlock so the then/else body code-gen starts fresh
+		// from its own block; otherwise stale curBlock from the condition
+		// would leak into the body's block-refresh logic.
 		cg.curBlock = nil
 
 		thenBlock := cg.newBlock(fmt.Sprintf("where.then.%d", i))
@@ -681,7 +695,7 @@ func (cg *CodeGen) genWhereList(block *ir.Block, wl *ast.WhereList, retType irty
 			elseBlock = cg.newBlock(fmt.Sprintf("where.else.%d", i))
 		}
 
-		condBr := block.NewCondBr(cond, thenBlock, elseBlock)
+		condBr := condEnd.NewCondBr(cond, thenBlock, elseBlock)
 		cg.attachCurrentDbgLocToTerm(condBr)
 
 		// Generate then body.
@@ -712,23 +726,25 @@ func (cg *CodeGen) genStmt(block *ir.Block, node ast.Node) (*ir.Block, bool, err
 	}
 
 	var dbgInstBefore int
-	if cg.debugMode && block != nil {
+
+	wantPosTrack := (cg.debugMode || cg.pclntabUsed) && block != nil
+	if wantPosTrack {
 		dbgInstBefore = len(block.Insts)
 	}
 
 	outBlock, term, err := cg.genStmtInner(block, node)
 
-	// Attach !dbg to every new instruction emitted by this statement.
-	// Without covering all of them, intermediate calls (e.g. the
-	// runtime helper inside `let frames = stacktrace()` or `return f()`
-	// where f is a closure) only pick up the catch-all `line:0`
-	// metadata from ensureAllCallsHaveDbg, which makes libdwfl resolve
-	// them to "file:0:0" at runtime — the wrong cell for tools that
-	// match the stacktrace atoms against sourcepos atoms. Attaching to
-	// every new instruction is also what `clang -g` does on hand-
-	// written C, so this brings Tin's debug info into line with the
-	// expectation set by the toolchain.
-	if cg.debugMode && !cg.emittingARC && block != nil && err == nil {
+	// Attach source-position info to every new instruction emitted by
+	// this statement. Two consumers:
+	//   - debug builds (-g): attachCurrentDbgLoc adds !dbg DILocation
+	//     metadata, materialized as DWARF .debug_line for lldb / gdb.
+	//   - pclntab (always when stacktrace is reachable): the same call
+	//     populates cg.instLineCol; pclntab.go's post-pass reads from
+	//     there to anchor per-call PC entries.
+	// Both paths share the attach helper but are independently gated
+	// inside attachCurrentDbgLoc, so release-with-stacktrace gets the
+	// side map only and emits no DWARF.
+	if wantPosTrack && !cg.emittingARC && err == nil {
 		for i := dbgInstBefore; i < len(block.Insts); i++ {
 			cg.attachCurrentDbgLoc(block.Insts[i])
 		}
@@ -1071,14 +1087,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
+	// Track whether we ever had a declared annotation. The struct-fallback
+	// override below must NOT fire for user-declared `i64` -- only for
+	// the implicit i64-fallback case where no annotation was given.
+	hadDeclaredType := s.Type != nil
+
 	if llType == nil {
 		llType = irtypes.I64
 	}
 
-	// If llType is the i64 fallback (unresolved generic/alias) and the init
-	// value has a concrete struct type, use the init value's type instead.
-	// This handles: let t GenericType = expr  where GenericType resolves to a concrete struct.
-	if initVal != nil && llType.Equal(irtypes.I64) {
+	// Generic-alias resolution: when the declared type is missing AND
+	// the init value has a concrete struct type, use that. This handles
+	// `let t = expr` where expr returns a Generic[T] resolved struct.
+	// Skip when an explicit annotation is present -- the type-mismatch
+	// check below should fire instead.
+	if !hadDeclaredType && initVal != nil && llType.Equal(irtypes.I64) {
 		if _, isStruct := initVal.Type().(*irtypes.StructType); isStruct {
 			llType = initVal.Type()
 		}
@@ -1086,6 +1109,15 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 	if block == nil {
 		panic(fmt.Sprintf("genVarDecl: block is nil for var %q (llType=%v, curBlock=%v, curFn=%v)", s.Name, llType, cg.curBlock, cg.curFn))
+	}
+
+	// #no_copy enforcement: a let-binding cannot hold a value of a #no_copy
+	// struct, since a subsequent reference would alias the underlying cell.
+	// `*S` is fine -- pointer copies just retain.
+	if name := cg.typeNameOf(llType); name != "" && cg.noCopyStructs[name] {
+		return nil, cg.nodeErr(s,
+			"%s is #no_copy: bind a *%s instead -- value-form let aliases the cell and double-frees on scope exit",
+			prettyStructName(name), prettyStructName(name))
 	}
 
 	// REPL mode: promote top-level `let` bindings in the cell function to LLVM
@@ -1143,12 +1175,35 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 	}
 
-	// All local variables are stack-allocated. Heap promotion happens lazily at
-	// the return site (genLatePromotedReturn) for variables whose addresses escape.
-	alloca := block.NewAlloca(llType)
+	// Local variables are stack-allocated by default. When escape analysis
+	// (cg.curFnEscapingVars) flagged this binding as having `&x` reach an
+	// escape sink -- return, struct-field of escaping struct, *Trait coerce,
+	// channel send, spawn arg, etc. -- heap-allocate it via _tin_rc_alloc
+	// instead so &x is a stable pointer outliving the frame. entry.val
+	// becomes the heap pointer directly (same LLVM type as a stack alloca:
+	// `*T`), so every later `genLValue(Ident)` returns the heap pointer
+	// without extra indirection. Scope-exit emits _tin_release on entry.val
+	// (see emitScopeRelease's isEarlyHeap branch).
+	earlyHeap := cg.curFnEscapingVars[s.Name]
 
-	// Emit dbg.declare for debug builds.
-	cg.emitDbgDeclare(block, alloca, s.Name, s.Pos().Line, 0, s.Type, llType)
+	var alloca value.Value
+
+	if earlyHeap {
+		sz := cg.llvmSizeOf(block, llType)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		alloca = block.NewBitCast(heapI8, irtypes.NewPointer(llType))
+		// Zero-init the heap block so reads of unwritten fields aren't
+		// uninitialized (mirrors what alloca's caller relies on).
+		block.NewStore(cg.zeroValue(llType), alloca)
+	} else {
+		alloca = block.NewAlloca(llType)
+	}
+
+	// Emit dbg.declare for debug builds. Stack allocas only -- heap-promoted
+	// vars don't have an alloca to attach the dbg.declare intrinsic to.
+	if stackAlloca, ok := alloca.(*ir.InstAlloca); ok {
+		cg.emitDbgDeclare(block, stackAlloca, s.Name, s.Pos().Line, 0, s.Type, llType)
+	}
 
 	// isHeapOwned: this variable receives the return value of a heap-promoting
 	// function (one that uses _tin_rc_alloc to return *T), or a &StructLit{} that
@@ -1165,6 +1220,14 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			calleeName = fn.Name
 		case *ast.ScopeAccess:
 			calleeName = strings.Join(fn.Path, "__")
+		case *ast.FieldAccess:
+			// Static method call written with dot syntax -- `S.alloc(...)` or
+			// `Generic[T].alloc(...)` (via FieldAccess on Identifier or
+			// IndexExpr respectively). Resolve to the IR function name so
+			// heapPromotingFns lookup matches.
+			if name := cg.staticCallIRName(fn); name != "" {
+				calleeName = name
+			}
 		}
 
 		if calleeName != "" && llType != nil {
@@ -1220,6 +1283,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			if depth > 0 {
 				isHeapOwned = true
 				heapOwnedDepth = depth
+			}
+		}
+	} else if _, isAwait := s.Value.(*ast.AwaitExpr); isAwait && llType != nil {
+		// `let c = await expr` where expr returns a *NamedStruct
+		// always transfers RC ownership to the caller -- the producer
+		// (channel/atomic/whatever) retained a slot, the await
+		// dequeues + clears the slot, and the awaiter is now the
+		// owner. Without this isHeapOwned flag the binding would skip
+		// scope-exit release_ptr and leak the dequeued value.
+		if pt, isPtr := llType.(*irtypes.PointerType); isPtr {
+			if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+					isHeapOwned = true
+					heapOwnedDepth = pointerChainDepth(llType)
+				}
 			}
 		}
 	}
@@ -1296,6 +1374,13 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// Non-fill, non-ArrayLit static target: fall through to initVal path below.
 	}
 
+	// ownsIfaceData: trait-iface let-bindings always own a fresh
+	// _tin_rc_alloc'd data ptr from coerceToTrait (both value-source and
+	// pointer-source coerceToTrait branches heap-copy the source struct).
+	// emitScopeRelease (runtime.go) uses the flag to emit the matching
+	// _tin_release at scope exit so the iface storage is reclaimed.
+	var ownsIfaceData bool
+
 	if initVal != nil {
 		// If the init value is an empty array {i8*, i64} but the declared type
 		// is a typed fat array {T*, i64}, use a properly-typed zero value.
@@ -1306,7 +1391,27 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 
 		srcType := initVal.Type()
+
+		ownsIfaceData = isTraitFatPtrShape(llType) && !isTraitFatPtrShape(srcType)
+
+		// Suppress coerceToTrait's deferred scope-exit release when this
+		// let-binding will own the iface and emit its own release via
+		// the scope entry's ownsIfaceData flag (see emitScopeRelease).
+		prevSuppress := cg.suppressIfaceScopeRelease
+		if ownsIfaceData {
+			cg.suppressIfaceScopeRelease = true
+		}
+
+		cg.coerceLastErr = nil
 		initVal = cg.coerce(block, initVal, llType)
+		cg.suppressIfaceScopeRelease = prevSuppress
+
+		// If coerce stashed a richer diagnostic (e.g. trait
+		// pointer-receiver-vs-value-source rejection), surface that
+		// instead of the generic type-mismatch fall-through.
+		if cg.coerceLastErr != nil {
+			return nil, cg.nodeErr(s, "%v", cg.coerceLastErr)
+		}
 		// Coerce returns the value unchanged when no conversion path applies;
 		// guard NewStore so a real type mismatch produces a clean diagnostic
 		// instead of a Go panic from llir's incompatible-operand check.
@@ -1332,7 +1437,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		isFreshFatFn := isFatFnPtr(llType) && cg.lastLambdaHadCaptures
 
 		boxedToAny := isAnyType(llType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn {
+		// Trait coercion already minted a fresh _tin_rc_alloc'd data ptr
+		// (rc=1) inside coerceToTrait; the let-binding owns it via
+		// ownsIfaceData. An emitRetain here would over-count and leak.
+		freshIface := ownsIfaceData
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface {
 			cg.emitRetain(block, initVal)
 		}
 	} else if s.Value == nil {
@@ -1424,7 +1533,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), declaredConst: s.IsConst, declaredLet: !s.IsConst}
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in
@@ -1523,6 +1632,18 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 }
 
 func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
+	// Propagate "owning iface" up the call graph: if we're returning a
+	// binding that we know carries an escape-promoted iface data block,
+	// flag this function so callers' let-bindings inherit
+	// ownsHeapIfaceData (see bindingOwnsHeapIfaceData).
+	if cg.curFn != nil && s.Value != nil {
+		if id, ok := s.Value.(*ast.Identifier); ok {
+			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.ownsHeapIfaceData {
+				cg.fnReturnsOwningIface[cg.curFn.Name()] = true
+			}
+		}
+	}
+
 	// In a coroutine body, return is replaced by _tin_fiber_complete + final suspend.
 	if cg.inCoroFn {
 		return cg.genCoroReturn(block, s)
@@ -1610,6 +1731,15 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	}
 
 	if s.Value == nil {
+		// Bare `return` in a non-void function: emit a Tin diagnostic
+		// here instead of letting NewRet(nil) reach LLVM and surface as
+		// a clang IR-level "value doesn't match function result type"
+		// error from a temp .ll file.
+		if cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
+			return cg.nodeErr(s, "function returns %s but the return statement has no value",
+				fmtArgType(cg.curFn.Sig.RetType))
+		}
+
 		if err := cg.emitDefers(block); err != nil {
 			return err
 		}
@@ -1670,23 +1800,34 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				return cg.nodeErr(s, "void function cannot return a value")
 			}
 		} else {
+			// Bare `return` in a non-void function: catch here with a
+			// targeted Tin diagnostic instead of letting LLVM emit
+			// `ret void` and surface a clang IR-level error.
+			if val == nil {
+				return cg.nodeErr(s, "function returns %s but the return statement has no value", fmtArgType(retType))
+			}
+
 			val = cg.coerce(block, val, retType)
 			if !val.Type().Equal(retType) {
-				gotName := cg.typeNameOf(val.Type())
-				if gotName == "" {
-					gotName = val.Type().LLString()
+				// Render in user-facing source syntax (Foo[i64], not
+				// the LLVM-mangled %Foo__i64). fmtArgType handles every
+				// common shape; fall back to prettyStructName via the
+				// raw struct name only when fmtArgType yields nothing.
+				gotName := fmtArgType(val.Type())
+				if gotName == "" || gotName == "<nil>" {
+					gotName = prettyStructName(cg.typeNameOf(val.Type()))
 				}
 
-				wantName := cg.typeNameOf(retType)
-				if wantName == "" {
-					wantName = retType.LLString()
+				wantName := fmtArgType(retType)
+				if wantName == "" || wantName == "<nil>" {
+					wantName = prettyStructName(cg.typeNameOf(retType))
 				}
 
 				if astDecl, ok := cg.funcDecls[cg.curFn.Name()]; ok && astDecl.RetType != nil {
 					wantName = astDecl.RetType.String()
 				}
 
-				return cg.nodeErr(s, "cannot return value of type %q as %q", gotName, wantName)
+				return cg.nodeErr(s, "cannot return value of type %s as %s", gotName, wantName)
 			}
 		}
 	}
@@ -2331,6 +2472,20 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
 	}
+	// Reject direct assignment to a `const` binding, top-level or block-
+	// scope. Without this, `const X i64 = 10; X = 99` silently compiles
+	// and writes to the read-only global -- LLVM's `constant` qualifier
+	// then makes the store unreachable, so the original value persists
+	// AND the user is silently lied to about whether the write happened.
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if cg.topLevelConstNames[id.Name] {
+			return block, cg.nodeErr(s, "cannot assign to top-level const %q (immutable storage)", id.Name)
+		}
+
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
+			return block, cg.nodeErr(s, "cannot assign to const %q; drop the const if you need to mutate", id.Name)
+		}
+	}
 	// Mutating an identifier invalidates any captured constant init (used
 	// by the if-condition folder). Clear it before emitting the store so
 	// later folds don't see stale information.
@@ -2523,7 +2678,18 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		// fields (string, [T], any, fn, nested struct) or an explicit deinit.
 		// Without this the old value's RC fields leak whenever a struct is
 		// reassigned. Mirrors the gate used by emitScopeRelease.
+		//
+		// On the same gate, retain the NEW value's RC fields when it's a
+		// borrowed copy of another binding (isCopyExpr): without the
+		// retain, both the source binding and this slot release the same
+		// underlying buffers when their scopes exit. Fresh callee-returned
+		// structs (isFreshBytesAlloc) already carry an unbalanced retain
+		// from the callee, so we move ownership instead of retaining.
 		if cg.typeNameOf(ptrType.ElemType) != "" && cg.elemNeedsRelease(ptrType.ElemType) {
+			if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
+				cg.emitRetain(block, val)
+			}
+
 			oldVal := block.NewLoad(ptrType.ElemType, ptr)
 			cg.emitRelease(block, oldVal)
 		}
@@ -2537,6 +2703,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Block, error) {
 	if err := cg.checkFieldWritable(s.Target); err != nil {
 		return block, err
+	}
+	// Reject compound-assign to a `const` binding (same reason as
+	// genAssign -- the underlying global lives in read-only storage).
+	if id, ok := s.Target.(*ast.Identifier); ok {
+		if cg.topLevelConstNames[id.Name] {
+			return block, cg.nodeErr(s, "cannot %s top-level const %q (immutable storage)", s.Op, id.Name)
+		}
+
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
+			return block, cg.nodeErr(s, "cannot %s const %q; drop the const if you need to mutate", s.Op, id.Name)
+		}
 	}
 	// Mutating an identifier invalidates any captured constant init.
 	if id, ok := s.Target.(*ast.Identifier); ok {
@@ -2881,7 +3058,15 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		return nil, false, err
 	}
 
-	cond = cg.toBool(block, cond)
+	// genExpr may have advanced cg.curBlock through short-circuit && / ||
+	// (genLogicalAnd/Or update curBlock to their merge block). Continue
+	// emitting the cond-branch in that block, not the original.
+	condEnd := block
+	if cg.curBlock != nil {
+		condEnd = cg.curBlock
+	}
+
+	cond = cg.toBool(condEnd, cond)
 
 	thenBlock := cg.newBlock("if.then")
 
@@ -2892,7 +3077,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		elseStart = mergeBlock
 	}
 
-	block.NewCondBr(cond, thenBlock, elseStart)
+	condEnd.NewCondBr(cond, thenBlock, elseStart)
 
 	// Then branch.
 	cg.curScope = newScope(cg.curScope)
@@ -2932,9 +3117,15 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 			return nil, false, err
 		}
 
-		elifCond = cg.toBool(currentElse, elifCond)
+		// Pick up curBlock in case the elif's cond was short-circuited.
+		elifCondEnd := currentElse
+		if cg.curBlock != nil {
+			elifCondEnd = cg.curBlock
+		}
+
+		elifCond = cg.toBool(elifCondEnd, elifCond)
 		elifThen := cg.newBlock("elif.then")
-		currentElse.NewCondBr(elifCond, elifThen, nextBlock)
+		elifCondEnd.NewCondBr(elifCond, elifThen, nextBlock)
 
 		cg.curScope = newScope(cg.curScope)
 
@@ -3016,11 +3207,20 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	// to stay quiet; any other fold-to-constant case emits the warning.
 	s.Cond = cg.prepareBoolCond(s.Cond, "for", true)
 
-	condBlock := cg.newBlock("for.cond")
+	headerBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	afterBlock := cg.newBlock("for.after")
 
-	brToCond := block.NewBr(condBlock)
+	// headerBlock is the loop's stable back-edge target; condBlock may
+	// advance through short-circuit && / || in the cond expression
+	// (genShortCircuit moves cg.curBlock to its merge block). The
+	// back-edge from the body must point at headerBlock, NOT the
+	// advanced condBlock -- otherwise the body becomes a third
+	// predecessor of the && merge block whose phi has no incoming for
+	// it, producing undef cond on the next iteration (= infinite loop).
+	condBlock := headerBlock
+
+	brToCond := block.NewBr(headerBlock)
 
 	// Condition - set curBlock so we can detect if await/yield changed it.
 	cg.curBlock = condBlock
@@ -3076,10 +3276,12 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 		// Release loop-body-local RC vars before jumping back to the condition.
 		cg.emitScopeRelease(endBody, cg.curScope)
 
+		// Back-edge to the stable loop header, not the (possibly advanced)
+		// cond eval block -- see headerBlock comment above.
 		if cg.curFnAutoYield {
-			cg.genYieldAutoAt(endBody, condBlock)
+			cg.genYieldAutoAt(endBody, headerBlock)
 		} else {
-			endBody.NewBr(condBlock)
+			endBody.NewBr(headerBlock)
 		}
 	}
 
@@ -3098,10 +3300,14 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 }
 
 func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
-	condBlock := cg.newBlock("for.cond")
+	headerBlock := cg.newBlock("for.cond")
 	bodyBlock := cg.newBlock("for.body")
 	postBlock := cg.newBlock("for.post")
 	afterBlock := cg.newBlock("for.after")
+
+	// headerBlock is the loop's stable back-edge target; condBlock may
+	// advance through short-circuit && / || in the cond expression.
+	condBlock := headerBlock
 
 	// Init: push a scope so the loop variable is scoped to the loop.
 	cg.curScope = newScope(cg.curScope)
@@ -3183,10 +3389,12 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 	}
 
 	if postBlock.Term == nil {
+		// Back-edge to the stable loop header, not the (possibly advanced)
+		// cond eval block.
 		if cg.curFnAutoYield {
-			cg.genYieldAutoAt(postBlock, condBlock)
+			cg.genYieldAutoAt(postBlock, headerBlock)
 		} else {
-			postBlock.NewBr(condBlock)
+			postBlock.NewBr(headerBlock)
 		}
 	}
 
@@ -3198,6 +3406,36 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 }
 
 func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) {
+	// `for ref` rejects ranges -- a range produces values, not slots,
+	// so there's nothing for ref to alias.
+	if s.IsRef {
+		if _, isRange := s.Iter.(*ast.RangeExpr); isRange {
+			return nil, cg.nodeErr(s, "for ref: cannot ref-iterate a range; range produces values, not slots")
+		}
+
+		if bin, ok := s.Iter.(*ast.BinExpr); ok && bin.Op == ".." {
+			return nil, cg.nodeErr(s, "for ref: cannot ref-iterate a range; range produces values, not slots")
+		}
+
+		// Reject ref-iteration over a `const` array (top-level or
+		// block-level). Top-level consts live in read-only storage;
+		// block-level consts are immutable by language convention.
+		// Mutable bindings (`let` block-level, `var` top-level) are
+		// fine -- ref aliases their slots.
+		if id, ok := s.Iter.(*ast.Identifier); ok {
+			if cg.topLevelConstNames[id.Name] {
+				return nil, cg.nodeErr(s, "for ref: cannot ref-iterate top-level const %q (immutable storage)", id.Name)
+			}
+
+			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
+				if entry.declaredConst {
+					return nil, cg.nodeErr(s, "for ref: cannot ref-iterate %q because it was declared with const; drop the const if you need to mutate elements",
+						id.Name)
+				}
+			}
+		}
+	}
+
 	// Check if iter is a RangeExpr or a BinExpr with op ".." (start..end).
 	if rng, ok := s.Iter.(*ast.RangeExpr); ok {
 		return cg.genForRange(block, s, rng)
@@ -3214,8 +3452,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	}
 
 	// iter[t] trait: struct (or fat-ptr) implementing iter[T] - use vtable.
-	if iterFatPtr, instKey, ok := cg.tryCoerceToIter(block, iterVal); ok {
-		return cg.genForIterTrait(block, s, iterFatPtr, instKey)
+	if iterFatPtr, instKey, ok, ownsData := cg.tryCoerceToIter(block, iterVal); ok {
+		return cg.genForIterTrait(block, s, iterFatPtr, instKey, ownsData)
 	}
 
 	// Rune iteration over strings: for r rune in s decodes UTF-8 codepoints.
@@ -3296,21 +3534,44 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	bodyIdx := bodyBlock.NewLoad(irtypes.I64, idxAlloca)
 	bodyPtr := bodyBlock.NewLoad(irtypes.NewPointer(elemType), ptrAlloca)
 	elemGep := bodyBlock.NewGetElementPtr(elemType, bodyPtr, bodyIdx)
-	elemVal := bodyBlock.NewLoad(elemType, elemGep)
-
-	// Register loop variable.
-	elemAlloca := bodyBlock.NewAlloca(elemType)
-	bodyBlock.NewStore(elemVal, elemAlloca)
 
 	isElemRC := isRCTrackedType(elemType)
-	// ARC: each iteration copies an element - retain to claim ownership.
-	if isElemRC {
-		cg.emitRetain(bodyBlock, elemVal)
-	}
 
-	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
-		cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+	if s.IsRef {
+		// `for ref` registers the slot's GEP as the scope binding's
+		// alloca. Reads through the binding load from the slot;
+		// writes (`x = newval`, `x += 1`) store back, so the array
+		// is mutated in place. genAssignStmt's release-old + retain-
+		// new path handles RC fields correctly: the old slot value
+		// gets released before the new one is written, matching the
+		// invariant that the slot owns the RC for its element.
+		if s.VarName != "" {
+			cg.curScope.set(s.VarName, &scopeEntry{
+				val: elemGep, isAlloc: true, isRC: isElemRC,
+				declPos: s.Pos(),
+				// noRelease=true: the slot lives in the source
+				// array, not in scope-local storage. Releasing
+				// here would double-free when the array drops.
+				noRelease: true,
+			})
+			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+		}
+	} else {
+		// Per-iteration COPY semantics (the historical default):
+		// load the element, store into a fresh alloca, retain RC
+		// to claim ownership, scope-exit releases.
+		elemVal := bodyBlock.NewLoad(elemType, elemGep)
+		elemAlloca := bodyBlock.NewAlloca(elemType)
+		bodyBlock.NewStore(elemVal, elemAlloca)
+
+		if isElemRC {
+			cg.emitRetain(bodyBlock, elemVal)
+		}
+
+		if s.VarName != "" {
+			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
+			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
+		}
 	}
 
 	var bodyErr error
@@ -3577,6 +3838,15 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	cg.pushBreakTarget(afterBlock)
 	bodyBlock, _, bodyErr = cg.genStmt(bodyBlock, s.Body)
 	cg.popBreakTarget()
+
+	// ARC: release loop-body-local RC vars before the back-edge so per-
+	// iteration `let` bindings don't leak. Mirrors genForIn / genForCStyle.
+	// Must run BEFORE we restore cg.curScope so emitScopeRelease still
+	// sees the body scope.
+	if bodyBlock != nil && bodyBlock.Term == nil {
+		cg.emitScopeRelease(bodyBlock, cg.curScope)
+	}
+
 	cg.curScope = cg.curScope.parent
 
 	if bodyErr != nil {

@@ -79,8 +79,11 @@ clause is optional. The compiler detects this and does not require a trailing
 `return` after the match:
 
 ```rust
-type direction = enum:
-  north, south, east, west
+enum direction =
+  north
+  south
+  east
+  west
 
 fn direction_name(d direction) string =
   match d:
@@ -121,34 +124,37 @@ enum atom weather =
   'cloudy
 ```
 
-Access members directly - they are plain atom values:
+Access members directly - they are plain atom values. Use `atom` as the
+binding type (the enum name is only the declaration grouping):
 
 ```rust
-let s status = 'ok
+let s atom = 'ok
 ```
 
 ### Pattern matching with `where`
 
-The natural way to dispatch on atom enums is `where`:
+The natural way to dispatch on atom enums is `where`. Functions take the
+parameter as type `atom`, and the compiler currently requires a `where _`
+wildcard fallback even when every named atom is covered:
 
 ```rust
-fn describe(s status) string =
+fn describe(s atom) string =
   where 'ok:  return "all good"
   where 'err: return "error occurred"
+  where _:    return "unknown"
 
-fn weather_msg(w weather) string =
+fn weather_msg(w atom) string =
   where 'sunny: return "bring sunglasses"
   where 'rainy: return "bring an umbrella"
   where _:      return "check the forecast"
 ```
 
-`match` works too:
+> Atom values are stored as runtime-interned identities (parameter type
+> `atom`), not as the enum's underlying integer. Using the enum name
+> (`status`, `weather`) as a variable or parameter type binds an i32
+> slot and will not accept atom literals.
 
-```rust
-match s:
-  case 'ok:  echo "ok"
-  case 'err: echo "error"
-```
+`match` over atoms is not supported - use `where` clauses for atom dispatch.
 
 ### Standalone atoms
 
@@ -209,6 +215,85 @@ match a.(type):
   default:
     echo "other"
 ```
+
+### Tagged unions as generic type arguments
+
+`type X = A | B` plays two roles:
+
+1. A **tagged-union type** when you have a value of it. The value carries a
+   tag and is laid out as `{ i8 tag, payload }`.
+2. A **type-set alias** when used in a where-guard. `where t is X` is
+   satisfied by any structural variant of X.
+
+Both meanings are preserved when X appears as a generic type argument. A
+generic instantiated with X stores the **literal tagged union** (with the
+tag), not one of the underlying variants:
+
+```rust
+use sync
+
+type num = i64 | f64
+
+let a num = 42
+let atom = sync::Atomic[num].new(a)   // Atomic stores num, not i64
+let v = atom.load()                   // v is num, tag preserved
+
+match v.(type):
+  case n i64: echo "i64 {n}"
+  case f f64: echo "f64 {f}"
+```
+
+### Where-guards over tagged unions
+
+`where t is X` matches **either** the literal X or any of its structural
+variants, so a single overload can cover both forms:
+
+```rust
+type num = i64 | f64
+
+struct Box[t] =
+  v t
+  fn show(this Box[t]) string where t is num =
+    match this.v.(type):
+      case n i64: return "i64 {n}"
+      case f f64: return "f64 {f}"
+
+let b1 = Box[num]{v: 42 as num}    // t = num   -> matches `where t is num`
+let b2 = Box[i64]{v: 7}            // t = i64   -> also matches (i64 is a variant of num)
+let b3 = Box[f64]{v: 3.14}         // t = f64   -> also matches
+```
+
+Inside a `where t is X` body, `t` is only known to be one of X's variants -
+it has no single concrete type. Use `match v.(type)` to recover the
+concrete variant. The compiler will not let you call type-specific operations
+on a `t`-typed value without one.
+
+### Compile-time match resolution
+
+When the generic is instantiated with a **single concrete variant** (e.g.
+`Box[i64]` for `where t is num`), `match v.(type)` is statically
+resolvable. The compiler keeps only the arm whose type matches the
+substituted `t` and dead-strips the rest -- no tag load, no switch, no
+branch. The arms for unreachable variants don't even reach the IR.
+
+```rust
+let bi = Box[i64]{v: 42}
+echo bi.show()   // emits the i64 arm body only; the f64 arm is gone
+
+let bn = Box[num]{v: 42 as num}
+echo bn.show()   // emits the full tag-dispatched switch (real tagged union)
+```
+
+If no arm matches the concrete type:
+
+- with a `default:` arm, the default body becomes the only emitted code.
+- without a `default:` arm, the compiler errors out -- the user wrote a
+  match that proves the instantiation is wrong (e.g. `Box[bool]` for a
+  `where t is num` body matching only i64/f64).
+
+This means `match v.(type)` inside a where-guarded function is free at
+runtime when the type-arg is concrete and pays only for the variants you
+actually write when the type-arg is the literal tagged union.
 
 ---
 
@@ -310,10 +395,13 @@ match r:
   case Ok(v):   echo "ok: {v}"
   case Err(m):  echo "error: {m}"
 
-// where-patterns reuse the same constructor syntax
+// where-patterns reuse the same constructor syntax;
+// where-clauses always require a `where _` fallback even when every
+// variant is handled
 fn unwrap_or(r Result[i32, string], d i32) i32 =
   where r is Ok(v):  return v
   where r is Err(_): return d
+  where _:           return d
 ```
 
 Match arms exhaustively covering every variant are recognised without a

@@ -22,7 +22,7 @@ struct LinkedList[T](List[T]) =
   tail *Node[T]
   _len i64
 
-  static fn new() LinkedList[T] =
+  static fn make() LinkedList[T] =
     return LinkedList[T]{head: nil, tail: nil, _len: 0}
 
   fn List::len(this LinkedList[T]) i64 =

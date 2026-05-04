@@ -185,7 +185,7 @@ func expandEntry(entry macroEntry, callText string, hasBang bool) (string, error
 		return "", err
 	}
 
-	p := parser.New(toks)
+	p := parser.New(toks, "<repl>")
 
 	prog, err := p.Parse()
 	if err != nil {

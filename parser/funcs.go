@@ -1,8 +1,6 @@
 package parser
 
 import (
-	"fmt"
-
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
 )
@@ -106,13 +104,18 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 				traitQualifier += ta
 			}
 		}
-	} else if p.check(lexer.IDENT) {
+	} else if p.check(lexer.IDENT) || isContextualNameKeyword(p.peek()) {
 		saved := p.pos
 		// Collect leading module/trait segments. A segment is an intermediate
 		// IDENT that is followed by `::` (i.e. another segment continues). The
 		// final IDENT (which is NOT followed by `::`) is either the trait name
 		// (qualified form) or the plain fn name, decided once we see what
 		// follows it.
+		//
+		// Some KW_* tokens (KW_FORWARD, KW_OVERRIDE) are *contextual* --
+		// they only act as keywords inside struct field declarations and
+		// are otherwise plain identifiers. Allow them as the leading
+		// segment of a function name so `fn forward(...)` works.
 		segments := []string{p.advance().Literal}
 
 		for p.check(lexer.DCOLON) && p.peekAt(1).Type == lexer.IDENT && p.peekAt(2).Type == lexer.DCOLON {
@@ -190,12 +193,15 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 		if p.check(lexer.KW_VIRTUAL) {
 			p.advance() // consume "virtual"
 
-			return &ast.FuncDecl{
+			fd := &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
 				RetType: retType, Tags: tags, IsStatic: isStatic,
 				IsVirtual: true,
-			}, nil
+			}
+			fd.SetPos(pos)
+
+			return fd, nil
 		}
 
 		if p.check(lexer.KW_EXTERN) {
@@ -207,7 +213,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 
 			symTok, err := p.expect(lexer.STRING_LIT)
 			if err != nil {
-				return nil, fmt.Errorf("extern symbol must be a string literal, e.g. extern(\"name\")")
+				return nil, p.errAtTok(p.peek(), "extern symbol must be a string literal, e.g. extern(\"name\")")
 			}
 
 			sym := symTok.Literal
@@ -218,12 +224,15 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			// Allow trailing tags after extern("sym"): e.g. extern("read") {#blocking}
 			tags = append(tags, p.parseTags()...)
 
-			return &ast.FuncDecl{
+			fd := &ast.FuncDecl{
 				Name: name, TraitQualifier: traitQualifier,
 				TypeParams: typeParams, Constraints: constraints, Params: params,
 				RetType: retType, Tags: tags, IsStatic: isStatic,
 				IsExtern: sym,
-			}, nil
+			}
+			fd.SetPos(pos)
+
+			return fd, nil
 		}
 
 		body, err := p.parseFuncBody()
@@ -231,23 +240,25 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 			return nil, err
 		}
 
-		_ = pos
-
-		return &ast.FuncDecl{
+		fd := &ast.FuncDecl{
 			Name: name, TraitQualifier: traitQualifier,
 			TypeParams: typeParams, Constraints: constraints, Params: params,
 			RetType: retType, Body: body, Tags: tags, IsStatic: isStatic,
-		}, nil
+		}
+		fd.SetPos(pos)
+
+		return fd, nil
 	}
 
 	// fn with no body (forward declaration / extern / trait virtual)
-	_ = pos
-
-	return &ast.FuncDecl{
+	fd := &ast.FuncDecl{
 		Name: name, TraitQualifier: traitQualifier,
 		TypeParams: typeParams, Constraints: constraints, Params: params,
 		RetType: retType, Tags: tags, IsStatic: isStatic,
-	}, nil
+	}
+	fd.SetPos(pos)
+
+	return fd, nil
 }
 
 // parseFuncBody parses the body after the `=` sign
@@ -454,8 +465,7 @@ func (p *Parser) parseTypeBoundUnary() (ast.TypeBound, error) {
 		// eval time isn't worth the complexity here. Use a synthesized atom
 		// referencing a negation of the parenthesised sub-tree via a
 		// special helper. For now we only allow `not` on atoms (leaves).
-		return nil, fmt.Errorf("%d:%d: `not` in a type bound must apply to a trait name, not a parenthesised expression",
-			pos.Line, pos.Col)
+		return nil, p.errAt(pos.Line, pos.Col, "\"not\" in a type bound must apply to a trait name, not a parenthesised expression")
 	}
 
 	return p.parseTypeBoundAtom()
@@ -480,8 +490,7 @@ func (p *Parser) parseTypeBoundAtom() (ast.TypeBound, error) {
 	if !isTypeToken(p.peek()) && !p.check(lexer.IDENT) {
 		pos := p.curPos()
 
-		return nil, fmt.Errorf("%d:%d: expected trait name in type bound",
-			pos.Line, pos.Col)
+		return nil, p.errAt(pos.Line, pos.Col, "expected trait name in type bound")
 	}
 
 	pos := p.curPos()
@@ -619,8 +628,7 @@ func (p *Parser) parseWherePattern() (ast.Node, error) {
 	}
 
 	if p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: empty where pattern `()` is not allowed; use `where _:` for a catch-all",
-			openPos.Line, openPos.Col)
+		return nil, p.errAt(openPos.Line, openPos.Col, "empty where pattern \"()\" is not allowed; use \"where _:\" for a catch-all")
 	}
 
 	var elems []ast.Node
@@ -700,6 +708,10 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 		return nil, err
 	}
 
+	p.blockDepth++
+
+	defer func() { p.blockDepth-- }()
+
 	b := &ast.Block{}
 	_ = pos
 
@@ -717,6 +729,33 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 		// Treat it as a block terminator without consuming it.
 		if p.check(lexer.COMMA) {
 			break
+		}
+		// A closing paren mid-block: we're inside the body of a
+		// lambda that lives in a call argument list, e.g.
+		//   f(fn(p) =
+		//     stmt
+		//     stmt)
+		// Break without consuming so the outer call's argv parser
+		// sees its `)`. The lambda body's matching DEDENT arrives
+		// AFTER the `)` is consumed by the outer parser; without
+		// the pendingLambdaDedents counter, that DEDENT would pop
+		// the calling scope (e.g. main's body) and cut everything
+		// after the call out. The counter tells skipNewlines /
+		// the next parseBlock loop iteration to swallow it.
+		if p.check(lexer.RPAREN) {
+			p.pendingLambdaDedents++
+
+			break
+		}
+		// Eat owed lambda-DEDENTs that landed at the start of this
+		// loop iteration before we could process them. Same scope
+		// fix as above, just from the consumer side.
+		if p.check(lexer.DEDENT) && p.pendingLambdaDedents > 0 {
+			p.advance()
+			p.pendingLambdaDedents--
+			p.skipSemisAndNewlines()
+
+			continue
 		}
 
 		isPass := p.check(lexer.KW_PASS)
@@ -745,4 +784,19 @@ func (p *Parser) parseBlock() (*ast.Block, error) {
 	}
 
 	return b, nil
+}
+
+// isContextualNameKeyword reports whether tok is a KW_* token that
+// also doubles as a valid identifier in name-position contexts (fn
+// names, struct/method names, etc.). The lexer eagerly tokenizes
+// these as keywords because they have meaning in struct-field syntax
+// (`forward`, `override`), but the language treats them as plain
+// identifiers everywhere else.
+func isContextualNameKeyword(tok lexer.Token) bool {
+	switch tok.Type {
+	case lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		return true
+	}
+
+	return false
 }

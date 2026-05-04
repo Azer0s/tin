@@ -52,7 +52,7 @@ Integer literals can be written in decimal, hexadecimal, octal, or binary:
 ```rust
 let mask  i64 = 0xFF00FF        // hex
 let perms i64 = 0o755           // octal  (rwxr-xr-x)
-let flags i64 = 0b1010_0011     // binary (underscores not yet supported)
+let flags i64 = 0b10100011      // binary (underscores not yet supported)
 ```
 
 All bases produce an `i64` literal; the `as` operator or an explicit type
@@ -185,12 +185,31 @@ echo count           // 1
 
 ### Constants
 
-`const` declares a compile-time constant. Its type must be specified:
+`const` declares a compile-time constant. The right-hand side must be a
+literal, an arithmetic / cast / shift / bitwise expression, an
+identifier reference to another `const`, or a call to a `#pure`
+function. The type may be omitted when the initializer is a literal:
 
 ```rust
 const MAX i32 = 100
 const PI  f64 = 3.14159265
+const FORTY_TWO = 42        // inferred i64
+
+const A = 6
+const B = A + 1             // chained references fold
+
+fn{#pure} double(x i64) i64 = return x * 2
+const Y = double(21)        // pure-call result, inferred i64 = 42
 ```
+
+Top-level constants live in read-only storage (`@X = constant ...` in
+LLVM IR, `.rodata` section). Writes through an aliased pointer
+(`let p = &MAX; *p = 0`) are undefined behavior; the compiler emits a
+`-Wwrite-to-const` warning at the write site, and the binary segfaults
+at `-O0` if the alias is reached.
+
+Block-level `const` is statically immutable too: `const xs = [1,2,3]`
+followed by `xs[0] = 99` is rejected at compile time.
 
 ### Top-level (global) variables
 
@@ -218,7 +237,8 @@ fn handle() =
   TotalRequests = TotalRequests + 1
 ```
 
-For variables shared across concurrent fibers, use `sync::AtomicI64` or a
+For variables shared across concurrent fibers, use `sync::Atomic[i64]`
+(or any other primitive: `Atomic[bool]`, `Atomic[f64]`, etc.) or a
 `sync::Mutex` - plain `var` declarations are not thread-safe.
 
 ---
@@ -381,7 +401,7 @@ let y f32 = 2.5
 
 // integer -> float
 let n i64 = 42
-let f = n as f64        // 42.0
+let f = n as f64        // 42
 
 // float -> integer (truncates toward zero)
 let i = 3.9 as i64      // 3

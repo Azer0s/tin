@@ -63,9 +63,7 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// ----------------------------------------------------------------------------
 // Pattern representation
-// ----------------------------------------------------------------------------
 
 type mPat interface {
 	mIsPat()
@@ -139,9 +137,7 @@ const (
 	mLitAtom
 )
 
-// ----------------------------------------------------------------------------
 // AST -> mPat conversion
-// ----------------------------------------------------------------------------
 
 // nodeToMPat converts an AST pattern node into the matrix-friendly
 // representation. Unknown shapes become mWild conservatively (treats the
@@ -339,9 +335,7 @@ func wildRow(n int) []mPat {
 	return r
 }
 
-// ----------------------------------------------------------------------------
 // Constructors and column signatures
-// ----------------------------------------------------------------------------
 
 // mCtor identifies a constructor head for column 0 of a matrix.
 //
@@ -725,11 +719,9 @@ func arrayDomainExhaustedWithWitness(exact map[int]bool, restMins []int) (bool, 
 	return true, 0
 }
 
-// ----------------------------------------------------------------------------
 // Specialize, Default
-// ----------------------------------------------------------------------------
 
-// specialize implements S(c, M) from Maranget §3.1.
+// specialize implements S(c, M) from Maranget section 3.1.
 func specialize(M [][]mPat, c mCtor) [][]mPat {
 	a := c.arity()
 
@@ -868,7 +860,7 @@ func specialize(M [][]mPat, c mCtor) [][]mPat {
 	return out
 }
 
-// defaultMatrix implements D(M) from Maranget §3.1.
+// defaultMatrix implements D(M) from Maranget section 3.1.
 func defaultMatrix(M [][]mPat) [][]mPat {
 	var out [][]mPat
 
@@ -881,9 +873,7 @@ func defaultMatrix(M [][]mPat) [][]mPat {
 	return out
 }
 
-// ----------------------------------------------------------------------------
 // Useful + witness construction
-// ----------------------------------------------------------------------------
 
 // witnessVal is a recovered concrete value uncovered by a matrix; built
 // during the Useful recursion so the caller can pretty-print it.
@@ -897,7 +887,7 @@ type witnessVal struct {
 // witness, when q is found useful, is a concrete value q matches and no row
 // of M does.
 func (cg *CodeGen) useful(M [][]mPat, q []mPat) (bool, *witnessVal) {
-	// Base cases following Maranget §3.1.
+	// Base cases following Maranget section 3.1.
 	if len(q) == 0 {
 		// The matrix has no rows iff the empty pattern is useful. (No
 		// remaining rows means none of them could "see" the empty value.)
@@ -1093,9 +1083,7 @@ func prependChildren(c mCtor, rest *witnessVal) *witnessVal {
 	return w
 }
 
-// ----------------------------------------------------------------------------
 // Witness pretty-printing
-// ----------------------------------------------------------------------------
 
 func (w *witnessVal) String() string {
 	if w == nil {
@@ -1173,9 +1161,7 @@ func (w *witnessVal) String() string {
 	return "_"
 }
 
-// ----------------------------------------------------------------------------
 // Public entry points
-// ----------------------------------------------------------------------------
 
 // marangetCheckWhereExhaustive returns (ok, witnessString). When ok is false
 // the witness describes a value the where-list fails to cover.
@@ -1333,9 +1319,7 @@ func sortStrings(s []string) {
 	}
 }
 
-// ----------------------------------------------------------------------------
 // Debug dumping (-fdump-match-info)
-// ----------------------------------------------------------------------------
 
 // patStr renders an mPat for debug dumps.
 func patStr(p mPat) string {

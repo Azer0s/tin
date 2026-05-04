@@ -10,21 +10,27 @@ package codegen
 // at runtime; we describe the shim's signature with ffi_type pointers
 // derived from fd.Params + fd.RetType, marshal each ctfeVal into a raw
 // argument cell, and unmarshal the result. No more per-arity cgo stubs,
-// no more bespoke i64 adapter — one path covers i64 / f64 / bool / string.
+// no more bespoke i64 adapter - one path covers i64 / f64 / bool / string.
 
 /*
 #cgo linux LDFLAGS: -ldl -lffi
-// macOS: libffi is keg-only Homebrew. Pick the prefix per-arch so the
-// linker doesn't warn about non-existent -L paths (clang is silent on
-// stray -I, but ld64 warns on stray -L). Users with a custom prefix
-// (MacPorts, manual install) can override via CGO_CFLAGS / CGO_LDFLAGS.
-#cgo darwin,arm64  CFLAGS:  -I/opt/homebrew/opt/libffi/include
-#cgo darwin,arm64  LDFLAGS: -L/opt/homebrew/opt/libffi/lib -lffi
-#cgo darwin,amd64  CFLAGS:  -I/usr/local/opt/libffi/include
-#cgo darwin,amd64  LDFLAGS: -L/usr/local/opt/libffi/lib -lffi
+// macOS: prefer the SDK's bundled libffi (header lives at <ffi/ffi.h>
+// inside the active CommandLineTools / Xcode SDK, library is part of
+// libSystem so a bare -lffi resolves it). Fall back to Homebrew via
+// extra -I lines so a Homebrew-installed libffi at the canonical
+// keg-only path also works -- ffi/ffi.h gets shadowed by ffi.h there
+// but both point at compatible headers. Users with a custom prefix
+// can still override via CGO_CFLAGS / CGO_LDFLAGS.
+#cgo darwin           LDFLAGS: -lffi
+#cgo darwin,arm64    CFLAGS: -I/opt/homebrew/opt/libffi/include
+#cgo darwin,amd64    CFLAGS: -I/usr/local/opt/libffi/include
 
 #include <dlfcn.h>
+#if __APPLE__
+#include <ffi/ffi.h>
+#else
 #include <ffi.h>
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -82,7 +88,7 @@ import (
 // back to libc free for string returns. We MUST NOT mix free implementations
 // with tin_extern_alloc: a #pure shim that returns a string allocates via
 // the runtime's configured tin_alloc_fn, which a non-malloc deployment can
-// override — in that case calling libc free corrupts the heap.
+// override - in that case calling libc free corrupts the heap.
 type pureFnHandle struct {
 	handle unsafe.Pointer // dlopen result
 	sym    unsafe.Pointer // dlsym(__tin_pure_shim_<name>)
@@ -107,7 +113,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 	}
 
 	// Verify the (hash -> shim) binding the cache claims. An empty manifest
-	// means a legacy/hand-crafted entry (e.g. test fixtures) — accept it
+	// means a legacy/hand-crafted entry (e.g. test fixtures) - accept it
 	// for backward compatibility. A non-empty mismatch means we'd be about
 	// to dlopen a .so whose symbol pedigree disagrees with what the
 	// caller expected; refuse instead of returning a wrong handle.
@@ -126,7 +132,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 	// load time even for primitive #pure fns whose wrapper happens to
 	// call tin_runtime_init in its preamble. With RTLD_LAZY the load
 	// succeeds, and only ACTUAL invocation of an unresolved symbol traps
-	// — which the libffi dispatcher would catch via ffi_call's stub if
+	// - which the libffi dispatcher would catch via ffi_call's stub if
 	// it ever fired (it doesn't for i64/f64/bool round-trips).
 	handle := C.dlopen(cPath, C.RTLD_LAZY|C.RTLD_LOCAL)
 	if handle == nil {
@@ -148,7 +154,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 
 	// Best-effort lookup of tin_extern_free so the dispatcher can release
 	// string-return buffers via the runtime's configured deallocator. May
-	// be nil for .so's that don't embed runtime/interop.c — the dispatcher
+	// be nil for .so's that don't embed runtime/interop.c - the dispatcher
 	// falls back to libc free in that case (correct as long as the runtime
 	// hasn't been pointed at a non-malloc allocator). Clear dlerror first
 	// so a stale message from an unrelated lookup doesn't leak through if
@@ -180,7 +186,7 @@ func LoadPureFn(hash, shimName string) (*pureFnHandle, error) {
 //	          via tin_extern_alloc (we copy + free here)
 //
 // Returns ok=false silently for any signature element outside that subset
-// — the caller falls back to AST evaluation.
+// - the caller falls back to AST evaluation.
 func InvokePureShim(h *pureFnHandle, fd *ast.FuncDecl, args []ctfeVal) (ctfeVal, bool) {
 	if fd == nil || fd.RetType == nil {
 		return ctfeVal{}, false

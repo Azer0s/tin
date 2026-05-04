@@ -72,9 +72,7 @@ void _tin_fiber_sync_await(int64_t pid);
 // Used by Future[t].await_result() in stdlib/sync/future.tin.
 void *_tin_future_await_raw(int64_t pid);
 
-// ---------------------------------------------------------------------------
 // await match support
-// ---------------------------------------------------------------------------
 
 // Forward declaration (full typedef is in fiber.c).
 typedef struct TinAnyWaiter TinAnyWaiter;

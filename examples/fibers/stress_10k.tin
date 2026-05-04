@@ -5,7 +5,7 @@
 
 use sync
 
-var counter sync::AtomicI64
+var counter sync::Atomic[i64]
 var done_ch sync::Channel[i64]
 
 fn{#async} inc_fiber() =
@@ -13,7 +13,7 @@ fn{#async} inc_fiber() =
   await done_ch.send(1)
 
 fn{#async} main() =
-  counter = sync::AtomicI64.make(0)
+  counter = sync::Atomic[i64].new(0)
   done_ch = sync::Channel[i64].make(10000)
 
   let n i64 = 10000

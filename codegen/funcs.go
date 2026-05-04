@@ -225,6 +225,18 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		if p.IsVarArgs {
 			continue // varargs is not an LLVM-level named parameter
 		}
+		// Reject by-value #no_copy params: passing such a value would shallow-
+		// copy the cell pointer and the callee's scope-exit drop would race
+		// with the caller's. Use *S instead. The receiver name `this` is
+		// exempt -- Tin's deinit convention is `fn deinit(this S)` and the
+		// receiver is the unique owner about to be torn down, not a copy.
+		if p.Name != "this" {
+			if name := cg.noCopyValueTypeName(p.Type); name != "" {
+				return cg.nodeErr(n,
+					"function %s parameter %q has type %s which is #no_copy: pass *%s instead",
+					n.Name, p.Name, prettyStructName(name), prettyStructName(name))
+			}
+		}
 
 		pt, err := cg.tinTypeToLLVM(p.Type)
 		if err != nil {
@@ -237,6 +249,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	var retType irtypes.Type = irtypes.Void
 
 	if n.RetType != nil {
+		// Returning a #no_copy by value would force the caller to bind it,
+		// which is also forbidden. Constructors must return *S.
+		if name := cg.noCopyValueTypeName(n.RetType); name != "" {
+			return cg.nodeErr(n,
+				"function %s returns %s by value, but %s is #no_copy: return *%s instead",
+				n.Name, prettyStructName(name), prettyStructName(name), prettyStructName(name))
+		}
+
 		var err error
 
 		retType, err = cg.tinTypeToLLVM(n.RetType)
@@ -270,8 +290,14 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			return nil // already declared
 		}
 	}
-	// Add function to module (declaration) using the IR name.
-	f := cg.mod.NewFunc(irName, retType, params...)
+	// Route fn creation through activeModule() so each pkg's user fns
+	// land in its per-pkg LLVM module. cg.activeMod is set by
+	// loadPackageFromSource; outside of pkg loading it's nil and
+	// activeModule() returns cg.mod (the entry pkg / runtime helpers).
+	// mergeRoutedPkgMods folds per-pkg modules back into cg.mod at end-
+	// of-Generate today; a future commit replaces the merge with
+	// parallel per-pkg .o compilation.
+	f := cg.activeModule().NewFunc(irName, retType, params...)
 	f.Blocks = nil // no body yet
 	cg.curScope.set(irName, &scopeEntry{val: f, isAlloc: false})
 
@@ -289,9 +315,17 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// can export them to the dynamic symbol table for dladdr to resolve.
 	// STB_LOCAL symbols never reach the dynsym regardless of -rdynamic,
 	// so without this gate every Tin frame would render as `??+0xADDR`.
-	if !hasTag(n.Tags, "interop") && !cg.stacktraceUsed {
-		f.Linkage = enum.LinkageInternal
-	}
+	//
+	// Per-pkg compile (incremental compilation step 2) is the fourth
+	// escape hatch: when each pkg compiles to its own .o, a fn defined
+	// in pkg A and called from pkg B must be linker-visible to B's .o.
+	// Internal-linkage symbols are STB_LOCAL and don't cross object
+	// boundaries, so cross-pkg calls need external linkage. We always
+	// route user fns through per-pkg modules now (predeclareFuncAs
+	// uses cg.activeModule()), so external linkage is the safe default;
+	// linker DCE (--gc-sections) still strips unused symbols.
+	_ = n
+	// f.Linkage stays at the default (external).
 
 	// #pure functions get LLVM attributes that unblock the optimizer:
 	// alwaysinline so call sites disappear; readnone + nounwind when the
@@ -312,7 +346,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			// disable-tail-calls keeps the frame on the stack rather
 			// than letting LLVM convert `return f()` into a `jmp` that
 			// erases this fn from the unwind chain. Must be a keyed
-			// AttrPair, NOT AttrString — AttrString would emit the
+			// AttrPair, NOT AttrString - AttrString would emit the
 			// whole `disable-tail-calls="true"` as one quoted string
 			// attribute name, which LLVM stores as an unrecognized
 			// attribute and silently ignores. AttrPair produces the
@@ -344,9 +378,9 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 // applyPureFuncAttrs sets LLVM function attributes on f based on the Tin
 // function's purity annotation:
 //
-//   - #pure → alwaysinline (always; the inliner will substitute the body
+//   - #pure -> alwaysinline (always; the inliner will substitute the body
 //     at every call site so LLVM's optimizer sees the math directly).
-//   - #pure with no {#allow_sideffect} block in the body → readnone +
+//   - #pure with no {#allow_sideffect} block in the body -> readnone +
 //     nounwind. This tells LLVM the call has no observable side effects
 //     and can be CSE'd, hoisted out of loops, or DCE'd when its result is
 //     unused.
@@ -394,6 +428,23 @@ func bodyHasAllowSideffect(body ast.Node) bool {
 func (cg *CodeGen) preregister(node ast.Node) error {
 	switch n := node.(type) {
 	case *ast.StructDecl:
+		// Tag-driven side maps must populate during preregister (pass 1)
+		// so later passes can consult them. genStructLayout (pass 3 phase
+		// A) used to be the only writer, but predeclareFuncAs (pass 2)
+		// also needs to see #no_copy to reject by-value parameters and
+		// returns -- previously those slipped through and only let-binding
+		// rejection caught them. Mirror the writes here for both bare and
+		// pkg-qualified keys so cross-package lookups work.
+		if hasTag(n.Tags, "no_copy") {
+			cg.noCopyStructs[n.Name] = true
+			cg.noCopyStructs[cg.pkgStructKey(n.Name)] = true
+		}
+
+		if hasTag(n.Tags, "closed") {
+			cg.closedStructs[n.Name] = true
+			cg.closedStructs[cg.pkgStructKey(n.Name)] = true
+		}
+
 		if len(n.TypeParams) > 0 {
 			// Generic struct - store as template keyed by arity; concrete types
 			// are created when a "type X = GenericStruct[T, R]" alias is processed.
@@ -404,6 +455,17 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			}
 
 			cg.genericStructsByArity[n.Name][len(n.TypeParams)] = n
+
+			// Tag the template's source file so monomorphizations can
+			// inherit it for `//!-Wno-` lookup. Without this, every
+			// `Channel[T]` instantiated in user code would lose the
+			// suppression that lives in stdlib/sync/channel.tin.
+			if cg.filename != "" {
+				cg.genericStructTmplFiles[n.Name] = cg.filename
+				if cg.currentPkg != "" {
+					cg.genericStructTmplFiles[cg.currentPkg+"__"+n.Name] = cg.filename
+				}
+			}
 		} else {
 			// Register an opaque struct so recursive types work.
 			// Use the canonical package-prefixed name as both the map key and the
@@ -459,11 +521,23 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		// forward references work; full layout is filled in genTypeDecl.
 		// Struct-monomorphization aliases (type point = tuple[f32]) are handled
 		// in genTypeDecl so that all struct templates are known first.
-		if _, isUnion := n.Type.(*ast.UnionTypeExpr); isUnion {
-			st := irtypes.NewStruct()
-			st.SetName(n.Name)
-			cg.structTypes[n.Name] = st
-			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+		if ut, isUnion := n.Type.(*ast.UnionTypeExpr); isUnion {
+			if _, exists := cg.structTypes[n.Name]; !exists {
+				st := irtypes.NewStruct()
+				st.SetName(n.Name)
+				cg.structTypes[n.Name] = st
+				cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+			}
+			// Populate unionTypeMembers here so that downstream constraint
+			// checks (`where t is X` against a tagged-union alias) work
+			// even when the TypeDecl was declared in an imported package
+			// -- packages.go doesn't run pass-2's genTypeDecl, so without
+			// this preregister write the membership is invisible across
+			// package boundaries and method-level where guards silently
+			// dead-strip every method.
+			if _, already := cg.unionTypeMembers[n.Name]; !already {
+				cg.unionTypeMembers[n.Name] = ut.Types
+			}
 		} else if _, isGeneric := n.Type.(*ast.GenericType); !isGeneric {
 			cg.typeAliases[n.Name] = n.Type
 		}
@@ -1065,6 +1139,15 @@ func (cg *CodeGen) genStructMethod(structName string, m *ast.FuncDecl) error {
 
 	var irName string
 
+	// Save / restore the receiver struct so genFuncDecl's display-name
+	// recording (recordFnDisplayName, called from inside genFuncDeclAs)
+	// renders the user-visible form `Struct.method` instead of just
+	// the bare method name.
+	prevRecv := cg.curMethodReceiverStruct
+	cg.curMethodReceiverStruct = structName
+
+	defer func() { cg.curMethodReceiverStruct = prevRecv }()
+
 	// Overloading: use the mangled name when this method belongs to an overload set.
 	if cg.overloadedNames[key] && m.IsExtern == "" {
 		sig := methodParamSig(m, structName)
@@ -1149,6 +1232,111 @@ func (cg *CodeGen) typeBoundSatisfied(concreteName string, bound ast.TypeBound) 
 	}
 
 	return true, nil
+}
+
+// formatStripWitnesses renders a list of dead-strip witnesses (one per
+// stripped overload) for inline use in a single-line error message.
+// Single witness: "doesn't match <bound>". Multi: "doesn't match any
+// of: <bound>, <bound>, ...".
+func formatStripWitnesses(witnesses []string) string {
+	if len(witnesses) == 0 {
+		return ""
+	}
+
+	if len(witnesses) == 1 {
+		return "doesn't match " + witnesses[0]
+	}
+
+	return "doesn't match any of: " + strings.Join(witnesses, ", ")
+}
+
+// prettyStructName renders an IR-mangled generic instantiation name
+// (e.g. "Box__bool", "Channel__string") back into the source-syntax
+// form ("Box[bool]", "Channel[string]"). Multi-arg generics use the
+// double-underscore separator inside the brackets too:
+// "HashMap__string__i64" -> "HashMap[string, i64]".
+//
+// Plain (non-generic) struct names pass through unchanged.
+func prettyStructName(s string) string {
+	idx := strings.Index(s, "__")
+	if idx < 0 {
+		return s
+	}
+
+	base := s[:idx]
+	rest := s[idx+2:]
+	args := strings.ReplaceAll(rest, "__", ", ")
+
+	return base + "[" + args + "]"
+}
+
+// methodConstraintWitness reports whether every where-clause on a generic
+// struct method holds under the given type-parameter substitution. Returns
+// an empty string when all constraints hold (the method survives), or a
+// human-readable description of the FIRST failing constraint when it
+// doesn't (the method is dead-stripped from the concrete struct).
+//
+// The returned witness format depends on the bound's shape so the
+// diagnostic stays informative:
+//   - pure leaf:      `where t is X` (t = "Y")
+//   - AND with miss:  `where t is X && Z` failed at `Z` (t = "Y")
+//   - OR all fail:    `where t is X || Z` matches neither (t = "Y")
+//
+// A method with no Constraints always survives.
+func (cg *CodeGen) methodConstraintWitness(m *ast.FuncDecl, typeSubst map[string]string) string {
+	if len(m.Constraints) == 0 {
+		return ""
+	}
+
+	for _, c := range m.Constraints {
+		concreteName, ok := typeSubst[c.TypeParam]
+		if !ok {
+			// The constraint references a type-param that isn't part
+			// of the struct's substitution (e.g. a method-level
+			// generic that hasn't been instantiated yet). Defer to
+			// the call-site path, which already validates these.
+			continue
+		}
+
+		ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound)
+		if ok {
+			continue
+		}
+
+		full := typeBoundString(c.Bound)
+
+		// Mixed AND/OR bound -- pointing at the failing AND-conjunct
+		// is genuinely informative: that's the specific missing
+		// requirement.
+		if !isPureOrBound(c.Bound) {
+			return fmt.Sprintf("where %s is %s (missing %s)",
+				c.TypeParam, full, typeBoundString(witness))
+		}
+
+		// Single-leaf or pure-OR bound: the bound itself describes
+		// the requirement; the concrete type didn't satisfy it.
+		_ = concreteName
+
+		return fmt.Sprintf("where %s is %s", c.TypeParam, full)
+	}
+
+	return ""
+}
+
+// isPureOrBound reports whether b is built only from atoms and OR
+// nodes (no AND). Used by the witness formatter to choose between
+// "failed at sub-check" and "matches none of" wording.
+func isPureOrBound(b ast.TypeBound) bool {
+	switch v := b.(type) {
+	case *ast.TBAtom:
+		return true
+	case *ast.TBOr:
+		return isPureOrBound(v.Left) && isPureOrBound(v.Right)
+	case *ast.TBAnd:
+		return false
+	}
+
+	return true
 }
 
 // typeArgsContainAnyOf reports whether any type-argument expression in args
@@ -1255,9 +1443,15 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return true
 	}
 
-	// If the name is a tagged union type, check whether structName is one of
-	// its variants (recursively, since unions can contain other unions).
+	// If the name is a tagged union type, the literal tagged-union type
+	// itself satisfies the bound (`where t is num` matches t = num, the
+	// whole union value), and so does any of its structural variants
+	// (`where t is num` matches t = i64 when num = i64 | f64).
 	if members, ok := cg.unionTypeMembers[traitName]; ok {
+		if structName == traitName {
+			return true
+		}
+
 		for _, member := range members {
 			if cg.typeExprContains(member, structName) {
 				return true
@@ -1603,7 +1797,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 		var wrapperFn *ir.Func
 
-		for _, f := range cg.mod.Funcs {
+		for _, f := range cg.allFuncs() {
 			if f.Name() == wrapperName {
 				wrapperFn = f
 
@@ -1968,7 +2162,10 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curDeferThunkRetType = nil
 
 	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
-	if len(cg.curFnEscapingVars) > 0 || hasDirectHeapReturn(n.Body, cg.heapPromotingFns) {
+
+	heapPromoting := len(cg.curFnEscapingVars) > 0 || hasDirectHeapReturn(n.Body, cg.heapPromotingFns)
+
+	if heapPromoting {
 		cg.heapPromotingFns[scopeName] = true
 		// Also store under the actual IR function name (which may include a
 		// parameter-type suffix, e.g. "json__parse_value__ptr_Parser") so that
@@ -1981,6 +2178,27 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFn = f
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
+
+	// Record the source file for this fn. pclntab.go uses this at the
+	// post-pass to emit per-fn header entries with correct file paths
+	// even when imports from other files were processed earlier (which
+	// would leave cg.filename pointing at a different .tin source).
+	if f != nil && cg.filename != "" {
+		if cg.fnSourceFiles == nil {
+			cg.fnSourceFiles = map[string]string{}
+		}
+
+		cg.fnSourceFiles[f.Name()] = cg.filename
+	}
+
+	// Record the user-visible display name (`pkg::name` for top-level
+	// fns, `pkg::Struct.method` when cg.curMethodReceiverStruct is set
+	// before calling here). pclntab.go's unmangleTinName consults this
+	// map at trace render time so users see source-level names instead
+	// of IR-mangled ones (`sync__AtomicI64_deinit` vs `sync::AtomicI64.deinit`).
+	if f != nil && f.Name() != "" {
+		cg.recordFnDisplayName(f.Name(), n)
+	}
 
 	// Emit DISubprogram for debug builds, and seed currentPos so that the
 	// parameter allocas and first body instruction are tagged with the
@@ -2237,7 +2455,7 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 				"bypasses inline channel optimizations. Fix: wrap your code in 'fn{#async} main() = ...' instead")
 	}
 
-	f := cg.mod.NewFunc("main", irtypes.I32)
+	f := cg.newCMainWrapper(false)
 	entry := f.NewBlock("entry")
 
 	prevFn := cg.curFn
@@ -2267,6 +2485,15 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 	// Emit fiber init if the program uses any fiber features.
 	entry = cg.emitFiberMainWrap(entry)
+
+	// Register the deinit dispatcher with libc atexit BEFORE running
+	// any user code. See codegen.go's main wrapper for rationale.
+	entry = cg.emitDeinitAllAtexit(entry)
+
+	// Register per-type-id any-release helpers so that any-boxed
+	// structs run their deinit on scope exit instead of just freeing
+	// the heap block.
+	entry = cg.emitAnyDispatchRegistrations(entry)
 
 	// Emit top-level var runtime initializations (deferred from pre-pass 1.7).
 	var err error
@@ -2385,7 +2612,7 @@ func (cg *CodeGen) genTestRunner() error {
 	}
 
 	// Generate main().
-	mainFn := cg.mod.NewFunc("main", irtypes.I32)
+	mainFn := cg.newCMainWrapper(false)
 	entry := mainFn.NewBlock("entry")
 
 	prevFn := cg.curFn
@@ -2395,6 +2622,15 @@ func (cg *CodeGen) genTestRunner() error {
 
 	// Initialize fiber runtime (workers + I/O thread) so tests can use spawn/await.
 	cur := cg.emitFiberMainWrap(entry)
+
+	// Register the deinit dispatcher with libc atexit BEFORE running
+	// any test code (matches the pattern in genImplicitMain / the
+	// codegen.go main wrapper).
+	cur = cg.emitDeinitAllAtexit(cur)
+
+	// Register per-type-id any-release helpers so that any-boxed
+	// structs in tests run their deinit on scope exit.
+	cur = cg.emitAnyDispatchRegistrations(cur)
 
 	// Initialize top-level var globals so tests can reference them.
 	cur, err = cg.emitTopLevelVarInits(cur)
@@ -2418,8 +2654,9 @@ func (cg *CodeGen) genTestRunner() error {
 		// Release RC-tracked locals (e.g. from topLevelVarInits).
 		cg.emitAllScopeReleases(cur, "")
 
-		// Deinit top-level globals (Mutex, Channel, etc.) after all fibers finish.
-		cg.emitTopLevelVarDeinits(cur)
+		// Deinit top-level globals: registered with atexit at the top
+		// of the test runner main; runs automatically on clean exit.
+		// Inline emit removed (was duplicating the atexit hook).
 
 		// Call _tin_test_finish(N) -> i64 exit code.
 		total := constant.NewInt(irtypes.I64, int64(len(cg.testDecls)))

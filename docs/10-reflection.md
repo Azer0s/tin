@@ -256,7 +256,7 @@ Pointer and array field types include nested type information:
 ```rust
 struct node =
   val  i64
-  next *node
+  next own *node
 
 let types = fieldtypes(node{val: 0, next: nil})
 echo types[0]       // 'i64
@@ -281,7 +281,7 @@ let u = user{id: 1, name: "Alice", bio: ""}
 
 echo fieldtag(u, "id")    // 'primary_key
 echo fieldtag(u, "name")  // 'required
-echo fieldtag(u, "bio")   // '' (empty atom - no tag)
+echo fieldtag(u, "bio")   // '   (empty atom - no tag)
 ```
 
 Field tags are stored in a compile-time global map with no runtime overhead
@@ -400,8 +400,12 @@ local rebinds the name `sourcepos` (default-off).
 ### stacktrace
 
 `stacktrace(cap?, opts?)` returns `[atom]` - the live call chain at
-the point of call, walked with libunwind and resolved with libdwfl
-(Linux/FreeBSD) or dladdr (macOS, runtime helper symbols only):
+the point of call, walked via the saved frame-pointer chain (rbp on
+x86_64, x29 on aarch64) and resolved against a custom `__tin_pclntab`
+section that codegen emits alongside the program text. No libdwfl /
+elfutils dependency on any platform; the same path works on Linux,
+FreeBSD, and macOS. Library frames (libc, libpthread, etc.) fall back
+to `dladdr` for symbol-only resolution:
 
 ```rust
 fn{#no_inline} probe() [atom] = return stacktrace()
@@ -446,22 +450,31 @@ Atom format degrades gracefully when debug info is unavailable:
 
 | Resolution available           | Atom shape                                       |
 |--------------------------------|--------------------------------------------------|
-| symbol + libdwfl line          | `'"sym@file:line:col"`                           |
+| symbol + pclntab line          | `'"sym@file:line:col"`                           |
 | line only (no symbol)          | `'"file:line:col"`                               |
 | symbol only (lib frame)        | `'"libname.so:sym+0x<offset>"`                   |
 | symbol only (main binary)      | `'"sym+0x<offset>"`                              |
 | neither                        | `'"??+0x<addr>"`                                 |
 
 Reachability gating: the compiler scans the AST for `stacktrace()` and
-only links libunwind/libdw and emits unwind tables (`-funwind-tables`,
-`-gline-tables-only`, `-rdynamic`) when at least one call is reachable.
-Programs that never reference `stacktrace()` pay zero binary-size or
-link-time cost.
+only emits the `__tin_pclntab` section and unwind tables
+(`-funwind-tables`, `-rdynamic`, `-fno-omit-frame-pointer`) when at
+least one call is reachable. Programs that never reference
+`stacktrace()` pay zero binary-size or link-time cost.
 
-> **Linker requirement:** `-lunwind` (LLVM libunwind) on every Linux
-> binary that uses `stacktrace()`; `-ldw` (elfutils) for the
-> file:line:col upgrade. macOS auto-links libunwind via libSystem and
-> has no elfutils, so frames degrade to `sym+0x<offset>` form.
+> **No external library dependency.** `file:line:col` resolution
+> comes from the in-binary `__tin_pclntab` section the compiler
+> emits; no elfutils / libdw / libdwfl link is required on any
+> platform. Library frames (libc, libpthread, etc.) still rely on
+> `dladdr` for symbol-only resolution.
+
+> **Frame-pointer requirement:** the walker follows the saved-fp
+> chain, so any C compilation unit reachable from a Tin trace must be
+> built with `-fno-omit-frame-pointer`. Tin codegen tags every IR
+> function with `frame-pointer="all"` and the runtime sets the C flag
+> on its own translation units; only third-party C reached via
+> `#interop` callbacks is at risk. A frame whose caller omitted fp
+> truncates the trace at that point.
 
 ---
 

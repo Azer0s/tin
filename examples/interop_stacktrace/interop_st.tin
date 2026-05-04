@@ -1,0 +1,44 @@
+// Tin functions exposed via #interop, used by harness.c to verify
+// that stacktrace() walks correctly across the C / Tin boundary in
+// both directions:
+//
+//   1. C -> Tin: harness main() calls print_st_direct(); stacktrace()
+//      runs from inside Tin and prints the resolved frames. The trace
+//      must include the Tin frame; the surrounding C frames are
+//      included only when the harness is built with
+//      -fno-omit-frame-pointer (see run.sh).
+//
+//   2. Tin -> C -> Tin: harness main() calls run_nested(), which
+//      calls back through c_call_back -> print_st_nested. The
+//      captured trace shows the full path: print_st_nested at top,
+//      then c_call_back, then run_nested below.
+//
+// Each Tin entry tags its output with a stable prefix so run.sh can
+// grep deterministically without coupling to the exact frame layout.
+use io
+
+fn c_call_back() void = extern("c_call_back")
+
+fn{#interop} print_st_direct() void =
+  let frames = stacktrace()
+  let _ = io::printf("DIRECT_FRAMES=%lld\n", len(frames))
+  for let f atom in frames:
+    let _ = io::printf("DIRECT: %s\n", f as string)
+  return
+
+fn{#interop} print_st_nested() void =
+  let frames = stacktrace()
+  let _ = io::printf("NESTED_FRAMES=%lld\n", len(frames))
+  for let f atom in frames:
+    let _ = io::printf("NESTED: %s\n", f as string)
+  return
+
+// run_nested invokes the C callback then returns through Tin land.
+// The trailing printf prevents LLVM from tail-calling c_call_back -
+// without it the run_nested frame is torn down before c_call_back
+// runs and the captured trace skips the Tin -> C -> Tin layer this
+// scenario is supposed to demonstrate.
+fn{#interop} run_nested() void =
+  c_call_back()
+  let _ = io::printf("TIN: run_nested returning\n")
+  return

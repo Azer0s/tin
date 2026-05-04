@@ -19,7 +19,7 @@ notok() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; fail=$((fail+1
 run_run() {
   # run_run NAME EXPECT_KIND EXPECT_SUBSTR FLAGS SRC
   local name=$1 kind=$2 want=$3 flag=$4 src=$5
-  local tmp=$(mktemp --suffix=.tin)
+  local tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
 
   local out

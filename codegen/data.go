@@ -633,7 +633,7 @@ func (cg *CodeGen) ensureDataPtrReleaseFn(adtName string, st *irtypes.StructType
 	var switchCases []*ir.Case
 
 	for variantName, vi := range variants {
-		if !variantHasReleasableField(vi) {
+		if !cg.variantHasReleasableField(vi) {
 			continue
 		}
 
@@ -669,9 +669,17 @@ func (cg *CodeGen) ensureDataPtrReleaseFn(adtName string, st *irtypes.StructType
 }
 
 // variantHasReleasableField returns true if any of the variant's fields carry
-// an owning reference that needs release (RC-tracked type or owning pointer
-// to a registered struct/ADT).
-func variantHasReleasableField(vi *dataVariantInfo) bool {
+// an owning reference that needs release (RC-tracked type, owning pointer
+// to a registered struct/ADT, or embedded named struct that itself has
+// RC-tracked fields).
+//
+// The embedded-struct branch is what catches `Result.Ok(event_with_time)`
+// where event_with_time is `struct { name string ... }`: the variant's
+// payload field is the struct by value, not a pointer, so the
+// pointer-to-struct branch above doesn't fire. Without this check the
+// match scrutinee for `match parse(...): Ok(ev) -> ...` is judged
+// "no owning fields" and the inner string leaks at scope exit.
+func (cg *CodeGen) variantHasReleasableField(vi *dataVariantInfo) bool {
 	for i, f := range vi.Fields {
 		if f.IsWeak {
 			continue
@@ -687,13 +695,21 @@ func variantHasReleasableField(vi *dataVariantInfo) bool {
 				return true
 			}
 		}
+
+		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+			if cg.elemNeedsRelease(t) {
+				return true
+			}
+		}
 	}
 
 	return false
 }
 
 // fieldNeedsOwningRelease returns true when a payload field type represents an
-// owning reference (RC-tracked fat type or pointer to a named struct).
+// owning reference (RC-tracked fat type, pointer to a named struct, or
+// an embedded named struct with RC fields). See variantHasReleasableField
+// for the embedded-struct rationale.
 func (cg *CodeGen) fieldNeedsOwningRelease(t irtypes.Type) bool {
 	if isRCTrackedType(t) {
 		return true
@@ -701,6 +717,12 @@ func (cg *CodeGen) fieldNeedsOwningRelease(t irtypes.Type) bool {
 
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+			return true
+		}
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+		if cg.elemNeedsRelease(t) {
 			return true
 		}
 	}
@@ -776,7 +798,7 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 	any := false
 
 	for _, vi := range variants {
-		if variantHasReleasableField(vi) {
+		if cg.variantHasReleasableField(vi) {
 			any = true
 
 			break
@@ -810,7 +832,7 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 	var switchCases []*ir.Case
 
 	for variantName, vi := range variants {
-		if !variantHasReleasableField(vi) {
+		if !cg.variantHasReleasableField(vi) {
 			continue
 		}
 

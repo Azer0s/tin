@@ -304,10 +304,28 @@ func (cg *CodeGen) resolveOverload(variants []*overloadEntry, argVals []value.Va
 			return v
 		}
 	}
-	// Pass 2: arity-only match.
-	for _, v := range variants {
-		if v.arity == len(argVals) {
-			return v
+	// Pass 2: arity-only fallback. Used only when the caller provided
+	// no resolved arg types (every entry in argTypes is nil), as can
+	// happen for nested generics during early-resolution passes. With
+	// any concrete arg type known, falling through here would silently
+	// pick a variant whose param type doesn't match, producing wrong
+	// results (e.g. `add(1.0, 2.0)` calling an `add(i64, i64)` overload
+	// after f64->i64 truncation). Force the user to disambiguate.
+	allArgsUnknown := true
+
+	for _, t := range argTypes {
+		if t != nil {
+			allArgsUnknown = false
+
+			break
+		}
+	}
+
+	if allArgsUnknown {
+		for _, v := range variants {
+			if v.arity == len(argVals) {
+				return v
+			}
 		}
 	}
 

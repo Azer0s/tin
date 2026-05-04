@@ -25,7 +25,7 @@ struct Unit =
 struct Future[t](Awaitable[t]) =
   pid i64
 
-  static fn make(pid i64) Future[t] =
+  static fn new(pid i64) Future[t] =
     return Future[t]{pid: pid}
 
   fn pid_val(this Future[t]) i64 =

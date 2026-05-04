@@ -598,7 +598,7 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 		walkAST(v.Expr, visit)
 	// Top-level decls whose initializers can contain expression trees.
 	// MacroDecl bodies need walking so detectStacktraceUsage finds
-	// stacktrace() calls referenced ONLY through a macro body — without
+	// stacktrace() calls referenced ONLY through a macro body - without
 	// this the gate stays off, linkage stays internal, and every Tin
 	// frame in the eventual trace renders as ??+0x<addr>.
 	case *ast.MacroDecl:

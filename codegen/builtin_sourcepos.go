@@ -13,7 +13,7 @@ package codegen
 //                         place where it appears in the program)
 //
 // The result is interned exactly the same way an `:atom` literal would
-// be — registerAtom + atomConstant — so a `sourcepos(...)` value is a
+// be - registerAtom + atomConstant - so a `sourcepos(...)` value is a
 // regular atom you can compare, store, format, or pass around.
 //
 // File component: the compiler does not currently track per-node source
@@ -42,7 +42,7 @@ import (
 // literal (atoms with non-identifier chars MUST use the quoted form)
 // AND does not interpret escape sequences inside, so we wrap by raw
 // concatenation rather than fmt's %q (which would escape backslashes
-// and quotes — making round-trip equality with hand-written atom
+// and quotes - making round-trip equality with hand-written atom
 // literals fail on paths containing those chars, e.g. on Windows).
 func (cg *CodeGen) genBuiltinSourcepos(_ *ir.Block, arg ast.Node, callPos ast.Pos) (value.Value, error) {
 	pos := cg.resolveSourcePos(arg, callPos)
@@ -60,7 +60,7 @@ func (cg *CodeGen) genBuiltinSourcepos(_ *ir.Block, arg ast.Node, callPos ast.Po
 	// IR-name vs user-name policy: the containing-fn arm uses
 	// cg.curFn.Name() which is the IR-mangled symbol (e.g.
 	// `_tin_user_main`, `pkg__fn`, `name__sig` for overloads). This is
-	// INTENTIONAL — runtime stacktrace() also reports IR-mangled names
+	// INTENTIONAL - runtime stacktrace() also reports IR-mangled names
 	// (because dladdr/libunwind look them up by ELF symbol), so a
 	// `sourcepos(...)` atom captured at compile time string-matches
 	// the runtime trace's frame for the same call site. Demangling
@@ -97,7 +97,7 @@ func (cg *CodeGen) resolveSourcePos(arg ast.Node, callPos ast.Pos) ast.Pos {
 			return pos
 		}
 
-		// Identifier we couldn't resolve to a known decl — fall through
+		// Identifier we couldn't resolve to a known decl - fall through
 		// to the identifier's own pos rather than callPos so the user
 		// at least sees the use site.
 		return id.Pos()
@@ -119,11 +119,11 @@ func (cg *CodeGen) resolveSourcePos(arg ast.Node, callPos ast.Pos) ast.Pos {
 // param/for-iter) takes precedence over a top-level fn of the same
 // name, and a top-level fn takes precedence over a top-level var.
 // Without that ordering, sourcepos on a name shadowed by an inner let
-// would resolve to the outer fn's decl line — wrong by language
+// would resolve to the outer fn's decl line - wrong by language
 // semantics, since the user's `name` at the call site refers to the
 // inner binding.
 func (cg *CodeGen) lookupSymbolPos(name string) (ast.Pos, bool) {
-	// 1. lexical scope chain first — locals and parameters that recorded
+	// 1. lexical scope chain first - locals and parameters that recorded
 	//    their binding position win over module-level decls of the same
 	//    name, mirroring the resolution path for ordinary identifiers.
 	if cg.curScope != nil {

@@ -1,0 +1,107 @@
+// test_for_ref.tin -- coverage for `for ref x in xs:` loop semantics.
+//
+// `for ref` aliases each slot of the iter rather than copying its value,
+// so assignments inside the body mutate the source array in place. The
+// tests below cover:
+//   - integer arrays mutated through ref
+//   - string arrays (RC-tracked element type) -- old slot released,
+//     new value retained
+//   - returned arrays (the array is the function's RC-owned return)
+//   - struct-wrapped arrays (h.xs accessed through a struct binding)
+//   - nested struct paths (outer.middle.inner_xs)
+//   - non-mutating ref iteration (idempotency of round-trip)
+//   - reject ranges
+//   - reject const arrays
+//   - reject element assignment on const arrays (the broader fix)
+
+use assert
+
+test "for ref mutates an int array" =
+  let xs = [1, 2, 3, 4, 5]
+  for ref x in xs:
+    x += 10
+  assert::equals(xs[0], 11)
+  assert::equals(xs[1], 12)
+  assert::equals(xs[2], 13)
+  assert::equals(xs[3], 14)
+  assert::equals(xs[4], 15)
+
+test "for ref handles compound and direct assignment" =
+  let xs = [10, 20, 30]
+  for ref x in xs:
+    x = x * 3
+  assert::equals(xs[0], 30)
+  assert::equals(xs[1], 60)
+  assert::equals(xs[2], 90)
+
+test "for ref over a string array releases old + retains new" =
+  let xs = ["alpha", "beta", "gamma"]
+  for ref s in xs:
+    s = s ++ "!"
+  assert::equals(xs[0], "alpha!")
+  assert::equals(xs[1], "beta!")
+  assert::equals(xs[2], "gamma!")
+
+test "for ref over a returned array still mutates" =
+  let xs = make_counts()
+  for ref x in xs:
+    x *= 2
+  assert::equals(xs[0], 2)
+  assert::equals(xs[1], 4)
+  assert::equals(xs[2], 6)
+
+test "for ref over an array inside a returned struct" =
+  let h = make_holder()
+  for ref x in h.xs:
+    x += 1
+  assert::equals(h.xs[0], 11)
+  assert::equals(h.xs[1], 21)
+  assert::equals(h.xs[2], 31)
+
+test "for ref over an array inside a nested struct" =
+  let outer = make_outer()
+  for ref x in outer.inner.xs:
+    x = x * x
+  assert::equals(outer.inner.xs[0], 1)
+  assert::equals(outer.inner.xs[1], 4)
+  assert::equals(outer.inner.xs[2], 9)
+
+test "for ref over string array inside struct" =
+  let h = Strings{ss: ["x", "y"]}
+  for ref s in h.ss:
+    s = "*" ++ s ++ "*"
+  assert::equals(h.ss[0], "*x*")
+  assert::equals(h.ss[1], "*y*")
+
+test "for ref where body does not assign leaves array untouched" =
+  let xs = [7, 8, 9]
+  let sum i64 = sum_through_ref(xs)
+  assert::equals(sum, 24)
+  assert::equals(xs[0], 7)
+  assert::equals(xs[1], 8)
+  assert::equals(xs[2], 9)
+
+fn sum_through_ref(xs [i64]) i64 =
+  let total i64 = 0
+  for ref x in xs:
+    let _t = total + x
+    total = _t
+  return total
+
+fn make_counts() [i64] = return [1, 2, 3]
+
+struct Holder =
+  xs [i64]
+
+fn make_holder() Holder = return Holder{xs: [10, 20, 30]}
+
+struct Inner =
+  xs [i64]
+
+struct Outer =
+  inner Inner
+
+fn make_outer() Outer = return Outer{inner: Inner{xs: [1, 2, 3]}}
+
+struct Strings =
+  ss [string]

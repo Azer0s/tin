@@ -2,7 +2,6 @@ package codegen
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -21,6 +20,16 @@ func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value,
 
 	if val == nil {
 		return nil, nil
+	}
+
+	// genExpr may have advanced cg.curBlock through short-circuit && / ||.
+	// The unary op (xor, fneg, sub, load) consumes `val` (often a phi
+	// rooted in a merge block) and must be emitted there, not in the
+	// stale input block. Without this `!(a || b)` lowers to an `xor`
+	// in `entry` that uses a phi defined later in the merge -- invalid
+	// SSA: "Instruction does not dominate all uses".
+	if cg.curBlock != nil {
+		block = cg.curBlock
 	}
 
 	// Operator overloading dispatch (Phase 3): if the operand is a user
@@ -364,15 +373,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
-			return nil, cg.nodeErr(e, "undefined function: %s", fn.Name)
+			return nil, cg.nodeErr(fn, "undefined function: %s", fn.Name)
 		}
 		// Warn when a {#blocking} extern is called inside an {#async} function.
 		if cg.curCoroHdl != nil {
 			if origDecl, found := cg.funcDecls[fn.Name]; found {
 				if origDecl.IsExtern != "" && hasTag(origDecl.Tags, "blocking") {
-					_, _ = fmt.Fprintf(os.Stderr,
-						"warning: calling blocking extern %q inside an {#async} function; "+
-							"use async_read/async_write instead\n", fn.Name)
+					cg.warn("blocking-in-async", e.Pos(),
+						"calling blocking extern %q inside an {#async} function; use async_read/async_write instead",
+						fn.Name)
 				}
 			}
 		}
@@ -399,23 +408,31 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			baseStaticName := staticName // preserved for error messages before typeArgStr overwrites staticName
 			// Also try the concrete monomorphized key when a type arg is present.
 			if typeArgStr != "" {
-				// typeArgStr may be comma-separated for multi-param generics (e.g. "string,i64").
-				// Build the canonical concrete name by joining parts with __.
-				typeArgParts := strings.Split(typeArgStr, ",")
+				// Each part can itself be a nested generic, a pointer/array,
+				// a qualified name, or a type alias. Parse via the same
+				// type-key string parser the canonical machinery uses, then
+				// run typeExprCanonicalKey to resolve aliases (so e.g.
+				// `type Ptr = *i64; Atomic[Ptr].new(...)` instantiates as
+				// `Atomic__*i64`, the same struct `Atomic[*i64].new(...)`
+				// would). splitTopLevelTypeArgs respects bracket depth so
+				// inner commas (`HashMap[K, List[i64]]`) don't split wrong.
+				typeArgTEs := splitTopLevelTypeArgs(typeArgStr)
+				resolvedParts := make([]string, len(typeArgTEs))
 
-				concreteName := staticName + "__" + strings.Join(typeArgParts, "__")
+				for i, te := range typeArgTEs {
+					resolvedParts[i] = cg.typeExprCanonicalKey(te)
+				}
+
+				concreteName := staticName + "__" + strings.Join(resolvedParts, "__")
 				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
 					if _, isGeneric := cg.genericStructsByArity[staticName]; isGeneric {
-						typeParams := make([]ast.TypeExpr, len(typeArgParts))
-						for i, p := range typeArgParts {
-							typeParams[i] = parseTypeParamStr(strings.TrimSpace(p))
-						}
-
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
-							Type: &ast.GenericType{Name: staticName, TypeParams: typeParams},
+							Type: &ast.GenericType{Name: staticName, TypeParams: typeArgTEs},
 						}
-						_ = cg.genTypeDecl(synthDecl)
+						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
+							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+						}
 					}
 				}
 
@@ -465,11 +482,26 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					ovCallee = oEntry.val
 				}
 
+				preCoerceVals := append([]value.Value(nil), llArgs...)
 				if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 					llArgs = cg.adaptArgs(block, llArgs, f2.Sig)
 				}
 
-				return block.NewCall(ovCallee, llArgs...), nil
+				result := block.NewCall(ovCallee, llArgs...)
+
+				for i, astArg := range e.Args {
+					if i >= len(preCoerceVals) || i >= len(llArgs) {
+						break
+					}
+
+					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+				}
+
+				if irtypes.IsVoid(result.Type()) {
+					return nil, nil
+				}
+
+				return result, nil
 			}
 
 			if entry, ok := cg.curScope.lookup(methodKey); ok {
@@ -488,9 +520,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 
+					preCoerceVals := append([]value.Value(nil), llArgs...)
 					llArgs = cg.adaptArgs(block, llArgs, f.Sig)
 
-					return block.NewCall(f, llArgs...), nil
+					result := block.NewCall(f, llArgs...)
+
+					for i, astArg := range e.Args {
+						if i >= len(preCoerceVals) || i >= len(llArgs) {
+							break
+						}
+
+						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+					}
+
+					if irtypes.IsVoid(result.Type()) {
+						return nil, nil
+					}
+
+					return result, nil
 				}
 			}
 		}
@@ -510,14 +557,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		// Trait fat-pointer dispatch: if obj is {i8*, vtable*}, use vtable.
 		if traitName, ok := cg.isTraitFatPtr(objVal.Type()); ok {
-			return cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
+			result, err := cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
+			if err != nil {
+				return nil, cg.nodeErr(e, "%v", err)
+			}
+
+			return result, nil
 		}
 		// Auto-deref: *TraitFatPtr -> load the fat pointer and dispatch through vtable.
 		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
 			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
 				loaded := block.NewLoad(pt.ElemType, objVal)
 
-				return cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+				result, err := cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
+				if err != nil {
+					return nil, cg.nodeErr(e, "%v", err)
+				}
+
+				return result, nil
 			}
 		}
 
@@ -852,6 +909,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
+		if witnesses, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
+			return nil, cg.nodeErr(e, "%s.%s %s",
+				prettyStructName(structName), fn.Field, formatStripWitnesses(witnesses))
+		}
+
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
 			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
 		}
@@ -891,7 +953,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		// Static method call on a generic struct: Type[K,V]::method(args) or
 		// pkg::Type[K,V]::method(args).  The ScopeAccess path looks like
-		// ["collections::HashMap[string,string]", "new"].
+		// ["collections::HashMap[string,string]", "make"].
 		// Resolve the concrete name and apply overload resolution when needed.
 		if len(fn.Path) >= 2 {
 			methodField := fn.Path[len(fn.Path)-1]
@@ -914,28 +976,28 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			if typeParamStr != "" {
 				if _, isGeneric := cg.genericStructsByArity[bareBaseName]; isGeneric {
-					rawParts := strings.Split(typeParamStr, ",")
+					// Each piece of typeParamStr can be a nested generic
+					// (`*rc::Cell[i64]`), a type alias, or a qualified
+					// name. Parse to a TypeExpr first so the canonical-
+					// key step handles all shapes (alias chains, pointers,
+					// packages) uniformly.
+					rawParts := splitTopLevelTypeArgs(typeParamStr)
 					resolvedParts := make([]string, len(rawParts))
 					resolvedTEs := make([]ast.TypeExpr, len(rawParts))
 
-					for i, raw := range rawParts {
-						raw = strings.TrimSpace(raw)
-						if alias, ok2 := cg.typeAliases[raw]; ok2 {
-							if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-								raw = simple.Name
-							}
-						}
-
-						resolvedParts[i] = raw
-						resolvedTEs[i] = parseTypeParamStr(raw)
+					for i, te := range rawParts {
+						resolvedParts[i] = cg.typeExprCanonicalKey(te)
+						resolvedTEs[i] = te
 					}
 
 					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
 					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-						_ = cg.genTypeDecl(&ast.TypeDecl{
+						if mErr := cg.genTypeDecl(&ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
-						})
+						}); mErr != nil {
+							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+						}
 					}
 
 					concreteMethodKey := concreteName + "_" + methodField
@@ -974,11 +1036,28 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							ovCallee = oEntry.val
 						}
 
+						preCoerceVals := append([]value.Value(nil), olArgs...)
 						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 							olArgs = cg.adaptArgs(block, olArgs, f2.Sig)
 						}
 
-						return block.NewCall(ovCallee, olArgs...), nil
+						result := block.NewCall(ovCallee, olArgs...)
+						// ARC: release temporary RC-tracked arguments (boxed-to-any temps,
+						// fresh string concats, etc.) so generic static methods don't leak
+						// the values their callers passed in. Mirrors the other call paths.
+						for i, astArg := range e.Args {
+							if i >= len(preCoerceVals) || i >= len(olArgs) {
+								break
+							}
+
+							cg.emitCallArgRelease(block, astArg, preCoerceVals[i], olArgs[i])
+						}
+
+						if irtypes.IsVoid(result.Type()) {
+							return nil, nil
+						}
+
+						return result, nil
 					}
 				}
 			}
@@ -1336,7 +1415,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", pt.ElemType)
 		}
 	} else {
-		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", callee.Type())
+		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", fmtArgType(callee.Type()))
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
@@ -1356,12 +1435,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
+		// Anchor the diagnostic on the function name (e.Func) so the
+		// underline starts at the identifier, not the open-paren. Falls
+		// back to the call expression's position when Func has no Pos.
+		anchor := ast.Node(e)
+		if e.Func != nil && e.Func.Pos().Line > 0 {
+			anchor = e.Func
+		}
+
+		endCol := cg.sourceLineEndCol(anchor.Pos().Line)
 		if calleeName != "" {
-			return nil, cg.nodeErr(e, "wrong number of arguments to %q: got %d, want %d",
+			return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments to %q: got %d, want %d",
 				calleeName, len(llArgs), len(calleeType.Params))
 		}
 
-		return nil, cg.nodeErr(e, "wrong number of arguments: got %d, want %d",
+		return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments: got %d, want %d",
 			len(llArgs), len(calleeType.Params))
 	}
 
@@ -1399,8 +1487,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				if !srcEl.Equal(tgtEl) && !srcEl.Equal(irtypes.I8) {
 					return nil, cg.nodeErr(e,
-						"argument %d: cannot pass [%s] where [%s] is expected; use `arg as [%s]` to convert",
-						i+1, fmtArgType(srcEl), fmtArgType(tgtEl), fmtArgType(tgtEl))
+						"argument %d: cannot pass [%s] where [%s] is expected; use %q to convert",
+						i+1, fmtArgType(srcEl), fmtArgType(tgtEl),
+						"arg as ["+fmtArgType(tgtEl)+"]")
 				}
 
 				continue

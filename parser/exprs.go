@@ -97,14 +97,17 @@ func (p *Parser) parseRange() (ast.Node, error) {
 	}
 
 	if p.check(lexer.RANGE) {
-		p.advance()
+		opTok := p.advance()
 
 		right, err2 := p.parseTernary()
 		if err2 != nil {
 			return nil, err2
 		}
 
-		return &ast.BinExpr{Left: left, Op: "..", Right: right}, nil
+		be := &ast.BinExpr{Left: left, Op: "..", Right: right}
+		be.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+
+		return be, nil
 	}
 
 	return left, nil
@@ -242,14 +245,17 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 			break
 		}
 
-		op := p.advance().Literal
+		opTok := p.advance()
+		op := opTok.Literal
 
 		right, err2 := p.parseMultiplicative()
 		if err2 != nil {
 			return nil, err2
 		}
 
-		left = &ast.BinExpr{Left: left, Op: op, Right: right}
+		be := &ast.BinExpr{Left: left, Op: op, Right: right}
+		be.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+		left = be
 	}
 	// Consume matching DEDENT(s) for any INDENT consumed during additive continuation.
 	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
@@ -348,6 +354,7 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 	}
 	// Dereference: *expr
 	if p.check(lexer.STAR) {
+		pos := p.curPos()
 		p.advance()
 
 		expr, err := p.parsePointerOperand()
@@ -355,10 +362,14 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 			return nil, err
 		}
 
-		return p.applyPostfixCasts(&ast.DerefExpr{Expr: expr})
+		d := &ast.DerefExpr{Expr: expr}
+		d.SetPos(pos)
+
+		return p.applyPostfixCasts(d)
 	}
 	// Address-of: &expr
 	if p.check(lexer.AMP) {
+		pos := p.curPos()
 		p.advance()
 
 		expr, err := p.parsePointerOperand()
@@ -366,7 +377,10 @@ func (p *Parser) parseUnary() (ast.Node, error) {
 			return nil, err
 		}
 
-		return p.applyPostfixCasts(&ast.AddressOfExpr{Expr: expr})
+		a := &ast.AddressOfExpr{Expr: expr}
+		a.SetPos(pos)
+
+		return p.applyPostfixCasts(a)
 	}
 
 	return p.parsePostfix()
@@ -712,8 +726,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					expr = sa
 				}
 			} else if idx, ok2 := expr.(*ast.IndexExpr); ok2 {
-				// e.g. result[u32]::ok(42) or pkg::Type[T,U]::method()
-				// - static method call on a generic type, with optional package qualifier.
+				// e.g. result[u32]::ok(42), pkg::Type[T,U]::method(),
+				// or G[G[i64]].make(...) where the type arg is itself a
+				// generic instantiation (nested IndexExpr).
 				var typeName string
 
 				switch inner := idx.Expr.(type) {
@@ -724,8 +739,9 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 				}
 
 				if typeName != "" {
-					if typeArgID, ok4 := idx.Index.(*ast.Identifier); ok4 {
-						typeName = typeName + "[" + typeArgID.Name + "]"
+					argStr := typeNodeToString(idx.Index)
+					if argStr != "" {
+						typeName = typeName + "[" + argStr + "]"
 					}
 
 					sa := ast.NewScopeAccess([]string{typeName, field.Literal}, field.Line, field.Col)
@@ -1070,8 +1086,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 			return parseIntLitToken(next.Literal), nil
 		default:
-			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
-				next.Line, next.Literal)
+			return nil, p.errAtTok(next, "'@' must be followed by a char or integer literal, got %q", next.Literal)
 		}
 
 	case lexer.BOOL_LIT:
@@ -1416,7 +1431,11 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.LBRACKET:
 		return p.parseArrayLit()
 
-	case lexer.IDENT:
+	case lexer.IDENT, lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		// KW_FORWARD / KW_OVERRIDE are *contextual* keywords -- they
+		// only have meaning inside struct field declarations. Accept
+		// them as plain identifiers in expression position so calls
+		// like `forward(p)` and types named `override` work.
 		tok := p.advance()
 		name := tok.Literal
 		// struct literal: name{...}
@@ -1482,8 +1501,61 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			return ast.NewIdent(tok.Literal, tok.Line, tok.Col), nil
 		}
 
-		return nil, p.errorf("unexpected token %s (%q)", tok.Type, tok.Literal)
+		return nil, p.errorf("unexpected token %s here; %s", describeToken(tok), suggestForToken(tok))
 	}
+}
+
+// describeToken renders a token for diagnostics: keyword tokens use
+// their source spelling ("var", "switch"), punctuation uses the
+// literal symbol, and structural tokens get a friendly name.
+func describeToken(tok lexer.Token) string {
+	switch tok.Type {
+	case lexer.NEWLINE:
+		return "end of line"
+	case lexer.INDENT:
+		return "an indented block"
+	case lexer.DEDENT:
+		return "a dedent"
+	case lexer.EOF:
+		return "end of file"
+	case lexer.IDENT:
+		return fmt.Sprintf("identifier %q", tok.Literal)
+	}
+
+	if tok.Literal != "" {
+		return fmt.Sprintf("%q", tok.Literal)
+	}
+
+	return tok.Type.String()
+}
+
+// suggestForToken produces a one-line tip pointing the user at the
+// likely typo or alternative when a token shows up in an unexpected
+// position. Returns "expected an expression" as a generic fallback.
+func suggestForToken(tok lexer.Token) string {
+	switch tok.Literal {
+	case "switch":
+		return "did you mean `match`?"
+	case "elif", "elseif":
+		return "use `else if` instead"
+	case "while":
+		return "use `for cond:` for a conditional loop"
+	case "func", "function", "def":
+		return "use `fn`"
+	}
+
+	switch tok.Type {
+	case lexer.COMMA:
+		return "trailing comma not allowed here"
+	case lexer.INDENT:
+		return "unexpected indentation; the previous line probably needs a `:` or this block is mis-aligned"
+	case lexer.DEDENT:
+		return "the block ended sooner than expected"
+	case lexer.NEWLINE:
+		return "expected the rest of an expression on this line"
+	}
+
+	return "expected an expression"
 }
 
 func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
@@ -1601,10 +1673,12 @@ func (p *Parser) indexExprTypeName(idx *ast.IndexExpr) (string, bool) {
 }
 
 // indexExprTypeArgs converts the Index of an IndexExpr (which encodes type
-// args as a comma-separated Identifier string) into a []ast.TypeExpr slice.
+// args as a comma-separated Identifier string for the simple case, or as a
+// nested IndexExpr / ScopeAccess for nested generics) into a []ast.TypeExpr.
 func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
-	if argID, ok := idx.Index.(*ast.Identifier); ok {
-		parts := strings.Split(argID.Name, ",")
+	switch ix := idx.Index.(type) {
+	case *ast.Identifier:
+		parts := strings.Split(ix.Name, ",")
 		result := make([]ast.TypeExpr, 0, len(parts))
 
 		for _, part := range parts {
@@ -1614,14 +1688,93 @@ func (p *Parser) indexExprTypeArgs(idx *ast.IndexExpr) []ast.TypeExpr {
 		return result
 	}
 
+	// Single non-Identifier type arg: convert via the generic node->type-expr
+	// path (covers nested IndexExpr like `G[i64]` and qualified names).
+	if te := typeNodeToTypeExpr(idx.Index); te != nil {
+		return []ast.TypeExpr{te}
+	}
+
+	return nil
+}
+
+// typeNodeToString converts an AST node that names a type (Identifier,
+// ScopeAccess, IndexExpr) into its source-level string. Nested generics
+// like `G[i64]` round-trip as `G[i64]`. Returns "" if the node isn't a
+// recognized type-naming shape.
+func typeNodeToString(n ast.Node) string {
+	switch v := n.(type) {
+	case *ast.Identifier:
+		return v.Name
+	case *ast.ScopeAccess:
+		return strings.Join(v.Path, "::")
+	case *ast.IndexExpr:
+		base := typeNodeToString(v.Expr)
+		if base == "" {
+			return ""
+		}
+
+		argStr := typeNodeToString(v.Index)
+		if argStr == "" {
+			return ""
+		}
+
+		return base + "[" + argStr + "]"
+	}
+
+	return ""
+}
+
+// typeNodeToTypeExpr lifts a type-shaped AST node (as parsed in expression
+// position) into a TypeExpr. Mirrors typeNodeToString but produces the
+// structured type rather than its source form.
+func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
+	switch v := n.(type) {
+	case *ast.Identifier:
+		return &ast.SimpleType{Name: v.Name}
+	case *ast.ScopeAccess:
+		return &ast.SimpleType{Name: strings.Join(v.Path, "::")}
+	case *ast.IndexExpr:
+		baseName := ""
+
+		switch be := v.Expr.(type) {
+		case *ast.Identifier:
+			baseName = be.Name
+		case *ast.ScopeAccess:
+			baseName = strings.Join(be.Path, "::")
+		}
+
+		if baseName == "" {
+			return nil
+		}
+
+		params := []ast.TypeExpr{}
+		// Multi-arg encoding: comma-joined identifier.
+		if argID, ok := v.Index.(*ast.Identifier); ok && strings.Contains(argID.Name, ",") {
+			for _, part := range strings.Split(argID.Name, ",") {
+				params = append(params, &ast.SimpleType{Name: strings.TrimSpace(part)})
+			}
+		} else {
+			inner := typeNodeToTypeExpr(v.Index)
+			if inner == nil {
+				return nil
+			}
+
+			params = append(params, inner)
+		}
+
+		return &ast.GenericType{Name: baseName, TypeParams: params}
+	}
+
 	return nil
 }
 
 func (p *Parser) parseStructLit(typeName string) (ast.Node, error) {
+	pos := p.curPos()
 	p.advance() // consume {
 	p.skipWhitespace()
 
 	lit := &ast.StructLit{TypeName: typeName}
+	lit.SetPos(pos)
 
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		// Named: "name: value" or positional: "value"

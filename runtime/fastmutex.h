@@ -10,14 +10,14 @@
 //   2  - LOCKED, at least one waiter in the embedded array or overflow list
 //
 // Fast paths (uncontended, common case):
-//   lock:   CAS(0→1)  - single atomic op, no OS call, no wl_lock
-//   unlock: CAS(1→0)  - single atomic op, no OS call, no wl_lock
+//   lock:   CAS(0->1)  - single atomic op, no OS call, no wl_lock
+//   unlock: CAS(1->0)  - single atomic op, no OS call, no wl_lock
 //
 // Slow paths (contended, rare):
 //   lock:   brief spin, then add {pid,hdl} to embedded waiter array or, if
-//           that is full, push to the overflow linked list; CAS(1→2);
+//           that is full, push to the overflow linked list; CAS(1->2);
 //           call _tin_fiber_park, return 0 (caller yields)
-//   unlock: CAS(1→0) fails because state==2; acquire wl_lock, pop one
+//   unlock: CAS(1->0) fails because state==2; acquire wl_lock, pop one
 //           waiter (embedded array first, then overflow list), update state,
 //           call _tin_fiber_unpark_hdl (runnext)
 //
@@ -66,7 +66,7 @@ typedef struct {
 // Zero-initialise a TinFastMutex (equivalent to = {0} but explicit).
 void tin_fmutex_init(TinFastMutex *m);
 
-// Attempt to acquire the lock with a single CAS (0→1).
+// Attempt to acquire the lock with a single CAS (0->1).
 // Returns 1 if locked, 0 if already held.
 static inline int tin_fmutex_trylock(TinFastMutex *m) {
     uint32_t expected = 0;
@@ -82,7 +82,7 @@ void _tin_fmutex_unlock_slow(TinFastMutex *m);
 
 // Acquire the lock for a coroutine context.
 //
-// Fast path (uncontended, state == 0): single inlined CAS(0→1).
+// Fast path (uncontended, state == 0): single inlined CAS(0->1).
 // Slow path (contended): brief spin, then register {pid,hdl} in the waiter
 //   array, atomically mark state = 2 ("has waiters"), call _tin_fiber_park,
 //   and return 0 so the caller can yield.
@@ -102,7 +102,7 @@ void tin_fmutex_lock_spin(TinFastMutex *m);
 
 // Release the lock.
 //
-// Fast path (state == 1, no waiters): single inlined CAS(1→0) - no wl_lock.
+// Fast path (state == 1, no waiters): single inlined CAS(1->0) - no wl_lock.
 // Slow path (state == 2, has waiters): pop one waiter under wl_lock, update
 //   state, then call _tin_fiber_unpark_hdl (runnext on worker threads).
 static inline void tin_fmutex_unlock(TinFastMutex *m) {

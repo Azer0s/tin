@@ -98,6 +98,23 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	f := cg.mod.NewFunc(name, retType, llParams...)
 	entry := f.NewBlock("entry")
 
+	// Record source file + display name so pclntab attributes lambda
+	// frames to the user's source file with a sensible synthetic name
+	// (e.g. `<lambda>@file:line:col` instead of `lambda.0+0x21`).
+	if cg.filename != "" {
+		if cg.fnSourceFiles == nil {
+			cg.fnSourceFiles = map[string]string{}
+		}
+
+		cg.fnSourceFiles[f.Name()] = cg.filename
+	}
+
+	if cg.fnDisplayNames == nil {
+		cg.fnDisplayNames = map[string]string{}
+	}
+
+	cg.fnDisplayNames[f.Name()] = "<lambda>"
+
 	prevCtx := cg.pushClosureCtx(f)
 
 	// Step 4: unpack captures from env inside the lambda body.
@@ -605,9 +622,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }
 
-// --------------------------------------------------------------------------
 // Fiber expression helpers
-// --------------------------------------------------------------------------
 
 // canonicalUnitStructName returns the LLVM struct name for the sync Unit type.
 // After canonical naming, this is "sync__Unit" when sync was loaded from source.
@@ -661,9 +676,9 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 		}
 	}
 
-	// Call Future[T].make(pid) to construct the struct value properly
+	// Call Future[T].new(pid) to construct the struct value properly
 	// (sets type_id, vtable pointer, and pid field).
-	makeFnName := futureConcreteName + "_make"
+	makeFnName := futureConcreteName + "_new"
 
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {
@@ -671,7 +686,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 			return nil, fmt.Errorf("spawn: sync package failed to load: %w; ensure the tin executable is alongside the stdlib/ directory", cg.syncLoadErr)
 		}
 
-		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded; ensure the tin executable is alongside the stdlib/ directory, or add `use sync` explicitly before using spawn/await", retTypeStr)
+		return nil, fmt.Errorf("spawn: Future[%s] not available - sync package could not be loaded; ensure the tin executable is alongside the stdlib/ directory, or add \"use sync\" explicitly before using spawn/await", retTypeStr)
 	}
 
 	makeFn, ok := se.val.(*ir.Func)
@@ -928,7 +943,6 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	// Does NOT run the body; body starts on the first coro.resume call.
 	innerHdl := block.NewCall(coroFn, coroArgs...)
 
-	// ---------------------------------------------------------------
 	// Drive loop:
 	//   drive.loop:
 	//     _tin_inline_result_mode_begin()   ; arm TLS result buffer for inner coro
@@ -942,7 +956,6 @@ func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) 
 	//     result = _tin_coro_take_result()
 	//     llvm.coro.destroy(inner)
 	//     _tin_inline_result_mode_end()
-	// ---------------------------------------------------------------
 	// mode_begin is placed at the TOP of driveLoopBlk so it fires before EVERY
 	// coro.resume - including re-entries after the outer fiber was parked and
 	// resumed (at which point the worker loop reset _inline_result_mode to 0).
@@ -1083,10 +1096,7 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	// sizeof(T) and is_rc - compile-time constants.
 	elemSize := cg.llvmSizeOf(block, elemType)
 
-	isRCVal := constant.NewInt(irtypes.I32, 0)
-	if isRCTrackedType(elemType) {
-		isRCVal = constant.NewInt(irtypes.I32, 1)
-	}
+	isRCVal := constant.NewInt(irtypes.I32, int64(channelRCKindOf(elemType)))
 
 	// pid is constant for the lifetime of the fiber - hoist before the retry loop
 	// so the TLS lookup is not repeated on every iteration.
@@ -1503,7 +1513,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 
 				resolvedCalleeName = monoName
 				// Find the $coro variant in the module (generated as side effect).
-				for _, f := range cg.mod.Funcs {
+				for _, f := range cg.allFuncs() {
 					if f.Name() == coroName {
 						coroFn = f
 						cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})
@@ -1746,7 +1756,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	if structName == "" {
-		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", objVal.Type())
+		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", fmtArgType(objVal.Type()))
 	}
 
 	// Check if fa.Field is an async fat-fn-ptr struct field (not a method).
@@ -1916,7 +1926,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 		}
 	}
 
-	makeFnName := futureConcreteName + "_make"
+	makeFnName := futureConcreteName + "_new"
 
 	se, ok := cg.curScope.lookup(makeFnName)
 	if !ok {

@@ -33,6 +33,7 @@ use net
 use os
 use paths
 use rand
+use rc
 use reflect
 use regex
 use result
@@ -68,6 +69,7 @@ export {
     os,
     paths,
     rand,
+    rc,
     reflect,
     regex,
     result,

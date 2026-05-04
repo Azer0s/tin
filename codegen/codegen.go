@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -50,6 +51,10 @@ type CodeGen struct {
 	structFieldTinTypes map[string][]ast.TypeExpr
 	// generic struct templates: name -> arity -> AST node (not compiled directly)
 	genericStructsByArity map[string]map[int]*ast.StructDecl
+	// genericStructTmplFiles: source file each template was registered
+	// from. Used by monomorphization to inherit per-line `//!-Wno-`
+	// directives from the template's source file.
+	genericStructTmplFiles map[string]string
 
 	// trait vtable struct types: instKey -> LLVM struct type for vtable
 	// instKey = traitName for non-generic, "traitName_typeArg" for generic
@@ -102,6 +107,22 @@ type CodeGen struct {
 
 	// global string counter
 	strCount int
+
+	// suppressIfaceScopeRelease tells coerceToTrait to skip registering its
+	// heap-allocated iface data ptr for deferred scope-exit release. Used by
+	// call sites that handle the release directly (let-binding's
+	// ownsIfaceData path, genForIterTrait's loop-exit release, the
+	// trait init/deinit chain wrappers in genStructLit / emitReleaseInner)
+	// so the data ptr isn't released twice. Stack-discipline: callers must
+	// save the prior value, set true, call coerceToTrait, restore.
+	suppressIfaceScopeRelease bool
+	// stringPool memoizes content-hashed string globals per active
+	// module so the same literal in the same module reuses a single
+	// global. Cross-module dedup is handled by linkonce_odr at link
+	// time. Required for per-pkg compile: each pkg module needs its
+	// own copies of any string it references (private-linkage strings
+	// can't cross object boundaries).
+	stringPool map[*ir.Module]map[string]value.Value
 	// general-purpose block label counter
 	labelCount int
 
@@ -149,6 +170,29 @@ type CodeGen struct {
 	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
 	memsetFn *ir.Func
 
+	// structOwningRawPtrFields: struct key -> set of `*T` raw-pointer field
+	// names that have been observed receiving the address of an early-heap-
+	// promoted local. The struct's release helper cascades _tin_release
+	// through each such field on drop, balancing the heap allocation done
+	// when the local was promoted. Recording it per-struct (rather than
+	// globally on `*T` types) keeps borrow-style `*T` fields untouched.
+	structOwningRawPtrFields map[string]map[string]bool
+
+	// fnReturnsOwningIface: set of function names that return a *Trait fat
+	// ptr whose `data` field carries an escape-promoted heap block. Set
+	// inside buildPtrToTraitBorrow when the source is in escapingVars; read
+	// by genVarDecl so `let s = make()` flags the binding for cascade-
+	// release of both the iface heap block and its data field.
+	fnReturnsOwningIface map[string]bool
+
+	// fnsTouchingExtern: closure of functions that call an extern directly
+	// or transitively reach one through the call graph. Computed once after
+	// all functions are loaded, consulted by checkAllUnwrappedCResources to
+	// flag struct fields whose value passes through a Tin call which itself
+	// hits an extern (depth >1, beyond intra-struct dispatch). nil until
+	// the fixpoint runs.
+	fnsTouchingExtern map[string]bool
+
 	// structWeakFields: struct key -> set of field names declared as `weak`.
 	// Weak fields are non-owning: they do not retain/release their values.
 	structWeakFields map[string]map[string]bool
@@ -173,6 +217,38 @@ type CodeGen struct {
 	// For cLayoutStructs: the %S.native type is packed (wrapper stays unpacked).
 	// For regular structs: the full LLVM struct type is packed.
 	packedStructs map[string]bool
+
+	// noCopyStructs: struct names declared with the {#no_copy} tag. Value
+	// copies of these are rejected at compile time (let b = a, by-value
+	// param/return, struct-lit field of value type). Holding *S is fine --
+	// pointer copies just retain the cell.
+	noCopyStructs map[string]bool
+
+	// closedStructs: struct names declared with the {#closed} tag. Their
+	// struct literal `S{...}` may only appear inside their own static
+	// methods, so external code is forced through a constructor.
+	closedStructs map[string]bool
+	// anyDispatchEmitted: true once the per-type-id any-release dispatch
+	// table has been registered with the runtime. Set by
+	// emitAnyDispatchRegistrations so the C-main wrapper, the test
+	// runner, and the implicit-main path don't double-emit the calls.
+	anyDispatchEmitted bool
+
+	// localDiagSuppressions: per-file `//!-Wno-<name>` directives keyed
+	// by source line. Lazily populated on the first warning emitted for
+	// a given file. The directive lives on the comment line(s) directly
+	// preceding the declaration the user wants to silence.
+	localDiagSuppressions map[string]map[int]map[string]bool
+
+	// structDeclsByName: every concrete struct AST seen during compilation,
+	// keyed by structKey. Used by post-passes (e.g. checkAllUnwrappedCResources)
+	// that need to walk fields and methods of stdlib structs in addition to
+	// the user's own -- funcDecls covers methods but not the originating decl
+	// + field positions, which the warning needs.
+	structDeclsByName map[string]*ast.StructDecl
+	// structDeclFiles: source path each structDeclsByName entry came from,
+	// so warnings on stdlib decls find their //!-Wno- suppressions.
+	structDeclFiles map[string]string
 
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
@@ -261,6 +337,45 @@ type CodeGen struct {
 	// Reflection metadata.
 	// structImpls: struct name -> []trait name strings (for traitof/typeof)
 	structImpls map[string][]string
+
+	// coerceLastErr stashes a positioned error from the most recent
+	// coerce() call when the inner trait/iface coercion path wanted
+	// to reject the user's input. coerce() itself returns Value (87+
+	// call sites; not refactoring that signature) so the error has
+	// to ride out-of-band. genVarDecl + co clear and check this
+	// after each coerce() invocation. Cleared on read.
+	coerceLastErr error
+
+	// deadStrippedMethods records methods that were dropped during
+	// generic-struct monomorphization because their `where t is X`
+	// guard didn't hold for the concrete instantiation. Keyed by
+	// concrete struct name -> method name -> list of witnesses (one
+	// per stripped impl, since a method can have multiple where-
+	// guarded overloads). Consumed by call-site error reporting so
+	// "undefined method" can list every failing constraint instead
+	// of the generic "method not found".
+	deadStrippedMethods map[string]map[string][]string
+
+	// implEntriesByMod tracks the per-module impl-section globals so the
+	// finalizer can pin them via @llvm.used. Populated by
+	// emitImplSectionEntry, drained by finalizeImplSection
+	// (codegen/reflect_table.go).
+	implEntriesByMod map[*ir.Module][]*ir.Global
+	implEntriesSeen  map[string]bool
+
+	// llvmUsedRoots is the per-module list of globals that need to be
+	// pinned in @llvm.used so the linker doesn't dead-strip them. LLVM
+	// rejects multiple @llvm.used per module, so every emitter (pclntab,
+	// reflect_table, future ones) appends here and a single pass at the
+	// end of Generate materializes one global per module.
+	llvmUsedRoots map[*ir.Module][]*ir.Global
+
+	// monoMods holds dedicated content-addressed modules carrying
+	// monomorphized fn bodies (step 5 of incremental compilation).
+	// Keyed by mono_hash; populated by extractMonoModules during
+	// finalize. main.go reads these via MonoModules() to drive
+	// .build/mono/<hash>/bin.o caching.
+	monoMods map[string]*ir.Module
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
 	structFieldLLVMTypes map[string][]irtypes.Type
 
@@ -363,11 +478,57 @@ type CodeGen struct {
 	// cost for stacktrace-related machinery.
 	stacktraceUsed bool
 
+	// pclntab state: emitted at the end of Generate (applyPclntabPostPass)
+	// when stacktraceUsed is true. Replaces the libdw / DWARF dependency
+	// for stacktrace symbol resolution with a Go-style PC -> file:line:col
+	// table embedded in a custom binary section. See codegen/pclntab.go.
+	// pclntabUsed is set when stacktrace is reachable (mirrors
+	// stacktraceUsed). Distinct from debugMode: pclntabUsed only
+	// enables per-inst line:col capture into instLineCol, while
+	// debugMode also emits DICompileUnit / DISubprogram / DILocation
+	// nodes that materialize as DWARF sections in the final binary.
+	pclntabUsed bool
+
+	// instLineCol stores per-instruction (line, col) source positions
+	// captured at attach time even when debug mode is off. Pclntab's
+	// post-pass walks fn.Blocks and reads from this map (preferring it
+	// over !dbg metadata) to anchor per-call PC entries.
+	instLineCol map[ir.Instruction]ast.Pos
+
+	pclntabPCType  *irtypes.StructType // {i32 pc_off, i32 line, i32 col}
+	pclntabHdrType *irtypes.StructType // per-fn header
+	pclntabHdrs    []*ir.Global        // emitted hdrs (pinned via @llvm.used)
+	// pclntabSeq is a single monotonic counter feeding suffix numbers for
+	// every pclntab-internal symbol (hdr, pcs, string pool entries, split
+	// block labels). Names are namespaced by their PREFIX (`__tin_pcln_hdr.`,
+	// `__tin_pcs.`, `__tin_pcln_s.`, `<bb>.split.`), so cross-kind ID
+	// collisions are impossible - a single monotonic ID just keeps the
+	// state minimal.
+	pclntabSeq              int
+	pclntabStringPoolPerMod map[*ir.Module]map[string]pclntabStringEntry // per-fn-module string pools
+	pclntabCtorFn           *ir.Func                                     // ctor created in pre-marker phase, finalized after
+	fnSourceFiles           map[string]string                            // ir-fn-name -> source .tin path
+	// fnDisplayNames maps mangled IR names back to user-readable Tin names
+	// for stacktrace display. Populated at predeclare time so the original
+	// AST context (package, struct receiver, generic type-args) is in hand.
+	// Format examples:
+	//   "sync__AtomicI64_deinit" -> "sync::AtomicI64.deinit"
+	//   "make__i64"              -> "make[i64]"
+	//   "_tin_user_main"         -> "main"
+	//   "foo$coro"               -> "foo$coro"  (passthrough for $coro variants;
+	//                                            display layer keeps the marker)
+	fnDisplayNames map[string]string
+
+	// curMethodReceiverStruct is the struct name when the codegen flow is
+	// emitting a struct method (genStructMethod sets it; helpers used by
+	// fn-emit pick it up). Empty when the current fn is not a method.
+	curMethodReceiverStruct string
+
 	// pureFoldBudget caps the total node-evaluation work spent on a
 	// single top-level #pure call (sum across all loops, recursion, and
 	// nested call expansions). When the budget is exhausted the
 	// evaluator returns errNotConst and the call falls back to runtime
-	// dispatch — same outcome as a non-foldable signature, but reached
+	// dispatch - same outcome as a non-foldable signature, but reached
 	// safely instead of pathologically. 0 means "use the default"
 	// (defaultPureFoldBudget); negative values are forbidden.
 	pureFoldBudget int
@@ -376,7 +537,7 @@ type CodeGen struct {
 	// `let`/`var`/`const` was declared, keyed by name. Populated as
 	// declarations are processed in Generate; consumed by the
 	// `sourcepos(symbol)` builtin to resolve a symbol's definition site
-	// when no AST node is in hand. Nested scopes don't go in here —
+	// when no AST node is in hand. Nested scopes don't go in here -
 	// scopeEntry.declPos covers locals separately.
 	topLevelVarPos map[string]ast.Pos
 
@@ -384,7 +545,7 @@ type CodeGen struct {
 	// allowed for the currently-evaluating top-level #pure call. The
 	// counter is reset at every entry into tryEvalPureCallToCtfeVal and
 	// decremented once per evalNode call. When it hits zero the
-	// evaluator unwinds with errCTFEBudget. Not goroutine-safe — codegen
+	// evaluator unwinds with errCTFEBudget. Not goroutine-safe - codegen
 	// is single-threaded by construction.
 	pureFoldBudgetRemaining int
 
@@ -406,6 +567,18 @@ type CodeGen struct {
 	// body can be emitted into either cg.mod or shimMod and end up calling
 	// declares that live in the same module.
 	runtimeHelperCache map[*ir.Module]map[string]*ir.Func
+
+	// pkgMods maps Tin package name -> per-pkg LLVM module. Lazily populated
+	// by pkgMod() in pkgmod.go. Foundation for incremental compilation
+	// step 2: each pkg eventually gets its own .ll/.o so the build can
+	// parallelize and cache per pkg. Empty until call sites start routing.
+	pkgMods map[string]*ir.Module
+
+	// echoedTypes tracks which named struct types have already been echoed
+	// into a given target module by echoTypeInActive. Per (module, typeName)
+	// idempotence prevents duplicate TypeDef entries when multiple call
+	// sites cross-reference the same type from a foreign pkg module.
+	echoedTypes map[*ir.Module]map[string]bool
 
 	// externIRNames: IR names of C extern functions. Populated by ensureExternDecl.
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
@@ -488,9 +661,7 @@ type CodeGen struct {
 	// during genFuncDecl so the wrapper can inspect params and return type.
 	userMainDecl *ast.FuncDecl
 
-	// ------------------------------------------------------------------
 	// Debug info (DWARF, -g flag)
-	// ------------------------------------------------------------------
 
 	// debugMode enables DWARF debug metadata emission.
 	debugMode bool
@@ -559,9 +730,7 @@ type CodeGen struct {
 	// struct name whose arity cannot be recovered by splitting on `__`.
 	dataInstTypeArgs map[string][]string
 
-	// ------------------------------------------------------------------
 	// Fiber / coroutine state
-	// ------------------------------------------------------------------
 
 	// LLVM coroutine intrinsics (lazily declared by ensureCoroIntrinsics).
 	coroIDFn      *ir.Func
@@ -701,20 +870,32 @@ type CodeGen struct {
 	// Used to emit deinits in reverse order at the end of main().
 	allTopLevelVars []topLevelVarInit
 
+	// deinitAllFn / deinitArmedGlobal / atexitFn back the
+	// `_tin_deinit_all` dispatcher registered via atexit() in the C
+	// wrapper main. Lazily emitted by emitDeinitAllFn /
+	// emitDeinitAllAtexit. Without this, top-level var deinits only
+	// run on fall-through-from-main; with it, deinits run on any
+	// clean-exit path (return, libc exit(N), etc.).
+	deinitAllFn       *ir.Func
+	deinitArmedGlobal *ir.Global
+	atexitFn          *ir.Func
+
 	// topLevelVarBareNames: bare (un-mangled) names of every top-level `var`
 	// across the entry program and all imported packages. Used by the #pure
 	// soundness check to reject reads/writes of mutable globals from a #pure
 	// body. Populated lazily before checkAllPureFuncs runs.
 	topLevelVarBareNames map[string]bool
+	// topLevelConstNames is the subset of topLevelVarBareNames whose
+	// declarations were `const` (not `var`). Read by #pure verification
+	// to skip the "reads mutable top-level var" diagnostic for consts.
+	topLevelConstNames map[string]bool
 
 	// pkgInitFns: init functions collected from packages that declare
 	// fn init(). Called at program startup after top-level var inits,
 	// in import order (dependencies before dependents).
 	pkgInitFns []*ir.Func
 
-	// ------------------------------------------------------------------
 	// Function overloading
-	// ------------------------------------------------------------------
 
 	// overloadedNames: base name (or "StructName_method") -> true when multiple
 	// definitions with the same name exist in the current module.
@@ -755,10 +936,16 @@ type CodeGen struct {
 }
 
 // topLevelVarInit holds a deferred runtime initializer for a top-level var.
+// pkgName is "" for the entry program's own top-level vars, or the
+// importing pkg name (e.g. "sync", "io") for vars declared inside an
+// imported pkg's source. Used by emitDeinitAllFn to group deinits per
+// pkg so the dispatcher can call `_tin_deinit_<pkg>` in reverse topo
+// order rather than walking a flat list.
 type topLevelVarInit struct {
 	name     string
 	global   *ir.Global
 	initExpr ast.Node
+	pkgName  string
 }
 
 // pushBreakTarget pushes afterBlock onto the break stack before generating a
@@ -897,7 +1084,7 @@ func (cg *CodeGen) SetTCOReportFunc(fn func(caller, callee string)) { cg.tcoRepo
 // When true, both tier-1 (AST evaluator) and tier-2 (cached .so dispatch)
 // are short-circuited, and every #pure call codegens as a regular runtime
 // invocation. The user-visible behavior of #pure (purity contract,
-// alwaysinline, readnone, no_recurse depth limit) is unchanged — only
+// alwaysinline, readnone, no_recurse depth limit) is unchanged - only
 // the constant-folding optimization is suppressed. Driven by the
 // `--no-pure-fold` CLI flag.
 func (cg *CodeGen) SetPureFoldDisabled(v bool) { cg.pureFoldDisabled = v }
@@ -923,6 +1110,57 @@ func (cg *CodeGen) SetPureFoldBudget(n int) {
 // docs/plans/stacktrace-libunwind.md). Stable through the rest of the
 // build; once set true it stays true.
 func (cg *CodeGen) StacktraceUsed() bool { return cg.stacktraceUsed }
+
+// PkgModules returns per-package LLVM modules (excluding cg.mod) in
+// deterministic alphabetical name order. Empty when no `use` decls
+// loaded any pkg, OR when mergeRoutedPkgMods has folded everything
+// back into cg.mod (which happens at the end of Generate today).
+//
+// main.go uses this to drive per-pkg .o compilation in parallel; the
+// linker then combines them with cg.mod into the final binary.
+// Currently returns nil because the merge step still folds everything
+// into cg.mod for the legacy single-module compile path; once main.go
+// is wired to compile each module separately, the merge step gets
+// removed and this returns the live per-pkg modules.
+func (cg *CodeGen) PkgModules() []*ir.Module {
+	if len(cg.pkgMods) == 0 {
+		return nil
+	}
+
+	out := make([]*ir.Module, 0, len(cg.pkgMods))
+	for _, name := range cg.pkgModNames() {
+		if m := cg.pkgMods[name]; m != nil && hasPkgContent(m) {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
+// PkgModuleNames returns the names paired with PkgModules() in the
+// same order. Used by the build driver to label per-pkg .ll / .o
+// artifacts.
+func (cg *CodeGen) PkgModuleNames() []string {
+	if len(cg.pkgMods) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(cg.pkgMods))
+	for _, name := range cg.pkgModNames() {
+		if m := cg.pkgMods[name]; m != nil && hasPkgContent(m) {
+			out = append(out, name)
+		}
+	}
+
+	return out
+}
+
+// hasPkgContent reports whether m carries any IR worth compiling. Pkg
+// modules that only declared types (everything DCE'd away) skip the
+// per-pkg .o emit so we don't waste a clang invocation on a no-op.
+func hasPkgContent(m *ir.Module) bool {
+	return len(m.Funcs) > 0 || len(m.Globals) > 0 || len(m.Aliases) > 0
+}
 
 // progress fires the optional progress callback with msg.  Callers use it to
 // report named pass boundaries, per-function events, imports, CTFE, and macros.
@@ -962,46 +1200,79 @@ func (cg *CodeGen) targetIsARM64() bool {
 // compile a trivial C snippet to LLVM IR and read the "target triple" line.
 func newModuleWithTriple() *ir.Module {
 	mod := ir.NewModule()
-	// TIN_TARGET_TRIPLE env var overrides the target triple (for testing cross-targets).
-	if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
-		mod.TargetTriple = override
-
-		return mod
-	}
-	// Compile an empty C translation unit to LLVM IR and extract the triple
-	// that clang actually emits.  This is the only way to get the normalized
-	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
-	if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
-		Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, `target triple = "`) {
-				triple := strings.TrimPrefix(line, `target triple = "`)
-
-				triple = strings.TrimSuffix(triple, `"`)
-				if triple != "" {
-					mod.TargetTriple = triple
-
-					return mod
-				}
-			}
-		}
-	}
-	// Fallback by GOOS/GOARCH when clang is unavailable.
-	switch runtime.GOOS + "/" + runtime.GOARCH {
-	case "linux/amd64":
-		mod.TargetTriple = "x86_64-pc-linux-gnu"
-	case "linux/arm64":
-		mod.TargetTriple = "aarch64-unknown-linux-gnu"
-	case "darwin/amd64":
-		mod.TargetTriple = "x86_64-apple-macosx11.0.0"
-	case "darwin/arm64":
-		mod.TargetTriple = "arm64-apple-macosx11.0.0"
-	default:
-		mod.TargetTriple = "x86_64-pc-linux-gnu"
-	}
+	mod.TargetTriple = detectTargetTriple()
+	// Pin the source-filename to a stable string so opt + ld.lld
+	// produce deterministic bitcode metadata regardless of the
+	// random temp-file path tin writes the IR to. Without this, the
+	// random-suffixed temp name leaks into the binary's symbol table
+	// and breaks reproducible-build tests.
+	mod.SourceFilename = "tin"
 
 	return mod
 }
+
+// SetTargetTriple lets the caller (typically main, after consulting
+// the disk-cached host-info record) hand us a precomputed triple so
+// codegen doesn't itself spawn clang. The setter is one-shot per
+// process; subsequent calls are no-ops, matching the sync.Once
+// semantics of the original auto-probe path.
+func SetTargetTriple(t string) {
+	targetTripleOnce.Do(func() { targetTripleCache = t })
+}
+
+// detectTargetTriple returns the LLVM target triple this build should
+// emit. Prefers the value supplied via SetTargetTriple (the disk-
+// cached host-info path). Falls back to TIN_TARGET_TRIPLE, then to a
+// live `clang -x c -` probe, then to a hardcoded GOOS/GOARCH map.
+func detectTargetTriple() string {
+	targetTripleOnce.Do(func() {
+		// TIN_TARGET_TRIPLE env var overrides the triple (for cross-target tests).
+		if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
+			targetTripleCache = override
+
+			return
+		}
+		// Compile an empty C TU to LLVM IR and extract the triple that
+		// clang actually emits. This is the only way to get the
+		// normalized macosx-style triple (rather than the darwin-style
+		// one from -dumpmachine).
+		if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
+			Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(line, `target triple = "`) {
+					triple := strings.TrimPrefix(line, `target triple = "`)
+
+					triple = strings.TrimSuffix(triple, `"`)
+					if triple != "" {
+						targetTripleCache = triple
+
+						return
+					}
+				}
+			}
+		}
+		// Fallback by GOOS/GOARCH when clang is unavailable.
+		switch runtime.GOOS + "/" + runtime.GOARCH {
+		case "linux/amd64":
+			targetTripleCache = "x86_64-pc-linux-gnu"
+		case "linux/arm64":
+			targetTripleCache = "aarch64-unknown-linux-gnu"
+		case "darwin/amd64":
+			targetTripleCache = "x86_64-apple-macosx11.0.0"
+		case "darwin/arm64":
+			targetTripleCache = "arm64-apple-macosx11.0.0"
+		default:
+			targetTripleCache = "x86_64-pc-linux-gnu"
+		}
+	})
+
+	return targetTripleCache
+}
+
+var (
+	targetTripleCache string
+	targetTripleOnce  sync.Once
+)
 
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {
@@ -1013,6 +1284,7 @@ func New(filename string) *CodeGen {
 		structFieldTags:        make(map[string]map[string]string),
 		structFieldTinTypes:    make(map[string][]ast.TypeExpr),
 		genericStructsByArity:  make(map[string]map[int]*ast.StructDecl),
+		genericStructTmplFiles: make(map[string]string),
 		traitVtableStructTypes: make(map[string]*irtypes.StructType),
 		traitFatPtrTypes:       make(map[string]*irtypes.StructType),
 		traitMethodOrder:       make(map[string][]string),
@@ -1050,6 +1322,7 @@ func New(filename string) *CodeGen {
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
 		structDisplayNames:       make(map[string]string),
 		structImpls:              make(map[string][]string),
+		deadStrippedMethods:      make(map[string]map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
 		traitChainedInits:        make(map[string][]*ir.Func),
 		traitChainedDeinits:      make(map[string][]*ir.Func),
@@ -1074,10 +1347,16 @@ func New(filename string) *CodeGen {
 		funcReturnUnsigned:       make(map[string]bool),
 		heapPromotingFns:         make(map[string]bool),
 		structWeakFields:         make(map[string]map[string]bool),
+		structOwningRawPtrFields: make(map[string]map[string]bool),
+		fnReturnsOwningIface:     make(map[string]bool),
 		structConstFields:        make(map[string]map[string]bool),
 		cLayoutStructs:           make(map[string]bool),
 		nativeStructTypes:        make(map[string]*irtypes.StructType),
 		packedStructs:            make(map[string]bool),
+		noCopyStructs:            make(map[string]bool),
+		closedStructs:            make(map[string]bool),
+		structDeclsByName:        make(map[string]*ast.StructDecl),
+		structDeclFiles:          make(map[string]string),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
@@ -1320,12 +1599,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// dladdr "<symbol>+<offset>" form for Tin user code.
 	cg.detectStacktraceUsage(prog.Stmts)
 
-	if cg.stacktraceUsed && !cg.debugMode {
-		cg.debugMode = true
-	}
+	// pclntabUsed mirrors stacktraceUsed for now. It controls the
+	// per-instruction line/col side-map (cg.instLineCol) that the
+	// pclntab post-pass reads to build per-fn PC tables. Unlike
+	// debugMode, enabling this does NOT pull in DWARF emission -
+	// release builds get pclntab WITHOUT bloating the binary with
+	// .debug_info / .debug_line / .debug_str sections that nothing
+	// reads. -g (debugMode) still emits full DWARF for lldb / gdb.
+	cg.pclntabUsed = cg.stacktraceUsed
 
-	// Initialize DWARF debug metadata when -g is active OR stacktrace
-	// is reachable (which implicitly needs line info for IP resolution).
+	// Initialize DWARF debug metadata only when -g is active. pclntab
+	// captures source positions through cg.instLineCol instead, so the
+	// runtime resolver works without a DICompileUnit graph in the IR.
 	if cg.debugMode {
 		cg.initDebugInfo()
 	}
@@ -1469,9 +1754,16 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		cg.topLevelVarBareNames = map[string]bool{}
 	}
 
+	if cg.topLevelConstNames == nil {
+		cg.topLevelConstNames = map[string]bool{}
+	}
+
 	for _, node := range prog.Stmts {
 		if tv, ok := node.(*ast.TopLevelVar); ok {
 			cg.topLevelVarBareNames[tv.Name] = true
+			if tv.IsConst {
+				cg.topLevelConstNames[tv.Name] = true
+			}
 		}
 	}
 
@@ -1679,7 +1971,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// Emit a parallel #interop-style shim for every wrappable #pure function
 	// so the per-fn .so cache (Phase C2) has a single uniform dispatch
 	// surface for cgo. The shim shares emitInteropWrapperFor's marshal
-	// logic — string/slice/bool widening all go through the same helpers
+	// logic - string/slice/bool widening all go through the same helpers
 	// the user-tagged #interop pipeline uses. Shim symbol is
 	// `__tin_pure_shim_<fn_name>` so it never collides with the function
 	// itself; in the main binary the shim has internal linkage and clang
@@ -1703,6 +1995,17 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 
 		cg.emitAtomTable()
+		cg.applyStacktracePostPass()
+		cg.finalizeImplSection()
+		// extractMonoModules MUST run before applyPclntabPostPass:
+		// pclntab emits blockaddress(@fn, %bb) constants and lld
+		// rejects them when @fn is only a declare. Moving mono fns
+		// first lets pclntab route the pcs entry into the same mono
+		// module where the fn definition now lives.
+		cg.extractMonoModules()
+		cg.applyPclntabPostPass()
+		cg.emitLlvmUsedRoots()
+		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
 	}
@@ -1710,17 +2013,40 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	if cg.replMode {
 		cg.emitAtomTable()
+		cg.applyStacktracePostPass()
+		cg.finalizeImplSection()
+		// extractMonoModules MUST run before applyPclntabPostPass:
+		// pclntab emits blockaddress(@fn, %bb) constants and lld
+		// rejects them when @fn is only a declare. Moving mono fns
+		// first lets pclntab route the pcs entry into the same mono
+		// module where the fn definition now lives.
+		cg.extractMonoModules()
+		cg.applyPclntabPostPass()
+		cg.emitLlvmUsedRoots()
+		cg.finalizePerPkgModules()
 
 		return cg.mod, nil
 	}
 
 	// If there are top-level statements, wrap them in main().
 	if len(topStmts) > 0 {
+		// Top-level imperative statements form an implicit main. If the
+		// user also wrote `fn main()`, both would emit an `i32 @main`
+		// wrapper -- the implicit one wins and the user main is never
+		// called. Error out so the user picks one model.
+		// (Top-level `const` and `var` are TU-level decls and don't
+		// reach topStmts, so this only fires for actual statements.)
+		if cg.userMainDecl != nil {
+			return nil, cg.nodeErr(topStmts[0],
+				"top-level statements cannot coexist with an explicit fn main(); "+
+					"move the statement inside main, or remove fn main() to use the implicit-main form")
+		}
+
 		// Check if main is already defined.
 		hasmain := false
 
-		for _, f := range cg.mod.Funcs {
-			if f.Name() == "main" {
+		for _, f := range cg.allFuncs() {
+			if f.Name() == "_tin_c_main" {
 				hasmain = true
 
 				break
@@ -1739,7 +2065,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// calls it and returns 0 so the process exits cleanly.
 	var userMainFn *ir.Func
 
-	for _, f := range cg.mod.Funcs {
+	for _, f := range cg.allFuncs() {
 		if f.Name() == "_tin_user_main" {
 			userMainFn = f
 
@@ -1751,8 +2077,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		// Only add the wrapper if there is no `i32 @main` already.
 		hasMain := false
 
-		for _, f := range cg.mod.Funcs {
-			if f.Name() == "main" {
+		for _, f := range cg.allFuncs() {
+			if f.Name() == "_tin_c_main" {
 				hasMain = true
 
 				break
@@ -1764,7 +2090,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// $coro ramp and main should run as the first fiber.
 			var userMainCoroFn *ir.Func
 
-			for _, f := range cg.mod.Funcs {
+			for _, f := range cg.allFuncs() {
 				if f.Name() == "_tin_user_main$coro" {
 					userMainCoroFn = f
 
@@ -1775,15 +2101,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			// If the user's main takes a [string] parameter, expose argc/argv.
 			wantsArgs := mainTakesStringArgs(cg.userMainDecl)
 
-			var wf *ir.Func
-			if wantsArgs {
-				wf = cg.mod.NewFunc("main", irtypes.I32,
-					ir.NewParam("argc", irtypes.I32),
-					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
-				)
-			} else {
-				wf = cg.mod.NewFunc("main", irtypes.I32)
-			}
+			wf := cg.newCMainWrapper(wantsArgs)
 
 			wb := wf.NewBlock("entry")
 
@@ -1804,6 +2122,18 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 			// Emit fiber init + io init when the program uses fiber features.
 			wb = cg.emitFiberMainWrap(wb)
+
+			// Register the deinit dispatcher with libc atexit BEFORE
+			// running user code. atexit guarantees the deinits fire on
+			// every clean exit path (return-from-main, libc exit(N),
+			// any fn call to std::os::exit) - not only the
+			// fall-through-from-main path the inline emit covers.
+			wb = cg.emitDeinitAllAtexit(wb)
+
+			// Register per-type-id any-release helpers so that any-boxed
+			// structs run their deinit on scope exit instead of just
+			// freeing the heap block.
+			wb = cg.emitAnyDispatchRegistrations(wb)
 
 			// Emit runtime initializers for top-level var declarations before
 			// any fiber runs so that globals are valid from the start.
@@ -1853,7 +2183,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				mainPid := wb.NewCall(cg.fiberSpawnJoinableFn, coroHdl)
 				wb.NewCall(syncAwaitFn, mainPid)
 				cg.emitFiberMainEnd(wb)
-				cg.emitTopLevelVarDeinits(wb)
+				// Deinits run via atexit(_tin_deinit_all); no inline
+				// emit needed here.
 				wb.NewRet(constant.NewInt(irtypes.I32, 0))
 			} else {
 				// fn main(): call synchronously (existing behavior).
@@ -1870,12 +2201,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 				retIsVoid := userMainFn.Sig.RetType.Equal(irtypes.Void)
 				if retIsVoid {
 					wb.NewCall(userMainFn, callArgs...)
-					cg.emitTopLevelVarDeinits(wb)
+					// Deinits run via atexit(_tin_deinit_all).
 					cg.emitFiberMainEnd(wb)
 					wb.NewRet(constant.NewInt(irtypes.I32, 0))
 				} else {
 					ret := wb.NewCall(userMainFn, callArgs...)
-					cg.emitTopLevelVarDeinits(wb)
+					// Deinits run via atexit(_tin_deinit_all).
 					cg.emitFiberMainEnd(wb)
 					// Coerce return value to i32 if needed.
 					var retVal value.Value = ret
@@ -1905,8 +2236,8 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// trivial no-op main so the binary links successfully.
 	hasMain := false
 
-	for _, f := range cg.mod.Funcs {
-		if f.Name() == "main" {
+	for _, f := range cg.allFuncs() {
+		if f.Name() == "_tin_c_main" {
 			hasMain = true
 
 			break
@@ -1918,12 +2249,92 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		// the linker has an entry point. When #interop functions exist
 		// the program is being built as a library; skip the synthetic
 		// main so the C consumer can provide its own.
-		wf := cg.mod.NewFunc("main", irtypes.I32)
+		wf := cg.newCMainWrapper(false)
 		wb := wf.NewBlock("entry")
 		wb.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 
+	cg.debugDumpUnterminated()
+	cg.applyStacktracePostPass()
+	cg.finalizeImplSection()
+	cg.applyPclntabPostPass()
+	cg.emitLlvmUsedRoots()
+	cg.finalizePerPkgModules()
+
+	// -Wunwrapped-c-resource: walks every struct (incl. stdlib) for raw
+	// C resource fields whose value crosses an extern boundary. Runs at
+	// the very end so all struct decls are registered (genStructDecl
+	// populates structDeclsByName lazily) and the call graph is built
+	// (computeFnsTouchingExtern needs it for transitive propagation).
+	cg.checkAllUnwrappedCResources(prog)
+
+	// Static analysis: warn on writes that reach a top-level `const`
+	// through a pointer alias. Top-level consts live in read-only
+	// storage so the write is undefined behavior.
+	cg.checkAllWritesToTopLevelConst(prog)
+
 	return cg.mod, nil
+}
+
+// newCMainWrapper creates the C-side entry-point function under the IR
+// name `_tin_c_main`, plus an `@main` alias so libc / `__libc_start_main`
+// still finds the conventional entry symbol. The rename keeps stacktrace
+// frames inside the wrapper distinct from the user's `fn main` (compiled
+// as `_tin_user_main` and displayed as `main`); without the rename, the
+// trace would show two consecutive `main`-named frames and confuse
+// readers about which is which.
+//
+// `withArgs` controls whether the wrapper takes the libc (argc, argv)
+// signature; the caller decides based on the user main's parameter list.
+//
+// LLVM aliases are handled by both ld.lld and GNU ld; on Mach-O the
+// convention is the same alias syntax via `--defsym` equivalent.
+// Returns the wrapper *ir.Func - the alias is internal bookkeeping.
+func (cg *CodeGen) newCMainWrapper(withArgs bool) *ir.Func {
+	var wf *ir.Func
+	if withArgs {
+		wf = cg.mod.NewFunc("_tin_c_main", irtypes.I32,
+			ir.NewParam("argc", irtypes.I32),
+			ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
+		)
+	} else {
+		wf = cg.mod.NewFunc("_tin_c_main", irtypes.I32)
+	}
+
+	cg.mod.Aliases = append(cg.mod.Aliases, ir.NewAlias("main", wf))
+
+	return wf
+}
+
+// applyStacktracePostPass walks every emitted function and tags it with
+// `frame-pointer="all"` when the program references stacktrace(). Required
+// for the runtime's frame-pointer walker (runtime/stacktrace.c, fp_walk)
+// to step through every Tin frame: LLVM at -O2 otherwise elides %rbp
+// setup on leaf / short functions and the FP walk skips them.
+//
+// Must be the LAST step in Generate so it covers everything that
+// cg.mod.NewFunc has produced - user fns, atom helpers, ADT release/retain
+// helpers, coro splits, lambda thunks, test runners, REPL cells. The
+// helper is shared across the three Generate exit branches (test runner,
+// REPL, normal main) so none of them slip past the tagging.
+//
+// clang's `-fno-omit-frame-pointer` cmd-line flag does NOT propagate into
+// IR-compiled functions; it only sets the default for code clang
+// generates from C source. Function attributes embedded in the IR are
+// the only mechanism that survives the IR -> object pipeline.
+func (cg *CodeGen) applyStacktracePostPass() {
+	if !cg.stacktraceUsed {
+		return
+	}
+
+	for _, f := range cg.allFuncs() {
+		if f.Blocks == nil {
+			continue // declarations don't carry codegen attributes
+		}
+
+		f.FuncAttrs = append(f.FuncAttrs,
+			ir.AttrPair{Key: "frame-pointer", Value: "all"})
+	}
 }
 
 // mainTakesStringArgs reports whether the user's explicit fn main has a first

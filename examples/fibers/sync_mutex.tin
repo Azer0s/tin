@@ -44,7 +44,7 @@ fn{#async} mutex_incrementer(n i64) =
   await g_done_ch.send(1)
 
 fn{#async} run_mutex_counter(fibers i64, per_fiber i64) i64 =
-  g_mu      = sync::Mutex.make()
+  g_mu      = sync::Mutex.new()
   g_counter = 0
   g_done_ch = sync::Channel[i64].make(fibers)
   let i i64 = 0
@@ -75,7 +75,7 @@ fn{#async} rwmutex_writer(n i64) =
   await g_rw_done.send(1)
 
 fn{#async} run_rwmutex_writers(fibers i64, per_fiber i64) i64 =
-  g_rwmu    = sync::RWMutex.make()
+  g_rwmu    = sync::RWMutex.new()
   g_rw_val  = 0
   g_rw_done = sync::Channel[i64].make(fibers)
   let i i64 = 0
@@ -117,7 +117,7 @@ fn{#async} mix_reader(n i64) =
   await g_mix_done.send(0)
 
 fn{#async} run_rwmutex_mixed(writers i64, readers i64, per i64) i64 =
-  g_rwmu     = sync::RWMutex.make()
+  g_rwmu     = sync::RWMutex.new()
   g_rw_val   = 0
   g_mix_done = sync::Channel[i64].make(writers + readers)
   let i i64 = 0
@@ -193,8 +193,8 @@ fn{#async} main() =
   else:
     echo "rwmutex mixed 4w+4r x50: FAIL (got {got3})"
 
-  g_cond     = sync::Cond.make()
-  g_cond_mu  = sync::Mutex.make()
+  g_cond     = sync::Cond.new()
+  g_cond_mu  = sync::Mutex.new()
   g_payload  = 0
   g_ready    = false
   g_cond_out = sync::Channel[i64].make(1)
@@ -206,8 +206,8 @@ fn{#async} main() =
   else:
     echo "cond signal: FAIL (got {r})"
 
-  g_cond     = sync::Cond.make()
-  g_cond_mu  = sync::Mutex.make()
+  g_cond     = sync::Cond.new()
+  g_cond_mu  = sync::Mutex.new()
   g_payload  = 0
   g_ready    = false
   g_cond_out = sync::Channel[i64].make(4)
@@ -233,7 +233,7 @@ fn{#async} main() =
 // ---------------------------------------------------------------------------
 
 test "mutex basic lock unlock" =
-  let m = sync::Mutex.make()
+  let m = sync::Mutex.new()
   await m.lock()
   m.unlock()
   assert::ok(true)
@@ -251,13 +251,13 @@ test "mutex protects shared counter: 16 fibers x 25" =
   assert::equals(await h, 400)
 
 test "rwmutex basic read_lock read_unlock" =
-  let rw = sync::RWMutex.make()
+  let rw = sync::RWMutex.new()
   await rw.read_lock()
   rw.read_unlock()
   assert::ok(true)
 
 test "rwmutex basic write lock unlock" =
-  let rw = sync::RWMutex.make()
+  let rw = sync::RWMutex.new()
   await rw.lock()
   rw.unlock()
   assert::ok(true)
@@ -275,8 +275,8 @@ test "rwmutex mixed readers and writers: 4w+4r x 50 writes" =
   assert::equals(await h, 200)
 
 test "cond signal wakes consumer with correct value" =
-  g_cond     = sync::Cond.make()
-  g_cond_mu  = sync::Mutex.make()
+  g_cond     = sync::Cond.new()
+  g_cond_mu  = sync::Mutex.new()
   g_payload  = 0
   g_ready    = false
   g_cond_out = sync::Channel[i64].make(1)
@@ -285,8 +285,8 @@ test "cond signal wakes consumer with correct value" =
   assert::equals(await g_cond_out.recv(), 99)
 
 test "cond broadcast wakes 4 consumers" =
-  g_cond     = sync::Cond.make()
-  g_cond_mu  = sync::Mutex.make()
+  g_cond     = sync::Cond.new()
+  g_cond_mu  = sync::Mutex.new()
   g_payload  = 0
   g_ready    = false
   g_cond_out = sync::Channel[i64].make(4)

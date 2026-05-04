@@ -325,14 +325,22 @@ type IfStmt struct {
 
 // ForStmt covers all three for variants:
 //
-//	C-style:  for let i T ; cond ; post : body
-//	For-in:   for let i T in iter : body
-//	For-range: for let i T in start..end : body  (handled as for-in over range)
+//	C-style:    for let i T ; cond ; post : body
+//	For-in:     for let i T in iter : body
+//	For-in-ref: for ref i in iter : body  (i aliases the slot, not a copy)
+//	For-range:  for let i T in start..end : body  (handled as for-in over range)
 type ForStmt struct {
 	base
 	Kind    ForKind
 	VarName string
 	VarType TypeExpr
+	// IsRef is set when the loop was declared as `for ref name in iter`.
+	// The loop variable aliases the underlying storage of each element
+	// rather than holding a per-iteration copy, so assignments inside
+	// the body mutate the source array. Only valid for for-in over a
+	// mutable, directly-indexable iter (rejects ranges and `let`/`const`
+	// arrays at codegen time).
+	IsRef bool
 	// C-style
 	Init Node
 	Cond Node
@@ -703,6 +711,7 @@ type Param struct {
 }
 
 type StructField struct {
+	Pos       Pos
 	Name      string
 	Type      TypeExpr
 	Tags      []string
@@ -843,12 +852,15 @@ type StringPart struct {
 	Format string // printf-style specifier without leading %, e.g. "08x", ".2f" (empty = default)
 }
 
-// TopLevelVar is a mutable module-scoped variable: var name Type [= expr]
+// TopLevelVar is a module-scoped binding: var/let/const name [Type] [= expr].
+// IsConst is true when the source used `let` or `const`; the binding is
+// immutable from user code (writes are rejected).
 type TopLevelVar struct {
 	base
-	Name  string
-	Type  TypeExpr
-	Value Node // nil = zero-initialized
+	Name    string
+	Type    TypeExpr
+	Value   Node // nil = zero-initialized
+	IsConst bool
 }
 
 // SpawnExpr spawns a fiber: spawn expr  or  spawn do: block

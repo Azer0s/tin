@@ -105,7 +105,12 @@ func (cg *CodeGen) checkInfiniteRecursion(fn *ast.FuncDecl) {
 
 // checkIdenticalOperands flags `x == x`, `x != x`, `x - x`, etc., where
 // both sides are the same syntactic expression. For floats the rewrite
-// would be unsound (NaN), so the check is skipped on float operands.
+// would be unsound (NaN), so the check is skipped on float operands AND
+// on operands whose type can't yet be statically determined -- runAstChecks
+// runs before scope is fully built, and exprIsFloat conservatively returns
+// false for unknown identifiers; without the explicit unknown-skip we'd
+// fire on `let v = 0.0/0.0; if v != v: ...` and miss the NaN check the
+// programmer wrote.
 func (cg *CodeGen) checkIdenticalOperands(e *ast.BinExpr) {
 	switch e.Op {
 	case "==", "!=", "<", "<=", ">", ">=", "-", "&", "|", "^", "/", "%":
@@ -116,8 +121,13 @@ func (cg *CodeGen) checkIdenticalOperands(e *ast.BinExpr) {
 	if !astEqual(e.Left, e.Right) {
 		return
 	}
-
+	// Float operand -> keep silent; NaN makes != / == meaningful.
 	if cg.exprIsFloat(e.Left) {
+		return
+	}
+	// Unknown type (typically: identifier whose let-binding hasn't been
+	// resolved yet) -> skip rather than risk a false positive on a float.
+	if cg.staticTypeOf(e.Left) == nil {
 		return
 	}
 
@@ -230,11 +240,11 @@ func (cg *CodeGen) checkUselessCast(e *ast.AsExpr) {
 // the user telling us the empty body is intentional, so we suppress.
 func (cg *CodeGen) checkEmptyIfBody(s *ast.IfStmt) {
 	if s.Then != nil && len(s.Then.Stmts) == 0 && !s.Then.IsExplicitPass {
-		cg.warn(DiagEmptyBody, s.Pos(), "empty `if` body")
+		cg.warn(DiagEmptyBody, s.Pos(), "empty if body")
 	}
 
 	if s.Else != nil && len(s.Else.Stmts) == 0 && !s.Else.IsExplicitPass {
-		cg.warn(DiagEmptyBody, s.Pos(), "empty `else` body")
+		cg.warn(DiagEmptyBody, s.Pos(), "empty else body")
 	}
 }
 

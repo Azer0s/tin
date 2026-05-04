@@ -268,6 +268,29 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	scrutAlloca := block.NewAlloca(outerSt)
 	block.NewStore(scrutinee, scrutAlloca)
 
+	// Wrap arm processing in a synthetic "scrutinee scope" only when
+	// the scrutinee was an OWNED expression (CallExpr, ++ concat,
+	// interpolated string, fresh array literal) AND the ADT carries
+	// owning fields. The owned-expression result was transferred to us
+	// at RC=1 with nothing else holding it, so without a release-on-
+	// exit it leaks (the original time_test bug:
+	// `match json::parse(s): Ok(ev) -> ...`).
+	//
+	// For BORROWED scrutinees (Identifier / FieldAccess / DerefExpr of
+	// a named variable / IndexExpr), the original owner still holds
+	// the +1 RC and will release it at its own scope exit. Adding our
+	// own release here would double-free; this is what regressed
+	// adt_basics' `sum(t *IntTree)` recursion when we tried to retain
+	// then release uniformly.
+	wantScrutRelease := !isCopyExpr(s.Expr) && cg.elemNeedsRelease(outerSt)
+
+	matchScrutScope := newScope(cg.curScope)
+	if wantScrutRelease {
+		matchScrutScope.set("__match_scrut", &scopeEntry{val: scrutAlloca, isAlloc: true})
+	}
+
+	cg.curScope = matchScrutScope
+
 	tagGEP := block.NewGetElementPtr(outerSt, scrutAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
@@ -288,7 +311,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 			pos = s.Cases[0].Pos
 		}
 
-		return nil, fmt.Errorf("%d:%d: non-exhaustive match on %s: no arm matches %s; add the missing variant or a `default:` arm",
+		return nil, fmt.Errorf("%d:%d: non-exhaustive match on %s: no arm matches %s; add the missing variant or a \"default:\" arm",
 			pos.Line, pos.Col, adtName, witness)
 	}
 
@@ -353,16 +376,31 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 				// `skipName` mechanism in genReturnStmt. Pointer-to-struct
 				// fields (e.g. `own *Tree[t]`) are bound as borrows without
 				// retain; they are shared with the scrutinee's payload.
+				//
+				// For embedded named structs whose payload itself contains
+				// RC fields (e.g. Result.Ok(event_with_time) where
+				// event_with_time has a string), the scope-exit semantics
+				// are the same as a borrow only when the scrutinee will be
+				// released by matchScrutScope (the OWNED scrutinee path).
+				// In that case the per-arm release MUST fire so two paths
+				// (binding scope + scrutinee scope) don't both decrement.
+				// We mirror the predicate by retaining + releasing
+				// symmetrically only when wantScrutRelease was set.
 				rcTracked := !f.IsWeak && isRCTrackedType(fieldTy)
+				owningStruct := !f.IsWeak && wantScrutRelease &&
+					!isRCTrackedType(fieldTy) && cg.elemNeedsRelease(fieldTy)
+
 				if rcTracked {
 					cg.emitRetain(caseBlock, fieldVal)
+				} else if owningStruct {
+					cg.emitStructFieldRetain(caseBlock, fieldVal)
 				}
 
 				alloca := caseBlock.NewAlloca(fieldVal.Type())
 				caseBlock.NewStore(fieldVal, alloca)
 
 				entry := &scopeEntry{val: alloca, isAlloc: true}
-				if !rcTracked {
+				if !rcTracked && !owningStruct {
 					entry.noRelease = true
 				}
 
@@ -412,6 +450,19 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 		anyFallthrough = true
 	}
+
+	// Release the scrutinee's owned ARC fields on the merged exit
+	// path. Returns inside an arm already drained matchScrutScope via
+	// emitAllScopeReleases (the synthetic scope sits above each arm
+	// scope), so this only fires when control falls through to
+	// afterBlock. matchScrutScope is only populated when the scrutinee
+	// was owned (see wantScrutRelease above); for borrowed scrutinees
+	// the scope is empty and emitScopeRelease is a no-op.
+	if anyFallthrough {
+		cg.emitScopeRelease(afterBlock, matchScrutScope)
+	}
+
+	cg.curScope = matchScrutScope.parent
 
 	if !anyFallthrough && resAlloca == nil {
 		afterBlock.NewUnreachable()
@@ -724,7 +775,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 	}
 
 	if !isFatArrayPtr(scrutinee.Type()) {
-		return nil, fmt.Errorf("array pattern match requires an array type, got %s", scrutinee.Type())
+		return nil, fmt.Errorf("array pattern match requires an array type, got %s", fmtArgType(scrutinee.Type()))
 	}
 
 	arrType := scrutinee.Type().(*irtypes.StructType)
@@ -1179,7 +1230,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 
 		sname := structNameFromValue(fval)
 		if sname == "" || len(sname) <= 8 || sname[:8] != "Future__" {
-			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fval.Type())
+			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fmtArgType(fval.Type()))
 		}
 
 		pidIdx := cg.fieldIndex(sname, "pid")
@@ -1243,7 +1294,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 	skipPtr := block.NewGetElementPtr(skipType, skipAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 
-	// --- WITH default: one non-blocking poll pass ---
+	// WITH default: one non-blocking poll pass
 	if s.Default != nil {
 		defaultBlock := cg.newBlock("awmatch.default")
 
@@ -1331,7 +1382,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 		return afterBlock, nil
 	}
 
-	// --- WITHOUT default: blocking loop ---
+	// WITHOUT default: blocking loop
 	// Loop: join_any -> poll -> dispatch; re-loop if guard fails; panic if exhausted.
 
 	// anyWaiterType mirrors TinAnyWaiter in fiber.c:
@@ -1360,7 +1411,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 	loopBlock := cg.newBlock("awmatch.loop")
 	block.NewBr(loopBlock)
 
-	// === loop body ===
+	// loop body
 	var resumeBlock *ir.Block
 
 	if cg.inCoroFn {
@@ -1520,7 +1571,11 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 
 	members, isUnion := cg.unionTypeMembers[unionName]
 	if !isUnion {
-		return nil, cg.nodeErr(s, "match .(type) requires a tagged union type, got %s", unionName)
+		// Concrete (non-union) type, e.g. a generic monomorphized from
+		// `where t is num` with t = i64. The match is statically
+		// resolvable: keep only the arm whose type equals val's type
+		// and dead-strip the rest.
+		return cg.genMatchTypeConcrete(block, s, val)
 	}
 
 	st := val.Type().(*irtypes.StructType)
@@ -1700,4 +1755,175 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	}
 
 	return afterBlock, nil
+}
+
+// genMatchTypeConcrete handles `match v.(type)` when v is a concrete
+// (non-tagged-union) type. This happens when a generic with `where t is X`
+// is instantiated with a single variant of X (e.g. Box[i64] for
+// `where t is num`). Arms whose declared type doesn't match val's type
+// are dead at compile time; the surviving arms (all of the same type)
+// are emitted in order with guards chaining: a guard miss on arm N
+// falls through to arm N+1, and the final unguarded arm (or default)
+// catches any leftover.
+func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val value.Value) (*ir.Block, error) {
+	valLLVM := val.Type()
+
+	matching := make([]ast.MatchCase, 0, len(s.Cases))
+
+	for _, c := range s.Cases {
+		var targetType ast.TypeExpr
+
+		if c.VarType != nil {
+			targetType = c.VarType
+		} else if sp, ok := c.Pattern.(*ast.StructPattern); ok {
+			targetType = &ast.SimpleType{Name: sp.TypeName}
+		}
+
+		if targetType == nil {
+			continue
+		}
+
+		targetLLVM, err := cg.tinTypeToLLVM(targetType)
+		if err != nil || !targetLLVM.Equal(valLLVM) {
+			continue
+		}
+
+		matching = append(matching, c)
+	}
+
+	if len(matching) == 0 {
+		if s.Default != nil {
+			cg.curScope = newScope(cg.curScope)
+			block, _, err := cg.genStmt(block, s.Default)
+			cg.emitScopeRelease(block, cg.curScope)
+			cg.curScope = cg.curScope.parent
+
+			return block, err
+		}
+
+		return nil, cg.nodeErr(s, "match .(type) on concrete type %s: no case matches",
+			concreteTypeDisplay(cg, valLLVM))
+	}
+
+	afterBlock := cg.newBlock("match.concrete.after")
+	anyFallthrough := false
+	cur := block
+
+	for i, c := range matching {
+		isLast := i == len(matching)-1
+
+		cg.curScope = newScope(cg.curScope)
+
+		if c.VarName != "" {
+			alloca := cur.NewAlloca(valLLVM)
+			cur.NewStore(val, alloca)
+			cg.curScope.set(c.VarName, &scopeEntry{val: alloca, isAlloc: true})
+		}
+
+		if c.Guard != nil {
+			guardVal, err2 := cg.genExpr(cur, c.Guard)
+			if err2 != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, err2
+			}
+
+			bodyBlock := cg.newBlock(fmt.Sprintf("match.concrete.body.%d", i))
+
+			var nextBlock *ir.Block
+			if isLast {
+				nextBlock = cg.newBlock(fmt.Sprintf("match.concrete.fall.%d", i))
+			} else {
+				nextBlock = cg.newBlock(fmt.Sprintf("match.concrete.next.%d", i))
+			}
+
+			cur.NewCondBr(cg.toBool(cur, guardVal), bodyBlock, nextBlock)
+
+			bodyEnd, _, err3 := cg.genStmt(bodyBlock, c.Body)
+			cg.emitScopeRelease(bodyEnd, cg.curScope)
+			cg.curScope = cg.curScope.parent
+
+			if err3 != nil {
+				return nil, err3
+			}
+
+			if bodyEnd != nil && bodyEnd.Term == nil {
+				bodyEnd.NewBr(afterBlock)
+
+				anyFallthrough = true
+			}
+
+			cur = nextBlock
+
+			continue
+		}
+
+		// Unguarded arm: this commits, no further arms can run.
+		bodyEnd, _, err := cg.genStmt(cur, c.Body)
+		cg.emitScopeRelease(bodyEnd, cg.curScope)
+		cg.curScope = cg.curScope.parent
+
+		if err != nil {
+			return nil, err
+		}
+
+		if bodyEnd != nil && bodyEnd.Term == nil {
+			bodyEnd.NewBr(afterBlock)
+
+			anyFallthrough = true
+		}
+
+		if !isLast {
+			// Subsequent arms are unreachable.
+			cur = nil
+
+			break
+		}
+
+		cur = nil
+	}
+
+	// If the last guarded arm failed its guard, `cur` still holds the
+	// fall-through block. Emit default into it (or just branch to after).
+	if cur != nil {
+		if s.Default != nil {
+			cg.curScope = newScope(cg.curScope)
+			defEnd, _, err := cg.genStmt(cur, s.Default)
+			cg.emitScopeRelease(defEnd, cg.curScope)
+			cg.curScope = cg.curScope.parent
+
+			if err != nil {
+				return nil, err
+			}
+
+			if defEnd != nil && defEnd.Term == nil {
+				defEnd.NewBr(afterBlock)
+
+				anyFallthrough = true
+			}
+		} else {
+			cur.NewBr(afterBlock)
+
+			anyFallthrough = true
+		}
+	}
+
+	if !anyFallthrough {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
+
+	return afterBlock, nil
+}
+
+// concreteTypeDisplay renders an LLVM type for diagnostics, preferring
+// the source-syntax form ("Box[i64]", "[i64]", "*Foo") over the raw
+// LLVM string ("%Box__i64", "{ i8*, i64 }", "%Foo*").
+func concreteTypeDisplay(cg *CodeGen, t irtypes.Type) string {
+	if name := cg.typeNameOf(t); name != "" {
+		return prettyStructName(name)
+	}
+
+	return fmtArgType(t)
 }

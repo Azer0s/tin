@@ -38,10 +38,10 @@ For the standard library the short form (`use sync`) is always preferred.
 Import only specific names to avoid pulling the whole namespace into scope:
 
 ```rust
-use { Channel, AtomicI64 } from sync
+use { Channel, Atomic } from sync
 
 let ch = Channel[i64].make(8)
-let c  = AtomicI64.make(0)
+let c  = Atomic[i64].new(0)
 ```
 
 ### File imports
@@ -111,7 +111,7 @@ It does not need to be exported and should not be called explicitly.
 | `ioutil`  | High-level line-oriented `read_string` / `write_string`                    |
 | `net::tcp` | `tcp::Conn`, `tcp::Server`, `tcp::listen`, `tcp::dial` - high-level TCP   |
 | `tls`     | Async TLS client connections over OpenSSL - see [`docs/stdlib/tls.md`](stdlib/tls.md) |
-| `sync`    | `Channel[T]`, `Mutex`, `RWMutex`, `Cond`, `AtomicI64`, `Future[T]`, `Unit` |
+| `sync`    | `Channel[T]`, `Mutex`, `RWMutex`, `Cond`, `Atomic[t]`, `Future[T]`, `Unit` |
 | `math`    | `sqrt`, `pow`, `floor`, `ceil`, `sin`, `cos`, `PI`, `E` - links `-lm`      |
 | `measure` | `now_us`, `now_ms` - monotonic clock for benchmarking                      |
 | `strings` | `strings::replace(s, old, new) string`                                     |
@@ -191,8 +191,8 @@ directly with `ioutil`.
 use sync
 
 let ch  = sync::Channel[i64].make(8)   // bounded channel, cap 8
-let mu  = sync::Mutex.make()
-let cnt = sync::AtomicI64.make(0)
+let mu  = sync::Mutex.new()
+let cnt = sync::Atomic[i64].new(0)
 ```
 
 See [14 - Fibers & Channels](14-fibers.md) for fiber and channel usage.

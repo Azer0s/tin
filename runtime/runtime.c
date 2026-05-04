@@ -14,12 +14,27 @@
 
 #include "runtime.h"
 #include <stdio.h>
+#include <signal.h>
 
 // Make stdout line-buffered so echo output appears immediately even when
 // stdout is connected to a pipe.  Line-buffering flushes on every '\n',
 // which is how tin's echo statement terminates every value.
 __attribute__((constructor)) static void _tin_stdout_init(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
+// Ignore SIGPIPE process-wide. Without this, writing to a closed socket
+// (a peer that disconnected mid-conversation) sends SIGPIPE to the
+// process and the default disposition kills it. Tin async writes return
+// -EPIPE to the caller via the normal error path; the runtime handles
+// that, but only if SIGPIPE doesn't reach the default handler first.
+// Echo-server stress tests under concurrent CI runners reliably hit
+// this when fragmented sends race the peer's close.
+__attribute__((constructor)) static void _tin_sigpipe_init(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGPIPE, &sa, NULL);
 }
 #include "arc.c"
 #include "strings.c"   // uses _tin_rc_alloc (arc)
@@ -39,4 +54,6 @@ __attribute__((constructor)) static void _tin_stdout_init(void) {
 #include "time.c"      // _tin_now_ms / _tin_now_us monotonic clock
 #include "interop.c"   // C-callable boundary helpers (#interop wrappers)
 #include "interop_trampoline.c"  // mmap'd per-instance closure trampolines
-#include "stacktrace.c" // stacktrace() builtin support (LLVM libunwind, see docs/plans/stacktrace-libunwind.md)
+#include "pclntab.c"   // PC -> file:line:col table (replaces libdw / DWARF)
+#include "stacktrace.c" // stacktrace() builtin support (FP walker + pclntab)
+#include "reflect_table.c" // link-time `tin_impl` walker (D1)

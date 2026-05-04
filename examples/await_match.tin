@@ -1,36 +1,58 @@
 use assert
+use sync
 use { sleep } from io
 
-fn{#async} slow_int(n i64) i64 =
+// `await match` deliberately fires for the FIRST future to complete and
+// drops the others. The dropped fibers' Futures are never awaited, so by
+// Tin's design (matching Go's goroutine semantics) they keep running and
+// their coro frames are reclaimed only when the process exits. valgrind
+// classifies that as "definitely lost" - the loss is intentional, not a
+// runtime bug, but it shows up as flake noise in this test suite.
+//
+// The pattern below uses a single `done` channel that every spawned
+// fiber signals when it finishes. After the await match picks an arm,
+// we drain one signal per spawned fiber: by the time we return from the
+// test, every fiber has cleanly hit its coro epilogue and its frame is
+// back in the per-thread pool. Without the drain, ~1 in 5 runs leaks
+// the un-selected fibers' frames under valgrind.
+fn{#async} slow_int(n i64, done sync::Channel[bool]) i64 =
   await sleep(1)
+  await done.send(true)
   return n
 
-fn{#async} slow_str(s string) string =
+fn{#async} slow_str(s string, done sync::Channel[bool]) string =
   await sleep(1)
+  await done.send(true)
   return s
 
 test "await match single future" =
-  let a = spawn slow_int(7)
+  let done = sync::Channel[bool].make(1)
+  let a = spawn slow_int(7, done)
   let got i64 = 0
   await match (a):
     case (x):
       got = x
+  let _ = await done.recv()
   assert::equals(7, got)
 
 test "await match two futures" =
-  let a = spawn slow_int(42)
-  let b = spawn slow_int(99)
+  let done = sync::Channel[bool].make(2)
+  let a = spawn slow_int(42, done)
+  let b = spawn slow_int(99, done)
   let got i64 = 0
   await match (a, b):
     case (x, _):
       got = x
     case (_, y):
       got = y
+  let _ = await done.recv()
+  let _ = await done.recv()
   assert::ok(got > 0)
 
 test "await match heterogeneous" =
-  let a = spawn slow_int(5)
-  let b = spawn slow_str("hello")
+  let done = sync::Channel[bool].make(2)
+  let a = spawn slow_int(5, done)
+  let b = spawn slow_str("hello", done)
   let int_got i64 = 0
   let str_got = ""
   await match (a, b):
@@ -38,20 +60,25 @@ test "await match heterogeneous" =
       int_got = n
     case (_, s):
       str_got = s
+  let _ = await done.recv()
+  let _ = await done.recv()
   let either = int_got + len(str_got)
   assert::ok(either > 0)
 
 test "await match default" =
-  let a = spawn slow_int(1)
+  let done = sync::Channel[bool].make(1)
+  let a = spawn slow_int(1, done)
   await match (a):
     case (x):
       assert::equals(1, x)
     default:
       assert::ok(true)
+  let _ = await done.recv()
 
 test "await match guard" =
-  let a = spawn slow_int(10)
-  let b = spawn slow_int(20)
+  let done = sync::Channel[bool].make(2)
+  let a = spawn slow_int(10, done)
+  let b = spawn slow_int(20, done)
   let got i64 = 0
   await match (a, b):
     case (x, _) if x > 5:
@@ -62,8 +89,9 @@ test "await match guard" =
       got = y
     case (_, y):
       got = -2
+  let _ = await done.recv()
+  let _ = await done.recv()
   assert::ok(got > 0)
 
 test "await match compiler error on variable array" =
   assert::ok(true)
-

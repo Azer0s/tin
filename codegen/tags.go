@@ -38,9 +38,7 @@ func isPureBuiltin(name string) bool {
 	return pureBuiltins[name]
 }
 
-// ---------------------------------------------------------------------------
 // #pure enforcement
-// ---------------------------------------------------------------------------
 
 // checkAllPureFuncs validates every #pure-tagged function in funcDecls.
 // Called after the predeclaration pass so all function signatures are known.
@@ -103,21 +101,24 @@ func (cg *CodeGen) walkPureNode(fnCtx string, node ast.Node, allowSideEffect boo
 		}
 
 	case *ast.Identifier:
-		if !allowSideEffect && cg.topLevelVarBareNames[v.Name] && !locals[v.Name] {
+		if !allowSideEffect && cg.topLevelVarBareNames[v.Name] && !locals[v.Name] && !cg.topLevelConstNames[v.Name] {
 			return cg.nodeErr(v, "fn %s: #pure violation - reads mutable top-level var %q", fnCtx, v.Name)
 		}
 
 	case *ast.ScopeAccess:
-		// pkg::name read: reject if it resolves to a mutable top-level var in
-		// any package. The bare name is the last path segment.
+		// pkg::name read: reject if it resolves to a mutable top-level
+		// var in any package. The bare name is the last path segment.
+		// Top-level CONST reads are allowed -- they're compile-time
+		// constants and don't make the call observably side-effecting.
 		//
-		// This is a heuristic: a false positive occurs only when one package
-		// exports a function (or other identifier) whose bare name matches a
-		// `var` declared in a different package. In practice the cross-pkg
-		// collision is rare; users hitting it can rename one of the two.
+		// This is a heuristic: a false positive occurs only when one
+		// package exports a function (or other identifier) whose bare
+		// name matches a `var` declared in a different package. In
+		// practice the cross-pkg collision is rare; users hitting it
+		// can rename one of the two.
 		if !allowSideEffect && len(v.Path) > 0 {
 			last := v.Path[len(v.Path)-1]
-			if cg.topLevelVarBareNames[last] {
+			if cg.topLevelVarBareNames[last] && !cg.topLevelConstNames[last] {
 				return cg.nodeErr(v, "fn %s: #pure violation - reads mutable top-level var %q", fnCtx, last)
 			}
 		}
@@ -596,9 +597,7 @@ func (cg *CodeGen) isPureCallable(fnCtx, calleeName string, visited map[string]b
 	return cg.walkPureNode(fnCtx, fd.Body, false, visited, calleeLocals)
 }
 
-// ---------------------------------------------------------------------------
 // #no_recurse enforcement (transitive)
-// ---------------------------------------------------------------------------
 
 // checkAllNoRecurseFuncs validates every #no_recurse-tagged function in funcDecls.
 // Detects recursion transitively through any depth of call chain.
@@ -833,9 +832,7 @@ func (cg *CodeGen) checkCallNoRecurse(targetFn string, call *ast.CallExpr, visit
 	return cg.walkNoRecurseNode(targetFn, fd.Body, visited)
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 // resolveCalleeName extracts the function name string from a CallExpr's Func field,
 // returning "" if it cannot be determined statically (e.g. function pointer).

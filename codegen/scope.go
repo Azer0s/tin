@@ -62,6 +62,15 @@ type scopeEntry struct {
 	// `sourcepos(symbol)` to report the binding location.
 	declPos ast.Pos
 
+	// declaredConst / declaredLet record whether the binding's source-
+	// level keyword was `const` / `let`. Used by `for ref` to refuse
+	// aliasing into immutable storage. `var` bindings have both flags
+	// false (the default). Synthetic bindings without a source keyword
+	// also have both false; ref-iteration over those is allowed because
+	// the compiler vouches for them being writable storage.
+	declaredConst bool
+	declaredLet   bool
+
 	// constInitExpr captures the initializer AST of a non-mutated `let` binding
 	// when that initializer can be statically analyzed for compile-time
 	// folding. Used by tryFoldExpr to follow `let t = typeof(v)` -> 'bool /
@@ -70,10 +79,46 @@ type scopeEntry struct {
 	// bool literal, integer literal); a later mutation invalidates this and
 	// the field is cleared by genAssign.
 	constInitExpr ast.Node
+
+	// ownsIfaceData is true for trait-iface let-bindings whose data ptr was
+	// freshly heap-allocated by coerceToTrait. emitScopeRelease emits an
+	// extra _tin_release on the iface's data field for these so the heap
+	// block is reclaimed. Both value-source and pointer-source coerceToTrait
+	// branches heap-copy the source struct now, so every value-to-iface
+	// let-binding sets this flag.
+	ownsIfaceData bool
+
+	// releaseRawPtr is set on synthetic alloca entries that hold a raw i8*
+	// heap pointer (e.g. anonymous iface temporaries from coerceToTrait
+	// passed inline as call arguments). emitScopeRelease loads the pointer
+	// and calls _tin_release on it. Used to defer cleanup of intermediate
+	// heap blocks until the enclosing scope exits, after any spawned
+	// fiber that captured the pointer has had a chance to complete via
+	// the scope's await.
+	releaseRawPtr bool
+
+	// isEarlyHeap is true when this `let` binding's storage was allocated
+	// via _tin_rc_alloc instead of stack alloca because escape analysis
+	// determined that the variable's address would outlive the function
+	// frame. entry.val IS the heap pointer (typed *T), so &x naturally
+	// produces a stable heap pointer and reads/writes through it work
+	// without any extra indirection. Scope-exit calls _tin_release on
+	// entry.val to drop the heap block.
+	isEarlyHeap bool
+
+	// ownsHeapIfaceData is true when this binding holds the result of a
+	// function that returned a *Trait whose `data` field is an escape-
+	// promoted heap pointer (the callee's source `&b` came from an
+	// escaping local). On scope exit, the iface block is released as
+	// usual AND the data field is released too -- neither would happen
+	// otherwise because nothing in the iface struct's static layout
+	// reveals that data points at heap memory.
+	ownsHeapIfaceData bool
 }
 
 type scope struct {
 	vars               map[string]*scopeEntry
+	names              []string // insertion order of `vars` keys; never randomized.
 	parent             *scope
 	isFunctionBoundary bool // if true, emitAllScopeReleases stops here and does not release parent vars
 }
@@ -95,5 +140,33 @@ func (s *scope) lookup(name string) (*scopeEntry, bool) {
 }
 
 func (s *scope) set(name string, e *scopeEntry) {
+	if _, existed := s.vars[name]; !existed {
+		s.names = append(s.names, name)
+	}
+
 	s.vars[name] = e
+}
+
+// each iterates the scope's entries in insertion order. Use this instead of
+// `range s.vars` whenever iteration order can leak into IR text - Go map
+// iteration is randomized per process, which would break the
+// content-addressed mono cache and the byte-identical-IR CI gate.
+func (s *scope) each(fn func(name string, e *scopeEntry)) {
+	for _, name := range s.names {
+		if e, ok := s.vars[name]; ok {
+			fn(name, e)
+		}
+	}
+}
+
+// eachReverse walks insertion order back-to-front. Used by emitScopeRelease
+// so ARC release happens LIFO (a variable that captured a reference to an
+// earlier-declared one is torn down first).
+func (s *scope) eachReverse(fn func(name string, e *scopeEntry)) {
+	for i := len(s.names) - 1; i >= 0; i-- {
+		name := s.names[i]
+		if e, ok := s.vars[name]; ok {
+			fn(name, e)
+		}
+	}
 }

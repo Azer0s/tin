@@ -16,7 +16,7 @@ package codegen
 // wrapper produced by emitPureFnCtfeShims. dlsym hits the shim, which
 // reuses the existing #interop marshal helpers (tin_interop_str_in/out,
 // tin_interop_slice_in/out, bool widening) before delegating to the
-// internal entry — the same path the user-tagged #interop pipeline uses.
+// internal entry - the same path the user-tagged #interop pipeline uses.
 
 import (
 	"fmt"
@@ -47,6 +47,7 @@ func (cg *CodeGen) ensureShimMod() *ir.Module {
 		cg.shimMod = ir.NewModule()
 		cg.shimMod.TargetTriple = cg.mod.TargetTriple
 		cg.shimMod.DataLayout = cg.mod.DataLayout
+		cg.shimMod.SourceFilename = "tin/ctfe-shim"
 	}
 
 	return cg.shimMod
@@ -162,21 +163,21 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 		if strings.Contains(name, "_") && fd.TraitQualifier != "" {
 			continue
 		}
-		// User already tagged it #interop — wrapper already emitted by
+		// User already tagged it #interop - wrapper already emitted by
 		// emitInteropWrappers under the bare name; reuse THAT one.
 		if hasTag(fd.Tags, "interop") {
 			cg.pureFnShims[name] = true
 
 			continue
 		}
-		// Skip generic / async / extern fns — validateInteropFunc would
+		// Skip generic / async / extern fns - validateInteropFunc would
 		// reject them anyway. Cheap pre-checks let us avoid building the
 		// wrapper for impossible cases.
 		if len(fd.TypeParams) > 0 || hasTag(fd.Tags, "async") || fd.IsExtern != "" {
 			continue
 		}
 		// Run the full #interop validator to gate types we can actually
-		// wrap. Failures are non-fatal — the fn just doesn't get a CTFE
+		// wrap. Failures are non-fatal - the fn just doesn't get a CTFE
 		// shim, and the dispatch path silently falls back to AST eval.
 		if err := cg.validateInteropFunc(fd); err != nil {
 			continue
@@ -209,7 +210,7 @@ func (cg *CodeGen) emitPureFnCtfeShims() error {
 // (.build/pure-fn/<Hash>/bin.so); IRText is the self-contained sub-module
 // .ll text the linker compiles.
 //
-// The function is exported with its native C-ABI signature — the same one
+// The function is exported with its native C-ABI signature - the same one
 // the #interop wrapper machinery would produce for primitive params and
 // returns. Callers dispatch via cgo shape entries (see ctfe_dispatch.go);
 // non-primitive args/returns will eventually route through the full
@@ -223,7 +224,7 @@ type PureFnArtifact struct {
 
 // PureFnsForCache walks every #pure function declared in the program and
 // returns one PureFnArtifact per fn. Fns whose Merkle hash cannot be computed
-// (generic, references unresolvable callees) are skipped silently — the AST
+// (generic, references unresolvable callees) are skipped silently - the AST
 // evaluator + main binary already cover the same fold path.
 //
 // The cache slice combines two source-of-truth modules:
@@ -239,7 +240,16 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtifact {
 		return nil
 	}
 
+	// Per-pkg compile (incremental compilation step 2) routes #pure fns
+	// into per-pkg modules, so the slicer needs to see ALL of cg.mod
+	// PLUS every per-pkg module's IR text. Concatenating gives the
+	// slicer one search target; the slicer is line-oriented so doubled
+	// `target triple` / `datalayout` headers don't confuse it (they
+	// match across modules).
 	mainText := cg.mod.String()
+	for _, m := range cg.PkgModules() {
+		mainText += "\n" + m.String()
+	}
 
 	shimText := ""
 	if cg.shimMod != nil {
@@ -252,7 +262,7 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtifact {
 		if !hasTag(fd.Tags, "pure") {
 			continue
 		}
-		// Generic functions cannot be sliced — their LLVM IR is per-instantiation.
+		// Generic functions cannot be sliced - their LLVM IR is per-instantiation.
 		if len(fd.TypeParams) > 0 {
 			continue
 		}
@@ -286,7 +296,7 @@ func (cg *CodeGen) PureFnsForCache() []PureFnArtifact {
 
 		// Combine. The forward declare for the internal entry that
 		// shimSlice carries collides with mainSlice's `define` for the
-		// same symbol — strip the duplicate `declare` line. Same for
+		// same symbol - strip the duplicate `declare` line. Same for
 		// any runtime-helper declares both halves emit independently.
 		ir := mergeSliceModules(mainSlice, shimSlice)
 		ir = promoteSymbolToExternal(ir, shimName)
@@ -338,7 +348,8 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 
 		switch {
 		case strings.HasPrefix(trimmed, "target triple"),
-			strings.HasPrefix(trimmed, "target datalayout"):
+			strings.HasPrefix(trimmed, "target datalayout"),
+			strings.HasPrefix(trimmed, "source_filename"):
 			if b.Len() == 0 {
 				b.WriteString(line)
 				b.WriteByte('\n')
@@ -384,7 +395,7 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 // collapsing whitespace runs AND truncating at the closing paren of the
 // argument list. Attribute lists (`alwaysinline readnone nounwind` etc.)
 // after that paren are advisory annotations the IR builder attaches to
-// some sides of an emit but not others — they don't affect calling
+// some sides of an emit but not others - they don't affect calling
 // convention or ABI, so an attribute-only divergence is NOT a sign of a
 // bug. By contrast, a divergence in return type or arg types between
 // the two halves WOULD produce a wrong .so, and the panic surrounding
@@ -473,6 +484,17 @@ func sliceIRForFuncs(fullIR string, targets []string) string {
 					foundAny = true
 				}
 
+				continue
+			}
+
+			// Drop alias lines: aliases reference whole-program entry
+			// points (e.g. `@main = alias i32 (), i32 ()* @_tin_c_main`)
+			// that the per-fn slice intentionally doesn't define. LLVM
+			// rejects an alias whose aliasee isn't a definition in the
+			// same module, so passing them through would error out the
+			// per-fn .so compile.
+			if strings.HasPrefix(strings.TrimSpace(line), "@") &&
+				strings.Contains(line, "= alias ") {
 				continue
 			}
 
