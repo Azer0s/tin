@@ -1145,6 +1145,16 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		}
 	}
 
+	// genTypeDecl may have registered concreteName as a typeAlias to a
+	// canonical-key form (e.g. `Tuple__udp::Conn__*errors::Error` ->
+	// `Tuple__udp__Conn__*errors__Error`); follow the alias chain before
+	// looking up the struct type.
+	if alias, ok := cg.typeAliases[concreteName]; ok {
+		if st, isSimple := alias.(*ast.SimpleType); isSimple {
+			concreteName = st.Name
+		}
+	}
+
 	st, ok := cg.structTypes[concreteName]
 	if !ok {
 		return nil, fmt.Errorf("failed to monomorphize Tuple type %q", concreteName)
