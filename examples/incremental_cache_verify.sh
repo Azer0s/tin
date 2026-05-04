@@ -109,14 +109,20 @@ check "tin clean preserves .build/pkg ($n_before_clean kept)" $?
 
 # 6. Cold build is deterministic: two cold builds produce byte-identical
 # binaries. Catches non-deterministic ordering in codegen / link.
-rm -rf .build /tmp/inc_a /tmp/inc_b
-./tin build "$work/a.tin" -o /tmp/inc_a >/dev/null 2>&1
-md5_a=$(md5sum /tmp/inc_a | awk '{print $1}')
-rm -rf .build
-./tin build "$work/a.tin" -o /tmp/inc_b >/dev/null 2>&1
-md5_b=$(md5sum /tmp/inc_b | awk '{print $1}')
-[[ "$md5_a" == "$md5_b" ]]
-check "two cold builds produce byte-identical binaries ($md5_a)" $?
+# Skipped on macOS: ld64 stamps a per-link UUID into LC_UUID by default
+# (and -no_uuid suppression isn't surfaced through the tin driver).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  printf '  skip  two cold builds produce byte-identical binaries (macOS LC_UUID stamping)\n'
+else
+  rm -rf .build /tmp/inc_a /tmp/inc_b
+  ./tin build "$work/a.tin" -o /tmp/inc_a >/dev/null 2>&1
+  md5_a=$(md5sum /tmp/inc_a | awk '{print $1}')
+  rm -rf .build
+  ./tin build "$work/a.tin" -o /tmp/inc_b >/dev/null 2>&1
+  md5_b=$(md5sum /tmp/inc_b | awk '{print $1}')
+  [[ "$md5_a" == "$md5_b" ]]
+  check "two cold builds produce byte-identical binaries ($md5_a)" $?
+fi
 
 # 7. Run/test cache invalidates on compiler binary change. The SBOM
 # records a synthetic __tin_binary__ entry hashing the running tin
@@ -202,7 +208,9 @@ done
 check "upstream pkg iface_hash unchanged across body edit" $?
 
 # 8. Concurrent builds of the same source share the cache safely. Race
-# four builds; all should succeed and produce byte-identical output.
+# four builds; all should succeed. On Linux we also assert byte-
+# identical output; on macOS we relax to just "all succeeded" because
+# ld64 stamps LC_UUID per link (see step 6).
 rm -rf .build
 pids=()
 for i in 1 2 3 4; do
@@ -213,14 +221,19 @@ race_rc=0
 for p in "${pids[@]}"; do
   wait "$p" || race_rc=1
 done
-md5_p=$(md5sum /tmp/inc_p1 | awk '{print $1}')
-md5_match=true
-for i in 2 3 4; do
-  this=$(md5sum "/tmp/inc_p$i" 2>/dev/null | awk '{print $1}')
-  [[ "$this" == "$md5_p" ]] || md5_match=false
-done
-[[ $race_rc -eq 0 && "$md5_match" == "true" ]]
-check "4 concurrent builds succeed and produce identical binaries" $?
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  [[ $race_rc -eq 0 && -s /tmp/inc_p1 && -s /tmp/inc_p2 && -s /tmp/inc_p3 && -s /tmp/inc_p4 ]]
+  check "4 concurrent builds succeed (macOS: byte-identity skipped, see step 6)" $?
+else
+  md5_p=$(md5sum /tmp/inc_p1 | awk '{print $1}')
+  md5_match=true
+  for i in 2 3 4; do
+    this=$(md5sum "/tmp/inc_p$i" 2>/dev/null | awk '{print $1}')
+    [[ "$this" == "$md5_p" ]] || md5_match=false
+  done
+  [[ $race_rc -eq 0 && "$md5_match" == "true" ]]
+  check "4 concurrent builds succeed and produce identical binaries" $?
+fi
 rm -f /tmp/inc_p*
 
 echo
