@@ -14,17 +14,23 @@ package codegen
 
 /*
 #cgo linux LDFLAGS: -ldl -lffi
-// macOS: libffi is keg-only Homebrew. Pick the prefix per-arch so the
-// linker doesn't warn about non-existent -L paths (clang is silent on
-// stray -I, but ld64 warns on stray -L). Users with a custom prefix
-// (MacPorts, manual install) can override via CGO_CFLAGS / CGO_LDFLAGS.
-#cgo darwin,arm64  CFLAGS:  -I/opt/homebrew/opt/libffi/include
-#cgo darwin,arm64  LDFLAGS: -L/opt/homebrew/opt/libffi/lib -lffi
-#cgo darwin,amd64  CFLAGS:  -I/usr/local/opt/libffi/include
-#cgo darwin,amd64  LDFLAGS: -L/usr/local/opt/libffi/lib -lffi
+// macOS: prefer the SDK's bundled libffi (header lives at <ffi/ffi.h>
+// inside the active CommandLineTools / Xcode SDK, library is part of
+// libSystem so a bare -lffi resolves it). Fall back to Homebrew via
+// extra -I lines so a Homebrew-installed libffi at the canonical
+// keg-only path also works -- ffi/ffi.h gets shadowed by ffi.h there
+// but both point at compatible headers. Users with a custom prefix
+// can still override via CGO_CFLAGS / CGO_LDFLAGS.
+#cgo darwin           LDFLAGS: -lffi
+#cgo darwin,arm64    CFLAGS: -I/opt/homebrew/opt/libffi/include
+#cgo darwin,amd64    CFLAGS: -I/usr/local/opt/libffi/include
 
 #include <dlfcn.h>
+#if __APPLE__
+#include <ffi/ffi.h>
+#else
 #include <ffi.h>
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 
