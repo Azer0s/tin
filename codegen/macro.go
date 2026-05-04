@@ -750,7 +750,7 @@ func parseExprString(s string) (ast.Node, error) {
 		return nil, fmt.Errorf("parse macro output %q: lex error: %w", s, err)
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, "<macro>")
 
 	return p.ParseExpr()
 }

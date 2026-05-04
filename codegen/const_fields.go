@@ -60,7 +60,7 @@ func (cg *CodeGen) checkFieldWritable(target ast.Node) error {
 		}
 
 		if cg.structConstFields[structName][t.Field] {
-			return cg.nodeErr(t, "cannot assign to const field %s.%s", structName, t.Field)
+			return cg.nodeErr(t, "cannot assign to const field %s.%s", cg.diagStructName(structName), t.Field)
 		}
 
 	case *ast.IndexExpr:

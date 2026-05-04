@@ -60,11 +60,15 @@ func ansiYellowText(s string) string { return ansi(ansiYellow, s) }
 func ansiCyanText(s string) string  { return ansi(ansiCyan, s) }
 func ansiDimText(s string) string   { return ansi(ansiDim, s) }
 
-// diagHeader matches the standard `file:line:col: ...` prefix produced
-// by every codegen / parser error. The file group accepts paths with
-// colons (uncommon on POSIX but legal on Windows volumes after we
-// strip the drive letter); it also accepts the bare-relative form.
-var diagHeader = regexp.MustCompile(`^([^:\n]+(?::[^:\n]*)*?):(\d+):(\d+):\s*(.*)$`)
+// diagHeader matches the standard `file:line:col[-endcol]: ...`
+// prefix produced by every codegen / parser error. The file group
+// accepts paths with colons (uncommon on POSIX but legal on Windows
+// volumes after we strip the drive letter); it also accepts the
+// bare-relative form. The optional `-endcol` lets a producer specify
+// the underline span explicitly when it knows where the offending
+// region ends; without it the renderer falls back to identifier-scan
+// heuristics.
+var diagHeader = regexp.MustCompile(`^([^:\n]+(?::[^:\n]*)*?):(\d+):(\d+)(?:-(\d+))?:\s*(.*)$`)
 
 // labelPattern catches the optional "warning:" / "error:" tag that
 // follows the position when the diagnostic came through warnInFile.
@@ -119,7 +123,15 @@ func renderOneLine(line string) string {
 		return line
 	}
 
-	rest := m[4]
+	endCol := 0
+
+	if m[4] != "" {
+		if v, e := strconv.Atoi(m[4]); e == nil {
+			endCol = v
+		}
+	}
+
+	rest := m[5]
 
 	// Pull the level and possible -W flag out of the message body so
 	// we can color them separately from the user-visible text.
@@ -144,7 +156,7 @@ func renderOneLine(line string) string {
 		return formatHeader(level, msg, flag, file, lineNum, col)
 	}
 
-	return formatSnippet(level, msg, flag, file, lineNum, col, source)
+	return formatSnippet(level, msg, flag, file, lineNum, col, endCol, source)
 }
 
 // formatHeader renders the no-source form: just the position +
@@ -169,7 +181,8 @@ func formatHeader(level, msg, flag string, file string, lineNum, col int) string
 	}
 
 	b.WriteString("\n")
-	b.WriteString(ansiCyanText("  --> "))
+	b.WriteString(strings.Repeat(" ", numWidth(lineNum)+1))
+	b.WriteString(ansiCyanText("--> "))
 	b.WriteString(fmt.Sprintf("%s:%d:%d", file, lineNum, col))
 
 	return b.String()
@@ -177,8 +190,11 @@ func formatHeader(level, msg, flag string, file string, lineNum, col int) string
 
 // formatSnippet is the Rust-style block: header, gutter, source line
 // with caret. The gutter width is chosen to fit the line number plus
-// one space padding.
-func formatSnippet(level, msg, flag, file string, lineNum, col int, source string) string {
+// one space padding. When endCol > col, the caret spans columns
+// [col, endCol] (1-indexed, inclusive); otherwise the renderer falls
+// back to identifier/operator/string heuristics for the underline
+// width.
+func formatSnippet(level, msg, flag, file string, lineNum, col, endCol int, source string) string {
 	var b strings.Builder
 
 	colorize := ansiRedText
@@ -204,16 +220,19 @@ func formatSnippet(level, msg, flag, file string, lineNum, col int, source strin
 
 	b.WriteString("\n")
 
-	gutter := strings.Repeat(" ", numWidth(lineNum))
+	// Gutter is `numWidth + 1` spaces wide -- one slot for the line
+	// number plus one trailing space -- so the `|` separators land in
+	// the same column for the numbered, empty and caret lines.
+	gutter := strings.Repeat(" ", numWidth(lineNum)+1)
 
 	b.WriteString(gutter)
-	b.WriteString(ansiCyanText(" --> "))
+	b.WriteString(ansiCyanText("--> "))
 	b.WriteString(fmt.Sprintf("%s:%d:%d\n", file, lineNum, col))
 
 	b.WriteString(gutter)
-	b.WriteString(ansiCyanText(" |\n"))
+	b.WriteString(ansiCyanText("|\n"))
 
-	b.WriteString(ansiCyanText(fmt.Sprintf(" %d | ", lineNum)))
+	b.WriteString(ansiCyanText(fmt.Sprintf("%d | ", lineNum)))
 	b.WriteString(source)
 	b.WriteString("\n")
 
@@ -222,14 +241,100 @@ func formatSnippet(level, msg, flag, file string, lineNum, col int, source strin
 	// column. Tabs in source count as one column for the caret too --
 	// matching Rust's behavior, which trades exact alignment for not
 	// having to know the user's tab width.
-	caret := strings.Repeat(" ", col-1) + "^"
+	//
+	// Span: explicit endCol wins (the producer knows the offending
+	// region's bounds). Otherwise, widen heuristically: identifier
+	// scans the rest of the name; quote scans the string literal;
+	// op-char scans the operator run.
+	var span int
+	if endCol >= col {
+		span = endCol - col + 1
+	} else {
+		span = caretSpan(source, col)
+	}
+
+	caret := strings.Repeat(" ", col-1) + strings.Repeat("^", span)
 
 	b.WriteString(gutter)
-	b.WriteString(ansiCyanText(" | "))
+	b.WriteString(ansiCyanText("| "))
 	b.WriteString(caretCol(caret))
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// caretSpan returns how many characters of `source` to underline,
+// starting at 1-indexed column `col`. Lands on an identifier? underline
+// the whole identifier. Lands on a string literal opener? underline the
+// quoted run (closing quote inclusive). Anything else (operator,
+// punctuation, end-of-line) gets a single-char caret.
+//
+// Returns at least 1 so the gutter math never produces an empty caret.
+func caretSpan(source string, col int) int {
+	if col < 1 || col > len(source) {
+		return 1
+	}
+
+	c := source[col-1]
+	if isIdentStart(c) {
+		n := 1
+		for col-1+n < len(source) && isIdentCont(source[col-1+n]) {
+			n++
+		}
+
+		return n
+	}
+
+	if c == '"' || c == '\'' {
+		quote := c
+		n := 1
+
+		for col-1+n < len(source) {
+			ch := source[col-1+n]
+			if ch == '\\' && col-1+n+1 < len(source) {
+				n += 2 // skip the escaped char as a unit
+				continue
+			}
+
+			n++
+			if ch == quote {
+				break
+			}
+		}
+
+		return n
+	}
+
+	// Operator-class char: greedily consume the run so multi-char ops
+	// like ++, ==, +=, <=, ..  get a caret across the whole token
+	// instead of the first character only.
+	if isOpChar(c) {
+		n := 1
+		for col-1+n < len(source) && isOpChar(source[col-1+n]) {
+			n++
+		}
+
+		return n
+	}
+
+	return 1
+}
+
+func isOpChar(b byte) bool {
+	switch b {
+	case '+', '-', '*', '/', '%', '=', '<', '>', '!', '&', '|', '^', '~', '.', '?':
+		return true
+	}
+
+	return false
+}
+
+func isIdentStart(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isIdentCont(b byte) bool {
+	return isIdentStart(b) || (b >= '0' && b <= '9')
 }
 
 // numWidth returns the digit count of n. Used to size the gutter so

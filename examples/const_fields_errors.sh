@@ -120,7 +120,7 @@ fn main() i64 =
 '
 
 # ── generic struct monomorphization preserves const-ness ──
-assert_err "generic monomorph" "cannot assign to const field IntBox.value" '
+assert_err "generic monomorph" "cannot assign to const field Box[i64].value" '
 struct Box[t] =
   const value t
 

@@ -176,6 +176,7 @@ func (cg *CodeGen) relocateFnToMonoModule(fn *ir.Func, hash string) {
 		target = ir.NewModule()
 		target.TargetTriple = cg.mod.TargetTriple
 		target.DataLayout = cg.mod.DataLayout
+		target.SourceFilename = "tin/mono:" + hash
 		cg.monoMods[hash] = target
 	}
 

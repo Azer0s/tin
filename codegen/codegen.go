@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -1199,46 +1200,79 @@ func (cg *CodeGen) targetIsARM64() bool {
 // compile a trivial C snippet to LLVM IR and read the "target triple" line.
 func newModuleWithTriple() *ir.Module {
 	mod := ir.NewModule()
-	// TIN_TARGET_TRIPLE env var overrides the target triple (for testing cross-targets).
-	if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
-		mod.TargetTriple = override
-
-		return mod
-	}
-	// Compile an empty C translation unit to LLVM IR and extract the triple
-	// that clang actually emits.  This is the only way to get the normalized
-	// macosx-style triple (rather than the darwin-style one from -dumpmachine).
-	if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
-		Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, `target triple = "`) {
-				triple := strings.TrimPrefix(line, `target triple = "`)
-
-				triple = strings.TrimSuffix(triple, `"`)
-				if triple != "" {
-					mod.TargetTriple = triple
-
-					return mod
-				}
-			}
-		}
-	}
-	// Fallback by GOOS/GOARCH when clang is unavailable.
-	switch runtime.GOOS + "/" + runtime.GOARCH {
-	case "linux/amd64":
-		mod.TargetTriple = "x86_64-pc-linux-gnu"
-	case "linux/arm64":
-		mod.TargetTriple = "aarch64-unknown-linux-gnu"
-	case "darwin/amd64":
-		mod.TargetTriple = "x86_64-apple-macosx11.0.0"
-	case "darwin/arm64":
-		mod.TargetTriple = "arm64-apple-macosx11.0.0"
-	default:
-		mod.TargetTriple = "x86_64-pc-linux-gnu"
-	}
+	mod.TargetTriple = detectTargetTriple()
+	// Pin the source-filename to a stable string so opt + ld.lld
+	// produce deterministic bitcode metadata regardless of the
+	// random temp-file path tin writes the IR to. Without this, the
+	// random-suffixed temp name leaks into the binary's symbol table
+	// and breaks reproducible-build tests.
+	mod.SourceFilename = "tin"
 
 	return mod
 }
+
+// SetTargetTriple lets the caller (typically main, after consulting
+// the disk-cached host-info record) hand us a precomputed triple so
+// codegen doesn't itself spawn clang. The setter is one-shot per
+// process; subsequent calls are no-ops, matching the sync.Once
+// semantics of the original auto-probe path.
+func SetTargetTriple(t string) {
+	targetTripleOnce.Do(func() { targetTripleCache = t })
+}
+
+// detectTargetTriple returns the LLVM target triple this build should
+// emit. Prefers the value supplied via SetTargetTriple (the disk-
+// cached host-info path). Falls back to TIN_TARGET_TRIPLE, then to a
+// live `clang -x c -` probe, then to a hardcoded GOOS/GOARCH map.
+func detectTargetTriple() string {
+	targetTripleOnce.Do(func() {
+		// TIN_TARGET_TRIPLE env var overrides the triple (for cross-target tests).
+		if override := os.Getenv("TIN_TARGET_TRIPLE"); override != "" {
+			targetTripleCache = override
+
+			return
+		}
+		// Compile an empty C TU to LLVM IR and extract the triple that
+		// clang actually emits. This is the only way to get the
+		// normalized macosx-style triple (rather than the darwin-style
+		// one from -dumpmachine).
+		if out, err := exec.Command("clang", "-x", "c", "-", "-S", "-emit-llvm", "-o", "-").
+			Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(line, `target triple = "`) {
+					triple := strings.TrimPrefix(line, `target triple = "`)
+
+					triple = strings.TrimSuffix(triple, `"`)
+					if triple != "" {
+						targetTripleCache = triple
+
+						return
+					}
+				}
+			}
+		}
+		// Fallback by GOOS/GOARCH when clang is unavailable.
+		switch runtime.GOOS + "/" + runtime.GOARCH {
+		case "linux/amd64":
+			targetTripleCache = "x86_64-pc-linux-gnu"
+		case "linux/arm64":
+			targetTripleCache = "aarch64-unknown-linux-gnu"
+		case "darwin/amd64":
+			targetTripleCache = "x86_64-apple-macosx11.0.0"
+		case "darwin/arm64":
+			targetTripleCache = "arm64-apple-macosx11.0.0"
+		default:
+			targetTripleCache = "x86_64-pc-linux-gnu"
+		}
+	})
+
+	return targetTripleCache
+}
+
+var (
+	targetTripleCache string
+	targetTripleOnce  sync.Once
+)
 
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {

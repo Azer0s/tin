@@ -478,7 +478,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		return fmt.Errorf("use %q: lex: %w", rawPath, lexErr)
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros from `use { name } from pkg` so the parser
 	// can do token substitution before parsing (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
@@ -488,6 +488,10 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %q: parse: %w", rawPath, parseErr)
+	}
+
+	for _, raw := range p.Warnings() {
+		_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 	}
 
 	cg.pkgSrcPaths = append(cg.pkgSrcPaths, srcPath)
@@ -912,7 +916,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		return fmt.Errorf("use %s: lex: %w", pkgPath, lexErr)
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros imported via `use { name } from pkg` so the
 	// parser can substitute them as bare tokens (same pattern as main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
@@ -922,6 +926,10 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
 		return fmt.Errorf("use %s: parse: %w", pkgPath, parseErr)
+	}
+
+	for _, raw := range p.Warnings() {
+		_, _ = fmt.Fprintln(os.Stderr, RenderDiagnostic(raw))
 	}
 
 	// Collect exported names from the package.

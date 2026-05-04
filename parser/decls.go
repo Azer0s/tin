@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
@@ -89,8 +88,8 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	if !p.check(lexer.NEWLINE) && !p.check(lexer.EOF) {
 		tok := p.peek()
 
-		return nil, fmt.Errorf("%d:%d: struct %s: body must start on the next line, indented; inline `struct Name = field type` is not supported -- write each field on its own indented line",
-			tok.Line, tok.Col, nameTok.Literal)
+		return nil, p.errAtTok(tok, "struct %s: body must start on the next line, indented; inline %q is not supported -- write each field on its own indented line",
+			nameTok.Literal, "struct Name = field type")
 	}
 
 	if p.check(lexer.NEWLINE) {
@@ -601,14 +600,14 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	}
 
 	if !p.check(lexer.NEWLINE) {
-		return nil, fmt.Errorf("%s: data %s: expected newline after '='", p.peek().String(), decl.Name)
+		return nil, p.errAtTok(p.peek(), "data %s: expected newline after '='", decl.Name)
 	}
 
 	p.advance()
 	p.skipNewlines()
 
 	if !p.check(lexer.INDENT) {
-		return nil, fmt.Errorf("%s: data %s: expected indented variant list", p.peek().String(), decl.Name)
+		return nil, p.errAtTok(p.peek(), "data %s: expected indented variant list", decl.Name)
 	}
 
 	p.advance()
@@ -636,11 +635,11 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	}
 
 	if len(decl.Variants) == 0 {
-		return nil, fmt.Errorf("data %s: at least one variant is required", decl.Name)
+		return nil, p.errAtTok(nameTok, "data %s: at least one variant is required", decl.Name)
 	}
 
 	if !anyPayload {
-		return nil, fmt.Errorf("data %s: at least one variant must carry a payload; use \"enum\" for pure-nullary sums", decl.Name)
+		return nil, p.errAtTok(nameTok, "data %s: at least one variant must carry a payload; use \"enum\" for pure-nullary sums", decl.Name)
 	}
 
 	return decl, nil
@@ -792,7 +791,7 @@ func (p *Parser) parseUseDecl() (*ast.UseDecl, error) {
 		}
 		// Expect soft keyword "from"
 		if !p.check(lexer.IDENT) || p.peek().Literal != "from" {
-			return nil, fmt.Errorf("expected 'from' after import list, got %q", p.peek().Literal)
+			return nil, p.errAtTok(p.peek(), "expected 'from' after import list, got %q", p.peek().Literal)
 		}
 
 		p.advance() // consume "from"
@@ -967,7 +966,7 @@ func (p *Parser) parseTestDecl() (*ast.TestDecl, error) {
 
 	// Expect a string description
 	if !p.check(lexer.STRING_LIT) {
-		return nil, fmt.Errorf("line %d: expected string description after 'test'", p.peek().Line)
+		return nil, p.errAtTok(p.peek(), "expected string description after 'test'")
 	}
 
 	decl.Desc = p.advance().Literal

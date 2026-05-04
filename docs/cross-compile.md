@@ -10,11 +10,14 @@ runs on. Both directions are supported on amd64 and arm64:
 | macOS amd64  | darwin/{amd64, arm64}, linux/{amd64, arm64}     |
 | macOS arm64  | darwin/{amd64, arm64}, linux/{amd64, arm64}     |
 
-The host's `clang` does the cross-compile via `-target <triple>`, with
-`lld` as the linker (it handles both ELF and Mach-O). Per-fn CTFE
-caches always build for the host triple - they're `dlopen`'d by the
-running compiler during constant folding, so they must match the host
-ABI even when the user-facing binary targets a different platform.
+The IR pipeline runs through host `opt` and host `ld.lld` (which
+handles both ELF and Mach-O via `ld64.lld` for darwin targets), with
+clang only invoked for C source compilation -- the host clang's
+`-target <triple>` flag, plus the appropriate sysroot, sets up the
+cross-compile cleanly. Per-fn CTFE caches always build for the host
+triple -- they're `dlopen`'d by the running compiler during constant
+folding, so they must match the host ABI even when the user-facing
+binary targets a different platform.
 
 ---
 
@@ -89,16 +92,26 @@ needed.
 
 The compiler picks tools and flags based on host vs target:
 
-| Step              | Same arch          | Cross-compile                          |
-|-------------------|--------------------|----------------------------------------|
-| Frontend          | host clang         | host clang + `-target <triple>`        |
-| Linker            | system default     | `clang -fuse-ld=lld`                   |
-| Sysroot           | implicit           | `-isysroot` (Darwin) / `--sysroot` (Linux) |
-| CTFE per-fn `.so` | host triple always | host triple always (ignores `-target`) |
+| Step              | Same arch                | Cross-compile                          |
+|-------------------|--------------------------|----------------------------------------|
+| IR -> bitcode     | host `opt`               | host `opt` (target-agnostic at this stage) |
+| C source          | host clang               | host clang + `-target <triple>`        |
+| Link              | `ld.lld` / `ld64.lld`    | same; lld port chosen by target OS     |
+| Sysroot           | implicit                 | `-isysroot` (Darwin) / `--sysroot` (Linux) |
+| CTFE per-fn `.so` | host triple always       | host triple always (ignores `-target`) |
 
-`lld` is required because GNU `ld` doesn't speak Mach-O and `ld64`
-doesn't speak ELF. `clang -fuse-ld=lld` covers both formats with one
-linker.
+`lld` is required because GNU `ld` doesn't speak Mach-O and Apple's
+`ld64` doesn't speak ELF. lld provides both `ld.lld` (ELF) and
+`ld64.lld` (Mach-O) under one project; the build picks the right one
+based on `-target`.
+
+> **Note:** the Mach-O path (`ld64.lld`) hasn't been end-to-end
+> validated on a real macOS host since the move to direct LLVM tools.
+> The probe + split-argv machinery is host-OS-agnostic, but Mach-O
+> uses an entirely different linker syntax (`-arch`, `-platform_version`,
+> `-l<name>` only -- no `--build-id`, no `--gc-sections`), so the
+> first macOS build under this pipeline may surface issues. File
+> a bug if you hit one.
 
 ---
 
@@ -141,6 +154,8 @@ with `--macos-sdk`.
 
 **"can't find linker lld"**: install LLVM's `lld`. `apt install lld`
 on Debian/Ubuntu, `pacman -S lld` on Arch, `brew install lld` on macOS.
+The package installs `ld.lld` (ELF) and `ld64.lld` (Mach-O) together;
+tin picks the right port based on `-target`.
 
 **"header not found" at clang stage**: the sysroot is incomplete or
 points at the wrong path. Confirm `<sysroot>/usr/include/stdio.h`

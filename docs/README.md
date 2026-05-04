@@ -110,7 +110,10 @@ fn main() =
 
 ## Get started
 
-Prerequisites: `clang` and LLVM 21 or newer on `PATH`.
+Prerequisites: `clang`, `opt`, and `ld.lld` (the `lld` package on most
+distros), all from LLVM 21 or newer, on `PATH`. The IR pipeline runs
+through `opt` and `ld.lld` directly; `clang` is only invoked for C
+source compilation and a few one-shot tooling probes.
 
 ```sh
 go build .
@@ -148,16 +151,17 @@ of thinLTO link work.
 ### 2. Per-package object cache (`.build/pkg/`)
 
 Each imported package is compiled to its own `.o` file keyed by
-SHA-256 of the package's IR text + canonical clang argv + host arch
-+ clang version. The slot also stores `.iface.json` + `.iface_hash`
-(the interface manifest — exported function signatures, struct
-shapes, trait impls).
+SHA-256 of the package's IR text + canonical compile-flag set + host
+arch + clang version. The slot also stores `.iface.json` +
+`.iface_hash` (the interface manifest — exported function signatures,
+struct shapes, trait impls).
 
 Effect: editing one package only invalidates that package's `.o`.
 Downstream consumers' IR is unchanged (their imports' interfaces
 didn't change), so their `.o` slots still hit. The link step still
-runs, but per-pkg compile is parallelized via clang's worker pool
-(`-j N`, default GOMAXPROCS).
+runs, but per-pkg compile is parallelized via the worker pool
+(`-j N`, default GOMAXPROCS) using `opt` for IR-to-bitcode and ld.lld
+for the link.
 
 ### 3. C-source cache (`.build/csrc/`)
 
@@ -185,7 +189,7 @@ on every push.
 ### Build observability
 
 `-v` prints per-stage progress to stderr. During the parallel compile
-phase, each clang job emits start/done events with elapsed time so
+phase, each compile job emits start/done events with elapsed time so
 you can see what's actually running:
 
 ```

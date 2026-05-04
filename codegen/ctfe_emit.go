@@ -47,6 +47,7 @@ func (cg *CodeGen) ensureShimMod() *ir.Module {
 		cg.shimMod = ir.NewModule()
 		cg.shimMod.TargetTriple = cg.mod.TargetTriple
 		cg.shimMod.DataLayout = cg.mod.DataLayout
+		cg.shimMod.SourceFilename = "tin/ctfe-shim"
 	}
 
 	return cg.shimMod
@@ -347,7 +348,8 @@ func mergeSliceModules(mainSlice, shimSlice string) string {
 
 		switch {
 		case strings.HasPrefix(trimmed, "target triple"),
-			strings.HasPrefix(trimmed, "target datalayout"):
+			strings.HasPrefix(trimmed, "target datalayout"),
+			strings.HasPrefix(trimmed, "source_filename"):
 			if b.Len() == 0 {
 				b.WriteString(line)
 				b.WriteByte('\n')

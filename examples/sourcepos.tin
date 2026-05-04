@@ -30,10 +30,10 @@ test "sourcepos(local let) resolves the let declaration line" =
 
 test "sourcepos(expression) resolves the expression site" =
   // Non-identifier args fall back to the containing-fn name as the
-  // symbol prefix, matching the runtime stacktrace format. The BinExpr
-  // position falls back to the sourcepos call site when the parser
-  // doesn't tag the arithmetic node directly.
-  assert::equals(locate_expr(), '"locate_expr@examples/sourcepos.tin:17:32")
+  // symbol prefix, matching the runtime stacktrace format. BinExpr
+  // nodes are tagged with the operator's position so diagnostics
+  // (and sourcepos) point at the offending operator.
+  assert::equals(locate_expr(), '"locate_expr@examples/sourcepos.tin:17:44")
 
 test "sourcepos atoms are first-class equal" =
   let a atom = sourcepos(helper)

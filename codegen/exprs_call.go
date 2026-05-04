@@ -2,7 +2,6 @@ package codegen
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -374,15 +373,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		entry, ok := cg.curScope.lookup(fn.Name)
 		if !ok {
-			return nil, cg.nodeErr(e, "undefined function: %s", fn.Name)
+			return nil, cg.nodeErr(fn, "undefined function: %s", fn.Name)
 		}
 		// Warn when a {#blocking} extern is called inside an {#async} function.
 		if cg.curCoroHdl != nil {
 			if origDecl, found := cg.funcDecls[fn.Name]; found {
 				if origDecl.IsExtern != "" && hasTag(origDecl.Tags, "blocking") {
-					_, _ = fmt.Fprintf(os.Stderr,
-						"warning: calling blocking extern %q inside an {#async} function; "+
-							"use async_read/async_write instead\n", fn.Name)
+					cg.warn("blocking-in-async", e.Pos(),
+						"calling blocking extern %q inside an {#async} function; use async_read/async_write instead",
+						fn.Name)
 				}
 			}
 		}
@@ -1435,12 +1434,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
+		// Anchor the diagnostic on the function name (e.Func) so the
+		// underline starts at the identifier, not the open-paren. Falls
+		// back to the call expression's position when Func has no Pos.
+		anchor := ast.Node(e)
+		if e.Func != nil && e.Func.Pos().Line > 0 {
+			anchor = e.Func
+		}
+
+		endCol := cg.sourceLineEndCol(anchor.Pos().Line)
 		if calleeName != "" {
-			return nil, cg.nodeErr(e, "wrong number of arguments to %q: got %d, want %d",
+			return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments to %q: got %d, want %d",
 				calleeName, len(llArgs), len(calleeType.Params))
 		}
 
-		return nil, cg.nodeErr(e, "wrong number of arguments: got %d, want %d",
+		return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments: got %d, want %d",
 			len(llArgs), len(calleeType.Params))
 	}
 

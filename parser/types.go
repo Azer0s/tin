@@ -539,7 +539,7 @@ func parseStringInterp(s string) (ast.Node, error) {
 			return nil, fmt.Errorf("interpolation error in {%s}: %w", exprSrc, err)
 		}
 
-		rp := New(toks)
+		rp := New(toks, "<interp>")
 
 		expr, err := rp.parseExpr()
 		if err != nil {
@@ -595,7 +595,7 @@ func ParseType(src string) (ast.TypeExpr, error) {
 		return nil, err
 	}
 
-	p := New(tokens)
+	p := New(tokens, "<type>")
 
 	return p.parseTypeExpr()
 }

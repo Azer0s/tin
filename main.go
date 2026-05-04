@@ -574,7 +574,28 @@ func main() {
 	// Default ANSI color on when stderr is a terminal -- matches what
 	// rustc and clang do. Overridable via --color={always,never,auto}
 	// later in arg parsing.
+	//
+	// Honor the standard env-var conventions:
+	//   NO_COLOR (any value)        -> disable colors unconditionally
+	//                                  (https://no-color.org)
+	//   CLICOLOR_FORCE=1            -> force colors even when piped
+	//                                  (https://bixense.com/clicolors/)
+	// The CLI flag --color=<auto|always|never> still wins over both.
 	codegen.AnsiEnabled = isStderrTTY()
+	if _, hasNoColor := os.LookupEnv("NO_COLOR"); hasNoColor {
+		codegen.AnsiEnabled = false
+	}
+
+	if os.Getenv("CLICOLOR_FORCE") == "1" {
+		codegen.AnsiEnabled = true
+	}
+
+	// Prime the disk-cached host-info so subsequent helpers (target
+	// triple detection in codegen, version banner in cache keys, link
+	// probe) never re-spawn clang on a warm machine.
+	if t := hostInfo().TargetTriple; t != "" {
+		codegen.SetTargetTriple(t)
+	}
 
 	if v := clangMajorVersion(); v > 0 && v < 15 {
 		_, _ = fmt.Fprintf(os.Stderr,
@@ -999,7 +1020,7 @@ doneFlags:
 	// can do token substitution for them before parsing begins.
 	cprog.step(file, "parse")
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, file)
 	for name, expansion := range codegen.ScanImportedNoParensMacros(file, tokens, stdlibDirForDirectives(stdlibOverride), nil) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
@@ -1010,7 +1031,11 @@ doneFlags:
 
 	prog, parseErr := p.Parse()
 	if parseErr != nil {
-		die("parse error: %v", parseErr)
+		die("parse error: %s", parseErr.Error())
+	}
+
+	for _, raw := range p.Warnings() {
+		_, _ = fmt.Fprintln(os.Stderr, codegen.RenderDiagnostic(raw))
 	}
 
 	// Preprocess: expand macros and print expanded source (no codegen/IR)
@@ -1363,35 +1388,11 @@ doneFlags:
 	}
 }
 
-// clangMajorVersion runs `clang --version` and returns the major version number,
-// or 0 if the version cannot be determined.
+// clangMajorVersion returns the major clang version number, or 0 if
+// the version cannot be determined. Backed by the disk-cached
+// host-info record.
 func clangMajorVersion() int {
-	out, err := exec.Command("clang", "--version").Output()
-	if err != nil {
-		return 0
-	}
-
-	// Output looks like: "Ubuntu clang version 18.1.3" or "clang version 14.0.0"
-	// Find "version " followed by a decimal major number.
-	s := string(out)
-
-	idx := strings.Index(s, "version ")
-	if idx < 0 {
-		return 0
-	}
-
-	s = s[idx+len("version "):]
-	major := 0
-
-	for _, ch := range s {
-		if ch >= '0' && ch <= '9' {
-			major = major*10 + int(ch-'0')
-		} else {
-			break
-		}
-	}
-
-	return major
+	return hostInfo().ClangMajorVersion
 }
 
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
@@ -1551,14 +1552,10 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			prog.step(sourceFile, "coro split")
 		}
 
-		splitArgs := append([]string{"-O1", "-S", "-emit-llvm"}, clangTargetFlag()...)
-		splitArgs = append(splitArgs, llInputFile, "-o", splitName)
-		split := exec.Command("clang", splitArgs...)
-		split.Stdout = os.Stdout
-
-		split.Stderr = os.Stderr
-
-		if err := split.Run(); err != nil {
+		if err := coroSplit(llInputFile, splitName, compileIROpts{
+			optLevel:    "-O1",
+			targetFlags: clangTargetFlag(),
+		}); err != nil {
 			return fmt.Errorf("coro split pass failed: %w", err)
 		}
 
@@ -1599,13 +1596,10 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		defer func() { _ = os.Remove(irObjName) }()
 
-		irArgs := append([]string{optLevel, "-c"}, clangTargetFlag()...)
-		irArgs = append(irArgs, llInputFile, "-o", irObjName)
-		clangIR := exec.Command("clang", irArgs...)
-		clangIR.Stdout = os.Stdout
-
-		clangIR.Stderr = os.Stderr
-		if err := clangIR.Run(); err != nil {
+		if err := compileIRToObj(llInputFile, irObjName, compileIROpts{
+			optLevel:    optLevel,
+			targetFlags: clangTargetFlag(),
+		}); err != nil {
 			return err
 		}
 
@@ -1737,7 +1731,19 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		}
 
 		a = append(a, llInputFile, "-o", irObjName)
-		jobsList = append(jobsList, compileJob{desc: filepath.Base(llInputFile), args: a})
+		ll, out := llInputFile, irObjName
+
+		jobsList = append(jobsList, compileJob{
+			desc: filepath.Base(llInputFile),
+			args: a,
+			runFn: func() error {
+				return compileIRToObj(ll, out, compileIROpts{
+					optLevel:    optLevel,
+					ltoMode:     "thin",
+					targetFlags: clangTargetFlag(),
+				})
+			},
+		})
 	}
 
 	// Per-pkg IR -> per-pkg .o. Each imported package's *ir.Module gets
@@ -1834,10 +1840,19 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		a := append([]string{}, flagsForKey...)
 		a = append(a, pkgLLName, "-o", tempObj)
+		in, out := pkgLLName, tempObj
+
 		jobsList = append(jobsList, compileJob{
 			desc:     "pkg:" + pkg.label,
 			args:     a,
 			renameTo: cachedObj,
+			runFn: func() error {
+				return compileIRToObj(in, out, compileIROpts{
+					optLevel:    optLevel,
+					ltoMode:     "thin",
+					targetFlags: clangTargetFlag(),
+				})
+			},
 		})
 	}
 
@@ -1967,76 +1982,28 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	// passed at compile time, .o files contain LLVM bitcode and the link
 	// runs the ThinLTO pipeline (parallel cross-TU inlining + global
 	// dead-code elimination).
-	args := []string{optLevel, "-flto=thin"}
-	args = append(args, clangTargetFlag()...)
-
-	if isDebug {
-		args = append(args, "-g")
-
-		if targetGOOS == "darwin" {
-			args = append(args, "-fstandalone-debug")
-		}
-	}
-
-	args = append(args, "-ffunction-sections", "-fdata-sections")
-	// Linker dead-code-stripping flag (per-target) plus (for
-	// cross-compile) the linker selection. lld is invoked via
-	// `-fuse-ld=lld` and dispatches to ld64.lld for Mach-O / ld.lld
-	// for ELF. The host's default linker only handles its native
-	// format, so we explicitly opt into lld whenever host != target.
-	if targetGOOS == "darwin" {
-		args = append(args, "-Wl,-dead_strip")
-	} else {
-		args = append(args, "-Wl,--gc-sections")
-	}
-
-	if runtime.GOOS != targetGOOS {
-		args = append(args, "-fuse-ld=lld")
-	}
-
-	args = append(args, linkInputs...)
-	args = append(args, cLinkerFlags...)
-	args = append(args, extraObjs...)
-	args = append(args, extraCFlags...)
-	// Conditional dynsym wiring. Only programs that reference
-	// `stacktrace()` pay the binary-size cost of dynsym promotion;
-	// default builds stay lean.
-	//
-	// `-rdynamic` promotes Tin user fns into the dynamic symbol table
-	// so dladdr can recover symbol names for IPs that fall outside the
-	// pclntab table (typically: runtime helpers, third-party C, libc).
-	// pclntab itself doesn't need dynsym - it stores names directly in
-	// .rodata and resolves via in-image section lookup - but the
-	// dladdr fallback in resolve_frame still does, otherwise frames in
-	// non-Tin code render as `??+0x<addr>` instead of `<lib>:sym+0x<off>`.
-	//
-	// macOS: dyld already keeps local symbols visible to dladdr until
-	// `strip` removes them, so `-rdynamic` is unnecessary on the
-	// Mach-O target.
-	//
-	// libdw / -ldw is GONE: the pclntab path in runtime/pclntab.c is
-	// the sole source-line resolver in every build (release + -g).
-	// -g still emits full DWARF for lldb / gdb, but stacktrace.c never
-	// reads it.
-	if stacktraceLinkActive && targetGOOS != "darwin" {
-		args = append(args, "-rdynamic")
-	}
-
-	args = append(args, "-o", outBin)
-
 	if prog != nil {
 		prog.step(outBin, "link")
 	}
 
-	clang := exec.Command("clang", args...)
-	clang.Stdout = os.Stdout
-	clang.Stderr = os.Stderr
+	allInputs := append([]string{}, linkInputs...)
+	allInputs = append(allInputs, extraObjs...)
 
-	if err := clang.Run(); err != nil {
-		return err
-	}
-
-	return nil
+	return linkBinary(allInputs, outBin, linkOpts{
+		optLevel:             optLevel,
+		ltoMode:              "thin",
+		debug:                isDebug,
+		standaloneDebugMacOS: targetGOOS == "darwin",
+		functionSecs:         true,
+		dataSecs:             true,
+		gcSections:           true,
+		useLld:               runtime.GOOS != targetGOOS,
+		rdynamic:             stacktraceLinkActive && targetGOOS != "darwin",
+		targetGOOS:           targetGOOS,
+		targetFlags:          clangTargetFlag(),
+		cLinkerFlags:         cLinkerFlags,
+		extraCFlags:          extraCFlags,
+	})
 }
 
 // chooseOptLevel returns the clang optimization flag for this build. Order of
@@ -2227,34 +2194,21 @@ func emitPureFnCache(cg *codegen.CodeGen, prog *compileProgress) error {
 // file compiled with the same flags reuses the .o across every Tin compile.
 const csrcCacheRoot = ".build/csrc"
 
-var (
-	clangVersionCache string
-	clangVersionOnce  sync.Once
-)
-
-// clangVersion returns the first line of `clang --version` output,
-// memoized for the process lifetime. Mixed into pkg/csrc cache keys so
-// a clang upgrade busts the cache. On error returns a per-process
-// sentinel (PID + start ns) so cache slots written under failure are
-// never reused — same defensive shape as tinBinaryHash.
+// clangVersion returns the first line of `clang --version` output.
+// Mixed into pkg/csrc cache keys so a clang upgrade busts the cache.
+// On probe failure returns a per-process sentinel (PID + start ns) so
+// cache slots written under failure are never reused -- same
+// defensive shape as tinBinaryHash.
+//
+// Backed by the disk-cached host-info record so subsequent tin
+// invocations reuse the result without re-spawning clang.
 func clangVersion() string {
-	clangVersionOnce.Do(func() {
-		out, err := exec.Command("clang", "--version").Output()
-		if err != nil {
-			clangVersionCache = fmt.Sprintf("UNAVAIL-pid%d-%d", os.Getpid(), time.Now().UnixNano())
+	v := hostInfo().ClangVersion
+	if v == "" {
+		return fmt.Sprintf("UNAVAIL-pid%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
 
-			fmt.Fprintf(os.Stderr, "warning: tin: can't read clang --version (%v); cache invalidation on toolchain change disabled, every build will miss\n", err)
-
-			return
-		}
-		// First line is e.g. "clang version 22.1.3 (...)" — keep just
-		// the version triple so a same-version build with a different
-		// install path or distro packaging still hits the cache.
-		first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
-		clangVersionCache = first
-	})
-
-	return clangVersionCache
+	return v
 }
 
 // pkgCacheRoot is the directory holding cached per-pkg .o files. Step 7
@@ -2364,16 +2318,24 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 	return objPath, false, nil
 }
 
-// compileJob describes a single `clang ...` invocation that runParallelClang
-// can fan out. desc is shown to the user via progress / error messages; args
-// are passed verbatim (no shell escaping). When renameTo is non-empty, the
-// runner renames the just-produced output (the path that appears as the -o
-// target inside args) to renameTo on success - so concurrent `tin` processes
-// can't half-write the same shared cache entry.
+// compileJob describes a single compile invocation that runParallelClang
+// can fan out. desc is shown to the user via progress / error messages.
+//
+// args is the canonical clang argv. It's used for cache-key generation
+// even when the actual execution goes through a different backend (the
+// argv shape is what the cache lookup hashes). When runFn is nil the
+// worker runs `clang args...` directly; when runFn is set the worker
+// invokes it instead -- that's how the lld backend supplies its own
+// `opt` invocation while preserving the cache-key contract.
+//
+// renameTo (when non-empty) tells the runner to atomically rename the
+// just-produced output to that path on success, so concurrent tin
+// processes can't half-write a shared cache entry.
 type compileJob struct {
 	desc     string
 	args     []string
 	renameTo string
+	runFn    func() error
 }
 
 // runParallelClang fans out a list of independent `clang ...` invocations
@@ -2415,10 +2377,14 @@ func runParallelClang(jobsList []compileJob, onJobEvent func(desc, kind string, 
 				onJobEvent(jobsList[i].desc, "start", 0)
 			}
 
-			cmd := exec.Command("clang", jobsList[i].args...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			errs[i] = cmd.Run()
+			if jobsList[i].runFn != nil {
+				errs[i] = jobsList[i].runFn()
+			} else {
+				cmd := exec.Command("clang", jobsList[i].args...)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				errs[i] = cmd.Run()
+			}
 
 			if onJobEvent != nil {
 				onJobEvent(jobsList[i].desc, "done", time.Since(start))
@@ -2687,7 +2653,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		cprog.step(fpath, "parse")
 
-		p := parser.New(tokens)
+		p := parser.New(tokens, fpath)
 		for name, expansion := range codegen.ScanImportedNoParensMacros(fpath, tokens, "", nil) {
 			p.RegisterNoParensMacro(name, expansion)
 		}
@@ -2696,10 +2662,15 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		if parseErr != nil {
 			cprog.clear()
 
-			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error: %v\n", fname, parseErr)
+			rendered := codegen.RenderDiagnostic(parseErr.Error())
+			_, _ = fmt.Fprintf(os.Stderr, "skip %s: parse error\n%s\n", fname, rendered)
 			results = append(results, result{fname, false, true, fmt.Sprintf("parse error: %v", parseErr), nil})
 
 			continue
+		}
+
+		for _, raw := range p.Warnings() {
+			_, _ = fmt.Fprintln(os.Stderr, codegen.RenderDiagnostic(raw))
 		}
 
 		cprog.step(fpath, "codegen")
@@ -3117,6 +3088,7 @@ func buildFlagsHash() string {
 		h.Write([]byte{0})
 		h.Write([]byte(linuxSysrootPath()))
 
+
 		sum := h.Sum(nil)
 		buildFlagsHashCache = hex.EncodeToString(sum[:4])
 	})
@@ -3411,8 +3383,17 @@ func runClean() {
 		// step 7 of incremental compilation). These are pure caches:
 		// hits never reuse stale entries because the key includes the
 		// content + every flag, so leaving them speeds up subsequent
-		// builds without correctness risk. Whole-program artifacts
-		// like .build/run/ and .build/test/ get wiped.
+		// builds without correctness risk.
+		//
+		// Everything else gets wiped:
+		//   .build/run/, .build/test/, .build/build/  -- whole-program artifacts
+		//   .build/host-info/                         -- toolchain probes
+		//                                                (cheap to redo, but
+		//                                                clearing them is the
+		//                                                only way to force a
+		//                                                fresh probe if the
+		//                                                user changed clang
+		//                                                in-place).
 		if e.Name() == "csrc" || e.Name() == "pure-fn" || e.Name() == "pkg" {
 			continue
 		}

@@ -62,6 +62,10 @@ func (cg *CodeGen) pkgMod(name string) *ir.Module {
 	m := ir.NewModule()
 	m.TargetTriple = cg.mod.TargetTriple
 	m.DataLayout = cg.mod.DataLayout
+	// Stable SourceFilename so opt-emitted bitcode is reproducible
+	// across builds; otherwise the random temp .ll path leaks into
+	// the binary's symbol table.
+	m.SourceFilename = "tin/pkg:" + name
 	cg.pkgMods[name] = m
 
 	return m

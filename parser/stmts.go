@@ -53,8 +53,8 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		if p.blockDepth > 0 {
 			tok := p.peek()
 
-			return nil, fmt.Errorf("%d:%d: `var` is module-scope only; use `let` for a mutable local binding, or move the `var` declaration to the top level",
-				tok.Line, tok.Col)
+			return nil, p.errAtTok(tok, "%q is module-scope only; use %q for a mutable local binding, or move the %q declaration to the top level",
+				"var", "let", "var")
 		}
 
 		return p.parseTopLevelVar()
@@ -768,8 +768,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 
 	// Require inline tuple literal.
 	if !p.check(lexer.LPAREN) {
-		return nil, fmt.Errorf("await match requires an inline tuple (...); variable and computed tuples are not yet supported (at %d:%d)",
-			p.peek().Line, p.peek().Col)
+		return nil, p.errAtTok(p.peek(), "await match requires an inline tuple (...); variable and computed tuples are not yet supported")
 	}
 
 	p.advance() // consume "("
@@ -802,7 +801,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	}
 
 	if len(futures) == 0 {
-		return nil, fmt.Errorf("await match requires at least one future in the tuple")
+		return nil, p.errAtTok(awaitPos, "await match requires at least one future in the tuple")
 	}
 
 	if _, err := p.expect(lexer.COLON); err != nil {
@@ -818,7 +817,7 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 	p.skipNewlines()
 
 	if !p.check(lexer.INDENT) {
-		return nil, fmt.Errorf("expected indented block after await match")
+		return nil, p.errAtTok(p.peek(), "expected indented block after await match")
 	}
 
 	p.advance() // consume INDENT
@@ -885,8 +884,8 @@ func (p *Parser) parseAwaitMatchStmt() (*ast.AwaitMatchStmt, error) {
 		}
 
 		if allGuarded {
-			fmt.Printf("%d:%d: warning: every await match arm has a guard and there is no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm or remove at least one guard, or suppress with -Wno-await-match-guards\n",
-				awaitPos.Line, awaitPos.Col)
+			p.warnAt(awaitPos.Line, awaitPos.Col, "await-match-guards",
+				"every await match arm has a guard and there is no default arm - if all futures complete without a passing guard, the program will panic at runtime; hint: add a 'default:' arm or remove at least one guard")
 		}
 	}
 
@@ -904,8 +903,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 	// Must be a tuple pattern.
 	if !p.check(lexer.LPAREN) {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match case must use a tuple pattern (...) (at %d:%d)",
-			p.peek().Line, p.peek().Col)
+		return ast.AwaitMatchCase{}, p.errAtTok(p.peek(), "await match case must use a tuple pattern (...)")
 	}
 
 	p.advance() // consume "("
@@ -932,8 +930,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 			name := p.advance().Literal
 			slots = append(slots, slot{name: name})
 		} else {
-			return ast.AwaitMatchCase{}, fmt.Errorf("unexpected token in await match pattern: %s (at %d:%d)",
-				p.peek().Type, p.peek().Line, p.peek().Col)
+			return ast.AwaitMatchCase{}, p.errAtTok(p.peek(), "unexpected token in await match pattern: %s", p.peek().Type)
 		}
 
 		p.skipWhitespace()
@@ -949,7 +946,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 
 	// Validate pattern length.
 	if len(slots) != nFutures {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match pattern length %d does not match futures tuple length %d",
+		return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match pattern length %d does not match futures tuple length %d",
 			len(slots), nFutures)
 	}
 
@@ -959,7 +956,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 	for i, s := range slots {
 		if !s.isWild {
 			if bindIdx >= 0 {
-				return ast.AwaitMatchCase{}, fmt.Errorf("await match case must have exactly one binding slot; found multiple non-wildcard slots")
+				return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match case must have exactly one binding slot; found multiple non-wildcard slots")
 			}
 
 			bindIdx = i
@@ -967,7 +964,7 @@ func (p *Parser) parseAwaitMatchCase(nFutures int) (ast.AwaitMatchCase, error) {
 	}
 
 	if bindIdx < 0 {
-		return ast.AwaitMatchCase{}, fmt.Errorf("await match case has no binding slot; use 'default:' for an unconditional arm")
+		return ast.AwaitMatchCase{}, p.errAt(pos.Line, pos.Col, "await match case has no binding slot; use 'default:' for an unconditional arm")
 	}
 
 	mc := ast.AwaitMatchCase{
@@ -1233,7 +1230,7 @@ func (p *Parser) parseArrayPattern() (*ast.ArrayPattern, error) {
 
 			ap.Elems = append(ap.Elems, elem)
 		} else {
-			return nil, fmt.Errorf("unexpected token in array pattern: %s", p.peek().Type)
+			return nil, p.errAtTok(p.peek(), "unexpected token in array pattern: %s", p.peek().Type)
 		}
 
 		p.skipWhitespace()

@@ -535,7 +535,7 @@ func parseSrc(src string) (*ast.Program, error) {
 		return nil, err
 	}
 
-	p := parser.New(tokens)
+	p := parser.New(tokens, "<repl>")
 
 	prog, parseErr := p.Parse()
 	if parseErr != nil {

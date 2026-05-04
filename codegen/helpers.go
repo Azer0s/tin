@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -135,12 +136,79 @@ func (cg *CodeGen) nodeErr(node ast.Node, format string, args ...interface{}) er
 	return fmt.Errorf("%s: %s", cg.posStr(node), fmt.Sprintf(format, args...))
 }
 
+// nodeErrSpan is nodeErr with an explicit end column, so the snippet
+// renderer underlines the entire `[startCol, endCol]` range instead of
+// applying its identifier/operator heuristic. Use when the offending
+// region is wider than a single token (e.g. a whole call site, a let
+// declaration spanning the line).
+//
+// endCol is 1-indexed and inclusive. When endCol <= startCol the range
+// degrades to a single-column caret -- callers can pass a sentinel
+// like `len(line)` to extend to end-of-line.
+func (cg *CodeGen) nodeErrSpan(node ast.Node, endCol int, format string, args ...interface{}) error {
+	var p ast.Pos
+	if node != nil {
+		p = node.Pos()
+	}
+
+	if p.Line == 0 {
+		p = cg.currentPos
+	}
+
+	if p.Line == 0 {
+		return fmt.Errorf("%s: %s", cg.filename, fmt.Sprintf(format, args...))
+	}
+
+	if endCol <= p.Col {
+		return fmt.Errorf("%s:%d:%d: %s", cg.filename, p.Line, p.Col, fmt.Sprintf(format, args...))
+	}
+
+	return fmt.Errorf("%s:%d:%d-%d: %s", cg.filename, p.Line, p.Col, endCol, fmt.Sprintf(format, args...))
+}
+
+// sourceLineEndCol returns the 1-indexed end column of `lineNum` in
+// the current source file. Used for "underline to end-of-line" spans
+// (e.g. let declarations whose AST node only carries the start
+// position). Returns 0 when the file isn't readable -- the caller
+// should fall back to a single-column caret.
+func (cg *CodeGen) sourceLineEndCol(lineNum int) int {
+	if cg.filename == "" || lineNum <= 0 {
+		return 0
+	}
+
+	src, ok := readSourceLine(cg.filename, lineNum)
+	if !ok {
+		return 0
+	}
+	// Strip trailing whitespace so the caret doesn't extend over
+	// blank padding the user can't see.
+	src = strings.TrimRight(src, " \t")
+
+	return len(src)
+}
+
 // displayStructName returns the user-facing name for a struct canonical key.
 // Package-qualified structs like "http__Client" are presented as "http::Client".
 // Bare names (user-level structs) are returned unchanged.
 func (cg *CodeGen) displayStructName(canonicalKey string) string {
 	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
 		return dn
+	}
+
+	return canonicalKey
+}
+
+// diagStructName is displayStructName plus a fallback that de-mangles
+// generic monomorphizations (`Box__i64` -> `Box[i64]`) so diagnostics
+// read as Tin source. Reflection helpers (typeof, etc.) keep the raw
+// canonical key via displayStructName -- it doubles as a stable id.
+func (cg *CodeGen) diagStructName(canonicalKey string) string {
+	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
+		return dn
+	}
+
+	if pretty := prettyStructName(canonicalKey); pretty != canonicalKey {
+		return pretty
 	}
 
 	return canonicalKey

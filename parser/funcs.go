@@ -1,8 +1,6 @@
 package parser
 
 import (
-	"fmt"
-
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
 )
@@ -215,7 +213,7 @@ func (p *Parser) parseFuncDecl(tags []string, isStatic bool) (*ast.FuncDecl, err
 
 			symTok, err := p.expect(lexer.STRING_LIT)
 			if err != nil {
-				return nil, fmt.Errorf("extern symbol must be a string literal, e.g. extern(\"name\")")
+				return nil, p.errAtTok(p.peek(), "extern symbol must be a string literal, e.g. extern(\"name\")")
 			}
 
 			sym := symTok.Literal
@@ -467,8 +465,7 @@ func (p *Parser) parseTypeBoundUnary() (ast.TypeBound, error) {
 		// eval time isn't worth the complexity here. Use a synthesized atom
 		// referencing a negation of the parenthesised sub-tree via a
 		// special helper. For now we only allow `not` on atoms (leaves).
-		return nil, fmt.Errorf("%d:%d: \"not\" in a type bound must apply to a trait name, not a parenthesised expression",
-			pos.Line, pos.Col)
+		return nil, p.errAt(pos.Line, pos.Col, "\"not\" in a type bound must apply to a trait name, not a parenthesised expression")
 	}
 
 	return p.parseTypeBoundAtom()
@@ -493,8 +490,7 @@ func (p *Parser) parseTypeBoundAtom() (ast.TypeBound, error) {
 	if !isTypeToken(p.peek()) && !p.check(lexer.IDENT) {
 		pos := p.curPos()
 
-		return nil, fmt.Errorf("%d:%d: expected trait name in type bound",
-			pos.Line, pos.Col)
+		return nil, p.errAt(pos.Line, pos.Col, "expected trait name in type bound")
 	}
 
 	pos := p.curPos()
@@ -632,8 +628,7 @@ func (p *Parser) parseWherePattern() (ast.Node, error) {
 	}
 
 	if p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: empty where pattern \"()\" is not allowed; use \"where _:\" for a catch-all",
-			openPos.Line, openPos.Col)
+		return nil, p.errAt(openPos.Line, openPos.Col, "empty where pattern \"()\" is not allowed; use \"where _:\" for a catch-all")
 	}
 
 	var elems []ast.Node

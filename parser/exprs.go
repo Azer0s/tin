@@ -97,14 +97,17 @@ func (p *Parser) parseRange() (ast.Node, error) {
 	}
 
 	if p.check(lexer.RANGE) {
-		p.advance()
+		opTok := p.advance()
 
 		right, err2 := p.parseTernary()
 		if err2 != nil {
 			return nil, err2
 		}
 
-		return &ast.BinExpr{Left: left, Op: "..", Right: right}, nil
+		be := &ast.BinExpr{Left: left, Op: "..", Right: right}
+		be.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+
+		return be, nil
 	}
 
 	return left, nil
@@ -242,14 +245,17 @@ func (p *Parser) parseAdditive() (ast.Node, error) {
 			break
 		}
 
-		op := p.advance().Literal
+		opTok := p.advance()
+		op := opTok.Literal
 
 		right, err2 := p.parseMultiplicative()
 		if err2 != nil {
 			return nil, err2
 		}
 
-		left = &ast.BinExpr{Left: left, Op: op, Right: right}
+		be := &ast.BinExpr{Left: left, Op: op, Right: right}
+		be.SetPos(ast.Pos{Line: opTok.Line, Col: opTok.Col})
+		left = be
 	}
 	// Consume matching DEDENT(s) for any INDENT consumed during additive continuation.
 	if indentConsumed > 0 && p.check(lexer.NEWLINE) {
@@ -1080,8 +1086,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 			return parseIntLitToken(next.Literal), nil
 		default:
-			return nil, fmt.Errorf("line %d: '@' must be followed by a char or integer literal, got %q",
-				next.Line, next.Literal)
+			return nil, p.errAtTok(next, "'@' must be followed by a char or integer literal, got %q", next.Literal)
 		}
 
 	case lexer.BOOL_LIT:
