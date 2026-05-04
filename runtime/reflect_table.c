@@ -89,44 +89,6 @@ static void _tin_impl_bucket_push(TinImplBucket *b, int32_t atom) {
     b->atoms[b->count++] = atom;
 }
 
-#ifdef __APPLE__
-#include <mach-o/getsect.h>
-#include <mach-o/dyld.h>
-
-// Walk every loaded Mach-O image and emit each TinImplEntry from its
-// __DATA,__tin_impl section. Iterating all images (rather than just the
-// main executable via _mh_execute_header) is required for the REPL,
-// where impl entries live in dlopen'd cell .so files. _mh_execute_header
-// is also unavailable when the runtime itself is built as a shared
-// library (the symbol only exists in the main executable image).
-static void _tin_iter_impl_section(void (*cb)(const TinImplEntry *)) {
-    uint32_t image_count = _dyld_image_count();
-    for (uint32_t i = 0; i < image_count; i++) {
-        const struct mach_header *hdr = _dyld_get_image_header(i);
-        if (hdr == NULL) continue;
-        unsigned long sz = 0;
-        const TinImplEntry *base = (const TinImplEntry *)getsectiondata(
-            (const struct mach_header_64 *)hdr,
-            "__DATA", "__tin_impl", &sz);
-        if (base == NULL || sz == 0) continue;
-        size_t n = sz / sizeof(TinImplEntry);
-        for (size_t j = 0; j < n; j++) cb(&base[j]);
-    }
-}
-#else
-// Weak refs so a binary that emits no impls (no `impl X for Y` anywhere)
-// still links: the section is empty and __start_/__stop_ resolve to NULL.
-extern const TinImplEntry __start_tin_impl[] __attribute__((weak));
-extern const TinImplEntry __stop_tin_impl[]  __attribute__((weak));
-
-static void _tin_iter_impl_section(void (*cb)(const TinImplEntry *)) {
-    if (__start_tin_impl == NULL || __stop_tin_impl == NULL) return;
-    for (const TinImplEntry *e = __start_tin_impl; e < __stop_tin_impl; e++) {
-        cb(e);
-    }
-}
-#endif
-
 static void _tin_impl_record(const TinImplEntry *e) {
     if (e == NULL || e->trait_name == NULL) return;
     int32_t atom = _tin_learn_atom(e->trait_name);
@@ -134,27 +96,111 @@ static void _tin_impl_record(const TinImplEntry *e) {
     _tin_impl_bucket_push(b, atom);
 }
 
+#ifdef __APPLE__
+#include <mach-o/getsect.h>
+#include <mach-o/dyld.h>
+
+// Mutex guarding _tin_impl_buckets vs. dyld's add-image callback: the
+// callback runs on whatever thread invoked dlopen and may be racing
+// with a query thread. Without this, two cells dlopen'd in parallel
+// from the REPL could both grow the bucket array concurrently and
+// corrupt the realloc.
+static pthread_mutex_t _tin_impl_table_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// _tin_impl_scan_image walks one Mach-O image's __DATA,__tin_impl
+// section and folds every entry into the table. Called both at
+// registration time (for already-loaded images) and on every future
+// dlopen via _dyld_register_func_for_add_image.
+static void _tin_impl_scan_image(const struct mach_header *hdr,
+                                  intptr_t vmaddr_slide) {
+    (void)vmaddr_slide;
+
+    if (hdr == NULL) return;
+
+    unsigned long sz = 0;
+    const TinImplEntry *base = (const TinImplEntry *)getsectiondata(
+        (const struct mach_header_64 *)hdr,
+        "__DATA", "__tin_impl", &sz);
+    if (base == NULL || sz == 0) return;
+
+    pthread_mutex_lock(&_tin_impl_table_mu);
+
+    size_t n = sz / sizeof(TinImplEntry);
+    for (size_t j = 0; j < n; j++) _tin_impl_record(&base[j]);
+
+    pthread_mutex_unlock(&_tin_impl_table_mu);
+}
+
 static void _tin_impl_table_init(void) {
-    _tin_iter_impl_section(_tin_impl_record);
+    // Registering once covers BOTH already-loaded images (dyld
+    // synchronously invokes the callback for each) AND every future
+    // dlopen -- so REPL cells loaded after process start get their
+    // impl entries discovered without us needing to re-scan on each
+    // query. Idempotent because pthread_once gates this.
+    _dyld_register_func_for_add_image(_tin_impl_scan_image);
 }
 
 void _tin_build_impl_table(void) {
     pthread_once(&_tin_impl_table_once, _tin_impl_table_init);
 }
+#else
+// Weak refs so a binary that emits no impls (no `impl X for Y` anywhere)
+// still links: the section is empty and __start_/__stop_ resolve to NULL.
+extern const TinImplEntry __start_tin_impl[] __attribute__((weak));
+extern const TinImplEntry __stop_tin_impl[]  __attribute__((weak));
+
+static void _tin_iter_impl_section(void) {
+    if (__start_tin_impl == NULL || __stop_tin_impl == NULL) return;
+    for (const TinImplEntry *e = __start_tin_impl; e < __stop_tin_impl; e++) {
+        _tin_impl_record(e);
+    }
+}
+
+static void _tin_impl_table_init(void) {
+    _tin_iter_impl_section();
+}
+
+void _tin_build_impl_table(void) {
+    pthread_once(&_tin_impl_table_once, _tin_impl_table_init);
+}
+#endif
+
+// On Apple, dyld's add-image callback can run concurrently with a
+// query (a dlopen on one thread while another thread calls traitof).
+// Lock reads and writes against the same mutex on that platform. On
+// ELF the table is fully populated by the link-time __start_/__stop_
+// scan at first query and never mutates after, so no lock is needed.
+#ifdef __APPLE__
+#define _TIN_IMPL_READ_LOCK()   pthread_mutex_lock(&_tin_impl_table_mu)
+#define _TIN_IMPL_READ_UNLOCK() pthread_mutex_unlock(&_tin_impl_table_mu)
+#else
+#define _TIN_IMPL_READ_LOCK()   ((void)0)
+#define _TIN_IMPL_READ_UNLOCK() ((void)0)
+#endif
 
 // Query: number of trait atoms for a given struct type id (0 if unknown).
 int32_t _tin_impl_count_for_type(int32_t type_id) {
     _tin_build_impl_table();
+
+    _TIN_IMPL_READ_LOCK();
     TinImplBucket *b = _tin_impl_bucket_for(type_id, 0);
-    return b ? b->count : 0;
+    int32_t count = b ? b->count : 0;
+    _TIN_IMPL_READ_UNLOCK();
+
+    return count;
 }
 
 // Query: i-th trait atom for a given struct type id (0 if out of range).
 int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx) {
     _tin_build_impl_table();
+
+    _TIN_IMPL_READ_LOCK();
     TinImplBucket *b = _tin_impl_bucket_for(type_id, 0);
-    if (b == NULL || idx < 0 || idx >= b->count) return 0;
-    return b->atoms[idx];
+    int32_t atom = 0;
+    if (b != NULL && idx >= 0 && idx < b->count) atom = b->atoms[idx];
+    _TIN_IMPL_READ_UNLOCK();
+
+    return atom;
 }
 
 // Query: total number of (type_id, trait) pairs across the whole table.
@@ -162,10 +208,14 @@ int32_t _tin_impl_atom_for_type(int32_t type_id, int32_t idx) {
 // time section walker actually saw the impls the compiler emitted.
 int32_t _tin_impl_total_entries(void) {
     _tin_build_impl_table();
+
+    _TIN_IMPL_READ_LOCK();
     int32_t total = 0;
     for (int32_t i = 0; i < _tin_impl_bucket_n; i++) {
         total += _tin_impl_buckets[i].count;
     }
+    _TIN_IMPL_READ_UNLOCK();
+
     return total;
 }
 

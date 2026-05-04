@@ -9,9 +9,9 @@ package main
 //
 // On the fast path we touch a marker file under .build/host-info/tools/
 // per detected tool. On subsequent invocations, presence of the marker
-// + presence of the tool in $PATH skips the more expensive --version
-// probe path. Negative results are NOT cached: a missing tool today may
-// be installed tomorrow.
+// + presence of the tool in $PATH skips the LookPath syscall path.
+// Negative results are NOT cached: a missing tool today may be installed
+// tomorrow.
 
 import (
 	"fmt"
@@ -30,6 +30,9 @@ const toolMarkerDir = ".build/host-info/tools"
 // requireTools verifies the toolchain tin needs to drive the backend.
 // On any miss, prints a per-distro install hint to stderr and exits.
 // Skipped on warm runs (marker file present + tool still in $PATH).
+//
+// Only call from compile paths -- subcommands that don't compile (clean,
+// repl-help text, no-args usage) should not require the toolchain.
 func requireTools() {
 	missing := []string{}
 
@@ -40,7 +43,20 @@ func requireTools() {
 	}
 
 	if len(missing) > 0 {
-		printMissingToolsHint(missing)
+		printMissingToolsHint(missing, false)
+		os.Exit(1)
+	}
+}
+
+// requireCrossCompileTools also requires `ld.lld` -- we force it via
+// `-fuse-ld=lld` on cross-compile because the host's system linker
+// rarely supports foreign target emulations. Only call when the user
+// has actually requested a cross-compile target.
+func requireCrossCompileTools() {
+	requireTools()
+
+	if !toolAvailable("ld.lld") {
+		printMissingToolsHint([]string{"ld.lld"}, true)
 		os.Exit(1)
 	}
 }
@@ -67,18 +83,30 @@ func toolAvailable(name string) bool {
 		return false
 	}
 	// First-time detection: persist the marker. Best-effort; failures
-	// just mean the next run repeats the LookPath, which is cheap.
+	// just mean the next run repeats the LookPath, which is cheap. Use
+	// Create+Close ("touch") for an idiomatic empty-file semantic.
 	_ = os.MkdirAll(toolMarkerDir, 0o755)
-	_ = os.WriteFile(marker, nil, 0o644)
+
+	if f, err := os.Create(marker); err == nil {
+		_ = f.Close()
+	}
 
 	return true
 }
 
 // printMissingToolsHint writes a tailored install hint to stderr based
-// on the detected package manager (or distro family on Linux).
-func printMissingToolsHint(missing []string) {
-	fmt.Fprintf(os.Stderr, "error: tin needs these tools but couldn't find them in $PATH: %s\n\n",
-		strings.Join(missing, ", "))
+// on the detected package manager (or distro family on Linux). When
+// crossCompile is true the message frames the missing tool as needed
+// only for cross-compile, so users without a foreign-arch use case
+// understand they can ignore it.
+func printMissingToolsHint(missing []string, crossCompile bool) {
+	scope := "needs"
+	if crossCompile {
+		scope = "needs (for cross-compile)"
+	}
+
+	fmt.Fprintf(os.Stderr, "error: tin %s these tools but couldn't find them in $PATH: %s\n\n",
+		scope, strings.Join(missing, ", "))
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -109,6 +137,19 @@ func printMissingToolsHint(missing []string) {
 		case "xbps":
 			fmt.Fprintln(os.Stderr, "Install on Void:")
 			fmt.Fprintln(os.Stderr, "    sudo xbps-install -S clang lld llvm")
+		case "emerge":
+			fmt.Fprintln(os.Stderr, "Install on Gentoo:")
+			fmt.Fprintln(os.Stderr, "    sudo emerge sys-devel/clang sys-devel/lld sys-devel/llvm")
+		case "eopkg":
+			fmt.Fprintln(os.Stderr, "Install on Solus:")
+			fmt.Fprintln(os.Stderr, "    sudo eopkg install clang lld llvm")
+		case "nix":
+			fmt.Fprintln(os.Stderr, "Install on NixOS / nix-env:")
+			fmt.Fprintln(os.Stderr, "    nix-env -iA nixpkgs.clang nixpkgs.lld nixpkgs.llvm")
+			fmt.Fprintln(os.Stderr, "or add `pkgs.clang pkgs.lld pkgs.llvm` to your environment.")
+		case "guix":
+			fmt.Fprintln(os.Stderr, "Install on Guix:")
+			fmt.Fprintln(os.Stderr, "    guix install clang lld llvm")
 		default:
 			fmt.Fprintln(os.Stderr, "Install via your distro's package manager. Typical names:")
 			fmt.Fprintln(os.Stderr, "    clang, lld, llvm")
@@ -134,6 +175,10 @@ func detectLinuxPM() string {
 		{"zypper", "zypper"},
 		{"apk", "apk"},
 		{"xbps-install", "xbps"},
+		{"emerge", "emerge"},
+		{"eopkg", "eopkg"},
+		{"nix-env", "nix"},
+		{"guix", "guix"},
 	} {
 		if _, err := exec.LookPath(candidate.bin); err == nil {
 			return candidate.name

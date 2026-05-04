@@ -592,26 +592,17 @@ func main() {
 		codegen.AnsiEnabled = true
 	}
 
-	// Verify the LLVM toolchain (clang + opt) is available before any
-	// path that needs it. Prints a per-distro install hint and exits
-	// on miss; warm runs short-circuit via per-tool marker files.
-	requireTools()
-
-	// Prime the disk-cached host-info so subsequent helpers (target
-	// triple detection in codegen, version banner in cache keys, link
-	// probe) never re-spawn clang on a warm machine.
-	if t := hostInfo().TargetTriple; t != "" {
-		codegen.SetTargetTriple(t)
-	}
-
-	if v := clangMajorVersion(); v > 0 && v < 15 {
-		_, _ = fmt.Fprintf(os.Stderr,
-			"error: clang version %d is too old; tin requires clang >= 15 (the presplitcoroutine attribute was added in LLVM 15)\n", v)
-
-		os.Exit(1)
-	}
+	// Toolchain checks are deferred until we know the user is asking
+	// for a compile (run/build/test/...). Subcommands that don't touch
+	// the backend (clean, repl-help text, no-args usage) shouldn't
+	// fail just because clang/opt aren't installed yet -- a fresh user
+	// running `tin --help` deserves to see the help, not an install
+	// hint. ensureBackendReady() below is called from each compile
+	// path before any clang/opt invocation.
 
 	if len(os.Args) >= 2 && os.Args[1] == "repl" {
+		ensureBackendReady()
+
 		runtimeDir := tinRuntimeDir()
 
 		var (
@@ -659,6 +650,8 @@ func main() {
 
 		os.Exit(1)
 	}
+
+	ensureBackendReady()
 
 	cmd := os.Args[1]
 
@@ -1404,6 +1397,36 @@ func clangMajorVersion() int {
 	return hostInfo().ClangMajorVersion
 }
 
+// minClangMajor is the lowest clang major version tin's IR pipeline
+// has been validated against. LLVM 17 is the floor: it's the first
+// release where the new opaque-pointer mode (which our IR emits) is
+// the default and the coroutine intrinsics match what we generate.
+// Bumping this requires verifying examples/ + stdlib/ pass under the
+// new minimum.
+const minClangMajor = 17
+
+// ensureBackendReady runs the toolchain probes that gate any compile.
+// LookPath-checks clang + opt, version-gates clang, and primes codegen
+// with the target triple. Cheap on warm runs (marker files + on-disk
+// JSON). The ld.lld check for cross-compile is deferred to the link
+// path where useLld actually fires; calling early would force every
+// invocation to require lld even for native builds.
+func ensureBackendReady() {
+	requireTools()
+
+	if t := hostInfo().TargetTriple; t != "" {
+		codegen.SetTargetTriple(t)
+	}
+
+	if v := clangMajorVersion(); v > 0 && v < minClangMajor {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"error: clang version %d is too old; tin requires clang >= %d\n",
+			v, minClangMajor)
+
+		os.Exit(1)
+	}
+}
+
 // fixCoroAttrs rewrites the LLVM IR string emitted by the llir library to
 // produce valid IR for the installed clang version.
 // "presplitcoroutine" must be a keyword attribute, not a string attribute.
@@ -1998,6 +2021,15 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	allInputs := append([]string{}, linkInputs...)
 	allInputs = append(allInputs, extraObjs...)
 
+	useLld := runtime.GOOS != targetGOOS || runtime.GOARCH != targetGOARCH
+	if useLld {
+		// Cross-compile path: ld.lld is the only linker we can rely on
+		// to support foreign target emulations. Fail fast with a
+		// per-distro install hint if it's missing, instead of letting
+		// clang surface a less-helpful "ld.lld: not found".
+		requireCrossCompileTools()
+	}
+
 	return linkBinary(allInputs, outBin, linkOpts{
 		optLevel:             optLevel,
 		ltoMode:              "thin",
@@ -2006,7 +2038,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		functionSecs:         true,
 		dataSecs:             true,
 		gcSections:           true,
-		useLld:               runtime.GOOS != targetGOOS || runtime.GOARCH != targetGOARCH,
+		useLld:               useLld,
 		rdynamic:             stacktraceLinkActive && targetGOOS != "darwin",
 		targetGOOS:           targetGOOS,
 		targetFlags:          clangTargetFlag(),
@@ -2312,6 +2344,15 @@ func csrcCacheLookup(srcPath string, args []string) (string, bool, error) {
 	sum.Write([]byte{0})
 	sum.Write([]byte(clangVersion()))
 
+	// Include the tin binary identity so a tin rebuild (which can
+	// change the IR/runtime contract -- e.g. new emitted symbols
+	// arc.c didn't yet define) invalidates stale cached .o files.
+	// `runtime.c` itself rarely changes by content, but its #includes
+	// (arc.c, fiber.c, ...) do; keying off the running tin binary
+	// catches every such transitive change in one stamp.
+	sum.Write([]byte{0})
+	sum.Write([]byte(tinBinaryHash()))
+
 	key := hex.EncodeToString(sum.Sum(nil))
 	dir := filepath.Join(csrcCacheRoot, key[:2])
 
@@ -2518,14 +2559,19 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 	}
 }
 
-// wrapExec returns exec.Command(prog, args...) unless $TIN_EXEC_WRAPPER is
-// set AND we're running a cross-arch binary, in which case it splits the
-// wrapper on whitespace and prepends it. The cross-arch guard prevents the
-// wrapper from leaking onto host-arch tools (e.g. macro CTFE shims always
-// build for the host).
+// wrapExec returns exec.Command(prog, args...) unless $TIN_EXEC_WRAPPER
+// is set AND we're running a foreign binary (cross-OS or cross-arch),
+// in which case it splits the wrapper on whitespace and prepends it.
+// The cross-target guard prevents the wrapper from leaking onto host-
+// platform tools (e.g. macro CTFE shims always build for the host).
+//
+// $TIN_EXEC_WRAPPER may contain whitespace-separated args (e.g.
+// `qemu-aarch64 -L /usr/aarch64-linux-gnu`), but doesn't support
+// quoted args with embedded whitespace -- matching Cargo's
+// CARGO_TARGET_<TRIPLE>_RUNNER convention.
 func wrapExec(prog string, args ...string) *exec.Cmd {
 	wrapper := strings.TrimSpace(os.Getenv("TIN_EXEC_WRAPPER"))
-	if wrapper == "" || runtime.GOARCH == targetGOARCH {
+	if wrapper == "" || (runtime.GOOS == targetGOOS && runtime.GOARCH == targetGOARCH) {
 		return exec.Command(prog, args...)
 	}
 
@@ -3424,12 +3470,16 @@ func runClean() {
 		// Everything else gets wiped:
 		//   .build/run/, .build/test/, .build/build/  -- whole-program artifacts
 		//   .build/host-info/                         -- toolchain probes
-		//                                                (cheap to redo, but
+		//                                                (clang version, target
+		//                                                triple, lld argv) AND
+		//                                                the per-tool presence
+		//                                                markers under tools/.
+		//                                                Cheap to redo, but
 		//                                                clearing them is the
 		//                                                only way to force a
 		//                                                fresh probe if the
 		//                                                user changed clang
-		//                                                in-place).
+		//                                                in-place.
 		if e.Name() == "csrc" || e.Name() == "pure-fn" || e.Name() == "pkg" {
 			continue
 		}

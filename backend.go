@@ -14,6 +14,8 @@ package main
 // equivalent path through the LLVM tools.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -176,12 +178,14 @@ func forceBuildIDSha1(args []string) []string {
 // ============================================================
 
 type lldArgvKey struct {
-	triple   string
-	optLevel string
-	debug    bool
-	ltoMode  string
-	macOS    bool
-	useLld   bool
+	triple        string
+	optLevel      string
+	debug         bool
+	ltoMode       string
+	macOS         bool
+	useLld        bool
+	standaloneDbg bool   // -fstandalone-debug (darwin debug builds)
+	extraHash     string // sha256(extraCFlags) so e.g. -fsanitize=address gets its own probe slot
 }
 
 type lldArgvEntry struct {
@@ -203,32 +207,63 @@ var (
 // machine, not per tin invocation.
 func lldArgvFor(opts linkOpts) *lldArgvEntry {
 	key := lldArgvKey{
-		triple:   tripleFromTargetGOOS(opts.targetGOOS, opts.targetFlags),
-		optLevel: opts.optLevel,
-		debug:    opts.debug,
-		ltoMode:  opts.ltoMode,
-		macOS:    opts.targetGOOS == "darwin",
-		useLld:   opts.useLld,
+		triple:        tripleFromTargetGOOS(opts.targetGOOS, opts.targetFlags),
+		optLevel:      opts.optLevel,
+		debug:         opts.debug,
+		ltoMode:       opts.ltoMode,
+		macOS:         opts.targetGOOS == "darwin",
+		useLld:        opts.useLld,
+		standaloneDbg: opts.standaloneDebugMacOS,
+		extraHash:     hashExtraCFlags(opts.extraCFlags),
 	}
 
 	if entry, ok := lookupLldArgv(key); ok {
 		return entry
 	}
 
-	if disk := readLldArgvFromDisk(key); disk != nil {
-		storeLldArgv(key, disk)
+	// Per-key lock so concurrent goroutines hitting the same key only
+	// run the probe once (the second arrival re-checks the cache after
+	// acquiring the lock and finds the first arrival's result).
+	probeOnce(key).Do(func() {
+		if disk := readLldArgvFromDisk(key); disk != nil {
+			storeLldArgv(key, disk)
 
-		return disk
+			return
+		}
+
+		entry := probeLldArgv(opts)
+		if entry.err == nil {
+			writeLldArgvToDisk(key, entry)
+		}
+
+		storeLldArgv(key, entry)
+	})
+
+	if entry, ok := lookupLldArgv(key); ok {
+		return entry
 	}
 
-	entry := probeLldArgv(opts)
-	if entry.err == nil {
-		writeLldArgvToDisk(key, entry)
+	return &lldArgvEntry{err: fmt.Errorf("lld probe: lookup miss after probe (internal)")}
+}
+
+// hashExtraCFlags returns a stable short hash of the user-supplied
+// --cflag values so two link targets with different extras (e.g.
+// -fsanitize=address vs nothing) get distinct probe cache slots. The
+// link argv depends on these flags (ASan adds libasan to the link
+// line); without this in the key, a second link with different extras
+// would silently reuse the wrong cached argv.
+func hashExtraCFlags(flags []string) string {
+	if len(flags) == 0 {
+		return ""
 	}
 
-	storeLldArgv(key, entry)
+	h := sha256.New()
+	for _, f := range flags {
+		h.Write([]byte(f))
+		h.Write([]byte{0})
+	}
 
-	return entry
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func lookupLldArgv(key lldArgvKey) (*lldArgvEntry, bool) {
@@ -245,6 +280,29 @@ func storeLldArgv(key lldArgvKey, entry *lldArgvEntry) {
 	defer lldArgvCacheMu.Unlock()
 
 	lldArgvCache[key] = entry
+}
+
+// probeOnce returns the per-key sync.Once used to coalesce concurrent
+// probes for the same lookup key. The Once value is keyed by the full
+// lldArgvKey so distinct (target, opt-level, ...) combos still probe
+// in parallel; only redundant probes for the SAME key block.
+var (
+	probeOnceMap = map[lldArgvKey]*sync.Once{}
+	probeOnceMu  sync.Mutex
+)
+
+func probeOnce(key lldArgvKey) *sync.Once {
+	probeOnceMu.Lock()
+	defer probeOnceMu.Unlock()
+
+	if o, ok := probeOnceMap[key]; ok {
+		return o
+	}
+
+	o := &sync.Once{}
+	probeOnceMap[key] = o
+
+	return o
 }
 
 // lldProbeCacheDir is the on-disk cache root for linker-argv probe
@@ -355,6 +413,14 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 		args = append(args, "-flto=thin")
 	}
 
+	if opts.debug {
+		args = append(args, "-g")
+	}
+
+	if opts.standaloneDebugMacOS && opts.targetGOOS == "darwin" {
+		args = append(args, "-fstandalone-debug")
+	}
+
 	args = append(args, opts.targetFlags...)
 
 	if opts.functionSecs {
@@ -377,6 +443,13 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 		args = append(args, "-fuse-ld=lld")
 	}
 
+	// extraCFlags is the user's --cflag passthrough. Some entries
+	// (e.g. -fsanitize=address) inject runtime libraries into the
+	// link line, so they MUST be in the probe argv -- otherwise the
+	// cached result would omit those libs and the link command tin
+	// later issues would fail to find them.
+	args = append(args, opts.extraCFlags...)
+
 	args = append(args, tmpPath, "-o", dummyOutPath, "-###")
 	out, _ := exec.Command("clang", args...).CombinedOutput()
 
@@ -387,10 +460,7 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 
 	last := lines[len(lines)-1]
 
-	toks, err := splitShellLine(last)
-	if err != nil {
-		return &lldArgvEntry{err: fmt.Errorf("lld probe: shlex: %w", err)}
-	}
+	toks := splitShellLine(last)
 
 	if len(toks) == 0 {
 		return &lldArgvEntry{err: fmt.Errorf("lld probe: empty argv")}
@@ -480,7 +550,11 @@ func writeDummyBitcode(path string, opts linkOpts) error {
 
 // splitShellLine parses a shell-style command line into argv tokens,
 // respecting double quotes (clang's -### uses them for every arg).
-func splitShellLine(line string) ([]string, error) {
+// Inside a quoted run, only `\\` and `\"` are recognized as escape
+// sequences (they unwrap to `\` and `"` respectively); a stray `\`
+// followed by anything else stays literal. Outside quotes a `\\` quotes
+// the next character verbatim.
+func splitShellLine(line string) []string {
 	var (
 		toks []string
 		buf  strings.Builder
@@ -489,6 +563,37 @@ func splitShellLine(line string) ([]string, error) {
 
 	for i := 0; i < len(line); i++ {
 		c := line[i]
+
+		// Escape sequences: handle them BEFORE the quote toggle so
+		// `\"` inside a quoted span stays a literal quote rather than
+		// closing the run.
+		if c == '\\' && i+1 < len(line) {
+			next := line[i+1]
+
+			if in {
+				if next == '"' || next == '\\' {
+					i++
+
+					buf.WriteByte(next)
+
+					continue
+				}
+				// Unknown escape inside quotes: keep both bytes
+				// literal (matches POSIX shell behavior for
+				// double-quoted strings).
+				buf.WriteByte(c)
+
+				continue
+			}
+
+			// Outside quotes: unconditional escape of the next byte.
+			i++
+
+			buf.WriteByte(next)
+
+			continue
+		}
+
 		if c == '"' {
 			in = !in
 
@@ -504,13 +609,6 @@ func splitShellLine(line string) ([]string, error) {
 			continue
 		}
 
-		if c == '\\' && i+1 < len(line) {
-			i++
-			buf.WriteByte(line[i])
-
-			continue
-		}
-
 		buf.WriteByte(c)
 	}
 
@@ -518,12 +616,17 @@ func splitShellLine(line string) ([]string, error) {
 		toks = append(toks, buf.String())
 	}
 
-	return toks, nil
+	return toks
 }
 
 // isClangTempForBase reports whether t looks like clang's renamed
 // temp object for an input whose basename (without extension) equals
-// `base`. Clang produces `/tmp/<base>-<hex>.o` under -flto=thin.
+// `base`. Clang produces `/tmp/<base>-<hex>.o` under -flto=thin where
+// the hex run is always at least six characters (`mkstemp`-style).
+// We require the same minimum so a foreign `.o` named `dummy-1.o`
+// can't be mistaken for the dummy.
+const clangTempMinHex = 6
+
 func isClangTempForBase(t, base string) bool {
 	if !strings.HasSuffix(t, ".o") {
 		return false
@@ -535,7 +638,7 @@ func isClangTempForBase(t, base string) bool {
 	}
 
 	rest := strings.TrimSuffix(strings.TrimPrefix(bt, base+"-"), ".o")
-	if len(rest) == 0 {
+	if len(rest) < clangTempMinHex {
 		return false
 	}
 

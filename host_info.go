@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -164,14 +165,14 @@ func probeClangVersionInto(info *hostToolchainInfo) {
 	s := string(out)
 
 	first := s
-	if idx := indexByte(s, '\n'); idx >= 0 {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
 		first = s[:idx]
 	}
 
-	info.ClangVersion = trimSpace(first)
+	info.ClangVersion = strings.TrimSpace(first)
 
 	// Parse "version <N>" then read the leading decimal run.
-	if idx := indexSubstr(s, "version "); idx >= 0 {
+	if idx := strings.Index(s, "version "); idx >= 0 {
 		rest := s[idx+len("version "):]
 		major := 0
 
@@ -214,10 +215,10 @@ func probeTargetTripleInto(info *hostToolchainInfo) {
 
 	const prefix = `target triple = "`
 
-	for _, line := range splitLines(string(out)) {
-		if hasPrefix(line, prefix) {
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, prefix) {
 			tr := line[len(prefix):]
-			if idx := indexByte(tr, '"'); idx >= 0 {
+			if idx := strings.IndexByte(tr, '"'); idx >= 0 {
 				tr = tr[:idx]
 			}
 
@@ -228,71 +229,4 @@ func probeTargetTripleInto(info *hostToolchainInfo) {
 			}
 		}
 	}
-}
-
-// Tiny string helpers kept local so this file doesn't need a strings
-// import (avoids accidentally drifting back to the heavyweight stdlib
-// API for one-line operations).
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-
-	return -1
-}
-
-func indexSubstr(s, sub string) int {
-	if len(sub) == 0 {
-		return 0
-	}
-
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-
-	return -1
-}
-
-func hasPrefix(s, p string) bool {
-	return len(s) >= len(p) && s[:len(p)] == p
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') {
-		s = s[1:]
-	}
-
-	for len(s) > 0 {
-		c := s[len(s)-1]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-			break
-		}
-
-		s = s[:len(s)-1]
-	}
-
-	return s
-}
-
-func splitLines(s string) []string {
-	var out []string
-
-	start := 0
-
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-
-	return out
 }

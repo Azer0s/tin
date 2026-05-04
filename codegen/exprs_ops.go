@@ -1145,14 +1145,28 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		}
 	}
 
-	// genTypeDecl may have registered concreteName as a typeAlias to a
-	// canonical-key form (e.g. `Tuple__udp::Conn__*errors::Error` ->
-	// `Tuple__udp__Conn__*errors__Error`); follow the alias chain before
-	// looking up the struct type.
-	if alias, ok := cg.typeAliases[concreteName]; ok {
-		if st, isSimple := alias.(*ast.SimpleType); isSimple {
-			concreteName = st.Name
+	// genTypeDecl may have registered concreteName as a typeAlias to
+	// a canonical-key form (e.g. `Tuple__udp::Conn__*errors::Error`
+	// -> `Tuple__udp__Conn__*errors__Error`). Follow the alias chain
+	// (with a safety bound) before looking up the struct type so
+	// multi-hop aliases also resolve. The 64-step cap mirrors
+	// typeExprCanonicalKeyN's recursion guard.
+	for i := 0; i < 64; i++ {
+		alias, ok := cg.typeAliases[concreteName]
+		if !ok {
+			break
 		}
+
+		st, isSimple := alias.(*ast.SimpleType)
+		if !isSimple {
+			break
+		}
+
+		if st.Name == concreteName {
+			break
+		}
+
+		concreteName = st.Name
 	}
 
 	st, ok := cg.structTypes[concreteName]
