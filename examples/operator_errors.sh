@@ -22,7 +22,7 @@ assert_err() {
   local want=$2
   local src=$3
   local tmp
-  tmp=$(mktemp --suffix=.tin)
+  tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   local out
   out=$(./tin run "$tmp" 2>&1 || true)
@@ -112,7 +112,7 @@ fn main() i64 =
 
 # ── verify primitives still work (negative regression check) ──
 # This MUST succeed; if it fails, the lockdown is over-eager.
-tmp=$(mktemp --suffix=.tin)
+tmp=$(mktemp)
 printf 'fn main() i64 =\n  let a = 1 + 2\n  let b = a * 3\n  let arr [i64] = [10, 20]\n  return b + arr[0]\n' > "$tmp"
 out=$(./tin run "$tmp" 2>&1 || true)
 rm -f "$tmp"

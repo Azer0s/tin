@@ -23,7 +23,7 @@ assert_err() {
   local want=$2
   local src=$3
   local tmp
-  tmp=$(mktemp --suffix=.tin)
+  tmp=$(mktemp)
   printf '%s\n' "$src" > "$tmp"
   local out
   out=$(./tin run "$tmp" 2>&1 || true)
@@ -115,7 +115,7 @@ fn main() i64 =
 # (proves the dead-strip is keyed on the bound, not on the method name).
 # Rather than rely on exit code (which programs use for return values),
 # `tin build` exits 0 on a clean compile and non-zero on diagnostic.
-work=$(mktemp --suffix=.tin)
+work=$(mktemp)
 out_bin=$(mktemp -u)
 cat > "$work" << 'EOF'
 struct Box[t] =
