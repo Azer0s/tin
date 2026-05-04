@@ -267,11 +267,12 @@ func clangTargetFlag() []string {
 			flags = append(flags, "-isysroot", sdk)
 		}
 	case "linux":
-		// Cross-compiling to Linux from a non-Linux host (typically
-		// macOS) needs a sysroot with glibc/musl headers + the
-		// dynamic linker. Skip when host is already Linux - clang
-		// already knows where /usr/include lives.
-		if runtime.GOOS != "linux" {
+		// Cross-compiling to Linux needs a sysroot with glibc headers
+		// + the target-arch dynamic linker. The native-Linux host can
+		// resolve /usr/include for its own arch but not for foreign
+		// archs (Arch x86 host can't satisfy /lib/ld-linux-aarch64.so.1
+		// without the cross-toolchain sysroot).
+		if runtime.GOOS != "linux" || runtime.GOARCH != targetGOARCH {
 			if sysroot := linuxSysrootPath(); sysroot != "" {
 				flags = append(flags, "--sysroot", sysroot)
 			}
@@ -367,6 +368,7 @@ func linuxSysrootPath() string {
 		"/opt/cross/" + arch + "-linux-gnu",
 		"/usr/local/" + arch + "-linux-gnu",
 		"/opt/homebrew/" + arch + "-linux-gnu",
+		"/usr/" + arch + "-linux-gnu",
 	}
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
@@ -1997,7 +1999,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		functionSecs:         true,
 		dataSecs:             true,
 		gcSections:           true,
-		useLld:               runtime.GOOS != targetGOOS,
+		useLld:               runtime.GOOS != targetGOOS || runtime.GOARCH != targetGOARCH,
 		rdynamic:             stacktraceLinkActive && targetGOOS != "darwin",
 		targetGOOS:           targetGOOS,
 		targetFlags:          clangTargetFlag(),
@@ -2485,6 +2487,10 @@ func validateMemcheck(memcheck string) {
 
 // memcheckCmd builds the exec.Cmd to run binary under the requested checker.
 // binArgs are forwarded to the binary as its argv[1..].
+//
+// $TIN_EXEC_WRAPPER prepends a runner (e.g. "qemu-aarch64") so cross-compiled
+// foreign-arch binaries can be exercised on the host. Modeled on Go's GOEXEC
+// and Cargo's CARGO_TARGET_<TRIPLE>_RUNNER.
 func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 	switch memcheck {
 	case "valgrind":
@@ -2495,14 +2501,32 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 			binary,
 		}, binArgs...)
 
-		return exec.Command("valgrind", args...)
+		return wrapExec("valgrind", args...)
 	case "leaks":
 		args := append([]string{"--atExit", "--", binary}, binArgs...)
 
-		return exec.Command("leaks", args...)
+		return wrapExec("leaks", args...)
 	default:
-		return exec.Command(binary, binArgs...)
+		return wrapExec(binary, binArgs...)
 	}
+}
+
+// wrapExec returns exec.Command(prog, args...) unless $TIN_EXEC_WRAPPER is
+// set AND we're running a cross-arch binary, in which case it splits the
+// wrapper on whitespace and prepends it. The cross-arch guard prevents the
+// wrapper from leaking onto host-arch tools (e.g. macro CTFE shims always
+// build for the host).
+func wrapExec(prog string, args ...string) *exec.Cmd {
+	wrapper := strings.TrimSpace(os.Getenv("TIN_EXEC_WRAPPER"))
+	if wrapper == "" || runtime.GOARCH == targetGOARCH {
+		return exec.Command(prog, args...)
+	}
+
+	parts := strings.Fields(wrapper)
+	full := append(append([]string{}, parts[1:]...), prog)
+	full = append(full, args...)
+
+	return exec.Command(parts[0], full...)
 }
 
 // runDirTestsRecursive collects all .tin files under root and runs them
@@ -2677,6 +2701,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		cg := codegen.New(fpath)
 		cg.SetTestMode(true)
+
+		if explicitTarget {
+			if triple := clangTripleForTarget(); triple != "" {
+				cg.SetTargetTriple(triple)
+			}
+		}
 
 		if verboseHeuristics {
 			cg.SetVerboseHeuristics(true)

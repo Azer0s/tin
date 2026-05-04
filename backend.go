@@ -186,6 +186,7 @@ type lldArgvKey struct {
 	debug    bool
 	ltoMode  string
 	macOS    bool
+	useLld   bool
 }
 
 type lldArgvEntry struct {
@@ -212,6 +213,7 @@ func lldArgvFor(opts linkOpts) *lldArgvEntry {
 		debug:    opts.debug,
 		ltoMode:  opts.ltoMode,
 		macOS:    opts.targetGOOS == "darwin",
+		useLld:   opts.useLld,
 	}
 
 	lldArgvCacheMu.Lock()
@@ -253,8 +255,8 @@ const lldProbeCacheDir = ".build/host-info/lld-probe"
 // so a clang upgrade (which can change the produced argv) busts the
 // cache.
 func lldProbeCacheKey(k lldArgvKey) string {
-	return fmt.Sprintf("%s_%s_%s_%v_%v_%s.argv",
-		clangVersion(), k.triple, k.optLevel, k.debug, k.macOS, k.ltoMode)
+	return fmt.Sprintf("%s_%s_%s_%v_%v_%s_%v.argv",
+		clangVersion(), k.triple, k.optLevel, k.debug, k.macOS, k.ltoMode, k.useLld)
 }
 
 // readLldArgvFromDisk loads a cached probe result. Returns nil on miss
@@ -315,11 +317,10 @@ func writeLldArgvToDisk(k lldArgvKey, entry *lldArgvEntry) {
 // first input object) and suffix (everything after the last). The
 // caller substitutes the actual `-o` and input list at the boundary.
 //
-// We do NOT pass `-fuse-ld=lld` to the probe -- letting clang pick
-// the system default means native macOS gets Apple's `ld`, native
-// Linux gets the system `ld` (which is usually a symlink to
-// `ld.bfd` or `ld.lld`), and cross-compiles get whatever clang's
-// driver chooses. The captured linker path is what we exec.
+// For native builds we let clang pick the system default linker
+// (Apple `ld` on macOS, system `ld` on Linux). For cross-compile
+// (opts.useLld) we force `-fuse-ld=lld` since the host's system
+// linker rarely supports foreign target emulations.
 func probeLldArgv(opts linkOpts) *lldArgvEntry {
 	tmp, err := os.CreateTemp("", "tin-lld-probe-*.bc")
 	if err != nil {
@@ -366,6 +367,10 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 		} else {
 			args = append(args, "-Wl,--gc-sections")
 		}
+	}
+
+	if opts.useLld {
+		args = append(args, "-fuse-ld=lld")
 	}
 
 	args = append(args, tmpPath, "-o", dummyOutPath, "-###")
