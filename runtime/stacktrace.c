@@ -381,11 +381,20 @@ static int32_t resolve_frame(uintptr_t ip, int spawn_of, int32_t flags) {
                 written = snprintf(buf, sizeof buf, "\"%s%s:%s+0x%lx\"",
                     spawn_pfx, lib, sym_name, off);
             }
-        } else if (off == 0 && !spawn_of) {
-            written = snprintf(buf, sizeof buf, "%s", sym_name);
         } else {
-            written = snprintf(buf, sizeof buf, "\"%s%s+0x%lx\"",
-                spawn_pfx, sym_name, off);
+            // Main binary: include the binary name after @ so callers can
+            // tell which binary the symbol belongs to without DWARF.
+            // Produces "sym@binary+0x<off>" (analogous to pclntab's "sym@file:line").
+            const char *fname = (have_dli && info.dli_fname) ? info.dli_fname : "";
+            const char *fbase = strrchr(fname, '/');
+            const char *bin   = fbase ? fbase + 1 : fname;
+            if (off == 0 && !spawn_of) {
+                written = snprintf(buf, sizeof buf, "\"%s%s@%s\"",
+                    spawn_pfx, sym_name, bin);
+            } else {
+                written = snprintf(buf, sizeof buf, "\"%s%s@%s+0x%lx\"",
+                    spawn_pfx, sym_name, bin, off);
+            }
         }
     } else {
         written = snprintf(buf, sizeof buf, "\"%s??+0x%lx\"",

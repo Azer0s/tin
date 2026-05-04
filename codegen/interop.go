@@ -471,23 +471,9 @@ func (cg *CodeGen) emitInteropWrappers(stmts []ast.Node) error {
 // passes. The user's contract is "this function is callable from C";
 // linker DCE breaks that contract.
 func (cg *CodeGen) pinInteropWrappers(wrappers []*ir.Func) {
-	if len(wrappers) == 0 {
-		return
+	for _, f := range wrappers {
+		cg.registerLlvmUsedFunc(cg.mod, f)
 	}
-
-	i8Ptr := irtypes.I8Ptr
-
-	entries := make([]constant.Constant, len(wrappers))
-	for i, f := range wrappers {
-		entries[i] = constant.NewBitCast(f, i8Ptr)
-	}
-
-	arrTy := irtypes.NewArray(uint64(len(wrappers)), i8Ptr)
-	init := constant.NewArray(arrTy, entries...)
-
-	used := cg.mod.NewGlobalDef("llvm.used", init)
-	used.Linkage = enum.LinkageAppending
-	used.Section = "llvm.metadata"
 }
 
 // emitInteropWrapperFor emits a single wrapper. Assumes the validation
@@ -520,6 +506,16 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 	if !ok {
 		return cg.nodeErr(fn, "fn %s: #interop entry resolved to non-function value", fn.Name)
 	}
+
+	// Override the pclntab display name so stacktrace() reports the
+	// C-visible symbol (__tin_interop_<name>) rather than the Tin source
+	// name. The heuristic would already return the IR name unchanged
+	// (it starts with __tin_), but recordFnDisplayName stored the Tin
+	// source name earlier; override it here.
+	if cg.fnDisplayNames == nil {
+		cg.fnDisplayNames = map[string]string{}
+	}
+	cg.fnDisplayNames[internalFn.Name()] = internalFn.Name()
 
 	// When the active emit target is a sibling module (CTFE shimMod),
 	// internalFn lives in cg.mod and is unreachable from the wrapper's
@@ -706,6 +702,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 	}
 
 	wrapper := cg.activeModule().NewFunc(wrapperName, retType, wrapperParams...)
+	wrapper.FuncAttrs = append(wrapper.FuncAttrs, ir.AttrString("noinline"))
 	block := wrapper.NewBlock("entry")
 	// Skip the tin_runtime_init bootstrap when emitting into the CTFE
 	// shim module: the dispatcher (Tin compiler) doesn't link the runtime

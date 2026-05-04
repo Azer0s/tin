@@ -370,6 +370,10 @@ type CodeGen struct {
 	// end of Generate materializes one global per module.
 	llvmUsedRoots map[*ir.Module][]*ir.Global
 
+	// llvmUsedFuncs is the per-module list of functions to include in
+	// the same combined @llvm.used emission (alongside llvmUsedRoots).
+	llvmUsedFuncs map[*ir.Module][]*ir.Func
+
 	// monoMods holds dedicated content-addressed modules carrying
 	// monomorphized fn bodies (step 5 of incremental compilation).
 	// Keyed by mono_hash; populated by extractMonoModules during

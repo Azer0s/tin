@@ -1628,19 +1628,47 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 		defer func() { _ = os.Remove(irObjName) }()
 
-		irArgs := append([]string{optLevel, "-c"}, clangTargetFlag()...)
-		irArgs = append(irArgs, llInputFile, "-o", irObjName)
-		clangIR := exec.Command("clang", irArgs...)
-		clangIR.Stdout = os.Stdout
-		clangIR.Stderr = os.Stderr
-
-		if err := clangIR.Run(); err != nil {
+		if err := compileIRToNativeObj(llInputFile, irObjName, optLevel); err != nil {
 			return err
 		}
 
 		objs := []string{irObjName}
 
 		var tmpObjs []string
+
+		for _, pkg := range pkgIRs {
+			pkgLL, err := os.CreateTemp("", "tin-pkg-*.ll")
+			if err != nil {
+				return fmt.Errorf("cannot create temp IR file: %w", err)
+			}
+			pkgLLName := pkgLL.Name()
+			if _, err := pkgLL.WriteString(pkg.irText); err != nil {
+				_ = pkgLL.Close()
+				_ = os.Remove(pkgLLName)
+				return err
+			}
+			_ = pkgLL.Close()
+
+			pkgObj, err := os.CreateTemp("", "tin-pkg-*.o")
+			if err != nil {
+				_ = os.Remove(pkgLLName)
+				return fmt.Errorf("cannot create temp object file: %w", err)
+			}
+			pkgObjName := pkgObj.Name()
+			_ = pkgObj.Close()
+
+			tmpObjs = append(tmpObjs, pkgLLName, pkgObjName)
+
+			if err := compileIRToNativeObj(pkgLLName, pkgObjName, optLevel); err != nil {
+				for _, f := range tmpObjs {
+					_ = os.Remove(f)
+				}
+				_ = os.Remove(pkgLLName)
+				return err
+			}
+
+			objs = append(objs, pkgObjName)
+		}
 
 		for _, cs := range cSources {
 			cObj, err := os.CreateTemp("", "tin-c-*.o")

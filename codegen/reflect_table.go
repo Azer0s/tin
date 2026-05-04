@@ -137,19 +137,46 @@ func (cg *CodeGen) registerLlvmUsed(mod *ir.Module, g *ir.Global) {
 	cg.llvmUsedRoots[mod] = append(cg.llvmUsedRoots[mod], g)
 }
 
+// registerLlvmUsedFunc appends f to mod's pending llvm.used funcs. Idempotent
+// per (module, function).
+func (cg *CodeGen) registerLlvmUsedFunc(mod *ir.Module, f *ir.Func) {
+	if cg.llvmUsedFuncs == nil {
+		cg.llvmUsedFuncs = map[*ir.Module][]*ir.Func{}
+	}
+
+	for _, existing := range cg.llvmUsedFuncs[mod] {
+		if existing == f {
+			return
+		}
+	}
+
+	cg.llvmUsedFuncs[mod] = append(cg.llvmUsedFuncs[mod], f)
+}
+
 // emitLlvmUsedRoots materializes the per-module @llvm.used global from
-// every root collected via registerLlvmUsed. Must be the LAST step in
-// codegen (after every emitter that would call registerLlvmUsed) so
-// nothing is missed and no two @llvm.used collide in the same module.
+// every root collected via registerLlvmUsed / registerLlvmUsedFunc. Must be
+// the LAST step in codegen so nothing is missed and no two @llvm.used collide
+// in the same module.
 func (cg *CodeGen) emitLlvmUsedRoots() {
-	for mod, roots := range cg.llvmUsedRoots {
-		if len(roots) == 0 {
-			continue
+	mods := map[*ir.Module]struct{}{}
+	for mod := range cg.llvmUsedRoots {
+		mods[mod] = struct{}{}
+	}
+	for mod := range cg.llvmUsedFuncs {
+		mods[mod] = struct{}{}
+	}
+
+	for mod := range mods {
+		used := make([]constant.Constant, 0)
+		for _, g := range cg.llvmUsedRoots[mod] {
+			used = append(used, constant.NewBitCast(g, irtypes.I8Ptr))
+		}
+		for _, f := range cg.llvmUsedFuncs[mod] {
+			used = append(used, constant.NewBitCast(f, irtypes.I8Ptr))
 		}
 
-		used := make([]constant.Constant, 0, len(roots))
-		for _, g := range roots {
-			used = append(used, constant.NewBitCast(g, irtypes.I8Ptr))
+		if len(used) == 0 {
+			continue
 		}
 
 		usedArrTy := irtypes.NewArray(uint64(len(used)), irtypes.I8Ptr)

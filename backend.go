@@ -69,6 +69,36 @@ func optThinLtoPreLinkPass(optLevel string) string {
 	}
 }
 
+// compileIRToNativeObj compiles an LLVM IR `.ll` to a native ELF/Mach-O
+// relocatable object without LTO. Used by --lib mode where the caller
+// wants a plain .o for ld -r, not ThinLTO bitcode.
+// Pipeline: opt <optLevel> (middle-end) -> llc -filetype=obj (codegen).
+func compileIRToNativeObj(llPath, outPath, optLevel string) error {
+	bcFile, err := os.CreateTemp("", "tin-lib-*.bc")
+	if err != nil {
+		return fmt.Errorf("cannot create temp bitcode file: %w", err)
+	}
+	bcPath := bcFile.Name()
+	_ = bcFile.Close()
+	defer func() { _ = os.Remove(bcPath) }()
+
+	optCmd := exec.Command("opt", optLevel, llPath, "-o", bcPath)
+	optCmd.Stdout = os.Stdout
+	optCmd.Stderr = os.Stderr
+	if err := optCmd.Run(); err != nil {
+		return fmt.Errorf("opt %s: %w", llPath, err)
+	}
+
+	llcCmd := exec.Command("llc", "-filetype=obj", "--relocation-model=pic", bcPath, "-o", outPath)
+	llcCmd.Stdout = os.Stdout
+	llcCmd.Stderr = os.Stderr
+	if err := llcCmd.Run(); err != nil {
+		return fmt.Errorf("llc %s: %w", bcPath, err)
+	}
+
+	return nil
+}
+
 // compileIRToObj compiles an LLVM IR `.ll` input into ThinLTO bitcode.
 // The actual codegen happens in ld.lld at link time -- matches what
 // `clang -c -flto=thin` does internally, just bypassing the clang
