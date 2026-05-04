@@ -21,11 +21,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install clang (required by tin codegen)
+      - name: Install clang + LLVM tools (opt + lld) required by tin codegen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev
           clang --version
+          opt --version | head -2
+          ld.lld --version
 
       - name: Build compiler
         run: go build -o tin .
@@ -143,11 +145,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install clang and valgrind
+      - name: Install clang + LLVM tools (opt + lld) + valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang valgrind libunwind-dev libdw-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev
           clang --version
+          opt --version | head -2
+          ld.lld --version
 
       - name: Build compiler
         run: go build -o tin .
