@@ -93,16 +93,25 @@ static void _tin_impl_bucket_push(TinImplBucket *b, int32_t atom) {
 #include <mach-o/getsect.h>
 #include <mach-o/dyld.h>
 
-extern const struct mach_header_64 _mh_execute_header;
-
+// Walk every loaded Mach-O image and emit each TinImplEntry from its
+// __DATA,__tin_impl section. Iterating all images (rather than just the
+// main executable via _mh_execute_header) is required for the REPL,
+// where impl entries live in dlopen'd cell .so files. _mh_execute_header
+// is also unavailable when the runtime itself is built as a shared
+// library (the symbol only exists in the main executable image).
 static void _tin_iter_impl_section(void (*cb)(const TinImplEntry *)) {
-    unsigned long sz = 0;
-    const TinImplEntry *base = (const TinImplEntry *)getsectiondata(
-        (const struct mach_header_64 *)&_mh_execute_header,
-        "__DATA", "__tin_impl", &sz);
-    if (base == NULL || sz == 0) return;
-    size_t n = sz / sizeof(TinImplEntry);
-    for (size_t i = 0; i < n; i++) cb(&base[i]);
+    uint32_t image_count = _dyld_image_count();
+    for (uint32_t i = 0; i < image_count; i++) {
+        const struct mach_header *hdr = _dyld_get_image_header(i);
+        if (hdr == NULL) continue;
+        unsigned long sz = 0;
+        const TinImplEntry *base = (const TinImplEntry *)getsectiondata(
+            (const struct mach_header_64 *)hdr,
+            "__DATA", "__tin_impl", &sz);
+        if (base == NULL || sz == 0) continue;
+        size_t n = sz / sizeof(TinImplEntry);
+        for (size_t j = 0; j < n; j++) cb(&base[j]);
+    }
 }
 #else
 // Weak refs so a binary that emits no impls (no `impl X for Y` anywhere)
