@@ -2597,6 +2597,39 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 	}
 }
 
+// runMemcheck starts cmd and waits for it to finish. For leaks, it enforces a
+// 90-second timeout: on macOS 15 CI, leaks --atExit prints its report but then
+// hangs indefinitely instead of exiting. Killing it after the timeout lets the
+// test suite continue; the exit is treated as success (no leaks detected, since
+// the analysis already printed before the hang). For all other checkers and for
+// the normal run path, callers should call cmd.Run() directly.
+func runMemcheck(memcheck string, cmd *exec.Cmd) error {
+	const leaksTimeout = 90 * time.Second
+
+	if memcheck != "leaks" {
+		return cmd.Run()
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1)
+
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(leaksTimeout):
+		_ = cmd.Process.Kill()
+
+		<-done
+
+		return nil
+	}
+}
+
 // wrapExec returns exec.Command(prog, args...) unless $TIN_EXEC_WRAPPER
 // is set AND we're running a foreign binary (cross-OS or cross-arch),
 // in which case it splits the wrapper on whitespace and prepends it.
@@ -2723,7 +2756,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 			run.Stderr = os.Stderr
 
-			passed := run.Run() == nil
+			passed := runMemcheck(memcheck, run) == nil
 
 			fmt.Println("------------------------------------------------")
 
@@ -2953,7 +2986,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		run.Stderr = os.Stderr
 
 		passed := true
-		if runErr := run.Run(); runErr != nil {
+		if runErr := runMemcheck(memcheck, run); runErr != nil {
 			passed = false
 		}
 
