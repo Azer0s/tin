@@ -1641,19 +1641,24 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			if err != nil {
 				return fmt.Errorf("cannot create temp IR file: %w", err)
 			}
+
 			pkgLLName := pkgLL.Name()
 			if _, err := pkgLL.WriteString(pkg.irText); err != nil {
 				_ = pkgLL.Close()
 				_ = os.Remove(pkgLLName)
+
 				return err
 			}
+
 			_ = pkgLL.Close()
 
 			pkgObj, err := os.CreateTemp("", "tin-pkg-*.o")
 			if err != nil {
 				_ = os.Remove(pkgLLName)
+
 				return fmt.Errorf("cannot create temp object file: %w", err)
 			}
+
 			pkgObjName := pkgObj.Name()
 			_ = pkgObj.Close()
 
@@ -1663,7 +1668,9 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 				for _, f := range tmpObjs {
 					_ = os.Remove(f)
 				}
+
 				_ = os.Remove(pkgLLName)
+
 				return err
 			}
 

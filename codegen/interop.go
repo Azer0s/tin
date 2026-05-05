@@ -515,6 +515,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 	if cg.fnDisplayNames == nil {
 		cg.fnDisplayNames = map[string]string{}
 	}
+
 	cg.fnDisplayNames[internalFn.Name()] = internalFn.Name()
 
 	// When the active emit target is a sibling module (CTFE shimMod),

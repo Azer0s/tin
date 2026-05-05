@@ -162,15 +162,18 @@ func (cg *CodeGen) emitLlvmUsedRoots() {
 	for mod := range cg.llvmUsedRoots {
 		mods[mod] = struct{}{}
 	}
+
 	for mod := range cg.llvmUsedFuncs {
 		mods[mod] = struct{}{}
 	}
 
 	for mod := range mods {
 		used := make([]constant.Constant, 0)
+
 		for _, g := range cg.llvmUsedRoots[mod] {
 			used = append(used, constant.NewBitCast(g, irtypes.I8Ptr))
 		}
+
 		for _, f := range cg.llvmUsedFuncs[mod] {
 			used = append(used, constant.NewBitCast(f, irtypes.I8Ptr))
 		}
