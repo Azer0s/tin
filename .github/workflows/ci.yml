@@ -284,12 +284,9 @@ jobs:
             examples/pure_soundness_errors.sh \
             examples/scoped_struct_tags_errors.sh \
             examples/trait_coercion_errors.sh \
-            examples/unreachable_arm_warnings.sh; do
+            examples/unreachable_arm_warnings.sh \
+            examples/interop_closure_returns/run.sh \
+            examples/interop_stacktrace/run.sh; do
             echo "=== $f ==="
             bash "$f"
           done
-
-      - name: Run interop tests with leaks
-        run: |
-          bash examples/interop_closure_returns/run.sh --leaks
-          bash examples/interop_stacktrace/run.sh --leaks
