@@ -2599,11 +2599,11 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 
 // runMemcheck starts cmd and waits for it to finish. For leaks, it enforces a
 // per-test timeout: on macOS 15 CI, leaks --atExit injects a library into the
-// binary that runs analysis on exit but then hangs before returning control,
-// leaving both the binary and the leaks tool process stuck. On timeout we kill
-// the leaks process and treat it as success so the test suite can continue.
-// Note: leaks requires being in the foreground process group (Setpgid would
-// cause it to exit immediately without running the binary).
+// binary that runs analysis on exit but then deadlocks inside the binary
+// before returning control. The binary (child of the leaks process) is what
+// actually hangs; killing only leaks orphans it. On timeout we first kill the
+// binary children via pgrep, then kill leaks itself.
+// Note: leaks requires the foreground process group (Setpgid breaks it).
 func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	const leaksTimeout = 15 * time.Second
 
@@ -2623,11 +2623,31 @@ func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	case err := <-done:
 		return err
 	case <-time.After(leaksTimeout):
-		_ = cmd.Process.Kill()
+		killLeaksTree(cmd.Process.Pid)
 
 		<-done
 
 		return nil
+	}
+}
+
+// killLeaksTree kills the binary that leaks --atExit launched (its child),
+// then kills the leaks process itself. Without killing the child first, the
+// binary orphans and accumulates across tests because killing only the leaks
+// parent leaves the binary running (the injection code deadlocks inside it).
+func killLeaksTree(leaksPid int) {
+	if out, err := exec.Command("pgrep", "-P", strconv.Itoa(leaksPid)).Output(); err == nil {
+		for _, s := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if pid, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	}
+
+	if p, err := os.FindProcess(leaksPid); err == nil {
+		_ = p.Kill()
 	}
 }
 
