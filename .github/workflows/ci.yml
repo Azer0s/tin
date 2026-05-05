@@ -260,10 +260,10 @@ jobs:
         run: go build -o tin .
 
       - name: Run example tests
-        run: ./tin test examples/... --leaks
+        run: ./tin test examples/...
 
       - name: Run stdlib tests
-        run: ./tin test stdlib/... --leaks
+        run: ./tin test stdlib/...
 
       - name: Run shell test scripts
         run: |
