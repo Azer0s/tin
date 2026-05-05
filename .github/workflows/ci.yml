@@ -236,3 +236,60 @@ jobs:
             ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done
+
+  build-and-test-macos:
+    name: Build and test (macOS arm64)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install LLVM (opt, llc, ld64.lld)
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Build compiler
+        run: go build -o tin .
+
+      - name: Run example tests
+        run: ./tin test examples/... -lm --leaks
+
+      - name: Run stdlib tests
+        run: ./tin test stdlib/... -lm --leaks
+
+      - name: Run shell test scripts
+        run: |
+          for f in \
+            examples/compiler_errors/test_errors.sh \
+            examples/const_fields_errors.sh \
+            examples/ctfe_stress_dispatch.sh \
+            examples/ctfe_stress_ir_checks.sh \
+            examples/escape_promotion.sh \
+            examples/incremental_cache_verify.sh \
+            examples/interop_errors.sh \
+            examples/maranget_exhaustive.sh \
+            examples/method_where_errors.sh \
+            examples/operator_errors.sh \
+            examples/operator_overload_phase0.sh \
+            examples/pattern_where_errors.sh \
+            examples/pure_fold_ir_checks.sh \
+            examples/pure_soundness_errors.sh \
+            examples/scoped_struct_tags_errors.sh \
+            examples/trait_coercion_errors.sh \
+            examples/unreachable_arm_warnings.sh; do
+            echo "=== $f ==="
+            bash "$f"
+          done
+
+      - name: Run interop tests with leaks
+        run: |
+          bash examples/interop_closure_returns/run.sh --leaks
+          bash examples/interop_stacktrace/run.sh --leaks

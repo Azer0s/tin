@@ -13,8 +13,10 @@
 set -u
 
 valgrind_mode=0
+leaks_mode=0
 for a in "$@"; do
   if [[ "$a" == "--valgrind" ]]; then valgrind_mode=1; fi
+  if [[ "$a" == "--leaks" ]];   then leaks_mode=1; fi
 done
 
 pass=0
@@ -106,6 +108,16 @@ if [[ "$valgrind_mode" -eq 1 ]]; then
       printf '  FAIL  valgrind run produced unexpected exit code %d\n' "$vg_rc"
       fail=$((fail + 1))
     fi
+  fi
+fi
+
+if [[ "$leaks_mode" -eq 1 ]]; then
+  if ! command -v leaks >/dev/null 2>&1; then
+    printf '  SKIP  leaks run (leaks not available)\n'
+  else
+    leaks_out=$(MallocStackLogging=1 leaks --atExit -- ./harness 2>&1)
+    n=$(echo "$leaks_out" | awk '/[0-9]+ leaks? for/{print $1; exit}')
+    check "leaks: 0 leaked objects" "${n:-0}" "0"
   fi
 fi
 
