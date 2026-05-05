@@ -444,9 +444,12 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return constant.NewInt(irtypes.I64, 0), nil
 
 	case *ast.Block:
-		// Block expression: (let x = ...; ...; last_expr) - produced by CTFE macro splices.
+		// Block expression: (stmt1; stmt2; ...; last_expr) - produced by CTFE macro splices.
 		// Generate all statements and return the value of the last expression.
+		// A new scope is pushed so let bindings do not leak into the outer function scope.
 		curBlock := block
+
+		cg.curScope = newScope(cg.curScope)
 
 		var lastVal value.Value = constant.NewInt(irtypes.I64, 0)
 
@@ -476,6 +479,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 				curBlock = newBlock
 			}
 		}
+
+		cg.emitScopeRelease(curBlock, cg.curScope)
+		cg.curScope = cg.curScope.parent
 
 		return lastVal, nil
 

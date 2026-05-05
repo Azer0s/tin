@@ -1,0 +1,37 @@
+// Block expressions: (stmt; stmt; ...; expr)
+//
+// A parenthesized sequence of statements terminated by an expression. The
+// value of the block is the value of the trailing expression. Any `let`
+// bindings inside are scoped to the block and do not leak out.
+//
+// Triggered when the first thing inside `(...)` is a statement-only keyword
+// (let, return, defer, for) OR when an expression is followed by `;`.
+
+use assert
+
+test "block starting with let" =
+  let a = (let x = 10; x * 2)
+  assert::equals(a, 20)
+
+test "block starting with expression then semi" =
+  let b = (1 + 1; 42)
+  assert::equals(b, 42)
+
+test "block with multiple let bindings" =
+  let c = (let x = 5; let y = x + 3; y * 2)
+  assert::equals(c, 16)
+
+test "let bindings are scoped to the block" =
+  let x = 99
+  let d = (let x = 1; x + 1)
+  assert::equals(d, 2)
+  assert::equals(x, 99)
+
+test "nested block expressions have independent scopes" =
+  let r = (let x = 1; (let x = 10; x) + x)
+  assert::equals(r, 11)
+
+test "block can use values from outer scope" =
+  let base = 100
+  let r = (let bonus = 5; base + bonus)
+  assert::equals(r, 105)

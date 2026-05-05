@@ -1366,11 +1366,15 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		p.suppressPostfixCast = 0
 
 		defer func() { p.suppressPostfixCast = savedSuppress }()
-		// Block expression: (let x = ...; expr) - produced by CTFE macro splices.
-		// Parsed as a sequence of statements terminated by ')'; the last statement
-		// must be an expression whose value is returned.
-		if p.check(lexer.KW_LET) {
+
+		// Block expression: (stmt1; stmt2; ...; last_expr)
+		// Triggers on statement-only keywords that can't start an expression,
+		// or on any expression followed by ';'.
+		parseBlockStmts := func(first ast.Node) (ast.Node, error) {
 			var stmts []ast.Node
+			if first != nil {
+				stmts = append(stmts, first)
+			}
 
 			for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 				if p.check(lexer.SEMI) || p.check(lexer.NEWLINE) {
@@ -1396,10 +1400,22 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 			return &ast.Block{Stmts: stmts}, nil
 		}
 
+		if p.check(lexer.KW_LET) || p.check(lexer.KW_RETURN) ||
+			p.check(lexer.KW_DEFER) || p.check(lexer.KW_FOR) {
+			return parseBlockStmts(nil)
+		}
+
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
+		// Block expression triggered by expression followed by ';'
+		if p.check(lexer.SEMI) {
+			p.advance()
+			return parseBlockStmts(&ast.ExprStmt{Expr: inner})
+		}
+
 		// Tuple literal: (e1, e2, ...) with 2+ elements
 		if p.check(lexer.COMMA) {
 			elems := []ast.Node{inner}
