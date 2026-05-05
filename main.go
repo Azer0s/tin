@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/Azer0s/tin/ast"
@@ -2601,18 +2600,16 @@ func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
 // runMemcheck starts cmd and waits for it to finish. For leaks, it enforces a
 // per-test timeout: on macOS 15 CI, leaks --atExit injects a library into the
 // binary that runs analysis on exit but then hangs before returning control,
-// leaving both the binary and the leaks tool process stuck. We put leaks in its
-// own process group (Setpgid) and kill the entire group on timeout, which takes
-// out both the leaks process and the binary it launched. The exit is treated as
-// success (no leaks detected) so the test suite can continue.
+// leaving both the binary and the leaks tool process stuck. On timeout we kill
+// the leaks process and treat it as success so the test suite can continue.
+// Note: leaks requires being in the foreground process group (Setpgid would
+// cause it to exit immediately without running the binary).
 func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	const leaksTimeout = 15 * time.Second
 
 	if memcheck != "leaks" {
 		return cmd.Run()
 	}
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -2626,7 +2623,7 @@ func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	case err := <-done:
 		return err
 	case <-time.After(leaksTimeout):
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
 
 		<-done
 
