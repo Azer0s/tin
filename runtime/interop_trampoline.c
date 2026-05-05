@@ -38,6 +38,19 @@
 #include <sys/mman.h>
 #include <pthread.h>
 
+// On macOS arm64 (Apple Silicon), W+X mmap requires MAP_JIT and the
+// thread-local pthread_jit_write_protect_np guard to toggle between
+// writable and executable states on the same page.
+#ifdef __APPLE__
+#  define JIT_MMAP_FLAGS (MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT)
+#  define JIT_WRITE_START() pthread_jit_write_protect_np(0)
+#  define JIT_WRITE_END()   pthread_jit_write_protect_np(1)
+#else
+#  define JIT_MMAP_FLAGS (MAP_PRIVATE | MAP_ANONYMOUS)
+#  define JIT_WRITE_START() ((void)0)
+#  define JIT_WRITE_END()   ((void)0)
+#endif
+
 // Forward decl from arc.c. Closure envs created by Tin are ARC blocks
 // with a destructor at offset 0; _tin_release_closure invokes the
 // destructor when rc reaches 0 to release captured RC values, then
@@ -227,8 +240,10 @@ static void atexit_release_all_pages(void) {
             void  *env  = data[1];
             // Scrub before release in case the dtor somehow re-enters
             // and re-walks this slot.
+            JIT_WRITE_START();
             data[0] = NULL;
             data[1] = NULL;
+            JIT_WRITE_END();
             _tin_release_closure(env);
         }
 
@@ -241,10 +256,12 @@ static void atexit_release_all_pages(void) {
 static TrampPage *new_page(void) {
     void *raw = mmap(NULL, TRAMP_PAGE_SIZE,
                      PROT_READ | PROT_WRITE | PROT_EXEC,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                     JIT_MMAP_FLAGS, -1, 0);
     if (raw == MAP_FAILED) {
         return NULL;
     }
+
+    JIT_WRITE_START();
 
     TrampPage *p = (TrampPage *)raw;
     p->next = NULL;
@@ -257,6 +274,8 @@ static TrampPage *new_page(void) {
         slot_set_free_next(p, (int32_t)i,
                            ((i + 1) < TRAMP_SLOTS) ? (int32_t)(i + 1) : -1);
     }
+
+    JIT_WRITE_END();
 
     // Append to the all-pages registry for atexit cleanup.
     if (_tramp_all_pages_len == _tramp_all_pages_cap) {
@@ -328,6 +347,8 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
     // Lay out the slot:
     //   slot+0..15   : TinClosureData = { fn, env }
     //   slot+16..31  : machine code
+    JIT_WRITE_START();
+
     void **data = (void **)slot;
     data[0] = fn;
     data[1] = env;
@@ -335,6 +356,8 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
     void *closure_data_ptr = slot;     // dispatcher reads from here
     uint8_t *code = slot + TRAMP_DATA_BYTES;
     size_t n = emit_trampoline(code, closure_data_ptr, dispatcher);
+
+    JIT_WRITE_END();
 
     icache_flush(code, n);
 
@@ -412,15 +435,15 @@ void tin_interop_closure_free(void *tramp) {
         return;
     }
 
-    p->in_use &= ~bit;
-
-    // Snapshot env BEFORE handing the slot back to the free-list, but
-    // AFTER confirming this is a first free. Released outside the
-    // mutex: the closure dtor may run user-defined Tin deinit code
-    // which can allocate, take other locks, or transitively allocate
-    // another trampoline.
+    // Snapshot env (read) before toggling write protection; reads are
+    // always safe from JIT pages regardless of write-protect state.
     void **data = (void **)slot;
     void *env = data[1];
+
+    JIT_WRITE_START();
+
+    p->in_use &= ~bit;
+
     // Scrub so a use-after-free of the trampoline pointer crashes
     // loudly instead of jumping through stale bytes.
     data[0] = NULL;
@@ -441,6 +464,8 @@ void tin_interop_closure_free(void *tramp) {
     // at process exit. This avoids the bookkeeping cost of removing
     // a page from _tramp_all_pages and keeps the per-call free path
     // lock-and-mutate only.
+
+    JIT_WRITE_END();
 
     pthread_mutex_unlock(&_tramp_mu);
 
