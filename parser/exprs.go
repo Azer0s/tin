@@ -1413,6 +1413,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		// Block expression triggered by expression followed by ';'
 		if p.check(lexer.SEMI) {
 			p.advance()
+
 			return parseBlockStmts(&ast.ExprStmt{Expr: inner})
 		}
 
