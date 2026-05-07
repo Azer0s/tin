@@ -516,6 +516,31 @@ func startsLower(s string) bool {
 	return c >= 'a' && c <= 'z'
 }
 
+// llvmTypeToTinTypeExprStructural reconstructs a TypeExpr from an
+// LLVM type, preserving pointer / array / string shape.  Used by
+// genTupleLit to synthesize a monomorphization decl that round-trips
+// through the type-resolver -- the flat-name form produced by
+// llvmTypeToTinName collapses pointers into a SimpleType whose Name
+// starts with `*`, which the AST treats as a literal identifier and
+// downstream type lookups silently fall back to i64.
+func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		return &ast.PointerType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType)}
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 && st.Fields[1].Equal(irtypes.I64) {
+			if pt.ElemType.Equal(irtypes.I8) {
+				return &ast.SimpleType{Name: "string"}
+			}
+
+			return &ast.ArrayType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType), Size: -1}
+		}
+	}
+
+	return &ast.SimpleType{Name: llvmTypeToTinName(t)}
+}
+
 func llvmTypeToTinName(t irtypes.Type) string {
 	switch t {
 	case irtypes.I1:

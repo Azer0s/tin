@@ -632,7 +632,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	}
 
 	// Make sure the caller sees the final block when an arg-evaluation path
-	// branched (e.g. fat-array → string conversion emits its own loop blocks).
+	// branched (e.g. fat-array -> string conversion emits its own loop blocks).
 	cg.curBlock = block
 
 	return block.NewLoad(fatPtrType, fatAlloca), nil

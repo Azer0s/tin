@@ -10,7 +10,7 @@
 //
 // Ownership: the file descriptor lives behind an *rc::Cell so copies of
 // Conn share ownership instead of double-closing on scope exit. Calling
-// .close() is optional (idempotent — POSIX close on an already-closed fd
+// .close() is optional (idempotent - POSIX close on an already-closed fd
 // is safe); the cell's dtor at last drop closes whatever the cell still
 // holds. Read the fd via the .fd() accessor.
 

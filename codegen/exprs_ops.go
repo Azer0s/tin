@@ -1155,18 +1155,24 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 	if concreteName == "" {
 		// Infer from element LLVM types.
 		parts := make([]string, len(vals))
+
+		typeParams := make([]ast.TypeExpr, len(vals))
 		for i, v := range vals {
 			parts[i] = llvmTypeToTinName(v.Type())
+			// Reconstruct a structural TypeExpr from the LLVM type so
+			// the synthesized monomorphization preserves PointerType /
+			// ArrayType nuance (e.g. `*errors::Err` is a PointerType
+			// wrapping a SimpleType, not a SimpleType whose name is
+			// "*errors::Err").  Falling back to SimpleType{Name:parts[i]}
+			// lost the pointer indirection and produced an i64 slot
+			// for any `*Trait` argument, which then panicked in
+			// downstream NewStore checks.
+			typeParams[i] = llvmTypeToTinTypeExprStructural(v.Type())
 		}
 
 		concreteName = "Tuple__" + strings.Join(parts, "__")
 		// Trigger monomorphization for this concrete name.
 		if _, done := cg.structTypes[concreteName]; !done {
-			typeParams := make([]ast.TypeExpr, len(parts))
-			for i, p := range parts {
-				typeParams[i] = &ast.SimpleType{Name: p}
-			}
-
 			synthDecl := &ast.TypeDecl{
 				Name: concreteName,
 				Type: &ast.GenericType{Name: "Tuple", TypeParams: typeParams},
@@ -2529,6 +2535,21 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 		if st, isStruct := targetType.(*irtypes.StructType); isStruct && isFatArrayPtr(st) {
 			if pt, isPtr := st.Fields[0].(*irtypes.PointerType); isPtr {
 				return cg.genArrayLitWithElemType(block, arrLit, pt.ElemType)
+			}
+		}
+	}
+
+	// Tuple literal with a known Tuple-struct target: pick the
+	// existing monomorphization rather than re-inferring from the
+	// element LLVM types.  Inference flattens trait pointers into
+	// SimpleType{"*errors__Err_iface"} which the type-resolver does
+	// not recognize, so the synthesized struct ends up with i64
+	// where `*Err` was expected and the tuple-store check rejects
+	// the legitimate value.
+	if tupLit, ok := argNode.(*ast.TupleLit); ok {
+		if st, isStruct := targetType.(*irtypes.StructType); isStruct {
+			if name := st.Name(); name != "" && strings.HasPrefix(name, "Tuple") {
+				return cg.genTupleLit(block, tupLit, targetType)
 			}
 		}
 	}

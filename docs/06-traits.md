@@ -420,8 +420,8 @@ compiler dispatches at the relevant call site automatically.
 
 | Direction      | Trait         | Impl signature                 | Triggered at                  |
 |----------------|---------------|--------------------------------|-------------------------------|
-| Other → struct | `implicit[T]` | `static fn ::implicit(t T) S`  | `let x S = t` and arg-passing |
-| Struct → other | `coerce[T]`   | `static fn ::coerce(this S) T` | `s as T`                      |
+| Other -> struct | `implicit[T]` | `static fn ::implicit(t T) S`  | `let x S = t` and arg-passing |
+| Struct -> other | `coerce[T]`   | `static fn ::coerce(this S) T` | `s as T`                      |
 
 Both traits sit outside the regular vtable machinery: there is no `Trait`
 fat-pointer view of `implicit` or `coerce`. The compiler stores the

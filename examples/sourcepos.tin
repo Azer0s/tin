@@ -67,4 +67,4 @@ test "sourcepos(for-in iter var) resolves the for-loop line" =
   // for-in header is on line 61, with `for` at column 3.
   assert::equals(locate_for_iter(), '"x@examples/sourcepos.tin:61:3")
 
-//!-Wno-format — line numbers above are pinned by tests
+//!-Wno-format - line numbers above are pinned by tests

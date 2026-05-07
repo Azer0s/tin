@@ -104,7 +104,7 @@ fn hmac_sha256_hex(key string, msg string) string =
 
   return sha256::hex_from_digest(tag)
 
-// ── HMAC-SHA-512 ───────────────────────────────────────────────────────
+// HMAC-SHA-512
 
 // hmac_sha512 computes HMAC-SHA-512 over the message.  Returns the
 // 64-byte tag.  Block size is 128 bytes; keys longer than that are
@@ -170,7 +170,7 @@ fn hmac_sha512_str(key string, msg string) [u8; 64] =
 fn hmac_sha512_hex(key string, msg string) string =
   return sha512::hex_from_512(hmac_sha512_str(key, msg))
 
-// ── HMAC-SHA-384 ───────────────────────────────────────────────────────
+// HMAC-SHA-384
 
 // hmac_sha384 uses the SHA-384 hash (block size 128, digest 48) inside
 // the HMAC construction.  Note the *block* size is the same as SHA-512

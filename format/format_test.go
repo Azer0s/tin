@@ -69,7 +69,7 @@ func TestFormatIdempotent(t *testing.T) {
 
 			pass2, changed := Format(pass1)
 			if changed {
-				t.Errorf("Format is not idempotent on %s — pass2 differs from pass1:\npass1:\n%s\npass2:\n%s",
+				t.Errorf("Format is not idempotent on %s - pass2 differs from pass1:\npass1:\n%s\npass2:\n%s",
 					after, pass1, pass2)
 			}
 		})

@@ -3214,7 +3214,7 @@ func stripTinPrefix(s string) string {
 }
 
 // defaultBuildOutPath mirrors the implicit `tin build` output naming:
-// `foo/bar.tin` → `foo/bar`. In --lib mode the suffix depends on the
+// `foo/bar.tin` -> `foo/bar`. In --lib mode the suffix depends on the
 // link configuration: `bar.o` with -static (single relocatable object
 // produced by `ld -r`), `bar.so` on Linux, `bar.dylib` on macOS.
 func defaultBuildOutPath(file string, libMode bool) string {

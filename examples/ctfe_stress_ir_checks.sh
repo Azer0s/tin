@@ -157,7 +157,7 @@ fn{#pure} traced_double(n i64) i64 =
 fn main() i64 = return traced_double(21)
 '
 
-# 10. Float fold path: hypot_squared(3, 4) → 25.0
+# 10. Float fold path: hypot_squared(3, 4) -> 25.0
 assert_main "f64 hypot_squared folds to 25.0" 'double 25\.0' 'call double @hypot_squared' '
 fn{#pure} hypot_squared(x f64, y f64) f64 = return x * x + y * y
 

@@ -157,7 +157,7 @@ def test_many_short_lines():
     BUG: ioutil::read_string_until_reader reads up to 4096 bytes per
     r.read() call but only returns data up to the first newline; any
     extra bytes in the same read chunk are silently discarded.
-    Nagle coalesces small sends → many lines arrive in one chunk →
+    Nagle coalesces small sends -> many lines arrive in one chunk ->
     only the first line per chunk is echoed."""
     s = conn(timeout=20)
     n = 1000
@@ -210,7 +210,7 @@ def test_binary_like_payload():
     record("binary-like payload", True)  # server should not crash
 
 def test_newline_only():
-    """Send just a newline - ioutil::read_string strips it, giving empty string → close."""
+    """Send just a newline - ioutil::read_string strips it, giving empty string -> close."""
     s = conn()
     s.sendall(b"\n")
     time.sleep(0.2)

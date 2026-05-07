@@ -113,7 +113,7 @@ const (
 	// `.close()` call AND without being transferred (returned, stored in
 	// a struct, passed to a fn). With Tin's default rc::Cell-backed
 	// resources, auto-cleanup makes explicit close optional, so this
-	// warning is default-off — opt in via -Wpedantic or
+	// warning is default-off - opt in via -Wpedantic or
 	// -Wunclosed-closeable for codebases that want explicit close
 	// discipline (e.g. for graceful TLS close_notify, deterministic fd
 	// release before a long compute, etc.).

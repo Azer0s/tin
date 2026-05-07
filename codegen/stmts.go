@@ -1970,8 +1970,17 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		cg.curBlock = block // sync before genExpr so we can detect block advances
 
 		var err error
+		// TupleLit: hand the coroutine's *original* return type to
+		// the tuple generator so trait-pointer fields keep their
+		// real LLVM type instead of being silently widened to i64
+		// during inference (the LLVM coro signature is i8*, but the
+		// stored payload uses the user-declared shape).
+		if tup, isTup := s.Value.(*ast.TupleLit); isTup && cg.curCoroRetType != nil {
+			retVal, err = cg.genTupleLit(block, tup, cg.curCoroRetType)
+		} else {
+			retVal, err = cg.genExpr(block, s.Value)
+		}
 
-		retVal, err = cg.genExpr(block, s.Value)
 		if err != nil {
 			return err
 		}

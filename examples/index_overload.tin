@@ -2,8 +2,8 @@
 // `index_set[K, V]` op-traits.
 //
 // Read side: `t[k]` dispatches to `fn ::index(this T, k K) (V, bool)`.
-//   - `let v = t[k]`         — auto-unwrap; panics if !ok
-//   - `let (v, ok) = t[k]`   — raw tuple destructure; no panic
+//   - `let v = t[k]`         - auto-unwrap; panics if !ok
+//   - `let (v, ok) = t[k]`   - raw tuple destructure; no panic
 //
 // Write side: `t[k] = v` dispatches to `fn ::index_set(this *T, k K, v V)`.
 // The pointer receiver lets the impl mutate fields in place.
@@ -55,7 +55,7 @@ fn main() =
   echo "missing = {v2}, found = {ok2}"
 
   // Bare access on a present key flows the value through unchanged.
-  // (Bare access on a missing key would panic — see test below.)
+  // (Bare access on a missing key would panic - see test below.)
   let v3 = b["pears"]
 
   echo "pears = {v3}"

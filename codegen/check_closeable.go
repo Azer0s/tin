@@ -22,7 +22,7 @@ import (
 //     RHS is a call (or an awaited call) resolvable to a top-level FuncDecl
 //     whose return type names a struct that implements Closeable. Tuple
 //     destructuring (`let (conn, err) = dial(...)`) is intentionally
-//     skipped — the err handling pattern in stdlib uses tuples and a
+//     skipped - the err handling pattern in stdlib uses tuples and a
 //     stricter check there would generate noise until we extend it.
 //   - Treats *any* reference to the name (return, arg, struct/array field,
 //     re-assign) as a transfer. Prefers false-negative over false-positive.

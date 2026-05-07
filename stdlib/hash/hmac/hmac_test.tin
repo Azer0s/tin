@@ -58,7 +58,7 @@ test "hmac_sha256 with empty key" =
   // HMAC-SHA256("","") = b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad
   assert::equals(hmac::hmac_sha256_hex("", ""), "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad")
 
-// ── HMAC-SHA-512 (RFC 4231 vectors) ──────────────────────────────────
+// HMAC-SHA-512 (RFC 4231 vectors)
 
 test "hmac_sha512 RFC 4231 test case 1" =
   let key = ""
@@ -86,7 +86,7 @@ test "hmac_sha512 RFC 4231 test case 6 (key longer than block)" =
   // RFC 4231 case 6
   assert::equals(hmac::hmac_sha512_hex(key, "Test Using Larger Than Block-Size Key - Hash Key First"), "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598")
 
-// ── HMAC-SHA-384 (RFC 4231 vectors) ──────────────────────────────────
+// HMAC-SHA-384 (RFC 4231 vectors)
 
 test "hmac_sha384 RFC 4231 test case 1" =
   let key = ""

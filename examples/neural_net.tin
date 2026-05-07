@@ -8,6 +8,7 @@
 
 use math
 use rand
+use assert
 
 const N_IN     i64 = 2
 const N_HIDDEN i64 = 3
@@ -151,3 +152,121 @@ fn main() =
   for let s i64 = 0; s < 4; s++:
     let (_, o) = forward(&net, xs[s])
     echo "  {xs[s][0]} XOR {xs[s][1]} -> {o[0]}  (target {ys[s][0]})"
+
+// ── tests ──────────────────────────────────────────────────────────
+//
+// Train a fresh network for a small but sufficient number of epochs
+// and assert that XOR is learned to within 0.1 of each target on
+// every input row.  Seeded RNG keeps the run deterministic so a CI
+// regression points at code, not luck.
+
+fn train_xor(epochs i64) Net =
+  let xs [[f64]] = [
+    [0.0, 0.0],
+    [0.0, 1.0],
+    [1.0, 0.0],
+    [1.0, 1.0],
+  ]
+  let ys [[f64]] = [
+    [0.0],
+    [1.0],
+    [1.0],
+    [0.0],
+  ]
+
+  let r = rand::new(1)
+  let net = new_net(&r)
+
+  for let epoch i64 = 0; epoch < epochs; epoch++:
+    for let s i64 = 0; s < 4; s++:
+      let _ = train_step(&net, xs[s], ys[s])
+
+  return net
+
+test "sigmoid behaves at the rails and at zero" =
+  // Endpoints are not exact f64s but should be within float epsilon.
+  assert::ok(sigmoid(0.0) - 0.5 < 0.0001 && 0.5 - sigmoid(0.0) < 0.0001)
+  assert::ok(sigmoid(20.0) > 0.999)
+  assert::ok(sigmoid(0.0 - 20.0) < 0.001)
+
+test "dsigmoid peaks at 0.25 when y = 0.5" =
+  let d = dsigmoid(0.5)
+
+  assert::ok(d - 0.25 < 0.0001 && 0.25 - d < 0.0001)
+  assert::ok(dsigmoid(0.0) < 0.0001)
+  assert::ok(dsigmoid(1.0) < 0.0001)
+
+test "rand_matrix produces values inside [-1, 1)" =
+  let r = rand::new(42)
+  let m = rand_matrix(&r, 3, 4)
+
+  assert::equals(len(m), 3)
+  assert::equals(len(m[0]), 4)
+
+  for let i i64 = 0; i < 3; i++:
+    for let j i64 = 0; j < 4; j++:
+      let v = m[i][j]
+
+      assert::ok(v >= -1.0 - 0.0001 && v < 1.0 + 0.0001)
+
+test "zero_vec creates an all-zero vector of the requested length" =
+  let v = zero_vec(5)
+
+  assert::equals(len(v), 5)
+
+  for let i i64 = 0; i < 5; i++:
+    assert::equals(v[i], 0.0)
+
+test "forward output has the expected shapes" =
+  let r = rand::new(7)
+  let net = new_net(&r)
+  let (h, o) = forward(&net, [0.5, 0.5])
+
+  assert::equals(len(h), N_HIDDEN)
+  assert::equals(len(o), N_OUT)
+  // Sigmoid range pin: every output must be in (0, 1).
+  for let i i64 = 0; i < N_HIDDEN; i++:
+    assert::ok(h[i] > 0.0 && h[i] < 1.0)
+
+  for let i i64 = 0; i < N_OUT; i++:
+    assert::ok(o[i] > 0.0 && o[i] < 1.0)
+
+test "train_step decreases loss on a single sample" =
+  let r = rand::new(3)
+  let net = new_net(&r)
+  let l1 = train_step(&net, [1.0, 0.0], [1.0])
+  let l2 = train_step(&net, [1.0, 0.0], [1.0])
+  // Stochastic SGD on one sample should monotonically reduce the
+  // squared error of that sample.
+  assert::ok(l2 <= l1)
+
+test "trained net solves XOR within tolerance" =
+  // 5000 epochs is the same budget as main; CI regressions that
+  // ruin the optimiser surface here as a single failed assertion.
+  let net = train_xor(5000)
+  let xs [[f64]] = [
+    [0.0, 0.0],
+    [0.0, 1.0],
+    [1.0, 0.0],
+    [1.0, 1.0],
+  ]
+  let targets [f64] = [0.0, 1.0, 1.0, 0.0]
+
+  for let s i64 = 0; s < 4; s++:
+    let (_, o) = forward(&net, xs[s])
+    let err = o[0] - targets[s]
+    let abs_err = err
+
+    if abs_err < 0.0:
+      abs_err = 0.0 - abs_err
+
+    assert::ok(abs_err < 0.1)
+
+test "bias updates change b2 after a training step" =
+  let r = rand::new(11)
+  let net = new_net(&r)
+  let before = net.b2[0]
+  let _ = train_step(&net, [1.0, 1.0], [0.0])
+  let after = net.b2[0]
+  // Any non-trivial gradient flows through b2 -- the value must move.
+  assert::ok(before != after)

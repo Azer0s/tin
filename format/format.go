@@ -14,7 +14,7 @@
 //   - Trailing newline: ensured (single newline at EOF).
 //   - Blank lines: runs of two-or-more collapse to one (every depth).
 //
-// Semantic blank-line insertion (idempotent — running on already-formatted
+// Semantic blank-line insertion (idempotent - running on already-formatted
 // source produces no change):
 //
 //  1. Blank line BEFORE a block-opener (`if`/`for`/`loop`/`match`/`where`/
@@ -27,10 +27,10 @@
 //     statement, not an `else`/`else if`/`case`/`default` continuation
 //     and not another block-opener which Rule 1 would handle).
 //  3. Blank line BEFORE the final `return` of a multi-statement body
-//     (≥3 non-comment statements). Skipped for short bodies and one-
+//     (>=3 non-comment statements). Skipped for short bodies and one-
 //     liner returns.
-//  4. Blank line AFTER a "setup section" — a maximal run of `let`
-//     bindings plus bare-name reassignments to in-section names — when
+//  4. Blank line AFTER a "setup section" - a maximal run of `let`
+//     bindings plus bare-name reassignments to in-section names - when
 //     the next line is none of those.
 //
 // Comment attachment: when a rule wants a blank line before a code line
@@ -216,7 +216,7 @@ func insertSemanticBlanks(lines []string) []string {
 	// Per-depth count of "real" statements seen since this depth was
 	// last entered. Used by Rule 2 to skip the blank-after-block when
 	// the just-closed block had only one statement (e.g. a one-line
-	// `if cond: return X` guard inside a loop — inserting a blank
+	// `if cond: return X` guard inside a loop - inserting a blank
 	// above the rest of the loop body would be visually wrong).
 	stmtCount := map[int]int{}
 
@@ -229,10 +229,10 @@ func insertSemanticBlanks(lines []string) []string {
 			pi := infos[prevCodeIdx]
 
 			// Rule 2: blank after block-closer. Detect via "previous
-			// code line was at a deeper depth than current" — meaning
+			// code line was at a deeper depth than current" - meaning
 			// at least one block just closed. Only fire when the
 			// just-closed block (the one at depth = li.depth+1) had
-			// ≥2 statements; otherwise the block was a one-line guard
+			// >=2 statements; otherwise the block was a one-line guard
 			// and inserting a blank below it visually fragments its
 			// parent body. Skip for `else`/`else if`/`case`/`default`
 			// continuations (part of the same construct).
@@ -246,8 +246,8 @@ func insertSemanticBlanks(lines []string) []string {
 			// previous line is at the SAME depth and is not itself a
 			// block-opener / block-continuation. Cases where the
 			// previous line is at a DIFFERENT depth are handled by
-			// Rule 2 (deeper → block closed) or by the "first stmt of
-			// a new block" case (shallower → entering a new body, no
+			// Rule 2 (deeper -> block closed) or by the "first stmt of
+			// a new block" case (shallower -> entering a new body, no
 			// blank).
 			if li.kind == kindBlockOpener && pi.depth == li.depth &&
 				pi.kind != kindBlockOpener && pi.kind != kindBlockContinuation {
@@ -255,7 +255,7 @@ func insertSemanticBlanks(lines []string) []string {
 			}
 
 			// Rule 6: setup-section close. Only consult the section
-			// at li.depth — sections at OTHER depths either belong to
+			// at li.depth - sections at OTHER depths either belong to
 			// outer scopes (still open) or inner scopes (already
 			// implicitly closed when we left them; their blank-line
 			// is supplied by Rule 2's block-closer detection).
@@ -264,7 +264,7 @@ func insertSemanticBlanks(lines []string) []string {
 			// shaped like `let x = ...; return x + 1` is too short
 			// to deserve a blank, and longer bodies are covered by
 			// Rule 3 (blank before the final return when there are
-			// ≥3 sibling statements). Suppressing the blank here
+			// >=3 sibling statements). Suppressing the blank here
 			// also keeps line-number-sensitive tests like
 			// `examples/sourcepos.tin` stable when the formatter
 			// runs over them.
@@ -303,7 +303,7 @@ func insertSemanticBlanks(lines []string) []string {
 		}
 
 		// When li's depth is shallower than some open setup-section's
-		// depth, those deeper sections are no longer reachable — drop
+		// depth, those deeper sections are no longer reachable - drop
 		// them so they don't fire stale blanks later.
 		for d := range setupNames {
 			if d > li.depth {
@@ -651,7 +651,7 @@ func lineIsLineComment(line string) bool {
 // multi-line literals are recognized as continuations rather than fresh
 // statements.
 //
-// Note: a bare `'X'` is NOT a char literal in Tin — `'foo` is an atom-
+// Note: a bare `'X'` is NOT a char literal in Tin - `'foo` is an atom-
 // by-name (no closing apostrophe), and `'"name"'` is a quoted atom.
 // Char-coded atoms use the `@'X'` form. We only special-case `@'...'`;
 // bare `'` is left as ordinary punctuation, which is fine because atom
@@ -696,7 +696,7 @@ func bracketDelta(body string) int {
 // honors a NEWLINE after a binary operator as transparent (parser/exprs.go
 // "Line-continuation: operator at end of line"), so the formatter must
 // treat the following line as a wrap of the same statement and leave its
-// indent alone — otherwise the indent stack picks up the deeper hanging
+// indent alone - otherwise the indent stack picks up the deeper hanging
 // indent as a "new block level" and subsequent siblings get garbage
 // indents.
 //
@@ -704,7 +704,7 @@ func bracketDelta(body string) int {
 //
 //	&& ||                             (logical)
 //	+ - * / %                         (arithmetic; bare `-` is unary on
-//	                                   the next line — we still treat it
+//	                                   the next line - we still treat it
 //	                                   as continuation, harmless)
 //	== != < > <= >=                   (comparison)
 //	+= -= *= /= %= ++=                (augmented assigns)
@@ -714,7 +714,7 @@ func bracketDelta(body string) int {
 //
 // Trailing `:` is the block-opener marker, NOT a continuation, so it's
 // excluded. Trailing `=` is excluded for the same reason most other tools
-// do — `let x = expr` is the canonical complete form, and a bare `=`
+// do - `let x = expr` is the canonical complete form, and a bare `=`
 // dangling at end of line is rare and ambiguous.
 func endsInContinuationOp(body string) bool {
 	// Strip a trailing line comment.

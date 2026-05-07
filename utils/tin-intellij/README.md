@@ -38,6 +38,6 @@ The output zip is at `build/distributions/tin-intellij-<version>.zip`.
 ## Installing
 
 1. Open your IDE
-2. Go to **Settings → Plugins → ⚙ → Install Plugin from Disk…**
+2. Go to **Settings -> Plugins -> ⚙ -> Install Plugin from Disk…**
 3. Select `build/distributions/tin-intellij-<version>.zip`
 4. Restart the IDE

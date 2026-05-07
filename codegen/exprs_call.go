@@ -1886,7 +1886,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 
 	// User struct (or *Struct) receiver: dispatch to ::index trait method
 	// when the struct implements index[K, R]. Mirror of dispatchBinOp's
-	// path — look up an op-trait impl keyed by (structName, "index")
+	// path - look up an op-trait impl keyed by (structName, "index")
 	// whose param type matches the index value, then emit the call.
 	//
 	// Comma-ok return convention (recommended): impls return a 2-tuple
@@ -1894,7 +1894,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	// At a tuple-destructure call site (`let (v, ok) = t[k]`) the raw
 	// tuple is passed through. At any other call site, codegen auto-
 	// unwraps: emits `if !ok: panic("...")` and substitutes V. Impls
-	// that return plain V (no comma-ok) are also accepted — value
+	// that return plain V (no comma-ok) are also accepted - value
 	// flows through unchanged.
 	if structName := cg.structNameForReceiver(arrType); structName != "" {
 		if fn := cg.lookupOpMethod(structName, "index", []irtypes.Type{idx.Type()}); fn != nil {
@@ -1933,7 +1933,7 @@ func (cg *CodeGen) maybeUnwrapIndexTuple(block *ir.Block, e *ast.IndexExpr, resu
 		return nil, nil
 	}
 
-	// Tin tuples are `{ i32 type_tag, T1, T2 }` — the (V, bool) pair
+	// Tin tuples are `{ i32 type_tag, T1, T2 }` - the (V, bool) pair
 	// lives at fields 1 and 2.
 	st, ok := result.Type().(*irtypes.StructType)
 	if !ok || len(st.Fields) != 3 {

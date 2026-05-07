@@ -143,7 +143,7 @@ struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
     return spawn send_to_impl(this.fd(), data, this.host, this.port)
 
   // close releases the read cursor and, for dial-based connections, closes
-  // the fd early. Idempotent — safe to call multiple times.
+  // the fd early. Idempotent - safe to call multiple times.
   fn Closeable::close(this Conn) =
     if this.owns_fd:
       io::close(this.fd())
