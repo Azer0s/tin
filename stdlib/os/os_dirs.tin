@@ -25,7 +25,7 @@ fn str_prefix(s string, n i64) string =
 
 // mkdir creates directory path and all missing parent directories (like mkdir -p).
 // Returns nil on success. Succeeds silently if the directory already exists.
-fn mkdir(path string) errors::Err =
+fn mkdir(path string) *errors::Err =
   let n = len(path)
 
   if n == 0:
@@ -50,7 +50,7 @@ fn mkdir(path string) errors::Err =
 
 // remove removes the file at path.
 // Returns nil on success, an error if the path does not exist or is a directory.
-fn remove(path string) errors::Err =
+fn remove(path string) *errors::Err =
   let r = io::remove(path)
 
   if r != 0:
@@ -60,7 +60,7 @@ fn remove(path string) errors::Err =
 
 // rmdir removes the empty directory at path.
 // Returns nil on success, an error if the directory is not empty or missing.
-fn rmdir(path string) errors::Err =
+fn rmdir(path string) *errors::Err =
   let r = os_rmdir(path)
 
   if r != 0:
@@ -70,7 +70,7 @@ fn rmdir(path string) errors::Err =
 
 // rename moves old_path to new_path.
 // Returns nil on success, an error otherwise.
-fn rename(old_path string, new_path string) errors::Err =
+fn rename(old_path string, new_path string) *errors::Err =
   let r = io::rename(old_path, new_path)
 
   if r != 0:

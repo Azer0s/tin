@@ -1,0 +1,36 @@
+// examples/numeric_underscore.tin - underscore separators in numeric literals.
+//
+// Tin lets you place `_` between digits to make long literals readable:
+// `1_000_000`, `0xDEAD_BEEF`, `0b1010_1010`, `3.141_592`, `1.5e1_0`.
+// The lexer treats the underscore as a no-op when it appears *between
+// two valid digits* in the current radix.  A leading or trailing
+// underscore inside a number is a malformed literal.
+
+use assert
+
+test "underscore in decimal int literal" =
+  assert::equals(1_000, 1000)
+  assert::equals(1_000_000, 1000000)
+  assert::equals(1_2_3_4_5, 12345)
+
+test "underscore in hex literal" =
+  assert::equals(0xDEAD_BEEF, 0xDEADBEEF)
+  assert::equals(0xFF_FF_FF_FF, 0xFFFFFFFF as i64)
+
+test "underscore in binary literal" =
+  assert::equals(0b1010_1010, 0b10101010)
+  assert::equals(0b1111_0000_1111_0000, 0b1111000011110000)
+
+test "underscore in octal literal" =
+  assert::equals(0o755_644, 0o755644)
+
+test "underscore in float literal" =
+  assert::equals(3.141_592, 3.141592)
+  assert::equals(1_000.5, 1000.5)
+  assert::equals(2.5e1_0, 2.5e10)
+
+test "underscore is purely visual: same value as without" =
+  let a = 1_234_567_890
+  let b = 1234567890
+
+  assert::equals(a, b)

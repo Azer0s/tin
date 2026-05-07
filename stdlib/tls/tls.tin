@@ -10,7 +10,7 @@
 // transparently:
 //
 //   let (conn, err) = tcp::dial("example.com", 443)
-//   if errors::has(err): panic(err.message())
+//   if errors::is_err(err): panic(err.message())
 //   let tls_conn = await tls::connect("example.com", conn.fd)
 //   let line = await ioutil::read_string(tls_conn)
 //   await ioutil::write_string(tls_conn, "hello\n")

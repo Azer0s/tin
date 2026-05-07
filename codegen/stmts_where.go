@@ -148,7 +148,7 @@ func (cg *CodeGen) genPatternWhereList(block *ir.Block, wl *ast.WhereList, retTy
 				successBlock = cg.curBlock
 			}
 
-			successBlock.NewCondBr(cg.toBool(successBlock, guardVal), bodyBlock, nextBlock)
+			successBlock.NewCondBr(cg.toBoolImplicit(successBlock, guardVal), bodyBlock, nextBlock)
 		} else {
 			successBlock.NewBr(bodyBlock)
 		}

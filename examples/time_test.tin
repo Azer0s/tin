@@ -127,7 +127,7 @@ test "Instant until success" =
   let end   = Instant{ns: 5000}
   let (d, err) = start.until(end)
 
-  assert::not_ok(errors::has(err))
+  assert::not_ok(errors::is_err(err))
   assert::equals(d.nanoseconds(), 4000)
 
 test "Instant until error when end before start" =
@@ -135,7 +135,7 @@ test "Instant until error when end before start" =
   let end   = Instant{ns: 1000}
   let (_, err) = start.until(end)
 
-  assert::ok(errors::has(err))
+  assert::ok(errors::is_err(err))
 
 test "Instant elapsed" =
   let start = Instant{ns: 100}
@@ -148,18 +148,18 @@ test "Instant elapsed" =
 
 test "parse_rfc3339 UTC no fractional" =
   let (t, err) = time::parse_rfc3339("2024-01-15T12:34:56Z")
-  assert::not_ok(errors::has(err))
+  assert::not_ok(errors::is_err(err))
   // 2024-01-15T12:34:56Z -> Unix seconds: 1705322096
   assert::equals(t.ns, 1705322096000000000)
 
 test "parse_rfc3339 with nanoseconds" =
   let (t, err) = time::parse_rfc3339("2024-01-15T12:34:56.000000123Z")
-  assert::not_ok(errors::has(err))
+  assert::not_ok(errors::is_err(err))
   assert::equals(t.ns, 1705322096000000123)
 
 test "parse_rfc3339 invalid returns error" =
   let (_, err) = time::parse_rfc3339("not-a-time")
-  assert::ok(errors::has(err))
+  assert::ok(errors::is_err(err))
 
 test "parse_rfc3339 round-trip" =
   let iso = "2024-06-01T08:00:00.000000000Z"
@@ -178,12 +178,12 @@ test "to_rfc3339 formats correctly" =
 
 test "parse with RFC3339 layout" =
   let (t, err) = time::parse(time::RFC3339, "2024-01-15T12:34:56Z")
-  assert::not_ok(errors::has(err))
+  assert::not_ok(errors::is_err(err))
   assert::equals(t.ns, 1705322096000000000)
 
 test "parse with unsupported layout returns error" =
   let (_, err) = time::parse("YYYY-MM-DD", "2024-01-15")
-  assert::ok(errors::has(err))
+  assert::ok(errors::is_err(err))
 
 // ---- Instant::now ----
 
@@ -287,3 +287,55 @@ test "json::encode struct with Guid field" =
   let j = json::encode(e)
 
   assert::equals(j, "\{\"id\":\"test-id\",\"name\":\"Bob\"\}")
+
+// ---- monotonic clock + sleep ----
+
+test "monotonic_ns is non-decreasing across calls" =
+  let a = time::monotonic_ns()
+  let b = time::monotonic_ns()
+
+  assert::ok(b >= a)
+
+test "awaiting sleep blocks for at least the requested duration" =
+  let start = time::monotonic_ns()
+
+  await time::sleep(time::from_ms(20))
+
+  let elapsed = time::monotonic_ns() - start
+
+  // Lower bound: 15ms gives slack for kernel timer granularity / CI noise.
+  // Upper bound: 5s catches catastrophic regressions like a hung sleep.
+  assert::ok(elapsed >= 15000000)
+  assert::ok(elapsed < 5000000000)
+
+test "awaited sleep with zero or negative is a noop" =
+  let start = time::monotonic_ns()
+
+  await time::sleep(time::from_ms(0))
+  await time::sleep(time::from_ms(0 - 100))
+
+  let elapsed = time::monotonic_ns() - start
+
+  // Should return effectively immediately; 50ms gives plenty of slack.
+  assert::ok(elapsed < 50000000)
+
+test "awaited sleep_ms convenience matches sleep(from_ms)" =
+  let start = time::monotonic_ns()
+
+  await time::sleep_ms(15)
+
+  let elapsed = time::monotonic_ns() - start
+
+  assert::ok(elapsed >= 10000000)
+  assert::ok(elapsed < 5000000000)
+
+test "unawaited sleep is a noop -- the future is dropped" =
+  let start = time::monotonic_ns()
+
+  // SleepFuture created and discarded; no wait should occur.
+  time::sleep(time::from_ms(100))
+  time::sleep_ms(100)
+  let elapsed = time::monotonic_ns() - start
+
+  // 50ms slack -- both calls should return effectively immediately.
+  assert::ok(elapsed < 50000000)

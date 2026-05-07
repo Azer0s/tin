@@ -58,7 +58,7 @@ fn file_size(path string) i64 =
 
 // stat returns a FileInfo for path.
 // Returns (info, nil) on success, (zeroed info, err) on failure.
-fn stat(path string) (FileInfo, errors::Err) =
+fn stat(path string) (FileInfo, *errors::Err) =
   let d = os_opendir(path)
 
   if d != nil:

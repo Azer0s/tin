@@ -126,6 +126,25 @@ const (
 	// each branch independently, so cross-branch interactions are
 	// intentionally ignored to avoid false positives.
 	DiagFiber = "fiber-misuse"
+	// DiagUnguardedTraitDowncast fires when `expr as *Concrete` is used
+	// to downcast a trait pointer (`*Trait`) to a concrete struct
+	// pointer without a preceding `expr is *Concrete` guard in the
+	// enclosing control-flow path.  The cast is inherently unchecked --
+	// if the dynamic type does not match, the resulting pointer aliases
+	// arbitrary memory -- so a guard is the canonical safe pattern.
+	// Default-on; suppress with -Wno-unguarded-trait-downcast or by
+	// adding the matching `is` check.
+	DiagUnguardedTraitDowncast = "unguarded-trait-downcast"
+	// DiagRedundantTypeCast fires on `<lit> as T` when the surrounding
+	// context already pins the slot to T and the literal would
+	// auto-coerce on its own.  Most commonly inside an array literal:
+	//
+	//   let k [u32; 64] = [0x428a2f98 as u32, ...]
+	//                                ^^^^^^ redundant
+	//
+	// Removing the cast is a pure cleanup; the resulting program is
+	// type-identical and shorter.  Default-on.
+	DiagRedundantTypeCast = "redundant-type-cast"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only

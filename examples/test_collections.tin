@@ -1,5 +1,6 @@
 use assert
 use collections
+use option
 
 // --- LinkedList[T] ---
 
@@ -38,10 +39,15 @@ test "list pop_front" =
 
   l.push_back(10)
   l.push_back(20)
-  assert::equals(l.pop_front(), 10)
+  assert::equals(option::unwrap(l.pop_front()), 10)
   assert::equals(l.len(), 1)
-  assert::equals(l.pop_front(), 20)
+  assert::equals(option::unwrap(l.pop_front()), 20)
   assert::equals(l.len(), 0)
+
+test "list pop_front empty returns None" =
+  let l = collections::LinkedList[i64].make()
+
+  assert::ok(option::is_none(l.pop_front()))
 
 test "list pop_back" =
   let l = collections::LinkedList[i64].make()
@@ -49,16 +55,21 @@ test "list pop_back" =
   l.push_back(10)
   l.push_back(20)
   l.push_back(30)
-  assert::equals(l.pop_back(), 30)
+  assert::equals(option::unwrap(l.pop_back()), 30)
   assert::equals(l.len(), 2)
-  assert::equals(l.pop_back(), 20)
+  assert::equals(option::unwrap(l.pop_back()), 20)
   assert::equals(l.len(), 1)
+
+test "list pop_back empty returns None" =
+  let l = collections::LinkedList[i64].make()
+
+  assert::ok(option::is_none(l.pop_back()))
 
 test "list single element pop_back" =
   let l = collections::LinkedList[i64].make()
 
   l.push_back(42)
-  assert::equals(l.pop_back(), 42)
+  assert::equals(option::unwrap(l.pop_back()), 42)
   assert::equals(l.len(), 0)
 
 test "list push and pop string values" =
@@ -67,8 +78,8 @@ test "list push and pop string values" =
   l.push_back("a")
   l.push_back("b")
   l.push_back("c")
-  assert::equals(l.pop_front(), "a")
-  assert::equals(l.pop_back(), "c")
+  assert::equals(option::unwrap(l.pop_front()), "a")
+  assert::equals(option::unwrap(l.pop_back()), "c")
   assert::equals(l.len(), 1)
   assert::equals(l.get(0), "b")
 

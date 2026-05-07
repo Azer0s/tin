@@ -23,12 +23,12 @@ async handle_conn(c udp::Conn) =
 fn{#async} main() =
   let (srv, err) = udp::listen(8082)
 
-  if errors::has(err):
+  if errors::is_err(err):
     panic(err.message())
   echo "udp echo listening on :8082"
 
   loop:
     let (c, cerr) = await srv.accept()
 
-    if !errors::has(cerr):
+    if !errors::is_err(cerr):
       spawn handle_conn(c)

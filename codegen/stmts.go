@@ -591,7 +591,7 @@ func (cg *CodeGen) genWhereCondition(block *ir.Block, condNode ast.Node) (value.
 		end = cg.curBlock
 	}
 
-	return cg.toBool(end, cond), nil
+	return cg.toBoolImplicit(end, cond), nil
 }
 
 // whereMode is the kind of dispatch a where-list uses.
@@ -1462,11 +1462,21 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	var ownsIfaceData bool
 
 	if initVal != nil {
-		// If the init value is an empty array {i8*, i64} but the declared type
-		// is a typed fat array {T*, i64}, use a properly-typed zero value.
+		// If the init value is an empty array literal `[]` (constant
+		// `{null, 0}`) but the declared type is a typed fat array
+		// `{T*, i64}`, use a properly-typed zero value.  Strings and
+		// non-empty slices share the {i8*, i64} shape, so we discriminate
+		// on the source value being a constant null-data struct -- the
+		// LLVM artifact genArrayLit emits for the empty-literal form
+		// only.  Real strings reach coerce/store-time checks unchanged
+		// so the user gets a precise type-mismatch diagnostic.
 		if !initVal.Type().Equal(llType) {
 			if isFatArrayPtr(initVal.Type()) && isFatArrayPtr(llType) {
-				initVal = cg.zeroValue(llType)
+				if cs, ok := initVal.(*constant.Struct); ok && len(cs.Fields) == 2 {
+					if _, isNull := cs.Fields[0].(*constant.Null); isNull {
+						initVal = cg.zeroValue(llType)
+					}
+				}
 			}
 		}
 
@@ -2730,7 +2740,12 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 	cg.curBlock = block
 
-	val, err := cg.genExpr(block, s.Value)
+	// Plumb the target's element type so that callee-side generators
+	// (notably empty-array literals `[]`) can pick the right shape up
+	// front instead of leaving a `{i8*, i64}` for coerce to massage.
+	ptrType := ptr.Type().(*irtypes.PointerType)
+
+	val, err := cg.genArgWithTargetType(block, s.Value, ptrType.ElemType)
 	if err != nil {
 		return block, err
 	}
@@ -2739,10 +2754,15 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
-	// Get the element type of the pointer.
-	ptrType := ptr.Type().(*irtypes.PointerType)
+
 	srcType := val.Type()
+
 	val = cg.coerce(block, val, ptrType.ElemType)
+	if !val.Type().Equal(ptrType.ElemType) {
+		return block, cg.nodeErr(s,
+			"cannot assign value of type %s (declared type %s)",
+			cg.tinTypeDisplay(srcType), cg.tinTypeDisplay(ptrType.ElemType))
+	}
 	// ARC: for RC-tracked types, retain new value (if copy) then release old.
 	// Skip retain if coerce just boxed a non-any value to any: the new box is
 	// a fresh _tin_rc_alloc (rc=1) and is already owned.
@@ -3261,7 +3281,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		condEnd = cg.curBlock
 	}
 
-	cond = cg.toBool(condEnd, cond)
+	cond = cg.toBoolImplicit(condEnd, cond)
 
 	thenBlock := cg.newBlock("if.then")
 
@@ -3318,7 +3338,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 			elifCondEnd = cg.curBlock
 		}
 
-		elifCond = cg.toBool(elifCondEnd, elifCond)
+		elifCond = cg.toBoolImplicit(elifCondEnd, elifCond)
 		elifThen := cg.newBlock("elif.then")
 		elifCondEnd.NewCondBr(elifCond, elifThen, nextBlock)
 
@@ -3430,7 +3450,7 @@ func (cg *CodeGen) genForWhile(block *ir.Block, s *ast.ForStmt) (*ir.Block, erro
 	}
 
 	cg.curBlock = nil
-	cond = cg.toBool(condBlock, cond)
+	cond = cg.toBoolImplicit(condBlock, cond)
 
 	// Detect constant-true condition (e.g. `for true:` / `loop:`).
 	// When the condition is always true, the loop only exits via break.
@@ -3547,7 +3567,7 @@ func (cg *CodeGen) genForCStyle(block *ir.Block, s *ast.ForStmt) (*ir.Block, err
 		}
 
 		cg.curBlock = nil
-		cond = cg.toBool(condBlock, cond)
+		cond = cg.toBoolImplicit(condBlock, cond)
 		condBlock.NewCondBr(cond, bodyBlock, afterBlock)
 	} else {
 		condBlock.NewBr(bodyBlock)

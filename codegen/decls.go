@@ -230,7 +230,7 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 
 	for _, impl := range orig.Implements {
 		traitName := traitBaseName(impl)
-		if traitName == "implicit" {
+		if traitName == "implicit" || traitName == "coerce" {
 			continue
 		}
 		// Strip package qualifier (e.g. "io::AsyncReader" -> "AsyncReader")
@@ -620,7 +620,7 @@ func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 				}
 			}
 
-			if traitName == "implicit" {
+			if traitName == "implicit" || traitName == "coerce" {
 				continue
 			}
 
@@ -1486,6 +1486,84 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			}
 
 			continue // no vtable for implicit
+		}
+
+		// Special trait: coerce[T]
+		//
+		// Direction-flip of implicit[T]: `implicit[T]` says "T flows
+		// into S" while `coerce[T]` says "S flows into T".  The user
+		// writes `static fn ::coerce(this S) T = ...` and any `s as T`
+		// dispatches through that method.  The receiver is value-form
+		// `this S`, mirroring the operator-trait convention; the body
+		// returns a fresh T derived from the struct's data.
+		//
+		// At call sites, genAsExpr looks up the coerce registry by
+		// the source struct's key; if the requested target type
+		// matches a registered method's return type, the cast lowers
+		// to a direct call to that static fn.  Multiple
+		// implementations are resolved by overload mangling on the
+		// (Struct, RetType) pair so `coerce[i64]` and `coerce[string]`
+		// can co-exist on the same struct.
+		if traitName == "coerce" {
+			gt, ok := impl.(*ast.GenericType)
+			if !ok || len(gt.TypeParams) == 0 {
+				continue
+			}
+
+			tgtLLVM, err := cg.tinTypeToLLVM(gt.TypeParams[0])
+			if err != nil {
+				continue
+			}
+
+			selfLLVM := cg.structTypes[structKey]
+
+			for _, m := range n.Methods {
+				if !m.IsStatic || len(m.Params) != 1 {
+					continue
+				}
+
+				if m.Name != "coerce" {
+					continue
+				}
+
+				paramLLVM, err2 := cg.tinTypeToLLVM(m.Params[0].Type)
+				if err2 != nil {
+					continue
+				}
+
+				if selfLLVM != nil && !paramLLVM.Equal(selfLLVM) {
+					continue
+				}
+
+				retLLVM, err3 := cg.tinTypeToLLVM(m.RetType)
+				if err3 != nil {
+					continue
+				}
+
+				if !retLLVM.Equal(tgtLLVM) {
+					continue
+				}
+
+				key := methodScopeName(structKey, m)
+
+				lookupName := key
+				if cg.overloadedNames[key] {
+					lookupName = overloadMangledName(key, methodParamSig(m, structKey))
+				}
+
+				if fnEntry, ok2 := cg.curScope.lookup(lookupName); ok2 {
+					if fn, ok3 := fnEntry.val.(*ir.Func); ok3 {
+						cg.coerceConvFns[structKey] = append(
+							cg.coerceConvFns[structKey],
+							coerceConvEntry{tgtLLVM: tgtLLVM, fn: fn},
+						)
+					}
+				}
+
+				break
+			}
+
+			continue // no vtable for coerce
 		}
 
 		// Strip package qualifier from traitName (e.g. "io::AsyncReader" -> "AsyncReader").

@@ -1,0 +1,12 @@
+// stdlib/crypto - umbrella for cryptography submodules.
+//
+// Provides:
+//   subtle - constant-time primitives (ct_eq, ct_eq_str)
+//
+// Import examples:
+//   use crypto::subtle
+//   use crypto
+
+use "./subtle/subtle"
+
+export { subtle } as crypto

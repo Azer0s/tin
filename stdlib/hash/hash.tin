@@ -1,19 +1,25 @@
-// stdlib/hash - Non-cryptographic and legacy hash functions.
+// stdlib/hash - Hash function family.
 //
 // Provides:
-//   fnv      - FNV-1a 32-bit and 64-bit
+//   fnv      - FNV-1a 32-bit and 64-bit (non-cryptographic)
 //   md5      - MD5 128-bit digest (legacy/checksum use only)
 //   sha1     - SHA-1 160-bit digest (legacy/checksum use only)
-//   xxhash3  - xxHash3 64-bit (fast, high-quality)
+//   sha256   - SHA-256 (FIPS 180-4); streaming + one-shot
+//   sha512   - SHA-512 / SHA-384 (FIPS 180-4); streaming + one-shot
+//   hmac     - HMAC over the SHA-2 family (RFC 2104)
+//   xxhash3  - xxHash3 64-bit (fast, high-quality, non-cryptographic)
 //
 // Import examples:
-//   use hash::xxhash3
-//   use hash::md5
+//   use hash::sha256
+//   use hash::hmac
 //   use hash
 
 use "./fnv/fnv"
+use "./hmac/hmac"
 use "./md5/md5"
 use "./sha1/sha1"
+use "./sha256/sha256"
+use "./sha512/sha512"
 use "./xxhash3/xxhash3"
 
-export { fnv, md5, sha1, xxhash3 } as hash
+export { fnv, hmac, md5, sha1, sha256, sha512, xxhash3 } as hash

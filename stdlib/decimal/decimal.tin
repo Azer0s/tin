@@ -16,7 +16,7 @@
 // representation of `f`; passing a string keeps the user's literal exact.
 
 use str
-use { Err } from errors
+use errors
 use errors
 
 // pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
@@ -158,7 +158,7 @@ fn from(s string) Value =
 // parse converts a decimal string to a Value. Accepts an optional leading
 // `-`, digits, and an optional `.<digits>` fractional part. Anything else
 // produces (zero, error).
-fn parse(s string) (Value, Err) =
+fn parse(s string) (Value, *errors::Err) =
   let n = len(s)
 
   if n == 0:

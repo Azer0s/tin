@@ -249,6 +249,21 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 			if !f.IsWeak && retainMask != nil && i < len(retainMask) && retainMask[i] {
 				cg.emitStructFieldRetain(block, arg)
 			}
+			// Coerce the arg to the declared field type and reject
+			// mismatches.  Without this guard, ir.NewStore panics
+			// inside llir when the user passes the wrong type into
+			// a variant constructor (e.g. `Ok("not an int")` for
+			// `Result[i64, _]`).
+			fieldType := vi.PayloadType.Fields[i]
+			arg = cg.coerce(block, arg, fieldType)
+
+			if !arg.Type().Equal(fieldType) {
+				return nil, fmt.Errorf(
+					"variant %s field %d: cannot store %s where %s is expected",
+					variantName, i,
+					cg.tinTypeDisplay(arg.Type()),
+					cg.tinTypeDisplay(fieldType))
+			}
 
 			block.NewStore(arg, fieldPtr)
 		}

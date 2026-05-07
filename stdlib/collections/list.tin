@@ -3,10 +3,12 @@
 // Defines the generic list interface. Concrete implementations (e.g. LinkedList)
 // implement this trait.
 
+use option
+
 trait List[T] =
   fn len(this List[T]) i64
   fn get(this List[T], i i64) T
   fn push_back(this *List[T], v T)
   fn push_front(this *List[T], v T)
-  fn pop_back(this *List[T]) T
-  fn pop_front(this *List[T]) T
+  fn pop_back(this *List[T]) Option[T]
+  fn pop_front(this *List[T]) Option[T]

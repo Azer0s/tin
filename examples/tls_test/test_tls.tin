@@ -16,7 +16,7 @@ fn{#async} main() =
 
   let (conn, err) = tcp::dial("127.0.0.1", 8443)
 
-  if errors::has(err):
+  if errors::is_err(err):
     panic(err.message())
 
   let tls_conn = await tls::connect("localhost", conn.fd())

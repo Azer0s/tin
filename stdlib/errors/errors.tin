@@ -1,56 +1,126 @@
-// stdlib/errors - Error type and constructors.
+// stdlib/errors - Error trait and string-backed default impl.
 //
-// Provides a simple Err type (alias for *Error) for propagating errors
-// without panicking.  nil means success.
+// ## The Err trait
 //
-//   use { Err } from errors
+// All error types in the stdlib implement the `Err` trait.  The trait
+// requires a single method:
 //
-//   fn open(path string) (*void, Err) =
-//     let fd = io::fopen(path, "r")
-//     if fd == nil:
-//       return (nil, errors::new("could not open file: " ++ path))
-//     return (fd, nil)
+//   trait Err =
+//     fn message(this Err) string = virtual
 //
-//   let (fd, err) = open("config.txt")
-//   if errors::has(err):
-//     echo "error: {err.message()}"
+// Errors flow through the program as `*Err` (pointer to trait).  The
+// pointer indirection gives a nil sentinel for "no error" while
+// preserving polymorphic dispatch on the concrete type underneath.
+//
+// Functions that may fail return one of:
+//
+//   (T, *Err)             classic two-value form: nil = success
+//   Result[T, *Err]       newer ADT-shaped form: Ok(v) / Err(e)
+//
+// ## Domain error pattern
+//
+// A domain error pairs a kind ADT with a struct wrapper:
+//
+//   data FlagErrorKind =
+//     UnknownFlag(name string)
+//     MissingValue(name string)
+//
+//   struct FlagError(errors::Err) =
+//     _kind FlagErrorKind
+//
+//     fn errors::Err::message(this FlagError) string =
+//       return error_message(this._kind)
+//
+//     fn kind(this FlagError) FlagErrorKind = return this._kind
+//
+//   fn error_message(k FlagErrorKind) string =
+//     match k:
+//       case UnknownFlag(name):  return "unknown flag: --" ++ name
+//       case MissingValue(name): return "missing value for --" ++ name
+//
+// Producers return the concrete struct widened to the trait pointer:
+//
+//   return Err(&FlagError{_kind: UnknownFlag(arg)} as *errors::Err)
+//
+// Consumers either format the message generically:
+//
+//   echo "fatal: {(*err).message()}"
+//
+// or pattern-match on the underlying kind via downcast helpers the
+// domain module provides (e.g. `flag::as_flag_error(e)`).
+//
+// ## StringErr
+//
+// `StringErr` is the no-frills default: just a string message.  Use it
+// for ad-hoc errors that do not warrant a typed kind ADT:
+//
+//   if !ok:
+//     return (nil, errors::new("could not parse: " ++ s))
+//
+// `errors::wrap(inner, ctx)` prepends context to an existing error.
 
-// Error holds an error message.
-struct Error =
-  _msg string
+// Err is the trait every error type implements.  Always reach it
+// through `*Err` so callers can express "no error" as nil.
+trait Err =
+  fn message(this Err) string = virtual
 
-  // message returns the error description.
-  fn message(this Error) string = return this._msg
+// StringErr is the default Err implementation, holding a single string
+// message.  Use errors::new(msg) to construct.
+struct StringErr(Err) =
+  msg string
 
-  // print returns the error message (used by echo and panic dispatch).
-  fn print(this Error) string = return this._msg
+  fn Err::message(this StringErr) string = return this.msg
 
-// Err is an alias for *Error.  nil means no error.
-type Err = *Error
+  // print is what `echo` and panic dispatch call.  Mirroring message
+  // keeps StringErr printable wherever it is referenced directly.
+  fn print(this StringErr) string = return this.msg
 
-// new creates a new Err with the given message.
-fn new(msg string) Err =
-  return &Error{_msg: msg}
+// new creates a heap-allocated StringErr and returns it as *Err.
+// The pointer is non-nil; nil flows from explicit `return nil` paths
+// or from default-zero locals.  The compiler auto-widens *StringErr to
+// *Err at the return site by building a heap iface that borrows the
+// concrete struct.
+fn new(msg string) *Err =
+  let s = &StringErr{msg: msg}
 
-// wrap creates a new Err prepending context to the inner error's message.
-// If inner is nil, acts as new(msg).
-fn wrap(inner Err, msg string) Err =
+  return s
+
+// wrap returns a new *Err whose message is "ctx: <inner>".  When inner
+// is nil, wrap acts as new(ctx).
+fn wrap(inner *Err, ctx string) *Err =
   if inner == nil:
-    return &Error{_msg: msg}
-  return &Error{_msg: msg ++ ": " ++ inner.message()}
+    return new(ctx)
+  let composed = ctx ++ ": " ++ (*inner).message()
+  let s = &StringErr{msg: composed}
 
-// has returns true when err is non-nil (i.e. an error occurred).
-fn has(err Err) bool =
+  return s
+
+// is_err returns true when err is non-nil (i.e. an error occurred).
+fn is_err(err *Err) bool =
   return err != nil
 
-// equals returns true if both errors are non-nil and have the same message,
-// or both are nil.
-fn equals(a Err, b Err) bool =
+// equals compares two *Err by message.  Both nil compares equal.
+// Operates on the trait so any two error implementations whose
+// rendered messages match are considered equivalent for the purpose of
+// "did the same thing happen?" assertions.
+fn equals(a *Err, b *Err) bool =
   if a == nil && b == nil:
     return true
   if a == nil || b == nil:
     return false
 
-  return a.message() == b.message()
+  return (*a).message() == (*b).message()
 
-export { Error, Err, new, wrap, has, equals } as errors
+// message dereferences a *Err and returns its formatted message, or an
+// empty string when the pointer is nil.
+fn message(err *Err) string =
+  if err == nil:
+    return ""
+
+  return (*err).message()
+
+export {
+  Err, StringErr,
+  new, wrap,
+  is_err, equals, message,
+} as errors

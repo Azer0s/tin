@@ -1,0 +1,119 @@
+// examples/implicit_trait_test.tin - stress test for the implicit[T] op-trait.
+//
+// `implicit[T]` says "T flows into S": writing `let x S = some_t`
+// dispatches through `static fn ::implicit(t T) S` to convert.  This
+// is the direction-flip of `coerce[T]`, which goes S -> T at `as T`
+// call sites.
+//
+// Together the two traits cover every conversion edge a struct may
+// participate in:
+//
+//                       implicit[T]                        coerce[U]
+//   T  ───────────────────────────►  S  ─────────────────────────►  U
+//        let x S = t                  let x U = s as U
+//
+// This file exercises implicit's existing decimal::Value impl plus a
+// fresh struct that builds in some less common scenarios (multiple
+// source types, constants used as initializers, struct passed to a
+// function whose param is the struct, etc.).
+
+use assert
+use decimal
+
+fn add_one(v decimal::Value) decimal::Value =
+  let one decimal::Value = 1
+
+  return v + one
+
+test "implicit[i64] makes plain int initialize a Value" =
+  let v decimal::Value = 42
+
+  // Round-trip through the recorded coeff/scale.  An int initializer
+  // produces scale=0, so coeff equals the input verbatim.
+  assert::equals(v.coeff, 42)
+  assert::equals(v.scale, 0 as i32)
+
+test "implicit[f64] folds a float into Value" =
+  let v decimal::Value = 1.5
+
+  // 1.5 -> coeff=15, scale=1.
+  assert::equals(v.coeff, 15)
+  assert::equals(v.scale, 1 as i32)
+
+test "implicit[string] parses string into Value" =
+  let v decimal::Value = "0.25"
+
+  // 0.25 -> coeff=25, scale=2.
+  assert::equals(v.coeff, 25)
+  assert::equals(v.scale, 2 as i32)
+
+test "implicit feeds function args" =
+  // The function takes Value but is called with an int -- the
+  // argument coercion path must trigger implicit[i64].
+  let result = add_one(7)
+
+  assert::equals(result.coeff, 8)
+
+test "implicit + arithmetic compose" =
+  // 1.5 + 2 should produce a Value worth 3.5; both operands are
+  // implicitly lifted from f64 / i64 to Value.
+  let a decimal::Value = 1.5
+  let b decimal::Value = 2
+  let c = a + b
+
+  // 1.5 + 2.0 = 3.5 (-> coeff=35, scale=1).
+  assert::equals(c.coeff, 35)
+  assert::equals(c.scale, 1 as i32)
+
+test "implicit retains identity when source already matches target" =
+  // Value -> Value direct assignment uses the regular copy path, not
+  // implicit (because `Value` is not in the implicit[*] list for
+  // itself).  This guards against an over-eager implicit dispatch
+  // that would loop forever.
+  let v1 decimal::Value = 5
+  let v2 decimal::Value = v1
+
+  assert::equals(v1.coeff, v2.coeff)
+
+// Now exercise implicit on a custom struct so we don't only test the
+// existing decimal impl.
+struct Centimeters(implicit[i64], implicit[f64]) =
+  mm i64
+
+  static fn ::implicit(n i64) Centimeters = return Centimeters{mm: n * 10}
+  static fn ::implicit(x f64) Centimeters =
+    return Centimeters{mm: (x * 10.0) as i64}
+
+test "custom struct receives implicit[i64]" =
+  let c Centimeters = 5
+
+  assert::equals(c.mm, 50)
+
+test "custom struct receives implicit[f64]" =
+  let c Centimeters = 2.5
+
+  assert::equals(c.mm, 25)
+
+test "custom struct implicit through function arg" =
+  let c = scale_up(3)
+
+  assert::equals(c.mm, 60)
+
+fn scale_up(c Centimeters) Centimeters = return Centimeters{mm: c.mm * 2}
+
+// Combine implicit + coerce on the same struct: bidirectional flow.
+struct Percent(implicit[f64], coerce[f64], coerce[string]) =
+  ratio f64
+
+  static fn ::implicit(x f64) Percent = return Percent{ratio: x}
+  static fn ::coerce(this Percent) f64 = return this.ratio * 100.0
+  static fn ::coerce(this Percent) string = return "{this.ratio * 100.0}%"
+
+test "implicit and coerce coexist on one struct" =
+  let p Percent = 0.25
+  let f = p as f64
+  let s = p as string
+
+  assert::equals(p.ratio, 0.25)
+  assert::equals(f, 25.0)
+  assert::equals(s, "25.000000%")

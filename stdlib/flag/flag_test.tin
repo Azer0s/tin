@@ -1,9 +1,9 @@
 use flag
 use assert
 
-// flag uses a module-level registry, so tests share state. We exercise the
-// constructors here and rely on the integration test (examples/flag_demo)
-// for end-to-end argv parsing scenarios.
+// flag uses a module-level registry, so the registry-mutating end-to-end
+// parse scenarios live in flag_parse.sh; this file covers the typed-flag
+// constructors only.
 
 test "bool flag default value is reachable" =
   let f = flag::bool("t1_verbose", false, "")

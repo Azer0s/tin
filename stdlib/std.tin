@@ -13,6 +13,7 @@
 
 use assert
 use collections
+use crypto
 use decimal
 use encoding
 use errors
@@ -50,6 +51,7 @@ use unicode
 export {
     assert,
     collections,
+    crypto,
     decimal,
     encoding,
     errors,

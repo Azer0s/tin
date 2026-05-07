@@ -32,8 +32,8 @@ fn is_none[t](o Option[t]) bool =
     case Some(_): return false
     case None:    return true
 
-// or_default returns the Some value or d when o is None.
-fn or_default[t](o Option[t], d t) t =
+// unwrap_or returns the Some value or d when o is None.
+fn unwrap_or[t](o Option[t], d t) t =
   match o:
     case Some(v): return v
     case None:    return d

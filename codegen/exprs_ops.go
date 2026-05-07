@@ -453,30 +453,27 @@ func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, e
 // Used when the declared array type is known (e.g. let fns [fn{#async}(i64) i64] = [double]).
 func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, targetElemType irtypes.Type) (value.Value, error) {
 	if len(e.Elems) == 0 {
-		// Empty dynamic array: {null, 0} typed against targetElemType when known.
-		// When no target is known the caller gets the untyped {i8*, i64} form and
-		// the coerce path later swaps it for a correctly-typed zero value.
-		var fat *irtypes.StructType
-
-		var dataNull value.Value
-
+		// Empty dynamic array: {null, 0} typed against targetElemType
+		// when known.  When no target is known the caller gets the
+		// untyped {i8*, i64} form and the coerce path later swaps it
+		// for a correctly-typed zero value -- the value is emitted as
+		// a *constant.Struct with a null data pointer so that
+		// downstream coerce paths can discriminate it from a real
+		// string at runtime (both share the {i8*, i64} shape; only a
+		// constant null in the data field is the empty-array bumper).
 		if targetElemType != nil {
-			fat = irtypes.NewStruct(irtypes.NewPointer(targetElemType), irtypes.I64)
-			dataNull = constant.NewNull(irtypes.NewPointer(targetElemType))
-		} else {
-			fat = stringFatPtrType() // {i8*, i64} - reuse structure
-			dataNull = constant.NewNull(irtypes.I8Ptr)
+			fat := irtypes.NewStruct(irtypes.NewPointer(targetElemType), irtypes.I64)
+
+			return constant.NewStruct(fat,
+				constant.NewNull(irtypes.NewPointer(targetElemType)),
+				constant.NewInt(irtypes.I64, 0)), nil
 		}
 
-		alloca := block.NewAlloca(fat)
-		ptrGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(dataNull, ptrGep)
-		lenGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(constant.NewInt(irtypes.I64, 0), lenGep)
+		fat := stringFatPtrType() // {i8*, i64}
 
-		return block.NewLoad(fat, alloca), nil
+		return constant.NewStruct(fat,
+			constant.NewNull(irtypes.I8Ptr),
+			constant.NewInt(irtypes.I64, 0)), nil
 	}
 
 	vals := make([]value.Value, len(e.Elems))
@@ -492,6 +489,12 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 
 		if targetElemType != nil {
 			v = cg.coerce(block, v, targetElemType)
+			if !v.Type().Equal(targetElemType) {
+				return nil, cg.nodeErr(elem,
+					"array element %d: cannot store %s where %s is expected",
+					i, cg.tinTypeDisplay(v.Type()),
+					cg.tinTypeDisplay(targetElemType))
+			}
 		}
 
 		vals[i] = v
@@ -501,6 +504,17 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 
 	if targetElemType != nil {
 		elemType = targetElemType
+	}
+	// All elements must agree on a single LLVM type before we hand
+	// them to ir.NewStore.  When there is no target hint, the first
+	// element pins the type and subsequent mismatches are caught here.
+	for i, v := range vals {
+		if !v.Type().Equal(elemType) {
+			return nil, cg.nodeErr(e.Elems[i],
+				"array element %d: cannot store %s where %s is expected",
+				i, cg.tinTypeDisplay(v.Type()),
+				cg.tinTypeDisplay(elemType))
+		}
 	}
 
 	n := int64(len(vals))
@@ -838,7 +852,15 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+
 			val = cg.coerce(block, val, st.Fields[idx])
+			if !val.Type().Equal(st.Fields[idx]) {
+				return nil, cg.nodeErr(v,
+					"struct %s field %d: cannot store %s where %s is expected",
+					e.TypeName, i, cg.tinTypeDisplay(val.Type()),
+					cg.tinTypeDisplay(st.Fields[idx]))
+			}
+
 			block.NewStore(val, gep)
 			// ARC: retain RC-tracked values that are copied from existing owners.
 			// Weak fields are non-owning: skip retain so only one owner counts.
@@ -883,14 +905,22 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 			idx := userOff + rawIdx
 
-			val, err := cg.genExpr(block, f.Value)
+			val, err := cg.genArgWithTargetType(block, f.Value, st.Fields[idx])
 			if err != nil {
 				return nil, err
 			}
 
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+
 			val = cg.coerce(block, val, st.Fields[idx])
+			if !val.Type().Equal(st.Fields[idx]) {
+				return nil, cg.nodeErr(f.Value,
+					"struct %s field %s: cannot store %s where %s is expected",
+					e.TypeName, f.Name, cg.tinTypeDisplay(val.Type()),
+					cg.tinTypeDisplay(st.Fields[idx]))
+			}
+
 			block.NewStore(val, gep)
 			// `&escape_promoted_local` flowing into a raw `*T` field -- the
 			// local was heap-allocated by escape analysis, and Tin would
@@ -1194,7 +1224,14 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		}
 
 		fieldType := st.Fields[idx]
+
 		v = cg.coerce(block, v, fieldType)
+		if !v.Type().Equal(fieldType) {
+			return nil, cg.nodeErr(tup.Elems[i],
+				"tuple element %d expects %s, got %s", i,
+				cg.tinTypeDisplay(fieldType), cg.tinTypeDisplay(v.Type()))
+		}
+
 		gep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 		block.NewStore(v, gep)
@@ -1423,6 +1460,73 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		return nil, err
 	}
 
+	// Trait-pointer downcast: `e as *Concrete` where e is *Trait_iface.
+	// The iface struct's `data` field points at the heap-allocated
+	// concrete struct that was widened into the trait at construction
+	// time, so the cast loads `(*e).data` and bitcasts to *Concrete.
+	// This is unchecked: if the concrete type does not match what the
+	// iface was built from the result is a wild pointer.  Callers
+	// should only use this when they know the dynamic type (e.g.
+	// inside the matching Result::Err arm of a domain-specific
+	// signature).  Returning nil when src is nil keeps the cast
+	// safe for the explicit guard pattern `if e == nil: return ...`.
+	//
+	// Casting a *Trait to a non-pointer concrete type is rejected as a
+	// compile error: it would silently load garbage from the iface's
+	// data field as if it were a value, and there is no use case where
+	// that is what the user means.  The intended forms are:
+	//   - `e as *Concrete` (pointer downcast, this branch)
+	//   - `(*e) as Concrete` (deref first, then value coerce)
+	if srcPt, ok := val.Type().(*irtypes.PointerType); ok {
+		if _, isTrait := cg.isTraitFatPtr(srcPt.ElemType); isTrait {
+			if tgtPt, ok2 := targetType.(*irtypes.PointerType); ok2 {
+				if _, isTraitTgt := cg.isTraitFatPtr(tgtPt.ElemType); !isTraitTgt {
+					if _, isStruct := tgtPt.ElemType.(*irtypes.StructType); isStruct {
+						ifaceStructTy := srcPt.ElemType.(*irtypes.StructType)
+						dataGep := block.NewGetElementPtr(ifaceStructTy, val,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+						dataPtr := block.NewLoad(irtypes.I8Ptr, dataGep)
+
+						return block.NewBitCast(dataPtr, targetType), nil
+					}
+				}
+			} else {
+				// *Trait -> non-pointer target: reject loud and clear.
+				return nil, cg.nodeErr(e,
+					"cannot cast a trait pointer to non-pointer type %s; "+
+						"use `(*x) as %s` to deref first, or `x as *%s` to "+
+						"keep the pointer form",
+					cg.tinTypeDisplay(targetType),
+					cg.tinTypeDisplay(targetType),
+					cg.tinTypeDisplay(targetType))
+			}
+		}
+	}
+
+	// Symmetric: Trait (value iface) -> *Concrete (pointer struct) is also
+	// a hard error.  A value trait carries no addressable storage to hand
+	// out as a pointer, and the implicit-ptr-to-iface bitcast that llir
+	// would otherwise emit produces a wild pointer that crashes the moment
+	// the caller dereferences it.  Force the user to take an address
+	// (`(&t) as *Concrete`) or restructure to deal in pointer traits from
+	// the start.
+	if _, isTrait := cg.isTraitFatPtr(val.Type()); isTrait {
+		if tgtPt, ok := targetType.(*irtypes.PointerType); ok {
+			if _, isTraitTgt := cg.isTraitFatPtr(tgtPt.ElemType); !isTraitTgt {
+				if _, isStruct := tgtPt.ElemType.(*irtypes.StructType); isStruct {
+					return nil, cg.nodeErr(e,
+						"cannot cast a value-form trait to pointer type %s; "+
+							"the iface holds the concrete by value with no "+
+							"stable address.  Use `*Trait` from the start, "+
+							"or `(&t) as %s` if you intend to take the "+
+							"caller's stack address",
+						cg.tinTypeDisplay(targetType),
+						cg.tinTypeDisplay(targetType))
+				}
+			}
+		}
+	}
+
 	// Fat-array to fat-array cast: explicit element-wise conversion via the
 	// runtime helper. Only this path - `x as [i32]` - performs the conversion;
 	// implicit coerce does not (silent narrowing was hiding bugs).
@@ -1478,7 +1582,53 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		}
 	}
 
+	// User-defined `coerce[T]` op-trait: if the source is a struct
+	// whose decl includes `coerce[T]` and a matching `static fn
+	// ::coerce(this S) T`, dispatch the cast to that function before
+	// trying built-in coercions.  Mirrors the existing implicit[T]
+	// path in coerce() but going the other direction (struct -> T).
+	if structName := cg.typeNameOf(val.Type()); structName != "" {
+		for _, entry := range cg.coerceConvFns[structName] {
+			if entry.tgtLLVM.Equal(targetType) {
+				return block.NewCall(entry.fn, val), nil
+			}
+		}
+	}
+
+	// Explicit `as` casts are allowed to do raw pointer / fat-ptr
+	// punning that would be unsafe to do implicitly.  Toggle the
+	// guard while coerce runs and reset after; the implicit
+	// let-binding path leaves the flag false so a stray
+	// `let p *i64 = 5` still rejects.
+	prevExplicit := cg.allowExplicitPtrCoerce
+	cg.allowExplicitPtrCoerce = true
+
 	result := cg.coerce(block, val, targetType)
+
+	cg.allowExplicitPtrCoerce = prevExplicit
+	// coerce() returns the input unchanged when it cannot find a
+	// conversion path, so a result whose type still does not match the
+	// requested target means the cast was impossible.  Up to here the
+	// compiler used to silently propagate the mismatch and surface it
+	// as the next assignment / return / call type error -- which buried
+	// the actual problem (the cast itself) under a confusing message at
+	// a downstream slot.  Reporting it at the cast site points the user
+	// at the right line.
+	if !result.Type().Equal(targetType) {
+		gotName := fmtArgType(result.Type())
+		if gotName == "" || gotName == "<nil>" {
+			gotName = prettyStructName(cg.typeNameOf(result.Type()))
+		}
+
+		wantName := cg.tinTypeDisplay(targetType)
+		// Identity casts are not "impossible" -- the existing
+		// useless-cast warning already covers them.  Anything else
+		// genuinely has no conversion path.
+		if !val.Type().Equal(targetType) {
+			return nil, cg.nodeErr(e,
+				"cannot cast %s to %s: no conversion path", gotName, wantName)
+		}
+	}
 	// Release the `any` box after unboxing when it is a temporary (fresh allocation
 	// from a call/getfield).  Identifiers and field accesses are copy-borrows that
 	// are owned by their parent scope/struct and must NOT be released here.
@@ -1600,7 +1750,7 @@ func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Va
 		return nil, err
 	}
 
-	cond = cg.toBool(block, cond)
+	cond = cg.toBoolImplicit(block, cond)
 
 	thenVal, err := cg.genExpr(block, e.Then)
 	if err != nil {
@@ -1722,6 +1872,39 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 			return cmp, nil
 		}
 	}
+	// Trait-pointer downcast check: `expr is *Concrete` where expr is
+	// of type `*Trait_iface`.  Compares the vtable in the iface against
+	// the (Concrete, Trait) vtable global; returns i1.  Pairs with the
+	// `as *Concrete` downcast so callers can guard the unsafe cast:
+	//
+	//   if e is *FlagError:
+	//     let fe = e as *FlagError
+	//     ...
+	//
+	// `astchecks.go:checkUnguardedTraitDowncast` warns when the `as`
+	// happens without a same-type `is` guard in the enclosing block.
+	if srcPt, ok := val.Type().(*irtypes.PointerType); ok {
+		if traitInstKey, isTrait := cg.isTraitFatPtr(srcPt.ElemType); isTrait && e.Type != nil {
+			if tt, ok2 := e.Type.(*ast.PointerType); ok2 {
+				if st, ok3 := tt.Elem.(*ast.SimpleType); ok3 {
+					structName := st.Name
+
+					vtableKey := structName + "__" + traitInstKey
+					if vtableGlobal, has := cg.traitVtableGlobals[vtableKey]; has {
+						ifaceStructTy := srcPt.ElemType.(*irtypes.StructType)
+						vtableGep := block.NewGetElementPtr(ifaceStructTy, val,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+						vtablePtrType := ifaceStructTy.Fields[1]
+						actual := block.NewLoad(vtablePtrType, vtableGep)
+						expected := block.NewBitCast(vtableGlobal, vtablePtrType)
+
+						return block.NewICmp(enum.IPredEQ, actual, expected), nil
+					}
+				}
+			}
+		}
+	}
+
 	// any type check: "x is dog" where x is any - compare type_id (field 0).
 	if isAnyType(val.Type()) && e.Type != nil {
 		targetName := ""

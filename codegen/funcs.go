@@ -2505,6 +2505,16 @@ func (cg *CodeGen) genImplicitMain(stmts []ast.Node) error {
 
 	cg.emitPkgInitFns(entry)
 
+	// Seed cg.mutatedNames from the union of every top-level statement so
+	// the if-condition folder treats reassigned top-level lets as non-const.
+	// Without this, `let alive bool = true` followed by `alive = false`
+	// later in the implicit main produces phantom "always true" warnings on
+	// any `if alive:` between the binding and the first mutation.
+	prevMutated := cg.mutatedNames
+	cg.mutatedNames = collectMutatedNamesFromStmts(stmts)
+
+	defer func() { cg.mutatedNames = prevMutated }()
+
 	for _, stmt := range stmts {
 		entry, _, err = cg.genStmt(entry, stmt)
 		if err != nil {

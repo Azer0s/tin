@@ -729,6 +729,67 @@ func (cg *CodeGen) toBool(block *ir.Block, val value.Value) value.Value {
 	return constant.NewInt(irtypes.I1, 1)
 }
 
+// rejectStructAsBoolOperand fires at struct operands of `&&`, `||`,
+// or `!` and rejects them with a diagnostic at e's position.  The
+// boolean operators have their own op-trait family (`not[ret]` for
+// `!`; `&&` / `||` are not currently overloadable but the policy is
+// the same to leave room for that), so silently coercing a struct
+// via `coerce[bool]` would mask user intent.  The user must write
+// `<struct> as bool && other` to opt in.
+func (cg *CodeGen) rejectStructAsBoolOperand(e ast.Node, t irtypes.Type) error {
+	if !isStructType(t) {
+		return nil
+	}
+	// Trait fat-pointers, fat-array pointers, strings, and other
+	// "fat" pointer-shaped structs are runtime aggregates that
+	// nonetheless carry a meaningful truthiness (nil / empty).
+	// toBool already lowers them; only *user* structs need to opt
+	// in via an explicit `as bool`.
+	if isFatPtrType(t) || isFatArrayPtr(t) || isTraitFatPtrShape(t) {
+		return nil
+	}
+
+	if isAnyType(t) {
+		return nil
+	}
+
+	return cg.nodeErr(e,
+		"cannot use %s as a boolean operand directly; "+
+			"add `as bool` (requires the struct to implement `coerce[bool]`)",
+		cg.tinTypeDisplay(t))
+}
+
+// toBoolImplicit lowers val to i1 in a *condition* context where Tin
+// is allowed to call user-defined `coerce[bool]` automatically.  The
+// canonical sites are `if val:`, `for val:`, ternary `val ? a : b`,
+// and match / where guards.  Boolean-operator sites (`&&`, `||`, `!`)
+// stay on toBool() because the user may have overloaded those traits
+// on the struct -- silently coercing would mask the overload.
+//
+// When val is a struct whose decl includes `coerce[bool]`, the
+// registered `static fn ::coerce(this S) bool` is called and its
+// result feeds the conditional branch.  All other types fall through
+// to the existing toBool primitive lowering.  Structs without a
+// `coerce[bool]` impl reach the existing fallback (constant true)
+// for now -- callers should report that statically as an error if
+// they want strict coverage; the implicit hook never silently fires
+// when a real coercion path is missing.
+func (cg *CodeGen) toBoolImplicit(block *ir.Block, val value.Value) value.Value {
+	if val == nil {
+		return constant.NewInt(irtypes.I1, 0)
+	}
+
+	if structName := cg.typeNameOf(val.Type()); structName != "" {
+		for _, entry := range cg.coerceConvFns[structName] {
+			if entry.tgtLLVM.Equal(irtypes.I1) {
+				return block.NewCall(entry.fn, val)
+			}
+		}
+	}
+
+	return cg.toBool(block, val)
+}
+
 // coerce converts a value to the target type, inserting casts as needed.
 func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type) value.Value {
 	if val == nil || target == nil {
@@ -791,6 +852,14 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// fat ptr then dereference garbage and segfault.
 	if tgtPt, ok := target.(*irtypes.PointerType); ok {
 		if traitName, isTrait := cg.isTraitFatPtr(tgtPt.ElemType); isTrait {
+			// nil literal -> *Trait: typed null pointer of the trait
+			// fat-ptr's pointer type.  Lets `(t, *Trait) = (val, nil)`
+			// and similar tuple/Result returns work without an explicit
+			// cast, which is the natural "no error" idiom.
+			if _, isNull := val.(*constant.Null); isNull {
+				return constant.NewNull(tgtPt)
+			}
+
 			if srcPt, isPtr := src.(*irtypes.PointerType); isPtr {
 				if _, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
 					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
@@ -843,9 +912,24 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		}
 
 		if srcPt.ElemType.Equal(irtypes.I8) && !tgtPt.ElemType.Equal(irtypes.I8) {
-			// Empty-array literal only. The untyped {i8*, i64} form is only
-			// produced by genArrayLitWithElemType(nil) for empty literals.
-			return cg.zeroValue(target)
+			// At the LLVM-type level a string and a `[i8]` slice are
+			// indistinguishable -- both are `{i8*, i64}`.  The
+			// previous "silently retype to the target" shortcut here
+			// turned `let xs [i64] = "abc"` into a zero-length
+			// `[i64]`, hiding the real type error.  The new policy:
+			// only retype when the source is a syntactic empty-array
+			// literal, which we recognize by a constant.Struct whose
+			// data pointer is a null constant (genArrayLit emits
+			// exactly that for `[]`).  Real string values reach the
+			// caller's store-time type check unchanged so the user
+			// gets a precise error.
+			if cv, ok := val.(*constant.Struct); ok && len(cv.Fields) == 2 {
+				if _, isNull := cv.Fields[0].(*constant.Null); isNull {
+					return cg.zeroValue(target)
+				}
+			}
+
+			return val
 		}
 		// Cross-type fat arrays (e.g. [i64] -> [i32]): leave val unchanged.
 		// adaptArgs / call-site validation reports this as a compile error with
@@ -872,16 +956,23 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 		}
 	}
 
-	// Fat-pointer (string / dynamic array) -> raw C pointer: extract data ptr.
-	// This enables passing Tin strings directly to extern C functions.
+	// Fat-pointer (string / dynamic array) -> raw C pointer: extract
+	// data ptr.  Allowed when the call site is an explicit `as` cast
+	// OR when the destination's element type is `i8` (the "raw bytes"
+	// pointer used for `*char` / `*byte` extern boundaries) -- this
+	// keeps Tin strings flowing into extern C functions transparently.
+	// Cross-elem casts (e.g. `string -> *i64`) require explicit `as`.
 	if isFatPtrType(src) {
-		if _, ok := target.(*irtypes.PointerType); ok {
-			rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
-			if rawPtr.Type().Equal(target) {
-				return rawPtr
-			}
+		if pt, ok := target.(*irtypes.PointerType); ok {
+			tgtElIsI8 := pt.ElemType.Equal(irtypes.I8)
+			if cg.allowExplicitPtrCoerce || tgtElIsI8 {
+				rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
+				if rawPtr.Type().Equal(target) {
+					return rawPtr
+				}
 
-			return block.NewBitCast(rawPtr, target)
+				return block.NewBitCast(rawPtr, target)
+			}
 		}
 	}
 
@@ -924,17 +1015,43 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	case irtypes.IsFloat(src) && irtypes.IsInt(target):
 		return block.NewFPToSI(val, target)
 
-	// Pointer -> Pointer.
+	// Pointer -> Pointer.  Same-elem identity is always implicit.
+	// `*i8` (Tin's untyped pointer; what `nil` and string data point
+	// at) widens to any typed pointer because it is structurally a
+	// "raw byte" alias and shows up in legitimate places (typed null
+	// literals, string-buffer escapes for C interop arguments).
+	// Cross-elem casts between two *non-i8* typed pointers (e.g.
+	// `*Foo` -> `*Bar`) are reserved for explicit `as`; the implicit
+	// path keeps them apart so two structurally unrelated types
+	// cannot pun by accident in a let-binding or arg pass.
 	case irtypes.IsPointer(src) && irtypes.IsPointer(target):
-		return block.NewBitCast(val, target)
+		srcEl := src.(*irtypes.PointerType).ElemType
 
-	// Int -> Pointer.
+		tgtEl := target.(*irtypes.PointerType).ElemType
+		if srcEl.Equal(tgtEl) {
+			return val
+		}
+
+		if srcEl.Equal(irtypes.I8) || tgtEl.Equal(irtypes.I8) {
+			return block.NewBitCast(val, target)
+		}
+
+		if cg.allowExplicitPtrCoerce {
+			return block.NewBitCast(val, target)
+		}
+	// Int -> Pointer and Pointer -> Int are likewise gated on the
+	// explicit-cast flag.  They remain available via `as *T` / `as
+	// i64` (raw-address punning, mostly inside `{#unsafe}` blocks),
+	// but a stray `let p *i64 = 5` reaches the binding's type check
+	// instead of producing a bogus pointer.
 	case irtypes.IsInt(src) && irtypes.IsPointer(target):
-		return block.NewIntToPtr(val, target)
-
-	// Pointer -> Int.
+		if cg.allowExplicitPtrCoerce {
+			return block.NewIntToPtr(val, target)
+		}
 	case irtypes.IsPointer(src) && irtypes.IsInt(target):
-		return block.NewPtrToInt(val, target)
+		if cg.allowExplicitPtrCoerce {
+			return block.NewPtrToInt(val, target)
+		}
 	}
 
 	// Unbox any to a scalar (int, float), struct, or string fat-ptr.

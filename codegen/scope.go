@@ -18,6 +18,14 @@ type implicitConvEntry struct {
 	fn      *ir.Func     // static fn(T) S
 }
 
+// coerceConvEntry records one S -> coerce[T] conversion function.  S
+// is the implementer struct (key into the registry); fn is the static
+// `::coerce(this S) T` method that runs at `<s_val> as T`.
+type coerceConvEntry struct {
+	tgtLLVM irtypes.Type // target type T
+	fn      *ir.Func     // static fn(S) T
+}
+
 // Scope
 
 type scopeEntry struct {

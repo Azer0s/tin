@@ -49,3 +49,19 @@ test "round trip url safe" =
   for i < len(cases):
     assert::equals(base64::decode(base64::encode_url(cases[i])), cases[i])
     i = i + 1
+
+test "encode_url_no_pad alias matches encode_url" =
+  let cases [string] = ["", "f", "fo", "foo", "Hello, World!", "JWT payload? yes/maybe"]
+  let i i64 = 0
+
+  for i < len(cases):
+    assert::equals(base64::encode_url_no_pad(cases[i]), base64::encode_url(cases[i]))
+    i = i + 1
+
+test "decode_url_no_pad round-trips with encode_url_no_pad" =
+  let cases [string] = ["", "f", "fo", "foo", "Hello, World!", "JWT payload? yes/maybe"]
+  let i i64 = 0
+
+  for i < len(cases):
+    assert::equals(base64::decode_url_no_pad(base64::encode_url_no_pad(cases[i])), cases[i])
+    i = i + 1

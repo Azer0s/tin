@@ -118,7 +118,17 @@ func methodParamSig(m *ast.FuncDecl, structName string) string {
 		}
 	}
 
-	return funcParamSig(params)
+	sig := funcParamSig(params)
+	// `coerce[T]` op-trait methods have shape `static fn ::coerce(this S) T`.
+	// Param sig collapses to "" after stripping `this`, so two coerce impls
+	// for the same struct would mangle to the same name and clobber each
+	// other.  Mix the return type into the sig so coerce[i64] and
+	// coerce[string] survive overload-mangling on the same struct.
+	if m.Name == "coerce" && m.IsStatic && m.RetType != nil {
+		sig += "->" + m.RetType.String()
+	}
+
+	return sig
 }
 
 // overloadMangledName returns the mangled IR name for a function/method when

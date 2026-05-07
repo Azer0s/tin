@@ -1,0 +1,299 @@
+// examples/conversion_stress.tin - hostile cases for implicit + coerce.
+//
+// Each test exercises a specific edge case and verifies it either runs
+// to completion with the expected outcome or fails the way the spec
+// promises.  Compile errors are exercised in a separate .sh harness.
+
+use assert
+use math
+use result
+
+// ---------------------------------------------------------------------------
+// 1. Multi-impl coerce on struct -- every target dispatches correctly
+// ---------------------------------------------------------------------------
+
+struct Quantity(coerce[i64], coerce[f64], coerce[string], coerce[bool], coerce[atom]) =
+  count i64
+
+  static fn ::coerce(this Quantity) i64    = return this.count
+  static fn ::coerce(this Quantity) f64    = return this.count as f64
+  static fn ::coerce(this Quantity) string = return "{this.count} units"
+  static fn ::coerce(this Quantity) bool   = return this.count > 0
+  static fn ::coerce(this Quantity) atom   =
+    if this.count == 0: return 'zero
+    if this.count > 0:  return 'positive
+
+    return 'negative
+
+test "coerce dispatches on each registered target" =
+  let q = Quantity{count: 42}
+
+  assert::equals(q as i64, 42)
+  assert::equals(q as f64, 42.0)
+  assert::equals(q as string, "42 units")
+  assert::ok(q as bool)
+  assert::equals(q as atom, 'positive)
+
+test "coerce on negative values" =
+  let q = Quantity{count: -3}
+
+  assert::equals(q as atom, 'negative)
+  // coerce[bool] is `count > 0`, so a negative count is falsy.
+  assert::ok(!(q as bool))
+
+test "coerce on zero" =
+  let q = Quantity{count: 0}
+
+  assert::equals(q as atom, 'zero)
+  assert::ok(!(q as bool))
+
+// ---------------------------------------------------------------------------
+// 2. Implicit + coerce combined: struct sandwiched between primitive flows
+// ---------------------------------------------------------------------------
+
+struct Tagged(implicit[i64], coerce[i64], coerce[string]) =
+  inner i64
+
+  static fn ::implicit(n i64) Tagged = return Tagged{inner: n * 2}
+  static fn ::coerce(this Tagged) i64    = return this.inner / 2
+  static fn ::coerce(this Tagged) string = return "tagged({this.inner})"
+
+test "implicit then coerce roundtrip" =
+  let t Tagged = 21
+
+  // implicit doubles, coerce halves -- net identity for value extraction.
+  assert::equals(t as i64, 21)
+  assert::equals(t.inner, 42)
+
+test "implicit through arg, coerce through return" =
+  let s = describe(7)
+
+  assert::equals(s, "tagged(14)")
+
+fn describe(n Tagged) string = return n as string
+
+// ---------------------------------------------------------------------------
+// 3. Implicit conversion via constants and literals
+// ---------------------------------------------------------------------------
+
+const SEED i64 = 99
+
+test "implicit accepts a const initializer" =
+  let t Tagged = SEED
+
+  assert::equals(t.inner, 198)
+
+test "implicit through arithmetic preserves the cast site" =
+  // `2 * 5` is i64; needs implicit at the let.
+  let t Tagged = 2 * 5
+
+  assert::equals(t.inner, 20)
+
+// ---------------------------------------------------------------------------
+// 4. coerce[bool] in conditionals (auto) but not in && / || (strict)
+// ---------------------------------------------------------------------------
+
+struct Switch(coerce[bool]) =
+  on bool
+
+  static fn ::coerce(this Switch) bool = return this.on
+
+test "auto coerce[bool] in if" =
+  let s = Switch{on: true}
+
+  if s:
+    assert::ok(true)
+  else:
+    assert::fails("expected if-truthy")
+
+test "auto coerce[bool] in else-if" =
+  let s = Switch{on: false}
+
+  if s:
+    assert::fails("expected else-if path")
+  else if Switch{on: true}:
+    assert::ok(true)
+  else:
+    assert::fails("expected else-if path")
+
+test "auto coerce[bool] in for" =
+  let counter Switch = Switch{on: true}
+  let i i64 = 0
+
+  for counter:
+    i = i + 1
+
+    if i >= 3:
+      counter = Switch{on: false}
+
+  assert::equals(i, 3)
+
+test "auto coerce[bool] in ternary" =
+  let s = Switch{on: true}
+  let v = s ? 1 : 0
+
+  assert::equals(v, 1)
+
+test "auto coerce[bool] in nested if" =
+  let s = Switch{on: true}
+
+  if s:
+    if s:
+      assert::ok(true)
+    else:
+      assert::fails("inner expected true")
+  else:
+    assert::fails("outer expected true")
+
+test "explicit as bool in &&" =
+  let a = Switch{on: true}
+  let b = Switch{on: true}
+
+  assert::ok(a as bool && b as bool)
+
+test "explicit as bool in ||" =
+  let a = Switch{on: false}
+  let b = Switch{on: true}
+
+  assert::ok(a as bool || b as bool)
+
+// ---------------------------------------------------------------------------
+// 5. Field initializers -- redundant cast warning DOES NOT fire on conversion
+// ---------------------------------------------------------------------------
+
+struct Point =
+  x i64
+  y i64
+
+test "named struct fields receive literals without cast" =
+  let p = Point{x: 1, y: 2}
+
+  assert::equals(p.x, 1)
+  assert::equals(p.y, 2)
+
+test "positional struct fields receive literals without cast" =
+  let p = Point{3, 4}
+
+  assert::equals(p.x, 3)
+  assert::equals(p.y, 4)
+
+// ---------------------------------------------------------------------------
+// 6. Overload selection -- same name, different return target
+// ---------------------------------------------------------------------------
+
+// Sanity-check that two coerce overloads on adjacent integer widths
+// don't cross-talk.  Both tests use the same struct but cast to
+// different targets; the dispatch must pick the right overload.
+struct Twin(coerce[i32], coerce[i64]) =
+  base i64
+
+  static fn ::coerce(this Twin) i32 = return (this.base * 2) as i32
+  static fn ::coerce(this Twin) i64 = return this.base * 4
+
+test "i32 vs i64 coerce overloads stay distinct" =
+  let t = Twin{base: 10}
+
+  assert::equals(t as i32, 20 as i32)
+  assert::equals(t as i64, 40)
+
+// ---------------------------------------------------------------------------
+// 7. Coerce in nested contexts
+// ---------------------------------------------------------------------------
+
+test "coerce inside an array literal" =
+  let q1 = Quantity{count: 1}
+  let q2 = Quantity{count: 2}
+  let xs [string] = [q1 as string, q2 as string]
+
+  assert::equals(len(xs), 2)
+  assert::equals(xs[0], "1 units")
+  assert::equals(xs[1], "2 units")
+
+test "coerce inside a tuple" =
+  let q = Quantity{count: 5}
+  let t = (q as i64, q as string)
+
+  assert::equals(t.a, 5)
+  assert::equals(t.b, "5 units")
+
+test "coerce inside an Ok variant" =
+  let q = Quantity{count: 7}
+  let r Result[string, string] = Ok(q as string)
+
+  match r:
+    case Ok(v):  assert::equals(v, "7 units")
+    case Err(_): assert::fails("expected Ok")
+
+// ---------------------------------------------------------------------------
+// 8. coerce + arithmetic chain
+// ---------------------------------------------------------------------------
+
+test "chain: cast, arithmetic, recast" =
+  let q = Quantity{count: 25}
+  let halved = (q as f64) / 2.0
+  let result = math::round(halved)
+
+  assert::equals(result, 13.0)
+
+// ---------------------------------------------------------------------------
+// 9. Pointer-to-struct: cast through deref
+// ---------------------------------------------------------------------------
+
+test "coerce via deref of struct pointer" =
+  let q = Quantity{count: 99}
+  let p = &q
+  // Deref first, then coerce.  `p as i64` would be a pointer cast,
+  // not a value cast, so the user must explicitly deref.
+  let n = (*p) as i64
+
+  assert::equals(n, 99)
+
+// ---------------------------------------------------------------------------
+// 10. Large fan-out: combining many traits on one struct
+// ---------------------------------------------------------------------------
+
+struct Mega(
+  add[Mega, Mega], sub[Mega, Mega],
+  comp[Mega], ord[Mega],
+  implicit[i64], implicit[f64],
+  coerce[i64], coerce[f64], coerce[string], coerce[bool],
+  print
+) =
+  v i64
+
+  fn ::add(this Mega, other Mega) Mega = return Mega{v: this.v + other.v}
+  fn ::sub(this Mega, other Mega) Mega = return Mega{v: this.v - other.v}
+  fn ::comp(this Mega, other Mega) bool = return this.v == other.v
+  fn ::ord(this Mega, other Mega) i64  = return this.v - other.v
+
+  static fn ::implicit(n i64) Mega = return Mega{v: n}
+  static fn ::implicit(x f64) Mega = return Mega{v: x as i64}
+
+  static fn ::coerce(this Mega) i64    = return this.v
+  static fn ::coerce(this Mega) f64    = return this.v as f64
+  static fn ::coerce(this Mega) string = return "Mega({this.v})"
+  static fn ::coerce(this Mega) bool   = return this.v != 0
+
+  fn ::print(this Mega) string = return "M{this.v}"
+
+test "all traits coexist: Mega" =
+  let a Mega = 5
+  let b Mega = 7.0
+  let s = a + b      // 5 + 7 -> 12
+  let d = b - a      // 7 - 5 -> 2
+
+  assert::equals(s as i64, 12)
+  assert::equals(d as i64, 2)
+  assert::equals(s as string, "Mega(12)")
+  assert::ok(s as bool)
+  assert::ok(s > a)  // ord: 12 > 5
+
+test "Mega in array stays distinct values (no aliasing)" =
+  let xs [Mega] = []
+
+  xs ++= 1
+  xs ++= 2
+  xs ++= 3
+  let total = xs[0] + xs[1] + xs[2]
+
+  assert::equals(total as i64, 6)

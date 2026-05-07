@@ -8,7 +8,7 @@
 
 use simd
 use errors
-use { Err } from errors
+use errors
 
 // simd_find_first returns the 0-based position of the lowest set bit in a
 // 16-bit movemask result.  Called only when mask != 0, so the loop always
@@ -327,9 +327,9 @@ fn atof(s string) f64 = extern("atof")
 fn is_digit(c byte) bool = return c >= @'0' && c <= @'9'
 
 // parse_int parses s as a decimal i64.
-// Returns (value, Err); Err is nil on success.
+// Returns (value, *errors::Err); Err is nil on success.
 // Accepts an optional leading '-' or '+'.
-fn parse_int(s string) (i64, Err) =
+fn parse_int(s string) (i64, *errors::Err) =
   let n = len(s)
 
   if n == 0:
@@ -348,15 +348,15 @@ fn parse_int(s string) (i64, Err) =
   return (atol(s), nil)
 
 // parse_int32 parses s as a decimal i32.
-// Returns (value, Err); Err is nil on success.
-fn parse_int32(s string) (i32, Err) =
+// Returns (value, *errors::Err); Err is nil on success.
+fn parse_int32(s string) (i32, *errors::Err) =
   let (v, err) = parse_int(s)
   return (v as i32, err)
 
 // parse_float parses s as an f64.
-// Returns (value, Err); Err is nil on success.
+// Returns (value, *errors::Err); Err is nil on success.
 // Accepts optional leading sign, digits, decimal point, and exponent.
-fn parse_float(s string) (f64, Err) =
+fn parse_float(s string) (f64, *errors::Err) =
   let n = len(s)
 
   if n == 0:

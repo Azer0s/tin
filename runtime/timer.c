@@ -96,11 +96,26 @@ void _tin_timer_shutdown(void) {
     _timer_cnt = 0;
 }
 
-// Park the current fiber for `ms` milliseconds.
-// Must be called from within a fiber (coro.suspend fires after this returns).
+// Park the current fiber for `ms` milliseconds.  Outside a fiber (e.g.
+// from a top-level main or the test runner) falls back to a plain
+// nanosleep so callers see a real wait either way -- the fiber-park
+// branch matters only when other fibers should keep running while
+// this one is parked.  The "no-op when not awaited" guarantee for
+// time::sleep is enforced at the Tin level (the lazy SleepFuture is
+// only consulted via await), so this function is unconditionally
+// allowed to actually sleep.
 void _tin_sleep_ms(int64_t ms) {
+    if (ms <= 0) return;
+
     int64_t pid = _tin_current_pid();
-    if (pid < 0 || ms <= 0) return;  // not in a fiber or no-op
+
+    if (pid < 0) {
+        struct timespec req;
+        req.tv_sec  = (time_t)(ms / 1000);
+        req.tv_nsec = (long)((ms % 1000) * 1000000L);
+        nanosleep(&req, NULL);
+        return;
+    }
 
     int64_t deadline = _now_ms() + ms;
 

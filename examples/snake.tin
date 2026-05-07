@@ -25,9 +25,11 @@ sx[2] = 10
 sy[2] = 10
 
 let (grid, _) = strings::parse_int("20")
+let grid_max i32 = grid as i32 - 1
+let inner    i32 = (cell - 2) as i32
 
-let fx    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64
-let fy    i64  = raylib::get_random_value(0, grid as i32 - 1) as i64
+let fx    i64  = raylib::get_random_value(0, grid_max) as i64
+let fy    i64  = raylib::get_random_value(0, grid_max) as i64
 let score i64  = 0
 let timer f32  = 0.0
 let speed f32  = 0.15
@@ -65,8 +67,8 @@ for !raylib::window_should_close():
     sy[1] = 10
     sx[2] = 10
     sy[2] = 10
-    fx    = raylib::get_random_value(0, grid as i32 - 1) as i64
-    fy    = raylib::get_random_value(0, grid as i32 - 1) as i64
+    fx    = raylib::get_random_value(0, grid_max) as i64
+    fy    = raylib::get_random_value(0, grid_max) as i64
     score = 0
     timer = 0.0
     alive = true
@@ -102,8 +104,8 @@ for !raylib::window_should_close():
         if nx == fx && ny == fy:
           slen  = slen + 1
           score = score + 10
-          fx    = raylib::get_random_value(0, grid as i32 - 1) as i64
-          fy    = raylib::get_random_value(0, grid as i32 - 1) as i64
+          fx    = raylib::get_random_value(0, grid_max) as i64
+          fy    = raylib::get_random_value(0, grid_max) as i64
 
   raylib::begin_drawing()
   raylib::clear_background(raylib::BLACK)
@@ -128,9 +130,9 @@ for !raylib::window_should_close():
     let py = sy[sidx] * cell + header
 
     if j == 0:
-      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, (cell - 2) as i32, (cell - 2) as i32, raylib::GREEN)
+      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, inner, inner, raylib::GREEN)
     else:
-      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, (cell - 2) as i32, (cell - 2) as i32, raylib::LIME)
+      raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, inner, inner, raylib::LIME)
     j = j + 1
 
   if !alive:

@@ -2,6 +2,13 @@
 //
 // Standard and URL-safe variants. Decode handles both with or without padding.
 //
+// Variants:
+//   encode             - standard alphabet (+ /), with = padding
+//   encode_url         - URL-safe alphabet (- _), no padding
+//   encode_url_no_pad  - explicit alias of encode_url
+//   decode             - tolerant: any alphabet, padded or unpadded
+//   decode_url_no_pad  - explicit alias of decode for URL-safe / unpadded inputs
+//
 // Import: use encoding::base64
 
 fn b64_rev(c byte) i64 =
@@ -69,6 +76,13 @@ fn encode(s string) string =
 fn encode_url(s string) string =
   return encode_b64(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", false)
 
+// encode_url_no_pad is an explicit alias for encode_url.  The two names
+// document at the call site that the encoding does not produce trailing
+// `=` padding; required for callers like JWT where the contract is
+// "URL-safe, unpadded".
+fn encode_url_no_pad(s string) string =
+  return encode_url(s)
+
 // decode decodes a Base64 string. Handles standard, URL-safe, padded or unpadded.
 fn decode(s string) string =
   let n = len(s)
@@ -100,4 +114,11 @@ fn decode(s string) string =
 
   return result
 
-export { encode, encode_url, decode } as base64
+// decode_url_no_pad is an explicit alias for decode that documents the
+// expected URL-safe, unpadded input shape.  decode itself already
+// accepts both alphabets and tolerates missing padding, so this is
+// purely a naming hook for callers that want to be explicit.
+fn decode_url_no_pad(s string) string =
+  return decode(s)
+
+export { encode, encode_url, encode_url_no_pad, decode, decode_url_no_pad } as base64

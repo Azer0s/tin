@@ -32,7 +32,7 @@
 
 use str
 use errors
-use { Err } from errors
+use errors
 use result
 use { Result } from result
 

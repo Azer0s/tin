@@ -71,6 +71,16 @@ type CodeGen struct {
 	traitAsyncMethodNames map[string][]string
 	// implicit conversion registry: struct name -> []entry
 	implicitConvFns map[string][]implicitConvEntry
+	coerceConvFns   map[string][]coerceConvEntry
+
+	// allowExplicitPtrCoerce gates the dangerous pointer-coercion
+	// paths in coerce() that turn `int -> *T`, `*Foo -> *Bar`, and
+	// `string -> *char` into bitcasts.  These are valid for explicit
+	// `as` casts (raw-address punning, C interop) but never for
+	// implicit conversion, so genAsExpr flips the flag on for the
+	// duration of its coerce call and resets it after.  Defaults
+	// false everywhere else.
+	allowExplicitPtrCoerce bool
 	// structVtableOrder: struct name -> ordered instKeys embedded as leading fields
 	structVtableOrder map[string][]string
 
@@ -1315,6 +1325,7 @@ func New(filename string) *CodeGen {
 		traitAsyncMethodNames:  make(map[string][]string),
 		traitBareToQualInstKey: make(map[string]string),
 		implicitConvFns:        make(map[string][]implicitConvEntry),
+		coerceConvFns:          make(map[string][]coerceConvEntry),
 		structVtableOrder:      make(map[string][]string),
 		enumValues:             make(map[string]int64),
 		enumTypes:              make(map[string]irtypes.Type),

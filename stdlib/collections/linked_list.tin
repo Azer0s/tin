@@ -7,8 +7,12 @@
 // push_back / push_front: O(1)
 // pop_front: O(1)
 // pop_back / get: O(n)
+//
+// pop_front / pop_back return Option[T]: Some(v) on a non-empty list,
+// None when the list is empty.
 
 use "./list"
+use option
 
 // Node[T] is an internal doubly-linked list node.
 struct Node[T] =
@@ -58,7 +62,9 @@ struct LinkedList[T](List[T]) =
     this.head = n
     this._len = this._len + 1
 
-  fn List::pop_front(this *LinkedList[T]) T =
+  fn List::pop_front(this *LinkedList[T]) Option[T] =
+    if this._len == 0:
+      return None
     let val = (*this.head).val
     let next = (*this.head).next
 
@@ -69,9 +75,11 @@ struct LinkedList[T](List[T]) =
     this.head = next
     this._len = this._len - 1
 
-    return val
+    return Some(val)
 
-  fn List::pop_back(this *LinkedList[T]) T =
+  fn List::pop_back(this *LinkedList[T]) Option[T] =
+    if this._len == 0:
+      return None
     let val = (*this.tail).val
 
     if this._len == 1:
@@ -79,7 +87,7 @@ struct LinkedList[T](List[T]) =
       this.tail = nil
       this._len = 0
 
-      return val
+      return Some(val)
 
     let cur = this.head
     let i i64 = 1
@@ -92,4 +100,4 @@ struct LinkedList[T](List[T]) =
     this.tail = cur
     this._len = this._len - 1
 
-    return val
+    return Some(val)

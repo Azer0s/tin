@@ -1,0 +1,104 @@
+use assert
+use hash::hmac
+
+test "hmac_sha256 RFC 4231 test case 1" =
+  // Key = 0x0b * 20, Data = "Hi There"
+  // Expected: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+  let key = ""
+  let i i64 = 0
+
+  for i < 20:
+    key = key ++ (0x0b as byte)
+    i = i + 1
+
+  assert::equals(hmac::hmac_sha256_hex(key, "Hi There"), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+
+test "hmac_sha256 RFC 4231 test case 2 (key shorter than block)" =
+  // Key = "Jefe", Data = "what do ya want for nothing?"
+  // Expected: 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+  assert::equals(hmac::hmac_sha256_hex("Jefe", "what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+
+test "hmac_sha256 RFC 4231 test case 3 (key shorter than block, all 0xaa)" =
+  // Key = 0xaa * 20, Data = 0xdd * 50
+  // Expected: 773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe
+  let key = ""
+  let i i64 = 0
+
+  for i < 20:
+    key = key ++ (0xaa as byte)
+    i = i + 1
+
+  let msg = ""
+  let j i64 = 0
+
+  for j < 50:
+    msg = msg ++ (0xdd as byte)
+    j = j + 1
+
+  assert::equals(hmac::hmac_sha256_hex(key, msg), "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe")
+
+test "hmac_sha256 RFC 4231 test case 6 (key longer than block, must be hashed down)" =
+  // Key = 0xaa * 131, Data = "Test Using Larger Than Block-Size Key - Hash Key First"
+  // Expected: 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54
+  let key = ""
+  let i i64 = 0
+
+  for i < 131:
+    key = key ++ (0xaa as byte)
+    i = i + 1
+
+  assert::equals(hmac::hmac_sha256_hex(key, "Test Using Larger Than Block-Size Key - Hash Key First"), "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+
+test "hmac_sha256 with empty message" =
+  // HMAC-SHA256(key="key", msg="") known answer
+  // Computed via reference: HMAC-SHA256("key","") = 5d5d139563c95b5967b9bd9a8c9b233a9dedb45072794cd232dc1b74832607d0
+  assert::equals(hmac::hmac_sha256_hex("key", ""), "5d5d139563c95b5967b9bd9a8c9b233a9dedb45072794cd232dc1b74832607d0")
+
+test "hmac_sha256 with empty key" =
+  // HMAC-SHA256("","") = b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad
+  assert::equals(hmac::hmac_sha256_hex("", ""), "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad")
+
+// ── HMAC-SHA-512 (RFC 4231 vectors) ──────────────────────────────────
+
+test "hmac_sha512 RFC 4231 test case 1" =
+  let key = ""
+  let i i64 = 0
+
+  for i < 20:
+    key = key ++ (0x0b as byte)
+    i = i + 1
+
+  // RFC 4231 case 1: HMAC-SHA-512(0x0b * 20, "Hi There")
+  assert::equals(hmac::hmac_sha512_hex(key, "Hi There"), "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
+
+test "hmac_sha512 RFC 4231 test case 2 (key shorter than block)" =
+  // RFC 4231 case 2: HMAC-SHA-512("Jefe", "what do ya want for nothing?")
+  assert::equals(hmac::hmac_sha512_hex("Jefe", "what do ya want for nothing?"), "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737")
+
+test "hmac_sha512 RFC 4231 test case 6 (key longer than block)" =
+  let key = ""
+  let i i64 = 0
+
+  for i < 131:
+    key = key ++ (0xaa as byte)
+    i = i + 1
+
+  // RFC 4231 case 6
+  assert::equals(hmac::hmac_sha512_hex(key, "Test Using Larger Than Block-Size Key - Hash Key First"), "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598")
+
+// ── HMAC-SHA-384 (RFC 4231 vectors) ──────────────────────────────────
+
+test "hmac_sha384 RFC 4231 test case 1" =
+  let key = ""
+  let i i64 = 0
+
+  for i < 20:
+    key = key ++ (0x0b as byte)
+    i = i + 1
+
+  // RFC 4231 case 1: HMAC-SHA-384(0x0b * 20, "Hi There")
+  assert::equals(hmac::hmac_sha384_hex(key, "Hi There"), "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6")
+
+test "hmac_sha384 RFC 4231 test case 2" =
+  // RFC 4231 case 2: HMAC-SHA-384("Jefe", "what do ya want for nothing?")
+  assert::equals(hmac::hmac_sha384_hex("Jefe", "what do ya want for nothing?"), "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649")

@@ -30,13 +30,13 @@ async handle_conn(conn tcp::Conn) =
 fn{#async} main() =
   let (srv, err) = tcp::listen(8080)
 
-  if errors::has(err):
+  if errors::is_err(err):
     panic(err.message())
   echo "listening on :8080"
 
   loop:
     let (c, cerr) = srv.accept()
 
-    if errors::has(cerr):
+    if errors::is_err(cerr):
       break
     spawn handle_conn(c)

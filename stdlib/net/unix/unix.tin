@@ -4,11 +4,11 @@
 // Mirrors the tcp package but uses AF_UNIX paths instead of ports:
 //
 //   let (srv, err) = unix::listen("/tmp/myapp.sock")
-//   if errors::has(err): panic(err.message())
+//   if errors::is_err(err): panic(err.message())
 //   let (c, aerr) = srv.accept()
 //
 //   let (c, err) = unix::dial("/tmp/myapp.sock")
-//   if errors::has(err): panic(err.message())
+//   if errors::is_err(err): panic(err.message())
 //   await ioutil::write_string(c, "hello\n")
 //
 // Ownership: the file descriptor lives behind an *rc::Cell so copies of
@@ -20,7 +20,7 @@ use io
 use rc
 use sync
 use errors
-use { Err } from errors
+use errors
 
 // C helpers
 fn tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
@@ -57,8 +57,8 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next connection.
-  // Returns (Conn, Err) - nil Err means success.
-  fn accept(this Server) (Conn, Err) =
+  // Returns (Conn, *errors::Err) - nil Err means success.
+  fn accept(this Server) (Conn, *errors::Err) =
     let fd = tin_unix_accept_c(this.fd())
 
     if fd < 0:
@@ -70,8 +70,8 @@ struct Server (io::Closeable) =
     io::close(this.fd())
 
 // listen creates a Unix domain socket server at path.
-// Removes any stale socket file. Returns (Server, Err).
-fn listen(path string) (Server, Err) =
+// Removes any stale socket file. Returns (Server, *errors::Err).
+fn listen(path string) (Server, *errors::Err) =
   let fd = tin_unix_listen_c(path)
 
   if fd < 0:
@@ -80,8 +80,8 @@ fn listen(path string) (Server, Err) =
   return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial connects to a Unix domain socket at path.
-// Returns (Conn, Err).
-fn dial(path string) (Conn, Err) =
+// Returns (Conn, *errors::Err).
+fn dial(path string) (Conn, *errors::Err) =
   let fd = tin_unix_connect_c(path)
 
   if fd < 0:

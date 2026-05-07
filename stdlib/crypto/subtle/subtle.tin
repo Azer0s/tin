@@ -1,0 +1,54 @@
+// stdlib/crypto/subtle - constant-time primitives.
+//
+// These helpers run in time independent of the input contents so that
+// secret-comparing code does not leak data through timing side-channels.
+// Use ct_eq when comparing MACs, signatures, password hashes, session
+// tokens, or any other secret value against a candidate.
+//
+// All functions here treat their inputs as byte sequences and avoid
+// short-circuiting branches.  They are not constant in their input
+// *length* -- a length mismatch returns false immediately, which is
+// considered acceptable because lengths are rarely secret.
+//
+// Import: use crypto::subtle
+
+// ct_eq compares two byte slices in constant time and returns true iff
+// they have the same length and identical contents.
+//
+// The byte-by-byte loop XORs each pair, ORs into an accumulator, and
+// converts to bool only at the very end -- no early-exit branch can
+// reveal where (or whether) a mismatch occurred.
+fn ct_eq(a [byte], b [byte]) bool =
+  let na = len(a)
+  let nb = len(b)
+
+  if na != nb:
+    return false
+  let acc i64 = 0
+  let i i64 = 0
+
+  for i < na:
+    acc = acc | ((a[i] as i64) ^ (b[i] as i64))
+    i = i + 1
+
+  return acc == 0
+
+// ct_eq_str is a string-typed convenience wrapper around ct_eq.  Tin
+// strings are length-prefixed byte sequences, so this just bridges the
+// type without copying.
+fn ct_eq_str(a string, b string) bool =
+  let na = len(a)
+  let nb = len(b)
+
+  if na != nb:
+    return false
+  let acc i64 = 0
+  let i i64 = 0
+
+  for i < na:
+    acc = acc | ((a[i] as i64) ^ (b[i] as i64))
+    i = i + 1
+
+  return acc == 0
+
+export { ct_eq, ct_eq_str } as subtle

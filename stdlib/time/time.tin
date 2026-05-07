@@ -28,11 +28,13 @@
 // RFC3339 with nanosecond precision is used for cross-language interoperability.
 
 use errors
-use { Err } from errors
 use encoding::json
+use sync
 
 // C helpers (private)
 fn tin_now_ns_c() i64       = extern("_tin_now_ns_real")
+fn tin_now_mono_ns_c() i64  = extern("_tin_now_ns")
+fn tin_sleep_ms_c(ms i64)   = extern("_tin_sleep_ms")
 fn tin_rfc3339_c(ns i64, buf *byte) i32 = extern("_tin_instant_rfc3339")
 fn tin_from_rfc3339_c(s string, out *i64) i32 = extern("_tin_from_rfc3339")
 
@@ -136,7 +138,7 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
 
   // until returns the Duration from this to later.
   // Returns an error if later is before this.
-  fn until(this Instant, later Instant) (Duration, Err) =
+  fn until(this Instant, later Instant) (Duration, *errors::Err) =
     if later.ns < this.ns:
       return (Duration{ns: 0}, errors::new("time: end is before start"))
     return (Duration{ns: later.ns - this.ns}, nil)
@@ -161,6 +163,60 @@ fn until_instant(t Instant) Duration =
   let cur = now()
   return Duration{ns: t.ns - cur.ns}
 
+// monotonic_ns returns nanoseconds from a monotonic clock source.
+// The absolute value is meaningless across processes; only differences
+// between two monotonic_ns calls are well-defined.  Use this for
+// measuring elapsed time -- now() can step forward or backward when the
+// system wall clock is adjusted.
+//
+//   let start = time::monotonic_ns()
+//   do_work()
+//   let elapsed = time::from_ns(time::monotonic_ns() - start)
+fn monotonic_ns() i64 = return tin_now_mono_ns_c()
+
+// SleepFuture is the lazy future returned by `sleep` and `sleep_ms`.
+// The actual park happens in `await_result` -- creating the value
+// without awaiting is a no-op.  Internally uses the fiber-aware timer
+// thread when awaited from inside a fiber, so other fibers continue
+// to run while this one is parked; outside any fiber the await is a
+// no-op (Tin's runtime fiber-park has nothing to park).
+struct SleepFuture(sync::Awaitable[sync::Unit]) =
+  ms i64
+
+  fn Awaitable::await_result(this SleepFuture) sync::Unit =
+    if this.ms > 0:
+      tin_sleep_ms_c(this.ms)
+
+    return sync::Unit{_unit: 0 as i8}
+
+// sleep returns a future that, when awaited, parks the current fiber
+// for at least d.  Discarding the future without awaiting is a no-op
+// -- creation is free, the wait only happens at `await sleep(d)`.
+//
+//   await time::sleep(time::from_ms(20))   // parks for 20ms
+//   time::sleep(time::from_ms(20))         // no-op (future dropped)
+//
+// Sub-millisecond residues are rounded up to 1ms so callers asking
+// for "a tiny bit" still yield once awaited rather than becoming a
+// busy-no-op; zero or negative d skips the park entirely.
+fn sleep(d Duration) SleepFuture =
+  if d.ns <= 0:
+    return SleepFuture{ms: 0}
+  let ms = d.ns / 1000000
+
+  if ms == 0:
+    ms = 1
+
+  return SleepFuture{ms: ms}
+
+// sleep_ms is a convenience for sleep(from_ms(ms)).  Returns a
+// SleepFuture; await it for the wait to actually happen.
+fn sleep_ms(ms i64) SleepFuture =
+  if ms <= 0:
+    return SleepFuture{ms: 0}
+
+  return SleepFuture{ms: ms}
+
 // RFC3339 layout constants (match Go's time.RFC3339 and time.RFC3339Nano)
 const RFC3339     string = "2006-01-02T15:04:05Z07:00"
 const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
@@ -168,7 +224,7 @@ const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
 // parse_rfc3339 parses an RFC3339 string into an Instant.
 // Supports UTC (Z) and timezone offsets (+HH:MM / -HH:MM).
 // Fractional seconds (up to nanosecond precision) are supported.
-fn parse_rfc3339(s string) (Instant, Err) =
+fn parse_rfc3339(s string) (Instant, *errors::Err) =
   let ns i64 = 0
   let ok = tin_from_rfc3339_c(s, &ns)
 
@@ -180,16 +236,17 @@ fn parse_rfc3339(s string) (Instant, Err) =
 // parse parses a time string using a named layout.
 // Supported layouts: RFC3339, RFC3339Nano (both parse the same RFC3339 format).
 // For other layouts, an error is returned.
-fn parse(layout string, value string) (Instant, Err) =
+fn parse(layout string, value string) (Instant, *errors::Err) =
   if layout == RFC3339 || layout == RFC3339Nano:
     return parse_rfc3339(value)
   return (Instant{ns: 0}, errors::new("time: unsupported layout: " ++ layout))
 
 export {
-  Duration, Instant,
+  Duration, Instant, SleepFuture,
   from_ns, from_us, from_ms, from_sec, from_min, from_hours,
   instant_from_ns,
   now, since, until_instant,
+  monotonic_ns, sleep, sleep_ms,
   parse_rfc3339, parse,
   RFC3339, RFC3339Nano,
 } as time

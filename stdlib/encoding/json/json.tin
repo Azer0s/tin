@@ -39,7 +39,7 @@
 use str
 use errors
 use simd
-use { Err } from errors
+use errors
 use result
 use { Result } from result
 

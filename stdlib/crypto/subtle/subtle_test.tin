@@ -1,0 +1,41 @@
+use assert
+use crypto::subtle
+
+test "ct_eq returns true on equal byte slices" =
+  let a [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+
+  assert::ok(subtle::ct_eq(a, b))
+
+test "ct_eq returns false on differing length" =
+  let a [byte] = [@'a' as byte, @'b' as byte]
+  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+
+  assert::ok(!subtle::ct_eq(a, b))
+
+test "ct_eq returns false on differing content (early bytes)" =
+  let a [byte] = [@'X' as byte, @'b' as byte, @'c' as byte]
+  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+
+  assert::ok(!subtle::ct_eq(a, b))
+
+test "ct_eq returns false on differing content (last byte)" =
+  let a [byte] = [@'a' as byte, @'b' as byte, @'X' as byte]
+  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+
+  assert::ok(!subtle::ct_eq(a, b))
+
+test "ct_eq on empty slices returns true" =
+  let a [byte] = []
+  let b [byte] = []
+
+  assert::ok(subtle::ct_eq(a, b))
+
+test "ct_eq_str matches identical strings" =
+  assert::ok(subtle::ct_eq_str("hello", "hello"))
+  assert::ok(subtle::ct_eq_str("", ""))
+
+test "ct_eq_str rejects mismatched strings" =
+  assert::ok(!subtle::ct_eq_str("hello", "world"))
+  assert::ok(!subtle::ct_eq_str("abc", "abcd"))
+  assert::ok(!subtle::ct_eq_str("a", ""))

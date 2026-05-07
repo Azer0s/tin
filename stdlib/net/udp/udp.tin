@@ -26,7 +26,7 @@ use mem
 use rc
 use sync
 use errors
-use { Err } from errors
+use errors
 
 // C helpers
 fn tin_udp_listen_c(port i32) i32                                                     = extern("_tin_udp_listen")
@@ -81,7 +81,7 @@ fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
 
   return avail
 
-fn{#async} accept_impl(fd i32) (Conn, Err) =
+fn{#async} accept_impl(fd i32) (Conn, *errors::Err) =
   let (data, host, port) = await spawn recv_from_impl(fd)
 
   if len(data) == 0:
@@ -160,16 +160,16 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next datagram and returns a Conn to the sender.
-  // Returns Future[(Conn, Err)] - nil Err means success.
-  fn accept(this Server) Future[(Conn, Err)] =
+  // Returns Future[(Conn, *errors::Err)] - nil Err means success.
+  fn accept(this Server) Future[(Conn, *errors::Err)] =
     return spawn accept_impl(this.fd())
 
   fn Closeable::close(this Server) =
     io::close(this.fd())
 
 // listen creates a bound UDP socket on the given port.
-// Returns (Server, Err).
-fn listen(port i32) (Server, Err) =
+// Returns (Server, *errors::Err).
+fn listen(port i32) (Server, *errors::Err) =
   let fd = tin_udp_listen_c(port)
 
   if fd < 0:
@@ -178,8 +178,8 @@ fn listen(port i32) (Server, Err) =
   return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial creates a connected UDP socket to host:port.
-// Returns (Conn, Err).
-fn dial(host string, port i32) (Conn, Err) =
+// Returns (Conn, *errors::Err).
+fn dial(host string, port i32) (Conn, *errors::Err) =
   let fd = tin_udp_connect_c(host, port)
 
   if fd < 0:

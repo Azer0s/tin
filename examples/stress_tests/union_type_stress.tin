@@ -151,12 +151,12 @@ test "union in struct field" =
   assert::equals(describe_tagged(tv2), "pi: float")
 
 test "count_ints in heterogeneous array" =
-  let items [json5] = [1 as json5, "x" as json5, 2 as json5, true as json5, 3 as json5]
+  let items [json5] = [1, "x", 2, true, 3]
 
   assert::equals(count_ints(items), 3)
 
 test "sum_numeric from mixed array" =
-  let items [json5] = [10 as json5, 2.5 as json5, "ignored" as json5, 5 as json5]
+  let items [json5] = [10, 2.5, "ignored", 5]
 
   assert::equals(sum_numeric(items), 17.5)
 

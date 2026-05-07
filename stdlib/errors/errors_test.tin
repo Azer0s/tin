@@ -1,0 +1,90 @@
+use assert
+use errors
+
+// A custom error type that implements errors::Err and carries a
+// structured kind, so we can exercise both polymorphic dispatch and
+// downcast-style inspection.
+data demo_kind =
+  Empty
+  Tag(value i64)
+
+struct demo_err(errors::Err) =
+  _kind demo_kind
+
+  fn errors::Err::message(this demo_err) string =
+    match this._kind:
+      case Empty:    return "demo: empty"
+      case Tag(v):   return "demo: tag {v}"
+
+  fn kind(this demo_err) demo_kind = return this._kind
+
+test "errors::new builds *Err with the given message" =
+  let e = errors::new("boom")
+
+  assert::ok(errors::is_err(e))
+  assert::equals(errors::message(e), "boom")
+
+test "nil *Err is treated as success" =
+  let e *errors::Err = nil
+
+  assert::ok(!errors::is_err(e))
+  assert::equals(errors::message(e), "")
+
+test "errors::wrap prepends context" =
+  let inner = errors::new("disk full")
+  let outer = errors::wrap(inner, "saving config")
+
+  assert::equals(errors::message(outer), "saving config: disk full")
+
+test "errors::wrap on nil acts as new" =
+  let e = errors::wrap(nil, "lonely")
+
+  assert::equals(errors::message(e), "lonely")
+
+test "errors::equals matches by rendered message" =
+  let a = errors::new("io error")
+  let b = errors::new("io error")
+  let c = errors::new("not the same")
+
+  assert::ok(errors::equals(a, b))
+  assert::ok(!errors::equals(a, c))
+
+test "errors::equals treats both-nil as equal" =
+  let n1 *errors::Err = nil
+  let n2 *errors::Err = nil
+
+  assert::ok(errors::equals(n1, n2))
+
+test "errors::equals nil vs non-nil is not equal" =
+  let n *errors::Err = nil
+  let e = errors::new("real")
+
+  assert::ok(!errors::equals(n, e))
+  assert::ok(!errors::equals(e, n))
+
+test "domain error widens to *Err and dispatches via message()" =
+  let de = &demo_err{_kind: Tag(42)}
+  let as_err = de as *errors::Err
+
+  assert::equals(errors::message(as_err), "demo: tag 42")
+
+test "domain error retains its kind for inspection" =
+  let de = &demo_err{_kind: Tag(7)}
+
+  match de.kind():
+    case Tag(v): assert::equals(v, 7)
+    case Empty:  assert::fails("expected Tag")
+
+test "*errors::Err downcasts back to the concrete struct" =
+  // After widening a domain error to *errors::Err, callers can recover
+  // the original concrete pointer with `as *demo_err` and re-read the
+  // typed kind.  The cast is unchecked: it only makes sense inside the
+  // matching arm of a typed Result, where the producer's signature
+  // pins the dynamic type.
+  let de = &demo_err{_kind: Tag(99)}
+  let widened *errors::Err = de
+  let back = widened as *demo_err
+
+  match (*back).kind():
+    case Tag(v): assert::equals(v, 99)
+    case Empty:  assert::fails("expected Tag")

@@ -13,7 +13,7 @@ async worker(id i64, msgs i64, done sync::Channel[i64]) =
   tls::set_ca_file("examples/tls_test/cert.pem")
   let (conn, err) = tcp::dial("127.0.0.1", 8443)
 
-  if errors::has(err):
+  if errors::is_err(err):
     echo "worker {id}: dial failed: {err}"
     await done.send(1)
 

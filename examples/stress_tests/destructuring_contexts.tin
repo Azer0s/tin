@@ -114,14 +114,14 @@ test "struct destructuring color_rgba" =
 // ---------------------------------------------------------------------------
 
 test "per-slot any array i64 and bool" =
-  let arr [any] = [42 as any, true as any]
+  let arr [any] = [42, true]
   let [n, flag] [i64, bool] = arr
 
   assert::equals(n, 42)
   assert::ok(flag)
 
 test "per-slot any array string and i64" =
-  let arr [any] = ["hello" as any, 99 as any]
+  let arr [any] = ["hello", 99]
   let [s, v] [string, i64] = arr
 
   assert::equals(s, "hello")

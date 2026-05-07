@@ -417,7 +417,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 			}
 
 			guardedBody := cg.newBlock(fmt.Sprintf("match.case.%d.%s.body", i, variantName))
-			caseBlock.NewCondBr(cg.toBool(caseBlock, guardVal), guardedBody, defaultBlock)
+			caseBlock.NewCondBr(cg.toBoolImplicit(caseBlock, guardVal), guardedBody, defaultBlock)
 
 			caseBlock = guardedBody
 		}
@@ -537,7 +537,7 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 				return nil, err2
 			}
 
-			checkBlock.NewCondBr(cg.toBool(checkBlock, guardVal), bodyBlock, nextCaseBlock)
+			checkBlock.NewCondBr(cg.toBoolImplicit(checkBlock, guardVal), bodyBlock, nextCaseBlock)
 		} else {
 			checkBlock.NewBr(bodyBlock)
 		}
@@ -952,7 +952,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 				return nil, err2
 			}
 
-			checkBlock.NewCondBr(cg.toBool(checkBlock, guardVal), bodyBlock, nextBlock)
+			checkBlock.NewCondBr(cg.toBoolImplicit(checkBlock, guardVal), bodyBlock, nextBlock)
 		} else {
 			checkBlock.NewBr(bodyBlock)
 		}
@@ -1398,7 +1398,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 				}
 
 				guardPassBlock := cg.newBlock(fmt.Sprintf("awmatch.guardpass.%d", i))
-				armEntryBlock.NewCondBr(cg.toBool(armEntryBlock, guardVal), guardPassBlock, nextArmBlock)
+				armEntryBlock.NewCondBr(cg.toBoolImplicit(armEntryBlock, guardVal), guardPassBlock, nextArmBlock)
 				armEntryBlock = guardPassBlock
 			}
 
@@ -1533,7 +1533,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 
 			guardPassBlock := cg.newBlock(fmt.Sprintf("awmatch.gpass.%d", i))
 			guardFailBlock := cg.newBlock(fmt.Sprintf("awmatch.gfail.%d", i))
-			armEntry.NewCondBr(cg.toBool(armEntry, guardVal), guardPassBlock, guardFailBlock)
+			armEntry.NewCondBr(cg.toBoolImplicit(armEntry, guardVal), guardPassBlock, guardFailBlock)
 
 			// Guard fail: mark slot as skipped, re-loop.
 			skipGep := guardFailBlock.NewGetElementPtr(skipType, skipAlloca,
@@ -1757,7 +1757,7 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 			}
 
 			bodyBlock := cg.newBlock(fmt.Sprintf("match.case.%d.body", i))
-			caseBlock.NewCondBr(cg.toBool(caseBlock, guardVal), bodyBlock, afterBlock)
+			caseBlock.NewCondBr(cg.toBoolImplicit(caseBlock, guardVal), bodyBlock, afterBlock)
 
 			anyFallthrough = true // guard failure goes to afterBlock
 			caseBlock = bodyBlock

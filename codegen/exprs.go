@@ -1481,6 +1481,10 @@ func (cg *CodeGen) genShortCircuit(block *ir.Block, e *ast.BinExpr, shortVal boo
 		return nil, err
 	}
 
+	if err := cg.rejectStructAsBoolOperand(e, left.Type()); err != nil {
+		return nil, err
+	}
+
 	leftEnd := cg.curBlock
 	leftBool := cg.toBool(leftEnd, left)
 
@@ -1506,6 +1510,10 @@ func (cg *CodeGen) genShortCircuit(block *ir.Block, e *ast.BinExpr, shortVal boo
 
 	right, err := cg.genExpr(rhsBlock, e.Right)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := cg.rejectStructAsBoolOperand(e, right.Type()); err != nil {
 		return nil, err
 	}
 

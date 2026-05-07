@@ -1,0 +1,244 @@
+// stdlib/hash/hmac - HMAC (RFC 2104) over SHA-2 hash families.
+//
+// HMAC(K, m) = H((K' XOR opad) || H((K' XOR ipad) || m))
+//
+// Where:
+//   K'   = K            if len(K) <= block_size
+//        = H(K)         if len(K)  > block_size
+//   K'   is then zero-padded to block_size
+//   ipad = byte 0x36 repeated block_size times
+//   opad = byte 0x5C repeated block_size times
+//
+// This module provides one-shot HMAC over the supported hash families
+// and returns a digest of the same size as the underlying hash.  Use
+// crypto::subtle::ct_eq when comparing HMAC outputs to avoid timing
+// side-channels.
+//
+// Supported:
+//   hmac_sha256(key, msg) [u8; 32]
+//   hmac_sha384(key, msg) [u8; 48]
+//   hmac_sha512(key, msg) [u8; 64]
+//
+// Import: use hash::hmac
+
+use hash::sha256
+use hash::sha512
+
+const SHA256_BLOCK_SIZE  i64 = 64
+const SHA256_DIGEST_SIZE i64 = 32
+
+const SHA512_BLOCK_SIZE  i64 = 128
+const SHA512_DIGEST_SIZE i64 = 64
+const SHA384_DIGEST_SIZE i64 = 48
+
+// hmac_sha256 computes HMAC-SHA-256 over the message.  Returns the
+// 32-byte tag.  The key may be any length: longer than 64 bytes is
+// hashed down to 32 bytes; shorter is zero-padded to 64.
+fn hmac_sha256(key *u8, key_len i64, msg *u8, msg_len i64) [u8; 32] =
+  // Step 1: derive K' (block-sized key).
+  let k_block [u8; 64]
+  let i i64 = 0
+
+  if key_len > SHA256_BLOCK_SIZE:
+    let kh = sha256::sha256(key, key_len)
+
+    for i < SHA256_DIGEST_SIZE:
+      k_block[i] = kh[i]
+      i = i + 1
+
+    for i < SHA256_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+  else:
+    for i < key_len:
+      k_block[i] = key[i]
+      i = i + 1
+
+    for i < SHA256_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+
+  // Step 2: form K' XOR ipad and K' XOR opad.
+  let inner_pad [u8; 64]
+  let outer_pad [u8; 64]
+  let j i64 = 0
+
+  for j < SHA256_BLOCK_SIZE:
+    inner_pad[j] = (k_block[j] ^ (0x36 as u8)) as u8
+    outer_pad[j] = (k_block[j] ^ (0x5c as u8)) as u8
+    j = j + 1
+
+  // Step 3: inner = H((K' XOR ipad) || msg)
+  let inner = sha256::Sha256.new()
+
+  inner.write(addr(inner_pad[0]), SHA256_BLOCK_SIZE)
+
+  if msg_len > 0:
+    inner.write(msg, msg_len)
+  let inner_digest = inner.sum()
+
+  // Step 4: outer = H((K' XOR opad) || inner)
+  let outer = sha256::Sha256.new()
+
+  outer.write(addr(outer_pad[0]), SHA256_BLOCK_SIZE)
+  outer.write(addr(inner_digest[0]), SHA256_DIGEST_SIZE)
+
+  return outer.sum()
+
+// hmac_sha256_str is a convenience wrapper for string keys/messages.
+fn hmac_sha256_str(key string, msg string) [u8; 32] =
+  let kp *u8 = nil
+  let mp *u8 = nil
+
+  if len(key) > 0:
+    kp = addr(key[0])
+  if len(msg) > 0:
+    mp = addr(msg[0])
+
+  return hmac_sha256(kp, len(key), mp, len(msg))
+
+// hmac_sha256_hex returns the HMAC-SHA-256 of (key, msg) as a 64-char
+// lowercase hex string.
+fn hmac_sha256_hex(key string, msg string) string =
+  let tag = hmac_sha256_str(key, msg)
+
+  return sha256::hex_from_digest(tag)
+
+// ── HMAC-SHA-512 ───────────────────────────────────────────────────────
+
+// hmac_sha512 computes HMAC-SHA-512 over the message.  Returns the
+// 64-byte tag.  Block size is 128 bytes; keys longer than that are
+// hashed down to 64 bytes first.
+fn hmac_sha512(key *u8, key_len i64, msg *u8, msg_len i64) [u8; 64] =
+  let k_block [u8; 128]
+  let i i64 = 0
+
+  if key_len > SHA512_BLOCK_SIZE:
+    let kh = sha512::sha512(key, key_len)
+
+    for i < SHA512_DIGEST_SIZE:
+      k_block[i] = kh[i]
+      i = i + 1
+
+    for i < SHA512_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+  else:
+    for i < key_len:
+      k_block[i] = key[i]
+      i = i + 1
+
+    for i < SHA512_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+
+  let inner_pad [u8; 128]
+  let outer_pad [u8; 128]
+  let j i64 = 0
+
+  for j < SHA512_BLOCK_SIZE:
+    inner_pad[j] = (k_block[j] ^ (0x36 as u8)) as u8
+    outer_pad[j] = (k_block[j] ^ (0x5c as u8)) as u8
+    j = j + 1
+
+  let inner = sha512::Sha512.new()
+
+  inner.write(addr(inner_pad[0]), SHA512_BLOCK_SIZE)
+
+  if msg_len > 0:
+    inner.write(msg, msg_len)
+  let inner_digest = inner.sum_512()
+
+  let outer = sha512::Sha512.new()
+
+  outer.write(addr(outer_pad[0]), SHA512_BLOCK_SIZE)
+  outer.write(addr(inner_digest[0]), SHA512_DIGEST_SIZE)
+
+  return outer.sum_512()
+
+fn hmac_sha512_str(key string, msg string) [u8; 64] =
+  let kp *u8 = nil
+  let mp *u8 = nil
+
+  if len(key) > 0:
+    kp = addr(key[0])
+  if len(msg) > 0:
+    mp = addr(msg[0])
+
+  return hmac_sha512(kp, len(key), mp, len(msg))
+
+fn hmac_sha512_hex(key string, msg string) string =
+  return sha512::hex_from_512(hmac_sha512_str(key, msg))
+
+// ── HMAC-SHA-384 ───────────────────────────────────────────────────────
+
+// hmac_sha384 uses the SHA-384 hash (block size 128, digest 48) inside
+// the HMAC construction.  Note the *block* size is the same as SHA-512
+// because the underlying compression function is SHA-512's; only the
+// initial values and output truncation differ.
+fn hmac_sha384(key *u8, key_len i64, msg *u8, msg_len i64) [u8; 48] =
+  let k_block [u8; 128]
+  let i i64 = 0
+
+  if key_len > SHA512_BLOCK_SIZE:
+    let kh = sha512::sha384(key, key_len)
+
+    for i < SHA384_DIGEST_SIZE:
+      k_block[i] = kh[i]
+      i = i + 1
+
+    for i < SHA512_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+  else:
+    for i < key_len:
+      k_block[i] = key[i]
+      i = i + 1
+
+    for i < SHA512_BLOCK_SIZE:
+      k_block[i] = 0 as u8
+      i = i + 1
+
+  let inner_pad [u8; 128]
+  let outer_pad [u8; 128]
+  let j i64 = 0
+
+  for j < SHA512_BLOCK_SIZE:
+    inner_pad[j] = (k_block[j] ^ (0x36 as u8)) as u8
+    outer_pad[j] = (k_block[j] ^ (0x5c as u8)) as u8
+    j = j + 1
+
+  let inner = sha512::Sha512.new_384()
+
+  inner.write(addr(inner_pad[0]), SHA512_BLOCK_SIZE)
+
+  if msg_len > 0:
+    inner.write(msg, msg_len)
+  let inner_digest = inner.sum_384()
+
+  let outer = sha512::Sha512.new_384()
+
+  outer.write(addr(outer_pad[0]), SHA512_BLOCK_SIZE)
+  outer.write(addr(inner_digest[0]), SHA384_DIGEST_SIZE)
+
+  return outer.sum_384()
+
+fn hmac_sha384_str(key string, msg string) [u8; 48] =
+  let kp *u8 = nil
+  let mp *u8 = nil
+
+  if len(key) > 0:
+    kp = addr(key[0])
+  if len(msg) > 0:
+    mp = addr(msg[0])
+
+  return hmac_sha384(kp, len(key), mp, len(msg))
+
+fn hmac_sha384_hex(key string, msg string) string =
+  return sha512::hex_from_384(hmac_sha384_str(key, msg))
+
+export {
+  hmac_sha256, hmac_sha256_str, hmac_sha256_hex,
+  hmac_sha384, hmac_sha384_str, hmac_sha384_hex,
+  hmac_sha512, hmac_sha512_str, hmac_sha512_hex,
+} as hmac

@@ -756,50 +756,40 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 
 	isFloat := false
 
+	// digitOK returns true while the next char is a valid digit in the
+	// current radix.  Underscore separators are *consumed* by the caller
+	// (skipped in the output) when they sit between two digits, so this
+	// helper does not need to special-case them.
 	switch {
 	case l.peek() == '0' && (l.peekAt(1) == 'x' || l.peekAt(1) == 'X'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // x/X
-
-		for l.pos < len(l.src) && isHexDigit(l.peek()) {
-			sb.WriteRune(l.advance())
-		}
+		l.consumeDigits(&sb, isHexDigit)
 
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	case l.peek() == '0' && (l.peekAt(1) == 'b' || l.peekAt(1) == 'B'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // b/B
-
-		for l.pos < len(l.src) && (l.peek() == '0' || l.peek() == '1') {
-			sb.WriteRune(l.advance())
-		}
+		l.consumeDigits(&sb, func(ch rune) bool { return ch == '0' || ch == '1' })
 
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	case l.peek() == '0' && (l.peekAt(1) == 'o' || l.peekAt(1) == 'O'):
 		sb.WriteRune(l.advance()) // 0
 		sb.WriteRune(l.advance()) // o/O
-
-		for l.pos < len(l.src) && l.peek() >= '0' && l.peek() <= '7' {
-			sb.WriteRune(l.advance())
-		}
+		l.consumeDigits(&sb, func(ch rune) bool { return ch >= '0' && ch <= '7' })
 
 		return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
 
 	default:
-		for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
-			sb.WriteRune(l.advance())
-		}
+		l.consumeDigits(&sb, unicode.IsDigit)
 
 		if l.pos < len(l.src) && l.peek() == '.' && l.peekAt(1) != '.' {
 			isFloat = true
 
 			sb.WriteRune(l.advance()) // .
-
-			for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
-				sb.WriteRune(l.advance())
-			}
+			l.consumeDigits(&sb, unicode.IsDigit)
 		}
 
 		if l.pos < len(l.src) && (l.peek() == 'e' || l.peek() == 'E') {
@@ -811,9 +801,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 				sb.WriteRune(l.advance())
 			}
 
-			for l.pos < len(l.src) && unicode.IsDigit(l.peek()) {
-				sb.WriteRune(l.advance())
-			}
+			l.consumeDigits(&sb, unicode.IsDigit)
 		}
 	}
 
@@ -822,6 +810,31 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 	}
 
 	return Token{Type: INT_LIT, Literal: sb.String(), Line: line, Col: col}, nil
+}
+
+// consumeDigits scans a digit run, writing each digit into sb and
+// quietly skipping any `_` separators that fall *between* digits.  A
+// leading or trailing underscore is left for the next lexer pass to
+// reject (it is a malformed numeric literal -- the regex allowed shape
+// is /\d(_?\d)*/, mirroring Go and Rust).  isOK identifies digits in
+// the current radix.
+func (l *Lexer) consumeDigits(sb *strings.Builder, isOK func(rune) bool) {
+	for l.pos < len(l.src) {
+		ch := l.peek()
+		if isOK(ch) {
+			sb.WriteRune(l.advance())
+
+			continue
+		}
+
+		if ch == '_' && l.pos+1 < len(l.src) && isOK(l.peekAt(1)) {
+			l.advance() // skip the underscore separator
+
+			continue
+		}
+
+		break
+	}
 }
 
 func isHexDigit(ch rune) bool {

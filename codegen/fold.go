@@ -368,7 +368,24 @@ func (cg *CodeGen) tryFoldUnaryExpr(e *ast.UnaryExpr) foldedValue {
 // site (e.g. a closure that mutates a captured variable).
 func collectMutatedNames(root ast.Node) map[string]bool {
 	out := map[string]bool{}
+	collectMutatedNamesInto(root, out)
 
+	return out
+}
+
+// collectMutatedNamesFromStmts is the multi-root variant used by
+// genImplicitMain, where the implicit main body is a flat slice of top-level
+// statements rather than a single Block / FuncDecl.
+func collectMutatedNamesFromStmts(stmts []ast.Node) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range stmts {
+		collectMutatedNamesInto(s, out)
+	}
+
+	return out
+}
+
+func collectMutatedNamesInto(root ast.Node, out map[string]bool) {
 	walkAST(root, func(n ast.Node) {
 		switch s := n.(type) {
 		case *ast.AssignStmt:
@@ -397,8 +414,6 @@ func collectMutatedNames(root ast.Node) map[string]bool {
 			}
 		}
 	})
-
-	return out
 }
 
 // walkAST visits every reachable node in the AST subtree, calling visit
@@ -467,6 +482,12 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 	case *ast.PostfixStmt:
 		walkAST(v.Expr, visit)
 	case *ast.VarDecl:
+		walkAST(v.Value, visit)
+	case *ast.TupleDestructDecl:
+		walkAST(v.Value, visit)
+	case *ast.ArrayDestructDecl:
+		walkAST(v.Value, visit)
+	case *ast.StructDestructDecl:
 		walkAST(v.Value, visit)
 	case *ast.ReturnStmt:
 		walkAST(v.Value, visit)

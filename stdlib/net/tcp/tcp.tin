@@ -18,7 +18,7 @@ use io
 use rc
 use sync
 use errors
-use { Err } from errors
+use errors
 
 // C helpers
 fn tin_tcp_listen_c(port i32) i32          = extern("_tin_tcp_listen")
@@ -53,10 +53,10 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next connection.
-  // Returns (Conn, Err) - nil Err means success.
+  // Returns (Conn, *errors::Err) - nil Err means success.
   //   let (c, err) = srv.accept()
-  //   if errors::has(err): return
-  fn accept(this Server) (Conn, Err) =
+  //   if errors::is_err(err): return
+  fn accept(this Server) (Conn, *errors::Err) =
     let fd = tin_tcp_accept_c(this.fd())
 
     if fd < 0:
@@ -68,8 +68,8 @@ struct Server (io::Closeable) =
     io::close(this.fd())
 
 // listen creates a TCP server on the given port.
-// Returns (Server, Err) - check Err before using Server.
-fn listen(port i32) (Server, Err) =
+// Returns (Server, *errors::Err) - check Err before using Server.
+fn listen(port i32) (Server, *errors::Err) =
   let fd = tin_tcp_listen_c(port)
 
   if fd < 0:
@@ -78,8 +78,8 @@ fn listen(port i32) (Server, Err) =
   return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial connects to host:port via TCP.
-// Returns (Conn, Err) - check Err before using Conn.
-fn dial(host string, port i32) (Conn, Err) =
+// Returns (Conn, *errors::Err) - check Err before using Conn.
+fn dial(host string, port i32) (Conn, *errors::Err) =
   let fd = tin_tcp_dial_c(host, port)
 
   if fd < 0:

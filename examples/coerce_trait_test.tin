@@ -1,0 +1,138 @@
+// examples/coerce_trait_test.tin - stress test for the coerce[T] op-trait.
+//
+// `coerce[T]` is the direction-flip of `implicit[T]`: where implicit
+// says "T flows into S", coerce says "S flows into T" via `s as T`.
+// The struct lists each target as a separate `coerce[T]` and provides
+// a matching `static fn ::coerce(this S) T`.  Multiple impls on the
+// same struct co-exist because methodParamSig mixes the return type
+// into the overload signature.
+
+use assert
+
+// Money: a fixed-point currency value with multiple lossy / lossless
+// conversions.  Exercises every primitive target as well as the
+// chain of casts that follow each other.
+struct Money(coerce[i64], coerce[f64], coerce[string], coerce[bool]) =
+  cents i64
+
+  static fn ::coerce(this Money) i64 = return this.cents
+
+  static fn ::coerce(this Money) f64 =
+    return (this.cents as f64) / 100.0
+
+  static fn ::coerce(this Money) string =
+    let dollars = this.cents / 100
+    let pennies = this.cents % 100
+
+    return "${dollars}.{pennies}"
+
+  // Truthiness: any non-zero balance is true.
+  static fn ::coerce(this Money) bool = return this.cents != 0
+
+test "coerce to i64 returns raw cents" =
+  let m = Money{cents: 1234}
+
+  assert::equals(m as i64, 1234)
+
+test "coerce to f64 divides by 100" =
+  let m = Money{cents: 250}
+
+  assert::equals(m as f64, 2.5)
+
+test "coerce to string prints dollar form" =
+  let m = Money{cents: 1234}
+
+  assert::equals(m as string, "$12.34")
+
+test "coerce to bool reports non-zero" =
+  let zero = Money{cents: 0}
+  let some = Money{cents: 5}
+
+  assert::ok(!(zero as bool))
+  assert::ok(some as bool)
+
+test "coerce works through a chain" =
+  let m = Money{cents: 999}
+  let s = m as string
+
+  assert::equals(s, "$9.99")
+  // f64 round-trip
+  let d = m as f64
+  let halved = d / 2.0
+
+  assert::equals(halved, 4.995)
+
+test "coerce target match is exact (i64 picks the i64 impl)" =
+  // Without overload-on-return, two impls would collide; this test
+  // pins that each target dispatches to the right one.
+  let m = Money{cents: 75}
+  let n = m as i64
+
+  assert::equals(n, 75)
+
+test "coerce keeps original value (no implicit mutation)" =
+  let m = Money{cents: 42}
+  let _ = m as string
+  let _ = m as f64
+
+  assert::equals(m.cents, 42)
+
+// Vector2: a numeric struct that coerces only to f64 (norm).  Probes
+// the case where a struct implements coerce for a single target type.
+struct Vector2(coerce[f64]) =
+  x f64
+  y f64
+
+  static fn ::coerce(this Vector2) f64 =
+    return this.x * this.x + this.y * this.y
+
+test "single-target coerce works" =
+  let v = Vector2{x: 3.0, y: 4.0}
+
+  assert::equals(v as f64, 25.0)
+
+// Mood: an atom-valued struct that coerces to atom and to string.
+// The atom target verifies coerce works for non-numeric primitives.
+struct Mood(coerce[atom], coerce[string]) =
+  state atom
+
+  static fn ::coerce(this Mood) atom = return this.state
+  static fn ::coerce(this Mood) string =
+    if this.state == 'happy: return "happy"
+    if this.state == 'sad:   return "sad"
+
+    return "unknown"
+
+test "coerce to atom" =
+  let m = Mood{state: 'happy}
+
+  assert::equals(m as atom, 'happy)
+
+test "coerce to string with match" =
+  let h = Mood{state: 'happy}
+  let s = Mood{state: 'sad}
+
+  assert::equals(h as string, "happy")
+  assert::equals(s as string, "sad")
+
+// CountedBag: ensures coerce works for impure-looking conversions
+// (computed value, not just a field read).
+struct CountedBag(coerce[i64]) =
+  items [string]
+
+  static fn ::coerce(this CountedBag) i64 = return len(this.items)
+
+test "coerce computes derived value" =
+  let bag = CountedBag{items: ["a", "b", "c", "d"]}
+
+  assert::equals(bag as i64, 4)
+
+// Pointer-to-struct coerce: not yet supported -- the receiver shape
+// is `this S` (value), not `*S`.  Document the limitation by NOT
+// providing such an impl here.
+
+test "value coerce keeps caller's struct unchanged" =
+  let bag = CountedBag{items: ["x"]}
+  let _ = bag as i64
+
+  assert::equals(len(bag.items), 1)
