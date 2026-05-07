@@ -30,32 +30,40 @@ fn id(b bool) bool = return b
 
 fn check_and_short() i64 =
   hits = 0
+
   if id(false) && bump():
     return -1
+
   return hits
 
 // && evaluates RHS when LHS is true.
 
 fn check_and_runs() i64 =
   hits = 0
+
   if id(true) && bump():
     return hits
+
   return -1
 
 // || short-circuit: true LHS -> RHS skipped.
 
 fn check_or_short() i64 =
   hits = 0
+
   if id(true) || bump():
     return hits
+
   return -1
 
 // || evaluates RHS when LHS is false.
 
 fn check_or_runs() i64 =
   hits = 0
+
   if id(false) || bump():
     return hits
+
   return -1
 
 // Real-world pattern that previously OOB-read: guard array access by length.
@@ -65,32 +73,42 @@ fn safe_last_eq(p *byte, n i64, want byte) bool =
 
 fn check_safe_empty() bool =
   let buf = mem::malloc(8) as *byte
+
   buf[0] = 0
   let r = safe_last_eq(buf, 0, 0)  // n==0 -> RHS must not read p[-1]
+
   mem::free(buf as *void)
+
   return r
 
 fn check_safe_match() bool =
   let buf = mem::malloc(8) as *byte
+
   buf[0] = 42 as byte
   let r = safe_last_eq(buf, 1, 42 as byte)
+
   mem::free(buf as *void)
+
   return r
 
 // Triple-chained && also short-circuits (left-to-right).
 
 fn triple_and(a bool, b bool, c bool) i64 =
   hits = 0
+
   if a && b && bump():
     return 100 + hits
+
   return hits
 
 // Mixed chains: a && (b || c).
 
 fn mixed_chain(a bool) i64 =
   hits = 0
+
   if a && (bump_false() || bump()):
     return 100 + hits
+
   return hits
 
 test "and short-circuits when LHS is false" =
@@ -133,9 +151,11 @@ test "mixed and-or evaluates only what is needed" =
 fn for_and_count(n i64, limit i64) i64 =
   let i i64 = 0
   let count i64 = 0
+
   for i < n && i < limit:
     count = count + 1
     i = i + 1
+
   return count
 
 test "for cond with && iterates the right number of times" =
@@ -170,4 +190,5 @@ fn make_u64(x u64) u64 = return x
 
 test "u64 % u64 from fn-call result, cast as i64" =
   let r i64 = (make_u64(18446744073709551615 as u64) % (100 as u64)) as i64
+
   assert::equals(r, 15)

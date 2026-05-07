@@ -18,6 +18,7 @@ use assert
 
 test "for ref mutates an int array" =
   let xs = [1, 2, 3, 4, 5]
+
   for ref x in xs:
     x += 10
   assert::equals(xs[0], 11)
@@ -28,6 +29,7 @@ test "for ref mutates an int array" =
 
 test "for ref handles compound and direct assignment" =
   let xs = [10, 20, 30]
+
   for ref x in xs:
     x = x * 3
   assert::equals(xs[0], 30)
@@ -36,6 +38,7 @@ test "for ref handles compound and direct assignment" =
 
 test "for ref over a string array releases old + retains new" =
   let xs = ["alpha", "beta", "gamma"]
+
   for ref s in xs:
     s = s ++ "!"
   assert::equals(xs[0], "alpha!")
@@ -44,6 +47,7 @@ test "for ref over a string array releases old + retains new" =
 
 test "for ref over a returned array still mutates" =
   let xs = make_counts()
+
   for ref x in xs:
     x *= 2
   assert::equals(xs[0], 2)
@@ -52,6 +56,7 @@ test "for ref over a returned array still mutates" =
 
 test "for ref over an array inside a returned struct" =
   let h = make_holder()
+
   for ref x in h.xs:
     x += 1
   assert::equals(h.xs[0], 11)
@@ -60,6 +65,7 @@ test "for ref over an array inside a returned struct" =
 
 test "for ref over an array inside a nested struct" =
   let outer = make_outer()
+
   for ref x in outer.inner.xs:
     x = x * x
   assert::equals(outer.inner.xs[0], 1)
@@ -68,6 +74,7 @@ test "for ref over an array inside a nested struct" =
 
 test "for ref over string array inside struct" =
   let h = Strings{ss: ["x", "y"]}
+
   for ref s in h.ss:
     s = "*" ++ s ++ "*"
   assert::equals(h.ss[0], "*x*")
@@ -76,6 +83,7 @@ test "for ref over string array inside struct" =
 test "for ref where body does not assign leaves array untouched" =
   let xs = [7, 8, 9]
   let sum i64 = sum_through_ref(xs)
+
   assert::equals(sum, 24)
   assert::equals(xs[0], 7)
   assert::equals(xs[1], 8)
@@ -83,9 +91,12 @@ test "for ref where body does not assign leaves array untouched" =
 
 fn sum_through_ref(xs [i64]) i64 =
   let total i64 = 0
+
   for ref x in xs:
     let _t = total + x
+
     total = _t
+
   return total
 
 fn make_counts() [i64] = return [1, 2, 3]

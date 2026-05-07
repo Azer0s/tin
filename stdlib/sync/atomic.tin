@@ -94,54 +94,74 @@ struct Atomic[t] =
 
   static fn new(v t) Atomic[t] where t is w8 =
     let raw = tin_atomic_alloc(8)
+
     tin_atomic_store_64(raw, &v as *void)
+
     return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w4 =
     let raw = tin_atomic_alloc(4)
+
     tin_atomic_store_32(raw, &v as *void)
+
     return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w2 =
     let raw = tin_atomic_alloc(2)
+
     tin_atomic_store_16(raw, &v as *void)
+
     return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w1 =
     let raw = tin_atomic_alloc(1)
+
     tin_atomic_store_8(raw, &v as *void)
+
     return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is not primitive =
     let raw = tin_atomic_obj_new(sizeof(t), isrc(t))
+
     tin_atomic_obj_store(raw, &v as *void)
+
     return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_obj_free)}
 
   // --- load ---------------------------------------------------------
 
   fn load(this Atomic[t]) t where t is w8 =
     let out t
+
     tin_atomic_load_64(this.ptr(), &out as *void)
+
     return out
 
   fn load(this Atomic[t]) t where t is w4 =
     let out t
+
     tin_atomic_load_32(this.ptr(), &out as *void)
+
     return out
 
   fn load(this Atomic[t]) t where t is w2 =
     let out t
+
     tin_atomic_load_16(this.ptr(), &out as *void)
+
     return out
 
   fn load(this Atomic[t]) t where t is w1 =
     let out t
+
     tin_atomic_load_8(this.ptr(), &out as *void)
+
     return out
 
   fn load(this Atomic[t]) t where t is not primitive =
     let out t
+
     tin_atomic_obj_load(this.ptr(), &out as *void)
+
     return out
 
   // --- store --------------------------------------------------------
@@ -203,5 +223,6 @@ struct Atomic[t] =
 
   fn for_locked(this Atomic[t], f fn(*t)) where t is not primitive =
     let payload *void = tin_atomic_obj_lock(this.ptr())
+
     f(payload as *t)
     tin_atomic_obj_unlock(this.ptr())

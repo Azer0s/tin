@@ -58,8 +58,10 @@ fn{#pure} clamp(v i64, lo i64, hi i64) i64 =
 
 fn{#pure} sum_range(n i64) i64 =
   let acc i64 = 0
+
   for let i i64 = 0; i < n; i++:
     acc = acc + i
+
   return acc
 
 test "#pure: if/else and ternary" =
@@ -124,9 +126,11 @@ fn{#pure} logging_compute(n i64) i64 =
     echo "start: n={n}"
   }
   let result i64 = n * n * n
+
   { #allow_sideffect } {
     echo "done: result={result}"
   }
+
   return result
 
 test "#pure: multiple sequential #allow_sideffect blocks" =
@@ -162,10 +166,13 @@ test "#sideffect: chain of sideffect functions" =
 fn{#no_recurse} iterative_fib(n i64) i64 =
   let a i64 = 0
   let b i64 = 1
+
   for let i i64 = 0; i < n; i++:
     let t i64 = a + b
+
     a = b
     b = t
+
   return a
 
 test "#no_recurse: iterative fibonacci" =
@@ -232,10 +239,13 @@ fn{#pure #no_recurse} ctfe_square(n i64) i64 = return n * n
 fn{#pure #no_recurse} ctfe_fib(n i64) i64 =
   let a i64 = 0
   let b i64 = 1
+
   for let i i64 = 0; i < n; i++:
     let t i64 = a + b
+
     a = b
     b = t
+
   return a
 
 // Transitive: ctfe_hyp calls ctfe_square, still fully evaluated at compile time

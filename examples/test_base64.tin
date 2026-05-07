@@ -37,6 +37,7 @@ test "decode url safe" =
 test "round trip standard" =
   let cases [string] = ["", "f", "fo", "foo", "foob", "fooba", "foobar"]
   let i i64 = 0
+
   for i < len(cases):
     assert::equals(base64::decode(base64::encode(cases[i])), cases[i])
     i = i + 1
@@ -44,6 +45,7 @@ test "round trip standard" =
 test "round trip url safe" =
   let cases [string] = ["", "f", "fo", "foo", "Hello, World!"]
   let i i64 = 0
+
   for i < len(cases):
     assert::equals(base64::decode(base64::encode_url(cases[i])), cases[i])
     i = i + 1

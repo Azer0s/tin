@@ -78,87 +78,104 @@ test "encode string with newline" =
 test "encode struct all fields" =
   let p = jt_point{x: 3, y: 4}
   let s = json::encode(p)
+
   assert::equals(s, "\{\"x\":3,\"y\":4\}")
 
 test "encode struct with json tag rename" =
   let u = jt_tagged_user{id: 1, email: "a@b.com"}
   let s = json::encode(u)
+
   assert::equals(s, "\{\"user_id\":1,\"email_address\":\"a@b.com\"\}")
 
 test "encode struct with json:- skips field" =
   let w = jt_with_secret{name: "alice", pwd: "hunter2"}
   let s = json::encode(w)
+
   assert::equals(s, "\{\"name\":\"alice\"\}")
 
 test "encode nested struct" =
   let r = jt_rect{origin: jt_point{x: 0, y: 0}, size: jt_point{x: 100, y: 50}}
   let s = json::encode(r)
+
   assert::equals("\{\"origin\":\{\"x\":0,\"y\":0\},\"size\":\{\"x\":100,\"y\":50\}\}", s)
 
 test "encode tuple" =
   // Tuples are structs with alphabetical field names a, b, c, ...
   let t = (10 as i64, "hello")
   let s = json::encode(t)
+
   assert::equals("\{\"a\":10,\"b\":\"hello\"\}", s)
 
 // Untyped parsing
 
 test "parse null" =
   let v = unwrap_or(json::parse("null"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_null())
 
 test "parse bool true" =
   let v = unwrap_or(json::parse("true"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_bool())
   assert::ok(v.as_bool())
 
 test "parse bool false" =
   let v = unwrap_or(json::parse("false"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_bool())
   assert::not_ok(v.as_bool())
 
 test "parse integer" =
   let v = unwrap_or(json::parse("42"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_int())
   assert::equals(v.as_int(), 42)
 
 test "parse negative integer" =
   let v = unwrap_or(json::parse("-7"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_int())
   assert::equals(v.as_int(), 0 - 7)
 
 test "parse float" =
   let v = unwrap_or(json::parse("3.14"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_float())
   assert::equals(v.as_float(), 3.14)
 
 test "parse string" =
   let v = unwrap_or(json::parse("\"hello\""), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "hello")
 
 test "parse string with escape sequences" =
   let v = unwrap_or(json::parse("\"line1\\nline2\""), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_string())
   assert::equals(v.as_string(), "line1\nline2")
 
 test "parse object get field" =
   let v = unwrap_or(json::parse("\{\"name\":\"alice\",\"age\":30\}"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_object())
   assert::equals(v.get("name").as_string(), "alice")
   assert::equals(v.get("age").as_int(), 30)
 
 test "parse object missing key returns null" =
   let v = unwrap_or(json::parse("\{\"x\":1\}"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.get("missing").is_null())
 
 test "parse object keys" =
   let v = unwrap_or(json::parse("\{\"a\":1,\"b\":2\}"), json::Value{kind: json::Kind.null_v})
   let ks = v.keys()
+
   assert::equals(len(ks), 2)
 
 test "parse array index" =
   let v = unwrap_or(json::parse("[10,20,30]"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 3)
   assert::equals(v.index(0).as_int(), 10)
@@ -167,53 +184,64 @@ test "parse array index" =
 
 test "parse array out of bounds returns null" =
   let v = unwrap_or(json::parse("[1,2]"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.index(5).is_null())
 
 test "parse empty array" =
   let v = unwrap_or(json::parse("[]"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_array())
   assert::equals(v.array_len(), 0)
 
 test "parse empty object" =
   let v = unwrap_or(json::parse("\{\}"), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_object())
   assert::equals(len(v.keys()), 0)
 
 test "parse empty string input returns null" =
   let v = unwrap_or(json::parse(""), json::Value{kind: json::Kind.null_v})
+
   assert::ok(v.is_null())
 
 // Typed parsing
 
 test "typed parse basic struct" =
   let c = unwrap_or(json::parse[jt_coord]("\{\"x\":5,\"y\":9\}"), jt_coord{})
+
   assert::equals(c.x, 5)
   assert::equals(c.y, 9)
 
 test "typed parse with json tag" =
   let u = unwrap_or(json::parse[jt_api_user]("\{\"user_id\":7,\"display_name\":\"bob\"\}"), jt_api_user{})
+
   assert::equals(u.id, 7)
   assert::equals(u.name, "bob")
 
 test "typed parse unknown keys ignored" =
   let s = unwrap_or(json::parse[jt_simple]("\{\"x\":3,\"extra\":\"ignored\"\}"), jt_simple{})
+
   assert::equals(s.x, 3)
 
 test "typed parse float field" =
   let m = unwrap_or(json::parse[jt_measure]("\{\"val\":2.5\}"), jt_measure{})
+
   assert::equals(m.val, 2.5)
 
 test "typed parse bool field" =
   let f = unwrap_or(json::parse[jt_flags]("\{\"enabled\":true\}"), jt_flags{})
+
   assert::ok(f.enabled)
 
 test "typed parse string field" =
   let g = unwrap_or(json::parse[jt_greeting]("\{\"msg\":\"hi there\"\}"), jt_greeting{})
+
   assert::equals(g.msg, "hi there")
 
 test "typed parse nested struct" =
   let s = "\{\"origin\":\{\"x\":3,\"y\":4\},\"size\":\{\"x\":100,\"y\":50\}\}"
   let r = unwrap_or(json::parse[jt_rect](s), jt_rect{})
+
   assert::equals(r.origin.x, 3)
   assert::equals(r.origin.y, 4)
   assert::equals(r.size.x, 100)

@@ -13,6 +13,7 @@ test "where t is ord with struct" =
   let a = Box{v: 5}
   let b = Box{v: 3}
   let m = pickMin(a, b)
+
   assert::equals(3, m.v)
 
 test "where t is ord with primitive" =

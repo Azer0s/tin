@@ -34,12 +34,14 @@ fn split_at_midpoint(arr [i64]) @[i64, [i64], [i64]] =
   let left [i64] = []
   let right [i64] = []
   let i i64 = 0
+
   for i < len(arr):
     if i < mid:
       left ++= arr[i]
     else:
       right ++= arr[i]
     i = i + 1
+
   return [left[mid - 1] as any, left as any, right as any]
 
 // ---------------------------------------------------------------------------
@@ -50,12 +52,14 @@ test "uniform array destructuring two slots" =
   // Fixed-length destructuring requires exact length match.
   let arr [i64] = [10, 20]
   let [a, b] [i64] = arr
+
   assert::equals(a, 10)
   assert::equals(b, 20)
 
 test "uniform array destructuring three slots" =
   let arr [i64] = [1, 2, 3]
   let [x, y, z] [i64] = arr
+
   assert::equals(x, 1)
   assert::equals(y, 2)
   assert::equals(z, 3)
@@ -67,6 +71,7 @@ test "uniform array destructuring three slots" =
 test "rest split head and tail" =
   let arr [i64] = [100, 200, 300, 400]
   let [head, ...tail] [i64] = arr
+
   assert::equals(head, 100)
   assert::equals(len(tail), 3)
   assert::equals(tail[0], 200)
@@ -77,6 +82,7 @@ test "rest split chained twice" =
   let [a, ...rest1] [i64] = arr
   let [b, ...rest2] [i64] = rest1
   let [c, ...rest3] [i64] = rest2
+
   assert::equals(a, 1)
   assert::equals(b, 2)
   assert::equals(c, 3)
@@ -90,12 +96,14 @@ test "rest split chained twice" =
 test "struct destructuring vec2" =
   let v = vec2{x: 7, y: 13}
   let {x, y} vec2 = v
+
   assert::equals(x, 7)
   assert::equals(y, 13)
 
 test "struct destructuring color_rgba" =
   let c = color_rgba{r: 255, g: 128, b: 0, a: 255}
   let {r, g, b, a} color_rgba = c
+
   assert::equals(r as i64, 255)
   assert::equals(g as i64, 128)
   assert::equals(b as i64, 0)
@@ -108,12 +116,14 @@ test "struct destructuring color_rgba" =
 test "per-slot any array i64 and bool" =
   let arr [any] = [42 as any, true as any]
   let [n, flag] [i64, bool] = arr
+
   assert::equals(n, 42)
   assert::ok(flag)
 
 test "per-slot any array string and i64" =
   let arr [any] = ["hello" as any, 99 as any]
   let [s, v] [string, i64] = arr
+
   assert::equals(s, "hello")
   assert::equals(v, 99)
 
@@ -129,10 +139,12 @@ test "struct destructuring inside loop" =
   ]
   let sum_x i64 = 0
   let sum_y i64 = 0
+
   for let p vec2 in points:
     let {x, y} vec2 = p
     sum_x = sum_x + x
     sum_y = sum_y + y
+
   assert::equals(sum_x, 9)
   assert::equals(sum_y, 12)
 
@@ -142,12 +154,15 @@ test "array destructuring inside loop for pairs" =
   let sum_vals i64 = 0
   let sum_keys i64 = 0
   let i i64 = 0
+
   for i < len(flat) / 2:
     let k = flat[i * 2]
     let v = flat[i * 2 + 1]
+
     sum_keys = sum_keys + k
     sum_vals = sum_vals + v
     i = i + 1
+
   assert::equals(sum_keys, 6)
   assert::equals(sum_vals, 60)
 
@@ -158,16 +173,19 @@ test "array destructuring inside loop for pairs" =
 fn min_max(arr [i64]) @[i64, i64] =
   let mn i64 = arr[0]
   let mx i64 = arr[0]
+
   for let v i64 in arr:
     if v < mn:
       mn = v
     if v > mx:
       mx = v
+
   return [mn as any, mx as any]
 
 test "destructure function return min_max" =
   let result = min_max([3, 1, 4, 1, 5, 9, 2, 6])
   let [mn, mx] @[i64, i64] = result
+
   assert::equals(mn, 1)
   assert::equals(mx, 9)
 
@@ -186,6 +204,7 @@ test "manually decompose nested struct" =
   }
   let {x: sx, y: sy} vec2 = seg.start
   let {x: ex, y: ey} vec2 = seg.end_pt
+
   // dx^2 + dy^2 = 9 + 16 = 25
   assert::equals(sx, 0)
   assert::equals(sy, 0)
@@ -202,6 +221,7 @@ test "destructured names can shadow outer let bindings" =
   let outer_y i64 = 888
   let v = vec2{x: 1, y: 2}
   let {x, y} vec2 = v
+
   assert::equals(outer_x, 999)
   assert::equals(outer_y, 888)
   assert::equals(x, 1)
@@ -211,9 +231,11 @@ test "destructured names shadow in nested scope" =
   let x i64 = 999
   let y i64 = 888
   let v = vec2{x: 1, y: 2}
+
   if true:
     let {x, y} vec2 = v   // shadows outer x, y in nested scope
     assert::equals(x, 1)
     assert::equals(y, 2)
+
   assert::equals(x, 999)
   assert::equals(y, 888)

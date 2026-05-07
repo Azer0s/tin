@@ -4,4 +4,5 @@
 fn main() =
   let x i64 = 42
   let y = x(10)
+
   echo y

@@ -41,6 +41,7 @@ fn two_defers_lifo() i64 =
     return 1    // registered first, runs last (LIFO) -> this wins
   defer do:
     return 2    // registered second, runs first (LIFO) -> written, then overwritten
+
   return 0
 
 test "LIFO order: last-registered defer's return wins" =
@@ -58,9 +59,11 @@ fn lambda_returns_nil() i64 =
 
 fn lambda_returns_pointer() i64 =
   let x i64 = 55
+
   defer (fn() *i64 =
     return &x
   )()
+
   return 100
 
 test "lambda returning nil pointer does not override" =
@@ -74,9 +77,12 @@ test "lambda returning non-nil pointer overrides return" =
 fn recoverable_with_override() i64 =
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       return -1  // override: return -1 if we caught a panic
+
   panic("oops")
+
   return 0
 
 test "return in defer+recover overrides return value" =
@@ -85,8 +91,10 @@ test "return in defer+recover overrides return value" =
 fn recover_no_panic() i64 =
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       return -1
+
   return 42
 
 test "recover without panic does not override return" =

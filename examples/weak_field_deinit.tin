@@ -20,29 +20,36 @@ fn make_dll(n i64) *DNode =
   let head = &DNode{val: 0, s: s, next: nil, prev: nil}
   let cur = head
   let i i64 = 1
+
   for i < n:
     let lbl = "node-" ++ "x"
     let node = &DNode{val: i, s: lbl, next: nil, prev: cur}
+
     cur.next = node
     cur = node
     i = i + 1
+
   return head
 
 fn dll_len(head *DNode) i64 =
   let count i64 = 0
   let cur = head
+
   for cur != nil:
     count = count + 1
     cur = cur.next
+
   return count
 
 test "dll of 50 nodes drops cleanly (weak prev skipped)" =
   let head = make_dll(50)
+
   assert::equals(50, dll_len(head))
 
 test "dll reassign frees prior chain (no double-free via weak)" =
   let head = make_dll(30)
   head = make_dll(45)
+
   assert::equals(45, dll_len(head))
 
 // ---------- tree with weak parent pointer ----------
@@ -59,8 +66,10 @@ fn make_subtree(depth i64, parent *TNode) *TNode =
     return nil
   let s = "tn" ++ "_x"
   let n = &TNode{val: depth, s: s, parent: parent, left: nil, right: nil}
+
   n.left = make_subtree(depth - 1, n)
   n.right = make_subtree(depth - 1, n)
+
   return n
 
 fn tnode_size(t *TNode) i64 =
@@ -70,11 +79,13 @@ fn tnode_size(t *TNode) i64 =
 
 test "tree depth 7 with weak parent (127 nodes) drops cleanly" =
   let root = make_subtree(7, nil)
+
   assert::equals(127, tnode_size(root))
 
 test "tree reassign with weak parent (no double-free)" =
   let root = make_subtree(5, nil)
   root = make_subtree(8, nil)
+
   assert::equals(255, tnode_size(root))
 
 // ---------- weak-only struct (no strong pointer fields) ----------
@@ -92,6 +103,7 @@ test "weak-only field skipped on deinit" =
   // after observer is gone (not yet enforced by language; just must not
   // double-free or crash).
   let obs = Observer{s: "watch" ++ "_str", target: head}
+
   assert::equals("watch_str", obs.s)
   // head still alive; iterate to prove.
   assert::equals(5, dll_len(head))

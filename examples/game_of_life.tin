@@ -20,42 +20,55 @@ fn usleep(us i64) void = extern("usleep")
 fn make_grid(h i64, w i64) [[i64]] =
   let g [[i64]] = []
   let r i64 = 0
+
   for r < h:
     let row [i64] = []
     let c i64 = 0
+
     for c < w:
       row ++= 0
       c = c + 1
+
     g ++= row
     r = r + 1
+
   return g
 
 fn live_neighbors(g [[i64]], r i64, c i64, h i64, w i64) i64 =
   let n i64 = 0
   let dr i64 = -1
+
   for dr <= 1:
     let dc i64 = -1
+
     for dc <= 1:
       if dr != 0 || dc != 0:
         n = n + g[(r + dr + h) % h][(c + dc + w) % w]
       dc = dc + 1
+
     dr = dr + 1
+
   return n
 
 fn step(cur [[i64]], h i64, w i64) [[i64]] =
   let nxt = make_grid(h, w)
   let r i64 = 0
+
   for r < h:
     let c i64 = 0
+
     for c < w:
       let alive = cur[r][c]
       let n     = live_neighbors(cur, r, c, h, w)
+
       if alive == 1 && (n == 2 || n == 3):
         nxt[r][c] = 1
       if alive == 0 && n == 3:
         nxt[r][c] = 1
       c = c + 1
+
     r = r + 1
+
   return nxt
 
 fn main() =
@@ -95,19 +108,23 @@ fn main() =
   g[17][48] = 1  g[17][49] = 1  g[17][50] = 1
 
   let gen i64 = 0
+
   for gen < 500:
     io::printf("\033[H")
 
     let r i64 = 0
+
     for r < h:
       let line string = ""
       let c i64 = 0
+
       for c < w:
         if g[r][c] == 1:
           line = line ++ "#"
         else:
           line = line ++ " "
         c = c + 1
+
       echo line
       r = r + 1
 

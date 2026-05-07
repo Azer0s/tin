@@ -15,15 +15,18 @@ fn defer_with_rc(name string) string =
 fn chain_with_defer() =
   let a = "hello" ++ " world"
   let b = a ++ "!"
+
   echo b
 
 fn multi_alloc_scope() =
   let s1 = "first" ++ ""
   let s2 = "second" ++ ""
   let s3 = s1 ++ " " ++ s2
+
   echo s3
 
 let r = defer_with_rc("arc")
+
 echo r
 chain_with_defer()
 multi_alloc_scope()

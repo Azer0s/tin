@@ -5,6 +5,7 @@ use assert
 
 test "parse symbol@file:line:col (typical sourcepos / stacktrace user fn)" =
   let p = source::parse_sourcepos('"render@src/server.tin:142:7")
+
   assert::equals(p.symbol, "render")
   assert::equals(p.file, "src/server.tin")
   assert::equals(p.line, 142 as i64)
@@ -16,6 +17,7 @@ test "parse symbol@file:line:col (typical sourcepos / stacktrace user fn)" =
 
 test "parse bare file:line:col (sourcepos on non-identifier expr)" =
   let p = source::parse_sourcepos('"src/util.tin:8:12")
+
   assert::equals(p.symbol, "")
   assert::equals(p.file, "src/util.tin")
   assert::equals(p.line, 8 as i64)
@@ -23,6 +25,7 @@ test "parse bare file:line:col (sourcepos on non-identifier expr)" =
 
 test "parse symbol+0x<offset> (no line info)" =
   let p = source::parse_sourcepos('"compute_value+0x1c")
+
   assert::equals(p.symbol, "compute_value")
   assert::equals(p.offset, 28 as i64)
   assert::equals(p.file, "")
@@ -31,6 +34,7 @@ test "parse symbol+0x<offset> (no line info)" =
 
 test "parse <lib>:symbol+0x<offset> (shared library frame)" =
   let p = source::parse_sourcepos('"libssl.so.3:SSL_read+0x142")
+
   assert::equals(p.lib, "libssl.so.3")
   assert::equals(p.symbol, "SSL_read")
   assert::equals(p.offset, 322 as i64)
@@ -41,6 +45,7 @@ test "parse <lib>:symbol with offset 0 (lib-fn entry, no '+0x')" =
   // shared lib. Without lib-suffix detection the parser would
   // misclassify the whole string as a bare symbol.
   let p = source::parse_sourcepos('"libssl.so.3:SSL_handshake")
+
   assert::equals(p.lib, "libssl.so.3")
   assert::equals(p.symbol, "SSL_handshake")
   assert::equals(p.offset, 0 as i64)
@@ -48,6 +53,7 @@ test "parse <lib>:symbol with offset 0 (lib-fn entry, no '+0x')" =
 
 test "parse <spawn-of>:<lib>:<sym> with offset 0" =
   let p = source::parse_sourcepos('"<spawn-of>:libpthread.so.0:pthread_create")
+
   assert::ok(p.spawn_of)
   assert::equals(p.lib, "libpthread.so.0")
   assert::equals(p.symbol, "pthread_create")
@@ -55,12 +61,14 @@ test "parse <spawn-of>:<lib>:<sym> with offset 0" =
 
 test "parse libfoo.dylib:sym (macOS shape)" =
   let p = source::parse_sourcepos('"libsystem_c.dylib:strlen+0x12")
+
   assert::equals(p.lib, "libsystem_c.dylib")
   assert::equals(p.symbol, "strlen")
   assert::equals(p.offset, 18 as i64)
 
 test "parse ??+0x<addr> (unresolved)" =
   let p = source::parse_sourcepos('"??+0x7f3a4b8c1234")
+
   assert::equals(p.address, 0x7f3a4b8c1234 as i64)
   assert::equals(p.symbol, "")
   assert::equals(p.file, "")
@@ -69,6 +77,7 @@ test "parse ??+0x<addr> (unresolved)" =
 
 test "parse <spawn-of>: prefix strips and sets the flag" =
   let p = source::parse_sourcepos('"<spawn-of>:run_workers@src/main.tin:42:5")
+
   assert::ok(p.spawn_of)
   assert::equals(p.symbol, "run_workers")
   assert::equals(p.file, "src/main.tin")
@@ -77,6 +86,7 @@ test "parse <spawn-of>: prefix strips and sets the flag" =
 
 test "parse <spawn-of>:<lib>:<sym>+<off> (frozen lib frame)" =
   let p = source::parse_sourcepos('"<spawn-of>:libssl.so.3:SSL_handshake+0x91")
+
   assert::ok(p.spawn_of)
   assert::equals(p.lib, "libssl.so.3")
   assert::equals(p.symbol, "SSL_handshake")
@@ -87,6 +97,7 @@ test "parse bare symbol (sourcepos at fn entry / no offset)" =
   // chars get the bare-symbol representation. The lexer round-trip
   // strips the surrounding quotes so the parser sees just "main".
   let p = source::parse_sourcepos('main)
+
   assert::equals(p.symbol, "main")
   assert::equals(p.file, "")
   assert::equals(p.offset, 0 as i64)
@@ -98,5 +109,6 @@ test "parse round-trips a real sourcepos atom" =
   // must recover the same symbol/file/line shape from the resulting atom.
   let pos = sourcepos(local_helper)
   let p = source::parse_sourcepos(pos)
+
   assert::equals("local_helper", p.symbol)
   assert::ok(p.line > 0 as i64)

@@ -59,11 +59,13 @@ fn verify_color(c *color, r u8, g u8, b u8, a u8) bool = extern("verify_color")
 
 test "mutation visibility: initial field values" =
   let p = get_point()
+
   assert::equals((*p).x, 10)
   assert::equals((*p).y, 20)
 
 test "mutation visibility: C mutates, Tin observes immediately" =
   let p = get_point()
+
   assert::equals((*p).x, 10)
   set_point_x(p, 99)
   assert::equals((*p).x, 99)  // live view - no snapshot
@@ -72,6 +74,7 @@ test "mutation visibility: C mutates, Tin observes immediately" =
 test "mutation visibility: two Tin handles to same C struct" =
   let p1 = get_point()
   let p2 = get_point()
+
   // Both must point to the exact same C struct.
   assert::equals(same_point_ptr(p1, p2), true)
   set_point_x(p1, 77)
@@ -80,6 +83,7 @@ test "mutation visibility: two Tin handles to same C struct" =
 
 test "mutation visibility: y field" =
   let p = get_point()
+
   set_point_y(p, 55)
   assert::equals((*p).y, 55)
   set_point_y(p, 20)
@@ -90,6 +94,7 @@ test "mutation visibility: y field" =
 
 test "nested cLayoutStruct: initial field reads" =
   let r = get_rect()
+
   assert::equals((*r).origin.x, 0)
   assert::equals((*r).origin.y, 0)
   assert::equals((*r).size.x, 100)
@@ -98,6 +103,7 @@ test "nested cLayoutStruct: initial field reads" =
 
 test "nested cLayoutStruct: C mutates origin, Tin observes" =
   let r = get_rect()
+
   set_rect_origin(r, 7, 13)
   assert::equals((*r).origin.x, 7)
   assert::equals((*r).origin.y, 13)
@@ -105,6 +111,7 @@ test "nested cLayoutStruct: C mutates origin, Tin observes" =
 
 test "nested cLayoutStruct: C mutates size, Tin observes" =
   let r = get_rect()
+
   set_rect_size(r, 640, 480)
   assert::equals((*r).size.x, 640)
   assert::equals((*r).size.y, 480)
@@ -112,6 +119,7 @@ test "nested cLayoutStruct: C mutates size, Tin observes" =
 
 test "nested cLayoutStruct: id field mutation" =
   let r = get_rect()
+
   set_rect_id(r, 99)
   assert::equals((*r).id, 99)
   set_rect_id(r, 42)
@@ -123,6 +131,7 @@ test "nested cLayoutStruct: id field mutation" =
 test "struct literal: field reads" =
   // Use values < 128 to avoid sign-extension ambiguity when casting u8 -> i64.
   let c = color{r: 10, g: 20, b: 30, a: 64}
+
   assert::equals(c.r as i64, 10)
   assert::equals(c.g as i64, 20)
   assert::equals(c.b as i64, 30)
@@ -130,10 +139,12 @@ test "struct literal: field reads" =
 
 test "struct literal: pass to C for verification" =
   let c = color{r: 1, g: 2, b: 3, a: 128}
+
   assert::equals(verify_color(&c, 1, 2, 3, 128), true)
 
 test "struct literal: positional syntax" =
   let c = color{255, 0, 128, 64}
+
   assert::equals(verify_color(&c, 255, 0, 128, 64), true)
 
 // ---------------------------------------------------------------------------
@@ -143,6 +154,7 @@ test "struct literal: positional syntax" =
 test "non-handover pointer: color field reads" =
   // g_color = {10, 20, 30, 40}; values < 128 avoid sign-extension with as i64.
   let c = get_color()
+
   assert::equals((*c).r as i64, 10)
   assert::equals((*c).g as i64, 20)
   assert::equals((*c).b as i64, 30)
@@ -150,6 +162,7 @@ test "non-handover pointer: color field reads" =
 
 test "non-handover pointer: C mutates color, Tin observes" =
   let c = get_color()
+
   set_color(c, 5, 15, 25, 35)
   assert::equals((*c).r as i64, 5)
   assert::equals((*c).g as i64, 15)
@@ -159,6 +172,7 @@ test "non-handover pointer: C mutates color, Tin observes" =
 
 test "non-handover pointer: pass back to C verify" =
   let c = get_color()
+
   assert::equals(verify_color(c, 10, 20, 30, 40), true)
 
 // ---------------------------------------------------------------------------
@@ -176,11 +190,13 @@ fn set_tagged_i(t *tagged_val, v i32) void = extern("set_tagged_i")
 
 test "union member in cLayoutStruct: initial field reads" =
   let t = get_tagged()
+
   assert::equals((*t).val.as_i, 42)
   assert::equals((*t).tag, 7)
 
 test "union member in cLayoutStruct: C mutation visible" =
   let t = get_tagged()
+
   set_tagged_i(t, 99)
   assert::equals((*t).val.as_i, 99)
   set_tagged_i(t, 42)   // restore

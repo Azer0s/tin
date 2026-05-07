@@ -7,4 +7,5 @@ struct Box[T] where T is ord && not bool =
 
 fn main() =
   let b = Box[bool]{value: true}
+
   echo b.value

@@ -23,8 +23,10 @@ test "stacktrace from a 3-deep fiber chain reports both ancestors" =
   // Count <spawn-of>: entries. Should be at least 2: one for the spawn
   // site in child(), one for the spawn site in the test body.
   let spawn_of_count i64 = 0
+
   for let f atom in frames:
     let s string = f as string
+
     if strings::contains(s, "<spawn-of>:"):
       spawn_of_count = spawn_of_count + 1
 

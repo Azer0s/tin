@@ -40,12 +40,14 @@ struct Rng =
   fn next_u64(this *Rng) u64 =
     let result u64 = rotl(this.s1 * 5, 7) * 9
     let t u64 = this.s1 << 17
+
     this.s2 = this.s2 ^ this.s0
     this.s3 = this.s3 ^ this.s1
     this.s1 = this.s1 ^ this.s2
     this.s0 = this.s0 ^ this.s3
     this.s2 = this.s2 ^ t
     this.s3 = rotl(this.s3, 45)
+
     return result
 
   // next_i64 returns the next 64 random bits reinterpreted as a signed i64.
@@ -59,6 +61,7 @@ struct Rng =
     let span u64 = (hi - lo) as u64
     let raw u64 = this.next_u64()
     let off u64 = raw % span
+
     return lo + (off as i64)
 
   // f64 returns a uniform double in [0.0, 1.0). Uses the top 53 bits of
@@ -67,6 +70,7 @@ struct Rng =
     let raw u64 = this.next_u64()
     let bits u64 = raw >> 11
     let f f64 = bits as f64
+
     return f * 1.1102230246251565e-16
 
   // bool returns true or false with equal probability.
@@ -77,8 +81,10 @@ struct Rng =
   // loop because it consumes 8 bytes per state advance.
   fn fill(this *Rng, buf *byte, n i64) =
     let off i64 = 0
+
     for off + 8 <= n:
       let v u64 = this.next_u64()
+
       buf[off + 0] = (v & 0xff) as byte
       buf[off + 1] = ((v >> 8) & 0xff) as byte
       buf[off + 2] = ((v >> 16) & 0xff) as byte
@@ -88,9 +94,11 @@ struct Rng =
       buf[off + 6] = ((v >> 48) & 0xff) as byte
       buf[off + 7] = ((v >> 56) & 0xff) as byte
       off = off + 8
+
     if off < n:
       let v u64 = this.next_u64()
       let tail i64 = 0
+
       for off + tail < n:
         buf[off + tail] = ((v >> (tail * 8)) & 0xff) as byte
         tail = tail + 1
@@ -106,6 +114,7 @@ fn splitmix64(state *u64) u64 =
   let z u64 = *state
   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
   z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+
   return z ^ (z >> 31)
 
 // new returns an Rng seeded with the given u64.
@@ -115,6 +124,7 @@ fn new(seed u64) Rng =
   let s1 = splitmix64(&s)
   let s2 = splitmix64(&s)
   let s3 = splitmix64(&s)
+
   return Rng{s0: s0, s1: s1, s2: s2, s3: s3}
 
 // new_from_time returns an Rng seeded from the current wall-clock nanoseconds.
@@ -128,21 +138,25 @@ fn new_from_time() Rng =
 // state cannot be predicted from external observation.
 fn new_secure() Rng =
   let buf [byte; 32]
+
   if getentropy(&buf[0], 32) != 0:
     panic("rand::new_secure: getentropy failed")
   let s0 u64 = read_u64_le(&buf[0])
   let s1 u64 = read_u64_le(&buf[8])
   let s2 u64 = read_u64_le(&buf[16])
   let s3 u64 = read_u64_le(&buf[24])
+
   return Rng{s0: s0, s1: s1, s2: s2, s3: s3}
 
 // read_u64_le reads a little-endian u64 from p.
 fn read_u64_le(p *byte) u64 =
   let v u64 = 0
   let i i64 = 0
+
   for i < 8:
     v = v | ((p[i] as u64) << (i * 8))
     i = i + 1
+
   return v
 
 // secure_bytes fills buf with n cryptographically-strong random bytes via
@@ -152,13 +166,16 @@ fn read_u64_le(p *byte) u64 =
 // getentropy fills at most 256 bytes per call, so larger requests loop.
 fn secure_bytes(buf *byte, n i64) bool =
   let off i64 = 0
+
   for off < n:
     let chunk i64 = n - off
+
     if chunk > 256:
       chunk = 256
     if getentropy(&buf[off], chunk) != 0:
       return false
     off = off + chunk
+
   return true
 
 // secure_u64 returns one cryptographically-strong random u64. Panics on
@@ -166,8 +183,10 @@ fn secure_bytes(buf *byte, n i64) bool =
 // use secure_bytes directly.
 fn secure_u64() u64 =
   let buf [byte; 8]
+
   if !secure_bytes(&buf[0], 8):
     panic("rand::secure_u64: getentropy failed")
+
   return read_u64_le(&buf[0])
 
 export {

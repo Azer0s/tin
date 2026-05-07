@@ -293,7 +293,26 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 
 		return &ast.Block{}, nil
 	}
-	// Single expression / statement on same line - may be SEMI-separated multi-statement
+	// Single expression / statement on same line - may be SEMI-separated multi-statement.
+	// Detect a literal `pass` BEFORE consuming the token so the caller gets a
+	// real empty Block (with IsExplicitPass=true) instead of a nil body.
+	// parseStatement returns nil for `pass` to drop the no-op out of normal
+	// statement lists, but for a fn body that nil otherwise propagates all the
+	// way to codegen where `Body == nil` means "forward declaration only" --
+	// emitting just a `declare` for the symbol. When such a function's address
+	// is later taken (e.g. passed as an `rc::Cell` dtor), the linker sees an
+	// undefined reference. Producing an explicit empty block here keeps codegen
+	// on the normal "emit a body returning void" path.
+	if p.check(lexer.KW_PASS) {
+		passPos := p.curPos()
+		p.advance()
+
+		blk := &ast.Block{IsExplicitPass: true}
+		blk.SetPos(passPos)
+
+		return blk, nil
+	}
+
 	first, err := p.parseStatement()
 	if err != nil {
 		return nil, err

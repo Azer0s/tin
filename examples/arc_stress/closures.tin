@@ -7,6 +7,7 @@ fn capture_string() =
   let prefix = "hello" ++ ""
   let greet = fn(name string) string =
     return prefix ++ ", " ++ name
+
   echo greet("world")
   echo greet("tin")
 
@@ -14,6 +15,7 @@ fn capture_string() =
 fn capture_int() =
   let base = 100
   let adder = fn(x i64) i64 = return base + x
+
   echo adder(5)
   echo adder(42)
 
@@ -26,6 +28,7 @@ fn two_closures() =
   let msg = "msg" ++ ""
   let f = fn() string = return msg ++ "1"
   let g = fn() string = return msg ++ "2"
+
   echo f()
   echo g()
 
@@ -35,6 +38,7 @@ fn closure_alloc_inside() =
   let build = fn(n i64) string =
     let s = tag ++ ": " ++ "value"
     return s
+
   echo build(1)
   echo build(2)
 
@@ -42,16 +46,19 @@ fn closure_alloc_inside() =
 fn iife() =
   let x = 7
   let result = (fn(n i64) i64 = return n * n)(x)
+
   echo result
 
 capture_string()
 capture_int()
 
 let add10 = make_adder(10)
+
 echo add10(3)
 echo add10(7)
 
 let add100 = make_adder(100)
+
 echo add100(5)
 
 two_closures()

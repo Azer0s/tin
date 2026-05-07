@@ -29,8 +29,10 @@ fn{#async} process_item(item work_item) i64 =
 
 fn{#async} process_with_transform(vals [i64], f fn(i64) i64) i64 =
   let total i64 = 0
+
   for let v i64 in vals:
     total = total + f(v)
+
   return total
 
 fn{#async} add_two(a i64, b i64) i64 =
@@ -38,8 +40,10 @@ fn{#async} add_two(a i64, b i64) i64 =
 
 fn{#async} sum_array(arr [i64]) i64 =
   let acc i64 = 0
+
   for let v i64 in arr:
     acc = acc + v
+
   return acc
 
 fn make_work_item(id i64) work_item =
@@ -52,22 +56,26 @@ fn make_work_item(id i64) work_item =
 test "spawn with struct literal argument" =
   let f = spawn process_item(work_item{id: 5, factor: 3, label: "x"})
   let r = await f
+
   assert::equals(r, 15)
 
 test "spawn with struct built by function call" =
   let f = spawn process_item(make_work_item(4))
   let r = await f
+
   // id=4, factor=8
   assert::equals(r, 32)
 
 test "spawn with array literal argument" =
   let f = spawn sum_array([10, 20, 30, 40])
   let r = await f
+
   assert::equals(r, 100)
 
 test "spawn with closure argument" =
   let f = spawn process_with_transform([1, 2, 3, 4, 5], fn(n i64) i64 = return n * n)
   let r = await f
+
   // 1+4+9+16+25 = 55
   assert::equals(r, 55)
 
@@ -75,6 +83,7 @@ test "spawn with arithmetic expression as argument" =
   let base i64 = 6
   let f = spawn add_two(base * base, base + 1)
   let r = await f
+
   // 36 + 7 = 43
   assert::equals(r, 43)
 
@@ -83,6 +92,7 @@ test "spawn with result of nested function calls as argument" =
     [1 * 1, 2 * 2, 3 * 3, 4 * 4]  // array of expressions
   )
   let r = await f
+
   assert::equals(r, 30)
 
 test "spawn with two complex struct args" =
@@ -93,22 +103,28 @@ test "spawn with two complex struct args" =
   let r2 = await f2
   let f3 = spawn add_two(r1, r2)
   let r3 = await f3
+
   // 21 + 12 = 33
   assert::equals(r3, 33)
 
 test "spawn inside loop with loop-index-dependent args" =
   let ch = sync::Channel[i64].make(5)
   let i i64 = 0
+
   for i < 5:
     let n = i + 1  // capture by value, not by reference
+
     spawn do:
       await ch.send(n * n)
     i = i + 1
+
   let total i64 = 0
   let j i64 = 0
+
   for j < 5:
     total = total + await ch.recv()
     j = j + 1
+
   // 1+4+9+16+25 = 55
   assert::equals(total, 55)
 
@@ -122,9 +138,12 @@ test "spawn do: block captures many locals" =
   let ch = sync::Channel[i64].make(1)
   let f = spawn do:
     let sum = a + b + c + d + e
+
     await ch.send(sum)
+
   await f
   let result = await ch.recv()
+
   assert::equals(result, 150)
 
 test "spawn in generic function" =
@@ -132,6 +151,7 @@ test "spawn in generic function" =
     for let v t in arr:
       let fib = spawn do:
         await ch.send(f(v))
+
       await fib
   let ch = sync::Channel[i64].make(3)
   let f = spawn spawn_transform(
@@ -139,8 +159,10 @@ test "spawn in generic function" =
     fn(s string) i64 = return len(s),
     ch,
   )
+
   await f
   let r1 = await ch.recv()
   let r2 = await ch.recv()
   let r3 = await ch.recv()
+
   assert::equals(r1 + r2 + r3, 6)

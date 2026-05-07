@@ -56,6 +56,7 @@ fn describe_val(v expr_val) string =
         return "negative integer {n}"
       if n == 0:
         return "zero"
+
       return "positive integer {n}"
     case x f64:
       if x < 0.0:
@@ -79,10 +80,12 @@ fn process_maybe_num(v expr_val) i64 =
     if n > 0:
       return n * 2
     return 0 - n
+
   if v is x f64:
     if x > 0.0:
       return 1
     return 0 - 1
+
   return 0
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,7 @@ fn type_priority(v expr_val) i64 =
     return 2
   if v is _ bool:
     return 1
+
   return 0
 
 // ---------------------------------------------------------------------------

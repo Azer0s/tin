@@ -186,6 +186,7 @@ test "array patterns by length" =
   let c [i32] = [1, 2]
   let d [i32] = [1, 2, 3]
   let e [i32] = [1, 2, 3, 4, 5]
+
   assert::equals("empty", arr_describe(a))
   assert::equals("one",   arr_describe(b))
   assert::equals("two",   arr_describe(c))
@@ -247,15 +248,18 @@ fn qsort(xs [i32]) [i32] =
   where ([x, ...rest]):
     let lower [i32] = []
     let upper [i32] = []
+
     for let e i32 in rest:
       if e < x:
         lower ++= e
       if e >= x:
         upper ++= e
+
     return qsort(lower) ++ [x] ++ qsort(upper)
 
 test "qsort via pattern where" =
   let a = qsort([3, 1, 4, 1, 5, 9, 2, 6])
+
   assert::equals(8, a.len)
   assert::equals(1, a[0])
   assert::equals(1, a[1])
@@ -268,7 +272,9 @@ test "qsort via pattern where" =
 
 test "qsort empty + singleton" =
   let e = qsort([])
+
   assert::equals(0, e.len)
   let s = qsort([42])
+
   assert::equals(1, s.len)
   assert::equals(42, s[0])

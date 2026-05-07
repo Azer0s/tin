@@ -25,6 +25,7 @@ test "atom equals bare string" =
 test "extern string to atom via static table" =
   // strdup copies "ok"; __tin_string_to_atom finds it in the compile-time table
   let a = strdup_atom("ok")
+
   assert::ok(a == 'ok)
   assert::equals(a, "ok")
   assert::ok(a != 'err)
@@ -33,6 +34,7 @@ test "runtime atom learning" =
   // These names are not compile-time atoms - CRC32 is computed at runtime
   let foo = strdup_atom("dynfoo")
   let bar = strdup_atom("dynbar")
+
   assert::equals(foo, "dynfoo")
   assert::equals(bar, "dynbar")
   assert::ok(foo != bar)
@@ -41,5 +43,6 @@ test "runtime atom idempotency" =
   // Same string always maps to the same atom code
   let a = strdup_atom("dynfoo")
   let b = strdup_atom("dynfoo")
+
   assert::ok(a == b)
   assert::equals(a, "dynfoo")

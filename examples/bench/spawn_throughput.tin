@@ -25,21 +25,26 @@ fn{#async} worker() =
 
 fn{#async} main() =
   let n i64 = 100000
+
   g_counter = sync::Atomic[i64].new(0)
   g_done = sync::Channel[i64].make(n)
 
   let start_ms = _tin_now_ms()
   let i i64 = 0
+
   for i < n:
     spawn worker()
     i = i + 1
+
   echo "spawned {n} fibers"
 
   let j i64 = 0
+
   for j < n:
     await g_done.recv()
     j = j + 1
 
   let elapsed = _tin_now_ms() - start_ms
   let rate = n * 1000 / elapsed
+
   echo "all done in ~{elapsed}ms  (~{rate} fibers/sec)"

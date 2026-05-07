@@ -11,30 +11,37 @@ var ch sync::Channel[string]
 fn{#async} build_string(id i64, depth i64) =
   let s = "fiber-{id}"
   let i i64 = 0
+
   for i < depth:
     s = s ++ "-{i}"
     i = i + 1
+
   await ch.send(s)
 
 fn{#async} main() =
   let n i64 = 500
   let depth i64 = 10
+
   ch = sync::Channel[string].make(n)
 
   let i i64 = 0
+
   for i < n:
     spawn build_string(i, depth)
     i = i + 1
 
   let combined = ""
   let collected i64 = 0
+
   for collected < n:
     let s = await ch.recv()
+
     combined = combined ++ s
     collected = collected + 1
 
   // The combined string should be non-empty
   let l = len(combined)
+
   if l == 0:
     echo "FAIL: combined string is empty"
     return

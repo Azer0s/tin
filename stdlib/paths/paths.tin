@@ -7,9 +7,11 @@
 fn path_substr(s string, from i64, to i64) string =
   let out = ""
   let i i64 = from
+
   for i < to:
     out = out ++ s[i]
     i = i + 1
+
   return out
 
 // join joins two path components, inserting a / between them if needed.
@@ -20,16 +22,19 @@ fn path_substr(s string, from i64, to i64) string =
 fn join(a string, b string) string =
   let na = len(a)
   let nb = len(b)
+
   if na == 0:
     return b
   if nb == 0:
     return a
   let a_trail = a[na - 1] == @'/'
   let b_lead = b[0] == @'/'
+
   if a_trail && b_lead:
     return a ++ path_substr(b, 1, nb)
   if !a_trail && !b_lead:
     return a ++ "/" ++ b
+
   return a ++ b
 
 // basename returns the last component of a path, stripping any trailing slashes.
@@ -39,14 +44,18 @@ fn join(a string, b string) string =
 // basename("/")         -> "/"
 fn basename(path string) string =
   let n = len(path)
+
   if n == 0:
     return ""
   let end i64 = n
+
   for end > 1 && path[end - 1] == @'/':
     end = end - 1
   let start i64 = end - 1
+
   for start > 0 && path[start - 1] != @'/':
     start = start - 1
+
   return path_substr(path, start, end)
 
 // dirname returns the directory portion of a path.
@@ -57,12 +66,15 @@ fn basename(path string) string =
 // dirname("/")         -> "/"
 fn dirname(path string) string =
   let n = len(path)
+
   if n == 0:
     return "."
   let end i64 = n
+
   for end > 1 && path[end - 1] == @'/':
     end = end - 1
   let i i64 = end - 1
+
   for i > 0 && path[i] != @'/':
     i = i - 1
   if path[i] != @'/':
@@ -70,8 +82,10 @@ fn dirname(path string) string =
   if i == 0:
     return "/"
   let j i64 = i
+
   for j > 1 && path[j - 1] == @'/':
     j = j - 1
+
   return path_substr(path, 0, j)
 
 // ext returns the file extension including the leading dot, or "" if none.
@@ -81,15 +95,18 @@ fn dirname(path string) string =
 // ext(".gitignore")     -> ""  (leading dot = hidden file, not extension)
 fn ext(path string) string =
   let n = len(path)
+
   if n == 0:
     return ""
   let i i64 = n - 1
+
   for i >= 0 && path[i] != @'.' && path[i] != @'/':
     i = i - 1
   if i < 0 || path[i] == @'/':
     return ""
   if i == 0 || path[i - 1] == @'/':
     return ""
+
   return path_substr(path, i, n)
 
 export { join, basename, dirname, ext } as paths

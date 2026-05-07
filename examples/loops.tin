@@ -8,17 +8,20 @@ for let j i32 in 1..6:
   echo "j = {j}"
 
 let items [string] = ["alpha", "beta", "gamma"]
+
 for let s string in items:
   echo s
 
 test "c-style loop sum" =
   let sum i32 = 0
+
   for let i i32 = 1; i <= 5; i++:
     sum = sum + i
   assert::equals(sum as i64, 15)
 
 test "range loop count" =
   let count i32 = 0
+
   for let j i32 in 1..6:
     count = count + 1
   assert::equals(count as i64, 5)
@@ -26,6 +29,7 @@ test "range loop count" =
 test "array iteration" =
   let items [string] = ["alpha", "beta", "gamma"]
   let count i64 = 0
+
   for let s string in items:
     count = count + 1
   assert::equals(count, 3)

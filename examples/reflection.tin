@@ -45,30 +45,38 @@ io::printf("typeof(true) = %s\n", typeof(true))
 // traitof (concrete)
 
 let pt = traitof(p)
+
 io::printf("traitof(p).len = %lld\n", pt.len)
+
 for let i i64 in 0..pt.len :
   io::printf("  trait[%lld] = %s\n", i, pt[i])
 
 let ct = traitof(c)
+
 io::printf("traitof(c).len = %lld\n", ct.len)
 
 // fieldnames (concrete)
 
 let pf = fieldnames(p)
+
 io::printf("fieldnames(p).len = %lld\n", pf.len)
+
 for let i i64 in 0..pf.len :
   io::printf("  field[%lld] = %s\n", i, pf[i])
 
 // fieldtypes (concrete)
 
 let pfty = fieldtypes(p)
+
 io::printf("fieldtypes(p).len = %lld\n", pfty.len)
+
 for let i i64 in 0..pfty.len :
   io::printf("  ftype[%lld] = %s\n", i, pfty[i])
 
 // getfield / setfield (concrete)
 
 let vx = getfield(p, "x")    // vx is any
+
 echo vx                       // prints the actual i64 value
 setfield(p, "x", 99)
 io::printf("after setfield x=99: p.x = %lld\n", p.x)
@@ -82,17 +90,23 @@ io::printf("typeof(a1 any=point) = %s\n", typeof(a1))
 io::printf("typeof(a2 any=color) = %s\n", typeof(a2))
 
 let at1 = traitof(a1)
+
 io::printf("traitof(a1).len = %lld\n", at1.len)
+
 for let i i64 in 0..at1.len :
   io::printf("  trait[%lld] = %s\n", i, at1[i])
 
 let af1 = fieldnames(a1)
+
 io::printf("fieldnames(a1).len = %lld\n", af1.len)
+
 for let i i64 in 0..af1.len :
   io::printf("  field[%lld] = %s\n", i, af1[i])
 
 let aft1 = fieldtypes(a1)
+
 io::printf("fieldtypes(a1).len = %lld\n", aft1.len)
+
 for let i i64 in 0..aft1.len :
   io::printf("  ftype[%lld] = %s\n", i, aft1[i])
 
@@ -100,15 +114,18 @@ for let i i64 in 0..aft1.len :
 
 let ag any = p
 let gx = getfield(ag, "x")    // gx is any
+
 echo gx
 
 // typeof on pointers and arrays
 
 let pv = p
 let ptr_p = &pv
+
 io::printf("typeof(&p)    = %s\n", typeof(ptr_p))
 
 let arr = [1, 2, 3]
+
 io::printf("typeof([1,2,3])= %s\n", typeof(arr))
 
 use assert
@@ -120,6 +137,7 @@ test "typeof primitives" =
 test "fieldnames on point" =
   let p2 = point{x: 1, y: 2}
   let names = fieldnames(p2)
+
   assert::equals(len(names), 2)
   assert::equals(names[0], "x")
   assert::equals(names[1], "y")
@@ -127,6 +145,7 @@ test "fieldnames on point" =
 test "getfield and setfield on point" =
   let p3 = point{x: 10, y: 20}
   let vx = getfield(p3, "x") as i64
+
   assert::equals(vx, 10)
   setfield(p3, "x", 99)
   assert::equals(p3.x, 99)

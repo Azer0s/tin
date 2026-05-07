@@ -97,6 +97,7 @@ fn read_u32_le(buf *u8, off i64) u32 =
   let b1 u32 = (buf[off + 1] as u32) << 8
   let b2 u32 = (buf[off + 2] as u32) << 16
   let b3 u32 = (buf[off + 3] as u32) << 24
+
   return b0 | b1 | b2 | b3
 
 // md5_process_block: run one 64-byte block through the MD5 compression function.
@@ -217,8 +218,10 @@ fn md5(data *u8, len i64) [u8; 16] =
 
   // Process all complete 64-byte blocks.
   let i i64 = 0
+
   for i + 64 <= len:
     let s [u32; 4] = md5_process_block(addr(data[i]), a, b, c, d)
+
     a = s[0]
     b = s[1]
     c = s[2]
@@ -230,15 +233,18 @@ fn md5(data *u8, len i64) [u8; 16] =
   let buf [u8; 128]
   let remaining i64 = len - i
   let j i64 = 0
+
   for j < remaining:
     buf[j] = data[i + j]
     j = j + 1
+
   buf[remaining] = 0x80
 
   // Bit length as u64 little-endian, placed at byte 56 of the last block
   // (or byte 120 of a two-block padding when remaining >= 56).
   let bit_len u64 = (len as u64) * 8
   let off i64 = 56
+
   if remaining >= 56:
     off = 120
 
@@ -253,6 +259,7 @@ fn md5(data *u8, len i64) [u8; 16] =
 
   // Process the final block(s).
   let s [u32; 4] = md5_process_block(addr(buf[0]), a, b, c, d)
+
   a = s[0]
   b = s[1]
   c = s[2]
@@ -260,6 +267,7 @@ fn md5(data *u8, len i64) [u8; 16] =
 
   if remaining >= 56:
     let s2 [u32; 4] = md5_process_block(addr(buf[64]), a, b, c, d)
+
     a = s2[0]
     b = s2[1]
     c = s2[2]
@@ -267,10 +275,12 @@ fn md5(data *u8, len i64) [u8; 16] =
 
   // Write digest as 16 little-endian bytes.
   let digest [u8; 16]
+
   md5_write_le(addr(digest[0]), 0, a)
   md5_write_le(addr(digest[0]), 4, b)
   md5_write_le(addr(digest[0]), 8, c)
   md5_write_le(addr(digest[0]), 12, d)
+
   return digest
 
 // hex nibble helper.
@@ -283,11 +293,14 @@ fn hex_nibble(v u8) u8 =
 fn md5_hex_from_digest(digest [u8; 16]) string =
   let buf [char; 32]
   let i i64 = 0
+
   for i < 16:
     let byte u8 = digest[i]
+
     buf[i * 2]     = hex_nibble((byte >> 4) & 0x0f) as char
     buf[i * 2 + 1] = hex_nibble(byte & 0x0f) as char
     i = i + 1
+
   return buf as string
 
 fn md5_hex(data *u8, len i64) string =

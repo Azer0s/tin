@@ -20,17 +20,22 @@ fn encode(s string) string =
   let result = ""
   let i i64 = 0
   let n = len(s)
+
   for i < n:
     let c = s[i] as byte
     let unreserved = (c >= @'A' && c <= @'Z') || (c >= @'a' && c <= @'z') || (c >= @'0' && c <= @'9') || c == @'-' || c == @'_' || c == @'.' || c == @'~'
+
     if unreserved:
       result = result ++ c
     else:
       let v = c as i64
+
       result = result ++ @'%'
       result = result ++ hex_char((v >> 4) & 0xF)
       result = result ++ hex_char(v & 0xF)
+
     i = i + 1
+
   return result
 
 fn from_hex(c byte) i64 =
@@ -40,6 +45,7 @@ fn from_hex(c byte) i64 =
     return ((c - @'A') as i64) + 10
   if c >= @'a' && c <= @'f':
     return ((c - @'a') as i64) + 10
+
   return -1
 
 // decode decodes a percent-encoded string.
@@ -50,11 +56,14 @@ fn decode(s string) string =
   let result = ""
   let i i64 = 0
   let n = len(s)
+
   for i < n:
     let c = s[i] as byte
+
     if c == @'%' && i + 2 < n:
       let hi = from_hex(s[i + 1] as byte)
       let lo = from_hex(s[i + 2] as byte)
+
       if hi >= 0 && lo >= 0:
         result = result ++ (hi * 16 + lo) as byte
         i = i + 3
@@ -67,6 +76,7 @@ fn decode(s string) string =
     else:
       result = result ++ c
       i = i + 1
+
   return result
 
 test "encode unreserved chars unchanged" =
@@ -108,6 +118,7 @@ test "decode lowercase hex" =
 
 test "encode then decode roundtrip" =
   let original = "hello world! foo=bar&baz=123"
+
   assert::equals(decode(encode(original)), original)
 
 export { encode, decode } as url

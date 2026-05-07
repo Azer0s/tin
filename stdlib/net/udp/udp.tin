@@ -46,12 +46,17 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
   let buf [byte; 65536]
   let host         = ""
   let port i32     = 0
+
   loop:
     let r = tin_udp_recvfrom_c(fd, &buf[0], 65536, &host, &port)
+
     if r != blocked:
       let sz = r
+
       if sz < 0: sz = 0
+
       return (buf[0:sz], host, port)
+
     yield
 
 // read_buf_impl copies bytes from a received datagram into out, advancing the cursor.
@@ -59,29 +64,38 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
 fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
   let p     = *read_pos
   let total = len(data)
+
   if p >= total:
     return 0
   let avail = total - p
+
   if n < avail: avail = n
   let i i64 = 0
+
   loop:
     if i >= avail: break
     out[i] = data[p + i]
     i = i + 1
+
   *read_pos = p + avail
+
   return avail
 
 fn{#async} accept_impl(fd i32) (Conn, Err) =
   let (data, host, port) = await spawn recv_from_impl(fd)
+
   if len(data) == 0:
     return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: accept failed"))
   let pos = mem::calloc(1, 8) as *i64
+
   return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false}, nil)
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_udp_sendto_c(fd, buf, n, host, port)
+
     if r != blocked:
       return r
     yield
@@ -157,16 +171,20 @@ struct Server (io::Closeable) =
 // Returns (Server, Err).
 fn listen(port i32) (Server, Err) =
   let fd = tin_udp_listen_c(port)
+
   if fd < 0:
     return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("udp: failed to bind port {port}"))
+
   return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial creates a connected UDP socket to host:port.
 // Returns (Conn, Err).
 fn dial(host string, port i32) (Conn, Err) =
   let fd = tin_udp_connect_c(host, port)
+
   if fd < 0:
     return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: failed to connect to {host}:{port}"))
+
   return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close), host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true}, nil)
 
 export { Server, Conn, listen, dial } as udp

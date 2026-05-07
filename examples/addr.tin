@@ -4,6 +4,7 @@ use assert
 test "address-of and dereference" =
   let x i64 = 42
   let p *i64 = &x
+
   assert::equals(*p, 42)
   *p = 99
   assert::equals(x, 99)
@@ -13,6 +14,7 @@ test "pointer write-back" =
   let b i64 = 2
   let pa *i64 = &a
   let pb *i64 = &b
+
   *pa = *pb
   assert::equals(a, 2)
 

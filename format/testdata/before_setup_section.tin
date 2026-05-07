@@ -1,0 +1,5 @@
+fn make_request(url string, body string) HttpRequest =
+  let headers = collections::HashMap[string, string]::make(4)
+  headers.set("content-type", "application/json")
+  headers.set("user-agent", "tin/1.0")
+  return HttpRequest{method: "POST", path: url, headers: headers, body: body}

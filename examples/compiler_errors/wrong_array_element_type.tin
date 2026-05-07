@@ -9,4 +9,5 @@ fn show32(xs [i32]) i32 =
 fn main() =
   let big [i64] = [1, 2, 3]
   let n = show32(big)
+
   echo n

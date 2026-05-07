@@ -26,12 +26,15 @@ fn{#pure} clamp(v i64, lo i64, hi i64) i64 =
     return lo
   if v > hi:
     return hi
+
   return v
 
 fn{#pure} sum_arr(arr [i64]) i64 =
   let acc i64 = 0
+
   for let v i64 in arr:
     acc = acc + v
+
   return acc
 
 // ---------------------------------------------------------------------------
@@ -45,19 +48,24 @@ fn{#async} async_square(n i64) i64 =
 fn{#async} async_pipeline(vals [i64], lo i64, hi i64) i64 =
   // 1. sync: clamp each value
   let clamped [i64] = []
+
   for let v i64 in vals:
     clamped ++= clamp(v, lo, hi)
   // 2. spawn sub-fibers for expensive work (simulated)
   let futures [Future[i64]] = []
+
   for let c i64 in clamped:
     futures ++= spawn async_square(c)
   // 3. await all and sum - interleaves async awaits with sync accumulation
   let total i64 = 0
   let i i64 = 0
+
   for i < len(futures):
     let sq = await futures[i]
+
     total = total + sq   // sync addition after async await
     i = i + 1
+
   return total
 
 // ---------------------------------------------------------------------------
@@ -68,6 +76,7 @@ fn{#async} async_with_sync_transform(n i64) i64 =
   let transform = fn(x i64) i64 = return x * 3 + 1  // sync closure
   let prepared = transform(n)                          // sync call
   let doubled = await spawn async_square(prepared)     // async
+
   return doubled + sum_arr([1, 2, 3])                  // sync after async
 
 // ---------------------------------------------------------------------------
@@ -91,6 +100,7 @@ fn{#async} direct_async_call_chain(n i64) i64 =
   // sync work between awaits
   let mid = clamp(b, 0, 10000)
   let c = await spawn async_square(mid)
+
   return c
 
 // ---------------------------------------------------------------------------
@@ -99,17 +109,20 @@ fn{#async} direct_async_call_chain(n i64) i64 =
 
 test "sync function called from async" =
   let r = await spawn async_square(7)
+
   assert::equals(r, 49)
 
 test "async pipeline with sync steps" =
   // vals=[0-5, 3, 15], clamped to [1,10]: [1,3,10]
   // squares: 1+9+100=110
   let r = await spawn async_pipeline([0 - 5, 3, 15], 1, 10)
+
   assert::equals(r, 110)
 
 test "async with sync transform" =
   // n=2: transform(2)=7, square(7)=49, sum([1,2,3])=6 -> 55
   let r = await spawn async_with_sync_transform(2)
+
   assert::equals(r, 55)
 
 test "sync aggregation of async results" =
@@ -120,32 +133,42 @@ test "sync aggregation of async results" =
   let b = await fb
   let c = await fc
   let total = process_results(a, b, c)
+
   assert::equals(total, 50)
 
 test "direct async call chain" =
   // n=2: sq(2)=4, sq(4)=16, clamp(16,0,10000)=16, sq(16)=256
   let r = await spawn direct_async_call_chain(2)
+
   assert::equals(r, 256)
 
 test "interleaved sync/async in main scope" =
   // Prepare args with sync functions, use async to compute
   let prepared = clamp(square(3), 5, 100)  // sync: square(3)=9, clamp->9
   let r = await spawn async_square(prepared)
+
   assert::equals(r, 81)
 
 test "concurrent fibers with sync post-processing" =
   let ch = sync::Channel[i64].make(4)
   let i i64 = 0
+
   for i < 4:
     let n = i  // capture by value
+
     spawn do:
       let s = square(n + 1)  // sync inside spawn do:
+
       await ch.send(s)
+
     i = i + 1
+
   let total i64 = 0
   let j i64 = 0
+
   for j < 4:
     total = total + await ch.recv()
     j = j + 1
+
   // squares of 1,2,3,4 = 1+4+9+16 = 30
   assert::equals(total, 30)

@@ -22,6 +22,7 @@ fn write_temp(name string, contents string) string =
   let path = "/tmp/" ++ name
   let _ = unlink_c(path)
   let f = io::fopen(path, "wb")
+
   if f == nil:
     panic("write_temp: fopen failed for {path}")
   let bytes = contents as [byte]
@@ -38,6 +39,7 @@ test "read_line returns three lines" =
   let (b, ok2) = r.read_line()
   let (c, ok3) = r.read_line()
   let (_, ok4) = r.read_line()
+
   assert::ok(ok1)
   assert::ok(ok2)
   assert::ok(ok3)
@@ -55,6 +57,7 @@ test "read_line treats unterminated final line as a line" =
   let (a, ok1) = r.read_line()
   let (b, ok2) = r.read_line()
   let (_, ok3) = r.read_line()
+
   assert::ok(ok1)
   assert::ok(ok2)
   assert::ok(!ok3)
@@ -70,6 +73,7 @@ test "read_byte returns each byte then false on EOF" =
   let (a, ok1) = r.read_byte()
   let (b, ok2) = r.read_byte()
   let (_, ok3) = r.read_byte()
+
   assert::ok(ok1)
   assert::ok(ok2)
   assert::ok(!ok3)
@@ -85,6 +89,7 @@ test "read_until uses custom delimiter" =
   let (a, _) = r.read_until(@',' as byte)
   let (b, _) = r.read_until(@',' as byte)
   let (c, _) = r.read_until(@',' as byte)
+
   assert::equals("one", a)
   assert::equals("two", b)
   assert::equals("three", c)
@@ -96,6 +101,7 @@ test "empty file returns false on first read_line" =
   let fd = open_c(path, O_RDONLY, 0 as i32)
   let r = io::bufreader(fd)
   let (_, ok) = r.read_line()
+
   assert::ok(!ok)
   io::close(fd)
   let _ = unlink_c(path)

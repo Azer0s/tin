@@ -29,6 +29,7 @@ echo APP_NAME
 echo DEBUG
 
 let n size_t = 42
+
 echo n
 
 test "integer constants" =
@@ -46,4 +47,5 @@ test "bool constant" =
 
 test "type alias" =
   let s size_t = MAX_RETRIES
+
   assert::equals(s, 3)

@@ -57,10 +57,12 @@ struct widget(labeled, measurable, comparable, summarizable, named_size) =
 
   fn comparable::compare_to(this widget, other i64) i64 =
     let m = this.measure()
+
     if m < other:
       return 0 - 1
     if m > other:
       return 1
+
     return 0
 
   fn summarizable::summary(this widget) string =
@@ -78,10 +80,12 @@ struct gadget(labeled, measurable, comparable, named_size) =
 
   fn comparable::compare_to(this gadget, other i64) i64 =
     let m = this.measure()
+
     if m < other:
       return 0 - 1
     if m > other:
       return 1
+
     return 0
 
 // ---------------------------------------------------------------------------
@@ -93,24 +97,31 @@ fn describe_item[t](x t) string where t is labeled+measurable =
 
 fn rank[t](x t, baseline i64) string where t is labeled+measurable+comparable =
   let cmp = x.compare_to(baseline)
+
   if cmp < 0:
     return "{x.label()} is below baseline"
   if cmp > 0:
     return "{x.label()} is above baseline"
+
   return "{x.label()} equals baseline"
 
 fn summarize_all[t](items [t]) [string] where t is summarizable =
   let out [string] = []
+
   for let item t in items:
     out ++= item.summary()
+
   return out
 
 fn find_largest[t](items [t]) i64 where t is measurable =
   let max i64 = 0 - 9999999
+
   for let item t in items:
     let m = item.measure()
+
     if m > max:
       max = m
+
   return max
 
 // ---------------------------------------------------------------------------
@@ -119,10 +130,12 @@ fn find_largest[t](items [t]) i64 where t is measurable =
 
 fn compare_pair[t](a t, b t) string where t is labeled+measurable =
   let diff = a.measure() - b.measure()
+
   if diff > 0:
     return "{a.label()} > {b.label()}"
   if diff < 0:
     return "{a.label()} < {b.label()}"
+
   return "{a.label()} == {b.label()}"
 
 // ---------------------------------------------------------------------------
@@ -152,22 +165,27 @@ struct dual_container =
 
 test "describe_item with widget" =
   let w = widget{name_field: "btn", size_field: 5, color: "red"}
+
   assert::equals(describe_item(w), "btn/red measures 25")
 
 test "describe_item with gadget" =
   let g = gadget{name_field: "knob", size_field: 8}
+
   assert::equals(describe_item(g), "gadget:knob measures 16")
 
 test "rank widget above baseline" =
   let w = widget{name_field: "w", size_field: 5, color: "blue"}
+
   assert::equals(rank(w, 20), "w/blue is above baseline")
 
 test "rank widget below baseline" =
   let w = widget{name_field: "w", size_field: 3, color: "blue"}
+
   assert::equals(rank(w, 20), "w/blue is below baseline")
 
 test "rank widget equals baseline" =
   let w = widget{name_field: "w", size_field: 5, color: "blue"}
+
   assert::equals(rank(w, 25), "w/blue equals baseline")
 
 test "summarize_all uses default for gadget (no summary override)" =
@@ -176,6 +194,7 @@ test "summarize_all uses default for gadget (no summary override)" =
     gadget{name_field: "b", size_field: 2},
   ]
   let summaries = summarize_all(items)
+
   // gadget doesn't override summary(), uses default "item"
   assert::equals(summaries[0], "item")
   assert::equals(summaries[1], "item")
@@ -186,6 +205,7 @@ test "summarize_all uses override for widget" =
     widget{name_field: "y", size_field: 4, color: "r"},
   ]
   let summaries = summarize_all(items)
+
   assert::equals(summaries[0], "widget[x, size=3, color=g]")
 
 test "find_largest across widgets" =
@@ -194,17 +214,21 @@ test "find_largest across widgets" =
     widget{name_field: "m", size_field: 5, color: "g"},  // measure=25
     widget{name_field: "l", size_field: 3, color: "b"},  // measure=9
   ]
+
   assert::equals(find_largest(items), 25)
 
 test "compare_pair widgets" =
   let big = widget{name_field: "big", size_field: 10, color: "r"}
   let small = widget{name_field: "small", size_field: 2, color: "b"}
+
   assert::equals(compare_pair(big, small), "big/r > small/b")
 
 test "named_size forward field trait" =
   let w = widget{name_field: "btn", size_field: 7, color: "g"}
+
   assert::equals(w.info(), "btn(size=7)")
   let g = gadget{name_field: "knob", size_field: 4}
+
   assert::equals(g.info(), "knob(size=4)")
 
 test "dual_container independent type counts" =
@@ -212,6 +236,7 @@ test "dual_container independent type counts" =
     ints: [1, 2, 3],
     strings: ["a", "b"],
   }
+
   assert::equals(dc.count_ints(), 3)
   assert::equals(dc.count_strings(), 2)
   assert::equals(dc.get_int(1), 2)

@@ -53,6 +53,7 @@ fn json5_to_i64(v json5) i64 =
     if b:
       return 1
     return 0
+
   return 0 - 1  // null
 
 // ---------------------------------------------------------------------------
@@ -72,13 +73,16 @@ fn describe_tagged(tv tagged_value) string =
 
 fn count_ints(items [json5]) i64 =
   let count i64 = 0
+
   for let v json5 in items:
     if v is _ i64:
       count = count + 1
+
   return count
 
 fn sum_numeric(items [json5]) f64 =
   let total f64 = 0.0
+
   for let v json5 in items:
     match v.(type):
       case n i64:
@@ -87,6 +91,7 @@ fn sum_numeric(items [json5]) f64 =
         total = total + x
       default:
         pass
+
   return total
 
 // ---------------------------------------------------------------------------
@@ -139,21 +144,26 @@ test "json5 to i64 coercion" =
 
 test "union in struct field" =
   let tv = tagged_value{name: "score", value: 100 as json5}
+
   assert::equals(describe_tagged(tv), "score: int")
   let tv2 = tagged_value{name: "pi", value: 3.14 as json5}
+
   assert::equals(describe_tagged(tv2), "pi: float")
 
 test "count_ints in heterogeneous array" =
   let items [json5] = [1 as json5, "x" as json5, 2 as json5, true as json5, 3 as json5]
+
   assert::equals(count_ints(items), 3)
 
 test "sum_numeric from mixed array" =
   let items [json5] = [10 as json5, 2.5 as json5, "ignored" as json5, 5 as json5]
+
   assert::equals(sum_numeric(items), 17.5)
 
 test "union assigned conditionally" =
   let v1 = make_json5(true, 5)
   let v2 = make_json5(false, 4)
+
   assert::ok(v1 is i64)
   assert::ok(v2 is f64)
   assert::equals(json5_to_i64(v1), 5)
@@ -164,6 +174,7 @@ test "union is-binding chain on same variable" =
   let v json5 = "hello" as json5
   let hit_int bool = false
   let hit_str bool = false
+
   if v is _ i64:
     hit_int = true
   if v is s string:
@@ -175,6 +186,7 @@ test "two-level union rich_val" =
   let a rich_val = (42 as num_or_str) as rich_val
   let b rich_val = ("tin" as num_or_str) as rich_val
   let c rich_val = true as rich_val
+
   assert::equals(rich_describe(a), "int:42")
   assert::equals(rich_describe(b), "str:tin")
   assert::equals(rich_describe(c), "yes")

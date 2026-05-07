@@ -21,6 +21,7 @@ test "binary +" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let b = Vec3{x: 4.0, y: 5.0, z: 6.0}
   let c = a + b
+
   assert::equals(5.0, c.x)
   assert::equals(7.0, c.y)
   assert::equals(9.0, c.z)
@@ -29,6 +30,7 @@ test "binary -" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let b = Vec3{x: 4.0, y: 5.0, z: 6.0}
   let d = b - a
+
   assert::equals(3.0, d.x)
   assert::equals(3.0, d.y)
   assert::equals(3.0, d.z)
@@ -36,6 +38,7 @@ test "binary -" =
 test "unary -" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let e = -a
+
   assert::equals(-1.0, e.x)
   assert::equals(-2.0, e.y)
   assert::equals(-3.0, e.z)
@@ -44,5 +47,6 @@ test "comparison" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let a_clone = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let b = Vec3{x: 4.0, y: 5.0, z: 6.0}
+
   assert::equals(true, a == a_clone)
   assert::equals(true, a != b)

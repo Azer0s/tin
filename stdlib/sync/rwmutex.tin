@@ -26,6 +26,7 @@ struct RWMutex =
 
   fn{#async #no_autoyield} read_lock(this RWMutex) =
     let pid = tin_current_pid_rw()
+
     for true:
       if tin_frwmutex2_rlock_try(this.ptr(), pid) != 0:
         return
@@ -36,6 +37,7 @@ struct RWMutex =
 
   fn{#async #no_autoyield} lock(this RWMutex) =
     let pid = tin_current_pid_rw()
+
     for true:
       if tin_frwmutex2_lock_try(this.ptr(), pid) != 0:
         return

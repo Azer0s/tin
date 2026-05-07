@@ -21,9 +21,11 @@ fn post_test() =
 
 test "write_file and read_file round-trip" =
   setup()
+
   defer post_test()
   let path = tmp("rw.txt")
   let we = os::write_file(path, "hello\n")
+
   assert::ok(!errors::has(we))
   let (content, re) = os::read_file(path)
   assert::ok(!errors::has(re))
@@ -32,17 +34,21 @@ test "write_file and read_file round-trip" =
 
 test "write_file creates file" =
   setup()
+
   defer post_test()
   let path = tmp("create.txt")
   let we = os::write_file(path, "created")
+
   assert::ok(!errors::has(we))
   assert::ok(os::exists(path))
   os::remove(path)
 
 test "write_file truncates existing file" =
   setup()
+
   defer post_test()
   let path = tmp("trunc.txt")
+
   os::write_file(path, "long content here")
   os::write_file(path, "short")
   let (content, _) = os::read_file(path)
@@ -51,8 +57,10 @@ test "write_file truncates existing file" =
 
 test "append_file" =
   setup()
+
   defer post_test()
   let path = tmp("append.txt")
+
   os::write_file(path, "line1\n")
   os::append_file(path, "line2\n")
   os::append_file(path, "line3\n")
@@ -63,9 +71,11 @@ test "append_file" =
 
 test "append_file creates file if missing" =
   setup()
+
   defer post_test()
   let path = tmp("append_new.txt")
   let ae = os::append_file(path, "first\n")
+
   assert::ok(!errors::has(ae))
   let (content, _) = os::read_file(path)
   assert::equals(content, "first\n")
@@ -77,11 +87,13 @@ test "read_file error on missing file" =
 
 test "write_file_bytes and read_file_bytes round-trip" =
   setup()
+
   defer post_test()
   let path = tmp("bytes.bin")
   // byte is i8 (signed), so 0xFF = -1; use values that round-trip cleanly
   let data = [1 as byte, 2 as byte, 3 as byte, -1 as byte, 0 as byte]
   let we = os::write_file_bytes(path, data)
+
   assert::ok(!errors::has(we))
   let (got, re) = os::read_file_bytes(path)
   assert::ok(!errors::has(re))
@@ -93,8 +105,10 @@ test "write_file_bytes and read_file_bytes round-trip" =
 
 test "empty file round-trip" =
   setup()
+
   defer post_test()
   let path = tmp("empty.txt")
+
   os::write_file(path, "")
   let (content, err) = os::read_file(path)
   assert::ok(!errors::has(err))
@@ -107,8 +121,10 @@ test "empty file round-trip" =
 
 test "exists returns true for a file" =
   setup()
+
   defer post_test()
   let path = tmp("ex_file.txt")
+
   os::write_file(path, "x")
   assert::ok(os::exists(path))
   os::remove(path)
@@ -118,26 +134,32 @@ test "exists returns false for missing path" =
 
 test "exists returns true for a directory" =
   setup()
+
   defer post_test()
   assert::ok(os::exists(TMP))
 
 test "is_dir returns false for a file" =
   setup()
+
   defer post_test()
   let path = tmp("notdir.txt")
+
   os::write_file(path, "y")
   assert::ok(!os::is_dir(path))
   os::remove(path)
 
 test "is_dir returns true for a directory" =
   setup()
+
   defer post_test()
   assert::ok(os::is_dir(TMP))
 
 test "file_size" =
   setup()
+
   defer post_test()
   let path = tmp("size.txt")
+
   os::write_file(path, "12345")
   assert::equals(os::file_size(path), 5)
   os::remove(path)
@@ -147,8 +169,10 @@ test "file_size returns -1 for missing file" =
 
 test "stat on a file" =
   setup()
+
   defer post_test()
   let path = tmp("stat_file.txt")
+
   os::write_file(path, "hello!")
   let (info, err) = os::stat(path)
   assert::ok(!errors::has(err))
@@ -158,6 +182,7 @@ test "stat on a file" =
 
 test "stat on a directory" =
   setup()
+
   defer post_test()
   let (info, err) = os::stat(TMP)
   assert::ok(!errors::has(err))
@@ -172,9 +197,11 @@ test "stat error on missing path" =
 
 test "mkdir creates nested directories" =
   setup()
+
   defer post_test()
   let dir = tmp("mkdir_test/a/b")
   let me = os::mkdir(dir)
+
   assert::ok(!errors::has(me))
   assert::ok(os::is_dir(dir))
   os::rmdir(dir)
@@ -183,43 +210,55 @@ test "mkdir creates nested directories" =
 
 test "mkdir succeeds on existing directory" =
   setup()
+
   defer post_test()
   let me = os::mkdir(TMP)
+
   assert::ok(!errors::has(me))
 
 test "rmdir removes empty directory" =
   setup()
   let dir = tmp("rmdir_test")
+
   os::mkdir(dir)
   let re = os::rmdir(dir)
+
   assert::ok(!errors::has(re))
   assert::ok(!os::exists(dir))
   post_test()
 
 test "rmdir error on missing directory" =
   let re = os::rmdir(tmp("no_such_dir_xyz"))
+
   assert::ok(errors::has(re))
 
 test "remove deletes a file" =
   setup()
+
   defer post_test()
   let path = tmp("remove_me.txt")
+
   os::write_file(path, "bye")
   let re = os::remove(path)
+
   assert::ok(!errors::has(re))
   assert::ok(!os::exists(path))
 
 test "remove error on missing file" =
   let re = os::remove(tmp("no_such_remove_xyz.txt"))
+
   assert::ok(errors::has(re))
 
 test "rename moves a file" =
   setup()
+
   defer post_test()
   let src = tmp("rename_src.txt")
   let dst = tmp("rename_dst.txt")
+
   os::write_file(src, "moved")
   let re = os::rename(src, dst)
+
   assert::ok(!errors::has(re))
   assert::ok(!os::exists(src))
   assert::ok(os::exists(dst))
@@ -229,4 +268,5 @@ test "rename moves a file" =
 
 test "rename error on missing source" =
   let re = os::rename(tmp("no_src_xyz.txt"), tmp("no_dst_xyz.txt"))
+
   assert::ok(errors::has(re))

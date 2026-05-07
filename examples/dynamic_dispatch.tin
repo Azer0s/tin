@@ -57,6 +57,7 @@ test "speak methods" =
   let d = dog{name: "Rex"}
   let c = cat{name: "Whiskers"}
   let r = robot{id: "R2D2"}
+
   assert::equals(d.speak(), "Woof! I am Rex")
   assert::equals(c.speak(), "Meow! I am Whiskers")
   assert::equals(r.speak(), "Beep boop, I am R2D2")
@@ -64,5 +65,6 @@ test "speak methods" =
 test "move methods" =
   let d = dog{name: "Rex"}
   let c = cat{name: "Whiskers"}
+
   assert::equals(d.move(), "Rex runs")
   assert::equals(c.move(), "Whiskers slinks")

@@ -7,6 +7,7 @@
 
 fn slice_strings_basic() =
   let words = ["hello", "world", "foo", "bar"]
+
   echo words[0]
   echo words[1]
 
@@ -14,6 +15,7 @@ fn slice_concat_strings() =
   let a = ["x", "y"]
   let b = ["z", "w"]
   let c = a ++ b
+
   echo c[0]
   echo c[3]
 
@@ -22,10 +24,12 @@ fn slice_strings_returned() [string] =
 
 fn iterate_strings() =
   let words = ["one", "two", "three"]
+
   for let w string in words:
     echo w
 
 let r = slice_strings_returned()
+
 echo r[0]
 
 slice_strings_basic()

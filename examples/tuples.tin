@@ -14,11 +14,13 @@ use assert
 fn min_max(arr [i64]) (i64, i64) =
   let min i64 = arr[0]
   let max i64 = arr[0]
+
   for let i i64 in 0..len(arr) :
     if arr[i] < min :
       min = arr[i]
     if arr[i] > max :
       max = arr[i]
+
   return (min, max)
 
 fn swap(x i64, y i64) (i64, i64) =
@@ -33,16 +35,19 @@ type int_bool = (i64, bool)
 
 test "basic tuple construction and field access" =
   let t = (10, 20)
+
   assert::equals(t.a, 10)
   assert::equals(t.b, 20)
 
 test "tuple type shorthand as variable type" =
   let p int_pair = (100, 200)
+
   assert::equals(p.a, 100)
   assert::equals(p.b, 200)
 
 test "function returning tuple shorthand" =
   let result = swap(3, 7)
+
   assert::equals(result.a, 7)
   assert::equals(result.b, 3)
 
@@ -58,6 +63,7 @@ test "tuple destructuring from swap" =
 
 test "3-tuple construction and access" =
   let t = (1, true, 3)
+
   assert::equals(t.a, 1)
   assert::ok(t.b)
   assert::equals(t.c, 3)
@@ -65,11 +71,13 @@ test "3-tuple construction and access" =
 test "tuple reflection - typeof" =
   let t = (1, true)
   let name = typeof(t)
-  assert::equals(name, "Tuple__i64__bool")
+
+  assert::equals(name, "Tuple[i64, bool]")
 
 test "tuple reflection - fieldnames" =
   let t = (1, 2, 3)
   let names = fieldnames(t)
+
   assert::equals(names.len, 3)
   assert::equals(names[0], "a")
   assert::equals(names[1], "b")
@@ -79,6 +87,7 @@ test "tuple boxing and unboxing via any" =
   let t = (42, true)
   let boxed any = t as any
   let t2 = boxed as (i64, bool)
+
   assert::equals(t2.a, 42)
   assert::ok(t2.b)
 
@@ -86,6 +95,7 @@ test "tuple pointer" =
   let t = (1, 2)
   let ptr *(i64, i64) = &t
   let v = *ptr
+
   assert::equals(v.a, 1)
   assert::equals(v.b, 2)
 

@@ -9,16 +9,19 @@ type tri = i8 | i32 | i64
 
 test "tagged union: is check i64 variant" =
   let a num = 42
+
   assert::ok(a is i64)
   assert::not_ok(a is f64)
 
 test "tagged union: is check f64 variant" =
   let b num = 3.14
+
   assert::ok(b is f64)
   assert::not_ok(b is i64)
 
 test "tagged union: is with variable binding" =
   let a num = 100
+
   if a is n i64:
     assert::equals(n, 100)
   else:
@@ -27,37 +30,44 @@ test "tagged union: is with variable binding" =
 test "tagged union: match on type i64 branch" =
   let a num = 7
   let got i64 = 0
+
   match a.(type):
     case n i64:
       got = n
     case _ f64:
       got = -1
+
   assert::equals(got, 7)
 
 test "tagged union: match on type f64 branch" =
   let b num = 2.5
   let hit bool = false
+
   match b.(type):
     case _ i64:
       assert::fails("wrong branch")
     case _ f64:
       hit = true
+
   assert::ok(hit)
 
 test "tagged union: string | i64 - string variant" =
   let s strnum = "hello"
+
   assert::ok(s is string)
   assert::not_ok(s is i64)
 
 test "tagged union: any boxing and typeof" =
   let a num = 42
   let x any = a
+
   assert::ok(typeof(x) == 'num)
 
 test "tagged union: N types (i8 | i32 | i64)" =
   let a tri = 10 as i8
   let b tri = 1000 as i32
   let c tri = 100000
+
   assert::ok(a is i8)
   assert::ok(b is i32)
   assert::ok(c is i64)
@@ -66,6 +76,7 @@ test "tagged union: N types (i8 | i32 | i64)" =
 test "tagged union: match N types" =
   let v tri = 999 as i32
   let got i64 = 0
+
   match v.(type):
     case _ i8:
       got = 1
@@ -73,4 +84,5 @@ test "tagged union: match N types" =
       got = 2
     case _ i64:
       got = 3
+
   assert::equals(got, 2)

@@ -9,16 +9,21 @@ use assert
 
 fn shadow_if(x i64) i64 =
   let result i64 = 0
+
   if x > 0:
     let result i64 = x * 2   // shadows outer `result` - OK
     return result
+
   return result
 
 fn shadow_for(n i64) i64 =
   let sum i64 = 0
+
   for let i i64 in 0..n:
     let i i64 = 42   // shadows the loop variable - OK
+
     sum = sum + i
+
   return sum
 
 fn shadow_match(x i64) i64 =
@@ -30,15 +35,18 @@ fn shadow_nested_fn() i64 =
   let f = fn() i64 =
     let x i64 = 99   // shadows outer x in nested fn - OK
     return x
+
   return f() + x   // outer x is still 1
 
 fn shadow_consecutive_scopes(flag bool) i64 =
   if flag:
     let v i64 = 10
     return v
+
   if !flag:
     let v i64 = 20   // same name as in the sibling if-block - OK (different scopes)
     return v
+
   return 0
 
 test "shadowing: if block" =

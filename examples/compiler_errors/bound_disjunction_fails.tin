@@ -7,4 +7,5 @@ struct Num[T] where T is i32 || i64 =
 
 fn main() =
   let n = Num[string]{value: "x"}
+
   echo n.value

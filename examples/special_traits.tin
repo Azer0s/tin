@@ -11,6 +11,7 @@ struct point2d(print) =
     return "({this.x}, {this.y})"
 
 let p = point2d{x: 3, y: 7}
+
 echo p                      // (3, 7)
 echo "point is {p}"         // point is (3, 7)
 
@@ -25,6 +26,7 @@ struct celsius(implicit[f64]) =
     return celsius{degrees: val}
 
 let temp celsius = 36.6        // implicit f64 -> celsius via celsius_from
+
 echo temp.degrees              // 36.600000
 
 // 3. iter[t] trait
@@ -60,6 +62,7 @@ struct countdown(iter[i64], print) =
     return "countdown(from={this.from_val})"
 
 let cd = countdown{from_val: 5}
+
 echo cd                       // countdown(from=5)
 
 for let v i64 in cd:
@@ -69,10 +72,12 @@ use assert
 
 test "print trait produces string" =
   let p2d = point2d{x: 3, y: 7}
+
   assert::equals("{p2d}", "(3, 7)")
 
 test "int_range len and get" =
   let r2 = int_range{start_val: 1, end_val: 6}
+
   assert::equals(r2.len(), 5)
   assert::equals(r2.get(0), 1)
   assert::equals(r2.get(4), 5)
@@ -80,6 +85,7 @@ test "int_range len and get" =
 test "countdown iteration sum" =
   let cd2 = countdown{from_val: 4}
   let s i64 = 0
+
   for let v i64 in cd2:
     s = s + v
   assert::equals(s, 10)

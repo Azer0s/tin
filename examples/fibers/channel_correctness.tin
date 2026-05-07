@@ -21,9 +21,11 @@ var prod_done sync::Channel[i64]
 
 fn{#async} producer_counted(id i64, count i64) =
   let i i64 = 0
+
   for i < count:
     await prod_ch.send(id * 100 + i)
     i = i + 1
+
   await prod_done.send(id)
 
 // main() for the CI fiber run step
@@ -31,6 +33,7 @@ fn{#async} producer_counted(id i64, count i64) =
 fn{#async} main() =
   // FIFO ordering
   let ch = sync::Channel[i64].make(8)
+
   await ch.send(0)
   await ch.send(1)
   await ch.send(2)
@@ -38,11 +41,14 @@ fn{#async} main() =
   await ch.send(4)
   let fifo_ok bool = true
   let i i64 = 0
+
   for i < 5:
     let v = await ch.recv()
+
     if v != i:
       fifo_ok = false
     i = i + 1
+
   if fifo_ok:
     echo "FIFO ordering: OK"
   else:
@@ -50,8 +56,10 @@ fn{#async} main() =
 
   // Capacity-1 boundary
   let c1 = sync::Channel[i64].make(1)
+
   await c1.send(777)
   let v1 = await c1.recv()
+
   if v1 == 777:
     echo "capacity=1: OK"
   else:
@@ -59,11 +67,13 @@ fn{#async} main() =
 
   // is_closed_empty after close and full drain
   let ce = sync::Channel[i64].make(4)
+
   await ce.send(10)
   await ce.send(20)
   ce.close()
   await ce.recv()
   await ce.recv()
+
   if ce.is_closed_empty():
     echo "is_closed_empty after drain: OK"
   else:
@@ -71,10 +81,12 @@ fn{#async} main() =
 
   // Channel[bool]
   let bch = sync::Channel[bool].make(4)
+
   await bch.send(true)
   await bch.send(false)
   let bt = await bch.recv()
   let bf = await bch.recv()
+
   if bt && !bf:
     echo "Channel[bool]: OK"
   else:
@@ -86,6 +98,7 @@ fn{#async} main() =
 
 test "channel FIFO ordering 5 elements" =
   let ch = sync::Channel[i64].make(8)
+
   await ch.send(0)
   await ch.send(1)
   await ch.send(2)
@@ -99,17 +112,21 @@ test "channel FIFO ordering 5 elements" =
 
 test "channel capacity 1 boundary" =
   let ch = sync::Channel[i64].make(1)
+
   await ch.send(42)
   let v = await ch.recv()
+
   assert::equals(v, 42)
 
 test "is_closed_empty false before close" =
   let ch = sync::Channel[i64].make(4)
+
   await ch.send(1)
   assert::not_ok(ch.is_closed_empty())
 
 test "is_closed_empty false when closed but not empty" =
   let ch = sync::Channel[i64].make(4)
+
   await ch.send(1)
   await ch.send(2)
   ch.close()
@@ -117,6 +134,7 @@ test "is_closed_empty false when closed but not empty" =
 
 test "is_closed_empty true after close and full drain" =
   let ch = sync::Channel[i64].make(4)
+
   await ch.send(100)
   await ch.send(200)
   ch.close()
@@ -126,12 +144,14 @@ test "is_closed_empty true after close and full drain" =
 
 test "Channel[bool] preserves true and false correctly" =
   let ch = sync::Channel[bool].make(4)
+
   await ch.send(true)
   await ch.send(false)
   await ch.send(true)
   let b1 = await ch.recv()
   let b2 = await ch.recv()
   let b3 = await ch.recv()
+
   assert::ok(b1)
   assert::not_ok(b2)
   assert::ok(b3)
@@ -139,18 +159,23 @@ test "Channel[bool] preserves true and false correctly" =
 test "multiple concurrent producers deliver correct total count" =
   prod_ch   = sync::Channel[i64].make(100)
   prod_done = sync::Channel[i64].make(4)
+
   spawn producer_counted(0, 10)
   spawn producer_counted(1, 10)
   spawn producer_counted(2, 10)
   spawn producer_counted(3, 10)
   let j i64 = 0
+
   for j < 4:
     await prod_done.recv()
     j = j + 1
+
   let total i64 = 0
   let k i64 = 0
+
   for k < 40:
     await prod_ch.recv()
     total = total + 1
     k = k + 1
+
   assert::equals(total, 40)

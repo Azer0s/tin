@@ -948,6 +948,13 @@ type CodeGen struct {
 	// overload resolution so that e.g. `let v f32x4 = simd::splat(3.0)` picks
 	// the f32x4 overload over f64x2. Cleared immediately after the call is resolved.
 	returnTypeHint irtypes.Type
+
+	// indexExprRawTuple is set by genTupleDestructDecl while it evaluates its
+	// RHS. When the RHS is a `t[k]` whose ::index impl returns (V, bool),
+	// genIndexExpr would normally auto-unwrap (extract V + panic if !ok); in
+	// destructure context we want the raw tuple so the destructure step can
+	// bind both names. Cleared after the RHS evaluation.
+	indexExprRawTuple bool
 }
 
 // topLevelVarInit holds a deferred runtime initializer for a top-level var.

@@ -44,8 +44,10 @@ fn make_default_returner[t](default_val t) fn() t =
 fn make_mapper[t, r](f fn(t) r) fn([t]) [r] =
   return fn(arr [t]) [r] =
     let out [r] = []
+
     for let v t in arr:
       out ++= f(v)
+
     return out
 
 // ---------------------------------------------------------------------------
@@ -91,8 +93,10 @@ fn make_accumulator(start i64) fn(i64) i64 =
 
 fn make_offset_checks(thresholds [i64]) [fn(i64) bool] =
   let fns [fn(i64) bool] = []
+
   for let t i64 in thresholds:
     fns ++= make_threshold_check(t)
+
   return fns
 
 // ---------------------------------------------------------------------------
@@ -101,12 +105,14 @@ fn make_offset_checks(thresholds [i64]) [fn(i64) bool] =
 
 test "threshold check returns correct bool" =
   let above10 = make_threshold_check(10)
+
   assert::ok(above10(11))
   assert::not_ok(above10(10))
   assert::not_ok(above10(5))
 
 test "range check closure" =
   let in_range = make_range_check(5, 15)
+
   assert::ok(in_range(5))
   assert::ok(in_range(15))
   assert::ok(in_range(10))
@@ -115,22 +121,26 @@ test "range check closure" =
 
 test "lookup closure with array env" =
   let lookup = make_lookup(["zero", "one", "two", "three"])
+
   assert::equals(lookup(0), "zero")
   assert::equals(lookup(2), "two")
   assert::equals(lookup(5), "")   // out of bounds
 
 test "generic default returner i64" =
   let get42 = make_default_returner(42)
+
   assert::equals(get42(), 42)
   assert::equals(get42(), 42)
 
 test "generic default returner string" =
   let get_hello = make_default_returner("hello")
+
   assert::equals(get_hello(), "hello")
 
 test "generic mapper closure" =
   let double_all = make_mapper(fn(n i64) i64 = return n * 2)
   let out = double_all([1, 2, 3, 4, 5])
+
   assert::equals(out[0], 2)
   assert::equals(out[4], 10)
 
@@ -138,6 +148,7 @@ test "adder factory double closure" =
   let factory = make_adder_factory()
   let add5 = factory(5)
   let add10 = factory(10)
+
   assert::equals(add5(3), 8)
   assert::equals(add10(3), 13)
   // Same factory can generate multiple independent closures
@@ -148,22 +159,26 @@ test "multiplier factory double closure" =
   let factory = make_multiplier_factory()
   let double = factory(2)
   let triple = factory(3)
+
   assert::equals(double(7), 14)
   assert::equals(triple(7), 21)
 
 test "scaler struct returns closure capturing this" =
   let s = scaler{factor: 4}
   let scale4 = s.get_scale_fn()
+
   assert::equals(scale4(5), 20)
   assert::equals(scale4(0), 0)
 
 test "scaler struct returns offset closure" =
   let s = scaler{factor: 3}
   let fn_ = s.get_offset_fn(10)
+
   assert::equals(fn_(5), 25)
 
 test "accumulator state persists across calls" =
   let acc = make_accumulator(100)
+
   assert::equals(acc(5), 105)
   assert::equals(acc(10), 115)
   assert::equals(acc(0 - 15), 100)
@@ -171,6 +186,7 @@ test "accumulator state persists across calls" =
 test "two independent accumulators" =
   let a = make_accumulator(0)
   let b = make_accumulator(1000)
+
   assert::equals(a(1), 1)
   assert::equals(b(1), 1001)
   assert::equals(a(1), 2)
@@ -178,6 +194,7 @@ test "two independent accumulators" =
 
 test "array of returned closures with different thresholds" =
   let checks = make_offset_checks([0, 5, 10, 20])
+
   // checks[0]: x > 0
   assert::ok(checks[0](1))
   assert::not_ok(checks[0](0))

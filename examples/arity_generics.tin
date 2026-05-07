@@ -36,11 +36,13 @@ type bool_triple = triple[bool, bool, bool]
 
 test "pair of integers" =
   let p = int_pair{first: 10, second: 20}
+
   assert::equals(p.first, 10)
   assert::equals(p.second, 20)
 
 test "triple of booleans" =
   let t = bool_triple{first: true, second: false, third: true}
+
   assert::ok(t.first)
   assert::not_ok(t.second)
   assert::ok(t.third)
@@ -48,12 +50,14 @@ test "triple of booleans" =
 test "result 1-arity" =
   type i64_result = result[i64]
   let r = i64_result{value: 42, is_ok: true}
+
   assert::ok(r.is_ok)
   assert::equals(r.value, 42)
 
 test "result 2-arity" =
   type i64_pair_result = result[i64, i64]
   let r = i64_pair_result{value: 0, err_val: 404, is_ok: false}
+
   assert::not_ok(r.is_ok)
   assert::equals(r.err_val, 404)
 
@@ -63,6 +67,7 @@ test "different arities coexist" =
   type i64_pair_result = result[i64, i64]
   let r1 = i64_result{value: 99, is_ok: true}
   let r2 = i64_pair_result{value: 0, err_val: 500, is_ok: false}
+
   assert::ok(r1.is_ok)
   assert::not_ok(r2.is_ok)
   assert::equals(r2.err_val, 500)
@@ -70,5 +75,6 @@ test "different arities coexist" =
 test "generic struct literal with explicit type args" =
   // Name[TypeArg, TypeArg]{...} syntax for inline generic struct construction.
   let p = pair[i64, bool]{first: 7, second: true}
+
   assert::equals(p.first, 7)
   assert::ok(p.second)

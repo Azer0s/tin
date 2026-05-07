@@ -6,4 +6,5 @@ struct NotBool[T] where T is not bool =
 
 fn main() =
   let b = NotBool[bool]{value: true}
+
   echo b.value

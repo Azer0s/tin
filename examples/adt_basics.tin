@@ -77,4 +77,5 @@ test "own-pointer recursive tree" =
     &Node(2, nil, nil),
     &Node(3, nil, &Node(4, nil, nil))
   )
+
   assert::equals(10, sum(t))

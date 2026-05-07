@@ -21,23 +21,29 @@ var capture_results_ch sync::Channel[string]
 
 fn{#async} main() =
   let n i64 = 500
+
   capture_results_ch = sync::Channel[string].make(n)
 
   // Each iteration creates fresh stack locals `idx` and `label`.
   // spawn do: captures them by value into the env struct before this
   // iteration's allocas go out of scope on the next loop iteration.
   let i i64 = 0
+
   for i < n:
     let idx i64 = i
     let label = "item-{i}"
+
     spawn do:
       let result = "{label}-done-{idx}"
+
       await capture_results_ch.send(result)
+
     i = i + 1
 
   // Drain all results - this is the synchronisation point confirming
   // all 500 do-block fibers have finished executing.
   let collected i64 = 0
+
   for collected < n:
     await capture_results_ch.recv()
     collected = collected + 1

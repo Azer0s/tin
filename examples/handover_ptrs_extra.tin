@@ -36,14 +36,17 @@ test "handover null pointer" =
   // _tin_ptr_handover(NULL, ...) returns NULL.
   // Scope exit must not crash on a nil *i64.
   let p = get_null_ptr()
+
   assert::equals(p == nil, true)
 
 test "handover multi-element array element 0" =
   let arr = get_i64_array(5)
+
   assert::equals(*arr, 10)
 
 test "handover multi-element array all elements via pointer arithmetic" =
   let arr = get_i64_array(5)
+
   { #unsafe } {
     assert::equals(*(arr + 0), 10)
     assert::equals(*(arr + 1), 20)
@@ -55,6 +58,7 @@ test "handover multi-element array all elements via pointer arithmetic" =
 
 test "handover nested struct pointer" =
   let p = get_outer_ptr()
+
   assert::equals((*p).a.x, 1)
   assert::equals((*p).a.y, 2)
   assert::equals((*p).b.x, 3)

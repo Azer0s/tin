@@ -8,11 +8,13 @@ use assert
 
 test "text logger debug below INFO threshold suppresses output" =
   let l = log::text().level(log::LEVEL_INFO).color(log::COLOR_OFF)
+
   log::debug!(l, "filtered")
   assert::ok(true)
 
 test "text logger above threshold emits" =
   let l = log::text().level(log::LEVEL_DEBUG).color(log::COLOR_OFF)
+
   log::debug!(l, "debug message")
   log::info!(l, "info message")
   log::warn!(l, "warn message")
@@ -21,6 +23,7 @@ test "text logger above threshold emits" =
 
 test "json logger emits at every level" =
   let p = log::json().level(log::LEVEL_DEBUG)
+
   log::debug!(p, "d")
   log::info!(p, "i")
   log::warn!(p, "w")
@@ -29,16 +32,20 @@ test "json logger emits at every level" =
 
 test "builder records configured level" =
   let l = log::text().level(log::LEVEL_WARN).color(log::COLOR_OFF)
+
   assert::equals(2 as i32, l.level_)
 
 test "json builder records configured level" =
   let p = log::json().level(log::LEVEL_ERROR)
+
   assert::equals(3 as i32, p.level_)
 
 test "hide_pos returns a logger with show_pos off" =
   let l = log::text().hide_pos()
+
   assert::ok(!l.show_pos_)
 
 test "show_pos toggles back on" =
   let l = log::text().hide_pos().show_pos()
+
   assert::ok(l.show_pos_)

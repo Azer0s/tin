@@ -28,6 +28,7 @@ test "decode zero and ff" =
 test "round trip" =
   let cases [string] = ["", "a", "hello", "Hello, World!"]
   let i i64 = 0
+
   for i < len(cases):
     assert::equals(base16::decode(base16::encode(cases[i])), cases[i])
     i = i + 1

@@ -25,12 +25,14 @@ fn rect_area(r rect) f64 =
 fn rect_contains(r rect, p vec2) bool =
   let in_x bool = p.x >= r.origin.x && p.x <= r.origin.x + r.size.x
   let in_y bool = p.y >= r.origin.y && p.y <= r.origin.y + r.size.y
+
   return in_x && in_y
 
 // -------------------------------------------------------------------------
 
 test "nested field access" =
   let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}
+
   assert::equals(r.origin.x, 1.0)
   assert::equals(r.origin.y, 2.0)
   assert::equals(r.size.x, 5.0)
@@ -39,30 +41,37 @@ test "nested field access" =
 test "struct destructuring" =
   let v = vec2{x: 3.0, y: 4.0}
   let {x, y} vec2 = v
+
   assert::equals(x, 3.0)
   assert::equals(y, 4.0)
 
 test "destructuring in computation" =
   let a = vec2{x: 1.0, y: 0.0}
   let b = vec2{x: 0.0, y: 1.0}
+
   assert::equals(vec2_dot(a, b), 0.0)
   let c = vec2_add(a, b)
   let {x, y} vec2 = c
+
   assert::equals(x, 1.0)
   assert::equals(y, 1.0)
 
 test "array destructuring in loop" =
   let pairs [i64] = [1, 2, 3, 4, 6, 8]
   let sum i64 = 0
+
   for let i i64 = 0; i < len(pairs); i += 2:
     let a i64 = pairs[i]
     let b i64 = pairs[i + 1]
+
     sum += a + b
+
   assert::equals(sum, 24)
 
 test "rest split into sub-array" =
   let nums [i64] = [10, 20, 30, 40, 50]
   let [first, ...rest] [i64] = nums
+
   assert::equals(first, 10)
   assert::equals(len(rest), 4)
   let [second, ...tail] [i64] = rest
@@ -71,5 +80,6 @@ test "rest split into sub-array" =
 
 test "rect contains point" =
   let r = rect{origin: vec2{x: 0.0, y: 0.0}, size: vec2{x: 10.0, y: 10.0}}
+
   assert::ok(rect_contains(r, vec2{x: 5.0, y: 5.0}))
   assert::not_ok(rect_contains(r, vec2{x: 11.0, y: 5.0}))

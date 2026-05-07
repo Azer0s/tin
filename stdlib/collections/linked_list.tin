@@ -31,13 +31,16 @@ struct LinkedList[T](List[T]) =
   fn List::get(this LinkedList[T], i i64) T =
     let cur = this.head
     let j i64 = 0
+
     for j < i:
       cur = (*cur).next
       j = j + 1
+
     return (*cur).val
 
   fn List::push_back(this *LinkedList[T], v T) =
     let n = &Node[T]{val: v, next: nil, prev: this.tail}
+
     if this.tail != nil:
       (*this.tail).next = n
     else:
@@ -47,6 +50,7 @@ struct LinkedList[T](List[T]) =
 
   fn List::push_front(this *LinkedList[T], v T) =
     let n = &Node[T]{val: v, next: this.head, prev: nil}
+
     if this.head != nil:
       (*this.head).prev = n
     else:
@@ -57,29 +61,35 @@ struct LinkedList[T](List[T]) =
   fn List::pop_front(this *LinkedList[T]) T =
     let val = (*this.head).val
     let next = (*this.head).next
+
     if next != nil:
       (*next).prev = nil
     else:
       this.tail = nil
     this.head = next
     this._len = this._len - 1
+
     return val
 
   fn List::pop_back(this *LinkedList[T]) T =
     let val = (*this.tail).val
+
     if this._len == 1:
       this.head = nil
       this.tail = nil
       this._len = 0
+
       return val
 
     let cur = this.head
     let i i64 = 1
+
     for i < this._len - 1:
       cur = (*cur).next
       i = i + 1
+
     (*cur).next = nil
     this.tail = cur
     this._len = this._len - 1
-    return val
 
+    return val

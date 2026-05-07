@@ -68,24 +68,28 @@ fn append_label(p *named, suffix string) =
 
 test "single pointer: translate mutates caller's struct" =
   let pt = point{x: 10, y: 20}
+
   translate(&pt, 3, -7)
   assert::equals(pt.x, 13)
   assert::equals(pt.y, 13)
 
 test "single pointer: zero clears both fields" =
   let pt = point{x: 5, y: 9}
+
   zero(&pt)
   assert::equals(pt.x, 0)
   assert::equals(pt.y, 0)
 
 test "single pointer: scale multiplies in place" =
   let pt = point{x: 3, y: 4}
+
   scale(&pt, 10)
   assert::equals(pt.x, 30)
   assert::equals(pt.y, 40)
 
 test "single pointer: chained mutations" =
   let pt = point{x: 1, y: 2}
+
   translate(&pt, 4, 6)   // (5, 8)
   scale(&pt, 3)           // (15, 24)
   translate(&pt, -5, -4)  // (10, 20)
@@ -96,6 +100,7 @@ test "double pointer: redirect changes which struct *p points to" =
   let a = &point{x: 1, y: 2}
   let b = &point{x: 3, y: 4}
   let p *point = a
+
   redirect(&p, b)
   assert::equals(p.x, 3)
   assert::equals(p.y, 4)
@@ -105,6 +110,7 @@ test "double pointer: redirect changes which struct *p points to" =
 test "double pointer: write through **point reaches original struct" =
   let pt = point{x: 0, y: 0}
   let p *point = &pt
+
   set_x_via_double(&p, 42)
   assert::equals(pt.x, 42)
   assert::equals(p.x, 42)
@@ -112,6 +118,7 @@ test "double pointer: write through **point reaches original struct" =
 test "double pointer: set_x then translate" =
   let pt = point{x: 0, y: 100}
   let p *point = &pt
+
   set_x_via_double(&p, 10)
   translate(p, 5, -50)
   assert::equals(pt.x, 15)
@@ -121,6 +128,7 @@ test "triple pointer: write through ***point reaches original" =
   let pt = point{x: 0, y: 0}
   let p *point = &pt
   let pp **point = &p
+
   set_y_via_triple(&pp, 77)
   assert::equals(pt.y, 77)
   assert::equals(p.y, 77)
@@ -130,6 +138,7 @@ test "triple pointer: chain redirect then write" =
   let b = &point{x: 0, y: 0}
   let p *point = a
   let pp **point = &p
+
   // redirect p -> b through double pointer
   redirect(pp, b)
   // now write through triple pointer - should land in b
@@ -139,17 +148,20 @@ test "triple pointer: chain redirect then write" =
 
 test "string field: relabel releases old string, retains new" =
   let n = named{label: "hello", value: 1}
+
   relabel(&n, "world")
   assert::equals(n.label, "world")
   assert::equals(n.value, 1)
 
 test "string field: append_label concatenates in place" =
   let n = named{label: "foo", value: 2}
+
   append_label(&n, "-bar")
   assert::equals(n.label, "foo-bar")
 
 test "string field: multiple relabels stay clean" =
   let n = named{label: "v1", value: 0}
+
   relabel(&n, "v2")
   relabel(&n, "v3")
   relabel(&n, "v4")
@@ -157,6 +169,7 @@ test "string field: multiple relabels stay clean" =
 
 test "heap struct: single pointer mutation propagates" =
   let p = &point{x: 7, y: 8}
+
   translate(p, -7, -8)
   assert::equals(p.x, 0)
   assert::equals(p.y, 0)
@@ -165,6 +178,7 @@ test "heap struct: double pointer swap then modify" =
   let a = &point{x: 10, y: 20}
   let b = &point{x: 30, y: 40}
   let cur *point = a
+
   redirect(&cur, b)
   translate(cur, 1, 1)
   assert::equals(b.x, 31)

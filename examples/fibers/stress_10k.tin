@@ -18,17 +18,20 @@ fn{#async} main() =
 
   let n i64 = 10000
   let i i64 = 0
+
   for i < n:
     spawn inc_fiber()
     i = i + 1
 
   // Collect all completions.
   let j i64 = 0
+
   for j < n:
     await done_ch.recv()
     j = j + 1
 
   let total = counter.load()
+
   if total == n:
     echo "PASS: counter = {total}"
   else:

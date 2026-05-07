@@ -43,12 +43,13 @@ fn many_int_locals() i64 =
   let d1 i64 = c3 + c4
   let e0 i64 = d0 - d1
   let e1 i64 = d0 + d1
+
   // All of a0..e1 are still in scope; force a use of each
   return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9
-       + b0 + b1 + b2 + b3 + b4
-       + c0 + c1 + c2 + c3 + c4
-       + d0 + d1
-       + e0 + e1
+    + b0 + b1 + b2 + b3 + b4
+    + c0 + c1 + c2 + c3 + c4
+    + d0 + d1
+    + e0 + e1
 
 // ---------------------------------------------------------------------------
 // 2. Many f64 locals
@@ -74,6 +75,7 @@ fn many_f64_locals() f64 =
   let z1 f64 = y3 + y4
   let w0 f64 = z0 * z1
   let w1 f64 = z0 + z1
+
   return w0 + w1 + x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,7 @@ fn product_8_params(a i64, b i64, c i64, d i64,
 fn dense_loop(n i64) i64 =
   let total i64 = 0
   let i i64 = 0
+
   for i < n:
     let a i64 = i * 3
     let b i64 = i * 5
@@ -105,8 +108,10 @@ fn dense_loop(n i64) i64 =
     let g i64 = d + e - f
     let h i64 = g * a + b
     let sum_local i64 = a + b + c + d + e + f + g + h
+
     total = total + sum_local % 1000
     i = i + 1
+
   return total
 
 // ---------------------------------------------------------------------------
@@ -129,6 +134,7 @@ fn cross_call_live(n i64) i64 =
   let r1 = pure_mul(v2, v3)  // call: v4 must survive
   let r2 = pure_add(v4, r0)  // call
   let r3 = pure_mul(r1, r2)  // call
+
   return r3 + v0 + v1 + v2 + v3 + v4
 
 // ---------------------------------------------------------------------------
@@ -152,6 +158,7 @@ fn many_bool_locals(n i64) i64 =
   let f13 bool = n % 7 == 0
   // Count how many are true
   let count i64 = 0
+
   if f0: count = count + 1
   if f1: count = count + 1
   if f2: count = count + 1
@@ -166,6 +173,7 @@ fn many_bool_locals(n i64) i64 =
   if f11: count = count + 1
   if f12: count = count + 1
   if f13: count = count + 1
+
   return count
 
 // ---------------------------------------------------------------------------
@@ -174,6 +182,7 @@ fn many_bool_locals(n i64) i64 =
 
 test "many int locals" =
   let r = many_int_locals()
+
   // a0..a9 = 55
   // b0..b4 = 3+7+11+15+19 = 55
   // c0..c4 = 21+165+57+77+285 = 605  (b0*b1, b2*b3, b4*b0, b1*b2, b3*b4)
@@ -184,19 +193,23 @@ test "many int locals" =
 
 test "many f64 locals produces finite result" =
   let r = many_f64_locals()
+
   // Just verify it doesn't crash and is > 0
   assert::ok(r > 0.0)
 
 test "12 params beyond register ABI" =
   let r = sum_12_params(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+
   assert::equals(r, 78)
 
 test "8 params product" =
   let r = product_8_params(1, 2, 3, 4, 5, 6, 7, 8)
+
   assert::equals(r, 40320)
 
 test "dense loop register pressure" =
   let r = dense_loop(10)
+
   assert::equals(r, -3560)  // verified with C: h=g*a+b goes negative at i>=3
 
 test "cross-call live ranges n=2" =
@@ -204,12 +217,14 @@ test "cross-call live ranges n=2" =
   // r0=add(4,6)=10, r1=mul(10,14)=140, r2=add(22,10)=32, r3=mul(140,32)=4480
   // total = 4480 + 4+6+10+14+22 = 4536
   let r = cross_call_live(2)
+
   assert::equals(r, 4536)
 
 test "many bool locals count n=15" =
   // 15 > 0..9 (all true = 10), 15%2!=0, 15%3=0, 15%5=0, 15%7!=0
   // true flags: f0..f9 (10), f11, f12 -> count=12
   let r = many_bool_locals(15)
+
   assert::equals(r, 12)
 
 test "many bool locals count n=5" =
@@ -217,4 +232,5 @@ test "many bool locals count n=5" =
   // 5%2!=0, 5%3!=0, 5%5=0 (f12), 5%7!=0
   // count = 5 + 1 = 6
   let r = many_bool_locals(5)
+
   assert::equals(r, 6)

@@ -5,6 +5,7 @@ use assert
 test "same seed produces same sequence" =
   let a = rand::new(42)
   let b = rand::new(42)
+
   assert::equals(a.next_u64(), b.next_u64())
   assert::equals(a.next_u64(), b.next_u64())
   assert::equals(a.next_u64(), b.next_u64())
@@ -12,14 +13,17 @@ test "same seed produces same sequence" =
 test "different seeds diverge immediately" =
   let a = rand::new(1)
   let b = rand::new(2)
+
   assert::ok(a.next_u64() != b.next_u64())
 
 // range_i64.
 test "range_i64 stays in bounds across many draws" =
   let r = rand::new(7)
   let i i32 = 0
+
   for i < 1000:
     let v = r.range_i64(10, 20)
+
     assert::ok(v >= 10)
     assert::ok(v < 20)
     i = i + 1
@@ -28,17 +32,22 @@ test "range_i64 covers the full range" =
   let r = rand::new(123)
   let seen [bool; 50]
   let i i32 = 0
+
   for i < 10000:
     let v = r.range_i64(0, 50)
+
     seen[v] = true
     i = i + 1
+
   let j i32 = 0
+
   for j < 50:
     assert::ok(seen[j])
     j = j + 1
 
 test "range_i64 panics on hi <= lo" =
   let r = rand::new(0)
+
   assert::panics(fn() = let _ = r.range_i64(5, 5))
   assert::panics(fn() = let _ = r.range_i64(10, 5))
 
@@ -46,8 +55,10 @@ test "range_i64 panics on hi <= lo" =
 test "f64 stays in [0, 1)" =
   let r = rand::new(99)
   let i i32 = 0
+
   for i < 1000:
     let v = r.f64()
+
     assert::ok(v >= 0.0)
     assert::ok(v < 1.0)
     i = i + 1
@@ -58,12 +69,14 @@ test "bool produces both values" =
   let trues i32 = 0
   let falses i32 = 0
   let i i32 = 0
+
   for i < 1000:
     if r.bool():
       trues = trues + 1
     else:
       falses = falses + 1
     i = i + 1
+
   // Within ~3 standard deviations of 500, allow [400, 600].
   assert::ok(trues > 400)
   assert::ok(trues < 600)
@@ -72,26 +85,32 @@ test "bool produces both values" =
 test "fill writes exactly n bytes" =
   let r = rand::new(2024)
   let buf [byte; 64]
+
   r.fill(&buf[0], 64)
   // Probability all 64 bytes are zero is ~10^-154, effectively impossible.
   let nonzero i32 = 0
   let i i32 = 0
+
   for i < 64:
     if buf[i] != (0 as byte):
       nonzero = nonzero + 1
     i = i + 1
+
   assert::ok(nonzero > 30)
 
 test "fill respects partial-tail writes (n=5)" =
   let r = rand::new(1)
   let buf [byte; 16]
   let i i32 = 0
+
   for i < 16:
     buf[i] = 0xAA as byte
     i = i + 1
+
   r.fill(&buf[0], 5)
   // Bytes 5..15 must still be sentinel; 0..4 may or may not be.
   let j i32 = 5
+
   for j < 16:
     assert::equals(0xAA as byte, buf[j])
     j = j + 1
@@ -101,34 +120,42 @@ test "secure_u64 produces distinct values" =
   let a = rand::secure_u64()
   let b = rand::secure_u64()
   let c = rand::secure_u64()
+
   // Extremely unlikely all three collide.
   assert::ok(!(a == b && b == c))
 
 test "secure_bytes fills buffer" =
   let buf [byte; 32]
+
   assert::ok(rand::secure_bytes(&buf[0], 32))
   let nonzero i32 = 0
   let i i32 = 0
+
   for i < 32:
     if buf[i] != (0 as byte):
       nonzero = nonzero + 1
     i = i + 1
+
   assert::ok(nonzero > 16)
 
 test "secure_bytes loops past 256-byte chunk size" =
   let buf [byte; 1024]
+
   assert::ok(rand::secure_bytes(&buf[0], 1024))
   // Last byte should be filled too.
   let last_quartile_nonzero i32 = 0
   let i i32 = 768
+
   for i < 1024:
     if buf[i] != (0 as byte):
       last_quartile_nonzero = last_quartile_nonzero + 1
     i = i + 1
+
   assert::ok(last_quartile_nonzero > 100)
 
 // new_secure: non-deterministic across calls.
 test "new_secure produces different streams" =
   let a = rand::new_secure()
   let b = rand::new_secure()
+
   assert::ok(a.next_u64() != b.next_u64())

@@ -5,6 +5,7 @@ use assert
 
 test "parse simple two-row file" =
   let rows = csv::parse("a,b,c\nd,e,f\n")
+
   assert::equals(2, len(rows))
   assert::equals(3, len(rows[0]))
   assert::equals("a", rows[0][0])
@@ -15,16 +16,19 @@ test "parse simple two-row file" =
 
 test "parse handles missing trailing newline" =
   let rows = csv::parse("a,b\nc,d")
+
   assert::equals(2, len(rows))
   assert::equals("c", rows[1][0])
   assert::equals("d", rows[1][1])
 
 test "parse single empty input yields no rows" =
   let rows = csv::parse("")
+
   assert::equals(0, len(rows))
 
 test "parse empty fields are kept" =
   let rows = csv::parse("a,,c\n,,\n")
+
   assert::equals(3, len(rows[0]))
   assert::equals("a", rows[0][0])
   assert::equals("",  rows[0][1])
@@ -37,17 +41,20 @@ test "parse empty fields are kept" =
 
 test "parse quoted field with embedded comma" =
   let rows = csv::parse("\"a,b\",c\n")
+
   assert::equals(2, len(rows[0]))
   assert::equals("a,b", rows[0][0])
   assert::equals("c",   rows[0][1])
 
 test "parse quoted field with escaped quote" =
   let rows = csv::parse("\"he said \"\"hi\"\"\",done\n")
+
   assert::equals("he said \"hi\"", rows[0][0])
   assert::equals("done",            rows[0][1])
 
 test "parse quoted field with embedded newline" =
   let rows = csv::parse("\"line1\nline2\",end\n")
+
   assert::equals(1, len(rows))
   assert::equals("line1\nline2", rows[0][0])
   assert::equals("end",          rows[0][1])
@@ -56,6 +63,7 @@ test "parse quoted field with embedded newline" =
 
 test "parse handles CRLF line endings" =
   let rows = csv::parse("a,b\r\nc,d\r\n")
+
   assert::equals(2, len(rows))
   assert::equals("c", rows[1][0])
 
@@ -63,6 +71,7 @@ test "parse handles CRLF line endings" =
 
 test "parse_with handles tab delimiter" =
   let rows = csv::parse_with("a\tb\tc\n", @'\t' as byte)
+
   assert::equals(3, len(rows[0]))
   assert::equals("a", rows[0][0])
   assert::equals("c", rows[0][2])
@@ -75,6 +84,7 @@ test "Reader.next streams rows one at a time" =
   let (row2, ok2) = r.next()
   let (row3, ok3) = r.next()
   let (_,    ok4) = r.next()
+
   assert::ok(ok1)
   assert::ok(ok2)
   assert::ok(ok3)
@@ -90,6 +100,7 @@ test "encode simple rows round-trips through parse" =
   rows ++= ["a", "b"] as [string]
   rows ++= ["c", "d"] as [string]
   let s = csv::encode(rows)
+
   assert::equals("a,b\nc,d\n", s)
 
 test "encode quotes fields containing the delimiter" =
@@ -108,9 +119,11 @@ test "encode leaves plain fields unchanged" =
 
 test "Writer accumulates rows and renders to string" =
   let w = csv::writer()
+
   w.row(["name", "age"] as [string])
   w.row(["Alice", "30"] as [string])
   let out = w.to_string()
+
   assert::equals("name,age\nAlice,30\n", out)
 
 // --- round-trip ---
@@ -120,6 +133,7 @@ test "encode then parse round-trips with quoting" =
   original ++= ["plain", "has,comma", "has\"quote", "has\nnewline"] as [string]
   let encoded = csv::encode(original)
   let decoded = csv::parse(encoded)
+
   assert::equals(1, len(decoded))
   assert::equals(4, len(decoded[0]))
   assert::equals("plain",        decoded[0][0])

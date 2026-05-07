@@ -28,9 +28,11 @@ fn impl_total() i32 = extern("_tin_impl_total_entries")
 
 test "link-time impl table records every (struct, trait) pair" =
   let total = impl_total()
+
   assert::equals(4 as i32, total)
 
 test "traitof on cat returns greeter and countable" =
   let c = cat{name: "Whiskers", meows: 3}
   let traits = traitof(c)
+
   assert::equals(2, len(traits))

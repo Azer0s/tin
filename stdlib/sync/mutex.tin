@@ -28,6 +28,7 @@ struct Mutex =
 
   fn{#async #no_autoyield} lock(this Mutex) =
     let pid = tin_current_pid_mx()
+
     for true:
       if tin_fmutex2_try_lock(this.ptr(), pid) != 0:
         return

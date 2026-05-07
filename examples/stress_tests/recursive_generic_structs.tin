@@ -25,8 +25,10 @@ struct list_node[t] =
 
   static fn cons(val t, next *list_node[t]) *list_node[t] =
     let n *list_node[t] = mem::calloc(1, sizeof(list_node[t])).(*list_node[t])
+
     (*n).val = val
     (*n).next = next
+
     return n
 
   // Frees all successor nodes recursively (not self).
@@ -63,16 +65,20 @@ struct tree_node[t] =
 
   static fn leaf(v t) *tree_node[t] =
     let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
+
     (*n).val = v
     (*n).left = nil
     (*n).right = nil
+
     return n
 
   static fn branch(v t, l *tree_node[t], r *tree_node[t]) *tree_node[t] =
     let n *tree_node[t] = mem::calloc(1, sizeof(tree_node[t])).(*tree_node[t])
+
     (*n).val = v
     (*n).left = l
     (*n).right = r
+
     return n
 
   // Frees all descendant nodes recursively (not self).
@@ -82,6 +88,7 @@ struct tree_node[t] =
       (*this.left).deinit()
       mem::free(this.left)
       this.left = nil
+
     if this.right != nil:
       (*this.right).deinit()
       mem::free(this.right)
@@ -97,8 +104,10 @@ fn tree_depth[t](root *tree_node[t]) i64 =
     return 0
   let l = tree_depth((*root).left)
   let r = tree_depth((*root).right)
+
   if l > r:
     return l + 1
+
   return r + 1
 
 fn tree_count[t](root *tree_node[t]) i64 =
@@ -165,6 +174,7 @@ test "linked list construction and length" =
   let n1 = list_node[i64]::cons(1, nil)
   let n2 = list_node[i64]::cons(2, n1)
   let n3 = list_node[i64]::cons(3, n2)
+
   assert::equals(list_len(n3), 3)
   (*n3).deinit()
   mem::free(n3)
@@ -173,6 +183,7 @@ test "linked list sum" =
   let n1 = list_node[i64]::cons(10, nil)
   let n2 = list_node[i64]::cons(20, n1)
   let n3 = list_node[i64]::cons(30, n2)
+
   assert::equals(list_sum_i64(n3), 60)
   (*n3).deinit()
   mem::free(n3)
@@ -181,6 +192,7 @@ test "linked list element access" =
   let n1 = list_node[i64]::cons(100, nil)
   let n2 = list_node[i64]::cons(200, n1)
   let n3 = list_node[i64]::cons(300, n2)
+
   assert::equals(list_get(n3, 0), 300)
   assert::equals(list_get(n3, 1), 200)
   assert::equals(list_get(n3, 2), 100)
@@ -191,6 +203,7 @@ test "linked list with string type" =
   let n1 = list_node[string]::cons("c", nil)
   let n2 = list_node[string]::cons("b", n1)
   let n3 = list_node[string]::cons("a", n2)
+
   assert::equals(list_get(n3, 0), "a")
   assert::equals(list_get(n3, 1), "b")
   assert::equals(list_get(n3, 2), "c")
@@ -208,6 +221,7 @@ test "binary tree sum" =
   let t3 = tree_node[i64]::branch(3, t1, t4)
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
+
   assert::equals(tree_sum(root), 20)
   (*root).deinit()
   mem::free(root)
@@ -218,6 +232,7 @@ test "binary tree depth" =
   let t3 = tree_node[i64]::branch(3, t1, t4)
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
+
   assert::equals(tree_depth(root), 3)
   (*root).deinit()
   mem::free(root)
@@ -228,44 +243,52 @@ test "binary tree count" =
   let t3 = tree_node[i64]::branch(3, t1, t4)
   let t7 = tree_node[i64]::leaf(7)
   let root = tree_node[i64]::branch(5, t3, t7)
+
   assert::equals(tree_count(root), 5)
   (*root).deinit()
   mem::free(root)
 
 test "option some unwrap_or" =
   let o = option[i64]::some(42)
+
   assert::ok(o.has_value)
   assert::equals(o.unwrap_or(0), 42)
 
 test "option none unwrap_or" =
   let o = option[i64]::none()
+
   assert::not_ok(o.has_value)
   assert::equals(o.unwrap_or(99), 99)
 
 test "option map_opt some" =
   let o = option[i64]::some(5)
   let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+
   assert::ok(doubled.has_value)
   assert::equals(doubled.val, 10)
 
 test "option map_opt none" =
   let o = option[i64]::none()
   let doubled = o.map_opt(fn(n i64) i64 = return n * 2)
+
   assert::not_ok(doubled.has_value)
 
 test "option map_opt type change string" =
   let o = option[i64]::some(7)
   let as_str = o.map_opt(fn(n i64) string = return "val={n}")
+
   assert::ok(as_str.has_value)
   assert::equals(as_str.val, "val=7")
 
 test "result success" =
   let r = safe_div(10, 2)
+
   assert::ok(r.ok)
   assert::equals(r.val, 5)
 
 test "result failure division by zero" =
   let r = safe_div(10, 0)
+
   assert::not_ok(r.ok)
   assert::equals(r.err, "division by zero")
 

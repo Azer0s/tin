@@ -71,6 +71,7 @@ fn classify_i64(n i64) string =
 
 fn sum_classified(arr [i64]) i64 =
   let total i64 = 0
+
   for let v i64 in arr:
     if v < 0:
       if v < 0 - 50:
@@ -85,6 +86,7 @@ fn sum_classified(arr [i64]) i64 =
           total = total + v * 2        // double for large positives
         else:
           total = total + v
+
   return total
 
 // ---------------------------------------------------------------------------
@@ -95,16 +97,19 @@ fn score_shapes(shapes [shape], colors [color]) i64 =
   let score i64 = 0
   let n i64 = len(shapes)
   let i i64 = 0
+
   for i < n:
     let s shape = shapes[i]
     let c color = colors[i]
     let base i64 = 0
+
     match s:
       case shape.circle:   base = 10
       case shape.square:   base = 8
       case shape.triangle: base = 6
       case shape.hexagon:  base = 12
       default:             base = 0
+
     if c == color.red:
       base = base * 2
     else:
@@ -112,6 +117,7 @@ fn score_shapes(shapes [shape], colors [color]) i64 =
         base = base / 2
     score = score + base
     i = i + 1
+
   return score
 
 // ---------------------------------------------------------------------------
@@ -191,6 +197,7 @@ test "classify_i64 deep nesting" =
 test "sum_classified nested if in loop" =
   // [-100, -20, 0, 5, 100] -> 300 + 20 + 0 + 5 + 200 = 525
   let result = sum_classified([0 - 100, 0 - 20, 0, 5, 100])
+
   assert::equals(result, 525)
 
 test "score_shapes enum+match in loop" =
@@ -198,6 +205,7 @@ test "score_shapes enum+match in loop" =
   let colors [color] = [color.red, color.green, color.alpha]
   // circle+red=20, square+green=8, hexagon+alpha=6 -> 34
   let s = score_shapes(shapes, colors)
+
   assert::equals(s, 34)
 
 test "describe_atom where chain" =
@@ -219,17 +227,20 @@ test "nested match" =
 test "tagged union extract_or_zero" =
   let a maybe_i64 = 42
   let b maybe_i64 = false
+
   assert::equals(extract_or_zero(a), 42)
   assert::equals(extract_or_zero(b), 0)
 
 test "double_if_present with value" =
   let m maybe_i64 = 7
   let result = double_if_present(m)
+
   assert::equals(extract_or_zero(result), 14)
 
 test "double_if_present with nothing" =
   let m maybe_i64 = false
   let result = double_if_present(m)
+
   assert::ok(result is bool)
 
 test "fizzbuzz where chain" =

@@ -43,6 +43,7 @@ fn new() Guid =
   let b = rand()
   let c = rand()
   let d = rand()
+
   return Guid{value: "{a:08x}-{b:04x}-4{c:03x}-8{d:03x}-{a:08x}{b:08x}"}
 
 export { Guid, new } as guid

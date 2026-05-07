@@ -7,21 +7,25 @@ use assert
 
 test "from(i64) keeps integer exact" =
   let v = decimal::from(42 as i64)
+
   assert::equals(42, v.coeff)
   assert::equals(0 as i32, v.scale)
 
 test "from(string) parses scale from fractional part" =
   let v = decimal::from("12.345")
+
   assert::equals(12345, v.coeff)
   assert::equals(3 as i32, v.scale)
 
 test "from(f64) round-trips short decimals" =
   let v = decimal::from(0.1)
+
   assert::equals(1, v.coeff)
   assert::equals(1 as i32, v.scale)
 
 test "from(f64) handles negative" =
   let v = decimal::from(-0.5)
+
   assert::equals(-5, v.coeff)
   assert::equals(1 as i32, v.scale)
 
@@ -33,35 +37,41 @@ test "0.1 + 0.2 == 0.3 with decimal" =
   let a = decimal::from("0.1")
   let b = decimal::from("0.2")
   let c = decimal::from("0.3")
+
   assert::equals(true, a + b == c)
 
 test "subtraction" =
   let a = decimal::from("1.5")
   let b = decimal::from("0.25")
+
   assert::equals(true, a - b == decimal::from("1.25"))
 
 test "multiplication scales correctly" =
   let a = decimal::from("0.5")
   let b = decimal::from("0.25")
   let c = a * b
+
   assert::equals(125, c.coeff)
   assert::equals(3 as i32, c.scale)
 
 test "negation" =
   let a = decimal::from("3.14")
   let n = -a
+
   assert::equals(-314, n.coeff)
 
 test "division normalizes trailing zeros" =
   let a = decimal::from("1.5")
   let b = decimal::from("0.5")
   let c = a / b
+
   assert::equals(3, c.coeff)
   assert::equals(0 as i32, c.scale)
 
 test "ord operators" =
   let a = decimal::from("1.0")
   let b = decimal::from("2.0")
+
   assert::equals(true, a < b)
   assert::equals(false, a > b)
   assert::equals(true, a <= b)
@@ -73,10 +83,12 @@ test "ord operators" =
 
 test "implicit conversion from string in let" =
   let v decimal::Value = "0.5"
+
   assert::equals(true, v == decimal::from("0.5"))
 
 test "implicit conversion from f64 in let" =
   let v decimal::Value = 0.25
+
   assert::equals(true, v == decimal::from("0.25"))
 
 fn dec_add(a decimal::Value, b decimal::Value) decimal::Value =
@@ -84,6 +96,7 @@ fn dec_add(a decimal::Value, b decimal::Value) decimal::Value =
 
 test "implicit conversion at call site" =
   let result = dec_add(0.1, 0.2)
+
   assert::equals(true, result == decimal::from("0.3"))
 
 fn make_value(x f64) decimal::Value =
@@ -91,6 +104,7 @@ fn make_value(x f64) decimal::Value =
 
 test "implicit conversion at return" =
   let v = make_value(2.5)
+
   assert::equals(true, v == decimal::from("2.5"))
 
 // ---------------------------------------------------------------------------
@@ -99,14 +113,17 @@ test "implicit conversion at return" =
 
 test "print preserves scale" =
   let v = decimal::from("1.230")
+
   assert::equals("1.230", "{v}")
 
 test "print of integer has no decimal point" =
   let v = decimal::from(7 as i64)
+
   assert::equals("7", "{v}")
 
 test "print of negative" =
   let v = decimal::from("-12.5")
+
   assert::equals("-12.5", "{v}")
 
 // ---------------------------------------------------------------------------

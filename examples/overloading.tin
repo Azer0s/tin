@@ -58,6 +58,7 @@ fn main() =
 
   // method overloads
   let f = Formatter{prefix: ">> "}
+
   echo f.format(99)          // >> 99
   echo f.format("world")     // >> world
   echo f.format(false)       // >> false

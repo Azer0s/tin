@@ -1,0 +1,11 @@
+fn run(items [string], threshold i64) Result[i64, string] =
+  let total i64 = 0
+  let name = items[0]
+  for let s string in items:
+    if len(s) > threshold:
+      return Err("too long")
+    total = total + len(s)
+  echo "scanned"
+  if total == 0:
+    return Ok(0)
+  return Ok(total)

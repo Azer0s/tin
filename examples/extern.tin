@@ -34,12 +34,14 @@ use extern (
 puts("hello from extern!")
 
 let msg string = "world"
+
 echo strlen(msg)
 
 echo strcmp("abc", "abc")
 echo strcmp("abc", "xyz")
 
 let home string = getenv("HOME")
+
 printf("HOME = %s\n", home)
 
 echo sqrt(144.0)

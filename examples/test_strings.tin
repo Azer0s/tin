@@ -149,6 +149,7 @@ test "trim already trimmed" =
 
 test "split on comma" =
   let parts = strings::split("a,b,c", ",")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "a")
   assert::equals(parts[1], "b")
@@ -156,6 +157,7 @@ test "split on comma" =
 
 test "split with leading separator" =
   let parts = strings::split(",a,", ",")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "")
   assert::equals(parts[1], "a")
@@ -163,6 +165,7 @@ test "split with leading separator" =
 
 test "split no separator found" =
   let parts = strings::split("hello", ",")
+
   assert::equals(len(parts), 1)
   assert::equals(parts[0], "hello")
 
@@ -170,14 +173,17 @@ test "split no separator found" =
 
 test "join with separator" =
   let parts [string] = ["a", "b", "c"]
+
   assert::equals(strings::join(parts, ", "), "a, b, c")
 
 test "join empty separator" =
   let parts [string] = ["a", "b", "c"]
+
   assert::equals(strings::join(parts, ""), "abc")
 
 test "join empty slice" =
   let parts [string] = []
+
   assert::equals(strings::join(parts, ","), "")
 
 // -- SIMD fast path correctness (exercises 16-byte-at-a-time code path) --
@@ -185,17 +191,21 @@ test "join empty slice" =
 test "simd path: index_of needle at end" =
   // 32-byte string so the SIMD path processes at least one chunk
   let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaabb"
+
   assert::equals(strings::index_of(s, "bb"), 30)
 
 test "simd path: index_of not found in long string" =
   let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  // 34 a's
+
   assert::equals(strings::index_of(s, "b"), -1)
 
 test "simd path: count in long string" =
   let s = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  // 35 x's
+
   assert::equals(strings::count(s, "x"), 35)
 
 test "simd path: contains in long string" =
   let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"  // 32 a's + b
+
   assert::ok(strings::contains(s, "b"))
   assert::not_ok(strings::contains(s, "c"))

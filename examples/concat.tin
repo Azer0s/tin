@@ -3,11 +3,13 @@
 use assert
 
 let greeting string = "Hello" ++ ", " ++ "world!"
+
 echo greeting
 
 // Concatenating variables.
 let first string = "foo"
 let second string = "bar"
+
 echo first ++ second
 
 // Building strings in functions.
@@ -20,6 +22,7 @@ echo join("hello", "world", " ")
 // Interpolation and concat together.
 let lang string = "Tin"
 let version string = "1.0"
+
 echo lang ++ " version " ++ version
 
 // Concatenation with function return values.

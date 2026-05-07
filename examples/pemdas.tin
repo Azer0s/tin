@@ -31,10 +31,12 @@ test "mixed mul/div and add/sub" =
 
 test "unary negation before multiplication" =
   let x i64 = 3
+
   assert::equals(-x * 2, -6)
 
 test "unary negation before addition" =
   let x i64 = 5
+
   assert::equals(-x + 10, 5)
 
 // Parentheses override precedence
@@ -84,6 +86,7 @@ test "arithmetic before comparison" =
 test "comparison chains with arithmetic" =
   let a i64 = 10
   let b i64 = 3
+
   assert::equals(a - b > 5, true)
 
 test "equality after arithmetic" =
@@ -162,12 +165,15 @@ test "negative result" =
 
 test "f64 multiplication before addition" =
   let result f64 = 2.0 + 3.0 * 4.0
+
   assert::equals(result, 14.0)
 
 test "f64 parentheses override" =
   let result f64 = (2.0 + 3.0) * 4.0
+
   assert::equals(result, 20.0)
 
 test "f64 division before subtraction" =
   let result f64 = 10.0 - 8.0 / 4.0
+
   assert::equals(result, 8.0)

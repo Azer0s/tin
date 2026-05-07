@@ -7,16 +7,20 @@ use assert
 
 test "bool flag default value is reachable" =
   let f = flag::bool("t1_verbose", false, "")
+
   assert::ok(!f.value)
 
 test "int flag default value is reachable" =
   let f = flag::int("t2_port", 8080, "")
+
   assert::equals(8080, f.value)
 
 test "str flag default value is reachable" =
   let f = flag::str("t3_name", "anon", "")
+
   assert::equals("anon", f.value)
 
 test "f64 flag default value is reachable" =
   let f = flag::f64("t4_ratio", 0.5, "")
+
   assert::equals(0.5, f.value)

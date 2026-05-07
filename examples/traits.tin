@@ -43,11 +43,13 @@ struct robot(named, greetable, describable) =
     return "Beep boop, I am {this.name()}"
 
 let cat = animal{label: "Whiskers", species: "cat"}
+
 echo cat.name()
 echo cat.describe()
 echo cat.greet()
 
 let bot = robot{label: "R2D2", model: "astromech"}
+
 echo bot.name()
 echo bot.describe()
 echo bot.greet()
@@ -77,12 +79,14 @@ print_description(bot)
 
 test "animal trait methods" =
   let a = animal{label: "Whiskers", species: "cat"}
+
   assert::equals(a.name(), "Whiskers")
   assert::equals(a.describe(), "Whiskers is a cat")
   assert::equals(a.greet(), "Hello, I am Whiskers")
 
 test "robot trait methods" =
   let bot = robot{label: "R2D2", model: "astromech"}
+
   assert::equals(bot.name(), "R2D2")
   assert::equals(bot.describe(), "R2D2 is robot model astromech")
   assert::equals(bot.greet(), "Beep boop, I am R2D2")

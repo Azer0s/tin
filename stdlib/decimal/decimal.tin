@@ -19,7 +19,6 @@ use str
 use { Err } from errors
 use errors
 
-
 // pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
 // range overflow i64 and the function panics rather than silently
 // returning a corrupted scale factor that would propagate as a wrong
@@ -29,9 +28,11 @@ fn pow10(n i32) i64 =
     panic("decimal: scale {n} out of range [0, 18]; combined coefficient/scale products would overflow i64")
   let r i64 = 1
   let i i32 = 0
+
   for i < n:
     r = r * 10
     i = i + 1
+
   return r
 
 // Value is a fixed-point decimal with i64 coefficient and i32 scale.
@@ -65,10 +66,12 @@ struct Value(
   // than {3e17, 17}.
   fn ::div(this Value, other Value) Value =
     let extra i32 = 18 - this.scale
+
     if extra < 0:
       extra = 0
     let factor = pow10(extra)
     let new_coeff = (this.coeff * factor) / other.coeff
+
     return normalize(Value{coeff: new_coeff, scale: this.scale + extra - other.scale})
 
   fn ::neg(this Value) Value =
@@ -114,9 +117,11 @@ struct Value(
 fn normalize(v Value) Value =
   let coeff = v.coeff
   let scale = v.scale
+
   for coeff != 0 && scale > 0 && coeff % 10 == 0:
     coeff = coeff / 10
     scale = scale - 1
+
   return Value{coeff: coeff, scale: scale}
 
 // align returns a, b at the same scale. The lower-scale operand is lifted
@@ -127,7 +132,9 @@ fn align(a Value, b Value) (Value, Value) =
   if a.scale > b.scale:
     let factor = pow10(a.scale - b.scale)
     return (a, Value{coeff: b.coeff * factor, scale: a.scale})
+
   let factor = pow10(b.scale - a.scale)
+
   return (Value{coeff: a.coeff * factor, scale: b.scale}, b)
 
 // Top-level overloaded `from`. Each variant produces a fresh Value with
@@ -153,10 +160,12 @@ fn from(s string) Value =
 // produces (zero, error).
 fn parse(s string) (Value, Err) =
   let n = len(s)
+
   if n == 0:
     return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: empty string"))
   let neg = false
   let i i64 = 0
+
   if s[0] == @'-':
     neg = true
     i = 1
@@ -166,8 +175,10 @@ fn parse(s string) (Value, Err) =
   let scale i32 = 0
   let seen_dot = false
   let seen_digit = false
+
   for i < n:
     let c = s[i]
+
     if c == @'.':
       if seen_dot:
         return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: extra '.'"))
@@ -175,15 +186,18 @@ fn parse(s string) (Value, Err) =
     else if c >= @'0' && c <= @'9':
       coeff = coeff * 10 + ((c - @'0') as i64)
       seen_digit = true
+
       if seen_dot:
         scale = scale + 1
     else:
       return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: invalid character"))
     i = i + 1
+
   if !seen_digit:
     return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: no digits"))
   if neg:
     coeff = -coeff
+
   return (Value{coeff: coeff, scale: scale}, nil)
 
 // parse_impl is the ::implicit / from(string) variant that panics on
@@ -191,8 +205,10 @@ fn parse(s string) (Value, Err) =
 // graceful handling should use decimal::parse(s).
 fn parse_impl(s string) Value =
   let (v, err) = parse(s)
+
   if err != nil:
     panic("decimal::from(string): {err}")
+
   return v
 
 // from_f64_impl produces a Value whose decimal representation round-trips
@@ -213,14 +229,18 @@ fn from_f64_impl(x f64) Value =
     panic("decimal::from(f64): -Inf cannot be represented as a decimal")
   let buf [byte; 64]
   let prec i32 = 1
+
   for prec <= 17:
     let n = str::sprintf(&buf[0] as *char, "%.*g", prec, x)
     let s = buf[0..n as i64] as string
+
     if str::atof(s) == x:
       return parse_impl(s)
     prec = prec + 1
+
   // Fallback: 17g always round-trips for normal doubles.
   let n = str::sprintf(&buf[0] as *char, "%.17g", x)
+
   return parse_impl(buf[0..n as i64] as string)
 
 // format_impl renders a Value as a canonical decimal string. Empty
@@ -229,35 +249,45 @@ fn from_f64_impl(x f64) Value =
 fn format_impl(v Value) string =
   let coeff = v.coeff
   let neg = coeff < 0
+
   if neg:
     coeff = -coeff
   let body string = "{coeff}"
+
   if v.scale == 0:
     if neg:
       return "-" ++ body
     return body
+
   let n = len(body)
   let s = v.scale as i64
+
   if n <= s:
     let pad = repeat_char(@'0', s - n + 1)
+
     body = pad ++ body
+
   let new_n = len(body)
   let int_end = new_n - s
   let int_part = body[0:int_end]
   let frac_part = body[int_end:new_n]
   let result = int_part ++ "." ++ frac_part
+
   if neg:
     return "-" ++ result
+
   return result
 
 fn repeat_char(c char, n i64) string =
   let out [byte; 64]
   let i i64 = 0
+
   for i < n:
     if i >= 64:
       break
     out[i] = c as byte
     i = i + 1
+
   return out[0..i] as string
 
 export {

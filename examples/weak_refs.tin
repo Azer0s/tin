@@ -31,6 +31,7 @@ struct Node =
 fn main() =
   let a = Node{value: 1, next: nil, prev: nil}
   let b = Node{value: 2, next: nil, prev: nil}
+
   echo "a.value = {a.value}"
   echo "b.value = {b.value}"
   echo "weak_refs: OK"
@@ -41,10 +42,12 @@ fn main() =
 
 test "node value reads correctly" =
   let n = Node{value: 42, next: nil, prev: nil}
+
   assert::equals(n.value, 42)
 
 test "nil weak pointer works as default" =
   let n = Node{value: 7, next: nil, prev: nil}
+
   assert::equals(n.next == nil, true)
   assert::equals(n.prev == nil, true)
 

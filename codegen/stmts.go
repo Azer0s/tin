@@ -2653,6 +2653,43 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 			entry.staticArrayLen = 0
 		}
 	}
+	// User struct (or *Struct) target: dispatch to ::index_set trait
+	// method when the receiver struct implements index_set[K, V].
+	// Mirrors dispatchBinOp. Must come before the SIMD case below so a
+	// user-defined index_set on a vector-wrapping struct still wins;
+	// for raw SIMD vectors the helper returns "" and we fall through.
+	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
+		recv, err2 := cg.genExpr(block, idxExpr.Expr)
+		if err2 == nil && recv != nil {
+			if structName := cg.structNameForReceiver(recv.Type()); structName != "" {
+				idx, err3 := cg.genExpr(block, idxExpr.Index)
+				if err3 != nil {
+					return block, err3
+				}
+
+				val, err4 := cg.genExpr(block, s.Value)
+				if err4 != nil {
+					return block, err4
+				}
+
+				if fn := cg.lookupOpMethod(structName, "index_set",
+					[]irtypes.Type{idx.Type(), val.Type()}); fn != nil {
+					_, dErr := cg.emitOpDispatch(block, fn, recv, []value.Value{idx, val})
+					if dErr != nil {
+						return block, dErr
+					}
+
+					return block, nil
+				}
+
+				return block, cg.nodeErr(s,
+					"type %s has no `::index_set` impl for (key %s, value %s); declare `fn ::index_set(this %s, k %s, v %s)`",
+					cg.tinTypeDisplay(recv.Type()), cg.tinTypeDisplay(idx.Type()), cg.tinTypeDisplay(val.Type()),
+					cg.tinTypeDisplay(recv.Type()), cg.tinTypeDisplay(idx.Type()), cg.tinTypeDisplay(val.Type()))
+			}
+		}
+	}
+
 	// Special case: SIMD vector index assignment v[i] = x.
 	// Vectors have no addressable lanes; use insertelement + store-back.
 	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {

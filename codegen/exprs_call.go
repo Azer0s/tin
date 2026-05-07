@@ -1884,8 +1884,109 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return block.NewLoad(at.ElemType, gep), nil
 	}
 
-	// No built-in indexing applies. Until the index trait lands
-	// (docs/plans/operator-overloading.md, Phase 4), reject loudly
-	// instead of returning nil and letting the caller crash later.
+	// User struct (or *Struct) receiver: dispatch to ::index trait method
+	// when the struct implements index[K, R]. Mirror of dispatchBinOp's
+	// path — look up an op-trait impl keyed by (structName, "index")
+	// whose param type matches the index value, then emit the call.
+	//
+	// Comma-ok return convention (recommended): impls return a 2-tuple
+	// `(V, bool)` where the bool reports whether the key was present.
+	// At a tuple-destructure call site (`let (v, ok) = t[k]`) the raw
+	// tuple is passed through. At any other call site, codegen auto-
+	// unwraps: emits `if !ok: panic("...")` and substitutes V. Impls
+	// that return plain V (no comma-ok) are also accepted — value
+	// flows through unchanged.
+	if structName := cg.structNameForReceiver(arrType); structName != "" {
+		if fn := cg.lookupOpMethod(structName, "index", []irtypes.Type{idx.Type()}); fn != nil {
+			result, derr := cg.emitOpDispatch(block, fn, arr, []value.Value{idx})
+			if derr != nil {
+				return nil, derr
+			}
+
+			return cg.maybeUnwrapIndexTuple(block, e, result)
+		}
+
+		return nil, cg.nodeErr(e,
+			"type %s has no `::index` impl for index of type %s; declare `fn ::index(this %s, k %s) (V, bool)`",
+			cg.tinTypeDisplay(arrType), cg.tinTypeDisplay(idx.Type()),
+			cg.tinTypeDisplay(arrType), cg.tinTypeDisplay(idx.Type()))
+	}
+
 	return nil, cg.nodeErr(e, "type %s does not support index expressions", arrType)
+}
+
+// maybeUnwrapIndexTuple handles the comma-ok return convention from a
+// user `::index` impl. If `result` is a 2-field struct shaped like
+// `(V, bool)`, the function:
+//
+//   - returns it as-is when codegen is currently inside a tuple-
+//     destructure VarDecl (cg.indexExprRawTuple); the destructure
+//     step will bind both halves.
+//   - otherwise extracts field 0 (V) and field 1 (bool), emits a
+//     branch that panics with a descriptive message when the bool
+//     is false, and returns V on the success path.
+//
+// If `result` is not shaped like `(V, bool)` (e.g. an impl that
+// returns plain V without comma-ok), it's returned unchanged.
+func (cg *CodeGen) maybeUnwrapIndexTuple(block *ir.Block, e *ast.IndexExpr, result value.Value) (value.Value, error) {
+	if result == nil {
+		return nil, nil
+	}
+
+	// Tin tuples are `{ i32 type_tag, T1, T2 }` — the (V, bool) pair
+	// lives at fields 1 and 2.
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 3 {
+		return result, nil
+	}
+
+	okField := st.Fields[2]
+	if it, isInt := okField.(*irtypes.IntType); !isInt || it.BitSize != 1 {
+		return result, nil
+	}
+
+	if cg.indexExprRawTuple {
+		return result, nil
+	}
+
+	val := block.NewExtractValue(result, 1)
+	okVal := block.NewExtractValue(result, 2)
+
+	panicBlock := cg.newBlock("idx.miss")
+	contBlock := cg.newBlock("idx.ok")
+
+	block.NewCondBr(okVal, contBlock, panicBlock)
+
+	msgPtr := cg.newGlobalString(indexMissMessage(e))
+	panicBlock.NewCall(cg.ensurePanicFn(), msgPtr)
+	panicBlock.NewUnreachable()
+
+	cg.curBlock = contBlock
+
+	return val, nil
+}
+
+// indexMissMessage formats the panic string for an unwrapped index miss.
+// Includes the AST source position to make the source line obvious.
+func indexMissMessage(e *ast.IndexExpr) string {
+	pos := e.Pos()
+
+	return fmt.Sprintf("index miss at %d:%d (no `(_, ok)` destructure to handle absent key)",
+		pos.Line, pos.Col)
+}
+
+// structNameForReceiver returns the named-struct identifier when t is a
+// struct or *Struct. Returns "" for any other shape. Used to drive
+// op-trait dispatch (::index, ::index_set) on receivers that can be
+// either a value-form struct or a pointer-to-struct.
+func (cg *CodeGen) structNameForReceiver(t irtypes.Type) string {
+	if isStructType(t) {
+		return cg.typeNameOf(t)
+	}
+
+	if pt, ok := t.(*irtypes.PointerType); ok && isStructType(pt.ElemType) {
+		return cg.typeNameOf(pt.ElemType)
+	}
+
+	return ""
 }

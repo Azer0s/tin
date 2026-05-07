@@ -2,32 +2,42 @@
 
 fn early_return(x i64) string =
   let prefix = "result: "
+
   if x > 10:
     let big = "big"
     return prefix ++ big
+
   let small = "small"
+
   return prefix ++ small
 
 fn conditional_alloc(flag bool) =
   let base = "base" ++ ""
+
   if flag:
     let extra = base ++ "!"
+
     echo extra
 
 fn nested_scopes() =
   let a = "a" ++ ""
   let b = "b" ++ ""
   let c = a ++ b
+
   if true:
     let d = c ++ "d"
+
     if true:
       let e = d ++ "e"
+
       echo e
 
 fn loop_alloc() =
   let items = [1, 2, 3, 4, 5]
+
   for let item i64 in items:
     let s = "item" ++ ""
+
     echo s
 
 echo early_return(5)

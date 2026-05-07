@@ -28,9 +28,11 @@ use sync
 
 fn val_before_if(n i64) i64 =
   let base i64 = n * 3          // defined here
+
   if n > 10:
     let extra i64 = 100         // only in this branch
     extra = extra + base        // uses base from pre-if
+
     return extra
   else:
     let reduced i64 = base - 1  // uses base from pre-if
@@ -40,10 +42,12 @@ fn val_before_if(n i64) i64 =
 fn val_before_if_used_after(n i64) i64 =
   let base i64 = n * 7          // defined before if
   let bonus i64 = 0
+
   if n % 2 == 0:
     bonus = 1
   else:
     bonus = 2
+
   // Both branches define bonus; base must still be live here
   return base + bonus            // uses base (pre-if) and bonus (post-merge)
 
@@ -55,11 +59,14 @@ fn loop_carried(n i64) i64 =
   let acc i64 = 0               // initial value
   let prev i64 = 1              // loop-carried across iterations
   let i i64 = 0
+
   for i < n:
     let next i64 = acc + prev   // uses both acc and prev from previous iteration
+
     acc = prev
     prev = next
     i = i + 1
+
   return prev                   // uses prev after loop exits
 
 // ---------------------------------------------------------------------------
@@ -74,6 +81,7 @@ enum i32 kind =
 fn val_before_match(k kind, n i64) i64 =
   let factor i64 = n * 2        // defined before match
   let delta i64 = 0
+
   match k:
     case kind.a_kind:
       delta = factor + 10       // uses pre-match `factor`
@@ -81,6 +89,7 @@ fn val_before_match(k kind, n i64) i64 =
       delta = factor - 5        // uses pre-match `factor`
     default:
       delta = factor * 2        // uses pre-match `factor`
+
   return factor + delta         // uses pre-match `factor` and post-match `delta`
 
 // ---------------------------------------------------------------------------
@@ -91,14 +100,18 @@ fn nested_loop_live(rows i64, cols i64) i64 =
   let total i64 = 0
   let row_sum i64 = 0           // updated per-outer-iteration
   let i i64 = 0
+
   for i < rows:
     row_sum = 0                 // reset per outer iteration
     let j i64 = 0
+
     for j < cols:
       row_sum = row_sum + (i * cols + j)
       j = j + 1
+
     total = total + row_sum     // row_sum defined in inner loop body
     i = i + 1
+
   return total
 
 // ---------------------------------------------------------------------------
@@ -109,7 +122,9 @@ fn{#async} val_across_await(n i64) i64 =
   let pre_val i64 = n * 5       // defined before first yield point
   let fut = spawn do:
     pass                        // just a yield
+
   await fut                     // yield/resume here
+
   return pre_val + 1            // pre_val must be live after resume
 
 // ---------------------------------------------------------------------------
@@ -119,6 +134,7 @@ fn{#async} val_across_await(n i64) i64 =
 
 fn{#async} conditional_then_await(n i64) i64 =
   let result i64 = 0
+
   if n > 0:
     result = n * 10
   else:
@@ -127,7 +143,9 @@ fn{#async} conditional_then_await(n i64) i64 =
   // Then we await - the phi node result must survive yield/resume.
   let fut = spawn do:
     pass
+
   await fut
+
   return result   // must be the phi value, live after resume
 
 // ---------------------------------------------------------------------------
@@ -137,12 +155,15 @@ fn{#async} conditional_then_await(n i64) i64 =
 fn{#async} loop_across_awaits(n i64) i64 =
   let acc i64 = 0
   let i i64 = 0
+
   for i < n:
     let fut = spawn do:
       pass   // just yield
+
     await fut
     acc = acc + i + 1    // acc must be live across the await inside the loop
     i = i + 1
+
   return acc
 
 // ---------------------------------------------------------------------------
@@ -152,6 +173,7 @@ fn{#async} loop_across_awaits(n i64) i64 =
 fn fan_in_branches(n i64) i64 =
   let pre i64 = n * 2           // pre-branch
   let branch_result i64 = 0
+
   if n == 0:
     branch_result = 100
   else:
@@ -165,6 +187,7 @@ fn fan_in_branches(n i64) i64 =
           branch_result = 400
         else:
           branch_result = 500
+
   // All branches feed branch_result; pre must still be live
   return pre + branch_result
 
@@ -201,16 +224,19 @@ test "nested loop live values" =
 
 test "async value across await" =
   let r = await spawn val_across_await(6)
+
   assert::equals(r, 31)  // 6*5+1=31
 
 test "async conditional before await" =
   let r1 = await spawn conditional_then_await(4)
   let r2 = await spawn conditional_then_await(0 - 3)
+
   assert::equals(r1, 40)
   assert::equals(r2, 3)
 
 test "async accumulator across multiple awaits" =
   let r = await spawn loop_across_awaits(5)
+
   // acc += 1+2+3+4+5 = 15
   assert::equals(r, 15)
 

@@ -12,14 +12,17 @@ union raw = i32 | i64
 test "native union: write i32 read back" =
   let c color_or_bytes = 255
   let v i32 = c.as_i32
+
   assert::equals(v, 255)
 
 test "native union: i32 type cast access" =
   let r raw = 42
   let v i32 = r.(i32)
+
   assert::equals(v, 42)
 
 test "native union: i64 type cast access" =
   let r raw = 9999
   let v i64 = r.(i64)
+
   assert::equals(v, 9999)

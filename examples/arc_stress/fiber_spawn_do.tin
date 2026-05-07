@@ -16,13 +16,16 @@ var results_ch sync::Channel[string]
 
 fn{#async} main() =
   let n i64 = 500
+
   input_ch   = sync::Channel[string].make(n)
   results_ch = sync::Channel[string].make(n)
 
   // Pre-fill the input channel with n strings.
   let i i64 = 0
+
   for i < n:
     let s = "item-{i}"
+
     await input_ch.send(s)
     i = i + 1
 
@@ -30,15 +33,19 @@ fn{#async} main() =
   // The future f goes out of scope on each iteration (unawaited); the do-block
   // fiber runs to completion independently. Results channel is the sync point.
   let j i64 = 0
+
   for j < n:
     spawn do:
       let raw = await input_ch.recv()
       let out = "done-" ++ raw
+
       await results_ch.send(out)
+
     j = j + 1
 
   // Drain all results - this ensures all 500 do-blocks have completed.
   let collected i64 = 0
+
   for collected < n:
     await results_ch.recv()
     collected = collected + 1

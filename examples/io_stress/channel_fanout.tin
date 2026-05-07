@@ -16,34 +16,45 @@ use sync
 fn{#async} fanout_consumer(id i64, inbox sync::Channel[string], done sync::Channel[i64]) =
   let msg = await inbox.recv()
   let _ = "consumer-{id}: got [{msg}]"
+
   await done.send(id)
 
 test "channel fanout 50 consumers (named param)" =
   let n i64 = 50
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
+
   for i < n:
     let ch = sync::Channel[string].make(1)
+
     spawn fanout_consumer(i, ch, done)
     await ch.send("item-{i}")
     i = i + 1
+
   let received i64 = 0
+
   for received < n:
     await done.recv()
     received = received + 1
+
   assert::equals(received, n)
 
 test "channel fanout 200 consumers (named param)" =
   let n i64 = 200
   let done = sync::Channel[i64].make(n)
   let i i64 = 0
+
   for i < n:
     let ch = sync::Channel[string].make(1)
+
     spawn fanout_consumer(i, ch, done)
     await ch.send("payload-{i}-data")
     i = i + 1
+
   let received i64 = 0
+
   for received < n:
     await done.recv()
     received = received + 1
+
   assert::equals(received, n)

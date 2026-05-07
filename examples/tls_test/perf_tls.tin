@@ -12,6 +12,7 @@ fn{#async} main() =
   tls::set_ca_file("examples/tls_test/cert.pem")
 
   let (conn, err) = tcp::dial("127.0.0.1", 8443)
+
   if errors::has(err):
     panic(err.message())
 
@@ -21,6 +22,7 @@ fn{#async} main() =
   let t0 = io::now_us()
 
   let i i64 = 0
+
   for i < rounds:
     await ioutil::write_string(tls_conn, "ping\n")
     await ioutil::read_string(tls_conn)

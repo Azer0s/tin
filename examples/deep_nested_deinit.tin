@@ -32,6 +32,7 @@ struct L0 =
 fn build() L0 =
   let s = "hello" ++ "_world"
   let a = [1, 2, 3, 4, 5]
+
   return L0{inner: L1{inner: L2{inner: L3{inner: L4{inner: L5{
     inner: L6{inner: L7{inner: L8{inner: L9{
       inner: Leaf{s: s, arr: a},
@@ -39,10 +40,12 @@ fn build() L0 =
 
 test "10-level nested struct: build and drop" =
   let v = build()
+
   assert::equals("hello_world", v.inner.inner.inner.inner.inner.inner.inner.inner.inner.inner.s)
   assert::equals(5, len(v.inner.inner.inner.inner.inner.inner.inner.inner.inner.inner.arr))
 
 test "10-level reassign frees prior leaf" =
   let v = build()
   v = build()
+
   assert::equals("hello_world", v.inner.inner.inner.inner.inner.inner.inner.inner.inner.inner.s)

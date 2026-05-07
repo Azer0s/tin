@@ -60,8 +60,10 @@ struct Server (io::Closeable) =
   // Returns (Conn, Err) - nil Err means success.
   fn accept(this Server) (Conn, Err) =
     let fd = tin_unix_accept_c(this.fd())
+
     if fd < 0:
       return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: accept failed"))
+
     return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
   fn Closeable::close(this Server) =
@@ -71,16 +73,20 @@ struct Server (io::Closeable) =
 // Removes any stale socket file. Returns (Server, Err).
 fn listen(path string) (Server, Err) =
   let fd = tin_unix_listen_c(path)
+
   if fd < 0:
     return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: failed to bind {path}"))
+
   return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial connects to a Unix domain socket at path.
 // Returns (Conn, Err).
 fn dial(path string) (Conn, Err) =
   let fd = tin_unix_connect_c(path)
+
   if fd < 0:
     return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: failed to connect to {path}"))
+
   return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 export { Conn, Server, listen, dial } as unix

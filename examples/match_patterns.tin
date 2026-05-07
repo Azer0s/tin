@@ -34,6 +34,7 @@ struct employee =
 
 test "bind all fields" =
   let p = point{x: 3, y: 7}
+
   match p:
     case point{x, y}:
       assert::equals(x, 3)
@@ -41,6 +42,7 @@ test "bind all fields" =
 
 test "bind subset of fields" =
   let p = point{x: 10, y: 20}
+
   match p:
     case point{x, _}:
       assert::equals(x, 10)
@@ -49,6 +51,7 @@ test "bind subset of fields" =
 
 test "literal constraint on i64 field" =
   let p = point{x: 0, y: 42}
+
   match p:
     case point{x: 0, y}:
       assert::equals(y, 42)
@@ -58,15 +61,18 @@ test "literal constraint on i64 field" =
 test "literal constraint not matched" =
   let p = point{x: 1, y: 42}
   let hit = false
+
   match p:
     case point{x: 0, y}:
       assert::fails("x is not 0")
     default:
       hit = true
+
   assert::ok(hit)
 
 test "literal constraint on string field" =
   let emp = person{name: "alice", age: 30, active: true}
+
   match emp:
     case person{name: "alice", age, _}:
       assert::equals(age, 30)
@@ -76,17 +82,20 @@ test "literal constraint on string field" =
 test "literal constraint on bool field" =
   let emp = person{name: "bob", age: 25, active: false}
   let matched = false
+
   match emp:
     case person{_, _, active: true}:
       assert::fails("should not match active=true")
     default:
       matched = true
+
   assert::ok(matched)
 
 // rename bindings
 
 test "rename binding" =
   let p = point{x: 5, y: 9}
+
   match p:
     case point{x: col, y: row}:
       assert::equals(col, 5)
@@ -94,6 +103,7 @@ test "rename binding" =
 
 test "rename binding with string field" =
   let emp = person{name: "carol", age: 40, active: true}
+
   match emp:
     case person{name: n, age: yrs, _}:
       assert::equals(n, "carol")
@@ -101,6 +111,7 @@ test "rename binding with string field" =
 
 test "mix rename and literal constraint" =
   let p = point{x: 0, y: 7}
+
   match p:
     case point{x: 0, y: row}:
       assert::equals(row, 7)
@@ -111,6 +122,7 @@ test "mix rename and literal constraint" =
 
 test "guard with bound field" =
   let p = point{x: 10, y: 3}
+
   match p:
     case point{x, y} if x > y:
       assert::equals(x, 10)
@@ -119,6 +131,7 @@ test "guard with bound field" =
 
 test "guard with renamed field" =
   let p = point{x: 5, y: 5}
+
   match p:
     case point{x: a, y: b} if a == b:
       assert::equals(a, 5)
@@ -130,6 +143,7 @@ test "guard failure falls to next arm" =
   let result = match p:
     case point{x, y} if x > y: "x bigger"
     case point{x, y}: "y bigger or equal"
+
   assert::equals(result, "y bigger or equal")
 
 // nested patterns
@@ -140,6 +154,7 @@ test "nested pattern with constraint" =
     address: address{city: "vienna", country: "austria"},
     salary:  80000,
   }
+
   match e:
     case employee{person: person{name: "dave", age, _}, address, salary}:
       assert::equals(age, 28)
@@ -153,6 +168,7 @@ test "nested pattern rename at inner level" =
     address: address{city: "berlin", country: "germany"},
     salary:  95000,
   }
+
   match e:
     case employee{person: person{name: emp_name, age: emp_age, _}, _, salary: pay}:
       assert::equals(emp_name, "eve")
@@ -165,6 +181,7 @@ test "nested pattern string constraint" =
     address: address{city: "paris", country: "france"},
     salary:  120000,
   }
+
   match e:
     case employee{_, address: address{city: "paris", country: c}, _}:
       assert::equals(c, "france")
@@ -180,12 +197,14 @@ test "match expression basic" =
     case point{x: 0, _}:    "y-axis"
     case point{_, y: 0}:    "x-axis"
     case point{_, _}:       "other"
+
   assert::equals(label, "origin")
 
 test "match expression with rename" =
   let p = point{x: 4, y: 7}
   let sum = match p:
     case point{x: a, y: b}: a + b
+
   assert::equals(sum, 11)
 
 test "match expression with string field" =
@@ -193,4 +212,5 @@ test "match expression with string field" =
   let greeting = match emp:
     case person{name: n, _, active: true}:  "hello {n}"
     case person{name: n, _, active: false}: "bye {n}"
+
   assert::equals(greeting, "hello grace")

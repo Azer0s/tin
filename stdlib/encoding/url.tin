@@ -15,18 +15,21 @@ fn is_unreserved(c byte) bool =
   if c >= @'A' && c <= @'Z': return true
   if c >= @'a' && c <= @'z': return true
   if c >= @'0' && c <= @'9': return true
+
   return c == @'-' || c == @'_' || c == @'.' || c == @'~'
 
 fn pct(c byte) string =
   let alpha = "0123456789ABCDEF"
   let hi = (c as i64 >> 4) & 0xF
   let lo = c as i64 & 0xF
+
   return "%" ++ alpha[hi] ++ alpha[lo]
 
 fn hex_val(c byte) i64 =
   if c >= @'0' && c <= @'9': return (c - @'0') as i64
   if c >= @'a' && c <= @'f': return (c - @'a' + 10) as i64
   if c >= @'A' && c <= @'F': return (c - @'A' + 10) as i64
+
   return 0 - 1
 
 // encode percent-encodes s, leaving only RFC 3986 unreserved characters
@@ -35,13 +38,16 @@ fn encode(s string) string =
   let n = len(s)
   let result = ""
   let i i64 = 0
+
   for i < n:
     let c = s[i] as byte
+
     if is_unreserved(c):
       result = result ++ c
     else:
       result = result ++ pct(c)
     i = i + 1
+
   return result
 
 // encode_component is an alias for encode.
@@ -54,8 +60,10 @@ fn decode(s string) string =
   let n = len(s)
   let result = ""
   let i i64 = 0
+
   for i < n:
     let c = s[i] as byte
+
     if c == @'+':
       result = result ++ @' '
       i = i + 1
@@ -63,6 +71,7 @@ fn decode(s string) string =
       if i + 2 < n:
         let hi = hex_val(s[i + 1] as byte)
         let lo = hex_val(s[i + 2] as byte)
+
         if hi >= 0 && lo >= 0:
           result = result ++ ((hi << 4) | lo) as byte
           i = i + 3
@@ -75,6 +84,7 @@ fn decode(s string) string =
     else:
       result = result ++ c
       i = i + 1
+
   return result
 
 // str_lt returns true if a is lexicographically less than b.
@@ -82,23 +92,29 @@ fn str_lt(a string, b string) bool =
   let na = len(a)
   let nb = len(b)
   let n = na
+
   if nb < na: n = nb
   let i i64 = 0
+
   for i < n:
     let ca = a[i] as i64
     let cb = b[i] as i64
+
     if ca < cb: return true
     if ca > cb: return false
     i = i + 1
+
   return na < nb
 
 // url_substr copies s[from:to] byte-by-byte into a new string.
 fn url_substr(s string, from i64, to i64) string =
   let out = ""
   let i i64 = from
+
   for i < to:
     out = out ++ s[i]
     i = i + 1
+
   return out
 
 // encode_query encodes the key-value pairs in params as a URL query string.
@@ -110,25 +126,30 @@ fn encode_query(params collections::HashMap[string, string]) string =
 
   // Sort keys lexicographically (insertion sort).
   let i i64 = 1
+
   for i < n:
     let key = ks[i]
     let j i64 = i - 1
+
     for j >= 0:
       if !str_lt(key, ks[j]):
         break
       ks[j + 1] = ks[j]
       j = j - 1
+
     ks[j + 1] = key
     i = i + 1
 
   // Build result string.
   let result = ""
   let k i64 = 0
+
   for k < n:
     if k > 0:
       result = result ++ "&"
     result = result ++ encode(ks[k]) ++ "=" ++ encode(params.get(ks[k]))
     k = k + 1
+
   return result
 
 // parse_segment decodes s[from:to] as a key=value pair and inserts into m.
@@ -137,18 +158,23 @@ fn parse_segment(m *collections::HashMap[string, string], s string, from i64, to
   if to <= from: return
   let eq i64 = 0 - 1
   let j i64 = from
+
   for j < to:
     if s[j] as byte == @'=':
       eq = j
       break
+
     j = j + 1
+
   let key = ""
   let val = ""
+
   if eq < from:
     key = decode(url_substr(s, from, to))
   else:
     key = decode(url_substr(s, from, eq))
     val = decode(url_substr(s, eq + 1, to))
+
   if len(key) > 0:
     m.set(key, val)
 
@@ -158,16 +184,21 @@ fn parse_segment(m *collections::HashMap[string, string], s string, from i64, to
 fn parse_query(s string) collections::HashMap[string, string] =
   let m = collections::HashMap[string, string].make(8)
   let n = len(s)
+
   if n == 0:
     return m
   let start i64 = 0
   let i i64 = 0
+
   for i < n:
     if s[i] as byte == @'&':
       parse_segment(&m, s, start, i)
       start = i + 1
+
     i = i + 1
+
   parse_segment(&m, s, start, n)
+
   return m
 
 export { encode, encode_component, decode, encode_query, parse_query } as url

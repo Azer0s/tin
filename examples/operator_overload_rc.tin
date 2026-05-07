@@ -16,12 +16,14 @@ test "concat via add" =
   let a = Tag{s: "alpha"}
   let b = Tag{s: "beta"}
   let c = a + b
+
   assert::equals("alpha+beta", c.s)
 
 test "compound +=" =
   let a = Tag{s: "x"}
   let b = Tag{s: "y"}
   a += b
+
   assert::equals("x+y", a.s)
   a += b
   assert::equals("x+y+y", a.s)
@@ -30,12 +32,14 @@ test "comp on RC fields" =
   let a = Tag{s: "same"}
   let b = Tag{s: "same"}
   let c = Tag{s: "diff"}
+
   assert::equals(true, a == b)
   assert::equals(true, a != c)
 
 test "many adds in a loop" =
   let acc = Tag{s: "0"}
   let one = Tag{s: "1"}
+
   for let i i64 = 0; i < 5; i += 1:
     acc += one
   assert::equals("0+1+1+1+1+1", acc.s)

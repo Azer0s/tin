@@ -11,12 +11,15 @@ struct fooStruct[t] where t is addable =
 
 test "fooStruct with i32" =
   let a = fooStruct[i32](42)
+
   assert::equals(a.value, 42)
 
 test "fooStruct with f64" =
   let b = fooStruct[f64](3.14)
+
   assert::equals(b.value, 3.14)
 
 test "fooStruct with u64" =
   let c = fooStruct[u64](100)
+
   assert::equals(c.value, 100)

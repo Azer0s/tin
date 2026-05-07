@@ -9,6 +9,7 @@ fn box_string() =
 fn box_int() =
   let n = 42
   let a any = n
+
   echo a
 
 fn box_and_pass(a any) =
@@ -16,14 +17,17 @@ fn box_and_pass(a any) =
 
 fn repeated_boxing() =
   let s1 = "foo" ++ "bar"
+
   box_and_pass(s1)
   let s2 = "baz" ++ "qux"
+
   box_and_pass(s2)
 
 fn box_in_loop() =
   let vals = [1, 2, 3, 4, 5]
   let a any = vals[0]
   let b any = vals[4]
+
   echo a
   echo b
 

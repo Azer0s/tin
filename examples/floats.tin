@@ -36,8 +36,10 @@ fn clamp(x f64, lo f64, hi f64) f64 =
 
 fn sqrt_approx(n f64) f64 =
   let x f64 = n / 2.0
+
   for let i i64 = 0; i < 20; i++:
     x = (x + n / x) / 2.0
+
   return x
 
 // -------------------------------------------------------------------------
@@ -81,4 +83,5 @@ test "newton sqrt" =
   assert::equals(sqrt_approx(9.0), 3.0)
   // epsilon check: |approx - exact| < 1e-9
   let diff f64 = math::fabs(sqrt_approx(2.0) - math::sqrt(2.0))
+
   assert::ok(diff < 0.000000001)

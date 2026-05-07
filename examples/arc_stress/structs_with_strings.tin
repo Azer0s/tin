@@ -14,22 +14,27 @@ fn make_named(f string, l string) named =
 fn copy_struct() =
   let n1 = named{first: "Alice", last: "Smith"}
   let n2 = n1
+
   echo n2.full()
   // both n1 and n2 released here - strings must be ref-counted correctly
 
 fn returned_struct() =
   let n = make_named("Bob", "Jones")
+
   echo n.full()
 
 fn overwrite_struct() =
   let n = named{first: "Carol", last: "White"}
+
   echo n.full()
   let n2 = named{first: "Dave", last: "Brown"}
+
   echo n2.full()
 
 fn struct_chain() =
   let a = named{first: "E", last: "F"}
   let b = named{first: a.first ++ "x", last: a.last ++ "y"}
+
   echo b.full()
 
 copy_struct()

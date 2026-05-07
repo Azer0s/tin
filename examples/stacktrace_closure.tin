@@ -15,6 +15,7 @@ fn{#no_inline} apply(f fn() [atom]) [atom] = return f()
 
 test "stacktrace inside a closure surfaces frames in this file" =
   let frames [atom] = apply(fn() [atom] = return stacktrace())
+
   assert::ok(len(frames) >= 2)
 
   // The walk must contain `apply` (the helper) and the synthesized
@@ -27,15 +28,19 @@ test "stacktrace inside a closure surfaces frames in this file" =
   let saw_apply i64 = 0
   let saw_lambda i64 = 0
   let saw_file i64 = 0
+
   for let f atom in frames:
     let s string = f as string
+
     if strings::contains(s, "apply"):
       saw_apply = saw_apply + 1
     if strings::contains(s, "lambda"):
       saw_lambda = saw_lambda + 1
     if strings::contains(s, "stacktrace_closure.tin:"):
       saw_file = saw_file + 1
+
   assert::ok(saw_apply >= 1)
   assert::ok(saw_lambda >= 1)
+
   if saw_file >= 1:
     assert::ok(saw_file >= 1)

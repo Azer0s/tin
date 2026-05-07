@@ -3,4 +3,5 @@
 
 fn main() =
   let result = compute(42)
+
   echo result

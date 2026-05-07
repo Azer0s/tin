@@ -6,4 +6,5 @@ fn add(a i32, b i32) i32 =
 
 fn main() =
   let r = add("hello", 5)
+
   echo r

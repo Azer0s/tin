@@ -19,6 +19,7 @@ test "vec + vec uses Vec3 impl" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let b = Vec3{x: 4.0, y: 5.0, z: 6.0}
   let c = a + b
+
   assert::equals(5.0, c.x)
   assert::equals(7.0, c.y)
   assert::equals(9.0, c.z)
@@ -26,6 +27,7 @@ test "vec + vec uses Vec3 impl" =
 test "vec + scalar uses f64 impl" =
   let a = Vec3{x: 1.0, y: 2.0, z: 3.0}
   let c = a + 10.0
+
   assert::equals(11.0, c.x)
   assert::equals(12.0, c.y)
   assert::equals(13.0, c.z)

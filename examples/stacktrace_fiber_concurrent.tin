@@ -32,4 +32,5 @@ test "concurrent fibers each capture their own spawn chain" =
   for let trace [atom] in [f0, f1, f2, f3]:
     assert::ok(len(trace) >= 2)
     let last string = trace[len(trace) - 1] as string
+
     assert::ok(strings::contains(last, "<spawn-of>:"))

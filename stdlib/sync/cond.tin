@@ -26,6 +26,7 @@ struct Cond =
 
   fn{#async #no_autoyield} wait(this Cond, mu Mutex) =
     let pid = tin_current_pid_cond()
+
     tin_fcond2_add_waiter(this.ptr(), pid)
     mu.unlock()
     yield

@@ -76,12 +76,14 @@ fn sum_first_last[t](it t) i64 where t is iter[i64] =
 // Demo
 
 let item = int_list{val: 42, count: 1, tag: "my-list"}
+
 echo first(item)          // 42
 echo last(item)           // 42
 show(item)                // int_list(42, len=1)
 print_label(item)         // my-list
 
 let p = pair{a: 10, b: 20, tag: "coords"}
+
 echo first(p)             // 10
 echo last(p)              // 20
 show(p)                   // (10, 20)
@@ -94,16 +96,20 @@ use assert
 
 test "int_list first and last" =
   let lst = int_list{val: 42, count: 1, tag: "t"}
+
   assert::equals(first(lst), 42)
   assert::equals(last(lst), 42)
 
 test "pair first and last" =
   let p2 = pair{a: 10, b: 20, tag: "coords"}
+
   assert::equals(first(p2), 10)
   assert::equals(last(p2), 20)
 
 test "sum_first_last" =
   let lst2 = int_list{val: 5, count: 1, tag: "t"}
+
   assert::equals(sum_first_last(lst2), 10)
   let p3 = pair{a: 3, b: 7, tag: "t"}
+
   assert::equals(sum_first_last(p3), 10)

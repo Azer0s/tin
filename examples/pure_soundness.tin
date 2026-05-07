@@ -54,9 +54,11 @@ test "pure memo: many call sites with same arg" =
 
 fn{#pure} traced_square(n i64) i64 =
   let r i64 = n * n
+
   { #allow_sideffect } {
     echo "traced_square({n}) = {r}"
   }
+
   return r
 
 test "pure + allow_sideffect: NOT folded (runtime call)" =

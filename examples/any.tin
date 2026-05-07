@@ -13,24 +13,30 @@ echo b
 test "any equality - same type and value" =
   let a any = 42
   let b any = 42
+
   assert::ok(a == b)
   let c any = 42
   let d any = 99
+
   assert::ok(c != d)
 
 test "any equality - different types" =
   let a any = 42
   let b any = 3.14
+
   assert::ok(a != b)
 
 test "any equality - strings" =
   let a any = "hello"
   let b any = "hello"
+
   assert::ok(a == b)
   let c any = "world"
+
   assert::ok(a != c)
 
 test "any equality - mixed any and primitive" =
   let a any = 10
+
   assert::ok(a == 10)
   assert::ok(10 == a)

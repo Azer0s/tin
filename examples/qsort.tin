@@ -27,6 +27,7 @@ fn qsort(arr [i64]) [i64] =
     for let x i64 in qsort(left):
       result ++= x
     result ++= pivot
+
     for let x i64 in qsort(right):
       result ++= x
 
@@ -36,6 +37,7 @@ fn qsort(arr [i64]) [i64] =
 
 let nums = [5, 2, 8, 1, 9, 3]
 let sorted = qsort(nums)
+
 for let x i64 in sorted:
   echo x
 
@@ -43,6 +45,7 @@ for let x i64 in sorted:
 
 test "sorts ascending" =
   let out = qsort([5, 2, 8, 1, 9, 3])
+
   assert::equals(out[0], 1)
   assert::equals(out[1], 2)
   assert::equals(out[2], 3)
@@ -52,26 +55,31 @@ test "sorts ascending" =
 
 test "empty array" =
   let out = qsort([])
+
   assert::equals(len(out), 0)
 
 test "single element" =
   let out = qsort([42])
+
   assert::equals(len(out), 1)
   assert::equals(out[0], 42)
 
 test "already sorted" =
   let out = qsort([1, 2, 3])
+
   assert::equals(out[0], 1)
   assert::equals(out[2], 3)
 
 test "reverse sorted" =
   let out = qsort([3, 2, 1])
+
   assert::equals(out[0], 1)
   assert::equals(out[1], 2)
   assert::equals(out[2], 3)
 
 test "duplicates" =
   let out = qsort([3, 1, 2, 1])
+
   assert::equals(out[0], 1)
   assert::equals(out[1], 1)
   assert::equals(out[2], 2)

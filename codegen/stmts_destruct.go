@@ -322,7 +322,15 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	// if-block's body) misdirect instruction emission to the wrong block.
 	cg.curBlock = nil
 
+	// Comma-ok destructure on `t[k]`: tell genIndexExpr to skip its
+	// auto-unwrap-or-panic step so the raw (V, bool) tuple flows through
+	// to the destructure binding below. See maybeUnwrapIndexTuple.
+	prevRaw := cg.indexExprRawTuple
+	cg.indexExprRawTuple = true
+
 	val, err := cg.genExpr(block, s.Value)
+	cg.indexExprRawTuple = prevRaw
+
 	if err != nil {
 		return nil, err
 	}

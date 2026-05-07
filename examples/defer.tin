@@ -16,15 +16,20 @@ fn process(size i64) i64 =
   if size <= 0:
     return 0 - 1
   let buf = mem::malloc(size)
+
   defer mem::free(buf)      // freed when process() returns
+
   return size * 2
 
 // Multiple defers: LIFO - b freed before a
 fn two_resources(n i64) i64 =
   let a = mem::malloc(16)
+
   defer mem::free(a)        // runs second
   let b = mem::malloc(16)
+
   defer mem::free(b)        // runs first
+
   return n + 1
 
 echo process(8)             // 16

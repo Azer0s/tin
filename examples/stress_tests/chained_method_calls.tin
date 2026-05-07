@@ -80,17 +80,21 @@ struct query_builder =
 
   fn build(this query_builder) string =
     let s string = "SELECT * FROM {this.table_name}"
+
     if len(this.where_clause) > 0:
       s = s ++ " WHERE {this.where_clause}"
     if len(this.order_col) > 0:
       let dir string = "ASC"
+
       if this.ascending == false:
         dir = "DESC"
       s = s ++ " ORDER BY {this.order_col} {dir}"
+
     if this.limit_val >= 0:
       s = s ++ " LIMIT {this.limit_val}"
     if this.offset_val > 0:
       s = s ++ " OFFSET {this.offset_val}"
+
     return s
 
 // ---------------------------------------------------------------------------
@@ -106,6 +110,7 @@ struct pipeline[t] =
   fn push(this pipeline[t], item t) pipeline[t] =
     let d [t] = this.data
     d ++= item
+
     return pipeline[t]{data: d}
 
   fn len_p(this pipeline[t]) i64 =
@@ -150,18 +155,22 @@ test "query builder chain: all options" =
     .limit(10)
     .offset(20)
     .build()
+
   assert::equals(q, "SELECT * FROM users WHERE age > 18 ORDER BY name ASC LIMIT 10 OFFSET 20")
 
 test "query builder chain: minimal" =
   let q = query_builder::new("products").limit(5).build()
+
   assert::equals(q, "SELECT * FROM products LIMIT 5")
 
 test "query builder chain: no limit" =
   let q = query_builder::new("logs").where_clause_set("level = error").build()
+
   assert::equals(q, "SELECT * FROM logs WHERE level = error")
 
 test "query builder chain: descending order" =
   let q = query_builder::new("events").order_by("ts", false).limit(100).build()
+
   assert::equals(q, "SELECT * FROM events ORDER BY ts DESC LIMIT 100")
 
 test "pipeline chain push multiple" =
@@ -169,6 +178,7 @@ test "pipeline chain push multiple" =
     .push(4)
     .push(5)
     .push(6)
+
   assert::equals(p.len_p(), 6)
   assert::equals(p.get_p(5), 6)
 
@@ -177,6 +187,7 @@ test "pipeline chain with strings" =
     .push("b")
     .push("c")
     .push("d")
+
   assert::equals(p.len_p(), 4)
   assert::equals(p.get_p(0), "a")
   assert::equals(p.get_p(3), "d")
@@ -187,6 +198,7 @@ test "str_builder chain simple" =
     .append(", ")
     .append("world")
     .build()
+
   assert::equals(s, "hello, world")
 
 test "str_builder chain with prepend" =
@@ -194,6 +206,7 @@ test "str_builder chain with prepend" =
     .append("world")
     .prepend("hello ")
     .build()
+
   assert::equals(s, "hello world")
 
 test "str_builder chain append_line" =
@@ -202,6 +215,7 @@ test "str_builder chain append_line" =
     .append_line("line2")
     .append("line3")
     .build()
+
   assert::equals(s, "line1\nline2\nline3")
 
 test "chain method result used as argument" =
@@ -213,6 +227,7 @@ test "chain method result used as argument" =
     .append(" / ")
     .append(q2)
     .build()
+
   assert::equals(combined, "SELECT * FROM a LIMIT 1 / SELECT * FROM b LIMIT 2")
 
 test "chain inside conditional" =
@@ -220,9 +235,11 @@ test "chain inside conditional" =
   let q = use_limit ?
     query_builder::new("t").limit(5).build()
     : query_builder::new("t").build()
+
   assert::equals(q, "SELECT * FROM t LIMIT 5")
 
 test "chain len used in expression" =
   let p = pipeline[i64]::of([10, 20, 30]).push(40).push(50)
   let doubled_len = p.len_p() * 2
+
   assert::equals(doubled_len, 10)

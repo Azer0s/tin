@@ -103,8 +103,10 @@ fn now_us() i64 = return tin_now_us()
 // Low-level primitive: call with `await spawn io::async_read(fd, buf, n)`.
 fn{#async} async_read(fd i32, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_async_read_c(fd, buf, n)
+
     if r != blocked:
       return r
     yield
@@ -115,8 +117,10 @@ fn{#async} async_read(fd i32, buf *byte, n i64) i64 =
 // Low-level primitive: call with `await spawn io::async_write(fd, buf, n)`.
 fn{#async} async_write(fd i32, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_async_write_c(fd, buf, n)
+
     if r != blocked:
       return r
     yield
@@ -137,6 +141,7 @@ fn write_all(fd i32, buf *byte, n i64) Future[sync::Unit] =
 
 fn{#async} write_all_impl(fd i32, buf *byte, n i64) =
   let sent i64 = 0
+
   loop:
     if sent >= n:
       break
@@ -154,6 +159,7 @@ fn read_exact(fd i32, buf *byte, n i64) Future[i64] =
 
 fn{#async} read_exact_impl(fd i32, buf *byte, n i64) i64 =
   let got i64 = 0
+
   loop:
     if got >= n:
       break
@@ -163,6 +169,7 @@ fn{#async} read_exact_impl(fd i32, buf *byte, n i64) i64 =
         return got
       got = got + r
     }
+
   return got
 
 // close closes a file descriptor.
@@ -203,11 +210,15 @@ struct BufferedReader =
       return false
     this.pos = 0
     let n = read_sync(this.fd, &this.buf[0], 4096)
+
     if n <= 0:
       this.done = true
       this.end = 0
+
       return false
+
     this.end = n
+
     return true
 
   // read_byte returns the next byte plus true; on EOF returns (0, false).
@@ -216,7 +227,9 @@ struct BufferedReader =
       if !this.refill():
         return (0 as byte, false)
     let b = this.buf[this.pos]
+
     this.pos = this.pos + 1
+
     return (b, true)
 
   // read_until reads bytes up to and including the first occurrence of
@@ -229,21 +242,26 @@ struct BufferedReader =
     let done_flag = false
     let result_str = ""
     let result_ok = false
+
     for !done_flag:
       let (b, ok) = this.read_byte()
+
       if !ok:
         if any:
           result_str = out
           result_ok = true
+
         done_flag = true
       else:
         any = true
+
         if b == delim:
           result_str = out
           result_ok = true
           done_flag = true
         else:
           out = out ++ b
+
     return (result_str, result_ok)
 
   // read_line returns the next line (without the trailing '\n'). Treats

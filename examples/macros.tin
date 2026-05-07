@@ -29,6 +29,7 @@ echo greet!("world")
 
 // Macros accept any expression as arguments.
 let x i64 = 7
+
 echo square!(x)
 echo add!(x, 3)
 

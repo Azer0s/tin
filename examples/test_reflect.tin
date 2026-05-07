@@ -9,10 +9,12 @@ echo reflect::kind(typeof(true))        // primitive
 echo reflect::kind(typeof("hello"))     // primitive  (string is a primitive)
 
 let arr = [1, 2, 3]
+
 echo reflect::kind(typeof(arr))         // array
 
 let p = 42
 let ptr = &p
+
 echo reflect::kind(typeof(ptr))         // ptr
 
 // is_* predicates
@@ -34,22 +36,26 @@ echo reflect::elem(typeof(42))          // '' (empty atom)
 
 // multi-level pointer elem
 let pp = &ptr
+
 echo typeof(pp)                         // '**i64
 echo reflect::elem(typeof(pp))          // '*i64
 echo reflect::elem(reflect::elem(typeof(pp)))  // 'i64
 
 // fn type atoms
 let fn_atom = '"fn(i64,f64)bool"
+
 echo reflect::kind(fn_atom)             // fn
 echo reflect::is_fn(fn_atom)            // 1
 echo reflect::fn_ret(fn_atom)           // 'bool
 
 let params = reflect::fn_params(fn_atom)
+
 echo params[0]                          // 'i64
 echo params[1]                          // 'f64
 
 // zero-arg fn
 let fn0 = '"fn()i64"
+
 echo reflect::fn_ret(fn0)               // i64
 let params0 = reflect::fn_params(fn0)
 // params0 is empty array - just check fn_ret works
@@ -57,11 +63,13 @@ let params0 = reflect::fn_params(fn0)
 // one-arg fn
 let fn1 = '"fn(string)i32"
 let params1 = reflect::fn_params(fn1)
+
 echo params1[0]                         // string
 
 // nested fn type
 let fn_nested = '"fn(fn(i64)bool,i64)string"
 let params_nested = reflect::fn_params(fn_nested)
+
 echo params_nested[0]                   // fn(i64)bool
 echo params_nested[1]                   // i64
 echo reflect::fn_ret(fn_nested)         // string
@@ -77,18 +85,22 @@ test "kind" =
   assert::equals(reflect::kind(typeof(true)), "primitive")
   assert::equals(reflect::kind(typeof("hello")), "primitive")
   let arr = [1, 2, 3]
+
   assert::equals(reflect::kind(typeof(arr)), "array")
   let p = 42
   let ptr = &p
+
   assert::equals(reflect::kind(typeof(ptr)), "ptr")
   assert::equals(reflect::kind('"fn(i64)bool"), "fn")
 
 test "is predicates" =
   assert::equals(reflect::is_primitive(typeof(42)), 1)
   let arr = [1, 2, 3]
+
   assert::equals(reflect::is_array(typeof(arr)), 1)
   let p = 42
   let ptr = &p
+
   assert::equals(reflect::is_ptr(typeof(ptr)), 1)
   assert::equals(reflect::is_fn('"fn(i64)bool"), 1)
   assert::equals(reflect::is_ptr(typeof(42)), 0)
@@ -99,6 +111,7 @@ test "elem" =
   let p = 42
   let ptr = &p
   let arr = [1, 2, 3]
+
   assert::equals(reflect::elem(typeof(ptr)), "i64")
   assert::equals(reflect::elem(typeof(arr)), "i64")
   assert::equals(reflect::elem('"*bool"), "bool")
@@ -107,25 +120,30 @@ test "elem" =
 
 test "fn type atoms" =
   let fn_atom = '"fn(i64,f64)bool"
+
   assert::equals(reflect::kind(fn_atom), "fn")
   assert::equals(reflect::is_fn(fn_atom), 1)
   assert::equals(reflect::fn_ret(fn_atom), "bool")
   let params = reflect::fn_params(fn_atom)
+
   assert::equals(params[0], "i64")
   assert::equals(params[1], "f64")
 
 test "fn_params zero-arg" =
   let fn0 = '"fn()i64"
+
   assert::equals(reflect::fn_ret(fn0), "i64")
 
 test "fn_params one-arg" =
   let fn1 = '"fn(string)i32"
   let params1 = reflect::fn_params(fn1)
+
   assert::equals(params1[0], "string")
 
 test "fn_params nested" =
   let fn_nested = '"fn(fn(i64)bool,i64)string"
   let params_nested = reflect::fn_params(fn_nested)
+
   assert::equals(params_nested[0], "fn(i64)bool")
   assert::equals(params_nested[1], "i64")
   assert::equals(reflect::fn_ret(fn_nested), "string")
@@ -136,6 +154,7 @@ test "fn_ret non-fn" =
 test "elem returns atom" =
   let x i64 = 0
   let px *i64 = &x
+
   // elem of *i64 is 'i64 - check it equals typeof(x) directly
   assert::equals(reflect::elem(typeof(px)) == typeof(x), true)
 
@@ -144,6 +163,7 @@ test "multi-level pointer elem" =
   let p *i64 = &x
   let pp **i64 = &p
   let ppp ***i64 = &pp
+
   // typeof chain: ***i64, **i64, *i64, i64
   assert::equals(reflect::elem(typeof(ppp))  == typeof(pp), true)
   assert::equals(reflect::elem(typeof(pp))   == typeof(p),  true)
@@ -153,14 +173,17 @@ test "multi-level pointer elem" =
 
 test "elem of array returns atom" =
   let arr = [1, 2, 3]
+
   assert::equals(reflect::elem(typeof(arr)) == typeof(42), true)
 
 test "fn_ret returns atom" =
   let fn_atom = '"fn(i64,f64)bool"
+
   assert::equals(reflect::fn_ret(fn_atom) == 'bool, true)
 
 test "fn_params returns atom slice" =
   let fn_atom = '"fn(i64,f64)bool"
   let ps = reflect::fn_params(fn_atom)
+
   assert::equals(ps[0] == 'i64,  true)
   assert::equals(ps[1] == 'f64,  true)

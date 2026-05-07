@@ -14,6 +14,7 @@ fn char_for(iter i64, max_iter i64) string =
   if iter >= max_iter:
     return "@"
   let idx = iter * 9 / max_iter
+
   if idx == 0:
     return " "
   if idx == 1:
@@ -30,6 +31,7 @@ fn char_for(iter i64, max_iter i64) string =
     return "*"
   if idx == 7:
     return "#"
+
   return "%"
 
 fn main() =
@@ -43,9 +45,11 @@ fn main() =
   let y_max f64 =  1.1
 
   let row i64 = 0
+
   for row < height:
     let line string = ""
     let col i64 = 0
+
     for col < width:
       let cx = x_min + (x_max - x_min) * (col as f64) / (width as f64)
       let cy = y_min + (y_max - y_min) * (row as f64) / (height as f64)
@@ -53,17 +57,21 @@ fn main() =
       let zx f64 = 0.0
       let zy f64 = 0.0
       let iter i64 = 0
+
       for iter < max_iter:
         let zx2 = zx * zx
         let zy2 = zy * zy
+
         if zx2 + zy2 > 4.0:
           break
         let nx = zx2 - zy2 + cx
+
         zy = 2.0 * zx * zy + cy
         zx = nx
         iter = iter + 1
 
       line = line ++ char_for(iter, max_iter)
       col = col + 1
+
     echo line
     row = row + 1

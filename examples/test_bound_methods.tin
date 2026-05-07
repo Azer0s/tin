@@ -30,28 +30,33 @@ struct greeter =
 test "bound value method returns correct result" =
   let c = counter::new(10)
   let get_fn = c.get
+
   assert::equals(get_fn(), 10)
 
 test "bound method with argument" =
   let c = counter::new(5)
   let mul_fn = c.mul
+
   assert::equals(mul_fn(3), 15)
 
 test "bound method with string arg" =
   let g = greeter::new("Alice")
   let greet_fn = g.greet
+
   assert::equals(greet_fn("hello"), "Alice: hello")
 
 test "bound method closure passed to higher-order fn" =
   let c = counter::new(7)
   let get_fn = c.get
   let v = get_fn()
+
   assert::equals(v, 7)
 
 test "multiple bound methods from same struct" =
   let c = counter::new(4)
   let get_fn = c.get
   let mul_fn = c.mul
+
   assert::equals(get_fn(), 4)
   assert::equals(mul_fn(10), 40)
 
@@ -60,12 +65,14 @@ test "bound method captures independent copies" =
   let c2 = counter::new(9)
   let get1 = c1.get
   let get2 = c2.get
+
   assert::equals(get1(), 3)
   assert::equals(get2(), 9)
 
 test "bound pointer receiver method mutates via original" =
   let c counter = counter::new(0)
   let add_fn = c.add
+
   add_fn(5)
   add_fn(3)
   assert::equals(c.get(), 8)
@@ -73,6 +80,7 @@ test "bound pointer receiver method mutates via original" =
 test "bound method on heap pointer captures the pointer" =
   let f = &counter{value: 0}
   let add_fn = f.add
+
   add_fn(10)
   add_fn(5)
   assert::equals(f.value, 15)
@@ -82,6 +90,7 @@ test "two heap pointers with bound methods are independent" =
   let b = &counter{value: 100}
   let add_a = a.add
   let add_b = b.add
+
   add_a(1)
   add_b(1)
   assert::equals(a.value, 1)

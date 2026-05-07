@@ -18,9 +18,11 @@ use io
 fn filter[t](pred fn(i t) bool) fn([t]) [t] =
   return fn(xs [t]) [t] =
     let out [t] = []
+
     for let x t in xs:
       if pred(x):
         out ++= x
+
     return out
 
 fn{#no_inline} probe() [atom] = return stacktrace()
@@ -33,24 +35,28 @@ fn{#no_inline} probe() [atom] = return stacktrace()
 // (no .dylib suffix) for `start` and `main`, so they pass is_in_lib.
 fn in_user_code(f atom) bool =
   let p = source::parse_sourcepos(f)
+
   if source::is_unknown(p):       return false
   if source::is_in_lib(p):        return false
   if source::is_program_entry(p): return false
+
   return source::is_resolved(p)
 
 fn print_frames(label string, fs [atom]) =
   let _ = io::printf("=== %s (%lld frames) ===\n", label, len(fs))
+
   for let f atom in fs:
     let _ = io::printf("  %s\n", f as string)
 
 fn main() i64 =
   let raw = probe()
+
   print_frames("unfiltered", raw)
 
   raw
     |> filter(in_user_code)
     |> fn(fs [atom]) =
-         print_frames("filtered (in_user_code)", fs)
+      print_frames("filtered (in_user_code)", fs)
 
   return 0
 
@@ -64,5 +70,6 @@ test "pipe + in_user_code drops a strict subset of the trace" =
   // robust across glibc / Mach-O / kernel-level frame variations.
   let raw = probe()
   let kept = raw |> filter(in_user_code)
+
   assert::ok(len(kept) >= 1)
   assert::ok(len(kept) < len(raw))

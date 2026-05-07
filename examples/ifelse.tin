@@ -33,8 +33,10 @@ test "if/else - false branch" =
 
 fn{#pure} clamp_low(n i64, lo i64) i64 =
   let r i64 = n
+
   if n < lo:
     r = lo
+
   return r
 
 test "if/else empty else - clamps when below" =
@@ -50,6 +52,7 @@ fn{#pure} category(n i64) string =
     return "negative"
   else if n == 0:
     return "zero"
+
   return "positive"   // falls through when both conditions are false
 
 test "else if no trailing else - negative" =

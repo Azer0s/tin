@@ -6,4 +6,5 @@ struct Cat =
 
 fn main() =
   let c = Cat{name: "Whiskers"}
+
   echo c.speak()

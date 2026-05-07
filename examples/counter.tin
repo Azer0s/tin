@@ -20,28 +20,36 @@ struct counter =
     return this.value
 
 let c = counter{value: 0}
+
 echo c.get()
 
 let c2 = c.inc()
 let c3 = c2.inc()
 let c4 = c3.inc()
+
 echo c4.get()
 
 let c5 = c4.add(10)
+
 echo c5.get()
 
 let c6 = c5.dec()
+
 echo c6.get()
 
 test "counter operations" =
   let c = counter{value: 0}
+
   assert::equals(c.get(), 0)
 
 test "counter increment and add" =
   let c = counter{value: 0}
   let c2 = c.inc().inc().inc()
+
   assert::equals(c2.get(), 3)
   let c3 = c2.add(10)
+
   assert::equals(c3.get(), 13)
   let c4 = c3.dec()
+
   assert::equals(c4.get(), 12)

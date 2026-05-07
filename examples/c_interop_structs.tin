@@ -27,40 +27,49 @@ fn c_origin(r rect) point2d               = extern("c_origin")
 
 fn main() =
   let p = point2d{x: 3.0, y: 4.0}
+
   echo c_add_xy(p)          // 7
 
   let p2 = c_scale(p, 2.0)
+
   echo p2.x                 // 6
   echo p2.y                 // 8
 
   let r = rect{origin: p, width: 10.0, height: 5.0}
+
   echo c_rect_area(r)       // 50
 
   let p3 = c_make_point(1.5, 2.5)
+
   echo p3.x                 // 1.5
   echo p3.y                 // 2.5
 
 test "c struct pass by value" =
   let pt = point2d{x: 3.0, y: 4.0}
+
   assert::equals(c_add_xy(pt), 7.0)
 
 test "c struct scale" =
   let pt = point2d{x: 3.0, y: 4.0}
   let pt2 = c_scale(pt, 2.0)
+
   assert::equals(pt2.x, 6.0)
   assert::equals(pt2.y, 8.0)
 
 test "nested c struct" =
   let rc = rect{origin: point2d{x: 0.0, y: 0.0}, width: 10.0, height: 20.0}
+
   assert::equals(c_rect_area(rc), 200.0)
 
 test "c struct return" =
   let pt = c_make_point(5.0, 6.0)
+
   assert::equals(pt.x, 5.0)
   assert::equals(pt.y, 6.0)
 
 test "nested c struct return" =
   let rc = rect{origin: point2d{x: 1.0, y: 2.0}, width: 3.0, height: 4.0}
   let orig = c_origin(rc)
+
   assert::equals(orig.x, 1.0)
   assert::equals(orig.y, 2.0)

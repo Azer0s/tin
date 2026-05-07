@@ -33,23 +33,29 @@ fn make_list(vals [i64]) *ListNode =
   let head = &ListNode{val: vals[0], next: nil, prev: nil}
   let cur = head
   let i i64 = 1
+
   for i < len(vals):
     let node = &ListNode{val: vals[i], next: nil, prev: cur}
+
     cur.next = node
     cur = node
     i = i + 1
+
   return head
 
 fn list_sum(head *ListNode) i64 =
   let s i64 = 0
   let cur = head
+
   for cur != nil:
     s = s + cur.val
     cur = cur.next
+
   return s
 
 let nums = [1, 2, 3, 4, 5]
 let head = make_list(nums)
+
 echo list_sum(head)   // 15
 
 // ---------------------------------------------------------------------------
@@ -91,4 +97,5 @@ fn eval(e *Expr) i64 =
 
 // Build: (2 + 3) * (4 + 1)
 let expr = mul(add(lit(2), lit(3)), add(lit(4), lit(1)))
+
 echo eval(expr)   // 25

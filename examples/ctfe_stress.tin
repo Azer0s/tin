@@ -96,8 +96,10 @@ fn{#pure} sign(n i64) i64 =
 
 fn{#pure} sum_to(n i64) i64 =
   let acc i64 = 0
+
   for let i i64 = 0; i <= n; i++:
     acc = acc + i
+
   return acc
 
 fn{#pure} match_kind(n i64) i64 =
@@ -168,6 +170,7 @@ test "memo: 50 call sites for cube(3) all fold once" =
   let s3 i64 = cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3)
   let s4 i64 = cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3)
   let s5 i64 = cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3) + cube(3)
+
   assert::equals(s1 + s2 + s3 + s4 + s5, 27 * 50)
 
 // --------------------------------------------------------------------------
@@ -209,9 +212,11 @@ test "shadow: param masks top-level var" =
 
 fn{#pure} traced_double(n i64) i64 =
   let r i64 = n * 2
+
   { #allow_sideffect } {
     echo "traced_double({n}) = {r}"
   }
+
   return r
 
 test "#allow_sideffect prevents fold" =
@@ -254,4 +259,5 @@ test "literal arg folds; variable arg compiles" =
   assert::equals(doubled(7), 14)
   // Runtime call - the body runs, not the fold.
   let dynamic i64 = 9
+
   assert::equals(use_doubled(dynamic), 18)

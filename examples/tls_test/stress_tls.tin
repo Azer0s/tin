@@ -12,17 +12,21 @@ use sync
 async worker(id i64, msgs i64, done sync::Channel[i64]) =
   tls::set_ca_file("examples/tls_test/cert.pem")
   let (conn, err) = tcp::dial("127.0.0.1", 8443)
+
   if errors::has(err):
     echo "worker {id}: dial failed: {err}"
     await done.send(1)
+
     return
 
   let tls_conn = await tls::connect("localhost", conn.fd())
 
   let i i64 = 0
+
   for i < msgs:
     await ioutil::write_string(tls_conn, "ping {id} {i}\n")
     let resp = await ioutil::read_string(tls_conn)
+
     if resp != "ECHO: ping {id} {i}":
       echo "worker {id} msg {i}: unexpected: {resp}"
     i = i + 1
@@ -37,12 +41,14 @@ fn{#async} main() =
   let done = sync::Channel[i64].make(workers)
 
   let i i64 = 0
+
   for i < workers:
     spawn worker(i, messages, done)
     i = i + 1
 
   let nerrors i64 = 0
   let j i64 = 0
+
   for j < workers:
     nerrors = nerrors + (await done.recv())
     j = j + 1

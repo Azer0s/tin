@@ -74,26 +74,33 @@ struct HttpResponse =
 fn headers_complete(buf string) i64 =
   let n = len(buf)
   let i i64 = 0
+
   for i < n - 3:
     if buf[i] == @'\r' && buf[i+1] == @'\n' &&
        buf[i+2] == @'\r' && buf[i+3] == @'\n':
       return i + 4
+
     i = i + 1
+
   i = 0
+
   for i < n - 1:
     if buf[i] == @'\n' && buf[i+1] == @'\n':
       return i + 2
     i = i + 1
+
   return -1
 
 // line_end returns the index of the first \r or \n at or after pos,
 // capped at limit.
 fn line_end(buf string, pos i64, limit i64) i64 =
   let i = pos
+
   for i < limit:
     if buf[i] == @'\r' || buf[i] == @'\n':
       return i
     i = i + 1
+
   return limit
 
 // skip_newline advances past the \r\n or \n at pos.
@@ -102,6 +109,7 @@ fn skip_newline(buf string, pos i64, limit i64) i64 =
     return pos + 2
   if pos < limit && buf[pos] == @'\n':
     return pos + 1
+
   return pos
 
 // parse_headers parses header lines from buf[start..end_pos) into a HashMap.
@@ -110,18 +118,25 @@ fn skip_newline(buf string, pos i64, limit i64) i64 =
 fn parse_headers(buf string, start i64, end_pos i64) collections::HashMap[string, string] =
   let headers = collections::HashMap[string, string]::make(16)
   let i = start
+
   for i < end_pos:
     let eol = line_end(buf, i, end_pos)
+
     if eol > i:
       let line = strings::substr(buf, i, eol)
       let colon = strings::index_of(line, ":")
+
       if colon > 0:
         let k = strings::to_lower(strings::trim(strings::substr(line, 0, colon)))
         let v = strings::trim(strings::substr(line, colon + 1, len(line)))
+
         headers.set(k, v)
+
     i = skip_newline(buf, eol, end_pos)
+
     if i == eol:
       i = eol + 1
+
   return headers
 
 // clip_body returns at most content_length bytes from body, or body itself
@@ -130,8 +145,10 @@ fn clip_body(body string, content_length i64) string =
   if content_length < 0:
     return body
   let blen = len(body)
+
   if content_length >= blen:
     return body
+
   return strings::substr(body, 0, content_length)
 
 // content_length reads the "content-length" header value, or returns -1.
@@ -139,8 +156,10 @@ fn content_length(headers collections::HashMap[string, string]) i64 =
   if !headers.has("content-length"):
     return -1
   let (v, err) = strings::parse_int(headers.get("content-length"))
+
   if err != nil:
     return -1
+
   return v
 
 // parse_request parses an HTTP/1.x request from buf.
@@ -149,6 +168,7 @@ fn parse_request(buf string) HttpRequest =
   let body_start = headers_complete(buf)
   let header_zone = buf
   let body_raw    = ""
+
   if body_start >= 0:
     header_zone = strings::substr(buf, 0, body_start)
     body_raw    = strings::substr(buf, body_start, len(buf))
@@ -162,6 +182,7 @@ fn parse_request(buf string) HttpRequest =
   let method  = ""
   let path    = ""
   let version = ""
+
   if len(parts) >= 1:
     method = parts[0]
   if len(parts) >= 2:
@@ -190,6 +211,7 @@ fn parse_response(buf string) HttpResponse =
   let body_start = headers_complete(buf)
   let header_zone = buf
   let body_raw    = ""
+
   if body_start >= 0:
     header_zone = strings::substr(buf, 0, body_start)
     body_raw    = strings::substr(buf, body_start, len(buf))
@@ -204,10 +226,12 @@ fn parse_response(buf string) HttpResponse =
   let version = ""
   let status_code i32 = 0
   let reason = ""
+
   if sp1 >= 0:
     version = strings::substr(first, 0, sp1)
     let rest = strings::substr(first, sp1 + 1, len(first))
     let sp2 = strings::index_of(rest, " ")
+
     if sp2 >= 0:
       let (code, _) = strings::parse_int32(strings::substr(rest, 0, sp2))
       status_code = code

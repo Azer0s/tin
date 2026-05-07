@@ -17,6 +17,7 @@ io::puts("=== stdlib_usage example ===")
 
 // Math: compute sqrt(2) and floor/ceil it.
 let root2 = math::sqrt(2.0)
+
 io::printf("sqrt(2) = %f\n", root2)
 io::printf("floor   = %f\n", math::floor(root2))
 io::printf("ceil    = %f\n", math::ceil(root2))
@@ -24,9 +25,11 @@ io::printf("ceil    = %f\n", math::ceil(root2))
 // str: measure string length and compare two strings.
 let hello = "Hello, world!"
 let n i64 = str::strlen(hello)
+
 io::printf("len(\"%s\") = %lld\n", hello, n)
 
 let cmp i32 = str::strcmp("abc", "abc")
+
 io::printf("strcmp(\"abc\",\"abc\") = %d\n", cmp)
 
 test "math stdlib" =

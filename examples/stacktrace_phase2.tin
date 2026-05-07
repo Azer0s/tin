@@ -17,6 +17,7 @@ fn{#no_inline} probe_outer() [atom] = return probe_inner()
 
 test "stacktrace() walks the live stack across multiple Tin frames" =
   let frames [atom] = probe_outer()
+
   // Expect at minimum: probe_inner, probe_outer, the test runner wrapper,
   // and main. A stricter equality check on names would lock the test to
   // clang's symbol-mangling choices.

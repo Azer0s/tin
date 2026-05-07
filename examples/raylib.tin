@@ -20,6 +20,7 @@ const BLACK = color{0, 0, 0, 255}
 const WHITE = color{255, 255, 255, 255}
 
 init_window(800, 600, "Hello Raylib")
+
 defer close_window()
 
 for !window_should_close():

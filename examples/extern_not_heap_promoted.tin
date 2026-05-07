@@ -22,6 +22,7 @@ test "extern function returning pointer to small struct" =
   assert::ok(compare_small_struct_ptr(s))
 
   let v = *s
+
   assert::equals(1, v.a)
   assert::equals(2, v.b)
   assert::equals(3, v.c)

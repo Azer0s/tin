@@ -12,21 +12,26 @@ fn{#async} count_once() =
 
 fn{#async} main() =
   let n i64 = 5000
+
   counter = sync::Channel[i64].make(n)
-  
+
   let i i64 = 0
+
   for i < n:
     spawn count_once()
     i = i + 1
-  
+
   let total i64 = 0
   let j i64 = 0
+
   for j < n:
     let v = await counter.recv()
+
     total = total + v
     j = j + 1
-  
+
   if total != n:
     echo "FAIL: expected {n} got {total}"
     return
+
   echo "fiber_spawn_storm: OK, spawned and collected {total} fibers"

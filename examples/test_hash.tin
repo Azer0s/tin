@@ -11,6 +11,7 @@ use hash::xxhash3
 
 test "fnv1a_32 empty string is non-zero" =
   let h = fnv::fnv1a_32("")
+
   assert::ok(h != 0)
 
 test "fnv1a_32 deterministic" =
@@ -21,6 +22,7 @@ test "fnv1a_32 different inputs differ" =
 
 test "fnv1a_32 string and bytes overloads agree" =
   let s = "hello"
+
   assert::equals(fnv::fnv1a_32(s), fnv::fnv1a_32(addr(s[0]), len(s)))
 
 test "fnv1a_64 deterministic" =
@@ -31,6 +33,7 @@ test "fnv1a_64 different inputs differ" =
 
 test "fnv1a_64 string and bytes overloads agree" =
   let s = "tin"
+
   assert::equals(fnv::fnv1a_64(s), fnv::fnv1a_64(addr(s[0]), len(s)))
 
 // -- MD5 --
@@ -52,6 +55,7 @@ test "md5 different inputs differ" =
 
 test "md5 output is 32 hex chars" =
   let h = md5::md5("hello")
+
   assert::equals(len(h), 32)
 
 // -- SHA1 --
@@ -70,6 +74,7 @@ test "sha1 different inputs differ" =
 
 test "sha1 output is 40 hex chars" =
   let h = sha1::sha1("hello")
+
   assert::equals(len(h), 40)
 
 // -- xxHash3 --
@@ -80,6 +85,7 @@ test "xxhash3 deterministic" =
 test "xxhash3 empty string does not crash" =
   let h = xxhash3::xxhash3("")
   let h2 = xxhash3::xxhash3("")
+
   assert::ok(h == h2)
 
 test "xxhash3 different inputs differ" =
@@ -93,5 +99,6 @@ test "xxhash3_seeded deterministic" =
 
 test "xxhash3 long string" =
   let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
   assert::equals(xxhash3::xxhash3(s), xxhash3::xxhash3(s))
   assert::ok(xxhash3::xxhash3(s) != xxhash3::xxhash3(s ++ "b"))

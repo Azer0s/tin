@@ -28,6 +28,7 @@ test "sqrt of 9" =
 
 test "sqrt of 2 approximate" =
   let s = math::sqrt(2.0)
+
   assert::ok(s > 1.41421 && s < 1.41422)
 
 // pow
@@ -97,6 +98,7 @@ test "log of 1 is 0" =
 test "exp and log are inverses" =
   let x = 2.5
   let result = math::log(math::exp(x))
+
   assert::ok(result > 2.4999 && result < 2.5001)
 
 test "log2 of 8 is 3" =
@@ -115,10 +117,12 @@ test "cos of 0" =
 
 test "sin of PI/2 is 1" =
   let result = math::sin(math::PI / 2.0)
+
   assert::ok(result > 0.9999 && result < 1.0001)
 
 test "cos of PI is -1" =
   let result = math::cos(math::PI)
+
   assert::ok(result < 0.0 - 0.9999 && result > 0.0 - 1.0001)
 
 // constants

@@ -1704,6 +1704,27 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 					entry.NewRet(result)
 				}
 			} else {
+				// Comma-ok adapter for ::index: user impl returns (V, bool),
+				// trait slot returns just V. Extract field at the V slot
+				// so the vtable shim still type-checks. Fat-ptr trait
+				// dispatch through this slot intentionally drops the ok
+				// bit; callers that want the bool must go through the
+				// direct dispatch in genIndexExpr (which handles comma-ok
+				// unwrap).
+				//
+				// Tin's tuple struct shape is `{ i32 type_tag, T1, T2 }`,
+				// so the V/bool pair lives at fields 1 and 2.
+				if st, ok := result.Type().(*irtypes.StructType); ok && len(st.Fields) == 3 {
+					if it, isInt := st.Fields[2].(*irtypes.IntType); isInt && it.BitSize == 1 &&
+						st.Fields[1].Equal(wrapSlot.RetType) {
+						v := entry.NewExtractValue(result, 1)
+						entry.NewRet(v)
+
+						wrappers = append(wrappers, wrapFn)
+
+						continue
+					}
+				}
 				// Coerce return value to wrapper signature if needed (e.g. user
 				// impl returns i32 but the trait alias signature says i64).
 				ret := cg.coerce(entry, result, wrapSlot.RetType)

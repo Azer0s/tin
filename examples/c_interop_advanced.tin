@@ -32,14 +32,17 @@ test "3-level nested struct by value" =
     layer: 3,
     flags: 0xFF
   }
+
   assert::equals(c_viewport_area(v), 10000)
 
 test "2-level nested struct by value" =
   let b = bounds{min: bvec2{x: 0, y: 0}, max: bvec2{x: 50, y: 30}}
+
   assert::equals(c_bounds_width(b), 50)
 
 test "C returns 3-level nested struct" =
   let v = c_make_viewport(5, 10, 25, 40, 7, 0xAB)
+
   assert::equals(v.clip.min.x, 5)
   assert::equals(v.clip.min.y, 10)
   assert::equals(v.clip.max.x, 25)
@@ -50,6 +53,7 @@ test "C returns 3-level nested struct" =
 test "C returns inner nested struct" =
   let v = c_make_viewport(3, 7, 50, 60, 1, 0)
   let m = c_viewport_min(v)
+
   assert::equals(m.x, 3)
   assert::equals(m.y, 7)
 
@@ -67,11 +71,13 @@ fn c_get_vec_ptr(out **pvec2) = extern("c_get_vec_ptr")
 
 test "pointer-to-struct: read via C" =
   let p = c_get_point_at(0)
+
   assert::equals(c_read_vec_x(p), 1)
   assert::equals(c_read_vec_y(p), 2)
 
 test "double pointer output param: C writes *pvec2 into **pvec2" =
   let p *pvec2 = nil
+
   c_get_vec_ptr(&p)
   assert::equals(c_read_vec_x(p), 42)
   assert::equals(c_read_vec_y(p), 99)
@@ -88,12 +94,14 @@ fn c_set_triple(t *triple, a i64, b i64, c i64) = extern("c_set_triple")
 
 test "pointer-to-struct: read fields" =
   let t = c_get_triple()
+
   assert::equals((*t).a, 10)
   assert::equals((*t).b, 20)
   assert::equals((*t).c, 30)
 
 test "pointer-to-struct: C mutates, Tin observes" =
   let t = c_get_triple()
+
   c_set_triple(t, 100, 200, 300)
   assert::equals((*t).a, 100)
   assert::equals((*t).b, 200)
@@ -116,44 +124,53 @@ fn c_tree_right(n *tree_node) *tree_node = extern("c_tree_right")
 
 test "tree: sum all nodes" =
   let root = c_build_tree()
+
   // 10 + 5 + 15 + 2 + 7 + 12 + 20 = 71
   assert::equals(c_tree_sum(root), 71)
 
 test "tree: depth" =
   let root = c_build_tree()
+
   assert::equals(c_tree_depth(root), 3)
 
 test "tree: root value" =
   let root = c_build_tree()
+
   assert::equals(c_tree_value(root), 10)
 
 test "tree: left child value" =
   let root = c_build_tree()
   let l = c_tree_left(root)
+
   assert::equals(c_tree_value(l), 5)
 
 test "tree: right child value" =
   let root = c_build_tree()
   let r = c_tree_right(root)
+
   assert::equals(c_tree_value(r), 15)
 
 test "tree: chained left-left (multi-hop)" =
   let root = c_build_tree()
+
   // root.left = g_nodes[4] (value=5), g_nodes[4].left = g_nodes[0] (value=2)
   assert::equals(c_tree_value(c_tree_left(c_tree_left(root))), 2)
 
 test "tree: chained left-right (multi-hop)" =
   let root = c_build_tree()
+
   // root.left = g_nodes[4] (value=5), g_nodes[4].right = g_nodes[1] (value=7)
   assert::equals(c_tree_value(c_tree_right(c_tree_left(root))), 7)
 
 test "tree: chained right-left (multi-hop)" =
   let root = c_build_tree()
+
   // root.right = g_nodes[5] (value=15), g_nodes[5].left = g_nodes[2] (value=12)
   assert::equals(c_tree_value(c_tree_left(c_tree_right(root))), 12)
 
 test "tree: chained right-right (multi-hop)" =
   let root = c_build_tree()
+
   // root.right = g_nodes[5] (value=15), g_nodes[5].right = g_nodes[3] (value=20)
   assert::equals(c_tree_value(c_tree_right(c_tree_right(root))), 20)
 
@@ -181,10 +198,12 @@ test "callback: lambda" =
 
 test "callback: lambda with capture" =
   let factor = 10
+
   assert::equals(c_apply_cb(fn(x i64) i64 = return x * factor, 5), 50)
 
 test "callback: void callback called multiple times" =
   let count [i64] = [0]
+
   c_for_each(fn(i i64) = count[0] = count[0] + 1, 5)
   assert::equals(count[0], 5)
 
@@ -219,11 +238,13 @@ test "4-level nested struct to C" =
     },
     id: 4
   }
+
   // 1 + 2 + 3 + 4 = 10
   assert::equals(c_deep4_sum(d), 10)
 
 test "C returns 4-level nested struct" =
   let d = c_make_deep4(10, 20, 30, 40)
+
   assert::equals(d.inner.p.a.v, 10)
   assert::equals(d.inner.p.b.v, 20)
   assert::equals(d.inner.tag, 30)
@@ -238,6 +259,7 @@ test "array of struct pointers" =
     c_get_point_at(2),
     c_get_point_at(3)
   ]
+
   // {1,2}, {3,4}, {5,6}, {7,8}
   assert::equals((*pts[0]).x, 1)
   assert::equals((*pts[0]).y, 2)
@@ -250,8 +272,10 @@ fn c_get_pvec2_triple_ptr(out ***pvec2) = extern("c_get_pvec2_triple_ptr")
 
 test "triple pointer out-param: C writes **pvec2 into ***pvec2" =
   let pp **pvec2 = nil
+
   c_get_pvec2_triple_ptr(&pp)
   let p = *pp
+
   assert::equals((*p).x, 77)
   assert::equals((*p).y, 88)
 
@@ -265,10 +289,12 @@ test "callback: i32 two-arg sum" =
 
 test "callback: i32 two-arg multiply with capture" =
   let scale i32 = 3
+
   assert::equals(c_apply_i32_2(fn(a i32, b i32) i32 = return (a + b) * scale, 4, 10), 42)
 
 test "callback: for-each xy coords sum" =
   // g_points = {1,2},{3,4},{5,6},{7,8}: sum of all x = 1+3+5+7 = 16
   let sumx [i32] = [0]
+
   c_for_each_point_xy(fn(x i32, y i32) = sumx[0] = sumx[0] + x)
   assert::equals(sumx[0], 16)

@@ -25,17 +25,22 @@ fn dsigmoid(y f64) f64 =
 // Allocate an h-by-w matrix of f64, filled with uniform values in [-1, 1).
 fn rand_matrix(r *rand::Rng, h i64, w i64) [[f64]] =
   let m [[f64]] = []
+
   for let i i64 = 0; i < h; i++:
     let row [f64] = []
+
     for let j i64 = 0; j < w; j++:
       row ++= 2.0 * r.f64() - 1.0
     m ++= row
+
   return m
 
 fn zero_vec(n i64) [f64] =
   let v [f64] = []
+
   for let i i64 = 0; i < n; i++:
     v ++= 0.0
+
   return v
 
 struct Net =
@@ -57,15 +62,19 @@ fn new_net(r *rand::Rng) Net =
 // Forward pass. Returns (hidden activations, output activations).
 fn forward(net *Net, x [f64]) ([f64], [f64]) =
   let h = zero_vec(N_HIDDEN)
+
   for let j i64 = 0; j < N_HIDDEN; j++:
     let z = net.b1[j]
+
     for let i i64 = 0; i < N_IN; i++:
       z = z + net.w1[j][i] * x[i]
     h[j] = sigmoid(z)
 
   let o = zero_vec(N_OUT)
+
   for let k i64 = 0; k < N_OUT; k++:
     let z = net.b2[k]
+
     for let j i64 = 0; j < N_HIDDEN; j++:
       z = z + net.w2[k][j] * h[j]
     o[k] = sigmoid(z)
@@ -79,15 +88,19 @@ fn train_step(net *Net, x [f64], target [f64]) f64 =
   // Output-layer deltas: dE/dz_k = (o_k - t_k) * sigmoid'(z_k)
   let d_out = zero_vec(N_OUT)
   let loss f64 = 0.0
+
   for let k i64 = 0; k < N_OUT; k++:
     let err = o[k] - target[k]
+
     loss = loss + err * err
     d_out[k] = err * dsigmoid(o[k])
 
   // Hidden-layer deltas: dE/dz_j = (sum_k d_out[k] * W2[k][j]) * sigmoid'(z_j)
   let d_hid = zero_vec(N_HIDDEN)
+
   for let j i64 = 0; j < N_HIDDEN; j++:
     let s f64 = 0.0
+
     for let k i64 = 0; k < N_OUT; k++:
       s = s + d_out[k] * net.w2[k][j]
     d_hid[j] = s * dsigmoid(h[j])
@@ -126,6 +139,7 @@ fn main() =
 
   for let epoch i64 = 0; epoch < EPOCHS; epoch++:
     let total f64 = 0.0
+
     for let s i64 = 0; s < 4; s++:
       total = total + train_step(&net, xs[s], ys[s])
     if epoch % 500 == 0:
@@ -133,6 +147,7 @@ fn main() =
 
   echo "---"
   echo "trained predictions:"
+
   for let s i64 = 0; s < 4; s++:
     let (_, o) = forward(&net, xs[s])
     echo "  {xs[s][0]} XOR {xs[s][1]} -> {o[0]}  (target {ys[s][0]})"

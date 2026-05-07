@@ -49,9 +49,11 @@ struct tuple[t] =
 type point = tuple[f32]
 
 let origin = point{0.0, 0.0}
+
 echo origin.show()               // first: 0, second: 0
 
 let p1 = point{1.5, 2.5}
+
 echo p1.show()                   // first: 1.5, second: 2.5
 
 // type mypoint = tuple[f32] override = ...
@@ -62,6 +64,7 @@ type mypoint = tuple[f32] override =
     return "({this.first:.0f}, {this.second:.0f})"
 
 let mp = mypoint{3.0, 4.0}
+
 echo mp.show()                   // (3, 4)
 
 // Multiple monomorphizations of the same template
@@ -69,6 +72,7 @@ echo mp.show()                   // (3, 4)
 type int_pair = tuple[i64]
 
 let nums = int_pair{10, 20}
+
 echo nums.show()                 // first: 10, second: 20
 
 // Both types are independent
@@ -83,12 +87,15 @@ use assert
 
 test "type alias show method" =
   let pt = point{3.0, 4.0}
+
   assert::equals(pt.show(), "first: 3, second: 4")
 
 test "override show method" =
   let mp2 = mypoint{5.0, 6.0}
+
   assert::equals(mp2.show(), "(5, 6)")
 
 test "int_pair" =
   let nums2 = int_pair{7, 8}
+
   assert::equals(nums2.show(), "first: 7, second: 8")

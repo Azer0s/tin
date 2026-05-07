@@ -15,9 +15,11 @@ fn greet(name string) string =
 fn greet(times i64, name string) string =
   let result string = ""
   let i i64 = 0
+
   for i < times:
     result = result ++ name ++ " "
     i = i + 1
+
   return result
 
 // top-level overloads by arity
@@ -79,6 +81,7 @@ test "overload by arity - sum" =
 
 test "method overload by type - set" =
   let b = Box{value: 0}
+
   b.set(42)
   assert::equals(b.value, 42)
   b.set("hello")
@@ -86,6 +89,7 @@ test "method overload by type - set" =
 
 test "method overload by arity - scale" =
   let b = Box{value: 3}
+
   assert::equals(b.scale(), 3)
   assert::equals(b.scale(4), 12)
   assert::equals(b.scale(2, 3), 18)

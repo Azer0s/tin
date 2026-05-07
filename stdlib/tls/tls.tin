@@ -81,28 +81,34 @@ fn connect(host string, fd i32) Future[TlsConn] =
 fn{#async} connect_impl(host string, fd i32) TlsConn =
   let handle  = tin_tls_new_c(host, fd)
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_tls_do_handshake_c(handle)
+
     if r != blocked:
       break
     yield
+
   return TlsConn{_cell: rc::Cell[*void].alloc(handle, tin_tls_free_c), fd: fd}
 
 fn{#async} tls_read_impl(handle *void, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_tls_read_c(handle, buf, n)
+
     if r != blocked:
       return r
     yield
 
 fn{#async} tls_write_impl(handle *void, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()
+
   loop:
     let r = tin_tls_write_c(handle, buf, n)
+
     if r != blocked:
       return r
     yield
-
 
 export { TlsConn, connect, set_ca_file } as tls

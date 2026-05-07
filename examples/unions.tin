@@ -37,10 +37,12 @@ echo direction_name(direction.north)
 echo direction_name(direction.west)
 
 let today day = day.saturday
+
 if is_weekend(today):
   echo "it is the weekend"
 
 let workday day = day.wednesday
+
 if is_weekend(workday):
   echo "weekend"
 

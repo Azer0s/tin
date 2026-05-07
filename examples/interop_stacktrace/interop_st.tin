@@ -22,15 +22,19 @@ fn c_call_back() void = extern("c_call_back")
 fn{#interop} print_st_direct() void =
   let frames = stacktrace()
   let _ = io::printf("DIRECT_FRAMES=%lld\n", len(frames))
+
   for let f atom in frames:
     let _ = io::printf("DIRECT: %s\n", f as string)
+
   return
 
 fn{#interop} print_st_nested() void =
   let frames = stacktrace()
   let _ = io::printf("NESTED_FRAMES=%lld\n", len(frames))
+
   for let f atom in frames:
     let _ = io::printf("NESTED: %s\n", f as string)
+
   return
 
 // run_nested invokes the C callback then returns through Tin land.
@@ -41,4 +45,5 @@ fn{#interop} print_st_nested() void =
 fn{#interop} run_nested() void =
   c_call_back()
   let _ = io::printf("TIN: run_nested returning\n")
+
   return

@@ -19,62 +19,78 @@ use assert
 fn map[t, r](f fn(t) r) fn([t]) [r] =
   return fn(list [t]) [r] =
     let res [r] = []
+
     for let v t in list:
       res ++= f(v)
+
     return res
 
 fn filter[t](pred fn(t) bool) fn([t]) [t] =
   return fn(list [t]) [t] =
     let res [t] = []
+
     for let v t in list:
       if pred(v):
         res ++= v
+
     return res
 
 fn reduce[t, r](f fn(r, t) r, init r) fn([t]) r =
   return fn(list [t]) r =
     let acc r = init
+
     for let v t in list:
       acc = f(acc, v)
+
     return acc
 
 fn take[t](n i64) fn([t]) [t] =
   return fn(list [t]) [t] =
     let res [t] = []
     let i i64 = 0
+
     for i < n && i < len(list):
       res ++= list[i]
       i = i + 1
+
     return res
 
 fn drop[t](n i64) fn([t]) [t] =
   return fn(list [t]) [t] =
     let res [t] = []
     let i i64 = n
+
     for i < len(list):
       res ++= list[i]
       i = i + 1
+
     return res
 
 fn flat_map[t, r](f fn(t) [r]) fn([t]) [r] =
   return fn(list [t]) [r] =
     let res [r] = []
+
     for let v t in list:
       let sub = f(v)
+
       for let s r in sub:
         res ++= s
+
     return res
 
 fn zip_with[a, b, c](f fn(a, b) c, bs [b]) fn([a]) [c] =
   return fn(as_arr [a]) [c] =
     let res [c] = []
     let n i64 = len(as_arr)
+
     if len(bs) < n:
       n = len(bs)
     let i i64 = 0
+
     for i < n:
       res ++= f(as_arr[i], bs[i])
       i = i + 1
+
     return res
 
 // ---------------------------------------------------------------------------
@@ -85,6 +101,7 @@ test "simple two-step pipe" =
   let result = [1, 2, 3, 4, 5]
     |> filter(fn(n i64) bool = return n % 2 == 0)
     |> map(fn(n i64) i64 = return n * n)
+
   assert::equals(result[0], 4)
   assert::equals(result[1], 16)
 
@@ -93,6 +110,7 @@ test "three-step pipe with reduce" =
     |> filter(fn(n i64) bool = return n % 2 == 0)
     |> map(fn(n i64) i64 = return n * 3)
     |> reduce(fn(acc i64, v i64) i64 = return acc + v, 0)
+
   // evens: 2,4,6,8,10 -> *3 = 6,12,18,24,30 -> sum=90
   assert::equals(result, 90)
 
@@ -100,6 +118,7 @@ test "pipe with take and drop" =
   let result = [1, 2, 3, 4, 5, 6, 7, 8]
     |> drop(2)
     |> take(4)
+
   // [3,4,5,6]
   assert::equals(len(result), 4)
   assert::equals(result[0], 3)
@@ -112,6 +131,7 @@ test "long pipeline five stages" =
     |> filter(fn(n i64) bool = return n % 2 == 1)     // [1,3,5,7]
     |> map(fn(n i64) i64 = return n * n)              // [1,9,25,49]
     |> reduce(fn(acc i64, v i64) i64 = return acc + v, 0)
+
   assert::equals(result, 84)
 
 test "flat_map pipe" =
@@ -124,6 +144,7 @@ test "flat_map pipe" =
         i = i + 1
       return out
     )
+
   // [1, 2,2, 3,3,3]
   assert::equals(len(result), 6)
   assert::equals(result[0], 1)
@@ -133,6 +154,7 @@ test "flat_map pipe" =
 test "zip_with pipe" =
   let result = [1, 2, 3, 4, 5]
     |> zip_with(fn(a i64, b i64) i64 = return a + b, [10, 20, 30, 40, 50])
+
   assert::equals(result[0], 11)
   assert::equals(result[4], 55)
 
@@ -142,6 +164,7 @@ test "pipe result stored and reused" =
   // Use evens twice
   let doubled = evens |> map(fn(n i64) i64 = return n * 2)
   let sum = evens |> reduce(fn(acc i64, v i64) i64 = return acc + v, 0)
+
   assert::equals(sum, 12)
   assert::equals(doubled[0], 4)
 
@@ -149,12 +172,14 @@ test "pipe inside a function argument" =
   fn count_above[t](arr [t], n i64) i64 where t is i64 =
     return len(arr |> filter(fn(v i64) bool = return v > n))
   let data = [1, 5, 3, 8, 2, 9, 4]
+
   assert::equals(count_above(data, 4), 3)  // 5,8,9
 
 test "pipe on string array" =
   let result = ["hello", "world", "tin", "compiler", "test"]
     |> filter(fn(s string) bool = return len(s) > 4)
     |> map(fn(s string) string = return "{s}!")
+
   assert::equals(len(result), 3)
   assert::equals(result[0], "hello!")
   assert::equals(result[1], "world!")
@@ -164,6 +189,7 @@ test "pipe empty source" =
   let result [i64] = []
     |> filter(fn(n i64) bool = return n > 0)
     |> map(fn(n i64) i64 = return n * 2)
+
   assert::equals(len(result), 0)
 
 test "nested pipes: result of one pipe fed into another" =
@@ -172,4 +198,5 @@ test "nested pipes: result of one pipe fed into another" =
   let final_result = intermediate
     |> map(fn(n i64) i64 = return n / 2)       // [3, 4, 5]
     |> reduce(fn(acc i64, v i64) i64 = return acc + v, 0)
+
   assert::equals(final_result, 12)

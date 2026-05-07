@@ -27,17 +27,20 @@ fn main() =
   // String pointer (ARC: retain/release still applies through pointer)
   let s string = "hello"
   let sp *string = &s
+
   echo *sp         // hello
 
 test "double pointer read" =
   let a i64 = 7
   let pa *i64 = &a
   let ppa **i64 = &pa
+
   assert::equals(**ppa, 7)
 
 test "double pointer write through first pointer" =
   let b i64 = 1
   let pb *i64 = &b
+
   *pb = 99
   assert::equals(b, 99)
 
@@ -45,6 +48,7 @@ test "double pointer write through second pointer" =
   let c i64 = 1
   let pc *i64 = &c
   let ppc **i64 = &pc
+
   **ppc = 77
   assert::equals(c, 77)
 
@@ -53,6 +57,7 @@ test "triple pointer read-write" =
   let pd *i64 = &d
   let ppd **i64 = &pd
   let pppd ***i64 = &ppd
+
   assert::equals(***pppd, 5)
   ***pppd = 42
   assert::equals(d, 42)
@@ -61,6 +66,7 @@ test "pointer type is_ptr reflection" =
   let e i64 = 0
   let pe *i64 = &e
   let ppe **i64 = &pe
+
   assert::equals(reflect::is_ptr(typeof(pe)), 1)
   assert::equals(reflect::is_ptr(typeof(ppe)), 1)
   assert::equals(reflect::is_ptr(typeof(e)), 0)
@@ -69,6 +75,7 @@ test "pointer elem type reflection" =
   let f i64 = 0
   let pf *i64 = &f
   let ppf **i64 = &pf
+
   // reflect::elem(*i64) should be i64, reflect::elem(**i64) should be *i64
   assert::equals(reflect::elem(typeof(pf)) == typeof(f), true)
   assert::equals(reflect::elem(typeof(ppf)) == typeof(pf), true)
@@ -76,4 +83,5 @@ test "pointer elem type reflection" =
 test "string pointer read" =
   let s string = "world"
   let sp *string = &s
+
   echo *sp

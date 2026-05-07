@@ -15,9 +15,11 @@ struct Flag(not[Flag]) =
 test "unary ! dispatches to not" =
   let t = Flag{v: true}
   let f = !t
+
   assert::equals(false, f.v)
 
   let g = !f
+
   assert::equals(true, g.v)
 
 struct Path(concat[Path, Path]) =
@@ -30,6 +32,7 @@ test "binary ++ dispatches to concat" =
   let a = Path{s: "etc"}
   let b = Path{s: "passwd"}
   let c = a ++ b
+
   assert::equals("etc/passwd", c.s)
 
 struct Scaled(mul[i64, Scaled]) =
@@ -40,11 +43,13 @@ struct Scaled(mul[i64, Scaled]) =
 test "Scaled * i64 dispatches to mul" =
   let s = Scaled{v: 5}
   let r = s * 3
+
   assert::equals(15, r.v)
 
 test "i64 * Scaled commutes" =
   let s = Scaled{v: 5}
   let r = 3 * s
+
   assert::equals(15, r.v)
 
 struct Counter(sub[Counter, Counter], div[i64, i64], mod[i64, i64]) =
@@ -58,6 +63,7 @@ test "non-commutative ops" =
   let a = Counter{v: 100}
   let b = Counter{v: 30}
   let s = a - b
+
   assert::equals(70, s.v)
   assert::equals(20, a / 5)
   assert::equals(2, a % 7)
@@ -76,6 +82,7 @@ test "compound += desugars through add" =
   let a = Acc{v: 1}
   let b = Acc{v: 10}
   a += b
+
   assert::equals(11, a.v)
   a += b
   assert::equals(21, a.v)
@@ -83,12 +90,14 @@ test "compound += desugars through add" =
 test "ord drives < <= > >=" =
   let a = Box{size: 3}
   let b = Box{size: 7}
+
   assert::equals(true, a < b)
   assert::equals(true, a <= b)
   assert::equals(false, a > b)
   assert::equals(false, a >= b)
 
   let c = Box{size: 7}
+
   assert::equals(false, b < c)
   assert::equals(true, b <= c)
   assert::equals(false, b > c)

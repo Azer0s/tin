@@ -100,7 +100,7 @@ fn main() i64 =
 '
 
 # ── struct[index] rejected for struct without index trait ──
-assert_err "struct[i64] rejected" "does not support index expressions" '
+assert_err "struct[i64] rejected" "no \`::index\` impl for index of type" '
 struct point =
   x i32
 

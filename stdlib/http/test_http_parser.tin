@@ -5,14 +5,17 @@ use http
 
 test "headers_complete: finds \\r\\n\\r\\n" =
   let buf = "GET / HTTP/1.1\r\nHost: x\r\n\r\nbody"
+
   assert::equals(http::headers_complete(buf), 27)
 
 test "headers_complete: finds \\n\\n fallback" =
   let buf = "GET / HTTP/1.1\nHost: x\n\nbody"
+
   assert::equals(http::headers_complete(buf), 24)
 
 test "headers_complete: returns -1 when not found" =
   let buf = "GET / HTTP/1.1\r\nHost: x\r\n"
+
   assert::equals(http::headers_complete(buf), -1)
 
 test "headers_complete: empty string returns -1" =
@@ -20,24 +23,29 @@ test "headers_complete: empty string returns -1" =
 
 test "headers_complete: bare separator only" =
   let buf = "\r\n\r\n"
+
   assert::equals(http::headers_complete(buf), 4)
 
 // -- parse_request: request line --
 
 test "parse_request: method" =
   let r = http::parse_request("POST /submit HTTP/1.1\r\n\r\n")
+
   assert::equals(r.method, "POST")
 
 test "parse_request: path" =
   let r = http::parse_request("GET /index.html HTTP/1.1\r\n\r\n")
+
   assert::equals(r.path, "/index.html")
 
 test "parse_request: version" =
   let r = http::parse_request("GET / HTTP/1.1\r\n\r\n")
+
   assert::equals(r.version, "HTTP/1.1")
 
 test "parse_request: HTTP/1.0 version" =
   let r = http::parse_request("HEAD /ping HTTP/1.0\r\n\r\n")
+
   assert::equals(r.version, "HTTP/1.0")
   assert::equals(r.method, "HEAD")
 
@@ -46,21 +54,25 @@ test "parse_request: HTTP/1.0 version" =
 test "parse_request: single header" =
   let buf = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.headers.get("host"), "example.com")
 
 test "parse_request: header key is lowercased" =
   let buf = "GET / HTTP/1.1\r\nContent-Type: text/html\r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.headers.get("content-type"), "text/html")
 
 test "parse_request: header value is trimmed" =
   let buf = "GET / HTTP/1.1\r\nX-Custom:  spaced value  \r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.headers.get("x-custom"), "spaced value")
 
 test "parse_request: multiple headers" =
   let buf = "GET / HTTP/1.1\r\nHost: h\r\nAccept: */*\r\nX-Id: 42\r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.headers.get("host"), "h")
   assert::equals(r.headers.get("accept"), "*/*")
   assert::equals(r.headers.get("x-id"), "42")
@@ -68,6 +80,7 @@ test "parse_request: multiple headers" =
 test "parse_request: no headers" =
   let buf = "DELETE /res HTTP/1.1\r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.headers.len(), 0)
 
 // -- parse_request: body --
@@ -75,26 +88,31 @@ test "parse_request: no headers" =
 test "parse_request: body without content-length" =
   let buf = "POST / HTTP/1.1\r\n\r\nhello"
   let r = http::parse_request(buf)
+
   assert::equals(r.body, "hello")
 
 test "parse_request: body clipped by content-length" =
   let buf = "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello world"
   let r = http::parse_request(buf)
+
   assert::equals(r.body, "hello")
 
 test "parse_request: body empty when content-length is 0" =
   let buf = "POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\nextra"
   let r = http::parse_request(buf)
+
   assert::equals(r.body, "")
 
 test "parse_request: no body section" =
   let buf = "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
   let r = http::parse_request(buf)
+
   assert::equals(r.body, "")
 
 test "parse_request: lf-only newlines" =
   let buf = "PUT /x HTTP/1.1\nContent-Length: 3\n\nabc"
   let r = http::parse_request(buf)
+
   assert::equals(r.method, "PUT")
   assert::equals(r.headers.get("content-length"), "3")
   assert::equals(r.body, "abc")
@@ -104,26 +122,31 @@ test "parse_request: lf-only newlines" =
 test "parse_response: status code 200" =
   let buf = "HTTP/1.1 200 OK\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.status as i32, 200)
 
 test "parse_response: status code 404" =
   let buf = "HTTP/1.1 404 Not Found\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.status as i32, 404)
 
 test "parse_response: version" =
   let buf = "HTTP/1.0 200 OK\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.version, "HTTP/1.0")
 
 test "parse_response: reason phrase" =
   let buf = "HTTP/1.1 404 Not Found\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.reason, "Not Found")
 
 test "parse_response: multi-word reason phrase" =
   let buf = "HTTP/1.1 500 Internal Server Error\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.reason, "Internal Server Error")
 
 // -- parse_response: headers and body --
@@ -131,21 +154,25 @@ test "parse_response: multi-word reason phrase" =
 test "parse_response: content-type header" =
   let buf = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.headers.get("content-type"), "application/json")
 
 test "parse_response: body" =
   let buf = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!"
   let r = http::parse_response(buf)
+
   assert::equals(r.body, "Hello, World!")
 
 test "parse_response: body clipped by content-length" =
   let buf = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello, World!"
   let r = http::parse_response(buf)
+
   assert::equals(r.body, "Hello")
 
 test "parse_response: empty body on 204" =
   let buf = "HTTP/1.1 204 No Content\r\n\r\n"
   let r = http::parse_response(buf)
+
   assert::equals(r.body, "")
   assert::equals(r.status as i32, 204)
 

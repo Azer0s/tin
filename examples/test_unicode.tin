@@ -3,6 +3,7 @@ use unicode
 
 test "rune is i32" =
   let r rune = 65 as rune
+
   assert::equals(r as i64, 65)
 
 test "valid basic" =
@@ -28,26 +29,31 @@ test "from_rune ascii" =
 test "from_rune 2-byte" =
   // U+00E4 (ä) = UTF-8: 0xC3 0xA4
   let expected = "" ++ (0xC3 as byte) ++ (0xA4 as byte)
+
   assert::equals(unicode::from_rune(0xE4 as rune), expected)
 
 test "from_rune 3-byte" =
   // U+20AC (€) = UTF-8: 0xE2 0x82 0xAC
   let expected = "" ++ (0xE2 as byte) ++ (0x82 as byte) ++ (0xAC as byte)
+
   assert::equals(unicode::from_rune(0x20AC as rune), expected)
 
 test "from_rune 4-byte" =
   // U+1F600 (grinning face emoji) = UTF-8: 0xF0 0x9F 0x98 0x80
   let expected = "" ++ (0xF0 as byte) ++ (0x9F as byte) ++ (0x98 as byte) ++ (0x80 as byte)
+
   assert::equals(unicode::from_rune(0x1F600 as rune), expected)
 
 test "from_rune invalid becomes replacement char" =
   // U+FFFD = UTF-8: 0xEF 0xBF 0xBD
   let expected = "" ++ (0xEF as byte) ++ (0xBF as byte) ++ (0xBD as byte)
+
   assert::equals(unicode::from_rune((0 - 1) as rune), expected)
 
 test "for rune in ascii" =
   let s = "hello"
   let codes [i64] = []
+
   for r rune in s:
     codes ++= r as i64
   assert::equals(len(codes), 5)
@@ -58,6 +64,7 @@ test "for rune in 2-byte sequence" =
   // ä (U+00E4) = 0xC3 0xA4
   let s = "" ++ (0xC3 as byte) ++ (0xA4 as byte)
   let codes [i64] = []
+
   for r rune in s:
     codes ++= r as i64
   assert::equals(len(codes), 1)
@@ -67,6 +74,7 @@ test "for rune in 3-byte sequence" =
   // € (U+20AC) = 0xE2 0x82 0xAC
   let s = "" ++ (0xE2 as byte) ++ (0x82 as byte) ++ (0xAC as byte)
   let codes [i64] = []
+
   for r rune in s:
     codes ++= r as i64
   assert::equals(len(codes), 1)
@@ -76,6 +84,7 @@ test "for rune in 4-byte sequence" =
   // U+1F600 = 0xF0 0x9F 0x98 0x80
   let s = "" ++ (0xF0 as byte) ++ (0x9F as byte) ++ (0x98 as byte) ++ (0x80 as byte)
   let codes [i64] = []
+
   for r rune in s:
     codes ++= r as i64
   assert::equals(len(codes), 1)
@@ -85,6 +94,7 @@ test "for rune mixed ascii and multibyte" =
   // "a" + ä(U+00E4) + "b" = 0x61 0xC3 0xA4 0x62
   let s = "a" ++ (0xC3 as byte) ++ (0xA4 as byte) ++ "b"
   let codes [i64] = []
+
   for r rune in s:
     codes ++= r as i64
   assert::equals(len(codes), 3)
@@ -94,6 +104,7 @@ test "for rune mixed ascii and multibyte" =
 
 test "runes ascii" =
   let rs = unicode::runes("abc")
+
   assert::equals(len(rs), 3)
   assert::equals(rs[0] as i64, 97)
   assert::equals(rs[2] as i64, 99)
@@ -107,14 +118,17 @@ test "count empty" =
 test "count multibyte" =
   // ä (2 bytes) + ö (2 bytes) = 4 bytes total, 2 runes
   let s = "" ++ (0xC3 as byte) ++ (0xA4 as byte) ++ (0xC3 as byte) ++ (0xB6 as byte)
+
   assert::equals(unicode::count(s), 2)
   assert::equals(len(s), 4)
 
 test "encode roundtrip ascii" =
   let s = "hello"
+
   assert::equals(unicode::encode(unicode::runes(s)), s)
 
 test "encode roundtrip multibyte" =
   // ä (0xC3 0xA4)
   let s = "" ++ (0xC3 as byte) ++ (0xA4 as byte)
+
   assert::equals(unicode::encode(unicode::runes(s)), s)

@@ -65,8 +65,10 @@ fn quad_identity[t](x t) t =
 
 fn arr_map[t, r](arr [t], f fn(t) r) [r] =
   let out [r] = []
+
   for let v t in arr:
     out ++= f(v)
+
   return out
 
 fn arr_map2[t, r, s](arr [t], f fn(t) r, g fn(r) s) [s] =
@@ -78,21 +80,25 @@ fn arr_map2[t, r, s](arr [t], f fn(t) r, g fn(r) s) [s] =
 
 test "box wrap/unwrap i64" =
   let b = box[i64]{val: 42}
+
   assert::equals(b.unwrap(), 42)
 
 test "box wrap/unwrap string" =
   let b = box[string]{val: "hello"}
+
   assert::equals(b.unwrap(), "hello")
 
 test "box map_box i64->string interpolation" =
   let b = box[i64]{val: 7}
   let bs = b.map_box(fn(n i64) string = return "{n}")
+
   assert::equals(bs.unwrap(), "7")
 
 test "box map_box chained" =
   let b = box[i64]{val: 3}
   let b2 = b.map_box(fn(n i64) i64 = return n * n)
-           .map_box(fn(n i64) i64 = return n + 1)
+    .map_box(fn(n i64) i64 = return n + 1)
+
   assert::equals(b2.unwrap(), 10)
 
 test "pair_box construction and field access" =
@@ -100,6 +106,7 @@ test "pair_box construction and field access" =
     left: box[i64]{val: 10},
     right: box[string]{val: "tin"},
   }
+
   assert::equals(p.left.unwrap(), 10)
   assert::equals(p.right.unwrap(), "tin")
 
@@ -109,15 +116,18 @@ test "pair_box swap" =
     right: box[bool]{val: true},
   }
   let s = p.swap()
+
   assert::ok(s.left.unwrap())
   assert::equals(s.right.unwrap(), 99)
 
 test "triple_box round-trip i64" =
   let tb = triple_box(55)
+
   assert::equals(triple_unbox(tb), 55)
 
 test "triple_box round-trip string" =
   let tb = triple_box("deep")
+
   assert::equals(triple_unbox(tb), "deep")
 
 test "identity chain i64" =
@@ -128,6 +138,7 @@ test "identity chain string" =
 
 test "arr_map i64 to i64" =
   let out = arr_map([1, 2, 3, 4], fn(n i64) i64 = return n * 2)
+
   assert::equals(out[0], 2)
   assert::equals(out[3], 8)
 
@@ -138,11 +149,13 @@ test "arr_map2 two-stage transform" =
     fn(n i64) i64 = return n * 2,
     fn(n i64) i64 = return n + 1,
   )
+
   assert::equals(out[0], 3)
   assert::equals(out[1], 5)
   assert::equals(out[2], 7)
 
 test "arr_map i64 to string" =
   let labels = arr_map([10, 20, 30], fn(n i64) string = return "item_{n}")
+
   assert::equals(labels[0], "item_10")
   assert::equals(labels[2], "item_30")

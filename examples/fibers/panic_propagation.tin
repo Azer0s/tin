@@ -28,47 +28,64 @@ fn{#async} returns_normally() i64 =
 
 test "await panic propagates to caller" =
   let caught string = ""
+
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       caught = msg
+
   let f = spawn always_panics()
+
   await f
   // unreachable if panic propagated
   assert::ok(false)
 
 test "await panic message is preserved" =
   let caught string = ""
+
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       caught = msg
+
   let f = spawn panics_with_value("my error")
+
   await f
   assert::equals(caught, "my error")
 
 test "no panic from awaited fiber leaves caught empty" =
   let caught string = ""
+
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       caught = msg
+
   let f = spawn returns_normally()
   let v = await f
+
   assert::equals(v, 42)
   assert::equals(caught, "")
 
 test "panic does not affect subsequent fibers" =
   let caught string = ""
+
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       caught = msg
+
   let f1 = spawn always_panics()
+
   await f1
   // After catching the panic, spawn another fiber normally.
   let f2 = spawn returns_normally()
   let v = await f2
+
   assert::equals(v, 42)
   assert::equals(caught, "boom from fiber")
 
@@ -82,20 +99,24 @@ fn{#async} catches_await_panic() i64 =
   defer do:
     let _ = recover()
   let _ = await spawn always_panics()
+
   return 0
 
 fn{#async} catches_direct_panic() i64 =
   defer do:
     let _ = recover()
   panic("direct")
+
   return 0
 
 test "recovered await-panic in async fn yields zero to outer awaiter" =
   let result = await spawn catches_await_panic()
+
   assert::equals(result, 0)
 
 test "recovered direct panic in async fn yields zero to outer awaiter" =
   let result = await spawn catches_direct_panic()
+
   assert::equals(result, 0)
 
 // Loop-edge panic re-raise: an async function that loops after spawning
@@ -110,12 +131,16 @@ fn{#async} loop_catches_ff_panic() i64 =
     let _ = recover()
   spawn fire_and_forget_panicker()
   let i i64 = 0
+
   for true:
     i = i + 1
+
     if i >= 1000000:
       return -1  // safety: should never reach this
+
   return 0  // unreachable normally; panic from ff fiber exits the loop via auto-yield check
 
 test "loop-edge re-raises panic from fire-and-forget fiber" =
   let result = await spawn loop_catches_ff_panic()
+
   assert::equals(result, 0)

@@ -61,16 +61,20 @@ struct Reader =
     if this.done:
       let empty [string] = []
       return (empty, false)
+
     if this.pos >= len(this.src):
       this.done = true
       let empty [string] = []
+
       return (empty, false)
+
     let row [string] = []
     let in_quoted = false
     let cur = ""
     let n = len(this.src)
     let row_done = false
     let just_started_field = true
+
     for !row_done:
       if this.pos >= n:
         // EOF terminates the current row.
@@ -79,6 +83,7 @@ struct Reader =
         row_done = true
       else:
         let c = this.src[this.pos]
+
         if in_quoted:
           if c == @'\"':
             // Look at next char: another quote means escaped quote, else end.
@@ -105,6 +110,7 @@ struct Reader =
             // CRLF: skip the \n that should follow. A bare CR ends the row too.
             row ++= cur
             this.pos = this.pos + 1
+
             if this.pos < n && this.src[this.pos] == @'\n':
               this.pos = this.pos + 1
             row_done = true
@@ -118,6 +124,7 @@ struct Reader =
             cur = cur ++ c
             this.pos = this.pos + 1
             just_started_field = false
+
     return (row, true)
 
 // reader constructs a Reader using `,` as the field delimiter.
@@ -137,12 +144,15 @@ fn parse_with(src string, delim byte) [[string]] =
   let r = Reader{src: src, pos: 0, delim: delim, done: false}
   let rows [[string]] = []
   let keep = true
+
   for keep:
     let (row, ok) = r.next()
+
     if !ok:
       keep = false
     else:
       rows ++= row
+
   return rows
 
 // encode renders rows to a single CSV string with `,` as the delimiter
@@ -155,17 +165,21 @@ fn encode_with(rows [[string]], delim byte) string =
   let out = ""
   let nr = len(rows)
   let i i64 = 0
+
   for i < nr:
     let row = rows[i]
     let nf = len(row)
     let j i64 = 0
+
     for j < nf:
       if j > 0:
         out = out ++ delim
       out = out ++ encode_field(row[j], delim)
       j = j + 1
+
     out = out ++ "\n"
     i = i + 1
+
   return out
 
 // encode_field returns the CSV-encoded form of a single field. Quotes the
@@ -177,14 +191,18 @@ fn encode_field(s string, delim byte) string =
   let n = len(s)
   let out = "\""
   let i i64 = 0
+
   for i < n:
     let c = s[i]
+
     if c == @'\"':
       out = out ++ "\"\""
     else:
       out = out ++ c
     i = i + 1
+
   out = out ++ "\""
+
   return out
 
 // needs_quoting reports whether s must be wrapped in `"..."` to round-trip
@@ -193,11 +211,14 @@ fn encode_field(s string, delim byte) string =
 fn needs_quoting(s string, delim byte) bool =
   let n = len(s)
   let i i64 = 0
+
   for i < n:
     let c = s[i]
+
     if c == delim || c == @'\"' || c == @'\n' || c == @'\r':
       return true
     i = i + 1
+
   return false
 
 // Writer accumulates rows in memory and exposes them as a string. For very

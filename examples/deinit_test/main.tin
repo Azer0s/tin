@@ -35,6 +35,7 @@ let r = resource{id: 1}
 
 fn use_resource() =
   let r2 = resource{id: 2}
+
   echo "using {r2.id}"
   // deinit 2 printed here when r2 goes out of scope
 
@@ -44,6 +45,7 @@ use_resource()
 
 fn use_holder() =
   let h = holder{item: resource{id: 3}}
+
   echo "holder has {h.item.id}"
   // deinit holder, then deinit 3
 
@@ -54,12 +56,14 @@ use_holder()
 test "resource fields accessible in deinit" =
   // Verifies the struct is fully constructed before deinit is eventually called.
   let r3 = resource{id: 10}
+
   assert::equals(r3.id, 10)
   // r3 out of scope: deinit 10
 
 test "nested struct deinit order" =
   // holder.deinit fires before the inner resource.deinit (field release).
   let h2 = holder{item: resource{id: 20}}
+
   assert::equals(h2.item.id, 20)
   // deinit holder, then deinit 20
 
@@ -69,6 +73,7 @@ test "returned struct deinit deferred to caller scope" =
   fn make_res(id i64) resource =
     return resource{id: id}
   let r4 = make_res(30)
+
   assert::equals(r4.id, 30)
   // deinit 30 here
 
@@ -78,5 +83,6 @@ struct plain =
 
 test "struct without deinit compiles cleanly" =
   let p = plain{x: 42}
+
   assert::equals(p.x, 42)
   // no deinit defined; no call emitted - no crash

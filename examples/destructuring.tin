@@ -15,18 +15,21 @@ test "uniform array destructuring" =
   // `let [a, b]` requires arr.len == 2 exactly under the strict semantics.
   let arr [i64] = [10, 20]
   let [a, b] [i64] = arr
+
   assert::equals(a, 10)
   assert::equals(b, 20)
 
 test "per-slot typed any-array destructuring" =
   let arr [any] = [42 as any, true as any]
   let [n, flag] [i32, bool] = arr
+
   assert::equals(n as i64, 42)
   assert::ok(flag)
 
 test "rest split" =
   let arr [i64] = [1, 2, 3, 4]
   let [x, ...xs] [i64] = arr
+
   assert::equals(x, 1)
   assert::equals(len(xs), 3)
   assert::equals(xs[0], 2)
@@ -35,12 +38,14 @@ test "rest split" =
 test "struct destructuring" =
   let p = point{x: 3, y: 4}
   let {x, y} point = p
+
   assert::equals(x, 3)
   assert::equals(y, 4)
 
 test "type alias for per-slot destructuring" =
   let arr [any] = [10 as any, false as any]
   let [n, flag] coord = arr
+
   assert::equals(n as i64, 10)
   assert::not_ok(flag)
 

@@ -16,15 +16,19 @@ use errors
 
 async handle_conn(c udp::Conn) =
   let line = await ioutil::read_string(c)
+
   await ioutil::write_string(c, line)
   c.close()
 
 fn{#async} main() =
   let (srv, err) = udp::listen(8082)
+
   if errors::has(err):
     panic(err.message())
   echo "udp echo listening on :8082"
+
   loop:
     let (c, cerr) = await srv.accept()
+
     if !errors::has(cerr):
       spawn handle_conn(c)

@@ -56,6 +56,7 @@ io::printf("sizeof(i32)        = %lld\n", sizeof(i32))
 
 let stack_d = dog { tag: 1 }
 let stack_c = cat { tag: 2 }
+
 describe(stack_d)
 describe(stack_c)
 
@@ -64,18 +65,22 @@ describe(stack_c)
 // Allocate a dog on the heap and initialise it through the pointer.
 let raw_dog = mem::malloc(sizeof(dog))
 let dp = raw_dog as *dog
+
 (*dp).tag = 42
 
 // Wrap the heap *dog directly in the speak fat-pointer for runtime dispatch.
 let hd speak = dp
+
 io::printf("heap %s says: %s\n", hd.label(), hd.sound())
 
 // Same for cat.
 let raw_cat = mem::malloc(sizeof(cat))
 let cp = raw_cat as *cat
+
 (*cp).tag = 99
 
 let hc speak = cp
+
 io::printf("heap %s says: %s\n", hc.label(), hc.sound())
 
 // Free heap memory.
@@ -87,8 +92,10 @@ use assert
 test "heap dog dispatch" =
   let raw = mem::malloc(sizeof(dog))
   let dp = raw as *dog
+
   (*dp).tag = 1
   let hd speak = dp
+
   assert::equals(hd.sound(), "Woof!")
   assert::equals(hd.label(), "dog")
   mem::free(raw)
@@ -96,8 +103,10 @@ test "heap dog dispatch" =
 test "heap cat dispatch" =
   let raw = mem::malloc(sizeof(cat))
   let cp = raw as *cat
+
   (*cp).tag = 2
   let hc speak = cp
+
   assert::equals(hc.sound(), "Meow!")
   assert::equals(hc.label(), "cat")
   mem::free(raw)

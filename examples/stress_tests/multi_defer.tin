@@ -53,16 +53,20 @@ fn lifo_via_string_ptr() *string =
 
 fn with_early_return(n i64) i64 =
   let a = mem::malloc(16)
+
   defer do:
     mem::free(a)
   let b = mem::malloc(32)
+
   defer do:
     mem::free(b)
   if n < 0:
     return 0 - 1   // early return: both defers must fire
   let c = mem::malloc(64)
+
   defer do:
     mem::free(c)
+
   return n * 2     // normal return: all three defers fire
 
 // ---------------------------------------------------------------------------
@@ -71,10 +75,13 @@ fn with_early_return(n i64) i64 =
 
 fn defer_mutates_via_ptr(n i64, p *i64) i64 =
   let result i64 = n
+
   defer do:
     result = result * 2
     (*p) = result   // write doubled value to pointer after return
+
   result = result + 1
+
   return result   // returns n+1; defer then writes (n+1)*2 to *p
 
 // ---------------------------------------------------------------------------
@@ -84,19 +91,25 @@ fn defer_mutates_via_ptr(n i64, p *i64) i64 =
 
 fn five_defers(buf *void, counter *i64) i64 =
   let count i64 = 0
+
   defer do:
     count = count + 1
     (*counter) = (*counter) + 1     // observable side effect
+
   defer do:
     count = count + 10
     (*counter) = (*counter) + 10
+
   defer do:
     count = count + 100
     (*counter) = (*counter) + 100
+
   defer do:
     count = count + 1000
     (*counter) = (*counter) + 1000
+
   defer mem::free(buf)
+
   return count   // returns 0 (count before defers run)
 
 // ---------------------------------------------------------------------------
@@ -108,10 +121,13 @@ fn five_defers(buf *void, counter *i64) i64 =
 fn safe_divide(a i64, b i64, caught *bool) i64 =
   defer do:
     let msg = recover()
+
     if len(msg) > 0:
       (*caught) = true   // signal that panic was caught
+
   if b == 0:
     panic("division by zero")
+
   return a / b
 
 // ---------------------------------------------------------------------------
@@ -120,16 +136,20 @@ fn safe_divide(a i64, b i64, caught *bool) i64 =
 
 fn inner_with_defer(x i64) i64 =
   let v i64 = x
+
   defer do:
     v = v + 100   // runs after inner returns; doesn't affect return value
+
   return v         // returns x (v before defer)
 
 fn outer_with_defer(x i64) i64 =
   let a = inner_with_defer(x)
   // inner_with_defer(x) returns x (defer inside inner doesn't affect return)
   let b i64 = a
+
   defer do:
     b = b + 10    // runs after outer returns; doesn't affect return value
+
   return b         // returns a = x
 
 // ---------------------------------------------------------------------------
@@ -138,34 +158,41 @@ fn outer_with_defer(x i64) i64 =
 
 test "lifo ordering via pointer" =
   let p = mem::malloc(8).(*i64)
+
   (*p) = 0
   lifo_via_ptr(p)
   // Defers ran: C(3) -> B(32) -> A(321)
   let order = (*p)
+
   mem::free(p.(*void))
   assert::equals(321, order)
 
 test "lifo ordering via string pointer" =
   let s_ptr = lifo_via_string_ptr()
   let order = *s_ptr
+
   assert::equals("CBA", order)
 
 test "defer fires on early return" =
   let result = with_early_return(0 - 5)
+
   assert::equals(0 - 1, result)
   // Defers free memory on every path.
 
 test "defer fires on normal return with all three defers" =
   let result = with_early_return(4)
+
   assert::equals(8, result)
 
 test "defer lambda captures and mutates via pointer" =
   // n=3: result=3+1=4, return value=4
   // defer then: result=4*2=8, *p=8
   let p = mem::malloc(8).(*i64)
+
   (*p) = 0
   let r = defer_mutates_via_ptr(3, p)
   let deferred_val = (*p)
+
   mem::free(p.(*void))
   assert::equals(4, r)            // return value = n+1 = 4
   assert::equals(8, deferred_val) // defer doubled it: 4*2=8
@@ -173,33 +200,40 @@ test "defer lambda captures and mutates via pointer" =
 test "five defers run in LIFO order" =
   let buf = mem::malloc(8)
   let counter = mem::malloc(8).(*i64)
+
   (*counter) = 0
   let r = five_defers(buf, counter)
   let total = (*counter)
+
   mem::free(counter.(*void))
   assert::equals(0, r)       // return value = 0 (count before defers)
   assert::equals(1111, total) // defers wrote 1+10+100+1000 to counter
 
 test "recover catches panic - function returns zero on panic" =
   let caught = mem::malloc(8).(*bool)
+
   (*caught) = false
   let r = safe_divide(10, 0, caught)
   let did_catch = (*caught)
+
   mem::free(caught.(*void))
   assert::equals(0, r)        // panic path: zero value returned
   assert::ok(did_catch)       // defer caught the panic
 
 test "recover not triggered when no panic" =
   let caught = mem::malloc(8).(*bool)
+
   (*caught) = false
   let r = safe_divide(10, 2, caught)
   let did_catch = (*caught)
+
   mem::free(caught.(*void))
   assert::equals(5, r)
   assert::not_ok(did_catch)
 
 test "nested function defers are independent" =
   let r = outer_with_defer(5)
+
   // inner_with_defer(5): v=5, defer v+=100 (after return), returns 5
   // outer: a=5, b=5, defer b+=10 (after return), returns 5
   assert::equals(5, r)

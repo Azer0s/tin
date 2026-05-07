@@ -12,35 +12,42 @@ var children_ch sync::Channel[string]
 
 fn{#async} child_work(parent_id i64, child_id i64) =
   let s = "p{parent_id}-c{child_id}"
+
   await children_ch.send(s)
 
 fn{#async} parent_work(parent_id i64, n_children i64) =
   let i i64 = 0
+
   for i < n_children:
     spawn child_work(parent_id, i)
     i = i + 1
 
   // Collect all child results
   let collected i64 = 0
+
   for collected < n_children:
     await children_ch.recv()
     collected = collected + 1
 
   let summary = "parent-{parent_id}: {collected} children done"
+
   await results.send(summary)
 
 fn{#async} main() =
   let n_parents i64 = 20
   let n_children i64 = 10
+
   results = sync::Channel[string].make(n_parents)
   children_ch = sync::Channel[string].make(n_parents * n_children)
 
   let i i64 = 0
+
   for i < n_parents:
     spawn parent_work(i, n_children)
     i = i + 1
 
   let done i64 = 0
+
   for done < n_parents:
     await results.recv()
     done = done + 1

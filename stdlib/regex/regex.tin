@@ -40,9 +40,11 @@ fn tin_pcre2_ovector_c() *i32                                                   
 fn substr(s string, beg i64, end i64) string =
   let out = ""
   let i i64 = beg
+
   for i < end:
     out = out ++ (s[i] as char)
     i = i + 1
+
   return out
 
 // Match result
@@ -74,10 +76,10 @@ struct Match =
 
 // Internal exec helper
 
-
 fn exec_match(code *void, subject string, start i64) Match =
   let slen = len(subject)
   let rc i32 = tin_pcre2_exec_c(code, subject, slen as i32, start as i32)
+
   if rc < 0:
     return Match{_matched: false, _groups: [], _begs: [], _ends: []}
 
@@ -86,13 +88,16 @@ fn exec_match(code *void, subject string, start i64) Match =
   let begs   [i64]    = []
   let ends   [i64]    = []
   let i i32 = 0
+
   for i < rc:
     let beg = ov[i * 2] as i64
     let end = ov[i * 2 + 1] as i64
+
     groups ++= substr(subject, beg, end)
     begs   ++= beg
     ends   ++= end
     i = i + 1
+
   return Match{_matched: true, _groups: groups, _begs: begs, _ends: ends}
 
 use rc
@@ -116,15 +121,19 @@ struct Regex =
   // exec executes the regex against subject and returns a Match.
   fn exec(this Regex, subject string) Match =
     let c = this.code()
+
     if c == 0 as *void:
       return Match{_matched: false, _groups: []}
+
     return exec_match(c, subject, 0)
 
   // match_at executes starting at byte offset start.
   fn match_at(this Regex, subject string, start i64) Match =
     let c = this.code()
+
     if c == 0 as *void:
       return Match{_matched: false, _groups: []}
+
     return exec_match(c, subject, start)
 
   // find_all returns all non-overlapping matches of the full pattern in s.
@@ -132,20 +141,25 @@ struct Regex =
 
     let results [string] = []
     let c = this.code()
+
     if c == 0 as *void:
       return results
     let pos i64 = 0
     let slen = len(s)
+
     for pos <= slen:
       let m = exec_match(c, s, pos)
+
       if !m.matched():
         break
       results ++= m.group(0)
       let end = m.end(0)
+
       if end <= pos:
         pos = pos + 1
       else:
         pos = end
+
     return results
 
 // Public API
@@ -154,99 +168,130 @@ struct Regex =
 // Check is_err() before using.
 fn compile(pattern string) Regex =
   let code = tin_pcre2_compile_c(pattern)
+
   if code == 0 as *void:
     let errptr = tin_pcre2_last_error_c()
     let msg = "regex compile error"
+
     if (errptr as i64) != 0:
       let msg_out = ""
       let ei i64 = 0
+
       for errptr[ei] != 0:
         msg_out = msg_out ++ errptr[ei]
         ei = ei + 1
+
       msg = msg_out
+
     return Regex{_cell: rc::Cell[*void].alloc(0 as *void, tin_pcre2_free_c), _err_msg: msg}
+
   return Regex{_cell: rc::Cell[*void].alloc(code, tin_pcre2_free_c), _err_msg: ""}
 
 // matches returns true if pattern matches anywhere in s.
 fn matches(pattern string, s string) bool =
   let re = compile(pattern)
+
   if re.is_err():
     return false
+
   return re.exec(s).matched()
 
 // find returns the first match of pattern in s, or "" if no match.
 fn find(pattern string, s string) string =
   let re = compile(pattern)
+
   if re.is_err():
     return ""
   let m = re.exec(s)
+
   if !m.matched():
     return ""
+
   return m.group(0)
 
 // find_all returns all non-overlapping matches of pattern in s.
 fn find_all(pattern string, s string) [string] =
   let re = compile(pattern)
+
   if re.is_err():
     return []
+
   return re.find_all(s)
 
 // replace replaces the first occurrence of pattern in s with repl.
 fn replace(pattern string, s string, repl string) string =
   let re = compile(pattern)
+
   if re.is_err():
     return s
   let m = re.exec(s)
+
   if !m.matched():
     return s
   let beg = m.beg(0)
   let end = m.end(0)
+
   return substr(s, 0, beg) ++ repl ++ substr(s, end, len(s))
 
 // replace_all replaces all non-overlapping occurrences of pattern in s with repl.
 fn replace_all(pattern string, s string, repl string) string =
   let re = compile(pattern)
+
   if re.is_err():
     return s
   let result = ""
   let slen = len(s)
   let pos  i64 = 0
+
   for pos <= slen:
     let m = re.match_at(s, pos)
+
     if !m.matched():
       result = result ++ substr(s, pos, slen)
       break
+
     let beg = m.beg(0)
     let end = m.end(0)
+
     result = result ++ substr(s, pos, beg) ++ repl
+
     if end <= pos:
       result = result ++ substr(s, pos, pos + 1)
       pos = pos + 1
     else:
       pos = end
+
   return result
 
 // split splits s by all matches of pattern.
 fn split(pattern string, s string) [string] =
   let re = compile(pattern)
   let parts [string] = []
+
   if re.is_err():
     parts ++= s
     return parts
+
   let slen = len(s)
   let pos  i64 = 0
+
   for pos <= slen:
     let m = re.match_at(s, pos)
+
     if !m.matched():
       parts ++= substr(s, pos, slen)
       break
+
     let beg = m.beg(0)
     let end = m.end(0)
+
     parts ++= substr(s, pos, beg)
+
     if end <= pos:
       pos = pos + 1
     else:
       pos = end
+
   return parts
 
 export { Regex, Match, compile, matches, find, find_all, replace, replace_all, split } as regex

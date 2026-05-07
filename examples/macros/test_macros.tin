@@ -5,6 +5,7 @@ use { Channel } from sync
 fn{#async} main() =
   // Test loop (no_parens macro)
   let i i64 = 0
+
   loop:
     if i >= 3: break
     echo i
@@ -22,6 +23,8 @@ fn{#async} main() =
 
   // Test selective struct import (bare Channel, no sync:: prefix)
   let ch = Channel[i64].make(4)
+
   await ch.send(42)
   let v = await ch.recv()
+
   echo v

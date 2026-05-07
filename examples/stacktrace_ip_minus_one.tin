@@ -20,6 +20,7 @@ fn{#no_inline} outer_helper() [atom] = return inner_helper()
 
 test "the immediate caller's frame resolves to the caller's source line" =
   let frames [atom] = outer_helper()
+
   assert::ok(len(frames) >= 2)
   // frame[0] is inner_helper's call to stacktrace; frame[1] is the
   // call instruction inside outer_helper. Both atoms must carry the
@@ -32,8 +33,10 @@ test "the immediate caller's frame resolves to the caller's source line" =
   // would silently weaken this regression sentinel otherwise.
   let f0 string = frames[0] as string
   let f1 string = frames[1] as string
+
   assert::ok(strings::contains(f0, "inner_helper"))
   assert::ok(strings::contains(f1, "outer_helper"))
+
   if strings::contains(f0, "@") && strings::contains(f1, "@"):
     assert::ok(strings::contains(f0, "stacktrace_ip_minus_one.tin:"))
     assert::ok(strings::contains(f1, "stacktrace_ip_minus_one.tin:"))

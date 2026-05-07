@@ -24,10 +24,12 @@ test "stacktrace inside a spawned fiber appends a <spawn-of>: frame" =
   // the symtab-aware resolver this would be "??+0x..." since CoroSplit
   // emits resume/destroy/cleanup at internal linkage.
   let live string = frames[0] as string
+
   assert::ok(!strings::has_prefix(live, "'\"??+"))
 
   // Verify the spawn-of frame sits at the bottom of the trace. The
   // top-level test runner spawns the test body as a fiber, so the
   // chain entry points back there.
   let last string = frames[len(frames) - 1] as string
+
   assert::ok(strings::contains(last, "<spawn-of>:"))

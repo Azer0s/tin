@@ -11,38 +11,47 @@ use errors
 
 test "replace all occurrences" =
   let result = strings::replace("foo bar foo baz foo", "foo", "qux")
+
   assert::equals(result, "qux bar qux baz qux")
 
 test "replace no occurrence returns original" =
   let result = strings::replace("hello world", "xyz", "abc")
+
   assert::equals(result, "hello world")
 
 test "replace single occurrence" =
   let result = strings::replace("hello world", "world", "tin")
+
   assert::equals(result, "hello tin")
 
 test "replace with empty new string deletes" =
   let result = strings::replace("aXbXcX", "X", "")
+
   assert::equals(result, "abc")
 
 test "replace old same as new is no-op" =
   let result = strings::replace("hello", "hello", "hello")
+
   assert::equals(result, "hello")
 
 test "replace adjacent occurrences" =
   let result = strings::replace("aabbaabb", "aa", "X")
+
   assert::equals(result, "XbbXbb")
 
 test "replace empty string input" =
   let result = strings::replace("", "x", "y")
+
   assert::equals(result, "")
 
 test "replace spaces" =
   let result = strings::replace("hello world foo", " ", "_")
+
   assert::equals(result, "hello_world_foo")
 
 test "replace empty old returns s unchanged" =
   let result = strings::replace("hello", "", "X")
+
   assert::equals(result, "hello")
 
 // ----- substr ----------------------------------------------------------------
@@ -155,6 +164,7 @@ test "last_index_of single occurrence" =
 
 test "split basic" =
   let parts = strings::split("a,b,c", ",")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "a")
   assert::equals(parts[1], "b")
@@ -162,26 +172,31 @@ test "split basic" =
 
 test "split no separator in string" =
   let parts = strings::split("hello", ",")
+
   assert::equals(len(parts), 1)
   assert::equals(parts[0], "hello")
 
 test "split trailing separator" =
   let parts = strings::split("a,b,", ",")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[2], "")
 
 test "split leading separator" =
   let parts = strings::split(",a,b", ",")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "")
 
 test "split empty string" =
   let parts = strings::split("", ",")
+
   assert::equals(len(parts), 1)
   assert::equals(parts[0], "")
 
 test "split multi-char separator" =
   let parts = strings::split("aXXbXXc", "XX")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "a")
   assert::equals(parts[1], "b")
@@ -189,6 +204,7 @@ test "split multi-char separator" =
 
 test "split empty separator returns bytes" =
   let parts = strings::split("abc", "")
+
   assert::equals(len(parts), 3)
   assert::equals(parts[0], "a")
   assert::equals(parts[1], "b")
@@ -198,22 +214,27 @@ test "split empty separator returns bytes" =
 
 test "join basic" =
   let parts [string] = ["a", "b", "c"]
+
   assert::equals(strings::join(parts, ","), "a,b,c")
 
 test "join empty sep" =
   let parts [string] = ["hello", " ", "world"]
+
   assert::equals(strings::join(parts, ""), "hello world")
 
 test "join single element" =
   let parts [string] = ["only"]
+
   assert::equals(strings::join(parts, ","), "only")
 
 test "join empty array" =
   let parts [string] = []
+
   assert::equals(strings::join(parts, ","), "")
 
 test "join multi-char sep" =
   let parts [string] = ["a", "b", "c"]
+
   assert::equals(strings::join(parts, " | "), "a | b | c")
 
 // ----- repeat ----------------------------------------------------------------
@@ -282,6 +303,7 @@ test "split-join round trip" =
   let s = "one,two,three"
   let parts = strings::split(s, ",")
   let rejoined = strings::join(parts, ",")
+
   assert::equals(rejoined, s)
 
 // ----- parse_int -------------------------------------------------------------

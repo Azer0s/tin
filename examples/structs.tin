@@ -9,10 +9,13 @@ struct person =
     return "{this.name} is {this.age} years old"
 
 let pete = person{name: "Pete", age: 20}
+
 echo pete.show()
 
 test "person struct" =
   let p = person{name: "Alice", age: 30}
+
   assert::equals(p.show(), "Alice is 30 years old")
   let q = person{name: "Bob", age: 0}
+
   assert::equals(q.show(), "Bob is 0 years old")

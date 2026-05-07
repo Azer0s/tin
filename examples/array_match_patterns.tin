@@ -26,15 +26,18 @@ use assert
 test "empty array" =
   let a [i64] = []
   let hit = false
+
   match a:
     case []:
       hit = true
     default:
       assert::fails("should be empty")
+
   assert::ok(hit)
 
 test "single element binds variable" =
   let a [i64] = [42]
+
   match a:
     case [x]:
       assert::equals(42, x)
@@ -43,6 +46,7 @@ test "single element binds variable" =
 
 test "two elements bind both variables" =
   let a [i64] = [10, 20]
+
   match a:
     case [x, y]:
       assert::equals(10, x)
@@ -52,6 +56,7 @@ test "two elements bind both variables" =
 
 test "three elements" =
   let a [i64] = [1, 2, 3]
+
   match a:
     case [x, y, z]:
       assert::equals(1, x)
@@ -63,17 +68,20 @@ test "three elements" =
 test "exact length mismatch falls to default" =
   let a [i64] = [1, 2, 3]
   let hit = false
+
   match a:
     case [x, y]:
       assert::fails("wrong length")
     default:
       hit = true
+
   assert::ok(hit)
 
 // wildcards
 
 test "wildcard discards elements" =
   let a [i64] = [7, 8]
+
   match a:
     case [_, _]:
       assert::ok(true)
@@ -82,6 +90,7 @@ test "wildcard discards elements" =
 
 test "wildcard mixed with binding" =
   let a [i64] = [5, 99, 3]
+
   match a:
     case [_, mid, _]:
       assert::equals(99, mid)
@@ -92,6 +101,7 @@ test "wildcard mixed with binding" =
 
 test "head + rest binds both" =
   let a [i64] = [1, 2, 3, 4]
+
   match a:
     case [head, ...tail]:
       assert::equals(1, head)
@@ -101,6 +111,7 @@ test "head + rest binds both" =
 
 test "rest slice contains correct elements" =
   let a [i64] = [10, 20, 30]
+
   match a:
     case [_, ...rest]:
       assert::equals(2, len(rest))
@@ -111,6 +122,7 @@ test "rest slice contains correct elements" =
 
 test "catch-all rest on non-empty" =
   let a [i64] = [5, 6, 7]
+
   match a:
     case [...all]:
       assert::equals(3, len(all))
@@ -120,6 +132,7 @@ test "catch-all rest on non-empty" =
 test "rest does NOT match empty (use [] for that)" =
   // `[...all]` requires len >= 1; empty arrays must be handled by `case []:`
   let a [i64] = []
+
   match a:
     case []:
       assert::ok(true)
@@ -128,6 +141,7 @@ test "rest does NOT match empty (use [] for that)" =
 
 test "unnamed rest discards tail" =
   let a [i64] = [42, 1, 2, 3]
+
   match a:
     case [first, ...]:
       assert::equals(42, first)
@@ -139,16 +153,19 @@ test "unnamed rest discards tail" =
 test "guard passes" =
   let a [i64] = [10, 2, 3]
   let hit = false
+
   match a:
     case [x, ...] if x > 5:
       hit = true
     default:
       assert::fails("guard should pass")
+
   assert::ok(hit)
 
 test "guard fails, falls to next arm" =
   let a [i64] = [1, 2, 3]
   let which = 0
+
   match a:
     case [x, ...] if x > 5:
       which = 1
@@ -156,10 +173,12 @@ test "guard fails, falls to next arm" =
       which = 2
     case []:
       which = 3
+
   assert::equals(2, which)
 
 test "guard on exact-length pattern" =
   let a [i64] = [3, 7]
+
   match a:
     case [x, y] if x < y:
       assert::ok(x < y)
@@ -176,9 +195,11 @@ test "match expression on empty vs nonempty" =
   let la = match a:
     case []: 0
     case [...]: 1
+
   let lb = match b:
     case []: 0
     case [...]: 1
+
   assert::equals(0, la)
   assert::equals(1, lb)
 
@@ -188,6 +209,7 @@ test "match expression binds and computes" =
     case [x, y]: x + y
     case [x]:    x
     default:     0
+
   assert::equals(7, s)
 
 // exhaustiveness
@@ -218,6 +240,7 @@ test "partial match with default" =
   let result = match a:
     case [x, y]: x + y
     default:     -1
+
   assert::equals(-1, result)
 
 // recursive algorithms
@@ -241,9 +264,11 @@ fn arr_max(a [i64], cur i64) i64 =
 fn arr_reverse(a [i64]) [i64] =
   let out [i64] = []
   let i = len(a) - 1
+
   for i >= 0:
     out ++= a[i]
     i--
+
   return out
 
 test "recursive sum" =
@@ -257,6 +282,7 @@ test "recursive max" =
 
 test "reverse via pattern-extracted index" =
   let rev = arr_reverse([1, 2, 3])
+
   assert::equals(3, rev[0])
   assert::equals(2, rev[1])
   assert::equals(1, rev[2])

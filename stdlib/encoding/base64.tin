@@ -15,39 +15,50 @@ fn b64_rev(c byte) i64 =
     return 62
   if c == @'/' || c == @'_':
     return 63
+
   return -1
 
 fn encode_b64(s string, alpha string, pad bool) string =
   let n = len(s)
+
   if n == 0:
     return ""
   let result = ""
   let i i64 = 0
+
   for i + 2 < n:
     let b0 = s[i] as i64
     let b1 = s[i + 1] as i64
     let b2 = s[i + 2] as i64
+
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]
     result = result ++ alpha[((b1 << 2) | (b2 >> 6)) & 0x3F]
     result = result ++ alpha[b2 & 0x3F]
     i = i + 3
+
   let rem = n - i
+
   if rem == 1:
     let b0 = s[i] as i64
+
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[(b0 << 4) & 0x3F]
+
     if pad:
       result = result ++ @'='
       result = result ++ @'='
   else if rem == 2:
     let b0 = s[i] as i64
     let b1 = s[i + 1] as i64
+
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]
     result = result ++ alpha[(b1 << 2) & 0x3F]
+
     if pad:
       result = result ++ @'='
+
   return result
 
 // encode returns the standard Base64 encoding of s (with = padding).
@@ -61,25 +72,32 @@ fn encode_url(s string) string =
 // decode decodes a Base64 string. Handles standard, URL-safe, padded or unpadded.
 fn decode(s string) string =
   let n = len(s)
+
   if n == 0:
     return ""
   let result = ""
   let i i64 = 0
   let acc i64 = 0
   let bits i64 = 0
+
   for i < n:
     let c = s[i] as byte
+
     if c == @'=' || c == 0 as byte:
       i = n
     else:
       let v = b64_rev(c)
+
       if v >= 0:
         acc = (acc << 6) | v
         bits = bits + 6
+
         if bits >= 8:
           bits = bits - 8
           result = result ++ ((acc >> bits) & 0xFF) as byte
+
     i = i + 1
+
   return result
 
 export { encode, encode_url, decode } as base64

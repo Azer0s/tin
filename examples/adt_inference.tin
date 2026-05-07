@@ -16,6 +16,7 @@ fn unwrap_or(r Result[i32, string], d i32) i32 =
 test "bare Ok/Err inferred from let type annotation" =
   let a Result[i32, string] = Ok(42)
   let b Result[i32, string] = Err("oops")
+
   assert::equals(42, unwrap_or(a, 0))
   assert::equals(99, unwrap_or(b, 99))
 
@@ -36,5 +37,6 @@ test "inference across multiple concrete instances" =
   let a Box[i64]    = Wrap(5)
   let b Box[string] = Wrap("hi")
   let c Box[string] = Nil
+
   assert::equals("hi",    unbox(b))
   assert::equals("<nil>", unbox(c))

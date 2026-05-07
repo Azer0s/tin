@@ -11,6 +11,7 @@ struct point =
   fn distance_sq(this point, other point) i64 =
     let dx = this.x - other.x
     let dy = this.y - other.y
+
     return dx * dx + dy * dy
 
 fn make_point(x i64, y i64) point =

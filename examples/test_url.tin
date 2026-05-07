@@ -40,18 +40,22 @@ test "decode lowercase hex" =
 
 test "roundtrip" =
   let s = "hello world! foo=bar&baz=123"
+
   assert::equals(url::decode(url::encode(s)), s)
 
 test "encode_query both keys present" =
   let m = collections::HashMap[string, string].make(4)
+
   m.set("b", "2")
   m.set("a", "1")
   let qs = url::encode_query(m)
+
   assert::ok(strings::index_of(qs, "a=1") >= 0)
   assert::ok(strings::index_of(qs, "b=2") >= 0)
 
 test "encode_query keys sorted" =
   let m = collections::HashMap[string, string].make(4)
+
   m.set("z", "last")
   m.set("a", "first")
   m.set("m", "mid")
@@ -59,21 +63,26 @@ test "encode_query keys sorted" =
   let ai = strings::index_of(qs, "a=")
   let mi = strings::index_of(qs, "m=")
   let zi = strings::index_of(qs, "z=")
+
   assert::ok(ai < mi)
   assert::ok(mi < zi)
 
 test "encode_query encodes special chars in values" =
   let m = collections::HashMap[string, string].make(4)
+
   m.set("q", "hello world")
   let qs = url::encode_query(m)
+
   assert::equals(qs, "q=hello%20world")
 
 test "encode_query empty map" =
   let m = collections::HashMap[string, string].make(4)
+
   assert::equals(url::encode_query(m), "")
 
 test "parse_query basic" =
   let m = url::parse_query("q=hello+world&page=2&empty=")
+
   assert::equals(m.get("q"), "hello world")
   assert::equals(m.get("page"), "2")
   assert::equals(m.get("empty"), "")
@@ -81,28 +90,34 @@ test "parse_query basic" =
 
 test "parse_query empty string" =
   let m = url::parse_query("")
+
   assert::equals(m.len(), 0)
 
 test "parse_query single pair" =
   let m = url::parse_query("key=value")
+
   assert::equals(m.get("key"), "value")
   assert::equals(m.len(), 1)
 
 test "parse_query percent encoded" =
   let m = url::parse_query("q=hello%20world&x=%2B")
+
   assert::equals(m.get("q"), "hello world")
   assert::equals(m.get("x"), "+")
 
 test "parse_query no value" =
   let m = url::parse_query("flag")
+
   assert::equals(m.get("flag"), "")
   assert::equals(m.len(), 1)
 
 test "parse_query round trip" =
   let m = collections::HashMap[string, string].make(4)
+
   m.set("hello world", "a b")
   m.set("x", "100%25")
   let qs = url::encode_query(m)
   let m2 = url::parse_query(qs)
+
   assert::equals(m2.get("hello world"), "a b")
   assert::equals(m2.get("x"), "100%25")

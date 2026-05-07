@@ -89,10 +89,12 @@ struct Value =
     if this.kind != Kind.object_v:
       return Value{kind: Kind.null_v}
     let i i64 = 0
+
     for i < len(this.kkeys):
       if str::strcmp(this.kkeys[i], key) == 0:
         return *this.items[i]
       i = i + 1
+
     return Value{kind: Kind.null_v}
 
   fn index(this Value, i i64) Value =
@@ -118,6 +120,7 @@ fn needs_quoting(s string) bool =
     return true
   // Leading characters that introduce YAML structure
   let fc = s[0]
+
   if fc == @'-' || fc == @'?' || fc == @'|' || fc == @'>':
     return true
   if fc == @'!' || fc == @'&' || fc == @'*' || fc == @' ':
@@ -132,6 +135,7 @@ fn needs_quoting(s string) bool =
       return true
     if c == @'\"' || c == @'\\' || c == @'\n' || c == @'\r' || c == @'\t':
       return true
+
   return false
 
 // yaml_string encodes s as a YAML scalar: plain if safe, double-quoted otherwise.
@@ -139,6 +143,7 @@ fn yaml_string(s string) string =
   if !needs_quoting(s):
     return s
   let result = "\""
+
   for c in s:
     if c == @'\"':
       result = result ++ "\\\""
@@ -152,6 +157,7 @@ fn yaml_string(s string) string =
       result = result ++ "\\t"
     else:
       result = result ++ c
+
   return result ++ "\""
 
 // yaml_key maps a struct field to its YAML key via a @"yaml:..." tag.
@@ -165,19 +171,23 @@ fn yaml_key(field_name string, tag string) string =
     return ""
   let key = ""
   let i i64 = 5
+
   for i < len(tag):
     key = key ++ tag[i]
     i = i + 1
+
   return key
 
 // make_indent produces a string of depth*2 spaces.
 fn make_indent(depth i64) string =
   let s = ""
   let i i64 = 0
+
   for i < depth:
     s = s ++ " "
     s = s ++ " "
     i = i + 1
+
   return s
 
 // Encoding
@@ -189,50 +199,64 @@ fn make_indent(depth i64) string =
 // caller's module context, enabling nested user-defined struct encoding.
 fn yaml_encode_any_impl[T](v any, depth i64, type_hint T) string =
   let t = typeof(v)
+
   if t == 'none:
     return "null"
   if t == 'bool:
     if v as bool:
       return "true"
     return "false"
+
   if t == 'i64:
     let n = v as i64
     return "{n}"
+
   if t == 'f64:
     let f = v as f64
     return "{f:g}"
+
   if t == 'string:
     return yaml_string(v as string)
   // YamlSerializable: delegate to the type's own encoding if it implements the trait.
   let vtraits = traitof(v)
   let vti i64 = 0
+
   for vti < len(vtraits):
     if vtraits[vti] == '"yaml::YamlSerializable":
       let ser = v as YamlSerializable
       return ser.to_yaml()
+
     vti = vti + 1
+
   let fields = fieldnames(v)
   let nf = len(fields)
+
   if nf == 0:
     return "null"
   let indent = make_indent(depth)
   let out = ""
   let i i64 = 0
+
   for i < nf:
     let fname string = fields[i]
     let ykey string = yaml_key(fname, fieldtag(v, fname))
+
     if len(ykey) > 0:
       let fval = getfield(v, fname)
       let ft = typeof(fval)
+
       if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
         out = out ++ indent ++ ykey ++ ": " ++ yaml_encode_any_impl[T](fval, depth, type_hint) ++ "\n"
       else:
         let ffields = fieldnames(fval)
+
         if len(ffields) > 0:
           out = out ++ indent ++ ykey ++ ":\n" ++ yaml_encode_any_impl[T](fval, depth+1, type_hint)
         else:
           out = out ++ indent ++ ykey ++ ": null\n"
+
     i = i + 1
+
   return out
 
 // encode[T] serialises a value of type T to a YAML string.
@@ -240,37 +264,47 @@ fn yaml_encode_any_impl[T](v any, depth i64, type_hint T) string =
 // Structs are encoded in block mapping style.
 fn encode[T](v T) string =
   let t = typeof(v)
+
   if t == 'none:
     return "null\n"
   if t == 'bool:
     if v as bool:
       return "true\n"
     return "false\n"
+
   if t == 'i64:
     let n = v as i64
     return "{n}\n"
+
   if t == 'f64:
     let f = v as f64
     return "{f:g}\n"
+
   if t == 'string:
     let sv T = v
     return yaml_string(sv as string) ++ "\n"
+
   // YamlSerializable: delegate to the type's own YAML encoding.
   let etraits = traitof(v)
   let eti i64 = 0
+
   for eti < len(etraits):
     if etraits[eti] == '"yaml::YamlSerializable":
       return yaml_encode_any_impl[T](v as any, 0, v) ++ "\n"
     eti = eti + 1
+
   let fields = fieldnames(v)
   let nf = len(fields)
+
   if nf == 0:
     return "null\n"
   let out = ""
   let i i64 = 0
+
   for i < nf:
     let fname string = fields[i]
     let ykey string = yaml_key(fname, fieldtag(v, fname))
+
     if len(ykey) > 0:
       let fval = getfield(v, fname)
       let ft = typeof(fval)
@@ -278,21 +312,26 @@ fn encode[T](v T) string =
       let ftraits = traitof(fval)
       let fti i64 = 0
       let fIsSerializable bool = false
+
       for fti < len(ftraits):
         if ftraits[fti] == '"yaml::YamlSerializable":
           fIsSerializable = true
         fti = fti + 1
+
       if fIsSerializable:
         out = out ++ ykey ++ ": " ++ yaml_encode_any_impl[T](fval, 0, v) ++ "\n"
       else if ft == 'none || ft == 'bool || ft == 'i64 || ft == 'f64 || ft == 'string:
         out = out ++ ykey ++ ": " ++ yaml_encode_any_impl[T](fval, 0, v) ++ "\n"
       else:
         let ffields = fieldnames(fval)
+
         if len(ffields) > 0:
           out = out ++ ykey ++ ":\n" ++ yaml_encode_any_impl[T](fval, 1, v)
         else:
           out = out ++ ykey ++ ": null\n"
+
     i = i + 1
+
   return out
 
 // Parser
@@ -309,7 +348,9 @@ struct Parser =
 
   fn advance(this *Parser) byte =
     let c = this.src[this.pos]
+
     this.pos = this.pos + 1
+
     return c
 
   fn at_end(this Parser) bool = return this.pos >= this.len
@@ -317,6 +358,7 @@ struct Parser =
   fn skip_inline_ws(this *Parser) =
     for this.pos < this.len:
       let c = this.src[this.pos]
+
       if c != @' ' && c != @'\t':
         break
       this.pos = this.pos + 1
@@ -337,8 +379,10 @@ struct Parser =
   // line without advancing pos.  Tabs are treated as single spaces.
   fn line_indent(this Parser) i64 =
     let i = this.pos
+
     for i < this.len && this.src[i] == @' ':
       i = i + 1
+
     return i - this.pos
 
 // skip_blanks advances past blank lines, comment lines (#...), and YAML
@@ -347,12 +391,14 @@ struct Parser =
 fn skip_blanks(p *Parser) =
   for !p.at_end():
     let start = p.pos
+
     // Skip leading spaces on this line.
     for p.pos < p.len && p.src[p.pos] == @' ':
       p.pos = p.pos + 1
     if p.at_end():
       break
     let c = p.src[p.pos]
+
     if c == @'\n' || c == @'\r':
       p.skip_eol()
     else if c == @'#':
@@ -361,6 +407,7 @@ fn skip_blanks(p *Parser) =
     else if c == @'-' && p.pos + 2 < p.len && p.src[p.pos+1] == @'-' && p.src[p.pos+2] == @'-':
       // Document-start marker --- (must be followed by space/newline/EOF).
       let n4 byte = 0
+
       if p.pos + 3 < p.len:
         n4 = p.src[p.pos+3]
       if n4 == @' ' || n4 == @'\n' || n4 == @'\r' || n4 == 0:
@@ -379,32 +426,40 @@ fn skip_blanks(p *Parser) =
 fn line_has_key(p *Parser) bool =
   let indent = p.line_indent()
   let i = p.pos + indent
+
   for i < p.len:
     let c = p.src[i]
+
     if c == @'\n' || c == @'\r' || c == @'#':
       return false
     if c == @':':
       if i + 1 >= p.len:
         return true
       let nc = p.src[i+1]
+
       if nc == @' ' || nc == @'\n' || nc == @'\r' || nc == @'\t':
         return true
+
     i = i + 1
+
   return false
 
 // trim_right removes trailing space and tab characters from s.
 fn trim_right(s string) string =
   let n = len(s)
   let end = n
+
   for end > 0 && (s[end-1] == @' ' || s[end-1] == @'\t'):
     end = end - 1
   if end == n:
     return s
   let result = ""
   let i i64 = 0
+
   for i < end:
     result = result ++ s[i]
     i = i + 1
+
   return result
 
 // parse_quoted_str parses a double-quoted YAML string starting at the current
@@ -412,22 +467,28 @@ fn trim_right(s string) string =
 fn parse_quoted_str(p *Parser) string =
   p.advance()  // consume opening '"'
   let result = ""
+
   for !p.at_end():
     let c = p.advance()
+
     if c == @'\"':
       break
     let out byte = c
+
     if c == @'\\':
       if p.at_end():
         break
       let esc = p.advance()
+
       if esc == @'\"':       out = @'\"'
       else if esc == @'\\': out = @'\\'
       else if esc == @'n':  out = @'\n'
       else if esc == @'r':  out = @'\r'
       else if esc == @'t':  out = @'\t'
       else:                 out = esc
+
     result = result ++ out
+
   return result
 
 // parse_block_scalar reads an unquoted scalar value in block context.
@@ -435,22 +496,27 @@ fn parse_quoted_str(p *Parser) string =
 // Trailing whitespace is stripped.
 fn parse_block_scalar(p *Parser) string =
   let result = ""
+
   for !p.at_end():
     let c = p.peek()
+
     if c == @'\n' || c == @'\r':
       break
     if c == @'#' && len(result) > 0 && result[len(result)-1] == @' ':
       break
     p.advance()
     result = result ++ c
+
   return trim_right(result)
 
 // parse_flow_scalar reads an unquoted scalar value in flow context.
 // Stops at flow terminators (',', '}', ']'), end-of-line, or inline comments.
 fn parse_flow_scalar(p *Parser) string =
   let result = ""
+
   for !p.at_end():
     let c = p.peek()
+
     if c == @'\n' || c == @'\r':
       break
     if c == @',' || c == @'}' || c == @']':
@@ -459,6 +525,7 @@ fn parse_flow_scalar(p *Parser) string =
       break
     p.advance()
     result = result ++ c
+
   return trim_right(result)
 
 // interpret_scalar converts a plain scalar string to a typed Value:
@@ -474,19 +541,24 @@ fn interpret_scalar(s string) *Value =
   // Attempt numeric parse.
   let i i64 = 0
   let neg = false
+
   if s[0] == @'-':
     neg = true
     i = 1
+
   let is_float = false
   let is_num = i < n
+
   for i < n:
     let c = s[i]
+
     if c == @'.':
       is_float = true
       i = i + 1
     else if c == @'e' || c == @'E':
       is_float = true
       i = i + 1
+
       if i < n && (s[i] == @'+' || s[i] == @'-'):
         i = i + 1
     else if c >= @'0' && c <= @'9':
@@ -494,20 +566,25 @@ fn interpret_scalar(s string) *Value =
     else:
       is_num = false
       break
+
   if is_num && i == n:
     if is_float:
       return &Value{kind: Kind.float_v, fval: str::atof(s)}
     // Parse integer directly from digits.
     let j i64 = 0
     let r i64 = 0
+
     if neg:
       j = 1
     for j < n:
       r = r * 10 + (s[j] - @'0') as i64
       j = j + 1
+
     if neg:
       r = 0 - r
+
     return &Value{kind: Kind.int_v, ival: r}
+
   return &Value{kind: Kind.string_v, sval: s}
 
 // Forward declarations for mutually recursive parsers.
@@ -517,13 +594,17 @@ fn parse_flow_mapping(p *Parser) *Value
 fn parse_flow_sequence(p *Parser) *Value =
   p.advance()  // consume '['
   let items [*Value] = []
+
   p.skip_inline_ws()
+
   if !p.at_end() && p.peek() == @']':
     p.advance()
     return &Value{kind: Kind.array_v, items: items}
+
   for !p.at_end():
     p.skip_inline_ws()
     let c = p.peek()
+
     if c == @'\"':
       items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
     else if c == @'[':
@@ -533,46 +614,60 @@ fn parse_flow_sequence(p *Parser) *Value =
     else:
       items ++= interpret_scalar(parse_flow_scalar(p))
     p.skip_inline_ws()
+
     if p.at_end():
       break
     let nc = p.peek()
+
     if nc == @']':
       p.advance()
       break
+
     if nc == @',':
       p.advance()
+
   return &Value{kind: Kind.array_v, items: items}
 
 fn parse_flow_mapping(p *Parser) *Value =
   p.advance()  // consume '{'
   let items [*Value] = []
   let kkeys [string] = []
+
   p.skip_inline_ws()
+
   if !p.at_end() && p.peek() == @'}':
     p.advance()
     return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
+
   for !p.at_end():
     p.skip_inline_ws()
     // Parse key.
     let key = ""
+
     if p.peek() == @'\"':
       key = parse_quoted_str(p)
     else:
       let k = ""
+
       for !p.at_end():
         let c = p.peek()
+
         if c == @':' || c == @',' || c == @'}' || c == @'\n' || c == @'\r':
           break
         p.advance()
         k = k ++ c
+
       key = trim_right(k)
+
     p.skip_inline_ws()
+
     if !p.at_end() && p.peek() == @':':
       p.advance()
     kkeys ++= key
     // Parse value.
     p.skip_inline_ws()
     let vc = p.peek()
+
     if vc == @'\"':
       items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
     else if vc == @'[':
@@ -582,48 +677,63 @@ fn parse_flow_mapping(p *Parser) *Value =
     else:
       items ++= interpret_scalar(parse_flow_scalar(p))
     p.skip_inline_ws()
+
     if p.at_end():
       break
     let nc = p.peek()
+
     if nc == @'}':
       p.advance()
       break
+
     if nc == @',':
       p.advance()
+
   return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
 
 fn parse_block_mapping(p *Parser, indent i64) *Value =
   let items [*Value] = []
   let kkeys [string] = []
+
   for !p.at_end():
     skip_blanks(p)
+
     if p.at_end():
       break
     if p.line_indent() != indent:
       break
     // Consume indent spaces.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     // Parse key (plain or double-quoted).
     let key = ""
+
     if p.peek() == @'\"':
       key = parse_quoted_str(p)
     else:
       let k = ""
+
       for !p.at_end():
         let c = p.peek()
+
         if c == @':' || c == @'\n' || c == @'\r' || c == @'#':
           break
         p.advance()
         k = k ++ c
+
       key = trim_right(k)
+
     kkeys ++= key
     p.skip_inline_ws()
+
     if !p.at_end() && p.peek() == @':':
       p.advance()
     p.skip_inline_ws()
+
     // If nothing follows ':' on this line, value is the next indented block.
     if p.at_end() || p.peek() == @'\n' || p.peek() == @'\r' || p.peek() == @'#':
       if !p.at_end() && p.peek() == @'#':
@@ -633,6 +743,7 @@ fn parse_block_mapping(p *Parser, indent i64) *Value =
     else:
       // Inline value: flow collection, quoted string, or plain scalar.
       let c = p.peek()
+
       if c == @'\"':
         items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
       else if c == @'[':
@@ -643,25 +754,31 @@ fn parse_block_mapping(p *Parser, indent i64) *Value =
         items ++= interpret_scalar(parse_block_scalar(p))
       p.skip_to_eol()
       p.skip_eol()
+
   return &Value{kind: Kind.object_v, items: items, kkeys: kkeys}
 
 fn parse_block_sequence(p *Parser, indent i64) *Value =
   let items [*Value] = []
+
   for !p.at_end():
     skip_blanks(p)
+
     if p.at_end():
       break
     if p.line_indent() != indent:
       break
     // Consume indent spaces.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     // Expect '-' sequence indicator.
     if p.peek() != @'-':
       break
     p.advance()  // consume '-'
+
     if p.at_end() || p.peek() == @'\n' || p.peek() == @'\r':
       // Value is on the next indented lines.
       p.skip_eol()
@@ -669,6 +786,7 @@ fn parse_block_sequence(p *Parser, indent i64) *Value =
     else:
       p.skip_inline_ws()
       let c = p.peek()
+
       if c == @'\"':
         items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
       else if c == @'[':
@@ -679,19 +797,23 @@ fn parse_block_sequence(p *Parser, indent i64) *Value =
         items ++= interpret_scalar(parse_block_scalar(p))
       p.skip_to_eol()
       p.skip_eol()
+
   return &Value{kind: Kind.array_v, items: items}
 
 // parse_node dispatches to the appropriate parser based on what the next
 // content line looks like, requiring an indentation of at least min_indent.
 fn parse_node(p *Parser, min_indent i64) *Value =
   skip_blanks(p)
+
   if p.at_end():
     return &Value{kind: Kind.null_v}
   let indent = p.line_indent()
+
   if indent < min_indent:
     return &Value{kind: Kind.null_v}
   // Peek at first non-space character on this line.
   let first byte = 0
+
   if p.pos + indent < p.len:
     first = p.src[p.pos + indent]
   // Dispatch via else-if to keep all uses of p in a single dominance chain
@@ -699,48 +821,65 @@ fn parse_node(p *Parser, min_indent i64) *Value =
   if first == @'[':
     // Flow sequence.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     let v = parse_flow_sequence(p)
+
     p.skip_to_eol()
     p.skip_eol()
+
     return v
   else if first == @'{':
     // Flow mapping.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     let v = parse_flow_mapping(p)
+
     p.skip_to_eol()
     p.skip_eol()
+
     return v
   else if first == @'\"':
     // Double-quoted string.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     let s = parse_quoted_str(p)
+
     p.skip_to_eol()
     p.skip_eol()
+
     return &Value{kind: Kind.string_v, sval: s}
   else if first == @'-':
     // Block sequence: '-' followed by space or newline.
     let after byte = 0
+
     if p.pos + indent + 1 < p.len:
       after = p.src[p.pos + indent + 1]
     if after == @' ' || after == @'\n' || after == @'\r' || after == 0:
       return parse_block_sequence(p, indent)
     // Fall through: '-' not a sequence indicator, treat as scalar.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     let s = parse_block_scalar(p)
+
     p.skip_to_eol()
     p.skip_eol()
+
     return interpret_scalar(s)
   else if line_has_key(p):
     // Block mapping.
@@ -748,12 +887,16 @@ fn parse_node(p *Parser, min_indent i64) *Value =
   else:
     // Plain scalar.
     let j i64 = 0
+
     for j < indent:
       p.advance()
       j = j + 1
+
     let s = parse_block_scalar(p)
+
     p.skip_to_eol()
     p.skip_eol()
+
     return interpret_scalar(s)
 
 // Public API
@@ -772,6 +915,7 @@ fn parse(s string) Result[Value, YamlError] =
   if len(s) == 0:
     return Result[Value, YamlError]::Err(YamlError::EmptyInput)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
+
   return Ok(*parse_node(&p, 0))
 
 // parse_nested_any_impl[T] populates nested struct fields from a YAML Value object.
@@ -782,11 +926,14 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
   let ftypes = fieldtypes(zero)
   let nf = len(fields)
   let i i64 = 0
+
   for i < nf:
     let fname string = fields[i]
     let yval = doc.get(fname)
+
     if !yval.is_null():
       let ftype = ftypes[i]
+
       match yval.kind:
         case Kind.int_v:
           if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
@@ -809,19 +956,25 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
             let nfv = getfield(zero, fname)
             let nft = traitof(nfv)
             let nfi i64 = 0
+
             for nfi < len(nft):
               if nft[nfi] == '"yaml::YamlDeserializable":
                 let ndeser = nfv as YamlDeserializable
+
                 ndeser.apply_yaml(yval.sval)
                 setfield(zero, fname, nfv)
+
               nfi = nfi + 1
         case Kind.object_v:
           let nested_zero = getfield(zero, fname)
           let nested = parse_nested_any_impl[T](nested_zero, yval, type_hint)
+
           setfield(zero, fname, nested)
         default:
           pass
+
     i = i + 1
+
   return zero
 
 // parse[T] parses a YAML string and decodes it directly into a value of type T.
@@ -833,6 +986,7 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
 fn parse[T](s string) Result[T, YamlError] =
   let out T
   let doc Value
+
   match parse(s):
     case Err(e): return Result[T, YamlError]::Err(e)
     case Ok(d):
@@ -844,14 +998,18 @@ fn parse[T](s string) Result[T, YamlError] =
   let ftypes = fieldtypes(out)
   let nf = len(fields)
   let i i64 = 0
+
   for i < nf:
     let fname string = fields[i]
     let ftypei any = ftypes[i]
     let ykey string = yaml_key(fname, fieldtag(out, fname))
+
     if len(ykey) > 0:
       let yval = doc.get(ykey)
+
       if !yval.is_null():
         let ftype = ftypei
+
         match yval.kind:
           case Kind.int_v:
             if ftype == 'i64 || ftype == 'i32 || ftype == 'i16 || ftype == 'i8:
@@ -874,19 +1032,25 @@ fn parse[T](s string) Result[T, YamlError] =
               let fv = getfield(out, fname)
               let ftraits = traitof(fv)
               let fi i64 = 0
+
               for fi < len(ftraits):
                 if ftraits[fi] == '"yaml::YamlDeserializable":
                   let deser = fv as YamlDeserializable
+
                   deser.apply_yaml(yval.sval)
                   setfield(out, fname, fv)
+
                 fi = fi + 1
           case Kind.object_v:
             let zero_nested = getfield(out, fname)
             let populated = parse_nested_any_impl[T](zero_nested, yval, out)
+
             setfield(out, fname, populated)
           default:
             pass
+
     i = i + 1
+
   return Ok(out)
 
 export {

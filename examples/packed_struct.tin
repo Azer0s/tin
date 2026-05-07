@@ -43,11 +43,13 @@ test "packed cLayoutStruct: C reports correct packed sizeof" =
 
 test "packed cLayoutStruct: field reads match C static initializer" =
   let h = get_hdr()
+
   assert::equals((*h).tag as i64, 1)
   assert::equals((*h).value as i64, 0x12345678)
 
 test "packed cLayoutStruct: field write via C setter is visible on re-read" =
   let h = get_hdr()
+
   set_hdr(h, 7, 0xABCD)
   assert::equals((*h).tag as i64, 7)
   assert::equals((*h).value as i64, 0xABCD)
@@ -56,6 +58,7 @@ test "packed cLayoutStruct: field write via C setter is visible on re-read" =
 
 test "packed cLayoutStruct: verify_hdr confirms field values after set_hdr" =
   let h = get_hdr()
+
   set_hdr(h, 42, 999)
   assert::equals(verify_hdr(h, 42, 999), true)
   assert::equals(verify_hdr(h, 1, 0), false)
@@ -63,6 +66,7 @@ test "packed cLayoutStruct: verify_hdr confirms field values after set_hdr" =
 
 test "packed cLayoutStruct: nested packed struct field access" =
   let m = get_msg()
+
   assert::equals((*m).kind as i64, 2)
   assert::equals((*m).hdr.tag as i64, 3)
   assert::equals((*m).hdr.value as i64, 99999)
@@ -82,10 +86,12 @@ test "packed Tin struct: sizeof is smaller with packing" =
   // Without packing: 4 + 1 + pad(1) + 2 + 1 + pad(1) = 10 bytes (u16 alignment).
   // So sizeof(tiny_rec) = 8 confirms packing is applied.
   let s i64 = sizeof(tiny_rec)
+
   assert::equals(s, 8)
 
 test "packed Tin struct: field reads and writes" =
   let r = tiny_rec{ a: 10, b: 1000, c: 42 }
+
   assert::equals(r.a as i64, 10)
   assert::equals(r.b as i64, 1000)
   assert::equals(r.c as i64, 42)
@@ -98,11 +104,13 @@ test "packed Tin struct: getfield reads correct field values" =
   let r = tiny_rec{ a: 3, b: 500, c: 7 }
   let va = getfield(r, "a") as u8
   let vb = getfield(r, "b") as u16
+
   assert::equals(va as i64, 3)
   assert::equals(vb as i64, 500)
 
 test "packed Tin struct: setfield updates field correctly" =
   let r = tiny_rec{ a: 1, b: 2, c: 3 }
+
   setfield(r, "a", 99 as u8)
   assert::equals(r.a as i64, 99)
   setfield(r, "b", 8888 as u16)
@@ -127,6 +135,7 @@ fn call_measure(s measurable) i64 =
 
 test "packed struct dynamic dispatch: vtable lookup returns correct value" =
   let s = sensor{ lo: 2, hi: 3 }
+
   assert::equals(s.measure(), 3 * 256 + 2)
   assert::equals(call_measure(s), 3 * 256 + 2)
 
@@ -139,10 +148,12 @@ test "packed struct trait variable: assign and dispatch" =
   // {i8* data, vtable*} where data points to a stack alloca of the struct.
   let s = sensor{ lo: 5, hi: 7 }
   let m measurable = s
+
   assert::equals(m.measure(), 7 * 256 + 5)
 
 test "packed struct trait variable: passed as trait parameter" =
   let s = sensor{ lo: 10, hi: 20 }
+
   assert::equals(call_measure(s), 20 * 256 + 10)
 
 // ---------------------------------------------------------------------------
@@ -153,6 +164,7 @@ test "packed struct boxed to any: unbox and read fields" =
   let s = sensor{ lo: 4, hi: 9 }
   let v any = s as any
   let s2 = v as sensor
+
   assert::equals(s2.lo as i64, 4)
   assert::equals(s2.hi as i64, 9)
   assert::equals(s2.measure(), 9 * 256 + 4)
@@ -161,6 +173,7 @@ test "packed Tin struct boxed to any: unbox tiny_rec" =
   let r = tiny_rec{ a: 11, b: 222, c: 33 }
   let v any = r as any
   let r2 = v as tiny_rec
+
   assert::equals(r2.a as i64, 11)
   assert::equals(r2.b as i64, 222)
   assert::equals(r2.c as i64, 33)
@@ -176,6 +189,7 @@ test "packed struct echo: direct echo of packed struct does not crash" =
   // We cannot easily assert echo output in tests; just verify it runs without
   // crashing and that field values are unchanged afterward.
   let s = sensor{ lo: 1, hi: 2 }
+
   echo s
   // Fields still intact after echo.
   assert::equals(s.lo as i64, 1)
@@ -183,6 +197,7 @@ test "packed struct echo: direct echo of packed struct does not crash" =
 
 test "packed struct echo: echo tiny_rec does not crash" =
   let r = tiny_rec{ a: 5, b: 100, c: 7 }
+
   echo r
   assert::equals(r.a as i64, 5)
   assert::equals(r.b as i64, 100)
@@ -193,10 +208,12 @@ test "packed struct echo: echo tiny_rec does not crash" =
 
 test "packed struct typeof returns struct name" =
   let s = sensor{ lo: 0, hi: 0 }
+
   assert::equals(typeof(s), "sensor")
 
 test "packed struct traitof lists implemented traits" =
   let s = sensor{ lo: 0, hi: 0 }
   let traits = traitof(s)
+
   assert::equals(traits.len, 1)
   assert::equals(traits[0], "measurable")

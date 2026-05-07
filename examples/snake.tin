@@ -73,6 +73,7 @@ for !raylib::window_should_close():
 
   if alive:
     timer = timer + raylib::get_frame_time()
+
     if timer >= speed:
       timer = timer - speed
       dx = ndx
@@ -83,8 +84,10 @@ for !raylib::window_should_close():
 
       let ci  i64  = 0
       let hit bool = false
+
       for ci < slen - 1:
         let ridx = (shead - ci + 400) % 400
+
         if sx[ridx] == nx && sy[ridx] == ny:
           hit = true
         ci = ci + 1
@@ -95,6 +98,7 @@ for !raylib::window_should_close():
         shead = (shead + 1) % 400
         sx[shead] = nx
         sy[shead] = ny
+
         if nx == fx && ny == fy:
           slen  = slen + 1
           score = score + 10
@@ -117,10 +121,12 @@ for !raylib::window_should_close():
 
   // Snake segments
   let j i64 = 0
+
   for j < slen:
     let sidx = (shead - j + 400) % 400
     let px = sx[sidx] * cell
     let py = sy[sidx] * cell + header
+
     if j == 0:
       raylib::draw_rectangle((px + 1) as i32, (py + 1) as i32, (cell - 2) as i32, (cell - 2) as i32, raylib::GREEN)
     else:

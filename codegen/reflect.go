@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -358,8 +359,28 @@ func (cg *CodeGen) genTypeof(block *ir.Block, e *ast.TypeofExpr) (value.Value, e
 
 	// Compile-time: resolve the tin type name and register as an atom.
 	name := cg.displayStructName(llvmTypeName(val.Type()))
+	name = prettyTupleName(name)
 
 	return cg.atomConstant(cg.registerAtom(name)), nil
+}
+
+// prettyTupleName rewrites the canonical `Tuple__T1__T2__...` form into the
+// generic-display form `Tuple[T1, T2, ...]`, matching how other generic
+// structs render in typeof output. Without this, tuple typeof leaks the
+// internal `__` separator (e.g. `'Tuple__i64__i64`) which reads as
+// compiler-internal noise instead of source syntax.
+func prettyTupleName(s string) string {
+	const prefix = "Tuple__"
+	if !strings.HasPrefix(s, prefix) {
+		return s
+	}
+
+	parts := strings.Split(s[len(prefix):], "__")
+	if len(parts) < 2 {
+		return s
+	}
+
+	return "Tuple[" + strings.Join(parts, ", ") + "]"
 }
 
 // genTraitof returns a [atom] of trait names.

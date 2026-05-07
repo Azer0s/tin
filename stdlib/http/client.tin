@@ -50,6 +50,7 @@ fn parse_url(url string) (bool, string, i32, string) =
   let use_tls = false
   let port i32 = 80
   let rest = url
+
   if strings::has_prefix(url, "https://"):
     use_tls = true
     port = 443
@@ -60,16 +61,19 @@ fn parse_url(url string) (bool, string, i32, string) =
   let slash = strings::index_of(rest, "/")
   let host_part = rest
   let path = "/"
+
   if slash >= 0:
     host_part = strings::substr(rest, 0, slash)
     path = strings::substr(rest, slash, len(rest))
 
   let host = host_part
   let colon = strings::index_of(host_part, ":")
+
   if colon >= 0:
     host = strings::substr(host_part, 0, colon)
     let port_str = strings::substr(host_part, colon + 1, len(host_part))
     let (p, perr) = strings::parse_int32(port_str)
+
     if perr == nil && p > 0:
       port = p
 
@@ -82,14 +86,17 @@ fn build_request(method string, host string, path string, client_hdrs collection
   let req = method ++ " " ++ path ++ " HTTP/1.1\r\n"
   req = req ++ "Host: " ++ host ++ "\r\n"
   req = req ++ "Connection: close\r\n"
+
   if len(body) > 0:
     req = req ++ "Content-Length: {len(body)}\r\n"
 
   // Client-level headers (skipped if the request overrides them).
   let cks = client_hdrs.keys()
   let i i64 = 0
+
   for i < len(cks):
     let k = cks[i]
+
     if !req_hdrs.has(k):
       req = req ++ k ++ ": " ++ client_hdrs.get(k) ++ "\r\n"
     i = i + 1
@@ -97,14 +104,18 @@ fn build_request(method string, host string, path string, client_hdrs collection
   // Per-request headers.
   let rks = req_hdrs.keys()
   let j i64 = 0
+
   for j < len(rks):
     let k = rks[j]
+
     req = req ++ k ++ ": " ++ req_hdrs.get(k) ++ "\r\n"
     j = j + 1
 
   req = req ++ "\r\n"
+
   if len(body) > 0:
     req = req ++ body
+
   return req
 
 // parse_hex parses a lowercase or uppercase hex string to i64.
@@ -112,8 +123,10 @@ fn build_request(method string, host string, path string, client_hdrs collection
 fn parse_hex(s string) i64 =
   let result i64 = 0
   let i i64 = 0
+
   for i < len(s):
     let c = s[i] as byte
+
     if c >= @'0' && c <= @'9':
       result = result * 16 + ((c - @'0') as i64)
     else if c >= @'a' && c <= @'f':
@@ -123,6 +136,7 @@ fn parse_hex(s string) i64 =
     else:
       break
     i = i + 1
+
   return result
 
 // decode_chunked decodes a Transfer-Encoding: chunked body.
@@ -130,33 +144,43 @@ fn decode_chunked(data string) string =
   let result = ""
   let i i64 = 0
   let n = len(data)
+
   loop:
     let j = i
+
     for j < n - 1:
       if data[j] == @'\r' && data[j+1] == @'\n':
         break
       j = j + 1
+
     if j >= n - 1:
       break
     let chunk_size = parse_hex(strings::substr(data, i, j))
+
     if chunk_size <= 0:
       break
     i = j + 2
+
     if i + chunk_size > n:
       break
     result = result ++ strings::substr(data, i, i + chunk_size)
     i = i + chunk_size + 2
+
   return result
 
 // read_all reads all bytes from r until EOF, returning them as a string.
 fn{#async} read_all(r io::AsyncReader) string =
   let acc = ""
+
   loop:
     let chunk = await ioutil::read_bytes(r, 4096)
+
     if len(chunk) == 0:
       break
     let s string = chunk as string
+
     acc = acc ++ s
+
   return acc
 
 // do_with_client dials the server, merges client + request headers,
@@ -167,6 +191,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
 
   // Dial and send.
   let (conn, dial_err) = tcp::dial(host, port)
+
   if dial_err != nil:
     return HttpResponse{
       status:  500 as HttpStatus,
@@ -174,19 +199,23 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
     }
 
   let raw = ""
+
   if use_tls:
     let tls_conn = await tls::connect(host, conn.fd())
+
     await ioutil::write_string(tls_conn, req_str)
     raw = await spawn read_all(tls_conn)
     tls_conn.close()
   else:
     await ioutil::write_string(conn, req_str)
     raw = await spawn read_all(conn)
+
   conn.close()
 
   // Parse response and handle chunked transfer encoding.
   let resp = parse_response(raw)
   let te = strings::to_lower(resp.headers.get_or("transfer-encoding", ""))
+
   if strings::contains(te, "chunked"):
     return HttpResponse{
       version: resp.version,
@@ -233,15 +262,19 @@ fn post(client Client, url string, body string) Future[HttpResponse] =
 // post_json performs an HTTP POST with a JSON body using the default client.
 fn post_json(url string, body string) Future[HttpResponse] =
   let hdrs = collections::HashMap[string, string]::make(2)
+
   hdrs.set("content-type", "application/json")
   let req = Request{method: "POST", url: url, headers: hdrs, body: body}
+
   return spawn do_with_client(empty_client(), req)
 
 // post_json performs an HTTP POST with a JSON body using the provided client.
 fn post_json(client Client, url string, body string) Future[HttpResponse] =
   let hdrs = collections::HashMap[string, string]::make(2)
+
   hdrs.set("content-type", "application/json")
   let req = Request{method: "POST", url: url, headers: hdrs, body: body}
+
   return spawn do_with_client(client, req)
 
 // put performs an HTTP PUT using the default client.

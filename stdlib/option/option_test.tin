@@ -27,18 +27,22 @@ test "map / and_then / or_else" =
   let b Option[i64] = None
 
   let m = option::map(a, fn(x i64) i64 = return x + 1)
+
   assert::equals(4, option::or_default(m, 0))
   assert::ok(option::is_none(option::map(b, fn(x i64) i64 = return x + 1)))
 
   let f = fn(x i64) Option[i64] = return Some(x * 10)
+
   assert::equals(30, option::or_default(option::and_then(a, f), 0))
   assert::ok(option::is_none(option::and_then(b, f)))
 
   let g = fn() Option[i64] = return Some(42)
+
   assert::equals(3,  option::or_default(option::or_else(a, g), 0))
   assert::equals(42, option::or_default(option::or_else(b, g), 0))
 
 test "unwrap / expect" =
   let a Option[i64] = Some(11)
+
   assert::equals(11, option::unwrap(a))
   assert::equals(11, option::expect(a, "should be some"))

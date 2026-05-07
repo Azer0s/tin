@@ -4,4 +4,5 @@
 
 fn main() =
   let n string = 42
+
   echo n

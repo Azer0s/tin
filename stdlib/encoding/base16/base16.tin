@@ -12,17 +12,21 @@ fn hex_val(c byte) i64 =
     return (c - @'a' + 10) as i64
   if c >= @'A' && c <= @'F':
     return (c - @'A' + 10) as i64
+
   return -1
 
 fn encode_with(s string, alpha string) string =
   let n = len(s)
   let result = ""
   let i i64 = 0
+
   for i < n:
     let b = s[i] as i64
+
     result = result ++ alpha[(b >> 4) & 0xF]
     result = result ++ alpha[b & 0xF]
     i = i + 1
+
   return result
 
 // encode returns the lowercase hexadecimal encoding of s.
@@ -38,12 +42,15 @@ fn decode(s string) string =
   let n = len(s)
   let result = ""
   let i i64 = 0
+
   for i + 1 < n:
     let hi = hex_val(s[i] as byte)
     let lo = hex_val(s[i + 1] as byte)
+
     if hi >= 0 && lo >= 0:
       result = result ++ ((hi << 4) | lo) as byte
     i = i + 2
+
   return result
 
 export { encode, encode_upper, decode } as base16

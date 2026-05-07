@@ -11,10 +11,12 @@ struct point =
   fn manhattan(this point) i64 =
     let ax i64 = this.x
     let ay i64 = this.y
+
     if ax < 0:
       ax = 0 - ax
     if ay < 0:
       ay = 0 - ay
+
     return ax + ay
 
 struct rect =
@@ -30,28 +32,35 @@ struct rect =
     return this.w * this.h
 
 let p = point{x: 3, y: 4}
+
 echo p.show()
 echo p.manhattan()
 
 let origin = point{x: 0, y: 0}
+
 echo origin.show()
 
 let r = rect{x: 10, y: 20, w: 5, h: 8}
+
 echo r.show()
 echo r.area()
 
 test "point show and manhattan" =
   let p = point{x: 3, y: 4}
+
   assert::equals(p.show(), "(3, 4)")
   assert::equals(p.manhattan(), 7)
 
 test "manhattan with negatives" =
   let neg = point{x: 0 - 3, y: 0 - 4}
+
   assert::equals(neg.manhattan(), 7)
   let origin = point{x: 0, y: 0}
+
   assert::equals(origin.manhattan(), 0)
 
 test "rect show and area" =
   let r = rect{x: 10, y: 20, w: 5, h: 8}
+
   assert::equals(r.show(), "rect at (10,20) size 5x8")
   assert::equals(r.area(), 40)

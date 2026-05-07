@@ -21,19 +21,24 @@ fn _tin_now_ms() i64 = extern("_tin_now_ms")
 fn{#async} count_autoyield(n i64) i64 =
   let sum i64 = 0
   let i i64 = 0
+
   for i < n:
     sum = sum + i
     i = i + 1
+
   return sum
 
 fn{#async #no_autoyield} count_manual_yield(n i64) i64 =
   let sum i64 = 0
   let i i64 = 0
+
   for i < n:
     sum = sum + i
     i = i + 1
+
     if i % 1000 == 0:
       yield
+
   return sum
 
 fn{#async} main() =
@@ -43,10 +48,12 @@ fn{#async} main() =
   let f1 = spawn count_autoyield(n)
   let r1 = await f1
   let t1 = _tin_now_ms()
+
   echo "auto-yield  {n} iters: ~{t1 - t0}ms  (sum={r1})"
 
   let t2 = _tin_now_ms()
   let f2 = spawn count_manual_yield(n)
   let r2 = await f2
   let t3 = _tin_now_ms()
+
   echo "no-autoyield {n} iters: ~{t3 - t2}ms  (sum={r2})"

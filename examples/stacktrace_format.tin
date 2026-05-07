@@ -27,6 +27,7 @@ test "user-fn frame resolves to symbol@file:line:col matching sourcepos format" 
   // it stays at "probe+0x<offset>". Either form proves the unwinder
   // landed on the right symbol.
   let top string = frames[0] as string
+
   assert::ok(strings::contains(top, "probe"))
 
   // The @<file>:<line>:<col> upgrade is libdw-dependent, so only
@@ -35,10 +36,13 @@ test "user-fn frame resolves to symbol@file:line:col matching sourcepos format" 
   // this environment (clang DWARF + libdw < 0.193 on Linux) and the
   // shape assertion would be false-positive.
   let any_with_at i64 = 0
+
   for let f atom in frames:
     let s string = f as string
+
     if strings::contains(s, "probe@"):
       any_with_at = any_with_at + 1
+
   if any_with_at >= 1:
     assert::ok(strings::contains(top, "probe@"))
     assert::ok(strings::contains(top, "stacktrace_format.tin:"))
@@ -54,6 +58,7 @@ test "stacktrace and sourcepos atoms share the symbol@file:line:col shape" =
   let frames [atom] = probe()
   let pos_str string = pos as string
   let live_str string = frames[0] as string
+
   assert::ok(strings::contains(pos_str, "probe@"))
   assert::ok(strings::contains(live_str, "probe"))
 
@@ -63,10 +68,13 @@ test "stacktrace(cap, opts) accepts a literal opts array" =
   // that the call returns *something* and parses cleanly. Asserting
   // on len is the cheapest regression sentinel for codegen breakage.
   let frames [atom] = stacktrace(8, ['hide_libc, 'hide_main])
+
   assert::ok(len(frames) >= 1)
 
 test "hide_unknown drops ??+0x frames" =
   let frames [atom] = stacktrace(64, ['hide_unknown])
+
   for let f atom in frames:
     let s string = f as string
+
     assert::ok(!strings::contains(s, "??+0x"))

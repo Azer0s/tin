@@ -9,13 +9,16 @@ use strings
 fn print_resp(label string, resp http::HttpResponse) =
   echo "{label}: {resp.version} {resp.status} {resp.reason}"
   let ct = resp.headers.get("content-type")
+
   if ct != "":
     echo "  content-type: {ct}"
   let cl = resp.headers.get("content-length")
+
   if cl != "":
     echo "  content-length: {cl}"
   if len(resp.body) > 0:
     let preview = resp.body
+
     if len(preview) > 120:
       preview = strings::substr(preview, 0, 120) ++ "..."
     echo "  body: {preview}"
@@ -23,6 +26,7 @@ fn print_resp(label string, resp http::HttpResponse) =
 fn{#async} main() =
   echo "=== default client ==="
   let resp = await http::get("http://httpbin.org/get")
+
   print_resp("GET /get", resp)
 
   echo "=== explicit request ==="
@@ -33,14 +37,18 @@ fn{#async} main() =
     body:    "hello",
   }
   let resp2 = await http::send(req)
+
   print_resp("POST /post", resp2)
 
   echo "=== custom client ==="
   let c = http::Client::new()
+
   c.set_header("x-app", "tin")
   let resp3 = await http::get(c, "http://httpbin.org/get")
+
   print_resp("GET /get (x-app: tin)", resp3)
   let resp4 = await http::post_json(c, "http://httpbin.org/post", "\{\"ok\":true}")
+
   print_resp("POST /post json", resp4)
 
   echo "=== put / patch / delete / head ==="

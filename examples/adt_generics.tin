@@ -19,6 +19,7 @@ fn opt_or(o Option[i64], d i64) i64 =
 test "Option[i64] explicit qualification" =
   let a Option[i64] = Option[i64]::Some(42)
   let b Option[i64] = Option[i64]::None
+
   assert::equals(42, opt_or(a, 0))
   assert::equals(99, opt_or(b, 99))
 
@@ -34,6 +35,7 @@ fn result_or(r Result[i32, string], d i32) i32 =
 test "Result[i32, string] success + failure" =
   let a Result[i32, string] = Result[i32, string]::Ok(5)
   let b Result[i32, string] = Result[i32, string]::Err("bad input")
+
   assert::equals(5,  result_or(a, 0))
   assert::equals(99, result_or(b, 99))
 

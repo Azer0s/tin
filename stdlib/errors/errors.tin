@@ -50,6 +50,7 @@ fn equals(a Err, b Err) bool =
     return true
   if a == nil || b == nil:
     return false
+
   return a.message() == b.message()
 
 export { Error, Err, new, wrap, has, equals } as errors

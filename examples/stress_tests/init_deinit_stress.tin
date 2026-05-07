@@ -58,9 +58,11 @@ fn scope_order_test() =
 fn early_return_test(n i64) i64 =
   event_log = []
   let a = resource{id: 10}
+
   if n < 0:
     return 0 - 1  // deinit a must fire here
   let b = resource{id: 11}
+
   return n  // deinit b then a
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,7 @@ struct outer_resource =
 fn heap_no_deinit_test() =
   event_log = []
   let p *resource = mem::calloc(1, sizeof(resource)).(*resource)
+
   (*p).id = 99
   // p goes out of scope but deinit should NOT be called for heap pointer
   // (caller is responsible for freeing; the compiler doesn't auto-deinit
@@ -99,6 +102,7 @@ fn heap_no_deinit_test() =
 fn defer_vs_deinit() =
   event_log = []
   let r = resource{id: 5}
+
   defer do:
     log_event("deferred")
   // At end of scope: defer fires first, then r.deinit. event_log
@@ -114,6 +118,7 @@ fn defer_vs_deinit() =
 test "init called on construction" =
   event_log = []
   let r = resource{id: 42}
+
   assert::equals(len(event_log), 1)
   assert::equals(event_log[0], "init:42")
 
@@ -130,6 +135,7 @@ test "deinit called at end of block LIFO" =
 
 test "deinit called on early return (only a)" =
   let result = early_return_test(0 - 5)
+
   // init:10 (a), early return taken, deinit:10 (a)
   // b was never constructed
   assert::equals(result, 0 - 1)
@@ -139,6 +145,7 @@ test "deinit called on early return (only a)" =
 
 test "deinit called on normal return (b then a)" =
   let result = early_return_test(7)
+
   // init:10 (a), init:11 (b), return 7: deinit:11, deinit:10
   assert::equals(result, 7)
   assert::equals(len(event_log), 4)

@@ -12,21 +12,26 @@ fn{#async} work_with_defer(id i64) =
   let tmp1 = "setup-{id}"
   let tmp2 = "work-{id}-step1"
   let tmp3 = tmp2 ++ "-step2"
+
   // tmp1, tmp2, tmp3 should be freed when function exits
   await results.send("done-{id}")
 
 fn{#async} main() =
   let n i64 = 200
+
   results = sync::Channel[string].make(n)
-  
+
   let i i64 = 0
+
   for i < n:
     spawn work_with_defer(i)
     i = i + 1
-  
+
   let done i64 = 0
+
   for done < n:
     let r = await results.recv()
+
     done = done + 1
-  
+
   echo "fiber_defer_arc: OK, {done} fibers completed with defer"

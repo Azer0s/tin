@@ -25,9 +25,11 @@ fn fib(n i64) i64 =
 fn sum_range(n i64) i64 =
   let acc i64 = 0
   let i i64 = 0
+
   for i < n:
     acc = acc + i
     i = i + 1
+
   return acc
 
 // busy_loop runs a compute-heavy loop.
@@ -37,9 +39,11 @@ fn sum_range(n i64) i64 =
 fn busy_loop(n i64) i64 =
   let s i64 = 0
   let i i64 = 0
+
   for i < n:
     s = s + i * i
     i = i + 1
+
   return s
 
 test "recursive fibonacci is correct from async context" =

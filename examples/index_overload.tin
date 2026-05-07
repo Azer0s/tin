@@ -1,0 +1,88 @@
+// User-defined `[]` operator via the built-in `index[K, V]` and
+// `index_set[K, V]` op-traits.
+//
+// Read side: `t[k]` dispatches to `fn ::index(this T, k K) (V, bool)`.
+//   - `let v = t[k]`         — auto-unwrap; panics if !ok
+//   - `let (v, ok) = t[k]`   — raw tuple destructure; no panic
+//
+// Write side: `t[k] = v` dispatches to `fn ::index_set(this *T, k K, v V)`.
+// The pointer receiver lets the impl mutate fields in place.
+
+use assert
+
+struct Bag (index[string, i64], index_set[string, i64]) =
+  keys [string]
+  vals [i64]
+
+  fn ::index(this Bag, k string) (i64, bool) =
+    let i i64 = 0
+
+    for i < len(this.keys):
+      if this.keys[i] == k:
+        return (this.vals[i], true)
+      i = i + 1
+
+    return (0, false)
+
+  fn ::index_set(this *Bag, k string, v i64) =
+    let i i64 = 0
+
+    for i < len(this.keys):
+      if this.keys[i] == k:
+        this.vals[i] = v
+        return
+
+      i = i + 1
+
+    this.keys ++= k
+    this.vals ++= v
+
+fn main() =
+  let b = Bag{keys: [], vals: []}
+  let mb = &b
+
+  // Write side.
+  mb["apples"] = 3
+  mb["pears"]  = 7
+
+  // Comma-ok destructure: get the value AND whether it was present.
+  let (v1, ok1) = b["apples"]
+
+  echo "apples = {v1}, found = {ok1}"
+
+  let (v2, ok2) = b["missing"]
+
+  echo "missing = {v2}, found = {ok2}"
+
+  // Bare access on a present key flows the value through unchanged.
+  // (Bare access on a missing key would panic — see test below.)
+  let v3 = b["pears"]
+
+  echo "pears = {v3}"
+
+test "comma-ok destructure surfaces presence" =
+  let b = Bag{keys: ["k"], vals: [99]}
+  let (v, ok) = b["k"]
+
+  assert::ok(ok)
+  assert::equals(99, v)
+  let (_, ok2) = b["nope"]
+
+  assert::not_ok(ok2)
+
+test "bare access returns value when present" =
+  let b = Bag{keys: ["k"], vals: [99]}
+
+  assert::equals(99, b["k"])
+
+test "index_set through *Bag mutates" =
+  let b = Bag{keys: [], vals: []}
+  let mb = &b
+
+  mb["x"] = 10
+  mb["x"] = 20
+  assert::equals(20, b["x"])
+
+// Bare access on a missing key panics with a descriptive message. Tested
+// out-of-band via `examples/index_overload_panic.sh` rather than
+// assert::panics so we can match the panic text on stderr exactly.

@@ -36,6 +36,7 @@ use extern (
 
 fn main() =
   let s = small_struct{a: 1, b: 2, c: 3, d: 4}
+
   print_small_struct(s)
 
   echo s
@@ -43,10 +44,13 @@ fn main() =
   echo s
 
   let p = point{x: 1.5, y: 2.5}
+
   print_point(p)
 
   let m = mixed_struct{x: @'A', value: 3.14}
+
   print_mixed_struct(m)
 
   let i = int32_struct{x: 100, y: 200}
+
   print_int32_struct(i)

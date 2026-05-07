@@ -19,6 +19,7 @@ struct {#pure@fn} value =
 
 test "pure@fn: pure methods compile and run" =
   let v = value{x: 5}
+
   assert::equals(v.square(), 25)
   assert::equals(v.double(), 10)
 
@@ -35,6 +36,7 @@ struct {#pure@fn} mixed =
 
 test "pure@fn: explicit #sideffect on a method overrides propagation" =
   let m = mixed{label: "hi"}
+
   assert::equals(m.id(), "hi")
 
 // #const@field default-flips fields to const; explicit `var` opts out.
@@ -46,11 +48,13 @@ struct {#const@field} point =
 
 test "const@field: unmarked fields are const by default" =
   let p = point{x: 1, y: 2, scratch: 0}
+
   assert::equals(p.x, 1)
   assert::equals(p.y, 2)
 
 test "const@field: var override is mutable" =
   let p = point{x: 10, y: 20, scratch: 0}
+
   p.scratch = 42
   assert::equals(p.scratch, 42)
 
@@ -67,4 +71,5 @@ struct {#no_recurse@method} counter =
 
 test "no_recurse@method: normal calls still work" =
   let c = counter.zero()
+
   assert::equals(c.current(), 1)

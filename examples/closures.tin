@@ -15,15 +15,18 @@ echo apply(double, 5)
 echo apply(square, 4)
 
 let double_then_inc = compose(inc, double)
+
 echo apply(double_then_inc, 3)
 
 let square_then_double = compose(double, square)
+
 echo apply(square_then_double, 5)
 
 test "apply" =
   let double = fn(x i32) i32 = return x * 2
   let square = fn(x i32) i32 = return x * x
   let inc    = fn(x i32) i32 = return x + 1
+
   assert::equals(apply(double, 5) as i64, 10)
   assert::equals(apply(square, 4) as i64, 16)
   assert::equals(apply(inc, 0) as i64, 1)
@@ -34,5 +37,6 @@ test "compose" =
   let inc    = fn(x i32) i32 = return x + 1
   let double_then_inc2 = compose(inc, double)
   let square_then_double2 = compose(double, square)
+
   assert::equals(apply(double_then_inc2, 3) as i64, 7)
   assert::equals(apply(square_then_double2, 5) as i64, 50)

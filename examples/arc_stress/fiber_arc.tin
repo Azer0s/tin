@@ -9,18 +9,22 @@ var result_ch sync::Channel[string]
 
 fn{#async} make_string(n i64) =
   let s = "fiber-{n}"
+
   await result_ch.send(s)
 
 fn{#async} main() =
   let n i64 = 1000
+
   result_ch = sync::Channel[string].make(n)
 
   let i i64 = 0
+
   for i < n:
     spawn make_string(i)
     i = i + 1
 
   let collected i64 = 0
+
   for collected < n:
     await result_ch.recv()
     collected = collected + 1

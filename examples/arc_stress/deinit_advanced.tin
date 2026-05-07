@@ -18,6 +18,7 @@ struct outer =
 // Deinit on overwrite: old value deinit'd, new value lives on
 fn overwrite_test() =
   let t = tracked{name: "v1"}
+
   echo "alive"
   // t out of scope: deinit:v1
 
@@ -27,12 +28,14 @@ fn make_tracked(n string) tracked =
 
 fn return_test() =
   let t = make_tracked("returned")
+
   echo "got: {t.name}"
   // deinit:returned here
 
 // Nested struct: outer deinit fires first, then inner fields released (calls inner deinit)
 fn nested_test() =
   let o = outer{inner: tracked{name: "inner"}}
+
   echo "outer alive"
   // deinit:outer then deinit:inner
 
@@ -46,6 +49,7 @@ struct stringy =
 fn string_deinit_test() =
   let s1 = stringy{label: "A" ++ "B"}
   let s2 = stringy{label: "C" ++ "D"}
+
   echo s1.label
   echo s2.label
   // deinit:CD then deinit:AB

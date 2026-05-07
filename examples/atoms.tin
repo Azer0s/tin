@@ -34,6 +34,7 @@ echo status_message('err)
 
 // Atoms can be stored in variables.
 let current_weather atom = 'sunny
+
 describe_weather(current_weather)
 
 // Atoms are echoed with their apostrophe prefix.
@@ -51,6 +52,7 @@ test "quoted atom equals simple atom" =
   // '"hello" and 'hello are the same atom
   let a atom = 'hello
   let b atom = '"hello"
+
   assert::ok(a == b)
   assert::equals(a, "hello")
   assert::equals(b, "hello")

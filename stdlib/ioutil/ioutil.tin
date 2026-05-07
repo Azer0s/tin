@@ -48,25 +48,32 @@ fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
   loop:
     if done: break
     let rd = await r.read(tmp, 4096)
+
     if rd <= 0: break
     let i i64 = 0
+
     loop:
       if i >= rd: break
       if n >= cap:
         cap = cap * 2
         out = mem::realloc(out as *void, cap) as *byte
+
       out[n] = tmp[i]
       n = n + 1
+
       if delim != 0 && tmp[i] == delim:
         done = true
         break
+
       i = i + 1
 
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   if delim != 0 && n > 0 && out[n-1] == @'\r': n = n - 1
   let s string = out[0..n] as string
+
   mem::free(tmp as *void)
   mem::free(out as *void)
+
   return s
 
 fn{#async} write_string_impl(w io::AsyncWriter, s string) =
@@ -95,7 +102,9 @@ fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
     }
 
   let result = tmp[0..got]
+
   mem::free(tmp as *void)
+
   return result
 
 fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
@@ -108,28 +117,36 @@ fn{#async} read_bytes_until_impl(r io::AsyncReader, delim byte) [byte] =
   loop:
     if done: break
     let rd = await r.read(tmp, 4096)
+
     if rd <= 0: break
     let i i64 = 0
+
     loop:
       if i >= rd: break
       if n >= cap:
         cap = cap * 2
         out = mem::realloc(out as *void, cap) as *byte
+
       out[n] = tmp[i]
       n = n + 1
+
       if delim != 0 && tmp[i] == delim:
         done = true
         break
+
       i = i + 1
 
   if delim != 0 && n > 0 && out[n-1] == delim: n = n - 1
   let result = out[0..n]
+
   mem::free(tmp as *void)
   mem::free(out as *void)
+
   return result
 
 fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
   let n = len(data)
+
   if n == 0:
     return
   let ptr  = &data[0]

@@ -13,10 +13,12 @@ echo "hello"
 echo "world"
 
 let x i64 = 10 /* inline block comment */ + 5
+
 echo x
 
 // Line comments and block comments can coexist.
 let y i64 = 42 // this is forty-two
+
 echo y
 
 /* Nested structures inside block comments are fine:
@@ -34,10 +36,12 @@ use assert
 
 test "inline block comment does not affect expression" =
   let x i64 = 10 /* + 100 */ + 5
+
   assert::equals(x, 15)
 
 test "line comment does not affect value" =
   let y i64 = 42 // not 43
+
   assert::equals(y, 42)
 
 test "add with inline comments" =
