@@ -27,11 +27,37 @@ test "unwrap_or" =
   assert::equals(5,  result::unwrap_or(a, 99))
   assert::equals(99, result::unwrap_or(b, 99))
 
-test "Option Some/None + helpers" =
-  let a Option[i64] = Some(10)
-  let b Option[i64] = None
+test "Result map / map_err" =
+  let a Result[i64, string] = Ok(3)
+  let b Result[i64, string] = Err("e")
+  let m1 = result::map(a, fn(x i64) i64 = return x * 2)
+  let m2 = result::map(b, fn(x i64) i64 = return x * 2)
+  assert::equals(6, result::unwrap_or(m1, 0))
+  assert::ok(result::is_err(m2))
 
-  assert::ok(result::is_some(a))
-  assert::ok(result::is_none(b))
-  assert::equals(10, result::option_or(a, 0))
-  assert::equals(0,  result::option_or(b, 0))
+  let n1 = result::map_err(a, fn(s string) string = return "wrapped: {s}")
+  let n2 = result::map_err(b, fn(s string) string = return "wrapped: {s}")
+  assert::ok(result::is_ok(n1))
+  match n2:
+    case Ok(_):  assert::fails("expected Err")
+    case Err(s): assert::equals("wrapped: e", s)
+
+test "Result and_then / or_else" =
+  let a Result[i64, string] = Ok(4)
+  let b Result[i64, string] = Err("bad")
+  let f = fn(x i64) Result[i64, string] = return Ok(x + 1)
+  assert::equals(5, result::unwrap_or(result::and_then(a, f), 0))
+  assert::ok(result::is_err(result::and_then(b, f)))
+
+  let g = fn(s string) Result[i64, string] = return Ok(99)
+  assert::equals(4,  result::unwrap_or(result::or_else(a, g), 0))
+  assert::equals(99, result::unwrap_or(result::or_else(b, g), 0))
+
+test "Result unwrap / expect / to_option" =
+  use option
+  let a Result[i64, string] = Ok(7)
+  assert::equals(7, result::unwrap(a))
+  assert::equals(7, result::expect(a, "should be ok"))
+  assert::ok(option::is_some(result::to_option(a)))
+  let b Result[i64, string] = Err("e")
+  assert::ok(option::is_none(result::to_option(b)))

@@ -48,6 +48,73 @@ func (cg *CodeGen) isCalleePure(c *ast.CallExpr) bool {
 	return false
 }
 
+// calleeReturnsMustUse reports whether the callee's declared return type is
+// a `Result[t, e]` (the canonical must-use type in Tin). When true, dropping
+// the result silently elides the error path.
+//
+// Best-effort: only matches when the callee can be resolved to a FuncDecl by
+// bare name or qualified scope path. Higher-order calls and method calls on
+// values whose decl can't be located fall through to the default-off
+// -Wunused-result.
+func (cg *CodeGen) calleeReturnsMustUse(c *ast.CallExpr) bool {
+	var fd *ast.FuncDecl
+
+	switch fn := c.Func.(type) {
+	case *ast.Identifier:
+		// Look up by bare name. funcDecls is keyed by varying mangling; iterate
+		// to find any decl whose unmangled Name matches.
+		for _, d := range cg.funcDecls {
+			if d != nil && d.Name == fn.Name {
+				fd = d
+
+				break
+			}
+		}
+	case *ast.ScopeAccess:
+		if len(fn.Path) == 0 {
+			return false
+		}
+
+		bare := fn.Path[len(fn.Path)-1]
+		for _, d := range cg.funcDecls {
+			if d != nil && d.Name == bare {
+				fd = d
+
+				break
+			}
+		}
+	}
+
+	if fd == nil || fd.RetType == nil {
+		return false
+	}
+
+	return isResultType(fd.RetType)
+}
+
+// isResultType reports whether te names the Result ADT (with or without a
+// package qualifier). Generic args don't matter: any Result[t, e] qualifies.
+func isResultType(te ast.TypeExpr) bool {
+	switch t := te.(type) {
+	case *ast.GenericType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name == "Result"
+	case *ast.SimpleType:
+		name := t.Name
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return name == "Result"
+	}
+
+	return false
+}
+
 // callDisplayName returns a short human-readable description of a call site
 // for use in diagnostic messages.
 func callDisplayName(c *ast.CallExpr) string {

@@ -21,7 +21,7 @@
 
 use assert
 
-// ── empty / exact-length ──────────────────────────────────────────────────────
+// empty / exact-length
 
 test "empty array" =
   let a [i64] = []
@@ -70,7 +70,7 @@ test "exact length mismatch falls to default" =
       hit = true
   assert::ok(hit)
 
-// ── wildcards ─────────────────────────────────────────────────────────────────
+// wildcards
 
 test "wildcard discards elements" =
   let a [i64] = [7, 8]
@@ -88,7 +88,7 @@ test "wildcard mixed with binding" =
     default:
       assert::fails("should match triple")
 
-// ── rest patterns ─────────────────────────────────────────────────────────────
+// rest patterns
 
 test "head + rest binds both" =
   let a [i64] = [1, 2, 3, 4]
@@ -134,7 +134,7 @@ test "unnamed rest discards tail" =
     default:
       assert::fails("should match")
 
-// ── guard clauses ─────────────────────────────────────────────────────────────
+// guard clauses
 
 test "guard passes" =
   let a [i64] = [10, 2, 3]
@@ -168,7 +168,7 @@ test "guard on exact-length pattern" =
     default:
       assert::fails("should match pair")
 
-// ── match as expression ───────────────────────────────────────────────────────
+// match as expression
 
 test "match expression on empty vs nonempty" =
   let a [i64] = []
@@ -190,7 +190,7 @@ test "match expression binds and computes" =
     default:     0
   assert::equals(7, s)
 
-// ── exhaustiveness ────────────────────────────────────────────────────────────
+// exhaustiveness
 
 // [] + [x,...xs] together cover all lengths -> exhaustive (no default needed)
 fn classify_len(a [i64]) string =
@@ -211,7 +211,7 @@ test "exhaustive via [] + rest covers all lengths" =
   assert::equals("many",  classify_len([1, 2, 3]))
   assert::equals("many",  classify_len([1, 2, 3, 4, 5]))
 
-// ── partial match ─────────────────────────────────────────────────────────────
+// partial match
 
 test "partial match with default" =
   let a [i64] = [1, 2, 3, 4]
@@ -220,7 +220,7 @@ test "partial match with default" =
     default:     -1
   assert::equals(-1, result)
 
-// ── recursive algorithms ──────────────────────────────────────────────────────
+// recursive algorithms
 
 fn arr_sum(a [i64]) i64 =
   match a:

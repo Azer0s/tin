@@ -36,8 +36,24 @@ package codegen
 // pointer crosses into C).
 
 import (
+	"reflect"
+
 	"github.com/Azer0s/tin/ast"
 )
+
+// isNilNode reports whether node is either an untyped nil interface or
+// an interface holding a nil pointer (typed-nil). The walker dispatches
+// on concrete pointer types via type switch; a typed-nil matches its
+// case but dereferencing fields panics, so guard up front.
+func isNilNode(node ast.Node) bool {
+	if node == nil {
+		return true
+	}
+
+	rv := reflect.ValueOf(node)
+
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
+}
 
 func (cg *CodeGen) checkAllWritesToTopLevelConst(prog *ast.Program) {
 	if cg.diagSuppressed(DiagWriteToConst) {
@@ -167,6 +183,10 @@ func scanMutatingParams(fn *ast.FuncDecl, mutators map[string]map[int]bool) map[
 	var walk func(node ast.Node)
 
 	walk = func(node ast.Node) {
+		if isNilNode(node) {
+			return
+		}
+
 		switch v := node.(type) {
 		case *ast.Block:
 			for _, s := range v.Stmts {
@@ -216,6 +236,12 @@ func scanMutatingParams(fn *ast.FuncDecl, mutators map[string]map[int]bool) map[
 		case *ast.IfStmt:
 			walk(v.Cond)
 			walk(v.Then)
+
+			for _, ei := range v.ElseIfs {
+				walk(ei.Cond)
+				walk(ei.Body)
+			}
+
 			walk(v.Else)
 		case *ast.ForStmt:
 			walk(v.Init)
@@ -315,6 +341,10 @@ func (cg *CodeGen) checkFuncForConstWrites(
 	var walk func(node ast.Node)
 
 	walk = func(node ast.Node) {
+		if isNilNode(node) {
+			return
+		}
+
 		switch v := node.(type) {
 		case *ast.Block:
 			for _, s := range v.Stmts {
@@ -378,6 +408,12 @@ func (cg *CodeGen) checkFuncForConstWrites(
 		case *ast.IfStmt:
 			walk(v.Cond)
 			walk(v.Then)
+
+			for _, ei := range v.ElseIfs {
+				walk(ei.Cond)
+				walk(ei.Body)
+			}
+
 			walk(v.Else)
 		case *ast.ForStmt:
 			walk(v.Init)

@@ -5,6 +5,7 @@
 
 use { loop } from macros
 use sync
+use "./closeable"
 
 // Console output
 
@@ -287,5 +288,6 @@ export {
   STDIN, STDOUT, STDERR,
   BufferedReader, bufreader,
   now_ms, now_us,
-  Reader, Writer, AsyncReader, AsyncWriter
+  Reader, Writer, AsyncReader, AsyncWriter,
+  Closeable
 } as io

@@ -641,6 +641,21 @@ func (cg *CodeGen) emitMatchDefaultArm(
 ) (*ir.Block, error) {
 	if s.Default != nil {
 		if resAlloca != nil {
+			if len(s.Default.Stmts) == 1 && isExplicitTerminator(s.Default.Stmts[0]) {
+				// Divergent default arm (return/break/panic): emit via genStmt and
+				// let the terminator close the block. No store, no branch to after.
+				cg.curBlock = curCheckBlock
+
+				var err2 error
+
+				curCheckBlock, _, err2 = cg.genStmt(curCheckBlock, s.Default)
+				if err2 != nil {
+					return nil, err2
+				}
+
+				return curCheckBlock, nil
+			}
+
 			if len(s.Default.Stmts) == 1 {
 				if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
 					// Reset curBlock so a previous arm's inner-match advancement
@@ -706,6 +721,22 @@ func (cg *CodeGen) emitMatchArmBody(
 	anyFallthrough *bool,
 ) (*ir.Block, error) {
 	if resAlloca != nil {
+		// Divergent arm (return/break/panic): emit via genStmt; the terminator
+		// closes the block, and we skip the result store + br to afterBlock.
+		// genStmt for ReturnStmt already calls emitAllScopeReleases.
+		if c.Body != nil && len(c.Body.Stmts) == 1 && isExplicitTerminator(c.Body.Stmts[0]) {
+			cg.curBlock = bodyBlock
+
+			var err2 error
+
+			bodyBlock, _, err2 = cg.genStmt(bodyBlock, c.Body)
+			if err2 != nil {
+				return nil, err2
+			}
+
+			return bodyBlock, nil
+		}
+
 		// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
 		if c.Body != nil && len(c.Body.Stmts) == 1 {
 			if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
@@ -1091,6 +1122,21 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 
 	genCaseBody := func(caseBlock *ir.Block, body *ast.Block) (*ir.Block, error) {
 		if resAlloca != nil {
+			// Divergent arm (return/break/panic): emit via genStmt; the terminator
+			// closes the block, and we skip the result store + br to afterBlock.
+			if body != nil && len(body.Stmts) == 1 && isExplicitTerminator(body.Stmts[0]) {
+				cg.curBlock = caseBlock
+
+				var err2 error
+
+				caseBlock, _, err2 = cg.genStmt(caseBlock, body)
+				if err2 != nil {
+					return nil, err2
+				}
+
+				return caseBlock, nil
+			}
+
 			// Expression mode: single-expression body (ExprStmt or nested MatchStmt).
 			if body != nil && len(body.Stmts) == 1 {
 				if expr := armExprNode(body.Stmts[0]); expr != nil {
@@ -1146,7 +1192,12 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		}
 
 		if resAlloca != nil {
-			anyFallthrough = true
+			// Expression mode: genCaseBody returns nil for non-divergent arms
+			// (which already branch to afterBlock). Divergent arms return a
+			// terminated block; nothing reaches afterBlock from them.
+			if caseBlock == nil {
+				anyFallthrough = true
+			}
 		} else if caseBlock != nil && caseBlock.Term == nil {
 			caseBlock.NewBr(afterBlock)
 
@@ -1162,7 +1213,9 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		}
 
 		if resAlloca != nil {
-			anyFallthrough = true
+			if defaultBlock == nil {
+				anyFallthrough = true
+			}
 		} else if defaultBlock != nil && defaultBlock.Term == nil {
 			defaultBlock.NewBr(afterBlock)
 

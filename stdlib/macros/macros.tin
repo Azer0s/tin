@@ -35,4 +35,32 @@ macro clamp!(x, lo, hi) = return x < lo ? lo : (x > hi ? hi : x)
 // dbg!(x) - identity: returns x unchanged (placeholder for debug tracing).
 macro dbg!(x) = `x`
 
-export { loop, async, todo!, unreachable!, min!, max!, abs!, clamp!, dbg! } as macros
+// try!(r) - Rust-style early-return for Result[t, e]. Inside a function whose
+// return type is Result[u, e], `let v = try!(r)` evaluates r once: on Ok(v) it
+// binds the inner value and continues, on Err it propagates `Err(e)` up by
+// returning from the enclosing function.
+//
+//   fn double(s string) Result[i64, string] =
+//     let n i64 = try!(parse_pos(s))
+//     return Ok(n * 2)
+macro try!(r) = `match r:
+  case Ok(v):  v
+  case Err(e): return Err(e)`
+
+// try_some!(o) - Option[t] analog of try!. On Some(v) yields v; on None
+// returns from the enclosing function with None.
+//
+//   fn first_doubled(xs [i64]) Option[i64] =
+//     let n i64 = try_some!(first(xs))
+//     return Some(n * 2)
+macro try_some!(o) = `match o:
+  case Some(v): v
+  case None:    return None`
+
+export {
+  loop, async,
+  todo!, unreachable!,
+  min!, max!, abs!, clamp!,
+  dbg!,
+  try!, try_some!
+} as macros

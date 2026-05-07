@@ -18,7 +18,7 @@ fn{#async} main() =
   if errors::has(err):
     panic(err.message())
 
-  let tls_conn = await tls::connect("localhost", conn.fd)
+  let tls_conn = await tls::connect("localhost", conn.fd())
 
   await ioutil::write_string(tls_conn, "hello tls\n")
   let resp = await ioutil::read_string(tls_conn)

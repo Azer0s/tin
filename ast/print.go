@@ -524,7 +524,7 @@ func printForStmt(v *ForStmt, depth int) string {
 // the AST round-trip through tin source text on its way to the helper
 // subprocess. Type-match (`match e.(type)`) and patterns more elaborate
 // than a literal/binding/wildcard fall back to the unhandled placeholder
-// — the upstream typeOfExpr already restricts CTFE returns to scalar
+// - the upstream typeOfExpr already restricts CTFE returns to scalar
 // shapes, so a pattern that doesn't print is one we wouldn't be able to
 // evaluate anyway.
 func printMatchStmt(v *MatchStmt, depth int) string {
@@ -556,7 +556,7 @@ func printMatchStmt(v *MatchStmt, depth int) string {
 
 		switch {
 		case c.Pattern == nil && c.VarName != "":
-			// `case i T:` with no literal pattern — bind only.
+			// `case i T:` with no literal pattern - bind only.
 			sb.WriteString(c.VarName)
 
 			if c.VarType != nil {

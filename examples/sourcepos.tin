@@ -41,7 +41,7 @@ test "sourcepos atoms are first-class equal" =
   assert::equals(a, b)
 
 // Local binding shadowing a top-level fn must resolve to the LOCAL
-// declaration, not the outer fn — same rule as ordinary identifier
+// declaration, not the outer fn - same rule as ordinary identifier
 // resolution. Without this, `sourcepos(name)` inside a region that
 // rebinds `name` would lie about which definition the call site sees.
 fn shadow_check() atom =

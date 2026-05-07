@@ -223,7 +223,7 @@ func (cg *CodeGen) preregisterTopLevelVar(tv *ast.TopLevelVar) error {
 // emitDeinitAllFn lazily synthesizes the per-pkg `_tin_deinit_<pkg>` fns
 // plus the whole-program dispatcher `_tin_deinit_all(void)`. The per-pkg
 // fns each release that pkg's top-level vars in reverse declaration
-// order. The dispatcher calls them in reverse pkg-load order — so
+// order. The dispatcher calls them in reverse pkg-load order - so
 // dependents tear down before their dependencies, matching the
 // topological-deinit guarantee from D4 of the incremental-compilation
 // plan.

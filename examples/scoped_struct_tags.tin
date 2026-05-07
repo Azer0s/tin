@@ -6,7 +6,7 @@
 
 use assert
 
-// ── #pure@fn propagates #pure to every method ──
+// #pure@fn propagates #pure to every method
 
 struct {#pure@fn} value =
   const x i64
@@ -22,7 +22,7 @@ test "pure@fn: pure methods compile and run" =
   assert::equals(v.square(), 25)
   assert::equals(v.double(), 10)
 
-// ── Explicit member tag takes precedence over propagation. ──
+// Explicit member tag takes precedence over propagation.
 
 struct {#pure@fn} mixed =
   const label string
@@ -37,7 +37,7 @@ test "pure@fn: explicit #sideffect on a method overrides propagation" =
   let m = mixed{label: "hi"}
   assert::equals(m.id(), "hi")
 
-// ── #const@field default-flips fields to const; explicit `var` opts out. ──
+// #const@field default-flips fields to const; explicit `var` opts out.
 
 struct {#const@field} point =
   x i64                // const (inherited default)
@@ -54,7 +54,7 @@ test "const@field: var override is mutable" =
   p.scratch = 42
   assert::equals(p.scratch, 42)
 
-// ── #no_recurse@method reaches only instance methods. ──
+// #no_recurse@method reaches only instance methods.
 
 struct {#no_recurse@method} counter =
   const initial i64

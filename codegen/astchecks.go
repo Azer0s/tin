@@ -5,6 +5,8 @@ package codegen
 // beyond what the existing scope already knows.
 
 import (
+	"reflect"
+
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
@@ -19,6 +21,7 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 	for _, n := range prog.Stmts {
 		if fd, ok := n.(*ast.FuncDecl); ok {
 			cg.checkInfiniteRecursion(fd)
+			cg.checkFiberMisuse(fd)
 		}
 
 		walkAST(n, func(node ast.Node) {
@@ -31,9 +34,14 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 				cg.checkUselessCast(e)
 			case *ast.IfStmt:
 				cg.checkEmptyIfBody(e)
+			case *ast.ForStmt:
+				cg.checkLoopInvariant(e)
 			}
 		})
 	}
+
+	cg.checkMagicNumbers(prog)
+	cg.checkStyle(prog)
 }
 
 // checkInfiniteRecursion flags a `f(x, y) = ... f(x, y) ...` where the
@@ -112,6 +120,31 @@ func (cg *CodeGen) checkInfiniteRecursion(fn *ast.FuncDecl) {
 // fire on `let v = 0.0/0.0; if v != v: ...` and miss the NaN check the
 // programmer wrote.
 func (cg *CodeGen) checkIdenticalOperands(e *ast.BinExpr) {
+	// Logical ops where the duplicated operand is redundant -- `x && x`
+	// is just `x`, `x || x` is just `x`. Side-effect-free identifiers
+	// only; a duplicated CallExpr could be intentional (idempotency
+	// check) and we have no purity info this early in the pipeline.
+	if e.Op == "&&" || e.Op == "||" {
+		if astEqual(e.Left, e.Right) && isPureForDuplicateCheck(e.Left) {
+			cg.warn(DiagIdenticalOperands, e.Pos(),
+				"both sides of %q are identical; the duplicate is redundant", e.Op)
+		}
+		// `x && !x` / `x || !x`: contradictions/tautologies.
+		if neg, ok := e.Right.(*ast.UnaryExpr); ok && (neg.Op == "!" || neg.Op == "not") {
+			if astEqual(e.Left, neg.Expr) && isPureForDuplicateCheck(e.Left) {
+				cg.warnTautologyAndOr(e)
+			}
+		}
+
+		if neg, ok := e.Left.(*ast.UnaryExpr); ok && (neg.Op == "!" || neg.Op == "not") {
+			if astEqual(neg.Expr, e.Right) && isPureForDuplicateCheck(e.Right) {
+				cg.warnTautologyAndOr(e)
+			}
+		}
+
+		return
+	}
+
 	switch e.Op {
 	case "==", "!=", "<", "<=", ">", ">=", "-", "&", "|", "^", "/", "%":
 	default:
@@ -133,6 +166,33 @@ func (cg *CodeGen) checkIdenticalOperands(e *ast.BinExpr) {
 
 	cg.warn(DiagIdenticalOperands, e.Pos(),
 		"both sides of %q are identical; result is constant", e.Op)
+}
+
+// warnTautologyAndOr fires the boolean-fold warning for `x && !x`
+// (always false) or `x || !x` (always true).
+func (cg *CodeGen) warnTautologyAndOr(e *ast.BinExpr) {
+	val := e.Op == "||"
+	cg.warn(DiagBoolAnalysis, e.Pos(),
+		"%q with operand and its negation is always %v", e.Op, val)
+}
+
+// isPureForDuplicateCheck reports whether an expression is safe to
+// flag as a duplicate operand without risking a false positive on a
+// side-effecting call. Conservative: only allows identifiers, literals,
+// field accesses, and unary/binary trees over those.
+func isPureForDuplicateCheck(n ast.Node) bool {
+	switch e := n.(type) {
+	case *ast.Identifier, *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.BoolLit, *ast.NilLit:
+		return true
+	case *ast.FieldAccess:
+		return isPureForDuplicateCheck(e.Expr)
+	case *ast.UnaryExpr:
+		return isPureForDuplicateCheck(e.Expr)
+	case *ast.BinExpr:
+		return isPureForDuplicateCheck(e.Left) && isPureForDuplicateCheck(e.Right)
+	}
+
+	return false
 }
 
 // checkArithIdentity flags arithmetic / bitwise ops that fold to a known
@@ -257,6 +317,438 @@ func (cg *CodeGen) exprIsFloat(expr ast.Node) bool {
 	}
 
 	return irtypes.IsFloat(t)
+}
+
+// checkLoopInvariant flags pure expressions inside a loop body whose
+// operands are never written (or address-taken) within the body or post
+// statements. The hint suggests hoisting the expression before the loop.
+//
+// Only arithmetic/bitwise/comparison/boolean/unary/field/cast trees over
+// identifiers and literals are considered: anything reached through a
+// call, pointer deref, or indexed read may observe state we don't
+// statically prove invariant, so we leave those alone.
+//
+// Emits at the maximal invariant subtree -- if `(a + b) * c` is fully
+// invariant, fires once on the whole expression rather than separately on
+// each subterm.
+func (cg *CodeGen) checkLoopInvariant(loop *ast.ForStmt) {
+	if loop.Body == nil || len(loop.Body.Stmts) == 0 {
+		return
+	}
+
+	mutated := map[string]bool{}
+
+	collectLoopMutations(loop.Body, mutated)
+
+	if loop.Post != nil {
+		collectLoopMutations(loop.Post, mutated)
+	}
+
+	if loop.VarName != "" {
+		mutated[loop.VarName] = true
+	}
+
+	cg.walkLicm(loop.Body, false, mutated)
+}
+
+// walkLicm descends through n's children. When it finds a BinExpr or
+// UnaryExpr that is fully loop-invariant and references at least one
+// identifier (so the optimizer can't trivially fold it), it warns -- but
+// only at the outermost such subtree, by passing parentInv=true to
+// children of an emitted node so they suppress their own emit.
+//
+// Nested ForStmt and LambdaExpr bodies are skipped: nested loops get
+// their own checkLoopInvariant pass, and lambdas may be invoked outside
+// the loop where "loop-invariant" no longer applies.
+func (cg *CodeGen) walkLicm(n ast.Node, parentInv bool, mutated map[string]bool) {
+	if n == nil {
+		return
+	}
+	// Same typed-nil guard as walkAST: an interface value can wrap a nil
+	// concrete pointer (e.g. *ast.Block) which `n == nil` misses, and
+	// dereferencing it (n.Pos(), or any field access) would segfault.
+	if rv := reflect.ValueOf(n); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return
+	}
+
+	switch n.(type) {
+	case *ast.ForStmt, *ast.LambdaExpr:
+		return
+	}
+
+	isInv := false
+
+	switch n.(type) {
+	case *ast.BinExpr, *ast.UnaryExpr:
+		if isLoopInvariantExpr(n, mutated) && containsIdentifier(n) {
+			isInv = true
+
+			if !parentInv {
+				cg.warn(DiagLoopInvariant, n.Pos(),
+					"expression does not depend on loop state; consider hoisting it before the loop")
+			}
+		}
+	}
+
+	switch e := n.(type) {
+	case *ast.Block:
+		for _, s := range e.Stmts {
+			cg.walkLicm(s, false, mutated)
+		}
+	case *ast.IfStmt:
+		cg.walkLicm(e.Cond, false, mutated)
+		cg.walkLicm(e.Then, false, mutated)
+
+		for _, ei := range e.ElseIfs {
+			cg.walkLicm(ei.Cond, false, mutated)
+			cg.walkLicm(ei.Body, false, mutated)
+		}
+
+		cg.walkLicm(e.Else, false, mutated)
+	case *ast.MatchStmt:
+		cg.walkLicm(e.Expr, false, mutated)
+
+		for _, c := range e.Cases {
+			cg.walkLicm(c.Pattern, false, mutated)
+			cg.walkLicm(c.Guard, false, mutated)
+			cg.walkLicm(c.Body, false, mutated)
+		}
+
+		cg.walkLicm(e.Default, false, mutated)
+	case *ast.AssignStmt:
+		cg.walkLicm(e.Target, false, mutated)
+		cg.walkLicm(e.Value, false, mutated)
+	case *ast.AugAssignStmt:
+		cg.walkLicm(e.Target, false, mutated)
+		cg.walkLicm(e.Value, false, mutated)
+	case *ast.PostfixStmt:
+		cg.walkLicm(e.Expr, false, mutated)
+	case *ast.VarDecl:
+		cg.walkLicm(e.Value, false, mutated)
+	case *ast.ReturnStmt:
+		cg.walkLicm(e.Value, false, mutated)
+	case *ast.EchoStmt:
+		cg.walkLicm(e.Value, false, mutated)
+	case *ast.ExprStmt:
+		cg.walkLicm(e.Expr, false, mutated)
+	case *ast.DeferStmt:
+		cg.walkLicm(e.Call, false, mutated)
+	case *ast.BinExpr:
+		cg.walkLicm(e.Left, isInv, mutated)
+		cg.walkLicm(e.Right, isInv, mutated)
+	case *ast.UnaryExpr:
+		cg.walkLicm(e.Expr, isInv, mutated)
+	case *ast.CallExpr:
+		cg.walkLicm(e.Func, false, mutated)
+
+		for _, a := range e.Args {
+			cg.walkLicm(a, false, mutated)
+		}
+	case *ast.IndexExpr:
+		cg.walkLicm(e.Expr, false, mutated)
+		cg.walkLicm(e.Index, false, mutated)
+	case *ast.FieldAccess:
+		cg.walkLicm(e.Expr, false, mutated)
+	case *ast.AsExpr:
+		cg.walkLicm(e.Expr, false, mutated)
+	case *ast.AwaitExpr:
+		cg.walkLicm(e.Future, false, mutated)
+	case *ast.SpawnExpr:
+		cg.walkLicm(e.Call, false, mutated)
+		cg.walkLicm(e.DoBlock, false, mutated)
+	case *ast.TernaryExpr:
+		cg.walkLicm(e.Cond, false, mutated)
+		cg.walkLicm(e.Then, false, mutated)
+		cg.walkLicm(e.Else, false, mutated)
+	case *ast.TaggedBlock:
+		cg.walkLicm(e.Body, false, mutated)
+	}
+}
+
+// isLoopInvariantExpr reports whether n is a pure expression all of
+// whose identifier operands are not in the mutated set. Conservative:
+// returns false for any node kind that could reach a side-effecting
+// operation (calls, derefs, indexing, address-of, await, spawn).
+func isLoopInvariantExpr(n ast.Node, mutated map[string]bool) bool {
+	if n == nil {
+		return true
+	}
+
+	switch e := n.(type) {
+	case *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.BoolLit, *ast.NilLit:
+		return true
+	case *ast.Identifier:
+		return !mutated[e.Name]
+	case *ast.FieldAccess:
+		return isLoopInvariantExpr(e.Expr, mutated)
+	case *ast.UnaryExpr:
+		return isPureUnaryOp(e.Op) && isLoopInvariantExpr(e.Expr, mutated)
+	case *ast.BinExpr:
+		return isPureBinOp(e.Op) &&
+			isLoopInvariantExpr(e.Left, mutated) &&
+			isLoopInvariantExpr(e.Right, mutated)
+	case *ast.AsExpr:
+		return isLoopInvariantExpr(e.Expr, mutated)
+	}
+
+	return false
+}
+
+func isPureBinOp(op string) bool {
+	switch op {
+	case "+", "-", "*", "/", "%",
+		"&", "|", "^", "<<", ">>",
+		"==", "!=", "<", "<=", ">", ">=",
+		"&&", "||":
+		return true
+	}
+
+	return false
+}
+
+func isPureUnaryOp(op string) bool {
+	switch op {
+	case "-", "+", "!", "~", "not":
+		return true
+	}
+
+	return false
+}
+
+// containsIdentifier reports whether n's subtree contains at least one
+// *ast.Identifier. Used by the LICM check so we don't emit on pure
+// constant expressions like `1 + 2` -- the optimizer folds those without
+// a programmer-visible improvement.
+func containsIdentifier(n ast.Node) bool {
+	found := false
+
+	walkAST(n, func(c ast.Node) {
+		if _, ok := c.(*ast.Identifier); ok {
+			found = true
+		}
+	})
+
+	return found
+}
+
+// collectLoopMutations records every name that is written, address-
+// taken, or rebound inside the loop body. Conservative on every front:
+// any `&x`, any assignment-target chain rooted at an Identifier, and any
+// VarDecl introduces the bound name into the mutated set. CallExpr args
+// of the form `&x` also mark x, since the callee can mutate through the
+// address.
+func collectLoopMutations(body ast.Node, mutated map[string]bool) {
+	walkAST(body, func(n ast.Node) {
+		switch e := n.(type) {
+		case *ast.AssignStmt:
+			markBaseIdent(e.Target, mutated)
+		case *ast.AugAssignStmt:
+			markBaseIdent(e.Target, mutated)
+		case *ast.PostfixStmt:
+			markBaseIdent(e.Expr, mutated)
+		case *ast.VarDecl:
+			mutated[e.Name] = true
+		case *ast.AddrExpr:
+			markBaseIdent(e.Val, mutated)
+		case *ast.AddressOfExpr:
+			markBaseIdent(e.Expr, mutated)
+		}
+	})
+}
+
+// markBaseIdent walks an l-value chain (FieldAccess / IndexExpr /
+// DerefExpr) down to its root identifier and records the name. A write
+// through `obj.field`, `arr[i]`, or `*p` means we can no longer prove
+// `obj`, `arr`, or `p` is loop-invariant, so the entire base name is
+// marked.
+func markBaseIdent(n ast.Node, m map[string]bool) {
+	for n != nil {
+		switch e := n.(type) {
+		case *ast.Identifier:
+			m[e.Name] = true
+
+			return
+		case *ast.FieldAccess:
+			n = e.Expr
+		case *ast.IndexExpr:
+			n = e.Expr
+		case *ast.DerefExpr:
+			n = e.Expr
+		default:
+			return
+		}
+	}
+}
+
+// checkMagicNumbers flags int and float literals that aren't in the
+// universal exempt set ({-1, 0, 1, 2}) and aren't in a context where
+// embedding the literal directly is conventional.
+//
+// Two-pass design: the first walkAST classifies each node into context
+// buckets (const-init descendants, array-index descendants, direct
+// comparison/bitwise operands -- including those wrapped in unary +/-
+// or `as` casts). The second walk inspects each literal against its
+// bucket flags and emits when none of them apply.
+//
+// Default-off; gated through warn() but we also short-circuit the
+// classification pass when the diagnostic is disabled to avoid building
+// per-node maps for nothing.
+func (cg *CodeGen) checkMagicNumbers(prog *ast.Program) {
+	if !cg.diagEnabled(DiagMagicNumber) {
+		return
+	}
+
+	inConst := map[ast.Node]bool{}
+	inIndex := map[ast.Node]bool{}
+	cmpOperand := map[ast.Node]bool{}
+	bitOperand := map[ast.Node]bool{}
+
+	classify := func(n ast.Node) {
+		switch e := n.(type) {
+		case *ast.VarDecl:
+			if e.IsConst && e.Value != nil {
+				walkAST(e.Value, func(c ast.Node) { inConst[c] = true })
+			}
+		case *ast.TopLevelVar:
+			if e.IsConst && e.Value != nil {
+				walkAST(e.Value, func(c ast.Node) { inConst[c] = true })
+			}
+		case *ast.IndexExpr:
+			if e.Index != nil {
+				walkAST(e.Index, func(c ast.Node) { inIndex[c] = true })
+			}
+		case *ast.BinExpr:
+			switch e.Op {
+			case "==", "!=", "<", "<=", ">", ">=":
+				peelLitContext(e.Left, cmpOperand)
+				peelLitContext(e.Right, cmpOperand)
+			case "&", "|", "^", "<<", ">>":
+				peelLitContext(e.Left, bitOperand)
+				peelLitContext(e.Right, bitOperand)
+			}
+		}
+	}
+
+	flag := func(n ast.Node) {
+		switch e := n.(type) {
+		case *ast.IntLit:
+			if shouldFlagIntMagic(e, inConst[e], inIndex[e], cmpOperand[e], bitOperand[e]) {
+				cg.warn(DiagMagicNumber, e.Pos(),
+					"magic number %d; consider naming it as a const", e.Value)
+			}
+		case *ast.FloatLit:
+			if shouldFlagFloatMagic(e, inConst[e], inIndex[e], cmpOperand[e]) {
+				cg.warn(DiagMagicNumber, e.Pos(),
+					"magic number %g; consider naming it as a const", e.Value)
+			}
+		}
+	}
+
+	for _, s := range prog.Stmts {
+		walkAST(s, classify)
+	}
+
+	for _, s := range prog.Stmts {
+		walkAST(s, flag)
+	}
+}
+
+// peelLitContext records `n` and any literal-shaped descendant reached
+// through unary +/- or an `as` cast. Captures `5`, `-5`, and `5 as i64`
+// uniformly so the magic-number check exempts a literal regardless of
+// the syntactic decoration around it.
+func peelLitContext(n ast.Node, m map[ast.Node]bool) {
+	for n != nil {
+		m[n] = true
+
+		switch e := n.(type) {
+		case *ast.UnaryExpr:
+			if e.Op == "-" || e.Op == "+" {
+				n = e.Expr
+
+				continue
+			}
+		case *ast.AsExpr:
+			n = e.Expr
+
+			continue
+		}
+
+		return
+	}
+}
+
+// shouldFlagIntMagic decides whether an integer literal warrants a
+// magic-number warning given its context flags.
+func shouldFlagIntMagic(e *ast.IntLit, inConst, inIdx, cmpOp, bitOp bool) bool {
+	if e.Big != nil {
+		return false
+	}
+
+	if inConst || inIdx || cmpOp {
+		return false
+	}
+
+	v := e.Value
+	if v >= -1 && v <= 2 {
+		return false
+	}
+
+	if bitOp && isBitOpExempt(v) {
+		return false
+	}
+
+	return true
+}
+
+// shouldFlagFloatMagic decides whether a float literal warrants a
+// magic-number warning. Floats don't get a bit-op exemption since
+// bitwise ops aren't defined for them.
+func shouldFlagFloatMagic(e *ast.FloatLit, inConst, inIdx, cmpOp bool) bool {
+	if inConst || inIdx || cmpOp {
+		return false
+	}
+
+	switch e.Value {
+	case -1, 0, 0.5, 1, 2:
+		return false
+	}
+
+	return true
+}
+
+// isBitOpExempt reports whether v is a recognizable bit pattern that
+// commonly appears as a bitwise operand: power of two (single-bit set
+// or shift count) or 2^N - 1 (an all-ones mask).
+func isBitOpExempt(v int64) bool {
+	if v <= 0 {
+		return v == 0 || v == -1
+	}
+
+	if v&(v-1) == 0 {
+		return true
+	}
+
+	if (v+1)&v == 0 {
+		return true
+	}
+
+	return false
+}
+
+// diagEnabled reports whether a default-off diagnostic has been opted
+// into via -W<name>, -Wpedantic, etc. Default-on diagnostics always
+// return true.
+func (cg *CodeGen) diagEnabled(name string) bool {
+	if !defaultOffWarnings[name] {
+		return true
+	}
+
+	if s := cg.diags[name]; s != nil {
+		return s.enabled
+	}
+
+	return false
 }
 
 // astEqual reports whether two AST nodes are syntactically identical for

@@ -263,7 +263,9 @@ typedef struct TinChannel {
 // ---------------------------------------------------------------------------
 
 void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
-    if (cap <= 0) cap = 1;
+    if (cap <= 0) {
+        _tin_panic("Channel.make: capacity must be > 0");
+    }
     // Round up to power of 2 for bitwise-AND wrap.
     int64_t po2 = 1;
     while (po2 < cap) po2 <<= 1;

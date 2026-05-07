@@ -1171,15 +1171,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
-		// Check genericFuncs first, then constrainedFuncs for cross-package generic calls.
-		for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
-			result, _, found, err2 := cg.callGenericFromMap(block, e.Args, bareName, m)
-			if err2 != nil {
-				return nil, err2
-			}
+		// Bare-name fallback for genericFuncs / constrainedFuncs.
+		// Skipped when the call is qualified (len(fn.Path) > 1): a qualified path
+		// uniquely names the package, so we must not fall back to a same-bare-name
+		// template from a different package (e.g. assert::ok(bool) silently
+		// monomorphizing result::ok[t,e](Result[t,e])).
+		if len(fn.Path) <= 1 {
+			for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
+				result, _, found, err2 := cg.callGenericFromMap(block, e.Args, bareName, m)
+				if err2 != nil {
+					return nil, err2
+				}
 
-			if found {
-				return result, nil
+				if found {
+					return result, nil
+				}
 			}
 		}
 		// e.g. weather.sunny used as function - probably an error, but handle gracefully.

@@ -77,8 +77,10 @@ void *_tin_tls_new(const char *host, int32_t fd) {
 
 // _tin_tls_do_handshake advances the TLS handshake one step.
 // Returns 0 when complete, TIN_IO_BLOCKED if more I/O is needed, -1 on error.
+// -1 also covers the post-shutdown case where ssl is NULL.
 int64_t _tin_tls_do_handshake(void *handle) {
     TinTLS *t = (TinTLS *)handle;
+    if (!t || !t->ssl) return -1;
     int r = SSL_do_handshake(t->ssl);
     if (r == 1) return 0;
 
@@ -90,8 +92,10 @@ int64_t _tin_tls_do_handshake(void *handle) {
 
 // _tin_tls_read reads up to n bytes into buf.
 // Returns bytes read (>0), 0 on clean close, TIN_IO_BLOCKED, or -1 on error.
+// 0 also covers the post-shutdown case (ssl == NULL).
 int64_t _tin_tls_read(void *handle, char *buf, int64_t n) {
     TinTLS *t = (TinTLS *)handle;
+    if (!t || !t->ssl) return 0;
     int r = SSL_read(t->ssl, buf, (int)n);
     if (r > 0) return (int64_t)r;
     if (r == 0) return 0;
@@ -104,8 +108,10 @@ int64_t _tin_tls_read(void *handle, char *buf, int64_t n) {
 
 // _tin_tls_write writes up to n bytes from buf.
 // Returns bytes written (>0), TIN_IO_BLOCKED, or -1 on error.
+// -1 also covers the post-shutdown case (ssl == NULL).
 int64_t _tin_tls_write(void *handle, const char *buf, int64_t n) {
     TinTLS *t = (TinTLS *)handle;
+    if (!t || !t->ssl) return -1;
     int r = SSL_write(t->ssl, buf, (int)n);
     if (r > 0) return (int64_t)r;
 
@@ -115,14 +121,26 @@ int64_t _tin_tls_write(void *handle, const char *buf, int64_t n) {
     return -1;
 }
 
-// _tin_tls_close sends close_notify and frees the TLS state.
-// Does NOT close the underlying fd - the caller manages that.
-void _tin_tls_close(void *handle) {
+// _tin_tls_shutdown sends close_notify and tears down OpenSSL state for
+// this connection. Idempotent: subsequent calls (including the rc::Cell
+// dtor below) see ssl == NULL and become no-ops. Does NOT close the
+// underlying fd or free the TinTLS struct.
+void _tin_tls_shutdown(void *handle) {
     TinTLS *t = (TinTLS *)handle;
     if (!t) return;
     if (t->ssl) {
         SSL_shutdown(t->ssl);
         SSL_free(t->ssl);
+        t->ssl = NULL;
     }
+}
+
+// _tin_tls_free is the rc::Cell dtor: runs once on the last drop of
+// TlsConn. Performs a final shutdown in case the user never called
+// .close() explicitly, then frees the TinTLS struct itself.
+void _tin_tls_free(void *handle) {
+    TinTLS *t = (TinTLS *)handle;
+    if (!t) return;
+    _tin_tls_shutdown(handle);
     free(t);
 }

@@ -253,7 +253,7 @@ func (cg *CodeGen) addCrossModuleDeclares() {
 		}
 	}
 
-	// Process cg.mod too — entry-program main / runtime helpers
+	// Process cg.mod too - entry-program main / runtime helpers
 	// frequently reference per-pkg fns (e.g. `assert::not_ok` from
 	// inside a test body that codegen emitted directly into cg.mod).
 	cg.addCrossModuleDeclaresFor(cg.mod, globalOwner)
@@ -356,7 +356,7 @@ func (cg *CodeGen) addCrossModuleDeclaresFor(m *ir.Module, globalOwner map[*ir.G
 		}
 	}
 
-	// Also walk global initializers — vtable globals reference fn
+	// Also walk global initializers - vtable globals reference fn
 	// pointers via constant expressions.
 	for _, g := range m.Globals {
 		if g.Init != nil {

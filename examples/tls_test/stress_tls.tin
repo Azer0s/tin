@@ -17,7 +17,7 @@ async worker(id i64, msgs i64, done sync::Channel[i64]) =
     await done.send(1)
     return
 
-  let tls_conn = await tls::connect("localhost", conn.fd)
+  let tls_conn = await tls::connect("localhost", conn.fd())
 
   let i i64 = 0
   for i < msgs:

@@ -128,7 +128,7 @@ Input:
 // `fn main()`, a follow-up `main()` cell is appended so the binary-style
 // entry point also runs (matching `tin run`).
 //
-// Test blocks are filtered out — they only run under `tin test`.
+// Test blocks are filtered out - they only run under `tin test`.
 func preload(s *session, path string) error {
 	src, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {

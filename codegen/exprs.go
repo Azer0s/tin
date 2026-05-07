@@ -808,7 +808,10 @@ func (cg *CodeGen) astInferType(node ast.Node) irtypes.Type {
 // using the cg.curBlock pattern (genVarDecl, genReturn, etc.) pick up the
 // correct block for subsequent code emission.
 func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Value, error) {
-	// Validate: each arm must have exactly one expression body.
+	// Validate: each arm must be a single expression OR a divergent
+	// terminator (return / break / panic). Divergent arms don't produce a
+	// value but unblock the common `let x = match ...: case Ok(v): v;
+	// case Err(e): return Err(e)` propagation pattern.
 	for i, c := range s.Cases {
 		if c.Body == nil || len(c.Body.Stmts) == 0 {
 			return nil, cg.nodeErr(s, "match expression: case %d has no body", i)
@@ -818,8 +821,8 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 			return nil, cg.nodeErr(s, "match expression: case %d has multiple statements; match expressions allow exactly one expression per arm", i)
 		}
 
-		if armExprNode(c.Body.Stmts[0]) == nil {
-			return nil, cg.nodeErr(s, "match expression: case %d body is not an expression (use 'return match ...' for statement arms)", i)
+		if armExprNode(c.Body.Stmts[0]) == nil && !isExplicitTerminator(c.Body.Stmts[0]) {
+			return nil, cg.nodeErr(s, "match expression: case %d body is not an expression or terminator (use 'return match ...' for statement arms)", i)
 		}
 	}
 
@@ -832,17 +835,21 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 			return nil, cg.nodeErr(s, "match expression: default arm has multiple statements; match expressions allow exactly one expression per arm")
 		}
 
-		if armExprNode(s.Default.Stmts[0]) == nil {
-			return nil, cg.nodeErr(s, "match expression: default arm body is not an expression (use 'return match ...' for statement arms)")
+		if armExprNode(s.Default.Stmts[0]) == nil && !isExplicitTerminator(s.Default.Stmts[0]) {
+			return nil, cg.nodeErr(s, "match expression: default arm body is not an expression or terminator (use 'return match ...' for statement arms)")
 		}
 	}
 
-	// Determine result type from the first arm that can be inferred.
-	// Push pattern bindings into a temporary scope so that renamed fields
-	// (e.g. "x: px") are visible to astInferType when the arm body is "px".
+	// Determine result type from the first non-divergent arm. Divergent arms
+	// (return/break/panic) don't yield a value, so they can't drive type
+	// inference; they're skipped here and emitted without a result store.
 	var resType irtypes.Type
 
 	for _, c := range s.Cases {
+		if isExplicitTerminator(c.Body.Stmts[0]) {
+			continue
+		}
+
 		if expr := armExprNode(c.Body.Stmts[0]); expr != nil {
 			resType = cg.astInferTypeWithPattern(expr, c.Pattern)
 		}
@@ -852,10 +859,18 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 		}
 	}
 
-	if resType == nil && s.Default != nil {
+	if resType == nil && s.Default != nil && !isExplicitTerminator(s.Default.Stmts[0]) {
 		if expr := armExprNode(s.Default.Stmts[0]); expr != nil {
 			resType = cg.astInferType(expr)
 		}
+	}
+
+	// Fall back to the caller's expected type (set by genVarDecl when the let
+	// has an explicit annotation, or by genReturn for `return match ...`).
+	// This rescues cases where every arm body refers to a pattern-bound name
+	// the inference doesn't see (e.g. `case Ok(v): v` from an ADT pattern).
+	if resType == nil {
+		resType = cg.returnTypeHint
 	}
 
 	if resType == nil {

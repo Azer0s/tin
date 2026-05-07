@@ -16,7 +16,7 @@ const progressLineWidth = 80
 // Two render modes, picked at construction by inspecting stderr:
 //
 //   - TTY: each top-level stage / detail event uses \r to overwrite the
-//     previous line, so only the current activity is visible — Zig-style
+//     previous line, so only the current activity is visible - Zig-style
 //     in-place progress. detail() events stream through.
 //
 //   - non-TTY (file or pipe): \r overwrites become noise (every event

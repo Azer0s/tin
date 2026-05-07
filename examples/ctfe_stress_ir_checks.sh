@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # IR-level proof that examples/ctfe_stress.tin's `assert::equals` arguments
-# were ACTUALLY produced by CTFE folding — not by an unfolded runtime call.
+# were ACTUALLY produced by CTFE folding - not by an unfolded runtime call.
 #
 # For each scenario we examine the @_tin_user_main body in the emitted IR
 # (test mode) and check:
@@ -118,7 +118,7 @@ fn main() i64 = return match_kind(7)
 '
 
 # 6. Memoization: 50 call sites all fold to 27, none survive as @cube calls.
-assert_main "memoised cube(3) — 50 sites, zero runtime calls" 'i64 27' 'call i64 @cube' '
+assert_main "memoised cube(3) - 50 sites, zero runtime calls" 'i64 27' 'call i64 @cube' '
 fn{#pure} cube(n i64) i64 = return n * n * n
 
 fn main() i64 =
@@ -145,7 +145,7 @@ fn{#pure} sq(counter i64) i64 = return counter * counter
 fn main() i64 = return sq(8)
 '
 
-# 9. #allow_sideffect blocks fold — runtime call MUST survive.
+# 9. #allow_sideffect blocks fold - runtime call MUST survive.
 assert_main "#allow_sideffect keeps the call" 'call i64 @traced_double' '' '
 fn{#pure} traced_double(n i64) i64 =
   let r i64 = n * 2

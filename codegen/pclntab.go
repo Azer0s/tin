@@ -452,7 +452,7 @@ func (cg *CodeGen) emitPclntabForFn(fn *ir.Func) {
 // fnHomeModule returns the LLVM module that defines fn. fn.Parent is
 // set by llir/llvm when fn is added via Module.NewFunc; for any fn
 // codegen creates, it always reflects the owning module. Falls back to
-// fallback if Parent is somehow nil (defensive — shouldn't happen for
+// fallback if Parent is somehow nil (defensive - shouldn't happen for
 // fns codegen produced).
 func fnHomeModule(fn *ir.Func, fallback *ir.Module) *ir.Module {
 	if fn != nil && fn.Parent != nil {

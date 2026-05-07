@@ -1,0 +1,18 @@
+fn filter[t](f fn(i t) bool) fn([t]) [t] =
+  return fn(list [t]) [t] =
+    let res [t] = []
+    for let i t in list:
+      if f(i):
+        res ++= i
+    return res
+
+fn qsort[t](xs [t]) [t] where t is ord =
+  where ([]): []
+  where ([x]): [x]
+  where ([x, ...rest]):
+    let lower = rest |> filter(fn(e t) bool = e < x)
+    let upper = rest |> filter(fn(e t) bool = e >= x)
+    return qsort(lower) ++ [x] ++ qsort(upper)
+
+
+echo qsort([3, 1, 4, 1, 5, 9])

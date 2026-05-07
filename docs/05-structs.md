@@ -328,7 +328,7 @@ struct Atomic[t] =
   fn load(this Atomic[t]) t where t is primitive = ...
   fn store(this Atomic[t], v t) where t is primitive = ...
 
-  // add/cas only on numeric types — bool can be loaded/stored but
+  // add/cas only on numeric types - bool can be loaded/stored but
   // arithmetic and compare-and-swap don't apply
   fn add(this Atomic[t], d t) t where t is numeric = ...
   fn cas(this Atomic[t], old t, nw t) t where t is numeric = ...
@@ -371,7 +371,7 @@ error: Box[bool].process doesn't match any of:
 The bound expression is the same `&&` / `||` / `not` algebra used by
 function-level constraints (see
 [03-functions.md](03-functions.md#type-constraints)). Type-equality
-bounds (`t is i64`) match only the literal type — a user struct that
+bounds (`t is i64`) match only the literal type - a user struct that
 implements `ord` can't accidentally satisfy `where t is i64`.
 
 ---

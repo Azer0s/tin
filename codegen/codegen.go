@@ -621,6 +621,17 @@ type CodeGen struct {
 	// rejected with a compile error when this is zero.
 	unsafeDepth int
 
+	// dfSuppressWarnings is non-zero while the dataflow pass is iterating
+	// a loop body to fixpoint. The first few iterations see a transient
+	// state where loop-modified locals still appear to hold their init
+	// values, so flow-sensitive checks would fire phantom warnings ("if
+	// epoch % 500 == 0 is always true" on iteration 0 of `for let epoch
+	// = 0; ...; epoch++`). dfWalkLoop suppresses warnings during the
+	// fixpoint iterations, then replays one final body walk with the
+	// converged input state so warnings that survive the widening still
+	// fire.
+	dfSuppressWarnings int
+
 	// verboseMatchInfo dumps the Maranget pattern matrix and per-arm
 	// reachability decisions for every match / where the compiler sees.
 	// Toggled by -fdump-match-info; for debugging the algorithm itself.
@@ -2015,16 +2026,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	}
 
 	// In REPL mode the cell function is the only entry point; skip main().
+	// Skip mono extraction: REPL compiles cg.mod alone (no separate mono
+	// .o cache), so monomorphized fn bodies must stay in cg.mod or
+	// dlopen will see only `declare`s for them.
 	if cg.replMode {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.finalizeImplSection()
-		// extractMonoModules MUST run before applyPclntabPostPass:
-		// pclntab emits blockaddress(@fn, %bb) constants and lld
-		// rejects them when @fn is only a declare. Moving mono fns
-		// first lets pclntab route the pcs entry into the same mono
-		// module where the fn definition now lives.
-		cg.extractMonoModules()
 		cg.applyPclntabPostPass()
 		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
@@ -2271,6 +2279,12 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// populates structDeclsByName lazily) and the call graph is built
 	// (computeFnsTouchingExtern needs it for transitive propagation).
 	cg.checkAllUnwrappedCResources(prog)
+
+	// -Wunclosed-closeable: warns when a let-bound value whose type
+	// implements io::Closeable leaves scope without a .close() call (or
+	// transfer). Runs after structDeclsByName is populated so the trait
+	// list per struct is complete.
+	cg.checkAllUnclosedCloseables(prog)
 
 	// Static analysis: warn on writes that reach a top-level `const`
 	// through a pointer alias. Top-level consts live in read-only

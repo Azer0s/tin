@@ -7,8 +7,15 @@
 //
 //   let n = await conn.read(&buf[0], 4096)
 //   await conn.write(&buf[0], n)
+//
+// Ownership: the file descriptor lives behind an *rc::Cell so copies of
+// Conn share ownership instead of double-closing on scope exit. Calling
+// .close() is optional (idempotent — POSIX close on an already-closed fd
+// is safe); the cell's dtor at last drop closes whatever the cell still
+// holds. Read the fd via the .fd() accessor.
 
 use io
+use rc
 use sync
 use errors
 use { Err } from errors
@@ -18,40 +25,45 @@ fn tin_tcp_listen_c(port i32) i32          = extern("_tin_tcp_listen")
 fn tin_tcp_accept_c(fd i32) i32            = extern("_tin_tcp_accept")
 fn tin_tcp_dial_c(host string, port i32) i32 = extern("_tin_tcp_dial")
 
-struct Conn (io::AsyncReader, io::AsyncWriter) =
-  fd i32
+struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
+  _fd_cell *rc::Cell[i32]
+
+  // fd returns the raw underlying file descriptor.
+  fn fd(this Conn) i32 = return this._fd_cell.payload()
 
   // read reads up to n bytes from the connection into buf.
   // Returns Future[i64] - use `await conn.read(buf, n)`.
   fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn io::async_read(this.fd, buf, n)
+    return spawn io::async_read(this.fd(), buf, n)
 
   // write writes up to n bytes from buf to the connection.
   // Returns Future[i64] - use `await conn.write(buf, n)`.
   fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn io::async_write(this.fd, buf, n)
+    return spawn io::async_write(this.fd(), buf, n)
 
-  fn close(this Conn) =
-    io::close(this.fd)
+  fn Closeable::close(this Conn) =
+    io::close(this.fd())
 
   fn valid(this Conn) bool =
-    return this.fd >= 0
+    return this.fd() >= 0
 
-struct Server =
-  listen_fd i32
+struct Server (io::Closeable) =
+  _fd_cell *rc::Cell[i32]
+
+  fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next connection.
   // Returns (Conn, Err) - nil Err means success.
   //   let (c, err) = srv.accept()
   //   if errors::has(err): return
   fn accept(this Server) (Conn, Err) =
-    let fd = tin_tcp_accept_c(this.listen_fd)
+    let fd = tin_tcp_accept_c(this.fd())
     if fd < 0:
-      return (Conn{fd: -1}, errors::new("tcp: accept failed"))
-    return (Conn{fd: fd}, nil)
+      return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: accept failed"))
+    return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
-  fn close(this Server) =
-    io::close(this.listen_fd)
+  fn Closeable::close(this Server) =
+    io::close(this.fd())
 
 
 // listen creates a TCP server on the given port.
@@ -59,15 +71,15 @@ struct Server =
 fn listen(port i32) (Server, Err) =
   let fd = tin_tcp_listen_c(port)
   if fd < 0:
-    return (Server{listen_fd: -1}, errors::new("tcp: failed to bind port {port}"))
-  return (Server{listen_fd: fd}, nil)
+    return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: failed to bind port {port}"))
+  return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial connects to host:port via TCP.
 // Returns (Conn, Err) - check Err before using Conn.
 fn dial(host string, port i32) (Conn, Err) =
   let fd = tin_tcp_dial_c(host, port)
   if fd < 0:
-    return (Conn{fd: -1}, errors::new("tcp: dial {host}:{port} failed"))
-  return (Conn{fd: fd}, nil)
+    return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: dial {host}:{port} failed"))
+  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 export { Conn, Server, listen, dial } as tcp

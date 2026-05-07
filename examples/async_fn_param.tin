@@ -7,7 +7,7 @@
 use assert
 use { sleep } from io
 
-// ─── helpers ─────────────────────���─────────────────────���───────────────────
+// helpers
 
 fn{#async} double(n i64) i64 =
   await sleep(1)
@@ -19,7 +19,7 @@ fn{#async} greet(s string) string =
 
 fn add_one(n i64) i64 = return n + 1
 
-// ─── 1. fn{#async}() as a function parameter ──────────────────────────────
+// 1. fn{#async}() as a function parameter
 
 // A sync function that accepts an async callback and spawns it.
 fn run_async(cb fn{#async}(i64) i64, n i64) i64 =
@@ -31,7 +31,7 @@ test "pass async fn as parameter" =
   let result = run_async(double, 21)
   assert::equals(result, 42)
 
-// ─── 2. [fn{#async}()] - array of async function values ───────────────────
+// 2. [fn{#async}()] - array of async function values
 
 test "store async fn in array" =
   let fns [fn{#async}(i64) i64] = [double]
@@ -48,7 +48,7 @@ test "multiple async fns in array" =
   assert::equals(r0, 6)
   assert::equals(r1, 14)
 
-// ─── 3. fn{#async}() in a struct field ────────────────────────────────────
+// 3. fn{#async}() in a struct field
 
 struct Handler =
   handle fn{#async}(i64) i64
@@ -59,7 +59,7 @@ test "async fn in struct field" =
   let r = await f
   assert::equals(r, 20)
 
-// ─── 4. Passing the correct overload ──────────────────────────────────────
+// 4. Passing the correct overload
 
 fn apply(cb fn(i64) i64, n i64) i64 = return cb(n)
 

@@ -69,28 +69,89 @@ const (
 	// warns when the program later assigns through the deref or passes
 	// the pointer to a function that would mutate it.
 	DiagWriteToConst = "write-to-const"
+	// DiagUseBeforeAssign fires when a local declared without an
+	// initializer (e.g. `let x i64`) is read before the program
+	// explicitly assigns to it on every path reaching the read. Tin
+	// auto-zero-inits primitives at runtime, so this is a style /
+	// correctness check rather than UB detection: the read returns 0,
+	// "", or nil, but the value almost certainly isn't what the
+	// programmer intended. Default-off; opt in via -Wall.
+	DiagUseBeforeAssign = "use-before-assign"
+	// DiagLoopInvariant fires on a pure expression inside a loop body
+	// whose operands are never assigned (or address-taken) within that
+	// body. Hoisting it to before the loop avoids redoing the work each
+	// iteration. The check is conservative: it only considers
+	// arithmetic/bitwise/comparison/boolean trees over identifiers,
+	// literals, field accesses, and casts -- never function calls,
+	// pointer derefs, or indexed reads, since those may observe
+	// side-effecting state we don't track.
+	DiagLoopInvariant = "loop-invariant"
+	// DiagMagicNumber fires on int/float literals embedded in code where
+	// a named constant would convey intent better. Default-off; opt in via
+	// -Wpedantic or -Wmagic-number. Universally exempt: -1, 0, 1, 2 (and
+	// their float counterparts). Context-exempt: const initializers,
+	// array index positions, comparison RHS, and bitwise-op operands when
+	// the value is a power of two or a 2^N-1 mask.
+	DiagMagicNumber = "magic-number"
+	// DiagStyle fires on naming conventions that don't match Tin's house
+	// style: functions, parameters, and locals should be snake_case;
+	// types (struct, trait, enum, type, union, data) should be
+	// PascalCase. Also flags trailing whitespace and a missing
+	// end-of-file newline. Default-off; opt in via -Wstyle or -Wall.
+	DiagStyle = "style"
+	// DiagUnusedMustUse fires when a statement-level call returns a
+	// `Result[t, e]` (or another #must_use-tagged type) and the result is
+	// silently dropped. Result is the canonical Tin error channel; ignoring
+	// it elides the error path entirely. The fix is to bind the result and
+	// match on it, propagate it via try!, or take it via unwrap_or / unwrap.
+	// To intentionally drop it, write `let _ = call(...)`. Default-on; use
+	// -Wno-unused-must-use to silence.
+	DiagUnusedMustUse = "unused-must-use"
+	// DiagUnclosedCloseable fires when a local binding's value is produced
+	// by a function whose return type implements `io::Closeable` (or
+	// another resource trait) and the binding leaves scope without a
+	// `.close()` call AND without being transferred (returned, stored in
+	// a struct, passed to a fn). With Tin's default rc::Cell-backed
+	// resources, auto-cleanup makes explicit close optional, so this
+	// warning is default-off — opt in via -Wpedantic or
+	// -Wunclosed-closeable for codebases that want explicit close
+	// discipline (e.g. for graceful TLS close_notify, deterministic fd
+	// release before a long compute, etc.).
+	DiagUnclosedCloseable = "unclosed-closeable"
+	// DiagFiber catches misuse of fiber/channel/mutex primitives:
+	// double-close of a channel on a single path; send to a channel that
+	// has already been closed on this path; mutex .lock() with no matching
+	// .unlock() before function return; mutex declared but never locked
+	// anywhere in the function. The check is intra-function and walks
+	// each branch independently, so cross-branch interactions are
+	// intentionally ignored to avoid false positives.
+	DiagFiber = "fiber-misuse"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
 // fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
 var defaultOffWarnings = map[string]bool{
-	DiagUnusedLet:     true,
-	DiagUnusedParam:   true,
-	DiagUnusedResult:  true,
-	DiagFloatEqual:    true,
-	DiagBuiltinShadow: true,
+	DiagUnusedLet:         true,
+	DiagUnusedParam:       true,
+	DiagUnusedResult:      true,
+	DiagFloatEqual:        true,
+	DiagBuiltinShadow:     true,
+	DiagUseBeforeAssign:   true,
+	DiagMagicNumber:       true,
+	DiagStyle:             true,
+	DiagUnclosedCloseable: true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
 // always-on safety warnings. Mirrors the clang/gcc convention: useful
 // hygiene checks that don't usually produce false positives in idiomatic
 // code.
-var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual}
+var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual, DiagUseBeforeAssign, DiagStyle}
 
 // wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
 // These can produce noise in code that follows trait-conformance patterns
 // (unused parameters required by an interface), so they're opt-in.
-var wpedanticWarnings = []string{DiagUnusedParam, DiagBuiltinShadow}
+var wpedanticWarnings = []string{DiagUnusedParam, DiagBuiltinShadow, DiagMagicNumber, DiagUnclosedCloseable}
 
 // diagState tracks the user's preferences for one named warning.
 type diagState struct {
@@ -438,6 +499,12 @@ func (cg *CodeGen) warn(name string, pos ast.Pos, format string, args ...any) {
 func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, args ...any) {
 	if file == "" {
 		file = cg.filenameForDiag()
+	}
+
+	// Suppressed during dataflow fixpoint iterations; see the comment on
+	// CodeGen.dfSuppressWarnings.
+	if cg.dfSuppressWarnings > 0 {
+		return
 	}
 
 	if cg.diagSuppressed(name) {

@@ -327,7 +327,7 @@ func (cg *CodeGen) genBlock(block *ir.Block, b *ast.Block) (*ir.Block, bool, err
 			// because the source code is still branching as written; "dead"
 			// is a property of the monomorphized callsite (e.g. typeof(v) ==
 			// 'i64 in encode[T]) rather than user-visible mistake.
-			if i+1 < len(b.Stmts) && isExplicitTerminator(stmt) {
+			if i+1 < len(b.Stmts) && (isExplicitTerminator(stmt) || isFullyTerminatingStructural(stmt)) {
 				cg.warn(DiagUnreachableCode, b.Stmts[i+1].Pos(),
 					"unreachable code after %s", terminatorKind(stmt))
 			}
@@ -368,6 +368,10 @@ func terminatorKind(stmt ast.Node) string {
 		return "return"
 	case *ast.BreakStmt:
 		return "break"
+	case *ast.IfStmt:
+		return "if/else where every branch returns"
+	case *ast.MatchStmt:
+		return "match where every arm returns"
 	}
 
 	if call, ok := stmt.(*ast.ExprStmt); ok {
@@ -379,6 +383,74 @@ func terminatorKind(stmt ast.Node) string {
 	}
 
 	return "terminator"
+}
+
+// isFullyTerminatingStructural reports whether a structural statement
+// (if-chain, match, block) terminates control flow on every path it
+// can take. Used by the unreachable-code check to flag dead statements
+// after a complete `if cond: return; else: return` (or a match whose
+// every arm returns), since those are syntactically distinguishable
+// from the monomorphization-driven structural-fold case the existing
+// isExplicitTerminator carve-out worries about.
+func isFullyTerminatingStructural(stmt ast.Node) bool {
+	switch s := stmt.(type) {
+	case *ast.Block:
+		return blockEndsTerminating(s)
+	case *ast.IfStmt:
+		// Every arm including else must terminate; missing else means
+		// the no-arm-taken path falls through.
+		if s.Else == nil {
+			return false
+		}
+
+		if !blockEndsTerminating(s.Then) {
+			return false
+		}
+
+		for _, ei := range s.ElseIfs {
+			if !blockEndsTerminating(ei.Body) {
+				return false
+			}
+		}
+
+		return blockEndsTerminating(s.Else)
+	case *ast.MatchStmt:
+		// Every case body must terminate. Default is required because
+		// without it the match falls through on no-match.
+		if s.Default == nil {
+			return false
+		}
+
+		for _, c := range s.Cases {
+			if !nodeEndsTerminating(c.Body) {
+				return false
+			}
+		}
+
+		return nodeEndsTerminating(s.Default)
+	}
+
+	return false
+}
+
+func blockEndsTerminating(b *ast.Block) bool {
+	if b == nil || len(b.Stmts) == 0 {
+		return false
+	}
+
+	return nodeEndsTerminating(b.Stmts[len(b.Stmts)-1])
+}
+
+func nodeEndsTerminating(n ast.Node) bool {
+	if n == nil {
+		return false
+	}
+
+	if b, ok := n.(*ast.Block); ok {
+		return blockEndsTerminating(b)
+	}
+
+	return isExplicitTerminator(n) || isFullyTerminatingStructural(n)
 }
 
 // isStmtNode reports whether an AST node is inherently a statement (not an
@@ -870,15 +942,23 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		if callExpr, ok := s.Expr.(*ast.CallExpr); ok {
 			cg.markOutParamVarsHeapOwned(callExpr)
 
-			// Discarded result of a non-void call: warn (default-off via
-			// -Wunused-result / -Wall). Spawn/await results were already
-			// short-circuited above; this only fires for plain calls.
+			// Discarded result of a non-void call: warn. Result-returning
+			// calls fire the always-on -Wunused-must-use diagnostic; pure
+			// calls fire -Wdiscarded-pure-call (the call has no observable
+			// effect at all). Everything else falls back to the default-off
+			// -Wunused-result. Spawn/await results were already short-
+			// circuited above; this only fires for plain calls.
 			if val != nil && !isVoidType(val.Type()) {
-				if cg.isCalleePure(callExpr) {
+				switch {
+				case cg.calleeReturnsMustUse(callExpr):
+					cg.warn(DiagUnusedMustUse, callExpr.Pos(),
+						"discarded Result from %s; handle the error or bind with `let _ = ...` to silence",
+						callDisplayName(callExpr))
+				case cg.isCalleePure(callExpr):
 					cg.warn(DiagDiscardedPureCall, callExpr.Pos(),
 						"discarded result of pure call to %s has no effect",
 						callDisplayName(callExpr))
-				} else {
+				default:
 					cg.warn(DiagUnusedResult, callExpr.Pos(),
 						"discarded result of call to %s; use `_ = ...` to silence",
 						callDisplayName(callExpr))
@@ -2392,6 +2472,84 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 		}
 
 		return n
+	case *ast.Block:
+		newStmts := make([]ast.Node, len(n.Stmts))
+		for i, s := range n.Stmts {
+			newStmts[i] = substituteMacroNode(s, subst)
+		}
+
+		return &ast.Block{Stmts: newStmts}
+	case *ast.MatchStmt:
+		newCases := make([]ast.MatchCase, len(n.Cases))
+		for i, c := range n.Cases {
+			var body *ast.Block
+			if b, ok := substituteMacroNode(c.Body, subst).(*ast.Block); ok {
+				body = b
+			}
+
+			newCases[i] = ast.MatchCase{
+				Pattern: substituteMacroNode(c.Pattern, subst),
+				Guard:   substituteMacroNode(c.Guard, subst),
+				VarName: c.VarName,
+				Body:    body,
+			}
+		}
+
+		var def *ast.Block
+
+		if n.Default != nil {
+			if b, ok := substituteMacroNode(n.Default, subst).(*ast.Block); ok {
+				def = b
+			}
+		}
+
+		return &ast.MatchStmt{
+			Expr:    substituteMacroNode(n.Expr, subst),
+			Cases:   newCases,
+			Default: def,
+			IsType:  n.IsType,
+		}
+	case *ast.IfStmt:
+		var thenBlk, elseBlk *ast.Block
+		if b, ok := substituteMacroNode(n.Then, subst).(*ast.Block); ok {
+			thenBlk = b
+		}
+
+		if n.Else != nil {
+			if b, ok := substituteMacroNode(n.Else, subst).(*ast.Block); ok {
+				elseBlk = b
+			}
+		}
+
+		newEIs := make([]ast.ElseIfClause, len(n.ElseIfs))
+		for i, ei := range n.ElseIfs {
+			var body *ast.Block
+			if b, ok := substituteMacroNode(ei.Body, subst).(*ast.Block); ok {
+				body = b
+			}
+
+			newEIs[i] = ast.ElseIfClause{
+				Cond: substituteMacroNode(ei.Cond, subst),
+				Body: body,
+			}
+		}
+
+		return &ast.IfStmt{
+			Cond:    substituteMacroNode(n.Cond, subst),
+			Then:    thenBlk,
+			ElseIfs: newEIs,
+			Else:    elseBlk,
+		}
+	case *ast.VarDecl:
+		out := *n
+		out.Value = substituteMacroNode(n.Value, subst)
+
+		return &out
+	case *ast.AssignStmt:
+		return &ast.AssignStmt{
+			Target: substituteMacroNode(n.Target, subst),
+			Value:  substituteMacroNode(n.Value, subst),
+		}
 	}
 
 	return node

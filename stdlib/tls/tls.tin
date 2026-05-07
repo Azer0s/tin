@@ -17,11 +17,17 @@
 //   tls_conn.close()
 //   conn.close()
 //
+// Ownership: the OpenSSL handle lives behind an *rc::Cell so copies of
+// TlsConn share ownership instead of double-freeing on scope exit. Calling
+// .close() is idempotent (sends close_notify + frees OpenSSL state, marks
+// the handle inert); the cell's dtor at last drop frees the wrapper struct.
+//
 // SSL_CTX is initialized automatically via fn init() at program startup.
 // To trust a custom CA (e.g. for testing with self-signed certs):
 //   tls::set_ca_file("path/to/ca.pem")
 
 use io
+use rc
 use { loop } from macros
 
 fn tin_tls_init_c()                                       = extern("_tin_tls_init")
@@ -30,7 +36,8 @@ fn tin_tls_new_c(host string, fd i32) *void               = extern("_tin_tls_new
 fn tin_tls_do_handshake_c(handle *void) i64               = extern("_tin_tls_do_handshake")
 fn tin_tls_read_c(handle *void, buf *byte, n i64) i64     = extern("_tin_tls_read")
 fn tin_tls_write_c(handle *void, buf *byte, n i64) i64    = extern("_tin_tls_write")
-fn tin_tls_close_c(handle *void)                          = extern("_tin_tls_close")
+fn tin_tls_shutdown_c(handle *void)                       = extern("_tin_tls_shutdown")
+fn tin_tls_free_c(handle *void)                           = extern("_tin_tls_free")
 fn tin_io_blocked_val_c() i64                             = extern("_tin_io_blocked_val")
 
 // fn init runs once at program startup and initializes the global SSL_CTX.
@@ -44,24 +51,26 @@ fn set_ca_file(path string) =
 
 // TlsConn is an async TLS connection over a connected TCP fd.
 // Implements io::AsyncReader and io::AsyncWriter.
-struct TlsConn (io::AsyncReader, io::AsyncWriter) =
-  _handle *void
-  fd      i32
+struct TlsConn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
+  _cell *rc::Cell[*void]
+  fd    i32
 
   // read reads up to n bytes from the TLS stream.
   // Returns Future[i64] - use `await conn.read(buf, n)` or pass to ioutil.
   fn AsyncReader::read(this TlsConn, buf *byte, n i64) Future[i64] =
-    return spawn tls_read_impl(this._handle, buf, n)
+    return spawn tls_read_impl(this._cell.payload(), buf, n)
 
   // write writes up to n bytes to the TLS stream.
   // Returns Future[i64] - use `await conn.write(buf, n)` or pass to ioutil.
   fn AsyncWriter::write(this TlsConn, buf *byte, n i64) Future[i64] =
-    return spawn tls_write_impl(this._handle, buf, n)
+    return spawn tls_write_impl(this._cell.payload(), buf, n)
 
-  // close sends a TLS close_notify alert and frees OpenSSL state.
-  // The caller is responsible for closing the underlying fd afterwards.
-  fn close(this TlsConn) =
-    tin_tls_close_c(this._handle)
+  // close sends a TLS close_notify alert and frees OpenSSL state. Idempotent:
+  // safe to call multiple times. The underlying fd must still be closed by
+  // the caller. The TinTLS wrapper struct itself is freed when the last
+  // reference to the cell drops.
+  fn Closeable::close(this TlsConn) =
+    tin_tls_shutdown_c(this._cell.payload())
 
 // connect wraps fd with TLS and performs the async handshake.
 // host is used for SNI and certificate verification.
@@ -77,7 +86,7 @@ fn{#async} connect_impl(host string, fd i32) TlsConn =
     if r != blocked:
       break
     yield
-  return TlsConn{_handle: handle, fd: fd}
+  return TlsConn{_cell: rc::Cell[*void].alloc(handle, tin_tls_free_c), fd: fd}
 
 fn{#async} tls_read_impl(handle *void, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()

@@ -10,7 +10,7 @@
 // libdwfl lands inside the call instruction itself. Without it, the
 // frame for outer_helper's call site would routinely resolve to a line
 // in the function declared immediately after outer_helper in the
-// source — line 23 specifically (where the call site lives) is the
+// source - line 23 specifically (where the call site lives) is the
 // stable reference point we assert on.
 use assert
 use strings
@@ -23,12 +23,12 @@ test "the immediate caller's frame resolves to the caller's source line" =
   assert::ok(len(frames) >= 2)
   // frame[0] is inner_helper's call to stacktrace; frame[1] is the
   // call instruction inside outer_helper. Both atoms must carry the
-  // expected symbol — that's resolution-agnostic and proves the walk
+  // expected symbol - that's resolution-agnostic and proves the walk
   // landed where it should. The file:line:col upgrade depends on
   // libdwfl being able to parse clang's DWARF (works on Arch with
   // libdw 0.193+; broken on Ubuntu 24.04 with libdw 0.190). We only
   // assert the IP-1 effect on file resolution when at least one frame
-  // shows the upgraded `@<file>:<line>:<col>` shape — broken libdwfl
+  // shows the upgraded `@<file>:<line>:<col>` shape - broken libdwfl
   // would silently weaken this regression sentinel otherwise.
   let f0 string = frames[0] as string
   let f1 string = frames[1] as string

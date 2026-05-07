@@ -1,0 +1,342 @@
+// neural_net_deep.tin - A deep multi-layer perceptron that classifies a
+// 3-class spiral dataset.
+//
+// Compared to neural_net.tin (a 2-3-1 sigmoid net for XOR), this one adds:
+//   * Arbitrary architecture driven by a layer-size list
+//   * ReLU activations in hidden layers, softmax + cross-entropy at output
+//   * He weight initialization
+//   * Mini-batch SGD with Nesterov-style momentum
+//   * A synthetic spiral dataset with train/test split + accuracy reporting
+//
+// Architecture: 2 -> 16 -> 16 -> 8 -> 3
+//
+// Build: tin build examples/neural_net_deep.tin -lm
+// Run:   tin run   examples/neural_net_deep.tin -lm
+
+use math
+use rand
+
+const N_CLASSES   i64 = 3
+const PER_CLASS   i64 = 120
+const TEST_FRAC   f64 = 0.2
+const EPOCHS      i64 = 400
+const BATCH_SIZE  i64 = 16
+const LR          f64 = 0.05
+const MOMENTUM    f64 = 0.9
+const REPORT_EVERY i64 = 25
+
+// --- linear-algebra helpers -------------------------------------------------
+
+fn zero_vec(n i64) [f64] =
+  let v [f64] = []
+  for let i i64 = 0; i < n; i++:
+    v ++= 0.0
+  return v
+
+fn zero_matrix(h i64, w i64) [[f64]] =
+  let m [[f64]] = []
+  for let i i64 = 0; i < h; i++:
+    m ++= zero_vec(w)
+  return m
+
+// Box-Muller: a single standard-normal sample built from two uniforms.
+fn randn(r *rand::Rng) f64 =
+  let u1 = r.f64()
+  if u1 < 1.0e-12: u1 = 1.0e-12
+  let u2 = r.f64()
+  return math::sqrt(0.0 - 2.0 * math::log(u1)) * math::cos(2.0 * math::PI * u2)
+
+// He initialization for ReLU layers: N(0, sqrt(2 / fan_in)).
+fn he_matrix(r *rand::Rng, h i64, w i64) [[f64]] =
+  let scale = math::sqrt(2.0 / (w as f64))
+  let m [[f64]] = []
+  for let i i64 = 0; i < h; i++:
+    let row [f64] = []
+    for let j i64 = 0; j < w; j++:
+      row ++= randn(r) * scale
+    m ++= row
+  return m
+
+// --- model ------------------------------------------------------------------
+
+// One fully-connected layer. weights[out][in], biases[out].
+struct Layer =
+  weights [[f64]]
+  biases  [f64]
+  // Velocity buffers for momentum SGD.
+  v_w [[f64]]
+  v_b [f64]
+  // Cached forward values for backprop. pre = Wx+b, post = activation(pre).
+  pre  [f64]
+  post [f64]
+
+struct Net =
+  layers [Layer]
+  // sizes[0] is the input dim, sizes[k] is the output dim of layer k-1.
+  sizes [i64]
+
+fn new_layer(r *rand::Rng, in_dim i64, out_dim i64) Layer =
+  return Layer{
+    weights: he_matrix(r, out_dim, in_dim),
+    biases:  zero_vec(out_dim),
+    v_w:     zero_matrix(out_dim, in_dim),
+    v_b:     zero_vec(out_dim),
+    pre:     zero_vec(out_dim),
+    post:    zero_vec(out_dim),
+  }
+
+fn new_net(r *rand::Rng, sizes [i64]) Net =
+  let layers [Layer] = []
+  for let i i64 = 1; i < len(sizes); i++:
+    layers ++= new_layer(r, sizes[i - 1], sizes[i])
+  return Net{layers: layers, sizes: sizes}
+
+// --- activations ------------------------------------------------------------
+
+fn relu(x f64) f64 =
+  if x > 0.0: return x
+  return 0.0
+
+// Numerically stable softmax. Writes into `out`.
+fn softmax(z [f64], out [f64]) =
+  let n = len(z)
+  let m = z[0]
+  for let i i64 = 1; i < n; i++:
+    if z[i] > m: m = z[i]
+  let s f64 = 0.0
+  for let i i64 = 0; i < n; i++:
+    out[i] = math::exp(z[i] - m)
+    s = s + out[i]
+  for let i i64 = 0; i < n; i++:
+    out[i] = out[i] / s
+
+// --- forward / backward -----------------------------------------------------
+
+// Forward pass. Returns the final softmax probabilities; layer caches are
+// updated in place so backward() can reuse them.
+fn forward(net *Net, x [f64]) [f64] =
+  let activation = x
+  let n_layers = len(net.layers)
+  for let l i64 = 0; l < n_layers; l++:
+    let layer = &net.layers[l]
+    let in_dim  = len(layer.weights[0])
+    let out_dim = len(layer.weights)
+    for let j i64 = 0; j < out_dim; j++:
+      let z = layer.biases[j]
+      for let i i64 = 0; i < in_dim; i++:
+        z = z + layer.weights[j][i] * activation[i]
+      layer.pre[j] = z
+      if l == n_layers - 1:
+        // Output layer: leave linear; softmax is applied below.
+        layer.post[j] = z
+      else:
+        layer.post[j] = relu(z)
+    activation = layer.post
+
+  // Softmax on the final pre-activations, written into the last layer's post.
+  let last = &net.layers[n_layers - 1]
+  softmax(last.pre, last.post)
+  return last.post
+
+// Backprop a single sample. Accumulates gradients into grads_w / grads_b
+// (one entry per layer). Returns the cross-entropy loss.
+fn backward(net *Net, x [f64], target i64,
+            grads_w *[[[f64]]], grads_b *[[f64]]) f64 =
+  let probs = forward(net, x)
+  let n_layers = len(net.layers)
+
+  // Cross-entropy loss: -log(prob assigned to the true class).
+  let p_target = probs[target]
+  if p_target < 1.0e-12: p_target = 1.0e-12
+  let loss = 0.0 - math::log(p_target)
+
+  // dL/dz for the softmax+cross-entropy output is (probs - one_hot).
+  let delta [f64] = []
+  for let i i64 = 0; i < len(probs); i++:
+    let v = probs[i]
+    if i == target: v = v - 1.0
+    delta ++= v
+
+  // Walk layers in reverse, accumulating gradients and propagating delta.
+  for let l i64 = n_layers - 1; l >= 0; l-- :
+    let layer = &net.layers[l]
+    let in_dim  = len(layer.weights[0])
+    let out_dim = len(layer.weights)
+
+    // The "input" to this layer is the previous layer's post-activation
+    // (or the original x for the first layer).
+    let input_act [f64] = x
+    if l > 0: input_act = net.layers[l - 1].post
+
+    // Accumulate weight + bias gradients.
+    for let j i64 = 0; j < out_dim; j++:
+      (*grads_b)[l][j] = (*grads_b)[l][j] + delta[j]
+      for let i i64 = 0; i < in_dim; i++:
+        (*grads_w)[l][j][i] = (*grads_w)[l][j][i] + delta[j] * input_act[i]
+
+    // Propagate delta to the previous layer (skip when at the input).
+    if l > 0:
+      let prev = &net.layers[l - 1]
+      let new_delta [f64] = []
+      for let i i64 = 0; i < in_dim; i++:
+        let s f64 = 0.0
+        for let j i64 = 0; j < out_dim; j++:
+          s = s + layer.weights[j][i] * delta[j]
+        // ReLU derivative: 1 if pre > 0 else 0.
+        if prev.pre[i] <= 0.0: s = 0.0
+        new_delta ++= s
+      delta = new_delta
+
+  return loss
+
+// Apply accumulated gradients with Nesterov-style momentum SGD.
+fn apply_grads(net *Net, grads_w [[[f64]]], grads_b [[f64]], batch_size i64) =
+  let scale = LR / (batch_size as f64)
+  let n_layers = len(net.layers)
+  for let l i64 = 0; l < n_layers; l++:
+    let layer = &net.layers[l]
+    let in_dim  = len(layer.weights[0])
+    let out_dim = len(layer.weights)
+    for let j i64 = 0; j < out_dim; j++:
+      let v_b_new = MOMENTUM * layer.v_b[j] - scale * grads_b[l][j]
+      layer.v_b[j] = v_b_new
+      layer.biases[j] = layer.biases[j] + MOMENTUM * v_b_new - scale * grads_b[l][j]
+      for let i i64 = 0; i < in_dim; i++:
+        let v_w_new = MOMENTUM * layer.v_w[j][i] - scale * grads_w[l][j][i]
+        layer.v_w[j][i] = v_w_new
+        let look_ahead = MOMENTUM * v_w_new - scale * grads_w[l][j][i]
+        layer.weights[j][i] = layer.weights[j][i] + look_ahead
+
+// Allocate fresh, zero-filled gradient buffers shaped like the network.
+fn zero_grads(net *Net) ([[[f64]]], [[f64]]) =
+  let gw [[[f64]]] = []
+  let gb [[f64]] = []
+  for let l i64 = 0; l < len(net.layers); l++:
+    let layer = &net.layers[l]
+    let h = len(layer.weights)
+    let w = len(layer.weights[0])
+    gw ++= zero_matrix(h, w)
+    gb ++= zero_vec(len(layer.biases))
+  return (gw, gb)
+
+// --- prediction + metrics ---------------------------------------------------
+
+fn argmax(v [f64]) i64 =
+  let best i64 = 0
+  let bv = v[0]
+  for let i i64 = 1; i < len(v); i++:
+    if v[i] > bv:
+      bv = v[i]
+      best = i
+  return best
+
+fn accuracy(net *Net, xs [[f64]], ys [i64]) f64 =
+  let correct i64 = 0
+  let n = len(xs)
+  for let s i64 = 0; s < n; s++:
+    let p = forward(net, xs[s])
+    if argmax(p) == ys[s]: correct = correct + 1
+  return (correct as f64) / (n as f64)
+
+// --- dataset ----------------------------------------------------------------
+
+// Generate a 3-arm spiral. Each class's points lie along a rotated arc with
+// jittered radius and angle, the classic non-linearly-separable benchmark.
+fn make_spirals(r *rand::Rng) ([[f64]], [i64]) =
+  let xs [[f64]] = []
+  let ys [i64] = []
+  for let c i64 = 0; c < N_CLASSES; c++:
+    let class_offset = (c as f64) * 2.0 * math::PI / (N_CLASSES as f64)
+    for let i i64 = 0; i < PER_CLASS; i++:
+      let t = (i as f64) / (PER_CLASS as f64)
+      let radius = 0.10 + 0.90 * t
+      let sweep  = 6.5 * t
+      let jitter = 0.30 * randn(r) * t
+      let theta = class_offset + sweep + jitter
+      xs ++= [radius * math::sin(theta), radius * math::cos(theta)]
+      ys ++= c
+  return (xs, ys)
+
+// In-place Fisher-Yates shuffle of a list of indices.
+fn shuffle(r *rand::Rng, idx *[i64]) =
+  let n = len(*idx)
+  for let i i64 = n - 1; i > 0; i--:
+    let j = r.range_i64(0, i + 1)
+    let tmp = (*idx)[i]
+    (*idx)[i] = (*idx)[j]
+    (*idx)[j] = tmp
+
+// --- main -------------------------------------------------------------------
+
+fn main() =
+  let r = rand::new(42)
+
+  // Build dataset and split it.
+  let (xs_all, ys_all) = make_spirals(&r)
+  let n_total = len(xs_all)
+  let idx [i64] = []
+  for let i i64 = 0; i < n_total; i++:
+    idx ++= i
+  shuffle(&r, &idx)
+
+  let n_test = (TEST_FRAC * (n_total as f64)) as i64
+  let xs_test [[f64]] = []
+  let ys_test [i64] = []
+  let xs_train [[f64]] = []
+  let ys_train [i64] = []
+  for let i i64 = 0; i < n_total; i++:
+    let k = idx[i]
+    if i < n_test:
+      xs_test  ++= xs_all[k]
+      ys_test  ++= ys_all[k]
+    else:
+      xs_train ++= xs_all[k]
+      ys_train ++= ys_all[k]
+  let n_train = len(xs_train)
+
+  echo "dataset: {n_total} samples, {n_train} train / {n_test} test, {N_CLASSES} classes"
+
+  // Build the network: 2 -> 16 -> 16 -> 8 -> 3.
+  let net = new_net(&r, [2, 16, 16, 8, 3])
+  echo "model: {net.sizes} (ReLU + softmax/cross-entropy, momentum SGD)"
+  echo "---"
+
+  // Indices used for batch shuffling each epoch.
+  let order [i64] = []
+  for let i i64 = 0; i < n_train; i++:
+    order ++= i
+
+  for let epoch i64 = 0; epoch < EPOCHS; epoch++:
+    shuffle(&r, &order)
+
+    let epoch_loss f64 = 0.0
+    for let start i64 = 0; start < n_train; start = start + BATCH_SIZE:
+      let end = start + BATCH_SIZE
+      if end > n_train: end = n_train
+      let bsz = end - start
+
+      let (gw, gb) = zero_grads(&net)
+      let batch_loss f64 = 0.0
+      for let s i64 = start; s < end; s++:
+        let k = order[s]
+        let one_loss = backward(&net, xs_train[k], ys_train[k], &gw, &gb)
+        batch_loss = batch_loss + one_loss
+      apply_grads(&net, gw, gb, bsz)
+      epoch_loss = epoch_loss + batch_loss
+
+    if epoch % REPORT_EVERY == 0 || epoch == EPOCHS - 1:
+      let train_acc = accuracy(&net, xs_train, ys_train)
+      let test_acc  = accuracy(&net, xs_test,  ys_test)
+      let avg_loss  = epoch_loss / (n_train as f64)
+      echo "epoch {epoch:>4}  loss {avg_loss}  train_acc {train_acc}  test_acc {test_acc}"
+
+  echo "---"
+  echo "sample predictions on test set:"
+  let n_show = 8
+  if n_show > n_test: n_show = n_test
+  for let i i64 = 0; i < n_show; i++:
+    let p = forward(&net, xs_test[i])
+    let pred = argmax(p)
+    let mark = "MISS"
+    if pred == ys_test[i]: mark = "ok"
+    echo "  ({xs_test[i][0]}, {xs_test[i][1]}) -> class {pred} (target {ys_test[i]}) {mark}  probs={p}"

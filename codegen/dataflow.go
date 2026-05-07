@@ -26,6 +26,7 @@ package codegen
 //     condition folds to a constant after substituting locals.
 
 import (
+	"math"
 	"math/big"
 	"strconv"
 
@@ -117,12 +118,84 @@ func mergeConst(a, b constFact) constFact {
 	return cBotFact()
 }
 
-// interval is a closed integer range [lo, hi]. `set` distinguishes "no
-// information" from a real range. The lattice meet is union; narrowing
-// happens through dedicated helpers driven by branch conditions.
+// interval is a strided integer range [lo, hi] step `stride` (Reps et
+// al.'s strided intervals). Members are {lo, lo+stride, lo+2*stride,
+// ..., hi} with the invariant `(hi - lo) % stride == 0` whenever
+// stride > 0. `set` distinguishes "no information" from a real range.
+//
+// stride conventions:
+//
+//	stride == 0 : singleton or stride-unconstrained (lo == hi acts as
+//	              a single value; treated as gcd-identity element by
+//	              unionInterval so a singleton does not pin down the
+//	              stride of an unrelated peer).
+//	stride == 1 : ordinary contiguous range.
+//	stride >  1 : every (stride-1) values out of `stride` are excluded;
+//	              used to track loop induction variables stepped by a
+//	              constant != 1, so `for i = 0; i < n; i += k` lets
+//	              the analyzer prove `i % k == 0` always-true inside
+//	              the body.
+//
+// The lattice meet (unionInterval) widens bounds and shrinks stride by
+// gcd. Narrowing happens through dedicated helpers driven by branch
+// conditions.
 type interval struct {
 	lo, hi int64
+	stride int64
 	set    bool
+}
+
+// singletonIv returns a strided interval containing exactly one value.
+// stride=0 lets the value join freely with any other interval without
+// pinning down a stride.
+func singletonIv(v int64) interval {
+	return interval{set: true, lo: v, hi: v, stride: 0}
+}
+
+// rangeIv returns the contiguous range [lo, hi] (stride 1).
+func rangeIv(lo, hi int64) interval {
+	if lo > hi {
+		return interval{}
+	}
+
+	if lo == hi {
+		return singletonIv(lo)
+	}
+
+	return interval{set: true, lo: lo, hi: hi, stride: 1}
+}
+
+// effectiveStride returns 1 for arbitrary ranges and stride 0 for
+// singletons -- the value to use in arithmetic ops where stride 0 means
+// "no constraint".
+func (iv interval) effectiveStride() int64 {
+	if !iv.set || iv.lo == iv.hi {
+		return 0
+	}
+
+	if iv.stride <= 0 {
+		return 1
+	}
+
+	return iv.stride
+}
+
+// gcd64 returns greatest common divisor on absolute values. gcd(0, x) =
+// |x|; gcd(0, 0) = 0. Used for stride lubs.
+func gcd64(a, b int64) int64 {
+	if a < 0 {
+		a = -a
+	}
+
+	if b < 0 {
+		b = -b
+	}
+
+	for b != 0 {
+		a, b = b, a%b
+	}
+
+	return a
 }
 
 // dfState captures the abstract state at one program point.
@@ -132,7 +205,13 @@ type dfState struct {
 	freed  map[string]bool       // variable was passed to deinit()
 	intv   map[string]interval   // integer interval per variable
 	floats map[string]*floatPair // exact + IEEE float pair per variable
-	dead   bool                  // true means control-flow can't reach this point
+	// uninit holds names of locals declared without an initializer that
+	// have NOT yet been explicitly assigned on this path. A read while
+	// the name is in this set fires DiagUseBeforeAssign. Tin
+	// auto-zero-inits primitives, so the read is well-defined; the
+	// warning is about programmer intent, not memory safety.
+	uninit map[string]bool
+	dead   bool // true means control-flow can't reach this point
 }
 
 func newDFState() *dfState {
@@ -142,6 +221,7 @@ func newDFState() *dfState {
 		freed:  map[string]bool{},
 		intv:   map[string]interval{},
 		floats: map[string]*floatPair{},
+		uninit: map[string]bool{},
 	}
 }
 
@@ -167,6 +247,10 @@ func (s *dfState) clone() *dfState {
 
 	for k, v := range s.floats {
 		out.floats[k] = v
+	}
+
+	for k, v := range s.uninit {
+		out.uninit[k] = v
 	}
 
 	return out
@@ -238,28 +322,178 @@ func mergeStates(a, b *dfState) *dfState {
 			out.floats[k] = v
 		}
 	}
+	// Uninit: union (i.e., "definitely assigned" is intersection). A name
+	// is still uninit at the join if either incoming path hadn't yet
+	// assigned to it -- a later read could come from that path.
+	for k, v := range a.uninit {
+		if v {
+			out.uninit[k] = true
+		}
+	}
+
+	for k, v := range b.uninit {
+		if v {
+			out.uninit[k] = true
+		}
+	}
 
 	return out
 }
 
-// unionInterval is the lattice meet for the interval analysis: the
-// smallest range containing both inputs. Either operand being unset means
-// the result is unset (we lost information).
+// unionInterval is the lattice meet for the strided-interval analysis:
+// the smallest strided interval containing both inputs. Either operand
+// being unset means the result is unset (we lost information).
+//
+// Bounds use min/max. Stride is gcd of the inputs' effective strides
+// and the gap between their lows -- the standard strided-interval lub
+// (Reps, Improved Memory-Access Analysis 2006). Singletons contribute
+// stride 0 (gcd identity) so a single value does not over-constrain
+// the merge.
 func unionInterval(a, b interval) interval {
 	if !a.set || !b.set {
 		return interval{}
 	}
 
-	out := interval{set: true, lo: a.lo, hi: a.hi}
-	if b.lo < out.lo {
-		out.lo = b.lo
+	lo := a.lo
+	if b.lo < lo {
+		lo = b.lo
 	}
 
-	if b.hi > out.hi {
-		out.hi = b.hi
+	hi := a.hi
+	if b.hi > hi {
+		hi = b.hi
+	}
+
+	if lo == hi {
+		return singletonIv(lo)
+	}
+
+	gap := a.lo - b.lo
+	if gap < 0 {
+		gap = -gap
+	}
+
+	s := gcd64(a.effectiveStride(), b.effectiveStride())
+	s = gcd64(s, gap)
+
+	if s == 0 {
+		s = 1
+	}
+
+	if (hi-lo)%s != 0 {
+		s = 1
+	}
+
+	return interval{set: true, lo: lo, hi: hi, stride: s}
+}
+
+// widenInterval is the Cousot-Cousot widening operator restricted to a
+// single variable: when `cur` extends beyond `prev` on either bound, the
+// extending side is pushed to ±∞ (int64 saturation) so the fixpoint
+// can stabilize on a non-trivial loop counter without taking thousands
+// of iterations. Stride is preserved by snapping the widened bound back
+// to the nearest multiple-of-stride offset from `cur.lo`, keeping the
+// interval invariant `(hi-lo) % stride == 0` intact for downstream
+// modulo folding (`x % stride == 0` provably 0 inside the loop body).
+func widenInterval(prev, cur interval) interval {
+	if !prev.set || !cur.set {
+		return cur
+	}
+
+	wlo, whi := cur.lo, cur.hi
+
+	if cur.lo < prev.lo {
+		wlo = math.MinInt64
+	}
+
+	if cur.hi > prev.hi {
+		whi = math.MaxInt64
+	}
+
+	if wlo == cur.lo && whi == cur.hi {
+		return cur
+	}
+
+	s := cur.effectiveStride()
+	if s > 1 {
+		if whi == math.MaxInt64 {
+			d := uint64(whi) - uint64(cur.lo)
+			whi -= int64(d % uint64(s))
+		}
+
+		if wlo == math.MinInt64 {
+			d := uint64(cur.lo) - uint64(wlo)
+			wlo += int64(d % uint64(s))
+		}
+	}
+
+	if wlo > whi {
+		return cur
+	}
+
+	if wlo == whi {
+		return singletonIv(wlo)
+	}
+
+	return interval{set: true, lo: wlo, hi: whi, stride: cur.stride}
+}
+
+// widenStates applies widenInterval per-variable to the freshly-merged
+// state `cur` against the previous iteration's `prev`. Other lattice
+// pieces (consts, nil-state, freed) are kept as-is -- they don't grow
+// monotonically the way intervals do.
+func widenStates(prev, cur *dfState) *dfState {
+	if prev == nil || cur == nil {
+		return cur
+	}
+
+	out := cur.clone()
+
+	for k, nv := range cur.intv {
+		if pv, ok := prev.intv[k]; ok && pv.set && nv.set {
+			out.intv[k] = widenInterval(pv, nv)
+		}
 	}
 
 	return out
+}
+
+// shiftIv returns iv shifted by a constant `delta`. Stride and width
+// are preserved. Used when an augmented assign or postfix op adds a
+// known constant to an induction variable.
+func shiftIv(iv interval, delta int64) interval {
+	if !iv.set {
+		return interval{}
+	}
+
+	return interval{set: true, lo: iv.lo + delta, hi: iv.hi + delta, stride: iv.stride}
+}
+
+// allMembersDivisibleBy returns true when every value the strided
+// interval can hold is an exact multiple of n. Requires the stride to
+// divide n's modulus AND the base lo to already be a multiple of n.
+// Used to fold `x % n` to 0 when the loop variable steps by a multiple
+// of n from a multiple of n (e.g. `for i = 0; ...; i += 500` makes
+// `i % 500 == 0` provably always-true).
+func allMembersDivisibleBy(iv interval, n int64) bool {
+	if !iv.set || n <= 0 {
+		return false
+	}
+
+	if iv.lo%n != 0 {
+		return false
+	}
+
+	if iv.lo == iv.hi {
+		return true
+	}
+
+	s := iv.effectiveStride()
+	if s == 0 {
+		return false
+	}
+
+	return s%n == 0
 }
 
 // statesEqual reports whether two states agree on every tracked variable.
@@ -301,6 +535,16 @@ func statesEqual(a, b *dfState) bool {
 	for k, v := range a.intv {
 		w, ok := b.intv[k]
 		if !ok || w != v {
+			return false
+		}
+	}
+
+	if len(a.uninit) != len(b.uninit) {
+		return false
+	}
+
+	for k, v := range a.uninit {
+		if w, ok := b.uninit[k]; !ok || w != v {
 			return false
 		}
 	}
@@ -361,19 +605,19 @@ func intervalForTinType(t ast.TypeExpr) interval {
 
 	switch st.Name {
 	case "i8":
-		return interval{set: true, lo: -128, hi: 127}
+		return rangeIv(-128, 127)
 	case "u8", "byte", "char":
-		return interval{set: true, lo: 0, hi: 255}
+		return rangeIv(0, 255)
 	case "i16":
-		return interval{set: true, lo: -32768, hi: 32767}
+		return rangeIv(-32768, 32767)
 	case "u16":
-		return interval{set: true, lo: 0, hi: 65535}
+		return rangeIv(0, 65535)
 	case "i32":
-		return interval{set: true, lo: -2147483648, hi: 2147483647}
+		return rangeIv(-2147483648, 2147483647)
 	case "u32":
-		return interval{set: true, lo: 0, hi: 4294967295}
+		return rangeIv(0, 4294967295)
 	case "i64":
-		return interval{set: true, lo: -9223372036854775808, hi: 9223372036854775807}
+		return rangeIv(-9223372036854775808, 9223372036854775807)
 	}
 
 	return interval{}
@@ -398,14 +642,125 @@ func (cg *CodeGen) intervalOf(expr ast.Node, st *dfState) interval {
 
 	switch e := expr.(type) {
 	case *ast.IntLit:
-		return interval{set: true, lo: e.Value, hi: e.Value}
+		return singletonIv(e.Value)
 	case *ast.Identifier:
 		if v, ok := st.intv[e.Name]; ok {
 			return v
 		}
+	case *ast.UnaryExpr:
+		if e.Op == "-" {
+			if iv := cg.intervalOf(e.Expr, st); iv.set {
+				return interval{set: true, lo: -iv.hi, hi: -iv.lo, stride: iv.effectiveStride()}
+			}
+		}
+	case *ast.BinExpr:
+		l := cg.intervalOf(e.Left, st)
+		r := cg.intervalOf(e.Right, st)
+
+		return intervalArith(e.Op, l, r)
 	}
 
 	return interval{}
+}
+
+// intervalArith computes the strided interval of `a op b`. Handles `+`,
+// `-`, `*` when at least one side narrows to useful bounds; returns the
+// unset interval otherwise. Stride is preserved through shifts (single-
+// constant `+`/`-`) and scaled through multiplications by a constant.
+func intervalArith(op string, a, b interval) interval {
+	if !a.set || !b.set {
+		return interval{}
+	}
+
+	aSingle := a.lo == a.hi
+	bSingle := b.lo == b.hi
+
+	switch op {
+	case "+":
+		if bSingle {
+			return shiftIv(a, b.lo)
+		}
+
+		if aSingle {
+			return shiftIv(b, a.lo)
+		}
+
+		s := gcd64(a.effectiveStride(), b.effectiveStride())
+		if s == 0 {
+			s = 1
+		}
+
+		lo := a.lo + b.lo
+		hi := a.hi + b.hi
+
+		if (hi-lo)%s != 0 {
+			s = 1
+		}
+
+		return interval{set: true, lo: lo, hi: hi, stride: s}
+	case "-":
+		if bSingle {
+			return shiftIv(a, -b.lo)
+		}
+
+		s := gcd64(a.effectiveStride(), b.effectiveStride())
+		if s == 0 {
+			s = 1
+		}
+
+		lo := a.lo - b.hi
+		hi := a.hi - b.lo
+
+		if (hi-lo)%s != 0 {
+			s = 1
+		}
+
+		return interval{set: true, lo: lo, hi: hi, stride: s}
+	case "*":
+		if bSingle {
+			return scaleIv(a, b.lo)
+		}
+
+		if aSingle {
+			return scaleIv(b, a.lo)
+		}
+	}
+
+	return interval{}
+}
+
+// scaleIv multiplies a strided interval by a constant. Stride scales
+// with the constant; bounds flip when the constant is negative.
+func scaleIv(iv interval, k int64) interval {
+	if !iv.set {
+		return interval{}
+	}
+
+	if k == 0 {
+		return singletonIv(0)
+	}
+
+	lo := iv.lo * k
+	hi := iv.hi * k
+
+	if k < 0 {
+		lo, hi = hi, lo
+	}
+
+	if lo == hi {
+		return singletonIv(lo)
+	}
+
+	s := iv.effectiveStride() * k
+	if s < 0 {
+		s = -s
+	}
+
+	if s == 0 {
+		s = 1
+	}
+
+	return interval{set: true, lo: lo, hi: hi, stride: s}
 }
 
 // dfWalkAny dispatches a node to dfWalkBlock for *Block or dfWalkStmt for
@@ -446,16 +801,35 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 	case *ast.VarDecl:
 		cg.dfCheckExpr(v.Value, st)
 
-		st = st.clone()
-		st.nil[v.Name] = cg.dfNilOf(v.Value, st)
-		st.cnst[v.Name] = cg.dfEval(v.Value, st)
+		// Compute the binding's facts from the pre-escape state (the
+		// RHS expression evaluates against the values held going in),
+		// then bottom-ise any other names whose address escaped through
+		// the RHS. Target gets overwritten next so escape on it is a
+		// no-op.
+		newNil := cg.dfNilOf(v.Value, st)
+		newCnst := cg.dfEval(v.Value, st)
+		newIv := cg.dfIntervalForBinding(v.Type, v.Value, st)
+		newFp := dfFoldFloat(v.Value, st)
 
-		if iv := cg.dfIntervalForBinding(v.Type, v.Value, st); iv.set {
-			st.intv[v.Name] = iv
+		st = cg.dfApplyEscapes(v.Value, st)
+		st = st.clone()
+		st.nil[v.Name] = newNil
+		st.cnst[v.Name] = newCnst
+
+		if newIv.set {
+			st.intv[v.Name] = newIv
 		}
 
-		if fp := dfFoldFloat(v.Value, st); fp != nil {
-			st.floats[v.Name] = fp
+		if newFp != nil {
+			st.floats[v.Name] = newFp
+		}
+		// Track the uninit-by-decl shape `let x T` (no initializer) so a
+		// later read fires DiagUseBeforeAssign. `let x = expr` (or `let
+		// x T = expr`) is initialized.
+		if v.Value == nil && v.Name != "" && v.Name != "_" {
+			st.uninit[v.Name] = true
+		} else {
+			delete(st.uninit, v.Name)
 		}
 
 		return st
@@ -463,20 +837,28 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 	case *ast.AssignStmt:
 		cg.dfCheckExpr(v.Value, st)
 
+		newNil := cg.dfNilOf(v.Value, st)
+		newCnst := cg.dfEval(v.Value, st)
+		newIv := cg.intervalOf(v.Value, st)
+		newFp := dfFoldFloat(v.Value, st)
+
+		st = cg.dfApplyEscapes(v.Value, st)
+
 		if id, ok := v.Target.(*ast.Identifier); ok {
 			st = st.clone()
-			st.nil[id.Name] = cg.dfNilOf(v.Value, st)
-			st.cnst[id.Name] = cg.dfEval(v.Value, st)
+			st.nil[id.Name] = newNil
+			st.cnst[id.Name] = newCnst
 			delete(st.freed, id.Name) // reassign clears freed state
+			delete(st.uninit, id.Name)
 
-			if iv := cg.intervalOf(v.Value, st); iv.set {
-				st.intv[id.Name] = iv
+			if newIv.set {
+				st.intv[id.Name] = newIv
 			} else {
 				delete(st.intv, id.Name)
 			}
 
-			if fp := dfFoldFloat(v.Value, st); fp != nil {
-				st.floats[id.Name] = fp
+			if newFp != nil {
+				st.floats[id.Name] = newFp
 			} else {
 				delete(st.floats, id.Name)
 			}
@@ -486,16 +868,79 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 
 	case *ast.AugAssignStmt:
 		cg.dfCheckExpr(v.Value, st)
-		// Augmented assigns invalidate the variable's known value: in the
-		// general case x += y is x = x + y; the new value is BOTTOM unless
-		// we did full arithmetic propagation.
-		if id, ok := v.Target.(*ast.Identifier); ok {
-			st = st.clone()
-			st.cnst[id.Name] = cBotFact()
-			st.nil[id.Name] = nilBottom
+		st = cg.dfApplyEscapes(v.Value, st)
 
-			delete(st.intv, id.Name)
+		if id, ok := v.Target.(*ast.Identifier); ok {
+			// `x += y` reads x before writing, so uninit fires here.
+			if st.uninit[id.Name] {
+				cg.warn(DiagUseBeforeAssign, v.Pos(),
+					"%q is read by %q before being explicitly assigned",
+					id.Name, v.Op)
+			}
+
+			st = st.clone()
+			st.nil[id.Name] = nilBottom
 			delete(st.floats, id.Name)
+			delete(st.uninit, id.Name)
+			// `x += k` and `x -= k` for constant k shift the strided
+			// interval. Preserving stride here is what lets the loop
+			// fixpoint widen `for epoch = 0; ...; epoch += 500` to a
+			// stride-500 interval rather than collapsing to BOTTOM.
+			cur, hasIv := st.intv[id.Name]
+			delta, isInt := dfConstInt(cg.dfEval(v.Value, st))
+
+			switch {
+			case isInt && (v.Op == "+=" || v.Op == "-=") && hasIv && cur.set:
+				d := delta
+				if v.Op == "-=" {
+					d = -d
+				}
+
+				st.intv[id.Name] = shiftIv(cur, d)
+			default:
+				delete(st.intv, id.Name)
+			}
+
+			st.cnst[id.Name] = cBotFact()
+		}
+
+		return st
+
+	case *ast.PostfixStmt:
+		// `x++` / `x--` mutates the bound name. Treat as a strided shift
+		// by ±1 so a loop counter's interval widens through the fixpoint
+		// instead of collapsing -- e.g. `for i = 0; i < 5; i++` ends up
+		// with i ∈ [0, 5] stride 1 at the join.
+		cg.dfCheckExpr(v.Expr, st)
+
+		if id, ok := v.Expr.(*ast.Identifier); ok {
+			if st.uninit[id.Name] {
+				cg.warn(DiagUseBeforeAssign, v.Pos(),
+					"%q is read by %q before being explicitly assigned",
+					id.Name, v.Op)
+			}
+
+			st = st.clone()
+			st.nil[id.Name] = nilBottom
+			delete(st.floats, id.Name)
+			delete(st.uninit, id.Name)
+
+			var d int64
+
+			switch v.Op {
+			case "++":
+				d = 1
+			case "--":
+				d = -1
+			}
+
+			if cur, ok := st.intv[id.Name]; ok && cur.set && d != 0 {
+				st.intv[id.Name] = shiftIv(cur, d)
+			} else {
+				delete(st.intv, id.Name)
+			}
+
+			st.cnst[id.Name] = cBotFact()
 		}
 
 		return st
@@ -516,12 +961,12 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 
 		cg.dfCheckExpr(v.Expr, st)
 
-		return st
+		return cg.dfApplyEscapes(v.Expr, st)
 
 	case *ast.EchoStmt:
 		cg.dfCheckExpr(v.Value, st)
 
-		return st
+		return cg.dfApplyEscapes(v.Value, st)
 
 	case *ast.ReturnStmt:
 		if v.Value != nil {
@@ -617,6 +1062,14 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 
 	prev := st
 
+	// Phase 1: iterate to fixpoint silently. The first iterations see a
+	// transient state where loop-modified locals still hold their init
+	// values; warnings emitted then would be phantom (e.g. "epoch % 500 ==
+	// 0 always true" on iter 0 of `for let epoch = 0; ...; epoch++`).
+	cg.dfSuppressWarnings++
+
+	converged := false
+
 	for i := 0; i < maxIter; i++ {
 		if cond != nil {
 			cg.dfCheckExpr(cond, prev)
@@ -630,26 +1083,60 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 		}
 
 		merged := mergeStates(prev, bodySt)
+		if i >= 1 {
+			// Apply widening from the second iteration onward so that
+			// monotone-growing loop counters saturate to int64 bounds
+			// (preserving stride). Without this, `for i = 0; i < N; i++`
+			// adds 1 to the upper bound each iteration and never
+			// converges within maxIter.
+			merged = widenStates(prev, merged)
+		}
+
 		if statesEqual(prev, merged) {
-			return merged
+			converged = true
+			prev = merged
+
+			break
 		}
 
 		prev = merged
 	}
 
-	// Did not converge in maxIter; return BOTTOM-ised state for everything
-	// the loop body might touch. Conservative: every tracked variable goes
-	// to BOTTOM.
-	out := newDFState()
-	for k := range prev.nil {
-		out.nil[k] = nilBottom
+	cg.dfSuppressWarnings--
+
+	if !converged {
+		// Did not converge in maxIter; return BOTTOM-ised state for
+		// everything the loop body might touch. Skip the emit pass --
+		// flow-sensitive warnings on a state that didn't stabilize are
+		// unreliable.
+		out := newDFState()
+		for k := range prev.nil {
+			out.nil[k] = nilBottom
+		}
+
+		for k := range prev.cnst {
+			out.cnst[k] = cBotFact()
+		}
+
+		return out
 	}
 
-	for k := range prev.cnst {
-		out.cnst[k] = cBotFact()
+	// Phase 2: walk the body once more with the converged input state so
+	// flow-sensitive warnings fire against values that actually reflect
+	// the loop's steady state. Any variable widened to BOTTOM during
+	// fixpoint stays BOTTOM here, so phantom-constant conditions don't
+	// fold; conditions that genuinely fold under the converged state
+	// (e.g. a local re-assigned the same constant on every iteration)
+	// still produce warnings. The walk's output state is discarded --
+	// prev is already a fixpoint, so re-walking can't refine it.
+	if cond != nil {
+		cg.dfCheckExpr(cond, prev)
 	}
 
-	return out
+	bodySt := prev.clone()
+	cg.dfWalkBlock(body, bodySt)
+
+	return prev
 }
 
 func (cg *CodeGen) dfWalkMatch(s *ast.MatchStmt, st *dfState) *dfState {
@@ -714,6 +1201,115 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 			cg.dfCheckFloatPrecision(e, st)
 		}
 	})
+
+	cg.dfCheckUseBeforeAssign(expr, st)
+}
+
+// dfCheckUseBeforeAssign warns on every read of a name that's still in
+// st.uninit. Excludes idents that appear directly under `&` (taking an
+// address doesn't read the value) and the `name` half of FieldAccess
+// (`s.field` -- field is a label, not a read of a binding called
+// `field`). The expression is walked with custom recursion (rather than
+// walkAST) so the skip rules can be applied site-locally.
+func (cg *CodeGen) dfCheckUseBeforeAssign(expr ast.Node, st *dfState) {
+	if expr == nil || st == nil || len(st.uninit) == 0 {
+		return
+	}
+
+	cg.dfCheckUseBeforeAssignNode(expr, st)
+}
+
+func (cg *CodeGen) dfCheckUseBeforeAssignNode(n ast.Node, st *dfState) {
+	if n == nil {
+		return
+	}
+
+	switch e := n.(type) {
+	case *ast.Identifier:
+		if st.uninit[e.Name] {
+			cg.warn(DiagUseBeforeAssign, e.Pos(),
+				"%q is read before being explicitly assigned (zero-initialized at runtime)",
+				e.Name)
+		}
+	case *ast.AddressOfExpr:
+		// `&x` itself is a read of the storage location, not the value;
+		// skip the inner identifier. But anything deeper (e.g. `&s.f`)
+		// still walks normally so reads under field accesses are caught.
+		if _, isIdent := e.Expr.(*ast.Identifier); isIdent {
+			return
+		}
+
+		cg.dfCheckUseBeforeAssignNode(e.Expr, st)
+	case *ast.FieldAccess:
+		// Recurse only into the receiver: `s.field` reads s, not a
+		// binding called field.
+		cg.dfCheckUseBeforeAssignNode(e.Expr, st)
+	case *ast.BinExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Left, st)
+		cg.dfCheckUseBeforeAssignNode(e.Right, st)
+	case *ast.UnaryExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Expr, st)
+	case *ast.CallExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Func, st)
+
+		for _, a := range e.Args {
+			cg.dfCheckUseBeforeAssignNode(a, st)
+		}
+	case *ast.DerefExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Expr, st)
+	case *ast.IndexExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Expr, st)
+		cg.dfCheckUseBeforeAssignNode(e.Index, st)
+	case *ast.TernaryExpr:
+		cg.dfCheckUseBeforeAssignNode(e.Cond, st)
+		cg.dfCheckUseBeforeAssignNode(e.Then, st)
+		cg.dfCheckUseBeforeAssignNode(e.Else, st)
+	}
+}
+
+// dfApplyEscapes returns a copy of `st` with any name whose address is
+// taken in `expr` invalidated to BOTTOM across every lattice piece. The
+// callee receiving `&x` may store, mutate, or deinit through the
+// pointer; we have no way to know without interprocedural info, so the
+// safe assumption after the expression is that x's previous facts no
+// longer hold.
+func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
+	if expr == nil || st == nil {
+		return st
+	}
+
+	var escaped []string
+
+	walkAST(expr, func(n ast.Node) {
+		ao, ok := n.(*ast.AddressOfExpr)
+		if !ok {
+			return
+		}
+
+		if id, ok := ao.Expr.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
+			escaped = append(escaped, id.Name)
+		}
+	})
+
+	if len(escaped) == 0 {
+		return st
+	}
+
+	out := st.clone()
+
+	for _, name := range escaped {
+		out.cnst[name] = cBotFact()
+		out.nil[name] = nilBottom
+		delete(out.intv, name)
+		delete(out.floats, name)
+		delete(out.freed, name)
+		// An address taken doesn't tell us whether the callee assigned;
+		// be lenient and clear uninit too so we don't flood the user
+		// with warnings on idiomatic out-parameters (`fn fill(p *T)`).
+		delete(out.uninit, name)
+	}
+
+	return out
 }
 
 // dfCheckFloatPrecision flags `==` / `!=` whose two sides are float
@@ -882,6 +1478,15 @@ func (cg *CodeGen) dfNilOf(expr ast.Node, st *dfState) nilFact {
 	return nilBottom
 }
 
+// dfConstInt extracts an int64 from a constFact when its kind is cInt.
+func dfConstInt(f constFact) (int64, bool) {
+	if f.kind != cInt {
+		return 0, false
+	}
+
+	return f.intVal, true
+}
+
 // dfEval evaluates expr against the abstract state, returning a constFact.
 // Recursively folds BinExpr/UnaryExpr using flow-sensitive identifier
 // lookups, falling through to tryFoldExpr for everything else.
@@ -900,6 +1505,20 @@ func (cg *CodeGen) dfEval(expr ast.Node, st *dfState) constFact {
 			return v
 		}
 	case *ast.BinExpr:
+		// Strided modulo fold: when the left side has a tracked strided
+		// interval all of whose members are exact multiples of the right
+		// side's constant divisor, the result is provably 0. This is
+		// what makes `if epoch % 500 == 0` fire bool-analysis inside
+		// `for epoch = 0; ...; epoch += 500`.
+		if e.Op == "%" {
+			rv := cg.dfEval(e.Right, st)
+			if n, ok := dfConstInt(rv); ok && n > 0 {
+				if iv := cg.intervalOf(e.Left, st); iv.set && allMembersDivisibleBy(iv, n) {
+					return cIntFact(0)
+				}
+			}
+		}
+
 		l := cg.dfEval(e.Left, st)
 		r := cg.dfEval(e.Right, st)
 
@@ -1096,7 +1715,7 @@ func narrowOnCond(cond ast.Node, st *dfState) (thenSt, elseSt *dfState) {
 // interval, or unset if it's not a literal int.
 func constIntOf(n ast.Node) interval {
 	if il, ok := n.(*ast.IntLit); ok {
-		return interval{set: true, lo: il.Value, hi: il.Value}
+		return singletonIv(il.Value)
 	}
 
 	return interval{}
@@ -1303,6 +1922,12 @@ func cmpAlwaysHolds(x interval, op string, c int64) (always, value bool) {
 }
 
 // clipInterval returns x ∩ [lo, hi], or unset if the result is empty.
+// When x has a non-trivial stride s > 1, the result is shrunk so that
+// new lo and hi remain at exact multiples-of-s offsets from x.lo (Reps
+// et al. 2006: clipping a strided interval to a bound). This keeps
+// `if epoch < 5000` narrowing of `for epoch = 0; ...; epoch += 500`
+// produce {0, 4500, 500} rather than {0, 4999} stride-1, so the
+// downstream `epoch % 500 == 0` fold can prove always-true.
 func clipInterval(x interval, lo, hi int64) interval {
 	if !x.set {
 		return interval{}
@@ -1320,5 +1945,35 @@ func clipInterval(x interval, lo, hi int64) interval {
 		return interval{}
 	}
 
-	return interval{set: true, lo: lo, hi: hi}
+	s := x.stride
+	if s <= 1 {
+		if lo == hi {
+			return singletonIv(lo)
+		}
+
+		stride := s
+		if stride <= 0 {
+			stride = 1
+		}
+
+		return interval{set: true, lo: lo, hi: hi, stride: stride}
+	}
+
+	if rem := (lo - x.lo) % s; rem != 0 {
+		lo += s - rem
+	}
+
+	if rem := (hi - x.lo) % s; rem != 0 {
+		hi -= rem
+	}
+
+	if lo > hi {
+		return interval{}
+	}
+
+	if lo == hi {
+		return singletonIv(lo)
+	}
+
+	return interval{set: true, lo: lo, hi: hi, stride: s}
 }

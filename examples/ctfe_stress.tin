@@ -1,19 +1,19 @@
 // ctfe_stress.tin - exhaustive stress test for the compile-time evaluation
-// pipeline (Phases A–C). Every assert here must hold AT RUNTIME, but the
+// pipeline (Phases A-C). Every assert here must hold AT RUNTIME, but the
 // companion examples/ctfe_stress_ir_checks.sh asserts that the IR for the
-// SAME programs has each call-site folded to a literal — proving the values
+// SAME programs has each call-site folded to a literal - proving the values
 // actually came from CTFE, not the live binary.
 //
 // Coverage:
-//   • basic arithmetic folding (tier-1 AST eval)
-//   • deep recursion (factorial, fibonacci, ackermann-lite, mutual)
-//   • all primitive types (i64, f64, bool)
-//   • full control flow inside #pure (if/elif/else, where, for, match)
-//   • #allow_sideffect blocks (must NOT fold)
-//   • memoisation across many call sites with the same args
-//   • transitive #pure call graphs
-//   • #pure with shadowed identifiers (locals named like top-level vars)
-//   • tier-2 dispatch fallback path (when -O0 + cache populated)
+//   * basic arithmetic folding (tier-1 AST eval)
+//   * deep recursion (factorial, fibonacci, ackermann-lite, mutual)
+//   * all primitive types (i64, f64, bool)
+//   * full control flow inside #pure (if/elif/else, where, for, match)
+//   * #allow_sideffect blocks (must NOT fold)
+//   * memoisation across many call sites with the same args
+//   * transitive #pure call graphs
+//   * #pure with shadowed identifiers (locals named like top-level vars)
+//   * tier-2 dispatch fallback path (when -O0 + cache populated)
 
 use assert
 
@@ -37,7 +37,7 @@ test "bit ops" =
   assert::equals(bit_ops(0, 0), 0)
 
 // --------------------------------------------------------------------------
-// 2. recursion — depth, mutual, indirect through #pure helpers
+// 2. recursion - depth, mutual, indirect through #pure helpers
 // --------------------------------------------------------------------------
 
 fn{#pure} fact(n i64) i64 =
@@ -78,7 +78,7 @@ test "mutual recursion: even/odd" =
   assert::equals(is_odd(21), true)
 
 // --------------------------------------------------------------------------
-// 3. control flow — every #pure-legal construct exercised at fold time
+// 3. control flow - every #pure-legal construct exercised at fold time
 // --------------------------------------------------------------------------
 
 fn{#pure} clamp(v i64, lo i64, hi i64) i64 =
@@ -133,7 +133,7 @@ test "match" =
   assert::equals(match_kind(7), 700)
 
 // --------------------------------------------------------------------------
-// 4. floats and bools — non-i64 fold paths
+// 4. floats and bools - non-i64 fold paths
 // --------------------------------------------------------------------------
 
 fn{#pure} hypot_squared(x f64, y f64) f64 = return x * x + y * y
@@ -154,7 +154,7 @@ test "bool fold" =
   assert::equals(either(false, true), true)
 
 // --------------------------------------------------------------------------
-// 5. memoisation — same args reused across many call sites
+// 5. memoisation - same args reused across many call sites
 // --------------------------------------------------------------------------
 
 fn{#pure} cube(n i64) i64 = return n * n * n
@@ -171,7 +171,7 @@ test "memo: 50 call sites for cube(3) all fold once" =
   assert::equals(s1 + s2 + s3 + s4 + s5, 27 * 50)
 
 // --------------------------------------------------------------------------
-// 6. transitive — A calls B calls C, all #pure
+// 6. transitive - A calls B calls C, all #pure
 // --------------------------------------------------------------------------
 
 fn{#pure} step1(n i64) i64 = return n + 1
@@ -186,7 +186,7 @@ test "transitive #pure chain" =
   assert::equals(step4(0), 1)
 
 // --------------------------------------------------------------------------
-// 7. shadowing — local names matching top-level vars must read the local
+// 7. shadowing - local names matching top-level vars must read the local
 // --------------------------------------------------------------------------
 
 var counter i64 = 9999
@@ -204,7 +204,7 @@ test "shadow: param masks top-level var" =
   assert::equals(square_via_param(8), 64)
 
 // --------------------------------------------------------------------------
-// 8. #allow_sideffect — must NOT fold (the runtime echo must execute)
+// 8. #allow_sideffect - must NOT fold (the runtime echo must execute)
 // --------------------------------------------------------------------------
 
 fn{#pure} traced_double(n i64) i64 =
@@ -218,7 +218,7 @@ test "#allow_sideffect prevents fold" =
   assert::equals(traced_double(21), 42)
 
 // --------------------------------------------------------------------------
-// 9. boundary values — i64 limits, zero divisors, deep nests
+// 9. boundary values - i64 limits, zero divisors, deep nests
 // --------------------------------------------------------------------------
 
 fn{#pure} safe_div(a i64, b i64) i64 =
@@ -242,7 +242,7 @@ test "boundary: deep recursion via base case" =
   assert::equals(ten_levels_deep(11), 11)
 
 // --------------------------------------------------------------------------
-// 10. mixed-tier — same fn called with literal args (folds) and variable
+// 10. mixed-tier - same fn called with literal args (folds) and variable
 //     args (must compile a real call). Both must produce the right answer.
 // --------------------------------------------------------------------------
 
@@ -252,6 +252,6 @@ fn use_doubled(n i64) i64 = return doubled(n)
 
 test "literal arg folds; variable arg compiles" =
   assert::equals(doubled(7), 14)
-  // Runtime call — the body runs, not the fold.
+  // Runtime call - the body runs, not the fold.
   let dynamic i64 = 9
   assert::equals(use_doubled(dynamic), 18)

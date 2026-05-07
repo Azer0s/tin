@@ -149,7 +149,7 @@ func (h *highlighter) Paint(line []rune, _ int) []rune {
 
 // isOverloadedOp reports whether tokenType is an operator whose corresponding
 // built-in trait has been implemented in this REPL session. The mapping
-// matches binOpTraitName / unaryOpTraitName in codegen — keep them in sync.
+// matches binOpTraitName / unaryOpTraitName in codegen - keep them in sync.
 //
 // `[`/`]` are left alone here: they appear in type-arg lists and array
 // literals far more often than in indexing, so painting them based on

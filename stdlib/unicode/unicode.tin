@@ -12,7 +12,7 @@
 //   unicode::count(s string) i64        - count runes (not bytes) in s
 //
 // String iteration:
-//   for r rune in s:   // yields each Unicode codepoint; invalid bytes → U+FFFD
+//   for r rune in s:   // yields each Unicode codepoint; invalid bytes -> U+FFFD
 //
 // Import: use unicode
 

@@ -13,10 +13,17 @@
 //   let c = udp::dial("127.0.0.1", 8082)
 //   await ioutil::write_string(c, "hello\n")
 //   let got = await ioutil::read_string(c)
+//
+// Ownership: the file descriptor lives behind an *rc::Cell so copies of
+// Conn / Server share ownership instead of double-closing on scope exit.
+// Dial-based Conn owns its fd (cell dtor is io::close). Accept-based Conn
+// shares the Server's fd (cell dtor is a no-op; the Server's own cell
+// closes the fd at last drop). Calling .close() is optional and idempotent.
 
 use { loop } from macros
 use io
 use mem
+use rc
 use sync
 use errors
 use { Err } from errors
@@ -27,6 +34,10 @@ fn tin_udp_connect_c(host string, port i32) i32                                 
 fn tin_udp_recvfrom_c(fd i32, buf *byte, n i64, host_out *string, port_out *i32) i64  = extern("_tin_udp_recvfrom")
 fn tin_udp_sendto_c(fd i32, buf *byte, n i64, host string, port i32) i64              = extern("_tin_udp_sendto")
 fn tin_io_blocked_val_c() i64                                                         = extern("_tin_io_blocked_val")
+
+// noop_close is the rc::Cell dtor for accept-based Conns whose fd is owned
+// by the parent Server; dropping the Conn must NOT close the shared fd.
+fn noop_close(_fd i32) = pass
 
 // Internal async implementations
 
@@ -63,9 +74,9 @@ fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
 fn{#async} accept_impl(fd i32) (Conn, Err) =
   let (data, host, port) = await spawn recv_from_impl(fd)
   if len(data) == 0:
-    return (Conn{fd: fd, host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: accept failed"))
+    return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: accept failed"))
   let pos = mem::calloc(1, 8) as *i64
-  return (Conn{fd: fd, host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false}, nil)
+  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false}, nil)
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = tin_io_blocked_val_c()
@@ -88,14 +99,18 @@ fn{#async} send_to_impl(fd i32, data [byte], host string, port i32) i64 =
 //
 // Dial-based Conn reads from the connected UDP socket directly.
 //
-// Always call close() when done to release internal resources.
-struct Conn (io::AsyncReader, io::AsyncWriter) =
-  fd       i32
+// .close() is optional and idempotent; the fd is auto-closed at last drop
+// (only for dial-based Conns; accept-based share the Server's fd).
+struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
+  _fd_cell *rc::Cell[i32]
   host     string
   port     i32
   data_buf [byte]   // received datagram (accept-based); empty for dial-based
   read_pos *i64     // heap-alloc'd read cursor into data_buf; null for dial-based
   owns_fd  bool     // false for accept-based (server fd is shared); true for dial-based
+
+  // fd returns the raw underlying file descriptor.
+  fn fd(this Conn) i32 = return this._fd_cell.payload()
 
   // read implements io::AsyncReader.
   // Accept-based: serves bytes from the received datagram, returns 0 at EOF.
@@ -103,52 +118,55 @@ struct Conn (io::AsyncReader, io::AsyncWriter) =
   fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
     if len(this.data_buf) > 0:
       return spawn read_buf_impl(this.data_buf, this.read_pos, buf, n)
-    return spawn io::async_read(this.fd, buf, n)
+    return spawn io::async_read(this.fd(), buf, n)
 
   // write sends buf[0..n] to the peer (AsyncWriter interface).
   fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn send_to_raw_impl(this.fd, buf, n, this.host, this.port)
+    return spawn send_to_raw_impl(this.fd(), buf, n, this.host, this.port)
 
   // write sends data to the peer (slice convenience overload).
   fn write(this Conn, data [byte]) Future[i64] =
-    return spawn send_to_impl(this.fd, data, this.host, this.port)
+    return spawn send_to_impl(this.fd(), data, this.host, this.port)
 
-  // close releases the read cursor and, for dial-based connections, closes the fd.
-  fn close(this Conn) =
+  // close releases the read cursor and, for dial-based connections, closes
+  // the fd early. Idempotent — safe to call multiple times.
+  fn Closeable::close(this Conn) =
     if this.owns_fd:
-      io::close(this.fd)
+      io::close(this.fd())
     mem::free(this.read_pos as *void)
 
   fn valid(this Conn) bool =
-    return this.fd >= 0
+    return this.fd() >= 0
 
 // Server listens for incoming UDP datagrams.
 // Create with udp::listen(port).
-struct Server =
-  fd i32
+struct Server (io::Closeable) =
+  _fd_cell *rc::Cell[i32]
+
+  fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next datagram and returns a Conn to the sender.
   // Returns Future[(Conn, Err)] - nil Err means success.
   fn accept(this Server) Future[(Conn, Err)] =
-    return spawn accept_impl(this.fd)
+    return spawn accept_impl(this.fd())
 
-  fn close(this Server) =
-    io::close(this.fd)
+  fn Closeable::close(this Server) =
+    io::close(this.fd())
 
 // listen creates a bound UDP socket on the given port.
 // Returns (Server, Err).
 fn listen(port i32) (Server, Err) =
   let fd = tin_udp_listen_c(port)
   if fd < 0:
-    return (Server{fd: -1}, errors::new("udp: failed to bind port {port}"))
-  return (Server{fd: fd}, nil)
+    return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("udp: failed to bind port {port}"))
+  return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
 
 // dial creates a connected UDP socket to host:port.
 // Returns (Conn, Err).
 fn dial(host string, port i32) (Conn, Err) =
   let fd = tin_udp_connect_c(host, port)
   if fd < 0:
-    return (Conn{fd: -1, host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: failed to connect to {host}:{port}"))
-  return (Conn{fd: fd, host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true}, nil)
+    return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: failed to connect to {host}:{port}"))
+  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close), host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true}, nil)
 
 export { Server, Conn, listen, dial } as udp

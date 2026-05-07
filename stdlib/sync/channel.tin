@@ -58,6 +58,9 @@ struct Channel[T] =
   //!-Wno-unwrapped-c-resource
   _ptr *void
 
+  // make(cap) requires cap > 0. cap <= 0 panics: zero-capacity
+  // ("rendezvous") channels are not supported -- the implementation
+  // requires at least one slot for the bitwise-AND wrap mask.
   static fn make(cap i64) Channel[T] =
     return Channel[T]{_ptr: tin_channel_new(cap, sizeof(T), isrc(T))}
 

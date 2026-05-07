@@ -222,7 +222,7 @@ func (s *session) evalCell(source string) error {
 
 	var cellStmts []ast.Node // let/echo/expressions/...
 
-	// Collect decl key→src pairs without registering yet; addDecl is called
+	// Collect decl key->src pairs without registering yet; addDecl is called
 	// after a successful compile so that new declarations don't appear in both
 	// the re-parsed accumulated source AND cellDecls (which would cause duplicate
 	// TypeDef entries in the LLVM module).

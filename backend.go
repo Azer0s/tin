@@ -43,10 +43,16 @@ type linkOpts struct {
 	gcSections           bool // -Wl,--gc-sections / -Wl,-dead_strip
 	useLld               bool // -fuse-ld=lld (cross-compile)
 	rdynamic             bool
-	targetGOOS           string
-	targetFlags          []string
-	cLinkerFlags         []string
-	extraCFlags          []string
+	// static drops the link line into a fully-static configuration.
+	// Honored on Linux as `-static` (libc and friends pulled in as
+	// archives); silently dropped on macOS because libSystem cannot be
+	// linked statically. The flag is reflected in the lld-probe cache
+	// key so static and dynamic argvs don't share a slot.
+	static       bool
+	targetGOOS   string
+	targetFlags  []string
+	cLinkerFlags []string
+	extraCFlags  []string
 }
 
 // optThinLtoPreLinkPass picks the right opt pipeline name for the
@@ -221,6 +227,7 @@ type lldArgvKey struct {
 	ltoMode       string
 	macOS         bool
 	useLld        bool
+	static        bool   // -static at link time pulls a different argv (libc.a, etc.)
 	standaloneDbg bool   // -fstandalone-debug (darwin debug builds)
 	extraHash     string // sha256(extraCFlags) so e.g. -fsanitize=address gets its own probe slot
 }
@@ -250,6 +257,7 @@ func lldArgvFor(opts linkOpts) *lldArgvEntry {
 		ltoMode:       opts.ltoMode,
 		macOS:         opts.targetGOOS == "darwin",
 		useLld:        opts.useLld,
+		static:        opts.static,
 		standaloneDbg: opts.standaloneDebugMacOS,
 		extraHash:     hashExtraCFlags(opts.extraCFlags),
 	}
@@ -486,6 +494,15 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 	// cached result would omit those libs and the link command tin
 	// later issues would fail to find them.
 	args = append(args, opts.extraCFlags...)
+
+	// -static on Linux pulls libc.a / libpthread.a / libm.a / libdl.a
+	// into the link line in place of their shared counterparts. macOS
+	// doesn't support a fully static link (no static libSystem), so
+	// the flag is silently dropped there -- the toolchain is already
+	// "as static as possible" by default on Mach-O.
+	if opts.static && opts.targetGOOS != "darwin" {
+		args = append(args, "-static")
+	}
 
 	args = append(args, tmpPath, "-o", dummyOutPath, "-###")
 	out, _ := exec.Command("clang", args...).CombinedOutput()

@@ -76,7 +76,7 @@ fn main() i64 =
   return 0
 '
 
-# 1b. The same rule fires for `let f Trait = &b` — pointer source still
+# 1b. The same rule fires for `let f Trait = &b` - pointer source still
 # heap-copies through coerceToTrait when the target is value-form Trait.
 assert_err 'pointer source into value-form Trait also rejected' \
   'value-form coercion silently mutates a heap copy' '

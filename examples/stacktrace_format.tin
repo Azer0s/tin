@@ -10,7 +10,7 @@
 //
 // Frames in auto-generated runtime helpers (the test wrapper, main(),
 // libc internals) lack matching debug info in some build modes and
-// fall back to "<symbol>+0x<offset>" — those aren't asserted here.
+// fall back to "<symbol>+0x<offset>" - those aren't asserted here.
 use assert
 use strings
 
@@ -20,7 +20,7 @@ test "user-fn frame resolves to symbol@file:line:col matching sourcepos format" 
   let frames [atom] = probe()
 
   // The first frame is `probe` itself. The atom must always carry the
-  // `probe` symbol — that's what dladdr / unw_get_proc_name produce
+  // `probe` symbol - that's what dladdr / unw_get_proc_name produce
   // and is independent of debug info quality. When libdwfl + line
   // tables work (newer libdw), it upgrades to "probe@<file>:<line>:<col>";
   // when libdw can't parse clang's DWARF (Ubuntu 24.04 / libdw 0.190),

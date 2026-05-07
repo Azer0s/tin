@@ -175,7 +175,7 @@ fn{#async} do_with_client(client Client, r Request) HttpResponse =
 
   let raw = ""
   if use_tls:
-    let tls_conn = await tls::connect(host, conn.fd)
+    let tls_conn = await tls::connect(host, conn.fd())
     await ioutil::write_string(tls_conn, req_str)
     raw = await spawn read_all(tls_conn)
     tls_conn.close()

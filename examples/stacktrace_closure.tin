@@ -6,7 +6,7 @@
 // using the .debug_line tables, so every Tin frame in the trace should
 // share the same source path (this file). What we assert is therefore
 // the weaker invariant: at least two distinct frames in this file
-// appear in the trace — proof that libunwind walked through the
+// appear in the trace - proof that libunwind walked through the
 // closure into apply.
 use assert
 use strings

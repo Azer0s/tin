@@ -21,6 +21,7 @@ import (
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/codegen"
+	"github.com/Azer0s/tin/format"
 	"github.com/Azer0s/tin/lexer"
 	"github.com/Azer0s/tin/parser"
 	"github.com/Azer0s/tin/repl"
@@ -31,18 +32,25 @@ const usage = `tin - the tin language compiler
 Subcommands:
   tin run         <file.tin>                  compile and execute
   tin build       <file.tin> [-o out]         compile to native binary
-  tin build       --lib <file.tin> [-o out]   compile to object file (library)
+  tin build       --lib <file.tin> [-o out]   compile to shared library (.so / .dylib)
+                                              add -static to emit a relocatable .o instead
   tin test        <file.tin|dir|dir/...>      run test blocks and report results
   tin build-test  <file.tin> [-o out]         compile test binary without running
   tin ir          <file.tin> [-o out]         emit LLVM IR (default: stdout)
   tin ir-test     <file.tin> [-o out]         emit test-mode LLVM IR
   tin preprocess  <file.tin>                  expand macros and print source to stdout
   tin repl        [--stdlib PATH] [file.tin]  interactive REPL (preloads file)
+  tin fmt         [--check] <file.tin>...     normalize indent / blank lines / EOF;
+                                              --check prints unformatted files and exits non-zero
   tin clean                                   delete the local .build/ cache
 
 Output:
   -o PATH                  write binary / object file to PATH
   -g                       emit debug info (-O0 + -g)
+  -static                  link executables fully statically (Linux: -static against libc.a
+                           and friends; macOS: accepted but is a no-op since libSystem cannot
+                           be linked statically). For --lib, swaps the default shared library
+                           (.so / .dylib) for a single relocatable object (.o) merged via ld -r.
   --emit-header=PATH       emit a C header for #interop functions
 
 Source / library:
@@ -75,8 +83,8 @@ Run / test:
                            exhaustion the call falls back to runtime emission. 0 = use default.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
-  -Wall                    enable hygiene checks: unused-let, unused-result
-  -Wpedantic               enable -Wall plus unused-param
+  -Wall                    enable hygiene checks: unused-let, unused-result, style
+  -Wpedantic               enable -Wall plus unused-param, magic-number
   -W<name>                 enable a default-off warning (e.g. -Wunused-let)
   -Wno-<name>              silence a warning entirely
   -Werror                  treat every warning as an error
@@ -93,12 +101,16 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     tautological-pointer-cmp    comparing a non-nil pointer against nil
     unreachable-code            statements after return / panic / infinite loop
     unused-match-arms           unreachable match case / where clause
+    loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    fiber-misuse                double close, send-after-close, lock-without-unlock, unused mutex
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
     unused-let                  let-binding that is never read
     unused-result               discarded result of a non-void call
     unused-param                fn parameter that is never read
     builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
+    magic-number                int/float literal where a named const would convey intent
+    style                       naming conventions, trailing whitespace, missing EOF newline
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)
@@ -206,6 +218,12 @@ var optLevelOverride string
 var (
 	debugBuild  bool
 	extraCFlags []string
+	// staticLink is set by -static. On Linux it forwards `-static` to
+	// clang at link time so libc/libm/etc. are pulled in as archives.
+	// On macOS the flag is accepted but nothing extra is forwarded --
+	// libSystem can't be statically linked, so the toolchain is
+	// already "as static as possible" by default.
+	staticLink bool
 )
 
 // testFastCompile is reserved for an opt-in "fast tests" mode that defaults
@@ -645,6 +663,12 @@ func main() {
 		return
 	}
 
+	if len(os.Args) >= 2 && os.Args[1] == "fmt" {
+		runFmt(os.Args[2:])
+
+		return
+	}
+
 	if len(os.Args) < 3 {
 		_, _ = fmt.Fprint(os.Stderr, usage)
 
@@ -670,7 +694,7 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g", "--fast", "--no-pure-fold", "-fno-pure-fold":
+		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
@@ -800,6 +824,8 @@ doneFlags:
 			extraCFlags = append(extraCFlags, "-DTIN_DEBUG_FIBER_SLOTS=1")
 		case "-g":
 			debugBuild = true
+		case "-static":
+			staticLink = true
 		case "-target":
 			if i+1 < len(os.Args) {
 				i++
@@ -949,7 +975,7 @@ doneFlags:
 	// for this source still hashes the same as a prior build, copy the
 	// cached binary to the user's -o path (or default name) and skip
 	// codegen + clang + link entirely. Without this, every `tin build`
-	// pays the full link cost even when nothing changed — which on
+	// pays the full link cost even when nothing changed - which on
 	// rtti_extern is ~3.5s of thinLTO link work per warm rebuild.
 	if cmd == "build" && !libMode {
 		buildOut := defaultBuildOutPath(file, libMode)
@@ -1259,7 +1285,7 @@ doneFlags:
 	case "build":
 		out := strings.TrimSuffix(file, filepath.Ext(file))
 		if libMode {
-			out += ".o"
+			out += libOutSuffix()
 		}
 		// Collect extra link inputs: .o/.a files, -lNAME, -LDIR, -o flag
 		var extraObjs []string
@@ -1688,6 +1714,10 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 
 			tmpObjs = append(tmpObjs, cObjName)
 			cArgs := append([]string{"-O2", "-c"}, clangTargetFlag()...)
+			// -fPIC is required when these objects will be linked into
+			// a shared library; harmless on the static path so we add
+			// it unconditionally for lib mode.
+			cArgs = append(cArgs, "-fPIC")
 			cArgs = append(cArgs, cs.flags...)
 			cArgs = append(cArgs, cs.path, "-o", cObjName)
 
@@ -1716,18 +1746,47 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			}
 		}()
 
-		// Merge all object files into the final output with ld -r (partial link)
 		if prog != nil {
 			prog.step(outBin, "link")
 		}
 
-		ldArgs := append([]string{"-r"}, objs...)
-		ldArgs = append(ldArgs, "-o", outBin)
-		ld := exec.Command("ld", ldArgs...)
-		ld.Stdout = os.Stdout
-		ld.Stderr = os.Stderr
+		// -static lib: merge into a single relocatable object via
+		// `ld -r` (partial link). The output is a `.o` that another
+		// link step pulls into a final binary.
+		if staticLink {
+			ldArgs := append([]string{"-r"}, objs...)
+			ldArgs = append(ldArgs, "-o", outBin)
+			ld := exec.Command("ld", ldArgs...)
+			ld.Stdout = os.Stdout
+			ld.Stderr = os.Stderr
 
-		return ld.Run()
+			return ld.Run()
+		}
+
+		// Shared lib: link with `clang -shared` (Linux) or
+		// `-dynamiclib` (macOS). Tin runtime symbols (__tin_release,
+		// __tin_rc_alloc, ...) and any other unresolved references
+		// are intentionally left undefined -- a `.so`/`.dylib`
+		// produced by `tin build --lib` is meant to be loaded into
+		// a host that already provides the runtime, mirroring the
+		// `ld -r` static path which also leaves these unresolved.
+		// macOS' default for `-dynamiclib` rejects undefined symbols
+		// outright, so we explicitly opt into dynamic_lookup.
+		shArgs := append([]string{}, clangTargetFlag()...)
+		if targetGOOS == "darwin" {
+			shArgs = append(shArgs, "-dynamiclib", "-Wl,-undefined,dynamic_lookup")
+		} else {
+			shArgs = append(shArgs, "-shared")
+		}
+
+		shArgs = append(shArgs, "-fPIC", "-o", outBin)
+		shArgs = append(shArgs, objs...)
+
+		clangSh := exec.Command("clang", shArgs...)
+		clangSh.Stdout = os.Stdout
+		clangSh.Stderr = os.Stderr
+
+		return clangSh.Run()
 	}
 
 	// Split the compile and link phases so each translation unit (IR, runtime.c,
@@ -1821,7 +1880,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 	// IR / runtime.c jobs. The .o files are added to linkInputs so the
 	// final clang link picks them up. With cross-module declares
 	// (codegen/pkgmod.go addCrossModuleDeclares) and shared TypeDefs
-	// (echoSharedTypeDefs), each pkg .ll is self-sufficient — its
+	// (echoSharedTypeDefs), each pkg .ll is self-sufficient - its
 	// cross-pkg references resolve at link time, not at compile time.
 	for _, pkg := range pkgIRs {
 		if dir := os.Getenv("TIN_DUMP_PKG_IR_DIR"); dir != "" {
@@ -1862,7 +1921,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		// so downstream consumers and tooling can inspect what shape this
 		// pkg presents. The manifest is content-addressed alongside pkg.o
 		// (same dir, same key prefix) so a cache hit also serves up the
-		// matching iface.json. Idempotent — overwrite is a no-op on warm
+		// matching iface.json. Idempotent - overwrite is a no-op on warm
 		// rebuilds since the input is byte-identical.
 		if pkg.iface != nil {
 			ifacePath := strings.TrimSuffix(cachedObj, ".o") + ".iface.json"
@@ -2082,6 +2141,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		targetFlags:          clangTargetFlag(),
 		cLinkerFlags:         cLinkerFlags,
 		extraCFlags:          extraCFlags,
+		static:               staticLink,
 	})
 }
 
@@ -2323,7 +2383,7 @@ func pkgCacheLookup(irText string, args []string) (string, bool, error) {
 	// Include host arch in the key so an amd64 host and arm64 host (e.g.
 	// running the same source tree via a docker --platform mount) don't
 	// share the same .o cache slot. clangTargetFlag() returns nil for
-	// native compiles, leaving the args identical across archs — without
+	// native compiles, leaving the args identical across archs - without
 	// this disambiguator, the second host would link the first host's .o
 	// and ld would error on the architecture mismatch.
 	sum.Write([]byte{0})
@@ -3154,16 +3214,32 @@ func stripTinPrefix(s string) string {
 }
 
 // defaultBuildOutPath mirrors the implicit `tin build` output naming:
-// `foo/bar.tin` → `foo/bar` (or `bar.o` in --lib mode). Used by the
-// build-cache check to know where to copy the cached binary when the
-// user did not pass -o.
+// `foo/bar.tin` → `foo/bar`. In --lib mode the suffix depends on the
+// link configuration: `bar.o` with -static (single relocatable object
+// produced by `ld -r`), `bar.so` on Linux, `bar.dylib` on macOS.
 func defaultBuildOutPath(file string, libMode bool) string {
 	out := strings.TrimSuffix(file, filepath.Ext(file))
 	if libMode {
-		out += ".o"
+		out += libOutSuffix()
 	}
 
 	return out
+}
+
+// libOutSuffix returns the platform-appropriate library suffix for the
+// current build configuration. -static produces a relocatable object;
+// without -static, we emit a shared library (`.so` on ELF targets,
+// `.dylib` on Mach-O).
+func libOutSuffix() string {
+	if staticLink {
+		return ".o"
+	}
+
+	if targetGOOS == "darwin" {
+		return ".dylib"
+	}
+
+	return ".so"
 }
 
 // lookupOArg scans the trailing argv (everything after the source-file
@@ -3183,7 +3259,7 @@ func lookupOArg(fileArgIdx int) string {
 // copyAndChmodExec copies src to dst and marks dst executable. Used by
 // the `tin build` cache hit path to materialize the cached binary at
 // the user's chosen -o path. The explicit Chmod handles the case where
-// dst already exists at non-exec perms — os.WriteFile honors the mode
+// dst already exists at non-exec perms - os.WriteFile honors the mode
 // arg only when CREATING a new file, so without the follow-up Chmod a
 // stale 0644 dst from an earlier run would silently keep its perms.
 func copyAndChmodExec(src, dst string) error {
@@ -3244,6 +3320,12 @@ func buildFlagsHash() string {
 		}
 
 		h.Write([]byte{0})
+
+		if staticLink {
+			h.Write([]byte{1})
+		}
+
+		h.Write([]byte{0})
 		h.Write([]byte(targetGOOS))
 		h.Write([]byte{0})
 		h.Write([]byte(targetGOARCH))
@@ -3274,7 +3356,7 @@ func buildFlagsHash() string {
 // compiler binary itself. sbomMatches recognizes it and compares against
 // tinBinaryHash() instead of trying to open the literal name as a file.
 // Without this, a fresh tin binary with a codegen fix would silently
-// reuse cached binaries built by the buggy compiler — the symptom that
+// reuse cached binaries built by the buggy compiler - the symptom that
 // surfaced in the u64-mod fix audit.
 const sbomBinaryMarker = "__tin_binary__"
 
@@ -3579,6 +3661,72 @@ func runClean() {
 		if err := os.RemoveAll(filepath.Join(".build", e.Name())); err != nil {
 			die("clean: %v", err)
 		}
+	}
+}
+
+// runFmt is the entry point for `tin fmt`. Without --check, it rewrites
+// each file in place when the formatted output differs. With --check, it
+// leaves files alone, prints the names of any that aren't formatted, and
+// exits non-zero if at least one file would change.
+func runFmt(args []string) {
+	check := false
+
+	var files []string
+
+	for _, a := range args {
+		switch a {
+		case "--check", "-check":
+			check = true
+		case "-h", "--help":
+			_, _ = fmt.Fprint(os.Stderr,
+				"usage: tin fmt [--check] <file.tin> [more.tin ...]\n")
+
+			os.Exit(0)
+		default:
+			if strings.HasPrefix(a, "-") {
+				die("fmt: unknown flag %q", a)
+			}
+
+			files = append(files, a)
+		}
+	}
+
+	if len(files) == 0 {
+		_, _ = fmt.Fprint(os.Stderr,
+			"usage: tin fmt [--check] <file.tin> [more.tin ...]\n")
+
+		os.Exit(1)
+	}
+
+	anyDiff := false
+
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			die("fmt: %v", err)
+		}
+
+		out, changed := format.Format(string(src))
+
+		if !changed {
+			continue
+		}
+
+		anyDiff = true
+
+		if check {
+			fmt.Println(f)
+
+			continue
+		}
+
+		if err := os.WriteFile(f, []byte(out), 0o644); err != nil {
+			die("fmt: writing %s: %v", f, err)
+		}
+	}
+
+	if check && anyDiff {
+		os.Exit(1)
 	}
 }
 

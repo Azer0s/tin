@@ -153,7 +153,7 @@ of thinLTO link work.
 Each imported package is compiled to its own `.o` file keyed by
 SHA-256 of the package's IR text + canonical compile-flag set + host
 arch + clang version. The slot also stores `.iface.json` +
-`.iface_hash` (the interface manifest — exported function signatures,
+`.iface_hash` (the interface manifest - exported function signatures,
 struct shapes, trait impls).
 
 Effect: editing one package only invalidates that package's `.o`.
@@ -174,7 +174,7 @@ on warm cache.
 
 `tin clean` wipes per-program artifacts (`.build/run/`, `.build/test/`,
 `.build/build/`). The content-addressed caches (`.build/pkg/`,
-`.build/csrc/`, `.build/pure-fn/`) are preserved on purpose — they
+`.build/csrc/`, `.build/pure-fn/`) are preserved on purpose - they
 can never serve a stale entry because the key includes everything
 that affects the output. Manually `rm -rf .build/` to nuke everything.
 

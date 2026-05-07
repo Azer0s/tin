@@ -65,7 +65,7 @@ func walkForAliases(node ast.Node, aliases map[string]string) {
 			case *ast.Identifier:
 				// `let alias2 = alias1`: alias2 walks back through alias1
 				// to whatever alias1 ultimately targets. Only record when
-				// alias1 is itself in the chain — otherwise the binding
+				// alias1 is itself in the chain - otherwise the binding
 				// is just a value copy with no escape implications.
 				if src, ok := aliases[v.Name]; ok {
 					aliases[n.Name] = src

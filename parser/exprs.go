@@ -1040,20 +1040,25 @@ var mask64 = new(big.Int).SetUint64(^uint64(0))
 func (p *Parser) parsePrimary() (ast.Node, error) {
 	tok := p.peek()
 	pos := p.curPos()
-	_ = pos
 
 	switch tok.Type {
 	case lexer.INT_LIT:
 		p.advance()
 
-		return parseIntLitToken(tok.Literal), nil
+		il := parseIntLitToken(tok.Literal)
+		il.SetPos(pos)
+
+		return il, nil
 
 	case lexer.FLOAT_LIT:
 		p.advance()
 
 		v, _ := strconv.ParseFloat(tok.Literal, 64)
 
-		return &ast.FloatLit{Value: v}, nil
+		fl := &ast.FloatLit{Value: v}
+		fl.SetPos(pos)
+
+		return fl, nil
 
 	case lexer.STRING_LIT:
 		p.advance()
@@ -1491,14 +1496,17 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		return p.parseSpawnExpr()
 
 	case lexer.KW_AWAIT:
-		p.advance()
+		awaitTok := p.advance()
 
 		fut, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
 
-		return &ast.AwaitExpr{Future: fut}, nil
+		aw := &ast.AwaitExpr{Future: fut}
+		aw.SetPos(ast.Pos{Line: awaitTok.Line, Col: awaitTok.Col})
+
+		return aw, nil
 
 	case lexer.KW_NIL:
 		p.advance()

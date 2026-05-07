@@ -1,0 +1,44 @@
+use assert
+use option
+
+test "Option Some/None via match" =
+  let a Option[i64] = Some(7)
+  let b Option[i64] = None
+
+  match a:
+    case Some(v): assert::equals(7, v)
+    case None:    assert::fails("expected Some")
+
+  match b:
+    case Some(_): assert::fails("expected None")
+    case None:    assert::ok(true)
+
+test "is_some / is_none / or_default" =
+  let a Option[i64] = Some(10)
+  let b Option[i64] = None
+
+  assert::ok(option::is_some(a))
+  assert::ok(option::is_none(b))
+  assert::equals(10, option::or_default(a, 0))
+  assert::equals(0,  option::or_default(b, 0))
+
+test "map / and_then / or_else" =
+  let a Option[i64] = Some(3)
+  let b Option[i64] = None
+
+  let m = option::map(a, fn(x i64) i64 = return x + 1)
+  assert::equals(4, option::or_default(m, 0))
+  assert::ok(option::is_none(option::map(b, fn(x i64) i64 = return x + 1)))
+
+  let f = fn(x i64) Option[i64] = return Some(x * 10)
+  assert::equals(30, option::or_default(option::and_then(a, f), 0))
+  assert::ok(option::is_none(option::and_then(b, f)))
+
+  let g = fn() Option[i64] = return Some(42)
+  assert::equals(3,  option::or_default(option::or_else(a, g), 0))
+  assert::equals(42, option::or_default(option::or_else(b, g), 0))
+
+test "unwrap / expect" =
+  let a Option[i64] = Some(11)
+  assert::equals(11, option::unwrap(a))
+  assert::equals(11, option::expect(a, "should be some"))

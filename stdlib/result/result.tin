@@ -1,8 +1,7 @@
-// result - the standard Result and Option ADTs.
+// result - the standard Result ADT.
 //
 // Result[t, e] represents either a successful value (`Ok(v)`) or a failure
-// (`Err(msg)`). Option[t] represents either a value (`Some(v)`) or absence
-// (`None`).
+// (`Err(msg)`).
 //
 // Typical usage:
 //
@@ -14,17 +13,17 @@
 //
 //   let n = unwrap_or(parse_i64("??"), -1)
 //
-// Bare constructors (`Ok(x)`, `Err(m)`, `Some(x)`, `None`) are inferred from
-// the target type when it is known (let-annotations, function arguments,
-// function returns); otherwise qualify explicitly, e.g. `Result[i64,string]::Ok(42)`.
+// Bare constructors (`Ok(x)`, `Err(m)`) are inferred from the target type
+// when it is known (let-annotations, function arguments, function returns);
+// otherwise qualify explicitly, e.g. `Result[i64,string]::Ok(42)`.
+//
+// Option (Some/None) lives in stdlib/option.
+
+use option
 
 data Result[t, e] =
   Ok(v t)
   Err(msg e)
-
-data Option[t] =
-  None
-  Some(v t)
 
 // is_ok reports whether the Result is an Ok value.
 fn is_ok[t, e](r Result[t, e]) bool =
@@ -44,20 +43,44 @@ fn unwrap_or[t, e](r Result[t, e], d t) t =
     case Ok(v):  return v
     case Err(_): return d
 
-// is_some reports whether the Option holds a value.
-fn is_some[t](o Option[t]) bool =
-  match o:
-    case Some(_): return true
-    case None:    return false
+// map applies f to the Ok value, leaving Err untouched.
+fn map[t, u, e](r Result[t, e], f fn(t) u) Result[u, e] =
+  match r:
+    case Ok(v):  return Ok(f(v))
+    case Err(m): return Err(m)
 
-// is_none reports whether the Option is empty.
-fn is_none[t](o Option[t]) bool =
-  match o:
-    case Some(_): return false
-    case None:    return true
+// map_err applies g to the Err value, leaving Ok untouched.
+fn map_err[t, e, f](r Result[t, e], g fn(e) f) Result[t, f] =
+  match r:
+    case Ok(v):  return Ok(v)
+    case Err(m): return Err(g(m))
 
-// option_or returns the Some value or d when o is None.
-fn option_or[t](o Option[t], d t) t =
-  match o:
-    case Some(v): return v
-    case None:    return d
+// and_then chains a fallible computation onto an Ok value (flatMap).
+fn and_then[t, u, e](r Result[t, e], f fn(t) Result[u, e]) Result[u, e] =
+  match r:
+    case Ok(v):  return f(v)
+    case Err(m): return Err(m)
+
+// or_else recovers from Err by applying g to produce a new Result.
+fn or_else[t, e, f](r Result[t, e], g fn(e) Result[t, f]) Result[t, f] =
+  match r:
+    case Ok(v):  return Ok(v)
+    case Err(m): return g(m)
+
+// unwrap returns the Ok value or panics on Err.
+fn unwrap[t, e](r Result[t, e]) t =
+  match r:
+    case Ok(v):  return v
+    case Err(_): panic("result::unwrap on Err")
+
+// expect returns the Ok value or panics with msg on Err.
+fn expect[t, e](r Result[t, e], msg string) t =
+  match r:
+    case Ok(v):  return v
+    case Err(_): panic(msg)
+
+// to_option converts a Result into an Option, discarding any error.
+fn to_option[t, e](r Result[t, e]) Option[t] =
+  match r:
+    case Ok(v):  return Some(v)
+    case Err(_): return None

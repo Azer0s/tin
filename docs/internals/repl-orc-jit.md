@@ -305,17 +305,17 @@ mysterious JIT crashes.
 
 ## Challenges summary
 
-| Challenge | Severity | Mitigation |
-|---|---|---|
-| Coroutine pass pipeline | High | Replicate Tin's two-pass O1→O2 exactly in `IRTransformLayer`; test with async functions before anything else |
-| Symbol redefinition | High | MVP: reject all redefinition with a clear error; relax for functions later via `ResourceTracker` |
-| Type feedback from codegen | Medium | Add `NewTopLevelBindings()` to `CodeGen`; requires small codegen change to track promoted globals |
-| Multi-line input | Medium | Parser EOF-error detection; straightforward given Tin's error types |
-| LLVM version coupling | Medium | Compile `tin-jit-host` from source at build time; version check at startup |
-| Struct redefinition with live values | High | Reject in MVP; requires type-tagged global tracking to relax |
-| Module memory growth | Low | Acceptable for REPL sessions; no mitigation needed |
-| Output interleaving | Low | Expected and correct behavior; document it |
-| Partial async binding persistence | Medium | Top-level `let x = await ...` is promoted to a global written at end of cell init; requires async init function pattern |
+| Challenge                            | Severity | Mitigation                                                                                                              |
+|--------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------|
+| Coroutine pass pipeline              | High     | Replicate Tin's two-pass O1->O2 exactly in `IRTransformLayer`; test with async functions before anything else           |
+| Symbol redefinition                  | High     | MVP: reject all redefinition with a clear error; relax for functions later via `ResourceTracker`                        |
+| Type feedback from codegen           | Medium   | Add `NewTopLevelBindings()` to `CodeGen`; requires small codegen change to track promoted globals                       |
+| Multi-line input                     | Medium   | Parser EOF-error detection; straightforward given Tin's error types                                                     |
+| LLVM version coupling                | Medium   | Compile `tin-jit-host` from source at build time; version check at startup                                              |
+| Struct redefinition with live values | High     | Reject in MVP; requires type-tagged global tracking to relax                                                            |
+| Module memory growth                 | Low      | Acceptable for REPL sessions; no mitigation needed                                                                      |
+| Output interleaving                  | Low      | Expected and correct behavior; document it                                                                              |
+| Partial async binding persistence    | Medium   | Top-level `let x = await ...` is promoted to a global written at end of cell init; requires async init function pattern |
 
 ---
 

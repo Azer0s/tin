@@ -116,7 +116,7 @@ compile time:
 **Carve-out for default-bodied methods.** If a trait method has a default
 body (e.g. `init` / `deinit` on `observable`), the bare-name form
 `fn methodName(this Foo)` *also* counts as an override, and the trait's
-default still runs (chained — see "Trait init/deinit chaining" below).
+default still runs (chained - see "Trait init/deinit chaining" below).
 Virtual methods (no default body) are strict-qualified.
 
 ```rust
@@ -457,7 +457,7 @@ dispatch. See `docs/internals/values.md` for the full LLVM layout details.
 Tin gives you two ways to hold a struct as a trait, and they have
 different semantics. Pick the one you want at the `let` site.
 
-### `Trait` (value form) — copy
+### `Trait` (value form) - copy
 
 ```rust
 let f Fooable = b
@@ -471,7 +471,7 @@ of scope.
 This matches Go's interface assignment. Predictable, safe across coroutine
 suspends, no lifetime concerns.
 
-### `*Trait` (pointer form) — borrow
+### `*Trait` (pointer form) - borrow
 
 ```rust
 let a *Fooable = &b
@@ -480,11 +480,11 @@ echo b.v        // mutated
 ```
 
 `a` is a pointer to a fat pointer whose data field aliases `&b`
-directly. Methods called through `*a` operate on `b`'s storage —
+directly. Methods called through `*a` operate on `b`'s storage -
 mutations propagate. `b` must outlive `a` (same gotcha as any other
 `*T` borrow).
 
-### `Trait = &b` — value-form coercion of a borrow
+### `Trait = &b` - value-form coercion of a borrow
 
 ```rust
 let b = Box{v: 5}
@@ -527,7 +527,7 @@ let f Fooable = b
 // the trait's receivers to Fooable if a copy is intended
 ```
 
-Read-only traits (all methods take `Self`) accept both forms — the
+Read-only traits (all methods take `Self`) accept both forms - the
 copy semantics are fine because there's nothing to mutate.
 
 ---

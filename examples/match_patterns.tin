@@ -30,7 +30,7 @@ struct employee =
   address address
   salary  i64
 
-// ── basic binding ──────────────────────────────────────────────────────────
+// basic binding
 
 test "bind all fields" =
   let p = point{x: 3, y: 7}
@@ -45,7 +45,7 @@ test "bind subset of fields" =
     case point{x, _}:
       assert::equals(x, 10)
 
-// ── literal constraints ────────────────────────────────────────────────────
+// literal constraints
 
 test "literal constraint on i64 field" =
   let p = point{x: 0, y: 42}
@@ -83,7 +83,7 @@ test "literal constraint on bool field" =
       matched = true
   assert::ok(matched)
 
-// ── rename bindings ────────────────────────────────────────────────────────
+// rename bindings
 
 test "rename binding" =
   let p = point{x: 5, y: 9}
@@ -107,7 +107,7 @@ test "mix rename and literal constraint" =
     default:
       assert::fails("should match")
 
-// ── guard clauses ──────────────────────────────────────────────────────────
+// guard clauses
 
 test "guard with bound field" =
   let p = point{x: 10, y: 3}
@@ -132,7 +132,7 @@ test "guard failure falls to next arm" =
     case point{x, y}: "y bigger or equal"
   assert::equals(result, "y bigger or equal")
 
-// ── nested patterns ────────────────────────────────────────────────────────
+// nested patterns
 
 test "nested pattern with constraint" =
   let e = employee{
@@ -171,7 +171,7 @@ test "nested pattern string constraint" =
     default:
       assert::fails("should match paris")
 
-// ── match as expression ────────────────────────────────────────────────────
+// match as expression
 
 test "match expression basic" =
   let p = point{x: 0, y: 0}

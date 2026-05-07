@@ -569,6 +569,18 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 					args = append(args, ptr)
 					// ARC: ::print returns a fresh string; release after snprintf.
 					toRelease = append(toRelease, strVal)
+				} else if isFatArrayPtr(t) {
+					// Fat array: pre-render as a fresh fat-string "[e1 e2 ...]".
+					strVal, newBlock, aerr := cg.genArrayToFatStr(block, val)
+					if aerr != nil {
+						return nil, aerr
+					}
+
+					block = newBlock
+
+					fmtParts = append(fmtParts, "%s")
+					args = append(args, cg.extractStringPtr(block, strVal))
+					toRelease = append(toRelease, strVal)
 				} else {
 					fmtParts = append(fmtParts, "%lld")
 					val = cg.coerce(block, val, irtypes.I64)
@@ -618,6 +630,10 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	for _, sv := range toRelease {
 		cg.emitRelease(block, sv)
 	}
+
+	// Make sure the caller sees the final block when an arg-evaluation path
+	// branched (e.g. fat-array → string conversion emits its own loop blocks).
+	cg.curBlock = block
 
 	return block.NewLoad(fatPtrType, fatAlloca), nil
 }

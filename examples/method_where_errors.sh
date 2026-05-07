@@ -57,7 +57,7 @@ fn main() i64 =
   return b.just_i64()
 '
 
-# 2. AND bound — points at the failing conjunct via "(missing X)".
+# 2. AND bound - points at the failing conjunct via "(missing X)".
 assert_err 'AND bound failure points at failing conjunct' \
   '(missing Sized)' '
 trait Sized =
@@ -75,7 +75,7 @@ fn main() i64 =
   return b.measure()
 '
 
-# 3. OR / union-alias bound — bound name appears in the message.
+# 3. OR / union-alias bound - bound name appears in the message.
 assert_err 'OR bound failure shows the bound' \
   "doesn't match where t is intish" '
 type intish = i32 | i64
@@ -92,7 +92,7 @@ fn main() i64 =
   return b.run()
 '
 
-# 4. Multiple impls, none satisfied — listed via "any of:".
+# 4. Multiple impls, none satisfied - listed via "any of:".
 assert_err 'multi-impl failure lists every candidate' \
   "doesn't match any of: where t is intish, where t is floatish" '
 type intish = i32 | i64

@@ -1,7 +1,7 @@
 // stacktrace_phase2.tin - smoke test for the libunwind-backed walk.
 //
 // Verifies the basic property that stacktrace() returns one entry per
-// live frame on the calling thread's stack. We assert on length only —
+// live frame on the calling thread's stack. We assert on length only -
 // the exact atom names include compile-dependent offsets like "+0x1e",
 // and asserting on those couples the test to clang's output. Frame
 // presence is enough for Phase 2.

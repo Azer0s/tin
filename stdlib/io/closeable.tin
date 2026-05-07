@@ -1,0 +1,14 @@
+// stdlib/io/closeable.tin - Closeable trait.
+//
+// Closeable is implemented by types owning a kernel-resource handle (file
+// descriptor, socket, TLS session, etc.) that must be released explicitly
+// when the owner is done with it. Typical implementers: tcp::Conn /
+// tcp::Server, udp::Conn / udp::Server, unix::Conn / unix::Server,
+// tls::TlsConn.
+//
+// Types that release their resource via reference counting (e.g. regex::Regex,
+// sync::Channel) are deliberately NOT Closeable - their lifetime is managed
+// automatically and an explicit close() would invite double-free bugs.
+
+trait Closeable =
+  fn close(this *Closeable) = virtual

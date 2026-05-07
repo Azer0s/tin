@@ -330,6 +330,13 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
 
     TrampPage *p = _tramp_freelist;
     int32_t idx = p->free_head;
+
+    // The TrampPage struct lives at the head of the MAP_JIT mmap'd page,
+    // so on Apple Silicon every write to it -- including the freelist
+    // bookkeeping below -- must happen with write-protect toggled off.
+    // The slot and code writes that follow are inside the same window.
+    JIT_WRITE_START();
+
     p->free_head = slot_free_next(p, idx);
     p->free_count--;
     p->in_use |= ((uint64_t)1) << idx;
@@ -340,15 +347,11 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
         p->next = NULL;
     }
 
-    pthread_mutex_unlock(&_tramp_mu);
-
     uint8_t *slot = slot_addr_in_page(p, idx);
 
     // Lay out the slot:
     //   slot+0..15   : TinClosureData = { fn, env }
     //   slot+16..31  : machine code
-    JIT_WRITE_START();
-
     void **data = (void **)slot;
     data[0] = fn;
     data[1] = env;
@@ -358,6 +361,8 @@ void *tin_make_trampoline(void *fn, void *env, void *dispatcher) {
     size_t n = emit_trampoline(code, closure_data_ptr, dispatcher);
 
     JIT_WRITE_END();
+
+    pthread_mutex_unlock(&_tramp_mu);
 
     icache_flush(code, n);
 

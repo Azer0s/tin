@@ -8,7 +8,7 @@
 //
 // Note on composition: a CTFE macro body may call expression-body macros
 // (they expand textually before the body compiles) and ordinary fns, but
-// not other CTFE macros — the inner macro's body lives in a separate
+// not other CTFE macros - the inner macro's body lives in a separate
 // translation unit at expansion time.
 use assert
 
@@ -131,7 +131,7 @@ test "macro: parity-driven splice" =
   assert::equals(lookup_idx!(8), 1)
 
 // -------------------------------------------------------------------------
-// Boolean logic chain — short-circuit semantics at compile time
+// Boolean logic chain - short-circuit semantics at compile time
 // -------------------------------------------------------------------------
 
 macro all_pos!(a, b, c) =
@@ -151,7 +151,7 @@ test "macro: boolean folds (or)" =
   assert::equals(any_zero!(1, 2, 0), true)
 
 // -------------------------------------------------------------------------
-// Heavier loop body — CTFE for 2D grid sum
+// Heavier loop body - CTFE for 2D grid sum
 // -------------------------------------------------------------------------
 
 macro grid_sum!(rows, cols) =
@@ -173,7 +173,7 @@ test "macro: 2D loop fold" =
 // -------------------------------------------------------------------------
 
 macro double_sum!(n) =
-  // Sum of 1.5 added n times — exact in f64 for small n (1.5 has finite
+  // Sum of 1.5 added n times - exact in f64 for small n (1.5 has finite
   // binary representation), so the result round-trips through CTFE without
   // the precision drift that bit-comparing 1/3 etc. would incur.
   let acc f64 = 0.0
@@ -187,7 +187,7 @@ test "macro: f64 accumulator (exact-rep sum)" =
   assert::equals(double_sum!(8), 12.0)
 
 // -------------------------------------------------------------------------
-// Deep iteration — well below the loop-iteration ceiling
+// Deep iteration - well below the loop-iteration ceiling
 // -------------------------------------------------------------------------
 
 macro count_to!(n) =
@@ -206,7 +206,7 @@ test "macro: deep loop (10k iterations)" =
 macro safe_classify!(n) =
   if n > 1000000:
     // dead branch at every test call site below; if this evaluated, the
-    // loop would still finish (200k < 100k ceiling? no — at 200k it would
+    // loop would still finish (200k < 100k ceiling? no - at 200k it would
     // trip the iteration cap, proving the dead branch is never walked).
     let acc i64 = 0
     for let i i64 = 0; i < 200000; i++:

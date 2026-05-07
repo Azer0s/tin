@@ -747,14 +747,14 @@ let v = await r   // calls r.await_result() -> 42
 
 `stdlib/sync` also provides:
 
-| Type        | Description                                          |
-|-------------|------------------------------------------------------|
-| `Mutex`     | Exclusive lock (pthread_mutex_t)                     |
-| `RWMutex`   | Reader-writer lock (pthread_rwlock_t)                |
-| `Cond`      | Condition variable (pthread_cond_t)                  |
-| `Atomic[t]` | Generic atomic (C11 atomics for `i*/u*/f*/bool`; mutex-protected for any other `t`). `cas`/`add` only available when `t` is numeric — see [05 - Structs](05-structs.md#method-level-where-guards) |
-| `Future[T]` | Typed future from `spawn`; implements `Awaitable[T]` |
-| `Unit`      | Placeholder return type for void async functions     |
+| Type        | Description                                                                                                                                                                                       |
+|-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Mutex`     | Exclusive lock (pthread_mutex_t)                                                                                                                                                                  |
+| `RWMutex`   | Reader-writer lock (pthread_rwlock_t)                                                                                                                                                             |
+| `Cond`      | Condition variable (pthread_cond_t)                                                                                                                                                               |
+| `Atomic[t]` | Generic atomic (C11 atomics for `i*/u*/f*/bool`; mutex-protected for any other `t`). `cas`/`add` only available when `t` is numeric - see [05 - Structs](05-structs.md#method-level-where-guards) |
+| `Future[T]` | Typed future from `spawn`; implements `Awaitable[T]`                                                                                                                                              |
+| `Unit`      | Placeholder return type for void async functions                                                                                                                                                  |
 
 ---
 

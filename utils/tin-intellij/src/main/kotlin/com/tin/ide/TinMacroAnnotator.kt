@@ -25,11 +25,11 @@ class TinMacroAnnotator : Annotator {
         val next = if (i < fileText.length) fileText[i] else '\u0000'
 
         when {
-            // name!(...) - macro invocation; colour name + ! for ANY name (! is always macro syntax)
-            next == '!' -> {
-                macro(element.textRange, holder)
-                macro(TextRange(i, i + 1), holder)
-            }
+            // name!(...) - macro invocation; colour the name. The trailing `!`
+            // is its own PsiElement and lives outside this element's textRange,
+            // so we cannot legally annotate it from here (IntelliJ's annotator
+            // contract requires annotation ranges to be inside the element).
+            next == '!' -> macro(element.textRange, holder)
 
             // name() - plain function call; lexer already gives it FUNCTION_CALL colour, nothing to do
             next == '(' -> return
