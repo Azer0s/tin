@@ -1609,9 +1609,9 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	prevExplicit := cg.allowExplicitPtrCoerce
 	cg.allowExplicitPtrCoerce = true
 
-	result := cg.coerce(block, val, targetType)
+	defer func() { cg.allowExplicitPtrCoerce = prevExplicit }()
 
-	cg.allowExplicitPtrCoerce = prevExplicit
+	result := cg.coerce(block, val, targetType)
 	// coerce() returns the input unchanged when it cannot find a
 	// conversion path, so a result whose type still does not match the
 	// requested target means the cast was impossible.  Up to here the
@@ -1906,6 +1906,13 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 
 						return block.NewICmp(enum.IPredEQ, actual, expected), nil
 					}
+					// The struct does not implement this trait (or the
+					// impl was misspelled).  A silent false would leave
+					// the user's `if e is *X:` guard permanently dead;
+					// report it instead.
+					return nil, cg.nodeErr(e,
+						"`is *%s` is unsatisfiable: struct %s does not implement the trait carried by %s",
+						structName, structName, cg.tinTypeDisplay(srcPt.ElemType))
 				}
 			}
 		}

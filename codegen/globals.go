@@ -459,10 +459,46 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 	}
 
 	concreteName := v.TypeName
-	if knownSt, has := cg.structTypes[concreteName]; has {
-		_ = knownSt
-	} else {
+	if _, has := cg.structTypes[concreteName]; !has {
 		return nil
+	}
+	// Refuse to fold structs whose runtime construction does more than
+	// pack field values:
+	//
+	//   - Trait impls require non-null vtable pointers in the leading
+	//     vtable slots; zero-initializing them would give later trait
+	//     dispatch a null vtable and crash at the first method call.
+	//   - User-defined `init` / chained-trait `init` runs imperative
+	//     code at construction time; bypassing it would skip side
+	//     effects the user expects.
+	//   - RC-tracked fields (string, [T], any, fn fat-ptr, nested
+	//     struct with RC fields) need a retain emitted by genStructLit
+	//     so the const slot owns its storage; folding alone leaves
+	//     refcount accounting wrong.
+	//
+	// Falling back to runtime init keeps the const correct; the
+	// global is still placed in `.rodata`-equivalent storage by the
+	// "needs runtime init" path in preregisterTopLevelVar.
+	if decl, has := cg.structDeclsByName[concreteName]; has && decl != nil {
+		if len(decl.Implements) > 0 {
+			return nil
+		}
+
+		for _, m := range decl.Methods {
+			if m == nil {
+				continue
+			}
+
+			if m.Name == "init" || m.Name == "deinit" {
+				return nil
+			}
+		}
+	}
+	// RC-tracked fields are detected from the LLVM struct type alone.
+	for _, ft := range st.Fields {
+		if isRCTrackedType(ft) {
+			return nil
+		}
 	}
 
 	fieldNames := cg.structFields[concreteName]

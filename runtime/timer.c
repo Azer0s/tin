@@ -11,6 +11,7 @@
 #include "runtime.h"
 #include "fiber.h"
 #include "timer.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -110,10 +111,16 @@ void _tin_sleep_ms(int64_t ms) {
     int64_t pid = _tin_current_pid();
 
     if (pid < 0) {
-        struct timespec req;
+        struct timespec req, rem;
         req.tv_sec  = (time_t)(ms / 1000);
         req.tv_nsec = (long)((ms % 1000) * 1000000L);
-        nanosleep(&req, NULL);
+        // Loop on EINTR so a signal (e.g. SIGCHLD on test harnesses)
+        // does not cut the wait short.  rem is updated with the
+        // remaining time; on success nanosleep returns 0 and the
+        // loop exits.
+        while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+            req = rem;
+        }
         return;
     }
 

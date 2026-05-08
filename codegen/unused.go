@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"sort"
 	"strings"
 
 	irtypes "github.com/llir/llvm/ir/types"
@@ -57,34 +58,7 @@ func (cg *CodeGen) isCalleePure(c *ast.CallExpr) bool {
 // values whose decl can't be located fall through to the default-off
 // -Wunused-result.
 func (cg *CodeGen) calleeReturnsMustUse(c *ast.CallExpr) bool {
-	var fd *ast.FuncDecl
-
-	switch fn := c.Func.(type) {
-	case *ast.Identifier:
-		// Look up by bare name. funcDecls is keyed by varying mangling; iterate
-		// to find any decl whose unmangled Name matches.
-		for _, d := range cg.funcDecls {
-			if d != nil && d.Name == fn.Name {
-				fd = d
-
-				break
-			}
-		}
-	case *ast.ScopeAccess:
-		if len(fn.Path) == 0 {
-			return false
-		}
-
-		bare := fn.Path[len(fn.Path)-1]
-		for _, d := range cg.funcDecls {
-			if d != nil && d.Name == bare {
-				fd = d
-
-				break
-			}
-		}
-	}
-
+	fd := cg.resolveCalleeFuncDecl(c)
 	if fd == nil || fd.RetType == nil {
 		return false
 	}
@@ -109,30 +83,7 @@ func (cg *CodeGen) calleeReturnsMustUse(c *ast.CallExpr) bool {
 // error", Future / Awaitable -> "did you forget `await`?".
 func (cg *CodeGen) mustUseMessage(c *ast.CallExpr) string {
 	name := callDisplayName(c)
-
-	var fd *ast.FuncDecl
-
-	switch fn := c.Func.(type) {
-	case *ast.Identifier:
-		for _, d := range cg.funcDecls {
-			if d != nil && d.Name == fn.Name {
-				fd = d
-
-				break
-			}
-		}
-	case *ast.ScopeAccess:
-		if len(fn.Path) > 0 {
-			bare := fn.Path[len(fn.Path)-1]
-			for _, d := range cg.funcDecls {
-				if d != nil && d.Name == bare {
-					fd = d
-
-					break
-				}
-			}
-		}
-	}
+	fd := cg.resolveCalleeFuncDecl(c)
 
 	if fd != nil && fd.RetType != nil {
 		switch {
@@ -152,6 +103,50 @@ func (cg *CodeGen) mustUseMessage(c *ast.CallExpr) string {
 
 	return "the result of `" + name + "` is discarded; bind with " +
 		"`let _ = ...` to silence."
+}
+
+// resolveCalleeFuncDecl looks up the FuncDecl behind a CallExpr in a
+// deterministic way -- iterating cg.funcDecls directly with a "first
+// matching .Name" pick is order-dependent (Go map iteration is
+// randomized) and would make the warning's text and gate flicker
+// build-to-build when overloads share a bare name.  We instead try
+// exact-key hits first, then fall back to a sorted-key suffix scan
+// so multiple builds always pick the same decl.
+func (cg *CodeGen) resolveCalleeFuncDecl(c *ast.CallExpr) *ast.FuncDecl {
+	bare := ""
+
+	switch fn := c.Func.(type) {
+	case *ast.Identifier:
+		bare = fn.Name
+	case *ast.ScopeAccess:
+		if len(fn.Path) == 0 {
+			return nil
+		}
+
+		bare = fn.Path[len(fn.Path)-1]
+	default:
+		return nil
+	}
+
+	if d, ok := cg.funcDecls[bare]; ok && d != nil {
+		return d
+	}
+
+	keys := make([]string, 0, len(cg.funcDecls))
+	for k := range cg.funcDecls {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		d := cg.funcDecls[k]
+		if d != nil && d.Name == bare {
+			return d
+		}
+	}
+
+	return nil
 }
 
 // isResultType reports whether te names the Result ADT (with or without a
@@ -207,18 +202,25 @@ func (cg *CodeGen) isAwaitableType(te ast.TypeExpr) bool {
 	} else if d, ok := cg.structDeclsByName[bare]; ok && d != nil {
 		decl = d
 	} else {
-		// Last resort: scan for a key that ends in `__<bare>` or
-		// equals `<bare>`.  Linear in the number of declared
-		// structs, but the per-call cost of unused-must-use only
-		// runs on statement-level call expressions so the absolute
-		// numbers stay small.
+		// Last resort: scan for a key that ends in `__<bare>`.
+		// Two structs in different packages can share a bare name
+		// (`pkgA::Future` vs `pkgB::Future`), so we must NOT pick
+		// one arbitrarily -- map iteration order is non-
+		// deterministic and would make the warning flicker
+		// build-to-build.  Collect every match; only fall through
+		// to the await-able check when exactly one survives.
 		suffix := "__" + bare
+
+		var matches []*ast.StructDecl
+
 		for k, d := range cg.structDeclsByName {
 			if strings.HasSuffix(k, suffix) {
-				decl = d
-
-				break
+				matches = append(matches, d)
 			}
+		}
+
+		if len(matches) == 1 {
+			decl = matches[0]
 		}
 	}
 

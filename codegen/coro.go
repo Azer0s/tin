@@ -242,6 +242,22 @@ func (cg *CodeGen) emitCoroEpilogue(frame *coroFrame) {
 	b.NewRet(frame.hdl)
 }
 
+// externYieldsAfter reports whether the named runtime extern leaves
+// the calling fiber in a pending-park state, requiring a
+// coro.suspend afterwards so the worker observes the park and
+// switches to another fiber.  The list is small and tightly
+// auditable -- channel send/recv emit their own inline suspends,
+// fiber_join handles its own waiter dance, and the remaining
+// park-on-call externs are timer / future / IO primitives.
+func externYieldsAfter(name string) bool {
+	switch name {
+	case "_tin_sleep_ms":
+		return true
+	}
+
+	return false
+}
+
 // emitSuspendPoint emits a coro.suspend in block.
 // Returns: resumeBlock (execution continues there after re-resume).
 // The cleanupBlock destination must be set by the caller; we branch directly

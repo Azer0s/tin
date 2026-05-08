@@ -1519,6 +1519,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 	result := block.NewCall(callee, llArgs...)
 
+	// Auto-suspend after externs that put the calling fiber in a
+	// pending-park state (e.g. `_tin_sleep_ms` registers a timer and
+	// flips `pending_park` to 1).  The runtime relies on a
+	// coro.suspend firing afterwards so the worker observes the park
+	// and switches; without it the body would race past the call,
+	// reach FIBER_DONE, and the timer would fire into a dead fiber.
+	// Channel send/recv handle their own suspends inline; the small
+	// list below covers the remaining park-on-call externs.
+	if cg.inCoroFn && cg.curCoroFrame != nil {
+		if f, ok := callee.(*ir.Func); ok && externYieldsAfter(f.Name()) {
+			block = cg.emitSuspendPoint(block, cg.curCoroFrame)
+			cg.curBlock = block
+		}
+	}
+
 	// ARC: release temporary RC-tracked arguments.  Fresh allocations (array
 	// literals, concat results, function-call return values, etc.) that are
 	// passed directly without being stored in a named variable have nobody to

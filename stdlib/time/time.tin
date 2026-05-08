@@ -174,18 +174,9 @@ fn until_instant(t Instant) Duration =
 //   let elapsed = time::from_ns(time::monotonic_ns() - start)
 fn monotonic_ns() i64 = return tin_now_mono_ns_c()
 
-// sleep_impl is the async worker the `sleep` / `sleep_ms` wrappers
-// spawn into a fiber.  It calls the runtime's `_tin_sleep_ms`, which
-// sets the fiber's `pending_park` bit and registers a timer-thread
-// callback; the explicit `yield` immediately afterwards is what
-// actually drives the coro.suspend so the worker thread observes
-// the park and switches to another fiber until the timer unparks
-// us.  Without the yield the body would race past the call, return,
-// and the fiber would complete before the timer fires.
 fn{#async} sleep_impl(ms i64) =
   if ms > 0:
     tin_sleep_ms_c(ms)
-    yield
 
 // sleep returns a future for a wait of at least d.  The work runs in
 // a freshly spawned fiber; awaiting the future blocks the caller

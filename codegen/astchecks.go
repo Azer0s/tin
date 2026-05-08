@@ -296,23 +296,25 @@ func (cg *CodeGen) variantArgTypeExpr(slot ast.TypeExpr, value ast.Node, i int) 
 
 // checkRedundantArgCasts inspects a function-call site and emits a
 // redundant-cast warning for each `<lit> as T` arg whose target T
-// matches the corresponding parameter's declared type.  The lookup is
-// best-effort: only direct `name(...)` calls to a registered top-level
-// function are considered.  Method calls and dynamic-call shapes are
-// skipped because resolving the receiver / overload would require
-// real type inference.
+// matches the corresponding parameter's declared type.  The lookup
+// uses resolveCalleeFuncDecl so qualified `pkg::fn(...)` calls and
+// overload-mangled funcDecls keys both find the right declaration
+// deterministically.  Method calls (FieldAccess) and dynamic-call
+// shapes are still skipped because resolving the receiver / overload
+// would require real type inference.
 func (cg *CodeGen) checkRedundantArgCasts(call *ast.CallExpr) {
 	if call == nil || len(call.Args) == 0 {
 		return
 	}
 
-	id, ok := call.Func.(*ast.Identifier)
-	if !ok {
+	switch call.Func.(type) {
+	case *ast.Identifier, *ast.ScopeAccess:
+	default:
 		return
 	}
 
-	fn, ok := cg.funcDecls[id.Name]
-	if !ok || fn == nil {
+	fn := cg.resolveCalleeFuncDecl(call)
+	if fn == nil {
 		return
 	}
 

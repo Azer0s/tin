@@ -517,18 +517,45 @@ func startsLower(s string) bool {
 }
 
 // llvmTypeToTinTypeExprStructural reconstructs a TypeExpr from an
-// LLVM type, preserving pointer / array / string shape.  Used by
-// genTupleLit to synthesize a monomorphization decl that round-trips
-// through the type-resolver -- the flat-name form produced by
-// llvmTypeToTinName collapses pointers into a SimpleType whose Name
-// starts with `*`, which the AST treats as a literal identifier and
-// downstream type lookups silently fall back to i64.
+// LLVM type, preserving pointer / array / string / trait-iface shape.
+// Used by genTupleLit to synthesize a monomorphization decl that
+// round-trips through the type-resolver -- the flat-name form
+// produced by llvmTypeToTinName collapses pointers into a SimpleType
+// whose Name starts with `*`, which the AST treats as a literal
+// identifier and downstream type lookups silently fall back to i64.
 func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		return &ast.PointerType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType)}
 	}
 
 	if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		// Trait fat-ptr {i8*, vtable_struct*} -- demangle the
+		// vtable's struct name (`<pkg>__<Trait>_vtable`) into the
+		// user-visible `<pkg>::<Trait>` so the synthesized
+		// monomorphization re-resolves to the right iface type
+		// instead of falling through to i64.
+		if st.Fields[0] == irtypes.I8Ptr {
+			if pt, ok2 := st.Fields[1].(*irtypes.PointerType); ok2 {
+				if vst, ok3 := pt.ElemType.(*irtypes.StructType); ok3 {
+					vname := vst.Name()
+					if strings.HasSuffix(vname, "_vtable") {
+						bare := strings.TrimSuffix(vname, "_vtable")
+
+						if i := strings.LastIndex(bare, "__"); i >= 0 {
+							bare = bare[:i] + "::" + bare[i+2:]
+						}
+
+						return &ast.SimpleType{Name: bare}
+					}
+				}
+			}
+		}
+		// Fat-pointer arrays / strings: {ElemPtr, i64}.  We cannot
+		// distinguish `[u8]` from `string` at the LLVM level (both
+		// are `{i8*, i64}`); both resolve to the same LLVM type
+		// downstream so the choice is cosmetic.  We pick `string`
+		// because it is the more common appearance for this shape
+		// in real code.
 		if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 && st.Fields[1].Equal(irtypes.I64) {
 			if pt.ElemType.Equal(irtypes.I8) {
 				return &ast.SimpleType{Name: "string"}
