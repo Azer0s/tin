@@ -502,3 +502,197 @@ func (cg *CodeGen) finalizePerPkgModules() {
 	cg.echoSharedTypeDefs()
 	cg.addCrossModuleDeclares()
 }
+
+// mergePkgModsIntoMain folds every per-pkg LLVM module's funcs, globals,
+// and typedefs back into cg.mod, then empties the pkgMods + monoMods
+// maps.  Used by the REPL entry-point return path: the REPL has no
+// separate compile step that would link per-pkg .o files into the cell
+// .so, so every definition has to live in cg.mod.
+//
+// Dedup-on-name-conflict policy: when both modules define a symbol
+// with the same name, prefer the entry that has a body (definition)
+// over an empty-blocks declare.  A naive name-only skip would silently
+// keep the declare and drop the define, producing dlopen
+// "symbol not found" errors when the cell calls the symbol.
+//
+// Determinism: pkgMods are walked in alphabetical name order
+// (pkgModNames is sorted) and monoMods in alphabetical hash order, so
+// the resulting cg.mod ordering is reproducible across runs.
+//
+// Per-module @llvm.used rekey: emitLlvmUsedRoots, which runs AFTER
+// this merge, would otherwise see leftover pkgMod entries in
+// cg.llvmUsedRoots/Funcs and emit a per-pkg @llvm.used global into a
+// module that is about to be discarded.  We rekey those entries from
+// the pkgMod/monoMod pointer to cg.mod so the subsequent emit produces
+// a single combined @llvm.used in cg.mod with every pin entry.
+func (cg *CodeGen) mergePkgModsIntoMain() {
+	if len(cg.pkgMods) == 0 && len(cg.monoMods) == 0 {
+		return
+	}
+
+	knownTypes := map[string]*irtypes.StructType{}
+	for _, t := range cg.mod.TypeDefs {
+		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
+			knownTypes[st.Name()] = st
+		}
+	}
+
+	knownFuncs := map[string]*ir.Func{}
+	for _, f := range cg.mod.Funcs {
+		if f.Name() != "" {
+			knownFuncs[f.Name()] = f
+		}
+	}
+
+	knownGlobals := map[string]*ir.Global{}
+	for _, g := range cg.mod.Globals {
+		if g.Name() != "" {
+			knownGlobals[g.Name()] = g
+		}
+	}
+
+	mergeFrom := func(m *ir.Module) {
+		if m == nil {
+			return
+		}
+
+		for _, t := range m.TypeDefs {
+			st, ok := t.(*irtypes.StructType)
+			if !ok || st.Name() == "" {
+				cg.mod.TypeDefs = append(cg.mod.TypeDefs, t)
+				continue
+			}
+
+			if _, dup := knownTypes[st.Name()]; dup {
+				continue
+			}
+
+			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
+			knownTypes[st.Name()] = st
+		}
+
+		for _, g := range m.Globals {
+			name := g.Name()
+			if name == "" {
+				cg.mod.Globals = append(cg.mod.Globals, g)
+				continue
+			}
+
+			existing, dup := knownGlobals[name]
+			if !dup {
+				cg.mod.Globals = append(cg.mod.Globals, g)
+				knownGlobals[name] = g
+
+				continue
+			}
+			// Prefer the entry with an initializer (definition) over an
+			// extern-only declare.  Identical-name globals between
+			// cg.mod and a pkgMod are normal: cg.mod often holds a
+			// declare for a runtime helper that ends up defined inside
+			// a pkg module.
+			if existing.Init == nil && g.Init != nil {
+				for i, eg := range cg.mod.Globals {
+					if eg == existing {
+						cg.mod.Globals[i] = g
+
+						break
+					}
+				}
+
+				knownGlobals[name] = g
+			}
+		}
+
+		for _, f := range m.Funcs {
+			name := f.Name()
+			if name == "" {
+				cg.mod.Funcs = append(cg.mod.Funcs, f)
+				continue
+			}
+
+			existing, dup := knownFuncs[name]
+			if !dup {
+				cg.mod.Funcs = append(cg.mod.Funcs, f)
+				knownFuncs[name] = f
+
+				continue
+			}
+			// Prefer the entry that has blocks (definition) over an
+			// empty-blocks declare.  Same pattern as globals: cg.mod
+			// frequently holds a declare for a symbol that turns out
+			// to be defined in a pkg module.
+			if len(existing.Blocks) == 0 && len(f.Blocks) > 0 {
+				for i, ef := range cg.mod.Funcs {
+					if ef == existing {
+						cg.mod.Funcs[i] = f
+
+						break
+					}
+				}
+
+				knownFuncs[name] = f
+			}
+		}
+	}
+
+	rekeyUsed := func(m *ir.Module) {
+		if m == nil {
+			return
+		}
+
+		if entries, ok := cg.llvmUsedRoots[m]; ok {
+			seen := map[*ir.Global]bool{}
+			for _, g := range cg.llvmUsedRoots[cg.mod] {
+				seen[g] = true
+			}
+
+			for _, g := range entries {
+				if !seen[g] {
+					cg.llvmUsedRoots[cg.mod] = append(cg.llvmUsedRoots[cg.mod], g)
+					seen[g] = true
+				}
+			}
+
+			delete(cg.llvmUsedRoots, m)
+		}
+
+		if entries, ok := cg.llvmUsedFuncs[m]; ok {
+			seen := map[*ir.Func]bool{}
+			for _, f := range cg.llvmUsedFuncs[cg.mod] {
+				seen[f] = true
+			}
+
+			for _, f := range entries {
+				if !seen[f] {
+					cg.llvmUsedFuncs[cg.mod] = append(cg.llvmUsedFuncs[cg.mod], f)
+					seen[f] = true
+				}
+			}
+
+			delete(cg.llvmUsedFuncs, m)
+		}
+	}
+
+	for _, name := range cg.pkgModNames() {
+		m := cg.pkgMods[name]
+		mergeFrom(m)
+		rekeyUsed(m)
+	}
+
+	cg.pkgMods = map[string]*ir.Module{}
+
+	monoHashes := make([]string, 0, len(cg.monoMods))
+	for h := range cg.monoMods {
+		monoHashes = append(monoHashes, h)
+	}
+
+	sort.Strings(monoHashes)
+
+	for _, h := range monoHashes {
+		m := cg.monoMods[h]
+		mergeFrom(m)
+		rekeyUsed(m)
+	}
+
+	cg.monoMods = map[string]*ir.Module{}
+}

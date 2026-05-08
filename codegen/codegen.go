@@ -2061,12 +2061,22 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// In REPL mode the cell function is the only entry point; skip main().
 	// Skip mono extraction: REPL compiles cg.mod alone (no separate mono
 	// .o cache), so monomorphized fn bodies must stay in cg.mod or
-	// dlopen will see only `declare`s for them.
+	// dlopen will see only `declare`s for them.  For the same reason we
+	// also fold per-pkg modules back into cg.mod here -- the non-REPL
+	// build compiles each pkg to its own .o and links them together,
+	// but the REPL has no separate compile/link pass; everything has
+	// to live in the single cg.mod that becomes the cell .so.
 	if cg.replMode {
 		cg.emitAtomTable()
 		cg.applyStacktracePostPass()
 		cg.finalizeImplSection()
 		cg.applyPclntabPostPass()
+		// Merge BEFORE emitLlvmUsedRoots: emitting first would create a
+		// per-pkg @llvm.used global that the merge then drops by name
+		// dedup, silently losing every impl-section pin entry.  Merge
+		// rekeys cg.llvmUsedRoots/Funcs from pkgMod -> cg.mod so the
+		// subsequent emit produces a single combined @llvm.used.
+		cg.mergePkgModsIntoMain()
 		cg.emitLlvmUsedRoots()
 		cg.finalizePerPkgModules()
 
