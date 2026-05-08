@@ -266,6 +266,17 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     if (cap <= 0) {
         _tin_panic("Channel.make: capacity must be > 0");
     }
+    // Bound the capacity from above: the po2 round-up below shifts a
+    // signed int64_t and will wrap into negative or loop past INT64_MAX
+    // for adversarial inputs.  A cap above 2^30 (~1 billion slots) is
+    // already absurd; reject it loudly so we don't end up doing a
+    // tiny malloc and overrunning it via cap_mask.
+    if (cap > (int64_t)1 << 30) {
+        _tin_panic("Channel.make: capacity too large (max 2^30)");
+    }
+    if (elem_size <= 0 || elem_size > (int64_t)1 << 16) {
+        _tin_panic("Channel.make: elem_size out of range");
+    }
     // Round up to power of 2 for bitwise-AND wrap.
     int64_t po2 = 1;
     while (po2 < cap) po2 <<= 1;

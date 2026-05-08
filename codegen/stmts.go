@@ -2492,21 +2492,30 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 
 		return n
 	case *ast.Block:
-		newStmts := make([]ast.Node, len(n.Stmts))
+		// Copy the original to preserve the embedded `base` (position
+		// info).  Building from scratch with a struct literal would
+		// drop the span and any diagnostic later raised against the
+		// substituted body would point at (0,0).
+		out := *n
+		out.Stmts = make([]ast.Node, len(n.Stmts))
+
 		for i, s := range n.Stmts {
-			newStmts[i] = substituteMacroNode(s, subst)
+			out.Stmts[i] = substituteMacroNode(s, subst)
 		}
 
-		return &ast.Block{Stmts: newStmts}
+		return &out
 	case *ast.MatchStmt:
-		newCases := make([]ast.MatchCase, len(n.Cases))
+		out := *n
+		out.Expr = substituteMacroNode(n.Expr, subst)
+		out.Cases = make([]ast.MatchCase, len(n.Cases))
+
 		for i, c := range n.Cases {
 			var body *ast.Block
 			if b, ok := substituteMacroNode(c.Body, subst).(*ast.Block); ok {
 				body = b
 			}
 
-			newCases[i] = ast.MatchCase{
+			out.Cases[i] = ast.MatchCase{
 				Pattern: substituteMacroNode(c.Pattern, subst),
 				Guard:   substituteMacroNode(c.Guard, subst),
 				VarName: c.VarName,
@@ -2514,61 +2523,53 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 			}
 		}
 
-		var def *ast.Block
-
 		if n.Default != nil {
 			if b, ok := substituteMacroNode(n.Default, subst).(*ast.Block); ok {
-				def = b
+				out.Default = b
 			}
 		}
 
-		return &ast.MatchStmt{
-			Expr:    substituteMacroNode(n.Expr, subst),
-			Cases:   newCases,
-			Default: def,
-			IsType:  n.IsType,
-		}
+		return &out
 	case *ast.IfStmt:
-		var thenBlk, elseBlk *ast.Block
+		out := *n
+		out.Cond = substituteMacroNode(n.Cond, subst)
+
 		if b, ok := substituteMacroNode(n.Then, subst).(*ast.Block); ok {
-			thenBlk = b
+			out.Then = b
 		}
 
 		if n.Else != nil {
 			if b, ok := substituteMacroNode(n.Else, subst).(*ast.Block); ok {
-				elseBlk = b
+				out.Else = b
 			}
 		}
 
-		newEIs := make([]ast.ElseIfClause, len(n.ElseIfs))
+		out.ElseIfs = make([]ast.ElseIfClause, len(n.ElseIfs))
+
 		for i, ei := range n.ElseIfs {
 			var body *ast.Block
 			if b, ok := substituteMacroNode(ei.Body, subst).(*ast.Block); ok {
 				body = b
 			}
 
-			newEIs[i] = ast.ElseIfClause{
+			out.ElseIfs[i] = ast.ElseIfClause{
 				Cond: substituteMacroNode(ei.Cond, subst),
 				Body: body,
 			}
 		}
 
-		return &ast.IfStmt{
-			Cond:    substituteMacroNode(n.Cond, subst),
-			Then:    thenBlk,
-			ElseIfs: newEIs,
-			Else:    elseBlk,
-		}
+		return &out
 	case *ast.VarDecl:
 		out := *n
 		out.Value = substituteMacroNode(n.Value, subst)
 
 		return &out
 	case *ast.AssignStmt:
-		return &ast.AssignStmt{
-			Target: substituteMacroNode(n.Target, subst),
-			Value:  substituteMacroNode(n.Value, subst),
-		}
+		out := *n
+		out.Target = substituteMacroNode(n.Target, subst)
+		out.Value = substituteMacroNode(n.Value, subst)
+
+		return &out
 	}
 
 	return node
@@ -2673,13 +2674,21 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		}
 	}
 	// User struct (or *Struct) target: dispatch to ::index_set trait
-	// method when the receiver struct implements index_set[K, V].
-	// Mirrors dispatchBinOp. Must come before the SIMD case below so a
-	// user-defined index_set on a vector-wrapping struct still wins;
-	// for raw SIMD vectors the helper returns "" and we fall through.
+	// method when the receiver struct implements index_set[K, V], or
+	// emit a SIMD insertelement when the receiver is a vector.  Both
+	// branches need the rvalue of the receiver, so emit it once here
+	// rather than once per branch -- emitting twice double-runs any
+	// side effects in the receiver expression and silently swallowed
+	// the genExpr error on the second go.  The third evaluation
+	// (genLValue for the SIMD store-back) is unavoidable but only
+	// fires for genuinely-addressable LHS expressions.
 	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
 		recv, err2 := cg.genExpr(block, idxExpr.Expr)
-		if err2 == nil && recv != nil {
+		if err2 != nil {
+			return block, err2
+		}
+
+		if recv != nil {
 			if structName := cg.structNameForReceiver(recv.Type()); structName != "" {
 				idx, err3 := cg.genExpr(block, idxExpr.Index)
 				if err3 != nil {
@@ -2706,15 +2715,8 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 					cg.tinTypeDisplay(recv.Type()), cg.tinTypeDisplay(idx.Type()), cg.tinTypeDisplay(val.Type()),
 					cg.tinTypeDisplay(recv.Type()), cg.tinTypeDisplay(idx.Type()), cg.tinTypeDisplay(val.Type()))
 			}
-		}
-	}
 
-	// Special case: SIMD vector index assignment v[i] = x.
-	// Vectors have no addressable lanes; use insertelement + store-back.
-	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
-		vecVal, err2 := cg.genExpr(block, idxExpr.Expr)
-		if err2 == nil && vecVal != nil {
-			if vecType, isVec := vecVal.Type().(*irtypes.VectorType); isVec {
+			if vecType, isVec := recv.Type().(*irtypes.VectorType); isVec {
 				idxVal, err3 := cg.genExpr(block, idxExpr.Index)
 				if err3 != nil {
 					return block, err3
@@ -2727,9 +2729,8 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 				newElem = cg.coerce(block, newElem, vecType.ElemType)
 				idx32 := cg.coerce(block, idxVal, irtypes.I32)
-				updated := block.NewInsertElement(vecVal, newElem, idx32)
+				updated := block.NewInsertElement(recv, newElem, idx32)
 
-				// Store the updated vector back to the variable's alloca.
 				vecPtr, err5 := cg.genLValue(block, idxExpr.Expr)
 				if err5 != nil {
 					return block, err5

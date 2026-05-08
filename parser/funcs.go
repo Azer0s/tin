@@ -288,34 +288,45 @@ func (p *Parser) parseFuncBody() (ast.Node, error) {
 		// that the lexer doesn't emit a new INDENT for.  Parse the body as a single
 		// statement (covers the common case of `return expr` on one line).
 		if !p.check(lexer.EOF) && !p.check(lexer.DEDENT) && !p.check(lexer.NEWLINE) {
+			// Mirror the same `pass` short-circuit as the same-line
+			// branch below: parseStatement returns nil for a bare
+			// `pass`, which would propagate up to codegen as Body=nil
+			// and cause a missing-symbol link error when the address
+			// is taken (e.g. for an rc::Cell dtor).  Surface an
+			// explicit empty Block instead.
+			if p.check(lexer.KW_PASS) {
+				passPos := p.curPos()
+				p.advance()
+
+				blk := &ast.Block{IsExplicitPass: true}
+				blk.SetPos(passPos)
+
+				return blk, nil
+			}
+
 			return p.parseStatement()
 		}
 
 		return &ast.Block{}, nil
 	}
 	// Single expression / statement on same line - may be SEMI-separated multi-statement.
-	// Detect a literal `pass` BEFORE consuming the token so the caller gets a
-	// real empty Block (with IsExplicitPass=true) instead of a nil body.
-	// parseStatement returns nil for `pass` to drop the no-op out of normal
-	// statement lists, but for a fn body that nil otherwise propagates all the
-	// way to codegen where `Body == nil` means "forward declaration only" --
-	// emitting just a `declare` for the symbol. When such a function's address
-	// is later taken (e.g. passed as an `rc::Cell` dtor), the linker sees an
-	// undefined reference. Producing an explicit empty block here keeps codegen
-	// on the normal "emit a body returning void" path.
-	if p.check(lexer.KW_PASS) {
-		passPos := p.curPos()
-		p.advance()
-
-		blk := &ast.Block{IsExplicitPass: true}
-		blk.SetPos(passPos)
-
-		return blk, nil
-	}
-
+	// `pass` here is special-cased the same way as parseStatement's drop-nil
+	// behavior, but we synthesize an explicit empty Block so codegen still
+	// emits a body for the function (otherwise taking the address of a
+	// `fn() = pass` extern-style decl produces an unresolved symbol).
+	// We intentionally fall through into the SEMI-continuation loop below
+	// so `fn foo() = pass; bar()` parses as a Block containing bar().
 	first, err := p.parseStatement()
 	if err != nil {
 		return nil, err
+	}
+
+	if first == nil && p.curPos().Line > 0 {
+		// parseStatement returns nil for `pass` (already consumed).
+		// Treat this as an explicit empty marker so the caller still
+		// gets a non-nil body when no continuation follows.
+		first = &ast.Block{IsExplicitPass: true}
+		first.(*ast.Block).SetPos(p.curPos())
 	}
 
 	if !p.check(lexer.SEMI) {

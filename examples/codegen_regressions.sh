@@ -200,5 +200,141 @@ fn main() =
   echo "{await ch.recv()}"
 '
 
+# ── is *T against nil pointer must NOT segfault.  The check now emits
+# a runtime nil-guard before the GEP+load.
+assert_substr "is *T on nil pointer is safe" \
+  "guarded-ok" '
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+fn main() =
+  let a *Animal = nil
+
+  if a is *Dog:
+    echo "wrong"
+  else:
+    echo "guarded-ok"
+'
+
+# ── lexer: leading underscore in numeric literal must NOT be silently
+# accepted as a separator.  Catches 0x_FF, 1._5, 0b_10, 1.0e_5.  With
+# the fix, `0x_FF` lexes as `0x` followed by `_FF` (undefined ident).
+assert_substr "lexer rejects leading-underscore numeric literal" \
+  "undefined identifier: _FF" '
+fn main() =
+  let x = 0x_FF
+  echo "{x}"
+'
+
+# ── JSON: "tnull" must NOT parse as `true` (per RFC 8259).
+assert_substr "JSON rejects tnull as true" \
+  "ok-rejected" '
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("tnull"):
+    case Ok(v): echo "wrong"
+    case Err(e): echo "ok-rejected"
+'
+
+# ── JSON: integer overflow surfaces as a Malformed error.
+assert_substr "JSON int overflow rejected" \
+  "ok-rejected-ovf" '
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("99999999999999999999"):
+    case Ok(v): echo "wrong"
+    case Err(e): echo "ok-rejected-ovf"
+'
+
+# ── JSON: \u escape decodes to the right UTF-8 codepoint.
+assert_substr "JSON \\\\u escape decodes to ASCII" \
+  "decoded-A" '
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("\"\\u0041\""):
+    case Ok(v): echo "decoded-{v.sval}"
+    case Err(e): echo "wrong"
+'
+
+# ── strings::parse_int rejects overflow instead of wrapping.
+assert_substr "parse_int rejects overflow" \
+  "ok-rejected" '
+use strings
+
+fn main() =
+  let (v, err) = strings::parse_int("99999999999999999999")
+
+  if err == nil: echo "wrong"
+  else:          echo "ok-rejected"
+'
+
+# ── strings::parse_int accepts i64::MIN exactly.
+assert_substr "parse_int accepts i64::MIN" \
+  "ok-min" '
+use strings
+
+fn main() =
+  let (v, err) = strings::parse_int("-9223372036854775808")
+
+  if err != nil: echo "wrong"
+  else if v == -9223372036854775808: echo "ok-min"
+  else: echo "wrong-v {v}"
+'
+
+# ── decimal::ord must not overflow on far-apart values (was using a-b).
+assert_runs_clean "decimal::ord far-apart values" "" '
+use decimal
+
+fn main() =
+  let a = decimal::from(-9223372036854000000)
+  let b = decimal::from(800)
+  let r = a.ord(b)
+
+  if r >= 0: echo "wrong sign"
+  else:      echo "ok"
+'
+
+# ── time::Duration::abs at i64::MIN saturates instead of wrapping.
+assert_substr "Duration::abs saturates at i64::MIN" \
+  "saturated" '
+use time
+
+fn main() =
+  let d = time::Duration{ns: -9223372036854775808}
+  let a = d.abs()
+
+  if a.ns > 0: echo "saturated"
+  else:        echo "wrong {a.ns}"
+'
+
+# ── http: header values must reject CR/LF/NUL injection.
+assert_substr "http header CR/LF rejected" \
+  "panic" '
+use collections
+use http
+
+fn main() =
+  let c = http::Client::new()
+
+  c.set_header("X-Foo", "bar\r\nEvil-Header: pwn")
+
+  let req = http::Request{
+    method: "GET", url: "http://example.com/",
+    headers: collections::HashMap[string, string]::make(1), body: ""
+  }
+
+  let _ = await http::send(c, req)
+'
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"

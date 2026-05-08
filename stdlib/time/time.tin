@@ -62,8 +62,12 @@ struct Duration =
   // hours returns the duration in hours (truncated).
   fn hours(this Duration) i64 = return this.ns / 3600000000000
 
-  // abs returns the absolute value of the duration.
+  // abs returns the absolute value of the duration.  Saturates to
+  // i64::MAX at i64::MIN, where 0 - MIN would otherwise overflow back
+  // to MIN and silently violate the contract.
   fn abs(this Duration) Duration =
+    if this.ns == -9223372036854775808:
+      return Duration{ns: 9223372036854775807}
     if this.ns < 0:
       return Duration{ns: 0 - this.ns}
     return this

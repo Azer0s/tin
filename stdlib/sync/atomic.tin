@@ -224,5 +224,8 @@ struct Atomic[t] =
   fn for_locked(this Atomic[t], f fn(*t)) where t is not primitive =
     let payload *void = tin_atomic_obj_lock(this.ptr())
 
+    // defer the unlock so a panic in `f` can't leave the cell locked
+    // forever; otherwise every subsequent load/store/for_locked from
+    // any thread spins indefinitely.
+    defer tin_atomic_obj_unlock(this.ptr())
     f(payload as *t)
-    tin_atomic_obj_unlock(this.ptr())

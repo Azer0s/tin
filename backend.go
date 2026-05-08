@@ -361,8 +361,13 @@ const lldProbeCacheDir = ".build/host-info/lld-probe"
 // so a clang upgrade (which can change the produced argv) busts the
 // cache.
 func lldProbeCacheKey(k lldArgvKey) string {
-	return fmt.Sprintf("%s_%s_%s_%v_%v_%s_%v.argv",
-		clangVersion(), k.triple, k.optLevel, k.debug, k.macOS, k.ltoMode, k.useLld)
+	// Every keying field of lldArgvKey must appear in the filename, or
+	// two builds that differ only in (e.g.) `static` will collide on
+	// disk and the second build picks up the first's argv -- silently
+	// linking dynamically when -static was requested or vice versa.
+	return fmt.Sprintf("%s_%s_%s_%v_%v_%s_%v_%v_%v_%s.argv",
+		clangVersion(), k.triple, k.optLevel, k.debug, k.macOS, k.ltoMode, k.useLld,
+		k.static, k.standaloneDbg, k.extraHash)
 }
 
 // readLldArgvFromDisk loads a cached probe result. Returns nil on miss

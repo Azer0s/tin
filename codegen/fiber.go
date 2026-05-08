@@ -11,6 +11,8 @@ package codegen
 // only manifest across a branch boundary aren't caught here.
 
 import (
+	"sort"
+
 	"github.com/Azer0s/tin/ast"
 )
 
@@ -67,8 +69,18 @@ func (cg *CodeGen) checkFiberMisuse(fn *ast.FuncDecl) {
 	state := newFiberState()
 	cg.walkFiberStmts(body.Stmts, &state)
 
-	for name, pos := range state.locked {
-		cg.warn(DiagFiber, pos,
+	// Iterate in sorted order: Go's randomized map iteration would
+	// otherwise leak into the warning order, which is observable to
+	// snapshot tests and -Werror first-error-wins.
+	names := make([]string, 0, len(state.locked))
+	for name := range state.locked {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	for _, name := range names {
+		cg.warn(DiagFiber, state.locked[name],
 			"mutex %q locked but never unlocked before function returns", name)
 	}
 }
@@ -99,9 +111,17 @@ func (cg *CodeGen) checkMutexUnused(_ *ast.FuncDecl, body *ast.Block) {
 		}
 	})
 
-	for name, pos := range declared {
+	// Sorted iteration: deterministic warning order across builds.
+	names := make([]string, 0, len(declared))
+	for name := range declared {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	for _, name := range names {
 		if !locked[name] {
-			cg.warn(DiagFiber, pos,
+			cg.warn(DiagFiber, declared[name],
 				"mutex %q declared but never locked", name)
 		}
 	}
@@ -122,22 +142,27 @@ func (cg *CodeGen) walkFiberStmt(s ast.Node, state *fiberState) {
 	case *ast.Block:
 		cg.walkFiberStmts(n.Stmts, state)
 	case *ast.IfStmt:
-		cg.walkFiberBranch(n.Then, state)
+		// A close/lock that fires on at least one arm propagates back
+		// out as a "may have closed/locked" fact -- otherwise a
+		// pattern like `if c: ch.close(); ch.close()` would not flag
+		// the trailing close as a possible double-close.  Walk each
+		// arm with its own clone, then merge the unions back in.
+		cg.walkFiberBranchMerging(n.Then, state)
 
 		for _, ei := range n.ElseIfs {
-			cg.walkFiberBranch(ei.Body, state)
+			cg.walkFiberBranchMerging(ei.Body, state)
 		}
 
 		if n.Else != nil {
-			cg.walkFiberBranch(n.Else, state)
+			cg.walkFiberBranchMerging(n.Else, state)
 		}
 	case *ast.MatchStmt:
 		for _, c := range n.Cases {
-			cg.walkFiberBranch(c.Body, state)
+			cg.walkFiberBranchMerging(c.Body, state)
 		}
 
 		if n.Default != nil {
-			cg.walkFiberBranch(n.Default, state)
+			cg.walkFiberBranchMerging(n.Default, state)
 		}
 	case *ast.ForStmt:
 		cg.walkFiberBranch(n.Body, state)
@@ -170,6 +195,32 @@ func (cg *CodeGen) walkFiberBranch(blk *ast.Block, state *fiberState) {
 
 	branch := state.clone()
 	cg.walkFiberStmts(blk.Stmts, &branch)
+}
+
+// walkFiberBranchMerging descends into a sub-block with a fresh clone,
+// then union-merges any new close/lock facts the branch added back
+// into the caller's state.  Used for if/match arms so that a close
+// inside one arm carries forward as a "may have closed" fact -- the
+// next sibling close at the same scope flags as a possible double.
+func (cg *CodeGen) walkFiberBranchMerging(blk *ast.Block, state *fiberState) {
+	if blk == nil {
+		return
+	}
+
+	branch := state.clone()
+	cg.walkFiberStmts(blk.Stmts, &branch)
+
+	for name, pos := range branch.closed {
+		if _, ok := state.closed[name]; !ok {
+			state.closed[name] = pos
+		}
+	}
+
+	for name, pos := range branch.locked {
+		if _, ok := state.locked[name]; !ok {
+			state.locked[name] = pos
+		}
+	}
 }
 
 // walkFiberExpr inspects an expression for fiber-relevant operations.

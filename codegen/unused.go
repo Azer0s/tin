@@ -124,6 +124,32 @@ func (cg *CodeGen) resolveCalleeFuncDecl(c *ast.CallExpr) *ast.FuncDecl {
 		}
 
 		bare = fn.Path[len(fn.Path)-1]
+		// For qualified calls like `time::sleep`, prefer the
+		// package-qualified entry so a user-defined `fn sleep()` at
+		// top level doesn't shadow the imported `time::sleep`.  Try
+		// `<pkg>__<bare>` first, then fall through to the bare lookup
+		// below as a last resort.
+		if len(fn.Path) >= 2 {
+			pkg := fn.Path[len(fn.Path)-2]
+
+			if d, ok := cg.funcDecls[pkg+"__"+bare]; ok && d != nil {
+				return d
+			}
+
+			keys := make([]string, 0, len(cg.funcDecls))
+			for k := range cg.funcDecls {
+				keys = append(keys, k)
+			}
+
+			sort.Strings(keys)
+
+			for _, k := range keys {
+				d := cg.funcDecls[k]
+				if d != nil && d.Name == bare && strings.HasPrefix(k, pkg+"__") {
+					return d
+				}
+			}
+		}
 	default:
 		return nil
 	}

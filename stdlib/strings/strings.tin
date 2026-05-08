@@ -8,7 +8,6 @@
 
 use simd
 use errors
-use errors
 
 // simd_find_first returns the 0-based position of the lowest set bit in a
 // 16-bit movemask result.  Called only when mask != 0, so the loop always
@@ -328,24 +327,53 @@ fn is_digit(c byte) bool = return c >= @'0' && c <= @'9'
 
 // parse_int parses s as a decimal i64.
 // Returns (value, *errors::Err); Err is nil on success.
-// Accepts an optional leading '-' or '+'.
+// Accepts an optional leading '-' or '+'.  Detects overflow up front
+// so we don't hand a wrapped value to the caller -- atol's behavior on
+// out-of-range input is implementation-defined, so we cannot rely on
+// it to flag overflow.
 fn parse_int(s string) (i64, *errors::Err) =
   let n = len(s)
 
   if n == 0:
     return (0, errors::new("parse_int: empty string"))
   let i i64 = 0
+  let neg = false
 
-  if s[0] == @'-' || s[0] == @'+':
+  if s[0] == @'-':
+    neg = true
+    i = 1
+  else if s[0] == @'+':
     i = 1
   if i >= n:
     return (0, errors::new("parse_int: no digits"))
+
+  // Accumulate as negative when neg, positive otherwise.  This lets us
+  // represent i64::MIN exactly, which is unreachable via "build positive,
+  // negate at the end" (i64::MIN's magnitude doesn't fit in the positive
+  // range).  Pre-check overflow on each step to avoid wrap.
+  let r i64 = 0
+
   for i < n:
     if !is_digit(s[i]):
       return (0, errors::new("parse_int: invalid character"))
+    let d = (s[i] - @'0') as i64
+
+    if neg:
+      // r * 10 - d >= i64::MIN, i.e. r >= (i64::MIN + d) / 10
+      if r < -922337203685477580:
+        return (0, errors::new("parse_int: integer overflow"))
+      if r == -922337203685477580 && d > 8:
+        return (0, errors::new("parse_int: integer overflow"))
+      r = r * 10 - d
+    else:
+      if r > 922337203685477580:
+        return (0, errors::new("parse_int: integer overflow"))
+      if r == 922337203685477580 && d > 7:
+        return (0, errors::new("parse_int: integer overflow"))
+      r = r * 10 + d
     i = i + 1
 
-  return (atol(s), nil)
+  return (r, nil)
 
 // parse_int32 parses s as a decimal i32.
 // Returns (value, *errors::Err); Err is nil on success.

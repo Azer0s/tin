@@ -7,6 +7,7 @@ package codegen
 import (
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/Azer0s/tin/ast"
@@ -117,36 +118,55 @@ func (cg *CodeGen) checkTypeNameStyle(name, kind string, pos ast.Pos) {
 }
 
 // checkSourceWhitespace flags trailing spaces/tabs at end of any line
-// and a missing terminating newline. Reads the source from disk once;
-// silent when the file isn't readable (avoids fighting the localmem
-// suppression scanner over the same edge case).
+// and a missing terminating newline.  Iterates every distinct user
+// source file we have a record of (collected from struct/func decls)
+// so the check covers the whole program -- using cg.filename alone
+// would only see the last package compiled, since that field is
+// mutated during per-package code generation.
 func (cg *CodeGen) checkSourceWhitespace() {
-	file := cg.filename
-	if file == "" {
-		return
+	seen := map[string]bool{}
+
+	addFile := func(f string) {
+		if f != "" {
+			seen[f] = true
+		}
 	}
 
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return
+	addFile(cg.filename)
+
+	for _, f := range cg.structDeclFiles {
+		addFile(f)
 	}
 
-	src := string(data)
+	files := make([]string, 0, len(seen))
+	for f := range seen {
+		files = append(files, f)
+	}
 
+	sort.Strings(files)
+
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+
+		cg.checkOneFileWhitespace(file, string(data))
+	}
+}
+
+func (cg *CodeGen) checkOneFileWhitespace(file, src string) {
 	if len(src) > 0 && !strings.HasSuffix(src, "\n") {
-		// Pin the warning to the last line of source so editors can
-		// jump to it instead of reporting (0,0).
 		lastLine := strings.Count(src, "\n") + 1
 
-		cg.warn(DiagStyle, ast.Pos{Line: lastLine, Col: 1},
+		cg.warnInFile(file, DiagStyle, ast.Pos{Line: lastLine, Col: 1},
 			"file is missing a trailing newline")
 	}
 
-	for i, line := range strings.Split(src, "\n") {
-		// strings.Split on "\n" produces a trailing empty element when
-		// the file ends in a newline -- skip it so we don't flag the
-		// implicit empty "line" past EOF as trailing whitespace.
-		if i == len(strings.Split(src, "\n"))-1 && line == "" {
+	lines := strings.Split(src, "\n")
+
+	for i, line := range lines {
+		if i == len(lines)-1 && line == "" {
 			continue
 		}
 
@@ -157,7 +177,7 @@ func (cg *CodeGen) checkSourceWhitespace() {
 
 		col := len(stripped) + 1
 
-		cg.warn(DiagStyle, ast.Pos{Line: i + 1, Col: col},
+		cg.warnInFile(file, DiagStyle, ast.Pos{Line: i + 1, Col: col},
 			"trailing whitespace")
 	}
 }

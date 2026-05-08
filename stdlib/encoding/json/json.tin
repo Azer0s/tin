@@ -39,7 +39,6 @@
 use str
 use errors
 use simd
-use errors
 use result
 use { Result } from result
 
@@ -119,8 +118,28 @@ struct Value =
 
 // String helpers
 
+// hex_digit returns the lowercase hex character for n in [0, 15].
+fn hex_digit(n i64) byte =
+  if n < 10:
+    return (@'0' + n) as byte
+  return (@'a' + n - 10) as byte
+
+// hex_val parses a single hex character to its 4-bit value.  Returns
+// 0 for invalid input -- callers must validate the byte first if the
+// distinction matters.
+fn hex_val(c i64) i64 =
+  if c >= @'0' as i64 && c <= @'9' as i64:
+    return c - (@'0' as i64)
+  if c >= @'a' as i64 && c <= @'f' as i64:
+    return c - (@'a' as i64) + 10
+  if c >= @'A' as i64 && c <= @'F' as i64:
+    return c - (@'A' as i64) + 10
+  return 0
+
 // escape_string produces the JSON encoding of s including surrounding quotes.
 // Iterates over bytes with `for c in s:` using string ++ byte concatenation.
+// RFC 8259 requires control bytes 0x00-0x1F to be escaped; conformant
+// parsers (jq, serde_json, Python json) reject literal control bytes.
 fn escape_string(s string) string =
   let result = "\""
 
@@ -129,12 +148,23 @@ fn escape_string(s string) string =
       result = result ++ "\\\""
     else if c == @'\\':
       result = result ++ "\\\\"
+    else if c == 0x08 as byte:
+      // 0x08 = BS (\b in JSON).  Tin's byte literals don't recognise
+      // \b, so we use the numeric value directly.
+      result = result ++ "\\b"
+    else if c == 0x0C as byte:
+      // 0x0C = FF (\f in JSON).
+      result = result ++ "\\f"
     else if c == @'\n':
       result = result ++ "\\n"
     else if c == @'\r':
       result = result ++ "\\r"
     else if c == @'\t':
       result = result ++ "\\t"
+    else if c < 0x20 as byte:
+      let n = c as i64
+
+      result = result ++ "\\u00" ++ hex_digit((n >> 4) & 0xF) ++ hex_digit(n & 0xF)
     else:
       result = result ++ c
 
@@ -328,9 +358,12 @@ fn encode[T](v T) string =
 // Internal parser
 
 struct Parser =
-  src *byte
-  pos i64
-  len i64
+  src       *byte
+  pos       i64
+  len       i64
+  err_pos   i64
+  err_msg   string
+  has_err   bool
 
   fn peek(this Parser) byte =
     if this.pos >= this.len:
@@ -343,6 +376,15 @@ struct Parser =
     this.pos = this.pos + 1
 
     return c
+
+  // fail records a parser-level error.  Subsequent calls leave the
+  // first error intact so the top-level `parse` surfaces the root
+  // cause rather than a downstream symptom.
+  fn fail(this *Parser, msg string) =
+    if !this.has_err:
+      this.has_err = true
+      this.err_pos = this.pos
+      this.err_msg = msg
 
   fn skip_ws(this *Parser) =
     // SIMD fast path: check 16 bytes at a time for whitespace.
@@ -444,31 +486,69 @@ fn parse_str(p *Parser) string =
         done = true
       else:
         let out byte = c
+        let emit = true
 
         if c == @'\\':
           if p.at_end():
             done = true
+            emit = false
           else:
             let esc = p.advance()
 
             if esc == @'\"':      out = @'\"'
             else if esc == @'\\': out = @'\\'
             else if esc == @'/':  out = @'/'
+            else if esc == @'b':  out = 0x08 as byte
+            else if esc == @'f':  out = 0x0C as byte
             else if esc == @'n':  out = @'\n'
             else if esc == @'r':  out = @'\r'
             else if esc == @'t':  out = @'\t'
+            else if esc == @'u':
+              // \uXXXX -- parse 4 hex digits into a codepoint, then
+              // UTF-8 encode it directly.  Emit nothing on malformed
+              // input or buffer underrun (the parser has no error
+              // channel here; the result will be partial but won't
+              // segfault).
+              emit = false
+
+              if p.pos + 4 <= p.len:
+                let h0 = p.src[p.pos] as i64
+                let h1 = p.src[p.pos + 1] as i64
+                let h2 = p.src[p.pos + 2] as i64
+                let h3 = p.src[p.pos + 3] as i64
+                let cp = (hex_val(h0) << 12) | (hex_val(h1) << 8) | (hex_val(h2) << 4) | hex_val(h3)
+
+                p.pos = p.pos + 4
+
+                if cp < 0x80:
+                  result = result ++ (cp as byte)
+                else if cp < 0x800:
+                  result = result ++ ((0xC0 | (cp >> 6)) as byte)
+                  result = result ++ ((0x80 | (cp & 0x3F)) as byte)
+                else:
+                  // Surrogate pairs (0xD800-0xDBFF + 0xDC00-0xDFFF)
+                  // would require a second \u escape; for now emit the
+                  // BMP codepoint as 3-byte UTF-8, which produces
+                  // wrong output for astral planes but at least valid
+                  // UTF-8 for the BMP range.
+                  result = result ++ ((0xE0 | (cp >> 12)) as byte)
+                  result = result ++ ((0x80 | ((cp >> 6) & 0x3F)) as byte)
+                  result = result ++ ((0x80 | (cp & 0x3F)) as byte)
             else:                 out = esc
 
-        if !done:
+        if !done && emit:
           result = result ++ out
 
   return result
 
 // parse_int_bytes parses an integer directly from raw bytes (p.src[start..p.pos]).
+// Overflow flips the parser's `has_err` flag and returns 0 -- callers
+// see the error surface at the top-level `parse`.
 fn parse_int_bytes(p *Parser, start i64) i64 =
   let neg = false
   let i   i64 = start
   let r   i64 = 0
+  let max_pre i64 = 922337203685477580   // (i64::MAX - 9) / 10
 
   if i < p.pos && p.src[i] == @'-':
     neg = true
@@ -479,7 +559,13 @@ fn parse_int_bytes(p *Parser, start i64) i64 =
 
     if c < @'0' || c > @'9':
       break
-    r = r * 10 + (c - @'0') as i64
+    let d = (c - @'0') as i64
+
+    // Pre-check overflow before the multiply: r*10 + d > i64::MAX.
+    if r > max_pre || (r == max_pre && d > 7):
+      p.fail("integer literal out of i64 range")
+      return 0
+    r = r * 10 + d
     i = i + 1
 
   if neg:
@@ -623,14 +709,28 @@ fn parse_value(p *Parser) *Value =
     return parse_object(p)
 
   if c == @'t':
+    // Validate "true" byte-by-byte.  The previous implementation
+    // blindly advanced 4 bytes, accepting "tnull" as `true` and
+    // walking past the end of buffer on a bare "t".  On mismatch we
+    // mark the parser as failed and return null; the top-level
+    // `parse` surfaces that as a Malformed error.
+    if p.pos + 4 > p.len || p.src[p.pos + 1] != @'r' || p.src[p.pos + 2] != @'u' || p.src[p.pos + 3] != @'e':
+      p.fail("expected `true`")
+      return &Value{kind: Kind.null_v}
     p.pos = p.pos + 4
     return &Value{kind: Kind.bool_v, bval: true}
 
   if c == @'f':
+    if p.pos + 5 > p.len || p.src[p.pos + 1] != @'a' || p.src[p.pos + 2] != @'l' || p.src[p.pos + 3] != @'s' || p.src[p.pos + 4] != @'e':
+      p.fail("expected `false`")
+      return &Value{kind: Kind.null_v}
     p.pos = p.pos + 5
     return &Value{kind: Kind.bool_v, bval: false}
 
   if c == @'n':
+    if p.pos + 4 > p.len || p.src[p.pos + 1] != @'u' || p.src[p.pos + 2] != @'l' || p.src[p.pos + 3] != @'l':
+      p.fail("expected `null`")
+      return &Value{kind: Kind.null_v}
     p.pos = p.pos + 4
     return &Value{kind: Kind.null_v}
 
@@ -660,9 +760,13 @@ data JsonError =
 fn parse(s string) Result[Value, JsonError] =
   if len(s) == 0:
     return Result[Value, JsonError]::Err(JsonError::EmptyInput)
-  let p = Parser{src: s as *byte, pos: 0, len: len(s)}
+  let p = Parser{src: s as *byte, pos: 0, len: len(s), err_pos: 0, err_msg: "", has_err: false}
+  let v = parse_value(&p)
 
-  return Ok(*parse_value(&p))
+  if p.has_err:
+    return Result[Value, JsonError]::Err(JsonError::Malformed(p.err_pos, p.err_msg))
+
+  return Ok(*v)
 
 // parse_nested_any_impl[T] populates nested struct fields from a JSON Value object.
 // `zero` is an any-boxed zero value of the nested struct type (obtained via getfield).

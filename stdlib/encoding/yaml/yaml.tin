@@ -32,7 +32,6 @@
 
 use str
 use errors
-use errors
 use result
 use { Result } from result
 

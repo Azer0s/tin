@@ -71,6 +71,16 @@ void *_tin_tls_new(const char *host, int32_t fd) {
     SSL_set_fd(t->ssl, t->fd);
     SSL_set_connect_state(t->ssl);
     SSL_set_tlsext_host_name(t->ssl, host);
+    // SSL_set_tlsext_host_name only sends the SNI extension.  Without
+    // SSL_set1_host the cert chain is verified against any trusted CA but
+    // not against the requested hostname, so any valid LetsEncrypt cert
+    // for *any* domain would be accepted.  Pin the expected hostname so
+    // OpenSSL fails the handshake on a name mismatch.  Empty/NULL host
+    // means "skip name check" (server name unknown to the caller); we
+    // refuse the connection up front so that case must be opted into
+    // explicitly via a future API rather than degrading silently.
+    if (!host || host[0] == '\0') { SSL_free(t->ssl); free(t); return NULL; }
+    if (SSL_set1_host(t->ssl, host) != 1) { SSL_free(t->ssl); free(t); return NULL; }
 
     return (void *)t;
 }

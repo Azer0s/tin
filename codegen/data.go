@@ -240,20 +240,12 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 		for i, arg := range args {
 			fieldPtr := block.NewGetElementPtr(vi.PayloadType, payloadPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
-			// Retain only when the caller told us the arg comes from an
-			// existing owner whose scope-exit release would otherwise dangle
-			// the ADT's copy. Fresh literals / call results already hold the
-			// single retain that transfers into the payload.
-			f := vi.Fields[i]
-
-			if !f.IsWeak && retainMask != nil && i < len(retainMask) && retainMask[i] {
-				cg.emitStructFieldRetain(block, arg)
-			}
-			// Coerce the arg to the declared field type and reject
-			// mismatches.  Without this guard, ir.NewStore panics
-			// inside llir when the user passes the wrong type into
-			// a variant constructor (e.g. `Ok("not an int")` for
-			// `Result[i64, _]`).
+			// Coerce + type-check FIRST so a mismatch errors out before
+			// we emit the retain.  Otherwise the retain is leaked when
+			// coerce can't bridge the types -- and on the success path
+			// the retain would target the pre-coerce value, which is
+			// wrong if coerce produced a fresh value (e.g. T -> any
+			// boxing).
 			fieldType := vi.PayloadType.Fields[i]
 			arg = cg.coerce(block, arg, fieldType)
 
@@ -263,6 +255,12 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 					variantName, i,
 					cg.tinTypeDisplay(arg.Type()),
 					cg.tinTypeDisplay(fieldType))
+			}
+
+			f := vi.Fields[i]
+
+			if !f.IsWeak && retainMask != nil && i < len(retainMask) && retainMask[i] {
+				cg.emitStructFieldRetain(block, arg)
 			}
 
 			block.NewStore(arg, fieldPtr)

@@ -82,11 +82,17 @@ fn{#async} connect_impl(host string, fd i32) TlsConn =
   let handle  = tin_tls_new_c(host, fd)
   let blocked = tin_io_blocked_val_c()
 
+  if handle == nil:
+    panic("tls::connect: failed to create TLS state for {host} (CA bundle missing or empty hostname)")
+
   loop:
     let r = tin_tls_do_handshake_c(handle)
 
-    if r != blocked:
+    if r == 0:
       break
+    if r != blocked:
+      tin_tls_free_c(handle)
+      panic("tls::connect: TLS handshake failed for {host} (cert chain or hostname verification failed)")
     yield
 
   return TlsConn{_cell: rc::Cell[*void].alloc(handle, tin_tls_free_c), fd: fd}

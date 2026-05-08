@@ -263,7 +263,10 @@ fn replace_all(pattern string, s string, repl string) string =
 
   return result
 
-// split splits s by all matches of pattern.
+// split splits s by all matches of pattern.  A zero-width match (e.g.
+// a pure lookahead) advances by one character without emitting an empty
+// part on each step; otherwise the result for "aaa" against "(?=a)"
+// would be ["", "", "", "aaa"] instead of the expected per-char split.
 fn split(pattern string, s string) [string] =
   let re = compile(pattern)
   let parts [string] = []
@@ -285,11 +288,13 @@ fn split(pattern string, s string) [string] =
     let beg = m.beg(0)
     let end = m.end(0)
 
-    parts ++= substr(s, pos, beg)
-
     if end <= pos:
+      // Zero-width match -- advance one character without recording
+      // the empty prefix.  Skips infinite-loop hazard while still
+      // returning a meaningful split.
       pos = pos + 1
     else:
+      parts ++= substr(s, pos, beg)
       pos = end
 
   return parts

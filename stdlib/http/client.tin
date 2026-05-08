@@ -79,9 +79,32 @@ fn parse_url(url string) (bool, string, i32, string) =
 
   return (use_tls, host, port, path)
 
+// header_value_safe rejects any byte that could be used to terminate a
+// header line and inject a second one (CR, LF, NUL).  Used to gate
+// caller-supplied keys, values, host, and path before they are spliced
+// into the wire format.  Returns true when the value is safe to emit.
+fn header_value_safe(s string) bool =
+  let i i64 = 0
+
+  for i < len(s):
+    let c = s[i] as byte
+
+    if c == @'\r' || c == @'\n' || c == 0:
+      return false
+    i = i + 1
+
+  return true
+
 // build_request serializes a request to HTTP/1.1 wire format.
 // client_hdrs are applied first; request hdrs override them on conflict.
+// Panics on any header / method / path / host that contains CR, LF, or
+// NUL -- that combination would let an attacker who controls a single
+// field smuggle a second request or split the response.
 fn build_request(method string, host string, path string, client_hdrs collections::HashMap[string, string], req_hdrs collections::HashMap[string, string], body string) string =
+  if !header_value_safe(method): panic("http: method contains CR/LF/NUL")
+  if !header_value_safe(host):   panic("http: host contains CR/LF/NUL")
+  if !header_value_safe(path):   panic("http: path contains CR/LF/NUL")
+
   // Request line and fixed headers.
   let req = method ++ " " ++ path ++ " HTTP/1.1\r\n"
   req = req ++ "Host: " ++ host ++ "\r\n"
@@ -98,7 +121,11 @@ fn build_request(method string, host string, path string, client_hdrs collection
     let k = cks[i]
 
     if !req_hdrs.has(k):
-      req = req ++ k ++ ": " ++ client_hdrs.get(k) ++ "\r\n"
+      let v = client_hdrs.get(k)
+
+      if !header_value_safe(k) || !header_value_safe(v):
+        panic("http: header contains CR/LF/NUL")
+      req = req ++ k ++ ": " ++ v ++ "\r\n"
     i = i + 1
 
   // Per-request headers.
@@ -107,8 +134,11 @@ fn build_request(method string, host string, path string, client_hdrs collection
 
   for j < len(rks):
     let k = rks[j]
+    let v = req_hdrs.get(k)
 
-    req = req ++ k ++ ": " ++ req_hdrs.get(k) ++ "\r\n"
+    if !header_value_safe(k) || !header_value_safe(v):
+      panic("http: header contains CR/LF/NUL")
+    req = req ++ k ++ ": " ++ v ++ "\r\n"
     j = j + 1
 
   req = req ++ "\r\n"
@@ -118,28 +148,47 @@ fn build_request(method string, host string, path string, client_hdrs collection
 
   return req
 
-// parse_hex parses a lowercase or uppercase hex string to i64.
-// Stops at the first non-hex character (handles chunk size extensions).
-fn parse_hex(s string) i64 =
+// parse_hex parses a lowercase or uppercase hex string to a non-negative
+// i64.  Stops at the first non-hex character (chunk size extensions).
+// Returns -1 if the parsed value would exceed i64::MAX (overflow) or if
+// the string contains no leading hex digit; callers must reject the
+// chunk in that case rather than treating it as size 0.
+fn parse_hex_checked(s string) i64 =
   let result i64 = 0
   let i i64 = 0
+  let saw = false
 
   for i < len(s):
     let c = s[i] as byte
+    let d i64 = -1
 
     if c >= @'0' && c <= @'9':
-      result = result * 16 + ((c - @'0') as i64)
+      d = (c - @'0') as i64
     else if c >= @'a' && c <= @'f':
-      result = result * 16 + (((c - @'a') as i64) + 10)
+      d = ((c - @'a') as i64) + 10
     else if c >= @'A' && c <= @'F':
-      result = result * 16 + (((c - @'A') as i64) + 10)
+      d = ((c - @'A') as i64) + 10
     else:
       break
+
+    saw = true
+
+    // i64::MAX / 16 = 576460752303423487
+    if result > 576460752303423487:
+      return -1
+    result = result * 16 + d
     i = i + 1
+
+  if !saw:
+    return -1
 
   return result
 
-// decode_chunked decodes a Transfer-Encoding: chunked body.
+// decode_chunked decodes a Transfer-Encoding: chunked body.  Returns
+// "" on any malformed chunk header so a hostile server can't either
+// (a) force an overflowed-then-truncated chunk size that drives an
+// out-of-bounds substr, or (b) silently terminate the response early
+// with garbage data.
 fn decode_chunked(data string) string =
   let result = ""
   let i i64 = 0
@@ -155,9 +204,15 @@ fn decode_chunked(data string) string =
 
     if j >= n - 1:
       break
-    let chunk_size = parse_hex(strings::substr(data, i, j))
+    let chunk_size = parse_hex_checked(strings::substr(data, i, j))
 
-    if chunk_size <= 0:
+    if chunk_size < 0:
+      // Malformed chunk header (overflow or no hex digits).  Drop the
+      // partial result rather than returning an attacker-controllable
+      // truncation.
+      return ""
+    if chunk_size == 0:
+      // RFC 7230 chunk-end marker.
       break
     i = j + 2
 

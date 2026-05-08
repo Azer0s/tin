@@ -6,10 +6,14 @@
 //   encode             - standard alphabet (+ /), with = padding
 //   encode_url         - URL-safe alphabet (- _), no padding
 //   encode_url_no_pad  - explicit alias of encode_url
-//   decode             - tolerant: any alphabet, padded or unpadded
+//   decode             - tolerant: any alphabet, padded or unpadded;
+//                        unknown bytes are skipped silently
+//   decode_strict      - rejects invalid bytes; returns (string, *Err)
 //   decode_url_no_pad  - explicit alias of decode for URL-safe / unpadded inputs
 //
 // Import: use encoding::base64
+
+use errors
 
 fn b64_rev(c byte) i64 =
   if c >= @'A' && c <= @'Z':
@@ -84,6 +88,12 @@ fn encode_url_no_pad(s string) string =
   return encode_url(s)
 
 // decode decodes a Base64 string. Handles standard, URL-safe, padded or unpadded.
+//
+// LENIENT: any byte not in the base64 alphabet (and not `=`) is silently
+// skipped.  This mirrors most legacy decoders but means malformed input
+// can produce output that looks plausible.  Use `decode_strict` when the
+// caller needs to reject invalid characters (auth tokens, signatures,
+// anything where a wrong byte must surface as an error).
 fn decode(s string) string =
   let n = len(s)
 
@@ -114,6 +124,47 @@ fn decode(s string) string =
 
   return result
 
+// decode_strict decodes a Base64 string, returning an error on any byte
+// outside the standard or URL-safe alphabet (and outside the trailing
+// `=` padding).  Required for auth-token / signature use cases where a
+// silent skip of a malformed byte produces a wrong but plausible
+// decoding.
+fn decode_strict(s string) (string, *errors::Err) =
+  let n = len(s)
+
+  if n == 0:
+    return ("", nil)
+  let result = ""
+  let i i64 = 0
+  let acc i64 = 0
+  let bits i64 = 0
+  let saw_pad = false
+
+  for i < n:
+    let c = s[i] as byte
+
+    if c == @'=':
+      saw_pad = true
+    else if saw_pad:
+      // Anything after a `=` must itself be `=` or end-of-string.
+      return ("", errors::new("base64::decode_strict: byte after padding"))
+    else if c == 0 as byte:
+      i = n
+    else:
+      let v = b64_rev(c)
+
+      if v < 0:
+        return ("", errors::new("base64::decode_strict: invalid character"))
+      acc = (acc << 6) | v
+      bits = bits + 6
+
+      if bits >= 8:
+        bits = bits - 8
+        result = result ++ ((acc >> bits) & 0xFF) as byte
+    i = i + 1
+
+  return (result, nil)
+
 // decode_url_no_pad is an explicit alias for decode that documents the
 // expected URL-safe, unpadded input shape.  decode itself already
 // accepts both alphabets and tolerates missing padding, so this is
@@ -121,4 +172,4 @@ fn decode(s string) string =
 fn decode_url_no_pad(s string) string =
   return decode(s)
 
-export { encode, encode_url, encode_url_no_pad, decode, decode_url_no_pad } as base64
+export { encode, encode_url, encode_url_no_pad, decode, decode_strict, decode_url_no_pad } as base64

@@ -17,7 +17,6 @@
 
 use str
 use errors
-use errors
 
 // pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
 // range overflow i64 and the function panics rather than silently
@@ -82,9 +81,16 @@ struct Value(
     return a.coeff == b.coeff
 
   // ord returns negative / zero / positive following strcmp convention.
+  // Uses branchy compare instead of subtraction so far-apart values
+  // (e.g. near i64::MIN and i64::MAX) don't overflow into the wrong
+  // sign.
   fn ::ord(this Value, other Value) i64 =
     let (a, b) = align(this, other)
-    return a.coeff - b.coeff
+
+    if a.coeff < b.coeff: return -1
+    if a.coeff > b.coeff: return 1
+
+    return 0
 
   // Implicit conversions: any numeric or string flowing into a Value lands
   // here. The static fns mirror the top-level decimal::from(...) overloads.
@@ -279,16 +285,17 @@ fn format_impl(v Value) string =
   return result
 
 fn repeat_char(c char, n i64) string =
-  let out [byte; 64]
+  // No 64-byte cap: scales beyond 64 produced silent truncation,
+  // which clipped leading zeros and corrupted the number.  Build
+  // via string ++ byte concatenation instead.
+  let out = ""
   let i i64 = 0
 
   for i < n:
-    if i >= 64:
-      break
-    out[i] = c as byte
+    out = out ++ (c as byte)
     i = i + 1
 
-  return out[0..i] as string
+  return out
 
 export {
   Value,

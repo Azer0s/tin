@@ -1898,13 +1898,31 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 					vtableKey := structName + "__" + traitInstKey
 					if vtableGlobal, has := cg.traitVtableGlobals[vtableKey]; has {
 						ifaceStructTy := srcPt.ElemType.(*irtypes.StructType)
-						vtableGep := block.NewGetElementPtr(ifaceStructTy, val,
+						// `is` is supposed to be safe on a nil trait pointer.
+						// A naive GEP+load would segfault; gate the load on
+						// non-nil and return false for nil pointers.
+						nilCheck := block.NewICmp(enum.IPredEQ, val,
+							constant.NewNull(srcPt))
+						loadBlk := cg.curFn.NewBlock("is_load")
+						mergeBlk := cg.curFn.NewBlock("is_merge")
+						block.NewCondBr(nilCheck, mergeBlk, loadBlk)
+
+						vtableGep := loadBlk.NewGetElementPtr(ifaceStructTy, val,
 							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 						vtablePtrType := ifaceStructTy.Fields[1]
-						actual := block.NewLoad(vtablePtrType, vtableGep)
-						expected := block.NewBitCast(vtableGlobal, vtablePtrType)
+						actual := loadBlk.NewLoad(vtablePtrType, vtableGep)
+						expected := loadBlk.NewBitCast(vtableGlobal, vtablePtrType)
+						eq := loadBlk.NewICmp(enum.IPredEQ, actual, expected)
 
-						return block.NewICmp(enum.IPredEQ, actual, expected), nil
+						loadBlk.NewBr(mergeBlk)
+						phi := mergeBlk.NewPhi(
+							ir.NewIncoming(constant.NewBool(false), block),
+							ir.NewIncoming(eq, loadBlk),
+						)
+
+						cg.curBlock = mergeBlk
+
+						return phi, nil
 					}
 					// The struct does not implement this trait (or the
 					// impl was misspelled).  A silent false would leave
@@ -2555,7 +2573,11 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 	// the legitimate value.
 	if tupLit, ok := argNode.(*ast.TupleLit); ok {
 		if st, isStruct := targetType.(*irtypes.StructType); isStruct {
-			if name := st.Name(); name != "" && strings.HasPrefix(name, "Tuple") {
+			// Tuple monomorphizations are mangled `Tuple__T1__T2__...`;
+			// matching just `Tuple` prefix would also catch user
+			// structs called `TupleHelper`, `Tuples`, etc.  Require the
+			// `Tuple__` separator suffix to disambiguate.
+			if name := st.Name(); name != "" && strings.HasPrefix(name, "Tuple__") {
 				return cg.genTupleLit(block, tupLit, targetType)
 			}
 		}

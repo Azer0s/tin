@@ -460,13 +460,22 @@ func widenStates(prev, cur *dfState) *dfState {
 
 // shiftIv returns iv shifted by a constant `delta`. Stride and width
 // are preserved. Used when an augmented assign or postfix op adds a
-// known constant to an induction variable.
+// known constant to an induction variable.  Bottoms out (returns the
+// empty interval) on i64 overflow rather than producing wrapped bounds
+// that downstream narrowing would treat as a real range.
 func shiftIv(iv interval, delta int64) interval {
 	if !iv.set {
 		return interval{}
 	}
 
-	return interval{set: true, lo: iv.lo + delta, hi: iv.hi + delta, stride: iv.stride}
+	lo, ok1 := addOverflow(iv.lo, delta)
+	hi, ok2 := addOverflow(iv.hi, delta)
+
+	if !ok1 || !ok2 {
+		return interval{}
+	}
+
+	return interval{set: true, lo: lo, hi: hi, stride: iv.stride}
 }
 
 // allMembersDivisibleBy returns true when every value the strided
@@ -667,6 +676,10 @@ func (cg *CodeGen) intervalOf(expr ast.Node, st *dfState) interval {
 // `-`, `*` when at least one side narrows to useful bounds; returns the
 // unset interval otherwise. Stride is preserved through shifts (single-
 // constant `+`/`-`) and scaled through multiplications by a constant.
+//
+// Overflow at i64 boundaries collapses the result to the empty/unset
+// interval rather than wrapping silently -- the wrapped bounds would
+// drive narrowIntervalCmp to false-positive "impossible range" warnings.
 func intervalArith(op string, a, b interval) interval {
 	if !a.set || !b.set {
 		return interval{}
@@ -685,13 +698,17 @@ func intervalArith(op string, a, b interval) interval {
 			return shiftIv(b, a.lo)
 		}
 
+		lo, ok1 := addOverflow(a.lo, b.lo)
+		hi, ok2 := addOverflow(a.hi, b.hi)
+
+		if !ok1 || !ok2 {
+			return interval{}
+		}
+
 		s := gcd64(a.effectiveStride(), b.effectiveStride())
 		if s == 0 {
 			s = 1
 		}
-
-		lo := a.lo + b.lo
-		hi := a.hi + b.hi
 
 		if (hi-lo)%s != 0 {
 			s = 1
@@ -700,16 +717,25 @@ func intervalArith(op string, a, b interval) interval {
 		return interval{set: true, lo: lo, hi: hi, stride: s}
 	case "-":
 		if bSingle {
-			return shiftIv(a, -b.lo)
+			neg, ok := subOverflow(0, b.lo)
+			if !ok {
+				return interval{}
+			}
+
+			return shiftIv(a, neg)
+		}
+
+		lo, ok1 := subOverflow(a.lo, b.hi)
+		hi, ok2 := subOverflow(a.hi, b.lo)
+
+		if !ok1 || !ok2 {
+			return interval{}
 		}
 
 		s := gcd64(a.effectiveStride(), b.effectiveStride())
 		if s == 0 {
 			s = 1
 		}
-
-		lo := a.lo - b.hi
-		hi := a.hi - b.lo
 
 		if (hi-lo)%s != 0 {
 			s = 1
@@ -727,6 +753,27 @@ func intervalArith(op string, a, b interval) interval {
 	}
 
 	return interval{}
+}
+
+// addOverflow returns a+b and a flag indicating whether the result fits
+// in int64.  Used by intervalArith to bottom-out wraparound.
+func addOverflow(a, b int64) (int64, bool) {
+	r := a + b
+	if (b > 0 && r < a) || (b < 0 && r > a) {
+		return 0, false
+	}
+
+	return r, true
+}
+
+// subOverflow returns a-b with a fits-in-int64 flag.
+func subOverflow(a, b int64) (int64, bool) {
+	r := a - b
+	if (b < 0 && r < a) || (b > 0 && r > a) {
+		return 0, false
+	}
+
+	return r, true
 }
 
 // scaleIv multiplies a strided interval by a constant. Stride scales
@@ -982,6 +1029,32 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 		return cg.dfWalkIf(v, st)
 
 	case *ast.ForStmt:
+		// For-in loops have nil Init/Cond/Post; piping them through
+		// dfWalkLoop walks the body once with the entry state and the
+		// induction variable is never registered, so any prior fact
+		// about a name shadowed by VarName leaks into the body.  Drop
+		// such facts before walking so the body sees a fresh slot for
+		// the loop variable.
+		if v.Kind == ast.ForIn {
+			loopSt := st
+			if v.VarName != "" {
+				loopSt = st.clone()
+				delete(loopSt.nil, v.VarName)
+				delete(loopSt.cnst, v.VarName)
+				delete(loopSt.intv, v.VarName)
+				delete(loopSt.floats, v.VarName)
+				delete(loopSt.uninit, v.VarName)
+				delete(loopSt.freed, v.VarName)
+			}
+			// Evaluate the iterable for side-effect facts (e.g. nil
+			// guard on the iter expression).
+			if v.Iter != nil {
+				cg.dfCheckExpr(v.Iter, loopSt)
+			}
+
+			return cg.dfWalkLoop(nil, nil, nil, v.Body, loopSt)
+		}
+
 		return cg.dfWalkLoop(v.Init, v.Cond, v.Post, v.Body, st)
 
 	case *ast.MatchStmt:
@@ -1109,6 +1182,12 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 		// everything the loop body might touch. Skip the emit pass --
 		// flow-sensitive warnings on a state that didn't stabilize are
 		// unreliable.
+		//
+		// `freed` and `uninit` are MAY-lattices: an entry means "the
+		// variable might be freed / uninitialised on some path through
+		// the loop."  Dropping them when the loop fails to converge
+		// silently masks use-after-deinit and use-of-uninit on the
+		// post-loop tail.  Carry them forward verbatim instead.
 		out := newDFState()
 		for k := range prev.nil {
 			out.nil[k] = nilBottom
@@ -1116,6 +1195,14 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 
 		for k := range prev.cnst {
 			out.cnst[k] = cBotFact()
+		}
+
+		for k, v := range prev.freed {
+			out.freed[k] = v
+		}
+
+		for k, v := range prev.uninit {
+			out.uninit[k] = v
 		}
 
 		return out
@@ -1745,19 +1832,34 @@ func narrowIntervalCmp(x interval, op string, c int64) (thenIv, elseIv interval)
 		return interval{}, interval{}
 	}
 
+	// c±1 underflow / overflow at i64::MIN / i64::MAX would feed bogus
+	// bounds into clipInterval and produce spurious "impossible range"
+	// warnings.  Clamp instead -- at the boundary the resulting clip is
+	// trivially the original interval (or empty), which is semantically
+	// the correct narrowing.
+	cMinus1, okM := subOverflow(c, 1)
+	if !okM {
+		cMinus1 = c
+	}
+
+	cPlus1, okP := addOverflow(c, 1)
+	if !okP {
+		cPlus1 = c
+	}
+
 	switch op {
 	case "<":
-		thenIv = clipInterval(x, x.lo, c-1)
+		thenIv = clipInterval(x, x.lo, cMinus1)
 		elseIv = clipInterval(x, c, x.hi)
 	case "<=":
 		thenIv = clipInterval(x, x.lo, c)
-		elseIv = clipInterval(x, c+1, x.hi)
+		elseIv = clipInterval(x, cPlus1, x.hi)
 	case ">":
-		thenIv = clipInterval(x, c+1, x.hi)
+		thenIv = clipInterval(x, cPlus1, x.hi)
 		elseIv = clipInterval(x, x.lo, c)
 	case ">=":
 		thenIv = clipInterval(x, c, x.hi)
-		elseIv = clipInterval(x, x.lo, c-1)
+		elseIv = clipInterval(x, x.lo, cMinus1)
 	case "==":
 		thenIv = clipInterval(x, c, c)
 		elseIv = x // can't refine the else side from a single point

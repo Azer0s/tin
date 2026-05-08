@@ -817,17 +817,24 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 // leading or trailing underscore is left for the next lexer pass to
 // reject (it is a malformed numeric literal -- the regex allowed shape
 // is /\d(_?\d)*/, mirroring Go and Rust).  isOK identifies digits in
-// the current radix.
+// the current radix.  The `_`-skip branch fires only after at least
+// one digit has already been consumed in this run; otherwise `0x_FF`,
+// `1._5`, `0b_10`, and `1.0e_5` would slip through silently as if the
+// underscore were a separator.
 func (l *Lexer) consumeDigits(sb *strings.Builder, isOK func(rune) bool) {
+	sawDigit := false
+
 	for l.pos < len(l.src) {
 		ch := l.peek()
 		if isOK(ch) {
 			sb.WriteRune(l.advance())
 
+			sawDigit = true
+
 			continue
 		}
 
-		if ch == '_' && l.pos+1 < len(l.src) && isOK(l.peekAt(1)) {
+		if sawDigit && ch == '_' && l.pos+1 < len(l.src) && isOK(l.peekAt(1)) {
 			l.advance() // skip the underscore separator
 
 			continue

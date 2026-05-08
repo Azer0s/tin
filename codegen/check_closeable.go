@@ -65,6 +65,17 @@ func (cg *CodeGen) checkAllUnclosedCloseables(prog *ast.Program) {
 func (cg *CodeGen) collectCloseableStructNames() map[string]bool {
 	out := map[string]bool{}
 
+	// Track which bare suffixes are claimed by which qualified name(s).
+	// If two packages contribute the same bare name (e.g. net::Conn and
+	// db::Conn) and only one is Closeable, the bare lookup must be
+	// disambiguated -- inserting it into `out` blindly would flip
+	// across builds because Go map iteration is randomized.  Resolve:
+	// only insert the bare suffix when it is unambiguous (claimed by
+	// at most one qualified Closeable, AND no other struct of the
+	// same bare name exists that does NOT implement Closeable).
+	bareCloseable := map[string]int{} // bare -> #closeable owners
+	bareTotal := map[string]int{}     // bare -> #total owners
+
 	for key, sd := range cg.structDeclsByName {
 		if sd == nil {
 			continue
@@ -73,6 +84,10 @@ func (cg *CodeGen) collectCloseableStructNames() map[string]bool {
 		hasCloseable := false
 
 		for _, impl := range sd.Implements {
+			if impl == nil {
+				continue
+			}
+
 			if traitBaseName(impl) == "Closeable" {
 				hasCloseable = true
 
@@ -80,14 +95,22 @@ func (cg *CodeGen) collectCloseableStructNames() map[string]bool {
 			}
 		}
 
-		if !hasCloseable {
-			continue
+		bare := key
+		if idx := strings.LastIndex(key, "__"); idx >= 0 {
+			bare = key[idx+2:]
 		}
 
-		out[key] = true
+		bareTotal[bare]++
 
-		if idx := strings.LastIndex(key, "__"); idx >= 0 {
-			out[key[idx+2:]] = true
+		if hasCloseable {
+			out[key] = true
+			bareCloseable[bare]++
+		}
+	}
+
+	for bare, n := range bareCloseable {
+		if n == 1 && bareTotal[bare] == 1 {
+			out[bare] = true
 		}
 	}
 
@@ -298,6 +321,17 @@ func (cg *CodeGen) bindingClosedOrTransferred(blk *ast.Block, name string) bool 
 			}
 		case *ast.AssignStmt:
 			if id, ok := v.Target.(*ast.Identifier); ok && id.Name == name {
+				found = true
+
+				return
+			}
+			// `self.handle = f` (field store) is also a transfer --
+			// the surrounding aggregate now holds the Closeable, so
+			// flagging the let binding would be a false positive.
+			// Match identifier on either side: target is a field
+			// access whose value-side mentions name, OR the value
+			// references name in any expression position.
+			if exprReferencesName(v.Value, name) {
 				found = true
 			}
 		}
