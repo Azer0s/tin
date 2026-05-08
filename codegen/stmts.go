@@ -1908,7 +1908,19 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				return cg.nodeErr(s, "function returns %s but the return statement has no value", fmtArgType(retType))
 			}
 
-			val = cg.coerce(block, val, retType)
+			// `return ident` skips the source's scope-exit release via
+			// retSkipName below; in that mode buildPtrToTraitBorrow
+			// must NOT retain (would leak +1 since the source never
+			// decrements).  Coerce while the flag is on, then clear.
+			if _, isIdent := s.Value.(*ast.Identifier); isIdent {
+				prevTransfer := cg.coerceTransfersSource
+				cg.coerceTransfersSource = true
+				val = cg.coerce(block, val, retType)
+				cg.coerceTransfersSource = prevTransfer
+			} else {
+				val = cg.coerce(block, val, retType)
+			}
+
 			if !val.Type().Equal(retType) {
 				// Render in user-facing source syntax (Foo[i64], not
 				// the LLVM-mangled %Foo__i64). fmtArgType handles every

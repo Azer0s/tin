@@ -466,5 +466,33 @@ test "false branch" =
   assert::equals(*p, 200)
 '
 
+# ── *Trait widening from an existing binding must NOT double-free.
+# `let de = &Lit; let widened *Trait = de` previously caused a UAF:
+# both bindings would end up calling the per-struct release_ptr at
+# scope exit (de directly, widened indirectly via the iface dtor's
+# vtable data-release thunk).  buildPtrToTraitBorrow now retains the
+# data so the two release paths balance.
+assert_zero_leaks "*Trait widening from binding does not double-free" '
+use assert
+use errors
+
+data dk =
+  Empty
+  Tag(value i64)
+
+struct dom(errors::Err) =
+  k dk
+  fn errors::Err::message(this dom) string = return "x"
+
+test "widen + downcast" =
+  let de = &dom{k: Tag(99)}
+  let widened *errors::Err = de
+  let back = widened as *dom
+
+  match (*back).k:
+    case Tag(v): assert::equals(v, 99)
+    case Empty:  assert::fails("expected Tag")
+'
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"

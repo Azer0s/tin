@@ -1909,6 +1909,36 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 	return nil
 }
 
+// sourceBindingIsEarlyHeap reports whether `allocaPtr` is the alloca
+// of a scope entry that's been early-heap-promoted (so its scope-exit
+// release is suppressed).  Used by buildPtrToTraitBorrow to decide
+// whether to emit a balancing retain on the iface's data field.
+func (cg *CodeGen) sourceBindingIsEarlyHeap(allocaPtr value.Value) bool {
+	if cg.curScope == nil {
+		return false
+	}
+
+	for s := cg.curScope; s != nil; s = s.parent {
+		var found bool
+
+		s.each(func(_ string, entry *scopeEntry) {
+			if entry == nil || !entry.isAlloc {
+				return
+			}
+
+			if entry.val == allocaPtr && entry.isEarlyHeap {
+				found = true
+			}
+		})
+
+		if found {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ensureTraitDataReleaseThunk returns (and caches) a tiny `void(i8*)`
 // thunk that bitcasts the data pointer to *<structKey> and invokes the
 // per-struct release_ptr.  Stored in each (struct, trait) vtable's
@@ -2277,6 +2307,24 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	dataI8 := block.NewBitCast(structPtr, irtypes.I8Ptr)
 	block.NewStore(dataI8, dataGEP)
+
+	// Retain the data when the source comes from a binding whose own
+	// scope-exit release will fire and decrement the data's RC.
+	// Without this retain, the iface's release_ptr (via the vtable's
+	// data-release thunk) and the source binding's release would both
+	// decrement -- a double-free.
+	//
+	// Skip the retain when:
+	//   - the source binding is early-heap-promoted (its scope-exit
+	//     release is SUPPRESSED -- only the iface would release, and
+	//     a retain here would strand a +1 reference)
+	//   - the caller set cg.coerceTransfersSource (e.g. genReturn
+	//     using retSkipName to transfer ownership; same suppression)
+	if loadInst, isLoad := structPtr.(*ir.InstLoad); isLoad {
+		if !cg.coerceTransfersSource && !cg.sourceBindingIsEarlyHeap(loadInst.Src) {
+			block.NewCall(cg.ensureRetain(), dataI8)
+		}
+	}
 
 	vtableGEP := block.NewGetElementPtr(fatPtrSt, temp,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))

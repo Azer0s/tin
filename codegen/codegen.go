@@ -132,6 +132,14 @@ type CodeGen struct {
 	// so the data ptr isn't released twice. Stack-discipline: callers must
 	// save the prior value, set true, call coerceToTrait, restore.
 	suppressIfaceScopeRelease bool
+
+	// coerceTransfersSource tells buildPtrToTraitBorrow that the
+	// source's scope-exit release will NOT fire (e.g. genReturn
+	// skipping the source via retSkipName).  In that case the iface
+	// inherits the source's single rc=1 and must not retain (which
+	// would leak).  Set/cleared by callers who know the transfer is
+	// happening; default false (borrow semantics, retain).
+	coerceTransfersSource bool
 	// stringPool memoizes content-hashed string globals per active
 	// module so the same literal in the same module reuses a single
 	// global. Cross-module dedup is handled by linkonce_odr at link

@@ -1,0 +1,30 @@
+FROM golang:1.25.0-bookworm AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libffi-dev \
+        libssl-dev \
+        libpcre2-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY . /app
+RUN go mod tidy
+ENV CGO_ENABLED=1
+RUN go build .
+
+FROM ubuntu:latest
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        lld \
+        llvm \
+        libffi-dev \
+        libssl-dev \
+        libpcre2-dev \
+        valgrind \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/runtime /app/runtime
+COPY --from=builder /app/tin /app/tin
+COPY --from=builder /app/examples /app/examples
+COPY --from=builder /app/stdlib /app/stdlib
+ENV PATH="/app:$PATH"
+WORKDIR /app
