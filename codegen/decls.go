@@ -1420,6 +1420,17 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 		cg.traitAsyncMethodNames[traitName] = asyncNames
 	}
 
+	// Append a per-vtable data-release fn pointer at the END of the
+	// vtable.  Layout: [method_0, ..., method_n, data_release_fn].
+	// Method indices are unchanged (they stay in [0, n)); existing
+	// method-dispatch GEPs work as-is.  ensureStructPtrReleaseFn for
+	// the iface fat-ptr loads index n (the last field) and calls it
+	// on the data pointer to run the concrete struct's release_ptr,
+	// so RC-tracked fields of the wrapped struct are released too --
+	// raw _tin_release alone would only free the outer block.
+	dataReleaseFnType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr))
+	fnPtrTypes = append(fnPtrTypes, dataReleaseFnType)
+
 	// Fill in the vtable struct fields now that method types are resolved.
 	vtableStub.Fields = fnPtrTypes
 	cg.mod.TypeDefs = append(cg.mod.TypeDefs, vtableStub)
@@ -1868,6 +1879,20 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			wrappers = append(wrappers, wrapFn)
 		}
 
+		// Append the concrete struct's release_ptr fn to the vtable
+		// (as the LAST slot -- method indices are unchanged).  Uses a
+		// data-release thunk that takes i8* (the iface's data field)
+		// and casts to the concrete struct pointer before invoking
+		// the standard struct release_ptr.  This lets the iface's
+		// own release_ptr in ensureStructPtrReleaseFn dispatch via
+		// the vtable to release RC-tracked fields of the wrapped
+		// struct (otherwise a raw _tin_release would only free the
+		// outer block, leaking string / fat-array fields).
+		dataReleaseThunk := cg.ensureTraitDataReleaseThunk(structKey, structSt)
+		dataReleaseFnType := vtableSt.Fields[len(vtableSt.Fields)-1].(*irtypes.PointerType)
+		thunkConst := constant.NewBitCast(dataReleaseThunk, dataReleaseFnType)
+		wrappers = append(wrappers, thunkConst)
+
 		// Build vtable global constant and update the pre-declared global's initializer.
 		vtableConst := constant.NewStruct(vtableSt, wrappers...)
 		if preVtable, preDeclared := cg.traitVtableGlobals[vtableKey]; preDeclared {
@@ -1882,6 +1907,29 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 	}
 
 	return nil
+}
+
+// ensureTraitDataReleaseThunk returns (and caches) a tiny `void(i8*)`
+// thunk that bitcasts the data pointer to *<structKey> and invokes the
+// per-struct release_ptr.  Stored in each (struct, trait) vtable's
+// last slot; consumed by the iface's release_ptr to teardown the
+// wrapped concrete struct's RC-tracked fields when the iface RC hits 0.
+func (cg *CodeGen) ensureTraitDataReleaseThunk(structKey string, structSt *irtypes.StructType) *ir.Func {
+	if fn, ok := cg.traitDataReleaseThunks[structKey]; ok {
+		return fn
+	}
+
+	fnName := structKey + "__trait_data_release"
+	fn := cg.activeModule().NewFunc(fnName, irtypes.Void, ir.NewParam("data", irtypes.I8Ptr))
+	cg.traitDataReleaseThunks[structKey] = fn
+
+	entry := fn.NewBlock("entry")
+	structPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(structSt))
+	relFn := cg.ensureStructPtrReleaseFn(structKey, structSt)
+	entry.NewCall(relFn, structPtr)
+	entry.NewRet(nil)
+
+	return fn
 }
 
 // isTraitFatPtr reports whether t is a trait fat-pointer {i8*, vtable_struct*}.

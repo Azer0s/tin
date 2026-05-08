@@ -1531,7 +1531,18 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// (rc=1) inside coerceToTrait; the let-binding owns it via
 		// ownsIfaceData. An emitRetain here would over-count and leak.
 		freshIface := ownsIfaceData
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface {
+		// Heap-promoted call return: the callee already returned rc=1
+		// (the heap promotion itself), so retaining here would push it
+		// to rc=2 while the scope exit only decrements once -- leaking
+		// rc=1. The chain-release on isHeapOwned is the matching dec.
+		freshHeapPromoted := isHeapOwned
+		// `let s = expr as string/Trait/...` lowers to a coerce[T] call
+		// returning rc=1; treating it as a borrow and retaining would
+		// over-count.  Same logic as freshHeapPromoted but generalized
+		// for any RC-tracked call result.
+		freshCallResult := isFreshCallResult(initVal)
+
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult {
 			cg.emitRetain(block, initVal)
 		}
 	} else if s.Value == nil {
@@ -1944,13 +1955,15 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	retSkipName := ""
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
-	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
+	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) && !isFreshCallResult(val) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.
 		// Retain first so the caller gets one owned reference, then scope cleanup
 		// decrements the RC back to a net-neutral result.
-		// Exception: [T;N] as string calls _tin_bytes_from_buf which already
-		// allocates with RC=1 - no extra retain needed.
+		// Exceptions:
+		//   - [T;N] as string calls _tin_bytes_from_buf (rc=1 already)
+		//   - `n as Trait` lowers to a coerce[T] call returning rc=1; the
+		//     call result is already owned, retaining would over-count.
 		cg.emitRetain(block, val)
 	}
 

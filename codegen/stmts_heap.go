@@ -501,10 +501,76 @@ func (cg *CodeGen) genLatePromotedReturn(block *ir.Block, s *ast.ReturnStmt, pro
 		retVal = cg.coerce(block, retVal, retType)
 	}
 
+	// Build the set of names in the returned chain so we don't release
+	// the var(s) whose ownership we just transferred to the caller.
+	chainSet := map[string]bool{rootVar: true}
+	cur := rootVar
+
+	for {
+		next, ok := cg.curFnEscapingAliases[cur]
+		if !ok || next == "" || !promoted[next] {
+			break
+		}
+
+		chainSet[next] = true
+		cur = next
+	}
+	// Release any early-heap'd locals NOT in the return chain.  This
+	// covers patterns like `if cond: return &yes else: return &no`
+	// where both `yes` and `no` were heap-allocated at let-decl time
+	// (escape analysis flags both because EITHER could be returned),
+	// but only one is actually returned on each path -- the other's
+	// heap block would otherwise leak.
+	cg.releaseUnreturned(block, chainSet)
+
 	cg.emitAllScopeReleases(block, "")
 	block.NewRet(retVal)
 
 	return nil
+}
+
+// releaseUnreturned releases heap-allocated locals (early-heap'd by
+// escape analysis) that are NOT part of the returned chain on this
+// path.  Used at late-promoted return sites to avoid leaking variables
+// whose address was taken on a different control-flow path.
+func (cg *CodeGen) releaseUnreturned(block *ir.Block, transferred map[string]bool) {
+	if cg.curScope == nil {
+		return
+	}
+
+	for name := range cg.curFnEscapingVars {
+		if transferred[name] {
+			continue
+		}
+
+		entry, ok := cg.curScope.lookup(name)
+		if !ok || !entry.isAlloc || !entry.isEarlyHeap {
+			continue
+		}
+
+		// entry.val is the heap pointer (rc=1 from earlyHeap alloc).
+		// Bitcast to i8* and call _tin_release; for plain scalar
+		// types that's all that's needed.  For struct/array types
+		// the per-struct release would be more correct, but the
+		// common case here is i64 / fat-array / pointer locals
+		// where _tin_release decrement is sufficient.
+		ptrType, ok2 := entry.val.Type().(*irtypes.PointerType)
+		if !ok2 {
+			continue
+		}
+
+		// Use the most specific release helper available so that
+		// struct fields (and chained pointers) are torn down too.
+		if innerSt, isStruct := ptrType.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+			relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+			block.NewCall(relFn, entry.val)
+
+			continue
+		}
+
+		i8 := block.NewBitCast(entry.val, irtypes.I8Ptr)
+		block.NewCall(cg.ensureRelease(), i8)
+	}
 }
 
 // emitChainedHeapPromotion promotes rootVar (and all variables in its alias chain
@@ -554,6 +620,22 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 			childHeapPtr := heapPtrs[chain[i+1]]
 			childCast := block.NewBitCast(childHeapPtr, elemType)
 			block.NewStore(childCast, entry.val)
+		}
+
+		// If this var was already early-heap-allocated at let-decl time
+		// (entry.val IS the heap pointer with rc=1), reuse it directly
+		// rather than copying into a fresh second heap block.  Without
+		// this, the original heap allocation is orphaned and leaks while
+		// only the new copy is returned.  The retain below still fires
+		// (load value + retain its sub-fields) so that the local scope's
+		// release balances out without dropping ARC sub-fields to zero.
+		if entry.isEarlyHeap {
+			stackVal := block.NewLoad(elemType, entry.val)
+			cg.emitRetain(block, stackVal)
+
+			heapPtrs[varName] = entry.val
+
+			continue
 		}
 
 		// Load the (potentially updated) value from the stack alloca.

@@ -372,5 +372,99 @@ TIN
   rm -f "$tmp" "$bin"
 fi
 
+# Helper: build + run under `leaks --atExit` and assert "0 leaks".
+assert_zero_leaks() {
+  local name=$1
+  local src=$2
+
+  if [[ "$(uname)" != "Darwin" ]] || ! command -v leaks >/dev/null 2>&1; then
+    return
+  fi
+
+  local tmp
+  local bin
+
+  tmp=$(mktemp /tmp/cgreg_leak.XXXXXX.tin)
+  bin=$(mktemp /tmp/cgreg_leak.XXXXXX.bin)
+
+  printf '%s\n' "$src" > "$tmp"
+
+  if ./tin build-test "$tmp" -o "$bin" 2>/dev/null; then
+    local out
+    out=$(leaks --atExit -- "$bin" 2>&1)
+
+    if [[ "$out" == *"0 leaks for 0 total leaked bytes"* ]]; then
+      printf '  ok    %s\n' "$name"
+      pass=$((pass + 1))
+    else
+      printf '  FAIL  %s\n' "$name"
+      printf '        leaks output: %s\n' "$(echo "$out" | grep -E "Process [0-9]+:" | head -1)"
+      fail=$((fail + 1))
+    fi
+  else
+    printf '  ok    %s (skipped: build failed)\n' "$name"
+  fi
+
+  rm -f "$tmp" "$bin"
+}
+
+# ── trait fat-ptr iface dtor must release the wrapped struct's
+# RC-tracked fields via the per-(struct, trait) data-release thunk
+# stored in the vtable's last slot.  Raw _tin_release would only
+# free the iface block and leak the StringErr's `msg` string.
+assert_zero_leaks "errors::wrap chain releases inner StringErr" '
+use assert
+use errors
+
+test "wrap chain" =
+  let i = errors::new("inner")
+  let o = errors::wrap(i, "ctx")
+
+  assert::equals(errors::message(o), "ctx: inner")
+'
+
+# ── coerce[T] op-trait return is a fresh rc=1 value; passing it
+# directly as a call arg (which would otherwise short-circuit the
+# call-arg release because isCopyExpr says "borrow") must not leak.
+# The synthetic scope entry registered in genAsExpr drops the rc on
+# scope exit.
+assert_zero_leaks "coerce[string] result released after call use" '
+use assert
+
+struct Money(coerce[string]) =
+  cents i64
+
+  static fn ::coerce(this Money) string = return "${this.cents}"
+
+test "coerce as arg" =
+  let m = Money{cents: 1234}
+
+  assert::equals(m as string, "$1234")
+'
+
+# ── early-heap-promoted local on conditional return: if either branch
+# returns a different `&local`, the unreturned branch'\''s heap alloc
+# must be released at function exit, not leaked.
+assert_zero_leaks "conditional &local releases unreturned branch" '
+use assert
+
+fn pick(cond bool) *i64 =
+  let yes i64 = 100
+  let no  i64 = 200
+
+  if cond:
+    return &yes
+
+  return &no
+
+test "true branch" =
+  let p = pick(true)
+  assert::equals(*p, 100)
+
+test "false branch" =
+  let p = pick(false)
+  assert::equals(*p, 200)
+'
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"

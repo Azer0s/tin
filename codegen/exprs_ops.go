@@ -1596,7 +1596,32 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	if structName := cg.typeNameOf(val.Type()); structName != "" {
 		for _, entry := range cg.coerceConvFns[structName] {
 			if entry.tgtLLVM.Equal(targetType) {
-				return block.NewCall(entry.fn, val), nil
+				result := block.NewCall(entry.fn, val)
+				// The coerce call returns an rc=1 value (string / fat
+				// array / iface).  When this AsExpr appears as an
+				// argument to another call (e.g. `assert::equals(m as
+				// string, ...)`), the parent's emitCallArgRelease
+				// short-circuits because isCopyExpr(AsExpr) walks
+				// through to the inner identifier and returns true --
+				// treating the cast result as a borrow.  Register a
+				// synthetic scope entry so emitAllScopeReleases drops
+				// the rc=1 reference at scope exit; otherwise it leaks.
+				if cg.curScope != nil && isRCTrackedType(result.Type()) {
+					alloca := block.NewAlloca(result.Type())
+					block.NewStore(result, alloca)
+
+					name := fmt.Sprintf(".coerce_tmp_%d", cg.strCount)
+					cg.strCount++
+					cg.curScope.set(name, &scopeEntry{
+						val:     alloca,
+						isAlloc: true,
+						isRC:    true,
+					})
+
+					return block.NewLoad(result.Type(), alloca), nil
+				}
+
+				return result, nil
 			}
 		}
 	}

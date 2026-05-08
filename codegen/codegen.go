@@ -65,6 +65,12 @@ type CodeGen struct {
 	traitMethodOrder map[string][]string
 	// vtable globals: "structName__instKey" -> ir.Global
 	traitVtableGlobals map[string]*ir.Global
+	// traitDataReleaseThunks: per-struct `void(i8*)` thunk that
+	// bitcasts data ptr to the struct type and calls struct.release_ptr.
+	// Stored in the LAST slot of every vtable for that struct so the
+	// iface's own release_ptr can dispatch via the vtable to release
+	// RC-tracked fields of the wrapped struct.
+	traitDataReleaseThunks map[string]*ir.Func
 	// instKey -> base trait name (for generic traits)
 	traitInstKeys map[string]string
 	// traitAsyncMethodNames: base trait name -> names of its {#async} virtual methods (in order)
@@ -1321,6 +1327,7 @@ func New(filename string) *CodeGen {
 		traitFatPtrTypes:       make(map[string]*irtypes.StructType),
 		traitMethodOrder:       make(map[string][]string),
 		traitVtableGlobals:     make(map[string]*ir.Global),
+		traitDataReleaseThunks: make(map[string]*ir.Func),
 		traitInstKeys:          make(map[string]string),
 		traitAsyncMethodNames:  make(map[string][]string),
 		traitBareToQualInstKey: make(map[string]string),

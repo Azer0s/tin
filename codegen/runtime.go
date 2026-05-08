@@ -856,6 +856,17 @@ func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, pos
 		return
 	}
 
+	// `expr as Trait/string/...` lowers to a coerce[T] call returning
+	// rc=1; isCopyExpr returns true for the AsExpr (it walks through
+	// to the inner identifier), but the cast result is a fresh
+	// allocation, not a borrow.  Without this exemption the call-arg
+	// release is skipped, leaking the cast result on every call site.
+	if isFreshCallResult(pre) {
+		cg.emitRelease(block, pre)
+
+		return
+	}
+
 	if isCopyExpr(astArg) {
 		return
 	}
@@ -990,6 +1001,24 @@ func isFreshBytesAlloc(v value.Value) bool {
 	}
 
 	return fn.Name() == "_tin_bytes_from_buf"
+}
+
+// isFreshCallResult returns true when v is the direct result of a
+// function call whose return value is a freshly RC-allocated value.
+// Used at return-site retain decisions: a `return expr` where expr
+// resolved to a call (e.g. `n as string` lowering to coerce[string])
+// already gives the caller rc=1 ownership; an extra retain would
+// raise rc to 2 and leak.  Conservatively true for any call returning
+// an RC-tracked type (string/fat-array/iface/any/struct ptr).
+func isFreshCallResult(v value.Value) bool {
+	call, ok := v.(*ir.InstCall)
+	if !ok {
+		return false
+	}
+
+	rt := call.Type()
+
+	return isRCTrackedType(rt)
 }
 
 // elemNeedsRelease reports whether a scope variable with element type elemType
@@ -1463,15 +1492,39 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	// from the loaded struct value (which is on the stack, still valid).
 	cg.emitRelease(releaseChildren, structVal)
 
-	// Trait-iface fat ptr: the `data` field (i8*) carries an
-	// RC-allocated pointer to the concrete struct; emitRelease can't
-	// see through i8*, so release it here when the iface RC hits 0.
-	// Matches the "iface owns its data" semantic established by
-	// buildPtrToTraitBorrow (which heap-allocs both the iface and the
-	// underlying struct).  Skipping this leaks the wrapped struct on
-	// every iface drop -- the entire `errors::new(...)` family.
+	// Trait-iface fat ptr: dispatch via the vtable's data-release
+	// thunk (last slot) to call the wrapped concrete struct's
+	// release_ptr.  Raw _tin_release would only free the outer block
+	// and leak any RC-tracked fields (string / fat-array / nested
+	// structs).  Falls back to raw release when the vtable shape
+	// doesn't match (defensive: shouldn't happen for well-formed
+	// trait fat-ptrs).
 	if isTraitFatPtrShape(st) {
 		dataField := releaseChildren.NewExtractValue(structVal, 0)
+		vtableField := releaseChildren.NewExtractValue(structVal, 1)
+
+		if vtablePtrType, ok := st.Fields[1].(*irtypes.PointerType); ok {
+			if vtableSt, ok2 := vtablePtrType.ElemType.(*irtypes.StructType); ok2 && len(vtableSt.Fields) > 0 {
+				lastIdx := len(vtableSt.Fields) - 1
+				lastFieldType := vtableSt.Fields[lastIdx]
+
+				if lastPt, ok3 := lastFieldType.(*irtypes.PointerType); ok3 {
+					if lastFnType, ok4 := lastPt.ElemType.(*irtypes.FuncType); ok4 && len(lastFnType.Params) == 1 && lastFnType.Params[0].Equal(irtypes.I8Ptr) && irtypes.IsVoid(lastFnType.RetType) {
+						releaseFnSlot := releaseChildren.NewGetElementPtr(vtableSt, vtableField,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(lastIdx)))
+						releaseFn := releaseChildren.NewLoad(lastFieldType, releaseFnSlot)
+
+						releaseChildren.NewCall(releaseFn, dataField)
+						releaseChildren.NewBr(exit)
+
+						exit.NewRet(nil)
+
+						return fn
+					}
+				}
+			}
+		}
+		// Fallback: raw release if vtable shape doesn't match expectation.
 		releaseChildren.NewCall(cg.ensureRelease(), dataField)
 	}
 
