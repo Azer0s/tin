@@ -952,8 +952,8 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 				switch {
 				case cg.calleeReturnsMustUse(callExpr):
 					cg.warn(DiagUnusedMustUse, callExpr.Pos(),
-						"discarded Result from %s; handle the error or bind with `let _ = ...` to silence",
-						callDisplayName(callExpr))
+						"%s",
+						cg.mustUseMessage(callExpr))
 				case cg.isCalleePure(callExpr):
 					cg.warn(DiagDiscardedPureCall, callExpr.Pos(),
 						"discarded result of pure call to %s has no effect",

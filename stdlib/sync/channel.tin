@@ -67,7 +67,11 @@ struct Channel[T] =
   // send parks the calling fiber directly when the channel is full.
   // Use `await ch.send(v)` to send inline; `spawn ch.send(v)` to fire-and-forget.
   // #no_autoyield: the loop already yields explicitly for the blocked case.
-  fn{#async #no_autoyield} send(this *Channel[T], val T) =
+  // #allow_drop: discarding the implicit Future[Unit] is the canonical
+  // fire-and-forget post-to-channel pattern; suppressing the
+  // unused-must-use warning at every call site keeps the diagnostic
+  // useful for futures where forgetting `await` is a bug.
+  fn{#async #no_autoyield #allow_drop} send(this *Channel[T], val T) =
     let pid = tin_current_pid_c()
 
     for true:

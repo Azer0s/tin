@@ -106,7 +106,7 @@ func (cg *CodeGen) validateScopedTag(d *ast.StructDecl, st ast.ScopedTag) error 
 	}
 	// @fn / @method / @static_fn: method-level tags only.
 	switch st.Name {
-	case "pure", "sideffect", "no_recurse", "no_thread", "no_autoyield":
+	case "pure", "sideffect", "no_recurse", "no_thread", "no_autoyield", "allow_drop":
 		// fine for any method scope
 		return nil
 	case "heavy", "async":

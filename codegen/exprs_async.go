@@ -381,9 +381,19 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 			escaped := strings.ReplaceAll(part.Str, "%", "%%")
 			fmtParts = append(fmtParts, escaped)
 		} else {
+			cg.curBlock = block
+
 			val, err := cg.genExpr(block, part.Expr)
 			if err != nil {
 				return nil, err
+			}
+			// Embedded `await` / async expressions advance cg.curBlock to
+			// a fresh continuation block.  Pull that forward so the
+			// subsequent format-arg emissions land in the live block;
+			// without this the original `block` ends up unterminated and
+			// llir's verifier panics with "missing terminator".
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
 			}
 
 			if val == nil {

@@ -413,6 +413,8 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		}
 
 		return nil
+	case *ast.StructLit:
+		return cg.tryConstantFoldStructLit(v, targetType)
 	}
 
 	// Fallback: route through the AST evaluator. This picks up BinExpr,
@@ -435,6 +437,94 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 	}
 
 	return nil
+}
+
+// tryConstantFoldStructLit folds a struct literal whose fields are
+// themselves CTFE-evaluable into a `*constant.Struct`.  Lets top-level
+// `const C = Color{r: 1, g: 2, b: 3}` work without requiring a
+// runtime init step.  The literal's TypeName must resolve to a known
+// struct (templated structs are monomorphized first), every user
+// field must be supplied either positionally or by name, and every
+// field value must itself fold to a constant of the right LLVM type.
+// Returns nil on any unmet condition; the caller surfaces a
+// "non-compile-time initializer" error for the wrapping const.
+func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes.Type) constant.Constant {
+	st, ok := targetType.(*irtypes.StructType)
+	if !ok {
+		return nil
+	}
+
+	if v.TypeName == "" {
+		return nil
+	}
+
+	concreteName := v.TypeName
+	if knownSt, has := cg.structTypes[concreteName]; has {
+		_ = knownSt
+	} else {
+		return nil
+	}
+
+	fieldNames := cg.structFields[concreteName]
+	userOff := cg.userFieldOffset(concreteName)
+
+	values := make([]constant.Constant, len(st.Fields))
+	// Initialize every field to its zero value -- vtable / type_id
+	// slots stay zero, user fields get overwritten below.
+	for i, ft := range st.Fields {
+		values[i] = cg.zeroConstant(ft)
+	}
+
+	// type_id field at index 0.
+	if typeID, has := cg.structTypeIDs[concreteName]; has {
+		values[0] = constant.NewInt(irtypes.I32, int64(typeID))
+	}
+
+	if len(v.Positional) > 0 {
+		for i, elem := range v.Positional {
+			idx := userOff + i
+			if idx >= len(st.Fields) {
+				break
+			}
+
+			c := cg.tryConstantFold(elem, st.Fields[idx])
+			if c == nil {
+				return nil
+			}
+
+			values[idx] = c
+		}
+	} else {
+		for _, f := range v.Fields {
+			rawIdx := -1
+
+			for i, fn := range fieldNames {
+				if fn == f.Name {
+					rawIdx = i
+
+					break
+				}
+			}
+
+			if rawIdx < 0 {
+				continue
+			}
+
+			idx := userOff + rawIdx
+			if idx >= len(st.Fields) {
+				continue
+			}
+
+			c := cg.tryConstantFold(f.Value, st.Fields[idx])
+			if c == nil {
+				return nil
+			}
+
+			values[idx] = c
+		}
+	}
+
+	return constant.NewStruct(st, values...)
 }
 
 // llvmTypeToTinTypeExpr maps the integer / float widths we care about
@@ -668,6 +758,16 @@ func (cg *CodeGen) inferTopLevelVarType(n ast.Node) ast.TypeExpr {
 			if fd, ok2 := cg.funcDecls[id.Name]; ok2 && fd.RetType != nil {
 				return fd.RetType
 			}
+		}
+	case *ast.StructLit:
+		// `const C = Foo{...}` -- the literal names its own type, so
+		// the user shouldn't have to repeat it in an annotation.
+		if v.TypeName != "" {
+			if len(v.TypeArgs) > 0 {
+				return &ast.GenericType{Name: v.TypeName, TypeParams: v.TypeArgs}
+			}
+
+			return &ast.SimpleType{Name: v.TypeName}
 		}
 	}
 

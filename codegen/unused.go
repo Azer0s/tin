@@ -89,12 +89,160 @@ func (cg *CodeGen) calleeReturnsMustUse(c *ast.CallExpr) bool {
 		return false
 	}
 
-	return isResultType(fd.RetType)
+	// Functions that opt out of the "must await / must use" rule via
+	// the `#allow_drop` tag are exempt regardless of return type.
+	// Channel send is the motivating case: posting a value to a
+	// channel is the canonical fire-and-forget pattern, and warning
+	// on every call site would force `let _ = ...` boilerplate that
+	// drowns out the useful "you forgot await" cases on functions
+	// like time::sleep.
+	if hasTag(fd.Tags, "allow_drop") {
+		return false
+	}
+
+	return isResultType(fd.RetType) || isFutureType(fd.RetType) || cg.isAwaitableType(fd.RetType)
+}
+
+// mustUseMessage formats the discarded-result warning so the message
+// names both the call site and the kind of value being thrown away,
+// and points the user at the right fix.  Result -> "handle the
+// error", Future / Awaitable -> "did you forget `await`?".
+func (cg *CodeGen) mustUseMessage(c *ast.CallExpr) string {
+	name := callDisplayName(c)
+
+	var fd *ast.FuncDecl
+
+	switch fn := c.Func.(type) {
+	case *ast.Identifier:
+		for _, d := range cg.funcDecls {
+			if d != nil && d.Name == fn.Name {
+				fd = d
+
+				break
+			}
+		}
+	case *ast.ScopeAccess:
+		if len(fn.Path) > 0 {
+			bare := fn.Path[len(fn.Path)-1]
+			for _, d := range cg.funcDecls {
+				if d != nil && d.Name == bare {
+					fd = d
+
+					break
+				}
+			}
+		}
+	}
+
+	if fd != nil && fd.RetType != nil {
+		switch {
+		case isFutureType(fd.RetType) || cg.isAwaitableType(fd.RetType):
+			return "the future returned by `" + name +
+				"` is dropped without `await`; the work runs in the " +
+				"background but the caller does not wait for it. " +
+				"Write `await " + name + "(...)` to wait, or " +
+				"`let _ = " + name + "(...)` to silence."
+		case isResultType(fd.RetType):
+			return "the Result returned by `" + name +
+				"` is dropped without inspection; handle the error " +
+				"with a match / unwrap / try, or `let _ = " + name +
+				"(...)` to silence."
+		}
+	}
+
+	return "the result of `" + name + "` is discarded; bind with " +
+		"`let _ = ...` to silence."
 }
 
 // isResultType reports whether te names the Result ADT (with or without a
 // package qualifier). Generic args don't matter: any Result[t, e] qualifies.
 func isResultType(te ast.TypeExpr) bool {
+	return typeNameMatches(te, "Result")
+}
+
+// isFutureType reports whether te names a Future (sync::Future[t] or any
+// other module's Future).  Dropping a Future without awaiting spawns a
+// background fiber whose work happens but whose result is lost; the
+// caller almost always wants `await fn(...)` instead.
+func isFutureType(te ast.TypeExpr) bool {
+	return typeNameMatches(te, "Future")
+}
+
+// isAwaitableType reports whether te names a struct that implements
+// the Awaitable[T] trait.  Lazy futures (e.g. time::SleepFuture) sit
+// outside the canonical `Future` shape but still represent deferred
+// work that needs `await` to actually run; flag a dropped result so
+// the user gets the same diagnostic as for plain Futures.
+func (cg *CodeGen) isAwaitableType(te ast.TypeExpr) bool {
+	name := simpleTypeName(te)
+	if name == "" {
+		if gt, ok := te.(*ast.GenericType); ok {
+			name = gt.Name
+		}
+	}
+
+	if name == "" {
+		return false
+	}
+	// structDeclsByName is keyed by the canonical (module-prefixed)
+	// struct name -- e.g. `time__SleepFuture`.  Try the user-written
+	// form first, then map `pkg::Name` -> `pkg__Name`, then sweep
+	// every key whose suffix matches the bare name (covers the
+	// common "user wrote `SleepFuture` but the decl lives in
+	// `time__SleepFuture`" case without doing a full import-trail
+	// resolution).
+	bare := name
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		bare = name[idx+2:]
+	}
+
+	mangled := strings.ReplaceAll(name, "::", "__")
+
+	var decl *ast.StructDecl
+
+	if d, ok := cg.structDeclsByName[name]; ok && d != nil {
+		decl = d
+	} else if d, ok := cg.structDeclsByName[mangled]; ok && d != nil {
+		decl = d
+	} else if d, ok := cg.structDeclsByName[bare]; ok && d != nil {
+		decl = d
+	} else {
+		// Last resort: scan for a key that ends in `__<bare>` or
+		// equals `<bare>`.  Linear in the number of declared
+		// structs, but the per-call cost of unused-must-use only
+		// runs on statement-level call expressions so the absolute
+		// numbers stay small.
+		suffix := "__" + bare
+		for k, d := range cg.structDeclsByName {
+			if strings.HasSuffix(k, suffix) {
+				decl = d
+
+				break
+			}
+		}
+	}
+
+	if decl == nil {
+		return false
+	}
+
+	for _, impl := range decl.Implements {
+		traitName := traitBaseName(impl)
+		if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
+			traitName = traitName[idx+2:]
+		}
+
+		if traitName == "Awaitable" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// typeNameMatches checks whether the bare (module-stripped) name of te
+// equals want.  Used by both the Result and Future #must_use checks.
+func typeNameMatches(te ast.TypeExpr, want string) bool {
 	switch t := te.(type) {
 	case *ast.GenericType:
 		name := t.Name
@@ -102,14 +250,14 @@ func isResultType(te ast.TypeExpr) bool {
 			name = name[idx+2:]
 		}
 
-		return name == "Result"
+		return name == want
 	case *ast.SimpleType:
 		name := t.Name
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
 			name = name[idx+2:]
 		}
 
-		return name == "Result"
+		return name == want
 	}
 
 	return false
@@ -123,6 +271,11 @@ func callDisplayName(c *ast.CallExpr) string {
 		return fn.Name
 	case *ast.FieldAccess:
 		return fn.Field
+	case *ast.ScopeAccess:
+		// Module / type-qualified call like `time::sleep`: rejoin the
+		// path so the warning shows the user-written form instead of
+		// the opaque `<call>` placeholder.
+		return strings.Join(fn.Path, "::")
 	}
 
 	return "<call>"
