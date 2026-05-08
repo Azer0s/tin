@@ -1462,6 +1462,19 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	// Block was freed (last reference). Release RC-tracked child fields
 	// from the loaded struct value (which is on the stack, still valid).
 	cg.emitRelease(releaseChildren, structVal)
+
+	// Trait-iface fat ptr: the `data` field (i8*) carries an
+	// RC-allocated pointer to the concrete struct; emitRelease can't
+	// see through i8*, so release it here when the iface RC hits 0.
+	// Matches the "iface owns its data" semantic established by
+	// buildPtrToTraitBorrow (which heap-allocs both the iface and the
+	// underlying struct).  Skipping this leaks the wrapped struct on
+	// every iface drop -- the entire `errors::new(...)` family.
+	if isTraitFatPtrShape(st) {
+		dataField := releaseChildren.NewExtractValue(structVal, 0)
+		releaseChildren.NewCall(cg.ensureRelease(), dataField)
+	}
+
 	releaseChildren.NewBr(exit)
 
 	exit.NewRet(nil)
@@ -1666,23 +1679,12 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
-		// Owning *Trait whose iface heap block carries escape-promoted
-		// data: release the data field first, then fall through to the
-		// standard isHeapOwned cleanup that frees the iface block.
-		// Without this the iface is freed but its data ptr leaks -- the
-		// source local was heap-promoted by escape analysis and its
-		// scope-exit release was skipped (it's now owned by this iface).
-		// entry.val is `**iface` (alloca holding the iface ptr); two
-		// loads to reach the iface struct, then extract data field.
-		if entry.ownsHeapIfaceData {
-			ifacePtrType := ptrType.ElemType
-			if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
-				ifacePtr := block.NewLoad(ifacePtrType, entry.val)
-				ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
-				dataField := block.NewExtractValue(ifaceVal, 0)
-				block.NewCall(cg.ensureRelease(), dataField)
-			}
-		}
+		// (ownsHeapIfaceData previously emitted an explicit data-field
+		// release here.  Now that ensureStructPtrReleaseFn releases the
+		// data field automatically when the iface RC hits 0, that
+		// explicit release would double-free.  Left as a no-op flag --
+		// the chain-release below frees both iface and data.)
+		_ = entry.ownsHeapIfaceData
 
 		// isHeapOwned: variable holds a _tin_rc_alloc'd pointer returned by a
 		// heap-promoting callee.  Use chain release to free all RC blocks.
@@ -1727,6 +1729,25 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
+		// *Trait pointer binding without isHeapOwned: elemNeedsRelease
+		// returns false for raw pointer types, so a binding like
+		// `let g *Trait = &x as *Trait` would otherwise leak the iface
+		// block.  Call its release_ptr explicitly; ensureStructPtr
+		// ReleaseFn's iface arm handles the wrapped data on RC=0.
+		// Restricted to let/const bindings: function parameters of
+		// *Trait are borrows from the caller and must not be released.
+		if (entry.declaredLet || entry.declaredConst) && !entry.noDeinit {
+			if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
+				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && isTraitFatPtrShape(innerSt) && innerSt.Name() != "" {
+					loaded := block.NewLoad(elemType, entry.val)
+					relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+					block.NewCall(relFn, loaded)
+
+					return
+				}
+			}
+		}
+
 		if !cg.elemNeedsRelease(elemType) {
 			return
 		}
@@ -1767,18 +1788,10 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 
 				return
 			}
-			// Owning *Trait whose iface block carries escape-promoted data:
-			// release the data field before falling through to the iface
-			// block release. Mirrors the emitScopeRelease branch.
-			if entry.ownsHeapIfaceData {
-				ifacePtrType := ptrType.ElemType
-				if pt, ok2 := ifacePtrType.(*irtypes.PointerType); ok2 && isTraitFatPtrShape(pt.ElemType) {
-					ifacePtr := block.NewLoad(ifacePtrType, entry.val)
-					ifaceVal := block.NewLoad(pt.ElemType, ifacePtr)
-					dataField := block.NewExtractValue(ifaceVal, 0)
-					block.NewCall(cg.ensureRelease(), dataField)
-				}
-			}
+			// (ownsHeapIfaceData no-op: the iface dtor in
+			// ensureStructPtrReleaseFn handles data release now.  See
+			// twin comment in emitScopeRelease.)
+			_ = entry.ownsHeapIfaceData
 			// isHeapOwned: chain release.
 			if entry.isHeapOwned {
 				heapPtr := block.NewLoad(ptrType.ElemType, entry.val)
@@ -1814,6 +1827,19 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				block.NewCall(cg.ensureRelease(), dataField)
 
 				return
+			}
+
+			// *Trait pointer binding fallback; see twin in emitScopeRelease.
+			if (entry.declaredLet || entry.declaredConst) && !entry.noDeinit {
+				if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
+					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && isTraitFatPtrShape(innerSt) && innerSt.Name() != "" {
+						loaded := block.NewLoad(elemType, entry.val)
+						relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+						block.NewCall(relFn, loaded)
+
+						return
+					}
+				}
 			}
 
 			if !cg.elemNeedsRelease(elemType) {

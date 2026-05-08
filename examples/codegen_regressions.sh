@@ -336,5 +336,41 @@ fn main() =
   let _ = await http::send(c, req)
 '
 
+# ── leak: errors::new(...) iface + StringErr must release on scope exit.
+# The iface dtor (ensureStructPtrReleaseFn's fat-ptr arm) releases the
+# data field when the iface RC hits 0; *Trait pointer let-bindings call
+# that dtor at scope exit.  Skip on non-darwin where `leaks` is absent.
+if [[ "$(uname)" == "Darwin" ]] && command -v leaks >/dev/null 2>&1; then
+  tmp=$(mktemp /tmp/cgreg_leak.XXXXXX.tin)
+  bin=$(mktemp /tmp/cgreg_leak.XXXXXX.bin)
+
+  cat > "$tmp" <<'TIN'
+use assert
+use errors
+
+test "errors::new releases on scope exit" =
+  let e = errors::new("boom")
+
+  assert::ok(errors::is_err(e))
+TIN
+
+  if ./tin build-test "$tmp" -o "$bin" 2>/dev/null; then
+    out=$(leaks --atExit -- "$bin" 2>&1)
+
+    if [[ "$out" == *"0 leaks for 0 total leaked bytes"* ]]; then
+      printf '  ok    errors::new no longer leaks\n'
+      pass=$((pass + 1))
+    else
+      printf '  FAIL  errors::new no longer leaks\n'
+      printf '        leaks output: %s\n' "$(echo "$out" | grep -E "Process [0-9]+:" | head -1)"
+      fail=$((fail + 1))
+    fi
+  else
+    printf '  ok    errors::new leak (skipped: build failed)\n'
+  fi
+
+  rm -f "$tmp" "$bin"
+fi
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"
