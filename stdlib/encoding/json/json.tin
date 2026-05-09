@@ -136,6 +136,15 @@ fn hex_val(c i64) i64 =
     return c - (@'A' as i64) + 10
   return 0
 
+// is_hex reports whether c is an ASCII hex digit (0-9 / a-f / A-F).
+// Used by parse_str's \u escape to validate before delegating to
+// hex_val (which silently returns 0 on non-hex input).
+fn is_hex(c i64) bool =
+  if c >= @'0' as i64 && c <= @'9' as i64: return true
+  if c >= @'a' as i64 && c <= @'f' as i64: return true
+  if c >= @'A' as i64 && c <= @'F' as i64: return true
+  return false
+
 // escape_string produces the JSON encoding of s including surrounding quotes.
 // Iterates over bytes with `for c in s:` using string ++ byte concatenation.
 // RFC 8259 requires control bytes 0x00-0x1F to be escaped; conformant
@@ -504,14 +513,22 @@ fn parse_str(p *Parser) string =
             else if esc == @'r':  out = @'\r'
             else if esc == @'t':  out = @'\t'
             else if esc == @'u':
-              // \uXXXX -- parse 4 hex digits into a codepoint, then
-              // UTF-8 encode it directly.  Emit nothing on malformed
-              // input or buffer underrun (the parser has no error
-              // channel here; the result will be partial but won't
-              // segfault).
+              // \uXXXX -- parse 4 hex digits into a codepoint and
+              // emit valid UTF-8.  Surrogate pairs (RFC 8259 sec 7):
+              // a high surrogate (0xD800-0xDBFF) MUST be followed by
+              // a low surrogate (0xDC00-0xDFFF) via a second \u
+              // escape, combining into a 21-bit codepoint encoded as
+              // 4-byte UTF-8.  Lone surrogates and any malformed
+              // input fail the parse rather than emit invalid UTF-8.
               emit = false
 
-              if p.pos + 4 <= p.len:
+              if p.pos + 4 > p.len:
+                p.fail("\\u escape: not enough characters")
+                done = true
+              else if !(is_hex(p.src[p.pos] as i64) && is_hex(p.src[p.pos + 1] as i64) && is_hex(p.src[p.pos + 2] as i64) && is_hex(p.src[p.pos + 3] as i64)):
+                p.fail("\\u escape: non-hex digit")
+                done = true
+              else:
                 let h0 = p.src[p.pos] as i64
                 let h1 = p.src[p.pos + 1] as i64
                 let h2 = p.src[p.pos + 2] as i64
@@ -520,17 +537,46 @@ fn parse_str(p *Parser) string =
 
                 p.pos = p.pos + 4
 
-                if cp < 0x80:
+                if cp >= 0xDC00 && cp <= 0xDFFF:
+                  // Lone low surrogate -- never legal on its own.
+                  p.fail("unpaired low surrogate in \\u escape")
+                  done = true
+                else if cp >= 0xD800 && cp <= 0xDBFF:
+                  // High surrogate: require a following \uDCxx low
+                  // surrogate, combine into a 21-bit codepoint.
+                  if p.pos + 6 > p.len || p.src[p.pos] != @'\\' || p.src[p.pos + 1] != @'u':
+                    p.fail("unpaired high surrogate in \\u escape")
+                    done = true
+                  else if !(is_hex(p.src[p.pos + 2] as i64) && is_hex(p.src[p.pos + 3] as i64) && is_hex(p.src[p.pos + 4] as i64) && is_hex(p.src[p.pos + 5] as i64)):
+                    p.fail("\\u escape after high surrogate: non-hex digit")
+                    done = true
+                  else:
+                    let l0 = p.src[p.pos + 2] as i64
+                    let l1 = p.src[p.pos + 3] as i64
+                    let l2 = p.src[p.pos + 4] as i64
+                    let l3 = p.src[p.pos + 5] as i64
+                    let lo = (hex_val(l0) << 12) | (hex_val(l1) << 8) | (hex_val(l2) << 4) | hex_val(l3)
+
+                    if lo < 0xDC00 || lo > 0xDFFF:
+                      p.fail("high surrogate not followed by low surrogate")
+                      done = true
+                    else:
+                      p.pos = p.pos + 6
+                      let astral = ((cp - 0xD800) << 10) | (lo - 0xDC00)
+                      let combined = astral + 0x10000
+
+                      // 4-byte UTF-8: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+                      result = result ++ ((0xF0 | (combined >> 18)) as byte)
+                      result = result ++ ((0x80 | ((combined >> 12) & 0x3F)) as byte)
+                      result = result ++ ((0x80 | ((combined >> 6) & 0x3F)) as byte)
+                      result = result ++ ((0x80 | (combined & 0x3F)) as byte)
+                else if cp < 0x80:
                   result = result ++ (cp as byte)
                 else if cp < 0x800:
                   result = result ++ ((0xC0 | (cp >> 6)) as byte)
                   result = result ++ ((0x80 | (cp & 0x3F)) as byte)
                 else:
-                  // Surrogate pairs (0xD800-0xDBFF + 0xDC00-0xDFFF)
-                  // would require a second \u escape; for now emit the
-                  // BMP codepoint as 3-byte UTF-8, which produces
-                  // wrong output for astral planes but at least valid
-                  // UTF-8 for the BMP range.
+                  // Non-surrogate BMP codepoint -- 3-byte UTF-8.
                   result = result ++ ((0xE0 | (cp >> 12)) as byte)
                   result = result ++ ((0x80 | ((cp >> 6) & 0x3F)) as byte)
                   result = result ++ ((0x80 | (cp & 0x3F)) as byte)
@@ -538,6 +584,13 @@ fn parse_str(p *Parser) string =
 
         if !done && emit:
           result = result ++ out
+
+  // Loop exit conditions: `done == true` (saw closing quote OR p.fail
+  // already set) or `at_end()` (ran out of input mid-string).  In the
+  // second case the string is unterminated; surface the error so
+  // callers don't see a silent truncation as a successful parse.
+  if !done && p.at_end() && !p.has_err:
+    p.fail("unterminated string literal")
 
   return result
 

@@ -6,7 +6,7 @@
 use assert
 use encoding::json
 use result
-use { unwrap_or } from result
+use { unwrap_or, is_err } from result
 
 // Module-level structs used across multiple tests.
 
@@ -246,3 +246,53 @@ test "typed parse nested struct" =
   assert::equals(r.origin.y, 4)
   assert::equals(r.size.x, 100)
   assert::equals(r.size.y, 50)
+
+// String escape edge cases (RFC 8259 sec 7).  Each previously
+// produced silently wrong output: lone surrogates emitted invalid
+// UTF-8, surrogate pairs decoded as two 3-byte sequences, malformed
+// \u escapes were treated as zero, and an unterminated string
+// returned a partial Ok.
+
+test "parse_str: \\u BMP codepoint encodes 2-byte UTF-8" =
+  let v = unwrap_or(json::parse("\"\\u00e9\""), json::Value{kind: json::Kind.null_v})
+
+  // U+00E9 -> 0xC3 0xA9
+  assert::equals(len(v.sval), 2)
+  assert::equals(v.sval[0], 0xC3 as byte)
+  assert::equals(v.sval[1], 0xA9 as byte)
+
+test "parse_str: \\u surrogate pair encodes 4-byte UTF-8" =
+  // U+1F600 (😀) is encoded as the surrogate pair 😀.
+  // Correct UTF-8 is F0 9F 98 80; the buggy code produced two
+  // 3-byte sequences and corrupted the output.
+  let v = unwrap_or(json::parse("\"\\uD83D\\uDE00\""), json::Value{kind: json::Kind.null_v})
+
+  assert::equals(len(v.sval), 4)
+  assert::equals(v.sval[0], 0xF0 as byte)
+  assert::equals(v.sval[1], 0x9F as byte)
+  assert::equals(v.sval[2], 0x98 as byte)
+  assert::equals(v.sval[3], 0x80 as byte)
+
+test "parse_str: lone high surrogate fails" =
+  assert::ok(is_err(json::parse("\"\\uD83D\"")))
+
+test "parse_str: lone low surrogate fails" =
+  assert::ok(is_err(json::parse("\"\\uDE00\"")))
+
+test "parse_str: high surrogate followed by non-\\u fails" =
+  assert::ok(is_err(json::parse("\"\\uD83Dx\"")))
+
+test "parse_str: high surrogate followed by another high surrogate fails" =
+  assert::ok(is_err(json::parse("\"\\uD83D\\uD83D\"")))
+
+test "parse_str: malformed \\u (non-hex digit) fails" =
+  assert::ok(is_err(json::parse("\"\\uZZZZ\"")))
+
+test "parse_str: \\u with too few hex digits fails" =
+  assert::ok(is_err(json::parse("\"\\u12\"")))
+
+test "parse_str: unterminated string fails" =
+  assert::ok(is_err(json::parse("\"abc")))
+
+test "parse_str: unterminated empty string fails" =
+  assert::ok(is_err(json::parse("\"")))

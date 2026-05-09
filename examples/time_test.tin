@@ -319,6 +319,48 @@ test "awaited sleep with zero or negative is a noop" =
   // Should return effectively immediately; 50ms gives plenty of slack.
   assert::ok(elapsed < 50000000)
 
+test "ready_unit sleep is fiberless: 1k iterations finish under 50ms" =
+  // Pre-fix this allocated 1k fibers + scheduler hops; with
+  // sync::ready_unit() the cost is two pointer ops per iteration.
+  let start = time::monotonic_ns()
+  let i i64 = 0
+
+  for i < 1000:
+    await time::sleep_ms(0)
+    i = i + 1
+
+  let elapsed = time::monotonic_ns() - start
+
+  assert::ok(elapsed < 50000000)
+
+// Saturating Duration constructors: previously `from_min(2 * 10^8)`
+// silently wrapped i64 and produced a tiny ns count; now overflow
+// clamps to MAX (or MIN for sign-flipped) so callers get a long wait
+// rather than a misbehaving short one.
+
+test "Duration::from_min saturates on overflow to i64::MAX" =
+  let big = 200000000  // 2 * 10^8 minutes; * 60e9 overflows i64
+  let d = time::from_min(big)
+
+  assert::equals(d.nanoseconds(), 9223372036854775807)
+
+test "Duration::from_hours saturates on overflow to i64::MAX" =
+  let big = 5000000  // 5 * 10^6 hours; * 3.6e12 overflows i64
+  let d = time::from_hours(big)
+
+  assert::equals(d.nanoseconds(), 9223372036854775807)
+
+test "Duration::from_sec saturates negative overflow to i64::MIN" =
+  let very_neg = 0 - 100000000000  // -1e11 sec; * 1e9 overflows
+  let d = time::from_sec(very_neg)
+
+  assert::equals(d.nanoseconds(), 0 - 9223372036854775808)
+
+test "Duration::from_ms zero/normal cases unaffected" =
+  assert::equals(time::from_ms(0).nanoseconds(), 0)
+  assert::equals(time::from_ms(7).nanoseconds(), 7000000)
+  assert::equals(time::from_ms(0 - 3).nanoseconds(), 0 - 3000000)
+
 test "awaited sleep_ms convenience matches sleep(from_ms)" =
   let start = time::monotonic_ns()
 

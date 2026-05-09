@@ -1930,7 +1930,16 @@ void _tin_fiber_run(void) {
 
 // (moved above _tin_fiber_await_result)
 
+// Sentinel pid used by Future helpers (see stdlib/sync/future.tin) to
+// produce a "ready" Future without spawning a fiber.  INT64_MIN is
+// outside the range used by _spawn_impl (which starts at 1) so we can
+// safely short-circuit here without any runtime bookkeeping.
+#define TIN_FUTURE_PID_READY_UNIT INT64_MIN
+
 void *_tin_future_await_raw(int64_t pid) {
+    if (pid == TIN_FUTURE_PID_READY_UNIT) {
+        return (void *)&_tin_unit_sentinel;
+    }
     _tin_fiber_join(pid, NULL);
     void *r = _tin_fiber_get_result(pid);
     return r ? r : (void *)&_tin_unit_sentinel;

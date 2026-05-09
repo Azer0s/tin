@@ -78,23 +78,57 @@ struct Duration =
   // sub returns d - other.
   fn sub(this Duration, other Duration) Duration = return Duration{ns: this.ns - other.ns}
 
+// sat_mul_i64 multiplies a * b with saturation: overflow clamps to
+// i64::MAX (or i64::MIN if exactly one operand is negative).  Used by
+// the from_* Duration constructors so callers asking for "wait 200
+// million minutes" get a long wait rather than a wrap-to-tiny one.
+fn sat_mul_i64(a i64, b i64) i64 =
+  if a == 0 || b == 0:
+    return 0
+  let max i64 = 9223372036854775807
+  let min i64 = -9223372036854775808
+  // |a| and |b| with the i64::MIN edge handled (since 0 - MIN
+  // overflows back to MIN); clamping to MAX is safe because the
+  // overflow check below would clamp the result anyway.
+  let a_abs i64 = a
+  let b_abs i64 = b
+
+  if a_abs == min:
+    a_abs = max
+  else if a_abs < 0:
+    a_abs = 0 - a_abs
+
+  if b_abs == min:
+    b_abs = max
+  else if b_abs < 0:
+    b_abs = 0 - b_abs
+  let neg = (a < 0) != (b < 0)
+
+  if a_abs > max / b_abs:
+    if neg:
+      return min
+    return max
+  return a * b
+
 // from_ns creates a Duration from a nanosecond count.
 fn from_ns(ns i64) Duration = return Duration{ns: ns}
 
-// from_us creates a Duration from a microsecond count.
-fn from_us(us i64) Duration = return Duration{ns: us * 1000}
+// from_us creates a Duration from a microsecond count.  Saturating
+// multiply: callers passing absurdly large values get clamped to
+// MAX/MIN nanoseconds rather than a silent wrap.
+fn from_us(us i64) Duration = return Duration{ns: sat_mul_i64(us, 1000)}
 
 // from_ms creates a Duration from a millisecond count.
-fn from_ms(ms i64) Duration = return Duration{ns: ms * 1000000}
+fn from_ms(ms i64) Duration = return Duration{ns: sat_mul_i64(ms, 1000000)}
 
 // from_sec creates a Duration from a second count.
-fn from_sec(s i64) Duration = return Duration{ns: s * 1000000000}
+fn from_sec(s i64) Duration = return Duration{ns: sat_mul_i64(s, 1000000000)}
 
 // from_min creates a Duration from a minute count.
-fn from_min(m i64) Duration = return Duration{ns: m * 60000000000}
+fn from_min(m i64) Duration = return Duration{ns: sat_mul_i64(m, 60000000000)}
 
 // from_hours creates a Duration from an hour count.
-fn from_hours(h i64) Duration = return Duration{ns: h * 3600000000000}
+fn from_hours(h i64) Duration = return Duration{ns: sat_mul_i64(h, 3600000000000)}
 
 // Instant
 
@@ -197,7 +231,12 @@ fn{#async} sleep_impl(ms i64) =
 // negative d spawns a no-op fiber that completes immediately.
 fn sleep(d Duration) sync::Future[sync::Unit] =
   if d.ns <= 0:
-    return spawn sleep_impl(0)
+    // Zero / negative duration: skip fiber spawn entirely.  Returning
+    // a ready-Future avoids the scheduler round-trip (and its ARC
+    // accounting) that the previous `spawn sleep_impl(0)` shape paid
+    // on every loop iteration when callers debounce a hot loop with
+    // `await time::sleep_ms(0)`.
+    return sync::ready_unit()
   let ms = d.ns / 1000000
 
   if ms == 0:
@@ -208,7 +247,7 @@ fn sleep(d Duration) sync::Future[sync::Unit] =
 // sleep_ms is a convenience for sleep(from_ms(ms)).
 fn sleep_ms(ms i64) sync::Future[sync::Unit] =
   if ms <= 0:
-    return spawn sleep_impl(0)
+    return sync::ready_unit()
 
   return spawn sleep_impl(ms)
 

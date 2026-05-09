@@ -36,3 +36,13 @@ struct Future[t](Awaitable[t]) =
     let typed *t = raw as *t
 
     return *typed
+
+// ready_unit returns a Future[Unit] that resolves immediately on
+// await without spawning a fiber.  Used by stdlib helpers that take a
+// Future-shaped contract but have no work to do for trivial inputs
+// (e.g. `time::sleep(0)`).  Implemented as a sentinel pid the runtime
+// recognises in `_tin_future_await_raw`; constructing or awaiting the
+// returned Future is O(1) with no heap or scheduler traffic.
+fn ready_unit() Future[Unit] =
+  // Matches TIN_FUTURE_PID_READY_UNIT in runtime/fiber.c.
+  return Future[Unit]{pid: -9223372036854775808}
