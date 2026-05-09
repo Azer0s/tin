@@ -17,6 +17,8 @@
 
 use str
 use errors
+use result
+use { Result } from result
 
 // pow10 returns 10^n as i64. n must be in [0, 18]; values outside that
 // range overflow i64 and the function panics rather than silently
@@ -191,14 +193,41 @@ fn from(v f64) Value =
 fn from(s string) Value =
   return parse_impl(s)
 
+// DecimalErrorKind enumerates the failure modes decimal::parse can hit.
+data DecimalErrorKind =
+  EmptyDecimal
+  ExtraDot(input string)
+  InvalidDecimalChar(input string)
+  NoDecimalDigits
+
+// DecimalError implements errors::Err.
+struct DecimalError(errors::Err) =
+  _kind DecimalErrorKind
+
+  fn kind(this DecimalError) DecimalErrorKind = return this._kind
+
+  fn errors::Err::message(this DecimalError) string =
+    match this._kind:
+      case EmptyDecimal:           return "decimal::parse: empty string"
+      case ExtraDot(_):            return "decimal::parse: extra '.'"
+      case InvalidDecimalChar(_):  return "decimal::parse: invalid character"
+      case NoDecimalDigits:        return "decimal::parse: no digits"
+
+  fn print(this DecimalError) string =
+    match this._kind:
+      case EmptyDecimal:           return "decimal::parse: empty string"
+      case ExtraDot(_):            return "decimal::parse: extra '.'"
+      case InvalidDecimalChar(_):  return "decimal::parse: invalid character"
+      case NoDecimalDigits:        return "decimal::parse: no digits"
+
 // parse converts a decimal string to a Value. Accepts an optional leading
 // `-`, digits, and an optional `.<digits>` fractional part. Anything else
-// produces (zero, error).
-fn parse(s string) (Value, *errors::Err) =
+// produces Err(DecimalError).
+fn parse(s string) Result[Value, DecimalError] =
   let n = len(s)
 
   if n == 0:
-    return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: empty string"))
+    return Err(DecimalError{_kind: EmptyDecimal})
   let neg = false
   let i i64 = 0
 
@@ -217,7 +246,7 @@ fn parse(s string) (Value, *errors::Err) =
 
     if c == @'.':
       if seen_dot:
-        return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: extra '.'"))
+        return Err(DecimalError{_kind: ExtraDot(s)})
       seen_dot = true
     else if c >= @'0' && c <= @'9':
       coeff = coeff * 10 + ((c - @'0') as i64)
@@ -226,26 +255,23 @@ fn parse(s string) (Value, *errors::Err) =
       if seen_dot:
         scale = scale + 1
     else:
-      return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: invalid character"))
+      return Err(DecimalError{_kind: InvalidDecimalChar(s)})
     i = i + 1
 
   if !seen_digit:
-    return (Value{coeff: 0, scale: 0}, errors::new("decimal::parse: no digits"))
+    return Err(DecimalError{_kind: NoDecimalDigits})
   if neg:
     coeff = -coeff
 
-  return (Value{coeff: coeff, scale: scale}, nil)
+  return Ok(Value{coeff: coeff, scale: scale})
 
 // parse_impl is the ::implicit / from(string) variant that panics on
 // malformed input rather than returning an error tuple. Callers who want
 // graceful handling should use decimal::parse(s).
 fn parse_impl(s string) Value =
-  let (v, err) = parse(s)
-
-  if err != nil:
-    panic("decimal::from(string): {err}")
-
-  return v
+  match parse(s):
+    case Ok(v):  return v
+    case Err(e): panic("decimal::from(string): {e.message()}")
 
 // from_f64_impl produces a Value whose decimal representation round-trips
 // through f64. Iterates printf precision from 1 to 17 and stops at the
@@ -335,4 +361,6 @@ export {
   Value,
   from,
   parse,
+  DecimalError, DecimalErrorKind,
+  EmptyDecimal, ExtraDot, InvalidDecimalChar, NoDecimalDigits,
 } as decimal

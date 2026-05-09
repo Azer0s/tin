@@ -900,10 +900,27 @@ fn parse_node(p *Parser, min_indent i64) *Value =
 
 // Public API
 
-// YamlError describes why a YAML parse attempt failed.
-data YamlError =
-  EmptyInput
-  Malformed(pos i64, msg string)
+// YamlErrorKind enumerates the failures parse can surface.
+data YamlErrorKind =
+  YamlEmpty
+  YamlMalformed(pos i64, msg string)
+
+// YamlError implements errors::Err so YAML failures compose with the
+// generic error trait.  Use kind() for structured discrimination.
+struct YamlError(errors::Err) =
+  _kind YamlErrorKind
+
+  fn kind(this YamlError) YamlErrorKind = return this._kind
+
+  fn errors::Err::message(this YamlError) string =
+    match this._kind:
+      case YamlEmpty:             return "yaml: empty input"
+      case YamlMalformed(pos, m): return "yaml: malformed at byte {pos}: {m}"
+
+  fn print(this YamlError) string =
+    match this._kind:
+      case YamlEmpty:             return "yaml: empty input"
+      case YamlMalformed(pos, m): return "yaml: malformed at byte {pos}: {m}"
 
 // parse parses a YAML string and returns a Value tree for untyped inspection.
 //
@@ -912,7 +929,7 @@ data YamlError =
 //     case Err(e): ...
 fn parse(s string) Result[Value, YamlError] =
   if len(s) == 0:
-    return Result[Value, YamlError]::Err(YamlError::EmptyInput)
+    return Err(YamlError{_kind: YamlEmpty})
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
 
   return Ok(*parse_node(&p, 0))
@@ -1053,6 +1070,7 @@ fn parse[T](s string) Result[T, YamlError] =
   return Ok(out)
 
 export {
-  Kind, Value, parse, encode, YamlError,
+  Kind, Value, parse, encode,
+  YamlError, YamlErrorKind, YamlEmpty, YamlMalformed,
   YamlSerializable, YamlDeserializable,
 } as yaml

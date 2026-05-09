@@ -1,5 +1,7 @@
 use decimal
 use assert
+use result
+use { unwrap_or, is_err } from result
 
 // ---------------------------------------------------------------------------
 // from() overloads
@@ -131,16 +133,13 @@ test "print of negative" =
 // ---------------------------------------------------------------------------
 
 test "parse rejects empty" =
-  let (_, err) = decimal::parse("")
-  assert::ok(err != nil)
+  assert::ok(is_err(decimal::parse("")))
 
 test "parse rejects junk" =
-  let (_, err) = decimal::parse("not a number")
-  assert::ok(err != nil)
+  assert::ok(is_err(decimal::parse("not a number")))
 
 test "parse accepts negative" =
-  let (v, err) = decimal::parse("-3.14")
-  assert::ok(err == nil)
+  let v = unwrap_or(decimal::parse("-3.14"), decimal::Value{coeff: 0, scale: 0})
   assert::equals(-314, v.coeff)
 
 // Formatting a Value with a large fractional scale exercises

@@ -29,7 +29,7 @@ fn mkdir(path string) *errors::Err =
   let n = len(path)
 
   if n == 0:
-    return errors::new("mkdir: empty path")
+    return &OsError{_kind: CannotMkdir("(empty path)")}
   // Walk forward creating each prefix component.
   // Start at 1 to skip the leading '/' of absolute paths.
   let i i64 = 1
@@ -43,7 +43,7 @@ fn mkdir(path string) *errors::Err =
   let d = os_opendir(path)
 
   if d == nil:
-    return errors::new("mkdir: failed to create directory: " ++ path)
+    return &OsError{_kind: CannotMkdir(path)}
   os_closedir(d)
 
   return nil
@@ -54,7 +54,7 @@ fn remove(path string) *errors::Err =
   let r = io::remove(path)
 
   if r != 0:
-    return errors::new("remove: failed: " ++ path)
+    return &OsError{_kind: CannotRemove(path)}
 
   return nil
 
@@ -64,7 +64,7 @@ fn rmdir(path string) *errors::Err =
   let r = os_rmdir(path)
 
   if r != 0:
-    return errors::new("rmdir: failed: " ++ path)
+    return &OsError{_kind: CannotRmdir(path)}
 
   return nil
 
@@ -74,6 +74,6 @@ fn rename(old_path string, new_path string) *errors::Err =
   let r = io::rename(old_path, new_path)
 
   if r != 0:
-    return errors::new("rename: failed: " ++ old_path ++ " -> " ++ new_path)
+    return &OsError{_kind: CannotRename(old_path, new_path)}
 
   return nil

@@ -8,6 +8,8 @@
 
 use simd
 use errors
+use result
+use { Result } from result
 
 // simd_find_first returns the 0-based position of the lowest set bit in a
 // 16-bit movemask result.  Called only when mask != 0, so the loop always
@@ -325,17 +327,57 @@ fn atof(s string) f64 = extern("atof")
 // is_digit returns true if the byte is an ASCII digit.
 fn is_digit(c byte) bool = return c >= @'0' && c <= @'9'
 
+// StringsErrorKind enumerates the failure modes the parse_* family
+// can surface.  Carrying the offending input lets callers reproduce
+// the input that failed without re-stringifying it.
+data StringsErrorKind =
+  EmptyString(op string)
+  NoDigits(op string)
+  InvalidCharacter(op string, input string)
+  IntegerOverflow(op string, input string)
+  MissingExponent(op string, input string)
+
+fn strings_error_message(k StringsErrorKind) string =
+  match k:
+    case EmptyString(op):           return op ++ ": empty string"
+    case NoDigits(op):              return op ++ ": no digits"
+    case InvalidCharacter(op, _):   return op ++ ": invalid character"
+    case IntegerOverflow(op, _):    return op ++ ": integer overflow"
+    case MissingExponent(op, _):    return op ++ ": missing exponent digits"
+
+// StringsError implements errors::Err so it widens to *errors::Err
+// for callers that handle errors generically.
+struct StringsError(errors::Err) =
+  _kind StringsErrorKind
+
+  fn kind(this StringsError) StringsErrorKind = return this._kind
+
+  fn errors::Err::message(this StringsError) string =
+    match this._kind:
+      case EmptyString(op):           return op ++ ": empty string"
+      case NoDigits(op):              return op ++ ": no digits"
+      case InvalidCharacter(op, _):   return op ++ ": invalid character"
+      case IntegerOverflow(op, _):    return op ++ ": integer overflow"
+      case MissingExponent(op, _):    return op ++ ": missing exponent digits"
+
+  fn print(this StringsError) string =
+    match this._kind:
+      case EmptyString(op):           return op ++ ": empty string"
+      case NoDigits(op):              return op ++ ": no digits"
+      case InvalidCharacter(op, _):   return op ++ ": invalid character"
+      case IntegerOverflow(op, _):    return op ++ ": integer overflow"
+      case MissingExponent(op, _):    return op ++ ": missing exponent digits"
+
 // parse_int parses s as a decimal i64.
-// Returns (value, *errors::Err); Err is nil on success.
 // Accepts an optional leading '-' or '+'.  Detects overflow up front
 // so we don't hand a wrapped value to the caller -- atol's behavior on
 // out-of-range input is implementation-defined, so we cannot rely on
 // it to flag overflow.
-fn parse_int(s string) (i64, *errors::Err) =
+fn parse_int(s string) Result[i64, StringsError] =
   let n = len(s)
 
   if n == 0:
-    return (0, errors::new("parse_int: empty string"))
+    return Err(StringsError{_kind: EmptyString("parse_int")})
   let i i64 = 0
   let neg = false
 
@@ -345,7 +387,7 @@ fn parse_int(s string) (i64, *errors::Err) =
   else if s[0] == @'+':
     i = 1
   if i >= n:
-    return (0, errors::new("parse_int: no digits"))
+    return Err(StringsError{_kind: NoDigits("parse_int")})
 
   // Accumulate as negative when neg, positive otherwise.  This lets us
   // represent i64::MIN exactly, which is unreachable via "build positive,
@@ -355,40 +397,39 @@ fn parse_int(s string) (i64, *errors::Err) =
 
   for i < n:
     if !is_digit(s[i]):
-      return (0, errors::new("parse_int: invalid character"))
+      return Err(StringsError{_kind: InvalidCharacter("parse_int", s)})
     let d = (s[i] - @'0') as i64
 
     if neg:
       // r * 10 - d >= i64::MIN, i.e. r >= (i64::MIN + d) / 10
       if r < -922337203685477580:
-        return (0, errors::new("parse_int: integer overflow"))
+        return Err(StringsError{_kind: IntegerOverflow("parse_int", s)})
       if r == -922337203685477580 && d > 8:
-        return (0, errors::new("parse_int: integer overflow"))
+        return Err(StringsError{_kind: IntegerOverflow("parse_int", s)})
       r = r * 10 - d
     else:
       if r > 922337203685477580:
-        return (0, errors::new("parse_int: integer overflow"))
+        return Err(StringsError{_kind: IntegerOverflow("parse_int", s)})
       if r == 922337203685477580 && d > 7:
-        return (0, errors::new("parse_int: integer overflow"))
+        return Err(StringsError{_kind: IntegerOverflow("parse_int", s)})
       r = r * 10 + d
     i = i + 1
 
-  return (r, nil)
+  return Ok(r)
 
 // parse_int32 parses s as a decimal i32.
-// Returns (value, *errors::Err); Err is nil on success.
-fn parse_int32(s string) (i32, *errors::Err) =
-  let (v, err) = parse_int(s)
-  return (v as i32, err)
+fn parse_int32(s string) Result[i32, StringsError] =
+  match parse_int(s):
+    case Ok(v):  return Ok(v as i32)
+    case Err(e): return Err(e)
 
 // parse_float parses s as an f64.
-// Returns (value, *errors::Err); Err is nil on success.
 // Accepts optional leading sign, digits, decimal point, and exponent.
-fn parse_float(s string) (f64, *errors::Err) =
+fn parse_float(s string) Result[f64, StringsError] =
   let n = len(s)
 
   if n == 0:
-    return (0.0, errors::new("parse_float: empty string"))
+    return Err(StringsError{_kind: EmptyString("parse_float")})
 
   // Optional leading sign.
   let i i64 = 0
@@ -396,7 +437,7 @@ fn parse_float(s string) (f64, *errors::Err) =
   if s[0] == @'-' || s[0] == @'+':
     i = 1
   if i >= n:
-    return (0.0, errors::new("parse_float: no digits"))
+    return Err(StringsError{_kind: NoDigits("parse_float")})
 
   // Integer part (and optional decimal point).
   let has_digit = false
@@ -412,7 +453,7 @@ fn parse_float(s string) (f64, *errors::Err) =
     else if c == @'e' || c == @'E':
       break
     else:
-      return (0.0, errors::new("parse_float: invalid character"))
+      return Err(StringsError{_kind: InvalidCharacter("parse_float", s)})
     i = i + 1
 
   // Fractional part.
@@ -425,7 +466,7 @@ fn parse_float(s string) (f64, *errors::Err) =
       i = i + 1
       break
     else:
-      return (0.0, errors::new("parse_float: invalid character"))
+      return Err(StringsError{_kind: InvalidCharacter("parse_float", s)})
     i = i + 1
 
   // Exponent part.
@@ -433,15 +474,15 @@ fn parse_float(s string) (f64, *errors::Err) =
     if s[i] == @'-' || s[i] == @'+':
       i = i + 1
     if i >= n:
-      return (0.0, errors::new("parse_float: missing exponent digits"))
+      return Err(StringsError{_kind: MissingExponent("parse_float", s)})
     for i < n:
       if !is_digit(s[i]):
-        return (0.0, errors::new("parse_float: invalid exponent"))
+        return Err(StringsError{_kind: InvalidCharacter("parse_float", s)})
       i = i + 1
 
   if !has_digit:
-    return (0.0, errors::new("parse_float: no digits"))
-  return (atof(s), nil)
+    return Err(StringsError{_kind: NoDigits("parse_float")})
+  return Ok(atof(s))
 
 export {
   substr,
@@ -451,5 +492,7 @@ export {
   join, repeat, replace, split,
   to_lower, to_upper,
   trim, trim_left, trim_right,
-  parse_int, parse_int32, parse_float
+  parse_int, parse_int32, parse_float,
+  StringsError, StringsErrorKind,
+  EmptyString, NoDigits, InvalidCharacter, IntegerOverflow, MissingExponent
 } as strings

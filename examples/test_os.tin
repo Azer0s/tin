@@ -5,6 +5,8 @@
 use os
 use errors
 use assert
+use result
+use { unwrap_or, is_err } from result
 
 const TMP = "/tmp/tin_test_os"
 
@@ -27,8 +29,7 @@ test "write_file and read_file round-trip" =
   let we = os::write_file(path, "hello\n")
 
   assert::ok(!errors::is_err(we))
-  let (content, re) = os::read_file(path)
-  assert::ok(!errors::is_err(re))
+  let content = unwrap_or(os::read_file(path), "")
   assert::equals(content, "hello\n")
   os::remove(path)
 
@@ -51,7 +52,7 @@ test "write_file truncates existing file" =
 
   os::write_file(path, "long content here")
   os::write_file(path, "short")
-  let (content, _) = os::read_file(path)
+  let content = unwrap_or(os::read_file(path), "")
   assert::equals(content, "short")
   os::remove(path)
 
@@ -64,8 +65,7 @@ test "append_file" =
   os::write_file(path, "line1\n")
   os::append_file(path, "line2\n")
   os::append_file(path, "line3\n")
-  let (content, err) = os::read_file(path)
-  assert::ok(!errors::is_err(err))
+  let content = unwrap_or(os::read_file(path), "")
   assert::equals(content, "line1\nline2\nline3\n")
   os::remove(path)
 
@@ -77,13 +77,12 @@ test "append_file creates file if missing" =
   let ae = os::append_file(path, "first\n")
 
   assert::ok(!errors::is_err(ae))
-  let (content, _) = os::read_file(path)
+  let content = unwrap_or(os::read_file(path), "")
   assert::equals(content, "first\n")
   os::remove(path)
 
 test "read_file error on missing file" =
-  let (_, err) = os::read_file(tmp("no_such_file_xyz.txt"))
-  assert::ok(errors::is_err(err))
+  assert::ok(is_err(os::read_file(tmp("no_such_file_xyz.txt"))))
 
 test "write_file_bytes and read_file_bytes round-trip" =
   setup()
@@ -95,12 +94,14 @@ test "write_file_bytes and read_file_bytes round-trip" =
   let we = os::write_file_bytes(path, data)
 
   assert::ok(!errors::is_err(we))
-  let (got, re) = os::read_file_bytes(path)
-  assert::ok(!errors::is_err(re))
-  assert::equals(len(got) as i64, 5)
-  assert::equals(got[0] as i64, 1)
-  assert::equals(got[3] as i64, -1)
-  assert::equals(got[4] as i64, 0)
+  match os::read_file_bytes(path):
+    case Ok(got):
+      assert::equals(len(got) as i64, 5)
+      assert::equals(got[0] as i64, 1)
+      assert::equals(got[3] as i64, -1)
+      assert::equals(got[4] as i64, 0)
+    case Err(_):
+      assert::fails("expected read_file_bytes to succeed")
   os::remove(path)
 
 test "empty file round-trip" =
@@ -110,8 +111,7 @@ test "empty file round-trip" =
   let path = tmp("empty.txt")
 
   os::write_file(path, "")
-  let (content, err) = os::read_file(path)
-  assert::ok(!errors::is_err(err))
+  let content = unwrap_or(os::read_file(path), "MISSING")
   assert::equals(content, "")
   assert::equals(os::file_size(path), 0)
   os::remove(path)
@@ -174,23 +174,24 @@ test "stat on a file" =
   let path = tmp("stat_file.txt")
 
   os::write_file(path, "hello!")
-  let (info, err) = os::stat(path)
-  assert::ok(!errors::is_err(err))
-  assert::ok(!info.is_directory)
-  assert::equals(info.size, 6)
+  match os::stat(path):
+    case Ok(info):
+      assert::ok(!info.is_directory)
+      assert::equals(info.size, 6)
+    case Err(_):
+      assert::fails("stat should succeed")
   os::remove(path)
 
 test "stat on a directory" =
   setup()
 
   defer post_test()
-  let (info, err) = os::stat(TMP)
-  assert::ok(!errors::is_err(err))
-  assert::ok(info.is_directory)
+  match os::stat(TMP):
+    case Ok(info): assert::ok(info.is_directory)
+    case Err(_):   assert::fails("stat should succeed on dir")
 
 test "stat error on missing path" =
-  let (_, err) = os::stat(tmp("no_such_stat_xyz"))
-  assert::ok(errors::is_err(err))
+  assert::ok(is_err(os::stat(tmp("no_such_stat_xyz"))))
 
 // -------------------------------------------------------------------------
 // mkdir / rmdir / rename / remove
@@ -262,7 +263,7 @@ test "rename moves a file" =
   assert::ok(!errors::is_err(re))
   assert::ok(!os::exists(src))
   assert::ok(os::exists(dst))
-  let (content, _) = os::read_file(dst)
+  let content = unwrap_or(os::read_file(dst), "")
   assert::equals(content, "moved")
   os::remove(dst)
 

@@ -270,24 +270,23 @@ fn main() =
 assert_substr "parse_int rejects overflow" \
   "ok-rejected" '
 use strings
+use { is_err } from result
 
 fn main() =
-  let (v, err) = strings::parse_int("99999999999999999999")
-
-  if err == nil: echo "wrong"
-  else:          echo "ok-rejected"
+  if is_err(strings::parse_int("99999999999999999999")): echo "ok-rejected"
+  else:                                                  echo "wrong"
 '
 
 # ── strings::parse_int accepts i64::MIN exactly.
 assert_substr "parse_int accepts i64::MIN" \
   "ok-min" '
 use strings
+use { unwrap_or } from result
 
 fn main() =
-  let (v, err) = strings::parse_int("-9223372036854775808")
+  let v = unwrap_or(strings::parse_int("-9223372036854775808"), 0)
 
-  if err != nil: echo "wrong"
-  else if v == -9223372036854775808: echo "ok-min"
+  if v == -9223372036854775808: echo "ok-min"
   else: echo "wrong-v {v}"
 '
 
