@@ -1,5 +1,7 @@
 use assert
 use encoding::base64
+use errors
+use strings
 
 test "encode empty" =
   assert::equals(base64::encode(""), "")
@@ -65,3 +67,41 @@ test "decode_url_no_pad round-trips with encode_url_no_pad" =
   for i < len(cases):
     assert::equals(base64::decode_url_no_pad(base64::encode_url_no_pad(cases[i])), cases[i])
     i = i + 1
+
+// decode_strict's job is to surface malformed input -- the previous
+// version silently truncated on embedded NUL and silently dropped
+// the unused tail bits of a 1- or 2-leftover group.
+
+test "decode_strict rejects embedded NUL" =
+  let s [byte] = [@'A', @'B', 0, @'C']
+  let (_, e) = base64::decode_strict(s as string)
+
+  assert::ok(e != nil)
+  assert::ok(strings::contains(errors::message(e), "invalid character"))
+
+test "decode_strict accepts well-formed standard input" =
+  let (out, e) = base64::decode_strict("Zm9v")
+
+  assert::equals(out, "foo")
+  assert::ok(e == nil)
+
+test "decode_strict accepts well-formed unpadded input" =
+  let (out, e) = base64::decode_strict("Zm8")
+
+  assert::equals(out, "fo")
+  assert::ok(e == nil)
+
+test "decode_strict rejects non-zero residual bits" =
+  // "AB" decodes 12 bits; the low 4 bits should be zero.  "AC" sets
+  // bit 1 of the residue and must be rejected.  Pre-fix the decoder
+  // silently dropped those bits and returned 1 byte.
+  let (_, e) = base64::decode_strict("AC")
+
+  assert::ok(e != nil)
+  assert::ok(strings::contains(errors::message(e), "residual bits"))
+
+test "decode_strict rejects byte after padding" =
+  let (_, e) = base64::decode_strict("Zg==a")
+
+  assert::ok(e != nil)
+  assert::ok(strings::contains(errors::message(e), "byte after padding"))

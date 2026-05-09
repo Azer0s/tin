@@ -63,18 +63,21 @@ func (cg *CodeGen) calleeReturnsMustUse(c *ast.CallExpr) bool {
 		return false
 	}
 
-	// Functions that opt out of the "must await / must use" rule via
-	// the `#allow_drop` tag are exempt regardless of return type.
-	// Channel send is the motivating case: posting a value to a
-	// channel is the canonical fire-and-forget pattern, and warning
-	// on every call site would force `let _ = ...` boilerplate that
-	// drowns out the useful "you forgot await" cases on functions
-	// like time::sleep.
-	if hasTag(fd.Tags, "allow_drop") {
+	isFutureLike := isFutureType(fd.RetType) || cg.isAwaitableType(fd.RetType)
+	isResult := isResultType(fd.RetType)
+
+	// `#allow_drop` opts out of the "did you forget `await`?" warning
+	// for fire-and-forget Future returns -- channel.send is the
+	// motivating case.  It MUST NOT silence the Result-discard warning:
+	// dropping an unobserved error is a different and dangerous bug,
+	// and a future maintainer who tags an `#allow_drop` fn returning
+	// Result should not get the error-discard check turned off behind
+	// their back.
+	if hasTag(fd.Tags, "allow_drop") && isFutureLike && !isResult {
 		return false
 	}
 
-	return isResultType(fd.RetType) || isFutureType(fd.RetType) || cg.isAwaitableType(fd.RetType)
+	return isResult || isFutureLike
 }
 
 // mustUseMessage formats the discarded-result warning so the message

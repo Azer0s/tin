@@ -336,6 +336,48 @@ fn main() =
   let _ = await http::send(c, req)
 '
 
+# ── header_value_safe must reject all C0 control bytes (0x00-0x1F
+# minus HTAB) and DEL (0x7F), per RFC 7230 sec 3.2.6.  Pre-fix only
+# CR / LF / NUL were rejected; bytes like 0x01 or 0x7F passed through
+# and could trip intermediaries that terminate parsing on any C0
+# byte.  We construct the bad value via a byte-array cast since Tin
+# does not support \xHH escapes in string literals.
+assert_substr "http header CTL byte (0x01) rejected" \
+  "panic" '
+use collections
+use http
+
+fn main() =
+  let c = http::Client::new()
+
+  c.set_header("X-Foo", "bar\x01x")
+
+  let req = http::Request{
+    method: "GET", url: "http://example.com/",
+    headers: collections::HashMap[string, string]::make(1), body: ""
+  }
+
+  let _ = await http::send(c, req)
+'
+
+assert_substr "http header DEL (0x7F) rejected" \
+  "panic" '
+use collections
+use http
+
+fn main() =
+  let c = http::Client::new()
+
+  c.set_header("X-Foo", "bar\x7fx")
+
+  let req = http::Request{
+    method: "GET", url: "http://example.com/",
+    headers: collections::HashMap[string, string]::make(1), body: ""
+  }
+
+  let _ = await http::send(c, req)
+'
+
 # ── leak: errors::new(...) iface + StringErr must release on scope exit.
 # The iface dtor (ensureStructPtrReleaseFn's fat-ptr arm) releases the
 # data field when the iface RC hits 0; *Trait pointer let-bindings call
@@ -492,6 +534,74 @@ test "widen + downcast" =
   match (*back).k:
     case Tag(v): assert::equals(v, 99)
     case Empty:  assert::fails("expected Tag")
+'
+
+# ── #allow_drop is for fire-and-forget Future returns (channel.send),
+# NOT a blanket silencer.  Dropping a Result on an `#allow_drop` fn
+# must still warn, otherwise a future maintainer who tags a fn
+# returning Result accidentally loses the unobserved-error check.
+assert_substr "#allow_drop on Result still warns on drop" \
+  "Result returned by" '
+use result
+use { Result } from result
+
+fn{#allow_drop} risky() Result[i64, string] =
+  return Result[i64, string]::Ok(42)
+
+fn main() = risky()
+'
+
+# ── The complementary half: #allow_drop on a Future-shaped return
+# (the channel.send pattern) DOES silence the warning.  This exact
+# pattern is exercised in stdlib via Channel::send, but we pin the
+# behavior here too so the regression catches both directions.
+assert_runs_clean "#allow_drop on Future-shaped return silences warning" \
+  "future returned by" '
+use sync::channel
+use { Channel } from sync::channel
+
+fn{#async} main() =
+  let ch = Channel[i64].make(4)
+  ch.send(42)
+'
+
+# ── Lexer string + char escapes \xHH \uHHHH \UHHHHHHHH \b \f \v \a.
+# The pre-fix lexer only handled \n \t \r \\ \" \' \0 plus \{ \},
+# leaving every other escape as a literal two-character sequence.
+# Each new escape is verified by a length / equality check.
+assert_substr "lex \\xHH escape decodes to single byte" \
+  "x01-1 x7f-1 ok" '
+fn main() = echo "x01-{len(\"\x01\")} x7f-{len(\"\x7f\")} ok"
+'
+
+assert_substr "lex \\uHHHH escape decodes BMP codepoint" \
+  "len=2 ok" '
+fn main() = echo "len={len(\"é\")} ok"
+'
+
+assert_substr "lex \\UHHHHHHHH escape decodes astral codepoint" \
+  "len=4 ok" '
+fn main() = echo "len={len(\"\U0001F600\")} ok"
+'
+
+assert_substr "lex \\b \\f \\v \\a all decode to one byte" \
+  "1 1 1 1 ok" '
+fn main() = echo "{len(\"\b\")} {len(\"\f\")} {len(\"\v\")} {len(\"\a\")} ok"
+'
+
+assert_substr "lex char literal \\xHH escape" \
+  "65 ok" '
+fn main() = echo "{@\x27\x41\x27} ok"
+'
+
+assert_substr "lex \\u with surrogate codepoint is rejected" \
+  "lex error: invalid \\u escape" '
+fn main() = echo "\uD800"
+'
+
+assert_substr "lex \\x with non-hex digits is rejected" \
+  "lex error: invalid \\x escape" '
+fn main() = echo "\xZZ"
 '
 
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"

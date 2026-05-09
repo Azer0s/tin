@@ -277,24 +277,39 @@ fn split(pattern string, s string) [string] =
 
   let slen = len(s)
   let pos  i64 = 0
+  // last_emit is the start of the next segment to emit.  Tracking it
+  // separately from pos lets the zero-width branch advance pos to
+  // break the infinite-loop hazard without dropping the byte at the
+  // current pos.  Pre-fix, that byte was silently lost
+  // (`re.split("(?=b)", "abc")` returned ["a", "c"] instead of
+  // ["a", "bc"]).
+  let last_emit i64 = 0
 
   for pos <= slen:
     let m = re.match_at(s, pos)
 
     if !m.matched():
-      parts ++= substr(s, pos, slen)
+      parts ++= substr(s, last_emit, slen)
       break
 
     let beg = m.beg(0)
     let end = m.end(0)
 
     if end <= pos:
-      // Zero-width match -- advance one character without recording
-      // the empty prefix.  Skips infinite-loop hazard while still
-      // returning a meaningful split.
+      // Zero-width match.  If beg is past the last emit, the bytes
+      // between last_emit and beg form a real segment; emit it now.
+      // When beg == last_emit (the zero-width match is right at the
+      // previous split boundary, e.g. immediately after a regular
+      // match left pos == last_emit), emitting would produce an
+      // empty string -- just advance pos by one byte to keep
+      // moving.  Either way pos advances so the loop terminates.
+      if last_emit < beg:
+        parts ++= substr(s, last_emit, beg)
+        last_emit = beg
       pos = pos + 1
     else:
-      parts ++= substr(s, pos, beg)
+      parts ++= substr(s, last_emit, beg)
+      last_emit = end
       pos = end
 
   return parts

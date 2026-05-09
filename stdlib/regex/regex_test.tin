@@ -192,3 +192,23 @@ test "split no match returns whole string as single element" =
 
   assert::equals(len(parts), 1)
   assert::equals(parts[0], "no digits")
+
+// Zero-width match in split must not drop the byte at the match
+// position.  Pre-fix, `(?=b)` on "abc" returned ["a", "c"] instead
+// of ["a", "bc"].
+test "split zero-width lookahead preserves the byte at the match site" =
+  let parts = regex::split("(?=b)", "abc")
+
+  assert::equals(len(parts), 2)
+  assert::equals(parts[0], "a")
+  assert::equals(parts[1], "bc")
+
+test "split zero-width lookahead with multiple sites" =
+  let parts = regex::split("(?=,)", "a,b,c")
+
+  // Each "," is a zero-width split point; the comma stays with the
+  // following segment.
+  assert::equals(len(parts), 3)
+  assert::equals(parts[0], "a")
+  assert::equals(parts[1], ",b")
+  assert::equals(parts[2], ",c")

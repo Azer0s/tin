@@ -301,6 +301,41 @@ func (l *Lexer) advance() rune {
 	return ch
 }
 
+// readHexDigits consumes exactly n hex characters from the input via
+// l.advance and returns their integer value and true on success, or
+// (0, false) if EOF is hit or any of the next n bytes is non-hex.
+// Used by the \xHH, \uHHHH, and \UHHHHHHHH escape sequences in string
+// and char literals.
+func (l *Lexer) readHexDigits(n int) (int, bool) {
+	val := 0
+
+	for i := 0; i < n; i++ {
+		if l.pos >= len(l.src) {
+			return 0, false
+		}
+
+		c := l.src[l.pos]
+
+		var d int
+
+		switch {
+		case c >= '0' && c <= '9':
+			d = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = int(c-'A') + 10
+		default:
+			return 0, false
+		}
+
+		val = val*16 + d
+		l.advance()
+	}
+
+	return val, true
+}
+
 func (l *Lexer) nextToken() (Token, error) {
 	// Handle indentation at line start
 	if l.atLineStart {
@@ -574,12 +609,52 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 				sb.WriteByte('\t')
 			case 'r':
 				sb.WriteByte('\r')
+			case 'b':
+				sb.WriteByte(0x08)
+			case 'f':
+				sb.WriteByte(0x0C)
+			case 'v':
+				sb.WriteByte(0x0B)
+			case 'a':
+				sb.WriteByte(0x07)
 			case '"':
 				sb.WriteByte('"')
+			case '\'':
+				sb.WriteByte('\'')
 			case '\\':
 				sb.WriteByte('\\')
 			case '0':
 				sb.WriteByte(0)
+			case 'x':
+				// \xHH - exactly two hex digits, one byte.
+				v, ok := l.readHexDigits(2)
+				if !ok {
+					return Token{Type: ILLEGAL, Literal: "\\x", Line: line, Col: col},
+						fmt.Errorf("invalid \\x escape: expected two hex digits at %d:%d", l.line, l.col)
+				}
+
+				sb.WriteByte(byte(v))
+			case 'u':
+				// \uHHHH - exactly four hex digits, UTF-8 encoded.
+				// Surrogate codepoints (0xD800-0xDFFF) and values beyond
+				// the Unicode range are rejected; pair surrogates are
+				// the responsibility of higher-level parsers if needed.
+				v, ok := l.readHexDigits(4)
+				if !ok || (v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF {
+					return Token{Type: ILLEGAL, Literal: "\\u", Line: line, Col: col},
+						fmt.Errorf("invalid \\u escape at %d:%d", l.line, l.col)
+				}
+
+				sb.WriteRune(rune(v))
+			case 'U':
+				// \UHHHHHHHH - exactly eight hex digits, UTF-8 encoded.
+				v, ok := l.readHexDigits(8)
+				if !ok || (v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF {
+					return Token{Type: ILLEGAL, Literal: "\\U", Line: line, Col: col},
+						fmt.Errorf("invalid \\U escape at %d:%d", l.line, l.col)
+				}
+
+				sb.WriteRune(rune(v))
 			case '{':
 				// \{ produces a literal { that is NOT treated as an interpolation marker.
 				// We keep the backslash so parseStringInterp can distinguish it.
@@ -611,7 +686,10 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 
 	ch := l.peek()
 
-	// Escape-sequence char literal: '\n', '\t', '\r', '\\', '\'', '\0', '"'
+	// Escape-sequence char literal: any single-byte escape mirrors
+	// the string-literal grammar (\n \t \r \b \f \v \a \\ \' \0 \"
+	// \xHH).  \u and \U are string-only because they may expand into
+	// multi-byte UTF-8 sequences that don't fit a CHAR_LIT (one byte).
 	if ch == '\\' {
 		l.advance() // consume '\'
 		esc := l.advance()
@@ -625,6 +703,14 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			b = '\t'
 		case 'r':
 			b = '\r'
+		case 'b':
+			b = 0x08
+		case 'f':
+			b = 0x0C
+		case 'v':
+			b = 0x0B
+		case 'a':
+			b = 0x07
 		case '\\':
 			b = '\\'
 		case '\'':
@@ -633,6 +719,14 @@ func (l *Lexer) readSingleQuote(line, col int) (Token, error) {
 			b = 0
 		case '"':
 			b = '"'
+		case 'x':
+			v, ok := l.readHexDigits(2)
+			if !ok {
+				return Token{Type: ILLEGAL, Literal: "\\x", Line: line, Col: col},
+					fmt.Errorf("invalid \\x escape in char literal: expected two hex digits at %d:%d", l.line, l.col)
+			}
+
+			b = byte(v)
 		default:
 			b = byte(esc)
 		}

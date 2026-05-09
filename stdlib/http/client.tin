@@ -80,18 +80,30 @@ fn parse_url(url string) (bool, string, i32, string) =
   return (use_tls, host, port, path)
 
 // header_value_safe rejects any byte that could be used to terminate a
-// header line and inject a second one (CR, LF, NUL).  Used to gate
-// caller-supplied keys, values, host, and path before they are spliced
-// into the wire format.  Returns true when the value is safe to emit.
+// header line and inject a second one, plus any other byte RFC 7230
+// forbids in a field-value.  RFC 7230 sec 3.2.6 limits field-value
+// characters to VCHAR / SP / HTAB; CR (0x0D), LF (0x0A), NUL (0x00),
+// the rest of the C0 control range (0x01-0x1F minus HTAB 0x09), and
+// DEL (0x7F) are all illegal.  Some intermediaries terminate parsing
+// at any C0 byte and produce surprising downstream behaviour.  Used
+// to gate caller-supplied keys, values, host, and path before they
+// are spliced into the wire format.  Returns true when the value is
+// safe to emit.
 fn header_value_safe(s string) bool =
   let i i64 = 0
 
   for i < len(s):
     let c = s[i] as byte
+    let cb = c as i64
 
-    if c == @'\r' || c == @'\n' || c == 0:
+    // Allow SP (0x20) through 0x7E, plus HTAB (0x09).  Reject every
+    // other control byte and DEL.
+    if c == @'\t':
+      i = i + 1
+    else if cb < 0x20 || cb == 0x7F:
       return false
-    i = i + 1
+    else:
+      i = i + 1
 
   return true
 

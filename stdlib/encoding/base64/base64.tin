@@ -148,9 +148,12 @@ fn decode_strict(s string) (string, *errors::Err) =
     else if saw_pad:
       // Anything after a `=` must itself be `=` or end-of-string.
       return ("", errors::new("base64::decode_strict: byte after padding"))
-    else if c == 0 as byte:
-      i = n
     else:
+      // NUL was previously short-circuited as end-of-string; reject
+      // it via the alphabet check instead so embedded NULs in user
+      // input (auth tokens, signatures) cannot silently truncate
+      // the decoded result -- which is the entire point of
+      // decode_strict over decode.
       let v = b64_rev(c)
 
       if v < 0:
@@ -162,6 +165,17 @@ fn decode_strict(s string) (string, *errors::Err) =
         bits = bits - 8
         result = result ++ ((acc >> bits) & 0xFF) as byte
     i = i + 1
+  // Residual unused bits must be zero.  After consuming every
+  // alphabet character, `bits` holds 0, 2, or 4 leftover low-order
+  // bits in `acc`; for a well-formed encoding those bits are 0.  Non-
+  // zero residue means the producer wrote a partial byte (e.g. "AB"
+  // alone leaves 4 trailing bits).  Earlier versions silently dropped
+  // the residue so the decoder accepted malformed truncations.
+  if bits != 0:
+    let mask = (1 << bits) - 1
+
+    if (acc & mask) != 0:
+      return ("", errors::new("base64::decode_strict: non-zero residual bits in last group"))
 
   return (result, nil)
 
