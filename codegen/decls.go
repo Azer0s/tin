@@ -1956,7 +1956,7 @@ func (cg *CodeGen) ensureTraitDataReleaseThunk(structKey string, structSt *irtyp
 	// `*<struct>` to `*Trait` references it via its vtable's data-release
 	// slot).  Default external-linkage would either link-error on
 	// duplicate emission across modules, or silently undefined-symbol
-	// when an incremental rebuild materialises the helper in a
+	// when an incremental rebuild materializes the helper in a
 	// different pkg's `.o` than the consumer's cached `.o` references.
 	fn.Linkage = enum.LinkageWeakODR
 	cg.traitDataReleaseThunks[structKey] = fn

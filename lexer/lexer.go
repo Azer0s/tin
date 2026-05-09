@@ -330,6 +330,7 @@ func (l *Lexer) readHexDigits(n int) (int, bool) {
 		}
 
 		val = val*16 + d
+
 		l.advance()
 	}
 

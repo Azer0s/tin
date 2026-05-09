@@ -642,9 +642,25 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 		// only the new copy is returned.  The retain below still fires
 		// (load value + retain its sub-fields) so that the local scope's
 		// release balances out without dropping ARC sub-fields to zero.
+		//
+		// Extra heap-pointer retain: when the function ALSO constructs an
+		// owning *Trait iface that borrows this same heap (`let p *Trait
+		// = &pt; return p` -- the iface dtor's data-release thunk
+		// decrements the heap block on scope exit), we need an explicit
+		// _tin_retain on the heap so the iface release doesn't free the
+		// block out from under the returned chain.  Detected via
+		// cg.fnReturnsOwningIface, set by buildPtrToTraitBorrow when it
+		// fires inside a fn with escaping vars.  Plain `return &local`
+		// (no iface) doesn't need this retain because the local scope
+		// already skips isEarlyHeap vars at scope exit.
 		if entry.isEarlyHeap {
 			stackVal := block.NewLoad(elemType, entry.val)
 			cg.emitRetain(block, stackVal)
+
+			if cg.curFn != nil && cg.fnReturnsOwningIface[cg.curFn.Name()] {
+				heapI8 := block.NewBitCast(entry.val, irtypes.I8Ptr)
+				block.NewCall(cg.ensureRetain(), heapI8)
+			}
 
 			heapPtrs[varName] = entry.val
 

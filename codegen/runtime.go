@@ -1575,36 +1575,50 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	// thunk (last slot) to call the wrapped concrete struct's
 	// release_ptr.  Raw _tin_release would only free the outer block
 	// and leak any RC-tracked fields (string / fat-array / nested
-	// structs).  Falls back to raw release when the vtable shape
-	// doesn't match (defensive: shouldn't happen for well-formed
-	// trait fat-ptrs).
+	// structs).  An unexpected vtable shape here panics at codegen
+	// time rather than emitting the old silent raw-release fallback:
+	// the genTraitVtables path always appends the data-release thunk
+	// as the last slot, so a shape mismatch indicates a codegen
+	// invariant break that we want to surface loudly during
+	// development -- the silent fallback would manifest as a slow,
+	// hard-to-diagnose leak in any consumer that releases the iface.
 	if isTraitFatPtrShape(st) {
 		dataField := releaseChildren.NewExtractValue(structVal, 0)
 		vtableField := releaseChildren.NewExtractValue(structVal, 1)
 
-		if vtablePtrType, ok := st.Fields[1].(*irtypes.PointerType); ok {
-			if vtableSt, ok2 := vtablePtrType.ElemType.(*irtypes.StructType); ok2 && len(vtableSt.Fields) > 0 {
-				lastIdx := len(vtableSt.Fields) - 1
-				lastFieldType := vtableSt.Fields[lastIdx]
-
-				if lastPt, ok3 := lastFieldType.(*irtypes.PointerType); ok3 {
-					if lastFnType, ok4 := lastPt.ElemType.(*irtypes.FuncType); ok4 && len(lastFnType.Params) == 1 && lastFnType.Params[0].Equal(irtypes.I8Ptr) && irtypes.IsVoid(lastFnType.RetType) {
-						releaseFnSlot := releaseChildren.NewGetElementPtr(vtableSt, vtableField,
-							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(lastIdx)))
-						releaseFn := releaseChildren.NewLoad(lastFieldType, releaseFnSlot)
-
-						releaseChildren.NewCall(releaseFn, dataField)
-						releaseChildren.NewBr(exit)
-
-						exit.NewRet(nil)
-
-						return fn
-					}
-				}
-			}
+		vtablePtrType, ok := st.Fields[1].(*irtypes.PointerType)
+		if !ok {
+			panic(fmt.Sprintf("ensureStructPtrReleaseFn: trait iface %s vtable field is not a pointer type", structName))
 		}
-		// Fallback: raw release if vtable shape doesn't match expectation.
-		releaseChildren.NewCall(cg.ensureRelease(), dataField)
+
+		vtableSt, ok2 := vtablePtrType.ElemType.(*irtypes.StructType)
+		if !ok2 || len(vtableSt.Fields) == 0 {
+			panic(fmt.Sprintf("ensureStructPtrReleaseFn: trait iface %s vtable struct has no fields", structName))
+		}
+
+		lastIdx := len(vtableSt.Fields) - 1
+		lastFieldType := vtableSt.Fields[lastIdx]
+
+		lastPt, ok3 := lastFieldType.(*irtypes.PointerType)
+		if !ok3 {
+			panic(fmt.Sprintf("ensureStructPtrReleaseFn: trait iface %s vtable last slot is not a pointer", structName))
+		}
+
+		lastFnType, ok4 := lastPt.ElemType.(*irtypes.FuncType)
+		if !ok4 || len(lastFnType.Params) != 1 || !lastFnType.Params[0].Equal(irtypes.I8Ptr) || !irtypes.IsVoid(lastFnType.RetType) {
+			panic(fmt.Sprintf("ensureStructPtrReleaseFn: trait iface %s vtable last slot is not void(i8*) data-release thunk", structName))
+		}
+
+		releaseFnSlot := releaseChildren.NewGetElementPtr(vtableSt, vtableField,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(lastIdx)))
+		releaseFn := releaseChildren.NewLoad(lastFieldType, releaseFnSlot)
+
+		releaseChildren.NewCall(releaseFn, dataField)
+		releaseChildren.NewBr(exit)
+
+		exit.NewRet(nil)
+
+		return fn
 	}
 
 	releaseChildren.NewBr(exit)

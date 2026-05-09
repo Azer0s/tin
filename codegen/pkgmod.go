@@ -531,6 +531,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 	}
 
 	knownTypes := map[string]*irtypes.StructType{}
+
 	for _, t := range cg.mod.TypeDefs {
 		if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" {
 			knownTypes[st.Name()] = st
@@ -538,6 +539,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 	}
 
 	knownFuncs := map[string]*ir.Func{}
+
 	for _, f := range cg.mod.Funcs {
 		if f.Name() != "" {
 			knownFuncs[f.Name()] = f
@@ -545,6 +547,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 	}
 
 	knownGlobals := map[string]*ir.Global{}
+
 	for _, g := range cg.mod.Globals {
 		if g.Name() != "" {
 			knownGlobals[g.Name()] = g
@@ -560,6 +563,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 			st, ok := t.(*irtypes.StructType)
 			if !ok || st.Name() == "" {
 				cg.mod.TypeDefs = append(cg.mod.TypeDefs, t)
+
 				continue
 			}
 
@@ -575,6 +579,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 			name := g.Name()
 			if name == "" {
 				cg.mod.Globals = append(cg.mod.Globals, g)
+
 				continue
 			}
 
@@ -607,6 +612,7 @@ func (cg *CodeGen) mergePkgModsIntoMain() {
 			name := f.Name()
 			if name == "" {
 				cg.mod.Funcs = append(cg.mod.Funcs, f)
+
 				continue
 			}
 

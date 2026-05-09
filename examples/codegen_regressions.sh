@@ -484,6 +484,33 @@ test "coerce as arg" =
   assert::equals(m as string, "$1234")
 '
 
+# Same pattern but the coerce target is a struct with RC sub-fields
+# (string, fat array, *Trait, etc.).  Pre-fix genAsExpr only registered
+# a synthetic scope entry when isRCTrackedType(result) was true, which
+# returns false for any non-fat-ptr struct.  Result: every `m as
+# Wallet` call leaked the Wallet's `amount` string.
+assert_zero_leaks "coerce[Struct] with RC field releases on scope exit" '
+use assert
+
+struct Wallet =
+  amount string
+
+struct Money(coerce[Wallet]) =
+  v i64
+
+  static fn ::coerce(this Money) Wallet =
+    return Wallet{amount: "{this.v}"}
+
+test "coerce stress: 1000 iterations leak nothing" =
+  let m = Money{v: 42}
+  let i i64 = 0
+
+  for i < 1000:
+    let w = m as Wallet
+    assert::equals(w.amount, "42")
+    i = i + 1
+'
+
 # ── early-heap-promoted local on conditional return: if either branch
 # returns a different `&local`, the unreturned branch'\''s heap alloc
 # must be released at function exit, not leaked.
@@ -506,6 +533,33 @@ test "true branch" =
 test "false branch" =
   let p = pick(false)
   assert::equals(*p, 200)
+'
+
+# Same pattern but with a non-named-struct early-heap'd local (fat
+# array of strings).  Pre-fix releaseUnreturned called raw
+# _tin_release on the unreturned branch's heap block, which freed the
+# outer fat-array struct but never released the element strings -- a
+# real leak for any return-an-address pattern with non-primitive
+# locals on a sibling branch.
+assert_zero_leaks "conditional &local releases unreturned [string]" '
+use assert
+
+fn pick(cond bool) *[string] =
+  let yes [string] = ["a", "b"]
+  let no  [string] = ["c", "d"]
+
+  if cond:
+    return &yes
+
+  return &no
+
+test "true branch keeps yes alive" =
+  let p = pick(true)
+  assert::equals((*p)[0], "a")
+
+test "false branch keeps no alive" =
+  let p = pick(false)
+  assert::equals((*p)[0], "c")
 '
 
 # ── *Trait widening from an existing binding must NOT double-free.
@@ -534,6 +588,67 @@ test "widen + downcast" =
   match (*back).k:
     case Tag(v): assert::equals(v, 99)
     case Empty:  assert::fails("expected Tag")
+'
+
+# ── Returning a *Trait field from an aggregate must retain the heap
+# block so the caller'\''s scope-exit release stays balanced.  Pre-fix
+# emitRetain was a no-op for bare *<iface> values (the trait fat-ptr
+# struct lives in cg.traitFatPtrTypes, not cg.structTypes), so
+# `return s.iface_field` left the iface RC unchanged while the caller
+# decremented on scope exit -- use-after-free crash after a couple of
+# iterations of any pattern that borrows a trait pointer through a
+# wrapper.
+assert_zero_leaks "return *Trait field through wrapper struct" '
+use assert
+use errors
+
+struct Holder =
+  e *errors::Err
+
+fn get_e(h Holder) *errors::Err =
+  return h.e
+
+test "1000 iter loop borrowing *Err field" =
+  let h = Holder{e: errors::new("inner")}
+  let i i64 = 0
+
+  for i < 1000:
+    let r = get_e(h)
+    assert::equals(errors::message(r), "inner")
+    i = i + 1
+'
+
+# ── Trait-widening a struct that implements multiple traits to two
+# distinct *Trait pointers must release both iface heap blocks AND
+# the underlying struct exactly once.  Pre-fix `let a *T1 = c; let m
+# *T2 = c` over-counted: genVarDecl'\''s post-coerce retain branch
+# treated the result of buildPtrToTraitBorrow as a borrow and added a
+# retain on top of the freshly-allocated iface block -- net +1 ref
+# count per widening, leaking 3 objects per iteration in a loop.
+assert_zero_leaks "trait widening to two traits drops cleanly" '
+use assert
+
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+trait Mammal =
+  fn fur_color(this Mammal) string = virtual
+
+struct Cat(Animal, Mammal) =
+  name string
+  fn Animal::sound(this Cat) string = return "meow"
+  fn Mammal::fur_color(this Cat) string = return "tabby"
+
+test "1000 iter double-widen does not leak" =
+  let i i64 = 0
+
+  for i < 1000:
+    let c = &Cat{name: "felix"}
+    let a *Animal = c
+    let m *Mammal = c
+    assert::equals(a.sound(), "meow")
+    assert::equals(m.fur_color(), "tabby")
+    i = i + 1
 '
 
 # ── #allow_drop is for fire-and-forget Future returns (channel.send),

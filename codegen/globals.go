@@ -517,19 +517,22 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 	}
 
 	if len(v.Positional) > 0 {
-		// Reject arity mismatches up front: the runtime path
-		// (genStructLit) errors on extra args and on missing args, so
-		// silently truncating / zero-filling here would suppress a
-		// diagnostic the user expects.  Fall back to runtime init by
-		// returning nil; the runtime path then surfaces the real error
-		// at the user's source line.
-		userFieldCount := len(st.Fields) - userOff
-		if len(v.Positional) != userFieldCount {
-			return nil
-		}
-
+		// Tin's runtime genStructLit silently zero-fills missing
+		// trailing fields and silently drops args past the field
+		// count (codegen/exprs_ops.go around line 841).  Mirror that
+		// behavior here so the fold path produces the same struct
+		// shape as the runtime; otherwise partial-positional const
+		// literals (`const C = Color{1, 2}` for a 4-field struct)
+		// would refuse the fold and force a runtime init, even
+		// though the runtime is happy to fill the rest with zeros.
+		// If we ever tighten the runtime to error on arity mismatch,
+		// the matching fold-side rejection should land at the same
+		// time.
 		for i, elem := range v.Positional {
 			idx := userOff + i
+			if idx >= len(st.Fields) {
+				break
+			}
 
 			c := cg.tryConstantFold(elem, st.Fields[idx])
 			if c == nil {
@@ -538,12 +541,7 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 
 			values[idx] = c
 		}
-	} else if len(v.Fields) > 0 {
-		// Same parity: all-or-none.  Either every user field is
-		// supplied by name (and every supplied name resolves), or we
-		// bail to the runtime path so the user gets a diagnostic.
-		seen := make(map[string]bool, len(v.Fields))
-
+	} else {
 		for _, f := range v.Fields {
 			rawIdx := -1
 
@@ -556,13 +554,12 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 			}
 
 			if rawIdx < 0 {
-				// Unknown field name: defer to runtime path.
-				return nil
+				continue
 			}
 
 			idx := userOff + rawIdx
 			if idx >= len(st.Fields) {
-				return nil
+				continue
 			}
 
 			c := cg.tryConstantFold(f.Value, st.Fields[idx])
@@ -571,15 +568,6 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 			}
 
 			values[idx] = c
-			seen[f.Name] = true
-		}
-		// Reject if any user field was omitted: the runtime path
-		// applies declared defaults and may also error on missing
-		// fields.  Folding with zero would silently bypass both.
-		for _, fn := range fieldNames {
-			if !seen[fn] {
-				return nil
-			}
 		}
 	}
 
