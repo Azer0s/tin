@@ -16,7 +16,10 @@ fn{#async} main() =
   if errors::is_err(err):
     panic(err.message())
 
-  let tls_conn = await tls::connect("localhost", conn.fd())
+  let (tls_conn, tls_err) = await tls::connect("localhost", conn.fd())
+
+  if errors::is_err(tls_err):
+    panic(tls_err.message())
 
   let rounds i64 = 1000
   let t0 = io::now_us()

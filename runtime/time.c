@@ -94,7 +94,13 @@ int _tin_from_rfc3339(const char *s, int64_t *ns_out) {
         tz_sign = (*p == '+') ? 1 : -1;
         p++;
         int tzh = 0, tzm = 0;
-        if (sscanf(p, "%d:%d", &tzh, &tzm) == 2) { tz_hour = tzh; tz_min = tzm; }
+        if (sscanf(p, "%d:%d", &tzh, &tzm) != 2) return -1;
+        // RFC 3339 sec 5.6 caps offsets at +/-23:59.  sscanf would
+        // otherwise accept "+99:99" and shift the epoch by an
+        // arbitrary amount, masking malformed input.
+        if (tzh < 0 || tzh > 23 || tzm < 0 || tzm > 59) return -1;
+        tz_hour = tzh;
+        tz_min  = tzm;
     }
     struct tm t;
     memset(&t, 0, sizeof(t));
@@ -107,6 +113,12 @@ int _tin_from_rfc3339(const char *s, int64_t *ns_out) {
     time_t epoch = timegm(&t);
     if (epoch == (time_t)-1) return -1;
     epoch -= tz_sign * (tz_hour * 3600 + tz_min * 60);
-    *ns_out = (int64_t)epoch * 1000000000LL + frac_ns;
+    // Final ns multiply: timegm produces a time_t in the i64 range,
+    // but multiplying by 1e9 must stay representable.  Reject inputs
+    // whose nanosecond value would overflow rather than silently
+    // wrapping the result.
+    int64_t epoch_i64 = (int64_t)epoch;
+    if (epoch_i64 > 9223372036LL || epoch_i64 < -9223372036LL) return -1;
+    *ns_out = epoch_i64 * 1000000000LL + frac_ns;
     return 0;
 }

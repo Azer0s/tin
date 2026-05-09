@@ -285,17 +285,21 @@ fn format_impl(v Value) string =
   return result
 
 fn repeat_char(c char, n i64) string =
-  // No 64-byte cap: scales beyond 64 produced silent truncation,
-  // which clipped leading zeros and corrupted the number.  Build
-  // via string ++ byte concatenation instead.
-  let out = ""
+  // Build into a [byte] (amortised O(1) push) then convert once.  The
+  // earlier `out = out ++ byte` form was O(n^2): every concat
+  // reallocated and copied the entire prefix, so a 100k-digit
+  // formatted decimal hung visibly.  Cap the length at i64::MAX
+  // implicitly via the loop counter; n <= 0 returns "".
+  if n <= 0:
+    return ""
+  let buf [byte] = []
   let i i64 = 0
 
   for i < n:
-    out = out ++ (c as byte)
+    buf ++= (c as byte)
     i = i + 1
 
-  return out
+  return buf as string
 
 export {
   Value,

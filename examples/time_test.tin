@@ -185,6 +185,22 @@ test "parse with unsupported layout returns error" =
   let (_, err) = time::parse("YYYY-MM-DD", "2024-01-15")
   assert::ok(errors::is_err(err))
 
+// RFC 3339 sec 5.6 caps timezone offsets at +/-23:59.  Pre-fix the
+// parser accepted arbitrary "+99:99" / "-50:00" via raw sscanf and
+// silently shifted the epoch; bound-check now rejects.
+
+test "parse rejects out-of-range RFC3339 timezone offset" =
+  let (_, err) = time::parse(time::RFC3339, "2024-01-15T12:34:56+99:99")
+  assert::ok(errors::is_err(err))
+
+test "parse rejects RFC3339 minute offset out of range" =
+  let (_, err) = time::parse(time::RFC3339, "2024-01-15T12:34:56-05:99")
+  assert::ok(errors::is_err(err))
+
+test "parse accepts max valid RFC3339 timezone offset" =
+  let (_, err) = time::parse(time::RFC3339, "2024-01-15T12:34:56+23:59")
+  assert::not_ok(errors::is_err(err))
+
 // ---- Instant::now ----
 
 test "now returns positive timestamp" =

@@ -142,3 +142,18 @@ test "parse accepts negative" =
   let (v, err) = decimal::parse("-3.14")
   assert::ok(err == nil)
   assert::equals(-314, v.coeff)
+
+// Formatting a Value with a large fractional scale exercises
+// repeat_char.  Pre-fix this concatenated bytes onto a growing
+// string per iteration -- O(n^2).  Even ~500 digits could hang on
+// slower machines; this case sanity-checks that the work happens in
+// linear-ish time and produces the right output.
+test "decimal repeat_char formats wide-scale value correctly" =
+  let v = decimal::Value{coeff: 1, scale: 500}
+  let s = "{v}"
+
+  // "0." + 499 zeros + "1" => 502 chars.
+  assert::equals(len(s), 502)
+  assert::equals(s[0], @'0')
+  assert::equals(s[1], @'.')
+  assert::equals(s[len(s) - 1], @'1')
