@@ -3,6 +3,7 @@ package codegen
 // types.go - LLVM type mapping, type helpers, and type query utilities.
 
 import (
+	"fmt"
 	"strings"
 
 	irtypes "github.com/llir/llvm/ir/types"
@@ -435,7 +436,30 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	if alias, ok := cg.typeAliases[bareName]; ok {
 		return cg.tinTypeToLLVM(alias)
 	}
-	// Default to i64
+	// Unknown identifier in a type position. Tin's convention is that
+	// real type names are capitalized (Result, Option, Future) and
+	// type parameters are lowercase (t, e, K). We only flag the
+	// capitalized case as an unknown-type error so generic templates,
+	// whose signatures still mention parameter names like `t` before
+	// substitution, can lower without complaint. The previous silent
+	// fall-through to i64 for capitalized names masked typos and let
+	// callers reference types from un-imported packages.
+	if bareName != "" && bareName[0] >= 'A' && bareName[0] <= 'Z' {
+		// One last shot: if the bare name is in dataDecls, accept it.
+		// Predeclare phase may resolve types before genDataDecl sets up
+		// the package-qualified entries we usually look at for ADTs.
+		if _, ok := cg.dataDecls[bareName]; ok {
+			// dataDecls has the template; concrete monomorphization
+			// happens via the GenericType branch when type args are
+			// supplied. A bare reference to a generic ADT (no args) is
+			// rarely meaningful but safe to fall through to i64 for
+			// historical compatibility — the eventual user error
+			// surfaces at the actual use site.
+			return irtypes.I64, nil
+		}
+
+		return nil, fmt.Errorf("unknown type %q (did you forget to `use` the package that defines it?)", name)
+	}
 
 	return irtypes.I64, nil
 }

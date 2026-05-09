@@ -68,6 +68,12 @@ type FuncDecl struct {
 	IsStatic       bool
 	IsExtern       string // non-empty = extern symbol name
 	IsVirtual      bool   // true for "fn f() T = virtual" in trait declarations
+
+	// RetTypeHasWildcard records whether RetType contained a WildcardType
+	// before generic substitution. Preserved through monomorphization so
+	// call sites can opt into wildcard-driven coercion ("call-site
+	// generics") for the return value.
+	RetTypeHasWildcard bool
 }
 
 // TypeConstraint bounds a type parameter with a boolean expression of trait
@@ -201,12 +207,24 @@ type UnionDecl struct {
 // Each variant carries zero or more positional or named fields.
 // At least one variant must carry a payload (pure-nullary shapes should
 // use `enum` instead).
+//
+// ADTs may also implement traits, mirroring struct trait impls:
+//
+//	data Result[T, E](tryable[T, Result[T, E]]) =
+//	  Ok(v T)
+//	  Err(msg E)
+//
+//	  fn tryable[T, Result[T, E]]::is_err(this Result[T, E]) bool = ...
+//
+// Trait impls live in the Implements list; method bodies live in Methods.
 type DataDecl struct {
 	base
 	Name        string
 	TypeParams  []string
 	Constraints []TypeConstraint
 	Variants    []DataVariant
+	Implements  []TypeExpr  // trait impls listed in parens, mirrors StructDecl.Implements
+	Methods     []*FuncDecl // method bodies for trait impls, mirrors StructDecl.Methods
 }
 
 type DataVariant struct {
@@ -876,6 +894,20 @@ type AwaitExpr struct {
 	Future Node
 }
 
+// TryExpr propagates a fallible-typed expression: `try foo()`.
+// Codegen desugars to:
+//
+//	let __t = expr
+//	if __t.tryable::is_err():
+//	  return __t.tryable::err_value()
+//	__t.tryable::ok_value()
+//
+// The enclosing fn must return a type compatible with err_value's return.
+type TryExpr struct {
+	base
+	Inner Node
+}
+
 // YieldStmt voluntarily yields the current fiber's time slice.
 type YieldStmt struct{ base }
 
@@ -1003,3 +1035,21 @@ type VoidType struct{}
 
 func (v *VoidType) typeExprMarker() {}
 func (v *VoidType) String() string  { return "void" }
+
+// WildcardType is the `_` placeholder permitted only in trait-bound
+// positions. It denotes an existentially-bound slot the impl picks.
+// Name is empty for anonymous `_`; non-empty for `_: T` where T is the
+// caller-supplied name used to refer to the slot inside the trait body
+// or impl methods.
+type WildcardType struct {
+	Name string // "" for anonymous `_`, otherwise the introduced name
+}
+
+func (w *WildcardType) typeExprMarker() {}
+func (w *WildcardType) String() string {
+	if w.Name == "" {
+		return "_"
+	}
+
+	return "_: " + w.Name
+}

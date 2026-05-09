@@ -1579,6 +1579,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		return nil
 	}
 
+	// Mirror this monomorphized FuncDecl in funcDecls under the IR
+	// scope name so call-site machinery (e.g. wildcard call-site
+	// generics) can look up the original FuncDecl by the same key the
+	// scope uses.
+	if scopeName != "" {
+		if _, present := cg.funcDecls[scopeName]; !present {
+			cg.funcDecls[scopeName] = n
+		}
+	}
+
 	// Build the mutated-names set for the if-condition folder. Restored
 	// after the body so nested function generations don't leak names
 	// across each other.

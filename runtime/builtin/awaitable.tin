@@ -1,0 +1,15 @@
+// runtime/builtin/awaitable.tin
+//
+// awaitable[t] trait - implement this on a struct to make it usable
+// with the `await` keyword.
+//
+// Example:
+//   struct MyFuture(awaitable[i64]) =
+//     ...
+//     fn awaitable[i64]::await_result(this MyFuture) i64 = ...
+//
+//   let f = MyFuture{...}
+//   let v = await f   // calls f.await_result()
+
+trait awaitable[t] =
+  fn await_result(this awaitable[t]) t = virtual

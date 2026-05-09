@@ -1775,6 +1775,16 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 }
 
 func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
+	// `return try expr` yields the success value (V from tryable[V, C]),
+	// not the container — so the natural-feeling form is almost always a
+	// type error in user code. Surface the gotcha with a hint pointing at
+	// the constructor wrap they probably meant. The underlying
+	// type-check still fires; this just adds context.
+	if _, isTryExpr := s.Value.(*ast.TryExpr); isTryExpr {
+		cg.warn(DiagReturnTry, s.Pos(),
+			"`return try expr` returns the success value, not the container; did you mean `return Ok(try expr)` or `return Some(try expr)`?")
+	}
+
 	// Propagate "owning iface" up the call graph: if we're returning a
 	// binding that we know carries an escape-promoted iface data block,
 	// flag this function so callers' let-bindings inherit
@@ -2035,6 +2045,21 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	}
 
 	cg.emitAllScopeReleases(block, retSkipName)
+
+	// Tin-level type-mismatch check on the return value: surface the
+	// error here so users see a Tin source location and message instead
+	// of an LLVM IR-level type-mismatch from clang on the temp .ll.
+	// This covers the case where a wildcard call-site mono didn't apply
+	// (impl didn't opt in) and the call returned the impl's concrete
+	// container shape that doesn't match the enclosing fn's return.
+	if cg.curFn != nil && val != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
+		if !val.Type().Equal(cg.curFn.Sig.RetType) {
+			return cg.nodeErr(s,
+				"return type mismatch: expected %s, got %s; if the called method has a wildcard return type, ensure its trait bound declares the wildcard slot (e.g. `tryable[T, Result[_, E]]`) so the value can be reconstructed in the enclosing function's type",
+				fmtArgType(cg.curFn.Sig.RetType), fmtArgType(val.Type()))
+		}
+	}
+
 	block.NewRet(val)
 
 	return nil

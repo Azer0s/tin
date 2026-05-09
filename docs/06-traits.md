@@ -233,6 +233,78 @@ Different type argument instantiations are independent. `iter[i64]` and
 
 ---
 
+## Call-site generics  -  wildcard slots in trait bounds
+
+A trait bound or method return type may contain `_` (wildcard). The
+slot is filled per call site by context, and the compiler emits one
+monomorphization per unique fill - in addition to the data type's
+own generic monomorphizations:
+
+```rust
+data Result[T, E](tryable[T, Result[_, E]]) =
+  Ok(v T)
+  Err(msg E)
+
+  fn err_value(this Result[T, E]) Result[_, E] =
+    match this:
+      case Ok(_):  panic("err_value on Ok")
+      case Err(_): return this
+```
+
+The `_` in `Result[_, E]` says "this slot is impl-determined; let
+each call pick." When `err_value` is called from four functions that
+fix the wildcard differently:
+
+```rust
+fn a() Result[i64,    MyErr] = return try r
+fn b() Result[string, MyErr] = return try r
+fn c() Result[any,    MyErr] = return try r
+fn d() Result[bool,   MyErr] = return try r
+```
+
+the compiler emits four monomorphizations - one per distinct fill -
+and each call dispatches directly to the correct one. There is no
+runtime tag-walk; resolution happens at compile time via the same
+mechanism Tin uses for regular generic functions.
+
+Without the wildcard, the impl commits to its concrete container
+shape and cross-T calls fail with a regular type-mismatch error:
+
+```rust
+data Result[T, E](tryable[T, Result[T, E]]) =
+  fn err_value(this Result[T, E]) Result[T, E] = this  // no `_`
+
+let r Result[i64, MyErr]    = ...
+let s Result[string, MyErr] = r.err_value()  // compile error
+```
+
+The wildcard is the explicit opt-in saying "this slot is
+fillable per call."
+
+The compiler picks the wildcard's substitution from whichever of
+these is unambiguous at the call site:
+
+- An explicit type annotation:
+  `let r Result[string, E] = adt.err_value()`.
+- The enclosing function's declared return type, when the call's
+  result is being returned: `return adt.err_value()`.
+- The expected argument type at a call: passing the result into a
+  function whose parameter type fixes the slot.
+
+If multiple contexts apply they must agree; if none fixes the slot
+the call is a compile error. Tin does not guess across wildcards.
+
+Wildcards may appear only in trait-bound positions (impl headers,
+generic where clauses, the return type of a method whose enclosing
+trait bound declares the slot). They are not value-level types:
+`let x _ = ...` and `fn f(x _) ...` are syntax errors.
+
+The internals doc at `docs/internals/call-site-generics.md`
+covers how the monomorphization is keyed and when the
+variant-aware reconstruction codegen runs.
+
+---
+
 ## Function-alias traits
 
 `trait X as fn(params) RetType` declares a trait whose sole requirement is

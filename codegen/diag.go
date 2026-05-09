@@ -16,6 +16,7 @@ import (
 // names so the user can scope suppression and escalation precisely.
 const (
 	DiagAsyncMain         = "async-main"
+	DiagReturnTry         = "return-try"
 	DiagBoolAnalysis      = "bool-analysis"
 	DiagUnusedMatchArms   = "unused-match-arms"
 	DiagAwaitMatchGuards  = "await-match-guards"

@@ -263,7 +263,7 @@ func (cg *CodeGen) isAwaitableType(te ast.TypeExpr) bool {
 			traitName = traitName[idx+2:]
 		}
 
-		if traitName == "Awaitable" {
+		if traitName == "awaitable" {
 			return true
 		}
 	}

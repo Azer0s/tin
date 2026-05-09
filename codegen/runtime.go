@@ -6,6 +6,7 @@ package codegen
 import (
 	"crypto/sha1"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -2569,7 +2570,26 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 			ir.NewParam("fn", irtypes.I8Ptr),
 		}, false)
 
-	for structName, typeID := range cg.structTypeIDs {
+	// Iterate in typeID order so the emitted register-call sequence is
+	// deterministic across program runs (Go map iteration is randomized).
+	type structEntry struct {
+		Name   string
+		TypeID int32
+	}
+
+	entries := make([]structEntry, 0, len(cg.structTypeIDs))
+
+	for name, id := range cg.structTypeIDs {
+		entries = append(entries, structEntry{Name: name, TypeID: id})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].TypeID < entries[j].TypeID
+	})
+
+	for _, e := range entries {
+		structName, typeID := e.Name, e.TypeID
+
 		st, ok := cg.structTypes[structName]
 		if !ok {
 			continue

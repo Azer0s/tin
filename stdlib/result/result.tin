@@ -21,9 +21,24 @@
 
 use option
 
-data Result[t, e] =
+data Result[t, e](tryable[t, Result[_, e]]) =
   Ok(v t)
   Err(msg e)
+
+  fn tryable[t, Result[_, e]]::is_err(this Result[t, e]) bool =
+    match this:
+      case Ok(_):  return false
+      case Err(_): return true
+
+  fn tryable[t, Result[_, e]]::ok_value(this Result[t, e]) t =
+    match this:
+      case Ok(v):  return v
+      case Err(_): panic("tryable::ok_value on Err")
+
+  fn tryable[t, Result[_, e]]::err_value(this Result[t, e]) Result[_, e] =
+    match this:
+      case Ok(_):  panic("tryable::err_value on Ok")
+      case Err(_): return this
 
 // is_ok reports whether the Result is an Ok value.
 fn is_ok[t, e](r Result[t, e]) bool =

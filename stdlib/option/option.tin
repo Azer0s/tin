@@ -16,9 +16,24 @@
 // when it is known (let-annotations, function arguments, function returns);
 // otherwise qualify explicitly, e.g. `Option[i64]::None`.
 
-data Option[t] =
+data Option[t](tryable[t, Option[_]]) =
   None
   Some(v t)
+
+  fn tryable[t, Option[_]]::is_err(this Option[t]) bool =
+    match this:
+      case Some(_): return false
+      case None:    return true
+
+  fn tryable[t, Option[_]]::ok_value(this Option[t]) t =
+    match this:
+      case Some(v): return v
+      case None:    panic("tryable::ok_value on None")
+
+  fn tryable[t, Option[_]]::err_value(this Option[t]) Option[_] =
+    match this:
+      case Some(_): panic("tryable::err_value on Some")
+      case None:    return this
 
 // is_some reports whether the Option holds a value.
 fn is_some[t](o Option[t]) bool =

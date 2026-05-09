@@ -574,6 +574,18 @@ func (p *Parser) parseUnionDecl() (*ast.UnionDecl, error) {
 //	  Variant1(t)
 //	  Variant2(name type, name type)
 //
+// ADTs may also implement traits and define method bodies for those
+// impls, mirroring struct trait impl syntax:
+//
+//	data Result[T, E](tryable[T, Result[T, E]]) =
+//	  Ok(v T)
+//	  Err(msg E)
+//
+//	  fn tryable[T, Result[T, E]]::is_err(this Result[T, E]) bool = ...
+//
+// Methods may appear interleaved with variants in the body; the parser
+// dispatches based on whether the next token is `fn`.
+//
 // At least one variant must carry a payload; pure-nullary ADTs are
 // rejected in favor of `enum`.
 func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
@@ -587,6 +599,35 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 
 	typeParams, _ := p.parseTypeParams()
 
+	// Optional trait implementations: data Foo[T](TraitA, TraitB[T]) =
+	// Mirrors the struct shape; the list may span multiple lines.
+	var impls []ast.TypeExpr
+
+	if p.check(lexer.LPAREN) {
+		p.advance()
+		p.skipWhitespace()
+
+		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			ti, err2 := p.parseTypeExpr()
+			if err2 != nil {
+				return nil, err2
+			}
+
+			impls = append(impls, ti)
+
+			p.skipWhitespace()
+
+			if p.check(lexer.COMMA) {
+				p.advance()
+				p.skipWhitespace()
+			}
+		}
+
+		if _, err2 := p.expect(lexer.RPAREN); err2 != nil {
+			return nil, err2
+		}
+	}
+
 	constraints := p.parseTypeConstraints()
 
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
@@ -597,6 +638,7 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 		Name:        nameTok.Literal,
 		TypeParams:  typeParams,
 		Constraints: constraints,
+		Implements:  impls,
 	}
 
 	if !p.check(lexer.NEWLINE) {
@@ -616,6 +658,23 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	anyPayload := false
 
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
+		// Methods (fn ...) can interleave with variants in the body.
+		// Useful for trait impl bodies on the ADT itself.
+		if p.check(lexer.KW_FN) {
+			fn, err2 := p.parseFuncDecl(nil, false)
+			if err2 != nil {
+				return nil, err2
+			}
+
+			if fn != nil {
+				decl.Methods = append(decl.Methods, fn)
+			}
+
+			p.skipNewlines()
+
+			continue
+		}
+
 		v, err2 := p.parseDataVariant()
 		if err2 != nil {
 			return nil, err2

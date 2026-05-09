@@ -853,6 +853,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 				}
 			}
+			// Call-site generics: when the called method's return type
+			// originally contained a wildcard slot and a return-type hint
+			// differs from the callee's actual return type, route through
+			// the per-target monomorphization so the call's result is
+			// directly the target shape (no caller-side rewrap).
+			if f, ok2 := callee.(*ir.Func); ok2 {
+				if decl := cg.funcDecls[methodName]; decl != nil && decl.RetTypeHasWildcard {
+					if cg.returnTypeHint == nil {
+						return nil, cg.nodeErr(e,
+							"%s.%s has a wildcard slot in its return type that needs context to fill (a let-binding type annotation, the enclosing function's return type, or an argument type expectation). Annotate the receiving binding (e.g. `let x %s = ...`) or call the method through `try` inside a function whose return type fixes the slot.",
+							prettyStructName(structName), strings.TrimPrefix(methodName, structName+"_"),
+							prettyStructName(structName))
+					}
+
+					if !cg.returnTypeHint.Equal(f.Sig.RetType) {
+						bareMethod := strings.TrimPrefix(methodName, structName+"_")
+						if monoFn, ok3 := cg.ensureWildcardMono(structName, bareMethod, objVal.Type(), cg.returnTypeHint); ok3 {
+							callee = monoFn
+						}
+					}
+				}
+			}
+
 			// Adapt arg types to function signature.
 			if f, ok2 := callee.(*ir.Func); ok2 {
 				calleeType = f.Sig

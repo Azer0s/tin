@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -12,6 +13,33 @@ import (
 
 	"github.com/Azer0s/tin/ast"
 )
+
+// sortedVariants returns the entries of variants sorted by tag so that
+// codegen emission is deterministic across program runs (Go's map
+// iteration is randomized per run, which would otherwise blow byte-for-
+// byte determinism in the IR — see TestIRDeterminism).
+func sortedVariants(variants map[string]*dataVariantInfo) []struct {
+	Name string
+	Info *dataVariantInfo
+} {
+	entries := make([]struct {
+		Name string
+		Info *dataVariantInfo
+	}, 0, len(variants))
+
+	for name, vi := range variants {
+		entries = append(entries, struct {
+			Name string
+			Info *dataVariantInfo
+		}{Name: name, Info: vi})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Info.Tag < entries[j].Info.Tag
+	})
+
+	return entries
+}
 
 // dataVariantInfo holds the per-variant layout of an ADT variant.
 // Tag is the ordinal index (declaration order). PayloadType is the LLVM struct
@@ -44,7 +72,68 @@ func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 		cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], n.Name)
 	}
 
-	return cg.emitConcreteData(n.Name, n)
+	if err := cg.emitConcreteData(n.Name, n); err != nil {
+		return err
+	}
+
+	return cg.genDataMethods(n.Name, n)
+}
+
+// genDataMethods emits method bodies declared in a `data` block as
+// top-level LLVM functions named `<DataName>_<method>` (or trait-qualified
+// when the method has a TraitQualifier). Mirrors the simpler subset of
+// genStructMethods needed for ADT trait impls; the receiver type is the
+// ADT itself rather than a struct.
+//
+// Trait-impl machinery (vtable wrappers, default-method injection,
+// trait-chain shims) is not yet plumbed through for ADTs — that lands in
+// the unified static-table commit. Direct static-dispatch method calls
+// resolve through the emitted functions immediately.
+func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
+	if len(n.Methods) == 0 && len(n.Implements) == 0 {
+		return nil
+	}
+
+	// Pre-register plain-name aliases so a method body that calls another
+	// method on the same ADT (e.g. one trait method delegating to another)
+	// can resolve through the bare name.
+	cg.registerPlainMethodAliases(adtName, n.Methods)
+
+	for _, m := range n.Methods {
+		if len(m.TypeParams) > 0 {
+			templateKey := adtName + "_" + m.Name
+			cg.genericMethodTemplates[templateKey] = m
+
+			continue
+		}
+
+		if err := cg.genStructMethod(adtName, m); err != nil {
+			return err
+		}
+	}
+
+	// Re-register after bodies are emitted so trait-qualified methods that
+	// were predeclared during body codegen surface under their plain names
+	// (mirrors genStructMethods's symmetric pre/post registration).
+	cg.registerPlainMethodAliases(adtName, n.Methods)
+
+	// Emit vtables and trait-impl globals for each implemented trait.
+	// Reuse the struct path by passing a synthetic StructDecl carrying just
+	// the fields genTraitVtables consults (name + impls + methods); the
+	// underlying machinery is type-agnostic.
+	if len(n.Implements) > 0 {
+		shim := &ast.StructDecl{
+			Name:       n.Name,
+			Implements: n.Implements,
+			Methods:    n.Methods,
+		}
+
+		if err := cg.genTraitVtables(shim); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // monomorphizeDataDecl substitutes the template's type parameters with the
@@ -62,14 +151,27 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 			tmpl.Name, len(tmpl.TypeParams), len(typeArgs))
 	}
 
-	subst := make(map[string]ast.TypeExpr, len(typeArgs))
+	subst := make(map[string]ast.TypeExpr, len(typeArgs)+1)
 	for i, name := range tmpl.TypeParams {
 		subst[name] = typeArgs[i]
 	}
 
+	// Convention: anonymous `_` in a partial-bound trait header (e.g.
+	// `tryable[T, Result[_, E]]`) resolves to the impl's success slot,
+	// which by Tin convention is the data's first type parameter. This
+	// is a syntactic shortcut — the underlying type after substitution
+	// is identical to writing `Result[T, E]` explicitly, but lets impls
+	// communicate intent ("the success slot is impl-determined") in the
+	// signature. Real existential cross-T propagation requires a deeper
+	// type-system feature (see masterplan).
+	if len(typeArgs) > 0 {
+		subst["_"] = typeArgs[0]
+	}
+
 	concrete := &ast.DataDecl{
-		Name:     concreteName,
-		Variants: make([]ast.DataVariant, len(tmpl.Variants)),
+		Name:       concreteName,
+		Variants:   make([]ast.DataVariant, len(tmpl.Variants)),
+		Implements: tmpl.Implements,
 	}
 
 	for vi, v := range tmpl.Variants {
@@ -90,13 +192,25 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 		concrete.Variants[vi] = ast.DataVariant{Pos: v.Pos, Name: v.Name, Fields: newFields}
 	}
 
+	// Substitute type params in method bodies and rename the receiver
+	// type from the generic ADT name to its concrete monomorphization.
+	concrete.Methods = make([]*ast.FuncDecl, 0, len(tmpl.Methods))
+	for _, m := range tmpl.Methods {
+		concrete.Methods = append(concrete.Methods,
+			substituteMethod(m, tmpl.Name, concreteName, subst))
+	}
+
 	cg.dataDecls[concreteName] = concrete
 
 	for _, v := range concrete.Variants {
 		cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], concreteName)
 	}
 
-	return cg.emitConcreteData(concreteName, concrete)
+	if err := cg.emitConcreteData(concreteName, concrete); err != nil {
+		return err
+	}
+
+	return cg.genDataMethods(concreteName, concrete)
 }
 
 // substituteTypeParams walks a type expression replacing named type
@@ -108,6 +222,17 @@ func substituteTypeParams(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.Ty
 	}
 
 	switch t := te.(type) {
+	case *ast.WildcardType:
+		key := "_"
+		if t.Name != "" {
+			key = t.Name
+		}
+
+		if replaced, ok := subst[key]; ok {
+			return replaced
+		}
+
+		return t
 	case *ast.SimpleType:
 		if replaced, ok := subst[t.Name]; ok {
 			return replaced
@@ -645,7 +770,8 @@ func (cg *CodeGen) ensureDataPtrReleaseFn(adtName string, st *irtypes.StructType
 
 	var switchCases []*ir.Case
 
-	for variantName, vi := range variants {
+	for _, e := range sortedVariants(variants) {
+		variantName, vi := e.Name, e.Info
 		if !cg.variantHasReleasableField(vi) {
 			continue
 		}
@@ -844,7 +970,8 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 
 	var switchCases []*ir.Case
 
-	for variantName, vi := range variants {
+	for _, e := range sortedVariants(variants) {
+		variantName, vi := e.Name, e.Info
 		if !cg.variantHasReleasableField(vi) {
 			continue
 		}

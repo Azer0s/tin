@@ -9,6 +9,9 @@ package codegen
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -141,6 +144,13 @@ func (cg *CodeGen) ensureFiberRuntime() {
 	cg.fiberInitFn = cg.ensureExternDecl("_tin_fiber_init", irtypes.Void, nil, false)
 	cg.fiberRunFn = cg.ensureExternDecl("_tin_fiber_run", irtypes.Void, nil, false)
 	cg.ioInitFn = cg.ensureExternDecl("_tin_io_init", irtypes.Void, nil, false)
+	// Auto-load runtime/builtin/ so language-defined traits (tryable,
+	// awaitable in the future, operator traits, etc.) are always in scope.
+	// Failure here is non-fatal: if the directory does not exist (e.g. a
+	// custom build), language features that depend on those traits surface
+	// their own errors at use sites.
+	_ = cg.ensureRuntimeBuiltinModules()
+
 	// Auto-load sync so Future[t] and Awaitable[t] are available
 	// for spawn/await codegen without requiring an explicit `use sync`.
 	// Error is stored; if sync fails to load, wrapPidInFuture will report it.
@@ -158,6 +168,55 @@ func (cg *CodeGen) ensureSyncModule() error {
 	cg.syncModuleLoaded = true
 
 	return cg.loadPackage("sync")
+}
+
+// ensureRuntimeBuiltinModules walks runtime/builtin/ and loads every
+// .tin file found so the traits defined there are in scope for every
+// program. Idempotent. Missing directory is treated as "no built-ins"
+// rather than an error so a stripped-down compiler build still works.
+func (cg *CodeGen) ensureRuntimeBuiltinModules() error {
+	if cg.runtimeBuiltinLoaded {
+		return nil
+	}
+
+	cg.runtimeBuiltinLoaded = true
+
+	dir := cg.runtimeBuiltinBase()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// No directory == no built-ins. Not an error.
+		return nil
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tin") {
+			continue
+		}
+
+		full := filepath.Join(dir, e.Name())
+
+		dedupeKey := "file:" + full
+		if cg.importedPkgs[dedupeKey] {
+			continue
+		}
+
+		cg.importedPkgs[dedupeKey] = true
+
+		src, err := os.ReadFile(full)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", full, err)
+		}
+
+		pkgName := strings.TrimSuffix(e.Name(), ".tin")
+		if err := cg.loadPackageFromSource("builtin::"+pkgName, pkgName, full); err != nil {
+			return fmt.Errorf("load %s: %w", full, err)
+		}
+
+		_ = src
+	}
+
+	return nil
 }
 
 // Coroutine prologue helper

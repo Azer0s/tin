@@ -1454,6 +1454,25 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		return p.parseArrayLit()
 
 	case lexer.IDENT, lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		// `try` is a contextual keyword: at expression-prefix position
+		// followed by anything other than `!` (which would indicate the
+		// existing `try!` macro), it parses as a try-expression that the
+		// codegen desugars against the tryable trait. Look at the token
+		// stream without advancing first so the macro path is preserved.
+		if p.peek().Type == lexer.IDENT && p.peek().Literal == "try" && p.peekAt(1).Type != lexer.NOT {
+			tryTok := p.advance()
+
+			inner, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			te := &ast.TryExpr{Inner: inner}
+			te.SetPos(ast.Pos{Line: tryTok.Line, Col: tryTok.Col})
+
+			return te, nil
+		}
+
 		// KW_FORWARD / KW_OVERRIDE are *contextual* keywords -- they
 		// only have meaning inside struct field declarations. Accept
 		// them as plain identifiers in expression position so calls

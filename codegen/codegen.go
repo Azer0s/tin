@@ -71,6 +71,13 @@ type CodeGen struct {
 	// iface's own release_ptr can dispatch via the vtable to release
 	// RC-tracked fields of the wrapped struct.
 	traitDataReleaseThunks map[string]*ir.Func
+	// wildcardMonos: per-(impl method, target type) wrapper functions
+	// for call-site generics. Each unique W (the wildcard's resolution
+	// at a call site) yields a distinct function in this map; calls
+	// dispatch to it directly. The wrapper internally calls the impl's
+	// original method and reconstructs the result in the target type.
+	// Keyed by `<origFnName>__W_<targetTypeName>`.
+	wildcardMonos map[string]*ir.Func
 	// instKey -> base trait name (for generic traits)
 	traitInstKeys map[string]string
 	// traitAsyncMethodNames: base trait name -> names of its {#async} virtual methods (in order)
@@ -881,6 +888,10 @@ type CodeGen struct {
 	// so wrapPidInFuture can report it if Future[T] is not available.
 	syncLoadErr error
 
+	// runtimeBuiltinLoaded is set to true once runtime/builtin/ has been
+	// auto-loaded. Idempotent guard — see ensureRuntimeBuiltinModules.
+	runtimeBuiltinLoaded bool
+
 	// lastSliceBase is a side-channel set by genSliceExpr to communicate the
 	// base allocation pointer (i8*, before any GEP offset) to genVarDecl.
 	// genVarDecl reads and clears it immediately after calling genExpr on a SliceExpr
@@ -1343,6 +1354,7 @@ func New(filename string) *CodeGen {
 		traitMethodOrder:       make(map[string][]string),
 		traitVtableGlobals:     make(map[string]*ir.Global),
 		traitDataReleaseThunks: make(map[string]*ir.Func),
+		wildcardMonos:          make(map[string]*ir.Func),
 		traitInstKeys:          make(map[string]string),
 		traitAsyncMethodNames:  make(map[string][]string),
 		traitBareToQualInstKey: make(map[string]string),
@@ -1455,6 +1467,18 @@ func (cg *CodeGen) stdlibBase() string {
 	}
 
 	return "stdlib"
+}
+
+// runtimeBuiltinBase returns the path to runtime/builtin/, the
+// directory holding language-defined traits (tryable, awaitable,
+// etc.) that are auto-loaded into every Tin program. Sibling of
+// stdlib so a custom-stdlib build still gets the built-in traits.
+func (cg *CodeGen) runtimeBuiltinBase() string {
+	if ex, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(ex), "runtime", "builtin")
+	}
+
+	return filepath.Join("runtime", "builtin")
 }
 
 // initBuiltinTupleTemplates pre-populates the Tuple generic struct templates

@@ -574,11 +574,24 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 		}
 
 		plainName := structKey + "_" + m.Name
+		qualName := methodScopeName(structKey, m)
+
+		// Mirror the FuncDecl under the plain key independently of
+		// the scope alias check below, so callers that look up by
+		// `Type_method` (e.g. genCallExpr's call-site-generics hook)
+		// find the impl's metadata — including RetTypeHasWildcard —
+		// even if the scope alias was already established by an
+		// earlier registerPlainMethodAliases pass.
+		if decl, ok2 := cg.funcDecls[qualName]; ok2 {
+			if _, present := cg.funcDecls[plainName]; !present {
+				cg.funcDecls[plainName] = decl
+			}
+		}
+
 		if _, exists := cg.curScope.lookup(plainName); exists {
 			continue
 		}
 
-		qualName := methodScopeName(structKey, m)
 		if entry, ok := cg.curScope.lookup(qualName); ok {
 			cg.curScope.set(plainName, entry)
 
@@ -692,6 +705,19 @@ func substituteTypeInTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) as
 	}
 
 	switch t := te.(type) {
+	case *ast.WildcardType:
+		// Anonymous `_` resolves through the conventional "_" key
+		// monomorphizeDataDecl populates. Named wildcards `_: T` look up
+		// by their introduced name. Unresolved wildcards pass through
+		// unchanged so callers can decide whether to error.
+		key := "_"
+		if t.Name != "" {
+			key = t.Name
+		}
+
+		if rep, ok := subst[key]; ok {
+			return rep
+		}
 	case *ast.SimpleType:
 		if rep, ok := subst[t.Name]; ok {
 			return rep
@@ -763,6 +789,10 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 		IsStatic:       m.IsStatic,
 		IsExtern:       m.IsExtern,
 		IsVirtual:      m.IsVirtual,
+		// Preserve the wildcard-return marker through monomorphization
+		// so call-site generics can opt in based on the original
+		// declaration's intent.
+		RetTypeHasWildcard: m.RetTypeHasWildcard || typeExprContainsWildcard(m.RetType),
 	}
 	out.SetPos(m.Pos())
 
@@ -1246,6 +1276,15 @@ func traitImplKey(te ast.TypeExpr) string {
 		}
 
 		return key
+	case *ast.WildcardType:
+		// Wildcard slots are existentials resolved by the impl-matcher.
+		// Encode the slot's name (or an anonymous placeholder) so two
+		// distinct wildcards in the same bound don't collide.
+		if t.Name != "" {
+			return "_W_" + t.Name
+		}
+
+		return "_W"
 	}
 
 	return "unknown"
@@ -1278,6 +1317,12 @@ func bareTraitImplKey(te ast.TypeExpr) string {
 		}
 
 		return key
+	case *ast.WildcardType:
+		if t.Name != "" {
+			return "_W_" + t.Name
+		}
+
+		return "_W"
 	}
 
 	return "unknown"
@@ -1963,8 +2008,23 @@ func (cg *CodeGen) ensureTraitDataReleaseThunk(structKey string, structSt *irtyp
 
 	entry := fn.NewBlock("entry")
 	structPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(structSt))
-	relFn := cg.ensureStructPtrReleaseFn(structKey, structSt)
-	entry.NewCall(relFn, structPtr)
+
+	// ADTs have their own release function (ensureDataPtrReleaseFn) that
+	// dispatches per-variant; the struct release path would treat the ADT
+	// as a flat struct and skip variant-specific payload teardown,
+	// leaking RC-tracked fields nested inside variants. Detect ADTs by
+	// presence in cg.dataVariants and route accordingly.
+	var relFn *ir.Func
+	if _, isADT := cg.dataVariants[structKey]; isADT {
+		relFn = cg.ensureDataPtrReleaseFn(structKey, structSt)
+	} else {
+		relFn = cg.ensureStructPtrReleaseFn(structKey, structSt)
+	}
+
+	if relFn != nil {
+		entry.NewCall(relFn, structPtr)
+	}
+
 	entry.NewRet(nil)
 
 	return fn

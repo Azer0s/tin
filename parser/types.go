@@ -167,6 +167,28 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		return &ast.GenericType{Name: "Tuple", TypeParams: types}, nil
 	}
 
+	// Wildcard `_` in trait-bound positions, optionally named via `_: T`.
+	// Parsed as a type expression unconditionally; semantic validation
+	// (only legal inside trait bounds) lives in the type-checker.
+	if p.check(lexer.IDENT) && p.peek().Literal == "_" {
+		p.advance() // consume _
+
+		w := &ast.WildcardType{}
+
+		if p.check(lexer.COLON) {
+			p.advance() // consume :
+
+			tok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+
+			w.Name = tok.Literal
+		}
+
+		return w, nil
+	}
+
 	// Named type, possibly generic: name[T, R] or module::name[T, R]
 	if !p.match(lexer.IDENT) && !isTypeKeyword(p.peek()) {
 		return nil, p.errorf("expected type, got %s (%q)", p.peek().Type, p.peek().Literal)
