@@ -1597,16 +1597,26 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 		for _, entry := range cg.coerceConvFns[structName] {
 			if entry.tgtLLVM.Equal(targetType) {
 				result := block.NewCall(entry.fn, val)
-				// The coerce call returns an rc=1 value (string / fat
-				// array / iface).  When this AsExpr appears as an
-				// argument to another call (e.g. `assert::equals(m as
-				// string, ...)`), the parent's emitCallArgRelease
-				// short-circuits because isCopyExpr(AsExpr) walks
-				// through to the inner identifier and returns true --
-				// treating the cast result as a borrow.  Register a
-				// synthetic scope entry so emitAllScopeReleases drops
-				// the rc=1 reference at scope exit; otherwise it leaks.
-				if cg.curScope != nil && isRCTrackedType(result.Type()) {
+				// The coerce call returns an rc=1 value -- could be a
+				// fat ptr (string / [T] / any / *Trait), or a struct
+				// whose fields hold ARC references that genStructLit
+				// retained at construction time.  When this AsExpr
+				// appears as an argument to another call (e.g.
+				// `assert::equals(m as string, ...)`), the parent's
+				// emitCallArgRelease short-circuits because
+				// isCopyExpr(AsExpr) walks through to the inner
+				// identifier and returns true -- treating the cast
+				// result as a borrow.  Register a synthetic scope
+				// entry so emitAllScopeReleases drops the rc=1
+				// reference at scope exit; otherwise it leaks.
+				//
+				// elemNeedsRelease is recursive (looks through struct
+				// fields), so a `coerce` returning Wallet{amount: string}
+				// is correctly tracked.  Pre-fix this checked
+				// isRCTrackedType, which is false for any non-fat-ptr
+				// struct -- silently leaking RC sub-fields of every
+				// `m as Wallet` call.
+				if cg.curScope != nil && cg.elemNeedsRelease(result.Type()) {
 					alloca := block.NewAlloca(result.Type())
 					block.NewStore(result, alloca)
 

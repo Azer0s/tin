@@ -292,6 +292,13 @@ type CodeGen struct {
 	// Each function has signature void @{name}__release_ptr({struct}* %ptr) and
 	// null-guards before loading/releasing the struct's ARC fields and freeing the block.
 	structPtrReleaseFns map[string]*ir.Func
+	// per-type null-safe heap-block release helpers: type key -> IR function.
+	// Same null-guard / load-then-decrement / release-fields-on-free pattern as
+	// structPtrReleaseFns but for non-named element types (fat array, string,
+	// any, fat fn).  Used by releaseUnreturned so an early-heap-promoted local
+	// of e.g. type [string] tears down its element strings on free instead of
+	// leaking them.
+	heapBlockReleaseFns map[string]*ir.Func
 
 	// Null-safe chain release helpers for depth>1 heap-owned cLayoutStruct pointers.
 	// Key: "structName__chain_N" (depth N). Recursively releases inner chain then frees block.
@@ -1407,6 +1414,7 @@ func New(filename string) *CodeGen {
 		structDeclFiles:          make(map[string]string),
 		elemReleaseHelpers:       make(map[string]*ir.Func),
 		elemRetainHelpers:        make(map[string]*ir.Func),
+		heapBlockReleaseFns:      make(map[string]*ir.Func),
 		structPtrReleaseFns:      make(map[string]*ir.Func),
 		chainReleaseFns:          make(map[string]*ir.Func),
 		diFiles:                  make(map[string]*metadata.DIFile),

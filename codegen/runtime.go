@@ -1072,10 +1072,20 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 			return true // may contain RC fields deeper in
 		}
 
-		// Owning pointer to a known Tin struct: needs recursive release.
+		// Owning pointer to a known Tin struct OR a trait fat-ptr iface
+		// struct: needs recursive release.  Iface structs live in
+		// cg.traitFatPtrTypes (not cg.structTypes), so detect them via
+		// shape -- otherwise an outer struct holding a *Trait field
+		// would be considered "no-release" and emitAllScopeReleases
+		// would skip its scope-exit cleanup, leaking the iface block
+		// (and any RC sub-fields the iface dtor would have torn down).
 		if pt, ok := ft.(*irtypes.PointerType); ok {
 			if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
 				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+					return true
+				}
+
+				if isTraitFatPtrShape(innerSt) {
 					return true
 				}
 			}
@@ -1141,12 +1151,22 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 		_, isNestedStruct := ft.(*irtypes.StructType)
 
 		// Owning pointer to a known Tin struct: must be recursively released/retained
-		// just like an inline nested struct.  Only non-weak fields qualify.
+		// just like an inline nested struct.  Only non-weak fields qualify.  Trait
+		// fat-ptr iface structs live in cg.traitFatPtrTypes (not cg.structTypes), so
+		// detect them via shape too -- otherwise a struct field of type *Trait
+		// (e.g. `e *errors::Err`) would skip retain/release entirely and the iface
+		// block leaks on outer struct copy or use-after-frees on outer struct drop
+		// (caller's drop releases the iface, callee's parameter copy never
+		// retained).
 		isTinStructPtr := false
 
 		if pt, ok2 := ft.(*irtypes.PointerType); ok2 {
 			if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
-				_, isTinStructPtr = cg.structTypes[innerSt.Name()]
+				if _, ok4 := cg.structTypes[innerSt.Name()]; ok4 {
+					isTinStructPtr = true
+				} else if isTraitFatPtrShape(innerSt) {
+					isTinStructPtr = true
+				}
 			}
 		}
 		// Owning raw pointer field -- registered when escape-promoted local
@@ -1195,8 +1215,49 @@ func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit fu
 	}
 }
 
+// emitOwningPtrRetainIfApplicable emits a _tin_retain on val if val is an
+// owning pointer to a named Tin struct or to a trait fat-ptr iface --
+// the cases where ownership transfer requires bumping the heap block's
+// RC.  Returns true when a retain was emitted.  Used by genReturn's
+// "return s.field" copy-expr branch and genVarDecl's
+// "let r = s.field" branch where the caller takes ownership; emitRetain
+// itself doesn't handle these because emitRelease's matching path
+// (ensureStructPtrReleaseFn) is keyed on scope-exit, not on every
+// retain site.
+func (cg *CodeGen) emitOwningPtrRetainIfApplicable(block *ir.Block, val value.Value) bool {
+	pt, ok := val.Type().(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	innerSt, ok2 := pt.ElemType.(*irtypes.StructType)
+	if !ok2 || innerSt.Name() == "" {
+		return false
+	}
+
+	_, isTinStruct := cg.structTypes[innerSt.Name()]
+	if !isTinStruct && !isTraitFatPtrShape(innerSt) {
+		return false
+	}
+
+	ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+	block.NewCall(cg.ensureRetain(), ptrI8)
+
+	return true
+}
+
 // emitRetain emits a _tin_retain call for an ARC-tracked value.
 // For named structs, it also retains any RC-tracked fields.
+//
+// NOTE: bare *<named struct> / *<iface> values are NOT retained here.
+// Tin's calling convention treats those as borrows -- the caller's
+// retain at the call site or struct-copy path is what keeps the
+// pointee alive, and callee scope exit must not release.  Mirroring
+// that asymmetry at function entry would unbalance scope releases.
+// When ownership transfer IS required (genReturn's "return s.field"
+// path, genVarDecl's "let r = s.field" path), the caller emits
+// _tin_retain on the i8* representation explicitly via
+// emitOwningPtrRetain.
 func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 	cg.emittingARC = true
 
@@ -1235,13 +1296,21 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 // emitStructFieldRetain retains a single struct field value.
 // Unlike emitRetain (which is also called for function parameter pointers), this
 // function is only called for fields loaded from a struct value being copied.
-// It explicitly handles owning *TinStruct pointer fields that emitRetain skips.
+// It explicitly handles owning *TinStruct pointer fields AND owning *Trait
+// iface fields that emitRetain skips: both are RC-managed heap blocks but
+// Tin's calling convention treats their bare pointer form as a borrow at
+// function entry.  When the value sits inside a struct that's being copied
+// (struct param entry retain, struct lit copy, etc.), the field IS owning
+// and must be retained so that scope-exit releases stay balanced.
 func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) {
 	t := fieldVal.Type()
-	// Owning pointer to a known Tin struct: retain via _tin_retain.
+	// Owning pointer to a known Tin struct OR a trait fat-ptr iface struct:
+	// retain via _tin_retain.  Iface structs live in cg.traitFatPtrTypes
+	// (not cg.structTypes), so detect them via shape.
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-			if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+			_, isTinStruct := cg.structTypes[innerSt.Name()]
+			if isTinStruct || isTraitFatPtrShape(innerSt) {
 				ptrI8 := block.NewBitCast(fieldVal, irtypes.I8Ptr)
 				block.NewCall(cg.ensureRetain(), ptrI8)
 
@@ -1467,6 +1536,16 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	ptrType := irtypes.NewPointer(st)
 	fnName := structName + "__release_ptr"
 	fn := cg.activeModule().NewFunc(fnName, irtypes.Void, ir.NewParam("ptr", ptrType))
+	// weak_odr lets multiple pkg modules emit the same symbol without
+	// link conflict: any pkg that scope-releases a `*<struct>` -- including
+	// trait-iface fat ptrs whose vtable thunk dispatches here -- references
+	// the helper.  Pre-fix the linkage was the IR default (external), which
+	// happens to work today because cg.structPtrReleaseFns caches the
+	// definition to a single CodeGen-active module, but the cache is fragile
+	// across incremental rebuilds where the cached `.o` for one pkg may be
+	// invalidated and re-emitted under a different pkg context.  Mirror the
+	// pattern in ensureElemRetainHelper / ensureElemReleaseHelper.
+	fn.Linkage = enum.LinkageWeakODR
 	// Cache before generating body to handle any hypothetical recursive reference.
 	cg.structPtrReleaseFns[structName] = fn
 
@@ -1529,6 +1608,71 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	}
 
 	releaseChildren.NewBr(exit)
+
+	exit.NewRet(nil)
+
+	return fn
+}
+
+// ensureHeapBlockReleaseFn returns (or lazily emits) a null-safe release
+// helper for an RC-allocated heap block whose content is one element of
+// type t.  The function decrements the block's RC; if it hits zero, the
+// loaded element is passed through emitRelease so its ARC sub-fields
+// (e.g. element strings of a [string] fat array) are released before
+// the block itself is freed.
+//
+// Signature:
+//
+//	define void @__tin_release_heap_<key>(<t>* %ptr) {
+//	entry:
+//	  br i1 (ptr == null), exit, do
+//	do:
+//	  v        = load <t>, ptr
+//	  freed    = _tin_release_struct(bitcast ptr to i8*)
+//	  br i1 (freed == 1), free_kids, exit
+//	free_kids:
+//	  emitRelease(v)   // walks ARC sub-fields recursively
+//	  br exit
+//	exit:
+//	  ret void
+//	}
+//
+// Used by releaseUnreturned for unreturned early-heap-promoted locals
+// whose type is not a named struct (so the existing ensureStructPtrReleaseFn
+// doesn't apply): fat arrays, strings, anys, fat fn ptrs.  Pre-fix that
+// path called raw _tin_release on the heap block, which freed the outer
+// block but never released the element's RC sub-fields.
+func (cg *CodeGen) ensureHeapBlockReleaseFn(t irtypes.Type) *ir.Func {
+	key := cg.elemTypeKey(t)
+	if fn, ok := cg.heapBlockReleaseFns[key]; ok {
+		return fn
+	}
+
+	ptrType := irtypes.NewPointer(t)
+	name := "__tin_release_heap_" + key
+	fn := cg.activeModule().NewFunc(name, irtypes.Void, ir.NewParam("ptr", ptrType))
+	// weak_odr matches the other shared per-type ARC helpers.
+	fn.Linkage = enum.LinkageWeakODR
+	cg.heapBlockReleaseFns[key] = fn
+
+	entry := fn.NewBlock("entry")
+	doRelease := fn.NewBlock("do_release")
+	freeKids := fn.NewBlock("free_kids")
+	exit := fn.NewBlock("exit")
+
+	// Null guard.
+	isNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(ptrType))
+	entry.NewCondBr(isNull, exit, doRelease)
+
+	// Load BEFORE decrement (the block is still valid since we hold a ref).
+	elemVal := doRelease.NewLoad(t, fn.Params[0])
+	ptrI8 := doRelease.NewBitCast(fn.Params[0], irtypes.I8Ptr)
+	wasFreed := doRelease.NewCall(cg.ensureReleaseStruct(), ptrI8)
+	isOne := doRelease.NewTrunc(wasFreed, irtypes.I1)
+	doRelease.NewCondBr(isOne, freeKids, exit)
+
+	cg.emitRelease(freeKids, elemVal)
+	freeKids.NewBr(exit)
 
 	exit.NewRet(nil)
 

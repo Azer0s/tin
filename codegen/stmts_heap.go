@@ -549,20 +549,33 @@ func (cg *CodeGen) releaseUnreturned(block *ir.Block, transferred map[string]boo
 		}
 
 		// entry.val is the heap pointer (rc=1 from earlyHeap alloc).
-		// Bitcast to i8* and call _tin_release; for plain scalar
-		// types that's all that's needed.  For struct/array types
-		// the per-struct release would be more correct, but the
-		// common case here is i64 / fat-array / pointer locals
-		// where _tin_release decrement is sufficient.
+		// Pick the most specific release helper for the element type
+		// so RC-tracked sub-fields are torn down on free.  Pre-fix the
+		// non-named-struct path called raw _tin_release, which freed
+		// the outer block but never released sub-fields -- a real
+		// leak for fat-array / string / any / fat-fn elements (e.g.
+		// `let xs [string] = [..]` early-heap'd because `&xs` is
+		// taken on a sibling branch).
 		ptrType, ok2 := entry.val.Type().(*irtypes.PointerType)
 		if !ok2 {
 			continue
 		}
 
-		// Use the most specific release helper available so that
-		// struct fields (and chained pointers) are torn down too.
 		if innerSt, isStruct := ptrType.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
 			relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+			block.NewCall(relFn, entry.val)
+
+			continue
+		}
+
+		// Element type has no per-struct helper.  If the type carries
+		// any RC-tracked subfield, route through the generic
+		// heap-block helper (load + decrement + emitRelease on free).
+		// Pure-i64 / pure-pointer / pure-bool elements have nothing to
+		// release beyond the outer block, so fall through to raw
+		// _tin_release for those.
+		if cg.elemNeedsRelease(ptrType.ElemType) {
+			relFn := cg.ensureHeapBlockReleaseFn(ptrType.ElemType)
 			block.NewCall(relFn, entry.val)
 
 			continue

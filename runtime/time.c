@@ -35,22 +35,27 @@ int64_t _tin_now_ns_real(void) {
 }
 
 // _tin_instant_rfc3339 formats ns (Unix epoch nanoseconds) as RFC3339 into buf.
-// buf must be at least 32 bytes. Returns the number of characters
-// actually written (clamped to 31 so the caller's buf[0..n] slice can
-// never read past the buffer for years > 9999).
+// buf must be at least 40 bytes (was 32, but %04d on year > 9999 spills
+// the trailing 'Z' off the previous limit; the i64 ns range only allows
+// years up to ~2262, but a manually-constructed Instant with a packed
+// large ns would have silently dropped the Z under the old limit and
+// produced an unparseable round-trip).  Returns the number of
+// characters actually written.
 int _tin_instant_rfc3339(int64_t ns, char *buf) {
     time_t sec = (time_t)(ns / 1000000000LL);
     long long frac = ns % 1000000000LL;
     if (frac < 0) { sec--; frac += 1000000000LL; }
     struct tm t;
     gmtime_r(&sec, &t);
-    int n = snprintf(buf, 32, "%04d-%02d-%02dT%02d:%02d:%02d.%09lldZ",
+    int n = snprintf(buf, 40, "%04d-%02d-%02dT%02d:%02d:%02d.%09lldZ",
                      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
                      t.tm_hour, t.tm_min, t.tm_sec, frac);
-    // snprintf returns the would-have-been length on truncation; cap
-    // to the actual buffer payload (31 bytes plus NUL).
+    // snprintf returns the would-have-been length on truncation; if
+    // the year ever exceeds ~99999999 (only possible via a packed
+    // out-of-range ns) the result is truncated and we surface 0 so
+    // the Tin caller doesn't return a half-written string.
     if (n < 0) return 0;
-    if (n > 31) n = 31;
+    if (n >= 40) return 0;
     return n;
 }
 

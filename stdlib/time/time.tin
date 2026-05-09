@@ -140,7 +140,7 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
   // to_rfc3339 formats the instant as an RFC3339 string with nanosecond precision.
   // Example: "2024-01-15T12:34:56.000000123Z"
   fn to_rfc3339(this Instant) string =
-    let buf [byte; 32]
+    let buf [byte; 40]
     let n = tin_rfc3339_c(this.ns, &buf[0])
 
     return buf[0..n as i64] as string

@@ -1482,7 +1482,31 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 		srcType := initVal.Type()
 
-		ownsIfaceData = isTraitFatPtrShape(llType) && !isTraitFatPtrShape(srcType)
+		// A let-binding "owns its iface" when the declared type is the
+		// trait fat-ptr shape (or pointer-to-it) and the source value
+		// isn't already that exact shape -- meaning coerce will run
+		// either coerceToTrait (value source) or buildPtrToTraitBorrow
+		// (pointer source) and produce a freshly RC-allocated iface.
+		// The pre-fix only checked the value-shape direction, leaving
+		// the pointer-shape case (`let a *Animal = &Cat{...}`,
+		// `let a *Animal = c` where c is *Cat) un-flagged so genVarDecl's
+		// post-coerce retain branch over-counted the fresh iface and
+		// leaked it.
+		isPtrToIface := func(t irtypes.Type) bool {
+			pt, ok := t.(*irtypes.PointerType)
+			if !ok {
+				return false
+			}
+
+			innerSt, ok2 := pt.ElemType.(*irtypes.StructType)
+			if !ok2 {
+				return false
+			}
+
+			return isTraitFatPtrShape(innerSt)
+		}
+		ownsIfaceData = (isTraitFatPtrShape(llType) && !isTraitFatPtrShape(srcType)) ||
+			(isPtrToIface(llType) && !isPtrToIface(srcType))
 
 		// Suppress coerceToTrait's deferred scope-exit release when this
 		// let-binding will own the iface and emit its own release via
@@ -1543,7 +1567,25 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		freshCallResult := isFreshCallResult(initVal)
 
 		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult {
-			cg.emitRetain(block, initVal)
+			// Owning-pointer borrow case: see emitOwningPtrRetainIfApplicable.
+			// emitRetain skips bare *<struct> / *<iface> by design (param
+			// borrow convention).  When the let-binding takes ownership of
+			// such a value (e.g. `let r = h.iface_field`), bump the heap
+			// block's RC explicitly so the binding's scope-exit release is
+			// matched.
+			//
+			// Skip for AsExpr (`let back = widened as *dom`): the cast
+			// extracts a raw pointer view from the source iface; the
+			// cast result is a borrow whose lifetime is tied to the
+			// source binding, NOT a new owning reference.  Retaining
+			// here would unbalance the source binding's own scope-exit
+			// release of the underlying heap block.
+			_, isAs := s.Value.(*ast.AsExpr)
+			if !isAs && cg.emitOwningPtrRetainIfApplicable(block, initVal) {
+				// Already retained.
+			} else {
+				cg.emitRetain(block, initVal)
+			}
 		}
 	} else if s.Value == nil {
 		// No initializer: zero-initialize.
@@ -1976,7 +2018,20 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		//   - [T;N] as string calls _tin_bytes_from_buf (rc=1 already)
 		//   - `n as Trait` lowers to a coerce[T] call returning rc=1; the
 		//     call result is already owned, retaining would over-count.
-		cg.emitRetain(block, val)
+		//
+		// Bare *<named struct> / *<iface> values are NOT covered by
+		// emitRetain (Tin's calling convention treats them as borrows
+		// for parameters, so emitRetain skips them to keep entry/exit
+		// balanced).  When the return path needs ownership transfer,
+		// retain the heap block explicitly via emitOwningPtrRetainIfApplicable
+		// before falling through to emitRetain for the rest.  Pre-fix,
+		// `return h.iface_field` left the iface RC unchanged while the
+		// caller's scope-exit release decremented it -- use-after-free
+		// after a few iterations of any pattern that returns a *Trait
+		// field from an aggregate.
+		if !cg.emitOwningPtrRetainIfApplicable(block, val) {
+			cg.emitRetain(block, val)
+		}
 	}
 
 	cg.emitAllScopeReleases(block, retSkipName)

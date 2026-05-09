@@ -1951,6 +1951,14 @@ func (cg *CodeGen) ensureTraitDataReleaseThunk(structKey string, structSt *irtyp
 
 	fnName := structKey + "__trait_data_release"
 	fn := cg.activeModule().NewFunc(fnName, irtypes.Void, ir.NewParam("data", irtypes.I8Ptr))
+	// weak_odr matches ensureElemRetainHelper / ensureElemReleaseHelper:
+	// the symbol is shared across pkg modules (any pkg that widens a
+	// `*<struct>` to `*Trait` references it via its vtable's data-release
+	// slot).  Default external-linkage would either link-error on
+	// duplicate emission across modules, or silently undefined-symbol
+	// when an incremental rebuild materialises the helper in a
+	// different pkg's `.o` than the consumer's cached `.o` references.
+	fn.Linkage = enum.LinkageWeakODR
 	cg.traitDataReleaseThunks[structKey] = fn
 
 	entry := fn.NewBlock("entry")

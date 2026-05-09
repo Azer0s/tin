@@ -131,16 +131,46 @@ fn normalize(v Value) Value =
   return Value{coeff: coeff, scale: scale}
 
 // align returns a, b at the same scale. The lower-scale operand is lifted
-// to match the higher one; the higher operand is unchanged.
+// to match the higher one; the higher operand is unchanged.  An attempted
+// helper-fn-based overflow check (`checked_mul_i64`) interacted poorly
+// with operator overload resolution -- because Value declares
+// `implicit[i64]`, the i64 comparison inside the helper resolved to
+// Value's overloaded `>`, which calls align(), which calls the helper:
+// infinite recursion at runtime.  The safe overflow check is inlined
+// below using only operations that don't go through any overloaded
+// trait, so resolution stays purely on i64.
+//
+// Pre-fix the lift used a plain multiply; a near-i64::MAX coefficient
+// with a wide scale gap silently wrapped (worst case: ord() compared
+// the wrapped values and returned the wrong sign).
 fn align(a Value, b Value) (Value, Value) =
   if a.scale == b.scale:
     return (a, b)
+
+  let max i64 = 9223372036854775807
+
   if a.scale > b.scale:
     let factor = pow10(a.scale - b.scale)
+
+    // factor is always positive (pow10 is in [1, 1e18]).  Detect
+    // overflow before the multiply: |b.coeff| * factor must fit in
+    // i64.  Using (max / factor) avoids any i64 multiply that could
+    // wrap before the check.
+    let limit = max / factor
+
+    if b.coeff > limit:
+      panic("decimal: align overflow -- coefficient too large for combined scale")
+    if b.coeff < (0 - limit):
+      panic("decimal: align overflow -- coefficient too negative for combined scale")
     return (a, Value{coeff: b.coeff * factor, scale: a.scale})
 
   let factor = pow10(b.scale - a.scale)
+  let limit = max / factor
 
+  if a.coeff > limit:
+    panic("decimal: align overflow -- coefficient too large for combined scale")
+  if a.coeff < (0 - limit):
+    panic("decimal: align overflow -- coefficient too negative for combined scale")
   return (Value{coeff: a.coeff * factor, scale: b.scale}, b)
 
 // Top-level overloaded `from`. Each variant produces a fresh Value with
