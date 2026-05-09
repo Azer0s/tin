@@ -296,3 +296,25 @@ test "parse_str: unterminated string fails" =
 
 test "parse_str: unterminated empty string fails" =
   assert::ok(is_err(json::parse("\"")))
+
+// Integer literal edge cases (RFC 8259 places no upper bound on the
+// magnitude of a JSON number, but the int parser is bounded to i64).
+// Pre-fix the parser accumulated positively then negated, so
+// `-9223372036854775808` (i64::MIN) was rejected as out-of-range
+// because its magnitude equals i64::MAX + 1 and does not fit.
+
+test "parse i64::MIN (-9223372036854775808)" =
+  let v = unwrap_or(json::parse("-9223372036854775808"), json::Value{kind: json::Kind.null_v})
+
+  assert::equals(v.ival, -9223372036854775808)
+
+test "parse i64::MAX (9223372036854775807)" =
+  let v = unwrap_or(json::parse("9223372036854775807"), json::Value{kind: json::Kind.null_v})
+
+  assert::equals(v.ival, 9223372036854775807)
+
+test "parse rejects integer one past i64::MIN" =
+  assert::ok(is_err(json::parse("-9223372036854775809")))
+
+test "parse rejects integer one past i64::MAX" =
+  assert::ok(is_err(json::parse("9223372036854775808")))

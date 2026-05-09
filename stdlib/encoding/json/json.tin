@@ -594,14 +594,20 @@ fn parse_str(p *Parser) string =
 
   return result
 
-// parse_int_bytes parses an integer directly from raw bytes (p.src[start..p.pos]).
-// Overflow flips the parser's `has_err` flag and returns 0 -- callers
-// see the error surface at the top-level `parse`.
+// parse_int_bytes parses an integer directly from raw bytes
+// (p.src[start..p.pos]).  Overflow flips the parser's `has_err` flag
+// and returns 0 -- callers see the error surface at the top-level
+// `parse`.
+//
+// We accumulate as negative for `-...` inputs so i64::MIN
+// (-9223372036854775808) parses correctly.  Building positive then
+// negating wraps the magnitude (which equals i64::MAX + 1 and does
+// not fit in positive i64) and would force us to reject a
+// well-formed JSON literal.
 fn parse_int_bytes(p *Parser, start i64) i64 =
   let neg = false
   let i   i64 = start
   let r   i64 = 0
-  let max_pre i64 = 922337203685477580   // (i64::MAX - 9) / 10
 
   if i < p.pos && p.src[i] == @'-':
     neg = true
@@ -614,15 +620,25 @@ fn parse_int_bytes(p *Parser, start i64) i64 =
       break
     let d = (c - @'0') as i64
 
-    // Pre-check overflow before the multiply: r*10 + d > i64::MAX.
-    if r > max_pre || (r == max_pre && d > 7):
-      p.fail("integer literal out of i64 range")
-      return 0
-    r = r * 10 + d
+    if neg:
+      // r is non-positive; check r * 10 - d >= i64::MIN.
+      if r < -922337203685477580:
+        p.fail("integer literal out of i64 range")
+        return 0
+      if r == -922337203685477580 && d > 8:
+        p.fail("integer literal out of i64 range")
+        return 0
+      r = r * 10 - d
+    else:
+      if r > 922337203685477580:
+        p.fail("integer literal out of i64 range")
+        return 0
+      if r == 922337203685477580 && d > 7:
+        p.fail("integer literal out of i64 range")
+        return 0
+      r = r * 10 + d
     i = i + 1
 
-  if neg:
-    return -r
   return r
 
 fn parse_number(p *Parser) *Value =
