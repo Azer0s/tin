@@ -1127,10 +1127,44 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		return nil, fmt.Errorf("tuple literal requires at least 2 elements")
 	}
 
+	// Pre-extract per-element target types from the expectedType so
+	// each element's gen can have a hint for ADT constructor
+	// disambiguation. expectedType is a named Tuple struct with
+	// fields at userOff..userOff+N-1 holding the element types.
+	var elemHints []irtypes.Type
+
+	if expectedType != nil {
+		if st, ok := expectedType.(*irtypes.StructType); ok {
+			if n := st.Name(); n != "" {
+				if _, known := cg.structTypes[n]; known {
+					off := cg.userFieldOffset(n)
+					if off+len(tup.Elems) <= len(st.Fields) {
+						elemHints = make([]irtypes.Type, len(tup.Elems))
+						for i := range tup.Elems {
+							elemHints[i] = st.Fields[off+i]
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Evaluate all element expressions.
 	vals := make([]value.Value, len(tup.Elems))
 	for i, elem := range tup.Elems {
-		v, err := cg.genExpr(block, elem)
+		var v value.Value
+
+		var err error
+
+		if elemHints != nil && elemHints[i] != nil {
+			prevHint := cg.returnTypeHint
+			cg.returnTypeHint = elemHints[i]
+			v, err = cg.genExpr(block, elem)
+			cg.returnTypeHint = prevHint
+		} else {
+			v, err = cg.genExpr(block, elem)
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -2656,6 +2690,20 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 				}
 			}
 		}
+	}
+	// Set returnTypeHint so bare ADT constructor calls in argument
+	// position disambiguate against the parameter's type. Covers
+	// `f(Ok(x))` and `f(Err(e))` where f's parameter is a Result.
+	// Restored after the recursive genExpr so siblings see the prior
+	// (caller-supplied) hint.
+	if targetType != nil {
+		prevHint := cg.returnTypeHint
+		cg.returnTypeHint = targetType
+
+		v, err := cg.genExpr(block, argNode)
+		cg.returnTypeHint = prevHint
+
+		return v, err
 	}
 
 	return cg.genExpr(block, argNode)

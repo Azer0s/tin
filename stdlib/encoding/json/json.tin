@@ -1005,6 +1005,6 @@ fn parse[T](s string) Result[T, errors::Err] =
 
 export {
   Kind, Value, parse, encode,
-  JsonError, EmptyInput, Malformed,
+  JsonError,
   JsonSerializable, JsonDeserializable,
 } as json

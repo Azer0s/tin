@@ -22,7 +22,7 @@ struct Cond =
   fn ptr(this Cond) *void = return this._cell.payload()
 
   static fn new() Cond =
-    return Cond{_cell: rc::Cell[*void].alloc(tin_fcond2_new(), tin_fcond2_free)}
+    return Cond{_cell: rc::Cell[*void].new(tin_fcond2_new(), tin_fcond2_free)}
 
   fn{#async #no_autoyield} wait(this Cond, mu Mutex) =
     let pid = tin_current_pid_cond()

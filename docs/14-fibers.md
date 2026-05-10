@@ -723,23 +723,42 @@ fn main() =
 
 ---
 
-## Awaitable[T] trait
+## awaitable[T] trait
 
-`Future[T]` implements the `Awaitable[t]` trait. You can implement this trait
-on your own types to make them awaitable with the `await` keyword:
+`Future[T]` implements the `awaitable[t]` trait. You can implement this trait
+on your own types to make them awaitable with the `await` keyword. The trait
+has two methods:
+
+- `ready()`  — non-blocking poll, returns `true` when `result()` is ready.
+- `result()` — produce the value.
+
+`await x` desugars to a runtime-driven spin loop:
+
+```
+loop:
+  if x.ready(): break
+  yield
+x.result()
+```
+
+The runtime owns the loop, so your `ready()` only has to answer the question
+and your `result()` only has to produce the value. No manual `yield`.
 
 ```rust
-use sync
-
-struct MyResult(sync::Awaitable[i64]) =
+struct MyResult(awaitable[i64]) =
+  done bool
   data i64
 
-  fn await_result(this MyResult) i64 =
-    return this.data
+  fn awaitable[i64]::ready(this MyResult)  bool = return this.done
+  fn awaitable[i64]::result(this MyResult) i64  = return this.data
 
-let r = MyResult{data: 42}
-let v = await r   // calls r.await_result() -> 42
+let r = MyResult{done: true, data: 42}
+let v = await r   // 42
 ```
+
+`Mutex.lock()`, `RWMutex.read_lock()`, and `RWMutex.lock()` return awaitable
+handles — `await m.lock()` runs the try-lock loop inline in the calling fiber
+without spawning a coroutine frame.
 
 ---
 

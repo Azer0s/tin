@@ -33,7 +33,10 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 		return nil, err
 	}
 
-	typeParams, _ := p.parseTypeParams()
+	typeParams, wildcards, err := p.parseTypeParamsWithWildcards()
+	if err != nil {
+		return nil, err
+	}
 
 	// Optional trait implementations: struct Foo(TraitA, TraitB[T]) =
 	// The list may span multiple lines; newlines inside parens are ignored.
@@ -73,7 +76,7 @@ func (p *Parser) parseStructDecl(tags []string) (*ast.StructDecl, error) {
 	}
 
 	decl := &ast.StructDecl{
-		Name: nameTok.Literal, TypeParams: typeParams,
+		Name: nameTok.Literal, TypeParams: typeParams, Wildcards: wildcards,
 		Constraints: constraints, Implements: impls,
 		Tags: tags, ScopedTags: scopedTags,
 	}
@@ -597,7 +600,10 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 		return nil, err
 	}
 
-	typeParams, _ := p.parseTypeParams()
+	typeParams, wildcards, err := p.parseTypeParamsWithWildcards()
+	if err != nil {
+		return nil, err
+	}
 
 	// Optional trait implementations: data Foo[T](TraitA, TraitB[T]) =
 	// Mirrors the struct shape; the list may span multiple lines.
@@ -637,6 +643,7 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	decl := &ast.DataDecl{
 		Name:        nameTok.Literal,
 		TypeParams:  typeParams,
+		Wildcards:   wildcards,
 		Constraints: constraints,
 		Implements:  impls,
 	}

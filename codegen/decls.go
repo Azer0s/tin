@@ -148,6 +148,14 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 }
 
 func (cg *CodeGen) genStructDecl(n *ast.StructDecl) error {
+	if err := checkConstraintsReferenceDeclared(n.Name, n.TypeParams, n.Wildcards, n.Constraints); err != nil {
+		return cg.nodeErr(n, "%s", err)
+	}
+
+	if err := checkMethodsAgainstImpls(n.Name, "struct", n.Implements, n.Methods); err != nil {
+		return cg.nodeErr(n, "%s", err)
+	}
+
 	if err := cg.genStructLayout(n); err != nil {
 		return err
 	}

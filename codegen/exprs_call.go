@@ -267,7 +267,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
+					cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], argVals[i], concreteFunc.Sig.RetType)
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -361,7 +361,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
+				cg.emitCallArgReleaseForRet(block, astArg, argValsPreCoerce[i], argVals[i], result.Type())
 			}
 
 			if irtypes.IsVoid(result.Type()) {
@@ -494,7 +494,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+					cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -530,7 +530,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+						cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
 					}
 
 					if irtypes.IsVoid(result.Type()) {
@@ -675,7 +675,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, argVals[i], llArgs[i+thisOff])
+				cg.emitCallArgReleaseForRet(block, astArg, argVals[i], llArgs[i+thisOff], result.Type())
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -763,7 +763,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, callArgs[i], llArgs[i+1])
+					cg.emitCallArgReleaseForRet(block, astArg, callArgs[i], llArgs[i+1], result.Type())
 				}
 
 				// ARC: release temporary struct receiver (method chain temporaries).
@@ -897,7 +897,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff])
+				cg.emitCallArgReleaseForRet(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff], result.Type())
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -1073,7 +1073,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 								break
 							}
 
-							cg.emitCallArgRelease(block, astArg, preCoerceVals[i], olArgs[i])
+							cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], olArgs[i], result.Type())
 						}
 
 						if irtypes.IsVoid(result.Type()) {
@@ -1148,7 +1148,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
+						cg.emitCallArgReleaseForRet(block, astArg, argValsPreCoerce[i], argVals[i], result.Type())
 					}
 
 					if irtypes.IsVoid(result.Type()) {
@@ -1340,7 +1340,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
+						cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], argVals[i], result2.Type())
 					}
 
 					if irtypes.IsVoid(result2.Type()) {
@@ -1568,7 +1568,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			break
 		}
 
-		cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i])
+		cg.emitCallArgReleaseForRet(block, astArg, llArgsPreCoerce[i], llArgs[i], result.Type())
 	}
 
 	if irtypes.IsVoid(result.Type()) {

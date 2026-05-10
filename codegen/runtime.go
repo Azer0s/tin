@@ -851,6 +851,16 @@ func isTraitFatPtrShape(t irtypes.Type) bool {
 //     balance any retain performed inside the callee (e.g. storing the pointer
 //     in a struct field via a struct literal).
 func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, post value.Value) {
+	cg.emitCallArgReleaseForRet(block, astArg, pre, post, nil)
+}
+
+// emitCallArgReleaseForRet is emitCallArgRelease augmented with the
+// callee's return type. The extra arg lets the ADT-rvalue release
+// path skip when the callee may have transferred the rvalue's inner
+// contents through its return value (e.g. unwrap_or returns the
+// inner Ok value). When ret type is nil (caller couldn't determine
+// it), behave conservatively and skip the ADT rvalue release.
+func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pre, post value.Value, retType irtypes.Type) {
 	if isAnyType(post.Type()) && !isAnyType(pre.Type()) {
 		cg.emitRelease(block, post)
 
@@ -911,12 +921,39 @@ func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, pos
 		// nets to zero, but the rvalue itself owns rc=1 of any
 		// heap-allocated active-variant fields (strings, byte
 		// slices, freshly-coerced ifaces). Without this release
-		// those fields leak. data_release_val dispatches on tag and
-		// releases only the active variant's owning fields.
-		if cg.isDataType(pre.Type()) {
+		// those fields leak.
+		//
+		// Only fire when the callee's return type can't transfer
+		// the rvalue's contents back to the caller. Primitives
+		// (bool, integer, float, void) are safe — they can't be
+		// derived from the ADT's payload. Anything else (string,
+		// struct, ADT, fat-ptr, void*) might be a transferred
+		// reference, so skip to avoid double-release-via-shared-ptr.
+		// retType==nil means the caller couldn't determine it —
+		// also skip conservatively.
+		if cg.isDataType(pre.Type()) && retType != nil && isPrimitiveOrVoid(retType) {
 			cg.emitDataValueRelease(block, pre)
 		}
 	}
+}
+
+// isPrimitiveOrVoid reports whether t is a return type that
+// definitely can't carry transferred references from an ADT-shaped
+// argument. Used by emitCallArgReleaseForRet to gate the ADT-rvalue
+// release.
+func isPrimitiveOrVoid(t irtypes.Type) bool {
+	if t == nil {
+		return false
+	}
+
+	switch t.(type) {
+	case *irtypes.IntType, *irtypes.FloatType:
+		return true
+	case *irtypes.VoidType:
+		return true
+	}
+
+	return false
 }
 
 // isCopyExpr returns true when an AST expression produces a reference to
@@ -1951,21 +1988,29 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
-		// *Trait pointer binding without isHeapOwned: elemNeedsRelease
-		// returns false for raw pointer types, so a binding like
-		// `let g *Trait = &x as *Trait` would otherwise leak the iface
-		// block.  Call its release_ptr explicitly; ensureStructPtr
-		// ReleaseFn's iface arm handles the wrapped data on RC=0.
-		// Restricted to let/const bindings: function parameters of
-		// *Trait are borrows from the caller and must not be released.
-		if (entry.declaredLet || entry.declaredConst) && !entry.noDeinit {
+		// *Trait or *TinStruct pointer binding without isHeapOwned:
+		// elemNeedsRelease returns false for raw pointer types, so a
+		// binding like `let g *Trait = &x as *Trait` or
+		// `let p = items[idx]` (where items is [*Struct]) would
+		// otherwise leak the heap block.  Call its release_ptr
+		// explicitly; ensureStructPtrReleaseFn handles both the
+		// iface and Tin-struct shapes.  Restricted to let/const
+		// bindings: function parameters that are *Trait / *Struct are
+		// borrows from the caller and must not be released.  The
+		// isHeapOwned / isEarlyHeap branches above already handle the
+		// freshly-allocated forms; this branch only catches the
+		// copy-expr and call-result forms that landed unmarked.
+		if entry.declaredLet && !entry.noDeinit {
 			if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
-				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && isTraitFatPtrShape(innerSt) && innerSt.Name() != "" {
-					loaded := block.NewLoad(elemType, entry.val)
-					relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
-					block.NewCall(relFn, loaded)
+				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+					_, isTinStruct := cg.structTypes[innerSt.Name()]
+					if isTinStruct || isTraitFatPtrShape(innerSt) {
+						loaded := block.NewLoad(elemType, entry.val)
+						relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+						block.NewCall(relFn, loaded)
 
-					return
+						return
+					}
 				}
 			}
 		}
@@ -2051,15 +2096,19 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				return
 			}
 
-			// *Trait pointer binding fallback; see twin in emitScopeRelease.
-			if (entry.declaredLet || entry.declaredConst) && !entry.noDeinit {
+			// *Trait or *TinStruct pointer binding fallback; see twin
+			// in emitScopeRelease.
+			if entry.declaredLet && !entry.noDeinit {
 				if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
-					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && isTraitFatPtrShape(innerSt) && innerSt.Name() != "" {
-						loaded := block.NewLoad(elemType, entry.val)
-						relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
-						block.NewCall(relFn, loaded)
+					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+						_, isTinStruct := cg.structTypes[innerSt.Name()]
+						if isTinStruct || isTraitFatPtrShape(innerSt) {
+							loaded := block.NewLoad(elemType, entry.val)
+							relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+							block.NewCall(relFn, loaded)
 
-						return
+							return
+						}
 					}
 				}
 			}

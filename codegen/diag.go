@@ -17,6 +17,22 @@ import (
 const (
 	DiagAsyncMain         = "async-main"
 	DiagReturnTry         = "return-try"
+	// DiagMatchResultTry fires on the two-arm Result match antipattern
+	// where the Ok arm assigns to (or just binds) a value and the Err
+	// arm returns early:
+	//
+	//   match parse(s):
+	//     case Ok(v): outer = v
+	//     case Err(_): return some_fallback
+	//
+	// The `try` keyword exists for exactly this control flow:
+	//
+	//   let outer = try parse(s)                // err returns the Result
+	//   let outer = try parse(s).map_err(...)   // err-type adapter
+	//
+	// Default-on; -Wno-match-result-try silences it (useful in code
+	// that genuinely needs side-effects in the Err arm beyond a return).
+	DiagMatchResultTry = "match-result-try"
 	DiagUnusedWildcard    = "unused-wildcard"
 	DiagBoolAnalysis      = "bool-analysis"
 	DiagUnusedMatchArms   = "unused-match-arms"

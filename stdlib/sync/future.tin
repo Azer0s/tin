@@ -1,19 +1,17 @@
 // stdlib/sync/future.tin
 //
-// Future[t] - wraps a fiber PID returned by `spawn`.
-// Implements awaitable[t] so `await f` retrieves the fiber's return value.
+// Future[t] - wraps a fiber PID returned by `spawn`. Implements
+// awaitable[t] so `await f` retrieves the fiber's return value.
 //
-// Usage:
-//   fn{#async} compute(n i64) i64 =
-//     return n * n
-//
+//   fn{#async} compute(n i64) i64 = return n * n
 //   let f = spawn compute(7)   // f : Future[i64]
 //   let r = await f            // r : i64 = 49
 //
-// Unit is the return type used for void {#async} functions.
-// await-ing a Future[Unit] just waits for completion, discards the result.
+// Unit is the return type used for void {#async} functions; awaiting
+// a Future[Unit] just waits for completion.
 
 fn tin_future_await_raw(pid i64) *void = extern("_tin_future_await_raw")
+fn tin_future_ready(pid i64)     i32   = extern("_tin_future_ready")
 
 // Unit - placeholder struct used as the type parameter for void async functions.
 struct Unit =
@@ -29,18 +27,29 @@ struct Future[t](awaitable[t]) =
   fn pid_val(this Future[t]) i64 =
     return this.pid
 
-  fn awaitable::await_result(this Future[t]) t =
+  // Non-blocking poll: 1 once the fiber is FIBER_DONE. The runtime's
+  // fiber_ready check is a single mutex-guarded status read, so the
+  // hot path of `await f` is "ready? yes -> result" without any
+  // suspend/resume traffic.
+  fn awaitable::ready(this Future[t]) bool =
+    return tin_future_ready(this.pid) != 0
+
+  // Block until the fiber finishes, then read the result. Safe to
+  // call directly even if not ready — _tin_future_await_raw spins
+  // via _tin_fiber_join.
+  fn awaitable::result(this Future[t]) t =
     let raw *void = tin_future_await_raw(this.pid)
     let typed *t = raw as *t
 
     return *typed
 
 // ready_unit returns a Future[Unit] that resolves immediately on
-// await without spawning a fiber.  Used by stdlib helpers that take a
+// await without spawning a fiber. Used by stdlib helpers that take a
 // Future-shaped contract but have no work to do for trivial inputs
-// (e.g. `time::sleep(0)`).  Implemented as a sentinel pid the runtime
-// recognises in `_tin_future_await_raw`; constructing or awaiting the
-// returned Future is O(1) with no heap or scheduler traffic.
+// (e.g. `time::sleep(0)`). The sentinel pid TIN_FUTURE_PID_READY_UNIT
+// in runtime/fiber.c is recognised by both _tin_future_ready (always
+// ready) and _tin_future_await_raw (returns the unit sentinel) so
+// constructing or awaiting the returned Future is O(1) with no heap
+// or scheduler traffic.
 fn ready_unit() Future[Unit] =
-  // Matches TIN_FUTURE_PID_READY_UNIT in runtime/fiber.c.
   return Future[Unit]{pid: -9223372036854775808}

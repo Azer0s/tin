@@ -248,6 +248,12 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	if err != nil {
 		return nil, err
 	}
+	// `match await f:` lowers the await into fresh blocks; continue
+	// scrutinee handling on the post-await block, not the pre-await
+	// one (which is already terminated by the await's br).
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
 
 	scrutType := scrutinee.Type()
 	if pt, ok := scrutType.(*irtypes.PointerType); ok {
@@ -477,6 +483,10 @@ func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca v
 	scrutinee, err := cg.genExpr(block, s.Expr)
 	if err != nil {
 		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
 	}
 
 	scrutType := scrutinee.Type()
@@ -805,6 +815,10 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 		return nil, err
 	}
 
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
 	if !isFatArrayPtr(scrutinee.Type()) {
 		return nil, fmt.Errorf("array pattern match requires an array type, got %s", fmtArgType(scrutinee.Type()))
 	}
@@ -1070,6 +1084,13 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	expr, err := cg.genExpr(block, s.Expr)
 	if err != nil {
 		return nil, err
+	}
+	// genExpr may have advanced curBlock (e.g. `match await f:` spawns
+	// new blocks inside the await lowering). The switch must terminate
+	// the block where execution actually lands, not the pre-await one
+	// that's already closed by the await's own terminator.
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
 	}
 
 	afterBlock := cg.newBlock("match.after")

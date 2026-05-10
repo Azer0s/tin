@@ -62,6 +62,8 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 				cg.checkRedundantArgCasts(e)
 			case *ast.StructLit:
 				cg.checkRedundantStructFieldCasts(e, astStructDecls)
+			case *ast.MatchStmt:
+				cg.checkResultMatchAntipattern(e)
 			}
 		})
 	}
@@ -1071,6 +1073,140 @@ func (cg *CodeGen) checkUselessCast(e *ast.AsExpr) {
 // checkEmptyIfBody flags `if x: { }` or `else: { }` where the block is
 // empty. Almost always an unfinished edit. An explicit `pass` keyword is
 // the user telling us the empty body is intentional, so we suppress.
+// checkResultMatchAntipattern detects the two-arm Result match where
+// the Ok branch binds the success value (assigned to a pre-declared
+// var, or used to make a downstream let) and the Err branch returns
+// early. The `try` keyword expresses the same control flow in one
+// line.
+//
+// Recognized shape:
+//
+//   match <result-call>:
+//     case Ok(v): <one or more stmts where v flows into an assign or let>
+//     case Err(_ | ...): return ...   // early return / panic
+//
+// Triggers when:
+//   - The match has exactly two cases (no default arm).
+//   - One pattern is `Ok(<binding>)`, the other is `Err(<anything>)`.
+//   - The Err arm ends in a return/panic (or is just a re-throw shape).
+//
+// Skipped when:
+//   - Either pattern has a guard (`if`).
+//   - The Ok body has side-effects beyond the binding/assign (still
+//     possible to convert, but the lint stays conservative).
+func (cg *CodeGen) checkResultMatchAntipattern(s *ast.MatchStmt) {
+	if s == nil || len(s.Cases) != 2 || s.Default != nil {
+		return
+	}
+
+	var okCase, errCase *ast.MatchCase
+
+	for i := range s.Cases {
+		c := &s.Cases[i]
+		if c.Guard != nil {
+			return
+		}
+
+		name := patternVariantName(c.Pattern)
+		switch name {
+		case "Ok":
+			if okCase != nil {
+				return
+			}
+
+			okCase = c
+		case "Err":
+			if errCase != nil {
+				return
+			}
+
+			errCase = c
+		default:
+			return
+		}
+	}
+
+	if okCase == nil || errCase == nil {
+		return
+	}
+
+	if !blockEndsInEarlyExit(errCase.Body) {
+		return
+	}
+	// Ok arm should be "small and pure" -- a single assign / let /
+	// expression -- so the rewrite to `let x = try ...` is mechanical.
+	// More elaborate Ok bodies may have flow that's hard to express via
+	// the try keyword; stay quiet in that case to avoid a noisy rewrite
+	// suggestion.
+	if !okArmIsRewriteableToTry(okCase.Body) {
+		return
+	}
+
+	cg.warn(DiagMatchResultTry, s.Pos(),
+		"this `match` on a Result mirrors the `try` keyword; prefer `let x = try expr` (or `try expr.map_err(...)` when the error type needs to change)")
+}
+
+// patternVariantName extracts the variant constructor name from a
+// match pattern, e.g. "Ok" from `Ok(v)`, "Err" from `Err(_)`. Returns
+// "" for patterns that aren't variant ctors.
+func patternVariantName(p ast.Node) string {
+	switch pat := p.(type) {
+	case *ast.CallExpr:
+		if id, ok := pat.Func.(*ast.Identifier); ok {
+			return id.Name
+		}
+	case *ast.Identifier:
+		// Niladic variant like `case None:` -- still has a name.
+		return pat.Name
+	}
+
+	return ""
+}
+
+// blockEndsInEarlyExit reports whether b's last statement is a return
+// or a panic call -- the shapes the `try` keyword's err-propagation
+// path corresponds to.
+func blockEndsInEarlyExit(b *ast.Block) bool {
+	if b == nil || len(b.Stmts) == 0 {
+		return false
+	}
+
+	last := b.Stmts[len(b.Stmts)-1]
+	if _, ok := last.(*ast.ReturnStmt); ok {
+		return true
+	}
+
+	if es, ok := last.(*ast.ExprStmt); ok {
+		if call, ok2 := es.Expr.(*ast.CallExpr); ok2 {
+			if id, ok3 := call.Func.(*ast.Identifier); ok3 && id.Name == "panic" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// okArmIsRewriteableToTry returns true when the Ok arm's body is the
+// trivial "use the bound value" shape that `try` would replace. Keeps
+// the lint conservative: complex bodies stay un-flagged.
+func okArmIsRewriteableToTry(b *ast.Block) bool {
+	if b == nil || len(b.Stmts) == 0 || len(b.Stmts) > 3 {
+		return false
+	}
+
+	for _, s := range b.Stmts {
+		switch s.(type) {
+		case *ast.AssignStmt, *ast.VarDecl, *ast.ExprStmt, *ast.ReturnStmt:
+			continue
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
 func (cg *CodeGen) checkEmptyIfBody(s *ast.IfStmt) {
 	if s.Then != nil && len(s.Then.Stmts) == 0 && !s.Then.IsExplicitPass {
 		cg.warn(DiagEmptyBody, s.Pos(), "empty if body")

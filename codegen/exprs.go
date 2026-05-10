@@ -65,22 +65,56 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	callMethod := func(blk *ir.Block, methodName string) (*ir.Block, value.Value, error) {
 		key := typeName + "_" + methodName
 
-		entry, ok := cg.curScope.lookup(key)
-		if !ok {
-			return blk, nil, cg.nodeErr(e, "try: %s does not implement tryable (missing %s)", typeName, methodName)
-		}
+		var fn *ir.Func
 
-		var fnVal value.Value
-		if entry.isAlloc {
-			ptrTy := entry.val.Type().(*irtypes.PointerType)
-			fnVal = blk.NewLoad(ptrTy.ElemType, entry.val)
+		if entry, ok := cg.curScope.lookup(key); ok {
+			var fnVal value.Value
+			if entry.isAlloc {
+				ptrTy := entry.val.Type().(*irtypes.PointerType)
+				fnVal = blk.NewLoad(ptrTy.ElemType, entry.val)
+			} else {
+				fnVal = entry.val
+			}
+
+			f, ok2 := fnVal.(*ir.Func)
+			if !ok2 {
+				return blk, nil, cg.nodeErr(e, "try: %s is not callable", key)
+			}
+
+			fn = f
 		} else {
-			fnVal = entry.val
-		}
+			// Cross-package fallback: when Result is first monomorphized
+			// inside a foreign package (e.g. time.tin's parse_rfc3339
+			// returns Result[Instant, errors::Err]), the trait-qualified
+			// -> plain-name alias for is_err / ok_value / err_value
+			// registers in that package's scope, which is discarded once
+			// the package finishes loading. The IR functions live on in
+			// the module though, so look them up by their fully-qualified
+			// IR name via dataDecls[typeName].Methods.
+			if dd, ok := cg.dataDecls[typeName]; ok {
+				for _, m := range dd.Methods {
+					if m.Name != methodName {
+						continue
+					}
 
-		fn, ok := fnVal.(*ir.Func)
-		if !ok {
-			return blk, nil, cg.nodeErr(e, "try: %s is not callable", key)
+					irName := methodScopeName(typeName, m)
+					for _, f := range cg.allFuncs() {
+						if f.Name() == irName {
+							fn = f
+
+							break
+						}
+					}
+
+					if fn != nil {
+						break
+					}
+				}
+			}
+
+			if fn == nil {
+				return blk, nil, cg.nodeErr(e, "try: %s does not implement tryable (missing %s)", typeName, methodName)
+			}
 		}
 
 		if len(fn.Sig.Params) == 0 {
@@ -228,14 +262,44 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 
 	origKey := typeName + "_" + methodName
 
-	origEntry, ok := cg.curScope.lookup(origKey)
-	if !ok {
-		return nil, false
-	}
+	var origFn *ir.Func
 
-	origFn, ok := origEntry.val.(*ir.Func)
-	if !ok {
-		return nil, false
+	if origEntry, ok := cg.curScope.lookup(origKey); ok {
+		fn, ok2 := origEntry.val.(*ir.Func)
+		if !ok2 {
+			return nil, false
+		}
+
+		origFn = fn
+	} else {
+		// Cross-package fallback: same situation as callMethod's
+		// fallback above — the plain alias died with the foreign
+		// package's scope, but the impl's IR func survives in the
+		// module under its trait-qualified name.
+		if dd, ok := cg.dataDecls[typeName]; ok {
+			for _, m := range dd.Methods {
+				if m.Name != methodName {
+					continue
+				}
+
+				irName := methodScopeName(typeName, m)
+				for _, f := range cg.allFuncs() {
+					if f.Name() == irName {
+						origFn = f
+
+						break
+					}
+				}
+
+				if origFn != nil {
+					break
+				}
+			}
+		}
+
+		if origFn == nil {
+			return nil, false
+		}
 	}
 
 	// Build the wrapper: takes the impl's receiver, returns target.
@@ -277,6 +341,51 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 // Monomorphization substitutes wildcards out of the concrete decl's
 // Implements list, so the template is the source of truth for whether
 // a wildcard was ever present in the impl bound.
+// emitAwaitableLoop lowers `await x` where x is a non-Future awaitable
+// to a runtime-driven spin loop:
+//
+//   loop:
+//     if x.ready(): goto done
+//     yield
+//   done:
+//     x.result()
+//
+// The runtime owns the spin/yield, so user impls of awaitable[t]
+// only have to answer "ready?" and "result". `yield` lowers to a
+// no-op outside an {#async} body, so `await` from synchronous code
+// turns into a busy-wait — which matches the legacy await_result
+// behaviour for direct (non-fiber) callers.
+func (cg *CodeGen) emitAwaitableLoop(block *ir.Block, val value.Value, readyFn, resultFn *ir.Func) (value.Value, error) {
+	condBlk := cg.newBlock("await.cond")
+	bodyBlk := cg.newBlock("await.body")
+	doneBlk := cg.newBlock("await.done")
+
+	block.NewBr(condBlk)
+
+	readyArgs := cg.adaptArgs(condBlk, []value.Value{val}, readyFn.Sig)
+	readyVal := condBlk.NewCall(readyFn, readyArgs...)
+	condBlk.NewCondBr(readyVal, doneBlk, bodyBlk)
+
+	cg.curBlock = bodyBlk
+
+	yieldedBlk, yieldErr := cg.genYieldStmt(bodyBlk)
+	if yieldErr != nil {
+		return nil, yieldErr
+	}
+
+	if yieldedBlk == nil {
+		yieldedBlk = bodyBlk
+	}
+
+	yieldedBlk.NewBr(condBlk)
+
+	resultArgs := cg.adaptArgs(doneBlk, []value.Value{val}, resultFn.Sig)
+	res := doneBlk.NewCall(resultFn, resultArgs...)
+	cg.curBlock = doneBlk
+
+	return res, nil
+}
+
 func (cg *CodeGen) adtImplHasWildcardBound(adtName, traitBaseName string) bool {
 	decls := []*ast.DataDecl{}
 
@@ -661,7 +770,11 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return cg.genStructLit(block, e)
 
 	case *ast.TupleLit:
-		return cg.genTupleLit(block, e, nil)
+		// Pass the current returnTypeHint as the expected type so
+		// elements can disambiguate ADT constructors against the
+		// tuple's element types (set by genArgWithTargetType,
+		// let-bindings with annotation, etc.).
+		return cg.genTupleLit(block, e, cg.returnTypeHint)
 
 	case *ast.SliceExpr:
 		return cg.genSliceExpr(block, e)
@@ -796,19 +909,34 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// The value must be a Future[T] struct.  Extract .pid field (field index 0).
 		pidIdx := cg.fieldIndex(structName, "pid")
 		if pidIdx < 0 {
-			// Not a Future struct - check if it implements Awaitable via await_result.
-			methodName := structName + "_await_result"
-			if se, ok := cg.curScope.lookup(methodName); ok {
-				if fn, ok2 := se.val.(*ir.Func); ok2 {
-					args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
-					result := block.NewCall(fn, args...)
-					cg.curBlock = block
+			// Not a Future struct: lower `await x` against the
+			// awaitable[t] trait as
+			//
+			//   loop:
+			//     if x.ready(): break
+			//     yield
+			//   x.result()
+			//
+			// The runtime drives the spin loop, so user impls
+			// only have to answer "ready?" and "result". If
+			// either method is missing report which one — the
+			// most common cause is forgetting to migrate from
+			// the old single-method shape.
+			readyName := structName + "_ready"
+			resultName := structName + "_result"
 
-					return result, nil
+			readyEntry, hasReady := cg.curScope.lookup(readyName)
+			resultEntry, hasResult := cg.curScope.lookup(resultName)
+
+			if hasReady && hasResult {
+				if readyFn, rOk := readyEntry.val.(*ir.Func); rOk {
+				if resultFn, sOk := resultEntry.val.(*ir.Func); sOk {
+					return cg.emitAwaitableLoop(block, val, readyFn, resultFn)
+				}
 				}
 			}
 
-			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement awaitable[t]; use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] directly", structName)
+			return nil, cg.nodeErr(e, "await: expression (type %q) does not implement awaitable[t] (need fn awaitable::ready and fn awaitable::result); use \"await spawn fn(args)\" to run fn as a fiber, or have the function return Future[t] directly", structName)
 		}
 
 		// Extract pid from Future[T] using extractvalue (no alloca -> safe inside loops).

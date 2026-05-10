@@ -353,5 +353,4 @@ export {
   from,
   parse,
   DecimalError,
-  EmptyDecimal, ExtraDot, InvalidDecimalChar, NoDecimalDigits,
 } as decimal

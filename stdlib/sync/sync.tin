@@ -14,11 +14,11 @@
 // awaitable[t] (the trait `await` desugars against) is defined in
 // runtime/builtin/awaitable.tin and auto-loaded into every program.
 
+use "./future"
 use "./mutex"
 use "./rwmutex"
 use "./cond"
 use "./atomic"
-use "./future"
 use "./channel"
 
 export { Mutex, RWMutex, Cond, Atomic, Channel, Future, Unit } as sync

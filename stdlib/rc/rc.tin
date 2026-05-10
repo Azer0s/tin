@@ -11,7 +11,7 @@
 // Usage:
 //   fn close_fd(p i64) = posix::close(p)
 //   let fd = posix::open("/etc/hosts", 0)
-//   let cell *Cell[i64] = Cell[i64].alloc(fd, close_fd)
+//   let cell *Cell[i64] = Cell[i64].new(fd, close_fd)
 //   // copying *Cell[i64] retains; the last drop runs close_fd(fd).
 //
 // T must be a non-RC-tracked type (raw pointer, integer, opaque extern).
@@ -26,7 +26,7 @@ struct {#no_copy #closed} Cell[T] =
   // Tin's pointer-ARC takes over from there: copying *Cell[T] retains,
   // each scope exit releases, the cell is freed on the last drop and
   // dtor runs exactly once on the stored value.
-  static fn alloc(value T, dtor fn(T)) *Cell[T] =
+  static fn new(value T, dtor fn(T)) *Cell[T] =
     return &Cell[T]{_dtor: dtor, _payload: value}
 
   // payload borrows the stored value. Reading does not change the RC.

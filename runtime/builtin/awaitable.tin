@@ -3,13 +3,31 @@
 // awaitable[t] trait - implement this on a struct to make it usable
 // with the `await` keyword.
 //
+// The trait splits the work in two:
+//   - ready()   non-blocking poll. returns true when result() is
+//               safe-and-fast to call. The runtime drives the spin
+//               loop, so user impls don't need to call yield.
+//   - result()  produce the value. result() may still block if the
+//               work isn't done — for backwards compatibility and
+//               so user code that calls result() without first
+//               polling ready() keeps working.
+//
+// `await x` lowers to:
+//   loop:
+//     if x.ready(): break
+//     yield
+//   x.result()
+//
 // Example:
 //   struct MyFuture(awaitable[i64]) =
-//     ...
-//     fn awaitable[i64]::await_result(this MyFuture) i64 = ...
+//     done bool
+//     val  i64
+//     fn awaitable[i64]::ready(this MyFuture) bool = return this.done
+//     fn awaitable[i64]::result(this MyFuture) i64 = return this.val
 //
-//   let f = MyFuture{...}
-//   let v = await f   // calls f.await_result()
+//   let f = MyFuture{done: true, val: 42}
+//   let v = await f   // 42
 
 trait awaitable[t] =
-  fn await_result(this awaitable[t]) t = virtual
+  fn ready(this awaitable[t]) bool = virtual
+  fn result(this awaitable[t]) t = virtual

@@ -171,6 +171,149 @@ func fmtTypeExpr(te ast.TypeExpr) string {
 	return te.String()
 }
 
+// checkConstraintsReferenceDeclared rejects where-guards that
+// reference a name that is not declared in the type's TypeParams or
+// Wildcards. Catches typos like `data Foo[T] where Q is comp` where
+// Q is undeclared. The error names the available declared params /
+// wildcards so the user can spot the typo.
+func checkConstraintsReferenceDeclared(declName string, typeParams, wildcards []string, constraints []ast.TypeConstraint) error {
+	if len(constraints) == 0 {
+		return nil
+	}
+
+	declared := map[string]bool{}
+	for _, p := range typeParams {
+		declared[p] = true
+	}
+
+	for _, w := range wildcards {
+		declared[w] = true
+	}
+
+	for _, c := range constraints {
+		if !declared[c.TypeParam] {
+			return fmt.Errorf("%s: where-guard `where %s is %s` references %s, which is not in the type-param list (have: %s); add %s as a type parameter or as a wildcard slot `_: %s`",
+				declName, c.TypeParam, typeBoundString(c.Bound), c.TypeParam,
+				declaredNamesString(typeParams, wildcards), c.TypeParam, c.TypeParam)
+		}
+	}
+
+	return nil
+}
+
+// declaredNamesString joins type-params and wildcards into a single
+// human-readable list, prefixing wildcard slots with "_: " so the
+// kind is obvious.
+func declaredNamesString(typeParams, wildcards []string) string {
+	var parts []string
+	parts = append(parts, typeParams...)
+
+	for _, w := range wildcards {
+		parts = append(parts, "_: "+w)
+	}
+
+	if len(parts) == 0 {
+		return "(none)"
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+// checkMethodsAgainstImpls rejects trait-qualified method definitions
+// (`fn TraitName::method`) when the data/struct does not list
+// TraitName in its implements list (the parens after the type-param
+// list, e.g. `data Foo(Reader, Writer) =`). Without this check a typo
+// in the qualifier or a forgotten Implements entry compiles silently
+// and the method is dead code.
+//
+// Both static (`fn ::method`) and unqualified methods are skipped:
+// they don't claim a trait impl. Only qualified methods get checked.
+func checkMethodsAgainstImpls(declName, declKind string, impls []ast.TypeExpr, methods []*ast.FuncDecl) error {
+	if len(methods) == 0 {
+		return nil
+	}
+
+	implTraits := map[string]bool{}
+
+	for _, impl := range impls {
+		for _, name := range collectTraitBaseNames(impl) {
+			implTraits[name] = true
+		}
+	}
+
+	for _, m := range methods {
+		if m.TraitQualifier == "" {
+			continue
+		}
+		// Static methods on traits write `::method`; the qualifier
+		// is empty in that case, so we never reach here for them.
+		// Trait-qualified methods produce a non-empty qualifier
+		// like `Reader` / `myt[T, Pair[_: W, T]]` / `pkg::Trait`.
+		bare := traitBaseFromQualifier(m.TraitQualifier)
+		if bare == "" {
+			continue
+		}
+
+		if !implTraits[bare] {
+			return fmt.Errorf("%s %s: method `fn %s::%s` references trait %q, but %s does not declare trait %q in its implements list. Add %s to %s's parens (e.g. `%s %s(...,%s) =`)",
+				declKind, declName, m.TraitQualifier, m.Name, bare, declName, bare, bare, declName, declKind, declName, bare)
+		}
+	}
+
+	return nil
+}
+
+// traitBaseFromQualifier extracts the bare trait name from a
+// qualifier string. Strips package prefixes (`pkg::Trait` -> `Trait`)
+// and type-args (`Trait[T, U]` -> `Trait`).
+func traitBaseFromQualifier(q string) string {
+	// Strip type-args first: anything from the first '[' onward.
+	if idx := strings.Index(q, "["); idx >= 0 {
+		q = q[:idx]
+	}
+	// Strip package: keep the last segment after `::`.
+	if idx := strings.LastIndex(q, "::"); idx >= 0 {
+		q = q[idx+2:]
+	}
+
+	return q
+}
+
+// collectTraitBaseNames extracts the bare trait name(s) from a
+// trait-impl TypeExpr. For SimpleType / GenericType the base name is
+// the type's name; for a UnionTypeExpr (rare) collect from each
+// alternative. Package qualifiers strip down to the last segment so
+// `pkg::Trait` matches a `Trait` qualifier on a method.
+func collectTraitBaseNames(t ast.TypeExpr) []string {
+	switch v := t.(type) {
+	case *ast.SimpleType:
+		name := v.Name
+
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return []string{name}
+	case *ast.GenericType:
+		name := v.Name
+
+		if idx := strings.LastIndex(name, "::"); idx >= 0 {
+			name = name[idx+2:]
+		}
+
+		return []string{name}
+	case *ast.UnionTypeExpr:
+		var out []string
+		for _, u := range v.Types {
+			out = append(out, collectTraitBaseNames(u)...)
+		}
+
+		return out
+	}
+
+	return nil
+}
+
 // dataVariantInfo holds the per-variant layout of an ADT variant.
 // Tag is the ordinal index (declaration order). PayloadType is the LLVM struct
 // packed from the variant's fields (empty struct for nullary variants).
@@ -192,6 +335,14 @@ func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 	// would force the runtime layout to depend on per-call info, which
 	// is impossible since the layout is fixed at declaration.
 	if err := checkNoWildcardInVariantFields(n); err != nil {
+		return cg.nodeErr(n, "%s", err)
+	}
+
+	if err := checkConstraintsReferenceDeclared(n.Name, n.TypeParams, n.Wildcards, n.Constraints); err != nil {
+		return cg.nodeErr(n, "%s", err)
+	}
+
+	if err := checkMethodsAgainstImpls(n.Name, "data", n.Implements, n.Methods); err != nil {
 		return cg.nodeErr(n, "%s", err)
 	}
 

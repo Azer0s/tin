@@ -474,6 +474,5 @@ export {
   to_lower, to_upper,
   trim, trim_left, trim_right,
   parse_int, parse_int32, parse_float,
-  StringsError,
-  EmptyString, NoDigits, InvalidCharacter, IntegerOverflow, MissingExponent
+  StringsError
 } as strings

@@ -1712,11 +1712,163 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.progress(fmt.Sprintf("cascade re-exports %s (%d macros)", pkgName, cascaded))
 		}
 	}
+	// Validate exports: every name in `export { ... } as pkg` must
+	// refer to a top-level decl (struct, generic struct, ADT, enum,
+	// trait, function, macro, or a name re-exported from a child
+	// package). ADT variant constructors are inferred from the
+	// ADT itself, so listing them in `export` is a redundant noise
+	// signal — the export list silently accepted them before and
+	// callers had no warning when they mis-spelled or referenced a
+	// stale name. Diagnose those cases here instead of silently
+	// dropping them.
+	if err := cg.validatePackageExports(pkgName, exportedNames); err != nil {
+		return err
+	}
 
 	cg.curScope = prevScope
 	cg.filename = prevFilename
 
 	return nil
+}
+
+// validatePackageExports rejects exports that don't refer to any
+// top-level decl. ADT variant constructors are explicitly called
+// out because they're a common mistake — the user lists them
+// alongside the parent ADT, but the language already makes the
+// variants visible once the ADT is exported.
+func (cg *CodeGen) validatePackageExports(pkgName string, exportedNames map[string]bool) error {
+	for name := range exportedNames {
+		if cg.isVariantOfExportedAdt(name, exportedNames) {
+			return fmt.Errorf("export of %q: ADT variant constructors are inferred from the parent ADT; remove %q from `export { ... } as %s`",
+				name, name, pkgName)
+		}
+
+		if cg.isExportable(name, pkgName) {
+			continue
+		}
+
+		return fmt.Errorf("export of %q: no top-level decl (struct, data, enum, trait, fn, macro) named %q is visible in package %q",
+			name, name, pkgName)
+	}
+
+	return nil
+}
+
+// isVariantOfExportedAdt reports whether name is a variant of some
+// ADT in the same export list. Used to flag redundant variant
+// exports.
+func (cg *CodeGen) isVariantOfExportedAdt(name string, exportedNames map[string]bool) bool {
+	owners := cg.dataVariantLookup[name]
+	for _, adt := range owners {
+		// Strip the leading "pkg__" prefix so we compare against the
+		// user-facing source name.
+		bare := adt
+		if idx := strings.Index(adt, "__"); idx >= 0 {
+			bare = adt[idx+2:]
+		}
+
+		if exportedNames[bare] || exportedNames[adt] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isExportable reports whether name refers to a top-level decl that
+// can appear in an export list.
+func (cg *CodeGen) isExportable(name, pkgName string) bool {
+	if _, ok := cg.structTypes[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.structTypes[pkgName+"__"+name]; ok {
+		return true
+	}
+
+	if _, ok := cg.genericStructsByArity[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataDecls[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataDecls[pkgName+"__"+name]; ok {
+		return true
+	}
+
+	if _, ok := cg.enumTypes[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.traits[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.funcDecls[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.overloads[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.constrainedFuncs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.genericFuncs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[name]; ok {
+		return true
+	}
+	// Macros are stored in cg.macros under multiple keys depending
+	// on the load path: bare name (from direct file-path imports),
+	// `pkg::name`, `pkg.name`, with and without a trailing `!`.
+	// Look through every shape that could match this export name.
+	bare := strings.TrimSuffix(name, "!")
+	if _, ok := cg.macros[bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"::"+bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"::"+bare+"!"]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"."+bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.typeAliases[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.curScope.lookup(name); ok {
+		return true
+	}
+	// Re-exported child-package names (e.g. `export { log } as std`
+	// where log is itself a package): a name matches if any macro or
+	// type alias is registered under `name::`.
+	for k := range cg.macros {
+		if strings.HasPrefix(k, name+"::") {
+			return true
+		}
+	}
+
+	for k := range cg.typeAliases {
+		if strings.HasPrefix(k, name+"::") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // loadPackageSelective loads a package and then registers only the named symbols

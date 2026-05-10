@@ -3,16 +3,17 @@
 //
 // Mirrors the tcp package but uses datagrams instead of streams:
 //
-//   let srv = udp::listen(8082)
-//   let (c, ok) = await srv.accept()
-//   let line = await ioutil::read_string(c)   // read the datagram as text
-//   await ioutil::write_string(c, line)        // echo back
-//   c.close()
+//   match udp::listen(8082):
+//     case Ok(srv):
+//       match await srv.accept():
+//         case Ok(c):  ...
+//         case Err(e): echo e.message()
+//     case Err(e): echo e.message()
 //
 // For a connected client:
-//   let c = udp::dial("127.0.0.1", 8082)
-//   await ioutil::write_string(c, "hello\n")
-//   let got = await ioutil::read_string(c)
+//   match udp::dial("127.0.0.1", 8082):
+//     case Ok(c): await ioutil::write_string(c, "hello\n")
+//     case Err(e): echo e.message()
 //
 // Ownership: the file descriptor lives behind an *rc::Cell so copies of
 // Conn / Server share ownership instead of double-closing on scope exit.
@@ -26,7 +27,24 @@ use mem
 use rc
 use sync
 use errors
-use errors
+use result
+use { Result } from result
+
+// UdpError enumerates the failure modes the udp stdlib can surface.
+// Implements errors::Err so calls return Result[T, errors::Err] and
+// unify with the rest of the typed-error ecosystem.
+data UdpError(errors::Err, print) =
+  CannotBind(port i32)
+  CannotConnect(host string, port i32)
+  AcceptFailed
+
+  fn errors::Err::message(this UdpError) string =
+    match this:
+      case CannotBind(p):       return "udp: failed to bind port {p}"
+      case CannotConnect(h, p): return "udp: failed to connect to {h}:{p}"
+      case AcceptFailed:        return "udp: accept failed"
+
+  fn ::print(this UdpError) string = return this.message()
 
 // C helpers
 fn tin_udp_listen_c(port i32) i32                                                     = extern("_tin_udp_listen")
@@ -81,14 +99,14 @@ fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
 
   return avail
 
-fn{#async} accept_impl(fd i32) (Conn, *errors::Err) =
+fn{#async} accept_impl(fd i32) Result[Conn, errors::Err] =
   let (data, host, port) = await spawn recv_from_impl(fd)
 
   if len(data) == 0:
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: accept failed"))
+    return Err(AcceptFailed)
   let pos = mem::calloc(1, 8) as *i64
 
-  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, noop_close), host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false}, nil)
+  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, noop_close), host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false})
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = tin_io_blocked_val_c()
@@ -160,31 +178,28 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next datagram and returns a Conn to the sender.
-  // Returns Future[(Conn, *errors::Err)] - nil Err means success.
-  fn accept(this Server) Future[(Conn, *errors::Err)] =
+  fn accept(this Server) Future[Result[Conn, errors::Err]] =
     return spawn accept_impl(this.fd())
 
   fn Closeable::close(this Server) =
     io::close(this.fd())
 
 // listen creates a bound UDP socket on the given port.
-// Returns (Server, *errors::Err).
-fn listen(port i32) (Server, *errors::Err) =
+fn listen(port i32) Result[Server, errors::Err] =
   let fd = tin_udp_listen_c(port)
 
   if fd < 0:
-    return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("udp: failed to bind port {port}"))
+    return Err(CannotBind(port))
 
-  return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+  return Ok(Server{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
 // dial creates a connected UDP socket to host:port.
-// Returns (Conn, *errors::Err).
-fn dial(host string, port i32) (Conn, *errors::Err) =
+fn dial(host string, port i32) Result[Conn, errors::Err] =
   let fd = tin_udp_connect_c(host, port)
 
   if fd < 0:
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close), host: "", port: 0, data_buf: [], read_pos: nil, owns_fd: false}, errors::new("udp: failed to connect to {host}:{port}"))
+    return Err(CannotConnect(host, port))
 
-  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close), host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true}, nil)
+  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close), host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true})
 
-export { Server, Conn, listen, dial } as udp
+export { Server, Conn, UdpError, listen, dial } as udp

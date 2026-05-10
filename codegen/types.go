@@ -212,6 +212,17 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
 						return nil, err
 					}
+				} else if concreteDecl, ok := cg.dataDecls[concreteName]; ok {
+					// Re-register plain method aliases in the current
+					// scope. The IR functions live in the module
+					// (emitted during the first monomorphization), but
+					// the trait-qualified -> plain-name aliases register
+					// into whatever scope was active at first sight —
+					// when that was a foreign package's scope, the
+					// alias dies with the package and `try` later can't
+					// find e.g. `Result__time__Instant__errors__Err_is_err`.
+					// Rewire the aliases here so consumers see them.
+					cg.registerPlainMethodAliases(concreteName, concreteDecl.Methods)
 				}
 
 				cg.dataInstTypeArgs[concreteName] = parts

@@ -97,35 +97,35 @@ struct Atomic[t] =
 
     tin_atomic_store_64(raw, &v as *void)
 
-    return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w4 =
     let raw = tin_atomic_alloc(4)
 
     tin_atomic_store_32(raw, &v as *void)
 
-    return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w2 =
     let raw = tin_atomic_alloc(2)
 
     tin_atomic_store_16(raw, &v as *void)
 
-    return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w1 =
     let raw = tin_atomic_alloc(1)
 
     tin_atomic_store_8(raw, &v as *void)
 
-    return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is not primitive =
     let raw = tin_atomic_obj_new(sizeof(t), isrc(t))
 
     tin_atomic_obj_store(raw, &v as *void)
 
-    return Atomic[t]{_cell: rc::Cell[*void].alloc(raw, tin_atomic_obj_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_obj_free)}
 
   // --- load ---------------------------------------------------------
 

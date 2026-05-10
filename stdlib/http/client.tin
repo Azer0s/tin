@@ -22,6 +22,7 @@ use ioutil
 use net::tcp
 use tls
 use io
+use result
 use { loop } from macros
 use "./http_parser"
 
@@ -252,40 +253,48 @@ fn{#async} read_all(r io::AsyncReader) string =
 
 // do_with_client dials the server, merges client + request headers,
 // sends the request, reads the full response, and closes the connection.
+// On dial / TLS-handshake failure surfaces a 5xx HttpResponse rather
+// than a Result; the public API contract is that callers always get
+// a response object.
+//
+// The match-arm-assign pattern below would be cleaner as `try`, but
+// `try` inside an {#async} function whose return type is HttpResponse
+// (not Result) requires wildcard mono with a non-Result target — that
+// path is not wired up. For now, match.
 fn{#async} do_with_client(client Client, r Request) HttpResponse =
   let (use_tls, host, port, path) = parse_url(r.url)
   let req_str = build_request(r.method, host, path, client.headers, r.headers, r.body)
 
-  // Dial and send.
-  let (conn, dial_err) = tcp::dial(host, port)
-
-  if dial_err != nil:
-    return HttpResponse{
-      status:  500 as HttpStatus,
-      headers: collections::HashMap[string, string]::make(1),
-    }
+  let conn tcp::Conn = tcp::Conn{_fd_cell: nil}
+  match tcp::dial(host, port):
+    case Ok(c): conn = c
+    case Err(_):
+      return HttpResponse{
+        status:  500 as HttpStatus,
+        headers: collections::HashMap[string, string]::make(1),
+      }
 
   let raw = ""
 
   if use_tls:
-    let (tls_conn, tls_err) = await tls::connect(host, conn.fd())
-
-    if tls_err != nil:
-      // Surface the handshake failure as a 502 Bad Gateway -- the
-      // upstream is unreachable from this client's perspective and
-      // the user already gets the error text via the response.  Pre-
-      // fix tls::connect panicked the whole program on a cert /
-      // SNI / chain failure, which is wrong for any client that
-      // intends to retry, fall back, or report the issue.
-      conn.close()
-      return HttpResponse{
-        status:  502 as HttpStatus,
-        headers: collections::HashMap[string, string]::make(1),
-      }
-
-    await ioutil::write_string(tls_conn, req_str)
-    raw = await spawn read_all(tls_conn)
-    tls_conn.close()
+    let tls_res = await tls::connect(host, conn.fd())
+    match tls_res:
+      case Ok(tls_conn):
+        await ioutil::write_string(tls_conn, req_str)
+        raw = await spawn read_all(tls_conn)
+        tls_conn.close()
+      case Err(_):
+        // Surface the handshake failure as a 502 Bad Gateway -- the
+        // upstream is unreachable from this client's perspective and
+        // the user already gets the error text via the response.  Pre-
+        // fix tls::connect panicked the whole program on a cert /
+        // SNI / chain failure, which is wrong for any client that
+        // intends to retry, fall back, or report the issue.
+        conn.close()
+        return HttpResponse{
+          status:  502 as HttpStatus,
+          headers: collections::HashMap[string, string]::make(1),
+        }
   else:
     await ioutil::write_string(conn, req_str)
     raw = await spawn read_all(conn)

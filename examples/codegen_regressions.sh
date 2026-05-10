@@ -748,5 +748,146 @@ data SingleUse[T](myt[T, Pair[_: W, T]]) =
 fn main() = echo "ok"
 '
 
+assert_substr "data accepts named wildcard slot in type-param list with where-guard" \
+  "ok" '
+trait myt[V, C] =
+  fn pull(this myt[V, C]) C = virtual
+
+data Pair[A, B] =
+  P(a A, b B)
+
+data Foo[T, _: W](myt[T, Pair[_: W, T]]) where W is comp =
+  Box(v T)
+
+  fn myt[T, Pair[_: W, T]]::pull(this Foo[T]) Pair[_: W, T] =
+    panic("noop")
+
+fn main() = echo "ok"
+'
+
+assert_substr "trait-qualified method requires matching impl in data parens" \
+  "does not declare trait" '
+trait myt[V, C] =
+  fn pull(this myt[V, C]) C = virtual
+
+data Pair[A, B] =
+  P(a A, b B)
+
+data Foo[T, _: W] where W is comp =
+  Box(v T)
+
+  fn myt[T, Pair[_: W, T]]::pull(this Foo[T]) Pair[_: W, T] =
+    panic("noop")
+
+fn main() = echo "ok"
+'
+
+assert_substr "bare _ rejected in type-param list (must be named)" \
+  "is not allowed in a type-parameter list" '
+data Bad[T, _] =
+  Box(v T)
+
+fn main() = echo "ok"
+'
+
+assert_substr "match-result-try: lint fires on Ok-assign + Err-return antipattern" \
+  "-Wmatch-result-try" '
+use result
+use { Result } from result
+use errors
+
+fn parse() Result[i64, errors::Err] = return Ok(42)
+
+fn main() =
+  let v i64 = 0
+  match parse():
+    case Ok(x): v = x
+    case Err(_): return
+  echo "got {v}"
+'
+
+assert_runs_clean "match-result-try: no false positive on echo-in-both-arms" \
+  "this match" '
+use result
+use { Result } from result
+use errors
+
+fn parse() Result[i64, errors::Err] = return Ok(42)
+
+fn main() =
+  match parse():
+    case Ok(x):  echo "got {x}"
+    case Err(e): echo "err: {e.message()}"
+'
+
+assert_substr "match await: int scrutinee does not crash IR emission" \
+  "got 42" '
+fn{#async} make_x() i64 = return 42
+
+fn{#async} main() =
+  let f = spawn make_x()
+  match await f:
+    case 42: echo "got 42"
+    case 1:  echo "one"
+'
+
+assert_substr "match await: ADT scrutinee does not crash IR emission" \
+  "ok" '
+use result
+use { Result } from result
+use errors
+
+fn{#async} parse() Result[i64, errors::Err] = return Ok(42)
+
+fn{#async} main() =
+  let f = spawn parse()
+  match await f:
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"
+'
+
+assert_substr "try keyword resolves Result methods across package boundaries" \
+  "ok" '
+use result
+use { Result } from result
+use errors
+use time
+
+fn parse() Result[time::Instant, errors::Err] =
+  return Ok(time::now())
+
+fn outer() Result[time::Instant, errors::Err] =
+  let t = try parse()
+  return Ok(t)
+
+fn main() =
+  match outer():
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"
+'
+
+assert_substr "user-defined awaitable: runtime drives ready/result spin loop" \
+  "attempts: 4" '
+var g_attempts i64
+
+struct PollMe(awaitable[i64]) =
+  reqd i64
+
+  fn awaitable[i64]::ready(this PollMe) bool =
+    g_attempts = g_attempts + 1
+    return g_attempts >= this.reqd
+
+  fn awaitable[i64]::result(this PollMe) i64 =
+    return g_attempts
+
+fn{#async} run() i64 =
+  let p = PollMe{reqd: 4}
+  return await p
+
+fn main() =
+  let f = spawn run()
+  echo "attempts: {await f}"
+'
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"

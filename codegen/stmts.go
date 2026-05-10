@@ -907,13 +907,22 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 			// advanced to a new block (e.g. coroutine chaining creates new blocks).
 			cg.curBlock = block
 
-			_, err := cg.genExpr(block, s.Expr)
+			val, err := cg.genExpr(block, s.Expr)
 			if err != nil {
 				return nil, false, err
 			}
 
 			if cg.curBlock != nil && cg.curBlock != block {
-				return cg.curBlock, false, nil
+				block = cg.curBlock
+			}
+
+			// Release a discarded RC-tracked result (e.g.
+			// `await ch.recv()` where ch is Channel[string]).  Without
+			// this, every chan-recv'd RC value leaks: the await
+			// produced an owned reference for the caller, and dropping
+			// it without a binding has no other place to release it.
+			if val != nil && !isVoidType(val.Type()) && isRCTrackedType(val.Type()) {
+				cg.emitRelease(block, val)
 			}
 
 			return block, false, nil
@@ -2113,7 +2122,20 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if tup, isTup := s.Value.(*ast.TupleLit); isTup && cg.curCoroRetType != nil {
 			retVal, err = cg.genTupleLit(block, tup, cg.curCoroRetType)
 		} else {
+			// Set returnTypeHint so ADT bare-constructor calls like
+			// `return Err(e)` disambiguate against the declared
+			// return type when multiple Result instantiations are in
+			// scope. Mirrors the sync-return path in genReturn — the
+			// LLVM coro signature is i8*, so we have to use the saved
+			// curCoroRetType instead of cg.curFn.Sig.RetType here.
+			prevHint := cg.returnTypeHint
+
+			if cg.curCoroRetType != nil && !irtypes.IsVoid(cg.curCoroRetType) {
+				cg.returnTypeHint = cg.curCoroRetType
+			}
+
 			retVal, err = cg.genExpr(block, s.Value)
+			cg.returnTypeHint = prevHint
 		}
 
 		if err != nil {

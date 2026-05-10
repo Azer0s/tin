@@ -19,16 +19,18 @@ fn{#async} main() =
   if errors::is_err(err):
     panic(err.message())
 
-  let (tls_conn, tls_err) = await tls::connect("localhost", conn.fd())
+  let tls_r = await tls::connect("localhost", conn.fd())
 
-  if errors::is_err(tls_err):
-    panic(tls_err.message())
+  match tls_r:
+    case Err(e):
+      panic(e.message())
+    case Ok(tls_conn):
+      await ioutil::write_string(tls_conn, "hello tls\n")
+      let resp = await ioutil::read_string(tls_conn)
 
-  await ioutil::write_string(tls_conn, "hello tls\n")
-  let resp = await ioutil::read_string(tls_conn)
+      assert::equals("ECHO: hello tls", resp)
+      echo "PASS: tls round-trip ok (resp={resp})"
 
-  assert::equals("ECHO: hello tls", resp)
-  echo "PASS: tls round-trip ok (resp={resp})"
+      tls_conn.close()
 
-  tls_conn.close()
   conn.close()

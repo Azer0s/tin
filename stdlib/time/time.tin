@@ -301,5 +301,5 @@ export {
   monotonic_ns, sleep, sleep_ms,
   parse_rfc3339, parse,
   RFC3339, RFC3339Nano,
-  TimeError, InvalidRfc3339, UnsupportedLayout,
+  TimeError,
 } as time

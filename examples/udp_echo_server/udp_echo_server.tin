@@ -13,6 +13,7 @@ use { loop, async } from macros
 use net::udp
 use ioutil
 use errors
+use result
 
 async handle_conn(c udp::Conn) =
   let line = await ioutil::read_string(c)
@@ -21,14 +22,14 @@ async handle_conn(c udp::Conn) =
   c.close()
 
 fn{#async} main() =
-  let (srv, err) = udp::listen(8082)
+  match udp::listen(8082):
+    case Err(e): panic(e.message())
+    case Ok(srv):
+      echo "udp echo listening on :8082"
 
-  if errors::is_err(err):
-    panic(err.message())
-  echo "udp echo listening on :8082"
+      loop:
+        let r = await srv.accept()
 
-  loop:
-    let (c, cerr) = await srv.accept()
-
-    if !errors::is_err(cerr):
-      spawn handle_conn(c)
+        match r:
+          case Ok(c):  spawn handle_conn(c)
+          case Err(e): echo "udp: accept dropped: {e.message()}"

@@ -144,6 +144,7 @@ type StructDecl struct {
 	base
 	Name        string
 	TypeParams  []string
+	Wildcards   []string         // call-site-supplied wildcard slot names (e.g. `_: W` in `struct Foo[T, _: W]`)
 	Constraints []TypeConstraint // generic type constraints: where t is addable
 	Fields      []StructField
 	Methods     []*FuncDecl
@@ -221,6 +222,7 @@ type DataDecl struct {
 	base
 	Name        string
 	TypeParams  []string
+	Wildcards   []string // call-site-supplied wildcard slot names (e.g. `_: W` in `data Foo[T, _: W]`)
 	Constraints []TypeConstraint
 	Variants    []DataVariant
 	Implements  []TypeExpr  // trait impls listed in parens, mirrors StructDecl.Implements
