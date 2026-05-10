@@ -2044,14 +2044,25 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		}
 	}
 
+	// Returning a trait fat-pointer by value: the scope's synthetic
+	// `.iface_data_*` release entry would otherwise free the heap
+	// block backing data_ptr before the caller ever sees it. Retain
+	// data_ptr here so the upcoming scope release decrements rc to 1
+	// instead of 0, leaving the caller with an owned iface they will
+	// release on drop. Mirrors how `retSkipName` keeps a returning
+	// named binding alive past scope cleanup.
+	if val != nil {
+		if _, ok := cg.isTraitFatPtr(val.Type()); ok {
+			dataPtr := block.NewExtractValue(val, 0)
+			block.NewCall(cg.ensureRetain(), dataPtr)
+		}
+	}
+
 	cg.emitAllScopeReleases(block, retSkipName)
 
 	// Tin-level type-mismatch check on the return value: surface the
 	// error here so users see a Tin source location and message instead
 	// of an LLVM IR-level type-mismatch from clang on the temp .ll.
-	// This covers the case where a wildcard call-site mono didn't apply
-	// (impl didn't opt in) and the call returned the impl's concrete
-	// container shape that doesn't match the enclosing fn's return.
 	if cg.curFn != nil && val != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
 		if !val.Type().Equal(cg.curFn.Sig.RetType) {
 			return cg.nodeErr(s,
