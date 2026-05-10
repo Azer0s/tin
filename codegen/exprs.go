@@ -272,13 +272,50 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 // the named trait whose bound contains at least one WildcardType slot.
 // Used to gate cross-T rewrap on the impl actually opting in via the
 // partial-bound syntax (see masterplan: "call-site generics").
+//
+// Both the concrete monomorphization and the template are checked.
+// Monomorphization substitutes wildcards out of the concrete decl's
+// Implements list, so the template is the source of truth for whether
+// a wildcard was ever present in the impl bound.
 func (cg *CodeGen) adtImplHasWildcardBound(adtName, traitBaseName string) bool {
+	decls := []*ast.DataDecl{}
+
+	if d := cg.dataDecls[adtName]; d != nil {
+		decls = append(decls, d)
+	}
+
+	if idx := strings.Index(adtName, "__"); idx > 0 {
+		if d := cg.dataDecls[adtName[:idx]]; d != nil {
+			decls = append(decls, d)
+		}
+	}
+
+	if len(decls) == 0 {
+		return false
+	}
+
+	for _, decl := range decls {
+		for _, impl := range decl.Implements {
+			if traitBaseImplName(impl) != traitBaseName {
+				continue
+			}
+
+			if typeExprContainsWildcard(impl) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// adtImplHasWildcardBoundLegacy is the pre-template-aware version,
+// retained for any code path still calling it directly. Prefer
+// adtImplHasWildcardBound. Same semantics, just doesn't fall back
+// through the template.
+func (cg *CodeGen) adtImplHasWildcardBoundLegacy(adtName, traitBaseName string) bool {
 	decl := cg.dataDecls[adtName]
 	if decl == nil {
-		// Monomorphized concretes are keyed by their suffixed name. Strip
-		// the suffix back to the template to find the original Implements
-		// list with wildcards intact (substituteTypeParams resolves them
-		// before reaching the concrete decl).
 		if idx := strings.Index(adtName, "__"); idx > 0 {
 			decl = cg.dataDecls[adtName[:idx]]
 		}

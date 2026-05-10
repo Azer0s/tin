@@ -61,7 +61,7 @@ fn file_size(path string) i64 =
 // stat returns a FileInfo for path.
 // Returns Ok(info) on success, Err(OsError) when the path doesn't
 // resolve to a readable file or directory.
-fn stat(path string) Result[FileInfo, OsError] =
+fn stat(path string) Result[FileInfo, errors::Err] =
   let d = os_opendir(path)
 
   if d != nil:
@@ -71,7 +71,7 @@ fn stat(path string) Result[FileInfo, OsError] =
   let f = io::fopen(path, "rb")
 
   if f == nil:
-    return Err(OsError{_kind: StatFailed(path)})
+    return Err(StatFailed(path))
   io::fseek(f, 0, 2)
   let sz = io::ftell(f)
 

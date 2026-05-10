@@ -718,5 +718,35 @@ assert_substr "lex \\x with non-hex digits is rejected" \
 fn main() = echo "\xZZ"
 '
 
+assert_substr "data warns when an anonymous wildcard slot is unused" \
+  "unused-wildcard" '
+trait foo[V, C] =
+  fn act(this foo[V, C]) i64 = virtual
+
+data UnusedW[T, E](foo[T, [_]]) =
+  Bar(v T)
+
+  fn foo[T, [_]]::act(this UnusedW[T, E]) i64 = return 42
+
+fn main() = echo "ok"
+'
+
+assert_substr "data warns when a named wildcard is referenced by exactly one method" \
+  "method-level generic" '
+trait myt[V, C] =
+  fn pull(this myt[V, C]) C = virtual
+
+data Pair[A, B] =
+  P(a A, b B)
+
+data SingleUse[T](myt[T, Pair[_: W, T]]) =
+  Box(v T)
+
+  fn myt[T, Pair[_: W, T]]::pull(this SingleUse[T]) Pair[_: W, T] =
+    panic("noop")
+
+fn main() = echo "ok"
+'
+
 printf "codegen regressions: %d passed, %d failed\n" "$pass" "$fail"
 exit "$fail"

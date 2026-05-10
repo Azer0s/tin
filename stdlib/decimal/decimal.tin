@@ -193,41 +193,32 @@ fn from(v f64) Value =
 fn from(s string) Value =
   return parse_impl(s)
 
-// DecimalErrorKind enumerates the failure modes decimal::parse can hit.
-data DecimalErrorKind =
+// DecimalError enumerates the failure modes decimal::parse can hit.
+// Implements errors::Err so calls return Result[T, errors::Err] like
+// the rest of the stdlib's typed-error ecosystem.
+data DecimalError(errors::Err, print) =
   EmptyDecimal
   ExtraDot(input string)
   InvalidDecimalChar(input string)
   NoDecimalDigits
 
-// DecimalError implements errors::Err.
-struct DecimalError(errors::Err) =
-  _kind DecimalErrorKind
-
-  fn kind(this DecimalError) DecimalErrorKind = return this._kind
-
   fn errors::Err::message(this DecimalError) string =
-    match this._kind:
+    match this:
       case EmptyDecimal:           return "decimal::parse: empty string"
       case ExtraDot(_):            return "decimal::parse: extra '.'"
       case InvalidDecimalChar(_):  return "decimal::parse: invalid character"
       case NoDecimalDigits:        return "decimal::parse: no digits"
 
-  fn print(this DecimalError) string =
-    match this._kind:
-      case EmptyDecimal:           return "decimal::parse: empty string"
-      case ExtraDot(_):            return "decimal::parse: extra '.'"
-      case InvalidDecimalChar(_):  return "decimal::parse: invalid character"
-      case NoDecimalDigits:        return "decimal::parse: no digits"
+  fn ::print(this DecimalError) string = return this.message()
 
 // parse converts a decimal string to a Value. Accepts an optional leading
 // `-`, digits, and an optional `.<digits>` fractional part. Anything else
 // produces Err(DecimalError).
-fn parse(s string) Result[Value, DecimalError] =
+fn parse(s string) Result[Value, errors::Err] =
   let n = len(s)
 
   if n == 0:
-    return Err(DecimalError{_kind: EmptyDecimal})
+    return Err(EmptyDecimal)
   let neg = false
   let i i64 = 0
 
@@ -246,7 +237,7 @@ fn parse(s string) Result[Value, DecimalError] =
 
     if c == @'.':
       if seen_dot:
-        return Err(DecimalError{_kind: ExtraDot(s)})
+        return Err(ExtraDot(s))
       seen_dot = true
     else if c >= @'0' && c <= @'9':
       coeff = coeff * 10 + ((c - @'0') as i64)
@@ -255,11 +246,11 @@ fn parse(s string) Result[Value, DecimalError] =
       if seen_dot:
         scale = scale + 1
     else:
-      return Err(DecimalError{_kind: InvalidDecimalChar(s)})
+      return Err(InvalidDecimalChar(s))
     i = i + 1
 
   if !seen_digit:
-    return Err(DecimalError{_kind: NoDecimalDigits})
+    return Err(NoDecimalDigits)
   if neg:
     coeff = -coeff
 
@@ -361,6 +352,6 @@ export {
   Value,
   from,
   parse,
-  DecimalError, DecimalErrorKind,
+  DecimalError,
   EmptyDecimal, ExtraDot, InvalidDecimalChar, NoDecimalDigits,
 } as decimal

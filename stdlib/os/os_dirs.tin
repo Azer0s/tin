@@ -5,6 +5,10 @@
 
 use io
 use errors
+use sync
+use { Unit } from sync
+use result
+use { Result } from result
 
 // POSIX directory / file-system operations.
 fn os_mkdir(path string, mode i32) i32 = extern("mkdir")
@@ -24,12 +28,12 @@ fn str_prefix(s string, n i64) string =
   return out
 
 // mkdir creates directory path and all missing parent directories (like mkdir -p).
-// Returns nil on success. Succeeds silently if the directory already exists.
-fn mkdir(path string) *errors::Err =
+// Succeeds silently if the directory already exists.
+fn mkdir(path string) Result[Unit, errors::Err] =
   let n = len(path)
 
   if n == 0:
-    return &OsError{_kind: CannotMkdir("(empty path)")}
+    return Err(CannotMkdir("(empty path)"))
   // Walk forward creating each prefix component.
   // Start at 1 to skip the leading '/' of absolute paths.
   let i i64 = 1
@@ -43,37 +47,34 @@ fn mkdir(path string) *errors::Err =
   let d = os_opendir(path)
 
   if d == nil:
-    return &OsError{_kind: CannotMkdir(path)}
+    return Err(CannotMkdir(path))
   os_closedir(d)
 
-  return nil
+  return Ok(Unit{_unit: 0})
 
 // remove removes the file at path.
-// Returns nil on success, an error if the path does not exist or is a directory.
-fn remove(path string) *errors::Err =
+fn remove(path string) Result[Unit, errors::Err] =
   let r = io::remove(path)
 
   if r != 0:
-    return &OsError{_kind: CannotRemove(path)}
+    return Err(CannotRemove(path))
 
-  return nil
+  return Ok(Unit{_unit: 0})
 
 // rmdir removes the empty directory at path.
-// Returns nil on success, an error if the directory is not empty or missing.
-fn rmdir(path string) *errors::Err =
+fn rmdir(path string) Result[Unit, errors::Err] =
   let r = os_rmdir(path)
 
   if r != 0:
-    return &OsError{_kind: CannotRmdir(path)}
+    return Err(CannotRmdir(path))
 
-  return nil
+  return Ok(Unit{_unit: 0})
 
 // rename moves old_path to new_path.
-// Returns nil on success, an error otherwise.
-fn rename(old_path string, new_path string) *errors::Err =
+fn rename(old_path string, new_path string) Result[Unit, errors::Err] =
   let r = io::rename(old_path, new_path)
 
   if r != 0:
-    return &OsError{_kind: CannotRename(old_path, new_path)}
+    return Err(CannotRename(old_path, new_path))
 
-  return nil
+  return Ok(Unit{_unit: 0})

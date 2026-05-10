@@ -900,36 +900,28 @@ fn parse_node(p *Parser, min_indent i64) *Value =
 
 // Public API
 
-// YamlErrorKind enumerates the failures parse can surface.
-data YamlErrorKind =
+// YamlError enumerates the failures parse can surface. Implements
+// errors::Err so calls return Result[T, errors::Err] like the rest
+// of the typed-error ecosystem.
+data YamlError(errors::Err, print) =
   YamlEmpty
   YamlMalformed(pos i64, msg string)
 
-// YamlError implements errors::Err so YAML failures compose with the
-// generic error trait.  Use kind() for structured discrimination.
-struct YamlError(errors::Err) =
-  _kind YamlErrorKind
-
-  fn kind(this YamlError) YamlErrorKind = return this._kind
-
   fn errors::Err::message(this YamlError) string =
-    match this._kind:
+    match this:
       case YamlEmpty:             return "yaml: empty input"
       case YamlMalformed(pos, m): return "yaml: malformed at byte {pos}: {m}"
 
-  fn print(this YamlError) string =
-    match this._kind:
-      case YamlEmpty:             return "yaml: empty input"
-      case YamlMalformed(pos, m): return "yaml: malformed at byte {pos}: {m}"
+  fn ::print(this YamlError) string = return this.message()
 
 // parse parses a YAML string and returns a Value tree for untyped inspection.
 //
 //   match yaml::parse("name: alice\nage: 30\n"):
 //     case Ok(v):  echo v.get("name").as_string()
 //     case Err(e): ...
-fn parse(s string) Result[Value, YamlError] =
+fn parse(s string) Result[Value, errors::Err] =
   if len(s) == 0:
-    return Err(YamlError{_kind: YamlEmpty})
+    return Err(YamlEmpty)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
 
   return Ok(*parse_node(&p, 0))
@@ -999,12 +991,12 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
 //
 //   struct point = x i64  y i64
 //   let p = yaml::parse[point]("x: 3\ny: 4\n")
-fn parse[T](s string) Result[T, YamlError] =
+fn parse[T](s string) Result[T, errors::Err] =
   let out T
   let doc Value
 
   match parse(s):
-    case Err(e): return Result[T, YamlError]::Err(e)
+    case Err(e): return Err(e)
     case Ok(d):
       doc = d
 
@@ -1071,6 +1063,6 @@ fn parse[T](s string) Result[T, YamlError] =
 
 export {
   Kind, Value, parse, encode,
-  YamlError, YamlErrorKind, YamlEmpty, YamlMalformed,
+  YamlError, YamlEmpty, YamlMalformed,
   YamlSerializable, YamlDeserializable,
 } as yaml

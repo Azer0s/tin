@@ -116,9 +116,25 @@ func traitQualifierKey(q string) string {
 
 // stripQualifierModule drops a leading "module::" prefix (or chain of them)
 // from a trait qualifier so that "io::AsyncReader" canonicalises to just
-// "AsyncReader". Type-arg suffixes are preserved: "io::Reader[byte]" -> "Reader[byte]".
+// "AsyncReader". Type-arg suffixes are preserved:
+// "io::Reader[byte]"           -> "Reader[byte]"
+// "tryable[string, errors::Err]" -> "tryable[string, errors::Err]"
+//   (the `::` lives inside the type-arg bracket, not in the leading
+//    module prefix, so it must NOT be stripped — earlier the function
+//    used LastIndex on `::`, which incorrectly trimmed everything
+//    before the type-arg's `::` and corrupted substituted qualifiers.)
 func stripQualifierModule(q string) string {
-	idx := strings.LastIndex(q, "::")
+	// Find the trait-name boundary: either the position of the first
+	// `[` (start of type-args) or the end of the string. Only `::`
+	// occurring before that boundary qualifies as a module prefix.
+	boundary := strings.IndexByte(q, '[')
+	if boundary < 0 {
+		boundary = len(q)
+	}
+
+	prefix := q[:boundary]
+
+	idx := strings.LastIndex(prefix, "::")
 	if idx < 0 {
 		return q
 	}
@@ -136,6 +152,17 @@ func stripQualifierModule(q string) string {
 func methodScopeName(structName string, m *ast.FuncDecl) string {
 	if m.TraitQualifier != "" {
 		bare := stripQualifierModule(m.TraitQualifier)
+		// Prefer parsing the qualifier into a TypeExpr and using
+		// traitImplKey on it — that is the same canonicalisation
+		// genTraitVtables uses on the impl-bound side, so qualifier
+		// strings with array / wildcard / pointer slots produce
+		// matching keys on both ends. Fall back to the legacy
+		// string-based traitQualifierKey when parsing fails (e.g.
+		// during predeclare passes that hand us a malformed
+		// fragment).
+		if te, err := parseTypeExprFromString(bare); err == nil {
+			return structName + "_" + traitImplKey(te) + "_" + m.Name
+		}
 
 		return structName + "_" + traitQualifierKey(bare) + "_" + m.Name
 	}

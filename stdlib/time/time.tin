@@ -257,48 +257,41 @@ fn sleep_ms(ms i64) sync::Future[sync::Unit] =
 const RFC3339     string = "2006-01-02T15:04:05Z07:00"
 const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
 
-// TimeErrorKind enumerates the failures the parse_* family can surface.
-data TimeErrorKind =
+// TimeError enumerates the failures the parse_* family can surface.
+// Implements errors::Err so calls return Result[T, errors::Err] and
+// unify with the rest of the typed-error ecosystem. Carrying the
+// offending input (or layout) makes round-tripping through generic
+// error paths still faithful to what the user supplied.
+data TimeError(errors::Err, print) =
   InvalidRfc3339(input string)
   UnsupportedLayout(layout string)
 
-// TimeError implements errors::Err.  Carrying the offending input
-// (or layout) makes round-tripping through generic error paths still
-// faithful to what the user supplied.
-struct TimeError(errors::Err) =
-  _kind TimeErrorKind
-
-  fn kind(this TimeError) TimeErrorKind = return this._kind
-
   fn errors::Err::message(this TimeError) string =
-    match this._kind:
+    match this:
       case InvalidRfc3339(input):  return "time: invalid RFC3339 string: " ++ input
       case UnsupportedLayout(lay): return "time: unsupported layout: " ++ lay
 
-  fn print(this TimeError) string =
-    match this._kind:
-      case InvalidRfc3339(input):  return "time: invalid RFC3339 string: " ++ input
-      case UnsupportedLayout(lay): return "time: unsupported layout: " ++ lay
+  fn ::print(this TimeError) string = return this.message()
 
 // parse_rfc3339 parses an RFC3339 string into an Instant.
 // Supports UTC (Z) and timezone offsets (+HH:MM / -HH:MM).
 // Fractional seconds (up to nanosecond precision) are supported.
-fn parse_rfc3339(s string) Result[Instant, TimeError] =
+fn parse_rfc3339(s string) Result[Instant, errors::Err] =
   let ns i64 = 0
   let ok = tin_from_rfc3339_c(s, &ns)
 
   if ok != 0:
-    return Err(TimeError{_kind: InvalidRfc3339(s)})
+    return Err(InvalidRfc3339(s))
 
   return Ok(Instant{ns: ns})
 
 // parse parses a time string using a named layout.
 // Supported layouts: RFC3339, RFC3339Nano (both parse the same RFC3339 format).
 // For other layouts, an error is returned.
-fn parse(layout string, value string) Result[Instant, TimeError] =
+fn parse(layout string, value string) Result[Instant, errors::Err] =
   if layout == RFC3339 || layout == RFC3339Nano:
     return parse_rfc3339(value)
-  return Err(TimeError{_kind: UnsupportedLayout(layout)})
+  return Err(UnsupportedLayout(layout))
 
 export {
   Duration, Instant,
@@ -308,5 +301,5 @@ export {
   monotonic_ns, sleep, sleep_ms,
   parse_rfc3339, parse,
   RFC3339, RFC3339Nano,
-  TimeError, TimeErrorKind, InvalidRfc3339, UnsupportedLayout,
+  TimeError, InvalidRfc3339, UnsupportedLayout,
 } as time

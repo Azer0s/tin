@@ -753,6 +753,181 @@ func substituteTypeInTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) as
 	return te
 }
 
+// substituteTraitQualifier walks a parsed trait-qualifier string,
+// applies the type substitution map, and re-emits the canonical form.
+// Returns the original string when the qualifier doesn't contain
+// substitutable type parameters (no `[`).
+func substituteTraitQualifier(qual string, subst map[string]ast.TypeExpr) string {
+	if qual == "" || !strings.Contains(qual, "[") || len(subst) == 0 {
+		return qual
+	}
+	// Parse the qualifier as a type expression so we can walk it
+	// recursively and substitute. The qualifier syntax is the same as a
+	// trait bound, so the same parser primitives apply.
+	te, err := parseTypeExprFromString(qual)
+	if err != nil {
+		return qual
+	}
+
+	te = substituteTypeInTypeExpr(te, subst)
+
+	return typeExprToTraitQualifier(te)
+}
+
+// parseTypeExprFromString parses a trait-qualifier-like string into a
+// TypeExpr by hand. The qualifier grammar is a subset of the type-expr
+// grammar (no pointers, arrays, or function types) so a small recursive
+// descent suffices and we don't drag the full parser in.
+func parseTypeExprFromString(s string) (ast.TypeExpr, error) {
+	p := &qualParser{src: s}
+
+	te, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.pos < len(s) {
+		return nil, fmt.Errorf("unexpected trailing %q", s[p.pos:])
+	}
+
+	return te, nil
+}
+
+type qualParser struct {
+	src string
+	pos int
+}
+
+func (p *qualParser) skipSpaces() {
+	for p.pos < len(p.src) && (p.src[p.pos] == ' ' || p.src[p.pos] == '\t') {
+		p.pos++
+	}
+}
+
+func (p *qualParser) parseExpr() (ast.TypeExpr, error) {
+	p.skipSpaces()
+
+	// Identifier (with optional `::` segments).
+	start := p.pos
+
+	for p.pos < len(p.src) {
+		c := p.src[p.pos]
+		if c == ':' && p.pos+1 < len(p.src) && p.src[p.pos+1] == ':' {
+			p.pos += 2
+
+			continue
+		}
+
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			p.pos++
+
+			continue
+		}
+
+		break
+	}
+
+	if start == p.pos {
+		return nil, fmt.Errorf("expected identifier at %d", p.pos)
+	}
+
+	name := p.src[start:p.pos]
+
+	// Special-case "_" — wildcard.
+	if name == "_" {
+		return &ast.WildcardType{}, nil
+	}
+
+	p.skipSpaces()
+
+	// Optional `[T, ...]`.
+	if p.pos < len(p.src) && p.src[p.pos] == '[' {
+		p.pos++ // consume `[`
+
+		var args []ast.TypeExpr
+
+		for {
+			p.skipSpaces()
+
+			if p.pos < len(p.src) && p.src[p.pos] == ']' {
+				p.pos++
+
+				break
+			}
+
+			arg, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			args = append(args, arg)
+
+			p.skipSpaces()
+			if p.pos < len(p.src) && p.src[p.pos] == ',' {
+				p.pos++
+
+				continue
+			}
+
+			if p.pos < len(p.src) && p.src[p.pos] == ']' {
+				p.pos++
+
+				break
+			}
+
+			return nil, fmt.Errorf("expected , or ] at %d", p.pos)
+		}
+
+		return &ast.GenericType{Name: name, TypeParams: args}, nil
+	}
+
+	return &ast.SimpleType{Name: name}, nil
+}
+
+// typeExprToTraitQualifier renders a TypeExpr in the canonical
+// trait-qualifier form (matching the parser's accepted shape). Inverse
+// of parseTypeExprFromString for the subset that appears in qualifiers.
+func typeExprToTraitQualifier(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		return t.Name
+	case *ast.GenericType:
+		out := t.Name + "["
+
+		for i, tp := range t.TypeParams {
+			if i > 0 {
+				out += ", "
+			}
+
+			out += typeExprToTraitQualifier(tp)
+		}
+
+		out += "]"
+
+		return out
+	case *ast.WildcardType:
+		if t.Name != "" {
+			return "_: " + t.Name
+		}
+
+		return "_"
+	case *ast.ArrayType:
+		if t.Size < 0 {
+			return "[" + typeExprToTraitQualifier(t.Elem) + "]"
+		}
+
+		return fmt.Sprintf("[%s; %d]", typeExprToTraitQualifier(t.Elem), t.Size)
+	case *ast.PointerType:
+		if t.IsConst {
+			return "const *" + typeExprToTraitQualifier(t.Elem)
+		}
+
+		return "*" + typeExprToTraitQualifier(t.Elem)
+	}
+
+	return ""
+}
+
 // substituteMethod returns a copy of m with type params substituted and
 // the self-parameter type renamed from genericName to concreteName.
 func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst map[string]ast.TypeExpr) *ast.FuncDecl {
@@ -777,9 +952,18 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	newRet := substituteTypeInTypeExpr(m.RetType, subst)
 	newBody := substituteStructNameInBody(m.Body, genericName, concreteName)
 
+	// Substitute the trait-qualifier string so methodScopeName produces
+	// the same key the impl-bound side computes. Without this, a
+	// monomorphized method on `tryable[t, Result[_, e]]` stays as the
+	// unsubstituted "tryable[t, Result[_, e]]" qualifier even when
+	// genTraitVtables looks for the substituted "tryable[T_concrete,
+	// Result[T_concrete, E_concrete]]" key — and the trait-vtable
+	// emission rejects the impl as missing.
+	newQualifier := substituteTraitQualifier(m.TraitQualifier, subst)
+
 	out := &ast.FuncDecl{
 		Name:           m.Name,
-		TraitQualifier: m.TraitQualifier,
+		TraitQualifier: newQualifier,
 		TypeParams:     m.TypeParams,
 		Constraints:    m.Constraints,
 		Params:         newParams,
@@ -1285,6 +1469,23 @@ func traitImplKey(te ast.TypeExpr) string {
 		}
 
 		return "_W"
+	case *ast.ArrayType:
+		// Array shapes appear in monomorphized trait bounds when the
+		// caller filled a slot with `[byte]` or similar. The same key
+		// scheme as elsewhere: dynamic arrays use `[]elem`,
+		// fixed-size arrays use `[elem; n]`. Mirror what
+		// typeExprCanonicalKey emits for ADT monomorphization names.
+		if t.Size < 0 {
+			return "[]" + traitImplKey(t.Elem)
+		}
+
+		return fmt.Sprintf("[%s;%d]", traitImplKey(t.Elem), t.Size)
+	case *ast.PointerType:
+		if t.IsConst {
+			return "const_ptr_" + traitImplKey(t.Elem)
+		}
+
+		return "ptr_" + traitImplKey(t.Elem)
 	}
 
 	return "unknown"
@@ -1786,7 +1987,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 			if !ok {
 				return fmt.Errorf("trait vtable: struct %s does not implement %s.%s; expected fn %s::%s(this %s, ...)",
-					structKey, traitName, methodName, traitName, methodName, structKey)
+					prettyStructName(structKey), cg.traitDisplayName(traitName), methodName,
+					cg.traitDisplayName(traitName), methodName, prettyStructName(structKey))
 			}
 
 			concreteFunc := concreteFn.val.(*ir.Func)
@@ -1907,7 +2109,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 			if !ok2 {
 				return fmt.Errorf("trait vtable: struct %s does not implement async %s.%s; expected fn %s::%s(this %s, ...) {#async}",
-					structKey, traitName, methodName, traitName, methodName, structKey)
+					prettyStructName(structKey), cg.traitDisplayName(traitName), methodName,
+					cg.traitDisplayName(traitName), methodName, prettyStructName(structKey))
 			}
 
 			concreteCoroFn := concreteCoro.val.(*ir.Func)
@@ -2153,7 +2356,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 	}
 
 	if lenSlot < 0 || getSlot < 0 {
-		return nil, fmt.Errorf("iter trait %s missing len/get methods", instKey)
+		return nil, fmt.Errorf("iter trait %s missing len/get methods", cg.traitDisplayName(instKey))
 	}
 
 	vtableSt := cg.traitVtableStructTypes[instKey]
@@ -2490,12 +2693,12 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 	vtableGlobal, ok := cg.traitVtableGlobals[vtableKey]
 	if !ok {
-		return nil, fmt.Errorf("no vtable for %s implementing %s", structName, instKey)
+		return nil, fmt.Errorf("no vtable for %s implementing %s", prettyStructName(structName), cg.traitDisplayName(instKey))
 	}
 
 	fatPtrType, fpOk := cg.traitFatPtrTypes[instKey]
 	if !fpOk {
-		return nil, fmt.Errorf("no fat-ptr type for trait %s", instKey)
+		return nil, fmt.Errorf("no fat-ptr type for trait %s", cg.traitDisplayName(instKey))
 	}
 
 	// Build fat pointer {i8* data, vtable*}.

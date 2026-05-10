@@ -17,6 +17,7 @@ import (
 const (
 	DiagAsyncMain         = "async-main"
 	DiagReturnTry         = "return-try"
+	DiagUnusedWildcard    = "unused-wildcard"
 	DiagBoolAnalysis      = "bool-analysis"
 	DiagUnusedMatchArms   = "unused-match-arms"
 	DiagAwaitMatchGuards  = "await-match-guards"

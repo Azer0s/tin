@@ -2057,6 +2057,25 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			block.NewCall(cg.ensureRetain(), dataPtr)
 		}
 	}
+	// Returning an ADT by value whose active variant payload holds
+	// a freshly-coerced trait fat-ptr: the iface heap block was
+	// alloc'd rc=1 by coerceToTrait and a synthetic `.iface_data_*`
+	// scope-release entry registered. Without compensation that
+	// release fires inside this function and frees the iface — caller
+	// gets a dangling pointer in the returned Result, which crashes
+	// the moment the caller's data_release_val tries to dispatch
+	// through the iface's vtable thunk.
+	//
+	// Suppress the synthetic iface-data scope releases for this
+	// function exit. The iface is transferred to the caller via the
+	// ADT, so the caller's data_release_val (fired by
+	// emitCallArgRelease's ADT path) becomes the sole owner that
+	// drops rc to 0. Limited to ADT returns where some variant has a
+	// fat-ptr field, so functions that don't transfer ifaces aren't
+	// affected.
+	if val != nil && cg.isDataType(val.Type()) && cg.adtHasFatPtrField(val.Type()) {
+		cg.suppressIfaceDataScopeReleases()
+	}
 
 	cg.emitAllScopeReleases(block, retSkipName)
 
@@ -3112,7 +3131,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 			}
 
 			return block, cg.nodeErr(s, "compound assignment %q is not defined for operands of type %s and %s",
-				s.Op, elemType, rhs.Type())
+				s.Op, fmtArgType(elemType), fmtArgType(rhs.Type()))
 		}
 	}
 

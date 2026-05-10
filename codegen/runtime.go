@@ -906,6 +906,16 @@ func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, pos
 				}
 			}
 		}
+		// ADT-by-value rvalue (e.g. `is_err(make())` where make
+		// returns Result by value): the callee retain+release helper
+		// nets to zero, but the rvalue itself owns rc=1 of any
+		// heap-allocated active-variant fields (strings, byte
+		// slices, freshly-coerced ifaces). Without this release
+		// those fields leak. data_release_val dispatches on tag and
+		// releases only the active variant's owning fields.
+		if cg.isDataType(pre.Type()) {
+			cg.emitDataValueRelease(block, pre)
+		}
 	}
 }
 

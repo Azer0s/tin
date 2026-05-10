@@ -41,6 +41,136 @@ func sortedVariants(variants map[string]*dataVariantInfo) []struct {
 	return entries
 }
 
+// checkNoWildcardInVariantFields enforces that ADT variant fields do
+// not reference a call-site-supplied wildcard slot. A field's type is
+// fixed at declaration; a wildcard's concrete type isn't known until
+// the call site fills it. Method bodies (which are monomorphized per
+// call) may freely use the wildcard — only field types are forbidden.
+func checkNoWildcardInVariantFields(n *ast.DataDecl) error {
+	for _, v := range n.Variants {
+		for _, f := range v.Fields {
+			if typeExprContainsWildcard(f.Type) {
+				return fmt.Errorf("data %s: variant %s field %q has type %s which references a call-site-forwarded slot (`_`); field layout is fixed at declaration but the slot's concrete type is only known per call. Wildcards may appear in trait bounds and method signatures (which monomorphize per call), not in field types",
+					n.Name, v.Name, f.Name, fmtTypeExpr(f.Type))
+			}
+		}
+	}
+
+	return nil
+}
+
+// unusedWildcardSlots returns warning messages for wildcard slots
+// declared in the data's trait bounds that are never referenced by
+// any variant or method, OR are referenced exactly once in a single
+// method (in which case a method-level generic type parameter would
+// express the same intent without obscuring the type at call sites).
+// Each violation gets one warning string in the returned slice.
+func unusedWildcardSlots(n *ast.DataDecl) []string {
+	declaredNames := map[string]bool{}
+
+	declaredAnon := false
+
+	for _, impl := range n.Implements {
+		walkWildcardNames(impl, declaredNames, &declaredAnon)
+	}
+
+	if !declaredAnon && len(declaredNames) == 0 {
+		return nil
+	}
+
+	used := map[string]bool{}
+	usedAnon := false
+
+	// usageCount counts how many distinct method signatures (params
+	// + return type) reference each named wildcard. A count of 1
+	// means the slot is forwarded through the data's bound but is
+	// only ever consumed by one method — a method-level type
+	// parameter would localize the choice to that method instead of
+	// every call to the data type.
+	usageCount := map[string]int{}
+
+	for _, m := range n.Methods {
+		seenInMethod := map[string]bool{}
+		seenAnonInMethod := false
+
+		for _, p := range m.Params {
+			walkWildcardNames(p.Type, used, &usedAnon)
+			walkWildcardNames(p.Type, seenInMethod, &seenAnonInMethod)
+		}
+
+		walkWildcardNames(m.RetType, used, &usedAnon)
+		walkWildcardNames(m.RetType, seenInMethod, &seenAnonInMethod)
+
+		for name := range seenInMethod {
+			usageCount[name]++
+		}
+	}
+
+	var out []string
+
+	if declaredAnon && !usedAnon {
+		out = append(out, fmt.Sprintf(
+			"data %s declares an anonymous `_` wildcard in its trait bound but never references it; the call-site forwarding is unnecessary",
+			n.Name))
+	}
+
+	for name := range declaredNames {
+		switch {
+		case !used[name]:
+			out = append(out, fmt.Sprintf(
+				"data %s declares wildcard slot `_: %s` in its trait bound but never references %s; the call-site forwarding is unnecessary",
+				n.Name, name, name))
+		case usageCount[name] == 1:
+			out = append(out, fmt.Sprintf(
+				"data %s declares wildcard slot `_: %s` but only one method references it; consider making %s a method-level generic instead so the type choice is local to that method",
+				n.Name, name, name))
+		}
+	}
+
+	return out
+}
+
+// walkWildcardNames collects every wildcard name from a type
+// expression into the names set; flips anon when an anonymous `_`
+// is seen.
+func walkWildcardNames(te ast.TypeExpr, names map[string]bool, anon *bool) {
+	if te == nil {
+		return
+	}
+
+	switch t := te.(type) {
+	case *ast.WildcardType:
+		if t.Name == "" {
+			*anon = true
+		} else {
+			names[t.Name] = true
+		}
+	case *ast.GenericType:
+		for _, p := range t.TypeParams {
+			walkWildcardNames(p, names, anon)
+		}
+	case *ast.PointerType:
+		walkWildcardNames(t.Elem, names, anon)
+	case *ast.ArrayType:
+		walkWildcardNames(t.Elem, names, anon)
+	case *ast.UnionTypeExpr:
+		for _, u := range t.Types {
+			walkWildcardNames(u, names, anon)
+		}
+	}
+}
+
+// fmtTypeExpr renders a TypeExpr in user-facing Tin syntax. Falls
+// back to the AST's String() method when the type isn't one of the
+// common shapes.
+func fmtTypeExpr(te ast.TypeExpr) string {
+	if te == nil {
+		return "void"
+	}
+
+	return te.String()
+}
+
 // dataVariantInfo holds the per-variant layout of an ADT variant.
 // Tag is the ordinal index (declaration order). PayloadType is the LLVM struct
 // packed from the variant's fields (empty struct for nullary variants).
@@ -57,6 +187,20 @@ type dataVariantInfo struct {
 // Generic ADTs are registered but not emitted here - monomorphization happens
 // on-demand when a concrete instance like `Option[i32]` is used.
 func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
+	// Wildcard slots are call-site-supplied: their concrete type is only
+	// known per call. A variant payload field referencing a wildcard
+	// would force the runtime layout to depend on per-call info, which
+	// is impossible since the layout is fixed at declaration.
+	if err := checkNoWildcardInVariantFields(n); err != nil {
+		return cg.nodeErr(n, "%s", err)
+	}
+
+	if warnMsgs := unusedWildcardSlots(n); len(warnMsgs) > 0 {
+		for _, m := range warnMsgs {
+			cg.warn(DiagUnusedWildcard, n.Pos(), "%s", m)
+		}
+	}
+
 	cg.dataDecls[n.Name] = n
 
 	if len(n.TypeParams) > 0 {
@@ -94,6 +238,21 @@ func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
 		return nil
 	}
 
+	// Predeclare every non-generic method signature so intra-ADT
+	// cross-method calls (e.g. `fn ::print(this T) = return this.message()`
+	// where message is a trait-qualified impl on the same ADT) resolve
+	// during body compilation. Mirrors top-level structs' predeclare
+	// pass that runs before genStructMethods.
+	for _, m := range n.Methods {
+		if len(m.TypeParams) > 0 || m.IsExtern != "" {
+			continue
+		}
+
+		if err := cg.predeclareMethod(adtName, m); err != nil {
+			return err
+		}
+	}
+
 	// Pre-register plain-name aliases so a method body that calls another
 	// method on the same ADT (e.g. one trait method delegating to another)
 	// can resolve through the bare name.
@@ -118,9 +277,12 @@ func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
 	cg.registerPlainMethodAliases(adtName, n.Methods)
 
 	// Emit vtables and trait-impl globals for each implemented trait.
-	// Reuse the struct path by passing a synthetic StructDecl carrying just
-	// the fields genTraitVtables consults (name + impls + methods); the
-	// underlying machinery is type-agnostic.
+	// Reuse the struct path by passing a synthetic StructDecl. ADTs use
+	// bare names everywhere (LLVM type, method symbols, vtable keys),
+	// while genTraitVtables would otherwise apply pkgStructKey and key
+	// vtables under `pkg__Name__instKey` while typeNameOf later returns
+	// just `Name`. Suspend the package context so genTraitVtables lines
+	// up with the bare-name convention.
 	if len(n.Implements) > 0 {
 		shim := &ast.StructDecl{
 			Name:       n.Name,
@@ -128,7 +290,13 @@ func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
 			Methods:    n.Methods,
 		}
 
-		if err := cg.genTraitVtables(shim); err != nil {
+		prevPkg := cg.currentPkg
+		cg.currentPkg = ""
+
+		err := cg.genTraitVtables(shim)
+		cg.currentPkg = prevPkg
+
+		if err != nil {
 			return err
 		}
 	}
@@ -168,10 +336,20 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 		subst["_"] = typeArgs[0]
 	}
 
+	// Substitute the Implements list so trait-impl keys derived from it
+	// (via bareTraitImplKey / traitImplKey) line up with the
+	// substituted method-qualifier keys produced by methodScopeName.
+	// Without this the vtable-emission lookup uses the unsubstituted
+	// impl bound while the methods register under the substituted form.
+	substImpls := make([]ast.TypeExpr, len(tmpl.Implements))
+	for i, impl := range tmpl.Implements {
+		substImpls[i] = substituteTypeInTypeExpr(impl, subst)
+	}
+
 	concrete := &ast.DataDecl{
 		Name:       concreteName,
 		Variants:   make([]ast.DataVariant, len(tmpl.Variants)),
-		Implements: tmpl.Implements,
+		Implements: substImpls,
 	}
 
 	for vi, v := range tmpl.Variants {
@@ -994,6 +1172,18 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 			fieldPtr := caseBlock.NewGetElementPtr(vi.PayloadType, payloadPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
 			fieldVal := caseBlock.NewLoad(vi.PayloadType.Fields[fi], fieldPtr)
+			// Trait fat-ptr value fields embedded in an ADT variant
+			// payload need value-form retain/release directly.
+			// Going through emitField (emitRelease /
+			// emitStructFieldRetain) hits walkRCStructFields which
+			// doesn't know iface struct shape; pre-fix the iface
+			// block leaked on release and aliased without a +1 RC
+			// on retain. Both must be paired or copies double-free.
+			if ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok && isTraitFatPtrShape(ft) {
+				emitFatPtrRetainOrRelease(cg, caseBlock, fieldVal, ft, suffix == "__data_retain_val")
+
+				continue
+			}
 			emitField(cg, caseBlock, fieldVal)
 		}
 
@@ -1002,6 +1192,265 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 
 	entry.NewSwitch(tagI64, exit, switchCases...)
 
+	exit.NewRet(nil)
+
+	return fn
+}
+
+// emitFatPtrRetainOrRelease emits inline retain/release for a value-form
+// trait fat-ptr {i8* data, vtable*} embedded in an ADT variant
+// payload.
+//
+// Retain: `_tin_retain(data)` — the iface data block was alloc'd by
+// coerceToTrait via _tin_rc_alloc, so retain is always safe (the RC
+// header is at data - sizeof(TinRCHdr)).
+//
+// Release: dispatch through the vtable's data-release thunk (last
+// slot) — the thunk decrements the data block's RC and walks nested
+// RC fields when the block hits 0. We do NOT additionally
+// _tin_release: the thunk already releases the block.
+func emitFatPtrRetainOrRelease(cg *CodeGen, block *ir.Block, val value.Value, st *irtypes.StructType, retain bool) {
+	dataField := block.NewExtractValue(val, 0)
+
+	if retain {
+		block.NewCall(cg.ensureRetain(), dataField)
+
+		return
+	}
+
+	vtableField := block.NewExtractValue(val, 1)
+
+	vtablePtrType, ok := st.Fields[1].(*irtypes.PointerType)
+	if !ok {
+		return
+	}
+
+	vtableSt, ok2 := vtablePtrType.ElemType.(*irtypes.StructType)
+	if !ok2 || len(vtableSt.Fields) == 0 {
+		return
+	}
+
+	lastIdx := len(vtableSt.Fields) - 1
+	lastFieldType := vtableSt.Fields[lastIdx]
+
+	lastPt, ok3 := lastFieldType.(*irtypes.PointerType)
+	if !ok3 {
+		return
+	}
+
+	lastFnType, ok4 := lastPt.ElemType.(*irtypes.FuncType)
+	if !ok4 || len(lastFnType.Params) != 1 ||
+		!lastFnType.Params[0].Equal(irtypes.I8Ptr) ||
+		!irtypes.IsVoid(lastFnType.RetType) {
+		return
+	}
+
+	releaseFnSlot := block.NewGetElementPtr(vtableSt, vtableField,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(lastIdx)))
+	releaseFn := block.NewLoad(lastFieldType, releaseFnSlot)
+	block.NewCall(releaseFn, dataField)
+}
+
+// adtHasFatPtrField reports whether any variant of the given ADT
+// type carries a trait fat-ptr value field. Used by genReturn to
+// decide whether to suppress synthetic iface-data scope-releases for
+// the function exit.
+func (cg *CodeGen) adtHasFatPtrField(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	if !ok {
+		return false
+	}
+
+	variants := cg.dataVariants[st.Name()]
+	if variants == nil {
+		return false
+	}
+
+	for _, vi := range variants {
+		for fi := range vi.Fields {
+			if vi.Fields[fi].IsWeak {
+				continue
+			}
+
+			if ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok && isTraitFatPtrShape(ft) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// suppressIfaceDataScopeReleases marks every synthetic
+// `.iface_data_*` scope entry in the current function scope as
+// noRelease, so emitAllScopeReleases skips its _tin_release call.
+// Used by genReturn when the return value is an ADT whose payload
+// transferred an iface to the caller — the caller's data_release_val
+// becomes the sole owner.
+func (cg *CodeGen) suppressIfaceDataScopeReleases() {
+	if cg.curScope == nil {
+		return
+	}
+
+	s := cg.curScope
+	for s != nil {
+		s.each(func(name string, e *scopeEntry) {
+			if e.releaseRawPtr {
+				e.noRelease = true
+			}
+		})
+
+		if s.isFunctionBoundary {
+			break
+		}
+
+		s = s.parent
+	}
+}
+
+// retainAdtFatPtrFields walks the active variant of an ADT value and
+// retains any trait fat-ptr field's data block. Cached per ADT type
+// as a __retain_fat_ptr_fields helper (analogous to
+// __data_retain_val) so each call site emits one call instead of an
+// inline switch.
+//
+// Used by genReturn to compensate for the scope-release of a
+// freshly-coerced iface that was stored into the ADT via Err(value)
+// without a retain (constructor args aren't isCopyExpr, so
+// wrapDataVariant's retainMask was false). Strings, fat arrays,
+// nested ADTs are excluded — their existing retain paths already
+// balance scope releases; double-retaining would leak.
+func (cg *CodeGen) retainAdtFatPtrFields(block *ir.Block, val value.Value) {
+	st, ok := val.Type().(*irtypes.StructType)
+	if !ok {
+		return
+	}
+
+	adtName := st.Name()
+
+	variants := cg.dataVariants[adtName]
+	if variants == nil {
+		return
+	}
+
+	hasFatPtrField := false
+
+	for _, vi := range variants {
+		for fi := range vi.Fields {
+			if vi.Fields[fi].IsWeak {
+				continue
+			}
+
+			if ft, ok2 := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok2 && isTraitFatPtrShape(ft) {
+				hasFatPtrField = true
+
+				break
+			}
+		}
+
+		if hasFatPtrField {
+			break
+		}
+	}
+
+	if !hasFatPtrField {
+		return
+	}
+
+	fn := cg.ensureAdtFatPtrFieldRetainFn(adtName, st)
+	if fn != nil {
+		block.NewCall(fn, val)
+	}
+}
+
+// ensureAdtFatPtrFieldRetainFn lazily emits a per-ADT helper that
+// switches on tag and calls _tin_retain on the data ptr of any
+// fat-ptr field in the active variant.
+func (cg *CodeGen) ensureAdtFatPtrFieldRetainFn(adtName string, st *irtypes.StructType) *ir.Func {
+	if fn, ok := cg.adtFatPtrFieldRetainFns[adtName]; ok {
+		return fn
+	}
+
+	variants := cg.dataVariants[adtName]
+	if variants == nil {
+		return nil
+	}
+
+	fnName := adtName + "__retain_fat_ptr_fields"
+	fn := cg.mod.NewFunc(fnName, irtypes.Void, ir.NewParam("val", st))
+	cg.adtFatPtrFieldRetainFns[adtName] = fn
+
+	entry := fn.NewBlock("entry")
+	exit := fn.NewBlock("exit")
+
+	stackCopy := entry.NewAlloca(st)
+	entry.NewStore(fn.Params[0], stackCopy)
+
+	tagGEP := entry.NewGetElementPtr(st, stackCopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tagI8 := entry.NewLoad(irtypes.I8, tagGEP)
+	tagI64 := entry.NewZExt(tagI8, irtypes.I64)
+
+	payloadGEP := entry.NewGetElementPtr(st, stackCopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+	var switchCases []*ir.Case
+
+	for _, e := range sortedVariants(variants) {
+		variantName, vi := e.Name, e.Info
+
+		variantHasFatPtr := false
+
+		for fi := range vi.Fields {
+			if vi.Fields[fi].IsWeak {
+				continue
+			}
+
+			if ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok && isTraitFatPtrShape(ft) {
+				variantHasFatPtr = true
+
+				break
+			}
+		}
+
+		if !variantHasFatPtr {
+			continue
+		}
+
+		caseBlock := fn.NewBlock("var_" + variantName)
+		switchCases = append(switchCases, ir.NewCase(
+			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
+
+		payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
+
+		for fi, f := range vi.Fields {
+			if f.IsWeak {
+				continue
+			}
+
+			ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType)
+			if !ok || !isTraitFatPtrShape(ft) {
+				continue
+			}
+
+			fieldPtr := caseBlock.NewGetElementPtr(vi.PayloadType, payloadPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+			fieldVal := caseBlock.NewLoad(ft, fieldPtr)
+			dataField := caseBlock.NewExtractValue(fieldVal, 0)
+			caseBlock.NewCall(cg.ensureRetain(), dataField)
+		}
+
+		caseBlock.NewBr(exit)
+	}
+
+	if len(switchCases) == 0 {
+		entry.NewBr(exit)
+		exit.NewRet(nil)
+
+		return fn
+	}
+
+	entry.NewSwitch(tagI64, exit, switchCases...)
 	exit.NewRet(nil)
 
 	return fn

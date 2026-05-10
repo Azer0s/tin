@@ -774,8 +774,9 @@ type CodeGen struct {
 	dataTypeIDs         map[string]int32
 	dataVariants        map[string]map[string]*dataVariantInfo
 	dataVariantLookup   map[string][]string
-	dataValueReleaseFns map[string]*ir.Func
-	dataValueRetainFns  map[string]*ir.Func
+	dataValueReleaseFns     map[string]*ir.Func
+	dataValueRetainFns      map[string]*ir.Func
+	adtFatPtrFieldRetainFns map[string]*ir.Func
 	// dataInstTypeArgs maps a concrete ADT instance name (e.g.
 	// "Result__json__Value__JsonError") to the resolved canonical type-arg
 	// names the instance was monomorphized with (e.g. ["json__Value",
@@ -1404,6 +1405,7 @@ func New(filename string) *CodeGen {
 		dataVariantLookup:        make(map[string][]string),
 		dataValueReleaseFns:      make(map[string]*ir.Func),
 		dataValueRetainFns:       make(map[string]*ir.Func),
+		adtFatPtrFieldRetainFns:  make(map[string]*ir.Func),
 		dataInstTypeArgs:         make(map[string][]string),
 		coroCallable:             make(map[string]bool),
 		callGraph:                make(map[string][]string),

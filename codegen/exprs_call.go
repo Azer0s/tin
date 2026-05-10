@@ -460,9 +460,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				best := cg.resolveOverload(variants, llArgs)
 				if best == nil {
-					typeName := baseStaticName
+					typeName := prettyStructName(baseStaticName)
 					if typeArgStr != "" {
-						typeName = baseStaticName + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
+						typeName = prettyStructName(baseStaticName) + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
 					}
 
 					return nil, cg.nodeErr(e, "no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
@@ -609,7 +609,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
-				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", structName, fn.Field, len(argVals))
+				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", prettyStructName(structName), fn.Field, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -938,10 +938,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
-			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
+			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", prettyStructName(structName), fn.Field)
 		}
 
-		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
+		return nil, cg.nodeErr(e, "undefined method: %s.%s", prettyStructName(structName), fn.Field)
 
 	case *ast.ScopeAccess:
 		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
@@ -1042,7 +1042,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
 							return nil, cg.nodeErr(e, "no matching overload for %s[%s]::%s (got %d arg(s))",
-								bareBaseName, strings.Join(resolvedParts, ", "), methodField, len(olArgs))
+								prettyStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -1758,7 +1758,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	// Handle field access on %S.native values: embedded cLayoutStruct fields.
@@ -1770,7 +1770,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(baseName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 		}
 
 		nativeSt := cg.nativeStructTypes[baseName]
@@ -1785,7 +1785,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	if cg.cLayoutStructs[structName] {
@@ -1795,7 +1795,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(structName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 		}
 
 		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
@@ -1817,7 +1817,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			return bm, nil
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	// We need a pointer to the struct to do GEP.

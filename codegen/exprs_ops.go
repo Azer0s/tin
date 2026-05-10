@@ -790,7 +790,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	st, ok := cg.structTypes[typeName]
 	if !ok {
-		return nil, cg.nodeErr(e, "unknown struct type: %s", typeName)
+		return nil, cg.nodeErr(e, "unknown struct type: %s", prettyStructName(typeName))
 	}
 
 	// #closed enforcement: a closed struct's literal `S{...}` may only
@@ -2256,7 +2256,7 @@ func (cg *CodeGen) callTraitMethod(block *ir.Block, ifaceVal value.Value, instKe
 	}
 
 	if slotIdx < 0 {
-		return nil, fmt.Errorf("trait %s has no method %s", instKey, methodName)
+		return nil, fmt.Errorf("trait %s has no method %s", cg.traitDisplayName(instKey), methodName)
 	}
 
 	// Extract data pointer and vtable pointer from iface fat ptr.
