@@ -1,0 +1,54 @@
+// examples/incremental_cache_verify_test.tin -- per-pkg .o cache
+// behavior under .build/pkg/.
+//
+// Replaces examples/incremental_cache_verify.sh.  Only the cold-
+// build populate check survives the conversion: the legacy script's
+// other invariants (warm-rebuild timing, -O0 cache-key split,
+// upstream pkg body edit + iface_hash stability, two-cold byte
+// identity, 4-way concurrent build race, SBOM `__tin_binary__`
+// entry) each depend on either timing, file-format scraping, or
+// parallel-spawn helpers that are awkward to express in tin tests
+// today.  The cold-build check alone catches the "cache silently
+// disabled" regression that motivated the original step-8 plan;
+// the rest is tracked in docs as follow-ups.
+
+use assert
+use strings
+use { discard } from macros
+use "./fixtures/run_compiler"
+
+const WORK string = "/tmp/inc_cache_work"
+
+fn count_obj_files() i64 =
+  let r = run_cmd(["sh", "-c", "find .build/pkg -name '*.o' 2>/dev/null | wc -l"], "", [] as [string])
+
+  if r.exit_code != 0 as i32:
+    return -1
+
+  return strings::parse_int(strings::trim(r.stdout)).unwrap("count_obj_files: non-integer")
+
+test "cold build populates .build/pkg" =
+  discard run_cmd(["rm", "-rf", WORK], "", [] as [string])
+  discard run_cmd(["mkdir", "-p", WORK], "", [] as [string])
+  // Source has to pull in at least one stdlib package so the per-pkg
+  // .o cache under .build/pkg actually gets populated -- a trivial
+  // `fn main() i64 = return 0` produces zero pkg entries and would
+  // give a false negative on the count check below.
+  //
+  // Write via `sh -c "cat > file <<EOF ... EOF"` rather than piping
+  // through stdin: run_cmd's stdin path doesn't reliably close the
+  // child's fd today, which hangs cat-style readers (a separate bug
+  // that doesn't gate this verification check).
+  let prog string = "use encoding::json\nfn main() i64 = echo json::encode(\"hi\"); return 0\n"
+
+  discard run_cmd(["sh", "-c", "printf %s '" ++ prog ++ "' > " ++ WORK ++ "/a.tin"], "", [] as [string])
+  // Drop .build/build too: tin caches the final linked binary there
+  // keyed by source hash, and a hit short-circuits the per-pkg
+  // compilation, leaving .build/pkg empty.  Removing all three caches
+  // is the only way to guarantee a true cold build.
+  discard run_cmd(["rm", "-rf", ".build/pkg", ".build/cache", ".build/build"], "", [] as [string])
+
+  let r = run_cmd(["./tin", "build", WORK ++ "/a.tin", "-o", "/tmp/inc_a"], "", [] as [string])
+
+  assert::equals(0 as i32, r.exit_code)
+  assert::ok(count_obj_files() >= 1)

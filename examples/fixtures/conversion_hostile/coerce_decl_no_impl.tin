@@ -1,0 +1,7 @@
+struct S(coerce[i64]) =
+  v i64
+
+fn main() =
+  let s = S{v: 5}
+  let n = s as i64
+  echo "{n}"

@@ -1,0 +1,7 @@
+struct {#packed} pt =
+  x i32
+  y i32
+
+fn{#interop} sum_pt(p pt) i32 = return p.x + p.y
+
+fn main() i64 = return 0

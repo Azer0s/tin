@@ -17,7 +17,7 @@ import (
 // sortedVariants returns the entries of variants sorted by tag so that
 // codegen emission is deterministic across program runs (Go's map
 // iteration is randomized per run, which would otherwise blow byte-for-
-// byte determinism in the IR — see TestIRDeterminism).
+// byte determinism in the IR - see TestIRDeterminism).
 func sortedVariants(variants map[string]*dataVariantInfo) []struct {
 	Name string
 	Info *dataVariantInfo
@@ -45,7 +45,7 @@ func sortedVariants(variants map[string]*dataVariantInfo) []struct {
 // not reference a call-site-supplied wildcard slot. A field's type is
 // fixed at declaration; a wildcard's concrete type isn't known until
 // the call site fills it. Method bodies (which are monomorphized per
-// call) may freely use the wildcard — only field types are forbidden.
+// call) may freely use the wildcard - only field types are forbidden.
 func checkNoWildcardInVariantFields(n *ast.DataDecl) error {
 	for _, v := range n.Variants {
 		for _, f := range v.Fields {
@@ -84,7 +84,7 @@ func unusedWildcardSlots(n *ast.DataDecl) []string {
 	// usageCount counts how many distinct method signatures (params
 	// + return type) reference each named wildcard. A count of 1
 	// means the slot is forwarded through the data's bound but is
-	// only ever consumed by one method — a method-level type
+	// only ever consumed by one method - a method-level type
 	// parameter would localize the choice to that method instead of
 	// every call to the data type.
 	usageCount := map[string]int{}
@@ -206,6 +206,7 @@ func checkConstraintsReferenceDeclared(declName string, typeParams, wildcards []
 // kind is obvious.
 func declaredNamesString(typeParams, wildcards []string) string {
 	var parts []string
+
 	parts = append(parts, typeParams...)
 
 	for _, w := range wildcards {
@@ -317,8 +318,10 @@ func collectTraitBaseNames(t ast.TypeExpr) []string {
 // dataVariantInfo holds the per-variant layout of an ADT variant.
 // Tag is the ordinal index (declaration order). PayloadType is the LLVM struct
 // packed from the variant's fields (empty struct for nullary variants).
+// Tag is int64 to mirror the i64 in-memory layout chosen for alignment; an
+// int8 cap silently truncated at the 129th variant.
 type dataVariantInfo struct {
-	Tag         int8
+	Tag         int64
 	PayloadType *irtypes.StructType
 	Fields      []ast.StructField
 }
@@ -381,7 +384,7 @@ func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 // ADT itself rather than a struct.
 //
 // Trait-impl machinery (vtable wrappers, default-method injection,
-// trait-chain shims) is not yet plumbed through for ADTs — that lands in
+// trait-chain shims) is not yet plumbed through for ADTs - that lands in
 // the unified static-table commit. Direct static-dispatch method calls
 // resolve through the emitted functions immediately.
 func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
@@ -465,6 +468,19 @@ func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
 // entries, and the codegen uses expected-type context to pick the concrete
 // instance.
 func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeExpr, concreteName string) error {
+	// Monomorphization re-walks the template's method signatures,
+	// which reference the template ADT by its bare name (e.g.
+	// `this Result[t, e]`). The strict-bare-type check in
+	// tinTypeToLLVM would reject that bare reference because the
+	// USER's scope (where monomorphization is invoked) hasn't pulled
+	// in `Result` via selective import. Suppress the check for the
+	// duration of this monomorphization - every name here is
+	// compiler-synthesized from the template, not user-written.
+	prev := cg.suppressBareTypeCheck
+	cg.suppressBareTypeCheck = true
+
+	defer func() { cg.suppressBareTypeCheck = prev }()
+
 	if len(typeArgs) != len(tmpl.TypeParams) {
 		return fmt.Errorf("data %s: expected %d type arg(s), got %d",
 			tmpl.Name, len(tmpl.TypeParams), len(typeArgs))
@@ -478,7 +494,7 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 	// Convention: anonymous `_` in a partial-bound trait header (e.g.
 	// `tryable[T, Result[_, E]]`) resolves to the impl's success slot,
 	// which by Tin convention is the data's first type parameter. This
-	// is a syntactic shortcut — the underlying type after substitution
+	// is a syntactic shortcut - the underlying type after substitution
 	// is identical to writing `Result[T, E]` explicitly, but lets impls
 	// communicate intent ("the success slot is impl-determined") in the
 	// signature. Real existential cross-T propagation requires a deeper
@@ -539,7 +555,26 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 		return err
 	}
 
-	return cg.genDataMethods(concreteName, concrete)
+	// Emit method bodies at module scope so the scope entries
+	// (`<ConcreteName>_<method>` -> *ir.Func) survive past whichever
+	// package's load triggered this monomorphization.  Without the
+	// swap, a stdlib package that first instantiates e.g.
+	// `Result[string, errors::Err]` (jwt is the canonical example)
+	// registers `Result__string__errors__Err_expect` in its own
+	// package scope, which is torn down when loadPackageFromSource
+	// returns -- and a later `r.expect(...)` from the user program
+	// fails to find the method even though the IR func is still
+	// linked in.  Mirrors the same dance in genTypeDecl for generic
+	// struct monomorphization.
+	prevScope := cg.curScope
+	if cg.moduleScope != nil && cg.curScope != cg.moduleScope {
+		cg.curScope = cg.moduleScope
+	}
+
+	err := cg.genDataMethods(concreteName, concrete)
+	cg.curScope = prevScope
+
+	return err
 }
 
 // substituteTypeParams walks a type expression replacing named type
@@ -599,6 +634,25 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 			if err != nil {
 				return fmt.Errorf("data %s: variant %s: %w", name, v.Name, err)
 			}
+			// Force the field's struct layout to be complete before
+			// the size computation below.  Without this, an ADT
+			// monomorphization that fires before its referenced user
+			// structs are laid out (Phase A processes the structs in
+			// AST order; a generic ADT instantiation triggered by an
+			// earlier predeclare hits the struct while its
+			// `irtypes.StructType.Fields` slice is still empty) gets
+			// llvmTypeSize == 0 for the payload, sizes the payload
+			// buffer to the smaller variant's needs, and silently
+			// truncates the user struct stored in the larger variant.
+			if structFt, ok := ft.(*irtypes.StructType); ok && len(structFt.Fields) == 0 {
+				structKey := structFt.Name()
+				if sd := cg.structDeclsByName[structKey]; sd != nil {
+					if err := cg.genStructLayout(sd); err != nil {
+						return fmt.Errorf("data %s: variant %s: forcing layout of %s: %w",
+							name, v.Name, structKey, err)
+					}
+				}
+			}
 
 			payloadFields = append(payloadFields, ft)
 		}
@@ -612,7 +666,7 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 		}
 
 		variants[v.Name] = &dataVariantInfo{
-			Tag:         int8(i),
+			Tag:         int64(i),
 			PayloadType: payloadSt,
 			Fields:      v.Fields,
 		}
@@ -632,7 +686,15 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 
-	st.Fields = []irtypes.Type{irtypes.I32, irtypes.I8, payloadArr}
+	// Tag widened from i8 to i64 so (a) the trailing [N x i8] payload
+	// lands at an 8-byte-aligned offset and (b) the whole ADT struct
+	// is itself 8-byte aligned at the alloca / cell level.  Without
+	// the widening, payload structs containing i64 fields get
+	// bitcast onto a 4-aligned location and aligned loads on
+	// aarch64 read garbage (i32 fields fit in the first 4 bytes of
+	// the misaligned region and worked by accident; i64+ blew up
+	// immediately).
+	st.Fields = []irtypes.Type{irtypes.I32, irtypes.I64, payloadArr}
 
 	cg.dataVariants[name] = variants
 
@@ -684,7 +746,7 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 
 	tagGEP := block.NewGetElementPtr(outerSt, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewInt(irtypes.I8, int64(vi.Tag)), tagGEP)
+	block.NewStore(constant.NewInt(irtypes.I64, vi.Tag), tagGEP)
 
 	if len(args) > 0 {
 		payloadGEP := block.NewGetElementPtr(outerSt, alloca,
@@ -767,8 +829,8 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 	typePart := fn.Path[0]
 
 	if len(fn.Path) > 2 {
-		// Only 3-element paths (`pkg::Adt::Variant` or `Adt[T,U]::Variant`) are
-		// recognized here; anything deeper is out of scope.
+		// 3-element paths (`pkg::Adt::Variant`) -- type is the
+		// second-to-last component.
 		typePart = fn.Path[len(fn.Path)-2]
 	}
 
@@ -779,6 +841,19 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 	}
 
 	adtName := typePart
+	// Accept `pkg::Adt[...]::Variant` (e.g. `result::Result[i64, string]::Ok`)
+	// by falling back to the bare name when the package-qualified form
+	// is not registered under its qualified key.  ADTs live in a flat
+	// namespace; qualification is a disambiguation hint, not a separate
+	// declaration.
+	if _, ok := cg.dataDecls[adtName]; !ok {
+		if idx := strings.LastIndex(adtName, "::"); idx >= 0 {
+			bare := adtName[idx+2:]
+			if _, ok2 := cg.dataDecls[bare]; ok2 {
+				adtName = bare
+			}
+		}
+	}
 
 	if _, ok := cg.dataDecls[adtName]; !ok {
 		return nil, false, nil
@@ -833,7 +908,16 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		}
 
 		argVals[i] = cg.coerce(block, v, vi.PayloadType.Fields[i])
-		retainMask[i] = isCopyExpr(a)
+		// retainMask: true means the arg is a borrow whose source still
+		// owns the +1 RC, so the ADT needs its own retain to keep the
+		// payload alive past the source's scope-exit.  Fresh allocations
+		// (`as string`/`as Trait` casts that lower to a runtime call
+		// returning rc=1, `_tin_bytes_from_buf` results) already own
+		// their rc; a second retain here would leave them unbalanced
+		// and leak by exactly 1 per construction.  Mirrors the
+		// freshIface / freshCallResult exemptions in the let-binding
+		// retain logic at the top of genVarDecl.
+		retainMask[i] = isCopyExpr(a) && !isFreshBytesAlloc(argVals[i]) && !isFreshCallResult(argVals[i])
 	}
 
 	v, err := cg.wrapDataVariant(block, adtName, variantName, argVals, retainMask)
@@ -918,7 +1002,12 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 
 		expected := vi.PayloadType.Fields[i]
 		argVals[i] = cg.coerce(block, v, expected)
-		retainMask[i] = isCopyExpr(a)
+		// Same fresh-alloc exemption as the unqualified variant
+		// constructor above: skip the retain when the arg already owns
+		// its rc (e.g. `as string` slice cast, `_tin_bytes_from_buf`
+		// result) so the construction doesn't push rc from 1 to 2 with
+		// only one matching release ever fired.
+		retainMask[i] = isCopyExpr(a) && !isFreshBytesAlloc(argVals[i]) && !isFreshCallResult(argVals[i])
 	}
 
 	return cg.wrapDataVariant(block, adt, variantName, argVals, retainMask)
@@ -1082,8 +1171,7 @@ func (cg *CodeGen) ensureDataPtrReleaseFn(adtName string, st *irtypes.StructType
 
 	tagGEP := doRelease.NewGetElementPtr(st, stackCopy,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagI8 := doRelease.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := doRelease.NewZExt(tagI8, irtypes.I64)
+	tagI64 := doRelease.NewLoad(irtypes.I64, tagGEP)
 
 	payloadGEP := doRelease.NewGetElementPtr(st, stackCopy,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
@@ -1107,7 +1195,7 @@ func (cg *CodeGen) ensureDataPtrReleaseFn(adtName string, st *irtypes.StructType
 
 		caseBlock := fn.NewBlock("var_" + variantName)
 		switchCases = append(switchCases, ir.NewCase(
-			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
+			constant.NewInt(irtypes.I64, vi.Tag), caseBlock))
 
 		payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
 
@@ -1291,8 +1379,7 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 
 	tagGEP := entry.NewGetElementPtr(st, stackCopy,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagI8 := entry.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := entry.NewZExt(tagI8, irtypes.I64)
+	tagI64 := entry.NewLoad(irtypes.I64, tagGEP)
 
 	payloadGEP := entry.NewGetElementPtr(st, stackCopy,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
@@ -1307,7 +1394,7 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 
 		caseBlock := fn.NewBlock("var_" + variantName)
 		switchCases = append(switchCases, ir.NewCase(
-			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
+			constant.NewInt(irtypes.I64, vi.Tag), caseBlock))
 
 		payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
 
@@ -1335,6 +1422,7 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 
 				continue
 			}
+
 			emitField(cg, caseBlock, fieldVal)
 		}
 
@@ -1352,12 +1440,12 @@ func (cg *CodeGen) ensureDataValueFieldFn(
 // trait fat-ptr {i8* data, vtable*} embedded in an ADT variant
 // payload.
 //
-// Retain: `_tin_retain(data)` — the iface data block was alloc'd by
+// Retain: `_tin_retain(data)` - the iface data block was alloc'd by
 // coerceToTrait via _tin_rc_alloc, so retain is always safe (the RC
 // header is at data - sizeof(TinRCHdr)).
 //
 // Release: dispatch through the vtable's data-release thunk (last
-// slot) — the thunk decrements the data block's RC and walks nested
+// slot) - the thunk decrements the data block's RC and walks nested
 // RC fields when the block hits 0. We do NOT additionally
 // _tin_release: the thunk already releases the block.
 func emitFatPtrRetainOrRelease(cg *CodeGen, block *ir.Block, val value.Value, st *irtypes.StructType, retain bool) {
@@ -1436,7 +1524,7 @@ func (cg *CodeGen) adtHasFatPtrField(t irtypes.Type) bool {
 // `.iface_data_*` scope entry in the current function scope as
 // noRelease, so emitAllScopeReleases skips its _tin_release call.
 // Used by genReturn when the return value is an ADT whose payload
-// transferred an iface to the caller — the caller's data_release_val
+// transferred an iface to the caller - the caller's data_release_val
 // becomes the sole owner.
 func (cg *CodeGen) suppressIfaceDataScopeReleases() {
 	if cg.curScope == nil {
@@ -1457,154 +1545,6 @@ func (cg *CodeGen) suppressIfaceDataScopeReleases() {
 
 		s = s.parent
 	}
-}
-
-// retainAdtFatPtrFields walks the active variant of an ADT value and
-// retains any trait fat-ptr field's data block. Cached per ADT type
-// as a __retain_fat_ptr_fields helper (analogous to
-// __data_retain_val) so each call site emits one call instead of an
-// inline switch.
-//
-// Used by genReturn to compensate for the scope-release of a
-// freshly-coerced iface that was stored into the ADT via Err(value)
-// without a retain (constructor args aren't isCopyExpr, so
-// wrapDataVariant's retainMask was false). Strings, fat arrays,
-// nested ADTs are excluded — their existing retain paths already
-// balance scope releases; double-retaining would leak.
-func (cg *CodeGen) retainAdtFatPtrFields(block *ir.Block, val value.Value) {
-	st, ok := val.Type().(*irtypes.StructType)
-	if !ok {
-		return
-	}
-
-	adtName := st.Name()
-
-	variants := cg.dataVariants[adtName]
-	if variants == nil {
-		return
-	}
-
-	hasFatPtrField := false
-
-	for _, vi := range variants {
-		for fi := range vi.Fields {
-			if vi.Fields[fi].IsWeak {
-				continue
-			}
-
-			if ft, ok2 := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok2 && isTraitFatPtrShape(ft) {
-				hasFatPtrField = true
-
-				break
-			}
-		}
-
-		if hasFatPtrField {
-			break
-		}
-	}
-
-	if !hasFatPtrField {
-		return
-	}
-
-	fn := cg.ensureAdtFatPtrFieldRetainFn(adtName, st)
-	if fn != nil {
-		block.NewCall(fn, val)
-	}
-}
-
-// ensureAdtFatPtrFieldRetainFn lazily emits a per-ADT helper that
-// switches on tag and calls _tin_retain on the data ptr of any
-// fat-ptr field in the active variant.
-func (cg *CodeGen) ensureAdtFatPtrFieldRetainFn(adtName string, st *irtypes.StructType) *ir.Func {
-	if fn, ok := cg.adtFatPtrFieldRetainFns[adtName]; ok {
-		return fn
-	}
-
-	variants := cg.dataVariants[adtName]
-	if variants == nil {
-		return nil
-	}
-
-	fnName := adtName + "__retain_fat_ptr_fields"
-	fn := cg.mod.NewFunc(fnName, irtypes.Void, ir.NewParam("val", st))
-	cg.adtFatPtrFieldRetainFns[adtName] = fn
-
-	entry := fn.NewBlock("entry")
-	exit := fn.NewBlock("exit")
-
-	stackCopy := entry.NewAlloca(st)
-	entry.NewStore(fn.Params[0], stackCopy)
-
-	tagGEP := entry.NewGetElementPtr(st, stackCopy,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagI8 := entry.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := entry.NewZExt(tagI8, irtypes.I64)
-
-	payloadGEP := entry.NewGetElementPtr(st, stackCopy,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-
-	var switchCases []*ir.Case
-
-	for _, e := range sortedVariants(variants) {
-		variantName, vi := e.Name, e.Info
-
-		variantHasFatPtr := false
-
-		for fi := range vi.Fields {
-			if vi.Fields[fi].IsWeak {
-				continue
-			}
-
-			if ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType); ok && isTraitFatPtrShape(ft) {
-				variantHasFatPtr = true
-
-				break
-			}
-		}
-
-		if !variantHasFatPtr {
-			continue
-		}
-
-		caseBlock := fn.NewBlock("var_" + variantName)
-		switchCases = append(switchCases, ir.NewCase(
-			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
-
-		payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
-
-		for fi, f := range vi.Fields {
-			if f.IsWeak {
-				continue
-			}
-
-			ft, ok := vi.PayloadType.Fields[fi].(*irtypes.StructType)
-			if !ok || !isTraitFatPtrShape(ft) {
-				continue
-			}
-
-			fieldPtr := caseBlock.NewGetElementPtr(vi.PayloadType, payloadPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
-			fieldVal := caseBlock.NewLoad(ft, fieldPtr)
-			dataField := caseBlock.NewExtractValue(fieldVal, 0)
-			caseBlock.NewCall(cg.ensureRetain(), dataField)
-		}
-
-		caseBlock.NewBr(exit)
-	}
-
-	if len(switchCases) == 0 {
-		entry.NewBr(exit)
-		exit.NewRet(nil)
-
-		return fn
-	}
-
-	entry.NewSwitch(tagI64, exit, switchCases...)
-	exit.NewRet(nil)
-
-	return fn
 }
 
 // genAdtIsExpr handles `x is Ctor(bindings...)` and `x is NullaryVariant` on
@@ -1669,8 +1609,8 @@ func (cg *CodeGen) genAdtIsExpr(block *ir.Block, scrut value.Value, e *ast.IsExp
 
 	tagGEP := block.NewGetElementPtr(st, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagVal := block.NewLoad(irtypes.I8, tagGEP)
-	cmp := block.NewICmp(enum.IPredEQ, tagVal, constant.NewInt(irtypes.I8, int64(vi.Tag)))
+	tagVal := block.NewLoad(irtypes.I64, tagGEP)
+	cmp := block.NewICmp(enum.IPredEQ, tagVal, constant.NewInt(irtypes.I64, vi.Tag))
 
 	if len(vi.Fields) > 0 && len(binders) == len(vi.Fields) {
 		payloadGEP := block.NewGetElementPtr(st, alloca,

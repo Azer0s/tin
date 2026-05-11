@@ -24,6 +24,7 @@ func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	// Unconstrained generic functions (TypeParams only) are also compiled on demand.
 	if len(n.TypeParams) > 0 {
 		cg.genericFuncs[n.Name] = n
+		cg.genericFuncOverloads[n.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[n.Name], n)
 		cg.genericFuncHomeScopes[n.Name] = cg.curScope
 
 		return nil
@@ -119,10 +120,11 @@ func traitQualifierKey(q string) string {
 // "AsyncReader". Type-arg suffixes are preserved:
 // "io::Reader[byte]"           -> "Reader[byte]"
 // "tryable[string, errors::Err]" -> "tryable[string, errors::Err]"
-//   (the `::` lives inside the type-arg bracket, not in the leading
-//    module prefix, so it must NOT be stripped — earlier the function
-//    used LastIndex on `::`, which incorrectly trimmed everything
-//    before the type-arg's `::` and corrupted substituted qualifiers.)
+//
+//	(the `::` lives inside the type-arg bracket, not in the leading
+//	 module prefix, so it must NOT be stripped - earlier the function
+//	 used LastIndex on `::`, which incorrectly trimmed everything
+//	 before the type-arg's `::` and corrupted substituted qualifiers.)
 func stripQualifierModule(q string) string {
 	// Find the trait-name boundary: either the position of the first
 	// `[` (start of type-args) or the end of the string. Only `::`
@@ -153,7 +155,7 @@ func methodScopeName(structName string, m *ast.FuncDecl) string {
 	if m.TraitQualifier != "" {
 		bare := stripQualifierModule(m.TraitQualifier)
 		// Prefer parsing the qualifier into a TypeExpr and using
-		// traitImplKey on it — that is the same canonicalisation
+		// traitImplKey on it - that is the same canonicalisation
 		// genTraitVtables uses on the impl-bound side, so qualifier
 		// strings with array / wildcard / pointer slots produce
 		// matching keys on both ends. Fall back to the legacy
@@ -241,6 +243,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// Generic functions are compiled on demand; register as template and skip.
 	if len(n.TypeParams) > 0 {
 		cg.genericFuncs[n.Name] = n
+		cg.genericFuncOverloads[n.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[n.Name], n)
 		cg.genericFuncHomeScopes[n.Name] = cg.curScope
 
 		return nil
@@ -512,12 +515,16 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 				cg.typeAliases[n.Name] = &ast.SimpleType{Name: structKey}
 			}
 		}
+
+		cg.curScope.markTypeVisible(n.Name)
 	case *ast.EnumDecl:
 		// Register enum values early so they are available during on-demand
 		// struct monomorphization triggered from pass 2 (predeclare).
 		if err := cg.genEnumDecl(n); err != nil {
 			return err
 		}
+
+		cg.curScope.markTypeVisible(n.Name)
 	case *ast.UnionDecl:
 		// Register an opaque struct so forward references work.
 		st := irtypes.NewStruct()
@@ -542,6 +549,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		}
 
 		cg.dataDecls[n.Name] = n
+		cg.curScope.markTypeVisible(n.Name)
 	case *ast.TypeDecl:
 		// Simple type aliases (type char = u8) go straight into typeAliases.
 		// Tagged union aliases (type u = i8 | string) get a placeholder struct so
@@ -568,12 +576,16 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		} else if _, isGeneric := n.Type.(*ast.GenericType); !isGeneric {
 			cg.typeAliases[n.Name] = n.Type
 		}
+
+		cg.curScope.markTypeVisible(n.Name)
 	case *ast.TraitDecl:
 		cg.traits[n.Name] = n
 		if cg.currentPkg != "" {
 			qualInstKey := cg.currentPkg + "__" + n.Name
 			cg.traitBareToQualInstKey[n.Name] = qualInstKey
 		}
+
+		cg.curScope.markTypeVisible(n.Name)
 	case *ast.MacroDecl:
 		cg.macros[n.Name] = n
 	case *ast.VarDecl:
@@ -1092,6 +1104,7 @@ func (cg *CodeGen) genFuncDecl(n *ast.FuncDecl) error {
 	// Register them in genericFuncs so call-site monomorphization can find them.
 	if len(n.TypeParams) > 0 {
 		cg.genericFuncs[n.Name] = n
+		cg.genericFuncOverloads[n.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[n.Name], n)
 		cg.genericFuncHomeScopes[n.Name] = cg.curScope
 
 		return nil
@@ -1601,6 +1614,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// Generic functions are compiled on demand; register as template and skip.
 	if len(n.TypeParams) > 0 && n.IsExtern == "" {
 		cg.genericFuncs[n.Name] = n
+		cg.genericFuncOverloads[n.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[n.Name], n)
 		cg.genericFuncHomeScopes[n.Name] = cg.curScope
 
 		return nil

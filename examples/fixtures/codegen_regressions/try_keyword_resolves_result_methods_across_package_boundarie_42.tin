@@ -1,0 +1,16 @@
+use result
+use { Result } from result
+use errors
+use time
+
+fn parse() Result[time::Instant, errors::Err] =
+  return Ok(time::now())
+
+fn outer() Result[time::Instant, errors::Err] =
+  let t = try parse()
+  return Ok(t)
+
+fn main() =
+  match outer():
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"

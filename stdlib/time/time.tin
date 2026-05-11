@@ -223,10 +223,10 @@ fn{#async} sleep_impl(ms i64) =
 // until the fiber finishes, which is when the timer unparks the
 // fiber after at least `ms` milliseconds.  Discarding the future
 // (`time::sleep(d)` as a statement) leaves the wait running in the
-// background and the unused-must-use check warns at compile time.
+// background and the must-use check warns at compile time.
 //
 //   await time::sleep(time::from_ms(20))   // parks 20ms
-//   time::sleep(time::from_ms(20))         // [-Wunused-must-use]
+//   time::sleep(time::from_ms(20))         // [-Wmust-use]
 //
 // Sub-millisecond residues round up to 1ms so a request for "a tiny
 // bit" still yields rather than becoming a busy no-op; zero or

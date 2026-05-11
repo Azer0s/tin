@@ -3,7 +3,7 @@
 A function or method may declare some slots of its return type with `_`
 (wildcard). At each call site those slots are filled in by context, and
 the compiler emits a separate monomorphization for each unique fill.
-This is in addition to — not instead of — the monomorphizations
+This is in addition to - not instead of - the monomorphizations
 produced by the function's own generic parameters and (for impl methods)
 by the data type's parameters.
 
@@ -129,7 +129,7 @@ these is unambiguous:
   into a function whose parameter type is `Result[string, E]`.
 
 If multiple contexts apply they must agree. If no context fixes the
-wildcard, the call is a compile error — type inference does not guess
+wildcard, the call is a compile error - type inference does not guess
 across the wildcard, because the choice is supposed to be intentional
 on the caller's part.
 
@@ -177,8 +177,8 @@ Migration steps still pending:
 - The mono body currently wraps the impl method (calls it, then
   reconstructs the result), rather than re-emitting the impl's body
   under the wildcard substitution. The wrapper-around-impl form is
-  semantically equivalent — each call site dispatches to a distinct
-  per-W symbol, which is the call-site generics feature in full —
+  semantically equivalent - each call site dispatches to a distinct
+  per-W symbol, which is the call-site generics feature in full -
   but a future refactor could re-emit the body directly so the
   reconstruction falls out of normal return-type coercion. The
   migration is structural and does not change observable behavior.

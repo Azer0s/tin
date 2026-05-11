@@ -1,0 +1,45 @@
+// examples/pure_soundness_errors_test.tin -- compile-time
+// rejections for the #pure soundness checker.  Positive cases live
+// in examples/pure_soundness.tin; this file pins every shape that
+// must surface as a clean diagnostic.
+//
+// Replaces examples/pure_soundness_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_reads_var_g(fixture string) =
+  let r = run_tin("run", "examples/fixtures/pure_soundness_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "reads mutable top-level var \"g\""))
+
+test "pure body reads a top-level var" =
+  expect_reads_var_g("reads_var.tin")
+
+test "pure body assigns a top-level var" =
+  expect_reads_var_g("writes_var.tin")
+
+test "pure body augmented-assigns a top-level var" =
+  expect_reads_var_g("aug_assign_var.tin")
+
+test "pure body transitively reads via a helper" =
+  expect_reads_var_g("transitive_helper.tin")
+
+test "pure body reads a top-level var inside an array literal" =
+  expect_reads_var_g("reads_var_in_array.tin")
+
+test "pure body reads a top-level var inside a struct literal" =
+  expect_reads_var_g("reads_var_in_struct.tin")
+
+test "pure body reads a top-level var inside an interpolated string" =
+  expect_reads_var_g("reads_var_in_interp.tin")
+
+test "pure body reads a top-level var inside a match case" =
+  expect_reads_var_g("reads_var_in_match.tin")
+
+test "pure body cannot spawn" =
+  let r = run_tin("run", "examples/fixtures/pure_soundness_errors/spawn_rejected.tin")
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "#pure violation - spawn"))

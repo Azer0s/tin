@@ -1,0 +1,5 @@
+struct Named =
+  label string
+
+const N = Named{label: "hi"}
+fn main() = echo "x"

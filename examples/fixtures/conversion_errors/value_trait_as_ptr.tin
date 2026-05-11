@@ -1,0 +1,13 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+fn taker(a Animal) =
+  let _ = a as *Dog
+
+fn main() =
+  let d = Dog{name: "rex"}
+  taker(d)

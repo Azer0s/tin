@@ -15,7 +15,7 @@
 //
 // Lock acquisitions are awaitable[Unit]: ready() is the try-lock
 // probe and the runtime spin loop drives the retry. No fiber-spawn
-// cost — the await-loop runs inline in the calling fiber.
+// cost - the await-loop runs inline in the calling fiber.
 
 use rc
 use "./future"

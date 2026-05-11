@@ -1,0 +1,2 @@
+fn{#allow_drop} bad() i64 = return 1
+fn main() = bad()

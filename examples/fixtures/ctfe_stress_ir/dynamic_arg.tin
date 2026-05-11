@@ -1,0 +1,5 @@
+fn{#pure} doubled(n i64) i64 = return n * 2
+
+fn main() i64 =
+  let dynamic i64 = 9
+  return doubled(dynamic)

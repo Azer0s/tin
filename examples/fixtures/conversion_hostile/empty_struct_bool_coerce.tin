@@ -1,0 +1,7 @@
+struct Marker(coerce[bool]) =
+  static fn ::coerce(this Marker) bool = return true
+
+fn main() =
+  let m = Marker{}
+  if m: echo "ok"
+  else: echo "WRONG"

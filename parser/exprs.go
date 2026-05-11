@@ -169,35 +169,38 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 }
 
 func (p *Parser) parseOr() (ast.Node, error) {
-	return p.parseBinary(p.parseAnd, lexer.OR)
+	return p.parseBinaryAllowLeading(p.parseAnd, lexer.OR)
 }
 
 func (p *Parser) parseAnd() (ast.Node, error) {
-	return p.parseBinary(p.parseBitOr, lexer.AND)
+	return p.parseBinaryAllowLeading(p.parseBitOr, lexer.AND)
 }
 
 func (p *Parser) parseBitOr() (ast.Node, error) {
-	return p.parseBinary(p.parseBitXor, lexer.BITOR)
+	return p.parseBinaryAllowLeading(p.parseBitXor, lexer.BITOR)
 }
 
 func (p *Parser) parseBitXor() (ast.Node, error) {
-	return p.parseBinary(p.parseBitAnd, lexer.XOR)
+	return p.parseBinaryAllowLeading(p.parseBitAnd, lexer.XOR)
 }
 
 func (p *Parser) parseBitAnd() (ast.Node, error) {
+	// `&` doubles as the address-of prefix operator, so a line
+	// starting with `&` is most often a unary statement (e.g.
+	// `&local`).  Use the trailing-only continuation here.
 	return p.parseBinary(p.parseEquality, lexer.AMP)
 }
 
 func (p *Parser) parseEquality() (ast.Node, error) {
-	return p.parseBinary(p.parseComparison, lexer.EQEQ, lexer.NEQ)
+	return p.parseBinaryAllowLeading(p.parseComparison, lexer.EQEQ, lexer.NEQ)
 }
 
 func (p *Parser) parseComparison() (ast.Node, error) {
-	return p.parseBinary(p.parseShift, lexer.LT, lexer.LTEQ, lexer.GT, lexer.GTEQ)
+	return p.parseBinaryAllowLeading(p.parseShift, lexer.LT, lexer.LTEQ, lexer.GT, lexer.GTEQ)
 }
 
 func (p *Parser) parseShift() (ast.Node, error) {
-	return p.parseBinary(p.parseAdditive, lexer.SHL, lexer.SHR)
+	return p.parseBinaryAllowLeading(p.parseAdditive, lexer.SHL, lexer.SHR)
 }
 
 func (p *Parser) parseAdditive() (ast.Node, error) {
@@ -291,13 +294,62 @@ func (p *Parser) parseMultiplicative() (ast.Node, error) {
 	return p.parseBinary(p.parseUnary, lexer.STAR, lexer.SLASH, lexer.PERCENT)
 }
 
+// parseBinary parses a left-associative binary expression with
+// trailing-operator continuation only.  Use parseBinaryAllowLeading
+// for ops whose token is unambiguously binary (`||`, `&&`, `==`,
+// ...); STAR / AMP / MINUS double as unary prefix operators so a
+// line starting with them is usually a separate statement, not a
+// continuation.
 func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenType) (ast.Node, error) {
+	return p.parseBinaryImpl(sub, false, ops...)
+}
+
+// parseBinaryAllowLeading is like parseBinary but additionally
+// accepts the operator at the start of a continuation line.
+// Restricted to op sets that cannot also be unary prefix operators
+// so a leading `||` continues the previous expression while a
+// leading `*` stays a statement-level deref.
+func (p *Parser) parseBinaryAllowLeading(sub func() (ast.Node, error), ops ...lexer.TokenType) (ast.Node, error) {
+	return p.parseBinaryImpl(sub, true, ops...)
+}
+
+func (p *Parser) parseBinaryImpl(sub func() (ast.Node, error), allowLeading bool, ops ...lexer.TokenType) (ast.Node, error) {
 	left, err := sub()
 	if err != nil {
 		return nil, err
 	}
 
-	for p.match(ops...) {
+	for {
+		// Operator on the same line: fall through to advance + parse.
+		if p.match(ops...) {
+			// nothing to do
+		} else if allowLeading && p.check(lexer.NEWLINE) {
+			// Operator at the start of the continuation line: peek
+			// past NEWLINE (+ optional INDENT) and accept it as the
+			// next op-token.  Consumed INDENTs flow into
+			// continuationDedents so the outer skipNewlines drains
+			// the matching DEDENTs later (same bookkeeping as the
+			// trailing-op continuation below).
+			saved := p.pos
+			savedDedents := p.continuationDedents
+
+			p.advance() // NEWLINE
+
+			for p.check(lexer.INDENT) {
+				p.advance()
+				p.continuationDedents++
+			}
+
+			if !p.match(ops...) {
+				p.pos = saved
+				p.continuationDedents = savedDedents
+
+				break
+			}
+		} else {
+			break
+		}
+
 		opTok := p.advance()
 		op := opTok.Literal
 

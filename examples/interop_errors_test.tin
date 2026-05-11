@@ -1,0 +1,124 @@
+// examples/interop_errors_test.tin -- Phase A (validation) and
+// Phase B (C-type whitelist) checks for the `#interop` control
+// tag.  Each compile-error fixture lives in
+// examples/fixtures/interop_errors/<name>.tin; the positive cases
+// confirm that the fixture compiles cleanly without an "#interop
+// violation"-style diagnostic.
+//
+// Replaces examples/interop_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_interop_error(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/interop_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_compiles_cleanly(fixture string) =
+  // `tin build-test` is the fastest path that still runs the full
+  // codegen pipeline -- exit_code == 0 plus the absence of any
+  // "#interop" / "error" / "violation" diagnostic means the
+  // whitelist accepted the signature.
+  let r = run_tin("build-test", "examples/fixtures/interop_errors/" ++ fixture)
+
+  assert::equals(0 as i32, r.exit_code)
+  assert::ok(!contains_text(r.stderr, "#interop"))
+  assert::ok(!contains_text(r.stderr, "violation"))
+
+// Phase A: validation (tag combinations, declaration shape).
+
+test "#interop + #async rejected" =
+  expect_interop_error("interop_async.tin", "#interop and #async cannot be combined")
+
+test "Future return rejected" =
+  expect_interop_error("future_return.tin", "contains Future[T]")
+
+test "any param rejected" =
+  expect_interop_error("any_param.tin", "any type is not C-representable")
+
+test "generic #interop fn rejected" =
+  expect_interop_error("generic_fn.tin", "cannot be applied to a generic function")
+
+test "extern declaration rejected (already C)" =
+  expect_interop_error("extern_decl.tin", "extern declaration is meaningless")
+
+test "name `main` reserved" =
+  expect_interop_error("main_name.tin", "reserved name")
+
+test "#interop method rejected (top-level only)" =
+  expect_interop_error("struct_method.tin", "is not allowed on methods")
+
+test "duplicate #interop name rejected" =
+  expect_interop_error("duplicate_name.tin", "duplicate #interop function name")
+
+// Phase B: type whitelist.
+
+test "struct param rejected" =
+  expect_interop_error("struct_param.tin", "named user types must be either")
+
+test "struct return rejected" =
+  expect_interop_error("struct_return.tin", "named user types must be either")
+
+test "fixed-size array rejected" =
+  expect_interop_error("fixed_array.tin", "fixed-size arrays are not representable")
+
+test "atom param rejected" =
+  expect_interop_error("atom_param.tin", "atom")
+
+test "callback returning struct rejected" =
+  expect_interop_error("cb_struct_return.tin", "is not a primitive C type")
+
+test "callback returning slice rejected" =
+  expect_interop_error("cb_slice_return.tin", "fat array")
+
+test "packed multi-float in one eightbyte rejected (SSE vector ABI)" =
+  expect_interop_error("multifloat_packed.tin", "SSE vector ABI")
+
+test "union return rejected" =
+  expect_interop_error("union_return.tin", "union types are not representable")
+
+test "[string] param rejected (ARC-managed elements)" =
+  expect_interop_error("string_slice.tin", "Tin strings are ARC-managed")
+
+test "[[i32]] param rejected (nested fat arrays)" =
+  expect_interop_error("nested_fat_array.tin", "nested fat arrays are ARC-managed")
+
+test "tin_runtime_init name reserved" =
+  expect_interop_error("reserved_runtime_init.tin", "would clash with a runtime symbol")
+
+test "__tin_interop_ prefix reserved" =
+  expect_interop_error("reserved_prefix.tin", "reserved internal-symbol prefix")
+
+// Phase B positive cases.
+
+test "*void opaque handle accepted" =
+  expect_compiles_cleanly("pos_void_opaque.tin")
+
+test "*Struct accepted (rendered as void* in header)" =
+  expect_compiles_cleanly("pos_struct_ptr.tin")
+
+test "string param accepted" =
+  expect_compiles_cleanly("pos_string.tin")
+
+test "fat array param accepted" =
+  expect_compiles_cleanly("pos_fat_array.tin")
+
+test "packed by-value pt accepted (i64 ABI)" =
+  expect_compiles_cleanly("pos_packed_pt.tin")
+
+test "callback with bool inner accepted" =
+  expect_compiles_cleanly("pos_cb_bool.tin")
+
+test "[bool] slice accepted" =
+  expect_compiles_cleanly("pos_bool_slice.tin")
+
+test "callback with string param/return accepted" =
+  expect_compiles_cleanly("pos_cb_string.tin")
+
+test "callback with slice param accepted" =
+  expect_compiles_cleanly("pos_cb_slice.tin")
+
+test "packed by-value small accepted (byval ABI)" =
+  expect_compiles_cleanly("pos_packed_small.tin")

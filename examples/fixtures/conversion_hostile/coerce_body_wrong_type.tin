@@ -1,0 +1,7 @@
+struct Money(coerce[i64]) =
+  cents i64
+  static fn ::coerce(this Money) i64 = return "not an int"
+
+fn main() =
+  let m = Money{cents: 1}
+  let _ = m as i64

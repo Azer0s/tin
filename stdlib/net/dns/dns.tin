@@ -1,0 +1,81 @@
+//!+dns.c -- -I $TIN_RUNTIME
+// stdlib/net/dns - DNS forward + reverse resolution.  Wraps
+// getaddrinfo / getnameinfo and surfaces failures as typed
+// `dns::DnsError` values that implement `errors::Err`.
+
+use errors
+use result
+use strings
+use { Result } from result
+
+// C helpers.  Tin's `string` lowers to `const char *` for externs,
+// and TinStrings flowing back from C use the out-parameter pattern
+// (mirrors stdlib/net/udp's recvfrom shape) so the runtime's
+// fat-pointer construction lives entirely on the C side.
+fn tin_dns_lookup_host_c(host string, err_code *i32, result *string) = extern("_tin_dns_lookup_host")
+fn tin_dns_lookup_addr_c(ip string, err_code *i32, result *string)   = extern("_tin_dns_lookup_addr")
+fn tin_dns_gai_strerror_c(code i32, out *string)                     = extern("_tin_dns_gai_strerror")
+
+// DnsError covers every failure surface this package can emit.
+// Implements errors::Err so callers get the same composability as
+// `tcp::TcpError` and friends.
+data DnsError(errors::Err, print) =
+  LookupFailed(host string, code i32)
+  ReverseFailed(ip string, code i32)
+  EmptyResult(host string)
+
+  fn errors::Err::message(this DnsError) string =
+    let detail string = ""
+
+    match this:
+      case LookupFailed(h, c):
+        tin_dns_gai_strerror_c(c, &detail)
+        return "dns: cannot resolve {h}: {detail}"
+      case ReverseFailed(a, c):
+        tin_dns_gai_strerror_c(c, &detail)
+        return "dns: cannot reverse {a}: {detail}"
+      case EmptyResult(h):
+        return "dns: no addresses for {h}"
+
+// lookup_host resolves `host` to one or more textual IP addresses
+// (mix of IPv4 and IPv6, depending on what the resolver returns).
+// Returns Err(LookupFailed) on resolver failure or Err(EmptyResult)
+// when getaddrinfo succeeded with zero usable records.
+fn lookup_host(host string) Result[[string], errors::Err] =
+  let code i32   = 0
+  let raw string = ""
+
+  tin_dns_lookup_host_c(host, &code, &raw)
+
+  if code != 0:
+    return Err(LookupFailed(host, code) as errors::Err)
+
+  let parts = strings::split(raw, "\n")
+
+  if len(parts) == 0:
+    return Err(EmptyResult(host) as errors::Err)
+
+  return Ok(parts)
+
+// lookup_addr does the reverse: given a textual IP, return the
+// hostname its PTR record resolves to.  Surfaces ReverseFailed on
+// any resolver-level error and EmptyResult when the resolver
+// returned without a PTR record.
+fn lookup_addr(ip string) Result[string, errors::Err] =
+  let code i32   = 0
+  let raw string = ""
+
+  tin_dns_lookup_addr_c(ip, &code, &raw)
+
+  if code != 0:
+    return Err(ReverseFailed(ip, code) as errors::Err)
+
+  if len(raw) == 0:
+    return Err(EmptyResult(ip) as errors::Err)
+
+  return Ok(raw)
+
+export {
+  lookup_host, lookup_addr,
+  DnsError,
+} as dns

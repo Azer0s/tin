@@ -1,0 +1,13 @@
+struct Yard(coerce[Foot]) =
+  y i64
+  static fn ::coerce(this Yard) Foot = return Foot{f: this.y * 3}
+
+struct Foot(coerce[Yard]) =
+  f i64
+  static fn ::coerce(this Foot) Yard = return Yard{y: this.f / 3}
+
+fn main() =
+  let y = Yard{y: 2}
+  let f = y as Foot
+  let y2 = f as Yard
+  echo "{f.f} {y2.y}"

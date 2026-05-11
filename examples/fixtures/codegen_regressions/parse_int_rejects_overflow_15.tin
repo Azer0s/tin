@@ -1,0 +1,6 @@
+use strings
+use { is_err } from result
+
+fn main() =
+  if is_err(strings::parse_int("99999999999999999999")): echo "ok-rejected"
+  else:                                                  echo "wrong"

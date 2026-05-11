@@ -1,0 +1,65 @@
+// examples/unreachable_arm_warnings_test.tin -- compiler warnings
+// for unreachable match cases / where clauses.  `-Wno-unused-match-
+// arms` must silence every fired diagnostic.
+//
+// Replaces examples/unreachable_arm_warnings.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+// Warnings only fire during codegen, so `tin run` skips them when
+// the binary cache hits.  Use `tin ir` instead: it always re-runs
+// codegen and surfaces every diagnostic regardless of cache state.
+fn expect_warning(fixture string, needle string, flags [string]) =
+  let r = run_tin_flags("ir", "examples/fixtures/unreachable_arm_warnings/" ++ fixture, flags)
+
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_no_warning(fixture string, flags [string]) =
+  let r = run_tin_flags("ir", "examples/fixtures/unreachable_arm_warnings/" ++ fixture, flags)
+
+  assert::ok(!contains_text(r.stderr, "warning"))
+
+// 1-5: where-clause patterns trip "unreachable where" warnings.
+
+test "where: array triple covers all, _ unreachable" =
+  expect_warning("where_array_covered_underscore.tin", "unreachable where", [])
+
+test "-Wno-unused-match-arms silences the where warning" =
+  expect_no_warning("where_array_covered_underscore.tin", ["-Wno-unused-match-arms"])
+
+test "where: bool true/false + _ unreachable" =
+  expect_warning("where_bool_covered_underscore.tin", "unreachable where", [])
+
+test "where: duplicate int literal arm unreachable" =
+  expect_warning("where_duplicate_int.tin", "unreachable where", [])
+
+test "where: bind-all then more clauses unreachable" =
+  expect_warning("where_bindall_then_more.tin", "unreachable where", [])
+
+// 6-8: match-case warnings (case + default).
+
+test "match: duplicate int literal case unreachable" =
+  expect_warning("match_duplicate_int.tin", "unreachable match case", [])
+
+test "match: array triple covers all, default unreachable" =
+  expect_warning("match_array_covered_default.tin", "unreachable match default", [])
+
+test "-Wno-unused-match-arms silences the match warning" =
+  expect_no_warning("match_array_covered_default.tin", ["-Wno-unused-match-arms"])
+
+// 9-11: silent / no-false-positive cases.
+
+test "match: default needed for atom open domain (silent)" =
+  expect_no_warning("match_atom_needs_default.tin", [])
+
+test "where: bool guards need explicit _ (silent)" =
+  expect_no_warning("where_bool_guards_need_underscore.tin", [])
+
+test "where: guarded clause does not cover (silent)" =
+  expect_no_warning("where_guarded_not_exhaustive.tin", [])
+
+// 12: bool exhaustive cases -- explicit default IS unreachable.
+
+test "match: bool exhaustive cases make default unreachable" =
+  expect_warning("match_bool_default.tin", "unreachable match default", [])

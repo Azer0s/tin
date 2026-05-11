@@ -1,0 +1,5 @@
+use option
+
+fn main() =
+  let o Option[i64, string] = None
+  echo "x"

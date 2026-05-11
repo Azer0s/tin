@@ -1,0 +1,15 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+fn unsafe_get(a *Animal) string =
+  let d = a as *Dog
+  return (*d).name
+
+fn main() =
+  let d = &Dog{name: "rex"}
+  let a *Animal = d
+  echo unsafe_get(a)

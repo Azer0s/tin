@@ -1,0 +1,9 @@
+use result
+use { Result } from result
+
+fn main() =
+  let a Result[i64, string] = Ok(42)
+  let b Result[i64, string] = Ok(99)
+  let one = result::unwrap(a)
+  let two = result::unwrap(b, "ignored")
+  echo "two={two} one={one}"

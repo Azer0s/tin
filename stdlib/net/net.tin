@@ -4,15 +4,18 @@
 //   tcp  - TCP connection and server types
 //   udp  - UDP socket types
 //   unix - Unix domain socket types
+//   dns  - forward / reverse name resolution + host[:port] parsing
 //
 // Import examples:
 //   use net::tcp
 //   use net::udp
 //   use net::unix
+//   use net::dns
 //   use net
 
 use "./tcp/tcp"
 use "./udp/udp"
 use "./unix/unix"
+use "./dns/dns"
 
-export { tcp, udp, unix } as net
+export { tcp, udp, unix, dns } as net

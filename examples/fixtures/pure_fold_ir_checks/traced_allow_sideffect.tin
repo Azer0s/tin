@@ -1,0 +1,8 @@
+fn{#pure} traced(n i64) i64 =
+  let r i64 = n * n
+  { #allow_sideffect } {
+    echo "n={n}"
+  }
+  return r
+
+fn main() i64 = return traced(4)

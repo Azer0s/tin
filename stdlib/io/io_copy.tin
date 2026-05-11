@@ -1,0 +1,61 @@
+// stdlib/io/io_copy.tin -- generic AsyncReader -> AsyncWriter copy
+// loop.
+//
+// Loaded into stdlib/io via `use "./io_copy"`.  The async I/O traits
+// live in async_traits.tin so the cross-file references resolve in
+// either inclusion order.  Buffered output lives next door in
+// io_bufwriter.tin.
+
+use mem
+use sync
+use { Unit } from sync
+use errors
+use result
+use { Result } from result
+use { loop } from macros
+use "./async_traits"
+use "./closeable"
+
+// Internal copy buffer size (matches Go's io.Copy default of 8 KiB).
+const COPY_BUF_BYTES i64 = 8192
+
+// copy reads bytes from src and writes them to dst until src returns
+// EOF (0 bytes) or either side surfaces a negative count (treated as
+// an error).  Returns the total number of bytes successfully written,
+// or an Err carrying the offending op.
+fn copy(dst AsyncWriter, src AsyncReader) Future[Result[i64, errors::Err]] =
+  return spawn copy_impl(dst, src)
+
+fn{#async} copy_impl(dst AsyncWriter, src AsyncReader) Result[i64, errors::Err] =
+  let cap i64 = COPY_BUF_BYTES
+  let buf_raw = mem::malloc(cap) as *byte
+  let total i64 = 0
+
+  loop:
+    let r = await src.read(buf_raw, cap)
+
+    if r < 0:
+      mem::free(buf_raw as *void)
+      return Err(errors::new("io::copy: read failed"))
+
+    if r == 0:
+      break
+
+    let written i64 = 0
+
+    for written < r:
+      let off  = (buf_raw as i64) + written
+      let here = off as *byte
+      let want = r - written
+      let w    = await dst.write(here, want)
+
+      if w <= 0:
+        mem::free(buf_raw as *void)
+        return Err(errors::new("io::copy: write failed"))
+      written = written + w
+
+    total = total + r
+
+  mem::free(buf_raw as *void)
+
+  return Ok(total)

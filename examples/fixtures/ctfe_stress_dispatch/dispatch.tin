@@ -1,0 +1,13 @@
+fn{#pure} square_i64(n i64) i64 = return n * n
+fn{#pure} clamp(v i64, lo i64, hi i64) i64 =
+  if v < lo: return lo
+  if v > hi: return hi
+  return v
+fn{#pure} fact(n i64) i64 =
+  if n <= 1: return 1
+  return n * fact(n - 1)
+fn{#pure} both(a bool, b bool) bool = return a && b
+fn{#pure} hypot_sq(x f64, y f64) f64 = return x * x + y * y
+
+fn main() i64 =
+  return square_i64(7)

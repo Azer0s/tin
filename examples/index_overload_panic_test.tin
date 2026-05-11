@@ -1,0 +1,16 @@
+// examples/index_overload_panic_test.tin -- bare `t[k]` on a missing
+// key must panic with the "index miss at L:C" message rather than
+// silently returning a zero value.  The comma-ok destructure form
+// (`let (v, ok) = b[k]`) is exercised by examples/index_overload.tin.
+//
+// Replaces examples/index_overload_panic.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+test "bare miss panics with location-tagged message" =
+  let r = run_tin("run", "examples/fixtures/index_overload_panic/miss.tin")
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "index miss")
+          || contains_text(r.stdout, "index miss"))

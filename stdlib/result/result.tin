@@ -20,6 +20,7 @@
 // Option (Some/None) lives in stdlib/option.
 
 use option
+use { Option } from option
 
 data Result[t, e](tryable[t, Result[_, e]]) =
   Ok(v t)
@@ -39,6 +40,53 @@ data Result[t, e](tryable[t, Result[_, e]]) =
     match this:
       case Ok(_):  panic("tryable::err_value on Ok")
       case Err(_): return this
+
+  // is_ok reports whether the Result is an Ok value.
+  fn is_ok(this Result[t, e]) bool =
+    match this:
+      case Ok(_):  return true
+      case Err(_): return false
+
+  // is_err reports whether the Result is an Err value.
+  fn is_err(this Result[t, e]) bool =
+    match this:
+      case Ok(_):  return false
+      case Err(_): return true
+
+  // unwrap_or returns the Ok value or d when this is Err.
+  fn unwrap_or(this Result[t, e], d t) t =
+    match this:
+      case Ok(v):  return v
+      case Err(_): return d
+
+  // or_else_value returns this when Ok, otherwise the literal
+  // fallback Result.  Symmetric with Option::or_else_value: useful
+  // when the fallback is a pre-built value and a closure adapter
+  // would add noise; for lazy/recovery flows use or_else.
+  fn or_else_value(this Result[t, e], fallback Result[t, e]) Result[t, e] =
+    match this:
+      case Ok(v):  return Ok(v)
+      case Err(_): return fallback
+
+  // unwrap returns the Ok value or panics on Err.  The no-arg
+  // form uses a generic message; pass a string for diagnostic
+  // context ("config load: {file}", "couldn't acquire db handle",
+  // ...).
+  fn unwrap(this Result[t, e]) t =
+    match this:
+      case Ok(v):  return v
+      case Err(_): panic("result::unwrap on Err")
+
+  fn unwrap(this Result[t, e], msg string) t =
+    match this:
+      case Ok(v):  return v
+      case Err(_): panic(msg)
+
+  // to_option stays as a top-level helper rather than a method:
+  // its return type Option[t] would otherwise force eager
+  // monomorphization of Option[Option[...]] when this Result is
+  // instantiated with an Option payload, colliding with the user's
+  // own Option[T] and surfacing as a Some-ambiguity error.
 
 // is_ok reports whether the Result is an Ok value.
 fn is_ok[t, e](r Result[t, e]) bool =
@@ -82,14 +130,21 @@ fn or_else[t, e, f](r Result[t, e], g fn(e) Result[t, f]) Result[t, f] =
     case Ok(v):  return Ok(v)
     case Err(m): return g(m)
 
-// unwrap returns the Ok value or panics on Err.
+// or_else_value returns r when Ok, otherwise the literal fallback.
+fn or_else_value[t, e](r Result[t, e], fallback Result[t, e]) Result[t, e] =
+  match r:
+    case Ok(v):  return Ok(v)
+    case Err(_): return fallback
+
+// unwrap returns the Ok value or panics on Err.  Two overloads:
+// no-arg form uses a default message, the (msg) form lets the
+// caller supply context for the panic.
 fn unwrap[t, e](r Result[t, e]) t =
   match r:
     case Ok(v):  return v
     case Err(_): panic("result::unwrap on Err")
 
-// expect returns the Ok value or panics with msg on Err.
-fn expect[t, e](r Result[t, e], msg string) t =
+fn unwrap[t, e](r Result[t, e], msg string) t =
   match r:
     case Ok(v):  return v
     case Err(_): panic(msg)

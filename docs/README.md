@@ -180,11 +180,14 @@ that affects the output. Manually `rm -rf .build/` to nuke everything.
 
 ### Verification
 
-`bash examples/incremental_cache_verify.sh` runs 10 invariant checks
-(cold/warm equivalence, `-O0` vs `-O2` cache key separation,
-edit-only-one-file isolation, byte-identical determinism, concurrent
-build safety, upstream-pkg-body-edit isolation, etc.). CI runs this
-on every push.
+`./tin test examples/incremental_cache_verify_test.tin` runs the
+cache-populate cold-build check.  Several invariants the original
+bash script verified (warm-rebuild timing, `-O0` vs `-O2` cache key
+separation, edit-only-one-file isolation, byte-identical
+determinism, concurrent build safety, upstream-pkg-body-edit
+isolation) are deferred -- they depended on timing / file-format
+scraping / parallel-spawn primitives that don't translate cleanly
+into tin tests yet.
 
 ### Build observability
 

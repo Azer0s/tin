@@ -1,0 +1,82 @@
+// examples/pattern_where_errors_test.tin -- compile-error paths
+// of the pattern-where feature.  Positive cases live in
+// examples/pattern_where.tin; this file is about error quality.
+//
+// Replaces examples/pattern_where_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_compile_error(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/pattern_where_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+// 1. Mixing bool clauses and pattern clauses is rejected.
+
+test "mix: bool then pattern rejected" =
+  expect_compile_error("mix_bool_then_pattern.tin",
+    "cannot mix bool clauses and pattern clauses")
+
+test "mix: pattern then bool rejected" =
+  expect_compile_error("mix_pattern_then_bool.tin",
+    "cannot mix bool clauses and pattern clauses")
+
+// 2. Non-exhaustive where-lists rejected.
+
+test "no catch-all (pattern) rejected" =
+  expect_compile_error("no_catchall_pattern.tin", "non-exhaustive where")
+
+test "no catch-all (bool) rejected" =
+  expect_compile_error("no_catchall_bool.tin", "non-exhaustive where")
+
+test "only guarded patterns (no true catch-all) rejected" =
+  expect_compile_error("only_guarded.tin", "non-exhaustive where")
+
+// 3. Arity mismatch between function and clause pattern.
+
+test "single-arg fn with tuple clause rejected" =
+  expect_compile_error("single_arg_tuple_clause.tin",
+    "function takes 1 argument but clause has a 2-element tuple pattern")
+
+test "multi-arg fn with bare single-pattern clause rejected" =
+  expect_compile_error("multi_arg_bare_clause.tin",
+    "function takes 2 arguments but clause has a single-pattern")
+
+test "multi-arg fn with wrong-width tuple clause rejected" =
+  expect_compile_error("multi_arg_wrong_width.tin", "clause pattern has 3 components")
+
+// 4. Type mismatch between pattern literal and arg type.
+
+test "int pattern on string arg rejected" =
+  expect_compile_error("int_on_string.tin",
+    "integer literal pattern used against non-integer argument")
+
+test "bool pattern on int arg rejected" =
+  expect_compile_error("bool_on_int.tin",
+    "bool literal pattern used against non-bool argument")
+
+test "string pattern on int arg rejected" =
+  expect_compile_error("string_on_int.tin",
+    "string literal pattern used against non-string argument")
+
+test "atom pattern on int arg rejected" =
+  expect_compile_error("atom_on_int.tin",
+    "atom literal pattern used against non-atom argument")
+
+test "array pattern on int arg rejected" =
+  expect_compile_error("array_on_int.tin",
+    "array pattern used against non-array argument")
+
+// 5-7. Misc.
+
+test "empty () where pattern rejected" =
+  expect_compile_error("empty_pattern.tin", "empty where pattern")
+
+test "nested tuple pattern rejected" =
+  expect_compile_error("nested_tuple.tin", "nested tuple patterns are not supported")
+
+test "struct pattern placeholder rejected" =
+  expect_compile_error("struct_pattern.tin",
+    "struct patterns in where-clauses are not yet supported")

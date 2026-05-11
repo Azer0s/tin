@@ -12,8 +12,6 @@
 use { loop, async } from macros
 use net::udp
 use ioutil
-use errors
-use result
 
 async handle_conn(c udp::Conn) =
   let line = await ioutil::read_string(c)

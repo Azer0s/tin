@@ -1,0 +1,3 @@
+fn main() =
+  let x = x + 1
+  echo "{x}"

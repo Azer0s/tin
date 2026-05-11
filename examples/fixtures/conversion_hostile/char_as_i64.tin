@@ -1,0 +1,4 @@
+fn main() =
+  let c = @'A'
+  let n i64 = c as i64
+  echo "{n}"

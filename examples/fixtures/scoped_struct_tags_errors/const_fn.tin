@@ -1,0 +1,8 @@
+struct {#const@fn} bad =
+  x i64
+
+  fn show(this bad) i64 =
+    return this.x
+
+fn main() i64 =
+  return 0

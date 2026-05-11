@@ -1,0 +1,17 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+fn pull_name(a *Animal) string =
+  if a is *Dog:
+    let d = a as *Dog
+    return (*d).name
+  return ""
+
+fn main() =
+  let d = &Dog{name: "rex"}
+  let a *Animal = d
+  echo pull_name(a)
+  echo "no warning expected"

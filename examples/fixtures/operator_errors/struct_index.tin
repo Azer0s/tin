@@ -1,0 +1,9 @@
+// `struct[i]` without an `index` op-trait impl must be a compile
+// error; previously fell through to `genIndexExpr -> nil`.
+struct point =
+  x i32
+
+fn main() i64 =
+  let a = point{x: 1}
+  let _ = a[0]
+  return 0

@@ -95,22 +95,52 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     async-main                  main() uses spawn/await but is not #async
     await-match-guards          guard clauses in await-match arms
     bool-analysis               condition that folds to true/false at compile time
+    cast-truncates              numeric cast that loses bits at runtime
     deref-nil                   dereference of literal nil
+    discarded-pure-call         dropped result of a #pure call has no effect
     div-by-zero / shift-overflow  arithmetic that's UB at runtime
-    self-assign                 x = x
-    tautological-pointer-cmp    comparing a non-nil pointer against nil
-    unreachable-code            statements after return / panic / infinite loop
-    unused-match-arms           unreachable match case / where clause
-    loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    double-deinit               value deinit'd twice on the same path
+    empty-body                  if / for / while body that is empty
     fiber-misuse                double close, send-after-close, lock-without-unlock, unused mutex
+    identical-operands          x == x, x - x, x & x, ...
+    impossible-range            for-loop range bounds that can never produce values
+    ineffective-allow-drop      "#allow_drop" on a non-must-use return type does nothing
+    infinite-recursion          fn that always re-enters itself with no exit branch
+    large-stack-alloc           local whose stack footprint exceeds the safe threshold
+    loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    match-result-try            two-arm Result match that .unwrap / .expect /
+                                .unwrap_or / .map / .map_err / try would replace
+    must-use                    discarded #must_use value (Result, Future, etc.)
+    redundant-import-prefix     "pkg::sub::x" after "use pkg::sub" already binds "sub"
+    redundant-type-cast         "<lit> as T" where T is already pinned by context
+    return-try                  "return try expr" (yields the unwrapped V,
+                                rarely what callers want)
+    self-assign                 x = x
+    tautological-int-cmp        integer comparison that always folds to true/false
+    tautological-pointer-cmp    comparing a non-nil pointer against nil
+    unguarded-trait-downcast    "expr as *Concrete" without an "is *Concrete" guard
+    unreachable-code            statements after return / panic / infinite loop
+    unsafe-required             raw-pointer arithmetic outside a {#unsafe} block
+    unused-import               imported package or name never referenced
+    unused-match-arms           unreachable match case / where clause
+    unused-wildcard             "_" pattern that shadows an in-scope binding
+    unwrapped-c-resource        C-managed resource field not wrapped in *rc::Cell
+    use-after-deinit            value used after explicit deinit
+    useless-arith-identity      x + 0, x * 1, x | 0, ... that the optimizer drops
+    useless-cast                cast whose source and target types are identical
+    float-precision             float literal that loses precision at the chosen width
+    write-to-const              write through a pointer alias to a top-level const
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
-    unused-let                  let-binding that is never read
-    unused-result               discarded result of a non-void call
-    unused-param                fn parameter that is never read
     builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
+    float-equal                 == / != between floats (use abs(a-b) < eps)
     magic-number                int/float literal where a named const would convey intent
     style                       naming conventions, trailing whitespace, missing EOF newline
+    unclosed-closeable          io::Closeable binding leaves scope without close()
+    unused-let                  let-binding that is never read
+    unused-param                fn parameter that is never read
+    unused-result               discarded result of a non-void call
+    use-before-assign           local read before being assigned on every path
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)

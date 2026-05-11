@@ -131,6 +131,92 @@ func methodParamSig(m *ast.FuncDecl, structName string) string {
 	return sig
 }
 
+// appendGenericFuncOverload appends fd to overloads, replacing any existing
+// entry whose param signature matches (an idempotent re-registration -- the
+// same template can be registered multiple times under bare + qualified
+// keys, or across re-entrant passes).  Different signatures coexist so call
+// sites can disambiguate generic free-fn overloads by arity / param shape.
+func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*ast.FuncDecl {
+	if fd == nil {
+		return overloads
+	}
+
+	sig := funcParamSig(fd.Params)
+	for i, existing := range overloads {
+		if existing == fd {
+			return overloads
+		}
+
+		if funcParamSig(existing.Params) == sig && len(existing.TypeParams) == len(fd.TypeParams) {
+			overloads[i] = fd
+
+			return overloads
+		}
+	}
+
+	return append(overloads, fd)
+}
+
+// pickGenericFuncOverload returns the entry from overloads whose declared
+// param arity matches argCount.  Returns nil when no overload matches or
+// when the choice would be ambiguous (multiple matches of the same arity).
+// The single-entry case short-circuits so the common non-overloaded path
+// stays a single pointer read.
+func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int) *ast.FuncDecl {
+	if len(overloads) == 0 {
+		return nil
+	}
+
+	if len(overloads) == 1 {
+		return overloads[0]
+	}
+
+	var (
+		match  *ast.FuncDecl
+		hits   int
+		strict int
+	)
+
+	for _, fd := range overloads {
+		fixed := 0
+
+		for _, p := range fd.Params {
+			if !p.IsVarArgs {
+				fixed++
+			}
+		}
+
+		if fixed == argCount {
+			match = fd
+			strict++
+
+			continue
+		}
+
+		if fixed < argCount {
+			// Variadic candidate.
+			for _, p := range fd.Params {
+				if p.IsVarArgs {
+					match = fd
+					hits++
+
+					break
+				}
+			}
+		}
+	}
+
+	if strict == 1 {
+		return match
+	}
+
+	if strict == 0 && hits == 1 {
+		return match
+	}
+
+	return nil
+}
+
 // overloadMangledName returns the mangled IR name for a function/method when
 // it is part of an overload set.
 func overloadMangledName(baseName, sig string) string {

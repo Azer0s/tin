@@ -1,0 +1,13 @@
+trait myt[V, C] =
+  fn pull(this myt[V, C]) C = virtual
+
+data Pair[A, B] =
+  P(a A, b B)
+
+data Foo[T, _: W] where W is comp =
+  Box(v T)
+
+  fn myt[T, Pair[_: W, T]]::pull(this Foo[T]) Pair[_: W, T] =
+    panic("noop")
+
+fn main() = echo "ok"

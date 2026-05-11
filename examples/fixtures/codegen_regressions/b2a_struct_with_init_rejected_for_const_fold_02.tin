@@ -1,0 +1,7 @@
+struct Counter =
+  n i64
+  fn init(this Counter) =
+    this.n = 100
+
+const C = Counter{n: 0}
+fn main() = echo "{C.n}"

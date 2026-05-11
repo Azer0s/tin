@@ -1,0 +1,4 @@
+fn{#interop} dup(a i32) i32 = return a
+fn{#interop} dup(b i32) i32 = return b
+
+fn main() i64 = return 0

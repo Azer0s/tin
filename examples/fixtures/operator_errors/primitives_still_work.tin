@@ -1,0 +1,14 @@
+// Negative regression: primitive arithmetic + array indexing must
+// still compile after the struct-operator lockdown.  Computes the
+// expected value and exits 0 so the harness can assert exit code.
+use assert
+
+fn main() i64 =
+  let a = 1 + 2
+  let b = a * 3
+  let arr [i64] = [10, 20]
+  let r = b + arr[0]
+
+  assert::equals(19 as i64, r)
+
+  return 0

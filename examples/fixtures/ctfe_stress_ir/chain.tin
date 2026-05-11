@@ -1,0 +1,6 @@
+fn{#pure} step1(n i64) i64 = return n + 1
+fn{#pure} step2(n i64) i64 = return step1(n) * 2
+fn{#pure} step3(n i64) i64 = return step2(n) - 3
+fn{#pure} step4(n i64) i64 = return step3(n) * step3(n)
+
+fn main() i64 = return step4(5)

@@ -12,11 +12,12 @@
 
 use assert
 use sync
+use { discard } from macros
 
 fn{#async} fanout_consumer(id i64, inbox sync::Channel[string], done sync::Channel[i64]) =
   let msg = await inbox.recv()
-  let _ = "consumer-{id}: got [{msg}]"
 
+  discard "consumer-{id}: got [{msg}]"
   await done.send(id)
 
 test "channel fanout 50 consumers (named param)" =

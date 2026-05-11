@@ -1,0 +1,4 @@
+fn main() =
+  let n i64 = 5
+  let f = n.foo
+  echo "{f}"

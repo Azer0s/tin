@@ -729,8 +729,8 @@ fn main() =
 on your own types to make them awaitable with the `await` keyword. The trait
 has two methods:
 
-- `ready()`  — non-blocking poll, returns `true` when `result()` is ready.
-- `result()` — produce the value.
+- `ready()`  - non-blocking poll, returns `true` when `result()` is ready.
+- `result()` - produce the value.
 
 `await x` desugars to a runtime-driven spin loop:
 
@@ -757,7 +757,7 @@ let v = await r   // 42
 ```
 
 `Mutex.lock()`, `RWMutex.read_lock()`, and `RWMutex.lock()` return awaitable
-handles — `await m.lock()` runs the try-lock loop inline in the calling fiber
+handles - `await m.lock()` runs the try-lock loop inline in the calling fiber
 without spawning a coroutine frame.
 
 ---

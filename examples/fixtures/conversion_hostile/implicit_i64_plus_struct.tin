@@ -1,0 +1,9 @@
+struct Inches(implicit[i64], add[Inches, Inches]) =
+  v i64
+  static fn ::implicit(n i64) Inches = return Inches{v: n}
+  fn ::add(this Inches, other Inches) Inches = return Inches{v: this.v + other.v}
+
+fn main() =
+  let a = Inches{v: 3}
+  let b = 5 + a
+  echo "{b.v}"

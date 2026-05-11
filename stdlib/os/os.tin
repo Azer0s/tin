@@ -7,6 +7,8 @@
 // Only this file may contain an export declaration for the os package.
 
 use "./os_files"
+use "./os_file"
+use "./os_process"
 use "./os_stat"
 use "./os_dirs"
 
@@ -55,6 +57,14 @@ export {
   read_file, read_file_bytes,
   write_file, write_file_bytes,
   append_file,
+  // File I/O (os_file)
+  File, OpenMode, OsError, PipePair, TempFile,
+  open, open_flags, create,
+  pipe, tempfile, tempdir,
+  chmod, symlink, readlink,
+  // Process (os_process)
+  Process, SpawnOptions, StdioMode,
+  default_options, start, exec,
   // File system inspection (os_stat)
   FileInfo, stat, exists, is_dir, file_size,
   // Directory / path ops (os_dirs)

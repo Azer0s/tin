@@ -1,6 +1,7 @@
 use assert
 use collections
 use option
+use { Option } from option
 
 // --- LinkedList[T] ---
 

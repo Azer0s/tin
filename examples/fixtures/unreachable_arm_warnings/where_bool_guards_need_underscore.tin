@@ -1,0 +1,6 @@
+fn classify(n i32) string =
+  where n < 0: "neg"
+  where n > 0: "pos"
+  where _:     "zero"
+
+echo classify(0)

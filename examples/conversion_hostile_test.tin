@@ -1,0 +1,120 @@
+// examples/conversion_hostile_test.tin -- hostile / pathological
+// inputs to the conversion machinery.  Every test boils down to:
+// the compiler must never emit a Go panic or goroutine-running trace
+// in its output.  A clean tin-side error message is fine; an
+// uncaught crash is not.
+//
+// Replaces examples/conversion_hostile.sh.
+
+use assert
+use { discard } from macros
+use "./fixtures/run_compiler"
+
+const HOSTILE_DIR string = "examples/fixtures/conversion_hostile/"
+
+fn run_fixture(fixture string) CompileResult =
+  return run_tin("run", HOSTILE_DIR ++ fixture)
+
+fn assert_no_panic(r CompileResult, label string) =
+  let combined = r.stdout ++ "\n" ++ r.stderr
+
+  assert::ok(!contains_text(combined, "panic:"))
+  assert::ok(!contains_text(combined, "goroutine"))
+
+  discard label
+
+fn expect_no_panic(fixture string) =
+  let r = run_fixture(fixture)
+
+  assert_no_panic(r, fixture)
+
+fn expect_substr(fixture string, needle string) =
+  let r        = run_fixture(fixture)
+  let combined = r.stdout ++ "\n" ++ r.stderr
+
+  assert::ok(contains_text(combined, needle))
+  assert_no_panic(r, fixture)
+
+// 1. Pathological coerce shapes.
+
+test "coerce body returns wrong type errors at the body" =
+  expect_substr("coerce_body_wrong_type.tin", "cannot return value of type")
+
+test "coerce body that calls itself terminates or stack-overflows cleanly" =
+  expect_no_panic("coerce_self_recurse.tin")
+
+test "coerce chain A->B->C terminates" =
+  expect_no_panic("coerce_chain_abc.tin")
+
+// 2. Implicit + arithmetic precedence.
+
+test "struct + i64: implicit on rhs picks struct add" =
+  expect_no_panic("implicit_struct_plus_i64.tin")
+
+test "i64 + struct: implicit on lhs picks struct add (commutative)" =
+  expect_no_panic("implicit_i64_plus_struct.tin")
+
+// 3. Nil downcast cases.
+
+test "nil *Trait as *Concrete preserves nil at the cast site" =
+  expect_no_panic("nil_iface_as_concrete.tin")
+
+// 4. Unusual literal forms.
+
+test "hex literal in fn call without redundant warn" =
+  expect_no_panic("hex_literal_in_call.tin")
+
+test "float literal in i64 slot truncates implicitly" =
+  expect_no_panic("float_lit_to_i64.tin")
+
+test "char as i64 auto-coerces" =
+  expect_no_panic("char_as_i64.tin")
+
+// 5. Trait-coerce interaction edge cases.
+
+test "coerce target is another struct" =
+  expect_no_panic("coerce_to_struct.tin")
+
+test "two-way coerce between structs" =
+  expect_no_panic("coerce_two_way.tin")
+
+// 6. Generic interactions.
+
+test "Result[Coerce-Struct, str] flows through generic" =
+  expect_no_panic("result_coerce_payload.tin")
+
+// 7. Self-referential / weird shapes.
+
+test "empty struct can have coerce[bool]" =
+  expect_no_panic("empty_struct_bool_coerce.tin")
+
+test "struct with multiple field types and coerce" =
+  expect_no_panic("multi_field_struct_coerce.tin")
+
+// 8. Interaction with `is` patterns.
+
+test "is *T in else-if chain narrows correctly" =
+  expect_no_panic("is_elseif_chain.tin")
+
+// 9. Redundant-cast warning across many sites in one expression.
+
+test "multi-redundant-cast: all sites flagged" =
+  // `tin run` swallows warnings on a cache hit; the original
+  // bash test ran in a fresh state.  `tin ir` always rebuilds
+  // and surfaces every diagnostic, which is what we want here.
+  let r        = run_tin("ir", HOSTILE_DIR ++ "multi_redundant_cast.tin")
+  let combined = r.stdout ++ "\n" ++ r.stderr
+
+  assert::ok(contains_text(combined, "redundant-type-cast"))
+  assert_no_panic(r, "multi_redundant_cast.tin")
+
+// 10. Compiler-stability tests.
+
+test "constructor with wrong arg count errors cleanly" =
+  expect_no_panic("ok_missing_arg.tin")
+
+test "generic with wrong arity errors cleanly" =
+  expect_no_panic("option_wrong_arity.tin")
+
+test "coerce[T] declared but no impl errors cleanly" =
+  expect_no_panic("coerce_decl_no_impl.tin")

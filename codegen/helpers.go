@@ -861,7 +861,19 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			}
 
 			if srcPt, isPtr := src.(*irtypes.PointerType); isPtr {
-				if _, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+				if srcInner, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+					// Identity widen: src is already `*<same iface>`.  Pre-fix
+					// this still ran buildPtrToTraitBorrow, which allocated a
+					// fresh iface block sharing the original's data ptr -- the
+					// original's scope-exit release would then fire its
+					// data-release thunk and free the data while the freshly-
+					// allocated copy was being returned, leaving the caller
+					// with a dangling iface.  Identity coerce must just
+					// return val.
+					if srcInner == tgtPt.ElemType {
+						return val
+					}
+
 					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
 						return result
 					}

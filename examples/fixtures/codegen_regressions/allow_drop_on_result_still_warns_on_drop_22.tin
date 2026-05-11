@@ -1,0 +1,7 @@
+use result
+use { Result } from result
+
+fn{#allow_drop} risky() Result[i64, string] =
+  return Result[i64, string]::Ok(42)
+
+fn main() = risky()

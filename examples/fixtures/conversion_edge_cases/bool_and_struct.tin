@@ -1,0 +1,10 @@
+struct Bag(coerce[bool]) =
+  n i64
+  static fn ::coerce(this Bag) bool = return this.n != 0
+
+fn other() bool = return true
+
+fn main() =
+  let b = Bag{n: 1}
+  if other() && b:
+    echo "x"

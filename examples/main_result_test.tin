@@ -1,0 +1,46 @@
+// examples/main_result_test.tin -- pin the three main-return shapes
+// that the C-main wrapper unpacks:
+//
+//   1. fn main() Result[i64, errors::Err]    -> Ok inner is the exit code
+//   2. fn main() Result[Unit, errors::Err]   -> Ok exits 0
+//   3. top-level `try` with no explicit main -> compiler synthesizes a
+//      Result-returning wrapper so `try` desugars cleanly
+//
+// Each variant is checked by running `./tin` against a fixture file
+// and asserting both the exit code and the stderr "error: ..." line
+// that fires on Err.
+
+use assert
+use { discard } from macros
+use "./fixtures/run_compiler"
+
+fn run_fixture(path string) CompileResult =
+  return run_cmd(["./tin", "run", path], "", [] as [string])
+
+test "fn main() Result[i64, errors::Err] returns the inner i64 as exit code" =
+  let r = run_fixture("examples/fixtures/main_result/ok_i64.tin")
+
+  assert::equals(42 as i32, r.exit_code)
+
+test "fn main() Result[i64, errors::Err] Err prints message and exits 1" =
+  let r = run_fixture("examples/fixtures/main_result/err_i64.tin")
+
+  assert::equals(1 as i32, r.exit_code)
+  assert::ok(contains_text(r.stderr, "error: boom"))
+
+test "top-level `try` synthesizes Result-returning main" =
+  let r = run_fixture("examples/fixtures/main_result/implicit_try_ok.tin")
+
+  assert::equals(0 as i32, r.exit_code)
+  assert::ok(contains_text(r.stdout, "7"))
+
+test "top-level `try` propagates Err to process exit + stderr" =
+  let r = run_fixture("examples/fixtures/main_result/implicit_try_err.tin")
+
+  assert::equals(1 as i32, r.exit_code)
+  assert::ok(contains_text(r.stderr, "error: empty input"))
+
+// Silence the unused-import warning that fires when `discard` is
+// not referenced inside any test body.
+fn _silence_discard() =
+  discard 0 as i64

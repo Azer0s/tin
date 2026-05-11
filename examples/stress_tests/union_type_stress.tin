@@ -185,7 +185,7 @@ test "union is-binding chain on same variable" =
 test "two-level union rich_val" =
   let a rich_val = (42 as num_or_str) as rich_val
   let b rich_val = ("tin" as num_or_str) as rich_val
-  let c rich_val = true as rich_val
+  let c rich_val = true
 
   assert::equals(rich_describe(a), "int:42")
   assert::equals(rich_describe(b), "str:tin")

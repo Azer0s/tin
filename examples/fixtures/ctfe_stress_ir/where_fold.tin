@@ -1,0 +1,6 @@
+fn{#pure} sign(n i64) i64 =
+  where n < 0:  -1
+  where n == 0:  0
+  where _:       1
+
+fn main() i64 = return sign(-7)

@@ -1,0 +1,121 @@
+// examples/ctfe_stress_ir_checks_test.tin -- IR-level proof that
+// #pure folding actually replaces every call site with the LLVM
+// constant.  Each fixture is compiled with `tin ir`, then the body
+// of @_tin_user_main is scoped out and asserted against:
+//   - a positive substring (the folded literal must appear)
+//   - a negative substring (`call` to the #pure fn must NOT appear
+//     in main, since the fold should have erased it)
+//
+// Replaces examples/ctfe_stress_ir_checks.sh.
+
+use assert
+use strings
+use "./fixtures/run_compiler"
+
+// extract_user_main scopes assertions to @_tin_user_main's body.
+// Mirrors the awk `/^define .* @_tin_user_main/,/^}/` slice from
+// the legacy shell script.
+fn extract_user_main(ir string) string =
+  let needle = "@_tin_user_main"
+  let start  = strings::index_of(ir, needle)
+
+  if start < 0:
+    return ""
+
+  let n     = len(ir as [byte])
+  let bytes = ir as [byte]
+  let i i64 = start
+
+  for i < n:
+    if bytes[i] == @'\n' as byte:
+      break
+    i = i + 1
+
+  let body_start = i + 1
+  let depth i64  = 1
+
+  i = body_start
+
+  for i < n && depth > 0:
+    if bytes[i] == @'}' as byte:
+      depth = depth - 1
+
+      if depth == 0:
+        break
+
+    i = i + 1
+
+  return strings::substr(ir, body_start, i)
+
+fn main_body_of(fixture string) string =
+  let r = run_tin("ir", "examples/fixtures/ctfe_stress_ir/" ++ fixture)
+
+  return extract_user_main(r.stdout)
+
+test "fact(15) folds to 1307674368000" =
+  let body = main_body_of("fact.tin")
+
+  assert::ok(contains_text(body, "ret i64 1307674368000"))
+  assert::ok(!contains_text(body, "call i64 @fact"))
+
+test "mutual is_even(20) folds to true" =
+  let body = main_body_of("mutual.tin")
+
+  assert::ok(contains_text(body, "ret i64 1"))
+  assert::ok(!contains_text(body, "call i1 @is_even"))
+  assert::ok(!contains_text(body, "call i1 @is_odd"))
+
+test "where-clause sign(-7) folds to -1" =
+  let body = main_body_of("where_fold.tin")
+
+  assert::ok(contains_text(body, "ret i64 -1"))
+  assert::ok(!contains_text(body, "call i64 @sign"))
+
+test "for-loop sum_to(100) folds to 5050" =
+  let body = main_body_of("for_loop.tin")
+
+  assert::ok(contains_text(body, "ret i64 5050"))
+  assert::ok(!contains_text(body, "call i64 @sum_to"))
+
+test "match match_kind(7) folds to 700" =
+  let body = main_body_of("match_fold.tin")
+
+  assert::ok(contains_text(body, "ret i64 700"))
+  assert::ok(!contains_text(body, "call i64 @match_kind"))
+
+test "memoised cube(3) - many sites, no runtime call" =
+  let body = main_body_of("memo_cube.tin")
+
+  assert::ok(contains_text(body, "i64 27"))
+  assert::ok(!contains_text(body, "call i64 @cube"))
+
+test "transitive step4(5) folds to 81, no @stepN calls" =
+  let body = main_body_of("chain.tin")
+
+  assert::ok(contains_text(body, "ret i64 81"))
+  assert::ok(!contains_text(body, "call i64 @step1"))
+  assert::ok(!contains_text(body, "call i64 @step2"))
+  assert::ok(!contains_text(body, "call i64 @step3"))
+  assert::ok(!contains_text(body, "call i64 @step4"))
+
+test "param shadow folds to 64" =
+  let body = main_body_of("shadow.tin")
+
+  assert::ok(contains_text(body, "ret i64 64"))
+  assert::ok(!contains_text(body, "call i64 @sq"))
+
+test "#allow_sideffect keeps the call" =
+  let body = main_body_of("sideeffect.tin")
+
+  assert::ok(contains_text(body, "call i64 @traced_double"))
+
+test "f64 hypot_squared folds to 25.0" =
+  let body = main_body_of("float.tin")
+
+  assert::ok(contains_text(body, "double 2.5") || contains_text(body, "double 25"))
+  assert::ok(!contains_text(body, "call double @hypot_squared"))
+
+test "variable-arg call survives as runtime @doubled" =
+  let body = main_body_of("dynamic_arg.tin")
+
+  assert::ok(contains_text(body, "call i64 @doubled"))

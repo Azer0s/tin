@@ -2331,6 +2331,15 @@ func (cg *CodeGen) callGenericFromMap(
 	if !ok {
 		return nil, block, false, nil
 	}
+	// When the bare-name entry came from genericFuncs, prefer the
+	// overload whose arity matches the call so two same-name
+	// generics (e.g. `unwrap[t](r)` and `unwrap[t](r, msg string)`)
+	// route to their own templates.  The single-entry case in
+	// pickGenericFuncOverload short-circuits, leaving non-overloaded
+	// callers unaffected.
+	if ov := pickGenericFuncOverload(cg.genericFuncOverloads[bareName], len(args)); ov != nil {
+		tmpl = ov
+	}
 
 	argVals := make([]value.Value, 0, len(args))
 	for _, arg := range args {
@@ -2402,6 +2411,17 @@ func (cg *CodeGen) callGenericFromMap(
 		}
 
 		if !isRCTrackedType(preCoerce.Type()) {
+			// ADT-by-value rvalue: same logic as
+			// emitCallArgReleaseForRet on the non-generic call
+			// path.  A temp ADT (e.g. `result::unwrap(pipe())`)
+			// owns rc=1 of its active-variant payload fields;
+			// without this release the callee's match-arm
+			// `transferredFromBorrow` retain stays unbalanced
+			// and leaks the payload's rc::Cell pointers.
+			if isTemporaryProducer(astArg) && cg.isDataType(preCoerce.Type()) {
+				cg.emitDataValueRelease(block, preCoerce)
+			}
+
 			continue
 		}
 

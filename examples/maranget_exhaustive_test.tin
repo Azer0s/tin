@@ -1,0 +1,70 @@
+// examples/maranget_exhaustive_test.tin -- compile-time
+// exhaustiveness checker (Maranget) for `where` and `match`.
+// Pins:
+//
+//   1. Non-exhaustive list patterns surface a witness in the
+//      error message.
+//   2. `-fdump-match-info` dumps the matrix + verdict.
+//   3. A redundant catch-all next to an exhaustive set produces
+//      a warning, silenced by `-Wno-unused-match-arms`.
+//
+// Replaces examples/maranget_exhaustive.sh.  The "exhaustive set
+// runs end-to-end" assertions are in examples/maranget_runtime_test.tin
+// where the runtime value can be checked directly.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_compile_error_with(fixture string, needle string, flags [string]) =
+  let r = run_tin_flags("run", "examples/fixtures/maranget_exhaustive/" ++ fixture, flags)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+// Warnings fire during codegen; `tin run` cache hits skip codegen
+// and silence the diagnostic.  `tin ir` always re-runs codegen so
+// the warning shows up deterministically across runs.
+fn expect_warning_in(fixture string, needle string, flags [string]) =
+  let r = run_tin_flags("ir", "examples/fixtures/maranget_exhaustive/" ++ fixture, flags)
+
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_no_warning(fixture string, flags [string]) =
+  let r = run_tin_flags("ir", "examples/fixtures/maranget_exhaustive/" ++ fixture, flags)
+
+  assert::ok(!contains_text(r.stderr, "warning"))
+
+// 2. where: missing case surfaces a witness in the error.
+
+test "where: missing singleton reports witness [_]" =
+  expect_compile_error_with("missing_singleton.tin", "no clause matches [_]", [])
+
+test "where: missing empty reports witness []" =
+  expect_compile_error_with("missing_empty.tin", "no clause matches []", [])
+
+// 6. -fdump-match-info dumps the matrix + verdict.  Uses
+// `tin ir` rather than `tin run` so the dump always fires
+// (compile cache hits suppress it in run mode).
+
+test "-fdump-match-info dumps [match-info] header" =
+  let r = run_tin_flags("ir", "examples/fixtures/maranget_exhaustive/dump_exhaustive.tin", ["-fdump-match-info"])
+
+  assert::ok(contains_text(r.stderr, "[match-info]"))
+
+test "-fdump-match-info reports exhaustive: YES" =
+  let r = run_tin_flags("ir", "examples/fixtures/maranget_exhaustive/dump_exhaustive.tin", ["-fdump-match-info"])
+
+  assert::ok(contains_text(r.stderr, "exhaustive: YES"))
+
+// 7. Witness generation for nested arrays.
+
+test "where: missing length-2 reports witness" =
+  expect_compile_error_with("missing_length2.tin", "no clause matches", [])
+
+// 8-9. Redundant catch-all is a warning; -Wno-unused-match-arms silences it.
+
+test "redundant catch-all next to exhaustive set warns" =
+  expect_warning_in("dead_catchall.tin", "warning: unreachable", [])
+
+test "-Wno-unused-match-arms silences the redundant catch-all warning" =
+  expect_no_warning("dead_catchall.tin", ["-Wno-unused-match-arms"])

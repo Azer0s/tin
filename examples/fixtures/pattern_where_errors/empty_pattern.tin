@@ -1,0 +1,3 @@
+fn g() i32 =
+  where (): 0
+  where _: 1

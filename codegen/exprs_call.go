@@ -205,6 +205,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				if !concreteOk && !hasOverloads {
 					gTmpl = t
+					// Multiple generic free-fn overloads share the bare-name
+					// entry; the latest registration wins.  Pick the one
+					// whose arity matches the call so e.g.
+					// `result::unwrap(r)` (1 arg) and
+					// `result::unwrap(r, msg)` (2 args) route to their
+					// respective templates.
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[fn.Name], len(e.Args)); ov != nil {
+						gTmpl = ov
+					}
 				}
 			}
 
@@ -1276,14 +1285,25 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				usedQual := false
 
 				if qualFuncName != "" {
-					tmpl, isGeneric = cg.genericFuncs[qualFuncName]
-					if isGeneric {
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args)); ov != nil {
+						tmpl = ov
+						isGeneric = true
+						usedQual = true
+					} else if g, ok := cg.genericFuncs[qualFuncName]; ok {
+						tmpl = g
+						isGeneric = true
 						usedQual = true
 					}
 				}
 
 				if !isGeneric {
-					tmpl, isGeneric = cg.genericFuncs[funcName]
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args)); ov != nil {
+						tmpl = ov
+						isGeneric = true
+					} else if g, ok := cg.genericFuncs[funcName]; ok {
+						tmpl = g
+						isGeneric = true
+					}
 				}
 
 				if !isGeneric {

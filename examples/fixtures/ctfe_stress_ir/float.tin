@@ -1,0 +1,5 @@
+fn{#pure} hypot_squared(x f64, y f64) f64 = return x * x + y * y
+
+fn main() i64 =
+  let r f64 = hypot_squared(3.0, 4.0)
+  return r as i64

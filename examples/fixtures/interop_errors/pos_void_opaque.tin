@@ -1,0 +1,7 @@
+struct point =
+  x i32
+
+fn{#interop} good(p *void) i32 =
+  return (p as *point).x
+
+fn main() i64 = return 0

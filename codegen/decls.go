@@ -587,7 +587,7 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 		// Mirror the FuncDecl under the plain key independently of
 		// the scope alias check below, so callers that look up by
 		// `Type_method` (e.g. genCallExpr's call-site-generics hook)
-		// find the impl's metadata — including RetTypeHasWildcard —
+		// find the impl's metadata - including RetTypeHasWildcard -
 		// even if the scope alias was already established by an
 		// earlier registerPlainMethodAliases pass.
 		if decl, ok2 := cg.funcDecls[qualName]; ok2 {
@@ -604,6 +604,47 @@ func (cg *CodeGen) registerPlainMethodAliases(structKey string, methods []*ast.F
 			cg.curScope.set(plainName, entry)
 
 			plainMethodNames[m.Name] = true
+		}
+	}
+}
+
+// rebindAdtMethodsInScope re-registers per-instantiation ADT method
+// scope entries in the current scope. Mirrors registerPlainMethodAliases
+// but for the no-trait-qualifier methods that get scope-registered
+// directly under structKey + "_" + methodName at predeclare time.
+// Used when a generic ADT instantiation is re-encountered after its
+// original monomorphization scope has been torn down (tin-test
+// wrapper boundaries, cross-package, etc.), so a later
+// `r.method()` call site still finds the method.
+//
+// Looks up the IR function via cg.allFuncs() because cg.funcDecls
+// alone only gives us the AST decl, and method dispatch needs the
+// ir.Func value.
+func (cg *CodeGen) rebindAdtMethodsInScope(structKey string, methods []*ast.FuncDecl) {
+	for _, m := range methods {
+		if m.TraitQualifier != "" {
+			continue
+		}
+
+		if m.IsExtern != "" {
+			continue
+		}
+
+		if len(m.TypeParams) > 0 {
+			continue
+		}
+
+		key := structKey + "_" + m.Name
+		if _, exists := cg.curScope.lookup(key); exists {
+			continue
+		}
+
+		for _, f := range cg.allFuncs() {
+			if f.Name() == key {
+				cg.curScope.set(key, &scopeEntry{val: f})
+
+				break
+			}
 		}
 	}
 }
@@ -841,7 +882,7 @@ func (p *qualParser) parseExpr() (ast.TypeExpr, error) {
 
 	name := p.src[start:p.pos]
 
-	// Special-case "_" — wildcard.
+	// Special-case "_" - wildcard.
 	if name == "_" {
 		return &ast.WildcardType{}, nil
 	}
@@ -871,6 +912,7 @@ func (p *qualParser) parseExpr() (ast.TypeExpr, error) {
 			args = append(args, arg)
 
 			p.skipSpaces()
+
 			if p.pos < len(p.src) && p.src[p.pos] == ',' {
 				p.pos++
 
@@ -965,7 +1007,7 @@ func substituteMethod(m *ast.FuncDecl, genericName, concreteName string, subst m
 	// monomorphized method on `tryable[t, Result[_, e]]` stays as the
 	// unsubstituted "tryable[t, Result[_, e]]" qualifier even when
 	// genTraitVtables looks for the substituted "tryable[T_concrete,
-	// Result[T_concrete, E_concrete]]" key — and the trait-vtable
+	// Result[T_concrete, E_concrete]]" key - and the trait-vtable
 	// emission rejects the impl as missing.
 	newQualifier := substituteTraitQualifier(m.TraitQualifier, subst)
 
@@ -1150,6 +1192,45 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		cg.typeAliases[n.Name] = n.Type
 
 		return nil
+	}
+
+	// Generic alias with its own type params (e.g.
+	// `type StrPair[T] = Pair[string, T]`): defer instantiation. The
+	// alias template is already in cg.genericTypeAliases (registered
+	// above); each USAGE like `StrPair[i32]{...}` resolves through
+	// expandGenericAlias, which substitutes the concrete args into the
+	// body and re-runs genTypeDecl. Eagerly substituting here would
+	// build a concrete struct whose field types still reference the
+	// alias's unresolved type params (T), which the strict bare-type
+	// resolver flags as "unknown type".
+	if len(n.TypeParams) > 0 {
+		// Check whether ANY of the GenericType's TypeParams is a
+		// template var of THIS alias (i.e. the alias is "open" - its
+		// body still mentions its own params). If so, leave it as a
+		// template; usage triggers instantiation. Closed forms
+		// (`type GI[unused] = G[i64]`) still fall through to the
+		// monomorphization path below.
+		open := false
+
+		for _, ta := range gt.TypeParams {
+			if st, ok := ta.(*ast.SimpleType); ok {
+				for _, p := range n.TypeParams {
+					if p == st.Name {
+						open = true
+
+						break
+					}
+				}
+			}
+
+			if open {
+				break
+			}
+		}
+
+		if open {
+			return nil
+		}
 	}
 
 	// Concrete generic alias (no type params on the alias itself, like
@@ -1417,7 +1498,20 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 		}
 	}
 
+	// Monomorphization re-walks the template's field declarations,
+	// which reference user-supplied type arguments by their bare names
+	// (e.g. `Result[string, string]` substituted into Tuple's `b` slot).
+	// Those args were already validated for visibility at the original
+	// call site (the user wrote them in scope); the bare-type check in
+	// tinTypeToLLVM would otherwise mis-fire here because monomorphization
+	// runs against moduleScope rather than the caller's scope.  Suppress
+	// it for the duration of the field walk -- the only types resolved
+	// here are compiler-substituted from the user's already-accepted
+	// type arguments.  Mirrors the same suppression in monomorphizeDataDecl.
+	prevSuppress := cg.suppressBareTypeCheck
+	cg.suppressBareTypeCheck = true
 	err := cg.genStructDecl(concrete)
+	cg.suppressBareTypeCheck = prevSuppress
 	cg.currentPkg = prevPkg
 	cg.curScope = prevScope
 
@@ -2195,6 +2289,37 @@ func (cg *CodeGen) sourceBindingIsEarlyHeap(allocaPtr value.Value) bool {
 	return false
 }
 
+// sourceBindingPointsToBorrowedStorage reports whether `allocaPtr` is the
+// alloca for a binding whose value is the address of a stack/global cell
+// (i.e. a borrowed pointer).  Used by buildPtrToTraitBorrow's indirect
+// path to route `let q = &b; let a *Trait = q` to the borrow vtable
+// instead of treating q as an owning heap pointer.
+func (cg *CodeGen) sourceBindingPointsToBorrowedStorage(allocaPtr value.Value) bool {
+	if cg.curScope == nil {
+		return false
+	}
+
+	for s := cg.curScope; s != nil; s = s.parent {
+		var found bool
+
+		s.each(func(_ string, entry *scopeEntry) {
+			if entry == nil || !entry.isAlloc {
+				return
+			}
+
+			if entry.val == allocaPtr && entry.pointsToBorrowedStorage {
+				found = true
+			}
+		})
+
+		if found {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ensureTraitDataReleaseThunk returns (and caches) a tiny `void(i8*)`
 // thunk that bitcasts the data pointer to *<structKey> and invokes the
 // per-struct release_ptr.  Stored in each (struct, trait) vtable's
@@ -2236,6 +2361,93 @@ func (cg *CodeGen) ensureTraitDataReleaseThunk(structKey string, structSt *irtyp
 		entry.NewCall(relFn, structPtr)
 	}
 
+	entry.NewRet(nil)
+
+	return fn
+}
+
+// ensureTraitBorrowVtable returns (and caches) a parallel "borrow" vtable
+// for (structKey, instKey).  Identical to the regular vtable except the
+// last slot (the data-release thunk) is replaced with a no-op.  Used by
+// buildPtrToTraitBorrow when the source is a stack alloca so that the
+// iface's release path frees only the iface block itself and leaves the
+// borrowed stack memory alone -- avoiding an uninit read of the
+// pseudo-RC-header at (stack_ptr - sizeof(TinRCHdr)).
+//
+// The retain-balance reasoning that made the regular vtable's data
+// release correct for heap sources no longer applies: borrows hold no
+// reference, so neither retain nor data release fires.  Returns nil
+// when the regular vtable hasn't been registered yet (caller falls
+// back to the owning path, which will fail at link time -- the only
+// way to hit that is a bug in the registration order).
+func (cg *CodeGen) ensureTraitBorrowVtable(vtableKey string) *ir.Global {
+	if g, ok := cg.traitBorrowVtableGlobals[vtableKey]; ok {
+		return g
+	}
+
+	owning, ok := cg.traitVtableGlobals[vtableKey]
+	if !ok || owning.Init == nil {
+		return nil
+	}
+
+	vtableSt, ok := owning.ContentType.(*irtypes.StructType)
+	if !ok || len(vtableSt.Fields) == 0 {
+		return nil
+	}
+
+	noop := cg.ensureTraitBorrowNoopRelease()
+	if noop == nil {
+		return nil
+	}
+
+	// Reuse every method slot from the owning vtable; swap the trailing
+	// data-release slot with the no-op.
+	origInit, ok := owning.Init.(*constant.Struct)
+	if !ok || len(origInit.Fields) != len(vtableSt.Fields) {
+		return nil
+	}
+
+	newFields := make([]constant.Constant, len(origInit.Fields))
+	copy(newFields, origInit.Fields)
+
+	dataReleaseSlot := len(newFields) - 1
+
+	slotType, slotOk := vtableSt.Fields[dataReleaseSlot].(*irtypes.PointerType)
+	if !slotOk {
+		return nil
+	}
+
+	newFields[dataReleaseSlot] = constant.NewBitCast(noop, slotType)
+
+	borrowConst := constant.NewStruct(vtableSt, newFields...)
+	borrowGlobal := cg.activeModule().NewGlobalDef(vtableKey+"_borrow_vtable_data", borrowConst)
+	borrowGlobal.Immutable = true
+	cg.traitBorrowVtableGlobals[vtableKey] = borrowGlobal
+
+	return borrowGlobal
+}
+
+// ensureTraitBorrowNoopRelease returns the single per-module `void(i8*)`
+// no-op installed in the data-release slot of every borrow vtable.
+// weak_odr so the same symbol unifies across pkg objects.
+func (cg *CodeGen) ensureTraitBorrowNoopRelease() *ir.Func {
+	const name = "_tin_iface_borrow_noop_release"
+	if entry, ok := cg.curScope.lookup(name); ok {
+		if fn, ok2 := entry.val.(*ir.Func); ok2 {
+			return fn
+		}
+	}
+
+	for _, fn := range cg.mod.Funcs {
+		if fn.Name() == name {
+			return fn
+		}
+	}
+
+	fn := cg.activeModule().NewFunc(name, irtypes.Void, ir.NewParam("data", irtypes.I8Ptr))
+	fn.Linkage = enum.LinkageWeakODR
+
+	entry := fn.NewBlock("entry")
 	entry.NewRet(nil)
 
 	return fn
@@ -2564,6 +2776,27 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 		return nil
 	}
 
+	// Is the source a stack alloca (or a bitcast/GEP rooted in one)?  If
+	// so, there is no RC header at (data - 16) -- the iface's standard
+	// data-release thunk would treat the stack bytes as a TinRCHdr and
+	// read uninit memory before the alloca, then conditionally free a
+	// stack pointer.  Swap in the borrow vtable (no-op release) and skip
+	// the balancing retain, since borrows neither own nor decrement.
+	isStackBorrow := isStackAllocaRoot(structPtr)
+	// Indirect borrow: `let q = &b; let a *Trait = q`.  structPtr is a
+	// Load whose source alloca was initialized with the address of a
+	// stack/global binding (we recorded this via pointsToBorrowedStorage
+	// at the let-decl site).  The loaded pointer still names a stack /
+	// global cell, not an RC block, so apply the same borrow-vtable
+	// treatment.
+	if !isStackBorrow {
+		if loadInst, isLoad := structPtr.(*ir.InstLoad); isLoad {
+			if cg.sourceBindingPointsToBorrowedStorage(loadInst.Src) {
+				isStackBorrow = true
+			}
+		}
+	}
+
 	// The fat ptr struct lives on the heap so a `*Trait` value can outlive
 	// the frame that built it (e.g. returned, sent down a channel, captured
 	// by an escaping closure). Stack-allocating here would dangle on every
@@ -2578,7 +2811,10 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 	// (We don't have the source AST here, so the most conservative
 	// option is "every buildPtrToTraitBorrow caller in a fn with any
 	// escaping var owns its iface data" -- which is the common case.)
-	if cg.curFn != nil && len(cg.curFnEscapingVars) > 0 {
+	//
+	// A borrow iface owns nothing past the iface block itself, so the
+	// owning-iface signal does not apply to it.
+	if !isStackBorrow && cg.curFn != nil && len(cg.curFnEscapingVars) > 0 {
 		cg.fnReturnsOwningIface[cg.curFn.Name()] = true
 	}
 
@@ -2594,22 +2830,67 @@ func (cg *CodeGen) buildPtrToTraitBorrow(block *ir.Block, structPtr value.Value,
 	// decrement -- a double-free.
 	//
 	// Skip the retain when:
+	//   - the source is a stack alloca (no RC header to touch and the
+	//     borrow vtable's release will not decrement either)
 	//   - the source binding is early-heap-promoted (its scope-exit
 	//     release is SUPPRESSED -- only the iface would release, and
 	//     a retain here would strand a +1 reference)
 	//   - the caller set cg.coerceTransfersSource (e.g. genReturn
 	//     using retSkipName to transfer ownership; same suppression)
-	if loadInst, isLoad := structPtr.(*ir.InstLoad); isLoad {
-		if !cg.coerceTransfersSource && !cg.sourceBindingIsEarlyHeap(loadInst.Src) {
-			block.NewCall(cg.ensureRetain(), dataI8)
+	if !isStackBorrow {
+		if loadInst, isLoad := structPtr.(*ir.InstLoad); isLoad {
+			if !cg.coerceTransfersSource && !cg.sourceBindingIsEarlyHeap(loadInst.Src) {
+				block.NewCall(cg.ensureRetain(), dataI8)
+			}
 		}
 	}
 
 	vtableGEP := block.NewGetElementPtr(fatPtrSt, temp,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(vtableGlobal, vtableGEP)
+	chosenVtable := value.Value(vtableGlobal)
+
+	if isStackBorrow {
+		if borrow := cg.ensureTraitBorrowVtable(vtableKey); borrow != nil {
+			chosenVtable = borrow
+		}
+	}
+
+	block.NewStore(chosenVtable, vtableGEP)
 
 	return temp
+}
+
+// isStackAllocaRoot reports whether v ultimately points at an LLVM
+// alloca in the current frame OR an LLVM global -- i.e. the source has
+// no TinRCHdr prefix and must not be touched by iface release/retain
+// paths.  Walks through bitcasts, zero-offset GEPs, and constant-expr
+// wrappers since structPtr is often a downcast of the originating
+// alloca rather than the alloca instruction itself.
+//
+// Globals (module-scope `var X Foo = ...`) live for the whole program
+// runtime and are not heap-allocated, so releasing them as if they were
+// an `_tin_rc_alloc` block would read uninit bytes before the global
+// (whatever lay in .bss/.data padding) and decrement that as if it were
+// an RC count.  Treating globals the same as stack allocas -- borrow
+// vtable, no retain -- keeps the iface block lifecycle correct without
+// touching the borrowed storage.
+func isStackAllocaRoot(v value.Value) bool {
+	for i := 0; i < 8; i++ {
+		switch n := v.(type) {
+		case *ir.InstAlloca:
+			return true
+		case *ir.Global:
+			return true
+		case *ir.InstBitCast:
+			v = n.From
+		case *ir.InstGetElementPtr:
+			v = n.Src
+		default:
+			return false
+		}
+	}
+
+	return false
 }
 
 func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey string) (value.Value, error) {

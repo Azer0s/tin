@@ -1,0 +1,4 @@
+use option
+
+fn main() =
+  let v Option[i64] = Some(42 as i64)

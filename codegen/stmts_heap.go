@@ -723,6 +723,115 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 	return heapPtrs[rootVar], nil
 }
 
+// heapPromotedFieldIndices walks a struct literal and returns the
+// LLVM field offset (factoring in the leading i32 type_id slot at
+// offset 0) for every field whose value is `&local` where local was
+// flagged as escaping by the current function's escape analysis,
+// AND whose declared field type is a raw pointer to a primitive --
+// `*KnownTinStruct` fields go through walkRCStructFields's
+// isTinStructPtr path on the regular release helper, so emitting a
+// second `_tin_release` here would walk freed memory.  Used by the
+// genReturn path to record per-function metadata that callers
+// consume to cascade-release the heap blocks.
+func (cg *CodeGen) heapPromotedFieldIndices(sl *ast.StructLit) []int {
+	if sl == nil {
+		return nil
+	}
+
+	structName := sl.TypeName
+
+	var out []int
+
+	for i, f := range sl.Fields {
+		ao, ok := f.Value.(*ast.AddressOfExpr)
+		if !ok {
+			continue
+		}
+
+		id, ok := ao.Expr.(*ast.Identifier)
+		if !ok {
+			continue
+		}
+		// Direct heap-promoted var, OR an alias whose source is.
+		name := id.Name
+		if src, isAlias := cg.curFnEscapingAliases[name]; isAlias && src != "" {
+			name = src
+		}
+
+		if !cg.curFnEscapingVars[name] {
+			continue
+		}
+		// Skip fields whose LLVM type is a pointer to a known Tin
+		// struct -- the per-struct release helper already cascades
+		// through them via isTinStructPtr.  Releasing here would
+		// double-free the underlying block.
+		if cg.fieldIsKnownStructPointer(structName, i) {
+			continue
+		}
+		// Field 0 is the type_id; declared field i lives at LLVM
+		// offset i+1 in the struct's IR layout.
+		out = append(out, i+1)
+	}
+
+	return out
+}
+
+// fieldIsKnownStructPointer reports whether the i'th declared field
+// of structName has type `*<known Tin struct>` -- i.e. the per-
+// struct release helper already walks it via `walkRCStructFields`'s
+// isTinStructPtr path.  Returns false on every other shape so the
+// cascade keeps releasing raw `*primitive` heap-promoted pointers.
+func (cg *CodeGen) fieldIsKnownStructPointer(structName string, fieldIdx int) bool {
+	if structName == "" {
+		return false
+	}
+
+	fts := cg.structFieldLLVMTypes[structName]
+	if fieldIdx < 0 || fieldIdx >= len(fts) {
+		return false
+	}
+
+	pt, ok := fts[fieldIdx].(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	innerSt, ok := pt.ElemType.(*irtypes.StructType)
+	if !ok || innerSt.Name() == "" {
+		return false
+	}
+
+	_, isTinStruct := cg.structTypes[innerSt.Name()]
+
+	return isTinStruct
+}
+
+// mergeFieldIndices unions two []int field-index lists, preserving
+// order and dropping duplicates.  Used so multiple return paths in
+// the same function accumulate every heap-promoted field they touch.
+func mergeFieldIndices(a, b []int) []int {
+	seen := map[int]bool{}
+
+	out := make([]int, 0, len(a)+len(b))
+	for _, v := range a {
+		if !seen[v] {
+			seen[v] = true
+
+			out = append(out, v)
+		}
+	}
+
+	for _, v := range b {
+		if !seen[v] {
+			seen[v] = true
+
+			out = append(out, v)
+		}
+	}
+
+	return out
+}
+
 // latePromotionRootVar extracts the name of the underlying escaping variable from
 // a simple return expression: `return &x` -> "x", `return p` (p=&x) -> "x".
 func latePromotionRootVar(node ast.Node, aliases map[string]string, promoted map[string]bool) string {

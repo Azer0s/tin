@@ -1,0 +1,99 @@
+// examples/trait_coercion_errors_test.tin -- compile-time + runtime
+// semantics for trait coercion.
+//
+//   - Value form (`let f Trait = b`) is a heap-copy snapshot.
+//   - Pointer form (`let f *Trait = &b`) is a borrow; mutations
+//     propagate back to the source.
+//   - When a trait has any *Self method, value-form coercion is
+//     rejected at compile time (heap-copy mutation is too easy to
+//     get wrong silently).
+//
+// Replaces examples/trait_coercion_errors.sh.  The positive
+// runtime cases (4-6 in the legacy file) are exercised inline
+// because they share the test process.
+
+use assert
+use "./fixtures/run_compiler"
+
+// 1-3: hard error when a value-form coercion targets a trait that
+// has pointer-receiver methods.  The diagnostic must:
+//   - flag the footgun,
+//   - name the offending method, and
+//   - suggest the `*Trait` fix.
+
+test "value form into pointer-receiver trait is rejected" =
+  let r = run_tin("run", "examples/fixtures/trait_coercion_errors/value_into_pointer_trait.tin")
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "value-form coercion silently mutates a heap copy"))
+  assert::ok(contains_text(r.stderr, "pointer-receiver methods (foo)"))
+  assert::ok(contains_text(r.stderr, "`let a *Fooable = &b`"))
+
+test "pointer source into value-form Trait also rejected" =
+  let r = run_tin("run", "examples/fixtures/trait_coercion_errors/ptr_source_into_value_trait.tin")
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "value-form coercion silently mutates a heap copy"))
+
+// 4. Pointer form: mutation through *Trait propagates to the source.
+
+trait Fooable =
+  fn foo(this *Fooable, n i64) = virtual
+
+struct CBox(Fooable) =
+  v i64
+
+  fn Fooable::foo(this *CBox, n i64) =
+    this.v = n
+
+test "*Trait form lets mutation propagate" =
+  let b = CBox{v: 0}
+  let a *Fooable = &b
+
+  (*a).foo(2)
+
+  assert::equals(2 as i64, b.v)
+
+// 5. Value form is fine when every method takes the receiver by value.
+
+trait Readable =
+  fn read(this Readable) i64 = virtual
+
+struct Source(Readable) =
+  v i64
+
+  fn Readable::read(this Source) i64 =
+    return this.v
+
+test "value Trait works for read-only traits (Self receiver)" =
+  let s = Source{v: 7}
+  let r Readable = s
+
+  assert::equals(7 as i64, r.read())
+
+// 6. Atomic[t].for_locked accepts a multi-statement anon lambda
+// whose last stmt carries the call's `)` on the same line.  The
+// parser must defer the lambda body's DEDENT so it doesn't pop the
+// surrounding scope (regression for the "for_locked won't parse"
+// bug).
+
+use sync
+
+struct Stats =
+  count i64
+  total i64
+
+test "Atomic.for_locked accepts indented multi-stmt anon lambda" =
+  let s = sync::Atomic[Stats].new(Stats{count: 0, total: 0})
+
+  s.for_locked(fn(p *Stats) =
+    p.count = p.count + 1
+    p.total = p.total + 100)
+  s.for_locked(fn(p *Stats) =
+    p.count = p.count + 1
+    p.total = p.total + 200)
+
+  let snap = s.load()
+
+  assert::equals(2 as i64,   snap.count)
+  assert::equals(300 as i64, snap.total)

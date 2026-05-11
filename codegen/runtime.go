@@ -545,6 +545,87 @@ func (cg *CodeGen) bindingOwnsHeapIfaceData(s *ast.VarDecl) bool {
 	return false
 }
 
+// releaseHeapPromotedFields emits a _tin_release for each field
+// offset recorded in entry.ownsHeapPromotedFields.  The binding's
+// alloca holds the struct value by reference (entry.val is its
+// `*Struct`); for each offset, GEP into the field, load the raw
+// pointer, and release it.  Called from both emitScopeRelease and
+// emitAllScopeReleases so the cascade fires on every scope-exit
+// path.
+func (cg *CodeGen) releaseHeapPromotedFields(block *ir.Block, entry *scopeEntry, ptrType *irtypes.PointerType) {
+	if len(entry.ownsHeapPromotedFields) == 0 {
+		return
+	}
+
+	st, ok := ptrType.ElemType.(*irtypes.StructType)
+	if !ok {
+		return
+	}
+
+	for _, idx := range entry.ownsHeapPromotedFields {
+		if idx < 0 || idx >= len(st.Fields) {
+			continue
+		}
+
+		fieldPtr := block.NewGetElementPtr(st, entry.val,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+		fieldVal := block.NewLoad(st.Fields[idx], fieldPtr)
+		ptrI8 := block.NewBitCast(fieldVal, irtypes.I8Ptr)
+
+		block.NewCall(cg.ensureRelease(), ptrI8)
+	}
+}
+
+// bindingHeapPromotedFields returns the LLVM field offsets whose
+// pointer values are heap-promoted blocks owned by s's let-binding.
+// Set when s = call(...) and the callee's body matched a
+// `return Struct{field: &local}` shape, which was recorded into
+// cg.fnReturnsHeapPromotedFields at codegen time of the callee.
+// Lets the caller's scope exit release the heap blocks the per-
+// struct release helper would otherwise skip as borrowed.
+func (cg *CodeGen) bindingHeapPromotedFields(s *ast.VarDecl) []int {
+	if s == nil || s.Value == nil {
+		return nil
+	}
+
+	ce, ok := s.Value.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+
+	name := resolveCalleeName(ce)
+	if name == "" {
+		return nil
+	}
+
+	bare := name
+	if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+		bare = bare[idx+2:]
+	}
+
+	if list, ok := cg.fnReturnsHeapPromotedFields[bare]; ok && len(list) > 0 {
+		out := make([]int, len(list))
+		copy(out, list)
+
+		return out
+	}
+
+	if cg.curScope != nil {
+		if entry, ok := cg.curScope.lookup(bare); ok {
+			if f, ok2 := entry.val.(interface{ Name() string }); ok2 {
+				if list, ok3 := cg.fnReturnsHeapPromotedFields[f.Name()]; ok3 && len(list) > 0 {
+					out := make([]int, len(list))
+					copy(out, list)
+
+					return out
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // declTypeIsTraitPtr reports whether te names `*Trait` for some declared
 // trait. Used to decide whether the binding's value can sensibly be an
 // owning-iface fat ptr.
@@ -839,9 +920,8 @@ func isTraitFatPtrShape(t irtypes.Type) bool {
 	return innerSt.Name() != "" && strings.HasSuffix(innerSt.Name(), "_vtable")
 }
 
-// emitCallArgRelease releases a temporary call argument after a call returns.
-// pre is the argument value before coercion; post is the value after coercion.
-// astArg is the corresponding AST expression.
+// emitCallArgReleaseForRet releases a temporary call argument after a
+// call returns, taking the callee's return type into account.
 //
 // Rules:
 //   - boxed-to-any: release the boxed value (fresh _tin_rc_alloc)
@@ -850,12 +930,8 @@ func isTraitFatPtrShape(t irtypes.Type) bool {
 //   - *TinStruct pointer temporaries: release via ensureStructPtrReleaseFn to
 //     balance any retain performed inside the callee (e.g. storing the pointer
 //     in a struct field via a struct literal).
-func (cg *CodeGen) emitCallArgRelease(block *ir.Block, astArg ast.Node, pre, post value.Value) {
-	cg.emitCallArgReleaseForRet(block, astArg, pre, post, nil)
-}
-
-// emitCallArgReleaseForRet is emitCallArgRelease augmented with the
-// callee's return type. The extra arg lets the ADT-rvalue release
+//
+// The ret-type arg lets the ADT-rvalue release
 // path skip when the callee may have transferred the rvalue's inner
 // contents through its return value (e.g. unwrap_or returns the
 // inner Ok value). When ret type is nil (caller couldn't determine
@@ -917,43 +993,20 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 			}
 		}
 		// ADT-by-value rvalue (e.g. `is_err(make())` where make
-		// returns Result by value): the callee retain+release helper
-		// nets to zero, but the rvalue itself owns rc=1 of any
-		// heap-allocated active-variant fields (strings, byte
-		// slices, freshly-coerced ifaces). Without this release
-		// those fields leak.
-		//
-		// Only fire when the callee's return type can't transfer
-		// the rvalue's contents back to the caller. Primitives
-		// (bool, integer, float, void) are safe — they can't be
-		// derived from the ADT's payload. Anything else (string,
-		// struct, ADT, fat-ptr, void*) might be a transferred
-		// reference, so skip to avoid double-release-via-shared-ptr.
-		// retType==nil means the caller couldn't determine it —
-		// also skip conservatively.
-		if cg.isDataType(pre.Type()) && retType != nil && isPrimitiveOrVoid(retType) {
+		// returns Result by value): the callee's entry retain +
+		// epilogue release nets to zero, but the rvalue itself
+		// still owns rc=1 of any heap-allocated active-variant
+		// fields (strings, byte slices, freshly-coerced ifaces,
+		// rc::Cell pointers).  Release here pairs with the match-
+		// site `transferredFromBorrow` retain inside the callee:
+		// the callee retains the extracted field for the caller's
+		// receiving binding, the caller decrements the rvalue's
+		// own share, and the net rc seen by the receiving binding
+		// is exactly 1 -- as if the rvalue had been moved.
+		if cg.isDataType(pre.Type()) {
 			cg.emitDataValueRelease(block, pre)
 		}
 	}
-}
-
-// isPrimitiveOrVoid reports whether t is a return type that
-// definitely can't carry transferred references from an ADT-shaped
-// argument. Used by emitCallArgReleaseForRet to gate the ADT-rvalue
-// release.
-func isPrimitiveOrVoid(t irtypes.Type) bool {
-	if t == nil {
-		return false
-	}
-
-	switch t.(type) {
-	case *irtypes.IntType, *irtypes.FloatType:
-		return true
-	case *irtypes.VoidType:
-		return true
-	}
-
-	return false
 }
 
 // isCopyExpr returns true when an AST expression produces a reference to
@@ -1375,6 +1428,66 @@ func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) 
 // RC-tracked fields and recurses into nested struct fields.
 func (cg *CodeGen) emitRelease(block *ir.Block, val value.Value) {
 	cg.emitReleaseInner(block, val, false)
+}
+
+// emitDiscardedValueRelease releases a value that the user dropped via
+// `let _ = expr` (or `discard expr`).  Routes through the right release
+// helper based on the value's shape: RC-tracked fat types release via
+// _tin_release; ADTs walk their active variant; structs walk their RC
+// and nested fields.  Skips raw pointers / primitives that can't carry
+// an owning reference.
+func (cg *CodeGen) emitDiscardedValueRelease(block *ir.Block, val value.Value, astArg ast.Node) {
+	if val == nil || block == nil || block.Term != nil {
+		return
+	}
+
+	t := val.Type()
+	// String / array / any / closure / trait fat-ptr / iface fat-ptr:
+	// the value owns rc=1 of its outer block.  Release matches the
+	// existing logic for temp args in callGenericFromMap.
+	if isRCTrackedType(t) {
+		if astArg != nil && isCopyExpr(astArg) {
+			return
+		}
+
+		cg.emitRelease(block, val)
+
+		return
+	}
+	// ADT by value: tag-dispatched release walks the active variant.
+	if cg.isDataType(t) {
+		cg.emitDataValueRelease(block, val)
+
+		return
+	}
+	// Named struct by value: walk RC fields + nested struct fields.
+	// Skip when the source expression is a borrow shape (Identifier
+	// etc.) - the original owner releases at its own scope exit.
+	if astArg != nil && isCopyExpr(astArg) {
+		return
+	}
+
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+			if cg.isDataType(innerSt) {
+				relFn := cg.ensureDataPtrReleaseFn(innerSt.Name(), innerSt)
+				if relFn != nil {
+					block.NewCall(relFn, val)
+				}
+
+				return
+			}
+
+			relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
+			block.NewCall(relFn, val)
+
+			return
+		}
+	}
+
+	if _, ok := t.(*irtypes.StructType); ok && cg.elemNeedsRelease(t) {
+		cg.emitRelease(block, val)
+	}
 }
 
 // emitReleaseNoDeinit is like emitRelease but suppresses the deinit call for
@@ -1922,6 +2035,13 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			return
 		}
 
+		// Heap-promoted struct fields: callee returned a struct value
+		// whose raw-pointer field is a heap block.  Release each block
+		// before the rest of the scope-exit logic runs (the per-struct
+		// release below treats raw *T fields as borrows, so the cascade
+		// would otherwise leak the cell).
+		cg.releaseHeapPromotedFields(block, entry, ptrType)
+
 		// Early-heap-promoted local: entry.val is the heap pointer itself
 		// (allocated via _tin_rc_alloc at let-decl time because escape
 		// analysis flagged the binding). The heap block now belongs to
@@ -1994,17 +2114,22 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// `let p = items[idx]` (where items is [*Struct]) would
 		// otherwise leak the heap block.  Call its release_ptr
 		// explicitly; ensureStructPtrReleaseFn handles both the
-		// iface and Tin-struct shapes.  Restricted to let/const
-		// bindings: function parameters that are *Trait / *Struct are
-		// borrows from the caller and must not be released.  The
-		// isHeapOwned / isEarlyHeap branches above already handle the
-		// freshly-allocated forms; this branch only catches the
-		// copy-expr and call-result forms that landed unmarked.
+		// iface and Tin-struct shapes.
+		//
+		// Trait fat-ptr branch: always release for let/const, since
+		// these are bound from a coerce that minted a heap iface
+		// block.  Tin-struct branch: ONLY release when the binding
+		// actually took ownership (ownsPtrViaRetain).  Without that
+		// guard, `let mb = &local_struct` would release a stack
+		// pointer and infinite-loop / corrupt memory.
 		if entry.declaredLet && !entry.noDeinit {
 			if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
 				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
 					_, isTinStruct := cg.structTypes[innerSt.Name()]
-					if isTinStruct || isTraitFatPtrShape(innerSt) {
+					isIface := isTraitFatPtrShape(innerSt)
+
+					shouldRelease := isIface || (isTinStruct && entry.ownsPtrViaRetain)
+					if shouldRelease {
 						loaded := block.NewLoad(elemType, entry.val)
 						relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
 						block.NewCall(relFn, loaded)
@@ -2055,6 +2180,9 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 
 				return
 			}
+			// Heap-promoted struct fields cascade-release; twin of the
+			// branch in emitScopeRelease.
+			cg.releaseHeapPromotedFields(block, entry, ptrType)
 			// (ownsHeapIfaceData no-op: the iface dtor in
 			// ensureStructPtrReleaseFn handles data release now.  See
 			// twin comment in emitScopeRelease.)
@@ -2102,7 +2230,10 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 				if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
 					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
 						_, isTinStruct := cg.structTypes[innerSt.Name()]
-						if isTinStruct || isTraitFatPtrShape(innerSt) {
+						isIface := isTraitFatPtrShape(innerSt)
+
+						shouldRelease := isIface || (isTinStruct && entry.ownsPtrViaRetain)
+						if shouldRelease {
 							loaded := block.NewLoad(elemType, entry.val)
 							relFn := cg.ensureStructPtrReleaseFn(innerSt.Name(), innerSt)
 							block.NewCall(relFn, loaded)

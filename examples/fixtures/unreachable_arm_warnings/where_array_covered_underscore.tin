@@ -1,0 +1,7 @@
+fn d(xs [i32]) string =
+  where ([]):           "empty"
+  where ([x]):          "one"
+  where ([x, ...rest]): "many"
+  where _:              "unreachable"
+
+echo d([1, 2])

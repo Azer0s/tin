@@ -1,5 +1,6 @@
 use assert
 use option
+use { Option } from option
 
 test "Option Some/None via match" =
   let a Option[i64] = Some(7)
@@ -41,8 +42,8 @@ test "map / and_then / or_else" =
   assert::equals(3,  option::unwrap_or(option::or_else(a, g), 0))
   assert::equals(42, option::unwrap_or(option::or_else(b, g), 0))
 
-test "unwrap / expect" =
+test "unwrap / unwrap-with-msg" =
   let a Option[i64] = Some(11)
 
   assert::equals(11, option::unwrap(a))
-  assert::equals(11, option::expect(a, "should be some"))
+  assert::equals(11, option::unwrap(a, "should be some"))

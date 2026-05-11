@@ -1,0 +1,6 @@
+fn pick(n i32) string =
+  where (0): "zero-1"
+  where (0): "zero-2"
+  where _:   "other"
+
+echo pick(0)

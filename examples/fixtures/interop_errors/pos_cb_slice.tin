@@ -1,0 +1,3 @@
+fn{#interop} good(cb fn([i32]) i32, xs [i32]) i32 = return cb(xs)
+
+fn main() i64 = return 0

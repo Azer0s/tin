@@ -1,0 +1,7 @@
+fn color(a atom) string =
+  return match a:
+    case 'red:   "R"
+    case 'green: "G"
+    default:     "?"
+
+echo color('red)

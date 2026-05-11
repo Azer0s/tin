@@ -7,6 +7,7 @@
 use assert
 use math
 use result
+use { Result } from result
 
 // ---------------------------------------------------------------------------
 // 1. Multi-impl coerce on struct -- every target dispatches correctly

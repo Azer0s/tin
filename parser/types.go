@@ -415,7 +415,7 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 // regular param names, wildcard slot names, and an error.
 //
 // The `_: w` form declares `w` as a call-site-supplied wildcard
-// slot — the data/struct decl's body may reference w in trait
+// slot - the data/struct decl's body may reference w in trait
 // bounds and method signatures, but the concrete type for w is
 // chosen per call site rather than per instantiation. Where-guards
 // on `w` are deferred to the call site.

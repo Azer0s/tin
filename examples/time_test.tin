@@ -4,12 +4,11 @@
 
 use assert
 use time
-use { Instant, Duration } from time
+use { Instant } from time
 use encoding::json
 use guid
 use { Guid } from guid
 use errors
-use result
 use { unwrap_or, is_err } from result
 
 // ---- Duration arithmetic ----

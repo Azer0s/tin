@@ -1,0 +1,14 @@
+type intish = i32 | i64
+type floatish = f32 | f64
+
+struct Box[t] =
+  v t
+
+  static fn make(v t) Box[t] = return Box[t]{v: v}
+
+  fn process(this Box[t]) i64 where t is intish = return 1
+  fn process(this Box[t]) i64 where t is floatish = return 2
+
+fn main() i64 =
+  let b = Box[bool].make(true)
+  return b.process()

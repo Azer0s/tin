@@ -1,0 +1,4 @@
+fn main() =
+  let p *i64 = nil
+  let v = *p
+  echo "{v}"

@@ -1,0 +1,106 @@
+// examples/compiler_errors_test.tin -- mirrors what the legacy
+// examples/compiler_errors/test_errors.sh script did, but as a
+// regular tin `test` block so it joins the standard `tin test`
+// run.  Each fixture under examples/compiler_errors/ must fail to
+// compile (exit_code != 0) and emit at least one byte of
+// diagnostic output to stderr.  This is intentionally loose: the
+// matching set of expected error messages lives in the more
+// targeted *_errors_test.tin files (typing_errors, conversion_errors,
+// etc.) -- this driver is only a tripwire that catches a fixture
+// silently starting to compile.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_compile_failure(fixture string) =
+  let r = run_tin("build", "examples/compiler_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(len(r.stderr) > 0 || len(r.stdout) > 0)
+
+test "bound_conjunction_fails rejects unsatisfied conjunction" =
+  expect_compile_failure("bound_conjunction_fails.tin")
+
+test "bound_disjunction_fails rejects unsatisfied disjunction" =
+  expect_compile_failure("bound_disjunction_fails.tin")
+
+test "bound_negation_fails rejects unsatisfied negation" =
+  expect_compile_failure("bound_negation_fails.tin")
+
+test "call_non_function rejects non-callable value" =
+  expect_compile_failure("call_non_function.tin")
+
+test "duplicate_var rejects shadowing in same scope" =
+  expect_compile_failure("duplicate_var.tin")
+
+test "empty_where_pattern rejects empty pattern" =
+  expect_compile_failure("empty_where_pattern.tin")
+
+test "fn_bound_fails rejects fn with unsatisfied bound" =
+  expect_compile_failure("fn_bound_fails.tin")
+
+test "missing_return rejects fn with missing return" =
+  expect_compile_failure("missing_return.tin")
+
+test "mixed_where_clauses rejects bool + pattern mix" =
+  expect_compile_failure("mixed_where_clauses.tin")
+
+test "non_exhaustive_match rejects non-exhaustive match" =
+  expect_compile_failure("non_exhaustive_match.tin")
+
+test "non_exhaustive_where rejects non-exhaustive where list" =
+  expect_compile_failure("non_exhaustive_where.tin")
+
+test "pattern_type_mismatch rejects int pattern against string" =
+  expect_compile_failure("pattern_type_mismatch.tin")
+
+test "pure_violation rejects side effect in #pure fn" =
+  expect_compile_failure("pure_violation.tin")
+
+test "recursive_no_recurse rejects self-call in #no_recurse fn" =
+  expect_compile_failure("recursive_no_recurse.tin")
+
+test "return_type_mismatch rejects wrong return type" =
+  expect_compile_failure("return_type_mismatch.tin")
+
+test "struct_pattern_in_where rejects struct pattern misuse" =
+  expect_compile_failure("struct_pattern_in_where.tin")
+
+test "undefined_function rejects call to unknown fn" =
+  expect_compile_failure("undefined_function.tin")
+
+test "undefined_import rejects unknown import" =
+  expect_compile_failure("undefined_import.tin")
+
+test "undefined_method rejects unknown method" =
+  expect_compile_failure("undefined_method.tin")
+
+test "undefined_type rejects unknown type" =
+  expect_compile_failure("undefined_type.tin")
+
+test "undefined_var rejects unknown variable" =
+  expect_compile_failure("undefined_var.tin")
+
+test "unknown_field rejects unknown struct field" =
+  expect_compile_failure("unknown_field.tin")
+
+test "void_return_value rejects value return in void fn" =
+  expect_compile_failure("void_return_value.tin")
+
+test "where_arity_mismatch rejects mismatched arity" =
+  expect_compile_failure("where_arity_mismatch.tin")
+
+test "wrong_arity rejects mismatched call arity" =
+  expect_compile_failure("wrong_arity.tin")
+
+test "wrong_array_element_type rejects bad element type" =
+  expect_compile_failure("wrong_array_element_type.tin")
+
+test "wrong_assign_type rejects mismatched assignment" =
+  expect_compile_failure("wrong_assign_type.tin")
+
+test "wrong_param_type_int_to_string rejects int passed as string" =
+  expect_compile_failure("wrong_param_type_int_to_string.tin")
+
+test "wrong_param_type_string_to_int rejects string passed as int" =
+  expect_compile_failure("wrong_param_type_string_to_int.tin")

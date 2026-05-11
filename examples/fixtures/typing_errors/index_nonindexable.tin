@@ -1,0 +1,4 @@
+fn main() =
+  let n i64 = 5
+  let v = n[0]
+  echo "{v}"

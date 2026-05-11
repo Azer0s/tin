@@ -1,0 +1,3 @@
+fn t(n i32) string =
+  where ([]): "y"
+  where _: "o"

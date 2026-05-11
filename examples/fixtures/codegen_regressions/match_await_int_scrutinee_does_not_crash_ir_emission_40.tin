@@ -1,0 +1,7 @@
+fn{#async} make_x() i64 = return 42
+
+fn{#async} main() =
+  let f = spawn make_x()
+  match await f:
+    case 42: echo "got 42"
+    case 1:  echo "one"

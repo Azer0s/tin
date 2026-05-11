@@ -299,8 +299,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 	tagGEP := block.NewGetElementPtr(outerSt, scrutAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := block.NewZExt(tagI8, irtypes.I64)
+	tagI64 := block.NewLoad(irtypes.I64, tagGEP)
 
 	afterBlock := cg.newBlock("match.after")
 	exhaustive := cg.isExhaustiveDataMatch(s, adtName)
@@ -325,7 +324,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 	var cases []*ir.Case
 
-	seenTags := make(map[int8]bool, len(s.Cases))
+	seenTags := make(map[int64]bool, len(s.Cases))
 
 	for i, c := range s.Cases {
 		if !cg.isDataMatchPattern(c.Pattern) {
@@ -355,7 +354,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d.%s", i, variantName))
 		cases = append(cases, ir.NewCase(
-			constant.NewInt(irtypes.I64, int64(vi.Tag)), caseBlock))
+			constant.NewInt(irtypes.I64, vi.Tag), caseBlock))
 
 		cg.curScope = newScope(cg.curScope)
 
@@ -383,22 +382,65 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 				// fields (e.g. `own *Tree[t]`) are bound as borrows without
 				// retain; they are shared with the scrutinee's payload.
 				//
-				// For embedded named structs whose payload itself contains
-				// RC fields (e.g. Result.Ok(event_with_time) where
-				// event_with_time has a string), the scope-exit semantics
-				// are the same as a borrow only when the scrutinee will be
-				// released by matchScrutScope (the OWNED scrutinee path).
-				// In that case the per-arm release MUST fire so two paths
-				// (binding scope + scrutinee scope) don't both decrement.
-				// We mirror the predicate by retaining + releasing
-				// symmetrically only when wantScrutRelease was set.
+				// For embedded named structs whose payload itself
+				// contains RC fields (e.g. Result.Ok(event_with_time)
+				// where event_with_time has a string), the binding
+				// must take its own retain regardless of scrutinee
+				// ownership.  A chained method call on a Result
+				// temporary (e.g. `verify(...).unwrap()`), or a free
+				// fn that consumes one (`result::unwrap(make())`),
+				// releases the temporary right after the call
+				// returns, so without an extra retain the returned
+				// struct's RC fields are read by the caller after
+				// the temporary's release has freed them.  The retain
+				// pairs with `entry.ownsIfaceData`-style scope-exit
+				// bookkeeping below so the net RC delta stays zero
+				// across every match shape (named scrutinee,
+				// temporary scrutinee, function-arg scrutinee).
 				rcTracked := !f.IsWeak && isRCTrackedType(fieldTy)
 				owningStruct := !f.IsWeak && wantScrutRelease &&
 					!isRCTrackedType(fieldTy) && cg.elemNeedsRelease(fieldTy)
+				transferredFromBorrow := !f.IsWeak && !wantScrutRelease &&
+					!isRCTrackedType(fieldTy) && cg.elemNeedsRelease(fieldTy)
 
 				if rcTracked {
-					cg.emitRetain(caseBlock, fieldVal)
+					// emitRetain is a no-op for trait fat-ptr values
+					// (extractRCDataPtr doesn't know about iface
+					// shape, walkRCStructFields skips synthetic iface
+					// structs).  Retain the data ptr directly so
+					// `case Err(e): return Err(e)` keeps the heap rc
+					// balanced against the source scrutinee's release;
+					// pairs with the wrapDataVariant retainMask path
+					// for the rewrap construction.  Gated on
+					// `wantScrutRelease`: the retain only makes sense
+					// when the source scrutinee is about to be
+					// released (owned rvalue or temp call result);
+					// for a borrow-shaped scrutinee (Identifier /
+					// FieldAccess) the source's own scope-exit keeps
+					// the data alive, and an extra retain would leak
+					// once per match-arm fire because no matching
+					// release runs on the iface struct value at arm
+					// scope exit.
+					if isTraitFatPtrShape(fieldVal.Type()) {
+						if wantScrutRelease {
+							dataPtr := caseBlock.NewExtractValue(fieldVal, 0)
+							caseBlock.NewCall(cg.ensureRetain(), dataPtr)
+						}
+					} else {
+						cg.emitRetain(caseBlock, fieldVal)
+					}
 				} else if owningStruct {
+					cg.emitStructFieldRetain(caseBlock, fieldVal)
+				} else if transferredFromBorrow {
+					// Borrow-shaped scrutinee (param/function-arg/copy
+					// expression) whose payload is a struct with RC
+					// content.  Retain so the binding keeps the RC
+					// fields alive past whatever the caller does with
+					// the borrow.  Pairs with the caller-side ADT
+					// rvalue release in emitCallArgReleaseForRet so
+					// `let f = unwrap(pipe())` (temp scrutinee) and
+					// `let c = vr.method()` (live local scrutinee)
+					// both stay rc-balanced.
 					cg.emitStructFieldRetain(caseBlock, fieldVal)
 				}
 
@@ -406,7 +448,26 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 				caseBlock.NewStore(fieldVal, alloca)
 
 				entry := &scopeEntry{val: alloca, isAlloc: true}
-				if !rcTracked && !owningStruct {
+				// noRelease semantics:
+				//   - rcTracked (string/array/any/fn closure): retained on
+				//     extract; the binding owns its own RC contribution and
+				//     must release at scope exit.
+				//   - owningStruct: retained because the scrutinee owns
+				//     the payload and will release it; the binding owns
+				//     its own retain, must release symmetrically.
+				//   - transferredFromBorrow: retained because the caller
+				//     may release the (temporary) scrutinee right after
+				//     the enclosing call returns -- the retain protects
+				//     the returned struct's RC fields long enough for the
+				//     receiving binding to take ownership.  The binding
+				//     itself must release at scope exit to balance the
+				//     retain when the arm body doesn't transfer v
+				//     out (e.g. `case Ok(v): claims_val = v` plus a
+				//     `return Ok(...)` later -- the assignment retains
+				//     independently, but our retain still needs a pair).
+				//   - else: binding is a pure borrow of scrutinee-owned
+				//     storage; suppress the scope-exit release.
+				if !rcTracked && !owningStruct && !transferredFromBorrow {
 					entry.noRelease = true
 				}
 
@@ -477,6 +538,324 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	}
 
 	return afterBlock, nil
+}
+
+// genTupleMatch handles `match (e1, e2, ...): case (p1, p2, ...):` shapes.
+// Each slot pattern is checked independently against the corresponding
+// tuple slot; the AND of every check selects the arm.  Supported slot
+// patterns: bare identifier (binds), `_` (wildcard), integer / string /
+// bool / char literal (equality), ADT ctor (e.g. Ok(x), None, Some(v)).
+// Nested tuple patterns also flow through this path recursively.
+func (cg *CodeGen) genTupleMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
+	scrutinee, err := cg.genExpr(block, s.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	scrutType := scrutinee.Type()
+	if pt, ok := scrutType.(*irtypes.PointerType); ok {
+		scrutinee = block.NewLoad(pt.ElemType, scrutinee)
+		scrutType = pt.ElemType
+	}
+
+	tupSt, isStruct := scrutType.(*irtypes.StructType)
+	if !isStruct {
+		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a tuple struct", fmtArgType(scrutType))
+	}
+
+	tupName := tupSt.Name()
+	if tupName == "" || !strings.HasPrefix(tupName, "Tuple__") {
+		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a Tuple__... monomorphization", fmtArgType(scrutType))
+	}
+
+	scrutAlloca := block.NewAlloca(scrutType)
+	block.NewStore(scrutinee, scrutAlloca)
+
+	// User-visible slots start after the type_id + any vtable
+	// pointers prefix; tuple struct layout matches the regular
+	// struct layout used by userFieldOffset.
+	slotOffset := cg.userFieldOffset(tupName)
+	slotCount := len(tupSt.Fields) - slotOffset
+
+	afterBlock := cg.newBlock("match.after")
+	anyFallthrough := false
+
+	curCheckBlock := block
+
+	for i, c := range s.Cases {
+		nextCaseBlock := cg.newBlock(fmt.Sprintf("tuple.next.%d", i))
+		bodyBlock := cg.newBlock(fmt.Sprintf("tuple.case.%d", i))
+
+		// Open a fresh scope so per-arm pattern bindings don't leak.
+		cg.curScope = newScope(cg.curScope)
+
+		checkBlock := curCheckBlock
+
+		// Wildcard catch-all: identifier "_" or a plain identifier with
+		// no slot decomposition — treat as default arm.
+		if id, ok := c.Pattern.(*ast.Identifier); ok && id.Name == "_" {
+			checkBlock.NewBr(bodyBlock)
+
+			_, bodyErr := cg.emitMatchArmBody(c, bodyBlock, afterBlock, resAlloca, &anyFallthrough)
+			cg.curScope = cg.curScope.parent
+
+			if bodyErr != nil {
+				return nil, bodyErr
+			}
+
+			nextCaseBlock.NewUnreachable()
+
+			curCheckBlock = nextCaseBlock
+
+			continue
+		}
+
+		tp, isTuple := c.Pattern.(*ast.TupleLit)
+		if !isTuple {
+			cg.curScope = cg.curScope.parent
+
+			return nil, fmt.Errorf("genTupleMatch: case %d pattern is not a tuple literal (got %T)", i, c.Pattern)
+		}
+
+		if len(tp.Elems) != slotCount {
+			cg.curScope = cg.curScope.parent
+
+			return nil, fmt.Errorf("genTupleMatch: case %d has %d tuple elements, scrutinee has %d", i, len(tp.Elems), slotCount)
+		}
+
+		var checkErr error
+
+		for j, elemPat := range tp.Elems {
+			fieldIdx := slotOffset + j
+			slotGEP := checkBlock.NewGetElementPtr(scrutType, scrutAlloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			slotType := tupSt.Fields[fieldIdx]
+
+			checkBlock, checkErr = cg.emitTupleSlotPatternCheck(checkBlock, nextCaseBlock, slotGEP, slotType, elemPat)
+			if checkErr != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, checkErr
+			}
+		}
+
+		if c.Guard != nil {
+			guardVal, gErr := cg.genExpr(checkBlock, c.Guard)
+			if gErr != nil {
+				cg.curScope = cg.curScope.parent
+
+				return nil, gErr
+			}
+
+			checkBlock.NewCondBr(cg.toBoolImplicit(checkBlock, guardVal), bodyBlock, nextCaseBlock)
+		} else {
+			checkBlock.NewBr(bodyBlock)
+		}
+
+		_, bodyErr := cg.emitMatchArmBody(c, bodyBlock, afterBlock, resAlloca, &anyFallthrough)
+		cg.curScope = cg.curScope.parent
+
+		if bodyErr != nil {
+			return nil, bodyErr
+		}
+
+		curCheckBlock = nextCaseBlock
+	}
+
+	// Default arm or fallthrough.
+	_, defaultErr := cg.emitMatchDefaultArm(s, curCheckBlock, afterBlock, resAlloca, &anyFallthrough, false)
+	if defaultErr != nil {
+		return nil, defaultErr
+	}
+
+	if !anyFallthrough && resAlloca == nil {
+		afterBlock.NewUnreachable()
+
+		return nil, nil
+	}
+
+	return afterBlock, nil
+}
+
+// emitTupleSlotPatternCheck dispatches a pattern check against one
+// tuple slot.  The slot pointer is `slotGEP` (a pointer to slotType in
+// the scrutinee alloca).  Failure branches to `failBlock`; success
+// returns the block to continue checking in (callers chain calls so
+// later slot checks join the success path).
+//
+// Supported patterns:
+//   - Identifier "_": wildcard, no check, no bind.
+//   - Identifier <other>: bind slot value to the name.
+//   - IntLit / FloatLit / StringLit / CharLit / BoolLit: equality.
+//   - CallExpr Variant(args): ADT variant tag check + sub-pattern
+//     bindings via genDataMatch-equivalent inline logic.
+//   - Identifier matching a nullary ADT variant: tag check.
+func (cg *CodeGen) emitTupleSlotPatternCheck(block *ir.Block, failBlock *ir.Block, slotGEP value.Value, slotType irtypes.Type, pat ast.Node) (*ir.Block, error) {
+	switch p := pat.(type) {
+	case *ast.Identifier:
+		if p.Name == "_" {
+			return block, nil
+		}
+		// ADT nullary variant identifier match (e.g. `case (None, x):`).
+		if cg.isDataMatchPattern(p) {
+			return cg.emitTupleSlotAdtCheck(block, failBlock, slotGEP, slotType, p)
+		}
+		// Plain binder: load and bind.
+		val := block.NewLoad(slotType, slotGEP)
+		alloca := block.NewAlloca(slotType)
+		block.NewStore(val, alloca)
+
+		if isRCTrackedType(slotType) {
+			cg.emitRetain(block, val)
+		}
+
+		entry := &scopeEntry{val: alloca, isAlloc: true}
+		if !isRCTrackedType(slotType) {
+			entry.noRelease = true
+		}
+
+		cg.curScope.set(p.Name, entry)
+
+		return block, nil
+	case *ast.CallExpr:
+		if cg.isDataMatchPattern(p) {
+			return cg.emitTupleSlotAdtCheck(block, failBlock, slotGEP, slotType, p)
+		}
+
+		return nil, fmt.Errorf("tuple-slot pattern: call expression that is not an ADT variant constructor")
+	case *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.CharLit, *ast.BoolLit:
+		val := block.NewLoad(slotType, slotGEP)
+
+		litVal, err := cg.genExpr(block, p)
+		if err != nil {
+			return nil, err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		litVal = cg.coerce(block, litVal, slotType)
+
+		var cmp value.Value
+
+		switch slotType.(type) {
+		case *irtypes.IntType:
+			cmp = block.NewICmp(enum.IPredEQ, val, litVal)
+		case *irtypes.FloatType:
+			cmp = block.NewFCmp(enum.FPredOEQ, val, litVal)
+		default:
+			return nil, fmt.Errorf("tuple-slot literal pattern: unsupported slot type %s", fmtArgType(slotType))
+		}
+
+		ok := cg.newBlock("tuple.lit.ok")
+		block.NewCondBr(cmp, ok, failBlock)
+
+		return ok, nil
+	case *ast.TupleLit:
+		// Nested tuple pattern: recurse.
+		innerSt, isStruct := slotType.(*irtypes.StructType)
+		if !isStruct || !strings.HasPrefix(innerSt.Name(), "Tuple__") {
+			return nil, fmt.Errorf("nested tuple pattern in slot of non-tuple type %s", fmtArgType(slotType))
+		}
+
+		if len(p.Elems) != len(innerSt.Fields) {
+			return nil, fmt.Errorf("nested tuple pattern: %d elements vs slot type's %d", len(p.Elems), len(innerSt.Fields))
+		}
+
+		for j, sub := range p.Elems {
+			subGEP := block.NewGetElementPtr(slotType, slotGEP,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j)))
+
+			var err error
+
+			block, err = cg.emitTupleSlotPatternCheck(block, failBlock, subGEP, innerSt.Fields[j], sub)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return block, nil
+	}
+
+	return nil, fmt.Errorf("tuple-slot pattern: unsupported pattern kind %T", pat)
+}
+
+// emitTupleSlotAdtCheck verifies that the slot (a Result/Option/etc.
+// ADT value) matches an ADT variant pattern.  Decomposes the slot
+// into discriminant + payload like genDataMatch does, but inline so
+// the per-arm failure path threads through the next-case block
+// rather than a per-data switch.
+func (cg *CodeGen) emitTupleSlotAdtCheck(block *ir.Block, failBlock *ir.Block, slotGEP value.Value, slotType irtypes.Type, pat ast.Node) (*ir.Block, error) {
+	adtSt, isStruct := slotType.(*irtypes.StructType)
+	if !isStruct {
+		return nil, fmt.Errorf("ADT pattern on non-ADT slot type %s", fmtArgType(slotType))
+	}
+
+	adtName := adtSt.Name()
+	if adtName == "" {
+		return nil, fmt.Errorf("ADT pattern on anonymous struct slot %s", fmtArgType(slotType))
+	}
+
+	variantName := dataPatternVariantName(pat)
+
+	vi := cg.dataVariantInfoFor(adtName, variantName)
+	if vi == nil {
+		return nil, fmt.Errorf("data %s has no variant %q", adtName, variantName)
+	}
+
+	tagGEP := block.NewGetElementPtr(adtSt, slotGEP,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tagI64 := block.NewLoad(irtypes.I64, tagGEP)
+	expectedTag := constant.NewInt(irtypes.I64, vi.Tag)
+	cmp := block.NewICmp(enum.IPredEQ, tagI64, expectedTag)
+
+	matchBlk := cg.newBlock("tuple.adt.match")
+	block.NewCondBr(cmp, matchBlk, failBlock)
+
+	// Bind payload fields.
+	binders := dataPatternBinders(pat)
+	if len(binders) != len(vi.Fields) {
+		return nil, fmt.Errorf("data %s.%s expects %d binding(s), got %d", adtName, variantName, len(vi.Fields), len(binders))
+	}
+
+	if len(vi.Fields) > 0 {
+		payloadGEP := matchBlk.NewGetElementPtr(adtSt, slotGEP,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+		payloadPtr := matchBlk.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
+
+		for fi, f := range vi.Fields {
+			name := binders[fi]
+			if name == "" || name == "_" {
+				continue
+			}
+
+			fieldPtr := matchBlk.NewGetElementPtr(vi.PayloadType, payloadPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+			fieldTy := vi.PayloadType.Fields[fi]
+			fieldVal := matchBlk.NewLoad(fieldTy, fieldPtr)
+
+			if !f.IsWeak && isRCTrackedType(fieldTy) {
+				cg.emitRetain(matchBlk, fieldVal)
+			}
+
+			alloca := matchBlk.NewAlloca(fieldVal.Type())
+			matchBlk.NewStore(fieldVal, alloca)
+
+			entry := &scopeEntry{val: alloca, isAlloc: true}
+			if !isRCTrackedType(fieldTy) {
+				entry.noRelease = true
+			}
+
+			cg.curScope.set(name, entry)
+		}
+	}
+
+	return matchBlk, nil
 }
 
 func (cg *CodeGen) genStructMatch(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
@@ -1081,6 +1460,18 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		}
 	}
 
+	// Tuple-pattern match: `case (p1, p2, ...):`.  Each slot pattern
+	// may be a wildcard, a binding identifier, a literal, or an ADT
+	// ctor (Ok(x), Err(_), None, Some(v)) — which is what motivates
+	// the dedicated path: the existing integer-switch fallback
+	// genExprs the pattern as an expression and trips on `Ok(x)`
+	// trying to evaluate x in the scrutinee scope.
+	for _, c := range s.Cases {
+		if _, ok := c.Pattern.(*ast.TupleLit); ok {
+			return cg.genTupleMatch(block, s, resAlloca)
+		}
+	}
+
 	expr, err := cg.genExpr(block, s.Expr)
 	if err != nil {
 		return nil, err
@@ -1655,11 +2046,13 @@ func (cg *CodeGen) genMatchType(block *ir.Block, s *ast.MatchStmt) (*ir.Block, e
 	st := val.Type().(*irtypes.StructType)
 	alloca := block.NewAlloca(st)
 	block.NewStore(val, alloca)
-	// Extract tag (field 1, i8; field 0 is i32 type_id), zero-extend to i64 for switch.
+	// Tagged unions keep the original {i32 type_id, i8 tag, payload}
+	// layout -- only ADTs widened the tag to i64.  Load i8 + zext so
+	// the switch operand width matches every NewCase below.
 	tagGEP := block.NewGetElementPtr(st, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagVal := block.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := block.NewZExt(tagVal, irtypes.I64)
+	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
+	tagI64 := block.NewZExt(tagI8, irtypes.I64)
 
 	afterBlock := cg.newBlock("match.after")
 

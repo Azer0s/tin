@@ -1,0 +1,55 @@
+// examples/conversion_torture_test.tin -- torture tests for the
+// conversion machinery, focused on the redundant-cast warning's
+// boundary cases (false positives + negatives) and the trait
+// `is *T` / `as *T` interactions.
+//
+// The previous `panics_no` cases (just "compiles + runs without
+// crashing") moved to examples/conversion_runtime_test.tin where
+// the runtime value is checked inline.  This file only keeps the
+// compile-error / warning coverage that genuinely needs the
+// os::exec round-trip.
+//
+// Replaces examples/conversion_torture.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_no_warning(fixture string, banned string) =
+  let r = run_tin("ir", "examples/fixtures/conversion_torture/" ++ fixture)
+
+  assert::ok(!contains_text(r.stderr, banned))
+
+fn expect_warning(fixture string, needle string) =
+  let r = run_tin("ir", "examples/fixtures/conversion_torture/" ++ fixture)
+
+  assert::ok(contains_text(r.stderr, needle))
+
+// A. Redundant-cast false-positive guards.
+
+test "literal cast on rhs of arithmetic isn't redundant" =
+  expect_no_warning("literal_in_arith.tin", "redundant-type-cast")
+
+test "i64 arg cast to i32 param is not redundant" =
+  expect_no_warning("arg_widen.tin", "redundant-type-cast")
+
+test "Some(literal) is not redundant when slot is Option[T]" =
+  expect_no_warning("some_literal_in_option.tin", "redundant-type-cast")
+
+test "method-call cast across i32->i64 is not redundant" =
+  expect_no_warning("method_cast.tin", "redundant-type-cast")
+
+// I. Compile-error / warning coverage.
+
+test "unguarded downcast warning shows variable name" =
+  expect_warning("downcast_var_name.tin", "downcast `a as")
+
+test "redundant cast points at slot" =
+  expect_warning("redundant_slot_pin.tin", "redundant `as")
+
+// J. Negative tests for the redundant warning's structural rules.
+
+test "inner cast that doesn't match outer slot stays silent" =
+  expect_no_warning("inner_mismatch.tin", "redundant-type-cast")
+
+test "Result[Option[T], E] outer Ok arg has no redundant cast" =
+  expect_no_warning("result_option_nested.tin", "redundant-type-cast")

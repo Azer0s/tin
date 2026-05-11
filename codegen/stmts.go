@@ -952,7 +952,7 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 			cg.markOutParamVarsHeapOwned(callExpr)
 
 			// Discarded result of a non-void call: warn. Result-returning
-			// calls fire the always-on -Wunused-must-use diagnostic; pure
+			// calls fire the always-on -Wmust-use diagnostic; pure
 			// calls fire -Wdiscarded-pure-call (the call has no observable
 			// effect at all). Everything else falls back to the default-off
 			// -Wunused-result. Spawn/await results were already short-
@@ -1103,6 +1103,35 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 }
 
 func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error) {
+	// `let _ = expr`: evaluate expr as a statement and drop the result.
+	// Without this short-circuit, two `let _ = call()` in the same scope
+	// both bind to scope entry "_", and the second's scope.set silently
+	// overwrites the first's alloca pointer; the first value's RC fields
+	// are then unreachable for scope-exit release and leak.  Treating
+	// the underscore form as a statement-level discard releases RC-
+	// tracked values eagerly and walks struct values for their inner
+	// RC fields, so every drop is balanced regardless of how many the
+	// user writes back-to-back.  The new `discard <expr>` macro
+	// expands to `let _ = <expr>`, so this also fixes every leak that
+	// the macro would have inherited.
+	if s.Name == "_" && s.Value != nil {
+		cg.curBlock = block
+
+		val, err := cg.genExpr(block, s.Value)
+		if err != nil {
+			return block, err
+		}
+
+		if cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		if val != nil && !isVoidType(val.Type()) {
+			cg.emitDiscardedValueRelease(block, val, s.Value)
+		}
+
+		return block, nil
+	}
 	// Top-level constants are preregistered in the preregister pass as direct
 	// constant values. Skip re-emitting them as stack allocas.
 	if s.IsConst {
@@ -1300,6 +1329,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// normal ARC release.
 	isHeapOwned := false
 	heapOwnedDepth := 0
+	pointsToBorrowedStorage := false
 
 	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
 		calleeName := ""
@@ -1372,6 +1402,20 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			if depth > 0 {
 				isHeapOwned = true
 				heapOwnedDepth = depth
+			}
+		}
+		// `let q = &localIdent` -- propagate the source's storage class.
+		// If the source binding lives on the stack (no TinRCHdr prefix), q
+		// must NOT participate in RC retain/release ops when later coerced
+		// to `*Trait` (see buildPtrToTraitBorrow).  Same applies to
+		// module-level globals.  We deliberately leave this flag UNSET when
+		// the source itself owns a heap reference -- the existing
+		// isHeapOwned / isEarlyHeap pipeline handles that case correctly.
+		if id, isIdent := addrOf.Expr.(*ast.Identifier); isIdent {
+			if srcEntry, ok := cg.curScope.lookup(id.Name); ok && srcEntry != nil {
+				if !srcEntry.isHeapOwned && !srcEntry.isEarlyHeap && !srcEntry.ownsPtrViaRetain {
+					pointsToBorrowedStorage = true
+				}
 			}
 		}
 	} else if _, isAwait := s.Value.(*ast.AwaitExpr); isAwait && llType != nil {
@@ -1590,8 +1634,37 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			// here would unbalance the source binding's own scope-exit
 			// release of the underlying heap block.
 			_, isAs := s.Value.(*ast.AsExpr)
-			if !isAs && cg.emitOwningPtrRetainIfApplicable(block, initVal) {
-				// Already retained.
+			// Only treat *TinStruct copy bindings as ownership
+			// transfers when the source is an IndexExpr (array
+			// element: `let p = items[idx]`). For FieldAccess /
+			// Identifier / DerefExpr the source still owns the +1
+			// RC for the binding's life, so retaining here would
+			// over-count and the matching scope-exit release_ptr
+			// would free a node the parent still references -
+			// breaking LinkedList.get and similar field-chase
+			// patterns. Iface ptrs continue to retain unconditionally
+			// (emitOwningPtrRetainIfApplicable's iface arm).
+			treatAsOwning := false
+
+			if !isAs {
+				if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+					treatAsOwning = true
+				}
+
+				if pt, isPtr := initVal.Type().(*irtypes.PointerType); isPtr {
+					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && isTraitFatPtrShape(innerSt) {
+						treatAsOwning = true
+					}
+				}
+			}
+
+			if treatAsOwning && cg.emitOwningPtrRetainIfApplicable(block, initVal) {
+				// Tag the entry so emitScopeRelease's *TinStruct
+				// release path knows this binding actually owns a
+				// heap RC slot.  Plain `let p = &local_var` does
+				// NOT come through here, so its scope exit skips
+				// release (correct - there's no heap to release).
+				cg.pendingOwnsPtrViaRetain = true
 			} else {
 				cg.emitRetain(block, initVal)
 			}
@@ -1685,7 +1758,9 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), declaredConst: s.IsConst, declaredLet: !s.IsConst}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), ownsHeapPromotedFields: cg.bindingHeapPromotedFields(s), declaredConst: s.IsConst, declaredLet: !s.IsConst, ownsPtrViaRetain: cg.pendingOwnsPtrViaRetain, pointsToBorrowedStorage: pointsToBorrowedStorage}
+
+	cg.pendingOwnsPtrViaRetain = false
 
 	// Capture the init expression for compile-time folding (codegen/fold.go).
 	// Subsequent assignments to the same name clear constInitExpr in
@@ -1785,7 +1860,7 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 
 func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	// `return try expr` yields the success value (V from tryable[V, C]),
-	// not the container — so the natural-feeling form is almost always a
+	// not the container - so the natural-feeling form is almost always a
 	// type error in user code. Surface the gotcha with a hint pointing at
 	// the constructor wrap they probably meant. The underlying
 	// type-check still fires; this just adds context.
@@ -1802,6 +1877,22 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if id, ok := s.Value.(*ast.Identifier); ok {
 			if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.ownsHeapIfaceData {
 				cg.fnReturnsOwningIface[cg.curFn.Name()] = true
+			}
+		}
+	}
+
+	// Record heap-promoted struct fields so the caller's receiving
+	// binding can cascade-release them.  Without this, `return
+	// Box{p: &x}` (where x is heap-promoted by escape analysis) leaves
+	// the heap block dangling - x's own scope-exit skips release
+	// (isEarlyHeap), the Box's per-struct release helper treats *T
+	// fields as borrows, and the caller's binding never sees it.
+	if cg.curFn != nil && s.Value != nil && len(cg.curFnEscapingVars) > 0 {
+		if sl, ok := s.Value.(*ast.StructLit); ok {
+			heapFields := cg.heapPromotedFieldIndices(sl)
+			if len(heapFields) > 0 {
+				prev := cg.fnReturnsHeapPromotedFields[cg.curFn.Name()]
+				cg.fnReturnsHeapPromotedFields[cg.curFn.Name()] = mergeFieldIndices(prev, heapFields)
 			}
 		}
 	}
@@ -2070,7 +2161,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	// a freshly-coerced trait fat-ptr: the iface heap block was
 	// alloc'd rc=1 by coerceToTrait and a synthetic `.iface_data_*`
 	// scope-release entry registered. Without compensation that
-	// release fires inside this function and frees the iface — caller
+	// release fires inside this function and frees the iface - caller
 	// gets a dangling pointer in the returned Result, which crashes
 	// the moment the caller's data_release_val tries to dispatch
 	// through the iface's vtable thunk.
@@ -2125,7 +2216,7 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			// Set returnTypeHint so ADT bare-constructor calls like
 			// `return Err(e)` disambiguate against the declared
 			// return type when multiple Result instantiations are in
-			// scope. Mirrors the sync-return path in genReturn — the
+			// scope. Mirrors the sync-return path in genReturn - the
 			// LLVM coro signature is i8*, so we have to use the saved
 			// curCoroRetType instead of cg.curFn.Sig.RetType here.
 			prevHint := cg.returnTypeHint

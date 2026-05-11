@@ -1,5 +1,6 @@
 use assert
 use result
+use { Result } from result
 
 test "Result Ok/Err via match" =
   let a Result[i32, string] = Ok(42)
@@ -60,12 +61,24 @@ test "Result and_then / or_else" =
   assert::equals(4,  result::unwrap_or(result::or_else(a, g), 0))
   assert::equals(99, result::unwrap_or(result::or_else(b, g), 0))
 
-test "Result unwrap / expect / to_option" =
+test "Result or_else_value" =
+  let a Result[i64, string] = Ok(4)
+  let b Result[i64, string] = Err("bad")
+  let fb Result[i64, string] = Ok(99)
+
+  assert::equals(4,  result::unwrap_or(result::or_else_value(a, fb), 0))
+  assert::equals(99, result::unwrap_or(result::or_else_value(b, fb), 0))
+
+  // Method form: same dispatch via the ADT's own method table.
+  assert::equals(4,  result::unwrap_or(a.or_else_value(fb), 0))
+  assert::equals(99, result::unwrap_or(b.or_else_value(fb), 0))
+
+test "Result unwrap / unwrap-with-msg / to_option" =
   use option
   let a Result[i64, string] = Ok(7)
 
   assert::equals(7, result::unwrap(a))
-  assert::equals(7, result::expect(a, "should be ok"))
+  assert::equals(7, result::unwrap(a, "should be ok"))
   assert::ok(option::is_some(result::to_option(a)))
   let b Result[i64, string] = Err("e")
 

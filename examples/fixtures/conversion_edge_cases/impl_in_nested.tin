@@ -1,0 +1,10 @@
+struct Cm(implicit[i64]) =
+  mm i64
+  static fn ::implicit(n i64) Cm = return Cm{mm: n * 10}
+
+fn double(c Cm) Cm = return Cm{mm: c.mm * 2}
+fn quad(c Cm) Cm = return double(double(c))
+
+fn main() =
+  let c = quad(3)
+  echo "mm={c.mm}"

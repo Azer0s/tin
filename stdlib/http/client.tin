@@ -259,7 +259,7 @@ fn{#async} read_all(r io::AsyncReader) string =
 //
 // The match-arm-assign pattern below would be cleaner as `try`, but
 // `try` inside an {#async} function whose return type is HttpResponse
-// (not Result) requires wildcard mono with a non-Result target — that
+// (not Result) requires wildcard mono with a non-Result target - that
 // path is not wired up. For now, match.
 fn{#async} do_with_client(client Client, r Request) HttpResponse =
   let (use_tls, host, port, path) = parse_url(r.url)

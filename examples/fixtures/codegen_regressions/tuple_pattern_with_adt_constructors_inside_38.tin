@@ -1,0 +1,17 @@
+use result
+use { Result } from result
+use errors
+
+fn parse(s string) Result[i64, errors::Err] =
+  if s == "":
+    return Err(errors::new("empty"))
+  if s == "x":
+    return Ok(42)
+  return Ok(99)
+
+fn main() =
+  let a = parse("x")
+  let b = parse("y")
+  match (a, b):
+    case (Ok(x), Ok(y)): echo "both ok: {x}, {y}"
+    case _:              echo "either failed"

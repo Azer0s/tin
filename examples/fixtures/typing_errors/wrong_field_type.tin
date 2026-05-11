@@ -1,0 +1,6 @@
+struct P =
+  x i64
+
+fn main() =
+  let p = P{x: "wrong"}
+  echo "{p.x}"

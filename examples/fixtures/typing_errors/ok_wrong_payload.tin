@@ -1,0 +1,7 @@
+use result
+
+fn main() =
+  let r Result[i64, string] = Ok("not an int")
+  match r:
+    case Ok(_): echo "x"
+    case Err(_): echo "x"

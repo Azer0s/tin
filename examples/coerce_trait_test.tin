@@ -8,6 +8,7 @@
 // into the overload signature.
 
 use assert
+use { discard } from macros
 
 // Money: a fixed-point currency value with multiple lossy / lossless
 // conversions.  Exercises every primitive target as well as the
@@ -72,8 +73,9 @@ test "coerce target match is exact (i64 picks the i64 impl)" =
 
 test "coerce keeps original value (no implicit mutation)" =
   let m = Money{cents: 42}
-  let _ = m as string
-  let _ = m as f64
+
+  discard m as string
+  discard m as f64
 
   assert::equals(m.cents, 42)
 
@@ -133,6 +135,7 @@ test "coerce computes derived value" =
 
 test "value coerce keeps caller's struct unchanged" =
   let bag = CountedBag{items: ["x"]}
-  let _ = bag as i64
+
+  discard bag as i64
 
   assert::equals(len(bag.items), 1)

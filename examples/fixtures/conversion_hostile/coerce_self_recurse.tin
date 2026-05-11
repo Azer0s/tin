@@ -1,0 +1,11 @@
+struct Wrap(coerce[i64]) =
+  v i64
+  static fn ::coerce(this Wrap) i64 =
+    if this.v <= 0:
+      return 0
+    return (Wrap{v: this.v - 1} as i64) + 1
+
+fn main() =
+  let w = Wrap{v: 10}
+  let n = w as i64
+  echo "{n}"

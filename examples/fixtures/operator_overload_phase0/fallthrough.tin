@@ -1,0 +1,13 @@
+// Phase 0 fall-through: Foo declares add[Foo, Foo] but the rhs is an
+// i64 literal, so the dispatch should fall through to the "binary
+// operator not defined" error rather than silently compiling or
+// dispatching to the wrong impl.
+struct Foo(add[Foo, Foo]) =
+  v i64
+
+  fn ::add(this Foo, other Foo) Foo = return Foo{v: this.v + other.v}
+
+fn main() =
+  let a = Foo{v: 1}
+  let b = a + 2
+  return

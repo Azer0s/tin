@@ -17,7 +17,7 @@ fn tin_str_data(s string) *byte                = extern("_tin_string_data")
 
 // OsError is the typed error every os function returns through. With
 // ADTs implementing traits directly (Workstream A), the variant set
-// and the trait impl collapse into a single ADT — no separate
+// and the trait impl collapse into a single ADT - no separate
 // XxxErrorKind data + XxxError wrapper struct.
 data OsError(errors::Err, print) =
   CannotOpen(op string, path string)

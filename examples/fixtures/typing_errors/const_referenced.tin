@@ -1,0 +1,5 @@
+const N i64 = 7
+
+fn main() =
+  let m = N + 1
+  echo "{m}"

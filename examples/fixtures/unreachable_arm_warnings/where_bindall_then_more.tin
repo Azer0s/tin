@@ -1,0 +1,5 @@
+fn echo_n(n i32) i32 =
+  where (n): n
+  where (0): 0
+
+echo echo_n(5)

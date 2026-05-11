@@ -1,0 +1,10 @@
+struct Mixed(coerce[i64], coerce[string]) =
+  a i32
+  b f64
+  c string
+  static fn ::coerce(this Mixed) i64 = return this.a as i64
+  static fn ::coerce(this Mixed) string = return this.c
+
+fn main() =
+  let m = Mixed{a: 7 as i32, b: 1.5, c: "hi"}
+  echo "{m as i64} {m as string}"

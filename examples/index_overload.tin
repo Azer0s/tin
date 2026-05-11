@@ -85,4 +85,6 @@ test "index_set through *Bag mutates" =
 
 // Bare access on a missing key panics with a descriptive message. Tested
 // out-of-band via `examples/index_overload_panic.sh` rather than
-// assert::panics so we can match the panic text on stderr exactly.
+// assert::panics_with because the index-miss panic path bypasses tin's
+// recover() at the moment (TODO: route through tin_panic so recover
+// can catch it).

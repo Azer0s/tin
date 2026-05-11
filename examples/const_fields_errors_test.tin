@@ -1,0 +1,56 @@
+// examples/const_fields_errors_test.tin -- per-field `const` lockdown.
+// Writing a `const` field through any of the supported assignment
+// shapes (direct, augmented, postfix ++/--, method `this`, pointer
+// `->`, generic monomorphization) must be a compile error.  The
+// reflective `setfield(...)` builtin and `&p.x` (address-of) are
+// deliberately allowed -- `const` is a compile-time discipline, not
+// a memory-safety guarantee.
+//
+// Replaces examples/const_fields_errors.sh.  Bad-code fixtures live
+// under examples/fixtures/const_fields_errors/; the positive cases
+// (setfield + address-of) are exercised inline since they compile.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_const_assign_error(fixture string, type_field string) =
+  let r = run_tin("run", "examples/fixtures/const_fields_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "cannot assign to const field " ++ type_field))
+
+test "direct assign to const field is a compile error" =
+  expect_const_assign_error("direct_assign.tin", "point.x")
+
+test "augmented assign (+=) to const field is a compile error" =
+  expect_const_assign_error("aug_assign.tin", "point.x")
+
+test "postfix ++ on const field is a compile error" =
+  expect_const_assign_error("postfix_incr.tin", "point.x")
+
+test "method body writing a const field is a compile error" =
+  expect_const_assign_error("method_write.tin", "point.x")
+
+test "pointer-through (->) write to const field is a compile error" =
+  expect_const_assign_error("pointer_through_write.tin", "point.x")
+
+test "generic monomorphization preserves const-ness" =
+  expect_const_assign_error("generic_monomorph.tin", "Box[i64].value")
+
+// --- positive cases: const is compile-time only --------------------
+
+struct cf_point =
+  const x i64
+  const y i64
+
+test "setfield is allowed on a const field (reflective bypass)" =
+  let p = cf_point{x: 1, y: 2}
+
+  setfield(p, "x", 42)
+  assert::equals(42 as i64, p.x)
+
+test "&p.x compiles for a const field (address-of is allowed)" =
+  let p  = cf_point{x: 5, y: 6}
+  let px = &p.x
+
+  assert::equals(5 as i64, *px)

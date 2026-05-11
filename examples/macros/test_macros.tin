@@ -1,6 +1,10 @@
 // Test: selective macro imports and stdlib/macros
-use { loop, min!, max!, abs!, clamp! } from macros
+use { loop, discard, min!, max!, abs!, clamp! } from macros
 use { Channel } from sync
+
+fn side_effect() i64 =
+  echo "side"
+  return 99
 
 fn{#async} main() =
   // Test loop (no_parens macro)
@@ -10,6 +14,11 @@ fn{#async} main() =
     if i >= 3: break
     echo i
     i = i + 1
+
+  // Test discard (no_parens no_excl): expands to `let _ =`, so
+  // multiple back-to-back drops compile without burning fresh names.
+  discard side_effect()
+  discard side_effect()
 
   // Test min! and max!
   echo min!(10, 5)

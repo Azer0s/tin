@@ -1,0 +1,11 @@
+use result
+use { Result } from result
+use errors
+
+fn{#async} parse() Result[i64, errors::Err] = return Ok(42)
+
+fn{#async} main() =
+  let f = spawn parse()
+  match await f:
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"

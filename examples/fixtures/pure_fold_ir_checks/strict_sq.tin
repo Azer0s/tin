@@ -1,0 +1,3 @@
+fn{#pure} sq(n i64) i64 = return n * n
+
+fn main() i64 = return sq(7)

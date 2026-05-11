@@ -1,0 +1,11 @@
+struct Counter(coerce[bool]) =
+  n i64
+  static fn ::coerce(this Counter) bool = return this.n > 0
+
+fn main() =
+  let c = Counter{n: 3}
+  let i i64 = 0
+  for c.n > 0 :
+    i = i + 1
+    c = Counter{n: c.n - 1}
+  echo "i={i}"

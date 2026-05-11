@@ -1,6 +1,6 @@
 // runtime/builtin/tryable.tin
 //
-// The `tryable` trait — the contract the `try` keyword desugars
+// The `tryable` trait - the contract the `try` keyword desugars
 // against. Partial-bound shape:
 //
 //   trait tryable[V, C] =
@@ -14,7 +14,7 @@
 // the data's success type. At the keyword desugar's
 // `return err_value()`, the wildcard means the propagated container's
 // success slot is independent of the enclosing function's success
-// type — only the error/failure shape (E in Result, the unit of None
+// type - only the error/failure shape (E in Result, the unit of None
 // in Option) has to be compatible.
 //
 // Methods are not contractually partial. Impls that have a structure

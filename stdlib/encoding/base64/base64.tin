@@ -37,10 +37,15 @@ fn encode_b64(s string, alpha string, pad bool) string =
   let result = ""
   let i i64 = 0
 
+  // The `s[i] as i64` cast sign-extends tin's i8-shaped string
+  // bytes, so any byte >= 0x80 turns negative and the bit-twiddling
+  // below produces garbage in the upper sextets.  Mask with 0xFF to
+  // recover unsigned semantics; required for callers that feed
+  // raw signature/MAC bytes (HMAC tags, ed25519 sigs, ciphertext).
   for i + 2 < n:
-    let b0 = s[i] as i64
-    let b1 = s[i + 1] as i64
-    let b2 = s[i + 2] as i64
+    let b0 = (s[i]     as i64) & 0xFF
+    let b1 = (s[i + 1] as i64) & 0xFF
+    let b2 = (s[i + 2] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]
@@ -51,7 +56,7 @@ fn encode_b64(s string, alpha string, pad bool) string =
   let rem = n - i
 
   if rem == 1:
-    let b0 = s[i] as i64
+    let b0 = (s[i] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[(b0 << 4) & 0x3F]
@@ -60,8 +65,8 @@ fn encode_b64(s string, alpha string, pad bool) string =
       result = result ++ @'='
       result = result ++ @'='
   else if rem == 2:
-    let b0 = s[i] as i64
-    let b1 = s[i + 1] as i64
+    let b0 = (s[i]     as i64) & 0xFF
+    let b1 = (s[i + 1] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]

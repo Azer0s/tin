@@ -1,0 +1,1 @@
+fn main() = echo "len={len(\"\U0001F600\")} ok"

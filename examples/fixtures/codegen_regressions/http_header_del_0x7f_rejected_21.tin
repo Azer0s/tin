@@ -1,0 +1,14 @@
+use collections
+use http
+
+fn main() =
+  let c = http::Client::new()
+
+  c.set_header("X-Foo", "bar\x7fx")
+
+  let req = http::Request{
+    method: "GET", url: "http://example.com/",
+    headers: collections::HashMap[string, string]::make(1), body: ""
+  }
+
+  let _ = await http::send(c, req)

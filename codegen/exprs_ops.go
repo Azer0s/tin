@@ -1192,16 +1192,27 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 
 		typeParams := make([]ast.TypeExpr, len(vals))
 		for i, v := range vals {
-			parts[i] = llvmTypeToTinName(v.Type())
+			// Use the raw mangled struct name for the name part so the
+			// resulting Tuple__... is a single valid identifier. The
+			// demangled form `Result[i64, errors, Err]` contains
+			// brackets/spaces that break downstream name parsing and
+			// also fail to resolve back to a registered concrete type
+			// (the monomorphization keyed off the mangled
+			// `Result__i64__errors__Err`). Fall back to
+			// llvmTypeToTinName for non-struct slots.
+			parts[i] = llvmRawPartForTuple(v.Type())
 			// Reconstruct a structural TypeExpr from the LLVM type so
 			// the synthesized monomorphization preserves PointerType /
 			// ArrayType nuance (e.g. `*errors::Err` is a PointerType
 			// wrapping a SimpleType, not a SimpleType whose name is
-			// "*errors::Err").  Falling back to SimpleType{Name:parts[i]}
-			// lost the pointer indirection and produced an i64 slot
-			// for any `*Trait` argument, which then panicked in
-			// downstream NewStore checks.
-			typeParams[i] = llvmTypeToTinTypeExprStructural(v.Type())
+			// "*errors::Err"). Tuple-slot variant keeps named struct
+			// references as their raw mangled name so the synth
+			// monomorphization re-resolves to the SAME concrete struct
+			// already registered (rather than going through demangle
+			// -> re-monomorphize, which can synthesize duplicate
+			// instantiations like Option[Option[i64]] when the user
+			// only wanted Option[i64]).
+			typeParams[i] = llvmTypeToTupleSlotTypeExpr(v.Type())
 		}
 
 		concreteName = "Tuple__" + strings.Join(parts, "__")
@@ -1275,8 +1286,16 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		gep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 		block.NewStore(v, gep)
-		// ARC: retain any RC-tracked elements.
-		if isCopyExpr(tup.Elems[i]) {
+		// ARC: retain any RC-tracked elements borrowed from an outer
+		// owner.  Fresh allocations (e.g. `buf[0..n] as string`, which
+		// lowers to _tin_bytes_from_buf, or any call returning an
+		// rc=1 string/array/iface) already own their reference; an
+		// extra retain here would leave rc=2 with only one matching
+		// release ever fired and the field would leak by exactly one
+		// allocation per construction.  Mirrors the fresh-alloc
+		// exemption in genDataScopeCtorCall / genDataConstructorCall
+		// and the freshIface / freshCallResult gates in genVarDecl.
+		if isCopyExpr(tup.Elems[i]) && !isFreshBytesAlloc(v) && !isFreshCallResult(v) {
 			cg.emitRetain(block, v)
 		}
 	}

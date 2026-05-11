@@ -9,6 +9,7 @@
 use math
 use rand
 use assert
+use { discard } from macros
 
 const N_IN     i64 = 2
 const N_HIDDEN i64 = 3
@@ -153,7 +154,7 @@ fn main() =
     let (_, o) = forward(&net, xs[s])
     echo "  {xs[s][0]} XOR {xs[s][1]} -> {o[0]}  (target {ys[s][0]})"
 
-// ── tests ──────────────────────────────────────────────────────────
+// tests
 //
 // Train a fresh network for a small but sufficient number of epochs
 // and assert that XOR is learned to within 0.1 of each target on
@@ -179,7 +180,7 @@ fn train_xor(epochs i64) Net =
 
   for let epoch i64 = 0; epoch < epochs; epoch++:
     for let s i64 = 0; s < 4; s++:
-      let _ = train_step(&net, xs[s], ys[s])
+      discard train_step(&net, xs[s], ys[s])
 
   return net
 
@@ -266,7 +267,7 @@ test "bias updates change b2 after a training step" =
   let r = rand::new(11)
   let net = new_net(&r)
   let before = net.b2[0]
-  let _ = train_step(&net, [1.0, 1.0], [0.0])
+  discard train_step(&net, [1.0, 1.0], [0.0])
   let after = net.b2[0]
   // Any non-trivial gradient flows through b2 -- the value must move.
   assert::ok(before != after)

@@ -36,6 +36,7 @@
 
 use str
 use result
+use { Result } from result
 use errors
 
 // FlagError enumerates the structured cases parse can fail on.

@@ -1,0 +1,249 @@
+//!+os_file.c
+// stdlib/os/os_file.tin -- os::File and the OpenMode atom enum.
+//
+// File wraps a POSIX file descriptor with rc::Cell so copies share
+// ownership and the last drop closes the fd.  Implements
+// io::AsyncReader / io::AsyncWriter / io::Closeable so callers can
+// `await f.read(buf, n)` / `await f.write(buf, n)` and the type
+// flows through `io::copy` and BufWriter.  The OpenMode atom enum
+// names the common open patterns; for finer control the underlying
+// POSIX flags are exposed below.
+
+use io
+use rc
+use sync
+use { Unit } from sync
+use errors
+use result
+use { Result } from result
+
+// POSIX flag accessors (one-shot, cached in toplevel consts below).
+fn tin_os_o_rdonly_c() i32 = extern("_tin_os_o_rdonly")
+fn tin_os_o_wronly_c() i32 = extern("_tin_os_o_wronly")
+fn tin_os_o_rdwr_c()   i32 = extern("_tin_os_o_rdwr")
+fn tin_os_o_creat_c()  i32 = extern("_tin_os_o_creat")
+fn tin_os_o_trunc_c()  i32 = extern("_tin_os_o_trunc")
+fn tin_os_o_append_c() i32 = extern("_tin_os_o_append")
+
+// C helpers that wrap open/lseek/fsync/symlink/readlink/mkstemp.
+fn tin_os_open_c(path string, flags i32) i32      = extern("_tin_os_open")
+fn tin_os_lseek_c(fd i32, off i64, whence i32) i64 = extern("_tin_os_lseek")
+fn tin_os_fsync_c(fd i32) i32                      = extern("_tin_os_fsync")
+fn tin_os_pipe_c(out *i32) i32                     = extern("_tin_os_pipe")
+fn tin_os_chmod_c(path string, mode i32) i32       = extern("_tin_os_chmod")
+fn tin_os_symlink_c(target string, link string) i32 = extern("_tin_os_symlink")
+fn tin_os_readlink_c(path string, out *char, out_len i64) i64 = extern("_tin_os_readlink")
+fn tin_os_mkstemp_c(template *char) i32            = extern("_tin_os_mkstemp")
+fn tin_os_mkdtemp_c(template *char) i32            = extern("_tin_os_mkdtemp")
+fn tin_os_tmpdir_c() *char                         = extern("_tin_os_tmpdir")
+
+// OpenMode names the canonical open patterns. Callers needing finer
+// control should fall back to open_flags() which takes the raw POSIX
+// bitfield.
+enum atom OpenMode =
+  'read
+  'write
+  'append
+  'read_write
+  'create
+  'truncate
+
+// open_mode_to_flags translates an OpenMode atom into the POSIX flag
+// bitfield expected by open(2).  Unknown atoms default to O_RDONLY.
+fn open_mode_to_flags(mode atom) i32 =
+  where 'read:       return tin_os_o_rdonly_c()
+  where 'write:      return tin_os_o_wronly_c() | tin_os_o_creat_c() | tin_os_o_trunc_c()
+  where 'append:     return tin_os_o_wronly_c() | tin_os_o_creat_c() | tin_os_o_append_c()
+  where 'read_write: return tin_os_o_rdwr_c()
+  where 'create:     return tin_os_o_wronly_c() | tin_os_o_creat_c()
+  where 'truncate:   return tin_os_o_wronly_c() | tin_os_o_creat_c() | tin_os_o_trunc_c()
+  where _:           return tin_os_o_rdonly_c()
+
+// SEEK_SET / SEEK_CUR / SEEK_END mirror the libc constants. Exposed
+// so callers can pass them to File.seek without remembering the
+// magic numbers.
+const SEEK_SET i32 = 0
+const SEEK_CUR i32 = 1
+const SEEK_END i32 = 2
+
+// File wraps a POSIX file descriptor with rc::Cell so copies share
+// ownership; the last drop closes the fd.  The _path field is kept
+// solely so error diagnostics know which file complained.
+struct File(io::AsyncReader, io::AsyncWriter, io::Closeable) =
+  _fd_cell *rc::Cell[i32]
+  _path    string
+
+  fn fd(this File) i32 = return this._fd_cell.payload()
+
+  // AsyncReader: spawn a fiber that runs the non-blocking read on
+  // the underlying fd. Callers do `let n = await f.read(buf, n)`.
+  fn AsyncReader::read(this File, buf *byte, n i64) Future[i64] =
+    return spawn io::async_read(this.fd(), buf, n)
+
+  fn AsyncWriter::write(this File, buf *byte, n i64) Future[i64] =
+    return spawn io::async_write(this.fd(), buf, n)
+
+  fn Closeable::close(this File) =
+    io::close(this.fd())
+
+  // seek changes the fd's read/write position.  whence is one of
+  // SEEK_SET / SEEK_CUR / SEEK_END (zero, current, end).
+  fn seek(this File, offset i64, whence i32) Result[i64, errors::Err] =
+    let n = tin_os_lseek_c(this.fd(), offset, whence)
+
+    if n < 0:
+      return Err(CannotRead("seek", this._path))
+
+    return Ok(n)
+
+  // flush forces buffered writes to the underlying device. fsync(2).
+  fn flush(this File) Result[Unit, errors::Err] =
+    if tin_os_fsync_c(this.fd()) != 0:
+      return Err(CannotWrite("flush", this._path))
+
+    return Ok(Unit{_unit: 0})
+
+// open opens path with the given OpenMode. Use open_flags(path, raw)
+// for finer control.
+fn open(path string, mode atom) Result[File, errors::Err] =
+  return open_flags(path, open_mode_to_flags(mode))
+
+// open_flags opens path with a raw POSIX flag bitfield. Use when the
+// canonical OpenMode atoms don't cover the case.
+fn open_flags(path string, flags i32) Result[File, errors::Err] =
+  let fd = tin_os_open_c(path, flags)
+
+  if fd < 0:
+    return Err(CannotOpen("open", path))
+
+  return Ok(File{_fd_cell: rc::Cell[i32].new(fd, io::close), _path: path})
+
+// create opens path for writing, creating or truncating it.  Shortcut
+// for open(path, 'write).
+fn create(path string) Result[File, errors::Err] =
+  return open(path, 'write)
+
+// PipePair holds the two ends of a kernel pipe. Use this rather than
+// a tuple because tin's tuple monomorphization can't yet reconstruct
+// a Tuple slot whose type is a trait-implementing struct with a
+// trait fat-ptr field (`*rc::Cell[i32]`).
+struct PipePair =
+  reader File
+  writer File
+
+// pipe returns a (read, write) File pair connected by a kernel pipe.
+fn pipe() Result[PipePair, errors::Err] =
+  let fds [i32; 2]
+  let rc_pipe = tin_os_pipe_c(&fds[0])
+
+  if rc_pipe != 0:
+    return Err(CannotOpen("pipe", "<anonymous>"))
+
+  let rd = File{_fd_cell: rc::Cell[i32].new(fds[0], io::close), _path: "<pipe-read>"}
+  let wr = File{_fd_cell: rc::Cell[i32].new(fds[1], io::close), _path: "<pipe-write>"}
+
+  return Ok(PipePair{reader: rd, writer: wr})
+
+// chmod adjusts the POSIX permission bits on path.  mode is the
+// usual octal triple (e.g. 0o755).
+fn chmod(path string, mode i32) Result[Unit, errors::Err] =
+  if tin_os_chmod_c(path, mode) != 0:
+    return Err(CannotWrite("chmod", path))
+
+  return Ok(Unit{_unit: 0})
+
+// symlink creates a symbolic link at linkpath pointing to target.
+fn symlink(target string, linkpath string) Result[Unit, errors::Err] =
+  if tin_os_symlink_c(target, linkpath) != 0:
+    return Err(CannotWrite("symlink", linkpath))
+
+  return Ok(Unit{_unit: 0})
+
+// readlink resolves a symlink at path to its target string.  Caps the
+// output at 4096 bytes (PATH_MAX on Linux/macOS); paths longer than
+// that surface as CannotRead.
+fn readlink(path string) Result[string, errors::Err] =
+  let buf [byte; 4096]
+  let n = tin_os_readlink_c(path, &buf[0] as *char, 4096)
+
+  if n < 0 || n >= 4096:
+    return Err(CannotRead("readlink", path))
+
+  return Ok(buf[0..n] as string)
+
+// TempFile bundles the newly-created tempfile with its filesystem
+// path so callers can both write through the handle and clean up by
+// path. See pipe() / PipePair for why we don't use a (File, string)
+// tuple here.
+struct TempFile =
+  file File
+  path string
+
+// tempfile creates a unique file in $TMPDIR (or /tmp) and returns
+// the open File along with the absolute path it was created at.
+fn tempfile() Result[TempFile, errors::Err] =
+  let dir = tin_os_tmpdir_c()
+  let template [byte; 4096]
+  let dir_len i64 = 0
+
+  for dir[dir_len] != 0 as char:
+    template[dir_len] = dir[dir_len] as byte
+    dir_len = dir_len + 1
+
+  let suffix = "/tin-tempXXXXXX"
+  let sn = len(suffix)
+  let i i64 = 0
+
+  for i < sn:
+    template[dir_len + i] = suffix[i]
+    i = i + 1
+
+  template[dir_len + sn] = 0 as byte
+
+  let fd = tin_os_mkstemp_c(&template[0] as *char)
+  if fd < 0:
+    return Err(CannotOpen("tempfile", "<tmpdir>"))
+
+  let total = dir_len + sn
+  let path  = template[0..total] as string
+
+  return Ok(TempFile{
+    file: File{_fd_cell: rc::Cell[i32].new(fd, io::close), _path: path},
+    path: path,
+  })
+
+// tempdir creates a unique directory under $TMPDIR (or /tmp) with
+// the supplied prefix and returns its absolute path.
+fn tempdir(prefix string) Result[string, errors::Err] =
+  let dir = tin_os_tmpdir_c()
+  let template [byte; 4096]
+  let dir_len i64 = 0
+
+  for dir[dir_len] != 0 as char:
+    template[dir_len] = dir[dir_len] as byte
+    dir_len = dir_len + 1
+
+  template[dir_len] = @'/'
+  dir_len = dir_len + 1
+  let pn = len(prefix)
+  let i i64 = 0
+
+  for i < pn:
+    template[dir_len + i] = prefix[i]
+    i = i + 1
+  dir_len = dir_len + pn
+
+  let suffix = "XXXXXX"
+  let sn = len(suffix)
+  let j i64 = 0
+
+  for j < sn:
+    template[dir_len + j] = suffix[j]
+    j = j + 1
+  dir_len = dir_len + sn
+  template[dir_len] = 0 as byte
+
+  if tin_os_mkdtemp_c(&template[0] as *char) != 0:
+    return Err(CannotMkdir("<tmpdir>"))
+
+  return Ok(template[0..dir_len] as string)

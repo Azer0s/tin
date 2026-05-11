@@ -1,0 +1,7 @@
+struct Bag(coerce[bool]) =
+  items [string]
+  static fn ::coerce(this Bag) bool = return len(this.items) > 0
+
+fn main() =
+  let b = Bag{items: ["x"]}
+  if !b: echo "x"

@@ -1,0 +1,36 @@
+// examples/scoped_struct_tags_errors_test.tin -- compile-time
+// rejections for struct-level scoped tags `#tag@scope`.  Positive
+// cases live in examples/scoped_struct_tags.tin; this file pins
+// every misuse shape that must surface as a clean diagnostic.
+//
+// Replaces examples/scoped_struct_tags_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_compile_error(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/scoped_struct_tags_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+test "#pure@fn catches echo in a propagated method" =
+  expect_compile_error("pure_fn_echo.tin", "pure violation")
+
+test "unknown @scope qualifier is rejected" =
+  expect_compile_error("unknown_scope.tin", "unknown struct tag scope @blah")
+
+test "#pure cannot be scoped @field" =
+  expect_compile_error("pure_field.tin", "tag #pure cannot be scoped @field")
+
+test "#const is a field tag and cannot be scoped @fn" =
+  expect_compile_error("const_fn.tin", "tag #const is a field tag")
+
+test "#packed is struct-level and cannot be scoped" =
+  expect_compile_error("packed_fn.tin", "tag #packed is struct-level and cannot be scoped")
+
+test "#handover is extern-only and cannot be on a struct" =
+  expect_compile_error("handover_fn.tin", "tag #handover is extern-only")
+
+test "#const@field default-flips unmarked fields to const" =
+  expect_compile_error("const_field_default_flip.tin", "cannot assign to const field bad.x")

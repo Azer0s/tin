@@ -8,7 +8,7 @@
 //               safe-and-fast to call. The runtime drives the spin
 //               loop, so user impls don't need to call yield.
 //   - result()  produce the value. result() may still block if the
-//               work isn't done — for backwards compatibility and
+//               work isn't done - for backwards compatibility and
 //               so user code that calls result() without first
 //               polling ready() keeps working.
 //

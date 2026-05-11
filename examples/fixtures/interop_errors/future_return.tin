@@ -1,0 +1,6 @@
+use sync
+
+fn{#interop} bad(n i32) Future[i32] =
+  return Future[i32]{pid: 0}
+
+fn main() i64 = return 0

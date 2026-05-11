@@ -1,0 +1,18 @@
+use result
+use { Result } from result
+use errors
+
+fn parse() Result[i64, errors::Err] = return Ok(42)
+
+// The lint now requires the enclosing fn to also return Result, since
+// the suggested `try` desugar only compiles in that context.
+fn outer() Result[i64, errors::Err] =
+  let v = match parse():
+    case Ok(x): x
+    case Err(e): return Err(e)
+  return Ok(v * 2)
+
+fn main() =
+  match outer():
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"

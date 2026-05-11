@@ -1,0 +1,12 @@
+trait Fooable =
+  fn foo(this *Fooable, n i64) = virtual
+
+struct Box(Fooable) =
+  v i64
+
+  fn Fooable::foo(this *Box, n i64) = this.v = n
+
+fn main() i64 =
+  let b = Box{v: 0}
+  let f Fooable = &b
+  return 0

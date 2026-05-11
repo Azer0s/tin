@@ -1,0 +1,7 @@
+fn{#pure} sum_to(n i64) i64 =
+  let acc i64 = 0
+  for let i i64 = 0; i <= n; i++:
+    acc = acc + i
+  return acc
+
+fn main() i64 = return sum_to(100)

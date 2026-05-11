@@ -35,7 +35,7 @@ struct Future[t](awaitable[t]) =
     return tin_future_ready(this.pid) != 0
 
   // Block until the fiber finishes, then read the result. Safe to
-  // call directly even if not ready — _tin_future_await_raw spins
+  // call directly even if not ready - _tin_future_await_raw spins
   // via _tin_fiber_join.
   fn awaitable::result(this Future[t]) t =
     let raw *void = tin_future_await_raw(this.pid)

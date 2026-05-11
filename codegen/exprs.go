@@ -69,6 +69,7 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 
 		if entry, ok := cg.curScope.lookup(key); ok {
 			var fnVal value.Value
+
 			if entry.isAlloc {
 				ptrTy := entry.val.Type().(*irtypes.PointerType)
 				fnVal = blk.NewLoad(ptrTy.ElemType, entry.val)
@@ -221,7 +222,7 @@ func blockOwner(b *ir.Block) *ir.Func { return b.Parent }
 // takes the same receiver as the impl method, internally invokes
 // the impl's method, reconstructs the result in `target`, and
 // returns. Each unique target produces a distinct LLVM symbol so
-// every call site dispatches directly — no inline rewrap, no
+// every call site dispatches directly - no inline rewrap, no
 // runtime tag-walk at the caller.
 //
 // Returns (monoFn, true) when monomorphization applies: the impl
@@ -273,7 +274,7 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 		origFn = fn
 	} else {
 		// Cross-package fallback: same situation as callMethod's
-		// fallback above — the plain alias died with the foreign
+		// fallback above - the plain alias died with the foreign
 		// package's scope, but the impl's IR func survives in the
 		// module under its trait-qualified name.
 		if dd, ok := cg.dataDecls[typeName]; ok {
@@ -307,6 +308,7 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 	cg.wildcardMonos[monoName] = monoFn
 
 	prevBlock := cg.curBlock
+
 	defer func() { cg.curBlock = prevBlock }()
 
 	entry := monoFn.NewBlock("entry")
@@ -344,18 +346,18 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 // emitAwaitableLoop lowers `await x` where x is a non-Future awaitable
 // to a runtime-driven spin loop:
 //
-//   loop:
-//     if x.ready(): goto done
-//     yield
-//   done:
-//     x.result()
+//	loop:
+//	  if x.ready(): goto done
+//	  yield
+//	done:
+//	  x.result()
 //
 // The runtime owns the spin/yield, so user impls of awaitable[t]
 // only have to answer "ready?" and "result". `yield` lowers to a
 // no-op outside an {#async} body, so `await` from synchronous code
-// turns into a busy-wait — which matches the legacy await_result
-// behaviour for direct (non-fiber) callers.
-func (cg *CodeGen) emitAwaitableLoop(block *ir.Block, val value.Value, readyFn, resultFn *ir.Func) (value.Value, error) {
+// turns into a busy-wait - which matches the legacy await_result
+// behavior for direct (non-fiber) callers.
+func (cg *CodeGen) emitAwaitableLoop(block *ir.Block, val value.Value, readyFn, resultFn *ir.Func, releaseVal bool) (value.Value, error) {
 	condBlk := cg.newBlock("await.cond")
 	bodyBlk := cg.newBlock("await.body")
 	doneBlk := cg.newBlock("await.done")
@@ -382,6 +384,17 @@ func (cg *CodeGen) emitAwaitableLoop(block *ir.Block, val value.Value, readyFn, 
 	resultArgs := cg.adaptArgs(doneBlk, []value.Value{val}, resultFn.Sig)
 	res := doneBlk.NewCall(resultFn, resultArgs...)
 	cg.curBlock = doneBlk
+
+	// Release the awaitable struct value once its result has been
+	// extracted -- but only when the value was a temp at the await
+	// site (e.g. `await m.lock()`, where Mutex.lock()'s LockHandle
+	// has no other owner).  For `await h` shapes the caller's
+	// h binding still owns the awaitable and will release it on
+	// scope exit; releasing here too would double-decrement the
+	// underlying rc::Cell.
+	if releaseVal && cg.elemNeedsRelease(val.Type()) {
+		cg.emitRelease(doneBlk, val)
+	}
 
 	return res, nil
 }
@@ -412,35 +425,6 @@ func (cg *CodeGen) adtImplHasWildcardBound(adtName, traitBaseName string) bool {
 			if typeExprContainsWildcard(impl) {
 				return true
 			}
-		}
-	}
-
-	return false
-}
-
-// adtImplHasWildcardBoundLegacy is the pre-template-aware version,
-// retained for any code path still calling it directly. Prefer
-// adtImplHasWildcardBound. Same semantics, just doesn't fall back
-// through the template.
-func (cg *CodeGen) adtImplHasWildcardBoundLegacy(adtName, traitBaseName string) bool {
-	decl := cg.dataDecls[adtName]
-	if decl == nil {
-		if idx := strings.Index(adtName, "__"); idx > 0 {
-			decl = cg.dataDecls[adtName[:idx]]
-		}
-	}
-
-	if decl == nil {
-		return false
-	}
-
-	for _, impl := range decl.Implements {
-		if traitBaseImplName(impl) != traitBaseName {
-			continue
-		}
-
-		if typeExprContainsWildcard(impl) {
-			return true
 		}
 	}
 
@@ -499,7 +483,7 @@ func typeExprContainsWildcard(te ast.TypeExpr) bool {
 }
 
 // rewrapTryable handles cross-T propagation for the `try` keyword
-// — generically across any ADT pair where matching-named variants have
+// - generically across any ADT pair where matching-named variants have
 // compatible payload layouts. The keyword's err branch produces a value
 // whose static type may not equal the enclosing fn's return type
 // because the impl declared `err_value` with a wildcard slot
@@ -510,7 +494,7 @@ func typeExprContainsWildcard(te ast.TypeExpr) bool {
 // Strategy: dispatch on inner's runtime tag. For each tag:
 //   - if target has a same-named variant whose payload type matches,
 //     extract the inner's fields and reconstruct in target;
-//   - otherwise panic — at runtime that branch is unreachable when
+//   - otherwise panic - at runtime that branch is unreachable when
 //     the impl's is_err honestly filters only payload-compatible
 //     variants into the err branch (Result.Ok / Option.Some never
 //     reach here because is_err returned false).
@@ -547,7 +531,7 @@ func (cg *CodeGen) rewrapTryable(block *ir.Block, inner value.Value, target irty
 
 	// Find variants that exist in both with payload-compatible shape.
 	// Variants present only in inner, or whose payload differs, become
-	// "panic" arms — runtime is supposed to never hit them since the
+	// "panic" arms - runtime is supposed to never hit them since the
 	// impl's is_err already filtered.
 	type rewrapArm struct {
 		name      string
@@ -600,8 +584,7 @@ func (cg *CodeGen) rewrapTryable(block *ir.Block, inner value.Value, target irty
 
 	tagGEP := block.NewGetElementPtr(innerOuterSt, innerStorage,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	tagI8 := block.NewLoad(irtypes.I8, tagGEP)
-	tagI64 := block.NewZExt(tagI8, irtypes.I64)
+	tagI64 := block.NewLoad(irtypes.I64, tagGEP)
 
 	// joinBlock collects each arm's rewrapped value via a phi.
 	joinBlock := parentFn.NewBlock("try.rewrap.join")
@@ -640,7 +623,7 @@ func (cg *CodeGen) rewrapTryable(block *ir.Block, inner value.Value, target irty
 		armBlock.NewBr(joinBlock)
 
 		switchCases = append(switchCases, ir.NewCase(
-			constant.NewInt(irtypes.I64, int64(arm.innerInfo.Tag)), armBlock))
+			constant.NewInt(irtypes.I64, arm.innerInfo.Tag), armBlock))
 		incomings = append(incomings, ir.NewIncoming(rewrapped, armBlock))
 	}
 
@@ -919,7 +902,7 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 			//
 			// The runtime drives the spin loop, so user impls
 			// only have to answer "ready?" and "result". If
-			// either method is missing report which one — the
+			// either method is missing report which one - the
 			// most common cause is forgetting to migrate from
 			// the old single-method shape.
 			readyName := structName + "_ready"
@@ -930,9 +913,18 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 			if hasReady && hasResult {
 				if readyFn, rOk := readyEntry.val.(*ir.Func); rOk {
-				if resultFn, sOk := resultEntry.val.(*ir.Func); sOk {
-					return cg.emitAwaitableLoop(block, val, readyFn, resultFn)
-				}
+					if resultFn, sOk := resultEntry.val.(*ir.Func); sOk {
+						// `await <name>` (Identifier / DerefExpr of a
+						// named pointer) is a borrow of the outer scope's
+						// binding -- the original binding's scope exit
+						// will release it.  Only release inside the loop
+						// when the futureExpr is a temp producer
+						// (CallExpr, BinExpr concat, etc.) and no other
+						// owner exists.
+						release := !isCopyExpr(futureExpr)
+
+						return cg.emitAwaitableLoop(block, val, readyFn, resultFn, release)
+					}
 				}
 			}
 

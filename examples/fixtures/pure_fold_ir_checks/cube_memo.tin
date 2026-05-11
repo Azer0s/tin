@@ -1,0 +1,5 @@
+fn{#pure} cube(n i64) i64 = return n * n * n
+
+fn main() i64 =
+  let a = cube(3) + cube(3) + cube(3)
+  return a

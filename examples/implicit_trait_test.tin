@@ -9,7 +9,7 @@
 // participate in:
 //
 //                       implicit[T]                        coerce[U]
-//   T  ───────────────────────────►  S  ─────────────────────────►  U
+//   T  --------------------------->  S  ------------------------->  U
 //        let x S = t                  let x U = s as U
 //
 // This file exercises implicit's existing decimal::Value impl plus a

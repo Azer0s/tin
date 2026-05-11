@@ -1,0 +1,17 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+struct Rock =
+  weight i64
+
+fn check(a *Animal) =
+  if a is *Rock:
+    echo "rock"
+
+fn main() =
+  let d = &Dog{name: "rex"}
+  check(d)

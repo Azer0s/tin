@@ -243,6 +243,16 @@ func (p *Parser) skipSemisAndNewlines() {
 	for p.check(lexer.NEWLINE) || p.check(lexer.SEMI) {
 		p.advance()
 	}
+	// Drain owed continuation DEDENTs from multi-line binary
+	// operator expressions (e.g. `let c = a\n      || b`).
+	// parseBinary records each consumed INDENT in
+	// continuationDedents; parseBlock's loop would otherwise see
+	// the matching DEDENT as the block terminator and close the
+	// enclosing scope early.
+	for p.continuationDedents > 0 && p.check(lexer.DEDENT) {
+		p.advance()
+		p.continuationDedents--
+	}
 	// Same lambda-DEDENT drain as in skipNewlines - parseBlock's main
 	// loop calls this after each stmt and would otherwise see the owed
 	// DEDENT and exit the wrong scope.

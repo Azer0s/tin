@@ -1,0 +1,7 @@
+fn worker() i64 = return 1
+
+fn{#pure} bad() i64 =
+  let f = spawn worker()
+  return await f
+
+fn main() i64 = return bad()

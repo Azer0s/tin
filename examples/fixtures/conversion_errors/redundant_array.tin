@@ -1,0 +1,2 @@
+fn main() =
+  let xs [u32; 3] = [0x1 as u32, 0x2 as u32, 0x3 as u32]

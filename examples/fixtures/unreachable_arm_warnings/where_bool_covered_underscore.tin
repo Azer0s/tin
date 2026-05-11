@@ -1,0 +1,6 @@
+fn yn(b bool) string =
+  where (true):  "yes"
+  where (false): "no"
+  where _:       "??"
+
+echo yn(true)

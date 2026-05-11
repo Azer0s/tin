@@ -1,0 +1,10 @@
+use result
+use { Result } from result
+use errors
+
+fn parse() Result[i64, errors::Err] = return Ok(42)
+
+fn main() =
+  match parse():
+    case Ok(x):  echo "got {x}"
+    case Err(e): echo "err: {e.message()}"

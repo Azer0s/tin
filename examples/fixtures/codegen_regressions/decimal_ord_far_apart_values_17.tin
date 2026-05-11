@@ -1,0 +1,9 @@
+use decimal
+
+fn main() =
+  let a = decimal::from(-9223372036854000000)
+  let b = decimal::from(800)
+  let r = a.ord(b)
+
+  if r >= 0: echo "wrong sign"
+  else:      echo "ok"

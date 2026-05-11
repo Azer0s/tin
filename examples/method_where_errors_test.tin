@@ -1,0 +1,41 @@
+// examples/method_where_errors_test.tin -- method-level `where`
+// guards on generic struct methods.  When a method's bound fails
+// for the concrete instantiation the method is dead-stripped and
+// the call site emits a diagnostic naming the failing constraint.
+// This file pins each diagnostic shape:
+//
+//   1. single leaf bound  -> "doesn't match where t is X"
+//   2. AND bound          -> "(missing Z)"
+//   3. OR / union bound   -> "doesn't match where t is <alias>"
+//   4. multi-impl, none   -> "doesn't match any of: ..."
+//
+// Replaces examples/method_where_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_compile_error(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/method_where_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+test "leaf bound: pretty struct name + bound" =
+  expect_compile_error("leaf_bound.tin", "Box[bool].just_i64 doesn't match where t is i64")
+
+test "AND bound failure points at the failing conjunct" =
+  expect_compile_error("and_bound.tin", "(missing Sized)")
+
+test "OR / union-alias bound names the bound" =
+  expect_compile_error("or_bound.tin", "doesn't match where t is intish")
+
+test "multi-impl failure lists every candidate" =
+  expect_compile_error("multi_impl.tin", "doesn't match any of: where t is intish, where t is floatish")
+
+test "method survives when the guard holds" =
+  // Sanity: compile-only via `tin build-test` to make sure the same
+  // method survives dead-strip when the concrete type satisfies the
+  // bound -- proves the strip is keyed on the bound, not the name.
+  let r = run_tin("build-test", "examples/fixtures/method_where_errors/guard_holds.tin")
+
+  assert::equals(0 as i32, r.exit_code)

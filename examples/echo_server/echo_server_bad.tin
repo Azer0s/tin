@@ -13,11 +13,10 @@
 //               spawn, async I/O, TINMAXPROCS M:N scheduling.
 
 use { loop, async } from macros
-use io
 use ioutil
 use net::tcp
 use encoding::json
-use errors
+use { unwrap } from result
 
 async handle_conn(conn tcp::Conn) =
   defer conn.close()
@@ -36,15 +35,13 @@ async handle_conn(conn tcp::Conn) =
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn{#async} main() =
-  let (srv, err) = tcp::listen(8080)
+  let srv = unwrap(tcp::listen(8080))
 
-  if errors::is_err(err):
-    panic(err.message())
   echo "listening on :8080"
 
   loop:
-    let (c, cerr) = srv.accept()
-
-    if errors::is_err(cerr):
-      break
-    spawn handle_conn(c)
+    match srv.accept():
+      case Ok(c):
+        spawn handle_conn(c)
+      case Err(_):
+        break

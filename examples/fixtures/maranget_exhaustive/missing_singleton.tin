@@ -1,0 +1,5 @@
+fn s(xs [i32]) i32 =
+  where ([]): 0
+  where ([x, ...rest]): x
+
+echo s([5])

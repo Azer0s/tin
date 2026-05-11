@@ -35,6 +35,45 @@ data Option[t](tryable[t, Option[_]]) =
       case Some(_): panic("tryable::err_value on Some")
       case None:    return this
 
+  // is_some reports whether the Option holds a value.
+  fn is_some(this Option[t]) bool =
+    match this:
+      case Some(_): return true
+      case None:    return false
+
+  // is_none reports whether the Option is empty.
+  fn is_none(this Option[t]) bool =
+    match this:
+      case Some(_): return false
+      case None:    return true
+
+  // unwrap_or returns the Some value or d when this is None.
+  fn unwrap_or(this Option[t], d t) t =
+    match this:
+      case Some(v): return v
+      case None:    return d
+
+  // or_else_value returns this when Some, otherwise the literal
+  // fallback Option.  Cheaper than or_else when the fallback is
+  // already-built and never needs to be lazily computed.
+  fn or_else_value(this Option[t], fallback Option[t]) Option[t] =
+    match this:
+      case Some(v): return Some(v)
+      case None:    return fallback
+
+  // unwrap returns the Some value or panics on None.  Two
+  // overloads: no-arg form uses a default message, the (msg) form
+  // lets the caller supply context for the panic.
+  fn unwrap(this Option[t]) t =
+    match this:
+      case Some(v): return v
+      case None:    panic("option::unwrap on None")
+
+  fn unwrap(this Option[t], msg string) t =
+    match this:
+      case Some(v): return v
+      case None:    panic(msg)
+
 // is_some reports whether the Option holds a value.
 fn is_some[t](o Option[t]) bool =
   match o:
@@ -53,7 +92,10 @@ fn unwrap_or[t](o Option[t], d t) t =
     case Some(v): return v
     case None:    return d
 
-// map applies f to the Some value, leaving None untouched.
+// map applies f to the Some value, leaving None untouched.  Kept as
+// a top-level helper because methods can't directly express the
+// closure's `u` type parameter at call sites today; users still write
+// `option::map(o, fn(x) ...)`.
 fn map[t, u](o Option[t], f fn(t) u) Option[u] =
   match o:
     case Some(v): return Some(f(v))
@@ -71,14 +113,21 @@ fn or_else[t](o Option[t], f fn() Option[t]) Option[t] =
     case Some(v): return Some(v)
     case None:    return f()
 
-// unwrap returns the Some value or panics on None.
+// or_else_value returns o when Some, otherwise the literal fallback.
+fn or_else_value[t](o Option[t], fallback Option[t]) Option[t] =
+  match o:
+    case Some(v): return Some(v)
+    case None:    return fallback
+
+// unwrap returns the Some value or panics on None.  Two overloads:
+// no-arg form uses a default message, the (msg) form lets the
+// caller supply context for the panic.
 fn unwrap[t](o Option[t]) t =
   match o:
     case Some(v): return v
     case None:    panic("option::unwrap on None")
 
-// expect returns the Some value or panics with msg on None.
-fn expect[t](o Option[t], msg string) t =
+fn unwrap[t](o Option[t], msg string) t =
   match o:
     case Some(v): return v
     case None:    panic(msg)
