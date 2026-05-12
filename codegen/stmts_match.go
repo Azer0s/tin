@@ -470,6 +470,17 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 				if !rcTracked && !owningStruct && !transferredFromBorrow {
 					entry.noRelease = true
 				}
+				// Iface fat-ptr with borrow scrutinee: the retain above is
+				// gated on wantScrutRelease, so when the scrutinee owns the
+				// data (Identifier / FieldAccess source) no retain fired.
+				// The scope-exit release would then decrement an rc the
+				// binding never bumped, frees the iface block while the
+				// scrutinee still references it, and the next allocator
+				// reuse trips on the dangling pointer.  Skip the release
+				// to mirror the retain gate.
+				if rcTracked && isTraitFatPtrShape(fieldVal.Type()) && !wantScrutRelease {
+					entry.noRelease = true
+				}
 
 				cg.curScope.set(name, entry)
 			}

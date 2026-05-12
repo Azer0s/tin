@@ -175,10 +175,30 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		monoTarget = cg.curFn.Sig.RetType
 	}
 
+	// Release tempStorage's content before returning from the try.err
+	// path.  The receiver was passed by value to err_value via a load, so
+	// tempStorage's bytes still reference the same Err payload;
+	// err_value's entry-retain bumped that payload's inner RC fields by
+	// +1 with no balancing release on the Err-branch `return this` path,
+	// so the rc would stay at +1 past return and leak.  Decrementing
+	// tempStorage here balances err_value's entry retain; the returned
+	// value still owns rc=1 for the caller.
+	emitTempRelease := func(blk *ir.Block) {
+		loaded := blk.NewLoad(srcType, tempStorage)
+		cg.emitRelease(blk, loaded)
+	}
+
 	monoFn, monoOK := cg.ensureWildcardMono(typeName, "err_value", srcType, monoTarget)
 	if monoOK {
 		thisArg := errBlock.NewLoad(srcType, tempStorage)
 		rewrapped := errBlock.NewCall(monoFn, thisArg)
+		emitTempRelease(errBlock)
+		// Run scope releases before the propagating return.  The
+		// surrounding function's RC locals (string params, closure
+		// envs, etc.) need to be cleaned up exactly as on a normal
+		// `return <expr>` path; skipping them here was leaking those
+		// allocations on any `try expr` early return.
+		cg.emitAllScopeReleases(errBlock, "")
 		errBlock.NewRet(rewrapped)
 	} else {
 		_, errVal, err := callMethod(errBlock, "err_value")
@@ -200,6 +220,8 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 				fmtArgType(errVal.Type()), fmtArgType(monoTarget), pretty, pretty)
 		}
 
+		emitTempRelease(errBlock)
+		cg.emitAllScopeReleases(errBlock, "")
 		errBlock.NewRet(errVal)
 	}
 
@@ -208,6 +230,8 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if err != nil {
 		return nil, err
 	}
+
+	emitTempRelease(okBlock)
 
 	cg.curBlock = okBlock
 

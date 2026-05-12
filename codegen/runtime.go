@@ -1616,6 +1616,39 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 		}
 	}
 
+	// Value-form trait fat-ptr: dispatch via the vtable's data-release thunk
+	// (last slot) on the data ptr so the underlying concrete struct's
+	// per-type release_ptr walks its RC fields before the block is freed.
+	// A raw _tin_release here would decrement the iface block's rc and
+	// free it without releasing inner heap-allocated fields like a
+	// StringErr's heap-built `msg` from `errors::wrap`.
+	if st, ok := t.(*irtypes.StructType); ok && isTraitFatPtrShape(st) {
+		dataField := block.NewExtractValue(val, 0)
+		vtableField := block.NewExtractValue(val, 1)
+
+		vtablePtrType, ok2 := st.Fields[1].(*irtypes.PointerType)
+		if ok2 {
+			if vtableSt, ok3 := vtablePtrType.ElemType.(*irtypes.StructType); ok3 && len(vtableSt.Fields) > 0 {
+				lastIdx := len(vtableSt.Fields) - 1
+				lastFieldType := vtableSt.Fields[lastIdx]
+
+				if lastPt, ok4 := lastFieldType.(*irtypes.PointerType); ok4 {
+					if lastFnType, ok5 := lastPt.ElemType.(*irtypes.FuncType); ok5 &&
+						len(lastFnType.Params) == 1 &&
+						lastFnType.Params[0].Equal(irtypes.I8Ptr) &&
+						irtypes.IsVoid(lastFnType.RetType) {
+						releaseFnSlot := block.NewGetElementPtr(vtableSt, vtableField,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(lastIdx)))
+						releaseFn := block.NewLoad(lastFieldType, releaseFnSlot)
+						block.NewCall(releaseFn, dataField)
+
+						return
+					}
+				}
+			}
+		}
+	}
+
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
 		block.NewCall(cg.ensureRelease(), rcPtr)

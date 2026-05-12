@@ -1,0 +1,140 @@
+// examples/iface_arc_regressions.tin -- regression tests for ARC bugs
+// found while migrating errors::new to the value-form Err iface.  Each
+// test exercises a specific code path; run under `tin test --leaks` to
+// catch over-retains / under-releases by zero-leak budget.
+//
+// The bugs ranged from compile-time codegen errors (extra retains in
+// ADT-variant construction) to runtime corruption (releasing
+// match-bound iface bindings the scrutinee still owned).
+
+use assert
+use { Result } from result
+use errors
+use strings
+
+// 1. Match-bound iface from a borrow scrutinee.
+//
+// `match r: case Err(e): use e` where `r` is a let-binding (borrow
+// scrutinee) must NOT retain `e` -- and consequently the binding's
+// scope-exit release must skip too.  Without the matched gate, the
+// release decremented an rc the binding never bumped, freed the iface
+// block while the scrutinee still referenced it, and the next allocator
+// reuse tripped on a dangling pointer (SIGBUS on the macOS allocator).
+
+fn read_msg(r Result[i64, errors::Err]) string =
+  match r:
+    case Ok(_):  return "ok"
+    case Err(e): return e.message()
+
+test "match Err(e) on borrow scrutinee does not over-release iface" =
+  let r Result[i64, errors::Err] = Err(errors::new("boom"))
+  let m = read_msg(r)
+
+  assert::equals("boom", m)
+
+// 2. try.ok extracts a string success: ok_value's entry retain + match
+// binding retain on the success string pair up with one data_release_val,
+// netting +1 -- the try lowering's tempStorage release balances it so
+// the let-binding holding the extracted string still owns rc=1.
+
+fn label_or_propagate(r Result[i64, errors::Err]) Result[string, errors::Err] =
+  let s = try r.map(fn(x i64) string = return "label-{x}")
+
+  return Ok(s ++ "!")
+
+test "try-ok on Result[string,_] does not leak the extracted success" =
+  let r Result[i64, errors::Err] = Ok(5)
+
+  match label_or_propagate(r):
+    case Ok(v):  assert::equals("label-5!", v)
+    case Err(_): assert::ok(false)
+
+// 3. try.err propagates without leaking the iface payload.  Symmetric
+// to (2) -- err_value's `return this` skips its scope release while
+// the entry retain bumped the iface's data rc; the try lowering's
+// tempStorage release on the err path closes the +1.
+
+test "try-err propagates the original Err without leaking iface block" =
+  let r Result[i64, errors::Err] = Err(errors::new("upstream"))
+
+  match label_or_propagate(r):
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals("upstream", e.message())
+
+// 4. Value-form iface release walks the inner concrete struct's RC
+// fields.  Pre-fix, `errors::wrap(inner, ctx)` returned a value Err
+// whose data ptr backed a StringErr with a heap-allocated msg --
+// raw `_tin_release` on the iface data ptr decremented the block's
+// rc but never released msg.  The dispatch must go through the
+// vtable's data-release thunk so StringErr__release_ptr cascades.
+
+test "value-form errors::wrap drops the inner heap msg on release" =
+  let inner = errors::new("disk full")
+  let outer = errors::wrap(inner, "saving config")
+
+  assert::equals("saving config: disk full", outer.message())
+
+// 5. Constructing `Err(NullaryVariant)` widens the variant into an
+// errors::Err iface via coerceToTrait -- a fresh rc=1 backing block.
+// wrapDataVariant used to treat the coerced iface as a borrowed
+// Identifier and retain it again (rc=2 with only one matching
+// release at consumer drop, leaking the variant block).
+
+data DemoErr(errors::Err, print) =
+  EmptyKind
+  WithMsg(text string)
+
+  fn errors::Err::message(this DemoErr) string =
+    match this:
+      case EmptyKind:      return "demo: empty"
+      case WithMsg(t):     return "demo: {t}"
+
+  fn ::print(this DemoErr) string = return this.message()
+
+fn fail_empty() Result[i64, errors::Err] =
+  return Err(EmptyKind)
+
+test "Err(nullary variant) widening does not leak the iface backing" =
+  match fail_empty():
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals("demo: empty", e.message())
+
+// 6. Explicit `X as errors::Err` cast as Err's argument exercises the
+// same retain-on-coerced-iface bug but through AsExpr's coerceToTrait
+// path -- the value arriving at wrapDataVariant has already been
+// widened (preCoerceType == expected) so the fresh-iface check needs
+// the AST-shape exemption in addition to the type-change exemption.
+
+fn fail_with_msg(s string) Result[i64, errors::Err] =
+  return Err(WithMsg(s) as errors::Err)
+
+test "Err(X as errors::Err) does not leak the iface backing" =
+  match fail_with_msg("io"):
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals("demo: io", e.message())
+
+// 7. parse_int's Err(StringsError variant) flows through map_err's
+// lambda producing an AppError struct with a heap text field, then
+// through try.err propagation.  Combines (1), (3), (4), and (5):
+// match-bound iface borrow + value-form release with heap field +
+// try.err temp release + Err(coerced) construction.  This is the
+// real-world shape that revealed the chain of bugs.
+
+struct AppError =
+  code i64
+  text string
+
+fn parse_int_doubled(s string) Result[i64, AppError] =
+  let v = try strings::parse_int(s).map_err(fn(e errors::Err) AppError =
+    return AppError{code: 1, text: e.message()})
+
+  return Ok(v * 2)
+
+test "try+map_err over heap-fielded error round-trip is leak-clean" =
+  match parse_int_doubled("not-a-number"):
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals(1, e.code)
+
+  match parse_int_doubled("21"):
+    case Ok(v):  assert::equals(42, v)
+    case Err(_): assert::ok(false)

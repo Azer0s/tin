@@ -1018,6 +1018,7 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 		}
 
 		expected := vi.PayloadType.Fields[i]
+		preCoerceType := v.Type()
 		argVals[i] = cg.coerce(block, v, expected)
 		// Same fresh-alloc exemption as the unqualified variant
 		// constructor above: skip the retain when the arg already owns
@@ -1025,6 +1026,25 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 		// result) so the construction doesn't push rc from 1 to 2 with
 		// only one matching release ever fired.
 		retainMask[i] = isCopyExpr(a) && !isFreshBytesAlloc(argVals[i]) && !isFreshCallResult(argVals[i])
+		// Fresh trait fat-ptr iface in field position: either
+		// (a) the implicit coerce widened a concrete value (preCoerceType
+		// differs from the iface field), or
+		// (b) the user wrote `X as Trait` and the AsExpr already invoked
+		// coerceToTrait, so the value arriving here is already iface-typed
+		// but came from a fresh _tin_rc_alloc.
+		// Both produce an owned rc=1 iface backing block.  Retaining here
+		// pushes rc to 2 with only one matching release at consumer drop,
+		// leaking the backing block (e.g. `Err(EmptyInput)` widening a
+		// JsonError, or `Err(X as errors::Err)` from jwt::verify).
+		if retainMask[i] {
+			if expSt, ok := expected.(*irtypes.StructType); ok && isTraitFatPtrShape(expSt) {
+				if !preCoerceType.Equal(expected) {
+					retainMask[i] = false
+				} else if _, isAs := a.(*ast.AsExpr); isAs {
+					retainMask[i] = false
+				}
+			}
+		}
 	}
 
 	return cg.wrapDataVariant(block, adt, variantName, argVals, retainMask)
