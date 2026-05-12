@@ -529,12 +529,19 @@ func expandShellExprs(s string) string {
 //
 //	//!-lm                         -> linker flag -lm
 //	//!-lm [x86_64]                -> linker flag -lm, x86_64 only
+//	//!-framework Cocoa [darwin]   -> two argv entries: -framework, Cocoa
 //	//!+helper.c                   -> compile helper.c alongside the module
 //	//!+src/foo.c -- -DDEBUG       -> compile src/foo.c with extra flag -DDEBUG
 //	//!+src/foo.c [arch]           -> compile only on matching arch
 //	//!+src/foo.c [arch] -- FLAGS  -> arch-specific file with extra flags
 //	//!-suppressions=PATH          -> pass --suppressions=PATH to valgrind
 //	                                   for this file (no effect outside --valgrind)
+//
+// Linker-flag directives are tokenized on whitespace AFTER $ENV / $(cmd)
+// expansion so multi-token flags like `-framework Cocoa` reach the linker
+// as separate argv entries.  Embed `$(brew --prefix foo)/lib/libfoo.a`
+// when you need to keep a path containing spaces in one token; that
+// command-substitution form is expanded before tokenization.
 //
 // srcDir is the directory of the .tin file; relative paths are resolved
 // against it.  $TIN_RUNTIME / $TIN_STDLIB / $ENV variables expand in
@@ -630,10 +637,18 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 
 				vgSuppressions = append(vgSuppressions, expanded)
 			} else {
-				// Linker flag: check for optional arch qualifier.
+				// Linker flag: check for optional arch qualifier, expand
+				// $ENV / $(cmd) tokens, then split into individual argv
+				// entries.  Multi-token flags like `-framework Cocoa` or
+				// `-Xlinker -rpath -Xlinker $ORIGIN` need to reach the
+				// linker as separate argv elements -- ld looks up
+				// `-framework` and `Cocoa` independently and rejects the
+				// concatenated form.  Mirrors how //!+file.c -- FLAGS
+				// tokenizes its trailing flag list.
 				flagAndQualifier, archQualifier := extractArchQualifier(rest)
 				if archMatches(archQualifier) {
-					linkerFlags = append(linkerFlags, os.ExpandEnv(expandShellExprs(flagAndQualifier)))
+					expanded := os.ExpandEnv(expandShellExprs(flagAndQualifier))
+					linkerFlags = append(linkerFlags, strings.Fields(expanded)...)
 				}
 			}
 
