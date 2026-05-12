@@ -1,5 +1,4 @@
 use assert
-use result
 use { Result } from result
 
 test "Result Ok/Err via match" =

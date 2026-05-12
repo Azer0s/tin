@@ -2,26 +2,26 @@ use assert
 use crypto::subtle
 
 test "ct_eq returns true on equal byte slices" =
-  let a [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
-  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+  let a [byte] = [@'a', @'b', @'c']
+  let b [byte] = [@'a', @'b', @'c']
 
   assert::ok(subtle::ct_eq(a, b))
 
 test "ct_eq returns false on differing length" =
-  let a [byte] = [@'a' as byte, @'b' as byte]
-  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+  let a [byte] = [@'a', @'b']
+  let b [byte] = [@'a', @'b', @'c']
 
   assert::ok(!subtle::ct_eq(a, b))
 
 test "ct_eq returns false on differing content (early bytes)" =
-  let a [byte] = [@'X' as byte, @'b' as byte, @'c' as byte]
-  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+  let a [byte] = [@'X', @'b', @'c']
+  let b [byte] = [@'a', @'b', @'c']
 
   assert::ok(!subtle::ct_eq(a, b))
 
 test "ct_eq returns false on differing content (last byte)" =
-  let a [byte] = [@'a' as byte, @'b' as byte, @'X' as byte]
-  let b [byte] = [@'a' as byte, @'b' as byte, @'c' as byte]
+  let a [byte] = [@'a', @'b', @'X']
+  let b [byte] = [@'a', @'b', @'c']
 
   assert::ok(!subtle::ct_eq(a, b))
 

@@ -12,7 +12,6 @@
 // Run with: tin test examples/fibers/panic_propagation.tin
 
 use assert
-use sync
 
 fn{#async} always_panics() i64 =
   panic("boom from fiber")

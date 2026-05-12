@@ -8,7 +8,6 @@ use { Instant } from time
 use encoding::json
 use guid
 use { Guid } from guid
-use errors
 
 // ---- Duration arithmetic ----
 
@@ -382,9 +381,10 @@ test "awaited sleep_ms convenience matches sleep(from_ms)" =
 test "unawaited sleep is a noop -- the future is dropped" =
   let start = time::monotonic_ns()
 
-  // SleepFuture created and discarded; no wait should occur.
-  time::sleep(time::from_ms(100))
-  time::sleep_ms(100)
+  // SleepFuture created and discarded; no wait should occur.  Bind to
+  // `_` so the must-use warning doesn't fire on the deliberate drop.
+  let _ = time::sleep(time::from_ms(100))
+  let _ = time::sleep_ms(100)
   let elapsed = time::monotonic_ns() - start
 
   // 50ms slack -- both calls should return effectively immediately.

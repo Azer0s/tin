@@ -9,7 +9,6 @@
 use assert
 use io
 use os
-use result
 
 fn{#async} write_str(bw *io::BufWriter, s string) i64 =
   let bytes = s as [byte]

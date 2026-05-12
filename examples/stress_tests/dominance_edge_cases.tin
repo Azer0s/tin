@@ -20,7 +20,6 @@
 // incorrect assumptions about which block dominates which.
 
 use assert
-use sync
 
 // ---------------------------------------------------------------------------
 // 1. Value defined before if, used after both branches merge

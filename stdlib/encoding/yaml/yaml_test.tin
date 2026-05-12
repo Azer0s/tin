@@ -5,7 +5,6 @@
 
 use assert
 use encoding::yaml
-use result
 
 // Module-level structs used across multiple tests.
 

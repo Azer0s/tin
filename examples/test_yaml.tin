@@ -6,7 +6,6 @@
 
 use assert
 use encoding::yaml
-use result
 
 // Typed structs for typed-parse tests.
 

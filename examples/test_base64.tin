@@ -1,7 +1,6 @@
 use assert
 use encoding::base64
 use errors
-use result
 use strings
 
 test "encode empty" =

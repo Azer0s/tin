@@ -6,7 +6,6 @@
 
 use assert
 use net::dns
-use result
 
 test "lookup_host resolves localhost to a loopback address" =
   let r = dns::lookup_host("localhost")

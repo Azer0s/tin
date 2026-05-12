@@ -4,9 +4,7 @@
 // os::tempfile so concurrent runs don't clash.
 
 use assert
-use io
 use os
-use result
 
 fn{#async} write_string_to(f os::File, s string) i64 =
   let buf = s as [byte]
@@ -126,4 +124,4 @@ test "spawn nonexistent program surfaces an error code" =
       let mp = &p
       let code = mp.wait().unwrap()
 
-      assert::not_equals(0 as i64, code as i64)
+      assert::not_equals(0, code as i64)

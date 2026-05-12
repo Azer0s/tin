@@ -1,5 +1,4 @@
 use assert
-use option
 use { Option } from option
 
 test "Option Some/None via match" =

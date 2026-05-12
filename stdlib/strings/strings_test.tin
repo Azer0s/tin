@@ -5,7 +5,6 @@
 
 use assert
 use strings
-use errors
 use result
 
 // ----- replace ---------------------------------------------------------------
