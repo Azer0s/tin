@@ -32,4 +32,4 @@ test "lookup_host surfaces an Err for a malformed label" =
   // .invalid suffix.
   let r = dns::lookup_host("")
 
-  assert::ok(result::is_err(r))
+  assert::ok(r.is_err())

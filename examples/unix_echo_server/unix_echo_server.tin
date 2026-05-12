@@ -12,7 +12,6 @@
 use { loop, async } from macros
 use ioutil
 use net::unix
-use { unwrap } from result
 
 async handle_conn(conn unix::Conn) =
   defer conn.close()
@@ -24,7 +23,7 @@ async handle_conn(conn unix::Conn) =
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn{#async} main() =
-  let srv = unwrap(unix::listen("/tmp/tin_unix_echo.sock"))
+  let srv = unix::listen("/tmp/tin_unix_echo.sock").unwrap()
 
   echo "listening on /tmp/tin_unix_echo.sock"
 

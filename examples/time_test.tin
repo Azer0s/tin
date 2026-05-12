@@ -9,7 +9,6 @@ use encoding::json
 use guid
 use { Guid } from guid
 use errors
-use { unwrap_or, is_err } from result
 
 // ---- Duration arithmetic ----
 
@@ -147,20 +146,20 @@ test "Instant elapsed" =
 // ---- RFC3339 parsing ----
 
 test "parse_rfc3339 UTC no fractional" =
-  let t = unwrap_or(time::parse_rfc3339("2024-01-15T12:34:56Z"), Instant{ns: 0})
+  let t = time::parse_rfc3339("2024-01-15T12:34:56Z").unwrap_or(Instant{ns: 0})
   // 2024-01-15T12:34:56Z -> Unix seconds: 1705322096
   assert::equals(t.ns, 1705322096000000000)
 
 test "parse_rfc3339 with nanoseconds" =
-  let t = unwrap_or(time::parse_rfc3339("2024-01-15T12:34:56.000000123Z"), Instant{ns: 0})
+  let t = time::parse_rfc3339("2024-01-15T12:34:56.000000123Z").unwrap_or(Instant{ns: 0})
   assert::equals(t.ns, 1705322096000000123)
 
 test "parse_rfc3339 invalid returns error" =
-  assert::ok(is_err(time::parse_rfc3339("not-a-time")))
+  assert::ok(time::parse_rfc3339("not-a-time").is_err())
 
 test "parse_rfc3339 round-trip" =
   let iso = "2024-06-01T08:00:00.000000000Z"
-  let t = unwrap_or(time::parse_rfc3339(iso), Instant{ns: 0})
+  let t = time::parse_rfc3339(iso).unwrap_or(Instant{ns: 0})
   let iso2 = t.to_rfc3339()
 
   assert::equals(iso, iso2)
@@ -174,24 +173,24 @@ test "to_rfc3339 formats correctly" =
 // ---- time::parse with layout ----
 
 test "parse with RFC3339 layout" =
-  let t = unwrap_or(time::parse(time::RFC3339, "2024-01-15T12:34:56Z"), Instant{ns: 0})
+  let t = time::parse(time::RFC3339, "2024-01-15T12:34:56Z").unwrap_or(Instant{ns: 0})
   assert::equals(t.ns, 1705322096000000000)
 
 test "parse with unsupported layout returns error" =
-  assert::ok(is_err(time::parse("YYYY-MM-DD", "2024-01-15")))
+  assert::ok(time::parse("YYYY-MM-DD", "2024-01-15").is_err())
 
 // RFC 3339 sec 5.6 caps timezone offsets at +/-23:59.  Pre-fix the
 // parser accepted arbitrary "+99:99" / "-50:00" via raw sscanf and
 // silently shifted the epoch; bound-check now rejects.
 
 test "parse rejects out-of-range RFC3339 timezone offset" =
-  assert::ok(is_err(time::parse(time::RFC3339, "2024-01-15T12:34:56+99:99")))
+  assert::ok(time::parse(time::RFC3339, "2024-01-15T12:34:56+99:99").is_err())
 
 test "parse rejects RFC3339 minute offset out of range" =
-  assert::ok(is_err(time::parse(time::RFC3339, "2024-01-15T12:34:56-05:99")))
+  assert::ok(time::parse(time::RFC3339, "2024-01-15T12:34:56-05:99").is_err())
 
 test "parse accepts max valid RFC3339 timezone offset" =
-  assert::not_ok(is_err(time::parse(time::RFC3339, "2024-01-15T12:34:56+23:59")))
+  assert::not_ok(time::parse(time::RFC3339, "2024-01-15T12:34:56+23:59").is_err())
 
 // ---- Instant::now ----
 
@@ -215,7 +214,7 @@ test "Instant to_json produces RFC3339 string" =
   assert::equals(j, "\"1970-01-01T00:00:00.000000000Z\"")
 
 test "Instant to_json non-zero" =
-  let t = unwrap_or(time::parse_rfc3339("2024-01-15T12:34:56Z"), Instant{ns: 0})
+  let t = time::parse_rfc3339("2024-01-15T12:34:56Z").unwrap_or(Instant{ns: 0})
   let j = t.to_json()
 
   assert::equals(j, "\"2024-01-15T12:34:56.000000000Z\"")

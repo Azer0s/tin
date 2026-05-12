@@ -23,7 +23,7 @@
 // string and json::parse[T] reconstructs the Instant automatically.
 //
 //   struct event = created_at Instant
-//   let ev = result::unwrap_or(json::parse[event]("{\"created_at\":\"2024-01-01T00:00:00Z\"}"), event{})
+//   let ev = json::parse[event]("{\"created_at\":\"2024-01-01T00:00:00Z\"}").unwrap_or(event{})
 //
 // RFC3339 with nanosecond precision is used for cross-language interoperability.
 

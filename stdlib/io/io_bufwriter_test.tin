@@ -19,10 +19,10 @@ fn{#async} flush_now(bw *io::BufWriter) i64 =
   return await bw.flush()
 
 fn read_all(path string) string =
-  return result::unwrap(os::read_file(path))
+  return os::read_file(path).unwrap()
 
 test "BufWriter coalesces small writes; explicit flush drains" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let bw = io::bufwriter(tf.file as io::AsyncWriter, 32)
   let mbw = &bw
   let n1 = await write_str(mbw, "abc")
@@ -43,7 +43,7 @@ test "BufWriter coalesces small writes; explicit flush drains" =
   let _ = os::remove(tf.path)
 
 test "BufWriter auto-flushes when buffer reaches capacity" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let bw = io::bufwriter(tf.file as io::AsyncWriter, 4)
   let mbw = &bw
   let _ = await write_str(mbw, "wxyz1234")
@@ -57,7 +57,7 @@ test "BufWriter auto-flushes when buffer reaches capacity" =
   let _ = os::remove(tf.path)
 
 test "BufWriter passes oversized writes straight through" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let bw = io::bufwriter(tf.file as io::AsyncWriter, 4)
   let mbw = &bw
   let _ = await write_str(mbw, "ab")

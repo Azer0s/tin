@@ -674,6 +674,38 @@ let sum = nums |> reduce(fn(acc i64, i i64) i64 = return acc + i, 0)
 echo sum   // 15
 ```
 
+### Pipe to a struct / ADT method
+
+`x |> Type::method` resolves `method` as an instance method on `Type` and
+calls it with `x` as the receiver -- the same thing `x.method()` does, but
+in pipe form so it composes with other pipe stages.  Generic type
+arguments are recovered from the LHS's compile-time type, so the bare
+name works without spelling out `[T, U]` again:
+
+```rust
+use { Result } from result
+
+fn parse(s string) Result[i64, errors::Err] = ...
+
+let v = parse("42")
+  |> Result::unwrap          // 42  -- bare form
+  |> double                  // 84
+
+// Explicit type-args are also accepted:
+let w = parse("7") |> Result[i64, errors::Err]::unwrap   // 7
+```
+
+The same form works for trait methods on an ADT or struct.  When a method
+is package-qualified (`pkg::Type::method`), the path goes through the
+package alias just like any other scope reference -- so if you only did
+`use { Type } from pkg` (selective import without the package alias), the
+qualified form errors and you must write the bare `Type::method`; if you
+imported both, the qualified form fires `-Wredundant-import-prefix`.
+
+The receiver value is matched against the first parameter of the chosen
+method, so a method taking `this *Foo` accepts a `*Foo` LHS, and a method
+taking `this Foo` accepts a `Foo` LHS.
+
 --
 
 ## Variadic functions

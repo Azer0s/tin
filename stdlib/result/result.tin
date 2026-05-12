@@ -82,29 +82,12 @@ data Result[t, e](tryable[t, Result[_, e]]) =
       case Ok(v):  return v
       case Err(_): panic(msg)
 
-  // to_option stays as a top-level helper rather than a method:
-  // its return type Option[t] would otherwise force eager
-  // monomorphization of Option[Option[...]] when this Result is
-  // instantiated with an Option payload, colliding with the user's
-  // own Option[T] and surfacing as a Some-ambiguity error.
-
-// is_ok reports whether the Result is an Ok value.
-fn is_ok[t, e](r Result[t, e]) bool =
-  match r:
-    case Ok(_):  return true
-    case Err(_): return false
-
-// is_err reports whether the Result is an Err value.
-fn is_err[t, e](r Result[t, e]) bool =
-  match r:
-    case Ok(_):  return false
-    case Err(_): return true
-
-// unwrap_or returns the Ok value or d when r is Err.
-fn unwrap_or[t, e](r Result[t, e], d t) t =
-  match r:
-    case Ok(v):  return v
-    case Err(_): return d
+  // map, map_err, and_then, or_else, to_option stay as top-level
+  // helpers (below): they introduce method-level type parameters
+  // (`map[u]` over the closure's result type, `to_option` over a
+  // foreign ADT) that the on-demand monomorphizer can't yet
+  // instantiate from a generic ADT's method scope.  Calling them on
+  // an instance still works via pipe (`r |> result::map(...)`).
 
 // map applies f to the Ok value, leaving Err untouched.
 fn map[t, u, e](r Result[t, e], f fn(t) u) Result[u, e] =
@@ -129,25 +112,6 @@ fn or_else[t, e, f](r Result[t, e], g fn(e) Result[t, f]) Result[t, f] =
   match r:
     case Ok(v):  return Ok(v)
     case Err(m): return g(m)
-
-// or_else_value returns r when Ok, otherwise the literal fallback.
-fn or_else_value[t, e](r Result[t, e], fallback Result[t, e]) Result[t, e] =
-  match r:
-    case Ok(v):  return Ok(v)
-    case Err(_): return fallback
-
-// unwrap returns the Ok value or panics on Err.  Two overloads:
-// no-arg form uses a default message, the (msg) form lets the
-// caller supply context for the panic.
-fn unwrap[t, e](r Result[t, e]) t =
-  match r:
-    case Ok(v):  return v
-    case Err(_): panic("result::unwrap on Err")
-
-fn unwrap[t, e](r Result[t, e], msg string) t =
-  match r:
-    case Ok(v):  return v
-    case Err(_): panic(msg)
 
 // to_option converts a Result into an Option, discarding any error.
 fn to_option[t, e](r Result[t, e]) Option[t] =

@@ -16,7 +16,6 @@ use { loop, async } from macros
 use ioutil
 use net::tcp
 use encoding::json
-use { unwrap } from result
 
 async handle_conn(conn tcp::Conn) =
   defer conn.close()
@@ -35,7 +34,7 @@ async handle_conn(conn tcp::Conn) =
     await ioutil::write_string(conn, "ECHO: {line}\n")
 
 fn{#async} main() =
-  let srv = unwrap(tcp::listen(8080))
+  let srv = tcp::listen(8080).unwrap()
 
   echo "listening on :8080"
 

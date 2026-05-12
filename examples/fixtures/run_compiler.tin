@@ -54,7 +54,7 @@ fn{#async} drain_pipe(f os::File) string =
 // the caller only piped stderr).  Splits out from run_tin so the
 // stdout / stderr legs use the same retry-on-empty contract.
 fn{#async} drain_stream(stream Option[os::File]) string =
-  if option::is_none(stream):
+  if stream.is_none():
     return ""
 
   let f = stream.unwrap("drain_stream: stream not piped")

@@ -181,13 +181,13 @@ fn start(argv [string], opts SpawnOptions) Result[Process, errors::Err] =
   let stderr_pair Option[PipePair] = None
 
   if opts.stdin == 'pipe:
-    stdin_pair = Some(result::unwrap(pipe()))
+    stdin_pair = Some(pipe().unwrap())
 
   if opts.stdout == 'pipe:
-    stdout_pair = Some(result::unwrap(pipe()))
+    stdout_pair = Some(pipe().unwrap())
 
   if opts.stderr == 'pipe:
-    stderr_pair = Some(result::unwrap(pipe()))
+    stderr_pair = Some(pipe().unwrap())
 
   // /dev/null fds when streams are requested 'null.
   let dn_in  i32 = -1

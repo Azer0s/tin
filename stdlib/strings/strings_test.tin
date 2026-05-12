@@ -7,7 +7,6 @@ use assert
 use strings
 use errors
 use result
-use { unwrap_or, is_err } from result
 
 // ----- replace ---------------------------------------------------------------
 
@@ -311,47 +310,47 @@ test "split-join round trip" =
 // ----- parse_int -------------------------------------------------------------
 
 test "parse_int positive" =
-  assert::equals(unwrap_or(strings::parse_int("42"), 0), 42)
+  assert::equals(strings::parse_int("42").unwrap_or(0), 42)
 
 test "parse_int negative" =
-  assert::equals(unwrap_or(strings::parse_int("-7"), 0), 0 - 7)
+  assert::equals(strings::parse_int("-7").unwrap_or(0), 0 - 7)
 
 test "parse_int with plus sign" =
-  assert::equals(unwrap_or(strings::parse_int("+5"), 0), 5)
+  assert::equals(strings::parse_int("+5").unwrap_or(0), 5)
 
 test "parse_int empty string is error" =
-  assert::ok(is_err(strings::parse_int("")))
+  assert::ok(strings::parse_int("").is_err())
 
 test "parse_int sign only is error" =
-  assert::ok(is_err(strings::parse_int("-")))
+  assert::ok(strings::parse_int("-").is_err())
 
 test "parse_int invalid char is error" =
-  assert::ok(is_err(strings::parse_int("12x")))
+  assert::ok(strings::parse_int("12x").is_err())
 
 // ----- parse_int32 -----------------------------------------------------------
 
 test "parse_int32 basic" =
-  assert::equals(unwrap_or(strings::parse_int32("100"), 0 as i32) as i64, 100)
+  assert::equals(strings::parse_int32("100").unwrap_or(0 as i32) as i64, 100)
 
 test "parse_int32 invalid is error" =
-  assert::ok(is_err(strings::parse_int32("abc")))
+  assert::ok(strings::parse_int32("abc").is_err())
 
 // ----- parse_float -----------------------------------------------------------
 
 test "parse_float positive" =
-  assert::equals(unwrap_or(strings::parse_float("3.14"), 0.0), 3.14)
+  assert::equals(strings::parse_float("3.14").unwrap_or(0.0), 3.14)
 
 test "parse_float negative" =
-  assert::equals(unwrap_or(strings::parse_float("-2.5"), 0.0), 0.0 - 2.5)
+  assert::equals(strings::parse_float("-2.5").unwrap_or(0.0), 0.0 - 2.5)
 
 test "parse_float integer" =
-  assert::equals(unwrap_or(strings::parse_float("10"), 0.0), 10.0)
+  assert::equals(strings::parse_float("10").unwrap_or(0.0), 10.0)
 
 test "parse_float exponent" =
-  assert::equals(unwrap_or(strings::parse_float("1.5e2"), 0.0), 150.0)
+  assert::equals(strings::parse_float("1.5e2").unwrap_or(0.0), 150.0)
 
 test "parse_float empty is error" =
-  assert::ok(is_err(strings::parse_float("")))
+  assert::ok(strings::parse_float("").is_err())
 
 test "parse_float invalid is error" =
-  assert::ok(is_err(strings::parse_float("abc")))
+  assert::ok(strings::parse_float("abc").is_err())

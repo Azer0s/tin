@@ -19,20 +19,20 @@ fn{#async} read_chunk(f os::File, max i64) (i64, string) =
   return (n, buf[0..n] as string)
 
 test "create + write + read_file round trip" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let f  = tf.file
   let _  = await write_string_to(f, "hello")
 
   f.close()
 
-  let s = result::unwrap(os::read_file(tf.path))
+  let s = os::read_file(tf.path).unwrap()
 
   assert::equals("hello", s)
 
   let _ = os::remove(tf.path)
 
 test "File.seek to start + read after write" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let f  = tf.file
   let _  = await write_string_to(f, "data-line")
   let _  = f.flush()
@@ -47,7 +47,7 @@ test "File.seek to start + read after write" =
   let _ = os::remove(tf.path)
 
 test "pipe write end -> read end carries bytes verbatim" =
-  let pp = result::unwrap(os::pipe())
+  let pp = os::pipe().unwrap()
   let _  = await write_string_to(pp.writer, "carry-me")
 
   let (n, got) = await read_chunk(pp.reader, 64)
@@ -59,17 +59,17 @@ test "pipe write end -> read end carries bytes verbatim" =
   pp.writer.close()
 
 test "chmod + symlink + readlink resolve back to target" =
-  let tf = result::unwrap(os::tempfile())
+  let tf = os::tempfile().unwrap()
   let _  = await write_string_to(tf.file, "x")
 
   tf.file.close()
 
-  let _ = result::unwrap(os::chmod(tf.path, 0o600))
+  let _ = os::chmod(tf.path, 0o600).unwrap()
 
   let link_path = tf.path ++ ".link"
-  let _ = result::unwrap(os::symlink(tf.path, link_path))
+  let _ = os::symlink(tf.path, link_path).unwrap()
 
-  let target = result::unwrap(os::readlink(link_path))
+  let target = os::readlink(link_path).unwrap()
 
   assert::equals(tf.path, target)
 
@@ -77,16 +77,16 @@ test "chmod + symlink + readlink resolve back to target" =
   let _ = os::remove(tf.path)
 
 test "tempdir returns a unique writable directory" =
-  let dir = result::unwrap(os::tempdir("tinjob-"))
+  let dir = os::tempdir("tinjob-").unwrap()
 
   assert::ok(os::is_dir(dir))
 
   let _ = os::rmdir(dir)
 
 test "spawn child + wait collects exit code" =
-  let p = result::unwrap(os::start(["true"]))
+  let p = os::start(["true"]).unwrap()
   let mp = &p
-  let code = result::unwrap(mp.wait())
+  let code = mp.wait().unwrap()
 
   assert::equals(0 as i32, code)
 
@@ -95,7 +95,7 @@ test "spawn child with stdout pipe captures bytes" =
     env: None, cwd: None,
     stdin: 'inherit, stdout: 'pipe, stderr: 'inherit,
   }
-  let p = result::unwrap(os::start(["echo", "pipe-out"], opts))
+  let p = os::start(["echo", "pipe-out"], opts).unwrap()
   let n   i64    = 0
   let got string = ""
 
@@ -112,11 +112,11 @@ test "spawn child with stdout pipe captures bytes" =
   assert::equals("pipe-out\n", got)
 
   let mp = &p
-  let _ = result::unwrap(mp.wait())
+  let _ = mp.wait().unwrap()
 
 test "spawn nonexistent program surfaces an error code" =
-  let p = result::unwrap(os::start(["/nope/this/does/not/exist"]))
+  let p = os::start(["/nope/this/does/not/exist"]).unwrap()
   let mp = &p
-  let code = result::unwrap(mp.wait())
+  let code = mp.wait().unwrap()
 
   assert::not_equals(0 as i64, code as i64)

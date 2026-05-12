@@ -834,7 +834,7 @@ data JsonError(errors::Err, print) =
 //
 // Or, when you don't care about the error:
 //
-//   let v = result::unwrap_or(json::parse(s), Value{kind: Kind.null_v})
+//   let v = json::parse(s).unwrap_or(Value{kind: Kind.null_v})
 fn parse(s string) Result[Value, errors::Err] =
   if len(s) == 0:
     return Err(EmptyInput)
