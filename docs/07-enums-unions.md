@@ -455,3 +455,73 @@ ADT values share the tagged-union layout:
 
 They compile to the same runtime shape, so interop through `any` boxing is
 uniform.
+
+### The `try` keyword
+
+Writing `match` arms for every Result is fine when each call really does
+different work on Err -- but it gets noisy fast. Most code wants the same
+thing: "give me the value or bubble the error up". `try` is the shorthand:
+
+```rust
+fn parse_pair(s string) Result[(i64, i64), errors::Err] =
+  let parts = strings::split(s, ",")
+
+  if len(parts) != 2:
+    return Err(errors::new("need two comma-separated ints"))
+
+  let a = try strings::parse_int(parts[0])
+  let b = try strings::parse_int(parts[1])
+
+  return Ok((a, b))
+```
+
+Each `try e` desugars to:
+
+```rust
+match e:
+  case Ok(v):  v             // bound into the surrounding expression
+  case Err(x): return Err(x) // propagate
+```
+
+`try` is sugar over the `tryable` trait (see [traits](06-traits.md)).
+Anything that implements `tryable[T, E]` can be used with `try`, not just
+`Result[T, E]` -- `Option[T]` works too (`None` propagates as the empty
+error of the surrounding `Result`). User types that want the same flow
+implement `tryable::is_err`, `tryable::ok_value`, `tryable::err_value`.
+
+The enclosing function must return a compatible `Result` (or `Option`)
+shape; otherwise the compiler refuses the `try` and tells you what type
+it expected.
+
+### `fn main() Result[...]`
+
+`main` may return a `Result` instead of nothing:
+
+```rust
+use errors
+use { Result } from result
+
+fn main() Result[i64, errors::Err] =
+  let cfg = try load_config()
+  let port = try cfg.port()
+
+  return Ok(port)
+```
+
+The C-main wrapper unpacks the return value:
+
+- `Ok(n)` (where `n: i64`) → `exit(n)`. Use this when you want the
+  process exit code to come from your program's logic.
+- `Ok(())` for `Result[Unit, ...]` → `exit(0)`.
+- `Err(e)` → prints `error: {e.message()}` to stderr and `exit(1)`.
+
+You can also use `try` at the top level without writing a `main` at all
+-- the compiler synthesizes a `Result`-returning wrapper around the
+top-level statements:
+
+```rust
+use errors
+
+let cfg = try load_config()  // bubbles up to the synthesized main
+echo cfg.port
+```

@@ -18,14 +18,37 @@ fn fib(n u32) u32 =
 
 echo fib(10)
 
+// Result + `try`: parse, propagate, done.
+use errors
+use { Result } from result
+use strings
+
+fn parse_pair(s string) Result[(i64, i64), errors::Err] =
+  let parts = strings::split(s, ",")
+
+  if len(parts) != 2:
+    return Err(errors::new("need two comma-separated ints"))
+
+  let a = try strings::parse_int(parts[0])
+  let b = try strings::parse_int(parts[1])
+
+  return Ok((a, b))
+
+fn main() Result[Unit, errors::Err] =
+  let (x, y) = try parse_pair("12,30")
+
+  echo "{x} + {y} = {x + y}"
+
+  return Ok(())
+
 // Structs with methods
-struct person =
+struct Person =
   name string
   age  u8
 
-  fn show(this person) string = return "{this.name} is {this.age}"
+  fn show(this Person) string = return "{this.name} is {this.age}"
 
-let pete = person{name: "Pete", age: 20}
+let pete = Person{name: "Pete", age: 20}
 echo pete.show()
 
 // Fibers and channels
@@ -57,8 +80,9 @@ go build -o tin .
 ./tin run examples/hello.tin
 ```
 
-That's it. There are no install targets; treat the `tin` binary as
-relocatable and put it on your `PATH` if you want.
+That's the whole install: no install target, no package manager, no
+project file. The `tin` binary is relocatable; drop it on your `PATH` if
+you want.
 
 ### Common commands
 
@@ -66,18 +90,20 @@ relocatable and put it on your `PATH` if you want.
 tin run    file.tin           # compile and execute
 tin build  file.tin -o out    # produce a native binary
 tin build  --lib file.tin     # produce a relocatable .o
-tin test   path/...           # run all `test` blocks under path/, recursive
+tin test   path/...           # run every `test` block under path/, recursive
 tin repl                      # interactive REPL (preload with `tin repl file.tin`)
 tin clean                     # wipe the .build/ cache
 ```
 
-`tin run` and `tin test` content-hash every input file (entry source,
-imported packages, `//!+` C sources) and skip lex/parse/codegen entirely
-when the cache directory's `sbom.txt` matches. Cache lives at
-`.build/<run|test>/<file>_<md5>/`.
+`tin run` and `tin test` content-hash every input (entry source,
+imported packages, `//!+` C sources) and skip the entire lex / parse /
+codegen pipeline when the cache directory's `sbom.txt` matches. The
+cache lives at `.build/<run|test>/<file>_<md5>/` -- delete it manually
+with `tin clean` or just `rm -rf .build/`.
 
-For tighter loops on the test suite: `tin test --fast path/...` drops to
-`-O0` so LLVM's optimizer doesn't dominate compile time.
+For tight inner loops on the test suite: `tin test --fast path/...`
+drops to `-O0` so LLVM's optimizer stops dominating the wall-clock
+compile time.
 
 ## Dependencies
 
