@@ -1,0 +1,14 @@
+// Regression: tuple-destructuring an ADT (Result, Option, ...) used
+// to silently pull out the type_id and tag instead of the user
+// payload, because the underlying struct layout
+// `{i32 typeID, i64 tag, [N x i8] payload}` happens to be field-
+// addressable like a tuple.  snake.tin's
+// `let (grid, _) = strings::parse_int("20")` was the canonical
+// wrong-shape case after parse_int migrated to Result.  The
+// compiler now rejects the destructure.
+
+use strings
+
+let (grid, _) = strings::parse_int("20")
+
+echo "grid={grid}"

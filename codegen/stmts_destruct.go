@@ -356,6 +356,23 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 		return nil, fmt.Errorf("tuple destructuring: unknown struct type '%s'", concreteName)
 	}
 
+	// Reject ADT values masquerading as tuples.  Result / Option / any data
+	// type shares the same `{i32 typeID, i64 tag, [N x i8] payload}` shape
+	// as a Tuple struct under the hood, so without this check `let (a, b)
+	// = my_result` silently extracted the type_id and tag instead of the
+	// Ok payload -- snake.tin's `let (grid, _) = parse_int("20")` was the
+	// canonical wrong-shape case after parse_int migrated to Result.
+	if cg.isDataType(val.Type()) {
+		pretty := prettyStructName(concreteName)
+
+		return nil, cg.nodeErr(s,
+			"cannot destructure %s as a tuple -- its layout is "+
+				"{tag, payload}, not (a, b).  Use a `match` to extract the "+
+				"variant, or call a method like .unwrap() / .unwrap_or(d) "+
+				"that returns the inner value directly",
+			pretty)
+	}
+
 	structAlloca := block.NewAlloca(llType)
 	block.NewStore(val, structAlloca)
 

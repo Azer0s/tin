@@ -73,10 +73,7 @@ fn parse_url(url string) (bool, string, i32, string) =
   if colon >= 0:
     host = strings::substr(host_part, 0, colon)
     let port_str = strings::substr(host_part, colon + 1, len(host_part))
-    let (p, perr) = strings::parse_int32(port_str)
-
-    if perr == nil && p > 0:
-      port = p
+    port = strings::parse_int32(port_str).unwrap_or(port)
 
   return (use_tls, host, port, path)
 

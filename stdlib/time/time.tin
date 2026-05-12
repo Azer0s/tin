@@ -7,7 +7,7 @@
 //
 //   let t = time::now()                          // current wall-clock time
 //   let iso = t.to_rfc3339()                     // "2024-01-01T12:34:56.000000000Z"
-//   let (t2, err) = time::parse_rfc3339(iso)     // round-trip
+//   let t2 = time::parse_rfc3339(iso).unwrap()   // round-trip
 //
 // ## Duration
 //

@@ -1,11 +1,13 @@
 use raylib
-use strings
 
 raylib::init_window(600, 640, "Snake")
 raylib::set_target_fps(60)
 
 let cell   i64 = 30
 let header i64 = 40
+let grid   i64 = 20
+let grid_max i32 = (grid - 1) as i32
+let inner    i32 = (cell - 2) as i32
 
 // Snake as ring buffer; shead is the index of the head segment
 let sx [i64; 400]
@@ -23,10 +25,6 @@ sx[1] = 9
 sy[1] = 10
 sx[2] = 10
 sy[2] = 10
-
-let (grid, _) = strings::parse_int("20")
-let grid_max i32 = grid as i32 - 1
-let inner    i32 = (cell - 2) as i32
 
 let fx    i64  = raylib::get_random_value(0, grid_max) as i64
 let fy    i64  = raylib::get_random_value(0, grid_max) as i64

@@ -208,3 +208,6 @@ test "codegen: chained unwrap on Result-of-struct preserves strings" =
 test "codegen: must-use does not false-positive on i64-returning extern" =
   expect_runs_clean("must_use_does_not_false_positive_on_i64_returning_extern_52.tin", "must-use")
 
+test "codegen: let-tuple destructure rejects ADT value" =
+  expect_substr("let_tuple_destructure_rejects_adt_value_53.tin", "cannot destructure")
+
