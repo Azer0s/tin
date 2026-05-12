@@ -115,8 +115,15 @@ test "spawn child with stdout pipe captures bytes" =
   let _ = mp.wait().unwrap()
 
 test "spawn nonexistent program surfaces an error code" =
-  let p = os::start(["/nope/this/does/not/exist"]).unwrap()
-  let mp = &p
-  let code = mp.wait().unwrap()
+  // Two acceptable failure surfaces: the spawn fails up front (when the
+  // runtime fast-fails on an absolute path that doesn't exist) or the
+  // spawn succeeds and the child exits with a non-zero code after exec
+  // fails.  Both count as "the error was surfaced"; the test fails only
+  // if a phantom run somehow reports exit 0.
+  match os::start(["/nope/this/does/not/exist"]):
+    case Err(_): assert::ok(true)
+    case Ok(p):
+      let mp = &p
+      let code = mp.wait().unwrap()
 
-  assert::not_equals(0 as i64, code as i64)
+      assert::not_equals(0 as i64, code as i64)

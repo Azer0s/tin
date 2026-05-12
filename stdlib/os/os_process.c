@@ -28,6 +28,17 @@ int64_t _tin_os_spawn(char *const argv[], int32_t argc,
                       int32_t in_fd, int32_t out_fd, int32_t err_fd,
                       const char *cwd, char *const envp[]) {
     (void)argc;
+    // Fast-fail on an absolute path that doesn't exist: skip the fork so
+    // failure surfaces without an unreachable child.  Required under
+    // macOS `leaks --atExit`, which traces forked children and freezes
+    // any child that calls _exit before exec -- waitpid in the parent
+    // hangs forever.  Relative names (no leading '/') still need execvp's
+    // PATH resolution, so leave them to the normal fork path.
+    if (argv != NULL && argv[0] != NULL && argv[0][0] == '/') {
+        if (access(argv[0], F_OK) != 0) {
+            return -1;
+        }
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
