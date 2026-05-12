@@ -27,20 +27,20 @@ test "map / and_then / or_else" =
   let a Option[i64] = Some(3)
   let b Option[i64] = None
 
-  let m = option::map(a, fn(x i64) i64 = return x + 1)
+  let m = a.map(fn(x i64) i64 = return x + 1)
 
   assert::equals(4, m.unwrap_or(0))
-  assert::ok(option::map(b, fn(x i64) i64 = return x + 1).is_none())
+  assert::ok(b.map(fn(x i64) i64 = return x + 1).is_none())
 
   let f = fn(x i64) Option[i64] = return Some(x * 10)
 
-  assert::equals(30, option::and_then(a, f).unwrap_or(0))
-  assert::ok(option::and_then(b, f).is_none())
+  assert::equals(30, a.and_then(f).unwrap_or(0))
+  assert::ok(b.and_then(f).is_none())
 
   let g = fn() Option[i64] = return Some(42)
 
-  assert::equals(3,  option::or_else(a, g).unwrap_or(0))
-  assert::equals(42, option::or_else(b, g).unwrap_or(0))
+  assert::equals(3,  a.or_else(g).unwrap_or(0))
+  assert::equals(42, b.or_else(g).unwrap_or(0))
 
 test "unwrap / unwrap-with-msg" =
   let a Option[i64] = Some(11)

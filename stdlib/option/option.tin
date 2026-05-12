@@ -74,27 +74,21 @@ data Option[t](tryable[t, Option[_]]) =
       case Some(v): return v
       case None:    panic(msg)
 
-  // map / and_then / or_else stay as top-level helpers (below):
-  // they take a method-level type parameter (`map[u]` over the
-  // closure's result type) that the generic ADT's method
-  // monomorphizer doesn't yet support cleanly.  Pipe form
-  // (`o |> option::map(fn(x) ...)`) still keeps the call site
-  // readable.
+  // map applies f to the Some value, leaving None untouched.
+  // Method-level type parameter `u` is bound at each call site.
+  fn map[u](this Option[t], f fn(t) u) Option[u] =
+    match this:
+      case Some(v): return Some(f(v))
+      case None:    return None
 
-// map applies f to the Some value, leaving None untouched.
-fn map[t, u](o Option[t], f fn(t) u) Option[u] =
-  match o:
-    case Some(v): return Some(f(v))
-    case None:    return None
+  // and_then chains an optional computation onto a Some value (flatMap).
+  fn and_then[u](this Option[t], f fn(t) Option[u]) Option[u] =
+    match this:
+      case Some(v): return f(v)
+      case None:    return None
 
-// and_then chains an optional computation onto a Some value (flatMap).
-fn and_then[t, u](o Option[t], f fn(t) Option[u]) Option[u] =
-  match o:
-    case Some(v): return f(v)
-    case None:    return None
-
-// or_else produces a fallback Option when o is None.
-fn or_else[t](o Option[t], f fn() Option[t]) Option[t] =
-  match o:
-    case Some(v): return Some(v)
-    case None:    return f()
+  // or_else produces a fallback Option when this is None.
+  fn or_else(this Option[t], f fn() Option[t]) Option[t] =
+    match this:
+      case Some(v): return Some(v)
+      case None:    return f()

@@ -797,6 +797,36 @@ func substituteTypeInTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) as
 		if newElem != t.Elem {
 			return &ast.ArrayType{Elem: newElem, Size: t.Size}
 		}
+	case *ast.FuncType:
+		// Closure-shaped parameter / return types: walk into the param
+		// and return slots so a method's `fn(t) u` param picks up the
+		// outer ADT substitution and (when present) downstream method-
+		// level type bindings.  Without this, a method signature like
+		// `fn map[u](this Result[t,e], f fn(t) u) Result[u, e]` keeps
+		// `t` symbolic inside the closure type after Result[i64, _]
+		// monomorphization, and codegen sees a return type of `i64`
+		// where `Option[i64]` was expected.
+		newParams := make([]ast.TypeExpr, len(t.Params))
+
+		changed := false
+
+		for i, p := range t.Params {
+			newP := substituteTypeInTypeExpr(p, subst)
+
+			newParams[i] = newP
+			if newP != p {
+				changed = true
+			}
+		}
+
+		newRet := substituteTypeInTypeExpr(t.RetType, subst)
+		if newRet != t.RetType {
+			changed = true
+		}
+
+		if changed {
+			return &ast.FuncType{Params: newParams, RetType: newRet, IsVarArgs: t.IsVarArgs}
+		}
 	}
 
 	return te

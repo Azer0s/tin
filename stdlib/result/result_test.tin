@@ -33,14 +33,14 @@ test "unwrap_or" =
 test "Result map / map_err" =
   let a Result[i64, string] = Ok(3)
   let b Result[i64, string] = Err("e")
-  let m1 = result::map(a, fn(x i64) i64 = return x * 2)
-  let m2 = result::map(b, fn(x i64) i64 = return x * 2)
+  let m1 = a.map(fn(x i64) i64 = return x * 2)
+  let m2 = b.map(fn(x i64) i64 = return x * 2)
 
   assert::equals(6, m1.unwrap_or(0))
   assert::ok(m2.is_err())
 
-  let n1 = result::map_err(a, fn(s string) string = return "wrapped: {s}")
-  let n2 = result::map_err(b, fn(s string) string = return "wrapped: {s}")
+  let n1 = a.map_err(fn(s string) string = return "wrapped: {s}")
+  let n2 = b.map_err(fn(s string) string = return "wrapped: {s}")
 
   assert::ok(n1.is_ok())
 
@@ -53,13 +53,13 @@ test "Result and_then / or_else" =
   let b Result[i64, string] = Err("bad")
   let f = fn(x i64) Result[i64, string] = return Ok(x + 1)
 
-  assert::equals(5, result::and_then(a, f).unwrap_or(0))
-  assert::ok(result::and_then(b, f).is_err())
+  assert::equals(5, a.and_then(f).unwrap_or(0))
+  assert::ok(b.and_then(f).is_err())
 
   let g = fn(s string) Result[i64, string] = return Ok(99)
 
-  assert::equals(4,  result::or_else(a, g).unwrap_or(0))
-  assert::equals(99, result::or_else(b, g).unwrap_or(0))
+  assert::equals(4,  a.or_else(g).unwrap_or(0))
+  assert::equals(99, b.or_else(g).unwrap_or(0))
 
 test "Result or_else_value" =
   let a Result[i64, string] = Ok(4)
@@ -81,7 +81,7 @@ test "Result unwrap / unwrap-with-msg / to_option" =
   assert::equals(7, a.unwrap("should be ok"))
   // to_option lives as a top-level helper (return-type Option[t] would
   // otherwise force eager Option[Option[...]] monomorphization).
-  assert::ok(result::to_option(a).is_some())
+  assert::ok(a.to_option().is_some())
   let b Result[i64, string] = Err("e")
 
-  assert::ok(result::to_option(b).is_none())
+  assert::ok(b.to_option().is_none())

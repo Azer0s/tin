@@ -82,39 +82,35 @@ data Result[t, e](tryable[t, Result[_, e]]) =
       case Ok(v):  return v
       case Err(_): panic(msg)
 
-  // map, map_err, and_then, or_else, to_option stay as top-level
-  // helpers (below): they introduce method-level type parameters
-  // (`map[u]` over the closure's result type, `to_option` over a
-  // foreign ADT) that the on-demand monomorphizer can't yet
-  // instantiate from a generic ADT's method scope.  Calling them on
-  // an instance still works via pipe (`r |> result::map(...)`).
+  // map applies f to the Ok value, leaving Err untouched.
+  // Method-level type parameter `u` -- the closure's return type --
+  // is left symbolic on the ADT-monomorphized template; it gets
+  // instantiated at each call site via genericMethodTemplates.
+  fn map[u](this Result[t, e], f fn(t) u) Result[u, e] =
+    match this:
+      case Ok(v):  return Ok(f(v))
+      case Err(m): return Err(m)
 
-// map applies f to the Ok value, leaving Err untouched.
-fn map[t, u, e](r Result[t, e], f fn(t) u) Result[u, e] =
-  match r:
-    case Ok(v):  return Ok(f(v))
-    case Err(m): return Err(m)
+  // map_err applies g to the Err value, leaving Ok untouched.
+  fn map_err[f](this Result[t, e], g fn(e) f) Result[t, f] =
+    match this:
+      case Ok(v):  return Ok(v)
+      case Err(m): return Err(g(m))
 
-// map_err applies g to the Err value, leaving Ok untouched.
-fn map_err[t, e, f](r Result[t, e], g fn(e) f) Result[t, f] =
-  match r:
-    case Ok(v):  return Ok(v)
-    case Err(m): return Err(g(m))
+  // and_then chains a fallible computation onto an Ok value (flatMap).
+  fn and_then[u](this Result[t, e], f fn(t) Result[u, e]) Result[u, e] =
+    match this:
+      case Ok(v):  return f(v)
+      case Err(m): return Err(m)
 
-// and_then chains a fallible computation onto an Ok value (flatMap).
-fn and_then[t, u, e](r Result[t, e], f fn(t) Result[u, e]) Result[u, e] =
-  match r:
-    case Ok(v):  return f(v)
-    case Err(m): return Err(m)
+  // or_else recovers from Err by applying g to produce a new Result.
+  fn or_else[f](this Result[t, e], g fn(e) Result[t, f]) Result[t, f] =
+    match this:
+      case Ok(v):  return Ok(v)
+      case Err(m): return g(m)
 
-// or_else recovers from Err by applying g to produce a new Result.
-fn or_else[t, e, f](r Result[t, e], g fn(e) Result[t, f]) Result[t, f] =
-  match r:
-    case Ok(v):  return Ok(v)
-    case Err(m): return g(m)
-
-// to_option converts a Result into an Option, discarding any error.
-fn to_option[t, e](r Result[t, e]) Option[t] =
-  match r:
-    case Ok(v):  return Some(v)
-    case Err(_): return None
+  // to_option converts this Result into an Option, discarding any error.
+  fn to_option(this Result[t, e]) Option[t] =
+    match this:
+      case Ok(v):  return Some(v)
+      case Err(_): return None
