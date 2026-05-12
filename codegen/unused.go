@@ -596,47 +596,40 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			// surface the usual "package not imported" error from the
 			// resolver instead.
 			if len(v.Path) >= 2 {
-				// The first ScopeAccess path component may itself be
-				// `pkg::Type[T]` (parsed as one segment).  Split on the
-				// leading `::` so we recover both the bare package name
-				// and the type name independently.
-				pkgSeg, typeSeg := v.Path[0], ""
-				if idx := strings.Index(pkgSeg, "::"); idx >= 0 {
-					typeSeg = pkgSeg[idx+2:]
-					pkgSeg = pkgSeg[:idx]
-				}
+				// Selective-shadow redundant-prefix.  The path can have
+				// arbitrary depth -- `pkg::Adt::method`,
+				// `pkg::sub::Adt::Ctor`, `pkg::sub::nested::fn`, or
+				// `pkg::Adt[T,U]::method` (where the [T,U] sometimes
+				// gets folded into the leading segment).  Normalize
+				// into a flat list of bare segments and try every
+				// prefix as the candidate package path.
+				flat := flattenScopeAccessSegments(v.Path)
 
-				if i := strings.IndexByte(typeSeg, '['); i >= 0 {
-					typeSeg = typeSeg[:i]
-				}
+				warned := false
 
-				tail := v.Path[len(v.Path)-1]
-				if i := strings.IndexByte(tail, '['); i >= 0 {
-					tail = tail[:i]
-				}
+				for k := 1; k < len(flat) && !warned; k++ {
+					pkgPath := strings.Join(flat[:k], "::")
 
-				if names, has := shadowedNames[pkgSeg]; has {
-					// Match against the most informative name -- prefer
-					// the inner type (e.g. `Result`) when the path was
-					// `result::Result[T]::Ok` since that's what the user
-					// selectively imported; otherwise fall back to the
-					// trailing variant name (`pkg::Ok` for a bare ctor).
-					suggested := ""
-
-					switch {
-					case typeSeg != "" && names[typeSeg]:
-						suggested = typeSeg
-					case names[tail]:
-						suggested = tail
+					names, has := shadowedNames[pkgPath]
+					if !has {
+						continue
+					}
+					// Look one segment past the prefix -- that is what
+					// the user typically imported (the type, ctor, or
+					// fn name).  Suggest rewriting with that bare name.
+					candidate := flat[k]
+					if !names[candidate] {
+						continue
 					}
 
-					if suggested != "" {
-						longPath := strings.Join(v.Path, "::")
+					longPath := strings.Join(v.Path, "::")
+					shortPath := strings.Join(append([]string{candidate}, flat[k+1:]...), "::")
 
-						cg.warn(DiagRedundantImportPrefix, v.Pos(),
-							"`use { %s } from %s` already binds `%s`; write `%s` directly instead of `%s`",
-							suggested, pkgSeg, suggested, suggested, longPath)
-					}
+					cg.warn(DiagRedundantImportPrefix, v.Pos(),
+						"`use { %s } from %s` already binds `%s`; write `%s` instead of `%s`",
+						candidate, pkgPath, candidate, shortPath, longPath)
+
+					warned = true
 				}
 			}
 		case *ast.FieldAccess:
@@ -719,6 +712,29 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		cg.warn(DiagUnusedImport, ud.Pos(),
 			"import %q is never used", base)
 	}
+}
+
+// flattenScopeAccessSegments splits each segment of a ScopeAccess path on
+// `::` (since the parser sometimes folds `pkg::Adt[T]` into one segment
+// to keep the type-arg list attached to its name) and strips any trailing
+// `[T,U]` type-arg suffix from each piece.  Returns the flat list of bare
+// identifier segments, which is what the redundant-import-prefix walk
+// needs to try every possible package-prefix split without caring about
+// how deep the namespace nesting is.
+func flattenScopeAccessSegments(path []string) []string {
+	flat := make([]string, 0, len(path))
+
+	for _, seg := range path {
+		for _, piece := range strings.Split(seg, "::") {
+			if i := strings.IndexByte(piece, '['); i >= 0 {
+				piece = piece[:i]
+			}
+
+			flat = append(flat, piece)
+		}
+	}
+
+	return flat
 }
 
 // importBaseName returns the bare identifier under which a `use` declaration

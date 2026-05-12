@@ -1,0 +1,53 @@
+// examples/pipe_adt_method.tin -- pipe a value into an ADT method or a
+// trait method on an ADT, using `value |> Adt::method` syntax.
+//
+// `Adt::method` looks up `method` as an instance method (or trait
+// method) on `Adt`, monomorphizing the generic parameters from the LHS
+// value's type at the call site.  When the package owning the ADT is
+// not in scope plainly (only `use { Adt } from pkg`), referencing it
+// as `pkg::Adt::method` is also a hard error -- selective imports do
+// NOT register the package qualifier.
+
+use assert
+use { Result } from result
+use errors
+
+// 1. Plain method on a non-generic ADT.
+
+data Color =
+  Red
+  Green
+  Blue
+  Rgb(r i64, g i64, b i64)
+
+  fn name(this Color) string =
+    match this:
+      case Red:        return "red"
+      case Green:      return "green"
+      case Blue:       return "blue"
+      case Rgb(_,_,_): return "rgb"
+
+test "pipe to plain ADT method" =
+  let c = Color::Rgb(10, 20, 30)
+  let s = c |> Color::name
+
+  assert::equals("rgb", s)
+
+// 2. Method on a generic ADT.  The Result imported above is generic
+// over (T, E); the type args are inferred from the LHS.
+
+test "pipe to Result::unwrap (generic ADT)" =
+  let r Result[i64, errors::Err] = Ok(7)
+  let v = r |> Result::unwrap
+
+  assert::equals(7, v)
+
+// 3. Trait method on an ADT.  `Result` implements the `tryable` trait;
+// `is_err` is a tryable-method dispatched through the ADT's vtable.
+// Pipe resolves it the same way as a plain method.
+
+test "pipe to trait method on ADT (is_err via Result)" =
+  let r Result[i64, errors::Err] = Err(errors::new("oops"))
+  let yes = r |> Result::is_err
+
+  assert::ok(yes)

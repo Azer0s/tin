@@ -849,6 +849,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			if err != nil {
 				return nil, err
 			}
+			// Refresh block after short-circuit / await / coro split
+			// operands that park curBlock on a merge.
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
 
 			gep := block.NewGetElementPtr(st, alloca,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
@@ -908,6 +913,12 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			val, err := cg.genArgWithTargetType(block, f.Value, st.Fields[idx])
 			if err != nil {
 				return nil, err
+			}
+			// Refresh block after short-circuit operands (`a || b`) that
+			// advanced curBlock to a merge -- otherwise the subsequent
+			// GEP/store land in a block where `val` does not dominate.
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
 			}
 
 			gep := block.NewGetElementPtr(st, alloca,
@@ -1167,6 +1178,13 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 
 		if err != nil {
 			return nil, err
+		}
+		// Short-circuit operands (`a || b`, `a && b`) park the IR
+		// insertion point on a merge block; pick it up before the next
+		// element's evaluation (and before the struct fill below) so
+		// every operation lands in a block that dominates its uses.
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
 		}
 
 		vals[i] = v
@@ -1799,6 +1817,17 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 		return nil, err
 	}
 
+	// `a |> Adt::method` (or `pkg::Adt::method`) -- the RHS names an
+	// instance method on a generic struct/ADT.  Evaluating the RHS via
+	// genExpr would dispatch through genDataScopeCtorCall and fail
+	// because `method` is not a variant; route directly to the method-
+	// call form `Adt::method(a)` which is what the pipe sugar means.
+	if sa, ok := e.Right.(*ast.ScopeAccess); ok {
+		if v, handled, mErr := cg.tryPipeToStaticMethod(block, sa, leftVal); handled {
+			return v, mErr
+		}
+	}
+
 	// Evaluate the right-hand side completely (including any call arguments),
 	// yielding the function to apply to leftVal.
 	rightFn, err := cg.genExpr(block, e.Right)
@@ -1836,6 +1865,67 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	}
 
 	return result, nil
+}
+
+// tryPipeToStaticMethod handles `a |> Adt::method` and
+// `a |> pkg::Adt::method` by converting it to `Adt::method(a)`.  Returns
+// (val, true, err) when the form was recognized so genPipeExpr can stop
+// before falling through to the value-as-callable path.
+func (cg *CodeGen) tryPipeToStaticMethod(block *ir.Block, sa *ast.ScopeAccess, leftVal value.Value) (value.Value, bool, error) {
+	if len(sa.Path) < 2 {
+		return nil, false, nil
+	}
+	// Last segment is the method name; everything before is the type
+	// path (`Adt`, `Adt[T,U]`, `pkg::Adt`, `pkg::Adt[T,U]`).
+	method := sa.Path[len(sa.Path)-1]
+	typeSeg := sa.Path[len(sa.Path)-2]
+	// Strip any package qualifier the parser folded into the leading
+	// segment, e.g. `result::Result[i64,string]` -> just `Result`.
+	if idx := strings.Index(typeSeg, "::"); idx >= 0 {
+		typeSeg = typeSeg[idx+2:]
+	}
+	// Strip the `[T,U]` type-arg suffix when present; we recover the
+	// concrete args from leftVal's type instead.
+	if i := strings.IndexByte(typeSeg, '['); i >= 0 {
+		typeSeg = typeSeg[:i]
+	}
+	// Bail out if the type isn't an ADT or generic struct -- let the
+	// regular pipe path handle it (e.g. user wrote `a |> mod::fn`).
+	if _, isADT := cg.dataDecls[typeSeg]; !isADT {
+		if _, isGenericStruct := cg.genericStructsByArity[typeSeg]; !isGenericStruct {
+			return nil, false, nil
+		}
+	}
+	// Build a synthetic call `Adt::method(leftVal)`.  We construct a
+	// throwaway Identifier node carrying a marker we can recognize
+	// downstream so the call goes through the regular method-resolution
+	// path; the easier route is to call cg.genMethodCall directly with
+	// leftVal as the receiver and `method` as the name.
+	concreteName := structNameFromValue(leftVal)
+	if concreteName == "" {
+		return nil, false, nil
+	}
+
+	scopeKey := concreteName + "_" + method
+
+	entry, ok := cg.curScope.lookup(scopeKey)
+	if !ok {
+		return nil, false, nil
+	}
+
+	fn, ok := entry.val.(*ir.Func)
+	if !ok {
+		return nil, false, nil
+	}
+
+	args := cg.adaptArgs(block, []value.Value{leftVal}, fn.Sig)
+	result := block.NewCall(fn, args...)
+
+	if irtypes.IsVoid(result.Type()) {
+		return nil, true, nil
+	}
+
+	return result, true, nil
 }
 
 func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Value, error) {

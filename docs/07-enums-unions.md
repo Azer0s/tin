@@ -431,6 +431,85 @@ ARC rules are identical to struct fields: owning pointers are released when
 the ADT value is freed, dispatched by the tag; weak references don't
 contribute to the retain count.
 
+### Methods, traits, and operators
+
+An ADT body can carry methods directly, just like a struct.  Use
+`match this:` to dispatch on the variant:
+
+```rust
+data Color =
+  Red
+  Green
+  Blue
+  Rgb(r i64, g i64, b i64)
+
+  fn luminance(this Color) i64 =
+    match this:
+      case Red:        return 76
+      case Green:      return 150
+      case Blue:       return 29
+      case Rgb(r,g,b): return (r * 76 + g * 150 + b * 29) / 256
+
+let c = Color::Rgb(255, 128, 64)
+echo c.luminance()
+```
+
+The implements list works exactly the same way it does on structs.
+Trait methods qualify with `<Trait>::` so the compiler can wire them into
+the right vtable slot:
+
+```rust
+trait Show =
+  fn show(this Show) string = virtual
+
+data Shape(Show) =
+  Dot
+  Circle(radius f64)
+  Rect(width f64, height f64)
+
+  fn Show::show(this Shape) string =
+    match this:
+      case Dot:        return "·"
+      case Circle(r):  return "○ r={r}"
+      case Rect(w, h): return "▭ {w}×{h}"
+
+let s Show = Shape::Circle(3.0)   // value-form coerce, heap-copy
+echo s.show()
+let p *Show = &Shape::Rect(2.0, 4.0)  // borrow-form, no copy
+echo (*p).show()
+```
+
+Operator overloads use the same `add[rhs, ret]` / `sub[rhs, ret]` / ...
+trait aliases as on structs (see
+[traits / operator overloading](06-traits.md#operator-overloading)).
+List the alias in the implements list and provide the impl in qualified
+form:
+
+```rust
+data Counter(add[bool, Counter], add[i64, Counter]) =
+  Zero
+  Cnt(n i64)
+
+  fn add[bool, Counter]::add(this Counter, b bool) Counter =
+    let inc = 0 as i64
+    if b: inc = 1 as i64
+    match this:
+      case Zero:   return Cnt(inc)
+      case Cnt(c): return Cnt(c + inc)
+
+  fn add[i64, Counter]::add(this Counter, n i64) Counter =
+    match this:
+      case Zero:   return Cnt(n)
+      case Cnt(c): return Cnt(c + n)
+
+let a Counter = Some(true)  // bare ctor inferred from let-type
+let b = a + true            // -> Cnt(2)
+let c = b + 40              // -> Cnt(42)
+```
+
+The full list of operator traits (`mul`, `div`, `concat`, `neg`, `comp`,
+`ord`, `index`, ...) lives in the [traits document](06-traits.md#operator-traits).
+
 ### Runtime layout
 
 ADT values share the tagged-union layout:

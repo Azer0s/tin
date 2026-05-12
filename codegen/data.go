@@ -906,6 +906,15 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		if err != nil {
 			return nil, true, err
 		}
+		// `cur || b`-style short-circuit operands evaluate across
+		// several blocks and leave the IR insertion point parked on a
+		// merge block; pick that up so the subsequent coerce / wrap
+		// stores into the right block (otherwise we emit instructions
+		// into the OLD block referencing values that only exist after
+		// the merge -- a dominance error).
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
 
 		argVals[i] = cg.coerce(block, v, vi.PayloadType.Fields[i])
 		// retainMask: true means the arg is a borrow whose source still
@@ -998,6 +1007,14 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 		v, err2 := cg.genExpr(block, a)
 		if err2 != nil {
 			return nil, err2
+		}
+		// Pick up any block advance caused by short-circuit operands
+		// (`a || b`, `a && b`) before the subsequent coerce/wrap;
+		// otherwise we store into the original block while the operand
+		// values only exist after the merge, producing a dominance
+		// error.  Same fix as in genDataScopeCtorCall.
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
 		}
 
 		expected := vi.PayloadType.Fields[i]
