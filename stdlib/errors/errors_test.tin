@@ -18,30 +18,21 @@ struct demo_err(errors::Err) =
 
   fn kind(this demo_err) demo_kind = return this._kind
 
-test "errors::new builds *Err with the given message" =
+// --- value-form API ---------------------------------------------------------
+
+test "errors::new returns a value-form Err with the given message" =
   let e = errors::new("boom")
 
-  assert::ok(errors::is_err(e))
-  assert::equals(errors::message(e), "boom")
+  assert::equals("boom", e.message())
+  assert::equals("boom", errors::message(e))
 
-test "nil *Err is treated as success" =
-  let e *errors::Err = nil
-
-  assert::ok(!errors::is_err(e))
-  assert::equals(errors::message(e), "")
-
-test "errors::wrap prepends context" =
+test "errors::wrap prepends context (value form)" =
   let inner = errors::new("disk full")
   let outer = errors::wrap(inner, "saving config")
 
-  assert::equals(errors::message(outer), "saving config: disk full")
+  assert::equals("saving config: disk full", outer.message())
 
-test "errors::wrap on nil acts as new" =
-  let e = errors::wrap(nil, "lonely")
-
-  assert::equals(errors::message(e), "lonely")
-
-test "errors::equals matches by rendered message" =
+test "errors::equals matches by rendered message (value form)" =
   let a = errors::new("io error")
   let b = errors::new("io error")
   let c = errors::new("not the same")
@@ -49,30 +40,52 @@ test "errors::equals matches by rendered message" =
   assert::ok(errors::equals(a, b))
   assert::ok(!errors::equals(a, c))
 
-test "errors::equals treats both-nil as equal" =
+// --- pointer-form overloads (back-compat) ----------------------------------
+
+test "errors::wrap pointer-form handles a nil inner" =
+  let n *errors::Err = nil
+  let e = errors::wrap(n, "lonely")
+
+  assert::equals("lonely", (*e).message())
+
+test "errors::is_err detects nil and non-nil pointer-form errors" =
+  let n *errors::Err = nil
+  let e = &errors::new("real")
+
+  assert::ok(!errors::is_err(n))
+  assert::ok(errors::is_err(e))
+
+test "errors::equals pointer-form treats both-nil as equal" =
   let n1 *errors::Err = nil
   let n2 *errors::Err = nil
 
   assert::ok(errors::equals(n1, n2))
 
-test "errors::equals nil vs non-nil is not equal" =
+test "errors::equals pointer-form nil vs non-nil is not equal" =
   let n *errors::Err = nil
-  let e = errors::new("real")
+  let e = &errors::new("real")
 
   assert::ok(!errors::equals(n, e))
   assert::ok(!errors::equals(e, n))
+
+test "errors::message pointer-form returns empty for nil" =
+  let n *errors::Err = nil
+
+  assert::equals("", errors::message(n))
+
+// --- domain error widening + downcast --------------------------------------
 
 test "domain error widens to *Err and dispatches via message()" =
   let de = &demo_err{_kind: Tag(42)}
   let as_err = de as *errors::Err
 
-  assert::equals(errors::message(as_err), "demo: tag 42")
+  assert::equals("demo: tag 42", errors::message(as_err))
 
 test "domain error retains its kind for inspection" =
   let de = &demo_err{_kind: Tag(7)}
 
   match de.kind():
-    case Tag(v): assert::equals(v, 7)
+    case Tag(v): assert::equals(7, v)
     case Empty:  assert::fails("expected Tag")
 
 test "*errors::Err downcasts back to the concrete struct" =
@@ -86,5 +99,5 @@ test "*errors::Err downcasts back to the concrete struct" =
   let back = widened as *demo_err
 
   match (*back).kind():
-    case Tag(v): assert::equals(v, 99)
+    case Tag(v): assert::equals(99, v)
     case Empty:  assert::fails("expected Tag")

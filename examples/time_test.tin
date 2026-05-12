@@ -124,17 +124,18 @@ test "Instant sub duration" =
 test "Instant until success" =
   let start = Instant{ns: 1000}
   let end   = Instant{ns: 5000}
-  let (d, err) = start.until(end)
+  let r = start.until(end)
+  let d = r.unwrap_or(time::from_ns(0))
 
-  assert::not_ok(errors::is_err(err))
+  assert::ok(r.is_ok())
   assert::equals(d.nanoseconds(), 4000)
 
 test "Instant until error when end before start" =
   let start = Instant{ns: 5000}
   let end   = Instant{ns: 1000}
-  let (_, err) = start.until(end)
+  let r = start.until(end)
 
-  assert::ok(errors::is_err(err))
+  assert::ok(r.is_err())
 
 test "Instant elapsed" =
   let start = Instant{ns: 100}

@@ -2978,6 +2978,19 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		srcVal := block.NewLoad(structSt, structVal)
 		block.NewStore(srcVal, typedDst)
 
+		// When the caller is returning a binding via this coerce (genReturn
+		// sets coerceTransfersSource for an Identifier return), the source's
+		// own scope-exit release is suppressed via retSkipName -- but we
+		// just copied the pointee into a fresh heap block, so the source
+		// pointer's rc=1 belongs to nobody after this point.  Release it
+		// now so the original heap block is freed; the iface's copy stays
+		// alive on its own.  Without this, `fn new(msg) Err = let s =
+		// &StringErr{msg}; return s` leaks the &StringErr literal block.
+		if cg.coerceTransfersSource {
+			srcI8 := block.NewBitCast(structVal, irtypes.I8Ptr)
+			block.NewCall(cg.ensureRelease(), srcI8)
+		}
+
 		dataPtr = heapPtr
 		concreteType = structSt
 	} else {

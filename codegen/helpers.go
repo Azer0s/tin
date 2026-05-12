@@ -1083,8 +1083,26 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// Pointer-to-struct -> struct value: load the pointed-to value.
 	// This handles value-receiver methods called on a pointer (e.g. p.method()
 	// where method takes 'this T' but p is '*T').
+	//
+	// Refuse for trait fat-pointer targets: silently loading a `*Trait`
+	// into a `Trait` value-form drops the outer iface block's rc=1 on
+	// the floor (the block was heap-alloc'd by coerceToTrait /
+	// buildPtrToTraitBorrow and nobody else owns it) but transfers the
+	// inner data ptr into the loaded value -- on the next ARC release
+	// site the heap block leaks and the inner data races against the
+	// loaded copy.  Require an explicit `*expr` so the user routes
+	// through genDerefExpr, which handles the temp-vs-binding ARC
+	// transfer correctly.
 	if pt, ok := src.(*irtypes.PointerType); ok {
 		if pt.ElemType.Equal(target) {
+			if targetSt, isStruct := target.(*irtypes.StructType); isStruct && isTraitFatPtrShape(targetSt) {
+				cg.coerceLastErr = fmt.Errorf(
+					"cannot implicitly deref `%s` to its value form `%s`: the outer iface block owns rc=1 and would leak.  Write `*expr` explicitly so the compiler can move ownership out of the temporary, or change the receiving type to `%s` (pointer form)",
+					cg.tinTypeDisplay(src), cg.tinTypeDisplay(target), cg.tinTypeDisplay(src))
+
+				return val
+			}
+
 			return block.NewLoad(target, val)
 		}
 	}

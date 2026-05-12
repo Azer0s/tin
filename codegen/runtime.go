@@ -1215,6 +1215,20 @@ func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.
 		// any {i32, i8*}: field 1 is the i8* data pointer
 		return block.NewExtractValue(val, 1)
 	}
+	// Trait fat-pointer value: {i8* data, vtable*}.  The first field is the
+	// heap pointer to the underlying concrete struct (allocated by
+	// coerceToTrait / buildPtrToTraitBorrow), so _tin_retain/release on
+	// that pointer is what balances ARC for an iface-VALUE field embedded
+	// in another struct/ADT.  Without this, copies of a Result whose Err
+	// payload is `errors::Err` (a trait value) would forget to bump the
+	// iface block's RC -- the original's drop then frees the block while
+	// the copy still holds a reference, producing the tcache double-free
+	// we caught under valgrind.
+	if st, ok := t.(*irtypes.StructType); ok && isTraitFatPtrShape(st) {
+		dataPtr := block.NewExtractValue(val, 0)
+
+		return dataPtr
+	}
 
 	return nil
 }
@@ -1730,7 +1744,13 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 
 	// Block was freed (last reference). Release RC-tracked child fields
 	// from the loaded struct value (which is on the stack, still valid).
-	cg.emitRelease(releaseChildren, structVal)
+	// Trait fat-ptrs handle their owned `data` field below via the
+	// vtable's data-release thunk; calling the generic emitRelease here
+	// for an iface would double-release `data` (extractRCDataPtr returns
+	// the data field for iface shapes), so skip it.
+	if !isTraitFatPtrShape(st) {
+		cg.emitRelease(releaseChildren, structVal)
+	}
 
 	// Trait-iface fat ptr: dispatch via the vtable's data-release
 	// thunk (last slot) to call the wrapped concrete struct's

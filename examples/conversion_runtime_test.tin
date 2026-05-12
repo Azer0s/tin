@@ -121,7 +121,7 @@ test "if on i64 zero" =
 
 fn maybe_fail(do_fail bool) Result[i64, *errors::Err] =
   if do_fail:
-    return Err(errors::new("something"))
+    return Err(&errors::new("something"))
   return Ok(7)
 
 test "Result-Err carrying *errors::Err round-trip" =

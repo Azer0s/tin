@@ -75,34 +75,53 @@ struct StringErr(Err) =
   // keeps StringErr printable wherever it is referenced directly.
   fn print(this StringErr) string = return this.msg
 
-// new creates a heap-allocated StringErr and returns it as *Err.
-// The pointer is non-nil; nil flows from explicit `return nil` paths
-// or from default-zero locals.  The compiler auto-widens *StringErr to
-// *Err at the return site by building a heap iface that borrows the
-// concrete struct.
-fn new(msg string) *Err =
+// new wraps `msg` in a StringErr and returns it as a value-form `Err`
+// (the trait fat-ptr {data, vtable}).  Storing the returned value in
+// a `Result[T, errors::Err]` is the common path; callers that need a
+// boxed pointer can take the address with `&errors::new(msg)`.
+//
+// Returning the value form avoids the silent ARC leak the old `*Err`
+// shape produced when a temporary `*Err` got implicitly deref'd into
+// a value-typed Err slot -- the compiler now rejects that coercion,
+// and this signature matches the common call site directly.
+fn new(msg string) Err =
   let s = &StringErr{msg: msg}
 
   return s
 
-// wrap returns a new *Err whose message is "ctx: <inner>".  When inner
-// is nil, wrap acts as new(ctx).
+// wrap returns a new Err whose message is "ctx: <inner>".  The
+// pointer-form overload below accepts `*Err` for legacy call sites
+// that haven't migrated to value-form errors yet.
+fn wrap(inner Err, ctx string) Err =
+  let composed = ctx ++ ": " ++ inner.message()
+  let s = &StringErr{msg: composed}
+
+  return s
+
 fn wrap(inner *Err, ctx string) *Err =
   if inner == nil:
-    return new(ctx)
+    let s0 = &StringErr{msg: ctx}
+
+    return s0
   let composed = ctx ++ ": " ++ (*inner).message()
   let s = &StringErr{msg: composed}
 
   return s
 
-// is_err returns true when err is non-nil (i.e. an error occurred).
+// is_err reports whether err is a non-nil pointer error.  Kept as an
+// overload for legacy `*Err`-typed call sites; value-form errors are
+// always present, so callers using `Result[T, errors::Err]` should
+// match the Result instead.
 fn is_err(err *Err) bool =
   return err != nil
 
-// equals compares two *Err by message.  Both nil compares equal.
-// Operates on the trait so any two error implementations whose
-// rendered messages match are considered equivalent for the purpose of
-// "did the same thing happen?" assertions.
+// equals compares two Err values by message.  Two error
+// implementations whose rendered messages match are considered
+// equivalent for the purpose of "did the same thing happen?"
+// assertions.  Overloads cover both value and pointer forms.
+fn equals(a Err, b Err) bool =
+  return a.message() == b.message()
+
 fn equals(a *Err, b *Err) bool =
   if a == nil && b == nil:
     return true
@@ -111,8 +130,11 @@ fn equals(a *Err, b *Err) bool =
 
   return (*a).message() == (*b).message()
 
-// message dereferences a *Err and returns its formatted message, or an
-// empty string when the pointer is nil.
+// message returns err's formatted message.  Free-fn alternative to
+// `err.message()`; the pointer-form overload returns "" for nil.
+fn message(err Err) string =
+  return err.message()
+
 fn message(err *Err) string =
   if err == nil:
     return ""

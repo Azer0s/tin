@@ -1167,6 +1167,20 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					return result, nil
 				}
 			}
+			// No matching overload found.  Release the side-effecting
+			// argument values we just emitted before falling through to
+			// the generic path -- otherwise the generic path re-evaluates
+			// every arg and the first set's allocations leak (e.g.
+			// `assert::equals(json::encode(...), ...)` where assert::equals
+			// is generic but errors::equals also exists as a same-named
+			// overload, so cg.overloads["equals"] is non-empty here).
+			for i, astArg := range e.Args {
+				if i >= len(argVals) || argVals[i] == nil {
+					continue
+				}
+
+				cg.emitCallArgReleaseForRet(block, astArg, argVals[i], argVals[i], irtypes.Void)
+			}
 		}
 		// Generic function call without explicit type arg: infer type and monomorphize.
 		// When multiple packages export identically-named generics (e.g. json::encode and

@@ -2312,6 +2312,30 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 
 			return typedPtr, nil
 		}
+		// &call(args) for arbitrary call expressions.  Evaluates the call,
+		// heap-allocates an RC block sized for the return value, stores the
+		// value into it, and returns the typed pointer.  Callers own the
+		// resulting `*T` and are responsible for releasing it; the same rules
+		// as `&StructLit{...}` apply.  Used for `&errors::new("...")`-style
+		// expressions where the user wants a pointer to a freshly produced
+		// value.
+		val, err := cg.genExpr(block, e)
+		if err != nil {
+			return nil, err
+		}
+
+		if val == nil || irtypes.IsVoid(val.Type()) {
+			return nil, fmt.Errorf("cannot take address of a void-returning call")
+		}
+
+		nullPtr := constant.NewNull(irtypes.NewPointer(val.Type()))
+		gepOne := block.NewGetElementPtr(val.Type(), nullPtr, constant.NewInt(irtypes.I32, 1))
+		sz := block.NewPtrToInt(gepOne, irtypes.I64)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(val.Type()))
+		block.NewStore(val, typedPtr)
+
+		return typedPtr, nil
 	}
 
 	return nil, fmt.Errorf("not an lvalue: %T", node)

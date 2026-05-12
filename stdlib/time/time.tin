@@ -178,10 +178,10 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
 
   // until returns the Duration from this to later.
   // Returns an error if later is before this.
-  fn until(this Instant, later Instant) (Duration, *errors::Err) =
+  fn until(this Instant, later Instant) Result[Duration, errors::Err] =
     if later.ns < this.ns:
-      return (Duration{ns: 0}, errors::new("time: end is before start"))
-    return (Duration{ns: later.ns - this.ns}, nil)
+      return Err(errors::new("time: end is before start"))
+    return Ok(Duration{ns: later.ns - this.ns})
 
   // elapsed returns the Duration from this to later without error checking.
   fn elapsed(this Instant, later Instant) Duration =

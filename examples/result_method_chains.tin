@@ -1,0 +1,99 @@
+// examples/result_method_chains.tin -- map / map_err and try-chaining
+// across generic ADT methods with their own type parameters.
+//
+// `map[u]` and `map_err[f]` carry method-level type parameters that
+// the compiler binds at each call site (the closure's return type
+// drives `u` / `f`).  The outer `t, e` come from the receiver.
+
+use assert
+use { Result } from result
+use errors
+use strings
+
+// 1. Map the Ok payload to a different type.
+
+test "map transforms Ok payload to a different type" =
+  let r Result[i64, errors::Err] = Ok(7)
+  let s = r.map(fn(n i64) string = return "n={n}")
+
+  match s:
+    case Ok(v):  assert::equals("n=7", v)
+    case Err(_): assert::ok(false)
+
+test "map passes Err through unchanged" =
+  let r Result[i64, errors::Err] = Err(errors::new("boom"))
+  let s = r.map(fn(n i64) string = return "n={n}")
+
+  match s:
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals("boom", e.message())
+
+// 2. Map the Err payload to a different type.
+
+struct AppError =
+  code i64
+  text string
+
+test "map_err transforms Err payload to a struct" =
+  let r Result[i64, string] = Err("not-found")
+  let s = r.map_err(fn(msg string) AppError =
+    return AppError{code: 404, text: msg})
+
+  match s:
+    case Ok(_):  assert::ok(false)
+    case Err(e):
+      assert::equals(404, e.code)
+      assert::equals("not-found", e.text)
+
+test "map_err passes Ok through unchanged" =
+  let r Result[i64, string] = Ok(42)
+  let s = r.map_err(fn(_ string) AppError = return AppError{code: 0, text: ""})
+
+  match s:
+    case Ok(v):  assert::equals(42, v)
+    case Err(_): assert::ok(false)
+
+// 3. `try` on a chained map_err.
+
+fn parse_int_doubled(s string) Result[i64, AppError] =
+  let v = try strings::parse_int(s).map_err(fn(e errors::Err) AppError =
+    return AppError{code: 1, text: e.message()})
+
+  return Ok(v * 2)
+
+test "try chain on map_err propagates the mapped Err" =
+  let bad = parse_int_doubled("not-a-number")
+
+  match bad:
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals(1, e.code)
+
+test "try chain on map_err returns Ok when input parses" =
+  let good = parse_int_doubled("21")
+
+  match good:
+    case Ok(v):  assert::equals(42, v)
+    case Err(_): assert::ok(false)
+
+// 4. `try` on a chained map.
+
+fn label_or_propagate(r Result[i64, errors::Err]) Result[string, errors::Err] =
+  let s = try r.map(fn(x i64) string = return "label-{x}")
+
+  return Ok(s ++ "!")
+
+test "try chain on map extracts the reshaped Ok" =
+  let r Result[i64, errors::Err] = Ok(5)
+  let s = label_or_propagate(r)
+
+  match s:
+    case Ok(v):  assert::equals("label-5!", v)
+    case Err(_): assert::ok(false)
+
+test "try chain on map propagates the original Err" =
+  let r Result[i64, errors::Err] = Err(errors::new("upstream"))
+  let s = label_or_propagate(r)
+
+  match s:
+    case Ok(_):  assert::ok(false)
+    case Err(e): assert::equals("upstream", e.message())
