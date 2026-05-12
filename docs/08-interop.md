@@ -10,7 +10,8 @@ Files can declare linker flags as special comments starting with `//!`:
 //!-lpthread
 ```
 
-Each `//!` line is appended verbatim to the linker command line. Common uses:
+Each `//!` line is split on whitespace and the resulting tokens are forwarded to
+the linker as separate argv entries. Common uses:
 
 | Directive      | Purpose                          |
 |----------------|----------------------------------|
@@ -19,6 +20,26 @@ Each `//!` line is appended verbatim to the linker command line. Common uses:
 | `//!-lpthread` | Link pthreads                    |
 
 Directives must appear before any non-comment code in the file.
+
+### Multi-token linker flags
+
+Flags that the linker expects as several argv entries -- the classic example
+being macOS `-framework Foo`, where `ld` looks up `-framework` and `Foo`
+independently -- are written with the tokens space-separated on one line:
+
+```rust
+//!-framework Cocoa            [darwin]
+//!-framework CoreFoundation   [darwin]
+//!-Xlinker -rpath -Xlinker /opt/lib
+```
+
+Each space-separated chunk becomes its own argv element. Comma-separated forms
+(`//!-Wl,-rpath,/opt/lib`) stay as a single token because they contain no
+whitespace -- this matches how `clang` itself unpacks `-Wl,` arguments.
+
+Use `$(brew --prefix ...)` shell substitution when a token must contain a
+literal path that may have spaces; the command's stdout is treated as one piece
+before the whitespace split runs.
 
 ```rust
 //!-lm
@@ -111,6 +132,31 @@ it does not propagate further.
 
 This is per-source-file and per-line; for project-wide suppression
 use the `-Wno-<name>` command-line flag instead.
+
+### Valgrind suppressions (`//!-suppressions=`)
+
+When a test runs under `tin test --valgrind`, files can opt into a valgrind
+suppressions file with:
+
+```rust
+//!-suppressions=path/to/file.supp [linux]
+```
+
+The path is resolved relative to the `.tin` file. `$TIN_RUNTIME`, `$TIN_STDLIB`,
+and `$ENV` variables expand the same way they do in `//!+file.c` flag lists.
+The platform qualifier honours the standard `[linux]` / `[darwin]` /
+`[windows]` gates so a glibc-only suppression stays scoped to Linux runs.
+
+The directive is silently ignored on `tin test --leaks` (macOS) and on regular
+`tin run` / `tin test` invocations -- it only feeds `--suppressions=PATH` to
+valgrind. The silence is therefore opt-in per file: tests that don't carry
+the directive run under the unmodified valgrind error budget.
+
+`stdlib/net/dns/dns_test.tin` ships such a suppression for glibc's lazy
+`__libc_dlopen_mode` -> `_dl_open` calls during the first `getaddrinfo()`;
+those leave 21 rtld-bookkeeping blocks reachable for the process lifetime
+that valgrind otherwise flags. The suppression rules anchor at `_dl_open` so
+real leaks elsewhere are unaffected.
 
 ---
 
