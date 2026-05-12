@@ -524,7 +524,8 @@ func expandShellExprs(s string) string {
 }
 
 // parseFileDirectives scans the leading lines of src for //! directives and
-// returns linker flags and C source files to compile in.
+// returns linker flags, C source files to compile in, and valgrind
+// suppression paths to apply when the test runs under --valgrind.
 //
 //	//!-lm                         -> linker flag -lm
 //	//!-lm [x86_64]                -> linker flag -lm, x86_64 only
@@ -532,10 +533,14 @@ func expandShellExprs(s string) string {
 //	//!+src/foo.c -- -DDEBUG       -> compile src/foo.c with extra flag -DDEBUG
 //	//!+src/foo.c [arch]           -> compile only on matching arch
 //	//!+src/foo.c [arch] -- FLAGS  -> arch-specific file with extra flags
+//	//!-suppressions=PATH          -> pass --suppressions=PATH to valgrind
+//	                                   for this file (no effect outside --valgrind)
 //
-// srcDir is the directory of the .tin file; relative C source paths are
-// resolved against it. Scanning stops at the first non-comment, non-blank line.
-func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cSources []cSource) {
+// srcDir is the directory of the .tin file; relative paths are resolved
+// against it.  $TIN_RUNTIME / $TIN_STDLIB / $ENV variables expand in
+// suppression paths the same way they do in //!+file flags.  Scanning
+// stops at the first non-comment, non-blank line.
+func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cSources []cSource, vgSuppressions []string) {
 	for _, line := range strings.SplitAfter(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
@@ -603,6 +608,27 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 				}
 
 				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
+			} else if strings.HasPrefix(rest, "-suppressions=") {
+				// Valgrind-only directive: register a suppressions file
+				// that applies when the binary runs under --valgrind.
+				// Honors the same `[arch]` qualifier as the other
+				// directives so platform-specific suppressions stay
+				// scoped (e.g. a glibc-only file is skipped on macOS).
+				specAndQualifier, archQualifier := extractArchQualifier(strings.TrimPrefix(rest, "-suppressions="))
+				if !archMatches(archQualifier) {
+					continue
+				}
+
+				rtDir := tinRuntimeDir()
+				expanded := strings.ReplaceAll(specAndQualifier, "$TIN_RUNTIME", rtDir)
+				expanded = strings.ReplaceAll(expanded, "$TIN_STDLIB", stdlibDir)
+				expanded = os.ExpandEnv(expanded)
+
+				if !filepath.IsAbs(expanded) {
+					expanded = filepath.Join(srcDir, expanded)
+				}
+
+				vgSuppressions = append(vgSuppressions, expanded)
 			} else {
 				// Linker flag: check for optional arch qualifier.
 				flagAndQualifier, archQualifier := extractArchQualifier(rest)
@@ -995,7 +1021,10 @@ doneFlags:
 		if _, statErr := os.Stat(runCacheBinPath); statErr == nil && sbomMatches(runCacheDir) {
 			memcheck, binArgs := parseRunArgs(fileArgIdx)
 			validateMemcheck(memcheck)
-			execRunBinary(runCacheBinPath, memcheck, binArgs)
+			// Pick up `//!-suppressions=` from the source so cached
+			// single-file tests still hand them to valgrind.
+			_, _, vgSupps := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
+			execRunBinary(runCacheBinPath, memcheck, binArgs, vgSupps...)
 
 			return
 		}
@@ -1026,7 +1055,7 @@ doneFlags:
 	}
 
 	// Collect directives declared in the source file via //! lines
-	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
+	fileLinkerFlags, fileCSources, fileVgSuppressions := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
 
 	// Estimate total stages for progress display. Mirrors the actual
 	// step shape so the post-codegen setTotal call refines without
@@ -1238,7 +1267,7 @@ doneFlags:
 			continue
 		}
 
-		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc), stdlibDirForDirectives(stdlibOverride))
+		pkgLinkFlags, pkgCSources, _ := parseFileDirectives(string(src), filepath.Dir(pkgSrc), stdlibDirForDirectives(stdlibOverride))
 		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
 		fileCSources = append(fileCSources, pkgCSources...)
 	}
@@ -1437,7 +1466,7 @@ doneFlags:
 		cprog.clear()
 
 		validateMemcheck(memcheck)
-		execRunBinary(runCacheBinPath, memcheck, binArgs)
+		execRunBinary(runCacheBinPath, memcheck, binArgs, fileVgSuppressions...)
 
 	default:
 		_, _ = fmt.Fprint(os.Stderr, usage)
@@ -2661,23 +2690,32 @@ func validateMemcheck(memcheck string) {
 	}
 }
 
-// memcheckCmd builds the exec.Cmd to run binary under the requested checker.
-// binArgs are forwarded to the binary as its argv[1..].
+// memcheckCmdWithSuppressions builds the exec.Cmd to run binary under
+// the requested checker.  binArgs are forwarded to the binary as its
+// argv[1..].  vgSuppressions feeds `--suppressions=FILE` to valgrind
+// from per-file `//!-suppressions=FILE` directives in the test source;
+// the scope stays at the file that opted in -- a global suppression
+// set would silently hide leaks in unrelated tests.
 //
 // $TIN_EXEC_WRAPPER prepends a runner (e.g. "qemu-aarch64") so cross-compiled
 // foreign-arch binaries can be exercised on the host. Modeled on Go's GOEXEC
 // and Cargo's CARGO_TARGET_<TRIPLE>_RUNNER.
-func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
+func memcheckCmdWithSuppressions(memcheck, binary string, vgSuppressions []string, binArgs ...string) *exec.Cmd {
 	switch memcheck {
 	case "valgrind":
-		args := append([]string{
+		vgArgs := []string{
 			"--error-exitcode=1",
 			"--leak-check=full",
 			"--errors-for-leak-kinds=all",
-			binary,
-		}, binArgs...)
+		}
+		for _, s := range vgSuppressions {
+			vgArgs = append(vgArgs, "--suppressions="+s)
+		}
 
-		return wrapExec("valgrind", args...)
+		vgArgs = append(vgArgs, binary)
+		vgArgs = append(vgArgs, binArgs...)
+
+		return wrapExec("valgrind", vgArgs...)
 	case "leaks":
 		args := append([]string{"--atExit", "--", binary}, binArgs...)
 
@@ -2851,6 +2889,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		// Parse //!-suppressions= directives up front so both the
+		// cache-hit and the fresh-compile branches below can hand them
+		// to memcheckCmdWithSuppressions; valgrind picks them up,
+		// non-valgrind runs just ignore the list.
+		_, _, fileVgSuppressions := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
+
 		// Cache lookup: if the test binary is already built and every dep
 		// recorded in its SBOM still hashes the same, run the cached binary
 		// directly and skip lex/parse/codegen for this file.
@@ -2860,7 +2904,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		if _, statErr := os.Stat(cachedBin); statErr == nil && sbomMatches(cacheDir) {
 			fmt.Printf("%s\n\n", fname)
 
-			run := memcheckCmd(memcheck, cachedBin)
+			run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 			var outBuf bytes.Buffer
 
@@ -2994,21 +3038,24 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue // no test blocks in this file
 		}
 
-		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
+		fileLinks, fCSources, _ := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
 
 		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
 			srcLinks = append(srcLinks, "-l"+lib)
 		}
 		// Collect //!+file.c and //!-lNAME directives from imported packages,
-		// just as the single-file build path does.
+		// just as the single-file build path does.  --valgrind suppression
+		// directives stay scoped to the test file -- pulling them in from
+		// every transitive package would silence checks they didn't opt
+		// into.
 		for _, pkgSrc := range cg.PackageSrcPaths() {
 			pkgBytes, pkgReadErr := os.ReadFile(pkgSrc)
 			if pkgReadErr != nil {
 				continue
 			}
 
-			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc), stdlibDirForDirectives(""))
+			pkgLinks, pkgCSrcs, _ := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc), stdlibDirForDirectives(""))
 			srcLinks = append(srcLinks, pkgLinks...)
 			fCSources = append(fCSources, pkgCSrcs...)
 		}
@@ -3089,7 +3136,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		cprog.clear()
 		fmt.Printf("%s\n\n", fname)
 
-		run := memcheckCmd(memcheck, cachedBin)
+		run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 		var outBuf bytes.Buffer
 
@@ -3623,8 +3670,8 @@ func collectExtraObjs(fileArgIdx int) []string {
 }
 
 // execRunBinary runs `bin` (under memcheck if set) and exits with its status.
-func execRunBinary(bin, memcheck string, binArgs []string) {
-	run := memcheckCmd(memcheck, bin, binArgs...)
+func execRunBinary(bin, memcheck string, binArgs []string, vgSuppressions ...string) {
+	run := memcheckCmdWithSuppressions(memcheck, bin, vgSuppressions, binArgs...)
 	run.Stdout = os.Stdout
 	run.Stderr = os.Stderr
 

@@ -1,0 +1,36 @@
+# runtime/valgrind-glibc-nss.supp -- valgrind suppressions for glibc's
+# lazy nss / resolver module loading.
+#
+# The first getaddrinfo() (and similar nss callers) in a glibc process
+# loads libnss_files.so / libnss_dns.so / libresolv.so via
+# __libc_dlopen_mode -> _dl_open and keeps the resulting mappings live
+# for the program's lifetime.  The rtld bookkeeping for those .so's
+# (linkmap entries, version maps, scope arrays, cache strdup'd paths)
+# stays in glibc's globals with no dlclose() ever called -- valgrind
+# reports each as "still reachable".
+#
+# Verified by a pure-C reproducer that calls only getaddrinfo() +
+# freeaddrinfo() with zero Tin code on the stack: 9,816 bytes / 21
+# blocks / 8 records, byte-for-byte identical to what Tin's dns_test
+# shows.  Every record's call chain terminates at `_dl_open` (the
+# dynamic linker's open-and-map entry), so we anchor the match there.
+# Real reachable leaks elsewhere in the program (no `_dl_open` frame
+# on the stack) still surface.
+
+{
+   glibc-rtld-dlopen-malloc-reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   ...
+   fun:_dl_open
+}
+
+{
+   glibc-rtld-dlopen-calloc-reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   ...
+   fun:_dl_open
+}
