@@ -2882,6 +2882,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		failedTests []string // individual test names that failed (empty = whole-file failure)
 	}
 
+	// Forward TTY state to child test binaries via env var, since their stdout
+	// is piped through io.MultiWriter and isatty() in the child returns false.
+	if isStdoutTTY() {
+		_ = os.Setenv("TIN_TEST_COLOR", "1")
+	}
+
 	wd, _ := os.Getwd()
 
 	var results []result
@@ -2917,16 +2923,20 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		cachedBin := filepath.Join(cacheDir, "bin")
 
 		if _, statErr := os.Stat(cachedBin); statErr == nil && sbomMatches(cacheDir) {
-			fmt.Printf("%s\n\n", fname)
+			fmt.Printf("%s\n\n", blueIfTTY(fname))
 
 			run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 			var outBuf bytes.Buffer
 
-			run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-			run.Stderr = os.Stderr
+			colorOut := newMemcheckColorWriter(os.Stdout)
+			colorErr := newMemcheckColorWriter(os.Stderr)
+			run.Stdout = io.MultiWriter(colorOut, &outBuf)
+			run.Stderr = colorErr
 
 			passed := runMemcheck(memcheck, run) == nil
+			_ = colorOut.Flush()
+			_ = colorErr.Flush()
 
 			fmt.Println("------------------------------------------------")
 
@@ -3149,19 +3159,23 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}
 
 		cprog.clear()
-		fmt.Printf("%s\n\n", fname)
+		fmt.Printf("%s\n\n", blueIfTTY(fname))
 
 		run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 		var outBuf bytes.Buffer
 
-		run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-		run.Stderr = os.Stderr
+		colorOut := newMemcheckColorWriter(os.Stdout)
+		colorErr := newMemcheckColorWriter(os.Stderr)
+		run.Stdout = io.MultiWriter(colorOut, &outBuf)
+		run.Stderr = colorErr
 
 		passed := true
 		if runErr := runMemcheck(memcheck, run); runErr != nil {
 			passed = false
 		}
+		_ = colorOut.Flush()
+		_ = colorErr.Flush()
 
 		fmt.Println("------------------------------------------------")
 
@@ -3206,13 +3220,18 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 	}
 
 	if failed == 0 && skipped == 0 {
-		fmt.Printf("all %d test file(s) passed.\n", len(results))
+		fmt.Printf("%s\n", greenIfTTY(fmt.Sprintf("all %d test file(s) passed.", len(results))))
 
 		return
 	}
 
 	passed := len(results) - failed - skipped
-	fmt.Printf("%d passed, %d failed, %d skipped (%d total)\n", passed, failed, skipped, len(results))
+	failPart := fmt.Sprintf("%d failed", failed)
+	if failed > 0 {
+		failPart = redIfTTY(failPart)
+	}
+
+	fmt.Printf("%d passed, %s, %d skipped (%d total)\n", passed, failPart, skipped, len(results))
 
 	if failed > 0 {
 		fmt.Printf("\nFailed:\n")
@@ -3687,8 +3706,25 @@ func collectExtraObjs(fileArgIdx int) []string {
 // execRunBinary runs `bin` (under memcheck if set) and exits with its status.
 func execRunBinary(bin, memcheck string, binArgs []string, vgSuppressions ...string) {
 	run := memcheckCmdWithSuppressions(memcheck, bin, vgSuppressions, binArgs...)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
+
+	if memcheck != "" {
+		colorOut := newMemcheckColorWriter(os.Stdout)
+		colorErr := newMemcheckColorWriter(os.Stderr)
+		run.Stdout = colorOut
+		run.Stderr = colorErr
+
+		defer func() {
+			_ = colorOut.Flush()
+			_ = colorErr.Flush()
+		}()
+	} else {
+		run.Stdout = os.Stdout
+		run.Stderr = os.Stderr
+	}
+
+	if isStdoutTTY() {
+		_ = os.Setenv("TIN_TEST_COLOR", "1")
+	}
 
 	if err := run.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -3833,4 +3869,121 @@ func isStderrTTY() bool {
 	}
 
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func isStdoutTTY() bool {
+	if _, hasNoColor := os.LookupEnv("NO_COLOR"); hasNoColor {
+		return false
+	}
+
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func greenIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[32m" + s + "\x1b[0m"
+}
+
+func redIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[31m" + s + "\x1b[0m"
+}
+
+func blueIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[34m" + s + "\x1b[0m"
+}
+
+// memcheckColorWriter wraps an underlying writer (os.Stdout / os.Stderr) and
+// colorizes recognized valgrind / macOS leaks summary lines. Buffers partial
+// lines across Write calls so a colorize pattern split across writes is not
+// missed.
+type memcheckColorWriter struct {
+	w   io.Writer
+	buf []byte
+	tty bool
+}
+
+// memcheckOKLine matches lines we want to highlight green: a clean
+// valgrind run or a "0 leaks for 0 total leaked bytes" report.
+var memcheckOKLine = regexp.MustCompile(`All heap blocks were freed -- no leaks are possible|\b0 leaks for 0 total leaked bytes\b`)
+
+// memcheckErrLine matches lines we want to highlight red: any non-zero
+// leak count from macOS leaks, or known valgrind error markers.
+var memcheckErrLine = regexp.MustCompile(`\b[1-9][0-9]* leak(s)? for [0-9]+ total leaked bytes\b|ERROR SUMMARY: [1-9][0-9]* errors|definitely lost: [1-9][0-9,]* bytes|indirectly lost: [1-9][0-9,]* bytes|Invalid (read|write|free)|uninitialised value`)
+
+func newMemcheckColorWriter(w *os.File) *memcheckColorWriter {
+	if _, hasNoColor := os.LookupEnv("NO_COLOR"); hasNoColor {
+		return &memcheckColorWriter{w: w, tty: false}
+	}
+
+	fi, err := w.Stat()
+	tty := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+
+	return &memcheckColorWriter{w: w, tty: tty}
+}
+
+func (m *memcheckColorWriter) Write(p []byte) (int, error) {
+	if !m.tty {
+		return m.w.Write(p)
+	}
+
+	m.buf = append(m.buf, p...)
+
+	for {
+		i := bytes.IndexByte(m.buf, '\n')
+		if i < 0 {
+			break
+		}
+
+		line := m.buf[:i+1]
+		m.buf = m.buf[i+1:]
+
+		if _, err := m.w.Write(colorizeMemcheckLine(line)); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(p), nil
+}
+
+func (m *memcheckColorWriter) Flush() error {
+	if len(m.buf) == 0 {
+		return nil
+	}
+
+	_, err := m.w.Write(colorizeMemcheckLine(m.buf))
+	m.buf = nil
+
+	return err
+}
+
+func colorizeMemcheckLine(line []byte) []byte {
+	if memcheckErrLine.Match(line) {
+		return memcheckErrLine.ReplaceAllFunc(line, func(m []byte) []byte {
+			return append(append([]byte("\x1b[31m"), m...), "\x1b[0m"...)
+		})
+	}
+
+	if memcheckOKLine.Match(line) {
+		return memcheckOKLine.ReplaceAllFunc(line, func(m []byte) []byte {
+			return append(append([]byte("\x1b[32m"), m...), "\x1b[0m"...)
+		})
+	}
+
+	return line
 }
