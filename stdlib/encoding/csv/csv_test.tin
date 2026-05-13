@@ -70,7 +70,7 @@ test "parse handles CRLF line endings" =
 // --- parse: alt delimiter ---
 
 test "parse_with handles tab delimiter" =
-  let rows = csv::parse_with("a\tb\tc\n", @'\t' as byte)
+  let rows = csv::parse_with("a\tb\tc\n", @'\t')
 
   assert::equals(3, len(rows[0]))
   assert::equals("a", rows[0][0])
@@ -104,16 +104,16 @@ test "encode simple rows round-trips through parse" =
   assert::equals("a,b\nc,d\n", s)
 
 test "encode quotes fields containing the delimiter" =
-  assert::equals("\"a,b\"", csv::encode_field("a,b", @',' as byte))
+  assert::equals("\"a,b\"", csv::encode_field("a,b", @','))
 
 test "encode quotes fields containing a quote and doubles it" =
-  assert::equals("\"he said \"\"hi\"\"\"", csv::encode_field("he said \"hi\"", @',' as byte))
+  assert::equals("\"he said \"\"hi\"\"\"", csv::encode_field("he said \"hi\"", @','))
 
 test "encode quotes fields containing newline" =
-  assert::equals("\"line1\nline2\"", csv::encode_field("line1\nline2", @',' as byte))
+  assert::equals("\"line1\nline2\"", csv::encode_field("line1\nline2", @','))
 
 test "encode leaves plain fields unchanged" =
-  assert::equals("simple", csv::encode_field("simple", @',' as byte))
+  assert::equals("simple", csv::encode_field("simple", @','))
 
 // --- Writer ---
 

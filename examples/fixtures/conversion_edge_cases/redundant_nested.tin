@@ -1,0 +1,12 @@
+use option
+use { Option } from option
+use result
+use { Result } from result
+
+fn make() Result[Option[i64], string] =
+  return Ok(Some(7 as i64))
+
+fn main() =
+  match make():
+    case Ok(_):  echo "ok"
+    case Err(_): echo "err"

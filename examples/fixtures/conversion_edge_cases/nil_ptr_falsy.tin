@@ -1,0 +1,6 @@
+fn main() =
+  let p *i64 = nil
+  if p:
+    echo "WRONG"
+  else:
+    echo "ok: nil pointer is falsy"

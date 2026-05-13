@@ -1,0 +1,6 @@
+use sync::channel
+use { Channel } from sync::channel
+
+fn{#async} main() =
+  let ch = Channel[i64].make(4)
+  ch.send(42)

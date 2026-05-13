@@ -14,6 +14,7 @@
 // Import: use encoding::base64
 
 use errors
+use { Result } from result
 
 fn b64_rev(c byte) i64 =
   if c >= @'A' && c <= @'Z':
@@ -37,10 +38,15 @@ fn encode_b64(s string, alpha string, pad bool) string =
   let result = ""
   let i i64 = 0
 
+  // The `s[i] as i64` cast sign-extends tin's i8-shaped string
+  // bytes, so any byte >= 0x80 turns negative and the bit-twiddling
+  // below produces garbage in the upper sextets.  Mask with 0xFF to
+  // recover unsigned semantics; required for callers that feed
+  // raw signature/MAC bytes (HMAC tags, ed25519 sigs, ciphertext).
   for i + 2 < n:
-    let b0 = s[i] as i64
-    let b1 = s[i + 1] as i64
-    let b2 = s[i + 2] as i64
+    let b0 = (s[i]     as i64) & 0xFF
+    let b1 = (s[i + 1] as i64) & 0xFF
+    let b2 = (s[i + 2] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]
@@ -51,7 +57,7 @@ fn encode_b64(s string, alpha string, pad bool) string =
   let rem = n - i
 
   if rem == 1:
-    let b0 = s[i] as i64
+    let b0 = (s[i] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[(b0 << 4) & 0x3F]
@@ -60,8 +66,8 @@ fn encode_b64(s string, alpha string, pad bool) string =
       result = result ++ @'='
       result = result ++ @'='
   else if rem == 2:
-    let b0 = s[i] as i64
-    let b1 = s[i + 1] as i64
+    let b0 = (s[i]     as i64) & 0xFF
+    let b1 = (s[i + 1] as i64) & 0xFF
 
     result = result ++ alpha[(b0 >> 2) & 0x3F]
     result = result ++ alpha[((b0 << 4) | (b1 >> 4)) & 0x3F]
@@ -129,11 +135,11 @@ fn decode(s string) string =
 // `=` padding).  Required for auth-token / signature use cases where a
 // silent skip of a malformed byte produces a wrong but plausible
 // decoding.
-fn decode_strict(s string) (string, *errors::Err) =
+fn decode_strict(s string) Result[string, errors::Err] =
   let n = len(s)
 
   if n == 0:
-    return ("", nil)
+    return Ok("")
   let result = ""
   let i i64 = 0
   let acc i64 = 0
@@ -147,7 +153,7 @@ fn decode_strict(s string) (string, *errors::Err) =
       saw_pad = true
     else if saw_pad:
       // Anything after a `=` must itself be `=` or end-of-string.
-      return ("", errors::new("base64::decode_strict: byte after padding"))
+      return Err(errors::new("base64::decode_strict: byte after padding"))
     else:
       // NUL was previously short-circuited as end-of-string; reject
       // it via the alphabet check instead so embedded NULs in user
@@ -157,7 +163,7 @@ fn decode_strict(s string) (string, *errors::Err) =
       let v = b64_rev(c)
 
       if v < 0:
-        return ("", errors::new("base64::decode_strict: invalid character"))
+        return Err(errors::new("base64::decode_strict: invalid character"))
       acc = (acc << 6) | v
       bits = bits + 6
 
@@ -175,9 +181,9 @@ fn decode_strict(s string) (string, *errors::Err) =
     let mask = (1 << bits) - 1
 
     if (acc & mask) != 0:
-      return ("", errors::new("base64::decode_strict: non-zero residual bits in last group"))
+      return Err(errors::new("base64::decode_strict: non-zero residual bits in last group"))
 
-  return (result, nil)
+  return Ok(result)
 
 // decode_url_no_pad is an explicit alias for decode that documents the
 // expected URL-safe, unpadded input shape.  decode itself already

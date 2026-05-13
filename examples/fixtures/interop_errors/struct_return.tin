@@ -1,0 +1,6 @@
+struct point =
+  x i32
+
+fn{#interop} bad() point = return point{x: 1}
+
+fn main() i64 = return 0

@@ -183,9 +183,9 @@ fn compile(pattern string) Regex =
 
       msg = msg_out
 
-    return Regex{_cell: rc::Cell[*void].alloc(0 as *void, tin_pcre2_free_c), _err_msg: msg}
+    return Regex{_cell: rc::Cell[*void].new(0 as *void, tin_pcre2_free_c), _err_msg: msg}
 
-  return Regex{_cell: rc::Cell[*void].alloc(code, tin_pcre2_free_c), _err_msg: ""}
+  return Regex{_cell: rc::Cell[*void].new(code, tin_pcre2_free_c), _err_msg: ""}
 
 // matches returns true if pattern matches anywhere in s.
 fn matches(pattern string, s string) bool =

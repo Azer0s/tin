@@ -1,0 +1,179 @@
+// stdlib/jwt/jwt_test.tin -- coverage for HS256/HS384/HS512 sign +
+// verify round-trips and every error path the verifier emits.
+//
+// The signature determinism test (one fixed claim set, one fixed
+// secret) pins the on-the-wire bytes; if the HMAC -> base64url
+// pipeline ever flips a bit, the assertion catches it.
+
+use assert
+use jwt
+use strings
+
+fn baseline_claims() jwt::Claims =
+  return jwt::Claims{
+    iss: "tin",
+    sub: "user42",
+    aud: "myapp",
+    exp: 0,
+    nbf: 0,
+    iat: 0,
+    jti: "",
+  }
+
+fn rejects(token string, key jwt::HmacKey, opts jwt::VerifyOptions) bool =
+  match jwt::verify(token, key, opts):
+    case Ok(_):  return false
+    case Err(_): return true
+
+test "HS256 sign produces the expected JWT for known input" =
+  // Signature precomputed via:
+  //   printf '%s' "<header>.<claims>" | openssl dgst -sha256 \
+  //     -hmac "super-secret" -binary | base64 | tr -d '=' | tr '/+' '_-'
+  let key      = jwt::hmac_from_string("super-secret")
+  let r        = jwt::sign(baseline_claims(), 'HS256, key)
+  let token    = r.unwrap("sign")
+  let expected = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ0aW4iLCJzdWIiOiJ1c2VyNDIiLCJhdWQiOiJteWFwcCJ9.lGehbr_ho_PtrceC43hNqmKigCk8KBQLtcJWbSqs4UE"
+
+  assert::equals(expected, token)
+
+test "HS256 sign + verify round-trips claims" =
+  let key   = jwt::hmac_from_string("hs256-secret")
+  let r     = jwt::sign(baseline_claims(), 'HS256, key)
+  let token = r.unwrap("sign")
+  let vr    = jwt::verify(token, key, jwt::default_options())
+  let c     = vr.unwrap("verify")
+
+  assert::equals("tin", c.iss)
+  assert::equals("user42", c.sub)
+  assert::equals("myapp", c.aud)
+
+test "HS384 sign + verify round-trips" =
+  let key   = jwt::hmac_from_string("hs384-secret")
+  let r     = jwt::sign(baseline_claims(), 'HS384, key)
+  let token = r.unwrap("sign")
+  let vr    = jwt::verify(token, key, jwt::default_options())
+  let c     = vr.unwrap("verify")
+
+  assert::equals("tin", c.iss)
+
+test "HS512 sign + verify round-trips" =
+  let key   = jwt::hmac_from_string("hs512-secret")
+  let r     = jwt::sign(baseline_claims(), 'HS512, key)
+  let token = r.unwrap("sign")
+  let vr    = jwt::verify(token, key, jwt::default_options())
+  let c     = vr.unwrap("verify")
+
+  assert::equals("tin", c.iss)
+
+test "verify rejects a tampered signature in constant time" =
+  let key       = jwt::hmac_from_string("hs256-secret")
+  let r         = jwt::sign(baseline_claims(), 'HS256, key)
+  let token     = r.unwrap("sign")
+  let parts     = strings::split(token, ".")
+  let sig_bytes = parts[2] as [byte]
+  let last      = len(sig_bytes) - 1
+
+  if sig_bytes[last] == @'A' as byte: sig_bytes[last] = @'B' as byte
+  else:                                sig_bytes[last] = @'A' as byte
+
+  let tampered = parts[0] ++ "." ++ parts[1] ++ "." ++ (sig_bytes as string)
+
+  assert::ok(rejects(tampered, key, jwt::default_options()))
+
+test "verify rejects the wrong key" =
+  let signer   = jwt::hmac_from_string("real-secret")
+  let attacker = jwt::hmac_from_string("guessed-secret")
+  let r        = jwt::sign(baseline_claims(), 'HS256, signer)
+  let token    = r.unwrap("sign")
+
+  assert::ok(rejects(token, attacker, jwt::default_options()))
+
+test "verify rejects a token whose segment count is wrong" =
+  let key = jwt::hmac_from_string("k")
+
+  assert::ok(rejects("a.b",       key, jwt::default_options()))
+  assert::ok(rejects("a.b.c.d",   key, jwt::default_options()))
+  assert::ok(rejects("not-a-jwt", key, jwt::default_options()))
+
+test "verify enforces exp" =
+  let key    = jwt::hmac_from_string("k")
+  let past_c = jwt::Claims{
+    iss: "tin", sub: "", aud: "", exp: 1, nbf: 0, iat: 0, jti: "",
+  }
+  let r     = jwt::sign(past_c, 'HS256, key)
+  let token = r.unwrap("sign")
+
+  assert::ok(rejects(token, key, jwt::default_options()))
+
+test "verify enforces nbf" =
+  let key      = jwt::hmac_from_string("k")
+  let future_c = jwt::Claims{
+    iss: "tin", sub: "", aud: "", exp: 0, nbf: 99999999999, iat: 0, jti: "",
+  }
+  let r     = jwt::sign(future_c, 'HS256, key)
+  let token = r.unwrap("sign")
+
+  assert::ok(rejects(token, key, jwt::default_options()))
+
+test "verify accepts within leeway window" =
+  let key   = jwt::hmac_from_string("k")
+  let now_c = jwt::Claims{
+    iss: "tin", sub: "", aud: "", exp: 1, nbf: 0, iat: 0, jti: "",
+  }
+
+  let opts = jwt::default_options()
+
+  opts.leeway = 99999999999
+
+  let r     = jwt::sign(now_c, 'HS256, key)
+  let token = r.unwrap("sign")
+  let vr    = jwt::verify(token, key, opts)
+  let _     = vr.unwrap("leeway absorbs stale exp")
+
+test "verify checks expected issuer when set" =
+  let key  = jwt::hmac_from_string("k")
+  let opts = jwt::default_options()
+
+  opts.expected_iss = "someone-else"
+
+  let r     = jwt::sign(baseline_claims(), 'HS256, key)
+  let token = r.unwrap("sign")
+
+  assert::ok(rejects(token, key, opts))
+
+test "verify checks expected audience when set" =
+  let key  = jwt::hmac_from_string("k")
+  let opts = jwt::default_options()
+
+  opts.expected_aud = "different-app"
+
+  let r     = jwt::sign(baseline_claims(), 'HS256, key)
+  let token = r.unwrap("sign")
+
+  assert::ok(rejects(token, key, opts))
+
+test "verify rejects alg=none even with valid signature segment" =
+  let key   = jwt::hmac_from_string("k")
+  // Manually-crafted alg:none header (base64url of
+  // {"alg":"none","typ":"JWT"}), empty claims, no signature.
+  let token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJpc3MiOiJ0aW4ifQ.AAAA"
+
+  assert::ok(rejects(token, key, jwt::default_options()))
+
+test "verify rejects an unsupported alg label" =
+  let key   = jwt::hmac_from_string("k")
+  // {"alg":"RS999","typ":"JWT"} -> base64url
+  let token = "eyJhbGciOiJSUzk5OSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ0aW4ifQ.AAAA"
+
+  assert::ok(rejects(token, key, jwt::default_options()))
+
+test "require_exp rejects a token missing exp" =
+  let key  = jwt::hmac_from_string("k")
+  let opts = jwt::default_options()
+
+  opts.require_exp = true
+
+  let r     = jwt::sign(baseline_claims(), 'HS256, key)
+  let token = r.unwrap("sign")
+
+  assert::ok(rejects(token, key, opts))

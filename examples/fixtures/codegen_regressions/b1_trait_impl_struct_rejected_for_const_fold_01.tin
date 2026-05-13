@@ -1,0 +1,9 @@
+trait Bumper =
+  fn bump(this Bumper) i64 = virtual
+
+struct Counter(Bumper) =
+  v i64
+  fn Bumper::bump(this Counter) i64 = return this.v + 1
+
+const C = Counter{v: 5}
+fn main() = echo "{C.v}"

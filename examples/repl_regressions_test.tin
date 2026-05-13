@@ -1,0 +1,49 @@
+// examples/repl_regressions_test.tin -- pin REPL-mode symbol
+// resolution.  Each cell .so previously contained only cg.mod, so
+// calling any function from `errors`, `strings`, `math`, etc.
+// failed at dlopen with `symbol not found in flat namespace
+// '_<pkg>__<fn>'`.  Generate now folds pkgMods and monoMods into
+// cg.mod for replMode; these tests catch a regression of the
+// per-cell .so missing pkg symbols.
+//
+// Replaces examples/repl_regressions.sh.  Each test pipes a short
+// script (followed by `:q`) into `tin repl` and grep-checks the
+// captured stdout, plus a "no linker error" cross-check on both
+// streams in case a silent regression printed the right output
+// AND a "symbol not found" warning to stderr.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn assert_no_linker_error(r CompileResult, ctx string) =
+  let combined = r.stdout ++ "\n" ++ r.stderr
+
+  assert::ok(!contains_text(combined, "symbol not found"))
+  assert::ok(!contains_text(combined, "undefined symbol"))
+  assert::ok(!contains_text(combined, "undefined reference"))
+  assert::ok(!contains_text(combined, "Undefined symbols"))
+  let _ = ctx
+
+test "REPL resolves errors:: stdlib symbol" =
+  let script = "use errors\nlet a = errors::new(\"inner\")\nlet b = errors::wrap(a, \"ctx\")\necho errors::message(b)\n:q\n"
+  let r      = run_tin_stdin("repl", script)
+
+  assert::ok(contains_text(r.stdout, "ctx: inner"))
+
+  assert_no_linker_error(r, "errors")
+
+test "REPL resolves strings:: stdlib symbol" =
+  let script = "use strings\necho strings::to_upper(\"hello\")\n:q\n"
+  let r      = run_tin_stdin("repl", script)
+
+  assert::ok(contains_text(r.stdout, "HELLO"))
+
+  assert_no_linker_error(r, "strings")
+
+test "REPL resolves math:: stdlib symbol" =
+  let script = "use math\necho math::sqrt(16.0)\n:q\n"
+  let r      = run_tin_stdin("repl", script)
+
+  assert::ok(contains_text(r.stdout, "4"))
+
+  assert_no_linker_error(r, "math")

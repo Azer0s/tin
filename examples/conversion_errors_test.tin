@@ -1,0 +1,81 @@
+// examples/conversion_errors_test.tin -- compile-time error paths
+// for the implicit / coerce conversion machinery.
+//
+// Replaces examples/conversion_errors.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_diagnostic(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/conversion_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+// expect_warning fires for diagnostics that are warnings (not
+// compile errors).  Uses `tin ir` rather than `tin run` so the
+// cache lookup never short-circuits the codegen pass (which is
+// where the warning is emitted); the subsequent test would
+// otherwise see empty stderr on a cached compile.
+fn expect_warning(fixture string, needle string) =
+  let r = run_tin("ir", "examples/fixtures/conversion_errors/" ++ fixture)
+
+  assert::ok(contains_text(r.stderr, needle))
+
+// 1. Impossible casts.
+
+test "string -> i64 has no conversion path" =
+  expect_diagnostic("str_to_i64.tin", "no conversion path")
+
+test "bool -> string has no conversion path" =
+  expect_diagnostic("bool_to_str.tin", "no conversion path")
+
+test "i64 -> string has no conversion path" =
+  expect_diagnostic("i64_to_str.tin", "no conversion path")
+
+// 2. Mixed pointer / value casts.
+
+test "*Trait as Concrete (pointer to value) errors" =
+  expect_diagnostic("ptr_trait_as_concrete.tin", "cannot cast a trait pointer to non-pointer type")
+
+test "Trait as *Concrete (value to pointer) errors" =
+  expect_diagnostic("value_trait_as_ptr.tin", "cannot cast a value-form trait to pointer type")
+
+// 3. Unguarded trait downcast warning.
+
+test "downcast without is-guard warns" =
+  expect_warning("unguarded_downcast.tin", "unguarded-trait-downcast")
+
+// 4. Bool-operator strictness on coerce[bool] structs.
+
+test "&& on coerce[bool] struct rejects" =
+  expect_diagnostic("and_bool_coerce.tin", "cannot use Bag as a boolean operand")
+
+test "|| on coerce[bool] struct rejects" =
+  expect_diagnostic("or_bool_coerce.tin", "cannot use Bag as a boolean operand")
+
+test "! on bool-coercible struct rejects (no not[ret] impl)" =
+  expect_diagnostic("not_bool_coerce.tin", "unary operator")
+
+// 5. Redundant-type-cast warnings (treated as errors via -Werror in test
+// harness; we just check the diagnostic name surfaces).
+
+test "redundant single-value cast warns" =
+  expect_warning("redundant_single.tin", "redundant-type-cast")
+
+test "redundant array-element cast warns" =
+  expect_warning("redundant_array.tin", "redundant-type-cast")
+
+test "redundant tuple-element cast warns" =
+  expect_warning("redundant_tuple.tin", "redundant-type-cast")
+
+test "redundant fn-arg cast warns" =
+  expect_warning("redundant_fnarg.tin", "redundant-type-cast")
+
+test "redundant struct-field cast warns" =
+  expect_warning("redundant_struct_field.tin", "redundant-type-cast")
+
+// 6. Coerce trait dispatch.
+
+test "coerce target not registered errors at cast site" =
+  expect_diagnostic("coerce_no_target.tin", "no conversion path")

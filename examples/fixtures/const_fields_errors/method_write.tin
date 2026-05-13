@@ -1,0 +1,11 @@
+struct point =
+  const x i64
+  const y i64
+
+  fn bump(this point, dx i64) =
+    this.x = this.x + dx
+
+fn main() i64 =
+  let p = point{x: 1, y: 2}
+  p.bump(5)
+  return 0

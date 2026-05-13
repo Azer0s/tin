@@ -1,0 +1,8 @@
+use io
+fn main() =
+  let f = io::fopen("/tmp/tin_regr_fwrite", "wb")
+  if f == nil:
+    return
+  let b = "hi" as [byte]
+  io::fwrite(&b[0] as *void, 1, 2, f)
+  io::fclose(f)

@@ -1,0 +1,8 @@
+struct {#pure@fn} bad =
+  x i64
+
+  fn write(this bad) =
+    echo this.x
+
+fn main() i64 =
+  return 0

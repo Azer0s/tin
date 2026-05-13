@@ -1,0 +1,293 @@
+//!+os_process.c
+// stdlib/os/os_process.tin -- Process, spawn / exec / wait / kill,
+// SpawnOptions + StdioMode.
+
+use io
+use mem
+use sync
+use { Unit } from sync
+use option
+use { Option } from option
+use errors
+use result
+use { Result } from result
+
+// C extern bindings.
+fn tin_os_spawn_c(argv **char, argc i32, in_fd i32, out_fd i32, err_fd i32,
+                  cwd *char, envp **char) i64 = extern("_tin_os_spawn")
+fn tin_os_exec_c(argv **char, argc i32) i32   = extern("_tin_os_exec")
+fn tin_os_waitpid_c(pid i64, out_status *i32) i64 = extern("_tin_os_waitpid")
+fn tin_os_status_exit_code_c(status i32) i32  = extern("_tin_os_status_exit_code")
+fn tin_os_kill_c(pid i64, sig i32) i32        = extern("_tin_os_kill")
+
+fn tin_os_sigterm_c() i32 = extern("_tin_os_sigterm")
+fn tin_os_sigkill_c() i32 = extern("_tin_os_sigkill")
+fn tin_os_sigint_c()  i32 = extern("_tin_os_sigint")
+fn tin_os_sighup_c()  i32 = extern("_tin_os_sighup")
+
+// StdioMode names what to do with a child's standard stream:
+//
+//   'inherit  -- child shares the parent's stream (default)
+//   'pipe     -- a kernel pipe is created; one end goes to the
+//                child as fd 0/1/2, the other end is the matching
+//                Process.stdin / .stdout / .stderr File handle.
+//   'null     -- stream is connected to /dev/null in the child.
+enum atom StdioMode =
+  'inherit
+  'pipe
+  'null
+
+// SpawnOptions tunes start behaviour.  Each stdio slot defaults
+// to 'inherit when zero-initialised; env / cwd are None when the
+// caller wants the parent's values to flow through.
+struct SpawnOptions =
+  env    Option[[string]]
+  cwd    Option[string]
+  stdin  atom
+  stdout atom
+  stderr atom
+
+// default_options returns SpawnOptions with all streams inherited
+// and env/cwd inherited from the parent. Callers mutate fields they
+// care about.
+fn default_options() SpawnOptions =
+  return SpawnOptions{env: None, cwd: None,
+                      stdin: 'inherit, stdout: 'inherit, stderr: 'inherit}
+
+// Process represents a child process. The Option[File] slots hold
+// the parent's end of a pipe when SpawnOptions requested 'pipe; the
+// child's other end was dup2'd onto its own stdin/stdout/stderr.
+struct Process =
+  _pid   i64
+  stdin  Option[File]
+  stdout Option[File]
+  stderr Option[File]
+
+  fn pid(this Process) i64 = return this._pid
+
+  // wait blocks until the child exits and returns its exit code.
+  // Signal-terminated children surface as -signo.
+  fn wait(this *Process) Result[i32, errors::Err] =
+    let status i32 = 0
+    let r = tin_os_waitpid_c(this._pid, &status)
+
+    if r < 0:
+      return Err(CannotRead("waitpid", "<process>"))
+
+    return Ok(tin_os_status_exit_code_c(status))
+
+  // kill sends SIGTERM (the default) to the child.  Use kill(sig)
+  // for a different signal.
+  fn kill(this *Process) Result[Unit, errors::Err] =
+    if tin_os_kill_c(this._pid, tin_os_sigterm_c()) != 0:
+      return Err(CannotWrite("kill", "<process>"))
+
+    return Ok(Unit{_unit: 0})
+
+  // kill (overload) sends an arbitrary signal to the child. See the
+  // SIGTERM / SIGKILL / SIGINT / SIGHUP top-level vars.
+  fn kill(this *Process, sig i32) Result[Unit, errors::Err] =
+    if tin_os_kill_c(this._pid, sig) != 0:
+      return Err(CannotWrite("kill", "<process>"))
+
+    return Ok(Unit{_unit: 0})
+
+// Common signal numbers exposed as i32 vars rather than `const`
+// because they're sourced from libc at runtime.
+var SIGTERM i32 = tin_os_sigterm_c()
+var SIGKILL i32 = tin_os_sigkill_c()
+var SIGINT  i32 = tin_os_sigint_c()
+var SIGHUP  i32 = tin_os_sighup_c()
+
+// spawn forks a child to run argv[0] argv[1...]. Each of the child's
+// stdio streams is inherited from the parent. See start for
+// pipes / nulling / cwd / env.
+fn start(argv [string]) Result[Process, errors::Err] =
+  return start(argv, default_options())
+
+// build_argv lays the argv out as null-terminated C strings followed
+// by a NULL terminator, then returns a heap-allocated **char that
+// the C shim can pass to execvp directly.  The caller MUST call
+// free_argv(arr, argc) after the C side is done with the buffer --
+// the parent process is what spawn() returns into, so the buffer
+// would otherwise leak per spawn.
+fn build_argv(argv [string]) **char =
+  let argc = len(argv)
+  let arr  = mem::malloc((argc + 1) * 8) as **char
+  let i i64 = 0
+
+  for i < argc:
+    let s = argv[i]
+    let n = len(s)
+    let p = mem::malloc(n + 1) as *char
+    let k i64 = 0
+
+    for k < n:
+      let dst_off = k
+      let src     = s[k] as char
+      let cell    = (p as i64) + dst_off
+      let cellp   = cell as *char
+
+      *cellp = src
+      k = k + 1
+    let term = (p as i64) + n
+    let termp = term as *char
+
+    *termp = 0 as char
+
+    let slot = (arr as i64) + i * 8
+    let slotp = slot as **char
+
+    *slotp = p
+    i = i + 1
+
+  let term_slot = (arr as i64) + argc * 8
+  let term_slotp = term_slot as **char
+
+  *term_slotp = 0 as *char
+
+  return arr
+
+// free_argv releases the buffers handed back by build_argv.  argc
+// MUST match the argc that build_argv was called with -- the NULL
+// terminator past argc is the only sentinel build_argv stores, and
+// reading entries beyond argc to discover EOF would race the C
+// shim's read of the same slots.
+fn free_argv(arr **char, argc i64) =
+  if arr as i64 == 0:
+    return
+
+  let i i64 = 0
+
+  for i < argc:
+    let slot  = (arr as i64) + i * 8
+    let slotp = slot as **char
+    let p     = *slotp
+
+    if p as i64 != 0:
+      mem::free(p as *void)
+    i = i + 1
+
+  mem::free(arr as *void)
+
+// start forks a child with full SpawnOptions control.
+fn start(argv [string], opts SpawnOptions) Result[Process, errors::Err] =
+  if len(argv) == 0:
+    return Err(CannotOpen("spawn", "<empty argv>"))
+
+  // Build pipes for each stream that requested 'pipe before forking.
+  let stdin_pair  Option[PipePair] = None
+  let stdout_pair Option[PipePair] = None
+  let stderr_pair Option[PipePair] = None
+
+  if opts.stdin == 'pipe:
+    stdin_pair = Some(pipe().unwrap())
+
+  if opts.stdout == 'pipe:
+    stdout_pair = Some(pipe().unwrap())
+
+  if opts.stderr == 'pipe:
+    stderr_pair = Some(pipe().unwrap())
+
+  // /dev/null fds when streams are requested 'null.
+  let dn_in  i32 = -1
+  let dn_out i32 = -1
+  let dn_err i32 = -1
+
+  if opts.stdin == 'null:
+    dn_in = tin_os_open_c("/dev/null", tin_os_o_rdonly_c())
+
+  if opts.stdout == 'null:
+    dn_out = tin_os_open_c("/dev/null", tin_os_o_wronly_c())
+
+  if opts.stderr == 'null:
+    dn_err = tin_os_open_c("/dev/null", tin_os_o_wronly_c())
+
+  // Child-side fds (read end for stdin, write end for stdout/stderr).
+  let in_fd  i32 = -1
+  let out_fd i32 = -1
+  let err_fd i32 = -1
+
+  match stdin_pair:
+    case Some(p):  in_fd = p.reader.fd()
+    case None:     in_fd = dn_in
+
+  match stdout_pair:
+    case Some(p):  out_fd = p.writer.fd()
+    case None:     out_fd = dn_out
+
+  match stderr_pair:
+    case Some(p):  err_fd = p.writer.fd()
+    case None:     err_fd = dn_err
+
+  let argv_buf = build_argv(argv)
+  let cwd_ptr *char = nil
+
+  match opts.cwd:
+    case Some(c): cwd_ptr = c as *char
+    case None:    cwd_ptr = nil
+
+  let envp_buf **char = nil
+
+  let envc i64 = 0
+
+  match opts.env:
+    case Some(e):
+      envp_buf = build_argv(e)
+      envc = len(e)
+    case None:
+      envp_buf = nil
+
+  let pid = tin_os_spawn_c(argv_buf, len(argv) as i32, in_fd, out_fd, err_fd, cwd_ptr, envp_buf)
+
+  // Once the C shim has spawned (or failed), the kernel owns the
+  // argv contents via the child's address space; the parent's copy
+  // can be released either way.
+  free_argv(argv_buf, len(argv))
+
+  if envp_buf as i64 != 0:
+    free_argv(envp_buf, envc)
+
+  if pid < 0:
+    return Err(CannotOpen("spawn", argv[0]))
+
+  // Close the child-side ends of any pipes we kept; the parent only
+  // needs the opposite end.
+  let parent_stdin  Option[File] = None
+  let parent_stdout Option[File] = None
+  let parent_stderr Option[File] = None
+
+  match stdin_pair:
+    case Some(p):
+      p.reader.close()
+      parent_stdin = Some(p.writer)
+    case None:
+      pass
+
+  match stdout_pair:
+    case Some(p):
+      p.writer.close()
+      parent_stdout = Some(p.reader)
+    case None:
+      pass
+
+  match stderr_pair:
+    case Some(p):
+      p.writer.close()
+      parent_stderr = Some(p.reader)
+    case None:
+      pass
+
+  return Ok(Process{_pid: pid, stdin: parent_stdin, stdout: parent_stdout, stderr: parent_stderr})
+
+// exec replaces the current process image with argv.  Never returns
+// on success.  On failure the function returns and the caller can
+// inspect errno-equivalents via the next os call.
+fn exec(argv [string]) =
+  if len(argv) == 0:
+    return
+  let buf = build_argv(argv)
+  let _   = tin_os_exec_c(buf, len(argv) as i32)
+  // On exec success the process image is replaced and this line is
+  // never reached; on failure we still own the buffer.
+  free_argv(buf, len(argv))

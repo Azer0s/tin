@@ -45,6 +45,9 @@ core.*
 vgcore.*
 massif.out.*
 
+# Working notes
+notes/
+
 # IDE / editor
 /utils/tin-intellij/.kotlin/
 .idea

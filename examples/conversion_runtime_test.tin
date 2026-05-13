@@ -1,0 +1,135 @@
+// Runtime assertions consolidated from examples/conversion_torture.sh's
+// panics_no cases.  Each `run_case panics_no` there was "compile this
+// program, run it, verify it doesn't crash and prints `ok`"; the same
+// thing expressed natively as `test "..." =` blocks here so the suite
+// runs under `tin test examples/...` instead of an out-of-band shell
+// harness.  The compile-error / warning cases (run_case want, wantnot)
+// stay in conversion_torture.sh because they verify the diagnostic
+// surface, which doesn't reach a runtime assertion.
+
+use assert
+use errors
+use { Result } from result
+
+// Note: the `is *T on borrow-form trait pointer` / `is *T
+// disambiguates between two impls` cases from the .sh harness stay
+// where they were - running them as `test` blocks here hangs
+// (pre-existing tin-test mode bug; bare `tin run` works fine).
+
+// -- coerce[bool] interaction with implicit-bool sites --
+
+struct Pred(coerce[bool]) =
+  v i64
+  static fn ::coerce(this Pred) bool = return this.v < 5
+
+test "coerce[bool] on for-init i guard" =
+  let p = Pred{v: 0}
+  let i i64 = 0
+
+  for p :
+    i = i + 1
+    p = Pred{v: p.v + 1}
+
+  assert::equals(5, i)
+
+struct Mix(coerce[bool], coerce[i64]) =
+  v i64
+  static fn ::coerce(this Mix) bool = return this.v != 0
+  static fn ::coerce(this Mix) i64  = return this.v * 10
+
+test "if uses coerce[bool] and not coerce[i64]" =
+  let m = Mix{v: 7}
+  let n i64 = 0
+
+  if m:
+    n = m as i64
+
+  assert::equals(70, n)
+
+// -- Operator overload + coerce coexistence --
+
+struct Points(add[Points, Points], coerce[i64]) =
+  v i64
+  fn ::add(this Points, other Points) Points = return Points{v: this.v + other.v}
+  static fn ::coerce(this Points) i64 = return this.v * 100
+
+test "add overload and coerce do not interfere" =
+  let a = Points{v: 5}
+  let b = Points{v: 7}
+  let c = a + b
+
+  assert::equals(12,   c.v)
+  assert::equals(1200, c as i64)
+
+// -- Aliasing & ARC pathologies --
+
+struct ListLen(coerce[i64]) =
+  xs [string]
+  static fn ::coerce(this ListLen) i64 = return len(this.xs)
+
+test "coerce reads heap-backed field repeatedly" =
+  let l = ListLen{xs: ["a", "b", "c"]}
+  let a = l as i64
+  let b = l as i64
+  let c = l as i64
+
+  assert::equals(3, a)
+  assert::equals(3, b)
+  assert::equals(3, c)
+  assert::equals(3, len(l.xs))
+
+// -- Method call on coerced result --
+
+struct Wrap(coerce[string]) =
+  v i64
+  static fn ::coerce(this Wrap) string = return "v={this.v}"
+
+test "method call chained off `as` result" =
+  let w = Wrap{v: 42}
+  let s = w as string
+
+  assert::equals("v=42", s)
+  assert::equals(4,       len(s))
+
+// -- Truthiness of native shapes (regression guards) --
+//
+// The .sh equivalents asserted "program runs without crashing"; not
+// the actual truthy/falsy verdict, which has historically been
+// truthy-for-non-zero-int / falsy-for-zero-int / falsy-for-empty-array
+// / TRUTHY-for-empty-string-due-to-non-nil-data-ptr.  Match the
+// non-zero-int / falsy-zero-int behavior here; the string and array
+// shapes are tested in `truthy_*` examples to keep the assertion
+// crisp instead of crashy-or-correct.
+
+test "if on i64 non-zero" =
+  let n = 5
+
+  if n:
+    assert::ok(true)
+  else:
+    assert::fails("non-zero i64 should be truthy")
+
+test "if on i64 zero" =
+  let n = 0
+
+  if n:
+    assert::fails("zero i64 should be falsy")
+  else:
+    assert::ok(true)
+
+// -- Trait pointer chained through Result --
+
+fn maybe_fail(do_fail bool) Result[i64, *errors::Err] =
+  if do_fail:
+    return Err(&errors::new("something"))
+  return Ok(7)
+
+test "Result-Err carrying *errors::Err round-trip" =
+  match maybe_fail(true):
+    case Ok(_): assert::fails("expected Err")
+    case Err(e):
+      assert::equals("something", errors::message(e))
+
+  match maybe_fail(false):
+    case Ok(n): assert::equals(7, n)
+    case Err(_): assert::fails("expected Ok")

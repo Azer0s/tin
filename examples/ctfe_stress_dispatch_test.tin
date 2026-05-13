@@ -1,0 +1,140 @@
+// examples/ctfe_stress_dispatch_test.tin -- Tier-2 CTFE dispatch
+// stress test.  Phase C2/C7 emits a per-fn .so for every wrappable
+// #pure function under `.build/pure-fn/<merkle>/bin.so` containing
+// the function body + a `__tin_pure_shim_<name>` C-callable
+// wrapper.  Phase C5 dlopens those .so's and dispatches via libffi.
+// This file proves the cache populates, each .so re-links cleanly,
+// and the user binary itself stays shim-free.
+//
+// Replaces examples/ctfe_stress_dispatch.sh.
+
+use assert
+use strings
+use { discard } from macros
+use "./fixtures/run_compiler"
+
+// count_so_files shells out to `find` (portable, no readdir in os
+// stdlib yet) and returns the number of `.build/pure-fn/*/bin.so`
+// files.  Returns -1 when find fails (unlikely on any POSIX host).
+fn count_so_files() i64 =
+  let r = run_cmd(["find", ".build/pure-fn", "-name", "bin.so"], "", [] as [string])
+
+  if r.exit_code != 0 as i32:
+    return -1
+
+  let lines = strings::split(strings::trim(r.stdout), "\n")
+  let n     = len(lines)
+  // strings::split on an empty input still yields a one-element
+  // slice; treat the "empty stdout" case as zero results.
+  if n == 1 && lines[0] == "":
+    return 0
+
+  return n
+
+// list_so_files returns the .so paths as a slice.
+fn list_so_files() [string] =
+  let r = run_cmd(["find", ".build/pure-fn", "-name", "bin.so"], "", [] as [string])
+
+  if r.exit_code != 0 as i32:
+    return [] as [string]
+
+  let trimmed = strings::trim(r.stdout)
+  if trimmed == "":
+    return [] as [string]
+
+  return strings::split(trimmed, "\n")
+
+// shim_exists scans every .so under .build/pure-fn for a symbol
+// matching `_{2,3}tin_pure_shim_<name>$` (macOS prepends an extra
+// underscore, hence the 2-or-3 tolerance).
+fn shim_exists(name string) bool =
+  let sos = list_so_files()
+  let i i64 = 0
+  let found bool = false
+
+  for i < len(sos):
+    let r = run_cmd(["nm", sos[i]], "", [] as [string])
+
+    if r.exit_code == 0 as i32:
+      if contains_text(r.stdout, " T __tin_pure_shim_" ++ name):
+        found = true
+        break
+
+      if contains_text(r.stdout, " T ___tin_pure_shim_" ++ name):
+        found = true
+        break
+
+    i = i + 1
+
+  return found
+
+// can_relink calls clang on the .so with the macOS-friendly
+// `dynamic_lookup` flag (Linux ld would use --unresolved-symbols
+// but this whole test runs under bash today on macOS hosts only).
+fn can_relink(so_path string) bool =
+  let argv [string] = ["clang", "-shared", "-undefined", "dynamic_lookup", "-o", "/dev/null", so_path]
+  let r = run_cmd(argv, "", [] as [string])
+
+  return r.exit_code == 0 as i32
+
+// build_with_cache invokes `./tin build` with the
+// TIN_PURE_FN_CACHE=1 env var so the .build/pure-fn cache
+// populates.  Routes through `sh -c` to apply the env-var prefix
+// inline -- avoids the os::setenv path that doesn't reliably
+// propagate across the tin-test fiber boundary today.
+fn build_with_cache(fixture string, out_bin string) CompileResult =
+  let cmd = "TIN_PURE_FN_CACHE=1 ./tin build " ++ fixture ++ " -o " ++ out_bin
+
+  return run_cmd(["sh", "-c", cmd], "", [] as [string])
+
+test "Tier-2 CTFE cache populates, re-links cleanly, no shim leak" =
+  let fixture = "examples/fixtures/ctfe_stress_dispatch/dispatch.tin"
+  let out_bin = "/tmp/tin_ctfe_dispatch_bin"
+  // Start from a clean slate so the .so count matches the fixture's
+  // #pure surface (5 functions).  tin's incremental cache short-
+  // circuits the codegen pass when the fixture content + pkg cache
+  // hash unchanged; removing both .build/pure-fn AND .build/build
+  // (the codegen artifact directory) forces a full rebuild that
+  // walks the #pure surface again.
+  discard run_cmd(["rm", "-rf", ".build/pure-fn", ".build/build"], "", [] as [string])
+  let r = build_with_cache(fixture, out_bin)
+
+  assert::equals(0 as i32, r.exit_code)
+
+  // 1. Cache populated with at least one .so per #pure fn.
+  let n = count_so_files()
+
+  assert::ok(n >= 5)
+
+  // 2. Each expected shim symbol is present in at least one .so.
+  assert::ok(shim_exists("square_i64"))
+  assert::ok(shim_exists("clamp"))
+  assert::ok(shim_exists("fact"))
+  assert::ok(shim_exists("both"))
+  assert::ok(shim_exists("hypot_sq"))
+
+  // 3. Every cached .so re-links cleanly through clang.
+  let sos    = list_so_files()
+  let broken i64 = 0
+  let i i64 = 0
+
+  for i < len(sos):
+    if !can_relink(sos[i]):
+      broken = broken + 1
+    i = i + 1
+
+  assert::equals(0 as i64, broken)
+
+  // 4. The user binary itself carries zero shim symbols.
+  let bin_syms = run_cmd(["nm", out_bin], "", [] as [string])
+
+  assert::equals(0 as i32, bin_syms.exit_code)
+  assert::ok(!contains_text(bin_syms.stdout, "_tin_pure_shim_"))
+  assert::ok(!contains_text(bin_syms.stdout, "_tin_interop_"))
+
+  // 5. A second build reuses the cache -- no new .so files.
+  discard run_cmd(["rm", "-f", out_bin], "", [] as [string])
+  let r2 = build_with_cache(fixture, out_bin)
+
+  assert::equals(0 as i32, r2.exit_code)
+  assert::equals(n, count_so_files())

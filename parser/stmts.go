@@ -672,7 +672,7 @@ func (p *Parser) parseForStmt() (*ast.ForStmt, error) {
 }
 
 func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
-	p.advance() // consume match
+	matchTok := p.advance() // consume match
 
 	expr, err := p.parseExpr()
 	if err != nil {
@@ -689,6 +689,7 @@ func (p *Parser) parseMatchStmt() (*ast.MatchStmt, error) {
 	}
 
 	stmt := &ast.MatchStmt{Expr: expr, IsType: isType}
+	stmt.SetPos(ast.Pos{Line: matchTok.Line, Col: matchTok.Col})
 
 	if p.check(lexer.NEWLINE) {
 		p.advance()

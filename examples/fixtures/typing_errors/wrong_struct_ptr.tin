@@ -1,0 +1,10 @@
+struct Foo =
+  a i64
+
+struct Bar =
+  b i64
+
+fn main() =
+  let f = &Foo{a: 1}
+  let p *Bar = f
+  echo p

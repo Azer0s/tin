@@ -1,0 +1,23 @@
+// stdlib/io/async_traits.tin -- the I/O trait declarations.
+//
+// Lives in its own file so io.tin and io_copy.tin can both `use
+// "./async_traits"` and see the traits registered before either
+// declares a struct whose fields reference *AsyncReader /
+// *AsyncWriter.  Re-exported from io's main file alongside the rest
+// of the package surface; users still write `io::AsyncReader` etc.
+
+trait Reader =
+  fn read(this *Reader, buf *byte, n i64) i64 = virtual
+
+trait Writer =
+  fn write(this *Writer, buf *byte, n i64) i64 = virtual
+
+// AsyncReader is implemented by types whose read returns a Future[i64].
+// Await the result directly: `let n = await r.read(buf, n)`.
+trait AsyncReader =
+  fn read(this *AsyncReader, buf *byte, n i64) Future[i64] = virtual
+
+// AsyncWriter is implemented by types whose write returns a Future[i64].
+// Await the result directly: `let n = await w.write(buf, n)`.
+trait AsyncWriter =
+  fn write(this *AsyncWriter, buf *byte, n i64) Future[i64] = virtual

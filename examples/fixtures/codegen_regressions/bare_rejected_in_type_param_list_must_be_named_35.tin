@@ -1,0 +1,4 @@
+data Bad[T, _] =
+  Box(v T)
+
+fn main() = echo "ok"

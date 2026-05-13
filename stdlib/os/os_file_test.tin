@@ -1,0 +1,127 @@
+// stdlib/os/os_file_test.tin -- coverage for the Phase-3 os::File +
+// pipe + tempfile + chmod/symlink/readlink surface.  Each test
+// cleans up after itself; they all use /tmp paths derived from
+// os::tempfile so concurrent runs don't clash.
+
+use assert
+use os
+
+fn{#async} write_string_to(f os::File, s string) i64 =
+  let buf = s as [byte]
+  return await f.write(&buf[0], len(buf))
+
+fn{#async} read_chunk(f os::File, max i64) (i64, string) =
+  let buf [byte; 4096]
+  let n = await f.read(&buf[0], max)
+
+  return (n, buf[0..n] as string)
+
+test "create + write + read_file round trip" =
+  let tf = os::tempfile().unwrap()
+  let f  = tf.file
+  let _  = await write_string_to(f, "hello")
+
+  f.close()
+
+  let s = os::read_file(tf.path).unwrap()
+
+  assert::equals("hello", s)
+
+  let _ = os::remove(tf.path)
+
+test "File.seek to start + read after write" =
+  let tf = os::tempfile().unwrap()
+  let f  = tf.file
+  let _  = await write_string_to(f, "data-line")
+  let _  = f.flush()
+  let _  = f.seek(0, 0)
+
+  let (n, got) = await read_chunk(f, 64)
+
+  assert::equals(9 as i64, n)
+  assert::equals("data-line", got)
+
+  f.close()
+  let _ = os::remove(tf.path)
+
+test "pipe write end -> read end carries bytes verbatim" =
+  let pp = os::pipe().unwrap()
+  let _  = await write_string_to(pp.writer, "carry-me")
+
+  let (n, got) = await read_chunk(pp.reader, 64)
+
+  assert::equals(8 as i64, n)
+  assert::equals("carry-me", got)
+
+  pp.reader.close()
+  pp.writer.close()
+
+test "chmod + symlink + readlink resolve back to target" =
+  let tf = os::tempfile().unwrap()
+  let _  = await write_string_to(tf.file, "x")
+
+  tf.file.close()
+
+  let _ = os::chmod(tf.path, 0o600).unwrap()
+
+  let link_path = tf.path ++ ".link"
+  let _ = os::symlink(tf.path, link_path).unwrap()
+
+  let target = os::readlink(link_path).unwrap()
+
+  assert::equals(tf.path, target)
+
+  let _ = os::remove(link_path)
+  let _ = os::remove(tf.path)
+
+test "tempdir returns a unique writable directory" =
+  let dir = os::tempdir("tinjob-").unwrap()
+
+  assert::ok(os::is_dir(dir))
+
+  let _ = os::rmdir(dir)
+
+test "spawn child + wait collects exit code" =
+  let p = os::start(["true"]).unwrap()
+  let mp = &p
+  let code = mp.wait().unwrap()
+
+  assert::equals(0 as i32, code)
+
+test "spawn child with stdout pipe captures bytes" =
+  let opts = os::SpawnOptions{
+    env: None, cwd: None,
+    stdin: 'inherit, stdout: 'pipe, stderr: 'inherit,
+  }
+  let p = os::start(["echo", "pipe-out"], opts).unwrap()
+  let n   i64    = 0
+  let got string = ""
+
+  match p.stdout:
+    case Some(f):
+      let (m, s) = await read_chunk(f, 64)
+      n   = m
+      got = s
+      f.close()
+    case None:
+      pass
+
+  assert::equals(9 as i64, n)
+  assert::equals("pipe-out\n", got)
+
+  let mp = &p
+  let _ = mp.wait().unwrap()
+
+test "spawn nonexistent program surfaces an error code" =
+  // Two acceptable failure surfaces: the spawn fails up front (when the
+  // runtime fast-fails on an absolute path that doesn't exist) or the
+  // spawn succeeds and the child exits with a non-zero code after exec
+  // fails.  Both count as "the error was surfaced"; the test fails only
+  // if a phantom run somehow reports exit 0.
+  match os::start(["/nope/this/does/not/exist"]):
+    case Err(_): assert::ok(true)
+    case Ok(p):
+      let mp = &p
+      let code = mp.wait().unwrap()
+
+      assert::not_equals(0, code as i64)

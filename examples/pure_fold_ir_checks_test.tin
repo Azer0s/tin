@@ -1,0 +1,97 @@
+// examples/pure_fold_ir_checks_test.tin -- IR-level assertions
+// that AST-time CTFE actually folds #pure call sites into LLVM
+// constants.  Backs the correctness checks in
+// examples/pure_soundness.tin with proof that folding happens.
+//
+// Each test compiles a fixture with `tin ir`, then either:
+//   - searches the WHOLE IR for an emitted attribute string, or
+//   - extracts the @_tin_user_main body and searches there to
+//     keep the #pure definitions themselves out of the match
+//     window (otherwise their recursive `call` would satisfy a
+//     "no call" negative assertion).
+//
+// Replaces examples/pure_fold_ir_checks.sh.
+
+use assert
+use strings
+use "./fixtures/run_compiler"
+
+// extract_user_main returns the substring of `ir` between the
+// `define ... @_tin_user_main` line and its closing `}`.  Mirrors
+// the awk one-liner in the legacy shell script.
+fn extract_user_main(ir string) string =
+  let needle = "@_tin_user_main"
+  let start  = strings::index_of(ir, needle)
+
+  if start < 0:
+    return ""
+
+  let n     = len(ir as [byte])
+  let bytes = ir as [byte]
+  let i i64 = start
+
+  for i < n:
+    if bytes[i] == @'\n' as byte:
+      break
+    i = i + 1
+  // i is at the newline ending the define-line; user_main starts here.
+  let body_start = i + 1
+  let depth i64  = 1
+
+  i = body_start
+
+  for i < n && depth > 0:
+    if bytes[i] == @'}' as byte:
+      depth = depth - 1
+
+      if depth == 0:
+        break
+
+    i = i + 1
+
+  return strings::substr(ir, body_start, i)
+
+fn ir_of(fixture string) string =
+  let r = run_tin("ir", "examples/fixtures/pure_fold_ir_checks/" ++ fixture)
+
+  return r.stdout
+
+test "fact(10) folds to 3628800 in main; no call to @fact in main" =
+  let ir   = ir_of("fact_10.tin")
+  let body = extract_user_main(ir)
+
+  assert::ok(contains_text(body, "ret i64 3628800"))
+  assert::ok(!contains_text(body, "call i64 @fact"))
+
+test "memoised cube(3) sites all fold; no @cube call in main" =
+  let ir   = ir_of("cube_memo.tin")
+  let body = extract_user_main(ir)
+
+  assert::ok(contains_text(body, "i64 27"))
+  assert::ok(!contains_text(body, "call i64 @cube"))
+
+test "#allow_sideffect prevents fold; main still calls @traced" =
+  let ir   = ir_of("traced_allow_sideffect.tin")
+  let body = extract_user_main(ir)
+
+  assert::ok(contains_text(body, "call i64 @traced"))
+
+test "strict #pure gets alwaysinline+readnone+nounwind" =
+  let ir = ir_of("strict_sq.tin")
+
+  assert::ok(contains_text(ir, "alwaysinline readnone nounwind"))
+  assert::ok(contains_text(ir, "@sq"))
+
+test "#pure + #allow_sideffect: alwaysinline without readnone" =
+  let ir = ir_of("pure_with_sideffect.tin")
+  // The strict-#pure attribute trio is `alwaysinline readnone
+  // nounwind` -- look for `readnone` in the @noisy define line
+  // specifically to confirm it's absent there.
+  let header_start = strings::index_of(ir, "@noisy")
+
+  assert::ok(header_start >= 0)
+
+  let after = strings::substr(ir, header_start, header_start + 200)
+
+  assert::ok(contains_text(after, "alwaysinline"))
+  assert::ok(!contains_text(after, "readnone"))

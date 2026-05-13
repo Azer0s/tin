@@ -1,0 +1,8 @@
+use option
+use result
+
+fn main() =
+  let r Result[Option[i64], string] = Ok(Some("not an int"))
+  match r:
+    case Ok(_): echo "x"
+    case Err(_): echo "x"

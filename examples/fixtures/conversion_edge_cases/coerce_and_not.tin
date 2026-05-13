@@ -1,0 +1,12 @@
+struct Toggle(coerce[bool], not[bool]) =
+  on bool
+  static fn ::coerce(this Toggle) bool = return this.on
+  fn ::not(this Toggle) bool = return !this.on
+
+fn main() =
+  let t = Toggle{on: true}
+  let n = !t
+  if !n:
+    echo "expected: not[bool] dispatched"
+  else:
+    echo "WRONG"

@@ -1,0 +1,9 @@
+struct Box[t] =
+  const value t
+
+type IntBox = Box[i64]
+
+fn main() i64 =
+  let b IntBox = IntBox{value: 5}
+  b.value = 99
+  return 0

@@ -1,0 +1,1 @@
+fn main() = echo "{@\x27\x41\x27} ok"

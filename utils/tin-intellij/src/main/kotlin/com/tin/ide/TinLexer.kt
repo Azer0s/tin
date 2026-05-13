@@ -311,7 +311,7 @@ class TinLexer : LexerBase() {
 
     private fun keywordToken(word: String): IElementType? = when (word) {
         "if", "else", "for", "in", "match", "case", "default",
-        "break", "return", "do", "defer", "where", "yield", "await", "spawn"
+        "break", "return", "do", "defer", "where", "yield", "await", "spawn", "try"
             -> TinTokenTypes.KEYWORD_CONTROL
         "fn" -> TinTokenTypes.KEYWORD_FN
         "let", "const", "var", "struct", "trait", "enum", "union", "data", "macro",

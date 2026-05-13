@@ -1,0 +1,213 @@
+// examples/codegen_regressions_test.tin -- regression tests for
+// codegen bugs caught in code review.  Each case pins one fix;
+// if a future change re-introduces the bug, the matching test
+// flips to FAILED.  Replaces examples/codegen_regressions.sh.
+//
+// Per case:
+//   - expect_substr      -> stdout/stderr from `tin run` must contain
+//                           `want` (covers compile errors that abort
+//                           the run AND runtime asserts of the form
+//                           `echo "ok"`).
+//   - expect_warn_substr -> like expect_substr but invokes `tin ir`;
+//                           the cache short-circuits warning emission
+//                           on subsequent `run` calls, so the IR pass
+//                           is the only place a -W diagnostic is
+//                           guaranteed to surface.
+//   - expect_runs_clean  -> output must contain neither "error:" nor
+//                           "panic:", plus a per-case must-not
+//                           substring.  Compile errors should still
+//                           fail the assertion since they print
+//                           "error:".
+//   - expect_warn_clean  -> like expect_runs_clean but driven through
+//                           `tin ir` (warning-silencing pattern: the
+//                           absence of the diagnostic is the point).
+
+use assert
+use "./fixtures/run_compiler"
+
+const FIX = "examples/fixtures/codegen_regressions/"
+
+fn expect_substr(fixture string, want string) =
+  let r = run_tin("run", FIX ++ fixture)
+  let blob = r.stdout ++ r.stderr
+  assert::ok(contains_text(blob, want))
+
+fn expect_warn_substr(fixture string, want string) =
+  let r = run_tin("ir", FIX ++ fixture)
+  let blob = r.stdout ++ r.stderr
+  assert::ok(contains_text(blob, want))
+
+fn expect_runs_clean(fixture string, must_not string) =
+  let r = run_tin("run", FIX ++ fixture)
+  let blob = r.stdout ++ r.stderr
+  assert::ok(!contains_text(blob, "error:"))
+  assert::ok(!contains_text(blob, "panic:"))
+  if len(must_not) > 0:
+    assert::ok(!contains_text(blob, must_not))
+
+fn expect_warn_clean(fixture string, must_not string) =
+  let r = run_tin("ir", FIX ++ fixture)
+  let blob = r.stdout ++ r.stderr
+  assert::ok(!contains_text(blob, "error:"))
+  if len(must_not) > 0:
+    assert::ok(!contains_text(blob, must_not))
+
+test "codegen: B1: trait-impl struct rejected for const fold" =
+  expect_substr("b1_trait_impl_struct_rejected_for_const_fold_01.tin", "non-compile-time initializer")
+
+test "codegen: B2a: struct with init rejected for const fold" =
+  expect_substr("b2a_struct_with_init_rejected_for_const_fold_02.tin", "non-compile-time initializer")
+
+test "codegen: B2b: struct with string field rejected for const fold" =
+  expect_substr("b2b_struct_with_string_field_rejected_for_const_fold_03.tin", "non-compile-time initializer")
+
+test "codegen: B1/B2: plain struct still folds" =
+  expect_runs_clean("b1_b2_plain_struct_still_folds_04.tin", "")
+
+test "codegen: B3: is *NonImpl errors clearly" =
+  expect_substr("b3_is_nonimpl_errors_clearly_05.tin", "is *Rock` is unsatisfiable")
+
+test "codegen: B7: qualified call arg cast warns" =
+  expect_warn_substr("b7_qualified_call_arg_cast_warns_06.tin", "redundant `as i64`")
+
+test "codegen: B11: value-form trait in tuple" =
+  expect_runs_clean("b11_value_form_trait_in_tuple_07.tin", "error:")
+
+test "codegen: auto-yield: awaited sleep_ms actually waits" =
+  expect_substr("auto_yield_awaited_sleep_ms_actually_waits_08.tin", "elapsed_ms_ok")
+
+test "codegen: #allow_drop suppresses must-use warning" =
+  expect_warn_clean("allow_drop_suppresses_must_use_warning_09.tin", "must-use")
+
+test "codegen: is *T on nil pointer is safe" =
+  expect_substr("is_t_on_nil_pointer_is_safe_10.tin", "guarded-ok")
+
+test "codegen: lexer rejects leading-underscore numeric literal" =
+  expect_substr("lexer_rejects_leading_underscore_numeric_literal_11.tin", "undefined identifier: _FF")
+
+test "codegen: JSON rejects tnull as true" =
+  expect_substr("json_rejects_tnull_as_true_12.tin", "ok-rejected")
+
+test "codegen: JSON int overflow rejected" =
+  expect_substr("json_int_overflow_rejected_13.tin", "ok-rejected-ovf")
+
+test "codegen: JSON \\\\u escape decodes to ASCII" =
+  expect_substr("json_u_escape_decodes_to_ascii_14.tin", "decoded-A")
+
+test "codegen: parse_int rejects overflow" =
+  expect_substr("parse_int_rejects_overflow_15.tin", "ok-rejected")
+
+test "codegen: parse_int accepts i64::MIN" =
+  expect_substr("parse_int_accepts_i64_min_16.tin", "ok-min")
+
+test "codegen: decimal::ord far-apart values" =
+  expect_runs_clean("decimal_ord_far_apart_values_17.tin", "")
+
+test "codegen: Duration::abs saturates at i64::MIN" =
+  expect_substr("duration_abs_saturates_at_i64_min_18.tin", "saturated")
+
+test "codegen: http header CR/LF rejected" =
+  expect_substr("http_header_cr_lf_rejected_19.tin", "panic")
+
+test "codegen: http header CTL byte (0x01) rejected" =
+  expect_substr("http_header_ctl_byte_0x01_rejected_20.tin", "panic")
+
+test "codegen: http header DEL (0x7F) rejected" =
+  expect_substr("http_header_del_0x7f_rejected_21.tin", "panic")
+
+test "codegen: #allow_drop on Result still warns on drop" =
+  expect_warn_substr("allow_drop_on_result_still_warns_on_drop_22.tin", "Result returned by")
+
+test "codegen: #allow_drop on Future-shaped return silences warning" =
+  expect_warn_clean("allow_drop_on_future_shaped_return_silences_warning_23.tin", "future returned by")
+
+test "codegen: lex \\xHH escape decodes to single byte" =
+  expect_substr("lex_xhh_escape_decodes_to_single_byte_24.tin", "x01-1 x7f-1 ok")
+
+test "codegen: lex \\uHHHH escape decodes BMP codepoint" =
+  expect_substr("lex_uhhhh_escape_decodes_bmp_codepoint_25.tin", "len=2 ok")
+
+test "codegen: lex \\UHHHHHHHH escape decodes astral codepoint" =
+  expect_substr("lex_uhhhhhhhh_escape_decodes_astral_codepoint_26.tin", "len=4 ok")
+
+test "codegen: lex \\b \\f \\v \\a all decode to one byte" =
+  expect_substr("lex_b_f_v_a_all_decode_to_one_byte_27.tin", "1 1 1 1 ok")
+
+test "codegen: lex char literal \\xHH escape" =
+  expect_substr("lex_char_literal_xhh_escape_28.tin", "65 ok")
+
+test "codegen: lex \\u with surrogate codepoint is rejected" =
+  expect_substr("lex_u_with_surrogate_codepoint_is_rejected_29.tin", "lex error: invalid \\u escape")
+
+test "codegen: lex \\x with non-hex digits is rejected" =
+  expect_substr("lex_x_with_non_hex_digits_is_rejected_30.tin", "lex error: invalid \\x escape")
+
+test "codegen: data warns when an anonymous wildcard slot is unused" =
+  expect_warn_substr("data_warns_when_an_anonymous_wildcard_slot_is_unused_31.tin", "unused-wildcard")
+
+test "codegen: data warns when a named wildcard is referenced by exactly one method" =
+  expect_warn_substr("data_warns_when_a_named_wildcard_is_referenced_by_exactly_on_32.tin", "method-level generic")
+
+test "codegen: data accepts named wildcard slot in type-param list with where-guard" =
+  expect_substr("data_accepts_named_wildcard_slot_in_type_param_list_with_whe_33.tin", "ok")
+
+test "codegen: trait-qualified method requires matching impl in data parens" =
+  expect_substr("trait_qualified_method_requires_matching_impl_in_data_parens_34.tin", "does not declare trait")
+
+test "codegen: bare _ rejected in type-param list (must be named)" =
+  expect_substr("bare_rejected_in_type_param_list_must_be_named_35.tin", "is not allowed in a type-parameter list")
+
+test "codegen: match-result-try: lint fires on Ok-assign + Err-return antipattern" =
+  expect_substr("match_result_try_lint_fires_on_ok_assign_err_return_antipatt_36.tin", "-Wmatch-result-try")
+
+test "codegen: match-result-try: no false positive on echo-in-both-arms" =
+  expect_runs_clean("match_result_try_no_false_positive_on_echo_in_both_arms_37.tin", "this match")
+
+test "codegen: tuple pattern with ADT constructors inside" =
+  expect_substr("tuple_pattern_with_adt_constructors_inside_38.tin", "both ok: 42, 99")
+
+test "codegen: tuple pattern with literal slot + ADT slot" =
+  expect_substr("tuple_pattern_with_literal_slot_adt_slot_39.tin", "got 7")
+
+test "codegen: match await: int scrutinee does not crash IR emission" =
+  expect_substr("match_await_int_scrutinee_does_not_crash_ir_emission_40.tin", "got 42")
+
+test "codegen: match await: ADT scrutinee does not crash IR emission" =
+  expect_substr("match_await_adt_scrutinee_does_not_crash_ir_emission_41.tin", "ok")
+
+test "codegen: try keyword resolves Result methods across package boundaries" =
+  expect_substr("try_keyword_resolves_result_methods_across_package_boundarie_42.tin", "ok")
+
+test "codegen: user-defined awaitable: runtime drives ready/result spin loop" =
+  expect_substr("user_defined_awaitable_runtime_drives_ready_result_spin_loop_43.tin", "attempts: 4")
+
+test "codegen: redundant-import-prefix flags long form" =
+  expect_warn_substr("redundant_import_prefix_flags_long_form_44.tin", "write `dns::lookup_host`")
+
+test "codegen: redundant-import-prefix silent on the short alias" =
+  expect_warn_clean("redundant_import_prefix_silent_on_the_short_alias_45.tin", "redundant-import-prefix")
+
+test "codegen: ineffective-allow-drop flags i64-returning fn" =
+  expect_warn_substr("ineffective_allow_drop_flags_i64_returning_fn_46.tin", "ineffective-allow-drop")
+
+test "codegen: || continues across a leading newline" =
+  expect_substr("continues_across_a_leading_newline_47.tin", "true")
+
+test "codegen: || continues across a trailing newline" =
+  expect_substr("continues_across_a_trailing_newline_48.tin", "true")
+
+test "codegen: generic free-fn overload picks template by arity" =
+  expect_substr("generic_free_fn_overload_picks_template_by_arity_49.tin", "two=99 one=42")
+
+test "codegen: ADT struct payload preserves multi-field i64 values" =
+  expect_substr("adt_struct_payload_preserves_multi_field_i64_values_50.tin", "n1=42 n2=99")
+
+test "codegen: chained unwrap on Result-of-struct preserves strings" =
+  expect_substr("chained_unwrap_on_result_of_struct_preserves_strings_51.tin", "iss=hello")
+
+test "codegen: must-use does not false-positive on i64-returning extern" =
+  expect_runs_clean("must_use_does_not_false_positive_on_i64_returning_extern_52.tin", "must-use")
+
+test "codegen: let-tuple destructure rejects ADT value" =
+  expect_substr("let_tuple_destructure_rejects_adt_value_53.tin", "cannot destructure")
+

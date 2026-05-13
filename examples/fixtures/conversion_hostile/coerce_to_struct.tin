@@ -1,0 +1,11 @@
+struct A =
+  v i64
+
+struct B(coerce[A]) =
+  q i64
+  static fn ::coerce(this B) A = return A{v: this.q * 100}
+
+fn main() =
+  let b = B{q: 5}
+  let a = b as A
+  echo "{a.v}"

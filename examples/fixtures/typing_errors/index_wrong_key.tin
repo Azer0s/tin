@@ -1,0 +1,4 @@
+fn main() =
+  let xs [i64] = [1, 2, 3]
+  let v = xs["one"]
+  echo "{v}"

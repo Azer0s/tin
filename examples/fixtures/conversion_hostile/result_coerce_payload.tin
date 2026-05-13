@@ -1,0 +1,13 @@
+use result
+
+struct Money(coerce[string]) =
+  cents i64
+  static fn ::coerce(this Money) string = return "$"
+
+fn make() Result[Money, string] =
+  return Ok(Money{cents: 100})
+
+fn main() =
+  match make():
+    case Ok(m):  echo (m as string)
+    case Err(_): echo "err"

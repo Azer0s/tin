@@ -1,0 +1,148 @@
+// stdlib/io/io_bufwriter.tin -- buffered AsyncWriter wrapper.
+//
+// Loaded into stdlib/io via `use "./io_bufwriter"`.  Sibling files
+// (async_traits.tin, closeable.tin) provide the trait declarations
+// this struct implements.
+//
+// Buffered writes coalesce small writes into one underlying flush so
+// chatty producers (line-oriented log emitters, byte-at-a-time
+// encoders) don't pay one async syscall per byte.  Flush is automatic
+// when the internal buffer fills; callers can also force-flush with
+// `await bw.flush()`.  Close releases the buffer; it does NOT close
+// the underlying writer (the caller owns that handle).
+
+use mem
+use { Future } from sync
+use "./async_traits"
+use "./closeable"
+
+// Default flush threshold; matches typical stdio buffering.
+const BUFWRITER_DEFAULT_CAP i64 = 4096
+
+// BufWriter wraps an AsyncWriter and accumulates writes in a heap
+// buffer of `cap` bytes.  Flush triggers when the buffer is full or
+// when the caller invokes bw.flush() / bw.close().
+struct BufWriter(AsyncWriter, Closeable) =
+  inner AsyncWriter
+  buf   *byte
+  cap   i64
+  pos   i64
+
+  fn AsyncWriter::write(this *BufWriter, src *byte, n i64) Future[i64] =
+    return spawn bufwriter_write(this, src, n)
+
+  fn flush(this *BufWriter) Future[i64] =
+    return spawn bufwriter_flush(this)
+
+  fn Closeable::close(this *BufWriter) =
+    if this.buf as i64 != 0:
+      mem::free(this.buf as *void)
+      this.buf = 0 as *byte
+      this.pos = 0
+      // Zero cap so any post-close write hits the `n >= b.cap`
+      // straight-through branch and never dereferences the freed
+      // buffer.  The contract is "close releases the buffer, not the
+      // underlying writer", so inner.write must still be reachable
+      // for callers that legitimately keep writing.
+      this.cap = 0
+
+// bufwriter wraps inner with the default 4 KiB buffer.
+fn bufwriter(inner AsyncWriter) BufWriter =
+  return bufwriter(inner, BUFWRITER_DEFAULT_CAP)
+
+// bufwriter wraps inner with a caller-chosen buffer size; values <= 0
+// fall back to the default.
+fn bufwriter(inner AsyncWriter, cap i64) BufWriter =
+  let real_cap = cap
+
+  if real_cap <= 0:
+    real_cap = BUFWRITER_DEFAULT_CAP
+
+  return BufWriter{
+    inner: inner,
+    buf:   mem::malloc(real_cap) as *byte,
+    cap:   real_cap,
+    pos:   0,
+  }
+
+// bufwriter_flush drains the internal buffer to the underlying
+// writer.  Returns the number of bytes flushed, or a negative count
+// surfaced verbatim from inner.write on error.  On a mid-flush error,
+// the bytes inner already accepted are dropped from the buffer (so a
+// retry doesn't duplicate them), and only the still-unflushed tail
+// stays queued for the next flush.
+fn{#async} bufwriter_flush(b *BufWriter) i64 =
+  if b.pos <= 0:
+    return 0
+
+  let total i64 = 0
+
+  for total < b.pos:
+    let off  = (b.buf as i64) + total
+    let here = off as *byte
+    let want = b.pos - total
+    let w    = await b.inner.write(here, want)
+
+    if w <= 0:
+      if total > 0:
+        // Slide unflushed [total..pos] down to [0..pos-total] so the
+        // bytes inner already accepted don't get re-shipped on retry.
+        let remaining = b.pos - total
+        let src_off   = (b.buf as i64) + total
+        let src_ptr   = src_off as *byte
+
+        mem::memmove(b.buf as *void, src_ptr as *void, remaining as i64)
+        b.pos = remaining
+      return w
+    total = total + w
+
+  b.pos = 0
+
+  return total
+
+// bufwriter_write copies into the internal buffer, auto-flushing
+// whenever the buffer is full.  Writes larger than `cap` bypass the
+// buffer entirely (after first flushing any pending bytes) so very
+// large payloads aren't broken into cap-sized fragments behind the
+// caller's back.
+fn{#async} bufwriter_write(b *BufWriter, src *byte, n i64) i64 =
+  if n <= 0:
+    return 0
+
+  if n >= b.cap:
+    let f = await spawn bufwriter_flush(b)
+
+    if f < 0:
+      return f
+
+    let big = await b.inner.write(src, n)
+
+    return big
+
+  let copied i64 = 0
+
+  for copied < n:
+    if b.pos >= b.cap:
+      let f = await spawn bufwriter_flush(b)
+
+      if f < 0:
+        return f
+
+    let room  = b.cap - b.pos
+    let avail = n - copied
+    let chunk = room
+
+    if avail < chunk:
+      chunk = avail
+
+    let dst_off = (b.buf as i64) + b.pos
+    let dst_ptr = dst_off as *byte
+    let src_off = (src as i64) + copied
+    let src_ptr = src_off as *byte
+
+    mem::memcpy(dst_ptr as *void, src_ptr as *void, chunk as i64)
+
+    b.pos   = b.pos + chunk
+    copied  = copied + chunk
+
+  return copied

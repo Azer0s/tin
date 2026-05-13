@@ -71,6 +71,12 @@ typedef struct {
     int64_t      pid;
     void        *hdl;          // LLVM coroutine handle
     FiberStatus  status;
+    // done_atomic: 1 once status reaches FIBER_DONE. Set with release
+    // ordering at the same time `status` is updated under _table_mu;
+    // read with acquire ordering by lock-free fast paths
+    // (_tin_future_ready, _tin_fiber_join's early-out) so a poll on
+    // a known-done fiber skips the table-mutex round trip.
+    _Atomic int  done_atomic;
     void        *result;       // heap-allocated result (set on FIBER_DONE)
     pthread_mutex_t done_mu;
     pthread_cond_t  done_cv;
@@ -912,6 +918,7 @@ static void *_worker_thread(void *_) {
             f->panic_msg = pmsg_buf;
             atomic_store(&_has_unhandled_panics, 1);
             f->status    = FIBER_DONE;
+            atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
             _fire_done_waiters(f);           // wake any fiber waiters
             pthread_mutex_lock(&f->done_mu);
             pthread_cond_broadcast(&f->done_cv);  // wake any OS-thread waiters
@@ -941,6 +948,7 @@ static void *_worker_thread(void *_) {
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
             f->status = FIBER_DONE;
+            atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
             // Snapshot had_waiters BEFORE _fire_done_waiters resets waiter_cnt.
             // prejoined=1 means the spawner will call _tin_fiber_join; treat it as
             // a waiter so ff_reclaim never races with that join.
@@ -1573,6 +1581,17 @@ const char *_tin_fiber_check_panic(void) {
 
 void _tin_fiber_join(int64_t pid, void *my_hdl) {
     (void)my_hdl;
+    // Lock-free fast path: if the target is already done, skip the
+    // table mutex entirely. Acquire ordering pairs with the worker
+    // thread's release store on transition to FIBER_DONE so the
+    // result/panic_msg fields the caller will read next are visible.
+    if (pid > 0 && pid < _fiber_cnt) {
+        TinFiber *quick = _fibers[pid];
+        if (quick && atomic_load_explicit(&quick->done_atomic,
+                                          memory_order_acquire)) {
+            return;
+        }
+    }
     pthread_mutex_lock(&_table_mu);
     if (pid <= 0 || pid >= _fiber_cnt || !_fibers[pid]) {
         pthread_mutex_unlock(&_table_mu);
@@ -1943,4 +1962,34 @@ void *_tin_future_await_raw(int64_t pid) {
     _tin_fiber_join(pid, NULL);
     void *r = _tin_fiber_get_result(pid);
     return r ? r : (void *)&_tin_unit_sentinel;
+}
+
+// _tin_future_ready: non-blocking poll. Returns 1 if pid has reached
+// FIBER_DONE (so a subsequent _tin_future_await_raw is the trivial
+// "read the result" path with no fiber-park traffic), else 0. Sentinel
+// pid TIN_FUTURE_PID_READY_UNIT is reported ready immediately.
+//
+// Used by `await x`'s loop-on-ready fast path so the runtime's spin
+// loop avoids parking when the work is already done.
+int32_t _tin_future_ready(int64_t pid) {
+    if (pid == TIN_FUTURE_PID_READY_UNIT) {
+        return 1;
+    }
+    // Lock-free fast path: read the per-fiber done_atomic flag.
+    // Set with release ordering by the worker thread when it
+    // transitions a fiber to FIBER_DONE; acquire here so the
+    // result/panic_msg fields are visible to the caller's
+    // subsequent _tin_future_await_raw if they race-and-rerun.
+    //
+    // Bounds-checking _fibers[pid] without _table_mu is safe here:
+    // _fibers entries are only nulled-out on shutdown after every
+    // worker has stopped, and the table only grows (entries never
+    // shift). A spurious read of a stale slot can at worst report
+    // not-ready, which is a safe over-poll.
+    if (pid <= 0) return 0;
+    int64_t cnt = _fiber_cnt;
+    if (pid >= cnt) return 0;
+    TinFiber *f = _fibers[pid];
+    if (!f) return 0;
+    return atomic_load_explicit(&f->done_atomic, memory_order_acquire);
 }

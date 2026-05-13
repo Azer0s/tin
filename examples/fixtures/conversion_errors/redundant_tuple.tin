@@ -1,0 +1,2 @@
+fn main() =
+  let p (i64, bool) = (5 as i64, true)

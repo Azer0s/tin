@@ -1,0 +1,4 @@
+fn main() =
+  let big i64 = 1000000000
+  let small i32 = big as i32
+  echo "{small}"

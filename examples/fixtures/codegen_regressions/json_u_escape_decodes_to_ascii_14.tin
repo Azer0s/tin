@@ -1,0 +1,7 @@
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("\"\\u0041\""):
+    case Ok(v): echo "decoded-{v.sval}"
+    case Err(e): echo "wrong"

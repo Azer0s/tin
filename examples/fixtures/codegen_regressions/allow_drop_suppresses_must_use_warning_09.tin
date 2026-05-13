@@ -1,0 +1,10 @@
+use sync
+
+fn{#async} producer(ch sync::Channel[i64]) =
+  ch.send(42)
+
+fn main() =
+  let ch = sync::Channel[i64].make(1)
+
+  spawn producer(ch)
+  echo "{await ch.recv()}"

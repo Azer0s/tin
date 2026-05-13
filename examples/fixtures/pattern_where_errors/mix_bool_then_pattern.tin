@@ -1,0 +1,4 @@
+fn f(n i32) i32 =
+  where n < 0: -1
+  where (0): 0
+  where _: 1

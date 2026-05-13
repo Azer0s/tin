@@ -1,9 +1,24 @@
 //!+sync_helpers.c
 
 // stdlib/sync - RWMutex (reader-writer lock, fiber-aware).
-// rc::Cell wraps the C lock cell so struct copies share ownership.
+//
+// The underlying C lock cell is wrapped in an rc::Cell so struct
+// copies share ownership.
+//
+// Usage:
+//   let rw = sync::RWMutex.new()
+//   await rw.read_lock()
+//   defer rw.read_unlock()
+//
+//   await rw.lock()      // exclusive
+//   defer rw.unlock()
+//
+// Lock acquisitions are awaitable[Unit]: ready() is the try-lock
+// probe and the runtime spin loop drives the retry. No fiber-spawn
+// cost - the await-loop runs inline in the calling fiber.
 
 use rc
+use "./future"
 
 fn tin_frwmutex2_new() *void                     = extern("_tin_frwmutex2_new")
 fn tin_frwmutex2_free(m *void)                   = extern("_tin_frwmutex2_free")
@@ -16,32 +31,49 @@ fn tin_frwmutex2_unlock(m *void)                 = extern("_tin_frwmutex2_unlock
 
 fn tin_current_pid_rw() i64 = extern("_tin_current_pid")
 
+// RLockHandle is the awaitable returned by RWMutex.read_lock().
+// Holds an rc::Cell reference so the inner C lock stays alive for
+// the handle's lifetime; ready()/result() are inline so the await-
+// loop runs in the caller's fiber.
+struct RLockHandle(awaitable[Unit]) =
+  _cell    *rc::Cell[*void]
+  _own_pid i64
+
+  fn awaitable[Unit]::ready(this RLockHandle) bool =
+    return tin_frwmutex2_rlock_try(this._cell.payload(), this._own_pid) != 0
+
+  fn awaitable[Unit]::result(this RLockHandle) Unit =
+    return Unit{_unit: 0}
+
+// WLockHandle is the awaitable returned by RWMutex.lock() (exclusive
+// write lock). Same shape as RLockHandle but probes the exclusive
+// try-lock.
+struct WLockHandle(awaitable[Unit]) =
+  _cell    *rc::Cell[*void]
+  _own_pid i64
+
+  fn awaitable[Unit]::ready(this WLockHandle) bool =
+    return tin_frwmutex2_lock_try(this._cell.payload(), this._own_pid) != 0
+
+  fn awaitable[Unit]::result(this WLockHandle) Unit =
+    return Unit{_unit: 0}
+
 struct RWMutex =
   _cell *rc::Cell[*void]
 
   fn ptr(this RWMutex) *void = return this._cell.payload()
 
   static fn new() RWMutex =
-    return RWMutex{_cell: rc::Cell[*void].alloc(tin_frwmutex2_new(), tin_frwmutex2_free)}
+    return RWMutex{_cell: rc::Cell[*void].new(tin_frwmutex2_new(), tin_frwmutex2_free)}
 
-  fn{#async #no_autoyield} read_lock(this RWMutex) =
-    let pid = tin_current_pid_rw()
-
-    for true:
-      if tin_frwmutex2_rlock_try(this.ptr(), pid) != 0:
-        return
-      yield
+  fn read_lock(this RWMutex) RLockHandle =
+    return RLockHandle{_cell: this._cell, _own_pid: tin_current_pid_rw()}
 
   fn read_unlock(this RWMutex) =
     tin_frwmutex2_runlock(this.ptr())
 
-  fn{#async #no_autoyield} lock(this RWMutex) =
-    let pid = tin_current_pid_rw()
-
-    for true:
-      if tin_frwmutex2_lock_try(this.ptr(), pid) != 0:
-        return
-      yield
+  fn lock(this RWMutex) WLockHandle =
+    return WLockHandle{_cell: this._cell, _own_pid: tin_current_pid_rw()}
 
   fn unlock(this RWMutex) =
     tin_frwmutex2_unlock(this.ptr())

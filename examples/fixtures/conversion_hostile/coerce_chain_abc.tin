@@ -1,0 +1,13 @@
+struct A(coerce[i64]) =
+  n i64
+  static fn ::coerce(this A) i64 = return this.n + 1
+
+struct B(coerce[i64]) =
+  inner A
+  static fn ::coerce(this B) i64 = return (this.inner as i64) * 2
+
+fn main() =
+  let a = A{n: 3}
+  let b = B{inner: a}
+  let v = b as i64
+  echo "{v}"

@@ -1,0 +1,7 @@
+fn yn(b bool) string =
+  return match b:
+    case true:  "y"
+    case false: "n"
+    default:    "?"
+
+echo yn(true)

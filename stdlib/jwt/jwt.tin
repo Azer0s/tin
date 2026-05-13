@@ -1,0 +1,466 @@
+// stdlib/jwt - RFC 7519 JSON Web Token signing + verification.
+//
+// First-cut surface: the three HMAC families (HS256 / HS384 /
+// HS512).  Asymmetric algorithms (RS*, ES*, EdDSA) sketched in the
+// masterplan need the upcoming `crypto::rsa` / `crypto::ec` /
+// `crypto::ed25519` PEM bindings to OpenSSL and will land alongside
+// those packages.
+//
+// Security defaults are locked in here, not negotiable by callers:
+//
+//   - `alg: none` is rejected at parse time
+//     (`JwtError::AlgNoneRejected`).
+//   - The chosen algorithm must match the key family the caller
+//     hands to verify().  Sign and verify are overloaded on key
+//     type so the compiler enforces the pairing.
+//   - Signatures are compared via `crypto::subtle::ct_eq` to keep
+//     verification time independent of the leading-byte mismatch.
+//   - `exp` and `nbf` are checked by default with a caller-tunable
+//     leeway (default zero) so token replay across small clock
+//     skew is impossible without explicit opt-in.
+
+use encoding::base64
+use encoding::json
+use errors
+use result
+use { Result } from result
+use strings
+use crypto::subtle
+use time
+use hash::hmac
+
+// Algorithm identifies which HMAC SHA-2 variant is used to sign
+// and verify a token.  Atom-enum form so callers spell it
+// `jwt::Algorithm.'HS256` without quoting; the variant set is
+// closed (no unknown alg slips past the type system).
+enum atom Algorithm =
+  'HS256
+  'HS384
+  'HS512
+
+// alg_label maps each variant to its on-the-wire JWS "alg" string.
+fn alg_label(a atom) string =
+  if a == 'HS256: return "HS256"
+  if a == 'HS384: return "HS384"
+  if a == 'HS512: return "HS512"
+  return ""
+
+fn alg_from_label(s string) (atom, bool) =
+  if s == "HS256": return ('HS256, true)
+  if s == "HS384": return ('HS384, true)
+  if s == "HS512": return ('HS512, true)
+  return ('HS256, false)
+
+// JwtError covers every failure surface this package can emit.
+// Implements errors::Err so callers can compose it with the rest of
+// the typed-error stack via `Result[T, errors::Err]`.
+data JwtError(errors::Err, print) =
+  TokenMalformed(reason string)
+  InvalidBase64(segment string)
+  InvalidJson(segment string)
+  UnsupportedAlgorithm(alg string)
+  AlgorithmMismatch(want string, got string)
+  AlgNoneRejected
+  InvalidSignature
+  Expired
+  NotYetValid
+  IssuerMismatch(want string, got string)
+  AudienceMismatch(want string, got string)
+  MissingClaim(name string)
+
+  fn errors::Err::message(this JwtError) string =
+    match this:
+      case TokenMalformed(r):            return "jwt: malformed token: {r}"
+      case InvalidBase64(seg):      return "jwt: invalid base64url in {seg} segment"
+      case InvalidJson(seg):        return "jwt: invalid JSON in {seg} segment"
+      case UnsupportedAlgorithm(a): return "jwt: unsupported algorithm {a}"
+      case AlgorithmMismatch(w, g): return "jwt: algorithm mismatch: want {w}, got {g}"
+      case AlgNoneRejected:         return "jwt: alg=none rejected"
+      case InvalidSignature:        return "jwt: signature did not verify"
+      case Expired:                 return "jwt: token expired (exp)"
+      case NotYetValid:             return "jwt: token not yet valid (nbf)"
+      case IssuerMismatch(w, g):    return "jwt: issuer mismatch: want {w}, got {g}"
+      case AudienceMismatch(w, g):  return "jwt: audience mismatch: want {w}, got {g}"
+      case MissingClaim(n):         return "jwt: missing required claim {n}"
+
+// HmacKey is the shared secret used for HS256/HS384/HS512.  Wraps a
+// byte slice so signing + verifying take a strongly-typed value
+// (preventing accidental string-vs-bytes confusion at call sites).
+struct HmacKey =
+  bytes [byte]
+
+// hmac_from_bytes wraps the secret bytes verbatim.  Use for keys
+// derived from random material (which is what the JWS spec
+// recommends).
+fn hmac_from_bytes(b [byte]) HmacKey =
+  return HmacKey{bytes: b}
+
+// hmac_from_string is a convenience for shared-secret strings; the
+// bytes are taken verbatim (no NUL stripping, no encoding change).
+fn hmac_from_string(s string) HmacKey =
+  return HmacKey{bytes: s as [byte]}
+
+// Claims carries the standard registered JWT claims.  Unix-epoch
+// seconds for the time fields; 0 means "absent" and the encoder
+// will omit the field.  Custom (private) claims aren't part of this
+// struct yet -- callers needing them can sign a manual JSON string
+// via sign_raw / verify_raw (TODO follow-up).
+struct Claims =
+  iss string
+  sub string
+  aud string
+  exp i64
+  nbf i64
+  iat i64
+  jti string
+
+// VerifyOptions tunes the verifier.  Empty strings mean "don't
+// check this field"; require_exp / require_nbf turn missing claims
+// into a hard error rather than skipping the check.  leeway is in
+// seconds and is added to exp / subtracted from nbf so small clock
+// skew between issuer and verifier doesn't refuse valid tokens.
+struct VerifyOptions =
+  expected_iss string
+  expected_aud string
+  leeway       i64
+  require_exp  bool
+  require_nbf  bool
+
+// default_options returns a VerifyOptions with no issuer/audience
+// pins, zero leeway, and no required time-claim presence.  Callers
+// who want exp/nbf enforced unconditionally should flip the flags
+// after constructing.
+fn default_options() VerifyOptions =
+  return VerifyOptions{
+    expected_iss: "",
+    expected_aud: "",
+    leeway:       0,
+    require_exp:  false,
+    require_nbf:  false,
+  }
+
+// Internal helpers --------------------------------------------------
+
+// now_unix_secs returns the current wall clock in unix seconds.
+fn now_unix_secs() i64 =
+  return time::now().to_ns() / 1000000000
+
+// hmac_sign computes the HMAC tag of `msg` under `key` for the
+// chosen variant and returns it as a heap-allocated byte slice.
+// Routing through `as [byte]` on a stack `[byte; N]` would leak the
+// stack frame's lifetime into the caller (the returned fat-ptr would
+// dangle once hmac_sign returns); the explicit copy into a slice
+// initialized as `[byte]` keeps the backing store on the heap.
+fn hmac_sign(alg atom, key HmacKey, msg [byte]) [byte] =
+  let key_bytes    = key.bytes
+  let key_ptr *u8 = nil
+  let msg_ptr *u8 = nil
+
+  if len(key_bytes) > 0:
+    key_ptr = &key_bytes[0] as *u8
+
+  if len(msg) > 0:
+    msg_ptr = &msg[0] as *u8
+
+  if alg == 'HS256:
+    let tag = hmac::hmac_sha256(key_ptr, len(key_bytes), msg_ptr, len(msg))
+    let out [byte] = [
+      tag[0]  as byte, tag[1]  as byte, tag[2]  as byte, tag[3]  as byte,
+      tag[4]  as byte, tag[5]  as byte, tag[6]  as byte, tag[7]  as byte,
+      tag[8]  as byte, tag[9]  as byte, tag[10] as byte, tag[11] as byte,
+      tag[12] as byte, tag[13] as byte, tag[14] as byte, tag[15] as byte,
+      tag[16] as byte, tag[17] as byte, tag[18] as byte, tag[19] as byte,
+      tag[20] as byte, tag[21] as byte, tag[22] as byte, tag[23] as byte,
+      tag[24] as byte, tag[25] as byte, tag[26] as byte, tag[27] as byte,
+      tag[28] as byte, tag[29] as byte, tag[30] as byte, tag[31] as byte,
+    ]
+    return out
+
+  if alg == 'HS384:
+    let tag = hmac::hmac_sha384(key_ptr, len(key_bytes), msg_ptr, len(msg))
+    let out [byte] = [
+      tag[0]  as byte, tag[1]  as byte, tag[2]  as byte, tag[3]  as byte,
+      tag[4]  as byte, tag[5]  as byte, tag[6]  as byte, tag[7]  as byte,
+      tag[8]  as byte, tag[9]  as byte, tag[10] as byte, tag[11] as byte,
+      tag[12] as byte, tag[13] as byte, tag[14] as byte, tag[15] as byte,
+      tag[16] as byte, tag[17] as byte, tag[18] as byte, tag[19] as byte,
+      tag[20] as byte, tag[21] as byte, tag[22] as byte, tag[23] as byte,
+      tag[24] as byte, tag[25] as byte, tag[26] as byte, tag[27] as byte,
+      tag[28] as byte, tag[29] as byte, tag[30] as byte, tag[31] as byte,
+      tag[32] as byte, tag[33] as byte, tag[34] as byte, tag[35] as byte,
+      tag[36] as byte, tag[37] as byte, tag[38] as byte, tag[39] as byte,
+      tag[40] as byte, tag[41] as byte, tag[42] as byte, tag[43] as byte,
+      tag[44] as byte, tag[45] as byte, tag[46] as byte, tag[47] as byte,
+    ]
+    return out
+
+  // 'HS512 is the only remaining variant.
+  let tag = hmac::hmac_sha512(key_ptr, len(key_bytes), msg_ptr, len(msg))
+  let out [byte] = [
+    tag[0]  as byte, tag[1]  as byte, tag[2]  as byte, tag[3]  as byte,
+    tag[4]  as byte, tag[5]  as byte, tag[6]  as byte, tag[7]  as byte,
+    tag[8]  as byte, tag[9]  as byte, tag[10] as byte, tag[11] as byte,
+    tag[12] as byte, tag[13] as byte, tag[14] as byte, tag[15] as byte,
+    tag[16] as byte, tag[17] as byte, tag[18] as byte, tag[19] as byte,
+    tag[20] as byte, tag[21] as byte, tag[22] as byte, tag[23] as byte,
+    tag[24] as byte, tag[25] as byte, tag[26] as byte, tag[27] as byte,
+    tag[28] as byte, tag[29] as byte, tag[30] as byte, tag[31] as byte,
+    tag[32] as byte, tag[33] as byte, tag[34] as byte, tag[35] as byte,
+    tag[36] as byte, tag[37] as byte, tag[38] as byte, tag[39] as byte,
+    tag[40] as byte, tag[41] as byte, tag[42] as byte, tag[43] as byte,
+    tag[44] as byte, tag[45] as byte, tag[46] as byte, tag[47] as byte,
+    tag[48] as byte, tag[49] as byte, tag[50] as byte, tag[51] as byte,
+    tag[52] as byte, tag[53] as byte, tag[54] as byte, tag[55] as byte,
+    tag[56] as byte, tag[57] as byte, tag[58] as byte, tag[59] as byte,
+    tag[60] as byte, tag[61] as byte, tag[62] as byte, tag[63] as byte,
+  ]
+  return out
+
+// build_header constructs the JOSE header for the chosen alg.  Tin's
+// JSON encoder would also work but the header has a fixed two-key
+// shape so the inline emit is shorter (and avoids serialising an
+// otherwise unused struct).
+fn build_header(alg atom) string =
+  let label = alg_label(alg)
+  let open  = "{"
+  let close = "}"
+  return open ++ "\"alg\":\"" ++ label ++ "\",\"typ\":\"JWT\"" ++ close
+
+// build_claims serialises Claims to its JSON representation,
+// omitting any field whose Tin value equals the zero literal.  This
+// matches the JWS conventions: callers should leave unused claims
+// at their default rather than the encoder producing
+// `"jti":""` noise.
+//
+// Each field has its own optional appender below: the helpers
+// return the (possibly extended) accumulator + the next `first`
+// flag.  Plain-value returns rather than `*string` mutation so the
+// compiler's ARC tracks each intermediate string buffer correctly.
+fn append_str(acc string, first bool, key string, value string) string =
+  if value == "":
+    return acc
+
+  let sep = ""
+
+  if !first:
+    sep = ","
+
+  // Route value through json::encode so embedded `"`, `\`, or control
+  // bytes can't break out of the JSON string and inject sibling
+  // claims (which the signature would still cover).  json::encode
+  // produces the value with its own surrounding quotes.
+  return acc ++ sep ++ "\"" ++ key ++ "\":" ++ json::encode(value)
+
+fn append_int(acc string, first bool, key string, value i64) string =
+  if value == 0:
+    return acc
+
+  let sep = ""
+
+  if !first:
+    sep = ","
+
+  return acc ++ sep ++ "\"{key}\":{value}"
+
+fn next_first(first bool, present bool) bool =
+  if present:
+    return false
+  return first
+
+fn build_claims(c Claims) string =
+  let out   = "{"
+  let first = true
+
+  out   = append_str(out, first, "iss", c.iss)
+  first = next_first(first, c.iss != "")
+
+  out   = append_str(out, first, "sub", c.sub)
+  first = next_first(first, c.sub != "")
+
+  out   = append_str(out, first, "aud", c.aud)
+  first = next_first(first, c.aud != "")
+
+  out   = append_int(out, first, "exp", c.exp)
+  first = next_first(first, c.exp != 0)
+
+  out   = append_int(out, first, "nbf", c.nbf)
+  first = next_first(first, c.nbf != 0)
+
+  out   = append_int(out, first, "iat", c.iat)
+  first = next_first(first, c.iat != 0)
+
+  out   = append_str(out, first, "jti", c.jti)
+  first = next_first(first, c.jti != "")
+
+  return out ++ "}"
+
+// b64url shortens base64::encode_url_no_pad at call sites.
+fn b64url(s string) string =
+  return base64::encode_url_no_pad(s)
+
+// b64url_bytes encodes a raw byte slice.
+fn b64url_bytes(b [byte]) [byte] =
+  let s = b as string
+  return b64url(s) as [byte]
+
+// Public API --------------------------------------------------------
+
+// sign produces a compact JWS (`<header>.<claims>.<sig>`) under
+// the given HMAC variant.  The header is auto-built from `alg`;
+// callers who need custom header fields can drop in a manual
+// implementation later.
+fn sign(claims Claims, alg atom, key HmacKey) Result[string, errors::Err] =
+  if alg_label(alg) == "":
+    return Err(UnsupportedAlgorithm("non-HMAC alg") as errors::Err)
+
+  let header_json  = build_header(alg)
+  let claims_json  = build_claims(claims)
+  let header_b64   = b64url(header_json)
+  let claims_b64   = b64url(claims_json)
+  let signing_input = header_b64 ++ "." ++ claims_b64
+  let sig          = hmac_sign(alg, key, signing_input as [byte])
+  let sig_b64      = b64url(sig as string)
+
+  return Ok(signing_input ++ "." ++ sig_b64)
+
+// claims_from_json walks the parsed JSON object and lifts every
+// registered claim back into the Claims struct.  Unknown fields
+// are tolerated.
+fn claims_from_json(v json::Value) Claims =
+  let c = Claims{iss: "", sub: "", aud: "", exp: 0, nbf: 0, iat: 0, jti: ""}
+
+  if !v.is_object():
+    return c
+
+  let keys = v.keys()
+  let i i64 = 0
+
+  for i < len(keys):
+    let k = keys[i]
+    let entry = v.get(k)
+
+    if k == "iss":
+      if entry.is_string(): c.iss = entry.as_string()
+    if k == "sub":
+      if entry.is_string(): c.sub = entry.as_string()
+    if k == "aud":
+      if entry.is_string(): c.aud = entry.as_string()
+    if k == "jti":
+      if entry.is_string(): c.jti = entry.as_string()
+    if k == "exp":
+      if entry.is_int(): c.exp = entry.as_int()
+    if k == "nbf":
+      if entry.is_int(): c.nbf = entry.as_int()
+    if k == "iat":
+      if entry.is_int(): c.iat = entry.as_int()
+
+    i = i + 1
+
+  return c
+
+// verify validates a compact JWS, comparing the recomputed HMAC tag
+// in constant time and enforcing exp/nbf/iss/aud per the supplied
+// VerifyOptions.  The algorithm used for verification is determined
+// by the token's own header BUT must belong to the HMAC family --
+// non-HMAC alg labels surface as UnsupportedAlgorithm so a forged
+// token claiming "none" or "RS256" against an HmacKey fails fast.
+fn verify(token string, key HmacKey, opts VerifyOptions) Result[Claims, errors::Err] =
+  let parts = strings::split(token, ".")
+
+  if len(parts) != 3:
+    return Err(TokenMalformed("expected three dot-separated segments") as errors::Err)
+
+  let header_b64 = parts[0]
+  let claims_b64 = parts[1]
+  let sig_b64    = parts[2]
+
+  if len(header_b64 as [byte]) == 0:
+    return Err(TokenMalformed("empty header segment") as errors::Err)
+
+  if len(claims_b64 as [byte]) == 0:
+    return Err(TokenMalformed("empty claims segment") as errors::Err)
+
+  if len(sig_b64 as [byte]) == 0:
+    return Err(TokenMalformed("empty signature segment") as errors::Err)
+
+  let header_json = base64::decode_url_no_pad(header_b64)
+  let claims_json = base64::decode_url_no_pad(claims_b64)
+  let sig_bytes   = base64::decode_url_no_pad(sig_b64)
+
+  let header_parsed = json::parse(header_json)
+
+  let header_val json::Value = json::Value{kind: json::Kind.null_v}
+
+  match header_parsed:
+    case Ok(v):  header_val = v
+    case Err(_): return Err(InvalidJson("header") as errors::Err)
+
+  if !header_val.is_object():
+    return Err(InvalidJson("header") as errors::Err)
+
+  let alg_v = header_val.get("alg")
+
+  if !alg_v.is_string():
+    return Err(TokenMalformed("header alg missing or non-string") as errors::Err)
+
+  let alg_str = alg_v.as_string()
+
+  if alg_str == "none":
+    return Err(AlgNoneRejected as errors::Err)
+
+  let (alg_tag, alg_ok) = alg_from_label(alg_str)
+
+  if !alg_ok:
+    return Err(UnsupportedAlgorithm(alg_str) as errors::Err)
+
+  // Recompute the tag and compare in constant time.
+  let signing_input = header_b64 ++ "." ++ claims_b64
+  let expected_tag  = hmac_sign(alg_tag, key, signing_input as [byte])
+
+  if !subtle::ct_eq(expected_tag, sig_bytes as [byte]):
+    return Err(InvalidSignature as errors::Err)
+
+  // Signature OK -- now parse the claims and run the standard
+  // timing / issuer / audience checks.
+  let claims_parsed = json::parse(claims_json)
+
+  let claims_val json::Value = json::Value{kind: json::Kind.null_v}
+
+  match claims_parsed:
+    case Ok(v):  claims_val = v
+    case Err(_): return Err(InvalidJson("claims") as errors::Err)
+
+  let claims = claims_from_json(claims_val)
+  let now    = now_unix_secs()
+
+  if opts.require_exp && claims.exp == 0:
+    return Err(MissingClaim("exp") as errors::Err)
+
+  if claims.exp != 0:
+    if now > claims.exp + opts.leeway:
+      return Err(Expired as errors::Err)
+
+  if opts.require_nbf && claims.nbf == 0:
+    return Err(MissingClaim("nbf") as errors::Err)
+
+  if claims.nbf != 0:
+    if now + opts.leeway < claims.nbf:
+      return Err(NotYetValid as errors::Err)
+
+  if opts.expected_iss != "":
+    if claims.iss != opts.expected_iss:
+      return Err(IssuerMismatch(opts.expected_iss, claims.iss) as errors::Err)
+
+  if opts.expected_aud != "":
+    if claims.aud != opts.expected_aud:
+      return Err(AudienceMismatch(opts.expected_aud, claims.aud) as errors::Err)
+
+  return Ok(claims)
+
+export {
+  Algorithm,
+  JwtError,
+  HmacKey, hmac_from_bytes, hmac_from_string,
+  Claims, VerifyOptions, default_options,
+  sign, verify,
+} as jwt

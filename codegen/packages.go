@@ -511,13 +511,20 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 
 	cg.filename = srcPath
 
-	// Process nested use declarations first.
+	// Process nested use declarations first. Selective imports
+	// (`use { Name } from pkg`) flow through loadPackageSelective so
+	// the bare aliases AND the bare-type-visibility set get
+	// registered.
 	for _, node := range prog.Stmts {
 		if ud, ok := node.(*ast.UseDecl); ok {
 			var loadErr error
-			if ud.IsFile {
+
+			switch {
+			case ud.FromSyntax:
+				loadErr = cg.loadPackageSelective(ud.Path, ud.Names, ud.IsFile)
+			case ud.IsFile:
 				loadErr = cg.loadPackageFromFilePath(ud.Path)
-			} else {
+			default:
 				loadErr = cg.loadPackage(ud.Path)
 			}
 
@@ -576,19 +583,30 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	}
 
 	// Pass 1.2: mark {#async} struct methods as coro-callable and pre-declare
-	// their $coro variants BEFORE genStructDecl generates method bodies.
+	// their $coro variants BEFORE genStructDecl generates method bodies.  The
+	// scope key uses the package-qualified struct name so it matches the
+	// spawn-method lookup site, which builds its key from typeNameOf(receiver)
+	// -- that always returns the qualified form (e.g. `sync__Cond`).  Using
+	// the bare sd.Name here would register `Cond_method$coro` while the call
+	// site searches for `sync__Cond_method$coro`, and any intra-struct
+	// `spawn this.other_method(...)` would fail to resolve unless the source
+	// happened to declare the methods in an order the body emitter never
+	// reaches the spawn before the inner predeclares -- a fragile invariant
+	// that hit Cond.wait/wait_impl.
 	for _, node := range prog.Stmts {
 		sd, ok := node.(*ast.StructDecl)
 		if !ok || len(sd.TypeParams) > 0 {
 			continue
 		}
 
+		structKey := cg.pkgStructKey(sd.Name)
+
 		for _, m := range sd.Methods {
 			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
 				continue
 			}
 
-			scopeKey := methodScopeName(sd.Name, m)
+			scopeKey := methodScopeName(structKey, m)
 
 			cg.coroCallable[scopeKey] = true
 			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {
@@ -642,53 +660,6 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
-	// Pass 1.5b: emit struct METHODS now that every struct + ADT layout is
-	// complete. Any tinTypeToLLVM call a method body makes on a generic ADT
-	// like Result[LocalStruct, Err] will therefore monomorphise with the
-	// correct payload size instead of a placeholder [1 x i8].
-	for _, node := range prog.Stmts {
-		sd, ok := node.(*ast.StructDecl)
-		if !ok {
-			continue
-		}
-
-		if compErr := cg.genStructMethods(sd); compErr != nil {
-			cg.curScope = prevScope
-			cg.filename = prevFilename
-
-			return fmt.Errorf("use %q: struct %s methods: %w", rawPath, sd.Name, compErr)
-		}
-
-		structKey := cg.pkgStructKey(sd.Name)
-
-		// Propagate methods to prevScope so callers can call them.
-		// Methods are registered under canonicalKey_methodName in curScope.
-		for _, m := range sd.Methods {
-			methodKey := structKey + "_" + m.Name
-			if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
-				prevScope.set(methodKey, entry)
-			}
-			// Propagate $coro variant so that `await obj.method()` works in
-			// calling code (directCallHasCoroVariant checks prevScope for the $coro).
-			coroKey := methodKey + "$coro"
-			if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
-				prevScope.set(coroKey, entry)
-			}
-			// Also expose under bare key for backward compatibility.
-			bareMethodKey := sd.Name + "_" + m.Name
-			if bareMethodKey != methodKey {
-				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
-					prevScope.set(bareMethodKey, entry)
-				}
-
-				bareCoroKey := bareMethodKey + "$coro"
-				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
-					prevScope.set(bareCoroKey, entry)
-				}
-			}
-		}
-	}
-
 	// Pass 0.8: detect overloaded function names so Pass 2/3 can mangle IR
 	// names for functions sharing the same base name (e.g. get(url) vs
 	// get(client, url)). Mirrors the same pass in loadPackageFromSource.
@@ -696,12 +667,17 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// so struct method keys must be scanned under that prefix or
 	// overloads on the imported file's structs won't be mangled and end
 	// up colliding under their bare scope name.
+	//
+	// Hoisted ahead of Pass 1.5b so struct method bodies that spawn or
+	// directly call free fns (Result[T,E] returners, async helpers) see
+	// the correctly mangled handle/$coro variant.
 	for name, flag := range scanOverloadedNamesPkg(prog.Stmts, cg.currentPkg) {
 		cg.overloadedNames[name] = flag
 	}
 
 	// Pass 1.45: pre-declare $coro variants of overloaded {#async} module-level
-	// functions so that Pass 2 bodies (and callers) can chain-await them.
+	// functions so that Pass 1.5b struct method bodies (and Pass 3 free
+	// fn bodies) can chain-await them.
 	for _, node := range prog.Stmts {
 		fd, ok := node.(*ast.FuncDecl)
 		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) || !cg.overloadedNames[fd.Name] {
@@ -721,7 +697,37 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
-	// Pass 2: predeclare non-extern functions.
+	// Pass 1.5c: pre-declare $coro variants for ALL module-level
+	// {#async} free functions.  Must run BEFORE Pass 1.5b so struct
+	// methods that spawn a same-file async free fn (e.g. BufWriter's
+	// AsyncWriter::write spawning a flush_then_write helper) see the
+	// $coro handle when their bodies compile.
+	for _, node := range prog.Stmts {
+		fd, ok := node.(*ast.FuncDecl)
+		if !ok || fd.IsExtern != "" || !isAsyncTag(fd.Tags) {
+			continue
+		}
+
+		baseName := pkgName + "__" + fd.Name
+		irName := baseName
+
+		if cg.overloadedNames[fd.Name] {
+			sig := funcParamSig(fd.Params)
+			irName = overloadMangledName(baseName, sig)
+		}
+
+		cg.coroCallable[irName] = true
+		if preErr := cg.predeclareCoroVariant(fd, irName, false); preErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %q: early coro predecl %s: %w", rawPath, fd.Name, preErr)
+		}
+	}
+
+	// Pass 2: predeclare non-extern functions.  Hoisted ahead of Pass
+	// 1.5b so struct methods can call free fns directly (not only via
+	// spawn).
 	for _, node := range prog.Stmts {
 		fd, ok := node.(*ast.FuncDecl)
 		if !ok || fd.IsExtern != "" {
@@ -770,6 +776,94 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 			cg.filename = prevFilename
 
 			return fmt.Errorf("use %q: %s: %w", rawPath, fd.Name, preErr)
+		}
+	}
+
+	// Pass 1.5b: emit struct METHODS now that every struct + ADT layout
+	// is complete AND every free-fn predeclare ($coro included) is
+	// registered.  Method bodies are free to spawn / await / directly
+	// call any other helper in the file.
+	for _, node := range prog.Stmts {
+		sd, ok := node.(*ast.StructDecl)
+		if !ok {
+			continue
+		}
+
+		if compErr := cg.genStructMethods(sd); compErr != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %q: struct %s methods: %w", rawPath, sd.Name, compErr)
+		}
+
+		structKey := cg.pkgStructKey(sd.Name)
+
+		// Propagate methods to prevScope so callers can call them.
+		// Methods are registered under canonicalKey_methodName in curScope.
+		for _, m := range sd.Methods {
+			methodKey := structKey + "_" + m.Name
+			if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
+				prevScope.set(methodKey, entry)
+			}
+			// Propagate $coro variant so that `await obj.method()` works in
+			// calling code (directCallHasCoroVariant checks prevScope for the $coro).
+			coroKey := methodKey + "$coro"
+			if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+				prevScope.set(coroKey, entry)
+			}
+			// Also expose under bare key for backward compatibility.
+			bareMethodKey := sd.Name + "_" + m.Name
+			if bareMethodKey != methodKey {
+				if entry, ok2 := cg.curScope.lookup(methodKey); ok2 {
+					prevScope.set(bareMethodKey, entry)
+				}
+
+				bareCoroKey := bareMethodKey + "$coro"
+				if entry, ok2 := cg.curScope.lookup(coroKey); ok2 {
+					prevScope.set(bareCoroKey, entry)
+				}
+			}
+		}
+	}
+
+	// Pass 2.8: register top-level const declarations in scope so that
+	// function bodies compiled in Pass 3 below can reference them by
+	// bare name. Mirrors the same pass in loadPackageFromSource. Without
+	// it, file-imported sub-files (use "./helper") silently treat any
+	// const reference inside a fn body as an undefined identifier.
+	registerPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		constVal := cg.evalConstExprTyped(value, typ)
+		if constVal == nil {
+			return
+		}
+
+		stn := ""
+		isUnsigned := false
+
+		if typ != nil {
+			stn = scalar8BitTypeName(typ)
+
+			if stn == "" {
+				stn = scalar128BitTypeName(typ)
+			}
+
+			isUnsigned = isUnsignedTinType(typ)
+		}
+
+		entry := &scopeEntry{val: constVal, isAlloc: false, scalarTypeName: stn, isUnsigned: isUnsigned}
+		cg.curScope.set(name, entry)
+	}
+
+	for _, node := range prog.Stmts {
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				registerPkgConst(d.Name, d.Value, d.Type)
+			}
 		}
 	}
 
@@ -977,9 +1071,19 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	for _, node := range prog.Stmts {
 		if ud, ok := node.(*ast.UseDecl); ok {
 			var loadErr error
-			if ud.IsFile {
+			// Route selective `use { Name } from pkg` through
+			// loadPackageSelective so the named bindings get
+			// re-registered as bare aliases (and bare-type-visibility
+			// for the strict-bare-type resolver). Without this,
+			// nested packages' selective imports degraded into plain
+			// `use pkg` and bare references to Result / Option / ...
+			// stopped resolving once the bare-visibility check landed.
+			switch {
+			case ud.FromSyntax:
+				loadErr = cg.loadPackageSelective(ud.Path, ud.Names, ud.IsFile)
+			case ud.IsFile:
 				loadErr = cg.loadPackageFromFilePath(ud.Path)
-			} else {
+			default:
 				loadErr = cg.loadPackage(ud.Path)
 			}
 
@@ -1333,6 +1437,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		// Generic functions (TypeParams) are compiled on demand; register the template.
 		if len(fd.TypeParams) > 0 {
 			cg.genericFuncs[fd.Name] = fd
+			cg.genericFuncOverloads[fd.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[fd.Name], fd)
 			cg.genericFuncHomeScopes[fd.Name] = cg.curScope // package scope for bare-name resolution
 
 			// Also register with qualified key so cross-package calls prefer the correct template
@@ -1341,6 +1446,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			if pkgName != "" {
 				qualKey := pkgName + "__" + fd.Name
 				cg.genericFuncs[qualKey] = fd
+				cg.genericFuncOverloads[qualKey] = appendGenericFuncOverload(cg.genericFuncOverloads[qualKey], fd)
 				cg.genericFuncHomeScopes[qualKey] = cg.curScope
 			}
 
@@ -1712,11 +1818,163 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 			cg.progress(fmt.Sprintf("cascade re-exports %s (%d macros)", pkgName, cascaded))
 		}
 	}
+	// Validate exports: every name in `export { ... } as pkg` must
+	// refer to a top-level decl (struct, generic struct, ADT, enum,
+	// trait, function, macro, or a name re-exported from a child
+	// package). ADT variant constructors are inferred from the
+	// ADT itself, so listing them in `export` is a redundant noise
+	// signal - the export list silently accepted them before and
+	// callers had no warning when they mis-spelled or referenced a
+	// stale name. Diagnose those cases here instead of silently
+	// dropping them.
+	if err := cg.validatePackageExports(pkgName, exportedNames); err != nil {
+		return err
+	}
 
 	cg.curScope = prevScope
 	cg.filename = prevFilename
 
 	return nil
+}
+
+// validatePackageExports rejects exports that don't refer to any
+// top-level decl. ADT variant constructors are explicitly called
+// out because they're a common mistake - the user lists them
+// alongside the parent ADT, but the language already makes the
+// variants visible once the ADT is exported.
+func (cg *CodeGen) validatePackageExports(pkgName string, exportedNames map[string]bool) error {
+	for name := range exportedNames {
+		if cg.isVariantOfExportedAdt(name, exportedNames) {
+			return fmt.Errorf("export of %q: ADT variant constructors are inferred from the parent ADT; remove %q from `export { ... } as %s`",
+				name, name, pkgName)
+		}
+
+		if cg.isExportable(name, pkgName) {
+			continue
+		}
+
+		return fmt.Errorf("export of %q: no top-level decl (struct, data, enum, trait, fn, macro) named %q is visible in package %q",
+			name, name, pkgName)
+	}
+
+	return nil
+}
+
+// isVariantOfExportedAdt reports whether name is a variant of some
+// ADT in the same export list. Used to flag redundant variant
+// exports.
+func (cg *CodeGen) isVariantOfExportedAdt(name string, exportedNames map[string]bool) bool {
+	owners := cg.dataVariantLookup[name]
+	for _, adt := range owners {
+		// Strip the leading "pkg__" prefix so we compare against the
+		// user-facing source name.
+		bare := adt
+		if idx := strings.Index(adt, "__"); idx >= 0 {
+			bare = adt[idx+2:]
+		}
+
+		if exportedNames[bare] || exportedNames[adt] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isExportable reports whether name refers to a top-level decl that
+// can appear in an export list.
+func (cg *CodeGen) isExportable(name, pkgName string) bool {
+	if _, ok := cg.structTypes[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.structTypes[pkgName+"__"+name]; ok {
+		return true
+	}
+
+	if _, ok := cg.genericStructsByArity[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataDecls[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataDecls[pkgName+"__"+name]; ok {
+		return true
+	}
+
+	if _, ok := cg.enumTypes[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.traits[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.funcDecls[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.overloads[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.constrainedFuncs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.genericFuncs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[name]; ok {
+		return true
+	}
+	// Macros are stored in cg.macros under multiple keys depending
+	// on the load path: bare name (from direct file-path imports),
+	// `pkg::name`, `pkg.name`, with and without a trailing `!`.
+	// Look through every shape that could match this export name.
+	bare := strings.TrimSuffix(name, "!")
+	if _, ok := cg.macros[bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"::"+bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"::"+bare+"!"]; ok {
+		return true
+	}
+
+	if _, ok := cg.macros[pkgName+"."+bare]; ok {
+		return true
+	}
+
+	if _, ok := cg.typeAliases[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.curScope.lookup(name); ok {
+		return true
+	}
+	// Re-exported child-package names (e.g. `export { log } as std`
+	// where log is itself a package): a name matches if any macro or
+	// type alias is registered under `name::`.
+	for k := range cg.macros {
+		if strings.HasPrefix(k, name+"::") {
+			return true
+		}
+	}
+
+	for k := range cg.typeAliases {
+		if strings.HasPrefix(k, name+"::") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // loadPackageSelective loads a package and then registers only the named symbols
@@ -1807,9 +2065,66 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 				break
 			}
 		}
+		// Mark bareName visible as a type so the strict-bare-type
+		// resolver lets `Name` resolve through cg.dataDecls /
+		// cg.structTypes / cg.enumTypes / cg.traits. Without this,
+		// `use { Result } from result` only registers an alias for
+		// non-ADT shapes; ADTs live in cg.dataDecls (flat global
+		// namespace) and only the visibility set gates bare access.
+		if cg.isTypeName(bareName, pkgName) {
+			cg.curScope.markTypeVisible(bareName)
+		}
 	}
 
 	return nil
+}
+
+// isTypeName reports whether bareName names a top-level type (data,
+// struct, enum, trait, type alias) - either as the raw bare key or as
+// the package-prefixed key. Used by selective-import to decide whether
+// to add the name to the importer's visibleTypes set.
+func (cg *CodeGen) isTypeName(bareName, pkgName string) bool {
+	if _, ok := cg.dataDecls[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataDecls[pkgName+"__"+bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.structTypes[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.structTypes[pkgName+"__"+bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.genericStructsByArity[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.enumTypes[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.traits[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.typeAliases[bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.typeAliases[pkgName+"::"+bareName]; ok {
+		return true
+	}
+
+	if _, ok := cg.typeAliases[pkgName+"."+bareName]; ok {
+		return true
+	}
+
+	return false
 }
 
 // ScanImportedNoParensMacros scans a token stream for `use { names } from path`
@@ -2048,6 +2363,15 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 // typeSubst maps type-param names to concrete struct names: {"t": "animal"}.
 func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubst map[string]string) (*ir.Func, error) {
 	irName := tmpl.Name + "__" + instKey
+	// Disambiguate generic free-fn overloads that share a base name + type
+	// args but differ in arity / param shape (e.g. `unwrap[t](r)` vs
+	// `unwrap[t](r, msg)`).  Without the suffix, both monomorphizations
+	// collapse to the same IR symbol and the cache returns whichever was
+	// compiled first, ignoring the caller's arg count.
+	if overloads := cg.genericFuncOverloads[tmpl.Name]; len(overloads) > 1 {
+		irName += "__" + funcParamSig(tmpl.Params)
+	}
+
 	if f, ok := cg.constrainedFuncInstances[irName]; ok {
 		return f, nil // already compiled (or forward-declared for recursive generics)
 	}

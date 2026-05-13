@@ -1,0 +1,3 @@
+fn{#interop} good(cb fn(string) string, n string) string = return cb(n)
+
+fn main() i64 = return 0

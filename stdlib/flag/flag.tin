@@ -20,7 +20,7 @@
 //         if verbose.value:
 //           echo "starting on port {port.value} as {name.value}"
 //       case Err(e):
-//         echo "flag error: {flag::error_message(e._kind)}"
+//         echo "flag error: {e.message()}"
 //         flag::print_usage()
 //
 // Supported syntax:
@@ -36,34 +36,22 @@
 
 use str
 use result
+use { Result } from result
 use errors
 
-// FlagErrorKind enumerates the structured cases parse can fail on.
-// Kept as a separate ADT from FlagError so match-on-kind can inspect
-// the payload without unwrapping a nested struct.
-data FlagErrorKind =
+// FlagError enumerates the structured cases parse can fail on.
+// Implements errors::Err so calls return Result[T, errors::Err] like
+// the rest of the typed-error ecosystem.
+data FlagError(errors::Err, print) =
   UnknownFlag(name string)
   MissingValue(name string)
 
-// FlagError is the typed error the parser returns.  It implements
-// errors::Err so it can flow through any code path that talks to the
-// generic error trait, while still exposing its kind for callers that
-// want structured handling.
-struct FlagError(errors::Err) =
-  _kind FlagErrorKind
-
-  fn kind(this FlagError) FlagErrorKind = return this._kind
-
   fn errors::Err::message(this FlagError) string =
-    return error_message(this._kind)
+    match this:
+      case UnknownFlag(name):  return "unknown flag: --" ++ name
+      case MissingValue(name): return "flag --" ++ name ++ " requires a value"
 
-  fn print(this FlagError) string = return error_message(this._kind)
-
-// error_message renders a FlagErrorKind as a human-readable string.
-fn error_message(k FlagErrorKind) string =
-  match k:
-    case UnknownFlag(name):  return "unknown flag: --" ++ name
-    case MissingValue(name): return "flag --" ++ name ++ " requires a value"
+  fn ::print(this FlagError) string = return this.message()
 
 const KIND_BOOL i32 = 0
 const KIND_INT  i32 = 1
@@ -169,7 +157,7 @@ fn f64(name string, default_val f64, help string) *FlagF64 =
 // FlagError describing what went wrong. On --help / -h, prints usage and
 // exits(0) -- this short-circuits return because the program author's
 // intent for --help is "stop and show help", not "give me back a value".
-fn parse(args [string]) Result[[string], FlagError] =
+fn parse(args [string]) Result[[string], errors::Err] =
   let n = len(args)
   // Use a growable slice rather than a fixed-size stack array: the
   // slice escapes through the returned Result, and the stack frame
@@ -198,9 +186,9 @@ fn parse(args [string]) Result[[string], FlagError] =
       let (consumed, missing_value) = apply_flag(args, i)
 
       if missing_value:
-        return Err(FlagError{_kind: MissingValue(flag_name(arg))})
+        return Err(MissingValue(flag_name(arg)))
       if consumed == 0:
-        return Err(FlagError{_kind: UnknownFlag(flag_name(arg))})
+        return Err(UnknownFlag(flag_name(arg)))
 
       i = i + consumed
 
@@ -403,7 +391,7 @@ fn exit_proc(code i32) = extern("exit")
 
 export {
   FlagBool, FlagInt, FlagStr, FlagF64,
-  FlagError, FlagErrorKind, error_message,
+  FlagError,
   bool, int, str, f64,
   parse, print_usage,
 } as flag

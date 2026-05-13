@@ -1,0 +1,206 @@
+// examples/typing_errors_test.tin -- typing-error stress tests for
+// let / var / const bindings, struct literals, generics, pointers,
+// tuples, arrays, function arity, and control-flow type mismatches.
+// Verifies that the wrong types produce a clean diagnostic and that
+// the compiler never panics on them.
+//
+// Replaces examples/typing_errors.sh.
+//
+// Two assertion shapes:
+//   - expect_diagnostic(fixture, needle):
+//       compilation fails (exit != 0) and stderr contains needle.
+//   - expect_no_compiler_panic(fixture):
+//       stderr / stdout do NOT contain a Go-style panic stack -- the
+//       compiler may still emit a diagnostic or silently accept, but
+//       it must not crash.  Covers pre-existing softs spots that are
+//       tracked separately.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_diagnostic(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/typing_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_no_compiler_panic(fixture string) =
+  let r = run_tin("run", "examples/fixtures/typing_errors/" ++ fixture)
+  let combined = r.stdout ++ "\n" ++ r.stderr
+
+  assert::ok(!contains_text(combined, "panic:"))
+  assert::ok(!contains_text(combined, "goroutine 1 [running]"))
+
+// A. Scalar type mismatches.
+
+test "string into i64 slot errors" =
+  expect_diagnostic("str_into_i64.tin", "error")
+
+test "i64 into string slot errors" =
+  expect_diagnostic("i64_into_str.tin", "error")
+
+test "bool into string slot errors" =
+  expect_diagnostic("bool_into_str.tin", "error")
+
+test "atom into i64 slot errors" =
+  expect_diagnostic("atom_into_i64.tin", "error")
+
+test "very large literal in i32 slot does not panic" =
+  expect_no_compiler_panic("large_lit_i32.tin")
+
+// B. Pointer type mismatches (pre-existing soft spots -- check no panic).
+
+test "scalar into pointer slot does not panic" =
+  expect_no_compiler_panic("scalar_into_ptr.tin")
+
+test "wrong-struct pointer does not panic" =
+  expect_no_compiler_panic("wrong_struct_ptr.tin")
+
+test "string into pointer slot does not panic" =
+  expect_no_compiler_panic("str_into_ptr.tin")
+
+// C. Array type mismatches.
+
+test "scalar into array slot errors" =
+  expect_diagnostic("scalar_into_array.tin", "error")
+
+test "string into array slot errors" =
+  expect_diagnostic("str_into_array.tin", "error")
+
+test "fixed-size array with too-few elements does not panic" =
+  expect_no_compiler_panic("fixed_arr_short.tin")
+
+test "fixed-size array with too-many elements does not panic" =
+  expect_no_compiler_panic("fixed_arr_long.tin")
+
+test "mixed-type array literal in [i64] slot does not panic" =
+  expect_no_compiler_panic("mixed_arr_lit.tin")
+
+// D. Tuple type mismatches.
+
+test "tuple slot with wrong arity does not panic" =
+  expect_no_compiler_panic("tuple_wrong_arity.tin")
+
+test "tuple slot with wrong-typed elem does not panic" =
+  expect_no_compiler_panic("tuple_wrong_elem.tin")
+
+test "scalar into tuple slot does not panic" =
+  expect_no_compiler_panic("scalar_into_tuple.tin")
+
+// E. Struct literal field errors.
+
+test "wrong field type in struct literal does not panic" =
+  expect_no_compiler_panic("wrong_field_type.tin")
+
+test "missing field in struct literal does not panic" =
+  expect_no_compiler_panic("missing_field.tin")
+
+test "extra field in struct literal does not panic" =
+  expect_no_compiler_panic("extra_field.tin")
+
+test "duplicate field in struct literal does not panic" =
+  expect_no_compiler_panic("duplicate_field.tin")
+
+// F. Generic ADT errors.
+
+test "Option with wrong type-arg count does not panic" =
+  expect_no_compiler_panic("option_wrong_arity.tin")
+
+test "Result with too-few type args does not panic" =
+  expect_no_compiler_panic("result_too_few_args.tin")
+
+test "Ok with wrong payload type does not panic" =
+  expect_no_compiler_panic("ok_wrong_payload.tin")
+
+// G. Reassignment.
+
+test "const can be referenced; cannot crash" =
+  expect_no_compiler_panic("const_referenced.tin")
+
+test "let reassignment in same fn does not panic" =
+  expect_no_compiler_panic("let_reassign.tin")
+
+// H. Use before definition.
+
+test "let referencing later let is undefined" =
+  expect_diagnostic("let_ref_later.tin", "undefined identifier")
+
+test "self-referential let does not panic" =
+  expect_no_compiler_panic("self_ref_let.tin")
+
+// I. Function call typing.
+
+test "wrong arg count: too few does not panic" =
+  expect_no_compiler_panic("too_few_args.tin")
+
+test "wrong arg count: too many does not panic" =
+  expect_no_compiler_panic("too_many_args.tin")
+
+test "wrong arg type names i64 as expected" =
+  expect_diagnostic("wrong_arg_type.tin", "where i64 is expected")
+
+test "fn return-type mismatch" =
+  expect_diagnostic("fn_ret_mismatch.tin", "cannot return value of type")
+
+test "void fn returns a value" =
+  expect_diagnostic("void_returns_value.tin", "void function cannot return")
+
+test "non-void fn missing return" =
+  expect_diagnostic("missing_return.tin", "not all code paths return")
+
+// J. Match exhaustiveness.
+
+test "non-exhaustive match on Option does not panic" =
+  expect_no_compiler_panic("nonexhaustive_match.tin")
+
+// K. Trait / constraint violations.
+
+test "calling generic with non-matching trait constraint does not panic" =
+  expect_no_compiler_panic("gen_constraint.tin")
+
+// L. Pointer arithmetic / nil deref.
+
+test "deref of statically-nil pointer does not panic the compiler" =
+  expect_no_compiler_panic("deref_nil.tin")
+
+// M. Index expression errors.
+
+test "indexing non-indexable type does not panic" =
+  expect_no_compiler_panic("index_nonindexable.tin")
+
+test "indexing array with non-int key does not panic" =
+  expect_no_compiler_panic("index_wrong_key.tin")
+
+// N. Field access on non-struct.
+
+test "field access on i64 does not panic" =
+  expect_no_compiler_panic("field_on_i64.tin")
+
+// O. Async / coroutine type errors.
+
+test "await on non-Future does not panic" =
+  expect_no_compiler_panic("await_non_future.tin")
+
+// P. Cast at slot vs cast at expr.
+
+test "let x i64 = (1 + 2 as i32) as i64 chains correctly" =
+  expect_no_compiler_panic("cast_chain_ok.tin")
+
+test "cast in struct literal field that needs widening" =
+  expect_no_compiler_panic("cast_struct_field_widen.tin")
+
+// Q. Underscore-literal lexing edges.
+
+test "trailing underscore after digit does not panic" =
+  expect_no_compiler_panic("trailing_underscore.tin")
+
+test "leading underscore is just an identifier" =
+  expect_no_compiler_panic("leading_underscore.tin")
+
+test "double underscore between digits does not panic" =
+  expect_no_compiler_panic("double_underscore.tin")
+
+// R. Stress: deeply nested type errors.
+
+test "deeply nested wrong-type initializer does not panic" =
+  expect_no_compiler_panic("nested_wrong_init.tin")

@@ -30,6 +30,8 @@
 use io
 use rc
 use errors
+use result
+use { Result } from result
 use { loop } from macros
 
 fn tin_tls_init_c()                                       = extern("_tin_tls_init")
@@ -74,31 +76,34 @@ struct TlsConn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   fn Closeable::close(this TlsConn) =
     tin_tls_shutdown_c(this._cell.payload())
 
-// noop_free is the rc::Cell dtor used for the placeholder TlsConn
-// returned when the handshake fails -- the underlying handle is
-// either nil or already freed by connect_impl, so the cell must not
-// re-free.
-fn noop_free(_handle *void) = pass
+// TlsError enumerates the failure modes the tls stdlib can surface.
+// Implements errors::Err so connect returns Result[TlsConn, errors::Err]
+// and unifies with the typed-error ecosystem.
+data TlsError(errors::Err, print) =
+  CannotCreateState(host string)
+  HandshakeFailed(host string)
+
+  fn errors::Err::message(this TlsError) string =
+    match this:
+      case CannotCreateState(h): return "tls::connect: failed to create TLS state for " ++ h ++ " (CA bundle missing or empty hostname)"
+      case HandshakeFailed(h):   return "tls::connect: TLS handshake failed for " ++ h ++ " (cert chain or hostname verification failed)"
+
+  fn ::print(this TlsError) string = return this.message()
 
 // connect wraps fd with TLS and performs the async handshake.
-// host is used for SNI and certificate verification.
-// Returns a Future yielding (TlsConn, *errors::Err).  On a nil error
-// the returned TlsConn is ready for reading and writing.  On a
-// non-nil error the TlsConn is a zero-state placeholder and must NOT
-// be used; production callers should branch on the error.  Pre-fix
-// this function panicked the program on TLS handshake failure, which
-// took down clients that intend to fall back, retry, or surface the
-// failure to a user.
-fn connect(host string, fd i32) Future[(TlsConn, *errors::Err)] =
+// host is used for SNI and certificate verification. Returns a
+// Future yielding Result[TlsConn, errors::Err]; on Err the
+// underlying TLS state has already been freed and there is no
+// TlsConn to clean up.
+fn connect(host string, fd i32) Future[Result[TlsConn, errors::Err]] =
   return spawn connect_impl(host, fd)
 
-fn{#async} connect_impl(host string, fd i32) (TlsConn, *errors::Err) =
-  let placeholder = TlsConn{_cell: rc::Cell[*void].alloc(nil as *void, noop_free), fd: fd}
-  let handle      = tin_tls_new_c(host, fd)
-  let blocked     = tin_io_blocked_val_c()
+fn{#async} connect_impl(host string, fd i32) Result[TlsConn, errors::Err] =
+  let handle  = tin_tls_new_c(host, fd)
+  let blocked = tin_io_blocked_val_c()
 
   if handle == nil:
-    return (placeholder, errors::new("tls::connect: failed to create TLS state for {host} (CA bundle missing or empty hostname)"))
+    return Err(CannotCreateState(host))
 
   loop:
     let r = tin_tls_do_handshake_c(handle)
@@ -107,10 +112,10 @@ fn{#async} connect_impl(host string, fd i32) (TlsConn, *errors::Err) =
       break
     if r != blocked:
       tin_tls_free_c(handle)
-      return (placeholder, errors::new("tls::connect: TLS handshake failed for {host} (cert chain or hostname verification failed)"))
+      return Err(HandshakeFailed(host))
     yield
 
-  return (TlsConn{_cell: rc::Cell[*void].alloc(handle, tin_tls_free_c), fd: fd}, nil)
+  return Ok(TlsConn{_cell: rc::Cell[*void].new(handle, tin_tls_free_c), fd: fd})
 
 fn{#async} tls_read_impl(handle *void, buf *byte, n i64) i64 =
   let blocked = tin_io_blocked_val_c()
@@ -132,4 +137,4 @@ fn{#async} tls_write_impl(handle *void, buf *byte, n i64) i64 =
       return r
     yield
 
-export { TlsConn, connect, set_ca_file } as tls
+export { TlsConn, TlsError, connect, set_ca_file } as tls

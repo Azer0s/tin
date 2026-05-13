@@ -1,0 +1,10 @@
+struct Box[t] =
+  v t
+
+  static fn make(v t) Box[t] = return Box[t]{v: v}
+
+  fn just_i64(this Box[t]) i64 where t is i64 = return 1
+
+fn main() i64 =
+  let b = Box[bool].make(true)
+  return b.just_i64()

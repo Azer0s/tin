@@ -1,0 +1,13 @@
+trait Sized =
+  fn size(this *Sized) i64 = virtual
+
+struct Box[t] =
+  v t
+
+  static fn make(v t) Box[t] = return Box[t]{v: v}
+
+  fn measure(this Box[t]) i64 where t is ord && Sized = return 1
+
+fn main() i64 =
+  let b = Box[i64].make(7)
+  return b.measure()

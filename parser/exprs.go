@@ -169,35 +169,38 @@ func (p *Parser) parseTernary() (ast.Node, error) {
 }
 
 func (p *Parser) parseOr() (ast.Node, error) {
-	return p.parseBinary(p.parseAnd, lexer.OR)
+	return p.parseBinaryAllowLeading(p.parseAnd, lexer.OR)
 }
 
 func (p *Parser) parseAnd() (ast.Node, error) {
-	return p.parseBinary(p.parseBitOr, lexer.AND)
+	return p.parseBinaryAllowLeading(p.parseBitOr, lexer.AND)
 }
 
 func (p *Parser) parseBitOr() (ast.Node, error) {
-	return p.parseBinary(p.parseBitXor, lexer.BITOR)
+	return p.parseBinaryAllowLeading(p.parseBitXor, lexer.BITOR)
 }
 
 func (p *Parser) parseBitXor() (ast.Node, error) {
-	return p.parseBinary(p.parseBitAnd, lexer.XOR)
+	return p.parseBinaryAllowLeading(p.parseBitAnd, lexer.XOR)
 }
 
 func (p *Parser) parseBitAnd() (ast.Node, error) {
+	// `&` doubles as the address-of prefix operator, so a line
+	// starting with `&` is most often a unary statement (e.g.
+	// `&local`).  Use the trailing-only continuation here.
 	return p.parseBinary(p.parseEquality, lexer.AMP)
 }
 
 func (p *Parser) parseEquality() (ast.Node, error) {
-	return p.parseBinary(p.parseComparison, lexer.EQEQ, lexer.NEQ)
+	return p.parseBinaryAllowLeading(p.parseComparison, lexer.EQEQ, lexer.NEQ)
 }
 
 func (p *Parser) parseComparison() (ast.Node, error) {
-	return p.parseBinary(p.parseShift, lexer.LT, lexer.LTEQ, lexer.GT, lexer.GTEQ)
+	return p.parseBinaryAllowLeading(p.parseShift, lexer.LT, lexer.LTEQ, lexer.GT, lexer.GTEQ)
 }
 
 func (p *Parser) parseShift() (ast.Node, error) {
-	return p.parseBinary(p.parseAdditive, lexer.SHL, lexer.SHR)
+	return p.parseBinaryAllowLeading(p.parseAdditive, lexer.SHL, lexer.SHR)
 }
 
 func (p *Parser) parseAdditive() (ast.Node, error) {
@@ -291,13 +294,62 @@ func (p *Parser) parseMultiplicative() (ast.Node, error) {
 	return p.parseBinary(p.parseUnary, lexer.STAR, lexer.SLASH, lexer.PERCENT)
 }
 
+// parseBinary parses a left-associative binary expression with
+// trailing-operator continuation only.  Use parseBinaryAllowLeading
+// for ops whose token is unambiguously binary (`||`, `&&`, `==`,
+// ...); STAR / AMP / MINUS double as unary prefix operators so a
+// line starting with them is usually a separate statement, not a
+// continuation.
 func (p *Parser) parseBinary(sub func() (ast.Node, error), ops ...lexer.TokenType) (ast.Node, error) {
+	return p.parseBinaryImpl(sub, false, ops...)
+}
+
+// parseBinaryAllowLeading is like parseBinary but additionally
+// accepts the operator at the start of a continuation line.
+// Restricted to op sets that cannot also be unary prefix operators
+// so a leading `||` continues the previous expression while a
+// leading `*` stays a statement-level deref.
+func (p *Parser) parseBinaryAllowLeading(sub func() (ast.Node, error), ops ...lexer.TokenType) (ast.Node, error) {
+	return p.parseBinaryImpl(sub, true, ops...)
+}
+
+func (p *Parser) parseBinaryImpl(sub func() (ast.Node, error), allowLeading bool, ops ...lexer.TokenType) (ast.Node, error) {
 	left, err := sub()
 	if err != nil {
 		return nil, err
 	}
 
-	for p.match(ops...) {
+	for {
+		// Operator on the same line: fall through to advance + parse.
+		if p.match(ops...) {
+			// nothing to do
+		} else if allowLeading && p.check(lexer.NEWLINE) {
+			// Operator at the start of the continuation line: peek
+			// past NEWLINE (+ optional INDENT) and accept it as the
+			// next op-token.  Consumed INDENTs flow into
+			// continuationDedents so the outer skipNewlines drains
+			// the matching DEDENTs later (same bookkeeping as the
+			// trailing-op continuation below).
+			saved := p.pos
+			savedDedents := p.continuationDedents
+
+			p.advance() // NEWLINE
+
+			for p.check(lexer.INDENT) {
+				p.advance()
+				p.continuationDedents++
+			}
+
+			if !p.match(ops...) {
+				p.pos = saved
+				p.continuationDedents = savedDedents
+
+				break
+			}
+		} else {
+			break
+		}
+
 		opTok := p.advance()
 		op := opTok.Literal
 
@@ -765,11 +817,27 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			var start ast.Node
 
 			if !p.check(lexer.COLON) && !p.check(lexer.RBRACKET) {
-				var err3 error
+				// `Generic[fn(...) ret]` -- the `fn(...) T` form is a
+				// FuncType, not an expression, so parseExpr would mis-
+				// dispatch to LambdaExpr parsing (and fail on the lack
+				// of a body).  Parse a TypeExpr instead and wrap it in a
+				// TypeRefNode the downstream resolver unpacks.
+				if p.check(lexer.KW_FN) {
+					te, err3 := p.parseFuncType()
+					if err3 != nil {
+						return nil, err3
+					}
 
-				start, err3 = p.parseExpr()
-				if err3 != nil {
-					return nil, err3
+					trn := &ast.TypeRefNode{Type: te}
+					trn.SetPos(expr.Pos())
+					start = trn
+				} else {
+					var err3 error
+
+					start, err3 = p.parseExpr()
+					if err3 != nil {
+						return nil, err3
+					}
 				}
 			}
 
@@ -1454,6 +1522,25 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		return p.parseArrayLit()
 
 	case lexer.IDENT, lexer.KW_FORWARD, lexer.KW_OVERRIDE:
+		// `try` is a contextual keyword: at expression-prefix position
+		// followed by anything other than `!` (which would indicate the
+		// existing `try!` macro), it parses as a try-expression that the
+		// codegen desugars against the tryable trait. Look at the token
+		// stream without advancing first so the macro path is preserved.
+		if p.peek().Type == lexer.IDENT && p.peek().Literal == "try" && p.peekAt(1).Type != lexer.NOT {
+			tryTok := p.advance()
+
+			inner, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			te := &ast.TryExpr{Inner: inner}
+			te.SetPos(ast.Pos{Line: tryTok.Line, Col: tryTok.Col})
+
+			return te, nil
+		}
+
 		// KW_FORWARD / KW_OVERRIDE are *contextual* keywords -- they
 		// only have meaning inside struct field declarations. Accept
 		// them as plain identifiers in expression position so calls
@@ -1744,6 +1831,63 @@ func typeNodeToString(n ast.Node) string {
 		}
 
 		return base + "[" + argStr + "]"
+	case *ast.TypeRefNode:
+		// Source-syntax-like fn-type encoding so the round trip survives
+		// IR mangling: `fn(p1,p2,...)ret`.  Mirrors typeExprCanonicalKey
+		// in the codegen so a parser-emitted key matches the codegen's
+		// canonical form when the AST is later re-resolved.
+		return typeExprSourceForm(v.Type)
+	}
+
+	return ""
+}
+
+// typeExprSourceForm produces a source-syntax key string for a TypeExpr.
+// Parser-side mirror of cg.typeExprCanonicalKey for the cases the parser
+// needs to emit (currently only FuncType plus its nested type composition).
+// Stays in lockstep with the codegen encoding so a key from either side
+// decodes the same way in parseTypeParamStr.
+func typeExprSourceForm(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case nil:
+		return ""
+	case *ast.SimpleType:
+		return t.Name
+	case *ast.PointerType:
+		return "*" + typeExprSourceForm(t.Elem)
+	case *ast.ArrayType:
+		if t.Size < 0 {
+			return "[]" + typeExprSourceForm(t.Elem)
+		}
+
+		return ""
+	case *ast.GenericType:
+		parts := make([]string, len(t.TypeParams))
+		for i, tp := range t.TypeParams {
+			parts[i] = typeExprSourceForm(tp)
+		}
+
+		return t.Name + "[" + strings.Join(parts, ",") + "]"
+	case *ast.FuncType:
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = typeExprSourceForm(p)
+		}
+
+		prefix := "fn"
+		if t.IsAsync {
+			prefix = "fn#async"
+		}
+
+		out := prefix + "(" + strings.Join(parts, ",") + ")"
+
+		if t.RetType != nil {
+			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
+				out += typeExprSourceForm(t.RetType)
+			}
+		}
+
+		return out
 	}
 
 	return ""
@@ -1758,6 +1902,8 @@ func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
 		return &ast.SimpleType{Name: v.Name}
 	case *ast.ScopeAccess:
 		return &ast.SimpleType{Name: strings.Join(v.Path, "::")}
+	case *ast.TypeRefNode:
+		return v.Type
 	case *ast.IndexExpr:
 		baseName := ""
 

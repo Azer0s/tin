@@ -1,0 +1,7 @@
+use strings
+
+fn main() =
+  let v = strings::parse_int("-9223372036854775808").unwrap_or(0)
+
+  if v == -9223372036854775808: echo "ok-min"
+  else: echo "wrong-v {v}"

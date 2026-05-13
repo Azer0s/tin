@@ -1,0 +1,15 @@
+use errors
+use result
+use { Result } from result
+
+struct Foo =
+  n1 i64
+  n2 i64
+
+fn make() Result[Foo, errors::Err] =
+  return Ok(Foo{n1: 42, n2: 99})
+
+fn main() =
+  match make():
+    case Ok(f):  echo "n1={f.n1} n2={f.n2}"
+    case Err(_): echo "err"

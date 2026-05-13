@@ -26,6 +26,7 @@
 
 use time
 use strings
+use { discard } from macros
 
 fn isatty_c(fd i32) i32 = extern("isatty")
 fn write_c(fd i32, buf *byte, n i64) i64 = extern("write")
@@ -135,7 +136,8 @@ fn resolve_color(c i32) bool =
 
 fn write_line(line string) =
   let bytes = line as [byte]
-  let _ = write_c(2, &bytes[0], len(bytes))
+
+  discard write_c(2, &bytes[0], len(bytes))
 
 // esc_byte is an ANSI ESC (0x1b) as a one-byte string. Tin's string
 // literals don't decode \x escapes, so we build the byte explicitly.

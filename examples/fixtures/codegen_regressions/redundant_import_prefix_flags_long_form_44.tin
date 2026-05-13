@@ -1,0 +1,4 @@
+use net::dns
+
+fn main() =
+  let _ = net::dns::lookup_host("localhost")

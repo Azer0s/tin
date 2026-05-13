@@ -1,0 +1,5 @@
+fn take(b u8) i64 = return b as i64
+
+fn main() =
+  let n = take(0xff)
+  echo "{n}"

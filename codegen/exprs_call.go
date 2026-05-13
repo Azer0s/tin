@@ -205,6 +205,15 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				if !concreteOk && !hasOverloads {
 					gTmpl = t
+					// Multiple generic free-fn overloads share the bare-name
+					// entry; the latest registration wins.  Pick the one
+					// whose arity matches the call so e.g.
+					// `result::unwrap(r)` (1 arg) and
+					// `result::unwrap(r, msg)` (2 args) route to their
+					// respective templates.
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[fn.Name], len(e.Args)); ov != nil {
+						gTmpl = ov
+					}
 				}
 			}
 
@@ -267,7 +276,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
+					cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], argVals[i], concreteFunc.Sig.RetType)
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -361,7 +370,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
+				cg.emitCallArgReleaseForRet(block, astArg, argValsPreCoerce[i], argVals[i], result.Type())
 			}
 
 			if irtypes.IsVoid(result.Type()) {
@@ -460,9 +469,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				best := cg.resolveOverload(variants, llArgs)
 				if best == nil {
-					typeName := baseStaticName
+					typeName := prettyStructName(baseStaticName)
 					if typeArgStr != "" {
-						typeName = baseStaticName + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
+						typeName = prettyStructName(baseStaticName) + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
 					}
 
 					return nil, cg.nodeErr(e, "no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
@@ -494,7 +503,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+					cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
 				}
 
 				if irtypes.IsVoid(result.Type()) {
@@ -530,7 +539,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], llArgs[i])
+						cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
 					}
 
 					if irtypes.IsVoid(result.Type()) {
@@ -609,7 +618,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
-				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", structName, fn.Field, len(argVals))
+				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", prettyStructName(structName), fn.Field, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -675,7 +684,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, argVals[i], llArgs[i+thisOff])
+				cg.emitCallArgReleaseForRet(block, astArg, argVals[i], llArgs[i+thisOff], result.Type())
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -763,7 +772,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						break
 					}
 
-					cg.emitCallArgRelease(block, astArg, callArgs[i], llArgs[i+1])
+					cg.emitCallArgReleaseForRet(block, astArg, callArgs[i], llArgs[i+1], result.Type())
 				}
 
 				// ARC: release temporary struct receiver (method chain temporaries).
@@ -853,6 +862,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 				}
 			}
+			// Call-site generics: when the called method's return type
+			// originally contained a wildcard slot and a return-type hint
+			// differs from the callee's actual return type, route through
+			// the per-target monomorphization so the call's result is
+			// directly the target shape (no caller-side rewrap).
+			if f, ok2 := callee.(*ir.Func); ok2 {
+				if decl := cg.funcDecls[methodName]; decl != nil && decl.RetTypeHasWildcard {
+					if cg.returnTypeHint == nil {
+						return nil, cg.nodeErr(e,
+							"%s.%s has a wildcard slot in its return type that needs context to fill (a let-binding type annotation, the enclosing function's return type, or an argument type expectation). Annotate the receiving binding (e.g. `let x %s = ...`) or call the method through `try` inside a function whose return type fixes the slot.",
+							prettyStructName(structName), strings.TrimPrefix(methodName, structName+"_"),
+							prettyStructName(structName))
+					}
+
+					if !cg.returnTypeHint.Equal(f.Sig.RetType) {
+						bareMethod := strings.TrimPrefix(methodName, structName+"_")
+						if monoFn, ok3 := cg.ensureWildcardMono(structName, bareMethod, objVal.Type(), cg.returnTypeHint); ok3 {
+							callee = monoFn
+						}
+					}
+				}
+			}
+
 			// Adapt arg types to function signature.
 			if f, ok2 := callee.(*ir.Func); ok2 {
 				calleeType = f.Sig
@@ -874,7 +906,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					break
 				}
 
-				cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff])
+				cg.emitCallArgReleaseForRet(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff], result.Type())
 			}
 
 			// ARC: release temporary struct receiver (method chain temporaries).
@@ -915,10 +947,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
-			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", structName, fn.Field)
+			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", prettyStructName(structName), fn.Field)
 		}
 
-		return nil, cg.nodeErr(e, "undefined method: %s.%s", structName, fn.Field)
+		return nil, cg.nodeErr(e, "undefined method: %s.%s", prettyStructName(structName), fn.Field)
 
 	case *ast.ScopeAccess:
 		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
@@ -1019,7 +1051,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
 							return nil, cg.nodeErr(e, "no matching overload for %s[%s]::%s (got %d arg(s))",
-								bareBaseName, strings.Join(resolvedParts, ", "), methodField, len(olArgs))
+								prettyStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -1050,7 +1082,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 								break
 							}
 
-							cg.emitCallArgRelease(block, astArg, preCoerceVals[i], olArgs[i])
+							cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], olArgs[i], result.Type())
 						}
 
 						if irtypes.IsVoid(result.Type()) {
@@ -1125,7 +1157,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, argValsPreCoerce[i], argVals[i])
+						cg.emitCallArgReleaseForRet(block, astArg, argValsPreCoerce[i], argVals[i], result.Type())
 					}
 
 					if irtypes.IsVoid(result.Type()) {
@@ -1134,6 +1166,20 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 					return result, nil
 				}
+			}
+			// No matching overload found.  Release the side-effecting
+			// argument values we just emitted before falling through to
+			// the generic path -- otherwise the generic path re-evaluates
+			// every arg and the first set's allocations leak (e.g.
+			// `assert::equals(json::encode(...), ...)` where assert::equals
+			// is generic but errors::equals also exists as a same-named
+			// overload, so cg.overloads["equals"] is non-empty here).
+			for i, astArg := range e.Args {
+				if i >= len(argVals) || argVals[i] == nil {
+					continue
+				}
+
+				cg.emitCallArgReleaseForRet(block, astArg, argVals[i], argVals[i], irtypes.Void)
 			}
 		}
 		// Generic function call without explicit type arg: infer type and monomorphize.
@@ -1253,14 +1299,25 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				usedQual := false
 
 				if qualFuncName != "" {
-					tmpl, isGeneric = cg.genericFuncs[qualFuncName]
-					if isGeneric {
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args)); ov != nil {
+						tmpl = ov
+						isGeneric = true
+						usedQual = true
+					} else if g, ok := cg.genericFuncs[qualFuncName]; ok {
+						tmpl = g
+						isGeneric = true
 						usedQual = true
 					}
 				}
 
 				if !isGeneric {
-					tmpl, isGeneric = cg.genericFuncs[funcName]
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args)); ov != nil {
+						tmpl = ov
+						isGeneric = true
+					} else if g, ok := cg.genericFuncs[funcName]; ok {
+						tmpl = g
+						isGeneric = true
+					}
 				}
 
 				if !isGeneric {
@@ -1317,7 +1374,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							break
 						}
 
-						cg.emitCallArgRelease(block, astArg, preCoerceVals[i], argVals[i])
+						cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], argVals[i], result2.Type())
 					}
 
 					if irtypes.IsVoid(result2.Type()) {
@@ -1545,7 +1602,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			break
 		}
 
-		cg.emitCallArgRelease(block, astArg, llArgsPreCoerce[i], llArgs[i])
+		cg.emitCallArgReleaseForRet(block, astArg, llArgsPreCoerce[i], llArgs[i], result.Type())
 	}
 
 	if irtypes.IsVoid(result.Type()) {
@@ -1735,7 +1792,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	// Handle field access on %S.native values: embedded cLayoutStruct fields.
@@ -1747,7 +1804,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(baseName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 		}
 
 		nativeSt := cg.nativeStructTypes[baseName]
@@ -1762,7 +1819,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	if cg.cLayoutStructs[structName] {
@@ -1772,7 +1829,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(structName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 		}
 
 		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
@@ -1794,7 +1851,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			return bm, nil
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", structName, e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
 	}
 
 	// We need a pointer to the struct to do GEP.

@@ -1,0 +1,2 @@
+fn main() =
+  let _ = "x" as i64

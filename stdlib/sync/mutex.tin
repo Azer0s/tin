@@ -7,8 +7,19 @@
 // and the cell is freed exactly once when the last owner drops. The
 // extra Cell.payload() load on every lock/unlock is trivial next to
 // the CAS / syscall the lock itself performs.
+//
+// Usage:
+//   let m = sync::Mutex.new()
+//   await m.lock()
+//   defer m.unlock()
+//   ...critical section...
+//
+// Lock acquisition is awaitable[Unit]: ready() is the try_lock probe
+// and the runtime spin loop drives the retry. No fiber-spawn cost
+// because the await-loop runs inline in the calling fiber.
 
 use rc
+use "./future"
 
 fn tin_fmutex2_new() *void                    = extern("_tin_fmutex2_new")
 fn tin_fmutex2_free(m *void)                  = extern("_tin_fmutex2_free")
@@ -18,21 +29,33 @@ fn tin_fmutex2_unlock(m *void)                = extern("_tin_fmutex2_unlock")
 
 fn tin_current_pid_mx() i64 = extern("_tin_current_pid")
 
+// LockHandle is the awaitable returned by Mutex.lock(). It holds a
+// refcounted reference to the same rc::Cell the Mutex uses, so
+// copies of the handle bump the cell's RC and the underlying
+// TinFastMutex is freed only when the last reference drops.
+// ready() probes try_lock; result() is a no-op marker. The runtime's
+// await loop yields between probes so a contended lock parks the
+// fiber on the next yield point without a coroutine frame.
+struct LockHandle(awaitable[Unit]) =
+  _cell    *rc::Cell[*void]
+  _own_pid i64
+
+  fn awaitable[Unit]::ready(this LockHandle) bool =
+    return tin_fmutex2_try_lock(this._cell.payload(), this._own_pid) != 0
+
+  fn awaitable[Unit]::result(this LockHandle) Unit =
+    return Unit{_unit: 0}
+
 struct Mutex =
   _cell *rc::Cell[*void]
 
   fn ptr(this Mutex) *void = return this._cell.payload()
 
   static fn new() Mutex =
-    return Mutex{_cell: rc::Cell[*void].alloc(tin_fmutex2_new(), tin_fmutex2_free)}
+    return Mutex{_cell: rc::Cell[*void].new(tin_fmutex2_new(), tin_fmutex2_free)}
 
-  fn{#async #no_autoyield} lock(this Mutex) =
-    let pid = tin_current_pid_mx()
-
-    for true:
-      if tin_fmutex2_try_lock(this.ptr(), pid) != 0:
-        return
-      yield
+  fn lock(this Mutex) LockHandle =
+    return LockHandle{_cell: this._cell, _own_pid: tin_current_pid_mx()}
 
   fn unlock(this Mutex) =
     tin_fmutex2_unlock(this.ptr())

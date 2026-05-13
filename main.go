@@ -95,22 +95,52 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     async-main                  main() uses spawn/await but is not #async
     await-match-guards          guard clauses in await-match arms
     bool-analysis               condition that folds to true/false at compile time
+    cast-truncates              numeric cast that loses bits at runtime
     deref-nil                   dereference of literal nil
+    discarded-pure-call         dropped result of a #pure call has no effect
     div-by-zero / shift-overflow  arithmetic that's UB at runtime
-    self-assign                 x = x
-    tautological-pointer-cmp    comparing a non-nil pointer against nil
-    unreachable-code            statements after return / panic / infinite loop
-    unused-match-arms           unreachable match case / where clause
-    loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    double-deinit               value deinit'd twice on the same path
+    empty-body                  if / for / while body that is empty
     fiber-misuse                double close, send-after-close, lock-without-unlock, unused mutex
+    identical-operands          x == x, x - x, x & x, ...
+    impossible-range            for-loop range bounds that can never produce values
+    ineffective-allow-drop      "#allow_drop" on a non-must-use return type does nothing
+    infinite-recursion          fn that always re-enters itself with no exit branch
+    large-stack-alloc           local whose stack footprint exceeds the safe threshold
+    loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    match-result-try            two-arm Result match that .unwrap / .expect /
+                                .unwrap_or / .map / .map_err / try would replace
+    must-use                    discarded #must_use value (Result, Future, etc.)
+    redundant-import-prefix     "pkg::sub::x" after "use pkg::sub" already binds "sub"
+    redundant-type-cast         "<lit> as T" where T is already pinned by context
+    return-try                  "return try expr" (yields the unwrapped V,
+                                rarely what callers want)
+    self-assign                 x = x
+    tautological-int-cmp        integer comparison that always folds to true/false
+    tautological-pointer-cmp    comparing a non-nil pointer against nil
+    unguarded-trait-downcast    "expr as *Concrete" without an "is *Concrete" guard
+    unreachable-code            statements after return / panic / infinite loop
+    unsafe-required             raw-pointer arithmetic outside a {#unsafe} block
+    unused-import               imported package or name never referenced
+    unused-match-arms           unreachable match case / where clause
+    unused-wildcard             "_" pattern that shadows an in-scope binding
+    unwrapped-c-resource        C-managed resource field not wrapped in *rc::Cell
+    use-after-deinit            value used after explicit deinit
+    useless-arith-identity      x + 0, x * 1, x | 0, ... that the optimizer drops
+    useless-cast                cast whose source and target types are identical
+    float-precision             float literal that loses precision at the chosen width
+    write-to-const              write through a pointer alias to a top-level const
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
-    unused-let                  let-binding that is never read
-    unused-result               discarded result of a non-void call
-    unused-param                fn parameter that is never read
     builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
+    float-equal                 == / != between floats (use abs(a-b) < eps)
     magic-number                int/float literal where a named const would convey intent
     style                       naming conventions, trailing whitespace, missing EOF newline
+    unclosed-closeable          io::Closeable binding leaves scope without close()
+    unused-let                  let-binding that is never read
+    unused-param                fn parameter that is never read
+    unused-result               discarded result of a non-void call
+    use-before-assign           local read before being assigned on every path
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)
@@ -494,18 +524,30 @@ func expandShellExprs(s string) string {
 }
 
 // parseFileDirectives scans the leading lines of src for //! directives and
-// returns linker flags and C source files to compile in.
+// returns linker flags, C source files to compile in, and valgrind
+// suppression paths to apply when the test runs under --valgrind.
 //
 //	//!-lm                         -> linker flag -lm
 //	//!-lm [x86_64]                -> linker flag -lm, x86_64 only
+//	//!-framework Cocoa [darwin]   -> two argv entries: -framework, Cocoa
 //	//!+helper.c                   -> compile helper.c alongside the module
 //	//!+src/foo.c -- -DDEBUG       -> compile src/foo.c with extra flag -DDEBUG
 //	//!+src/foo.c [arch]           -> compile only on matching arch
 //	//!+src/foo.c [arch] -- FLAGS  -> arch-specific file with extra flags
+//	//!-suppressions=PATH          -> pass --suppressions=PATH to valgrind
+//	                                   for this file (no effect outside --valgrind)
 //
-// srcDir is the directory of the .tin file; relative C source paths are
-// resolved against it. Scanning stops at the first non-comment, non-blank line.
-func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cSources []cSource) {
+// Linker-flag directives are tokenized on whitespace AFTER $ENV / $(cmd)
+// expansion so multi-token flags like `-framework Cocoa` reach the linker
+// as separate argv entries.  Embed `$(brew --prefix foo)/lib/libfoo.a`
+// when you need to keep a path containing spaces in one token; that
+// command-substitution form is expanded before tokenization.
+//
+// srcDir is the directory of the .tin file; relative paths are resolved
+// against it.  $TIN_RUNTIME / $TIN_STDLIB / $ENV variables expand in
+// suppression paths the same way they do in //!+file flags.  Scanning
+// stops at the first non-comment, non-blank line.
+func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, cSources []cSource, vgSuppressions []string) {
 	for _, line := range strings.SplitAfter(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//!") {
@@ -573,11 +615,40 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 				}
 
 				cSources = append(cSources, cSource{path: cpath, flags: extraFlags})
+			} else if strings.HasPrefix(rest, "-suppressions=") {
+				// Valgrind-only directive: register a suppressions file
+				// that applies when the binary runs under --valgrind.
+				// Honors the same `[arch]` qualifier as the other
+				// directives so platform-specific suppressions stay
+				// scoped (e.g. a glibc-only file is skipped on macOS).
+				specAndQualifier, archQualifier := extractArchQualifier(strings.TrimPrefix(rest, "-suppressions="))
+				if !archMatches(archQualifier) {
+					continue
+				}
+
+				rtDir := tinRuntimeDir()
+				expanded := strings.ReplaceAll(specAndQualifier, "$TIN_RUNTIME", rtDir)
+				expanded = strings.ReplaceAll(expanded, "$TIN_STDLIB", stdlibDir)
+				expanded = os.ExpandEnv(expanded)
+
+				if !filepath.IsAbs(expanded) {
+					expanded = filepath.Join(srcDir, expanded)
+				}
+
+				vgSuppressions = append(vgSuppressions, expanded)
 			} else {
-				// Linker flag: check for optional arch qualifier.
+				// Linker flag: check for optional arch qualifier, expand
+				// $ENV / $(cmd) tokens, then split into individual argv
+				// entries.  Multi-token flags like `-framework Cocoa` or
+				// `-Xlinker -rpath -Xlinker $ORIGIN` need to reach the
+				// linker as separate argv elements -- ld looks up
+				// `-framework` and `Cocoa` independently and rejects the
+				// concatenated form.  Mirrors how //!+file.c -- FLAGS
+				// tokenizes its trailing flag list.
 				flagAndQualifier, archQualifier := extractArchQualifier(rest)
 				if archMatches(archQualifier) {
-					linkerFlags = append(linkerFlags, os.ExpandEnv(expandShellExprs(flagAndQualifier)))
+					expanded := os.ExpandEnv(expandShellExprs(flagAndQualifier))
+					linkerFlags = append(linkerFlags, strings.Fields(expanded)...)
 				}
 			}
 
@@ -588,6 +659,47 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 	}
 
 	return
+}
+
+// dedupLinkerFlags removes duplicate linker flags while keeping `(flag, value)`
+// pairs together for flags that take a positional argument (-framework,
+// -Xlinker, ...). Naive per-token dedup orphans the value -- e.g.
+// `-framework Foundation -framework AppKit` would collapse to
+// `-framework Foundation AppKit` and ld treats AppKit as a plain input file.
+func dedupLinkerFlags(flags []string) []string {
+	takesValue := map[string]bool{
+		"-framework":      true,
+		"-weak_framework": true,
+		"-Xlinker":        true,
+		"-rpath":          true,
+	}
+
+	seen := map[string]bool{}
+	out := flags[:0]
+
+	for i := 0; i < len(flags); i++ {
+		f := flags[i]
+		if takesValue[f] && i+1 < len(flags) {
+			key := f + " " + flags[i+1]
+
+			if !seen[key] {
+				seen[key] = true
+
+				out = append(out, f, flags[i+1])
+			}
+
+			i++
+
+			continue
+		}
+
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+
+	return out
 }
 
 func main() {
@@ -965,7 +1077,10 @@ doneFlags:
 		if _, statErr := os.Stat(runCacheBinPath); statErr == nil && sbomMatches(runCacheDir) {
 			memcheck, binArgs := parseRunArgs(fileArgIdx)
 			validateMemcheck(memcheck)
-			execRunBinary(runCacheBinPath, memcheck, binArgs)
+			// Pick up `//!-suppressions=` from the source so cached
+			// single-file tests still hand them to valgrind.
+			_, _, vgSupps := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
+			execRunBinary(runCacheBinPath, memcheck, binArgs, vgSupps...)
 
 			return
 		}
@@ -996,7 +1111,7 @@ doneFlags:
 	}
 
 	// Collect directives declared in the source file via //! lines
-	fileLinkerFlags, fileCSources := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
+	fileLinkerFlags, fileCSources, fileVgSuppressions := parseFileDirectives(string(src), filepath.Dir(file), stdlibDirForDirectives(stdlibOverride))
 
 	// Estimate total stages for progress display. Mirrors the actual
 	// step shape so the post-codegen setTotal call refines without
@@ -1208,7 +1323,7 @@ doneFlags:
 			continue
 		}
 
-		pkgLinkFlags, pkgCSources := parseFileDirectives(string(src), filepath.Dir(pkgSrc), stdlibDirForDirectives(stdlibOverride))
+		pkgLinkFlags, pkgCSources, _ := parseFileDirectives(string(src), filepath.Dir(pkgSrc), stdlibDirForDirectives(stdlibOverride))
 		fileLinkerFlags = append(fileLinkerFlags, pkgLinkFlags...)
 		fileCSources = append(fileCSources, pkgCSources...)
 	}
@@ -1228,20 +1343,8 @@ doneFlags:
 
 		fileCSources = deduped
 	}
-	// Deduplicate linker flags too.
-	{
-		seen := map[string]bool{}
 
-		deduped := fileLinkerFlags[:0]
-		for _, f := range fileLinkerFlags {
-			if !seen[f] {
-				seen[f] = true
-				deduped = append(deduped, f)
-			}
-		}
-
-		fileLinkerFlags = deduped
-	}
+	fileLinkerFlags = dedupLinkerFlags(fileLinkerFlags)
 
 	// Refine progress total now that package C sources are known and we can
 	// check whether a coroutine split pass is needed. The shape of the
@@ -1407,7 +1510,7 @@ doneFlags:
 		cprog.clear()
 
 		validateMemcheck(memcheck)
-		execRunBinary(runCacheBinPath, memcheck, binArgs)
+		execRunBinary(runCacheBinPath, memcheck, binArgs, fileVgSuppressions...)
 
 	default:
 		_, _ = fmt.Fprint(os.Stderr, usage)
@@ -2631,23 +2734,32 @@ func validateMemcheck(memcheck string) {
 	}
 }
 
-// memcheckCmd builds the exec.Cmd to run binary under the requested checker.
-// binArgs are forwarded to the binary as its argv[1..].
+// memcheckCmdWithSuppressions builds the exec.Cmd to run binary under
+// the requested checker.  binArgs are forwarded to the binary as its
+// argv[1..].  vgSuppressions feeds `--suppressions=FILE` to valgrind
+// from per-file `//!-suppressions=FILE` directives in the test source;
+// the scope stays at the file that opted in -- a global suppression
+// set would silently hide leaks in unrelated tests.
 //
 // $TIN_EXEC_WRAPPER prepends a runner (e.g. "qemu-aarch64") so cross-compiled
 // foreign-arch binaries can be exercised on the host. Modeled on Go's GOEXEC
 // and Cargo's CARGO_TARGET_<TRIPLE>_RUNNER.
-func memcheckCmd(memcheck, binary string, binArgs ...string) *exec.Cmd {
+func memcheckCmdWithSuppressions(memcheck, binary string, vgSuppressions []string, binArgs ...string) *exec.Cmd {
 	switch memcheck {
 	case "valgrind":
-		args := append([]string{
+		vgArgs := []string{
 			"--error-exitcode=1",
 			"--leak-check=full",
 			"--errors-for-leak-kinds=all",
-			binary,
-		}, binArgs...)
+		}
+		for _, s := range vgSuppressions {
+			vgArgs = append(vgArgs, "--suppressions="+s)
+		}
 
-		return wrapExec("valgrind", args...)
+		vgArgs = append(vgArgs, binary)
+		vgArgs = append(vgArgs, binArgs...)
+
+		return wrapExec("valgrind", vgArgs...)
 	case "leaks":
 		args := append([]string{"--atExit", "--", binary}, binArgs...)
 
@@ -2799,6 +2911,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		failedTests []string // individual test names that failed (empty = whole-file failure)
 	}
 
+	// Forward TTY state to child test binaries via env var, since their stdout
+	// is piped through io.MultiWriter and isatty() in the child returns false.
+	if isStdoutTTY() {
+		_ = os.Setenv("TIN_TEST_COLOR", "1")
+	}
+
 	wd, _ := os.Getwd()
 
 	var results []result
@@ -2821,6 +2939,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		// Parse //!-suppressions= directives up front so both the
+		// cache-hit and the fresh-compile branches below can hand them
+		// to memcheckCmdWithSuppressions; valgrind picks them up,
+		// non-valgrind runs just ignore the list.
+		_, _, fileVgSuppressions := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
+
 		// Cache lookup: if the test binary is already built and every dep
 		// recorded in its SBOM still hashes the same, run the cached binary
 		// directly and skip lex/parse/codegen for this file.
@@ -2828,16 +2952,20 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		cachedBin := filepath.Join(cacheDir, "bin")
 
 		if _, statErr := os.Stat(cachedBin); statErr == nil && sbomMatches(cacheDir) {
-			fmt.Printf("%s\n\n", fname)
+			fmt.Printf("%s\n\n", blueIfTTY(fname))
 
-			run := memcheckCmd(memcheck, cachedBin)
+			run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 			var outBuf bytes.Buffer
 
-			run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-			run.Stderr = os.Stderr
+			colorOut := newMemcheckColorWriter(os.Stdout)
+			colorErr := newMemcheckColorWriter(os.Stderr)
+			run.Stdout = io.MultiWriter(colorOut, &outBuf)
+			run.Stderr = colorErr
 
 			passed := runMemcheck(memcheck, run) == nil
+			_ = colorOut.Flush()
+			_ = colorErr.Flush()
 
 			fmt.Println("------------------------------------------------")
 
@@ -2964,21 +3092,24 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue // no test blocks in this file
 		}
 
-		fileLinks, fCSources := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
+		fileLinks, fCSources, _ := parseFileDirectives(string(src), filepath.Dir(fpath), stdlibDirForDirectives(""))
 
 		srcLinks := append([]string{}, fileLinks...)
 		for _, lib := range cg.LinkLibs() {
 			srcLinks = append(srcLinks, "-l"+lib)
 		}
 		// Collect //!+file.c and //!-lNAME directives from imported packages,
-		// just as the single-file build path does.
+		// just as the single-file build path does.  --valgrind suppression
+		// directives stay scoped to the test file -- pulling them in from
+		// every transitive package would silence checks they didn't opt
+		// into.
 		for _, pkgSrc := range cg.PackageSrcPaths() {
 			pkgBytes, pkgReadErr := os.ReadFile(pkgSrc)
 			if pkgReadErr != nil {
 				continue
 			}
 
-			pkgLinks, pkgCSrcs := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc), stdlibDirForDirectives(""))
+			pkgLinks, pkgCSrcs, _ := parseFileDirectives(string(pkgBytes), filepath.Dir(pkgSrc), stdlibDirForDirectives(""))
 			srcLinks = append(srcLinks, pkgLinks...)
 			fCSources = append(fCSources, pkgCSrcs...)
 		}
@@ -2997,20 +3128,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			fCSources = deduped
 		}
-		// Deduplicate link flags too.
-		{
-			seen := map[string]bool{}
 
-			deduped := srcLinks[:0]
-			for _, f := range srcLinks {
-				if !seen[f] {
-					seen[f] = true
-					deduped = append(deduped, f)
-				}
-			}
-
-			srcLinks = deduped
-		}
+		srcLinks = dedupLinkerFlags(srcLinks)
 
 		linkFlags := append(srcLinks, extraFlags...)
 
@@ -3057,19 +3176,24 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		}
 
 		cprog.clear()
-		fmt.Printf("%s\n\n", fname)
+		fmt.Printf("%s\n\n", blueIfTTY(fname))
 
-		run := memcheckCmd(memcheck, cachedBin)
+		run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
 		var outBuf bytes.Buffer
 
-		run.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-		run.Stderr = os.Stderr
+		colorOut := newMemcheckColorWriter(os.Stdout)
+		colorErr := newMemcheckColorWriter(os.Stderr)
+		run.Stdout = io.MultiWriter(colorOut, &outBuf)
+		run.Stderr = colorErr
 
 		passed := true
 		if runErr := runMemcheck(memcheck, run); runErr != nil {
 			passed = false
 		}
+
+		_ = colorOut.Flush()
+		_ = colorErr.Flush()
 
 		fmt.Println("------------------------------------------------")
 
@@ -3114,13 +3238,19 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 	}
 
 	if failed == 0 && skipped == 0 {
-		fmt.Printf("all %d test file(s) passed.\n", len(results))
+		fmt.Printf("%s\n", greenIfTTY(fmt.Sprintf("all %d test file(s) passed.", len(results))))
 
 		return
 	}
 
 	passed := len(results) - failed - skipped
-	fmt.Printf("%d passed, %d failed, %d skipped (%d total)\n", passed, failed, skipped, len(results))
+
+	failPart := fmt.Sprintf("%d failed", failed)
+	if failed > 0 {
+		failPart = redIfTTY(failPart)
+	}
+
+	fmt.Printf("%d passed, %s, %d skipped (%d total)\n", passed, failPart, skipped, len(results))
 
 	if failed > 0 {
 		fmt.Printf("\nFailed:\n")
@@ -3593,10 +3723,27 @@ func collectExtraObjs(fileArgIdx int) []string {
 }
 
 // execRunBinary runs `bin` (under memcheck if set) and exits with its status.
-func execRunBinary(bin, memcheck string, binArgs []string) {
-	run := memcheckCmd(memcheck, bin, binArgs...)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
+func execRunBinary(bin, memcheck string, binArgs []string, vgSuppressions ...string) {
+	run := memcheckCmdWithSuppressions(memcheck, bin, vgSuppressions, binArgs...)
+
+	if memcheck != "" {
+		colorOut := newMemcheckColorWriter(os.Stdout)
+		colorErr := newMemcheckColorWriter(os.Stderr)
+		run.Stdout = colorOut
+		run.Stderr = colorErr
+
+		defer func() {
+			_ = colorOut.Flush()
+			_ = colorErr.Flush()
+		}()
+	} else {
+		run.Stdout = os.Stdout
+		run.Stderr = os.Stderr
+	}
+
+	if isStdoutTTY() {
+		_ = os.Setenv("TIN_TEST_COLOR", "1")
+	}
 
 	if err := run.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -3741,4 +3888,121 @@ func isStderrTTY() bool {
 	}
 
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func isStdoutTTY() bool {
+	if _, hasNoColor := os.LookupEnv("NO_COLOR"); hasNoColor {
+		return false
+	}
+
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func greenIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[32m" + s + "\x1b[0m"
+}
+
+func redIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[31m" + s + "\x1b[0m"
+}
+
+func blueIfTTY(s string) string {
+	if !isStdoutTTY() {
+		return s
+	}
+
+	return "\x1b[34m" + s + "\x1b[0m"
+}
+
+// memcheckColorWriter wraps an underlying writer (os.Stdout / os.Stderr) and
+// colorizes recognized valgrind / macOS leaks summary lines. Buffers partial
+// lines across Write calls so a colorize pattern split across writes is not
+// missed.
+type memcheckColorWriter struct {
+	w   io.Writer
+	buf []byte
+	tty bool
+}
+
+// memcheckOKLine matches lines we want to highlight green: a clean
+// valgrind run or a "0 leaks for 0 total leaked bytes" report.
+var memcheckOKLine = regexp.MustCompile(`All heap blocks were freed -- no leaks are possible|\b0 leaks for 0 total leaked bytes\b`)
+
+// memcheckErrLine matches lines we want to highlight red: any non-zero
+// leak count from macOS leaks, or known valgrind error markers.
+var memcheckErrLine = regexp.MustCompile(`\b[1-9][0-9]* leak(s)? for [0-9]+ total leaked bytes\b|ERROR SUMMARY: [1-9][0-9]* errors|definitely lost: [1-9][0-9,]* bytes|indirectly lost: [1-9][0-9,]* bytes|Invalid (read|write|free)|uninitialised value`)
+
+func newMemcheckColorWriter(w *os.File) *memcheckColorWriter {
+	if _, hasNoColor := os.LookupEnv("NO_COLOR"); hasNoColor {
+		return &memcheckColorWriter{w: w, tty: false}
+	}
+
+	fi, err := w.Stat()
+	tty := err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+
+	return &memcheckColorWriter{w: w, tty: tty}
+}
+
+func (m *memcheckColorWriter) Write(p []byte) (int, error) {
+	if !m.tty {
+		return m.w.Write(p)
+	}
+
+	m.buf = append(m.buf, p...)
+
+	for {
+		i := bytes.IndexByte(m.buf, '\n')
+		if i < 0 {
+			break
+		}
+
+		line := m.buf[:i+1]
+		m.buf = m.buf[i+1:]
+
+		if _, err := m.w.Write(colorizeMemcheckLine(line)); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(p), nil
+}
+
+func (m *memcheckColorWriter) Flush() error {
+	if len(m.buf) == 0 {
+		return nil
+	}
+
+	_, err := m.w.Write(colorizeMemcheckLine(m.buf))
+	m.buf = nil
+
+	return err
+}
+
+func colorizeMemcheckLine(line []byte) []byte {
+	if memcheckErrLine.Match(line) {
+		return memcheckErrLine.ReplaceAllFunc(line, func(m []byte) []byte {
+			return append(append([]byte("\x1b[31m"), m...), "\x1b[0m"...)
+		})
+	}
+
+	if memcheckOKLine.Match(line) {
+		return memcheckOKLine.ReplaceAllFunc(line, func(m []byte) []byte {
+			return append(append([]byte("\x1b[32m"), m...), "\x1b[0m"...)
+		})
+	}
+
+	return line
 }

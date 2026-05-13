@@ -1,0 +1,10 @@
+struct Maybe(coerce[bool]) =
+  v bool
+  static fn ::coerce(this Maybe) bool = return this.v
+
+fn main() =
+  let on  = Maybe{v: true}
+  let off = Maybe{v: false}
+  let r = on ? "Y" : "N"
+  let s = off ? "Y" : "N"
+  echo "{r}{s}"

@@ -1,0 +1,8 @@
+struct {#const@field} bad =
+  x i64
+  var scratch i64
+
+fn main() i64 =
+  let b = bad{x: 1, scratch: 0}
+  b.x = 99
+  return 0

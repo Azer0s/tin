@@ -167,6 +167,28 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 		return &ast.GenericType{Name: "Tuple", TypeParams: types}, nil
 	}
 
+	// Wildcard `_` in trait-bound positions, optionally named via `_: T`.
+	// Parsed as a type expression unconditionally; semantic validation
+	// (only legal inside trait bounds) lives in the type-checker.
+	if p.check(lexer.IDENT) && p.peek().Literal == "_" {
+		p.advance() // consume _
+
+		w := &ast.WildcardType{}
+
+		if p.check(lexer.COLON) {
+			p.advance() // consume :
+
+			tok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+
+			w.Name = tok.Literal
+		}
+
+		return w, nil
+	}
+
 	// Named type, possibly generic: name[T, R] or module::name[T, R]
 	if !p.match(lexer.IDENT) && !isTypeKeyword(p.peek()) {
 		return nil, p.errorf("expected type, got %s (%q)", p.peek().Type, p.peek().Literal)
@@ -384,16 +406,51 @@ func (p *Parser) parseParam() (ast.Param, error) {
 
 // parseTypeParams parses optional generic type parameters [t] or [t, r]
 func (p *Parser) parseTypeParams() ([]string, error) {
+	params, _, err := p.parseTypeParamsWithWildcards()
+
+	return params, err
+}
+
+// parseTypeParamsWithWildcards parses `[t, u, _: w]` and returns
+// regular param names, wildcard slot names, and an error.
+//
+// The `_: w` form declares `w` as a call-site-supplied wildcard
+// slot - the data/struct decl's body may reference w in trait
+// bounds and method signatures, but the concrete type for w is
+// chosen per call site rather than per instantiation. Where-guards
+// on `w` are deferred to the call site.
+//
+// Bare `_` (no name) is rejected at this position: an unnamed
+// wildcard in a type-param list has nothing else can refer to.
+func (p *Parser) parseTypeParamsWithWildcards() ([]string, []string, error) {
 	if !p.check(lexer.LBRACKET) {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	p.advance()
 
-	var params []string
+	var (
+		params    []string
+		wildcards []string
+	)
 
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
-		if p.check(lexer.IDENT) {
+		if p.check(lexer.IDENT) && p.peek().Literal == "_" {
+			p.advance()
+
+			if !p.check(lexer.COLON) {
+				return nil, nil, p.errorf("bare `_` is not allowed in a type-parameter list; use `_: name` to introduce a named wildcard slot")
+			}
+
+			p.advance()
+
+			tok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			wildcards = append(wildcards, tok.Literal)
+		} else if p.check(lexer.IDENT) {
 			params = append(params, p.advance().Literal)
 		}
 
@@ -403,10 +460,10 @@ func (p *Parser) parseTypeParams() ([]string, error) {
 	}
 
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return params, nil
+	return params, wildcards, nil
 }
 
 // parseTypeArgList parses [TypeExpr] or [TypeExpr, TypeExpr, ...] (concrete type arguments).

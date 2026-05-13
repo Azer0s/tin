@@ -1288,6 +1288,127 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	return result, nil
 }
 
+// tryChannelWrapperFastPath detects `ch.recv()` / `ch.send(val)` call sites
+// that target the Channel.{recv,send} sync wrapper (which returns
+// `Future[T]` constructed via `spawn this.{recv,send}_impl(...)`) and emits
+// the inline channel direct op directly, returning T (or no value for send)
+// to the caller's coro frame.  The caller is expected to be `genAwaitExpr`
+// in a coro context -- it bypasses both the wrapper call and the
+// subsequent await on its returned Future.  Returns (val, true, err) when
+// the fast path was applied; (nil, false, nil) when the call shape doesn't
+// match and the caller should fall through to the standard await lowering.
+//
+// Mirrors the in-coro inline-drive path that genInlineAsyncDrive applies
+// to a direct `fn{#async}` call.  The wrapper rework moved the actual
+// `#async` body to `recv_impl` / `send_impl`, so we recognize the wrapper
+// shape by callee name + receiver-struct prefix and re-anchor on the
+// `_impl` method when emitting the inline retry loop.
+func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.CallExpr) (value.Value, bool, error) {
+	fa, ok := callNode.Func.(*ast.FieldAccess)
+	if !ok {
+		return nil, false, nil
+	}
+
+	if fa.Field != "recv" && fa.Field != "send" {
+		return nil, false, nil
+	}
+
+	thisVal, err := cg.genExpr(block, fa.Expr)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if thisVal == nil {
+		return nil, false, nil
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	// Channel methods take a pointer receiver; auto-address if we have a
+	// value, mirroring what the regular method call path does.
+	thisPtr := thisVal
+	if _, isPtr := thisVal.Type().(*irtypes.PointerType); !isPtr {
+		alloca := block.NewAlloca(thisVal.Type())
+		block.NewStore(thisVal, alloca)
+		thisPtr = alloca
+	}
+
+	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
+	if !isPtr {
+		return nil, false, nil
+	}
+
+	structName := cg.typeNameOf(pt.ElemType)
+	if !strings.HasPrefix(structName, "Channel__") && !strings.HasPrefix(structName, "sync__Channel__") {
+		return nil, false, nil
+	}
+
+	// Receiver and shape match.  Emit the inline op against the channel
+	// element type.  Element type is recovered from the struct's name
+	// suffix (chanElemTypeFromName); falls through on inability to
+	// resolve, letting the slow path take over.
+	elemType := cg.chanElemTypeFromName(structName)
+	if elemType == nil || irtypes.IsVoid(elemType) {
+		return nil, false, nil
+	}
+
+	switch fa.Field {
+	case "recv":
+		if len(callNode.Args) != 0 {
+			return nil, false, nil
+		}
+
+		val, err2 := cg.genDirectChanRecv(block, thisPtr, elemType)
+		if err2 != nil {
+			return nil, false, err2
+		}
+
+		if val == nil {
+			return nil, false, nil
+		}
+
+		return val, true, nil
+	case "send":
+		if len(callNode.Args) != 1 {
+			return nil, false, nil
+		}
+
+		valArg, err2 := cg.genExpr(block, callNode.Args[0])
+		if err2 != nil {
+			return nil, false, err2
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		valArg = cg.coerce(block, valArg, elemType)
+
+		out, err2 := cg.genDirectChanSend(block, thisPtr, valArg, callNode.Args[0])
+		if err2 != nil {
+			return nil, false, err2
+		}
+
+		if out == nil {
+			// send returns Unit; the caller (await Future[Unit]) doesn't
+			// use the value but expects a non-nil result for the await
+			// machinery.  Materialize the canonical Unit value.
+			unitTy, lookupErr := cg.tinTypeToLLVM(&ast.SimpleType{Name: "sync::Unit"})
+			if lookupErr != nil || unitTy == nil {
+				return nil, false, nil
+			}
+
+			return constant.NewStruct(unitTy.(*irtypes.StructType), constant.NewInt(irtypes.I8, 0)), true, nil
+		}
+
+		return out, true, nil
+	}
+
+	return nil, false, nil
+}
+
 // activeSpawnFn returns the spawn function for the current context.
 //
 // All spawns use _tin_fiber_spawn_joinable (prejoined=1) by default so that a
@@ -2312,6 +2433,30 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 
 			return typedPtr, nil
 		}
+		// &call(args) for arbitrary call expressions.  Evaluates the call,
+		// heap-allocates an RC block sized for the return value, stores the
+		// value into it, and returns the typed pointer.  Callers own the
+		// resulting `*T` and are responsible for releasing it; the same rules
+		// as `&StructLit{...}` apply.  Used for `&errors::new("...")`-style
+		// expressions where the user wants a pointer to a freshly produced
+		// value.
+		val, err := cg.genExpr(block, e)
+		if err != nil {
+			return nil, err
+		}
+
+		if val == nil || irtypes.IsVoid(val.Type()) {
+			return nil, fmt.Errorf("cannot take address of a void-returning call")
+		}
+
+		nullPtr := constant.NewNull(irtypes.NewPointer(val.Type()))
+		gepOne := block.NewGetElementPtr(val.Type(), nullPtr, constant.NewInt(irtypes.I32, 1))
+		sz := block.NewPtrToInt(gepOne, irtypes.I64)
+		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
+		typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(val.Type()))
+		block.NewStore(val, typedPtr)
+
+		return typedPtr, nil
 	}
 
 	return nil, fmt.Errorf("not an lvalue: %T", node)
@@ -2330,6 +2475,15 @@ func (cg *CodeGen) callGenericFromMap(
 	tmpl, ok := m[bareName]
 	if !ok {
 		return nil, block, false, nil
+	}
+	// When the bare-name entry came from genericFuncs, prefer the
+	// overload whose arity matches the call so two same-name
+	// generics (e.g. `unwrap[t](r)` and `unwrap[t](r, msg string)`)
+	// route to their own templates.  The single-entry case in
+	// pickGenericFuncOverload short-circuits, leaving non-overloaded
+	// callers unaffected.
+	if ov := pickGenericFuncOverload(cg.genericFuncOverloads[bareName], len(args)); ov != nil {
+		tmpl = ov
 	}
 
 	argVals := make([]value.Value, 0, len(args))
@@ -2402,6 +2556,17 @@ func (cg *CodeGen) callGenericFromMap(
 		}
 
 		if !isRCTrackedType(preCoerce.Type()) {
+			// ADT-by-value rvalue: same logic as
+			// emitCallArgReleaseForRet on the non-generic call
+			// path.  A temp ADT (e.g. `result::unwrap(pipe())`)
+			// owns rc=1 of its active-variant payload fields;
+			// without this release the callee's match-arm
+			// `transferredFromBorrow` retain stays unbalanced
+			// and leaks the payload's rc::Cell pointers.
+			if isTemporaryProducer(astArg) && cg.isDataType(preCoerce.Type()) {
+				cg.emitDataValueRelease(block, preCoerce)
+			}
+
 			continue
 		}
 

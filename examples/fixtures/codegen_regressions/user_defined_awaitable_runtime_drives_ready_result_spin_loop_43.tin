@@ -1,0 +1,19 @@
+var g_attempts i64
+
+struct PollMe(awaitable[i64]) =
+  reqd i64
+
+  fn awaitable[i64]::ready(this PollMe) bool =
+    g_attempts = g_attempts + 1
+    return g_attempts >= this.reqd
+
+  fn awaitable[i64]::result(this PollMe) i64 =
+    return g_attempts
+
+fn{#async} run() i64 =
+  let p = PollMe{reqd: 4}
+  return await p
+
+fn main() =
+  let f = spawn run()
+  echo "attempts: {await f}"

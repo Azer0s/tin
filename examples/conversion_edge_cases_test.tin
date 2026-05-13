@@ -1,0 +1,121 @@
+// examples/conversion_edge_cases_test.tin -- aggressive stress
+// tests for the conversion machinery.  Probes edge cases at the
+// borders of the implicit / coerce / downcast / redundant-cast
+// warning rules.
+//
+// Replaces examples/conversion_edge_cases.sh.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_diagnostic_in(fixture string, needle string) =
+  let r = run_tin("ir", "examples/fixtures/conversion_edge_cases/" ++ fixture)
+
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_no_diagnostic(fixture string, banned string) =
+  let r = run_tin("ir", "examples/fixtures/conversion_edge_cases/" ++ fixture)
+
+  assert::ok(!contains_text(r.stderr, banned))
+
+fn expect_compile_error(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/conversion_edge_cases/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, needle))
+
+fn expect_runs_with_stdout(fixture string, needle string) =
+  let r = run_tin("run", "examples/fixtures/conversion_edge_cases/" ++ fixture)
+
+  assert::ok(!contains_text(r.stderr, "error:"))
+  assert::ok(contains_text(r.stdout, needle))
+
+// A. Trait downcast edge cases.
+
+test "downcast to wrong concrete type still warns" =
+  expect_diagnostic_in("downcast_wrong_type.tin", "unguarded-trait-downcast")
+
+test "is *T followed by as *T does not warn" =
+  let r = run_tin("ir", "examples/fixtures/conversion_edge_cases/is_then_as_no_warn.tin")
+
+  assert::ok(!contains_text(r.stderr, "unguarded-trait-downcast"))
+
+// B. Coerce edge cases.
+
+test "coerce target absent: error names 'no conversion path'" =
+  expect_compile_error("coerce_missing_target.tin", "no conversion path")
+
+test "duplicate coerce[bool] in implements list is harmless" =
+  expect_runs_with_stdout("coerce_dup_bool.tin", "x")
+
+test "coerce return type mismatched with impl param errors" =
+  expect_compile_error("coerce_ret_mismatch.tin", "no conversion path")
+
+// C. Implicit edge cases.
+
+test "implicit through arg in nested call runs cleanly" =
+  expect_runs_with_stdout("impl_in_nested.tin", "mm=120")
+
+test "duplicate implicit[i64] in implements list is harmless" =
+  expect_runs_with_stdout("impl_dup.tin", "50")
+
+// D. Conditional edge cases.
+
+test "while loop auto-coerces struct condition" =
+  expect_runs_with_stdout("while_struct_cond.tin", "i=3")
+
+test "struct with coerce[bool] AND not[bool] uses not for !" =
+  expect_runs_with_stdout("coerce_and_not.tin", "not[bool] dispatched")
+
+test "ternary auto-coerces both branches independently" =
+  expect_runs_with_stdout("ternary_struct.tin", "YN")
+
+// E. Redundant-cast warning must NOT fire on legitimate casts.
+
+test "real i64 -> i32 narrowing is not redundant" =
+  expect_no_diagnostic("widen_i64_to_i32.tin", "redundant-type-cast")
+
+test "explicit cast in non-typed let is not redundant" =
+  expect_no_diagnostic("literal_no_slot.tin", "redundant-type-cast")
+
+test "cast inside expr (not at slot) is not redundant" =
+  expect_no_diagnostic("cast_inner_expr.tin", "redundant-type-cast")
+
+// E. Redundant-cast warning SHOULD fire at the slot.
+
+test "redundant cast at slot fires" =
+  expect_diagnostic_in("redundant_slot.tin", "redundant-type-cast")
+
+test "redundant cast on Some payload fires" =
+  expect_diagnostic_in("redundant_some.tin", "redundant-type-cast")
+
+test "redundant cast on inner Option payload fires" =
+  expect_diagnostic_in("redundant_nested.tin", "redundant-type-cast")
+
+// F. Impossible-cast error wording.
+
+test "impossible cast names source type in error" =
+  expect_compile_error("impossible_cast.tin", "string")
+
+test "impossible cast names target type in error" =
+  expect_compile_error("impossible_cast.tin", "i64")
+
+// G. Bool operator strictness with mixed operands.
+
+test "bool && struct rejects struct side" =
+  expect_compile_error("bool_and_struct.tin", "cannot use")
+
+// H. Pointer to bool-coercible struct in conditional.
+
+test "pointer-to-bool-coercible-struct stays pointer-truthy" =
+  expect_runs_with_stdout("pointer_truthy.tin", "p is non-nil")
+
+// I. Generic struct paths -- no spurious redundant-cast warnings.
+
+test "generic struct receives literal in field via redundant-free path" =
+  expect_no_diagnostic("generic_field.tin", "redundant-type-cast")
+
+// J. Auto coerce[bool] must not fire for nil-able pointer to non-struct.
+
+test "nil pointer in if is falsy without coerce dispatch" =
+  expect_runs_with_stdout("nil_ptr_falsy.tin", "ok: nil pointer is falsy")

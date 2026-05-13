@@ -1,0 +1,13 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+fn main() =
+  let a *Animal = nil
+  if a is *Dog:
+    echo "WRONG: nil should not match"
+  else:
+    echo "ok: nil iface fails the is-check"

@@ -1,0 +1,5 @@
+use errors
+use { Result } from result
+
+fn main() Result[i64, errors::Err] =
+  return Err(errors::new("boom"))

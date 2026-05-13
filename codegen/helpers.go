@@ -861,7 +861,19 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			}
 
 			if srcPt, isPtr := src.(*irtypes.PointerType); isPtr {
-				if _, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+				if srcInner, isStruct := srcPt.ElemType.(*irtypes.StructType); isStruct {
+					// Identity widen: src is already `*<same iface>`.  Pre-fix
+					// this still ran buildPtrToTraitBorrow, which allocated a
+					// fresh iface block sharing the original's data ptr -- the
+					// original's scope-exit release would then fire its
+					// data-release thunk and free the data while the freshly-
+					// allocated copy was being returned, leaving the caller
+					// with a dangling iface.  Identity coerce must just
+					// return val.
+					if srcInner == tgtPt.ElemType {
+						return val
+					}
+
 					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
 						return result
 					}
@@ -1071,8 +1083,26 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// Pointer-to-struct -> struct value: load the pointed-to value.
 	// This handles value-receiver methods called on a pointer (e.g. p.method()
 	// where method takes 'this T' but p is '*T').
+	//
+	// Refuse for trait fat-pointer targets: silently loading a `*Trait`
+	// into a `Trait` value-form drops the outer iface block's rc=1 on
+	// the floor (the block was heap-alloc'd by coerceToTrait /
+	// buildPtrToTraitBorrow and nobody else owns it) but transfers the
+	// inner data ptr into the loaded value -- on the next ARC release
+	// site the heap block leaks and the inner data races against the
+	// loaded copy.  Require an explicit `*expr` so the user routes
+	// through genDerefExpr, which handles the temp-vs-binding ARC
+	// transfer correctly.
 	if pt, ok := src.(*irtypes.PointerType); ok {
 		if pt.ElemType.Equal(target) {
+			if targetSt, isStruct := target.(*irtypes.StructType); isStruct && isTraitFatPtrShape(targetSt) {
+				cg.coerceLastErr = fmt.Errorf(
+					"cannot implicitly deref `%s` to its value form `%s`: the outer iface block owns rc=1 and would leak.  Write `*expr` explicitly so the compiler can move ownership out of the temporary, or change the receiving type to `%s` (pointer form)",
+					cg.tinTypeDisplay(src), cg.tinTypeDisplay(target), cg.tinTypeDisplay(src))
+
+				return val
+			}
+
 			return block.NewLoad(target, val)
 		}
 	}

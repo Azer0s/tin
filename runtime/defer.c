@@ -94,3 +94,17 @@ void _tin_panic(const char *msg) {
 void _tin_assert(int32_t cond, const char *msg) {
     if (!cond) _tin_panic(msg);
 }
+
+// _tin_main_err_exit prints "error: <msg>\n" to stderr and exits 1.
+// Used by the C-main wrapper when fn main() Result[T, errors::Err]
+// returns Err: the iface's message string is fetched on the Tin
+// side, then forwarded to this helper which formats and exits.
+void _tin_main_err_exit(const char *msg, int64_t len) {
+    fflush(stdout);
+    if (msg && len > 0) {
+        fprintf(stderr, "error: %.*s\n", (int)len, msg);
+    } else {
+        fputs("error: <empty message>\n", stderr);
+    }
+    exit(1);
+}

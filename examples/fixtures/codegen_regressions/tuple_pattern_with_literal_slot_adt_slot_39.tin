@@ -1,0 +1,11 @@
+use result
+use { Result } from result
+use errors
+
+fn parse() Result[i64, errors::Err] = return Ok(7)
+
+fn main() =
+  let a = parse()
+  match (1, a):
+    case (1, Ok(v)): echo "got {v}"
+    case _:          echo "no"

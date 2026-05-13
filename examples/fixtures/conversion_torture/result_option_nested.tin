@@ -1,0 +1,10 @@
+use option
+use { Option } from option
+use result
+use { Result } from result
+
+fn main() =
+  let r Result[Option[i64], string] = Ok(Some(7))
+  match r:
+    case Ok(_): echo "ok"
+    case Err(_): echo "err"

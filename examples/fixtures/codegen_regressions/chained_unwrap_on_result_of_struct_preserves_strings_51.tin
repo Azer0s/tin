@@ -1,0 +1,13 @@
+use errors
+use result
+use { Result } from result
+
+struct Foo =
+  name string
+
+fn make() Result[Foo, errors::Err] =
+  return Ok(Foo{name: "hello"})
+
+fn main() =
+  let f = make().unwrap()
+  echo "iss={f.name}"

@@ -12,6 +12,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	"github.com/llir/llvm/ir/metadata"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
@@ -65,12 +66,27 @@ type CodeGen struct {
 	traitMethodOrder map[string][]string
 	// vtable globals: "structName__instKey" -> ir.Global
 	traitVtableGlobals map[string]*ir.Global
+	// traitBorrowVtableGlobals: parallel "borrow" vtable per
+	// (structName, instKey).  Same method slots as the regular vtable
+	// but the LAST slot (data-release) is a no-op so that the iface
+	// release path leaves a borrowed data pointer untouched.  Used by
+	// buildPtrToTraitBorrow when the source is a stack alloca (no RC
+	// header to decrement) so the iface release does not read uninit
+	// bytes before the alloca.  Lazily built on first use.
+	traitBorrowVtableGlobals map[string]*ir.Global
 	// traitDataReleaseThunks: per-struct `void(i8*)` thunk that
 	// bitcasts data ptr to the struct type and calls struct.release_ptr.
 	// Stored in the LAST slot of every vtable for that struct so the
 	// iface's own release_ptr can dispatch via the vtable to release
 	// RC-tracked fields of the wrapped struct.
 	traitDataReleaseThunks map[string]*ir.Func
+	// wildcardMonos: per-(impl method, target type) wrapper functions
+	// for call-site generics. Each unique W (the wildcard's resolution
+	// at a call site) yields a distinct function in this map; calls
+	// dispatch to it directly. The wrapper internally calls the impl's
+	// original method and reconstructs the result in the target type.
+	// Keyed by `<origFnName>__W_<targetTypeName>`.
+	wildcardMonos map[string]*ir.Func
 	// instKey -> base trait name (for generic traits)
 	traitInstKeys map[string]string
 	// traitAsyncMethodNames: base trait name -> names of its {#async} virtual methods (in order)
@@ -132,6 +148,26 @@ type CodeGen struct {
 	// so the data ptr isn't released twice. Stack-discipline: callers must
 	// save the prior value, set true, call coerceToTrait, restore.
 	suppressIfaceScopeRelease bool
+
+	// suppressBareTypeCheck disables the strict-bare-type visibility
+	// check in tinTypeToLLVM. Set during compiler-internal recursion
+	// (e.g. data-decl monomorphization re-walks template methods that
+	// reference the ADT by its bare template name).  Callers save the
+	// prior value, set true, then restore.
+	suppressBareTypeCheck bool
+
+	// pendingOwnsPtrViaRetain is a one-shot flag set by genVarDecl
+	// just before allocating the scopeEntry: true iff the binding's
+	// init expression flowed through emitOwningPtrRetainIfApplicable.
+	// genVarDecl reads it into entry.ownsPtrViaRetain and resets to
+	// false. Used to gate the *TinStruct release on scope exit.
+	pendingOwnsPtrViaRetain bool
+
+	// curFnReturnsResult tracks whether runAstChecks is currently
+	// inside a FuncDecl whose declared return type is `Result[_, _]`.
+	// Non-zero ⇒ inside such a fn. The match-as-try lint consults
+	// this so it only fires when `try` would actually compile.
+	curFnReturnsResult int
 
 	// coerceTransfersSource tells buildPtrToTraitBorrow that the
 	// source's scope-exit release will NOT fire (e.g. genReturn
@@ -285,6 +321,7 @@ type CodeGen struct {
 	releaseClosureFn           *ir.Func // _tin_release_closure(env i8*)
 	releaseAnyFn               *ir.Func // _tin_release_any(tag i32, data i8*)
 	foreachStructElemReleaseFn *ir.Func // _tin_foreach_struct_elem_release(data i8*, count i64, elem_size i64, fn i8*)
+	foreachFixedElemReleaseFn  *ir.Func // _tin_foreach_fixed_elem_release(data i8*, count i64, elem_size i64, fn i8*)
 	releasePtrElemArrayFn      *ir.Func // _tin_release_ptr_elem_array(data i8*, count i64)
 	// per-type array element release helpers: type key -> IR function
 	elemReleaseHelpers map[string]*ir.Func
@@ -339,8 +376,16 @@ type CodeGen struct {
 	// constrained generic functions
 	// constrainedFuncs: funcName -> FuncDecl template (has Constraints)
 	constrainedFuncs map[string]*ast.FuncDecl
-	// genericFuncs: funcName -> FuncDecl template (has TypeParams, may have no Constraints)
+	// genericFuncs: funcName -> FuncDecl template (has TypeParams, may have no Constraints).
+	// When multiple generic free fns share a base name (arity-overload), only
+	// the most recently registered one lands here; the full list is
+	// preserved in genericFuncOverloads so call sites can pick by arity.
 	genericFuncs map[string]*ast.FuncDecl
+	// genericFuncOverloads: funcName -> every generic FuncDecl template seen
+	// under that name.  Populated alongside genericFuncs; used by call-site
+	// dispatch when the bare lookup's arity doesn't match the call arg count.
+	// Empty / single-entry for the common (non-overloaded) case.
+	genericFuncOverloads map[string][]*ast.FuncDecl
 	// genericFuncHomeScopes: funcName -> scope in which the template was declared.
 	// Used during monomorphization so the template body can resolve bare local names.
 	genericFuncHomeScopes map[string]*scope
@@ -447,6 +492,16 @@ type CodeGen struct {
 	// pointers (*T via _tin_rc_alloc).  Callers use this to mark the result
 	// variable as isHeapOwned so scope-exit emits the correct two-step release.
 	heapPromotingFns map[string]bool
+
+	// fnReturnsHeapPromotedFields: map from function name to the list of
+	// struct-field indices in the returned struct value whose stored
+	// pointer is a heap-promoted `&local`.  Populated when emitting
+	// `return Struct{field: &x}` in a function whose `x` was flagged
+	// as escaping; consulted at the receiving call site so the binding
+	// scope exit can release the owning pointer (otherwise the heap
+	// block leaks: the per-struct release helper treats raw-pointer
+	// fields as borrows and skips them).
+	fnReturnsHeapPromotedFields map[string][]int
 	// match subject: set before entering genWhereList when the function body
 	// is a pure where-list pattern match. Used to compare atom conditions.
 	matchSubject value.Value
@@ -880,6 +935,10 @@ type CodeGen struct {
 	// syncLoadErr holds the error from the most recent ensureSyncModule call,
 	// so wrapPidInFuture can report it if Future[T] is not available.
 	syncLoadErr error
+
+	// runtimeBuiltinLoaded is set to true once runtime/builtin/ has been
+	// auto-loaded. Idempotent guard - see ensureRuntimeBuiltinModules.
+	runtimeBuiltinLoaded bool
 
 	// lastSliceBase is a side-channel set by genSliceExpr to communicate the
 	// base allocation pointer (i8*, before any GEP offset) to genVarDecl.
@@ -1330,95 +1389,99 @@ var (
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {
 	cg := &CodeGen{
-		filename:               filename,
-		mod:                    newModuleWithTriple(),
-		structTypes:            make(map[string]*irtypes.StructType),
-		structFields:           make(map[string][]string),
-		structFieldTags:        make(map[string]map[string]string),
-		structFieldTinTypes:    make(map[string][]ast.TypeExpr),
-		genericStructsByArity:  make(map[string]map[int]*ast.StructDecl),
-		genericStructTmplFiles: make(map[string]string),
-		traitVtableStructTypes: make(map[string]*irtypes.StructType),
-		traitFatPtrTypes:       make(map[string]*irtypes.StructType),
-		traitMethodOrder:       make(map[string][]string),
-		traitVtableGlobals:     make(map[string]*ir.Global),
-		traitDataReleaseThunks: make(map[string]*ir.Func),
-		traitInstKeys:          make(map[string]string),
-		traitAsyncMethodNames:  make(map[string][]string),
-		traitBareToQualInstKey: make(map[string]string),
-		implicitConvFns:        make(map[string][]implicitConvEntry),
-		coerceConvFns:          make(map[string][]coerceConvEntry),
-		structVtableOrder:      make(map[string][]string),
-		enumValues:             make(map[string]int64),
-		enumTypes:              make(map[string]irtypes.Type),
-		genericTypeAliases:     make(map[string]*ast.TypeDecl),
+		filename:                 filename,
+		mod:                      newModuleWithTriple(),
+		structTypes:              make(map[string]*irtypes.StructType),
+		structFields:             make(map[string][]string),
+		structFieldTags:          make(map[string]map[string]string),
+		structFieldTinTypes:      make(map[string][]ast.TypeExpr),
+		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
+		genericStructTmplFiles:   make(map[string]string),
+		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
+		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
+		traitMethodOrder:         make(map[string][]string),
+		traitVtableGlobals:       make(map[string]*ir.Global),
+		traitBorrowVtableGlobals: make(map[string]*ir.Global),
+		traitDataReleaseThunks:   make(map[string]*ir.Func),
+		wildcardMonos:            make(map[string]*ir.Func),
+		traitInstKeys:            make(map[string]string),
+		traitAsyncMethodNames:    make(map[string][]string),
+		traitBareToQualInstKey:   make(map[string]string),
+		implicitConvFns:          make(map[string][]implicitConvEntry),
+		coerceConvFns:            make(map[string][]coerceConvEntry),
+		structVtableOrder:        make(map[string][]string),
+		enumValues:               make(map[string]int64),
+		enumTypes:                make(map[string]irtypes.Type),
+		genericTypeAliases:       make(map[string]*ast.TypeDecl),
 		typeAliases: map[string]ast.TypeExpr{
 			// rune is a built-in alias for i32 (Unicode codepoint, U+0000..U+10FFFF).
 			// for r rune in someString triggers UTF-8 decoding in the for-in loop.
 			"rune": &ast.SimpleType{Name: "i32"},
 		},
-		traits:                   make(map[string]*ast.TraitDecl),
-		opTraitImpls:             make(map[string][]opTraitImplEntry),
-		exports:                  make(map[string]string),
-		importedPkgs:             make(map[string]bool),
-		loadedSrcPaths:           make(map[string]bool),
-		constrainedFuncs:         make(map[string]*ast.FuncDecl),
-		genericFuncs:             make(map[string]*ast.FuncDecl),
-		genericFuncHomeScopes:    make(map[string]*scope),
-		constrainedFuncInstances: make(map[string]*ir.Func),
-		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
-		macros:                   make(map[string]*ast.MacroDecl),
-		funcDecls:                make(map[string]*ast.FuncDecl),
-		ctfeCache:                make(map[string]ctfeMemoEntry),
-		topLevelVarPos:           make(map[string]ast.Pos),
-		externTLSVars:            make(map[string]*ir.Global),
-		structTypeIDs:            make(map[string]int32),
-		fnTypeIDs:                make(map[string]int32),
-		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
-		structDisplayNames:       make(map[string]string),
-		structImpls:              make(map[string][]string),
-		deadStrippedMethods:      make(map[string]map[string][]string),
-		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
-		traitChainedInits:        make(map[string][]*ir.Func),
-		traitChainedDeinits:      make(map[string][]*ir.Func),
-		atomCodes:                make(map[string]int32),
-		atomCodeToName:           make(map[int32]string),
-		unionTypeMembers:         make(map[string][]ast.TypeExpr),
-		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
-		unionTypeIDs:             make(map[string]int32),
-		dataDecls:                make(map[string]*ast.DataDecl),
-		dataTypeIDs:              make(map[string]int32),
-		dataVariants:             make(map[string]map[string]*dataVariantInfo),
-		dataVariantLookup:        make(map[string][]string),
-		dataValueReleaseFns:      make(map[string]*ir.Func),
-		dataValueRetainFns:       make(map[string]*ir.Func),
-		dataInstTypeArgs:         make(map[string][]string),
-		coroCallable:             make(map[string]bool),
-		callGraph:                make(map[string][]string),
-		funcHeuristics:           make(map[string]*FuncHeuristicInfo),
-		overloadedNames:          make(map[string]bool),
-		overloads:                make(map[string][]*overloadEntry),
-		genericMethodsSetUp:      make(map[string]bool),
-		funcReturnUnsigned:       make(map[string]bool),
-		heapPromotingFns:         make(map[string]bool),
-		structWeakFields:         make(map[string]map[string]bool),
-		structOwningRawPtrFields: make(map[string]map[string]bool),
-		fnReturnsOwningIface:     make(map[string]bool),
-		structConstFields:        make(map[string]map[string]bool),
-		cLayoutStructs:           make(map[string]bool),
-		nativeStructTypes:        make(map[string]*irtypes.StructType),
-		packedStructs:            make(map[string]bool),
-		noCopyStructs:            make(map[string]bool),
-		closedStructs:            make(map[string]bool),
-		structDeclsByName:        make(map[string]*ast.StructDecl),
-		structDeclFiles:          make(map[string]string),
-		elemReleaseHelpers:       make(map[string]*ir.Func),
-		elemRetainHelpers:        make(map[string]*ir.Func),
-		heapBlockReleaseFns:      make(map[string]*ir.Func),
-		structPtrReleaseFns:      make(map[string]*ir.Func),
-		chainReleaseFns:          make(map[string]*ir.Func),
-		diFiles:                  make(map[string]*metadata.DIFile),
-		diTypeCache:              make(map[string]metadata.Field),
+		traits:                      make(map[string]*ast.TraitDecl),
+		opTraitImpls:                make(map[string][]opTraitImplEntry),
+		exports:                     make(map[string]string),
+		importedPkgs:                make(map[string]bool),
+		loadedSrcPaths:              make(map[string]bool),
+		constrainedFuncs:            make(map[string]*ast.FuncDecl),
+		genericFuncs:                make(map[string]*ast.FuncDecl),
+		genericFuncOverloads:        make(map[string][]*ast.FuncDecl),
+		genericFuncHomeScopes:       make(map[string]*scope),
+		constrainedFuncInstances:    make(map[string]*ir.Func),
+		genericMethodTemplates:      make(map[string]*ast.FuncDecl),
+		macros:                      make(map[string]*ast.MacroDecl),
+		funcDecls:                   make(map[string]*ast.FuncDecl),
+		ctfeCache:                   make(map[string]ctfeMemoEntry),
+		topLevelVarPos:              make(map[string]ast.Pos),
+		externTLSVars:               make(map[string]*ir.Global),
+		structTypeIDs:               make(map[string]int32),
+		fnTypeIDs:                   make(map[string]int32),
+		nextTypeID:                  6, // 0-5 reserved for anyTag* primitives (fn=5)
+		structDisplayNames:          make(map[string]string),
+		structImpls:                 make(map[string][]string),
+		deadStrippedMethods:         make(map[string]map[string][]string),
+		structFieldLLVMTypes:        make(map[string][]irtypes.Type),
+		traitChainedInits:           make(map[string][]*ir.Func),
+		traitChainedDeinits:         make(map[string][]*ir.Func),
+		atomCodes:                   make(map[string]int32),
+		atomCodeToName:              make(map[int32]string),
+		unionTypeMembers:            make(map[string][]ast.TypeExpr),
+		nativeUnionDecls:            make(map[string]*ast.UnionDecl),
+		unionTypeIDs:                make(map[string]int32),
+		dataDecls:                   make(map[string]*ast.DataDecl),
+		dataTypeIDs:                 make(map[string]int32),
+		dataVariants:                make(map[string]map[string]*dataVariantInfo),
+		dataVariantLookup:           make(map[string][]string),
+		dataValueReleaseFns:         make(map[string]*ir.Func),
+		dataValueRetainFns:          make(map[string]*ir.Func),
+		dataInstTypeArgs:            make(map[string][]string),
+		coroCallable:                make(map[string]bool),
+		callGraph:                   make(map[string][]string),
+		funcHeuristics:              make(map[string]*FuncHeuristicInfo),
+		overloadedNames:             make(map[string]bool),
+		overloads:                   make(map[string][]*overloadEntry),
+		genericMethodsSetUp:         make(map[string]bool),
+		funcReturnUnsigned:          make(map[string]bool),
+		heapPromotingFns:            make(map[string]bool),
+		fnReturnsHeapPromotedFields: make(map[string][]int),
+		structWeakFields:            make(map[string]map[string]bool),
+		structOwningRawPtrFields:    make(map[string]map[string]bool),
+		fnReturnsOwningIface:        make(map[string]bool),
+		structConstFields:           make(map[string]map[string]bool),
+		cLayoutStructs:              make(map[string]bool),
+		nativeStructTypes:           make(map[string]*irtypes.StructType),
+		packedStructs:               make(map[string]bool),
+		noCopyStructs:               make(map[string]bool),
+		closedStructs:               make(map[string]bool),
+		structDeclsByName:           make(map[string]*ast.StructDecl),
+		structDeclFiles:             make(map[string]string),
+		elemReleaseHelpers:          make(map[string]*ir.Func),
+		elemRetainHelpers:           make(map[string]*ir.Func),
+		heapBlockReleaseFns:         make(map[string]*ir.Func),
+		structPtrReleaseFns:         make(map[string]*ir.Func),
+		chainReleaseFns:             make(map[string]*ir.Func),
+		diFiles:                     make(map[string]*metadata.DIFile),
+		diTypeCache:                 make(map[string]metadata.Field),
 	}
 	atomType := irtypes.NewStruct(irtypes.I32)
 	atomType.SetName("__atom")
@@ -1455,6 +1518,18 @@ func (cg *CodeGen) stdlibBase() string {
 	}
 
 	return "stdlib"
+}
+
+// runtimeBuiltinBase returns the path to runtime/builtin/, the
+// directory holding language-defined traits (tryable, awaitable,
+// etc.) that are auto-loaded into every Tin program. Sibling of
+// stdlib so a custom-stdlib build still gets the built-in traits.
+func (cg *CodeGen) runtimeBuiltinBase() string {
+	if ex, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(ex), "runtime", "builtin")
+	}
+
+	return filepath.Join("runtime", "builtin")
 }
 
 // initBuiltinTupleTemplates pre-populates the Tuple generic struct templates
@@ -1609,6 +1684,18 @@ func (cg *CodeGen) ReplGlobalTinTypeName(g ReplGlobal) string {
 	if g.TinType != nil {
 		return g.TinType.String()
 	}
+	// Prefer the structural reconstructor: it preserves pointer shape
+	// and demangles `<pkg>__<Trait>_iface` (vtable-typed second slot)
+	// back to `<pkg>::<Trait>`, so that a let-binding of
+	// `errors::new("x")` (whose LLVM type is `*errors__Err_iface`) is
+	// re-injected into the next cell as `*errors::Err` rather than the
+	// unresolvable `*errors::Err_iface`.
+	te := llvmTypeToTinTypeExprStructural(g.LLVMType)
+	if te != nil {
+		if name := te.String(); name != "" && name != "any" {
+			return name
+		}
+	}
 
 	n := llvmTypeToTinName(g.LLVMType)
 	if n == "any" {
@@ -1634,6 +1721,16 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.progress("check declarations")
 
 	if err := checkDuplicateDecls(prog.Stmts); err != nil {
+		return nil, fmt.Errorf("%s:%w", cg.filename, err)
+	}
+
+	// Reject `pkg::Name` references when the file only imported `pkg`
+	// selectively (`use { Name } from pkg`).  Selective imports bring
+	// the named symbols into scope but do NOT register `pkg` as a
+	// package alias; reaching for the qualified form should be a hard
+	// error so users can't accidentally rely on a namespace they did
+	// not opt into.
+	if err := checkSelectiveImportQualifiers(prog.Stmts); err != nil {
 		return nil, fmt.Errorf("%s:%w", cg.filename, err)
 	}
 
@@ -1688,6 +1785,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 		if fd, ok := node.(*ast.FuncDecl); ok && len(fd.TypeParams) > 0 {
 			cg.genericFuncs[fd.Name] = fd
+			cg.genericFuncOverloads[fd.Name] = appendGenericFuncOverload(cg.genericFuncOverloads[fd.Name], fd)
 		}
 	}
 
@@ -1761,6 +1859,32 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	for name, flag := range scanOverloadedNames(prog.Stmts) {
 		cg.overloadedNames[name] = flag
 	}
+
+	// Pre-pass 1.85: emit struct layouts for the entry program BEFORE
+	// predeclareFunc starts walking signatures.  A `fn make() Result[Foo, ...]`
+	// signature triggers Result monomorphization via tinTypeToLLVM; if
+	// Foo's struct hasn't had its Fields populated yet, the ADT's
+	// payload buffer is sized to the smaller variant only and writes
+	// of the larger struct payload spill over the buffer.  This
+	// hoist mirrors the pkg-import path in loadPackageFromSource
+	// (Pass 1.5a runs before its Pass 2 predeclares).
+	for _, node := range prog.Stmts {
+		if sd, ok := node.(*ast.StructDecl); ok && len(sd.TypeParams) == 0 {
+			if err := cg.genStructLayout(sd); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Pre-pass 1.9: synthesize `fn main() Result[Unit, errors::Err]`
+	// when top-level imperative statements use `try` but no explicit
+	// `fn main` exists.  Without this, `let v = try foo()` at script
+	// scope tries to propagate Err through the implicit main's i32
+	// return and fails to typecheck.  Wrapping the script in a Result-
+	// returning main lets try desugar against a real Result-shaped
+	// return frame; the C-main wrapper unpacks the Result into the
+	// process exit code via tryEmitResultMainReturn.
+	prog.Stmts = cg.synthesizeImplicitMainForTry(prog.Stmts)
 
 	// Second pass: pre-declare all functions (signatures only) so forward calls work.
 	cg.progress("predeclare functions")
@@ -2271,17 +2395,24 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					ret := wb.NewCall(userMainFn, callArgs...)
 					// Deinits run via atexit(_tin_deinit_all).
 					cg.emitFiberMainEnd(wb)
-					// Coerce return value to i32 if needed.
-					var retVal value.Value = ret
-					if !ret.Type().Equal(irtypes.I32) {
-						if ret.Type().Equal(irtypes.I64) {
-							retVal = wb.NewTrunc(ret, irtypes.I32)
-						} else {
-							retVal = constant.NewInt(irtypes.I32, 0)
+					// fn main() Result[Unit, errors::Err] / Result[i64, errors::Err]:
+					// unpack the Result.  Ok -> exit 0 (or the inner i64,
+					// truncated to i32); Err -> print the message and exit 1.
+					if cg.tryEmitResultMainReturn(wb, ret) {
+						// terminator already emitted by the helper
+					} else {
+						// Coerce return value to i32 if needed.
+						var retVal value.Value = ret
+						if !ret.Type().Equal(irtypes.I32) {
+							if ret.Type().Equal(irtypes.I64) {
+								retVal = wb.NewTrunc(ret, irtypes.I32)
+							} else {
+								retVal = constant.NewInt(irtypes.I32, 0)
+							}
 						}
-					}
 
-					wb.NewRet(retVal)
+						wb.NewRet(retVal)
+					}
 				}
 			}
 
@@ -2343,6 +2474,351 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	cg.checkAllWritesToTopLevelConst(prog)
 
 	return cg.mod, nil
+}
+
+// synthesizeImplicitMainForTry walks stmts and, if any top-level
+// imperative statement uses `try`, replaces those statements with a
+// synthesized `fn main() Result[Unit, errors::Err]` whose body is the
+// original statements plus a closing `return Ok(Unit{_unit: 0})`.
+// The synthesis only fires when there is no explicit `fn main`
+// already in stmts; with an explicit main, top-level try is a user
+// error that the existing diagnostic handles.
+func (cg *CodeGen) synthesizeImplicitMainForTry(stmts []ast.Node) []ast.Node {
+	hasExplicitMain := false
+
+	for _, s := range stmts {
+		if fd, ok := s.(*ast.FuncDecl); ok && fd.Name == "main" && !fd.IsStatic {
+			hasExplicitMain = true
+
+			break
+		}
+	}
+
+	if hasExplicitMain {
+		return stmts
+	}
+
+	bodyStmts := make([]ast.Node, 0, len(stmts))
+
+	otherStmts := make([]ast.Node, 0, len(stmts))
+
+	hasTry := false
+
+	for _, s := range stmts {
+		if isTopLevelDecl(s) {
+			otherStmts = append(otherStmts, s)
+
+			continue
+		}
+
+		bodyStmts = append(bodyStmts, s)
+
+		if nodeContainsTry(s) {
+			hasTry = true
+		}
+	}
+
+	if !hasTry {
+		return stmts
+	}
+
+	// `return Ok(0)` as the final body statement.  Using i64 instead of
+	// sync::Unit avoids forcing the user's script to `use sync` just to
+	// satisfy the synthetic Result wrapper.  The C-main wrapper accepts
+	// Result[i64, errors::Err] equally well and exits with the inner i64
+	// truncated to i32.
+	okCall := &ast.CallExpr{
+		Func: &ast.Identifier{Name: "Ok"},
+		Args: []ast.Node{
+			&ast.IntLit{Value: 0},
+		},
+	}
+
+	bodyStmts = append(bodyStmts, &ast.ReturnStmt{Value: okCall})
+
+	resultType := &ast.GenericType{
+		Name: "Result",
+		TypeParams: []ast.TypeExpr{
+			&ast.SimpleType{Name: "i64"},
+			&ast.SimpleType{Name: "errors::Err"},
+		},
+	}
+
+	mainDecl := &ast.FuncDecl{
+		Name:    "main",
+		RetType: resultType,
+		Body:    &ast.Block{Stmts: bodyStmts},
+	}
+
+	return append(otherStmts, mainDecl)
+}
+
+// isTopLevelDecl returns true for AST nodes that belong at the top
+// level and MUST stay outside the synthesized main body (function /
+// type / use / etc. declarations).  Everything else is imperative
+// script-level code and gets absorbed into the synthesized main.
+func isTopLevelDecl(n ast.Node) bool {
+	switch n.(type) {
+	case *ast.FuncDecl, *ast.StructDecl, *ast.EnumDecl, *ast.TypeDecl,
+		*ast.UseDecl, *ast.ExportDecl, *ast.TraitDecl, *ast.MacroDecl,
+		*ast.UnionDecl, *ast.DataDecl, *ast.TestDecl, *ast.TopLevelVar:
+		return true
+	}
+
+	return false
+}
+
+// nodeContainsTry returns true when n or any of its descendants is a
+// TryExpr.  Used by the implicit-main synthesizer to decide whether
+// the script needs a Result-typed wrapper.
+func nodeContainsTry(n ast.Node) bool {
+	if n == nil {
+		return false
+	}
+
+	if _, ok := n.(*ast.TryExpr); ok {
+		return true
+	}
+
+	found := false
+
+	walkAST(n, func(v ast.Node) {
+		if _, ok := v.(*ast.TryExpr); ok {
+			found = true
+		}
+	})
+
+	return found
+}
+
+// tryEmitResultMainReturn unpacks ret as a Result[Unit | i64, errors::Err]
+// when the user's `fn main()` is typed that way.  Ok exits 0 (or the
+// inner i64 truncated to i32); Err calls the iface's `errors::Err::message`
+// method, forwards the string to the `_tin_main_err_exit` C helper which
+// prints "error: <msg>\n" to stderr and exits 1.  Returns true when the
+// helper emitted the full unpack-and-return chain (caller must skip its
+// own terminator).
+func (cg *CodeGen) tryEmitResultMainReturn(block *ir.Block, ret value.Value) bool {
+	retSt, ok := ret.Type().(*irtypes.StructType)
+	if !ok {
+		return false
+	}
+
+	name := retSt.Name()
+	if !strings.HasPrefix(name, "Result__") {
+		return false
+	}
+
+	variants, ok := cg.dataVariants[name]
+	if !ok {
+		return false
+	}
+
+	okVI, ok := variants["Ok"]
+	if !ok {
+		return false
+	}
+
+	errVI, ok := variants["Err"]
+	if !ok {
+		return false
+	}
+	// Ok payload must be Unit or i64 - any other shape means the caller
+	// can't sensibly express the process exit code.  An Err payload that
+	// looks like errors::Err but an Ok shape we don't handle (e.g.
+	// `fn main() Result[i32, errors::Err]`) would silently swallow the
+	// Err if we fell through to the generic non-Result path; refuse the
+	// signature instead so the user picks i64 or Unit.
+	okInnerTy, okShape := resultMainOkInnerType(okVI)
+
+	errIsErrIface := resultMainErrIsErrIface(errVI)
+	if !okShape && errIsErrIface {
+		panic(fmt.Sprintf("fn main() return type %s is not supported as a process exit shape; use Result[Unit, errors::Err] or Result[i64, errors::Err]", name))
+	}
+
+	if !okShape {
+		return false
+	}
+	// Err payload must be an errors::Err fat-ptr iface so we know how to
+	// call .message() on it.
+	if !errIsErrIface {
+		return false
+	}
+
+	// Stash the returned Result so we can GEP into it.
+	alloca := block.NewAlloca(retSt)
+	block.NewStore(ret, alloca)
+
+	tagGEP := block.NewGetElementPtr(retSt, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tag := block.NewLoad(irtypes.I64, tagGEP)
+	isOk := block.NewICmp(enum.IPredEQ, tag, constant.NewInt(irtypes.I64, okVI.Tag))
+
+	parent := block.Parent
+	okBlk := parent.NewBlock("main.result.ok")
+	errBlk := parent.NewBlock("main.result.err")
+	block.NewCondBr(isOk, okBlk, errBlk)
+
+	// Ok branch.
+	payloadGEP := okBlk.NewGetElementPtr(retSt, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+	switch okInnerTy {
+	case "Unit":
+		okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	case "i64":
+		payloadPtr := okBlk.NewBitCast(payloadGEP, irtypes.NewPointer(irtypes.I64))
+		v := okBlk.NewLoad(irtypes.I64, payloadPtr)
+		okBlk.NewRet(okBlk.NewTrunc(v, irtypes.I32))
+	}
+
+	// Err branch: extract iface fat-ptr, call vtable message slot, forward
+	// the resulting TinString to _tin_main_err_exit.
+	errPayloadGEP := errBlk.NewGetElementPtr(retSt, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+	// The Err variant's payload struct stores the errors::Err iface as
+	// its field 0; reuse that struct type directly so we don't depend
+	// on whether buildIfaceShape happened to register the type under
+	// `cg.traitFatPtrTypes` yet.
+	ifaceTy, ok := errVI.PayloadType.Fields[0].(*irtypes.StructType)
+	if !ok {
+		errBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+
+		return true
+	}
+
+	ifaceP := errBlk.NewBitCast(errPayloadGEP, irtypes.NewPointer(ifaceTy))
+	ifaceVal := errBlk.NewLoad(ifaceTy, ifaceP)
+	dataPtr := errBlk.NewExtractValue(ifaceVal, 0)
+	vtPtr := errBlk.NewExtractValue(ifaceVal, 1)
+
+	msgFn, ok := cg.findErrMessageSlot(vtPtr.Type())
+	if !ok {
+		errBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+
+		return true
+	}
+	// Load the message slot from the vtable.
+	msgSlotPtr := errBlk.NewGetElementPtr(msgFn.vtType, vtPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(msgFn.slotIdx)))
+	msgFnVal := errBlk.NewLoad(msgFn.fnPtrType, msgSlotPtr)
+	msgStr := errBlk.NewCall(msgFnVal, dataPtr)
+
+	strPtr := errBlk.NewExtractValue(msgStr, 0)
+	strLen := errBlk.NewExtractValue(msgStr, 1)
+	errExitFn := cg.ensureExternDecl("_tin_main_err_exit", irtypes.Void, []*ir.Param{
+		ir.NewParam("msg", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+	}, false)
+	errBlk.NewCall(errExitFn, strPtr, strLen)
+	// _tin_main_err_exit calls exit(); marking this block unreachable
+	// lets LLVM drop any code after it.
+	errBlk.NewUnreachable()
+
+	return true
+}
+
+// resultMainOkInnerType classifies the Ok payload of `Result[T, errors::Err]`
+// when used as main's return type.  Returns ("Unit", true), ("i64", true),
+// or ("", false) for any other shape (which falls back to the generic
+// non-Result main return handling).
+func resultMainOkInnerType(vi *dataVariantInfo) (string, bool) {
+	if vi == nil || vi.PayloadType == nil || len(vi.PayloadType.Fields) != 1 {
+		return "", false
+	}
+
+	ft := vi.PayloadType.Fields[0]
+	if it, ok := ft.(*irtypes.IntType); ok && it.BitSize == 64 {
+		return "i64", true
+	}
+
+	if st, ok := ft.(*irtypes.StructType); ok {
+		name := st.Name()
+		if name == "sync__Unit" || name == "Unit" {
+			return "Unit", true
+		}
+	}
+
+	return "", false
+}
+
+// resultMainErrIsErrIface returns true when the Err variant's payload
+// is the `errors::Err` trait-object struct (fat ptr layout: {i8* data, vt* vtable}).
+func resultMainErrIsErrIface(vi *dataVariantInfo) bool {
+	if vi == nil || vi.PayloadType == nil || len(vi.PayloadType.Fields) != 1 {
+		return false
+	}
+
+	st, ok := vi.PayloadType.Fields[0].(*irtypes.StructType)
+	if !ok {
+		return false
+	}
+
+	return st.Name() == "errors__Err_iface"
+}
+
+// errMessageSlot resolves the layout of `errors::Err::message` for the
+// active errors::Err vtable type so the wrapper can call the right
+// vtable slot at IR-emit time.
+type errMessageSlot struct {
+	vtType    *irtypes.StructType
+	fnPtrType *irtypes.PointerType
+	slotIdx   int
+}
+
+// findErrMessageSlot returns the vtable struct's `message` slot
+// metadata so tryEmitResultMainReturn can GEP into the right offset
+// and load the function pointer to call.  Walks cg.traitVtableFields
+// to find the index of the `message` method.
+func (cg *CodeGen) findErrMessageSlot(vtPtrTy irtypes.Type) (*errMessageSlot, bool) {
+	pt, ok := vtPtrTy.(*irtypes.PointerType)
+	if !ok {
+		return nil, false
+	}
+
+	vt, ok := pt.ElemType.(*irtypes.StructType)
+	if !ok {
+		return nil, false
+	}
+
+	for i, f := range vt.Fields {
+		fpt, ok := f.(*irtypes.PointerType)
+		if !ok {
+			continue
+		}
+
+		ft, ok := fpt.ElemType.(*irtypes.FuncType)
+		if !ok {
+			continue
+		}
+		// The `message` method has signature `(*Err data) TinString`.
+		// TinString is the {i8*, i64} struct; match by return type.
+		retSt, ok := ft.RetType.(*irtypes.StructType)
+		if !ok {
+			continue
+		}
+
+		if len(retSt.Fields) != 2 {
+			continue
+		}
+
+		if _, ok := retSt.Fields[0].(*irtypes.PointerType); !ok {
+			continue
+		}
+
+		if it, ok := retSt.Fields[1].(*irtypes.IntType); !ok || it.BitSize != 64 {
+			continue
+		}
+
+		if len(ft.Params) != 1 {
+			continue
+		}
+
+		return &errMessageSlot{vtType: vt, fnPtrType: fpt, slotIdx: i}, true
+	}
+
+	return nil, false
 }
 
 // newCMainWrapper creates the C-side entry-point function under the IR

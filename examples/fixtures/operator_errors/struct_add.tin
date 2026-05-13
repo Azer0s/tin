@@ -1,0 +1,10 @@
+// struct + struct without an `add` op-trait impl must be a compile
+// error -- previously fell through to a silent `i64 0` codegen.
+struct point =
+  x i32
+
+fn main() i64 =
+  let a = point{x: 1}
+  let b = point{x: 2}
+  let _ = a + b
+  return 0

@@ -1,0 +1,11 @@
+struct Source =
+  v i32
+
+  fn read(this Source) i32 = return this.v
+
+fn want_i64(n i64) i64 = return n
+
+fn main() =
+  let s = Source{v: 10}
+  let n = want_i64(s.read() as i64)
+  echo "{n}"

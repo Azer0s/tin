@@ -900,19 +900,28 @@ fn parse_node(p *Parser, min_indent i64) *Value =
 
 // Public API
 
-// YamlError describes why a YAML parse attempt failed.
-data YamlError =
-  EmptyInput
-  Malformed(pos i64, msg string)
+// YamlError enumerates the failures parse can surface. Implements
+// errors::Err so calls return Result[T, errors::Err] like the rest
+// of the typed-error ecosystem.
+data YamlError(errors::Err, print) =
+  YamlEmpty
+  YamlMalformed(pos i64, msg string)
+
+  fn errors::Err::message(this YamlError) string =
+    match this:
+      case YamlEmpty:             return "yaml: empty input"
+      case YamlMalformed(pos, m): return "yaml: malformed at byte {pos}: {m}"
+
+  fn ::print(this YamlError) string = return this.message()
 
 // parse parses a YAML string and returns a Value tree for untyped inspection.
 //
 //   match yaml::parse("name: alice\nage: 30\n"):
 //     case Ok(v):  echo v.get("name").as_string()
 //     case Err(e): ...
-fn parse(s string) Result[Value, YamlError] =
+fn parse(s string) Result[Value, errors::Err] =
   if len(s) == 0:
-    return Result[Value, YamlError]::Err(YamlError::EmptyInput)
+    return Err(YamlEmpty)
   let p = Parser{src: s as *byte, pos: 0, len: len(s)}
 
   return Ok(*parse_node(&p, 0))
@@ -982,12 +991,12 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
 //
 //   struct point = x i64  y i64
 //   let p = yaml::parse[point]("x: 3\ny: 4\n")
-fn parse[T](s string) Result[T, YamlError] =
+fn parse[T](s string) Result[T, errors::Err] =
   let out T
   let doc Value
 
   match parse(s):
-    case Err(e): return Result[T, YamlError]::Err(e)
+    case Err(e): return Err(e)
     case Ok(d):
       doc = d
 
@@ -1053,6 +1062,7 @@ fn parse[T](s string) Result[T, YamlError] =
   return Ok(out)
 
 export {
-  Kind, Value, parse, encode, YamlError,
+  Kind, Value, parse, encode,
+  YamlError,
   YamlSerializable, YamlDeserializable,
 } as yaml

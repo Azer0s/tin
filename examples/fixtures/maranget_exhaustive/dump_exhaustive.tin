@@ -1,0 +1,6 @@
+fn d(xs [i32]) string =
+  where ([]): "e"
+  where ([x]): "1"
+  where ([x, ...rest]): "n"
+
+echo d([])

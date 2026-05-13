@@ -1,0 +1,5 @@
+use result
+
+fn main() =
+  let r Result[i64] = Ok(1)
+  echo "x"

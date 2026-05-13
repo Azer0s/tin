@@ -1,0 +1,10 @@
+use result
+
+fn make() Result[i64, string] =
+  return Ok(99)
+
+fn main() =
+  let r = make()
+  match r:
+    case Ok(v):  echo "{v}"
+    case Err(_): echo "err"

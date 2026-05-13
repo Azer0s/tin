@@ -6,18 +6,48 @@
 use io
 use mem
 use errors
+use sync
+use { Unit } from sync
+use result
+use { Result } from result
 
 // C runtime helpers for string/byte conversions (already in the runtime).
 fn tin_str_from_bytes(ptr *byte, n i64) string = extern("_tin_string_from_bytes")
 fn tin_str_data(s string) *byte                = extern("_tin_string_data")
 
+// OsError is the typed error every os function returns through. With
+// ADTs implementing traits directly (Workstream A), the variant set
+// and the trait impl collapse into a single ADT - no separate
+// XxxErrorKind data + XxxError wrapper struct.
+data OsError(errors::Err, print) =
+  CannotOpen(op string, path string)
+  CannotRead(op string, path string)
+  CannotWrite(op string, path string)
+  CannotMkdir(path string)
+  CannotRemove(path string)
+  CannotRmdir(path string)
+  CannotRename(src string, dst string)
+  StatFailed(path string)
+
+  fn errors::Err::message(this OsError) string =
+    match this:
+      case CannotOpen(op, path):   return op ++ ": cannot open: " ++ path
+      case CannotRead(op, path):   return op ++ ": cannot read: " ++ path
+      case CannotWrite(op, path):  return op ++ ": cannot write: " ++ path
+      case CannotMkdir(path):      return "mkdir: cannot create: " ++ path
+      case CannotRemove(path):     return "remove: cannot delete: " ++ path
+      case CannotRmdir(path):      return "rmdir: cannot remove: " ++ path
+      case CannotRename(src, dst): return "rename: cannot move " ++ src ++ " -> " ++ dst
+      case StatFailed(path):       return "stat: failed for: " ++ path
+
+  fn ::print(this OsError) string = return this.message()
+
 // read_file reads the entire contents of path and returns it as a string.
-// Returns ("", err) on failure.
-fn read_file(path string) (string, *errors::Err) =
+fn read_file(path string) Result[string, errors::Err] =
   let f = io::fopen(path, "rb")
 
   if f == nil:
-    return ("", errors::new("read_file: cannot open: " ++ path))
+    return Err(CannotOpen("read_file", path))
   io::fseek(f, 0, 2)
   let sz = io::ftell(f)
 
@@ -30,20 +60,14 @@ fn read_file(path string) (string, *errors::Err) =
 
   mem::free(buf as *void)
 
-  return (s, nil)
+  return Ok(s)
 
 // read_file_bytes reads the entire contents of path as a byte slice.
-// Returns ([], err) on failure.
-fn read_file_bytes(path string) ([byte], *errors::Err) =
+fn read_file_bytes(path string) Result[[byte], errors::Err] =
   let f = io::fopen(path, "rb")
 
   if f == nil:
-    let tmp = mem::malloc(1) as *byte
-    let empty = tmp[0..0]
-
-    mem::free(tmp as *void)
-
-    return (empty, errors::new("read_file_bytes: cannot open: " ++ path))
+    return Err(CannotOpen("read_file_bytes", path))
 
   io::fseek(f, 0, 2)
   let sz = io::ftell(f)
@@ -53,34 +77,32 @@ fn read_file_bytes(path string) ([byte], *errors::Err) =
   let n = io::fread(buf as *void, 1, sz, f)
 
   io::fclose(f)
-  let result = buf[0..n]
+  let bytes = buf[0..n]
 
   mem::free(buf as *void)
 
-  return (result, nil)
+  return Ok(bytes)
 
 // write_file writes content to path, creating or truncating the file.
-// Returns nil on success, an error otherwise.
-fn write_file(path string, content string) *errors::Err =
+fn write_file(path string, content string) Result[Unit, errors::Err] =
   let f = io::fopen(path, "wb")
 
   if f == nil:
-    return errors::new("write_file: cannot open: " ++ path)
+    return Err(CannotOpen("write_file", path))
   let ptr = tin_str_data(content)
   let n = len(content)
 
   io::fwrite(ptr as *void, 1, n, f)
   io::fclose(f)
 
-  return nil
+  return Ok(Unit{_unit: 0})
 
 // write_file_bytes writes data to path, creating or truncating the file.
-// Returns nil on success, an error otherwise.
-fn write_file_bytes(path string, data [byte]) *errors::Err =
+fn write_file_bytes(path string, data [byte]) Result[Unit, errors::Err] =
   let f = io::fopen(path, "wb")
 
   if f == nil:
-    return errors::new("write_file_bytes: cannot open: " ++ path)
+    return Err(CannotOpen("write_file_bytes", path))
   let n = len(data)
 
   if n > 0:
@@ -90,19 +112,18 @@ fn write_file_bytes(path string, data [byte]) *errors::Err =
 
   io::fclose(f)
 
-  return nil
+  return Ok(Unit{_unit: 0})
 
 // append_file appends content to path, creating it if it does not exist.
-// Returns nil on success, an error otherwise.
-fn append_file(path string, content string) *errors::Err =
+fn append_file(path string, content string) Result[Unit, errors::Err] =
   let f = io::fopen(path, "ab")
 
   if f == nil:
-    return errors::new("append_file: cannot open: " ++ path)
+    return Err(CannotOpen("append_file", path))
   let ptr = tin_str_data(content)
   let n = len(content)
 
   io::fwrite(ptr as *void, 1, n, f)
   io::fclose(f)
 
-  return nil
+  return Ok(Unit{_unit: 0})

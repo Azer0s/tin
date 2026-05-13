@@ -1,0 +1,10 @@
+fn{#pure} match_kind(n i64) i64 =
+  match n:
+    case 0:
+      return 0
+    case 1:
+      return 10
+    default:
+      return n * 100
+
+fn main() i64 = return match_kind(7)

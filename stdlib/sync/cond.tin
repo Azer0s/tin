@@ -22,9 +22,17 @@ struct Cond =
   fn ptr(this Cond) *void = return this._cell.payload()
 
   static fn new() Cond =
-    return Cond{_cell: rc::Cell[*void].alloc(tin_fcond2_new(), tin_fcond2_free)}
+    return Cond{_cell: rc::Cell[*void].new(tin_fcond2_new(), tin_fcond2_free)}
 
-  fn{#async #no_autoyield} wait(this Cond, mu Mutex) =
+  // wait returns a Future[Unit] that resolves once the cond has been
+  // signalled and the mutex is reacquired. Typical use:
+  //   await cond.wait(mu)
+  // The outer wrapper is plain sync; the inner #async helper carries
+  // the park/yield loop.
+  fn wait(this Cond, mu Mutex) Future[Unit] =
+    return spawn this.wait_impl(mu)
+
+  fn{#async #no_autoyield} wait_impl(this Cond, mu Mutex) =
     let pid = tin_current_pid_cond()
 
     tin_fcond2_add_waiter(this.ptr(), pid)

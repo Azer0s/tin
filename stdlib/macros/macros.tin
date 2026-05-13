@@ -14,6 +14,12 @@ macro{#no_parens #no_excl} loop() = `for true`
 // Write `async foo(x i32) i32 =` instead of `fn{#async} foo(x i32) i32 =`.
 macro{#no_parens #no_excl} async() = `fn{#async}`
 
+// discard - explicitly ignore the value of an expression.  Expands to
+// `let _ =`, so `discard make()` reads as a deliberate drop and side-
+// steps the awkwardness of repeating `let _ =` (or burning fresh names
+// like `_2`, `_3`) when several throwaway calls sit next to each other.
+macro{#no_parens #no_excl} discard() = `let _ =`
+
 // todo!() - panic with "not yet implemented" at the call site.
 macro todo!() = `panic("not yet implemented")`
 
@@ -58,7 +64,7 @@ macro try_some!(o) = `match o:
   case None:    return None`
 
 export {
-  loop, async,
+  loop, async, discard,
   todo!, unreachable!,
   min!, max!, abs!, clamp!,
   dbg!,

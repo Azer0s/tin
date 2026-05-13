@@ -1,0 +1,8 @@
+use time
+
+fn main() =
+  let d = time::Duration{ns: -9223372036854775808}
+  let a = d.abs()
+
+  if a.ns > 0: echo "saturated"
+  else:        echo "wrong {a.ns}"

@@ -1,0 +1,9 @@
+struct point =
+  const x i64
+  const y i64
+
+fn main() i64 =
+  let p = point{x: 1, y: 2}
+  let pp = &p
+  pp->x = 99
+  return 0

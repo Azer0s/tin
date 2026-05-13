@@ -1,0 +1,8 @@
+use option
+use { Option } from option
+
+fn main() =
+  let v Option[i64] = Some(42)
+  match v:
+    case Some(n): echo "{n}"
+    case None:    echo "x"

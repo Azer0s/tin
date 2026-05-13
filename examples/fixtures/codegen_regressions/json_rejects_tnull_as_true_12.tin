@@ -1,0 +1,7 @@
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("tnull"):
+    case Ok(v): echo "wrong"
+    case Err(e): echo "ok-rejected"

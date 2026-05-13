@@ -1,0 +1,7 @@
+fn pick(n i32) string =
+  return match n:
+    case 0: "first-zero"
+    case 0: "second-zero"
+    default: "other"
+
+echo pick(0)

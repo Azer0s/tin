@@ -1,0 +1,65 @@
+// examples/escape_promotion_test.tin -- heap-promotion invariants for
+// `&local` whose value reaches an escape sink (return, field of
+// returned struct, fat-ptr to *Trait).  The escape-analysis pass
+// must heap-promote the local so dereferencing the pointer after
+// the function returns is safe.  Each test pins one shape that
+// previously stack-allocated and read freed memory.
+//
+// Replaces examples/escape_promotion.sh (run + grep on stdout) with
+// inline assertions that the heap-promoted value round-trips.
+
+use assert
+
+// --- baseline ------------------------------------------------------
+
+fn return_local_ptr() *i64 =
+  let x i64 = 999
+  return &x
+
+test "return &local heap-promotes the local" =
+  let p = return_local_ptr()
+
+  assert::equals(999 as i64, *p)
+
+// --- struct field with &local --------------------------------------
+
+struct Box =
+  p *i64
+
+fn make_box_ptr() *Box =
+  let x i64 = 100
+  return &Box{p: &x}
+
+fn make_box_val() Box =
+  let x i64 = 200
+  return Box{p: &x}
+
+test "&local in field of returned *Box heap-promotes the local" =
+  let b = make_box_ptr()
+
+  assert::equals(100 as i64, *b.p)
+
+test "&local in field of returned by-value Box heap-promotes the local" =
+  let b = make_box_val()
+
+  assert::equals(200 as i64, *b.p)
+
+// --- *Trait = &local that escapes ----------------------------------
+
+trait Showable =
+  fn show(this *Showable) i64 = virtual
+
+struct Pt(Showable) =
+  v i64
+
+  fn Showable::show(this *Pt) i64 = return this.v
+
+fn make_showable() *Showable =
+  let pt = Pt{v: 5}
+  let p *Showable = &pt
+  return p
+
+test "return *Trait of &local heap-promotes the local" =
+  let s = make_showable()
+
+  assert::equals(5 as i64, (*s).show())

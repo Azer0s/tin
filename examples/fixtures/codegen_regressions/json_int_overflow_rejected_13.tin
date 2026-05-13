@@ -1,0 +1,7 @@
+use encoding::json
+use { Result } from result
+
+fn main() =
+  match json::parse("99999999999999999999"):
+    case Ok(v): echo "wrong"
+    case Err(e): echo "ok-rejected-ovf"

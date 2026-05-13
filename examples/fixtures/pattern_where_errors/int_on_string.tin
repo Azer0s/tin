@@ -1,0 +1,3 @@
+fn t(s string) string =
+  where (0): "z"
+  where _: "o"

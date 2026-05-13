@@ -1,0 +1,14 @@
+use time
+
+fn main() =
+  let s = time::monotonic_ns()
+
+  await time::sleep_ms(50)
+
+  let elapsed = time::monotonic_ns() - s
+  // 30ms slack covers timer-granularity jitter.
+
+  if elapsed >= 30000000:
+    echo "elapsed_ms_ok"
+  else:
+    echo "elapsed_too_short {elapsed}"

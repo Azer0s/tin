@@ -18,11 +18,29 @@ use io
 use rc
 use sync
 use errors
+use result
+use { Result } from result
 
 // C helpers
 fn tin_tcp_listen_c(port i32) i32          = extern("_tin_tcp_listen")
 fn tin_tcp_accept_c(fd i32) i32            = extern("_tin_tcp_accept")
 fn tin_tcp_dial_c(host string, port i32) i32 = extern("_tin_tcp_dial")
+
+// TcpError enumerates the failures the tcp stdlib can surface.
+// Implements errors::Err so calls return Result[T, errors::Err] and
+// unify with the typed-error ecosystem.
+data TcpError(errors::Err, print) =
+  AcceptFailed
+  CannotBind(port i32)
+  DialFailed(host string, port i32)
+
+  fn errors::Err::message(this TcpError) string =
+    match this:
+      case AcceptFailed:     return "tcp: accept failed"
+      case CannotBind(p):    return "tcp: failed to bind port {p}"
+      case DialFailed(h, p): return "tcp: dial {h}:{p} failed"
+
+  fn ::print(this TcpError) string = return this.message()
 
 struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   _fd_cell *rc::Cell[i32]
@@ -52,38 +70,33 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next connection.
-  // Returns (Conn, *errors::Err) - nil Err means success.
-  //   let (c, err) = srv.accept()
-  //   if errors::is_err(err): return
-  fn accept(this Server) (Conn, *errors::Err) =
+  fn accept(this Server) Result[Conn, errors::Err] =
     let fd = tin_tcp_accept_c(this.fd())
 
     if fd < 0:
-      return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: accept failed"))
+      return Err(AcceptFailed)
 
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+    return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
   fn Closeable::close(this Server) =
     io::close(this.fd())
 
 // listen creates a TCP server on the given port.
-// Returns (Server, *errors::Err) - check Err before using Server.
-fn listen(port i32) (Server, *errors::Err) =
+fn listen(port i32) Result[Server, errors::Err] =
   let fd = tin_tcp_listen_c(port)
 
   if fd < 0:
-    return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: failed to bind port {port}"))
+    return Err(CannotBind(port))
 
-  return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+  return Ok(Server{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
 // dial connects to host:port via TCP.
-// Returns (Conn, *errors::Err) - check Err before using Conn.
-fn dial(host string, port i32) (Conn, *errors::Err) =
+fn dial(host string, port i32) Result[Conn, errors::Err] =
   let fd = tin_tcp_dial_c(host, port)
 
   if fd < 0:
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("tcp: dial {host}:{port} failed"))
+    return Err(DialFailed(host, port))
 
-  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
-export { Conn, Server, listen, dial } as tcp
+export { Conn, Server, TcpError, listen, dial } as tcp

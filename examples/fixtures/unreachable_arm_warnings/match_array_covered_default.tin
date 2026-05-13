@@ -1,0 +1,8 @@
+fn d(xs [i32]) string =
+  return match xs:
+    case []:           "empty"
+    case [x]:          "one"
+    case [x, ...rest]: "many"
+    default:           "unreachable"
+
+echo d([1, 2])

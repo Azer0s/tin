@@ -1,0 +1,7 @@
+struct P =
+  x i64
+
+fn main() =
+  let small i32 = 5
+  let p = P{x: small as i64}
+  echo "{p.x}"

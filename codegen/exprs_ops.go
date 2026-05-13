@@ -168,6 +168,12 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 	switch n := node.(type) {
 	case *ast.Identifier:
 		return n.Name
+	case *ast.TypeRefNode:
+		// Parser-emitted carrier for type-arg-position FuncType (and
+		// other shapes parseExpr can't yield natively).  Delegate to the
+		// canonical-key encoder so the result round-trips via
+		// parseTypeParamStr.
+		return cg.typeExprCanonicalKey(n.Type)
 	case *ast.UnaryExpr:
 		if n.Op == "*" {
 			inner := cg.exprToTypeParamKey(n.Expr)
@@ -282,6 +288,63 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 	if strings.HasPrefix(s, "[]") {
 		return &ast.ArrayType{Elem: parseTypeParamStr(s[2:]), Size: -1}
 	}
+	// `fn(params)ret` (or `fn#async(params)ret`) form emitted by
+	// typeExprCanonicalKey for FuncType.  Walk to the matching `)` respecting
+	// nested parens / brackets so a param like
+	// `fn(Channel[i64], fn(i64)i64)bool` round-trips.
+	isAsync := false
+
+	bodyStart := -1
+
+	switch {
+	case strings.HasPrefix(s, "fn#async("):
+		isAsync = true
+		bodyStart = len("fn#async(")
+	case strings.HasPrefix(s, "fn("):
+		bodyStart = len("fn(")
+	}
+
+	if bodyStart > 0 {
+		paren := 1
+
+		end := -1
+
+		for i := bodyStart; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				paren++
+			case ')':
+				paren--
+				if paren == 0 {
+					end = i
+				}
+			}
+
+			if end >= 0 {
+				break
+			}
+		}
+
+		if end > 0 {
+			inner := s[bodyStart:end]
+
+			var params []ast.TypeExpr
+
+			if strings.TrimSpace(inner) != "" {
+				params = splitTopLevelTypeArgs(inner)
+			}
+
+			retStr := strings.TrimSpace(s[end+1:])
+
+			var ret ast.TypeExpr
+
+			if retStr != "" {
+				ret = parseTypeParamStr(retStr)
+			}
+
+			return &ast.FuncType{Params: params, RetType: ret, IsAsync: isAsync}
+		}
+	}
 	// Look for the FIRST top-level `[` so we can split base[args]. Bracket
 	// depth tracking keeps `Cell[*rc::Cell[i64]]` from splitting at the
 	// inner `[`.
@@ -319,17 +382,22 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 func splitTopLevelTypeArgs(s string) []ast.TypeExpr {
 	var out []ast.TypeExpr
 
-	depth := 0
+	bdepth := 0
+	pdepth := 0
 	start := 0
 
 	for i, c := range s {
 		switch c {
 		case '[':
-			depth++
+			bdepth++
 		case ']':
-			depth--
+			bdepth--
+		case '(':
+			pdepth++
+		case ')':
+			pdepth--
 		case ',':
-			if depth == 0 {
+			if bdepth == 0 && pdepth == 0 {
 				out = append(out, parseTypeParamStr(s[start:i]))
 				start = i + 1
 			}
@@ -552,6 +620,44 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
 
 	return block.NewLoad(fatType, fatAlloca), nil
+}
+
+// genArrayLitAsFixed materializes an array literal `[e0, e1, ..., eN]` as a
+// fixed-size aggregate of LLVM type `[N x T]`.  Used when the target slot
+// (struct field, parameter) is declared with explicit length `[T; N]`.
+// Element count must match exactly; the function rejects under/overflow with
+// a positioned diagnostic.
+func (cg *CodeGen) genArrayLitAsFixed(block *ir.Block, e *ast.ArrayLit, at *irtypes.ArrayType) (value.Value, error) {
+	if uint64(len(e.Elems)) != at.Len {
+		return nil, cg.nodeErr(e,
+			"fixed-size array [_; %d] needs exactly %d elements, got %d",
+			at.Len, at.Len, len(e.Elems))
+	}
+
+	alloca := block.NewAlloca(at)
+	for i, elem := range e.Elems {
+		v, err := cg.genArgWithTargetType(block, elem, at.ElemType)
+		if err != nil {
+			return nil, err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		v = cg.coerce(block, v, at.ElemType)
+		if !v.Type().Equal(at.ElemType) {
+			return nil, cg.nodeErr(elem,
+				"array element %d: cannot store %s where %s is expected",
+				i, cg.tinTypeDisplay(v.Type()), cg.tinTypeDisplay(at.ElemType))
+		}
+
+		gep := block.NewGetElementPtr(at, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, int64(i)))
+		block.NewStore(v, gep)
+	}
+
+	return block.NewLoad(at, alloca), nil
 }
 
 // genArrayFillLit generates code for [value; count] fill array literals.
@@ -790,7 +896,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 	st, ok := cg.structTypes[typeName]
 	if !ok {
-		return nil, cg.nodeErr(e, "unknown struct type: %s", typeName)
+		return nil, cg.nodeErr(e, "unknown struct type: %s", prettyStructName(typeName))
 	}
 
 	// #closed enforcement: a closed struct's literal `S{...}` may only
@@ -848,6 +954,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			val, err := cg.genExpr(block, v)
 			if err != nil {
 				return nil, err
+			}
+			// Refresh block after short-circuit / await / coro split
+			// operands that park curBlock on a merge.
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
 			}
 
 			gep := block.NewGetElementPtr(st, alloca,
@@ -908,6 +1019,12 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			val, err := cg.genArgWithTargetType(block, f.Value, st.Fields[idx])
 			if err != nil {
 				return nil, err
+			}
+			// Refresh block after short-circuit operands (`a || b`) that
+			// advanced curBlock to a merge -- otherwise the subsequent
+			// GEP/store land in a block where `val` does not dominate.
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
 			}
 
 			gep := block.NewGetElementPtr(st, alloca,
@@ -1127,12 +1244,53 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		return nil, fmt.Errorf("tuple literal requires at least 2 elements")
 	}
 
+	// Pre-extract per-element target types from the expectedType so
+	// each element's gen can have a hint for ADT constructor
+	// disambiguation. expectedType is a named Tuple struct with
+	// fields at userOff..userOff+N-1 holding the element types.
+	var elemHints []irtypes.Type
+
+	if expectedType != nil {
+		if st, ok := expectedType.(*irtypes.StructType); ok {
+			if n := st.Name(); n != "" {
+				if _, known := cg.structTypes[n]; known {
+					off := cg.userFieldOffset(n)
+					if off+len(tup.Elems) <= len(st.Fields) {
+						elemHints = make([]irtypes.Type, len(tup.Elems))
+						for i := range tup.Elems {
+							elemHints[i] = st.Fields[off+i]
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Evaluate all element expressions.
 	vals := make([]value.Value, len(tup.Elems))
 	for i, elem := range tup.Elems {
-		v, err := cg.genExpr(block, elem)
+		var v value.Value
+
+		var err error
+
+		if elemHints != nil && elemHints[i] != nil {
+			prevHint := cg.returnTypeHint
+			cg.returnTypeHint = elemHints[i]
+			v, err = cg.genExpr(block, elem)
+			cg.returnTypeHint = prevHint
+		} else {
+			v, err = cg.genExpr(block, elem)
+		}
+
 		if err != nil {
 			return nil, err
+		}
+		// Short-circuit operands (`a || b`, `a && b`) park the IR
+		// insertion point on a merge block; pick it up before the next
+		// element's evaluation (and before the struct fill below) so
+		// every operation lands in a block that dominates its uses.
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
 		}
 
 		vals[i] = v
@@ -1158,16 +1316,27 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 
 		typeParams := make([]ast.TypeExpr, len(vals))
 		for i, v := range vals {
-			parts[i] = llvmTypeToTinName(v.Type())
+			// Use the raw mangled struct name for the name part so the
+			// resulting Tuple__... is a single valid identifier. The
+			// demangled form `Result[i64, errors, Err]` contains
+			// brackets/spaces that break downstream name parsing and
+			// also fail to resolve back to a registered concrete type
+			// (the monomorphization keyed off the mangled
+			// `Result__i64__errors__Err`). Fall back to
+			// llvmTypeToTinName for non-struct slots.
+			parts[i] = llvmRawPartForTuple(v.Type())
 			// Reconstruct a structural TypeExpr from the LLVM type so
 			// the synthesized monomorphization preserves PointerType /
 			// ArrayType nuance (e.g. `*errors::Err` is a PointerType
 			// wrapping a SimpleType, not a SimpleType whose name is
-			// "*errors::Err").  Falling back to SimpleType{Name:parts[i]}
-			// lost the pointer indirection and produced an i64 slot
-			// for any `*Trait` argument, which then panicked in
-			// downstream NewStore checks.
-			typeParams[i] = llvmTypeToTinTypeExprStructural(v.Type())
+			// "*errors::Err"). Tuple-slot variant keeps named struct
+			// references as their raw mangled name so the synth
+			// monomorphization re-resolves to the SAME concrete struct
+			// already registered (rather than going through demangle
+			// -> re-monomorphize, which can synthesize duplicate
+			// instantiations like Option[Option[i64]] when the user
+			// only wanted Option[i64]).
+			typeParams[i] = llvmTypeToTupleSlotTypeExpr(v.Type())
 		}
 
 		concreteName = "Tuple__" + strings.Join(parts, "__")
@@ -1241,8 +1410,16 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		gep := block.NewGetElementPtr(st, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 		block.NewStore(v, gep)
-		// ARC: retain any RC-tracked elements.
-		if isCopyExpr(tup.Elems[i]) {
+		// ARC: retain any RC-tracked elements borrowed from an outer
+		// owner.  Fresh allocations (e.g. `buf[0..n] as string`, which
+		// lowers to _tin_bytes_from_buf, or any call returning an
+		// rc=1 string/array/iface) already own their reference; an
+		// extra retain here would leave rc=2 with only one matching
+		// release ever fired and the field would leak by exactly one
+		// allocation per construction.  Mirrors the fresh-alloc
+		// exemption in genDataScopeCtorCall / genDataConstructorCall
+		// and the freshIface / freshCallResult gates in genVarDecl.
+		if isCopyExpr(tup.Elems[i]) && !isFreshBytesAlloc(v) && !isFreshCallResult(v) {
 			cg.emitRetain(block, v)
 		}
 	}
@@ -1746,6 +1923,17 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 		return nil, err
 	}
 
+	// `a |> Adt::method` (or `pkg::Adt::method`) -- the RHS names an
+	// instance method on a generic struct/ADT.  Evaluating the RHS via
+	// genExpr would dispatch through genDataScopeCtorCall and fail
+	// because `method` is not a variant; route directly to the method-
+	// call form `Adt::method(a)` which is what the pipe sugar means.
+	if sa, ok := e.Right.(*ast.ScopeAccess); ok {
+		if v, handled, mErr := cg.tryPipeToStaticMethod(block, sa, leftVal); handled {
+			return v, mErr
+		}
+	}
+
 	// Evaluate the right-hand side completely (including any call arguments),
 	// yielding the function to apply to leftVal.
 	rightFn, err := cg.genExpr(block, e.Right)
@@ -1783,6 +1971,67 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	}
 
 	return result, nil
+}
+
+// tryPipeToStaticMethod handles `a |> Adt::method` and
+// `a |> pkg::Adt::method` by converting it to `Adt::method(a)`.  Returns
+// (val, true, err) when the form was recognized so genPipeExpr can stop
+// before falling through to the value-as-callable path.
+func (cg *CodeGen) tryPipeToStaticMethod(block *ir.Block, sa *ast.ScopeAccess, leftVal value.Value) (value.Value, bool, error) {
+	if len(sa.Path) < 2 {
+		return nil, false, nil
+	}
+	// Last segment is the method name; everything before is the type
+	// path (`Adt`, `Adt[T,U]`, `pkg::Adt`, `pkg::Adt[T,U]`).
+	method := sa.Path[len(sa.Path)-1]
+	typeSeg := sa.Path[len(sa.Path)-2]
+	// Strip any package qualifier the parser folded into the leading
+	// segment, e.g. `result::Result[i64,string]` -> just `Result`.
+	if idx := strings.Index(typeSeg, "::"); idx >= 0 {
+		typeSeg = typeSeg[idx+2:]
+	}
+	// Strip the `[T,U]` type-arg suffix when present; we recover the
+	// concrete args from leftVal's type instead.
+	if i := strings.IndexByte(typeSeg, '['); i >= 0 {
+		typeSeg = typeSeg[:i]
+	}
+	// Bail out if the type isn't an ADT or generic struct -- let the
+	// regular pipe path handle it (e.g. user wrote `a |> mod::fn`).
+	if _, isADT := cg.dataDecls[typeSeg]; !isADT {
+		if _, isGenericStruct := cg.genericStructsByArity[typeSeg]; !isGenericStruct {
+			return nil, false, nil
+		}
+	}
+	// Build a synthetic call `Adt::method(leftVal)`.  We construct a
+	// throwaway Identifier node carrying a marker we can recognize
+	// downstream so the call goes through the regular method-resolution
+	// path; the easier route is to call cg.genMethodCall directly with
+	// leftVal as the receiver and `method` as the name.
+	concreteName := structNameFromValue(leftVal)
+	if concreteName == "" {
+		return nil, false, nil
+	}
+
+	scopeKey := concreteName + "_" + method
+
+	entry, ok := cg.curScope.lookup(scopeKey)
+	if !ok {
+		return nil, false, nil
+	}
+
+	fn, ok := entry.val.(*ir.Func)
+	if !ok {
+		return nil, false, nil
+	}
+
+	args := cg.adaptArgs(block, []value.Value{leftVal}, fn.Sig)
+	result := block.NewCall(fn, args...)
+
+	if irtypes.IsVoid(result.Type()) {
+		return nil, true, nil
+	}
+
+	return result, true, nil
 }
 
 func (cg *CodeGen) genTernaryExpr(block *ir.Block, e *ast.TernaryExpr) (value.Value, error) {
@@ -2256,7 +2505,7 @@ func (cg *CodeGen) callTraitMethod(block *ir.Block, ifaceVal value.Value, instKe
 	}
 
 	if slotIdx < 0 {
-		return nil, fmt.Errorf("trait %s has no method %s", instKey, methodName)
+		return nil, fmt.Errorf("trait %s has no method %s", cg.traitDisplayName(instKey), methodName)
 	}
 
 	// Extract data pointer and vtable pointer from iface fat ptr.
@@ -2597,6 +2846,15 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 				return cg.genArrayLitWithElemType(block, arrLit, pt.ElemType)
 			}
 		}
+
+		// Fixed-size [N x T] target (e.g. struct field declared as
+		// [errors::Err; 3]): build the aggregate in a fresh stack alloca and
+		// load it as a value.  Without this branch the literal would default
+		// to its fat-array form {T*, i64} and store-time type-checking would
+		// reject the assignment, even though both shapes display as `[T]`.
+		if at, isArr := targetType.(*irtypes.ArrayType); isArr {
+			return cg.genArrayLitAsFixed(block, arrLit, at)
+		}
 	}
 
 	// Tuple literal with a known Tuple-struct target: pick the
@@ -2656,6 +2914,20 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 				}
 			}
 		}
+	}
+	// Set returnTypeHint so bare ADT constructor calls in argument
+	// position disambiguate against the parameter's type. Covers
+	// `f(Ok(x))` and `f(Err(e))` where f's parameter is a Result.
+	// Restored after the recursive genExpr so siblings see the prior
+	// (caller-supplied) hint.
+	if targetType != nil {
+		prevHint := cg.returnTypeHint
+		cg.returnTypeHint = targetType
+
+		v, err := cg.genExpr(block, argNode)
+		cg.returnTypeHint = prevHint
+
+		return v, err
 	}
 
 	return cg.genExpr(block, argNode)

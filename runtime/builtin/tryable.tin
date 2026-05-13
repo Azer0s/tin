@@ -1,0 +1,29 @@
+// runtime/builtin/tryable.tin
+//
+// The `tryable` trait - the contract the `try` keyword desugars
+// against. Partial-bound shape:
+//
+//   trait tryable[V, C] =
+//     fn is_err(this tryable[V, C])    bool = virtual
+//     fn ok_value(this tryable[V, C])  V    = virtual
+//     fn err_value(this tryable[V, C]) C    = virtual
+//
+// The container C carries a wildcard slot for the success type, e.g.
+// Result[_, E] or Option[_]. That wildcard is impl-resolved per
+// (concrete data, trait) pair: at the impl site, `_` unifies with
+// the data's success type. At the keyword desugar's
+// `return err_value()`, the wildcard means the propagated container's
+// success slot is independent of the enclosing function's success
+// type - only the error/failure shape (E in Result, the unit of None
+// in Option) has to be compatible.
+//
+// Methods are not contractually partial. Impls that have a structure
+// where ok_value/err_value only make sense in one branch (Result,
+// Option) panic in the wrong branch by their own choice; user impls
+// with custom semantics (e.g. an HTTP wrapper that treats body errors
+// as failure) may have all three meaningful in any state.
+
+trait tryable[V, C] =
+  fn is_err(this tryable[V, C])    bool = virtual
+  fn ok_value(this tryable[V, C])  V    = virtual
+  fn err_value(this tryable[V, C]) C    = virtual

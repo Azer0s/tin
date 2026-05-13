@@ -577,6 +577,8 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 	case *ast.IsExpr:
 		walkAST(v.Expr, visit)
 		walkAST(v.Pattern, visit)
+	case *ast.TryExpr:
+		walkAST(v.Inner, visit)
 	case *ast.InterpolatedString:
 		for _, p := range v.Parts {
 			if p.IsExpr {

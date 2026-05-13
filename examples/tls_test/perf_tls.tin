@@ -16,26 +16,28 @@ fn{#async} main() =
   if errors::is_err(err):
     panic(err.message())
 
-  let (tls_conn, tls_err) = await tls::connect("localhost", conn.fd())
+  let tls_r = await tls::connect("localhost", conn.fd())
 
-  if errors::is_err(tls_err):
-    panic(tls_err.message())
+  match tls_r:
+    case Err(e):
+      panic(e.message())
+    case Ok(tls_conn):
+      let rounds i64 = 1000
+      let t0 = io::now_us()
 
-  let rounds i64 = 1000
-  let t0 = io::now_us()
+      let i i64 = 0
 
-  let i i64 = 0
+      for i < rounds:
+        await ioutil::write_string(tls_conn, "ping\n")
+        await ioutil::read_string(tls_conn)
+        i = i + 1
 
-  for i < rounds:
-    await ioutil::write_string(tls_conn, "ping\n")
-    await ioutil::read_string(tls_conn)
-    i = i + 1
+      let elapsed = io::now_us() - t0
+      let us_per_rt = elapsed / rounds
 
-  let elapsed = io::now_us() - t0
-  let us_per_rt = elapsed / rounds
+      echo "{rounds} round trips in {elapsed}us"
+      echo "latency: {us_per_rt} us/rt"
 
-  echo "{rounds} round trips in {elapsed}us"
-  echo "latency: {us_per_rt} us/rt"
+      tls_conn.close()
 
-  tls_conn.close()
   conn.close()

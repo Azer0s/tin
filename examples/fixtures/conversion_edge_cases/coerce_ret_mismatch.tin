@@ -1,0 +1,8 @@
+struct Money(coerce[i64]) =
+  cents i64
+  static fn ::coerce(this Money) string = return "hi"
+
+fn main() =
+  let m = Money{cents: 1}
+  let n = m as i64
+  echo "{n}"

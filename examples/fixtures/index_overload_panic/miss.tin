@@ -1,0 +1,23 @@
+// Bare `t[k]` on a missing key must panic with the "index miss at L:C"
+// message rather than silently returning a zero value.  The comma-ok
+// destructure form (`let (v, ok) = b[k]`) is exercised by
+// examples/index_overload.tin.
+
+struct Bag(index[string, i64]) =
+  keys [string]
+  vals [i64]
+
+  fn ::index(this Bag, k string) (i64, bool) =
+    let i i64 = 0
+
+    for i < len(this.keys):
+      if this.keys[i] == k:
+        return (this.vals[i], true)
+      i = i + 1
+
+    return (0, false)
+
+fn main() =
+  let b = Bag{keys: ["x"], vals: [42]}
+  let v = b["never_set"]
+  echo v

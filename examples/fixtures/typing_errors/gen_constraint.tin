@@ -1,0 +1,9 @@
+struct A =
+  v i64
+
+fn dbl[t](x t) t where t is add = return x + x
+
+fn main() =
+  let a = A{v: 5}
+  let b = dbl(a)
+  echo "{b.v}"

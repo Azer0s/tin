@@ -1,0 +1,3 @@
+fn main() =
+  let p *i64 = "hello"
+  echo "{p}"

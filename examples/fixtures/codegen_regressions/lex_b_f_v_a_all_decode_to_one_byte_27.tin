@@ -1,0 +1,1 @@
+fn main() = echo "{len(\"\b\")} {len(\"\f\")} {len(\"\v\")} {len(\"\a\")} ok"

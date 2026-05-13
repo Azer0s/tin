@@ -1,0 +1,7 @@
+struct {#packed} small =
+  a u8
+  b u16
+
+fn{#interop} sum_small(p small) i32 = return (p.a as i32) + (p.b as i32)
+
+fn main() i64 = return 0

@@ -1,0 +1,6 @@
+fn s(n i32) string =
+  where (n) if n < 0: "neg"
+  where (n) if n > 0: "pos"
+  where _:            "zero"
+
+echo s(5)

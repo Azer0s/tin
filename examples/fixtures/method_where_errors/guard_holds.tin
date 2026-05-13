@@ -1,0 +1,12 @@
+// Positive case: the where guard holds, so the method survives the
+// dead-strip pass and the program compiles cleanly.
+struct Box[t] =
+  v t
+
+  static fn make(v t) Box[t] = return Box[t]{v: v}
+
+  fn just_i64(this Box[t]) i64 where t is i64 = return this.v
+
+fn main() i64 =
+  let b = Box[i64].make(7)
+  return b.just_i64()

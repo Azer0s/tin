@@ -1,0 +1,49 @@
+// examples/operator_errors_test.tin -- Phase 0 lockdown of the
+// silent `genBinExpr -> i64 0` and `genIndexExpr -> nil` fall-
+// throughs.  Once operator overloading lands, the corresponding
+// op-trait impl suppresses these errors; until then every bad
+// usage must be a clean compile error.
+//
+// Replaces examples/operator_errors.sh.  Each fixture lives under
+// examples/fixtures/operator_errors/ and is compiled via
+// `./tin run` so the resulting diagnostic is asserted on its real
+// surface (stderr + exit code).
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_binary_operator_error(fixture string) =
+  let r = run_tin("run", "examples/fixtures/operator_errors/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "binary operator"))
+
+test "struct + struct rejected" =
+  expect_binary_operator_error("struct_add.tin")
+
+test "struct - struct rejected" =
+  expect_binary_operator_error("struct_sub.tin")
+
+test "struct * struct rejected" =
+  expect_binary_operator_error("struct_mul.tin")
+
+test "struct / struct rejected" =
+  expect_binary_operator_error("struct_div.tin")
+
+test "struct + i64 rejected" =
+  expect_binary_operator_error("struct_add_i64.tin")
+
+test "struct[i64] rejected without index trait" =
+  let r = run_tin("run", "examples/fixtures/operator_errors/struct_index.tin")
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "no `::index` impl for index of type"))
+
+test "primitives still work (lockdown is not over-eager)" =
+  // Fixture asserts the expected value and returns 0 so a clean
+  // compile-and-run shows up as exit_code == 0; the lockdown must
+  // not bleed onto i64 arithmetic or array indexing.
+  let r = run_tin("run", "examples/fixtures/operator_errors/primitives_still_work.tin")
+
+  assert::equals(0 as i32, r.exit_code)
+  assert::ok(!contains_text(r.stderr, "error"))

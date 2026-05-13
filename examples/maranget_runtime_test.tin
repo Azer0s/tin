@@ -1,0 +1,80 @@
+// Runtime assertions consolidated from the value-output cases in
+// examples/maranget_exhaustive.sh.  The .sh harness only checked
+// program-output substrings; turning each into a `test` block makes
+// the same coverage visible under `tin test examples/...`.
+//
+// Witness / error-message / IR-dump cases stay in
+// maranget_exhaustive.sh because they probe diagnostic surface.
+
+use assert
+
+// where: list triple is exhaustive (Fibonacci via recursive where).
+fn fib(n i32) i32 =
+  where (0): 0
+  where (1): 1
+  where (n): fib(n - 2) + fib(n - 1)
+
+test "where: list triple is exhaustive" =
+  assert::equals(55 as i32, fib(10))
+
+// where: array decomposition is exhaustive.
+fn sum_arr(xs [i32]) i32 =
+  where ([]): 0
+  where ([x]): x
+  where ([x, ...rest]): x + sum_arr(rest)
+
+test "where: list triple sums" =
+  assert::equals(10 as i32, sum_arr([1, 2, 3, 4]))
+
+// match: list triple exhaustive (no default).
+fn describe(xs [i32]) string =
+  return match xs:
+    case []: "empty"
+    case [x]: "one"
+    case [x, ...rest]: "many"
+
+test "match: list triple is exhaustive (no default)" =
+  assert::equals("many",  describe([1, 2, 3]))
+  assert::equals("one",   describe([7]))
+  assert::equals("empty", describe([]))
+
+// match: bool exhaustive (no default).
+fn yn(b bool) string =
+  return match b:
+    case true:  "yes"
+    case false: "no"
+
+test "match: bool exhaustive (no default)" =
+  assert::equals("yes", yn(true))
+  assert::equals("no",  yn(false))
+
+// match: exhaustive without default still runs.
+fn count_kind(xs [i32]) i32 =
+  return match xs:
+    case []: 0
+    case [x]: 1
+    case [x, ...rest]: 2
+
+test "match exhaustive without default still runs" =
+  assert::equals(1 as i32, count_kind([5]))
+  assert::equals(0 as i32, count_kind([]))
+  assert::equals(2 as i32, count_kind([1, 2, 3]))
+
+// Struct patterns (Maranget treats fields conservatively but the
+// compile still succeeds and the match runs).
+struct point =
+  x i32
+  y i32
+
+fn label(p point) string =
+  return match p:
+    case point{x: 0, y: 0}: "origin"
+    case point{x: 0, _}:    "y-axis"
+    case point{_, y: 0}:    "x-axis"
+    case point{_, _}:       "other"
+
+test "struct match still compiles (opaque, no false positives)" =
+  assert::equals("origin", label(point{x: 0, y: 0}))
+  assert::equals("y-axis", label(point{x: 0, y: 3}))
+  assert::equals("x-axis", label(point{x: 5, y: 0}))
+  assert::equals("other",  label(point{x: 1, y: 1}))

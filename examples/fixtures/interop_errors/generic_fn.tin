@@ -1,0 +1,3 @@
+fn{#interop} bad[t](x t) t = return x
+
+fn main() i64 = return 0

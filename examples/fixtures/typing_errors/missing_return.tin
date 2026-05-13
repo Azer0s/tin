@@ -1,0 +1,2 @@
+fn pretend() i64 =
+  let _ = 1

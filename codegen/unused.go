@@ -238,18 +238,31 @@ func (cg *CodeGen) isAwaitableType(te ast.TypeExpr) bool {
 		// deterministic and would make the warning flicker
 		// build-to-build.  Collect every match; only fall through
 		// to the await-able check when exactly one survives.
-		suffix := "__" + bare
+		// Skip the suffix scan when the bare name doesn't start with
+		// an ASCII uppercase letter.  Tin's PascalCase convention
+		// guarantees struct names start uppercase; lowercase bares
+		// like `i64`, `byte`, `bool`, `string` can only be scalar /
+		// builtin types.  Without this gate, a query for `i64` would
+		// match monomorphised generics such as `Future__i64` and
+		// falsely classify i64 as Awaitable, which then fires the
+		// "future returned by ..." must-use warning for any
+		// i64-returning libc extern (fwrite, read, write, ...).
+		if len(bare) > 0 && (bare[0] < 'A' || bare[0] > 'Z') {
+			// No struct can have this bare name; bail out.
+		} else {
+			suffix := "__" + bare
 
-		var matches []*ast.StructDecl
+			var matches []*ast.StructDecl
 
-		for k, d := range cg.structDeclsByName {
-			if strings.HasSuffix(k, suffix) {
-				matches = append(matches, d)
+			for k, d := range cg.structDeclsByName {
+				if strings.HasSuffix(k, suffix) {
+					matches = append(matches, d)
+				}
 			}
-		}
 
-		if len(matches) == 1 {
-			decl = matches[0]
+			if len(matches) == 1 {
+				decl = matches[0]
+			}
 		}
 	}
 
@@ -263,7 +276,7 @@ func (cg *CodeGen) isAwaitableType(te ast.TypeExpr) bool {
 			traitName = traitName[idx+2:]
 		}
 
-		if traitName == "Awaitable" {
+		if traitName == "awaitable" {
 			return true
 		}
 	}
@@ -331,9 +344,11 @@ func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
 		switch v := n.(type) {
 		case *ast.FuncDecl:
 			cg.checkUnusedInFunc(v)
+			cg.checkAllowDropTag(v)
 		case *ast.StructDecl:
 			for _, m := range v.Methods {
 				cg.checkUnusedInFunc(m)
+				cg.checkAllowDropTag(m)
 			}
 		}
 	}
@@ -341,14 +356,141 @@ func (cg *CodeGen) checkAllUnused(prog *ast.Program) {
 	cg.checkUnusedImports(prog)
 }
 
+// checkAllowDropTag warns when `#allow_drop` is applied to a function
+// whose return type is not must-use (Result / Future / Awaitable).
+// The tag only suppresses the -Wmust-use diagnostic; on regular
+// i64- / void- / struct-returning fns it has no effect, so its
+// presence is dead weight at best and a misunderstanding of the tag
+// at worst.
+func (cg *CodeGen) checkAllowDropTag(fd *ast.FuncDecl) {
+	if fd == nil || !hasTag(fd.Tags, "allow_drop") {
+		return
+	}
+
+	if fd.RetType != nil {
+		if isResultType(fd.RetType) || isFutureType(fd.RetType) || cg.isAwaitableType(fd.RetType) {
+			return
+		}
+	}
+
+	cg.warn(DiagIneffectiveAllowDrop, fd.Pos(),
+		"`#allow_drop` on `%s` has no effect: the function does not "+
+			"return a must-use value (Result, Future, or Awaitable). "+
+			"Remove the tag, or change the return type to the value "+
+			"callers were meant to drop.",
+		fd.Name)
+}
+
 // checkUnusedImports warns for `use pkg` / `use { name } from pkg` /
 // `use "./file"` declarations whose imported names are never referenced
 // anywhere else in the program. Skipped in REPL mode where each cell sees
 // only its own statements - a `use` in cell N legitimately gets used in
+// isNoParensMacroName reports whether name resolves to a #no_parens
+// macro imported from pkgPath.  Used to suppress the unused-import
+// warning for macros whose invocation site is erased by token
+// substitution before the AST walk sees it.  Selective imports of
+// macros that don't end in `!` route through loadPackageSelective's
+// "function" branch and never get re-bound as a bare macro key, so we
+// fall back to the pkg-qualified entry registered by the loader.
+func (cg *CodeGen) isNoParensMacroName(name, pkgPath string) bool {
+	// Bare `name` keys would over-match: a `use { foo } from regular`
+	// where the importer happens to share a name with an unrelated
+	// no_parens macro foo from another package would silently
+	// suppress the unused-import warning.  Require a pkg-prefixed hit
+	// so the check is anchored to the import we're actually looking
+	// at.
+	if pkgPath == "" {
+		return false
+	}
+
+	parts := strings.Split(pkgPath, "::")
+	short := parts[len(parts)-1]
+
+	candidates := []string{
+		pkgPath + "::" + name, pkgPath + "::" + name + "!",
+		pkgPath + "." + name, pkgPath + "." + name + "!",
+		short + "::" + name, short + "::" + name + "!",
+		short + "." + name, short + "." + name + "!",
+	}
+
+	for _, key := range candidates {
+		if m, ok := cg.macros[key]; ok && macroHasTag(m, "no_parens") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // cell N+1.
+//
+// Also runs the redundant-import-prefix check: if a file does
+// `use net::dns` (binding the short alias `dns`) but then writes
+// `net::dns::lookup_host`, suggest the short form.
 func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 	if cg.replMode {
 		return
+	}
+
+	// nestedImportAliases maps the *prefix tuple* of a nested import
+	// (e.g. ["net", "dns"]) to its bare alias ("dns").  Populated from
+	// `use pkg::nested` / `use pkg::nested::deep` declarations and
+	// consulted on every ScopeAccess so we can warn when the file
+	// reaches for the symbol via the long prefix.  Joined with "::" so
+	// we can compare against ScopeAccess path prefixes cheaply.
+	nestedImportAliases := map[string]string{}
+
+	// selectiveOnlyPkgNames maps a package path to the set of names that
+	// were brought into scope via `use { X, Y } from pkg`.  Populated
+	// only when the same file did NOT also `use pkg` -- in that case
+	// the package-level alias is intentionally available and writing
+	// `pkg::X` is not redundant.
+	pkgImported := map[string]bool{}
+	selectiveBindings := map[string]map[string]bool{} // pkg -> set of names
+
+	for _, n := range prog.Stmts {
+		ud, ok := n.(*ast.UseDecl)
+		if !ok || ud.IsExtern || ud.IsFile {
+			continue
+		}
+
+		if ud.FromSyntax {
+			// Selective: `use { X, Y } from pkg`.
+			if selectiveBindings[ud.Path] == nil {
+				selectiveBindings[ud.Path] = map[string]bool{}
+			}
+
+			for _, name := range ud.Names {
+				selectiveBindings[ud.Path][strings.TrimSuffix(name, "!")] = true
+			}
+
+			continue
+		}
+
+		pkgImported[ud.Path] = true
+
+		if !strings.Contains(ud.Path, "::") {
+			continue
+		}
+
+		nestedImportAliases[ud.Path] = importBaseName(ud.Path)
+	}
+
+	// shadowedNames tracks selective imports for packages that the user
+	// ALSO imported plainly (`use pkg; use { X } from pkg`).  In that
+	// case writing `pkg::X` works but is redundant -- X is already in
+	// scope as a bare name -- so warn and point the user at the short
+	// form.  The hard error for selective-only imports lives in
+	// checkSelectiveImportQualifiers (codegen/resolve.go); this map
+	// only covers the both-imported case.
+	shadowedNames := map[string]map[string]bool{}
+
+	for pkg, names := range selectiveBindings {
+		if !pkgImported[pkg] {
+			continue
+		}
+
+		shadowedNames[pkg] = names
 	}
 
 	// Collect every name referenced anywhere - identifiers, scope-access
@@ -405,16 +547,90 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		case *ast.Identifier:
 			used[v.Name] = true
 		case *ast.ScopeAccess:
-			if len(v.Path) > 0 {
-				// Generic-type method calls fold the type-arg list into the
-				// first path segment, e.g. ScopeAccess{Path: ["pkg::T[U]",
-				// "method"]}. Split on "::" to recover the import root.
-				root := v.Path[0]
-				if idx := strings.Index(root, "::"); idx >= 0 {
-					root = root[:idx]
+			// Mark every path segment as used.  A call to
+			// `net::dns::lookup_host` is a usage of BOTH `net` (in case
+			// the file did `use net`) AND `dns` (in case the file did
+			// `use net::dns`).  Marking only the first segment would
+			// falsely warn that `dns` is unused for the second form.
+			//
+			// Generic-type method calls fold the type-arg list into a
+			// path segment, e.g. ScopeAccess{Path: ["pkg::T[U]", "m"]};
+			// split each segment on "::" so the import-root and any
+			// inner namespace names are recovered.
+			for _, seg := range v.Path {
+				if idx := strings.Index(seg, "::"); idx >= 0 {
+					used[seg[:idx]] = true
+				} else {
+					used[seg] = true
+				}
+			}
+			// Redundant-import-prefix: if any prefix of this path's
+			// leading namespace segments matches a `use pkg::sub`
+			// alias the file already bound, point the user at the
+			// shorter form.  The check only fires for path lengths
+			// strictly greater than the alias depth so we don't
+			// flag the alias usage itself.
+			for prefixLen := 2; prefixLen < len(v.Path); prefixLen++ {
+				joined := strings.Join(v.Path[:prefixLen], "::")
+
+				alias, ok := nestedImportAliases[joined]
+				if !ok {
+					continue
 				}
 
-				used[root] = true
+				shortPath := alias + "::" + strings.Join(v.Path[prefixLen:], "::")
+				longPath := strings.Join(v.Path, "::")
+
+				cg.warn(DiagRedundantImportPrefix, v.Pos(),
+					"`%s` already binds `%s`; write `%s` instead of `%s`",
+					joined, alias, shortPath, longPath)
+
+				break
+			}
+			// Selective-shadow redundant-prefix: when the file did
+			// `use { X } from pkg` (selective only -- no plain
+			// `use pkg`), writing `pkg::X` reaches through a qualifier
+			// the file did not opt into.  Suggest the bare form.  Only
+			// fires when the trailing name was actually one of the
+			// selective imports; unrelated `pkg::Y` references still
+			// surface the usual "package not imported" error from the
+			// resolver instead.
+			if len(v.Path) >= 2 {
+				// Selective-shadow redundant-prefix.  The path can have
+				// arbitrary depth -- `pkg::Adt::method`,
+				// `pkg::sub::Adt::Ctor`, `pkg::sub::nested::fn`, or
+				// `pkg::Adt[T,U]::method` (where the [T,U] sometimes
+				// gets folded into the leading segment).  Normalize
+				// into a flat list of bare segments and try every
+				// prefix as the candidate package path.
+				flat := flattenScopeAccessSegments(v.Path)
+
+				warned := false
+
+				for k := 1; k < len(flat) && !warned; k++ {
+					pkgPath := strings.Join(flat[:k], "::")
+
+					names, has := shadowedNames[pkgPath]
+					if !has {
+						continue
+					}
+					// Look one segment past the prefix -- that is what
+					// the user typically imported (the type, ctor, or
+					// fn name).  Suggest rewriting with that bare name.
+					candidate := flat[k]
+					if !names[candidate] {
+						continue
+					}
+
+					longPath := strings.Join(v.Path, "::")
+					shortPath := strings.Join(append([]string{candidate}, flat[k+1:]...), "::")
+
+					cg.warn(DiagRedundantImportPrefix, v.Pos(),
+						"`use { %s } from %s` already binds `%s`; write `%s` instead of `%s`",
+						candidate, pkgPath, candidate, shortPath, longPath)
+
+					warned = true
+				}
 			}
 		case *ast.FieldAccess:
 			if id, ok := v.Expr.(*ast.Identifier); ok {
@@ -458,17 +674,36 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		if ud.FromSyntax && len(ud.Names) > 0 {
 			// `use { a, b } from pkg`: each name lands in scope directly.
 			for _, name := range ud.Names {
-				if !used[name] {
-					cg.warn(DiagUnusedImport, ud.Pos(),
-						"imported name %q is never used", name)
+				if used[name] {
+					continue
 				}
+				// #no_parens macros are erased by token-substitution in
+				// the parser before the AST is walked, so a real
+				// invocation leaves no trace for `used[name]` to catch.
+				// Suppress the warning when the import resolves to one.
+				if cg.isNoParensMacroName(name, ud.Path) {
+					continue
+				}
+
+				cg.warn(DiagUnusedImport, ud.Pos(),
+					"imported name %q is never used", name)
 			}
 
 			continue
 		}
 
-		// `use pkg` / `use "./file"` brings the package handle into scope
-		// under its base name (last `::` or `/` segment).
+		// `use "./file"` flat-imports every exported symbol into the
+		// current scope under its bare name -- there is no namespace
+		// alias to reference, so a "is the base name used?" check
+		// would always fail.  Skip the unused diagnostic for this
+		// import shape; the symbol-level unused checks above already
+		// catch dead code referenced through the file import.
+		if ud.IsFile {
+			continue
+		}
+
+		// `use pkg` brings the package handle into scope under its
+		// base name (last `::` segment).
 		base := importBaseName(ud.Path)
 		if base == "" || used[base] {
 			continue
@@ -477,6 +712,29 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		cg.warn(DiagUnusedImport, ud.Pos(),
 			"import %q is never used", base)
 	}
+}
+
+// flattenScopeAccessSegments splits each segment of a ScopeAccess path on
+// `::` (since the parser sometimes folds `pkg::Adt[T]` into one segment
+// to keep the type-arg list attached to its name) and strips any trailing
+// `[T,U]` type-arg suffix from each piece.  Returns the flat list of bare
+// identifier segments, which is what the redundant-import-prefix walk
+// needs to try every possible package-prefix split without caring about
+// how deep the namespace nesting is.
+func flattenScopeAccessSegments(path []string) []string {
+	flat := make([]string, 0, len(path))
+
+	for _, seg := range path {
+		for _, piece := range strings.Split(seg, "::") {
+			if i := strings.IndexByte(piece, '['); i >= 0 {
+				piece = piece[:i]
+			}
+
+			flat = append(flat, piece)
+		}
+	}
+
+	return flat
 }
 
 // importBaseName returns the bare identifier under which a `use` declaration

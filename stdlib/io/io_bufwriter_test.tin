@@ -1,0 +1,71 @@
+// stdlib/io/io_bufwriter_test.tin -- coverage for io::BufWriter.
+//
+// Backs the BufWriter with an os::tempfile so each test exercises the
+// trait-dispatch path (BufWriter.inner is an AsyncWriter fat-ptr
+// pointing at os::File).  Verifies: small writes coalesce until flush,
+// auto-flush at capacity, oversized writes bypass the buffer, close
+// releases internal storage without touching the underlying file.
+
+use assert
+use io
+use os
+
+fn{#async} write_str(bw *io::BufWriter, s string) i64 =
+  let bytes = s as [byte]
+  return await bw.write(&bytes[0], len(bytes))
+
+fn{#async} flush_now(bw *io::BufWriter) i64 =
+  return await bw.flush()
+
+fn read_all(path string) string =
+  return os::read_file(path).unwrap()
+
+test "BufWriter coalesces small writes; explicit flush drains" =
+  let tf = os::tempfile().unwrap()
+  let bw = io::bufwriter(tf.file as io::AsyncWriter, 32)
+  let mbw = &bw
+  let n1 = await write_str(mbw, "abc")
+  let n2 = await write_str(mbw, "defg")
+
+  assert::equals(3 as i64, n1)
+  assert::equals(4 as i64, n2)
+
+  let f = await flush_now(mbw)
+
+  assert::equals(7 as i64, f)
+
+  mbw.close()
+  tf.file.close()
+
+  assert::equals("abcdefg", read_all(tf.path))
+
+  let _ = os::remove(tf.path)
+
+test "BufWriter auto-flushes when buffer reaches capacity" =
+  let tf = os::tempfile().unwrap()
+  let bw = io::bufwriter(tf.file as io::AsyncWriter, 4)
+  let mbw = &bw
+  let _ = await write_str(mbw, "wxyz1234")
+  let _ = await flush_now(mbw)
+
+  mbw.close()
+  tf.file.close()
+
+  assert::equals("wxyz1234", read_all(tf.path))
+
+  let _ = os::remove(tf.path)
+
+test "BufWriter passes oversized writes straight through" =
+  let tf = os::tempfile().unwrap()
+  let bw = io::bufwriter(tf.file as io::AsyncWriter, 4)
+  let mbw = &bw
+  let _ = await write_str(mbw, "ab")
+  let _ = await write_str(mbw, "QQQQQQQQQQQQ")
+  let _ = await flush_now(mbw)
+
+  mbw.close()
+  tf.file.close()
+
+  assert::equals("abQQQQQQQQQQQQ", read_all(tf.path))
+
+  let _ = os::remove(tf.path)

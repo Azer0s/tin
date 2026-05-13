@@ -122,6 +122,36 @@ type scopeEntry struct {
 	// otherwise because nothing in the iface struct's static layout
 	// reveals that data points at heap memory.
 	ownsHeapIfaceData bool
+
+	// ownsHeapPromotedFields is the set of LLVM field offsets whose
+	// pointer values are heap-promoted blocks owned by this binding.
+	// Populated when the receiving call site looks up
+	// cg.fnReturnsHeapPromotedFields for the callee and inherits its
+	// metadata.  Scope-exit emits a _tin_release for the value loaded
+	// from each listed field so the heap blocks freed by the per-
+	// struct release helper (which treats raw *T fields as borrows)
+	// don't leak.
+	ownsHeapPromotedFields []int
+
+	// ownsPtrViaRetain is set when emitOwningPtrRetainIfApplicable
+	// bumped the heap RC for this binding's source value (a copy
+	// expression: identifier, field access, index, deref).  The
+	// matching scope-exit release_ptr fires off this flag.  Plain
+	// `&local` bindings, function parameters, and call-result
+	// bindings (isHeapOwned) DO NOT set this - their release
+	// (or non-release) is handled elsewhere.
+	ownsPtrViaRetain bool
+
+	// pointsToBorrowedStorage is true when this binding holds a pointer
+	// (`*T`) that was initialized by taking the address of a stack
+	// alloca or module-level global -- i.e. the pointee has NO TinRCHdr
+	// prefix.  Downstream coercions like `let a *Trait = thisBinding`
+	// must use the borrow vtable (no-op data release) and skip the
+	// _tin_retain on the data field, otherwise the iface release path
+	// reads (data - sizeof(TinRCHdr)) bytes that don't exist and either
+	// reports an uninit-read under valgrind or atomically corrupts
+	// adjacent stack / .bss memory.
+	pointsToBorrowedStorage bool
 }
 
 type scope struct {
@@ -129,10 +159,57 @@ type scope struct {
 	names              []string // insertion order of `vars` keys; never randomized.
 	parent             *scope
 	isFunctionBoundary bool // if true, emitAllScopeReleases stops here and does not release parent vars
+	// visibleTypes tracks bare type names (data, struct, enum, trait,
+	// type alias) that are accessible without package qualification
+	// in this scope. Populated by:
+	//   - type declarations in the current translation unit (the
+	//     declaring scope sees its own types bare),
+	//   - `use { Name } from pkg` selective imports (importer sees
+	//     Name bare),
+	//   - file-path `use "./helper"` imports (helper's decls flow
+	//     into the importing scope as if inlined).
+	// Plain `use pkg` does NOT populate this - consumers must write
+	// `pkg::Name` to reach those types, mirroring how variables /
+	// functions already require pkg qualification or selective
+	// import. typeNameVisible walks the parent chain.
+	visibleTypes map[string]bool
 }
+
+// rcRetainedFromCopy is true on a scopeEntry when its let-binding
+// took a copy-expression value (Identifier, FieldAccess, IndexExpr,
+// non-temporary DerefExpr) AND emitOwningPtrRetainIfApplicable
+// bumped the heap block's RC. Marker for emitScopeRelease's
+// `*TinStruct` / `*Trait` release path: only emit release_ptr when
+// the binding actually took ownership of a heap block.  `let mb = &b`
+// (AddressOf of a stack local) does NOT set this flag, so the scope
+// release no longer tries to atomic-decrement memory it doesn't own.
 
 func newScope(parent *scope) *scope {
 	return &scope{vars: make(map[string]*scopeEntry), parent: parent}
+}
+
+// markTypeVisible records that bareName is accessible without
+// qualification in this scope. Used by type declarations and
+// selective imports. Lazy-allocates the map on first use.
+func (s *scope) markTypeVisible(bareName string) {
+	if s.visibleTypes == nil {
+		s.visibleTypes = make(map[string]bool)
+	}
+
+	s.visibleTypes[bareName] = true
+}
+
+// typeNameVisible reports whether bareName is reachable as an
+// unqualified type identifier from this scope, walking the parent
+// chain.
+func (s *scope) typeNameVisible(bareName string) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if cur.visibleTypes != nil && cur.visibleTypes[bareName] {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *scope) lookup(name string) (*scopeEntry, bool) {

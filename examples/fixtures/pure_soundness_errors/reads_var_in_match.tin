@@ -1,0 +1,10 @@
+var g i64 = 0
+
+fn{#pure} bad(n i64) i64 =
+  match n:
+    case 0:
+      return g
+    default:
+      return 0
+
+fn main() i64 = return bad(0)

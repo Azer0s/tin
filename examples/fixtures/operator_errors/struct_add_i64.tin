@@ -1,0 +1,8 @@
+// Mixed struct + primitive: same fall-through as struct+struct.
+struct point =
+  x i32
+
+fn main() i64 =
+  let a = point{x: 1}
+  let _ = a + 5
+  return 0

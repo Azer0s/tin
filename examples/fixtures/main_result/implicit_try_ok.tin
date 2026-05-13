@@ -1,0 +1,10 @@
+use errors
+use { Result } from result
+
+fn parse_pos(s string) Result[i64, errors::Err] =
+  if s == "":
+    return Err(errors::new("empty"))
+  return Ok(7)
+
+let v = try parse_pos("x")
+echo v

@@ -807,15 +807,24 @@ fn parse_value(p *Parser) *Value =
 
 // Public API
 
-// JsonError describes why a parse attempt failed.
+// JsonError enumerates the failures parse can surface. Implements
+// errors::Err so calls return Result[T, errors::Err] like the rest
+// of the typed-error ecosystem.
 //
-//   data JsonError =
+//   data JsonError(errors::Err, print) =
 //     EmptyInput                // source string was empty
 //     Malformed(pos i64, msg string)
 //       // generic malformation at byte offset `pos`; `msg` is a short reason
-data JsonError =
+data JsonError(errors::Err, print) =
   EmptyInput
   Malformed(pos i64, msg string)
+
+  fn errors::Err::message(this JsonError) string =
+    match this:
+      case EmptyInput:        return "json: empty input"
+      case Malformed(pos, m): return "json: malformed at byte {pos}: {m}"
+
+  fn ::print(this JsonError) string = return this.message()
 
 // parse parses a JSON string into a Value tree.
 //
@@ -825,15 +834,15 @@ data JsonError =
 //
 // Or, when you don't care about the error:
 //
-//   let v = result::unwrap_or(json::parse(s), Value{kind: Kind.null_v})
-fn parse(s string) Result[Value, JsonError] =
+//   let v = json::parse(s).unwrap_or(Value{kind: Kind.null_v})
+fn parse(s string) Result[Value, errors::Err] =
   if len(s) == 0:
-    return Result[Value, JsonError]::Err(JsonError::EmptyInput)
+    return Err(EmptyInput)
   let p = Parser{src: s as *byte, pos: 0, len: len(s), err_pos: 0, err_msg: "", has_err: false}
   let v = parse_value(&p)
 
   if p.has_err:
-    return Result[Value, JsonError]::Err(JsonError::Malformed(p.err_pos, p.err_msg))
+    return Err(Malformed(p.err_pos, p.err_msg))
 
   return Ok(*v)
 
@@ -916,12 +925,12 @@ fn parse_nested_any_impl[T](zero any, doc Value, type_hint T) any =
 //
 //   let u = json::parse[user]("{\"id\":1,\"name\":\"Alice\"}")
 //   echo u.name   // Alice
-fn parse[T](s string) Result[T, JsonError] =
+fn parse[T](s string) Result[T, errors::Err] =
   let out T
   let doc Value
 
   match parse(s):
-    case Err(e): return Result[T, JsonError]::Err(e)
+    case Err(e): return Err(e)
     case Ok(d):
       doc = d
 

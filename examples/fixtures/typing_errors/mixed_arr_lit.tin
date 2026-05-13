@@ -1,0 +1,3 @@
+fn main() =
+  let xs [i64] = [1, "two"]
+  echo "{xs[0]}"

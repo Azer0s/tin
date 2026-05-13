@@ -14,6 +14,7 @@
 
 use strings
 use collections
+use result
 
 // HttpStatus holds common HTTP status codes as named i32 constants.
 enum i32 HttpStatus =
@@ -155,12 +156,7 @@ fn clip_body(body string, content_length i64) string =
 fn content_length(headers collections::HashMap[string, string]) i64 =
   if !headers.has("content-length"):
     return -1
-  let (v, err) = strings::parse_int(headers.get("content-length"))
-
-  if err != nil:
-    return -1
-
-  return v
+  return strings::parse_int(headers.get("content-length")).unwrap_or(0 - 1)
 
 // parse_request parses an HTTP/1.x request from buf.
 // Returns a zero-value HttpRequest if the request line is malformed.
@@ -233,12 +229,10 @@ fn parse_response(buf string) HttpResponse =
     let sp2 = strings::index_of(rest, " ")
 
     if sp2 >= 0:
-      let (code, _) = strings::parse_int32(strings::substr(rest, 0, sp2))
-      status_code = code
+      status_code = strings::parse_int32(strings::substr(rest, 0, sp2)).unwrap_or(0 as i32)
       reason = strings::trim(strings::substr(rest, sp2 + 1, len(rest)))
     else:
-      let (code, _) = strings::parse_int32(rest)
-      status_code = code
+      status_code = strings::parse_int32(rest).unwrap_or(0 as i32)
 
   let hdr_start = skip_newline(header_zone, eol, n)
   let headers = parse_headers(header_zone, hdr_start, n)

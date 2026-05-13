@@ -1,0 +1,7 @@
+struct Cm(implicit[i64], implicit[i64]) =
+  mm i64
+  static fn ::implicit(n i64) Cm = return Cm{mm: n * 10}
+
+fn main() =
+  let c Cm = 5
+  echo "{c.mm}"

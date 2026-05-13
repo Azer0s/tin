@@ -8,16 +8,17 @@
 //                  add/cas only available on numeric t (i*, u*, f*); on
 //                  Atomic[bool] only load/store/make are exposed.
 //   Channel[T]   - bounded FIFO channel (ring buffer + Mutex + Cond)
-//   Awaitable[t] - trait for types that can be awaited with `await`
-//   Future[t]    - typed result from `spawn`; implements Awaitable[t]
+//   Future[t]    - typed result from `spawn`; implements awaitable[t]
 //   Unit         - empty struct used as the return type for void async functions
+//
+// awaitable[t] (the trait `await` desugars against) is defined in
+// runtime/builtin/awaitable.tin and auto-loaded into every program.
 
+use "./future"
 use "./mutex"
 use "./rwmutex"
 use "./cond"
 use "./atomic"
-use "./awaitable"
-use "./future"
 use "./channel"
 
-export { Mutex, RWMutex, Cond, Atomic, Channel, Awaitable, Future, Unit } as sync
+export { Mutex, RWMutex, Cond, Atomic, Channel, Future, Unit } as sync

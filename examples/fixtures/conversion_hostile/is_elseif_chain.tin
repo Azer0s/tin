@@ -1,0 +1,25 @@
+trait Animal =
+  fn sound(this Animal) string = virtual
+
+struct Dog(Animal) =
+  name string
+  fn Animal::sound(this Dog) string = return "woof"
+
+struct Cat(Animal) =
+  name string
+  fn Animal::sound(this Cat) string = return "meow"
+
+fn describe(a *Animal) string =
+  if a is *Dog:
+    let d = a as *Dog
+    return "dog: " ++ (*d).name
+  else if a is *Cat:
+    let c = a as *Cat
+    return "cat: " ++ (*c).name
+  return "unknown"
+
+fn main() =
+  let d = &Dog{name: "rex"}
+  let c = &Cat{name: "tom"}
+  echo describe(d)
+  echo describe(c)

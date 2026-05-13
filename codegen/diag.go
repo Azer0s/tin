@@ -15,7 +15,25 @@ import (
 // All compiler warnings should flow through CodeGen.warn() with one of these
 // names so the user can scope suppression and escalation precisely.
 const (
-	DiagAsyncMain         = "async-main"
+	DiagAsyncMain = "async-main"
+	DiagReturnTry = "return-try"
+	// DiagMatchResultTry fires on the two-arm Result match antipattern
+	// where the Ok arm assigns to (or just binds) a value and the Err
+	// arm returns early:
+	//
+	//   match parse(s):
+	//     case Ok(v): outer = v
+	//     case Err(_): return some_fallback
+	//
+	// The `try` keyword exists for exactly this control flow:
+	//
+	//   let outer = try parse(s)                // err returns the Result
+	//   let outer = try parse(s).map_err(...)   // err-type adapter
+	//
+	// Default-on; -Wno-match-result-try silences it (useful in code
+	// that genuinely needs side-effects in the Err arm beyond a return).
+	DiagMatchResultTry    = "match-result-try"
+	DiagUnusedWildcard    = "unused-wildcard"
 	DiagBoolAnalysis      = "bool-analysis"
 	DiagUnusedMatchArms   = "unused-match-arms"
 	DiagAwaitMatchGuards  = "await-match-guards"
@@ -105,8 +123,8 @@ const (
 	// it elides the error path entirely. The fix is to bind the result and
 	// match on it, propagate it via try!, or take it via unwrap_or / unwrap.
 	// To intentionally drop it, write `let _ = call(...)`. Default-on; use
-	// -Wno-unused-must-use to silence.
-	DiagUnusedMustUse = "unused-must-use"
+	// -Wno-must-use to silence.
+	DiagUnusedMustUse = "must-use"
 	// DiagUnclosedCloseable fires when a local binding's value is produced
 	// by a function whose return type implements `io::Closeable` (or
 	// another resource trait) and the binding leaves scope without a
@@ -145,6 +163,23 @@ const (
 	// Removing the cast is a pure cleanup; the resulting program is
 	// type-identical and shorter.  Default-on.
 	DiagRedundantTypeCast = "redundant-type-cast"
+	// DiagRedundantImportPrefix fires when a file imports a nested
+	// package (e.g. `use net::dns`) and then refers to it through the
+	// fully qualified prefix (`net::dns::lookup_host`) instead of the
+	// shorter alias the import already binds (`dns::lookup_host`).  The
+	// shorter form matches the import line, is the canonical way to
+	// reach the same symbol after the import, and avoids leaving the
+	// reader wondering whether `net` is also in scope (it may not be).
+	// Default-on.
+	DiagRedundantImportPrefix = "redundant-import-prefix"
+	// DiagIneffectiveAllowDrop fires when the `#allow_drop` tag is
+	// attached to a function whose return type is not a must-use
+	// (Result, Future, Awaitable).  `#allow_drop` only suppresses the
+	// -Wmust-use diagnostic; on a regular i64- / void- / struct-
+	// returning function it has zero effect, so its presence either
+	// reflects a copy-paste leftover or a misunderstanding of what the
+	// tag does.  Default-on.
+	DiagIneffectiveAllowDrop = "ineffective-allow-drop"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only

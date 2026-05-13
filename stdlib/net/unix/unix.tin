@@ -20,12 +20,29 @@ use io
 use rc
 use sync
 use errors
-use errors
+use result
+use { Result } from result
 
 // C helpers
 fn tin_unix_listen_c(path string) i32  = extern("_tin_unix_listen")
 fn tin_unix_accept_c(fd i32) i32       = extern("_tin_unix_accept")
 fn tin_unix_connect_c(path string) i32 = extern("_tin_unix_connect")
+
+// UnixError enumerates the failures the net::unix stdlib can
+// surface. Implements errors::Err so calls return
+// Result[T, errors::Err] and unify with the typed-error ecosystem.
+data UnixError(errors::Err, print) =
+  AcceptFailed
+  CannotBind(path string)
+  CannotConnect(path string)
+
+  fn errors::Err::message(this UnixError) string =
+    match this:
+      case AcceptFailed:      return "unix: accept failed"
+      case CannotBind(p):     return "unix: failed to bind " ++ p
+      case CannotConnect(p):  return "unix: failed to connect to " ++ p
+
+  fn ::print(this UnixError) string = return this.message()
 
 // Conn is a connected Unix domain socket.
 // Implements io::AsyncReader and io::AsyncWriter so it works with ioutil.
@@ -57,36 +74,34 @@ struct Server (io::Closeable) =
   fn fd(this Server) i32 = return this._fd_cell.payload()
 
   // accept waits for the next connection.
-  // Returns (Conn, *errors::Err) - nil Err means success.
-  fn accept(this Server) (Conn, *errors::Err) =
+  fn accept(this Server) Result[Conn, errors::Err] =
     let fd = tin_unix_accept_c(this.fd())
 
     if fd < 0:
-      return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: accept failed"))
+      return Err(AcceptFailed)
 
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+    return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
   fn Closeable::close(this Server) =
     io::close(this.fd())
 
-// listen creates a Unix domain socket server at path.
-// Removes any stale socket file. Returns (Server, *errors::Err).
-fn listen(path string) (Server, *errors::Err) =
+// listen creates a Unix domain socket server at path. Removes any
+// stale socket file before bind.
+fn listen(path string) Result[Server, errors::Err] =
   let fd = tin_unix_listen_c(path)
 
   if fd < 0:
-    return (Server{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: failed to bind {path}"))
+    return Err(CannotBind(path))
 
-  return (Server{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+  return Ok(Server{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
 // dial connects to a Unix domain socket at path.
-// Returns (Conn, *errors::Err).
-fn dial(path string) (Conn, *errors::Err) =
+fn dial(path string) Result[Conn, errors::Err] =
   let fd = tin_unix_connect_c(path)
 
   if fd < 0:
-    return (Conn{_fd_cell: rc::Cell[i32].alloc(-1, io::close)}, errors::new("unix: failed to connect to {path}"))
+    return Err(CannotConnect(path))
 
-  return (Conn{_fd_cell: rc::Cell[i32].alloc(fd, io::close)}, nil)
+  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
 
-export { Conn, Server, listen, dial } as unix
+export { Conn, Server, UnixError, listen, dial } as unix

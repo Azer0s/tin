@@ -4,6 +4,7 @@
 // implement this trait.
 
 use option
+use { Option } from option
 
 trait List[T] =
   fn len(this List[T]) i64

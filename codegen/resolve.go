@@ -16,6 +16,15 @@ import (
 // checkDuplicateDecls is the entry point.  It checks the top-level (module)
 // scope and every nested block/function/lambda body for duplicate `let` names.
 func checkDuplicateDecls(nodes []ast.Node) error {
+	// Duplicate `use` decls at module scope: importing the same package
+	// twice (or pulling the same name from a package twice) is almost
+	// always a copy-paste mistake.  Catch it before codegen folds the
+	// dedup -- silently ignoring the second `use` made typos like
+	// `use rseult; use result` look fine until something downstream broke.
+	if err := checkDuplicateUseDecls(nodes); err != nil {
+		return err
+	}
+
 	// Top-level module scope.
 	if err := checkNodeListDecls(nodes); err != nil {
 		return err
@@ -25,6 +34,130 @@ func checkDuplicateDecls(nodes []ast.Node) error {
 	for _, n := range nodes {
 		if err := walkForDuplicates(n); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// checkSelectiveImportQualifiers rejects `pkg::Name` references when
+// the surrounding file only imported `pkg` via `use { ... } from pkg`.
+// Selective imports bring the named symbols into scope as bare names
+// but do NOT register the package itself as a namespace -- writing
+// `pkg::X` reaches for a qualifier the file never opted into, and is
+// almost always a stale habit from before the selective import was
+// added.  Files that want both forms must say both: `use pkg` and
+// `use { X } from pkg`.
+func checkSelectiveImportQualifiers(nodes []ast.Node) error {
+	// First pass: classify each top-level UseDecl.
+	pkgImported := map[string]bool{}
+	selectivePkgs := map[string]bool{}
+
+	for _, node := range nodes {
+		ud, ok := node.(*ast.UseDecl)
+		if !ok || ud.IsExtern || ud.IsFile {
+			continue
+		}
+
+		if ud.FromSyntax {
+			selectivePkgs[ud.Path] = true
+		} else {
+			pkgImported[ud.Path] = true
+		}
+	}
+
+	// Set of packages that are reachable ONLY through selective imports.
+	selectiveOnly := map[string]bool{}
+
+	for p := range selectivePkgs {
+		if !pkgImported[p] {
+			selectiveOnly[p] = true
+		}
+	}
+
+	if len(selectiveOnly) == 0 {
+		return nil
+	}
+
+	// Second pass: walk the program and reject any ScopeAccess whose
+	// first segment names a selective-only package.  We do not try to
+	// rewrite or downgrade the error: the file declared its intent by
+	// importing selectively, so adding `use pkg` is the right fix.
+	var visitErr error
+
+	visit := func(n ast.Node) {
+		if visitErr != nil {
+			return
+		}
+
+		sa, ok := n.(*ast.ScopeAccess)
+		if !ok || len(sa.Path) < 1 {
+			return
+		}
+
+		pkg := sa.Path[0]
+		if idx := strings.Index(pkg, "::"); idx >= 0 {
+			pkg = pkg[:idx]
+		}
+
+		if !selectiveOnly[pkg] {
+			return
+		}
+
+		visitErr = fmt.Errorf("%d:%d: `%s::...` cannot be used because the file only imported %q selectively (`use { ... } from %s`); add `use %s` to opt into the qualified form, or rewrite as a bare name",
+			sa.Pos().Line, sa.Pos().Col, pkg, pkg, pkg, pkg)
+	}
+
+	for _, n := range nodes {
+		walkAST(n, visit)
+
+		if visitErr != nil {
+			return visitErr
+		}
+	}
+
+	return nil
+}
+
+// checkDuplicateUseDecls scans the module-level node list and rejects
+// repeated package or selective-name imports.  Allowed:
+//   - `use foo` paired with `use { X } from foo` (package alias + selective)
+//   - `use { X } from foo` paired with `use { Y } from foo` (different names)
+//
+// Rejected:
+//   - `use foo` ... `use foo`     (duplicate package import)
+//   - `use { X } from foo` ... `use { X } from foo` (duplicate selective)
+func checkDuplicateUseDecls(nodes []ast.Node) error {
+	seenPkg := make(map[string]int)
+	seenSel := make(map[string]int) // key = "<pkg>::<name>"
+
+	for _, node := range nodes {
+		ud, ok := node.(*ast.UseDecl)
+		if !ok || ud.IsExtern {
+			continue
+		}
+
+		if !ud.FromSyntax {
+			// Plain `use foo` -- track the package path.
+			if prev, dup := seenPkg[ud.Path]; dup {
+				return fmt.Errorf("%d:%d: duplicate import %q (previously imported at line %d)",
+					ud.Pos().Line, ud.Pos().Col, ud.Path, prev)
+			}
+
+			seenPkg[ud.Path] = ud.Pos().Line
+
+			continue
+		}
+
+		// Selective `use { a, b } from foo` -- track each name independently.
+		for _, name := range ud.Names {
+			key := ud.Path + "::" + name
+			if prev, dup := seenSel[key]; dup {
+				return fmt.Errorf("%d:%d: duplicate import of %q from %q (previously imported at line %d)",
+					ud.Pos().Line, ud.Pos().Col, name, ud.Path, prev)
+			}
+
+			seenSel[key] = ud.Pos().Line
 		}
 	}
 

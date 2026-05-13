@@ -1,0 +1,43 @@
+//!-suppressions=valgrind-glibc-nss.supp [linux]
+// stdlib/net/dns/dns_test.tin -- coverage for net::dns.
+//
+// lookup_host hits the real resolver, so we test against `localhost`
+// which every POSIX system resolves locally (127.0.0.1 and ::1) and
+// against a guaranteed-invalid label to exercise the error path.
+//
+// The `//!-suppressions=` directive above (linux-only) silences the 21
+// "still reachable" blocks glibc's lazy nss/resolver dlopen leaves
+// mapped for the process lifetime when getaddrinfo() runs for the
+// first time.  Pure-C reproducer with the exact same byte/block count
+// proves they originate entirely in glibc; the suppression rules in
+// the file are anchored at `_dl_open` so real leaks elsewhere are
+// not affected.
+
+use assert
+use net::dns
+
+test "lookup_host resolves localhost to a loopback address" =
+  let r = dns::lookup_host("localhost")
+
+  match r:
+    case Ok(addrs):
+      assert::ok(len(addrs) > 0)
+
+      let found_loopback = false
+
+      for a in addrs:
+        if a == "127.0.0.1": found_loopback = true
+        if a == "::1":       found_loopback = true
+
+      assert::ok(found_loopback)
+    case Err(e):
+      panic("localhost resolution failed: {e.message()}")
+
+test "lookup_host surfaces an Err for a malformed label" =
+  // Empty string is rejected by getaddrinfo without any network
+  // round-trip, so this case stays synchronous even on hosts whose
+  // resolver would otherwise spend seconds on NXDOMAIN for a
+  // .invalid suffix.
+  let r = dns::lookup_host("")
+
+  assert::ok(r.is_err())

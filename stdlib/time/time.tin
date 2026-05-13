@@ -7,7 +7,7 @@
 //
 //   let t = time::now()                          // current wall-clock time
 //   let iso = t.to_rfc3339()                     // "2024-01-01T12:34:56.000000000Z"
-//   let (t2, err) = time::parse_rfc3339(iso)     // round-trip
+//   let t2 = time::parse_rfc3339(iso).unwrap()   // round-trip
 //
 // ## Duration
 //
@@ -23,11 +23,13 @@
 // string and json::parse[T] reconstructs the Instant automatically.
 //
 //   struct event = created_at Instant
-//   let ev = result::unwrap_or(json::parse[event]("{\"created_at\":\"2024-01-01T00:00:00Z\"}"), event{})
+//   let ev = json::parse[event]("{\"created_at\":\"2024-01-01T00:00:00Z\"}").unwrap_or(event{})
 //
 // RFC3339 with nanosecond precision is used for cross-language interoperability.
 
 use errors
+use result
+use { Result } from result
 use encoding::json
 use sync
 
@@ -176,10 +178,10 @@ struct Instant(json::JsonSerializable, json::JsonDeserializable) =
 
   // until returns the Duration from this to later.
   // Returns an error if later is before this.
-  fn until(this Instant, later Instant) (Duration, *errors::Err) =
+  fn until(this Instant, later Instant) Result[Duration, errors::Err] =
     if later.ns < this.ns:
-      return (Duration{ns: 0}, errors::new("time: end is before start"))
-    return (Duration{ns: later.ns - this.ns}, nil)
+      return Err(errors::new("time: end is before start"))
+    return Ok(Duration{ns: later.ns - this.ns})
 
   // elapsed returns the Duration from this to later without error checking.
   fn elapsed(this Instant, later Instant) Duration =
@@ -221,10 +223,10 @@ fn{#async} sleep_impl(ms i64) =
 // until the fiber finishes, which is when the timer unparks the
 // fiber after at least `ms` milliseconds.  Discarding the future
 // (`time::sleep(d)` as a statement) leaves the wait running in the
-// background and the unused-must-use check warns at compile time.
+// background and the must-use check warns at compile time.
 //
 //   await time::sleep(time::from_ms(20))   // parks 20ms
-//   time::sleep(time::from_ms(20))         // [-Wunused-must-use]
+//   time::sleep(time::from_ms(20))         // [-Wmust-use]
 //
 // Sub-millisecond residues round up to 1ms so a request for "a tiny
 // bit" still yields rather than becoming a busy no-op; zero or
@@ -255,25 +257,41 @@ fn sleep_ms(ms i64) sync::Future[sync::Unit] =
 const RFC3339     string = "2006-01-02T15:04:05Z07:00"
 const RFC3339Nano string = "2006-01-02T15:04:05.999999999Z07:00"
 
+// TimeError enumerates the failures the parse_* family can surface.
+// Implements errors::Err so calls return Result[T, errors::Err] and
+// unify with the rest of the typed-error ecosystem. Carrying the
+// offending input (or layout) makes round-tripping through generic
+// error paths still faithful to what the user supplied.
+data TimeError(errors::Err, print) =
+  InvalidRfc3339(input string)
+  UnsupportedLayout(layout string)
+
+  fn errors::Err::message(this TimeError) string =
+    match this:
+      case InvalidRfc3339(input):  return "time: invalid RFC3339 string: " ++ input
+      case UnsupportedLayout(lay): return "time: unsupported layout: " ++ lay
+
+  fn ::print(this TimeError) string = return this.message()
+
 // parse_rfc3339 parses an RFC3339 string into an Instant.
 // Supports UTC (Z) and timezone offsets (+HH:MM / -HH:MM).
 // Fractional seconds (up to nanosecond precision) are supported.
-fn parse_rfc3339(s string) (Instant, *errors::Err) =
+fn parse_rfc3339(s string) Result[Instant, errors::Err] =
   let ns i64 = 0
   let ok = tin_from_rfc3339_c(s, &ns)
 
   if ok != 0:
-    return (Instant{ns: 0}, errors::new("time: invalid RFC3339 string: " ++ s))
+    return Err(InvalidRfc3339(s))
 
-  return (Instant{ns: ns}, nil)
+  return Ok(Instant{ns: ns})
 
 // parse parses a time string using a named layout.
 // Supported layouts: RFC3339, RFC3339Nano (both parse the same RFC3339 format).
 // For other layouts, an error is returned.
-fn parse(layout string, value string) (Instant, *errors::Err) =
+fn parse(layout string, value string) Result[Instant, errors::Err] =
   if layout == RFC3339 || layout == RFC3339Nano:
     return parse_rfc3339(value)
-  return (Instant{ns: 0}, errors::new("time: unsupported layout: " ++ layout))
+  return Err(UnsupportedLayout(layout))
 
 export {
   Duration, Instant,
@@ -283,4 +301,5 @@ export {
   monotonic_ns, sleep, sleep_ms,
   parse_rfc3339, parse,
   RFC3339, RFC3339Nano,
+  TimeError,
 } as time

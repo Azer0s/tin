@@ -3,6 +3,7 @@ package codegen
 // types.go - LLVM type mapping, type helpers, and type query utilities.
 
 import (
+	"fmt"
 	"strings"
 
 	irtypes "github.com/llir/llvm/ir/types"
@@ -80,6 +81,32 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		return "*" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
 	case *ast.ArrayType:
 		return "[]" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
+	case *ast.FuncType:
+		// `fn(p1,p2,...)ret` -- source-syntax-like so parseTypeParamStr can
+		// decode by scanning to the matching `)`.  `void` ret stays implicit.
+		// `#async` is preserved in the key (`fn#async(...)` -- avoids the
+		// brace pair so the parser-side stringifier round-trips through
+		// IR mangling without quoting); without the marker, async and sync
+		// fn-types would collide on the same generic instantiation key.
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = cg.typeExprCanonicalKeyN(p, depth+1)
+		}
+
+		prefix := "fn"
+		if t.IsAsync {
+			prefix = "fn#async"
+		}
+
+		out := prefix + "(" + strings.Join(parts, ",") + ")"
+
+		if t.RetType != nil {
+			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
+				out += cg.typeExprCanonicalKeyN(t.RetType, depth+1)
+			}
+		}
+
+		return out
 	}
 
 	return te.String()
@@ -190,7 +217,33 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		// Generic ADT: `Option[i32]`, `Result[i32, string]`, ... Monomorphize
 		// on demand to a concrete data type named <adt>__<part1>__<part2>.
-		if dd, ok2 := cg.dataDecls[t.Name]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
+		// Pkg-qualified names (`option::Option`, `result::Result`) resolve
+		// through the same template registered under the bare name; ADTs
+		// live in a flat namespace today, so qualification is a hint, not
+		// a separate type.
+		adtLookupName := t.Name
+
+		nameWasQualified := strings.Contains(t.Name, "::")
+
+		if _, ok := cg.dataDecls[adtLookupName]; !ok {
+			if idx := strings.LastIndex(adtLookupName, "::"); idx >= 0 {
+				bare := adtLookupName[idx+2:]
+				if _, ok2 := cg.dataDecls[bare]; ok2 {
+					adtLookupName = bare
+				}
+			}
+		}
+
+		if !nameWasQualified && !cg.suppressBareTypeCheck &&
+			cg.curScope != nil && !cg.curScope.typeNameVisible(adtLookupName) {
+			if _, isAdt := cg.dataDecls[adtLookupName]; isAdt && isUserAdtName(adtLookupName) {
+				return nil, fmt.Errorf(
+					"type %q is not in scope as a bare name; either qualify (`<pkg>::%s[...]`) or import selectively (`use { %s } from <pkg>`)",
+					adtLookupName, adtLookupName, adtLookupName)
+			}
+		}
+
+		if dd, ok2 := cg.dataDecls[adtLookupName]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
 			parts := make([]string, arity)
 
 			isTemplateVar := false
@@ -206,11 +259,28 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			}
 
 			if !isTemplateVar {
-				concreteName := t.Name + "__" + strings.Join(parts, "__")
+				// Use the bare-resolved name so `option::Option[i64]`
+				// and `Option[i64]` share the same concrete
+				// monomorphization (and the same Some/None ctors).
+				concreteName := adtLookupName + "__" + strings.Join(parts, "__")
 				if _, done := cg.structTypes[concreteName]; !done {
 					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
 						return nil, err
 					}
+				} else if concreteDecl, ok := cg.dataDecls[concreteName]; ok {
+					// Re-register plain method aliases AND plain-method
+					// scope entries in the current scope. The IR
+					// functions live in the module (emitted during the
+					// first monomorphization), but their scope
+					// registrations sit in whatever scope was active at
+					// first sight - when that was a foreign package's
+					// or a sibling tin-test wrapper's scope, those
+					// registrations die with it. Without rewiring, a
+					// later `let _ = r.method()` on the same concrete
+					// instantiation can't find the method even though
+					// the IR func is fine.
+					cg.registerPlainMethodAliases(concreteName, concreteDecl.Methods)
+					cg.rebindAdtMethodsInScope(concreteName, concreteDecl.Methods)
 				}
 
 				cg.dataInstTypeArgs[concreteName] = parts
@@ -253,7 +323,19 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 							Name: concreteName,
 							Type: &ast.GenericType{Name: qualTypeName, TypeParams: t.TypeParams},
 						}
-						_ = cg.genTypeDecl(synthDecl) // best-effort
+
+						if synthErr := cg.genTypeDecl(synthDecl); synthErr != nil {
+							// Surface the synthesis failure instead of
+							// silently returning the pre-registered opaque
+							// struct (whose Fields slice would be empty,
+							// causing downstream destructure / field-load to
+							// produce nonsense IR).  Pre-2026 this swallowed
+							// the error which left users with an empty
+							// `%Tuple__... = type {}` and an indecipherable
+							// "undefined identifier" miles away from the
+							// real cause.
+							return nil, synthErr
+						}
 					}
 
 					if st, ok2 := cg.structTypes[concreteName]; ok2 {
@@ -435,7 +517,41 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	if alias, ok := cg.typeAliases[bareName]; ok {
 		return cg.tinTypeToLLVM(alias)
 	}
-	// Default to i64
+	// Unknown identifier in a type position. Tin's convention is that
+	// real type names are capitalized (Result, Option, Future) and
+	// type parameters are lowercase (t, e, K). We only flag the
+	// capitalized case as an unknown-type error so generic templates,
+	// whose signatures still mention parameter names like `t` before
+	// substitution, can lower without complaint. The previous silent
+	// fall-through to i64 for capitalized names masked typos and let
+	// callers reference types from un-imported packages.
+	if bareName != "" && bareName[0] >= 'A' && bareName[0] <= 'Z' {
+		// One last shot: if the bare name is in dataDecls, accept it.
+		// Predeclare phase may resolve types before genDataDecl sets up
+		// the package-qualified entries we usually look at for ADTs.
+		if _, ok := cg.dataDecls[bareName]; ok {
+			// dataDecls has the template; concrete monomorphization
+			// happens via the GenericType branch when type args are
+			// supplied. A bare reference to a generic ADT (no args) is
+			// rarely meaningful but safe to fall through to i64 for
+			// historical compatibility - the eventual user error
+			// surfaces at the actual use site.
+			return irtypes.I64, nil
+		}
+		// If the name matches a type parameter of an enclosing generic
+		// template (struct, data, fn, or type alias), treat it as a
+		// template variable and fall through to i64 so monomorphization
+		// can substitute it at usage time. Pre-fix this bare-error
+		// branch fired during generic-alias body resolution because the
+		// alias's own type parameters (e.g. `T` in
+		// `type StrPair[T] = Pair[string, T]`) weren't recognized as
+		// template vars yet.
+		if cg.curScope != nil && cg.curScope.typeNameVisible(bareName) {
+			return irtypes.I64, nil
+		}
+
+		return nil, fmt.Errorf("unknown type %q (did you forget to `use` the package that defines it?)", name)
+	}
 
 	return irtypes.I64, nil
 }
@@ -455,6 +571,85 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 // the demangler relies on heuristic: lowercase first segment is treated as
 // a package, uppercase-first as the type. Returns "" if the name doesn't
 // look mangled (no `__`).
+// llvmRawPartForTuple returns the identifier-safe name component to
+// stitch into a `Tuple__...` monomorphization key. For named LLVM
+// struct types (including their pointer / array wrappers) returns the
+// raw mangled name; falls back to llvmTypeToTinName for everything
+// else (scalars, anonymous structs).
+func llvmRawPartForTuple(t irtypes.Type) string {
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		return "*" + llvmRawPartForTuple(pt.ElemType)
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok {
+		if n := st.Name(); n != "" {
+			return n
+		}
+	}
+
+	return llvmTypeToTinName(t)
+}
+
+// llvmTypeToTupleSlotTypeExpr is the TypeExpr companion to
+// llvmRawPartForTuple: builds a TypeExpr that uses raw mangled names
+// for named structs so the synthesized Tuple__... type's slot
+// resolves directly to the same struct via structTypes lookup. The
+// generic structural reconstructor at llvmTypeToTinTypeExprStructural
+// can't do this universally - its callers downstream of method
+// monomorphization need the demangled form to drive nested generic
+// substitution - so the raw form is local to tuple plumbing.
+func llvmTypeToTupleSlotTypeExpr(t irtypes.Type) ast.TypeExpr {
+	if pt, ok := t.(*irtypes.PointerType); ok {
+		return &ast.PointerType{Elem: llvmTypeToTupleSlotTypeExpr(pt.ElemType)}
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok {
+		// Trait fat-ptr {i8*, vtable_struct*} -- delegate to
+		// llvmTypeToTinTypeExprStructural's iface branch so the
+		// `errors__Err_iface` shape demangles to `errors::Err`.
+		if len(st.Fields) == 2 && st.Fields[0] == irtypes.I8Ptr {
+			if pt2, ok2 := st.Fields[1].(*irtypes.PointerType); ok2 {
+				if vst, ok3 := pt2.ElemType.(*irtypes.StructType); ok3 {
+					if vname := vst.Name(); strings.HasSuffix(vname, "_vtable") {
+						return llvmTypeToTinTypeExprStructural(t)
+					}
+				}
+			}
+		}
+
+		if n := st.Name(); n != "" {
+			return &ast.SimpleType{Name: n}
+		}
+	}
+
+	return llvmTypeToTinTypeExprStructural(t)
+}
+
+// isUserAdtName reports whether name looks like a user-written ADT
+// reference (capitalized, no underscores marking a compiler-
+// synthesized monomorphization). The visibility check only fires for
+// such names - internal monomorphizations like `Option__i64` or
+// underscore-prefixed helpers are exempt.
+func isUserAdtName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	if strings.Contains(name, "__") {
+		return false
+	}
+
+	if name[0] == '_' {
+		return false
+	}
+
+	if name[0] < 'A' || name[0] > 'Z' {
+		return false
+	}
+
+	return true
+}
+
 func demangleStructName(s string) string {
 	if !strings.Contains(s, "__") {
 		return ""

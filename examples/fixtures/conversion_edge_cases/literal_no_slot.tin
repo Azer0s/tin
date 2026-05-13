@@ -1,0 +1,3 @@
+fn main() =
+  let v = 42 as i32
+  echo "{v}"

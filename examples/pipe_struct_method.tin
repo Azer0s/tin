@@ -1,0 +1,38 @@
+// examples/pipe_struct_method.tin -- pipe a value into a struct method
+// using `value |> StructName::method` syntax.
+//
+// The pipe operator can target three different RHS shapes:
+//   - free function:   `x |> some_fn`            -> some_fn(x)
+//   - struct method:   `b |> Box::get`           -> Box::get(b)  i.e. b.get()
+//   - generic struct:  `b |> Box[i64]::get`      -> Box[i64]::get(b)
+//
+// When the struct is generic, the type arguments are recovered from the
+// LHS's compile-time type, so the bare `Box::get` form (without `[i64]`)
+// also works.
+use assert
+
+struct Box[t] =
+  v t
+
+  fn get(this Box[t]) t = return this.v
+  fn doubled(this Box[t]) t where t is i64 = return this.v * (2 as t)
+
+test "pipe to struct method (bare type name; type args inferred from LHS)" =
+  let b = Box[i64]{v: 21}
+  let one = b |> Box::get
+  let two = b |> Box::doubled
+
+  assert::equals(21, one)
+  assert::equals(42, two)
+
+test "pipe to struct method (type args explicit)" =
+  let b = Box[i64]{v: 10}
+  let v = b |> Box[i64]::get
+
+  assert::equals(10, v)
+
+test "pipe chains read left-to-right" =
+  let b = Box[i64]{v: 7}
+  let v = b |> Box::doubled  // 14
+
+  assert::equals(14, v)

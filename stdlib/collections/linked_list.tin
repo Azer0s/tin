@@ -13,6 +13,7 @@
 
 use "./list"
 use option
+use { Option } from option
 
 // Node[T] is an internal doubly-linked list node.
 struct Node[T] =

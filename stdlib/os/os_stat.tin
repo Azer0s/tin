@@ -5,6 +5,8 @@
 
 use io
 use errors
+use result
+use { Result } from result
 
 // opendir/closedir are used to distinguish directories from regular files
 // without requiring a C struct (no dirent or stat struct needed).
@@ -57,21 +59,22 @@ fn file_size(path string) i64 =
   return sz
 
 // stat returns a FileInfo for path.
-// Returns (info, nil) on success, (zeroed info, err) on failure.
-fn stat(path string) (FileInfo, *errors::Err) =
+// Returns Ok(info) on success, Err(OsError) when the path doesn't
+// resolve to a readable file or directory.
+fn stat(path string) Result[FileInfo, errors::Err] =
   let d = os_opendir(path)
 
   if d != nil:
     os_closedir(d)
-    return (FileInfo{size: 0, is_directory: true}, nil)
+    return Ok(FileInfo{size: 0, is_directory: true})
 
   let f = io::fopen(path, "rb")
 
   if f == nil:
-    return (FileInfo{size: 0, is_directory: false}, errors::new("stat: no such file or directory: " ++ path))
+    return Err(StatFailed(path))
   io::fseek(f, 0, 2)
   let sz = io::ftell(f)
 
   io::fclose(f)
 
-  return (FileInfo{size: sz, is_directory: false}, nil)
+  return Ok(FileInfo{size: sz, is_directory: false})

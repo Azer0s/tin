@@ -1,5 +1,5 @@
 use assert
-use option
+use { Option } from option
 
 test "Option Some/None via match" =
   let a Option[i64] = Some(7)
@@ -17,32 +17,32 @@ test "is_some / is_none / unwrap_or" =
   let a Option[i64] = Some(10)
   let b Option[i64] = None
 
-  assert::ok(option::is_some(a))
-  assert::ok(option::is_none(b))
-  assert::equals(10, option::unwrap_or(a, 0))
-  assert::equals(0,  option::unwrap_or(b, 0))
+  assert::ok(a.is_some())
+  assert::ok(b.is_none())
+  assert::equals(10, a.unwrap_or(0))
+  assert::equals(0,  b.unwrap_or(0))
 
 test "map / and_then / or_else" =
   let a Option[i64] = Some(3)
   let b Option[i64] = None
 
-  let m = option::map(a, fn(x i64) i64 = return x + 1)
+  let m = a.map(fn(x i64) i64 = return x + 1)
 
-  assert::equals(4, option::unwrap_or(m, 0))
-  assert::ok(option::is_none(option::map(b, fn(x i64) i64 = return x + 1)))
+  assert::equals(4, m.unwrap_or(0))
+  assert::ok(b.map(fn(x i64) i64 = return x + 1).is_none())
 
   let f = fn(x i64) Option[i64] = return Some(x * 10)
 
-  assert::equals(30, option::unwrap_or(option::and_then(a, f), 0))
-  assert::ok(option::is_none(option::and_then(b, f)))
+  assert::equals(30, a.and_then(f).unwrap_or(0))
+  assert::ok(b.and_then(f).is_none())
 
   let g = fn() Option[i64] = return Some(42)
 
-  assert::equals(3,  option::unwrap_or(option::or_else(a, g), 0))
-  assert::equals(42, option::unwrap_or(option::or_else(b, g), 0))
+  assert::equals(3,  a.or_else(g).unwrap_or(0))
+  assert::equals(42, b.or_else(g).unwrap_or(0))
 
-test "unwrap / expect" =
+test "unwrap / unwrap-with-msg" =
   let a Option[i64] = Some(11)
 
-  assert::equals(11, option::unwrap(a))
-  assert::equals(11, option::expect(a, "should be some"))
+  assert::equals(11, a.unwrap())
+  assert::equals(11, a.unwrap("should be some"))

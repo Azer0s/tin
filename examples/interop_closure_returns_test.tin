@@ -1,0 +1,80 @@
+// examples/interop_closure_returns_test.tin -- end-to-end test for
+// #interop functions that RETURN a Tin closure to C.  Replaces
+// examples/interop_closure_returns/run.sh.
+//
+// Flow per test setup:
+//   1. tin build --lib closures.tin -o closures.o --emit-header=closures.h
+//   2. clang -O1 -o harness harness.c closures.o runtime/runtime.c
+//        -lpthread -ldl -lm
+//   3. run ./harness, grep the printed lines for expected substrings.
+//
+// All artefacts land in /tmp/tin_interop_closure_returns/ so a leftover
+// from a previous run doesn't fail the build step on re-entry.
+
+use assert
+use os
+use strings
+use "./fixtures/run_compiler"
+
+const WORK = "/tmp/tin_interop_closure_returns"
+const SRC  = "examples/interop_closure_returns"
+
+// build_harness compiles closures.tin into a static .o + header,
+// then links it with harness.c and the runtime into a native
+// binary.  Returns the harness path on success.  Build / link
+// failures surface via assert so the test reports a clear "this
+// step broke" rather than a cryptic "argv[0] not found" error
+// from a later run_cmd call.
+fn build_harness() string =
+  let _ = os::mkdir(WORK)
+
+  let build_argv = ["./tin", "build", "--lib", SRC ++ "/closures.tin", "-o", WORK ++ "/closures.o", "--emit-header=" ++ WORK ++ "/closures.h"]
+  let build = run_tin_argv(build_argv, "")
+
+  assert::ok(build.exit_code == 0 as i32)
+
+  let clang_argv = ["clang", "-O1", "-I", WORK, "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/closures.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm"]
+  let clang = run_cmd(clang_argv, "", [] as [string])
+
+  assert::ok(clang.exit_code == 0 as i32)
+
+  return WORK ++ "/harness"
+
+fn grep_first(text string, prefix string) string =
+  let lines = strings::split(text, "\n")
+  let i i64 = 0
+
+  for i < len(lines):
+    if strings::has_prefix(lines[i], prefix):
+      return lines[i]
+    i = i + 1
+
+  return ""
+
+fn run_harness() string =
+  let path = build_harness()
+  let r = run_cmd([path], "", [] as [string])
+
+  assert::ok(r.exit_code == 0 as i32)
+
+  return r.stdout
+
+test "interop closures: harness produces every expected line" =
+  let out = run_harness()
+
+  assert::equals("add5(10)=15",                                       grep_first(out, "add5(10)"))
+  assert::equals("add5(1)=6 add42(1)=43 add5(7)=12 add42(8)=50",      grep_first(out, "add5(1)"))
+  assert::equals("ctr=1 2 3 4",                                       grep_first(out, "ctr="))
+  assert::equals("ctr2=1 ctr=5 ctr2=2",                               grep_first(out, "ctr2="))
+  assert::equals("mul3(7)=21",                                        grep_first(out, "mul3("))
+  // 256 * 1000 + (255*256/2) = 288640
+  assert::equals("stress_sum=288640",                                 grep_first(out, "stress_sum="))
+  assert::equals("greet=hello ariel|goodbye ariel|hello world",       grep_first(out, "greet="))
+  assert::equals("pred=0 0 1",                                        grep_first(out, "pred="))
+  assert::equals("nested=1014",                                       grep_first(out, "nested="))
+  // strlen("hello world") = 11; 10000 * 11 = 110000
+  assert::equals("string_stress=110000",                              grep_first(out, "string_stress="))
+  assert::equals("double_free_distinct=1 slots=1 2",                  grep_first(out, "double_free_"))
+  assert::equals("bogus_safe after=107",                              grep_first(out, "bogus_safe"))
+  assert::equals("leaked=5",                                          grep_first(out, "leaked="))
+  assert::equals("done",                                              grep_first(out, "done"))

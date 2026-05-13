@@ -1,0 +1,5 @@
+fn take(n i32) i32 = return n + 1 as i32
+
+fn main() =
+  let big i64 = 100
+  echo "{take(big as i32)}"

@@ -116,6 +116,7 @@ void  _tin_coro_free(void *ptr);
 void      _tin_defer_push(TinDeferEntry *entry, void (*fn)(void *, void *), void *env, void *ret_slot);
 void      _tin_defer_pop(int64_t n);
 void      _tin_panic(const char *msg);
+void      _tin_main_err_exit(const char *msg, int64_t len);
 void      _tin_assert(int32_t cond, const char *msg);
 TinString _tin_recover(void);
 // Fiber-level panic interception (called by worker loop around _coro_resume).

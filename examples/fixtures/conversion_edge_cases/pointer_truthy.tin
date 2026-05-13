@@ -1,0 +1,11 @@
+struct Bag(coerce[bool]) =
+  n i64
+  static fn ::coerce(this Bag) bool = return this.n != 0
+
+fn main() =
+  let b = Bag{n: 0}
+  let p *Bag = &b
+  if p:
+    echo "p is non-nil"
+  else:
+    echo "WRONG: pointer dispatched coerce[bool]"

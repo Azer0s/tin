@@ -1,0 +1,91 @@
+// examples/interop_stacktrace_test.tin -- end-to-end test for
+// stacktrace() across the C / Tin #interop boundary.  Replaces
+// examples/interop_stacktrace/run.sh.
+//
+// The harness MUST be compiled with -fno-omit-frame-pointer because
+// Tin's stacktrace() is an FP-walking unwinder (see
+// runtime/stacktrace.c); any C frame that omits the FP truncates
+// the chain.  -rdynamic exposes the C symbols in .dynsym so dladdr
+// can name them.  -DTIN_STACKTRACE=1 swaps in the real unwinder
+// instead of the no-op stub.  -gline-tables-only embeds the line
+// info libdwfl (Linux) needs to render "file:line:col"; on Darwin
+// the pclntab is sufficient and -ldw isn't linked.
+
+use assert
+use os
+use strings
+use "./fixtures/run_compiler"
+
+const WORK = "/tmp/tin_interop_stacktrace"
+const SRC  = "examples/interop_stacktrace"
+
+// extra_link_libs picks the elfutils dependency only on non-Darwin
+// hosts.  Mirrors the `uname` check in the legacy run.sh.
+fn extra_link_libs() [string] =
+  let r = run_cmd(["uname"], "", [] as [string])
+
+  if strings::has_prefix(r.stdout, "Darwin"):
+    return [] as [string]
+
+  return ["-ldw"]
+
+fn build_harness() string =
+  let _ = os::mkdir(WORK)
+
+  let build_argv = ["./tin", "build", "--lib", SRC ++ "/interop_st.tin", "-o", WORK ++ "/interop_st.o", "--emit-header=" ++ WORK ++ "/interop_st.h"]
+  let build = run_tin_argv(build_argv, "")
+
+  assert::ok(build.exit_code == 0 as i32)
+
+  let base = ["clang", "-O1", "-fno-omit-frame-pointer", "-rdynamic", "-DTIN_STACKTRACE=1", "-gline-tables-only", "-I", WORK, "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/interop_st.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm"]
+  let extras = extra_link_libs()
+  let clang_argv = base ++ extras
+  let clang = run_cmd(clang_argv, "", [] as [string])
+
+  assert::ok(clang.exit_code == 0 as i32)
+
+  return WORK ++ "/harness"
+
+fn run_harness() string =
+  let path = build_harness()
+  let r = run_cmd([path], "", [] as [string])
+
+  assert::ok(r.exit_code == 0 as i32)
+
+  return r.stdout
+
+// frame_count_for parses one of the two FRAMES= lines emitted by
+// the harness.  Returns -1 when the line is missing so the test
+// flags a structural regression (rather than silently passing the
+// "nested > direct" comparison against two zeros).
+fn frame_count_for(text string, key string) i64 =
+  let lines = strings::split(text, "\n")
+  let i i64 = 0
+
+  for i < len(lines):
+    if strings::has_prefix(lines[i], key ++ "="):
+      let rest = strings::substr(lines[i], len(key) + 1, len(lines[i]))
+
+      return strings::parse_int(rest).unwrap_or(-1)
+
+    i = i + 1
+
+  return -1
+
+test "interop stacktrace: harness traces cross the C/Tin boundary" =
+  let out = run_harness()
+
+  assert::ok(contains_text(out, "DIRECT_FRAMES="))
+  assert::ok(contains_text(out, "NESTED_FRAMES="))
+  assert::ok(contains_text(out, "DIRECT:"))
+  assert::ok(contains_text(out, "__tin_interop_print_st_direct"))
+  assert::ok(contains_text(out, "NESTED:"))
+  assert::ok(contains_text(out, "__tin_interop_print_st_nested"))
+  assert::ok(contains_text(out, "c_call_back"))
+  assert::ok(contains_text(out, "run_nested"))
+
+  let direct = frame_count_for(out, "DIRECT_FRAMES")
+  let nested = frame_count_for(out, "NESTED_FRAMES")
+
+  assert::ok(direct > 0)
+  assert::ok(nested > direct)

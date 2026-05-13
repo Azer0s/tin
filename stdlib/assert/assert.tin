@@ -39,7 +39,52 @@ fn panics(f fn() void) =
   if !did_panic :
     abort("expected panic but none occurred")
 
+// panics_with is like panics but additionally checks that the panic
+// message contains `want_substr`. Used to lock down the wording of a
+// specific panic so a refactor that silently changes the surface text
+// fails the test.
+fn panics_with(f fn() void, want_substr string) =
+  let did_panic bool = false
+  let captured string = ""
+
+  defer do:
+    let msg string = recover()
+
+    if len(msg) > 0 :
+      did_panic = true
+      captured = msg
+
+  f()
+
+  if !did_panic :
+    abort("expected panic but none occurred")
+
+  let found = false
+  let i i64 = 0
+  let n = len(captured)
+  let m = len(want_substr)
+
+  for i + m <= n:
+    let j i64 = 0
+    let hit = true
+
+    for j < m:
+      if captured[i + j] != want_substr[j]:
+        hit = false
+
+        break
+      j = j + 1
+
+    if hit:
+      found = true
+
+      break
+    i = i + 1
+
+  if !found:
+    abort("expected panic to contain {want_substr}, got: {captured}")
+
 export {
   ok, not_ok, equals, not_equals,
-  fails, panics
+  fails, panics, panics_with
 } as assert

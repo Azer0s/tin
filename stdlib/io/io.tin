@@ -6,6 +6,7 @@
 use { loop } from macros
 use sync
 use "./closeable"
+use "./async_traits"
 
 // Console output
 
@@ -275,24 +276,14 @@ fn bufreader(fd i32) BufferedReader =
   return BufferedReader{fd: fd, pos: 0, end: 0, done: false}
 
 // ---------------------------------------------------------------------------
-// I/O traits
+// I/O traits live in ./async_traits.tin so file-path imports below
+// (./io_copy) see the trait registrations regardless of inclusion
+// order.  io::Reader / io::Writer / io::AsyncReader / io::AsyncWriter
+// are re-exported as part of this package's surface.
 // ---------------------------------------------------------------------------
 
-trait Reader =
-  fn read(this *Reader, buf *byte, n i64) i64 = virtual
-
-trait Writer =
-  fn write(this *Writer, buf *byte, n i64) i64 = virtual
-
-// AsyncReader is implemented by types whose read returns a Future[i64].
-// Await the result directly: `let n = await r.read(buf, n)`.
-trait AsyncReader =
-  fn read(this *AsyncReader, buf *byte, n i64) Future[i64] = virtual
-
-// AsyncWriter is implemented by types whose write returns a Future[i64].
-// Await the result directly: `let n = await w.write(buf, n)`.
-trait AsyncWriter =
-  fn write(this *AsyncWriter, buf *byte, n i64) Future[i64] = virtual
+use "./io_copy"
+use "./io_bufwriter"
 
 export {
   puts, fputs, fprintf, printf, print,
@@ -307,5 +298,7 @@ export {
   BufferedReader, bufreader,
   now_ms, now_us,
   Reader, Writer, AsyncReader, AsyncWriter,
-  Closeable
+  Closeable,
+  copy,
+  BufWriter, bufwriter,
 } as io
