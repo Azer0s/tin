@@ -295,6 +295,7 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 	isAsync := false
 
 	bodyStart := -1
+
 	switch {
 	case strings.HasPrefix(s, "fn#async("):
 		isAsync = true

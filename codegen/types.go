@@ -99,6 +99,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		}
 
 		out := prefix + "(" + strings.Join(parts, ",") + ")"
+
 		if t.RetType != nil {
 			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
 				out += cg.typeExprCanonicalKeyN(t.RetType, depth+1)

@@ -1118,7 +1118,7 @@ func isCopyExpr(node ast.Node) bool {
 //
 // Conservative on shape: only matches `*(<ident> as *T)`.  A future expansion
 // could descend through nested AsExprs, but the recv() pattern is the only
-// known caller and a tighter check minimises the chance of accidentally
+// known caller and a tighter check minimizes the chance of accidentally
 // skipping a retain we genuinely need.
 func (cg *CodeGen) isDerefOfRawVoidPtrCast(node ast.Node) bool {
 	de, ok := node.(*ast.DerefExpr)
@@ -1353,10 +1353,6 @@ func (cg *CodeGen) extractRCDataPtr(block *ir.Block, val value.Value, t irtypes.
 	}
 
 	return nil
-}
-
-func (cg *CodeGen) walkRCStructFields(block *ir.Block, val value.Value, visit func(value.Value)) {
-	cg.walkRCStructFieldsEx(block, val, visit, nil)
 }
 
 // walkRCStructFieldsEx is the array-aware variant of walkRCStructFields.

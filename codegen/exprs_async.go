@@ -1300,7 +1300,7 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 //
 // Mirrors the in-coro inline-drive path that genInlineAsyncDrive applies
 // to a direct `fn{#async}` call.  The wrapper rework moved the actual
-// `#async` body to `recv_impl` / `send_impl`, so we recognise the wrapper
+// `#async` body to `recv_impl` / `send_impl`, so we recognize the wrapper
 // shape by callee name + receiver-struct prefix and re-anchor on the
 // `_impl` method when emitting the inline retry loop.
 func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.CallExpr) (value.Value, bool, error) {
@@ -1394,7 +1394,7 @@ func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.Call
 		if out == nil {
 			// send returns Unit; the caller (await Future[Unit]) doesn't
 			// use the value but expects a non-nil result for the await
-			// machinery.  Materialise the canonical Unit value.
+			// machinery.  Materialize the canonical Unit value.
 			unitTy, lookupErr := cg.tinTypeToLLVM(&ast.SimpleType{Name: "sync::Unit"})
 			if lookupErr != nil || unitTy == nil {
 				return nil, false, nil

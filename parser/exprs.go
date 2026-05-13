@@ -1880,6 +1880,7 @@ func typeExprSourceForm(te ast.TypeExpr) string {
 		}
 
 		out := prefix + "(" + strings.Join(parts, ",") + ")"
+
 		if t.RetType != nil {
 			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
 				out += typeExprSourceForm(t.RetType)
