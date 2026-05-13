@@ -661,6 +661,45 @@ func parseFileDirectives(src, srcDir, stdlibDir string) (linkerFlags []string, c
 	return
 }
 
+// dedupLinkerFlags removes duplicate linker flags while keeping `(flag, value)`
+// pairs together for flags that take a positional argument (-framework,
+// -Xlinker, ...). Naive per-token dedup orphans the value -- e.g.
+// `-framework Foundation -framework AppKit` would collapse to
+// `-framework Foundation AppKit` and ld treats AppKit as a plain input file.
+func dedupLinkerFlags(flags []string) []string {
+	takesValue := map[string]bool{
+		"-framework":      true,
+		"-weak_framework": true,
+		"-Xlinker":        true,
+		"-rpath":          true,
+	}
+
+	seen := map[string]bool{}
+	out := flags[:0]
+
+	for i := 0; i < len(flags); i++ {
+		f := flags[i]
+		if takesValue[f] && i+1 < len(flags) {
+			key := f + " " + flags[i+1]
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, f, flags[i+1])
+			}
+
+			i++
+
+			continue
+		}
+
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+
+	return out
+}
+
 func main() {
 	// Default ANSI color on when stderr is a terminal -- matches what
 	// rustc and clang do. Overridable via --color={always,never,auto}
@@ -1302,20 +1341,7 @@ doneFlags:
 
 		fileCSources = deduped
 	}
-	// Deduplicate linker flags too.
-	{
-		seen := map[string]bool{}
-
-		deduped := fileLinkerFlags[:0]
-		for _, f := range fileLinkerFlags {
-			if !seen[f] {
-				seen[f] = true
-				deduped = append(deduped, f)
-			}
-		}
-
-		fileLinkerFlags = deduped
-	}
+	fileLinkerFlags = dedupLinkerFlags(fileLinkerFlags)
 
 	// Refine progress total now that package C sources are known and we can
 	// check whether a coroutine split pass is needed. The shape of the
@@ -3099,20 +3125,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			fCSources = deduped
 		}
-		// Deduplicate link flags too.
-		{
-			seen := map[string]bool{}
-
-			deduped := srcLinks[:0]
-			for _, f := range srcLinks {
-				if !seen[f] {
-					seen[f] = true
-					deduped = append(deduped, f)
-				}
-			}
-
-			srcLinks = deduped
-		}
+		srcLinks = dedupLinkerFlags(srcLinks)
 
 		linkFlags := append(srcLinks, extraFlags...)
 
