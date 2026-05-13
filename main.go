@@ -3174,6 +3174,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 		if runErr := runMemcheck(memcheck, run); runErr != nil {
 			passed = false
 		}
+
 		_ = colorOut.Flush()
 		_ = colorErr.Flush()
 
@@ -3226,6 +3227,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 	}
 
 	passed := len(results) - failed - skipped
+
 	failPart := fmt.Sprintf("%d failed", failed)
 	if failed > 0 {
 		failPart = redIfTTY(failPart)
