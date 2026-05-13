@@ -389,3 +389,10 @@ test "unawaited sleep is a noop -- the future is dropped" =
 
   // 50ms slack -- both calls should return effectively immediately.
   assert::ok(elapsed < 50000000)
+
+  // Give the dropped fibers time to finish before the test process
+  // exits -- otherwise macOS `leaks --atExit` catches the 100ms-sleep
+  // fibers mid-coroutine and reports their frames.  The non-blocking
+  // assertion above already passed; this await only delays teardown,
+  // it does not gate the contract under test.
+  let _ = await time::sleep_ms(150)

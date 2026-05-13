@@ -842,6 +842,21 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		futureExpr := e.Future
 		if callNode, ok := e.Future.(*ast.CallExpr); ok {
 			if cg.inCoroFn {
+				// Channel fast path: `await ch.recv()` and `await ch.send(v)`
+				// short-circuit the outer sync wrapper (which returns a
+				// `Future[T]` constructed via `spawn this.{recv,send}_impl`)
+				// and emit the inline channel op directly, returning T to
+				// the caller's coro frame.  Without this, every channel
+				// op would pay a fiber spawn + join even when the inner
+				// `_impl` body is inline-drive eligible.
+				if result, ok2, driveErr := cg.tryChannelWrapperFastPath(block, callNode); ok2 {
+					if driveErr != nil {
+						return nil, driveErr
+					}
+
+					return result, nil
+				}
+
 				// Inside a coroutine: try zero-cost inline drive.
 				result, driveErr := cg.genInlineAsyncDrive(block, callNode)
 				if driveErr != nil {
