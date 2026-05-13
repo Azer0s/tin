@@ -681,6 +681,7 @@ func dedupLinkerFlags(flags []string) []string {
 		f := flags[i]
 		if takesValue[f] && i+1 < len(flags) {
 			key := f + " " + flags[i+1]
+
 			if !seen[key] {
 				seen[key] = true
 				out = append(out, f, flags[i+1])
@@ -1341,6 +1342,7 @@ doneFlags:
 
 		fileCSources = deduped
 	}
+
 	fileLinkerFlags = dedupLinkerFlags(fileLinkerFlags)
 
 	// Refine progress total now that package C sources are known and we can
@@ -3125,6 +3127,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			fCSources = deduped
 		}
+
 		srcLinks = dedupLinkerFlags(srcLinks)
 
 		linkFlags := append(srcLinks, extraFlags...)
