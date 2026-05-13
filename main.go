@@ -684,6 +684,7 @@ func dedupLinkerFlags(flags []string) []string {
 
 			if !seen[key] {
 				seen[key] = true
+
 				out = append(out, f, flags[i+1])
 			}
 
