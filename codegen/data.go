@@ -1557,6 +1557,36 @@ func (cg *CodeGen) adtHasFatPtrField(t irtypes.Type) bool {
 	return false
 }
 
+// hasLiveIfaceDataScopeEntry reports whether the current function scope
+// chain holds any synthetic `.iface_data_*` entry that has not been marked
+// noRelease.  Used by genReturn to gate the trait fat-ptr ownership retain:
+// the retain only compensates for a scope release that's actually going to
+// fire, so a pass-through wrapper / borrow-deref return must not over-retain.
+func (cg *CodeGen) hasLiveIfaceDataScopeEntry() bool {
+	if cg.curScope == nil {
+		return false
+	}
+
+	found := false
+
+	s := cg.curScope
+	for s != nil {
+		s.each(func(name string, e *scopeEntry) {
+			if e.releaseRawPtr && !e.noRelease {
+				found = true
+			}
+		})
+
+		if found || s.isFunctionBoundary {
+			break
+		}
+
+		s = s.parent
+	}
+
+	return found
+}
+
 // suppressIfaceDataScopeReleases marks every synthetic
 // `.iface_data_*` scope entry in the current function scope as
 // noRelease, so emitAllScopeReleases skips its _tin_release call.

@@ -2119,7 +2119,8 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	retSkipName := ""
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
-	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) && !isFreshCallResult(val) {
+	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) && !isFreshCallResult(val) &&
+		!cg.isDerefOfRawVoidPtrCast(s.Value) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.
 		// Retain first so the caller gets one owned reference, then scope cleanup
@@ -2128,6 +2129,10 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		//   - [T;N] as string calls _tin_bytes_from_buf (rc=1 already)
 		//   - `n as Trait` lowers to a coerce[T] call returning rc=1; the
 		//     call result is already owned, retaining would over-count.
+		//   - `*(rawvoid as *T)` is a move out of foreign memory (e.g. a
+		//     channel's per-thread recv scratch buffer that already
+		//     transferred RC into the slot); retaining would leave a +1
+		//     no scope cleanup decrements, leaking every received value.
 		//
 		// Bare *<named struct> / *<iface> values are NOT covered by
 		// emitRetain (Tin's calling convention treats them as borrows
@@ -2151,8 +2156,16 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	// instead of 0, leaving the caller with an owned iface they will
 	// release on drop. Mirrors how `retSkipName` keeps a returning
 	// named binding alive past scope cleanup.
+	//
+	// Gated on the function actually having registered a live
+	// `.iface_data_*` entry via coerceToTrait.  Without the gate,
+	// pass-through wrappers like `fn make() Err = return errors::new("x")`
+	// over-retain (the inner errors::new already returned rc=1 and there's
+	// no matching scope release in the wrapper to compensate), and
+	// channel.recv-style functions that just deref a borrowed iface
+	// pointer leak every received value.
 	if val != nil {
-		if _, ok := cg.isTraitFatPtr(val.Type()); ok {
+		if _, ok := cg.isTraitFatPtr(val.Type()); ok && cg.hasLiveIfaceDataScopeEntry() {
 			dataPtr := block.NewExtractValue(val, 0)
 			block.NewCall(cg.ensureRetain(), dataPtr)
 		}

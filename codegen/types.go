@@ -81,6 +81,31 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		return "*" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
 	case *ast.ArrayType:
 		return "[]" + cg.typeExprCanonicalKeyN(t.Elem, depth+1)
+	case *ast.FuncType:
+		// `fn(p1,p2,...)ret` -- source-syntax-like so parseTypeParamStr can
+		// decode by scanning to the matching `)`.  `void` ret stays implicit.
+		// `#async` is preserved in the key (`fn#async(...)` -- avoids the
+		// brace pair so the parser-side stringifier round-trips through
+		// IR mangling without quoting); without the marker, async and sync
+		// fn-types would collide on the same generic instantiation key.
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = cg.typeExprCanonicalKeyN(p, depth+1)
+		}
+
+		prefix := "fn"
+		if t.IsAsync {
+			prefix = "fn#async"
+		}
+
+		out := prefix + "(" + strings.Join(parts, ",") + ")"
+		if t.RetType != nil {
+			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
+				out += cg.typeExprCanonicalKeyN(t.RetType, depth+1)
+			}
+		}
+
+		return out
 	}
 
 	return te.String()

@@ -156,6 +156,21 @@ void _tin_foreach_struct_elem_release(
     }
 }
 
+// Release each element of an inline (stack/struct-field) fixed-size array
+// [T; N] whose backing storage is NOT an RC block.  Unlike its sibling above,
+// this does NOT decrement an outer RC or free anything: the buffer's lifetime
+// is owned by the enclosing scope or struct.  Used for scope-exit and per-
+// struct release of [T; N] fields whose elements own RC heap blocks
+// (e.g. [errors::Err; 4], [string; N]).
+void _tin_foreach_fixed_elem_release(
+    void *data, int64_t count, int64_t elem_size, TinElemReleaseFn release_fn
+) {
+    if (!data) return;
+    for (int64_t i = 0; i < count; i++) {
+        release_fn((char *)data + i * elem_size);
+    }
+}
+
 // Retain helpers for array concatenation: when `b = a ++ [item]` and `a` is a
 // non-temporary source, the new buffer `b` holds copies of `a`'s element
 // pointers.  Since `a` and `b` both hold those pointers, each element's RC

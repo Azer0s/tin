@@ -817,11 +817,27 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			var start ast.Node
 
 			if !p.check(lexer.COLON) && !p.check(lexer.RBRACKET) {
-				var err3 error
+				// `Generic[fn(...) ret]` -- the `fn(...) T` form is a
+				// FuncType, not an expression, so parseExpr would mis-
+				// dispatch to LambdaExpr parsing (and fail on the lack
+				// of a body).  Parse a TypeExpr instead and wrap it in a
+				// TypeRefNode the downstream resolver unpacks.
+				if p.check(lexer.KW_FN) {
+					te, err3 := p.parseFuncType()
+					if err3 != nil {
+						return nil, err3
+					}
 
-				start, err3 = p.parseExpr()
-				if err3 != nil {
-					return nil, err3
+					trn := &ast.TypeRefNode{Type: te}
+					trn.SetPos(expr.Pos())
+					start = trn
+				} else {
+					var err3 error
+
+					start, err3 = p.parseExpr()
+					if err3 != nil {
+						return nil, err3
+					}
 				}
 			}
 
@@ -1815,6 +1831,62 @@ func typeNodeToString(n ast.Node) string {
 		}
 
 		return base + "[" + argStr + "]"
+	case *ast.TypeRefNode:
+		// Source-syntax-like fn-type encoding so the round trip survives
+		// IR mangling: `fn(p1,p2,...)ret`.  Mirrors typeExprCanonicalKey
+		// in the codegen so a parser-emitted key matches the codegen's
+		// canonical form when the AST is later re-resolved.
+		return typeExprSourceForm(v.Type)
+	}
+
+	return ""
+}
+
+// typeExprSourceForm produces a source-syntax key string for a TypeExpr.
+// Parser-side mirror of cg.typeExprCanonicalKey for the cases the parser
+// needs to emit (currently only FuncType plus its nested type composition).
+// Stays in lockstep with the codegen encoding so a key from either side
+// decodes the same way in parseTypeParamStr.
+func typeExprSourceForm(te ast.TypeExpr) string {
+	switch t := te.(type) {
+	case nil:
+		return ""
+	case *ast.SimpleType:
+		return t.Name
+	case *ast.PointerType:
+		return "*" + typeExprSourceForm(t.Elem)
+	case *ast.ArrayType:
+		if t.Size < 0 {
+			return "[]" + typeExprSourceForm(t.Elem)
+		}
+
+		return ""
+	case *ast.GenericType:
+		parts := make([]string, len(t.TypeParams))
+		for i, tp := range t.TypeParams {
+			parts[i] = typeExprSourceForm(tp)
+		}
+
+		return t.Name + "[" + strings.Join(parts, ",") + "]"
+	case *ast.FuncType:
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = typeExprSourceForm(p)
+		}
+
+		prefix := "fn"
+		if t.IsAsync {
+			prefix = "fn#async"
+		}
+
+		out := prefix + "(" + strings.Join(parts, ",") + ")"
+		if t.RetType != nil {
+			if _, isVoid := t.RetType.(*ast.VoidType); !isVoid {
+				out += typeExprSourceForm(t.RetType)
+			}
+		}
+
+		return out
 	}
 
 	return ""
@@ -1829,6 +1901,8 @@ func typeNodeToTypeExpr(n ast.Node) ast.TypeExpr {
 		return &ast.SimpleType{Name: v.Name}
 	case *ast.ScopeAccess:
 		return &ast.SimpleType{Name: strings.Join(v.Path, "::")}
+	case *ast.TypeRefNode:
+		return v.Type
 	case *ast.IndexExpr:
 		baseName := ""
 

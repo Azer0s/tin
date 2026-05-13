@@ -583,19 +583,30 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	}
 
 	// Pass 1.2: mark {#async} struct methods as coro-callable and pre-declare
-	// their $coro variants BEFORE genStructDecl generates method bodies.
+	// their $coro variants BEFORE genStructDecl generates method bodies.  The
+	// scope key uses the package-qualified struct name so it matches the
+	// spawn-method lookup site, which builds its key from typeNameOf(receiver)
+	// -- that always returns the qualified form (e.g. `sync__Cond`).  Using
+	// the bare sd.Name here would register `Cond_method$coro` while the call
+	// site searches for `sync__Cond_method$coro`, and any intra-struct
+	// `spawn this.other_method(...)` would fail to resolve unless the source
+	// happened to declare the methods in an order the body emitter never
+	// reaches the spawn before the inner predeclares -- a fragile invariant
+	// that hit Cond.wait/wait_impl.
 	for _, node := range prog.Stmts {
 		sd, ok := node.(*ast.StructDecl)
 		if !ok || len(sd.TypeParams) > 0 {
 			continue
 		}
 
+		structKey := cg.pkgStructKey(sd.Name)
+
 		for _, m := range sd.Methods {
 			if !isAsyncTag(m.Tags) || m.IsExtern != "" {
 				continue
 			}
 
-			scopeKey := methodScopeName(sd.Name, m)
+			scopeKey := methodScopeName(structKey, m)
 
 			cg.coroCallable[scopeKey] = true
 			if preErr := cg.predeclareCoroVariant(m, scopeKey, false); preErr != nil {

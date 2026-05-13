@@ -321,6 +321,7 @@ type CodeGen struct {
 	releaseClosureFn           *ir.Func // _tin_release_closure(env i8*)
 	releaseAnyFn               *ir.Func // _tin_release_any(tag i32, data i8*)
 	foreachStructElemReleaseFn *ir.Func // _tin_foreach_struct_elem_release(data i8*, count i64, elem_size i64, fn i8*)
+	foreachFixedElemReleaseFn  *ir.Func // _tin_foreach_fixed_elem_release(data i8*, count i64, elem_size i64, fn i8*)
 	releasePtrElemArrayFn      *ir.Func // _tin_release_ptr_elem_array(data i8*, count i64)
 	// per-type array element release helpers: type key -> IR function
 	elemReleaseHelpers map[string]*ir.Func

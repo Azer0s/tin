@@ -64,14 +64,25 @@ struct Channel[T] =
   static fn make(cap i64) Channel[T] =
     return Channel[T]{_ptr: tin_channel_new(cap, sizeof(T), isrc(T))}
 
-  // send parks the calling fiber directly when the channel is full.
-  // Use `await ch.send(v)` to send inline; `spawn ch.send(v)` to fire-and-forget.
+  // send returns a Future[Unit] that resolves once the value has been
+  // enqueued. Idiomatic call sites:
+  //   await ch.send(v)        // park caller fiber until enqueued
+  //   ch.send(v)              // fire-and-forget; #allow_drop on the outer
+  //                           // silences -Wmust-use, the result is dropped
+  //                           // and the send still runs to completion in
+  //                           // its own fiber.
+  // #allow_drop: discarding the Future[Unit] is the canonical fire-and-
+  // forget pattern; suppressing the must-use diagnostic at every call site
+  // keeps the warning useful for futures where forgetting `await` is a bug.
+  fn{#allow_drop} send(this *Channel[T], val T) Future[Unit] =
+    return spawn this.send_impl(val)
+
+  // send_impl carries the blocking enqueue loop. Kept as a separate
+  // `fn{#async}` so the outer `send` is a plain sync wrapper that just
+  // constructs the Future[Unit].  Inline-drive on the inner remains
+  // available for the compiler's await optimisations.
   // #no_autoyield: the loop already yields explicitly for the blocked case.
-  // #allow_drop: discarding the implicit Future[Unit] is the canonical
-  // fire-and-forget post-to-channel pattern; suppressing the
-  // must-use warning at every call site keeps the diagnostic
-  // useful for futures where forgetting `await` is a bug.
-  fn{#async #no_autoyield #allow_drop} send(this *Channel[T], val T) =
+  fn{#async #no_autoyield} send_impl(this *Channel[T], val T) =
     let pid = tin_current_pid_c()
 
     for true:
@@ -83,10 +94,16 @@ struct Channel[T] =
         return
       yield
 
-  // recv parks the calling fiber directly when the channel is empty.
-  // Use `await ch.recv()` to receive inline.
+  // recv returns a Future[T] that resolves to the next dequeued value.
+  // Idiomatic call: `let v = await ch.recv()`.  A bare `ch.recv()` would
+  // drop the Future and is caught by -Wmust-use.
+  fn recv(this *Channel[T]) Future[T] =
+    return spawn this.recv_impl()
+
+  // recv_impl carries the blocking dequeue loop.  Same outer/inner split
+  // as `send` / `send_impl`.
   // #no_autoyield: the loop already yields explicitly for the blocked case.
-  fn{#async #no_autoyield} recv(this *Channel[T]) T =
+  fn{#async #no_autoyield} recv_impl(this *Channel[T]) T =
     let blocked = tin_channel_recv_blocked_val()
     let pid = tin_current_pid_c()
 

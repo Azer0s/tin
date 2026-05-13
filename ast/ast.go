@@ -545,6 +545,16 @@ type AsExpr struct {
 	Type TypeExpr
 }
 
+// TypeRefNode lifts a TypeExpr into expression position.  Used so the parser
+// can place a complex type (e.g. `fn(i64) i64`) inside an IndexExpr's Index
+// slot when the brackets are being used for type-arg instantiation rather
+// than runtime indexing.  Downstream resolvers (exprToTypeParamKey,
+// typeNodeToString, typeNodeToTypeExpr) unwrap the carried TypeExpr.
+type TypeRefNode struct {
+	base
+	Type TypeExpr
+}
+
 type SizeofExpr struct {
 	base
 	Type TypeExpr

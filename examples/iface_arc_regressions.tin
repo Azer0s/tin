@@ -11,6 +11,7 @@ use assert
 use { Result } from result
 use errors
 use strings
+use sync
 
 // 1. Match-bound iface from a borrow scrutinee.
 //
@@ -138,3 +139,164 @@ test "try+map_err over heap-fielded error round-trip is leak-clean" =
   match parse_int_doubled("21"):
     case Ok(v):  assert::equals(42, v)
     case Err(_): assert::ok(false)
+
+// 8. Local `[errors::Err; N]` array of iface values must walk each slot
+// at scope exit.  Pre-fix the scope-release short-circuited on ArrayType
+// and leaked one heap block per slot (4 × 64 bytes on the original
+// repro).  emitFixedArrayRelease + elemNeedsRelease recursion close it.
+
+test "fixed-size array of value-form Err scope-releases each slot" =
+  let xs [errors::Err; 4] = [
+    errors::new("one"),
+    errors::new("two"),
+    errors::new("three"),
+    errors::new("four"),
+  ]
+  let i i64 = 0
+  for i < len(xs):
+    assert::ok(len(xs[i].message()) > 0)
+    i = i + 1
+
+// 9. Same array embedded as a struct field: walkRCStructFieldsEx now
+// dispatches to emitFixedArrayRelease for `[T; N]` field types, and
+// elemNeedsRelease reports true for any struct whose fields recurse
+// through an array of releasable elements.
+
+struct ErrHolder =
+  xs [errors::Err; 3]
+
+test "struct field [errors::Err; N] cascades release through walker" =
+  let h = ErrHolder{xs: [
+    errors::new("a"),
+    errors::new("b"),
+    errors::new("c"),
+  ]}
+  assert::equals("a", h.xs[0].message())
+  assert::equals("b", h.xs[1].message())
+  assert::equals("c", h.xs[2].message())
+
+// 10. Pass-through wrapper that returns a freshly-coerced iface value
+// from a callee.  Pre-fix the unconditional trait fat-ptr retain in
+// genReturn over-bumped rc by 1 (no `.iface_data_*` scope entry exists
+// in the wrapper to balance it), leaking on every call.  The
+// hasLiveIfaceDataScopeEntry gate fixes it.
+
+fn rewrap(msg string) errors::Err = return errors::new(msg)
+
+test "wrapper that returns callee's iface does not over-retain" =
+  let _ = rewrap("just propagate")
+
+// 11. `*(rawvoid as *T)` move out of an opaque scratch buffer (the
+// channel.recv pattern).  Pre-fix the isCopyExpr-driven retain in
+// genReturn fired even though no scope cleanup decrements the *void
+// binding, leaking every received value.  isDerefOfRawVoidPtrCast
+// recognises the shape and skips the retain.
+//
+// Exercises both `recv` (single value) and a recv loop, including the
+// case where the channel buffer is drained completely so subsequent
+// `_tin_channel_free` finds no slots to release.
+
+test "channel recv of value-form Err is leak-clean" =
+  let ch = sync::Channel[errors::Err].make(4)
+  await ch.send(errors::new("one"))
+  await ch.send(errors::new("two"))
+  let e1 = await ch.recv()
+  let e2 = await ch.recv()
+
+  assert::equals("one", e1.message())
+  assert::equals("two", e2.message())
+
+// 12. Function as a non-capturing struct field, invoked via the
+// `(a.f)(...)` form so the field-access doubles as the receiver.  Field
+// retain/release on fat-fn-ptr struct fields go through
+// walkRCStructFields whose copy semantics must stay balanced.
+
+fn _arc_add_one(x i64) i64 = return x + 1
+
+struct IntOp =
+  f fn(i64) i64
+
+test "non-capturing fn struct field, direct invoke" =
+  let a = IntOp{f: _arc_add_one}
+
+  assert::equals(42, (a.f)(41))
+
+// 13. Capturing closure (i64 capture) stored in a struct field.  The
+// closure env is a fat-fn-ptr {fn*, env*}; the env block is rc-tracked
+// and walked by emitStructFieldRetain.  Verifies multiple call sites
+// don't double-release the env.
+
+fn _arc_make_adder(base i64) IntOp =
+  return IntOp{f: fn(x i64) i64 = return x + base}
+
+test "i64-capturing closure in struct field, multiple invocations" =
+  let a = _arc_make_adder(100)
+
+  assert::equals(105, (a.f)(5))
+  assert::equals(110, (a.f)(10))
+
+// 14. Capturing closure with a string capture.  The env now owns a
+// string heap block whose RC must survive every invocation but free
+// exactly once when the holding struct drops.
+
+struct StrOp =
+  f fn(string) string
+
+fn _arc_make_greeter(prefix string) StrOp =
+  return StrOp{f: fn(name string) string = return prefix ++ ": " ++ name}
+
+test "string-capturing closure in struct field" =
+  let g = _arc_make_greeter("hello")
+
+  assert::equals("hello: world", (g.f)("world"))
+  assert::equals("hello: again",  (g.f)("again"))
+
+// 15. Channel transporting non-capturing function values.  The
+// channel's rc_kind is TIN_RC_FN so rc_retain/release_slot dispatch
+// through _tin_release_closure on the env (null for named fns, but the
+// path still has to be balanced).  Inline `fn(...)` in the type-arg
+// position also exercises the parser's TypeRefNode lift.
+
+fn _arc_neg(x i64) i64 = return 0 - x
+
+test "channel of non-capturing fn values is leak-clean" =
+  let ch = sync::Channel[fn(i64) i64].make(4)
+  await ch.send(_arc_add_one)
+  await ch.send(_arc_neg)
+  let f1 = await ch.recv()
+  let f2 = await ch.recv()
+
+  assert::equals(11, f1(10))
+  assert::equals(-10, f2(10))
+
+// 16. Channel transporting capturing closures.  Each send retains the
+// env; each recv transfers the slot's rc into the scratch buffer; the
+// receiver's let-binding owns rc=1 and releases on scope exit.
+
+fn _arc_make_mul(by i64) fn(i64) i64 =
+  return fn(x i64) i64 = return x * by
+
+test "channel of capturing closures is leak-clean" =
+  let ch = sync::Channel[fn(i64) i64].make(4)
+  await ch.send(_arc_make_mul(3))
+  await ch.send(_arc_make_mul(7))
+  let g1 = await ch.recv()
+  let g2 = await ch.recv()
+
+  assert::equals(30, g1(10))
+  assert::equals(70, g2(10))
+
+// 17. Inline `fn{#async}(args) ret` in the type-arg position.  The
+// canonical-key encoding has to distinguish async from sync (so that
+// Channel[fn(i64)i64] and Channel[fn{#async}(i64)i64] don't collide),
+// and the parser's TypeRefNode has to lift the async marker through.
+
+fn{#async} _arc_add_async(x i64) i64 = return x + 1
+
+test "channel of fn{#async} non-capturing is leak-clean" =
+  let ch = sync::Channel[fn{#async}(i64) i64].make(4)
+  await ch.send(_arc_add_async)
+  let f fn{#async}(i64) i64 = await ch.recv()
+  let r = await spawn f(41)
+
+  assert::equals(42, r)

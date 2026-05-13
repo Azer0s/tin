@@ -168,6 +168,12 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 	switch n := node.(type) {
 	case *ast.Identifier:
 		return n.Name
+	case *ast.TypeRefNode:
+		// Parser-emitted carrier for type-arg-position FuncType (and
+		// other shapes parseExpr can't yield natively).  Delegate to the
+		// canonical-key encoder so the result round-trips via
+		// parseTypeParamStr.
+		return cg.typeExprCanonicalKey(n.Type)
 	case *ast.UnaryExpr:
 		if n.Op == "*" {
 			inner := cg.exprToTypeParamKey(n.Expr)
@@ -282,6 +288,62 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 	if strings.HasPrefix(s, "[]") {
 		return &ast.ArrayType{Elem: parseTypeParamStr(s[2:]), Size: -1}
 	}
+	// `fn(params)ret` (or `fn#async(params)ret`) form emitted by
+	// typeExprCanonicalKey for FuncType.  Walk to the matching `)` respecting
+	// nested parens / brackets so a param like
+	// `fn(Channel[i64], fn(i64)i64)bool` round-trips.
+	isAsync := false
+
+	bodyStart := -1
+	switch {
+	case strings.HasPrefix(s, "fn#async("):
+		isAsync = true
+		bodyStart = len("fn#async(")
+	case strings.HasPrefix(s, "fn("):
+		bodyStart = len("fn(")
+	}
+
+	if bodyStart > 0 {
+		paren := 1
+
+		end := -1
+
+		for i := bodyStart; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				paren++
+			case ')':
+				paren--
+				if paren == 0 {
+					end = i
+				}
+			}
+
+			if end >= 0 {
+				break
+			}
+		}
+
+		if end > 0 {
+			inner := s[bodyStart:end]
+
+			var params []ast.TypeExpr
+
+			if strings.TrimSpace(inner) != "" {
+				params = splitTopLevelTypeArgs(inner)
+			}
+
+			retStr := strings.TrimSpace(s[end+1:])
+
+			var ret ast.TypeExpr
+
+			if retStr != "" {
+				ret = parseTypeParamStr(retStr)
+			}
+
+			return &ast.FuncType{Params: params, RetType: ret, IsAsync: isAsync}
+		}
+	}
 	// Look for the FIRST top-level `[` so we can split base[args]. Bracket
 	// depth tracking keeps `Cell[*rc::Cell[i64]]` from splitting at the
 	// inner `[`.
@@ -319,17 +381,22 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 func splitTopLevelTypeArgs(s string) []ast.TypeExpr {
 	var out []ast.TypeExpr
 
-	depth := 0
+	bdepth := 0
+	pdepth := 0
 	start := 0
 
 	for i, c := range s {
 		switch c {
 		case '[':
-			depth++
+			bdepth++
 		case ']':
-			depth--
+			bdepth--
+		case '(':
+			pdepth++
+		case ')':
+			pdepth--
 		case ',':
-			if depth == 0 {
+			if bdepth == 0 && pdepth == 0 {
 				out = append(out, parseTypeParamStr(s[start:i]))
 				start = i + 1
 			}
@@ -552,6 +619,44 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
 
 	return block.NewLoad(fatType, fatAlloca), nil
+}
+
+// genArrayLitAsFixed materializes an array literal `[e0, e1, ..., eN]` as a
+// fixed-size aggregate of LLVM type `[N x T]`.  Used when the target slot
+// (struct field, parameter) is declared with explicit length `[T; N]`.
+// Element count must match exactly; the function rejects under/overflow with
+// a positioned diagnostic.
+func (cg *CodeGen) genArrayLitAsFixed(block *ir.Block, e *ast.ArrayLit, at *irtypes.ArrayType) (value.Value, error) {
+	if uint64(len(e.Elems)) != at.Len {
+		return nil, cg.nodeErr(e,
+			"fixed-size array [_; %d] needs exactly %d elements, got %d",
+			at.Len, at.Len, len(e.Elems))
+	}
+
+	alloca := block.NewAlloca(at)
+	for i, elem := range e.Elems {
+		v, err := cg.genArgWithTargetType(block, elem, at.ElemType)
+		if err != nil {
+			return nil, err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		v = cg.coerce(block, v, at.ElemType)
+		if !v.Type().Equal(at.ElemType) {
+			return nil, cg.nodeErr(elem,
+				"array element %d: cannot store %s where %s is expected",
+				i, cg.tinTypeDisplay(v.Type()), cg.tinTypeDisplay(at.ElemType))
+		}
+
+		gep := block.NewGetElementPtr(at, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, int64(i)))
+		block.NewStore(v, gep)
+	}
+
+	return block.NewLoad(at, alloca), nil
 }
 
 // genArrayFillLit generates code for [value; count] fill array literals.
@@ -2739,6 +2844,15 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 			if pt, isPtr := st.Fields[0].(*irtypes.PointerType); isPtr {
 				return cg.genArrayLitWithElemType(block, arrLit, pt.ElemType)
 			}
+		}
+
+		// Fixed-size [N x T] target (e.g. struct field declared as
+		// [errors::Err; 3]): build the aggregate in a fresh stack alloca and
+		// load it as a value.  Without this branch the literal would default
+		// to its fat-array form {T*, i64} and store-time type-checking would
+		// reject the assignment, even though both shapes display as `[T]`.
+		if at, isArr := targetType.(*irtypes.ArrayType); isArr {
+			return cg.genArrayLitAsFixed(block, arrLit, at)
 		}
 	}
 
