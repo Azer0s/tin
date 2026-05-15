@@ -459,6 +459,7 @@ func (cg *CodeGen) asyncFuncDeclForCall(ce *ast.CallExpr) *ast.FuncDecl {
 		// like `cond_producer_broadcast` would falsely match a call to
 		// `cond.broadcast()` by suffix alone.
 		suffix := "_" + fn.Field
+
 		for key, fd := range cg.funcDecls {
 			if fd == nil || !isAsyncTag(fd.Tags) {
 				continue
@@ -500,7 +501,7 @@ func (cg *CodeGen) asyncFuncDeclForCall(ce *ast.CallExpr) *ast.FuncDecl {
 // queries cheap.  Seeded with the runtime's known-parking primitives.
 func (cg *CodeGen) fnBodyMayPark(fd *ast.FuncDecl) bool {
 	if fd == nil || fd.Body == nil {
-		// No body to analyse (e.g. extern decl): assume parking unless
+		// No body to analyze (e.g. extern decl): assume parking unless
 		// the runtime seeds say otherwise.  Currently every extern reaches
 		// here without a seed and is treated conservatively.
 		return true
@@ -577,7 +578,7 @@ func (cg *CodeGen) checkBareAsyncCall(ce *ast.CallExpr, awaitedOrSpawned map[*as
 // that contains a literal `await` expression.  Doesn't follow inlined
 // or generated awaits -- only the user's source-level keyword, since
 // the lint's purpose is documentation: pedantic projects want sync
-// signatures to disclose parking behaviour.
+// signatures to disclose parking behavior.
 //
 // Async fns (`fn{#async}`) skip the walk -- their use of await is
 // expected.  Test blocks are sync functions today; if/when they're
@@ -656,7 +657,7 @@ func (cg *CodeGen) checkSyncWaitInCoroCallable(prog *ast.Program) {
 // isSyncWaitCall reports whether `callee` is the `sync::wait` (or
 // `sync::wait_all`) function reference.  Accepts the `pkg::name`
 // ScopeAccess shape that imports of `sync` produce.  Does NOT
-// recognise rebinds via `let mywait = sync::wait` -- the wrapper
+// recognize rebinds via `let mywait = sync::wait` -- the wrapper
 // would have to be analyzed through Andersen flow to detect that,
 // which is out of scope for this check.
 func isSyncWaitCall(callee ast.Node) bool {
@@ -731,7 +732,7 @@ func (cg *CodeGen) checkDroppableFiber(es *ast.ExprStmt) {
 // whose body transitively reaches `await` or `spawn`.  The C-interop
 // boundary means callers may be arbitrary OS threads that don't own
 // scheduler state; awaiting or spawning from such a thread has
-// undefined scheduling behaviour.
+// undefined scheduling behavior.
 //
 // Implementation: piggybacks on the fnBodyMayPark cache -- a fn whose
 // body may park is also "uses scheduler".  False positives on

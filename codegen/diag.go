@@ -207,7 +207,7 @@ const (
 	// expression directly.  Runtime works (the await uses
 	// `_tin_fiber_sync_await` to drive the scheduler from non-fiber
 	// callers, or park the fiber in fiber callers), but the function's
-	// signature doesn't disclose the parking behaviour.  The pedantic
+	// signature doesn't disclose the parking behavior.  The pedantic
 	// nudge suggests either `sync::wait(future)` for an explicit
 	// sync-to-async bridge or promoting the fn to `fn{#async}`.
 	//
@@ -248,7 +248,7 @@ const (
 	// non-Tin threads via the C-interop boundary) whose body
 	// transitively reaches `await` or `spawn`.  The Tin scheduler
 	// assumes thread-local state owned by Tin's own worker pool; calls
-	// from arbitrary C threads have undefined scheduling behaviour.
+	// from arbitrary C threads have undefined scheduling behavior.
 	//
 	// Default-off; enabled by `-Wpedantic`.
 	DiagNonTinThread = "non-tin-thread"
@@ -313,7 +313,7 @@ const (
 	// DiagManualDoubleFree fires when `mem::free(p)` is invoked on
 	// a pointer that the intraprocedural pass has already proven
 	// freed on the same path.  Hard error class -- double-free is
-	// undefined behaviour in C and can corrupt the allocator's
+	// undefined behavior in C and can corrupt the allocator's
 	// freelist.
 	//
 	// Default-on.
@@ -331,15 +331,15 @@ const (
 // defaultOffWarnings lists diagnostics that are silent by default and only
 // fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
 var defaultOffWarnings = map[string]bool{
-	DiagUnusedLet:         true,
-	DiagUnusedParam:       true,
-	DiagUnusedResult:      true,
-	DiagFloatEqual:        true,
-	DiagBuiltinShadow:     true,
-	DiagUseBeforeAssign:   true,
-	DiagMagicNumber:       true,
-	DiagStyle:             true,
-	DiagUnclosedCloseable: true,
+	DiagUnusedLet:            true,
+	DiagUnusedParam:          true,
+	DiagUnusedResult:         true,
+	DiagFloatEqual:           true,
+	DiagBuiltinShadow:        true,
+	DiagUseBeforeAssign:      true,
+	DiagMagicNumber:          true,
+	DiagStyle:                true,
+	DiagUnclosedCloseable:    true,
 	DiagBareAsyncCall:        true,
 	DiagSyncUsesAwait:        true,
 	DiagDroppableFiber:       true,

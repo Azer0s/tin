@@ -713,9 +713,9 @@ func (cg *CodeGen) runDataflow(prog *ast.Program) {
 //
 //  1. Direct pass: for each fn F:
 //     - paramFrees[F] gets every param index i such that the body
-//       contains `mem::free(p_i)` directly.
+//     contains `mem::free(p_i)` directly.
 //     - returnsAlloc[F] is true when any return value is a direct
-//       call to mem::malloc / calloc / realloc / alloc.
+//     call to mem::malloc / calloc / realloc / alloc.
 //
 //  2. Fixpoint iteration: walk all calls.  If callee C has
 //     paramFrees[C] containing index j, and the call's arg at
@@ -832,12 +832,12 @@ func (cg *CodeGen) computeManualAllocSummaries(prog *ast.Program) {
 							continue
 						}
 
-						argId, ok2 := arg.(*ast.Identifier)
+						argID, ok2 := arg.(*ast.Identifier)
 						if !ok2 {
 							continue
 						}
 
-						pidx, here := entry.paramIndex[argId.Name]
+						pidx, here := entry.paramIndex[argID.Name]
 						if !here {
 							continue
 						}
@@ -1899,9 +1899,9 @@ func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
 	}
 
 	var (
-		escaped       []string
-		callArgNames  []string
-		callArgFreed  []string
+		escaped      []string
+		callArgNames []string
+		callArgFreed []string
 	)
 
 	walkAST(expr, func(n ast.Node) {
@@ -1959,15 +1959,15 @@ func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
 			}
 
 			for i, a := range e.Args {
-				argId, ok := a.(*ast.Identifier)
-				if !ok || argId.Name == "" || argId.Name == "_" {
+				argID, ok := a.(*ast.Identifier)
+				if !ok || argID.Name == "" || argID.Name == "_" {
 					continue
 				}
 
 				if calleeFrees != nil && calleeFrees[i] {
 					// Caller's `helper(p)`-and-helper-frees-p
 					// shape: transition Live -> Freed.
-					callArgFreed = append(callArgFreed, argId.Name)
+					callArgFreed = append(callArgFreed, argID.Name)
 
 					continue
 				}
@@ -1979,7 +1979,7 @@ func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
 					continue
 				}
 
-				callArgNames = append(callArgNames, argId.Name)
+				callArgNames = append(callArgNames, argID.Name)
 			}
 		}
 	})
@@ -2113,7 +2113,7 @@ func isReallocOfSelf(expr ast.Node, name string) bool {
 // callReturnsAlloc reports whether `expr` is a direct call to a fn
 // that the pre-pass summary proves returns a freshly-allocated
 // block.  Counterpart to isManualAllocCall but interprocedural --
-// recognises `let p = make()` shapes where `make` ultimately
+// recognizes `let p = make()` shapes where `make` ultimately
 // returns mem::malloc.  Conservative: only direct identifier-call
 // shapes are tracked; method calls / scope-access calls / generic
 // instantiations are out of scope.
@@ -2357,9 +2357,9 @@ func (cg *CodeGen) indexReceiverTypeIsArrayLike(expr ast.Node, st *dfState) bool
 //
 //   - Identifier  -> st.types[name] (param, local, captured)
 //   - FieldAccess -> recursively resolve receiver to a struct, then
-//                    look up the named field in structDeclsByName
+//     look up the named field in structDeclsByName
 //   - IndexExpr   -> recursively resolve receiver, peel one `[T]`
-//                    or pointer layer (chained indexing)
+//     or pointer layer (chained indexing)
 //
 // CallExpr / overloads / generic instantiation are NOT resolved
 // (would require a full type checker rerun); callers get nil and

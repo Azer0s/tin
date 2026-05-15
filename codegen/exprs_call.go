@@ -1621,6 +1621,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				if wrapped != nil {
 					llArgs[i] = wrapped
+
 					continue
 				}
 			}
@@ -1637,6 +1638,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 					if wrapped != nil {
 						llArgs[i] = wrapped
+
 						continue
 					}
 				}

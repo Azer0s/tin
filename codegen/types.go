@@ -1031,14 +1031,6 @@ func isAsyncFatFnPtr(t irtypes.Type) bool {
 	return isFatFnPtr(t)
 }
 
-// fatFnPtrInnerFnType returns the inner LLVM fn type for slot N of
-// a fat-fn-ptr (N must be 0, 1, or 2).  Slots 0 and 1 hold the
-// user-callable signature (returns T); slot 2 holds the coro ramp's
-// signature (returns i8*).
-func fatFnPtrInnerFnType(fatStruct *irtypes.StructType, slot int) *irtypes.FuncType {
-	return fatStruct.Fields[slot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
-}
-
 // isAtomType returns true if t is the %__atom named struct type { i32 }.
 func isAtomType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)

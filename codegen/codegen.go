@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -2186,7 +2187,21 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// scope and resolveColoredCallee would silently fall back to the
 	// plain sync callee -- correct semantics but cooperation is lost
 	// on every forward-ref'd colored call site.
-	for name, decl := range cg.funcDecls {
+	//
+	// Iterate in sorted name order: Go map iteration is intentionally
+	// non-deterministic, and each iteration calls NewFunc on cg.mod, so
+	// the declarations land in whatever order the map happened to walk
+	// this run.  That broke TestIRDeterminism (which diffs two runs of
+	// `tin ir` and demands byte-identical output).
+	colNames := make([]string, 0, len(cg.funcDecls))
+	for name := range cg.funcDecls {
+		colNames = append(colNames, name)
+	}
+
+	sort.Strings(colNames)
+
+	for _, name := range colNames {
+		decl := cg.funcDecls[name]
 		if !cg.coloredCallable[name] {
 			continue
 		}

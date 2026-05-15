@@ -3169,7 +3169,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// pointer to a trait fat-pointer struct).  These ARE RC-tracked
 	// blocks (allocated via _tin_rc_alloc inside
 	// buildPtrToTraitBorrow / coerceToTrait), but isRCTrackedType
-	// only recognises the iface STRUCT type, not the pointer-to-
+	// only recognizes the iface STRUCT type, not the pointer-to-
 	// iface shape that appears in struct fields and bindings.
 	// Without retain-on-store + release-of-old, reassigning a
 	// `*Trait` field would dangle on the next reader (the

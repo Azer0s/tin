@@ -370,6 +370,7 @@ func (cg *CodeGen) ensureCoroWrapperFor(srcFn *ir.Func) *ir.Func {
 	if cg.coroWrappers == nil {
 		cg.coroWrappers = map[string]*ir.Func{}
 	}
+
 	if existing, ok := cg.coroWrappers[wrapperName]; ok {
 		return existing
 	}
@@ -400,6 +401,7 @@ func (cg *CodeGen) ensureCoroWrapperFor(srcFn *ir.Func) *ir.Func {
 	cg.curFn = wrapper
 
 	entry := wrapper.NewBlock("entry")
+
 	cg.ensureFiberRuntime()
 	frame, ramp := cg.emitCoroPrologue(entry)
 
@@ -718,6 +720,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 		}
 	case *ast.CallExpr:
 		cg.walkBoxedRefs(v.Func, true)
+
 		for _, a := range v.Args {
 			cg.walkBoxedRefs(a, false)
 		}
@@ -762,6 +765,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 		cg.walkBoxedRefs(v.Future, false)
 	case *ast.SpawnExpr:
 		cg.walkBoxedRefs(v.Call, false)
+
 		if v.DoBlock != nil {
 			for _, s := range v.DoBlock.Stmts {
 				cg.walkBoxedRefs(s, false)
@@ -803,6 +807,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 		cg.walkBoxedRefs(v.Expr, false)
 	case *ast.IfStmt:
 		cg.walkBoxedRefs(v.Cond, false)
+
 		if v.Then != nil {
 			for _, s := range v.Then.Stmts {
 				cg.walkBoxedRefs(s, false)
@@ -811,6 +816,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 
 		for _, ei := range v.ElseIfs {
 			cg.walkBoxedRefs(ei.Cond, false)
+
 			if ei.Body != nil {
 				for _, s := range ei.Body.Stmts {
 					cg.walkBoxedRefs(s, false)
@@ -828,6 +834,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 		cg.walkBoxedRefs(v.Init, false)
 		cg.walkBoxedRefs(v.Post, false)
 		cg.walkBoxedRefs(v.Iter, false)
+
 		if v.Body != nil {
 			for _, s := range v.Body.Stmts {
 				cg.walkBoxedRefs(s, false)
@@ -843,6 +850,7 @@ func (cg *CodeGen) walkBoxedRefs(n ast.Node, inCalleePos bool) {
 		}
 	case *ast.MatchStmt:
 		cg.walkBoxedRefs(v.Expr, false)
+
 		for _, c := range v.Cases {
 			if c.Guard != nil {
 				cg.walkBoxedRefs(c.Guard, false)
@@ -972,6 +980,7 @@ func (cg *CodeGen) predeclareColoredVariant(n *ast.FuncDecl, tinName string, has
 	}
 
 	var retType irtypes.Type = irtypes.Void
+
 	if n.RetType != nil {
 		rt, err := cg.tinTypeToLLVM(n.RetType)
 		if err != nil {
@@ -1025,6 +1034,7 @@ func (cg *CodeGen) genColoredFuncBody(n *ast.FuncDecl, coloredName string) error
 	}
 
 	var retType irtypes.Type = irtypes.Void
+
 	if n.RetType != nil {
 		rt, err := cg.tinTypeToLLVM(n.RetType)
 		if err != nil {
@@ -1424,10 +1434,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	// dtor slot indicates the env was built via buildClosureEnv and is
 	// RC-allocated, shared across the sync/colored/coro variants.  Do
 	// NOT free() it here -- the RC dtor handles release.
-	envIsClosureLayout := false
-	if envStructType != nil && len(envStructType.Fields) == len(captures)+1 && envStructType.Fields[0] == irtypes.I8Ptr {
-		envIsClosureLayout = true
-	}
+	envIsClosureLayout := envStructType != nil && len(envStructType.Fields) == len(captures)+1 && envStructType.Fields[0] == irtypes.I8Ptr
 
 	// ARC: release the env's own reference to each RC-tracked capture (the
 	// matching retain was emitted in genSpawnDoBlock before buildEnv).

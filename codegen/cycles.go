@@ -212,6 +212,7 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 			// Suggest a concrete candidate: name the first plain-strong
 			// edge in the SCC.  The user can then `weak` or `own` it.
 			suggestion := ""
+
 			for _, n := range scc {
 				for _, e := range adj[n] {
 					if sccSet[e.to] && !e.isWeak && !e.isOwn && e.fieldName != "" {

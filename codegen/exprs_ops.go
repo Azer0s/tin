@@ -1987,6 +1987,7 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 		if cg.inCoroFn || cg.curFnColoredSync {
 			slot = 1
 		}
+
 		fnPtr := block.NewExtractValue(rightFn, uint64(slot))
 		envPtr := block.NewExtractValue(rightFn, 3)
 		fnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
@@ -2870,6 +2871,7 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 	// then OVERRIDE slot 2 with our async shim (which forwards to the
 	// real $coro rather than a synth'd one).
 	syncFatVal := cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
+
 	return block.NewInsertValue(syncFatVal, shim, 2)
 }
 

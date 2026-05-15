@@ -125,6 +125,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	// nested lambdas don't accidentally inherit the outer binding.
 	selfName := cg.lambdaSelfName
 	cg.lambdaSelfName = ""
+
 	if selfName != "" && e.RetType != nil {
 		// Build the fat-fn-ptr value: slots 0/1 = this fn (we don't
 		// emit a separate $colored variant for the self-reference; the
@@ -239,6 +240,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	// same body; curFnAutoYield + curFnColoredSync flip the yield
 	// lowering to runtime-driven via _tin_fiber_yield_coro.
 	coloredName := coloredVersionName(name)
+
 	coloredParams := make([]*ir.Param, len(llParams))
 	for i, p := range llParams {
 		coloredParams[i] = ir.NewParam(p.Name(), p.Type())
@@ -272,6 +274,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		coloredEntry.NewStore(fatVal, fatSlot)
 		cg.curScope.set(selfName, &scopeEntry{val: fatSlot, isAlloc: true, noDeinit: true, noRelease: true})
 	}
+
 	cg.unpackClosureEnv(coloredEntry, coloredFn, envStructType, captures)
 
 	for i, p := range e.Params {
@@ -293,6 +296,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	}
 
 	prevMatchSubjectC := cg.matchSubject
+
 	if _, isWhere := e.Body.(*ast.WhereList); isWhere && len(e.Params) > 0 {
 		firstParamName := e.Params[0].Name
 		if se, ok := cg.curScope.lookup(firstParamName); ok && se.isAlloc {
@@ -425,10 +429,10 @@ func (cg *CodeGen) buildFatFnPtrValue(block *ir.Block, syncFn *ir.Func, env valu
 	}
 
 	fatType := irtypes.NewStruct(
-		irtypes.NewPointer(syncFn.Sig),    // slot 0: non-colored sync (canonical)
-		irtypes.NewPointer(slot1.Sig),     // slot 1: colored sync (== slot 0 when no colored variant)
+		irtypes.NewPointer(syncFn.Sig), // slot 0: non-colored sync (canonical)
+		irtypes.NewPointer(slot1.Sig),  // slot 1: colored sync (== slot 0 when no colored variant)
 		irtypes.NewPointer(coroSlot.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)), // slot 2: coro ramp / real $coro
-		irtypes.I8Ptr,                     // slot 3: env
+		irtypes.I8Ptr, // slot 3: env
 	)
 
 	v0 := block.NewInsertValue(constant.NewUndef(fatType), syncFn, 0)
@@ -989,55 +993,6 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 	return block.NewCall(makeFn, pid), nil
 }
 
-// peekStructTypeName returns the LLVM struct type name for a simple identifier
-// expression without evaluating it.  Returns "" when the type cannot be
-// determined statically (e.g., complex sub-expression).
-func (cg *CodeGen) peekStructTypeName(identName string) string {
-	se, ok := cg.curScope.lookup(identName)
-	if !ok {
-		return ""
-	}
-
-	t := se.val.Type()
-	if se.isAlloc {
-		if pt, ok2 := t.(*irtypes.PointerType); ok2 {
-			t = pt.ElemType
-		}
-	}
-
-	if name := cg.typeNameOf(t); name != "" {
-		return name
-	}
-
-	if pt, ok2 := t.(*irtypes.PointerType); ok2 {
-		return cg.typeNameOf(pt.ElemType)
-	}
-
-	return ""
-}
-
-// directCallHasCoroVariant returns true if callNode is a direct call to an
-// {#async} function (i.e., its $coro ramp exists in scope).  Does not evaluate
-// any sub-expressions or generate IR.
-func (cg *CodeGen) directCallHasCoroVariant(callNode *ast.CallExpr) bool {
-	switch fn := callNode.Func.(type) {
-	case *ast.FieldAccess:
-		if id, ok := fn.Expr.(*ast.Identifier); ok {
-			if structName := cg.peekStructTypeName(id.Name); structName != "" {
-				_, ok2 := cg.curScope.lookup(structName + "_" + fn.Field + "$coro")
-
-				return ok2
-			}
-		}
-	case *ast.Identifier:
-		_, ok := cg.curScope.lookup(fn.Name + "$coro")
-
-		return ok
-	}
-
-	return false
-}
-
 // genInlineAsyncDrive drives an {#async} function call inline within the
 // current coroutine, without spawning a new fiber.
 //
@@ -1593,10 +1548,16 @@ func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.Call
 	}
 
 	// Channel methods take a pointer receiver; auto-address if we have a
-	// value, mirroring what the regular method call path does.
+	// value, mirroring what the regular method call path does.  HOIST the
+	// alloca to the function entry block -- emitting in `block` puts it
+	// inside the caller's for-loop body and leaks a Channel-struct-sized
+	// stack slot per iteration.  In the MPMC bench (`await ch.send(i)` x
+	// 250K) this leaked ~4 MB onto macOS's 544 KB worker stack, hitting
+	// the guard page and SIGBUSing on ~60% of runs.
 	thisPtr := thisVal
 	if _, isPtr := thisVal.Type().(*irtypes.PointerType); !isPtr {
-		alloca := block.NewAlloca(thisVal.Type())
+		entry := cg.curFn.Blocks[0]
+		alloca := entry.NewAlloca(thisVal.Type())
 		block.NewStore(thisVal, alloca)
 		thisPtr = alloca
 	}
@@ -1944,7 +1905,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 		if se, ok2 := cg.curScope.lookup(calleeName); ok2 && se.isAlloc {
 			if pt, ok3 := se.val.Type().(*irtypes.PointerType); ok3 && isAsyncFatFnPtr(pt.ElemType) {
 				loaded := block.NewLoad(pt.ElemType, se.val)
-				fnPtr := block.NewExtractValue(loaded, 2) // slot 2: coro ramp
+				fnPtr := block.NewExtractValue(loaded, 2)  // slot 2: coro ramp
 				envPtr := block.NewExtractValue(loaded, 3) // slot 3: env
 				fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
@@ -2075,7 +2036,7 @@ func (cg *CodeGen) asyncFatPtrRetType(tinFnType ast.TypeExpr) irtypes.Type {
 // to get the coroutine handle, then spawns the fiber and returns Future[T].
 // tinFnType is the declared Tin FuncType for the callee (may be nil, falls back to Future[Unit]).
 func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argNodes []ast.Node, tinFnType ast.TypeExpr) (value.Value, error) {
-	fnPtr := block.NewExtractValue(fatVal, 2) // slot 2: coro ramp
+	fnPtr := block.NewExtractValue(fatVal, 2)  // slot 2: coro ramp
 	envPtr := block.NewExtractValue(fatVal, 3) // slot 3: env
 	fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
