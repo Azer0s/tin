@@ -70,6 +70,21 @@ func (cg *CodeGen) scanMatchForUnreachable(s *ast.MatchStmt) {
 	if cg.diagSuppressed(DiagUnusedMatchArms) {
 		return
 	}
+	// Skip the unreachable scan when any case pattern is a bare
+	// identifier naming a known type ("case T:" -- not valid pattern
+	// syntax, the user wants `case x is T:` or `match scrutinee.(type)`).
+	// Without this skip the Maranget walker sees the bare identifier
+	// as a wildcard binder and falsely flags the subsequent arm as
+	// unreachable, piling a confusing "unreachable" warning on top of
+	// the real "undefined identifier" error that genIdentifier will
+	// emit later for the same arm.
+	for _, c := range s.Cases {
+		if id, ok := c.Pattern.(*ast.Identifier); ok {
+			if cg.isKnownTypeName(id.Name) {
+				return
+			}
+		}
+	}
 
 	for i := range s.Cases {
 		if !cg.marangetMatchArmUseful(s, i) {

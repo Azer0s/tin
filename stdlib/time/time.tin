@@ -231,7 +231,7 @@ fn{#async} sleep_impl(ms i64) =
 // Sub-millisecond residues round up to 1ms so a request for "a tiny
 // bit" still yields rather than becoming a busy no-op; zero or
 // negative d spawns a no-op fiber that completes immediately.
-fn sleep(d Duration) sync::Future[sync::Unit] =
+fn sleep(d Duration) Future[sync::Unit] =
   if d.ns <= 0:
     // Zero / negative duration: skip fiber spawn entirely.  Returning
     // a ready-Future avoids the scheduler round-trip (and its ARC
@@ -247,7 +247,7 @@ fn sleep(d Duration) sync::Future[sync::Unit] =
   return spawn sleep_impl(ms)
 
 // sleep_ms is a convenience for sleep(from_ms(ms)).
-fn sleep_ms(ms i64) sync::Future[sync::Unit] =
+fn sleep_ms(ms i64) Future[sync::Unit] =
   if ms <= 0:
     return sync::ready_unit()
 

@@ -109,8 +109,7 @@ struct pipeline[t] =
 
   fn push(this pipeline[t], item t) pipeline[t] =
     let d [t] = this.data
-    d ++= item
-
+    d ++= [item]
     return pipeline[t]{data: d}
 
   fn len_p(this pipeline[t]) i64 =

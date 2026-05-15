@@ -61,9 +61,12 @@ type ptConstraint struct {
 }
 
 // runAndersen computes a program-wide points-to summary and uses it to
-// surface interprocedural nil-deref findings. Runs after the
-// intraprocedural pass so the two warnings can ride the same DiagDerefNil
-// channel.
+// surface interprocedural nil-deref findings.  Walks each fn body to
+// emit proven-nil DiagDerefNil warnings (a hard finding -- no per-path
+// guard can rescue a points-to set of {@nil}), AND stores the points-to
+// map on cg so the dataflow pass can consult it from the
+// -Wunchecked-returned-nil pedantic check, which IS per-path and skips
+// sites that the runtime guard has narrowed to non-nil.
 func (cg *CodeGen) runAndersen(prog *ast.Program) {
 	funcByName := map[string]*ast.FuncDecl{}
 
@@ -85,10 +88,36 @@ func (cg *CodeGen) runAndersen(prog *ast.Program) {
 	}
 
 	pts := solveAndersen(constraints)
+	cg.andersenPts = pts
 
 	for _, fd := range funcByName {
 		cg.scanAndersenDerefs(fd, pts)
 	}
+}
+
+// andersenMayBeNil reports whether the points-to set for (fnName,
+// varName) contains @nil among other tokens.  Used by the dataflow
+// pass's -Wunchecked-returned-nil check: when the points-to MAY be
+// nil and the current path has not narrowed the variable to
+// non-nil, emit the interprocedural pedantic warning.  Returns
+// false when no points-to entry exists or when the set is the
+// proven-nil singleton (the default-on DiagDerefNil channel handles
+// that case in scanAndersenDerefs).
+func (cg *CodeGen) andersenMayBeNil(fnName, varName string) bool {
+	if cg.andersenPts == nil {
+		return false
+	}
+
+	set, ok := cg.andersenPts[ptVarFor(fnName, varName)]
+	if !ok || len(set) == 0 {
+		return false
+	}
+
+	if len(set) == 1 && set[aTokNil] {
+		return false
+	}
+
+	return set[aTokNil]
 }
 
 // collectPtConstraints walks fn's body, emitting one constraint per
@@ -101,14 +130,14 @@ func (cg *CodeGen) collectPtConstraints(fn *ast.FuncDecl, funcByName map[string]
 	walkAST(fn.Body, func(n ast.Node) {
 		switch s := n.(type) {
 		case *ast.VarDecl:
-			cg.assignConstraints(fn.Name, s.Name, s.Value, funcByName, out)
+			cg.assignConstraints(fn.Name, s.Name, fn.Name, s.Value, funcByName, out)
 		case *ast.AssignStmt:
 			if id, ok := s.Target.(*ast.Identifier); ok {
-				cg.assignConstraints(fn.Name, id.Name, s.Value, funcByName, out)
+				cg.assignConstraints(fn.Name, id.Name, fn.Name, s.Value, funcByName, out)
 			}
 		case *ast.ReturnStmt:
 			if s.Value != nil {
-				cg.assignConstraints(fn.Name, "$ret", s.Value, funcByName, out)
+				cg.assignConstraints(fn.Name, "$ret", fn.Name, s.Value, funcByName, out)
 			}
 		case *ast.CallExpr:
 			cg.callConstraints(fn.Name, s, funcByName, out)
@@ -117,9 +146,18 @@ func (cg *CodeGen) collectPtConstraints(fn *ast.FuncDecl, funcByName map[string]
 }
 
 // assignConstraints emits the one or two constraints implied by
-// `<fn>::<dst> = <src>`.
-func (cg *CodeGen) assignConstraints(fnName, dstName string, src ast.Node, funcByName map[string]*ast.FuncDecl, out *[]ptConstraint) {
-	dst := ptVarFor(fnName, dstName)
+// `<dstFn>::<dstName> = <src>`, where `<src>` is an expression
+// evaluated in `<srcFn>`'s scope.  Caller passes srcFn explicitly
+// because the dst and src fn can differ: a param-binding constraint
+// `f(arg)` resolves dst in the callee's scope (`f`) while the arg
+// expression resolves in the caller's scope.  Conflating the two
+// (using one `fnName` for both) silently misses
+// `let p = nil; deref(p)`-style two-step nil propagation: the
+// Identifier(`p`) on the call site would resolve to
+// `deref::p` (self-edge) instead of `main::p`, breaking the
+// transitive nil flow into the callee.
+func (cg *CodeGen) assignConstraints(dstFn, dstName, srcFn string, src ast.Node, funcByName map[string]*ast.FuncDecl, out *[]ptConstraint) {
+	dst := ptVarFor(dstFn, dstName)
 
 	switch e := src.(type) {
 	case nil:
@@ -128,11 +166,11 @@ func (cg *CodeGen) assignConstraints(fnName, dstName string, src ast.Node, funcB
 		*out = append(*out, ptConstraint{kind: ptcAdd, dst: dst, token: aTokNil})
 	case *ast.AddressOfExpr:
 		if id, ok := e.Expr.(*ast.Identifier); ok {
-			tok := ptToken("@addr:" + fnName + "::" + id.Name)
+			tok := ptToken("@addr:" + srcFn + "::" + id.Name)
 			*out = append(*out, ptConstraint{kind: ptcAdd, dst: dst, token: tok})
 		}
 	case *ast.Identifier:
-		*out = append(*out, ptConstraint{kind: ptcCopy, dst: dst, src: ptVarFor(fnName, e.Name)})
+		*out = append(*out, ptConstraint{kind: ptcCopy, dst: dst, src: ptVarFor(srcFn, e.Name)})
 	case *ast.CallExpr:
 		if id, ok := e.Func.(*ast.Identifier); ok {
 			if callee, ok2 := funcByName[id.Name]; ok2 {
@@ -165,7 +203,11 @@ func (cg *CodeGen) callConstraints(callerFn string, c *ast.CallExpr, funcByName 
 			continue
 		}
 
-		cg.assignConstraints(callee.Name, paramName, arg, funcByName, out)
+		// dstFn = callee (param scope), srcFn = caller (arg scope).
+		// Pre-fix this used callee for both, so Identifier(p) on the
+		// call site resolved to <callee>::p instead of <caller>::p
+		// and the nil-flow from `let p = nil; f(p)` was lost.
+		cg.assignConstraints(callee.Name, paramName, callerFn, arg, funcByName, out)
 	}
 }
 
@@ -227,6 +269,13 @@ func (cg *CodeGen) scanAndersenDerefs(fn *ast.FuncDecl, pts map[ptVar]map[ptToke
 		return len(set) == 1 && set[aTokNil]
 	}
 
+	// Only fire on proven-nil (singleton {@nil}).  The may-be-nil
+	// case is delegated to the dataflow pass's
+	// -Wunchecked-returned-nil check, which has per-path narrowing
+	// available and can suppress sites that the runtime guard has
+	// proven non-nil.  scanAndersenDerefs runs as a pure AST walk
+	// with no per-path knowledge, so it would otherwise false-fire
+	// inside `if p != nil:` bodies.
 	walkAST(fn.Body, func(n ast.Node) {
 		switch e := n.(type) {
 		case *ast.DerefExpr:

@@ -161,7 +161,12 @@ func llvmTypeName(t irtypes.Type) string {
 	}
 
 	if at, ok := t.(*irtypes.ArrayType); ok {
-		return "[" + llvmTypeName(at.ElemType) + "]"
+		// LLVM's irtypes.ArrayType always represents Tin's *fixed*-size
+		// form `[T; N]` -- fat arrays `[T]` lower to a struct, not an
+		// IR array.  Include the length so the rendered name round-trips
+		// through parseTypeParamStr and so wildcard guards can distinguish
+		// `[_; 3]` from `[_; 4]`.
+		return fmt.Sprintf("[%s; %d]", llvmTypeName(at.ElemType), at.Len)
 	}
 
 	if vt, ok := t.(*irtypes.VectorType); ok {
@@ -176,6 +181,15 @@ func llvmTypeName(t irtypes.Type) string {
 		}
 
 		if st.Name() != "" {
+			// Trait fat-pointer struct (`Show_iface`): strip the
+			// `_iface` suffix and return the bare trait name
+			// (`Show`) so monomorphization-key strings round-trip
+			// through the type resolver (`*Show` rather than the
+			// un-resolvable `*Show_iface`).  isTraitFatPtrShape
+			// confirms the {i8*, *<name>_vtable} structural shape.
+			if isTraitFatPtrShape(t) && strings.HasSuffix(st.Name(), "_iface") {
+				return strings.TrimSuffix(st.Name(), "_iface")
+			}
 			// User-defined struct / data type: use struct name as atom.
 			return st.Name()
 		}

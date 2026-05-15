@@ -152,18 +152,29 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 			if err != nil {
 				return false, err
 			}
+			// genExpr may have advanced `cg.curBlock` past the original
+			// `block` -- e.g. `await spawn ...` finishes in the synthetic
+			// `await.ok` block, not the entry block.  The terminator
+			// must land where the result is live, so prefer cg.curBlock
+			// when it differs.  Pre-fix this emitted on the (already
+			// terminated) entry block, leaving `await.ok` dangling and
+			// triggering "missing terminator" during IR serialization.
+			curBlock := cg.curBlock
+			if curBlock == nil {
+				curBlock = block
+			}
 
 			if val != nil {
-				val = cg.coerce(block, val, retType)
+				val = cg.coerce(curBlock, val, retType)
 
 				retSkip := ""
 				if ident, ok := inner.(*ast.Identifier); ok {
 					retSkip = ident.Name
 				}
 
-				emitTerminator(block, val, retSkip)
+				emitTerminator(curBlock, val, retSkip)
 			} else {
-				if err := addDefaultRet(block); err != nil {
+				if err := addDefaultRet(curBlock); err != nil {
 					return false, err
 				}
 			}
@@ -1187,9 +1198,19 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 			if llType != nil {
 				cg.returnTypeHint = llType
 			}
+			// Recursive lambda support: if the RHS is a lambda with an
+			// explicit retType, plumb the let-binding name through so
+			// genLambdaExpr can pre-register a self-reference in the
+			// lambda's body scope.  Required for `let fact = fn(n i64)
+			// i64 = ... fact(n-1) ...`.  retType-less lambdas can't
+			// recurse here because the signature isn't known up front.
+			if lam, ok := s.Value.(*ast.LambdaExpr); ok && lam.RetType != nil && s.Name != "" && s.Name != "_" {
+				cg.lambdaSelfName = s.Name
+			}
 
 			initVal, err = cg.genExpr(block, s.Value)
 			cg.returnTypeHint = nil
+			cg.lambdaSelfName = ""
 		}
 
 		if err != nil {
@@ -1619,7 +1640,16 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// for any RC-tracked call result.
 		freshCallResult := isFreshCallResult(initVal)
 
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult {
+		// `let v t = *(raw as *t)` where `raw : *void` -- ownership-
+		// transfer load out of opaque scratch storage that the caller
+		// frees immediately afterwards (sync::wait's get_result + free
+		// sequence; channel.recv's per-thread buffer; ...).  The void-
+		// ptr-cast tag tells us no other tracked binding still owns
+		// these inner fields, so retaining here would leave a +1 with
+		// no matching release.  Same exception the return-stmt path
+		// already applies.
+		derefOfRawVoid := cg.isDerefOfRawVoidPtrCast(s.Value)
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult && !derefOfRawVoid {
 			// Owning-pointer borrow case: see emitOwningPtrRetainIfApplicable.
 			// emitRetain skips bare *<struct> / *<iface> by design (param
 			// borrow convention).  When the let-binding takes ownership of
@@ -3135,6 +3165,17 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// this.head = n), not for arbitrary pointer dereferences (*pp = target)
 	// which are raw pointer stores, not ownership transfers.
 	isTinStructPtrElem := false
+	// isTraitIfacePtrElem: the target field is `*Trait_iface` (a
+	// pointer to a trait fat-pointer struct).  These ARE RC-tracked
+	// blocks (allocated via _tin_rc_alloc inside
+	// buildPtrToTraitBorrow / coerceToTrait), but isRCTrackedType
+	// only recognises the iface STRUCT type, not the pointer-to-
+	// iface shape that appears in struct fields and bindings.
+	// Without retain-on-store + release-of-old, reassigning a
+	// `*Trait` field would dangle on the next reader (the
+	// caller-side release in emitCallArgReleaseForRet frees the
+	// iface block the field still pointed at).
+	isTraitIfacePtrElem := false
 
 	if _, isFieldTarget := s.Target.(*ast.FieldAccess); isFieldTarget {
 		if ept, ok6 := ptrType.ElemType.(*irtypes.PointerType); ok6 {
@@ -3142,14 +3183,19 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 				_, isTinStructPtrElem = cg.structTypes[innerSt.Name()]
 			}
 		}
+
+		isTraitIfacePtrElem = cg.isTraitFatPtrPtrType(ptrType.ElemType)
 	}
 
-	if (isRCTrackedType(ptrType.ElemType) || isTinStructPtrElem) && !isWeakTarget {
+	if (isRCTrackedType(ptrType.ElemType) || isTinStructPtrElem || isTraitIfacePtrElem) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
 		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(val) {
-			if isTinStructPtrElem {
-				// Direct _tin_retain for *TinStruct pointers (emitRetain doesn't
-				// handle these to avoid retaining borrowed parameters).
+			if isTinStructPtrElem || isTraitIfacePtrElem {
+				// Direct _tin_retain for *TinStruct and
+				// *Trait_iface pointers (emitRetain doesn't
+				// handle these because the leading-ptr
+				// classification only matches the iface STRUCT
+				// shape, not the *iface pointer shape).
 				ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
 				block.NewCall(cg.ensureRetain(), ptrI8)
 			} else {
@@ -3261,10 +3307,11 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		}
 	}
 
-	// For ++= the rhs is an element to append, not the container type.
-	// Save the raw rhs for use in the ++= case; other ops coerce rhs to
-	// the container/element type (which is the same for scalar types).
-	rhsRaw := rhs
+	// Coerce the rhs to the LHS slot's type.  For scalar ops this is a
+	// no-op when both sides share the same numeric type; for `++=` the
+	// LHS slot is a slice (`{T*, i64}`) and the rhs must also be a
+	// `[T]` literal/value -- mismatches produce a compile error inside
+	// the ++= branch (see below).
 	rhs = cg.coerce(block, rhs, elemType)
 
 	var result value.Value
@@ -3302,94 +3349,100 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 			result = block.NewSDiv(current, rhs)
 		}
 	case "++=":
-		// Append element to fat array {T*, i64}.
-		// current = {old_ptr, old_len}; rhs = new element of type T.
-		// new_len = old_len + 1
-		// new_ptr = malloc(new_len * sizeof(T))
-		// memcpy(new_ptr, old_ptr, old_len * sizeof(T))
-		// new_ptr[old_len] = rhs
-		// result = {new_ptr, new_len}
-		if isFatArrayPtr(elemType) {
-			fatType := elemType.(*irtypes.StructType)
-			dataPtrType := fatType.Fields[0].(*irtypes.PointerType)
-			elemT := dataPtrType.ElemType
+		// Slice concat-assign: `xs ++= ys` extends `xs : [T]` with all
+		// elements of `ys : [T]`.  The right-hand side must be the same
+		// slice type as the left -- to append a single value, wrap it
+		// as a one-element literal: `xs ++= [v]`.  Emission mirrors the
+		// `++` binary operator at exprs.go:1908:
+		//
+		//   new_len = old_len + rhs_len
+		//   new_ptr = rc_alloc(new_len * sizeof(T))
+		//   memcpy(new_ptr,             old_ptr, old_len * sizeof(T))
+		//   memcpy(new_ptr + old_bytes, rhs_ptr, rhs_len * sizeof(T))
+		//
+		// For non-temporary RHS, retain each copied element so the new
+		// buffer co-owns them.  Always release the old buffer; for a
+		// temporary RHS, also release its backing buffer (the contained
+		// element refs have been transferred to the new buffer).
+		if !isFatArrayPtr(elemType) {
+			return block, cg.nodeErr(s,
+				"`++=` requires a slice ([T]) on the left-hand side, got %s",
+				fmtArgType(elemType))
+		}
 
-			oldPtr := block.NewExtractValue(current, 0)
-			oldLen := block.NewExtractValue(current, 1)
-			newLen := block.NewAdd(oldLen, constant.NewInt(irtypes.I64, 1))
+		fatType := elemType.(*irtypes.StructType)
+		dataPtrType := fatType.Fields[0].(*irtypes.PointerType)
+		elemT := dataPtrType.ElemType
 
-			// sizeof(elemT) via GEP trick.
-			nullElemPtr := constant.NewNull(irtypes.NewPointer(elemT))
-			sizeGep := block.NewGetElementPtr(elemT, nullElemPtr, constant.NewInt(irtypes.I64, 1))
-			elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
-			newBytes := block.NewMul(newLen, elemSize)
+		if !rhs.Type().Equal(elemType) {
+			return block, cg.nodeErr(s,
+				"`++=` expects a `[%s]` on the right-hand side; got %s. "+
+					"`++=` is concat-assign (not append-one) -- to append a "+
+					"single value, wrap it: `xs ++= [v]`",
+				fmtArgType(elemT), fmtArgType(rhs.Type()))
+		}
 
-			newI8Ptr := block.NewCall(cg.ensureRCAlloc(), newBytes)
-			newPtr := block.NewBitCast(newI8Ptr, irtypes.NewPointer(elemT))
+		oldPtr := block.NewExtractValue(current, 0)
+		oldLen := block.NewExtractValue(current, 1)
+		rhsPtr := block.NewExtractValue(rhs, 0)
+		rhsLen := block.NewExtractValue(rhs, 1)
+		newLen := block.NewAdd(oldLen, rhsLen)
 
-			// memcpy old data.
-			oldBytes := block.NewMul(oldLen, elemSize)
-			oldI8Ptr := block.NewBitCast(oldPtr, irtypes.I8Ptr)
-			block.NewCall(cg.ensureMemcpy(), newI8Ptr, oldI8Ptr, oldBytes, constant.NewInt(irtypes.I1, 0))
+		// sizeof(elemT) via GEP trick.
+		nullElemPtr := constant.NewNull(irtypes.NewPointer(elemT))
+		sizeGep := block.NewGetElementPtr(elemT, nullElemPtr, constant.NewInt(irtypes.I64, 1))
+		elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
+		newBytes := block.NewMul(newLen, elemSize)
 
-			// Store new element at index old_len.
-			// Use rhsRaw (the raw expression value) to avoid the earlier
-			// coerce(rhs, elemType) which coerced to the container type rather
-			// than the element type.  Re-coerce here to elemT (element type).
-			newElemGep := block.NewGetElementPtr(elemT, newPtr, oldLen)
-			newElem := cg.coerce(block, rhsRaw, elemT)
+		newI8Ptr := block.NewCall(cg.ensureRCAlloc(), newBytes)
+		newPtr := block.NewBitCast(newI8Ptr, irtypes.NewPointer(elemT))
 
-			// ARC for pointer-typed elements ([*T]):
-			// The array co-owns every element pointer, so all elements must be
-			// heap-allocated (ARC-managed) before being stored.
-			if pt, isPtr := elemT.(*irtypes.PointerType); isPtr {
-				if addrOf, ok := s.Value.(*ast.AddressOfExpr); ok {
-					if _, isIdent := addrOf.Expr.(*ast.Identifier); isIdent {
-						// &localVar: the pointer is to a stack alloca.  Heap-promote
-						// it by copying the struct value into a fresh _tin_rc_alloc
-						// block so the array holds a proper ARC-managed pointer.
-						structVal := block.NewLoad(pt.ElemType, newElem)
-						sz := cg.llvmSizeOf(block, pt.ElemType)
-						heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
-						typedHeapPtr := block.NewBitCast(heapI8, elemT)
-						cg.emitRetain(block, structVal) // retain RC fields before copying
-						block.NewStore(structVal, typedHeapPtr)
-						newElem = typedHeapPtr
-						// newElem is fresh (RC=1) - no additional retain below
-					}
-				}
-			}
+		// memcpy old data (ownership transfers from old_buf to new_buf).
+		oldBytes := block.NewMul(oldLen, elemSize)
+		oldI8Ptr := block.NewBitCast(oldPtr, irtypes.I8Ptr)
+		block.NewCall(cg.ensureMemcpy(), newI8Ptr, oldI8Ptr, oldBytes, constant.NewInt(irtypes.I1, 0))
 
-			block.NewStore(newElem, newElemGep)
-			// ARC: retain element if it is copied from an existing owner (variable,
-			// field, or index).  Without this, releasing the source variable frees
-			// the element's data while the array still holds a reference.
-			// Exception: [T;N] as string via _tin_bytes_from_buf is already RC=1.
-			if isCopyExpr(s.Value) && !isFreshBytesAlloc(newElem) {
-				if _, isPtr := elemT.(*irtypes.PointerType); isPtr {
-					// For pointer elements: retain the pointed-to ARC block itself.
-					ptrI8 := block.NewBitCast(newElem, irtypes.I8Ptr)
-					block.NewCall(cg.ensureRetain(), ptrI8)
-				} else {
-					cg.emitRetain(block, newElem)
-				}
-			}
+		// memcpy RHS data at offset oldLen*elemSize.
+		rhsOffset := block.NewMul(oldLen, elemSize)
+		rhsDst := block.NewGetElementPtr(irtypes.I8, newI8Ptr, rhsOffset)
+		rhsI8Ptr := block.NewBitCast(rhsPtr, irtypes.I8Ptr)
+		rhsBytes := block.NewMul(rhsLen, elemSize)
+		block.NewCall(cg.ensureMemcpy(), rhsDst, rhsI8Ptr, rhsBytes, constant.NewInt(irtypes.I1, 0))
 
-			// Build new fat ptr.
-			fatAlloca := block.NewAlloca(fatType)
-			ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			block.NewStore(newPtr, ptrGep)
-			lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			block.NewStore(newLen, lenGep)
-			result = block.NewLoad(fatType, fatAlloca)
+		// ARC: when the RHS is an alias to existing storage, the new
+		// buffer shares element pointers with the source.  Retain each
+		// copied element so the two buffers can release independently.
+		// `elemNeedsRelease` returns false for raw pointer types, but
+		// pointer elements stored inside `[*T]` arrays DO need
+		// retain/release -- check that case explicitly.
+		_, elemIsPtr := elemT.(*irtypes.PointerType)
+		needsElemRetain := cg.elemNeedsRelease(elemT) || isRCTrackedType(elemT) || elemIsPtr
 
-			// ARC: release old array data (rc goes to 0 -> free) before
-			// overwriting the alloca with the new fat ptr.
-			block.NewCall(cg.ensureRelease(), oldI8Ptr)
-		} else {
-			result = rhs
+		if !isTemporaryProducer(s.Value) && needsElemRetain {
+			cg.emitRetainElemSlice(block, rhsDst, rhsLen, elemT)
+		}
+
+		// Build the new fat-ptr value.
+		fatAlloca := block.NewAlloca(fatType)
+		ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		block.NewStore(newPtr, ptrGep)
+		lenGep := block.NewGetElementPtr(fatType, fatAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		block.NewStore(newLen, lenGep)
+		result = block.NewLoad(fatType, fatAlloca)
+
+		// ARC: drop the old buffer (its element refs transferred to
+		// new_buf via memcpy; releasing the old buffer's outer rc
+		// frees the bytes without touching embedded refs).
+		block.NewCall(cg.ensureRelease(), oldI8Ptr)
+
+		// ARC: when the RHS was a temporary (fresh literal or call
+		// result), the temp buffer's element refs were transferred
+		// into the new buffer.  Release the temp's outer buffer to
+		// reclaim its bytes without touching elements.
+		if isTemporaryProducer(s.Value) {
+			block.NewCall(cg.ensureRelease(), rhsI8Ptr)
 		}
 	default:
 		result = rhs

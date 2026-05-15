@@ -109,8 +109,7 @@ fn summarize_all[t](items [t]) [string] where t is summarizable =
   let out [string] = []
 
   for let item t in items:
-    out ++= item.summary()
-
+    out ++= [item.summary()]
   return out
 
 fn find_largest[t](items [t]) i64 where t is measurable =

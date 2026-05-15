@@ -26,6 +26,7 @@ package codegen
 //     condition folds to a constant after substituting locals.
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -211,17 +212,68 @@ type dfState struct {
 	// auto-zero-inits primitives, so the read is well-defined; the
 	// warning is about programmer intent, not memory safety.
 	uninit map[string]bool
-	dead   bool // true means control-flow can't reach this point
+	// notZero holds integer names proven != 0 on this path via a
+	// guard like `if x != 0:` or `if x > 0:`.  Used by
+	// dfCheckUncheckedDiv to silence pedantic warnings on guarded
+	// divisions where the interval-narrowing can't represent the
+	// punctured range (i.e. arbitrary i64 minus the singleton 0).
+	// Cleared on assignment to the name.
+	notZero map[string]bool
+	// boundsChecked holds integer names whose upper bound has been
+	// established on this path -- either via `if i < positiveConst:`
+	// (narrows interval, also recorded here), `if i < len(arr):`
+	// (recorded against the specific arr name), or by being the
+	// induction variable of a `for i in arr` loop.  Used by
+	// dfCheckUncheckedIndex to silence pedantic warnings on guarded
+	// array accesses.  A name is in the set iff *some* upper bound was
+	// established; we don't track WHICH array, only that the user
+	// proved an upper bound.  Cleared on assignment.
+	boundsChecked map[string]bool
+	// types tracks the declared AST type of every binding visible on
+	// this path -- parameters seeded at fn entry, locals seeded by
+	// VarDecl.  Used by dfCheckUncheckedIndex to distinguish built-in
+	// array indexing (i64 bounds-check semantics) from user `::index`
+	// overloads (ok-destructure semantics).  Not used for value
+	// inference -- types are static, not flow-sensitive -- so the map
+	// is shared by clone (same pointers) rather than copied.
+	types map[string]ast.TypeExpr
+	// manualAlloc tracks names bound to `mem::malloc/calloc/realloc`
+	// results.  Live: held but not yet freed on this path.  Freed:
+	// `mem::free` consumed it.  Escaped: the pointer left the fn
+	// (returned, stored, passed to another fn) so the check stops
+	// tracking it.  Drives -Wmanual-alloc-leak (on scope-exit),
+	// -Wmanual-double-free, -Wmanual-use-after-free.  Counterpart to
+	// `freed` (ARC deinit) but tracks the C-interop malloc/free
+	// world separately so the two diagnostics don't cross-fire.
+	manualAlloc map[string]manualAllocState
+	dead        bool // true means control-flow can't reach this point
 }
+
+// manualAllocState is the per-name lattice for mem::malloc/free
+// tracking.  Live < Freed < Escaped (Bottom): any join collapses to
+// the dominant state, but a Freed path "wins" over a missing free
+// (MAY-be-leaked semantics is captured by Live surviving to a scope
+// exit where it would have been Freed had ALL paths freed).
+type manualAllocState int
+
+const (
+	manualAllocLive    manualAllocState = 1
+	manualAllocFreed   manualAllocState = 2
+	manualAllocEscaped manualAllocState = 3
+)
 
 func newDFState() *dfState {
 	return &dfState{
-		nil:    map[string]nilFact{},
-		cnst:   map[string]constFact{},
-		freed:  map[string]bool{},
-		intv:   map[string]interval{},
-		floats: map[string]*floatPair{},
-		uninit: map[string]bool{},
+		nil:           map[string]nilFact{},
+		cnst:          map[string]constFact{},
+		freed:         map[string]bool{},
+		intv:          map[string]interval{},
+		floats:        map[string]*floatPair{},
+		uninit:        map[string]bool{},
+		notZero:       map[string]bool{},
+		boundsChecked: map[string]bool{},
+		types:         map[string]ast.TypeExpr{},
+		manualAlloc:   map[string]manualAllocState{},
 	}
 }
 
@@ -251,6 +303,22 @@ func (s *dfState) clone() *dfState {
 
 	for k, v := range s.uninit {
 		out.uninit[k] = v
+	}
+
+	for k, v := range s.notZero {
+		out.notZero[k] = v
+	}
+
+	for k, v := range s.boundsChecked {
+		out.boundsChecked[k] = v
+	}
+
+	for k, v := range s.types {
+		out.types[k] = v
+	}
+
+	for k, v := range s.manualAlloc {
+		out.manualAlloc[k] = v
 	}
 
 	return out
@@ -334,6 +402,63 @@ func mergeStates(a, b *dfState) *dfState {
 	for k, v := range b.uninit {
 		if v {
 			out.uninit[k] = true
+		}
+	}
+	// notZero: only retain when BOTH branches proved non-zero.  Either
+	// path that didn't prove it leaves the merge unable to make the
+	// claim either.  (Intersection: the stricter of the two facts.)
+	for k, v := range a.notZero {
+		if v && b.notZero[k] {
+			out.notZero[k] = true
+		}
+	}
+	// boundsChecked: intersection (same shape as notZero).  A name
+	// remains proven bounds-checked at the join only when every
+	// incoming path established an upper bound.
+	for k, v := range a.boundsChecked {
+		if v && b.boundsChecked[k] {
+			out.boundsChecked[k] = true
+		}
+	}
+	// types: union; static type info, never differs between paths,
+	// so we just take whichever side has the binding.
+	for k, v := range a.types {
+		out.types[k] = v
+	}
+
+	for k, v := range b.types {
+		if _, ok := out.types[k]; !ok {
+			out.types[k] = v
+		}
+	}
+
+	// manualAlloc merge: Live AND Live -> Live (still might leak);
+	// Freed AND Freed -> Freed (consistent); mix -> Live (the
+	// not-freed path leaks); Escaped on either side -> Escaped
+	// (binding has left the fn, don't track further).
+	for k, va := range a.manualAlloc {
+		vb, hasB := b.manualAlloc[k]
+		if !hasB {
+			out.manualAlloc[k] = va
+
+			continue
+		}
+
+		switch {
+		case va == manualAllocEscaped || vb == manualAllocEscaped:
+			out.manualAlloc[k] = manualAllocEscaped
+		case va == manualAllocLive || vb == manualAllocLive:
+			// Either path didn't free -- treat as Live so the
+			// post-loop / post-if scope-exit check flags it.
+			out.manualAlloc[k] = manualAllocLive
+		case va == manualAllocFreed && vb == manualAllocFreed:
+			out.manualAlloc[k] = manualAllocFreed
+		}
+	}
+
+	for k, vb := range b.manualAlloc {
+		if _, ok := out.manualAlloc[k]; !ok {
+			out.manualAlloc[k] = vb
 		}
 	}
 
@@ -563,7 +688,14 @@ func statesEqual(a, b *dfState) bool {
 
 // runDataflow runs the intraprocedural dataflow pass over every top-level
 // FuncDecl (and struct method). Each function gets its own analysis run.
+//
+// Pre-pass: compute the interprocedural manual-alloc summaries
+// (paramFrees, returnsAlloc) so the dataflow's call-site handler
+// can make precise escape decisions instead of conservatively
+// marking every call arg as Escaped.
 func (cg *CodeGen) runDataflow(prog *ast.Program) {
+	cg.computeManualAllocSummaries(prog)
+
 	for _, n := range prog.Stmts {
 		switch v := n.(type) {
 		case *ast.FuncDecl:
@@ -576,10 +708,188 @@ func (cg *CodeGen) runDataflow(prog *ast.Program) {
 	}
 }
 
+// computeManualAllocSummaries walks every top-level fn (and struct
+// method) twice:
+//
+//  1. Direct pass: for each fn F:
+//     - paramFrees[F] gets every param index i such that the body
+//       contains `mem::free(p_i)` directly.
+//     - returnsAlloc[F] is true when any return value is a direct
+//       call to mem::malloc / calloc / realloc / alloc.
+//
+//  2. Fixpoint iteration: walk all calls.  If callee C has
+//     paramFrees[C] containing index j, and the call's arg at
+//     position j is the caller's own param p_k, propagate by
+//     adding k to paramFrees[F].  Similarly, when `return f(...)`
+//     and f is in returnsAlloc, set returnsAlloc[F] = true.
+//     Iterate until no changes.
+//
+// Conservative: parameters that flow through complex expressions
+// (struct field, address-of, etc.) are not tracked.  The
+// dataflow's call-site handler treats such bindings as Escaped --
+// which is the existing fallback -- so the summary just refines
+// the common direct-pass shape.
+func (cg *CodeGen) computeManualAllocSummaries(prog *ast.Program) {
+	if cg.paramFrees == nil {
+		cg.paramFrees = map[string]map[int]bool{}
+	}
+
+	if cg.returnsAlloc == nil {
+		cg.returnsAlloc = map[string]bool{}
+	}
+
+	type fnEntry struct {
+		decl       *ast.FuncDecl
+		paramIndex map[string]int // param name -> position
+	}
+
+	fns := map[string]fnEntry{}
+
+	addFn := func(fd *ast.FuncDecl) {
+		if fd == nil || fd.Body == nil || fd.IsExtern != "" || fd.IsVirtual {
+			return
+		}
+
+		idx := map[string]int{}
+		pos := 0
+
+		for _, p := range fd.Params {
+			if p.IsVarArgs {
+				continue
+			}
+
+			if p.Name != "" && p.Name != "_" {
+				idx[p.Name] = pos
+			}
+
+			pos++
+		}
+
+		fns[fd.Name] = fnEntry{decl: fd, paramIndex: idx}
+	}
+
+	for _, n := range prog.Stmts {
+		switch v := n.(type) {
+		case *ast.FuncDecl:
+			addFn(v)
+		case *ast.StructDecl:
+			for _, m := range v.Methods {
+				addFn(m)
+			}
+		}
+	}
+
+	// Phase 1: direct summary.  Seed an empty entry for every
+	// analyzed fn so the dataflow's call-site handler can tell
+	// "analyzed callee, frees nothing" from "unanalyzed callee
+	// (extern / indirect)".  Without the seed, both cases looked
+	// identical (paramFrees lookup returned nil) and a Live alloc
+	// passed to a read-only helper got marked Escaped, silently
+	// suppressing the leak warning.
+	for name := range fns {
+		if cg.paramFrees[name] == nil {
+			cg.paramFrees[name] = map[int]bool{}
+		}
+	}
+
+	for name, entry := range fns {
+		walkAST(entry.decl.Body, func(n ast.Node) {
+			switch s := n.(type) {
+			case *ast.ExprStmt:
+				if argName, ok := isManualFreeCall(s.Expr); ok {
+					if i, here := entry.paramIndex[argName]; here {
+						cg.paramFrees[name][i] = true
+					}
+				}
+			case *ast.ReturnStmt:
+				if s.Value != nil && isManualAllocCall(s.Value) {
+					cg.returnsAlloc[name] = true
+				}
+			}
+		})
+	}
+
+	// Phase 2: fixpoint over call edges.
+	for changed := true; changed; {
+		changed = false
+
+		for name, entry := range fns {
+			walkAST(entry.decl.Body, func(n ast.Node) {
+				switch s := n.(type) {
+				case *ast.CallExpr:
+					id, ok := s.Func.(*ast.Identifier)
+					if !ok {
+						return
+					}
+
+					calleeFrees, hasFrees := cg.paramFrees[id.Name]
+					if !hasFrees {
+						return
+					}
+
+					for i, arg := range s.Args {
+						if !calleeFrees[i] {
+							continue
+						}
+
+						argId, ok2 := arg.(*ast.Identifier)
+						if !ok2 {
+							continue
+						}
+
+						pidx, here := entry.paramIndex[argId.Name]
+						if !here {
+							continue
+						}
+
+						if cg.paramFrees[name] == nil {
+							cg.paramFrees[name] = map[int]bool{}
+						}
+
+						if !cg.paramFrees[name][pidx] {
+							cg.paramFrees[name][pidx] = true
+							changed = true
+						}
+					}
+				case *ast.ReturnStmt:
+					if s.Value == nil {
+						return
+					}
+
+					call, ok := s.Value.(*ast.CallExpr)
+					if !ok {
+						return
+					}
+
+					id, ok2 := call.Func.(*ast.Identifier)
+					if !ok2 {
+						return
+					}
+
+					if cg.returnsAlloc[id.Name] && !cg.returnsAlloc[name] {
+						cg.returnsAlloc[name] = true
+						changed = true
+					}
+				}
+			})
+		}
+	}
+}
+
 func (cg *CodeGen) dfAnalyzeFunc(fn *ast.FuncDecl) {
 	if fn.Body == nil || fn.IsExtern != "" || fn.IsVirtual {
 		return
 	}
+
+	// Stash the current fn name for the Andersen lookup in
+	// dfCheckExpr -- ptVarFor keys on the (fn, var) pair, and the
+	// dataflow walker doesn't otherwise know which function it is
+	// in.  Cleared at exit so a later subagent / monomorphization
+	// step doesn't accidentally key into the wrong fn.
+	prevDfFn := cg.dfCurFnName
+	cg.dfCurFnName = fn.Name
+
+	defer func() { cg.dfCurFnName = prevDfFn }()
 
 	// Entry state: parameters are BOTTOM (could be anything from caller).
 	// Their interval is seeded from the declared type, so a `u8` parameter
@@ -598,9 +908,16 @@ func (cg *CodeGen) dfAnalyzeFunc(fn *ast.FuncDecl) {
 		if iv := intervalForTinType(p.Type); iv.set {
 			st.intv[p.Name] = iv
 		}
+
+		if p.Type != nil {
+			st.types[p.Name] = p.Type
+		}
 	}
 
-	cg.dfWalkAny(fn.Body, st)
+	cg.manualAllocSites = map[string]ast.Pos{}
+
+	finalSt := cg.dfWalkAny(fn.Body, st)
+	cg.dfCheckManualAllocLeaks(finalSt)
 }
 
 // intervalForTinType returns the integer range that a variable of type t
@@ -845,6 +1162,39 @@ func (cg *CodeGen) dfWalkBlock(b *ast.Block, st *dfState) *dfState {
 
 func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 	switch v := stmt.(type) {
+	case *ast.TupleDestructDecl:
+		// Mark a `t[k]` RHS as ok-destructured so the
+		// -Wunchecked-index pedantic check stays silent for the
+		// canonical `let (v, ok) = t[k]` shape.  The IndexExpr's
+		// visit consults cg.dfSkipIndexCheck.
+		if ie, ok := v.Value.(*ast.IndexExpr); ok {
+			if cg.dfSkipIndexCheck == nil {
+				cg.dfSkipIndexCheck = map[*ast.IndexExpr]bool{}
+			}
+
+			cg.dfSkipIndexCheck[ie] = true
+		}
+
+		cg.dfCheckExpr(v.Value, st)
+
+		// Seed types for the bound names.  Without type inference
+		// from the destructured tuple we leave them untyped (no
+		// downstream warning is silenced or fired incorrectly).
+		st = cg.dfApplyEscapes(v.Value, st)
+		st = st.clone()
+
+		for _, name := range v.Names {
+			if name == "" || name == "_" {
+				continue
+			}
+
+			st.nil[name] = nilBottom
+			st.cnst[name] = cBotFact()
+			delete(st.uninit, name)
+		}
+
+		return st
+
 	case *ast.VarDecl:
 		cg.dfCheckExpr(v.Value, st)
 
@@ -869,6 +1219,38 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 
 		if newFp != nil {
 			st.floats[v.Name] = newFp
+		}
+		// Track the declared type so dfCheckUncheckedIndex can tell
+		// built-in arrays apart from user `::index` overloads.  When
+		// the let binding is unannotated, infer from the RHS shape
+		// where possible (array literals, len() calls produce known
+		// types).
+		if v.Name != "" && v.Name != "_" {
+			if v.Type != nil {
+				st.types[v.Name] = v.Type
+			} else if rhsType := cg.dfInferTypeFromRHS(v.Value); rhsType != nil {
+				st.types[v.Name] = rhsType
+			}
+			// Manual-alloc tracking: `let p = mem::malloc(...)`
+			// (or calloc/realloc/alloc) starts a Live binding
+			// that must be passed to `mem::free` before scope
+			// exit.  ALSO: `let p = make()` where `make` was
+			// proven by the interprocedural pre-pass to return
+			// a freshly-allocated block starts a Live binding
+			// too -- the caller now owns the allocation and
+			// must free it.  Reassignment to anything else
+			// clears the entry.
+			if isManualAllocCall(v.Value) || cg.callReturnsAlloc(v.Value) {
+				st.manualAlloc[v.Name] = manualAllocLive
+
+				if cg.manualAllocSites == nil {
+					cg.manualAllocSites = map[string]ast.Pos{}
+				}
+
+				cg.manualAllocSites[v.Name] = v.Pos()
+			} else {
+				delete(st.manualAlloc, v.Name)
+			}
 		}
 		// Track the uninit-by-decl shape `let x T` (no initializer) so a
 		// later read fires DiagUseBeforeAssign. `let x = expr` (or `let
@@ -897,6 +1279,48 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.cnst[id.Name] = newCnst
 			delete(st.freed, id.Name) // reassign clears freed state
 			delete(st.uninit, id.Name)
+			delete(st.notZero, id.Name)
+			delete(st.boundsChecked, id.Name) // reassign clears any prior non-zero proof
+			// Manual-alloc reassign rules:
+			//   - prior Live + RHS is mem::realloc(<same id>, ...):
+			//       legal swap (realloc consumes the input
+			//       pointer internally).  Stay Live, no warn.
+			//   - prior Live + RHS is any OTHER alloc / call that
+			//       returns alloc:  the prior block is dropped --
+			//       warn leak, then transition to a fresh Live
+			//       binding for the new allocation.
+			//   - prior Live + RHS is a borrow (other identifier,
+			//       field load, etc.):  same drop-warn, then
+			//       clear the entry (no new alloc to track).
+			//   - prior absent + RHS is an alloc: standard Live
+			//       initialisation.
+			//   - prior absent + RHS is anything else: no-op.
+			rhsIsAlloc := isManualAllocCall(v.Value) || cg.callReturnsAlloc(v.Value)
+			rhsIsReallocSelf := isReallocOfSelf(v.Value, id.Name)
+			priorLive := st.manualAlloc[id.Name] == manualAllocLive
+
+			switch {
+			case priorLive && rhsIsReallocSelf:
+				// Legal swap; nothing to do.
+			case priorLive && rhsIsAlloc:
+				cg.warn(DiagManualAllocLeak, v.Pos(),
+					"reassigning %q drops the previous mem::malloc/calloc/realloc result without `mem::free`; add the free before the reassignment, or transfer ownership first",
+					id.Name)
+
+				st.manualAlloc[id.Name] = manualAllocLive
+				cg.manualAllocSites[id.Name] = v.Pos()
+			case priorLive:
+				cg.warn(DiagManualAllocLeak, v.Pos(),
+					"reassigning %q drops the previous mem::malloc/calloc/realloc result without `mem::free`; add the free before the reassignment, or transfer ownership first",
+					id.Name)
+
+				delete(st.manualAlloc, id.Name)
+			case rhsIsAlloc:
+				st.manualAlloc[id.Name] = manualAllocLive
+				cg.manualAllocSites[id.Name] = v.Pos()
+			default:
+				delete(st.manualAlloc, id.Name)
+			}
 
 			if newIv.set {
 				st.intv[id.Name] = newIv
@@ -929,6 +1353,8 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.nil[id.Name] = nilBottom
 			delete(st.floats, id.Name)
 			delete(st.uninit, id.Name)
+			delete(st.notZero, id.Name)
+			delete(st.boundsChecked, id.Name)
 			// `x += k` and `x -= k` for constant k shift the strided
 			// interval. Preserving stride here is what lets the loop
 			// fixpoint widen `for epoch = 0; ...; epoch += 500` to a
@@ -971,6 +1397,8 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 			st.nil[id.Name] = nilBottom
 			delete(st.floats, id.Name)
 			delete(st.uninit, id.Name)
+			delete(st.notZero, id.Name)
+			delete(st.boundsChecked, id.Name)
 
 			var d int64
 
@@ -1005,6 +1433,22 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 
 			return st
 		}
+		// Manual-alloc tracking: detect `mem::free(p)` at the
+		// statement level (the common shape).  Transitions p
+		// from Live to Freed; warns on a re-free of an already
+		// Freed binding.
+		if name, ok := isManualFreeCall(v.Expr); ok {
+			st = st.clone()
+
+			if st.manualAlloc[name] == manualAllocFreed {
+				cg.warn(DiagManualDoubleFree, v.Expr.Pos(),
+					"mem::free(%q) but %q was already freed on this path", name, name)
+			}
+
+			st.manualAlloc[name] = manualAllocFreed
+
+			return st
+		}
 
 		cg.dfCheckExpr(v.Expr, st)
 
@@ -1019,6 +1463,18 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 		if v.Value != nil {
 			cg.dfCheckExpr(v.Value, st)
 		}
+
+		// Manual-alloc ownership transfer: returning a Live binding
+		// transfers ownership to the caller; mark Escaped so the
+		// scope-exit leak check stays silent.
+		st = st.clone()
+		dfEscapeManualAllocFromExpr(v.Value, st)
+		// Early-return leak check: any binding still Live AND not
+		// in the returned expression leaks via this exit point.
+		// Without this the function-end leak check (which runs on
+		// the joined non-dead state) misses leaks that escape via
+		// early returns -- the dead branch's state is discarded.
+		cg.dfCheckManualAllocLeaks(st)
 
 		dead := st.clone()
 		dead.dead = true
@@ -1045,6 +1501,20 @@ func (cg *CodeGen) dfWalkStmt(stmt ast.Node, st *dfState) *dfState {
 				delete(loopSt.floats, v.VarName)
 				delete(loopSt.uninit, v.VarName)
 				delete(loopSt.freed, v.VarName)
+				delete(loopSt.notZero, v.VarName)
+				delete(loopSt.boundsChecked, v.VarName)
+				// Range-form iteration (`for i in lo..hi`) makes the
+				// loop variable an integer index bounded above by hi
+				// (a typical bounds-check shape).  Mark it
+				// boundsChecked so `arr[i]` inside the body skips the
+				// -Wunchecked-index pedantic warning when the
+				// surrounding code wrote the obvious `for i in
+				// 0..len(arr): arr[i]` pattern.  We don't verify hi
+				// matches the indexed array -- the warning is about
+				// intent ("you wrote an upper bound"), not soundness.
+				if bin, ok := v.Iter.(*ast.BinExpr); ok && bin.Op == ".." {
+					loopSt.boundsChecked[v.VarName] = true
+				}
 			}
 			// Evaluate the iterable for side-effect facts (e.g. nil
 			// guard on the iter expression).
@@ -1147,8 +1617,20 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 		if cond != nil {
 			cg.dfCheckExpr(cond, prev)
 		}
-
+		// Body sees the then-narrowed state from the loop condition
+		// (`for i < len(arr): arr[i]` should treat `i` as
+		// boundsChecked inside the body).  narrowOnCond returns
+		// (thenSt, elseSt); we want thenSt for the body, the
+		// elseSt is the post-loop continuation handled by the
+		// outer caller via the un-narrowed `prev`.
 		bodySt := prev.clone()
+		if cond != nil {
+			thenSt, _ := narrowOnCond(cond, prev)
+			if thenSt != nil {
+				bodySt = thenSt
+			}
+		}
+
 		bodySt = cg.dfWalkBlock(body, bodySt)
 
 		if post != nil && bodySt != nil && !bodySt.dead {
@@ -1221,6 +1703,13 @@ func (cg *CodeGen) dfWalkLoop(init, cond, post ast.Node, body *ast.Block, st *df
 	}
 
 	bodySt := prev.clone()
+	if cond != nil {
+		thenSt, _ := narrowOnCond(cond, prev)
+		if thenSt != nil {
+			bodySt = thenSt
+		}
+	}
+
 	cg.dfWalkBlock(body, bodySt)
 
 	return prev
@@ -1260,11 +1749,38 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 
 	walkAST(expr, func(n ast.Node) {
 		switch e := n.(type) {
+		case *ast.Identifier:
+			// Manual-alloc use-after-free: any read of a name
+			// whose manualAlloc state is Freed fires the
+			// diagnostic.  Skipped when the read is `mem::free`
+			// dispatching (we want one warning per use site, not
+			// recursively on the free arg itself -- isManualFreeCall
+			// already handles the double-free message).
+			if st.manualAlloc[e.Name] == manualAllocFreed {
+				cg.warn(DiagManualUseAfterFree, e.Pos(),
+					"use of %q after mem::free on this path", e.Name)
+			}
 		case *ast.DerefExpr:
 			if id, ok := e.Expr.(*ast.Identifier); ok {
 				if st.nil[id.Name] == nilIsNil {
 					cg.warn(DiagDerefNil, e.Pos(),
 						"dereferencing %q which is statically nil at this point", id.Name)
+				} else if st.nil[id.Name] != nilNonNil {
+					// Prefer the interprocedural diagnostic when
+					// Andersen has more-specific info: "this came
+					// from a fn that returns nil sometimes".  Falls
+					// back to the generic intraprocedural pedantic
+					// warning when no interprocedural source is
+					// known (e.g. the value is a fresh param).
+					if cg.andersenMayBeNil(cg.dfCurFnName, id.Name) {
+						cg.warn(DiagUncheckedReturnedNil, e.Pos(),
+							"dereferencing %q whose source function may return nil; guard with `if %s != nil:` or unwrap before this point",
+							id.Name, id.Name)
+					} else {
+						cg.warn(DiagUncheckedNilDeref, e.Pos(),
+							"dereference of %q without proving non-nil; guard with `if %s != nil:` or unwrap before this point",
+							id.Name, id.Name)
+					}
 				}
 
 				if st.freed[id.Name] {
@@ -1277,6 +1793,20 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 				if st.nil[id.Name] == nilIsNil {
 					cg.warn(DiagDerefNil, e.Pos(),
 						"field access on %q which is statically nil at this point", id.Name)
+				} else if dfIsPointerLike(st.types[id.Name]) && st.nil[id.Name] != nilNonNil {
+					// Same prefer-interprocedural logic as the
+					// DerefExpr branch above: the Andersen warning
+					// names the source function, which is more
+					// actionable than the generic dataflow message.
+					if cg.andersenMayBeNil(cg.dfCurFnName, id.Name) {
+						cg.warn(DiagUncheckedReturnedNil, e.Pos(),
+							"field access on %q whose source function may return nil; guard with `if %s != nil:` or unwrap before this point",
+							id.Name, id.Name)
+					} else {
+						cg.warn(DiagUncheckedNilDeref, e.Pos(),
+							"field access on pointer %q without proving non-nil; guard with `if %s != nil:` or unwrap before this point",
+							id.Name, id.Name)
+					}
 				}
 
 				if st.freed[id.Name] {
@@ -1284,8 +1814,11 @@ func (cg *CodeGen) dfCheckExpr(expr ast.Node, st *dfState) {
 						"field access on %q after deinit on this path", id.Name)
 				}
 			}
+		case *ast.IndexExpr:
+			cg.dfCheckUncheckedIndex(e, st)
 		case *ast.BinExpr:
 			cg.dfCheckFloatPrecision(e, st)
+			cg.dfCheckUncheckedDiv(e, st)
 		}
 	})
 
@@ -1365,20 +1898,93 @@ func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
 		return st
 	}
 
-	var escaped []string
+	var (
+		escaped       []string
+		callArgNames  []string
+		callArgFreed  []string
+	)
 
 	walkAST(expr, func(n ast.Node) {
-		ao, ok := n.(*ast.AddressOfExpr)
-		if !ok {
-			return
-		}
+		switch e := n.(type) {
+		case *ast.AddressOfExpr:
+			if id, ok := e.Expr.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
+				escaped = append(escaped, id.Name)
+			}
+		case *ast.StructLit:
+			// Storing a Live alloc into a struct field transfers
+			// ownership to the struct: `Owner{buf: p}` makes the
+			// Owner instance responsible for p, not the caller.
+			// Mark p Escaped so the scope-exit leak check skips it.
+			for _, f := range e.Fields {
+				if id, ok := f.Value.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
+					callArgNames = append(callArgNames, id.Name)
+				}
+			}
+		case *ast.ArrayLit:
+			// Same logic for array element absorption:
+			// `let xs = [p, q]` transfers ownership of p, q.
+			for _, el := range e.Elems {
+				if id, ok := el.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
+					callArgNames = append(callArgNames, id.Name)
+				}
+			}
+		case *ast.TupleLit:
+			for _, el := range e.Elems {
+				if id, ok := el.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
+					callArgNames = append(callArgNames, id.Name)
+				}
+			}
+		case *ast.CallExpr:
+			// Skip mem::free -- handled separately in ExprStmt
+			// (transitions Live -> Freed, not an escape).
+			if _, isFree := isManualFreeCall(e); isFree {
+				return
+			}
+			// Use the interprocedural paramFrees summary when
+			// available.  Two cases:
+			//   - hasSummary && calleeFrees[i] -> Live -> Freed
+			//     (callee provably frees its own param at index i)
+			//   - hasSummary && !calleeFrees[i] -> stays Live
+			//     (callee provably does NOT free; the alloc is
+			//     just borrowed for read/write through the pointer)
+			//   - no summary (extern, indirect, unanalyzed) -> Escaped
+			//     (conservative: callee MIGHT take ownership)
+			var (
+				calleeFrees map[int]bool
+				hasSummary  bool
+			)
 
-		if id, ok := ao.Expr.(*ast.Identifier); ok && id.Name != "" && id.Name != "_" {
-			escaped = append(escaped, id.Name)
+			if id, ok := e.Func.(*ast.Identifier); ok {
+				calleeFrees, hasSummary = cg.paramFrees[id.Name]
+			}
+
+			for i, a := range e.Args {
+				argId, ok := a.(*ast.Identifier)
+				if !ok || argId.Name == "" || argId.Name == "_" {
+					continue
+				}
+
+				if calleeFrees != nil && calleeFrees[i] {
+					// Caller's `helper(p)`-and-helper-frees-p
+					// shape: transition Live -> Freed.
+					callArgFreed = append(callArgFreed, argId.Name)
+
+					continue
+				}
+
+				if hasSummary {
+					// Analyzed callee provably does NOT free
+					// this index -- the alloc remains the
+					// caller's responsibility.
+					continue
+				}
+
+				callArgNames = append(callArgNames, argId.Name)
+			}
 		}
 	})
 
-	if len(escaped) == 0 {
+	if len(escaped) == 0 && len(callArgNames) == 0 && len(callArgFreed) == 0 {
 		return st
 	}
 
@@ -1396,7 +2002,519 @@ func (cg *CodeGen) dfApplyEscapes(expr ast.Node, st *dfState) *dfState {
 		delete(out.uninit, name)
 	}
 
+	for _, name := range callArgNames {
+		if out.manualAlloc[name] == manualAllocLive {
+			out.manualAlloc[name] = manualAllocEscaped
+		}
+	}
+
+	for _, name := range callArgFreed {
+		// Interprocedural Live -> Freed (the callee's summary
+		// proves the param is passed to mem::free).
+		if out.manualAlloc[name] == manualAllocLive {
+			out.manualAlloc[name] = manualAllocFreed
+		}
+	}
+
 	return out
+}
+
+// dfEscapeManualAllocFromExpr walks `expr` and marks every manually
+// allocated identifier that appears as Escaped in `st`.  Used by
+// ReturnStmt to transfer ownership to the caller and by assignment
+// to non-local destinations (struct field, array element, etc.) to
+// signal that the binding now flows out of the current scope's
+// responsibility.
+func dfEscapeManualAllocFromExpr(expr ast.Node, st *dfState) {
+	if expr == nil || st == nil {
+		return
+	}
+
+	walkAST(expr, func(n ast.Node) {
+		if id, ok := n.(*ast.Identifier); ok {
+			if st.manualAlloc[id.Name] == manualAllocLive {
+				st.manualAlloc[id.Name] = manualAllocEscaped
+			}
+		}
+	})
+}
+
+// dfCheckManualAllocLeaks emits -Wmanual-alloc-leak for every name
+// still in Live state at function exit.  Called once at the end of
+// dfAnalyzeFunc with the joined post-body state -- intermediate
+// scope exits don't fire (you're allowed to free in a later
+// statement) but a path that reaches the function return without
+// any `mem::free(p)` DOES fire.  Position is recovered from the
+// scope entry where the binding was first seen; we keep that in a
+// per-fn map populated during VarDecl walks.
+func (cg *CodeGen) dfCheckManualAllocLeaks(st *dfState) {
+	if st == nil {
+		return
+	}
+
+	// Don't re-fire on a dead state: every path that ended in a
+	// ReturnStmt already ran the leak check at that exit, so the
+	// joined dead state would emit a second warning for the same
+	// binding.  The fn-end caller and the ReturnStmt caller share
+	// this helper; this guard keeps the second one silent.
+	if st.dead {
+		return
+	}
+
+	for name, state := range st.manualAlloc {
+		if state != manualAllocLive {
+			continue
+		}
+
+		pos := cg.manualAllocSites[name]
+		cg.warn(DiagManualAllocLeak, pos,
+			"%q holds an mem::malloc/calloc/realloc result that is not freed on every path; "+
+				"add `mem::free(%s)` before scope exit, or transfer ownership by returning "+
+				"the pointer / storing it in a field", name, name)
+	}
+}
+
+// isReallocOfSelf reports whether `expr` is `mem::realloc(<name>, ...)`
+// with the first argument being the identifier `name`.  The
+// realloc convention is that the input pointer is consumed
+// (potentially freed by the allocator), so reassigning the same
+// binding to its realloc result is a LEGAL ownership transfer --
+// not a dropped allocation.  Anything else (different name, no
+// arg, different fn) returns false.
+func isReallocOfSelf(expr ast.Node, name string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	callee := call.Func
+	if ie, ok2 := callee.(*ast.IndexExpr); ok2 {
+		callee = ie.Expr
+	}
+
+	sa, ok := callee.(*ast.ScopeAccess)
+	if !ok {
+		return false
+	}
+
+	if len(sa.Path) != 2 || sa.Path[0] != "mem" || sa.Path[1] != "realloc" {
+		return false
+	}
+
+	if len(call.Args) < 1 {
+		return false
+	}
+
+	id, ok := call.Args[0].(*ast.Identifier)
+
+	return ok && id.Name == name
+}
+
+// callReturnsAlloc reports whether `expr` is a direct call to a fn
+// that the pre-pass summary proves returns a freshly-allocated
+// block.  Counterpart to isManualAllocCall but interprocedural --
+// recognises `let p = make()` shapes where `make` ultimately
+// returns mem::malloc.  Conservative: only direct identifier-call
+// shapes are tracked; method calls / scope-access calls / generic
+// instantiations are out of scope.
+func (cg *CodeGen) callReturnsAlloc(expr ast.Node) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	id, ok := call.Func.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+
+	return cg.returnsAlloc[id.Name]
+}
+
+// isManualAllocCall reports whether `expr` is a call to one of the
+// manual-allocation primitives in `mem::`:
+//
+//	mem::malloc(size)         // raw libc malloc
+//	mem::calloc(n, size)      // raw libc calloc
+//	mem::realloc(p, new_size) // raw libc realloc (already-owned block
+//	                          // becomes Live again under the new var)
+//	mem::alloc[T]()           // typed wrapper that allocates + zeros
+//	mem::alloc[T](n)          // typed wrapper allocating n elements
+//
+// Each of these returns a freshly-owned block that must reach
+// `mem::free` (or escape the fn) before scope exit.  Used by
+// VarDecl/AssignStmt to seed the manualAlloc tracker.
+func isManualAllocCall(expr ast.Node) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	// Type args wrap the callee in an IndexExpr:
+	// `mem::alloc[*Foo]()` -> CallExpr{Func: IndexExpr{Expr:
+	// ScopeAccess[mem, alloc], Index: <typeArg>}}.  No-type-args
+	// callers have ScopeAccess directly.  Unwrap one IndexExpr
+	// layer if present.
+	callee := call.Func
+	if ie, ok2 := callee.(*ast.IndexExpr); ok2 {
+		callee = ie.Expr
+	}
+
+	sa, ok := callee.(*ast.ScopeAccess)
+	if !ok {
+		return false
+	}
+
+	if len(sa.Path) != 2 || sa.Path[0] != "mem" {
+		return false
+	}
+
+	switch sa.Path[1] {
+	case "malloc", "calloc", "realloc", "alloc":
+		return true
+	}
+
+	return false
+}
+
+// isManualFreeCall reports whether `expr` is `mem::free(p)` with `p`
+// a simple identifier; returns the identifier's name.  Anything more
+// elaborate (`mem::free(struct.field)`, `mem::free(call())`) is left
+// to the user to verify -- the lattice keyed on name can't track
+// non-binding free targets.
+func isManualFreeCall(expr ast.Node) (string, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+
+	sa, ok := call.Func.(*ast.ScopeAccess)
+	if !ok {
+		return "", false
+	}
+
+	if len(sa.Path) != 2 || sa.Path[0] != "mem" || sa.Path[1] != "free" {
+		return "", false
+	}
+
+	if len(call.Args) != 1 {
+		return "", false
+	}
+
+	id, ok := call.Args[0].(*ast.Identifier)
+	if !ok {
+		return "", false
+	}
+
+	return id.Name, true
+}
+
+// dfCheckUncheckedDiv warns on `a / b` and `a % b` when the dataflow
+// pass cannot prove `b != 0` at the use site.  The default-on hard
+// error for "division by zero" already rejects b == constant 0; this
+// pedantic check covers the unproven case: b is a variable with an
+// interval that may contain 0, or has no interval at all.  When b
+// folds to a non-zero compile-time constant the check stays silent
+// (the const case is proven safe).
+func (cg *CodeGen) dfCheckUncheckedDiv(e *ast.BinExpr, st *dfState) {
+	if e.Op != "/" && e.Op != "%" {
+		return
+	}
+
+	// Constant RHS: zero already errored, non-zero is provably safe.
+	if v := cg.tryFoldExpr(e.Right); v.kind == foldInt {
+		return
+	}
+
+	// Identifier RHS with an interval that excludes zero, OR with a
+	// flow-sensitive notZero proof, is provably safe.
+	if id, ok := e.Right.(*ast.Identifier); ok {
+		if iv, has := st.intv[id.Name]; has && iv.set && (iv.lo > 0 || iv.hi < 0) {
+			return
+		}
+
+		if st.notZero[id.Name] {
+			return
+		}
+	}
+
+	// Float division by zero is well-defined IEEE (Inf/NaN); only warn
+	// when the operands look integral.  We don't have type info here
+	// cheap, so guard on op kind: `%` is integer-only in Tin, and `/`
+	// on identifiers we conservatively warn about.
+	rhsDesc := "divisor"
+	if id, ok := e.Right.(*ast.Identifier); ok {
+		rhsDesc = fmt.Sprintf("divisor %q", id.Name)
+	}
+
+	cg.warn(DiagUncheckedDiv, e.Pos(),
+		"%q with unproven non-zero %s; guard with `if <divisor> != 0:` or narrow the value before this point",
+		e.Op, rhsDesc)
+}
+
+// dfCheckUncheckedIndex warns on `arr[i]` when the dataflow pass
+// cannot prove the access is safe on the current path.  Two
+// regimes:
+//
+//   - Built-in arrays / slices / strings / pointers: index must be
+//     bounds-checked.  Proof comes from a constant index that
+//     fits, a flow-sensitive `boundsChecked` fact set by
+//     narrowOnCond on `if i < expr:` / `if i <= expr:` guards.
+//   - User structs with a `::index` overload: the impl returns
+//     `(V, bool)` and the canonical safe access is the destructure
+//     `let (v, ok) = t[k]` (the caller then checks `ok`).  A bare
+//     `t[k]` at any other context relies on the codegen auto-
+//     unwrap, which panics on miss -- that's the "unchecked" path.
+//     The TupleDestructDecl pre-walk handler sets a transient
+//     skip-flag so the access doesn't double-fire on the
+//     destructured form.
+func (cg *CodeGen) dfCheckUncheckedIndex(e *ast.IndexExpr, st *dfState) {
+	// Constant index: handled by the default-on -Warray-bounds path.
+	if v := cg.tryFoldExpr(e.Index); v.kind == foldInt {
+		return
+	}
+
+	// Skip when this IndexExpr is the RHS of a tuple-destructure
+	// (`let (v, ok) = t[k]`).  dfWalkStmt sets this transient flag
+	// before walking the destructure's value so the IndexExpr's
+	// visit knows it was unwrapped.  Applies to both array-like
+	// receivers (rare; usually a fat-ptr-of-tuples access) and
+	// custom `::index` receivers (the canonical safe form).
+	if cg.dfSkipIndexCheck[e] {
+		return
+	}
+
+	receiverIsArray := cg.indexReceiverTypeIsArrayLike(e.Expr, st)
+
+	if receiverIsArray {
+		// Identifier index with a flow-sensitive bounds-check proof
+		// is provably safe.
+		idIndex, isIdent := e.Index.(*ast.Identifier)
+		if isIdent && st.boundsChecked[idIndex.Name] {
+			return
+		}
+
+		idxDesc := "index"
+		if isIdent {
+			idxDesc = fmt.Sprintf("index %q", idIndex.Name)
+		}
+
+		cg.warn(DiagUncheckedIndex, e.Pos(),
+			"array %s accessed without proven bounds check; guard with `if <index> < len(arr):` or narrow the value before this point",
+			idxDesc)
+
+		return
+	}
+
+	// Custom `::index` overload receiver: access without ok-
+	// destructuring relies on the auto-unwrap panic to catch a
+	// missing key at runtime.  Pedantic: warn so the user either
+	// destructures `(v, ok) = t[k]` and checks `ok`, or accepts
+	// the runtime panic by silencing the diagnostic explicitly.
+	t := cg.dfResolveType(e.Expr, st)
+	if t != nil && !isArrayLikeType(t) {
+		recvDesc := dfExprDescription(e.Expr)
+		cg.warn(DiagUncheckedIndex, e.Pos(),
+			"indexed access on %s (custom `::index` impl) without `(v, ok)` destructure; pattern: `let (v, ok) = %s[...]; if ok: ...` or silence with `-Wno-unchecked-index`",
+			recvDesc, recvDesc)
+	}
+}
+
+// dfExprDescription returns a short rendering of an expression for
+// use in diagnostic messages.  Identifier names render as `name`;
+// FieldAccess as `recv.field`; everything else as `<expr>`.
+func dfExprDescription(expr ast.Node) string {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return fmt.Sprintf("%q", e.Name)
+	case *ast.FieldAccess:
+		return fmt.Sprintf("%s.%s", dfExprDescription(e.Expr), e.Field)
+	}
+
+	return "<expr>"
+}
+
+// indexReceiverTypeIsArrayLike reports whether the IndexExpr
+// receiver `expr` resolves to a built-in indexable type (array
+// literal, slice / fat-ptr `[T]`, string, or pointer) on the
+// current dataflow state.  Handles identifiers, field access on
+// struct-typed receivers, and chained index expressions
+// (`rows[i][j]`).  For unresolvable shapes (CallExpr, etc.) it
+// returns false so we don't false-warn on map accesses we can't
+// see through.
+func (cg *CodeGen) indexReceiverTypeIsArrayLike(expr ast.Node, st *dfState) bool {
+	t := cg.dfResolveType(expr, st)
+	if t == nil {
+		return false
+	}
+
+	return isArrayLikeType(t)
+}
+
+// dfResolveType walks an expression and returns its declared AST
+// type when we can resolve it statically, or nil otherwise.
+// Supported shapes:
+//
+//   - Identifier  -> st.types[name] (param, local, captured)
+//   - FieldAccess -> recursively resolve receiver to a struct, then
+//                    look up the named field in structDeclsByName
+//   - IndexExpr   -> recursively resolve receiver, peel one `[T]`
+//                    or pointer layer (chained indexing)
+//
+// CallExpr / overloads / generic instantiation are NOT resolved
+// (would require a full type checker rerun); callers get nil and
+// fall back to "don't warn" so map-like / opaque receivers stay
+// silent.
+func (cg *CodeGen) dfResolveType(expr ast.Node, st *dfState) ast.TypeExpr {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		if t, ok := st.types[e.Name]; ok {
+			return t
+		}
+
+		return nil
+
+	case *ast.FieldAccess:
+		recvT := cg.dfResolveType(e.Expr, st)
+		if recvT == nil {
+			return nil
+		}
+
+		structName := dfStructNameOf(recvT)
+		if structName == "" {
+			return nil
+		}
+
+		decl, ok := cg.structDeclsByName[structName]
+		if !ok || decl == nil {
+			return nil
+		}
+
+		for _, f := range decl.Fields {
+			if f.Name == e.Field {
+				return f.Type
+			}
+		}
+
+		return nil
+
+	case *ast.IndexExpr:
+		recvT := cg.dfResolveType(e.Expr, st)
+		if recvT == nil {
+			return nil
+		}
+		// Peel one layer of array / pointer / string.
+		switch t := recvT.(type) {
+		case *ast.ArrayType:
+			return t.Elem
+		case *ast.PointerType:
+			return t.Elem
+		}
+
+		return nil
+	}
+
+	return nil
+}
+
+// dfStructNameOf returns the struct name a TypeExpr refers to, or
+// "" if it does not name a struct.  Resolves through pointer
+// wrappers (`*Foo` -> "Foo") and bare names.
+func dfStructNameOf(t ast.TypeExpr) string {
+	switch n := t.(type) {
+	case *ast.SimpleType:
+		return n.Name
+	case *ast.PointerType:
+		return dfStructNameOf(n.Elem)
+	case *ast.GenericType:
+		return n.Name
+	}
+
+	return ""
+}
+
+// dfIsPointerLike reports whether t is a pointer or pointer-like
+// type (raw `*T`, `*Trait`).  Used by dfCheckExpr's FieldAccess
+// case to decide whether `s.field` warrants the
+// -Wunchecked-nil-deref pedantic check.  Slices and arrays return
+// false: their bounds story is the -Wunchecked-index regime, not
+// the nil-deref regime.
+func dfIsPointerLike(t ast.TypeExpr) bool {
+	_, ok := t.(*ast.PointerType)
+
+	return ok
+}
+
+// isArrayLikeType reports whether t is a built-in indexable type
+// (array literal `[T; N]`, slice / fat-pointer `[T]`, string, raw
+// pointer `*T`).  Excludes user struct types -- those route through
+// `::index` overloads with `(V, bool)` semantics.
+func isArrayLikeType(t ast.TypeExpr) bool {
+	if t == nil {
+		return false
+	}
+
+	switch n := t.(type) {
+	case *ast.ArrayType:
+		return true
+	case *ast.PointerType:
+		return true
+	case *ast.SimpleType:
+		return n.Name == "string"
+	}
+
+	return false
+}
+
+// dfInferTypeFromRHS attempts to recover the type of a let-binding
+// from its initializer when the user did not write an explicit
+// annotation.  Supported shapes:
+//   - `[a, b, c]` literal -> *ast.ArrayType
+//   - `[T; N]` typed array literal -> *ast.ArrayType
+//   - `fn(...)` direct call -> looked up in cg.funcDecls for RetType
+//   - `&x` address-of -> *ast.PointerType (element type left blank)
+//
+// Returns nil when the type cannot be inferred locally; the binding
+// is then left untyped in dfState.types and the
+// -Wunchecked-{index,nil-deref} checks skip it (conservative).
+func (cg *CodeGen) dfInferTypeFromRHS(rhs ast.Node) ast.TypeExpr {
+	switch n := rhs.(type) {
+	case *ast.ArrayLit:
+		// Bare literal -- element type unknown without full inference,
+		// but the SHAPE is an array, which is all we need to tell
+		// array-like from custom-index.  Synthesize a placeholder
+		// element type; isArrayLikeType only checks the outer node
+		// kind.
+		_ = n
+
+		return &ast.ArrayType{Elem: &ast.SimpleType{Name: ""}}
+
+	case *ast.AddressOfExpr:
+		// `&x` is always a pointer to whatever x is.  Element type
+		// is left blank -- the dataflow only checks the OUTER kind
+		// of the inferred type, so the placeholder suffices.
+		return &ast.PointerType{Elem: &ast.SimpleType{Name: ""}}
+
+	case *ast.CallExpr:
+		// Direct call by simple-name: look up the callee's
+		// declared return type.  Falls back to nil for method
+		// calls, scope-qualified calls, generic templates, etc.
+		// -- those require more machinery the dataflow pass
+		// doesn't carry.
+		id, ok := n.Func.(*ast.Identifier)
+		if !ok {
+			return nil
+		}
+
+		decl, ok := cg.funcDecls[id.Name]
+		if !ok || decl == nil {
+			return nil
+		}
+
+		return decl.RetType
+	}
+
+	return nil
 }
 
 // dfCheckFloatPrecision flags `==` / `!=` whose two sides are float
@@ -1760,6 +2878,17 @@ func narrowOnCond(cond ast.Node, st *dfState) (thenSt, elseSt *dfState) {
 	if id, ok := bin.Left.(*ast.Identifier); ok {
 		iv := constIntOf(bin.Right)
 		if !iv.set {
+			// Non-constant RHS: still record a flow-sensitive
+			// upper-bound proof for `i < expr` / `i <= expr`,
+			// even though we can't narrow the interval.  Matches
+			// the user's intent ("I wrote an upper-bound guard")
+			// for the -Wunchecked-index pedantic check.  The
+			// classic pattern is `if i < len(arr): arr[i]`,
+			// where `len(arr)` is a call and not constIntOf-able.
+			if bin.Op == "<" || bin.Op == "<=" {
+				thenSt.boundsChecked[id.Name] = true
+			}
+
 			return
 		}
 
@@ -1769,6 +2898,12 @@ func narrowOnCond(cond ast.Node, st *dfState) (thenSt, elseSt *dfState) {
 	} else if id, ok := bin.Right.(*ast.Identifier); ok {
 		iv := constIntOf(bin.Left)
 		if !iv.set {
+			// Non-constant LHS: mirror image of the above.
+			// `expr > i` / `expr >= i` imply an upper bound on i.
+			if bin.Op == ">" || bin.Op == ">=" {
+				thenSt.boundsChecked[id.Name] = true
+			}
+
 			return
 		}
 
@@ -1793,6 +2928,53 @@ func narrowOnCond(cond ast.Node, st *dfState) (thenSt, elseSt *dfState) {
 
 	if elseIv.set {
 		elseSt.intv[name] = elseIv
+	}
+
+	// notZero narrowing: x != 0 -> then proves non-zero; x == 0 -> else
+	// proves non-zero.  Also covers strict-sign guards (x > 0, x < 0
+	// imply non-zero on the then side) and !=0-style relations against
+	// a non-zero constant (x != c with c != 0 doesn't imply x != 0, so
+	// only handle c == 0 here).  Used by dfCheckUncheckedDiv to silence
+	// guarded divisions where the residual interval can't represent the
+	// punctured range.
+	switch op {
+	case "!=":
+		if c == 0 {
+			thenSt.notZero[name] = true
+		}
+	case "==":
+		if c == 0 {
+			elseSt.notZero[name] = true
+		}
+	case ">":
+		if c >= 0 {
+			thenSt.notZero[name] = true
+		}
+	case ">=":
+		if c > 0 {
+			thenSt.notZero[name] = true
+		}
+	case "<":
+		if c <= 0 {
+			thenSt.notZero[name] = true
+		}
+	case "<=":
+		if c < 0 {
+			thenSt.notZero[name] = true
+		}
+	}
+
+	// boundsChecked narrowing: `x < c` or `x <= c` with c > 0 records
+	// that x has been compared against an upper bound, so the
+	// pedantic -Wunchecked-index check stays silent for `arr[x]`
+	// inside the then branch.  We don't verify c <= len(arr) -- the
+	// goal is "did the user write an upper-bound guard," not "is the
+	// guard sound" (since c could be a const < len(arr) too).
+	switch op {
+	case "<", "<=":
+		if c > 0 {
+			thenSt.boundsChecked[name] = true
+		}
 	}
 
 	return

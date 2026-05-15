@@ -19,6 +19,14 @@ import (
 func (cg *CodeGen) predeclareFunc(n *ast.FuncDecl) error {
 	// Constrained generic functions are compiled on demand at call sites.
 	if len(n.Constraints) > 0 {
+		// Reject obviously-unsatisfiable shapes (`where t is *t`,
+		// `where t is List[t]`, etc.) at declaration time so the
+		// user sees one clear error at the source instead of an
+		// opaque "undefined: <fn>" later at every call site.
+		if err := checkConstraintsReferenceDeclared(n.Name, n.TypeParams, nil, n.Constraints); err != nil {
+			return err
+		}
+
 		return nil
 	}
 	// Unconstrained generic functions (TypeParams only) are also compiled on demand.
@@ -1460,7 +1468,128 @@ func typeBoundStringParen(bound ast.TypeBound) string {
 // structSatisfiesConstraint checks that structName satisfies a trait expression.
 // traitExpr may be a SimpleType ("labeled"), GenericType ("iter[i64]"), or a
 // type alias that expands to a union ("addable" = i8|i16|i32|...).
+// typeExprStructuralMatch reports whether the concrete TypeExpr
+// matches the bound TypeExpr structurally, treating WildcardType
+// in `bound` as "matches anything".  Examples (concrete vs bound):
+//
+//	*i64           vs *_             --> true
+//	*i64           vs *i64           --> true
+//	*i64           vs *Foo           --> false
+//	i64            vs *_             --> false (not a pointer)
+//	Point[A, B]    vs Point[_, _]    --> true
+//	Point[A, B]    vs Point[A, _]    --> true
+//	Point[A, B]    vs Pair[_, _]     --> false (different generic head)
+//	[i64]          vs [_]            --> true
+//
+// Used by structSatisfiesConstraint for wildcard-shape bounds
+// (`where t is *_`, `where t is Point[_, _]`, etc.).
+func typeExprStructuralMatch(concrete, bound ast.TypeExpr) bool {
+	if bound == nil {
+		return concrete == nil
+	}
+	// Wildcard matches any type.
+	if _, ok := bound.(*ast.WildcardType); ok {
+		return true
+	}
+
+	if concrete == nil {
+		return false
+	}
+
+	switch b := bound.(type) {
+	case *ast.SimpleType:
+		c, ok := concrete.(*ast.SimpleType)
+
+		return ok && c.Name == b.Name
+	case *ast.PointerType:
+		c, ok := concrete.(*ast.PointerType)
+		if !ok {
+			return false
+		}
+
+		return typeExprStructuralMatch(c.Elem, b.Elem)
+	case *ast.ArrayType:
+		c, ok := concrete.(*ast.ArrayType)
+		if !ok {
+			return false
+		}
+		// Size must match exactly: `[_; 3]` is "fixed-size 3 of any
+		// element", not "any array of any length".  Fat-array bound
+		// `[_]` (Size=-1) accepts only fat-array concretes; a fixed
+		// `[T; N]` concrete is a distinct shape.
+		if c.Size != b.Size {
+			return false
+		}
+
+		return typeExprStructuralMatch(c.Elem, b.Elem)
+	case *ast.GenericType:
+		c, ok := concrete.(*ast.GenericType)
+		if !ok {
+			return false
+		}
+
+		if c.Name != b.Name || len(c.TypeParams) != len(b.TypeParams) {
+			return false
+		}
+
+		for i := range b.TypeParams {
+			if !typeExprStructuralMatch(c.TypeParams[i], b.TypeParams[i]) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	return false
+}
+
 func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.TypeExpr) bool {
+	// Pointer / wildcard bound: match by structural shape.  Parses
+	// the concrete name back into a TypeExpr and recursively
+	// matches against the bound, treating WildcardType as "any
+	// type" and PointerType / ArrayType / GenericType wrappers as
+	// structural constraints.
+	//
+	//   bound = *_                   --> any pointer type
+	//   bound = *Foo                 --> exactly *Foo
+	//   bound = Point[_, _]          --> Point with 2 type args
+	//   bound = HashMap[string, _]   --> string-keyed HashMap of anything
+	//
+	// SimpleType bounds fall through to the trait / type-equality
+	// path below (where `t is i64` or `t is comp` is checked).
+	//
+	// The concrete name may arrive in either form -- bracketed
+	// ("Point[i64, string]") from the type-alias expansion path,
+	// or mangled ("Point__i64__string") from the fn monomorph
+	// path's typeSubst.  prettyStructName converts the mangled
+	// form to bracketed; bracketed input passes through unchanged.
+	if _, isSimple := traitExpr.(*ast.SimpleType); !isSimple {
+		// Prefer the *structured* TypeExpr recorded at struct
+		// monomorphization (cg.dataInstShape).  prettyStructName +
+		// parseTypeParamStr can't recover nested generics from the
+		// mangled name because `__` separator is ambiguous between
+		// arity-N and one-nested-N-arity-1 forms:
+		// "Box__Pair__i64__string" could be Box[Pair, i64, string]
+		// (3 args) or Box[Pair[i64, string]] (1 nested arg).
+		// dataInstShape carries the original TypeExpr list, so we
+		// rebuild the GenericType exactly.
+		var concreteExpr ast.TypeExpr
+		if shape, ok := cg.dataInstShape[structName]; ok {
+			concreteExpr = &ast.GenericType{Name: shape.Tmpl, TypeParams: shape.Args}
+		} else {
+			concreteExpr = parseTypeParamStr(prettyStructName(structName))
+		}
+
+		if typeExprStructuralMatch(concreteExpr, traitExpr) {
+			return true
+		}
+		// PointerType / GenericType bounds that didn't match
+		// structurally fall through: maybe the trait name path
+		// below resolves it (e.g. user-declared
+		// `trait Box[T]` invoked as `t is Box[T]`).
+	}
+
 	var traitName string
 
 	switch te := traitExpr.(type) {
@@ -2490,6 +2619,28 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 
 		if err := cg.genCoroFuncBody(n, coroKey, nil, nil); err != nil {
+			return err
+		}
+	}
+	// Emit the $colored variant when this fn is in the colored set (reached
+	// from a coro body or boxed into a fat-fn-ptr value).  Same body as
+	// sync, but with auto-yield enabled and lowered to a runtime yield
+	// call -- callers in cooperative context route here instead of the
+	// plain sync entry so loop back-edges / heavy calls cooperate with
+	// the scheduler.  See docs/internals/fn-coloring.md.
+	//
+	// `#no_autoyield` opts the fn out: with yields suppressed, the
+	// colored body would be byte-identical to the sync entry, so we
+	// skip the emission entirely.  lookupColoredVariant returns nil for
+	// the fn and slot 1 of its fat-fn-ptr falls back to slot 0.  Bare
+	// calls from cooperative context similarly fall through (still
+	// gated on funcHeuristics for the pre-call yield).
+	if cg.coloredCallable[scopeName] && !hasTag(n.Tags, "no_autoyield") {
+		if err := cg.predeclareColoredVariant(n, scopeName, false); err != nil {
+			return err
+		}
+
+		if err := cg.genColoredFuncBody(n, coloredVersionName(scopeName)); err != nil {
 			return err
 		}
 	}

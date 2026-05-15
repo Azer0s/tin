@@ -150,8 +150,16 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		return irtypes.NewArray(uint64(t.Size), elem), nil
 	case *ast.FuncType:
-		// Function values are fat pointers: { fn(i8* env, params...) ret *, i8* }
-		// The i8* env carries the closure environment; non-capturing lambdas use null
+		// Uniform 4-slot fat-fn-ptr ABI:
+		// `{non_colored_sync*, colored_sync*, coro_ramp*, env}`.
+		// Same shape for `fn(...) T` and `fn{#async}(...) T`; coercion
+		// between them is a bitwise copy.  Call lowering picks the slot
+		// by caller context: bare sync call -> slot 0, in-coro bare
+		// call -> slot 1, spawn / await -> slot 2.  Slot 0's inner fn
+		// returns the declared T (canonical user signature); slot 2's
+		// inner fn returns i8* (coro hdl).  Slot 1 currently shares
+		// slot 0's body until per-fn colored emission lands.  See
+		// docs/internals/fn-coloring.md.
 		llParams := []irtypes.Type{irtypes.I8Ptr} // env is always first
 
 		for _, p := range t.Params {
@@ -174,17 +182,17 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			}
 		}
 
-		// Async fat-fn-ptr: the inner function is the $coro variant which always
-		// returns i8* (coroutine handle), regardless of the declared return type.
-		if t.IsAsync {
-			ret = irtypes.I8Ptr
-		}
+		coroFnTy := irtypes.NewFunc(irtypes.I8Ptr, llParams...)
+		coroFnTy.Variadic = t.IsVarArgs
+		syncFnTy := irtypes.NewFunc(ret, llParams...)
+		syncFnTy.Variadic = t.IsVarArgs
 
-		ft := irtypes.NewFunc(ret, llParams...)
-		ft.Variadic = t.IsVarArgs
-		// Fat pointer struct: { fn_ptr*, i8* }
-
-		return irtypes.NewStruct(irtypes.NewPointer(ft), irtypes.I8Ptr), nil
+		return irtypes.NewStruct(
+			irtypes.NewPointer(syncFnTy), // slot 0: non-colored sync (canonical fn type for inference)
+			irtypes.NewPointer(syncFnTy), // slot 1: colored sync (placeholder, same as slot 0 until per-fn coloring)
+			irtypes.NewPointer(coroFnTy), // slot 2: coro ramp (returns i8* hdl; used by spawn / await)
+			irtypes.I8Ptr,                // slot 3: env
+		), nil
 	case *ast.GenericType:
 		// Handle known generic types
 		if t.Name == "fn" && len(t.TypeParams) >= 1 {
@@ -284,6 +292,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				}
 
 				cg.dataInstTypeArgs[concreteName] = parts
+				cg.dataInstShape[concreteName] = instShape{Tmpl: dd.Name, Args: t.TypeParams}
 
 				if st, ok3 := cg.structTypes[concreteName]; ok3 {
 					return st, nil
@@ -337,6 +346,8 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 							return nil, synthErr
 						}
 					}
+
+					cg.dataInstShape[concreteName] = instShape{Tmpl: qualTypeName, Args: t.TypeParams}
 
 					if st, ok2 := cg.structTypes[concreteName]; ok2 {
 						return st, nil
@@ -981,40 +992,51 @@ func isFatArrayPtr(t irtypes.Type) bool {
 	return ok
 }
 
-// isFatFnPtr returns true when t is a closure fat pointer { fn(i8*,...)*, i8* }.
+// isFatFnPtr returns true when t is the uniform 4-slot fat-fn-ptr
+// `{non_colored_sync*, colored_sync*, coro_ramp*, env}`.  Slot 0 is
+// the canonical user-facing sync fn type (used for type inference,
+// param-type derivation, and direct calls outside coros).  Slot 1
+// is the in-coro colored sync variant.  Slot 2 is the coro ramp
+// (returns i8* hdl, for `spawn` / await).  Slot 3 is i8* env.
 func isFatFnPtr(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 {
+	if !ok || len(st.Fields) != 4 {
 		return false
 	}
 
-	if st.Fields[1] != irtypes.I8Ptr {
+	if st.Fields[3] != irtypes.I8Ptr {
 		return false
 	}
 
-	pt, ok := st.Fields[0].(*irtypes.PointerType)
-	if !ok {
-		return false
+	for i := 0; i < 3; i++ {
+		pt, ok2 := st.Fields[i].(*irtypes.PointerType)
+		if !ok2 {
+			return false
+		}
+
+		if _, ok3 := pt.ElemType.(*irtypes.FuncType); !ok3 {
+			return false
+		}
 	}
 
-	_, ok = pt.ElemType.(*irtypes.FuncType)
-
-	return ok
+	return true
 }
 
-// isAsyncFatFnPtr returns true when t is an async closure fat pointer
-// { fn(i8*, params...) i8* *, i8* } - the inner function returns i8*
-// (coroutine handle), as produced for fn{#async}(...) type expressions.
+// isAsyncFatFnPtr: under the uniform 4-slot ABI, every fat-fn-ptr
+// carries a coro ramp in slot 2, so the LLVM-level type can't tell
+// async from sync.  Type-system distinctions (was this slot declared
+// `{#async}`) live in the AST.  Kept as an alias for back-compat
+// with the small number of call sites that historically used it.
 func isAsyncFatFnPtr(t irtypes.Type) bool {
-	if !isFatFnPtr(t) {
-		return false
-	}
+	return isFatFnPtr(t)
+}
 
-	st := t.(*irtypes.StructType)
-	fnPtr := st.Fields[0].(*irtypes.PointerType)
-	ft := fnPtr.ElemType.(*irtypes.FuncType)
-
-	return ft.RetType != nil && ft.RetType.Equal(irtypes.I8Ptr)
+// fatFnPtrInnerFnType returns the inner LLVM fn type for slot N of
+// a fat-fn-ptr (N must be 0, 1, or 2).  Slots 0 and 1 hold the
+// user-callable signature (returns T); slot 2 holds the coro ramp's
+// signature (returns i8*).
+func fatFnPtrInnerFnType(fatStruct *irtypes.StructType, slot int) *irtypes.FuncType {
+	return fatStruct.Fields[slot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 }
 
 // isAtomType returns true if t is the %__atom named struct type { i32 }.

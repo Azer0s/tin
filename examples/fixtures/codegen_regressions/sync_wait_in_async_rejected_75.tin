@@ -1,0 +1,16 @@
+// Regression (D): sync::wait inside any fn reachable from `#async`
+// is a hard compile error.  Previously it silently SIGSEGV'd at
+// runtime because sync::wait's `_tin_fiber_join` call expects a
+// `coro.suspend` IR to follow (which a sync function body never
+// has).  Compile-time block + runtime panic both surface a clear
+// message pointing the user at `await`.
+
+use sync
+
+fn{#async} dbl(n i64) i64 = return n * 2
+
+fn{#async} trip(n i64) i64 =
+  let f = spawn dbl(n)
+  return sync::wait(f)
+
+fn main() i64 = return 0

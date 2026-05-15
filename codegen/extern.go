@@ -122,6 +122,28 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 
 		return irtypes.NewPointer(elem), nil
 	}
+	// fn(...) T: at the C ABI boundary, a Tin fn value (fat-fn-ptr
+	// `{fn(i8* env, params...) ret, i8* env}`) is incompatible with a
+	// raw C function pointer (which has no env arg).  Lower to `i8*`;
+	// the call site wraps Tin fn values via `tin_make_trampoline` to
+	// produce a C-callable thunk, and the return path wraps incoming
+	// raw C ptrs back into a fat-fn-ptr.  Without this case, externs
+	// declared with fn-typed params received the fat-ptr struct as the
+	// LLVM arg type, and the segfaults at every callback call site
+	// (the env shifted every C param).
+	if _, ok := te.(*ast.FuncType); ok {
+		return irtypes.I8Ptr, nil
+	}
+	// *fn(...) T: pointer-to-fn extern param.  The Tin source shape
+	// is `&cb` where cb is a fat-fn-ptr local; the C side expects
+	// `fn_t *cbp` (pointer to a raw fn ptr).  Lower to `i8**`; the
+	// call site builds a trampoline for the underlying fat-fn-ptr,
+	// stores it in a fresh stack slot, and passes the slot address.
+	if pt, ok := te.(*ast.PointerType); ok {
+		if _, isFn := pt.Elem.(*ast.FuncType); isFn {
+			return irtypes.NewPointer(irtypes.I8Ptr), nil
+		}
+	}
 
 	return cg.tinTypeToLLVM(te)
 }
@@ -141,6 +163,8 @@ func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, 
 		return nil, fmt.Errorf("tinStructNativeLLVM: unknown struct %q", structName)
 	}
 
+	tinFieldTypes := cg.structFieldTinTypes[structName]
+
 	nativeFields := make([]irtypes.Type, len(userFields))
 	for i, ft := range userFields {
 		// Recursively convert nested named struct fields.
@@ -151,6 +175,26 @@ func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, 
 			}
 
 			nativeFields[i] = inner
+		} else if i < len(tinFieldTypes) {
+			// Fn-typed fields are lowered to raw C fn ptrs at the
+			// boundary, matching `tinTypeToExternLLVM`.  Without this,
+			// a Tin struct passed by value to C would carry the
+			// fat-fn-ptr `{fn(...), env}` struct in the native layout
+			// -- the C side would have to know Tin's internal layout
+			// to call the callback.  The struct->native conversion in
+			// wrapStructToExtern populates the i8* field with a
+			// trampoline; this side just declares the slot type.
+			if _, isFn := tinFieldTypes[i].(*ast.FuncType); isFn {
+				nativeFields[i] = irtypes.I8Ptr
+			} else if pt, isPt := tinFieldTypes[i].(*ast.PointerType); isPt {
+				if _, innerFn := pt.Elem.(*ast.FuncType); innerFn {
+					nativeFields[i] = irtypes.NewPointer(irtypes.I8Ptr)
+				} else {
+					nativeFields[i] = ft
+				}
+			} else {
+				nativeFields[i] = ft
+			}
 		} else {
 			nativeFields[i] = ft
 		}
@@ -179,6 +223,7 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 
 	offset := int64(cg.userFieldOffset(structName))
 	userFields := cg.structFieldLLVMTypes[structName]
+	tinFieldTypes := cg.structFieldTinTypes[structName]
 
 	tinAlloca := block.NewAlloca(tinSt)
 	block.NewStore(val, tinAlloca)
@@ -197,6 +242,58 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 			}
 
 			fv = fv2
+		}
+		// Fat-fn-ptr field (`f fn(...) T` in source).  At the C
+		// boundary the native struct holds the field as `i8*` (raw
+		// fn ptr).  Build a trampoline from the {fn, env} pair so C
+		// can call through the slot directly; the trampoline bakes
+		// in env via the runtime register-stash mechanism.
+		if i < len(tinFieldTypes) {
+			if ftAst, ok2 := tinFieldTypes[i].(*ast.FuncType); ok2 && isFatFnPtr(fv.Type()) {
+				disp, dispErr := cg.getOrCreateClosureDispatcher(ftAst)
+				if dispErr != nil {
+					return nil, dispErr
+				}
+
+				// Non-colored sync variant (slot 0) -- C trampolines run synchronously.
+				fnRaw := block.NewExtractValue(fv, 0)
+				envRaw := block.NewExtractValue(fv, 3)
+				fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
+				dispI8 := block.NewBitCast(disp, irtypes.I8Ptr)
+				// Retain env: the trampoline transfers one ref; the
+				// source struct field still owns the original.
+				block.NewCall(cg.ensureRetain(), envRaw)
+				fv = block.NewCall(cg.ensureMakeTrampoline(), fnI8, envRaw, dispI8)
+			}
+		}
+		// *fn(...) field: source is a `*{fn, env}` (pointer to a
+		// local fat-fn-ptr).  Native field is `i8**`.  Load the
+		// fat-ptr, build trampoline, store in a fresh stack slot,
+		// and use the slot's address as the native field value.
+		if i < len(tinFieldTypes) {
+			if ptAst, ok2 := tinFieldTypes[i].(*ast.PointerType); ok2 {
+				if ftAst, isFn := ptAst.Elem.(*ast.FuncType); isFn {
+					if argPt, isPtr := fv.Type().(*irtypes.PointerType); isPtr && isFatFnPtr(argPt.ElemType) {
+						disp, dispErr := cg.getOrCreateClosureDispatcher(ftAst)
+						if dispErr != nil {
+							return nil, dispErr
+						}
+
+						fatVal := block.NewLoad(argPt.ElemType, fv)
+						// Non-colored sync variant (slot 0) -- C trampolines run synchronously.
+						fnRaw := block.NewExtractValue(fatVal, 0)
+						envRaw := block.NewExtractValue(fatVal, 3)
+						fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
+						dispI8 := block.NewBitCast(disp, irtypes.I8Ptr)
+						// See sibling `*FuncType` field branch above.
+						block.NewCall(cg.ensureRetain(), envRaw)
+						tramp := block.NewCall(cg.ensureMakeTrampoline(), fnI8, envRaw, dispI8)
+						slot := block.NewAlloca(irtypes.I8Ptr)
+						block.NewStore(tramp, slot)
+						fv = slot
+					}
+				}
+			}
 		}
 
 		dstGep := block.NewGetElementPtr(nativeSt, nativeAlloca,
@@ -744,6 +841,36 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 
 	if src.Equal(target) {
 		return val
+	}
+	// i8* -> Tin fat-fn-ptr {sync*, colored*, coro*, i8* env}:
+	// the extern returned a raw C function pointer; wrap it into a
+	// Tin fat-fn-ptr value.  Env (slot 3) points at a small RC block
+	// laid out as {i8* dtor=null, i8* c_fn_ptr} -- the standard
+	// fat-fn-ptr release path (_tin_release_closure) frees it when
+	// the wrapped value's last reference is dropped.  Slots 0 and 1
+	// are a per-signature shim that loads c_fn_ptr from env+8 and
+	// calls through it.  Slot 2 (coro ramp) is a synth wrapper so
+	// `spawn ret_of_c_fn(args)` works.  Symmetric counterpart to
+	// wrapFatFnPtrAsCCallback in exprs_call.go (Tin-fn -> C-arg).
+	if src.Equal(irtypes.I8Ptr) {
+		if tgtSt, ok := target.(*irtypes.StructType); ok && isFatFnPtr(tgtSt) {
+			shim := cg.getOrCreateCFnShimFromLLVM(tgtSt)
+			// Allocate the env block via _tin_rc_alloc(16) so
+			// _tin_release_closure can free it safely.
+			envI8 := block.NewCall(cg.ensureRCAlloc(),
+				constant.NewInt(irtypes.I64, 16))
+			i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr)
+			// Slot 0: dtor (null -- no captured RC values to release).
+			dtorSlot := block.NewBitCast(envI8, i8PtrPtr)
+			block.NewStore(constant.NewNull(irtypes.I8Ptr), dtorSlot)
+			// Slot 1: the raw C fn ptr (env+8).
+			cFnPtrSlot := block.NewGetElementPtr(irtypes.I8, envI8,
+				constant.NewInt(irtypes.I32, 8))
+			cFnPtrSlotTyped := block.NewBitCast(cFnPtrSlot, i8PtrPtr)
+			block.NewStore(val, cFnPtrSlotTyped)
+
+			return cg.buildFatFnPtrValue(block, shim, envI8)
+		}
 	}
 	// *native_struct -> *TinStruct (non-handover): copy into an immortal RC block
 	// with correct Tin layout. Store the original C pointer in the hidden trailing

@@ -1,4 +1,4 @@
-# REPL: LLVM ORC JIT Design (Option B)
+# REPL: LLVM ORC JIT Design
 
 ## Overview
 

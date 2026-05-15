@@ -20,6 +20,15 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
+// instShape records the original template name and TypeExpr
+// arg list of a generic struct/data instantiation. Used by
+// wildcard-guard constraint matching so nested generics like
+// `Box[Pair[_, _]]` survive the `__`-mangled IR struct name.
+type instShape struct {
+	Tmpl string
+	Args []ast.TypeExpr
+}
+
 // CodeGen
 
 // CodeGen holds all state needed during code generation.
@@ -165,7 +174,7 @@ type CodeGen struct {
 
 	// curFnReturnsResult tracks whether runAstChecks is currently
 	// inside a FuncDecl whose declared return type is `Result[_, _]`.
-	// Non-zero ⇒ inside such a fn. The match-as-try lint consults
+	// Non-zero => inside such a fn. The match-as-try lint consults
 	// this so it only fires when `try` would actually compile.
 	curFnReturnsResult int
 
@@ -745,6 +754,26 @@ type CodeGen struct {
 	// fn(env, args...). Keyed by sanitized (ret, params) signature.
 	interopDispatchers map[string]*ir.Func
 
+	// cFnShims caches per-signature shims that wrap a raw C function
+	// pointer (returned from an extern with a fn-typed RetType) into a
+	// Tin fat-fn-ptr.  The shim signature matches the Tin fat-fn-ptr's
+	// inner fn type `fn(i8* env, params...) ret`; the body bitcasts env
+	// back to the C fn ptr and calls through it.  Keyed by the same
+	// (ret, params) signature key as interopDispatchers.
+	cFnShims map[string]*ir.Func
+
+	// makeTrampolineFn caches the `tin_make_trampoline` extern
+	// declaration so multiple ensureMakeTrampoline call paths share
+	// one declaration rather than each adding their own (which `opt`
+	// rejects as a duplicate).
+	makeTrampolineFn *ir.Func
+
+	// coroWrappers caches the per-fn `$coro_wrap` synthesized by
+	// ensureCoroWrapperFor (fat-fn-ptr slot 0).  Scope-based lookup
+	// is unreliable across module/package boundaries -- this keyed
+	// by the source fn's mangled name guarantees module-wide uniqueness.
+	coroWrappers map[string]*ir.Func
+
 	// interopPackedStructs is the set of `#packed` struct names
 	// reachable from the program. Populated by checkAllInteropFuncs;
 	// consulted by the validator and the wrapper emitter.
@@ -830,6 +859,15 @@ type CodeGen struct {
 	// "JsonError"]). Used by inferTypeArgs to recover type arguments from a
 	// struct name whose arity cannot be recovered by splitting on `__`.
 	dataInstTypeArgs map[string][]string
+	// dataInstShape preserves the *original* TypeExpr arg list and the
+	// template name for a monomorphized generic struct/data so the
+	// constraint checker can match wildcard guards against nested
+	// generic shapes without going through the lossy `__`-mangled name.
+	// Example: instantiating `Box[Pair[i64, string]]` records
+	//   "Box__Pair__i64__string" -> {Tmpl:"Box", Args:[Pair[i64,string]]}
+	// where Args carries the structured GenericType, whereas the
+	// `__`-flattened form is unrecoverable.
+	dataInstShape map[string]instShape
 
 	// Fiber / coroutine state
 
@@ -865,6 +903,7 @@ type CodeGen struct {
 	panicFlagGlobal    *ir.Global // _has_unhandled_panics: fast-path flag for the two-level panic check
 	coroTakeResultFn   *ir.Func   // _tin_coro_take_result() -> i8*: for chaining
 	fiberYieldCoroFn   *ir.Func
+	currentCoroHdlFn   *ir.Func // _tin_current_coro_hdl() -> i8*: TLS lookup, used by $colored yields
 	fiberInitFn        *ir.Func
 	fiberRunFn         *ir.Func
 	ioInitFn           *ir.Func
@@ -885,6 +924,40 @@ type CodeGen struct {
 	// coroCallable: set of function names that need a $coro duplicate.
 	// Built by colorCallGraph() after the predeclaration pass.
 	coroCallable map[string]bool
+
+	// coloredCallable: set of function names that need a $colored
+	// sync variant emitted (slot 1 of the fat-fn-ptr ABI).  Built by
+	// colorCallGraph(): seeds with sync fns called from {#async}
+	// bodies and fns referenced as values (boxed into a fat-fn-ptr),
+	// then BFS-propagates through cg.callGraph -- a colored body
+	// routes its sync callees to their colored variants, so any sync
+	// callee transitively reached from a colored entry point also
+	// needs a colored emission.  See docs/internals/fn-coloring.md.
+	coloredCallable map[string]bool
+
+	// boxedFns: set of fn names referenced as values (without an
+	// immediate call) anywhere in the program.  Populated by
+	// collectBoxedFns before colorCallGraph; serves as a root set
+	// for coloredCallable BFS so any fn that can flow into a
+	// fat-fn-ptr value has its $colored variant emitted (slot 1).
+	boxedFns map[string]bool
+
+	// fnParkingClass caches the may-park result computed by
+	// astchecks.fnBodyMayPark for each Tin fn (keyed by funcDecl name).
+	// `true` means the body transitively reaches a yield / await /
+	// known-parking primitive; `false` means it is pure compute.  The
+	// cache is populated lazily during -Wbare-parking-async-call
+	// dispatch and also serves to break recursion in the walker.
+	fnParkingClass map[string]bool
+
+	// knownParkingExterns names the C runtime primitives whose Tin-level
+	// bare-call would park the calling thread.  Used to seed the
+	// may-park analysis at extern-call boundaries -- the analysis can't
+	// see into C bodies, so an explicit roster is the only way to
+	// classify them.  Synced with runtime/*.c manually; missing entries
+	// only weaken `-Wbare-parking-async-call` (false negative), they
+	// don't compromise the rest of the runtime.
+	knownParkingExterns map[string]bool
 
 	// callGraph: funcName -> []callee names. Built during predeclaration.
 	callGraph map[string][]string
@@ -907,12 +980,19 @@ type CodeGen struct {
 
 	// Per-function coro state (valid only when genCoroFuncBody is active).
 	inCoroFn       bool
-	curFnAutoYield bool         // true in $coro variant of #async functions without #no_autoyield
-	curCoroHdl     value.Value  // %hdl i8* in the current coro function
-	curCoroID      value.Value  // %id token in the current coro function
-	curCoroCleanup *ir.Block    // cleanup block for the current coro function
-	curCoroFrame   *coroFrame   // full frame for the current coro function
-	curCoroRetType irtypes.Type // original return type of current $coro function
+	curFnAutoYield bool // true in $coro variant of #async functions without #no_autoyield
+	// curFnColoredSync: true while emitting a $colored sync body.
+	// Switches the yield-instruction emitter from llvm.coro.suspend
+	// (intrinsic, requires a coro frame) to
+	// _tin_fiber_yield_coro(_tin_current_coro_hdl()) (runtime call,
+	// uses TLS-tracked hdl).  A $colored body has no frame of its
+	// own; it borrows the caller's via TLS.
+	curFnColoredSync bool
+	curCoroHdl       value.Value  // %hdl i8* in the current coro function
+	curCoroID        value.Value  // %id token in the current coro function
+	curCoroCleanup   *ir.Block    // cleanup block for the current coro function
+	curCoroFrame     *coroFrame   // full frame for the current coro function
+	curCoroRetType   irtypes.Type // original return type of current $coro function
 
 	// yieldResumeBlocks: IR blocks that are resume-points after an explicit
 	// `yield` statement.  At loop backedges, if `from` is in this set the
@@ -1039,12 +1119,63 @@ type CodeGen struct {
 	// the f32x4 overload over f64x2. Cleared immediately after the call is resolved.
 	returnTypeHint irtypes.Type
 
+	// lambdaSelfName carries the let-binding name through genVarDecl into
+	// genLambdaExpr so the lambda body can call itself recursively.
+	// Without this, `let fact = fn(n i64) i64 = fact(n-1)` would fail
+	// at the recursive call site with "undefined identifier: fact" --
+	// the name isn't registered in scope until AFTER the lambda body
+	// returns, which is too late for the body's own references.  The
+	// emitter pre-registers the lambda's IR func under this name (as a
+	// fat-fn-ptr alloca built from the body's own env param) before
+	// walking the body.  Cleared immediately after use.
+	lambdaSelfName string
+
 	// indexExprRawTuple is set by genTupleDestructDecl while it evaluates its
 	// RHS. When the RHS is a `t[k]` whose ::index impl returns (V, bool),
 	// genIndexExpr would normally auto-unwrap (extract V + panic if !ok); in
 	// destructure context we want the raw tuple so the destructure step can
 	// bind both names. Cleared after the RHS evaluation.
 	indexExprRawTuple bool
+	// dfSkipIndexCheck holds IndexExpr nodes whose -Wunchecked-index
+	// pedantic check should stay silent because the access is
+	// destructured via `let (v, ok) = t[k]` (the safe form for
+	// custom `::index` impls).  Populated by the dataflow pass's
+	// TupleDestructDecl handler before walking the IndexExpr; the
+	// dfCheckUncheckedIndex visit then consults this set.
+	dfSkipIndexCheck map[*ast.IndexExpr]bool
+	// andersenPts holds the interprocedural points-to summary
+	// computed by runAndersen.  Used by the dataflow pass's
+	// -Wunchecked-returned-nil check to surface nil flow across
+	// function boundaries that the intraprocedural pass can't see.
+	andersenPts map[ptVar]map[ptToken]bool
+	// dfCurFnName is the name of the function currently being
+	// analyzed by the dataflow pass.  Set by dfAnalyzeFunc on
+	// entry, cleared on exit.  Used by dfCheckExpr to key Andersen
+	// points-to lookups (which are scoped per fn).
+	dfCurFnName string
+	// manualAllocSites records the source position where each
+	// manually-allocated binding was first seen.  Used by
+	// dfCheckManualAllocLeaks to point the diagnostic at the
+	// `let p = mem::malloc(...)` site rather than the function
+	// body's closing brace.  Reset at the start of each fn's
+	// dataflow run.
+	manualAllocSites map[string]ast.Pos
+	// paramFrees is the interprocedural summary "fn F frees its
+	// param at position I via mem::free".  Computed to fixpoint by
+	// computeManualAllocSummaries before the dataflow pass runs.
+	// Used at call sites: if the callee frees param i and the
+	// caller passes a Live binding at position i, the binding
+	// transitions to Freed (not Escaped) in the caller's state,
+	// eliminating the false-positive leak warning on the
+	// `let p = mem::malloc(); helper(p); // helper frees p` shape.
+	paramFrees map[string]map[int]bool
+	// returnsAlloc[F] is true when fn F's body has a return
+	// statement whose value is a mem::malloc/calloc/realloc/alloc
+	// call OR a call to another returnsAlloc fn.  Drives the
+	// caller-side `let p = make()` initialisation: when the callee
+	// returnsAlloc, p starts Live (the caller now owns the
+	// allocation and must `mem::free` it).
+	returnsAlloc map[string]bool
 }
 
 // topLevelVarInit holds a deferred runtime initializer for a top-level var.
@@ -1418,44 +1549,70 @@ func New(filename string) *CodeGen {
 			// for r rune in someString triggers UTF-8 decoding in the for-in loop.
 			"rune": &ast.SimpleType{Name: "i32"},
 		},
-		traits:                      make(map[string]*ast.TraitDecl),
-		opTraitImpls:                make(map[string][]opTraitImplEntry),
-		exports:                     make(map[string]string),
-		importedPkgs:                make(map[string]bool),
-		loadedSrcPaths:              make(map[string]bool),
-		constrainedFuncs:            make(map[string]*ast.FuncDecl),
-		genericFuncs:                make(map[string]*ast.FuncDecl),
-		genericFuncOverloads:        make(map[string][]*ast.FuncDecl),
-		genericFuncHomeScopes:       make(map[string]*scope),
-		constrainedFuncInstances:    make(map[string]*ir.Func),
-		genericMethodTemplates:      make(map[string]*ast.FuncDecl),
-		macros:                      make(map[string]*ast.MacroDecl),
-		funcDecls:                   make(map[string]*ast.FuncDecl),
-		ctfeCache:                   make(map[string]ctfeMemoEntry),
-		topLevelVarPos:              make(map[string]ast.Pos),
-		externTLSVars:               make(map[string]*ir.Global),
-		structTypeIDs:               make(map[string]int32),
-		fnTypeIDs:                   make(map[string]int32),
-		nextTypeID:                  6, // 0-5 reserved for anyTag* primitives (fn=5)
-		structDisplayNames:          make(map[string]string),
-		structImpls:                 make(map[string][]string),
-		deadStrippedMethods:         make(map[string]map[string][]string),
-		structFieldLLVMTypes:        make(map[string][]irtypes.Type),
-		traitChainedInits:           make(map[string][]*ir.Func),
-		traitChainedDeinits:         make(map[string][]*ir.Func),
-		atomCodes:                   make(map[string]int32),
-		atomCodeToName:              make(map[int32]string),
-		unionTypeMembers:            make(map[string][]ast.TypeExpr),
-		nativeUnionDecls:            make(map[string]*ast.UnionDecl),
-		unionTypeIDs:                make(map[string]int32),
-		dataDecls:                   make(map[string]*ast.DataDecl),
-		dataTypeIDs:                 make(map[string]int32),
-		dataVariants:                make(map[string]map[string]*dataVariantInfo),
-		dataVariantLookup:           make(map[string][]string),
-		dataValueReleaseFns:         make(map[string]*ir.Func),
-		dataValueRetainFns:          make(map[string]*ir.Func),
-		dataInstTypeArgs:            make(map[string][]string),
-		coroCallable:                make(map[string]bool),
+		traits:                   make(map[string]*ast.TraitDecl),
+		opTraitImpls:             make(map[string][]opTraitImplEntry),
+		exports:                  make(map[string]string),
+		importedPkgs:             make(map[string]bool),
+		loadedSrcPaths:           make(map[string]bool),
+		constrainedFuncs:         make(map[string]*ast.FuncDecl),
+		genericFuncs:             make(map[string]*ast.FuncDecl),
+		genericFuncOverloads:     make(map[string][]*ast.FuncDecl),
+		genericFuncHomeScopes:    make(map[string]*scope),
+		constrainedFuncInstances: make(map[string]*ir.Func),
+		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
+		macros:                   make(map[string]*ast.MacroDecl),
+		funcDecls:                make(map[string]*ast.FuncDecl),
+		ctfeCache:                make(map[string]ctfeMemoEntry),
+		topLevelVarPos:           make(map[string]ast.Pos),
+		externTLSVars:            make(map[string]*ir.Global),
+		structTypeIDs:            make(map[string]int32),
+		fnTypeIDs:                make(map[string]int32),
+		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
+		structDisplayNames:       make(map[string]string),
+		structImpls:              make(map[string][]string),
+		deadStrippedMethods:      make(map[string]map[string][]string),
+		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
+		traitChainedInits:        make(map[string][]*ir.Func),
+		traitChainedDeinits:      make(map[string][]*ir.Func),
+		atomCodes:                make(map[string]int32),
+		atomCodeToName:           make(map[int32]string),
+		unionTypeMembers:         make(map[string][]ast.TypeExpr),
+		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
+		unionTypeIDs:             make(map[string]int32),
+		dataDecls:                make(map[string]*ast.DataDecl),
+		dataTypeIDs:              make(map[string]int32),
+		dataVariants:             make(map[string]map[string]*dataVariantInfo),
+		dataVariantLookup:        make(map[string][]string),
+		dataValueReleaseFns:      make(map[string]*ir.Func),
+		dataValueRetainFns:       make(map[string]*ir.Func),
+		dataInstTypeArgs:         make(map[string][]string),
+		dataInstShape:            make(map[string]instShape),
+		coroCallable:             make(map[string]bool),
+		coloredCallable:          make(map[string]bool),
+		boxedFns:                 make(map[string]bool),
+		fnParkingClass:           make(map[string]bool),
+		knownParkingExterns: map[string]bool{
+			// Channel ops: park on empty / full + closed.
+			"tin_channel_recv_blocking":  true,
+			"tin_channel_send_blocking":  true,
+			"tin_channel_recv_park":      true,
+			"_tin_channel_recv_blocking": true,
+			"_tin_channel_send_blocking": true,
+			"_tin_channel_recv_park":     true,
+			// Timer / sleep: park until elapsed.
+			"tin_sleep_ms_c": true,
+			"_tin_sleep_ms":  true,
+			// Async I/O: park on EAGAIN.
+			"tin_async_read_c":  true,
+			"tin_async_write_c": true,
+			"_tin_async_read":   true,
+			"_tin_async_write":  true,
+			// Mutex / cond / fiber join: explicit park.
+			"_tin_fmutex2_lock":      true,
+			"_tin_fcond2_add_waiter": true,
+			"_tin_fiber_sync_await":  true,
+			"_tin_fiber_join":        true,
+		},
 		callGraph:                   make(map[string][]string),
 		funcHeuristics:              make(map[string]*FuncHeuristicInfo),
 		overloadedNames:             make(map[string]bool),
@@ -1964,9 +2121,13 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 
 	cg.checkAllUnused(prog)
 
-	cg.runDataflow(prog)
-
+	// Run Andersen FIRST so cg.andersenPts is populated before the
+	// dataflow pass, which consults the points-to map for the
+	// -Wunchecked-returned-nil pedantic check.  Andersen has no
+	// dataflow dependency, so the swap is a pure ordering change.
 	cg.runAndersen(prog)
+
+	cg.runDataflow(prog)
 
 	cg.runAstChecks(prog)
 
@@ -1986,11 +2147,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	cg.collectBoxedFns(prog)
 	cg.colorCallGraph()
+	cg.checkSyncWaitInCoroCallable(prog)
 	cg.computeAutoYieldHeuristics(prog)
 
-	// Pre-declare $coro variants for all colored functions so that mutual
-	// references across coro bodies resolve correctly.
+	// Pre-declare $coro and $colored variants for all colored functions
+	// so that mutual references across coro/colored bodies resolve
+	// correctly during body emission.
 	for _, node := range prog.Stmts {
 		if fd, ok := node.(*ast.FuncDecl); ok {
 			// fn main() is renamed to _tin_user_main at IR level; predeclare
@@ -2005,6 +2169,38 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					return nil, err
 				}
 			}
+
+			if cg.coloredCallable[coroKey] {
+				if err := cg.predeclareColoredVariant(fd, coroKey, false); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	// Predeclare $colored variants for every fn in coloredCallable that
+	// wasn't already covered by the prog.Stmts loop above.  In
+	// particular: struct methods (registered into cg.funcDecls under
+	// their mangled scope name during the struct-decl pass) and
+	// package-loaded fns.  Without this pass, a coro caller emitted
+	// BEFORE its colored callee would not see `<callee>$colored` in
+	// scope and resolveColoredCallee would silently fall back to the
+	// plain sync callee -- correct semantics but cooperation is lost
+	// on every forward-ref'd colored call site.
+	for name, decl := range cg.funcDecls {
+		if !cg.coloredCallable[name] {
+			continue
+		}
+
+		if decl == nil || decl.IsExtern != "" || decl.Body == nil {
+			continue
+		}
+
+		if hasTag(decl.Tags, "no_autoyield") {
+			continue
+		}
+
+		if err := cg.predeclareColoredVariant(decl, name, false); err != nil {
+			return nil, err
 		}
 	}
 

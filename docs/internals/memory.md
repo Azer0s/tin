@@ -367,15 +367,15 @@ containing an array of itself) do not produce infinite recursion.
 A `[*T]` array stores raw ARC-managed heap pointers as elements. Every
 pointer in such an array **must** point to a `_tin_rc_alloc`'d block.
 
-The compiler enforces this at every `++= ` append:
+The compiler enforces this at every `++=` concat-assign.  RHS is a
+`[*T]` slice; the ARC rules below apply to *each* element being
+copied into the destination buffer:
 
-- **`items ++= call_result`** - fresh pointer from a call (RC=1); no
-  retain needed, ownership transfers to the array.
-- **`items ++= ptr_variable`** - existing pointer variable; the compiler emits
-  `_tin_retain(ptr as i8*)` so the array co-owns the block.
-- **`items ++= &localVar`** - stack pointer; the compiler heap-promotes the
-  value: copies it into a fresh `_tin_rc_alloc` block so the stored pointer is
-  always ARC-managed.
+- **`items ++= [call_result]`** - fresh pointer from a call (RC=1);
+  no retain needed, ownership transfers to the array.
+- **`items ++= [ptr_variable]`** - existing pointer variable; the
+  compiler emits `_tin_retain(ptr as i8*)` so the array co-owns the
+  block.
 
 When the array is released, `_tin_release_ptr_elem_array` decrements the
 outer buffer RC; if it hits zero, it calls `_tin_release` on each element

@@ -1,0 +1,15 @@
+// Regression: `let f = fn{#async}(...) T = ...` emits a real $coro
+// body alongside the sync + colored variants.  Slot 2 of the
+// resulting fat-fn-ptr points to the real $coro (not the synth
+// $coro_wrap), so `spawn f(args)` routes through a real coroutine
+// whose body cooperates at its own coloring points.
+
+use sync
+
+fn main() i64 =
+  let base = 100
+  let f = fn{#async}(n i64) i64 =
+    return n + base
+  let fut = spawn f(7)
+  echo sync::wait(fut)
+  return 0

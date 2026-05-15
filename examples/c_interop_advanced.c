@@ -97,23 +97,27 @@ tree_node *c_tree_left(tree_node *n) { return n ? n->left : NULL; }
 tree_node *c_tree_right(tree_node *n) { return n ? n->right : NULL; }
 
 // -- 5. Callbacks (Tin fn passed to C) ------------------------------------
-// Tin fat-fn-ptr is { fn(i8* env, params...)*, i8* env }.
+// Tin lowers `fn(...) T` extern params to raw C function pointers
+// (codegen/extern.go).  Closure environments, when any, are baked
+// into a runtime-synthesized trampoline by `tin_make_trampoline`;
+// the C side just calls the function pointer through its declared
+// signature -- it never sees an env arg.
 
-typedef struct { int64_t (*fn)(void *env, int64_t); void *env; } callback_i64;
-typedef struct { int64_t (*fn)(void *env, int64_t, int64_t); void *env; } callback_i64_2;
-typedef struct { void (*fn)(void *env, int64_t); void *env; } callback_void;
+typedef int64_t (*callback_i64)(int64_t);
+typedef int64_t (*callback_i64_2)(int64_t, int64_t);
+typedef void    (*callback_void)(int64_t);
 
 int64_t c_apply_cb(callback_i64 cb, int64_t n) {
-    return cb.fn(cb.env, n);
+    return cb(n);
 }
 
 int64_t c_apply2_cb(callback_i64_2 cb, int64_t a, int64_t b) {
-    return cb.fn(cb.env, a, b);
+    return cb(a, b);
 }
 
 void c_for_each(callback_void cb, int64_t n) {
     for (int64_t i = 0; i < n; i++) {
-        cb.fn(cb.env, i);
+        cb(i);
     }
 }
 
@@ -166,18 +170,18 @@ void c_get_pvec2_triple_ptr(pvec2 ***out) {
 
 // -- 11. Callbacks with varying argument patterns -----------------------
 
-// Callback that receives two *pvec2 pointers and returns i32 (sum of x fields).
-typedef struct { int32_t (*fn)(void *env, int32_t, int32_t); void *env; } callback_i32_2;
+// Callback that receives two i32s and returns i32.
+typedef int32_t (*callback_i32_2)(int32_t, int32_t);
 
 int32_t c_apply_i32_2(callback_i32_2 cb, int32_t a, int32_t b) {
-    return cb.fn(cb.env, a, b);
+    return cb(a, b);
 }
 
 // Sum x-fields of all g_points via callback, passing i32 each time.
-typedef struct { void (*fn)(void *env, int32_t x, int32_t y); void *env; } callback_xy;
+typedef void (*callback_xy)(int32_t x, int32_t y);
 
 void c_for_each_point_xy(callback_xy cb) {
     for (int32_t i = 0; i < 4; i++) {
-        cb.fn(cb.env, g_points[i].x, g_points[i].y);
+        cb(g_points[i].x, g_points[i].y);
     }
 }

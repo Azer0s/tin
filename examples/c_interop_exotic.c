@@ -16,12 +16,18 @@ typedef struct { int64_t **pp; int32_t n; }   i64_dbl;
 typedef struct { int64_t ***ppp; int32_t n; } i64_tri;
 typedef struct { i64_dbl inner; int64_t id; } nested_i64_dbl;
 
-// -- Callback struct types (Tin fat-fn ABI: { fn*, env* }) --
+// -- Callback types --
+//
+// Tin lowers `fn(...) T` extern params to raw C function pointers
+// (codegen/extern.go).  Closure environments, when any, are baked
+// into a runtime-synthesized trampoline by `tin_make_trampoline`;
+// the C side just calls the function pointer through its declared
+// signature -- it never sees an env arg.
 
-typedef struct { void    (*fn)(void *env, exvec *p);              void *env; } cb_evptr;
-typedef struct { void    (*fn)(void *env, exvec *a, exvec *b);    void *env; } cb_evpair;
-typedef struct { int64_t (*fn)(void *env, exvec *p, int32_t n);   void *env; } cb_evptr_int;
-typedef struct { int64_t (*fn)(void *env, int64_t);               void *env; } cb_i64;
+typedef void    (*cb_evptr)(exvec *p);
+typedef void    (*cb_evpair)(exvec *a, exvec *b);
+typedef int64_t (*cb_evptr_int)(exvec *p, int32_t n);
+typedef int64_t (*cb_i64)(int64_t);
 
 // -- Static data for exvec (pointer tests) --
 
@@ -57,22 +63,22 @@ static void ensure_int_init(void) {
 // -- Section 1: callbacks that receive struct pointers from C --
 
 void c_foreach_ev_ptr(cb_evptr cb) {
-    for (int i = 0; i < 4; i++) cb.fn(cb.env, &g_evs[i]);
+    for (int i = 0; i < 4; i++) cb(&g_evs[i]);
 }
 
 void c_foreach_ev_pair(cb_evpair cb) {
     // calls cb with consecutive pairs: (evs[0],evs[1]), (evs[1],evs[2]), (evs[2],evs[3])
-    for (int i = 0; i < 3; i++) cb.fn(cb.env, &g_evs[i], &g_evs[i+1]);
+    for (int i = 0; i < 3; i++) cb(&g_evs[i], &g_evs[i+1]);
 }
 
 int64_t c_apply_ev_int(cb_evptr_int cb, exvec *p, int32_t n) {
-    return cb.fn(cb.env, p, n);
+    return cb(p, n);
 }
 
 // -- Section 2: callback pointer (C takes cb_i64*) --
 
 int64_t c_apply_cb_ptr(cb_i64 *cbp, int64_t n) {
-    return cbp->fn(cbp->env, n);
+    return (*cbp)(n);
 }
 
 // -- Section 3: C stashes callback, calls it later --
@@ -80,12 +86,12 @@ int64_t c_apply_cb_ptr(cb_i64 *cbp, int64_t n) {
 static cb_i64 g_stashed;
 
 void    c_stash_cb(cb_i64 cb)     { g_stashed = cb; }
-int64_t c_call_stashed(int64_t n) { return g_stashed.fn(g_stashed.env, n); }
+int64_t c_call_stashed(int64_t n) { return g_stashed(n); }
 
 // -- Section 4: chained callbacks --
 
 int64_t c_chain_cbs(cb_i64 f, cb_i64 g, int64_t n) {
-    return g.fn(g.env, f.fn(f.env, n));
+    return g(f(n));
 }
 
 // -- Section 5: structs with i64 pointer fields --
@@ -141,7 +147,7 @@ nested_i64_dbl c_get_nested_i64_dbl(int32_t idx, int64_t id) {
 typedef struct { cb_i64 f; int64_t base; } fn_val_s;
 
 int64_t c_apply_fn_val(fn_val_s s, int64_t n) {
-    return s.f.fn(s.f.env, s.base + n);
+    return s.f(s.base + n);
 }
 
 // -- Section 8: struct with *fn pointer field --
@@ -149,5 +155,5 @@ int64_t c_apply_fn_val(fn_val_s s, int64_t n) {
 typedef struct { cb_i64 *f; int64_t base; } fn_ptr_s;
 
 int64_t c_apply_fn_ptr(fn_ptr_s s, int64_t n) {
-    return s.f->fn(s.f->env, s.base + n);
+    return (*s.f)(s.base + n);
 }

@@ -52,8 +52,7 @@ fn runes(s string) [rune] =
   let result [rune] = []
 
   for r rune in s:
-    result ++= r
-
+    result ++= [r]
   return result
 
 // encode encodes a slice of codepoints as a UTF-8 string.

@@ -1,0 +1,13 @@
+// `await ch.recv()` works because Channel.recv is a sync fn returning
+// Future[T] (wraps `spawn this.recv_impl()`).  Verifies the
+// strict-await rule + the fast-path detection both keep this idiom
+// working end-to-end.
+use sync
+
+fn main() =
+  let ch = sync::Channel[i64].make(1)
+  await ch.send(42)
+  let v = await ch.recv()
+
+  if v == 42:
+    echo "recv-ok"

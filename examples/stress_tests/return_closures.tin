@@ -46,8 +46,7 @@ fn make_mapper[t, r](f fn(t) r) fn([t]) [r] =
     let out [r] = []
 
     for let v t in arr:
-      out ++= f(v)
-
+      out ++= [f(v)]
     return out
 
 // ---------------------------------------------------------------------------
@@ -95,8 +94,7 @@ fn make_offset_checks(thresholds [i64]) [fn(i64) bool] =
   let fns [fn(i64) bool] = []
 
   for let t i64 in thresholds:
-    fns ++= make_threshold_check(t)
-
+    fns ++= [make_threshold_check(t)]
   return fns
 
 // ---------------------------------------------------------------------------

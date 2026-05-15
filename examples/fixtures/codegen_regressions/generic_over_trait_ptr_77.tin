@@ -1,0 +1,28 @@
+// Regression (B): generic fn `first[T](xs [T]) T` instantiated with
+// `T = *Show` (a trait fat-ptr) used to error with
+// `codegen error: unknown type "Show_iface"`.  Two bugs combined:
+//   1. inferTypeArgsFromParamPrio in the SimpleType case took the
+//      bare struct name from a *PointerType argType, dropping the
+//      pointer indirection -- so a `[*Foo]` arg yielded `T = Foo`
+//      (value) instead of `T = *Foo`.  This was also silently
+//      buggy for non-trait `*Struct` types (wrong-shaped reads).
+//   2. The monomorphizer substituted typeSubst["T"] = "*Show" into a
+//      SimpleType{Name: "*Show"}, an ill-formed type that the
+//      resolver flagged.  Now parseConcreteSubstName splits leading
+//      `*` runs into nested PointerType wrappers.
+//
+// Also covered: the trait-iface name strip in llvmTypeName so the
+// substitution string is `*Show` rather than `*Show_iface`.
+
+trait Show =
+  fn show(this Show) string = virtual
+
+struct N(Show) =
+  fn Show::show(this N) string = return "N"
+
+fn first[T](xs [T]) T = return xs[0]
+
+fn main() i64 =
+  let xs [*Show] = [&N{}]
+  echo first(xs).show()
+  return 0

@@ -1,0 +1,23 @@
+// Regression: storing a Live mem::malloc result in a struct
+// field is an ownership transfer -- the new struct owns the
+// allocation, so the binding that originally held it must NOT
+// be flagged for leak.  The leak diagnostic's own remediation
+// text says "or transfer ownership by [...] storing it in a
+// field", but dfApplyEscapes only recognised AddressOfExpr and
+// CallExpr -- struct/array/tuple literals leaked through with
+// no escape transition, producing a spurious warning.
+//
+// Fix: dfApplyEscapes now also walks StructLit / ArrayLit /
+// TupleLit constructors and escapes any identifier captured as
+// a field value or element.
+
+use mem
+
+struct Owner =
+  buf *void
+
+fn run() Owner =
+  let p = mem::malloc(64)
+  return Owner{buf: p}
+
+fn main() i64 = return 0

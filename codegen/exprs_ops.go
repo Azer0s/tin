@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -361,6 +362,25 @@ func parseTypeParamStr(s string) ast.TypeExpr {
 
 				inner = inner[:len(inner)-1]
 				baseName := s[:i]
+				// Bare `[T]` / `[T; N]` is the fat- or fixed-array form,
+				// not a generic instantiation. Without this branch a
+				// wildcard guard like `where t is [*_]` would compare an
+				// ArrayType against a GenericType{Name:""} and fail.
+				if baseName == "" {
+					if semi := strings.LastIndex(inner, ";"); semi >= 0 {
+						elem := strings.TrimSpace(inner[:semi])
+						sizeStr := strings.TrimSpace(inner[semi+1:])
+
+						sz := -1
+						if n, err := strconv.Atoi(sizeStr); err == nil {
+							sz = n
+						}
+
+						return &ast.ArrayType{Elem: parseTypeParamStr(elem), Size: sz}
+					}
+
+					return &ast.ArrayType{Elem: parseTypeParamStr(inner), Size: -1}
+				}
 
 				return &ast.GenericType{Name: baseName, TypeParams: splitTopLevelTypeArgs(inner)}
 			}
@@ -1824,6 +1844,18 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	defer func() { cg.allowExplicitPtrCoerce = prevExplicit }()
 
 	result := cg.coerce(block, val, targetType)
+	// Coerce-to-any uses boxAsAny, which retains the source's inner
+	// ARC ptr so the any data block "owns" one reference (released
+	// when the block hits RC=0 in _tin_release_any).  For lvalue
+	// sources the matching release comes from the source binding's
+	// scope-exit; for rvalue sources there is no such binding, so we
+	// emit a balancing release here to transfer the rvalue's RC into
+	// the data block's ownership.  Without this, every `<heap> as any`
+	// where the source is a transient (string interpolation, fn call
+	// result, struct literal, etc.) would leak the inner content.
+	if isAnyType(targetType) && !isAnyType(val.Type()) && !isCopyExpr(e.Expr) && isRCTrackedType(val.Type()) {
+		cg.emitRelease(block, val)
+	}
 	// coerce() returns the input unchanged when it cannot find a
 	// conversion path, so a result whose type still does not match the
 	// requested target means the cast was impossible.  Up to here the
@@ -1948,8 +1980,15 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	var result value.Value
 
 	if isFatFnPtr(rightFn.Type()) {
-		fnPtr := block.NewExtractValue(rightFn, 0)
-		envPtr := block.NewExtractValue(rightFn, 1)
+		// Pick the sync variant: slot 1 (colored) when the pipe sits
+		// inside cooperative context ($coro or $colored body),
+		// otherwise slot 0 (non-colored).  Mirrors callFatFn.
+		slot := 0
+		if cg.inCoroFn || cg.curFnColoredSync {
+			slot = 1
+		}
+		fnPtr := block.NewExtractValue(rightFn, uint64(slot))
+		envPtr := block.NewExtractValue(rightFn, 3)
 		fnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 		llArgs := cg.adaptArgs(block, []value.Value{envPtr, leftVal}, fnType)
 		result = block.NewCall(fnPtr, llArgs...)
@@ -2187,8 +2226,14 @@ func (cg *CodeGen) genIsExpr(block *ir.Block, e *ast.IsExpr) (value.Value, error
 						// non-nil and return false for nil pointers.
 						nilCheck := block.NewICmp(enum.IPredEQ, val,
 							constant.NewNull(srcPt))
-						loadBlk := cg.curFn.NewBlock("is_load")
-						mergeBlk := cg.curFn.NewBlock("is_merge")
+						// Use uniquified labels -- two `is *T` exprs in
+						// the same fn would otherwise both produce blocks
+						// labeled `is_load` / `is_merge`, and LLVM's phi
+						// reference `%is_load` collapses to the first
+						// match, silently rewiring the second `is`'s
+						// incoming edge to the wrong block.
+						loadBlk := cg.newBlock("is_load")
+						mergeBlk := cg.newBlock("is_merge")
 						block.NewCondBr(nilCheck, mergeBlk, loadBlk)
 
 						vtableGep := loadBlk.NewGetElementPtr(ifaceStructTy, val,
@@ -2647,13 +2692,16 @@ func (cg *CodeGen) traitAsyncMethodRetType(instKey, methodName string) irtypes.T
 	return nil
 }
 
-// wrapFnAsFatPtr wraps a named or extern function pointer into a fat-fn-ptr
-// { fn(i8* env, params...)*, i8* } with a null environment.
-// The shim ignores its env parameter and simply forwards to the wrapped function.
-// Shims are cached per function name to avoid duplicate definitions.
+// wrapFnAsFatPtr wraps a named or extern function pointer into the
+// 4-slot fat-fn-ptr.  Builds an env-dropping sync shim from the
+// source fn, then routes through buildFatFnPtrValue to fill slots
+// 0/1/2/3 (coro wrapper / colored / non-colored / env).  Shims are
+// cached per source-fn name to avoid duplicate definitions.
 func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatType irtypes.Type) value.Value {
 	fatSt := targetFatType.(*irtypes.StructType)
-	// The fat-fn-ptr stores fn(i8*, params...)* in field 0.
+	// Slot 0 holds the non-colored sync variant -- the shim adapts the
+	// bare fn to this env-first sync signature.  Slot 2 (coro ramp) is
+	// synthesized later by buildFatFnPtrValue via ensureCoroWrapperFor.
 	wrapperFnType := fatSt.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
 	// Get the original function's type (without the env param).
@@ -2721,16 +2769,11 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 		}
 	}
 
-	// Return fat-fn-ptr { shim*, null }.
-	alloca := block.NewAlloca(fatSt)
-	gep0 := block.NewGetElementPtr(fatSt, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(shim, gep0)
-	gep1 := block.NewGetElementPtr(fatSt, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewNull(irtypes.I8Ptr), gep1)
-
-	return block.NewLoad(fatSt, alloca)
+	// Build the 4-slot fat-fn-ptr value: slot 0 is a coro wrapper
+	// around the sync shim, slots 1 and 2 share the shim, slot 3 is
+	// null env.  Centralized via buildFatFnPtrValue so the layout
+	// only lives in one place.
+	return cg.buildFatFnPtrValue(block, shim, constant.NewNull(irtypes.I8Ptr))
 }
 
 // wrapAsyncFnAsFatPtr wraps an {#async} function's $coro variant into an async
@@ -2740,7 +2783,9 @@ func (cg *CodeGen) wrapFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatT
 // Shims are cached per function name to avoid duplicate definitions.
 func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targetFatType irtypes.Type) value.Value {
 	fatSt := targetFatType.(*irtypes.StructType)
-	wrapperFnType := fatSt.Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+	// Slot 2 is the coro-ramp slot; we need its signature to shape the
+	// async shim that adapts source$coro to env-first.
+	wrapperFnType := fatSt.Fields[2].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
 	// Derive the name of the function so we can look up its $coro variant.
 	fnName := ""
@@ -2817,16 +2862,15 @@ func (cg *CodeGen) wrapAsyncFnAsFatPtr(block *ir.Block, fnVal value.Value, targe
 		entry.NewRet(hdl)
 	}
 
-	// Return async fat-fn-ptr { shim*, null }.
-	alloca := block.NewAlloca(fatSt)
-	gep0 := block.NewGetElementPtr(fatSt, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(shim, gep0)
-	gep1 := block.NewGetElementPtr(fatSt, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewNull(irtypes.I8Ptr), gep1)
-
-	return block.NewLoad(fatSt, alloca)
+	// Build the 4-slot fat-fn-ptr {sync, colored, coro, env}.  The sync
+	// slots (0, 1) need an env-first adapter -- the source's sync entry
+	// has the bare user signature `fn(i64) i64` whereas the slot-0/1
+	// type expects `fn(i8* env, i64) i64`.  Delegate to wrapFnAsFatPtr's
+	// shim path for slots 0/1 + a synthesized coro wrapper for slot 2,
+	// then OVERRIDE slot 2 with our async shim (which forwards to the
+	// real $coro rather than a synth'd one).
+	syncFatVal := cg.wrapFnAsFatPtr(block, fnVal, targetFatType)
+	return block.NewInsertValue(syncFatVal, shim, 2)
 }
 
 // genArgWithTargetType evaluates an argument expression with a known target
@@ -2933,10 +2977,20 @@ func (cg *CodeGen) genArgWithTargetType(block *ir.Block, argNode ast.Node, targe
 	return cg.genExpr(block, argNode)
 }
 
-// callFatFn emits a call through a closure fat pointer { fn(i8*,params...)*, i8* }.
+// callFatFn emits a call through the 4-slot fat-fn-ptr ABI
+// `{non_colored_sync*, colored_sync*, coro_ramp*, env}`.  Bare calls
+// pick the slot by caller context: cooperative caller (inside $coro
+// OR $colored body) -> slot 1 (colored), plain sync caller -> slot 0
+// (non-colored).  Slot 2 (coro) is reserved for `spawn`, which routes
+// through genSpawnAsyncFatPtr instead.
 func (cg *CodeGen) callFatFn(block *ir.Block, fatPtr value.Value, argNodes []ast.Node) (value.Value, error) {
-	fnPtr := block.NewExtractValue(fatPtr, 0)
-	envPtr := block.NewExtractValue(fatPtr, 1)
+	slot := 0
+	if cg.inCoroFn || cg.curFnColoredSync {
+		slot = 1
+	}
+
+	fnPtr := block.NewExtractValue(fatPtr, uint64(slot))
+	envPtr := block.NewExtractValue(fatPtr, 3)
 
 	// Build args (index 0 = env, indices 1..N = actual params).
 	llArgs := []value.Value{envPtr}

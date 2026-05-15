@@ -21,7 +21,7 @@ fn map[t, r](f fn(t) r) fn([t]) [r] =
     let res [r] = []
 
     for let v t in list:
-      res ++= f(v)
+      res ++= [f(v)]
 
     return res
 
@@ -31,7 +31,7 @@ fn filter[t](pred fn(t) bool) fn([t]) [t] =
 
     for let v t in list:
       if pred(v):
-        res ++= v
+        res ++= [v]
 
     return res
 
@@ -50,7 +50,7 @@ fn take[t](n i64) fn([t]) [t] =
     let i i64 = 0
 
     for i < n && i < len(list):
-      res ++= list[i]
+      res ++= [list[i]]
       i = i + 1
 
     return res
@@ -61,7 +61,7 @@ fn drop[t](n i64) fn([t]) [t] =
     let i i64 = n
 
     for i < len(list):
-      res ++= list[i]
+      res ++= [list[i]]
       i = i + 1
 
     return res
@@ -74,7 +74,7 @@ fn flat_map[t, r](f fn(t) [r]) fn([t]) [r] =
       let sub = f(v)
 
       for let s r in sub:
-        res ++= s
+        res ++= [s]
 
     return res
 
@@ -88,7 +88,7 @@ fn zip_with[a, b, c](f fn(a, b) c, bs [b]) fn([a]) [c] =
     let i i64 = 0
 
     for i < n:
-      res ++= f(as_arr[i], bs[i])
+      res ++= [f(as_arr[i], bs[i])]
       i = i + 1
 
     return res
@@ -140,7 +140,7 @@ test "flat_map pipe" =
       let out [i64] = []
       let i i64 = 0
       for i < n:
-        out ++= n
+        out ++= [n]
         i = i + 1
       return out
     )

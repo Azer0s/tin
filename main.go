@@ -94,6 +94,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     array-bounds                index out of bounds for known-length array
     async-main                  main() uses spawn/await but is not #async
     await-match-guards          guard clauses in await-match arms
+    bare-parking-async-call     calling an async fn whose body may park, without spawn/await
     bool-analysis               condition that folds to true/false at compile time
     cast-truncates              numeric cast that loses bits at runtime
     deref-nil                   dereference of literal nil
@@ -132,10 +133,25 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     write-to-const              write through a pointer alias to a top-level const
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
+    bare-async-call             every bare call to an fn{#async} (pedantic superset of
+                                bare-parking-async-call - flags pure-compute async fns too)
     builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
+    droppable-fiber             spawn fn(args) whose Future is neither stored, returned, nor awaited
     float-equal                 == / != between floats (use abs(a-b) < eps)
     magic-number                int/float literal where a named const would convey intent
+    non-tin-thread              #interop fn body reaches 'await' or 'spawn' - callable from non-Tin
+                                OS threads that don't own scheduler state
     style                       naming conventions, trailing whitespace, missing EOF newline
+    sync-uses-await             sync fn body contains a literal 'await' - prefer sync::wait(future)
+                                to make the sync->async bridge explicit, or promote to fn{#async}
+    unchecked-div               a / b or a % b where the divisor is not proven non-zero by dataflow
+                                (complement to default-on div-by-zero hard error)
+    unchecked-index             arr[i] where i is not bounds-checked, OR t[k] on a custom ::index
+                                impl without (v, ok) destructure (complement to default-on array-bounds)
+    unchecked-nil-deref         *p or p.field where p is not proven non-nil by dataflow
+                                (complement to default-on deref-nil warning)
+    unchecked-returned-nil      deref of a value whose source function may return nil
+                                (interprocedural complement via Andersen points-to)
     unclosed-closeable          io::Closeable binding leaves scope without close()
     unused-let                  let-binding that is never read
     unused-param                fn parameter that is never read

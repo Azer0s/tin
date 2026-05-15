@@ -58,10 +58,10 @@ fn make_pow_fns() [fn(i64) i64] =
   let exp1 = fn(x i64) i64 = return x          // x^1
   let exp2 = fn(x i64) i64 = return x * x      // x^2
   let exp3 = fn(x i64) i64 = return x * x * x  // x^3
-  fns ++= exp0
-  fns ++= exp1
-  fns ++= exp2
-  fns ++= exp3
+  fns ++= [exp0]
+  fns ++= [exp1]
+  fns ++= [exp2]
+  fns ++= [exp3]
 
   return fns
 

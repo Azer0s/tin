@@ -1,0 +1,19 @@
+// Regression: -Wunchecked-returned-nil fires when the Andersen
+// interprocedural points-to set for a binding contains @nil
+// (because its source function sometimes returns nil) AND the
+// current path has not narrowed the value to non-nil via a guard.
+
+struct Node =
+  val i64
+
+fn maybe(b bool) *Node =
+  if b :
+    let n = Node{val: 42}
+    return &n
+  return nil
+
+fn use_unchecked(b bool) i64 =
+  let p = maybe(b)
+  return p.val
+
+fn main() i64 = return 0

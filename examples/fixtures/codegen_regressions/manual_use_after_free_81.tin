@@ -1,0 +1,10 @@
+// Regression: -Wmanual-use-after-free fires on any read of a
+// manually-allocated binding after mem::free on the same path.
+
+use mem
+
+fn main() i64 =
+  let p = mem::malloc(64)
+  mem::free(p)
+  let q = p
+  return 0

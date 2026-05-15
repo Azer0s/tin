@@ -18,6 +18,23 @@ fn calloc(n i64, size i64) *void = extern("calloc")
 // Returns null on failure (original block is unchanged)
 fn realloc(ptr *void, new_size i64) *void = extern("realloc")
 
+// alloc[t]() allocates a zeroed `*t` -- typed wrapper around
+// `malloc(sizeof(t))` + `memset` so callers get a real pointer type
+// without writing the cast themselves.  The result must reach
+// `mem::free(p as *void)` before scope exit (the -Wmanual-alloc-leak
+// check tracks this).
+fn alloc[t]() *t =
+  let m = malloc(sizeof(t))
+  memset(m, 0, sizeof(t))
+  return m as *t
+
+// alloc[t](n) -- arity-2 form is TODO.  Returning `[*t]` would be
+// the right shape (n zeroed pointer slots) but currently there's
+// no language facility for casting raw `*void` memory into a
+// fat-pointer `[*t]` slice.  Until a `mem::view_slice` builtin
+// lands, callers can drop down to `mem::malloc(n * 8)` and walk
+// the buffer with pointer arithmetic inside an `{#unsafe}` block.
+
 // free releases memory previously allocated by malloc/calloc/realloc
 fn free(ptr *void) = extern("free")
 
@@ -38,5 +55,6 @@ fn memcmp(a *void, b *void, n i64) i32 = extern("memcmp")
 
 export {
   malloc, calloc, realloc, free,
-  memcpy, memmove, memset, memcmp
+  memcpy, memmove, memset, memcmp,
+  alloc
 } as mem

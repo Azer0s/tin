@@ -266,6 +266,35 @@ let n = await io::async_read(fd, &buf[0], 4096)
 let n = await spawn io::async_read(fd, &buf[0], 4096)
 ```
 
+### Strict await rule
+
+`await` operates **purely on values implementing `awaitable[T]`** - the
+compiler does not insert an implicit `spawn` under the operand. Older Tin
+versions silently desugared `await fn(args)` (where `fn` was `{#async}`) into
+`await spawn fn(args)`; that sugar has been removed. The two valid shapes are:
+
+```rust
+// 1. await a value that already implements awaitable[T]
+let f = spawn compute(7)
+let r = await f
+
+// 2. await a SpawnExpr or a call that returns Future[T] / awaitable[T]
+let r = await spawn compute(7)
+let body = await fetch(url)         // fetch returns Future[string]
+```
+
+The compile error for the removed sugar reads:
+
+```
+await expects an awaitable value (Future[T] / awaitable[T]), but the
+operand is a raw i64 returned from an async fn called in sync mode.
+Did you mean `await spawn compute(7)`?
+```
+
+Bare `fn{#async}` calls (without `spawn` or `await`) are still legal -
+they run the sync variant inline - but trigger `-Wbare-parking-async-call`
+when the callee may park (see [diagnostics](#async-coloring-diagnostics)).
+
 ---
 
 ## Future[T]
@@ -283,6 +312,29 @@ fn{#async} compute(n i64) i64 =
 let f = spawn compute(7)   // f is Future[i64]
 let r = await f            // r is i64 = 49
 ```
+
+### Future[T] auto-coercion to Future[any]
+
+`Future[T]` implements `coerce[Future[any]]`, the op-trait that the compiler
+consults at every implicit coercion site. Any context that expects a
+`Future[any]` therefore accepts a `Future[T]` of any element type without an
+explicit cast - including `[Future[any]]` literals passed to
+`sync::wait_all`:
+
+```rust
+use sync
+
+fn{#async} produce_i64() i64 = return 7
+fn{#async} produce_str() string = return "ok"
+
+fn main() =
+  let fs [Future[any]] = [spawn produce_i64(), spawn produce_str()]
+  let _ = sync::wait_all(fs)
+```
+
+The conversion is a typed-field copy of the underlying PID, so it is O(1)
+and never allocates. Use `as any` if you need to widen the element type
+inside an already-typed `Future[T]`.
 
 ---
 
@@ -775,6 +827,65 @@ without spawning a coroutine frame.
 | `Future[T]` | Typed future from `spawn`; implements `Awaitable[T]`                                                                                                                                              |
 | `Unit`      | Placeholder return type for void async functions                                                                                                                                                  |
 
+`Future[T]` is exported at the top level (no `sync::` prefix) for ergonomics
+- write `Future[i64]`, not `sync::Future[i64]`.
+
+---
+
+## Bridging sync to async: `sync::wait` / `sync::wait_all`
+
+A **sync** function cannot use `await` directly (the operand would have to
+be driven by a scheduler that only exists inside `{#async}` frames). When
+you have a `Future[T]` on the sync side, use `sync::wait` to drive the
+scheduler from a non-async caller:
+
+```rust
+use sync
+
+fn{#async} compute(n i64) i64 = return n * 2
+
+fn main() =                      // plain sync main
+  let f = spawn compute(21)      // f : Future[i64]
+  let r = sync::wait(f)          // drives the scheduler, returns 42
+  echo r
+```
+
+`sync::wait(f)`:
+
+1. Asks the runtime to schedule the fiber and park *the calling OS thread*
+   on a condvar until it completes (`_tin_fiber_sync_await`).
+2. Transfers ownership of the result buffer to the caller
+   (`_tin_fiber_get_result` returns `*void`).
+3. Reads the typed value, frees the buffer (`_tin_free`), and returns it.
+
+The transfer-then-free pattern is required - `_tin_future_await_raw` only
+peeks at the buffer and leaks it on `recv`-style flows. Use `sync::wait` for
+every sync->async bridge; never roll your own.
+
+### `sync::wait_all` - drain a heterogeneous list
+
+```rust
+fn{#async} produce_i64() i64    = return 7
+fn{#async} produce_str() string = return "ok"
+
+fn main() =
+  let fs [Future[any]] = [spawn produce_i64(), spawn produce_str()]
+  let results = sync::wait_all(fs)   // [any], element types preserved
+```
+
+The element type `Future[any]` is intentional - it lets the same call
+aggregate mixed-element-type futures. The compiler auto-coerces each
+`Future[T]` literal via the `coerce[Future[any]]` trait on `Future[t]`, so
+you do not need explicit `as Future[any]` casts.
+
+`sync::wait_all` returns `[any]`; index into it and `as T` when you need
+the concrete value.
+
+> **Note.** `++=` is concat-assign (not append-one), so the wait_all
+> body uses `out ++= [wait(fs[i])]` -- the bracket is a one-element
+> slice, not an attempt to box. To append a single value to a slice,
+> always wrap it.
+
 ---
 
 ## await match
@@ -870,6 +981,109 @@ await match (a, b):
   case (_, y) if y > 5:  got = y
   case (_, y):            got = -2   // unguarded fallback for b
 ```
+
+---
+
+## Async-coloring diagnostics
+
+Tin emits a family of warnings that help keep sync and async code from
+silently mixing in surprising ways. They are listed here together because
+they share a single conceptual goal - keeping the "color" of each call
+explicit at the source-code level.
+
+| Diagnostic                    | Default     | Triggers on                                                                              |
+|-------------------------------|-------------|------------------------------------------------------------------------------------------|
+| `bare-parking-async-call`     | **on**      | Bare `fn{#async}` call whose body transitively reaches a known-parking primitive         |
+| `bare-async-call`             | pedantic    | Every bare `fn{#async}` call (superset; also flags pure-compute async fns)               |
+| `sync-uses-await`             | pedantic    | Sync fn body contains an `await` expression                                              |
+| `droppable-fiber`             | pedantic    | Statement-level `spawn fn(args)` whose `Future` is neither stored, returned, nor awaited |
+| `non-tin-thread`              | pedantic    | `#interop` fn body reaches `await` or `spawn`                                            |
+| `async-main`                  | on          | Plain `fn main()` uses `spawn` / `await` (slower bridge)                                 |
+| `blocking`                    | on          | Blocking C extern called from a `{#async}` body                                          |
+| `await-match-guards`          | on          | Every `await match` arm has a guard and there is no `default`                            |
+
+Pedantic warnings (default-off) are enabled by `-Wpedantic` or
+individually with `-W<name>`. Any warning can be suppressed with
+`-Wno-<name>` and escalated to an error with `-Werror=<name>`.
+
+### `-Wbare-parking-async-call` (default on)
+
+Calling an `fn{#async}` directly invokes the **sync variant** - which
+ignores the scheduler. If the callee's body transitively reaches a
+known-parking primitive (channel `send`/`recv`, `sleep_ms`, async I/O,
+etc.), the calling OS thread parks too, defeating the whole point of
+running async.
+
+```rust
+fn{#async} chunk_read(fd i32) i64 =
+  return await spawn io::async_read(fd, buf, 4096)
+
+fn main() =
+  let _ = chunk_read(fd)
+  // warning: calling async fn 'chunk_read' from sync context may park the
+  // calling thread; consider `await spawn chunk_read(fd)` or
+  // `sync::wait(spawn chunk_read(fd))`.
+```
+
+The check is *transitive*: any callee whose call graph reaches a parking
+extern is classified parking. The seed set lives in
+`codegen.knownParkingExterns`.
+
+### `-Wbare-async-call` (pedantic)
+
+Pedantic superset: fires on **every** bare `fn{#async}` call, even ones
+the compiler proves cannot park. Useful when the codebase wants to make
+the sync->async boundary explicit at every call site.
+
+### `-Wsync-uses-await` (pedantic)
+
+`await` inside a sync fn body works (Tin will emit a temporary fiber to
+drive it), but it is rarely what the author intended:
+
+```rust
+fn uses_await() i64 =
+  return await spawn compute(5)
+  // -Wsync-uses-await: `await` inside sync fn "uses_await" drives the
+  // scheduler at runtime; prefer `sync::wait(future)` to make the
+  // sync->async bridge explicit, or promote this fn to `fn{#async}`.
+```
+
+Either promote the caller to `fn{#async}` or replace the `await` with
+`sync::wait(spawn ...)`.
+
+### `-Wdroppable-fiber` (pedantic)
+
+A statement-level `spawn` whose `Future` is discarded is fire-and-forget:
+
+```rust
+fn main() =
+  spawn log_event("ignored-result")
+  // -Wdroppable-fiber: the `Future[T]` returned by this `spawn` is
+  // discarded; bind to `let _ =` if intentional, or `await` it.
+```
+
+Suppress by binding to `_`:
+
+```rust
+let _ = spawn log_event("ignored-result")
+```
+
+### `-Wnon-tin-thread` (pedantic)
+
+`#interop` fns are callable from arbitrary OS threads. Calling `await` or
+`spawn` from such a thread executes against scheduler state the calling
+thread does not own:
+
+```rust
+fn{#interop} c_entry(arg *void) =
+  let _ = await spawn bg_work()
+  // -Wnon-tin-thread: `#interop` fn "c_entry" awaits or spawns; calls
+  // from non-Tin threads will execute against scheduler state they do
+  // not own.
+```
+
+Move the await/spawn behind a normal Tin entrypoint and call *into* it
+from the interop layer rather than the other way around.
 
 ---
 

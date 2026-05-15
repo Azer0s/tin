@@ -21,4 +21,76 @@ use "./cond"
 use "./atomic"
 use "./channel"
 
-export { Mutex, RWMutex, Cond, Atomic, Channel, Future, Unit } as sync
+fn tin_fiber_sync_await(pid i64) = extern("_tin_fiber_sync_await")
+fn tin_fiber_get_result(pid i64) *void = extern("_tin_fiber_get_result")
+fn tin_free(p *void) = extern("_tin_free")
+fn tin_is_worker_thread() i32 = extern("_tin_is_worker_thread")
+
+// wait blocks the caller (driving the scheduler if no fiber context
+// is active) until the Future resolves, then returns its value.  Acts
+// as an explicit sync-side bridge for code that prefers a function
+// call over the `await` keyword -- the two compile to equivalent
+// runtime calls.  Use from sync fns / main / tests when you want the
+// sync-to-async boundary visible at the call site:
+//
+//   let body = sync::wait(spawn fetch("/users"))    // explicit
+//   let body = await spawn fetch("/users")          // keyword form
+fn wait[t](f Future[t]) t =
+  // Belt-and-suspenders runtime check: the compile-time
+  // checkSyncWaitInCoroCallable pass blocks `sync::wait` from
+  // appearing in any fn reachable from #async, but a future
+  // refactor (function-pointer indirection, generic
+  // monomorphization, ...) could route around the static check.
+  // Calling sync::wait on a worker thread would otherwise lock up
+  // the scheduler: _tin_fiber_sync_await sets pending_join and
+  // returns, expecting a `coro.suspend` IR to follow that never
+  // comes from a sync body, so we'd read the result buffer
+  // before the target completes -- silent garbage / SIGSEGV.
+  //
+  // _tin_is_worker_thread returns 1 only when the calling OS
+  // thread is one of the M:N worker threads (i.e. a fiber is
+  // currently executing on this thread).  Main, I/O, timer
+  // threads return 0.  Non-zero here means a tagged-fn check
+  // got bypassed (function-pointer indirection, generic
+  // monomorphization, ...) and we're about to deadlock or
+  // segfault -- panic loudly so the user has a chance to fix.
+  if tin_is_worker_thread() != 0 as i32 :
+    panic("sync::wait called from inside a fiber (worker thread); use `await` instead -- sync::wait is the sync-to-async bootstrap bridge, not a cooperative wait")
+
+  tin_fiber_sync_await(f.pid)
+  // `_tin_fiber_get_result` transfers ownership of the malloc'd
+  // result box.  The `*(raw as *t)` shape is recognised by the
+  // codegen as a "move out of opaque scratch storage" (same path
+  // `Channel.recv` uses): the standard deref-copy retain is
+  // suppressed so the load inherits the box's existing reference
+  // count.  We then `_tin_free` the now-empty buffer and hand the
+  // value to the caller at rc=1 -- the only shape that balances.
+  let raw *void = tin_fiber_get_result(f.pid)
+  let v t       = *(raw as *t)
+
+  tin_free(raw)
+
+  return v
+
+// wait_all drives the scheduler until every Future in the input slice
+// has resolved, then returns the collected results in input order.
+// Heterogeneous: callers spawn fns that return `any`, the futures
+// share the `Future[any]` element type, results come back as `[any]`.
+//
+//   fn{#async} fetch_user(id i64) any = return user_record as any
+//   fn{#async} fetch_count() any      = return 42 as any
+//
+//   let fs = [spawn fetch_user(id), spawn fetch_count()]
+//   let results = sync::wait_all(fs)   // [any]
+fn wait_all(fs [Future[any]]) [any] =
+  let n = len(fs)
+  let out [any] = []
+  let i i64 = 0
+
+  for i < n:
+    out ++= [wait(fs[i])]
+    i = i + 1
+
+  return out
+
+export { Mutex, RWMutex, Cond, Atomic, Channel, Unit, wait, wait_all } as sync

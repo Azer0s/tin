@@ -97,8 +97,8 @@ test "Reader.next streams rows one at a time" =
 
 test "encode simple rows round-trips through parse" =
   let rows [[string]] = []
-  rows ++= ["a", "b"] as [string]
-  rows ++= ["c", "d"] as [string]
+  rows ++= [["a", "b"] as [string]]
+  rows ++= [["c", "d"] as [string]]
   let s = csv::encode(rows)
 
   assert::equals("a,b\nc,d\n", s)
@@ -130,7 +130,7 @@ test "Writer accumulates rows and renders to string" =
 
 test "encode then parse round-trips with quoting" =
   let original [[string]] = []
-  original ++= ["plain", "has,comma", "has\"quote", "has\nnewline"] as [string]
+  original ++= [["plain", "has,comma", "has\"quote", "has\nnewline"] as [string]]
   let encoded = csv::encode(original)
   let decoded = csv::parse(encoded)
 

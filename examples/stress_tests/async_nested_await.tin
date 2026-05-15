@@ -106,7 +106,7 @@ fn{#async} spawn_collect_await(n i64) i64 =
   let i i64 = 0
 
   for i < n:
-    futures ++= spawn add_one(i)
+    futures ++= [spawn add_one(i)]
     i = i + 1
 
   let total i64 = 0

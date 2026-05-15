@@ -469,9 +469,9 @@ data Shape(Show) =
 
   fn Show::show(this Shape) string =
     match this:
-      case Dot:        return "·"
-      case Circle(r):  return "○ r={r}"
-      case Rect(w, h): return "▭ {w}×{h}"
+      case Dot:        return "."
+      case Circle(r):  return "() r={r}"
+      case Rect(w, h): return "[] {w}*{h}"
 
 let s Show = Shape::Circle(3.0)   // value-form coerce, heap-copy
 echo s.show()
@@ -589,10 +589,10 @@ fn main() Result[i64, errors::Err] =
 
 The C-main wrapper unpacks the return value:
 
-- `Ok(n)` (where `n: i64`) → `exit(n)`. Use this when you want the
+- `Ok(n)` (where `n: i64`) -> `exit(n)`. Use this when you want the
   process exit code to come from your program's logic.
-- `Ok(())` for `Result[Unit, ...]` → `exit(0)`.
-- `Err(e)` → prints `error: {e.message()}` to stderr and `exit(1)`.
+- `Ok(())` for `Result[Unit, ...]` -> `exit(0)`.
+- `Err(e)` -> prints `error: {e.message()}` to stderr and `exit(1)`.
 
 You can also use `try` at the top level without writing a `main` at all
 -- the compiler synthesizes a `Result`-returning wrapper around the

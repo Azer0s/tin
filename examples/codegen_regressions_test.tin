@@ -52,6 +52,16 @@ fn expect_warn_clean(fixture string, must_not string) =
   if len(must_not) > 0:
     assert::ok(!contains_text(blob, must_not))
 
+// expect_pedantic_warn_substr drives the compiler with `-Wpedantic` so
+// the default-off lints surface; otherwise identical to
+// expect_warn_substr.  Used to pin diagnostics that only fire under
+// the pedantic warning set (`-Wsync-uses-await`, `-Wdroppable-fiber`,
+// `-Wnon-tin-thread`, ...).
+fn expect_pedantic_warn_substr(fixture string, want string) =
+  let r = run_tin_flags("ir", FIX ++ fixture, ["-Wpedantic"])
+  let blob = r.stdout ++ r.stderr
+  assert::ok(contains_text(blob, want))
+
 test "codegen: B1: trait-impl struct rejected for const fold" =
   expect_substr("b1_trait_impl_struct_rejected_for_const_fold_01.tin", "non-compile-time initializer")
 
@@ -210,4 +220,176 @@ test "codegen: must-use does not false-positive on i64-returning extern" =
 
 test "codegen: let-tuple destructure rejects ADT value" =
   expect_substr("let_tuple_destructure_rejects_adt_value_53.tin", "cannot destructure")
+
+test "codegen: -Wbare-parking-async-call fires on parking fn" =
+  expect_warn_substr("bare_parking_async_call_warns_54.tin", "may park the calling thread")
+
+test "codegen: -Wbare-parking-async-call silent on pure-compute async" =
+  expect_warn_clean("bare_parking_async_call_silent_on_pure_compute_55.tin", "may park the calling thread")
+
+test "codegen: sync::wait drives scheduler from sync caller" =
+  expect_substr("sync_wait_drives_scheduler_from_sync_caller_56.tin", "wait-ok")
+
+test "codegen: sync::wait_all aggregates heterogeneous futures" =
+  expect_substr("sync_wait_all_aggregates_heterogeneous_futures_57.tin", "all-ok")
+
+test "codegen: Future[t] auto-coerces to Future[any]" =
+  expect_substr("future_auto_coerce_to_future_any_58.tin", "coerce-ok")
+
+test "codegen: await ch.recv() returns T directly through outer wrapper" =
+  expect_substr("await_channel_recv_returns_t_directly_59.tin", "recv-ok")
+
+test "codegen: await on non-awaitable callee is a compile error" =
+  expect_substr("await_on_non_awaitable_is_compile_error_60.tin", "is a raw i64")
+
+test "codegen: -Wsync-uses-await (pedantic) flags await in sync fn" =
+  expect_pedantic_warn_substr(
+    "sync_uses_await_pedantic_61.tin",
+    "drives the scheduler at runtime")
+
+test "codegen: -Wdroppable-fiber (pedantic) flags discarded spawn" =
+  expect_pedantic_warn_substr(
+    "droppable_fiber_pedantic_62.tin",
+    "Future[T]` returned by this `spawn` is discarded")
+
+test "codegen: -Wnon-tin-thread (pedantic) flags interop fn that awaits" =
+  expect_pedantic_warn_substr(
+    "non_tin_thread_pedantic_63.tin",
+    "non-Tin threads")
+
+test "codegen: -Wsync-fn-coerced-to-async (pedantic) flags sync->async slot" =
+  expect_pedantic_warn_substr(
+    "sync_fn_coerced_to_async_pedantic_64.tin",
+    "synthesized coro wrapper")
+
+test "codegen: rvalue-as-any boxing in ++= does not leak inner content" =
+  let r = run_tin_flags("run", FIX ++ "any_box_rvalue_no_leak_65.tin", ["--leaks"])
+  let blob = r.stdout ++ r.stderr
+  // The leaks tool reports "0 leaks for 0 total leaked bytes." on success.
+  // Allow the macOS leaks-tool security flake ("is not debuggable") as
+  // a pass too -- the body still ran cleanly (stdout has "10").
+  assert::ok(contains_text(blob, "0 leaks for") || contains_text(blob, "is not debuggable"))
+  assert::ok(contains_text(blob, "10"))
+
+test "codegen: recursive lambda with explicit retType resolves self-ref" =
+  expect_substr("rec_lambda_self_ref_66.tin", "120")
+
+test "codegen: -Wunchecked-nil-deref (pedantic) flags unguarded *p" =
+  expect_pedantic_warn_substr(
+    "unchecked_nil_deref_pedantic_67.tin",
+    "without proving non-nil")
+
+test "codegen: -Wunchecked-div (pedantic) flags unguarded a/b" =
+  expect_pedantic_warn_substr(
+    "unchecked_div_pedantic_68.tin",
+    "unproven non-zero")
+
+test "codegen: fn{#async} lambda emits real $coro + spawn returns Future[T]" =
+  expect_substr("async_lambda_spawn_69.tin", "107")
+
+test "codegen: -Wunchecked-index (pedantic) flags unguarded arr[i]" =
+  expect_pedantic_warn_substr(
+    "unchecked_index_pedantic_70.tin",
+    "without proven bounds check")
+
+test "codegen: -Wunchecked-index (pedantic) flags bare custom ::index access" =
+  expect_pedantic_warn_substr(
+    "unchecked_index_custom_71.tin",
+    "without `(v, ok)` destructure")
+
+test "codegen: -Wunchecked-nil-deref (pedantic) also flags p.field on *T" =
+  expect_pedantic_warn_substr(
+    "unchecked_field_nil_deref_72.tin",
+    "field access on pointer")
+
+test "codegen: -Wunchecked-returned-nil (pedantic) flags deref of may-nil result" =
+  expect_pedantic_warn_substr(
+    "unchecked_returned_nil_73.tin",
+    "source function may return nil")
+
+test "codegen: *Struct -> *Trait call-arg coerce releases iface block" =
+  let r = run_tin_flags("run", FIX ++ "borrow_trait_coerce_no_leak_74.tin", ["--leaks"])
+  let blob = r.stdout ++ r.stderr
+  assert::ok(contains_text(blob, "0 leaks for") || contains_text(blob, "is not debuggable"))
+  assert::ok(contains_text(blob, "dog: rex"))
+
+test "codegen: sync::wait inside #async-reachable fn is a hard error" =
+  expect_substr("sync_wait_in_async_rejected_75.tin",
+    "sync::wait inside fn")
+
+test "codegen: first(xs).show() on [*Trait] does not leak iface" =
+  let r = run_tin_flags("run", FIX ++ "arr_trait_method_no_leak_76.tin", ["--leaks"])
+  let blob = r.stdout ++ r.stderr
+  assert::ok(contains_text(blob, "0 leaks for") || contains_text(blob, "is not debuggable"))
+  assert::ok(contains_text(blob, "N"))
+
+test "codegen: generic first[T] instantiated with T = *Trait" =
+  expect_substr("generic_over_trait_ptr_77.tin", "N")
+
+test "codegen: Andersen flags let p=nil; deref(p) chain" =
+  expect_warn_substr("andersen_let_nil_then_call_78.tin",
+    "static analysis proves only points to nil")
+
+test "codegen: -Wmanual-alloc-leak flags un-freed mem::malloc" =
+  expect_warn_substr("manual_alloc_leak_79.tin",
+    "mem::malloc/calloc/realloc result that is not freed")
+
+test "codegen: -Wmanual-double-free flags repeated mem::free" =
+  expect_warn_substr("manual_double_free_80.tin",
+    "already freed on this path")
+
+test "codegen: -Wmanual-use-after-free flags read after mem::free" =
+  expect_warn_substr("manual_use_after_free_81.tin",
+    "after mem::free on this path")
+
+test "codegen: unsatisfiable `where t is *t` is rejected at decl" =
+  expect_substr("unsatisfiable_constraint_82.tin",
+    "is never satisfiable")
+
+test "codegen: reassigning a Live alloc to a borrow flags the drop" =
+  expect_warn_substr("manual_reassign_drop_83.tin",
+    "reassigning")
+
+test "codegen: early return without mem::free flags the leak path" =
+  expect_warn_substr("manual_early_return_leak_84.tin",
+    "not freed on every path")
+
+test "codegen: `where t is *_` admits any pointer type" =
+  expect_runs_clean("wildcard_guard_pointer_85.tin", "")
+
+test "codegen: `where t is Point[_, _]` matches mangled generic name" =
+  expect_runs_clean("wildcard_guard_generic_86.tin", "")
+
+test "codegen: wildcard guard rejects unrelated struct cleanly" =
+  expect_substr("wildcard_guard_negative_87.tin",
+    "where t is Point[_, _]")
+
+test "codegen: `where t is Box[Pair[_, _]]` matches nested generic shape" =
+  expect_runs_clean("wildcard_guard_nested_generic_88.tin", "")
+
+test "codegen: `where t is [*_]` matches fat-array of any pointer" =
+  expect_runs_clean("wildcard_guard_fat_array_89.tin", "")
+
+test "codegen: `where t is [_; 3]` matches fixed-size 3 array" =
+  expect_runs_clean("wildcard_guard_fixed_array_90.tin", "")
+
+test "codegen: `where t is [_; 3]` rejects `[i64; 4]` size mismatch" =
+  expect_substr("wildcard_guard_fixed_array_size_mismatch_91.tin",
+    "where t is [_; 3]")
+
+test "codegen: paramFrees summary keeps non-freed arg Live (still leaks)" =
+  expect_warn_substr("manual_partial_free_summary_92.tin",
+    "p2")
+
+test "codegen: struct field captures Live alloc (ownership transferred)" =
+  expect_warn_clean("manual_struct_field_absorb_93.tin",
+    "not freed on every path")
+
+test "codegen: implicit-return body `= await spawn f()` compiles cleanly" =
+  expect_warn_clean("await_implicit_return_94.tin",
+    "missing terminator")
+
+test "codegen: read-only helper call keeps alloc Live (still leaks)" =
+  expect_warn_substr("manual_readonly_arg_95.tin",
+    "not freed on every path")
 

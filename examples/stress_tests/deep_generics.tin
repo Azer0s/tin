@@ -67,8 +67,7 @@ fn arr_map[t, r](arr [t], f fn(t) r) [r] =
   let out [r] = []
 
   for let v t in arr:
-    out ++= f(v)
-
+    out ++= [f(v)]
   return out
 
 fn arr_map2[t, r, s](arr [t], f fn(t) r, g fn(r) s) [s] =

@@ -172,6 +172,12 @@ func typeExprToString(te ast.TypeExpr) string {
 		}
 
 		return strings.Join(parts, " | ")
+	case *ast.WildcardType:
+		if t.Name == "" {
+			return "_"
+		}
+
+		return "_: " + t.Name
 	}
 
 	return ""

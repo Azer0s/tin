@@ -644,6 +644,17 @@ static int _is_worker_thread(void) {
     return 0;
 }
 
+// Exported version of _is_worker_thread for callers in stdlib Tin
+// code.  Returns 1 when the calling thread is one of the M:N
+// worker threads (i.e. a fiber is currently executing on this OS
+// thread), 0 otherwise (main, I/O, timer threads).  Used by
+// sync::wait to refuse running on a worker -- sync::wait is the
+// sync-to-async bootstrap bridge for main / non-async code, never
+// a cooperative wait inside a fiber.
+int32_t _tin_is_worker_thread(void) {
+    return (int32_t)_is_worker_thread();
+}
+
 // Per-fiber spinlock helpers for the park/unpark hot path.
 // Only used for status, pending_park, and pending_wakeup transitions.
 static inline void _fib_lock(TinFiber *f) {
@@ -1898,10 +1909,22 @@ void _tin_fiber_run(void) {
         }
     }
 
-    // Free fiber table.
+    // Free fiber table.  Fibers that didn't reach FIBER_DONE still own
+    // a live coroutine frame (parked on a timer, channel, I/O fd, or
+    // sitting in pending_park before coro.suspend fired).  Workers have
+    // joined by now, so nothing else references the frame -- recycle it
+    // through _tin_coro_free (which routes to the main-thread pool that
+    // gets flushed at the end of this function).  Without this, macOS
+    // `leaks --atExit` flags every parked fiber's frame as a leak on
+    // process exit (especially common in tests that drop a SleepFuture
+    // with the underlying timer still pending).
     if (_fibers) {
         for (int64_t i = 1; i < _fiber_cnt; i++) {
             if (_fibers[i]) {
+                if (_fibers[i]->status != FIBER_DONE && _fibers[i]->hdl) {
+                    _tin_coro_free(_fibers[i]->hdl);
+                    _fibers[i]->hdl = NULL;
+                }
                 free(_fibers[i]->result);
                 if (_fibers[i]->panic_msg) _tin_release(_fibers[i]->panic_msg);
                 pthread_mutex_destroy(&_fibers[i]->done_mu);

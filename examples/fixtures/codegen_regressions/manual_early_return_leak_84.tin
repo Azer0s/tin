@@ -1,0 +1,18 @@
+// Regression: an early `return` that exits before mem::free
+// runs leaks the allocation on that path.  Pre-fix the check
+// only ran at function end on the joined non-dead state, so
+// early-return paths slipped past.  Fix: dfCheckManualAllocLeaks
+// is invoked at every ReturnStmt on the pre-dead state, plus a
+// `st.dead` guard at fn-end so a function that returns on every
+// path doesn't double-warn.
+
+use mem
+
+fn check(b bool) i64 =
+  let p = mem::malloc(64)
+  if b :
+    mem::free(p)
+    return 1
+  return 2
+
+fn main() i64 = return 0

@@ -206,9 +206,9 @@ fn exec_match(code *void, subject string, start i64) Match =
   for i < rc:
     let beg = ov[i * 2] as i64
     let end = ov[i * 2 + 1] as i64
-    groups ++= substr(subject, beg, end)
-    begs   ++= beg
-    ends   ++= end
+    groups ++= [substr(subject, beg, end)]
+    begs   ++= [beg]
+    ends   ++= [end]
     i = i + 1
 
   mem::free(ov as *void)

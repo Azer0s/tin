@@ -66,7 +66,7 @@ test "array copy retains" =
 test "array append does not alias" =
   let a = [1, 2, 3]
   let b = a
-  b ++= 4
+  b ++= [4]
 
   // b now has length 4; a is unaffected (append reallocates)
   assert::equals(a.len, 3)

@@ -18,7 +18,15 @@ struct Unit =
   _unit i8
 
 // Future[t] - wraps a fiber PID for type-safe deferred awaiting.
-struct Future[t](awaitable[t]) =
+//
+// Implements coerce[Future[any]] so a concrete Future[i64] / Future[string]
+// auto-coerces to Future[any] at any call site that expects the erased
+// form (e.g. sync::wait_all's input slice).  The pid alone identifies the
+// fiber; the result type stored in t is recovered through the trait
+// dispatch on await -- erasing to Future[any] just stops carrying the
+// compile-time t and defers the type at the await site to the caller's
+// downcast.
+struct Future[t](awaitable[t], coerce[Future[any]]) =
   pid i64
 
   static fn new(pid i64) Future[t] =
@@ -43,6 +51,13 @@ struct Future[t](awaitable[t]) =
 
     return *typed
 
+  // coerce to Future[any] - identity at the value level (same {i64 pid}
+  // layout); the type parameter is erased so heterogeneous Futures can
+  // share a slot.  Fires automatically wherever cg.coerce sees a
+  // Future[t] flowing into a Future[any] position.
+  static fn ::coerce(this Future[t]) Future[any] =
+    return Future[any]{pid: this.pid}
+
 // ready_unit returns a Future[Unit] that resolves immediately on
 // await without spawning a fiber. Used by stdlib helpers that take a
 // Future-shaped contract but have no work to do for trivial inputs
@@ -53,3 +68,4 @@ struct Future[t](awaitable[t]) =
 // or scheduler traffic.
 fn ready_unit() Future[Unit] =
   return Future[Unit]{pid: -9223372036854775808}
+

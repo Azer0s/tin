@@ -607,7 +607,7 @@ func (cg *CodeGen) genTupleMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 		checkBlock := curCheckBlock
 
 		// Wildcard catch-all: identifier "_" or a plain identifier with
-		// no slot decomposition — treat as default arm.
+		// no slot decomposition - treat as default arm.
 		if id, ok := c.Pattern.(*ast.Identifier); ok && id.Name == "_" {
 			checkBlock.NewBr(bodyBlock)
 
@@ -1473,7 +1473,7 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 
 	// Tuple-pattern match: `case (p1, p2, ...):`.  Each slot pattern
 	// may be a wildcard, a binding identifier, a literal, or an ADT
-	// ctor (Ok(x), Err(_), None, Some(v)) — which is what motivates
+	// ctor (Ok(x), Err(_), None, Some(v)) - which is what motivates
 	// the dedicated path: the existing integer-switch fallback
 	// genExprs the pattern as an expression and trips on `Ok(x)`
 	// trying to evaluate x in the scrutinee scope.

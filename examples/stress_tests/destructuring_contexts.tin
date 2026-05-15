@@ -37,9 +37,9 @@ fn split_at_midpoint(arr [i64]) @[i64, [i64], [i64]] =
 
   for i < len(arr):
     if i < mid:
-      left ++= arr[i]
+      left ++= [arr[i]]
     else:
-      right ++= arr[i]
+      right ++= [arr[i]]
     i = i + 1
 
   return [left[mid - 1] as any, left as any, right as any]

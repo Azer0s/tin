@@ -1,0 +1,21 @@
+// Regression: a wildcard guard must still reject types whose
+// shape doesn't match.  `where t is Point[_, _]` accepts any
+// Point[A, B] but must reject an unrelated struct.  The
+// diagnostic must show the bound as written ("Point[_, _]"),
+// not "Point[, ]" -- the latter would happen if WildcardType's
+// printer fell through to typeExprToString's default-empty
+// branch.
+
+struct Point[T, U] =
+  x T
+  y U
+
+struct Other =
+  v i64
+
+fn needs_point[t](p t) i64 where t is Point[_, _] =
+  return 1
+
+fn main() i64 =
+  let o = Other{v: 5}
+  return needs_point(o)

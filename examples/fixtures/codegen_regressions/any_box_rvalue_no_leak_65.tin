@@ -1,0 +1,15 @@
+// Regression: rvalue-as-any boxing in array literal + ++= consumes the
+// inner heap content into the any data block; without the inner-release
+// in _tin_release_any (tag=2 string branch) plus the matching retain
+// in boxAsAny + the post-box release at the rvalue cast site, every
+// such `<heap-rvalue> as any` leaked the inner.  Fixture exercises the
+// shape that previously leaked 1 node / 32+ bytes per element.
+fn main() i64 =
+  let xs [any] = []
+  let i i64 = 0
+  for i < 10 :
+    xs ++= ["msg-{i}" as any]
+    i = i + 1
+
+  echo len(xs)
+  return 0

@@ -1,0 +1,25 @@
+// Regression: when a helper's interproc summary proves it frees
+// SOME but not all of its pointer params, the unfreed ones must
+// stay Live and still trip the alloc-leak diagnostic.  Pre-fix
+// the dataflow's call-site handler marked EVERY non-freed arg
+// as Escaped (assuming the callee might take ownership), which
+// silently dropped the leak warning on `p2` here.
+//
+// Fix: when paramFrees has an entry for the callee (i.e. the
+// summary IS available), non-freed indexes stay Live.  Only
+// callees with no summary at all keep the conservative Escaped
+// transition.
+
+use mem
+
+fn release_first(a *void, b *void) =
+  mem::free(a)
+
+fn run() =
+  let p1 = mem::malloc(64)
+  let p2 = mem::malloc(64)
+  release_first(p1, p2)
+  // p2 was passed to a helper that demonstrably doesn't free it.
+  // The leak diagnostic must surface.
+
+fn main() i64 = return 0

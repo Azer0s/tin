@@ -1544,6 +1544,12 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	cg.suppressBareTypeCheck = prevSuppress
 	cg.currentPkg = prevPkg
 	cg.curScope = prevScope
+	// Record the original TypeExpr arg list so wildcard-guard
+	// matching (`where t is Box[Pair[_, _]]`) can compare against
+	// the structured form instead of the lossy `__`-mangled name.
+	if err == nil {
+		cg.dataInstShape[n.Name] = instShape{Tmpl: tmpl.Name, Args: gt.TypeParams}
+	}
 
 	// genStructDecl tagged structDeclFiles[concrete.Name] with cg.filename
 	// -- but cg.filename here is whoever instantiated the generic, NOT the
@@ -2481,6 +2487,25 @@ func (cg *CodeGen) ensureTraitBorrowNoopRelease() *ir.Func {
 	entry.NewRet(nil)
 
 	return fn
+}
+
+// isTraitFatPtrPtrType reports whether t is a POINTER to a trait
+// fat-pointer struct (i.e. `*Trait_iface` in source).  Borrow-form
+// trait coercion (`fn f(a *Trait); f(structPtr)`) lowers to this
+// shape: buildPtrToTraitBorrow heap-allocates the fat-pointer block
+// and returns its address as `*Trait_iface`.  Used by
+// emitCallArgReleaseForRet to know when a coerced call arg owns a
+// freshly allocated iface block that must be released after the
+// call returns.
+func (cg *CodeGen) isTraitFatPtrPtrType(t irtypes.Type) bool {
+	pt, ok := t.(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	_, isIface := cg.isTraitFatPtr(pt.ElemType)
+
+	return isIface
 }
 
 // isTraitFatPtr reports whether t is a trait fat-pointer {i8*, vtable_struct*}.

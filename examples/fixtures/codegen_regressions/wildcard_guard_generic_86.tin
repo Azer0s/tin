@@ -1,0 +1,26 @@
+// Regression: `where t is Point[_, _]` should match any
+// instantiation of Point regardless of its two type args.
+// Pre-fix the constraint check only knew SimpleType bounds; a
+// GenericType bound either fell through to a name-equality
+// check ("Point" != "Point__i64__string") or panicked.  In
+// addition, the concrete struct name arrives mangled
+// ("Point__i64__string"), so even after structural matching
+// was added, the parser couldn't turn it back into a
+// GenericType.
+//
+// Fix: structSatisfiesConstraint runs prettyStructName on the
+// concrete name before parseTypeParamStr, then walks the bound
+// with typeExprStructuralMatch.
+
+struct Point[T, U] =
+  x T
+  y U
+
+type PIS = Point[i64, string]
+
+fn first[t](p t) i64 where t is Point[_, _] =
+  return 7
+
+fn main() i64 =
+  let p PIS = PIS{x: 1, y: "hi"}
+  return first(p) - 7

@@ -1,0 +1,10 @@
+// -Wsync-uses-await (pedantic) fires when a sync fn body contains
+// a literal `await` expression.  Compile with `-Wpedantic` to see
+// the warning; default builds stay silent.
+fn{#async} compute(n i64) i64 = return n * 2
+
+fn uses_await() i64 =
+  return await spawn compute(5)
+
+fn main() =
+  let _ = uses_await()

@@ -3,12 +3,12 @@
 Tin can produce binaries for an OS/architecture other than the one it
 runs on. Both directions are supported on amd64 and arm64:
 
-| Host         | Target                                          |
-|--------------|-------------------------------------------------|
-| Linux amd64  | linux/{amd64, arm64, 386}, darwin/{amd64, arm64}|
-| Linux arm64  | linux/{amd64, arm64}, darwin/{amd64, arm64}     |
-| macOS amd64  | darwin/{amd64, arm64}, linux/{amd64, arm64}     |
-| macOS arm64  | darwin/{amd64, arm64}, linux/{amd64, arm64}     |
+| Host        | Target                                           |
+|-------------|--------------------------------------------------|
+| Linux amd64 | linux/{amd64, arm64, 386}, darwin/{amd64, arm64} |
+| Linux arm64 | linux/{amd64, arm64}, darwin/{amd64, arm64}      |
+| macOS amd64 | darwin/{amd64, arm64}, linux/{amd64, arm64}      |
+| macOS arm64 | darwin/{amd64, arm64}, linux/{amd64, arm64}      |
 
 The IR pipeline runs through host `opt` and host `ld.lld` (which
 handles both ELF and Mach-O via `ld64.lld` for darwin targets), with

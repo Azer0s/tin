@@ -1,0 +1,11 @@
+// Regression: `where t is *t` (and equivalents like `where t is
+// pointer[t]` after type-alias expansion) is unsatisfiable
+// because no concrete type T can equal *T -- the occurs check
+// makes the constraint recursive.  The checker rejects the
+// declaration at parse-time instead of silently producing a fn
+// no caller can satisfy (which surfaced earlier as the misleading
+// "undefined: <fn>" error).
+
+fn bad[t]() t where t is *t = return nil as t
+
+fn main() i64 = return 0

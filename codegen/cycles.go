@@ -63,9 +63,10 @@ import (
 
 // cycleEdge describes a single struct-field reference in the type graph.
 type cycleEdge struct {
-	to     string // target struct name
-	isWeak bool
-	isOwn  bool
+	to        string // target struct name
+	fieldName string // source field that established this edge
+	isWeak    bool
+	isOwn     bool
 }
 
 // checkStructCycles validates ownership invariants across all concrete struct
@@ -84,13 +85,13 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 				// direct self-reference (Node -> Node) is still added so the
 				// SCC algorithm can find it.
 				if target == d.Name {
-					edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak, isOwn: f.IsOwn})
+					edges = append(edges, cycleEdge{to: target, fieldName: f.Name, isWeak: f.IsWeak, isOwn: f.IsOwn})
 				}
 
 				continue
 			}
 
-			edges = append(edges, cycleEdge{to: target, isWeak: f.IsWeak, isOwn: f.IsOwn})
+			edges = append(edges, cycleEdge{to: target, fieldName: f.Name, isWeak: f.IsWeak, isOwn: f.IsOwn})
 		}
 
 		adj[d.Name] = edges
@@ -208,10 +209,30 @@ func (cg *CodeGen) checkStructCycles(decls []*ast.StructDecl) error {
 		// A cycle is only safe when there is at least one cycle-breaking
 		// edge (weak) or an explicit ownership declaration (own).
 		if weakCount == 0 && ownCount == 0 {
+			// Suggest a concrete candidate: name the first plain-strong
+			// edge in the SCC.  The user can then `weak` or `own` it.
+			suggestion := ""
+			for _, n := range scc {
+				for _, e := range adj[n] {
+					if sccSet[e.to] && !e.isWeak && !e.isOwn && e.fieldName != "" {
+						suggestion = fmt.Sprintf(
+							"\n\thint: marking %s.%s as `weak` (cycle-breaking, non-owning) "+
+								"or `own` (owning, kept alive while %s is alive) breaks the cycle",
+							n, e.fieldName, n)
+
+						break
+					}
+				}
+
+				if suggestion != "" {
+					break
+				}
+			}
+
 			return fmt.Errorf(
 				"reference cycle detected: %s\n"+
-					"\tat least one field in the cycle must be marked `weak` or `own`",
-				cycle)
+					"\tat least one field in the cycle must be marked `weak` or `own`%s",
+				cycle, suggestion)
 		}
 
 		// A cycle must have at least one strong owner so objects are not

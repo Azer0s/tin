@@ -93,9 +93,9 @@ fn exec_match(code *void, subject string, start i64) Match =
     let beg = ov[i * 2] as i64
     let end = ov[i * 2 + 1] as i64
 
-    groups ++= substr(subject, beg, end)
-    begs   ++= beg
-    ends   ++= end
+    groups ++= [substr(subject, beg, end)]
+    begs   ++= [beg]
+    ends   ++= [end]
     i = i + 1
 
   return Match{_matched: true, _groups: groups, _begs: begs, _ends: ends}
@@ -152,7 +152,7 @@ struct Regex =
 
       if !m.matched():
         break
-      results ++= m.group(0)
+      results ++= [m.group(0)]
       let end = m.end(0)
 
       if end <= pos:
@@ -272,7 +272,7 @@ fn split(pattern string, s string) [string] =
   let parts [string] = []
 
   if re.is_err():
-    parts ++= s
+    parts ++= [s]
     return parts
 
   let slen = len(s)
@@ -289,7 +289,7 @@ fn split(pattern string, s string) [string] =
     let m = re.match_at(s, pos)
 
     if !m.matched():
-      parts ++= substr(s, last_emit, slen)
+      parts ++= [substr(s, last_emit, slen)]
       break
 
     let beg = m.beg(0)
@@ -304,11 +304,11 @@ fn split(pattern string, s string) [string] =
       // empty string -- just advance pos by one byte to keep
       // moving.  Either way pos advances so the loop terminates.
       if last_emit < beg:
-        parts ++= substr(s, last_emit, beg)
+        parts ++= [substr(s, last_emit, beg)]
         last_emit = beg
       pos = pos + 1
     else:
-      parts ++= substr(s, last_emit, beg)
+      parts ++= [substr(s, last_emit, beg)]
       last_emit = end
       pos = end
 

@@ -116,6 +116,28 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	cg.fnDisplayNames[f.Name()] = "<lambda>"
 
 	prevCtx := cg.pushClosureCtx(f)
+	// Recursive lambda self-reference: when genVarDecl plumbed a
+	// `lambdaSelfName`, register a fat-fn-ptr value built from this
+	// lambda's own IR func + its env arg under that name in the new
+	// scope.  Recursive calls inside the body resolve to this fat
+	// value and dispatch through callFatFn -> slot 0 -> the IR func
+	// with the proper env.  We clear cg.lambdaSelfName up front so
+	// nested lambdas don't accidentally inherit the outer binding.
+	selfName := cg.lambdaSelfName
+	cg.lambdaSelfName = ""
+	if selfName != "" && e.RetType != nil {
+		// Build the fat-fn-ptr value: slots 0/1 = this fn (we don't
+		// emit a separate $colored variant for the self-reference; the
+		// colored-variant emission below copies the same self-ref so
+		// recursive calls inside a colored body also route through it).
+		// Slot 2 = synth coro wrapper via ensureCoroWrapperFor.
+		// Slot 3 = the lambda's own env arg (p0).
+		envForSelf := f.Params[0]
+		fatVal := cg.buildFatFnPtrValue(entry, f, envForSelf)
+		fatSlot := entry.NewAlloca(fatVal.Type())
+		entry.NewStore(fatVal, fatSlot)
+		cg.curScope.set(selfName, &scopeEntry{val: fatSlot, isAlloc: true, noDeinit: true, noRelease: true})
+	}
 
 	// Step 4: unpack captures from env inside the lambda body.
 	// unpackClosureEnv uses GEPs directly (env persists across calls) and retains
@@ -211,17 +233,263 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 
 	cg.popClosureCtx(prevCtx)
 
-	// Step 5: build and return fat pointer { fn_ptr, env_i8_ptr } using insertvalue
-	// so no stack alloca is needed.
-	fatStructType := irtypes.NewStruct(irtypes.NewPointer(f.Sig), irtypes.I8Ptr)
-	fat0 := block.NewInsertValue(constant.NewUndef(fatStructType), f, 0)
-	fat1 := block.NewInsertValue(fat0, envI8Ptr, 1)
+	// Step 4.5: emit a $colored variant of the lambda body so slot 1
+	// of the fat-fn-ptr can route cooperative-context invocations to
+	// a yield-instrumented body.  Same signature as the sync lambda,
+	// same body; curFnAutoYield + curFnColoredSync flip the yield
+	// lowering to runtime-driven via _tin_fiber_yield_coro.
+	coloredName := coloredVersionName(name)
+	coloredParams := make([]*ir.Param, len(llParams))
+	for i, p := range llParams {
+		coloredParams[i] = ir.NewParam(p.Name(), p.Type())
+	}
+
+	coloredFn := cg.mod.NewFunc(coloredName, retType, coloredParams...)
+	cg.curScope.set(coloredName, &scopeEntry{val: coloredFn, isAlloc: false})
+
+	if cg.filename != "" {
+		cg.fnSourceFiles[coloredFn.Name()] = cg.filename
+	}
+
+	cg.fnDisplayNames[coloredFn.Name()] = "<lambda$colored>"
+
+	coloredEntry := coloredFn.NewBlock("entry")
+
+	prevCtxC := cg.pushClosureCtx(coloredFn)
+	prevAutoYield := cg.curFnAutoYield
+	prevColoredSync := cg.curFnColoredSync
+	cg.curFnAutoYield = true
+	cg.curFnColoredSync = true
+	// Recursive lambda self-reference (colored variant): mirror the
+	// sync variant's self-ref registration so recursive calls inside
+	// the colored body also resolve through a fat-fn-ptr.  Slot 1 of
+	// that fat-fn-ptr is coloredFn itself, so cooperative-context
+	// recursion stays cooperative.
+	if selfName != "" && e.RetType != nil {
+		envForSelf := coloredFn.Params[0]
+		fatVal := cg.buildFatFnPtrValue(coloredEntry, coloredFn, envForSelf)
+		fatSlot := coloredEntry.NewAlloca(fatVal.Type())
+		coloredEntry.NewStore(fatVal, fatSlot)
+		cg.curScope.set(selfName, &scopeEntry{val: fatSlot, isAlloc: true, noDeinit: true, noRelease: true})
+	}
+	cg.unpackClosureEnv(coloredEntry, coloredFn, envStructType, captures)
+
+	for i, p := range e.Params {
+		param := coloredFn.Params[i+1]
+
+		pt, err := cg.tinTypeToLLVM(p.Type)
+		if err != nil {
+			cg.curFnAutoYield = prevAutoYield
+			cg.curFnColoredSync = prevColoredSync
+			cg.popClosureCtx(prevCtxC)
+
+			return nil, err
+		}
+
+		alloca := coloredEntry.NewAlloca(pt)
+		coloredEntry.NewStore(param, alloca)
+		cg.emitRetain(coloredEntry, param)
+		cg.curScope.set(p.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRCTrackedType(pt)})
+	}
+
+	prevMatchSubjectC := cg.matchSubject
+	if _, isWhere := e.Body.(*ast.WhereList); isWhere && len(e.Params) > 0 {
+		firstParamName := e.Params[0].Name
+		if se, ok := cg.curScope.lookup(firstParamName); ok && se.isAlloc {
+			pt := se.val.Type().(*irtypes.PointerType)
+			cg.matchSubject = coloredEntry.NewLoad(pt.ElemType, se.val)
+		}
+	}
+
+	termC, errC := cg.genBody(coloredEntry, e.Body, retType)
+	cg.matchSubject = prevMatchSubjectC
+	cg.curFnAutoYield = prevAutoYield
+	cg.curFnColoredSync = prevColoredSync
+	cg.popClosureCtx(prevCtxC)
+
+	if errC != nil {
+		return nil, errC
+	}
+
+	if !termC {
+		lastBlock := coloredFn.Blocks[len(coloredFn.Blocks)-1]
+		if lastBlock.Term == nil {
+			if irtypes.IsVoid(retType) {
+				lastBlock.NewRet(nil)
+			} else {
+				lastBlock.NewRet(cg.zeroValue(retType))
+			}
+		}
+	}
+
+	// Step 4.75: when the lambda carries the `#async` tag, emit a real
+	// $coro body alongside the sync + colored variants.  Slot 2 of the
+	// fat-fn-ptr then targets this body directly via
+	// lookupRealCoroVariant instead of going through the synth coro
+	// wrapper (which costs an extra frame allocation per spawn and
+	// internally targets slot 1's $colored body).  Matches the slot-2
+	// shape declared `fn{#async}` named fns have.
+	if hasTag(e.Tags, "async") {
+		// Register the sync `name -> f` mapping in the outer
+		// scope so genCoroFuncBody's recursive-self-ref builder
+		// can find the sync IR func to wrap into a fat-fn-ptr.
+		// Removed at the end of this block so the let binding
+		// (which holds the FAT-FN-PTR value, not the IR func)
+		// installs cleanly via genVarDecl.
+		hadPriorSelf := false
+
+		var priorSelf *scopeEntry
+
+		if selfName != "" {
+			if prev, ok := cg.curScope.vars[name]; ok {
+				hadPriorSelf = true
+				priorSelf = prev
+			}
+
+			cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+		}
+
+		synth := &ast.FuncDecl{
+			Name:    name,
+			Params:  e.Params,
+			RetType: e.RetType,
+			Tags:    []string{"async"},
+			Body:    e.Body,
+		}
+		cg.coroCallable[name] = true
+
+		if err := cg.predeclareCoroVariant(synth, name, true); err != nil {
+			return nil, fmt.Errorf("async lambda: predeclare coro: %w", err)
+		}
+
+		// Plumb the self-name through to genCoroFuncBody so it
+		// can register a fat-fn-ptr self-ref in the coro body's
+		// scope (recursive `count(n-1)` inside an #async lambda).
+		if selfName != "" {
+			cg.lambdaSelfName = selfName
+		}
+
+		if err := cg.genCoroFuncBody(synth, coroVersionName(name), captures, envStructType); err != nil {
+			return nil, fmt.Errorf("async lambda: gen coro body: %w", err)
+		}
+
+		// Restore the outer scope: the let binding will overwrite
+		// `name` with the fat-fn-ptr value when genVarDecl
+		// finishes, but for nested async-lambda emission we must
+		// not leave a stale entry around.
+		if selfName != "" {
+			if hadPriorSelf {
+				cg.curScope.set(name, priorSelf)
+			} else {
+				delete(cg.curScope.vars, name)
+			}
+		}
+	}
+
+	// Step 5: build and return the 4-slot fat-fn-ptr value.
+	// buildFatFnPtrValue's lookupColoredVariant picks up the colored
+	// variant we just emitted and wires it into slot 1.  When this
+	// lambda emitted a real $coro body (step 4.75), buildFatFnPtrValue's
+	// lookupRealCoroVariant picks that up for slot 2 in place of the
+	// synth coro wrapper.
+	fatVal := cg.buildFatFnPtrValue(block, f, envI8Ptr)
 
 	// Signal to genVarDecl whether this closure has captured variables so it can
 	// skip the _tin_release_closure(null) call for non-capturing closures.
 	cg.lastLambdaHadCaptures = len(captures) > 0
 
-	return fat1, nil
+	return fatVal, nil
+}
+
+// buildFatFnPtrValue assembles a 4-slot fat-fn-ptr value from a sync
+// fn ptr and an env pointer.  Slot 0 = sync body (canonical).
+// Slot 1 = $colored variant when one was emitted, else slot 0 (the
+// caller is non-cooperative; no cooperation is needed anyway).
+// Slot 2 = a per-fn coro wrapper lazily emitted via
+// ensureCoroWrapperFor; the wrapper internally targets slot 1's body
+// so a spawned sync fn cooperates at the same coloring points as a
+// bare cooperative-context call.  Slot 3 = env.
+func (cg *CodeGen) buildFatFnPtrValue(block *ir.Block, syncFn *ir.Func, env value.Value) value.Value {
+	slot1 := syncFn
+	if colored := cg.lookupColoredVariant(syncFn); colored != nil {
+		slot1 = colored
+	}
+
+	// Slot 2 prefers a real `<name>$coro` body when one was emitted
+	// (e.g. for a `fn{#async}` lambda or any function the colored set
+	// classifies as coro-callable).  Falls back to the synth wrapper
+	// otherwise so a plain sync fn still has a working coro ramp.
+	var coroSlot value.Value = cg.ensureCoroWrapperFor(syncFn)
+	if realCoro := cg.lookupRealCoroVariant(syncFn); realCoro != nil {
+		coroSlot = realCoro
+	}
+
+	fatType := irtypes.NewStruct(
+		irtypes.NewPointer(syncFn.Sig),    // slot 0: non-colored sync (canonical)
+		irtypes.NewPointer(slot1.Sig),     // slot 1: colored sync (== slot 0 when no colored variant)
+		irtypes.NewPointer(coroSlot.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)), // slot 2: coro ramp / real $coro
+		irtypes.I8Ptr,                     // slot 3: env
+	)
+
+	v0 := block.NewInsertValue(constant.NewUndef(fatType), syncFn, 0)
+	v1 := block.NewInsertValue(v0, slot1, 1)
+	v2 := block.NewInsertValue(v1, coroSlot, 2)
+	v3 := block.NewInsertValue(v2, env, 3)
+
+	return v3
+}
+
+// lookupRealCoroVariant returns the `<syncFn>$coro` IR function if a
+// real coroutine body was emitted (predeclared AND has blocks).
+// Mirrors lookupColoredVariant: a stub without a body must not be
+// wired into slot 2, since the linker would resolve it to a missing
+// symbol.
+func (cg *CodeGen) lookupRealCoroVariant(syncFn *ir.Func) *ir.Func {
+	coroName := coroVersionName(syncFn.Name())
+
+	entry, ok := cg.curScope.lookup(coroName)
+	if !ok {
+		return nil
+	}
+
+	f, ok := entry.val.(*ir.Func)
+	if !ok || len(f.Blocks) == 0 {
+		return nil
+	}
+
+	return f
+}
+
+// lookupColoredVariant returns the `<syncFn>$colored` IR function if
+// one was emitted (predeclared AND has a body) during the coloring
+// pass; nil otherwise.  Used by buildFatFnPtrValue to wire slot 1
+// and by ensureCoroWrapperFor to pick the body the synth wrapper
+// should target.
+//
+// Body-presence check (`len(f.Blocks) > 0`) is mandatory: a
+// `<name>$colored` symbol with zero blocks is a declaration-only
+// stub that would link to nothing.  Package fns are codegenned
+// before colorCallGraph runs, so their colored stubs may be
+// predeclared in a later pre-pass but never gain a body; the
+// fallback path lets call sites route to the plain sync entry
+// instead (cooperation is lost, but no link failure).
+func (cg *CodeGen) lookupColoredVariant(syncFn *ir.Func) *ir.Func {
+	if syncFn == nil {
+		return nil
+	}
+
+	coloredName := syncFn.Name() + "$colored"
+	if entry, ok := cg.curScope.lookup(coloredName); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn && len(f.Blocks) > 0 {
+			// Sanity: signature must match the sync fn (slot 1 has
+			// the same param / return shape as slot 0).
+			if f.Sig.Equal(syncFn.Sig) {
+				return f
+			}
+		}
+	}
+
+	return nil
 }
 
 // genClosureDtor generates a per-closure destructor IR function that releases
@@ -355,14 +623,12 @@ func (cg *CodeGen) genBoundMethod(block *ir.Block, recvExpr ast.Node, obj value.
 		wrapEntry.NewRet(result)
 	}
 
-	// Return fat pointer { wrapFn, envI8Ptr }.
-	fatStructType := irtypes.NewStruct(irtypes.NewPointer(wrapFn.Sig), irtypes.I8Ptr)
-	fat0 := block.NewInsertValue(constant.NewUndef(fatStructType), wrapFn, 0)
-	fat1 := block.NewInsertValue(fat0, envI8Ptr, 1)
+	// Return 4-slot fat-fn-ptr {coro_ramp, colored_sync, non_colored_sync, env}.
+	fatVal := cg.buildFatFnPtrValue(block, wrapFn, envI8Ptr)
 
 	cg.lastLambdaHadCaptures = true
 
-	return fat1, nil
+	return fatVal, nil
 }
 
 // Interpolated string
@@ -1678,8 +1944,8 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 		if se, ok2 := cg.curScope.lookup(calleeName); ok2 && se.isAlloc {
 			if pt, ok3 := se.val.Type().(*irtypes.PointerType); ok3 && isAsyncFatFnPtr(pt.ElemType) {
 				loaded := block.NewLoad(pt.ElemType, se.val)
-				fnPtr := block.NewExtractValue(loaded, 0)
-				envPtr := block.NewExtractValue(loaded, 1)
+				fnPtr := block.NewExtractValue(loaded, 2) // slot 2: coro ramp
+				envPtr := block.NewExtractValue(loaded, 3) // slot 3: env
 				fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
 				// Build args: env first, then actual params.
@@ -1697,6 +1963,16 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 				hdl := block.NewCall(fnPtr, spawnArgs...)
 				pid := cg.emitSpawnCall(block, hdl)
 				retType := cg.asyncFatPtrRetType(se.tinType)
+				// Fallback: if se.tinType wasn't annotated (typical for
+				// `let f = fn{#async}(...) T = ...`), recover T from slot
+				// 0's LLVM function type.  Slot 0 returns T (slot 2
+				// returns i8*, so we can't use it directly).
+				if retType == nil {
+					slot0Ty := pt.ElemType.(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+					if !irtypes.IsVoid(slot0Ty.RetType) {
+						retType = slot0Ty.RetType
+					}
+				}
 
 				return cg.wrapPidInFutureWithLLVMType(block, pid, retType)
 			}
@@ -1799,8 +2075,8 @@ func (cg *CodeGen) asyncFatPtrRetType(tinFnType ast.TypeExpr) irtypes.Type {
 // to get the coroutine handle, then spawns the fiber and returns Future[T].
 // tinFnType is the declared Tin FuncType for the callee (may be nil, falls back to Future[Unit]).
 func (cg *CodeGen) genSpawnAsyncFatPtr(block *ir.Block, fatVal value.Value, argNodes []ast.Node, tinFnType ast.TypeExpr) (value.Value, error) {
-	fnPtr := block.NewExtractValue(fatVal, 0)
-	envPtr := block.NewExtractValue(fatVal, 1)
+	fnPtr := block.NewExtractValue(fatVal, 2) // slot 2: coro ramp
+	envPtr := block.NewExtractValue(fatVal, 3) // slot 3: env
 	fatFnType := fnPtr.Type().(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
 
 	// Build arg list: env first, then actual params (type-guided for fn values).

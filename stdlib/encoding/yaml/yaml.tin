@@ -605,13 +605,13 @@ fn parse_flow_sequence(p *Parser) *Value =
     let c = p.peek()
 
     if c == @'\"':
-      items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
+      items ++= [&Value{kind: Kind.string_v, sval: parse_quoted_str(p)}]
     else if c == @'[':
-      items ++= parse_flow_sequence(p)
+      items ++= [parse_flow_sequence(p)]
     else if c == @'{':
-      items ++= parse_flow_mapping(p)
+      items ++= [parse_flow_mapping(p)]
     else:
-      items ++= interpret_scalar(parse_flow_scalar(p))
+      items ++= [interpret_scalar(parse_flow_scalar(p))]
     p.skip_inline_ws()
 
     if p.at_end():
@@ -662,19 +662,19 @@ fn parse_flow_mapping(p *Parser) *Value =
 
     if !p.at_end() && p.peek() == @':':
       p.advance()
-    kkeys ++= key
+    kkeys ++= [key]
     // Parse value.
     p.skip_inline_ws()
     let vc = p.peek()
 
     if vc == @'\"':
-      items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
+      items ++= [&Value{kind: Kind.string_v, sval: parse_quoted_str(p)}]
     else if vc == @'[':
-      items ++= parse_flow_sequence(p)
+      items ++= [parse_flow_sequence(p)]
     else if vc == @'{':
-      items ++= parse_flow_mapping(p)
+      items ++= [parse_flow_mapping(p)]
     else:
-      items ++= interpret_scalar(parse_flow_scalar(p))
+      items ++= [interpret_scalar(parse_flow_scalar(p))]
     p.skip_inline_ws()
 
     if p.at_end():
@@ -726,7 +726,7 @@ fn parse_block_mapping(p *Parser, indent i64) *Value =
 
       key = trim_right(k)
 
-    kkeys ++= key
+    kkeys ++= [key]
     p.skip_inline_ws()
 
     if !p.at_end() && p.peek() == @':':
@@ -738,19 +738,19 @@ fn parse_block_mapping(p *Parser, indent i64) *Value =
       if !p.at_end() && p.peek() == @'#':
         p.skip_to_eol()
       p.skip_eol()
-      items ++= parse_node(p, indent + 1)
+      items ++= [parse_node(p, indent + 1)]
     else:
       // Inline value: flow collection, quoted string, or plain scalar.
       let c = p.peek()
 
       if c == @'\"':
-        items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
+        items ++= [&Value{kind: Kind.string_v, sval: parse_quoted_str(p)}]
       else if c == @'[':
-        items ++= parse_flow_sequence(p)
+        items ++= [parse_flow_sequence(p)]
       else if c == @'{':
-        items ++= parse_flow_mapping(p)
+        items ++= [parse_flow_mapping(p)]
       else:
-        items ++= interpret_scalar(parse_block_scalar(p))
+        items ++= [interpret_scalar(parse_block_scalar(p))]
       p.skip_to_eol()
       p.skip_eol()
 
@@ -781,19 +781,19 @@ fn parse_block_sequence(p *Parser, indent i64) *Value =
     if p.at_end() || p.peek() == @'\n' || p.peek() == @'\r':
       // Value is on the next indented lines.
       p.skip_eol()
-      items ++= parse_node(p, indent + 1)
+      items ++= [parse_node(p, indent + 1)]
     else:
       p.skip_inline_ws()
       let c = p.peek()
 
       if c == @'\"':
-        items ++= &Value{kind: Kind.string_v, sval: parse_quoted_str(p)}
+        items ++= [&Value{kind: Kind.string_v, sval: parse_quoted_str(p)}]
       else if c == @'[':
-        items ++= parse_flow_sequence(p)
+        items ++= [parse_flow_sequence(p)]
       else if c == @'{':
-        items ++= parse_flow_mapping(p)
+        items ++= [parse_flow_mapping(p)]
       else:
-        items ++= interpret_scalar(parse_block_scalar(p))
+        items ++= [interpret_scalar(parse_block_scalar(p))]
       p.skip_to_eol()
       p.skip_eol()
 

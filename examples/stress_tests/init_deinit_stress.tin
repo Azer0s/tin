@@ -27,8 +27,7 @@ use mem
 var event_log [string]
 
 fn log_event(msg string) =
-  event_log ++= msg
-
+  event_log ++= [msg]
 struct resource =
   id     i64
   active bool

@@ -857,7 +857,9 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 			fnSlotPtrCast := block.NewBitCast(fnSlotPtr, i8PtrPtr)
 			block.NewStore(rawCb, fnSlotPtrCast)
 
-			// Build the Tin fat fn-ptr `{thunk, env}`.
+			// Build the Tin 4-slot fat fn-ptr {coro, colored, sync, env}.
+			// The thunk is the sync variant (slot 2); buildFatFnPtrValue
+			// synthesizes a coro wrapper for slot 0.
 			fatTy, err := cg.tinTypeToLLVM(ft)
 			if err != nil {
 				return err
@@ -865,20 +867,14 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 
 			st := fatTy.(*irtypes.StructType)
 
-			alloca := block.NewAlloca(st)
-			fnFieldPtr := block.NewGetElementPtr(st, alloca,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, 0))
-			envFieldPtr := block.NewGetElementPtr(st, alloca,
-				constant.NewInt(irtypes.I32, 0),
-				constant.NewInt(irtypes.I32, 1))
-
-			thunkCast := block.NewBitCast(thunk, st.Fields[0])
-			block.NewStore(thunkCast, fnFieldPtr)
-			block.NewStore(envI8, envFieldPtr)
-
-			loaded := block.NewLoad(st, alloca)
-			args = append(args, loaded)
+			// Bitcast the thunk to slot-2's expected pointer type before
+			// handing to buildFatFnPtrValue.  buildFatFnPtrValue expects
+			// *ir.Func so we pass the thunk directly (its sig matches
+			// slot 2's inner fn type since getOrCreateCallbackThunk
+			// builds it from the same Tin FuncType).
+			_ = st
+			fatVal := cg.buildFatFnPtrValue(block, thunk, envI8)
+			args = append(args, fatVal)
 
 			// The internal entry retains+releases env per Tin's
 			// fn-arg convention; we drop our originating reference
@@ -947,14 +943,13 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
 		retTinPtr = block.NewExtractValue(rawRet, 0)
 	case "callback":
-		// rawRet is the Tin fat fn-ptr {fn, env}. We OWN one ARC ref on
-		// env (Tin convention for fat-fn-ptr returns); transfer it to
-		// the trampoline (no retain, no release here -
-		// tin_interop_closure_free will release env when the user frees
-		// the trampoline). Pass the raw fn pointer to the dispatcher,
-		// which reads (fn, env) back out of the trampoline slot.
+		// rawRet is the 4-slot Tin fat fn-ptr {sync, colored, coro, env}.
+		// C trampolines can't run coros -- pull the non-colored sync
+		// variant (slot 0).  We OWN one ARC ref on env (Tin convention
+		// for fat-fn-ptr returns); transfer it to the trampoline.  The
+		// dispatcher reads (fn, env) back out of the trampoline slot.
 		fnRaw := block.NewExtractValue(rawRet, 0)
-		envRaw := block.NewExtractValue(rawRet, 1)
+		envRaw := block.NewExtractValue(rawRet, 3)
 
 		fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
 
@@ -2015,8 +2010,18 @@ func (cg *CodeGen) ensureRuntimeInitOnce() *ir.Func {
 func (cg *CodeGen) ensureMakeTrampoline() *ir.Func {
 	const name = "tin_make_trampoline"
 
+	// Cached field is the source of truth across all scopes -- multiple
+	// call paths into this helper (interop return-fn, callback args)
+	// previously each declared their own and produced a duplicate
+	// `declare` in the final IR, which `opt` rejected.
+	if cg.makeTrampolineFn != nil {
+		return cg.makeTrampolineFn
+	}
+
 	if entry, ok := cg.curScope.lookup(name); ok {
 		if f, isFn := entry.val.(*ir.Func); isFn {
+			cg.makeTrampolineFn = f
+
 			return f
 		}
 	}
@@ -2026,6 +2031,7 @@ func (cg *CodeGen) ensureMakeTrampoline() *ir.Func {
 		ir.NewParam("env", irtypes.I8Ptr),
 		ir.NewParam("dispatcher", irtypes.I8Ptr))
 	cg.curScope.set(name, &scopeEntry{val: f, isAlloc: false})
+	cg.makeTrampolineFn = f
 
 	return f
 }

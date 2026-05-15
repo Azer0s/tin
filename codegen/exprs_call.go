@@ -6,6 +6,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -115,22 +116,34 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
-		// Built-in: len(expr)
+		// Built-in: len(expr).  Skipped when a user binding shadows the
+		// name in lexical scope -- the binding wins (matches sourcepos).
+		// Pre-fix the builtin always won and the user's `let len = ...`
+		// was silently dead.
 		if fn.Name == "len" && len(e.Args) == 1 {
-			return cg.genBuiltinLen(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("len"); !shadowed {
+				return cg.genBuiltinLen(block, e.Args[0])
+			}
 		}
-		// Built-in: panic(msg)
+		// Built-in: panic(msg).  Same shadowing rule.
 		if fn.Name == "panic" && len(e.Args) == 1 {
-			return cg.genBuiltinPanic(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("panic"); !shadowed {
+				return cg.genBuiltinPanic(block, e.Args[0])
+			}
 		}
-		// Built-in: recover() - retrieve panic message from deferred function.
+		// Built-in: recover().  Same shadowing rule.
 		if fn.Name == "recover" && len(e.Args) == 0 {
-			return cg.genBuiltinRecover(block)
+			if _, shadowed := cg.curScope.lookup("recover"); !shadowed {
+				return cg.genBuiltinRecover(block)
+			}
 		}
 		// Built-in: default(TypeName) - returns the zero value for a type.
 		// Used in generic code to produce a typed zero without knowing the concrete type.
+		// Same shadowing rule.
 		if fn.Name == "default" && len(e.Args) == 1 {
-			return cg.genBuiltinDefault(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("default"); !shadowed {
+				return cg.genBuiltinDefault(block, e.Args[0])
+			}
 		}
 		// Built-in: sourcepos(symbol_or_expr) - returns the atom for
 		// "<name>@<file>:<line>:<col>" (identifier arg) or
@@ -269,7 +282,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				// Adapt args if needed and call.
 				preCoerceVals := argVals
 				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
-				result := block.NewCall(concreteFunc, argVals...)
+				result := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
 				// ARC: release temporary RC-tracked arguments (same as regular call path).
 				for i, astArg := range e.Args {
 					if i >= len(preCoerceVals) {
@@ -405,7 +418,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			callee = loaded
 		} else {
-			callee = entry.val
+			// Route to the $colored variant of the callee when emitting
+			// inside a cooperative body ($coro or $colored).  See
+			// docs/internals/fn-coloring.md "Call routing".  Falls
+			// through to the plain sync entry when no colored variant
+			// was emitted for the callee (callee not in coloredCallable
+			// or its body was elided).
+			callee = cg.resolveColoredCallee(fn.Name, entry.val)
 		}
 
 	case *ast.FieldAccess:
@@ -532,7 +551,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					preCoerceVals := append([]value.Value(nil), llArgs...)
 					llArgs = cg.adaptArgs(block, llArgs, f.Sig)
 
-					result := block.NewCall(f, llArgs...)
+					result := block.NewCall(cg.resolveColoredFn(f), llArgs...)
 
 					for i, astArg := range e.Args {
 						if i >= len(preCoerceVals) || i >= len(llArgs) {
@@ -555,6 +574,20 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		objVal, err := cg.genExpr(block, fn.Expr)
 		if err != nil {
 			return nil, err
+		}
+		// genExpr on a CallExpr receiver may have split the block
+		// (e.g. a heavy/recursive call inside a $coro or $colored body
+		// emits a pre-call yield via genCallSiteYieldFor and advances
+		// cg.curBlock).  Refresh `block` so subsequent emits land
+		// downstream of the split instead of in the original block,
+		// which is now terminated.  Without this refresh, the IR
+		// verifier reports "missing terminator" on the yield's
+		// `afterBlk` (the call landed there but nothing else did) or
+		// "instruction does not dominate all uses" (later loads
+		// referenced %objVal but were emitted into the original block,
+		// not the block where %objVal was actually computed).
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
 		}
 
 		// -> operator: dereference the pointer-to-struct to get the struct value.
@@ -581,6 +614,17 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				result, err := cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
 				if err != nil {
 					return nil, cg.nodeErr(e, "%v", err)
+				}
+				// objVal owns rc=1 on the iface block when it was
+				// freshly allocated by the caller (fn returning
+				// *Trait, &Struct{...} expr literal, [*Trait]
+				// indexing returning the element).  Loads from a
+				// binding's alloca denote borrows; the binding's
+				// own scope-exit release handles the iface, so we
+				// must NOT release here.  Mirrors
+				// emitCallArgReleaseForRet's *Trait_iface path.
+				if _, isLoad := objVal.(*ir.InstLoad); !isLoad && !isCopyExpr(fn.Expr) {
+					cg.emitRelease(block, objVal)
 				}
 
 				return result, nil
@@ -765,7 +809,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				llArgs = append(llArgs, thisArg)
 				llArgs = append(llArgs, callArgs...)
 				llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
-				result := block.NewCall(concreteFunc, llArgs...)
+				result := block.NewCall(cg.resolveColoredFn(concreteFunc), llArgs...)
 				// ARC: release temporary RC-tracked call arguments (index 1+ in llArgs; 0 is this).
 				for i, astArg := range e.Args {
 					if i >= len(callArgs) || i+1 >= len(llArgs) {
@@ -893,6 +937,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			// Auto-yield before calling a heavy or recursive method.
 			block = cg.genCallSiteYieldFor(block, methodName)
+			// Route to $colored when emitting in cooperative context.
+			if f, ok := callee.(*ir.Func); ok {
+				callee = cg.resolveColoredFn(f)
+			}
 
 			result := block.NewCall(callee, llArgs...)
 			// ARC: release temporary RC-tracked args.
@@ -1367,7 +1415,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 					preCoerceVals := append([]value.Value(nil), argVals...)
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
-					result2 := block.NewCall(concreteFunc, argVals...)
+					result2 := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
 					// ARC: release temporary RC-tracked arguments.
 					for i, astArg := range e.Args {
 						if i >= len(preCoerceVals) {
@@ -1557,6 +1605,42 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				continue
 			}
+			// Tin fn -> C extern fn-ptr arg.  `tinTypeToExternLLVM`
+			// lowers a Tin `fn(...) T` param to `i8*` at the C ABI
+			// boundary (a raw C function pointer).  At the call site,
+			// we still have the fat-fn-ptr value; route it through
+			// `tin_make_trampoline` to produce a C-callable thunk
+			// that bakes in the closure env via the runtime
+			// register-stash mechanism.  Same mechanism as the
+			// `#interop` return-fn path at codegen/interop.go:970.
+			if isFatFnPtr(arg.Type()) && pt.Equal(irtypes.I8Ptr) {
+				wrapped, wrapErr := cg.wrapFatFnPtrAsCCallback(block, callee, i, arg, e)
+				if wrapErr != nil {
+					return nil, wrapErr
+				}
+
+				if wrapped != nil {
+					llArgs[i] = wrapped
+					continue
+				}
+			}
+			// Tin *fn(...) T -> C `fn_t *cbp` arg.  Lowered to `i8**`.
+			// Source is `&cb` (LLVM `*{fn(...), env}`).  Load the
+			// fat-fn-ptr, build the trampoline, store the trampoline
+			// `i8*` in a fresh stack slot, pass the slot's address.
+			if argPt, isPtr := arg.Type().(*irtypes.PointerType); isPtr {
+				if isFatFnPtr(argPt.ElemType) && pt.Equal(irtypes.NewPointer(irtypes.I8Ptr)) {
+					wrapped, wrapErr := cg.wrapFatFnPtrAddrAsCCallbackPtr(block, callee, i, arg, e)
+					if wrapErr != nil {
+						return nil, wrapErr
+					}
+
+					if wrapped != nil {
+						llArgs[i] = wrapped
+						continue
+					}
+				}
+			}
 
 			if cg.argTypeImplicitlyOK(arg.Type(), pt) {
 				continue
@@ -1647,10 +1731,25 @@ func (cg *CodeGen) argTypeImplicitlyOK(src, pt irtypes.Type) bool {
 			}
 		}
 	}
-	// Raw C-pointer / fat-ptr extraction shims.
-	if _, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
-		if _, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
-			return true
+	// Raw C-pointer / fat-ptr extraction shims.  This was previously
+	// "any *X -> any *Y is OK", which silently accepted unrelated
+	// pointer types of matching shape (e.g. `*B` passed where `*A`
+	// was expected -- both end up i64-sized and the runtime memcpy
+	// would be UB if the field layouts diverge).  Tighten to: only
+	// allow when one side is the opaque `*i8` (void* / raw handle)
+	// or when the pointees match.  Cross-type pointer casts must be
+	// spelled explicitly with `as *T` so the author opts in.
+	if srcPt, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
+		if tgtPt, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
+			// Equal pointees: trivially compatible.
+			if srcPt.ElemType.Equal(tgtPt.ElemType) {
+				return true
+			}
+			// Either side opaque `i8*` / `*void`: ABI-compatible by
+			// design (used for C handles, generic raw buffers).
+			if srcPt.ElemType.Equal(irtypes.I8) || tgtPt.ElemType.Equal(irtypes.I8) {
+				return true
+			}
 		}
 	}
 
@@ -2047,6 +2146,72 @@ func indexMissMessage(e *ast.IndexExpr) string {
 		pos.Line, pos.Col)
 }
 
+// resolveColoredCallee picks the $colored variant of a callee when
+// the current body is in cooperative context (cg.inCoroFn -- true
+// inside $coro and $colored emissions) and the callee has a $colored
+// variant available in scope.  Falls through to the plain callee
+// otherwise.  Used at the named-call site in genCallExpr.
+//
+// The colored variant has the same signature as the plain sync entry
+// (returns T, takes the same params), so the surrounding call-emission
+// machinery (arity check, arg coerce, retain/release) is unaffected.
+func (cg *CodeGen) resolveColoredCallee(name string, fallback value.Value) value.Value {
+	// Cooperative context covers both $coro bodies (inCoroFn) and
+	// $colored bodies (curFnColoredSync).  Plain sync bodies (neither
+	// flag set) stay on the plain callee -- they aren't running on a
+	// fiber and yields would have nowhere to suspend to.
+	if !cg.inCoroFn && !cg.curFnColoredSync {
+		return fallback
+	}
+	// Don't redirect calls to coroutine variants (they have a
+	// different signature -- return i8* hdl) or other special
+	// symbols.
+	if strings.HasSuffix(name, "$coro") || strings.HasSuffix(name, "$colored") {
+		return fallback
+	}
+
+	coloredName := coloredVersionName(name)
+	if entry, ok := cg.curScope.lookup(coloredName); ok {
+		// Body-presence check (`len(f.Blocks) > 0`) -- a declaration-only
+		// stub would link to nothing.  Package fns are codegenned before
+		// colorCallGraph runs, so their `<name>$colored` may be
+		// predeclared but never gain a body.  Falling back to the plain
+		// sync callee preserves correctness (cooperation is lost for
+		// that specific call, but no link failure).
+		if f, isFn := entry.val.(*ir.Func); isFn && len(f.Blocks) > 0 {
+			return f
+		}
+	}
+
+	return fallback
+}
+
+// resolveColoredFn is the *ir.Func-keyed version of resolveColoredCallee,
+// used at method/static-call sites where the callee has already been
+// resolved to an IR function rather than by AST identifier.  Returns the
+// $colored variant when cooperative context + sig match; the original
+// fn otherwise.
+func (cg *CodeGen) resolveColoredFn(f *ir.Func) *ir.Func {
+	if f == nil {
+		return f
+	}
+
+	if !cg.inCoroFn && !cg.curFnColoredSync {
+		return f
+	}
+
+	name := f.Name()
+	if strings.HasSuffix(name, "$coro") || strings.HasSuffix(name, "$colored") {
+		return f
+	}
+
+	if colored := cg.lookupColoredVariant(f); colored != nil {
+		return colored
+	}
+
+	return f
+}
+
 // structNameForReceiver returns the named-struct identifier when t is a
 // struct or *Struct. Returns "" for any other shape. Used to drive
 // op-trait dispatch (::index, ::index_set) on receivers that can be
@@ -2061,4 +2226,210 @@ func (cg *CodeGen) structNameForReceiver(t irtypes.Type) string {
 	}
 
 	return ""
+}
+
+// getOrCreateCFnShimFromLLVM returns (creating on first use) a
+// per-signature shim that bridges a raw C function pointer into the
+// Tin fat-fn-ptr ABI.  Shim signature matches the fat-fn-ptr's inner
+// `fn(i8* env, params...) ret`; the env points at a small RC block
+// laid out as {i8* dtor=null, i8* c_fn_ptr}.  The shim loads c_fn_ptr
+// from env+8, bitcasts to the C function type, and calls through it
+// (dropping the Tin-side env arg).  The env block is allocated via
+// _tin_rc_alloc so the standard fat-fn-ptr release path
+// (_tin_release_closure) frees it correctly.  Keyed by LLVM signature
+// so multiple externs returning the same fn shape share one shim.
+// Used by wrapFromExtern when an extern's `fn(...) T` return needs
+// lifting back into a Tin fat-fn-ptr value.
+func (cg *CodeGen) getOrCreateCFnShimFromLLVM(fatStruct *irtypes.StructType) *ir.Func {
+	innerFnPtrTy := fatStruct.Fields[0].(*irtypes.PointerType)
+	innerFnTy := innerFnPtrTy.ElemType.(*irtypes.FuncType)
+
+	// The Tin inner fn has env as first param, then the actual params.
+	// The C fn type drops env and keeps the rest.
+	tinParamTypes := innerFnTy.Params[1:]
+
+	key := callbackSigKey(innerFnTy.RetType, tinParamTypes)
+
+	if cg.cFnShims == nil {
+		cg.cFnShims = make(map[string]*ir.Func)
+	}
+
+	if f, ok := cg.cFnShims[key]; ok {
+		return f
+	}
+
+	shimName := "__tin_c_fn_shim_" + key
+
+	envParam := ir.NewParam("env", irtypes.I8Ptr)
+	shimParams := []*ir.Param{envParam}
+
+	for i, t := range tinParamTypes {
+		shimParams = append(shimParams, ir.NewParam(fmt.Sprintf("a%d", i), t))
+	}
+
+	shim := cg.mod.NewFunc(shimName, innerFnTy.RetType, shimParams...)
+	shim.Linkage = enum.LinkageInternal
+
+	tb := shim.NewBlock("entry")
+	// Load the C fn ptr from env+8 (env layout: {dtor=null, c_fn_ptr}).
+	// Offset 0 is the destructor slot _tin_release_closure invokes when
+	// the block's RC hits zero; null means no extra cleanup.
+	envI8Slot := tb.NewGetElementPtr(irtypes.I8, envParam,
+		constant.NewInt(irtypes.I32, 8))
+	envCFnPtrSlot := tb.NewBitCast(envI8Slot, irtypes.NewPointer(irtypes.I8Ptr))
+	cFnRaw := tb.NewLoad(irtypes.I8Ptr, envCFnPtrSlot)
+
+	cFnTy := irtypes.NewFunc(innerFnTy.RetType, tinParamTypes...)
+	cFnPtr := tb.NewBitCast(cFnRaw, irtypes.NewPointer(cFnTy))
+
+	callArgs := make([]value.Value, 0, len(shimParams)-1)
+	for _, p := range shimParams[1:] {
+		callArgs = append(callArgs, p)
+	}
+
+	result := tb.NewCall(cFnPtr, callArgs...)
+
+	if irtypes.IsVoid(innerFnTy.RetType) {
+		tb.NewRet(nil)
+	} else {
+		tb.NewRet(result)
+	}
+
+	cg.cFnShims[key] = shim
+
+	return shim
+}
+
+// wrapFatFnPtrAddrAsCCallbackPtr handles a Tin source like `&cb`
+// (pointer to a fat-fn-ptr local) flowing into a C extern param
+// typed `i8**` (pointer to a raw C fn ptr).  Loads the fat-fn-ptr,
+// builds the trampoline, stores the trampoline `i8*` in a fresh
+// stack slot, and returns the slot's address.  The C side calls
+// `(*cbp)(args)` to deref the slot, get the trampoline, and call
+// through it (env is baked in by tin_make_trampoline).
+//
+// Returns (nil, nil) when the wrap doesn't apply (e.g. callee AST
+// unavailable, param shape not a `*fn(...)`).
+func (cg *CodeGen) wrapFatFnPtrAddrAsCCallbackPtr(
+	block *ir.Block,
+	callee value.Value,
+	paramIdx int,
+	arg value.Value,
+	callExpr *ast.CallExpr,
+) (value.Value, error) {
+	calleeFn, ok := callee.(*ir.Func)
+	if !ok {
+		return nil, nil
+	}
+
+	calleeName := calleeFn.Name()
+	if stripped := strings.TrimPrefix(calleeName, "__tinwrap_"); stripped != calleeName {
+		calleeName = stripped
+	}
+
+	decl, ok := cg.funcDecls[calleeName]
+	if !ok || decl == nil || paramIdx >= len(decl.Params) {
+		return nil, nil
+	}
+
+	pt, ok := decl.Params[paramIdx].Type.(*ast.PointerType)
+	if !ok {
+		return nil, nil
+	}
+
+	ft, ok := pt.Elem.(*ast.FuncType)
+	if !ok {
+		return nil, nil
+	}
+
+	disp, err := cg.getOrCreateClosureDispatcher(ft)
+	if err != nil {
+		return nil, cg.nodeErr(callExpr,
+			"argument %d to extern %q: cannot build closure dispatcher for %s: %v",
+			paramIdx+1, calleeFn.Name(), fmtArgType(arg.Type()), err)
+	}
+
+	argPt := arg.Type().(*irtypes.PointerType)
+	fatVal := block.NewLoad(argPt.ElemType, arg)
+
+	// C trampolines can't run coros -- pull the non-colored sync variant (slot 0).
+	fnRaw := block.NewExtractValue(fatVal, 0)
+	envRaw := block.NewExtractValue(fatVal, 3)
+	fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
+	dispI8 := block.NewBitCast(disp, irtypes.I8Ptr)
+
+	// See `wrapFatFnPtrAsCCallback` for the retain rationale.
+	block.NewCall(cg.ensureRetain(), envRaw)
+	trampoline := block.NewCall(cg.ensureMakeTrampoline(), fnI8, envRaw, dispI8)
+
+	slot := block.NewAlloca(irtypes.I8Ptr)
+	block.NewStore(trampoline, slot)
+
+	return slot, nil
+}
+
+// wrapFatFnPtrAsCCallback converts a Tin fat-fn-ptr argument value
+// into a C-callable function pointer (i8*) suitable for an extern's
+// raw-C-fn-ptr param.  Mirrors codegen/interop.go's #interop return-fn
+// path: extract {fn, env} from the fat-ptr, get-or-create a
+// per-signature dispatcher, hand off to `tin_make_trampoline` which
+// returns a runtime-synthesized thunk that bakes env into x16/r10 at
+// invocation time.
+//
+// Returns (nil, nil) when the callee's AST is unavailable or doesn't
+// describe a fn-typed param at index i (e.g. variadic slot, generic);
+// the caller falls back to its standard implicit-coerce check, which
+// will produce a clean diagnostic if the shape really is wrong.
+func (cg *CodeGen) wrapFatFnPtrAsCCallback(
+	block *ir.Block,
+	callee value.Value,
+	paramIdx int,
+	arg value.Value,
+	callExpr *ast.CallExpr,
+) (value.Value, error) {
+	calleeFn, ok := callee.(*ir.Func)
+	if !ok {
+		return nil, nil
+	}
+	// Look up the Tin AST decl to recover the original `fn(...) T`
+	// type of the param.  Tin-side extern call sites resolve to the
+	// `__tinwrap_<name>` wrapper rather than the bare extern symbol
+	// (see funcs.go:1847 -- the wrapper marshals struct / fn / string
+	// arg types).  Strip the prefix so the funcDecls lookup hits.
+	calleeName := calleeFn.Name()
+	if stripped := strings.TrimPrefix(calleeName, "__tinwrap_"); stripped != calleeName {
+		calleeName = stripped
+	}
+
+	decl, ok := cg.funcDecls[calleeName]
+	if !ok || decl == nil || paramIdx >= len(decl.Params) {
+		return nil, nil
+	}
+
+	ft, ok := decl.Params[paramIdx].Type.(*ast.FuncType)
+	if !ok {
+		return nil, nil
+	}
+
+	disp, err := cg.getOrCreateClosureDispatcher(ft)
+	if err != nil {
+		return nil, cg.nodeErr(callExpr,
+			"argument %d to extern %q: cannot build closure dispatcher for %s: %v",
+			paramIdx+1, calleeFn.Name(), fmtArgType(arg.Type()), err)
+	}
+
+	// C trampolines can't run coros -- pull the non-colored sync variant (slot 0).
+	fnRaw := block.NewExtractValue(arg, 0)
+	envRaw := block.NewExtractValue(arg, 3)
+	fnI8 := block.NewBitCast(fnRaw, irtypes.I8Ptr)
+	dispI8 := block.NewBitCast(disp, irtypes.I8Ptr)
+
+	// Retain env: `tin_make_trampoline` transfers one ARC ref to the
+	// trampoline (released by `atexit_release_all_pages` at process
+	// exit, or `tin_interop_closure_free` mid-life).  The source
+	// fat-fn-ptr (an arg, not a return) still owns its own ref --
+	// without a retain here, atexit's release would double-free.
+	block.NewCall(cg.ensureRetain(), envRaw)
+
+	return block.NewCall(cg.ensureMakeTrampoline(), fnI8, envRaw, dispI8), nil
 }

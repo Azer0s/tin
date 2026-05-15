@@ -1,0 +1,11 @@
+// -Wbare-parking-async-call fires when a fn{#async} whose body
+// transitively reaches a known-parking primitive is bare-called.
+use sync
+
+fn{#async} drain(ch sync::Channel[i64]) i64 =
+  return await ch.recv()
+
+fn main() =
+  let ch = sync::Channel[i64].make(1)
+  await ch.send(42)
+  let _ = drain(ch)

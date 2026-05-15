@@ -343,7 +343,7 @@ fn repeat_char(c char, n i64) string =
   let i i64 = 0
 
   for i < n:
-    buf ++= (c as byte)
+    buf ++= [c as byte]
     i = i + 1
 
   return buf as string

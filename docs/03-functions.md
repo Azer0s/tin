@@ -312,7 +312,7 @@ fn map[t, r](f fn(i t) r) fn([t]) [r] =
   return fn(list [t]) [r] =
     let res [r] = []
     for let i t in list:
-      res ++= f(i)
+      res ++= [f(i)]
     return res
 ```
 
@@ -629,7 +629,7 @@ fn filter[t](f fn(i t) bool) fn([t]) [t] =
     let res [t] = []
     for let i t in list:
       if f(i):
-        res ++= i
+        res ++= [i]
     return res
 
 fn reduce[t, r](f fn(acc r, i t) r, init r) fn([t]) r =

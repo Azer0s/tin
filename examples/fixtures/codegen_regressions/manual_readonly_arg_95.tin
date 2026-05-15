@@ -1,0 +1,24 @@
+// Regression: passing a Live alloc to a helper that READS the
+// pointer but doesn't free it must still trigger the leak
+// diagnostic.  Pre-fix the paramFrees map only got an entry for
+// fns that actually called mem::free on a param, so a read-only
+// helper (`read_size`) looked indistinguishable from an extern
+// (no entry at all) -- and the conservative "unknown callee
+// might take ownership" branch marked the arg Escaped, silently
+// dropping the leak warning.
+//
+// Fix: seed an empty paramFrees entry for every analyzed fn so
+// the dataflow's call-site handler can tell "analyzed callee
+// that demonstrably frees nothing" from "unanalyzed callee".
+
+use mem
+
+fn read_size(p *void) i64 = return 8
+
+fn run() =
+  let p = mem::malloc(64)
+  let _ = read_size(p)
+  // p was just read by an analyzed helper; the alloc is still
+  // the caller's responsibility and must be flagged as leak.
+
+fn main() i64 = return 0

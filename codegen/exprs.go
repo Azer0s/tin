@@ -152,8 +152,24 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		return nil, cg.nodeErr(e, "try: not inside a function body")
 	}
 
-	errBlock := parentFn.NewBlock("try.err")
-	okBlock := parentFn.NewBlock("try.ok")
+	// Pair the two labels with a function-local counter (`try.0.err`,
+	// `try.0.ok`, `try.1.err`, ...) so two `try` sites in the same
+	// fn don't collide on the same block name (LLVM IR rejects
+	// duplicates with `opt: input module is broken`).  Counting
+	// existing `try.` blocks in this fn keeps numbering local --
+	// cg.labelCount alone would produce `try.err.500` style labels
+	// pulled from a CodeGen-global counter, which is ugly and
+	// shuffles when unrelated code elsewhere emits more blocks.
+	tryIdx := 0
+
+	for _, b := range parentFn.Blocks {
+		if strings.HasPrefix(b.LocalName, "try.") && strings.HasSuffix(b.LocalName, ".err") {
+			tryIdx++
+		}
+	}
+
+	errBlock := parentFn.NewBlock(fmt.Sprintf("try.%d.err", tryIdx))
+	okBlock := parentFn.NewBlock(fmt.Sprintf("try.%d.ok", tryIdx))
 
 	// is_err returns bool which Tin lowers to i1. CondBr expects i1.
 	cond := isErrVal
@@ -821,34 +837,27 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		return cg.genTryExpr(block, e)
 
 	case *ast.AwaitExpr:
-		// await expr - evaluates e.Future (which must be a Future[t] / Awaitable[t]).
+		// await expr -- evaluates e.Future, which must implement awaitable[t]
+		// (typically `Future[t]`).  Strict: the operand's type must be an
+		// awaitable; there is no auto-spawn-under-await sugar.  To wait on a
+		// user-declared `fn{#async} f() T`, write `await spawn f(args)` --
+		// `spawn` produces `Future[T]` and the await unwraps to T.
 		//
-		// Any rvalue that evaluates to an Awaitable[T] can be awaited:
-		//   await spawn fn(args)      - spawn returns Future[T]
-		//   await fetch()             - fetch() returns Future[T]
-		//   await f                   - f : Future[T] variable
-		//   await asyncFn(args)       - inline drive: no fiber allocation (inCoroFn only)
-		//
-		// Type rule: await is valid iff expr : Awaitable[T] (i.e. Future[T]).
-		// Calling a {#async} fn directly within a coroutine uses inline drive.
-		// {#async} direct call handling: `await asyncFn(args)` (no explicit spawn).
-		//
-		// Two cases based on calling context:
-		//   inCoroFn == true  -> inline drive: runs inner coro in this fiber's frame,
-		//                        no fiber allocation, direct park/unpark via runnext.
-		//   inCoroFn == false -> auto-spawn: wrap in synthetic SpawnExpr so the regular
-		//                        await-Future path takes over (e.g. sync wrapper body,
-		//                        or main() in non-async context).
+		// Optimisations that fire under coro context (cg.inCoroFn == true):
+		//   - Channel fast path: `await ch.recv()` / `await ch.send(v)` emit
+		//     the inline channel direct op, bypassing the sync wrapper and
+		//     its spawn.
+		//   - Inline-drive: `await spawn fn(args)` where fn has a `$coro`
+		//     variant drives the inner coroutine in the caller's own frame
+		//     instead of allocating a fresh fiber.
 		futureExpr := e.Future
-		if callNode, ok := e.Future.(*ast.CallExpr); ok {
-			if cg.inCoroFn {
-				// Channel fast path: `await ch.recv()` and `await ch.send(v)`
-				// short-circuit the outer sync wrapper (which returns a
-				// `Future[T]` constructed via `spawn this.{recv,send}_impl`)
-				// and emit the inline channel op directly, returning T to
-				// the caller's coro frame.  Without this, every channel
-				// op would pay a fiber spawn + join even when the inner
-				// `_impl` body is inline-drive eligible.
+		if cg.inCoroFn {
+			// Channel fast path: `await ch.recv()` / `await ch.send(v)`
+			// short-circuit the outer sync wrapper (which returns a
+			// `Future[T]` constructed via `spawn this.{recv,send}_impl`)
+			// and emit the inline channel op directly, returning T to
+			// the caller's coro frame.
+			if callNode, ok := e.Future.(*ast.CallExpr); ok {
 				if result, ok2, driveErr := cg.tryChannelWrapperFastPath(block, callNode); ok2 {
 					if driveErr != nil {
 						return nil, driveErr
@@ -856,42 +865,31 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 
 					return result, nil
 				}
-
-				// Inside a coroutine: try zero-cost inline drive.
-				result, driveErr := cg.genInlineAsyncDrive(block, callNode)
-				if driveErr != nil {
-					return nil, driveErr
-				}
-
-				if result != nil {
-					return result, nil
-				}
-				// (nil, nil) -> callee $coro not in scope yet; fall through to auto-spawn.
 			}
-			// Not in coroutine (or inline drive not available): auto-spawn if async.
-			if cg.directCallHasCoroVariant(callNode) {
-				futureExpr = &ast.SpawnExpr{Call: callNode}
-			} else {
-				// Check whether the callee evaluates to an async fat-ptr.
-				// Handles `await x(args)` and `await fns[i](args)`.
-				isAsyncFatPtrCallee := false
 
-				switch calleeNode := callNode.Func.(type) {
-				case *ast.Identifier:
-					// Variable of type fn{#async}(...): check scope.
-					if se, seOk := cg.curScope.lookup(calleeNode.Name); seOk && se.isAlloc {
-						if pt, ptOk := se.val.Type().(*irtypes.PointerType); ptOk && isAsyncFatFnPtr(pt.ElemType) {
-							isAsyncFatPtrCallee = true
+			// Inline-drive: `await spawn fn(args)` runs the inner coroutine
+			// in this fiber's own frame without allocating a fresh fiber.
+			// Gated on cg.stacktraceUsed: when the program reaches
+			// stacktrace(), inline-drive collapses two spawn-chain levels
+			// into one and breaks the parent-gen walk -- so we use the
+			// real spawn path (which captures caller IP + parent pid+gen
+			// at the spawn site) whenever stacktrace is observable.  In
+			// stacktrace-free programs the optimisation is sound and
+			// saves the fiber-frame allocation + scheduler handoff.
+			if !cg.stacktraceUsed {
+				if spawnNode, ok := e.Future.(*ast.SpawnExpr); ok {
+					if callNode, ok2 := spawnNode.Call.(*ast.CallExpr); ok2 {
+						result, driveErr := cg.genInlineAsyncDrive(block, callNode)
+						if driveErr != nil {
+							return nil, driveErr
 						}
-					}
-				case *ast.IndexExpr:
-					// fns[i](args) where fns: [fn{#async}(...)].
-					// Let genSpawnExpr evaluate and decide; mark as candidate.
-					isAsyncFatPtrCallee = true
-				}
 
-				if isAsyncFatPtrCallee {
-					futureExpr = &ast.SpawnExpr{Call: callNode}
+						if result != nil {
+							return result, nil
+						}
+						// (nil, nil) -> callee $coro not in scope; fall through
+						// to the standard spawn+await path below.
+					}
 				}
 			}
 		}
@@ -1582,6 +1580,39 @@ func (cg *CodeGen) genMatchAsExpr(block *ir.Block, s *ast.MatchStmt) (value.Valu
 	return afterBlock.NewLoad(resType, resAlloca), nil
 }
 
+// isKnownTypeName returns true when name resolves to a primitive,
+// struct, trait, union, data, or generic type registered in this
+// codegen.  Used by genIdentifier to emit a sharper error when the
+// user wrote a type name in expression position (e.g. `case T:` in a
+// match arm) -- the redirect points them at `match scrutinee.(type)`.
+func (cg *CodeGen) isKnownTypeName(name string) bool {
+	switch name {
+	case "i8", "i16", "i32", "i64", "i128",
+		"u8", "u16", "u32", "u64", "u128",
+		"f32", "f64", "f128",
+		"bool", "byte", "char", "string", "atom", "any", "void":
+		return true
+	}
+
+	if _, ok := cg.structTypeIDs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.unionTypeIDs[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.traitInstKeys[name]; ok {
+		return true
+	}
+
+	if _, ok := cg.dataTypeIDs[name]; ok {
+		return true
+	}
+
+	return false
+}
+
 func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Value, error) {
 	entry, ok := cg.curScope.lookup(e.Name)
 	if !ok {
@@ -1590,6 +1621,18 @@ func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Valu
 			return nil, err
 		} else if v != nil {
 			return v, nil
+		}
+		// Common confusion: the user wrote `case T:` in a match arm,
+		// thinking T is a pattern that matches values of type T.  The
+		// match parser treats T as an expression (since it has no `is`
+		// keyword) so we end up here.  Detect known type names and
+		// redirect to the `match a.(type)` form Tin uses for runtime
+		// type matching.
+		if cg.isKnownTypeName(e.Name) {
+			return nil, cg.nodeErr(e,
+				"`%s` is a type, not a value -- to match by type, write "+
+					"`match <scrutinee>.(type)` (the case arms then bind the "+
+					"matched type, e.g. `case x i64: ...`)", e.Name)
 		}
 
 		return nil, cg.nodeErr(e, "undefined identifier: %s", e.Name)
@@ -1922,6 +1965,27 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		} else if isStringType(right.Type()) && irtypes.IsInt(left.Type()) && left.Type().(*irtypes.IntType).BitSize == 8 {
 			left = byteToStringFatPtr(block, left)
 			leftCoerced = true
+		}
+		// `++` is slice-slice concat (mirrors `++=`).  String ++ byte is
+		// handled above; everything else requires both sides to be the
+		// same fat-array (or string) type.  Without this check,
+		// `[1, 2] ++ 3` silently fell into the array path and produced
+		// garbage IR (insertvalue/extractvalue with a non-fat-ptr RHS).
+		leftIsArr := isFatArrayPtr(left.Type()) && !isStringType(left.Type())
+		rightIsArr := isFatArrayPtr(right.Type()) && !isStringType(right.Type())
+
+		if leftIsArr != rightIsArr {
+			return nil, cg.nodeErr(e,
+				"`++` is slice concat: both sides must be the same slice "+
+					"type, got %s ++ %s. To prepend or append a single value, "+
+					"wrap it as a one-element slice: `[v] ++ xs` or `xs ++ [v]`",
+				fmtArgType(left.Type()), fmtArgType(right.Type()))
+		}
+
+		if leftIsArr && rightIsArr && !left.Type().Equal(right.Type()) {
+			return nil, cg.nodeErr(e,
+				"`++` requires matching slice element types, got %s ++ %s",
+				fmtArgType(left.Type()), fmtArgType(right.Type()))
 		}
 		// Typed array concatenation: {T*, i64} ++ {T*, i64} -> {T*, i64}
 		// (strings {i8*, i64} are handled by the string path below)

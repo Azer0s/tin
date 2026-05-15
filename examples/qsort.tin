@@ -18,18 +18,18 @@ fn qsort(arr [i64]) [i64] =
 
     for let x i64 in rest:
       if x < pivot:
-        left ++= x
+        left ++= [x]
       else:
-        right ++= x
+        right ++= [x]
 
     let result [i64] = []
 
     for let x i64 in qsort(left):
-      result ++= x
-    result ++= pivot
+      result ++= [x]
+    result ++= [pivot]
 
     for let x i64 in qsort(right):
-      result ++= x
+      result ++= [x]
 
     return result
 

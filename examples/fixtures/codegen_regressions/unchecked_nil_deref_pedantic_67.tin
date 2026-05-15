@@ -1,0 +1,8 @@
+// Regression: -Wunchecked-nil-deref (pedantic) fires on a *p
+// dereference when the dataflow pass cannot prove p is non-nil.
+// Complement to -Wderef-nil (which fires only when p is proven nil).
+
+fn maybe(p *i64) i64 =
+  return *p
+
+fn main() i64 = return 0

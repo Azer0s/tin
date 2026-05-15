@@ -705,7 +705,7 @@ fn parse_array(p *Parser) *Value =
 
   for !p.at_end():
     p.skip_ws()
-    items ++= parse_value(p)
+    items ++= [parse_value(p)]
     p.skip_ws()
 
     if p.at_end():
@@ -744,8 +744,8 @@ fn parse_object(p *Parser) *Value =
     if !p.at_end() && p.peek() == @':':
       p.advance()
     p.skip_ws()
-    kkeys ++= key
-    items ++= parse_value(p)
+    kkeys ++= [key]
+    items ++= [parse_value(p)]
     p.skip_ws()
 
     if p.at_end():

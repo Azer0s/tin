@@ -2361,6 +2361,29 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 //
 // instKey is the unique suffix, e.g. "animal" for fn foo[t] with t->animal.
 // typeSubst maps type-param names to concrete struct names: {"t": "animal"}.
+// parseConcreteSubstName turns the string form of an inferred type
+// (e.g. "i64", "Show", "*Foo", "**Bar") into a structural ast.TypeExpr.
+// Leading `*` runs become nested *ast.PointerType wrappers around an
+// inner *ast.SimpleType; anything else lands as a bare SimpleType.
+// Used by monomorphizeFunc to expand `typeSubst[T] = "*Show"` into a
+// well-formed `*Show` (PointerType -> SimpleType) so the type
+// resolver sees structural pointer-ness rather than a SimpleType
+// whose name happens to start with `*`.
+func parseConcreteSubstName(name string) ast.TypeExpr {
+	stars := 0
+
+	for stars < len(name) && name[stars] == '*' {
+		stars++
+	}
+
+	var t ast.TypeExpr = &ast.SimpleType{Name: name[stars:]}
+	for i := 0; i < stars; i++ {
+		t = &ast.PointerType{Elem: t}
+	}
+
+	return t
+}
+
 func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubst map[string]string) (*ir.Func, error) {
 	irName := tmpl.Name + "__" + instKey
 	// Disambiguate generic free-fn overloads that share a base name + type
@@ -2398,10 +2421,18 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 		}
 	}
 
-	// Build ast.TypeExpr substitution map.
+	// Build ast.TypeExpr substitution map.  Most concrete names are
+	// bare struct / primitive names that wrap straight into a
+	// SimpleType, but inference for `[*Trait]` / `[*Struct]` element
+	// types now records the pointer prefix in `concrete` (e.g.
+	// `*Show`) so the substituted type carries the indirection.  Parse
+	// the leading `*` runs into nested PointerType wrappers so the
+	// resolver sees a well-formed `*T` type expression rather than a
+	// SimpleType whose name starts with `*` (which the resolver would
+	// flag as an unknown identifier).
 	astSubst := make(map[string]ast.TypeExpr, len(typeSubst))
 	for param, concrete := range typeSubst {
-		astSubst[param] = &ast.SimpleType{Name: concrete}
+		astSubst[param] = parseConcreteSubstName(concrete)
 	}
 
 	// Substitute params.
@@ -2581,7 +2612,23 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 				if name == "" {
 					if ptr, ok2 := argType.(*irtypes.PointerType); ok2 {
 						if st2, ok3 := ptr.ElemType.(*irtypes.StructType); ok3 {
-							name = st2.Name()
+							// `*StructName` -- preserve the pointer
+							// indirection in the substitution.
+							// Pre-fix this returned just `StructName`
+							// (value type) so a generic over
+							// `[*Foo]` instantiated as `T = Foo`,
+							// reading values out at the wrong type;
+							// for trait fat-pointer types
+							// (`*Show_iface`) it also produced an
+							// un-resolvable raw `Show_iface` SimpleType
+							// in the monomorphized signature.
+							inner := st2.Name()
+
+							if isTraitFatPtrShape(ptr.ElemType) && strings.HasSuffix(inner, "_iface") {
+								inner = strings.TrimSuffix(inner, "_iface")
+							}
+
+							name = "*" + inner
 						}
 					}
 				}

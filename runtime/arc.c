@@ -72,8 +72,16 @@ void _tin_release_fat_elem_array(void *data, int64_t count) {
     }
 }
 
+// Forward declaration; full definition appears below.  Required because
+// _tin_release_any_elem_array dispatches each element through it.
+void _tin_release_any(int32_t tag, void *data);
+
 // Release a fat array whose elements are `any` {i32 tag, void* ptr}.
-// Same RC-0 semantics as _tin_release_fat_elem_array.
+// Same RC-0 semantics as _tin_release_fat_elem_array.  Dispatches each
+// element through _tin_release_any (tag-aware) so inner ARC-tracked
+// content (string i8*, fat-array T*, fat-fn-ptr env) gets released
+// when its any data block hits RC=0.  Without this dispatch, the
+// inner content of every any element would leak when its block frees.
 void _tin_release_any_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
@@ -82,7 +90,9 @@ void _tin_release_any_elem_array(void *data, int64_t count) {
     if (prev == 1) {
         typedef struct { int32_t tag; void *ptr; } AnyElem;
         AnyElem *elems = (AnyElem *)data;
-        for (int64_t i = 0; i < count; i++) _tin_release(elems[i].ptr);
+        for (int64_t i = 0; i < count; i++) {
+            _tin_release_any(elems[i].tag, elems[i].ptr);
+        }
         free(hdr);
     }
 }
@@ -103,16 +113,17 @@ void _tin_release_closure(void *env) {
     }
 }
 
-// Release a fat array whose elements are closure fat pointers {fn_ptr*, i8* env}.
-// Decrements the outer RC; when RC=0, releases each element's env via
-// _tin_release_closure then frees the outer block.
+// Release a fat array whose elements are 4-slot fat-fn-ptrs
+// {coro*, colored*, sync*, i8* env}.  Decrements the outer RC; when RC=0,
+// releases each element's env via _tin_release_closure then frees the outer
+// block.
 void _tin_release_fn_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
     if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
     int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
     if (prev == 1) {
-        typedef struct { void *fn_ptr; void *env; } FnElem;
+        typedef struct { void *coro; void *colored; void *sync; void *env; } FnElem;
         FnElem *elems = (FnElem *)data;
         for (int64_t i = 0; i < count; i++) _tin_release_closure(elems[i].env);
         free(hdr);
@@ -195,10 +206,10 @@ void _tin_retain_fat_elems(void *data, int64_t count) {
 }
 
 // Retain each closure fat-pointer element in a [fn] slice.
-// Closure fat pointers are {fn_ptr*, i8* env}; the env (field 1) is ARC-managed.
+// Fat-fn-ptrs are {sync*, colored*, coro*, i8* env}; env (slot 3) is ARC-managed.
 void _tin_retain_fn_elems(void *data, int64_t count) {
     if (!data || count <= 0) return;
-    typedef struct { void *fn_ptr; void *env; } FnElem;
+    typedef struct { void *sync; void *colored; void *coro; void *env; } FnElem;
     FnElem *elems = (FnElem *)data;
     for (int64_t i = 0; i < count; i++) _tin_retain(elems[i].env);
 }
@@ -270,8 +281,9 @@ void *_tin_ptr_handover(void *src, size_t elem_size) {
 }
 
 // Release an `any` value whose tag is anyTagFn (5): the data block holds a
-// closure fat pointer {fn_ptr*, i8* env}.  Decrements the data RC; when RC
-// reaches 0 releases the env via _tin_release_closure then frees the block.
+// 4-slot fat-fn-ptr {sync*, colored*, coro*, i8* env}.  Decrements the data
+// RC; when RC reaches 0 releases env (slot 3) via _tin_release_closure then
+// frees the block.
 // For all other tags, behaves like _tin_release(data).
 // anyTagFn = 5 matches the constant in codegen/types.go.
 
@@ -309,9 +321,28 @@ void _tin_release_any(int32_t tag, void *data) {
     if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
     int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
     if (prev == 1) {
-        if (tag == 5) { /* anyTagFn */
-            void *env = *((void **)data + 1);
+        // The data block "owns" one reference to its inner ARC-tracked
+        // content (the box-as-any path retains the inner before storing
+        // it).  When the block hits RC=0 we release that owned ref so
+        // strings / closure envs nested inside an any don't leak.  Tag
+        // layout (matches codegen/types.go):
+        //   0=int, 1=float, 2=string, 3=bool, 4=ptr, 5=fn, 6+=struct
+        // Only tag=2 (string) and tag=5 (fn) carry an ARC-tracked
+        // inner that needs explicit release here -- int/float/bool/
+        // ptr/atom either carry no heap (primitives) or store a raw
+        // pointer that the caller's emitRetain/emitRelease handles via
+        // generic _tin_retain/_tin_release on the data ptr itself.
+        switch (tag) {
+        case 2: /* anyTagString -- release the i8* string ptr inside */
+            _tin_release(*(void **)data);
+            break;
+        case 5: { /* anyTagFn -- release the env (slot 3 of fat-fn-ptr) */
+            void *env = *((void **)data + 3);
             _tin_release_closure(env);
+            break;
+        }
+        default:
+            break;
         }
         free(hdr);
     }

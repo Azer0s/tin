@@ -888,7 +888,7 @@ func (cg *CodeGen) isBadFatPtrArithmetic(op string, lt, rt irtypes.Type) bool {
 //   - strings      {i8*, i64}           - ptr is either immortal (-1 sentinel) or rc-alloc'd
 //   - fat arrays   {T*,  i64}           - ptr is always rc-alloc'd
 //   - any          {i32, i8*}           - ptr is rc-alloc'd (boxed value)
-//   - fat fn ptrs  {fn(i8*,...)*, i8*}  - env (field 1) is rc-alloc'd (null for named-fn wrappers)
+//   - fat fn ptrs  {coro*, colored*, sync*, i8* env}  - env (field 3) is rc-alloc'd (null for named-fn wrappers)
 func isRCTrackedType(t irtypes.Type) bool {
 	return rcKindOf(t) != rcKindNone
 }
@@ -905,7 +905,7 @@ const (
 	rcKindNone       rcKind = 0 // no RC management needed
 	rcKindLeadingPtr rcKind = 1 // string / fat array / trait fat ptr / named struct ptr -- retain ptr at offset 0
 	rcKindAny        rcKind = 2 // any: {i32 tag, i8* ptr} -- release via _tin_release_any(tag, ptr@8)
-	rcKindFn         rcKind = 3 // fat fn ptr: {fn*, env*} -- release via _tin_release_closure(env@8)
+	rcKindFn         rcKind = 3 // fat fn ptr: {coro*, colored*, sync*, env*} -- release via _tin_release_closure(env@24)
 )
 
 // rcKindOf classifies an LLVM type by where its retainable pointer
@@ -994,6 +994,43 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 		cg.emitRelease(block, post)
 
 		return
+	}
+
+	// Trait-coerce / fresh-iface call argument: the parameter slot is
+	// `*Trait_iface` and the value flowing in is a freshly allocated
+	// iface block (heap-allocated by buildPtrToTraitBorrow or returned
+	// fresh from a callee that itself returns *Trait).  Without
+	// releasing the block after the callee returns, the iface leaks
+	// because *Trait_iface pointers are not classified as
+	// rc-tracked-leading-ptr -- isRCTrackedType / isFreshCallResult
+	// match on the iface STRUCT type, not the *iface_struct pointer
+	// shape we get when a fn returns or accepts a `*Trait`.
+	//
+	// Two arrival shapes trigger the release:
+	//
+	//   1. Call-site implicit coerce: pre's type is *Struct (or other
+	//      non-iface pointer), post's type is *Trait_iface.
+	//      buildPtrToTraitBorrow allocated the iface on the heap.
+	//   2. Same-iface-type but pre is a fresh SSA producer (an InstCall
+	//      returning *Trait, an InstBitCast of an _tin_rc_alloc, ...) --
+	//      i.e. NOT a load from a binding's alloca.  Loads from
+	//      bindings denote borrows; the binding's own scope-exit
+	//      release handles the iface.
+	if cg.isTraitFatPtrPtrType(post.Type()) {
+		if !cg.isTraitFatPtrPtrType(pre.Type()) {
+			cg.emitRelease(block, post)
+
+			return
+		}
+		// Same iface type: distinguish fresh allocation from a
+		// borrow.  Loads of an *iface pointer carry the borrow
+		// semantics; anything else (call result, bitcast of
+		// rc_alloc, ...) is fresh and must be released here.
+		if _, isLoad := pre.(*ir.InstLoad); !isLoad {
+			cg.emitRelease(block, post)
+
+			return
+		}
 	}
 
 	// `expr as Trait/string/...` lowers to a coerce[T] call returning
@@ -1538,9 +1575,9 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 	defer func() { cg.emittingARC = false }()
 
 	t := val.Type()
-	// Closure fat pointer: retain the env field (i8*). _tin_retain handles null env.
+	// Closure fat pointer: retain the env field (i8*, slot 3). _tin_retain handles null env.
 	if isFatFnPtr(t) {
-		envField := block.NewExtractValue(val, 1)
+		envField := block.NewExtractValue(val, 3)
 		block.NewCall(cg.ensureRetain(), envField)
 
 		return
@@ -1701,9 +1738,9 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 			return
 		}
 	}
-	// Closure fat pointer: release the env via _tin_release_closure (null-safe).
+	// Closure fat pointer: release the env (slot 3) via _tin_release_closure (null-safe).
 	if isFatFnPtr(t) {
-		envField := block.NewExtractValue(val, 1)
+		envField := block.NewExtractValue(val, 3)
 		block.NewCall(cg.ensureReleaseClosure(), envField)
 
 		return
@@ -1740,7 +1777,7 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 				}
 
 				if isFatFnPtr(elemType) {
-					// [fn]: closure env is at field 1 (offset 8)
+					// [fn]: closure env is slot 3 (offset 24) of {coro,colored,sync,env}
 					block.NewCall(cg.ensureReleaseFnElemArray(), dataPtrI8, length)
 
 					return

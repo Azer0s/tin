@@ -20,7 +20,7 @@ Syntax highlighting and language support for the [Tin programming language](../.
 
 ## Requirements
 
-- IntelliJ-based IDE (IntelliJ IDEA, GoLand, CLion, etc.) build 241–263
+- IntelliJ-based IDE (IntelliJ IDEA, GoLand, CLion, etc.) build 241-263
 - JDK 17+ to build from source
 
 ## Building

@@ -18,28 +18,60 @@ let x = nums[0]    // 1
 let y = nums[4]    // 5
 ```
 
-### Array append (`++=`)
+### Array concat-assign (`++=`)
 
-`++=` appends a single element to an array variable in place:
+`++=` extends an array variable in place with every element of another
+slice of the same element type.  The right-hand side must be a `[T]`
+matching the left -- to append a single value, wrap it as a one-element
+slice:
 
 ```rust
 let res [i64] = []
-res ++= 1
-res ++= 2
-res ++= 3
+res ++= [1]            // append one element
+res ++= [2, 3]         // append two elements
 // res is now [1, 2, 3]
+
+let more = [4, 5]
+res ++= more           // concat with another slice  -> [1, 2, 3, 4, 5]
 ```
+
+Passing a bare element (`res ++= 1`) is a compile error.  The diagnostic
+points to the wrap fix:
+
+```
+error: `++=` expects a `[i64]` on the right-hand side; got i64.
+       `++=` is concat-assign (not append-one) -- to append a single
+       value, wrap it: `xs ++= [v]`
+```
+
+The strict shape catches a class of silent bugs (e.g. `xs ++= [v]` on
+`xs : [any]` used to box the whole `[v]` slice as one `any` element,
+leaking memory and giving surprising semantics).  Concat-assign with
+matching slice types has no such ambiguity.
 
 ### Array concatenation (`++`)
 
-`++` creates a new array by joining two arrays or an array and an element:
+`++` creates a new array by joining two arrays of matching element
+type.  Both sides must be slices of the same element type -- to
+prepend or append a single value, wrap it as a one-element slice
+(symmetric with `++=`):
 
 ```rust
 let a = [1, 2, 3]
 let b = [4, 5]
-let c = a ++ b     // [1, 2, 3, 4, 5]
+let c = a ++ b          // [1, 2, 3, 4, 5]
+let d = a ++ [99]       // [1, 2, 3, 99]
+let e = [0] ++ a        // [0, 1, 2, 3]
 
 let s = "Hello" ++ ", world!"   // string concatenation works the same way
+```
+
+Mismatched shapes produce a clear error:
+
+```
+error: `++` is slice concat: both sides must be the same slice
+       type, got [i64] ++ i64. To prepend or append a single value,
+       wrap it as a one-element slice: `[v] ++ xs` or `xs ++ [v]`
 ```
 
 ### Iterating arrays

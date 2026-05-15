@@ -55,7 +55,7 @@ test "for rune in ascii" =
   let codes [i64] = []
 
   for r rune in s:
-    codes ++= r as i64
+    codes ++= [r as i64]
   assert::equals(len(codes), 5)
   assert::equals(codes[0], 104)
   assert::equals(codes[4], 111)
@@ -66,7 +66,7 @@ test "for rune in 2-byte sequence" =
   let codes [i64] = []
 
   for r rune in s:
-    codes ++= r as i64
+    codes ++= [r as i64]
   assert::equals(len(codes), 1)
   assert::equals(codes[0], 0xE4)
 
@@ -76,7 +76,7 @@ test "for rune in 3-byte sequence" =
   let codes [i64] = []
 
   for r rune in s:
-    codes ++= r as i64
+    codes ++= [r as i64]
   assert::equals(len(codes), 1)
   assert::equals(codes[0], 0x20AC)
 
@@ -86,7 +86,7 @@ test "for rune in 4-byte sequence" =
   let codes [i64] = []
 
   for r rune in s:
-    codes ++= r as i64
+    codes ++= [r as i64]
   assert::equals(len(codes), 1)
   assert::equals(codes[0], 0x1F600)
 
@@ -96,7 +96,7 @@ test "for rune mixed ascii and multibyte" =
   let codes [i64] = []
 
   for r rune in s:
-    codes ++= r as i64
+    codes ++= [r as i64]
   assert::equals(len(codes), 3)
   assert::equals(codes[0], 97)
   assert::equals(codes[1], 0xE4)

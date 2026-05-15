@@ -31,7 +31,7 @@ fn zero_vec(n i64) [f64] =
   let v [f64] = []
 
   for let i i64 = 0; i < n; i++:
-    v ++= 0.0
+    v ++= [0.0]
 
   return v
 
@@ -39,7 +39,7 @@ fn zero_matrix(h i64, w i64) [[f64]] =
   let m [[f64]] = []
 
   for let i i64 = 0; i < h; i++:
-    m ++= zero_vec(w)
+    m ++= [zero_vec(w)]
 
   return m
 
@@ -61,8 +61,8 @@ fn he_matrix(r *rand::Rng, h i64, w i64) [[f64]] =
     let row [f64] = []
 
     for let j i64 = 0; j < w; j++:
-      row ++= randn(r) * scale
-    m ++= row
+      row ++= [randn(r) * scale]
+    m ++= [row]
 
   return m
 
@@ -98,7 +98,7 @@ fn new_net(r *rand::Rng, sizes [i64]) Net =
   let layers [Layer] = []
 
   for let i i64 = 1; i < len(sizes); i++:
-    layers ++= new_layer(r, sizes[i - 1], sizes[i])
+    layers ++= [new_layer(r, sizes[i - 1], sizes[i])]
 
   return Net{layers: layers, sizes: sizes}
 
@@ -179,7 +179,7 @@ fn backward(net *Net, x [f64], target i64,
     let v = probs[i]
 
     if i == target: v = v - 1.0
-    delta ++= v
+    delta ++= [v]
 
   // Walk layers in reverse, accumulating gradients and propagating delta.
   for let l i64 = n_layers - 1; l >= 0; l-- :
@@ -212,7 +212,7 @@ fn backward(net *Net, x [f64], target i64,
           s = s + layer.weights[j][i] * delta[j]
         // ReLU derivative: 1 if pre > 0 else 0.
         if prev.pre[i] <= 0.0: s = 0.0
-        new_delta ++= s
+        new_delta ++= [s]
 
       delta = new_delta
 
@@ -252,8 +252,8 @@ fn zero_grads(net *Net) ([[[f64]]], [[f64]]) =
     let h = len(layer.weights)
     let w = len(layer.weights[0])
 
-    gw ++= zero_matrix(h, w)
-    gb ++= zero_vec(len(layer.biases))
+    gw ++= [zero_matrix(h, w)]
+    gb ++= [zero_vec(len(layer.biases))]
 
   return (gw, gb)
 
@@ -300,7 +300,7 @@ fn make_spirals(r *rand::Rng) ([[f64]], [i64]) =
       let theta = class_offset + sweep + jitter
 
       xs ++= [radius * math::sin(theta), radius * math::cos(theta)]
-      ys ++= c
+      ys ++= [c]
 
   return (xs, ys)
 
@@ -326,7 +326,7 @@ fn main() =
   let idx [i64] = []
 
   for let i i64 = 0; i < n_total; i++:
-    idx ++= i
+    idx ++= [i]
   shuffle(&r, &idx)
 
   let n_test = (TEST_FRAC * (n_total as f64)) as i64
@@ -339,11 +339,11 @@ fn main() =
     let k = idx[i]
 
     if i < n_test:
-      xs_test  ++= xs_all[k]
-      ys_test  ++= ys_all[k]
+      xs_test  ++= [xs_all[k]]
+      ys_test  ++= [ys_all[k]]
     else:
-      xs_train ++= xs_all[k]
-      ys_train ++= ys_all[k]
+      xs_train ++= [xs_all[k]]
+      ys_train ++= [ys_all[k]]
 
   let n_train = len(xs_train)
 
@@ -359,7 +359,7 @@ fn main() =
   let order [i64] = []
 
   for let i i64 = 0; i < n_train; i++:
-    order ++= i
+    order ++= [i]
 
   for let epoch i64 = 0; epoch < EPOCHS; epoch++:
     shuffle(&r, &order)

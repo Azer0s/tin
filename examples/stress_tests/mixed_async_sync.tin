@@ -50,12 +50,12 @@ fn{#async} async_pipeline(vals [i64], lo i64, hi i64) i64 =
   let clamped [i64] = []
 
   for let v i64 in vals:
-    clamped ++= clamp(v, lo, hi)
+    clamped ++= [clamp(v, lo, hi)]
   // 2. spawn sub-fibers for expensive work (simulated)
   let futures [Future[i64]] = []
 
   for let c i64 in clamped:
-    futures ++= spawn async_square(c)
+    futures ++= [spawn async_square(c)]
   // 3. await all and sum - interleaves async awaits with sync accumulation
   let total i64 = 0
   let i i64 = 0

@@ -292,9 +292,9 @@ test "all traits coexist: Mega" =
 test "Mega in array stays distinct values (no aliasing)" =
   let xs [Mega] = []
 
-  xs ++= 1
-  xs ++= 2
-  xs ++= 3
+  xs ++= [1 as Mega]
+  xs ++= [2 as Mega]
+  xs ++= [3 as Mega]
   let total = xs[0] + xs[1] + xs[2]
 
   assert::equals(total as i64, 6)

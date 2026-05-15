@@ -1675,6 +1675,17 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 		return nil, err
 	}
 
+	// Optional inline tags: fn{#async} / fn{#pure} etc.  Mirrors
+	// parseFuncDecl so lambdas can carry the same control tags as
+	// named fns.  #async on a lambda asks codegen to emit a real
+	// $coro variant alongside the sync + colored bodies, so a
+	// spawned lambda cooperates at its own coloring points rather
+	// than going through the synth coro wrapper that targets slot 1.
+	var tags []string
+	if p.check(lexer.LBRACE) {
+		tags = p.parseTags()
+	}
+
 	typeParams, _ := p.parseTypeParams()
 
 	params, err := p.parseParams()
@@ -1701,7 +1712,7 @@ func (p *Parser) parseLambda() (*ast.LambdaExpr, error) {
 		}
 	}
 
-	return &ast.LambdaExpr{TypeParams: typeParams, Params: params, RetType: retType, Body: body}, nil
+	return &ast.LambdaExpr{TypeParams: typeParams, Params: params, RetType: retType, Body: body, Tags: tags}, nil
 }
 
 func (p *Parser) parseArrayLit() (ast.Node, error) {

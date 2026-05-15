@@ -14,10 +14,10 @@ fn slice_returned() [i64] =
 
 fn slice_append_loop() =
   let res [i64] = []
-  res ++= 1
-  res ++= 2
-  res ++= 3
-  res ++= 4
+  res ++= [1]
+  res ++= [2]
+  res ++= [3]
+  res ++= [4]
 
   echo res[3]
 

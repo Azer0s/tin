@@ -47,7 +47,9 @@ void _tin_panic(const char *msg);
 #define TIN_RC_FN           3
 
 typedef struct { int32_t tag; void *ptr; } TinAnyVal;
-typedef struct { void   *fn;  void *env; } TinFnVal;
+// Fat-fn-ptr layout: {non_colored_sync*, colored_sync*, coro_ramp*, env}.
+// Only env participates in ARC; the other three slots are code pointers.
+typedef struct { void *sync; void *colored; void *coro; void *env; } TinFnVal;
 
 // rc_retain_slot retains the payload pointer at the right offset for kind.
 static inline void rc_retain_slot(void *slot, int kind) {

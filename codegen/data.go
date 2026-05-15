@@ -175,7 +175,12 @@ func fmtTypeExpr(te ast.TypeExpr) string {
 // reference a name that is not declared in the type's TypeParams or
 // Wildcards. Catches typos like `data Foo[T] where Q is comp` where
 // Q is undeclared. The error names the available declared params /
-// wildcards so the user can spot the typo.
+// wildcards so the user can spot the typo.  Also runs an occurs
+// check: `where t is X[t]` (or any bound expression that names the
+// type-param itself as a non-trivial subterm) is unsatisfiable
+// because no concrete type T can equal *T or List[T] for some
+// outer wrapper that adds structure -- the constraint would
+// require an infinitely recursive type.
 func checkConstraintsReferenceDeclared(declName string, typeParams, wildcards []string, constraints []ast.TypeConstraint) error {
 	if len(constraints) == 0 {
 		return nil
@@ -196,9 +201,95 @@ func checkConstraintsReferenceDeclared(declName string, typeParams, wildcards []
 				declName, c.TypeParam, typeBoundString(c.Bound), c.TypeParam,
 				declaredNamesString(typeParams, wildcards), c.TypeParam, c.TypeParam)
 		}
+
+		if msg, bad := boundOccursCheck(c.TypeParam, c.Bound); bad {
+			return fmt.Errorf("%s: where-guard `where %s is %s` is never satisfiable: %s",
+				declName, c.TypeParam, typeBoundString(c.Bound), msg)
+		}
 	}
 
 	return nil
+}
+
+// boundOccursCheck reports whether a TypeBound's structure makes the
+// constraint impossible to satisfy because the bound-side
+// expression references the type-param itself as a strict subterm
+// (i.e. wrapped in a pointer / array / generic-args layer).  For
+// example:
+//
+//	where t is *t          --> t = *t impossible (recursive)
+//	where t is Box[t]      --> t = Box[t] impossible (recursive)
+//	where t is pointer[t]  --> after expanding pointer[t] = *t,
+//	                           same as the first case
+//
+// Returns (description, true) when unsatisfiable, ("", false) when
+// the bound is plausibly satisfiable.  The check is intentionally
+// CONSERVATIVE: it walks the bound's TypeExpr looking for a
+// SimpleType whose name equals TypeParam, but only fires when that
+// SimpleType is NESTED inside another wrapper (a top-level `t is t`
+// would be tautological -- legal, weird, but not unsatisfiable).
+func boundOccursCheck(typeParam string, bound ast.TypeBound) (string, bool) {
+	var walk func(b ast.TypeBound) (string, bool)
+
+	walk = func(b ast.TypeBound) (string, bool) {
+		switch v := b.(type) {
+		case *ast.TBAtom:
+			if v.Trait == nil {
+				return "", false
+			}
+			// Tautological `t is t` is legal (always true); only
+			// flag when the type-param appears as a STRICT subterm.
+			if id, ok := v.Trait.(*ast.SimpleType); ok && id.Name == typeParam {
+				return "", false
+			}
+
+			if typeExprContains(v.Trait, typeParam) {
+				return fmt.Sprintf(
+					"the bound %q contains %q as a nested subterm, so the constraint reduces to %q = %q (no concrete type satisfies %q = wrapper(%q))",
+					typeExprString(v.Trait), typeParam, typeParam, typeExprString(v.Trait), typeParam, typeParam,
+				), true
+			}
+
+			return "", false
+		case *ast.TBAnd:
+			if msg, bad := walk(v.Left); bad {
+				return msg, true
+			}
+
+			return walk(v.Right)
+		case *ast.TBOr:
+			// Disjunction: only flag if BOTH sides are unsatisfiable.
+			lm, lb := walk(v.Left)
+			rm, rb := walk(v.Right)
+
+			if lb && rb {
+				return lm + "; " + rm, true
+			}
+
+			return "", false
+		}
+
+		return "", false
+	}
+
+	return walk(bound)
+}
+
+// typeExprString renders a TypeExpr in a short user-facing form
+// for diagnostic messages.  Falls back to the AST's own String
+// method when available.
+func typeExprString(t ast.TypeExpr) string {
+	if t == nil {
+		return "<nil>"
+	}
+
+	type stringer interface{ String() string }
+
+	if s, ok := t.(stringer); ok {
+		return s.String()
+	}
+
+	return fmt.Sprintf("%v", t)
 }
 
 // declaredNamesString joins type-params and wildcards into a single

@@ -174,7 +174,7 @@ fn filter[t](f fn(i t) bool) fn([t]) [t] =
 
     for let i t in list:
       if f(i):
-        res ++= i
+        res ++= [i]
 
     return res
 
@@ -183,7 +183,7 @@ fn map[t, r](f fn(i t) r) fn([t]) [r] =
     let res [r] = []
 
     for let i t in list:
-      res ++= f(i)
+      res ++= [f(i)]
 
     return res
 
@@ -202,9 +202,9 @@ fn subsequences[t](l [t]) [[t]] =
     for let j i64 in 0..len(l):
       let pick = (i >> j) & 1
       if pick == 0:
-        sequence ++= l[j]
+        sequence ++= [l[j]]
 
-    res ++= sequence
+    res ++= [sequence]
   return res
 ```
 

@@ -37,12 +37,42 @@ type closureCtx struct {
 	fnDeferRetAlloca  value.Value
 	deferThunkRetType irtypes.Type
 	inCoroFn          bool
+	autoYield         bool
+	coloredSync       bool
+	coroHdl           value.Value
+	coroID            value.Value
+	coroCleanup       *ir.Block
+	coroFrame         *coroFrame
+	coroRetType       irtypes.Type
 }
 
 // pushClosureCtx saves the current function context, switches cg to f, and
-// roots the new scope at the module-level (global) scope.
+// roots the new scope at the module-level (global) scope.  All coroutine /
+// autoyield / colored-sync flags are saved and reset to the "plain sync fn"
+// defaults so the closure body doesn't inherit the enclosing function's
+// coro frame (which would produce cross-function SSA references via
+// llvm.coro.suspend) or autoyield instrumentation.
 func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
-	prev := closureCtx{cg.curFn, cg.curScope, cg.curBlock, cg.pendingDeferFnI8s, cg.pendingDeferFrames, cg.pendingDeferEnvs, cg.curDeferRetSlotParam, cg.curFnDeferRetAlloca, cg.curDeferThunkRetType, cg.inCoroFn}
+	prev := closureCtx{
+		fn:                cg.curFn,
+		scope:             cg.curScope,
+		curBlock:          cg.curBlock,
+		deferFnI8s:        cg.pendingDeferFnI8s,
+		deferFrames:       cg.pendingDeferFrames,
+		deferEnvs:         cg.pendingDeferEnvs,
+		deferRetSlotParam: cg.curDeferRetSlotParam,
+		fnDeferRetAlloca:  cg.curFnDeferRetAlloca,
+		deferThunkRetType: cg.curDeferThunkRetType,
+		inCoroFn:          cg.inCoroFn,
+		autoYield:         cg.curFnAutoYield,
+		coloredSync:       cg.curFnColoredSync,
+		coroHdl:           cg.curCoroHdl,
+		coroID:            cg.curCoroID,
+		coroCleanup:       cg.curCoroCleanup,
+		coroFrame:         cg.curCoroFrame,
+		coroRetType:       cg.curCoroRetType,
+	}
+
 	cg.curFn = f
 	cg.curBlock = nil
 	cg.pendingDeferFnI8s = nil
@@ -51,10 +81,20 @@ func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
 	cg.curDeferRetSlotParam = nil
 	cg.curFnDeferRetAlloca = nil
 	cg.curDeferThunkRetType = nil
-	// Thunks and closures are plain functions, not coroutines. Resetting
-	// inCoroFn prevents emitTerminator from emitting coro completion code
-	// (which would create cross-function SSA references) inside the thunk.
+	// Thunks and closures are plain functions, not coroutines.  Reset
+	// every "we're inside a fiber/coroutine body" flag so the closure's
+	// own body emits as a plain sync fn -- otherwise yield-insertion
+	// machinery would emit llvm.coro.suspend or _tin_fiber_yield_coro
+	// referencing the OUTER fn's coro frame, producing cross-function
+	// SSA references that crash coro-split / verify-ir.
 	cg.inCoroFn = false
+	cg.curFnAutoYield = false
+	cg.curFnColoredSync = false
+	cg.curCoroHdl = nil
+	cg.curCoroID = nil
+	cg.curCoroCleanup = nil
+	cg.curCoroFrame = nil
+	cg.curCoroRetType = nil
 
 	global := prev.scope
 	for global.parent != nil {
@@ -78,6 +118,13 @@ func (cg *CodeGen) popClosureCtx(prev closureCtx) {
 	cg.curFnDeferRetAlloca = prev.fnDeferRetAlloca
 	cg.curDeferThunkRetType = prev.deferThunkRetType
 	cg.inCoroFn = prev.inCoroFn
+	cg.curFnAutoYield = prev.autoYield
+	cg.curFnColoredSync = prev.coloredSync
+	cg.curCoroHdl = prev.coroHdl
+	cg.curCoroID = prev.coroID
+	cg.curCoroCleanup = prev.coroCleanup
+	cg.curCoroFrame = prev.coroFrame
+	cg.curCoroRetType = prev.coroRetType
 }
 
 // buildEnv heap-allocates an env struct for the given captures and stores each
@@ -358,10 +405,19 @@ func (cg *CodeGen) unpackEnv(entry *ir.Block, f *ir.Func, envStructType *irtypes
 	envRaw := f.Params[0]
 
 	envTypedPtr := entry.NewBitCast(envRaw, irtypes.NewPointer(envStructType))
+	// Detect closure-env layout: when field 0 is i8* (the dtor slot
+	// prepended by buildClosureEnv), captures start at field 1.
+	// spawn-do envs (built by buildEnv) have no dtor slot, so the
+	// offset stays at 0.
+	fieldOffset := 0
+	if len(envStructType.Fields) == len(captures)+1 && envStructType.Fields[0] == irtypes.I8Ptr {
+		fieldOffset = 1
+	}
+
 	for i, c := range captures {
 		gep := entry.NewGetElementPtr(envStructType, envTypedPtr,
 			constant.NewInt(irtypes.I32, 0),
-			constant.NewInt(irtypes.I32, int64(i)))
+			constant.NewInt(irtypes.I32, int64(i+fieldOffset)))
 		if c.byRef {
 			allocaPtr := entry.NewLoad(c.llvmTy, gep)
 			// noRelease: the captured variable is owned by the outer scope; the
@@ -490,6 +546,15 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		rawPtr := block.NewCall(rcAlloc, sz)
 		strPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
 		block.NewStore(val, strPtr)
+		// The any data block owns one reference to the inner string's
+		// i8* ptr -- the matching release is in _tin_release_any
+		// (tag=2 branch).  Without this retain, the string would be
+		// freed by its original scope's release while the any block
+		// still holds a (dangling) pointer to it; with the new release
+		// path freeing the inner ptr, missing the retain here would
+		// double-free or leak depending on caller shape.
+		innerPtr := block.NewExtractValue(val, 0)
+		block.NewCall(cg.ensureRetain(), innerPtr)
 
 		dataPtr = rawPtr
 	case t.Equal(irtypes.I1):
@@ -523,22 +588,26 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 
 		dataPtr = rawPtr
 	case isFatFnPtr(t):
-		// Fat function pointer { fn(i8*,...)*, i8* }: heap-copy the struct so the
-		// any can outlive its stack alloca.  Use anyTagFn (5) for all fat fn ptrs
-		// so the any-release path can detect closures and release their env.
+		// Fat function pointer {sync*, colored*, coro*, i8* env}:
+		// heap-copy the struct so the any can outlive its stack
+		// alloca.  Use anyTagFn (5) for all fat fn ptrs so the
+		// any-release path can detect closures and release their env.
 		tag = anyTagFn
 
 		sz := llvmTypeSize(t)
 		if sz == 0 {
-			sz = 16 // two pointers
+			sz = 32 // four pointers (3 fn slots + env)
 		}
 
 		rawPtr := block.NewCall(rcAlloc, constant.NewInt(irtypes.I64, int64(sz)))
 		fnPtrStore := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
 		block.NewStore(val, fnPtrStore)
-		// Retain env so the any data block independently owns a reference to it.
-		// _tin_retain is null-safe (handles null env for wrapped named functions).
-		envField := block.NewExtractValue(val, 1)
+		// Retain env (slot 3) so the any data block independently owns a
+		// reference to it.  _tin_retain is null-safe (handles null env
+		// for wrapped named functions).  Reading any non-env slot here
+		// would feed a code-segment pointer to _tin_retain, which reads
+		// the RC header 16 bytes BEFORE that address -- silent corruption.
+		envField := block.NewExtractValue(val, 3)
 		block.NewCall(cg.ensureRetain(), envField)
 
 		dataPtr = rawPtr
@@ -886,6 +955,20 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	if targetName := cg.typeNameOf(target); targetName != "" {
 		for _, entry := range cg.implicitConvFns[targetName] {
 			if entry.srcLLVM.Equal(src) {
+				return block.NewCall(entry.fn, val)
+			}
+		}
+	}
+
+	// coerce[T] op-trait: source struct S declared `coerce[T]` and provides
+	// `static fn ::coerce(this S) T`.  Dispatched at every implicit-coercion
+	// site (function args, let bindings, array elements, struct fields) so
+	// `let v T = s` auto-fires the user's conversion without an `as T`.
+	// genAsExpr already routes explicit `s as T` here too; this branch is
+	// the implicit-coercion twin of that path.
+	if structName := cg.typeNameOf(src); structName != "" {
+		for _, entry := range cg.coerceConvFns[structName] {
+			if entry.tgtLLVM.Equal(target) {
 				return block.NewCall(entry.fn, val)
 			}
 		}

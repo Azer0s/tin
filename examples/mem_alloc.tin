@@ -1,0 +1,45 @@
+// stdlib/mem demonstration: typed `mem::alloc[T]()` returning *T,
+// raw `mem::malloc(bytes)` returning *void, and the manual-free
+// discipline.  Compile-time `-Wmanual-alloc-leak`,
+// `-Wmanual-double-free`, and `-Wmanual-use-after-free` track each
+// binding through its scope and reject the obvious mistakes; this
+// file shows the "correct discipline" shape that compiles clean.
+
+use mem
+use assert
+
+struct Box =
+  value i64
+
+// Typed alloc: single *Box, zero-initialized.
+test "mem::alloc[T]() round-trips through fields" =
+  let b = mem::alloc[Box]()
+  b.value = 42
+  assert::equals(42, b.value)
+  mem::free(b as *void)
+
+// Raw malloc: byte buffer, used for arbitrary memory.
+test "mem::malloc(bytes) round-trips through bytewise writes" =
+  let buf = mem::malloc(16)
+  mem::memset(buf, 0x41 as i32, 16)  // fill with 'A'
+  let bytes = (buf as *u8)
+  // Compare the first byte we wrote.
+  assert::equals(0x41 as i64, (*bytes) as i64)
+  mem::free(buf)
+
+// Ownership transfer: the caller takes the live block from the
+// callee and is responsible for the free.  The -Wmanual-alloc-leak
+// pass tracks the returned binding as Escaped inside `make_box`
+// (return transfers ownership), and Live in `main` until the
+// matching `mem::free`.
+fn make_box(v i64) *Box =
+  let b = mem::alloc[Box]()
+  b.value = v
+  return b
+
+test "ownership transfer through fn return" =
+  let b = make_box(123)
+  assert::equals(123, b.value)
+  mem::free(b as *void)
+
+fn main() i64 = return 0

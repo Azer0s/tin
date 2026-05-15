@@ -9,13 +9,19 @@
 use assert
 use io
 use os
+use sync
 
-fn{#async} write_str(bw *io::BufWriter, s string) i64 =
+// Test-local helpers: sync forwarders that return the Future directly so
+// call sites can `await write_str(...)` without an explicit spawn.  This
+// mirrors the stdlib's outer-wrapper pattern (e.g. Channel.recv) where
+// the public surface returns Future[T] and the inner `#async` body is
+// hidden -- here the inner body is BufWriter.write itself.
+fn write_str(bw *io::BufWriter, s string) Future[i64] =
   let bytes = s as [byte]
-  return await bw.write(&bytes[0], len(bytes))
+  return bw.write(&bytes[0], len(bytes))
 
-fn{#async} flush_now(bw *io::BufWriter) i64 =
-  return await bw.flush()
+fn flush_now(bw *io::BufWriter) Future[i64] =
+  return bw.flush()
 
 fn read_all(path string) string =
   return os::read_file(path).unwrap()

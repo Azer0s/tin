@@ -32,8 +32,8 @@ fn rand_matrix(r *rand::Rng, h i64, w i64) [[f64]] =
     let row [f64] = []
 
     for let j i64 = 0; j < w; j++:
-      row ++= 2.0 * r.f64() - 1.0
-    m ++= row
+      row ++= [2.0 * r.f64() - 1.0]
+    m ++= [row]
 
   return m
 
@@ -41,7 +41,7 @@ fn zero_vec(n i64) [f64] =
   let v [f64] = []
 
   for let i i64 = 0; i < n; i++:
-    v ++= 0.0
+    v ++= [0.0]
 
   return v
 

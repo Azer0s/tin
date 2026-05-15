@@ -1,0 +1,12 @@
+// Regression: -Wmanual-double-free fires when mem::free(p) is
+// invoked on a binding the dataflow pass has already proven freed
+// on the same path.  Double-free is UB in C and can corrupt the
+// allocator's freelist.
+
+use mem
+
+fn main() i64 =
+  let p = mem::malloc(64)
+  mem::free(p)
+  mem::free(p)
+  return 0

@@ -82,7 +82,7 @@ fn err_value(this Result[T, E]) Result[_, E] =
     case Err(_): return this
 ```
 
-After substitution at one call site (`_` ↦ string):
+After substitution at one call site (`_` |-> string):
 
 ```
 fn err_value__W_string(this Result[T, E]) Result[string, E] =

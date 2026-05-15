@@ -112,7 +112,7 @@ fn filter[t](pred fn(i t) bool) fn([t]) [t] =
     let out [t] = []
     for let x t in xs:
       if pred(x):
-        out ++= x
+        out ++= [x]
     return out
 ```
 

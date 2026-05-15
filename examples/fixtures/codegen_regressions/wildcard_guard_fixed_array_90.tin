@@ -1,0 +1,18 @@
+// Regression: `where t is [_; 3]` -- fixed-size array with
+// wildcard element.  Two pre-fix bugs combined:
+// (1) llvmTypeName(ArrayType) dropped the size, rendering
+//     `[i64; 3]` as `[i64]`, so a fixed-size array couldn't
+//     be distinguished from a fat array;
+// (2) typeExprStructuralMatch on ArrayType only compared the
+//     element type, so `[T; 4]` would have silently matched
+//     `[_; 3]` even after fix (1).
+//
+// Fix: llvmTypeName now prints `[T; N]` for IR ArrayType, and
+// structural-match compares Size strictly.
+
+fn three[t](xs t) i64 where t is [_; 3] =
+  return 1
+
+fn main() i64 =
+  let xs [i64; 3] = [10, 20, 30]
+  return three(xs) - 1

@@ -11,6 +11,11 @@ yields to the cooperative scheduler at two kinds of site:
 
 The sync (non-fiber) variant of the same function is **never** affected.
 
+See also [`fn-coloring.md`](fn-coloring.md) for how this single sync
+variant sits inside the broader function-coloring model (current
+shape vs the planned non-colored / colored / `$coro` split that
+task #85 introduces).
+
 ---
 
 ## Phase 1: Loop backedge yields

@@ -8,7 +8,7 @@ fn map[t, r](f fn(i t) r) fn([t]) [r] =
     let res [r] = []
 
     for let i t in list:
-      res ++= f(i)
+      res ++= [f(i)]
 
     return res
 
@@ -18,7 +18,7 @@ fn filter[t](f fn(i t) bool) fn([t]) [t] =
 
     for let i t in list:
       if f(i):
-        res ++= i
+        res ++= [i]
 
     return res
 

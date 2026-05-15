@@ -1,0 +1,19 @@
+// Regression: `where t is *_` is a wildcard guard that should
+// admit any pointer type and reject non-pointers.  Pre-fix the
+// non-SimpleType bound path didn't structurally match the
+// concrete type against the bound shape, so `*_` either matched
+// nothing or got reduced to the bare trait name "*_".
+//
+// Fix: structSatisfiesConstraint walks non-SimpleType bounds
+// with typeExprStructuralMatch, treating WildcardType as
+// "any type" while still requiring `*` to match a pointer.
+
+fn takes_any_ptr[t](p t) i64 where t is *_ =
+  return 1
+
+fn main() i64 =
+  let n = 5
+  let s = "hi"
+  let a = takes_any_ptr(&n)
+  let b = takes_any_ptr(&s)
+  return a + b - 2
