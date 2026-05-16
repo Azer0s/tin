@@ -16,6 +16,39 @@
 #include <stdio.h>
 #include <signal.h>
 
+// Pull in every system header that declares the allocator family
+// BEFORE the mimalloc macro shim activates below.  Otherwise our
+// #define malloc mi_malloc-style substitutions would textually
+// rewrite the system declarations themselves (e.g. <malloc/_malloc.h>'s
+// `void *malloc(size_t)` becomes `void *mi_malloc(...)` which collides
+// with the real prototype).  These includes are guarded internally so
+// the order is purely about declaration visibility.
+#include <stdlib.h>
+#include <string.h>
+
+// mimalloc shim.  When -DTIN_USE_MIMALLOC=1 is passed at runtime.c
+// compile time, every malloc/free/realloc/calloc call inside the tin
+// runtime translation unit is routed through mimalloc's mi_* APIs.
+// We use macro substitution rather than rewriting every call site
+// because there are many (arc, fiber, channel, atom table, ...) and
+// the substitution kicks in after the system declarations above are
+// visible, so the system headers stay intact and only OUR call sites
+// are redirected.
+//
+// The build flag is set by tin's link path when --no-mimalloc is NOT
+// passed AND libmimalloc was located at a standard path.  When it is
+// missing the tin compiler errors loudly at build time -- we never
+// silently fall back here.
+#if TIN_USE_MIMALLOC
+#  include <mimalloc.h>
+#  define malloc(n)     mi_malloc((size_t)(n))
+#  define free(p)       mi_free(p)
+#  define realloc(p, n) mi_realloc((p), (size_t)(n))
+#  define calloc(n, sz) mi_calloc((size_t)(n), (size_t)(sz))
+#  define strdup(s)     mi_strdup(s)
+#  define strndup(s, n) mi_strndup((s), (size_t)(n))
+#endif
+
 // Make stdout line-buffered so echo output appears immediately even when
 // stdout is connected to a pipe.  Line-buffering flushes on every '\n',
 // which is how tin's echo statement terminates every value.

@@ -57,6 +57,10 @@ Source / library:
   --stdlib PATH            override the stdlib path (default: <execDir>/stdlib)
   --lib-root PATH          add a package root, repeatable (before default <execDir>/libs)
   --cflag FLAG             pass FLAG to clang, repeatable (e.g. --cflag -fsanitize=address)
+  --mimalloc               link with mimalloc instead of libc malloc.
+                           opt-in for 10-30% wins on alloc-heavy code;
+                           requires libmimalloc installed (brew/pacman/apt),
+                           fails at link if it can't find it
   -lNAME / -LDIR           link with libNAME / add DIR to lib search path
   file.o / file.a          link with extra object or archive file
 
@@ -263,6 +267,7 @@ var optLevelOverride string
 // non-debug `-O2` build for a `-g` request, or vice versa.
 var (
 	debugBuild  bool
+	useMimalloc bool
 	extraCFlags []string
 	// staticLink is set by -static. On Linux it forwards `-static` to
 	// clang at link time so libc/libm/etc. are pulled in as archives.
@@ -861,6 +866,13 @@ doneFlags:
 	// key; main() resets them per-invocation here.
 	extraCFlags = nil
 	debugBuild = false
+	// mimalloc is off by default so tin doesn't require libmimalloc on
+	// every host -- libc malloc works everywhere with no install step.
+	// `--mimalloc` at the top level opts in; on alloc-heavy code it
+	// buys 10-30% on workload-style benchmarks.  When the flag is
+	// passed but the library is missing, the link path errors loudly
+	// instead of silently downgrading.
+	useMimalloc = false
 
 	var stdlibOverride string
 
@@ -891,6 +903,14 @@ doneFlags:
 				i++
 				extraCFlags = append(extraCFlags, os.Args[i])
 			}
+		case "--mimalloc":
+			// Opts into linking against mimalloc and routing the
+			// runtime's malloc/free/realloc/calloc through mi_*.
+			// Off by default to avoid making libmimalloc a required
+			// install for every tin host.  Errors loudly at link
+			// time if --mimalloc is passed but the library isn't
+			// found on standard paths.
+			useMimalloc = true
 		case "--color":
 			// --color=<auto|always|never>. Defaults to `auto` which
 			// turns ANSI escapes on when stderr is a terminal. The
@@ -2149,6 +2169,22 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			rtArgs = append(rtArgs, "-fno-unwind-tables", "-fno-asynchronous-unwind-tables")
 		}
 
+		// mimalloc: compile runtime.c with -DTIN_USE_MIMALLOC=1 plus
+		// the include path for mimalloc.h so the macro-shim in
+		// runtime.c redirects malloc/free/realloc/calloc to mi_*.
+		// csrc cache key includes argv so mimalloc vs non-mimalloc
+		// builds get distinct .o entries.  If the user passed
+		// --no-mimalloc, useMimalloc is false here and we skip the
+		// shim entirely (libc malloc path).  Missing libmimalloc with
+		// useMimalloc=true is surfaced as a link-time error in
+		// linkBinary, not a silent skip.
+		if useMimalloc {
+			rtArgs = append(rtArgs, "-DTIN_USE_MIMALLOC=1")
+			if _, incDir, ok := findMimallocInstall(targetGOOS); ok && incDir != "" {
+				rtArgs = append(rtArgs, "-I"+incDir)
+			}
+		}
+
 		cachedPath, hit, err := csrcCacheLookup(rtC, rtArgs)
 		if err != nil {
 			return err
@@ -2261,6 +2297,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		cLinkerFlags:         cLinkerFlags,
 		extraCFlags:          extraCFlags,
 		static:               staticLink,
+		useMimalloc:          useMimalloc,
 	})
 }
 
