@@ -16,6 +16,41 @@ import (
 
 // Helper utilities
 
+// hoistAlloca emits `alloca ty` at the start of the function that owns
+// `block`, then returns the alloca.  USE THIS instead of
+// `block.NewAlloca` whenever the call site might be reached from inside
+// a loop body.
+//
+// Allocas placed in a non-entry block emit as `sub sp, ...` at that
+// block's PC; the matching `add sp, ...` only fires when the function
+// returns -- there's no `add sp` on the loop back-edge.  An alloca
+// inside a for-loop body therefore silently leaks one slot per
+// iteration onto the C stack, until the thread's stack guard page is
+// hit (SIGBUS on macOS, where worker threads have 544 KB default
+// stacks; Linux's 8 MB default hides the same bug as a slowdown).
+//
+// Derives the owning function from block.Parent rather than cg.curFn:
+// several codegen paths build synthetic helper functions (deinit
+// thunks, trait release wrappers, coro splits) without updating
+// cg.curFn, and trusting cg.curFn there would hoist into the outer
+// caller's entry block, producing IR that references slots which
+// never exist in the helper.
+func (cg *CodeGen) hoistAlloca(block *ir.Block, ty irtypes.Type) *ir.InstAlloca {
+	if block != nil && block.Parent != nil && len(block.Parent.Blocks) > 0 {
+		return block.Parent.Blocks[0].NewAlloca(ty)
+	}
+
+	if block != nil {
+		return block.NewAlloca(ty)
+	}
+
+	if cg.curFn != nil && len(cg.curFn.Blocks) > 0 {
+		return cg.curFn.Blocks[0].NewAlloca(ty)
+	}
+
+	return ir.NewAlloca(ty)
+}
+
 // closureCapture describes a variable captured from the enclosing scope.
 type closureCapture struct {
 	name   string

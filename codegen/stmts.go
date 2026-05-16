@@ -1347,7 +1347,11 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// uninitialized (mirrors what alloca's caller relies on).
 		block.NewStore(cg.zeroValue(llType), alloca)
 	} else {
-		alloca = block.NewAlloca(llType)
+		// Hoist the alloca to function entry so a let-binding inside a
+		// loop body doesn't grow the stack one slot per iteration.
+		// LLVM-canonical: mem2reg promotes entry allocas to SSA
+		// registers, and the slot is reused across iterations.
+		alloca = cg.hoistAlloca(block, llType)
 	}
 
 	// Emit dbg.declare for debug builds. Stack allocas only -- heap-promoted

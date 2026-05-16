@@ -1,0 +1,95 @@
+// Real-world-shaped workload: producer-worker-sink pipeline where each
+// item does actual work, not just message passing.
+//
+// Stage 1: main produces N integer "requests" into the work channel
+// Stage 2: 8 worker fibers each receive an item, do real work
+//          (string formatting + arithmetic, simulating request handling)
+//          and forward the i64 result to the sink channel
+// Stage 3: main drains all N results from the sink and aggregates them
+//
+// This shape is closer to a request-processing pipeline (web handler,
+// stream stage) than the existing pingpong/fanout benches, which are
+// pure scheduler latency tests with zero per-item work.
+//
+// Per-item work is deliberately small (5 string concats + a hash-like
+// arithmetic accumulation) so the channel overhead still dominates --
+// otherwise the bench measures string allocation, not fiber dispatch.
+
+use sync
+use io
+use measure
+
+var g_in      sync::Channel[i64]
+var g_out     sync::Channel[i64]
+var g_elapsed i64
+
+// process_one simulates per-item handler work: a few string concats
+// and an integer hash-mix.  Returns an i64 the sink can aggregate.
+// `#allow_drop` because we drop the formatted-string intermediates.
+fn process_one(v i64) i64 =
+  let key = "item-{v}"
+  let header = "[req] " ++ key
+  let trailer = key ++ " :ok"
+  let combo = header ++ " | " ++ trailer
+  // simple hash-like reduction over the formatted string's length and
+  // the input so the optimizer can't constant-fold the work away
+  let m = len(combo) as i64
+  return ((v * 1315423911) ^ (m * 2654435761)) & 0x7fffffff
+
+fn{#async} worker() =
+  for true:
+    let v = await g_in.recv()
+    if v < 0:
+      return
+    await g_out.send(process_one(v))
+
+// Producer fiber drives g_in independently from main so the sink
+// (main) can drain g_out concurrently without deadlocking on a full
+// out-buffer while it pushes more in.  Symmetric channel caps so the
+// pipeline can hold ~workers items of slack in either direction.
+fn{#async} producer(n i64) =
+  let i i64 = 0
+  for i < n:
+    await g_in.send(i)
+    i = i + 1
+
+fn{#async} main() =
+  let workers i64 = 8
+  let n       i64 = 200000
+
+  g_in  = sync::Channel[i64].make(64)
+  g_out = sync::Channel[i64].make(64)
+
+  let i i64 = 0
+  for i < workers:
+    spawn worker()
+    i = i + 1
+
+  let start = measure::now_us()
+
+  let prod = spawn producer(n)
+
+  // Drain results.  An accumulator keeps the workers honest: if the
+  // compiler somehow elided the body, the sum would diverge from the
+  // hash-mix output and a careful runner could detect it.
+  let acc i64 = 0
+  i = 0
+  for i < n:
+    acc = acc + await g_out.recv()
+    i = i + 1
+
+  await prod
+
+  g_elapsed = measure::now_us() - start
+
+  // Send `-1` once per worker to unblock the `for true` loop and let
+  // each worker fiber exit cleanly so the spawn ARC drops to zero.
+  i = 0
+  for i < workers:
+    await g_in.send(-1)
+    i = i + 1
+
+  let throughput = n * 1000000 / g_elapsed
+  echo "{n} items, {workers} workers, acc={acc}"
+  echo "elapsed: ~{g_elapsed / 1000}ms"
+  echo "throughput: ~{throughput} items/sec"

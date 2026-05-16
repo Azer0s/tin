@@ -27,5 +27,9 @@ path = "src/pipeline10.rs"
 name = "bench_rust_fanout"
 path = "src/fanout.rs"
 
+[[bin]]
+name = "bench_rust_workload"
+path = "src/workload.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync"] }

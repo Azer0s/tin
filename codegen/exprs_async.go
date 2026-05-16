@@ -1332,11 +1332,13 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
 	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
 
-	// Alloca for val so send_blocking can take &val.  Allocated in the outer coro
-	// frame - persists across suspensions.  The value is set once and retried
-	// until the channel accepts it.
+	// Alloca for val so send_blocking can take &val.  HOIST to function
+	// entry: emitting in `block` would put it inside the caller's for-loop
+	// body and grow the stack per iteration.  Each `await ch.send(v)` would
+	// otherwise leak sizeof(T) bytes per loop iteration (~4 MB on the MPMC
+	// bench, blowing macOS's 544 KB worker-thread stack).
 	elemType := valArg.Type()
-	valSlot := block.NewAlloca(elemType)
+	valSlot := cg.hoistAlloca(block, elemType)
 	block.NewStore(valArg, valSlot)
 	valPtr := block.NewBitCast(valSlot, irtypes.I8Ptr)
 
@@ -1459,7 +1461,10 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 
 	// Alloca for result - written by _tin_channel_recv_direct, persists across
 	// suspensions so the retry loop can safely re-use the slot on wakeup.
-	outSlot := block.NewAlloca(elemType)
+	// HOIST to function entry: emitting in `block` would put the alloca
+	// inside the caller's for-loop body and grow the stack per iter (each
+	// `await ch.recv()` in a `for` would leak elemType bytes).
+	outSlot := cg.hoistAlloca(block, elemType)
 	outPtr := block.NewBitCast(outSlot, irtypes.I8Ptr)
 
 	// pid is constant for the lifetime of the fiber - hoist before the retry loop
@@ -1534,33 +1539,49 @@ func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.Call
 		return nil, false, nil
 	}
 
-	thisVal, err := cg.genExpr(block, fa.Expr)
-	if err != nil {
-		return nil, false, err
+	// Try to get a direct lvalue pointer first.  When fa.Expr is an
+	// identifier resolving to a let-binding (alloca) or a global
+	// `Channel[T]`, genLValue returns a `*Channel[T]` directly -- saving
+	// the per-call full-struct load + store into a scratch alloca that
+	// the genExpr+spill path would emit.  In the workload bench's hot
+	// loop (`for true: await g_in.recv(); ...; await g_out.send(...)`)
+	// this removes two %Channel__T struct copies per iteration.
+	var (
+		thisPtr value.Value
+		err     error
+	)
+
+	if lv, lvErr := cg.genLValue(block, fa.Expr); lvErr == nil && lv != nil {
+		if _, isPtr := lv.Type().(*irtypes.PointerType); isPtr {
+			thisPtr = lv
+		}
 	}
 
-	if thisVal == nil {
-		return nil, false, nil
-	}
+	if thisPtr == nil {
+		thisVal, err2 := cg.genExpr(block, fa.Expr)
+		if err2 != nil {
+			return nil, false, err2
+		}
 
-	if cg.curBlock != nil && cg.curBlock != block {
+		if thisVal == nil {
+			return nil, false, nil
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		thisPtr = thisVal
+		if _, isPtr := thisVal.Type().(*irtypes.PointerType); !isPtr {
+			alloca := cg.hoistAlloca(block, thisVal.Type())
+			block.NewStore(thisVal, alloca)
+			thisPtr = alloca
+		}
+	} else if cg.curBlock != nil && cg.curBlock != block {
 		block = cg.curBlock
 	}
 
-	// Channel methods take a pointer receiver; auto-address if we have a
-	// value, mirroring what the regular method call path does.  HOIST the
-	// alloca to the function entry block -- emitting in `block` puts it
-	// inside the caller's for-loop body and leaks a Channel-struct-sized
-	// stack slot per iteration.  In the MPMC bench (`await ch.send(i)` x
-	// 250K) this leaked ~4 MB onto macOS's 544 KB worker stack, hitting
-	// the guard page and SIGBUSing on ~60% of runs.
-	thisPtr := thisVal
-	if _, isPtr := thisVal.Type().(*irtypes.PointerType); !isPtr {
-		entry := cg.curFn.Blocks[0]
-		alloca := entry.NewAlloca(thisVal.Type())
-		block.NewStore(thisVal, alloca)
-		thisPtr = alloca
-	}
+	_ = err
 
 	pt, isPtr := thisPtr.Type().(*irtypes.PointerType)
 	if !isPtr {

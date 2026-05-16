@@ -49,6 +49,8 @@ func main() {
 		runPipeline10()
 	case "fanout":
 		runFanout()
+	case "workload":
+		runWorkload()
 	default:
 		runPingPong()
 	}
