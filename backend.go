@@ -48,7 +48,7 @@ type linkOpts struct {
 	// archives); silently dropped on macOS because libSystem cannot be
 	// linked statically. The flag is reflected in the lld-probe cache
 	// key so static and dynamic argvs don't share a slot.
-	static       bool
+	static bool
 	// useMimalloc routes runtime malloc/free through mimalloc's mi_*
 	// API.  When true: the runtime.c TU is compiled with
 	// -DTIN_USE_MIMALLOC=1 (which activates the macro shim that
@@ -783,6 +783,7 @@ func tripleFromTargetGOOS(targetGOOS string, targetFlags []string) string {
 // installation error we should surface, not paper over.
 func findMimallocInstall(targetGOOS string) (libDir, incDir string, ok bool) {
 	var libCandidates []string
+
 	var incCandidates []string
 
 	if targetGOOS == "darwin" {
