@@ -1659,6 +1659,126 @@ func byteToStringFatPtr(block *ir.Block, b value.Value) value.Value {
 	return block.NewInsertValue(v0, constant.NewInt(irtypes.I64, 1), 1)
 }
 
+// isStringConcatNode reports whether node is a `++` BinExpr whose two sides
+// are both string-typed (i.e. an internal node of a fusable string-concat
+// chain).  Byte-coerced concats and array concats return false so the
+// existing 2-way path handles them.
+func (cg *CodeGen) isStringConcatNode(node ast.Node) bool {
+	be, ok := node.(*ast.BinExpr)
+	if !ok || be.Op != "++" {
+		return false
+	}
+
+	lt := cg.astInferType(be.Left)
+	rt := cg.astInferType(be.Right)
+
+	return lt != nil && rt != nil && isStringType(lt) && isStringType(rt)
+}
+
+// flattenStringConcat walks a `++` chain on strings and returns the leaf AST
+// nodes in left-to-right source order.  When node is not a string `++` it
+// returns a single-element slice containing node itself.
+func (cg *CodeGen) flattenStringConcat(node ast.Node) []ast.Node {
+	if cg.isStringConcatNode(node) {
+		be := node.(*ast.BinExpr)
+
+		return append(cg.flattenStringConcat(be.Left), cg.flattenStringConcat(be.Right)...)
+	}
+
+	return []ast.Node{node}
+}
+
+// genFusedStringConcat lowers `a ++ b ++ ... ++ z` to a single _tin_rc_alloc
+// + N memcpys.  Without fusion, codegen emits N-1 nested 2-way concats, each
+// allocating an intermediate buffer that is immediately released by the next
+// concat.  For workload-bench's `header ++ " | " ++ trailer` this saves one
+// alloc per item (200k allocs on a 200k-item run).
+//
+// Each leaf is evaluated left-to-right via genExpr (preserving source-order
+// side effects), then the fat-pointer's ptr+len is extracted.  After the
+// memcpy phase, leaves whose AST is a temporary-producer (call result,
+// interpolation, ...) are released; non-temp leaves are not -- their data
+// has been copied into the new buffer, and their own RC remains untouched.
+func (cg *CodeGen) genFusedStringConcat(block *ir.Block, leaves []ast.Node) (value.Value, error) {
+	type part struct {
+		node   ast.Node
+		val    value.Value
+		ptr    value.Value
+		length value.Value
+	}
+
+	parts := make([]part, 0, len(leaves))
+
+	for _, leaf := range leaves {
+		cg.curBlock = block
+
+		v, err := cg.genExpr(block, leaf)
+		if err != nil {
+			return nil, err
+		}
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+
+		if v == nil || !isStringType(v.Type()) {
+			// Shouldn't happen given isStringConcatNode's type guard; fall
+			// back to a clear error rather than emitting malformed IR.
+			return nil, cg.nodeErr(leaf,
+				"`++` chain leaf must be a string, got %s", fmtArgType(v.Type()))
+		}
+
+		parts = append(parts, part{
+			node:   leaf,
+			val:    v,
+			ptr:    cg.extractStringPtr(block, v),
+			length: cg.extractStringLen(block, v),
+		})
+	}
+
+	totalLen := parts[0].length
+	for i := 1; i < len(parts); i++ {
+		totalLen = block.NewAdd(totalLen, parts[i].length)
+	}
+
+	allocSize := block.NewAdd(totalLen, constant.NewInt(irtypes.I64, 1))
+	buf := block.NewCall(cg.ensureRCAlloc(), allocSize)
+
+	var offset value.Value = constant.NewInt(irtypes.I64, 0)
+
+	for i, p := range parts {
+		var dst value.Value
+		if i == 0 {
+			dst = buf
+		} else {
+			dst = block.NewGetElementPtr(irtypes.I8, buf, offset)
+		}
+
+		block.NewCall(cg.ensureMemcpy(), dst, p.ptr, p.length, constant.NewInt(irtypes.I1, 0))
+
+		if i < len(parts)-1 {
+			offset = block.NewAdd(offset, p.length)
+		}
+	}
+
+	nullByte := block.NewGetElementPtr(irtypes.I8, buf, totalLen)
+	block.NewStore(constant.NewInt(irtypes.I8, 0), nullByte)
+
+	fatPtrType := stringFatPtrType()
+	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), buf, 0)
+	result := block.NewInsertValue(v0, totalLen, 1)
+
+	for _, p := range parts {
+		if isTemporaryProducer(p.node) {
+			cg.emitRelease(block, p.val)
+		}
+	}
+
+	cg.curBlock = block
+
+	return result, nil
+}
+
 func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, error) {
 	// Short-circuit for && and ||.
 	switch e.Op {
@@ -1666,6 +1786,16 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		return cg.genLogicalAnd(block, e)
 	case "||":
 		return cg.genLogicalOr(block, e)
+	}
+
+	// String concat fusion: detect `++` chains on strings of length >= 3
+	// before evaluating operands.  Pairwise emission would alloc a temp
+	// per intermediate node; the fused path does one alloc + N memcpys.
+	// Length 2 falls through to the existing 2-way path (identical IR).
+	if e.Op == "++" && cg.isStringConcatNode(e) {
+		if chain := cg.flattenStringConcat(e); len(chain) >= 3 {
+			return cg.genFusedStringConcat(block, chain)
+		}
 	}
 
 	cg.curBlock = block
