@@ -164,5 +164,5 @@ test "coercion: float literal matches f32 lane" =
   assert::equals(v[0], 1.0)
 
 test "coercion: int literal matches i64 return value" =
-  fn ret42() i64 = return 42
+  let ret42 = fn() i64 = return 42
   assert::equals(ret42(), 42)

@@ -17,8 +17,7 @@ fn overwrite_string() =
   echo s2
 
 fn string_in_function_args() =
-  fn take_str(s string) string =
-    return s ++ " suffix"
+  let take_str = fn(s string) string = return s ++ " suffix"
   let base = "base"
   let r = take_str(base)
 

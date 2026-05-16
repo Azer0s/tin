@@ -11,6 +11,7 @@ use "./os_file"
 use "./os_process"
 use "./os_stat"
 use "./os_dirs"
+use "./os_platform"
 
 // Process control
 
@@ -68,5 +69,7 @@ export {
   // File system inspection (os_stat)
   FileInfo, stat, exists, is_dir, file_size,
   // Directory / path ops (os_dirs)
-  mkdir, remove, rmdir, rename
+  mkdir, remove, rmdir, rename,
+  // Host OS detection (os_platform)
+  platform
 } as os

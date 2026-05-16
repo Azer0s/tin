@@ -117,12 +117,11 @@ test "both struct and trait init are called" =
 
 test "both struct and trait deinit are called" =
   deinit_count = 0
-  fn run_deinit() void =
+  let run_deinit = fn() =
     let w2 = observable_widget{id: 2}
     let dummy i64 = w2.id
 
     echo dummy
-
   run_deinit()
   // struct deinit adds 10, trait deinit adds 1 => total 11
   assert::equals(deinit_count, 11)

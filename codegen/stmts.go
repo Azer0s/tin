@@ -1082,12 +1082,24 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		return block, false, nil
 
 	case *ast.FuncDecl:
-		// Nested function declaration - hoist to top level.
-		if err := cg.genFuncDecl(s); err != nil {
-			return nil, false, err
-		}
-
-		return block, false, nil
+		// Tin doesn't support a `fn name(...) =` declaration inside another
+		// function body.  The hoist-to-module-scope path that the old code
+		// took here silently produced TWO `define @name` IR entries when the
+		// outer fn was traversed by more than one codegen pass (e.g. the
+		// $colored predeclare loop), and `opt` rejects the redefinition.
+		// Reject at the source level with a redirect to the lambda form,
+		// which is the supported way to bind a callable in a local scope:
+		//
+		//   let name = fn(p1, p2, ...) RetTy = ...body...
+		//
+		// The lambda binds an ordinary local variable so it composes with
+		// the rest of the language (captures by closure, can be passed as
+		// an arg, lives in the let-scope) and has none of the duplicate-
+		// emission shape.
+		return nil, false, cg.nodeErr(s,
+			"`fn %s` inside a function body is not supported; "+
+				"use a lambda bound to a let:  let %s = fn(...) RetTy = ...body...",
+			s.Name, s.Name)
 
 	case *ast.TaggedBlock:
 		if hasTag(s.Tags, "unsafe") {

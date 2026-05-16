@@ -2794,6 +2794,14 @@ func memcheckCmdWithSuppressions(memcheck, binary string, vgSuppressions []strin
 // Note: leaks requires the foreground process group (Setpgid breaks it).
 func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	const leaksTimeout = 15 * time.Second
+	// After we give up on the leaks run and SIGKILL its children, the
+	// binary's atexit-injected analysis library can deadlock inside its
+	// own destructor and never let cmd.Wait() return.  Without an upper
+	// bound here the leaks step on the macOS GHA runner stalls for the
+	// full job timeout (we measured 4m+ on `Run example tests` with no
+	// progress and no terminator).  Cap the post-kill drain so the
+	// runner gives up after a bounded window and the test loop moves on.
+	const leaksKillDrain = 5 * time.Second
 
 	if memcheck != "leaks" {
 		return cmd.Run()
@@ -2813,7 +2821,13 @@ func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 	case <-time.After(leaksTimeout):
 		killLeaksTree(cmd.Process.Pid)
 
-		<-done
+		select {
+		case <-done:
+		case <-time.After(leaksKillDrain):
+			// Children refused to die even after SIGKILL.  Leak the
+			// goroutine -- it'll get GC'd on process exit -- and
+			// return so the test runner can continue.
+		}
 
 		return nil
 	}
