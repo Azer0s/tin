@@ -771,6 +771,15 @@ func (cg *CodeGen) ensureStrlenDecl() *ir.Func {
 		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
 }
 
+// ensureCStrLenDecl lazily declares `_tin_extern_cstr_len`, a NULL-safe
+// strlen used when wrapping C `char*` returns into Tin fat-string fat ptrs.
+// Returns 0 for a NULL input; defers to strlen otherwise.  Defined in
+// runtime.c.
+func (cg *CodeGen) ensureCStrLenDecl() *ir.Func {
+	return cg.ensureExternDecl("_tin_extern_cstr_len", irtypes.I64,
+		[]*ir.Param{ir.NewParam("s", irtypes.I8Ptr)}, false)
+}
+
 // extractFatPtrData extracts field 0 (the raw data pointer) from a fat-pointer
 // struct value. Works whether the value is a struct value or a pointer to one.
 func (cg *CodeGen) extractFatPtrData(block *ir.Block, val value.Value, st *irtypes.StructType) value.Value {
@@ -894,22 +903,50 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 	// raw pointer -> fat-pointer (non-handover string return): build {ptr, len}.
 	// Copy string data into an RC allocation so Tin can release it correctly.
 	// C retains ownership of the original; Tin has an independent RC=1 copy.
+	//
+	// Use _tin_extern_cstr_len (NULL-safe strlen wrapper) instead of bare
+	// strlen so that C APIs returning NULL for absent values -- getenv
+	// missing var, ttyname not a tty, readline EOF -- don't segfault when
+	// we wrap their return.  When len is 0 (input was NULL or empty C
+	// string) we materialize an empty fat string {NULL, 0} rather than
+	// rc_alloc'ing a 1-byte buffer just to copy the lone NUL terminator.
 	if _, ok := src.(*irtypes.PointerType); ok {
 		if tgtSt, ok2 := target.(*irtypes.StructType); ok2 && isFatPtrType(target) {
-			strlenFn := cg.ensureStrlenDecl()
+			cstrLenFn := cg.ensureCStrLenDecl()
 
 			rawI8Ptr := val
 			if !src.Equal(irtypes.I8Ptr) {
 				rawI8Ptr = block.NewBitCast(val, irtypes.I8Ptr)
 			}
 
-			// Compute length and copy into RC-managed allocation (+1 for null terminator).
-			length := block.NewCall(strlenFn, rawI8Ptr)
+			// length = 0 when rawI8Ptr is NULL (NULL-safe wrapper).
+			length := block.NewCall(cstrLenFn, rawI8Ptr)
 			allocSize := block.NewAdd(length, constant.NewInt(irtypes.I64, 1))
-			rcRaw := block.NewCall(cg.ensureRCAlloc(), allocSize)
-			block.NewCall(cg.ensureMemcpy(), rcRaw, rawI8Ptr, allocSize, constant.NewInt(irtypes.I1, 0))
 
-			// Coerce RC pointer to the type expected by fat-ptr field 0.
+			// Always allocate (size = len + 1).  When length == 0 (NULL or
+			// empty input) the alloc is just 1 byte -- a writable NUL
+			// terminator -- so we can safely memcpy with len bytes (zero
+			// bytes from NULL is a no-op; libc treats memcpy(_, NULL, 0)
+			// as valid by convention).  Avoid the bare 0-byte alloc path
+			// since RC headers need a real allocation to hang off of.
+			rcRaw := block.NewCall(cg.ensureRCAlloc(), allocSize)
+
+			// Avoid memcpy when input is NULL: undefined behavior on some
+			// libc impls.  Branch on length-as-proxy-for-non-null since we
+			// only get length > 0 on a valid non-empty C string.
+			isEmpty := block.NewICmp(enum.IPredEQ, length, constant.NewInt(irtypes.I64, 0))
+			// Materialize a non-null source for the memcpy path; the
+			// `select` keeps the branch off the IR critical path -- when
+			// isEmpty is true the dst gets one byte (the NUL we'll write
+			// below).
+			memcpyLen := block.NewSelect(isEmpty, constant.NewInt(irtypes.I64, 0), length)
+			block.NewCall(cg.ensureMemcpy(), rcRaw, rawI8Ptr, memcpyLen, constant.NewInt(irtypes.I1, 0))
+
+			// Write the trailing NUL ourselves so the RC buffer is a
+			// valid C string regardless of which path produced it.
+			nulGep := block.NewGetElementPtr(irtypes.I8, rcRaw, length)
+			block.NewStore(constant.NewInt(irtypes.I8, 0), nulGep)
+
 			var ptr value.Value = rcRaw
 			if !rcRaw.Type().Equal(tgtSt.Fields[0]) {
 				ptr = block.NewBitCast(rcRaw, tgtSt.Fields[0])

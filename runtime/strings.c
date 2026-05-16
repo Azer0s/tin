@@ -21,6 +21,15 @@ TinString _tin_str_from_cstr(const char *s) {
     return (TinString){ s, (int64_t)strlen(s) };
 }
 
+// NULL-safe strlen used by the codegen extern-return wrap path.  C string-
+// returning APIs (getenv, ttyname, readline, ...) often signal "absent" with
+// NULL; calling bare strlen on NULL is UB and segfaults on glibc / Darwin
+// libSystem.  Returns 0 for NULL so the wrap site can build an empty fat
+// string {NULL, 0} without crashing.
+int64_t _tin_extern_cstr_len(const char *s) {
+    return s == NULL ? 0 : (int64_t)strlen(s);
+}
+
 // Compare two strings
 int32_t _tin_str_eq(TinString a, TinString b) {
     if (a.len != b.len) return 0;

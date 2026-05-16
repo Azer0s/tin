@@ -3775,13 +3775,27 @@ func execRunBinary(bin, memcheck string, binArgs []string, vgSuppressions ...str
 		_ = os.Setenv("TIN_TEST_COLOR", "1")
 	}
 
-	if err := run.Run(); err != nil {
+	// Route through runMemcheck when a memcheck tool is active so the
+	// leaks(1) deadlock guard (15 s + 5 s drain) also covers single-file
+	// `tin run --leaks` invocations -- not just `tin test` ones.  Without
+	// this, the macOS leaks --atExit injection that suspends the target
+	// in T state and never SIGCONTs it would hang `tin run` forever, and
+	// shell-out callers (test fixtures using run_tin_flags) inherit the
+	// hang.
+	var runErr error
+	if memcheck != "" {
+		runErr = runMemcheck(memcheck, run)
+	} else {
+		runErr = run.Run()
+	}
+
+	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(runErr, &exitErr) {
 			os.Exit(exitErr.ExitCode())
 		}
 
-		die("run error: %v", err)
+		die("run error: %v", runErr)
 	}
 }
 

@@ -87,6 +87,7 @@ const char      *_tin_f128_to_cstr(tin_fp128_t v);
 // -- Strings
 TinString _tin_str_concat(TinString a, TinString b);
 TinString _tin_str_from_cstr(const char *s);
+int64_t   _tin_extern_cstr_len(const char *s);
 int32_t   _tin_str_eq(TinString a, TinString b);
 TinString _tin_string_from_bytes(const char *ptr, int64_t len);
 const char *_tin_string_data(TinString s);
