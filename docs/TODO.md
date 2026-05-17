@@ -51,11 +51,11 @@ checker MUST verify it covers the destination type's bytecount.
 
 Categories:
 
-**Always-correct (silent)** — `mem::malloc(sizeof([T; N]))` or
+**Always-correct (silent)** - `mem::malloc(sizeof([T; N]))` or
 `mem::malloc(K)` where the literal K equals `sizeof(T) * N`.
 Accept without warning.
 
-**Statically-wrong (hard error)** — same shape, but K is less than
+**Statically-wrong (hard error)** - same shape, but K is less than
 `sizeof(T) * N`.
 
 ```
@@ -67,7 +67,7 @@ L |   let arr = p as *[i64; 16]
   |             ^
 ```
 
-**Indeterminate (silent default, pedantic warning)** — K is a
+**Indeterminate (silent default, pedantic warning)** - K is a
 runtime value (parameter, computation involving non-constants).
 Under `-Wpedantic` emit a `unchecked-alloc-cast` warning suggesting
 the user write the size via `sizeof([T; N])` so the verifier can
@@ -75,24 +75,24 @@ prove the match.
 
 ### Implementation outline
 
-1. **Type checker** — extend the `as` resolver to accept
+1. **Type checker** - extend the `as` resolver to accept
    `*void -> *[T; N]` (and equivalently `*T -> *[T; N]` where T
    matches the element type).  Reject all other shapes (no
    `*void as [T; N]`, no `*void as [T]`, no `*void as *<incomplete>`).
 
-2. **Element-type restriction** — at the cast site, refuse T that
+2. **Element-type restriction** - at the cast site, refuse T that
    contains ARC-tracked types (`string`, `[T]`, `any`, `*Struct`
    pointing into ARC space, fat-fn-ptr).  Fixed-size arrays of
    primitives and `#no_arc`-tagged structs are accepted.  Without
    this gate, code could obtain a `*[*Struct; N]` cast and walk
    into ARC release at scope-exit on uninitialised memory.
 
-3. **Size dataflow trace** — at the cast site, walk the receiver:
-   - `*ast.Identifier` → look up the binding's init expression in
+3. **Size dataflow trace** - at the cast site, walk the receiver:
+   - `*ast.Identifier` -> look up the binding's init expression in
      a per-fn map populated during VarDecl walks (similar shape to
      `cg.manualAllocSites`).
    - If init is `mem::malloc(<const>)` / `mem::calloc(<const>, <const>)`
-     / `mem::realloc(_, <const>)` / `mem::alloc[U]()` — record the
+     / `mem::realloc(_, <const>)` / `mem::alloc[U]()` - record the
      allocation byte count.
    - Compare against `sizeof([T; N])`.  Emit error on mismatch.
 
@@ -100,11 +100,11 @@ prove the match.
    or the size argument is a non-constant), fall through to the
    pedantic warning path.
 
-4. **`sizeof` of fixed-size arrays** — verify codegen lowers
+4. **`sizeof` of fixed-size arrays** - verify codegen lowers
    `sizeof([T; N])` to a compile-time constant (it should; the
    array type is monomorphic).
 
-5. **Stdlib re-add** — once (1)-(4) are in, restore `alloc[t](n)`
+5. **Stdlib re-add** - once (1)-(4) are in, restore `alloc[t](n)`
    in `stdlib/mem/mem.tin` as:
 
    ```tin
@@ -129,14 +129,14 @@ prove the match.
   boundary, etc.).
 
 - **`mem::realloc` interactions**: `let p = mem::malloc(64);
-  p = mem::realloc(p, 128); let arr = p as *[i64; 16]` — the
+  p = mem::realloc(p, 128); let arr = p as *[i64; 16]` - the
   size is the realloc's new_size, not malloc's.  The dataflow
   trace has to follow the latest assignment.  Already handled by
   the `manualAlloc` lattice's reassign-clears-state logic; just
   needs the size map to reset on AssignStmt as well.
 
 - **Cast through `as *T`**: should `let q = p as *i64; let arr = q
-  as *[i64; 16]` work?  Probably yes — the underlying allocation
+  as *[i64; 16]` work?  Probably yes - the underlying allocation
   doesn't change.  The trace would need to follow non-`*void`
   pointer aliases as well.  Defer until the simple case is in.
 

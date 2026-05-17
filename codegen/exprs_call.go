@@ -253,7 +253,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					if name, found := typeSubst[tp]; found {
-						instKey += name
+						instKey += name.Canon
 					} else {
 						instKey += tp
 					}
@@ -452,19 +452,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				concreteName := staticName + "__" + strings.Join(resolvedParts, "__")
-				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+				if cg.structTypeFor(CanonKey(concreteName)) == nil {
 					if _, isGeneric := cg.genericStructsByArity[staticName]; isGeneric {
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: staticName, TypeParams: typeArgTEs},
 						}
 						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+							return nil, cg.nodeErr(e, "instantiating %s: %v", cg.diagStructName(concreteName), mErr)
 						}
 					}
 				}
 
-				if _, exists := cg.structTypes[concreteName]; exists {
+				if cg.structTypeFor(CanonKey(concreteName)) != nil {
 					methodKey = concreteName + "_" + fn.Field
 					staticName = concreteName
 				}
@@ -488,9 +488,9 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				best := cg.resolveOverload(variants, llArgs)
 				if best == nil {
-					typeName := prettyStructName(baseStaticName)
+					typeName := cg.diagStructName(baseStaticName)
 					if typeArgStr != "" {
-						typeName = prettyStructName(baseStaticName) + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
+						typeName = cg.diagStructName(baseStaticName) + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
 					}
 
 					return nil, cg.nodeErr(e, "no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
@@ -662,7 +662,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			best := cg.resolveOverload(variants, argVals)
 			if best == nil {
-				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", prettyStructName(structName), fn.Field, len(argVals))
+				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", cg.diagStructName(structName), fn.Field, len(argVals))
 			}
 
 			oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -774,7 +774,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					if name, found := typeSubst[tp]; found {
-						instKey += name
+						instKey += name.Canon
 					} else {
 						instKey += tp
 					}
@@ -916,8 +916,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					if cg.returnTypeHint == nil {
 						return nil, cg.nodeErr(e,
 							"%s.%s has a wildcard slot in its return type that needs context to fill (a let-binding type annotation, the enclosing function's return type, or an argument type expectation). Annotate the receiving binding (e.g. `let x %s = ...`) or call the method through `try` inside a function whose return type fixes the slot.",
-							prettyStructName(structName), strings.TrimPrefix(methodName, structName+"_"),
-							prettyStructName(structName))
+							cg.diagStructName(structName), strings.TrimPrefix(methodName, structName+"_"),
+							cg.diagStructName(structName))
 					}
 
 					if !cg.returnTypeHint.Equal(f.Sig.RetType) {
@@ -991,14 +991,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 		if witnesses, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
 			return nil, cg.nodeErr(e, "%s.%s %s",
-				prettyStructName(structName), fn.Field, formatStripWitnesses(witnesses))
+				cg.diagStructName(structName), fn.Field, formatStripWitnesses(witnesses))
 		}
 
 		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
-			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", prettyStructName(structName), fn.Field)
+			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", cg.diagStructName(structName), fn.Field)
 		}
 
-		return nil, cg.nodeErr(e, "undefined method: %s.%s", prettyStructName(structName), fn.Field)
+		return nil, cg.nodeErr(e, "undefined method: %s.%s", cg.diagStructName(structName), fn.Field)
 
 	case *ast.ScopeAccess:
 		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
@@ -1071,12 +1071,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
-					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					if cg.structTypeFor(CanonKey(concreteName)) == nil {
 						if mErr := cg.genTypeDecl(&ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 						}); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+							return nil, cg.nodeErr(e, "instantiating %s: %v", cg.diagStructName(concreteName), mErr)
 						}
 					}
 
@@ -1099,7 +1099,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
 							return nil, cg.nodeErr(e, "no matching overload for %s[%s]::%s (got %d arg(s))",
-								prettyStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
+								cg.diagStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -1318,7 +1318,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// substituted (e.g. a recursive call like _encode_any[T](...) inside
 			// _encode_any__jt_rect), resolve it to the concrete type so we don't
 			// create a self-referential alias ("T" -> "T") that causes infinite recursion.
-			if alias, ok := cg.typeAliases[typeArgName]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(typeArgName)); alias != nil {
 				if st, ok2 := alias.(*ast.SimpleType); ok2 && st.Name != typeArgName {
 					typeArgName = st.Name
 				}
@@ -1387,7 +1387,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if isGeneric && len(tmpl.TypeParams) > 0 {
-					typeSubst := map[string]string{tmpl.TypeParams[0]: typeArgName}
+					typeSubst := map[string]TypeName{tmpl.TypeParams[0]: cg.typeNameFromCanon(typeArgName)}
 					instKey := typeArgName
 
 					concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
@@ -1526,7 +1526,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", pt.ElemType)
 		}
 	} else {
-		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", fmtArgType(callee.Type()))
+		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", cg.fmtArgType(callee.Type()))
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
@@ -1599,8 +1599,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if !srcEl.Equal(tgtEl) && !srcEl.Equal(irtypes.I8) {
 					return nil, cg.nodeErr(e,
 						"argument %d: cannot pass [%s] where [%s] is expected; use %q to convert",
-						i+1, fmtArgType(srcEl), fmtArgType(tgtEl),
-						"arg as ["+fmtArgType(tgtEl)+"]")
+						i+1, cg.fmtArgType(srcEl), cg.fmtArgType(tgtEl),
+						"arg as ["+cg.fmtArgType(tgtEl)+"]")
 				}
 
 				continue
@@ -1650,7 +1650,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			return nil, cg.nodeErr(e,
 				"argument %d: cannot pass %s where %s is expected",
-				i+1, fmtArgType(arg.Type()), fmtArgType(pt))
+				i+1, cg.fmtArgType(arg.Type()), cg.fmtArgType(pt))
 		}
 	}
 
@@ -1825,7 +1825,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 	if enumBaseName != "" {
 		key := enumBaseName + "." + e.Field
 		if val, ok2 := cg.enumValues[key]; ok2 {
-			baseType := cg.enumTypes[enumBaseName]
+			baseType := cg.enumTypeFor(CanonKey(enumBaseName))
 			if it, ok3 := baseType.(*irtypes.IntType); ok3 {
 				return constant.NewInt(it, val), nil
 			}
@@ -1893,7 +1893,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 	}
 
 	// Handle field access on %S.native values: embedded cLayoutStruct fields.
@@ -1905,7 +1905,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(baseName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 		}
 
 		nativeSt := cg.nativeStructTypes[baseName]
@@ -1920,7 +1920,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 	}
 
 	if cg.cLayoutStructs[structName] {
@@ -1930,7 +1930,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		fieldIdx := cg.nativeFieldIndex(structName, e.Field)
 		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
+			return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 		}
 
 		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
@@ -1952,7 +1952,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			return bm, nil
 		}
 
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
+		return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 	}
 
 	// We need a pointer to the struct to do GEP.
@@ -2348,7 +2348,7 @@ func (cg *CodeGen) wrapFatFnPtrAddrAsCCallbackPtr(
 	if err != nil {
 		return nil, cg.nodeErr(callExpr,
 			"argument %d to extern %q: cannot build closure dispatcher for %s: %v",
-			paramIdx+1, calleeFn.Name(), fmtArgType(arg.Type()), err)
+			paramIdx+1, calleeFn.Name(), cg.fmtArgType(arg.Type()), err)
 	}
 
 	argPt := arg.Type().(*irtypes.PointerType)
@@ -2417,7 +2417,7 @@ func (cg *CodeGen) wrapFatFnPtrAsCCallback(
 	if err != nil {
 		return nil, cg.nodeErr(callExpr,
 			"argument %d to extern %q: cannot build closure dispatcher for %s: %v",
-			paramIdx+1, calleeFn.Name(), fmtArgType(arg.Type()), err)
+			paramIdx+1, calleeFn.Name(), cg.fmtArgType(arg.Type()), err)
 	}
 
 	// C trampolines can't run coros -- pull the non-colored sync variant (slot 0).

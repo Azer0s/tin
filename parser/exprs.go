@@ -1624,7 +1624,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 		// Parse the future operand as primary + chain up to (and including)
 		// the first CallExpr.  This makes `await EXPR.method()` parse as
-		// `(await EXPR.method()).method()` — the chain after the awaited
+		// `(await EXPR.method()).method()` - the chain after the awaited
 		// call applies to the Result/value, not the Future.  Use parens to
 		// override (`await (x.y().z())` still awaits the full chain).
 		fut, err := p.parsePostfixOpt(true)

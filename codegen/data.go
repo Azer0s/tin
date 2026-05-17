@@ -446,7 +446,7 @@ func (cg *CodeGen) genDataDecl(n *ast.DataDecl) error {
 		}
 	}
 
-	cg.dataDecls[n.Name] = n
+	cg.recordData(CanonKey(n.Name), n)
 
 	if len(n.TypeParams) > 0 {
 		// Generic ADTs are emitted on-demand during monomorphization. Each
@@ -636,7 +636,7 @@ func (cg *CodeGen) monomorphizeDataDecl(tmpl *ast.DataDecl, typeArgs []ast.TypeE
 			substituteMethod(m, tmpl.Name, concreteName, subst))
 	}
 
-	cg.dataDecls[concreteName] = concrete
+	cg.recordData(CanonKey(concreteName), concrete)
 
 	for _, v := range concrete.Variants {
 		cg.dataVariantLookup[v.Name] = appendUnique(cg.dataVariantLookup[v.Name], concreteName)
@@ -769,11 +769,11 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 
 	payloadArr := irtypes.NewArray(maxSize, irtypes.I8)
 
-	st := cg.structTypes[name]
+	st := cg.structTypeFor(CanonKey(name))
 	if st == nil {
 		st = irtypes.NewStruct()
 		st.SetName(name)
-		cg.structTypes[name] = st
+		cg.recordLLVM(CanonKey(name), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 
@@ -824,7 +824,7 @@ func (cg *CodeGen) wrapDataVariant(block *ir.Block, adtName, variantName string,
 			adtName, variantName, len(vi.Fields), len(args))
 	}
 
-	outerSt := cg.structTypes[adtName]
+	outerSt := cg.structTypeFor(CanonKey(adtName))
 	if outerSt == nil {
 		return nil, fmt.Errorf("data %s: outer LLVM struct missing", adtName)
 	}
@@ -937,22 +937,22 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 	// is not registered under its qualified key.  ADTs live in a flat
 	// namespace; qualification is a disambiguation hint, not a separate
 	// declaration.
-	if _, ok := cg.dataDecls[adtName]; !ok {
+	if cg.dataDeclFor(CanonKey(adtName)) == nil {
 		if idx := strings.LastIndex(adtName, "::"); idx >= 0 {
 			bare := adtName[idx+2:]
-			if _, ok2 := cg.dataDecls[bare]; ok2 {
+			if cg.dataDeclFor(CanonKey(bare)) != nil {
 				adtName = bare
 			}
 		}
 	}
 
-	if _, ok := cg.dataDecls[adtName]; !ok {
+	if cg.dataDeclFor(CanonKey(adtName)) == nil {
 		return nil, false, nil
 	}
 
 	// Concrete instance: Option[i32]::Some -> concrete Option__i32.
 	if typeParamStr != "" {
-		tmpl := cg.dataDecls[adtName]
+		tmpl := cg.dataDeclFor(CanonKey(adtName))
 		if tmpl == nil {
 			return nil, true, fmt.Errorf("data %s: template not found", adtName)
 		}
@@ -970,7 +970,7 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		}
 
 		concreteName := adtName + "__" + strings.Join(resolvedParts, "__")
-		if _, done := cg.structTypes[concreteName]; !done {
+		if cg.structTypeFor(CanonKey(concreteName)) == nil {
 			if err := cg.monomorphizeDataDecl(tmpl, resolvedTEs, concreteName); err != nil {
 				return nil, true, err
 			}

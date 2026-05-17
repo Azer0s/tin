@@ -459,7 +459,7 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 	}
 
 	concreteName := v.TypeName
-	if _, has := cg.structTypes[concreteName]; !has {
+	if cg.structTypeFor(CanonKey(concreteName)) == nil {
 		return nil
 	}
 	// Refuse to fold structs whose runtime construction does more than

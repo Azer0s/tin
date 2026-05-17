@@ -159,7 +159,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		// wrapper on the fly so that field accesses through the parameter work.
 		if ptrTe, isPtrType := p.Type.(*ast.PointerType); isPtrType {
 			if stTe, isSimple := ptrTe.Elem.(*ast.SimpleType); isSimple && cg.cLayoutStructs[stTe.Name] {
-				wrapperSt := cg.structTypes[stTe.Name]
+				wrapperSt := cg.structTypeFor(CanonKey(stTe.Name))
 				wrapperAlloca := entry.NewAlloca(wrapperSt)
 				entry.NewStore(constant.NewZeroInitializer(wrapperSt), wrapperAlloca)
 
@@ -925,11 +925,11 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 // Falls back to "Unit" for pre-compiled .tin.mod scenarios.
 func (cg *CodeGen) canonicalUnitStructName() string {
 	// Prefer the canonical package-prefixed name.
-	if _, ok := cg.structTypes["sync__Unit"]; ok {
+	if cg.structTypeFor(CanonKey("sync__Unit")) != nil {
 		return "sync__Unit"
 	}
 	// Try the type alias (covers pre-compiled mod scenarios).
-	if alias, ok := cg.typeAliases["sync::Unit"]; ok {
+	if alias := cg.aliasTypeFor(CanonKey("sync::Unit")); alias != nil {
 		if simple, ok2 := alias.(*ast.SimpleType); ok2 {
 			return simple.Name
 		}
@@ -962,7 +962,7 @@ func (cg *CodeGen) wrapPidInFuture(block *ir.Block, pid value.Value, calleeName 
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
 	futureConcreteName := "Future__" + retTypeStr
-	if _, exists := cg.structTypes[futureConcreteName]; !exists {
+	if cg.structTypeFor(CanonKey(futureConcreteName)) == nil {
 		futureASTType := &ast.GenericType{
 			Name:       "Future",
 			TypeParams: []ast.TypeExpr{retTypeExpr},
@@ -1890,7 +1890,7 @@ func (cg *CodeGen) genSpawnExpr(block *ir.Block, e *ast.SpawnExpr) (value.Value,
 				}
 
 				if name, found := typeSubst[tp]; found {
-					instKey += name
+					instKey += name.Canon
 				} else {
 					instKey += tp
 				}
@@ -2116,7 +2116,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 		dataPtr := block.NewExtractValue(objVal, 0)
 		vtablePtr := block.NewExtractValue(objVal, 1)
 
-		vtableSt := cg.traitVtableStructTypes[instKey]
+		vtableSt := cg.vtableFor(CanonKey(instKey))
 		fnPtrGep := block.NewGetElementPtr(vtableSt, vtablePtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(coroSlotIdx)))
 		coroSlotFnPtrType := vtableSt.Fields[coroSlotIdx].(*irtypes.PointerType)
@@ -2161,7 +2161,7 @@ func (cg *CodeGen) genSpawnMethodExpr(block *ir.Block, callNode *ast.CallExpr, f
 	}
 
 	if structName == "" {
-		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", fmtArgType(objVal.Type()))
+		return nil, fmt.Errorf("spawn: cannot determine struct type for method call on %s", cg.fmtArgType(objVal.Type()))
 	}
 
 	// Check if fa.Field is an async fat-fn-ptr struct field (not a method).
@@ -2318,7 +2318,7 @@ func (cg *CodeGen) wrapPidInFutureWithLLVMType(block *ir.Block, pid value.Value,
 
 	// Ensure Future[retType] is instantiated via on-demand monomorphization.
 	futureConcreteName := "Future__" + retTypeStr
-	if _, exists := cg.structTypes[futureConcreteName]; !exists {
+	if cg.structTypeFor(CanonKey(futureConcreteName)) == nil {
 		retTypeExpr := &ast.SimpleType{Name: retTypeStr}
 
 		futureASTType := &ast.GenericType{
@@ -2767,7 +2767,7 @@ func (cg *CodeGen) callGenericFromMap(
 		}
 
 		if name, found := typeSubst[tp]; found {
-			instKey += name
+			instKey += name.Canon
 		} else {
 			instKey += tp
 		}

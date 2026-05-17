@@ -272,7 +272,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 			if name := cg.noCopyValueTypeName(p.Type); name != "" {
 				return cg.nodeErr(n,
 					"function %s parameter %q has type %s which is #no_copy: pass *%s instead",
-					n.Name, p.Name, prettyStructName(name), prettyStructName(name))
+					n.Name, p.Name, cg.diagStructName(name), cg.diagStructName(name))
 			}
 		}
 
@@ -292,7 +292,7 @@ func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 		if name := cg.noCopyValueTypeName(n.RetType); name != "" {
 			return cg.nodeErr(n,
 				"function %s returns %s by value, but %s is #no_copy: return *%s instead",
-				n.Name, prettyStructName(name), prettyStructName(name), prettyStructName(name))
+				n.Name, cg.diagStructName(name), cg.diagStructName(name), cg.diagStructName(name))
 		}
 
 		var err error
@@ -512,7 +512,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			structKey := cg.pkgStructKey(n.Name)
 			st := irtypes.NewStruct()
 			st.SetName(structKey)
-			cg.structTypes[structKey] = st
+			cg.recordLLVM(CanonKey(structKey), st)
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 			// Register a bare-name alias so that code referencing the short form
 			// (e.g. "Parser" inside yaml, "Unit" inside sync) resolves to the
@@ -520,7 +520,8 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			// definition takes precedence over a same-named type from an earlier
 			// package loaded in the same scope.
 			if cg.currentPkg != "" {
-				cg.typeAliases[n.Name] = &ast.SimpleType{Name: structKey}
+				cg.recordAliasType(CanonKey(n.Name), &ast.SimpleType{Name: structKey})
+				cg.recordAlias(CanonKey(structKey), n.Name)
 			}
 		}
 
@@ -537,7 +538,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		// Register an opaque struct so forward references work.
 		st := irtypes.NewStruct()
 		st.SetName(n.Name)
-		cg.structTypes[n.Name] = st
+		cg.recordLLVM(CanonKey(n.Name), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	case *ast.DataDecl:
 		// Register an opaque struct for non-generic ADTs so forward references
@@ -548,7 +549,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		if len(n.TypeParams) == 0 {
 			st := irtypes.NewStruct()
 			st.SetName(n.Name)
-			cg.structTypes[n.Name] = st
+			cg.recordLLVM(CanonKey(n.Name), st)
 			cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 
 			for _, v := range n.Variants {
@@ -556,7 +557,7 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 			}
 		}
 
-		cg.dataDecls[n.Name] = n
+		cg.recordData(CanonKey(n.Name), n)
 		cg.curScope.markTypeVisible(n.Name)
 	case *ast.TypeDecl:
 		// Simple type aliases (type char = u8) go straight into typeAliases.
@@ -565,10 +566,10 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 		// Struct-monomorphization aliases (type point = tuple[f32]) are handled
 		// in genTypeDecl so that all struct templates are known first.
 		if ut, isUnion := n.Type.(*ast.UnionTypeExpr); isUnion {
-			if _, exists := cg.structTypes[n.Name]; !exists {
+			if cg.structTypeFor(CanonKey(n.Name)) == nil {
 				st := irtypes.NewStruct()
 				st.SetName(n.Name)
-				cg.structTypes[n.Name] = st
+				cg.recordLLVM(CanonKey(n.Name), st)
 				cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 			}
 			// Populate unionTypeMembers here so that downstream constraint
@@ -582,15 +583,26 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 				cg.unionTypeMembers[n.Name] = ut.Types
 			}
 		} else if _, isGeneric := n.Type.(*ast.GenericType); !isGeneric {
-			cg.typeAliases[n.Name] = n.Type
+			cg.recordAliasType(CanonKey(n.Name), n.Type)
 		}
 
 		cg.curScope.markTypeVisible(n.Name)
 	case *ast.TraitDecl:
-		cg.traits[n.Name] = n
+		cg.recordTrait(CanonKey(n.Name), n)
+
 		if cg.currentPkg != "" {
 			qualInstKey := cg.currentPkg + "__" + n.Name
 			cg.traitBareToQualInstKey[n.Name] = qualInstKey
+
+			displayPkg := cg.currentPkgPath
+			if displayPkg == "" {
+				displayPkg = cg.currentPkg
+			}
+			// Register the qualified form so callers asking for the
+			// trait by `pkg__Trait` canonical key get the source-form
+			// `pkg::Trait` display back without any reconstruction.
+			cg.recordDisplay(CanonKey(qualInstKey), displayPkg+"::"+n.Name)
+			cg.recordTrait(CanonKey(qualInstKey), n)
 		}
 
 		cg.curScope.markTypeVisible(n.Name)
@@ -1298,26 +1310,6 @@ func formatStripWitnesses(witnesses []string) string {
 	return "doesn't match any of: " + strings.Join(witnesses, ", ")
 }
 
-// prettyStructName renders an IR-mangled generic instantiation name
-// (e.g. "Box__bool", "Channel__string") back into the source-syntax
-// form ("Box[bool]", "Channel[string]"). Multi-arg generics use the
-// double-underscore separator inside the brackets too:
-// "HashMap__string__i64" -> "HashMap[string, i64]".
-//
-// Plain (non-generic) struct names pass through unchanged.
-func prettyStructName(s string) string {
-	idx := strings.Index(s, "__")
-	if idx < 0 {
-		return s
-	}
-
-	base := s[:idx]
-	rest := s[idx+2:]
-	args := strings.ReplaceAll(rest, "__", ", ")
-
-	return base + "[" + args + "]"
-}
-
 // methodConstraintWitness reports whether every where-clause on a generic
 // struct method holds under the given type-parameter substitution. Returns
 // an empty string when all constraints hold (the method survives), or a
@@ -1575,10 +1567,13 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		// dataInstShape carries the original TypeExpr list, so we
 		// rebuild the GenericType exactly.
 		var concreteExpr ast.TypeExpr
-		if shape, ok := cg.dataInstShape[structName]; ok {
+		if shape, ok := cg.instShapeFor(CanonKey(structName)); ok {
 			concreteExpr = &ast.GenericType{Name: shape.Tmpl, TypeParams: shape.Args}
 		} else {
-			concreteExpr = parseTypeParamStr(prettyStructName(structName))
+			// Fallback when no structured shape was recorded: build the
+			// TypeExpr directly via the same `__`-split heuristic
+			// previously routed through parseTypeParamStr(prettyStructName(...)).
+			concreteExpr = canonNameToTypeExpr(structName)
 		}
 
 		if typeExprStructuralMatch(concreteExpr, traitExpr) {
@@ -1630,8 +1625,8 @@ func (cg *CodeGen) structSatisfiesConstraint(structName string, traitExpr ast.Ty
 		return false
 	}
 
-	td, ok := cg.traits[traitName]
-	if !ok {
+	td := cg.traitFor(CanonKey(traitName))
+	if td == nil {
 		// Not a declared trait or union alias: type-equality constraint.
 		// "where t is i64" is satisfied iff concreteName == "i64".
 		return traitName == structName

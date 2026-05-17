@@ -92,7 +92,7 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 			// the package finishes loading. The IR functions live on in
 			// the module though, so look them up by their fully-qualified
 			// IR name via dataDecls[typeName].Methods.
-			if dd, ok := cg.dataDecls[typeName]; ok {
+			if dd := cg.dataDeclFor(CanonKey(typeName)); dd != nil {
 				for _, m := range dd.Methods {
 					if m.Name != methodName {
 						continue
@@ -187,7 +187,14 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	// ensureWildcardMono. When the types do match (or the impl didn't
 	// opt in via a wildcard bound), fall back to the direct call.
 	monoTarget := irtypes.Type(nil)
-	if cg.curFn != nil {
+	// Inside a coro-transformed async fn, curFn.Sig.RetType is the
+	// continuation-frame i8*, not the user-visible Tin return type.
+	// Prefer curCoroRetType (set by coro.go around the body emit) so
+	// `try` against an async fn returning Result[T, Err] resolves the
+	// wildcard mono against the real Result type instead of i8*.
+	if cg.curCoroRetType != nil && !irtypes.IsVoid(cg.curCoroRetType) {
+		monoTarget = cg.curCoroRetType
+	} else if cg.curFn != nil {
 		monoTarget = cg.curFn.Sig.RetType
 	}
 
@@ -204,18 +211,30 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		cg.emitRelease(blk, loaded)
 	}
 
+	// emitPropagatingReturn finalizes the err-branch by returning retVal.
+	// Inside a coro fn the LLVM signature is i8* and direct NewRet won't
+	// type-check, so the value has to flow through emitCoroComplete +
+	// emitFinalSuspend the same way an explicit `return X` does in
+	// genCoroReturn.
+	emitPropagatingReturn := func(blk *ir.Block, retVal value.Value) {
+		emitTempRelease(blk)
+		cg.emitAllScopeReleases(blk, "")
+
+		if cg.inCoroFn {
+			cg.emitCoroComplete(blk, retVal)
+			cg.emitFinalSuspend(blk, cg.curCoroFrame)
+
+			return
+		}
+
+		blk.NewRet(retVal)
+	}
+
 	monoFn, monoOK := cg.ensureWildcardMono(typeName, "err_value", srcType, monoTarget)
 	if monoOK {
 		thisArg := errBlock.NewLoad(srcType, tempStorage)
 		rewrapped := errBlock.NewCall(monoFn, thisArg)
-		emitTempRelease(errBlock)
-		// Run scope releases before the propagating return.  The
-		// surrounding function's RC locals (string params, closure
-		// envs, etc.) need to be cleaned up exactly as on a normal
-		// `return <expr>` path; skipping them here was leaking those
-		// allocations on any `try expr` early return.
-		cg.emitAllScopeReleases(errBlock, "")
-		errBlock.NewRet(rewrapped)
+		emitPropagatingReturn(errBlock, rewrapped)
 	} else {
 		_, errVal, err := callMethod(errBlock, "err_value")
 		if err != nil {
@@ -229,16 +248,14 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		// letting the LLVM verifier surface a mangled-typename
 		// mismatch from the temp .ll file.
 		if monoTarget != nil && !errVal.Type().Equal(monoTarget) {
-			pretty := prettyStructName(typeName)
+			pretty := cg.diagStructName(typeName)
 
 			return nil, cg.nodeErr(e,
 				"`try`: cannot propagate %s through a function returning %s. The impl of tryable on %s did not declare a wildcard slot in its trait bound, so the success type cannot be re-bound at this call site. Add the wildcard (e.g. change the trait bound to `tryable[V, %s[_, ...]]`) or convert the value explicitly with .map / .map_err.",
-				fmtArgType(errVal.Type()), fmtArgType(monoTarget), pretty, pretty)
+				cg.fmtArgType(errVal.Type()), cg.fmtArgType(monoTarget), pretty, pretty)
 		}
 
-		emitTempRelease(errBlock)
-		cg.emitAllScopeReleases(errBlock, "")
-		errBlock.NewRet(errVal)
+		emitPropagatingReturn(errBlock, errVal)
 	}
 
 	// Ok branch: call ok_value, that's the value of the try expression.
@@ -317,7 +334,7 @@ func (cg *CodeGen) ensureWildcardMono(typeName, methodName string, srcType, targ
 		// fallback above - the plain alias died with the foreign
 		// package's scope, but the impl's IR func survives in the
 		// module under its trait-qualified name.
-		if dd, ok := cg.dataDecls[typeName]; ok {
+		if dd := cg.dataDeclFor(CanonKey(typeName)); dd != nil {
 			for _, m := range dd.Methods {
 				if m.Name != methodName {
 					continue
@@ -442,12 +459,12 @@ func (cg *CodeGen) emitAwaitableLoop(block *ir.Block, val value.Value, readyFn, 
 func (cg *CodeGen) adtImplHasWildcardBound(adtName, traitBaseName string) bool {
 	decls := []*ast.DataDecl{}
 
-	if d := cg.dataDecls[adtName]; d != nil {
+	if d := cg.dataDeclFor(CanonKey(adtName)); d != nil {
 		decls = append(decls, d)
 	}
 
 	if idx := strings.Index(adtName, "__"); idx > 0 {
-		if d := cg.dataDecls[adtName[:idx]]; d != nil {
+		if d := cg.dataDeclFor(CanonKey(adtName[:idx])); d != nil {
 			decls = append(decls, d)
 		}
 	}
@@ -609,7 +626,7 @@ func (cg *CodeGen) rewrapTryable(block *ir.Block, inner value.Value, target irty
 		return compatibleArms[i].innerInfo.Tag < compatibleArms[j].innerInfo.Tag
 	})
 
-	innerOuterSt := cg.structTypes[innerName]
+	innerOuterSt := cg.structTypeFor(CanonKey(innerName))
 	if innerOuterSt == nil {
 		return nil, nil, false
 	}
@@ -1341,8 +1358,8 @@ func (cg *CodeGen) astInferTypeWithPattern(node ast.Node, pattern ast.Node) irty
 // collectPatternBindingTypes walks a StructPattern and fills bindings with the
 // LLVM type for each free or renamed field, recursing into nested patterns.
 func (cg *CodeGen) collectPatternBindingTypes(sp *ast.StructPattern, bindings map[string]irtypes.Type) {
-	llvmType, ok := cg.structTypes[sp.TypeName]
-	if !ok {
+	llvmType := cg.structTypeFor(CanonKey(sp.TypeName))
+	if llvmType == nil {
 		return
 	}
 
@@ -1725,7 +1742,7 @@ func (cg *CodeGen) genFusedStringConcat(block *ir.Block, leaves []ast.Node) (val
 			// Shouldn't happen given isStringConcatNode's type guard; fall
 			// back to a clear error rather than emitting malformed IR.
 			return nil, cg.nodeErr(leaf,
-				"`++` chain leaf must be a string, got %s", fmtArgType(v.Type()))
+				"`++` chain leaf must be a string, got %s", cg.fmtArgType(v.Type()))
 		}
 
 		parts = append(parts, part{
@@ -2109,13 +2126,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 				"`++` is slice concat: both sides must be the same slice "+
 					"type, got %s ++ %s. To prepend or append a single value, "+
 					"wrap it as a one-element slice: `[v] ++ xs` or `xs ++ [v]`",
-				fmtArgType(left.Type()), fmtArgType(right.Type()))
+				cg.fmtArgType(left.Type()), cg.fmtArgType(right.Type()))
 		}
 
 		if leftIsArr && rightIsArr && !left.Type().Equal(right.Type()) {
 			return nil, cg.nodeErr(e,
 				"`++` requires matching slice element types, got %s ++ %s",
-				fmtArgType(left.Type()), fmtArgType(right.Type()))
+				cg.fmtArgType(left.Type()), cg.fmtArgType(right.Type()))
 		}
 		// Typed array concatenation: {T*, i64} ++ {T*, i64} -> {T*, i64}
 		// (strings {i8*, i64} are handled by the string path below)

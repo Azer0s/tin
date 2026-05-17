@@ -203,8 +203,8 @@ func (cg *CodeGen) adtVariantFieldTypes(slot ast.TypeExpr, value ast.Node) []str
 		return nil
 	}
 
-	decl, ok := cg.dataDecls[gt.Name]
-	if !ok {
+	decl := cg.dataDeclFor(CanonKey(gt.Name))
+	if decl == nil {
 		return nil
 	}
 
@@ -299,8 +299,8 @@ func (cg *CodeGen) variantArgTypeExpr(slot ast.TypeExpr, value ast.Node, i int) 
 		return nil
 	}
 
-	decl, ok := cg.dataDecls[gt.Name]
-	if !ok || len(decl.TypeParams) != len(gt.TypeParams) {
+	decl := cg.dataDeclFor(CanonKey(gt.Name))
+	if decl == nil || len(decl.TypeParams) != len(gt.TypeParams) {
 		return nil
 	}
 
@@ -470,7 +470,7 @@ func (cg *CodeGen) asyncFuncDeclForCall(ce *ast.CallExpr) *ast.FuncDecl {
 			}
 
 			prefix := strings.TrimSuffix(key, suffix)
-			if _, isStruct := cg.structTypes[prefix]; isStruct {
+			if cg.structTypeFor(CanonKey(prefix)) != nil {
 				return fd
 			}
 		}
@@ -1161,9 +1161,7 @@ func (cg *CodeGen) checkUnguardedTraitDowncast(fn *ast.FuncDecl) {
 			bare = name[i+2:]
 		}
 
-		_, ok := cg.traits[bare]
-
-		return ok
+		return cg.traitFor(CanonKey(bare)) != nil
 	}
 
 	// isKnownStruct mirrors isKnownTrait for the structTypes registry.
@@ -1171,12 +1169,12 @@ func (cg *CodeGen) checkUnguardedTraitDowncast(fn *ast.FuncDecl) {
 	// of `::`, so we try the original SimpleType name, the bare suffix,
 	// and the `::` -> `__` substitution before giving up.
 	isKnownStruct := func(name string) bool {
-		if _, ok := cg.structTypes[name]; ok {
+		if cg.structTypeFor(CanonKey(name)) != nil {
 			return true
 		}
 
 		mangled := strings.ReplaceAll(name, "::", "__")
-		if _, ok := cg.structTypes[mangled]; ok {
+		if cg.structTypeFor(CanonKey(mangled)) != nil {
 			return true
 		}
 
@@ -1185,9 +1183,7 @@ func (cg *CodeGen) checkUnguardedTraitDowncast(fn *ast.FuncDecl) {
 			bare = name[i+2:]
 		}
 
-		_, ok := cg.structTypes[bare]
-
-		return ok
+		return cg.structTypeFor(CanonKey(bare)) != nil
 	}
 
 	// nameRefersToTraitPointer reports whether `name`'s declared

@@ -52,8 +52,12 @@ type CodeGen struct {
 	u128ToCstrFn         *ir.Func
 	f128ToCstrFn         *ir.Func
 
-	// struct type registry: name -> LLVM struct type
-	structTypes map[string]*irtypes.StructType
+	// Unified type registry.  One record per Tin type, keyed by
+	// canonical name.  Replaces the per-aspect maps (structTypes,
+	// dataDecls, traits, ...) that the codegen used pre-refactor; see
+	// typename.go for the record shape and accessor helpers.
+	types map[CanonKey]*TypeRecord
+
 	// struct field order: name -> []fieldName
 	structFields map[string][]string
 	// struct field tags: structName -> fieldName -> first @"..." tag value (empty string = untagged)
@@ -68,10 +72,6 @@ type CodeGen struct {
 	genericStructTmplFiles map[string]string
 
 	// trait vtable struct types: instKey -> LLVM struct type for vtable
-	// instKey = traitName for non-generic, "traitName_typeArg" for generic
-	traitVtableStructTypes map[string]*irtypes.StructType
-	// trait fat-pointer types: instKey -> LLVM struct {i8*, vtable*}
-	traitFatPtrTypes map[string]*irtypes.StructType
 	// trait method order: traitName -> []method name (shared across instantiations)
 	traitMethodOrder map[string][]string
 	// vtable globals: "structName__instKey" -> ir.Global
@@ -118,20 +118,13 @@ type CodeGen struct {
 
 	// enum value registry: "EnumName.Member" -> int64
 	enumValues map[string]int64
-	// enum type registry: name -> base LLVM type
-	enumTypes map[string]irtypes.Type
 
-	// type alias registry: alias name -> TypeExpr
-	typeAliases map[string]ast.TypeExpr
 	// genericTypeAliases stores the full TypeDecl for each generic type
 	// alias (those with TypeParams). Needed to expand calls like
 	// `StrPair[i32]{...}` - the alias substitutes its params into the RHS
 	// and re-enters monomorphization on the underlying struct. Also holds
 	// the alias's own where-clause bounds so they can fire on instantiation.
 	genericTypeAliases map[string]*ast.TypeDecl
-
-	// trait registry: trait name -> TraitDecl
-	traits map[string]*ast.TraitDecl
 
 	// opTraitImpls indexes built-in operator-trait method impls per struct so
 	// that lookupOpMethod can pick the right variant when a struct implements
@@ -412,13 +405,6 @@ type CodeGen struct {
 	structTypeIDs map[string]int32 // struct name -> compile-time type ID
 	fnTypeIDs     map[string]int32 // fn signature string -> compile-time type ID
 	nextTypeID    int32            // counter; starts at 6
-
-	// structDisplayNames maps canonical struct key (e.g. "http__Client") to the
-	// fully-qualified user-facing name (e.g. "http::Client").  Only package-
-	// qualified structs have entries here; bare user-level names are their own
-	// display names.  Used by typeof() and fieldtypes() so that reflection code
-	// can match on 'http::Client instead of the opaque 'http__Client atom.
-	structDisplayNames map[string]string
 
 	// Reflection metadata.
 	// structImpls: struct name -> []trait name strings (for traitof/typeof)
@@ -848,27 +834,11 @@ type CodeGen struct {
 	// dataVariants[adt][v]  -> per-variant info (tag, payload struct, fields)
 	// dataVariantLookup[v]  -> list of ADT names that declare a variant named v;
 	//                         used to resolve bare constructor references.
-	dataDecls           map[string]*ast.DataDecl
 	dataTypeIDs         map[string]int32
 	dataVariants        map[string]map[string]*dataVariantInfo
 	dataVariantLookup   map[string][]string
 	dataValueReleaseFns map[string]*ir.Func
 	dataValueRetainFns  map[string]*ir.Func
-	// dataInstTypeArgs maps a concrete ADT instance name (e.g.
-	// "Result__json__Value__JsonError") to the resolved canonical type-arg
-	// names the instance was monomorphized with (e.g. ["json__Value",
-	// "JsonError"]). Used by inferTypeArgs to recover type arguments from a
-	// struct name whose arity cannot be recovered by splitting on `__`.
-	dataInstTypeArgs map[string][]string
-	// dataInstShape preserves the *original* TypeExpr arg list and the
-	// template name for a monomorphized generic struct/data so the
-	// constraint checker can match wildcard guards against nested
-	// generic shapes without going through the lossy `__`-mangled name.
-	// Example: instantiating `Box[Pair[i64, string]]` records
-	//   "Box__Pair__i64__string" -> {Tmpl:"Box", Args:[Pair[i64,string]]}
-	// where Args carries the structured GenericType, whereas the
-	// `__`-flattened form is unrecoverable.
-	dataInstShape map[string]instShape
 
 	// Fiber / coroutine state
 
@@ -1266,7 +1236,7 @@ func (cg *CodeGen) pkgStructKey(name string) string {
 			displayPkg = cg.currentPkg
 		}
 
-		cg.structDisplayNames[key] = displayPkg + "::" + name
+		cg.recordDisplay(CanonKey(key), displayPkg+"::"+name)
 
 		return key
 	}
@@ -1523,14 +1493,11 @@ func New(filename string) *CodeGen {
 	cg := &CodeGen{
 		filename:                 filename,
 		mod:                      newModuleWithTriple(),
-		structTypes:              make(map[string]*irtypes.StructType),
 		structFields:             make(map[string][]string),
 		structFieldTags:          make(map[string]map[string]string),
 		structFieldTinTypes:      make(map[string][]ast.TypeExpr),
 		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
 		genericStructTmplFiles:   make(map[string]string),
-		traitVtableStructTypes:   make(map[string]*irtypes.StructType),
-		traitFatPtrTypes:         make(map[string]*irtypes.StructType),
 		traitMethodOrder:         make(map[string][]string),
 		traitVtableGlobals:       make(map[string]*ir.Global),
 		traitBorrowVtableGlobals: make(map[string]*ir.Global),
@@ -1543,14 +1510,7 @@ func New(filename string) *CodeGen {
 		coerceConvFns:            make(map[string][]coerceConvEntry),
 		structVtableOrder:        make(map[string][]string),
 		enumValues:               make(map[string]int64),
-		enumTypes:                make(map[string]irtypes.Type),
 		genericTypeAliases:       make(map[string]*ast.TypeDecl),
-		typeAliases: map[string]ast.TypeExpr{
-			// rune is a built-in alias for i32 (Unicode codepoint, U+0000..U+10FFFF).
-			// for r rune in someString triggers UTF-8 decoding in the for-in loop.
-			"rune": &ast.SimpleType{Name: "i32"},
-		},
-		traits:                   make(map[string]*ast.TraitDecl),
 		opTraitImpls:             make(map[string][]opTraitImplEntry),
 		exports:                  make(map[string]string),
 		importedPkgs:             make(map[string]bool),
@@ -1569,7 +1529,6 @@ func New(filename string) *CodeGen {
 		structTypeIDs:            make(map[string]int32),
 		fnTypeIDs:                make(map[string]int32),
 		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
-		structDisplayNames:       make(map[string]string),
 		structImpls:              make(map[string][]string),
 		deadStrippedMethods:      make(map[string]map[string][]string),
 		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
@@ -1580,14 +1539,11 @@ func New(filename string) *CodeGen {
 		unionTypeMembers:         make(map[string][]ast.TypeExpr),
 		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
 		unionTypeIDs:             make(map[string]int32),
-		dataDecls:                make(map[string]*ast.DataDecl),
 		dataTypeIDs:              make(map[string]int32),
 		dataVariants:             make(map[string]map[string]*dataVariantInfo),
 		dataVariantLookup:        make(map[string][]string),
 		dataValueReleaseFns:      make(map[string]*ir.Func),
 		dataValueRetainFns:       make(map[string]*ir.Func),
-		dataInstTypeArgs:         make(map[string][]string),
-		dataInstShape:            make(map[string]instShape),
 		coroCallable:             make(map[string]bool),
 		coloredCallable:          make(map[string]bool),
 		boxedFns:                 make(map[string]bool),
@@ -1651,6 +1607,13 @@ func New(filename string) *CodeGen {
 	if ex, err := os.Executable(); err == nil {
 		cg.libsRoots = []string{filepath.Join(filepath.Dir(ex), "libs")}
 	}
+
+	// Seed builtin type aliases that exist outside of any source package:
+	// rune is a Unicode codepoint represented as i32; `for r rune in s`
+	// triggers UTF-8 decoding in the for-in loop.  Setting it via
+	// recordAliasType lands it in the registry so cg.aliasTypeFor finds
+	// it from any call site.
+	cg.recordAliasType(CanonKey("rune"), &ast.SimpleType{Name: "i32"})
 
 	return cg
 }
@@ -1717,7 +1680,7 @@ func (cg *CodeGen) initBuiltinTupleTemplates() {
 // built-in special traits (iter[t]) so structs can implement them without an
 // explicit "trait iter[t] = ..." declaration in the source file.
 func (cg *CodeGen) registerBuiltinTraits() {
-	if _, ok := cg.traits["iter"]; ok {
+	if cg.traitFor(CanonKey("iter")) != nil {
 		return // already declared by user
 	}
 	// iter[t]: fn len(this iter[t]) i64 = virtual
@@ -1738,11 +1701,12 @@ func (cg *CodeGen) registerBuiltinTraits() {
 		},
 		RetType: &ast.SimpleType{Name: "t"},
 	}
-	cg.traits["iter"] = &ast.TraitDecl{
+	iterTrait := &ast.TraitDecl{
 		Name:       "iter",
 		TypeParams: []string{"t"},
 		Methods:    []*ast.FuncDecl{lenMethod, getMethod},
 	}
+	cg.recordTrait(CanonKey("iter"), iterTrait)
 }
 
 // registerBuiltinOpTraits pre-populates cg.traits with synthetic alias-form
@@ -1754,11 +1718,11 @@ func (cg *CodeGen) registerBuiltinTraits() {
 // usual trait-impl lookup (traitImplKey).
 func (cg *CodeGen) registerBuiltinOpTraits() {
 	mk := func(name string, typeParams []string, params []ast.TypeExpr, ret ast.TypeExpr) {
-		if _, ok := cg.traits[name]; ok {
+		if cg.traitFor(CanonKey(name)) != nil {
 			return // user (or earlier pass) already declared
 		}
 
-		cg.traits[name] = &ast.TraitDecl{
+		td := &ast.TraitDecl{
 			Name:       name,
 			TypeParams: typeParams,
 			IsAlias:    true,
@@ -1767,6 +1731,7 @@ func (cg *CodeGen) registerBuiltinOpTraits() {
 				RetType: ret,
 			},
 		}
+		cg.recordTrait(CanonKey(name), td)
 	}
 
 	t := func(n string) ast.TypeExpr { return &ast.SimpleType{Name: n} }

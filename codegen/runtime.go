@@ -698,9 +698,7 @@ func (cg *CodeGen) declTypeIsTraitPtr(te ast.TypeExpr) bool {
 		name = name[idx+2:]
 	}
 
-	_, isTrait := cg.traits[name]
-
-	return isTrait
+	return cg.traitFor(CanonKey(name)) != nil
 }
 
 // markOwningRawPtrField records that fieldName on structName receives an
@@ -740,7 +738,7 @@ func (cg *CodeGen) markOwningRawPtrField(structName, fieldName string, valueExpr
 	}
 	// Tin struct pointer: existing structPtrReleaseFn already cascades.
 	if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-		if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+		if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 			return
 		}
 	}
@@ -807,8 +805,8 @@ func (cg *CodeGen) noCopyValueTypeName(te ast.TypeExpr) string {
 				return name
 			}
 
-			alias, ok := cg.typeAliases[name]
-			if !ok {
+			alias := cg.aliasTypeFor(CanonKey(name))
+			if alias == nil {
 				break
 			}
 
@@ -1077,7 +1075,7 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	if isTemporaryProducer(astArg) {
 		if pt, ok := pre.Type().(*irtypes.PointerType); ok {
 			if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+				if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 					cg.emitRelease(block, pre)
 				}
 			}
@@ -1341,7 +1339,7 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 		// (and any RC sub-fields the iface dtor would have torn down).
 		if pt, ok := ft.(*irtypes.PointerType); ok {
 			if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+				if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 					return true
 				}
 
@@ -1446,7 +1444,7 @@ func (cg *CodeGen) walkRCStructFieldsEx(
 
 		if pt, ok2 := ft.(*irtypes.PointerType); ok2 {
 			if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
-				if _, ok4 := cg.structTypes[innerSt.Name()]; ok4 {
+				if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 					isTinStructPtr = true
 				} else if isTraitFatPtrShape(innerSt) {
 					isTinStructPtr = true
@@ -1546,7 +1544,7 @@ func (cg *CodeGen) emitOwningPtrRetainIfApplicable(block *ir.Block, val value.Va
 		return false
 	}
 
-	_, isTinStruct := cg.structTypes[innerSt.Name()]
+	isTinStruct := cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 	if !isTinStruct && !isTraitFatPtrShape(innerSt) {
 		return false
 	}
@@ -1624,7 +1622,7 @@ func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) 
 	// (not cg.structTypes), so detect them via shape.
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-			_, isTinStruct := cg.structTypes[innerSt.Name()]
+			isTinStruct := cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 			if isTinStruct || isTraitFatPtrShape(innerSt) {
 				ptrI8 := block.NewBitCast(fieldVal, irtypes.I8Ptr)
 				block.NewCall(cg.ensureRetain(), ptrI8)
@@ -2130,7 +2128,7 @@ func (cg *CodeGen) ensureHeapBlockReleaseFn(t irtypes.Type) *ir.Func {
 //	}
 func (cg *CodeGen) ensureHeapChainReleaseFn(structName string, depth int) *ir.Func {
 	if depth == 1 {
-		wrapperSt := cg.structTypes[structName]
+		wrapperSt := cg.structTypeFor(CanonKey(structName))
 
 		return cg.ensureStructPtrReleaseFn(structName, wrapperSt)
 	}
@@ -2141,7 +2139,7 @@ func (cg *CodeGen) ensureHeapChainReleaseFn(structName string, depth int) *ir.Fu
 	}
 
 	// Build parameter type: (depth)*S.wrapper
-	wrapperSt := cg.structTypes[structName]
+	wrapperSt := cg.structTypeFor(CanonKey(structName))
 
 	var paramType irtypes.Type = wrapperSt
 	for i := 0; i < depth; i++ {
@@ -2382,7 +2380,7 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if entry.declaredLet && !entry.noDeinit {
 			if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
 				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
-					_, isTinStruct := cg.structTypes[innerSt.Name()]
+					isTinStruct := cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 					isIface := isTraitFatPtrShape(innerSt)
 
 					shouldRelease := isIface || (isTinStruct && entry.ownsPtrViaRetain)
@@ -2494,7 +2492,7 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			if entry.declaredLet && !entry.noDeinit {
 				if pt, isPtr := elemType.(*irtypes.PointerType); isPtr {
 					if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
-						_, isTinStruct := cg.structTypes[innerSt.Name()]
+						isTinStruct := cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 						isIface := isTraitFatPtrShape(innerSt)
 
 						shouldRelease := isIface || (isTinStruct && entry.ownsPtrViaRetain)
@@ -3052,8 +3050,8 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 	for _, e := range entries {
 		structName, typeID := e.Name, e.TypeID
 
-		st, ok := cg.structTypes[structName]
-		if !ok {
+		st := cg.structTypeFor(CanonKey(structName))
+		if st == nil {
 			continue
 		}
 
@@ -3145,7 +3143,7 @@ func (cg *CodeGen) structHasRelease(structName string, st *irtypes.StructType) b
 
 		if pt, ok := ft.(*irtypes.PointerType); ok {
 			if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
-				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+				if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 					return true
 				}
 			}

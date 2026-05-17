@@ -90,14 +90,14 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 	for _, impl := range n.Implements {
 		name := traitBaseName(impl)
 		// Strip package qualifier (e.g. "io::AsyncReader" -> "AsyncReader").
-		if _, ok2 := cg.traits[name]; !ok2 {
+		if cg.traitFor(CanonKey(name)) == nil {
 			if idx := strings.LastIndex(name, "::"); idx >= 0 {
 				name = name[idx+2:]
 			}
 		}
 
-		trait, ok := cg.traits[name]
-		if !ok {
+		trait := cg.traitFor(CanonKey(name))
+		if trait == nil {
 			continue
 		}
 
@@ -215,16 +215,16 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		if name := cg.noCopyValueTypeName(f.Type); name != "" {
 			return cg.nodeErr(n,
 				"struct %s field %q has type %s which is #no_copy: copying %s would alias the cell. Use *%s instead",
-				prettyStructName(structKey), f.Name, prettyStructName(name),
-				prettyStructName(structKey), prettyStructName(name))
+				cg.diagStructName(structKey), f.Name, cg.diagStructName(name),
+				cg.diagStructName(structKey), cg.diagStructName(name))
 		}
 	}
 
-	st, ok := cg.structTypes[structKey]
-	if !ok {
+	st := cg.structTypeFor(CanonKey(structKey))
+	if st == nil {
 		st = irtypes.NewStruct()
 		st.SetName(structKey)
-		cg.structTypes[structKey] = st
+		cg.recordLLVM(CanonKey(structKey), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 
@@ -243,13 +243,13 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		}
 		// Strip package qualifier (e.g. "io::AsyncReader" -> "AsyncReader")
 		// so that "struct Foo (io::Bar)" correctly resolves to trait "Bar".
-		if _, ok := cg.traits[traitName]; !ok {
+		if cg.traitFor(CanonKey(traitName)) == nil {
 			if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
 				traitName = traitName[idx+2:]
 			}
 		}
 
-		if _, ok := cg.traits[traitName]; !ok {
+		if cg.traitFor(CanonKey(traitName)) == nil {
 			continue
 		}
 
@@ -268,7 +268,7 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		typeSubst := map[string]irtypes.Type{}
 
 		if gt, ok2 := impl.(*ast.GenericType); ok2 {
-			td := cg.traits[traitName]
+			td := cg.traitFor(CanonKey(traitName))
 			for i, tpName := range td.TypeParams {
 				if i < len(gt.TypeParams) {
 					lt, err := cg.tinTypeToLLVM(gt.TypeParams[i])
@@ -285,7 +285,7 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 			return err
 		}
 
-		vtableSt := cg.traitVtableStructTypes[instKey]
+		vtableSt := cg.vtableFor(CanonKey(instKey))
 		vtableInstKeys = append(vtableInstKeys, instKey)
 		vtableFieldTypes = append(vtableFieldTypes, irtypes.NewPointer(vtableSt))
 	}
@@ -378,7 +378,7 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		// Also register under the ".native" key so tinStructNativeLLVM (which caches
 		// in cg.structTypes[name+".native"]) finds the already-declared type and does
 		// not create a second LLVM type definition.
-		cg.structTypes[structKey+".native"] = nativeSt
+		cg.recordLLVM(CanonKey(structKey+".native"), nativeSt)
 
 		// Wrapper: { i32, vtable_ptrs..., i8* c_data_ptr }
 		wrapperFields := append([]irtypes.Type{irtypes.I32},
@@ -497,14 +497,14 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 	// compile the trait's version under a unique name so both can be called.
 	for _, impl := range orig.Implements {
 		traitName := traitBaseName(impl)
-		if _, ok := cg.traits[traitName]; !ok {
+		if cg.traitFor(CanonKey(traitName)) == nil {
 			if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
 				traitName = traitName[idx+2:]
 			}
 		}
 
-		td, ok := cg.traits[traitName]
-		if !ok {
+		td := cg.traitFor(CanonKey(traitName))
+		if td == nil {
 			continue
 		}
 
@@ -676,7 +676,7 @@ func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 
 		for _, impl := range sd.Implements {
 			traitName := traitBaseName(impl)
-			if _, ok2 := cg.traits[traitName]; !ok2 {
+			if cg.traitFor(CanonKey(traitName)) == nil {
 				if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
 					traitName = traitName[idx+2:]
 				}
@@ -686,8 +686,8 @@ func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 				continue
 			}
 
-			td, ok2 := cg.traits[traitName]
-			if !ok2 {
+			td := cg.traitFor(CanonKey(traitName))
+			if td == nil {
 				continue
 			}
 
@@ -1219,7 +1219,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	if !isTmpl {
 		// GenericType refers to something other than a generic struct
 		// (e.g. a generic trait instantiation used as a type alias).
-		cg.typeAliases[n.Name] = n.Type
+		cg.recordAliasType(CanonKey(n.Name), n.Type)
 
 		return nil
 	}
@@ -1277,7 +1277,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	if len(n.TypeParams) == 0 && len(n.Overrides) == 0 {
 		canonicalName := cg.typeExprCanonicalKey(gt)
 		if canonicalName != n.Name {
-			if _, alreadyDone := cg.structTypes[canonicalName]; !alreadyDone {
+			if cg.structTypeFor(CanonKey(canonicalName)) == nil {
 				if err := cg.genTypeDecl(&ast.TypeDecl{
 					Name: canonicalName,
 					Type: gt,
@@ -1286,7 +1286,8 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 				}
 			}
 
-			cg.typeAliases[n.Name] = &ast.SimpleType{Name: canonicalName}
+			cg.recordAliasType(CanonKey(n.Name), &ast.SimpleType{Name: canonicalName})
+			cg.recordAlias(CanonKey(canonicalName), n.Name)
 
 			return nil
 		}
@@ -1442,22 +1443,25 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	// Register the concrete struct type (opaque first, just like preregister).
 	// n.Name is already the full concrete name (e.g. "Future__sync__Unit"), so
 	// no package prefix should be applied.
-	if _, exists := cg.structTypes[n.Name]; !exists {
+	if cg.structTypeFor(CanonKey(n.Name)) == nil {
 		st := irtypes.NewStruct()
 		st.SetName(n.Name)
-		cg.structTypes[n.Name] = st
+		cg.recordLLVM(CanonKey(n.Name), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 
 	// Register type-param substitutions as aliases so that expressions inside
 	// method bodies (e.g. `let out T`, `sizeof(T)`) resolve to the concrete type.
-	prevAliases := make(map[string]ast.TypeExpr, len(subst))
-	for param, typeExpr := range subst {
-		if old, had := cg.typeAliases[param]; had {
-			prevAliases[param] = old
-		}
+	type prevEntry struct {
+		val    ast.TypeExpr
+		hadVal bool
+	}
 
-		cg.typeAliases[param] = typeExpr
+	prevAliases := make(map[string]prevEntry, len(subst))
+
+	for param, typeExpr := range subst {
+		prev, had := cg.pushAlias(param, typeExpr)
+		prevAliases[param] = prevEntry{val: prev, hadVal: had}
 	}
 
 	// Compile struct methods at module scope so they are visible everywhere,
@@ -1548,7 +1552,7 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 	// matching (`where t is Box[Pair[_, _]]`) can compare against
 	// the structured form instead of the lossy `__`-mangled name.
 	if err == nil {
-		cg.dataInstShape[n.Name] = instShape{Tmpl: tmpl.Name, Args: gt.TypeParams}
+		cg.recordInstShape(CanonKey(n.Name), tmpl.Name, gt.TypeParams)
 	}
 
 	// genStructDecl tagged structDeclFiles[concrete.Name] with cg.filename
@@ -1569,11 +1573,8 @@ func (cg *CodeGen) genTypeDecl(n *ast.TypeDecl) error {
 
 	// Restore previous type aliases (removes the T->string etc. temporaries).
 	for param := range subst {
-		if old, had := prevAliases[param]; had {
-			cg.typeAliases[param] = old
-		} else {
-			delete(cg.typeAliases, param)
-		}
+		entry := prevAliases[param]
+		cg.popAlias(param, entry.val, entry.hadVal)
 	}
 
 	return err
@@ -1682,12 +1683,12 @@ func (cg *CodeGen) buildTraitFatPtrType(traitName string) (*irtypes.StructType, 
 //	instKey   - unique instance key (e.g. "iter_i64")
 //	typeSubst - map from trait type-param name -> concrete LLVM type
 func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst map[string]irtypes.Type) (*irtypes.StructType, error) {
-	if fp, ok := cg.traitFatPtrTypes[instKey]; ok {
+	if fp := cg.ifaceFor(CanonKey(instKey)); fp != nil {
 		return fp, nil
 	}
 
-	td, ok := cg.traits[traitName]
-	if !ok {
+	td := cg.traitFor(CanonKey(traitName))
+	if td == nil {
 		return nil, fmt.Errorf("unknown trait: %s", traitName)
 	}
 
@@ -1698,9 +1699,8 @@ func (cg *CodeGen) buildTraitFatPtrTypeInst(traitName, instKey string, typeSubst
 	vtableStub.SetName(instKey + "_vtable")
 	fatPtrStub := irtypes.NewStruct(irtypes.I8Ptr, irtypes.NewPointer(vtableStub))
 	fatPtrStub.SetName(instKey + "_iface")
-	cg.traitVtableStructTypes[instKey] = vtableStub
-	cg.traitFatPtrTypes[instKey] = fatPtrStub
 	cg.traitInstKeys[instKey] = traitName
+	cg.recordTraitIface(CanonKey(instKey), fatPtrStub, vtableStub)
 
 	var (
 		methodNames []string
@@ -1910,7 +1910,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				continue
 			}
 
-			selfLLVM := cg.structTypes[structKey]
+			selfLLVM := cg.structTypeFor(CanonKey(structKey))
 
 			for _, m := range n.Methods {
 				if !m.IsStatic || len(m.Params) != 1 {
@@ -1962,14 +1962,14 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 		}
 
 		// Strip package qualifier from traitName (e.g. "io::AsyncReader" -> "AsyncReader").
-		if _, ok2 := cg.traits[traitName]; !ok2 {
+		if cg.traitFor(CanonKey(traitName)) == nil {
 			if idx := strings.LastIndex(traitName, "::"); idx >= 0 {
 				traitName = traitName[idx+2:]
 			}
 		}
 
-		td, ok := cg.traits[traitName]
-		if !ok {
+		td := cg.traitFor(CanonKey(traitName))
+		if td == nil {
 			continue
 		}
 
@@ -2009,10 +2009,10 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 			return err
 		}
 
-		vtableSt := cg.traitVtableStructTypes[instKey]
+		vtableSt := cg.vtableFor(CanonKey(instKey))
 		methodNames := cg.traitMethodOrder[traitName]
 
-		structSt := cg.structTypes[structKey]
+		structSt := cg.structTypeFor(CanonKey(structKey))
 		if structSt == nil {
 			continue
 		}
@@ -2125,8 +2125,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 			if !ok {
 				return fmt.Errorf("trait vtable: struct %s does not implement %s.%s; expected fn %s::%s(this %s, ...)",
-					prettyStructName(structKey), cg.traitDisplayName(traitName), methodName,
-					cg.traitDisplayName(traitName), methodName, prettyStructName(structKey))
+					cg.diagStructName(structKey), cg.traitDisplayName(traitName), methodName,
+					cg.traitDisplayName(traitName), methodName, cg.diagStructName(structKey))
 			}
 
 			concreteFunc := concreteFn.val.(*ir.Func)
@@ -2161,7 +2161,7 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 				// back to selfPtr. Construct a fat-pointer using the original data ptr
 				// (selfPtr / wrapParams[0]) and the statically-known vtable global so
 				// the returned fat-pointer is valid beyond this wrapper's stack frame.
-				fatPtrType := cg.traitFatPtrTypes[retInstKey]
+				fatPtrType := cg.ifaceFor(CanonKey(retInstKey))
 				retVtableKey := structKey + "__" + retInstKey
 
 				retVtableGlobal := cg.traitVtableGlobals[retVtableKey]
@@ -2247,8 +2247,8 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 
 			if !ok2 {
 				return fmt.Errorf("trait vtable: struct %s does not implement async %s.%s; expected fn %s::%s(this %s, ...) {#async}",
-					prettyStructName(structKey), cg.traitDisplayName(traitName), methodName,
-					cg.traitDisplayName(traitName), methodName, prettyStructName(structKey))
+					cg.diagStructName(structKey), cg.traitDisplayName(traitName), methodName,
+					cg.traitDisplayName(traitName), methodName, cg.diagStructName(structKey))
 			}
 
 			concreteCoroFn := concreteCoro.val.(*ir.Func)
@@ -2529,9 +2529,9 @@ func (cg *CodeGen) isTraitFatPtr(t irtypes.Type) (string, bool) {
 		return "", false
 	}
 	// Check it's a known trait vtable struct (returns instKey, not traitName).
-	for instKey, vs := range cg.traitVtableStructTypes {
-		if vs == vst {
-			return instKey, true
+	for canon, r := range cg.types {
+		if r.Vtable == vst {
+			return string(canon), true
 		}
 	}
 
@@ -2634,7 +2634,7 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 		return nil, fmt.Errorf("iter trait %s missing len/get methods", cg.traitDisplayName(instKey))
 	}
 
-	vtableSt := cg.traitVtableStructTypes[instKey]
+	vtableSt := cg.vtableFor(CanonKey(instKey))
 
 	// Determine element type from get's return type (vtable slot getSlot).
 	getFnType := vtableSt.Fields[getSlot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
@@ -2748,8 +2748,8 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
 	bareTraitName := bareTraitNameFromKey(instKey)
 
-	td, ok := cg.traits[bareTraitName]
-	if !ok {
+	td := cg.traitFor(CanonKey(bareTraitName))
+	if td == nil {
 		return nil
 	}
 
@@ -2778,7 +2778,7 @@ func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
 // shape as prettyStructName but kept separate because traits use a
 // different mangling pipeline.
 func (cg *CodeGen) traitDisplayName(instKey string) string {
-	return prettyStructName(instKey)
+	return cg.diagStructName(instKey)
 }
 
 // bareTraitNameFromKey strips the "__T1__T2..." instantiation suffix
@@ -3050,11 +3050,11 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 	vtableGlobal, ok := cg.traitVtableGlobals[vtableKey]
 	if !ok {
-		return nil, fmt.Errorf("no vtable for %s implementing %s", prettyStructName(structName), cg.traitDisplayName(instKey))
+		return nil, fmt.Errorf("no vtable for %s implementing %s", cg.diagStructName(structName), cg.traitDisplayName(instKey))
 	}
 
-	fatPtrType, fpOk := cg.traitFatPtrTypes[instKey]
-	if !fpOk {
+	fatPtrType := cg.ifaceFor(CanonKey(instKey))
+	if fatPtrType == nil {
 		return nil, fmt.Errorf("no fat-ptr type for trait %s", cg.traitDisplayName(instKey))
 	}
 
@@ -3097,7 +3097,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 	// Idempotent: skip if already registered (can be called from preregister AND pass 3).
-	if _, alreadyDone := cg.enumTypes[n.Name]; alreadyDone {
+	if cg.isEnumFor(CanonKey(n.Name)) {
 		return nil
 	}
 	// Determine base LLVM type.
@@ -3112,7 +3112,7 @@ func (cg *CodeGen) genEnumDecl(n *ast.EnumDecl) error {
 		baseType = bt
 	}
 
-	cg.enumTypes[n.Name] = baseType
+	cg.recordEnum(CanonKey(n.Name), baseType)
 
 	// Register member values.
 	var nextVal int64 = 0
@@ -3159,11 +3159,11 @@ func (cg *CodeGen) genTaggedUnionTypeDecl(name string, ut *ast.UnionTypeExpr) er
 
 	payloadType := irtypes.NewArray(maxSize, irtypes.I8)
 
-	st := cg.structTypes[name]
+	st := cg.structTypeFor(CanonKey(name))
 	if st == nil {
 		st = irtypes.NewStruct()
 		st.SetName(name)
-		cg.structTypes[name] = st
+		cg.recordLLVM(CanonKey(name), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 	// Assign a compile-time type ID (same pool as structs/data types).
@@ -3195,11 +3195,11 @@ func (cg *CodeGen) genUnionDecl(n *ast.UnionDecl) error {
 
 	storageType := irtypes.NewArray(maxSize, irtypes.I8)
 
-	st := cg.structTypes[n.Name]
+	st := cg.structTypeFor(CanonKey(n.Name))
 	if st == nil {
 		st = irtypes.NewStruct()
 		st.SetName(n.Name)
-		cg.structTypes[n.Name] = st
+		cg.recordLLVM(CanonKey(n.Name), st)
 		cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 	}
 
@@ -3436,7 +3436,7 @@ func (cg *CodeGen) ambiguousMethodError(structName string, methods []*ast.FuncDe
 		declFile = cg.filename
 	}
 
-	pretty := prettyStructName(structName)
+	pretty := cg.diagStructName(structName)
 
 	// Anchor the diagnostic at the call site that triggered
 	// monomorphization (cg.currentPos). The user wants to see WHERE

@@ -273,27 +273,21 @@ func (cg *CodeGen) sourceLineEndCol(lineNum int) int {
 // Package-qualified structs like "http__Client" are presented as "http::Client".
 // Bare names (user-level structs) are returned unchanged.
 func (cg *CodeGen) displayStructName(canonicalKey string) string {
-	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
+	if dn := cg.displayFor(CanonKey(canonicalKey)); dn != "" {
 		return dn
 	}
 
 	return canonicalKey
 }
 
-// diagStructName is displayStructName plus a fallback that de-mangles
-// generic monomorphizations (`Box__i64` -> `Box[i64]`) so diagnostics
-// read as Tin source. Reflection helpers (typeof, etc.) keep the raw
-// canonical key via displayStructName -- it doubles as a stable id.
+// diagStructName returns the user-facing Pretty form of a canonical key,
+// routing through TypeName so monomorphized generics with package-qualified
+// args render with `::` separators and structured `[...]` brackets, and so
+// trait fat-pointer struct names (`pkg__Trait_iface`) lose their internal
+// `_iface` suffix.  Reflection helpers (typeof, etc.) keep the raw key via
+// displayStructName -- the canonical key doubles as a stable id.
 func (cg *CodeGen) diagStructName(canonicalKey string) string {
-	if dn, ok := cg.structDisplayNames[canonicalKey]; ok {
-		return dn
-	}
-
-	if pretty := prettyStructName(canonicalKey); pretty != canonicalKey {
-		return pretty
-	}
-
-	return canonicalKey
+	return cg.typeNameFromCanon(canonicalKey).Pretty
 }
 
 // tinTypeDisplay returns a user-facing description of an LLVM type using
@@ -334,14 +328,11 @@ func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
 	}
 
 	name := llvmTypeName(t)
-	if dn, ok := cg.structDisplayNames[name]; ok {
-		return dn
-	}
-
-	// De-mangle monomorphized generic struct names (Box__i64 -> Box[i64]),
-	// matching the rendering used by fmtArgType. Without this, named
-	// struct types fell through as raw LLVM symbols.
-	if pretty := prettyStructName(name); pretty != name {
+	// Route through TypeName so monomorphized generic struct names with
+	// package-qualified args ("Box__pkg__Inner__i64") render as
+	// "Box[pkg::Inner, i64]" instead of the lossy "Box[pkg, Inner, i64]"
+	// that prettyStructName's `__`-split alone produces.
+	if pretty := cg.typeNameFromCanon(name).Pretty; pretty != name {
 		return pretty
 	}
 
@@ -1328,13 +1319,13 @@ func isUnsignedIntLLVMType(t irtypes.Type) bool {
 // pointer is extracted directly from the any's heap block so mutations through
 // the fat-pointer persist (supporting pointer-receiver trait methods).
 func (cg *CodeGen) coerceAnyToTrait(block *ir.Block, anyVal value.Value, instKey string) (value.Value, error) {
-	fatPtrType, ok := cg.traitFatPtrTypes[instKey]
-	if !ok {
+	fatPtrType := cg.ifaceFor(CanonKey(instKey))
+	if fatPtrType == nil {
 		return nil, fmt.Errorf("coerceAnyToTrait: no fat-ptr type for trait %s", instKey)
 	}
 
-	vtableSt, ok2 := cg.traitVtableStructTypes[instKey]
-	if !ok2 {
+	vtableSt := cg.vtableFor(CanonKey(instKey))
+	if vtableSt == nil {
 		return nil, fmt.Errorf("coerceAnyToTrait: no vtable struct type for trait %s", instKey)
 	}
 

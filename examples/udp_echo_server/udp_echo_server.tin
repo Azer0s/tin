@@ -19,15 +19,14 @@ async handle_conn(c udp::Conn) =
   await ioutil::write_string(c, line)
   c.close()
 
-fn{#async} main() =
-  match udp::listen(8082):
-    case Err(e): panic(e.message())
-    case Ok(srv):
-      echo "udp echo listening on :8082"
+fn{#async} main() Result[Unit, errors::Err] =
+  let srv = udp::listen(8082).unwrap()
+  echo "udp echo listening on :8082"
 
-      loop:
-        let r = await srv.accept()
+  loop:
+    let c = try await srv.accept().
+      map_err(fn(e errors::Err) errors::Err =
+        echo "udp: accept error: {e.message()}"
+        return e)
 
-        match r:
-          case Ok(c):  spawn handle_conn(c)
-          case Err(e): echo "udp: accept dropped: {e.message()}"
+    spawn handle_conn(c)

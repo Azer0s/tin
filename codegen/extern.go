@@ -37,7 +37,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 		// Resolve type alias first (e.g. "Color" -> "raylib__Color") so that
 		// package-qualified canonical names are found in structFieldLLVMTypes.
 		structNameForExtern := st.Name
-		if alias, ok2 := cg.typeAliases[structNameForExtern]; ok2 {
+		if alias := cg.aliasTypeFor(CanonKey(structNameForExtern)); alias != nil {
 			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 				structNameForExtern = simple.Name
 			}
@@ -79,7 +79,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 
 			if st, ok3 := pt.Elem.(*ast.SimpleType); ok3 {
 				ptrStructName := st.Name
-				if alias, ok4 := cg.typeAliases[ptrStructName]; ok4 {
+				if alias := cg.aliasTypeFor(CanonKey(ptrStructName)); alias != nil {
 					if simple, ok5 := alias.(*ast.SimpleType); ok5 {
 						ptrStructName = simple.Name
 					}
@@ -154,7 +154,7 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, error) {
 	nativeName := structName + ".native"
 	// Return cached version if available.
-	if st, ok := cg.structTypes[nativeName]; ok {
+	if st := cg.structTypeFor(CanonKey(nativeName)); st != nil {
 		return st, nil
 	}
 
@@ -202,7 +202,7 @@ func (cg *CodeGen) tinStructNativeLLVM(structName string) (*irtypes.StructType, 
 
 	st := irtypes.NewStruct(nativeFields...)
 	st.SetName(nativeName)
-	cg.structTypes[nativeName] = st
+	cg.recordLLVM(CanonKey(nativeName), st)
 	cg.mod.TypeDefs = append(cg.mod.TypeDefs, st)
 
 	return st, nil
@@ -313,8 +313,8 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 		return val, nil
 	}
 
-	tinSt, tinOk := cg.structTypes[structName]
-	if !tinOk {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	if tinSt == nil {
 		return val, nil
 	}
 
@@ -414,7 +414,7 @@ func (cg *CodeGen) isNamedTinStruct(te ast.TypeExpr) (string, bool) {
 		name := st.Name
 		// Resolve type alias so package-qualified canonical names are found
 		// (e.g. "Color" -> "raylib__Color" after `use raylib`).
-		if alias, ok2 := cg.typeAliases[name]; ok2 {
+		if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
 				name = simple.Name
 			}
@@ -513,7 +513,7 @@ func (cg *CodeGen) extractCSrcPtr(block *ir.Block, tinPtr value.Value, te ast.Ty
 		return block.NewBitCast(tinPtr, cTargetType)
 	}
 
-	tinSt := cg.structTypes[st.Name]
+	tinSt := cg.structTypeFor(CanonKey(st.Name))
 	gep := block.NewGetElementPtr(tinSt, tinPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 	cPtr := block.NewLoad(irtypes.I8Ptr, gep)
@@ -573,7 +573,7 @@ func (cg *CodeGen) markPtrStructCLayout(te ast.TypeExpr) {
 		}
 
 		if st, ok2 := pt.Elem.(*ast.SimpleType); ok2 {
-			if _, isStruct := cg.structTypes[st.Name]; isStruct {
+			if cg.structTypeFor(CanonKey(st.Name)) != nil {
 				cg.cLayoutStructs[st.Name] = true
 			}
 
@@ -971,7 +971,7 @@ func (cg *CodeGen) wrapFromExtern(block *ir.Block, val value.Value, target irtyp
 // going through the c_data_ptr field. All cLayoutStruct field accesses must use
 // this helper so that non-handover mutations by C are observable.
 func (cg *CodeGen) emitCLayoutFieldPtr(block *ir.Block, wrapperPtr value.Value, structName string, fieldIdx int) value.Value {
-	wrapperType := cg.structTypes[structName]
+	wrapperType := cg.structTypeFor(CanonKey(structName))
 	nativeType := cg.nativeStructTypes[structName]
 
 	// Load c_data_ptr (at userFieldOffset index)
@@ -1008,7 +1008,7 @@ func (cg *CodeGen) emitFieldGEP(block *ir.Block, structPtr value.Value, structNa
 		return nil
 	}
 
-	structType := cg.structTypes[structName]
+	structType := cg.structTypeFor(CanonKey(structName))
 	if structType == nil {
 		return nil
 	}
@@ -1069,8 +1069,8 @@ func (cg *CodeGen) emitStructPtrBorrow(block *ir.Block, src value.Value, tgtPt *
 // holding the inner wrapper pointer. The scope release must free the chain via
 // ensureHeapChainReleaseFn.
 func (cg *CodeGen) emitWrapNativeChain(block *ir.Block, nativeVal value.Value, structName string, depth int) (value.Value, error) {
-	wrapperSt, ok := cg.structTypes[structName]
-	if !ok {
+	wrapperSt := cg.structTypeFor(CanonKey(structName))
+	if wrapperSt == nil {
 		return nil, fmt.Errorf("emitWrapNativeChain: unknown struct %q", structName)
 	}
 

@@ -266,7 +266,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 		return nil, fmt.Errorf("genDataMatch: cannot resolve ADT name for match scrutinee (type=%v)", scrutType)
 	}
 
-	outerSt := cg.structTypes[adtName]
+	outerSt := cg.structTypeFor(CanonKey(adtName))
 	if outerSt == nil {
 		return nil, fmt.Errorf("genDataMatch: ADT %q is not registered", adtName)
 	}
@@ -575,12 +575,12 @@ func (cg *CodeGen) genTupleMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 
 	tupSt, isStruct := scrutType.(*irtypes.StructType)
 	if !isStruct {
-		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a tuple struct", fmtArgType(scrutType))
+		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a tuple struct", cg.fmtArgType(scrutType))
 	}
 
 	tupName := tupSt.Name()
 	if tupName == "" || !strings.HasPrefix(tupName, "Tuple__") {
-		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a Tuple__... monomorphization", fmtArgType(scrutType))
+		return nil, fmt.Errorf("genTupleMatch: scrutinee type %s is not a Tuple__... monomorphization", cg.fmtArgType(scrutType))
 	}
 
 	scrutAlloca := block.NewAlloca(scrutType)
@@ -760,7 +760,7 @@ func (cg *CodeGen) emitTupleSlotPatternCheck(block *ir.Block, failBlock *ir.Bloc
 		case *irtypes.FloatType:
 			cmp = block.NewFCmp(enum.FPredOEQ, val, litVal)
 		default:
-			return nil, fmt.Errorf("tuple-slot literal pattern: unsupported slot type %s", fmtArgType(slotType))
+			return nil, fmt.Errorf("tuple-slot literal pattern: unsupported slot type %s", cg.fmtArgType(slotType))
 		}
 
 		ok := cg.newBlock("tuple.lit.ok")
@@ -771,7 +771,7 @@ func (cg *CodeGen) emitTupleSlotPatternCheck(block *ir.Block, failBlock *ir.Bloc
 		// Nested tuple pattern: recurse.
 		innerSt, isStruct := slotType.(*irtypes.StructType)
 		if !isStruct || !strings.HasPrefix(innerSt.Name(), "Tuple__") {
-			return nil, fmt.Errorf("nested tuple pattern in slot of non-tuple type %s", fmtArgType(slotType))
+			return nil, fmt.Errorf("nested tuple pattern in slot of non-tuple type %s", cg.fmtArgType(slotType))
 		}
 
 		if len(p.Elems) != len(innerSt.Fields) {
@@ -804,12 +804,12 @@ func (cg *CodeGen) emitTupleSlotPatternCheck(block *ir.Block, failBlock *ir.Bloc
 func (cg *CodeGen) emitTupleSlotAdtCheck(block *ir.Block, failBlock *ir.Block, slotGEP value.Value, slotType irtypes.Type, pat ast.Node) (*ir.Block, error) {
 	adtSt, isStruct := slotType.(*irtypes.StructType)
 	if !isStruct {
-		return nil, fmt.Errorf("ADT pattern on non-ADT slot type %s", fmtArgType(slotType))
+		return nil, fmt.Errorf("ADT pattern on non-ADT slot type %s", cg.fmtArgType(slotType))
 	}
 
 	adtName := adtSt.Name()
 	if adtName == "" {
-		return nil, fmt.Errorf("ADT pattern on anonymous struct slot %s", fmtArgType(slotType))
+		return nil, fmt.Errorf("ADT pattern on anonymous struct slot %s", cg.fmtArgType(slotType))
 	}
 
 	variantName := dataPatternVariantName(pat)
@@ -1210,7 +1210,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 	}
 
 	if !isFatArrayPtr(scrutinee.Type()) {
-		return nil, fmt.Errorf("array pattern match requires an array type, got %s", fmtArgType(scrutinee.Type()))
+		return nil, fmt.Errorf("array pattern match requires an array type, got %s", cg.fmtArgType(scrutinee.Type()))
 	}
 
 	arrType := scrutinee.Type().(*irtypes.StructType)
@@ -1706,7 +1706,7 @@ func (cg *CodeGen) genAwaitMatch(block *ir.Block, s *ast.AwaitMatchStmt) (*ir.Bl
 
 		sname := structNameFromValue(fval)
 		if sname == "" || len(sname) <= 8 || sname[:8] != "Future__" {
-			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, fmtArgType(fval.Type()))
+			return nil, fmt.Errorf("await match: expression at index %d is not a Future[T] (got type %s)", i, cg.fmtArgType(fval.Type()))
 		}
 
 		pidIdx := cg.fieldIndex(sname, "pid")
@@ -2400,8 +2400,8 @@ func (cg *CodeGen) genMatchTypeConcrete(block *ir.Block, s *ast.MatchStmt, val v
 // LLVM string ("%Box__i64", "{ i8*, i64 }", "%Foo*").
 func concreteTypeDisplay(cg *CodeGen, t irtypes.Type) string {
 	if name := cg.typeNameOf(t); name != "" {
-		return prettyStructName(name)
+		return cg.diagStructName(name)
 	}
 
-	return fmtArgType(t)
+	return cg.fmtArgType(t)
 }

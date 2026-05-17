@@ -261,11 +261,11 @@ func (cg *CodeGen) structNameFromTinType(t ast.TypeExpr) string {
 	case *ast.SimpleType:
 		name := n.Name
 		// Resolve type aliases.
-		if alias, ok := cg.typeAliases[name]; ok {
+		if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			return cg.structNameFromTinType(alias)
 		}
 
-		if _, ok := cg.structTypes[name]; ok {
+		if cg.structTypeFor(CanonKey(name)) != nil {
 			return name
 		}
 

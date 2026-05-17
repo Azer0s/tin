@@ -48,6 +48,7 @@ const (
 	DiagDiscardedPureCall = "discarded-pure-call"
 	DiagUnsafeRequired    = "unsafe-required"
 	DiagUnusedLet         = "unused-let"
+	DiagLetNoReassign     = "let-no-reassign"
 	DiagUnusedParam       = "unused-param"
 	DiagUnusedResult      = "unused-result"
 	DiagUnusedImport      = "unused-import"
@@ -332,6 +333,7 @@ const (
 // fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
 var defaultOffWarnings = map[string]bool{
 	DiagUnusedLet:            true,
+	DiagLetNoReassign:        true,
 	DiagUnusedParam:          true,
 	DiagUnusedResult:         true,
 	DiagFloatEqual:           true,
@@ -355,7 +357,7 @@ var defaultOffWarnings = map[string]bool{
 // always-on safety warnings. Mirrors the clang/gcc convention: useful
 // hygiene checks that don't usually produce false positives in idiomatic
 // code.
-var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual, DiagUseBeforeAssign, DiagStyle}
+var wallWarnings = []string{DiagUnusedLet, DiagLetNoReassign, DiagUnusedResult, DiagFloatEqual, DiagUseBeforeAssign, DiagStyle}
 
 // wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
 // These can produce noise in code that follows trait-conformance patterns

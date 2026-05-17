@@ -316,9 +316,9 @@ func (cg *CodeGen) diTypeFromLLVM(t irtypes.Type) metadata.Field {
 			}
 		}
 		// Search struct registry for a matching type pointer.
-		for name, st := range cg.structTypes {
-			if st == v {
-				return cg.diTypeFor(name)
+		for canon, r := range cg.types {
+			if r.LLVM == v {
+				return cg.diTypeFor(string(canon))
 			}
 		}
 	}
@@ -403,7 +403,7 @@ func (cg *CodeGen) diTypeFor(tinTypeName string) metadata.Field {
 		default:
 			// Try struct registry (normalize :: -> __ for package-qualified names).
 			structKey := strings.ReplaceAll(tinTypeName, "::", "__")
-			if st := cg.structTypes[structKey]; st != nil {
+			if st := cg.structTypeFor(CanonKey(structKey)); st != nil {
 				t = cg.diStructTypeFromRegistry(structKey, st)
 			} else {
 				// Unknown type: opaque i64-sized scalar so the variable is at

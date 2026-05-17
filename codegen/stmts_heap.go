@@ -697,7 +697,7 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 
 		if isCLayout {
 			// Load c_data_ptr from the just-copied wrapper.
-			tinSt := cg.structTypes[sName]
+			tinSt := cg.structTypeFor(CanonKey(sName))
 			cDataIdx := int64(cg.cDataPtrIndex(sName))
 			cDataGep := block.NewGetElementPtr(tinSt, heapPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
@@ -801,9 +801,7 @@ func (cg *CodeGen) fieldIsKnownStructPointer(structName string, fieldIdx int) bo
 		return false
 	}
 
-	_, isTinStruct := cg.structTypes[innerSt.Name()]
-
-	return isTinStruct
+	return cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 }
 
 // mergeFieldIndices unions two []int field-index lists, preserving

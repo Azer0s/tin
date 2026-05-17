@@ -640,7 +640,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		// genericStructsByArity and must not be aliased to "pkg__Name" here,
 		// or genTypeDecl will fail to find the template under the qualified key.
 		if len(sd.TypeParams) == 0 {
-			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: cg.pkgStructKey(sd.Name)}
+			cg.setTypeAlias(sd.Name, &ast.SimpleType{Name: cg.pkgStructKey(sd.Name)})
 		}
 	}
 
@@ -1102,19 +1102,22 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	for name := range exportedNames {
 		// Non-generic structs use canonical "pkgName__name" keys.
 		canonicalKey := pkgName + "__" + name
-		if _, ok := cg.structTypes[canonicalKey]; ok {
-			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: canonicalKey}
-			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: canonicalKey}
-		} else if _, ok2 := cg.structTypes[name]; ok2 {
+		if cg.structTypeFor(CanonKey(canonicalKey)) != nil {
+			cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: canonicalKey})
+			cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: canonicalKey})
+			cg.recordAlias(CanonKey(canonicalKey), pkgName+"::"+name)
+		} else if cg.structTypeFor(CanonKey(name)) != nil {
 			// Struct was loaded without a package prefix (e.g. from a direct file import
 			// that ran before currentPkg was set). Fall back to bare-name alias.
-			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
-			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
+			cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: name})
+			cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: name})
+			cg.recordAlias(CanonKey(name), pkgName+"::"+name)
 		}
 		// Generic struct templates are always keyed by bare name.
 		if _, ok := cg.genericStructsByArity[name]; ok {
-			cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
-			cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
+			cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: name})
+			cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: name})
+			cg.recordAlias(CanonKey(name), pkgName+"::"+name)
 		}
 	}
 
@@ -1252,24 +1255,24 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		// For non-generic structs: "sync::Unit" -> SimpleType{Name: "sync__Unit"}.
 		// For generic struct templates: "sync::Channel" -> SimpleType{Name: "Channel"} (bare).
 		structKey := pkgName + "__" + sd.Name
-		if _, stOk := cg.structTypes[structKey]; stOk {
+		if cg.structTypeFor(CanonKey(structKey)) != nil {
 			// Non-generic struct with canonical key.
 			prevScope.set(pkgName+"::"+sd.Name, &scopeEntry{val: nil, isAlloc: false})
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: structKey}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: structKey}
+			cg.setTypeAlias(pkgName+"::"+sd.Name, &ast.SimpleType{Name: structKey})
+			cg.setTypeAlias(pkgName+"."+sd.Name, &ast.SimpleType{Name: structKey})
 			// Always update the bare-name alias to the current package's struct so
 			// that intra-package code (pass 3 bodies) resolves the correct type even
 			// when multiple packages loaded in the same scope share a type name.
-			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
-		} else if _, stOk2 := cg.structTypes[sd.Name]; stOk2 {
+			cg.setTypeAlias(sd.Name, &ast.SimpleType{Name: structKey})
+		} else if cg.structTypeFor(CanonKey(sd.Name)) != nil {
 			// Struct registered under bare name (e.g. from file-path import before
 			// currentPkg was set, or user-level struct).
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
+			cg.setTypeAlias(pkgName+"::"+sd.Name, &ast.SimpleType{Name: sd.Name})
+			cg.setTypeAlias(pkgName+"."+sd.Name, &ast.SimpleType{Name: sd.Name})
 		} else {
 			// Generic struct template (not in structTypes) - use bare name alias.
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
+			cg.setTypeAlias(pkgName+"::"+sd.Name, &ast.SimpleType{Name: sd.Name})
+			cg.setTypeAlias(pkgName+"."+sd.Name, &ast.SimpleType{Name: sd.Name})
 		}
 	}
 
@@ -1725,11 +1728,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 	for name := range exportedNames {
 		canonicalKey := pkgName + "__" + name
 		// Check for a non-generic struct type that was imported.
-		if _, isStruct := cg.structTypes[canonicalKey]; isStruct {
+		if cg.structTypeFor(CanonKey(canonicalKey)) != nil {
 			// Register package-qualified type alias for the caller.
-			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
-				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: canonicalKey}
-				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: canonicalKey}
+			if cg.aliasTypeFor(CanonKey(pkgName+"::"+name)) == nil {
+				cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: canonicalKey})
+				cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: canonicalKey})
 			}
 			// Propagate any methods found in our child scope to prevScope.
 			// Methods are registered under the canonical key.
@@ -1738,11 +1741,11 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 					prevScope.set(key, entry)
 				}
 			})
-		} else if _, isStruct2 := cg.structTypes[name]; isStruct2 {
+		} else if cg.structTypeFor(CanonKey(name)) != nil {
 			// Bare-name struct (e.g. file-path import that ran before currentPkg was set).
-			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
-				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
-				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
+			if cg.aliasTypeFor(CanonKey(pkgName+"::"+name)) == nil {
+				cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: name})
+				cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: name})
 			}
 
 			cg.curScope.each(func(key string, entry *scopeEntry) {
@@ -1753,9 +1756,9 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 
 		if _, isGeneric := cg.genericStructsByArity[name]; isGeneric {
-			if _, alreadySet := cg.typeAliases[pkgName+"::"+name]; !alreadySet {
-				cg.typeAliases[pkgName+"::"+name] = &ast.SimpleType{Name: name}
-				cg.typeAliases[pkgName+"."+name] = &ast.SimpleType{Name: name}
+			if cg.aliasTypeFor(CanonKey(pkgName+"::"+name)) == nil {
+				cg.setTypeAlias(pkgName+"::"+name, &ast.SimpleType{Name: name})
+				cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: name})
 			}
 		}
 	}
@@ -1884,11 +1887,11 @@ func (cg *CodeGen) isVariantOfExportedAdt(name string, exportedNames map[string]
 // isExportable reports whether name refers to a top-level decl that
 // can appear in an export list.
 func (cg *CodeGen) isExportable(name, pkgName string) bool {
-	if _, ok := cg.structTypes[name]; ok {
+	if cg.structTypeFor(CanonKey(name)) != nil {
 		return true
 	}
 
-	if _, ok := cg.structTypes[pkgName+"__"+name]; ok {
+	if cg.structTypeFor(CanonKey(pkgName+"__"+name)) != nil {
 		return true
 	}
 
@@ -1896,19 +1899,19 @@ func (cg *CodeGen) isExportable(name, pkgName string) bool {
 		return true
 	}
 
-	if _, ok := cg.dataDecls[name]; ok {
+	if cg.dataDeclFor(CanonKey(name)) != nil {
 		return true
 	}
 
-	if _, ok := cg.dataDecls[pkgName+"__"+name]; ok {
+	if cg.dataDeclFor(CanonKey(pkgName+"__"+name)) != nil {
 		return true
 	}
 
-	if _, ok := cg.enumTypes[name]; ok {
+	if cg.isEnumFor(CanonKey(name)) {
 		return true
 	}
 
-	if _, ok := cg.traits[name]; ok {
+	if cg.traitFor(CanonKey(name)) != nil {
 		return true
 	}
 
@@ -1952,7 +1955,7 @@ func (cg *CodeGen) isExportable(name, pkgName string) bool {
 		return true
 	}
 
-	if _, ok := cg.typeAliases[name]; ok {
+	if cg.aliasTypeFor(CanonKey(name)) != nil {
 		return true
 	}
 
@@ -1968,8 +1971,8 @@ func (cg *CodeGen) isExportable(name, pkgName string) bool {
 		}
 	}
 
-	for k := range cg.typeAliases {
-		if strings.HasPrefix(k, name+"::") {
+	for canon, r := range cg.types {
+		if r.Alias != nil && strings.HasPrefix(string(canon), name+"::") {
 			return true
 		}
 	}
@@ -2057,9 +2060,9 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 			pkgName + "::" + bareName,
 			pkgName + "." + bareName,
 		} {
-			if te, ok := cg.typeAliases[key]; ok {
-				if _, already := cg.typeAliases[bareName]; !already {
-					cg.typeAliases[bareName] = te
+			if te := cg.aliasTypeFor(CanonKey(key)); te != nil {
+				if cg.aliasTypeFor(CanonKey(bareName)) == nil {
+					cg.setTypeAlias(bareName, te)
 				}
 
 				break
@@ -2084,19 +2087,19 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 // the package-prefixed key. Used by selective-import to decide whether
 // to add the name to the importer's visibleTypes set.
 func (cg *CodeGen) isTypeName(bareName, pkgName string) bool {
-	if _, ok := cg.dataDecls[bareName]; ok {
+	if cg.dataDeclFor(CanonKey(bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.dataDecls[pkgName+"__"+bareName]; ok {
+	if cg.dataDeclFor(CanonKey(pkgName+"__"+bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.structTypes[bareName]; ok {
+	if cg.structTypeFor(CanonKey(bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.structTypes[pkgName+"__"+bareName]; ok {
+	if cg.structTypeFor(CanonKey(pkgName+"__"+bareName)) != nil {
 		return true
 	}
 
@@ -2104,23 +2107,23 @@ func (cg *CodeGen) isTypeName(bareName, pkgName string) bool {
 		return true
 	}
 
-	if _, ok := cg.enumTypes[bareName]; ok {
+	if cg.isEnumFor(CanonKey(bareName)) {
 		return true
 	}
 
-	if _, ok := cg.traits[bareName]; ok {
+	if cg.traitFor(CanonKey(bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.typeAliases[bareName]; ok {
+	if cg.aliasTypeFor(CanonKey(bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.typeAliases[pkgName+"::"+bareName]; ok {
+	if cg.aliasTypeFor(CanonKey(pkgName+"::"+bareName)) != nil {
 		return true
 	}
 
-	if _, ok := cg.typeAliases[pkgName+"."+bareName]; ok {
+	if cg.aliasTypeFor(CanonKey(pkgName+"."+bareName)) != nil {
 		return true
 	}
 
@@ -2302,8 +2305,8 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 		return nil
 	}
 
-	td, ok := cg.traits[traitName]
-	if !ok {
+	td := cg.traitFor(CanonKey(traitName))
+	if td == nil {
 		return nil
 	}
 
@@ -2384,7 +2387,7 @@ func parseConcreteSubstName(name string) ast.TypeExpr {
 	return t
 }
 
-func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubst map[string]string) (*ir.Func, error) {
+func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubst map[string]TypeName) (*ir.Func, error) {
 	irName := tmpl.Name + "__" + instKey
 	// Disambiguate generic free-fn overloads that share a base name + type
 	// args but differ in arity / param shape (e.g. `unwrap[t](r)` vs
@@ -2402,10 +2405,12 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// Validate that each concrete type satisfies its declared constraints, and
 	// ensure default (non-virtual) trait methods are available for the concrete type.
 	for _, c := range tmpl.Constraints {
-		concreteName, ok := typeSubst[c.TypeParam]
+		concreteTN, ok := typeSubst[c.TypeParam]
 		if !ok {
 			continue
 		}
+
+		concreteName := concreteTN.Canon
 
 		if ok, witness := cg.typeBoundSatisfied(concreteName, c.Bound); !ok {
 			return nil, fmt.Errorf("%d:%d: fn %s[%s]: type %q does not satisfy constraint \"where %s is %s\" (failing sub-check: \"%s\")",
@@ -2432,7 +2437,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// flag as an unknown identifier).
 	astSubst := make(map[string]ast.TypeExpr, len(typeSubst))
 	for param, concrete := range typeSubst {
-		astSubst[param] = parseConcreteSubstName(concrete)
+		astSubst[param] = parseConcreteSubstName(concrete.Canon)
 	}
 
 	// Substitute params.
@@ -2482,13 +2487,23 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// param (e.g. as a variable type annotation) resolve to the concrete type.
 	// Save previous values so they can be restored after compilation - stale
 	// aliases from one monomorphization must not bleed into the next.
-	prevAliases := make(map[string]ast.TypeExpr, len(astSubst))
-	for param, concreteTE := range astSubst {
-		if old, had := cg.typeAliases[param]; had {
-			prevAliases[param] = old
-		}
+	type prevEntry struct {
+		val    ast.TypeExpr
+		hadVal bool
+	}
 
-		cg.typeAliases[param] = concreteTE
+	prevAliases := make(map[string]prevEntry, len(astSubst))
+
+	for param, concreteTE := range astSubst {
+		prev, had := cg.pushAlias(param, concreteTE)
+		prevAliases[param] = prevEntry{val: prev, hadVal: had}
+	}
+
+	restoreAliases := func() {
+		for param := range astSubst {
+			entry := prevAliases[param]
+			cg.popAlias(param, entry.val, entry.hadVal)
+		}
 	}
 
 	// Pre-declare the function signature (no body yet) so that recursive calls
@@ -2497,13 +2512,7 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	if err := cg.predeclareFuncAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
 
-		for param := range astSubst {
-			if old, had := prevAliases[param]; had {
-				cg.typeAliases[param] = old
-			} else {
-				delete(cg.typeAliases, param)
-			}
-		}
+		restoreAliases()
 
 		return nil, err
 	}
@@ -2523,26 +2532,14 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	if err := cg.genFuncDeclAs(concrete, irName); err != nil {
 		cg.curScope = prevScope
 
-		for param := range astSubst {
-			if old, had := prevAliases[param]; had {
-				cg.typeAliases[param] = old
-			} else {
-				delete(cg.typeAliases, param)
-			}
-		}
+		restoreAliases()
 
 		return nil, err
 	}
 
 	// Restore type aliases - must happen before restoring curScope so that any
 	// scope-sensitive alias lookups during cleanup see the original state.
-	for param := range astSubst {
-		if old, had := prevAliases[param]; had {
-			cg.typeAliases[param] = old
-		} else {
-			delete(cg.typeAliases, param)
-		}
-	}
+	restoreAliases()
 
 	cg.curScope = prevScope
 
@@ -2568,10 +2565,14 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	return compiled, nil
 }
 
-// inferTypeArgs maps type-parameter names to concrete struct names given the
-// actual argument LLVM types at a call site.
-func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[string]string {
-	subst := make(map[string]string)
+// inferTypeArgs maps type-parameter names to TypeName given the actual
+// argument LLVM types at a call site.  The returned map uses TypeName so
+// downstream consumers can pick the Canon (monomorph-key) or Pretty
+// (diagnostic) form explicitly; before TypeName this returned bare
+// strings and consumers were inconsistent about which form they
+// interpreted them as.
+func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[string]TypeName {
+	subst := make(map[string]TypeName)
 	// Track whether each bound type param came from a constant (literal) argument.
 	// Non-constant (runtime) bindings take priority over constant-derived ones.
 	fromConst := make(map[string]bool)
@@ -2603,12 +2604,20 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 // inferTypeArgsFromParamPrio is like inferTypeArgsFromParam but respects a priority rule:
 // a binding derived from a runtime (non-constant) argument always wins over one derived
 // from a literal constant.
-func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType irtypes.Type, typeParams []string, subst map[string]string, fromConst map[string]bool, isConst bool) {
+func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType irtypes.Type, typeParams []string, subst map[string]TypeName, fromConst map[string]bool, isConst bool) {
 	switch pt := paramType.(type) {
 	case *ast.SimpleType:
 		for _, tp := range typeParams {
 			if pt.Name == tp {
-				name := cg.typeNameOf(argType)
+				// Capture the Canon form of argType so the substitution
+				// can never carry a leaked `_iface` suffix from a trait
+				// used as a value type.  Pre-TypeName this read
+				// typeNameOf(argType) directly, which returned the raw
+				// struct.Name() including `_iface`; downstream
+				// SimpleType{Name: subst[tp]} then propagated that into
+				// monomorph keys and silently diverged from the source-
+				// form path.  See docs/plans/typename-refactor.md.
+				name := cg.typeNameFromLLVM(argType).Canon
 				if name == "" {
 					if ptr, ok2 := argType.(*irtypes.PointerType); ok2 {
 						if st2, ok3 := ptr.ElemType.(*irtypes.StructType); ok3 {
@@ -2642,12 +2651,12 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 					// Additionally, string wins over __atom even if atom came from a non-const
 					// argument: atoms are coercible to string, so mixed (atom, string) calls
 					// should resolve t = string rather than t = __atom.
-					existingIsAtom := subst[tp] == "__atom"
+					existingIsAtom := subst[tp].Canon == "__atom"
 
 					currentIsString := name == "string"
 					if existing, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) || (existingIsAtom && currentIsString) {
 						_ = existing
-						subst[tp] = name
+						subst[tp] = cg.typeNameFromCanon(name)
 						fromConst[tp] = isConst
 					}
 				}
@@ -2680,7 +2689,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 		// json__Value). If no record exists, fall back to a `__`-split, which
 		// is correct when every arg is a bare name.
 		var parts []string
-		if recorded, ok := cg.dataInstTypeArgs[structName]; ok && len(recorded) == len(pt.TypeParams) {
+		if recorded := cg.instPartsFor(CanonKey(structName)); recorded != nil && len(recorded) == len(pt.TypeParams) {
 			parts = recorded
 		} else if len(pt.TypeParams) == 1 {
 			// Single type arg: the whole remainder is the arg (preserves
@@ -2697,7 +2706,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 				for _, tp := range typeParams {
 					if simpleInner.Name == tp {
 						if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
-							subst[tp] = parts[0]
+							subst[tp] = cg.typeNameFromCanon(parts[0])
 							fromConst[tp] = isConst
 						}
 
@@ -2705,7 +2714,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 					}
 				}
 			} else {
-				if innerST, ok := cg.structTypes[parts[0]]; ok {
+				if innerST := cg.structTypeFor(CanonKey(parts[0])); innerST != nil {
 					cg.inferTypeArgsFromParamPrio(innerParam, innerST, typeParams, subst, fromConst, isConst)
 				}
 			}
@@ -2728,7 +2737,7 @@ func (cg *CodeGen) inferTypeArgsFromParamPrio(paramType ast.TypeExpr, argType ir
 			for _, tp := range typeParams {
 				if simpleInner.Name == tp {
 					if _, exists := subst[tp]; !exists || (fromConst[tp] && !isConst) {
-						subst[tp] = part
+						subst[tp] = cg.typeNameFromCanon(part)
 						fromConst[tp] = isConst
 					}
 
@@ -2852,14 +2861,14 @@ func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
 
 	// Resolve type alias to canonical struct name.
 	canonicalName := typeName
-	if alias, ok := cg.typeAliases[typeName]; ok {
+	if alias := cg.aliasTypeFor(CanonKey(typeName)); alias != nil {
 		if st, ok2 := alias.(*ast.SimpleType); ok2 {
 			canonicalName = st.Name
 		}
 	}
 
-	st, ok := cg.structTypes[canonicalName]
-	if !ok {
+	st := cg.structTypeFor(CanonKey(canonicalName))
+	if st == nil {
 		return nil
 	}
 

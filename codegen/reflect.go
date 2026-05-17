@@ -667,7 +667,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 		sn := st0.name
 		typeID := st0.id
 
-		st := cg.structTypes[sn]
+		st := cg.structTypeFor(CanonKey(sn))
 		if st == nil {
 			continue
 		}
@@ -750,7 +750,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 	fieldNames := cg.structFields[sn]
 	fieldTypes := cg.structFieldLLVMTypes[sn]
 
-	st := cg.structTypes[sn]
+	st := cg.structTypeFor(CanonKey(sn))
 	if st == nil || len(fieldNames) == 0 {
 		return zeroAny, nil
 	}
@@ -826,7 +826,7 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 		sn := st0.name
 		typeID := st0.id
 
-		st := cg.structTypes[sn]
+		st := cg.structTypeFor(CanonKey(sn))
 		if st == nil {
 			continue
 		}

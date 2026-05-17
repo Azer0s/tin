@@ -1268,7 +1268,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	if name := cg.typeNameOf(llType); name != "" && cg.noCopyStructs[name] {
 		return nil, cg.nodeErr(s,
 			"%s is #no_copy: bind a *%s instead -- value-form let aliases the cell and double-frees on scope exit",
-			prettyStructName(name), prettyStructName(name))
+			cg.diagStructName(name), cg.diagStructName(name))
 	}
 
 	// REPL mode: promote top-level `let` bindings in the cell function to LLVM
@@ -1464,7 +1464,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// scope-exit release_ptr and leak the dequeued value.
 		if pt, isPtr := llType.(*irtypes.PointerType); isPtr {
 			if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
-				if _, isTinStruct := cg.structTypes[innerSt.Name()]; isTinStruct {
+				if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
 					isHeapOwned = true
 					heapOwnedDepth = pointerChainDepth(llType)
 				}
@@ -1622,7 +1622,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		if !initVal.Type().Equal(llType) {
 			return nil, cg.nodeErr(s,
 				"cannot assign value of type %s to %q (declared type %s)",
-				fmtArgType(initVal.Type()), s.Name, fmtArgType(llType))
+				cg.fmtArgType(initVal.Type()), s.Name, cg.fmtArgType(llType))
 		}
 
 		block.NewStore(initVal, alloca)
@@ -2036,7 +2036,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		// error from a temp .ll file.
 		if cg.curFn != nil && !irtypes.IsVoid(cg.curFn.Sig.RetType) {
 			return cg.nodeErr(s, "function returns %s but the return statement has no value",
-				fmtArgType(cg.curFn.Sig.RetType))
+				cg.fmtArgType(cg.curFn.Sig.RetType))
 		}
 
 		if err := cg.emitDefers(block); err != nil {
@@ -2103,7 +2103,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			// targeted Tin diagnostic instead of letting LLVM emit
 			// `ret void` and surface a clang IR-level error.
 			if val == nil {
-				return cg.nodeErr(s, "function returns %s but the return statement has no value", fmtArgType(retType))
+				return cg.nodeErr(s, "function returns %s but the return statement has no value", cg.fmtArgType(retType))
 			}
 
 			// `return ident` skips the source's scope-exit release via
@@ -2124,14 +2124,14 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				// the LLVM-mangled %Foo__i64). fmtArgType handles every
 				// common shape; fall back to prettyStructName via the
 				// raw struct name only when fmtArgType yields nothing.
-				gotName := fmtArgType(val.Type())
+				gotName := cg.fmtArgType(val.Type())
 				if gotName == "" || gotName == "<nil>" {
-					gotName = prettyStructName(cg.typeNameOf(val.Type()))
+					gotName = cg.diagStructName(cg.typeNameOf(val.Type()))
 				}
 
-				wantName := fmtArgType(retType)
+				wantName := cg.fmtArgType(retType)
 				if wantName == "" || wantName == "<nil>" {
-					wantName = prettyStructName(cg.typeNameOf(retType))
+					wantName = cg.diagStructName(cg.typeNameOf(retType))
 				}
 
 				if astDecl, ok := cg.funcDecls[cg.curFn.Name()]; ok && astDecl.RetType != nil {
@@ -2245,7 +2245,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 		if !val.Type().Equal(cg.curFn.Sig.RetType) {
 			return cg.nodeErr(s,
 				"return type mismatch: expected %s, got %s; if the called method has a wildcard return type, ensure its trait bound declares the wildcard slot (e.g. `tryable[T, Result[_, E]]`) so the value can be reconstructed in the enclosing function's type",
-				fmtArgType(cg.curFn.Sig.RetType), fmtArgType(val.Type()))
+				cg.fmtArgType(cg.curFn.Sig.RetType), cg.fmtArgType(val.Type()))
 		}
 	}
 
@@ -3196,7 +3196,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	if _, isFieldTarget := s.Target.(*ast.FieldAccess); isFieldTarget {
 		if ept, ok6 := ptrType.ElemType.(*irtypes.PointerType); ok6 {
 			if innerSt, ok7 := ept.ElemType.(*irtypes.StructType); ok7 && innerSt.Name() != "" {
-				_, isTinStructPtrElem = cg.structTypes[innerSt.Name()]
+				isTinStructPtrElem = cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 			}
 		}
 
@@ -3319,7 +3319,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 			}
 
 			return block, cg.nodeErr(s, "compound assignment %q is not defined for operands of type %s and %s",
-				s.Op, fmtArgType(elemType), fmtArgType(rhs.Type()))
+				s.Op, cg.fmtArgType(elemType), cg.fmtArgType(rhs.Type()))
 		}
 	}
 
@@ -3383,7 +3383,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		if !isFatArrayPtr(elemType) {
 			return block, cg.nodeErr(s,
 				"`++=` requires a slice ([T]) on the left-hand side, got %s",
-				fmtArgType(elemType))
+				cg.fmtArgType(elemType))
 		}
 
 		fatType := elemType.(*irtypes.StructType)
@@ -3395,7 +3395,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 				"`++=` expects a `[%s]` on the right-hand side; got %s. "+
 					"`++=` is concat-assign (not append-one) -- to append a "+
 					"single value, wrap it: `xs ++= [v]`",
-				fmtArgType(elemT), fmtArgType(rhs.Type()))
+				cg.fmtArgType(elemT), cg.fmtArgType(rhs.Type()))
 		}
 
 		oldPtr := block.NewExtractValue(current, 0)

@@ -43,7 +43,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
 			// Qualified name: check typeAliases first (e.g. "collections::HashMap" may
 			// alias back to the bare "HashMap" used in genericStructsByArity).
-			if alias, ok := cg.typeAliases[name]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 				return cg.typeExprCanonicalKeyN(alias, depth+1)
 			}
 
@@ -51,7 +51,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		}
 		// Bare name: look up in typeAliases for the canonical form.
 		// Recurse to handle alias chains (e.g. t -> Unit -> sync__Unit, or t -> [byte]).
-		if alias, ok := cg.typeAliases[name]; ok {
+		if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			return cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
 
@@ -60,12 +60,12 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		name := t.Name
 		if strings.Contains(name, "::") {
 			// Qualified name: check typeAliases first (e.g. "collections::HashMap" -> "HashMap").
-			if alias, ok := cg.typeAliases[name]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 				name = cg.typeExprCanonicalKeyN(alias, depth+1)
 			} else {
 				name = strings.ReplaceAll(name, "::", "__")
 			}
-		} else if alias, ok := cg.typeAliases[name]; ok {
+		} else if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			// Bare name: resolve through alias (e.g. bare "Channel" -> "sync__Channel").
 			name = cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
@@ -199,7 +199,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			return cg.tinTypeToLLVM(&ast.FuncType{})
 		}
 		// Generic trait instantiation (e.g. iter[i64]) -> fat pointer type
-		if td, ok := cg.traits[t.Name]; ok {
+		if td := cg.traitFor(CanonKey(t.Name)); td != nil {
 			instKey := traitImplKey(t)
 			typeSubst := map[string]irtypes.Type{}
 
@@ -233,10 +233,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		nameWasQualified := strings.Contains(t.Name, "::")
 
-		if _, ok := cg.dataDecls[adtLookupName]; !ok {
+		if cg.dataDeclFor(CanonKey(adtLookupName)) == nil {
 			if idx := strings.LastIndex(adtLookupName, "::"); idx >= 0 {
 				bare := adtLookupName[idx+2:]
-				if _, ok2 := cg.dataDecls[bare]; ok2 {
+				if cg.dataDeclFor(CanonKey(bare)) != nil {
 					adtLookupName = bare
 				}
 			}
@@ -244,14 +244,14 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		if !nameWasQualified && !cg.suppressBareTypeCheck &&
 			cg.curScope != nil && !cg.curScope.typeNameVisible(adtLookupName) {
-			if _, isAdt := cg.dataDecls[adtLookupName]; isAdt && isUserAdtName(adtLookupName) {
+			if cg.dataDeclFor(CanonKey(adtLookupName)) != nil && isUserAdtName(adtLookupName) {
 				return nil, fmt.Errorf(
 					"type %q is not in scope as a bare name; either qualify (`<pkg>::%s[...]`) or import selectively (`use { %s } from <pkg>`)",
 					adtLookupName, adtLookupName, adtLookupName)
 			}
 		}
 
-		if dd, ok2 := cg.dataDecls[adtLookupName]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
+		if dd := cg.dataDeclFor(CanonKey(adtLookupName)); dd != nil && len(dd.TypeParams) == arity && arity > 0 {
 			parts := make([]string, arity)
 
 			isTemplateVar := false
@@ -271,11 +271,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				// and `Option[i64]` share the same concrete
 				// monomorphization (and the same Some/None ctors).
 				concreteName := adtLookupName + "__" + strings.Join(parts, "__")
-				if _, done := cg.structTypes[concreteName]; !done {
+				if cg.structTypeFor(CanonKey(concreteName)) == nil {
 					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
 						return nil, err
 					}
-				} else if concreteDecl, ok := cg.dataDecls[concreteName]; ok {
+				} else if concreteDecl := cg.dataDeclFor(CanonKey(concreteName)); concreteDecl != nil {
 					// Re-register plain method aliases AND plain-method
 					// scope entries in the current scope. The IR
 					// functions live in the module (emitted during the
@@ -291,10 +291,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					cg.rebindAdtMethodsInScope(concreteName, concreteDecl.Methods)
 				}
 
-				cg.dataInstTypeArgs[concreteName] = parts
-				cg.dataInstShape[concreteName] = instShape{Tmpl: dd.Name, Args: t.TypeParams}
+				cg.recordInstShape(CanonKey(concreteName), dd.Name, t.TypeParams)
+				cg.recordInstParts(CanonKey(concreteName), parts)
 
-				if st, ok3 := cg.structTypes[concreteName]; ok3 {
+				if st := cg.structTypeFor(CanonKey(concreteName)); st != nil {
 					return st, nil
 				}
 			}
@@ -327,7 +327,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 				if !isTemplateVar {
 					concreteName := qualTypeName + "__" + strings.Join(parts, "__")
-					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					if cg.structTypeFor(CanonKey(concreteName)) == nil {
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: qualTypeName, TypeParams: t.TypeParams},
@@ -347,9 +347,9 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 						}
 					}
 
-					cg.dataInstShape[concreteName] = instShape{Tmpl: qualTypeName, Args: t.TypeParams}
+					cg.recordInstShape(CanonKey(concreteName), qualTypeName, t.TypeParams)
 
-					if st, ok2 := cg.structTypes[concreteName]; ok2 {
+					if st := cg.structTypeFor(CanonKey(concreteName)); st != nil {
 						return st, nil
 					}
 				}
@@ -463,7 +463,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return anyFatPtrType(), nil
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
-	if _, ok := cg.traits[name]; ok {
+	if cg.traitFor(CanonKey(name)) != nil {
 		// If the trait belongs to a package, use the qualified instKey so that
 		// bare-name references (e.g. "JsonSerializable" inside json.tin) produce
 		// the same fat-ptr/vtable LLVM types as qualified references (e.g.
@@ -484,10 +484,24 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 
 		return fp, nil
 	}
-	// Strip package qualifier (e.g. "sync::AtomicI64" -> "AtomicI64") and retry.
+	// Strip package qualifier (e.g. "sync::AtomicI64" -> "AtomicI64") and
+	// retry.  Two qualifier forms reach this point: the source form
+	// `pkg::Name` (from a parsed TypeExpr) and the canonical form
+	// `pkg__Name` (from TypeName.Canon flowing back through SimpleType --
+	// see typename.go).  Both must resolve to the same LLVM type for the
+	// canonical/LLVM forms to be interchangeable downstream.
 	bareName := name
 	if idx := strings.LastIndex(name, "::"); idx >= 0 {
 		bareName = name[idx+2:]
+	} else if idx := strings.LastIndex(name, "__"); idx >= 0 {
+		// `pkg__Name` shape: only commit if the bare tail is a known
+		// trait or struct.  Otherwise `Future__i64` would wrongly split
+		// to `i64`; the consistent fallback is to keep `bareName = name`
+		// and let the explicit structTypes lookup handle it.
+		tail := name[idx+2:]
+		if cg.traitFor(CanonKey(tail)) != nil {
+			bareName = tail
+		}
 	}
 	// For package-qualified names (e.g. "udp::Conn"), try the canonical
 	// pkg__Name key BEFORE falling back to the bare name.  This prevents a
@@ -495,17 +509,17 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	// as the bare alias "Conn") from shadowing the intended type.
 	if bareName != name {
 		pkgQualKey := strings.ReplaceAll(name, "::", "__")
-		if st, ok := cg.structTypes[pkgQualKey]; ok {
+		if st := cg.structTypeFor(CanonKey(pkgQualKey)); st != nil {
 			return st, nil
 		}
 
-		if et, ok := cg.enumTypes[pkgQualKey]; ok {
+		if et := cg.enumTypeFor(CanonKey(pkgQualKey)); et != nil {
 			return et, nil
 		}
 	}
 	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
 	if bareName != name {
-		if _, ok := cg.traits[bareName]; ok {
+		if cg.traitFor(CanonKey(bareName)) != nil {
 			qualInstKey := strings.ReplaceAll(name, "::", "__")
 
 			fp, err := cg.buildTraitFatPtrTypeInst(bareName, qualInstKey, nil)
@@ -517,15 +531,15 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		}
 	}
 	// Check struct types
-	if st, ok := cg.structTypes[bareName]; ok {
+	if st := cg.structTypeFor(CanonKey(bareName)); st != nil {
 		return st, nil
 	}
 	// Check enum types
-	if et, ok := cg.enumTypes[bareName]; ok {
+	if et := cg.enumTypeFor(CanonKey(bareName)); et != nil {
 		return et, nil
 	}
 	// Check type aliases
-	if alias, ok := cg.typeAliases[bareName]; ok {
+	if alias := cg.aliasTypeFor(CanonKey(bareName)); alias != nil {
 		return cg.tinTypeToLLVM(alias)
 	}
 	// Unknown identifier in a type position. Tin's convention is that
@@ -540,7 +554,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		// One last shot: if the bare name is in dataDecls, accept it.
 		// Predeclare phase may resolve types before genDataDecl sets up
 		// the package-qualified entries we usually look at for ADTs.
-		if _, ok := cg.dataDecls[bareName]; ok {
+		if cg.dataDeclFor(CanonKey(bareName)) != nil {
 			// dataDecls has the template; concrete monomorphization
 			// happens via the GenericType branch when type args are
 			// supplied. A bare reference to a generic ADT (no args) is
