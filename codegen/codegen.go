@@ -1090,6 +1090,13 @@ type CodeGen struct {
 	// the f32x4 overload over f64x2. Cleared immediately after the call is resolved.
 	returnTypeHint irtypes.Type
 
+	// preEvaledArgVals stashes the arg-value list when the call site
+	// has to evaluate args early to disambiguate among generic overloads
+	// of the same arity (see pickGenericFuncOverload).  The downstream
+	// monomorphization / call-emit code consumes this and nils it so
+	// the eval doesn't fire twice (and re-trigger side effects).
+	preEvaledArgVals []value.Value
+
 	// lambdaSelfName carries the let-binding name through genVarDecl into
 	// genLambdaExpr so the lambda body can call itself recursively.
 	// Without this, `let fact = fn(n i64) i64 = fact(n-1)` would fail

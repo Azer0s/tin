@@ -202,7 +202,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// Check if this is a generic or constrained function call - monomorphize it.
 		{
-			var gTmpl *ast.FuncDecl
+			var (
+				gTmpl    *ast.FuncDecl
+				argVals  []value.Value
+				argsEval bool
+			)
 			if t, ok2 := cg.constrainedFuncs[fn.Name]; ok2 {
 				gTmpl = t
 			} else if t, ok2 := cg.genericFuncs[fn.Name]; ok2 {
@@ -223,8 +227,31 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					// whose arity matches the call so e.g.
 					// `result::unwrap(r)` (1 arg) and
 					// `result::unwrap(r, msg)` (2 args) route to their
-					// respective templates.
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[fn.Name], len(e.Args)); ov != nil {
+					// respective templates.  When arity ties (e.g.
+					// `fn poke[t](xs [t])` vs `fn poke[t](p *Trait[t])`)
+					// we eval args once up front and pass the LLVM types
+					// so pickGenericFuncOverload can disambiguate by
+					// param shape.
+					if ovs := cg.genericFuncOverloads[fn.Name]; len(ovs) > 1 {
+						argVals = make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err2 := cg.genExpr(block, arg)
+							if err2 != nil {
+								return nil, err2
+							}
+							argVals = append(argVals, av)
+						}
+						argsEval = true
+						argTypes := make([]irtypes.Type, len(argVals))
+						for i, v := range argVals {
+							if v != nil {
+								argTypes[i] = v.Type()
+							}
+						}
+						if ov := pickGenericFuncOverload(ovs, len(e.Args), argTypes); ov != nil {
+							gTmpl = ov
+						}
+					} else if ov := pickGenericFuncOverload(ovs, len(e.Args), nil); ov != nil {
 						gTmpl = ov
 					}
 				}
@@ -233,14 +260,16 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if gTmpl != nil {
 				tmpl := gTmpl
 				// Evaluate arguments first to infer concrete types.
-				argVals := make([]value.Value, 0, len(e.Args))
-				for _, arg := range e.Args {
-					av, err2 := cg.genExpr(block, arg)
-					if err2 != nil {
-						return nil, err2
-					}
+				if !argsEval {
+					argVals = make([]value.Value, 0, len(e.Args))
+					for _, arg := range e.Args {
+						av, err2 := cg.genExpr(block, arg)
+						if err2 != nil {
+							return nil, err2
+						}
 
-					argVals = append(argVals, av)
+						argVals = append(argVals, av)
+					}
 				}
 
 				typeSubst := cg.inferTypeArgs(tmpl, argVals)
@@ -1346,8 +1375,40 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				usedQual := false
 
+				// When the candidate set under either key has >1 entry
+				// the arity-only picker can't disambiguate.  Eval args
+				// once up front and pass LLVM types so pickGenericFunc-
+				// Overload can rank by param shape (matches the bare-
+				// name path above).  The eval'd argVals are stashed in
+				// preEvaledArgVals so the later monomorphization path
+				// can reuse them without re-running side effects.
+				var preEvaledArgTypes []irtypes.Type
+				if (qualFuncName != "" && len(cg.genericFuncOverloads[qualFuncName]) > 1) ||
+					len(cg.genericFuncOverloads[funcName]) > 1 {
+					if cg.preEvaledArgVals == nil {
+						vals := make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err2 := cg.genExpr(block, arg)
+							if err2 != nil {
+								return nil, err2
+							}
+							vals = append(vals, av)
+							if cg.curBlock != nil && cg.curBlock != block {
+								block = cg.curBlock
+							}
+						}
+						cg.preEvaledArgVals = vals
+					}
+					preEvaledArgTypes = make([]irtypes.Type, len(cg.preEvaledArgVals))
+					for i, v := range cg.preEvaledArgVals {
+						if v != nil {
+							preEvaledArgTypes[i] = v.Type()
+						}
+					}
+				}
+
 				if qualFuncName != "" {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args)); ov != nil {
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args), preEvaledArgTypes); ov != nil {
 						tmpl = ov
 						isGeneric = true
 						usedQual = true
@@ -1359,7 +1420,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if !isGeneric {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args)); ov != nil {
+					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args), preEvaledArgTypes); ov != nil {
 						tmpl = ov
 						isGeneric = true
 					} else if g, ok := cg.genericFuncs[funcName]; ok {
@@ -1398,18 +1459,26 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					if err2 != nil {
 						return nil, err2
 					}
-					// Build argument list and call
-					argVals := make([]value.Value, 0, len(e.Args))
-					for _, arg := range e.Args {
-						av, err3 := cg.genExpr(block, arg)
-						if err3 != nil {
-							return nil, err3
-						}
+					// Build argument list and call.  Reuse args eval'd
+					// during overload disambiguation when available so
+					// side effects don't fire twice.
+					var argVals []value.Value
+					if cg.preEvaledArgVals != nil {
+						argVals = cg.preEvaledArgVals
+						cg.preEvaledArgVals = nil
+					} else {
+						argVals = make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err3 := cg.genExpr(block, arg)
+							if err3 != nil {
+								return nil, err3
+							}
 
-						argVals = append(argVals, av)
+							argVals = append(argVals, av)
 
-						if cg.curBlock != nil && cg.curBlock != block {
-							block = cg.curBlock
+							if cg.curBlock != nil && cg.curBlock != block {
+								block = cg.curBlock
+							}
 						}
 					}
 

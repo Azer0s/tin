@@ -2740,7 +2740,7 @@ func (cg *CodeGen) callGenericFromMap(
 	// route to their own templates.  The single-entry case in
 	// pickGenericFuncOverload short-circuits, leaving non-overloaded
 	// callers unaffected.
-	if ov := pickGenericFuncOverload(cg.genericFuncOverloads[bareName], len(args)); ov != nil {
+	if ov := pickGenericFuncOverload(cg.genericFuncOverloads[bareName], len(args), nil); ov != nil {
 		tmpl = ov
 	}
 
