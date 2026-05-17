@@ -592,6 +592,14 @@ func (p *Parser) parseIsSuffix(expr ast.Node) (ast.Node, error) {
 }
 
 func (p *Parser) parsePostfix() (ast.Node, error) {
+	return p.parsePostfixOpt(false)
+}
+
+// parsePostfixOpt is the shared postfix walker. When stopAfterCall is true,
+// the loop exits after consuming a CallExpr-producing segment so the caller
+// can re-enter the chain on the outer expression. Used by `await EXPR.foo()`
+// to make the chain `(await EXPR.foo())` rather than `await (EXPR.foo())`.
+func (p *Parser) parsePostfixOpt(stopAfterCall bool) (ast.Node, error) {
 	expr, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
@@ -599,6 +607,7 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 	indentConsumed := 0
 
+postfixLoop:
 	for {
 		// Allow NEWLINE + optional INDENT before DOT or ARROW (method chain continuation).
 		if p.check(lexer.NEWLINE) {
@@ -685,6 +694,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 				fa := ast.NewFieldAccess(expr, field.Literal, false, field.Line, field.Col)
 				expr = ast.NewCallExpr(fa, args, field.Line, field.Col)
+
+				if stopAfterCall {
+					break postfixLoop
+				}
 			} else {
 				expr = ast.NewFieldAccess(expr, field.Literal, false, field.Line, field.Col)
 			}
@@ -715,6 +728,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 				fa := ast.NewFieldAccess(expr, field.Literal, true, field.Line, field.Col)
 				expr = ast.NewCallExpr(fa, args, field.Line, field.Col)
+
+				if stopAfterCall {
+					break postfixLoop
+				}
 			} else {
 				expr = ast.NewFieldAccess(expr, field.Literal, true, field.Line, field.Col)
 			}
@@ -747,6 +764,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					}
 
 					expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
+
+					if stopAfterCall {
+						break postfixLoop
+					}
 				} else if p.check(lexer.LBRACE) {
 					// pkg::subpkg::Type{...} - package-qualified struct literal
 					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
@@ -766,6 +787,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 					}
 
 					expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
+
+					if stopAfterCall {
+						break postfixLoop
+					}
 				} else if p.check(lexer.LBRACE) {
 					// pkg::Type{...} - package-qualified struct literal
 					lit, err3 := p.parseStructLit(strings.Join(sa.Path, "::"))
@@ -805,6 +830,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 						}
 
 						expr = ast.NewCallExpr(sa, args, field.Line, field.Col)
+
+						if stopAfterCall {
+							break postfixLoop
+						}
 					} else {
 						expr = sa
 					}
@@ -959,6 +988,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 
 			expr = &ast.CallExpr{Func: expr, Args: args}
 
+			if stopAfterCall {
+				break postfixLoop
+			}
+
 		case lexer.LPAREN:
 			// Function call - record position of the opening paren for error messages.
 			callTok := p.peek()
@@ -969,6 +1002,10 @@ func (p *Parser) parsePostfix() (ast.Node, error) {
 			}
 
 			expr = ast.NewCallExpr(expr, args, callTok.Line, callTok.Col)
+
+			if stopAfterCall {
+				break postfixLoop
+			}
 
 		case lexer.KW_AS:
 			if p.suppressPostfixCast > 0 {
@@ -1585,7 +1622,12 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 	case lexer.KW_AWAIT:
 		awaitTok := p.advance()
 
-		fut, err := p.parseExpr()
+		// Parse the future operand as primary + chain up to (and including)
+		// the first CallExpr.  This makes `await EXPR.method()` parse as
+		// `(await EXPR.method()).method()` — the chain after the awaited
+		// call applies to the Result/value, not the Future.  Use parens to
+		// override (`await (x.y().z())` still awaits the full chain).
+		fut, err := p.parsePostfixOpt(true)
 		if err != nil {
 			return nil, err
 		}
