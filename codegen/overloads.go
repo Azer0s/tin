@@ -194,16 +194,20 @@ func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int, argTypes [
 			best      *ast.FuncDecl
 			bestTies  int
 		)
+
 		for _, fd := range overloads {
 			fixed := 0
+
 			for _, p := range fd.Params {
 				if !p.IsVarArgs {
 					fixed++
 				}
 			}
+
 			if fixed != argCount {
 				continue
 			}
+
 			score := scoreGenericTemplate(fd, argTypes)
 			if score > bestScore {
 				bestScore = score
@@ -213,6 +217,7 @@ func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int, argTypes [
 				bestTies++
 			}
 		}
+
 		if best != nil && bestTies == 1 {
 			return best
 		}
@@ -277,22 +282,28 @@ func scoreGenericTemplate(fd *ast.FuncDecl, argTypes []irtypes.Type) int {
 	for _, tp := range fd.TypeParams {
 		tps[tp] = true
 	}
+
 	total := 0
 	idx := 0
+
 	for _, p := range fd.Params {
 		if p.IsVarArgs {
 			continue
 		}
+
 		if idx >= len(argTypes) {
 			break
 		}
+
 		s := paramShapeScore(p.Type, argTypes[idx], tps)
 		if s == 0 {
 			return 0
 		}
+
 		total += s
 		idx++
 	}
+
 	return total
 }
 
@@ -303,6 +314,7 @@ func paramShapeScore(param ast.TypeExpr, arg irtypes.Type, typeParams map[string
 	if param == nil || arg == nil {
 		return 10 // unknown -> treat as bare param match
 	}
+
 	switch p := param.(type) {
 	case *ast.SimpleType:
 		if typeParams[p.Name] {
@@ -317,16 +329,19 @@ func paramShapeScore(param ast.TypeExpr, arg irtypes.Type, typeParams map[string
 			if irtypes.IsInt(arg) {
 				return 100
 			}
+
 			return 0
 		case "f64", "f32":
 			if irtypes.IsFloat(arg) {
 				return 100
 			}
+
 			return 0
 		case "string":
 			if isStringType(arg) {
 				return 100
 			}
+
 			return 0
 		}
 		// Unknown concrete name: don't claim a match.
@@ -336,20 +351,24 @@ func paramShapeScore(param ast.TypeExpr, arg irtypes.Type, typeParams map[string
 		if isStringType(arg) || isFatArrayPtr(arg) {
 			return 50
 		}
+
 		return 0
 	case *ast.PointerType:
 		_, isPtr := arg.(*irtypes.PointerType)
 		if isPtr {
 			return 50
 		}
+
 		return 0
 	case *ast.GenericType:
 		// `Trait[T]` as a by-value iface fat-ptr param.
 		if isTraitFatPtrShape(arg) {
 			return 50
 		}
+
 		return 0
 	}
+
 	return 10
 }
 

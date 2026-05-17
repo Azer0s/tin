@@ -1,0 +1,26 @@
+// libs/blas/types - CBLAS enum constants.
+//
+// Values are fixed by the spec and identical across Accelerate,
+// OpenBLAS, Netlib, and MKL.  Used with the `*_raw` entry points;
+// the high-level wrappers default to ROW_MAJOR + NO_TRANS.
+
+// Memory layout for matrices passed as flat buffers.
+const ROW_MAJOR i32 = 101
+const COL_MAJOR i32 = 102
+
+// Transpose flag for matrix operands.
+const NO_TRANS    i32 = 111
+const TRANS       i32 = 112
+const CONJ_TRANS  i32 = 113
+
+// Which triangle of a symmetric / triangular matrix carries data.
+const UPPER i32 = 121
+const LOWER i32 = 122
+
+// Whether the diagonal of a triangular matrix is implicitly unit.
+const NON_UNIT i32 = 131
+const UNIT     i32 = 132
+
+// Which side of `op(A)` the rectangular operand sits on (trsm / trmm).
+const LEFT  i32 = 141
+const RIGHT i32 = 142

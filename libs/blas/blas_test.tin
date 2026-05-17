@@ -1,0 +1,204 @@
+// libs/blas/blas_test - inline correctness tests for the CBLAS bindings.
+//
+// Inputs are chosen so the result is exactly representable in IEEE 754
+// binary64 (small signed integers, powers of two), which lets us use
+// strict assert::equals on f64 outputs.  Vendors with different
+// reduction orders (Accelerate vs. OpenBLAS) all agree as long as no
+// rounding occurs along the way.
+//
+// Each routine is tested via the high-level wrapper.  A handful of
+// extra tests drive `*_raw` to verify the underlying surface still
+// works (custom strides, transposes, accumulation).
+
+use assert
+use blas
+
+// ---------------------------------------------------------------------------
+// Level 1 - high-level
+// ---------------------------------------------------------------------------
+
+test "ddot computes the dot product" =
+  let x [f64] = [1.0, 2.0, 3.0]
+  let y [f64] = [4.0, 5.0, 6.0]
+
+  // 1*4 + 2*5 + 3*6 = 32
+  assert::equals(32.0, blas::ddot(x, y))
+
+test "dasum sums absolute values" =
+  let x [f64] = [1.0, -2.0, 3.0, -4.0]
+
+  assert::equals(10.0, blas::dasum(x))
+
+test "dnrm2 returns the Euclidean norm" =
+  let x [f64] = [3.0, 4.0]
+
+  // sqrt(9 + 16) = 5
+  assert::equals(5.0, blas::dnrm2(x))
+
+test "dscal scales in place" =
+  let x [f64] = [1.0, 2.0, 3.0, 4.0]
+  blas::dscal(2.0, x)
+
+  assert::equals(2.0, x[0])
+  assert::equals(4.0, x[1])
+  assert::equals(6.0, x[2])
+  assert::equals(8.0, x[3])
+
+test "daxpy computes y := alpha*x + y" =
+  let x [f64] = [1.0, 2.0, 3.0]
+  let y [f64] = [4.0, 5.0, 6.0]
+  blas::daxpy(2.0, x, y)
+
+  assert::equals(6.0,  y[0])
+  assert::equals(9.0,  y[1])
+  assert::equals(12.0, y[2])
+  // x is read-only for axpy
+  assert::equals(1.0, x[0])
+
+test "dcopy copies x into y" =
+  let x [f64] = [7.0, 8.0, 9.0]
+  let y [f64] = [0.0, 0.0, 0.0]
+  blas::dcopy(x, y)
+
+  assert::equals(7.0, y[0])
+  assert::equals(8.0, y[1])
+  assert::equals(9.0, y[2])
+
+test "dswap exchanges x and y" =
+  let x [f64] = [1.0, 2.0, 3.0]
+  let y [f64] = [4.0, 5.0, 6.0]
+  blas::dswap(x, y)
+
+  assert::equals(4.0, x[0])
+  assert::equals(5.0, x[1])
+  assert::equals(6.0, x[2])
+  assert::equals(1.0, y[0])
+  assert::equals(2.0, y[1])
+  assert::equals(3.0, y[2])
+
+test "idamax returns the 0-based index of max |X[i]|" =
+  let x [f64] = [1.0, -7.0, 3.0, 4.0]
+
+  assert::equals(1 as i32, blas::idamax(x))
+
+test "sdot single-precision dot product" =
+  let x [f32] = [1.0, 2.0, 3.0]
+  let y [f32] = [4.0, 5.0, 6.0]
+
+  assert::equals(32.0 as f32, blas::sdot(x, y))
+
+// ---------------------------------------------------------------------------
+// Level 2 - high-level
+// ---------------------------------------------------------------------------
+
+test "dgemv computes y := A*x" =
+  let a [[f64]] = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0],
+  ]
+  let x [f64] = [1.0, 1.0, 1.0]
+  let y [f64] = [0.0, 0.0]
+
+  // A * [1,1,1]^T = [6, 15]
+  blas::dgemv(a, x, y)
+
+  assert::equals(6.0,  y[0])
+  assert::equals(15.0, y[1])
+
+// ---------------------------------------------------------------------------
+// Level 3 - high-level
+// ---------------------------------------------------------------------------
+
+test "dgemm computes C := A*B (2x3 * 3x2)" =
+  // A*B = [ 1*7+2*9+3*11,  1*8+2*10+3*12 ]  = [ 58,  64]
+  //       [ 4*7+5*9+6*11,  4*8+5*10+6*12 ]    [139, 154]
+  let a [[f64]] = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0],
+  ]
+  let b [[f64]] = [
+    [7.0,  8.0],
+    [9.0,  10.0],
+    [11.0, 12.0],
+  ]
+  let c [[f64]] = [
+    [0.0, 0.0],
+    [0.0, 0.0],
+  ]
+
+  blas::dgemm(a, b, c)
+
+  assert::equals(58.0,  c[0][0])
+  assert::equals(64.0,  c[0][1])
+  assert::equals(139.0, c[1][0])
+  assert::equals(154.0, c[1][1])
+
+// ---------------------------------------------------------------------------
+// Raw API - verifies the underlying surface still works for power
+// users who need strides, transposes, or accumulation.
+// ---------------------------------------------------------------------------
+
+test "ddot_raw honors non-unit strides" =
+  let x [f64] = [1.0, 99.0, 2.0, 99.0, 3.0]
+  let y [f64] = [4.0, 5.0, 6.0]
+
+  // strided X = [1, 2, 3], dense Y = [4, 5, 6] -> 32
+  assert::equals(32.0, blas::ddot_raw(3, &x[0], 2, &y[0], 1))
+
+test "dgemv_raw: y := alpha*A^T*x + beta*y" =
+  // A is 2x3 (row-major, lda=3); op(A) is 3x2.
+  //   [1 2 3]
+  //   [4 5 6]
+  let a [f64] = [
+    1.0, 2.0, 3.0,
+    4.0, 5.0, 6.0,
+  ]
+  let x [f64] = [1.0, 1.0]
+  let y [f64] = [10.0, 20.0, 30.0]
+
+  // alpha=2, beta=3; A^T * x = [5, 7, 9]
+  // 2*[5,7,9] + 3*[10,20,30] = [40, 74, 108]
+  blas::dgemv_raw(
+    blas::ROW_MAJOR, blas::TRANS,
+    2, 3,
+    2.0,
+    &a[0], 3,
+    &x[0], 1,
+    3.0,
+    &y[0], 1,
+  )
+
+  assert::equals(40.0,  y[0])
+  assert::equals(74.0,  y[1])
+  assert::equals(108.0, y[2])
+
+test "dgemm_raw accumulates with non-zero beta" =
+  // I (2x2) * X (2x2) = X; alpha=2, beta=3 -> 2*X + 3*C0
+  let i [f64] = [
+    1.0, 0.0,
+    0.0, 1.0,
+  ]
+  let x [f64] = [
+    1.0, 2.0,
+    3.0, 4.0,
+  ]
+  let c [f64] = [
+    10.0, 20.0,
+    30.0, 40.0,
+  ]
+
+  // expected: 2*X + 3*C0 = [[32, 64], [96, 128]]
+  blas::dgemm_raw(
+    blas::ROW_MAJOR, blas::NO_TRANS, blas::NO_TRANS,
+    2, 2, 2,
+    2.0,
+    &i[0], 2,
+    &x[0], 2,
+    3.0,
+    &c[0], 2,
+  )
+
+  assert::equals(32.0,  c[0])
+  assert::equals(64.0,  c[1])
+  assert::equals(96.0,  c[2])
+  assert::equals(128.0, c[3])

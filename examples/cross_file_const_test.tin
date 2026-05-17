@@ -1,0 +1,20 @@
+// examples/cross_file_const_test - regression for const propagation
+// across `use "./file"` imports.
+//
+// loadPackageFromFilePath used to propagate fns, types, and macros to
+// the importing scope but not top-level consts.  That made a const
+// declared in a helper file invisible to its importer even though
+// every other top-level decl was reachable.  This test imports a
+// helper that defines ANSWER and asserts the const resolves both in
+// expressions and in initializers.
+
+use assert
+use "./fixtures/cross_file_const_helper"
+
+test "const from a use-imported helper resolves by bare name" =
+  assert::equals(42 as i32, ANSWER)
+
+test "const from a use-imported helper folds into expressions" =
+  let doubled = ANSWER * 2
+
+  assert::equals(84 as i32, doubled)

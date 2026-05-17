@@ -239,15 +239,19 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							if err2 != nil {
 								return nil, err2
 							}
+
 							argVals = append(argVals, av)
 						}
+
 						argsEval = true
+
 						argTypes := make([]irtypes.Type, len(argVals))
 						for i, v := range argVals {
 							if v != nil {
 								argTypes[i] = v.Type()
 							}
 						}
+
 						if ov := pickGenericFuncOverload(ovs, len(e.Args), argTypes); ov != nil {
 							gTmpl = ov
 						}
@@ -1383,6 +1387,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				// preEvaledArgVals so the later monomorphization path
 				// can reuse them without re-running side effects.
 				var preEvaledArgTypes []irtypes.Type
+
 				if (qualFuncName != "" && len(cg.genericFuncOverloads[qualFuncName]) > 1) ||
 					len(cg.genericFuncOverloads[funcName]) > 1 {
 					if cg.preEvaledArgVals == nil {
@@ -1392,13 +1397,17 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							if err2 != nil {
 								return nil, err2
 							}
+
 							vals = append(vals, av)
+
 							if cg.curBlock != nil && cg.curBlock != block {
 								block = cg.curBlock
 							}
 						}
+
 						cg.preEvaledArgVals = vals
 					}
+
 					preEvaledArgTypes = make([]irtypes.Type, len(cg.preEvaledArgVals))
 					for i, v := range cg.preEvaledArgVals {
 						if v != nil {

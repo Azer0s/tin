@@ -1,0 +1,79 @@
+//!-framework Accelerate [darwin]
+//!-lopenblas [linux]
+
+// libs/blas - CBLAS bindings (Apple Accelerate on macOS, OpenBLAS on Linux).
+//
+// Two API tiers:
+//
+//   1. Ergonomic wrappers (the default).  Take Tin arrays directly,
+//      infer length from `len()`, assume stride 1, row-major, no
+//      transpose, alpha=1, beta=0:
+//
+//        use blas
+//
+//        let x [f64] = [1.0, 2.0, 3.0]
+//        let y [f64] = [4.0, 5.0, 6.0]
+//        let d = blas::ddot(x, y)              // 32.0
+//
+//        blas::daxpy(2.0, x, y)                // y := 2x + y
+//        let n = blas::dnrm2(x)                // sqrt(x . x)
+//
+//        // Matrices are [[f64]] (row-of-rows); all dims inferred:
+//        let a [[f64]] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+//        blas::dgemv(a, x, y)                  // y := A*x
+//        blas::dgemm(a, b, c)                  // C := A*B
+//
+//   2. Raw extern bindings (`*_raw`).  Full CBLAS surface with
+//      explicit layout, transpose, alpha/beta, strides, and leading
+//      dimensions.  Reach for these when you need column-major,
+//      transposed operands, non-unit strides, or to accumulate onto
+//      an existing buffer:
+//
+//        blas::dgemv_raw(blas::ROW_MAJOR, blas::TRANS,
+//                        2, 3, 2.0, &a[0], 3, &x[0], 1,
+//                        3.0, &y[0], 1)        // y := 2 A^T x + 3 y
+//
+// All routines come from a single vendor library, so one linker flag
+// covers Levels 1-3.
+
+use "./types"
+use "./level1"
+use "./level2"
+use "./level3"
+
+export {
+  // Enum constants (used with *_raw)
+  ROW_MAJOR, COL_MAJOR,
+  NO_TRANS, TRANS, CONJ_TRANS,
+  UPPER, LOWER,
+  NON_UNIT, UNIT,
+  LEFT, RIGHT,
+
+  // Level 1 - high-level
+  ddot,  sdot,
+  dasum, sasum,
+  dnrm2, snrm2,
+  dscal, sscal,
+  daxpy, saxpy,
+  dcopy, scopy,
+  dswap, sswap,
+  idamax, isamax,
+
+  // Level 1 - raw
+  ddot_raw,  sdot_raw,
+  dasum_raw, sasum_raw,
+  dnrm2_raw, snrm2_raw,
+  dscal_raw, sscal_raw,
+  daxpy_raw, saxpy_raw,
+  dcopy_raw, scopy_raw,
+  dswap_raw, sswap_raw,
+  idamax_raw, isamax_raw,
+
+  // Level 2
+  dgemv, sgemv,
+  dgemv_raw, sgemv_raw,
+
+  // Level 3
+  dgemm, sgemm,
+  dgemm_raw, sgemm_raw,
+} as blas

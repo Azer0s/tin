@@ -1,0 +1,7 @@
+// examples/fixtures/cross_file_const_helper - helper for
+// cross_file_const_test.tin.  Declares a top-level const that the
+// importer references by bare name.  Exists to lock in the const
+// propagation pass added to loadPackageFromFilePath; if that pass
+// regresses, the importer fails with "undefined identifier".
+
+const ANSWER i32 = 42

@@ -951,6 +951,45 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		}
 	}
 
+	// Propagate top-level const declarations to prevScope so that the
+	// importing file can both reference them in expressions AND list
+	// them in its `export { ... } as pkg` block.  Pass 2.8 above only
+	// registers consts into the local file scope; without this loop a
+	// const defined in a helper file is invisible to its importer,
+	// even though every other top-level decl flows through transparently.
+	for _, node := range prog.Stmts {
+		var constName string
+
+		switch d := node.(type) {
+		case *ast.VarDecl:
+			if d.IsConst {
+				constName = d.Name
+			}
+		case *ast.TopLevelVar:
+			if d.IsConst {
+				constName = d.Name
+			}
+		}
+
+		if constName == "" {
+			continue
+		}
+
+		entry, ok := cg.curScope.lookup(constName)
+		if !ok {
+			continue
+		}
+		// Bare name: lets fn bodies in the importing file reference
+		// the const directly (`if x == ROW_MAJOR: ...`).
+		prevScope.set(constName, entry)
+		// Parent-package-prefixed name: lets loadPackageFromSource's
+		// export-propagation loop find the const under "<pkg>__<name>"
+		// when the importing file re-exports it as part of the package.
+		if cg.currentPkg != "" {
+			prevScope.set(cg.currentPkg+"__"+constName, entry)
+		}
+	}
+
 	// Register ALL macros defined in the file as bare names.
 	for _, node := range prog.Stmts {
 		md, ok := node.(*ast.MacroDecl)

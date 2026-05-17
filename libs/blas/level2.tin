@@ -1,0 +1,140 @@
+// libs/blas/level2 - BLAS Level 2: matrix-vector operations.
+//
+// Two layers:
+//
+//   dgemv_raw  thin extern binding: full CBLAS surface (layout,
+//              transpose, alpha, beta, strides, lda).  Takes a flat
+//              row-major buffer for A.
+//
+//   dgemv      high-level wrapper: takes a row-of-rows matrix
+//              `[[f64]]`, infers dimensions from the array shapes,
+//              and computes y := A * x.  A is flattened into a
+//              contiguous buffer for the BLAS call.  No copy-back is
+//              needed since y is already a flat `[f64]`.
+
+use "./types"
+
+// ---------------------------------------------------------------------------
+// Raw extern bindings.
+// ---------------------------------------------------------------------------
+
+// dgemv_raw:  Y := alpha * op(A) * X + beta * Y, op(A) = A or A^T.
+//
+//   layout  ROW_MAJOR or COL_MAJOR
+//   trans   NO_TRANS, TRANS, or CONJ_TRANS
+//   m, n    rows / cols of A (BEFORE transpose)
+//   alpha   scalar
+//   a       pointer to A's first element
+//   lda     leading dimension of A
+//   x       vector of length n if NO_TRANS, m if TRANS
+//   incx    stride for X
+//   beta    scalar
+//   y       vector of length m if NO_TRANS, n if TRANS; updated in place
+//   incy    stride for Y
+fn dgemv_raw(
+  layout i32, trans i32,
+  m i32, n i32,
+  alpha f64,
+  a *f64, lda i32,
+  x *f64, incx i32,
+  beta f64,
+  y *f64, incy i32,
+) = extern("cblas_dgemv")
+
+fn sgemv_raw(
+  layout i32, trans i32,
+  m i32, n i32,
+  alpha f32,
+  a *f32, lda i32,
+  x *f32, incx i32,
+  beta f32,
+  y *f32, incy i32,
+) = extern("cblas_sgemv")
+
+// ---------------------------------------------------------------------------
+// Flatten helpers (private to the package).
+// ---------------------------------------------------------------------------
+
+// flatten_f64 copies a row-of-rows matrix into a contiguous row-major
+// buffer of length rows*cols.  Panics on a jagged input (rows of
+// differing length).
+fn flatten_f64(m [[f64]]) [f64] =
+  let out [f64] = []
+  let rows = len(m)
+
+  if rows == 0:
+    return out
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    if len(m[i]) != cols:
+      panic("blas: jagged matrix - row {i} has {len(m[i])} elements, expected {cols}")
+    for let j i64 = 0; j < cols; j++:
+      out ++= [m[i][j]]
+  return out
+
+fn flatten_f32(m [[f32]]) [f32] =
+  let out [f32] = []
+  let rows = len(m)
+
+  if rows == 0:
+    return out
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    if len(m[i]) != cols:
+      panic("blas: jagged matrix - row {i} has {len(m[i])} elements, expected {cols}")
+    for let j i64 = 0; j < cols; j++:
+      out ++= [m[i][j]]
+  return out
+
+// ---------------------------------------------------------------------------
+// High-level wrappers.
+// ---------------------------------------------------------------------------
+
+// dgemv computes y := A * x.
+//
+// Shape is fully inferred:
+//   rows = len(a)        (validated: a must be non-empty)
+//   cols = len(a[0])     (validated: all rows must match)
+//   len(x) must equal cols
+//   len(y) must equal rows
+//
+// y is updated in place.
+fn dgemv(a [[f64]], x [f64], y [f64]) =
+  let rows = len(a)
+  if rows == 0: return
+  let cols = len(a[0])
+
+  if len(x) != cols:
+    panic("blas::dgemv: len(x)={len(x)} but A has {cols} cols")
+  if len(y) != rows:
+    panic("blas::dgemv: len(y)={len(y)} but A has {rows} rows")
+  let flat = flatten_f64(a)
+  dgemv_raw(
+    ROW_MAJOR, NO_TRANS, rows as i32, cols as i32,
+    1.0,
+    &flat[0], cols as i32,
+    &x[0], 1,
+    0.0,
+    &y[0], 1,
+  )
+
+fn sgemv(a [[f32]], x [f32], y [f32]) =
+  let rows = len(a)
+  if rows == 0: return
+  let cols = len(a[0])
+
+  if len(x) != cols:
+    panic("blas::sgemv: len(x)={len(x)} but A has {cols} cols")
+  if len(y) != rows:
+    panic("blas::sgemv: len(y)={len(y)} but A has {rows} rows")
+  let flat = flatten_f32(a)
+  sgemv_raw(
+    ROW_MAJOR, NO_TRANS, rows as i32, cols as i32,
+    1.0 as f32,
+    &flat[0], cols as i32,
+    &x[0], 1,
+    0.0 as f32,
+    &y[0], 1,
+  )

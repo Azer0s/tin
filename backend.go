@@ -190,6 +190,27 @@ func linkBinary(inputs []string, outBin string, opts linkOpts) error {
 	argv = append(argv, inputs...)
 	argv = append(argv, opts.cLinkerFlags...)
 
+	// macOS ld defaults the ThinLTO intermediate directory to
+	// `/var/folders/.../T/thinlto-<hash>`, where the hash is computed
+	// from the input list.  Two parallel `tin test` invocations whose
+	// link commands share enough content-addressed pkg .o files end
+	// up with IDENTICAL hashes, so both linkers write to (and read
+	// from) the SAME thinlto dir, scribbling on each other's
+	// `<N>.arm64.thinlto.o` intermediates and producing spurious
+	// duplicate-symbol errors at codegen time.  Force a unique
+	// per-link dir via `-object_path_lto` so the intermediates are
+	// process-isolated.
+	if opts.targetGOOS == "darwin" {
+		ltoDir, err := os.MkdirTemp("", "tin-lto-*")
+		if err != nil {
+			return fmt.Errorf("tin: cannot allocate LTO temp dir: %w", err)
+		}
+
+		defer func() { _ = os.RemoveAll(ltoDir) }()
+
+		argv = append(argv, "-object_path_lto", ltoDir)
+	}
+
 	// mimalloc: link before the entry.suffix so the libc that lives in
 	// the suffix doesn't win the malloc/free symbol resolution race.
 	// On dynamic links (the common path), `-lmimalloc` adds a DT_NEEDED

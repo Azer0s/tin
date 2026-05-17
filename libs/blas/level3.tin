@@ -1,0 +1,157 @@
+// libs/blas/level3 - BLAS Level 3: matrix-matrix operations.
+//
+// Two layers:
+//
+//   dgemm_raw  thin extern binding: full CBLAS surface.  Operates on
+//              flat row-major (or column-major) buffers.
+//
+//   dgemm      high-level wrapper: takes row-of-rows matrices
+//              `[[f64]]`, infers all three dimensions (m, k, n) from
+//              the array shapes, and computes C := A * B.  A, B and
+//              C are flattened into contiguous buffers for the BLAS
+//              call; results are copied back into C.
+
+use "./types"
+
+// ---------------------------------------------------------------------------
+// Raw extern bindings.
+// ---------------------------------------------------------------------------
+
+// dgemm_raw:  C := alpha * op(A) * op(B) + beta * C.
+//
+//   layout      ROW_MAJOR or COL_MAJOR
+//   trans_a     NO_TRANS / TRANS / CONJ_TRANS for A
+//   trans_b     NO_TRANS / TRANS / CONJ_TRANS for B
+//   m, n, k     dims of the multiplied form:
+//                 op(A) is m-by-k, op(B) is k-by-n, C is m-by-n
+//   alpha       scalar
+//   a, lda      A and its leading dimension
+//   b, ldb      B and its leading dimension
+//   beta        scalar
+//   c, ldc      C and its leading dimension; updated in place
+fn dgemm_raw(
+  layout i32, trans_a i32, trans_b i32,
+  m i32, n i32, k i32,
+  alpha f64,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+  beta f64,
+  c *f64, ldc i32,
+) = extern("cblas_dgemm")
+
+fn sgemm_raw(
+  layout i32, trans_a i32, trans_b i32,
+  m i32, n i32, k i32,
+  alpha f32,
+  a *f32, lda i32,
+  b *f32, ldb i32,
+  beta f32,
+  c *f32, ldc i32,
+) = extern("cblas_sgemm")
+
+// ---------------------------------------------------------------------------
+// Unflatten helpers.  The matching flatten_* helpers live in
+// level2.tin and are reused here.
+// ---------------------------------------------------------------------------
+
+// unflatten_f64 copies the contiguous row-major buffer `flat` back
+// into the caller's row-of-rows matrix `m`.  Inner array allocations
+// are reused; only the f64 values are overwritten.
+fn unflatten_f64(flat [f64], m [[f64]]) =
+  let rows = len(m)
+
+  if rows == 0: return
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      m[i][j] = flat[i * cols + j]
+
+fn unflatten_f32(flat [f32], m [[f32]]) =
+  let rows = len(m)
+
+  if rows == 0: return
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      m[i][j] = flat[i * cols + j]
+
+// ---------------------------------------------------------------------------
+// High-level wrappers.
+// ---------------------------------------------------------------------------
+
+// dgemm computes C := A * B.
+//
+// All three dimensions are inferred from the array shapes:
+//   m = len(a)        rows of A and C
+//   k = len(a[0])     cols of A and rows of B
+//   n = len(b[0])     cols of B and C
+//
+// C is pre-allocated by the caller to shape m-by-n; its values are
+// overwritten in place with the product.
+fn dgemm(a [[f64]], b [[f64]], c [[f64]]) =
+  let m = len(a)
+  if m == 0: return
+  let k = len(a[0])
+
+  if len(b) != k:
+    panic("blas::dgemm: A has {k} cols but B has {len(b)} rows")
+  if k == 0: return
+  let n = len(b[0])
+
+  if len(c) != m:
+    panic("blas::dgemm: C has {len(c)} rows but A has {m}")
+  if n != 0 && len(c[0]) != n:
+    panic("blas::dgemm: C has {len(c[0])} cols but B has {n}")
+  let a_flat = flatten_f64(a)
+  let b_flat = flatten_f64(b)
+  let c_flat [f64] = []
+
+  for let i i64 = 0; i < m * n; i++:
+    c_flat ++= [0.0]
+
+  dgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    m as i32, n as i32, k as i32,
+    1.0,
+    &a_flat[0], k as i32,
+    &b_flat[0], n as i32,
+    0.0,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f64(c_flat, c)
+
+fn sgemm(a [[f32]], b [[f32]], c [[f32]]) =
+  let m = len(a)
+  if m == 0: return
+  let k = len(a[0])
+
+  if len(b) != k:
+    panic("blas::sgemm: A has {k} cols but B has {len(b)} rows")
+  if k == 0: return
+  let n = len(b[0])
+
+  if len(c) != m:
+    panic("blas::sgemm: C has {len(c)} rows but A has {m}")
+  if n != 0 && len(c[0]) != n:
+    panic("blas::sgemm: C has {len(c[0])} cols but B has {n}")
+  let a_flat = flatten_f32(a)
+  let b_flat = flatten_f32(b)
+  let c_flat [f32] = []
+
+  for let i i64 = 0; i < m * n; i++:
+    c_flat ++= [0.0 as f32]
+
+  sgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    m as i32, n as i32, k as i32,
+    1.0 as f32,
+    &a_flat[0], k as i32,
+    &b_flat[0], n as i32,
+    0.0 as f32,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f32(c_flat, c)
