@@ -1161,6 +1161,31 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 		}
 	}
 
+	// Compound types may carry trait type params nested inside them, e.g.
+	// `Option[t]` / `[t]` / `*Trait[t]` / `fn(t) u`.  Push the substitution
+	// through tinTypeToLLVM as transient type aliases so the recursive
+	// resolve sees `t -> i64` (etc.) when it hits the bare SimpleType
+	// node deep in the expression.  Without this, `tinTypeToLLVM(Option[t])`
+	// treats the unbound `t` as opaque and returns a mis-typed
+	// instantiation.
+	type savedAlias struct {
+		prev    ast.TypeExpr
+		hadPrev bool
+	}
+	saved := make(map[string]savedAlias, len(subst))
+	for tp, lt := range subst {
+		target := llvmTypeToTinTypeExprStructural(lt)
+		if target == nil {
+			continue
+		}
+		prev, hadPrev := cg.pushAlias(tp, target)
+		saved[tp] = savedAlias{prev: prev, hadPrev: hadPrev}
+	}
+	defer func() {
+		for tp, s := range saved {
+			cg.popAlias(tp, s.prev, s.hadPrev)
+		}
+	}()
 	return cg.tinTypeToLLVM(te)
 }
 

@@ -1,0 +1,100 @@
+// examples/nlen_builtin_test - coverage for the nlen(arr) builtin.
+//
+// nlen returns one i64 per static array layer, where each element is
+// the runtime length observed by descending through arr[0] at that
+// level.  When descent hits an empty layer the remaining inner dims
+// are reported as 0 (so we never deref a null data pointer).
+
+use assert
+
+test "nlen([1, 2, 3]) -> [3]" =
+  let d = nlen([1, 2, 3])
+
+  assert::equals(1 as i64, len(d))
+  assert::equals(3 as i64, d[0])
+
+test "nlen([[1, 2], [3, 4]]) -> [2, 2]" =
+  let d = nlen([[1, 2], [3, 4]])
+
+  assert::equals(2 as i64, len(d))
+  assert::equals(2 as i64, d[0])
+  assert::equals(2 as i64, d[1])
+
+test "nlen([[[1,2],[3,4]],[[5,6],[7,8]]]) -> [2, 2, 2]" =
+  let d = nlen([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+
+  assert::equals(3 as i64, len(d))
+  assert::equals(2 as i64, d[0])
+  assert::equals(2 as i64, d[1])
+  assert::equals(2 as i64, d[2])
+
+test "nlen on a 1D empty array -> [0]" =
+  let empty [i64] = []
+  let d = nlen(empty)
+
+  assert::equals(1 as i64, len(d))
+  assert::equals(0 as i64, d[0])
+
+test "nlen on a 2D empty outer array -> [0, 0]" =
+  // The static type carries the depth even when the runtime is empty.
+  let empty [[i64]] = []
+  let d = nlen(empty)
+
+  assert::equals(2 as i64, len(d))
+  assert::equals(0 as i64, d[0])
+  assert::equals(0 as i64, d[1])
+
+test "nlen with a non-empty outer but empty inner -> [1, 0]" =
+  let inner [i64] = []
+  let outer [[i64]] = [inner]
+  let d = nlen(outer)
+
+  assert::equals(2 as i64, len(d))
+  assert::equals(1 as i64, d[0])
+  assert::equals(0 as i64, d[1])
+
+test "nlen reports the first row's length for ragged arrays" =
+  // nlen descends via arr[0], so the second row's length is ignored.
+  // The 2D shape reported is [rows, len(arr[0])].
+  let ragged [[i64]] = [[1, 2, 3], [4]]
+  let d = nlen(ragged)
+
+  assert::equals(2 as i64, len(d))
+  assert::equals(2 as i64, d[0])
+  assert::equals(3 as i64, d[1])
+
+test "nlen on a 3D array with empty inner -> [1, 1, 0]" =
+  let inner [i64] = []
+  let mid [[i64]] = [inner]
+  let outer [[[i64]]] = [mid]
+  let d = nlen(outer)
+
+  assert::equals(3 as i64, len(d))
+  assert::equals(1 as i64, d[0])
+  assert::equals(1 as i64, d[1])
+  assert::equals(0 as i64, d[2])
+
+test "nlen on a 3D array empty at depth 2 -> [1, 0, 0]" =
+  let mid [[i64]] = []
+  let outer [[[i64]]] = [mid]
+  let d = nlen(outer)
+
+  assert::equals(3 as i64, len(d))
+  assert::equals(1 as i64, d[0])
+  assert::equals(0 as i64, d[1])
+  assert::equals(0 as i64, d[2])
+
+test "nlen accepts f64 element arrays" =
+  let m [[f64]] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+  let d = nlen(m)
+
+  assert::equals(2 as i64, len(d))
+  assert::equals(2 as i64, d[0])
+  assert::equals(3 as i64, d[1])
+
+test "nlen on a single-element 1D array -> [1]" =
+  let one [i64] = [42]
+  let d = nlen(one)
+
+  assert::equals(1 as i64, len(d))
+  assert::equals(1 as i64, d[0])
