@@ -200,12 +200,20 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 		// Generic trait instantiation (e.g. iter[i64]) -> fat pointer type
 		if td := cg.traitFor(CanonKey(t.Name)); td != nil {
-			instKey := traitImplKey(t)
+			// Resolve aliases in TypeParams so the instKey reflects the
+			// substituted concrete types.  Without this, a struct mono
+			// field of shape `src Seq[t]` (where t is currently
+			// aliased to i64 by pushAlias) builds an iface keyed
+			// "Seq__t" -- which collides with later "Seq__t" lookups
+			// from different contexts AND mismatches the assigned
+			// value's "Seq__i64" iface.
+			resolved := cg.resolveAliasesInTypeExpr(t).(*ast.GenericType)
+			instKey := traitImplKey(resolved)
 			typeSubst := map[string]irtypes.Type{}
 
 			for i, tpName := range td.TypeParams {
-				if i < len(t.TypeParams) {
-					lt, err := cg.tinTypeToLLVM(t.TypeParams[i])
+				if i < len(resolved.TypeParams) {
+					lt, err := cg.tinTypeToLLVM(resolved.TypeParams[i])
 					if err != nil {
 						return nil, err
 					}
@@ -538,8 +546,19 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	if et := cg.enumTypeFor(CanonKey(bareName)); et != nil {
 		return et, nil
 	}
-	// Check type aliases
+	// Check type aliases.  Guard against alias cycles (e.g. a generic
+	// param transiently aliased to a TypeExpr that references the
+	// param itself) by tracking the resolution path; bail out when a
+	// name reappears.
 	if alias := cg.aliasTypeFor(CanonKey(bareName)); alias != nil {
+		if cg.aliasResolving == nil {
+			cg.aliasResolving = make(map[string]bool, 4)
+		}
+		if cg.aliasResolving[bareName] {
+			return nil, fmt.Errorf("alias cycle resolving %q via %s", bareName, alias.String())
+		}
+		cg.aliasResolving[bareName] = true
+		defer delete(cg.aliasResolving, bareName)
 		return cg.tinTypeToLLVM(alias)
 	}
 	// Unknown identifier in a type position. Tin's convention is that
@@ -1161,32 +1180,118 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 		}
 	}
 
-	// Compound types may carry trait type params nested inside them, e.g.
-	// `Option[t]` / `[t]` / `*Trait[t]` / `fn(t) u`.  Push the substitution
-	// through tinTypeToLLVM as transient type aliases so the recursive
-	// resolve sees `t -> i64` (etc.) when it hits the bare SimpleType
-	// node deep in the expression.  Without this, `tinTypeToLLVM(Option[t])`
-	// treats the unbound `t` as opaque and returns a mis-typed
-	// instantiation.
-	type savedAlias struct {
-		prev    ast.TypeExpr
-		hadPrev bool
-	}
-	saved := make(map[string]savedAlias, len(subst))
+	// Compound types carry trait type params nested inside them, e.g.
+	// `Option[t]` / `[t]` / `*Trait[t]` / `fn(t) u`.  Rewrite the AST
+	// to substitute `t -> concrete` everywhere a bare SimpleType
+	// matches a key in subst, then hand the rewritten expression to
+	// tinTypeToLLVM.  Without this, `tinTypeToLLVM(Option[t])` treats
+	// the unbound `t` as opaque and returns a mis-typed instantiation.
+	substTE := make(map[string]ast.TypeExpr, len(subst))
 	for tp, lt := range subst {
 		target := llvmTypeToTinTypeExprStructural(lt)
 		if target == nil {
 			continue
 		}
-		prev, hadPrev := cg.pushAlias(tp, target)
-		saved[tp] = savedAlias{prev: prev, hadPrev: hadPrev}
-	}
-	defer func() {
-		for tp, s := range saved {
-			cg.popAlias(tp, s.prev, s.hadPrev)
+		if st, ok := target.(*ast.SimpleType); ok && st.Name == tp {
+			// Self-alias from a vtable struct type whose name doesn't
+			// recover to a real Tin type -- don't substitute.
+			continue
 		}
-	}()
-	return cg.tinTypeToLLVM(te)
+		substTE[tp] = target
+	}
+	if len(substTE) == 0 {
+		return cg.tinTypeToLLVM(te)
+	}
+	return cg.tinTypeToLLVM(substituteTypeExpr(te, substTE))
+}
+
+// resolveAliasesInTypeExpr walks te and replaces every SimpleType whose
+// name has a registered alias (cg.aliasTypeFor) with the alias target,
+// recursing through PointerType, ArrayType, GenericType, FuncType.  Used
+// by tinTypeToLLVM's trait-instantiation branch so the iface instKey
+// reflects the currently-substituted concrete types instead of the
+// generic param names.
+func (cg *CodeGen) resolveAliasesInTypeExpr(te ast.TypeExpr) ast.TypeExpr {
+	if te == nil {
+		return nil
+	}
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if alias := cg.aliasTypeFor(CanonKey(t.Name)); alias != nil {
+			return cg.resolveAliasesInTypeExpr(alias)
+		}
+		return te
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem:    cg.resolveAliasesInTypeExpr(t.Elem),
+			IsConst: t.IsConst,
+		}
+	case *ast.ArrayType:
+		return &ast.ArrayType{
+			Elem: cg.resolveAliasesInTypeExpr(t.Elem),
+			Size: t.Size,
+		}
+	case *ast.GenericType:
+		newParams := make([]ast.TypeExpr, len(t.TypeParams))
+		for i, p := range t.TypeParams {
+			newParams[i] = cg.resolveAliasesInTypeExpr(p)
+		}
+		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
+	case *ast.FuncType:
+		newParams := make([]ast.TypeExpr, len(t.Params))
+		for i, p := range t.Params {
+			newParams[i] = cg.resolveAliasesInTypeExpr(p)
+		}
+		return &ast.FuncType{
+			Params:  newParams,
+			RetType: cg.resolveAliasesInTypeExpr(t.RetType),
+			IsAsync: t.IsAsync,
+		}
+	}
+	return te
+}
+
+// substituteTypeExpr returns te with every SimpleType{Name} whose Name
+// is a key in subst replaced by the corresponding TypeExpr.  Recursive;
+// nested generic args, array elements, pointer elements, function
+// param/return types are all walked.
+func substituteTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.TypeExpr {
+	if te == nil {
+		return nil
+	}
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if r, ok := subst[t.Name]; ok {
+			return r
+		}
+		return te
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem:    substituteTypeExpr(t.Elem, subst),
+			IsConst: t.IsConst,
+		}
+	case *ast.ArrayType:
+		return &ast.ArrayType{
+			Elem: substituteTypeExpr(t.Elem, subst),
+			Size: t.Size,
+		}
+	case *ast.GenericType:
+		newParams := make([]ast.TypeExpr, len(t.TypeParams))
+		for i, p := range t.TypeParams {
+			newParams[i] = substituteTypeExpr(p, subst)
+		}
+		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
+	case *ast.FuncType:
+		newParams := make([]ast.TypeExpr, len(t.Params))
+		for i, p := range t.Params {
+			newParams[i] = substituteTypeExpr(p, subst)
+		}
+		return &ast.FuncType{
+			Params:  newParams,
+			RetType: substituteTypeExpr(t.RetType, subst),
+		}
+	}
+	return te
 }
 
 // llvmElemByteSize returns the size in bytes of a scalar LLVM type, or 0 for

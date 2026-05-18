@@ -1097,6 +1097,10 @@ type CodeGen struct {
 	// the eval doesn't fire twice (and re-trigger side effects).
 	preEvaledArgVals []value.Value
 
+	// aliasResolving guards against cycles in tinTypeToLLVM's alias-
+	// chain resolution.  Set per-resolution and cleared on exit.
+	aliasResolving map[string]bool
+
 	// lambdaSelfName carries the let-binding name through genVarDecl into
 	// genLambdaExpr so the lambda body can call itself recursively.
 	// Without this, `let fact = fn(n i64) i64 = fact(n-1)` would fail
