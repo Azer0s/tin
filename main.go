@@ -101,9 +101,14 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     infinite-recursion          fn that always re-enters itself with no exit branch
     large-stack-alloc           local whose stack footprint exceeds the safe threshold
     loop-invariant              pure expression in a loop body that doesn't depend on loop state
+    manual-alloc-leak           mem::malloc/calloc/realloc result leaks on some path (no free)
+    manual-double-free          mem::free called twice on the same pointer along one path
+    manual-use-after-free       deref/pass of an mem::malloc'd pointer after mem::free
     match-result-try            two-arm Result match that .unwrap / .expect /
                                 .unwrap_or / .map / .map_err / try would replace
     must-use                    discarded #must_use value (Result, Future, etc.)
+    ptr-trait                   "*Trait" in a fn signature or struct field (redundant
+                                indirection on top of the trait fat-ptr; prefer "Trait")
     redundant-import-prefix     "pkg::sub::x" after "use pkg::sub" already binds "sub"
     redundant-type-cast         "<lit> as T" where T is already pinned by context
     return-try                  "return try expr" (yields the unwrapped V,
@@ -111,6 +116,8 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     self-assign                 x = x
     tautological-int-cmp        integer comparison that always folds to true/false
     tautological-pointer-cmp    comparing a non-nil pointer against nil
+    trait-snapshot-mutation     value-source coerce to a trait whose impl mutates through
+                                *Self (mutations won't propagate; suggests "&Lit" alias form)
     unguarded-trait-downcast    "expr as *Concrete" without an "is *Concrete" guard
     unreachable-code            statements after return / panic / infinite loop
     unsafe-required             raw-pointer arithmetic outside a {#unsafe} block
@@ -134,6 +141,8 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     non-tin-thread              #interop fn body reaches 'await' or 'spawn' - callable from non-Tin
                                 OS threads that don't own scheduler state
     style                       naming conventions, trailing whitespace, missing EOF newline
+    sync-fn-coerced-to-async    sync fn coerced into a fn{#async} slot; the bytes match but the
+                                callee will not see await/spawn coloring (pedantic)
     sync-uses-await             sync fn body contains a literal 'await' - prefer sync::wait(future)
                                 to make the sync->async bridge explicit, or promote to fn{#async}
     unchecked-div               a / b or a % b where the divisor is not proven non-zero by dataflow
@@ -145,6 +154,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     unchecked-returned-nil      deref of a value whose source function may return nil
                                 (interprocedural complement via Andersen points-to)
     unclosed-closeable          io::Closeable binding leaves scope without close()
+    let-no-reassign             mutable "let" binding that is never reassigned (suggests "const")
     unused-let                  let-binding that is never read
     unused-param                fn parameter that is never read
     unused-result               discarded result of a non-void call

@@ -19,8 +19,8 @@ the work and we can verify identical numeric output).
 
 | size             | C             | Tin raw       | ratio |
 |------------------|---------------|---------------|-------|
-| N=256, 200 iters | 23.4 ± 0.6 ms | 27.7 ± 2.7 ms | 1.19× |
-| N=512, 50 iters  | 46.3 ± 1.3 ms | 50.3 ± 1.9 ms | 1.09× |
+| N=256, 200 iters | 23.4 $\pm$ 0.6 ms | 27.7 $\pm$ 2.7 ms | 1.19$\times$ |
+| N=512, 50 iters  | 46.3 $\pm$ 1.3 ms | 50.3 $\pm$ 1.9 ms | 1.09$\times$ |
 
 **Tin's raw bindings are within 10-20% of C** - and most of the
 remaining gap is process startup, not per-call FFI cost. At N=512
@@ -33,7 +33,7 @@ indistinguishable.
 zero-allocates a flat C buffer on every call. At small sizes the
 wrapper cost dominates BLAS work; at larger sizes it grows
 superlinearly because Tin's `xs ++= [v]` is currently O(n) per
-append (so building the c_flat zero buffer is O(n⁴) for an N*N
+append (so building the c_flat zero buffer is $O(n^4)$ for an $N \times N$
 matrix). Internal timings:
 
 | size              | gemm loop (Tin high) | per call |
@@ -47,7 +47,7 @@ This is **not** a fundamental BLAS-binding limit - it's the cost of
 Tin's current `++=` implementation hitting the wrapper's c_flat
 zero-init loop. If `++=` ever lands an amortized growth strategy,
 the wrapper drops to the same ~10-20% overhead as the raw path
-plus one O(n²) flatten/unflatten copy.
+plus one $O(n^2)$ flatten/unflatten copy.
 
 ## Reproducing
 
