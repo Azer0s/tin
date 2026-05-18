@@ -12,9 +12,7 @@
 //
 // Both `d` (double / f64) and `s` (single / f32) variants are exposed.
 
-// ---------------------------------------------------------------------------
 // Raw extern bindings.
-// ---------------------------------------------------------------------------
 
 // ddot_raw returns the dot product sum(X[i*incx] * Y[i*incy]) for i in 0..n.
 fn ddot_raw(n i32, x *f64, incx i32, y *f64, incy i32) f64 = extern("cblas_ddot")
@@ -51,9 +49,7 @@ fn sswap_raw(n i32, x *f32, incx i32, y *f32, incy i32) = extern("cblas_sswap")
 fn idamax_raw(n i32, x *f64, incx i32) i32 = extern("cblas_idamax")
 fn isamax_raw(n i32, x *f32, incx i32) i32 = extern("cblas_isamax")
 
-// ---------------------------------------------------------------------------
 // High-level wrappers - take Tin arrays directly, stride implicitly 1.
-// ---------------------------------------------------------------------------
 
 // ddot returns the dot product of two equal-length f64 vectors.
 fn ddot(x [f64], y [f64]) f64 =

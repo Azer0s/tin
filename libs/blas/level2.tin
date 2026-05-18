@@ -14,9 +14,7 @@
 
 use "./types"
 
-// ---------------------------------------------------------------------------
 // Raw extern bindings.
-// ---------------------------------------------------------------------------
 
 // dgemv_raw:  Y := alpha * op(A) * X + beta * Y, op(A) = A or A^T.
 //
@@ -51,13 +49,93 @@ fn sgemv_raw(
   y *f32, incy i32,
 ) = extern("cblas_sgemv")
 
-// ---------------------------------------------------------------------------
+// dger_raw:  A := alpha * x * y^T + A    (rank-1 update)
+//   m, n   rows / cols of A
+//   x      vector of length m
+//   y      vector of length n
+//   a      m-by-n matrix, updated in place
+fn dger_raw(
+  layout i32,
+  m i32, n i32,
+  alpha f64,
+  x *f64, incx i32,
+  y *f64, incy i32,
+  a *f64, lda i32,
+) = extern("cblas_dger")
+
+fn sger_raw(
+  layout i32,
+  m i32, n i32,
+  alpha f32,
+  x *f32, incx i32,
+  y *f32, incy i32,
+  a *f32, lda i32,
+) = extern("cblas_sger")
+
+// dsymv_raw:  y := alpha * A * x + beta * y, A is n-by-n symmetric.
+//   uplo   UPPER or LOWER (which triangle of A holds the data)
+//   n      order of A
+fn dsymv_raw(
+  layout i32, uplo i32,
+  n i32,
+  alpha f64,
+  a *f64, lda i32,
+  x *f64, incx i32,
+  beta f64,
+  y *f64, incy i32,
+) = extern("cblas_dsymv")
+
+fn ssymv_raw(
+  layout i32, uplo i32,
+  n i32,
+  alpha f32,
+  a *f32, lda i32,
+  x *f32, incx i32,
+  beta f32,
+  y *f32, incy i32,
+) = extern("cblas_ssymv")
+
+// dtrmv_raw:  x := op(A) * x, A is n-by-n triangular.
+//   uplo   UPPER or LOWER
+//   trans  NO_TRANS / TRANS / CONJ_TRANS
+//   diag   NON_UNIT or UNIT (whether diagonal is implicit 1)
+fn dtrmv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f64, lda i32,
+  x *f64, incx i32,
+) = extern("cblas_dtrmv")
+
+fn strmv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f32, lda i32,
+  x *f32, incx i32,
+) = extern("cblas_strmv")
+
+// dtrsv_raw:  solves op(A) * x = b, A is n-by-n triangular.
+//   On input, x holds b; on return, x holds the solution.
+fn dtrsv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f64, lda i32,
+  x *f64, incx i32,
+) = extern("cblas_dtrsv")
+
+fn strsv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f32, lda i32,
+  x *f32, incx i32,
+) = extern("cblas_strsv")
+
 // Flatten helpers (private to the package).
-// ---------------------------------------------------------------------------
 
 // flatten_f64 copies a row-of-rows matrix into a contiguous row-major
-// buffer of length rows*cols.  Panics on a jagged input (rows of
-// differing length).
+// buffer of length rows*cols.  Assumes the caller has already
+// verified rectangularity (the high-level wrappers panic via
+// `nrect` before calling this); no per-row length check is done
+// here.
 fn flatten_f64(m [[f64]]) [f64] =
   let out [f64] = []
   let rows = len(m)
@@ -67,8 +145,6 @@ fn flatten_f64(m [[f64]]) [f64] =
   let cols = len(m[0])
 
   for let i i64 = 0; i < rows; i++:
-    if len(m[i]) != cols:
-      panic("blas: jagged matrix - row {i} has {len(m[i])} elements, expected {cols}")
     for let j i64 = 0; j < cols; j++:
       out ++= [m[i][j]]
   return out
@@ -82,29 +158,50 @@ fn flatten_f32(m [[f32]]) [f32] =
   let cols = len(m[0])
 
   for let i i64 = 0; i < rows; i++:
-    if len(m[i]) != cols:
-      panic("blas: jagged matrix - row {i} has {len(m[i])} elements, expected {cols}")
     for let j i64 = 0; j < cols; j++:
       out ++= [m[i][j]]
   return out
 
-// ---------------------------------------------------------------------------
+// unflatten_f64 copies the contiguous row-major buffer `flat` back
+// into the caller's row-of-rows matrix `m`.  Inner array allocations
+// are reused; only the f64 values are overwritten.
+fn unflatten_f64(flat [f64], m [[f64]]) =
+  let rows = len(m)
+
+  if rows == 0: return
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      m[i][j] = flat[i * cols + j]
+
+fn unflatten_f32(flat [f32], m [[f32]]) =
+  let rows = len(m)
+
+  if rows == 0: return
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      m[i][j] = flat[i * cols + j]
+
 // High-level wrappers.
-// ---------------------------------------------------------------------------
 
 // dgemv computes y := A * x.
 //
-// Shape is fully inferred:
-//   rows = len(a)        (validated: a must be non-empty)
-//   cols = len(a[0])     (validated: all rows must match)
-//   len(x) must equal cols
-//   len(y) must equal rows
-//
+// A must be rectangular; nrect is checked up front so the inner
+// shape values from nlen are trustable.  Shape is read in one shot:
+//   shape[0] = rows  (validated against len(y))
+//   shape[1] = cols  (validated against len(x))
 // y is updated in place.
 fn dgemv(a [[f64]], x [f64], y [f64]) =
-  let rows = len(a)
+  if !nrect(a):
+    panic("blas::dgemv: A is not rectangular")
+  let shape = nlen(a)
+  let rows  = shape[0]
+  let cols  = shape[1]
+
   if rows == 0: return
-  let cols = len(a[0])
 
   if len(x) != cols:
     panic("blas::dgemv: len(x)={len(x)} but A has {cols} cols")
@@ -121,9 +218,13 @@ fn dgemv(a [[f64]], x [f64], y [f64]) =
   )
 
 fn sgemv(a [[f32]], x [f32], y [f32]) =
-  let rows = len(a)
+  if !nrect(a):
+    panic("blas::sgemv: A is not rectangular")
+  let shape = nlen(a)
+  let rows  = shape[0]
+  let cols  = shape[1]
+
   if rows == 0: return
-  let cols = len(a[0])
 
   if len(x) != cols:
     panic("blas::sgemv: len(x)={len(x)} but A has {cols} cols")
@@ -137,4 +238,201 @@ fn sgemv(a [[f32]], x [f32], y [f32]) =
     &x[0], 1,
     0.0 as f32,
     &y[0], 1,
+  )
+
+// dger: A := alpha * x * yT + A    (rank-1 update)
+//
+// A is m-by-n (shape inferred via nlen).  len(x) must be m, len(y)
+// must be n.  A is rectangular-checked and updated in place.
+fn dger(alpha f64, x [f64], y [f64], a [[f64]]) =
+  if !nrect(a):
+    panic("blas::dger: A is not rectangular")
+  let sa = nlen(a)
+  let m  = sa[0]
+  let n  = sa[1]
+
+  if m == 0 || n == 0: return
+
+  if len(x) != m:
+    panic("blas::dger: len(x)={len(x)} but A has {m} rows")
+  if len(y) != n:
+    panic("blas::dger: len(y)={len(y)} but A has {n} cols")
+  let a_flat = flatten_f64(a)
+  dger_raw(
+    ROW_MAJOR,
+    m as i32, n as i32,
+    alpha,
+    &x[0], 1,
+    &y[0], 1,
+    &a_flat[0], n as i32,
+  )
+
+  unflatten_f64(a_flat, a)
+
+fn sger(alpha f32, x [f32], y [f32], a [[f32]]) =
+  if !nrect(a):
+    panic("blas::sger: A is not rectangular")
+  let sa = nlen(a)
+  let m  = sa[0]
+  let n  = sa[1]
+
+  if m == 0 || n == 0: return
+
+  if len(x) != m:
+    panic("blas::sger: len(x)={len(x)} but A has {m} rows")
+  if len(y) != n:
+    panic("blas::sger: len(y)={len(y)} but A has {n} cols")
+  let a_flat = flatten_f32(a)
+  sger_raw(
+    ROW_MAJOR,
+    m as i32, n as i32,
+    alpha,
+    &x[0], 1,
+    &y[0], 1,
+    &a_flat[0], n as i32,
+  )
+
+  unflatten_f32(a_flat, a)
+
+// dsymv: y := A * x where A is n-by-n symmetric.
+//
+// `uplo` selects which triangle of A holds the data (UPPER or LOWER);
+// the other triangle is never read.  y is overwritten in place.
+fn dsymv(uplo i32, a [[f64]], x [f64], y [f64]) =
+  if !nrect(a):
+    panic("blas::dsymv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::dsymv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::dsymv: len(x)={len(x)} but A is {n}x{n}")
+  if len(y) != n:
+    panic("blas::dsymv: len(y)={len(y)} but A is {n}x{n}")
+  let a_flat = flatten_f64(a)
+  dsymv_raw(
+    ROW_MAJOR, uplo,
+    n as i32,
+    1.0,
+    &a_flat[0], n as i32,
+    &x[0], 1,
+    0.0,
+    &y[0], 1,
+  )
+
+fn ssymv(uplo i32, a [[f32]], x [f32], y [f32]) =
+  if !nrect(a):
+    panic("blas::ssymv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::ssymv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::ssymv: len(x)={len(x)} but A is {n}x{n}")
+  if len(y) != n:
+    panic("blas::ssymv: len(y)={len(y)} but A is {n}x{n}")
+  let a_flat = flatten_f32(a)
+  ssymv_raw(
+    ROW_MAJOR, uplo,
+    n as i32,
+    1.0 as f32,
+    &a_flat[0], n as i32,
+    &x[0], 1,
+    0.0 as f32,
+    &y[0], 1,
+  )
+
+// dtrmv: x := A * x where A is n-by-n triangular (NoTrans).
+//
+// `uplo` selects which triangle of A holds the data.
+// `diag` is UNIT (treat the diagonal as 1) or NON_UNIT.
+// x is overwritten in place.
+fn dtrmv(uplo i32, diag i32, a [[f64]], x [f64]) =
+  if !nrect(a):
+    panic("blas::dtrmv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::dtrmv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::dtrmv: len(x)={len(x)} but A is {n}x{n}")
+  let a_flat = flatten_f64(a)
+  dtrmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &a_flat[0], n as i32,
+    &x[0], 1,
+  )
+
+fn strmv(uplo i32, diag i32, a [[f32]], x [f32]) =
+  if !nrect(a):
+    panic("blas::strmv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::strmv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::strmv: len(x)={len(x)} but A is {n}x{n}")
+  let a_flat = flatten_f32(a)
+  strmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &a_flat[0], n as i32,
+    &x[0], 1,
+  )
+
+// dtrsv: solves A * x = b where A is n-by-n triangular (NoTrans).
+//
+// On entry x holds b; on return x holds the solution.  `uplo` /
+// `diag` describe A's storage and diagonal convention.
+fn dtrsv(uplo i32, diag i32, a [[f64]], x [f64]) =
+  if !nrect(a):
+    panic("blas::dtrsv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::dtrsv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::dtrsv: len(x)={len(x)} but A is {n}x{n}")
+  let a_flat = flatten_f64(a)
+  dtrsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &a_flat[0], n as i32,
+    &x[0], 1,
+  )
+
+fn strsv(uplo i32, diag i32, a [[f32]], x [f32]) =
+  if !nrect(a):
+    panic("blas::strsv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::strsv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::strsv: len(x)={len(x)} but A is {n}x{n}")
+  let a_flat = flatten_f32(a)
+  strsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &a_flat[0], n as i32,
+    &x[0], 1,
   )

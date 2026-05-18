@@ -13,9 +13,7 @@
 use assert
 use blas
 
-// ---------------------------------------------------------------------------
 // Level 1 - high-level
-// ---------------------------------------------------------------------------
 
 test "ddot computes the dot product" =
   let x [f64] = [1.0, 2.0, 3.0]
@@ -87,9 +85,7 @@ test "sdot single-precision dot product" =
 
   assert::equals(32.0 as f32, blas::sdot(x, y))
 
-// ---------------------------------------------------------------------------
 // Level 2 - high-level
-// ---------------------------------------------------------------------------
 
 test "dgemv computes y := A*x" =
   let a [[f64]] = [
@@ -105,9 +101,69 @@ test "dgemv computes y := A*x" =
   assert::equals(6.0,  y[0])
   assert::equals(15.0, y[1])
 
-// ---------------------------------------------------------------------------
+test "dger updates A := alpha*x*y^T + A (rank-1)" =
+  // x = [1, 2], y = [3, 4]; x*y^T = [[3, 4], [6, 8]]
+  // Plus identity-like initial A = [[10, 20], [30, 40]] with alpha=1.
+  // Expected: [[10+3, 20+4], [30+6, 40+8]] = [[13, 24], [36, 48]]
+  let x [f64] = [1.0, 2.0]
+  let y [f64] = [3.0, 4.0]
+  let a [[f64]] = [
+    [10.0, 20.0],
+    [30.0, 40.0],
+  ]
+
+  blas::dger(1.0, x, y, a)
+
+  assert::equals(13.0, a[0][0])
+  assert::equals(24.0, a[0][1])
+  assert::equals(36.0, a[1][0])
+  assert::equals(48.0, a[1][1])
+
+test "dsymv computes y := A*x with a symmetric A (lower stored)" =
+  // Conceptual A = [[2, 1], [1, 3]]; only lower triangle is stored
+  // (upper slots can be anything, never read).
+  let a [[f64]] = [
+    [2.0, 999.0],
+    [1.0, 3.0],
+  ]
+  let x [f64] = [4.0, 5.0]
+  let y [f64] = [0.0, 0.0]
+
+  // A * x = [2*4 + 1*5, 1*4 + 3*5] = [13, 19]
+  blas::dsymv(blas::LOWER, a, x, y)
+
+  assert::equals(13.0, y[0])
+  assert::equals(19.0, y[1])
+
+test "dtrmv computes x := A*x for upper triangular A" =
+  // A upper: [[2, 3], [_, 4]], x = [1, 5]
+  // A * x = [2*1 + 3*5, 4*5] = [17, 20]
+  let a [[f64]] = [
+    [2.0, 3.0],
+    [99.0, 4.0],   // lower triangle slot never read
+  ]
+  let x [f64] = [1.0, 5.0]
+
+  blas::dtrmv(blas::UPPER, blas::NON_UNIT, a, x)
+
+  assert::equals(17.0, x[0])
+  assert::equals(20.0, x[1])
+
+test "dtrsv solves A*x = b for upper triangular A" =
+  // Inverse of the dtrmv case: A = [[2, 3], [_, 4]], b = [17, 20]
+  // Expected x = [1, 5].
+  let a [[f64]] = [
+    [2.0, 3.0],
+    [99.0, 4.0],
+  ]
+  let x [f64] = [17.0, 20.0]   // b on input
+
+  blas::dtrsv(blas::UPPER, blas::NON_UNIT, a, x)
+
+  assert::equals(1.0, x[0])
+  assert::equals(5.0, x[1])
+
 // Level 3 - high-level
-// ---------------------------------------------------------------------------
 
 test "dgemm computes C := A*B (2x3 * 3x2)" =
   // A*B = [ 1*7+2*9+3*11,  1*8+2*10+3*12 ]  = [ 58,  64]
@@ -133,10 +189,92 @@ test "dgemm computes C := A*B (2x3 * 3x2)" =
   assert::equals(139.0, c[1][0])
   assert::equals(154.0, c[1][1])
 
-// ---------------------------------------------------------------------------
+test "dsymm computes C := A*B with A symmetric (left, lower)" =
+  // Conceptual A = [[2, 1], [1, 3]]; only lower triangle stored.
+  // B = [[1, 2], [3, 4]]; A*B = [[5, 8], [10, 14]]
+  let a [[f64]] = [
+    [2.0, 999.0],
+    [1.0, 3.0],
+  ]
+  let b [[f64]] = [
+    [1.0, 2.0],
+    [3.0, 4.0],
+  ]
+  let c [[f64]] = [
+    [0.0, 0.0],
+    [0.0, 0.0],
+  ]
+
+  blas::dsymm(blas::LEFT, blas::LOWER, a, b, c)
+
+  assert::equals(5.0,  c[0][0])
+  assert::equals(8.0,  c[0][1])
+  assert::equals(10.0, c[1][0])
+  assert::equals(14.0, c[1][1])
+
+test "dsyrk computes C := A*A^T (upper triangle written)" =
+  // A is 2x3: [[1, 2, 3], [4, 5, 6]]
+  // A*A^T = [[1+4+9, 4+10+18], [4+10+18, 16+25+36]]
+  //       = [[14, 32], [32, 77]]
+  // dsyrk(UPPER) writes only the upper triangle; the lower slot is
+  // left at the wrapper's initial 0.
+  let a [[f64]] = [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0],
+  ]
+  let c [[f64]] = [
+    [0.0, 0.0],
+    [0.0, 0.0],
+  ]
+
+  blas::dsyrk(blas::UPPER, a, c)
+
+  assert::equals(14.0, c[0][0])
+  assert::equals(32.0, c[0][1])
+  assert::equals(0.0,  c[1][0])   // lower triangle untouched (wrapper-zeroed)
+  assert::equals(77.0, c[1][1])
+
+test "dtrmm computes B := A*B for upper-triangular A (left)" =
+  // A = [[2, 3], [_, 4]] (upper); B = [[5, 6], [7, 8]]
+  // A*B col 0 = [2*5+3*7, 4*7]     = [31, 28]
+  // A*B col 1 = [2*6+3*8, 4*8]     = [36, 32]
+  let a [[f64]] = [
+    [2.0, 3.0],
+    [99.0, 4.0],
+  ]
+  let b [[f64]] = [
+    [5.0, 6.0],
+    [7.0, 8.0],
+  ]
+
+  blas::dtrmm(blas::LEFT, blas::UPPER, blas::NON_UNIT, a, b)
+
+  assert::equals(31.0, b[0][0])
+  assert::equals(36.0, b[0][1])
+  assert::equals(28.0, b[1][0])
+  assert::equals(32.0, b[1][1])
+
+test "dtrsm solves A*X = B for upper-triangular A (left)" =
+  // Inverse of the dtrmm case: A = [[2, 3], [_, 4]],
+  // B = [[31, 36], [28, 32]] -> X = [[5, 6], [7, 8]].
+  let a [[f64]] = [
+    [2.0, 3.0],
+    [99.0, 4.0],
+  ]
+  let b [[f64]] = [
+    [31.0, 36.0],
+    [28.0, 32.0],
+  ]
+
+  blas::dtrsm(blas::LEFT, blas::UPPER, blas::NON_UNIT, a, b)
+
+  assert::equals(5.0, b[0][0])
+  assert::equals(6.0, b[0][1])
+  assert::equals(7.0, b[1][0])
+  assert::equals(8.0, b[1][1])
+
 // Raw API - verifies the underlying surface still works for power
 // users who need strides, transposes, or accumulation.
-// ---------------------------------------------------------------------------
 
 test "ddot_raw honors non-unit strides" =
   let x [f64] = [1.0, 99.0, 2.0, 99.0, 3.0]

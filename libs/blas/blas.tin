@@ -69,11 +69,31 @@ export {
   dswap_raw, sswap_raw,
   idamax_raw, isamax_raw,
 
-  // Level 2
+  // Level 2 - high-level
   dgemv, sgemv,
-  dgemv_raw, sgemv_raw,
+  dger,  sger,
+  dsymv, ssymv,
+  dtrmv, strmv,
+  dtrsv, strsv,
 
-  // Level 3
+  // Level 2 - raw
+  dgemv_raw, sgemv_raw,
+  dger_raw,  sger_raw,
+  dsymv_raw, ssymv_raw,
+  dtrmv_raw, strmv_raw,
+  dtrsv_raw, strsv_raw,
+
+  // Level 3 - high-level
   dgemm, sgemm,
+  dsymm, ssymm,
+  dsyrk, ssyrk,
+  dtrmm, strmm,
+  dtrsm, strsm,
+
+  // Level 3 - raw
   dgemm_raw, sgemm_raw,
+  dsymm_raw, ssymm_raw,
+  dsyrk_raw, ssyrk_raw,
+  dtrmm_raw, strmm_raw,
+  dtrsm_raw, strsm_raw,
 } as blas
