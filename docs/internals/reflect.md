@@ -148,20 +148,19 @@ while (*p && !(*p == ')' && depth == 0)) {
    - Padding to the next 8-byte boundary.
 
 ```mermaid
-block-beta
-  columns 1
-  block:arc["ARC block (rc=1)"]
-    columns 1
-    s0["TinString[0]  -- ptr -> record[0].data, len = strlen(param[0])"]
+flowchart TB
+  subgraph arc["ARC block (rc = 1) -- one allocation"]
+    direction TB
+    s0["TinString[0] -- ptr, len"]
     s1["TinString[1]"]
     sdot["..."]
     sn["TinString[arity-1]"]
-    r0head["record[0]: int64_t rc = -1  (immortal sentinel)"]
-    r0data["record[0]: char data[plen+1]  (TinString[0].ptr points here)"]
-    r0pad["record[0]: padding to 8-byte align"]
+    r0["record[0]: rc=-1 | char data[plen+1] | padding to 8-byte align"]
     r1["record[1]: ..."]
     rdot["..."]
+    s0 ~~~ s1 ~~~ sdot ~~~ sn ~~~ r0 ~~~ r1 ~~~ rdot
   end
+  s0 -. "ptr ->" .-> r0
 ```
 
 Each `TinString.ptr` points into its corresponding immortal record's `data`

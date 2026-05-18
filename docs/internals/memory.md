@@ -22,13 +22,12 @@ typedef struct { int64_t rc; } TinRCHdr;
 Every ARC-managed heap block is laid out as:
 
 ```mermaid
-block-beta
-  columns 1
-  block:hdr
-    rc["TinRCHdr { int64_t rc } -- 8 bytes"]
-  end
-  block:data
-    user["user data ... (public pointer points here)"]
+flowchart TB
+  subgraph block["ARC heap block (one malloc)"]
+    direction TB
+    hdr["TinRCHdr { int64_t rc }<br/>8 bytes (low address)"]
+    data["user data ...<br/>public pointer points here"]
+    hdr ~~~ data
   end
 ```
 
