@@ -179,6 +179,12 @@ type CodeGen struct {
 	// would leak).  Set/cleared by callers who know the transfer is
 	// happening; default false (borrow semantics, retain).
 	coerceTransfersSource bool
+	// lastAliasBorrowVtable is set by coerceToTrait's pointer-source
+	// path when the source isn't RC-managed (stack borrow, external
+	// pointer).  The fat-ptr build picks it up so the iface's
+	// scope-exit release is a no-op rather than calling _tin_release
+	// on a header that doesn't exist.  Cleared immediately after use.
+	lastAliasBorrowVtable value.Value
 	// stringPool memoizes content-hashed string globals per active
 	// module so the same literal in the same module reuses a single
 	// global. Cross-module dedup is handled by linkonce_odr at link
@@ -1096,6 +1102,14 @@ type CodeGen struct {
 	// monomorphization / call-emit code consumes this and nils it so
 	// the eval doesn't fire twice (and re-trigger side effects).
 	preEvaledArgVals []value.Value
+
+	// pipeCurriedRetHint passes the LHS of `a |> f(args)` through to
+	// pickGenericFuncOverload so the picker can prefer the overload
+	// whose return-fn first-param shape matches the LHS.  Lets
+	// `[t]` and `*Seq[t]` curried-pipe overloads coexist under the
+	// same bare name.  Set by genPipeExpr before evaluating the RHS,
+	// cleared immediately after.
+	pipeCurriedRetHint irtypes.Type
 
 	// aliasResolving guards against cycles in tinTypeToLLVM's alias-
 	// chain resolution.  Set per-resolution and cleared on exit.

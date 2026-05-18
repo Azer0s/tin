@@ -28,7 +28,6 @@ fn rect_contains(r rect, p vec2) bool =
 
   return in_x && in_y
 
-// -------------------------------------------------------------------------
 
 test "nested field access" =
   let r = rect{origin: vec2{x: 1.0, y: 2.0}, size: vec2{x: 5.0, y: 3.0}}

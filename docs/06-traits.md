@@ -706,81 +706,127 @@ dispatch. See `docs/internals/values.md` for the full LLVM layout details.
 
 ## Trait coercion: value vs pointer
 
-Tin gives you two ways to hold a struct as a trait, and they have
-different semantics. Pick the one you want at the `let` site.
+Tin gives you two ways to hold a struct as a trait. The choice at the
+`let` (or return) site is your alias signal.
 
-### `Trait` (value form) - copy
+### `Trait = b` -- snapshot
 
 ```rust
 let f Fooable = b
 ```
 
-The struct `b` is **heap-copied** into a fresh allocation owned by `f`.
+The struct `b` is heap-copied into a fresh allocation owned by `f`.
 `f` and `b` are independent storage from this point on. Mutations
-through `f` do not affect `b`. The copy is released when `f` goes out
-of scope.
+through pointer-receiver impl methods land on the snapshot, not on
+`b`. The copy is released when `f` goes out of scope.
 
-This matches Go's interface assignment. Predictable, safe across coroutine
-suspends, no lifetime concerns.
+This matches Go's interface assignment from a value.
 
-### `*Trait` (pointer form) - borrow
+### `Trait = &b` -- alias
+
+```rust
+let f Fooable = &b
+f.foo(2)
+echo b.v        // mutated -- f and b share the same storage
+```
+
+The trait fat-pointer's `data` slot aliases `&b` directly. Mutations
+through pointer-receiver impl methods propagate to `b`. The
+compiler traces the source pointer's provenance to decide
+ownership:
+
+- RC source (`&T{...}` or any `_tin_rc_alloc`-rooted pointer):
+  retain to give the iface its own slice of the lifetime; the
+  scope-exit release balances.
+- Stack borrow (`&local_var`) or external pointer (`mem::malloc +
+  cast`, FFI returns): swap in the trait's no-op borrow vtable so
+  the iface doesn't try to release storage it doesn't own. Same
+  outlives gotcha as any other `*T` borrow -- `b` must outlive
+  `f`.
+
+### `*Trait` -- discouraged
 
 ```rust
 let a *Fooable = &b
 (*a).foo(2)
-echo b.v        // mutated
 ```
 
-`a` is a pointer to a fat pointer whose data field aliases `&b`
-directly. Methods called through `*a` operate on `b`'s storage -
-mutations propagate. `b` must outlive `a` (same gotcha as any other
-`*T` borrow).
+`*Trait` is a pointer to a trait fat-pointer. Since the fat-pointer
+already carries a heap pointer in its `data` slot, the outer `*` is
+a second indirection on top of an indirection that's already there.
+The compiler emits `-Wptr-trait` whenever `*Trait` shows up in a
+function signature or struct field. Prefer the value-form `Trait =
+&b` -- it has the same alias semantics with one fewer level of
+indirection.
 
-### `Trait = &b` - value-form coercion of a borrow
+### Receiver shape
+
+Each trait method may declare its `this` receiver as `this T`
+(value) or `this *T` (pointer). The two forms differ only in what
+the vtable adapter does at dispatch:
+
+- `this *Self` -- adapter passes the trait fat-pointer's `data` slot
+  directly. Mutations to `this.field` land on whatever the source
+  binding was (the snapshot or the aliased original).
+- `this Self` -- adapter loads from `data` into a stack-local copy
+  and passes that. Mutations to `this.field` are local and discarded
+  when the method returns. Useful for the "this method won't change
+  observable state" signal at the API level.
+
+Mixed receivers within a single trait are fine (Go's standard
+pattern -- read methods on value, mutating methods on pointer):
 
 ```rust
-let b = Box{v: 5}
-let f Fooable = &b   // borrow form coerced into a value-form trait
-echo f.label()       // dispatches through &b's storage
+trait Map[K, V] =
+  fn len(this Map[K, V]) i64
+  fn get(this Map[K, V], k K) V
+  fn set(this *Map[K, V], k K, v V)
+  fn delete(this *Map[K, V], k K)
 ```
 
-When the right-hand side is `&b` (or any `*T`), the value-form trait
-slot stores the borrow's data pointer in its data field directly --
-no heap copy, no extra allocation. Read-only methods see the live
-state of `b`. Mutations through `f` would still hit `b`'s storage,
-but the same value/pointer-receiver rule from the next section
-applies: a trait with any `*Self` method rejects this form, push
-you to the explicit `*Fooable` borrow.
-
-This form is convenient when an API takes `Fooable` by value but
-you want to avoid the heap copy.
-
-### Why both forms? Why does the choice matter?
-
-Because `Trait` always copies, calling a `*Self` method via a value-form
-trait would silently mutate the heap copy and the caller would never
-see the change. To prevent that footgun, the compiler **rejects** value
-coercion when the trait has any pointer-receiver method:
+Each impl method must match the trait def's declared receiver per
+method:
 
 ```rust
-trait Fooable =
-  fn foo(this *Fooable, n i64) = virtual    // pointer receiver
+struct HashMap[K, V](Map[K, V]) =
+  ...
+  fn Map::len(this HashMap[K, V]) i64 = ...           // matches def
+  fn Map::set(this *HashMap[K, V], k K, v V) = ...    // matches def
 
-struct Box (Fooable) =
-  v i64
-  fn Fooable::foo(this *Box, n i64) = this.v = n
-
-let b = Box{v: 0}
-let f Fooable = b
-//  ^^^^^^^^^^^^^
-// error: trait Fooable has pointer-receiver methods (foo);
-// value coercion would silently mutate a heap copy.
-// Use `let a *Fooable = &b` to mutate the original, or rewrite
-// the trait's receivers to Fooable if a copy is intended
+  // fn Map::len(this *HashMap[K, V]) i64    -- ERROR: def says value
 ```
 
-Read-only traits (all methods take `Self`) accept both forms - the
-copy semantics are fine because there's nothing to mutate.
+If the trait method omits `this` entirely
+(`fn next() Option[t]`), each impl is free to choose value or
+pointer per its own needs -- the trait def isn't pinning a contract
+on that method.
+
+### Default methods that mutate forward fields
+
+A default method that assigns to a forward field must have a
+pointer receiver. The trait def has to say `this *T` up front; a
+value-receiver default that tries to mutate a forward field is
+rejected at the trait declaration:
+
+```rust
+trait counter =
+  count i64 forward
+  fn inc(this counter) =            // value receiver
+    this.count = this.count + 1     // ERROR: would mutate a copy
+```
+
+The fix is `this *counter`. The auto-injected default on every
+implementing struct then carries the same pointer receiver and the
+mutation lands on the caller's storage.
+
+### Warning: value-source coerce to a trait that mutates
+
+When the source is a value (`let f Trait = StructLit{...}`) and any
+impl method on the source struct takes `*Self`, the compile is
+legal but unusual -- the trait fat-ptr owns a heap snapshot and
+mutations through pointer-receiver methods won't propagate. The
+compiler emits `-Wtrait-snapshot-mutation` pointing at the line and
+suggests the `&StructLit{...}` alias form.
 
 ---
 

@@ -1,10 +1,6 @@
 use assert
 use seq
 
-// Some tests use direct calls instead of `|>` because the multi-pipe
-// closure path tickles a Tin coro-split LLVM-dominance bug; the seq
-// stdlib API itself is fine -- the workaround is per call site.
-
 test "filter + map + sum pipe" =
   let r = [1, 2, 3, 4, 5, 6]
             |> seq::filter(fn(x i64) bool = return x % 2 == 0)
@@ -13,41 +9,41 @@ test "filter + map + sum pipe" =
   assert::equals(r, 56)
 
 test "take eager" =
-  let r = seq::take[i64](2)([10, 20, 30, 40, 50])
+  let r = [10, 20, 30, 40, 50] |> seq::take(2)
   assert::equals(len(r), 2)
   assert::equals(r[0], 10)
   assert::equals(r[1], 20)
 
 test "skip eager" =
-  let r = seq::skip[i64](3)([10, 20, 30, 40, 50])
+  let r = [10, 20, 30, 40, 50] |> seq::skip(3)
   assert::equals(len(r), 2)
   assert::equals(r[0], 40)
 
 test "take_while" =
-  let r = seq::take_while(fn(x i64) bool = return x < 3)([1, 2, 3, 4, 1])
+  let r = [1, 2, 3, 4, 1] |> seq::take_while(fn(x i64) bool = return x < 3)
   assert::equals(len(r), 2)
   assert::equals(r[0], 1)
   assert::equals(r[1], 2)
 
 test "step_by" =
-  let r = seq::step_by[i64](2)([0, 1, 2, 3, 4, 5])
+  let r = [0, 1, 2, 3, 4, 5] |> seq::step_by(2)
   assert::equals(len(r), 3)
   assert::equals(r[0], 0)
   assert::equals(r[2], 4)
 
 test "chain" =
-  let r = seq::chain[i64]([3, 4])([1, 2])
+  let r = [1, 2] |> seq::chain([3, 4])
   assert::equals(len(r), 4)
   assert::equals(r[2], 3)
 
 test "reverse" =
-  let r = seq::reverse([1, 2, 3, 4])
+  let r = [1, 2, 3, 4] |> seq::reverse
   assert::equals(len(r), 4)
   assert::equals(r[0], 4)
   assert::equals(r[3], 1)
 
 test "sort_by ascending" =
-  let r = seq::sort_by[i64](fn(a i64, b i64) i64 = return a - b)([3, 1, 4, 1, 5])
+  let r = [3, 1, 4, 1, 5] |> seq::sort_by(fn(a i64, b i64) i64 = return a - b)
   assert::equals(r[0], 1)
   assert::equals(r[4], 5)
 
@@ -57,13 +53,12 @@ test "count" =
 test "sum" =
   assert::equals(seq::sum([1, 2, 3, 4]), 10)
 
-test "any / all" =
-  assert::ok(seq::any(fn(x i64) bool = return x > 2)([1, 2, 3]))
-  assert::ok(seq::all(fn(x i64) bool = return x % 2 == 0)([2, 4, 6]))
+test "exists / all" =
+  assert::ok([1, 2, 3] |> seq::exists(fn(x i64) bool = return x > 2))
+  assert::ok([2, 4, 6] |> seq::all(fn(x i64) bool = return x % 2 == 0))
 
 test "find" =
-  let r = seq::find(fn(x i64) bool = return x > 2)([1, 2, 3, 4])
-  match r:
+  match [1, 2, 3, 4] |> seq::find(fn(x i64) bool = return x > 2):
     case Some(v): assert::equals(v, 3)
     case None:    assert::ok(false)
 
@@ -76,24 +71,22 @@ test "first / last" =
     case None:    assert::ok(false)
 
 test "fold sum" =
-  let r = seq::fold[i64, i64](0, fn(acc i64, x i64) i64 = return acc + x)([1, 2, 3, 4])
+  let r = [1, 2, 3, 4] |> seq::fold(0, fn(acc i64, x i64) i64 = return acc + x)
   assert::equals(r, 10)
 
 test "reduce" =
-  let r = seq::reduce[i64](fn(a i64, b i64) i64 = return a + b)([1, 2, 3, 4])
-  match r:
+  match [1, 2, 3, 4] |> seq::reduce(fn(a i64, b i64) i64 = return a + b):
     case Some(v): assert::equals(v, 10)
     case None:    assert::ok(false)
 
 test "min_by / max_by" =
   let cmp = fn(a i64, b i64) i64 = return a - b
-  match seq::min_by(cmp)([3, 1, 4, 1, 5]):
+  match [3, 1, 4, 1, 5] |> seq::min_by(cmp):
     case Some(v): assert::equals(v, 1)
     case None:    assert::ok(false)
-  match seq::max_by(cmp)([3, 1, 4, 1, 5]):
+  match [3, 1, 4, 1, 5] |> seq::max_by(cmp):
     case Some(v): assert::equals(v, 5)
     case None:    assert::ok(false)
 
 test "enumerate" =
-  let r = seq::enumerate([10, 20, 30])
-  assert::equals(len(r), 3)
+  assert::equals(len(seq::enumerate([10, 20, 30])), 3)

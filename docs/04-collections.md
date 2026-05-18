@@ -98,6 +98,81 @@ let s = "hello"
 echo s.len    // 5
 ```
 
+### Array shape (`nlen`)
+
+For nested arrays, `nlen` returns the **size of each dimension** as an
+`[i64]`. It descends through `arr[0]` at every level, so it captures
+the canonical shape under the assumption that the array is
+rectangular:
+
+```rust
+nlen([1, 2, 3])                        // [3]
+nlen([[1, 2], [3, 4]])                 // [2, 2]
+nlen([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])  // [2, 2, 2]
+nlen([])                               // [0]
+```
+
+`len(nlen(arr))` is the **rank** (number of dimensions). `nlen` is not
+"how many dimensions" on its own; it's the per-dimension sizes.
+
+When descent hits an empty layer the remaining inner dims are reported
+as `0` (rather than dereferencing the null data pointer of the empty
+array):
+
+```rust
+let empty [[i64]] = []
+nlen(empty)                            // [0, 0]
+
+let outer [[i64]] = [[]]
+nlen(outer)                            // [1, 0]
+```
+
+`nlen` only samples `arr[0]` at each level, so jagged arrays report
+the first row's shape:
+
+```rust
+nlen([[1, 2, 3], [4]])                 // [2, 3]  (not [2, ?])
+```
+
+If shape integrity matters, pair `nlen` with `nrect` (below).
+
+### Rectangularity (`nrect`)
+
+`nrect(arr) bool` walks every element at every interior depth and
+returns `true` iff every sub-array shares its sibling's length.
+Use it whenever you need the shape from `nlen` to be trustable —
+BLAS-style matrix code, contiguous-buffer flattening, anything that
+treats a `[[T]]` as a real rectangle:
+
+```rust
+nrect([[1, 2], [3, 4]])                // true
+nrect([[1, 2, 3], [4]])                // false  (rows differ)
+nrect([1, 2, 3])                       // true   (depth 1 is vacuous)
+nrect([])                              // true   (no rows to compare)
+nrect("hello")                         // true   (strings are flat)
+```
+
+`nrect` and `nlen` are complementary, not redundant:
+
+| Builtin | Cost          | Reads             | Returns                  |
+|---------|---------------|-------------------|--------------------------|
+| `len`   | O(1)          | outer length      | `i64`                    |
+| `nlen`  | O(depth)      | `arr[0]` chain    | `[i64]` per-dim sizes    |
+| `nrect` | O(N elements) | every sub-array   | `bool`                   |
+
+The usual pattern is:
+
+```rust
+if !nrect(matrix):
+  panic("expected a rectangular matrix")
+let shape = nlen(matrix)
+let rows = shape[0]
+let cols = shape[1]
+```
+
+For a rare opt-out — when you've just built the matrix yourself and
+know it's rectangular — skip `nrect` and call `nlen` directly.
+
 ### Element type must match
 
 An array of one element type cannot be silently passed where a different

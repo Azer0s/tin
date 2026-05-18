@@ -1,0 +1,262 @@
+use option
+use { Option } from option
+
+// Lazy `Seq[t]` form of seq.  Same curried, pipe-first names as the
+// eager `[t]` API in ./eager.tin; the overload picker disambiguates by
+// pipe-LHS shape at each call site.
+
+// Trait + iterator structs
+
+trait Seq[t] =
+  fn next(this *Seq[t]) Option[t]
+
+struct Range (Seq[i64]) =
+  cur  i64
+  end_ i64
+
+  fn Seq[i64]::next(this *Range) Option[i64] =
+    if this.cur >= this.end_:
+      return None
+    let c = this.cur
+    this.cur = c + 1
+    return Some(c)
+
+struct Iter[t] (Seq[t]) =
+  data [t]
+  pos  i64
+
+  fn Seq[t]::next(this *Iter[t]) Option[t] =
+    if this.pos >= len(this.data):
+      return None
+    let v = this.data[this.pos]
+    this.pos = this.pos + 1
+    return Some(v)
+
+struct MapSeq[t, u] (Seq[u]) =
+  src Seq[t]
+  f   fn(t) u
+
+  fn Seq[u]::next(this *MapSeq[t, u]) Option[u] =
+    match this.src.next():
+      case Some(x): return Some(this.f(x))
+      case None:    return None
+
+struct FilterSeq[t] (Seq[t]) =
+  src  Seq[t]
+  pred fn(t) bool
+
+  fn Seq[t]::next(this *FilterSeq[t]) Option[t] =
+    for true:
+      match this.src.next():
+        case Some(x):
+          if this.pred(x): return Some(x)
+        case None: break
+    return None
+
+struct TakeSeq[t] (Seq[t]) =
+  src Seq[t]
+  n   i64
+
+  fn Seq[t]::next(this *TakeSeq[t]) Option[t] =
+    if this.n <= 0:
+      return None
+    this.n = this.n - 1
+    return this.src.next()
+
+struct SkipSeq[t] (Seq[t]) =
+  src  Seq[t]
+  n    i64
+  done bool
+
+  fn Seq[t]::next(this *SkipSeq[t]) Option[t] =
+    if !this.done:
+      this.done = true
+      for this.n > 0:
+        match this.src.next():
+          case Some(_): this.n = this.n - 1
+          case None:    return None
+    return this.src.next()
+
+struct TakeWhileSeq[t] (Seq[t]) =
+  src  Seq[t]
+  pred fn(t) bool
+  done bool
+
+  fn Seq[t]::next(this *TakeWhileSeq[t]) Option[t] =
+    if this.done: return None
+    match this.src.next():
+      case Some(x):
+        if this.pred(x): return Some(x)
+        this.done = true
+        return None
+      case None:
+        this.done = true
+        return None
+
+struct SkipWhileSeq[t] (Seq[t]) =
+  src     Seq[t]
+  pred    fn(t) bool
+  skipped bool
+
+  fn Seq[t]::next(this *SkipWhileSeq[t]) Option[t] =
+    if !this.skipped:
+      for true:
+        match this.src.next():
+          case Some(x):
+            if !this.pred(x):
+              this.skipped = true
+              return Some(x)
+          case None:
+            this.skipped = true
+            return None
+    return this.src.next()
+
+struct ChainSeq[t] (Seq[t]) =
+  a Seq[t]
+  b Seq[t]
+
+  fn Seq[t]::next(this *ChainSeq[t]) Option[t] =
+    match this.a.next():
+      case Some(x): return Some(x)
+      case None:    return this.b.next()
+
+struct StepBySeq[t] (Seq[t]) =
+  src   Seq[t]
+  n     i64
+  first bool
+
+  fn Seq[t]::next(this *StepBySeq[t]) Option[t] =
+    if !this.first:
+      let skip = this.n - 1
+      for skip > 0:
+        match this.src.next():
+          case Some(_): skip = skip - 1
+          case None:    return None
+    this.first = false
+    return this.src.next()
+
+// Constructors.  Every iterator's next() takes `*Impl`, so each ctor
+// returns the heap-allocated `&Impl` form and lets the Seq[t] coerce
+// wrap it as a trait fat-ptr -- no implicit value-to-heap boxing.
+
+fn range(s i64, e i64) Seq[i64] =
+  return &Range{cur: s, end_: e}
+
+fn iter[t](xs [t]) Seq[t] =
+  return &Iter[t]{data: xs, pos: 0}
+
+// Curried lazy transforms
+
+fn map[t, u](f fn(t) u) fn(Seq[t]) Seq[u] =
+  return fn(s Seq[t]) Seq[u] =
+    return &MapSeq[t, u]{src: s, f: f}
+
+fn filter[t](pred fn(t) bool) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &FilterSeq[t]{src: s, pred: pred}
+
+fn take[t](n i64) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &TakeSeq[t]{src: s, n: n}
+
+fn skip[t](n i64) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &SkipSeq[t]{src: s, n: n, done: false}
+
+fn take_while[t](pred fn(t) bool) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &TakeWhileSeq[t]{src: s, pred: pred, done: false}
+
+fn skip_while[t](pred fn(t) bool) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &SkipWhileSeq[t]{src: s, pred: pred, skipped: false}
+
+fn chain[t](ys Seq[t]) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &ChainSeq[t]{a: s, b: ys}
+
+fn step_by[t](n i64) fn(Seq[t]) Seq[t] =
+  return fn(s Seq[t]) Seq[t] =
+    return &StepBySeq[t]{src: s, n: n, first: true}
+
+// Terminals
+
+fn count[t](s Seq[t]) i64 =
+  let n i64 = 0
+  for true:
+    match s.next():
+      case Some(_): n = n + 1
+      case None:    break
+  return n
+
+fn sum(s Seq[i64]) i64 =
+  let acc i64 = 0
+  for true:
+    match s.next():
+      case Some(v): acc = acc + v
+      case None:    break
+  return acc
+
+fn sumf(s Seq[f64]) f64 =
+  let acc f64 = 0.0
+  for true:
+    match s.next():
+      case Some(v): acc = acc + v
+      case None:    break
+  return acc
+
+fn fold[t, u](init u, f fn(u, t) u) fn(Seq[t]) u =
+  return fn(s Seq[t]) u =
+    let acc = init
+    for true:
+      match s.next():
+        case Some(x): acc = f(acc, x)
+        case None:    break
+    return acc
+
+fn reduce[t](f fn(t, t) t) fn(Seq[t]) Option[t] =
+  return fn(s Seq[t]) Option[t] =
+    match s.next():
+      case None: return None
+      case Some(seed):
+        let acc = seed
+        for true:
+          match s.next():
+            case Some(x): acc = f(acc, x)
+            case None:    break
+        return Some(acc)
+
+fn find[t](pred fn(t) bool) fn(Seq[t]) Option[t] =
+  return fn(s Seq[t]) Option[t] =
+    for true:
+      match s.next():
+        case Some(x):
+          if pred(x): return Some(x)
+        case None: break
+    return None
+
+fn first[t](s Seq[t]) Option[t] =
+  return s.next()
+
+fn nth[t](i i64) fn(Seq[t]) Option[t] =
+  return fn(s Seq[t]) Option[t] =
+    for i > 0:
+      match s.next():
+        case Some(_): i = i - 1
+        case None:    return None
+    return s.next()
+
+fn for_each[t](f fn(t)) fn(Seq[t]) =
+  return fn(s Seq[t]) =
+    for true:
+      match s.next():
+        case Some(x): f(x)
+        case None:    break
+
+fn to_array[t](s Seq[t]) [t] =
+  let out [t] = []
+  for true:
+    match s.next():
+      case Some(v): out ++= [v]
+      case None:    break
+  return out

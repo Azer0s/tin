@@ -2,9 +2,7 @@ use decimal
 use assert
 use result
 
-// ---------------------------------------------------------------------------
 // from() overloads
-// ---------------------------------------------------------------------------
 
 test "from(i64) keeps integer exact" =
   let v = decimal::from(42 as i64)
@@ -30,9 +28,7 @@ test "from(f64) handles negative" =
   assert::equals(-5, v.coeff)
   assert::equals(1 as i32, v.scale)
 
-// ---------------------------------------------------------------------------
 // Operator overloading
-// ---------------------------------------------------------------------------
 
 test "0.1 + 0.2 == 0.3 with decimal" =
   let a = decimal::from("0.1")
@@ -78,9 +74,7 @@ test "ord operators" =
   assert::equals(true, a <= b)
   assert::equals(true, b >= a)
 
-// ---------------------------------------------------------------------------
 // Implicit trait
-// ---------------------------------------------------------------------------
 
 test "implicit conversion from string in let" =
   let v decimal::Value = "0.5"
@@ -108,9 +102,7 @@ test "implicit conversion at return" =
 
   assert::equals(true, v == decimal::from("2.5"))
 
-// ---------------------------------------------------------------------------
 // print trait
-// ---------------------------------------------------------------------------
 
 test "print preserves scale" =
   let v = decimal::from("1.230")
@@ -127,9 +119,7 @@ test "print of negative" =
 
   assert::equals("-12.5", "{v}")
 
-// ---------------------------------------------------------------------------
 // parse() returns errors
-// ---------------------------------------------------------------------------
 
 test "parse rejects empty" =
   assert::ok(decimal::parse("").is_err())

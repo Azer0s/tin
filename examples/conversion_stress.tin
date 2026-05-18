@@ -9,9 +9,7 @@ use math
 use result
 use { Result } from result
 
-// ---------------------------------------------------------------------------
 // 1. Multi-impl coerce on struct -- every target dispatches correctly
-// ---------------------------------------------------------------------------
 
 struct Quantity(coerce[i64], coerce[f64], coerce[string], coerce[bool], coerce[atom]) =
   count i64
@@ -48,9 +46,7 @@ test "coerce on zero" =
   assert::equals(q as atom, 'zero)
   assert::ok(!(q as bool))
 
-// ---------------------------------------------------------------------------
 // 2. Implicit + coerce combined: struct sandwiched between primitive flows
-// ---------------------------------------------------------------------------
 
 struct Tagged(implicit[i64], coerce[i64], coerce[string]) =
   inner i64
@@ -73,9 +69,7 @@ test "implicit through arg, coerce through return" =
 
 fn describe(n Tagged) string = return n as string
 
-// ---------------------------------------------------------------------------
 // 3. Implicit conversion via constants and literals
-// ---------------------------------------------------------------------------
 
 const SEED i64 = 99
 
@@ -90,9 +84,7 @@ test "implicit through arithmetic preserves the cast site" =
 
   assert::equals(t.inner, 20)
 
-// ---------------------------------------------------------------------------
 // 4. coerce[bool] in conditionals (auto) but not in && / || (strict)
-// ---------------------------------------------------------------------------
 
 struct Switch(coerce[bool]) =
   on bool
@@ -158,9 +150,7 @@ test "explicit as bool in ||" =
 
   assert::ok(a as bool || b as bool)
 
-// ---------------------------------------------------------------------------
 // 5. Field initializers -- redundant cast warning DOES NOT fire on conversion
-// ---------------------------------------------------------------------------
 
 struct Point =
   x i64
@@ -178,9 +168,7 @@ test "positional struct fields receive literals without cast" =
   assert::equals(p.x, 3)
   assert::equals(p.y, 4)
 
-// ---------------------------------------------------------------------------
 // 6. Overload selection -- same name, different return target
-// ---------------------------------------------------------------------------
 
 // Sanity-check that two coerce overloads on adjacent integer widths
 // don't cross-talk.  Both tests use the same struct but cast to
@@ -197,9 +185,7 @@ test "i32 vs i64 coerce overloads stay distinct" =
   assert::equals(t as i32, 20 as i32)
   assert::equals(t as i64, 40)
 
-// ---------------------------------------------------------------------------
 // 7. Coerce in nested contexts
-// ---------------------------------------------------------------------------
 
 test "coerce inside an array literal" =
   let q1 = Quantity{count: 1}
@@ -225,9 +211,7 @@ test "coerce inside an Ok variant" =
     case Ok(v):  assert::equals(v, "7 units")
     case Err(_): assert::fails("expected Ok")
 
-// ---------------------------------------------------------------------------
 // 8. coerce + arithmetic chain
-// ---------------------------------------------------------------------------
 
 test "chain: cast, arithmetic, recast" =
   let q = Quantity{count: 25}
@@ -236,9 +220,7 @@ test "chain: cast, arithmetic, recast" =
 
   assert::equals(result, 13.0)
 
-// ---------------------------------------------------------------------------
 // 9. Pointer-to-struct: cast through deref
-// ---------------------------------------------------------------------------
 
 test "coerce via deref of struct pointer" =
   let q = Quantity{count: 99}
@@ -249,9 +231,7 @@ test "coerce via deref of struct pointer" =
 
   assert::equals(n, 99)
 
-// ---------------------------------------------------------------------------
 // 10. Large fan-out: combining many traits on one struct
-// ---------------------------------------------------------------------------
 
 struct Mega(
   add[Mega, Mega], sub[Mega, Mega],

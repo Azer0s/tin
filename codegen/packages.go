@@ -925,6 +925,16 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 				}
 			} else {
 				prevScope.set(fd.Name, entry)
+				// Also register under the file's own pkg-prefixed key
+				// (e.g. "eager__sum" when this file was loaded as
+				// `use "./eager"`) so the parent's cross-file overload
+				// resolver in genCallExpr can `lookup(best.irName)` and
+				// reach the concrete IR func.  Without this, the entry
+				// only lives in the popped sub-file scope and
+				// pickOverload looks like it succeeded but the
+				// subsequent scope lookup falls through, dispatching to
+				// a wrong-shape callee and segfaulting at runtime.
+				prevScope.set(lookupName, entry)
 				// Also register under the parent package prefix (e.g. "os__stat") so that
 				// loadPackageFromSource can find and re-export this symbol under the package
 				// namespace (e.g. as "os::stat"). Without this, only the file-local prefix
@@ -1006,6 +1016,83 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 		cg.macros[pkgName+"::"+bareName+"!"] = md
 		cg.macros[pkgName+"."+bareName] = md
 		cg.macros[pkgName+"::"+bareName] = md
+	}
+
+	// When this helper file is being loaded INSIDE an outer package
+	// (e.g. seq.tin doing `use "./eager"` / `use "./lazy"`), mirror the
+	// generic-function templates under the outer package's qualified
+	// key so callers can resolve `seq::filter` against templates that
+	// physically live in eager.tin or lazy.tin.  Also register every
+	// non-generic free function in the shared cg.overloads table so
+	// that two siblings declaring the same name (e.g. eager `fn sum
+	// (xs [i64])` and lazy `fn sum(s *Seq[i64])`) coexist as
+	// arg-type-resolved overloads -- without this, the bare name `sum`
+	// in scope is overwritten by whichever file loads last and any
+	// `xs |> seq::sum` segfaults by dispatching to the wrong shape.
+	if cg.currentPkg != "" && cg.currentPkg != pkgName {
+		for _, node := range prog.Stmts {
+			fd, ok := node.(*ast.FuncDecl)
+			if !ok || fd.IsExtern != "" {
+				continue
+			}
+
+			if len(fd.TypeParams) > 0 {
+				qualKey := cg.currentPkg + "__" + fd.Name
+				if _, already := cg.genericFuncs[qualKey]; !already {
+					cg.genericFuncs[qualKey] = fd
+				}
+
+				cg.genericFuncOverloads[qualKey] = appendGenericFuncOverload(cg.genericFuncOverloads[qualKey], fd)
+
+				if _, already := cg.genericFuncHomeScopes[qualKey]; !already {
+					cg.genericFuncHomeScopes[qualKey] = cg.curScope
+				}
+
+				continue
+			}
+
+			if len(fd.Constraints) > 0 {
+				continue
+			}
+
+			irName := pkgName + "__" + fd.Name
+			if cg.overloadedNames[fd.Name] {
+				irName = overloadMangledName(irName, funcParamSig(fd.Params))
+			}
+
+			alreadyHave := false
+
+			for _, existing := range cg.overloads[fd.Name] {
+				if existing.irName == irName {
+					alreadyHave = true
+
+					break
+				}
+			}
+
+			if alreadyHave {
+				continue
+			}
+
+			paramTypes, ptErr := cg.resolveParamTypes(fd.Params, "")
+			if ptErr != nil {
+				continue
+			}
+
+			var retType irtypes.Type
+
+			if fd.RetType != nil {
+				retType, _ = cg.tinTypeToLLVM(fd.RetType)
+			}
+
+			cg.overloads[fd.Name] = append(cg.overloads[fd.Name], &overloadEntry{
+				irName:     irName,
+				paramSig:   funcParamSig(fd.Params),
+				paramTypes: paramTypes,
+				arity:      len(paramTypes),
+				returnType: retType,
+			})
+		}
 	}
 
 	cg.curScope = prevScope
@@ -2432,9 +2519,15 @@ func (cg *CodeGen) monomorphizeFunc(tmpl *ast.FuncDecl, instKey string, typeSubs
 	// args but differ in arity / param shape (e.g. `unwrap[t](r)` vs
 	// `unwrap[t](r, msg)`).  Without the suffix, both monomorphizations
 	// collapse to the same IR symbol and the cache returns whichever was
-	// compiled first, ignoring the caller's arg count.
+	// compiled first, ignoring the caller's arg count.  Also fold in the
+	// return-type's deep mangle so eager-vs-lazy curried overloads with
+	// identical param shapes (`fn map[t,u](f) fn([t]) [u]` vs
+	// `fn map[t,u](f) fn(*Seq[t]) *Seq[u]`) get distinct IR symbols.
 	if overloads := cg.genericFuncOverloads[tmpl.Name]; len(overloads) > 1 {
-		irName += "__" + funcParamSig(tmpl.Params)
+		irName += "__" + funcParamSigDeep(tmpl.Params)
+		if tmpl.RetType != nil {
+			irName += "__" + typeExprMangleDeep(tmpl.RetType)
+		}
 	}
 
 	if f, ok := cg.constrainedFuncInstances[irName]; ok {
@@ -2634,6 +2727,17 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 			}
 
 			cg.inferTypeArgsFromParamPrio(p.Type, argVals[i].Type(), tmpl.TypeParams, subst, fromConst, isConst)
+		}
+	}
+
+	// Pipe-context inference: when the call is the RHS of `a |> f(args)`
+	// and f's declared return is `fn(<head>) <ret>`, unify <head> against
+	// the LHS's LLVM type so generic params that only appear in the
+	// returned closure (e.g. `fn take[t](n i64) fn(*Seq[t]) *Seq[t]`)
+	// can be inferred without the user typing `take[i64](n)`.
+	if cg.pipeCurriedRetHint != nil && tmpl.RetType != nil {
+		if ft, ok := tmpl.RetType.(*ast.FuncType); ok && len(ft.Params) > 0 {
+			cg.inferTypeArgsFromParamPrio(ft.Params[0], cg.pipeCurriedRetHint, tmpl.TypeParams, subst, fromConst, false)
 		}
 	}
 

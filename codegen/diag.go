@@ -154,6 +154,25 @@ const (
 	// Default-on; suppress with -Wno-unguarded-trait-downcast or by
 	// adding the matching `is` check.
 	DiagUnguardedTraitDowncast = "unguarded-trait-downcast"
+	// DiagPtrTrait fires when a type expression names `*Trait` (a
+	// pointer to a trait fat-pointer).  The trait fat-pointer
+	// already carries a heap pointer in its `data` slot, so the
+	// outer `*` is a second indirection on top of an indirection
+	// that's already there.  The value-form `Trait` is the
+	// canonical shape; `*Trait` remains supported for cases that
+	// genuinely need a borrowed fat-ptr but is almost never the
+	// right answer.  Default-on; suppress per-decl with
+	// `//!-Wno-ptr-trait` or globally with `-Wno-ptr-trait`.
+	DiagPtrTrait = "ptr-trait"
+	// DiagTraitSnapshotMutation fires when a value-source coerce to a
+	// trait whose impl on the source struct has pointer-receiver
+	// methods.  The compile is fine -- the trait fat-ptr owns a heap
+	// snapshot and mutations through *Self methods land on it -- but
+	// readers usually expect the alias form (`Trait = &b`) when the
+	// trait can mutate.  The warning steers them at the source they
+	// almost certainly meant.  Default-on; per-call silence with
+	// `//!-Wno-trait-snapshot-mutation`.
+	DiagTraitSnapshotMutation = "trait-snapshot-mutation"
 	// DiagRedundantTypeCast fires on `<lit> as T` when the surrounding
 	// context already pins the slot to T and the literal would
 	// auto-coerce on its own.  Most commonly inside an array literal:

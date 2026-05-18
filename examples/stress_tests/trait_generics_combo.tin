@@ -17,9 +17,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // Traits
-// ---------------------------------------------------------------------------
 
 trait labeled =
   fn label(this labeled) string = virtual
@@ -40,9 +38,7 @@ trait named_size =
   fn info(this named_size) string =
     return "{this.name_field}(size={this.size_field})"
 
-// ---------------------------------------------------------------------------
 // Structs
-// ---------------------------------------------------------------------------
 
 struct widget(labeled, measurable, comparable, summarizable, named_size) =
   name_field string
@@ -88,9 +84,7 @@ struct gadget(labeled, measurable, comparable, named_size) =
 
     return 0
 
-// ---------------------------------------------------------------------------
 // Generic functions with multiple constraints
-// ---------------------------------------------------------------------------
 
 fn describe_item[t](x t) string where t is labeled+measurable =
   return "{x.label()} measures {x.measure()}"
@@ -123,9 +117,7 @@ fn find_largest[t](items [t]) i64 where t is measurable =
 
   return max
 
-// ---------------------------------------------------------------------------
 // Generic function calling another generic function
-// ---------------------------------------------------------------------------
 
 fn compare_pair[t](a t, b t) string where t is labeled+measurable =
   let diff = a.measure() - b.measure()
@@ -137,10 +129,8 @@ fn compare_pair[t](a t, b t) string where t is labeled+measurable =
 
   return "{a.label()} == {b.label()}"
 
-// ---------------------------------------------------------------------------
 // One struct implementing the same generic trait concept at two types
 // (using two different method names that serve as iter-like roles)
-// ---------------------------------------------------------------------------
 
 struct dual_container =
   ints    [i64]
@@ -158,9 +148,7 @@ struct dual_container =
   fn get_string(this dual_container, i i64) string =
     return this.strings[i]
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "describe_item with widget" =
   let w = widget{name_field: "btn", size_field: 5, color: "red"}

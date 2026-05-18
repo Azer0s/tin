@@ -44,9 +44,7 @@ fn split_at_midpoint(arr [i64]) @[i64, [i64], [i64]] =
 
   return [left[mid - 1] as any, left as any, right as any]
 
-// ---------------------------------------------------------------------------
 // 1. Basic array destructuring
-// ---------------------------------------------------------------------------
 
 test "uniform array destructuring two slots" =
   // Fixed-length destructuring requires exact length match.
@@ -64,9 +62,7 @@ test "uniform array destructuring three slots" =
   assert::equals(y, 2)
   assert::equals(z, 3)
 
-// ---------------------------------------------------------------------------
 // 2. Rest-split destructuring
-// ---------------------------------------------------------------------------
 
 test "rest split head and tail" =
   let arr [i64] = [100, 200, 300, 400]
@@ -89,9 +85,7 @@ test "rest split chained twice" =
   assert::equals(len(rest3), 2)
   assert::equals(rest3[0], 4)
 
-// ---------------------------------------------------------------------------
 // 3. Struct destructuring
-// ---------------------------------------------------------------------------
 
 test "struct destructuring vec2" =
   let v = vec2{x: 7, y: 13}
@@ -109,9 +103,7 @@ test "struct destructuring color_rgba" =
   assert::equals(b as i64, 0)
   assert::equals(a as i64, 255)
 
-// ---------------------------------------------------------------------------
 // 4. Per-slot any-array destructuring
-// ---------------------------------------------------------------------------
 
 test "per-slot any array i64 and bool" =
   let arr [any] = [42, true]
@@ -127,9 +119,7 @@ test "per-slot any array string and i64" =
   assert::equals(s, "hello")
   assert::equals(v, 99)
 
-// ---------------------------------------------------------------------------
 // 5. Destructuring inside a for loop
-// ---------------------------------------------------------------------------
 
 test "struct destructuring inside loop" =
   let points [vec2] = [
@@ -166,9 +156,7 @@ test "array destructuring inside loop for pairs" =
   assert::equals(sum_keys, 6)
   assert::equals(sum_vals, 60)
 
-// ---------------------------------------------------------------------------
 // 6. Destructuring function return values
-// ---------------------------------------------------------------------------
 
 fn min_max(arr [i64]) @[i64, i64] =
   let mn i64 = arr[0]
@@ -189,9 +177,7 @@ test "destructure function return min_max" =
   assert::equals(mn, 1)
   assert::equals(mx, 9)
 
-// ---------------------------------------------------------------------------
 // 7. Nested struct destructuring (destructure fields from inner struct)
-// ---------------------------------------------------------------------------
 
 struct segment =
   start vec2
@@ -212,9 +198,7 @@ test "manually decompose nested struct" =
   assert::equals(ey, 4)
   assert::equals((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy), 25)
 
-// ---------------------------------------------------------------------------
 // 8. Shadowing with destructuring names
-// ---------------------------------------------------------------------------
 
 test "destructured names can shadow outer let bindings" =
   let outer_x i64 = 999

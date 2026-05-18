@@ -2739,22 +2739,54 @@ func (cg *CodeGen) callGenericFromMap(
 	// generics (e.g. `unwrap[t](r)` and `unwrap[t](r, msg string)`)
 	// route to their own templates.  The single-entry case in
 	// pickGenericFuncOverload short-circuits, leaving non-overloaded
-	// callers unaffected.
-	if ov := pickGenericFuncOverload(cg.genericFuncOverloads[bareName], len(args), nil); ov != nil {
+	// callers unaffected.  When the overload set has >1 candidates we
+	// eval args first so the shape-aware picker can disambiguate by
+	// the LLVM type of each arg (array vs trait-ptr, etc.).
+	var argVals []value.Value
+	if ovs := cg.genericFuncOverloads[bareName]; len(ovs) > 1 {
+		argVals = make([]value.Value, 0, len(args))
+
+		for _, arg := range args {
+			av, err := cg.genExpr(block, arg)
+			if err != nil {
+				return nil, block, true, err
+			}
+
+			argVals = append(argVals, av)
+
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
+		}
+
+		argTypes := make([]irtypes.Type, len(argVals))
+
+		for i, v := range argVals {
+			if v != nil {
+				argTypes[i] = v.Type()
+			}
+		}
+
+		if ov := pickGenericFuncOverloadHinted(ovs, len(args), argTypes, cg.pipeCurriedRetHint); ov != nil {
+			tmpl = ov
+		}
+	} else if ov := pickGenericFuncOverloadHinted(cg.genericFuncOverloads[bareName], len(args), nil, cg.pipeCurriedRetHint); ov != nil {
 		tmpl = ov
 	}
 
-	argVals := make([]value.Value, 0, len(args))
-	for _, arg := range args {
-		av, err := cg.genExpr(block, arg)
-		if err != nil {
-			return nil, block, true, err
-		}
+	if argVals == nil {
+		argVals = make([]value.Value, 0, len(args))
+		for _, arg := range args {
+			av, err := cg.genExpr(block, arg)
+			if err != nil {
+				return nil, block, true, err
+			}
 
-		argVals = append(argVals, av)
+			argVals = append(argVals, av)
 
-		if cg.curBlock != nil && cg.curBlock != block {
-			block = cg.curBlock
+			if cg.curBlock != nil && cg.curBlock != block {
+				block = cg.curBlock
+			}
 		}
 	}
 

@@ -588,6 +588,10 @@ func (cg *CodeGen) preregister(node ast.Node) error {
 
 		cg.curScope.markTypeVisible(n.Name)
 	case *ast.TraitDecl:
+		if err := cg.checkTraitDefaultMutationForms(n); err != nil {
+			return err
+		}
+
 		cg.recordTrait(CanonKey(n.Name), n)
 
 		if cg.currentPkg != "" {
@@ -2328,6 +2332,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevEscapingVars := cg.curFnEscapingVars
 	prevEscapingAliases := cg.curFnEscapingAliases
 	prevDiScope := cg.diCurrentScope
+	// lastSliceBase is a single-slot side channel from genSliceExpr to
+	// genVarDecl.  When a slice expr inside this function's body never
+	// gets paired with an outer let-binding (e.g. `return xs[0:m]`) the
+	// stale value would otherwise be picked up by an unrelated let-
+	// binding in the OUTER function -- producing a retain whose operand
+	// is an SSA value from a foreign function's block.
+	prevLastSliceBase := cg.lastSliceBase
 	cg.pendingDeferFnI8s = nil
 	cg.pendingDeferFrames = nil
 	cg.pendingDeferEnvs = nil
@@ -2335,6 +2346,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.curFnAutoYield = false // sync variant never auto-yields
 	cg.curDeferRetSlotParam = nil
 	cg.curDeferThunkRetType = nil
+	cg.lastSliceBase = nil
 
 	cg.curFnEscapingVars, cg.curFnEscapingAliases = findEscapingAddressTakenVars(n.Body)
 
@@ -2586,6 +2598,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.tcoFuncName = prevTCOFuncName
 	cg.tcoLoopTop = prevTCOLoopTop
 	cg.tcoParams = prevTCOParams
+	cg.lastSliceBase = prevLastSliceBase
 
 	// Note: #no_recurse is enforced by checkAllNoRecurseFuncs (AST-level,
 	// transitive) before this function is ever compiled. No IR walk needed.

@@ -49,6 +49,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [Networking](stdlib/networking.md) | `io`, `ioutil`, `tcp`, `udp`, `unix` - async I/O and socket types                              |
 | [Rc](stdlib/rc.md)                 | `rc::Cell[T]` refcounted handle for shared C resources -- the wrapper that lets `Atomic`, `Mutex`, etc. be copied safely |
 | [Regex](stdlib/regex.md)           | PCRE regular expressions: `compile`, `exec`, `find_all`, `replace`, `split`                    |
+| [Seq](stdlib/seq.md)               | Curried pipe-first sequence ops, eager `[t]` and lazy `Seq[t]` under the same names           |
 | [SIMD](stdlib/simd.md)             | Portable SIMD: vector types, `splat`, `loadu`, `cmpeq`, `movemask`, arch directives            |
 | [Strings](stdlib/strings.md)       | String operations: `replace`, `split`, `join`, `trim`, `contains`, `index_of`, case conversion |
 

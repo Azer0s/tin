@@ -82,6 +82,63 @@ func typeExprMangle(te ast.TypeExpr) string {
 	return "t"
 }
 
+// typeExprMangleDeep is a richer variant of typeExprMangle that fully
+// expands FuncType signatures.  Used by appendGenericFuncOverload to
+// keep two same-arity generic decls coexisting in the overload registry
+// when only their return-fn shape differs (e.g. `fn map[t,u](f) fn([t]) [u]`
+// vs `fn map[t,u](f) fn(*Seq[t]) *Seq[u]`).  Kept separate from the
+// shallow mangle so existing IR-name layouts stay untouched.
+func typeExprMangleDeep(te ast.TypeExpr) string {
+	if te == nil {
+		return "void"
+	}
+
+	switch t := te.(type) {
+	case *ast.FuncType:
+		parts := []string{"fn"}
+		for _, p := range t.Params {
+			parts = append(parts, typeExprMangleDeep(p))
+		}
+
+		parts = append(parts, "to_"+typeExprMangleDeep(t.RetType))
+
+		return strings.Join(parts, "_")
+	case *ast.PointerType:
+		if t.IsConst {
+			return "cptr_" + typeExprMangleDeep(t.Elem)
+		}
+
+		return "ptr_" + typeExprMangleDeep(t.Elem)
+	case *ast.ArrayType:
+		return "arr_" + typeExprMangleDeep(t.Elem)
+	case *ast.GenericType:
+		parts := []string{t.Name}
+		for _, tp := range t.TypeParams {
+			parts = append(parts, typeExprMangleDeep(tp))
+		}
+
+		return strings.Join(parts, "_")
+	}
+
+	return typeExprMangle(te)
+}
+
+// funcParamSigDeep returns funcParamSig but with FuncType params expanded
+// recursively.  See typeExprMangleDeep.
+func funcParamSigDeep(params []ast.Param) string {
+	var parts []string
+
+	for _, p := range params {
+		if p.IsVarArgs {
+			continue
+		}
+
+		parts = append(parts, typeExprMangleDeep(p.Type))
+	}
+
+	return strings.Join(parts, "__")
+}
+
 // funcParamSig returns the mangled parameter-type signature for a function
 // declaration, e.g. "i64__string" for (n i64, s string).
 // Vararg parameters are excluded.
@@ -141,13 +198,32 @@ func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*a
 		return overloads
 	}
 
-	sig := funcParamSig(fd.Params)
+	sig := funcParamSigDeep(fd.Params)
+	retSig := ""
+
+	if fd.RetType != nil {
+		retSig = typeExprMangleDeep(fd.RetType)
+	}
+
 	for i, existing := range overloads {
 		if existing == fd {
 			return overloads
 		}
 
-		if funcParamSig(existing.Params) == sig && len(existing.TypeParams) == len(fd.TypeParams) {
+		existingRetSig := ""
+		if existing.RetType != nil {
+			existingRetSig = typeExprMangleDeep(existing.RetType)
+		}
+		// Only collapse re-registrations of the SAME template (matching
+		// param sig + return sig + arity).  Two overloads sharing a
+		// param shape but differing in return type (e.g. eager
+		// `fn map[t,u](f) fn([t]) [u]` vs lazy
+		// `fn map[t,u](f) fn(*Seq[t]) *Seq[u]`) MUST both stay in the
+		// registry so pickGenericFuncOverloadHinted can pick between
+		// them by pipe-LHS shape.
+		if funcParamSigDeep(existing.Params) == sig &&
+			existingRetSig == retSig &&
+			len(existing.TypeParams) == len(fd.TypeParams) {
 			overloads[i] = fd
 
 			return overloads
@@ -157,7 +233,7 @@ func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*a
 	return append(overloads, fd)
 }
 
-// pickGenericFuncOverload returns the entry from overloads whose declared
+// pickGenericFuncOverloadHinted returns the entry from overloads whose declared
 // param arity matches argCount.  Returns nil when no overload matches or
 // when the choice would be ambiguous (multiple matches of the same arity).
 // The single-entry case short-circuits so the common non-overloaded path
@@ -170,7 +246,16 @@ func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*a
 // `fn poke[t](p *Pingable[t])` coexist: the array vs trait-iface shape
 // disambiguates even though both templates have arity 1 and the bare-name
 // overload table can't tell them apart from arity alone.
-func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int, argTypes []irtypes.Type) *ast.FuncDecl {
+//
+// curriedRetHint covers the pipe case: when the call site is the RHS of
+// `xs |> f(args)`, callers pass the LHS's LLVM type so candidates whose
+// declared return is `fn(<head>) <ret>` and whose `<head>` matches the
+// hint get a tie-breaking score bump.  Lets two arity-1 generic
+// overloads differing only in the SHAPE of the closure they return
+// (e.g. `fn map[t,u](f) fn([t]) [u]` vs
+// `fn map[t,u](f) fn(Seq[t]) Seq[u]`) coexist under the same bare name
+// and resolve by what's piped into them.
+func pickGenericFuncOverloadHinted(overloads []*ast.FuncDecl, argCount int, argTypes []irtypes.Type, curriedRetHint irtypes.Type) *ast.FuncDecl {
 	if len(overloads) == 0 {
 		return nil
 	}
@@ -209,6 +294,8 @@ func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int, argTypes [
 			}
 
 			score := scoreGenericTemplate(fd, argTypes)
+			score += scoreCurriedReturn(fd, curriedRetHint)
+
 			if score > bestScore {
 				bestScore = score
 				best = fd
@@ -305,6 +392,27 @@ func scoreGenericTemplate(fd *ast.FuncDecl, argTypes []irtypes.Type) int {
 	}
 
 	return total
+}
+
+// scoreCurriedReturn scores how well fd's declared return-fn first-param
+// shape matches the piped LHS type.  Returns 0 when fd's return isn't a
+// `fn(...)` head or hint is nil.  See pickGenericFuncOverloadHinted.
+func scoreCurriedReturn(fd *ast.FuncDecl, hint irtypes.Type) int {
+	if hint == nil || fd.RetType == nil {
+		return 0
+	}
+
+	ft, ok := fd.RetType.(*ast.FuncType)
+	if !ok || len(ft.Params) == 0 {
+		return 0
+	}
+
+	tps := map[string]bool{}
+	for _, tp := range fd.TypeParams {
+		tps[tp] = true
+	}
+
+	return paramShapeScore(ft.Params[0], hint, tps)
 }
 
 // paramShapeScore matches a single parameter's declared TypeExpr against

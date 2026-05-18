@@ -1179,6 +1179,12 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 
 	if s.Value != nil {
 		cg.curBlock = block
+		// Clear any stale lastSliceBase left over from a slice expr that
+		// fired in a non-let context (e.g. `return xs[0:m]` inside a
+		// callee's body).  Without this, the next genVarDecl would
+		// retain/release a value from a foreign function's block,
+		// producing a forward-reference IR.
+		cg.lastSliceBase = nil
 		// TupleLit: pass the declared type so fields get the right LLVM types.
 		if tup, ok := s.Value.(*ast.TupleLit); ok && llType != nil {
 			initVal, err = cg.genTupleLit(block, tup, llType)
@@ -1743,13 +1749,12 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// header rather than a possibly-interior fat-ptr field-0 pointer.
 	// We read it here (after genExpr returns) so that any nested expression that
 	// also calls genSliceExpr doesn't clobber our value.
+	// genSliceExpr emits its own +1 retain on the base now, so we just
+	// record the base pointer for scope-exit release -- the matching
+	// retain is no longer required here.
 	sliceBase := cg.lastSliceBase
 
 	cg.lastSliceBase = nil
-	if sliceBase != nil {
-		// Retain the base pointer once to balance the scope-exit release below.
-		block.NewCall(cg.ensureRetain(), sliceBase)
-	}
 
 	// If there is already an RC-tracked variable with the same name in the CURRENT
 	// (not parent) scope, release it before overwriting the entry.  This handles
@@ -2110,6 +2115,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			// retSkipName below; in that mode buildPtrToTraitBorrow
 			// must NOT retain (would leak +1 since the source never
 			// decrements).  Coerce while the flag is on, then clear.
+			cg.coerceLastErr = nil
 			if _, isIdent := s.Value.(*ast.Identifier); isIdent {
 				prevTransfer := cg.coerceTransfersSource
 				cg.coerceTransfersSource = true
@@ -2117,6 +2123,12 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 				cg.coerceTransfersSource = prevTransfer
 			} else {
 				val = cg.coerce(block, val, retType)
+			}
+			// Surface a richer diagnostic stashed by coerce (e.g.
+			// value-form coerce of an impl whose receiver is *Self) in
+			// place of the generic type-mismatch fall-through below.
+			if cg.coerceLastErr != nil {
+				return cg.nodeErr(s, "%v", cg.coerceLastErr)
 			}
 
 			if !val.Type().Equal(retType) {

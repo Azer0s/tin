@@ -72,7 +72,6 @@ fn rename(old_path string, new_path string) i32 = extern("rename")
 // print writes s followed by a newline (alias for puts)
 fn print(s string) = puts(s)
 
-// ---------------------------------------------------------------------------
 // Async I/O - non-blocking reads/writes backed by the dedicated I/O thread.
 //
 // Low-level primitives (async_read, async_write) are {#async} functions that
@@ -82,7 +81,6 @@ fn print(s string) = puts(s)
 //   let n = await spawn io::async_read(fd, &buf[0], 4096)  // low-level
 //   await io::sleep(100)                                    // high-level
 //   await io::write_all(fd, &buf[0], n)                    // high-level
-// ---------------------------------------------------------------------------
 
 // Raw C helpers (not exported)
 fn tin_async_read_c(fd i32, buf *byte, n i64) i64 = extern("_tin_async_read")
@@ -187,9 +185,7 @@ const STDIN  i32 = 0
 const STDOUT i32 = 1
 const STDERR i32 = 2
 
-// ---------------------------------------------------------------------------
 // Buffered reader: line-oriented input over a file descriptor.
-// ---------------------------------------------------------------------------
 
 const BUFREADER_CAP i64 = 4096
 
@@ -275,12 +271,10 @@ struct BufferedReader =
 fn bufreader(fd i32) BufferedReader =
   return BufferedReader{fd: fd, pos: 0, end: 0, done: false}
 
-// ---------------------------------------------------------------------------
 // I/O traits live in ./async_traits.tin so file-path imports below
 // (./io_copy) see the trait registrations regardless of inclusion
 // order.  io::Reader / io::Writer / io::AsyncReader / io::AsyncWriter
 // are re-exported as part of this package's surface.
-// ---------------------------------------------------------------------------
 
 use "./io_copy"
 use "./io_bufwriter"

@@ -49,9 +49,7 @@ fn{#async} sum_array(arr [i64]) i64 =
 fn make_work_item(id i64) work_item =
   return work_item{id: id, factor: id * 2, label: "item_{id}"}
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "spawn with struct literal argument" =
   let f = spawn process_item(work_item{id: 5, factor: 3, label: "x"})

@@ -377,14 +377,36 @@ func (cg *CodeGen) buildClosureEnv(block *ir.Block, captures []closureCapture, d
 	}
 
 	// Store captures at fields 1..N and retain RC-tracked ones.
+	// emitStructFieldRetain handles the `*Trait_iface` and `*TinStruct`
+	// cases that plain emitRetain skips (param-borrow convention) -- a
+	// closure that outlives its outer scope must own its captured
+	// pointer outright or the env would dangle the moment the caller
+	// releases its own borrow.
 	for i, c := range captures {
 		gep := block.NewGetElementPtr(envStructType, envTypedPtr,
 			constant.NewInt(irtypes.I32, 0),
 			constant.NewInt(irtypes.I32, int64(i+1)))
 		block.NewStore(c.val, gep)
 
-		if isRCTrackedType(c.llvmTy) {
-			cg.emitRetain(block, c.val)
+		needRetain := isRCTrackedType(c.llvmTy)
+		// Also retain pointer-to-trait-iface / pointer-to-Tin-struct
+		// captures: the param-borrow convention skips them in
+		// isRCTrackedType, but a closure that outlives the caller's
+		// scope MUST hold its own +1 reference, otherwise the caller's
+		// scope-exit release frees the heap block before the closure
+		// fires.
+		if !needRetain {
+			if pt, ok := c.llvmTy.(*irtypes.PointerType); ok {
+				if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
+					if cg.structTypeFor(CanonKey(innerSt.Name())) != nil || isTraitFatPtrShape(innerSt) {
+						needRetain = true
+					}
+				}
+			}
+		}
+
+		if needRetain {
+			cg.emitStructFieldRetain(block, c.val)
 		}
 	}
 
@@ -968,7 +990,11 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 					if srcInner == tgtPt.ElemType {
 						return val
 					}
-
+					// `*Concrete -> *Trait`: the inner fat-ptr's
+					// `data` slot is always a pointer, so handing
+					// it a `*Concrete` is the natural shape.
+					// Value-form sources flow through
+					// coerceToTrait's value-source path, not here.
 					if result := cg.buildPtrToTraitBorrow(block, val, traitName, tgtPt.ElemType); result != nil {
 						return result
 					}

@@ -115,7 +115,14 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 			}
 
 			if !structHasMethod(aug, m.Name) {
-				// Bind "this" parameter to this struct type.
+				// Bind "this" parameter to this struct type, preserving
+				// the receiver shape the trait declared.  Pointer-form
+				// receivers stay pointer; value-form receivers stay
+				// value.  Rule 2 in docs/06-traits.md: every method
+				// implementing a trait on a struct shares its receiver
+				// shape with the trait def, so the auto-injected
+				// default has to follow the def's lead -- not silently
+				// flip to *Self the way it did before.
 				injected := *m
 				// Mark the injected method as a trait impl so methodScopeName
 				// produces "Struct_<trait>_<method>" (matching what the vtable
@@ -124,18 +131,24 @@ func (cg *CodeGen) augmentStructFromTraits(n *ast.StructDecl) *ast.StructDecl {
 				// qualified lookup would miss them.
 				injected.TraitQualifier = name
 
-				ptrType := &ast.PointerType{Elem: &ast.SimpleType{Name: n.Name}}
+				wasPointer := false
+				if len(m.Params) > 0 && m.Params[0].Name == "this" {
+					_, wasPointer = m.Params[0].Type.(*ast.PointerType)
+				}
+
+				var thisType ast.TypeExpr = &ast.SimpleType{Name: n.Name}
+				if wasPointer {
+					thisType = &ast.PointerType{Elem: &ast.SimpleType{Name: n.Name}}
+				}
+
 				if len(injected.Params) == 0 || injected.Params[0].Name != "this" {
 					injected.Params = append([]ast.Param{
-						{Name: "this", Type: ptrType},
+						{Name: "this", Type: thisType},
 					}, injected.Params...)
 				} else {
-					// Fix this param to use pointer-to-struct so that mutations to
-					// forward fields inside the default method body persist to the
-					// caller's variable.
 					newParams := make([]ast.Param, len(injected.Params))
 					copy(newParams, injected.Params)
-					newParams[0].Type = ptrType
+					newParams[0].Type = thisType
 					injected.Params = newParams
 				}
 
@@ -729,6 +742,91 @@ func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 			return cg.nodeErr(sd, "struct %s declares trait(s) %s but does not implement: %s",
 				sd.Name, traitListDisplay(sd.Implements), strings.Join(missing, "; "))
 		}
+		// Per-method receiver-shape match: each impl method's first
+		// param shape must mirror the trait def's corresponding
+		// method.  Mixed-shape traits are fine (Map[K,V] read methods
+		// are value-receiver, mutating methods are pointer-receiver);
+		// what's rejected is the user writing `*Self` on an impl
+		// whose trait def says `Self`, or vice versa.  Without this,
+		// `trait Seq[t] = fn next(this Seq[t])` paired with
+		// `fn Seq[i64]::next(this *Range)` would dispatch through a
+		// hidden value-load on what the user thinks is a pointer
+		// borrow.
+		if err := cg.checkImplReceiversMatchTraitDef(sd); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkImplReceiversMatchTraitDef enforces that each impl method's
+// `this` receiver shape matches the receiver declared by the
+// corresponding trait def method -- IF the trait def declared one.
+// When the trait def's method omits `this` entirely (the implicit
+// form), the impl is free to declare value or pointer receiver per
+// its own needs.  Skip static methods, unknown traits, and impls
+// whose corresponding trait method was declared without `this`.
+func (cg *CodeGen) checkImplReceiversMatchTraitDef(sd *ast.StructDecl) error {
+	for _, m := range sd.Methods {
+		if m.TraitQualifier == "" {
+			continue
+		}
+
+		bare := traitBaseFromQualifier(m.TraitQualifier)
+		if bare == "" {
+			continue
+		}
+
+		td := cg.traitFor(CanonKey(bare))
+		if td == nil {
+			continue
+		}
+
+		var defMethod *ast.FuncDecl
+
+		for _, tm := range td.Methods {
+			if tm.Name == m.Name {
+				defMethod = tm
+
+				break
+			}
+		}
+
+		if defMethod == nil {
+			continue
+		}
+
+		if len(m.Params) == 0 || m.Params[0].Name != "this" {
+			continue
+		}
+		// Trait def didn't declare `this` -- the impl is free.  This
+		// is the "no contract" path; the trait author opted out of
+		// pinning receiver shape and each impl picks for itself.
+		if len(defMethod.Params) == 0 || defMethod.Params[0].Name != "this" {
+			continue
+		}
+
+		_, implIsPtr := m.Params[0].Type.(*ast.PointerType)
+		_, defIsPtr := defMethod.Params[0].Type.(*ast.PointerType)
+
+		if implIsPtr == defIsPtr {
+			continue
+		}
+
+		implShape := "this " + sd.Name
+		if implIsPtr {
+			implShape = "this *" + sd.Name
+		}
+
+		defShape := "this " + bare
+		if defIsPtr {
+			defShape = "this *" + bare
+		}
+
+		return cg.nodeErr(m,
+			"impl %s::%s for %s has receiver `%s` but trait %s declared `%s`; the impl must use the same receiver shape the trait declared",
+			bare, m.Name, sd.Name, implShape, bare, defShape)
 	}
 
 	return nil
@@ -2738,39 +2836,159 @@ func (cg *CodeGen) genForIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPtr v
 // concrete struct value or pointer, given the target instKey (e.g. "named" or "iter_i64").
 // If structVal is already a *struct (e.g. from malloc), the heap pointer is
 // used directly as the data pointer instead of allocating new stack space.
-// traitPointerReceiverMethods returns the method names of trait `instKey`
-// whose `this` receiver is a pointer (`*Self` or `*Trait[...]`).
-// Returns nil for unknown traits or traits with all-value receivers.
-//
-// Used by coerceToTrait to reject value-form coercion when the trait
-// has any pointer-receiver method -- that combination silently mutates
-// a heap copy and the user almost certainly meant `let a *T = &b`.
-func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
-	bareTraitName := bareTraitNameFromKey(instKey)
-
-	td := cg.traitFor(CanonKey(bareTraitName))
+// checkTraitDefaultMutationForms enforces rule 2's pre-condition: a
+// trait declared with value-receiver methods (`fn foo(this Trait)`)
+// cannot ship default-method bodies that assign to forward fields,
+// because the auto-injected impl on every struct now preserves the
+// trait def's value receiver (see augmentStructFromTraits) and a
+// `this.field = X` against a value receiver doesn't propagate.  The
+// user has to declare the trait pointer-receiver (`this *Trait`) up
+// front if they want default-method mutation.
+func (cg *CodeGen) checkTraitDefaultMutationForms(td *ast.TraitDecl) error {
 	if td == nil {
 		return nil
 	}
 
-	var ptrMethods []string
+	forwardFieldNames := map[string]bool{}
+	for _, ff := range td.ForwardFields {
+		forwardFieldNames[ff.Name] = true
+	}
+
+	if len(forwardFieldNames) == 0 {
+		return nil
+	}
 
 	for _, m := range td.Methods {
-		if len(m.Params) == 0 {
+		if m.IsVirtual || m.Body == nil {
 			continue
 		}
 
-		first := m.Params[0]
-		if first.Name != "this" {
+		if len(m.Params) == 0 || m.Params[0].Name != "this" {
 			continue
 		}
 
-		if _, isPtr := first.Type.(*ast.PointerType); isPtr {
-			ptrMethods = append(ptrMethods, m.Name)
+		if _, isPtr := m.Params[0].Type.(*ast.PointerType); isPtr {
+			continue // pointer receiver: mutation through it is fine
+		}
+
+		mutatedField := firstAssignedForwardField(m.Body, forwardFieldNames)
+		if mutatedField == "" {
+			continue
+		}
+
+		return cg.nodeErr(m,
+			"trait %s: default method %s has a value receiver (`this %s`) "+
+				"but its body assigns to forward field `%s`; that mutation would "+
+				"land on a copy.  Declare the receiver as `this *%s` so the "+
+				"default body and every implementing struct share a pointer "+
+				"receiver",
+			td.Name, m.Name, td.Name, mutatedField, td.Name)
+	}
+
+	return nil
+}
+
+// firstAssignedForwardField walks body and returns the name of the
+// first forward-field assignment target it finds (`this.<name> = ...`
+// or augmented-assign / postfix), or "" when nothing matches.
+func firstAssignedForwardField(body ast.Node, forwardFieldNames map[string]bool) string {
+	var found string
+
+	walkAST(body, func(n ast.Node) {
+		if found != "" {
+			return
+		}
+
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if name := forwardFieldTarget(s.Target, forwardFieldNames); name != "" {
+				found = name
+			}
+		case *ast.AugAssignStmt:
+			if name := forwardFieldTarget(s.Target, forwardFieldNames); name != "" {
+				found = name
+			}
+		case *ast.PostfixStmt:
+			if name := forwardFieldTarget(s.Expr, forwardFieldNames); name != "" {
+				found = name
+			}
+		}
+	})
+
+	return found
+}
+
+// forwardFieldTarget returns the field name when target is a
+// `this.<name>` field access whose `<name>` matches a forward field.
+// Returns "" otherwise.
+func forwardFieldTarget(target ast.Node, forwardFieldNames map[string]bool) string {
+	fa, ok := target.(*ast.FieldAccess)
+	if !ok {
+		return ""
+	}
+
+	id, ok := fa.Expr.(*ast.Identifier)
+	if !ok || id.Name != "this" {
+		return ""
+	}
+
+	if forwardFieldNames[fa.Field] {
+		return fa.Field
+	}
+
+	return ""
+}
+
+// pointerProvenanceIsRCAlloc walks back through bitcasts, GEPs, and
+// load instructions to find the originating call that produced the
+// pointer.  Returns true when the originator is `_tin_rc_alloc` (or
+// a similar Tin RC allocator wrapper).  Used by coerceToTrait's
+// pointer-source aliasing path to decide whether the source has an
+// ARC header that retain/release can safely touch.  External /
+// raw-pointer sources (mem::malloc, FFI returns, casts of i64-as-
+// pointer) return false so the iface uses the borrow vtable instead.
+func (cg *CodeGen) pointerProvenanceIsRCAlloc(v value.Value) bool {
+	for i := 0; i < 32; i++ {
+		switch n := v.(type) {
+		case *ir.InstBitCast:
+			v = n.From
+		case *ir.InstLoad:
+			pt, ok := n.Src.Type().(*irtypes.PointerType)
+			if !ok {
+				return false
+			}
+
+			if alloca, isAlloca := n.Src.(*ir.InstAlloca); isAlloca {
+				_ = pt
+				_ = alloca
+			}
+			// A loaded *T came from somewhere -- usually a let
+			// binding's alloca.  We can't trace the binding's
+			// stored value without scope info, so be conservative:
+			// don't claim RC.  The let-binding's own coerce sites
+			// would have set the alloca through a fresh `&T{...}`
+			// path, but proving that here is out of scope.
+			return false
+		case *ir.InstGetElementPtr:
+			v = n.Src
+		case *ir.InstCall:
+			calleeName := ""
+			if f, ok := n.Callee.(*ir.Func); ok {
+				calleeName = f.Name()
+			}
+
+			switch calleeName {
+			case "_tin_rc_alloc", "_tin_rc_alloc_atomic", "_tin_rc_alloc_typed":
+				return true
+			}
+
+			return false
+		default:
+			return false
 		}
 	}
 
-	return ptrMethods
+	return false
 }
 
 // traitDisplayName renders an instKey ("Reader", "Awaitable__i64") as
@@ -2779,18 +2997,6 @@ func (cg *CodeGen) traitPointerReceiverMethods(instKey string) []string {
 // different mangling pipeline.
 func (cg *CodeGen) traitDisplayName(instKey string) string {
 	return cg.diagStructName(instKey)
-}
-
-// bareTraitNameFromKey strips the "__T1__T2..." instantiation suffix
-// off an instKey, returning the bare trait name registered in
-// cg.traits. For non-generic traits the key is already bare, so this
-// is a no-op.
-func bareTraitNameFromKey(instKey string) string {
-	if i := strings.Index(instKey, "__"); i >= 0 {
-		return instKey[:i]
-	}
-
-	return instKey
 }
 
 // buildPtrToTraitBorrow lowers `let a *Trait = &b` (or any other coerce
@@ -2951,28 +3157,23 @@ func isStackAllocaRoot(v value.Value) bool {
 func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey string) (value.Value, error) {
 	structType := structVal.Type()
 
-	// Receiver/source mismatch: if the trait has any pointer-receiver
-	// methods, target=value-trait coercion would silently mutate a heap
-	// copy regardless of whether the source was `b` or `&b` -- Tin's
-	// `Trait` always heap-copies. Reject both. The user must use
-	// `let a *Trait = &b` to get a real borrow.
-	//
-	// Stash the diagnostic on cg.coerceLastErr so the caller
-	// (genVarDecl, etc.) can surface it positioned at the user's
-	// source line -- coerce() itself returns Value with no error
-	// channel and is called from 87+ sites we don't want to touch.
-	if missing := cg.traitPointerReceiverMethods(instKey); len(missing) > 0 {
-		err := fmt.Errorf(
-			"trait %s has pointer-receiver methods (%s); value-form coercion silently mutates a heap copy. "+
-				"Use `let a *%s = &b` to mutate the original, or rewrite the trait's receivers to %s if a copy is intended",
-			cg.traitDisplayName(instKey),
-			strings.Join(missing, ", "),
-			cg.traitDisplayName(instKey),
-			cg.traitDisplayName(instKey))
-		cg.coerceLastErr = err
-
-		return nil, err
-	}
+	// Rule 1 (docs/06-traits.md): the source's receiver form must
+	// match the form the impl methods expect.  `traitImplForm` walks
+	// the struct's impl methods (and falls back to the trait def) and
+	// returns "pointer" or "value"; the source is `*T` iff structType
+	// is a PointerType.  Mismatches are rejected with a positioned
+	// diagnostic stashed on cg.coerceLastErr (coerce() itself has no
+	// error channel and is called from 87+ sites we don't want to
+	// touch).
+	// Coerce semantics: value source -> trait owns a heap-copy of the
+	// value (snapshot); pointer source -> trait fat-ptr aliases the
+	// source directly.  Both legitimate, documented in
+	// docs/06-traits.md.  Mutations through pointer-receiver methods
+	// land on whatever data points to (the heap copy or the source);
+	// value-receiver methods receive a stack-local copy at the vtable
+	// adapter regardless.  The `&x` vs `x` distinction at the coerce
+	// site is the user's signal for "alias me" vs "snapshot me" --
+	// the compiler doesn't second-guess it.
 
 	var (
 		dataPtr      value.Value
@@ -2980,45 +3181,66 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	)
 
 	if pt, ok := structType.(*irtypes.PointerType); ok {
-		// Pointer source (e.g. *T from `&T{...}` or mem::malloc + cast).
-		// Copy the pointee into a fresh _tin_rc_alloc so the iface always
-		// owns its own ARC-tracked storage. We can't safely retain the
-		// source pointer here because we don't know whether it has an
-		// RC header (`&T{...}` does, `mem::malloc(sizeof(T))` does not),
-		// and _tin_retain on a non-RC pointer corrupts the previous
-		// 16 bytes. Copying gives uniform iface release semantics across
-		// every coercion source. Tradeoff: pointer-receiver methods
-		// dispatched through the iface mutate the heap copy, not the
-		// original *T -- code that relies on mutation visibility through
-		// the iface must call methods directly on the *T (or use the
-		// value-source `let var iface_T = struct_value` pattern, which
-		// has the same heap-copy semantics).
-		structSt := pt.ElemType
-		szGEP := block.NewGetElementPtr(structSt,
-			constant.NewNull(irtypes.NewPointer(structSt)),
-			constant.NewInt(irtypes.I32, 1))
-		szInt := block.NewPtrToInt(szGEP, irtypes.I64)
-		heapPtr := block.NewCall(cg.ensureRCAlloc(), szInt)
-		typedDst := block.NewBitCast(heapPtr, irtypes.NewPointer(structSt))
-		srcVal := block.NewLoad(structSt, structVal)
-		block.NewStore(srcVal, typedDst)
-
-		// When the caller is returning a binding via this coerce (genReturn
-		// sets coerceTransfersSource for an Identifier return), the source's
-		// own scope-exit release is suppressed via retSkipName -- but we
-		// just copied the pointee into a fresh heap block, so the source
-		// pointer's rc=1 belongs to nobody after this point.  Release it
-		// now so the original heap block is freed; the iface's copy stays
-		// alive on its own.  Without this, `fn new(msg) Err = let s =
-		// &StringErr{msg}; return s` leaks the &StringErr literal block.
-		if cg.coerceTransfersSource {
-			srcI8 := block.NewBitCast(structVal, irtypes.I8Ptr)
-			block.NewCall(cg.ensureRelease(), srcI8)
+		// Pointer source: alias the source pointer directly so that
+		// mutations through *Self impl methods propagate to *structVal.
+		// The trait fat-ptr's data field is exactly the source pointer.
+		// Lifetime is split three ways:
+		//   1. source provenance traces back to `_tin_rc_alloc`
+		//      (`&T{...}`, ensureRCAlloc, etc.): retain to give the
+		//      iface its own RC slot, scope-exit release balances.
+		//   2. source is a stack/global borrow (`&local` or alloca
+		//      bitcast): swap in the trait's borrow vtable so the
+		//      iface's release is a no-op, don't retain.
+		//   3. source is an external/raw pointer (mem::malloc + cast,
+		//      C-interop returns): borrow vtable + no retain; the
+		//      caller owns lifetime exactly like any *T pointer cast.
+		stackBorrowSrc := isStackAllocaRoot(structVal)
+		if !stackBorrowSrc {
+			if loadInst, isLoad := structVal.(*ir.InstLoad); isLoad {
+				if cg.sourceBindingPointsToBorrowedStorage(loadInst.Src) {
+					stackBorrowSrc = true
+				}
+			}
 		}
 
-		dataPtr = heapPtr
-		concreteType = structSt
+		hasRCHeader := !stackBorrowSrc && cg.pointerProvenanceIsRCAlloc(structVal)
+
+		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
+		concreteType = pt.ElemType
+
+		if hasRCHeader && !cg.coerceTransfersSource {
+			skipRetain := false
+
+			if loadInst, isLoad := structVal.(*ir.InstLoad); isLoad {
+				if cg.sourceBindingIsEarlyHeap(loadInst.Src) {
+					skipRetain = true
+				}
+			}
+
+			if !skipRetain {
+				block.NewCall(cg.ensureRetain(), dataPtr)
+			}
+		}
+		// Stack/global borrow OR external pointer: swap in the
+		// trait's borrow vtable so the iface's scope-exit release
+		// won't decrement a header that may not exist.
+		if !hasRCHeader {
+			structName := cg.typeNameOf(pt.ElemType)
+			vtableKey := structName + "__" + instKey
+
+			if borrow := cg.ensureTraitBorrowVtable(vtableKey); borrow != nil {
+				cg.lastAliasBorrowVtable = borrow
+			}
+		}
 	} else {
+		// Value-source coerce: the trait fat-ptr owns its own
+		// heap-allocated snapshot of the value.  Mutations through
+		// *Self impl methods land on the snapshot, not on the
+		// caller's storage.  The -Wtrait-snapshot-mutation warning
+		// fires from astchecks (not here) when the source struct's
+		// impl has pointer-receiver methods, so it has the right
+		// source position and doesn't double-fire on $coro variants.
+		//
 		// Heap-allocate the source struct so the iface's `this` pointer
 		// survives across coroutine suspends. A stack alloca here would die
 		// the moment the constructing coroutine suspends (the resume
@@ -3058,6 +3280,14 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		return nil, fmt.Errorf("no fat-ptr type for trait %s", cg.traitDisplayName(instKey))
 	}
 
+	// Borrow vtable swap for non-RC pointer sources (set above).
+	chosenVtable := value.Value(vtableGlobal)
+
+	if cg.lastAliasBorrowVtable != nil {
+		chosenVtable = cg.lastAliasBorrowVtable
+		cg.lastAliasBorrowVtable = nil
+	}
+
 	// Build fat pointer {i8* data, vtable*}.
 	ifaceAlloca := block.NewAlloca(fatPtrType)
 	dataGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
@@ -3065,7 +3295,7 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	block.NewStore(dataPtr, dataGep)
 	vtableGep := block.NewGetElementPtr(fatPtrType, ifaceAlloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(vtableGlobal, vtableGep)
+	block.NewStore(chosenVtable, vtableGep)
 
 	// Defer the heap-block release to the enclosing scope's exit. We
 	// can't release immediately after this call returns because spawn'd
@@ -3080,7 +3310,9 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 	// directly), for a for-iter loop (genForIterTrait emits its own
 	// release at loop exit), or for a trait init/deinit chain call
 	// (genStructLit / emitReleaseInner emit their own tighter release).
-	// Those callers pre-mark cg.suppressIfaceScopeRelease.
+	// Those callers pre-mark cg.suppressIfaceScopeRelease.  Also skip
+	// for stack-borrow pointer sources -- the borrow vtable's release
+	// is a no-op and we don't own the storage either way.
 	if cg.curScope != nil && !cg.suppressIfaceScopeRelease {
 		ptrSlot := block.NewAlloca(irtypes.I8Ptr)
 		block.NewStore(dataPtr, ptrSlot)

@@ -12,9 +12,7 @@
 // translation unit at expansion time.
 use assert
 
-// -------------------------------------------------------------------------
 // Composition: CTFE body calling expression-body helpers
-// -------------------------------------------------------------------------
 
 macro dbl!(x) = x * 2
 macro qdr!(x) = dbl!(x) * 2
@@ -37,9 +35,7 @@ test "macro composition: helpers driven by CTFE loop" =
   assert::equals(hex_pow!(1), 16)
   assert::equals(hex_pow!(3), 4096)
 
-// -------------------------------------------------------------------------
 // CTFE with match: discriminant + literal cases + default arm
-// -------------------------------------------------------------------------
 
 macro stage_cost!(stage) =
   match stage:
@@ -55,9 +51,7 @@ test "macro: match with multiple cases and default" =
   assert::equals(stage_cost!(3), 1500)
   assert::equals(stage_cost!(7), 7000)
 
-// -------------------------------------------------------------------------
 // String building at compile time
-// -------------------------------------------------------------------------
 
 macro repeat_str!(s, n) =
   let acc string = ""
@@ -72,9 +66,7 @@ test "macro: string repeat" =
   assert::equals(repeat_str!("ab", 1), "ab")
   assert::equals(repeat_str!("ab", 4), "abababab")
 
-// -------------------------------------------------------------------------
 // Many parameters + arithmetic chain
-// -------------------------------------------------------------------------
 
 macro weighted_sum!(a, b, c, d) =
   return a * 1000 + b * 100 + c * 10 + d
@@ -84,9 +76,7 @@ test "macro: multi-arg numeric weave" =
   assert::equals(weighted_sum!(0, 0, 0, 0), 0)
   assert::equals(weighted_sum!(9, 8, 7, 6), 9876)
 
-// -------------------------------------------------------------------------
 // Recursion exercising depth without crossing the ceiling
-// -------------------------------------------------------------------------
 
 macro power!(base, exp) =
   if exp == 0:
@@ -99,9 +89,7 @@ test "macro: recursive power, moderate depth" =
   assert::equals(power!(3, 5), 243)
   assert::equals(power!(7, 4), 2401)
 
-// -------------------------------------------------------------------------
 // Conditional code-splice: macro chooses between two AST fragments
-// -------------------------------------------------------------------------
 
 macro bind_choice!(use_alpha) =
   if use_alpha:
@@ -115,9 +103,7 @@ test "macro: backtick splice from CTFE branch" =
   assert::equals(bind_choice!(true), 100)
   assert::equals(bind_choice!(false), 200)
 
-// -------------------------------------------------------------------------
 // CTFE drives a numeric loop whose result selects which name to splice
-// -------------------------------------------------------------------------
 
 macro lookup_idx!(n) =
   let parity i64 = 0
@@ -138,9 +124,7 @@ test "macro: parity-driven splice" =
   assert::equals(lookup_idx!(7), 2)
   assert::equals(lookup_idx!(8), 1)
 
-// -------------------------------------------------------------------------
 // Boolean logic chain - short-circuit semantics at compile time
-// -------------------------------------------------------------------------
 
 macro all_pos!(a, b, c) =
   return (a > 0) && (b > 0) && (c > 0)
@@ -158,9 +142,7 @@ test "macro: boolean folds (or)" =
   assert::equals(any_zero!(1, 2, 3), false)
   assert::equals(any_zero!(1, 2, 0), true)
 
-// -------------------------------------------------------------------------
 // Heavier loop body - CTFE for 2D grid sum
-// -------------------------------------------------------------------------
 
 macro grid_sum!(rows, cols) =
   let total i64 = 0
@@ -178,9 +160,7 @@ test "macro: 2D loop fold" =
   assert::equals(grid_sum!(3, 3), 36)   // N=9 -> 9*8/2 = 36
   assert::equals(grid_sum!(5, 4), 190)  // N=20 -> 20*19/2 = 190
 
-// -------------------------------------------------------------------------
 // Float arithmetic + accumulator
-// -------------------------------------------------------------------------
 
 macro double_sum!(n) =
   // Sum of 1.5 added n times - exact in f64 for small n (1.5 has finite
@@ -198,9 +178,7 @@ test "macro: f64 accumulator (exact-rep sum)" =
   assert::equals(double_sum!(2), 3.0)
   assert::equals(double_sum!(8), 12.0)
 
-// -------------------------------------------------------------------------
 // Deep iteration - well below the loop-iteration ceiling
-// -------------------------------------------------------------------------
 
 macro count_to!(n) =
   let acc i64 = 0
@@ -213,9 +191,7 @@ macro count_to!(n) =
 test "macro: deep loop (10k iterations)" =
   assert::equals(count_to!(10000), 10000)
 
-// -------------------------------------------------------------------------
 // Branch-pruning: only the live arm's body is evaluated
-// -------------------------------------------------------------------------
 
 macro safe_classify!(n) =
   if n > 1000000:

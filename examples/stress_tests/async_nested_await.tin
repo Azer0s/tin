@@ -14,9 +14,7 @@
 use assert
 use sync
 
-// ---------------------------------------------------------------------------
 // Basic async helpers
-// ---------------------------------------------------------------------------
 
 fn{#async} add_one(n i64) i64 =
   return n + 1
@@ -40,9 +38,7 @@ fn{#async} sum_range(lo i64, hi i64) i64 =
 
   return acc
 
-// ---------------------------------------------------------------------------
 // Pattern 1: await inside a for loop - accumulates results
-// ---------------------------------------------------------------------------
 
 fn{#async} sum_via_await_loop(n i64) i64 =
   let total i64 = 0
@@ -57,10 +53,8 @@ fn{#async} sum_via_await_loop(n i64) i64 =
 
   return total
 
-// ---------------------------------------------------------------------------
 // Pattern 2: await on both branches of if/else
 //            The resumed basic block must have a valid dominator.
-// ---------------------------------------------------------------------------
 
 fn{#async} await_in_both_branches(x i64) i64 =
   if x > 0:
@@ -70,10 +64,8 @@ fn{#async} await_in_both_branches(x i64) i64 =
     let b = await spawn multiply(0 - x, 3)
     return b
 
-// ---------------------------------------------------------------------------
 // Pattern 3: await after an if/else that doesn't return
 //            Value computed before the if must remain live after it.
-// ---------------------------------------------------------------------------
 
 fn{#async} await_after_if(x i64) i64 =
   let base i64 = x * 5        // computed before if
@@ -85,9 +77,7 @@ fn{#async} await_after_if(x i64) i64 =
 
   return result
 
-// ---------------------------------------------------------------------------
 // Pattern 4: nested await - inner await feeds outer spawn
-// ---------------------------------------------------------------------------
 
 fn{#async} nested_await_chain(n i64) i64 =
   let a = await spawn add_one(n)
@@ -96,10 +86,8 @@ fn{#async} nested_await_chain(n i64) i64 =
 
   return c
 
-// ---------------------------------------------------------------------------
 // Pattern 5: collect futures in a loop, then await them all
 //            Tests that a [Future[i64]] array survives yield/resume.
-// ---------------------------------------------------------------------------
 
 fn{#async} spawn_collect_await(n i64) i64 =
   let futures [Future[i64]] = []
@@ -118,16 +106,12 @@ fn{#async} spawn_collect_await(n i64) i64 =
 
   return total
 
-// ---------------------------------------------------------------------------
 // Pattern 6: await result used directly in arithmetic expression
-// ---------------------------------------------------------------------------
 
 fn{#async} await_in_expr(a i64, b i64) i64 =
   return (await spawn add_one(a)) * (await spawn add_one(b))
 
-// ---------------------------------------------------------------------------
 // Pattern 7: await inside a while-style loop with early break
-// ---------------------------------------------------------------------------
 
 fn{#async} await_loop_break(limit i64) i64 =
   let acc i64 = 0
@@ -145,9 +129,7 @@ fn{#async} await_loop_break(limit i64) i64 =
 
   return acc
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "await inside for loop accumulator" =
   // sum of (i+1) for i in 0..5 = 1+2+3+4+5 = 15

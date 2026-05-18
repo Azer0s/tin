@@ -221,6 +221,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					typeSubst[tpName] = lt
 				}
 			}
+			// Pretty form is set once at registration so the diagnostic
+			// path can call diagStructName(instKey) and get
+			// "Seq[i64]" rather than the mangled "Seq__i64" -- compare
+			// memory `feedback_no_pretty_reconstruction.md`.
+			cg.upsertTypeRecord(CanonKey(instKey)).Pretty = cg.prettyTraitInst(t.Name, resolved.TypeParams)
 
 			return cg.buildTraitFatPtrTypeInst(t.Name, instKey, typeSubst)
 		}
@@ -554,11 +559,14 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		if cg.aliasResolving == nil {
 			cg.aliasResolving = make(map[string]bool, 4)
 		}
+
 		if cg.aliasResolving[bareName] {
 			return nil, fmt.Errorf("alias cycle resolving %q via %s", bareName, alias.String())
 		}
+
 		cg.aliasResolving[bareName] = true
 		defer delete(cg.aliasResolving, bareName)
+
 		return cg.tinTypeToLLVM(alias)
 	}
 	// Unknown identifier in a type position. Tin's convention is that
@@ -1187,21 +1195,26 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 	// tinTypeToLLVM.  Without this, `tinTypeToLLVM(Option[t])` treats
 	// the unbound `t` as opaque and returns a mis-typed instantiation.
 	substTE := make(map[string]ast.TypeExpr, len(subst))
+
 	for tp, lt := range subst {
 		target := llvmTypeToTinTypeExprStructural(lt)
 		if target == nil {
 			continue
 		}
+
 		if st, ok := target.(*ast.SimpleType); ok && st.Name == tp {
 			// Self-alias from a vtable struct type whose name doesn't
 			// recover to a real Tin type -- don't substitute.
 			continue
 		}
+
 		substTE[tp] = target
 	}
+
 	if len(substTE) == 0 {
 		return cg.tinTypeToLLVM(te)
 	}
+
 	return cg.tinTypeToLLVM(substituteTypeExpr(te, substTE))
 }
 
@@ -1215,11 +1228,13 @@ func (cg *CodeGen) resolveAliasesInTypeExpr(te ast.TypeExpr) ast.TypeExpr {
 	if te == nil {
 		return nil
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		if alias := cg.aliasTypeFor(CanonKey(t.Name)); alias != nil {
 			return cg.resolveAliasesInTypeExpr(alias)
 		}
+
 		return te
 	case *ast.PointerType:
 		return &ast.PointerType{
@@ -1236,18 +1251,21 @@ func (cg *CodeGen) resolveAliasesInTypeExpr(te ast.TypeExpr) ast.TypeExpr {
 		for i, p := range t.TypeParams {
 			newParams[i] = cg.resolveAliasesInTypeExpr(p)
 		}
+
 		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
 	case *ast.FuncType:
 		newParams := make([]ast.TypeExpr, len(t.Params))
 		for i, p := range t.Params {
 			newParams[i] = cg.resolveAliasesInTypeExpr(p)
 		}
+
 		return &ast.FuncType{
 			Params:  newParams,
 			RetType: cg.resolveAliasesInTypeExpr(t.RetType),
 			IsAsync: t.IsAsync,
 		}
 	}
+
 	return te
 }
 
@@ -1259,11 +1277,13 @@ func substituteTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.Type
 	if te == nil {
 		return nil
 	}
+
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		if r, ok := subst[t.Name]; ok {
 			return r
 		}
+
 		return te
 	case *ast.PointerType:
 		return &ast.PointerType{
@@ -1280,17 +1300,20 @@ func substituteTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.Type
 		for i, p := range t.TypeParams {
 			newParams[i] = substituteTypeExpr(p, subst)
 		}
+
 		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
 	case *ast.FuncType:
 		newParams := make([]ast.TypeExpr, len(t.Params))
 		for i, p := range t.Params {
 			newParams[i] = substituteTypeExpr(p, subst)
 		}
+
 		return &ast.FuncType{
 			Params:  newParams,
 			RetType: substituteTypeExpr(t.RetType, subst),
 		}
 	}
+
 	return te
 }
 

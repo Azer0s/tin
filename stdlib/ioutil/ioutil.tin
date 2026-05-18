@@ -18,9 +18,7 @@ use { loop } from macros
 // C helpers (private runtime operations with no stdlib equivalent)
 fn tin_string_data_c(s string) *byte             = extern("_tin_string_data")
 
-// ---------------------------------------------------------------------------
 // Adapters: wrap a raw fd so it works with AsyncReader / AsyncWriter overloads.
-// ---------------------------------------------------------------------------
 
 struct FdReader (io::AsyncReader) =
   fd i32
@@ -34,9 +32,7 @@ struct FdWriter (io::AsyncWriter) =
   fn AsyncWriter::write(this FdWriter, buf *byte, n i64) Future[i64] =
     return spawn io::async_write(this.fd, buf, n)
 
-// ---------------------------------------------------------------------------
 // Internal {#async} implementations
-// ---------------------------------------------------------------------------
 
 fn{#async} read_string_until_impl(r io::AsyncReader, delim byte) string =
   let tmp  = mem::malloc(4096) as *byte
@@ -160,9 +156,7 @@ fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
       sent = sent + r
     }
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
 // read_string_until reads from fd until delim is seen (or EOF).
 // Pass 0 as delim to read until EOF.

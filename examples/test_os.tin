@@ -15,7 +15,6 @@ fn setup() =
 fn post_test() =
   let _ = os::rmdir(TMP)
 
-// -------------------------------------------------------------------------
 // File write / read
 
 test "write_file and read_file round-trip" =
@@ -113,7 +112,6 @@ test "empty file round-trip" =
   assert::equals(os::file_size(path), 0)
   os::remove(path)
 
-// -------------------------------------------------------------------------
 // stat / exists / is_dir / file_size
 
 test "exists returns true for a file" =
@@ -190,7 +188,6 @@ test "stat on a directory" =
 test "stat error on missing path" =
   assert::ok(os::stat(tmp("no_such_stat_xyz")).is_err())
 
-// -------------------------------------------------------------------------
 // mkdir / rmdir / rename / remove
 
 test "mkdir creates nested directories" =

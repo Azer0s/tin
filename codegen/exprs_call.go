@@ -125,6 +125,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				return cg.genBuiltinLen(block, e.Args[0])
 			}
 		}
+		// Built-in: nlen(expr) returns the dimensions of a multidim
+		// array as an [i64].  Same shadowing rule as len.
+		if fn.Name == "nlen" && len(e.Args) == 1 {
+			if _, shadowed := cg.curScope.lookup("nlen"); !shadowed {
+				return cg.genBuiltinNlen(block, e.Args[0])
+			}
+		}
+		// Built-in: nrect(expr) reports rectangularity of a nested
+		// array (every sub-array at the same depth has the same
+		// length).  Same shadowing rule as len.
+		if fn.Name == "nrect" && len(e.Args) == 1 {
+			if _, shadowed := cg.curScope.lookup("nrect"); !shadowed {
+				return cg.genBuiltinNrect(block, e.Args[0])
+			}
+		}
 		// Built-in: panic(msg).  Same shadowing rule.
 		if fn.Name == "panic" && len(e.Args) == 1 {
 			if _, shadowed := cg.curScope.lookup("panic"); !shadowed {
@@ -252,10 +267,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							}
 						}
 
-						if ov := pickGenericFuncOverload(ovs, len(e.Args), argTypes); ov != nil {
+						if ov := pickGenericFuncOverloadHinted(ovs, len(e.Args), argTypes, cg.pipeCurriedRetHint); ov != nil {
 							gTmpl = ov
 						}
-					} else if ov := pickGenericFuncOverload(ovs, len(e.Args), nil); ov != nil {
+					} else if ov := pickGenericFuncOverloadHinted(ovs, len(e.Args), nil, cg.pipeCurriedRetHint); ov != nil {
 						gTmpl = ov
 					}
 				}
@@ -1007,11 +1022,22 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// Fallback: the "method" might be a callable function field on the struct.
 		// e.g. struct handler { validate fn(i64) bool } called as h.validate(x).
+		// Same fallback for `*Struct` receivers (`this.f(x)` inside a
+		// method where this is *Self), GEP'ing through the pointer
+		// directly so the field is reached without an intermediate
+		// copy + the call sees the live struct.
+		var fieldGepBase value.Value
 		if _, isStruct := objVal.Type().(*irtypes.StructType); isStruct {
-			alloca := block.NewAlloca(objVal.Type())
-			block.NewStore(objVal, alloca)
+			fieldGepBase = block.NewAlloca(objVal.Type())
+			block.NewStore(objVal, fieldGepBase)
+		} else if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
+			if _, ok2 := pt.ElemType.(*irtypes.StructType); ok2 {
+				fieldGepBase = objVal
+			}
+		}
 
-			gep := cg.emitFieldGEP(block, alloca, structName, fn.Field)
+		if fieldGepBase != nil {
+			gep := cg.emitFieldGEP(block, fieldGepBase, structName, fn.Field)
 			if gep != nil {
 				if pt, ok := gep.Type().(*irtypes.PointerType); ok {
 					fieldVal := block.NewLoad(pt.ElemType, gep)
@@ -1417,7 +1443,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if qualFuncName != "" {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args), preEvaledArgTypes); ov != nil {
+					if ov := pickGenericFuncOverloadHinted(cg.genericFuncOverloads[qualFuncName], len(e.Args), preEvaledArgTypes, cg.pipeCurriedRetHint); ov != nil {
 						tmpl = ov
 						isGeneric = true
 						usedQual = true
@@ -1429,7 +1455,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if !isGeneric {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args), preEvaledArgTypes); ov != nil {
+					if ov := pickGenericFuncOverloadHinted(cg.genericFuncOverloads[funcName], len(e.Args), preEvaledArgTypes, cg.pipeCurriedRetHint); ov != nil {
 						tmpl = ov
 						isGeneric = true
 					} else if g, ok := cg.genericFuncs[funcName]; ok {
@@ -1457,8 +1483,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if isGeneric && len(tmpl.TypeParams) > 0 {
-					typeSubst := map[string]TypeName{tmpl.TypeParams[0]: cg.typeNameFromCanon(typeArgName)}
-					instKey := typeArgName
+					// Multi-arg generic instantiation: `f[T1, T2](args)` is
+					// parsed as IndexExpr{Index: Identifier{Name: "T1, T2"}}.
+					// Split on commas so every template param gets a
+					// substitution; without this only TypeParams[0] was
+					// bound, leaving the rest pointing at stale aliases
+					// (or unresolved) and downstream resolves to garbage.
+					typeArgParts := splitTopLevelTypeArgs(typeArgName)
+					typeSubst := make(map[string]TypeName, len(tmpl.TypeParams))
+					instKey := ""
+
+					for i, tp := range tmpl.TypeParams {
+						if i >= len(typeArgParts) {
+							break
+						}
+
+						partTE := typeArgParts[i]
+						partCanon := cg.typeExprCanonicalKey(partTE)
+						typeSubst[tp] = cg.typeNameFromCanon(partCanon)
+
+						if i > 0 {
+							instKey += "__"
+						}
+
+						instKey += partCanon
+					}
+
+					if instKey == "" {
+						instKey = typeArgName
+					}
 
 					concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
 					if usedQual && savedHome != nil {

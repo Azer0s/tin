@@ -18,9 +18,7 @@
 use assert
 use mem
 
-// ---------------------------------------------------------------------------
 // 1. LIFO ordering - observe via pointer written by each defer
-// ---------------------------------------------------------------------------
 
 // lifo_via_ptr writes to a shared i64 pointer from each defer.
 // Defers run in LIFO order (last registered runs first).
@@ -47,9 +45,7 @@ fn lifo_via_string_ptr() *string =
 
   return s_ptr
 
-// ---------------------------------------------------------------------------
 // 2. Defer with early return - all defers must fire on every path
-// ---------------------------------------------------------------------------
 
 fn with_early_return(n i64) i64 =
   let a = mem::malloc(16)
@@ -69,9 +65,7 @@ fn with_early_return(n i64) i64 =
 
   return n * 2     // normal return: all three defers fire
 
-// ---------------------------------------------------------------------------
 // 3. Defer captures outer variable - observe via pointer
-// ---------------------------------------------------------------------------
 
 fn defer_mutates_via_ptr(n i64, p *i64) i64 =
   let result i64 = n
@@ -84,10 +78,8 @@ fn defer_mutates_via_ptr(n i64, p *i64) i64 =
 
   return result   // returns n+1; defer then writes (n+1)*2 to *p
 
-// ---------------------------------------------------------------------------
 // 4. Five defers in one function - stress the defer list
 //    Observe via a shared counter pointer (defers write to it after return).
-// ---------------------------------------------------------------------------
 
 fn five_defers(buf *void, counter *i64) i64 =
   let count i64 = 0
@@ -112,11 +104,9 @@ fn five_defers(buf *void, counter *i64) i64 =
 
   return count   // returns 0 (count before defers run)
 
-// ---------------------------------------------------------------------------
 // 5. recover() inside a deferred block catches panic
 //    The function returns the zero value on panic (0 for i64).
 //    The defer with recover can signal the panic via a pointer.
-// ---------------------------------------------------------------------------
 
 fn safe_divide(a i64, b i64, caught *bool) i64 =
   defer do:
@@ -130,9 +120,7 @@ fn safe_divide(a i64, b i64, caught *bool) i64 =
 
   return a / b
 
-// ---------------------------------------------------------------------------
 // 6. Nested calls where each has its own defers - no cross-contamination
-// ---------------------------------------------------------------------------
 
 fn inner_with_defer(x i64) i64 =
   let v i64 = x
@@ -152,9 +140,7 @@ fn outer_with_defer(x i64) i64 =
 
   return b         // returns a = x
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "lifo ordering via pointer" =
   let p = mem::malloc(8).(*i64)

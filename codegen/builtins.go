@@ -24,6 +24,8 @@ var compileTimeBuiltins = map[string]bool{
 	"panic":      true,
 	"recover":    true,
 	"len":        true,
+	"nlen":       true,
+	"nrect":      true,
 	"echo":       true, // not a fn but reserved as a statement keyword; shadow still misleads
 	"sourcepos":  true,
 	"stacktrace": true, // reserved for the libunwind-backed runtime builtin (see docs/plans/stacktrace-libunwind.md)

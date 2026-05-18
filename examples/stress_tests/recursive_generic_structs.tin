@@ -15,9 +15,7 @@
 use assert
 use mem
 
-// ---------------------------------------------------------------------------
 // 1. Linked list node (singly linked, heap allocated)
-// ---------------------------------------------------------------------------
 
 struct list_node[t] =
   val  t
@@ -54,9 +52,7 @@ fn list_get[t](node *list_node[t], idx i64) t =
     return (*node).val
   return list_get((*node).next, idx - 1)
 
-// ---------------------------------------------------------------------------
 // 2. Binary tree (generic, heap allocated)
-// ---------------------------------------------------------------------------
 
 struct tree_node[t] =
   val   t
@@ -115,10 +111,8 @@ fn tree_count[t](root *tree_node[t]) i64 =
     return 0
   return 1 + tree_count((*root).left) + tree_count((*root).right)
 
-// ---------------------------------------------------------------------------
 // 3. Option type (generic, value-semantic via tagged union approach)
 //    Simulated as a struct since Tin doesn't have built-in Option.
-// ---------------------------------------------------------------------------
 
 struct option[t] =
   has_value bool
@@ -140,9 +134,7 @@ struct option[t] =
       return option[r]::some(f(this.val))
     return option[r]::none()
 
-// ---------------------------------------------------------------------------
 // 4. Result type (generic over value and error string)
-// ---------------------------------------------------------------------------
 
 struct result[t] =
   ok  bool
@@ -165,9 +157,7 @@ fn safe_div(a i64, b i64) result[i64] =
     return result[i64]::failure("division by zero")
   return result[i64]::success(a / b)
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "linked list construction and length" =
   // 3 -> 2 -> 1 -> nil

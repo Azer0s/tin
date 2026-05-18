@@ -124,6 +124,33 @@ func (cg *CodeGen) recordLLVM(canon CanonKey, t irtypes.Type) {
 	}
 }
 
+// prettyTraitInst returns the user-facing source form of a trait
+// instantiation -- "Seq[i64]" / "Map[string, i64]" -- given the trait's
+// bare name and the AST type-args used to instantiate it.  Used at
+// trait-iface registration so diagStructName(instKey) renders the
+// bracketed pretty form rather than the mangled "Seq__i64" canon.
+func (cg *CodeGen) prettyTraitInst(traitName string, args []ast.TypeExpr) string {
+	if len(args) == 0 {
+		if p := cg.prettyOf(CanonKey(traitName)); p != "" {
+			return p
+		}
+
+		return traitName
+	}
+
+	parts := make([]string, len(args))
+	for i, a := range args {
+		parts[i] = cg.typeNameFromExpr(a).Pretty
+	}
+
+	headPretty := traitName
+	if p := cg.prettyOf(CanonKey(traitName)); p != "" {
+		headPretty = p
+	}
+
+	return headPretty + "[" + strings.Join(parts, ", ") + "]"
+}
+
 // recordTraitIface stores a trait's fat-pointer + vtable structs alongside
 // the registry record.  Mirrors the traitFatPtrTypes + traitVtableStructTypes
 // writes at trait instantiation.

@@ -1626,10 +1626,20 @@ func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value,
 	block.NewStore(newDataPtr, newDataGep)
 	block.NewStore(newLen, newLenGep)
 
+	// The slice escapes whatever scope-exit release the source binding
+	// owns: when the source's RC hits 0, the underlying ARC block is
+	// freed and the slice goes dangling.  Bump the base block's RC here
+	// so the slice carries its own +1 reference; the matching release
+	// fires either via genVarDecl's basePtr (when the slice is the
+	// direct init of a let-binding) or via the fat-array's normal
+	// scope-exit release (when the slice escapes through a call, e.g.
+	// `return xs[0:m]` consumed by the caller).
+	baseI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
+	block.NewCall(cg.ensureRetain(), baseI8)
 	// Expose the BASE allocation pointer (before the GEP offset) so that genVarDecl
 	// can retain/release the actual ARC block rather than a possibly-interior pointer.
 	// For start==0 newDataPtr==dataPtr; for start>0 newDataPtr is interior.
-	cg.lastSliceBase = block.NewBitCast(dataPtr, irtypes.I8Ptr)
+	cg.lastSliceBase = baseI8
 
 	return block.NewLoad(arrType, resultAlloca), nil
 }
@@ -1950,6 +1960,26 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	// a |> f(args) = f(args)(a)  - curried style: call f(args) first, then call
 	// the returned function with a.
 	// a |> f         = f(a)      - plain function value on the right.
+
+	// Bare RHS naming a generic (or otherwise non-evaluable as a value)
+	// function: desugar `a |> pkg::fn` (or `a |> fn`) to `pkg::fn(a)` so
+	// the regular call path handles generic-type inference from the
+	// left-hand expression's type.  Without this, `genExpr(e.Right)`
+	// would try to materialize `seq::reverse` as a value and fail with
+	// "undefined: seq::reverse" because the generic has no concrete
+	// instantiation to pick.
+	if sa, ok := e.Right.(*ast.ScopeAccess); ok && cg.isBareGenericFuncRef(sa) {
+		synth := &ast.CallExpr{Func: sa, Args: []ast.Node{e.Left}}
+
+		return cg.genCallExpr(block, synth)
+	}
+
+	if id, ok := e.Right.(*ast.Identifier); ok && cg.isBareGenericFuncRefIdent(id) {
+		synth := &ast.CallExpr{Func: id, Args: []ast.Node{e.Left}}
+
+		return cg.genCallExpr(block, synth)
+	}
+
 	leftVal, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		return nil, err
@@ -1967,8 +1997,16 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	}
 
 	// Evaluate the right-hand side completely (including any call arguments),
-	// yielding the function to apply to leftVal.
+	// yielding the function to apply to leftVal.  Stash leftVal's type as
+	// a curried-return hint so overload picking inside the RHS (e.g.
+	// `map(f)` with both `[t]`-eager and `*Seq[t]`-lazy overloads) can
+	// pick the variant whose returned closure consumes leftVal.
+	prevHint := cg.pipeCurriedRetHint
+	cg.pipeCurriedRetHint = leftVal.Type()
+
 	rightFn, err := cg.genExpr(block, e.Right)
+	cg.pipeCurriedRetHint = prevHint
+
 	if err != nil {
 		return nil, err
 	}
@@ -2011,6 +2049,51 @@ func (cg *CodeGen) genPipeExpr(block *ir.Block, e *ast.PipeExpr) (value.Value, e
 	}
 
 	return result, nil
+}
+
+// isBareGenericFuncRef reports whether sa names a free function that
+// CAN'T be materialized as a plain LLVM function value at the RHS of a
+// pipe -- i.e. a generic template with no concrete instantiation, OR a
+// non-generic overload set whose disambiguation depends on the LHS
+// type.  In either case the pipe should desugar `a |> pkg::f` to
+// `pkg::f(a)` so the normal call-resolution path handles it.
+func (cg *CodeGen) isBareGenericFuncRef(sa *ast.ScopeAccess) bool {
+	if len(sa.Path) < 2 {
+		return false
+	}
+
+	qual := strings.Join(sa.Path, "::")
+	bare := sa.Path[len(sa.Path)-1]
+
+	for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
+		if _, ok := m[qual]; ok {
+			return true
+		}
+
+		if _, ok := m[bare]; ok {
+			return true
+		}
+	}
+
+	if ovs, ok := cg.overloads[bare]; ok && len(ovs) > 1 {
+		return true
+	}
+
+	return false
+}
+
+func (cg *CodeGen) isBareGenericFuncRefIdent(id *ast.Identifier) bool {
+	for _, m := range []map[string]*ast.FuncDecl{cg.genericFuncs, cg.constrainedFuncs} {
+		if _, ok := m[id.Name]; ok {
+			return true
+		}
+	}
+
+	if ovs, ok := cg.overloads[id.Name]; ok && len(ovs) > 1 {
+		return true
+	}
+
+	return false
 }
 
 // tryPipeToStaticMethod handles `a |> Adt::method` and

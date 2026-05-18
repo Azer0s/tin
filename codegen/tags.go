@@ -23,6 +23,8 @@ func hasTag(tags []string, name string) bool {
 // even though they are not declared in funcDecls.
 var pureBuiltins = map[string]bool{
 	"len":        true,
+	"nlen":       true,
+	"nrect":      true,
 	"sizeof":     true,
 	"default":    true,
 	"typeof":     true,

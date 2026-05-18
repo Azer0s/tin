@@ -11,9 +11,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // Packed cLayoutStruct declarations (must match packed_struct.c layout)
-// ---------------------------------------------------------------------------
 
 struct {#packed} packed_hdr =
   tag   u8
@@ -31,9 +29,7 @@ fn verify_hdr(h *packed_hdr, tag u8, value u32) bool    = extern("verify_hdr")
 fn sizeof_packed_hdr() i32                              = extern("sizeof_packed_hdr")
 fn sizeof_packed_msg() i32                              = extern("sizeof_packed_msg")
 
-// ---------------------------------------------------------------------------
 // Packed cLayoutStruct tests
-// ---------------------------------------------------------------------------
 
 test "packed cLayoutStruct: C reports correct packed sizeof" =
   // packed_hdr = u8 + u32 = 5 bytes (no padding between tag and value).
@@ -72,9 +68,7 @@ test "packed cLayoutStruct: nested packed struct field access" =
   assert::equals((*m).hdr.value as i64, 99999)
   assert::equals((*m).extra as i64, 1234)
 
-// ---------------------------------------------------------------------------
 // Regular (non-cLayout) packed Tin struct
-// ---------------------------------------------------------------------------
 
 struct {#packed} tiny_rec =
   a u8
@@ -96,9 +90,7 @@ test "packed Tin struct: field reads and writes" =
   assert::equals(r.b as i64, 1000)
   assert::equals(r.c as i64, 42)
 
-// ---------------------------------------------------------------------------
 // Reflection: getfield / setfield on a regular packed struct
-// ---------------------------------------------------------------------------
 
 test "packed Tin struct: getfield reads correct field values" =
   let r = tiny_rec{ a: 3, b: 500, c: 7 }
@@ -116,9 +108,7 @@ test "packed Tin struct: setfield updates field correctly" =
   setfield(r, "b", 8888 as u16)
   assert::equals(r.b as i64, 8888)
 
-// ---------------------------------------------------------------------------
 // Dynamic dispatch: packed struct implementing a trait
-// ---------------------------------------------------------------------------
 
 trait measurable =
   fn measure(this measurable) i64 = virtual
@@ -139,9 +129,7 @@ test "packed struct dynamic dispatch: vtable lookup returns correct value" =
   assert::equals(s.measure(), 3 * 256 + 2)
   assert::equals(call_measure(s), 3 * 256 + 2)
 
-// ---------------------------------------------------------------------------
 // Boxing: packed struct assigned to trait variable (fat pointer)
-// ---------------------------------------------------------------------------
 
 test "packed struct trait variable: assign and dispatch" =
   // Assigning a concrete packed struct to a trait variable creates a fat pointer
@@ -156,9 +144,7 @@ test "packed struct trait variable: passed as trait parameter" =
 
   assert::equals(call_measure(s), 20 * 256 + 10)
 
-// ---------------------------------------------------------------------------
 // Boxing to any: packed struct round-trip through any
-// ---------------------------------------------------------------------------
 
 test "packed struct boxed to any: unbox and read fields" =
   let s = sensor{ lo: 4, hi: 9 }
@@ -178,9 +164,7 @@ test "packed Tin struct boxed to any: unbox tiny_rec" =
   assert::equals(r2.b as i64, 222)
   assert::equals(r2.c as i64, 33)
 
-// ---------------------------------------------------------------------------
 // Echo/print: packed struct echo dispatches without crashing
-// ---------------------------------------------------------------------------
 
 fn sum_sensor(s sensor) i64 =
   return s.measure()
@@ -202,9 +186,7 @@ test "packed struct echo: echo tiny_rec does not crash" =
   assert::equals(r.a as i64, 5)
   assert::equals(r.b as i64, 100)
 
-// ---------------------------------------------------------------------------
 // typeof / traitof on packed struct
-// ---------------------------------------------------------------------------
 
 test "packed struct typeof returns struct name" =
   let s = sensor{ lo: 0, hi: 0 }
