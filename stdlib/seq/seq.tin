@@ -1,0 +1,299 @@
+use option
+use { Option } from option
+
+// Curried, pipe-first transforms.  Each fn takes its non-data argument
+// (closure, count, ...) and returns a closure that consumes the array.
+//
+//   let r = [1, 2, 3, 4, 5, 6]
+//             |> filter(fn(x i64) bool = return x % 2 == 0)
+//             |> map(fn(x i64) i64 = return x * x)
+//             |> sum
+//
+// A lazy `Seq[t]` form is planned; today it trips a compiler bug in
+// curried fns whose closure signature carries a trait fat-ptr, so the
+// stdlib ships eager-on-arrays only.
+
+// ----------------------------------------------------------------------
+// Transforms
+
+fn map[t, u](f fn(t) u) fn([t]) [u] =
+  return fn(xs [t]) [u] =
+    let out [u] = []
+    for x in xs:
+      out ++= [f(x)]
+    return out
+
+fn filter[t](pred fn(t) bool) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let out [t] = []
+    for x in xs:
+      if pred(x):
+        out ++= [x]
+    return out
+
+fn flat_map[t, u](f fn(t) [u]) fn([t]) [u] =
+  return fn(xs [t]) [u] =
+    let out [u] = []
+    for x in xs:
+      for y in f(x):
+        out ++= [y]
+    return out
+
+fn take[t](n i64) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    if n <= 0:
+      let empty_arr [t] = []
+      return empty_arr
+    let m = n
+    if m > len(xs):
+      m = len(xs)
+    return xs[0:m]
+
+fn skip[t](n i64) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    if n <= 0:
+      return xs
+    if n >= len(xs):
+      let empty_arr [t] = []
+      return empty_arr
+    return xs[n:len(xs)]
+
+fn take_while[t](pred fn(t) bool) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let out [t] = []
+    for x in xs:
+      if !pred(x): break
+      out ++= [x]
+    return out
+
+fn skip_while[t](pred fn(t) bool) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let out [t] = []
+    let started = false
+    for x in xs:
+      if !started && pred(x):
+        pass
+      else:
+        started = true
+        out ++= [x]
+    return out
+
+fn step_by[t](n i64) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    if n <= 1:
+      return xs
+    let out [t] = []
+    let i i64 = 0
+    for i < len(xs):
+      out ++= [xs[i]]
+      i = i + n
+    return out
+
+fn chain[t](ys [t]) fn([t]) [t] =
+  return fn(xs [t]) [t] = return xs ++ ys
+
+fn zip[t, u](ys [u]) fn([t]) [(t, u)] =
+  return fn(xs [t]) [(t, u)] =
+    let out [(t, u)] = []
+    let n = len(xs)
+    if len(ys) < n:
+      n = len(ys)
+    let i i64 = 0
+    for i < n:
+      out ++= [(xs[i], ys[i])]
+      i = i + 1
+    return out
+
+fn enumerate[t](xs [t]) [(i64, t)] =
+  let out [(i64, t)] = []
+  let i i64 = 0
+  for i < len(xs):
+    out ++= [(i, xs[i])]
+    i = i + 1
+  return out
+
+fn chunks[t](n i64) fn([t]) [[t]] =
+  return fn(xs [t]) [[t]] =
+    let out [[t]] = []
+    if n <= 0:
+      return out
+    let i i64 = 0
+    for i < len(xs):
+      let end = i + n
+      if end > len(xs):
+        end = len(xs)
+      out ++= [xs[i:end]]
+      i = i + n
+    return out
+
+fn windows[t](n i64) fn([t]) [[t]] =
+  return fn(xs [t]) [[t]] =
+    let out [[t]] = []
+    if n <= 0 || n > len(xs):
+      return out
+    let last = len(xs) - n
+    let i i64 = 0
+    for i <= last:
+      out ++= [xs[i:i+n]]
+      i = i + 1
+    return out
+
+fn dedup_by[t](eq fn(t, t) bool) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let out [t] = []
+    let first = true
+    let prev t
+    for x in xs:
+      if first:
+        out ++= [x]
+        prev = x
+        first = false
+      else:
+        if !eq(prev, x):
+          out ++= [x]
+          prev = x
+    return out
+
+fn reverse[t](xs [t]) [t] =
+  let out [t] = []
+  let i = len(xs) - 1
+  for i >= 0:
+    out ++= [xs[i]]
+    i = i - 1
+  return out
+
+// cmp(a, b) < 0 when a < b.  Insertion sort on a copy.
+fn sort_by[t](cmp fn(t, t) i64) fn([t]) [t] =
+  return fn(xs [t]) [t] =
+    let empty_arr [t] = []
+    let out [t] = xs ++ empty_arr
+    let n = len(out)
+    let i i64 = 1
+    for i < n:
+      let j = i
+      for j > 0:
+        if cmp(out[j - 1], out[j]) <= 0:
+          break
+        let tmp = out[j - 1]
+        out[j - 1] = out[j]
+        out[j] = tmp
+        j = j - 1
+      i = i + 1
+    return out
+
+// ----------------------------------------------------------------------
+// Terminals -- arity-1 (bare pipe) or curried for the arg-taking forms
+
+fn count[t](xs [t]) i64 = return len(xs)
+
+fn sum(xs [i64]) i64 =
+  let acc i64 = 0
+  for x in xs:
+    acc = acc + x
+  return acc
+
+fn sumf(xs [f64]) f64 =
+  let acc f64 = 0.0
+  for x in xs:
+    acc = acc + x
+  return acc
+
+fn min_by[t](cmp fn(t, t) i64) fn([t]) Option[t] =
+  return fn(xs [t]) Option[t] =
+    if len(xs) == 0:
+      return None
+    let best = xs[0]
+    let i i64 = 1
+    for i < len(xs):
+      if cmp(xs[i], best) < 0:
+        best = xs[i]
+      i = i + 1
+    return Some(best)
+
+fn max_by[t](cmp fn(t, t) i64) fn([t]) Option[t] =
+  return fn(xs [t]) Option[t] =
+    if len(xs) == 0:
+      return None
+    let best = xs[0]
+    let i i64 = 1
+    for i < len(xs):
+      if cmp(xs[i], best) > 0:
+        best = xs[i]
+      i = i + 1
+    return Some(best)
+
+fn fold[t, u](init u, f fn(u, t) u) fn([t]) u =
+  return fn(xs [t]) u =
+    let acc = init
+    for x in xs:
+      acc = f(acc, x)
+    return acc
+
+fn reduce[t](f fn(t, t) t) fn([t]) Option[t] =
+  return fn(xs [t]) Option[t] =
+    if len(xs) == 0:
+      return None
+    let acc = xs[0]
+    let i i64 = 1
+    for i < len(xs):
+      acc = f(acc, xs[i])
+      i = i + 1
+    return Some(acc)
+
+fn find[t](pred fn(t) bool) fn([t]) Option[t] =
+  return fn(xs [t]) Option[t] =
+    for x in xs:
+      if pred(x):
+        return Some(x)
+    return None
+
+fn any[t](pred fn(t) bool) fn([t]) bool =
+  return fn(xs [t]) bool =
+    for x in xs:
+      if pred(x):
+        return true
+    return false
+
+fn all[t](pred fn(t) bool) fn([t]) bool =
+  return fn(xs [t]) bool =
+    for x in xs:
+      if !pred(x):
+        return false
+    return true
+
+fn first[t](xs [t]) Option[t] =
+  if len(xs) == 0:
+    return None
+  return Some(xs[0])
+
+fn last[t](xs [t]) Option[t] =
+  if len(xs) == 0:
+    return None
+  return Some(xs[len(xs) - 1])
+
+fn nth[t](i i64) fn([t]) Option[t] =
+  return fn(xs [t]) Option[t] =
+    if i < 0 || i >= len(xs):
+      return None
+    return Some(xs[i])
+
+fn position[t](pred fn(t) bool) fn([t]) Option[i64] =
+  return fn(xs [t]) Option[i64] =
+    let i i64 = 0
+    for i < len(xs):
+      if pred(xs[i]):
+        return Some(i)
+      i = i + 1
+    return None
+
+fn for_each[t](f fn(t)) fn([t]) =
+  return fn(xs [t]) =
+    for x in xs:
+      f(x)
+
+export {
+  map, filter, flat_map, take, skip, take_while, skip_while, step_by,
+  chain, zip, enumerate, chunks, windows, dedup_by, reverse, sort_by,
+  count, sum, sumf, min_by, max_by, fold, reduce, find, any, all,
+  first, last, nth, position, for_each,
+} as seq
