@@ -21,14 +21,15 @@ typedef struct { int64_t rc; } TinRCHdr;
 
 Every ARC-managed heap block is laid out as:
 
-```
-low address
-  ┌─────────────────────────────┐
-  │  TinRCHdr  { int64_t rc }   │  <- 8 bytes
-  ├─────────────────────────────┤
-  │  user data ...              │  <- public pointer starts here
-  └─────────────────────────────┘
-high address
+```mermaid
+block-beta
+  columns 1
+  block:hdr
+    rc["TinRCHdr { int64_t rc } -- 8 bytes"]
+  end
+  block:data
+    user["user data ... (public pointer points here)"]
+  end
 ```
 
 The **public pointer** (stored in `TinString.ptr`, `TinSlice.ptr`, struct

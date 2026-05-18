@@ -37,24 +37,15 @@ The buffer starts at 1024 slots and doubles on each overflow up to `_rq_max`
 
 ## FiberStatus State Machine
 
-```
-                   spawn()
-                    │
-                    ▼
-              ┌──RUNNABLE──┐
-              │            │
-         worker picks up   │
-              │            │
-              ▼            │
-           RUNNING ────────┘ (yield / auto-yield: re-enqueue)
-              │
-       park() │  (sleep / blocked I/O)
-              ▼
-           BLOCKED
-              │
-     unpark() │  (timer fires / epoll/kqueue fires)
-              ▼
-           RUNNABLE -> ... -> DONE
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNABLE: spawn()
+    RUNNABLE --> RUNNING: worker picks up
+    RUNNING --> RUNNABLE: yield / auto-yield (re-enqueue)
+    RUNNING --> BLOCKED: park() -- sleep / blocked I/O
+    BLOCKED --> RUNNABLE: unpark() -- timer / epoll / kqueue
+    RUNNING --> DONE: llvm.coro.done
+    DONE --> [*]
 ```
 
 - **FIBER_RUNNABLE**: in the run queue, waiting for a worker.

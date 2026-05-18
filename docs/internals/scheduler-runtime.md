@@ -262,17 +262,16 @@ completes:
 2. `await future` evaluates `future` (which implements `Awaitable[T]`) and
    calls `Future_await_result(future)` -> `_tin_fiber_join(pid2)`.
 
-```
-await spawn fn_b(args)
-  │
-  ├─ spawn fn_b(args)   -> allocates fiber pid2, pushes to run queue
-  │                        returns Future[T]{pid: pid2}
-  │
-  └─ await future       -> calls Future_await_result(future)
-                        -> calls _tin_fiber_join(pid2, my_hdl)
-                        -> parks calling fiber (BLOCKED in coro context)
-                        ->   or blocks OS thread (non-coro context)
-                        -> waits until pid2 reaches FIBER_DONE
+```mermaid
+flowchart TD
+    A["await spawn fn_b(args)"] --> B["spawn fn_b(args)"]
+    A --> C["await future"]
+    B --> B1["allocates fiber pid2, pushes to run queue"]
+    B1 --> B2["returns Future[T] { pid: pid2 }"]
+    C --> C1["Future_await_result(future)"]
+    C1 --> C2["_tin_fiber_join(pid2, my_hdl)"]
+    C2 --> C3["parks calling fiber (BLOCKED in coro context)<br/>or blocks OS thread (non-coro context)"]
+    C3 --> C4["waits until pid2 reaches FIBER_DONE"]
 ```
 
 There is **no inline drive loop** - the inner fiber runs independently on any

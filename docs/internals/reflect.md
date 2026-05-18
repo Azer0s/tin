@@ -147,22 +147,21 @@ while (*p && !(*p == ')' && depth == 0)) {
    - The parameter name string data (`plen` bytes + `\0`).
    - Padding to the next 8-byte boundary.
 
-```
-ARC block (rc=1):
-  ┌────────────────────────────┐
-  │  TinString[0]              │  <- ptr points into record[0].data
-  │  TinString[1]              │     len = strlen(param[1])
-  │  ...                       │
-  │  TinString[arity-1]        │
-  ├────────────────────────────┤
-  │  record[0]:                │
-  │    int64_t rc = -1         │  <- immortal sentinel
-  │    char data[plen+1]       │  <- TinString[0].ptr points here
-  │    padding to 8-byte align │
-  ├────────────────────────────┤
-  │  record[1]: ...            │
-  │  ...                       │
-  └────────────────────────────┘
+```mermaid
+block-beta
+  columns 1
+  block:arc["ARC block (rc=1)"]
+    columns 1
+    s0["TinString[0]  -- ptr -> record[0].data, len = strlen(param[0])"]
+    s1["TinString[1]"]
+    sdot["..."]
+    sn["TinString[arity-1]"]
+    r0head["record[0]: int64_t rc = -1  (immortal sentinel)"]
+    r0data["record[0]: char data[plen+1]  (TinString[0].ptr points here)"]
+    r0pad["record[0]: padding to 8-byte align"]
+    r1["record[1]: ..."]
+    rdot["..."]
+  end
 ```
 
 Each `TinString.ptr` points into its corresponding immortal record's `data`
