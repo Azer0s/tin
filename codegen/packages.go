@@ -1145,21 +1145,43 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.overloadedNames[name] = flag
 	}
 
-	// Pass 0.7: register top-level var declarations in the package as LLVM
-	// globals so that the package's functions (predeclared in pass 2) can
-	// reference them by bare name. Exported vars also become reachable to
-	// the caller as `pkg::name` / `pkg.name`.
+	// Pass 1.5a: emit struct LAYOUTS (field types only, no method bodies)
+	// and register the type aliases. Method bodies are deferred to Pass 1.5b
+	// so that Pass 1.6's ADT layouts see fully-laid-out inner structs.
 	for _, node := range prog.Stmts {
-		tv, ok := node.(*ast.TopLevelVar)
+		sd, ok := node.(*ast.StructDecl)
 		if !ok {
 			continue
 		}
 
-		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
+		if compErr := cg.genStructLayout(sd); compErr != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
-			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
+			return fmt.Errorf("use %s: struct %s: %w", pkgPath, sd.Name, compErr)
+		}
+		// Register type aliases so module-qualified types resolve.
+		// For non-generic structs: "sync::Unit" -> SimpleType{Name: "sync__Unit"}.
+		// For generic struct templates: "sync::Channel" -> SimpleType{Name: "Channel"} (bare).
+		structKey := pkgName + "__" + sd.Name
+		if _, stOk := cg.structTypes[structKey]; stOk {
+			// Non-generic struct with canonical key.
+			prevScope.set(pkgName+"::"+sd.Name, &scopeEntry{val: nil, isAlloc: false})
+			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: structKey}
+			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: structKey}
+			// Always update the bare-name alias to the current package's struct so
+			// intra-package code (pass 3 bodies) resolves the correct type even
+			// when multiple packages loaded in the same scope share a type name.
+			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
+		} else if _, stOk2 := cg.structTypes[sd.Name]; stOk2 {
+			// Struct registered under bare name (e.g. from file-path import before
+			// currentPkg was set, or user-level struct).
+			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
+			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
+		} else {
+			// Generic struct template (not in structTypes) - use bare name alias.
+			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
+			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
 		}
 	}
 
@@ -1233,43 +1255,21 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		}
 	}
 
-	// Pass 1.5a: emit struct LAYOUTS (field types only, no method bodies)
-	// and register the type aliases. Method bodies are deferred to Pass 1.5b
-	// so that Pass 1.6's ADT layouts see fully-laid-out inner structs.
+	// Pass 1.7: register top-level var declarations in the package as LLVM
+	// globals now that struct layouts are complete, so any struct-typed
+	// initializer can fold with the final field layout. Exported vars also
+	// become reachable to the caller as `pkg::name` / `pkg.name`.
 	for _, node := range prog.Stmts {
-		sd, ok := node.(*ast.StructDecl)
+		tv, ok := node.(*ast.TopLevelVar)
 		if !ok {
 			continue
 		}
 
-		if compErr := cg.genStructLayout(sd); compErr != nil {
+		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
 			cg.curScope = prevScope
 			cg.filename = prevFilename
 
-			return fmt.Errorf("use %s: struct %s: %w", pkgPath, sd.Name, compErr)
-		}
-		// Register type aliases so module-qualified types resolve.
-		// For non-generic structs: "sync::Unit" -> SimpleType{Name: "sync__Unit"}.
-		// For generic struct templates: "sync::Channel" -> SimpleType{Name: "Channel"} (bare).
-		structKey := pkgName + "__" + sd.Name
-		if _, stOk := cg.structTypes[structKey]; stOk {
-			// Non-generic struct with canonical key.
-			prevScope.set(pkgName+"::"+sd.Name, &scopeEntry{val: nil, isAlloc: false})
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: structKey}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: structKey}
-			// Always update the bare-name alias to the current package's struct so
-			// that intra-package code (pass 3 bodies) resolves the correct type even
-			// when multiple packages loaded in the same scope share a type name.
-			cg.typeAliases[sd.Name] = &ast.SimpleType{Name: structKey}
-		} else if _, stOk2 := cg.structTypes[sd.Name]; stOk2 {
-			// Struct registered under bare name (e.g. from file-path import before
-			// currentPkg was set, or user-level struct).
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
-		} else {
-			// Generic struct template (not in structTypes) - use bare name alias.
-			cg.typeAliases[pkgName+"::"+sd.Name] = &ast.SimpleType{Name: sd.Name}
-			cg.typeAliases[pkgName+"."+sd.Name] = &ast.SimpleType{Name: sd.Name}
+			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
 		}
 	}
 
@@ -2830,6 +2830,30 @@ func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
 
 	// Slot 0: i32 type_id.
 	fields[0] = constant.NewInt(irtypes.I32, int64(typeID))
+
+	// Evaluate each positional field from the literal.
+	for i, elem := range lit.Positional {
+		if i >= len(fieldLLVMTypes) {
+			break
+		}
+
+		llIdx := userOff + i
+		if llIdx >= len(st.Fields) {
+			break
+		}
+
+		intType, ok2 := fieldLLVMTypes[i].(*irtypes.IntType)
+		if !ok2 {
+			return nil // non-integer fields not supported in struct constants
+		}
+
+		intTyp, bigVal := cg.evalConstExprInt(elem, intType)
+		if intTyp == nil {
+			return nil
+		}
+
+		fields[llIdx] = &constant.Int{Typ: intTyp, X: bigVal}
+	}
 
 	// Evaluate each named field from the literal.
 	for _, f := range lit.Fields {
