@@ -13,11 +13,11 @@ package codegen
 //      synthetic `$ret` node.
 //   2. Each `let p = <expr>` / `p = <expr>` / `return <expr>` produces
 //      one or more inclusion constraints:
-//         p = nil        ->  pts(p) ⊇ {NIL}
-//         p = &x         ->  pts(p) ⊇ {ADDR(<fn>, x)}
-//         p = q          ->  pts(p) ⊇ pts(q)
-//         p = f(args...) ->  pts(p) ⊇ pts(f::$ret)
-//                            and pts(f::param_i) ⊇ pts(args[i])
+//         p = nil        ->  pts(p) \supseteq {NIL}
+//         p = &x         ->  pts(p) \supseteq {ADDR(<fn>, x)}
+//         p = q          ->  pts(p) \supseteq pts(q)
+//         p = f(args...) ->  pts(p) \supseteq pts(f::$ret)
+//                            and pts(f::param_i) \supseteq pts(args[i])
 //      (Loads/stores through pointer arithmetic are not modeled here -
 //      Tin already requires `{#unsafe}` to write them, and the static
 //      analyzer is meant to surface obvious bugs, not exhaustively model
@@ -49,8 +49,8 @@ func ptVarFor(fn, name string) ptVar { return ptVar(fn + "::" + name) }
 type ptcKind int
 
 const (
-	ptcAdd  ptcKind = iota // pts(dst) ⊇ {token}
-	ptcCopy                // pts(dst) ⊇ pts(src)
+	ptcAdd  ptcKind = iota // pts(dst) \supseteq {token}
+	ptcCopy                // pts(dst) \supseteq pts(src)
 )
 
 type ptConstraint struct {
@@ -181,7 +181,7 @@ func (cg *CodeGen) assignConstraints(dstFn, dstName, srcFn string, src ast.Node,
 }
 
 // callConstraints emits parameter-binding constraints for a call site.
-// pts(<callee>::param_i) ⊇ pts(<caller>::arg_i).
+// pts(<callee>::param_i) \supseteq pts(<caller>::arg_i).
 func (cg *CodeGen) callConstraints(callerFn string, c *ast.CallExpr, funcByName map[string]*ast.FuncDecl, out *[]ptConstraint) {
 	id, ok := c.Func.(*ast.Identifier)
 	if !ok {

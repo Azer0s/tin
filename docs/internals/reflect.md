@@ -29,7 +29,7 @@ primitive ::= "i8" | "i16" | "i32" | "i64" | "i128"
 pointer   ::= "*" atom
 array     ::= "[" atom "]"
 fn_type   ::= "fn(" params ")" atom
-params    ::= ε | atom ("," atom)*
+params    ::= \epsilon | atom ("," atom)*
 struct_name ::= identifier
 ```
 

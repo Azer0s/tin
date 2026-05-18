@@ -60,7 +60,7 @@ fn add_or_panic(a i64, b i64) i64 =
 
 Tin does **not** insert overflow checks for you. Same applies to
 unsigned types (`u32::max + 1 == 0`), and to floats (`f64` follows
-IEEE 754 - overflow goes to `±inf`, divide-by-zero goes to `inf` or
+IEEE 754 - overflow goes to `\pm inf`, divide-by-zero goes to `inf` or
 `NaN` without a trap).
 
 ---

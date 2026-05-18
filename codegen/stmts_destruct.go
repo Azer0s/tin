@@ -366,7 +366,7 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 		pretty := cg.diagStructName(concreteName)
 
 		return nil, cg.nodeErr(s,
-			"cannot destructure %s as a tuple -- its layout is "+
+			"cannot destructure %s as a tuple - its layout is "+
 				"{tag, payload}, not (a, b).  Use a `match` to extract the "+
 				"variant, or call a method like .unwrap() / .unwrap_or(d) "+
 				"that returns the inner value directly",

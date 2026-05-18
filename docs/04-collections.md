@@ -140,7 +140,7 @@ If shape integrity matters, pair `nlen` with `nrect` (below).
 
 `nrect(arr) bool` walks every element at every interior depth and
 returns `true` iff every sub-array shares its sibling's length.
-Use it whenever you need the shape from `nlen` to be trustable —
+Use it whenever you need the shape from `nlen` to be trustable -
 BLAS-style matrix code, contiguous-buffer flattening, anything that
 treats a `[[T]]` as a real rectangle:
 
@@ -170,8 +170,8 @@ let rows = shape[0]
 let cols = shape[1]
 ```
 
-For a rare opt-out — when you've just built the matrix yourself and
-know it's rectangular — skip `nrect` and call `nlen` directly.
+For a rare opt-out - when you've just built the matrix yourself and
+know it's rectangular - skip `nrect` and call `nlen` directly.
 
 ### Element type must match
 
