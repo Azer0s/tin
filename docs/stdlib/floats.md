@@ -22,8 +22,8 @@ cannot be expressed as `f64` literals:
 | Function           | Value | Description                                     |
 |--------------------|-------|-------------------------------------------------|
 | `floats::NaN()`    | `NaN` | Not-a-Number; result of `0/0`, `sqrt(-1)`, etc. |
-| `floats::Inf()`    | `+\infty`  | Positive infinity; result of `1/0`, overflow    |
-| `floats::NegInf()` | `-\infty`  | Negative infinity; result of `-1/0`             |
+| `floats::Inf()`    | $+\infty$  | Positive infinity; result of `1/0`, overflow    |
+| `floats::NegInf()` | $-\infty$  | Negative infinity; result of `-1/0`             |
 
 ```rust
 let n = floats::NaN()
@@ -43,9 +43,9 @@ All predicates return `bool`:
 
 ```rust
 floats::is_nan(x)      // true if x is NaN
-floats::is_inf(x)      // true if x is +\infty or -\infty
-floats::is_pos_inf(x)  // true if x is +\infty
-floats::is_neg_inf(x)  // true if x is -\infty
+floats::is_inf(x)      // true if x is +inf or -inf
+floats::is_pos_inf(x)  // true if x is +inf
+floats::is_neg_inf(x)  // true if x is -inf
 floats::is_finite(x)   // true if x is neither NaN nor infinite
 ```
 
@@ -66,10 +66,10 @@ fn safe_div(a f64, b f64) f64 =
 | Function                 | Returns | Description                           |
 |--------------------------|---------|---------------------------------------|
 | `NaN() f64`              | NaN     | Not-a-Number                          |
-| `Inf() f64`              | +\infty      | Positive infinity                     |
-| `NegInf() f64`           | -\infty      | Negative infinity                     |
+| `Inf() f64`              | $+\infty$    | Positive infinity                     |
+| `NegInf() f64`           | $-\infty$    | Negative infinity                     |
 | `is_nan(x f64) bool`     | -       | True if `x` is NaN                    |
-| `is_inf(x f64) bool`     | -       | True if `x` is \pm\infty                     |
-| `is_pos_inf(x f64) bool` | -       | True if `x` is +\infty                     |
-| `is_neg_inf(x f64) bool` | -       | True if `x` is -\infty                     |
+| `is_inf(x f64) bool`     | -       | True if `x` is $\pm\infty$            |
+| `is_pos_inf(x f64) bool` | -       | True if `x` is $+\infty$              |
+| `is_neg_inf(x f64) bool` | -       | True if `x` is $-\infty$              |
 | `is_finite(x f64) bool`  | -       | True if `x` is a normal finite number |

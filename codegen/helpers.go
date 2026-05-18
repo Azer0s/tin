@@ -104,7 +104,7 @@ func (cg *CodeGen) posStr(node ast.Node) string {
 
 // nodeErr returns an error prefixed with the source location of node.
 func (cg *CodeGen) nodeErr(node ast.Node, format string, args ...interface{}) error {
-	return fmt.Errorf("%s: %s", cg.posStr(node), fmt.Sprintf(format, args...))
+	return fmt.Errorf("%s: %s", cg.posStr(node), latexToUnicode(fmt.Sprintf(format, args...)))
 }
 
 // nodeErrSpan is nodeErr with an explicit end column, so the snippet
@@ -126,15 +126,17 @@ func (cg *CodeGen) nodeErrSpan(node ast.Node, endCol int, format string, args ..
 		p = cg.currentPos
 	}
 
+	msg := latexToUnicode(fmt.Sprintf(format, args...))
+
 	if p.Line == 0 {
-		return fmt.Errorf("%s: %s", cg.filename, fmt.Sprintf(format, args...))
+		return fmt.Errorf("%s: %s", cg.filename, msg)
 	}
 
 	if endCol <= p.Col {
-		return fmt.Errorf("%s:%d:%d: %s", cg.filename, p.Line, p.Col, fmt.Sprintf(format, args...))
+		return fmt.Errorf("%s:%d:%d: %s", cg.filename, p.Line, p.Col, msg)
 	}
 
-	return fmt.Errorf("%s:%d:%d-%d: %s", cg.filename, p.Line, p.Col, endCol, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%s:%d:%d-%d: %s", cg.filename, p.Line, p.Col, endCol, msg)
 }
 
 // sourceLineEndCol returns the 1-indexed end column of `lineNum` in

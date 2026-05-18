@@ -773,7 +773,7 @@ func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, arg
 		cg.hadWarnError = true
 	}
 
-	msg := fmt.Sprintf(format, args...)
+	msg := latexToUnicode(fmt.Sprintf(format, args...))
 
 	raw := fmt.Sprintf("%s:%d:%d: %s: %s [-W%s]",
 		file, pos.Line, pos.Col, severity, msg, name)
