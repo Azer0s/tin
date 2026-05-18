@@ -423,7 +423,13 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		return c
 	}
 
-	// Last resort: the package-side evaluator (`evalConstExprTyped`).
+	// Last resort: struct-literal constants and package-side constant folding.
+	if lit, ok := n.(*ast.StructLit); ok {
+		if c := cg.evalStructLitConst(lit); c != nil {
+			return c
+		}
+	}
+
 	// Stronger than `evalAsConstant` for cast / shift / bitwise-NOT
 	// expressions over u8..u128 widths, and the only path that yields
 	// a *big.Int-backed `constant.Int` for 128-bit consts -- which is
@@ -459,6 +465,12 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 	}
 
 	concreteName := v.TypeName
+	if alias, ok := cg.typeAliases[concreteName]; ok {
+		if simple, ok2 := alias.(*ast.SimpleType); ok2 {
+			concreteName = simple.Name
+		}
+	}
+
 	if _, has := cg.structTypes[concreteName]; !has {
 		return nil
 	}
