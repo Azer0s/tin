@@ -29,9 +29,31 @@ test "from builds the same value as a struct literal" =
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 4.0)
 
-test "i is the imaginary unit" =
-  assert::equals(complex::i.re, 0.0)
-  assert::equals(complex::i.im, 1.0)
+test "I is the imaginary unit" =
+  assert::equals(complex::I.re, 0.0)
+  assert::equals(complex::I.im, 1.0)
+
+// Operator overloads with implicit scalar promotion
+
+test "Complex + f64 promotes via implicit[f64]" =
+  let z = complex::I + 2.0
+  assert::equals(z.re, 2.0)
+  assert::equals(z.im, 1.0)
+
+test "f64 + Complex (commutative swap path)" =
+  let z = 2.0 + complex::I
+  assert::equals(z.re, 2.0)
+  assert::equals(z.im, 1.0)
+
+test "Complex * f64 promotes scalar" =
+  let z = complex::I * 3.0
+  assert::equals(z.re, 0.0)
+  assert::equals(z.im, 3.0)
+
+test "i64 + Complex picks implicit[i64]" =
+  let z = 3 + complex::I
+  assert::equals(z.re, 3.0)
+  assert::equals(z.im, 1.0)
 
 // Operator overloads
 

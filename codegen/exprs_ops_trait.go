@@ -255,6 +255,19 @@ func (cg *CodeGen) dispatchBinOp(block *ir.Block, e *ast.BinExpr, left, right va
 
 			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
 		}
+
+		// Implicit-coerce fallback: an impl `add[S, P]` is registered
+		// but rt != P; if rt can implicit[P] into the param type the
+		// user's intent is "promote rhs to P and call".  Mirrors how
+		// `let v P = rval` would fire the implicit at any other slot.
+		if fn, coerced := cg.findOpImplWithCoerce(block, structName, traitName, right, rt); fn != nil {
+			res, err := cg.emitOpDispatch(block, fn, left, []value.Value{coerced})
+			if err != nil {
+				return nil, true, err
+			}
+
+			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
+		}
 	}
 
 	if isStructType(rt) && !isStructType(lt) && binOpIsCommutative(e.Op) {
@@ -267,9 +280,74 @@ func (cg *CodeGen) dispatchBinOp(block *ir.Block, e *ast.BinExpr, left, right va
 
 			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
 		}
+
+		// Same implicit-coerce fallback as above, on the swapped form.
+		if fn, coerced := cg.findOpImplWithCoerce(block, structName, traitName, left, lt); fn != nil {
+			res, err := cg.emitOpDispatch(block, fn, right, []value.Value{coerced})
+			if err != nil {
+				return nil, true, err
+			}
+
+			return cg.finishBinOpDispatch(block, e.Op, res), true, nil
+		}
 	}
 
 	return nil, false, nil
+}
+
+// findOpImplWithCoerce looks for an op-trait impl on structName whose
+// single param P accepts `val` via implicit[P] conversion.  Returns the
+// impl fn and a coerced value of type P on success; (nil, nil) when no
+// impl matches.  Only fires when the impl is unary-on-the-non-receiver
+// (single param past the receiver) so the rhs is unambiguously the
+// coercion target.
+func (cg *CodeGen) findOpImplWithCoerce(
+	block *ir.Block,
+	structName, traitName string,
+	val value.Value, valType irtypes.Type,
+) (*ir.Func, value.Value) {
+	key := structName + "/" + traitName
+
+	for _, impl := range cg.opTraitImpls[key] {
+		if len(impl.paramTypes) != 1 {
+			continue
+		}
+
+		paramT := impl.paramTypes[0]
+		if paramT.Equal(valType) {
+			continue // direct lookup would have hit this
+		}
+
+		if !cg.canImplicitCoerce(valType, paramT) {
+			continue
+		}
+
+		coerced := cg.coerce(block, val, paramT)
+		if coerced.Type().Equal(paramT) {
+			return impl.fn, coerced
+		}
+	}
+
+	return nil, nil
+}
+
+// canImplicitCoerce reports whether src can be implicit[T]-converted to
+// target.  Walks the implicit conversion registry; mirrors the lookup in
+// coerce() but as a predicate so dispatchBinOp can pick an impl without
+// firing side-effecting IR.
+func (cg *CodeGen) canImplicitCoerce(src, target irtypes.Type) bool {
+	targetName := cg.typeNameOf(target)
+	if targetName == "" {
+		return false
+	}
+
+	for _, entry := range cg.implicitConvFns[targetName] {
+		if entry.srcLLVM.Equal(src) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // finishBinOpDispatch post-processes the impl-method result for operators

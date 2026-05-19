@@ -12,12 +12,19 @@
 //   echo w                            // -7 + 25i
 //   echo complex::abs(z)              // 5.0
 //
-// The CBLAS `c` / `z` (single / double complex) families expect arrays
-// of interleaved `{re, im, re, im, ...}` doubles.  Because Complex is a
-// two-f64 struct with no padding, `&xs[0]` for `[Complex]` reinterprets
-// as `*f64` and lines up byte-for-byte with the CBLAS layout -- no
-// conversion needed.  A regression test in complex_test.tin pins the
-// invariant.
+// Scalar promotion: f64 / i64 / i32 / f32 are accepted as Complex
+// operands via the `implicit[T]` traits, so `complex::I + 2.0`,
+// `3 * complex::I`, etc. compile to two calls (implicit coerce then the
+// op-trait method) with no extra surface in user code.
+//
+// The CBLAS `c` / `z` (single / double complex) families expect packed
+// interleaved `{re, im, re, im, ...}` doubles.  A `[Complex]` in Tin
+// does NOT match that layout: each element carries the Tin struct
+// header (type_id + vtable slots) so the element stride is 72 bytes
+// instead of 16.  The libs/blas/complex.tin wrappers handle this by
+// packing into an `[f64]` scratch buffer before each CBLAS call and
+// unpacking back for mutating routines.  This is internal to the BLAS
+// wrappers; user code keeps the natural `[Complex]` shape.
 
 // Private C-math helpers used by the holomorphic functions below.
 // math.tin doesn't expose sinh / cosh / hypot under their natural
@@ -150,11 +157,11 @@ fn cos(z Complex) Complex =
 fn tan(z Complex) Complex = return sin(z) / cos(z)
 
 // Imaginary unit 0 + 1i.  Use to spell complex literals naturally:
-//   let z = complex::from(3.0, 4.0) + complex::i
-const i = Complex{re: 0.0, im: 1.0}
+//   let z = complex::from(3.0, 4.0) + complex::I
+const I = Complex{re: 0.0, im: 1.0}
 
 export {
-  Complex, i,
+  Complex, I,
   from, from_polar,
   conj, abs, arg,
   exp, log, sqrt,
