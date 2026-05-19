@@ -878,7 +878,7 @@ func largeStructAlignment(st *irtypes.StructType) int64 {
 //
 // The byval attribute is the marker callExtern uses to detect "wrap
 // this struct value into a stack slot at the call site" -- on AAPCS64
-// we synthesise the same wrap but emit only the attrs clang would
+// we synthesize the same wrap but emit only the attrs clang would
 // (no byval) so the IR continues to match what the linked C side
 // declares.  See byvalTypeOf for the call-site detection path which
 // covers both cases.
