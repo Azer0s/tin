@@ -25,13 +25,13 @@ import (
 // show up in CI.
 func TestExternABIShape(t *testing.T) {
 	for _, tt := range []struct {
-		name           string
-		triple         string
-		wantDecl       []string
-		wantCallByval  []string
-		wantCallSret   []string
-		notWantDecl    []string
-		notWantCall    []string
+		name          string
+		triple        string
+		wantDecl      []string
+		wantCallByval []string
+		wantCallSret  []string
+		notWantDecl   []string
+		notWantCall   []string
 	}{
 		{
 			name:   "x86_64",
