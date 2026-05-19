@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Azer0s/tin/codegen"
@@ -204,6 +205,58 @@ func memcheckCmdWithSuppressions(memcheck, binary string, vgSuppressions []strin
 	default:
 		return wrapExec(binary, binArgs...)
 	}
+}
+
+// formatProcessErrorReason builds the per-test failure summary for a
+// run that crashed / exited non-zero without surfacing any
+// `test "..." ... FAILED` lines.  Includes the exit code, signal
+// info, and the last non-empty line of stderr / stdout so the user
+// can tell a SIGSEGV apart from a setjmp panic apart from a normal
+// non-zero exit.  Previously the reason was the bare "process
+// error" string, which made CI failures painful to diagnose.
+func formatProcessErrorReason(cmd *exec.Cmd, errBuf, outBuf *bytes.Buffer) string {
+	state := cmd.ProcessState
+	if state == nil {
+		return "process error (no exit state)"
+	}
+
+	var detail string
+
+	if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		detail = fmt.Sprintf("killed by signal %d (%s)", int(ws.Signal()), ws.Signal())
+	} else {
+		detail = fmt.Sprintf("exit %d", state.ExitCode())
+	}
+
+	if tail := lastNonEmptyLine(errBuf.String()); tail != "" {
+		return fmt.Sprintf("process error (%s; stderr: %s)", detail, truncate(tail, 200))
+	}
+
+	if tail := lastNonEmptyLine(outBuf.String()); tail != "" {
+		return fmt.Sprintf("process error (%s; stdout: %s)", detail, truncate(tail, 200))
+	}
+
+	return fmt.Sprintf("process error (%s; no output)", detail)
+}
+
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t != "" {
+			return t
+		}
+	}
+
+	return ""
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return s[:n] + "..."
 }
 
 // runMemcheck starts cmd and waits for it to finish. For leaks, it enforces a
@@ -407,12 +460,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 			run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
-			var outBuf bytes.Buffer
+			var outBuf, errBuf bytes.Buffer
 
 			colorOut := newMemcheckColorWriter(os.Stdout)
 			colorErr := newMemcheckColorWriter(os.Stderr)
 			run.Stdout = io.MultiWriter(colorOut, &outBuf)
-			run.Stderr = colorErr
+			run.Stderr = io.MultiWriter(colorErr, &errBuf)
 
 			passed := runMemcheck(memcheck, run) == nil
 			_ = colorOut.Flush()
@@ -434,7 +487,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 				if len(failedTests) > 0 {
 					reason = "test failures"
 				} else {
-					reason = "process error"
+					reason = formatProcessErrorReason(run, &errBuf, &outBuf)
 				}
 			}
 
@@ -633,12 +686,12 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 
 		run := memcheckCmdWithSuppressions(memcheck, cachedBin, fileVgSuppressions)
 
-		var outBuf bytes.Buffer
+		var outBuf, errBuf bytes.Buffer
 
 		colorOut := newMemcheckColorWriter(os.Stdout)
 		colorErr := newMemcheckColorWriter(os.Stderr)
 		run.Stdout = io.MultiWriter(colorOut, &outBuf)
-		run.Stderr = colorErr
+		run.Stderr = io.MultiWriter(colorErr, &errBuf)
 
 		passed := true
 		if runErr := runMemcheck(memcheck, run); runErr != nil {
@@ -664,7 +717,7 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			if len(failedTests) > 0 {
 				reason = "test failures"
 			} else {
-				reason = "process error"
+				reason = formatProcessErrorReason(run, &errBuf, &outBuf)
 			}
 		}
 

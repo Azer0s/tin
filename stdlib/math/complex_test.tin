@@ -29,9 +29,9 @@ test "from builds the same value as a struct literal" =
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 4.0)
 
-test "i() is the imaginary unit" =
-  assert::equals(complex::i().re, 0.0)
-  assert::equals(complex::i().im, 1.0)
+test "i is the imaginary unit" =
+  assert::equals(complex::i.re, 0.0)
+  assert::equals(complex::i.im, 1.0)
 
 // Operator overloads
 

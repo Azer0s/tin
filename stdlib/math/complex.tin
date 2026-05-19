@@ -149,18 +149,13 @@ fn cos(z Complex) Complex =
 // tan(z) = sin(z) / cos(z)
 fn tan(z Complex) Complex = return sin(z) / cos(z)
 
-// i returns the imaginary unit 0 + 1i.  Folds to a constant in
-// optimized builds; use to spell complex literals naturally:
-//   let z = complex::from(3.0, 4.0) + complex::i()
-//
-// Top-level `const I Complex = ...` would be the natural shape but
-// the current compiler doesn't fold struct literals in const
-// initializer position, so we wrap it in a #pure function.
-fn{#pure} i() Complex = return Complex{re: 0.0, im: 1.0}
+// Imaginary unit 0 + 1i.  Use to spell complex literals naturally:
+//   let z = complex::from(3.0, 4.0) + complex::i
+const i = Complex{re: 0.0, im: 1.0}
 
 export {
-  Complex,
-  from, from_polar, i,
+  Complex, i,
+  from, from_polar,
   conj, abs, arg,
   exp, log, sqrt,
   sin, cos, tan

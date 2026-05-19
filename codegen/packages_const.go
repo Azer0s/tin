@@ -81,17 +81,12 @@ func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
 			break
 		}
 
-		intType, ok2 := fieldLLVMTypes[i].(*irtypes.IntType)
-		if !ok2 {
-			return nil // non-integer fields not supported in struct constants
-		}
-
-		intTyp, bigVal := cg.evalConstExprInt(elem, intType)
-		if intTyp == nil {
+		fc := cg.evalConstFieldExpr(elem, fieldLLVMTypes[i])
+		if fc == nil {
 			return nil
 		}
 
-		fields[llIdx] = &constant.Int{Typ: intTyp, X: bigVal}
+		fields[llIdx] = fc
 	}
 
 	// Evaluate each named field from the literal.
@@ -115,20 +110,65 @@ func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
 			continue
 		}
 
-		intType, ok2 := fieldLLVMTypes[rawIdx].(*irtypes.IntType)
-		if !ok2 {
-			return nil // non-integer fields not supported in struct constants
+		fc := cg.evalConstFieldExpr(f.Value, fieldLLVMTypes[rawIdx])
+		if fc == nil {
+			return nil
 		}
 
-		intTyp, bigVal := cg.evalConstExprInt(f.Value, intType)
+		fields[llIdx] = fc
+	}
+
+	return constant.NewStruct(st, fields...)
+}
+
+// evalConstFieldExpr evaluates a single struct-field initializer to
+// an LLVM constant of the field's declared type.  Handles int, float
+// (f32 / f64), and `-<float-literal>` shapes -- enough to make
+// `const I Complex = Complex{re: 0.0, im: 1.0}` fold without falling
+// back to a runtime initializer.
+func (cg *CodeGen) evalConstFieldExpr(expr ast.Node, fieldType irtypes.Type) constant.Constant {
+	if ft, ok := fieldType.(*irtypes.FloatType); ok {
+		if v, ok2 := evalConstFloat(expr); ok2 {
+			return constant.NewFloat(ft, v)
+		}
+
+		return nil
+	}
+
+	if it, ok := fieldType.(*irtypes.IntType); ok {
+		intTyp, bigVal := cg.evalConstExprInt(expr, it)
 		if intTyp == nil {
 			return nil
 		}
 
-		fields[llIdx] = &constant.Int{Typ: intTyp, X: bigVal}
+		return &constant.Int{Typ: intTyp, X: bigVal}
 	}
 
-	return constant.NewStruct(st, fields...)
+	return nil
+}
+
+// evalConstFloat reads a float literal (optionally negated) into a
+// raw float64.  Used by evalConstFieldExpr for struct-const fields.
+func evalConstFloat(expr ast.Node) (float64, bool) {
+	switch e := expr.(type) {
+	case *ast.FloatLit:
+		return e.Value, true
+	case *ast.IntLit:
+		return float64(e.Value), true
+	case *ast.UnaryExpr:
+		if e.Op != "-" {
+			return 0, false
+		}
+
+		inner, ok := evalConstFloat(e.Expr)
+		if !ok {
+			return 0, false
+		}
+
+		return -inner, true
+	}
+
+	return 0, false
 }
 
 func (cg *CodeGen) evalConstExpr(expr ast.Node) constant.Constant {

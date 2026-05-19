@@ -83,12 +83,19 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// then makes the store unreachable, so the original value persists
 	// AND the user is silently lied to about whether the write happened.
 	if id, ok := s.Target.(*ast.Identifier); ok {
-		if cg.topLevelConstNames[id.Name] {
+		// Check the local scope first.  A locally-declared `let i ...`
+		// shadows a same-named top-level const, and the assignment
+		// targets the local binding -- not the const.  Without this
+		// order, exporting a const named after a common loop variable
+		// (e.g. `complex::i`) breaks every function that uses `i` as
+		// a local, even in unrelated packages, because the bare
+		// identifier maps back to the const's storage.
+		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
+			if entry.declaredConst {
+				return block, cg.nodeErr(s, "cannot assign to const %q; drop the const if you need to mutate", id.Name)
+			}
+		} else if cg.topLevelConstNames[id.Name] {
 			return block, cg.nodeErr(s, "cannot assign to top-level const %q (immutable storage)", id.Name)
-		}
-
-		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 && entry.declaredConst {
-			return block, cg.nodeErr(s, "cannot assign to const %q; drop the const if you need to mutate", id.Name)
 		}
 	}
 	// Mutating an identifier invalidates any captured constant init (used
