@@ -1083,6 +1083,24 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	if calleeType != nil {
+		// Pre-marshal `[string]` / `[atom]` args targeting a C
+		// `char**` param.  The inline marshaler emits a stack
+		// alloca + fill-loop and updates the current block to the
+		// loop-exit, so subsequent arg-prep, the call itself, and
+		// any post-call cleanup all land after the marshal.
+		for i, arg := range llArgs {
+			if i >= len(calleeType.Params) {
+				continue
+			}
+
+			if cg.needsCstrArrMarshal(arg, calleeType.Params[i]) {
+				isAtom := isAtomType(
+					arg.Type().(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType,
+				)
+				llArgs[i], block = cg.marshalArrayToCstrArr(block, arg, isAtom)
+			}
+		}
+
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
 
 		// Strict per-argument type check. Fires for clear mismatches

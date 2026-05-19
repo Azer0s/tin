@@ -109,11 +109,26 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 		}
 	}
 	// []T (dynamic array):
-	//   - as parameter: unwrap to *T (C receives the data pointer)
+	//   - as parameter: unwrap to *T (C receives the data pointer).
+	//     [string] and [atom] are special-cased to `**char` (i8**)
+	//     because their element types are themselves fat-ptr / opaque-
+	//     code structs the C side can't read directly.  The call-site
+	//     marshaler in `genExternArg` allocates a temporary
+	//     `char*[len]` array on the caller's stack and fills it with
+	//     each element's raw data pointer (TinString.ptr / the atom's
+	//     interned name).  No null terminator is added; the C caller
+	//     must know the length out-of-band, mirroring the existing
+	//     `[i32] -> int32_t*` convention.
 	//   - as return type: keep the full fat-ptr {*T, i64} so C returns the struct
 	if at, ok := te.(*ast.ArrayType); ok && at.Size < 0 {
 		if forReturn {
 			return cg.tinTypeToLLVM(te)
+		}
+
+		if st, ok2 := at.Elem.(*ast.SimpleType); ok2 {
+			if st.Name == "string" || st.Name == "atom" {
+				return irtypes.NewPointer(irtypes.I8Ptr), nil
+			}
 		}
 
 		elem, err := cg.tinTypeToLLVM(at.Elem)

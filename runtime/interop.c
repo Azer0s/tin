@@ -172,6 +172,64 @@ TIN_API TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t ele
     return (TinSlice){buf, len, len};
 }
 
+// Marshal a Tin `[string]` value into a `char **` array of length
+// `n` suitable for handing to a C function expecting an array-of-
+// strings parameter.  Each slot is just the `TinString.ptr` field of
+// the corresponding element, no copy of the underlying bytes; the
+// original strings stay live and the returned array borrows them.
+// The array itself is rc_alloc'd; the call site releases it after
+// the extern call returns.  No null terminator -- the C caller is
+// expected to track length out-of-band (mirrors the existing
+// `[i32] -> int32_t*` convention).
+TIN_API const char **_tin_strarr_to_cstr_arr(const TinString *src, int64_t n) {
+    if (n <= 0) return NULL;
+
+    const char **out = (const char **)_tin_rc_alloc(n * (int64_t)sizeof(char *));
+    if (!out) return NULL;
+
+    for (int64_t i = 0; i < n; i++) {
+        out[i] = src[i].ptr;
+    }
+
+    return out;
+}
+
+// Marshal a Tin `[atom]` value into a `const char **` array.  Each
+// atom code is resolved to its interned name via
+// `_tin_rt_atom_to_str` (same lookup the user-visible `as string`
+// coerce uses).  The atom-name strings live in the static atom
+// table -- the array borrows them.  No null terminator; see
+// _tin_strarr_to_cstr_arr.
+extern const char *_tin_rt_atom_to_str(int32_t code);
+
+TIN_API const char **_tin_atomarr_to_cstr_arr(const int32_t *codes, int64_t n) {
+    if (n <= 0) return NULL;
+
+    const char **out = (const char **)_tin_rc_alloc(n * (int64_t)sizeof(char *));
+    if (!out) return NULL;
+
+    for (int64_t i = 0; i < n; i++) {
+        const char *name = _tin_rt_atom_to_str(codes[i]);
+        // atom-table entries are wrapped in quotes for round-trip
+        // round-trip purposes; strip them so C sees the raw name.
+        if (name && name[0] == '"') {
+            size_t len = 0;
+            while (name[len + 1] != '\0' && name[len + 1] != '"') len++;
+            // Allocate a fresh nul-terminated copy without quotes.
+            char *clean = (char *)_tin_rc_alloc((int64_t)(len + 1));
+            if (clean) {
+                memcpy(clean, name + 1, len);
+                clean[len] = '\0';
+                name = clean;
+            }
+        }
+
+        out[i] = name;
+    }
+
+    return out;
+}
+
 // Marshal a Tin slice out to the C side via tin_extern_alloc. The
 // caller passes pointers to the data and length out-slots; the
 // function fills them and returns 0 on success or 1 on OOM/overflow.

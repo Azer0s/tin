@@ -106,6 +106,8 @@ char *_tin_buf_alloc(int64_t n);
 char *_tin_buf_realloc(char *p, int64_t n);
 void  _tin_buf_free(char *p);
 TinSlice _tin_bytes_from_buf(const char *ptr, int64_t len);
+const char **_tin_strarr_to_cstr_arr(const TinString *src, int64_t n);
+const char **_tin_atomarr_to_cstr_arr(const int32_t *codes, int64_t n);
 
 // -- Slices
 TinSlice _tin_slice_append(TinSlice s, const void *elem, int64_t elem_size);
