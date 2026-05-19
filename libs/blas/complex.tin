@@ -1,0 +1,677 @@
+// libs/blas/complex - BLAS complex double-precision (z*) routines.
+//
+// CBLAS passes complex scalars and vectors as `const void *` pointers
+// to packed interleaved `{re, im, re, im, ...}` doubles.  Our
+// `math::complex::Complex` is `{re: f64, im: f64}` at the value level,
+// but a `[Complex]` array in Tin stores each element with the Tin
+// struct header (type_id + vtable slots) prefixed -- so the element
+// stride is 72 bytes, not 16, and the raw array pointer can NOT be
+// handed to CBLAS directly.
+//
+// The high-level wrappers below pack into / unpack out of an `[f64]`
+// scratch buffer of length 2N (interleaved doubles), which is exactly
+// the layout CBLAS expects.  One copy in, one copy out for routines
+// that mutate; one copy in for read-only operands.  The packing loop
+// is straight field reads / writes -- no allocations beyond the
+// scratch slice itself.
+//
+// Single-precision complex (`c*` family) isn't bound yet -- it would
+// need a parallel ComplexF32 type; add when needed.
+
+use "./types"
+use math::complex
+
+// Packing helpers - private to this module.
+//
+// pack_z copies an `[Complex]` into a new `[f64]` of length 2N with
+// the layout `[re0, im0, re1, im1, ...]`.  Used to materialize a
+// CBLAS-compatible buffer from a Tin complex vector.
+fn pack_z(xs [complex::Complex]) [f64] =
+  let n = len(xs)
+  let out [f64] = [0.0] * (n * 2)
+
+  for let i i64 = 0; i < n; i++:
+    out[i * 2]     = xs[i].re
+    out[i * 2 + 1] = xs[i].im
+  return out
+
+// unpack_z copies the interleaved `[f64]` back into an existing
+// `[Complex]` array of the matching length.  Used after CBLAS
+// mutates the buffer in place (axpy / scal / gemv-out / ...).
+fn unpack_z(packed [f64], xs [complex::Complex]) =
+  let n = len(xs)
+
+  for let i i64 = 0; i < n; i++:
+    xs[i].re = packed[i * 2]
+    xs[i].im = packed[i * 2 + 1]
+
+// pack_zmat flattens an `[[Complex]]` row-of-rows matrix into a
+// contiguous row-major `[f64]` of length 2 * rows * cols.  Used for
+// the Level 2 / 3 matrix operands.
+fn pack_zmat(m [[complex::Complex]]) [f64] =
+  let rows = len(m)
+
+  if rows == 0:
+    return [] as [f64]
+  let cols = len(m[0])
+  let out [f64] = [0.0] * (rows * cols * 2)
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      let base = (i * cols + j) * 2
+      out[base]     = m[i][j].re
+      out[base + 1] = m[i][j].im
+  return out
+
+// unpack_zmat copies the interleaved `[f64]` back into the
+// row-of-rows matrix.  Caller-supplied `m` keeps its existing row
+// arrays; only the f64 values are overwritten.
+fn unpack_zmat(packed [f64], m [[complex::Complex]]) =
+  let rows = len(m)
+
+  if rows == 0: return
+  let cols = len(m[0])
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      let base = (i * cols + j) * 2
+      m[i][j].re = packed[base]
+      m[i][j].im = packed[base + 1]
+
+// ===== Level 1: vector-vector =====
+//
+// dotc / dotu return their result through an out-pointer (BLAS
+// convention: avoids the "complex return value" ABI mess across
+// platforms).  The wrappers below stack-allocate a `Complex` slot
+// and pass its address as the result pointer.  `*Complex` -> `*native`
+// pointer conversion (codegen/extern.go::adaptTinPtrToNativePtr) makes
+// `&local_complex` valid at the C boundary; the same adapter handles
+// the `alpha` / `beta` arguments.
+
+// zdotc_sub computes conj(x) . y    (CONJUGATED dot product).
+fn zdotc_raw(
+  n i32,
+  x *f64, incx i32,
+  y *f64, incy i32,
+  result *complex::Complex,
+) = extern("cblas_zdotc_sub")
+
+// zdotu_sub computes x . y          (UNCONJUGATED dot product).
+fn zdotu_raw(
+  n i32,
+  x *f64, incx i32,
+  y *f64, incy i32,
+  result *complex::Complex,
+) = extern("cblas_zdotu_sub")
+
+// dzasum returns sum(|Re(X[i])| + |Im(X[i])|).
+fn dzasum_raw(n i32, x *f64, incx i32) f64 = extern("cblas_dzasum")
+
+// dznrm2 returns the Euclidean norm of a complex vector.
+fn dznrm2_raw(n i32, x *f64, incx i32) f64 = extern("cblas_dznrm2")
+
+// zscal:    X := alpha * X         (alpha is complex)
+fn zscal_raw(
+  n i32,
+  alpha *complex::Complex,
+  x *f64, incx i32,
+) = extern("cblas_zscal")
+
+// zdscal:   X := alpha * X         (alpha is real)
+fn zdscal_raw(
+  n i32,
+  alpha f64,
+  x *f64, incx i32,
+) = extern("cblas_zdscal")
+
+// zaxpy:    Y := alpha * X + Y     (alpha is complex)
+fn zaxpy_raw(
+  n i32,
+  alpha *complex::Complex,
+  x *f64, incx i32,
+  y *f64, incy i32,
+) = extern("cblas_zaxpy")
+
+// zcopy:    Y := X
+fn zcopy_raw(
+  n i32,
+  x *f64, incx i32,
+  y *f64, incy i32,
+) = extern("cblas_zcopy")
+
+// zswap:    swap X and Y element-wise
+fn zswap_raw(
+  n i32,
+  x *f64, incx i32,
+  y *f64, incy i32,
+) = extern("cblas_zswap")
+
+// izamax returns the index of the largest |Re(X[i])| + |Im(X[i])|.
+fn izamax_raw(n i32, x *f64, incx i32) i32 = extern("cblas_izamax")
+
+// High-level Level 1 wrappers.
+
+// zdotc returns conj(x) . y         (Hermitian dot product).
+fn zdotc(x [complex::Complex], y [complex::Complex]) complex::Complex =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::zdotc: length mismatch (x={n}, y={len(y)})")
+  let px = pack_z(x)
+  let py = pack_z(y)
+  let r = complex::Complex{re: 0.0, im: 0.0}
+  zdotc_raw(n as i32, &px[0], 1, &py[0], 1, &r)
+  return r
+
+// zdotu returns x . y                (no conjugation).
+fn zdotu(x [complex::Complex], y [complex::Complex]) complex::Complex =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::zdotu: length mismatch (x={n}, y={len(y)})")
+  let px = pack_z(x)
+  let py = pack_z(y)
+  let r = complex::Complex{re: 0.0, im: 0.0}
+  zdotu_raw(n as i32, &px[0], 1, &py[0], 1, &r)
+  return r
+
+// dzasum returns sum(|Re(x[i])| + |Im(x[i])|).
+fn dzasum(x [complex::Complex]) f64 =
+  let px = pack_z(x)
+  return dzasum_raw(len(x) as i32, &px[0], 1)
+
+// dznrm2 returns the Euclidean norm sqrt(sum(|x[i]|^2)).
+fn dznrm2(x [complex::Complex]) f64 =
+  let px = pack_z(x)
+  return dznrm2_raw(len(x) as i32, &px[0], 1)
+
+// zscal: x := alpha * x  (complex scalar).
+fn zscal(alpha complex::Complex, x [complex::Complex]) =
+  let n = len(x)
+  let px = pack_z(x)
+  zscal_raw(n as i32, &alpha, &px[0], 1)
+  unpack_z(px, x)
+
+// zdscal: x := alpha * x  (real scalar, complex vector).
+fn zdscal(alpha f64, x [complex::Complex]) =
+  let n = len(x)
+  let px = pack_z(x)
+  zdscal_raw(n as i32, alpha, &px[0], 1)
+  unpack_z(px, x)
+
+// zaxpy: y := alpha * x + y.
+fn zaxpy(alpha complex::Complex, x [complex::Complex], y [complex::Complex]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::zaxpy: length mismatch (x={n}, y={len(y)})")
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zaxpy_raw(n as i32, &alpha, &px[0], 1, &py[0], 1)
+  unpack_z(py, y)
+
+// zcopy: y := x.
+fn zcopy(x [complex::Complex], y [complex::Complex]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::zcopy: length mismatch (x={n}, y={len(y)})")
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zcopy_raw(n as i32, &px[0], 1, &py[0], 1)
+  unpack_z(py, y)
+
+// zswap: exchange x and y element-wise.
+fn zswap(x [complex::Complex], y [complex::Complex]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::zswap: length mismatch (x={n}, y={len(y)})")
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zswap_raw(n as i32, &px[0], 1, &py[0], 1)
+  unpack_z(px, x)
+  unpack_z(py, y)
+
+// izamax: 0-based index of the largest |Re(x[i])| + |Im(x[i])|.
+fn izamax(x [complex::Complex]) i32 =
+  let px = pack_z(x)
+  return izamax_raw(len(x) as i32, &px[0], 1)
+
+// ===== Level 2: matrix-vector =====
+
+// zgemv:    y := alpha * op(A) * x + beta * y
+fn zgemv_raw(
+  layout i32, trans i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  x *f64, incx i32,
+  beta *complex::Complex,
+  y *f64, incy i32,
+) = extern("cblas_zgemv")
+
+// zgerc:    A := alpha * x * y^H + A    (CONJUGATED rank-1 update)
+fn zgerc_raw(
+  layout i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  x *f64, incx i32,
+  y *f64, incy i32,
+  a *f64, lda i32,
+) = extern("cblas_zgerc")
+
+// zgeru:    A := alpha * x * y^T + A    (UNCONJUGATED rank-1 update)
+fn zgeru_raw(
+  layout i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  x *f64, incx i32,
+  y *f64, incy i32,
+  a *f64, lda i32,
+) = extern("cblas_zgeru")
+
+// zhemv:    y := alpha * A * x + beta * y   (A Hermitian)
+fn zhemv_raw(
+  layout i32, uplo i32,
+  n i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  x *f64, incx i32,
+  beta *complex::Complex,
+  y *f64, incy i32,
+) = extern("cblas_zhemv")
+
+// ztrmv:    x := op(A) * x   (A triangular)
+fn ztrmv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f64, lda i32,
+  x *f64, incx i32,
+) = extern("cblas_ztrmv")
+
+// ztrsv:    solve op(A) * x = b   (A triangular; on entry x = b)
+fn ztrsv_raw(
+  layout i32, uplo i32, trans i32, diag i32,
+  n i32,
+  a *f64, lda i32,
+  x *f64, incx i32,
+) = extern("cblas_ztrsv")
+
+// zgemv: y := A * x (alpha=1, beta=0, no transpose).
+fn zgemv(a [[complex::Complex]], x [complex::Complex], y [complex::Complex]) =
+  if !nrect(a):
+    panic("blas::zgemv: A is not rectangular")
+  let shape = nlen(a)
+  let rows  = shape[0]
+  let cols  = shape[1]
+
+  if rows == 0: return
+
+  if len(x) != cols:
+    panic("blas::zgemv: len(x)={len(x)} but A has {cols} cols")
+  if len(y) != rows:
+    panic("blas::zgemv: len(y)={len(y)} but A has {rows} rows")
+  let alpha = complex::Complex{re: 1.0, im: 0.0}
+  let beta  = complex::Complex{re: 0.0, im: 0.0}
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zgemv_raw(
+    ROW_MAJOR, NO_TRANS, rows as i32, cols as i32,
+    &alpha,
+    &pa[0], cols as i32,
+    &px[0], 1,
+    &beta,
+    &py[0], 1,
+  )
+
+  unpack_z(py, y)
+
+// zgerc: A := alpha * x * y^H + A   (conjugated outer product).
+fn zgerc(alpha complex::Complex, x [complex::Complex], y [complex::Complex], a [[complex::Complex]]) =
+  if !nrect(a):
+    panic("blas::zgerc: A is not rectangular")
+  let sa = nlen(a)
+  let m  = sa[0]
+  let n  = sa[1]
+
+  if m == 0 || n == 0: return
+
+  if len(x) != m:
+    panic("blas::zgerc: len(x)={len(x)} but A has {m} rows")
+  if len(y) != n:
+    panic("blas::zgerc: len(y)={len(y)} but A has {n} cols")
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zgerc_raw(
+    ROW_MAJOR,
+    m as i32, n as i32,
+    &alpha,
+    &px[0], 1,
+    &py[0], 1,
+    &pa[0], n as i32,
+  )
+
+  unpack_zmat(pa, a)
+
+// zgeru: A := alpha * x * y^T + A   (unconjugated outer product).
+fn zgeru(alpha complex::Complex, x [complex::Complex], y [complex::Complex], a [[complex::Complex]]) =
+  if !nrect(a):
+    panic("blas::zgeru: A is not rectangular")
+  let sa = nlen(a)
+  let m  = sa[0]
+  let n  = sa[1]
+
+  if m == 0 || n == 0: return
+
+  if len(x) != m:
+    panic("blas::zgeru: len(x)={len(x)} but A has {m} rows")
+  if len(y) != n:
+    panic("blas::zgeru: len(y)={len(y)} but A has {n} cols")
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zgeru_raw(
+    ROW_MAJOR,
+    m as i32, n as i32,
+    &alpha,
+    &px[0], 1,
+    &py[0], 1,
+    &pa[0], n as i32,
+  )
+
+  unpack_zmat(pa, a)
+
+// zhemv: y := A * x where A is n-by-n Hermitian.
+fn zhemv(uplo i32, a [[complex::Complex]], x [complex::Complex], y [complex::Complex]) =
+  if !nrect(a):
+    panic("blas::zhemv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::zhemv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::zhemv: len(x)={len(x)} but A is {n}x{n}")
+  if len(y) != n:
+    panic("blas::zhemv: len(y)={len(y)} but A is {n}x{n}")
+  let alpha = complex::Complex{re: 1.0, im: 0.0}
+  let beta  = complex::Complex{re: 0.0, im: 0.0}
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  let py = pack_z(y)
+  zhemv_raw(
+    ROW_MAJOR, uplo,
+    n as i32,
+    &alpha,
+    &pa[0], n as i32,
+    &px[0], 1,
+    &beta,
+    &py[0], 1,
+  )
+
+  unpack_z(py, y)
+
+// ztrmv: x := A * x where A is n-by-n triangular (NoTrans).
+fn ztrmv(uplo i32, diag i32, a [[complex::Complex]], x [complex::Complex]) =
+  if !nrect(a):
+    panic("blas::ztrmv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::ztrmv: A is {sa[0]}x{sa[1]} but must be square")
+  if len(x) != n:
+    panic("blas::ztrmv: len(x)={len(x)} but A is {n}x{n}")
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  ztrmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &pa[0], n as i32,
+    &px[0], 1,
+  )
+
+  unpack_z(px, x)
+
+// ztrsv: solves A * x = b where A is n-by-n triangular (NoTrans).
+fn ztrsv(uplo i32, diag i32, a [[complex::Complex]], x [complex::Complex]) =
+  if !nrect(a):
+    panic("blas::ztrsv: A is not rectangular")
+  let sa = nlen(a)
+  let n  = sa[0]
+
+  if n == 0: return
+
+  if sa[1] != n:
+    panic("blas::ztrsv: A is {sa[0]}x{sa[1]} but must be square")
+  let pa = pack_zmat(a)
+  let px = pack_z(x)
+  ztrsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    n as i32,
+    &pa[0], n as i32,
+    &px[0], 1,
+  )
+
+  unpack_z(px, x)
+
+// ===== Level 3: matrix-matrix =====
+
+// zgemm:    C := alpha * op(A) * op(B) + beta * C
+fn zgemm_raw(
+  layout i32, trans_a i32, trans_b i32,
+  m i32, n i32, k i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+  beta *complex::Complex,
+  c *f64, ldc i32,
+) = extern("cblas_zgemm")
+
+// zhemm:    side=LEFT  -> C := alpha * A * B + beta * C  (A Hermitian)
+//           side=RIGHT -> C := alpha * B * A + beta * C
+fn zhemm_raw(
+  layout i32, side i32, uplo i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+  beta *complex::Complex,
+  c *f64, ldc i32,
+) = extern("cblas_zhemm")
+
+// zherk:    C := alpha * op(A) * op(A)^H + beta * C   (Hermitian rank-k)
+// alpha and beta are REAL even though A and C are complex.
+fn zherk_raw(
+  layout i32, uplo i32, trans i32,
+  n i32, k i32,
+  alpha f64,
+  a *f64, lda i32,
+  beta f64,
+  c *f64, ldc i32,
+) = extern("cblas_zherk")
+
+// ztrmm:    side / uplo / trans / diag select op(A) and side; B in/out.
+fn ztrmm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+) = extern("cblas_ztrmm")
+
+// ztrsm:    side=LEFT  -> solves op(A) * X = alpha * B
+//           side=RIGHT -> solves X * op(A) = alpha * B
+fn ztrsm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha *complex::Complex,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+) = extern("cblas_ztrsm")
+
+// zgemm: C := A * B  (alpha=1, beta=0, no transposes).
+fn zgemm(a [[complex::Complex]], b [[complex::Complex]], c [[complex::Complex]]) =
+  if !nrect(a):
+    panic("blas::zgemm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::zgemm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::zgemm: C is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let sc = nlen(c)
+  let m = sa[0]
+  let k = sa[1]
+  let n = sb[1]
+
+  if m == 0 || n == 0 || k == 0: return
+
+  if sb[0] != k:
+    panic("blas::zgemm: A is {m}x{k} but B has {sb[0]} rows")
+  if sc[0] != m:
+    panic("blas::zgemm: C has {sc[0]} rows but A has {m} rows")
+  if sc[1] != n:
+    panic("blas::zgemm: C has {sc[1]} cols but B has {n} cols")
+  let alpha = complex::Complex{re: 1.0, im: 0.0}
+  let beta  = complex::Complex{re: 0.0, im: 0.0}
+  let pa = pack_zmat(a)
+  let pb = pack_zmat(b)
+  let pc = pack_zmat(c)
+  zgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    m as i32, n as i32, k as i32,
+    &alpha,
+    &pa[0], k as i32,
+    &pb[0], n as i32,
+    &beta,
+    &pc[0], n as i32,
+  )
+
+  unpack_zmat(pc, c)
+
+// zhemm: side=LEFT  -> C := A * B  (A Hermitian)
+//        side=RIGHT -> C := B * A
+fn zhemm(side i32, uplo i32, a [[complex::Complex]], b [[complex::Complex]], c [[complex::Complex]]) =
+  if !nrect(a):
+    panic("blas::zhemm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::zhemm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::zhemm: C is not rectangular")
+  let sb = nlen(b)
+  let m = sb[0]
+  let n = sb[1]
+
+  if m == 0 || n == 0: return
+  let alpha = complex::Complex{re: 1.0, im: 0.0}
+  let beta  = complex::Complex{re: 0.0, im: 0.0}
+  let pa = pack_zmat(a)
+  let pb = pack_zmat(b)
+  let pc = pack_zmat(c)
+  let lda i32 = m as i32
+  if side != LEFT:
+    lda = n as i32
+  zhemm_raw(
+    ROW_MAJOR, side, uplo,
+    m as i32, n as i32,
+    &alpha,
+    &pa[0], lda,
+    &pb[0], n as i32,
+    &beta,
+    &pc[0], n as i32,
+  )
+
+  unpack_zmat(pc, c)
+
+// zherk: C := alpha * A * A^H + beta * C   (Hermitian rank-k update).
+fn zherk(uplo i32, alpha f64, a [[complex::Complex]], beta f64, c [[complex::Complex]]) =
+  if !nrect(a):
+    panic("blas::zherk: A is not rectangular")
+  if !nrect(c):
+    panic("blas::zherk: C is not rectangular")
+  let sa = nlen(a)
+  let sc = nlen(c)
+  let n = sa[0]
+  let k = sa[1]
+
+  if n == 0 || k == 0: return
+
+  if sc[0] != n || sc[1] != n:
+    panic("blas::zherk: C must be {n}x{n} but is {sc[0]}x{sc[1]}")
+  let pa = pack_zmat(a)
+  let pc = pack_zmat(c)
+  zherk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    n as i32, k as i32,
+    alpha,
+    &pa[0], k as i32,
+    beta,
+    &pc[0], n as i32,
+  )
+
+  unpack_zmat(pc, c)
+
+// ztrmm: side=LEFT  -> B := alpha * op(A) * B   (A triangular)
+//        side=RIGHT -> B := alpha * B * op(A)
+fn ztrmm(
+  side i32, uplo i32, diag i32,
+  alpha complex::Complex,
+  a [[complex::Complex]], b [[complex::Complex]],
+) =
+  if !nrect(a):
+    panic("blas::ztrmm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::ztrmm: B is not rectangular")
+  let sb = nlen(b)
+  let m = sb[0]
+  let n = sb[1]
+
+  if m == 0 || n == 0: return
+  let pa = pack_zmat(a)
+  let pb = pack_zmat(b)
+  let lda i32 = m as i32
+  if side != LEFT:
+    lda = n as i32
+  ztrmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    &alpha,
+    &pa[0], lda,
+    &pb[0], n as i32,
+  )
+
+  unpack_zmat(pb, b)
+
+// ztrsm: side=LEFT  -> solve op(A) * X = alpha * B; B holds the solution.
+//        side=RIGHT -> solve X * op(A) = alpha * B; B holds the solution.
+fn ztrsm(
+  side i32, uplo i32, diag i32,
+  alpha complex::Complex,
+  a [[complex::Complex]], b [[complex::Complex]],
+) =
+  if !nrect(a):
+    panic("blas::ztrsm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::ztrsm: B is not rectangular")
+  let sb = nlen(b)
+  let m = sb[0]
+  let n = sb[1]
+
+  if m == 0 || n == 0: return
+  let pa = pack_zmat(a)
+  let pb = pack_zmat(b)
+  let lda i32 = m as i32
+  if side != LEFT:
+    lda = n as i32
+  ztrsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    &alpha,
+    &pa[0], lda,
+    &pb[0], n as i32,
+  )
+
+  unpack_zmat(pb, b)

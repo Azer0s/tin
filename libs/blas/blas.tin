@@ -40,6 +40,7 @@ use "./types"
 use "./level1"
 use "./level2"
 use "./level3"
+use "./complex"
 
 export {
   // Enum constants (used with *_raw)
@@ -96,4 +97,21 @@ export {
   dsyrk_raw, ssyrk_raw,
   dtrmm_raw, strmm_raw,
   dtrsm_raw, strsm_raw,
+
+  // Complex (z) - high-level
+  zdotc, zdotu,
+  dzasum, dznrm2,
+  zscal, zdscal,
+  zaxpy, zcopy, zswap, izamax,
+  zgemv, zgerc, zgeru, zhemv, ztrmv, ztrsv,
+  zgemm, zhemm, zherk, ztrmm, ztrsm,
+
+  // Complex (z) - raw
+  zdotc_raw, zdotu_raw,
+  dzasum_raw, dznrm2_raw,
+  zscal_raw, zdscal_raw,
+  zaxpy_raw, zcopy_raw, zswap_raw, izamax_raw,
+  zgemv_raw, zgerc_raw, zgeru_raw,
+  zhemv_raw, ztrmv_raw, ztrsv_raw,
+  zgemm_raw, zhemm_raw, zherk_raw, ztrmm_raw, ztrsm_raw,
 } as blas
