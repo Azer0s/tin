@@ -471,37 +471,6 @@ func (cg *CodeGen) ensureBytesFromBuf() *ir.Func {
 		}, false)
 }
 
-// ensureStrarrToCstrArr lazily declares
-// `_tin_strarr_to_cstr_arr(*TinString, i64) -> i8**`.  Called at
-// extern call sites that pass a Tin `[string]` to a C function
-// expecting a `char**` -- builds an rc_alloc'd `char*[n]` whose
-// slots borrow each TinString's `.ptr`.  See runtime/interop.c.
-func (cg *CodeGen) ensureStrarrToCstrArr() *ir.Func {
-	tinStringPtr := irtypes.NewPointer(stringFatPtrType())
-
-	return cg.ensureExternDecl("_tin_strarr_to_cstr_arr",
-		irtypes.NewPointer(irtypes.I8Ptr),
-		[]*ir.Param{
-			ir.NewParam("src", tinStringPtr),
-			ir.NewParam("n", irtypes.I64),
-		}, false)
-}
-
-// ensureAtomarrToCstrArr declares the [atom] -> char** marshaler.
-// Each atom code is resolved to its interned name via the runtime
-// atom table; surrounding quotes are stripped so the C side sees
-// the raw symbol name.  See runtime/interop.c.
-func (cg *CodeGen) ensureAtomarrToCstrArr() *ir.Func {
-	codePtr := irtypes.NewPointer(irtypes.I32)
-
-	return cg.ensureExternDecl("_tin_atomarr_to_cstr_arr",
-		irtypes.NewPointer(irtypes.I8Ptr),
-		[]*ir.Param{
-			ir.NewParam("codes", codePtr),
-			ir.NewParam("n", irtypes.I64),
-		}, false)
-}
-
 // ensureSnprintf lazily declares the snprintf external function.
 // int snprintf(char* buf, size_t n, const char* format, ...)
 func (cg *CodeGen) ensureSnprintf() *ir.Func {
