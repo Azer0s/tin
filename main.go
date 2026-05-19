@@ -171,7 +171,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
                                 expressions with no name for reviewers.
     non-tin-thread              #interop fn body reaches 'await' or 'spawn'. Smell:
                                 a C caller on a non-Tin pthread triggers scheduler
-                                state the runtime never initialised there.
+                                state the runtime never initialized there.
     style                       Naming conventions, trailing whitespace, missing
                                 EOF newline. Smell: drift from project style.
     sync-fn-coerced-to-async    Sync fn coerced into a fn{#async} slot; bytes
@@ -183,7 +183,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     unchecked-div               a / b or a % b where the divisor is not proven
                                 non-zero by dataflow (complement to default-on
                                 div-by-zero hard error). Smell: code path the
-                                analyser cannot prove safe.
+                                analyzer cannot prove safe.
     unchecked-index             arr[i] where i is not bounds-checked, OR t[k] on
                                 a custom ::index impl without (v, ok) destructure
                                 (complement to default-on array-bounds).
@@ -198,7 +198,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
                                 Smell: file/socket/handle leaked at scope exit.
     let-no-reassign             Mutable 'let' binding that is never reassigned.
                                 Smell: 'const' communicates immutability better and
-                                lets the optimiser fold.
+                                lets the optimizer fold.
     unused-let                  let-binding that is never read. Smell: dead
                                 variable from a refactor.
     unused-param                fn parameter that is never read. Smell: signature
@@ -206,7 +206,7 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     unused-result               Discarded result of a non-void call. Smell: the
                                 call's status is being thrown away.
     use-before-assign           Local read before being assigned on every path.
-                                Smell: forgot to initialise on one branch.
+                                Smell: forgot to initialize on one branch.
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)
