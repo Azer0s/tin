@@ -816,38 +816,125 @@ func isLargeStruct(t irtypes.Type) bool {
 	return llvmTypeSize(st) > largeStructByValThreshold
 }
 
+// callArgWithAttrs wraps val in an ir.Arg with the supplied attrs.
+// Returns val unchanged when attrs is empty so AAPCS64 (where the
+// large-struct attribute list is nil) keeps call args bare.
+func callArgWithAttrs(val value.Value, attrs []ir.ParamAttribute) value.Value {
+	if len(attrs) == 0 {
+		return val
+	}
+
+	return ir.NewArg(val, attrs...)
+}
+
+// largeStructAlignment returns the natural alignment in bytes for a
+// >16-byte struct passed by reference at the C boundary.  Currently
+// every such struct in Tin (TinString/TinSlice/TinAtomArray/...) is a
+// `{ptr, i64, i64}` triple so the answer is 8.  Computing it from the
+// field types instead of hard-coding lets a future extern over a
+// struct containing i128 or a SIMD type stay correctly aligned.
+func largeStructAlignment(st *irtypes.StructType) int64 {
+	maxAlign := int64(1)
+
+	for _, f := range st.Fields {
+		switch ft := f.(type) {
+		case *irtypes.PointerType:
+			if 8 > maxAlign {
+				maxAlign = 8
+			}
+		case *irtypes.IntType:
+			a := int64((ft.BitSize + 7) / 8)
+			if a > maxAlign {
+				maxAlign = a
+			}
+		case *irtypes.FloatType:
+			a := int64(8)
+
+			switch ft.Kind {
+			case irtypes.FloatKindHalf:
+				a = 2
+			case irtypes.FloatKindFloat:
+				a = 4
+			case irtypes.FloatKindFP128, irtypes.FloatKindX86_FP80, irtypes.FloatKindPPC_FP128:
+				a = 16
+			}
+
+			if a > maxAlign {
+				maxAlign = a
+			}
+		default:
+			if 8 > maxAlign {
+				maxAlign = 8
+			}
+		}
+	}
+
+	return maxAlign
+}
+
+// largeStructByvalAttrs returns the attribute list a >16-byte struct
+// `byval` parameter needs at the call site AND on the declaration on
+// x86_64 SysV (clang 18+ shape: `noundef byval(%struct) align <a>`).
+// On AAPCS64 the composite is passed indirectly via a bare pointer
+// arg with no attribute; an empty list keeps the call site bare.
+// Same list goes in both places because LLVM doesn't propagate them.
+func (cg *CodeGen) largeStructByvalAttrs(st *irtypes.StructType) []ir.ParamAttribute {
+	if !cg.targetIsAMD64() {
+		return nil
+	}
+
+	return []ir.ParamAttribute{
+		enum.ParamAttrNoUndef,
+		ir.Byval{Typ: st},
+		ir.Align(largeStructAlignment(st)),
+	}
+}
+
+// largeStructSretAttrs returns the attribute list the hidden sret
+// pointer arg of a >16-byte struct return needs.  Both ARM64 (x8
+// implicit return register) and x86_64 (SysV hidden first arg) need
+// `sret(%struct) align <a>` -- LLVM uses the attribute to route the
+// pointer to the right ABI register, so dropping it on either side
+// produces a caller/callee disagreement.  Clang 18 additionally
+// emits `dead_on_unwind writable` on x86_64; they're optimization
+// hints (the C side writes to the slot before unwinding) and llir
+// 0.3.6 doesn't expose them as keyword enums.  Currently omitted --
+// not needed for correctness and the AttrString form was emitting
+// them as quoted user attrs, which LLVM ignores anyway.  See the
+// project_extern_abi_shim memory.
+func (cg *CodeGen) largeStructSretAttrs(st *irtypes.StructType) []ir.ParamAttribute {
+	return []ir.ParamAttribute{
+		ir.SRet{Typ: st},
+		ir.Align(largeStructAlignment(st)),
+	}
+}
+
 // emitExternWithABIShim declares the underlying C extern with the
 // clang-style lowered signature and synthesizes a Tin-side wrapper
 // that takes/returns the structs by value.  Returns the wrapper -- the
 // rest of codegen treats it as if it were the extern itself.
 func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, params []*ir.Param) *ir.Func {
-	// Step 1: build the lowered extern declaration.
+	// Step 1: build the lowered extern declaration.  ABI attributes
+	// (byval / sret) must appear on BOTH the declaration and the call
+	// site or LLVM's SysV lowering treats the pointer arg as a plain
+	// integer in RDI/RSI and corrupts the param at the boundary.
 	loweredParams := make([]*ir.Param, 0, len(params)+1)
 
-	var sretSlot *ir.Param
+	var (
+		sretSlot     *ir.Param
+		sretCallAttr []ir.ParamAttribute
+	)
+
+	paramCallAttrs := make([][]ir.ParamAttribute, 0, len(params))
 
 	retLowered := !isLargeStruct(retType)
 	loweredRet := retType
 
 	if !retLowered {
-		// Return-via-sret: prepend a pointer param tagged sret, and
-		// switch the LLVM return type to void.  Match the modern
-		// clang (>= 18) shape exactly:
-		//   `ptr dead_on_unwind writable sret(%struct) align 8`
-		// Earlier we only emitted `sret(%struct) align 8`; the
-		// missing `writable` lets LLVM assume the slot is read-only
-		// and elide the store the C side performs, leaving callers
-		// with a zero / garbage struct on Linux x86_64 -- this was
-		// the root of the panic/recover/stacktrace test crashes
-		// (recover() returned garbage, the assert::equals against
-		// the expected message failed and aborted the test).
+		retSt := retType.(*irtypes.StructType)
+		sretCallAttr = cg.largeStructSretAttrs(retSt)
 		sretSlot = ir.NewParam("sret_slot", irtypes.NewPointer(retType))
-		sretSlot.Attrs = append(sretSlot.Attrs,
-			ir.AttrString("dead_on_unwind"),
-			ir.AttrString("writable"),
-			ir.SRet{Typ: retType},
-			ir.Align(8),
-		)
+		sretSlot.Attrs = append(sretSlot.Attrs, sretCallAttr...)
 		loweredParams = append(loweredParams, sretSlot)
 		loweredRet = irtypes.Void
 	}
@@ -856,25 +943,13 @@ func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, par
 		if isLargeStruct(p.Type()) {
 			st := p.Type().(*irtypes.StructType)
 			lp := ir.NewParam(p.Name(), irtypes.NewPointer(st))
-			// Match clang 18 (Ubuntu 24.04 CI) exactly for the
-			// declaration site of a >16-byte struct param on x86_64
-			// SysV:
-			//   `ptr noundef byval(%struct) align 8`
-			// AAPCS64 (macOS arm64 / Linux arm64) passes composites
-			// >16 bytes by reference -- a bare `ptr` matches clang
-			// there; emitting `byval` would mislower the AAPCS
-			// indirect call into a stack-blit.
-			if strings.HasPrefix(detectTargetTriple(), "x86_64-") {
-				lp.Attrs = append(lp.Attrs,
-					enum.ParamAttrNoUndef,
-					ir.Byval{Typ: st},
-					ir.Align(8),
-				)
-			}
-
+			attrs := cg.largeStructByvalAttrs(st)
+			lp.Attrs = append(lp.Attrs, attrs...)
 			loweredParams = append(loweredParams, lp)
+			paramCallAttrs = append(paramCallAttrs, attrs)
 		} else {
 			loweredParams = append(loweredParams, p)
+			paramCallAttrs = append(paramCallAttrs, nil)
 		}
 	}
 
@@ -917,43 +992,17 @@ func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, par
 		sretAlloca = entry.NewAlloca(retType)
 	}
 
-	// Call-site attribute notes:
-	//   sret/byval must appear at BOTH the function declaration AND
-	//   every call site -- LLVM does not propagate them.  Without the
-	//   call-site attrs, x86_64 SysV lowering treats the pointer as a
-	//   plain integer arg in RDI/RSI etc, which corrupts every
-	//   >16-byte struct param at the boundary.
-	x86_64 := strings.HasPrefix(detectTargetTriple(), "x86_64-")
 	callArgs := make([]value.Value, 0, len(loweredParams))
 
 	if !retLowered {
-		if x86_64 {
-			callArgs = append(callArgs, ir.NewArg(sretAlloca,
-				ir.AttrString("dead_on_unwind"),
-				ir.AttrString("writable"),
-				ir.SRet{Typ: retType},
-				ir.Align(8),
-			))
-		} else {
-			callArgs = append(callArgs, sretAlloca)
-		}
+		callArgs = append(callArgs, callArgWithAttrs(sretAlloca, sretCallAttr))
 	}
 
-	for _, sp := range shimParams {
+	for i, sp := range shimParams {
 		if isLargeStruct(sp.Type()) {
-			st := sp.Type().(*irtypes.StructType)
 			slot := entry.NewAlloca(sp.Type())
 			entry.NewStore(sp, slot)
-
-			if x86_64 {
-				callArgs = append(callArgs, ir.NewArg(slot,
-					enum.ParamAttrNoUndef,
-					ir.Byval{Typ: st},
-					ir.Align(8),
-				))
-			} else {
-				callArgs = append(callArgs, slot)
-			}
+			callArgs = append(callArgs, callArgWithAttrs(slot, paramCallAttrs[i]))
 		} else {
 			callArgs = append(callArgs, sp)
 		}
