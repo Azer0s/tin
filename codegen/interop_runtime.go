@@ -27,45 +27,51 @@ func (cg *CodeGen) emitMemcpy(block *ir.Block, dst, src value.Value, n int64) {
 
 // ensureInteropStrIn declares `TinString tin_interop_str_in(i8*)` in the
 // active LLVM module (cg.mod by default; cg.shimMod during CTFE shim emit).
+// Routed through ensureExternDecl so ARM64 / SysV ABI lowering (sret for
+// the widened 24-byte TinString return) matches what clang emits in runtime.c.
 func (cg *CodeGen) ensureInteropStrIn() *ir.Func {
-	return cg.ensureRuntimeHelper("tin_interop_str_in",
+	return cg.ensureExternDecl("tin_interop_str_in",
 		stringFatPtrType(),
-		ir.NewParam("cstr", irtypes.I8Ptr))
+		[]*ir.Param{ir.NewParam("cstr", irtypes.I8Ptr)}, false)
 }
 
 // ensureInteropStrOut declares `i8* tin_interop_str_out(TinString)` in the
 // active LLVM module.
 func (cg *CodeGen) ensureInteropStrOut() *ir.Func {
-	return cg.ensureRuntimeHelper("tin_interop_str_out",
+	return cg.ensureExternDecl("tin_interop_str_out",
 		irtypes.I8Ptr,
-		ir.NewParam("s", stringFatPtrType()))
+		[]*ir.Param{ir.NewParam("s", stringFatPtrType())}, false)
 }
 
 // ensureInteropSliceIn declares
 // `TinSlice tin_interop_slice_in(i8* data, i64 len, i64 elem_size)` in the
 // active LLVM module.
 func (cg *CodeGen) ensureInteropSliceIn() *ir.Func {
-	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	sliceTy := fatArrayPtrType(irtypes.I8)
 
-	return cg.ensureRuntimeHelper("tin_interop_slice_in",
+	return cg.ensureExternDecl("tin_interop_slice_in",
 		sliceTy,
-		ir.NewParam("data", irtypes.I8Ptr),
-		ir.NewParam("len", irtypes.I64),
-		ir.NewParam("elem_size", irtypes.I64))
+		[]*ir.Param{
+			ir.NewParam("data", irtypes.I8Ptr),
+			ir.NewParam("len", irtypes.I64),
+			ir.NewParam("elem_size", irtypes.I64),
+		}, false)
 }
 
 // ensureInteropSliceOut declares
 // `i32 tin_interop_slice_out(TinSlice, i64 elem_size, i8** out_data,
 // i64* out_len)` in the active LLVM module.
 func (cg *CodeGen) ensureInteropSliceOut() *ir.Func {
-	sliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	sliceTy := fatArrayPtrType(irtypes.I8)
 
-	return cg.ensureRuntimeHelper("tin_interop_slice_out",
+	return cg.ensureExternDecl("tin_interop_slice_out",
 		irtypes.I32,
-		ir.NewParam("s", sliceTy),
-		ir.NewParam("elem_size", irtypes.I64),
-		ir.NewParam("out_data", irtypes.NewPointer(irtypes.I8Ptr)),
-		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
+		[]*ir.Param{
+			ir.NewParam("s", sliceTy),
+			ir.NewParam("elem_size", irtypes.I64),
+			ir.NewParam("out_data", irtypes.NewPointer(irtypes.I8Ptr)),
+			ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)),
+		}, false)
 }
 
 // getOrCreateCallbackThunk returns a Tin-calling-convention thunk for

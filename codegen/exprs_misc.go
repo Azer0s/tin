@@ -162,16 +162,20 @@ func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Valu
 	return entry.val, nil
 }
 
-// byteToStringFatPtr wraps a single i8 value in a {i8*, i64} fat-pointer so
-// that it can be used on either side of a string ++ byte concatenation.
+// byteToStringFatPtr wraps a single i8 value in a `{i8*, i64 len,
+// i64 cap}` fat-pointer so that it can be used on either side of a
+// `string ++ byte` concatenation.  cap = -1 (immortal/borrowed-style)
+// because the backing storage is a stack alloca that the receiver
+// must not free.
 func byteToStringFatPtr(block *ir.Block, b value.Value) value.Value {
 	byteAlloca := block.NewAlloca(irtypes.I8)
 	block.NewStore(b, byteAlloca)
 
 	fatPtrType := stringFatPtrType()
 	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), byteAlloca, 0)
+	v1 := block.NewInsertValue(v0, constant.NewInt(irtypes.I64, 1), 1)
 
-	return block.NewInsertValue(v0, constant.NewInt(irtypes.I64, 1), 1)
+	return block.NewInsertValue(v1, constant.NewInt(irtypes.I64, -1), 2)
 }
 
 // isStringConcatNode reports whether node is a `++` BinExpr whose two sides
@@ -279,9 +283,11 @@ func (cg *CodeGen) genFusedStringConcat(block *ir.Block, leaves []ast.Node) (val
 	nullByte := block.NewGetElementPtr(irtypes.I8, buf, totalLen)
 	block.NewStore(constant.NewInt(irtypes.I8, 0), nullByte)
 
+	// Build {i8*, i64 len, i64 cap} -- cap == len, no headroom.
 	fatPtrType := stringFatPtrType()
 	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), buf, 0)
-	result := block.NewInsertValue(v0, totalLen, 1)
+	v1 := block.NewInsertValue(v0, totalLen, 1)
+	result := block.NewInsertValue(v1, totalLen, 2)
 
 	for _, p := range parts {
 		if isTemporaryProducer(p.node) {

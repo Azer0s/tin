@@ -104,16 +104,8 @@ func (cg *CodeGen) genBuiltinNlen(block *ir.Block, arg ast.Node) (value.Value, e
 		}
 	}
 
-	fatType := irtypes.NewStruct(irtypes.NewPointer(irtypes.I64), irtypes.I64)
-	fatAlloca := joinBlk.NewAlloca(fatType)
-	ptrGep := joinBlk.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	joinBlk.NewStore(dataPtr, ptrGep)
-	lenGep := joinBlk.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	joinBlk.NewStore(constant.NewInt(irtypes.I64, int64(depth)), lenGep)
-
-	result := joinBlk.NewLoad(fatType, fatAlloca)
+	depthConst := constant.NewInt(irtypes.I64, int64(depth))
+	result := cg.buildFatArrayValue(joinBlk, irtypes.I64, dataPtr, depthConst, depthConst)
 
 	// Release the outer argument if it's a temporary RC allocation
 	// (e.g. nlen(make_matrix()) - the matrix is fresh and unowned).

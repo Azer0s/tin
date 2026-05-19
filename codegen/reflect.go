@@ -62,19 +62,14 @@ func structNameFromValue(v value.Value) string {
 func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	elemType := cg.atomType // %__atom = { i32 }
 	n := int64(len(atoms))
-	fat := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
 
 	if n == 0 {
-		// Empty array: null data pointer, length 0.
-		alloca := block.NewAlloca(fat)
-		ptrGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(constant.NewNull(irtypes.NewPointer(elemType)), ptrGep)
-		lenGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(constant.NewInt(irtypes.I64, 0), lenGep)
+		// Empty array: null data, len=0, cap=0.
+		zero := constant.NewInt(irtypes.I64, 0)
 
-		return block.NewLoad(fat, alloca)
+		return cg.buildFatArrayValue(block, elemType,
+			constant.NewNull(irtypes.NewPointer(elemType)),
+			zero, zero)
 	}
 
 	// Register each atom and build element constants.
@@ -113,15 +108,12 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	dataGEP := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_2, i64_0)
 	dataGEP.InBounds = true
 
-	fatAlloca := block.NewAlloca(fat)
-	ptrGep := block.NewGetElementPtr(fat, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(dataGEP, ptrGep)
-	lenGep := block.NewGetElementPtr(fat, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
+	// Immortal storage: cap = -1 so `++=` rejects mutation and the drop
+	// path skips RC release.
+	nConst := constant.NewInt(irtypes.I64, n)
+	borrowed := constant.NewInt(irtypes.I64, -1)
 
-	return block.NewLoad(fat, fatAlloca)
+	return cg.buildFatArrayValue(block, elemType, dataGEP, nConst, borrowed)
 }
 
 // llvmTypeName returns the tin type name string for any LLVM type,
@@ -210,7 +202,7 @@ func llvmTypeName(t irtypes.Type) string {
 		}
 
 		if isFatArrayPtr(t) {
-			if len(st.Fields) == 2 {
+			if len(st.Fields) == 3 {
 				if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
 					return "[" + llvmTypeName(pt.ElemType) + "]"
 				}
@@ -469,8 +461,8 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 // to pick the right one.  The result type is always {%__atom*, i64}.
 func (cg *CodeGen) runtimeAtomArraySelectByTypeID(block *ir.Block, typeIDVal value.Value,
 	table map[int32][]string) value.Value {
-	// Fat-pointer type for [atom]: {%__atom*, i64}.
-	fatType := irtypes.NewStruct(irtypes.NewPointer(cg.atomType), irtypes.I64)
+	// Fat-pointer type for [atom]: {%__atom*, i64 len, i64 cap}.
+	fatType := fatArrayPtrType(cg.atomType)
 
 	// Build default (empty array).
 	def := cg.buildAtomArray(block, nil)

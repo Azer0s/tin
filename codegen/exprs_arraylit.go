@@ -7,6 +7,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -21,26 +22,24 @@ func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, e
 // Used when the declared array type is known (e.g. let fns [fn{#async}(i64) i64] = [double]).
 func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, targetElemType irtypes.Type) (value.Value, error) {
 	if len(e.Elems) == 0 {
-		// Empty dynamic array: {null, 0} typed against targetElemType
-		// when known.  When no target is known the caller gets the
-		// untyped {i8*, i64} form and the coerce path later swaps it
-		// for a correctly-typed zero value -- the value is emitted as
-		// a *constant.Struct with a null data pointer so that
-		// downstream coerce paths can discriminate it from a real
-		// string at runtime (both share the {i8*, i64} shape; only a
-		// constant null in the data field is the empty-array bumper).
+		// Empty dynamic array: {null, 0, 0} typed against targetElemType
+		// when known.  Cap=0 means "first append must allocate".  When
+		// no target is known the caller gets the untyped {i8*, i64}
+		// (string-shaped) form and the coerce path later swaps it for
+		// a correctly-typed zero value -- the constant null in the
+		// data field is what discriminates it from a real string at
+		// runtime.
 		if targetElemType != nil {
-			fat := irtypes.NewStruct(irtypes.NewPointer(targetElemType), irtypes.I64)
-
-			return constant.NewStruct(fat,
+			return fatArrayConst(targetElemType,
 				constant.NewNull(irtypes.NewPointer(targetElemType)),
-				constant.NewInt(irtypes.I64, 0)), nil
+				0, 0), nil
 		}
 
-		fat := stringFatPtrType() // {i8*, i64}
+		fat := stringFatPtrType() // {i8*, i64 len, i64 cap}
 
 		return constant.NewStruct(fat,
 			constant.NewNull(irtypes.I8Ptr),
+			constant.NewInt(irtypes.I64, 0),
 			constant.NewInt(irtypes.I64, 0)), nil
 	}
 
@@ -109,17 +108,11 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 		}
 	}
 
-	// Return as fat pointer {T*, i64}.
-	fatType := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
-	fatAlloca := block.NewAlloca(fatType)
-	ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(dataPtr, ptrGep)
-	lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
+	// Return as fat pointer {T*, i64, i64}. Cap == n: a literal has no
+	// preallocated headroom, so the first `++=` triggers a grow.
+	lenConst := constant.NewInt(irtypes.I64, n)
 
-	return block.NewLoad(fatType, fatAlloca), nil
+	return cg.buildFatArrayValue(block, elemType, dataPtr, lenConst, lenConst), nil
 }
 
 // genArrayLitAsFixed materializes an array literal `[e0, e1, ..., eN]` as a
@@ -160,6 +153,79 @@ func (cg *CodeGen) genArrayLitAsFixed(block *ir.Block, e *ast.ArrayLit, at *irty
 	return block.NewLoad(at, alloca), nil
 }
 
+// genArrayFillBinExpr lowers the `[v] * n` infix form to a fresh `[T]`
+// of `n` copies of `v`.  Compile-time integer counts collapse to the
+// same compile-time path `genArrayFillLit` uses for `[v; N]`; runtime
+// counts emit one `_tin_rc_alloc` plus a per-element store loop.  The
+// two forms share the same lowering -- only the parsing differs.
+func (cg *CodeGen) genArrayFillBinExpr(block *ir.Block, valNode, countNode ast.Node) (value.Value, error) {
+	if lit, ok := countNode.(*ast.IntLit); ok {
+		return cg.genArrayFillLit(block, &ast.ArrayFillLit{
+			Value: valNode,
+			Count: int(lit.Value),
+		})
+	}
+
+	v, err := cg.genExpr(block, valNode)
+	if err != nil {
+		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	cnt, err := cg.genExpr(block, countNode)
+	if err != nil {
+		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	cnt = cg.coerce(block, cnt, irtypes.I64)
+	elemType := v.Type()
+
+	nullPtr := constant.NewNull(irtypes.NewPointer(elemType))
+	sizeGep := block.NewGetElementPtr(elemType, nullPtr, constant.NewInt(irtypes.I64, 1))
+	elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
+	totalSize := block.NewMul(elemSize, cnt)
+
+	mallocI8 := block.NewCall(cg.ensureRCAlloc(), totalSize)
+	dataPtr := block.NewBitCast(mallocI8, irtypes.NewPointer(elemType))
+
+	// Per-element fill loop driven by `cnt`.  Retains for RC element
+	// types use _tin_retain so immortal fill values stay at rc=-1.
+	loopHeader := cg.newBlock("fill.head")
+	loopBody := cg.newBlock("fill.body")
+	loopExit := cg.newBlock("fill.exit")
+
+	iAlloca := block.NewAlloca(irtypes.I64)
+	block.NewStore(constant.NewInt(irtypes.I64, 0), iAlloca)
+	block.NewBr(loopHeader)
+
+	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+	cond := loopHeader.NewICmp(enum.IPredSLT, iVal, cnt)
+	loopHeader.NewCondBr(cond, loopBody, loopExit)
+
+	iv := loopBody.NewLoad(irtypes.I64, iAlloca)
+	gep := loopBody.NewGetElementPtr(elemType, dataPtr, iv)
+	loopBody.NewStore(v, gep)
+
+	if isRCTrackedType(elemType) {
+		cg.emitRetain(loopBody, v)
+	}
+
+	next := loopBody.NewAdd(iv, constant.NewInt(irtypes.I64, 1))
+	loopBody.NewStore(next, iAlloca)
+	loopBody.NewBr(loopHeader)
+
+	cg.curBlock = loopExit
+
+	return cg.buildFatArrayValue(loopExit, elemType, dataPtr, cnt, cnt), nil
+}
+
 // genArrayFillLit generates code for [value; count] fill array literals.
 // Returns a heap-allocated fat-ptr {T*, i64} dynamic array of `count` copies of `value`.
 func (cg *CodeGen) genArrayFillLit(block *ir.Block, e *ast.ArrayFillLit) (value.Value, error) {
@@ -195,17 +261,10 @@ func (cg *CodeGen) genArrayFillLit(block *ir.Block, e *ast.ArrayFillLit) (value.
 		}
 	}
 
-	// Return fat pointer {T*, i64}.
-	fatType := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
-	fatAlloca := block.NewAlloca(fatType)
-	ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(dataPtr, ptrGep)
-	lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
+	// Return fat pointer {T*, i64, i64} with cap == len.
+	lenConst := constant.NewInt(irtypes.I64, n)
 
-	return block.NewLoad(fatType, fatAlloca), nil
+	return cg.buildFatArrayValue(block, elemType, dataPtr, lenConst, lenConst), nil
 }
 
 // inferStructTypeArgs infers type arguments for a generic struct literal from

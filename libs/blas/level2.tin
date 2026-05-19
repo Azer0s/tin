@@ -13,6 +13,7 @@
 //              needed since y is already a flat `[f64]`.
 
 use "./types"
+use mem
 
 // Raw extern bindings.
 
@@ -137,53 +138,54 @@ fn strsv_raw(
 // `nrect` before calling this); no per-row length check is done
 // here.
 fn flatten_f64(m [[f64]]) [f64] =
-  let out [f64] = []
   let rows = len(m)
 
   if rows == 0:
-    return out
+    return [] as [f64]
   let cols = len(m[0])
+  let out [f64] = [0.0] * (rows * cols)
 
   for let i i64 = 0; i < rows; i++:
-    for let j i64 = 0; j < cols; j++:
-      out ++= [m[i][j]]
+    mem::memcpy(&out[i * cols] as *void, &m[i][0] as *void, cols * 8)
   return out
 
 fn flatten_f32(m [[f32]]) [f32] =
-  let out [f32] = []
   let rows = len(m)
 
   if rows == 0:
-    return out
+    return [] as [f32]
   let cols = len(m[0])
+  let out [f32] = [0.0 as f32] * (rows * cols)
 
   for let i i64 = 0; i < rows; i++:
-    for let j i64 = 0; j < cols; j++:
-      out ++= [m[i][j]]
+    mem::memcpy(&out[i * cols] as *void, &m[i][0] as *void, cols * 4)
   return out
 
 // unflatten_f64 copies the contiguous row-major buffer `flat` back
 // into the caller's row-of-rows matrix `m`.  Inner array allocations
-// are reused; only the f64 values are overwritten.
+// are reused; only the f64 values are overwritten.  One memcpy per
+// row beats per-element indexed stores by an order of magnitude on
+// matrices wider than a handful of columns -- the column-major inner
+// loop above re-checks slice bounds on every step.
 fn unflatten_f64(flat [f64], m [[f64]]) =
   let rows = len(m)
 
   if rows == 0: return
   let cols = len(m[0])
+  let row_bytes = cols * 8
 
   for let i i64 = 0; i < rows; i++:
-    for let j i64 = 0; j < cols; j++:
-      m[i][j] = flat[i * cols + j]
+    mem::memcpy(&m[i][0] as *void, &flat[i * cols] as *void, row_bytes)
 
 fn unflatten_f32(flat [f32], m [[f32]]) =
   let rows = len(m)
 
   if rows == 0: return
   let cols = len(m[0])
+  let row_bytes = cols * 4
 
   for let i i64 = 0; i < rows; i++:
-    for let j i64 = 0; j < cols; j++:
-      m[i][j] = flat[i * cols + j]
+    mem::memcpy(&m[i][0] as *void, &flat[i * cols] as *void, row_bytes)
 
 // High-level wrappers.
 

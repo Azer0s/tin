@@ -5,6 +5,7 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -721,28 +722,232 @@ func coerceNativeStructForABI2Reg(st *irtypes.StructType) bool {
 	return nativeStructAllInteger(st)
 }
 
-// ensureExternDecl returns (or creates) a bare LLVM function declaration for a
-// C extern symbol. Re-uses an existing declaration if one with a matching
-// signature already exists.
+// ensureExternDecl returns (or creates) a bare LLVM function declaration
+// for a C extern symbol.  Re-uses an existing declaration if one with a
+// matching signature already exists in the currently-active module
+// (Tin emits per-pkg IR modules; cross-module references have to be
+// re-declared locally so the linker can resolve them).
+//
+// When any param OR return type is a struct >16 bytes (the SysV/AAPCS
+// threshold for in-register vs by-memory passing), clang lowers the
+// signature: params become `ptr` and returns become an `sret` ptr arg
+// prepended to a void-return.  Tin's hand-emitted IR doesn't auto-
+// lower, so we'd produce a signature mismatch against runtime.c.
+//
+// To fix it without infecting every call site, this function emits
+// BOTH the lowered C extern (matching clang) AND a Tin-side shim with
+// the natural struct-by-value signature.  Callers receive the shim,
+// which alloca-stores the struct args, forwards the lowered pointers
+// to the real extern, and loads the result back from an sret slot
+// when needed.  The shim has linkonce_odr linkage so each pkg module
+// that needs it can emit its own copy; the linker dedups.  LLVM's
+// optimizer inlines the shim away in release builds.
 func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params []*ir.Param, variadic bool) *ir.Func {
-	for _, f := range cg.allFuncs() {
-		if f.Name() == cName {
-			return f
-		}
-	}
+	mod := cg.activeModule()
 
-	f := cg.mod.NewFunc(cName, retType, params...)
-	f.Sig.Variadic = variadic
-	f.Blocks = nil
-	// Track that this IR name is a C extern symbol so that Tin user functions
-	// with the same name can be mangled to avoid redefinition conflicts.
 	if cg.externIRNames == nil {
 		cg.externIRNames = map[string]bool{}
 	}
 
+	needsLowering := externNeedsABILowering(retType, params)
+
+	// When the signature needs ABI lowering, callers expect the shim
+	// back from `ensureExternDecl`.  Look for an existing shim in this
+	// module; if absent we emit a fresh one (the actual `cName` extern
+	// gets re-declared alongside).  This is what lets cross-pkg
+	// references resolve -- each pkg module that uses the shim emits
+	// its own linkonce_odr copy.
+	shimName := cName + "$abi_shim"
+	for _, f := range mod.Funcs {
+		if needsLowering && f.Name() == shimName {
+			return f
+		}
+
+		if !needsLowering && f.Name() == cName {
+			return f
+		}
+	}
+
+	if !needsLowering || variadic {
+		// Fast path: signature fits in registers, no shim needed.
+		f := mod.NewFunc(cName, retType, params...)
+		f.Sig.Variadic = variadic
+		f.Blocks = nil
+		cg.externIRNames[cName] = true
+
+		return f
+	}
+
+	return cg.emitExternWithABIShim(cName, retType, params)
+}
+
+// largeStructByValThreshold is the size in bytes above which the
+// SysV-AMD64 and AAPCS64 ABIs pass/return structs via memory rather
+// than registers.  Matches what clang emits for the C frontend.
+const largeStructByValThreshold = 16
+
+// externNeedsABILowering reports whether any extern param or return
+// type is a struct larger than the by-value threshold, requiring the
+// sret/indirect-ptr lowering shim.
+func externNeedsABILowering(retType irtypes.Type, params []*ir.Param) bool {
+	if isLargeStruct(retType) {
+		return true
+	}
+
+	for _, p := range params {
+		if isLargeStruct(p.Type()) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isLargeStruct reports whether t is an anonymous struct (Tin fat-ptr,
+// any-box, etc.) whose size exceeds the by-value passing threshold.
+// Named structs are excluded because Tin user types pass through other
+// codepaths.
+func isLargeStruct(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	if !ok || st.Name() != "" {
+		return false
+	}
+
+	return llvmTypeSize(st) > largeStructByValThreshold
+}
+
+// emitExternWithABIShim declares the underlying C extern with the
+// clang-style lowered signature and synthesizes a Tin-side wrapper
+// that takes/returns the structs by value.  Returns the wrapper -- the
+// rest of codegen treats it as if it were the extern itself.
+func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, params []*ir.Param) *ir.Func {
+	// Step 1: build the lowered extern declaration.
+	loweredParams := make([]*ir.Param, 0, len(params)+1)
+
+	var sretSlot *ir.Param
+
+	retLowered := !isLargeStruct(retType)
+	loweredRet := retType
+
+	if !retLowered {
+		// Return-via-sret: prepend a pointer param tagged sret, and
+		// switch the LLVM return type to void.  Match the modern
+		// clang (>= 18) shape exactly:
+		//   `ptr dead_on_unwind writable sret(%struct) align 8`
+		// Earlier we only emitted `sret(%struct) align 8`; the
+		// missing `writable` lets LLVM assume the slot is read-only
+		// and elide the store the C side performs, leaving callers
+		// with a zero / garbage struct on Linux x86_64 -- this was
+		// the root of the panic/recover/stacktrace test crashes
+		// (recover() returned garbage, the assert::equals against
+		// the expected message failed and aborted the test).
+		sretSlot = ir.NewParam("sret_slot", irtypes.NewPointer(retType))
+		sretSlot.Attrs = append(sretSlot.Attrs,
+			ir.AttrString("dead_on_unwind"),
+			ir.AttrString("writable"),
+			ir.SRet{Typ: retType},
+			ir.Align(8),
+		)
+		loweredParams = append(loweredParams, sretSlot)
+		loweredRet = irtypes.Void
+	}
+
+	for _, p := range params {
+		if isLargeStruct(p.Type()) {
+			st := p.Type().(*irtypes.StructType)
+			lp := ir.NewParam(p.Name(), irtypes.NewPointer(st))
+			// Modern clang (>= 18) lowers a `void f(MyStruct s)` for a
+			// >16-byte struct on Linux x86_64 SysV to `void f(ptr
+			// dead_on_return noundef %s)` -- NO `byval` attribute, just
+			// a pointer parameter that LLVM's ABI pass turns into the
+			// SysV "memory class" passing convention.  Emitting the
+			// legacy `byval(struct) align 8` here produces a DIFFERENT
+			// IR-level signature than the linked C side: the SysV
+			// lowering for byval differs subtly from the lowering for
+			// a bare pointer, and on Linux x86_64 that mismatch
+			// corrupts every >16-byte struct param at the call
+			// boundary (test descriptions came through as garbage
+			// bytes, panic-related tests crashed before producing
+			// output).  On AAPCS64 (macOS arm64 / Linux arm64) bare
+			// pointer matches clang too.
+			loweredParams = append(loweredParams, lp)
+		} else {
+			loweredParams = append(loweredParams, p)
+		}
+	}
+
+	mod := cg.activeModule()
+
+	if os.Getenv("TIN_DEBUG_SHIMS") == "1" {
+		modName := "root"
+		if mod != cg.mod {
+			modName = mod.SourceFilename
+		}
+
+		fmt.Fprintf(os.Stderr, "[shim emit %q in mod=%s]\n", cName, modName)
+	}
+
+	cFn := mod.NewFunc(cName, loweredRet, loweredParams...)
+	cFn.Blocks = nil
 	cg.externIRNames[cName] = true
 
-	return f
+	// Step 2: synthesize the Tin-side shim with the natural signature.
+	shimName := cName + "$abi_shim"
+
+	shimParams := make([]*ir.Param, len(params))
+
+	for i, p := range params {
+		shimParams[i] = ir.NewParam(p.Name(), p.Type())
+	}
+
+	shim := mod.NewFunc(shimName, retType, shimParams...)
+	// weak_odr lets the same shim appear in multiple per-pkg modules
+	// without producing duplicate-symbol link errors.  ThinLTO is
+	// happier with weak_odr than linkonce_odr for cross-module shims
+	// because it preserves at least one definition rather than
+	// dropping all copies during global DCE.
+	shim.Linkage = enum.LinkageWeakODR
+
+	entry := shim.NewBlock("entry")
+
+	var sretAlloca value.Value
+	if !retLowered {
+		sretAlloca = entry.NewAlloca(retType)
+	}
+
+	callArgs := make([]value.Value, 0, len(loweredParams))
+	if !retLowered {
+		callArgs = append(callArgs, sretAlloca)
+	}
+
+	for i, sp := range shimParams {
+		_ = i
+
+		if isLargeStruct(sp.Type()) {
+			slot := entry.NewAlloca(sp.Type())
+			entry.NewStore(sp, slot)
+
+			callArgs = append(callArgs, slot)
+		} else {
+			callArgs = append(callArgs, sp)
+		}
+	}
+
+	if retLowered {
+		ret := entry.NewCall(cFn, callArgs...)
+
+		if _, isVoid := retType.(*irtypes.VoidType); isVoid {
+			entry.NewRet(nil)
+		} else {
+			entry.NewRet(ret)
+		}
+	} else {
+		entry.NewCall(cFn, callArgs...)
+		loaded := entry.NewLoad(retType, sretAlloca)
+		entry.NewRet(loaded)
+	}
+
+	return shim
 }
 
 // ensureExternTLSVar returns (or creates) an extern thread-local global variable

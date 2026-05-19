@@ -2,7 +2,10 @@
 
 // stdlib/math - Mathematical functions
 //
-// Wraps standard C math.h functions
+// Wraps standard C math.h functions plus a stdlib Complex type
+// (see complex.tin) re-exported under this package.
+
+use "./complex"
 
 // Basic arithmetic
 
@@ -103,5 +106,7 @@ export {
   sin, cos, tan, asin, acos, atan, atan2,
   floor, ceil, round, trunc,
   fmin, fmax,
-  PI, E
+  PI, E,
+  // Complex numbers are in the math::complex sub-namespace.
+  complex
 } as math

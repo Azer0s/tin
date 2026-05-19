@@ -133,17 +133,12 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 					elemSzBytes = int64(sz)
 				}
 
-				sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-				rawAlloca := checkBlock.NewAlloca(sliceType)
-
+				// `{i8*, i64 len, i64 cap}` raw slice for the runtime
+				// helper.  cap == len since this view exists only for
+				// the duration of the subslice call.
+				sliceType := fatArrayPtrType(irtypes.I8)
 				dataPtrAsI8 := checkBlock.NewBitCast(dataPtr, irtypes.I8Ptr)
-				rawPtrGep := checkBlock.NewGetElementPtr(sliceType, rawAlloca,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-				checkBlock.NewStore(dataPtrAsI8, rawPtrGep)
-				rawLenGep := checkBlock.NewGetElementPtr(sliceType, rawAlloca,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-				checkBlock.NewStore(arrLen, rawLenGep)
-				rawSlice := checkBlock.NewLoad(sliceType, rawAlloca)
+				rawSlice := cg.buildFatArrayValue(checkBlock, irtypes.I8, dataPtrAsI8, arrLen, arrLen)
 
 				subFn := cg.ensureSliceSubslice()
 				subResult := checkBlock.NewCall(subFn, rawSlice,

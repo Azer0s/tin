@@ -15,39 +15,48 @@ the work and we can verify identical numeric output).
 
 ## Results (M1 Pro, macOS)
 
-`hyperfine -N --warmup 2 'bench/bin/c_dgemm N ITERS' 'bench/bin/tin_raw_dgemm N ITERS'`:
+`hyperfine -N --warmup 2 'bench/bin/c_dgemm N ITERS' 'bench/bin/tin_raw_dgemm N ITERS' 'bench/bin/tin_high_dgemm N ITERS'`:
 
-| size             | C             | Tin raw       | ratio |
-|------------------|---------------|---------------|-------|
-| N=256, 200 iters | 23.4 $\pm$ 0.6 ms | 27.7 $\pm$ 2.7 ms | 1.19$\times$ |
-| N=512, 50 iters  | 46.3 $\pm$ 1.3 ms | 50.3 $\pm$ 1.9 ms | 1.09$\times$ |
+| size            | C              | Tin raw          | Tin high          | raw vs C | high vs C |
+|-----------------|----------------|------------------|-------------------|----------|-----------|
+| N=256, 50 iters | 8.4 $\pm$ 0.8 ms  | 16.0 $\pm$ 2.5 ms   | 27.0 $\pm$ 2.3 ms   | 1.9$\times$    | 3.1$\times$     |
+| N=512, 50 iters | 47.6 $\pm$ 2.3 ms | 52.3 $\pm$ 2.2 ms   | 131 $\pm$ 5 ms     | 1.1$\times$    | 2.7$\times$     |
 
-**Tin's raw bindings are within 10-20% of C** - and most of the
-remaining gap is process startup, not per-call FFI cost. At N=512
-the actual BLAS work dominates and the two are essentially
-indistinguishable.
+**Tin's raw bindings are within 10-20% of C at the work-dominated
+sizes**, matching the FFI baseline.  The high-level wrapper carries
+extra O($n^2$) flatten/unflatten cost per call; with the amortized
+`++=` and row-at-a-time concat (May 2026) it sits at 2.7-3$\times$ C,
+down from 18-24$\times$ before those landed.
 
 ## High-level wrapper
 
 `blas::dgemm` takes `[[f64]]` (row-of-rows) and flattens A, B, and
-zero-allocates a flat C buffer on every call. At small sizes the
-wrapper cost dominates BLAS work; at larger sizes it grows
-superlinearly because Tin's `xs ++= [v]` is currently O(n) per
-append (so building the c_flat zero buffer is $O(n^4)$ for an $N \times N$
-matrix). Internal timings:
+allocates a flat C buffer on every call.  Two iterative
+optimizations dropped wrapper cost dramatically:
+
+1. **Amortized `++=`**: each append is O(1) amortized, so the
+   flatten loops dropped from $O(n^4)$ (per-element appends $\times$ per-call
+   reallocation) to $O(n^2)$.
+2. **Row-wise concat + skip c_flat zero-init**: `flatten_f64`
+   now does `out ++= m[i]` once per row (one bulk memcpy) instead
+   of `out ++= [m[i][j]]` per element, and c_flat is initialised
+   via `flatten_f64(c)` instead of an N$^2$ zero-fill loop (dgemm
+   has `beta=0` so the contents are discarded anyway).
+
+Internal timings after both landed:
 
 | size              | gemm loop (Tin high) | per call |
 |-------------------|----------------------|----------|
-| N=32, 1000 iters  | 6.0 s                | 6 ms     |
-| N=64, 100 iters   | 0.34 s               | 3.4 ms   |
-| N=128, 100 iters  | 23.6 s               | 236 ms   |
-| N=256, 50 iters   | 69.8 s               | 1.4 s    |
+| N=64, 1000 iters  | 17.3 ms              | 17 us    |
+| N=128, 100 iters  | 6.1 ms               | 61 us    |
+| N=256, 50 iters   | 15.7 ms              | 315 us   |
+| N=512, 50 iters   | 99 ms                | 2.0 ms   |
 
-This is **not** a fundamental BLAS-binding limit - it's the cost of
-Tin's current `++=` implementation hitting the wrapper's c_flat
-zero-init loop. If `++=` ever lands an amortized growth strategy,
-the wrapper drops to the same ~10-20% overhead as the raw path
-plus one $O(n^2)$ flatten/unflatten copy.
+Compared to the pre-amortization numbers (N=128 / 100 iters was
+23.6 s, N=256 / 50 iters was 69.8 s) the wrapper is now hundreds
+to thousands of times faster at these sizes.  Remaining per-call
+cost is dominated by the two row-wise memcpy fans (A, B) plus the
+unflatten store back into the caller's `[[f64]]`.
 
 ## Reproducing
 

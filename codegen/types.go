@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 
 	"github.com/Azer0s/tin/ast"
 )
@@ -144,8 +147,8 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 
 		if t.Size < 0 {
-			// Dynamic array: {elem*, i64}
-			return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64), nil
+			// Dynamic array: {elem*, i64 len, i64 cap}
+			return fatArrayPtrType(elem), nil
 		}
 
 		return irtypes.NewArray(uint64(t.Size), elem), nil
@@ -388,7 +391,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	case *ast.TupleArrayType:
 		// @[T1, T2, ...] resolves to [any] - fat array of any values.
-		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
+		return fatArrayPtrType(anyFatPtrType()), nil
 	}
 
 	return irtypes.I64, nil
@@ -460,8 +463,8 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.NewVector(4, irtypes.Double), nil
 
 	case "string":
-		// fat pointer: {i8*, i64}
-		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
+		// Uniform fat-pointer: {i8*, i64 len, i64 cap}.
+		return stringFatPtrType(), nil
 	case "atom", "__atom":
 		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
 		// Both spellings appear: user-facing Tin code uses `atom`, while
@@ -775,13 +778,13 @@ func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
 		return &ast.PointerType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType)}
 	}
 
-	if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 2 {
+	if st, ok := t.(*irtypes.StructType); ok {
 		// Trait fat-ptr {i8*, vtable_struct*} -- demangle the
 		// vtable's struct name (`<pkg>__<Trait>_vtable`) into the
 		// user-visible `<pkg>::<Trait>` so the synthesized
 		// monomorphization re-resolves to the right iface type
 		// instead of falling through to i64.
-		if st.Fields[0] == irtypes.I8Ptr {
+		if len(st.Fields) == 2 && st.Fields[0] == irtypes.I8Ptr {
 			if pt, ok2 := st.Fields[1].(*irtypes.PointerType); ok2 {
 				if vst, ok3 := pt.ElemType.(*irtypes.StructType); ok3 {
 					vname := vst.Name()
@@ -797,18 +800,20 @@ func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
 				}
 			}
 		}
-		// Fat-pointer arrays / strings: {ElemPtr, i64}.  We cannot
-		// distinguish `[u8]` from `string` at the LLVM level (both
-		// are `{i8*, i64}`); both resolve to the same LLVM type
-		// downstream so the choice is cosmetic.  We pick `string`
-		// because it is the more common appearance for this shape
-		// in real code.
-		if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 && st.Fields[1].Equal(irtypes.I64) {
-			if pt.ElemType.Equal(irtypes.I8) {
-				return &ast.SimpleType{Name: "string"}
-			}
+		// Fat-pointer arrays / strings: {ElemPtr, i64 len, i64 cap}.
+		// We cannot distinguish `[u8]` from `string` at the LLVM
+		// level (both are `{i8*, i64, i64}`); both resolve to the same
+		// LLVM type downstream so the choice is cosmetic.  We pick
+		// `string` because it is the more common appearance for this
+		// shape in real code.
+		if len(st.Fields) == 3 && st.Fields[1].Equal(irtypes.I64) && st.Fields[2].Equal(irtypes.I64) {
+			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
+				if pt.ElemType.Equal(irtypes.I8) {
+					return &ast.SimpleType{Name: "string"}
+				}
 
-			return &ast.ArrayType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType), Size: -1}
+				return &ast.ArrayType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType), Size: -1}
+			}
 		}
 	}
 
@@ -847,23 +852,25 @@ func llvmTypeToTinName(t irtypes.Type) string {
 			return n
 		}
 		// Anonymous struct - detect by shape:
-		// {i8*, i64}  = string
-		// {i32, i8*}  = any
-		if len(st.Fields) == 2 {
-			if st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I64) {
+		// {i8*, i64, i64}     = string (fat-ptr widened with cap)
+		// {ElemType*, i64, i64} = [ElemType] (fat-ptr widened with cap)
+		// {i32, i8*}          = any (unchanged)
+		if len(st.Fields) == 3 && st.Fields[1].Equal(irtypes.I64) && st.Fields[2].Equal(irtypes.I64) {
+			if st.Fields[0].Equal(irtypes.I8Ptr) {
 				return "string"
 			}
 
-			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
-				return "any"
-			}
-			// Fat array pointer: anonymous {ElemType*, i64}.
-			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok && st.Fields[1].Equal(irtypes.I64) {
+			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok {
 				elem := llvmTypeToTinName(pt.ElemType)
 				if elem != "" && elem != "any" {
 					return "[" + elem + "]"
 				}
 			}
+		}
+
+		if len(st.Fields) == 2 &&
+			st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
+			return "any"
 		}
 	}
 
@@ -876,9 +883,55 @@ func llvmTypeToTinName(t irtypes.Type) string {
 	return "any"
 }
 
-// stringFatPtrType returns the {i8*, i64} type used for tin strings.
+// stringFatPtrType returns the {i8*, i64 len, i64 cap} type used for
+// tin strings.  Identical shape to the byte-array fat-ptr, so
+// `string` and `[byte]` stay interchangeable after the fat-array
+// widening.  Strings are conceptually immutable so cap matters less
+// than for `[T]`, but maintaining the uniform layout keeps coercion-
+// free and lets future string-mutation code grow strings in place.
 func stringFatPtrType() *irtypes.StructType {
-	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64, irtypes.I64)
+}
+
+// fatArrayPtrType returns the {*elem, i64 len, i64 cap} type used for
+// tin dynamic arrays.  Cap is the allocated element count when >= 0;
+// cap < 0 marks a borrowed view (panics on `++=`, no RC release on drop).
+//
+// All array construction goes through this helper so the layout change
+// stays localized.
+func fatArrayPtrType(elem irtypes.Type) *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64, irtypes.I64)
+}
+
+// fatArrayConst builds a compile-time constant fat-array value of the
+// given element type, data pointer, length, and capacity.
+func fatArrayConst(elem irtypes.Type, dataPtr constant.Constant, length, capacity int64) *constant.Struct {
+	return constant.NewStruct(fatArrayPtrType(elem),
+		dataPtr,
+		constant.NewInt(irtypes.I64, length),
+		constant.NewInt(irtypes.I64, capacity))
+}
+
+// buildFatArrayValue emits IR to materialize a fat-array value
+// `{dataPtr, length, capacity}` and returns the loaded struct.  All
+// runtime fat-array constructions should go through this helper so the
+// triple-slot layout stays consistent.
+func (cg *CodeGen) buildFatArrayValue(block *ir.Block, elem irtypes.Type, dataPtr, length, capacity value.Value) value.Value {
+	fatType := fatArrayPtrType(elem)
+	alloca := block.NewAlloca(fatType)
+	ptrGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(dataPtr, ptrGep)
+
+	lenGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(length, lenGep)
+
+	capGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	block.NewStore(capacity, capGep)
+
+	return block.NewLoad(fatType, alloca)
 }
 
 // anyFatPtrType returns the {i32, i8*} type used for tin `any` values.
@@ -980,28 +1033,43 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 
 // Type query helpers
 
-// isFatPtrType returns true if t is a two-field struct whose first field
-// is a pointer - i.e., a Tin fat-pointer (string, array, etc.).
+// isFatPtrType returns true if t is a Tin fat-pointer: the uniform
+// three-field `{T* data, i64 len, i64 cap}` layout shared by strings,
+// `[byte]`, and every `[T]` dynamic array.
 func isFatPtrType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 {
+	if !ok || len(st.Fields) != 3 {
 		return false
 	}
 
 	_, isPtr := st.Fields[0].(*irtypes.PointerType)
 
-	return isPtr && irtypes.IsInt(st.Fields[1])
+	return isPtr && irtypes.IsInt(st.Fields[1]) && irtypes.IsInt(st.Fields[2])
 }
 
-// isStringType returns true if t is the tin string fat-pointer type {i8*, i64}.
-// Named structs (user-defined) are never fat-pointers.
+// isStringType returns true if t is the tin string fat-pointer type
+// {i8*, i64 len, i64 cap}.  Named structs (user-defined) are never
+// fat-pointers.  Note: strings are also a valid `[byte]` fat-array
+// (i8* is a pointer-to-i8) so isFatArrayPtr matches them too -- the
+// caller should check isStringType first when it matters.
 func isStringType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || st.Name() != "" || len(st.Fields) != 2 {
+	if !ok || st.Name() != "" || len(st.Fields) != 3 {
 		return false
 	}
 
-	return st.Fields[0] == irtypes.I8Ptr && st.Fields[1].Equal(irtypes.I64)
+	if !st.Fields[1].Equal(irtypes.I64) || !st.Fields[2].Equal(irtypes.I64) {
+		return false
+	}
+	// Compare structurally rather than by pointer identity: codegen
+	// builds string fat-ptrs through several helpers and the resulting
+	// PointerType instances aren't necessarily the same singleton.
+	pt, ok := st.Fields[0].(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	return pt.ElemType.Equal(irtypes.I8)
 }
 
 // isAnyType returns true if t is the tin `any` fat-pointer type {i32, i8*}.
@@ -1015,16 +1083,18 @@ func isAnyType(t irtypes.Type) bool {
 	return st.Fields[0].Equal(irtypes.I32) && st.Fields[1] == irtypes.I8Ptr
 }
 
-// isFatArrayPtr returns true for anonymous {T*, i64} fat array pointer structs.
-// Named structs (user-defined) are excluded to avoid false matches with
-// structs that embed vtable pointers as their first field.
+// isFatArrayPtr returns true for anonymous {T*, i64 len, i64 cap} fat
+// array pointer structs.  Named structs (user-defined) are excluded to
+// avoid false matches with structs that embed vtable pointers as their
+// first field.  Strings are {i8*, i64} (two fields, no cap) -- those
+// match isStringType, not this predicate.
 func isFatArrayPtr(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || st.Name() != "" || len(st.Fields) != 2 {
+	if !ok || st.Name() != "" || len(st.Fields) != 3 {
 		return false
 	}
 
-	if !irtypes.IsInt(st.Fields[1]) {
+	if !irtypes.IsInt(st.Fields[1]) || !irtypes.IsInt(st.Fields[2]) {
 		return false
 	}
 

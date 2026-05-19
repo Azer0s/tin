@@ -148,6 +148,23 @@ func (cg *CodeGen) pointerProvenanceIsRCAlloc(v value.Value) bool {
 			case "_tin_rc_alloc", "_tin_rc_alloc_atomic", "_tin_rc_alloc_typed":
 				return true
 			}
+			// Tin convention: a function returning `*<named-Tin-struct>`
+			// transfers rc=1 ownership to the caller (`fn make() *Foo`
+			// hands back a fresh heap block).  Without this branch,
+			// `return make_inner()` chains through coerceToTrait pick
+			// the borrow vtable and leak the block; the user-facing
+			// shape (let it = make_chain(); ... let s = make_show())
+			// loses heap provenance the moment the value flows through
+			// an LLVM Call result that's neither a direct rc_alloc nor
+			// a let-binding lookup. The struct registry check filters
+			// out C-extern returns (those produce native-shaped types).
+			if pt, ok := n.Type().(*irtypes.PointerType); ok {
+				if innerSt, isStruct := pt.ElemType.(*irtypes.StructType); isStruct && innerSt.Name() != "" {
+					if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
+						return true
+					}
+				}
+			}
 
 			return false
 		default:
@@ -371,6 +388,23 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		}
 
 		hasRCHeader := !stackBorrowSrc && cg.pointerProvenanceIsRCAlloc(structVal)
+		// pointerProvenanceIsRCAlloc can't trace through an LLVM Load
+		// back to the alloca's initial store, so a `return s` where
+		// `s` came from `&StructLit{...}` looks borrowed.  Consult the
+		// source binding's scope metadata as a fallback -- if it was
+		// recorded as fresh-RC-rooted at let-binding time, we own the
+		// heap block and need the owning vtable for the caller's
+		// scope-exit release to free it.
+		fromHeapBinding := false
+
+		if !hasRCHeader && !stackBorrowSrc {
+			if loadInst, isLoad := structVal.(*ir.InstLoad); isLoad {
+				if cg.sourceBindingHoldsFreshRCPtr(loadInst.Src) {
+					hasRCHeader = true
+					fromHeapBinding = true
+				}
+			}
+		}
 
 		dataPtr = block.NewBitCast(structVal, irtypes.I8Ptr)
 		concreteType = pt.ElemType
@@ -380,6 +414,21 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 			if loadInst, isLoad := structVal.(*ir.InstLoad); isLoad {
 				if cg.sourceBindingIsEarlyHeap(loadInst.Src) {
+					skipRetain = true
+				}
+			}
+			// Direct `_tin_rc_alloc`'d source (e.g. `return &Range{...}`
+			// or a fresh constructor result) hands the iface rc=1
+			// already; the matching scope-release at the caller will
+			// drop it to zero and free the block.  Retaining here would
+			// stamp rc=2 and the single caller-side release leaves the
+			// block at rc=1 forever -- a steady leak per call.
+			// `fromHeapBinding` is the indirect counterpart: the source
+			// came through a let-binding whose value is fresh-RC, so
+			// the binding's own scope release will fire too and we DO
+			// need the +1 for the iface's slot.
+			if !fromHeapBinding && cg.pointerProvenanceIsRCAlloc(structVal) {
+				if _, isLoad := structVal.(*ir.InstLoad); !isLoad {
 					skipRetain = true
 				}
 			}

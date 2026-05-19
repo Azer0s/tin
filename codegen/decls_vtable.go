@@ -720,6 +720,43 @@ func (cg *CodeGen) genTraitVtables(n *ast.StructDecl) error {
 	return nil
 }
 
+// sourceBindingHoldsFreshRCPtr reports whether `allocaPtr` is the
+// alloca of a scope entry that was initialized from a fresh
+// `_tin_rc_alloc`'d pointer (`&StructLit{...}`, `&Variant(...)`,
+// field-access ownership transfers).  Used by `coerceToTrait`'s
+// pointer-source path so a `return s` from such a binding picks the
+// OWNING vtable rather than the borrow vtable -- the caller's
+// release needs to free the heap block, which only the owning
+// vtable's data-release slot does.  Without this check, the LLVM
+// Load that materializes the binding's stored pointer hides the RC
+// provenance from `pointerProvenanceIsRCAlloc`, and every iface
+// returned by such a function leaks its data on every release.
+func (cg *CodeGen) sourceBindingHoldsFreshRCPtr(allocaPtr value.Value) bool {
+	if cg.curScope == nil {
+		return false
+	}
+
+	for s := cg.curScope; s != nil; s = s.parent {
+		var found bool
+
+		s.each(func(_ string, entry *scopeEntry) {
+			if entry == nil || !entry.isAlloc {
+				return
+			}
+
+			if entry.val == allocaPtr && (entry.holdsFreshRCPtr || entry.isHeapOwned) {
+				found = true
+			}
+		})
+
+		if found {
+			return true
+		}
+	}
+
+	return false
+}
+
 // sourceBindingIsEarlyHeap reports whether `allocaPtr` is the alloca
 // of a scope entry that's been early-heap-promoted (so its scope-exit
 // release is suppressed).  Used by buildPtrToTraitBorrow to decide

@@ -191,7 +191,7 @@ fn json_key(field_name string, tag string) string =
   if len(tag) == 6 && tag[5] == @'-':
     return ""
 
-  // Extract the key name: tag[5:] using string ++ byte.
+  // Extract the key name: tag[5..len(tag)] using string ++ byte.
   let key = ""
   let i i64 = 5
 

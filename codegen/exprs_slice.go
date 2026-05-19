@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -48,9 +49,40 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 		ptrVal = v
 	}
 
+	// Fat-array source `arr[lo..hi]`: route through the same
+	// copy-into-fresh-buffer path as `genSliceExpr` so the result is
+	// an owned, freely-mutable `[T]`.
+	if isFatArrayPtr(ptrVal.Type()) {
+		fatType := ptrVal.Type().(*irtypes.StructType)
+		dataPtrType := fatType.Fields[0].(*irtypes.PointerType)
+		elemT := dataPtrType.ElemType
+
+		srcDataPtr := block.NewExtractValue(ptrVal, 0)
+		length := block.NewSub(hiVal, loVal)
+		srcRange := block.NewGetElementPtr(elemT, srcDataPtr, loVal)
+
+		nullElemPtr := constant.NewNull(irtypes.NewPointer(elemT))
+		sizeGep := block.NewGetElementPtr(elemT, nullElemPtr,
+			constant.NewInt(irtypes.I64, 1))
+		elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
+		totalBytes := block.NewMul(length, elemSize)
+
+		newI8 := block.NewCall(cg.ensureRCAlloc(), totalBytes)
+		newDataPtr := block.NewBitCast(newI8, irtypes.NewPointer(elemT))
+		srcI8 := block.NewBitCast(srcRange, irtypes.I8Ptr)
+		block.NewCall(cg.ensureMemcpy(), newI8, srcI8, totalBytes,
+			constant.NewInt(irtypes.I1, 0))
+
+		if isRCTrackedType(elemT) {
+			cg.emitRetainElemSlice(block, newDataPtr, length, elemT)
+		}
+
+		return cg.buildFatArrayValue(block, elemT, newDataPtr, length, length), nil
+	}
+
 	pt, ok := ptrVal.Type().(*irtypes.PointerType)
 	if !ok {
-		return nil, fmt.Errorf("range slice requires a pointer, got %s", cg.fmtArgType(ptrVal.Type()))
+		return nil, fmt.Errorf("range slice requires a pointer or fat-array source, got %s", cg.fmtArgType(ptrVal.Type()))
 	}
 
 	length := block.NewSub(hiVal, loVal)
@@ -61,141 +93,42 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 		return block.NewCall(cg.ensureBytesFromBuf(), startPtr, length), nil
 	}
 
-	// Other pointer types: build a non-owning fat pointer {T*, i64}.
-	fatType := irtypes.NewStruct(irtypes.NewPointer(pt.ElemType), irtypes.I64)
-	alloca := block.NewAlloca(fatType)
-	ptrGep := block.NewGetElementPtr(fatType, alloca, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(startPtr, ptrGep)
-	lenGep := block.NewGetElementPtr(fatType, alloca, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(length, lenGep)
+	// Other pointer types: copy the [lo..hi) range into a fresh
+	// RC-allocated buffer so the returned slice is owned and freely
+	// mutable (`++=` works without surprising aliasing).  Cap == len:
+	// the first append triggers a grow.
+	nullElemPtr := constant.NewNull(irtypes.NewPointer(pt.ElemType))
+	sizeGep := block.NewGetElementPtr(pt.ElemType, nullElemPtr,
+		constant.NewInt(irtypes.I64, 1))
+	elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
+	totalBytes := block.NewMul(length, elemSize)
+	mallocI8 := block.NewCall(cg.ensureRCAlloc(), totalBytes)
+	newDataPtr := block.NewBitCast(mallocI8, irtypes.NewPointer(pt.ElemType))
+	srcI8 := block.NewBitCast(startPtr, irtypes.I8Ptr)
+	block.NewCall(cg.ensureMemcpy(), mallocI8, srcI8, totalBytes,
+		constant.NewInt(irtypes.I1, 0))
 
-	return block.NewLoad(fatType, alloca), nil
+	return cg.buildFatArrayValue(block, pt.ElemType, newDataPtr, length, length), nil
 }
 
-// genSliceExpr generates code for a slice expression arr[start:end].
+// genSliceExpr is the codegen entry point for the `arr[start:end]`
+// form, which Tin used to accept as an alias for `arr[start..end]`.
+// The `..` form is now canonical (consistent with `for i in 0..n` and
+// visually distinct from `[T; N]`); this entry point exists solely to
+// emit a clear migration hint when the user reaches for `:`.
+//
+// Open-ended ranges (`[:end]` and `[start:]`) are rejected the same
+// way -- callers should write `[0..end]` / `[start..len(arr)]`.
 func (cg *CodeGen) genSliceExpr(block *ir.Block, e *ast.SliceExpr) (value.Value, error) {
-	// Fixed-size byte arrays [byte; N]: heap-copy the slice to produce a [byte].
-	// Use genLValue to get the alloca pointer directly (no spurious full-array load).
-	if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil {
-		if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
-			if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 && at.ElemType.Equal(irtypes.I8) {
-				var startVal, endVal value.Value
-
-				if e.Start != nil {
-					sv, err := cg.genExpr(block, e.Start)
-					if err != nil {
-						return nil, err
-					}
-
-					startVal = cg.coerce(block, sv, irtypes.I64)
-				} else {
-					startVal = constant.NewInt(irtypes.I64, 0)
-				}
-
-				if e.End != nil {
-					ev, err := cg.genExpr(block, e.End)
-					if err != nil {
-						return nil, err
-					}
-
-					endVal = cg.coerce(block, ev, irtypes.I64)
-				} else {
-					endVal = constant.NewInt(irtypes.I64, int64(at.Len))
-				}
-
-				length := block.NewSub(endVal, startVal)
-				elemPtr := block.NewGetElementPtr(at, arrPtr,
-					constant.NewInt(irtypes.I32, 0), startVal)
-				srcPtr := block.NewBitCast(elemPtr, irtypes.I8Ptr)
-
-				return block.NewCall(cg.ensureBytesFromBuf(), srcPtr, length), nil
-			}
-		}
-	}
-
-	arrVal, err := cg.genExpr(block, e.Expr)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only fat-pointer arrays {T*, i64} are supported for slicing.
-	arrType, ok := arrVal.Type().(*irtypes.StructType)
-	if !ok || len(arrType.Fields) < 2 {
-		return nil, fmt.Errorf("slice expression requires a fat-array type, got %s", cg.fmtArgType(arrVal.Type()))
-	}
-
-	ptrField := arrType.Fields[0]
-
-	ptrType, isPtrType := ptrField.(*irtypes.PointerType)
-	if !isPtrType {
-		return nil, fmt.Errorf("slice expression: first field must be a pointer, got %s", ptrField)
-	}
-
-	elemType := ptrType.ElemType
-
-	alloca := block.NewAlloca(arrType)
-	block.NewStore(arrVal, alloca)
-
-	// Extract data pointer and length from fat-array.
-	dataGep := block.NewGetElementPtr(arrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	lenGep := block.NewGetElementPtr(arrType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	dataPtr := block.NewLoad(ptrType, dataGep)
-	arrLen := block.NewLoad(irtypes.I64, lenGep)
-
-	var startVal, endVal value.Value
-
+	lo := "0"
 	if e.Start != nil {
-		sv, err := cg.genExpr(block, e.Start)
-		if err != nil {
-			return nil, err
-		}
-
-		startVal = cg.coerce(block, sv, irtypes.I64)
-	} else {
-		startVal = constant.NewInt(irtypes.I64, 0)
+		lo = strings.TrimSpace(ast.PrintExpr(e.Start))
 	}
 
+	hi := "n"
 	if e.End != nil {
-		ev, err := cg.genExpr(block, e.End)
-		if err != nil {
-			return nil, err
-		}
-
-		endVal = cg.coerce(block, ev, irtypes.I64)
-	} else {
-		endVal = arrLen
+		hi = strings.TrimSpace(ast.PrintExpr(e.End))
 	}
 
-	// newDataPtr = GEP(elemType, dataPtr, startVal)
-	newDataPtr := block.NewGetElementPtr(elemType, dataPtr, startVal)
-	// newLen = endVal - startVal
-	newLen := block.NewSub(endVal, startVal)
-
-	// Build new fat-array {T*, i64}.
-	resultAlloca := block.NewAlloca(arrType)
-	newDataGep := block.NewGetElementPtr(arrType, resultAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	newLenGep := block.NewGetElementPtr(arrType, resultAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(newDataPtr, newDataGep)
-	block.NewStore(newLen, newLenGep)
-
-	// The slice escapes whatever scope-exit release the source binding
-	// owns: when the source's RC hits 0, the underlying ARC block is
-	// freed and the slice goes dangling.  Bump the base block's RC here
-	// so the slice carries its own +1 reference; the matching release
-	// fires either via genVarDecl's basePtr (when the slice is the
-	// direct init of a let-binding) or via the fat-array's normal
-	// scope-exit release (when the slice escapes through a call, e.g.
-	// `return xs[0:m]` consumed by the caller).
-	baseI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
-	block.NewCall(cg.ensureRetain(), baseI8)
-	// Expose the BASE allocation pointer (before the GEP offset) so that genVarDecl
-	// can retain/release the actual ARC block rather than a possibly-interior pointer.
-	// For start==0 newDataPtr==dataPtr; for start>0 newDataPtr is interior.
-	cg.lastSliceBase = baseI8
-
-	return block.NewLoad(arrType, resultAlloca), nil
+	return nil, cg.nodeErr(e, "range slice uses `..` (e.g. `arr[%s..%s]`), not `:`", lo, hi)
 }

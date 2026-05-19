@@ -37,7 +37,7 @@ fn take[t](n i64) fn([t]) [t] =
     let m = n
     if m > len(xs):
       m = len(xs)
-    return xs[0:m]
+    return xs[0..m]
 
 fn skip[t](n i64) fn([t]) [t] =
   return fn(xs [t]) [t] =
@@ -45,7 +45,7 @@ fn skip[t](n i64) fn([t]) [t] =
       return xs
     if n >= len(xs):
       return [] as [t]
-    return xs[n:len(xs)]
+    return xs[n..len(xs)]
 
 fn take_while[t](pred fn(t) bool) fn([t]) [t] =
   return fn(xs [t]) [t] =
@@ -111,7 +111,7 @@ fn chunks[t](n i64) fn([t]) [[t]] =
       let end = i + n
       if end > len(xs):
         end = len(xs)
-      out ++= [xs[i:end]]
+      out ++= [xs[i..end]]
       i = i + n
     return out
 
@@ -123,7 +123,7 @@ fn windows[t](n i64) fn([t]) [[t]] =
     let last = len(xs) - n
     let i i64 = 0
     for i <= last:
-      out ++= [xs[i:i+n]]
+      out ++= [xs[i..i+n]]
       i = i + 1
     return out
 

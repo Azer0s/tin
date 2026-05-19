@@ -455,7 +455,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// so the user gets a precise type-mismatch diagnostic.
 		if !initVal.Type().Equal(llType) {
 			if isFatArrayPtr(initVal.Type()) && isFatArrayPtr(llType) {
-				if cs, ok := initVal.(*constant.Struct); ok && len(cs.Fields) == 2 {
+				if cs, ok := initVal.(*constant.Struct); ok && len(cs.Fields) == 3 {
 					if _, isNull := cs.Fields[0].(*constant.Null); isNull {
 						initVal = cg.zeroValue(llType)
 					}
@@ -558,7 +558,14 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// no matching release.  Same exception the return-stmt path
 		// already applies.
 		derefOfRawVoid := cg.isDerefOfRawVoidPtrCast(s.Value)
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult && !derefOfRawVoid {
+		// `let s = a[lo..hi]` lowers via genIndexExpr to
+		// genPtrRangeSlice, which always returns a freshly
+		// `_tin_rc_alloc`'d owned buffer.  Without this exception,
+		// isCopyExpr fires the genVarDecl retain and the binding's
+		// scope-exit release leaves the buffer at rc=1 forever --
+		// one leaked slice per binding.
+		freshSliceExpr := isFreshSliceExpr(s.Value)
+		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult && !derefOfRawVoid && !freshSliceExpr {
 			// Owning-pointer borrow case: see emitOwningPtrRetainIfApplicable.
 			// emitRetain skips bare *<struct> / *<iface> by design (param
 			// borrow convention).  When the let-binding takes ownership of
@@ -697,6 +704,18 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	}
 
 	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), ownsHeapPromotedFields: cg.bindingHeapPromotedFields(s), declaredConst: s.IsConst, declaredLet: !s.IsConst, ownsPtrViaRetain: cg.pendingOwnsPtrViaRetain, pointsToBorrowedStorage: pointsToBorrowedStorage}
+
+	// Tag the binding with its alias source when the initializer is a bare
+	// identifier resolving to another fat-pointer binding.  Used by the
+	// -Walias-mutation check at later indexed-write / `++=` sites.
+	if src, ok := s.Value.(*ast.Identifier); ok && src != nil {
+		t := alloca.Type().(*irtypes.PointerType).ElemType
+		if isStringType(t) || isFatArrayPtr(t) {
+			if srcEntry, ok2 := cg.curScope.lookup(src.Name); ok2 && srcEntry.isAlloc {
+				entry.aliasedFromName = src.Name
+			}
+		}
+	}
 
 	cg.pendingOwnsPtrViaRetain = false
 

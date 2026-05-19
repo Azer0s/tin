@@ -19,6 +19,19 @@ import (
 // reference it. When `name` is in exportedNames, the parent scope also
 // gets `pkg::name` / `pkg.name` aliases.
 func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string, exportedNames map[string]bool, parentScope *scope) error {
+	// Mirror the entry-program path: when no explicit type annotation is
+	// given, infer from a literal-form initializer (struct lit, int lit,
+	// etc.).  Without this, `const RED = Color{...}` in a package would
+	// register as a void* global and panic at the first store.
+	if tv.Type == nil && tv.Value != nil {
+		tv.Type = cg.inferTopLevelVarType(tv.Value)
+	}
+
+	if tv.Type == nil {
+		return cg.nodeErr(tv, "top-level %s requires either a type annotation or an initializer with an obvious type",
+			topLevelVarKindWord(tv))
+	}
+
 	lt, err := cg.tinTypeToLLVM(tv.Type)
 	if err != nil {
 		return err
@@ -406,8 +419,12 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		raw := cg.newGlobalString(v.Value).(constant.Constant)
 		strType := stringFatPtrType()
 		lenVal := constant.NewInt(irtypes.I64, int64(len(v.Value)))
+		// Constant strings live in `.rodata`; cap = -1 marks the
+		// buffer as a borrowed view (`++=` panics, drop skips
+		// release).  Matches buildStringFatPtr's runtime emission.
+		borrowed := constant.NewInt(irtypes.I64, -1)
 
-		s := constant.NewStruct(strType, raw, lenVal)
+		s := constant.NewStruct(strType, raw, lenVal, borrowed)
 		if targetType.Equal(strType) {
 			return s
 		}

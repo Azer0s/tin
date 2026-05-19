@@ -98,6 +98,13 @@ let s = "hello"
 echo s.len    // 5
 ```
 
+### Capacity, fill, copy, and the cap-check panic
+
+`cap(arr)`, `copy(arr)`, the `[v] * n` runtime fill syntax, the
+shared-buffer alias model, and the runtime cap-check panic on `++=`
+are documented in
+[04-collections-mutation.md](04-collections-mutation.md).
+
 ### Array shape (`nlen`)
 
 For nested arrays, `nlen` returns the **size of each dimension** as an
@@ -198,9 +205,11 @@ conversions like `[i32] as [u32]` are a zero-cost pointer reinterpretation.
 
 ### Implementation note
 
-Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len` builtin
-simply reads the second word; it compiles to a single load with no function
-call overhead.
+Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len`
+builtin reads the second word, `cap` the third; both compile to a
+single load with no function call overhead.
+[04-collections-mutation.md](04-collections-mutation.md#implementation-note)
+covers the amortized growth + in-place fast path for `++=`.
 
 ### Array destructuring
 

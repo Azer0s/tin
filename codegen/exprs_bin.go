@@ -29,6 +29,17 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		}
 	}
 
+	// Array-fill literal: `[v] * n` allocates a fresh `[T]` of `n`
+	// copies of `v`.  Detect the single-element array-literal LHS up
+	// front so the `*` operator dispatches to a fill loop instead of
+	// the generic multiplication path (which would error on the
+	// non-numeric LHS).
+	if e.Op == "*" {
+		if al, ok := e.Left.(*ast.ArrayLit); ok && len(al.Elems) == 1 {
+			return cg.genArrayFillBinExpr(block, al.Elems[0], e.Right)
+		}
+	}
+
 	cg.curBlock = block
 
 	left, err := cg.genExpr(block, e.Left)
@@ -383,9 +394,13 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 			rightBytes := block.NewMul(rightLen, elemSize)
 			block.NewCall(cg.ensureMemcpy(), rightDst, rightI8Ptr, rightBytes, constant.NewInt(irtypes.I1, 0))
 
-			// Build new fat ptr {T*, i64}
+			// Build new fat ptr {T*, i64, i64}.  Cap == totalLen: the
+			// concat allocates exactly totalLen elements with no
+			// headroom, so the first `++=` on the result triggers
+			// a grow.
 			v0 := block.NewInsertValue(constant.NewUndef(fatType), newPtr, 0)
-			result := block.NewInsertValue(v0, totalLen, 1)
+			v1 := block.NewInsertValue(v0, totalLen, 1)
+			result := block.NewInsertValue(v1, totalLen, 2)
 			// For non-temporary sources, the new buffer shares element pointers
 			// with the source array.  Retain each shared element so that releasing
 			// the source and the new buffer are independent: each holds its own RC

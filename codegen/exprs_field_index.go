@@ -63,6 +63,13 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			objType = pt.ElemType
 		}
 	}
+	// Save the pre-auto-deref pointer so the bound-method fallback below
+	// can recover it when the FieldAccess resolves to `x.method` on a
+	// heap-allocated receiver -- the auto-deref otherwise loads the
+	// value and the bound-method codegen copies it to a fresh stack
+	// alloca, leaking the heap block on every capture.
+	preDerefObj := obj
+	preDerefType := objType
 	// Auto-deref: when obj is a pointer-to-named-struct, dereference it even
 	// without the -> operator.  This handles pointer receiver methods where
 	// `this *Foo` fields are accessed with `this.field` rather than `this->field`.
@@ -74,6 +81,8 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 			}
 		}
 	}
+
+	_ = preDerefType
 
 	// Handle .len on dynamic arrays {T*, i64} and strings {i8*, i64}.
 	if e.Field == "len" && (isFatArrayPtr(objType) || isStringType(objType)) {
@@ -156,7 +165,15 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 		// Not a struct field -- check if it is a bound method reference.
 		// `f.method` where f is of struct type Foo synthesizes a closure that
 		// captures the receiver and calls Foo_method(receiver, args...).
-		if bm, err2 := cg.genBoundMethod(block, e.Expr, obj, structName, e.Field); err2 == nil && bm != nil {
+		// Pass the pre-auto-deref pointer so anon receivers like
+		// `(&counter{}).add` capture the heap pointer rather than a
+		// fresh stack copy that orphans the heap block.
+		recvObj := obj
+		if _, isPtr := preDerefObj.Type().(*irtypes.PointerType); isPtr {
+			recvObj = preDerefObj
+		}
+
+		if bm, err2 := cg.genBoundMethod(block, e.Expr, recvObj, structName, e.Field); err2 == nil && bm != nil {
 			return bm, nil
 		}
 
@@ -178,7 +195,9 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 }
 
 func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value, error) {
-	// ptr[lo..hi] - range slice on a raw pointer: produce a fat-pointer [T].
+	// `arr[lo..hi]` is the canonical range-slice form -- routes to
+	// the unified slice helper that copies into a fresh `_tin_rc_alloc`'d
+	// buffer for fat arrays, raw pointers, and fixed-size arrays.
 	if bin, ok := e.Index.(*ast.BinExpr); ok && bin.Op == ".." {
 		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
 	}
@@ -241,8 +260,10 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 
 	switch at := arrType.(type) {
 	case *irtypes.StructType:
-		if len(at.Fields) == 2 {
-			// Fat pointer: {T*, i64} - extract data pointer directly without alloca.
+		// Fat-ptr: `{T*, i64}` (string) or `{T*, i64, i64}` (dynamic array).
+		// Either shape is indexed by extracting the data pointer and
+		// GEPing into it; the cap slot is irrelevant for read access.
+		if len(at.Fields) == 2 || len(at.Fields) == 3 {
 			elemPtrType := at.Fields[0]
 
 			dataPtr := block.NewExtractValue(arr, 0)

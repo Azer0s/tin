@@ -212,10 +212,10 @@ historical inserts and the priority order above.
 6. push child scope
 7. Pass 0.5: `preregister`
 8. Pre-pass 0.8: overload-name scan
-9. **Pass 0.7: `preregisterPkgTopLevelVar`** (see "known wart" below)
-10. Pass 1: extern func bodies
-11. Pass 1.5a: `genStructLayout` + register package type aliases
-12. Pass 1.6: `genDataDecl`
+9. Pass 1: extern func bodies
+10. Pass 1.5a: `genStructLayout` + register package type aliases
+11. Pass 1.6: `genDataDecl`
+12. **Pass 1.65: `preregisterPkgTopLevelVar`** (after layouts -- see invariant #4)
 13. Pass 1.2: async struct-method coro predeclare
 14. Pass 1.4: predeclare module-level functions
 15. Pass 1.45: predeclare async free-fn coro variants
@@ -247,34 +247,6 @@ historical inserts and the priority order above.
 15. symbol propagation into the parent scope
 
 ---
-
-## Known wart: `loadPackageFromSource` runs vars before layouts
-
-`loadPackageFromSource` Pass 0.7 (`preregisterPkgTopLevelVar`) runs
-*before* Pass 1.5a (`genStructLayout`). This violates invariant #4 above:
-a top-level `const RED = Color{r: 255}` in an imported package folds
-against a placeholder for `Color`, the global ends up typed `void*`,
-and a later store panics:
-
-```
-panic: store operands are not compatible: src=%foo__Color; dst=void*
-  emitTopLevelVarInits  codegen/globals.go
-```
-
-`loadPackageFromFilePath` does not have this bug -- its var-handling
-runs in Pass 2.8 after layouts are done.
-
-The fix is to move Pass 0.7 to after Pass 1.6 in
-`loadPackageFromSource`. A drive-by like "fold struct literals using
-the `evalStructLitConst` fallback" papers over the symptom (the
-initializer evaluates against the late-bound layout) but leaves the
-underlying ordering bug in place. Anything else that touches struct
-shape (vtable building, ADT-typed const) will hit it next.
-
-When implementing the fix, preserve the comment block on Pass 0.7
-explaining that vars need to be visible to function bodies, and add a
-new comment explaining why it now runs after Pass 1.6. Update this
-doc's "Pass order in each driver" section to reflect the move.
 
 ---
 

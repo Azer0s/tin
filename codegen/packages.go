@@ -182,24 +182,6 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.overloadedNames[name] = flag
 	}
 
-	// Pass 0.7: register top-level var declarations in the package as LLVM
-	// globals so that the package's functions (predeclared in pass 2) can
-	// reference them by bare name. Exported vars also become reachable to
-	// the caller as `pkg::name` / `pkg.name`.
-	for _, node := range prog.Stmts {
-		tv, ok := node.(*ast.TopLevelVar)
-		if !ok {
-			continue
-		}
-
-		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
-			cg.curScope = prevScope
-			cg.filename = prevFilename
-
-			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
-		}
-	}
-
 	// Pass 1: compile extern-backed functions first so their names are in scope
 	// before non-extern bodies reference them.
 	for _, node := range prog.Stmts {
@@ -327,6 +309,27 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 				return fmt.Errorf("use %s: data %s: %w", pkgPath, dd.Name, compErr)
 			}
+		}
+	}
+
+	// Pass 1.65: register top-level var declarations as LLVM globals. Must
+	// run AFTER Pass 1.5a/1.6 (struct + ADT layouts) so that struct-typed
+	// initializers like `const RED = Color{r: 255}` fold against the final
+	// LLVM struct type. The previous slot (Pass 0.7, before layouts) folded
+	// against a placeholder, producing void* globals and a "store operands
+	// not compatible" panic in emitTopLevelVarInits. See invariant #4 in
+	// docs/internals/codegen-passes.md.
+	for _, node := range prog.Stmts {
+		tv, ok := node.(*ast.TopLevelVar)
+		if !ok {
+			continue
+		}
+
+		if err := cg.preregisterPkgTopLevelVar(tv, pkgName, exportedNames, prevScope); err != nil {
+			cg.curScope = prevScope
+			cg.filename = prevFilename
+
+			return fmt.Errorf("use %s: var %s: %w", pkgPath, tv.Name, err)
 		}
 	}
 

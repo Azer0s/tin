@@ -51,7 +51,7 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 						constant.NewInt(irtypes.I32, 0), idx), nil
 				}
 
-				if st, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && len(st.Fields) == 2 {
+				if st, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && len(st.Fields) == 3 {
 					// Fat array: load the data pointer (field 0) and GEP into it.
 					ptrGep := block.NewGetElementPtr(st, arrPtr,
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -75,8 +75,10 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		arrType := arr.Type()
 		switch at := arrType.(type) {
 		case *irtypes.StructType:
-			if len(at.Fields) == 2 {
-				// Fat pointer: {T*, i64} - extract data pointer directly without alloca.
+			// Fat pointer: either the 2-field legacy shape (kept for
+			// constants in helper paths) or the canonical 3-field
+			// `{T*, i64 len, i64 cap}` shape -- both index via field 0.
+			if len(at.Fields) == 2 || len(at.Fields) == 3 {
 				elemPtrType := at.Fields[0]
 
 				dataPtr := block.NewExtractValue(arr, 0)

@@ -291,6 +291,33 @@ func isFreshCallResult(v value.Value) bool {
 	return isRCTrackedType(rt)
 }
 
+// isFreshSliceExpr reports whether expr is a range-slice `a[lo..hi]`
+// (an IndexExpr whose Index is a BinExpr with op ".."), optionally
+// wrapped in an `as T` coerce.  genPtrRangeSlice always returns a
+// freshly `_tin_rc_alloc`'d owned buffer for these; an extra retain
+// at the let-binding or return-stmt site would raise rc to 2 with
+// only one matching release, leaking one fat-array header per
+// evaluation.
+//
+// AsExpr wrapping matters because `let s = buf[0..n] as string` is
+// the dominant shape across the stdlib (read_file et al.): the
+// coerce reuses the slice's data buffer in-place, so freshness is
+// preserved through the cast.
+func isFreshSliceExpr(n ast.Node) bool {
+	if as, ok := n.(*ast.AsExpr); ok {
+		n = as.Expr
+	}
+
+	ix, ok := n.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+
+	bin, ok2 := ix.Index.(*ast.BinExpr)
+
+	return ok2 && bin.Op == ".."
+}
+
 // elemNeedsRelease reports whether a scope variable with element type elemType
 // requires any ARC or deinit processing at scope exit.  Returns false for
 // primitive types (int, float, raw pointers) and for named structs with no RC

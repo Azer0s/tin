@@ -310,8 +310,11 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 	bodyBlock := cg.newBlock("forin.body")
 	afterBlock := cg.newBlock("forin.after")
 
-	// Extract length and data pointer from fat ptr.
-	fatPtrType := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
+	// Extract length and data pointer from fat ptr.  Fat-ptr is either
+	// the 2-field string shape `{i8*, i64}` or the 3-field array shape
+	// `{T*, i64, i64}`; the iteration code only touches fields 0 and 1
+	// so it works for both.
+	fatPtrType := fatArrayPtrType(elemType)
 
 	// Alloca to store the fat ptr.
 	fatAlloca := block.NewAlloca(iterVal.Type())

@@ -67,6 +67,33 @@ func (cg *CodeGen) evalStructLitConst(lit *ast.StructLit) constant.Constant {
 	// Slot 0: i32 type_id.
 	fields[0] = constant.NewInt(irtypes.I32, int64(typeID))
 
+	// Evaluate each positional field from the literal. Positional and
+	// named are mutually exclusive (parser enforces it), but mirror the
+	// runtime genStructLit shape either way -- silently zero-fill missing
+	// trailing fields and silently drop args past the field count.
+	for i, elem := range lit.Positional {
+		if i >= len(fieldLLVMTypes) {
+			break
+		}
+
+		llIdx := userOff + i
+		if llIdx >= len(st.Fields) {
+			break
+		}
+
+		intType, ok2 := fieldLLVMTypes[i].(*irtypes.IntType)
+		if !ok2 {
+			return nil // non-integer fields not supported in struct constants
+		}
+
+		intTyp, bigVal := cg.evalConstExprInt(elem, intType)
+		if intTyp == nil {
+			return nil
+		}
+
+		fields[llIdx] = &constant.Int{Typ: intTyp, X: bigVal}
+	}
+
 	// Evaluate each named field from the literal.
 	for _, f := range lit.Fields {
 		rawIdx := -1
@@ -114,8 +141,11 @@ func (cg *CodeGen) evalConstExpr(expr ast.Node) constant.Constant {
 		raw := cg.newGlobalString(e.Value).(constant.Constant)
 		strType := stringFatPtrType()
 		lenVal := constant.NewInt(irtypes.I64, int64(len(e.Value)))
+		// Const strings live in `.rodata`; cap = -1 marks the
+		// borrowed-view encoding (`++=` panics, drop skips release).
+		borrowed := constant.NewInt(irtypes.I64, -1)
 
-		return constant.NewStruct(strType, raw, lenVal)
+		return constant.NewStruct(strType, raw, lenVal, borrowed)
 	}
 
 	// Try integer path.

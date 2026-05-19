@@ -346,6 +346,14 @@ const (
 	//
 	// Default-on.
 	DiagManualUseAfterFree = "manual-use-after-free"
+	// DiagAliasMutation fires when a binding aliased from another
+	// fat-pointer (string or [T]) is mutated indirectly via indexed
+	// write or `++=`.  Because Tin passes / assigns slices shared,
+	// `let b = a; b[0] = ...` reaches through to `a` as well, which
+	// is almost never what the writer intended.  The fix is to break
+	// the alias up front: `let b = copy(a); b[0] = ...`.
+	// Default-off; opt in via -Wpedantic or -W<name>.
+	DiagAliasMutation = "alias-mutation"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
@@ -370,6 +378,7 @@ var defaultOffWarnings = map[string]bool{
 	DiagUncheckedDiv:         true,
 	DiagUncheckedIndex:       true,
 	DiagUncheckedReturnedNil: true,
+	DiagAliasMutation:        true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
@@ -385,7 +394,7 @@ var wpedanticWarnings = []string{
 	DiagUnusedParam, DiagBuiltinShadow, DiagMagicNumber, DiagUnclosedCloseable,
 	DiagBareAsyncCall, DiagSyncUsesAwait, DiagDroppableFiber, DiagNonTinThread,
 	DiagSyncFnCoercedToAsync, DiagUncheckedNilDeref, DiagUncheckedDiv, DiagUncheckedIndex,
-	DiagUncheckedReturnedNil,
+	DiagUncheckedReturnedNil, DiagAliasMutation,
 }
 
 // diagState tracks the user's preferences for one named warning.

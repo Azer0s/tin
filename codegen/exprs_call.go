@@ -59,6 +59,27 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				return cg.genBuiltinLen(block, e.Args[0])
 			}
 		}
+		// Built-in: cap(expr) returns the capacity (allocated headroom)
+		// of a string or dynamic array.  Only a LOCAL let-binding
+		// shadows the builtin; function-name collisions (e.g. an stdlib
+		// `cap` import) fall through to the builtin because the call
+		// shape unambiguously says cap-of-slice when the arg is one
+		// string or fat-ptr.
+		if fn.Name == "cap" && len(e.Args) == 1 {
+			if entry, ok := cg.curScope.lookup("cap"); !ok || !entry.isAlloc {
+				return cg.genBuiltinCap(block, e.Args[0])
+			}
+		}
+		// Built-in: copy(expr) returns a fresh, independently-owned
+		// duplicate of a string or dynamic array.  Only a LOCAL
+		// let-binding shadows; stdlib's `io::copy(dst, src)` doesn't
+		// collide because arity differs and copy(arr) is the natural
+		// one-arg form for the deep-copy builtin.
+		if fn.Name == "copy" && len(e.Args) == 1 {
+			if entry, ok := cg.curScope.lookup("copy"); !ok || !entry.isAlloc {
+				return cg.genBuiltinCopy(block, e.Args[0])
+			}
+		}
 		// Built-in: nlen(expr) returns the dimensions of a multidim
 		// array as an [i64].  Same shadowing rule as len.
 		if fn.Name == "nlen" && len(e.Args) == 1 {
@@ -80,10 +101,23 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				return cg.genBuiltinPanic(block, e.Args[0])
 			}
 		}
-		// Built-in: recover().  Same shadowing rule.
-		if fn.Name == "recover" && len(e.Args) == 0 {
+		// Built-in: recover() returns the panic message string; the
+		// `recover('trace)` opt-in form returns a `(string, [atom])`
+		// tuple so a deferred function can pair the recovered text
+		// with the panic-site backtrace.  Same shadowing rule.
+		if fn.Name == "recover" && len(e.Args) <= 1 {
 			if _, shadowed := cg.curScope.lookup("recover"); !shadowed {
-				return cg.genBuiltinRecover(block)
+				if len(e.Args) == 0 {
+					return cg.genBuiltinRecover(block)
+				}
+
+				if atomLit, ok2 := e.Args[0].(*ast.AtomLit); ok2 && atomLit.Name == "trace" {
+					return cg.genBuiltinRecoverTrace(block)
+				}
+
+				return nil, cg.nodeErr(e.Args[0],
+					"recover(arg) only accepts the atom literal 'trace; "+
+						"call `recover()` for the plain message form")
 			}
 		}
 		// Built-in: default(TypeName) - returns the zero value for a type.

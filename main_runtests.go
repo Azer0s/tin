@@ -599,6 +599,8 @@ func runFileTests(fpaths []string, extraFlags []string, extraCFlags []string, me
 			continue
 		}
 
+		// StacktraceUsed sticks true after the first ensurePanicFn call,
+		// so an unrecovered panic in a test binary dumps a backtrace.
 		stacktraceLinkActive = cg.StacktraceUsed()
 
 		irText := fixCoroAttrs(mod.String())

@@ -92,6 +92,61 @@ Labels: `heavy` (explicit `{#heavy}` tag), `recursive` (call-graph cycle),
 
 ## Panic in fibers
 
+### Unrecovered panic prints a stacktrace
+
+When a panic escapes every defer, Tin prints a Go/Rust-style trace
+before `exit(1)`:
+
+```
+panic: kaboom
+
+stacktrace:
+  deep
+      at example.tin:1:30
+  middle
+      at example.tin:2:31
+  outer
+      at example.tin:3:32
+```
+
+The trace section is **pay-for-what-you-use**: the resolver
+(pclntab + `-rdynamic` + frame-pointer attributes on every function)
+only links into the binary when the codegen detected an explicit
+`panic(...)` or `stacktrace(...)` call in user source. Programs
+that only trigger compiler-emitted panics (cap-check, array bounds,
+ADT mismatch) print the message and `exit(1)` without the trace
+block, keeping their binaries small.
+
+Frame visibility tracks LLVM inlining: small or single-call user
+functions collapse into their caller, so the trace shows only the
+surviving frames. Annotate with `fn{#no_inline}` to pin a function
+to its own frame for debugging.
+
+### `recover('trace)` returns (msg, trace)
+
+Plain `recover()` keeps its existing signature - returns the panic
+message as a string, or empty when not panicking. The opt-in
+`recover('trace)` form returns a `(string, [atom])` tuple of the
+recovered message paired with the same frame atoms `stacktrace()`
+would have produced at the panic site:
+
+```rust
+fn handler() =
+  defer do:
+    let (msg, frames) = recover('trace)
+    if len(msg) > 0:
+      echo "panic: {msg}"
+      for f in frames:
+        echo "  {f}"
+  some_call_that_might_panic()
+```
+
+The trace is captured the moment `_tin_panic` fires (before defers
+run), so the atoms point at the original call site rather than the
+defer's own frame. Call `recover('trace)` BEFORE plain `recover()`
+in the same defer body - the second call would observe a cleared
+panic state and hand back an empty trace.
+
 ### Panic propagation via `await`
 
 When a spawned fiber panics, the panic is not immediately fatal. The runtime

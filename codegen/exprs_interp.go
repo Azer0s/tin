@@ -271,15 +271,6 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	fillArgs = append(fillArgs, args...)
 	block.NewCall(snprintfFn, fillArgs...)
 
-	fatPtrType := stringFatPtrType()
-	fatAlloca := block.NewAlloca(fatPtrType)
-	ptrGep := block.NewGetElementPtr(fatPtrType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(buf, ptrGep)
-	lenGep := block.NewGetElementPtr(fatPtrType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(neededI64, lenGep)
-
 	// ARC: release temporary RC-tracked values (::print strings, concat/call results)
 	// now that snprintf has consumed their data pointers.
 	for _, sv := range toRelease {
@@ -290,7 +281,7 @@ func (cg *CodeGen) genInterpolatedString(block *ir.Block, e *ast.InterpolatedStr
 	// branched (e.g. fat-array -> string conversion emits its own loop blocks).
 	cg.curBlock = block
 
-	return block.NewLoad(fatPtrType, fatAlloca), nil
+	return cg.buildFatArrayValue(block, irtypes.I8, buf, neededI64, neededI64), nil
 }
 
 // Fiber expression helpers

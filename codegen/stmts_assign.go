@@ -3,6 +3,7 @@ package codegen
 import (
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -109,6 +110,18 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// (genLValue for the SIMD store-back) is unavoidable but only
 	// fires for genuinely-addressable LHS expressions.
 	if idxExpr, ok := s.Target.(*ast.IndexExpr); ok {
+		// -Walias-mutation: when the target is `a[i] = ...` and `a` was
+		// declared as `let a = b` from another fat-pointer binding, the
+		// write reaches through to `b` too because slices/strings pass
+		// shared.  Suggest `copy(...)` at the binding site.
+		if id, isID := idxExpr.Expr.(*ast.Identifier); isID && cg.curScope != nil {
+			if e, has := cg.curScope.lookup(id.Name); has && e.aliasedFromName != "" {
+				cg.warn(DiagAliasMutation, s.Pos(),
+					"writing to %q via indexed assignment also mutates %q (shared buffer); use `let %s = copy(%s)` to break the alias",
+					id.Name, e.aliasedFromName, id.Name, e.aliasedFromName)
+			}
+		}
+
 		recv, err2 := cg.genExpr(block, idxExpr.Expr)
 		if err2 != nil {
 			return block, err2
@@ -385,6 +398,18 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 	// Mutating an identifier invalidates any captured constant init.
 	if id, ok := s.Target.(*ast.Identifier); ok {
 		if entry, ok2 := cg.curScope.lookup(id.Name); ok2 {
+			// -Walias-mutation for `++=`: an aliased binding's append
+			// either races (in-place when rc==1) or reallocates so the
+			// alias no longer points at the same data; either way the
+			// reader's intent is suspect.  ++= only fires the warning
+			// since other compound ops don't mutate the buffer in
+			// place.
+			if s.Op == "++=" && entry.aliasedFromName != "" {
+				cg.warn(DiagAliasMutation, s.Pos(),
+					"appending to %q via `++=` operates on the shared buffer it inherited from %q; use `let %s = copy(%s)` to break the alias",
+					id.Name, entry.aliasedFromName, id.Name, entry.aliasedFromName)
+			}
+
 			entry.constInitExpr = nil
 			entry.staticArrayLen = 0
 		}
@@ -487,18 +512,17 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		// Slice concat-assign: `xs ++= ys` extends `xs : [T]` with all
 		// elements of `ys : [T]`.  The right-hand side must be the same
 		// slice type as the left -- to append a single value, wrap it
-		// as a one-element literal: `xs ++= [v]`.  Emission mirrors the
-		// `++` binary operator at exprs.go:1908:
+		// as a one-element literal: `xs ++= [v]`.
 		//
-		//   new_len = old_len + rhs_len
-		//   new_ptr = rc_alloc(new_len * sizeof(T))
-		//   memcpy(new_ptr,             old_ptr, old_len * sizeof(T))
-		//   memcpy(new_ptr + old_bytes, rhs_ptr, rhs_len * sizeof(T))
+		// Fast path (amortized O(1)): when the existing buffer has
+		// enough capacity for the new total AND we are the sole owner
+		// (rc == 1), append the rhs in place and bump len.  Otherwise
+		// allocate a fresh buffer with geometric growth (max(needLen,
+		// oldCap*2 + 1)) so a chain of `xs ++= [v]` amortizes to O(1)
+		// per append.
 		//
-		// For non-temporary RHS, retain each copied element so the new
-		// buffer co-owns them.  Always release the old buffer; for a
-		// temporary RHS, also release its backing buffer (the contained
-		// element refs have been transferred to the new buffer).
+		// Slow path always retains rhs elements before the old buffer's
+		// release so shared rhs sources stay alive in the new buffer.
 		if !isFatArrayPtr(elemType) {
 			return block, cg.nodeErr(s,
 				"`++=` requires a slice ([T]) on the left-hand side, got %s",
@@ -519,6 +543,7 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 
 		oldPtr := block.NewExtractValue(current, 0)
 		oldLen := block.NewExtractValue(current, 1)
+		oldCap := block.NewExtractValue(current, 2)
 		rhsPtr := block.NewExtractValue(rhs, 0)
 		rhsLen := block.NewExtractValue(rhs, 1)
 		newLen := block.NewAdd(oldLen, rhsLen)
@@ -527,58 +552,170 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		nullElemPtr := constant.NewNull(irtypes.NewPointer(elemT))
 		sizeGep := block.NewGetElementPtr(elemT, nullElemPtr, constant.NewInt(irtypes.I64, 1))
 		elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
-		newBytes := block.NewMul(newLen, elemSize)
 
-		newI8Ptr := block.NewCall(cg.ensureRCAlloc(), newBytes)
-		newPtr := block.NewBitCast(newI8Ptr, irtypes.NewPointer(elemT))
-
-		// memcpy old data (ownership transfers from old_buf to new_buf).
-		oldBytes := block.NewMul(oldLen, elemSize)
 		oldI8Ptr := block.NewBitCast(oldPtr, irtypes.I8Ptr)
-		block.NewCall(cg.ensureMemcpy(), newI8Ptr, oldI8Ptr, oldBytes, constant.NewInt(irtypes.I1, 0))
-
-		// memcpy RHS data at offset oldLen*elemSize.
-		rhsOffset := block.NewMul(oldLen, elemSize)
-		rhsDst := block.NewGetElementPtr(irtypes.I8, newI8Ptr, rhsOffset)
 		rhsI8Ptr := block.NewBitCast(rhsPtr, irtypes.I8Ptr)
-		rhsBytes := block.NewMul(rhsLen, elemSize)
-		block.NewCall(cg.ensureMemcpy(), rhsDst, rhsI8Ptr, rhsBytes, constant.NewInt(irtypes.I1, 0))
 
-		// ARC: when the RHS is an alias to existing storage, the new
-		// buffer shares element pointers with the source.  Retain each
-		// copied element so the two buffers can release independently.
-		// `elemNeedsRelease` returns false for raw pointer types, but
-		// pointer elements stored inside `[*T]` arrays DO need
-		// retain/release -- check that case explicitly.
+		// Runtime cap-check: a negative cap encodes a borrowed view or
+		// an immortal global; both forbid `++=` (the source storage is
+		// not owned and may not be grown).  Empty growable bindings use
+		// cap=0 and oldPtr=null and bypass the check.  Skip the emission
+		// entirely under --no-runtime-checks for tight loops audited to
+		// only ever ++= owned slices.
+		//
+		// On panic the block emits a function-level return after the
+		// `_tin_panic` call so a `recover()` in a deferred caller (e.g.
+		// `assert::panics_with`) unwinds out of the current frame
+		// instead of falling into the would-be in-place path with an
+		// invalid PHI predecessor.  Mirrors `genBuiltinPanic`'s exit
+		// shape.
+		if !cg.noRuntimeChecks {
+			capNeg := block.NewICmp(enum.IPredSLT, oldCap, constant.NewInt(irtypes.I64, 0))
+			capCheckPanic := cg.newBlock("augadd.cap.panic")
+			capCheckOk := cg.newBlock("augadd.cap.ok")
+			block.NewCondBr(capNeg, capCheckPanic, capCheckOk)
+
+			// rhs was already evaluated above (possibly an `_tin_rc_alloc`
+			// of a fresh array literal like `xs ++= [v]`).  The panic
+			// path bails before any consumer takes ownership, so release
+			// the temporary's buffer here -- otherwise a deferred
+			// recover() would leak the temp on every cap-check fire.
+			if isTemporaryProducer(s.Value) {
+				capCheckPanic.NewCall(cg.ensureRelease(), rhsI8Ptr)
+			}
+
+			msgPtr := cg.newGlobalString("`++=` requires an owned slice (cap >= 0); the target is a borrowed view or immortal literal -- create an owned copy first with copy(...)")
+			capCheckPanic.NewCall(cg.ensurePanicFn(), msgPtr)
+
+			// _tin_panic returns only when a deferred `recover()` caught
+			// the panic; we then unwind out of the current frame.
+			// Mirror `genBuiltinPanic`'s cleanup so heap-allocated defer
+			// envs and ARC-tracked scope locals are reclaimed before the
+			// synthetic ret -- without it a recovered cap-check panic
+			// leaks every scope-owned slice / closure env in the
+			// enclosing fn.
+			for _, env := range cg.pendingDeferEnvs {
+				if _, isNull := env.(*constant.Null); !isNull {
+					capCheckPanic.NewCall(cg.ensureFree(), env)
+				}
+			}
+
+			cg.emitAllScopeReleases(capCheckPanic, "")
+
+			if cg.curFn != nil {
+				retType := cg.curFn.Sig.RetType
+				if irtypes.IsVoid(retType) {
+					capCheckPanic.NewRet(nil)
+				} else {
+					capCheckPanic.NewRet(cg.zeroValue(retType))
+				}
+			} else {
+				capCheckPanic.NewUnreachable()
+			}
+
+			block = capCheckOk
+			cg.curBlock = block
+		}
+
 		_, elemIsPtr := elemT.(*irtypes.PointerType)
 		needsElemRetain := cg.elemNeedsRelease(elemT) || isRCTrackedType(elemT) || elemIsPtr
+		rhsIsTemp := isTemporaryProducer(s.Value)
 
-		if !isTemporaryProducer(s.Value) && needsElemRetain {
-			cg.emitRetainElemSlice(block, rhsDst, rhsLen, elemT)
+		// Decide in-place vs grow.  In-place requires both:
+		//   (a) oldCap >= newLen, so the existing buffer has room.
+		//   (b) rc(oldPtr) == 1, so no other owner sees the mutation.
+		// Empty buffers (oldPtr == null) skip the rc probe (reading
+		// hdr-of-null UBs) and go straight to the grow path.
+		hasCap := block.NewICmp(enum.IPredSGE, oldCap, newLen)
+
+		nullPtr := constant.NewNull(irtypes.I8Ptr)
+		ptrIsNull := block.NewICmp(enum.IPredEQ, oldI8Ptr, nullPtr)
+
+		// rcHdr = oldPtr - sizeof(TinRCHdr)  (TinRCHdr is 16 bytes).
+		negHdr := constant.NewInt(irtypes.I64, -16)
+		hdrPtr := block.NewGetElementPtr(irtypes.I8, oldI8Ptr, negHdr)
+		// When oldPtr is null we cannot deref hdrPtr: select a safe
+		// sentinel address that always reads as rc != 1.  The constant
+		// global below stores 0 in the rc slot, which fails the
+		// `rcVal == 1` check and forces the grow path.
+		zeroRC := cg.newGlobalString("\x00\x00\x00\x00\x00\x00\x00\x00")
+		safeI8Ptr := block.NewSelect(ptrIsNull, zeroRC, hdrPtr)
+		safeI64Ptr := block.NewBitCast(safeI8Ptr, irtypes.NewPointer(irtypes.I64))
+		rcVal := block.NewLoad(irtypes.I64, safeI64Ptr)
+		isOwned := block.NewICmp(enum.IPredEQ, rcVal, constant.NewInt(irtypes.I64, 1))
+
+		notNull := block.NewICmp(enum.IPredNE, oldI8Ptr, nullPtr)
+		canInPlace := block.NewAnd(hasCap, isOwned)
+		canInPlace = block.NewAnd(canInPlace, notNull)
+
+		inPlaceBlk := cg.newBlock("augadd.inplace")
+		growBlk := cg.newBlock("augadd.grow")
+		mergeBlk := cg.newBlock("augadd.merge")
+
+		block.NewCondBr(canInPlace, inPlaceBlk, growBlk)
+
+		// --- In-place path: append rhs at offset oldLen, len = newLen,
+		//     cap stays the same.  The old buffer is preserved.
+		ipDstOffset := inPlaceBlk.NewMul(oldLen, elemSize)
+		ipDst := inPlaceBlk.NewGetElementPtr(irtypes.I8, oldI8Ptr, ipDstOffset)
+		ipBytes := inPlaceBlk.NewMul(rhsLen, elemSize)
+		inPlaceBlk.NewCall(cg.ensureMemcpy(), ipDst, rhsI8Ptr, ipBytes, constant.NewInt(irtypes.I1, 0))
+
+		if !rhsIsTemp && needsElemRetain {
+			cg.emitRetainElemSlice(inPlaceBlk, ipDst, rhsLen, elemT)
 		}
 
-		// Build the new fat-ptr value.
-		fatAlloca := block.NewAlloca(fatType)
-		ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(newPtr, ptrGep)
-		lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(newLen, lenGep)
-		result = block.NewLoad(fatType, fatAlloca)
-
-		// ARC: drop the old buffer (its element refs transferred to
-		// new_buf via memcpy; releasing the old buffer's outer rc
-		// frees the bytes without touching embedded refs).
-		block.NewCall(cg.ensureRelease(), oldI8Ptr)
-
-		// ARC: when the RHS was a temporary (fresh literal or call
-		// result), the temp buffer's element refs were transferred
-		// into the new buffer.  Release the temp's outer buffer to
-		// reclaim its bytes without touching elements.
-		if isTemporaryProducer(s.Value) {
-			block.NewCall(cg.ensureRelease(), rhsI8Ptr)
+		if rhsIsTemp {
+			inPlaceBlk.NewCall(cg.ensureRelease(), rhsI8Ptr)
 		}
+
+		inPlaceResult := cg.buildFatArrayValue(inPlaceBlk, elemT, oldPtr, newLen, oldCap)
+		inPlaceBlk.NewBr(mergeBlk)
+
+		// --- Grow path: allocate a fresh buffer with geometric
+		//     headroom, memcpy both sides, release the old buffer.
+		//     capForGrow = max(newLen, oldCap * 2 + 1) when oldCap > 0;
+		//     when oldCap <= 0 (empty or borrowed view), fall back to
+		//     newLen so we don't allocate a useless extra slot.
+		doubleCap := growBlk.NewShl(oldCap, constant.NewInt(irtypes.I64, 1))
+		doubleCap2 := growBlk.NewAdd(doubleCap, constant.NewInt(irtypes.I64, 1))
+		capPositive := growBlk.NewICmp(enum.IPredSGT, oldCap, constant.NewInt(irtypes.I64, 0))
+		geomCap := growBlk.NewSelect(capPositive, doubleCap2, newLen)
+		geomBigger := growBlk.NewICmp(enum.IPredSGT, geomCap, newLen)
+		newCap := growBlk.NewSelect(geomBigger, geomCap, newLen)
+
+		newBytes := growBlk.NewMul(newCap, elemSize)
+		newI8Ptr := growBlk.NewCall(cg.ensureRCAlloc(), newBytes)
+		newPtr := growBlk.NewBitCast(newI8Ptr, irtypes.NewPointer(elemT))
+
+		oldBytes := growBlk.NewMul(oldLen, elemSize)
+		growBlk.NewCall(cg.ensureMemcpy(), newI8Ptr, oldI8Ptr, oldBytes, constant.NewInt(irtypes.I1, 0))
+
+		rhsOffset := growBlk.NewMul(oldLen, elemSize)
+		rhsDst := growBlk.NewGetElementPtr(irtypes.I8, newI8Ptr, rhsOffset)
+		rhsBytes := growBlk.NewMul(rhsLen, elemSize)
+		growBlk.NewCall(cg.ensureMemcpy(), rhsDst, rhsI8Ptr, rhsBytes, constant.NewInt(irtypes.I1, 0))
+
+		if !rhsIsTemp && needsElemRetain {
+			cg.emitRetainElemSlice(growBlk, rhsDst, rhsLen, elemT)
+		}
+
+		growBlk.NewCall(cg.ensureRelease(), oldI8Ptr)
+
+		if rhsIsTemp {
+			growBlk.NewCall(cg.ensureRelease(), rhsI8Ptr)
+		}
+
+		growResult := cg.buildFatArrayValue(growBlk, elemT, newPtr, newLen, newCap)
+		growBlk.NewBr(mergeBlk)
+
+		phi := mergeBlk.NewPhi(
+			ir.NewIncoming(inPlaceResult, inPlaceBlk),
+			ir.NewIncoming(growResult, growBlk),
+		)
+		result = phi
+		block = mergeBlk
+		cg.curBlock = block
 	default:
 		result = rhs
 	}

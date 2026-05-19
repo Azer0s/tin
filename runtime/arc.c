@@ -65,7 +65,10 @@ void _tin_release_fat_elem_array(void *data, int64_t count) {
     if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
     int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
     if (prev == 1) {
-        typedef struct { void *ptr; int64_t dummy; } FatElem;
+        // Mirrors the fat-array element layout `{T* ptr, i64 len, i64
+        // cap}` -- struct size must match so the per-element stride
+        // is right.  Only ptr is read; len/cap are unused here.
+        typedef struct { void *ptr; int64_t len; int64_t cap; } FatElem;
         FatElem *elems = (FatElem *)data;
         for (int64_t i = 0; i < count; i++) _tin_release(elems[i].ptr);
         free(hdr);
@@ -197,10 +200,11 @@ void _tin_retain_ptr_elems(void *data, int64_t count) {
 }
 
 // Retain each fat-pointer element in a [string] or [[T]] slice.
-// Fat pointers are {void*, i64}; field 0 is the ARC-managed data pointer.
+// Fat pointers are `{void* ptr, i64 len, i64 cap}`; field 0 is the
+// ARC-managed data pointer.  Struct size must match the array stride.
 void _tin_retain_fat_elems(void *data, int64_t count) {
     if (!data || count <= 0) return;
-    typedef struct { void *ptr; int64_t dummy; } FatElem;
+    typedef struct { void *ptr; int64_t len; int64_t cap; } FatElem;
     FatElem *elems = (FatElem *)data;
     for (int64_t i = 0; i < count; i++) _tin_retain(elems[i].ptr);
 }

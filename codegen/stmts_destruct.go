@@ -180,22 +180,17 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 			}
 		}
 
-		// Build a generic {i8*, i64} slice for _tin_slice_subslice
-		sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-		rawAlloca := block.NewAlloca(sliceType)
-
+		// Build a `{i8*, i64 len, i64 cap}` raw slice for
+		// _tin_slice_subslice (cap == len; the source array's actual
+		// cap doesn't matter for the subslice, which copies anyway).
+		sliceType := fatArrayPtrType(irtypes.I8)
 		dataPtrAsI8 := block.NewBitCast(ptrField, irtypes.I8Ptr)
-		rawPtrGep := block.NewGetElementPtr(sliceType, rawAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(dataPtrAsI8, rawPtrGep)
 
 		lenGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		arrLen := block.NewLoad(irtypes.I64, lenGep)
-		rawLenGep := block.NewGetElementPtr(sliceType, rawAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(arrLen, rawLenGep)
-		rawSlice := block.NewLoad(sliceType, rawAlloca)
+		rawSlice := cg.buildFatArrayValue(block, irtypes.I8, dataPtrAsI8, arrLen, arrLen)
+		_ = sliceType
 
 		subFn := cg.ensureSliceSubslice()
 		subResult := block.NewCall(subFn, rawSlice,

@@ -179,7 +179,7 @@ func (cg *CodeGen) buildClosureEnv(block *ir.Block, captures []closureCapture, d
 			}
 		}
 
-		if needRetain {
+		if needRetain && !c.skipRetain {
 			cg.emitStructFieldRetain(block, c.val)
 		}
 	}

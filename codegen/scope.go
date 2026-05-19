@@ -36,6 +36,21 @@ type scopeEntry struct {
 	noRelease  bool        // true for borrowed bindings (e.g. union `is` vars) -- scope exit skips all release
 	isGlobal   bool        // true for module-level globals; skip in per-function scope release
 	isUnsigned bool        // true if the variable's Tin type is unsigned (u8/u16/u32/u64)
+	// aliasedFromName is set when this binding was declared as `let b = a`
+	// from another fat-pointer binding (`string` / `[T]`).  Indexed-write
+	// and `++=` sites consult it to emit the -Walias-mutation warning so
+	// the user gets pointed at `copy(...)` when they almost certainly
+	// meant to break the alias.
+	aliasedFromName string
+	// holdsFreshRCPtr is true when the binding was initialized from an
+	// expression that produces a fresh `_tin_rc_alloc`'d pointer (notably
+	// `&StructLit{...}` and ADT constructors).  Without this flag, a
+	// subsequent `return s` from such a binding loses the RC provenance
+	// at the coerce-to-trait site (LLVM Load doesn't trace back through
+	// the alloca's store chain), and `coerceToTrait` falls back to the
+	// borrow vtable whose data-release slot is a no-op -- leaking the
+	// heap block on every caller scope-exit.
+	holdsFreshRCPtr bool
 	// byteArrayElem is the element type name ("byte", "u8", "char") when this
 	// variable holds a [byte]/[u8]/[char] fat array.  Empty string otherwise.
 	// Used by genEcho to choose the per-element printf format.

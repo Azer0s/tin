@@ -407,6 +407,14 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 	// it, file-imported sub-files (use "./helper") silently treat any
 	// const reference inside a fn body as an undefined identifier.
 	registerPkgConst := func(name string, value ast.Node, typ ast.TypeExpr) {
+		// Mirror the entry-program path: when no explicit type annotation
+		// is given, infer from a literal-form initializer so that
+		// `const RED = Color{...}` folds against the real LLVM struct
+		// type instead of bailing out.
+		if typ == nil && value != nil {
+			typ = cg.inferTopLevelVarType(value)
+		}
+
 		constVal := cg.evalConstExprTyped(value, typ)
 		if constVal == nil {
 			return

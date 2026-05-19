@@ -58,14 +58,15 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 	// dladdr "<symbol>+<offset>" form for Tin user code.
 	cg.detectStacktraceUsage(prog.Stmts)
 
-	// pclntabUsed mirrors stacktraceUsed for now. It controls the
-	// per-instruction line/col side-map (cg.instLineCol) that the
-	// pclntab post-pass reads to build per-fn PC tables. Unlike
-	// debugMode, enabling this does NOT pull in DWARF emission -
-	// release builds get pclntab WITHOUT bloating the binary with
-	// .debug_info / .debug_line / .debug_str sections that nothing
-	// reads. -g (debugMode) still emits full DWARF for lldb / gdb.
-	cg.pclntabUsed = cg.stacktraceUsed
+	// pclntabUsed gates the per-instruction line/col side-map
+	// (cg.instLineCol) the pclntab post-pass reads to build per-fn PC
+	// tables.  Latched true up-front because we cannot know yet whether
+	// any codegen path will hit `ensurePanicFn` (array bounds, cap-check,
+	// ADT mismatch...); the side-map is a Go map in cg state and costs
+	// nothing in the binary when applyPclntabPostPass later finds
+	// stacktraceUsed == false and stays silent.  Unlike debugMode, this
+	// does NOT pull in DWARF.
+	cg.pclntabUsed = true
 
 	// Initialize DWARF debug metadata only when -g is active. pclntab
 	// captures source positions through cg.instLineCol instead, so the
@@ -696,7 +697,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 			var argsSliceVal value.Value
 
 			if wantsArgs {
-				strArrType := irtypes.NewStruct(irtypes.NewPointer(stringFatPtrType()), irtypes.I64)
+				strArrType := fatArrayPtrType(stringFatPtrType())
 				argvFn := cg.ensureExternDecl("_tin_argv_to_slice", strArrType, []*ir.Param{
 					ir.NewParam("argc", irtypes.I32),
 					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),

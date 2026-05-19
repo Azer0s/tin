@@ -99,7 +99,7 @@ func (cg *CodeGen) boxToAny(block *ir.Block, val value.Value) value.Value {
 		dataPtr = rawPtr
 	case isStringType(t):
 		tag = anyTagString
-		sz := constant.NewInt(irtypes.I64, 16) // {i8*, i64} = 16 bytes
+		sz := constant.NewInt(irtypes.I64, 24) // {i8*, i64 len, i64 cap} = 24 bytes
 		rawPtr := block.NewCall(rcAlloc, sz)
 		strPtr := block.NewBitCast(rawPtr, irtypes.NewPointer(t))
 		block.NewStore(val, strPtr)

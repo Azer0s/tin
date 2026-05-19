@@ -36,7 +36,7 @@ fn tin_pcre2_free_c(code *void)                                                 
 fn tin_pcre2_exec_c(code *void, subject string, sublen i32, start i32) i32               = extern("tin_pcre2_exec")
 fn tin_pcre2_ovector_c() *i32                                                             = extern("tin_pcre2_ovector")
 
-// substr extracts s[beg:end] as a string using byte-by-byte append.
+// substr extracts s[beg..end] as a string using byte-by-byte append.
 fn substr(s string, beg i64, end i64) string =
   let out = ""
   let i i64 = beg

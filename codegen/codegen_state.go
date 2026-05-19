@@ -100,6 +100,7 @@ func (cg *CodeGen) newBlock(base string) *ir.Block {
 // SetTestMode enables test-mode compilation: test blocks are compiled into
 // test functions and a test-runner main() is generated.
 func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
+func (cg *CodeGen) SetNoRuntimeChecks(v bool)  { cg.noRuntimeChecks = v }
 func (cg *CodeGen) SetVerboseMatchInfo(v bool) { cg.verboseMatchInfo = v }
 
 // SetNoWarnAsyncMain is the -Wno-async-main hook (kept for back-compat with

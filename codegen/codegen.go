@@ -217,14 +217,6 @@ type CodeGen struct {
 
 	// tinPanicFn is the lazily declared _tin_panic(msg i8*) extern.
 	tinPanicFn *ir.Func
-	// tinRecoverFn is the lazily declared _tin_recover() -> TinString extern.
-	tinRecoverFn *ir.Func
-	// sliceSubsliceFn is the lazily declared _tin_slice_subslice extern.
-	sliceSubsliceFn *ir.Func
-	// sliceConvertIntFn is the lazily declared _tin_slice_convert_int extern.
-	sliceConvertIntFn *ir.Func
-	// bytesFromBufFn is the lazily declared _tin_bytes_from_buf extern.
-	bytesFromBufFn *ir.Func
 	// memsetFn is the lazily declared llvm.memset.p0i8.i64 intrinsic.
 	memsetFn *ir.Func
 
@@ -680,6 +672,12 @@ type CodeGen struct {
 	// and a test-runner main is generated instead of the normal implicit main.
 	testMode  bool
 	testDecls []*ast.TestDecl
+
+	// noRuntimeChecks disables emission of runtime safety checks like the
+	// `++=` borrowed-view (cap < 0) panic.  Trades a single icmp-and-branch
+	// per write site for the chance of silently mutating shared / immortal
+	// storage; only meaningful for tight loops that have been audited.
+	noRuntimeChecks bool
 
 	// diags tracks per-warning suppression / escalation preferences. Keyed
 	// by canonical diagnostic name (see codegen/diag.go for constants).

@@ -10,7 +10,7 @@ expression-oriented syntax. It compiles to native code via LLVM.
 | [01 - Basics](01-basics.md) | Types, variables, `echo`, string interpolation, operators |
 | [02 - Control Flow](02-control-flow.md) | `if/else`, `for`, `match` (struct + array patterns), `where`, `defer`, `panic` |
 | [03 - Functions](03-functions.md) | Functions, closures, generics, pipe operator, overloading |
-| [04 - Collections](04-collections.md) | Arrays, slices, ranges, destructuring |
+| [04 - Collections](04-collections.md) | Arrays, slices, ranges, destructuring (cap, copy, alias semantics in [04-collections-mutation](04-collections-mutation.md)) |
 | [05 - Structs](05-structs.md) | Structs, methods, `fn init`/`fn deinit`, generics, type aliases, tuples |
 | [06 - Traits](06-traits.md) | Trait declaration, default methods, forward fields, vtable dispatch, generic traits |
 | [07 - Enums & Unions](07-enums-unions.md) | Integer enums, atom enums, tagged unions, native C unions |

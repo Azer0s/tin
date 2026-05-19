@@ -1,0 +1,35 @@
+// examples/cross_file_struct_const_test - regression for struct-typed
+// top-level consts crossing a `use "./file"` import.
+//
+// Before the fix, loadPackageFromSource ran Pass 0.7
+// (preregisterPkgTopLevelVar) BEFORE Pass 1.5a (genStructLayout),
+// so a top-level `const RED Color = Color{...}` in an imported
+// package folded against a placeholder for `Color`.  The global
+// ended up typed void*, and a later store panicked with
+//   panic: store operands are not compatible: src=%Color; dst=void*
+//
+// preregisterPkgTopLevelVar also lacked the type-inference path that
+// the entry-program version had, so the bare form
+// `const RED = Color{...}` (no annotation) folded against void as well.
+//
+// The fix moves var registration to Pass 1.65 (after layouts) and
+// adds inference to preregisterPkgTopLevelVar.  See
+// docs/internals/codegen-passes.md, invariant #4.
+
+use assert
+use "./fixtures/cross_file_struct_const_helper"
+
+test "named-field struct const survives package boundary" =
+  assert::equals(255 as u8, RED.r)
+  assert::equals(100 as u8, RED.g)
+  assert::equals(50 as u8, RED.b)
+
+test "positional struct const survives package boundary" =
+  assert::equals(42 as u8, GREEN.r)
+  assert::equals(99 as u8, GREEN.g)
+  assert::equals(17 as u8, GREEN.b)
+
+test "explicit-typed struct const survives package boundary" =
+  assert::equals(0 as u8, BLUE.r)
+  assert::equals(0 as u8, BLUE.g)
+  assert::equals(255 as u8, BLUE.b)

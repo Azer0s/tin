@@ -647,7 +647,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		lenVal := block.NewExtractValue(rawRet, 1)
 		dataI8 := block.NewBitCast(typedData, irtypes.I8Ptr)
 
-		rawSliceTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+		rawSliceTy := fatArrayPtrType(irtypes.I8)
 		alloca := block.NewAlloca(rawSliceTy)
 		ptrField := block.NewGetElementPtr(rawSliceTy, alloca,
 			constant.NewInt(irtypes.I32, 0),
@@ -655,8 +655,12 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		lenField := block.NewGetElementPtr(rawSliceTy, alloca,
 			constant.NewInt(irtypes.I32, 0),
 			constant.NewInt(irtypes.I32, 1))
+		capField := block.NewGetElementPtr(rawSliceTy, alloca,
+			constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 2))
 		block.NewStore(dataI8, ptrField)
 		block.NewStore(lenVal, lenField)
+		block.NewStore(lenVal, capField)
 		rawSlice := block.NewLoad(rawSliceTy, alloca)
 
 		// out_data and out_len are the last two wrapper params.

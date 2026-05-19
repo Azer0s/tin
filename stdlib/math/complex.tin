@@ -1,0 +1,167 @@
+// stdlib/math/complex - Complex numbers (f64, f64).
+//
+// Complex is a struct of two f64s (re, im) laid out contiguously with no
+// padding.  Arithmetic uses standard operator traits, so user code reads
+// the same as primitive math:
+//
+//   use math
+//   use math::complex
+//
+//   let z = complex::Complex{re: 3.0, im: 4.0}
+//   let w = z * z + complex::I        // (3+4i)^2 + i = -7 + 25i
+//   echo w                            // -7 + 25i
+//   echo complex::abs(z)              // 5.0
+//
+// The CBLAS `c` / `z` (single / double complex) families expect arrays
+// of interleaved `{re, im, re, im, ...}` doubles.  Because Complex is a
+// two-f64 struct with no padding, `&xs[0]` for `[Complex]` reinterprets
+// as `*f64` and lines up byte-for-byte with the CBLAS layout -- no
+// conversion needed.  A regression test in complex_test.tin pins the
+// invariant.
+
+// Private C-math helpers used by the holomorphic functions below.
+// math.tin doesn't expose sinh / cosh / hypot under their natural
+// names yet, so declare locals here.  Resolved by the `//!-lm` link
+// flag math.tin already brings in.
+fn c_sinh(x f64) f64 = extern("sinh")
+fn c_cosh(x f64) f64 = extern("cosh")
+fn c_sqrt(x f64) f64 = extern("sqrt")
+fn c_exp(x f64)  f64 = extern("exp")
+fn c_log(x f64)  f64 = extern("log")
+fn c_sin(x f64)  f64 = extern("sin")
+fn c_cos(x f64)  f64 = extern("cos")
+fn c_atan2(y f64, x f64) f64 = extern("atan2")
+fn c_hypot(x f64, y f64) f64 = extern("hypot")
+fn c_fabs(x f64) f64 = extern("fabs")
+
+// Complex is a fixed-layout (f64 re, f64 im) value.  No padding, total
+// size 16 bytes -- matches the CBLAS `void *` complex layout exactly.
+struct Complex(
+  add[Complex, Complex], sub[Complex, Complex],
+  mul[Complex, Complex], div[Complex, Complex],
+  neg[Complex], comp[Complex],
+  implicit[i32], implicit[i64], implicit[f32], implicit[f64],
+  print
+) =
+  re f64
+  im f64
+
+  // Operator overloads.
+
+  fn ::add(this Complex, other Complex) Complex =
+    return Complex{re: this.re + other.re, im: this.im + other.im}
+
+  fn ::sub(this Complex, other Complex) Complex =
+    return Complex{re: this.re - other.re, im: this.im - other.im}
+
+  // (a+bi)(c+di) = (ac - bd) + (ad + bc)i
+  fn ::mul(this Complex, other Complex) Complex =
+    return Complex{
+      re: this.re * other.re - this.im * other.im,
+      im: this.re * other.im + this.im * other.re
+    }
+
+  // (a+bi) / (c+di) = ((ac+bd) + (bc-ad)i) / (c^2 + d^2)
+  // No guard against c^2 + d^2 == 0: division by zero produces an inf /
+  // NaN result the same way f64 division does.  Callers that care can
+  // check `abs(other)` first.
+  fn ::div(this Complex, other Complex) Complex =
+    let denom f64 = other.re * other.re + other.im * other.im
+    return Complex{
+      re: (this.re * other.re + this.im * other.im) / denom,
+      im: (this.im * other.re - this.re * other.im) / denom
+    }
+
+  fn ::neg(this Complex) Complex =
+    return Complex{re: -this.re, im: -this.im}
+
+  fn ::comp(this Complex, other Complex) bool =
+    return this.re == other.re && this.im == other.im
+
+  // Implicit conversions from numeric scalars.  Lets users mix
+  // `Complex + 1` / `2.5 * z` etc. without an explicit constructor.
+  static fn ::implicit(v i32) Complex = return Complex{re: v as f64, im: 0.0}
+  static fn ::implicit(v i64) Complex = return Complex{re: v as f64, im: 0.0}
+  static fn ::implicit(v f32) Complex = return Complex{re: v as f64, im: 0.0}
+  static fn ::implicit(v f64) Complex = return Complex{re: v,        im: 0.0}
+
+  // print: render as "a + bi" / "a - bi".  The sign of the imaginary
+  // part folds into the joiner so we don't emit "1.0 + -2.0i".
+  fn ::print(this Complex) string =
+    if this.im >= 0.0:
+      return "{this.re} + {this.im}i"
+    return "{this.re} - {-this.im}i"
+
+// Construction helpers
+
+// from builds a Complex from real and imaginary parts.  The struct
+// literal works too; `from` exists so call-site readers don't have
+// to remember field order.
+fn from(re f64, im f64) Complex = return Complex{re: re, im: im}
+
+// from_polar builds a Complex from polar form (r, theta in radians).
+// r may be negative; the angle is mod 2pi.
+fn from_polar(r f64, theta f64) Complex =
+  return Complex{re: r * c_cos(theta), im: r * c_sin(theta)}
+
+// Component readers (mirror math.tin's flat-function style).
+
+// conj returns the complex conjugate (a + bi -> a - bi).
+fn conj(z Complex) Complex = return Complex{re: z.re, im: -z.im}
+
+// abs returns the modulus sqrt(re^2 + im^2).  Uses hypot so values
+// near f64::MAX don't overflow during the intermediate square.
+fn abs(z Complex) f64 = return c_hypot(z.re, z.im)
+
+// arg returns the principal argument in (-pi, pi].
+fn arg(z Complex) f64 = return c_atan2(z.im, z.re)
+
+// Holomorphic functions
+
+// exp(z) = e^a * (cos b + i sin b)
+fn exp(z Complex) Complex =
+  let r = c_exp(z.re)
+  return Complex{re: r * c_cos(z.im), im: r * c_sin(z.im)}
+
+// log(z) = log|z| + i*arg(z)  (principal branch; arg in (-pi, pi]).
+fn log(z Complex) Complex =
+  return Complex{re: c_log(abs(z)), im: arg(z)}
+
+// sqrt(z) via polar: sqrt(|z|) * (cos(arg/2) + i sin(arg/2)).
+// Principal branch: result has non-negative real part.
+fn sqrt(z Complex) Complex =
+  return from_polar(c_sqrt(abs(z)), arg(z) / 2.0)
+
+// sin(z) = sin(a) cosh(b) + i cos(a) sinh(b)
+fn sin(z Complex) Complex =
+  return Complex{
+    re: c_sin(z.re) * c_cosh(z.im),
+    im: c_cos(z.re) * c_sinh(z.im)
+  }
+
+// cos(z) = cos(a) cosh(b) - i sin(a) sinh(b)
+fn cos(z Complex) Complex =
+  return Complex{
+    re: c_cos(z.re) * c_cosh(z.im),
+    im: -c_sin(z.re) * c_sinh(z.im)
+  }
+
+// tan(z) = sin(z) / cos(z)
+fn tan(z Complex) Complex = return sin(z) / cos(z)
+
+// i returns the imaginary unit 0 + 1i.  Folds to a constant in
+// optimized builds; use to spell complex literals naturally:
+//   let z = complex::from(3.0, 4.0) + complex::i()
+//
+// Top-level `const I Complex = ...` would be the natural shape but
+// the current compiler doesn't fold struct literals in const
+// initializer position, so we wrap it in a #pure function.
+fn{#pure} i() Complex = return Complex{re: 0.0, im: 1.0}
+
+export {
+  Complex,
+  from, from_polar, i,
+  conj, abs, arg,
+  exp, log, sqrt,
+  sin, cos, tan
+} as complex

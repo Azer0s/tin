@@ -323,13 +323,13 @@ func (cg *CodeGen) findErrMessageSlot(vtPtrTy irtypes.Type) (*errMessageSlot, bo
 			continue
 		}
 		// The `message` method has signature `(*Err data) TinString`.
-		// TinString is the {i8*, i64} struct; match by return type.
+		// TinString is the {i8*, i64 len, i64 cap} struct; match by return type.
 		retSt, ok := ft.RetType.(*irtypes.StructType)
 		if !ok {
 			continue
 		}
 
-		if len(retSt.Fields) != 2 {
+		if len(retSt.Fields) != 3 {
 			continue
 		}
 
@@ -338,6 +338,10 @@ func (cg *CodeGen) findErrMessageSlot(vtPtrTy irtypes.Type) (*errMessageSlot, bo
 		}
 
 		if it, ok := retSt.Fields[1].(*irtypes.IntType); !ok || it.BitSize != 64 {
+			continue
+		}
+
+		if it, ok := retSt.Fields[2].(*irtypes.IntType); !ok || it.BitSize != 64 {
 			continue
 		}
 

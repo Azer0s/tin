@@ -268,7 +268,7 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 			// exactly that for `[]`).  Real string values reach the
 			// caller's store-time type check unchanged so the user
 			// gets a precise error.
-			if cv, ok := val.(*constant.Struct); ok && len(cv.Fields) == 2 {
+			if cv, ok := val.(*constant.Struct); ok && len(cv.Fields) == 3 {
 				if _, isNull := cv.Fields[0].(*constant.Null); isNull {
 					return cg.zeroValue(target)
 				}
@@ -465,43 +465,27 @@ func (cg *CodeGen) convertFatArray(block *ir.Block, val value.Value, srcSt, tgtS
 	srcSz := llvmTypeSize(srcElem)
 	tgtSz := llvmTypeSize(tgtElem)
 
-	// Spill to alloca and extract ptr/len.
-	srcSpill := block.NewAlloca(srcSt)
-	block.NewStore(val, srcSpill)
-	lenGep := block.NewGetElementPtr(srcSt, srcSpill,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	srcLen := block.NewLoad(irtypes.I64, lenGep)
-	ptrGep := block.NewGetElementPtr(srcSt, srcSpill,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	srcData := block.NewLoad(srcPt, ptrGep)
+	// Extract ptr/len directly from the source fat-pointer struct.
+	srcLen := block.NewExtractValue(val, 1)
+	srcData := block.NewExtractValue(val, 0)
 
 	if srcSz == tgtSz {
+		// Same-width reinterpret: bitcast the data pointer, keep len.
+		// Cap == len (we treat the result as owned, fresh-shaped).
 		newData := block.NewBitCast(srcData, tgtPt)
-		resAlloca := block.NewAlloca(tgtSt)
-		resPtrGep := block.NewGetElementPtr(tgtSt, resAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(newData, resPtrGep)
-		resLenGep := block.NewGetElementPtr(tgtSt, resAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(srcLen, resLenGep)
 
-		return block.NewLoad(tgtSt, resAlloca)
+		return cg.buildFatArrayValue(block, tgtElem, newData, srcLen, srcLen)
 	}
 
 	if !irtypes.IsInt(srcElem) || !irtypes.IsInt(tgtElem) {
 		return val
 	}
 
-	// Build {i8*, i64} raw slice of source and call runtime converter.
-	rawSlice := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-	rawAlloca := block.NewAlloca(rawSlice)
-	rawPtrGep := block.NewGetElementPtr(rawSlice, rawAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(block.NewBitCast(srcData, irtypes.I8Ptr), rawPtrGep)
-	rawLenGep := block.NewGetElementPtr(rawSlice, rawAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(srcLen, rawLenGep)
-	rawVal := block.NewLoad(rawSlice, rawAlloca)
+	// Build a 3-field raw slice {i8*, i64 len, i64 cap} matching the
+	// runtime TinSlice layout, then call `_tin_slice_convert_int`.
+	rawSlice := fatArrayPtrType(irtypes.I8)
+	srcDataI8 := block.NewBitCast(srcData, irtypes.I8Ptr)
+	rawVal := cg.buildFatArrayValue(block, irtypes.I8, srcDataI8, srcLen, srcLen)
 
 	srcSigned := int64(1)
 	if isUnsignedIntLLVMType(srcElem) {
@@ -513,10 +497,10 @@ func (cg *CodeGen) convertFatArray(block *ir.Block, val value.Value, srcSt, tgtS
 		constant.NewInt(irtypes.I64, int64(tgtSz)),
 		constant.NewInt(irtypes.I32, srcSigned))
 
-	// Reinterpret {i8*, i64} result as {T2*, i64}.
-	resRawAlloca := block.NewAlloca(rawSlice)
-	block.NewStore(convResult, resRawAlloca)
-	castPtr := block.NewBitCast(resRawAlloca, irtypes.NewPointer(tgtSt))
+	// Reinterpret the raw {i8*, i64, i64} result as {T2*, i64, i64}.
+	resAlloca := block.NewAlloca(rawSlice)
+	block.NewStore(convResult, resAlloca)
+	castPtr := block.NewBitCast(resAlloca, irtypes.NewPointer(tgtSt))
 
 	return block.NewLoad(tgtSt, castPtr)
 }

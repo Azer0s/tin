@@ -73,6 +73,10 @@ Run / test:
                            hangs the evaluator or when comparing folded vs unfolded codegen.
   --pure-fold-budget=N     cap node visits per top-level #pure call (default 1_000_000). On
                            exhaustion the call falls back to runtime emission. 0 = use default.
+  --no-runtime-checks      strip emission of runtime safety checks (currently: the ++=
+                           borrowed-view / immortal-cap panic). Trades the icmp-and-branch per
+                           write site for the chance of silently mutating shared storage; only
+                           use for tight loops audited to ++= owned slices.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
   -Wall                    enable hygiene checks: unused-let, unused-result, style
@@ -132,6 +136,8 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     write-to-const              write through a pointer alias to a top-level const
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
+    alias-mutation              writing to a binding declared via 'let b = a' from another
+                                fat-pointer; reaches through to the shared buffer (use copy(a))
     bare-async-call             every bare call to an fn{#async} (pedantic superset of
                                 bare-parking-async-call - flags pure-compute async fns too)
     builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
@@ -386,7 +392,7 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold":
+		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
@@ -400,6 +406,16 @@ func main() {
 
 			// `--pure-fold-budget=N` is a single-token "key=value" flag.
 			if strings.HasPrefix(a, "--pure-fold-budget=") {
+				fileArgIdx++
+
+				continue
+			}
+
+			// -Wall / -Wpedantic / -W<name> / -Wno-<name> / -Werror[=name]
+			// are single-token flags too -- they need to be skipped here
+			// so the file argument lands correctly when callers write
+			// `tin run -Wpedantic foo.tin`.
+			if strings.HasPrefix(a, "-W") || strings.HasPrefix(a, "-Werror") {
 				fileArgIdx++
 
 				continue
@@ -446,6 +462,7 @@ doneFlags:
 	wPedantic := false
 	noPureFold := false
 	pureFoldBudget := 0 // 0 = use codegen default
+	noRuntimeChecks := false
 
 	var (
 		warnSuppress []string // -Wno-<name> targets
@@ -571,6 +588,8 @@ doneFlags:
 			optLevelOverride = a
 		case "--no-pure-fold", "-fno-pure-fold":
 			noPureFold = true
+		case "--no-runtime-checks":
+			noRuntimeChecks = true
 		case "--fast":
 			// Shortcut for `tin test`: drop the optimization level so the
 			// LLVM passes that dominate compile time on rtti-heavy /
@@ -810,6 +829,10 @@ doneFlags:
 		cg.SetPureFoldBudget(pureFoldBudget)
 	}
 
+	if noRuntimeChecks {
+		cg.SetNoRuntimeChecks(true)
+	}
+
 	if wPedantic {
 		cg.SetWPedantic()
 	} else if wAll {
@@ -898,8 +921,10 @@ doneFlags:
 
 	// Latch the stacktrace flag for the upcoming compileIR call. Phase 6
 	// of docs/plans/stacktrace-libunwind.md gates `-lunwind` / `-rdynamic`
-	// / `-DTIN_STACKTRACE` on this; programs that never reference
-	// stacktrace() get the unmodified clang argv (and a smaller binary).
+	// / `-DTIN_STACKTRACE` on this. `StacktraceUsed()` is sticky-true once
+	// any codegen path called `ensurePanicFn` (explicit panic, array
+	// bounds, cap-check, ADT mismatch...) so an unrecovered panic dumps
+	// a backtrace; pure programs that never touch panic still pay zero.
 	stacktraceLinkActive = cg.StacktraceUsed()
 
 	irText := fixCoroAttrs(mod.String())

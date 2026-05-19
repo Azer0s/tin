@@ -281,7 +281,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
 	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) && !isFreshCallResult(val) &&
-		!cg.isDerefOfRawVoidPtrCast(s.Value) {
+		!cg.isDerefOfRawVoidPtrCast(s.Value) && !isFreshSliceExpr(s.Value) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.
 		// Retain first so the caller gets one owned reference, then scope cleanup
@@ -535,6 +535,117 @@ func (cg *CodeGen) genBuiltinLen(block *ir.Block, arg ast.Node) (value.Value, er
 	}
 
 	return length, nil
+}
+
+// genBuiltinCopy implements the copy(expr) built-in: returns a fresh,
+// independently-owned duplicate of a string or dynamic array.  Modifying
+// the returned value does not affect the source.  For RC-tracked element
+// types, each element gets a retain so the new buffer's release does not
+// take down elements still owned by the source.
+func (cg *CodeGen) genBuiltinCopy(block *ir.Block, arg ast.Node) (value.Value, error) {
+	val, err := cg.genExpr(block, arg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pick up any continuation block that `arg` evaluation parked us
+	// in (an `await` inside `copy(...)` advances cg.curBlock); without
+	// this all the subsequent IR lands in the original block and the
+	// emission verifier flags the dead use of the await's result.
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	t := val.Type()
+
+	if !isStringType(t) && !isFatArrayPtr(t) {
+		return nil, fmt.Errorf("copy() not supported for type %s", t)
+	}
+
+	st := t.(*irtypes.StructType)
+	elemPtrType := st.Fields[0].(*irtypes.PointerType)
+	elemT := elemPtrType.ElemType
+
+	srcPtr := block.NewExtractValue(val, 0)
+	srcLen := block.NewExtractValue(val, 1)
+
+	// sizeof(elemT) via GEP trick.
+	nullElemPtr := constant.NewNull(irtypes.NewPointer(elemT))
+	sizeGep := block.NewGetElementPtr(elemT, nullElemPtr, constant.NewInt(irtypes.I64, 1))
+	elemSize := block.NewPtrToInt(sizeGep, irtypes.I64)
+	totalBytes := block.NewMul(srcLen, elemSize)
+
+	// For strings, allocate len+1 so the result is NUL-terminated and stays
+	// drop-in compatible with C-extern boundaries that read past .len.
+	var allocBytes value.Value = totalBytes
+	if isStringType(t) {
+		allocBytes = block.NewAdd(totalBytes, constant.NewInt(irtypes.I64, 1))
+	}
+
+	newI8Ptr := block.NewCall(cg.ensureRCAlloc(), allocBytes)
+	newPtr := block.NewBitCast(newI8Ptr, irtypes.NewPointer(elemT))
+
+	srcI8Ptr := block.NewBitCast(srcPtr, irtypes.I8Ptr)
+	block.NewCall(cg.ensureMemcpy(), newI8Ptr, srcI8Ptr, totalBytes, constant.NewInt(irtypes.I1, 0))
+
+	if isStringType(t) {
+		nullByte := block.NewGetElementPtr(irtypes.I8, newI8Ptr, totalBytes)
+		block.NewStore(constant.NewInt(irtypes.I8, 0), nullByte)
+	}
+
+	// Retain every RC-tracked element so the copy independently owns its
+	// references; without this the copy's release would tear down content
+	// still held by the source.
+	_, elemIsPtr := elemT.(*irtypes.PointerType)
+	if cg.elemNeedsRelease(elemT) || isRCTrackedType(elemT) || elemIsPtr {
+		cg.emitRetainElemSlice(block, newI8Ptr, srcLen, elemT)
+	}
+
+	if isRCTrackedType(t) && !isCopyExpr(arg) {
+		cg.emitRelease(block, val)
+	}
+
+	return cg.buildFatArrayValue(block, elemT, newPtr, srcLen, srcLen), nil
+}
+
+// genBuiltinCap implements the cap(expr) built-in: returns the i64
+// capacity (allocated headroom) of a string or dynamic array.  For
+// an owned/growable slice cap >= len; immortal / borrowed views
+// (string literals, fieldnames(), atom-array globals) encode
+// cap == -1 so the runtime cap-check on `++=` can reject them
+// before allocating.  Static arrays have cap == len.
+func (cg *CodeGen) genBuiltinCap(block *ir.Block, arg ast.Node) (value.Value, error) {
+	val, err := cg.genExpr(block, arg)
+	if err != nil {
+		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	t := val.Type()
+
+	var capacity value.Value
+
+	if isStringType(t) || isFatArrayPtr(t) {
+		st := t.(*irtypes.StructType)
+		alloca := block.NewAlloca(st)
+		block.NewStore(val, alloca)
+		gep := block.NewGetElementPtr(st, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+		capacity = block.NewLoad(irtypes.I64, gep)
+	} else if at, ok := t.(*irtypes.ArrayType); ok {
+		return constant.NewInt(irtypes.I64, int64(at.Len)), nil
+	} else {
+		return nil, fmt.Errorf("cap() not supported for type %s", t)
+	}
+
+	if isRCTrackedType(t) && !isCopyExpr(arg) {
+		cg.emitRelease(block, val)
+	}
+
+	return capacity, nil
 }
 
 // Defer chain helpers

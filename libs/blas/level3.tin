@@ -170,10 +170,10 @@ fn dgemm(a [[f64]], b [[f64]], c [[f64]]) =
     panic("blas::dgemm: C has {sc[1]} cols but B has {n}")
   let a_flat = flatten_f64(a)
   let b_flat = flatten_f64(b)
-  let c_flat [f64] = []
-
-  for let i i64 = 0; i < m * n; i++:
-    c_flat ++= [0.0]
+  // beta=0 below means dgemm overwrites C, so c_flat's pre-call
+  // contents don't matter -- flatten C (instead of a per-element
+  // zero-fill loop) just to get a correctly-sized owned buffer.
+  let c_flat = flatten_f64(c)
 
   dgemm_raw(
     ROW_MAJOR, NO_TRANS, NO_TRANS,
@@ -213,10 +213,7 @@ fn sgemm(a [[f32]], b [[f32]], c [[f32]]) =
     panic("blas::sgemm: C has {sc[1]} cols but B has {n}")
   let a_flat = flatten_f32(a)
   let b_flat = flatten_f32(b)
-  let c_flat [f32] = []
-
-  for let i i64 = 0; i < m * n; i++:
-    c_flat ++= [0.0 as f32]
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by sgemm.
 
   sgemm_raw(
     ROW_MAJOR, NO_TRANS, NO_TRANS,
@@ -263,10 +260,7 @@ fn dsymm(side i32, uplo i32, a [[f64]], b [[f64]], c [[f64]]) =
     panic("blas::dsymm: C is {sc[0]}x{sc[1]} but expected {m}x{n}")
   let a_flat = flatten_f64(a)
   let b_flat = flatten_f64(b)
-  let c_flat [f64] = []
-
-  for let i i64 = 0; i < m * n; i++:
-    c_flat ++= [0.0]
+  let c_flat = flatten_f64(c) // beta=0; contents discarded by dsymm.
   dsymm_raw(
     ROW_MAJOR, side, uplo,
     m as i32, n as i32,
@@ -305,10 +299,7 @@ fn ssymm(side i32, uplo i32, a [[f32]], b [[f32]], c [[f32]]) =
     panic("blas::ssymm: C is {sc[0]}x{sc[1]} but expected {m}x{n}")
   let a_flat = flatten_f32(a)
   let b_flat = flatten_f32(b)
-  let c_flat [f32] = []
-
-  for let i i64 = 0; i < m * n; i++:
-    c_flat ++= [0.0 as f32]
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by ssymm.
   ssymm_raw(
     ROW_MAJOR, side, uplo,
     m as i32, n as i32,
@@ -344,10 +335,7 @@ fn dsyrk(uplo i32, a [[f64]], c [[f64]]) =
   if sc[0] != n || sc[1] != n:
     panic("blas::dsyrk: C is {sc[0]}x{sc[1]} but expected {n}x{n}")
   let a_flat = flatten_f64(a)
-  let c_flat [f64] = []
-
-  for let i i64 = 0; i < n * n; i++:
-    c_flat ++= [0.0]
+  let c_flat = flatten_f64(c) // beta=0; contents discarded by dsyrk.
   dsyrk_raw(
     ROW_MAJOR, uplo, NO_TRANS,
     n as i32, k as i32,
@@ -374,10 +362,7 @@ fn ssyrk(uplo i32, a [[f32]], c [[f32]]) =
   if sc[0] != n || sc[1] != n:
     panic("blas::ssyrk: C is {sc[0]}x{sc[1]} but expected {n}x{n}")
   let a_flat = flatten_f32(a)
-  let c_flat [f32] = []
-
-  for let i i64 = 0; i < n * n; i++:
-    c_flat ++= [0.0 as f32]
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by ssyrk.
   ssyrk_raw(
     ROW_MAJOR, uplo, NO_TRANS,
     n as i32, k as i32,

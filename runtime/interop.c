@@ -105,17 +105,17 @@ TIN_API TinString tin_interop_str_in(const char *cstr) {
         char *buf = (char *)_tin_rc_alloc(1);
         if (buf) buf[0] = '\0';
 
-        return (TinString){buf, 0};
+        return (TinString){buf, 0, 1};
     }
 
     int64_t len = (int64_t)strlen(cstr);
     char *buf = (char *)_tin_rc_alloc(len + 1);
-    if (!buf) return (TinString){NULL, 0};
+    if (!buf) return (TinString){NULL, 0, 0};
 
     memcpy(buf, cstr, (size_t)len);
     buf[len] = '\0';
 
-    return (TinString){buf, len};
+    return (TinString){buf, len, len + 1};
 }
 
 // Marshal a Tin string out to the C side via the user-configurable
@@ -154,22 +154,22 @@ TIN_API TinSlice tin_interop_slice_in(const void *data, int64_t len, int64_t ele
         char *buf = (char *)_tin_rc_alloc(1);
         if (buf) buf[0] = '\0';
 
-        return (TinSlice){buf, 0};
+        return (TinSlice){buf, 0, 0};
     }
 
     int64_t bytes;
     if (safe_mul64(len, elem_size, &bytes) != 0) {
-        return (TinSlice){NULL, 0};
+        return (TinSlice){NULL, 0, 0};
     }
 
     void *buf = _tin_rc_alloc(bytes);
-    if (!buf) return (TinSlice){NULL, 0};
+    if (!buf) return (TinSlice){NULL, 0, 0};
 
     if (data) {
         memcpy(buf, data, (size_t)bytes);
     }
 
-    return (TinSlice){buf, len};
+    return (TinSlice){buf, len, len};
 }
 
 // Marshal a Tin slice out to the C side via tin_extern_alloc. The

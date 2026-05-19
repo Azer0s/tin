@@ -54,6 +54,13 @@ type closureCapture struct {
 	val    value.Value
 	llvmTy irtypes.Type
 	byRef  bool // true: store the alloca pointer; false: store the loaded value
+	// skipRetain is true when buildClosureEnv must NOT bump the
+	// capture's RC (set by genBoundMethod for anonymous heap-receiver
+	// shapes like `(&Foo{}).method` where the closure env takes the
+	// only rc=1 reference and the dtor's release_ptr is the matching
+	// drop).  Default false preserves the safer "retain at capture"
+	// shape every other caller relies on.
+	skipRetain bool
 }
 
 // closureCtx saves the mutable per-function state so it can be restored after
@@ -210,7 +217,7 @@ func (cg *CodeGen) tinTypeDisplay(t irtypes.Type) string {
 				return "any"
 			}
 
-			if isFatArrayPtr(tt) && len(tt.Fields) == 2 {
+			if isFatArrayPtr(tt) && len(tt.Fields) == 3 {
 				if pt, ok := tt.Fields[0].(*irtypes.PointerType); ok {
 					return "[" + cg.tinTypeDisplay(pt.ElemType) + "]"
 				}

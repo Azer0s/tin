@@ -164,6 +164,11 @@
           "match": "\\b(as|is|sizeof|addr|typeof|traitof|fieldnames|fieldtypes|fieldtag|getfield|setfield|isrc)\\b"
         },
         {
+          "comment": "Builtin functions (len, cap, copy, nlen, nrect, panic, recover, stacktrace, sourcepos, default)",
+          "name": "support.function.builtin.tin",
+          "match": "\\b(len|cap|copy|nlen|nrect|panic|recover|stacktrace|sourcepos|default)(?=\\s*\\()"
+        },
+        {
           "comment": "Statement keywords",
           "name": "keyword.other.tin",
           "match": "\\b(echo|test|pass)\\b"

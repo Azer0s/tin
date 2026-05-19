@@ -12,11 +12,20 @@
 
 // -- Core types
 
-// Fat-pointer string: { i8* ptr, i64 len }
-typedef struct { const char *ptr; int64_t len; } TinString;
+// Fat-pointer string: { i8* ptr, i64 len, i64 cap }.  Matches the
+// `[byte]` fat-array layout so strings and byte slices stay
+// interchangeable.  cap < 0 marks immortal / borrowed storage; see
+// the TinSlice comment below for the encoding.
+typedef struct { const char *ptr; int64_t len; int64_t cap; } TinString;
 
-// Dynamic array: { T* ptr, i64 len }
-typedef struct { void *ptr; int64_t len; } TinSlice;
+// Dynamic array fat-pointer layout: { T* ptr, i64 len, i64 cap }.
+//   ptr  - data pointer (RC-managed when cap >= 0; borrowed otherwise)
+//   len  - element count currently in use
+//   cap  - allocated element count.  cap < 0 marks a borrowed view:
+//          `++=` panics and the drop path skips RC release.  This is
+//          what slicing a buffer (arr[3..7]), reflection's immortal
+//          atom arrays, and FFI returns produce.
+typedef struct { void *ptr; int64_t len; int64_t cap; } TinSlice;
 
 // ARC header prepended before every heap-managed block
 typedef struct { int64_t rc; int64_t _pad; } TinRCHdr;  // 16 bytes for 128-bit SIMD alignment
@@ -30,13 +39,15 @@ typedef struct TinDeferEntry {
 } TinDeferEntry;
 
 // Array of TinStrings returned by _tin_reflect_fn_params (legacy, [string] variant)
-typedef struct { TinString *ptr; int64_t len; } TinStringArray;
+// Same triple-slot layout as TinSlice.
+typedef struct { TinString *ptr; int64_t len; int64_t cap; } TinStringArray;
 
 // Single atom value { i32 code } - matches %__atom LLVM type
 typedef struct { int32_t code; } TinAtom;
 
 // Array of TinAtoms returned by _tin_reflect_fn_params ([atom] variant)
-typedef struct { TinAtom *ptr; int64_t len; } TinAtomArray;
+// Same triple-slot layout as TinSlice.
+typedef struct { TinAtom *ptr; int64_t len; int64_t cap; } TinAtomArray;
 
 // -- ARC
 void *_tin_rc_alloc(int64_t size);
@@ -90,7 +101,7 @@ TinString _tin_str_from_cstr(const char *s);
 int64_t   _tin_extern_cstr_len(const char *s);
 int32_t   _tin_str_eq(TinString a, TinString b);
 TinString _tin_string_from_bytes(const char *ptr, int64_t len);
-const char *_tin_string_data(TinString s);
+const char *_tin_string_data(const char *ptr);
 char *_tin_buf_alloc(int64_t n);
 char *_tin_buf_realloc(char *p, int64_t n);
 void  _tin_buf_free(char *p);
@@ -119,7 +130,8 @@ void      _tin_defer_pop(int64_t n);
 void      _tin_panic(const char *msg);
 void      _tin_main_err_exit(const char *msg, int64_t len);
 void      _tin_assert(int32_t cond, const char *msg);
-TinString _tin_recover(void);
+void         _tin_recover(TinString *out);
+void         _tin_recover_trace_atoms(TinAtomArray *out);
 // Fiber-level panic interception (called by worker loop around _coro_resume).
 void        _tin_panic_catch_begin(void);
 const char *_tin_panic_catch_end(void);

@@ -1,0 +1,221 @@
+// examples/copy_aliasing_test.tin -- coverage for the `copy(...)` and
+// `cap(...)` built-ins introduced alongside the fat-pointer cap widening.
+//
+// Tin's array/string semantics: passing or assigning shares the
+// underlying buffer.  Writes via the second name are visible through
+// the first.  `copy(x)` breaks that alias by allocating a fresh
+// independently-owned duplicate; `cap(x)` reads the allocated headroom.
+
+use assert
+
+test "let-binding aliases share the same buffer" =
+  let a [i64] = [1, 2, 3]
+  let b = a
+
+  b[0] = 99
+
+  assert::equals(99, a[0])
+  assert::equals(99, b[0])
+
+test "copy breaks the alias for i64 arrays" =
+  let a [i64] = [10, 20, 30]
+  let b = copy(a)
+
+  b[0] = 999
+
+  assert::equals(10, a[0])
+  assert::equals(999, b[0])
+
+test "copy preserves all elements" =
+  let a [i64] = [7, 8, 9, 10, 11]
+  let b = copy(a)
+
+  assert::equals(len(a), len(b))
+  assert::equals(a[0], b[0])
+  assert::equals(a[4], b[4])
+
+test "copy of a string is materially equal and length-preserving" =
+  let s1 = "hello world"
+  let s2 = copy(s1)
+
+  assert::equals(s1, s2)
+  assert::equals(len(s1), len(s2))
+
+test "copy of an immortal string upgrades cap from negative to len" =
+  let s1 = "hi"
+
+  // String literals back onto an immortal global; cap is INT64_MIN so
+  // a runtime cap-check on indexed write would refuse it.
+  assert::ok(cap(s1) < 0)
+
+  let s2 = copy(s1)
+
+  // copy() always allocates a fresh ARC buffer with cap == len.
+  assert::equals(len(s2), cap(s2))
+
+test "cap of an array literal equals its length" =
+  let xs [i64] = [1, 2, 3, 4]
+
+  assert::equals(4, len(xs))
+  assert::equals(4, cap(xs))
+
+test "cap of an empty growable array is zero" =
+  let xs [i64] = []
+
+  assert::equals(0, len(xs))
+  assert::equals(0, cap(xs))
+
+test "cap of a [byte] array literal equals its length" =
+  let bs [byte] = [0x68 as byte, 0x69 as byte]
+
+  assert::equals(2, len(bs))
+  assert::equals(2, cap(bs))
+
+struct cat_test_point =
+  x i64
+  y i64
+
+test "++= on a borrowed-view slice (cap < 0) panics" =
+  // fieldnames returns an immortal [atom] with cap = -1.  ++= on it
+  // must fail the runtime cap-check rather than silently allocate a
+  // fresh owned buffer the caller never sees.
+  assert::panics_with(fn() =
+    let p = cat_test_point{x: 1, y: 2}
+    let fields = fieldnames(p)
+    fields ++= ['_dummy], "borrowed view")
+
+// -Walias-mutation rides along with the copy() builtin: the user
+// suppresses it by binding through copy().  The check itself fires
+// under -Wpedantic in regular code; we don't run a compiler subprocess
+// here -- those tests live alongside the diagnostic harness.  Below
+// just confirms the runtime behaviour: copy() materially decouples the
+// two bindings so mutating one doesn't leak into the other, exactly
+// what the warning steers the user toward.
+test "copy + ++= leaves the original slice untouched" =
+  let a [i64] = [1, 2, 3]
+  let b = copy(a)
+
+  b ++= [4]
+  b ++= [5]
+
+  assert::equals(3, len(a))
+  assert::equals(5, len(b))
+  assert::equals(1, a[0])
+  assert::equals(5, b[4])
+
+test "amortized ++= grows cap geometrically beyond len" =
+  // Append enough items that the in-place fast path has to run at
+  // least once.  cap must end strictly above len, proving the
+  // geometric growth landed and the in-place writes used the
+  // headroom rather than allocating a fresh buffer for every item.
+  let xs [i64] = []
+  let i i64 = 0
+  for i < 32:
+    xs ++= [i]
+    i = i + 1
+
+  assert::equals(32, len(xs))
+  assert::ok(cap(xs) >= 32)
+  assert::ok(cap(xs) >= 32 + 16)
+
+// recover() opt-in tuple form
+
+fn{#no_inline} ct_inner() = panic("trace marker")
+
+fn ct_caller() ([atom], string) =
+  let captured_trace [atom] = []
+  let captured_msg = ""
+
+  defer do:
+    let (msg, trace) = recover('trace)
+    captured_msg = msg
+    captured_trace = trace
+
+  ct_inner()
+
+  return (captured_trace, captured_msg)
+
+test "recover('trace) returns (msg, trace) tuple; trace currently empty" =
+  let (frames, msg) = ct_caller()
+
+  assert::equals("trace marker", msg)
+  // Panic-time stacktrace capture is temporarily disabled (was
+  // crashing on Linux x86_64 under setjmp-protected test runner
+  // frames). recover('trace) returns an empty trace until the
+  // capture lands behind a robust runtime gate.
+  assert::equals(0, len(frames))
+
+// Slice semantics: `arr[lo..hi]` is the only slice form (no `[lo:hi]`).
+// The result is a fresh, owned [T] that does NOT alias the source.
+
+test "slice copies the [lo..hi) range into a fresh independent buffer" =
+  let a [i64] = [10, 20, 30, 40, 50]
+  let s = a[1..4]
+
+  assert::equals(3, len(s))
+  assert::equals(20, s[0])
+  assert::equals(30, s[1])
+  assert::equals(40, s[2])
+
+test "writing to a slice does not touch the source" =
+  let a [i64] = [10, 20, 30, 40]
+  let s = a[1..3]
+  s[0] = 99
+
+  assert::equals(20, a[1])
+  assert::equals(99, s[0])
+
+test "slice cap equals len so the next append triggers a grow" =
+  let a [i64] = [1, 2, 3, 4]
+  let s = a[1..3]
+
+  assert::equals(2, len(s))
+  assert::equals(2, cap(s))
+
+test "slice with full [0..len(a)) is identical to copy()" =
+  let a [i64] = [1, 2, 3]
+  let s = a[0..len(a)]
+
+  assert::equals(len(a), len(s))
+  s[0] = 99
+  assert::equals(1, a[0])
+
+test "empty slice [k..k) has len 0 and cap 0" =
+  let a [i64] = [1, 2, 3, 4]
+  let s = a[2..2]
+
+  assert::equals(0, len(s))
+  assert::equals(0, cap(s))
+
+test "slice of [string] retains the element strings so source is safe to mutate" =
+  let words = ["alpha", "beta", "gamma", "delta"]
+  let s = words[1..3]
+
+  words[1] = "BETA"
+
+  assert::equals("beta", s[0])
+  assert::equals("gamma", s[1])
+
+fn return_slice() [i64] =
+  let a [i64] = [1, 2, 3, 4, 5]
+  return a[1..4]
+
+test "returning a slice transfers ownership without leaking" =
+  let r = return_slice()
+
+  assert::equals(3, len(r))
+  assert::equals(2, r[0])
+  assert::equals(4, r[2])
+
+fn{#no_inline} classic_recover_into(out *string) =
+  defer do:
+    *out = recover()
+
+  panic("classic shape")
+
+test "recover() without 'trace still returns just the string" =
+  let got = ""
+
+  classic_recover_into(&got)
+
+  assert::equals("classic shape", got)

@@ -71,11 +71,11 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
     if r == blocked:
       yield
     else if r > 0:
-      return (buf[0:r], host, port)
+      return (buf[0..r], host, port)
     else if r < 0:
       // Hard error from recvfrom; surface as zero-length so accept_impl
       // can return an Err to the caller.
-      return (buf[0:0], host, port)
+      return (buf[0..0], host, port)
     // r == 0: empty datagram.  Skip it (some kernels deliver them,
     // some don't; either way an empty payload is meaningless to the
     // echo-style API) and continue the recv loop without producing a

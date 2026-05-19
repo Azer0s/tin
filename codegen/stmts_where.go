@@ -450,17 +450,12 @@ func (cg *CodeGen) emitWhereArrayPatternTest(block *ir.Block, ap *ast.ArrayPatte
 				elemSzBytes = int64(sz)
 			}
 
-			sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-			rawAlloca := lenOkBlock.NewAlloca(sliceType)
-
+			// `{i8*, i64 len, i64 cap}` raw slice for the subslice
+			// runtime helper.  cap == len; the slice is borrowed for
+			// the call only.
+			sliceType := fatArrayPtrType(irtypes.I8)
 			dataAsI8 := lenOkBlock.NewBitCast(dataPtr, irtypes.I8Ptr)
-			rawPtrGep := lenOkBlock.NewGetElementPtr(sliceType, rawAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			lenOkBlock.NewStore(dataAsI8, rawPtrGep)
-			rawLenGep := lenOkBlock.NewGetElementPtr(sliceType, rawAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			lenOkBlock.NewStore(arrLen, rawLenGep)
-			rawSlice := lenOkBlock.NewLoad(sliceType, rawAlloca)
+			rawSlice := cg.buildFatArrayValue(lenOkBlock, irtypes.I8, dataAsI8, arrLen, arrLen)
 
 			subRes := lenOkBlock.NewCall(cg.ensureSliceSubslice(), rawSlice,
 				constant.NewInt(irtypes.I64, int64(regularCount)),

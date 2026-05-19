@@ -144,14 +144,19 @@ func (cg *CodeGen) newGlobalString(s string) value.Value {
 	return gep
 }
 
-// buildStringFatPtr creates a tin string fat-pointer {i8*, i64} from a literal string.
+// buildStringFatPtr creates a tin string fat-pointer
+// `{i8* data, i64 len, i64 cap}` from a literal string.  Literals live
+// in immortal `@.str` globals, so cap = -1: the borrowed-view encoding
+// signals "do not mutate, do not RC-release".
 func (cg *CodeGen) buildStringFatPtr(block *ir.Block, s string) value.Value {
 	ptr := cg.newGlobalString(s)
 	length := constant.NewInt(irtypes.I64, int64(len(s)))
+	borrowed := constant.NewInt(irtypes.I64, -1)
 	fatPtrType := stringFatPtrType()
 	v0 := block.NewInsertValue(constant.NewUndef(fatPtrType), ptr, 0)
+	v1 := block.NewInsertValue(v0, length, 1)
 
-	return block.NewInsertValue(v0, length, 1)
+	return block.NewInsertValue(v1, borrowed, 2)
 }
 
 // extractStringPtr extracts the i8* data pointer from a tin string fat-ptr.
@@ -173,6 +178,17 @@ func (cg *CodeGen) extractStringLen(block *ir.Block, fatPtr value.Value) value.V
 // panic builtin
 
 // ensurePanicFn lazily declares the _tin_panic external function.
+//
+// Note on `cg.stacktraceUsed`: the flag is NOT flipped here.  Every Tin
+// program is reachable to `_tin_panic` (cap-checks, array bounds, ADT
+// mismatches all funnel through it); flipping in this helper would
+// switch on `frame-pointer="all"` and pclntab emission for every
+// binary, which adds 5-10x to LTO link time even when the user never
+// wrote an explicit `panic(...)`.  Instead, `detectStacktraceUsage`
+// scans the AST for explicit `panic(...)` / `stacktrace(...)` calls
+// and that's what gates the resolver section.  Compiler-emitted
+// panics still print their message and exit -- they just drop the
+// trace block.
 func (cg *CodeGen) ensurePanicFn() *ir.Func {
 	if cg.tinPanicFn != nil {
 		return cg.tinPanicFn
@@ -289,20 +305,18 @@ func (cg *CodeGen) genBuiltinPanic(block *ir.Block, msgNode ast.Node) (value.Val
 }
 
 // ensureSliceSubslice lazily declares _tin_slice_subslice(TinSlice s, i64 start, i64 elem_size) -> TinSlice.
-// TinSlice has the same layout as a fat array: { i8*, i64 }.
+// TinSlice has the fat-array layout: `{i8*, i64 len, i64 cap}`.
+// Routed through ensureExternDecl so the ABI shim wraps it.
 func (cg *CodeGen) ensureSliceSubslice() *ir.Func {
-	if cg.sliceSubsliceFn != nil {
-		return cg.sliceSubsliceFn
-	}
+	// No top-level cache: see ensureBytesFromBuf for the rationale.
+	sliceType := fatArrayPtrType(irtypes.I8)
 
-	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-	cg.sliceSubsliceFn = cg.mod.NewFunc("_tin_slice_subslice", sliceType,
-		ir.NewParam("s", sliceType),
-		ir.NewParam("start", irtypes.I64),
-		ir.NewParam("elem_size", irtypes.I64),
-	)
-
-	return cg.sliceSubsliceFn
+	return cg.ensureExternDecl("_tin_slice_subslice", sliceType,
+		[]*ir.Param{
+			ir.NewParam("s", sliceType),
+			ir.NewParam("start", irtypes.I64),
+			ir.NewParam("elem_size", irtypes.I64),
+		}, false)
 }
 
 // ensureSliceConvertInt lazily declares _tin_slice_convert_int(TinSlice s,
@@ -310,64 +324,151 @@ func (cg *CodeGen) ensureSliceSubslice() *ir.Func {
 // Used by fat-array cross-type coercion to reallocate the buffer and convert
 // integer elements from one width to another.
 func (cg *CodeGen) ensureSliceConvertInt() *ir.Func {
-	if cg.sliceConvertIntFn != nil {
-		return cg.sliceConvertIntFn
-	}
+	// No top-level cache: see ensureBytesFromBuf for the rationale.
+	sliceType := fatArrayPtrType(irtypes.I8)
 
-	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-	cg.sliceConvertIntFn = cg.mod.NewFunc("_tin_slice_convert_int", sliceType,
-		ir.NewParam("s", sliceType),
-		ir.NewParam("src_sz", irtypes.I64),
-		ir.NewParam("tgt_sz", irtypes.I64),
-		ir.NewParam("src_signed", irtypes.I32),
-	)
-
-	return cg.sliceConvertIntFn
+	return cg.ensureExternDecl("_tin_slice_convert_int", sliceType,
+		[]*ir.Param{
+			ir.NewParam("s", sliceType),
+			ir.NewParam("src_sz", irtypes.I64),
+			ir.NewParam("tgt_sz", irtypes.I64),
+			ir.NewParam("src_signed", irtypes.I32),
+		}, false)
 }
 
-// ensureRecoverFn lazily declares the _tin_recover() -> TinString extern.
+// ensureRecoverFn lazily declares _tin_recover as a void function
+// writing the recovered TinString to its `out` param.  The runtime
+// uses an out-param shape instead of returning the 24-byte struct
+// because the SRet shim path in ensureExternDecl has an ABI mismatch
+// with clang 18's lowering on Linux x86_64; out-params route through
+// pointer-passing, which both compilers handle identically.
+// No top-level cache: see ensureBytesFromBuf for the rationale.
 func (cg *CodeGen) ensureRecoverFn() *ir.Func {
-	if cg.tinRecoverFn != nil {
-		return cg.tinRecoverFn
-	}
-
-	cg.tinRecoverFn = cg.mod.NewFunc("_tin_recover", stringFatPtrType())
-
-	return cg.tinRecoverFn
+	return cg.ensureExternDecl("_tin_recover", irtypes.Void,
+		[]*ir.Param{ir.NewParam("out", irtypes.NewPointer(stringFatPtrType()))},
+		false)
 }
 
 // genBuiltinRecover implements recover(): returns the panic message from a
 // deferred function, or an empty string if not currently panicking.
 func (cg *CodeGen) genBuiltinRecover(block *ir.Block) (value.Value, error) {
-	return block.NewCall(cg.ensureRecoverFn()), nil
+	outSlot := cg.hoistAlloca(block, stringFatPtrType())
+	block.NewCall(cg.ensureRecoverFn(), outSlot)
+
+	return block.NewLoad(stringFatPtrType(), outSlot), nil
+}
+
+// ensureRecoverTraceAtomsFn declares _tin_recover_trace_atoms as a
+// void function writing to an out param.  Same ABI-dodge rationale
+// as ensureRecoverFn.
+func (cg *CodeGen) ensureRecoverTraceAtomsFn() *ir.Func {
+	atomArrType := fatArrayPtrType(cg.atomType)
+
+	return cg.ensureExternDecl("_tin_recover_trace_atoms", irtypes.Void,
+		[]*ir.Param{ir.NewParam("out", irtypes.NewPointer(atomArrType))},
+		false)
+}
+
+// genBuiltinRecoverTrace implements `recover('trace)`: returns a
+// `(string, [atom])` tuple where the first element is the panic
+// message (same string `recover()` would have returned) and the
+// second is the call-site backtrace captured when `_tin_panic`
+// fired.  Order matters: capture the trace BEFORE recovering the
+// message because `_tin_recover` clears `_tin_panic_msg` which is
+// also the "still panicking" gate inside `_tin_recover_trace_atoms`;
+// if recover ran first the trace call would observe a cleared
+// state and hand back an empty array.
+func (cg *CodeGen) genBuiltinRecoverTrace(block *ir.Block) (value.Value, error) {
+	atomArrTy := fatArrayPtrType(cg.atomType)
+	traceSlot := cg.hoistAlloca(block, atomArrTy)
+	block.NewCall(cg.ensureRecoverTraceAtomsFn(), traceSlot)
+	traceVal := block.NewLoad(atomArrTy, traceSlot)
+
+	msgSlot := cg.hoistAlloca(block, stringFatPtrType())
+	block.NewCall(cg.ensureRecoverFn(), msgSlot)
+	msgVal := block.NewLoad(stringFatPtrType(), msgSlot)
+
+	// Monomorphise `Tuple[string, [atom]]` on demand so the resulting
+	// value carries the same struct type a hand-written
+	// `let t = ("msg", ['frame)` would have produced -- this lets
+	// downstream destructuring (`let (msg, trace) = recover('trace)`)
+	// resolve through the normal Tuple struct path.
+	atomTypeName := "atom"
+	tupName := "Tuple__string__[" + atomTypeName + "]"
+
+	if cg.structTypeFor(CanonKey(tupName)) == nil {
+		synthDecl := &ast.TypeDecl{
+			Name: tupName,
+			Type: &ast.GenericType{Name: "Tuple", TypeParams: []ast.TypeExpr{
+				&ast.SimpleType{Name: "string"},
+				&ast.ArrayType{Elem: &ast.SimpleType{Name: atomTypeName}, Size: -1},
+			}},
+		}
+		_ = cg.genTypeDecl(synthDecl)
+	}
+
+	for i := 0; i < 64; i++ {
+		alias := cg.aliasTypeFor(CanonKey(tupName))
+		if alias == nil {
+			break
+		}
+
+		st, isSimple := alias.(*ast.SimpleType)
+		if !isSimple {
+			break
+		}
+
+		if st.Name == tupName {
+			break
+		}
+
+		tupName = st.Name
+	}
+
+	st := cg.structTypeFor(CanonKey(tupName))
+	if st == nil {
+		return nil, fmt.Errorf("recover('trace): failed to monomorphise Tuple[string, [atom]]")
+	}
+
+	alloca := block.NewAlloca(st)
+	block.NewStore(constant.NewZeroInitializer(st), alloca)
+
+	if typeID, has := cg.structTypeIDs[tupName]; has {
+		typeIDGep := block.NewGetElementPtr(st, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
+	}
+
+	userOff := cg.userFieldOffset(tupName)
+
+	msgGep := block.NewGetElementPtr(st, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(userOff)))
+	block.NewStore(msgVal, msgGep)
+
+	traceGep := block.NewGetElementPtr(st, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(userOff+1)))
+	block.NewStore(traceVal, traceGep)
+
+	return block.NewLoad(st, alloca), nil
 }
 
 // ensureBytesFromBuf lazily declares _tin_bytes_from_buf(ptr *i8, len i64) {i8*, i64}.
 // Copies len bytes from ptr into a new RC-allocated heap buffer and returns
 // a fat [byte] slice.  Used to convert fixed-size stack arrays to [byte].
 func (cg *CodeGen) ensureBytesFromBuf() *ir.Func {
-	if cg.bytesFromBufFn != nil {
-		return cg.bytesFromBufFn
-	}
+	// Route through ensureExternDecl so the ABI-lowering shim wraps
+	// the 24-byte TinSlice return.  No top-level cache: each pkg
+	// module that uses the helper has to emit its own shim copy
+	// (linkonce_odr dedups at link time) -- a single shared
+	// `*ir.Func` from the first module won't satisfy later modules'
+	// references.
+	sliceType := fatArrayPtrType(irtypes.I8)
 
-	// Reuse any existing declaration (e.g. from ioutil/os declaring the same
-	// extern under a different Tin name) to avoid duplicate IR declarations.
-	for _, f := range cg.mod.Funcs {
-		if f.Name() == "_tin_bytes_from_buf" {
-			cg.bytesFromBufFn = f
-
-			return f
-		}
-	}
-
-	sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-	cg.bytesFromBufFn = cg.mod.NewFunc("_tin_bytes_from_buf", sliceType,
-		ir.NewParam("ptr", irtypes.I8Ptr),
-		ir.NewParam("len", irtypes.I64),
-	)
-	cg.bytesFromBufFn.Blocks = nil
-
-	return cg.bytesFromBufFn
+	return cg.ensureExternDecl("_tin_bytes_from_buf", sliceType,
+		[]*ir.Param{
+			ir.NewParam("ptr", irtypes.I8Ptr),
+			ir.NewParam("len", irtypes.I64),
+		}, false)
 }
 
 // ensureSnprintf lazily declares the snprintf external function.

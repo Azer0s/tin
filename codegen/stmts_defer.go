@@ -61,9 +61,9 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 
 		if entry.isAlloc {
 			// Capture by reference so mutations inside the thunk are visible outside.
-			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
+			captures = append(captures, closureCapture{name: n, val: entry.val, llvmTy: entry.val.Type(), byRef: true})
 		} else {
-			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), false})
+			captures = append(captures, closureCapture{name: n, val: entry.val, llvmTy: entry.val.Type(), byRef: false})
 		}
 	}
 
@@ -133,9 +133,9 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 		}
 
 		if entry.isAlloc {
-			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), true})
+			captures = append(captures, closureCapture{name: n, val: entry.val, llvmTy: entry.val.Type(), byRef: true})
 		} else {
-			captures = append(captures, closureCapture{n, entry.val, entry.val.Type(), false})
+			captures = append(captures, closureCapture{name: n, val: entry.val, llvmTy: entry.val.Type(), byRef: false})
 		}
 	}
 
