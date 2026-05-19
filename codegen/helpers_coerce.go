@@ -302,21 +302,65 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	}
 
 	// Fat-pointer (string / dynamic array) -> raw C pointer: extract
-	// data ptr.  Allowed when the call site is an explicit `as` cast
-	// OR when the destination's element type is `i8` (the "raw bytes"
-	// pointer used for `*char` / `*byte` extern boundaries) -- this
-	// keeps Tin strings flowing into extern C functions transparently.
-	// Cross-elem casts (e.g. `string -> *i64`) require explicit `as`.
+	// data ptr.  Allowed when:
+	//   - the call site is an explicit `as` cast
+	//   - the destination's element type is `i8` (the "raw bytes"
+	//     pointer used for `*char` / `*byte` extern boundaries; keeps
+	//     Tin strings flowing into extern C functions transparently)
+	//   - the destination's element type matches the fat-array's own
+	//     element type (e.g. `[i32] -> int32_t*`): this is exactly
+	//     what every `extern("...") fn f(xs [T], n i64)` needs at the
+	//     C boundary, so it's safe to do unconditionally; cross-elem
+	//     casts (e.g. `[i64] -> i32*`) still require explicit `as`.
+	//
+	// Without this last branch the fat-array struct gets passed
+	// inline to C, and AAPCS64 (Apple ARM / Linux ARM) lowers the
+	// 24-byte composite to an INDIRECT pointer.  C then sees a
+	// pointer-to-stack-copy where it expected a data pointer -- writes
+	// land on the caller's stack copy of {ptr, len, cap}, never
+	// reaching the actual array.  Reads happen to work by accident
+	// (the first 8 bytes are the data pointer), which is why simple
+	// "sum" tests pass but in-place mutation silently no-ops.
 	if isFatPtrType(src) {
 		if pt, ok := target.(*irtypes.PointerType); ok {
+			srcEl := src.(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType
 			tgtElIsI8 := pt.ElemType.Equal(irtypes.I8)
-			if cg.allowExplicitPtrCoerce || tgtElIsI8 {
+			tgtElMatchesSrcEl := pt.ElemType.Equal(srcEl)
+
+			if cg.allowExplicitPtrCoerce || tgtElIsI8 || tgtElMatchesSrcEl {
 				rawPtr := cg.extractFatPtrData(block, val, src.(*irtypes.StructType))
 				if rawPtr.Type().Equal(target) {
 					return rawPtr
 				}
 
 				return block.NewBitCast(rawPtr, target)
+			}
+		}
+	}
+
+	// Fixed-size array `[T; N]` -> raw C pointer (`T*`, `*i8` for
+	// chars, or any *U via explicit cast): decay to the first-element
+	// pointer.  Mirrors C's own array-to-pointer decay at function
+	// boundaries.  Requires the value to be addressable; if `val` is
+	// an rvalue we materialize it through a stack alloca first.
+	if srcArr, ok := src.(*irtypes.ArrayType); ok {
+		if pt, ok2 := target.(*irtypes.PointerType); ok2 {
+			tgtElIsI8 := pt.ElemType.Equal(irtypes.I8)
+			tgtElMatches := pt.ElemType.Equal(srcArr.ElemType)
+
+			if cg.allowExplicitPtrCoerce || tgtElIsI8 || tgtElMatches {
+				slot := cg.hoistAlloca(block, srcArr)
+				block.NewStore(val, slot)
+
+				gep := block.NewGetElementPtr(srcArr, slot,
+					constant.NewInt(irtypes.I32, 0),
+					constant.NewInt(irtypes.I32, 0))
+
+				if gep.Type().Equal(target) {
+					return gep
+				}
+
+				return block.NewBitCast(gep, target)
 			}
 		}
 	}

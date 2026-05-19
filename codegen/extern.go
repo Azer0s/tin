@@ -108,8 +108,10 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 			cur = pt.Elem
 		}
 	}
-	// []T (dynamic array):
-	//   - as parameter: unwrap to *T (C receives the data pointer).
+	// []T (dynamic array) and [T; N] (fixed-size array):
+	//   - as parameter: unwrap to *T (C receives the first-element
+	//     pointer).  Same convention C itself uses when an array
+	//     parameter decays at the function call boundary.
 	//     [string] and [atom] are special-cased to `**char` (i8**)
 	//     because their element types are themselves fat-ptr / opaque-
 	//     code structs the C side can't read directly.  The call-site
@@ -119,14 +121,16 @@ func (cg *CodeGen) tinTypeToExternLLVM(te ast.TypeExpr, forReturn bool) (irtypes
 	//     interned name).  No null terminator is added; the C caller
 	//     must know the length out-of-band, mirroring the existing
 	//     `[i32] -> int32_t*` convention.
-	//   - as return type: keep the full fat-ptr {*T, i64} so C returns the struct
-	if at, ok := te.(*ast.ArrayType); ok && at.Size < 0 {
+	//   - as return type: keep the full fat-ptr {*T, i64} for dynamic
+	//     arrays so C returns the struct; fixed-size arrays aren't
+	//     a valid C return type and stay rejected by tinTypeToLLVM.
+	if at, ok := te.(*ast.ArrayType); ok {
 		if forReturn {
 			return cg.tinTypeToLLVM(te)
 		}
 
 		if st, ok2 := at.Elem.(*ast.SimpleType); ok2 {
-			if st.Name == "string" || st.Name == "atom" {
+			if (st.Name == "string" || st.Name == "atom") && at.Size < 0 {
 				return irtypes.NewPointer(irtypes.I8Ptr), nil
 			}
 		}
@@ -318,6 +322,91 @@ func (cg *CodeGen) wrapStructToExtern(block *ir.Block, val value.Value, structNa
 	}
 
 	return block.NewLoad(nativeSt, nativeAlloca), nil
+}
+
+// adaptTinPtrToNativePtr handles `*TinStruct` arguments passed at a C
+// extern boundary that expects `*<S>.native`.  Returns the adapted IR
+// value when the conversion fires; nil otherwise (call site falls
+// through to the next adapter or the strict-type error).
+//
+// The Tin layout is `{type_id, vtable_ptrs..., user_field_0, ...}`;
+// the native layout is `{user_field_0, ...}`.  When every user field
+// is ABI-compatible (no fat-ptr / fn fields whose Tin and native
+// shapes differ), the user-fields region of the Tin allocation is
+// byte-identical to a native struct -- a GEP to the first user field
+// + bitcast to the target pointer type yields a pointer C can read
+// AND write through, so out-params (`c_func(*S, ...)` that mutates
+// `*p`) propagate to the Tin storage with no intermediate copy.
+//
+// Nested struct fields recurse via the same ABI-compat predicate;
+// if any user field is a fat-ptr / fat-fn-ptr the conversion bails
+// (the call site falls through to a future helper or the error).
+func (cg *CodeGen) adaptTinPtrToNativePtr(
+	block *ir.Block, val value.Value, target irtypes.Type,
+) value.Value {
+	srcPt, ok := val.Type().(*irtypes.PointerType)
+	if !ok {
+		return nil
+	}
+
+	tgtPt, ok := target.(*irtypes.PointerType)
+	if !ok {
+		return nil
+	}
+
+	tgtName := cg.typeNameOf(tgtPt.ElemType)
+	if tgtName == "" || !strings.HasSuffix(tgtName, ".native") {
+		return nil
+	}
+
+	tinStructName := strings.TrimSuffix(tgtName, ".native")
+
+	srcSt, ok := srcPt.ElemType.(*irtypes.StructType)
+	if !ok {
+		return nil
+	}
+
+	if cg.typeNameOf(srcSt) != tinStructName {
+		return nil
+	}
+
+	if !cg.structIsABICompat(tinStructName) {
+		return nil
+	}
+
+	offset := int64(cg.userFieldOffset(tinStructName))
+	firstUser := block.NewGetElementPtr(srcSt, val,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, offset))
+
+	return block.NewBitCast(firstUser, target)
+}
+
+// structIsABICompat reports whether structName's user fields lay out
+// identically in the Tin and native forms -- the precondition for the
+// pointer-aliasing trick adaptTinPtrToNativePtr uses.  Excludes any
+// struct with a fat-ptr (string / [T] / any / *Trait) or fat-fn-ptr
+// field; those have different shapes in the two layouts and need a
+// copying conversion instead.
+func (cg *CodeGen) structIsABICompat(structName string) bool {
+	fields, ok := cg.structFieldLLVMTypes[structName]
+	if !ok {
+		return false
+	}
+
+	for _, ft := range fields {
+		if isFatPtrType(ft) || isFatFnPtr(ft) {
+			return false
+		}
+
+		if innerSt, ok2 := ft.(*irtypes.StructType); ok2 {
+			if innerSt.Name() != "" && !cg.structIsABICompat(innerSt.Name()) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // wrapNativeStructToTin converts a C-native struct (user fields only) into the

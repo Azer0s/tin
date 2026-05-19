@@ -1,0 +1,109 @@
+// examples/c_interop_matrix/c_to_tin/lib.tin
+//
+// C -> Tin matrix: #interop exports covering every supported shape
+// for struct in / out / by-pointer at the boundary, plus the baseline
+// scalar / string / array cases used to anchor the table.  Each
+// function carries its row ID from docs/internals/c-interop-matrix.md
+// in the comment so a failing line in the driver maps straight back.
+//
+// Built with `tin build --lib lib.tin --emit-header=lib.h`.  The
+// matching C side lives in driver.c.
+
+// ===== C-A: Scalars =====
+
+fn{#interop} c_a_add(a i32, b i32) i32 = return a + b
+
+// ===== C-B: Strings =====
+
+fn{#interop} c_b_greet(name string) string = return "hello " ++ name
+
+// ===== C-C: Arrays =====
+
+fn{#interop} c_c_sum(xs [i32]) i32 =
+  let total i32 = 0
+  let i i64 = 0
+  for i < len(xs):
+    total = total + xs[i]
+    i = i + 1
+  return total
+
+// ===== C-D: Callbacks =====
+
+fn{#interop} c_d_apply(cb fn(i32) i32, n i32) i32 = return cb(n) * 2
+
+// ===== C-E: #packed struct by value (IN) =====
+//
+// Only #packed user structs are stable enough to cross the C boundary
+// by value -- non-packed carries vtable / padding the C side can't
+// model.  #packed fixed at 8 bytes here so the SysV/AAPCS64 ABI
+// coerces it through a single integer register.
+
+struct {#packed} c_e_pt =
+  x i32
+  y i32
+
+fn{#interop} c_e_sum(p c_e_pt) i32 = return p.x + p.y
+
+// ===== C-F: #packed struct by value (OUT) =====
+//
+// Returning a #packed value: the same single-register coerce on
+// the way out.
+
+fn{#interop} c_f_make(x i32, y i32) c_e_pt = return c_e_pt{x: x, y: y}
+
+// ===== C-G: Struct pointer (IN) =====
+//
+// Non-packed user struct accepted by *T.  The C header renders this
+// as `void *` (no stable typedef for a Tin-layout struct); the
+// generated wrapper converts the inbound C pointer to a Tin *T via
+// `emitStructPtrBorrow` so field access goes through the Tin
+// layout.  This pairs with the existing T18 (Tin -> *T -> C) row
+// in the opposite direction.
+
+struct c_g_dyad =
+  a i64
+  b i64
+
+fn{#interop} c_g_sum(p *c_g_dyad) i64 = return (*p).a + (*p).b
+
+// ===== C-H: Struct pointer mutating (IN) =====
+//
+// C passes a pointer it owns; Tin writes through it; C reads the
+// changes back.  Same shape as C-G except the return is void.
+
+fn{#interop} c_h_fill(p *c_g_dyad, x i64) =
+  (*p).a = x
+  (*p).b = x * 2
+
+// ===== C-I: Struct pointer (OUT) =====
+//
+// Tin allocates, returns *T; C sees a `void *`.  C must call
+// `tin_release` when done (see header comment in the generated
+// lib.h).  Matches C7 in the doc.
+
+fn{#interop} c_i_make(a i64, b i64) *c_g_dyad =
+  return &c_g_dyad{a: a, b: b}
+
+// ===== C-J / C-K / C-L: Mixed-parameter shapes =====
+//
+// Real C clients call Tin entry points with a mix of every shape
+// above in one signature.  These rows pin the joint behavior.
+
+// String + scalar + *struct + array all in one call.
+fn{#interop} c_j_combine(s string, n i32, p *c_g_dyad, xs [i32]) i64 =
+  let total i64 = 0
+  let i i64 = 0
+  for i < len(xs):
+    total = total + xs[i] as i64
+    i = i + 1
+  return total + (*p).a + (*p).b + n as i64 + len(s)
+
+// Callback + packed-struct value + string in one call.
+fn{#interop} c_k_invoke(cb fn(i32) i32, p c_e_pt, s string) i32 =
+  return cb(p.x + p.y) + len(s) as i32
+
+// Mixed inputs, returning a Tin-allocated *struct.  Exercises the
+// whole input pipeline plus the pointer-out return adapter.
+fn{#interop} c_l_build(s string, k i32, cb fn(i32) i32) *c_g_dyad =
+  let r i64 = cb(k) as i64
+  return &c_g_dyad{a: len(s), b: r}

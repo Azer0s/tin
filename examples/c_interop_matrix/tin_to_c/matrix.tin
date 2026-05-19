@@ -1,0 +1,289 @@
+// examples/c_interop_matrix/tin_to_c/matrix.tin
+//
+// Tin -> C interop matrix: every row in docs/internals/c-interop-matrix.md
+// section "Tin -> C" gets a test here.  Group ordering matches the doc.
+// Each test is named "T<id>" so a failure trivially maps back to a row.
+
+//!+./matrix.c
+
+use assert
+use math
+
+// ===== T1-T4: Scalars =====
+
+fn c_add_i32(a i32, b i32) i32 = extern("c_add_i32")
+fn c_sub_f64(a f64, b f64) f64 = extern("c_sub_f64")
+fn c_negate_bool(b bool) bool = extern("c_negate_bool")
+fn c_write_42(out *i64) = extern("c_write_42")
+
+test "T1: scalar i32 round trip" =
+  assert::equals(c_add_i32(40, 2), 42)
+
+test "T2: f64 with two args" =
+  assert::ok(math::fabs(c_sub_f64(3.5, 1.25) - 2.25) < 1e-9)
+
+test "T3: bool ABI (i1 ↔ i8)" =
+  assert::ok(c_negate_bool(true) == false)
+  assert::ok(c_negate_bool(false) == true)
+
+test "T4: out-param via *i64" =
+  let x i64 = 0
+  c_write_42(&x)
+  assert::equals(x, 42)
+
+// ===== T5-T8: Strings =====
+
+fn c_strlen_wrap(s string) i64 = extern("c_strlen_wrap")
+fn c_static_str() string = extern("c_static_str")
+fn{#handover} c_malloc_str() string = extern("c_malloc_str")
+fn c_concat_pair(a string, b string) string = extern("c_concat_pair")
+
+test "T5: string -> char*" =
+  assert::equals(c_strlen_wrap("hello"), 5)
+
+test "T6: char* (static) -> string copy" =
+  assert::equals(c_static_str(), "static")
+
+test "T7: #handover malloc'd char* adopted by Tin" =
+  assert::equals(c_malloc_str(), "from-malloc")
+
+test "T8: string round trip via C concat" =
+  assert::equals(c_concat_pair("foo", "bar"), "foobar")
+
+// ===== T9-T10: Atoms =====
+
+fn c_atom_len(a atom) i64 = extern("c_atom_len")
+fn c_make_atom_name() atom = extern("c_make_atom_name")
+
+test "T9: atom -> char* (interned name)" =
+  assert::equals(c_atom_len('hello), 5)
+
+test "T10: C-returned char* interned into atom" =
+  assert::ok(c_make_atom_name() == 'from_c)
+
+// ===== T11-T13: Arrays of primitives =====
+
+fn c_sum_i32_arr(xs [i32], n i64) i64 = extern("c_sum_i32_arr")
+fn c_double_f64_arr(xs [f64], n i64) = extern("c_double_f64_arr")
+fn c_byte_first(buf [byte; 8]) i64 = extern("c_byte_first")
+
+test "T11: [i32] -> int32_t* with length" =
+  let xs [i32] = [1, 2, 3, 4]
+  assert::equals(c_sum_i32_arr(xs, len(xs)), 10)
+
+test "T12: [f64] mutated by C, visible in Tin (shared buffer)" =
+  let xs [f64] = [1.0, 2.0, 3.0]
+  c_double_f64_arr(xs, len(xs))
+  assert::ok(math::fabs(xs[0] - 2.0) < 1e-9)
+  assert::ok(math::fabs(xs[2] - 6.0) < 1e-9)
+
+test "T13: fixed-size [byte; N] decays to *byte" =
+  let buf [byte; 8] = [9, 0, 0, 0, 0, 0, 0, 0]
+  assert::equals(c_byte_first(buf), 9)
+
+// ===== T14-T15: Arrays of strings / atoms =====
+
+fn c_strarr_total(xs [string], n i64) i64 = extern("c_strarr_total")
+fn c_atomarr_total(xs [atom], n i64) i64 = extern("c_atomarr_total")
+
+test "T14: [string] -> char**" =
+  let xs = ["aa", "bbb", "cccc"]
+  assert::equals(c_strarr_total(xs, len(xs)), 9)
+
+test "T15: [atom] -> char** via name lookup" =
+  let xs = ['p, 'qq, 'rrr]
+  assert::equals(c_atomarr_total(xs, len(xs)), 6)
+
+// ===== T16-T17: Structs by value =====
+
+struct pt_small =
+  x i32
+  y i32
+
+fn c_pt_small_sum(p pt_small) i32 = extern("c_pt_small_sum")
+
+struct pt_big =
+  a i64
+  b i64
+  c i64
+
+fn c_pt_big_sum(p pt_big) i64 = extern("c_pt_big_sum")
+fn c_pt_big_make(a i64, b i64, c i64) pt_big = extern("c_pt_big_make")
+
+test "T16: small struct (≤16B) by value" =
+  let p = pt_small{x: 10, y: 32}
+  assert::equals(c_pt_small_sum(p), 42)
+
+test "T17: large struct (>16B) by value (byval/sret)" =
+  let p = pt_big{a: 1, b: 2, c: 3}
+  assert::equals(c_pt_big_sum(p), 6)
+  let q = c_pt_big_make(10, 20, 30)
+  assert::equals(q.a, 10)
+  assert::equals(q.b, 20)
+  assert::equals(q.c, 30)
+
+// ===== T18-T19: Pointer-to-struct =====
+
+struct vec3 =
+  x f32
+  y f32
+  z f32
+
+fn c_vec3_get() *vec3 = extern("c_vec3_get")
+fn c_vec3_bump_z(v *vec3, dz f32) = extern("c_vec3_bump_z")
+
+test "T18: *vec3 mutated by C, observed via Tin" =
+  let v = c_vec3_get()
+  let z0 = (*v).z
+  c_vec3_bump_z(v, 5.0)
+  assert::ok(math::fabs((*v).z - (z0 + 5.0)) < 1e-9)
+
+test "T19: C make() returning *vec3" =
+  let v = c_vec3_get()
+  assert::ok(math::fabs((*v).x - 0.0) < 1e-9)
+
+// ===== T20: Nested struct =====
+
+struct inner =
+  a i64
+  b i64
+
+struct outer =
+  lo inner
+  hi inner
+
+fn c_outer_sum(o outer) i64 = extern("c_outer_sum")
+
+test "T20: nested struct by value" =
+  let o = outer{lo: inner{a: 1, b: 2}, hi: inner{a: 10, b: 20}}
+  assert::equals(c_outer_sum(o), 33)
+
+// ===== T21: #packed struct =====
+
+struct {#packed} packed_pt =
+  x i32
+  y i32
+
+fn c_packed_sum(p packed_pt) i32 = extern("c_packed_sum")
+
+test "T21: #packed struct ≤8B in single register" =
+  let p = packed_pt{x: 17, y: 25}
+  assert::equals(c_packed_sum(p), 42)
+
+// ===== T23-T25: Callbacks =====
+
+fn c_invoke_cb_i64(cb fn(i64) i64, x i64) i64 = extern("c_invoke_cb_i64")
+fn c_invoke_cb_str(cb fn(string) i64, s string) i64 = extern("c_invoke_cb_str")
+
+test "T23: callback fn(i64) i64 invoked by C" =
+  let f = fn(x i64) i64 = return x * 2
+  assert::equals(c_invoke_cb_i64(f, 21), 42)
+
+test "T24: callback fn(string) i64 invoked by C" =
+  let f = fn(s string) i64 = return len(s)
+  assert::equals(c_invoke_cb_str(f, "hello world"), 11)
+
+test "T25: callback capturing local" =
+  let bias i64 = 100
+  let f = fn(x i64) i64 = return x + bias
+  assert::equals(c_invoke_cb_i64(f, 42), 142)
+
+// ===== T28-T29: Variadic =====
+//
+// One extern declaration with `...` covers all argument shapes; per-
+// callsite type checking still applies to args that follow the format
+// string.  Pass the format with the trailing %d / %s removed in the
+// test so we don't depend on stdout state.
+
+fn c_printf(format string, ...) i32 = extern("printf")
+
+test "T28: variadic printf with i32" =
+  let n = c_printf("", 42)
+  assert::ok(n >= 0)
+
+test "T29: variadic printf with string" =
+  let n = c_printf("", "abc")
+  assert::ok(n >= 0)
+
+// ===== T30: void* handle round trip =====
+
+fn c_handle_make() *void = extern("c_handle_make")
+fn c_handle_use(h *void) i64 = extern("c_handle_use")
+fn c_handle_free(h *void) = extern("c_handle_free")
+
+test "T30: void* opaque handle round trip" =
+  let h = c_handle_make()
+  let v = c_handle_use(h)
+  assert::equals(v, 1234)
+  c_handle_free(h)
+
+// ===== T32-T33: address-of-local struct -> C =====
+//
+// Pass a Tin-allocated struct by pointer to a C extern.  The Tin
+// allocation has the type_id + vtable header in front of the user
+// fields; the call-site adapter (codegen/extern.go::
+// adaptTinPtrToNativePtr) GEPs to the user-fields region so the C
+// side sees the bare native layout it expects, with shared storage
+// for round-trip mutations.
+
+struct dyad =
+  a i64
+  b i64
+
+fn c_dyad_read(p *dyad) i64 = extern("c_dyad_read")
+fn c_dyad_mutate(p *dyad) = extern("c_dyad_mutate")
+
+test "T32: &local_struct -> *T   (C reads through the pointer)" =
+  let d = dyad{a: 17, b: 25}
+  assert::equals(c_dyad_read(&d), 42)
+
+test "T33: &local_struct -> *T   (C mutates; Tin observes)" =
+  let d dyad = dyad{a: 0, b: 0}
+  c_dyad_mutate(&d)
+  assert::equals(d.a, 11)
+  assert::equals(d.b, 22)
+
+// ===== T34-T37: Mixed-parameter shapes =====
+//
+// Real C APIs combine the primitives above in arbitrary orders.
+// These rows pin the joint behavior so a regression in one
+// individual lowering doesn't slip through when its neighbor in
+// the same signature still happens to land in the right register.
+
+fn c_mix_sps(p *dyad, n i64, s string) i64 = extern("c_mix_sps")
+
+fn c_mix_full(
+  cb fn(i64) i64,
+  s string,
+  p *dyad,
+  xs [i64], xs_len i64,
+  k i64,
+) i64 = extern("c_mix_full")
+
+fn c_mix_make(s string, n i64) dyad = extern("c_mix_make")
+
+fn c_mix_arr_struct(xs [i64], n i64, p pt_big) i64 = extern("c_mix_arr_struct")
+
+test "T34: extern(*struct, scalar, string) returning i64" =
+  let d = dyad{a: 7, b: 8}
+  // C body: (a + b) * n + strlen(s) = 15 * 4 + 5 = 65
+  assert::equals(c_mix_sps(&d, 4, "hello"), 65)
+
+test "T35: extern(callback, string, *struct, [i64], scalar)" =
+  let d = dyad{a: 1, b: 2}
+  let xs [i64] = [10, 20, 30]
+  let double = fn(x i64) i64 = return x * 2
+  // C body: cb(a + b) + strlen(s) + sum(xs) + k = 6 + 5 + 60 + 100 = 171
+  assert::equals(c_mix_full(double, "hello", &d, xs, len(xs), 100), 171)
+
+test "T36: extern(string, scalar) returning struct by value" =
+  let d = c_mix_make("abcd", 7)
+  // C body: dyad{a: strlen(s), b: n} = (4, 7)
+  assert::equals(d.a, 4)
+  assert::equals(d.b, 7)
+
+test "T37: extern([i64], large_struct_by_value) returning i64" =
+  let xs [i64] = [4, 5, 6]
+  let p = pt_big{a: 1, b: 2, c: 3}
+  // C body: sum(xs) + p.a + p.b + p.c = 15 + 6 = 21
+  assert::equals(c_mix_arr_struct(xs, len(xs), p), 21)

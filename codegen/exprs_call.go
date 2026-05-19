@@ -1180,6 +1180,21 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 			}
 
+			// *TinStruct -> *<S>.native: pass a pointer to the user-
+			// fields region of the Tin allocation.  The fields appear
+			// in the same order and types in both layouts (Tin just
+			// prefixes a typeid + vtable header), so a GEP to the
+			// first user field + bitcast to the native pointer type
+			// is bit-identical to what C expects.  C writes hit the
+			// real Tin storage so out-params propagate.  Limited to
+			// ABI-compat structs (no fat-ptr / fn fields, which have
+			// different shapes in the two layouts).
+			if adapted := cg.adaptTinPtrToNativePtr(block, arg, pt); adapted != nil {
+				llArgs[i] = adapted
+
+				continue
+			}
+
 			if cg.argTypeImplicitlyOK(arg.Type(), pt) {
 				continue
 			}
