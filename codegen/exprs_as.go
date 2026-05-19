@@ -29,7 +29,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 0))
 					srcPtr := block.NewBitCast(elemPtr, irtypes.I8Ptr)
 
-					return block.NewCall(cg.ensureBytesFromBuf(), srcPtr, n), nil
+					return cg.callExtern(block, cg.ensureBytesFromBuf(), srcPtr, n), nil
 				}
 			}
 		}

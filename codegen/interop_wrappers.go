@@ -334,7 +334,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 			cstr := wrapperParams[wrapperIdx]
 			wrapperIdx++
 
-			tinStr := block.NewCall(cg.ensureInteropStrIn(), cstr)
+			tinStr := cg.callExtern(block, cg.ensureInteropStrIn(), cstr)
 			args = append(args, tinStr)
 
 			ptrField := block.NewExtractValue(tinStr, 0)
@@ -487,7 +487,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 			// Cast the typed C pointer to i8* for the runtime call.
 			dataI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
 			elemSize := constant.NewInt(irtypes.I64, int64(sliceElemSizes[paramIdx]))
-			rawSlice := block.NewCall(cg.ensureInteropSliceIn(), dataI8, lenVal, elemSize)
+			rawSlice := cg.callExtern(block, cg.ensureInteropSliceIn(), dataI8, lenVal, elemSize)
 
 			// rawSlice is {i8*, i64}. The internal expects {T*, i64}.
 			// Extract, bitcast the pointer, and reassemble.
@@ -539,7 +539,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 
 	switch retKind {
 	case "string":
-		finalRet = block.NewCall(cg.ensureInteropStrOut(), rawRet)
+		finalRet = cg.callExtern(block, cg.ensureInteropStrOut(), rawRet)
 		retTinPtr = block.NewExtractValue(rawRet, 0)
 	case "callback":
 		// rawRet is the 4-slot Tin fat fn-ptr {sync, colored, coro, env}.
@@ -670,7 +670,7 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 		outDataI8 := block.NewBitCast(outData, irtypes.NewPointer(irtypes.I8Ptr))
 		elemSize := constant.NewInt(irtypes.I64, int64(sliceElemSize))
 
-		finalRet = block.NewCall(cg.ensureInteropSliceOut(),
+		finalRet = cg.callExtern(block, cg.ensureInteropSliceOut(),
 			rawSlice, elemSize, outDataI8, outLen)
 
 		// Release the typed data buffer Tin allocated for the slice.

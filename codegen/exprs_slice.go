@@ -90,7 +90,7 @@ func (cg *CodeGen) genPtrRangeSlice(block *ir.Block, ptrExpr ast.Node, loExpr as
 
 	// *byte -> call _tin_bytes_from_buf for an ARC-managed [byte].
 	if pt.ElemType.Equal(irtypes.I8) {
-		return block.NewCall(cg.ensureBytesFromBuf(), startPtr, length), nil
+		return cg.callExtern(block, cg.ensureBytesFromBuf(), startPtr, length), nil
 	}
 
 	// Other pointer types: copy the [lo..hi) range into a fresh

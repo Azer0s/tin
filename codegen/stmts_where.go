@@ -457,7 +457,7 @@ func (cg *CodeGen) emitWhereArrayPatternTest(block *ir.Block, ap *ast.ArrayPatte
 			dataAsI8 := lenOkBlock.NewBitCast(dataPtr, irtypes.I8Ptr)
 			rawSlice := cg.buildFatArrayValue(lenOkBlock, irtypes.I8, dataAsI8, arrLen, arrLen)
 
-			subRes := lenOkBlock.NewCall(cg.ensureSliceSubslice(), rawSlice,
+			subRes := cg.callExtern(lenOkBlock, cg.ensureSliceSubslice(), rawSlice,
 				constant.NewInt(irtypes.I64, int64(regularCount)),
 				constant.NewInt(irtypes.I64, elemSzBytes))
 

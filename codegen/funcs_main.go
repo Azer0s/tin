@@ -218,7 +218,7 @@ func (cg *CodeGen) genTestRunner() error {
 		for i, td := range cg.testDecls {
 			descVal := cg.buildStringFatPtr(cur, td.Desc)
 			fnPtr := cur.NewBitCast(testFuncs[i], irtypes.I8Ptr)
-			cur.NewCall(runTestFn, descVal, fnPtr)
+			cg.callExtern(cur, runTestFn, descVal, fnPtr)
 		}
 
 		// Drain the run queue and shut down workers.

@@ -702,7 +702,7 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 					ir.NewParam("argc", irtypes.I32),
 					ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
 				}, false)
-				argsSliceVal = wb.NewCall(argvFn, wf.Params[0], wf.Params[1])
+				argsSliceVal = cg.callExtern(wb, argvFn, wf.Params[0], wf.Params[1])
 			}
 
 			if userMainCoroFn != nil {

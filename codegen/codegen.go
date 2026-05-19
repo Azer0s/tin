@@ -657,6 +657,12 @@ type CodeGen struct {
 	// Used to detect collisions when a Tin user function has the same name as a C symbol.
 	externIRNames map[string]bool
 
+	// externABIs: per-extern logical signature for callExtern's byval /
+	// sret wrap.  Populated by declareABILoweredExtern; consulted by
+	// callExtern.  Keyed by the *ir.Func declaration (per-pkg-module
+	// distinct).
+	externABIs map[*ir.Func]externABI
+
 	// externTLSVars: extern thread-local global variables declared in the IR.
 	// Keyed by C variable name. Populated by ensureExternTLSVar.
 	externTLSVars map[string]*ir.Global

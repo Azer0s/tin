@@ -492,7 +492,7 @@ func (cg *CodeGen) convertFatArray(block *ir.Block, val value.Value, srcSt, tgtS
 		srcSigned = 0
 	}
 
-	convResult := block.NewCall(cg.ensureSliceConvertInt(), rawVal,
+	convResult := cg.callExtern(block, cg.ensureSliceConvertInt(), rawVal,
 		constant.NewInt(irtypes.I64, int64(srcSz)),
 		constant.NewInt(irtypes.I64, int64(tgtSz)),
 		constant.NewInt(irtypes.I32, srcSigned))

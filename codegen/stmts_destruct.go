@@ -193,7 +193,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		_ = sliceType
 
 		subFn := cg.ensureSliceSubslice()
-		subResult := block.NewCall(subFn, rawSlice,
+		subResult := cg.callExtern(block, subFn, rawSlice,
 			constant.NewInt(irtypes.I64, int64(regularCount)),
 			constant.NewInt(irtypes.I64, elemSzBytes))
 

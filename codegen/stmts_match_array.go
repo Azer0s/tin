@@ -141,7 +141,7 @@ func (cg *CodeGen) genArrayMatch(block *ir.Block, s *ast.MatchStmt, resAlloca va
 				rawSlice := cg.buildFatArrayValue(checkBlock, irtypes.I8, dataPtrAsI8, arrLen, arrLen)
 
 				subFn := cg.ensureSliceSubslice()
-				subResult := checkBlock.NewCall(subFn, rawSlice,
+				subResult := cg.callExtern(checkBlock, subFn, rawSlice,
 					constant.NewInt(irtypes.I64, int64(regularCount)),
 					constant.NewInt(irtypes.I64, elemSzBytes))
 

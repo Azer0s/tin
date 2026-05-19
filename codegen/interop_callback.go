@@ -191,7 +191,7 @@ func (cg *CodeGen) marshalCToTinInThunk(b *ir.Block, v value.Value, ret ast.Type
 			switch st.Name {
 			case "string":
 				// v is i8* from C. Copy into a Tin ARC string.
-				return b.NewCall(cg.ensureInteropStrIn(), v)
+				return cg.callExtern(b, cg.ensureInteropStrIn(), v)
 			case "bool":
 				return b.NewICmp(enum.IPredNE, v, constant.NewInt(irtypes.I8, 0))
 			}
@@ -393,7 +393,7 @@ func (cg *CodeGen) marshalCToTinForDispatch(b *ir.Block, pieces []*ir.Param,
 	if st, ok := t.(*ast.SimpleType); ok {
 		switch st.Name {
 		case "string":
-			tinStr := b.NewCall(cg.ensureInteropStrIn(), pieces[0])
+			tinStr := cg.callExtern(b, cg.ensureInteropStrIn(), pieces[0])
 			temp := b.NewExtractValue(tinStr, 0)
 
 			return tinStr, temp
@@ -416,7 +416,7 @@ func (cg *CodeGen) marshalCToTinForDispatch(b *ir.Block, pieces []*ir.Param,
 
 		dataI8 := b.NewBitCast(pieces[0], irtypes.I8Ptr)
 		elemSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(elemTy)))
-		rawSlice := b.NewCall(cg.ensureInteropSliceIn(), dataI8, pieces[1], elemSize)
+		rawSlice := cg.callExtern(b, cg.ensureInteropSliceIn(), dataI8, pieces[1], elemSize)
 
 		// rawSlice is {i8*, i64}. The internal Tin closure expects
 		// {T*, i64}; bitcast the data field and reassemble.
@@ -454,7 +454,7 @@ func (cg *CodeGen) marshalTinToCForDispatch(b *ir.Block, v value.Value,
 		if st, ok := ret.(*ast.SimpleType); ok {
 			switch st.Name {
 			case "string":
-				out := b.NewCall(cg.ensureInteropStrOut(), v)
+				out := cg.callExtern(b, cg.ensureInteropStrOut(), v)
 				// Release the Tin string returned by the inner closure
 				// after we've copied its bytes into the C buffer.
 				ptr := b.NewExtractValue(v, 0)

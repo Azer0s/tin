@@ -749,27 +749,22 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 		cg.externIRNames = map[string]bool{}
 	}
 
-	needsLowering := externNeedsABILowering(retType, params)
-
-	// When the signature needs ABI lowering, callers expect the shim
-	// back from `ensureExternDecl`.  Look for an existing shim in this
-	// module; if absent we emit a fresh one (the actual `cName` extern
-	// gets re-declared alongside).  This is what lets cross-pkg
-	// references resolve -- each pkg module that uses the shim emits
-	// its own linkonce_odr copy.
-	shimName := cName + "$abi_shim"
+	// Reuse any existing declaration of `cName` in this module.  The
+	// bare extern carries byval/sret encoded into its param attrs when
+	// ABI lowering applies; subsequent callers via cg.callExtern read
+	// the attrs to drive the wrap at the call site.
 	for _, f := range mod.Funcs {
-		if needsLowering && f.Name() == shimName {
-			return f
-		}
-
-		if !needsLowering && f.Name() == cName {
+		if f.Name() == cName {
 			return f
 		}
 	}
 
+	needsLowering := externNeedsABILowering(retType, params)
+
 	if !needsLowering || variadic {
-		// Fast path: signature fits in registers, no shim needed.
+		// Fast path: signature fits in registers (or variadic, which
+		// the SysV ABI passes via registers regardless of struct
+		// size).  Declare verbatim.
 		f := mod.NewFunc(cName, retType, params...)
 		f.Sig.Variadic = variadic
 		f.Blocks = nil
@@ -778,7 +773,7 @@ func (cg *CodeGen) ensureExternDecl(cName string, retType irtypes.Type, params [
 		return f
 	}
 
-	return cg.emitExternWithABIShim(cName, retType, params)
+	return cg.declareABILoweredExtern(cName, retType, params)
 }
 
 // largeStructByValThreshold is the size in bytes above which the
@@ -875,21 +870,35 @@ func largeStructAlignment(st *irtypes.StructType) int64 {
 }
 
 // largeStructByvalAttrs returns the attribute list a >16-byte struct
-// `byval` parameter needs at the call site AND on the declaration on
-// x86_64 SysV (clang 18+ shape: `noundef byval(%struct) align <a>`).
-// On AAPCS64 the composite is passed indirectly via a bare pointer
-// arg with no attribute; an empty list keeps the call site bare.
-// Same list goes in both places because LLVM doesn't propagate them.
+// parameter needs at the call site AND on the declaration.
+//
+// x86_64 SysV (clang 18+ shape): `noundef byval(%struct) align <a>`.
+// AAPCS64 (Apple ARM / Linux ARM, clang 18+ shape): `noundef` and a
+// bare pointer.  clang adds `dead_on_return` as an opt hint we omit.
+//
+// The byval attribute is the marker callExtern uses to detect "wrap
+// this struct value into a stack slot at the call site" -- on AAPCS64
+// we synthesise the same wrap but emit only the attrs clang would
+// (no byval) so the IR continues to match what the linked C side
+// declares.  See byvalTypeOf for the call-site detection path which
+// covers both cases.
 func (cg *CodeGen) largeStructByvalAttrs(st *irtypes.StructType) []ir.ParamAttribute {
-	if !cg.targetIsAMD64() {
-		return nil
+	if cg.targetIsAMD64() {
+		return []ir.ParamAttribute{
+			enum.ParamAttrNoUndef,
+			ir.Byval{Typ: st},
+			ir.Align(largeStructAlignment(st)),
+		}
 	}
 
-	return []ir.ParamAttribute{
-		enum.ParamAttrNoUndef,
-		ir.Byval{Typ: st},
-		ir.Align(largeStructAlignment(st)),
+	if cg.targetIsARM64() {
+		return []ir.ParamAttribute{
+			enum.ParamAttrNoUndef,
+			ir.Align(largeStructAlignment(st)),
+		}
 	}
+
+	return nil
 }
 
 // largeStructSretAttrs returns the attribute list the hidden sret
@@ -911,47 +920,129 @@ func (cg *CodeGen) largeStructSretAttrs(st *irtypes.StructType) []ir.ParamAttrib
 	}
 }
 
-// emitExternWithABIShim declares the underlying C extern with the
-// clang-style lowered signature and synthesizes a Tin-side wrapper
-// that takes/returns the structs by value.  Returns the wrapper -- the
-// rest of codegen treats it as if it were the extern itself.
-func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, params []*ir.Param) *ir.Func {
-	// Step 1: build the lowered extern declaration.  ABI attributes
-	// (byval / sret) must appear on BOTH the declaration and the call
-	// site or LLVM's SysV lowering treats the pointer arg as a plain
-	// integer in RDI/RSI and corrupts the param at the boundary.
-	loweredParams := make([]*ir.Param, 0, len(params)+1)
+// externABI records the logical (struct-by-value) signature of an
+// ABI-lowered extern.  Populated at declaration time, consulted by
+// callExtern to decide which call args need the alloca-store-pointer
+// wrap and whether to prepend an sret slot.  Keyed by the lowered
+// *ir.Func because each pkg module gets its own decl object.
+//
+// Attribute-based detection won't work on AAPCS64: clang declares
+// the lowered extern as `void f(ptr noundef)` with NO byval attr,
+// so a param's IR attrs alone don't distinguish "logical struct
+// value" from "logical pointer".  The sidecar map keeps the logical
+// shape explicit.
+type externABI struct {
+	sretType   irtypes.Type
+	byvalSlots []irtypes.Type
+}
 
-	var (
-		sretSlot     *ir.Param
-		sretCallAttr []ir.ParamAttribute
-	)
-
-	paramCallAttrs := make([][]ir.ParamAttribute, 0, len(params))
-
-	retLowered := !isLargeStruct(retType)
-	loweredRet := retType
-
-	if !retLowered {
-		retSt := retType.(*irtypes.StructType)
-		sretCallAttr = cg.largeStructSretAttrs(retSt)
-		sretSlot = ir.NewParam("sret_slot", irtypes.NewPointer(retType))
-		sretSlot.Attrs = append(sretSlot.Attrs, sretCallAttr...)
-		loweredParams = append(loweredParams, sretSlot)
-		loweredRet = irtypes.Void
+// callExtern calls `fn` from `block` with `args` matching fn's
+// LOGICAL (struct-by-value) signature, performing the byval / sret
+// wrap at the call site for any >16-byte struct param or return.
+// fn must be an extern declared via `ensureExternDecl`; the logical
+// signature is recorded in cg.externABIs when the extern was first
+// declared.  Extern fns with no ABI lowering fall through to a
+// plain NewCall.
+//
+// Replaces the previous IR shim function (`*$abi_shim`).  The shim
+// existed only to translate between Tin codegen's natural-signature
+// view and the byval/sret signature clang emits for the linked C
+// side; doing the same wrap inline at the call site removes the
+// intermediate function (and the per-pkg weak_odr copies it required),
+// keeps the IR signature in lockstep with clang, and means ABI
+// correctness no longer depends on the inliner running.
+//
+// Args follow the logical signature: pass the struct value, not a
+// pointer.  The helper does the alloca-store-byval wrap.  When `fn`
+// returns a >16B struct via sret, callExtern allocates the return
+// slot, prepends it as the first call arg, issues a void call, and
+// loads the result back -- the caller sees a struct-by-value return.
+func (cg *CodeGen) callExtern(block *ir.Block, fn *ir.Func, args ...value.Value) value.Value {
+	abi, ok := cg.externABIs[fn]
+	if !ok {
+		// No ABI lowering for this extern -- pass args through.
+		return block.NewCall(fn, args...)
 	}
 
-	for _, p := range params {
+	params := fn.Params
+
+	paramOffset := 0
+	if abi.sretType != nil {
+		paramOffset = 1
+	}
+
+	callArgs := make([]value.Value, 0, len(params))
+
+	var sretSlot value.Value
+
+	if abi.sretType != nil {
+		sretSlot = cg.hoistAlloca(block, abi.sretType)
+		callArgs = append(callArgs, callArgWithAttrs(sretSlot, params[0].Attrs))
+	}
+
+	for i, a := range args {
+		pIdx := i + paramOffset
+		// Variadic externs (e.g. printf) declare fewer params than
+		// args.  Pass extras through unchanged.
+		if pIdx >= len(params) {
+			callArgs = append(callArgs, a)
+
+			continue
+		}
+
+		var byvalTy irtypes.Type
+		if i < len(abi.byvalSlots) {
+			byvalTy = abi.byvalSlots[i]
+		}
+
+		if byvalTy != nil {
+			slot := cg.hoistAlloca(block, byvalTy)
+			block.NewStore(a, slot)
+			callArgs = append(callArgs, callArgWithAttrs(slot, params[pIdx].Attrs))
+		} else {
+			callArgs = append(callArgs, a)
+		}
+	}
+
+	if abi.sretType != nil {
+		block.NewCall(fn, callArgs...)
+
+		return block.NewLoad(abi.sretType, sretSlot)
+	}
+
+	return block.NewCall(fn, callArgs...)
+}
+
+// declareABILoweredExtern emits the bare extern declaration with its
+// final byval / sret signature -- matching what clang emits for the
+// linked C definition.  No wrapper function is generated; callers use
+// `cg.callExtern` to drive the byval/sret wrap at each call site.
+func (cg *CodeGen) declareABILoweredExtern(cName string, retType irtypes.Type, params []*ir.Param) *ir.Func {
+	loweredParams := make([]*ir.Param, 0, len(params)+1)
+	loweredRet := retType
+
+	abi := externABI{
+		byvalSlots: make([]irtypes.Type, len(params)),
+	}
+
+	if isLargeStruct(retType) {
+		retSt := retType.(*irtypes.StructType)
+		sretSlot := ir.NewParam("sret_slot", irtypes.NewPointer(retType))
+		sretSlot.Attrs = append(sretSlot.Attrs, cg.largeStructSretAttrs(retSt)...)
+		loweredParams = append(loweredParams, sretSlot)
+		loweredRet = irtypes.Void
+		abi.sretType = retType
+	}
+
+	for i, p := range params {
 		if isLargeStruct(p.Type()) {
 			st := p.Type().(*irtypes.StructType)
 			lp := ir.NewParam(p.Name(), irtypes.NewPointer(st))
-			attrs := cg.largeStructByvalAttrs(st)
-			lp.Attrs = append(lp.Attrs, attrs...)
+			lp.Attrs = append(lp.Attrs, cg.largeStructByvalAttrs(st)...)
 			loweredParams = append(loweredParams, lp)
-			paramCallAttrs = append(paramCallAttrs, attrs)
+			abi.byvalSlots[i] = st
 		} else {
 			loweredParams = append(loweredParams, p)
-			paramCallAttrs = append(paramCallAttrs, nil)
 		}
 	}
 
@@ -963,68 +1054,20 @@ func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, par
 			modName = mod.SourceFilename
 		}
 
-		fmt.Fprintf(os.Stderr, "[shim emit %q in mod=%s]\n", cName, modName)
+		fmt.Fprintf(os.Stderr, "[extern declare %q in mod=%s]\n", cName, modName)
 	}
 
 	cFn := mod.NewFunc(cName, loweredRet, loweredParams...)
 	cFn.Blocks = nil
 	cg.externIRNames[cName] = true
 
-	// Step 2: synthesize the Tin-side shim with the natural signature.
-	shimName := cName + "$abi_shim"
-
-	shimParams := make([]*ir.Param, len(params))
-
-	for i, p := range params {
-		shimParams[i] = ir.NewParam(p.Name(), p.Type())
+	if cg.externABIs == nil {
+		cg.externABIs = map[*ir.Func]externABI{}
 	}
 
-	shim := mod.NewFunc(shimName, retType, shimParams...)
-	// weak_odr lets the same shim appear in multiple per-pkg modules
-	// without producing duplicate-symbol link errors.  ThinLTO is
-	// happier with weak_odr than linkonce_odr for cross-module shims
-	// because it preserves at least one definition rather than
-	// dropping all copies during global DCE.
-	shim.Linkage = enum.LinkageWeakODR
+	cg.externABIs[cFn] = abi
 
-	entry := shim.NewBlock("entry")
-
-	var sretAlloca value.Value
-	if !retLowered {
-		sretAlloca = entry.NewAlloca(retType)
-	}
-
-	callArgs := make([]value.Value, 0, len(loweredParams))
-
-	if !retLowered {
-		callArgs = append(callArgs, callArgWithAttrs(sretAlloca, sretCallAttr))
-	}
-
-	for i, sp := range shimParams {
-		if isLargeStruct(sp.Type()) {
-			slot := entry.NewAlloca(sp.Type())
-			entry.NewStore(sp, slot)
-			callArgs = append(callArgs, callArgWithAttrs(slot, paramCallAttrs[i]))
-		} else {
-			callArgs = append(callArgs, sp)
-		}
-	}
-
-	if retLowered {
-		ret := entry.NewCall(cFn, callArgs...)
-
-		if _, isVoid := retType.(*irtypes.VoidType); isVoid {
-			entry.NewRet(nil)
-		} else {
-			entry.NewRet(ret)
-		}
-	} else {
-		entry.NewCall(cFn, callArgs...)
-		loaded := entry.NewLoad(retType, sretAlloca)
-		entry.NewRet(loaded)
-	}
-
-	return shim
+	return cFn
 }
 
 // ensureExternTLSVar returns (or creates) an extern thread-local global variable
