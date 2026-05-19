@@ -636,6 +636,18 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			if id, ok := v.Expr.(*ast.Identifier); ok {
 				used[id.Name] = true
 			}
+		case *ast.StructLit:
+			// `Foo{...}` and `pkg::Foo{...}` count as a use of the
+			// type name AND the leading namespace.  Without this the
+			// selective-import "never used" check fires for cases
+			// like `use { Value } from pkg; let v = Value{...}`.
+			name := v.TypeName
+			if idx := strings.Index(name, "::"); idx >= 0 {
+				used[name[:idx]] = true
+				name = name[idx+2:]
+			}
+
+			used[name] = true
 		case *ast.FuncDecl:
 			for _, p := range v.Params {
 				visitType(p.Type)
@@ -708,9 +720,16 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		if base == "" || used[base] {
 			continue
 		}
+		// Report the full path the user wrote (`math::complex`) rather
+		// than the bare base (`complex`) so the warning points at the
+		// exact `use` line they need to remove.
+		shown := ud.Path
+		if shown == "" {
+			shown = base
+		}
 
 		cg.warn(DiagUnusedImport, ud.Pos(),
-			"import %q is never used", base)
+			"import %q is never used", shown)
 	}
 }
 

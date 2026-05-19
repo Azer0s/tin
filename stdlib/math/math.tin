@@ -7,6 +7,12 @@
 
 use "./complex"
 
+// Surface the complex Value type as `math::Complex` so callers who
+// just `use math` can spell the type without also importing the
+// complex sub-namespace.  The struct itself, the imaginary unit, and
+// all helpers still live in math::complex.
+type Complex = complex::Value
+
 // Basic arithmetic
 
 // fabs returns the absolute value of x
@@ -107,6 +113,8 @@ export {
   floor, ceil, round, trunc,
   fmin, fmax,
   PI, E,
-  // Complex numbers are in the math::complex sub-namespace.
+  // Complex number type surfaced at math::Complex.  Helpers, the
+  // imaginary unit, and the constructor live in math::complex.
+  Complex,
   complex
 } as math

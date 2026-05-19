@@ -688,6 +688,12 @@ func (cg *CodeGen) isExternOutPtrParam(te ast.TypeExpr) (string, int, bool) {
 // markPtrStructCLayout marks the struct at the base of a *...*StructName type
 // (any depth) as needing a hidden C source pointer field. Handles *S, **S,
 // ***S, etc. Skips primitives like *void, *i8.
+//
+// Cross-package structs aren't reachable here -- their decls were processed
+// during Pre-pass 1.9 (package load) without the cLayoutStruct flag, so the
+// native shadow type was never emitted.  Marking them now would crash later
+// codegen with "missing native type".  adaptTinPtrToNativePtr handles the
+// cross-package `*Tin -> *native` case at the call site instead.
 func (cg *CodeGen) markPtrStructCLayout(te ast.TypeExpr) {
 	cur := te
 

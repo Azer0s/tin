@@ -20,12 +20,12 @@ fn approx(a f64, b f64) bool =
 // Construction and field access
 
 test "struct literal stores re / im" =
-  let z = complex::Complex{re: 3.0, im: 4.0}
+  let z = complex::Value{re: 3.0, im: 4.0}
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 4.0)
 
 test "from builds the same value as a struct literal" =
-  let z = complex::from(3.0, 4.0)
+  let z = complex::from_value(3.0, 4.0)
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 4.0)
 
@@ -55,67 +55,83 @@ test "i64 + Complex picks implicit[i64]" =
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 1.0)
 
+test "f64 - Complex (non-commutative LHS coerce)" =
+  let z = 2.0 - complex::I
+  assert::equals(z.re, 2.0)
+  assert::equals(z.im, -1.0)
+
+test "f64 / Complex computes the inverse for unit i" =
+  // 1 / i = -i  because i * (-i) = 1.
+  let z = 1.0 / complex::I
+  assert::equals(z.re, 0.0)
+  assert::equals(z.im, -1.0)
+
+test "i64 - Complex via implicit[i64]" =
+  let z = 5 - complex::Value{re: 2.0, im: 3.0}
+  assert::equals(z.re, 3.0)
+  assert::equals(z.im, -3.0)
+
 // Operator overloads
 
 test "add" =
-  let c = complex::from(1.0, 2.0) + complex::from(5.0, -1.0)
+  let c = complex::from_value(1.0, 2.0) + complex::from_value(5.0, -1.0)
   assert::equals(c.re, 6.0)
   assert::equals(c.im, 1.0)
 
 test "sub" =
-  let c = complex::from(5.0, 3.0) - complex::from(2.0, 7.0)
+  let c = complex::from_value(5.0, 3.0) - complex::from_value(2.0, 7.0)
   assert::equals(c.re, 3.0)
   assert::equals(c.im, -4.0)
 
 test "mul follows (a+bi)(c+di) = (ac - bd) + (ad + bc)i" =
-  let c = complex::from(3.0, 4.0) * complex::from(2.0, -1.0)
+  let c = complex::from_value(3.0, 4.0) * complex::from_value(2.0, -1.0)
   // (3+4i)(2-i) = 6 - 3i + 8i + 4 = 10 + 5i
   assert::equals(c.re, 10.0)
   assert::equals(c.im, 5.0)
 
 test "div is the inverse of mul" =
-  let a = complex::from(3.0, 4.0)
-  let b = complex::from(2.0, -1.0)
+  let a = complex::from_value(3.0, 4.0)
+  let b = complex::from_value(2.0, -1.0)
   let q = (a * b) / b
   assert::ok(approx(q.re, a.re))
   assert::ok(approx(q.im, a.im))
 
 test "neg flips both parts" =
-  let z = -complex::from(3.0, -4.0)
+  let z = -complex::from_value(3.0, -4.0)
   assert::equals(z.re, -3.0)
   assert::equals(z.im, 4.0)
 
 test "comp compares structurally" =
-  let a = complex::from(1.5, 2.5)
-  let b = complex::from(1.5, 2.5)
-  let c = complex::from(1.5, 2.6)
+  let a = complex::from_value(1.5, 2.5)
+  let b = complex::from_value(1.5, 2.5)
+  let c = complex::from_value(1.5, 2.6)
   assert::ok(a == b)
   assert::ok(!(a == c))
 
 // Implicit scalar coercion: lets users mix Complex with f64 / i64.
 
 test "implicit coerce: f64 fits into a Complex slot" =
-  let z complex::Complex = 1.0
+  let z complex::Value = 1.0
   assert::equals(z.re, 1.0)
   assert::equals(z.im, 0.0)
 
 test "implicit coerce: i64 fits into a Complex slot" =
-  let z complex::Complex = 3
+  let z complex::Value = 3
   assert::equals(z.re, 3.0)
   assert::equals(z.im, 0.0)
 
 // Helpers
 
 test "conj" =
-  let c = complex::conj(complex::from(3.0, 4.0))
+  let c = complex::conj(complex::from_value(3.0, 4.0))
   assert::equals(c.re, 3.0)
   assert::equals(c.im, -4.0)
 
 test "abs returns sqrt(re^2 + im^2)" =
-  assert::equals(complex::abs(complex::from(3.0, 4.0)), 5.0)
+  assert::equals(complex::abs(complex::from_value(3.0, 4.0)), 5.0)
 
 test "arg of positive real is 0" =
-  assert::equals(complex::arg(complex::from(2.0, 0.0)), 0.0)
+  assert::equals(complex::arg(complex::from_value(2.0, 0.0)), 0.0)
 
 test "from_polar / arg round-trip" =
   let z = complex::from_polar(2.0, 1.0)
@@ -125,28 +141,28 @@ test "from_polar / arg round-trip" =
 // Holomorphic functions
 
 test "exp(0) == 1" =
-  let z = complex::exp(complex::from(0.0, 0.0))
+  let z = complex::exp(complex::from_value(0.0, 0.0))
   assert::ok(approx(z.re, 1.0))
   assert::ok(approx(z.im, 0.0))
 
 test "exp(i*pi) == -1 (Euler's identity)" =
-  let z = complex::exp(complex::from(0.0, math::PI))
+  let z = complex::exp(complex::from_value(0.0, math::PI))
   assert::ok(approx(z.re, -1.0))
   assert::ok(approx(z.im, 0.0))
 
 test "log(exp(z)) == z for small z" =
-  let z = complex::from(0.5, 0.3)
+  let z = complex::from_value(0.5, 0.3)
   let w = complex::log(complex::exp(z))
   assert::ok(approx(w.re, z.re))
   assert::ok(approx(w.im, z.im))
 
 test "sqrt(-1) == i" =
-  let z = complex::sqrt(complex::from(-1.0, 0.0))
+  let z = complex::sqrt(complex::from_value(-1.0, 0.0))
   assert::ok(approx(z.re, 0.0))
   assert::ok(approx(z.im, 1.0))
 
 test "sin^2 + cos^2 == 1 for real input" =
-  let z = complex::from(0.7, 0.0)
+  let z = complex::from_value(0.7, 0.0)
   let s = complex::sin(z)
   let c = complex::cos(z)
   assert::ok(approx(s.re * s.re + c.re * c.re, 1.0))

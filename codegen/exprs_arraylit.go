@@ -401,6 +401,11 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				return nil, err
 			}
 		}
+		// The canonical name we just synthesized is a fresh codegen
+		// artefact at this call site -- opt it into the bare-name
+		// visibility set so the resolver below accepts it the way it
+		// would for an explicit `type Name = ...` decl.
+		cg.curScope.markTypeVisible(concreteName)
 
 		typeName = concreteName
 		// Rewrite the StructLit to use the concrete name for the rest of genStructLit.
@@ -412,12 +417,35 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 	// (e.g., bare "Mutex" -> "sync__Mutex" after canonical naming).
 	// Also handles package-qualified names like "http::Request" -> "http__Request"
 	// and deep paths like "net::tcp::Conn" -> "tcp::Conn" -> "tcp__Conn".
+	//
+	// For BARE names (no `::`), only resolve through the alias when
+	// the current scope marks the name as visible OR we are emitting
+	// inside the defining package's own context (currentPkg set, and
+	// `<currentPkg>__<name>` resolves to a struct).  The first check
+	// covers consumer-side code: `use math` shouldn't make
+	// `Complex{...}` work just because math happens to load
+	// math::complex internally.  The second check keeps the
+	// package's own bodies and const initializers working --
+	// complex.tin's `const I = Complex{re: 0.0, im: 1.0}` is emitted
+	// at main-module top-level where the scope chain has lost the
+	// package's visibility set, but currentPkg is restored by
+	// emitTopLevelVarInits so the canonical form still resolves.
 	if cg.structTypeFor(CanonKey(typeName)) == nil {
 		resolved := false
 
-		if alias := cg.aliasTypeFor(CanonKey(typeName)); alias != nil {
-			if simple, ok3 := alias.(*ast.SimpleType); ok3 {
-				typeName = simple.Name
+		// When emitting inside a package's own context, prefer the
+		// in-package canonical form (`<pkg>__<name>`) over whatever
+		// the global bare alias points to.  Two packages can each
+		// declare a struct with the same bare name (math::complex
+		// and encoding::json both ship a `Value`); the last loader
+		// to register the bare alias wins globally, so without this
+		// short-circuit complex.tin's `const I = Value{...}` would
+		// resolve `Value` to `json__Value` whenever json happens to
+		// be transitively loaded by something else.
+		if !strings.Contains(typeName, "::") && cg.currentPkg != "" {
+			pkgScoped := cg.currentPkg + "__" + typeName
+			if cg.structTypeFor(CanonKey(pkgScoped)) != nil {
+				typeName = pkgScoped
 				next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
 				next.SetPos(origPos)
 				e = next
@@ -425,11 +453,37 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 		}
 
-		// For multi-level qualified names (e.g. "net::tcp::Conn"), strip leading
-		// package components one at a time until an alias is found.
+		bareAndHidden := !resolved &&
+			!strings.Contains(typeName, "::") &&
+			!cg.curScope.typeNameVisible(typeName) &&
+			(cg.currentPkg == "" ||
+				cg.structTypeFor(CanonKey(cg.currentPkg+"__"+typeName)) == nil)
+
+		if !resolved {
+			if alias := cg.aliasTypeFor(CanonKey(typeName)); alias != nil && !bareAndHidden {
+				if simple, ok3 := alias.(*ast.SimpleType); ok3 {
+					typeName = simple.Name
+					next := &ast.StructLit{TypeName: typeName, Fields: e.Fields, Positional: e.Positional}
+					next.SetPos(origPos)
+					e = next
+					resolved = true
+				}
+			}
+		}
+
+		// For multi-level qualified names (e.g. "net::tcp::Conn"), strip
+		// leading package components and try each progressively shorter
+		// qualified form.  The stripped form must STILL contain `::` so
+		// the bare-name alias (registered for every exported struct at
+		// package load) can't accidentally absorb a stale prefix.  This
+		// gate is what stops `math::Complex` from resolving when only
+		// `math` is imported and Complex actually lives under
+		// `math::complex::Value` -- without it, the inner module's bare
+		// alias leaks under any qualified path that happens to end in
+		// the same name.
 		if !resolved && strings.Contains(typeName, "::") {
 			parts := strings.Split(typeName, "::")
-			for i := 1; i < len(parts); i++ {
+			for i := 1; i < len(parts)-1; i++ {
 				shorter := strings.Join(parts[i:], "::")
 
 				if alias := cg.aliasTypeFor(CanonKey(shorter)); alias != nil {

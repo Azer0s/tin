@@ -292,6 +292,33 @@ func (cg *CodeGen) dispatchBinOp(block *ir.Block, e *ast.BinExpr, left, right va
 		}
 	}
 
+	// Non-commutative op with the struct on the RHS and a non-struct on
+	// the LHS.  The commutative branch can't fire here because swapping
+	// `2.0 - i` to `i - 2.0` changes the result.  Instead, promote the
+	// LHS to the struct's type (via implicit[T]) and dispatch the impl
+	// with the coerced LHS as the receiver:
+	//   2.0 - complex::I  ->  Complex_from_2.sub(complex::I)
+	// This is what mathematical scalar-struct expressions like
+	// `1.0 / z` (complex inverse) or `n - point` actually want.  Only
+	// fires when (a) struct exposes an op[S, S] impl, AND (b) the LHS
+	// has an implicit[S] on S so the promotion is well-defined.
+	if isStructType(rt) && !isStructType(lt) && !binOpIsCommutative(e.Op) {
+		structName := cg.typeNameOf(rt)
+		if cg.canImplicitCoerce(lt, rt) {
+			if fn := cg.lookupOpMethod(structName, traitName, []irtypes.Type{rt}); fn != nil {
+				coerced := cg.coerce(block, left, rt)
+				if coerced.Type().Equal(rt) {
+					res, err := cg.emitOpDispatch(block, fn, coerced, []value.Value{right})
+					if err != nil {
+						return nil, true, err
+					}
+
+					return cg.finishBinOpDispatch(block, e.Op, res), true, nil
+				}
+			}
+		}
+	}
+
 	return nil, false, nil
 }
 
@@ -331,19 +358,60 @@ func (cg *CodeGen) findOpImplWithCoerce(
 	return nil, nil
 }
 
-// canImplicitCoerce reports whether src can be implicit[T]-converted to
-// target.  Walks the implicit conversion registry; mirrors the lookup in
-// coerce() but as a predicate so dispatchBinOp can pick an impl without
-// firing side-effecting IR.
+// canImplicitCoerce reports whether src can be coerced to target via
+// any implicit (non-`as`) path the coerce() machinery accepts.  Acts as
+// a side-effect-free predicate so dispatchBinOp can pick an impl
+// without emitting wasted IR.  Covers:
+//
+//   - identity (same LLVM type)
+//   - implicit[T] on the target struct (`static fn ::implicit(v U) T`)
+//   - coerce[T] on the source struct (`static fn ::coerce(this S) T`)
+//   - built-in widening: int -> wider int (same / opposite signedness),
+//     float -> wider float, int -> any float
+//   - i1 (bool) -> any wider int (zext)
 func (cg *CodeGen) canImplicitCoerce(src, target irtypes.Type) bool {
-	targetName := cg.typeNameOf(target)
-	if targetName == "" {
-		return false
+	if src.Equal(target) {
+		return true
 	}
 
-	for _, entry := range cg.implicitConvFns[targetName] {
-		if entry.srcLLVM.Equal(src) {
+	// implicit[T] on the target struct.
+	if targetName := cg.typeNameOf(target); targetName != "" {
+		for _, entry := range cg.implicitConvFns[targetName] {
+			if entry.srcLLVM.Equal(src) {
+				return true
+			}
+		}
+	}
+
+	// coerce[T] on the source struct.
+	if srcName := cg.typeNameOf(src); srcName != "" {
+		for _, entry := range cg.coerceConvFns[srcName] {
+			if entry.tgtLLVM.Equal(target) {
+				return true
+			}
+		}
+	}
+
+	// Built-in numeric widening (no precision loss possible in IR --
+	// signed/unsigned interpretation is at the use site, not the bit
+	// pattern).  i1 -> wider int is the bool->int path.
+	if srcInt, ok := src.(*irtypes.IntType); ok {
+		if tgtInt, ok2 := target.(*irtypes.IntType); ok2 {
+			if srcInt.BitSize <= tgtInt.BitSize {
+				return true
+			}
+		}
+
+		if _, ok2 := target.(*irtypes.FloatType); ok2 {
 			return true
+		}
+	}
+
+	if srcFp, ok := src.(*irtypes.FloatType); ok {
+		if tgtFp, ok2 := target.(*irtypes.FloatType); ok2 {
+			if floatBits(srcFp) <= floatBits(tgtFp) {
+				return true
+			}
 		}
 	}
 

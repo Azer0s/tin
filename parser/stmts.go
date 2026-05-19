@@ -78,7 +78,8 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	case lexer.KW_STRUCT:
 		return p.parseStructDecl(tags)
 	case lexer.KW_TYPE:
-		return p.parseTypeDecl()
+		return nil, p.errorf(
+			"`type` declarations are only allowed at top level, not inside a function or block body")
 	case lexer.KW_ENUM:
 		return p.parseEnumDecl()
 	case lexer.KW_RETURN:
@@ -102,7 +103,8 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	case lexer.KW_ECHO:
 		return p.parseEchoStmt()
 	case lexer.KW_USE:
-		return p.parseUseDecl()
+		return nil, p.errorf(
+			"`use` declarations are only allowed at top level, not inside a function or block body")
 	case lexer.KW_EXPORT:
 		return p.parseExportDecl()
 	case lexer.KW_WHERE:

@@ -1,4 +1,5 @@
 use assert
+use option
 use { Result } from result
 
 test "Result Ok/Err via match" =
@@ -73,7 +74,6 @@ test "Result or_else_value" =
   assert::equals(99, b.or_else_value(fb).unwrap_or(0))
 
 test "Result unwrap / unwrap-with-msg / to_option" =
-  use option
   let a Result[i64, string] = Ok(7)
 
   assert::equals(7, a.unwrap())

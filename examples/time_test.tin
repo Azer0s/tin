@@ -63,7 +63,7 @@ test "Duration sub" =
   assert::equals(c.milliseconds(), 300)
 
 test "Duration abs negative" =
-  let d = Duration{ns: 0 - 5000000}
+  let d = time::Duration{ns: 0 - 5000000}
   let a = d.abs()
 
   assert::equals(a.milliseconds(), 5)

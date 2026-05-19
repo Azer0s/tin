@@ -798,6 +798,43 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 				cg.setTypeAlias(pkgName+"."+name, &ast.SimpleType{Name: name})
 			}
 		}
+
+		// Top-level type aliases (`type Foo = Bar`) registered during
+		// preregister.  Expose as `pkg::Foo` after resolving the chain
+		// through to its terminal target so consumers don't have to
+		// also import every intermediate alias's defining package.
+		if cg.structTypeFor(CanonKey(canonicalKey)) == nil &&
+			cg.structTypeFor(CanonKey(name)) == nil {
+			if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
+				resolved := alias
+				seen := map[string]bool{name: true}
+
+				for {
+					simple, ok := resolved.(*ast.SimpleType)
+					if !ok {
+						break
+					}
+
+					if seen[simple.Name] {
+						break
+					}
+
+					seen[simple.Name] = true
+
+					next := cg.aliasTypeFor(CanonKey(simple.Name))
+					if next == nil {
+						break
+					}
+
+					resolved = next
+				}
+
+				if cg.aliasTypeFor(CanonKey(pkgName+"::"+name)) == nil {
+					cg.setTypeAlias(pkgName+"::"+name, resolved)
+					cg.setTypeAlias(pkgName+"."+name, resolved)
+				}
+			}
+		}
 	}
 
 	// Pass 5: register exported macros under pkg-qualified keys so that

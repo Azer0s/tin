@@ -721,9 +721,23 @@ func (cg *CodeGen) zeroConstant(t irtypes.Type) constant.Constant {
 
 // emitTopLevelVarInits emits the runtime initializers for top-level vars into
 // the provided block. Returns the (possibly advanced) current block.
+//
+// Each init expression is evaluated with cg.currentPkg restored to the
+// package that owns the var, so bare-name struct refs in the init body
+// (e.g. complex.tin's `const I = Complex{...}`) still resolve through
+// the package's bare alias even though the main module's emission
+// context has currentPkg unset.  Without this push/pop, the bare-name
+// visibility gate in genStructLit rejects every cross-package const
+// whose initializer mentions a struct type unqualified.
 func (cg *CodeGen) emitTopLevelVarInits(block *ir.Block) (*ir.Block, error) {
 	for _, vi := range cg.topLevelVarInits {
+		prevPkg := cg.currentPkg
+		cg.currentPkg = vi.pkgName
+
 		val, err := cg.genExpr(block, vi.initExpr)
+
+		cg.currentPkg = prevPkg
+
 		if err != nil {
 			return block, err
 		}
