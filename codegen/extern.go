@@ -384,10 +384,21 @@ func (cg *CodeGen) adaptTinPtrToNativePtr(
 
 // structIsABICompat reports whether structName's user fields lay out
 // identically in the Tin and native forms -- the precondition for the
-// pointer-aliasing trick adaptTinPtrToNativePtr uses.  Excludes any
-// struct with a fat-ptr (string / [T] / any / *Trait) or fat-fn-ptr
-// field; those have different shapes in the two layouts and need a
-// copying conversion instead.
+// pointer-aliasing trick adaptTinPtrToNativePtr uses.
+//
+// Accepts: integer / float / raw-pointer fields.  Rejects:
+//   - fat-ptr fields (string, [T], any, *Trait): different shapes in the
+//     two layouts (Tin has {ptr,len,cap}, native has a raw pointer);
+//     the bitcast would mis-read the second / third slots.
+//   - fat-fn-ptr fields: same shape issue.
+//   - nested user-struct fields: even if the nested struct is itself
+//     ABI-compat, Tin inlines its FULL Tin layout (typeid + vtable +
+//     user fields) at the parent's field offset, while the native form
+//     of the parent inlines the nested struct's NATIVE layout (user
+//     fields only).  The bitcast'd pointer would land C's reads on the
+//     nested struct's typeid instead of its first user field.
+//   - fixed-size-array fields of any composite element type: same
+//     reasoning applied per-element.  Arrays of primitives are fine.
 func (cg *CodeGen) structIsABICompat(structName string) bool {
 	fields, ok := cg.structFieldLLVMTypes[structName]
 	if !ok {
@@ -399,8 +410,17 @@ func (cg *CodeGen) structIsABICompat(structName string) bool {
 			return false
 		}
 
-		if innerSt, ok2 := ft.(*irtypes.StructType); ok2 {
-			if innerSt.Name() != "" && !cg.structIsABICompat(innerSt.Name()) {
+		if _, ok2 := ft.(*irtypes.StructType); ok2 {
+			// Nested user struct field: Tin inlines its full layout
+			// (with header) here; native expects just user fields.
+			// No safe bitcast trick.
+			return false
+		}
+
+		if at, ok2 := ft.(*irtypes.ArrayType); ok2 {
+			// Fixed-size array of a non-primitive element: same
+			// inline-vs-native mismatch per element.
+			if _, isStruct := at.ElemType.(*irtypes.StructType); isStruct {
 				return false
 			}
 		}

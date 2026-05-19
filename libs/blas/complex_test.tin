@@ -78,7 +78,11 @@ test "zswap exchanges x and y" =
   let x [complex::Complex] = [cz(1.0, 2.0), cz(3.0, 4.0)]
   let y [complex::Complex] = [cz(5.0, 6.0), cz(7.0, 8.0)]
   blas::zswap(x, y)
+  // Assert every slot: a bug in unpack_z that only wrote one element
+  // per array would still pass a half-checked version of this test.
   eq(x[0], cz(5.0, 6.0))
+  eq(x[1], cz(7.0, 8.0))
+  eq(y[0], cz(1.0, 2.0))
   eq(y[1], cz(3.0, 4.0))
 
 test "izamax returns the 0-based index of the largest |Re|+|Im|" =
