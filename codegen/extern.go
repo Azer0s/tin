@@ -856,20 +856,22 @@ func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, par
 		if isLargeStruct(p.Type()) {
 			st := p.Type().(*irtypes.StructType)
 			lp := ir.NewParam(p.Name(), irtypes.NewPointer(st))
-			// Modern clang (>= 18) lowers a `void f(MyStruct s)` for a
-			// >16-byte struct on Linux x86_64 SysV to `void f(ptr
-			// dead_on_return noundef %s)` -- NO `byval` attribute, just
-			// a pointer parameter that LLVM's ABI pass turns into the
-			// SysV "memory class" passing convention.  Emitting the
-			// legacy `byval(struct) align 8` here produces a DIFFERENT
-			// IR-level signature than the linked C side: the SysV
-			// lowering for byval differs subtly from the lowering for
-			// a bare pointer, and on Linux x86_64 that mismatch
-			// corrupts every >16-byte struct param at the call
-			// boundary (test descriptions came through as garbage
-			// bytes, panic-related tests crashed before producing
-			// output).  On AAPCS64 (macOS arm64 / Linux arm64) bare
-			// pointer matches clang too.
+			// Match clang 18 (Ubuntu 24.04 CI) exactly for the
+			// declaration site of a >16-byte struct param on x86_64
+			// SysV:
+			//   `ptr noundef byval(%struct) align 8`
+			// AAPCS64 (macOS arm64 / Linux arm64) passes composites
+			// >16 bytes by reference -- a bare `ptr` matches clang
+			// there; emitting `byval` would mislower the AAPCS
+			// indirect call into a stack-blit.
+			if strings.HasPrefix(detectTargetTriple(), "x86_64-") {
+				lp.Attrs = append(lp.Attrs,
+					enum.ParamAttrNoUndef,
+					ir.Byval{Typ: st},
+					ir.Align(8),
+				)
+			}
+
 			loweredParams = append(loweredParams, lp)
 		} else {
 			loweredParams = append(loweredParams, p)
@@ -915,19 +917,43 @@ func (cg *CodeGen) emitExternWithABIShim(cName string, retType irtypes.Type, par
 		sretAlloca = entry.NewAlloca(retType)
 	}
 
+	// Call-site attribute notes:
+	//   sret/byval must appear at BOTH the function declaration AND
+	//   every call site -- LLVM does not propagate them.  Without the
+	//   call-site attrs, x86_64 SysV lowering treats the pointer as a
+	//   plain integer arg in RDI/RSI etc, which corrupts every
+	//   >16-byte struct param at the boundary.
+	x86_64 := strings.HasPrefix(detectTargetTriple(), "x86_64-")
 	callArgs := make([]value.Value, 0, len(loweredParams))
+
 	if !retLowered {
-		callArgs = append(callArgs, sretAlloca)
+		if x86_64 {
+			callArgs = append(callArgs, ir.NewArg(sretAlloca,
+				ir.AttrString("dead_on_unwind"),
+				ir.AttrString("writable"),
+				ir.SRet{Typ: retType},
+				ir.Align(8),
+			))
+		} else {
+			callArgs = append(callArgs, sretAlloca)
+		}
 	}
 
-	for i, sp := range shimParams {
-		_ = i
-
+	for _, sp := range shimParams {
 		if isLargeStruct(sp.Type()) {
+			st := sp.Type().(*irtypes.StructType)
 			slot := entry.NewAlloca(sp.Type())
 			entry.NewStore(sp, slot)
 
-			callArgs = append(callArgs, slot)
+			if x86_64 {
+				callArgs = append(callArgs, ir.NewArg(slot,
+					enum.ParamAttrNoUndef,
+					ir.Byval{Typ: st},
+					ir.Align(8),
+				))
+			} else {
+				callArgs = append(callArgs, slot)
+			}
 		} else {
 			callArgs = append(callArgs, sp)
 		}
