@@ -221,7 +221,7 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 		// and leak by exactly 1 per construction.  Mirrors the
 		// freshIface / freshCallResult exemptions in the let-binding
 		// retain logic at the top of genVarDecl.
-		retainMask[i] = isCopyExpr(a) && !isFreshBytesAlloc(argVals[i]) && !isFreshCallResult(argVals[i])
+		retainMask[i] = isCopyExpr(a) && !cg.isFreshBytesAlloc(argVals[i]) && !cg.isFreshCallResult(argVals[i])
 	}
 
 	v, err := cg.wrapDataVariant(block, adtName, variantName, argVals, retainMask)
@@ -320,7 +320,7 @@ func (cg *CodeGen) genDataConstructorCall(block *ir.Block, variantName string, a
 		// its rc (e.g. `as string` slice cast, `_tin_bytes_from_buf`
 		// result) so the construction doesn't push rc from 1 to 2 with
 		// only one matching release ever fired.
-		retainMask[i] = isCopyExpr(a) && !isFreshBytesAlloc(argVals[i]) && !isFreshCallResult(argVals[i])
+		retainMask[i] = isCopyExpr(a) && !cg.isFreshBytesAlloc(argVals[i]) && !cg.isFreshCallResult(argVals[i])
 		// Fresh trait fat-ptr iface in field position: either
 		// (a) the implicit coerce widened a concrete value (preCoerceType
 		// differs from the iface field), or

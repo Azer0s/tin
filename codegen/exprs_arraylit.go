@@ -978,7 +978,7 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 		// allocation per construction.  Mirrors the fresh-alloc
 		// exemption in genDataScopeCtorCall / genDataConstructorCall
 		// and the freshIface / freshCallResult gates in genVarDecl.
-		if isCopyExpr(tup.Elems[i]) && !isFreshBytesAlloc(v) && !isFreshCallResult(v) {
+		if isCopyExpr(tup.Elems[i]) && !cg.isFreshBytesAlloc(v) && !cg.isFreshCallResult(v) {
 			cg.emitRetain(block, v)
 		}
 	}

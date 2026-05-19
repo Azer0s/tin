@@ -1020,9 +1020,22 @@ func (cg *CodeGen) callExtern(block *ir.Block, fn *ir.Func, args ...value.Value)
 	}
 
 	if abi.sretType != nil {
-		block.NewCall(fn, callArgs...)
+		call := block.NewCall(fn, callArgs...)
+		load := block.NewLoad(abi.sretType, sretSlot)
 
-		return block.NewLoad(abi.sretType, sretSlot)
+		// Record the load -> call mapping so the rc-tracker
+		// (isFreshBytesAlloc, isFreshCallResult) can see through the
+		// sret indirection and still treat the load as a fresh call
+		// result.  Without this the load would be retain-on-return
+		// while the underlying rc=1 is never balanced -> permanent
+		// leak; see runtime_release.go for the matching probe.
+		if cg.sretCallResults == nil {
+			cg.sretCallResults = map[*ir.InstLoad]*ir.InstCall{}
+		}
+
+		cg.sretCallResults[load] = call
+
+		return load
 	}
 
 	return block.NewCall(fn, callArgs...)

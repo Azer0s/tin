@@ -547,7 +547,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// returning rc=1; treating it as a borrow and retaining would
 		// over-count.  Same logic as freshHeapPromoted but generalized
 		// for any RC-tracked call result.
-		freshCallResult := isFreshCallResult(initVal)
+		freshCallResult := cg.isFreshCallResult(initVal)
 
 		// `let v t = *(raw as *t)` where `raw : *void` -- ownership-
 		// transfer load out of opaque scratch storage that the caller
@@ -565,7 +565,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		// scope-exit release leaves the buffer at rc=1 forever --
 		// one leaked slice per binding.
 		freshSliceExpr := isFreshSliceExpr(s.Value)
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult && !derefOfRawVoid && !freshSliceExpr {
+		if isCopyExpr(s.Value) && !boxedToAny && !cg.isFreshBytesAlloc(initVal) && !isFreshFatFn && !freshIface && !freshHeapPromoted && !freshCallResult && !derefOfRawVoid && !freshSliceExpr {
 			// Owning-pointer borrow case: see emitOwningPtrRetainIfApplicable.
 			// emitRetain skips bare *<struct> / *<iface> by design (param
 			// borrow convention).  When the let-binding takes ownership of

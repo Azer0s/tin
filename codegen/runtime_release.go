@@ -59,7 +59,7 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	// to the inner identifier), but the cast result is a fresh
 	// allocation, not a borrow.  Without this exemption the call-arg
 	// release is skipped, leaking the cast result on every call site.
-	if isFreshCallResult(pre) {
+	if cg.isFreshCallResult(pre) {
 		cg.emitRelease(block, pre)
 
 		return
@@ -259,14 +259,20 @@ func isTemporaryProducer(node ast.Node) bool {
 // existing variable) and must NOT receive an extra retain at assignment or return
 // sites.  An extra retain would raise the RC to 2 while only one release is ever
 // emitted, causing a permanent leak.
-func isFreshBytesAlloc(v value.Value) bool {
-	call, ok := v.(*ir.InstCall)
-	if !ok {
+//
+// Sret-lowered externs return their value as a `load` from the sret slot
+// rather than a direct call.  The CodeGen.sretCallResults map (populated by
+// callExtern) recovers the underlying *ir.InstCall so this probe still fires
+// on `_tin_bytes_from_buf` even after the ABI shim refactor turned it into
+// a sret-returning declaration.
+func (cg *CodeGen) isFreshBytesAlloc(v value.Value) bool {
+	call := cg.underlyingCall(v)
+	if call == nil {
 		return false
 	}
 
-	fn, ok2 := call.Callee.(*ir.Func)
-	if !ok2 {
+	fn, ok := call.Callee.(*ir.Func)
+	if !ok {
 		return false
 	}
 
@@ -280,15 +286,33 @@ func isFreshBytesAlloc(v value.Value) bool {
 // already gives the caller rc=1 ownership; an extra retain would
 // raise rc to 2 and leak.  Conservatively true for any call returning
 // an RC-tracked type (string/fat-array/iface/any/struct ptr).
-func isFreshCallResult(v value.Value) bool {
-	call, ok := v.(*ir.InstCall)
-	if !ok {
+//
+// Recognizes the sret-load wrapping the same way isFreshBytesAlloc does.
+func (cg *CodeGen) isFreshCallResult(v value.Value) bool {
+	call := cg.underlyingCall(v)
+	if call == nil {
 		return false
 	}
 
-	rt := call.Type()
+	return isRCTrackedType(call.Type())
+}
 
-	return isRCTrackedType(rt)
+// underlyingCall returns the *ir.InstCall behind v.  Direct calls pass
+// through; sret-lowered externs route through the sretCallResults map.
+func (cg *CodeGen) underlyingCall(v value.Value) *ir.InstCall {
+	if call, ok := v.(*ir.InstCall); ok {
+		return call
+	}
+
+	if load, ok := v.(*ir.InstLoad); ok {
+		if cg != nil {
+			if call, ok2 := cg.sretCallResults[load]; ok2 {
+				return call
+			}
+		}
+	}
+
+	return nil
 }
 
 // isFreshSliceExpr reports whether expr is a range-slice `a[lo..hi]`

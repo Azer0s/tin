@@ -663,6 +663,16 @@ type CodeGen struct {
 	// distinct).
 	externABIs map[*ir.Func]externABI
 
+	// sretCallResults: for sret-lowered extern calls, the value the
+	// caller sees is a `load` from the sret slot, not the `call` itself.
+	// The release / retain bookkeeping (isFreshBytesAlloc,
+	// isFreshCallResult) probes the IR node's runtime type to detect
+	// "this is a fresh rc=1 value from a call", which fails for a load.
+	// This map lets the lookup paper over the indirection by mapping each
+	// sret-load back to the underlying *ir.InstCall.  Populated by
+	// callExtern; read by the fresh-result detectors.
+	sretCallResults map[*ir.InstLoad]*ir.InstCall
+
 	// externTLSVars: extern thread-local global variables declared in the IR.
 	// Keyed by C variable name. Populated by ensureExternTLSVar.
 	externTLSVars map[string]*ir.Global

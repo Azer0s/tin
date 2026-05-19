@@ -280,7 +280,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	retSkipName := ""
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
-	} else if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) && !isFreshCallResult(val) &&
+	} else if isCopyExpr(s.Value) && !cg.isFreshBytesAlloc(val) && !cg.isFreshCallResult(val) &&
 		!cg.isDerefOfRawVoidPtrCast(s.Value) && !isFreshSliceExpr(s.Value) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.

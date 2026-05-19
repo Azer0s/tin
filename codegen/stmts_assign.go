@@ -344,7 +344,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 	if (isRCTrackedType(ptrType.ElemType) || isTinStructPtrElem || isTraitIfacePtrElem) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny && !isFreshBytesAlloc(val) {
+		if isCopyExpr(s.Value) && !boxedToAny && !cg.isFreshBytesAlloc(val) {
 			if isTinStructPtrElem || isTraitIfacePtrElem {
 				// Direct _tin_retain for *TinStruct and
 				// *Trait_iface pointers (emitRetain doesn't
@@ -373,7 +373,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 		// structs (isFreshBytesAlloc) already carry an unbalanced retain
 		// from the callee, so we move ownership instead of retaining.
 		if cg.typeNameOf(ptrType.ElemType) != "" && cg.elemNeedsRelease(ptrType.ElemType) {
-			if isCopyExpr(s.Value) && !isFreshBytesAlloc(val) {
+			if isCopyExpr(s.Value) && !cg.isFreshBytesAlloc(val) {
 				cg.emitRetain(block, val)
 			}
 
