@@ -233,7 +233,12 @@ test "zhemm with LEFT side: C := A * B   (A Hermitian)" =
     [cz(0.0, 0.0), cz(0.0, 0.0)],
   ]
   blas::zhemm(blas::LEFT, blas::UPPER, a, b, c)
+  // Identity A means every slot of C must equal B, including
+  // off-diagonal entries.  Half-checking the diagonal would let a
+  // half-broken pack_zmat / unpack_zmat slip through.
   eq(c[0][0], b[0][0])
+  eq(c[0][1], b[0][1])
+  eq(c[1][0], b[1][0])
   eq(c[1][1], b[1][1])
 
 test "ztrmm: B := A * B   (A upper triangular, side=LEFT, no transpose)" =
