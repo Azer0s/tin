@@ -855,6 +855,8 @@ func largeStructAlignment(st *irtypes.StructType) int64 {
 				a = 2
 			case irtypes.FloatKindFloat:
 				a = 4
+			case irtypes.FloatKindDouble:
+				a = 8
 			case irtypes.FloatKindFP128, irtypes.FloatKindX86_FP80, irtypes.FloatKindPPC_FP128:
 				a = 16
 			}
