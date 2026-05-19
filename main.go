@@ -79,12 +79,21 @@ Run / test:
                            use for tight loops audited to ++= owned slices.
 
 Warnings (all warnings carry a name; -Werror=<name> escalates one):
-  -Wall                    enable hygiene checks: unused-let, unused-result, style
-  -Wpedantic               enable -Wall plus unused-param, magic-number
-  -W<name>                 enable a default-off warning (e.g. -Wunused-let)
-  -Wno-<name>              silence a warning entirely
-  -Werror                  treat every warning as an error
-  -Werror=<name>           treat the named warning as an error
+  -Wall                    Enable hygiene checks that almost never produce false
+                           positives in idiomatic Tin code: unused-let, unused-result,
+                           let-no-reassign, use-before-assign, float-equal, style.
+                           Routine builds usually want this on.
+  -Wpedantic               Issue diagnostics that are technically correct but often
+                           acceptable in idiomatic Tin code: unused parameters
+                           required by a trait conformance, magic-number literals,
+                           bare calls to fn{#async}, calls to a #interop fn from
+                           Tin itself, etc. Enable when auditing new code or
+                           reviewing a module; routine builds usually do not want
+                           them. Implies -Wall.
+  -W<name>                 Enable a single default-off warning (e.g. -Wunused-let).
+  -Wno-<name>              Silence a warning entirely.
+  -Werror                  Treat every warning as an error.
+  -Werror=<name>           Treat the named warning as an error.
 
   Default-on:
     array-bounds                index out of bounds for known-length array
@@ -136,35 +145,68 @@ Warnings (all warnings carry a name; -Werror=<name> escalates one):
     write-to-const              write through a pointer alias to a top-level const
 
   Default-off (opt in via -W<name>, -Wall, or -Wpedantic):
-    alias-mutation              writing to a binding declared via 'let b = a' from another
-                                fat-pointer; reaches through to the shared buffer (use copy(a))
-    bare-async-call             every bare call to an fn{#async} (pedantic superset of
-                                bare-parking-async-call - flags pure-compute async fns too)
-    builtin-shadow              local binding masks a compile-time builtin (typeof, sourcepos, ...)
-    droppable-fiber             spawn fn(args) whose Future is neither stored, returned, nor awaited
-    float-equal                 == / != between floats (use abs(a-b) < eps)
-    magic-number                int/float literal where a named const would convey intent
-    non-tin-thread              #interop fn body reaches 'await' or 'spawn' - callable from non-Tin
-                                OS threads that don't own scheduler state
-    style                       naming conventions, trailing whitespace, missing EOF newline
-    sync-fn-coerced-to-async    sync fn coerced into a fn{#async} slot; the bytes match but the
-                                callee will not see await/spawn coloring (pedantic)
-    sync-uses-await             sync fn body contains a literal 'await' - prefer sync::wait(future)
-                                to make the sync->async bridge explicit, or promote to fn{#async}
-    unchecked-div               a / b or a % b where the divisor is not proven non-zero by dataflow
-                                (complement to default-on div-by-zero hard error)
-    unchecked-index             arr[i] where i is not bounds-checked, OR t[k] on a custom ::index
-                                impl without (v, ok) destructure (complement to default-on array-bounds)
-    unchecked-nil-deref         *p or p.field where p is not proven non-nil by dataflow
-                                (complement to default-on deref-nil warning)
-    unchecked-returned-nil      deref of a value whose source function may return nil
-                                (interprocedural complement via Andersen points-to)
-    unclosed-closeable          io::Closeable binding leaves scope without close()
-    let-no-reassign             mutable "let" binding that is never reassigned (suggests "const")
-    unused-let                  let-binding that is never read
-    unused-param                fn parameter that is never read
-    unused-result               discarded result of a non-void call
-    use-before-assign           local read before being assigned on every path
+    alias-mutation              Writing to a binding declared via 'let b = a' from
+                                another fat-pointer; reaches through to the shared
+                                buffer. Smell: writer assumed copy semantics; use
+                                'let b = copy(a)' to break the alias.
+    bare-async-call             Every bare call to an fn{#async}. Pedantic superset
+                                of bare-parking-async-call (default-on, body-aware);
+                                this one flags pure-compute async fns too.
+                                Smell: forgot 'spawn' / 'await', call runs sync.
+    builtin-shadow              Local binding masks a compile-time builtin (typeof,
+                                sourcepos, ...). Smell: downstream calls to the
+                                builtin silently break.
+    droppable-fiber             spawn fn(args) whose Future is neither stored,
+                                returned, nor awaited. Smell: fire-and-forget that
+                                drops work at scope exit; awaitable was intended.
+    float-equal                 == / != between floats. Smell: comparing IEEE 754
+                                values exactly when an epsilon was intended.
+    interop-self-call           Tin code calls a fn tagged #interop. Smell: the
+                                tag does not change how Tin calls behave (they
+                                bypass the C-export wrapper); the tag is dead
+                                metadata at the call site. Drop the tag, or split
+                                into 'fn foo_impl ... fn{#interop} foo = foo_impl(...)'.
+    magic-number                int/float literal where a named const would convey
+                                intent. Smell: tuning constants buried in
+                                expressions with no name for reviewers.
+    non-tin-thread              #interop fn body reaches 'await' or 'spawn'. Smell:
+                                a C caller on a non-Tin pthread triggers scheduler
+                                state the runtime never initialised there.
+    style                       Naming conventions, trailing whitespace, missing
+                                EOF newline. Smell: drift from project style.
+    sync-fn-coerced-to-async    Sync fn coerced into a fn{#async} slot; bytes
+                                match but the callee will not see await/spawn
+                                coloring. Smell: callers expected the fn to yield.
+    sync-uses-await             Sync fn body contains a literal 'await'. Smell:
+                                hidden parking; prefer sync::wait(future) to make
+                                the bridge explicit, or promote to fn{#async}.
+    unchecked-div               a / b or a % b where the divisor is not proven
+                                non-zero by dataflow (complement to default-on
+                                div-by-zero hard error). Smell: code path the
+                                analyser cannot prove safe.
+    unchecked-index             arr[i] where i is not bounds-checked, OR t[k] on
+                                a custom ::index impl without (v, ok) destructure
+                                (complement to default-on array-bounds).
+                                Smell: index source is user input or unbounded.
+    unchecked-nil-deref         *p or p.field where p is not proven non-nil by
+                                dataflow (complement to default-on deref-nil).
+                                Smell: deref before nil-check on the same path.
+    unchecked-returned-nil      Deref of a value whose source function may return
+                                nil (interprocedural via Andersen points-to).
+                                Smell: caller never matched on the return.
+    unclosed-closeable          io::Closeable binding leaves scope without close().
+                                Smell: file/socket/handle leaked at scope exit.
+    let-no-reassign             Mutable 'let' binding that is never reassigned.
+                                Smell: 'const' communicates immutability better and
+                                lets the optimiser fold.
+    unused-let                  let-binding that is never read. Smell: dead
+                                variable from a refactor.
+    unused-param                fn parameter that is never read. Smell: signature
+                                outdated, or required by a trait conformance.
+    unused-result               Discarded result of a non-void call. Smell: the
+                                call's status is being thrown away.
+    use-before-assign           Local read before being assigned on every path.
+                                Smell: forgot to initialise on one branch.
 
 Diagnostic dumps (debug aids; output to stderr):
   -v                       print compilation stages (lex, parse, codegen, link, ...)

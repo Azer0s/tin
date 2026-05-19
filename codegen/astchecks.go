@@ -59,7 +59,15 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 		// otherwise can't compile inside it.
 		prevReturnsResult := cg.curFnReturnsResult
 
+		// Track the enclosing FuncDecl so call-site lints can consult
+		// caller-side tags (e.g. -Winterop-self-call skips when the
+		// enclosing fn is itself `#interop`).  Nested function decls
+		// are uncommon at this AST level but the outer fd remains the
+		// closest match for diagnostic intent.
+		var enclosingFn *ast.FuncDecl
 		if fd, ok := n.(*ast.FuncDecl); ok {
+			enclosingFn = fd
+
 			if astReturnTypeIsResult(fd.RetType) {
 				cg.curFnReturnsResult++
 			}
@@ -85,6 +93,7 @@ func (cg *CodeGen) runAstChecks(prog *ast.Program) {
 				cg.checkRedundantArgCasts(e)
 				cg.checkBareAsyncCall(e, awaitedOrSpawned)
 				cg.checkSyncFnCoercedToAsync(e)
+				cg.checkInteropSelfCall(e, enclosingFn)
 			case *ast.ExprStmt:
 				cg.checkDroppableFiber(e)
 			case *ast.StructLit:

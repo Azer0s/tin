@@ -164,6 +164,58 @@ func (cg *CodeGen) checkBareAsyncCall(ce *ast.CallExpr, awaitedOrSpawned map[*as
 		name, name, name)
 }
 
+// interopFuncDeclForCall returns the AST FuncDecl for ce's callee if
+// the callee resolves to a `fn{#interop}`-tagged declaration.  Same
+// resolution strategy as asyncFuncDeclForCall: bare identifier or
+// `pkg::name` form; methods cannot be `#interop` so the field-access
+// branch is omitted.  Returns nil otherwise.
+func (cg *CodeGen) interopFuncDeclForCall(ce *ast.CallExpr) *ast.FuncDecl {
+	switch fn := ce.Func.(type) {
+	case *ast.Identifier:
+		if fd, ok := cg.funcDecls[fn.Name]; ok && fd != nil && hasTag(fd.Tags, "interop") {
+			return fd
+		}
+	case *ast.ScopeAccess:
+		if len(fn.Path) > 0 {
+			last := fn.Path[len(fn.Path)-1]
+			if fd, ok := cg.funcDecls[last]; ok && fd != nil && hasTag(fd.Tags, "interop") {
+				return fd
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkInteropSelfCall fires `-Winterop-self-call` (pedantic) when a
+// CallExpr inside enclosingFn invokes a `fn{#interop}` callee.
+// `#interop` only affects the C-ABI wrapper Tin emits for outside
+// consumers; Tin-side calls bypass it and route to the internal
+// entry, so the tag is decorative at a Tin call site.  Almost always
+// signals confusion about what `#interop` does.
+//
+// Exception: an `#interop` callee invoked from another `#interop`
+// caller is fine - the second wrapper might legitimately delegate
+// to the first, and erroring would force a no-op refactor.
+func (cg *CodeGen) checkInteropSelfCall(ce *ast.CallExpr, enclosingFn *ast.FuncDecl) {
+	if enclosingFn != nil && hasTag(enclosingFn.Tags, "interop") {
+		return
+	}
+
+	fd := cg.interopFuncDeclForCall(ce)
+	if fd == nil {
+		return
+	}
+
+	cg.warn(DiagInteropSelfCall, ce.Pos(),
+		"`%s` is tagged `#interop`; the tag only affects the C-export wrapper. "+
+			"Tin-side calls bypass it and route to the internal entry, so the tag "+
+			"adds nothing here. Drop the `#interop` tag if `%s` does not need to "+
+			"be a C export, or factor it: `fn %s_impl(...) = ...` for Tin-internal "+
+			"callers plus `fn{#interop} %s(...) = %s_impl(...)` for the C export.",
+		fd.Name, fd.Name, fd.Name, fd.Name, fd.Name)
+}
+
 // checkSyncUsesAwait fires `-Wsync-uses-await` on every sync fn body
 // that contains a literal `await` expression.  Doesn't follow inlined
 // or generated awaits -- only the user's source-level keyword, since

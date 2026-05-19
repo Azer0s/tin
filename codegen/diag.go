@@ -354,6 +354,17 @@ const (
 	// the alias up front: `let b = copy(a); b[0] = ...`.
 	// Default-off; opt in via -Wpedantic or -W<name>.
 	DiagAliasMutation = "alias-mutation"
+	// DiagInteropSelfCall fires when Tin code calls a function tagged
+	// `#interop`.  The `#interop` tag emits a C-ABI wrapper for C
+	// consumers; Tin-side callers bypass that wrapper and route to
+	// the internal entry point unchanged, so the tag is decorative at
+	// the Tin call site.  The warning isn't a bug per se - the
+	// callee compiles fine and works - but it usually signals a
+	// misunderstanding of what the tag does.  The clean factoring is
+	// to split into a plain Tin fn that Tin calls and a thin
+	// `#interop` wrapper that delegates to it (the C export).
+	// Default-off; opt in via -Wpedantic or -W<name>.
+	DiagInteropSelfCall = "interop-self-call"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
@@ -379,6 +390,7 @@ var defaultOffWarnings = map[string]bool{
 	DiagUncheckedIndex:       true,
 	DiagUncheckedReturnedNil: true,
 	DiagAliasMutation:        true,
+	DiagInteropSelfCall:      true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
@@ -394,7 +406,7 @@ var wpedanticWarnings = []string{
 	DiagUnusedParam, DiagBuiltinShadow, DiagMagicNumber, DiagUnclosedCloseable,
 	DiagBareAsyncCall, DiagSyncUsesAwait, DiagDroppableFiber, DiagNonTinThread,
 	DiagSyncFnCoercedToAsync, DiagUncheckedNilDeref, DiagUncheckedDiv, DiagUncheckedIndex,
-	DiagUncheckedReturnedNil, DiagAliasMutation,
+	DiagUncheckedReturnedNil, DiagAliasMutation, DiagInteropSelfCall,
 }
 
 // diagState tracks the user's preferences for one named warning.
