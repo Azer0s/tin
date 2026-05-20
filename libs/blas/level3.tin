@@ -509,3 +509,172 @@ fn strsm(side i32, uplo i32, diag i32, a [[f32]], b [[f32]]) =
   )
 
   unflatten_f32(b_flat, b)
+
+// ===== Matrix[T] overloads =====
+//
+// Same routines, accepting the flat-buffer Matrix[T] wrapper from
+// flat.tin.  No flatten / unflatten pass -- `data` is already the
+// CBLAS-native contiguous row-major layout.  These are the perf
+// path; the `[[T]]` overloads above remain the ergonomic default.
+
+fn dgemm(a Matrix[f64], b Matrix[f64], c Matrix[f64]) =
+  if a.cols != b.rows:
+    panic("blas::dgemm: A is {a.rows}x{a.cols}, B has {b.rows} rows")
+  if c.rows != a.rows || c.cols != b.cols:
+    panic("blas::dgemm: C {c.rows}x{c.cols} doesn't match {a.rows}x{b.cols}")
+  if a.rows == 0 || a.cols == 0 || b.cols == 0: return
+  dgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    a.rows as i32, b.cols as i32, a.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn sgemm(a Matrix[f32], b Matrix[f32], c Matrix[f32]) =
+  if a.cols != b.rows:
+    panic("blas::sgemm: A is {a.rows}x{a.cols}, B has {b.rows} rows")
+  if c.rows != a.rows || c.cols != b.cols:
+    panic("blas::sgemm: C {c.rows}x{c.cols} doesn't match {a.rows}x{b.cols}")
+  if a.rows == 0 || a.cols == 0 || b.cols == 0: return
+  sgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    a.rows as i32, b.cols as i32, a.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dsymm(side i32, uplo i32, a Matrix[f64], b Matrix[f64], c Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dsymm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dsymm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if c.rows != b.rows || c.cols != b.cols:
+    panic("blas::dsymm: C {c.rows}x{c.cols} doesn't match B {b.rows}x{b.cols}")
+  if b.rows == 0 || b.cols == 0: return
+  dsymm_raw(
+    ROW_MAJOR, side, uplo,
+    b.rows as i32, b.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn ssymm(side i32, uplo i32, a Matrix[f32], b Matrix[f32], c Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::ssymm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::ssymm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if c.rows != b.rows || c.cols != b.cols:
+    panic("blas::ssymm: C {c.rows}x{c.cols} doesn't match B {b.rows}x{b.cols}")
+  if b.rows == 0 || b.cols == 0: return
+  ssymm_raw(
+    ROW_MAJOR, side, uplo,
+    b.rows as i32, b.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dsyrk(uplo i32, a Matrix[f64], c Matrix[f64]) =
+  if c.rows != a.rows || c.cols != a.rows:
+    panic("blas::dsyrk: C is {c.rows}x{c.cols} but expected {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  dsyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    a.rows as i32, a.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn ssyrk(uplo i32, a Matrix[f32], c Matrix[f32]) =
+  if c.rows != a.rows || c.cols != a.rows:
+    panic("blas::ssyrk: C is {c.rows}x{c.cols} but expected {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  ssyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    a.rows as i32, a.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dtrmm(side i32, uplo i32, diag i32, alpha f64, a Matrix[f64], b Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrmm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dtrmm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  dtrmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn strmm(side i32, uplo i32, diag i32, alpha f32, a Matrix[f32], b Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::strmm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::strmm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  strmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn dtrsm(side i32, uplo i32, diag i32, alpha f64, a Matrix[f64], b Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrsm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dtrsm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  dtrsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn strsm(side i32, uplo i32, diag i32, alpha f32, a Matrix[f32], b Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::strsm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::strsm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  strsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )

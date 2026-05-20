@@ -157,6 +157,14 @@ type scopeEntry struct {
 	// (or non-release) is handled elsewhere.
 	ownsPtrViaRetain bool
 
+	// cLayoutWrapperRCStruct is set when this binding holds the by-value
+	// return of an extern wrapper whose return type is a cLayoutStruct.  The
+	// wrapper _tin_rc_alloc'd a (wrapper+native) block so the c_data_ptr
+	// stays valid past the return; scope-exit must release that block.  The
+	// field carries the struct name so the release path can recover the
+	// wrapper's element size for the offset-back-out from c_data_ptr.
+	cLayoutWrapperRCStruct string
+
 	// pointsToBorrowedStorage is true when this binding holds a pointer
 	// (`*T`) that was initialized by taking the address of a stack
 	// alloca or module-level global -- i.e. the pointee has NO TinRCHdr

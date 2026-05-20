@@ -263,3 +263,244 @@ test "ztrsm: solve A * X = B   (A upper triangular, side=LEFT)" =
   blas::ztrsm(blas::LEFT, blas::UPPER, blas::NON_UNIT, cz(1.0, 0.0), a, b)
   eq(b[0][0], cz(1.0, 0.0))
   eq(b[1][0], cz(1.0, 0.0))
+
+// ===== ComplexArray (flat-buffer) overload coverage =====
+//
+// Same inputs as the [complex::Value] tests above; just rebound
+// through the flat-buffer wrapper.  Confirms the no-pack path
+// produces the same numeric results.
+
+test "ComplexArray zdotc" =
+  let x = blas::complex_array_from([cz(1.0, 2.0), cz(3.0, -1.0)])
+  let y = blas::complex_array_from([cz(4.0, 0.0), cz(0.0, 1.0)])
+  // Same math as the [Complex] test: result = 3 - 5i
+  eq(blas::zdotc(x, y), cz(3.0, -5.0))
+
+test "ComplexArray zdotu" =
+  let x = blas::complex_array_from([cz(1.0, 2.0), cz(3.0, -1.0)])
+  let y = blas::complex_array_from([cz(4.0, 0.0), cz(0.0, 1.0)])
+  eq(blas::zdotu(x, y), cz(5.0, 11.0))
+
+test "ComplexArray dzasum" =
+  let x = blas::complex_array_from([cz(1.0, -2.0), cz(-3.0, 4.0)])
+  assert::equals(10.0, blas::dzasum(x))
+
+test "ComplexArray dznrm2" =
+  let x = blas::complex_array_from([cz(3.0, 0.0), cz(0.0, 4.0)])
+  assert::equals(5.0, blas::dznrm2(x))
+
+test "ComplexArray zscal mutates in place" =
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(0.0, 1.0)])
+  blas::zscal(cz(0.0, 2.0), x)
+  // 2i * 1 = 2i; 2i * i = -2
+  eq(x[0], cz(0.0, 2.0))
+  eq(x[1], cz(-2.0, 0.0))
+
+test "ComplexArray zdscal scales by real" =
+  let x = blas::complex_array_from([cz(1.0, -1.0), cz(2.0, 3.0)])
+  blas::zdscal(0.5, x)
+  eq(x[0], cz(0.5, -0.5))
+  eq(x[1], cz(1.0, 1.5))
+
+test "ComplexArray zaxpy mutates y" =
+  let x = blas::complex_array_from([cz(1.0, 1.0), cz(2.0, -1.0)])
+  let y = blas::complex_array_from([cz(0.0, 0.0), cz(0.0, 0.0)])
+  blas::zaxpy(cz(0.0, 1.0), x, y)
+  // alpha = i; y[0] += i*(1+i) = -1+i;  y[1] += i*(2-i) = 1+2i
+  eq(y[0], cz(-1.0, 1.0))
+  eq(y[1], cz(1.0, 2.0))
+  // x unchanged
+  eq(x[0], cz(1.0, 1.0))
+
+test "ComplexArray zcopy" =
+  let x = blas::complex_array_from([cz(7.0, -8.0), cz(9.0, 10.0)])
+  let y = blas::complex_array(2)
+  blas::zcopy(x, y)
+  eq(y[0], cz(7.0, -8.0))
+  eq(y[1], cz(9.0, 10.0))
+
+test "ComplexArray zswap" =
+  let x = blas::complex_array_from([cz(1.0, 2.0), cz(3.0, 4.0)])
+  let y = blas::complex_array_from([cz(5.0, 6.0), cz(7.0, 8.0)])
+  blas::zswap(x, y)
+  eq(x[0], cz(5.0, 6.0))
+  eq(x[1], cz(7.0, 8.0))
+  eq(y[0], cz(1.0, 2.0))
+  eq(y[1], cz(3.0, 4.0))
+
+test "ComplexArray izamax" =
+  let x = blas::complex_array_from([cz(1.0, 1.0), cz(0.0, 5.0), cz(2.0, -2.0)])
+  assert::equals(1, blas::izamax(x))
+
+test "complex_array_from_flat wraps interleaved [f64]" =
+  let raw [f64] = [1.0, 2.0, 3.0, 4.0]
+  let a = blas::complex_array_from_flat(raw)
+  assert::equals(2, a.len as i64)
+  eq(a[0], cz(1.0, 2.0))
+  eq(a[1], cz(3.0, 4.0))
+
+// ===== ComplexMatrix (flat-buffer L2 / L3) overload coverage =====
+
+test "ComplexMatrix zgemv" =
+  // A = [[1, i], [1, 1]]; x = [1, 1]
+  // y[0] = 1*1 + i*1 = 1+i;  y[1] = 1*1 + 1*1 = 2
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 1.0)],
+    [cz(1.0, 0.0), cz(1.0, 0.0)],
+  ])
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(1.0, 0.0)])
+  let y = blas::complex_array(2)
+  blas::zgemv(a, x, y)
+  eq(y[0], cz(1.0, 1.0))
+  eq(y[1], cz(2.0, 0.0))
+
+test "ComplexMatrix zgerc: A := alpha * x * y^H + A" =
+  let alpha = cz(1.0, 0.0)
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(0.0, 1.0)])
+  let y = blas::complex_array_from([cz(1.0, 0.0), cz(0.0, 1.0)])
+  let a = blas::complex_matrix(2, 2)
+  blas::zgerc(alpha, x, y, a)
+  eq(a[(0, 0)], cz(1.0, 0.0))
+  eq(a[(0, 1)], cz(0.0, -1.0))
+  eq(a[(1, 0)], cz(0.0, 1.0))
+  eq(a[(1, 1)], cz(1.0, 0.0))
+
+test "ComplexMatrix zgeru: A := alpha * x * y^T + A" =
+  let alpha = cz(1.0, 0.0)
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(0.0, 1.0)])
+  let y = blas::complex_array_from([cz(1.0, 0.0), cz(0.0, 1.0)])
+  let a = blas::complex_matrix(2, 2)
+  blas::zgeru(alpha, x, y, a)
+  eq(a[(0, 0)], cz(1.0, 0.0))
+  eq(a[(0, 1)], cz(0.0, 1.0))
+  eq(a[(1, 0)], cz(0.0, 1.0))
+  eq(a[(1, 1)], cz(-1.0, 0.0))
+
+test "ComplexMatrix zhemv (A Hermitian)" =
+  // A = [[2, 1+i], [1-i, 3]];  x = [1, 1]
+  // y[0] = 2*1 + (1+i)*1 = 3 + i
+  // y[1] = (1-i)*1 + 3*1 = 4 - i
+  let a = blas::complex_matrix_from([
+    [cz(2.0, 0.0), cz(1.0, 1.0)],
+    [cz(1.0, -1.0), cz(3.0, 0.0)],
+  ])
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(1.0, 0.0)])
+  let y = blas::complex_array(2)
+  blas::zhemv(blas::UPPER, a, x, y)
+  eq(y[0], cz(3.0, 1.0))
+  eq(y[1], cz(4.0, -1.0))
+
+test "ComplexMatrix ztrmv (upper triangular)" =
+  // A = [[1, i], [0, 2]]; x = [1, 1]
+  // x[0] := 1+i;  x[1] := 2
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 1.0)],
+    [cz(0.0, 0.0), cz(2.0, 0.0)],
+  ])
+  let x = blas::complex_array_from([cz(1.0, 0.0), cz(1.0, 0.0)])
+  blas::ztrmv(blas::UPPER, blas::NON_UNIT, a, x)
+  eq(x[0], cz(1.0, 1.0))
+  eq(x[1], cz(2.0, 0.0))
+
+test "ComplexMatrix ztrsv solves A*x = b (upper triangular)" =
+  // A = [[1, i], [0, 2]]; b = [1+i, 2] -> x = [1, 1]
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 1.0)],
+    [cz(0.0, 0.0), cz(2.0, 0.0)],
+  ])
+  let x = blas::complex_array_from([cz(1.0, 1.0), cz(2.0, 0.0)])
+  blas::ztrsv(blas::UPPER, blas::NON_UNIT, a, x)
+  eq(x[0], cz(1.0, 0.0))
+  eq(x[1], cz(1.0, 0.0))
+
+test "ComplexMatrix zgemm on 2x2 identity is identity" =
+  let id = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 0.0)],
+    [cz(0.0, 0.0), cz(1.0, 0.0)],
+  ])
+  let b = blas::complex_matrix_from([
+    [cz(2.0, 1.0), cz(0.0, -1.0)],
+    [cz(3.0, 0.0), cz(4.0, 5.0)],
+  ])
+  let c = blas::complex_matrix(2, 2)
+  blas::zgemm(id, b, c)
+  let c00 = c[(0, 0)]
+  let c01 = c[(0, 1)]
+  let c10 = c[(1, 0)]
+  let c11 = c[(1, 1)]
+  eq(c00, cz(2.0, 1.0))
+  eq(c01, cz(0.0, -1.0))
+  eq(c10, cz(3.0, 0.0))
+  eq(c11, cz(4.0, 5.0))
+
+test "ComplexMatrix zherk: C := A * A^H (Hermitian rank-k)" =
+  // A = [[1, i]] (1x2);  A * A^H = [1*1 + i*(-i)] = [2]    (1x1)
+  let a = blas::complex_matrix_from([[cz(1.0, 0.0), cz(0.0, 1.0)]])
+  let c = blas::complex_matrix(1, 1)
+  blas::zherk(blas::UPPER, 1.0, a, 0.0, c)
+  // Diagonal is real for Hermitian matrices.
+  let c00 = c[(0, 0)]
+  assert::equals(2.0, c00.re)
+  assert::equals(0.0, c00.im)
+
+test "ComplexMatrix zhemm LEFT identity" =
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 0.0)],
+    [cz(0.0, 0.0), cz(1.0, 0.0)],
+  ])
+  let b = blas::complex_matrix_from([
+    [cz(1.0, 1.0), cz(2.0, 0.0)],
+    [cz(3.0, 0.0), cz(4.0, -1.0)],
+  ])
+  let c = blas::complex_matrix(2, 2)
+  blas::zhemm(blas::LEFT, blas::UPPER, a, b, c)
+  let c00 = c[(0, 0)]
+  let c01 = c[(0, 1)]
+  let c10 = c[(1, 0)]
+  let c11 = c[(1, 1)]
+  eq(c00, cz(1.0, 1.0))
+  eq(c01, cz(2.0, 0.0))
+  eq(c10, cz(3.0, 0.0))
+  eq(c11, cz(4.0, -1.0))
+
+test "ComplexMatrix ztrmm B := A*B (upper, LEFT)" =
+  // A = [[1, i], [0, 2]]; B = [[1], [1]]
+  // (A*B)[0] = 1+i; (A*B)[1] = 2
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 1.0)],
+    [cz(0.0, 0.0), cz(2.0, 0.0)],
+  ])
+  let b = blas::complex_matrix_from([[cz(1.0, 0.0)], [cz(1.0, 0.0)]])
+  blas::ztrmm(blas::LEFT, blas::UPPER, blas::NON_UNIT, cz(1.0, 0.0), a, b)
+  let b00 = b[(0, 0)]
+  let b10 = b[(1, 0)]
+  eq(b00, cz(1.0, 1.0))
+  eq(b10, cz(2.0, 0.0))
+
+test "ComplexMatrix ztrsm solves A*X = B (upper, LEFT)" =
+  // A = [[1, i], [0, 2]]; B = [[1+i], [2]]; X = [[1], [1]]
+  let a = blas::complex_matrix_from([
+    [cz(1.0, 0.0), cz(0.0, 1.0)],
+    [cz(0.0, 0.0), cz(2.0, 0.0)],
+  ])
+  let b = blas::complex_matrix_from([[cz(1.0, 1.0)], [cz(2.0, 0.0)]])
+  blas::ztrsm(blas::LEFT, blas::UPPER, blas::NON_UNIT, cz(1.0, 0.0), a, b)
+  let b00 = b[(0, 0)]
+  let b10 = b[(1, 0)]
+  eq(b00, cz(1.0, 0.0))
+  eq(b10, cz(1.0, 0.0))
+
+test "complex_matrix_from_flat wraps interleaved [f64]" =
+  // 2x2 with values (1+2i), (3+4i), (5+6i), (7+8i)
+  let raw [f64] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let m = blas::complex_matrix_from_flat(2, 2, raw)
+  assert::equals(2, m.rows as i64)
+  assert::equals(2, m.cols as i64)
+  let m00 = m[(0, 0)]
+  let m01 = m[(0, 1)]
+  let m10 = m[(1, 0)]
+  let m11 = m[(1, 1)]
+  eq(m00, cz(1.0, 2.0))
+  eq(m01, cz(3.0, 4.0))
+  eq(m10, cz(5.0, 6.0))
+  eq(m11, cz(7.0, 8.0))

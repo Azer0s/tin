@@ -438,3 +438,156 @@ fn strsv(uplo i32, diag i32, a [[f32]], x [f32]) =
     &a_flat[0], n as i32,
     &x[0], 1,
   )
+
+// ===== Matrix[T] overloads =====
+//
+// Same routines, accepting `Matrix[T]` for the matrix operand
+// instead of `[[T]]`.  No per-call flatten / unflatten -- the
+// matrix is already contiguous row-major.  Vectors stay as `[T]`
+// (already flat for primitive T).
+
+fn dgemv(a Matrix[f64], x [f64], y [f64]) =
+  if len(x) != a.cols:
+    panic("blas::dgemv: len(x)={len(x)} but A has {a.cols} cols")
+  if len(y) != a.rows:
+    panic("blas::dgemv: len(y)={len(y)} but A has {a.rows} rows")
+  if a.rows == 0: return
+  dgemv_raw(
+    ROW_MAJOR, NO_TRANS, a.rows as i32, a.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+    0.0,
+    &y[0], 1,
+  )
+
+fn sgemv(a Matrix[f32], x [f32], y [f32]) =
+  if len(x) != a.cols:
+    panic("blas::sgemv: len(x)={len(x)} but A has {a.cols} cols")
+  if len(y) != a.rows:
+    panic("blas::sgemv: len(y)={len(y)} but A has {a.rows} rows")
+  if a.rows == 0: return
+  sgemv_raw(
+    ROW_MAJOR, NO_TRANS, a.rows as i32, a.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+    0.0 as f32,
+    &y[0], 1,
+  )
+
+fn dger(alpha f64, x [f64], y [f64], a Matrix[f64]) =
+  if len(x) != a.rows:
+    panic("blas::dger: len(x)={len(x)} but A has {a.rows} rows")
+  if len(y) != a.cols:
+    panic("blas::dger: len(y)={len(y)} but A has {a.cols} cols")
+  if a.rows == 0 || a.cols == 0: return
+  dger_raw(
+    ROW_MAJOR,
+    a.rows as i32, a.cols as i32,
+    alpha,
+    &x[0], 1,
+    &y[0], 1,
+    &a.data[0], a.cols as i32,
+  )
+
+fn sger(alpha f32, x [f32], y [f32], a Matrix[f32]) =
+  if len(x) != a.rows:
+    panic("blas::sger: len(x)={len(x)} but A has {a.rows} rows")
+  if len(y) != a.cols:
+    panic("blas::sger: len(y)={len(y)} but A has {a.cols} cols")
+  if a.rows == 0 || a.cols == 0: return
+  sger_raw(
+    ROW_MAJOR,
+    a.rows as i32, a.cols as i32,
+    alpha,
+    &x[0], 1,
+    &y[0], 1,
+    &a.data[0], a.cols as i32,
+  )
+
+fn dsymv(uplo i32, a Matrix[f64], x [f64], y [f64]) =
+  if a.rows != a.cols:
+    panic("blas::dsymv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::dsymv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if len(y) != a.rows:
+    panic("blas::dsymv: len(y)={len(y)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  dsymv_raw(
+    ROW_MAJOR, uplo, a.rows as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+    0.0,
+    &y[0], 1,
+  )
+
+fn ssymv(uplo i32, a Matrix[f32], x [f32], y [f32]) =
+  if a.rows != a.cols:
+    panic("blas::ssymv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::ssymv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if len(y) != a.rows:
+    panic("blas::ssymv: len(y)={len(y)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  ssymv_raw(
+    ROW_MAJOR, uplo, a.rows as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+    0.0 as f32,
+    &y[0], 1,
+  )
+
+fn dtrmv(uplo i32, diag i32, a Matrix[f64], x [f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrmv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::dtrmv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  dtrmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+  )
+
+fn strmv(uplo i32, diag i32, a Matrix[f32], x [f32]) =
+  if a.rows != a.cols:
+    panic("blas::strmv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::strmv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  strmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+  )
+
+fn dtrsv(uplo i32, diag i32, a Matrix[f64], x [f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrsv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::dtrsv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  dtrsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+  )
+
+fn strsv(uplo i32, diag i32, a Matrix[f32], x [f32]) =
+  if a.rows != a.cols:
+    panic("blas::strsv: A is {a.rows}x{a.cols} but must be square")
+  if len(x) != a.rows:
+    panic("blas::strsv: len(x)={len(x)} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  strsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x[0], 1,
+  )

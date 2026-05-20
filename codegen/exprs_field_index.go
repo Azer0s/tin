@@ -180,8 +180,13 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 		return nil, cg.nodeErr(e, "unknown field %s.%s", cg.diagStructName(structName), e.Field)
 	}
 
-	// We need a pointer to the struct to do GEP.
-	alloca := block.NewAlloca(objType)
+	// We need a pointer to the struct to do GEP.  The alloca MUST be
+	// hoisted to the function entry block -- a per-call alloca in a
+	// loop body grows the stack by sizeof(struct) every iteration
+	// (LLVM `alloca` outside the entry block isn't dead-store-elim
+	// across loop iterations).  At N=256k iters and 24B Box that's
+	// ~6 MB of stack, blowing past the default 8 MB and segfaulting.
+	alloca := cg.hoistAlloca(block, objType)
 	block.NewStore(obj, alloca)
 	gep := block.NewGetElementPtr(objType, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -237,7 +242,18 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 		return nil, err
 	}
 
+	// Clear returnTypeHint while typing the index sub-expression.
+	// The hint propagates from the surrounding context (call-arg
+	// position, let-binding annotation, etc.) and would otherwise
+	// leak into a tuple-literal index like `m[(i, j)]`, mis-typing
+	// the tuple as the outer expected type.  The index's natural
+	// type is what `::index` expects, never the surrounding context.
+	prevHint := cg.returnTypeHint
+	cg.returnTypeHint = nil
+
 	idx, err := cg.genExpr(block, e.Index)
+	cg.returnTypeHint = prevHint
+
 	if err != nil {
 		return nil, err
 	}

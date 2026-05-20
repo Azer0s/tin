@@ -37,6 +37,7 @@
 // covers Levels 1-3.
 
 use "./types"
+use "./flat"
 use "./level1"
 use "./level2"
 use "./level3"
@@ -49,6 +50,21 @@ export {
   UPPER, LOWER,
   NON_UNIT, UNIT,
   LEFT, RIGHT,
+
+  // Flat-buffer wrappers.  Real-valued: Array[T] / Matrix[T]
+  // (T = f32 || f64).  Complex (double-precision only): ComplexArray
+  // for L1, ComplexMatrix for L2/L3 (when added).  The real-valued
+  // forms are fully no-copy; the complex flat types match CBLAS's
+  // interleaved {re, im} layout directly so the z* routines also
+  // skip the per-call pack.
+  Array,
+  array, array_from,
+  Matrix,
+  matrix, matrix_from,
+  ComplexArray,
+  complex_array, complex_array_from, complex_array_from_flat,
+  ComplexMatrix,
+  complex_matrix, complex_matrix_from, complex_matrix_from_flat,
 
   // Level 1 - high-level
   ddot,  sdot,

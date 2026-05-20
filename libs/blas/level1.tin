@@ -118,3 +118,63 @@ fn sswap(x [f32], y [f32]) =
 // idamax returns the 0-based index of the largest |x[i]|.
 fn idamax(x [f64]) i32 = return idamax_raw(len(x) as i32, &x[0], 1)
 fn isamax(x [f32]) i32 = return isamax_raw(len(x) as i32, &x[0], 1)
+
+
+// ===== Array[T] overloads =====
+//
+// Same routine names, accepting Array[T] (f32 or f64).  Storage is
+// already CBLAS-compatible, so each call is the raw extern plus one
+// struct-field load.  Function name stays the precision-specific
+// form (ddot vs sdot, etc.) since CBLAS itself splits that way.
+
+fn ddot(x Array[f64], y Array[f64]) f64 =
+  if x.len != y.len:
+    panic("blas::ddot: length mismatch (x={x.len}, y={y.len})")
+  return ddot_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn sdot(x Array[f32], y Array[f32]) f32 =
+  if x.len != y.len:
+    panic("blas::sdot: length mismatch (x={x.len}, y={y.len})")
+  return sdot_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn dasum(x Array[f64]) f64 = return dasum_raw(x.len as i32, &x.data[0], 1)
+fn sasum(x Array[f32]) f32 = return sasum_raw(x.len as i32, &x.data[0], 1)
+
+fn dnrm2(x Array[f64]) f64 = return dnrm2_raw(x.len as i32, &x.data[0], 1)
+fn snrm2(x Array[f32]) f32 = return snrm2_raw(x.len as i32, &x.data[0], 1)
+
+fn dscal(alpha f64, x Array[f64]) = dscal_raw(x.len as i32, alpha, &x.data[0], 1)
+fn sscal(alpha f32, x Array[f32]) = sscal_raw(x.len as i32, alpha, &x.data[0], 1)
+
+fn daxpy(alpha f64, x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::daxpy: length mismatch (x={x.len}, y={y.len})")
+  daxpy_raw(x.len as i32, alpha, &x.data[0], 1, &y.data[0], 1)
+
+fn saxpy(alpha f32, x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::saxpy: length mismatch (x={x.len}, y={y.len})")
+  saxpy_raw(x.len as i32, alpha, &x.data[0], 1, &y.data[0], 1)
+
+fn dcopy(x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::dcopy: length mismatch (x={x.len}, y={y.len})")
+  dcopy_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn scopy(x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::scopy: length mismatch (x={x.len}, y={y.len})")
+  scopy_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn dswap(x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::dswap: length mismatch (x={x.len}, y={y.len})")
+  dswap_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn sswap(x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::sswap: length mismatch (x={x.len}, y={y.len})")
+  sswap_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn idamax(x Array[f64]) i32 = return idamax_raw(x.len as i32, &x.data[0], 1)
+fn isamax(x Array[f32]) i32 = return isamax_raw(x.len as i32, &x.data[0], 1)

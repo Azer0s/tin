@@ -65,6 +65,25 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 		return
 	}
 
+	// Fresh struct-valued call result whose fields own RC-tracked
+	// references: e.g. `blas::array_from(xs)` returns an `Array[T]`
+	// struct holding a retained `[T]`.  When this is consumed inline
+	// as a call arg (no let-binding to anchor a scope-exit release),
+	// the struct's RC fields would leak.  emitRelease on a struct
+	// value walks the fields, so call it here when the value is a
+	// direct call result whose type isn't already covered by the
+	// isFreshCallResult path above (that one only matches outer
+	// fat-pointer return types).
+	if cg.underlyingCall(pre) != nil {
+		if _, isStruct := pre.Type().(*irtypes.StructType); isStruct {
+			if cg.elemNeedsRelease(pre.Type()) {
+				cg.emitRelease(block, pre)
+
+				return
+			}
+		}
+	}
+
 	if isCopyExpr(astArg) {
 		return
 	}

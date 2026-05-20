@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 )
 
@@ -30,6 +31,28 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if entry.releaseRawPtr {
 			loadedPtr := block.NewLoad(ptrType.ElemType, entry.val)
 			block.NewCall(cg.ensureRelease(), loadedPtr)
+
+			return
+		}
+
+		// cLayoutWrapperRCStruct: binding holds the by-value return of an
+		// extern wrapper that _tin_rc_alloc'd a (wrapper + native) block to
+		// keep its c_data_ptr valid past the call.  Recover the rc base by
+		// stepping the c_data_ptr back one wrapper-sized element (LLVM GEP
+		// with index -1 handles the sizeof multiplication) and release it.
+		if entry.cLayoutWrapperRCStruct != "" {
+			sName := entry.cLayoutWrapperRCStruct
+			tinSt := cg.structTypeFor(CanonKey(sName))
+			if tinSt != nil {
+				structVal := block.NewLoad(ptrType.ElemType, entry.val)
+				cDataIdx := int64(cg.cDataPtrIndex(sName))
+				cDataPtr := block.NewExtractValue(structVal, uint64(cDataIdx))
+				cDataAsSt := block.NewBitCast(cDataPtr, irtypes.NewPointer(tinSt))
+				rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
+					constant.NewInt(irtypes.I64, -1))
+				rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
+				block.NewCall(cg.ensureRelease(), rcBaseI8)
+			}
 
 			return
 		}
@@ -184,6 +207,23 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 			if entry.releaseRawPtr {
 				loadedPtr := block.NewLoad(ptrType.ElemType, entry.val)
 				block.NewCall(cg.ensureRelease(), loadedPtr)
+
+				return
+			}
+			// cLayoutWrapperRCStruct: twin of the branch in emitScopeRelease.
+			if entry.cLayoutWrapperRCStruct != "" {
+				sName := entry.cLayoutWrapperRCStruct
+				tinSt := cg.structTypeFor(CanonKey(sName))
+				if tinSt != nil {
+					structVal := block.NewLoad(ptrType.ElemType, entry.val)
+					cDataIdx := int64(cg.cDataPtrIndex(sName))
+					cDataPtr := block.NewExtractValue(structVal, uint64(cDataIdx))
+					cDataAsSt := block.NewBitCast(cDataPtr, irtypes.NewPointer(tinSt))
+					rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
+						constant.NewInt(irtypes.I64, -1))
+					rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRelease(), rcBaseI8)
+				}
 
 				return
 			}

@@ -340,3 +340,135 @@ test "dgemm_raw accumulates with non-zero beta" =
   assert::equals(64.0,  c[1])
   assert::equals(96.0,  c[2])
   assert::equals(128.0, c[3])
+
+// ===== Array[T] / Matrix[T] overload coverage =====
+//
+// Same inputs as the [T] / [[T]] tests above; just rebound through
+// the flat-buffer wrappers.  Confirms each overload picks the
+// where-guarded body and produces the expected result.
+
+test "Array[f64] ddot" =
+  let x = blas::array_from([1.0, 2.0, 3.0])
+  let y = blas::array_from([4.0, 5.0, 6.0])
+  assert::equals(32.0, blas::ddot(x, y))
+
+test "Array[f32] sdot" =
+  let xv [f32] = [1.0, 2.0, 3.0]
+  let yv [f32] = [4.0, 5.0, 6.0]
+  assert::equals(32.0 as f32, blas::sdot(blas::array_from(xv), blas::array_from(yv)))
+
+test "Array dasum + sasum" =
+  let x = blas::array_from([1.0, -2.0, 3.0, -4.0])
+  assert::equals(10.0, blas::dasum(x))
+  let xfv [f32] = [1.0, -2.0, 3.0, -4.0]
+  assert::equals(10.0 as f32, blas::sasum(blas::array_from(xfv)))
+
+test "Array dnrm2 + snrm2" =
+  let x = blas::array_from([3.0, 4.0])
+  assert::equals(5.0, blas::dnrm2(x))
+  let xfv [f32] = [3.0, 4.0]
+  assert::equals(5.0 as f32, blas::snrm2(blas::array_from(xfv)))
+
+test "Array dscal scales in place" =
+  let x = blas::array_from([1.0, 2.0, 3.0, 4.0])
+  blas::dscal(2.0, x)
+  assert::equals(2.0, x[0])
+  assert::equals(8.0, x[3])
+
+test "Array daxpy mutates y" =
+  let x = blas::array_from([1.0, 2.0, 3.0])
+  let y = blas::array_from([4.0, 5.0, 6.0])
+  blas::daxpy(2.0, x, y)
+  assert::equals(6.0,  y[0])
+  assert::equals(12.0, y[2])
+  // x unchanged
+  assert::equals(1.0, x[0])
+
+test "Array dcopy copies x into y" =
+  let x = blas::array_from([7.0, 8.0, 9.0])
+  let y = blas::array_from([0.0, 0.0, 0.0])
+  blas::dcopy(x, y)
+  assert::equals(7.0, y[0])
+  assert::equals(9.0, y[2])
+
+test "Array dswap exchanges x and y" =
+  let x = blas::array_from([1.0, 2.0, 3.0])
+  let y = blas::array_from([10.0, 20.0, 30.0])
+  blas::dswap(x, y)
+  assert::equals(10.0, x[0])
+  assert::equals(30.0, x[2])
+  assert::equals(1.0,  y[0])
+  assert::equals(3.0,  y[2])
+
+test "Array idamax returns the 0-based index of max |X[i]|" =
+  let x = blas::array_from([1.0, -5.0, 2.0, -3.0])
+  assert::equals(1, blas::idamax(x) as i64)
+
+test "Matrix[f64] dgemm: identity * B == B" =
+  let id = blas::matrix_from(2, 2, [1.0, 0.0, 0.0, 1.0])
+  let b  = blas::matrix_from(2, 2, [2.0, 3.0, 4.0, 5.0])
+  let c  = blas::matrix[f64](2, 2)
+  blas::dgemm(id, b, c)
+  assert::equals(2.0, c[(0, 0)])
+  assert::equals(3.0, c[(0, 1)])
+  assert::equals(4.0, c[(1, 0)])
+  assert::equals(5.0, c[(1, 1)])
+
+test "Matrix[f32] sgemm: identity * B == B" =
+  let idv [f32] = [1.0, 0.0, 0.0, 1.0]
+  let bv  [f32] = [2.0, 3.0, 4.0, 5.0]
+  let id = blas::matrix_from(2, 2, idv)
+  let b  = blas::matrix_from(2, 2, bv)
+  let c  = blas::matrix[f32](2, 2)
+  blas::sgemm(id, b, c)
+  assert::equals(2.0 as f32, c[(0, 0)])
+  assert::equals(5.0 as f32, c[(1, 1)])
+
+test "Matrix dgemv: y := A*x" =
+  let a = blas::matrix_from(2, 3, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+  let x [f64] = [1.0, 1.0, 1.0]
+  let y [f64] = [0.0, 0.0]
+  blas::dgemv(a, x, y)
+  // row 0: 1+2+3 = 6;  row 1: 4+5+6 = 15
+  assert::equals(6.0,  y[0])
+  assert::equals(15.0, y[1])
+
+test "Matrix dsymm A symmetric, side LEFT" =
+  // A = [[1, 2], [2, 3]] symmetric; B = [[1, 0], [0, 1]] identity
+  // C := A * B = A
+  let a = blas::matrix_from(2, 2, [1.0, 2.0, 2.0, 3.0])
+  let b = blas::matrix_from(2, 2, [1.0, 0.0, 0.0, 1.0])
+  let c = blas::matrix[f64](2, 2)
+  blas::dsymm(blas::LEFT, blas::LOWER, a, b, c)
+  assert::equals(1.0, c[(0, 0)])
+  assert::equals(2.0, c[(0, 1)])
+  assert::equals(2.0, c[(1, 0)])
+  assert::equals(3.0, c[(1, 1)])
+
+test "Matrix dsyrk: C := A * A^T (upper)" =
+  // A = [[1, 2], [3, 4]]; A * A^T = [[5, 11], [11, 25]]
+  let a = blas::matrix_from(2, 2, [1.0, 2.0, 3.0, 4.0])
+  let c = blas::matrix[f64](2, 2)
+  blas::dsyrk(blas::UPPER, a, c)
+  assert::equals(5.0,  c[(0, 0)])
+  assert::equals(11.0, c[(0, 1)])
+  assert::equals(25.0, c[(1, 1)])
+
+test "Matrix dtrmm: B := alpha * A * B (upper, NoTrans, LEFT)" =
+  // A = [[2, 1], [0, 3]];  B = [[1, 1], [1, 1]];  alpha = 1
+  // (A*B)[0] = [2*1+1*1, 2*1+1*1] = [3, 3]
+  // (A*B)[1] = [0*1+3*1, 0*1+3*1] = [3, 3]
+  let a = blas::matrix_from(2, 2, [2.0, 1.0, 0.0, 3.0])
+  let b = blas::matrix_from(2, 2, [1.0, 1.0, 1.0, 1.0])
+  blas::dtrmm(blas::LEFT, blas::UPPER, blas::NON_UNIT, 1.0, a, b)
+  assert::equals(3.0, b[(0, 0)])
+  assert::equals(3.0, b[(1, 1)])
+
+test "Matrix dtrsv: A*x = b, upper triangular" =
+  // A = [[2, 1], [0, 3]];  b = [3, 6]
+  // Back-sub: x[1] = 6/3 = 2;  x[0] = (3 - 1*2)/2 = 0.5
+  let a = blas::matrix_from(2, 2, [2.0, 1.0, 0.0, 3.0])
+  let x [f64] = [3.0, 6.0]
+  blas::dtrsv(blas::UPPER, blas::NON_UNIT, a, x)
+  assert::equals(0.5, x[0])
+  assert::equals(2.0, x[1])

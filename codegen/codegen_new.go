@@ -180,6 +180,7 @@ func New(filename string) *CodeGen {
 		genericMethodsSetUp:         make(map[string]bool),
 		funcReturnUnsigned:          make(map[string]bool),
 		heapPromotingFns:            make(map[string]bool),
+		cLayoutWrapperReturnFns:     make(map[string]string),
 		fnReturnsHeapPromotedFields: make(map[string][]int),
 		structWeakFields:            make(map[string]map[string]bool),
 		structOwningRawPtrFields:    make(map[string]map[string]bool),

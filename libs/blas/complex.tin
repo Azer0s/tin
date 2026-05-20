@@ -233,6 +233,57 @@ fn izamax(x [complex::Value]) i32 =
   let px = pack_z(x)
   return izamax_raw(len(x) as i32, &px[0], 1)
 
+// ===== ComplexArray overloads =====
+//
+// Same routine names accepting blas::ComplexArray (interleaved
+// `[f64]` storage).  No pack -- `data` is already exactly what
+// CBLAS expects, so each call is the raw extern plus one struct-
+// field load.
+
+fn zdotc(x ComplexArray, y ComplexArray) complex::Value =
+  if x.len != y.len:
+    panic("blas::zdotc: length mismatch (x={x.len}, y={y.len})")
+  let r = complex::Value{re: 0.0, im: 0.0}
+  zdotc_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1, &r)
+  return r
+
+fn zdotu(x ComplexArray, y ComplexArray) complex::Value =
+  if x.len != y.len:
+    panic("blas::zdotu: length mismatch (x={x.len}, y={y.len})")
+  let r = complex::Value{re: 0.0, im: 0.0}
+  zdotu_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1, &r)
+  return r
+
+fn dzasum(x ComplexArray) f64 =
+  return dzasum_raw(x.len as i32, &x.data[0], 1)
+
+fn dznrm2(x ComplexArray) f64 =
+  return dznrm2_raw(x.len as i32, &x.data[0], 1)
+
+fn zscal(alpha complex::Value, x ComplexArray) =
+  zscal_raw(x.len as i32, &alpha, &x.data[0], 1)
+
+fn zdscal(alpha f64, x ComplexArray) =
+  zdscal_raw(x.len as i32, alpha, &x.data[0], 1)
+
+fn zaxpy(alpha complex::Value, x ComplexArray, y ComplexArray) =
+  if x.len != y.len:
+    panic("blas::zaxpy: length mismatch (x={x.len}, y={y.len})")
+  zaxpy_raw(x.len as i32, &alpha, &x.data[0], 1, &y.data[0], 1)
+
+fn zcopy(x ComplexArray, y ComplexArray) =
+  if x.len != y.len:
+    panic("blas::zcopy: length mismatch (x={x.len}, y={y.len})")
+  zcopy_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn zswap(x ComplexArray, y ComplexArray) =
+  if x.len != y.len:
+    panic("blas::zswap: length mismatch (x={x.len}, y={y.len})")
+  zswap_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn izamax(x ComplexArray) i32 =
+  return izamax_raw(x.len as i32, &x.data[0], 1)
+
 // ===== Level 2: matrix-vector =====
 
 // zgemv:    y := alpha * op(A) * x + beta * y
@@ -675,3 +726,190 @@ fn ztrsm(
   )
 
   unpack_zmat(pb, b)
+
+// ===== ComplexMatrix overloads (L2 / L3) =====
+//
+// Same routine names accepting blas::ComplexMatrix for the matrix
+// operand and blas::ComplexArray for the vector operands.  Both
+// types carry interleaved {re, im} f64 storage, so each call is
+// the raw extern plus struct-field loads -- no pack / unpack.
+
+fn zgemv(a ComplexMatrix, x ComplexArray, y ComplexArray) =
+  if x.len != a.cols:
+    panic("blas::zgemv: len(x)={x.len} but A has {a.cols} cols")
+  if y.len != a.rows:
+    panic("blas::zgemv: len(y)={y.len} but A has {a.rows} rows")
+  if a.rows == 0: return
+  let alpha = complex::Value{re: 1.0, im: 0.0}
+  let beta  = complex::Value{re: 0.0, im: 0.0}
+  zgemv_raw(
+    ROW_MAJOR, NO_TRANS, a.rows as i32, a.cols as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &x.data[0], 1,
+    &beta,
+    &y.data[0], 1,
+  )
+
+fn zgerc(alpha complex::Value, x ComplexArray, y ComplexArray, a ComplexMatrix) =
+  if x.len != a.rows:
+    panic("blas::zgerc: len(x)={x.len} but A has {a.rows} rows")
+  if y.len != a.cols:
+    panic("blas::zgerc: len(y)={y.len} but A has {a.cols} cols")
+  if a.rows == 0 || a.cols == 0: return
+  zgerc_raw(
+    ROW_MAJOR,
+    a.rows as i32, a.cols as i32,
+    &alpha,
+    &x.data[0], 1,
+    &y.data[0], 1,
+    &a.data[0], a.cols as i32,
+  )
+
+fn zgeru(alpha complex::Value, x ComplexArray, y ComplexArray, a ComplexMatrix) =
+  if x.len != a.rows:
+    panic("blas::zgeru: len(x)={x.len} but A has {a.rows} rows")
+  if y.len != a.cols:
+    panic("blas::zgeru: len(y)={y.len} but A has {a.cols} cols")
+  if a.rows == 0 || a.cols == 0: return
+  zgeru_raw(
+    ROW_MAJOR,
+    a.rows as i32, a.cols as i32,
+    &alpha,
+    &x.data[0], 1,
+    &y.data[0], 1,
+    &a.data[0], a.cols as i32,
+  )
+
+fn zhemv(uplo i32, a ComplexMatrix, x ComplexArray, y ComplexArray) =
+  if a.rows != a.cols:
+    panic("blas::zhemv: A is {a.rows}x{a.cols} but must be square")
+  if x.len != a.rows:
+    panic("blas::zhemv: len(x)={x.len} but A is {a.rows}x{a.rows}")
+  if y.len != a.rows:
+    panic("blas::zhemv: len(y)={y.len} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  let alpha = complex::Value{re: 1.0, im: 0.0}
+  let beta  = complex::Value{re: 0.0, im: 0.0}
+  zhemv_raw(
+    ROW_MAJOR, uplo, a.rows as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &x.data[0], 1,
+    &beta,
+    &y.data[0], 1,
+  )
+
+fn ztrmv(uplo i32, diag i32, a ComplexMatrix, x ComplexArray) =
+  if a.rows != a.cols:
+    panic("blas::ztrmv: A is {a.rows}x{a.cols} but must be square")
+  if x.len != a.rows:
+    panic("blas::ztrmv: len(x)={x.len} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  ztrmv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x.data[0], 1,
+  )
+
+fn ztrsv(uplo i32, diag i32, a ComplexMatrix, x ComplexArray) =
+  if a.rows != a.cols:
+    panic("blas::ztrsv: A is {a.rows}x{a.cols} but must be square")
+  if x.len != a.rows:
+    panic("blas::ztrsv: len(x)={x.len} but A is {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  ztrsv_raw(
+    ROW_MAJOR, uplo, NO_TRANS, diag,
+    a.rows as i32,
+    &a.data[0], a.cols as i32,
+    &x.data[0], 1,
+  )
+
+fn zgemm(a ComplexMatrix, b ComplexMatrix, c ComplexMatrix) =
+  if a.cols != b.rows:
+    panic("blas::zgemm: A is {a.rows}x{a.cols}, B has {b.rows} rows")
+  if c.rows != a.rows || c.cols != b.cols:
+    panic("blas::zgemm: C {c.rows}x{c.cols} doesn't match {a.rows}x{b.cols}")
+  if a.rows == 0 || a.cols == 0 || b.cols == 0: return
+  let alpha = complex::Value{re: 1.0, im: 0.0}
+  let beta  = complex::Value{re: 0.0, im: 0.0}
+  zgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    a.rows as i32, b.cols as i32, a.cols as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    &beta,
+    &c.data[0], c.cols as i32,
+  )
+
+fn zhemm(side i32, uplo i32, a ComplexMatrix, b ComplexMatrix, c ComplexMatrix) =
+  if a.rows != a.cols:
+    panic("blas::zhemm: A is {a.rows}x{a.cols} but must be square")
+  let expect i64 = b.rows
+  if side != LEFT:
+    expect = b.cols
+  if a.rows != expect:
+    panic("blas::zhemm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if c.rows != b.rows || c.cols != b.cols:
+    panic("blas::zhemm: C {c.rows}x{c.cols} doesn't match B {b.rows}x{b.cols}")
+  if b.rows == 0 || b.cols == 0: return
+  let alpha = complex::Value{re: 1.0, im: 0.0}
+  let beta  = complex::Value{re: 0.0, im: 0.0}
+  zhemm_raw(
+    ROW_MAJOR, side, uplo,
+    b.rows as i32, b.cols as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    &beta,
+    &c.data[0], c.cols as i32,
+  )
+
+fn zherk(uplo i32, alpha f64, a ComplexMatrix, beta f64, c ComplexMatrix) =
+  if c.rows != a.rows || c.cols != a.rows:
+    panic("blas::zherk: C is {c.rows}x{c.cols} but expected {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  zherk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    a.rows as i32, a.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    beta,
+    &c.data[0], c.cols as i32,
+  )
+
+fn ztrmm(side i32, uplo i32, diag i32, alpha complex::Value, a ComplexMatrix, b ComplexMatrix) =
+  if a.rows != a.cols:
+    panic("blas::ztrmm: A is {a.rows}x{a.cols} but must be square")
+  let expect i64 = b.rows
+  if side != LEFT:
+    expect = b.cols
+  if a.rows != expect:
+    panic("blas::ztrmm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  ztrmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn ztrsm(side i32, uplo i32, diag i32, alpha complex::Value, a ComplexMatrix, b ComplexMatrix) =
+  if a.rows != a.cols:
+    panic("blas::ztrsm: A is {a.rows}x{a.cols} but must be square")
+  let expect i64 = b.rows
+  if side != LEFT:
+    expect = b.cols
+  if a.rows != expect:
+    panic("blas::ztrsm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  ztrsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    &alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
