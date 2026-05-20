@@ -873,3 +873,198 @@ func promotedTupleElemVar(elem ast.Node, aliases map[string]string, promoted map
 
 	return ""
 }
+
+// cLayoutBindingEscapes reports whether `name` appears in any position
+// other than `name.field` / `name[idx]` receiver, or `name = newval`
+// assignment target, within body.  Conservative: any node type the walker
+// doesn't explicitly understand is treated as escape, since the binding's
+// name might appear inside it.  Used by genVarDecl to decide whether the
+// hidden out_native buffer for a cLayoutStruct extern wrapper return can
+// be stack-allocated (non-escape) or must be _tin_rc_alloc'd (escape).
+func (cg *CodeGen) cLayoutBindingEscapes(name string, body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	var found bool
+
+	var walk func(n ast.Node)
+
+	// receiverWalk strips one layer of receiver context: if n is exactly the
+	// binding identifier, that use is fine; otherwise walk it normally.
+	receiverWalk := func(n ast.Node) {
+		if n == nil {
+			return
+		}
+
+		if id, ok := n.(*ast.Identifier); ok && id.Name == name {
+			return
+		}
+
+		walk(n)
+	}
+
+	walk = func(n ast.Node) {
+		if n == nil || found {
+			return
+		}
+
+		switch v := n.(type) {
+		case *ast.Identifier:
+			if v.Name == name {
+				found = true
+			}
+		case *ast.FieldAccess:
+			receiverWalk(v.Expr)
+		case *ast.IndexExpr:
+			receiverWalk(v.Expr)
+			walk(v.Index)
+		case *ast.AssignStmt:
+			receiverWalk(v.Target)
+			walk(v.Value)
+		case *ast.AugAssignStmt:
+			receiverWalk(v.Target)
+			walk(v.Value)
+		case *ast.PostfixStmt:
+			receiverWalk(v.Expr)
+		case *ast.Block:
+			for _, s := range v.Stmts {
+				walk(s)
+			}
+		case *ast.ExprStmt:
+			walk(v.Expr)
+		case *ast.VarDecl:
+			walk(v.Value)
+		case *ast.ReturnStmt:
+			walk(v.Value)
+		case *ast.DeferStmt:
+			walk(v.Call)
+		case *ast.IfStmt:
+			walk(v.Cond)
+			walk(v.Then)
+
+			for _, ei := range v.ElseIfs {
+				walk(ei.Cond)
+				walk(ei.Body)
+			}
+
+			walk(v.Else)
+		case *ast.ForStmt:
+			walk(v.Init)
+			walk(v.Cond)
+			walk(v.Post)
+			walk(v.Iter)
+			walk(v.Body)
+		case *ast.MatchStmt:
+			walk(v.Expr)
+
+			for _, c := range v.Cases {
+				walk(c.Pattern)
+				walk(c.Guard)
+				walk(c.Body)
+			}
+
+			walk(v.Default)
+		case *ast.EchoStmt:
+			walk(v.Value)
+		case *ast.CallExpr:
+			walk(v.Func)
+
+			for _, a := range v.Args {
+				walk(a)
+			}
+		case *ast.BinExpr:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryExpr:
+			walk(v.Expr)
+		case *ast.TernaryExpr:
+			walk(v.Cond)
+			walk(v.Then)
+			walk(v.Else)
+		case *ast.PipeExpr:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.LambdaExpr:
+			walk(v.Body)
+		case *ast.AddressOfExpr:
+			walk(v.Expr)
+		case *ast.DerefExpr:
+			walk(v.Expr)
+		case *ast.AsExpr:
+			walk(v.Expr)
+		case *ast.IsExpr:
+			walk(v.Expr)
+		case *ast.TypeAssertExpr:
+			walk(v.Expr)
+		case *ast.AwaitExpr:
+			walk(v.Future)
+		case *ast.SpawnExpr:
+			walk(v.Call)
+			walk(v.DoBlock)
+		case *ast.StructLit:
+			for _, f := range v.Fields {
+				walk(f.Value)
+			}
+
+			for _, p := range v.Positional {
+				walk(p)
+			}
+		case *ast.ArrayLit:
+			for _, e := range v.Elems {
+				walk(e)
+			}
+		case *ast.ArrayFillLit:
+			walk(v.Value)
+		case *ast.TupleLit:
+			for _, e := range v.Elems {
+				walk(e)
+			}
+		case *ast.RangeExpr:
+			walk(v.Start)
+			walk(v.End)
+		case *ast.TaggedBlock:
+			walk(v.Body)
+		case *ast.WhereList:
+			for _, c := range v.Clauses {
+				walk(c.Pattern)
+				walk(c.Body)
+			}
+		case *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.BoolLit,
+			*ast.NilLit, *ast.AtomLit, *ast.CharLit, *ast.BacktickLit,
+			*ast.BreakStmt, *ast.ScopeAccess, *ast.TypeRefNode,
+			*ast.SizeofExpr, *ast.IsRCExpr, *ast.TypeofExpr,
+			*ast.TraitofExpr, *ast.FieldnamesExpr, *ast.FieldtypesExpr,
+			*ast.FieldtagExpr:
+			// Leaf or type-introspection nodes -- no identifier escape route.
+		default:
+			// Unknown node type -- conservative: assume the binding might
+			// be reachable through it.
+			found = true
+		}
+	}
+
+	walk(body)
+
+	return found
+}
+
+// currentFnAstBody returns the AST body of the function or test being
+// codegen'd, or nil at module scope / synthetic helpers.  Prefers the
+// explicitly-tracked curFnAstBody (set for both regular fns and tests),
+// falls back to funcDecls lookup by IR name for legacy contexts.
+func (cg *CodeGen) currentFnAstBody() ast.Node {
+	if cg.curFnAstBody != nil {
+		return cg.curFnAstBody
+	}
+
+	if cg.curFn == nil {
+		return nil
+	}
+
+	if decl, ok := cg.funcDecls[cg.curFn.Name()]; ok && decl != nil {
+		return decl.Body
+	}
+
+	return nil
+}

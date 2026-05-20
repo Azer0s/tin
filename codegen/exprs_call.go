@@ -1052,10 +1052,14 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	// `out_native` parameter the call site fills in below; relax the arity
 	// check by one slot in that case so the user-visible arg count matches
 	// the Tin function declaration.
-	expectedArity := len(calleeType.Params)
-	if f, ok := callee.(*ir.Func); ok {
-		if _, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
-			expectedArity--
+	expectedArity := 0
+	if calleeType != nil {
+		expectedArity = len(calleeType.Params)
+
+		if f, ok := callee.(*ir.Func); ok {
+			if _, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
+				expectedArity--
+			}
 		}
 	}
 
@@ -1292,16 +1296,39 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 // extern value return.  The wrapper writes the native bytes into the
 // returned pointer; c_data_ptr in the Tin wrapper value will point there.
 //
-// For now this always rc_alloc's a [wrapper | native] block (preserving the
-// pre-out-param behavior bytes-for-bytes).  Phase 2 of step 3+4 will swap
-// to a stack composite + IMMORTAL_RC sentinel when escape analysis says the
-// result does not outlive the current frame.
+// Stack mode (cg.nextCLayoutStackBind == structName): hoistAlloca a
+// {TinRCHdr | wrapper | native} composite on the caller's entry block,
+// write TIN_IMMORTAL_RC (-1) into the RCHdr slot once, and hand the
+// native portion's address to the wrapper.  The emitRelease(c_data_ptr -
+// sizeof(wrapper)) path reads the sentinel and skips, so the standard
+// release walker is correct without per-call rc traffic.
+//
+// Heap mode (default): _tin_rc_alloc the [wrapper | native] block exactly
+// as the pre-out-param wrapper used to do internally; layout and release
+// math are unchanged.
 func (cg *CodeGen) allocCLayoutReturnBuffer(block *ir.Block, structName string, _ *ast.CallExpr) value.Value {
 	tinSt := cg.structTypeFor(CanonKey(structName))
 	nativeSt := cg.nativeStructTypes[structName]
 
 	if tinSt == nil || nativeSt == nil {
 		panic(fmt.Sprintf("allocCLayoutReturnBuffer: missing IR types for %q", structName))
+	}
+
+	if cg.nextCLayoutStackBind == structName {
+		compositeTy := irtypes.NewStruct(irtypes.I64, tinSt, nativeSt)
+		composite := cg.hoistAlloca(block, compositeTy)
+		// Write the IMMORTAL_RC sentinel into slot 0.  hoistAlloca leaves
+		// us in the entry block at fn start; the store goes in the caller's
+		// current block since the slot must be set before each call (the
+		// alloca itself is reused across loop iterations).
+		rcSlotGep := block.NewGetElementPtr(compositeTy, composite,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		block.NewStore(constant.NewInt(irtypes.I64, -1), rcSlotGep)
+
+		nativePtr := block.NewGetElementPtr(compositeTy, composite,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+		return nativePtr
 	}
 
 	wrapperSize := cg.llvmSizeOf(block, tinSt)

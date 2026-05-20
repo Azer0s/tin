@@ -113,9 +113,12 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				cg.lambdaSelfName = s.Name
 			}
 
+			cg.maybeMarkCLayoutStackBind(s)
+
 			initVal, err = cg.genExpr(block, s.Value)
 			cg.returnTypeHint = nil
 			cg.lambdaSelfName = ""
+			cg.nextCLayoutStackBind = ""
 		}
 
 		if err != nil {
@@ -260,6 +263,8 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	isHeapOwned := false
 	heapOwnedDepth := 0
 	pointsToBorrowedStorage := false
+
+	defer func() { cg.nextCLayoutStackBind = "" }()
 
 	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
 		calleeName := ""
@@ -813,4 +818,59 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 	}
 
 	return nil
+}
+
+// maybeMarkCLayoutStackBind sets cg.nextCLayoutStackBind when the let-binding's
+// initializer is a direct CallExpr to a cLayoutStruct-value-returning wrapper
+// AND the binding does not escape the enclosing function frame.  Called just
+// before the initializer is emitted via genExpr so allocCLayoutReturnBuffer
+// (consulted by genCallExpr while the wrapper call is being lowered) sees
+// the flag and stack-allocates the out_native buffer with the IMMORTAL_RC
+// sentinel.
+func (cg *CodeGen) maybeMarkCLayoutStackBind(s *ast.VarDecl) {
+	if s == nil || s.Name == "" || s.Value == nil {
+		return
+	}
+
+	callExpr, isCall := s.Value.(*ast.CallExpr)
+	if !isCall {
+		return
+	}
+
+	calleeName := ""
+
+	switch fn := callExpr.Func.(type) {
+	case *ast.Identifier:
+		calleeName = fn.Name
+	case *ast.ScopeAccess:
+		calleeName = strings.Join(fn.Path, "__")
+	}
+
+	if calleeName == "" {
+		return
+	}
+
+	structName, hasOutParam := cg.cLayoutWrapperOutParamFns[calleeName]
+	if !hasOutParam {
+		if entry, ok := cg.curScope.lookup(calleeName); ok {
+			if f, ok2 := entry.val.(*ir.Func); ok2 {
+				structName, hasOutParam = cg.cLayoutWrapperOutParamFns[f.Name()]
+			}
+		}
+	}
+
+	if !hasOutParam {
+		return
+	}
+
+	body := cg.currentFnAstBody()
+	if body == nil {
+		return
+	}
+
+	if cg.cLayoutBindingEscapes(s.Name, body) {
+		return
+	}
+
+	cg.nextCLayoutStackBind = structName
 }

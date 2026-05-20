@@ -485,6 +485,19 @@ type CodeGen struct {
 	// for escape) to the call site rather than baking it into the wrapper.
 	cLayoutWrapperOutParamFns map[string]string
 
+	// nextCLayoutStackBind, when non-empty, signals genCallExpr to allocate
+	// the cLayoutStruct extern return's out_native buffer on the caller's
+	// stack with an IMMORTAL_RC sentinel instead of via _tin_rc_alloc.
+	// genVarDecl sets this for the duration of a non-escape let-binding RHS
+	// evaluation, then clears it.  Empty string means use the heap path.
+	nextCLayoutStackBind string
+
+	// curFnAstBody is the AST body of the function or test being codegen'd.
+	// Set by genFuncDeclAs and the test runner before emitting the body, used
+	// by escape analysis on let-bindings (which need to walk the surrounding
+	// function body, including for TestDecls that aren't in funcDecls).
+	curFnAstBody ast.Node
+
 	// fnReturnsHeapPromotedFields: map from function name to the list of
 	// struct-field indices in the returned struct value whose stored
 	// pointer is a heap-promoted `&local`.  Populated when emitting
