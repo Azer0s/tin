@@ -476,14 +476,15 @@ type CodeGen struct {
 	// variable as isHeapOwned so scope-exit emits the correct two-step release.
 	heapPromotingFns map[string]bool
 
-	// cLayoutWrapperOutParamFns: wrapper name -> cLayoutStruct name.
+	// cLayoutWrapperNativeReturnFns: wrapper name -> cLayoutStruct name.
 	// Wrappers for extern functions that return a cLayoutStruct by value
-	// take a hidden trailing parameter `out_native *Native_struct`.  The
-	// wrapper writes the C return value into *out_native and builds the
-	// Tin struct value with c_data_ptr = bitcast(out_native, i8*).  This
-	// hands the allocation decision (stack-bind for non-escape, rc_alloc
-	// for escape) to the call site rather than baking it into the wrapper.
-	cLayoutWrapperOutParamFns map[string]string
+	// return the C-layout %Native struct directly instead of building a
+	// Tin wrapper value.  The call site allocates the storage (stack
+	// composite for non-escape, _tin_rc_alloc for escape), stores the
+	// native return into it, and stamps the Tin wrapper value (typeid +
+	// zero vtables + c_data_ptr) inline.  Keeps the wrapper's LLVM
+	// signature 1:1 with the user's Tin declaration -- no hidden params.
+	cLayoutWrapperNativeReturnFns map[string]string
 
 	// nextCLayoutStackBind, when non-empty, signals genCallExpr to allocate
 	// the cLayoutStruct extern return's out_native buffer on the caller's

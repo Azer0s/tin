@@ -1049,6 +1049,47 @@ func (cg *CodeGen) cLayoutBindingEscapes(name string, body ast.Node) bool {
 	return found
 }
 
+// structHasPointerReceiverMethod reports whether any method declared on
+// structName takes a pointer receiver (`fn ::m(this *S, ...)`).  Such a
+// method, when called on a binding, materializes `&binding` to satisfy
+// the receiver -- which means any binding of type S must outlive the
+// callee's view of the memory.  Stack-binding such a value would let the
+// callee write through a dangling pointer once the caller's frame ends,
+// so escape analysis must conservatively heap-allocate.
+//
+// Walks funcDecls to find methods; the first param is named `this` by
+// Tin convention and carries the receiver type.  Does not yet follow
+// trait-inherited methods -- those would extend this with a structImpls
+// lookup once the registry is wired up.
+func (cg *CodeGen) structHasPointerReceiverMethod(structName string) bool {
+	for _, decl := range cg.funcDecls {
+		if decl == nil || len(decl.Params) == 0 {
+			continue
+		}
+
+		first := decl.Params[0]
+		if first.Name != "this" {
+			continue
+		}
+
+		pt, ok := first.Type.(*ast.PointerType)
+		if !ok {
+			continue
+		}
+
+		elem, ok2 := pt.Elem.(*ast.SimpleType)
+		if !ok2 {
+			continue
+		}
+
+		if elem.Name == structName {
+			return true
+		}
+	}
+
+	return false
+}
+
 // currentFnAstBody returns the AST body of the function or test being
 // codegen'd, or nil at module scope / synthetic helpers.  Prefers the
 // explicitly-tracked curFnAstBody (set for both regular fns and tests),

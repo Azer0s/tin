@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
@@ -84,6 +85,30 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	if cg.underlyingCall(pre) != nil {
 		if _, isStruct := pre.Type().(*irtypes.StructType); isStruct {
 			if cg.elemNeedsRelease(pre.Type()) {
+				cg.emitRelease(block, pre)
+
+				return
+			}
+		}
+	}
+
+	// Inline cLayoutStruct extern value return: the AST node is a
+	// CallExpr to a native-returning wrapper, but `pre` is the load
+	// produced by buildCLayoutWrapperValue (not the call instruction),
+	// so the underlyingCall branch above misses it.  Detect via the
+	// callee name and release the fresh wrapper here.
+	if call, isCall := astArg.(*ast.CallExpr); isCall {
+		calleeName := ""
+
+		switch fn := call.Func.(type) {
+		case *ast.Identifier:
+			calleeName = fn.Name
+		case *ast.ScopeAccess:
+			calleeName = strings.Join(fn.Path, "__")
+		}
+
+		if calleeName != "" {
+			if _, has := cg.cLayoutWrapperNativeReturnFns[calleeName]; has {
 				cg.emitRelease(block, pre)
 
 				return

@@ -850,16 +850,24 @@ func (cg *CodeGen) maybeMarkCLayoutStackBind(s *ast.VarDecl) {
 		return
 	}
 
-	structName, hasOutParam := cg.cLayoutWrapperOutParamFns[calleeName]
-	if !hasOutParam {
+	structName, isNativeReturn := cg.cLayoutWrapperNativeReturnFns[calleeName]
+	if !isNativeReturn {
 		if entry, ok := cg.curScope.lookup(calleeName); ok {
 			if f, ok2 := entry.val.(*ir.Func); ok2 {
-				structName, hasOutParam = cg.cLayoutWrapperOutParamFns[f.Name()]
+				structName, isNativeReturn = cg.cLayoutWrapperNativeReturnFns[f.Name()]
 			}
 		}
 	}
 
-	if !hasOutParam {
+	if !isNativeReturn {
+		return
+	}
+
+	// Pointer-receiver methods force heap mode: if any method on the
+	// struct takes `this *S`, calling that method on the binding does
+	// `&binding` under the hood.  A stack composite can't survive past
+	// the callee's view, so we must heap-allocate the storage.
+	if cg.structHasPointerReceiverMethod(structName) {
 		return
 	}
 

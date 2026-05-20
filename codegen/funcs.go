@@ -296,32 +296,29 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				tinNonVarargIdx++
 			}
 
-			// cLayoutStruct value return: append a hidden out_native pointer
-			// param so the caller controls allocation (stack-bind for non-
-			// escape, _tin_rc_alloc for escape).  The wrapper writes the C
-			// return into *out_native and builds the Tin struct value with
-			// c_data_ptr = bitcast(out_native, i8*).
-			var (
-				cLayoutOutNativeParam  *ir.Param
-				cLayoutOutNativeStruct string
-			)
+			// cLayoutStruct value return: the wrapper returns the C-layout
+			// %Native struct directly (no Tin-wrapper construction inside).
+			// The call site allocates the storage and stamps the Tin wrapper
+			// (typeid + vtables + c_data_ptr) inline -- which keeps the
+			// wrapper's LLVM signature 1:1 with the user's Tin declaration.
+			cLayoutNativeReturnStruct := ""
+			wrapperRetType := retType
 
 			if n.RetType != nil {
 				if sName, isStruct := cg.isNamedTinStruct(n.RetType); isStruct && cg.cLayoutStructs[sName] {
 					nativeSt, _ := cg.tinStructNativeLLVM(sName)
 					if nativeSt != nil {
-						cLayoutOutNativeParam = ir.NewParam("__tin_out_native", irtypes.NewPointer(nativeSt))
-						wrapperParams = append(wrapperParams, cLayoutOutNativeParam)
-						cLayoutOutNativeStruct = sName
+						wrapperRetType = nativeSt
+						cLayoutNativeReturnStruct = sName
 					}
 				}
 			}
 
-			wrapperFn = cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
+			wrapperFn = cg.mod.NewFunc(wrapperName, wrapperRetType, wrapperParams...)
 
-			if cLayoutOutNativeStruct != "" {
-				cg.cLayoutWrapperOutParamFns[wrapperName] = cLayoutOutNativeStruct
-				cg.cLayoutWrapperOutParamFns[scopeName] = cLayoutOutNativeStruct
+			if cLayoutNativeReturnStruct != "" {
+				cg.cLayoutWrapperNativeReturnFns[wrapperName] = cLayoutNativeReturnStruct
+				cg.cLayoutWrapperNativeReturnFns[scopeName] = cLayoutNativeReturnStruct
 			}
 
 			prevFn := cg.curFn
@@ -490,25 +487,22 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						}
 					}
 
-					var (
-						tinResult value.Value
-						err       error
-					)
-
-					if cLayoutOutNativeParam != nil && cLayoutOutNativeStruct == sName {
-						tinResult, err = cg.wrapNativeStructToTinIntoBuffer(entry, nativeResult, sName, cLayoutOutNativeParam)
+					if cLayoutNativeReturnStruct == sName {
+						// Native-return shape: just hand the C-layout struct
+						// back to the call site, which handles allocation and
+						// Tin wrapper stamping (typeid + vtables + c_data_ptr).
+						finalResult = nativeResult
 					} else {
-						tinResult, err = cg.wrapNativeStructToTin(entry, nativeResult, sName)
+						tinResult, err := cg.wrapNativeStructToTin(entry, nativeResult, sName)
+						if err != nil {
+							cg.curFn = prevFn
+							cg.curScope = prevScope
+
+							return err
+						}
+
+						finalResult = tinResult
 					}
-
-					if err != nil {
-						cg.curFn = prevFn
-						cg.curScope = prevScope
-
-						return err
-					}
-
-					finalResult = tinResult
 				} else {
 					finalResult = cg.wrapFromExtern(entry, rawResult, retType, hasTag(n.Tags, "handover"))
 				}

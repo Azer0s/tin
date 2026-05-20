@@ -1048,22 +1048,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
-	// cLayoutStruct value-returning wrappers carry one hidden trailing
-	// `out_native` parameter the call site fills in below; relax the arity
-	// check by one slot in that case so the user-visible arg count matches
-	// the Tin function declaration.
-	expectedArity := 0
-	if calleeType != nil {
-		expectedArity = len(calleeType.Params)
-
-		if f, ok := callee.(*ir.Func); ok {
-			if _, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
-				expectedArity--
-			}
-		}
-	}
-
-	if calleeType != nil && !calleeType.Variadic && len(llArgs) != expectedArity {
+	if calleeType != nil && !calleeType.Variadic && len(llArgs) != len(calleeType.Params) {
 		calleeName := ""
 
 		if f, ok := callee.(*ir.Func); ok {
@@ -1090,11 +1075,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		endCol := cg.sourceLineEndCol(anchor.Pos().Line)
 		if calleeName != "" {
 			return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments to %q: got %d, want %d",
-				calleeName, len(llArgs), expectedArity)
+				calleeName, len(llArgs), len(calleeType.Params))
 		}
 
 		return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments: got %d, want %d",
-			len(llArgs), expectedArity)
+			len(llArgs), len(calleeType.Params))
 	}
 
 	if calleeType != nil {
@@ -1226,19 +1211,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		block = cg.genCallSiteYieldFor(block, f.Name())
 	}
 
-	// cLayoutStruct-value-returning wrapper: append the hidden out_native
-	// buffer pointer.  Allocate the buffer here -- stack composite with an
-	// IMMORTAL_RC sentinel when the result is known not to escape, heap
-	// rc_alloc otherwise.  The buffer is the [TinRCHdr | wrapper | native]
-	// layout the release path expects, and c_data_ptr (which the wrapper
-	// writes from the bitcast of our pointer) lands on the native portion.
+	// cLayoutStruct-value-returning wrapper: the wrapper returns the
+	// C-layout %Native struct directly.  The call site allocates the
+	// storage (stack composite + IMMORTAL_RC sentinel for non-escape,
+	// _tin_rc_alloc'd [wrapper | native] block for escape), stores the
+	// native into it, and stamps the Tin wrapper value (typeid + zero
+	// vtables + c_data_ptr) inline.  The release path uses
+	// _tin_release(c_data_ptr - sizeof(wrapper)), which lands on the
+	// sentinel for stack mode and on the rc-alloc header for heap mode.
+	var cLayoutNativeReturnStruct string
+
 	if f, ok := callee.(*ir.Func); ok {
-		if sName, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
-			llArgs = append(llArgs, cg.allocCLayoutReturnBuffer(block, sName, e))
+		if sName, has := cg.cLayoutWrapperNativeReturnFns[f.Name()]; has {
+			cLayoutNativeReturnStruct = sName
 		}
 	}
 
-	result := block.NewCall(callee, llArgs...)
+	var result value.Value = block.NewCall(callee, llArgs...)
+
+	if cLayoutNativeReturnStruct != "" {
+		nativePtr := cg.allocCLayoutReturnBuffer(block, cLayoutNativeReturnStruct, e)
+		block.NewStore(result, nativePtr)
+		result = cg.buildCLayoutWrapperValue(block, nativePtr, cLayoutNativeReturnStruct)
+	}
 
 	// Auto-suspend after externs that put the calling fiber in a
 	// pending-park state (e.g. `_tin_sleep_ms` registers a timer and
