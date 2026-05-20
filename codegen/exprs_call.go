@@ -1048,7 +1048,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
-	if calleeType != nil && !calleeType.Variadic && len(llArgs) != len(calleeType.Params) {
+	// cLayoutStruct value-returning wrappers carry one hidden trailing
+	// `out_native` parameter the call site fills in below; relax the arity
+	// check by one slot in that case so the user-visible arg count matches
+	// the Tin function declaration.
+	expectedArity := len(calleeType.Params)
+	if f, ok := callee.(*ir.Func); ok {
+		if _, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
+			expectedArity--
+		}
+	}
+
+	if calleeType != nil && !calleeType.Variadic && len(llArgs) != expectedArity {
 		calleeName := ""
 
 		if f, ok := callee.(*ir.Func); ok {
@@ -1075,11 +1086,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		endCol := cg.sourceLineEndCol(anchor.Pos().Line)
 		if calleeName != "" {
 			return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments to %q: got %d, want %d",
-				calleeName, len(llArgs), len(calleeType.Params))
+				calleeName, len(llArgs), expectedArity)
 		}
 
 		return nil, cg.nodeErrSpan(anchor, endCol, "wrong number of arguments: got %d, want %d",
-			len(llArgs), len(calleeType.Params))
+			len(llArgs), expectedArity)
 	}
 
 	if calleeType != nil {
@@ -1211,6 +1222,18 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		block = cg.genCallSiteYieldFor(block, f.Name())
 	}
 
+	// cLayoutStruct-value-returning wrapper: append the hidden out_native
+	// buffer pointer.  Allocate the buffer here -- stack composite with an
+	// IMMORTAL_RC sentinel when the result is known not to escape, heap
+	// rc_alloc otherwise.  The buffer is the [TinRCHdr | wrapper | native]
+	// layout the release path expects, and c_data_ptr (which the wrapper
+	// writes from the bitcast of our pointer) lands on the native portion.
+	if f, ok := callee.(*ir.Func); ok {
+		if sName, has := cg.cLayoutWrapperOutParamFns[f.Name()]; has {
+			llArgs = append(llArgs, cg.allocCLayoutReturnBuffer(block, sName, e))
+		}
+	}
+
 	result := block.NewCall(callee, llArgs...)
 
 	// Auto-suspend after externs that put the calling fiber in a
@@ -1264,3 +1287,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 //   - target is a fat-fn-ptr and src is a function pointer (closure shim)
 //   - both sides are pointer types of compatible underlying shape (ABI is
 //     the pointer width either way)
+
+// allocCLayoutReturnBuffer allocates the storage backing a cLayoutStruct
+// extern value return.  The wrapper writes the native bytes into the
+// returned pointer; c_data_ptr in the Tin wrapper value will point there.
+//
+// For now this always rc_alloc's a [wrapper | native] block (preserving the
+// pre-out-param behavior bytes-for-bytes).  Phase 2 of step 3+4 will swap
+// to a stack composite + IMMORTAL_RC sentinel when escape analysis says the
+// result does not outlive the current frame.
+func (cg *CodeGen) allocCLayoutReturnBuffer(block *ir.Block, structName string, _ *ast.CallExpr) value.Value {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	nativeSt := cg.nativeStructTypes[structName]
+
+	if tinSt == nil || nativeSt == nil {
+		panic(fmt.Sprintf("allocCLayoutReturnBuffer: missing IR types for %q", structName))
+	}
+
+	wrapperSize := cg.llvmSizeOf(block, tinSt)
+	nativeSize := cg.llvmSizeOf(block, nativeSt)
+	totalSize := block.NewAdd(wrapperSize, nativeSize)
+	rcRaw := block.NewCall(cg.ensureRCAlloc(), totalSize)
+	tinPtr := block.NewBitCast(rcRaw, irtypes.NewPointer(tinSt))
+	overflow := block.NewGetElementPtr(tinSt, tinPtr, constant.NewInt(irtypes.I64, 1))
+
+	return block.NewBitCast(overflow, irtypes.NewPointer(nativeSt))
+}

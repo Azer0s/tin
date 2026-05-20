@@ -429,6 +429,57 @@ func (cg *CodeGen) structIsABICompat(structName string) bool {
 	return true
 }
 
+// wrapNativeStructToTinIntoBuffer is the caller-provided-storage variant of
+// wrapNativeStructToTin for cLayoutStructs.  The caller has allocated a
+// (TinRCHdr + Tin wrapper + Native) composite (stack-bound with an
+// IMMORTAL_RC sentinel for non-escape, or _tin_rc_alloc'd for escape) and
+// passes a pointer to the Native portion as outNativePtr.  We store the C
+// return into *outNativePtr (typed store, no memcpy) and build the Tin
+// wrapper struct value with c_data_ptr = bitcast(outNativePtr, i8*),
+// returning the wrapper by value.
+func (cg *CodeGen) wrapNativeStructToTinIntoBuffer(block *ir.Block, val value.Value, structName string, outNativePtr value.Value) (value.Value, error) {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	if tinSt == nil {
+		return nil, fmt.Errorf("wrapNativeStructToTinIntoBuffer: missing wrapper type for %q", structName)
+	}
+
+	nativeSt := cg.nativeStructTypes[structName]
+	if nativeSt == nil {
+		return nil, fmt.Errorf("wrapNativeStructToTinIntoBuffer: missing native type for %q", structName)
+	}
+
+	if outNativePtr.Type().String() != irtypes.NewPointer(nativeSt).String() {
+		return nil, fmt.Errorf("wrapNativeStructToTinIntoBuffer: out_native pointer has type %s, expected %s",
+			outNativePtr.Type(), irtypes.NewPointer(nativeSt))
+	}
+
+	block.NewStore(val, outNativePtr)
+
+	wrapperAlloca := block.NewAlloca(tinSt)
+	block.NewStore(constant.NewZeroInitializer(tinSt), wrapperAlloca)
+
+	typeID := cg.structTypeIDs[structName]
+	typeIDGep := block.NewGetElementPtr(tinSt, wrapperAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(constant.NewInt(irtypes.I32, int64(typeID)), typeIDGep)
+
+	offset := int64(cg.userFieldOffset(structName))
+	for v := int64(1); v < offset; v++ {
+		vtGep := block.NewGetElementPtr(tinSt, wrapperAlloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, v))
+		fieldType := tinSt.Fields[v]
+		block.NewStore(constant.NewNull(fieldType.(*irtypes.PointerType)), vtGep)
+	}
+
+	cDataIdx := int64(cg.cDataPtrIndex(structName))
+	cDataGep := block.NewGetElementPtr(tinSt, wrapperAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+	outI8 := block.NewBitCast(outNativePtr, irtypes.I8Ptr)
+	block.NewStore(outI8, cDataGep)
+
+	return block.NewLoad(tinSt, wrapperAlloca), nil
+}
+
 // wrapNativeStructToTin converts a C-native struct (user fields only) into the
 // full Tin struct layout (type_id + vtable + user fields).
 // For cLayoutStructs, uses the wrapper+native RC allocation so c_data_ptr is valid.

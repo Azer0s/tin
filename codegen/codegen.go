@@ -476,6 +476,15 @@ type CodeGen struct {
 	// variable as isHeapOwned so scope-exit emits the correct two-step release.
 	heapPromotingFns map[string]bool
 
+	// cLayoutWrapperOutParamFns: wrapper name -> cLayoutStruct name.
+	// Wrappers for extern functions that return a cLayoutStruct by value
+	// take a hidden trailing parameter `out_native *Native_struct`.  The
+	// wrapper writes the C return value into *out_native and builds the
+	// Tin struct value with c_data_ptr = bitcast(out_native, i8*).  This
+	// hands the allocation decision (stack-bind for non-escape, rc_alloc
+	// for escape) to the call site rather than baking it into the wrapper.
+	cLayoutWrapperOutParamFns map[string]string
+
 	// fnReturnsHeapPromotedFields: map from function name to the list of
 	// struct-field indices in the returned struct value whose stored
 	// pointer is a heap-promoted `&local`.  Populated when emitting

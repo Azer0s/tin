@@ -296,7 +296,30 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 				tinNonVarargIdx++
 			}
 
+			// cLayoutStruct value return: append a hidden out_native pointer
+			// param so the caller controls allocation (stack-bind for non-
+			// escape, _tin_rc_alloc for escape).  The wrapper writes the C
+			// return into *out_native and builds the Tin struct value with
+			// c_data_ptr = bitcast(out_native, i8*).
+			var cLayoutOutNativeParam *ir.Param
+			cLayoutOutNativeStruct := ""
+
+			if n.RetType != nil {
+				if sName, isStruct := cg.isNamedTinStruct(n.RetType); isStruct && cg.cLayoutStructs[sName] {
+					nativeSt, _ := cg.tinStructNativeLLVM(sName)
+					if nativeSt != nil {
+						cLayoutOutNativeParam = ir.NewParam("__tin_out_native", irtypes.NewPointer(nativeSt))
+						wrapperParams = append(wrapperParams, cLayoutOutNativeParam)
+						cLayoutOutNativeStruct = sName
+					}
+				}
+			}
+
 			wrapperFn = cg.mod.NewFunc(wrapperName, retType, wrapperParams...)
+			if cLayoutOutNativeStruct != "" {
+				cg.cLayoutWrapperOutParamFns[wrapperName] = cLayoutOutNativeStruct
+				cg.cLayoutWrapperOutParamFns[scopeName] = cLayoutOutNativeStruct
+			}
 			prevFn := cg.curFn
 			prevScope := cg.curScope
 			cg.curFn = wrapperFn
@@ -463,7 +486,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 						}
 					}
 
-					tinResult, err := cg.wrapNativeStructToTin(entry, nativeResult, sName)
+					var tinResult value.Value
+					var err error
+
+					if cLayoutOutNativeParam != nil && cLayoutOutNativeStruct == sName {
+						tinResult, err = cg.wrapNativeStructToTinIntoBuffer(entry, nativeResult, sName, cLayoutOutNativeParam)
+					} else {
+						tinResult, err = cg.wrapNativeStructToTin(entry, nativeResult, sName)
+					}
+
 					if err != nil {
 						cg.curFn = prevFn
 						cg.curScope = prevScope
