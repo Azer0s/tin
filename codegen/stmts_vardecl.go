@@ -260,7 +260,6 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	isHeapOwned := false
 	heapOwnedDepth := 0
 	pointsToBorrowedStorage := false
-	cLayoutWrapperRCStruct := ""
 
 	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
 		calleeName := ""
@@ -314,20 +313,6 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				if depth > 0 {
 					isHeapOwned = true
 					heapOwnedDepth = depth
-				}
-			}
-
-			// cLayoutWrapperReturnFns: callee returns a cLayoutStruct by value
-			// whose backing rc-block needs scope-exit release.  Look up under
-			// both the raw callee name and the IR func name (mirrors heap-fn
-			// lookup above).
-			if sName, ok := cg.cLayoutWrapperReturnFns[calleeName]; ok {
-				cLayoutWrapperRCStruct = sName
-			} else if entry, ok := cg.curScope.lookup(calleeName); ok {
-				if f, ok2 := entry.val.(*ir.Func); ok2 {
-					if sName, ok3 := cg.cLayoutWrapperReturnFns[f.Name()]; ok3 {
-						cLayoutWrapperRCStruct = sName
-					}
 				}
 			}
 		}
@@ -718,7 +703,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		stn = scalar128BitTypeName(s.Type)
 	}
 
-	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), ownsHeapPromotedFields: cg.bindingHeapPromotedFields(s), declaredConst: s.IsConst, declaredLet: !s.IsConst, ownsPtrViaRetain: cg.pendingOwnsPtrViaRetain, pointsToBorrowedStorage: pointsToBorrowedStorage, cLayoutWrapperRCStruct: cLayoutWrapperRCStruct}
+	entry := &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, basePtr: sliceBase, isUnsigned: isUnsignedTinType(s.Type), byteArrayElem: bae, scalarTypeName: stn, isHeapOwned: isHeapOwned, heapOwnedDepth: heapOwnedDepth, noRelease: noReleaseClosureEnv, tinType: s.Type, ownsIfaceData: ownsIfaceData, isEarlyHeap: earlyHeap, ownsHeapIfaceData: cg.bindingOwnsHeapIfaceData(s), ownsHeapPromotedFields: cg.bindingHeapPromotedFields(s), declaredConst: s.IsConst, declaredLet: !s.IsConst, ownsPtrViaRetain: cg.pendingOwnsPtrViaRetain, pointsToBorrowedStorage: pointsToBorrowedStorage}
 
 	// Tag the binding with its alias source when the initializer is a bare
 	// identifier resolving to another fat-pointer binding.  Used by the

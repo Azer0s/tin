@@ -552,17 +552,6 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 			cg.heapPromotingFns[scopeName] = true
 		}
 
-		// cLayoutStruct return: wrapNativeStructToTin _tin_rc_alloc's a block
-		// holding wrapper+native; callers must release it on scope exit or the
-		// block leaks on every wrapper call.  Record (wrapper -> struct name)
-		// so the receiving binding knows which c_data_ptr offset to back out.
-		if n.RetType != nil {
-			if sName, isStruct := cg.isNamedTinStruct(n.RetType); isStruct && cg.cLayoutStructs[sName] {
-				cg.cLayoutWrapperReturnFns[wrapperName] = sName
-				cg.cLayoutWrapperReturnFns[scopeName] = sName
-			}
-		}
-
 		cg.curScope.set(scopeName, &scopeEntry{val: wrapperFn, isAlloc: false})
 
 		return nil

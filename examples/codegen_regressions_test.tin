@@ -423,3 +423,7 @@ test "codegen: read-only helper call keeps alloc Live (still leaks)" =
   expect_warn_substr("manual_readonly_arg_95.tin",
     "not freed on every path")
 
+test "codegen: field-access alloca hoisted out of loop body" =
+  expect_substr("field_access_alloca_loop_96.tin",
+    "total=6000000")
+

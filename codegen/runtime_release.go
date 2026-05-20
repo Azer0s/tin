@@ -65,6 +65,10 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 		return
 	}
 
+	if isCopyExpr(astArg) {
+		return
+	}
+
 	// Fresh struct-valued call result whose fields own RC-tracked
 	// references: e.g. `blas::array_from(xs)` returns an `Array[T]`
 	// struct holding a retained `[T]`.  When this is consumed inline
@@ -73,7 +77,10 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	// value walks the fields, so call it here when the value is a
 	// direct call result whose type isn't already covered by the
 	// isFreshCallResult path above (that one only matches outer
-	// fat-pointer return types).
+	// fat-pointer return types).  Must come after isCopyExpr -- a
+	// bound identifier whose initializer was a call still resolves
+	// to underlyingCall != nil through the LLVM use chain, but the
+	// binding owns the rc so the call site must not release here.
 	if cg.underlyingCall(pre) != nil {
 		if _, isStruct := pre.Type().(*irtypes.StructType); isStruct {
 			if cg.elemNeedsRelease(pre.Type()) {
@@ -82,10 +89,6 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 				return
 			}
 		}
-	}
-
-	if isCopyExpr(astArg) {
-		return
 	}
 
 	if isRCTrackedType(pre.Type()) {
@@ -387,6 +390,15 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 	structName := cg.typeNameOf(elemType)
 	if structName == "" {
 		return true // anonymous struct (e.g. from external code) - be conservative
+	}
+
+	// cLayoutStruct value: always needs release.  The wrapper carries a
+	// c_data_ptr into a separately-allocated rc-block (heap-bound from an
+	// extern wrapper return, or stack-bound with immortal-RC sentinel from
+	// genCLayoutStructLit).  emitRelease calls _tin_release on the rc-base;
+	// the sentinel makes stack-bound a no-op while heap-bound frees.
+	if cg.cLayoutStructs[structName] {
+		return true
 	}
 
 	// ADT value: tag-dispatched release walks the active variant's payload.

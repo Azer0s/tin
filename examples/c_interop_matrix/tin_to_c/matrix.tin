@@ -287,3 +287,80 @@ test "T37: extern([i64], large_struct_by_value) returning i64" =
   let p = pt_big{a: 1, b: 2, c: 3}
   // C body: sum(xs) + p.a + p.b + p.c = 15 + 6 = 21
   assert::equals(c_mix_arr_struct(xs, len(xs), p), 21)
+
+test "T38: reassigning a cLayoutStruct wrapper binding does not leak" =
+  // First wrapper call rc-allocates a block; the reassignment must
+  // release that block before storing the second call's result, or
+  // --leaks flags the first allocation.
+  let d = c_mix_make("abcd", 7)
+  d = c_mix_make("xy", 3)
+  assert::equals(d.a, 2)
+  assert::equals(d.b, 3)
+
+fn build_dyad() dyad =
+  return c_mix_make("zz", 9)
+
+test "T39: cLayoutStruct returned through a Tin function does not leak" =
+  // The wrapper rc-block must survive the build_dyad return and get
+  // released by the receiving let-binding.  If the binding's scope
+  // exit doesn't see this as heap-tracked, the rc-block leaks.
+  let d = build_dyad()
+  assert::equals(d.a, 2)
+  assert::equals(d.b, 9)
+
+test "T40: inline wrapper result consumed by a Tin function does not leak" =
+  // No let-binding to anchor the rc-block; the inline call result is
+  // copied into sum_dyad's parameter.  The call site must release the
+  // wrapper's rc allocation after the call returns.
+  assert::equals(sum_dyad(c_mix_make("ab", 4)), 6)
+
+fn sum_dyad(d dyad) i64 =
+  return d.a + d.b
+
+test "T41: wrapper result inside an inline interpolation does not leak" =
+  // Wrapper call result accessed via field in interpolation context.
+  let s = "a={c_mix_make(\"qq\", 5).a},b={c_mix_make(\"qq\", 5).b}"
+  assert::equals(s, "a=2,b=5")
+
+test "T42: reassign through a forwarder function does not leak" =
+  // Forwarder result reassigned; previous block must release before the
+  // second one is stored.
+  let d = build_dyad()
+  d = build_dyad()
+  assert::equals(d.b, 9)
+
+test "T43: copy binding `let d2 = d` flows + releases correctly" =
+  // d2 shares the underlying rc-block with d.  Both scope-exits will
+  // try to release it -- without retain on copy the second release is
+  // a double-free.  With retain, the rc-block is freed exactly once.
+  let d = c_mix_make("ab", 4)
+  let d2 = d
+  assert::equals(d2.a + d2.b, 6)
+  assert::equals(d.a + d.b, 6)
+
+test "T44: pass-by-value into a Tin function does not double-free" =
+  // sum_dyad copies the struct into its parameter; that copy aliases
+  // the caller's rc-block.  The callee's scope exit must not release
+  // (borrow semantics), only the caller's let-binding scope exit does.
+  let d = c_mix_make("xy", 3)
+  assert::equals(sum_dyad(d), 5)
+  // Re-use d after the call to detect use-after-free.
+  assert::equals(d.b, 3)
+
+struct holder =
+  data dyad
+
+test "T45: stored as a struct field, lifetime tied to the holder" =
+  // Storing the wrapper into another struct.  When the outer holder is
+  // dropped, the inner dyad's rc-block must also be released.
+  let h = holder{data: c_mix_make("ab", 4)}
+  assert::equals(h.data.a + h.data.b, 6)
+
+test "T46: stack-bound dyad literal stored as holder field is a no-op release" =
+  // Same field-storage pattern but the source is a stack-bound dyad
+  // literal -- its c_data_ptr points to caller stack with no rc header.
+  // Releasing via c_data_ptr - sizeof(wrapper) must hit the immortal RC
+  // sentinel and skip, not corrupt the stack.
+  let h = holder{data: dyad{a: 11, b: 22}}
+  assert::equals(h.data.a + h.data.b, 33)
+

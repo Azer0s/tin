@@ -152,12 +152,24 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 
 		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
 
+		var fieldVal value.Value
+
 		nativeSt := cg.nativeStructTypes[structName]
 		if nativeSt != nil && fieldIdx < len(nativeSt.Fields) {
-			return block.NewLoad(nativeSt.Fields[fieldIdx], gep), nil
+			fieldVal = block.NewLoad(nativeSt.Fields[fieldIdx], gep)
+		} else {
+			fieldVal = block.NewLoad(irtypes.I64, gep)
 		}
 
-		return block.NewLoad(irtypes.I64, gep), nil
+		// Inline fresh call result (no let-binding to anchor scope-exit
+		// release): release the cLayoutStruct rc-block after pulling out
+		// the field.  emitRelease handles both heap-bound (frees) and
+		// stack-bound (immortal sentinel: no-op).
+		if _, isCall := e.Expr.(*ast.CallExpr); isCall {
+			cg.emitRelease(block, obj)
+		}
+
+		return fieldVal, nil
 	}
 
 	fieldIdx := cg.fieldIndex(structName, e.Field)

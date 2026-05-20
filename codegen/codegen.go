@@ -476,14 +476,6 @@ type CodeGen struct {
 	// variable as isHeapOwned so scope-exit emits the correct two-step release.
 	heapPromotingFns map[string]bool
 
-	// cLayoutWrapperReturnFns: function name -> cLayoutStruct name.  Populated
-	// for extern wrappers whose return type is a cLayoutStruct -- the wrapper
-	// allocates an RC block via _tin_rc_alloc(sizeof(wrapper)+sizeof(native))
-	// and the returned wrapper value's c_data_ptr field points into that block.
-	// Callers consult this so the let-binding (or inline-consume) can release
-	// the RC block at scope exit; otherwise every such call leaks the block.
-	cLayoutWrapperReturnFns map[string]string
-
 	// fnReturnsHeapPromotedFields: map from function name to the list of
 	// struct-field indices in the returned struct value whose stored
 	// pointer is a heap-promoted `&local`.  Populated when emitting

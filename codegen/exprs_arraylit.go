@@ -756,11 +756,24 @@ func (cg *CodeGen) genCLayoutStructLit(block *ir.Block, e *ast.StructLit, typeNa
 		return nil, fmt.Errorf("cLayoutStruct %s: missing native type", typeName)
 	}
 
-	// Stack-allocate wrapper and native data.
-	wrapperAlloca := block.NewAlloca(st)
-	nativeAlloca := block.NewAlloca(nativeSt)
-	block.NewStore(constant.NewZeroInitializer(st), wrapperAlloca)
-	block.NewStore(constant.NewZeroInitializer(nativeSt), nativeAlloca)
+	// Stack-allocate a composite [TinRCHdr | wrapper | native] block so that
+	// the same release path used for heap-bound (_tin_rc_alloc'd) cLayout
+	// values works here too -- _tin_release(c_data_ptr - sizeof(wrapper))
+	// reads the RC header at the rcSlot, sees TIN_IMMORTAL_RC, and skips.
+	// Without this sentinel the same release call would read random adjacent
+	// stack memory and either segfault or atomically corrupt unrelated locals.
+	compositeTy := irtypes.NewStruct(irtypes.I64, st, nativeSt)
+	composite := block.NewAlloca(compositeTy)
+	block.NewStore(constant.NewZeroInitializer(compositeTy), composite)
+
+	rcSlotGep := block.NewGetElementPtr(compositeTy, composite,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(constant.NewInt(irtypes.I64, -1), rcSlotGep)
+
+	wrapperAlloca := block.NewGetElementPtr(compositeTy, composite,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	nativeAlloca := block.NewGetElementPtr(compositeTy, composite,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
 
 	// Set type_id.
 	if typeID, ok := cg.structTypeIDs[typeName]; ok {

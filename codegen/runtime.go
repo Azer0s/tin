@@ -4,6 +4,8 @@ package codegen
 // global string constants, and lazily-declared runtime/C functions.
 
 import (
+	"fmt"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
@@ -41,6 +43,14 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 	// payload layout from walkRCStructFields, so we emit a dispatch here.
 	if cg.isDataType(t) {
 		cg.emitDataValueRetain(block, val)
+
+		return
+	}
+
+	// cLayoutStruct value: bump the rc-block that c_data_ptr borrows into.
+	// Heap-bound increments; stack-bound (immortal sentinel) is a no-op.
+	if structName := cg.typeNameOf(t); structName != "" && cg.cLayoutStructs[structName] {
+		cg.emitCLayoutStructRetain(block, val, structName)
 
 		return
 	}
@@ -355,6 +365,15 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 		return
 	}
 
+	// cLayoutStruct value: release the wrapper + native rc-block.  Heap-bound
+	// (extern wrapper return) frees the block; stack-bound (struct literal)
+	// reads the immortal-RC sentinel written by genCLayoutStructLit and skips.
+	if structName := cg.typeNameOf(t); structName != "" && cg.cLayoutStructs[structName] {
+		cg.emitCLayoutStructRelease(block, val, structName)
+
+		return
+	}
+
 	// Release RC-tracked fields and recurse into nested struct fields.
 	// Propagate skipDeinit so that parameter-copy teardown does not call deinit
 	// on nested struct fields (the caller's emitRelease already handles that).
@@ -365,6 +384,54 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 		func(fieldPtr value.Value, at *irtypes.ArrayType) {
 			cg.emitFixedArrayRelease(block, fieldPtr, at)
 		})
+}
+
+// emitCLayoutStructRelease releases the rc-block backing a cLayoutStruct
+// value.  The wrapper's c_data_ptr points to the native portion which sits
+// one wrapper-element past the rc-base (whether heap-allocated via
+// _tin_rc_alloc or stack-allocated as part of genCLayoutStructLit's
+// composite layout with an immortal-RC sentinel).  Step back one wrapper
+// element (LLVM GEP -1) and call _tin_release; the sentinel makes the
+// stack-bound case a safe no-op.
+func (cg *CodeGen) emitCLayoutStructRelease(block *ir.Block, val value.Value, structName string) {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	if tinSt == nil {
+		panic(fmt.Sprintf("emitCLayoutStructRelease: no IR struct for %q", structName))
+	}
+
+	cDataIdx := cg.cDataPtrIndex(structName)
+	if cDataIdx < 0 {
+		panic(fmt.Sprintf("emitCLayoutStructRelease: %q has no c_data_ptr field", structName))
+	}
+
+	cDataPtr := block.NewExtractValue(val, uint64(cDataIdx))
+	cDataAsSt := block.NewBitCast(cDataPtr, irtypes.NewPointer(tinSt))
+	rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
+		constant.NewInt(irtypes.I64, -1))
+	rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
+	block.NewCall(cg.ensureRelease(), rcBaseI8)
+}
+
+// emitCLayoutStructRetain bumps the rc-block for a cLayoutStruct value
+// being copied.  Mirror of emitCLayoutStructRelease: heap-bound bumps,
+// stack-bound is a no-op via the immortal sentinel.
+func (cg *CodeGen) emitCLayoutStructRetain(block *ir.Block, val value.Value, structName string) {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	if tinSt == nil {
+		panic(fmt.Sprintf("emitCLayoutStructRetain: no IR struct for %q", structName))
+	}
+
+	cDataIdx := cg.cDataPtrIndex(structName)
+	if cDataIdx < 0 {
+		panic(fmt.Sprintf("emitCLayoutStructRetain: %q has no c_data_ptr field", structName))
+	}
+
+	cDataPtr := block.NewExtractValue(val, uint64(cDataIdx))
+	cDataAsSt := block.NewBitCast(cDataPtr, irtypes.NewPointer(tinSt))
+	rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
+		constant.NewInt(irtypes.I64, -1))
+	rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
+	block.NewCall(cg.ensureRetain(), rcBaseI8)
 }
 
 // ensureStructPtrReleaseFn lazily creates (or returns a cached) null-safe pointer

@@ -57,7 +57,13 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	// vtable's data-release thunk; calling the generic emitRelease here
 	// for an iface would double-release `data` (extractRCDataPtr returns
 	// the data field for iface shapes), so skip it.
-	if !isTraitFatPtrShape(st) {
+	//
+	// cLayoutStructs: the wrapper block is the rc-block (whether allocated
+	// by emitStructPtrBorrow for *S returns or wrapNativeStructToTin for
+	// S-by-value returns), and was just freed.  c_data_ptr is either a C
+	// borrow (no Tin RC) or pointed inside the now-freed wrapper block;
+	// either way, calling emitRelease here would corrupt or use-after-free.
+	if !isTraitFatPtrShape(st) && !cg.cLayoutStructs[structName] {
 		cg.emitRelease(releaseChildren, structVal)
 	}
 
