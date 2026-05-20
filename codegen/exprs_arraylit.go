@@ -402,7 +402,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 		}
 		// The canonical name we just synthesized is a fresh codegen
-		// artefact at this call site -- opt it into the bare-name
+		// artifact at this call site -- opt it into the bare-name
 		// visibility set so the resolver below accepts it the way it
 		// would for an explicit `type Name = ...` decl.
 		cg.curScope.markTypeVisible(concreteName)

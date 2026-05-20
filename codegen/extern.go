@@ -465,17 +465,17 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 			block.NewStore(constant.NewNull(fieldType.(*irtypes.PointerType)), vtGep)
 		}
 
-		// Copy native data into overflow area (GEP+1 past wrapper).
+		// Store native data into the overflow area (GEP+1 past wrapper) via
+		// a typed store -- no memcpy / temp alloca needed since val already
+		// has the native struct type.
 		overflowGEP := block.NewGetElementPtr(tinSt, tinPtr, constant.NewInt(irtypes.I64, 1))
-		overflowI8 := block.NewBitCast(overflowGEP, irtypes.I8Ptr)
-		nativeAlloca := block.NewAlloca(nativeSt)
-		block.NewStore(val, nativeAlloca)
-		srcI8 := block.NewBitCast(nativeAlloca, irtypes.I8Ptr)
-		block.NewCall(cg.ensureMemcpy(), overflowI8, srcI8, nativeSize, constant.NewInt(irtypes.I1, 0))
+		nativePtr := block.NewBitCast(overflowGEP, irtypes.NewPointer(nativeSt))
+		block.NewStore(val, nativePtr)
 
 		cDataIdx := int64(cg.cDataPtrIndex(structName))
 		cDataGep := block.NewGetElementPtr(tinSt, tinPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
+		overflowI8 := block.NewBitCast(overflowGEP, irtypes.I8Ptr)
 		block.NewStore(overflowI8, cDataGep)
 
 		return block.NewLoad(tinSt, tinPtr), nil
