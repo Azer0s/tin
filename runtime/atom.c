@@ -86,7 +86,9 @@ int32_t _tin_learn_atom_handover(char *str) {
         fputs("tin: atom OOM\n", stderr);
         exit(1);
     }
-    hdr->rc = TIN_IMMORTAL_RC;
+    hdr->rc    = 0;
+    hdr->flags = TIN_RC_IMMORTAL;
+    hdr->_pad  = 0;
     char *s = (char *)(hdr + 1);
     memcpy(s, str, copy_len);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));
@@ -169,7 +171,9 @@ int32_t _tin_learn_atom(const char *str) {
         fputs("tin: atom OOM\n", stderr);
         exit(1);
     }
-    hdr->rc = TIN_IMMORTAL_RC;
+    hdr->rc    = 0;
+    hdr->flags = TIN_RC_IMMORTAL;
+    hdr->_pad  = 0;
     char *s = (char *)(hdr + 1);
     memcpy(s, str, len + 1);
     TinRtAtomNode *node = malloc(sizeof(TinRtAtomNode));

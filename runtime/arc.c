@@ -1,8 +1,15 @@
-// tin runtime - ARC (Automatic Reference Counting)
+// tin runtime - ARC (Automatic Reference Counting) with biased RC.
 //
-// Every heap block managed by ARC is preceded by a TinRCHdr.
-// The public pointer points past the header to the actual data.
-// Static string literals use TIN_IMMORTAL_RC (-1) so retain/release skip them.
+// Every heap block managed by ARC is preceded by a TinRCHdr.  The
+// public pointer points past the header to the actual data.  Static
+// Static string literals carry TIN_RC_IMMORTAL in flags so retain/release skip them.
+//
+// Biased RC: each block carries a `shared` bit.  Blocks start shared=0
+// (single-fiber/thread, retain/release uses non-atomic ops).  When the
+// block escapes -- spawn capture, channel send, ... -- the bit is set
+// via _tin_make_shared (release ordering) BEFORE the pointer becomes
+// visible to another thread.  Subsequent retain/release on a shared
+// block falls back to atomic ops.  See docs/15-ownership.md.
 
 #include "runtime.h"
 #include <stdlib.h>
@@ -13,33 +20,146 @@ static inline TinRCHdr *_rc_hdr(void *ptr) {
     return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
 }
 
-// Allocate an ARC-managed block of `size` bytes; starts with rc = 1
+// Internal accessor exposed by heap_arena.c.  Returns the per-thread
+// heap pinned to the Tin arena; mimalloc heaps are thread-owned and
+// each calling thread lazily creates its own.  Returns NULL in
+// degraded mode (TINMAXHEAP=0).
+extern mi_heap_t *_tin_managed_heap(void);
+
+static inline void *_tin_arena_alloc(size_t bytes) {
+    mi_heap_t *h = _tin_managed_heap();
+    if (h != NULL) {
+        return mi_heap_malloc(h, bytes);
+    }
+    return malloc(bytes);
+}
+
+// Allocate an ARC-managed block of `size` bytes.  Starts with rc=1,
+// SHARED flag set (atomic retain/release), UNIQUE clear (set only by
+// release as rc transitions back to 1).  Use _tin_rc_alloc_local when
+// escape analysis proved the block stays inside a single fiber.
 void *_tin_rc_alloc(int64_t size) {
-    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + (size_t)size);
+    TinRCHdr *hdr = (TinRCHdr *)_tin_arena_alloc(sizeof(TinRCHdr) + (size_t)size);
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
-    hdr->rc = 1;
+    hdr->rc    = 1;
+    hdr->flags = TIN_RC_SHARED;
+    hdr->_pad  = 0;
     return hdr + 1;
 }
 
-// Increment reference count; skips immortal (rc == -1) and NULL pointers.
-// Uses RELAXED ordering: only the increment itself needs to be atomic;
-// no happens-before relationship is required for retain.
+// Allocate a fiber-local block.  flags=0 means SHARED clear (non-atomic
+// fast path) and UNIQUE clear (codegen consults UNIQUE only on the
+// non-atomic path; we leave the initial value clear so the first
+// observed rc-transition fills it in correctly).  If the block later
+// escapes, _tin_make_shared flips SHARED and subsequent ops fall back
+// to atomic.
+void *_tin_rc_alloc_local(int64_t size) {
+    TinRCHdr *hdr = (TinRCHdr *)_tin_arena_alloc(sizeof(TinRCHdr) + (size_t)size);
+    if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
+    hdr->rc    = 1;
+    hdr->flags = TIN_RC_UNIQUE; // rc==1 with no other references
+    hdr->_pad  = 0;
+    return hdr + 1;
+}
+
+// Mark a block as shared across fiber/thread boundaries.  Atomic-OR
+// keeps any other flag bits (UNIQUE, ARENA, ...) intact.  Release
+// ordering pairs with the receiver's acquire on the channel/spawn
+// machinery so every subsequent retain/release sees SHARED set.  No-op
+// on NULL and on immortal blocks (retain/release short-circuit before
+// the SHARED check anyway).
+void _tin_make_shared(void *ptr) {
+    if (!ptr) return;
+    TinRCHdr *hdr = _rc_hdr(ptr);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_RELAXED);
+    if (flags & TIN_RC_IMMORTAL) return;
+    __atomic_or_fetch(&hdr->flags, TIN_RC_SHARED, __ATOMIC_RELEASE);
+}
+
+// Increment reference count; immortal and NULL pointers short-circuit.
+// Non-atomic when SHARED is clear; atomic when SHARED is set.  The
+// non-atomic path also clears UNIQUE (rc is moving above 1).  ACQUIRE
+// on the flag load pairs with the RELEASE store in _tin_make_shared.
 void _tin_retain(void *ptr) {
     if (!ptr) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    __atomic_fetch_add(&hdr->rc, 1, __ATOMIC_RELAXED);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    if (flags & TIN_RC_SHARED) {
+        __atomic_fetch_add(&hdr->rc, 1, __ATOMIC_RELAXED);
+    } else {
+        hdr->rc++;
+        // Bumping rc above 1 means another owner exists -- UNIQUE no
+        // longer holds.  Only safe to clear on the non-atomic path
+        // because the SHARED path may race with another thread.
+        if (flags & TIN_RC_UNIQUE) {
+            hdr->flags = flags & ~TIN_RC_UNIQUE;
+        }
+    }
 }
 
 // Decrement reference count; frees the block when it reaches zero.
-// Uses ACQ_REL ordering so all prior accesses to the object are visible
-// before the free (preventing use-after-free on concurrent release).
+// Non-atomic on SHARED=0, ACQ_REL atomic on SHARED=1.  When the
+// post-release rc lands at 1 on the non-atomic path, set UNIQUE so
+// the single remaining owner can take the in-place mutation fast path
+// at the next CoW site.  Skips free() when the ARENA bit is set --
+// the block's storage is owned by an external arena/pool.
 void _tin_release(void *ptr) {
     if (!ptr) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
-    if (prev == 1) free(hdr);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+        // rc dropping to 1 leaves us with the single remaining owner.
+        // Re-enable UNIQUE so the next CoW site can mutate in place.
+        if (prev == 2) {
+            hdr->flags = flags | TIN_RC_UNIQUE;
+        }
+    }
+    if (prev == 1 && !(flags & TIN_RC_ARENA)) free(hdr);
+}
+
+// Provenance-aware retain.  Used by codegen for ARC ops on user-
+// pointer values (*T, *void, *i64, etc.) whose source is unknown at
+// the call site.  When the pointer falls outside Tin's arena (C-
+// allocated, static, stack), the call is a no-op; otherwise it
+// dispatches to the biased retain path.
+//
+// Splitting from _tin_retain keeps the data-pointer fast path (struct
+// field walks, fat-string data releases) free of the range check --
+// those callers know their pointer is Tin-managed by construction.
+void _tin_retain_ptr(void *ptr) {
+    if (!_tin_is_managed(ptr)) return;
+    _tin_retain(ptr);
+}
+
+// Provenance-aware release.  Mirrors _tin_retain_ptr: short-circuits
+// on foreign pointers, dispatches to _tin_release on managed ones.
+void _tin_release_ptr(void *ptr) {
+    if (!_tin_is_managed(ptr)) return;
+    _tin_release(ptr);
+}
+
+// cLayoutStruct retain/release with the wrapper's borrow flag.
+// flags bit 0 = "borrowed": c_data_ptr points outside the wrapper's
+// rc-block (e.g. pointer-extern returns where C owns the lifetime), so
+// the ptr the codegen passes via the c_data_ptr - sizeof(wrapper) trick
+// would land in unrelated memory.  When the bit is set, skip the rc
+// touch entirely; ownership is tracked through the original wrapper
+// pointer that the caller (a separate rc-block) holds.
+void _tin_retain_clayout(void *ptr, int32_t flags) {
+    if (flags & 1) return;
+    _tin_retain(ptr);
+}
+
+void _tin_release_clayout(void *ptr, int32_t flags) {
+    if (flags & 1) return;
+    _tin_release(ptr);
 }
 
 // Decrement reference count and free; returns 1 if the block was freed (prev==1).
@@ -49,9 +169,16 @@ void _tin_release(void *ptr) {
 int64_t _tin_release_struct(void *ptr) {
     if (!ptr) return 0;
     TinRCHdr *hdr = _rc_hdr(ptr);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return 0;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
-    if (prev == 1) { free(hdr); return 1; }
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return 0;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
+    if (prev == 1 && !(flags & TIN_RC_ARENA)) { free(hdr); return 1; }
     return 0;
 }
 
@@ -62,8 +189,15 @@ int64_t _tin_release_struct(void *ptr) {
 void _tin_release_fat_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         // Mirrors the fat-array element layout `{T* ptr, i64 len, i64
         // cap}` -- struct size must match so the per-element stride
@@ -88,8 +222,15 @@ void _tin_release_any(int32_t tag, void *data);
 void _tin_release_any_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         typedef struct { int32_t tag; void *ptr; } AnyElem;
         AnyElem *elems = (AnyElem *)data;
@@ -106,8 +247,15 @@ void _tin_release_any_elem_array(void *data, int64_t count) {
 void _tin_release_closure(void *env) {
     if (!env) return;
     TinRCHdr *hdr = _rc_hdr(env);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         typedef void(*DtorFn)(void*);
         DtorFn dtor = *(DtorFn *)env;
@@ -123,8 +271,15 @@ void _tin_release_closure(void *env) {
 void _tin_release_fn_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         typedef struct { void *coro; void *colored; void *sync; void *env; } FnElem;
         FnElem *elems = (FnElem *)data;
@@ -141,8 +296,15 @@ void _tin_release_fn_elem_array(void *data, int64_t count) {
 void _tin_release_ptr_elem_array(void *data, int64_t count) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         void **elems = (void **)data;
         for (int64_t i = 0; i < count; i++) _tin_release(elems[i]);
@@ -160,8 +322,15 @@ void _tin_foreach_struct_elem_release(
 ) {
     if (!data) return;
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         for (int64_t i = 0; i < count; i++) {
             release_fn((char *)data + i * elem_size);
@@ -258,7 +427,9 @@ char *_tin_string_handover(char *src) {
     size_t copy_len = (sz > 0) ? sz : (strlen(src) + 1);
     TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
-    hdr->rc = 1;
+    hdr->rc    = 1;
+    hdr->flags = TIN_RC_SHARED;
+    hdr->_pad  = 0;
     char *dst = (char *)(hdr + 1);
     memcpy(dst, src, copy_len);
     if (sz > 0) free(src);
@@ -277,7 +448,9 @@ void *_tin_ptr_handover(void *src, size_t elem_size) {
     if (copy_len == 0) return src;
     TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
-    hdr->rc = 1;
+    hdr->rc    = 1;
+    hdr->flags = TIN_RC_SHARED;
+    hdr->_pad  = 0;
     void *dst = (void *)(hdr + 1);
     memcpy(dst, src, copy_len);
     if (sz > 0) free(src);
@@ -322,8 +495,15 @@ void _tin_release_any(int32_t tag, void *data) {
     }
 
     TinRCHdr *hdr = _rc_hdr(data);
-    if (__atomic_load_n(&hdr->rc, __ATOMIC_ACQUIRE) == TIN_IMMORTAL_RC) return;
-    int64_t prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (flags & TIN_RC_IMMORTAL) return;
+    uint32_t prev;
+    if (flags & TIN_RC_SHARED) {
+        prev = __atomic_fetch_sub(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+    } else {
+        prev = hdr->rc;
+        hdr->rc = prev - 1;
+    }
     if (prev == 1) {
         // The data block "owns" one reference to its inner ARC-tracked
         // content (the box-as-any path retains the inner before storing

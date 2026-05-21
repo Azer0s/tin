@@ -69,6 +69,7 @@ __attribute__((constructor)) static void _tin_sigpipe_init(void) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPIPE, &sa, NULL);
 }
+#include "heap_arena.c" // initializes Tin arena; exposes _tin_managed_heap
 #include "arc.c"
 #include "strings.c"   // uses _tin_rc_alloc (arc)
 #include "slice.c"     // uses _tin_rc_alloc (arc)

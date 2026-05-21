@@ -174,7 +174,7 @@ typedef struct {
     // causing the second fiber's panic to accidentally consume the first fiber's
     // recover() entry.
     TinDeferEntry *saved_defer_chain;
-    // Spawn-chain capture for cross-fiber stacktrace() (Phase 4 of
+    // Spawn-chain capture for cross-fiber stacktrace() (see
     // docs/plans/stacktrace-libunwind.md). spawn_caller_ip is the
     // llvm.returnaddress(0) snapshot at the spawn site that produced
     // this fiber. spawn_parent_pid/spawn_parent_gen identify the parent
@@ -1271,7 +1271,7 @@ static int64_t _spawn_impl(void *hdl, int prejoined, uintptr_t caller_ip) {
     f->status    = FIBER_RUNNABLE;
     f->prejoined = prejoined;
 
-    // Spawn-chain capture (Phase 4 of docs/plans/stacktrace-libunwind.md).
+    // Spawn-chain capture (see docs/plans/stacktrace-libunwind.md).
     // Only populated when the spawn site asked for it; programs without
     // any reachable stacktrace() leave the fields at zero (the bootstrap
     // default), terminating the walk at this fiber.
@@ -1313,7 +1313,7 @@ int64_t _tin_fiber_spawn_joinable(void *hdl) {
     return _spawn_impl(hdl, 1, 0);
 }
 
-// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+// Stacktrace-aware spawn variants (see docs/plans/stacktrace-libunwind.md).
 // Codegen routes to these instead of the bare _tin_fiber_spawn{,_joinable}
 // when cg.stacktraceUsed; the extra caller_ip arg is the user fn's
 // llvm.returnaddress(0) at the spawn statement, which gets recorded on

@@ -42,11 +42,11 @@
 // table. No DWARF, no libdw, no debuginfod.
 //
 // The whole pclntab path is gated on TIN_STACKTRACE so programs that
-// never call stacktrace() don't pay any binary-size cost. Phase 6 of
-// docs/plans/stacktrace-libunwind.md sets this define from main.go
+// never call stacktrace() don't pay any binary-size cost.  See
+// docs/plans/stacktrace-libunwind.md.  main.go sets this define
 // conditional on cg.StacktraceUsed(), which in turn is fed by the AST
-// pre-pass detectStacktraceUsage. Programs that don't use stacktrace()
-// get the stub branch below.
+// pre-pass detectStacktraceUsage.  Programs that don't use
+// stacktrace() get the stub branch below.
 
 #include "runtime.h"
 

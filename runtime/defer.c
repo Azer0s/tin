@@ -64,10 +64,15 @@ static __thread const char *_tin_panic_msg = NULL;
 static __thread int32_t _tin_panic_trace[TIN_PANIC_TRACE_CAP];
 static __thread int32_t _tin_panic_trace_n = 0;
 
-// An immortal (rc=-1) empty string returned by _tin_recover() when not panicking.
-// The struct layout matches TinRCHdr (16 bytes: rc + _pad) so that
-// _tin_release(ptr) computes ptr - sizeof(TinRCHdr) = &rc = TIN_IMMORTAL_RC.
-static const struct { int64_t rc; int64_t _pad; char c; } _tin_empty_str_sentinel = { TIN_IMMORTAL_RC, 0, '\0' };
+// An immortal empty string returned by _tin_recover() when not panicking.
+// Layout matches TinRCHdr (16 bytes: { u32 rc; u32 flags; u64 _pad; })
+// so that _tin_release(ptr) sees TIN_RC_IMMORTAL in flags and skips.
+static const struct {
+    uint32_t rc;
+    uint32_t flags;
+    uint64_t _pad;
+    char     c;
+} _tin_empty_str_sentinel = { 0, TIN_RC_IMMORTAL, 0, '\0' };
 
 // Called from a deferred function to retrieve and clear the current panic message.
 // Writes the recovered panic message into *out.  Out-param shape
