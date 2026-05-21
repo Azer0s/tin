@@ -103,6 +103,13 @@ func (cg *CodeGen) SetTestMode(v bool)         { cg.testMode = v }
 func (cg *CodeGen) SetNoRuntimeChecks(v bool)  { cg.noRuntimeChecks = v }
 func (cg *CodeGen) SetVerboseMatchInfo(v bool) { cg.verboseMatchInfo = v }
 
+// SetExplainOwnership enables the per-binding ownership report.  The
+// spec is "*" to print every binding, "fnName" to filter by function
+// name, or "file.tin:fnName" to filter by both.  The report is
+// emitted to stderr at the end of codegen for the current compilation
+// unit.  Driven by the `--explain-ownership[=spec]` CLI flag.
+func (cg *CodeGen) SetExplainOwnership(spec string) { cg.explainOwnershipSpec = spec }
+
 // SetNoWarnAsyncMain is the -Wno-async-main hook (kept for back-compat with
 // existing callers; new code should use SetWarnSuppress(DiagAsyncMain)).
 func (cg *CodeGen) SetNoWarnAsyncMain(v bool) {

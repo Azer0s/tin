@@ -82,6 +82,20 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		return cg.genFoldedIf(block, s, v)
 	}
 
+	// Pre-analyze move usage across all branches so the per-branch
+	// codegen can install pre-move retains for partial moves (bindings
+	// moved in some branches but not others).  Pushed onto
+	// partialMovedStack for the duration of the branch codegen; popped
+	// after the merge below.
+	partial := cg.analyzeIfPartialMoves(s)
+	if len(partial) > 0 {
+		cg.partialMovedStack = append(cg.partialMovedStack, partial)
+
+		defer func() {
+			cg.partialMovedStack = cg.partialMovedStack[:len(cg.partialMovedStack)-1]
+		}()
+	}
+
 	mergeBlock := cg.newBlock("if.merge")
 
 	// Reset cg.curBlock to the entry block before evaluating the condition.
@@ -118,6 +132,29 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 
 	condEnd.NewCondBr(cond, thenBlock, elseStart)
 
+	// Move tracking: collect the union of all branches' potentially-moved
+	// names (used as the snapshot candidate set), and capture the pre-if
+	// state so each branch can roll back into a fresh per-branch view.
+	moveCandidates := map[string]bool{}
+	if names := collectMovedNames(s.Then); len(names) > 0 {
+		for n := range names {
+			moveCandidates[n] = true
+		}
+	}
+
+	for _, ei := range s.ElseIfs {
+		for n := range collectMovedNames(ei.Body) {
+			moveCandidates[n] = true
+		}
+	}
+
+	for n := range collectMovedNames(s.Else) {
+		moveCandidates[n] = true
+	}
+
+	preMoveSnap := cg.snapshotMoveState(moveCandidates)
+	branchSets := make([]map[string]bool, 0, 2+len(s.ElseIfs))
+
 	// Then branch.
 	cg.curScope = newScope(cg.curScope)
 
@@ -132,6 +169,8 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	if err != nil {
 		return nil, false, err
 	}
+	branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+	cg.restoreMoveState(preMoveSnap)
 
 	thenTerminated := thenTerm || thenCurBlock.Term != nil
 	if !thenTerminated {
@@ -179,6 +218,8 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		if err != nil {
 			return nil, false, err
 		}
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 
 		elifTerminated := elifTerm || elifCurBlock.Term != nil
 		if !elifTerminated {
@@ -207,6 +248,8 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		if err != nil {
 			return nil, false, err
 		}
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 
 		elseTerminated = elseTerm || elseCurBlock.Term != nil
 		if !elseTerminated {
@@ -215,6 +258,19 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	} else if currentElse != mergeBlock && currentElse.Term == nil {
 		currentElse.NewBr(mergeBlock)
 	}
+	// If there is no explicit else, the implicit fall-through is an
+	// empty-move branch -- which makes any move in a sibling partial.
+	// Add an empty set so the intersection logic sees the no-move
+	// path.  When there IS an else we already appended its branchSet
+	// above, so this skip avoids double-counting.
+	if s.Else == nil {
+		branchSets = append(branchSets, map[string]bool{})
+	}
+	// Merge branch move sets into the outer scope: intersection bindings
+	// become Moved (use-after-move on subsequent reads), partial bindings
+	// keep their pre-move ownership thanks to the per-branch retain
+	// emitted in genMoveExpr.
+	cg.movedBindings = cg.commitMergedMoves(branchSets, preMoveSnap.moved)
 
 	// Only add unreachable to mergeBlock if ALL branches terminated (returned/
 	// branched elsewhere). When there is no else clause, the false path always

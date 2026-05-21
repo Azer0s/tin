@@ -1,0 +1,10 @@
+// Partial moves (`move x.field`) are rejected at the parser: `move`
+// expects a bare identifier.
+struct point =
+  x i64
+  y i64
+
+fn main() =
+  let p = point{x: 1, y: 2}
+  let n = move p.x
+  echo n

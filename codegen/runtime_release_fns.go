@@ -34,13 +34,26 @@ func (cg *CodeGen) ensureStructPtrReleaseFn(structName string, st *irtypes.Struc
 	cg.structPtrReleaseFns[structName] = fn
 
 	entry := fn.NewBlock("entry")
+	provCheck := fn.NewBlock("prov_check")
 	doRelease := fn.NewBlock("do_release")
 	releaseChildren := fn.NewBlock("release_children")
 	exit := fn.NewBlock("exit")
 
 	// Null guard.
 	isNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(ptrType))
-	entry.NewCondBr(isNull, exit, doRelease)
+	entry.NewCondBr(isNull, exit, provCheck)
+
+	// Provenance check: pointers that fall outside Tin's arena (C-allocated,
+	// stack, static data, foreign mmap) short-circuit to no-op so the
+	// header math on `ptrI8 - sizeof(TinRCHdr)` never reads garbage.
+	// cLayoutStructs that aren't allocated through Tin's wrapper path
+	// (e.g. a raw extern *Foo cast from *void) flow safely through this
+	// check.  Cost: one call + branch per release; mimalloc's range
+	// lookup is ~3-5 cycles in the predicted case.
+	provPtr := provCheck.NewBitCast(fn.Params[0], irtypes.I8Ptr)
+	provOK := provCheck.NewCall(cg.ensureIsManaged(), provPtr)
+	provIsManaged := provCheck.NewICmp(enum.IPredNE, provOK, constant.NewInt(irtypes.I32, 0))
+	provCheck.NewCondBr(provIsManaged, doRelease, exit)
 
 	// Load the struct value BEFORE decrementing RC (the block is still valid
 	// since we hold a reference). Then atomically decrement RC. If the block

@@ -129,6 +129,14 @@ func (cg *CodeGen) isKnownTypeName(name string) bool {
 }
 
 func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Value, error) {
+	// Use-after-move check.  genMoveExpr records moved bindings in
+	// cg.movedBindings before returning the value to its consumer;
+	// subsequent reads of the same name in this fn body are rejected
+	// with a location-tagged error.
+	if err := cg.checkUseAfterMove(e.Name, e); err != nil {
+		return nil, err
+	}
+
 	entry, ok := cg.curScope.lookup(e.Name)
 	if !ok {
 		// Nullary ADT variant: bare `None`, `Leaf`, etc.

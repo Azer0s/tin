@@ -365,6 +365,14 @@ func (cg *CodeGen) emitInteropWrapperWithName(fn *ast.FuncDecl, wrapperName stri
 			}
 
 			tinAlloca := block.NewAlloca(tinTy)
+			// Zero-init the wrapper so the cLayoutStruct flag field
+			// at userFieldOffset+1 starts at 0 = owned.  Without
+			// this, the i32 flag would inherit stack garbage and
+			// emitCLayoutStructRetain could no-op spuriously,
+			// leaking the wrapper's rc-block.
+			if st, ok := tinTy.(*irtypes.StructType); ok {
+				block.NewStore(constant.NewZeroInitializer(st), tinAlloca)
+			}
 
 			// Init type_id at field 0.
 			tid := constant.NewInt(irtypes.I32, int64(cg.structTypeIDs[structName]))

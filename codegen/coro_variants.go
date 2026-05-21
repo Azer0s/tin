@@ -164,6 +164,13 @@ func (cg *CodeGen) genColoredFuncBody(n *ast.FuncDecl, coloredName string) error
 	prevDiScope := cg.diCurrentScope
 	prevEscapingVars := cg.curFnEscapingVars
 	prevEscapingAliases := cg.curFnEscapingAliases
+	// Each variant of the function body emits independently; the
+	// moved-bindings set from the sync pass must not leak into the
+	// colored pass or every read after a `move` in the sync body
+	// would fire a spurious use-after-move when the colored body
+	// codegens.
+	prevMovedBindings := cg.movedBindings
+	cg.movedBindings = nil
 
 	cg.curBlock = nil
 	cg.pendingDeferFnI8s = nil
@@ -214,6 +221,7 @@ func (cg *CodeGen) genColoredFuncBody(n *ast.FuncDecl, coloredName string) error
 		cg.diCurrentScope = prevDiScope
 		cg.curFnEscapingVars = prevEscapingVars
 		cg.curFnEscapingAliases = prevEscapingAliases
+		cg.movedBindings = prevMovedBindings
 	}()
 
 	entry := coloredFn.NewBlock("entry")

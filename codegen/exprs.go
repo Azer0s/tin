@@ -177,6 +177,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 	case *ast.SpawnExpr:
 		return cg.genSpawnExpr(block, e)
 
+	case *ast.MoveExpr:
+		return cg.genMoveExpr(block, e)
+
 	case *ast.TryExpr:
 		return cg.genTryExpr(block, e)
 

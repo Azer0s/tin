@@ -199,6 +199,12 @@ func buildFlagsHash() string {
 		h.Write([]byte{0})
 		h.Write([]byte(linuxSysrootPath()))
 
+		// Runtime-check toggles and --ownership-borrow control which
+		// branches the codegen emits, so they must invalidate the
+		// per-source binary cache too.
+		h.Write([]byte{0})
+		h.Write([]byte(cachedCheckFlagsKey))
+
 		sum := h.Sum(nil)
 		buildFlagsHashCache = hex.EncodeToString(sum[:4])
 	})

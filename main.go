@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -45,10 +46,13 @@ Source / library:
   --stdlib PATH            override the stdlib path (default: <execDir>/stdlib)
   --lib-root PATH          add a package root, repeatable (before default <execDir>/libs)
   --cflag FLAG             pass FLAG to clang, repeatable (e.g. --cflag -fsanitize=address)
-  --mimalloc               link with mimalloc instead of libc malloc.
-                           opt-in for 10-30% wins on alloc-heavy code;
-                           requires libmimalloc installed (brew/pacman/apt),
-                           fails at link if it can't find it
+  --mimalloc               link with mimalloc (DEFAULT; kept for back-compat).
+                           Tin's arena-segregated ARC requires mimalloc;
+                           install libmimalloc (brew/pacman/apt) before
+                           building. fails at link if it can't be found.
+  --no-mimalloc            disable mimalloc linkage. builds will fail
+                           at link time; reserved for future degraded-mode
+                           work (sanitizers, bare-metal targets).
   -lNAME / -LDIR           link with libNAME / add DIR to lib search path
   file.o / file.a          link with extra object or archive file
 
@@ -321,6 +325,13 @@ var (
 	// libSystem can't be statically linked, so the toolchain is
 	// already "as static as possible" by default.
 	staticLink bool
+	// Cache-invalidation: the runtime-check toggles change which
+	// safety branches are compiled in, so they must mix into the
+	// cache key. Otherwise toggling --check=NAME or --no-check=NAME on
+	// a previously compiled source would return the stale binary
+	// built with the prior flags. Package-level so buildFlagsHash()
+	// can read them.
+	cachedCheckFlagsKey string
 )
 
 // testFastCompile is reserved for an opt-in "fast tests" mode that defaults
@@ -434,7 +445,7 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks":
+		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks", "--explain-ownership":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
@@ -448,6 +459,21 @@ func main() {
 
 			// `--pure-fold-budget=N` is a single-token "key=value" flag.
 			if strings.HasPrefix(a, "--pure-fold-budget=") {
+				fileArgIdx++
+
+				continue
+			}
+
+			// `--explain-ownership=spec` is a single-token "key=value" flag.
+			if strings.HasPrefix(a, "--explain-ownership=") {
+				fileArgIdx++
+
+				continue
+			}
+
+			// `--check=names` / `--no-check=names` are single-token
+			// "key=value" flags.
+			if strings.HasPrefix(a, "--check=") || strings.HasPrefix(a, "--no-check=") {
 				fileArgIdx++
 
 				continue
@@ -483,13 +509,12 @@ doneFlags:
 	// key; main() resets them per-invocation here.
 	extraCFlags = nil
 	debugBuild = false
-	// mimalloc is off by default so tin doesn't require libmimalloc on
-	// every host -- libc malloc works everywhere with no install step.
-	// `--mimalloc` at the top level opts in; on alloc-heavy code it
-	// buys 10-30% on workload-style benchmarks.  When the flag is
-	// passed but the library is missing, the link path errors loudly
-	// instead of silently downgrading.
-	useMimalloc = false
+	// mimalloc is REQUIRED: Tin's arena-segregated ARC routes every
+	// managed allocation through a dedicated mimalloc arena so the
+	// runtime can distinguish Tin-managed pointers from C-allocated
+	// ones (see runtime/heap_arena.c).  The flag toggle stays for
+	// future degraded-mode work; users must install libmimalloc.
+	useMimalloc = true
 
 	var stdlibOverride string
 
@@ -505,6 +530,14 @@ doneFlags:
 	noPureFold := false
 	pureFoldBudget := 0 // 0 = use codegen default
 	noRuntimeChecks := false
+	explainOwnership := ""
+	// --check=NAME[,NAME] selects which runtime safety checks to
+	// compile into the binary.  Accumulated across repeated flags and
+	// across comma lists; --check=all turns every check on; the
+	// inverse --no-check=NAME individually disables.
+	enabledChecks := map[string]bool{}
+	disabledChecks := map[string]bool{}
+	checkAll := false
 
 	var (
 		warnSuppress []string // -Wno-<name> targets
@@ -522,13 +555,16 @@ doneFlags:
 				extraCFlags = append(extraCFlags, os.Args[i])
 			}
 		case "--mimalloc":
-			// Opts into linking against mimalloc and routing the
-			// runtime's malloc/free/realloc/calloc through mi_*.
-			// Off by default to avoid making libmimalloc a required
-			// install for every tin host.  Errors loudly at link
-			// time if --mimalloc is passed but the library isn't
-			// found on standard paths.
+			// Kept as a no-op for backward compat with existing
+			// scripts.  mimalloc is on by default since the arena-
+			// segregated ARC infrastructure depends on it.
 			useMimalloc = true
+		case "--no-mimalloc":
+			// Disables linking against mimalloc.  The runtime
+			// expects mimalloc -- builds will fail at link time
+			// with this flag.  Reserved for future degraded-mode
+			// work (sanitizer builds, bare-metal).
+			useMimalloc = false
 		case "--color":
 			// --color=<auto|always|never>. Defaults to `auto` which
 			// turns ANSI escapes on when stderr is a terminal. The
@@ -632,6 +668,9 @@ doneFlags:
 			noPureFold = true
 		case "--no-runtime-checks":
 			noRuntimeChecks = true
+		case "--explain-ownership":
+			// Bare form: print every binding in the program.
+			explainOwnership = "*"
 		case "--fast":
 			// Shortcut for `tin test`: drop the optimization level so the
 			// LLVM passes that dominate compile time on rtti-heavy /
@@ -656,6 +695,34 @@ doneFlags:
 				warnEnable = append(warnEnable, strings.TrimPrefix(a, "-W"))
 			case strings.HasPrefix(a, "--emit-header="):
 				emitHeaderPath = strings.TrimPrefix(a, "--emit-header=")
+			case strings.HasPrefix(a, "--explain-ownership="):
+				// Filter form: --explain-ownership=file.tin:fnName
+				// (or --explain-ownership=fnName for all-files match).
+				explainOwnership = strings.TrimPrefix(a, "--explain-ownership=")
+			case strings.HasPrefix(a, "--check="):
+				raw := strings.TrimPrefix(a, "--check=")
+				for _, name := range strings.Split(raw, ",") {
+					name = strings.TrimSpace(name)
+					if name == "" {
+						continue
+					}
+
+					if name == "all" {
+						checkAll = true
+
+						continue
+					}
+
+					enabledChecks[name] = true
+				}
+			case strings.HasPrefix(a, "--no-check="):
+				raw := strings.TrimPrefix(a, "--no-check=")
+				for _, name := range strings.Split(raw, ",") {
+					name = strings.TrimSpace(name)
+					if name != "" {
+						disabledChecks[name] = true
+					}
+				}
 			case strings.HasPrefix(a, "--pure-fold-budget="):
 				raw := strings.TrimPrefix(a, "--pure-fold-budget=")
 
@@ -668,6 +735,49 @@ doneFlags:
 			}
 		}
 	}
+
+	// Resolve --check= flags into the final enabled set, then build a
+	// stable cache key BEFORE any cacheBinDir() call so toggling
+	// --check / --no-check / --no-runtime-checks / --ownership-borrow
+	// invalidates the per-source binary cache and forces re-compile.
+	//
+	// All runtime safety checks default OFF (the binary is
+	// production-shaped out of the box); --check=NAME or --check=all
+	// opts in.  The reserved names are: rc-balance, ownership-canary,
+	// append-cap, cycle-detect, heap-sample, bounds.  Only append-cap
+	// has a backing implementation today; the others register but
+	// have no runtime effect until their backing checks land.
+	resolvedChecks := map[string]bool{}
+
+	if checkAll {
+		for _, name := range []string{"append-cap", "rc-balance", "ownership-canary", "cycle-detect", "heap-sample", "bounds"} {
+			resolvedChecks[name] = true
+		}
+	}
+
+	for name := range enabledChecks {
+		resolvedChecks[name] = true
+	}
+
+	for name := range disabledChecks {
+		delete(resolvedChecks, name)
+	}
+
+	// --no-runtime-checks is the back-compat synonym for "strip
+	// every runtime check"; since the default already does that,
+	// the flag is a clearing operation on top of any --check= opts
+	// that came earlier in argv.
+	if noRuntimeChecks {
+		resolvedChecks = map[string]bool{}
+	}
+
+	checkNames := make([]string, 0, len(resolvedChecks))
+	for name := range resolvedChecks {
+		checkNames = append(checkNames, name)
+	}
+
+	sort.Strings(checkNames)
+	cachedCheckFlagsKey = strings.Join(checkNames, ",")
 
 	// Directory mode: tin test <dir> runs all test files in a directory.
 	// tin test <dir>/... recurses into all subdirectories (Go-style wildcard).
@@ -871,8 +981,15 @@ doneFlags:
 		cg.SetPureFoldBudget(pureFoldBudget)
 	}
 
-	if noRuntimeChecks {
-		cg.SetNoRuntimeChecks(true)
+	// append-cap is the only check with a backing implementation
+	// today; map it to the legacy noRuntimeChecks toggle (which is
+	// inverted: true = strip, false = emit).  When append-cap is NOT
+	// in the resolved set (computed during flag parsing above), strip
+	// emission.
+	cg.SetNoRuntimeChecks(!resolvedChecks["append-cap"])
+
+	if explainOwnership != "" {
+		cg.SetExplainOwnership(explainOwnership)
 	}
 
 	if wPedantic {
@@ -961,12 +1078,15 @@ doneFlags:
 		die("warnings treated as errors")
 	}
 
-	// Latch the stacktrace flag for the upcoming compileIR call. Phase 6
-	// of docs/plans/stacktrace-libunwind.md gates `-lunwind` / `-rdynamic`
-	// / `-DTIN_STACKTRACE` on this. `StacktraceUsed()` is sticky-true once
-	// any codegen path called `ensurePanicFn` (explicit panic, array
-	// bounds, cap-check, ADT mismatch...) so an unrecovered panic dumps
-	// a backtrace; pure programs that never touch panic still pay zero.
+	cg.FinalizeExplainOwnership()
+
+	// Latch the stacktrace flag for the upcoming compileIR call.  See
+	// docs/plans/stacktrace-libunwind.md: `-lunwind` / `-rdynamic` /
+	// `-DTIN_STACKTRACE` are gated on this.  `StacktraceUsed()` is
+	// sticky-true once any codegen path called `ensurePanicFn`
+	// (explicit panic, array bounds, cap-check, ADT mismatch...) so
+	// an unrecovered panic dumps a backtrace; pure programs that
+	// never touch panic still pay zero.
 	stacktraceLinkActive = cg.StacktraceUsed()
 
 	irText := fixCoroAttrs(mod.String())

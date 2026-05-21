@@ -47,8 +47,20 @@ func (cg *CodeGen) ensureFree() *ir.Func {
 
 // ARC helpers
 
-// ensureRCAlloc lazily declares _tin_rc_alloc(size i64) i8*.
+// ensureRCAlloc returns the allocator the current function should use.
+// When curFnSyncLocal is set (the call-graph analyzer proved the
+// enclosing function is not reachable from any {#async} root) it
+// routes to _tin_rc_alloc_local which starts blocks at shared=0 so
+// the biased retain/release path can use non-atomic ops.  Otherwise
+// it falls back to the conservative _tin_rc_alloc which starts at
+// shared=1.  The runtime path is identical from the codegen's
+// perspective (same i8* return shape); the difference shows up only
+// in the runtime's biased-RC fast path.
 func (cg *CodeGen) ensureRCAlloc() *ir.Func {
+	if cg.curFnSyncLocal {
+		return cg.ensureRCAllocLocal()
+	}
+
 	if cg.rcAllocFn != nil {
 		return cg.rcAllocFn
 	}
@@ -57,6 +69,78 @@ func (cg *CodeGen) ensureRCAlloc() *ir.Func {
 		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
 
 	return cg.rcAllocFn
+}
+
+// ensureRCAllocLocal lazily declares _tin_rc_alloc_local(size i64) i8*.
+// Allocates with shared=0 -- caller must be confident the block stays
+// confined to the current fiber.
+func (cg *CodeGen) ensureRCAllocLocal() *ir.Func {
+	if cg.rcAllocLocalFn != nil {
+		return cg.rcAllocLocalFn
+	}
+
+	cg.rcAllocLocalFn = cg.ensureExternDecl("_tin_rc_alloc_local", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
+
+	return cg.rcAllocLocalFn
+}
+
+// ensureMakeShared lazily declares _tin_make_shared(ptr i8*).
+// Emitted at any site where a previously-local block crosses a
+// fiber boundary -- spawn capture, channel send, global store, etc.
+func (cg *CodeGen) ensureMakeShared() *ir.Func {
+	if cg.makeSharedFn != nil {
+		return cg.makeSharedFn
+	}
+
+	cg.makeSharedFn = cg.ensureExternDecl("_tin_make_shared", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+
+	return cg.makeSharedFn
+}
+
+// ensureIsManaged lazily declares _tin_is_managed(ptr i8*) -> i32.
+// Returns nonzero when the pointer was allocated through Tin's arena.
+// Used by per-struct release helpers (`Foo__release_ptr`) and by
+// codegen's _tin_retain_ptr / _tin_release_ptr emission sites to
+// short-circuit ARC ops on pointers from outside the Tin runtime.
+func (cg *CodeGen) ensureIsManaged() *ir.Func {
+	if cg.isManagedFn != nil {
+		return cg.isManagedFn
+	}
+
+	cg.isManagedFn = cg.ensureExternDecl("_tin_is_managed", irtypes.I32,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+
+	return cg.isManagedFn
+}
+
+// ensureRetainPtr lazily declares _tin_retain_ptr(ptr i8*).
+// Provenance-aware retain entry point.  Codegen routes ARC ops on
+// user-pointer types (*T) here; ops on data pointers continue using
+// _tin_retain directly because those callers know their source.
+func (cg *CodeGen) ensureRetainPtr() *ir.Func {
+	if cg.retainPtrFn != nil {
+		return cg.retainPtrFn
+	}
+
+	cg.retainPtrFn = cg.ensureExternDecl("_tin_retain_ptr", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+
+	return cg.retainPtrFn
+}
+
+// ensureReleasePtr lazily declares _tin_release_ptr(ptr i8*).
+// Provenance-aware release; mirror of ensureRetainPtr.
+func (cg *CodeGen) ensureReleasePtr() *ir.Func {
+	if cg.releasePtrFn != nil {
+		return cg.releasePtrFn
+	}
+
+	cg.releasePtrFn = cg.ensureExternDecl("_tin_release_ptr", irtypes.Void,
+		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
+
+	return cg.releasePtrFn
 }
 
 // ensureRetain lazily declares _tin_retain(ptr i8*).
@@ -81,6 +165,40 @@ func (cg *CodeGen) ensureRelease() *ir.Func {
 		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
 
 	return cg.releaseFn
+}
+
+// ensureCLayoutRetain lazily declares _tin_retain_clayout(ptr i8*, flags i32).
+// Wraps _tin_retain with a flags check: if bit 0 of flags is set, the
+// wrapper is borrowed (c_data_ptr points outside its rc-block) and the
+// call no-ops without touching memory at ptr.
+func (cg *CodeGen) ensureCLayoutRetain() *ir.Func {
+	if cg.clayoutRetainFn != nil {
+		return cg.clayoutRetainFn
+	}
+
+	cg.clayoutRetainFn = cg.ensureExternDecl("_tin_retain_clayout", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("ptr", irtypes.I8Ptr),
+			ir.NewParam("flags", irtypes.I32),
+		}, false)
+
+	return cg.clayoutRetainFn
+}
+
+// ensureCLayoutRelease lazily declares _tin_release_clayout(ptr i8*, flags i32).
+// Borrowed-flag mirror of ensureCLayoutRetain for the release side.
+func (cg *CodeGen) ensureCLayoutRelease() *ir.Func {
+	if cg.clayoutReleaseFn != nil {
+		return cg.clayoutReleaseFn
+	}
+
+	cg.clayoutReleaseFn = cg.ensureExternDecl("_tin_release_clayout", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("ptr", irtypes.I8Ptr),
+			ir.NewParam("flags", irtypes.I32),
+		}, false)
+
+	return cg.clayoutReleaseFn
 }
 
 // ensureReleaseStruct lazily declares _tin_release_struct(ptr i8*) i64.

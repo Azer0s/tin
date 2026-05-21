@@ -264,7 +264,10 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	heapOwnedDepth := 0
 	pointsToBorrowedStorage := false
 
-	defer func() { cg.nextCLayoutStackBind = "" }()
+	defer func() {
+		cg.nextCLayoutStackBind = ""
+		cg.curStructLitOuterIsLocal = false
+	}()
 
 	if callExpr, isCall := s.Value.(*ast.CallExpr); isCall {
 		calleeName := ""
@@ -616,7 +619,12 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				// NOT come through here, so its scope exit skips
 				// release (correct - there's no heap to release).
 				cg.pendingOwnsPtrViaRetain = true
-			} else {
+			} else if !cg.currentFnBorrowSet[s.Name] {
+				// Skip the entry retain for bindings the borrow
+				// analyzer classified as Borrowed.  The scope-exit
+				// release path checks the same classification (via
+				// entry.ownership) and skips matching releases so
+				// the pair stays balanced.
 				cg.emitRetain(block, initVal)
 			}
 		}
@@ -746,8 +754,19 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	}
 
 	entry.declPos = s.Pos()
+	// Bindings the borrow analyzer flagged as borrow-safe get
+	// classified as Borrowed.  emitScopeRelease reads this field to
+	// decide whether to drop the scope-exit release.
+	if cg.currentFnBorrowSet[s.Name] {
+		entry.ownership = ownershipBorrowed
+	}
+
 	cg.curScope.set(s.Name, entry)
 	cg.warnIfBuiltinShadow("let", s.Name, s.Pos())
+	// Record the binding for --explain-ownership: Borrowed for
+	// analyzer-classified bindings, Owned otherwise.  No-op when
+	// --explain-ownership is off.
+	cg.recordOwnership(s.Name, entry.ownership, "")
 
 	return block, nil
 }
@@ -828,38 +847,68 @@ func (cg *CodeGen) emitDefers(block *ir.Block) error {
 // the flag and stack-allocates the out_native buffer with the IMMORTAL_RC
 // sentinel.
 func (cg *CodeGen) maybeMarkCLayoutStackBind(s *ast.VarDecl) {
+	// Defensive: a previous let-decl's defer should have cleared the flag,
+	// but if something interrupted it (panic in a sub-genExpr, early
+	// return up the stack), stale state would silently apply to this
+	// binding.  Reset before deciding.
+	cg.nextCLayoutStackBind = ""
+	cg.curStructLitOuterIsLocal = false
+
 	if s == nil || s.Name == "" || s.Value == nil {
 		return
 	}
 
-	callExpr, isCall := s.Value.(*ast.CallExpr)
-	if !isCall {
-		return
-	}
+	// Peel through `as T` / `T.(type)` so `let d = c_call(...) as dyad`
+	// still reaches the wrapper-call lookup.  The cast is a no-op at this
+	// level -- the underlying value is the cLayoutStruct value we're
+	// considering for stack-bind.
+	peeled := peelTypeWrappers(s.Value)
 
-	calleeName := ""
-
-	switch fn := callExpr.Func.(type) {
-	case *ast.Identifier:
-		calleeName = fn.Name
-	case *ast.ScopeAccess:
-		calleeName = strings.Join(fn.Path, "__")
-	}
-
-	if calleeName == "" {
-		return
-	}
-
-	structName, isNativeReturn := cg.cLayoutWrapperNativeReturnFns[calleeName]
-	if !isNativeReturn {
-		if entry, ok := cg.curScope.lookup(calleeName); ok {
-			if f, ok2 := entry.val.(*ir.Func); ok2 {
-				structName, isNativeReturn = cg.cLayoutWrapperNativeReturnFns[f.Name()]
-			}
+	// `let h = Holder{field: c_call(...)}` -- the inner cLayout call's
+	// result is stored into a field of h.  If h doesn't escape, the
+	// inner call's stack composite can live in the same caller frame as
+	// h's alloca; genStructLit will pick up the flag and stack-bind the
+	// field's wrapper call.  Holder itself doesn't need any special
+	// handling -- it's a regular Tin struct laid out by-value.
+	//
+	// Pass Holder's name to the escape walker so it treats reads of
+	// `h.<cLayoutField>` as escape: those reads pull a cLayoutStruct
+	// value out of h, and that value's c_data_ptr still points into h's
+	// composite storage -- letting it flow into another binding / return
+	// / call-arg would leak the storage reference past h's stack frame.
+	if sl, isStructLit := peeled.(*ast.StructLit); isStructLit {
+		body := cg.currentFnAstBody()
+		if body == nil {
+			return
 		}
+
+		// If the OUTER struct itself has any *this-receiver method,
+		// calling `h.someMethod()` materializes `&h` -- and the method
+		// body could store that pointer somewhere persistent, escaping
+		// h's storage (and any cLayout fields embedded in it) past the
+		// caller's frame.  The walker treats `h.someMethod()` as a
+		// receiver-position FieldAccess (method name isn't a struct
+		// field), so it doesn't catch this on its own.  Heap-allocate
+		// the inner cLayout fields in that case.
+		if cg.structHasPointerReceiverMethod(sl.TypeName) {
+			return
+		}
+
+		if cg.cLayoutBindingEscapesForType(s.Name, sl.TypeName, body) {
+			return
+		}
+
+		cg.curStructLitOuterIsLocal = true
+
+		return
 	}
 
-	if !isNativeReturn {
+	if _, isCall := peeled.(*ast.CallExpr); !isCall {
+		return
+	}
+
+	structName := cg.resolveCLayoutWrapperCall(peeled)
+	if structName == "" {
 		return
 	}
 
@@ -876,7 +925,13 @@ func (cg *CodeGen) maybeMarkCLayoutStackBind(s *ast.VarDecl) {
 		return
 	}
 
-	if cg.cLayoutBindingEscapes(s.Name, body) {
+	// Pass the binding's cLayoutStruct name to the walker so that any
+	// (currently hypothetical) nested cLayoutStruct fields trigger the
+	// FieldAccess-of-cLayout-field escape rule.  Today's cLayoutStructs
+	// only carry primitives, so the structName argument is functionally
+	// no-op, but it's the right shape if cLayout-in-cLayout becomes a
+	// thing later.
+	if cg.cLayoutBindingEscapesForType(s.Name, structName, body) {
 		return
 	}
 

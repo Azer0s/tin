@@ -126,6 +126,7 @@ func New(filename string) *CodeGen {
 		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
 		macros:                   make(map[string]*ast.MacroDecl),
 		funcDecls:                make(map[string]*ast.FuncDecl),
+		methodMayMutateReceiver:  make(map[string]bool),
 		ctfeCache:                make(map[string]ctfeMemoEntry),
 		topLevelVarPos:           make(map[string]ast.Pos),
 		externTLSVars:            make(map[string]*ir.Global),

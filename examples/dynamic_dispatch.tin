@@ -8,25 +8,25 @@ use assert
 trait speaker =
   fn speak(this speaker) string = virtual
 
-trait mover =
-  fn move(this mover) string = virtual
+trait strider =
+  fn stride(this strider) string = virtual
 
-struct dog(speaker, mover) =
+struct dog(speaker, strider) =
   name string
 
   fn speaker::speak(this dog) string =
     return "Woof! I am {this.name}"
 
-  fn mover::move(this dog) string =
+  fn strider::stride(this dog) string =
     return "{this.name} runs"
 
-struct cat(speaker, mover) =
+struct cat(speaker, strider) =
   name string
 
   fn speaker::speak(this cat) string =
     return "Meow! I am {this.name}"
 
-  fn mover::move(this cat) string =
+  fn strider::stride(this cat) string =
     return "{this.name} slinks"
 
 struct robot(speaker) =
@@ -39,8 +39,8 @@ struct robot(speaker) =
 fn make_speak[t](s t) where t is speaker =
   echo s.speak()
 
-fn make_move[t](m t) where t is mover =
-  echo m.move()
+fn make_stride[t](m t) where t is strider =
+  echo m.stride()
 
 let d = dog{name: "Rex"}
 let c = cat{name: "Whiskers"}
@@ -50,8 +50,8 @@ make_speak(d)
 make_speak(c)
 make_speak(r)
 
-make_move(d)
-make_move(c)
+make_stride(d)
+make_stride(c)
 
 test "speak methods" =
   let d = dog{name: "Rex"}
@@ -62,9 +62,9 @@ test "speak methods" =
   assert::equals(c.speak(), "Meow! I am Whiskers")
   assert::equals(r.speak(), "Beep boop, I am R2D2")
 
-test "move methods" =
+test "stride methods" =
   let d = dog{name: "Rex"}
   let c = cat{name: "Whiskers"}
 
-  assert::equals(d.move(), "Rex runs")
-  assert::equals(c.move(), "Whiskers slinks")
+  assert::equals(d.stride(), "Rex runs")
+  assert::equals(c.stride(), "Whiskers slinks")

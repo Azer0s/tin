@@ -371,7 +371,10 @@ func (p *Parser) parseTupleDestructDecl(isConst bool, pos ast.Pos) (*ast.TupleDe
 	return node, nil
 }
 
-// parseTopLevelVar parses:  var name Type [= expr]
+// parseTopLevelVar parses:  var name [Type] [= expr]
+// Type is optional when an initializer is present (inferred from RHS).
+// Mirrors parseTopLevelLetConst so `var x = "hello"` works without an
+// explicit type the same way `let x = "hello"` already does.
 func (p *Parser) parseTopLevelVar() (*ast.TopLevelVar, error) {
 	p.advance() // consume var
 
@@ -380,9 +383,12 @@ func (p *Parser) parseTopLevelVar() (*ast.TopLevelVar, error) {
 		return nil, err
 	}
 
-	typ, err := p.parseTypeExpr()
-	if err != nil {
-		return nil, err
+	var typ ast.TypeExpr
+	if !p.match(lexer.ASSIGN, lexer.NEWLINE, lexer.EOF, lexer.SEMI) {
+		typ, err = p.parseTypeExpr()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var val ast.Node

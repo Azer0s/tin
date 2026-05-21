@@ -68,9 +68,10 @@ func fixCoroAttrs(ir string) string {
 }
 
 // stacktraceLinkFlag is the link-time toggle that promotes user fns to
-// the dynsym (Linux ELF only) and pulls in libunwind. Phase 6 of
-// docs/plans/stacktrace-libunwind.md gates these on cg.StacktraceUsed();
-// the global below is set in main() before each compileIR call.
+// the dynsym (Linux ELF only) and pulls in libunwind.  See
+// docs/plans/stacktrace-libunwind.md: link-time emission is gated on
+// cg.StacktraceUsed(); the global below is set in main() before each
+// compileIR call.
 //
 // We can't thread a bool param through compileIR without rewriting its
 // signature in five places, so a process-global suffices: the compiler
@@ -438,7 +439,7 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 		// (see runtime/stacktrace.c). Default builds keep paying the
 		// 5-10% binary-size tax for unwind info nothing reads on Linux
 		// x86_64, so emit the negative path explicitly when stacktrace
-		// isn't reachable. (Phase 6, docs/plans/stacktrace-libunwind.md.)
+		// isn't reachable.  See docs/plans/stacktrace-libunwind.md.
 		//
 		// Source line resolution no longer goes through DWARF: the
 		// codegen post-pass (codegen/pclntab.go) emits a custom

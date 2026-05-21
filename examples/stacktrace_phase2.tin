@@ -3,8 +3,8 @@
 // Verifies the basic property that stacktrace() returns one entry per
 // live frame on the calling thread's stack. We assert on length only -
 // the exact atom names include compile-dependent offsets like "+0x1e",
-// and asserting on those couples the test to clang's output. Frame
-// presence is enough for Phase 2.
+// and asserting on those couples the test to clang's output.  Frame
+// presence is what this test pins down.
 //
 // Both helper fns carry #no_inline so the optimizer can't collapse them
 // into a single frame at -O2; without that, the walk would correctly

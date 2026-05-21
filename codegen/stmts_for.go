@@ -377,7 +377,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 				// noRelease=true: the slot lives in the source
 				// array, not in scope-local storage. Releasing
 				// here would double-free when the array drops.
-				noRelease: true,
+				noRelease:     true,
+				isForIterator: true,
 			})
 			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 		}
@@ -394,7 +395,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		}
 
 		if s.VarName != "" {
-			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
+			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos(), isForIterator: true})
 			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 		}
 	}
@@ -573,7 +574,7 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 
 	// body: expose loop variable, run user statements
 	cg.curScope = newScope(cg.curScope)
-	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos()})
+	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos(), isForIterator: true})
 	cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 
 	cg.pushBreakTarget(afterBlock)
@@ -654,7 +655,7 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	// Body.
 	cg.curScope = newScope(cg.curScope)
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos()})
+		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos(), isForIterator: true})
 		cg.warnIfBuiltinShadow("for", s.VarName, s.Pos())
 	}
 

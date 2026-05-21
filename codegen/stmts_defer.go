@@ -151,6 +151,10 @@ func (cg *CodeGen) genDeferLambdaThunk(block *ir.Block, lambdaNode ast.Node) (va
 
 	prevCtx := cg.pushClosureCtx(f)
 	cg.curDeferRetSlotParam = f.Params[1]
+	// Scope the cLayout escape walker to the thunk body so any
+	// let-decl inside the defer thunk's lambda body is analyzed
+	// against its own scope, not the outer fn's.
+	cg.curFnAstBody = lambda.Body
 
 	// Set the lambda's declared return type so genReturn can coerce values correctly.
 	// e.g. for `fn() *i64 = return None`, curDeferThunkRetType = *i64.

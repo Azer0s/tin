@@ -45,9 +45,9 @@ func (cg *CodeGen) checkAllTraitImplsComplete(stmts []ast.Node) error {
 			}
 
 			if td.IsAlias {
-				// For as-fn aliases, the impl is `fn ::T(...)` (predeclared as
-				// `Struct_T_T` per Phase 1 parser convention) or the trait's own
-				// default if it has one.
+				// For as-fn aliases, the impl is `fn ::T(...)` (predeclared
+				// as `Struct_T_T` per the parser's as-fn alias convention)
+				// or the trait's own default if it has one.
 				wantQual := structKey + "_" + traitName + "_" + traitName
 				wantBare := structKey + "_" + traitName
 

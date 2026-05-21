@@ -18,6 +18,13 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		if !entry.isAlloc || entry.noRelease {
 			return
 		}
+		// Borrowed bindings do not own a +1 reference, so their
+		// scope-exit must not release.  Moved bindings transferred
+		// their +1 to a consumer, also no release here.  See
+		// docs/15-ownership.md for the semantics.
+		if entry.ownership == ownershipBorrowed || entry.ownership == ownershipMoved {
+			return
+		}
 
 		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
 		if !ok {
@@ -173,6 +180,12 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 		// LIFO across this scope's vars; same rationale as emitScopeRelease.
 		s.eachReverse(func(name string, entry *scopeEntry) {
 			if name == skipName || !entry.isAlloc || entry.isGlobal || entry.noRelease {
+				return
+			}
+			// Borrowed/moved bindings have no +1 to drop; releasing here
+			// would be an unbalanced release that the analyzer's entry
+			// retain elision relies on us skipping.
+			if entry.ownership == ownershipBorrowed || entry.ownership == ownershipMoved {
 				return
 			}
 

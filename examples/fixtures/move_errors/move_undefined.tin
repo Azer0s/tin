@@ -1,0 +1,3 @@
+// Moving a name that does not exist in scope is a clean error,
+// not a panic.
+fn main() = echo move not_a_thing

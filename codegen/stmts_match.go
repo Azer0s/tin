@@ -25,6 +25,19 @@ func (cg *CodeGen) genMatch(block *ir.Block, s *ast.MatchStmt) (*ir.Block, error
 
 func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAlloca value.Value) (*ir.Block, error) {
 	cg.prepareMatchGuards(s.Cases)
+	// Pre-analyze move usage across all arms so the case bodies see the
+	// partial-move set on the stack and emit balancing retains.  The
+	// per-arm snapshot/restore happens inside each match variant's
+	// case-body loop (see genMatch's int-switch path and
+	// genDataMatch).
+	partial := cg.analyzeMatchPartialMoves(s)
+	if len(partial) > 0 {
+		cg.partialMovedStack = append(cg.partialMovedStack, partial)
+
+		defer func() {
+			cg.partialMovedStack = cg.partialMovedStack[:len(cg.partialMovedStack)-1]
+		}()
+	}
 
 	if s.IsType {
 		return cg.genMatchType(block, s)
@@ -124,6 +137,22 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	// A match without a default is still exhaustive when every member of an
 	// enum atom type is covered by an explicit case.
 	anyFallthrough := s.Default == nil && !cg.isExhaustiveEnumMatch(s)
+	// Per-arm move tracking: candidates is the union of moves across
+	// all arms; the snapshot/restore lives in the genCaseBody closure
+	// so each arm walks a fresh per-branch view of movedBindings.
+	moveCandidates := map[string]bool{}
+	for _, c := range s.Cases {
+		for n := range collectMovedNames(c.Body) {
+			moveCandidates[n] = true
+		}
+	}
+
+	for n := range collectMovedNames(s.Default) {
+		moveCandidates[n] = true
+	}
+
+	preMoveSnap := cg.snapshotMoveState(moveCandidates)
+	branchSets := make([]map[string]bool, 0, len(s.Cases)+1)
 
 	genCaseBody := func(caseBlock *ir.Block, body *ast.Block) (*ir.Block, error) {
 		if resAlloca != nil {
@@ -195,6 +224,8 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		if err != nil {
 			return nil, err
 		}
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 
 		if resAlloca != nil {
 			// Expression mode: genCaseBody returns nil for non-divergent arms
@@ -216,6 +247,8 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		if err != nil {
 			return nil, err
 		}
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 
 		if resAlloca != nil {
 			if defaultBlock == nil {
@@ -226,7 +259,13 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 
 			anyFallthrough = true
 		}
+	} else {
+		// No-default fall-through is an empty-move branch -- same
+		// rationale as the no-else path in genIf.  Add an empty set
+		// so the intersection logic sees the no-move path.
+		branchSets = append(branchSets, map[string]bool{})
 	}
+	cg.movedBindings = cg.commitMergedMoves(branchSets, preMoveSnap.moved)
 
 	// All arms terminated - afterBlock is unreachable; signal exhaustive termination.
 	if !anyFallthrough {

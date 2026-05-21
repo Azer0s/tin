@@ -508,6 +508,42 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 		return &ast.NilLit{}, nil
 
+	case lexer.KW_MOVE:
+		moveTok := p.advance()
+		// Source form: `move <ident>`.  Partial moves (`move x.field`)
+		// and moves of complex expressions are rejected at parse time
+		// -- the source must be a bare local binding.  Codegen will
+		// further reject moves of function parameters, iterator
+		// bindings, and other non-owning bindings with a clear error
+		// and a fix-it.
+		nextTok := p.peek()
+		if nextTok.Type != lexer.IDENT {
+			return nil, p.errAtTok(nextTok,
+				"`move` expects an identifier (the local binding being moved); got %s",
+				nextTok.Type.String())
+		}
+
+		idTok := p.advance()
+		// Reject partial moves and call/index chains on the moved
+		// binding -- `move x.field`, `move x()`, `move x[i]` etc.
+		// The user almost certainly wants to extract first or take
+		// a pointer; chaining off `move` would silently transfer
+		// the WHOLE binding and then operate on the value, which is
+		// surprising. Force the explicit `let v = x.field; move v`
+		// shape.
+		switch p.peek().Type {
+		case lexer.DOT, lexer.LBRACKET, lexer.LPAREN:
+			return nil, p.errAtTok(p.peek(),
+				"`move` expects a bare identifier; partial moves (`move %s%s...`) are not supported. Extract first: `let v = %s%s...; move v`",
+				idTok.Literal, p.peek().Type.String(),
+				idTok.Literal, p.peek().Type.String())
+		}
+
+		mv := &ast.MoveExpr{Name: idTok.Literal}
+		mv.SetPos(ast.Pos{Line: moveTok.Line, Col: moveTok.Col})
+
+		return mv, nil
+
 	case lexer.KW_YIELD:
 		p.advance()
 

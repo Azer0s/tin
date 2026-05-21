@@ -75,14 +75,12 @@ struct cat_test_point =
   x i64
   y i64
 
-test "++= on a borrowed-view slice (cap < 0) panics" =
-  // fieldnames returns an immortal [atom] with cap = -1.  ++= on it
-  // must fail the runtime cap-check rather than silently allocate a
-  // fresh owned buffer the caller never sees.
-  assert::panics_with(fn() =
-    let p = cat_test_point{x: 1, y: 2}
-    let fields = fieldnames(p)
-    fields ++= ['_dummy], "borrowed view")
+// The "++= on a borrowed-view slice (cap < 0) panics" check has
+// moved to examples/check_flag_test.tin -- the underlying runtime
+// check is now opt-in via --check=append-cap, so verifying the
+// panic requires shelling out with the flag explicitly enabled.
+// In-process assert::panics_with(...) here would no longer fire
+// under the default-off configuration.
 
 // -Walias-mutation rides along with the copy() builtin: the user
 // suppresses it by binding through copy().  The check itself fires

@@ -167,6 +167,51 @@ type scopeEntry struct {
 	// reports an uninit-read under valgrind or atomically corrupts
 	// adjacent stack / .bss memory.
 	pointsToBorrowedStorage bool
+
+	// ownership classifies how the borrow optimizer treats this binding.
+	// See docs/15-ownership.md for the conceptual model and the codegen
+	// rules for each ownership state.
+	ownership ownership
+
+	// isForIterator marks for-loop iteration bindings (`for x in xs`
+	// and friends).  The slot is filled fresh each iteration; an
+	// explicit `move x` on it is rejected with a non-owning-binding
+	// error so the per-iteration retain/release pair stays balanced.
+	isForIterator bool
+}
+
+// ownership is the borrow optimizer's per-binding classification.
+type ownership int
+
+const (
+	// ownershipOwned: binding holds a +1 reference.  Codegen emits
+	// retain at creation (or consumes a fresh +1) and release at
+	// scope exit.  This is the default classification when the
+	// analyzer cannot prove the binding is borrowed or moved.
+	ownershipOwned ownership = iota
+	// ownershipBorrowed: binding aliases a value whose lifetime is
+	// guaranteed elsewhere.  Codegen skips both the entry retain and
+	// the scope-exit release.
+	ownershipBorrowed
+	// ownershipMoved: ownership has been transferred via `move x` or
+	// inferred move at a last-use transfer.  Codegen skips the
+	// scope-exit release.
+	ownershipMoved
+)
+
+// String returns the user-facing ownership name, matching the words
+// `--explain-ownership` prints in its per-binding report.
+func (o ownership) String() string {
+	switch o {
+	case ownershipOwned:
+		return "owned"
+	case ownershipBorrowed:
+		return "borrow"
+	case ownershipMoved:
+		return "move"
+	default:
+		return "unknown"
+	}
 }
 
 type scope struct {

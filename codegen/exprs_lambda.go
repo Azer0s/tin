@@ -113,6 +113,10 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	cg.fnDisplayNames[f.Name()] = "<lambda>"
 
 	prevCtx := cg.pushClosureCtx(f)
+	// Scope the cLayout escape walker's AST lookups to this lambda's
+	// body, not the enclosing fn's -- otherwise a let-decl inside the
+	// lambda would walk the outer body and mismatch on shadowed names.
+	cg.curFnAstBody = e.Body
 	// Recursive lambda self-reference: when genVarDecl plumbed a
 	// `lambdaSelfName`, register a fat-fn-ptr value built from this
 	// lambda's own IR func + its env arg under that name in the new
@@ -181,6 +185,13 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
 				i8Param := entry.NewBitCast(param, irtypes.I8Ptr)
 				entry.NewStore(i8Param, cDataGep)
+
+				// Mark the wrapper as borrowed: c_data_ptr is the C-side
+				// pointer the caller handed us; we do not own its rc-block.
+				flagsIdx := int64(cg.clayoutFlagsIndex(stTe.Name))
+				flagsGep := entry.NewGetElementPtr(wrapperSt, wrapperAlloca,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, flagsIdx))
+				entry.NewStore(constant.NewInt(irtypes.I32, cLayoutFlagBorrowed), flagsGep)
 
 				// Store the wrapper address in the param alloca (type: *(*exvec_wrapper)).
 				alloca := entry.NewAlloca(pt)
@@ -255,6 +266,7 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 	coloredEntry := coloredFn.NewBlock("entry")
 
 	prevCtxC := cg.pushClosureCtx(coloredFn)
+	cg.curFnAstBody = e.Body
 	prevAutoYield := cg.curFnAutoYield
 	prevColoredSync := cg.curFnColoredSync
 	cg.curFnAutoYield = true

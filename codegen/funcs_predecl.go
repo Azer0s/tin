@@ -181,6 +181,16 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Register in funcDecls so that #pure tag checking applies to methods too.
 	key := methodScopeName(structName, m)
 	cg.funcDecls[key] = m
+	// Track receiver shape so the borrow analyzer can keep `t` as a
+	// candidate borrow when every method named `m.Name` takes a value
+	// receiver.  A single pointer-receiver definition (mutating) flips
+	// the flag for that name globally -- conservative: we only need
+	// one definition to potentially mutate before we refuse to borrow.
+	if len(m.Params) > 0 {
+		if _, isPtr := m.Params[0].Type.(*ast.PointerType); isPtr {
+			cg.methodMayMutateReceiver[m.Name] = true
+		}
+	}
 
 	var (
 		err    error

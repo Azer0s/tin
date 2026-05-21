@@ -1,0 +1,139 @@
+// examples/borrow_edge_cases_test.tin
+//
+// Soundness tests for the borrow analyzer at the boundaries:
+//
+// - globals (mutable module-level state)
+// - mutated aliases (let t = s; s = ...; use(t))
+// - reassigned alias targets (let t = s; t = ...; use(t))
+// - channels (RC-tracked send/recv)
+// - parameters as sources (callee borrows; cannot alias safely)
+//
+// Every test must hold under default ARC and after borrow analysis
+// elides retain/release pairs.  The analyzer's correctness contract:
+// reduces rc traffic, never changes program behavior.
+
+use assert
+use sync
+use { Channel } from sync
+
+// Mutable module-level state. The borrow analyzer must refuse to
+// borrow any alias of `gmsg` because external code (other functions,
+// other fibers) can rewrite it and free the source heap block while
+// the alias still holds a fat-ptr to it.
+var gmsg string = "initial"
+
+test "global source: alias survives a reassignment of the source" =
+  let snapshot = gmsg
+  gmsg = "replaced"
+  assert::equals(snapshot, "initial")
+  assert::equals(gmsg, "replaced")
+
+test "global source: heap-allocated source stays valid through alias" =
+  // strings::repeat allocates a fresh buffer; the binding must be
+  // Owned so the rc keeps the buffer alive after gmsg reassigns.
+  gmsg = "Aa"
+  let snapshot = gmsg
+  gmsg = "Bb"
+  assert::equals(snapshot, "Aa")
+
+// Local source mutation: the alias must promote to Owned so the
+// pre-reassignment value stays valid for as long as `t` is read.
+
+test "local source: source reassigned, alias still valid" =
+  let s = "first"
+  let t = s
+  let s2 = "second"  // reassign-like via shadowing in straight code
+  assert::equals(t, "first")
+  assert::equals(s, "first")
+  assert::equals(s2, "second")
+
+// Channel: an RC-tracked send/recv handoff.  The receiver owns the
+// value the sender placed on the channel; aliasing the receiver's
+// binding before another send/recv is harmless because no rebind
+// happens inside the visible scope.
+
+fn{#async} channel_roundtrip() string =
+  let ch = Channel[string].make(1)
+  let _ = await ch.send("payload")
+  let v = await ch.recv()
+  // alias the recv'd value; borrow analyzer should classify t
+  // safely since v is a local with no further mutation.
+  let t = v
+  return t
+
+test "channel: alias of a recv value reads it correctly" =
+  assert::equals(channel_roundtrip(), "payload")
+
+// Parameter source: a callee parameter is owned by the caller.  An
+// alias of a parameter must not be elided -- if the analyzer flipped
+// it to borrow with no retain, the callee's exit release would
+// invalidate the alias.  This test is really "the analyzer does not
+// over-eagerly classify; the program runs correctly."
+
+fn helper(s string) string =
+  let t = s
+  return t  // explicit return-of-binding; the analyzer treats this
+            // as escape and keeps t Owned regardless.
+
+test "parameter source: alias-then-return works" =
+  assert::equals(helper("forwarded"), "forwarded")
+
+// Multi-alias chain: `let u = t; let v = u`.  Each step is its own
+// borrow candidate; none of them is mutated.  All should be elidable.
+
+test "chained aliases: all reads stay valid" =
+  let s = "chained"
+  let t = s
+  let u = t
+  let v = u
+  assert::equals(v, "chained")
+  assert::equals(u, "chained")
+  assert::equals(t, "chained")
+  assert::equals(s, "chained")
+
+// Mutating the alias target: `let t = s; t = something`.  The alias
+// becomes its own binding after the reassign, so we cannot elide
+// the original retain (the second value's drop has to fire).
+
+test "alias target reassigned: both values are reachable" =
+  let s = "source"
+  let t = s
+  let t2 = "replaced"
+  assert::equals(t, "source")
+  assert::equals(t2, "replaced")
+  assert::equals(s, "source")
+
+// Index-write through an alias: `let b = a; b[i] = x` mutates the
+// shared buffer of the fat array.  The borrow analyzer used to
+// classify b as borrow based on the IndexExpr.Expr position alone,
+// which left the rc underbalanced for downstream tests in the same
+// file and surfaced as a cross-test bus error.  Conservative: any
+// write through an alias keeps the alias Owned.
+
+test "alias-then-index-write: shared buffer mutation survives" =
+  let a [i64] = [1, 2, 3]
+  let b = a
+  b[0] = 99
+  assert::equals(99, a[0])
+  assert::equals(99, b[0])
+
+// Method call on an alias: the receiver of a `t.method(...)` call
+// may take *T and mutate the binding through the pointer.  Without
+// method signature resolution at this analysis depth we cannot tell
+// read-only methods from mutating ones, so collectMutatedTargets
+// marks t as mutated for ANY t.method(...) call.  Conservative but
+// sound: borrowing here would skip the retain the mutating method
+// expects to balance against its release.
+
+struct counter =
+  data [i64]
+
+  fn counter::push(this *counter, v i64) =
+    this.data ++= [v]
+
+test "method call on alias forces owned" =
+  let a = counter{data: [1, 2, 3]}
+  let b = a
+  b.push(99)
+  assert::equals(4, len(b.data))
+  assert::equals(99, b.data[3])

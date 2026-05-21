@@ -96,8 +96,12 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	// CallExpr to a native-returning wrapper, but `pre` is the load
 	// produced by buildCLayoutWrapperValue (not the call instruction),
 	// so the underlyingCall branch above misses it.  Detect via the
-	// callee name and release the fresh wrapper here.
-	if call, isCall := astArg.(*ast.CallExpr); isCall {
+	// callee name and release the fresh wrapper here.  Peels through
+	// AsExpr / TypeAssertExpr wrappers so `sum_dyad(c_mix_make(...) as
+	// dyad)` and friends are still recognized as fresh wrapper calls.
+	inner := peelTypeWrappers(astArg)
+
+	if call, isCall := inner.(*ast.CallExpr); isCall {
 		calleeName := ""
 
 		switch fn := call.Func.(type) {
@@ -485,3 +489,21 @@ func (cg *CodeGen) elemNeedsRelease(elemType irtypes.Type) bool {
 
 // extractRCDataPtr extracts the ARC heap data pointer (i8*) from a
 // string, fat-array, or any value.  Returns nil for non-ARC types.
+
+// peelTypeWrappers strips repeated `as T` / `T.(type)` wrappers off an
+// expression so callers can inspect the inner shape (call, identifier,
+// etc.) without caring about lexically-trailing coercions.  Used by
+// inline-consume release detection so `sum_dyad(c_mix_make(...) as dyad)`
+// is still recognized as a fresh wrapper call.
+func peelTypeWrappers(n ast.Node) ast.Node {
+	for {
+		switch e := n.(type) {
+		case *ast.AsExpr:
+			n = e.Expr
+		case *ast.TypeAssertExpr:
+			n = e.Expr
+		default:
+			return n
+		}
+	}
+}

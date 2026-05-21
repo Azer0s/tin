@@ -315,6 +315,26 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 	defaultBlock := cg.newBlock("match.default")
 
+	// Per-arm move tracking: same shape as the int-switch path in
+	// genMatch.  candidates is the union of moves across all arms; the
+	// snapshot/restore wraps each arm so spurious use-after-move errors
+	// do not leak between siblings, and the merged commit at the end
+	// promotes intersection moves to use-after-move while keeping
+	// partial moves rc-balanced via genMoveExpr's pre-move retain.
+	moveCandidates := map[string]bool{}
+	for _, c := range s.Cases {
+		for n := range collectMovedNames(c.Body) {
+			moveCandidates[n] = true
+		}
+	}
+
+	for n := range collectMovedNames(s.Default) {
+		moveCandidates[n] = true
+	}
+
+	preMoveSnap := cg.snapshotMoveState(moveCandidates)
+	branchSets := make([]map[string]bool, 0, len(s.Cases)+1)
+
 	var cases []*ir.Case
 
 	seenTags := make(map[int64]bool, len(s.Cases))
@@ -500,6 +520,9 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 		}
 
 		cg.curScope = cg.curScope.parent
+
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 	}
 
 	block.NewSwitch(tagI64, defaultBlock, cases...)
@@ -514,6 +537,9 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 		}
 
 		cg.curScope = cg.curScope.parent
+
+		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
+		cg.restoreMoveState(preMoveSnap)
 	} else if exhaustive {
 		defaultBlock.NewUnreachable()
 	} else {
@@ -521,6 +547,15 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 
 		anyFallthrough = true
 	}
+	// Empty-move path representing the no-default fall-through when
+	// the match is not exhaustive without a default; see the same
+	// logic in genMatch / genIf.  When the match IS exhaustive (every
+	// variant covered or explicit default) we already have a real
+	// branch set for every reachable path, so no padding is needed.
+	if s.Default == nil && !exhaustive {
+		branchSets = append(branchSets, map[string]bool{})
+	}
+	cg.movedBindings = cg.commitMergedMoves(branchSets, preMoveSnap.moved)
 
 	// Release the scrutinee's owned ARC fields on the merged exit
 	// path. Returns inside an arm already drained matchScrutScope via

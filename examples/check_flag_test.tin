@@ -1,0 +1,41 @@
+// examples/check_flag_test.tin
+//
+// Regression: --check=NAME[,NAME] opts into specific runtime
+// safety checks.  All checks default OFF -- the binary is
+// production-shaped out of the box.  Tests below verify:
+//
+//   - Default OFF: ++= on a borrowed-view silently allocates a fresh
+//     buffer (no panic).
+//   - --check=append-cap: the runtime cap-check fires; ++= on a
+//     borrowed view panics with "borrowed view".
+//   - --check=all: shorthand for "every check on" -- append-cap fires.
+//   - --check=rc-balance,append-cap: comma-separated list opts into
+//     each name; append-cap still fires.
+//   - --no-runtime-checks: back-compat synonym for the new default
+//     (all checks stripped).  Confirms it stays clean when no checks
+//     were enabled.
+
+use assert
+use "./fixtures/run_compiler"
+
+test "append-cap: default OFF -- no panic on borrowed-view ++=" =
+  let r = run_tin_flags("run", "examples/fixtures/check_flag/append_cap_panic.tin", [] as [string])
+  assert::ok(r.exit_code == 0 as i32)
+
+test "append-cap: --check=append-cap opts into the panic" =
+  let r = run_tin_flags("run", "examples/fixtures/check_flag/append_cap_panic.tin", ["--check=append-cap"])
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "borrowed view"))
+
+test "--check=all enables append-cap" =
+  let r = run_tin_flags("run", "examples/fixtures/check_flag/append_cap_panic.tin", ["--check=all"])
+  assert::ok(r.exit_code != 0 as i32)
+
+test "comma-separated list opts into each name" =
+  let r = run_tin_flags("run", "examples/fixtures/check_flag/append_cap_panic.tin", ["--check=rc-balance,append-cap"])
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "borrowed view"))
+
+test "no-runtime-checks back-compat: matches the new default" =
+  let r = run_tin_flags("run", "examples/fixtures/check_flag/append_cap_panic.tin", ["--no-runtime-checks"])
+  assert::ok(r.exit_code == 0 as i32)

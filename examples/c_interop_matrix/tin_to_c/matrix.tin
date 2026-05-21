@@ -364,3 +364,77 @@ test "T46: stack-bound dyad literal stored as holder field is a no-op release" =
   let h = holder{data: dyad{a: 11, b: 22}}
   assert::equals(h.data.a + h.data.b, 33)
 
+test "T47: holder with wrapper-call field, holder doesn't escape" =
+  // `holder{data: c_mix_make(...)}` where the outer holder is bound to
+  // a non-escape let.  The inner cLayout's storage can live alongside
+  // holder in the caller's stack frame -- IR check shows no
+  // _tin_rc_alloc for the dyad portion (stack composite via the
+  // curStructLitOuterIsLocal flag).
+  let h = holder{data: c_mix_make("ab", 4)}
+  assert::equals(h.data.a + h.data.b, 6)
+
+fn extract_holder_data() dyad =
+  // Force the inner cLayout field to escape via let-extract + return.
+  // If the escape walker were to stack-bind the inner dyad, the dyad
+  // value returned here would carry c_data_ptr into our dead stack
+  // frame, and the caller would UAF on the next field read.  Heap
+  // allocation is the only safe choice.
+  let h = holder{data: c_mix_make("zy", 5)}
+  let saved = h.data
+  return saved
+
+test "T48: cLayout field escape via FieldAccess forces heap" =
+  // saved's c_data_ptr must survive past extract_holder_data's frame.
+  // Heap mode is the correct choice; the walker treats h.data as
+  // escape because dyad is the cLayoutStruct field type.
+  let d = extract_holder_data()
+  assert::equals(d.a, 2)
+  assert::equals(d.b, 5)
+
+// Nested non-cLayout struct containing a cLayout field: extracting the
+// outer field still yields a value whose embedded dyad's c_data_ptr
+// references the holder's storage.  The walker's transitive carrier
+// check classifies sub_carrier as a cLayout carrier (it owns a dyad
+// field), so the FieldAccess rule fires for outer.s reads.
+struct sub_carrier =
+  d dyad
+
+struct outer_layered =
+  s sub_carrier
+
+fn extract_layered() dyad =
+  let h = outer_layered{s: sub_carrier{d: c_mix_make("qr", 6)}}
+  let saved = h.s
+  return saved.d
+
+test "T49: nested struct carrying cLayout field escapes via outer field" =
+  let d = extract_layered()
+  assert::equals(d.a, 2)
+  assert::equals(d.b, 6)
+
+test "T50: field reassign of cLayout releases the displaced value" =
+  // Initial dyad stack-binds (holder doesn't escape).  Subsequent
+  // assignments to h.data swap the field to heap-allocated dyads;
+  // genAssign's struct-value branch must load the previous wrapper,
+  // release its rc-block (skip for the initial stack composite,
+  // free for the heap successors), then store the new wrapper --
+  // otherwise every overwrite leaks the displaced block.
+  let h = holder{data: c_mix_make("a", 1)}
+  h.data = c_mix_make("bb", 2)
+  h.data = c_mix_make("ccc", 3)
+  assert::equals(h.data.a, 3)
+  assert::equals(h.data.b, 3)
+
+test "T51: cLayout binding inside a lambda body is scoped to the lambda" =
+  // The escape walker tracks the AST body of the surrounding fn.
+  // For a let-decl inside a lambda body the walker must restrict
+  // its lookups to the lambda's body, otherwise a same-named outer
+  // binding would falsely flag the inner one as escaping.  Both
+  // bindings here only feed scalar field reads, so neither should
+  // leak regardless of which scope analysis picks them up.
+  let d = c_mix_make("outer", 11)
+  let f = fn() i64 =
+    let d = c_mix_make("inner", 22)
+    return d.a + d.b
+  assert::equals(f() + d.a + d.b, 27 + 5 + 11)
+

@@ -115,6 +115,10 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	prevYieldResumeBlocks := cg.yieldResumeBlocks
 	prevCurBlock := cg.curBlock
 	prevDiScope := cg.diCurrentScope
+	// Reset moved-bindings for this body's emission so the outer
+	// sync variant's moves do not poison the coro variant.
+	prevMovedBindings := cg.movedBindings
+	cg.movedBindings = nil
 
 	cg.curBlock = nil
 	cg.yieldResumeBlocks = make(map[*ir.Block]bool)
@@ -370,6 +374,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.yieldResumeBlocks = prevYieldResumeBlocks
 	cg.curBlock = prevCurBlock
 	cg.diCurrentScope = prevDiScope
+	cg.movedBindings = prevMovedBindings
 
 	return nil
 }

@@ -148,6 +148,8 @@ func (cg *CodeGen) genTestRunner() error {
 		prevDeferFrames := cg.pendingDeferFrames
 		prevDeferEnvs := cg.pendingDeferEnvs
 		prevFnAstBody := cg.curFnAstBody
+		prevBorrowSet := cg.currentFnBorrowSet
+		prevMovedBindings := cg.movedBindings
 		cg.curFn = fn
 		cg.curScope = newScope(cg.curScope)
 		cg.curBlock = nil
@@ -156,6 +158,8 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferEnvs = nil
 		cg.labelCount = 0
 		cg.curFnAstBody = td.Body
+		cg.currentFnBorrowSet = cg.analyzeFunctionBorrows(td.Body)
+		cg.movedBindings = nil
 
 		prevMutated := cg.mutatedNames
 		cg.mutatedNames = collectMutatedNames(td.Body)
@@ -182,6 +186,8 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.pendingDeferFrames = prevDeferFrames
 		cg.pendingDeferEnvs = prevDeferEnvs
 		cg.curFnAstBody = prevFnAstBody
+		cg.currentFnBorrowSet = prevBorrowSet
+		cg.movedBindings = prevMovedBindings
 		cg.mutatedNames = prevMutated
 
 		testFuncs[i] = fn

@@ -515,6 +515,12 @@ func (cg *CodeGen) wrapNativeStructToTin(block *ir.Block, val value.Value, struc
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
 		overflowI8 := block.NewBitCast(overflowGEP, irtypes.I8Ptr)
 		block.NewStore(overflowI8, cDataGep)
+		// Zero the borrow flag: Tin owns this rc-block, so retain /
+		// release should follow the c_data_ptr - 1 rc-base trick.
+		flagsIdx := int64(cg.clayoutFlagsIndex(structName))
+		flagsGep := block.NewGetElementPtr(tinSt, tinPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, flagsIdx))
+		block.NewStore(constant.NewInt(irtypes.I32, 0), flagsGep)
 
 		return block.NewLoad(tinSt, tinPtr), nil
 	}
@@ -1557,7 +1563,13 @@ func (cg *CodeGen) emitStructPtrBorrow(block *ir.Block, src value.Value, tgtPt *
 	}
 
 	block.NewStore(i8Src, cDataGep)
-	// Inline fields left zero-init; they are not used for non-handover borrows.
+	// Mark the wrapper as borrowed: c_data_ptr points to C-side memory
+	// outside this rc-block, so emitCLayoutStructRetain / Release must
+	// not chase the c_data_ptr - 1 trick to find an rc-base.
+	flagsIdx := int64(cg.clayoutFlagsIndex(structName))
+	flagsGep := block.NewGetElementPtr(tinSt, tinPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, flagsIdx))
+	block.NewStore(constant.NewInt(irtypes.I32, cLayoutFlagBorrowed), flagsGep)
 
 	return tinPtr
 }
@@ -1654,6 +1666,12 @@ func (cg *CodeGen) emitStructPtrHandover(block *ir.Block, src value.Value, tgtPt
 	cDataGep := block.NewGetElementPtr(tinSt, tinPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
 	block.NewStore(overflowI8, cDataGep)
+	// 6b. Zero the borrow flag: handover copied the data into our
+	// own rc-block, so retain / release uses the c_data_ptr - 1 trick.
+	flagsIdx := int64(cg.clayoutFlagsIndex(structName))
+	flagsGep := block.NewGetElementPtr(tinSt, tinPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, flagsIdx))
+	block.NewStore(constant.NewInt(irtypes.I32, 0), flagsGep)
 	// 7. Free original C pointer (data now lives in the Tin-owned overflow area).
 	block.NewCall(cg.ensureHandoverFree(), i8Src)
 

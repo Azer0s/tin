@@ -680,7 +680,7 @@ func (cg *CodeGen) tryChannelWrapperFastPath(block *ir.Block, callNode *ast.Call
 // completion, keeping its slot available for reuse.
 func (cg *CodeGen) activeSpawnFn() *ir.Func {
 	if cg.stacktraceUsed {
-		// Stacktrace-aware spawn variants (Phase 4 of
+		// Stacktrace-aware spawn variants (see
 		// docs/plans/stacktrace-libunwind.md). The runtime signature
 		// adds a uintptr_t caller_ip at the end; emitSpawnCall is
 		// responsible for materializing it via llvm.returnaddress(0).
@@ -700,8 +700,8 @@ func (cg *CodeGen) activeSpawnFn() *ir.Func {
 
 // ensureLLVMReturnAddress lazily declares the i8*(i32) returnaddress
 // intrinsic used at spawn sites to capture the caller's IP for the
-// stacktrace spawn-chain (Phase 4). Reusing one declaration across
-// every spawn site keeps cg.mod's intrinsic list deduplicated.
+// stacktrace spawn-chain.  Reusing one declaration across every spawn
+// site keeps cg.mod's intrinsic list deduplicated.
 func (cg *CodeGen) ensureLLVMReturnAddress() *ir.Func {
 	if cg.llvmReturnAddressFn != nil {
 		return cg.llvmReturnAddressFn

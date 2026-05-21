@@ -113,6 +113,150 @@ func recordCallees(n ast.Node, out *[]string) {
 	}
 }
 
+// computeSpawnerReachable populates cg.spawnerReachable: the set of
+// functions whose values might escape across a fiber boundary or
+// through a global slot.  A function is in the set when its body
+// directly contains a spawn/await OR a write to a module-level
+// global -- both of which can hand the function's allocations to a
+// different thread -- OR transitively calls any such function.
+//
+// Currently UNSOUND (callers of this set produce conservative answers
+// in funcs.go pending the fixes tracked in task #74):
+//   - recordCallees ignores ScopedAccess and FieldAccess call forms,
+//     so the call graph misses every method and `pkg::name(...)` edge.
+//   - cg.funcDecls keys are inconsistent across regular fns, package
+//     fns, and generic monomorphizations, so name-keyed lookups miss.
+// Keeping the seed logic intact so the analysis is ready to flip back
+// on once those gaps close.
+//
+// Idempotent: returns the cached map if already computed.  Walks
+// cg.callGraph[caller] -> [callees] in a fixpoint until no new
+// callers get tagged.
+func (cg *CodeGen) computeSpawnerReachable() map[string]bool {
+	if cg.spawnerReachable != nil {
+		return cg.spawnerReachable
+	}
+
+	out := map[string]bool{}
+	// Seed: any function whose body crosses a fiber boundary or
+	// writes to a global.
+	for name, decl := range cg.funcDecls {
+		if decl == nil || decl.Body == nil {
+			continue
+		}
+
+		if bodyCrossesFiberBoundary(decl.Body) || cg.bodyWritesToGlobal(decl.Body) {
+			out[name] = true
+		}
+	}
+
+	// Fixpoint: a caller of any tagged function is also tagged.  O(N*N)
+	// worst case; in practice converges in a few rounds since most
+	// call chains are shallow.
+	changed := true
+	for changed {
+		changed = false
+
+		for caller, callees := range cg.callGraph {
+			if out[caller] {
+				continue
+			}
+
+			for _, callee := range callees {
+				if out[callee] {
+					out[caller] = true
+					changed = true
+
+					break
+				}
+			}
+		}
+	}
+
+	cg.spawnerReachable = out
+
+	return out
+}
+
+// computeGlobalMutators populates cg.globalMutators: for each
+// module-level global, the set of functions that may mutate it
+// directly or transitively (via the call graph).  Idempotent.
+//
+// Used by the borrow analyzer to allow `let t = some_global` to be
+// classified as Borrowed when no callee in the current body's call
+// closure mutates that global.  Without this map the analyzer
+// rejects every global alias for safety.
+func (cg *CodeGen) computeGlobalMutators() map[string]map[string]bool {
+	if cg.globalMutators != nil {
+		return cg.globalMutators
+	}
+
+	out := map[string]map[string]bool{}
+	// Seed: each fn's direct global writes.
+	for fnName, decl := range cg.funcDecls {
+		if decl == nil || decl.Body == nil {
+			continue
+		}
+
+		walkAST(decl.Body, func(n ast.Node) {
+			var target ast.Node
+
+			switch v := n.(type) {
+			case *ast.AssignStmt:
+				if v == nil {
+					return
+				}
+
+				target = v.Target
+			case *ast.AugAssignStmt:
+				if v == nil {
+					return
+				}
+
+				target = v.Target
+			default:
+				return
+			}
+
+			name := rootIdentifierName(target)
+			if name == "" {
+				return
+			}
+
+			if _, isGlobal := cg.topLevelVarPos[name]; !isGlobal {
+				return
+			}
+
+			if out[name] == nil {
+				out[name] = map[string]bool{}
+			}
+
+			out[name][fnName] = true
+		})
+	}
+	// Fixpoint upward via callGraph: a caller of a mutator of g is
+	// also a mutator of g.
+	changed := true
+	for changed {
+		changed = false
+
+		for caller, callees := range cg.callGraph {
+			for _, callee := range callees {
+				for _, mutators := range out {
+					if mutators[callee] && !mutators[caller] {
+						mutators[caller] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	cg.globalMutators = out
+
+	return out
+}
+
 // buildCallGraphEntry builds call-graph entries for a single function declaration
 // and all its struct methods.
 func (cg *CodeGen) buildCallGraphEntry(name string, body ast.Node) {

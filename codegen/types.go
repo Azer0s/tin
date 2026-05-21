@@ -1201,6 +1201,23 @@ func (cg *CodeGen) cDataPtrIndex(structName string) int {
 	return cg.userFieldOffset(structName)
 }
 
+// clayoutFlagsIndex returns the LLVM field index of the i32 flags field
+// for cLayoutStructs (placed immediately after c_data_ptr).  Returns -1
+// for non-cLayout structs.  Bit 0 = "borrowed" (c_data_ptr is foreign).
+func (cg *CodeGen) clayoutFlagsIndex(structName string) int {
+	if !cg.cLayoutStructs[structName] {
+		return -1
+	}
+
+	return cg.cDataPtrIndex(structName) + 1
+}
+
+// cLayoutFlagBorrowed is bit 0 of the wrapper's flags field.  When set,
+// emitCLayoutStructRetain / Release no-op: the wrapper aliases memory
+// outside its own rc-block (typically a pointer-extern return), so the
+// c_data_ptr - 1 retain trick would corrupt unrelated memory.
+const cLayoutFlagBorrowed = int64(1)
+
 // fieldIndex returns the LLVM struct field index for a named user field.
 // For regular structs: returns userFieldOffset + i (wrapper GEP index).
 // For cLayoutStructs: returns the native field index (0-based within %S.native).

@@ -26,6 +26,8 @@ func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
 		coroCleanup:       cg.curCoroCleanup,
 		coroFrame:         cg.curCoroFrame,
 		coroRetType:       cg.curCoroRetType,
+		fnAstBody:         cg.curFnAstBody,
+		movedBindings:     cg.movedBindings,
 	}
 
 	cg.curFn = f
@@ -36,6 +38,13 @@ func (cg *CodeGen) pushClosureCtx(f *ir.Func) closureCtx {
 	cg.curDeferRetSlotParam = nil
 	cg.curFnDeferRetAlloca = nil
 	cg.curDeferThunkRetType = nil
+	// Reset to nil; the closure/thunk caller is responsible for setting
+	// curFnAstBody to the body that will actually be emitted so the
+	// cLayout escape walker scopes its name lookups to that body.
+	cg.curFnAstBody = nil
+	// Each closure / thunk emission starts with its own moved-bindings
+	// set so the outer fn's moves do not poison this body's reads.
+	cg.movedBindings = nil
 	// Thunks and closures are plain functions, not coroutines.  Reset
 	// every "we're inside a fiber/coroutine body" flag so the closure's
 	// own body emits as a plain sync fn -- otherwise yield-insertion
@@ -80,6 +89,8 @@ func (cg *CodeGen) popClosureCtx(prev closureCtx) {
 	cg.curCoroCleanup = prev.coroCleanup
 	cg.curCoroFrame = prev.coroFrame
 	cg.curCoroRetType = prev.coroRetType
+	cg.curFnAstBody = prev.fnAstBody
+	cg.movedBindings = prev.movedBindings
 }
 
 // buildEnv heap-allocates an env struct for the given captures and stores each

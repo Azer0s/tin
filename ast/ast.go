@@ -906,6 +906,17 @@ type AwaitExpr struct {
 	Future Node
 }
 
+// MoveExpr explicitly transfers ownership of a local binding to its
+// consumer.  Source-level form: `move x`, where `x` must be a local
+// `let`-binding that the current scope owns.  Codegen emits the
+// binding's current value AND marks the scope entry as ownershipMoved
+// so the scope-exit release is elided and any subsequent use of `x`
+// becomes a compile error.  See docs/15-ownership.md for the model.
+type MoveExpr struct {
+	base
+	Name string // the identifier being moved (e.g. "x")
+}
+
 // TryExpr propagates a fallible-typed expression: `try foo()`.
 // Codegen desugars to:
 //

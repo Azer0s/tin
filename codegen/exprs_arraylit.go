@@ -564,7 +564,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				break
 			}
 
-			val, err := cg.genExpr(block, v)
+			val, err := cg.genStructLitFieldValue(block, v)
 			if err != nil {
 				return nil, err
 			}
@@ -629,7 +629,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 
 			idx := userOff + rawIdx
 
-			val, err := cg.genArgWithTargetType(block, f.Value, st.Fields[idx])
+			val, err := cg.genStructLitFieldValueTyped(block, f.Value, st.Fields[idx])
 			if err != nil {
 				return nil, err
 			}
@@ -756,19 +756,27 @@ func (cg *CodeGen) genCLayoutStructLit(block *ir.Block, e *ast.StructLit, typeNa
 		return nil, fmt.Errorf("cLayoutStruct %s: missing native type", typeName)
 	}
 
-	// Stack-allocate a composite [TinRCHdr | wrapper | native] block so that
-	// the same release path used for heap-bound (_tin_rc_alloc'd) cLayout
-	// values works here too -- _tin_release(c_data_ptr - sizeof(wrapper))
-	// reads the RC header at the rcSlot, sees TIN_IMMORTAL_RC, and skips.
-	// Without this sentinel the same release call would read random adjacent
-	// stack memory and either segfault or atomically corrupt unrelated locals.
-	compositeTy := irtypes.NewStruct(irtypes.I64, st, nativeSt)
+	// Stack-allocate a composite [TinRCHdr | wrapper | native] block so the
+	// same release path used for heap-bound (_tin_rc_alloc'd) cLayout
+	// values works here too: _tin_release(c_data_ptr - sizeof(wrapper))
+	// reads `*(ptr - sizeof(TinRCHdr))`, sees TIN_IMMORTAL_RC in the
+	// sentinel, and skips.  The RCHdr slot is sized to match the runtime's
+	// 16-byte TinRCHdr ({ int64_t rc; int64_t shared }); writing the rc
+	// field (slot 0 of the [2 x i64]) to -1 makes the release a safe
+	// no-op.  Without matching that size the release would read random
+	// adjacent stack memory and either segfault or atomically corrupt
+	// unrelated locals.  runtime/runtime.h pins this with a _Static_assert
+	// -- if it ever fires, this composite (and allocCLayoutReturnBuffer's
+	// stack-mode path) needs an update in lockstep.
+	rcHdrTy := irtypes.NewArray(2, irtypes.I64)
+	compositeTy := irtypes.NewStruct(rcHdrTy, st, nativeSt)
 	composite := block.NewAlloca(compositeTy)
 	block.NewStore(constant.NewZeroInitializer(compositeTy), composite)
 
-	rcSlotGep := block.NewGetElementPtr(compositeTy, composite,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(constant.NewInt(irtypes.I64, -1), rcSlotGep)
+	rcFieldGep := block.NewGetElementPtr(compositeTy, composite,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0),
+		constant.NewInt(irtypes.I32, 0))
+	block.NewStore(constant.NewInt(irtypes.I64, -1), rcFieldGep)
 
 	wrapperAlloca := block.NewGetElementPtr(compositeTy, composite,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
@@ -1061,3 +1069,94 @@ func (cg *CodeGen) genTupleLit(block *ir.Block, tup *ast.TupleLit, expectedType 
 // alloca), the array is implicitly decayed to its first-element pointer
 // so `buf[0..n]` reads as `(&buf[0])[0..n]` - the natural way to splice
 // out an ARC-managed slice without a separate `&` and an extern call.
+
+// resolveCLayoutWrapperCall returns the cLayoutStruct name when value is
+// a CallExpr (post-AsExpr / TypeAssertExpr peel) whose callee is a
+// cLayoutStruct-value-returning extern wrapper.  Empty string means
+// "not a recognized cLayoutWrapper call".  Used by both
+// maybeMarkCLayoutStackBind and the per-struct-field hook so the lookup
+// logic stays in one place.
+func (cg *CodeGen) resolveCLayoutWrapperCall(value ast.Node) string {
+	callExpr, isCall := peelTypeWrappers(value).(*ast.CallExpr)
+	if !isCall {
+		return ""
+	}
+
+	calleeName := ""
+
+	switch fn := callExpr.Func.(type) {
+	case *ast.Identifier:
+		calleeName = fn.Name
+	case *ast.ScopeAccess:
+		calleeName = strings.Join(fn.Path, "__")
+	}
+
+	if calleeName == "" {
+		return ""
+	}
+
+	if structName, ok := cg.cLayoutWrapperNativeReturnFns[calleeName]; ok {
+		return structName
+	}
+
+	if entry, ok := cg.curScope.lookup(calleeName); ok {
+		if f, isFn := entry.val.(*ir.Func); isFn {
+			if structName, ok2 := cg.cLayoutWrapperNativeReturnFns[f.Name()]; ok2 {
+				return structName
+			}
+		}
+	}
+
+	return ""
+}
+
+// genStructLitFieldValue evaluates v as a struct-literal positional
+// field, transparently priming nextCLayoutStackBind when:
+//   - the enclosing struct-literal is in a non-escape context
+//     (curStructLitOuterIsLocal is set), AND
+//   - v is a CallExpr to a cLayoutStruct-returning wrapper whose struct
+//     does not have any *this-receiver method.
+//
+// Uses defer to restore the previous flag value even if genExpr panics,
+// so a runaway error doesn't leak the flag into the next field.
+func (cg *CodeGen) genStructLitFieldValue(block *ir.Block, v ast.Node) (value.Value, error) {
+	restore := cg.primeCLayoutStackBindForField(v)
+	defer restore()
+
+	return cg.genExpr(block, v)
+}
+
+// genStructLitFieldValueTyped is the typed-target variant for named-field
+// struct literals (`S{name: expr}`); same priming behavior as
+// genStructLitFieldValue but routes through genArgWithTargetType so the
+// declared field type drives coercion.
+func (cg *CodeGen) genStructLitFieldValueTyped(block *ir.Block, v ast.Node, target irtypes.Type) (value.Value, error) {
+	restore := cg.primeCLayoutStackBindForField(v)
+	defer restore()
+
+	return cg.genArgWithTargetType(block, v, target)
+}
+
+// primeCLayoutStackBindForField sets nextCLayoutStackBind when v is a
+// cLayoutWrapper call AND the enclosing struct lit is non-escape AND the
+// struct has no *this-receiver method.  Returns a restore func.
+func (cg *CodeGen) primeCLayoutStackBindForField(v ast.Node) func() {
+	prev := cg.nextCLayoutStackBind
+
+	if !cg.curStructLitOuterIsLocal {
+		return func() { cg.nextCLayoutStackBind = prev }
+	}
+
+	structName := cg.resolveCLayoutWrapperCall(v)
+	if structName == "" {
+		return func() { cg.nextCLayoutStackBind = prev }
+	}
+
+	if cg.structHasPointerReceiverMethod(structName) {
+		return func() { cg.nextCLayoutStackBind = prev }
+	}
+
+	cg.nextCLayoutStackBind = structName
+
+	return func() { cg.nextCLayoutStackBind = prev }
+}

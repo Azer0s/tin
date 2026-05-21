@@ -1301,24 +1301,57 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 // Heap mode (default): _tin_rc_alloc the [wrapper | native] block exactly
 // as the pre-out-param wrapper used to do internally; layout and release
 // math are unchanged.
-func (cg *CodeGen) allocCLayoutReturnBuffer(block *ir.Block, structName string, _ *ast.CallExpr) value.Value {
+func (cg *CodeGen) allocCLayoutReturnBuffer(block *ir.Block, structName string, callExpr *ast.CallExpr) value.Value {
 	tinSt := cg.structTypeFor(CanonKey(structName))
 	nativeSt := cg.nativeStructTypes[structName]
 
 	if tinSt == nil || nativeSt == nil {
-		panic(fmt.Sprintf("allocCLayoutReturnBuffer: missing IR types for %q", structName))
+		pos := ""
+
+		if callExpr != nil {
+			pos = fmt.Sprintf(" at %s", callExpr.Pos())
+		}
+
+		panic(fmt.Sprintf("internal: allocCLayoutReturnBuffer needs IR types for cLayoutStruct %q (tinSt=%v, nativeSt=%v)%s -- the wrapper was registered in cLayoutWrapperNativeReturnFns but the struct's LLVM types aren't lowered yet",
+			structName, tinSt != nil, nativeSt != nil, pos))
 	}
 
 	if cg.nextCLayoutStackBind == structName {
-		compositeTy := irtypes.NewStruct(irtypes.I64, tinSt, nativeSt)
+		// Consume the flag immediately so that nested cLayout extern calls
+		// inside the same let-binding RHS (e.g. `let d = c_outer(c_inner(...))`)
+		// don't all stack-bind -- only the outermost call's result is bound
+		// to the binding the escape analysis covered; the inner call's
+		// result flows into the outer's argument list and therefore escapes.
+		cg.nextCLayoutStackBind = ""
+
+		// Composite mirrors a heap rc-block: [TinRCHdr | wrapper | native]
+		// with the RCHdr slot sized to match the runtime's 16-byte header
+		// (TinRCHdr = { u32 rc; u32 flags; u64 _pad }).  `_tin_release(ptr)`
+		// reads `*(ptr - sizeof(TinRCHdr))` and checks `flags & IMMORTAL`,
+		// so the stack slot's first 8 bytes carry the IMMORTAL bit and the
+		// 8 bytes are padding -- writing the second half is optional but
+		// keeps the layout self-describing and crash-safe under valgrind.
+		// runtime/runtime.h pins sizeof(TinRCHdr) == 16 via _Static_assert
+		// -- if it fires, update the rcHdrTy here AND in genCLayoutStructLit
+		// in lockstep.
+		rcHdrTy := irtypes.NewArray(2, irtypes.I64)
+		compositeTy := irtypes.NewStruct(rcHdrTy, tinSt, nativeSt)
 		composite := cg.hoistAlloca(block, compositeTy)
-		// Write the IMMORTAL_RC sentinel into slot 0.  hoistAlloca leaves
-		// us in the entry block at fn start; the store goes in the caller's
-		// current block since the slot must be set before each call (the
-		// alloca itself is reused across loop iterations).
-		rcSlotGep := block.NewGetElementPtr(compositeTy, composite,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(constant.NewInt(irtypes.I64, -1), rcSlotGep)
+
+		// One-shot IMMORTAL_RC sentinel store in the same entry block the
+		// alloca lives in -- the slot's value never changes between calls,
+		// so a single write suffices and avoids per-call store traffic in
+		// hot loops.  Falls back to the current block if hoistAlloca
+		// couldn't reach an entry block.
+		entryBlock := block
+		if cg.curFn != nil && len(cg.curFn.Blocks) > 0 {
+			entryBlock = cg.curFn.Blocks[0]
+		}
+
+		rcFieldGep := entryBlock.NewGetElementPtr(compositeTy, composite,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 0))
+		entryBlock.NewStore(constant.NewInt(irtypes.I64, -1), rcFieldGep)
 
 		nativePtr := block.NewGetElementPtr(compositeTy, composite,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))

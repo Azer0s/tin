@@ -302,8 +302,15 @@ type CodeGen struct {
 
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
+	rcAllocLocalFn             *ir.Func // _tin_rc_alloc_local(size i64) i8*  (biased: starts shared=0)
+	makeSharedFn               *ir.Func // _tin_make_shared(ptr i8*)
 	retainFn                   *ir.Func // _tin_retain(ptr i8*)
 	releaseFn                  *ir.Func // _tin_release(ptr i8*)
+	retainPtrFn                *ir.Func // _tin_retain_ptr(ptr i8*) -- provenance-aware
+	releasePtrFn               *ir.Func // _tin_release_ptr(ptr i8*) -- provenance-aware
+	isManagedFn                *ir.Func // _tin_is_managed(ptr i8*) -> i32
+	clayoutRetainFn            *ir.Func // _tin_retain_clayout(ptr i8*, flags i32)
+	clayoutReleaseFn           *ir.Func // _tin_release_clayout(ptr i8*, flags i32)
 	releaseStructFn            *ir.Func // _tin_release_struct(ptr i8*) i64
 	releaseFatElemArrayFn      *ir.Func // _tin_release_fat_elem_array(data i8*, count i64)
 	releaseAnyElemArrayFn      *ir.Func // _tin_release_any_elem_array(data i8*, count i64)
@@ -493,6 +500,36 @@ type CodeGen struct {
 	// evaluation, then clears it.  Empty string means use the heap path.
 	nextCLayoutStackBind string
 
+	// structPtrReceiverCache memoizes structHasPointerReceiverMethod's
+	// answer per struct name.  The walk over funcDecls + structImpls is
+	// O(N_methods + N_traits * N_methods_per_trait), invoked once per
+	// cLayout-returning let-binding; without a cache the cost compounds
+	// quadratically with the number of cLayout-returning let-bindings in
+	// large codebases.
+	//
+	// The companion `*Sig` fields snapshot the size signal that drove the
+	// last cache fill: outer map lengths catch additions of new structs
+	// / functions, while structImplsSumLen catches trait-impl slices
+	// being EXTENDED on an existing struct key (a trait added late by
+	// monomorphization or REPL cell that wouldn't change
+	// len(structImpls)).  Any mismatch triggers a flush + lazy recompute.
+	// True overwrites (same key, replaced value -- rare outside REPL)
+	// still need an explicit invalidation; InvalidateStructPtrReceiverCache
+	// is exposed for callers that know they've done one.
+	structPtrReceiverCache                  map[string]bool
+	structPtrReceiverCacheFuncDeclsLen      int
+	structPtrReceiverCacheStructImplsN      int
+	structPtrReceiverCacheStructImplsSumLen int
+
+	// curStructLitOuterIsLocal is set by maybeMarkCLayoutStackBind when
+	// the enclosing let-binding holds a StructLit whose outer struct
+	// doesn't escape.  genStructLit consults this flag while emitting
+	// each field initializer: if the value is a cLayoutStruct-returning
+	// wrapper call, it sets nextCLayoutStackBind for that single field
+	// so the inner cLayoutStruct stack-binds alongside the outer's
+	// caller-frame storage.  Cleared by genVarDecl's defer.
+	curStructLitOuterIsLocal bool
+
 	// curFnAstBody is the AST body of the function or test being codegen'd.
 	// Set by genFuncDeclAs and the test runner before emitting the body, used
 	// by escape analysis on let-bindings (which need to walk the surrounding
@@ -541,6 +578,46 @@ type CodeGen struct {
 	// funcDecls: function name -> FuncDecl AST, populated during predeclaration.
 	// Used by the #pure transitive side-effect checker.
 	funcDecls map[string]*ast.FuncDecl
+
+	// methodMayMutateReceiver: method base name -> true if any
+	// definition with this base name takes a pointer receiver (and
+	// therefore could mutate the receiver's storage through `*this`).
+	// Populated during predeclareMethod.  Used by the borrow
+	// analyzer to decide whether `t.method(...)` should force `t`
+	// to Owned: an entry of true means yes, conservatively; absence
+	// (or false) means every definition has a value receiver and
+	// the call cannot mutate the caller's binding, so the analyzer
+	// can keep `t` as a candidate borrow.
+	methodMayMutateReceiver map[string]bool
+
+	// curFnSyncLocal is true when codegenning the body of a function
+	// that the call-graph analyzer proved is NOT reachable from any
+	// {#async} root.  Such a function never runs on a fiber, its
+	// captures never cross a thread, and ARC blocks it allocates
+	// stay confined to the spawn-free caller -- so retain/release
+	// on those blocks can use non-atomic ops.  Codegen routes
+	// _tin_rc_alloc calls through _tin_rc_alloc_local when this
+	// flag is set; the runtime still upgrades to atomic on any
+	// _tin_make_shared if the analysis turned out wrong.
+	// See docs/15-ownership.md "Biased reference counting".
+	curFnSyncLocal bool
+
+	// spawnerReachable: function-name set populated by
+	// computeSpawnerReachable.  A function is "spawner-reachable"
+	// when it directly contains a spawn/await OR transitively
+	// calls a function that does.  Used by the biased-RC analyzer:
+	// any value flowing through such a function might end up on a
+	// spawned fiber's thread, so its allocs must use the atomic
+	// (shared=1) allocator.
+	spawnerReachable map[string]bool
+
+	// globalMutators: global var name -> set of fn names that may
+	// mutate that global (directly or transitively).  Built once via
+	// computeGlobalMutators after the call graph is populated.  The
+	// borrow analyzer consults this map to relax the "no borrow of
+	// global aliases" rule: `let t = some_global` is borrow-safe
+	// when no callee in the body's call closure mutates the global.
+	globalMutators map[string]map[string]bool
 
 	// ctfeCache memoizes the result of tryEvalPureCallToCtfeVal keyed by a
 	// fingerprint of (function name, argument values). A repeated call with
@@ -718,6 +795,46 @@ type CodeGen struct {
 	// storage; only meaningful for tight loops that have been audited.
 	noRuntimeChecks bool
 
+	// explainOwnershipSpec, when non-empty, asks the borrow optimizer to
+	// emit a per-binding ownership report at end of codegen. "*" prints
+	// everything; "fnName" filters by function; "file.tin:fnName"
+	// filters by both. Set via --explain-ownership[=spec].
+	explainOwnershipSpec string
+	// explainOwnershipReport accumulates "fn: bindingName ownership note"
+	// lines as the analyzer classifies each binding. Flushed to stderr
+	// by FinalizeExplainOwnership at the end of the compilation unit.
+	explainOwnershipReport []ownershipReportEntry
+
+	// currentFnBorrowSet is the per-function output of
+	// analyzeFunctionBorrows: names of bindings the analyzer
+	// classified as Borrowed for the function currently being
+	// codegenned. Reset at function entry. Empty when
+	// ownershipBorrowEnabled is false.
+	currentFnBorrowSet map[string]bool
+
+	// movedBindings tracks names of let-bindings that have been
+	// explicitly moved via `move x` within the function body
+	// currently being codegenned. genIdentifier consults this set
+	// at every read and raises use-after-move on names that appear.
+	// Reset at function entry alongside currentFnBorrowSet.
+	movedBindings map[string]bool
+	// pendingMoveSelfName is set during VarDecl codegen when the
+	// initializer is a MoveExpr targeting the same binding name (the
+	// pathological `let x = move x` case).  genMoveExpr checks this
+	// and errors with a clearer message than the generic
+	// use-after-move path would produce.
+	pendingMoveSelfName string
+
+	// partialMovedStack is a stack of "binding is partially moved
+	// across this branching construct" sets.  Pushed by genIf /
+	// genMatch before codegenning their branches when the pre-analysis
+	// shows the binding is moved on some paths but not all.
+	// genMoveExpr consults the stack and emits a balancing retain
+	// before reading the value, so that the merged outer scope's
+	// release path stays rc-balanced regardless of which branch
+	// runs.  See docs/15-ownership.md "Per-branch move tracking".
+	partialMovedStack []map[string]bool
+
 	// diags tracks per-warning suppression / escalation preferences. Keyed
 	// by canonical diagnostic name (see codegen/diag.go for constants).
 	diags map[string]*diagState
@@ -889,7 +1006,7 @@ type CodeGen struct {
 	// Fiber runtime functions (lazily declared by ensureFiberRuntime).
 	fiberSpawnFn              *ir.Func
 	fiberSpawnJoinableFn      *ir.Func // _tin_fiber_spawn_joinable: sets prejoined=1 on TinFiber
-	fiberSpawnChainFn         *ir.Func // _tin_fiber_spawn_chain: stacktrace-aware (Phase 4)
+	fiberSpawnChainFn         *ir.Func // _tin_fiber_spawn_chain: stacktrace-aware
 	fiberSpawnJoinableChainFn *ir.Func // _tin_fiber_spawn_joinable_chain: prejoined+stacktrace
 	llvmReturnAddressFn       *ir.Func // llvm.returnaddress intrinsic for spawn-site IP capture
 	// spawnFireForget: when true, activeSpawnFn() returns fiberSpawnFn (prejoined=0).

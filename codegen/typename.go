@@ -11,8 +11,9 @@ package codegen
 // TypeRecord (below) is the next layer: instead of N parallel maps each
 // keyed by a raw string ("structTypes", "dataDecls", "traits", ...),
 // codegen tracks one record per Tin type and accesses every aspect
-// through that record.  Phase 1 of the registry refactor populates this
-// alongside the existing maps; later phases delete the old maps.
+// through that record.  The registry is populated alongside the
+// existing maps; the per-aspect maps are migrated away from
+// incrementally.
 //
 // Construct only via the typeNameFrom* helpers below.
 
@@ -37,9 +38,9 @@ type CanonKey string
 //
 // Construction is via cg.upsertTypeRecord (which gets-or-creates by
 // CanonKey); mutation happens at the existing write sites that
-// register the type in the per-aspect maps.  Phase 1 populates
-// records but reads still go through the old maps; later phases
-// migrate readers and delete the maps.
+// register the type in the per-aspect maps.  Writes populate the
+// record alongside the old maps; readers are being migrated from the
+// maps to the record incrementally.
 type TypeRecord struct {
 	// Canonical identity.  Set at first registration; immutable after.
 	Canon  CanonKey
@@ -72,7 +73,7 @@ type TypeRecord struct {
 	Aliases map[string]string
 
 	// constrainedFuncInstances per-type, etc. -- additional facets
-	// land here as phases progress.
+	// land here as the registry grows.
 }
 
 // upsertTypeRecord returns the TypeRecord for canon, creating an empty
@@ -81,7 +82,7 @@ type TypeRecord struct {
 //
 // The returned pointer is stable for the lifetime of the CodeGen, so
 // callers can stash it and avoid repeated map lookups -- the eventual
-// phase 4 endpoint where TypeName carries the *TypeRecord.
+// endpoint is for TypeName to carry the *TypeRecord directly.
 func (cg *CodeGen) upsertTypeRecord(canon CanonKey) *TypeRecord {
 	if cg.types == nil {
 		cg.types = make(map[CanonKey]*TypeRecord)
@@ -334,9 +335,9 @@ func (cg *CodeGen) prettyForExpr(te ast.TypeExpr) string {
 
 // Typed read accessors over the registry.  Each returns the value
 // stored on the TypeRecord for canon, or the zero value if no record
-// exists (matching the existing map-lookup semantics).  Phase 2 of the
-// registry refactor migrates read sites from the per-aspect maps to
-// these accessors; later phases delete the maps.
+// exists (matching the existing map-lookup semantics).  Read sites
+// are migrated from the per-aspect maps to these accessors so the
+// maps can eventually be deleted.
 
 // llvmTypeFor returns the LLVM type for canon, or nil if unknown.
 func (cg *CodeGen) llvmTypeFor(canon CanonKey) irtypes.Type {

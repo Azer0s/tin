@@ -41,6 +41,9 @@ macro clamp!(x, lo, hi) = return x < lo ? lo : (x > hi ? hi : x)
 // dbg!(x) - identity: returns x unchanged (placeholder for debug tracing).
 macro dbg!(x) = `x`
 
+// run is an alias for `await spawn`
+macro{#no_parens #no_excl} run() = `await spawn`
+
 // try!(r) - Rust-style early-return for Result[t, e]. Inside a function whose
 // return type is Result[u, e], `let v = try!(r)` evaluates r once: on Ok(v) it
 // binds the inner value and continues, on Err it propagates `Err(e)` up by
@@ -49,7 +52,7 @@ macro dbg!(x) = `x`
 //   fn double(s string) Result[i64, string] =
 //     let n i64 = try!(parse_pos(s))
 //     return Ok(n * 2)
-macro try!(r) = `match r:
+macro try!(r) = `match {r}:
   case Ok(v):  v
   case Err(e): return Err(e)`
 
@@ -59,7 +62,7 @@ macro try!(r) = `match r:
 //   fn first_doubled(xs [i64]) Option[i64] =
 //     let n i64 = try_some!(first(xs))
 //     return Some(n * 2)
-macro try_some!(o) = `match o:
+macro try_some!(o) = `match {o}:
   case Some(v): v
   case None:    return None`
 

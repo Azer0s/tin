@@ -332,7 +332,32 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	// iface block the field still pointed at).
 	isTraitIfacePtrElem := false
 
-	if _, isFieldTarget := s.Target.(*ast.FieldAccess); isFieldTarget {
+	// Same shape-test for both FieldAccess targets (struct field writes)
+	// and Identifier targets whose declared type is a managed pointer.
+	//
+	// FieldAccess: always fires (struct field IS owning by convention).
+	// Identifier: fires when the binding is already owning (subsequent
+	// owning store), OR when the rvalue is a fresh owning source (first
+	// promotion from borrow / uninit to owning).  Skips Identifier ←
+	// Identifier borrow-alias rebinding (cursor pattern) so a `cur =
+	// node` step does NOT release the previous cursor value, which
+	// might still be owned by another binding.
+	isIdentTarget := false
+
+	var identEntry *scopeEntry
+	if id, ok2 := s.Target.(*ast.Identifier); ok2 {
+		if entry, ok3 := cg.curScope.lookup(id.Name); ok3 && entry.declaredLet && !entry.isGlobal {
+			isIdentTarget = true
+			identEntry = entry
+		}
+	}
+
+	_, isFieldTarget := s.Target.(*ast.FieldAccess)
+
+	considerPtrTarget := isFieldTarget ||
+		(isIdentTarget && (identEntry.ownsPtrViaRetain || !isCopyExpr(s.Value)))
+
+	if considerPtrTarget {
 		if ept, ok6 := ptrType.ElemType.(*irtypes.PointerType); ok6 {
 			if innerSt, ok7 := ept.ElemType.(*irtypes.StructType); ok7 && innerSt.Name() != "" {
 				isTinStructPtrElem = cg.structTypeFor(CanonKey(innerSt.Name())) != nil
@@ -358,8 +383,24 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 			}
 		}
 
-		oldVal := block.NewLoad(ptrType.ElemType, ptr)
-		cg.emitRelease(block, oldVal)
+		// Release the previous slot value when:
+		//   - FieldAccess targets (struct field owns its slot), OR
+		//   - Identifier targets whose binding already owns.
+		// First promotion from borrow / uninit to owning skips the
+		// release because the slot held either nil or a borrow-alias
+		// the binding never retained.
+		if !isIdentTarget || (identEntry != nil && identEntry.ownsPtrViaRetain) {
+			oldVal := block.NewLoad(ptrType.ElemType, ptr)
+			cg.emitRelease(block, oldVal)
+		}
+		// Promote the Identifier binding to owning after the store so
+		// scope-exit release fires for every subsequent owning store
+		// against this slot.  FieldAccess targets do not touch the
+		// binding's ownership state -- struct-field ownership lives in
+		// the struct's release helper.
+		if (isTinStructPtrElem || isTraitIfacePtrElem) && isIdentTarget && identEntry != nil {
+			identEntry.ownsPtrViaRetain = true
+		}
 	} else if !isWeakTarget {
 		// Struct values: release the previous value if it has any RC-tracked
 		// fields (string, [T], any, fn, nested struct) or an explicit deinit.
@@ -639,6 +680,9 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		ptrIsNull := block.NewICmp(enum.IPredEQ, oldI8Ptr, nullPtr)
 
 		// rcHdr = oldPtr - sizeof(TinRCHdr)  (TinRCHdr is 16 bytes).
+		// Header layout: { u32 rc; u32 flags; u64 _pad; }.  Read only
+		// the rc field (first 4 bytes); reading the whole first
+		// 8 bytes would mix flag bits into the comparison.
 		negHdr := constant.NewInt(irtypes.I64, -16)
 		hdrPtr := block.NewGetElementPtr(irtypes.I8, oldI8Ptr, negHdr)
 		// When oldPtr is null we cannot deref hdrPtr: select a safe
@@ -647,9 +691,9 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		// `rcVal == 1` check and forces the grow path.
 		zeroRC := cg.newGlobalString("\x00\x00\x00\x00\x00\x00\x00\x00")
 		safeI8Ptr := block.NewSelect(ptrIsNull, zeroRC, hdrPtr)
-		safeI64Ptr := block.NewBitCast(safeI8Ptr, irtypes.NewPointer(irtypes.I64))
-		rcVal := block.NewLoad(irtypes.I64, safeI64Ptr)
-		isOwned := block.NewICmp(enum.IPredEQ, rcVal, constant.NewInt(irtypes.I64, 1))
+		safeI32Ptr := block.NewBitCast(safeI8Ptr, irtypes.NewPointer(irtypes.I32))
+		rcVal := block.NewLoad(irtypes.I32, safeI32Ptr)
+		isOwned := block.NewICmp(enum.IPredEQ, rcVal, constant.NewInt(irtypes.I32, 1))
 
 		notNull := block.NewICmp(enum.IPredNE, oldI8Ptr, nullPtr)
 		canInPlace := block.NewAnd(hasCap, isOwned)

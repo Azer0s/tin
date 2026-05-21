@@ -242,9 +242,14 @@ func (cg *CodeGen) genStructLayout(n *ast.StructDecl) error {
 		// not create a second LLVM type definition.
 		cg.recordLLVM(CanonKey(structKey+".native"), nativeSt)
 
-		// Wrapper: { i32, vtable_ptrs..., i8* c_data_ptr }
+		// Wrapper: { i32 type_id, vtable_ptrs..., i8* c_data_ptr, i32 flags }
+		// flags bit 0 = "borrowed": c_data_ptr points to memory the wrapper
+		// does not own (e.g. pointer-extern returns wrap a C-side pointer).
+		// emitCLayoutStructRetain / emitCLayoutStructRelease branch on this
+		// bit and no-op when set, so retain/release on a borrowed wrapper
+		// does not corrupt unrelated memory via the c_data_ptr - 1 trick.
 		wrapperFields := append([]irtypes.Type{irtypes.I32},
-			append(vtableFieldTypes, irtypes.I8Ptr)...)
+			append(vtableFieldTypes, irtypes.I8Ptr, irtypes.I32)...)
 		st.Fields = wrapperFields
 	} else {
 		// Final layout: [i32 type_id, vtable_0*, ..., user_field_0, ...]

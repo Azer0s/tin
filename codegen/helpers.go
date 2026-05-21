@@ -83,6 +83,8 @@ type closureCtx struct {
 	coroCleanup       *ir.Block
 	coroFrame         *coroFrame
 	coroRetType       irtypes.Type
+	fnAstBody         ast.Node
+	movedBindings     map[string]bool
 }
 
 // pushClosureCtx saves the current function context, switches cg to f, and

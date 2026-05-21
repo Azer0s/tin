@@ -1,0 +1,31 @@
+// Regression: `let p *Foo` (forward-declared, no initializer) followed
+// by branched assignment used to leak every value the branches store
+// into p.  The assignment codegen only set isTinStructPtrElem and the
+// retain/release/ownsPtrViaRetain bookkeeping for FieldAccess targets,
+// so Identifier targets fell through to a bare `block.NewStore(...)`
+// and emitScopeRelease saw no ownsPtrViaRetain flag at function exit.
+//
+// Verified with `--leaks` -- pure-Tin code, no FFI involved.  100k
+// iterations leaked 200k allocations before the fix, 0 after.
+
+struct Foo =
+  x i64
+
+fn make_foo(n i64) *Foo =
+  return &Foo{x: n}
+
+fn test_if(c bool) i64 =
+  let p *Foo
+  if c:
+    p = make_foo(1)
+  else:
+    p = make_foo(2)
+  return p.x
+
+fn main() i64 =
+  let total = 0
+  for let i in 0..1000:
+    total += test_if(true)
+    total += test_if(false)
+  echo total
+  return 0

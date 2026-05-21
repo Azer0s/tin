@@ -409,7 +409,11 @@ func (cg *CodeGen) emitCLayoutStructRelease(block *ir.Block, val value.Value, st
 	rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
 		constant.NewInt(irtypes.I64, -1))
 	rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
-	block.NewCall(cg.ensureRelease(), rcBaseI8)
+	// Flag in bit 0 of the flags field tells _tin_release_clayout to
+	// no-op for borrowed wrappers (pointer-extern returns where
+	// c_data_ptr lives outside the rc-block).
+	flagsVal := block.NewExtractValue(val, uint64(cg.clayoutFlagsIndex(structName)))
+	block.NewCall(cg.ensureCLayoutRelease(), rcBaseI8, flagsVal)
 }
 
 // emitCLayoutStructRetain bumps the rc-block for a cLayoutStruct value
@@ -431,7 +435,11 @@ func (cg *CodeGen) emitCLayoutStructRetain(block *ir.Block, val value.Value, str
 	rcBase := block.NewGetElementPtr(tinSt, cDataAsSt,
 		constant.NewInt(irtypes.I64, -1))
 	rcBaseI8 := block.NewBitCast(rcBase, irtypes.I8Ptr)
-	block.NewCall(cg.ensureRetain(), rcBaseI8)
+	// Flag in bit 0 of the flags field tells _tin_retain_clayout to
+	// no-op for borrowed wrappers (pointer-extern returns where
+	// c_data_ptr lives outside the rc-block).
+	flagsVal := block.NewExtractValue(val, uint64(cg.clayoutFlagsIndex(structName)))
+	block.NewCall(cg.ensureCLayoutRetain(), rcBaseI8, flagsVal)
 }
 
 // ensureStructPtrReleaseFn lazily creates (or returns a cached) null-safe pointer

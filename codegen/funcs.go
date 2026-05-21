@@ -677,6 +677,45 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 
 	defer func() { cg.curFnAstBody = prevFnAstBody }()
 
+	// Run the borrow analyzer over this function body once; the result
+	// (set of names to classify as Borrowed) is consulted by
+	// maybeMarkBindingBorrowed during let-decl codegen. No-op when
+	// --ownership-borrow is off.
+	prevBorrowSet := cg.currentFnBorrowSet
+	cg.currentFnBorrowSet = cg.analyzeFunctionBorrows(n.Body)
+	prevMovedBindings := cg.movedBindings
+	cg.movedBindings = nil
+	// Biased RC: route _tin_rc_alloc to the local (shared=0) variant
+	// when the call-graph analyzer proved this function is NOT
+	// reachable from an {#async} root AND the body does not write
+	// to any module-level global.  Async unreachability prevents
+	// fiber escape; the global-write check prevents a different
+	// thread from concurrently rc-touching a value this function
+	// just stored into a globally-visible slot.  Sync extern calls
+	// stay local -- they execute synchronously on the caller's
+	// thread.  See docs/15-ownership.md "Biased reference counting".
+	prevSyncLocal := cg.curFnSyncLocal
+	// Biased-RC local-alloc opt-in is disabled: computeSpawnerReachable
+	// is unsound in two ways still pending fix (task #74):
+	//   - recordCallees ignores ScopedAccess (`assert::equals(...)`)
+	//     and FieldAccess (`m.lock()`, `Mutex.new()`) calls, so the
+	//     call graph misses every method and package-qualified edge.
+	//   - cg.funcDecls keys are inconsistent: regular fns use bare
+	//     names, package fns from packages.go use the short name, and
+	//     generic monos use the mangled name -- spawnerSet lookups
+	//     against scopeName therefore systematically miss.
+	// Until both are fixed, force every block through _tin_rc_alloc
+	// (SHARED=1) by leaving curFnSyncLocal at false.  Manifested as a
+	// lost increment + later hang in examples/fibers/sync_mutex.tin.
+	_ = scopeName
+	cg.curFnSyncLocal = false
+
+	defer func() {
+		cg.currentFnBorrowSet = prevBorrowSet
+		cg.movedBindings = prevMovedBindings
+		cg.curFnSyncLocal = prevSyncLocal
+	}()
+
 	cg.curScope = newScope(cg.curScope)
 	cg.curScope.isFunctionBoundary = true
 
@@ -764,6 +803,23 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 	}
 
+	// Run the borrow analyzer over each parameter so the entry retain
+	// and scope-exit release pair can be elided when the body uses the
+	// parameter read-only.  Tin's calling convention puts both ops on
+	// the callee side, so dropping both stays balanced and the
+	// caller's binding rc is preserved through the call.  Skips
+	// method receivers (parameters named "this") because trait
+	// dispatch expects an owned receiver -- demoting that would race
+	// with the trait fat-pointer release path.
+	paramNames := make([]string, 0, len(n.Params))
+	for _, p := range n.Params {
+		if p.Name != "" && !p.IsVarArgs {
+			paramNames = append(paramNames, p.Name)
+		}
+	}
+
+	paramBorrows := cg.analyzeFunctionParamBorrows(n.Body, paramNames)
+
 	// Alloca parameters and register them in scope.
 	// Iterate tin params; skip varargs (no LLVM parameter), but register a
 	// null placeholder so the name is defined inside the body.
@@ -787,16 +843,31 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		alloca := entry.NewAlloca(p.Type())
 		entry.NewStore(p, alloca)
 		isRC := isRCTrackedType(p.Type())
-		cg.emitRetain(entry, p)
+		// Borrowed parameters skip the callee's entry retain.
+		// emitScopeRelease in runtime_scope.go matches it by also
+		// skipping the release, so the pair stays balanced.
+		paramBorrowed := paramBorrows[astParam.Name]
+		if !paramBorrowed {
+			cg.emitRetain(entry, p)
+		}
 		// Emit dbg.declare for this parameter in debug builds.
 		cg.emitDbgDeclare(entry, alloca, astParam.Name, n.Pos().Line, uint64(llIdx), astParam.Type, p.Type())
+
+		paramOwnership := ownershipOwned
+		if paramBorrowed {
+			paramOwnership = ownershipBorrowed
+		}
 		// Function parameters receive a by-value copy of the caller's struct.
 		// The parameter is not the owner of the value; the caller is.  Mark
 		// noDeinit so that scope-exit release of the parameter copy does not
 		// invoke deinit (which would be a spurious call from the callee's
 		// perspective and could double-free external resources).
-		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type, declPos: n.Pos()})
+		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type, declPos: n.Pos(), ownership: paramOwnership})
 		cg.warnIfBuiltinShadow("param", astParam.Name, n.Pos())
+		// Record the parameter in --explain-ownership so the user
+		// can see whether the analyzer demoted it from Owned to
+		// Borrowed.
+		cg.recordOwnership(astParam.Name, paramOwnership, "parameter")
 
 		if llIdx == 1 {
 			firstParamAlloca = alloca

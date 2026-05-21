@@ -205,6 +205,16 @@ func collectFreeVars(body ast.Node, localNames map[string]bool) []string {
 				walk(v.Call)
 			}
 			// Don't descend into DoBlock of nested spawn do: blocks; they capture independently.
+		case *ast.MoveExpr:
+			// `move s` reads `s` then marks it as moved.  Without
+			// this case, a lambda body containing `move s` would
+			// not collect `s` as a captured free variable, and
+			// genMoveExpr would fail with "no such binding in
+			// scope" because the env unpack never installed it.
+			if v.Name != "" && !localNames[v.Name] && !seen[v.Name] {
+				seen[v.Name] = true
+				result = append(result, v.Name)
+			}
 		}
 	}
 	walk(body)
