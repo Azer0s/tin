@@ -12,6 +12,23 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
+// nameLooksCrossContext reports whether an IR scope name carries the
+// double-underscore marker the codegen uses for symbols whose call
+// graph spans multiple compilation contexts: package fns
+// (`pkg__name`), generic monomorphizations (`Type__Arg_method`),
+// trait-qualified methods.  Used by the biased-RC gate to default such
+// functions to the shared (atomic) allocator -- the per-body call
+// graph cannot prove non-escape for them.
+func nameLooksCrossContext(name string) bool {
+	for i := 0; i+1 < len(name); i++ {
+		if name[i] == '_' && name[i+1] == '_' {
+			return true
+		}
+	}
+
+	return false
+}
+
 // predeclareFunc adds a function to the module and registers it in the global
 // scope without generating the body. This enables forward references and recursion.
 
@@ -695,20 +712,26 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// stay local -- they execute synchronously on the caller's
 	// thread.  See docs/15-ownership.md "Biased reference counting".
 	prevSyncLocal := cg.curFnSyncLocal
-	// Biased-RC local-alloc opt-in is disabled: computeSpawnerReachable
-	// is unsound in two ways still pending fix (task #74):
-	//   - recordCallees ignores ScopedAccess (`assert::equals(...)`)
-	//     and FieldAccess (`m.lock()`, `Mutex.new()`) calls, so the
-	//     call graph misses every method and package-qualified edge.
-	//   - cg.funcDecls keys are inconsistent: regular fns use bare
-	//     names, package fns from packages.go use the short name, and
-	//     generic monos use the mangled name -- spawnerSet lookups
-	//     against scopeName therefore systematically miss.
-	// Until both are fixed, force every block through _tin_rc_alloc
-	// (SHARED=1) by leaving curFnSyncLocal at false.  Manifested as a
-	// lost increment + later hang in examples/fibers/sync_mutex.tin.
-	_ = scopeName
-	cg.curFnSyncLocal = false
+	// Biased RC: route _tin_rc_alloc through the local (shared=0)
+	// variant when the call-graph analyzer proved this function is
+	// NOT reachable from any {#async} root AND does not write to a
+	// global.  recordCallees now covers ScopeAccess and FieldAccess
+	// callees so package fns and method dispatch land in the graph.
+	//
+	// Conservative gate: any scopeName containing `__` is a package
+	// fn, generic monomorphization, or trait-qualifier-decorated
+	// method.  These cross compilation contexts the per-package call
+	// graph doesn't fully see, so they default to non-local.  Plain
+	// user-defined fns and user struct methods use single underscores
+	// and remain eligible.  Refining this requires unifying the
+	// funcDecls keying (task #75 stretch); the heuristic is sound
+	// (over-tags some functions) and unblocks the perf win on user
+	// code today.
+	spawnerSet := cg.computeSpawnerReachable()
+	cg.curFnSyncLocal = scopeName != "" &&
+		!cg.coroCallable[scopeName] &&
+		!spawnerSet[scopeName] &&
+		!nameLooksCrossContext(scopeName)
 
 	defer func() {
 		cg.currentFnBorrowSet = prevBorrowSet

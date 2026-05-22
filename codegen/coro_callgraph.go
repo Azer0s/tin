@@ -15,8 +15,28 @@ func recordCallees(n ast.Node, out *[]string) {
 
 	switch v := n.(type) {
 	case *ast.CallExpr:
-		if id, ok := v.Func.(*ast.Identifier); ok {
-			*out = append(*out, id.Name)
+		switch fn := v.Func.(type) {
+		case *ast.Identifier:
+			*out = append(*out, fn.Name)
+		case *ast.ScopeAccess:
+			// pkg::name(...) -> "pkg__name", matching the IR symbol
+			// packages.go installs.  Multi-segment paths join with
+			// the same double-underscore separator.
+			if len(fn.Path) > 0 {
+				name := fn.Path[0]
+				for _, p := range fn.Path[1:] {
+					name += "__" + p
+				}
+				*out = append(*out, name)
+			}
+		case *ast.FieldAccess:
+			// Method / static call: type info is not available here
+			// (recordCallees runs pre-typecheck on the raw AST), so
+			// emit the bare field name.  callees consumed by
+			// computeSpawnerReachable also alias funcDecls under
+			// bare method names (see decls_struct.go), so the edge
+			// resolves later.
+			*out = append(*out, fn.Field)
 		}
 
 		recordCallees(v.Func, out)
@@ -120,14 +140,13 @@ func recordCallees(n ast.Node, out *[]string) {
 // global -- both of which can hand the function's allocations to a
 // different thread -- OR transitively calls any such function.
 //
-// Currently UNSOUND (callers of this set produce conservative answers
-// in funcs.go pending the fixes tracked in task #74):
-//   - recordCallees ignores ScopedAccess and FieldAccess call forms,
-//     so the call graph misses every method and `pkg::name(...)` edge.
-//   - cg.funcDecls keys are inconsistent across regular fns, package
-//     fns, and generic monomorphizations, so name-keyed lookups miss.
-// Keeping the seed logic intact so the analysis is ready to flip back
-// on once those gaps close.
+// recordCallees feeds ScopeAccess (`pkg::name(...)`) and FieldAccess
+// (`obj.m(...)`) into the call graph alongside bare identifiers, so
+// method dispatch and package-qualified call edges propagate
+// through the fixpoint.  Cross-context callees (package fns, generic
+// monomorphizations) whose funcDecls key would not match the IR
+// scope name fall under nameLooksCrossContext in funcs.go and skip
+// the biased-RC fast path conservatively.
 //
 // Idempotent: returns the cached map if already computed.  Walks
 // cg.callGraph[caller] -> [callees] in a fixpoint until no new
