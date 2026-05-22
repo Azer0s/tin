@@ -237,7 +237,7 @@ struct Sha512 =
       if this.buf_len < BLOCK_SIZE:
         return
 
-      let s = process_block(addr(this.buf[0]), this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
+      let s = process_block(&this.buf[0], this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
 
       this.h0 = s[0]
       this.h1 = s[1]
@@ -250,7 +250,7 @@ struct Sha512 =
       this.buf_len = 0
 
     for i + BLOCK_SIZE <= n:
-      let s = process_block(addr(data[i]), this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
+      let s = process_block(&data[i], this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
 
       this.h0 = s[0]
       this.h1 = s[1]
@@ -276,7 +276,7 @@ struct Sha512 =
 
     if n == 0:
       return
-    this.write(addr(s[0]), n)
+    this.write(&s[0], n)
 
   // sum_internal finalizes the chaining state into eight 64-bit words.
   // Both the 512 and 384 sums share the padding logic; only the output
@@ -311,10 +311,10 @@ struct Sha512 =
 
     if plen >= 112:
       off = 240  // pad spills to a second block; length lives at byte 240
-    write_u64_be(addr(pad[0]), off, 0 as u64)
-    write_u64_be(addr(pad[0]), off + 8, bit_len)
+    write_u64_be(&pad[0], off, 0 as u64)
+    write_u64_be(&pad[0], off + 8, bit_len)
 
-    let s = process_block(addr(pad[0]), h0, h1, h2, h3, h4, h5, h6, h7)
+    let s = process_block(&pad[0], h0, h1, h2, h3, h4, h5, h6, h7)
 
     h0 = s[0]
     h1 = s[1]
@@ -326,7 +326,7 @@ struct Sha512 =
     h7 = s[7]
 
     if plen >= 112:
-      let s2 = process_block(addr(pad[BLOCK_SIZE]), h0, h1, h2, h3, h4, h5, h6, h7)
+      let s2 = process_block(&pad[BLOCK_SIZE], h0, h1, h2, h3, h4, h5, h6, h7)
 
       h0 = s2[0]
       h1 = s2[1]
@@ -347,14 +347,14 @@ struct Sha512 =
     let s = this.sum_internal()
     let digest [u8; 64]
 
-    write_u64_be(addr(digest[0]), 0,  s[0])
-    write_u64_be(addr(digest[0]), 8,  s[1])
-    write_u64_be(addr(digest[0]), 16, s[2])
-    write_u64_be(addr(digest[0]), 24, s[3])
-    write_u64_be(addr(digest[0]), 32, s[4])
-    write_u64_be(addr(digest[0]), 40, s[5])
-    write_u64_be(addr(digest[0]), 48, s[6])
-    write_u64_be(addr(digest[0]), 56, s[7])
+    write_u64_be(&digest[0], 0,  s[0])
+    write_u64_be(&digest[0], 8,  s[1])
+    write_u64_be(&digest[0], 16, s[2])
+    write_u64_be(&digest[0], 24, s[3])
+    write_u64_be(&digest[0], 32, s[4])
+    write_u64_be(&digest[0], 40, s[5])
+    write_u64_be(&digest[0], 48, s[6])
+    write_u64_be(&digest[0], 56, s[7])
 
     return digest
 
@@ -364,12 +364,12 @@ struct Sha512 =
     let s = this.sum_internal()
     let digest [u8; 48]
 
-    write_u64_be(addr(digest[0]), 0,  s[0])
-    write_u64_be(addr(digest[0]), 8,  s[1])
-    write_u64_be(addr(digest[0]), 16, s[2])
-    write_u64_be(addr(digest[0]), 24, s[3])
-    write_u64_be(addr(digest[0]), 32, s[4])
-    write_u64_be(addr(digest[0]), 40, s[5])
+    write_u64_be(&digest[0], 0,  s[0])
+    write_u64_be(&digest[0], 8,  s[1])
+    write_u64_be(&digest[0], 16, s[2])
+    write_u64_be(&digest[0], 24, s[3])
+    write_u64_be(&digest[0], 32, s[4])
+    write_u64_be(&digest[0], 40, s[5])
 
     return digest
 
@@ -436,7 +436,7 @@ fn sha512(s string) string =
 
     return hex_from_512(h.sum_512())
 
-  return sha512_hex(addr(s[0]), len(s))
+  return sha512_hex(&s[0], len(s))
 
 fn sha384(s string) string =
   if len(s) == 0:
@@ -444,7 +444,7 @@ fn sha384(s string) string =
 
     return hex_from_384(h.sum_384())
 
-  return sha384_hex(addr(s[0]), len(s))
+  return sha384_hex(&s[0], len(s))
 
 export {
   Sha512,

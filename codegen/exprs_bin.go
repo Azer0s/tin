@@ -42,8 +42,21 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 	cg.curBlock = block
 
+	// Pointer-arithmetic and comparison operators are permitted
+	// transient-consumption sites for nested pointer arithmetic
+	// (chained `(p + 1) + 1`, `p + 1 == q`, ...).  Allow operands to
+	// be ptr-arith expressions even outside `{#unsafe}`; non-permitted
+	// outer operators (`*`, `/`, `%`, `<<`, ...) leave the flag at
+	// the caller's setting.
+	prevTransient := cg.transientPtrAllowed
+	switch e.Op {
+	case "+", "-", "==", "!=", "<", "<=", ">", ">=":
+		cg.transientPtrAllowed = true
+	}
+
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
+		cg.transientPtrAllowed = prevTransient
 		return nil, err
 	}
 
@@ -54,6 +67,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	cg.curBlock = block
 
 	right, err := cg.genExpr(block, e.Right)
+	cg.transientPtrAllowed = prevTransient
 	if err != nil {
 		return nil, err
 	}
@@ -133,9 +147,26 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	if ptrType, isPtr := lt.(*irtypes.PointerType); isPtr && irtypes.IsInt(rt) {
 		switch e.Op {
 		case "+", "-":
-			if cg.unsafeDepth == 0 {
+			// Pointer arithmetic produces a transient view into
+			// existing memory.  Tin cannot guarantee the view's
+			// lifetime relative to the underlying buffer's owner --
+			// the address could outlive whatever rc-block backed it,
+			// turning into a use-after-free the moment the owner
+			// releases.  To stay sound the view must be consumed
+			// in-place: dereferenced, indexed, accessed as a field,
+			// compared, chained into more arithmetic, or cast to an
+			// integer (with a warning).  Binding it, returning it,
+			// passing it as an argument, or storing it into any
+			// outlasting slot is rejected here; wrap the code in
+			// `{#unsafe} { ... }` if you really need it, taking
+			// responsibility for the lifetime by hand.
+			if cg.unsafeDepth == 0 && !cg.transientPtrAllowed {
 				return nil, cg.nodeErr(e,
-					"pointer arithmetic requires an `{#unsafe}` block")
+					"pointer arithmetic must be consumed in-place "+
+						"(deref, field, index, comparison, cast-to-int) -- "+
+						"the resulting view's lifetime cannot be tracked "+
+						"once it leaves the expression.  Wrap in `{#unsafe} "+
+						"{ ... }` to take responsibility yourself.")
 			}
 		}
 		// Ensure the index is i64.

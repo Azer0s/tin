@@ -10,24 +10,32 @@ import (
 )
 
 func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, error) {
-	// addr(N) where N is an integer literal: treat as inttoptr cast (raw address).
-	if il, ok := e.Val.(*ast.IntLit); ok {
-		if cg.unsafeDepth == 0 {
-			return nil, cg.nodeErr(e,
-				"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
-		}
-
-		if il.Big != nil {
-			return nil, cg.nodeErr(e,
-				"addr(int_literal) target must fit in 64 bits (got %s)", il.Big.String())
-		}
-
-		v := constant.NewInt(irtypes.I64, il.Value)
-
-		return block.NewIntToPtr(v, irtypes.I8Ptr), nil
+	// `addr(...)` is the raw-address builtin -- it materializes a
+	// pointer at a specific bare-metal address.  The only legitimate
+	// argument is an integer literal under `{#unsafe}`; anything else
+	// (taking the address of an lvalue) belongs to the `&` operator.
+	// Without this rejection users learn the wrong mental model and
+	// stdlib code starts mixing the two forms.
+	il, ok := e.Val.(*ast.IntLit)
+	if !ok {
+		return nil, cg.nodeErr(e,
+			"addr(...) takes a raw integer address (e.g. addr(0xDEADBEEF)). "+
+				"To take the address of an lvalue, use `&expr` instead.")
 	}
 
-	return cg.genLValue(block, e.Val)
+	if cg.unsafeDepth == 0 {
+		return nil, cg.nodeErr(e,
+			"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
+	}
+
+	if il.Big != nil {
+		return nil, cg.nodeErr(e,
+			"addr(int_literal) target must fit in 64 bits (got %s)", il.Big.String())
+	}
+
+	v := constant.NewInt(irtypes.I64, il.Value)
+
+	return block.NewIntToPtr(v, irtypes.I8Ptr), nil
 }
 
 func (cg *CodeGen) genAddrOfExpr(block *ir.Block, e *ast.AddressOfExpr) (value.Value, error) {
@@ -39,7 +47,13 @@ func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value,
 		return nil, cg.nodeErr(e, "dereferencing nil literal")
 	}
 
+	// `*(p + n)` is a permitted transient-pointer consumption site:
+	// the address from the arithmetic is consumed immediately by the
+	// deref load and never reaches a binding / arg / return.
+	prevTransient := cg.transientPtrAllowed
+	cg.transientPtrAllowed = true
 	val, err := cg.genExpr(block, e.Expr)
+	cg.transientPtrAllowed = prevTransient
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,36 @@
+// Acceptance tests for the transient-pointer rule set
+// (task #76).  Pointer arithmetic is permitted outside `{#unsafe}`
+// only when the result is consumed in-place; the rejected-shape
+// counterparts live as fixtures under fixtures/transient_ptr/.
+
+use assert
+
+test "transient ptr: deref read consumes in place" =
+  let xs [u8] = [10, 20, 30]
+  let p = &xs[0]
+  let v = *(p + 1)
+  assert::equals(20 as u8, v)
+
+test "transient ptr: indexed consume in place" =
+  let xs [u8] = [10, 20, 30]
+  let p = &xs[0]
+  let v = (p + 1)[1]
+  assert::equals(30 as u8, v)
+
+test "transient ptr: comparison is permitted" =
+  let xs [u8] = [10, 20, 30]
+  let p = &xs[0]
+  let same = (p + 0) == p
+  assert::ok(same)
+
+test "transient ptr: chained arithmetic is permitted (deref consumes)" =
+  let xs [u8] = [10, 20, 30]
+  let p = &xs[0]
+  let v = *((p + 1) + 1)
+  assert::equals(30 as u8, v)
+
+test "transient ptr: cast to integer is permitted with a warning" =
+  let xs [u8] = [10, 20, 30]
+  let p = &xs[0]
+  let n = (p + 1) as i64
+  assert::ok(n != 0 as i64)

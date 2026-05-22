@@ -1,0 +1,10 @@
+// Returning a pointer-arithmetic result is rejected: the caller
+// would hold a view to memory the callee's frame no longer owns.
+
+fn shift(p *u8) *u8 =
+  return p + 1   // rejected
+
+fn main() =
+  let xs [u8] = [1 as u8, 2 as u8, 3 as u8]
+  let q = shift(&xs[0])
+  echo *q

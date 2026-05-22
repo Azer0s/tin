@@ -17,6 +17,14 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 		return nil, cg.nodeErr(e, "field access on nil literal")
 	}
 
+	// `(p + n).field` is a permitted transient consumption: the
+	// pointer-arithmetic view is read (or written) in-place and never
+	// escapes.  The save/restore lets nested `*(s.field)` cases that
+	// don't traffic in arithmetic stay unaffected.
+	prevTransient := cg.transientPtrAllowed
+	cg.transientPtrAllowed = true
+	defer func() { cg.transientPtrAllowed = prevTransient }()
+
 	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
 	var enumBaseName string
 
@@ -212,6 +220,12 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 }
 
 func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value, error) {
+	// `(p + n)[i]` is a permitted transient consumption -- the
+	// arithmetic view is indexed in-place without escaping.
+	prevTransient := cg.transientPtrAllowed
+	cg.transientPtrAllowed = true
+	defer func() { cg.transientPtrAllowed = prevTransient }()
+
 	// `arr[lo..hi]` is the canonical range-slice form -- routes to
 	// the unified slice helper that copies into a fresh `_tin_rc_alloc`'d
 	// buffer for fat arrays, raw pointers, and fixed-size arrays.

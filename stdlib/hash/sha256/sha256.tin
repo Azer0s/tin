@@ -207,7 +207,7 @@ struct Sha256 =
       if this.buf_len < 64:
         return
 
-      let s = process_block(addr(this.buf[0]), this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
+      let s = process_block(&this.buf[0], this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
 
       this.h0 = s[0]
       this.h1 = s[1]
@@ -221,7 +221,7 @@ struct Sha256 =
 
     // Process full 64-byte blocks straight from the input.
     for i + 64 <= n:
-      let s = process_block(addr(data[i]), this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
+      let s = process_block(&data[i], this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7)
 
       this.h0 = s[0]
       this.h1 = s[1]
@@ -249,7 +249,7 @@ struct Sha256 =
 
     if n == 0:
       return
-    this.write(addr(s[0]), n)
+    this.write(&s[0], n)
 
   // sum finalizes the hash and returns the 32-byte digest.  The hasher
   // is left in a finalized state; call reset() before reusing.  Calling
@@ -281,9 +281,9 @@ struct Sha256 =
 
     if plen >= 56:
       off = 120
-    write_u64_be(addr(pad[0]), off, bit_len)
+    write_u64_be(&pad[0], off, bit_len)
 
-    let s = process_block(addr(pad[0]), h0, h1, h2, h3, h4, h5, h6, h7)
+    let s = process_block(&pad[0], h0, h1, h2, h3, h4, h5, h6, h7)
 
     h0 = s[0]
     h1 = s[1]
@@ -295,7 +295,7 @@ struct Sha256 =
     h7 = s[7]
 
     if plen >= 56:
-      let s2 = process_block(addr(pad[64]), h0, h1, h2, h3, h4, h5, h6, h7)
+      let s2 = process_block(&pad[64], h0, h1, h2, h3, h4, h5, h6, h7)
 
       h0 = s2[0]
       h1 = s2[1]
@@ -308,14 +308,14 @@ struct Sha256 =
 
     let digest [u8; 32]
 
-    write_u32_be(addr(digest[0]), 0, h0)
-    write_u32_be(addr(digest[0]), 4, h1)
-    write_u32_be(addr(digest[0]), 8, h2)
-    write_u32_be(addr(digest[0]), 12, h3)
-    write_u32_be(addr(digest[0]), 16, h4)
-    write_u32_be(addr(digest[0]), 20, h5)
-    write_u32_be(addr(digest[0]), 24, h6)
-    write_u32_be(addr(digest[0]), 28, h7)
+    write_u32_be(&digest[0], 0, h0)
+    write_u32_be(&digest[0], 4, h1)
+    write_u32_be(&digest[0], 8, h2)
+    write_u32_be(&digest[0], 12, h3)
+    write_u32_be(&digest[0], 16, h4)
+    write_u32_be(&digest[0], 20, h5)
+    write_u32_be(&digest[0], 24, h6)
+    write_u32_be(&digest[0], 28, h7)
 
     return digest
 
@@ -363,7 +363,7 @@ fn sha256(s string) string =
 
     return hex_from_digest(h.sum())
 
-  return sha256_hex(addr(s[0]), len(s))
+  return sha256_hex(&s[0], len(s))
 
 export {
   Sha256, sha256, sha256_hex, hex_from_digest,

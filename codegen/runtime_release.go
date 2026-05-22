@@ -213,17 +213,6 @@ func isCopyExpr(node ast.Node) bool {
 		// its fields at RC=1.  Retaining here would cause RC=2 with only one release,
 		// leaking the inner allocations.
 		return !isTemporaryProducer(n.Expr)
-	case *ast.AddrExpr:
-		// `addr(place)` is the borrow-style address-of builtin: it
-		// returns a pointer into an existing place expression (array
-		// element, string byte, struct field, local var), never a
-		// fresh allocation.  The resulting *T aliases the source's
-		// rc-block; the source's scope-exit release is the matching
-		// decrement.  Without this case, the call-arg release path
-		// treated `addr(s[0])` as a fresh allocation and decremented
-		// the source rc-block once per call, freeing memory the
-		// source still owned.
-		return true
 	case *ast.AddressOfExpr:
 		// `&place` is owning only when `place` is an identifier that
 		// escape analysis flagged for heap promotion -- those cases go

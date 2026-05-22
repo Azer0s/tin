@@ -23,7 +23,7 @@ test "fnv1a_32 different inputs differ" =
 test "fnv1a_32 string and bytes overloads agree" =
   let s = "hello"
 
-  assert::equals(fnv::fnv1a_32(s), fnv::fnv1a_32(addr(s[0]), len(s)))
+  assert::equals(fnv::fnv1a_32(s), fnv::fnv1a_32(&s[0], len(s)))
 
 test "fnv1a_64 deterministic" =
   assert::equals(fnv::fnv1a_64("hello"), fnv::fnv1a_64("hello"))
@@ -34,7 +34,7 @@ test "fnv1a_64 different inputs differ" =
 test "fnv1a_64 string and bytes overloads agree" =
   let s = "tin"
 
-  assert::equals(fnv::fnv1a_64(s), fnv::fnv1a_64(addr(s[0]), len(s)))
+  assert::equals(fnv::fnv1a_64(s), fnv::fnv1a_64(&s[0], len(s)))
 
 // -- MD5 --
 

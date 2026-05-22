@@ -848,9 +848,21 @@ type CodeGen struct {
 	hadWarnError bool
 
 	// unsafeDepth tracks lexical nesting of `{#unsafe} { ... }` blocks.
-	// Operations like raw pointer arithmetic and `addr(int_literal)` are
-	// rejected with a compile error when this is zero.
+	// Operations like `addr(int_literal)` are rejected with a compile
+	// error when this is zero.  Pointer arithmetic is permitted at
+	// zero depth only under a transient-consumption context (deref,
+	// field access, index, comparison, chained arithmetic, integer
+	// cast); see transientPtrAllowed.
 	unsafeDepth int
+
+	// transientPtrAllowed is set by callers that are about to consume
+	// a pointer-arithmetic expression in-place (`*(p + n)`,
+	// `(p + n).field`, `(p + n)[i]`, comparisons, chained arithmetic,
+	// `(p + n) as i64`).  The BinExpr-arithmetic emitter accepts ptr
+	// arithmetic outside `{#unsafe}` only when this is true.  Callers
+	// save / restore around the recursion so a permitted parent
+	// doesn't accidentally bless deeper non-transient uses.
+	transientPtrAllowed bool
 
 	// dfSuppressWarnings is non-zero while the dataflow pass is iterating
 	// a loop body to fixpoint. The first few iterations see a transient

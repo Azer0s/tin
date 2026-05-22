@@ -404,7 +404,7 @@ struct Parser =
     let cr  = simd::splat(@'\r')
 
     for this.pos + 16 <= this.len:
-      let chunk = simd::loadu(addr(this.src[this.pos]))
+      let chunk = simd::loadu(&this.src[this.pos])
       let is_sp  = simd::cmpeq(chunk, sp)
       let is_tab = simd::cmpeq(chunk, tab)
       let is_nl  = simd::cmpeq(chunk, nl)
@@ -454,7 +454,7 @@ fn parse_str(p *Parser) string =
     // When a special byte is found, copy the plain prefix and break to the
     // scalar handler below (which consumes the special byte itself).
     for p.pos + 16 <= p.len:
-      let chunk  = simd::loadu(addr(p.src[p.pos]))
+      let chunk  = simd::loadu(&p.src[p.pos])
       let hit_dq = simd::cmpeq(chunk, dq)
       let hit_bs = simd::cmpeq(chunk, bsl)
       let hits   = hit_dq | hit_bs
