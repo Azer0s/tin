@@ -137,18 +137,19 @@ void _tin_heap_init(void) {
     _tin_arena_active = 1;
 }
 
-// Returns 1 only when ptr points at the start of a Tin rc-block --
-// i.e. the public pointer of one of our allocations.  Two-stage check:
+// Returns 1 only when ptr points at the start of a Tin rc-block that
+// is currently allocated.  Two-stage check:
 //
 //   1. Range: ptr must fall inside [base, base+size).  Foreign
 //      pointers (libc malloc / stack / rodata / mmap / extern) live
 //      outside the exclusive arena and fail this.
 //   2. Magic: the would-be header at (ptr - sizeof(TinRCHdr)) must
 //      carry TIN_RC_HDR_MAGIC in its _pad slot.  _tin_rc_alloc and
-//      friends stamp it at allocation; interior pointers (e.g.
-//      &arr[5]) land inside block data where _pad mismatches and the
-//      check fails, so _tin_retain_ptr / _tin_release_ptr safely
-//      no-op rather than corrupting bytes 16 ahead of the pointer.
+//      friends stamp it at allocation; the release path zeroes it
+//      before mi_free so freshly-freed blocks fail this check until
+//      mimalloc reuses the slot.  Interior pointers (e.g. &arr[5])
+//      land inside block data where _pad never matched in the first
+//      place.
 //
 // Degraded mode (TINMAXHEAP=0): no arena, return 1 unconditionally
 // for non-null pointers.  Retain/release on foreign pointers will then
@@ -160,11 +161,6 @@ int _tin_is_managed(void *ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)_tin_arena_base;
     if (addr - base >= _tin_arena_size) return 0;
-    // ptr is in the arena.  The header sits at ptr - sizeof(TinRCHdr).
-    // Reject pointers too close to the arena base for the subtract to
-    // stay in-range -- there is no real rc-block whose header would
-    // land before the arena, but the bounds-check keeps the read safe
-    // under any future shifting allocator layouts.
     if (addr - base < sizeof(TinRCHdr)) return 0;
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
     return hdr->_pad == TIN_RC_HDR_MAGIC;

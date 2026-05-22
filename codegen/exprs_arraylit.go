@@ -598,16 +598,29 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				cg.markOwningRawPtrField(typeName, fieldName, v, val.Type())
 			}
 
-			if isCopyExpr(v) && !weakSet[fieldName] {
-				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
-					if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
-						if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
-							ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
-							block.NewCall(cg.ensureRetain(), ptrI8)
+			if !weakSet[fieldName] {
+				// Primitive *T field: retain regardless of isCopyExpr
+				// shape.  The release walk in walkRCStructFieldsEx
+				// unconditionally releases every *T field at struct
+				// drop via _tin_release_ptr, so to balance we must
+				// retain at construction whether the source is a
+				// borrow (let p = ...) or a fresh call result
+				// (get_ptr()).  Foreign or interior pointers no-op
+				// via _tin_retain_ptr's arena + magic check.
+				if isPrimitivePtr(val.Type()) {
+					ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRetainPtr(), ptrI8)
+				} else if isCopyExpr(v) {
+					if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
+						if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+							if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
+								ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+								block.NewCall(cg.ensureRetain(), ptrI8)
+							}
 						}
+					} else {
+						cg.emitRetain(block, val)
 					}
-				} else {
-					cg.emitRetain(block, val)
 				}
 			}
 		}
@@ -662,16 +675,25 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 			}
 			// ARC: retain RC-tracked values copied from existing owners.
 			// Weak fields are non-owning: skip retain.
-			if isCopyExpr(f.Value) && !weakSet[f.Name] {
-				if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
-					if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
-						if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
-							ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
-							block.NewCall(cg.ensureRetain(), ptrI8)
+			if !weakSet[f.Name] {
+				// Primitive *T: retain unconditionally so the matching
+				// scope-exit / per-struct release_ptr stays balanced
+				// regardless of whether the field initializer was a
+				// borrow expression or a call result.
+				if isPrimitivePtr(val.Type()) {
+					ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRetainPtr(), ptrI8)
+				} else if isCopyExpr(f.Value) {
+					if pt, ok2 := val.Type().(*irtypes.PointerType); ok2 {
+						if innerSt, ok3 := pt.ElemType.(*irtypes.StructType); ok3 && innerSt.Name() != "" {
+							if cg.structTypeFor(CanonKey(innerSt.Name())) != nil {
+								ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+								block.NewCall(cg.ensureRetain(), ptrI8)
+							}
 						}
+					} else {
+						cg.emitRetain(block, val)
 					}
-				} else {
-					cg.emitRetain(block, val)
 				}
 			}
 		}

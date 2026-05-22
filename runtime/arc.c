@@ -30,11 +30,14 @@ static inline void *_tin_arena_alloc(size_t bytes) {
     return mi_heap_malloc(_tin_managed_heap(), bytes);
 }
 
-// Free a block returned by _tin_arena_alloc.  mi_free walks back to
-// the owning heap even when called from a different thread than the
-// one that allocated, so cross-thread free is safe.
-static inline void _tin_arena_free(void *p) {
-    mi_free(p);
+// Free a block returned by _tin_arena_alloc.  Zero the header's _pad
+// before mi_free so _tin_is_managed reliably rejects pointers into
+// freed blocks (mimalloc's free-list link overwrites offset 0..7,
+// but the pad slot at 8..15 would otherwise survive across the free
+// and trick the magic check into accepting a freed pointer as live).
+static inline void _tin_arena_free(void *hdr) {
+    ((TinRCHdr *)hdr)->_pad = 0;
+    mi_free(hdr);
 }
 
 // Allocate an ARC-managed block of `size` bytes.  Starts with rc=1,
