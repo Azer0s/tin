@@ -138,13 +138,31 @@ IMMORTAL, then branch on SHARED:
 zero, unless `TIN_RC_ARENA` is set (the storage belongs to an external
 pool).
 
-## The heap arena
+## The heap arena (opt-in via `--mimalloc`)
+
+mimalloc is opt-in.  Default builds use libc malloc for rc-blocks and
+rely on the header magic alone to identify Tin pointers.  Passing
+`--mimalloc` adds two layers on top:
+
+- **Allocator perf.** mimalloc's thread-local free lists beat glibc /
+  jemalloc on alloc-heavy workloads; per-thread mi_heaps pinned to the
+  arena eliminate cross-thread free contention.
+- **Defense-in-depth for `_tin_retain_ptr` / `_tin_release_ptr`.**
+  The arena is a contiguous virtual range that only Tin's rc-heaps
+  draw from (exclusive arena), so `_tin_is_managed` can range-check
+  the pointer *before* dereferencing the would-be header.  A foreign
+  pointer near an unmapped page boundary fails the range check
+  without ever touching `ptr - sizeof(TinRCHdr)`, eliminating the
+  rare-but-possible SIGSEGV the magic-only build can hit on a foreign
+  `*T` whose preceding 16 bytes happen to land in unmapped memory.
+  False positives via accidental magic collision are also impossible
+  in mimalloc mode because the range check fails first.
 
 ```
 TINMAXHEAP=64G  -> reserve 64 GiB virtual
 TINMAXHEAP=2G   -> reserve 2 GiB
-TINMAXHEAP=0    -> disable; _tin_is_managed returns 1 for any non-null
-                   pointer (degraded mode, sanitizer builds)
+TINMAXHEAP=0    -> disable; _tin_is_managed falls back to magic-only
+                   (degraded mode, sanitizer builds)
 ```
 
 `runtime/heap_arena.c` calls `mi_reserve_os_memory_ex` at constructor
@@ -164,19 +182,25 @@ int _tin_is_managed(void *ptr);
 ```
 
 Returns 1 when `ptr` is the public pointer of one of Tin's rc-blocks.
-Two-stage check:
 
-1. **Range.** `ptr` must fall inside `[arena_base, arena_base + arena_size)`.
-   The arena is `exclusive=true`, so only heaps explicitly bound to it
-   (the per-thread rc-heaps in this file) draw from it -- libc malloc,
-   stack frames, rodata, extern returns, foreign mmap'd regions all
-   land outside.
-2. **Magic.** The would-be header at `ptr - sizeof(TinRCHdr)` must
-   carry `TIN_RC_HDR_MAGIC` in its `_pad` slot. `_tin_rc_alloc` and
-   friends stamp it at allocation. Interior pointers (e.g. `&arr[5]`
-   into a fat array's data buffer) pass the range check but land
-   inside block data; `_pad` there is random user bytes and the magic
-   fails to match.
+**Default build (libc malloc).** Single-stage magic check:
+
+- **Magic.** The would-be header at `ptr - sizeof(TinRCHdr)` must
+  carry `TIN_RC_HDR_MAGIC` in its `_pad` slot. `_tin_rc_alloc` and
+  friends stamp it at allocation. Interior pointers (e.g. `&arr[5]`)
+  land inside block data where `_pad` is random user bytes and the
+  magic mismatches.  False positives are statistically impossible
+  with a 64-bit nonce.
+
+**With `--mimalloc` (arena active).** Two-stage check, range first:
+
+1. **Range.** `ptr` must fall inside
+   `[arena_base, arena_base + arena_size)`.  Foreign pointers (libc
+   malloc, stack, rodata, extern returns, foreign mmap'd regions)
+   fail this without dereferencing the header.
+2. **Magic.** Same as above; rejects interior pointers within the
+   arena and freed-then-not-yet-reused blocks (`_pad` is zeroed in
+   `_tin_arena_free`).
 
 Codegen uses `_tin_is_managed` indirectly through `_tin_retain_ptr` /
 `_tin_release_ptr` for every primitive `*T` retain/release site --
@@ -206,15 +230,28 @@ pointer is Tin-managed by construction.
 
 ### mimalloc
 
-The runtime is built with `-DTIN_USE_MIMALLOC=1` by default and links
-against `libmimalloc`. `runtime/runtime.c` macro-substitutes every
-allocator call in the Tin translation unit (`malloc`, `free`, `realloc`,
-`calloc`, `strdup`, `strndup`) to `mi_*` after the system headers
-declare them. The arena registration in `heap_arena.c` is what makes
-those calls land in the segregated address range.
+Opt-in via `--mimalloc`.  When enabled, the runtime is compiled with
+`-DTIN_USE_MIMALLOC=1`, links against `libmimalloc`, and `heap_arena.c`
+reserves the arena + creates per-thread mi_heaps.  rc-block alloc /
+free in `arc.c` route through `mi_heap_malloc` / `mi_free`.
 
-`--no-mimalloc` opts out of the link and the runtime falls through to
-libc allocators. The arena is then a no-op (`TINMAXHEAP=0` semantics).
+Without the flag (default), `heap_arena.c` compiles a stub
+`_tin_is_managed` that does only the magic check, and `arc.c` uses
+libc `malloc` / `free` for rc-blocks.  No external dependency.
+
+**Why keep mimalloc as an option at all.** Two reasons:
+
+1. The arena is a defense-in-depth layer for the provenance check.
+   In the default build, `_tin_retain_ptr(some_foreign_ptr)` has to
+   read `*(foreign_ptr - 16)` before it can reject the pointer via
+   magic mismatch.  If that read crosses an unmapped page boundary
+   (rare but possible for a pointer right at the start of a fresh
+   mmap region), the runtime SIGSEGVs instead of returning a clean
+   "no-op."  The arena range check eliminates that risk: a foreign
+   pointer is rejected by address, never touching the header.
+2. mimalloc's allocator is consistently faster than glibc's on
+   alloc-heavy fiber workloads (see `bench/tin/workload.tin`).  Apps
+   that need the perf trade a build dependency for the win.
 
 ## See also
 

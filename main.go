@@ -46,15 +46,15 @@ Source / library:
   --stdlib PATH            override the stdlib path (default: <execDir>/stdlib)
   --lib-root PATH          add a package root, repeatable (before default <execDir>/libs)
   --cflag FLAG             pass FLAG to clang, repeatable (e.g. --cflag -fsanitize=address)
-  --mimalloc               link with mimalloc (DEFAULT). Tin's
-                           arena-segregated ARC uses the arena's range
-                           check + header magic; install libmimalloc
-                           (brew/pacman/apt) before building.
-  --no-mimalloc            opt out of mimalloc; rc-blocks come from
-                           libc malloc and _tin_is_managed relies on
-                           the header magic alone.  Useful for
-                           sanitizer builds and platforms without
-                           libmimalloc.
+  --mimalloc               opt into mimalloc.  Adds the arena-
+                           segregated ARC (TINMAXHEAP virtual range
+                           + per-thread heaps) on top of the
+                           default header-magic check, primarily for
+                           the allocator's perf win.  Requires
+                           libmimalloc on the host.
+  --no-mimalloc            (DEFAULT) rc-blocks come from libc malloc;
+                           _tin_is_managed checks the rc-header magic
+                           alone.  No external dependency.
   -lNAME / -LDIR           link with libNAME / add DIR to lib search path
   file.o / file.a          link with extra object or archive file
 
@@ -512,12 +512,13 @@ doneFlags:
 	// key; main() resets them per-invocation here.
 	extraCFlags = nil
 	debugBuild = false
-	// mimalloc is the DEFAULT but no longer required for correctness:
-	// _tin_is_managed falls back to a header-magic-only check when
-	// the arena is disabled (--no-mimalloc).  Performance benefits
-	// stay with mimalloc, but a sanitizer build or a host without
-	// libmimalloc can opt out.
-	useMimalloc = true
+	// mimalloc is OPT-IN.  Correctness rests on the header magic
+	// stamped into every rc-block, so the default build uses libc
+	// malloc and _tin_is_managed checks `_pad == TIN_RC_HDR_MAGIC`
+	// alone.  Users who want the arena + per-thread heap perf win
+	// can pass `--mimalloc`; the runtime then reserves a TINMAXHEAP
+	// virtual range and routes rc allocations through it.
+	useMimalloc = false
 
 	var stdlibOverride string
 

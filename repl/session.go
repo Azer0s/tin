@@ -166,21 +166,10 @@ func (s *session) buildRuntime(outSo string) error {
 	args := []string{
 		"-shared", "-fPIC", "-O1", "-pthread",
 		"-DTIN_STACKTRACE=1",
-		"-DTIN_USE_MIMALLOC=1",
 		"-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer",
 		"-funwind-tables", "-fasynchronous-unwind-tables",
 		"-gline-tables-only",
 		"-I" + s.runtimeDir,
-	}
-	// mimalloc include + lib paths must match the main compile path so
-	// the runtime shim and the linker can both resolve mi_*.
-	if libDir, incDir, ok := findMimallocInstall(runtime.GOOS); ok {
-		if incDir != "" {
-			args = append(args, "-I"+incDir)
-		}
-		if libDir != "" {
-			args = append(args, "-L"+libDir)
-		}
 	}
 
 	args = append(args, rtC)
@@ -188,7 +177,7 @@ func (s *session) buildRuntime(outSo string) error {
 		args = append(args, "-ldw")
 	}
 
-	args = append(args, "-lmimalloc", "-o", outSo)
+	args = append(args, "-o", outSo)
 
 	cmd := exec.Command("clang", args...)
 
