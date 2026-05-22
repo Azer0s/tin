@@ -986,8 +986,17 @@ func (cg *CodeGen) genStmtInner(block *ir.Block, node ast.Node) (*ir.Block, bool
 		}
 
 		if err == nil && val != nil && isRCTrackedType(val.Type()) && isTemporaryProducer(s.Expr) {
-			// Discarded RC-tracked value from a call/concat/etc.: release our ref.
-			cg.emitRelease(block, val)
+			// Primitive *T return values from a discarded call (e.g.
+			// `memcpy(dst, src, n)` returning dst as *void) are
+			// borrows of memory the caller still owns through another
+			// binding.  Releasing them would decrement the rc of the
+			// caller's block and free it before the assertion can
+			// read.  Skip release for rcKindRawPtr; the binding-level
+			// owner handles its own rc.
+			if !isPrimitivePtr(val.Type()) {
+				// Discarded RC-tracked value from a call/concat/etc.: release our ref.
+				cg.emitRelease(block, val)
+			}
 		}
 
 		return block, false, err

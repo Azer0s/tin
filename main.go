@@ -46,13 +46,15 @@ Source / library:
   --stdlib PATH            override the stdlib path (default: <execDir>/stdlib)
   --lib-root PATH          add a package root, repeatable (before default <execDir>/libs)
   --cflag FLAG             pass FLAG to clang, repeatable (e.g. --cflag -fsanitize=address)
-  --mimalloc               link with mimalloc (DEFAULT; kept for back-compat).
-                           Tin's arena-segregated ARC requires mimalloc;
-                           install libmimalloc (brew/pacman/apt) before
-                           building. fails at link if it can't be found.
-  --no-mimalloc            disable mimalloc linkage. builds will fail
-                           at link time; reserved for future degraded-mode
-                           work (sanitizers, bare-metal targets).
+  --mimalloc               link with mimalloc (DEFAULT). Tin's
+                           arena-segregated ARC uses the arena's range
+                           check + header magic; install libmimalloc
+                           (brew/pacman/apt) before building.
+  --no-mimalloc            opt out of mimalloc; rc-blocks come from
+                           libc malloc and _tin_is_managed relies on
+                           the header magic alone.  Useful for
+                           sanitizer builds and platforms without
+                           libmimalloc.
   -lNAME / -LDIR           link with libNAME / add DIR to lib search path
   file.o / file.a          link with extra object or archive file
 
@@ -445,7 +447,8 @@ func main() {
 	for fileArgIdx < len(os.Args) {
 		a := os.Args[fileArgIdx]
 		switch a {
-		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks", "--explain-ownership":
+		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks", "--explain-ownership",
+			"--mimalloc", "--no-mimalloc":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
@@ -509,11 +512,11 @@ doneFlags:
 	// key; main() resets them per-invocation here.
 	extraCFlags = nil
 	debugBuild = false
-	// mimalloc is REQUIRED: Tin's arena-segregated ARC routes every
-	// managed allocation through a dedicated mimalloc arena so the
-	// runtime can distinguish Tin-managed pointers from C-allocated
-	// ones (see runtime/heap_arena.c).  The flag toggle stays for
-	// future degraded-mode work; users must install libmimalloc.
+	// mimalloc is the DEFAULT but no longer required for correctness:
+	// _tin_is_managed falls back to a header-magic-only check when
+	// the arena is disabled (--no-mimalloc).  Performance benefits
+	// stay with mimalloc, but a sanitizer build or a host without
+	// libmimalloc can opt out.
 	useMimalloc = true
 
 	var stdlibOverride string

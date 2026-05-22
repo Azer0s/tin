@@ -15,11 +15,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <mimalloc.h>
+
+#if TIN_USE_MIMALLOC
+#  include <mimalloc.h>
+#endif
 
 static inline TinRCHdr *_rc_hdr(void *ptr) {
     return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
 }
+
+#if TIN_USE_MIMALLOC
 
 // Per-thread mimalloc heap, pinned to the Tin arena.  Defined in
 // heap_arena.c; cached after first call so the lookup is one TLS load
@@ -39,6 +44,23 @@ static inline void _tin_arena_free(void *hdr) {
     ((TinRCHdr *)hdr)->_pad = 0;
     mi_free(hdr);
 }
+
+#else // !TIN_USE_MIMALLOC
+
+// --no-mimalloc fallback: rc-blocks come from libc malloc.  The
+// header magic is what _tin_is_managed checks (heap_arena.c stub);
+// zeroing _pad on free is still essential so a freed-then-recycled-
+// by-libc block doesn't trick a stale *T retain/release.
+static inline void *_tin_arena_alloc(size_t bytes) {
+    return malloc(bytes);
+}
+
+static inline void _tin_arena_free(void *hdr) {
+    ((TinRCHdr *)hdr)->_pad = 0;
+    free(hdr);
+}
+
+#endif // TIN_USE_MIMALLOC
 
 // Allocate an ARC-managed block of `size` bytes.  Starts with rc=1,
 // SHARED flag set (atomic retain/release), UNIQUE clear (set only by

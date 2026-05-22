@@ -123,6 +123,16 @@ func (cg *CodeGen) emitDiscardedValueRelease(block *ir.Block, val value.Value, a
 	}
 
 	t := val.Type()
+	// Primitive *T return values from discarded calls (e.g.
+	// `memcpy(...)` returning the dst alias) are borrows of memory
+	// the caller still owns through another binding.  Releasing them
+	// would decrement the rc of that caller-owned block and free it
+	// prematurely.  *T is rc-tracked at binding boundaries, but a
+	// transient return into a void context is a borrow we deliberately
+	// drop.
+	if isPrimitivePtr(t) {
+		return
+	}
 	// String / array / any / closure / trait fat-ptr / iface fat-ptr:
 	// the value owns rc=1 of its outer block.  Release matches the
 	// existing logic for temp args in callGenericFromMap.
