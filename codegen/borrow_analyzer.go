@@ -196,19 +196,21 @@ func (cg *CodeGen) analyzeFunctionParamBorrows(body ast.Node, paramNames []strin
 	if body == nil || len(paramNames) == 0 {
 		return nil
 	}
-
-	mutated := cg.collectMutatedTargets(body)
+	// Param mutation check: only `p = newptr` (direct reassign of the
+	// binding) disqualifies; writes through the pointer (`*p = x`,
+	// `p.f = x`, `p[i] = x`) mutate the pointee, not the param itself,
+	// so the caller's rc invariant holds.  Without this distinction,
+	// `fn inc(p *i64) = *p = *p + 1` would always force the callee's
+	// entry retain even when the body never reassigns p.
+	reassigned := cg.collectReassignedNames(body)
 	result := map[string]bool{}
 
 	for _, name := range paramNames {
 		if name == "" {
 			continue
 		}
-		// Same mutation-source check as let-bindings: if the param
-		// is reassigned in the body, the entry retain is needed to
-		// keep the original value alive across the reassignment's
-		// release.
-		if mutated[name] {
+
+		if reassigned[name] {
 			continue
 		}
 
@@ -218,6 +220,44 @@ func (cg *CodeGen) analyzeFunctionParamBorrows(body ast.Node, paramNames []strin
 	}
 
 	return result
+}
+
+// collectReassignedNames returns the set of identifier names that are
+// REASSIGNED in `node` (`p = x` or `p op= x` -- the identifier
+// itself, not its pointee).  Distinct from `collectMutatedTargets`,
+// which conservatively walks through every wrapper (FieldAccess,
+// IndexExpr, DerefExpr) and lumps reads-through-write together.
+func (cg *CodeGen) collectReassignedNames(node ast.Node) map[string]bool {
+	out := map[string]bool{}
+
+	if node == nil {
+		return out
+	}
+
+	record := func(target ast.Node) {
+		if id, isId := target.(*ast.Identifier); isId && id != nil {
+			out[id.Name] = true
+		}
+	}
+
+	walkAST(node, func(n ast.Node) {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			if v != nil {
+				record(v.Target)
+			}
+		case *ast.AugAssignStmt:
+			if v != nil {
+				record(v.Target)
+			}
+		case *ast.PostfixStmt:
+			if v != nil {
+				record(v.Expr)
+			}
+		}
+	})
+
+	return out
 }
 
 // collectBorrowCandidates walks `node` and records every let-binding
@@ -243,6 +283,24 @@ func (cg *CodeGen) collectBorrowCandidates(node ast.Node) map[string]string {
 
 		if id, isIdent := vd.Value.(*ast.Identifier); isIdent && id != nil {
 			out[vd.Name] = id.Name
+
+			return
+		}
+		// `let t = &s[i]` -- raw `*T` view into an indexed
+		// element of a local array.  Borrow-safe iff the rest of
+		// the analyzer's checks (no escape, source not mutated)
+		// hold; the downstream isSafeBorrowUse walk catches
+		// returns, captures into closures/fibers, etc.  Other
+		// alias shapes (&s, &s.f, s.f, s[i], *s) are deliberately
+		// not included -- each interacts with iface-coerce /
+		// per-struct release paths in ways the borrow walk
+		// doesn't safely cover yet.
+		if ao, isAddr := vd.Value.(*ast.AddressOfExpr); isAddr && ao != nil {
+			if ix, isIx := ao.Expr.(*ast.IndexExpr); isIx && ix != nil {
+				if id, isId := ix.Expr.(*ast.Identifier); isId && id != nil {
+					out[vd.Name] = id.Name
+				}
+			}
 		}
 	})
 
@@ -290,6 +348,34 @@ func (cg *CodeGen) collectMutatedTargets(node ast.Node) map[string]bool {
 	if node == nil {
 		return out
 	}
+	// Pre-scan: does the body contain ANY `*expr = ...` or
+	// `*expr op= ...` writeback through a pointer?  Without one,
+	// `&x` cannot reach a `*p = newvalue` that would mutate x, so
+	// the AddressOf-conservative-mutation branch below can stay
+	// inert and read-only patterns (`let p = &xs[i]; v = *(p+1)`)
+	// keep their borrow-safe candidate status.
+	hasWriteThrough := false
+
+	walkAST(node, func(n ast.Node) {
+		if hasWriteThrough {
+			return
+		}
+
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if s != nil {
+				if _, isDeref := s.Target.(*ast.DerefExpr); isDeref {
+					hasWriteThrough = true
+				}
+			}
+		case *ast.AugAssignStmt:
+			if s != nil {
+				if _, isDeref := s.Target.(*ast.DerefExpr); isDeref {
+					hasWriteThrough = true
+				}
+			}
+		}
+	})
 
 	walkAST(node, func(n ast.Node) {
 		switch v := n.(type) {
@@ -315,14 +401,14 @@ func (cg *CodeGen) collectMutatedTargets(node ast.Node) map[string]bool {
 			if v == nil {
 				return
 			}
-			// `&s`, `&s.field`, `&s[i]` all open the door to
-			// `*p = newvalue` later; we cannot track which
-			// pointer aliases which binding at this analysis
-			// depth, so treat the root identifier as
-			// conservatively mutatable.  recordTargetRoot
-			// walks through FieldAccess / IndexExpr / DerefExpr
-			// to the underlying binding name.
-			recordTargetRoot(v.Expr, out)
+			// `&s`, `&s.field`, `&s[i]` open the door to
+			// `*p = newvalue` only when the body contains a
+			// `*expr = ...` writeback (hasWriteThrough pre-scan).
+			// Read-only patterns like `let p = &xs[i]; v = *(p+1)`
+			// stay borrow-safe.
+			if hasWriteThrough {
+				recordTargetRoot(v.Expr, out)
+			}
 		case *ast.CallExpr:
 			if v == nil {
 				return
@@ -723,10 +809,13 @@ func isSafeBorrowUse(parent, id ast.Node) bool {
 	case *ast.BinExpr:
 		return p.Left == id || p.Right == id
 	case *ast.UnaryExpr:
-		// `!t`, `-t`, `~t` consume the value; safe.  Pointer
-		// deref `*t` is handled the same way: reading through a
-		// borrowed pointer is fine as long as the source binding
-		// is alive.
+		// `!t`, `-t`, `~t` consume the value; safe.
+		return p.Expr == id
+	case *ast.DerefExpr:
+		// `*t` reads through the borrowed pointer; safe as long
+		// as the source binding is alive (LIFO scope-release
+		// keeps the source's storage live until after this
+		// borrow's scope exit).
 		return p.Expr == id
 	case *ast.EchoStmt:
 		return p.Value == id

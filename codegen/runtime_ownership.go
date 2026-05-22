@@ -198,6 +198,69 @@ func (cg *CodeGen) declTypeIsTraitPtr(te ast.TypeExpr) bool {
 	return cg.traitFor(CanonKey(name)) != nil
 }
 
+// exprIsAddrOfEscapingLocal reports whether `e` is `&Identifier` whose
+// target is a heap-promoted local in the current function (curFnEscapingVars).
+func (cg *CodeGen) exprIsAddrOfEscapingLocal(e ast.Node) bool {
+	addr, ok := e.(*ast.AddressOfExpr)
+	if !ok {
+		return false
+	}
+
+	id, ok := addr.Expr.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+
+	return cg.curFnEscapingVars[id.Name]
+}
+
+// releaseHeapPromotedLocalsInStructLit emits a release for every
+// `&heap_promoted_local` value used as a primitive *T field of `e`.
+// Called from the `&StructLit` lowering after the heap-bound copy has
+// been stored, to balance the unconditional field-store retain that
+// genStructLit emitted for those slots.  Only the heap-bound path
+// emits this -- bare `Box{...}` (by-value) balances via temp-copy
+// access plus binding scope-exit, so a release here would UAF.
+func (cg *CodeGen) releaseHeapPromotedLocalsInStructLit(block *ir.Block, e *ast.StructLit) {
+	emit := func(node ast.Node) {
+		if !cg.exprIsAddrOfEscapingLocal(node) {
+			return
+		}
+
+		ao := node.(*ast.AddressOfExpr)
+		id := ao.Expr.(*ast.Identifier)
+
+		entry, ok := cg.curScope.lookup(id.Name)
+		if !ok || !entry.isAlloc || !entry.isEarlyHeap {
+			return
+		}
+
+		ptrType, ok := entry.val.Type().(*irtypes.PointerType)
+		if !ok {
+			return
+		}
+		// entry.val for early-heap'd locals is the heap pointer itself
+		// (cast via bitcast on alloc); release it via the provenance-
+		// aware _tin_release_ptr if it's a primitive *T, else via the
+		// generic release for fat-ptr-shaped heap blocks.
+		if isPrimitivePtr(ptrType) {
+			i8p := block.NewBitCast(entry.val, irtypes.I8Ptr)
+			block.NewCall(cg.ensureReleasePtr(), i8p)
+		} else {
+			i8p := block.NewBitCast(entry.val, irtypes.I8Ptr)
+			block.NewCall(cg.ensureRelease(), i8p)
+		}
+	}
+
+	for _, v := range e.Positional {
+		emit(v)
+	}
+
+	for _, f := range e.Fields {
+		emit(f.Value)
+	}
+}
+
 // markOwningRawPtrField records that fieldName on structName receives an
 // owning heap pointer. Triggered by genStructLit (and assignment paths) when
 // the value being stored is `&Identifier` and the identifier is in
@@ -410,6 +473,9 @@ func rcKindOf(t irtypes.Type) rcKind {
 	switch {
 	case t == nil:
 		return rcKindNone
+	case isVolatilePtr(t):
+		// Raw bare-metal pointer (e.g. addr(0xDEAD)) -- skip all rc.
+		return rcKindNone
 	case isAnyType(t):
 		return rcKindAny
 	case isFatFnPtr(t):
@@ -423,6 +489,23 @@ func rcKindOf(t irtypes.Type) rcKind {
 	return rcKindNone
 }
 
+// volatileAddrSpace is the LLVM address space tin uses for raw,
+// bare-metal pointer values (`volatile *T`, e.g. the result of
+// `addr(0xDEADBEEF)`).  Pointers in this space are explicitly opted
+// out of all rc retain/release/is_managed machinery: their lifetimes
+// are the user's responsibility.  Any other address space (0 today)
+// is rc-tracked normally.
+const volatileAddrSpace = 1
+
+// isVolatilePtr reports whether t is an rc-opted-out raw pointer.
+// Callers in the rc machinery (rcKindOf, isPrimitivePtr, scope
+// release, assignment release, return release) all check this first
+// and treat a volatile pointer as if it has no rc to manage.
+func isVolatilePtr(t irtypes.Type) bool {
+	pt, ok := t.(*irtypes.PointerType)
+	return ok && pt.AddrSpace == volatileAddrSpace
+}
+
 // isPrimitivePtr reports whether t is a pointer whose element type is
 // a scalar (*i64, *f64, *void, *byte, ...) -- NOT a pointer to a
 // named struct (those have per-struct release helpers) and NOT a
@@ -431,9 +514,16 @@ func rcKindOf(t irtypes.Type) rcKind {
 // _tin_retain_ptr / _tin_release_ptr for these; the runtime's
 // arena-range + header-magic check makes foreign and interior
 // pointers safe no-ops.
+//
+// Volatile pointers (addrspace 1) are excluded -- they're the raw
+// `addr(...)` escape hatch and must skip rc entirely.
 func isPrimitivePtr(t irtypes.Type) bool {
 	pt, ok := t.(*irtypes.PointerType)
 	if !ok {
+		return false
+	}
+
+	if pt.AddrSpace == volatileAddrSpace {
 		return false
 	}
 

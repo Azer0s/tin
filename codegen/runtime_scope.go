@@ -146,6 +146,23 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 			}
 		}
 
+		// Raw primitive-pointer parameter classified as Owned: the
+		// entry retain went through _tin_retain_ptr (emitRetain's
+		// isPrimitivePtr branch) but elemNeedsRelease(*intT) returns
+		// false, so without an explicit _tin_release_ptr the +1 the
+		// callee added at entry leaks the underlying heap block.
+		// Bounded to params (declaredLet=false, noDeinit=true) so
+		// let-bindings that intentionally observe stack/foreign ptrs
+		// (where _tin_retain_ptr was a provenance-failed no-op) don't
+		// get a spurious release.
+		if !entry.declaredLet && entry.noDeinit && isPrimitivePtr(elemType) {
+			loaded := block.NewLoad(elemType, entry.val)
+			ptrI8 := block.NewBitCast(loaded, irtypes.I8Ptr)
+			block.NewCall(cg.ensureReleasePtr(), ptrI8)
+
+			return
+		}
+
 		if !cg.elemNeedsRelease(elemType) {
 			return
 		}
@@ -262,6 +279,17 @@ func (cg *CodeGen) emitAllScopeReleases(block *ir.Block, skipName string) {
 						}
 					}
 				}
+			}
+
+			// Raw primitive-pointer param: twin of the branch in
+			// emitScopeRelease.  Balance the entry _tin_retain_ptr
+			// with an explicit _tin_release_ptr at scope exit.
+			if !entry.declaredLet && entry.noDeinit && isPrimitivePtr(elemType) {
+				loaded := block.NewLoad(elemType, entry.val)
+				ptrI8 := block.NewBitCast(loaded, irtypes.I8Ptr)
+				block.NewCall(cg.ensureReleasePtr(), ptrI8)
+
+				return
 			}
 
 			if !cg.elemNeedsRelease(elemType) {

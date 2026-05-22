@@ -299,7 +299,7 @@ fn make_spirals(r *rand::Rng) ([[f64]], [i64]) =
       let jitter = 0.30 * randn(r) * t
       let theta = class_offset + sweep + jitter
 
-      xs ++= [radius * math::sin(theta), radius * math::cos(theta)]
+      xs ++= [[radius * math::sin(theta), radius * math::cos(theta)]]
       ys ++= [c]
 
   return (xs, ys)

@@ -483,7 +483,7 @@ fn{#no_thread} init_globals() = pass
 | `#heavy`         | fn / method          | Forces "auto-yield" classification for schedulers    |
 | `#no_autoyield`  | fn / method / lambda | Suppresses auto-yield at loop backedges and calls    |
 | `#handover`      | extern fn only       | Transfers ownership of a returned C pointer into ARC |
-| `#interop`       | top-level fn         | Emits a C-callable wrapper; see [08 - C Interop](docs/08-interop.md#calling-tin-from-c-interop) |
+| `#interop`       | top-level fn         | Emits a C-callable wrapper; see [08 - C Interop](../08-interop.md#calling-tin-from-c-interop) |
 
 #### Struct tags
 
@@ -510,7 +510,7 @@ Scopes: `@fn` (all methods), `@method` (instance methods only),
 opts out. Per-field `const` / `var` also work standalone - see
 [Per-field mutability](#per-field-mutability---const--var).
 
-See [docs/13-control-tags.md](docs/13-control-tags.md) for the full
+See [docs/13-control-tags.md](../13-control-tags.md) for the full
 tag-scope compatibility matrix and cascade semantics.
 
 #### Macro tags
@@ -894,7 +894,7 @@ pointer-dereference writes `pp->f = v`). Reflective writes
 The struct-level tag `#const@field` flips the default for unmarked
 fields to `const`; see [Struct tags](#struct-tags) above.
 
-See [docs/05-structs.md](docs/05-structs.md#field-mutability---const--var)
+See [docs/05-structs.md](../05-structs.md#field-mutability---const--var)
 for detailed semantics and interaction with `weak` / `own` modifiers.
 
 ---
@@ -941,8 +941,8 @@ fn sign(n i64) i64 =
   where _:  -1
 ```
 
-See [docs/02-control-flow.md](docs/02-control-flow.md) for the full
-pattern grammar and [docs/04-collections.md](docs/04-collections.md)
+See [docs/02-control-flow.md](../02-control-flow.md) for the full
+pattern grammar and [docs/04-collections.md](../04-collections.md)
 for array patterns.
 
 ---
@@ -1028,7 +1028,7 @@ await match [fa, fb, fc]:
 
 The `sync` stdlib provides channels (`Channel[T]`, bounded + unbounded),
 mutexes (`Mutex`), and atomics (`Atomic[T]`). See
-[docs/14-fibers.md](docs/14-fibers.md) for the full model, scheduler
+[docs/14-fibers.md](../14-fibers.md) for the full model, scheduler
 contract, and performance notes.
 
 ---
@@ -1063,5 +1063,5 @@ setfield(u, "id", 42)
 
 `getfield` / `setfield` on a concrete struct lower to a direct GEP
 + load/store; on an `any` value, a runtime dispatch chain selects the
-correct struct layout. See [docs/10-reflection.md](docs/10-reflection.md)
+correct struct layout. See [docs/10-reflection.md](../10-reflection.md)
 for the full API.

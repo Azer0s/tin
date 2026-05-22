@@ -42,6 +42,14 @@ func (p *Parser) parseTypeUnion() (ast.TypeExpr, error) {
 }
 
 func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
+	// volatile *T -- raw/bare-metal pointer escape hatch (skips rc retain/release).
+	// Pairs with `volatile const *T` if user wants both qualifiers.
+	isVolatile := false
+	if p.check(lexer.KW_VOLATILE) {
+		isVolatile = true
+
+		p.advance()
+	}
 	// const *T
 	isConst := false
 	if p.check(lexer.KW_CONST) {
@@ -58,7 +66,11 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 			return nil, err
 		}
 
-		return &ast.PointerType{Elem: elem, IsConst: isConst}, nil
+		return &ast.PointerType{Elem: elem, IsConst: isConst, IsVolatile: isVolatile}, nil
+	}
+
+	if isVolatile {
+		return nil, fmt.Errorf("`volatile` qualifier only applies to pointer types (`volatile *T`)")
 	}
 	// @[T1, T2, ...] - TupleArrayType (typed per-slot destructuring annotation)
 	if p.check(lexer.AT) {

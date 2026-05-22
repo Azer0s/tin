@@ -80,6 +80,7 @@ const (
 	KW_DATA
 	KW_REF
 	KW_MOVE
+	KW_VOLATILE
 
 	// Operators
 	PLUS      // +
@@ -164,9 +165,10 @@ var tokenNames = map[TokenType]string{
 	KW_WEAK: "weak",
 	KW_OWN:  "own",
 	KW_DATA: "data",
-	KW_REF:  "ref",
-	KW_MOVE: "move",
-	PLUS:    "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
+	KW_REF:      "ref",
+	KW_MOVE:     "move",
+	KW_VOLATILE: "volatile",
+	PLUS:        "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
 	SHL: "<<", SHR: ">>", INC: "++", APPENDEQ: "++=", PLUSEQ: "+=",
@@ -205,9 +207,10 @@ var keywords = map[string]TokenType{
 	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD, "nil": KW_NIL,
 	"weak": KW_WEAK,
 	"own":  KW_OWN,
-	"ref":  KW_REF,
-	"move": KW_MOVE,
-	"true": BOOL_LIT, "false": BOOL_LIT,
+	"ref":      KW_REF,
+	"move":     KW_MOVE,
+	"volatile": KW_VOLATILE,
+	"true":     BOOL_LIT, "false": BOOL_LIT,
 }
 
 // Token is a single lexical unit

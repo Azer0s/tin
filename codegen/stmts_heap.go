@@ -655,7 +655,17 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 		// already skips isEarlyHeap vars at scope exit.
 		if entry.isEarlyHeap {
 			stackVal := block.NewLoad(elemType, entry.val)
-			cg.emitRetain(block, stackVal)
+			// Retain preserves inner RC fields across the return.
+			// SKIP for raw primitive pointer values (`*i64`, `*u8`,
+			// ...): the caller's chain release decrements the inner
+			// block exactly once, so a retain here would leave a +1
+			// the chain release cannot match.  Multi-level pointer
+			// chains (`alloc_nested() **i64` /
+			// `alloc_triple_deref() ***i64`) were leaking the innermost
+			// block on every call before this exemption.
+			if !isPrimitivePtr(elemType) {
+				cg.emitRetain(block, stackVal)
+			}
 
 			if cg.curFn != nil && cg.fnReturnsOwningIface[cg.curFn.Name()] {
 				heapI8 := block.NewBitCast(entry.val, irtypes.I8Ptr)

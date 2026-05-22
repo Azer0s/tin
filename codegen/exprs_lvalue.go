@@ -221,6 +221,22 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 		heapI8 := block.NewCall(cg.ensureRCAlloc(), sz)
 		typedPtr := block.NewBitCast(heapI8, irtypes.NewPointer(st))
 		block.NewStore(val, typedPtr)
+		// Heap-promoted local escaping into a raw *T field: balance
+		// the field-store retain that genStructLit unconditionally
+		// emitted.  Layout of the leak this prevents:
+		//
+		//   fn make() *Box =
+		//     let x = 100              // x heap-promoted, rc=1
+		//     return &Box{p: &x}       // field-store retain: x.rc=2
+		//
+		// The local's scope-exit skips its release (isEarlyHeap), and
+		// Box's per-struct release_ptr only walks the field once when
+		// the heap Box is dropped, so the alloc-owner-rc strands at
+		// rc=1.  Releasing the local here (only in the *heap-bound*
+		// `&StructLit` path -- not in the by-value StructLit path,
+		// which already balances via a temp-copy-plus-binding double-
+		// release) brings the cycle back to zero.
+		cg.releaseHeapPromotedLocalsInStructLit(block, e)
 
 		return typedPtr, nil
 

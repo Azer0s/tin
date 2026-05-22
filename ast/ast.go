@@ -1012,17 +1012,23 @@ func (a *ArrayType) String() string {
 }
 
 type PointerType struct {
-	Elem    TypeExpr
-	IsConst bool
+	Elem       TypeExpr
+	IsConst    bool
+	IsVolatile bool // `volatile *T` -- escape hatch for raw/bare-metal pointers; bypasses rc retain/release at codegen time
 }
 
 func (p *PointerType) typeExprMarker() {}
 func (p *PointerType) String() string {
-	if p.IsConst {
-		return "const *" + p.Elem.String()
+	prefix := ""
+	if p.IsVolatile {
+		prefix = "volatile "
 	}
 
-	return "*" + p.Elem.String()
+	if p.IsConst {
+		return prefix + "const *" + p.Elem.String()
+	}
+
+	return prefix + "*" + p.Elem.String()
 }
 
 type FuncType struct {

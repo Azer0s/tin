@@ -10,32 +10,66 @@ import (
 )
 
 func (cg *CodeGen) genAddrExpr(block *ir.Block, e *ast.AddrExpr) (value.Value, error) {
-	// `addr(...)` is the raw-address builtin -- it materializes a
-	// pointer at a specific bare-metal address.  The only legitimate
-	// argument is an integer literal under `{#unsafe}`; anything else
-	// (taking the address of an lvalue) belongs to the `&` operator.
-	// Without this rejection users learn the wrong mental model and
-	// stdlib code starts mixing the two forms.
-	il, ok := e.Val.(*ast.IntLit)
-	if !ok {
-		return nil, cg.nodeErr(e,
-			"addr(...) takes a raw integer address (e.g. addr(0xDEADBEEF)). "+
-				"To take the address of an lvalue, use `&expr` instead.")
-	}
-
+	// `addr(...)` is the raw-address builtin.  Two accepted forms,
+	// both requiring `{#unsafe}` and both producing `volatile *T`:
+	//
+	//   1. addr(int_literal)  -> volatile *char  (bare-metal poke)
+	//   2. addr(arr[i])       -> volatile *T     (escape an array
+	//                                              slot into raw-ptr
+	//                                              world; emits a
+	//                                              warning)
+	//
+	// The `volatile` qualifier (addrspace 1 at LLVM level) tells the
+	// rc machinery to skip retain/release for the resulting pointer
+	// -- raw addresses don't live in tin's heap and reading their
+	// rc header would fault.  Crossing back to `*T` requires an
+	// explicit cast (also in `{#unsafe}`), which is the user's
+	// promise that the address is in fact rc-managed.
 	if cg.unsafeDepth == 0 {
 		return nil, cg.nodeErr(e,
-			"addr(int_literal) creates a raw pointer and requires an `{#unsafe}` block")
+			"addr(...) creates a raw `volatile` pointer and requires an `{#unsafe}` block")
 	}
 
-	if il.Big != nil {
+	switch arg := e.Val.(type) {
+	case *ast.IntLit:
+		if arg.Big != nil {
+			return nil, cg.nodeErr(e,
+				"addr(int_literal) target must fit in 64 bits (got %s)", arg.Big.String())
+		}
+
+		// Result type: volatile *char  ->  addrspace(1) i8*
+		vptr := &irtypes.PointerType{ElemType: irtypes.I8, AddrSpace: volatileAddrSpace}
+
+		return block.NewIntToPtr(constant.NewInt(irtypes.I64, arg.Value), vptr), nil
+	case *ast.IndexExpr:
+		// Take the slot address via the usual lvalue path, then
+		// shed rc tracking by promoting to addrspace(1).  The
+		// resulting pointer is volatile *T (T = element type),
+		// and the user owns the lifetime hazards.
+		cg.warn("volatile-from-lvalue", e.Pos(),
+			"taking addr() of an array slot escapes the rc lifetime "+
+				"checker; prefer `&arr[i]` unless you specifically need a "+
+				"`volatile` raw pointer.")
+
+		lval, err := cg.genLValue(block, arg)
+		if err != nil {
+			return nil, err
+		}
+
+		pt, ok := lval.Type().(*irtypes.PointerType)
+		if !ok {
+			return nil, cg.nodeErr(e, "addr(arr[i]): lvalue did not produce a pointer (got %s)", lval.Type())
+		}
+
+		vptr := &irtypes.PointerType{ElemType: pt.ElemType, AddrSpace: volatileAddrSpace}
+
+		return block.NewAddrSpaceCast(lval, vptr), nil
+	default:
 		return nil, cg.nodeErr(e,
-			"addr(int_literal) target must fit in 64 bits (got %s)", il.Big.String())
+			"addr(...) takes a raw integer address (e.g. addr(0xDEADBEEF)) or "+
+				"an indexed lvalue (addr(arr[i])).  To take the address of a "+
+				"regular lvalue, use `&expr` instead.")
 	}
-
-	v := constant.NewInt(irtypes.I64, il.Value)
-
-	return block.NewIntToPtr(v, irtypes.I8Ptr), nil
 }
 
 func (cg *CodeGen) genAddrOfExpr(block *ir.Block, e *ast.AddressOfExpr) (value.Value, error) {

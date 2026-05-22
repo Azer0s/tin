@@ -70,6 +70,16 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 		return
 	}
 
+	// Interpolated string `"{expr}"`: genInterpolatedString allocates a
+	// fresh _tin_rc_alloc buffer + wraps it in a fat-ptr.  Without a
+	// post-call release, the buffer leaks because nothing else owns the
+	// rc=1 reference once the call returns.
+	if _, isInterp := astArg.(*ast.InterpolatedString); isInterp {
+		cg.emitRelease(block, pre)
+
+		return
+	}
+
 	// Fresh struct-valued call result whose fields own RC-tracked
 	// references: e.g. `blas::array_from(xs)` returns an `Array[T]`
 	// struct holding a retained `[T]`.  When this is consumed inline

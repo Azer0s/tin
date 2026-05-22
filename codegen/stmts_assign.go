@@ -369,7 +369,18 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 
 	if (isRCTrackedType(ptrType.ElemType) || isTinStructPtrElem || isTraitIfacePtrElem) && !isWeakTarget {
 		boxedToAny := isAnyType(ptrType.ElemType) && !isAnyType(srcType)
-		if isCopyExpr(s.Value) && !boxedToAny && !cg.isFreshBytesAlloc(val) {
+		// View-style assignment to a raw primitive pointer:
+		// `kp = &s[i]` or `kp = s as *u8` extracts a borrow view
+		// from an existing owner.  Retaining would bump the
+		// underlying heap block but scope-exit skips release for
+		// raw-ptr let-bindings, so the +1 leaks one block per
+		// reassignment.  Mirrors the asToRawPtr exemption in
+		// genVarDecl.
+		_, isAsRHS := s.Value.(*ast.AsExpr)
+		_, isAddrOfRHS := s.Value.(*ast.AddressOfExpr)
+		viewToRawPtrAssign := (isAsRHS || isAddrOfRHS) && isPrimitivePtr(ptrType.ElemType)
+
+		if isCopyExpr(s.Value) && !boxedToAny && !cg.isFreshBytesAlloc(val) && !viewToRawPtrAssign {
 			if isTinStructPtrElem || isTraitIfacePtrElem {
 				// Direct _tin_retain for *TinStruct and
 				// *Trait_iface pointers (emitRetain doesn't
@@ -383,13 +394,31 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 			}
 		}
 
-		// Release the previous slot value when:
-		//   - FieldAccess targets (struct field owns its slot), OR
-		//   - Identifier targets whose binding already owns.
-		// First promotion from borrow / uninit to owning skips the
-		// release because the slot held either nil or a borrow-alias
-		// the binding never retained.
-		if !isIdentTarget || (identEntry != nil && identEntry.ownsPtrViaRetain) {
+		// Release the previous slot value.  Three classes of binding:
+		//
+		//  - *TinStruct / *Trait_iface targets: use ownsPtrViaRetain
+		//    as the "I own a +1" flag.  A binding can start as a
+		//    borrow (`let p = ptr_param`) and only become owning
+		//    after a retaining store, so the release must wait for
+		//    that promotion.
+		//  - Fat types whose binding is Owned (string / [T] / any /
+		//    fn): the slot's current value is fully retained.
+		//    Release it before overwriting -- `result = result ++ x`
+		//    leaked one block per iteration without this.
+		//  - Borrowed fat-type bindings: the let-decl skipped its
+		//    entry retain, so the slot's current value is an alias
+		//    owned by another binding.  Releasing it would double-
+		//    free; skip.
+		releaseOld := !isIdentTarget
+		if isIdentTarget && identEntry != nil {
+			if isTinStructPtrElem || isTraitIfacePtrElem {
+				releaseOld = identEntry.ownsPtrViaRetain
+			} else {
+				releaseOld = identEntry.ownership != ownershipBorrowed
+			}
+		}
+
+		if releaseOld {
 			oldVal := block.NewLoad(ptrType.ElemType, ptr)
 			cg.emitRelease(block, oldVal)
 		}

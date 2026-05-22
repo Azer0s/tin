@@ -700,11 +700,16 @@ func (cg *CodeGen) fmtArgType(t irtypes.Type) string {
 	}
 
 	if pt, ok := t.(*irtypes.PointerType); ok {
-		if pt.ElemType == nil {
-			return "*void"
+		prefix := ""
+		if pt.AddrSpace == volatileAddrSpace {
+			prefix = "volatile "
 		}
 
-		return "*" + cg.fmtArgType(pt.ElemType)
+		if pt.ElemType == nil {
+			return prefix + "*void"
+		}
+
+		return prefix + "*" + cg.fmtArgType(pt.ElemType)
 	}
 
 	if at, ok := t.(*irtypes.ArrayType); ok {

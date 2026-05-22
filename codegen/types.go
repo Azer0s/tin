@@ -130,16 +130,29 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		return irtypes.Void, nil
 	case *ast.PointerType:
 		// *void is invalid in LLVM IR - use i8* (opaque pointer convention)
+		var inner irtypes.Type
+
 		if st, ok := t.Elem.(*ast.SimpleType); ok && st.Name == "void" {
-			return irtypes.I8Ptr, nil
+			inner = irtypes.I8
+		} else {
+			i, err := cg.tinTypeToLLVM(t.Elem)
+			if err != nil {
+				return nil, err
+			}
+
+			inner = i
 		}
 
-		inner, err := cg.tinTypeToLLVM(t.Elem)
-		if err != nil {
-			return nil, err
+		pt := irtypes.NewPointer(inner)
+		if t.IsVolatile {
+			// `volatile *T` lives in addrspace(1). The address-space tag is
+			// what tells the rc machinery (rcKindOf / isPrimitivePtr) and
+			// the binding system to skip retain/release for raw bare-metal
+			// pointers without inventing a second pointer category.
+			pt.AddrSpace = volatileAddrSpace
 		}
 
-		return irtypes.NewPointer(inner), nil
+		return pt, nil
 	case *ast.ArrayType:
 		elem, err := cg.tinTypeToLLVM(t.Elem)
 		if err != nil {

@@ -192,8 +192,9 @@ __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
 
 // --no-mimalloc build: no arena, no per-thread heaps.  rc-blocks come
 // from libc malloc.  _tin_is_managed relies entirely on the header
-// magic stamped by _tin_rc_alloc into hdr->_pad.
-
+// magic stamped by _tin_rc_alloc into hdr->_pad.  Raw addresses from
+// `addr(int_literal)` carry the `volatile *T` type which skips
+// rc-tracking entirely in codegen, so they never reach this function.
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));

@@ -451,6 +451,12 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// emitScopeRelease (runtime.go) uses the flag to emit the matching
 	// _tin_release at scope exit so the iface storage is reclaimed.
 	var ownsIfaceData bool
+	// preCoerceSrcType captures initVal's type BEFORE coerce reshapes
+	// it (e.g. boxing into `any`).  The borrow-classification check at
+	// the bottom of this function needs the pre-coerce type to spot
+	// implicit boxing -- `let x any = n` whose post-coerce initVal is
+	// already `any` but whose source was something else.
+	var preCoerceSrcType irtypes.Type
 
 	if initVal != nil {
 		// If the init value is an empty array literal `[]` (constant
@@ -472,6 +478,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 		}
 
 		srcType := initVal.Type()
+		preCoerceSrcType = srcType
 
 		// A let-binding "owns its iface" when the declared type is the
 		// trait fat-ptr shape (or pointer-to-it) and the source value
@@ -612,6 +619,31 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				}
 			}
 
+			// `let p = expr as *u8` / `as *char` / `as *void`: raw-
+			// pointer view extracted from a fat-ptr or other owner.
+			// emitRetain would route through _tin_retain_ptr (bumping
+			// the underlying heap block's RC) but scope-exit skips
+			// release_ptr for raw primitive pointers (elemNeedsRelease
+			// returns false), so the +1 leaks.  Treat as a borrow
+			// view: no retain, no release.
+			//
+			// Twin cases:
+			//   - `let p = &s[i]` (AddressOf into IndexExpr) -- raw
+			//     ptr aliasing into a fat-ptr's data.
+			//   - `let p = *pp` (DerefExpr loading an inner pointer
+			//     out of a `**T` heap chain) -- inner ptr is borrow
+			//     view, pp's chain release frees the underlying block.
+			// collectBorrowCandidates records the &s[i] shape but the
+			// analyzer rejects whenever the source is a parameter,
+			// capture, or other non-let binding, so currentFnBorrowSet
+			// misses these.  Without an explicit exemption here the
+			// emitRetain on the let-init leaves an unbalanced +1 on
+			// the source's heap block.
+			_, isAddrOf := s.Value.(*ast.AddressOfExpr)
+			_, isDeref := s.Value.(*ast.DerefExpr)
+			viewToRawPtr := (isAs || isAddrOf || isDeref) && isPrimitivePtr(initVal.Type())
+			asToRawPtr := viewToRawPtr
+
 			if treatAsOwning && cg.emitOwningPtrRetainIfApplicable(block, initVal) {
 				// Tag the entry so emitScopeRelease's *TinStruct
 				// release path knows this binding actually owns a
@@ -619,7 +651,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 				// NOT come through here, so its scope exit skips
 				// release (correct - there's no heap to release).
 				cg.pendingOwnsPtrViaRetain = true
-			} else if !cg.currentFnBorrowSet[s.Name] {
+			} else if !cg.currentFnBorrowSet[s.Name] && !asToRawPtr {
 				// Skip the entry retain for bindings the borrow
 				// analyzer classified as Borrowed.  The scope-exit
 				// release path checks the same classification (via
@@ -757,7 +789,25 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// Bindings the borrow analyzer flagged as borrow-safe get
 	// classified as Borrowed.  emitScopeRelease reads this field to
 	// decide whether to drop the scope-exit release.
-	if cg.currentFnBorrowSet[s.Name] {
+	//
+	// EXCEPTION: a let-binding whose coerce minted a fresh rc=1
+	// allocation -- `let x any = n` (boxedToAny) or
+	// `let m Trait = s` (ownsIfaceData).  The borrow analyzer's
+	// "let target = source-Ident" shape misses the coercion-induced
+	// allocation; flagging as Borrowed would suppress the
+	// scope-exit release of the freshly-allocated block.
+	coerceAllocates := false
+	if preCoerceSrcType != nil {
+		if isAnyType(llType) && !isAnyType(preCoerceSrcType) {
+			coerceAllocates = true
+		}
+
+		if ownsIfaceData {
+			coerceAllocates = true
+		}
+	}
+
+	if cg.currentFnBorrowSet[s.Name] && !coerceAllocates {
 		entry.ownership = ownershipBorrowed
 	}
 
