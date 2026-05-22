@@ -157,14 +157,18 @@ func (cg *CodeGen) computeSpawnerReachable() map[string]bool {
 	}
 
 	out := map[string]bool{}
-	// Seed: any function whose body crosses a fiber boundary or
-	// writes to a global.
+	// Seed: any function whose body could publish an allocation past a
+	// fiber boundary, into a global, or through an extern.  An extern
+	// call is opaque to the analyzer -- the foreign code might stash
+	// the pointer in thread-local state, hand it to another OS thread,
+	// or otherwise share it -- so we treat any function that calls
+	// extern as a publishing site.
 	for name, decl := range cg.funcDecls {
 		if decl == nil || decl.Body == nil {
 			continue
 		}
 
-		if bodyCrossesFiberBoundary(decl.Body) || cg.bodyWritesToGlobal(decl.Body) {
+		if bodyCrossesFiberBoundary(decl.Body) || cg.bodyWritesToGlobal(decl.Body) || cg.bodyCallsExtern(decl.Body) {
 			out[name] = true
 		}
 	}

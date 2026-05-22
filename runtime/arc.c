@@ -15,23 +15,26 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <mimalloc.h>
 
 static inline TinRCHdr *_rc_hdr(void *ptr) {
     return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
 }
 
-// Internal accessor exposed by heap_arena.c.  Returns the per-thread
-// heap pinned to the Tin arena; mimalloc heaps are thread-owned and
-// each calling thread lazily creates its own.  Returns NULL in
-// degraded mode (TINMAXHEAP=0).
+// Per-thread mimalloc heap, pinned to the Tin arena.  Defined in
+// heap_arena.c; cached after first call so the lookup is one TLS load
+// in the hot path.
 extern mi_heap_t *_tin_managed_heap(void);
 
 static inline void *_tin_arena_alloc(size_t bytes) {
-    mi_heap_t *h = _tin_managed_heap();
-    if (h != NULL) {
-        return mi_heap_malloc(h, bytes);
-    }
-    return malloc(bytes);
+    return mi_heap_malloc(_tin_managed_heap(), bytes);
+}
+
+// Free a block returned by _tin_arena_alloc.  mi_free walks back to
+// the owning heap even when called from a different thread than the
+// one that allocated, so cross-thread free is safe.
+static inline void _tin_arena_free(void *p) {
+    mi_free(p);
 }
 
 // Allocate an ARC-managed block of `size` bytes.  Starts with rc=1,
@@ -43,7 +46,7 @@ void *_tin_rc_alloc(int64_t size) {
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
     hdr->rc    = 1;
     hdr->flags = TIN_RC_SHARED;
-    hdr->_pad  = 0;
+    hdr->_pad  = TIN_RC_HDR_MAGIC;
     return hdr + 1;
 }
 
@@ -58,7 +61,7 @@ void *_tin_rc_alloc_local(int64_t size) {
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
     hdr->rc    = 1;
     hdr->flags = TIN_RC_UNIQUE; // rc==1 with no other references
-    hdr->_pad  = 0;
+    hdr->_pad  = TIN_RC_HDR_MAGIC;
     return hdr + 1;
 }
 
@@ -121,7 +124,7 @@ void _tin_release(void *ptr) {
             hdr->flags = flags | TIN_RC_UNIQUE;
         }
     }
-    if (prev == 1 && !(flags & TIN_RC_ARENA)) free(hdr);
+    if (prev == 1 && !(flags & TIN_RC_ARENA)) _tin_arena_free(hdr);
 }
 
 // Provenance-aware retain.  Used by codegen for ARC ops on user-
@@ -178,7 +181,7 @@ int64_t _tin_release_struct(void *ptr) {
         prev = hdr->rc;
         hdr->rc = prev - 1;
     }
-    if (prev == 1 && !(flags & TIN_RC_ARENA)) { free(hdr); return 1; }
+    if (prev == 1 && !(flags & TIN_RC_ARENA)) { _tin_arena_free(hdr); return 1; }
     return 0;
 }
 
@@ -205,7 +208,7 @@ void _tin_release_fat_elem_array(void *data, int64_t count) {
         typedef struct { void *ptr; int64_t len; int64_t cap; } FatElem;
         FatElem *elems = (FatElem *)data;
         for (int64_t i = 0; i < count; i++) _tin_release(elems[i].ptr);
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -237,7 +240,7 @@ void _tin_release_any_elem_array(void *data, int64_t count) {
         for (int64_t i = 0; i < count; i++) {
             _tin_release_any(elems[i].tag, elems[i].ptr);
         }
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -260,7 +263,7 @@ void _tin_release_closure(void *env) {
         typedef void(*DtorFn)(void*);
         DtorFn dtor = *(DtorFn *)env;
         if (dtor) dtor(env);
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -284,7 +287,7 @@ void _tin_release_fn_elem_array(void *data, int64_t count) {
         typedef struct { void *coro; void *colored; void *sync; void *env; } FnElem;
         FnElem *elems = (FnElem *)data;
         for (int64_t i = 0; i < count; i++) _tin_release_closure(elems[i].env);
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -308,7 +311,7 @@ void _tin_release_ptr_elem_array(void *data, int64_t count) {
     if (prev == 1) {
         void **elems = (void **)data;
         for (int64_t i = 0; i < count; i++) _tin_release(elems[i]);
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -335,7 +338,7 @@ void _tin_foreach_struct_elem_release(
         for (int64_t i = 0; i < count; i++) {
             release_fn((char *)data + i * elem_size);
         }
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }
 
@@ -425,11 +428,11 @@ char *_tin_string_handover(char *src) {
     if (!src) return NULL;
     size_t sz = _tin_usable_size(src);
     size_t copy_len = (sz > 0) ? sz : (strlen(src) + 1);
-    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
+    TinRCHdr *hdr = (TinRCHdr *)_tin_arena_alloc(sizeof(TinRCHdr) + copy_len);
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
     hdr->rc    = 1;
     hdr->flags = TIN_RC_SHARED;
-    hdr->_pad  = 0;
+    hdr->_pad  = TIN_RC_HDR_MAGIC;
     char *dst = (char *)(hdr + 1);
     memcpy(dst, src, copy_len);
     if (sz > 0) free(src);
@@ -446,11 +449,11 @@ void *_tin_ptr_handover(void *src, size_t elem_size) {
     size_t sz = _tin_usable_size(src);
     size_t copy_len = (sz > 0) ? sz : elem_size;
     if (copy_len == 0) return src;
-    TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + copy_len);
+    TinRCHdr *hdr = (TinRCHdr *)_tin_arena_alloc(sizeof(TinRCHdr) + copy_len);
     if (!hdr) { fputs("tin: out of memory\n", stderr); exit(1); }
     hdr->rc    = 1;
     hdr->flags = TIN_RC_SHARED;
-    hdr->_pad  = 0;
+    hdr->_pad  = TIN_RC_HDR_MAGIC;
     void *dst = (void *)(hdr + 1);
     memcpy(dst, src, copy_len);
     if (sz > 0) free(src);
@@ -528,6 +531,6 @@ void _tin_release_any(int32_t tag, void *data) {
         default:
             break;
         }
-        free(hdr);
+        _tin_arena_free(hdr);
     }
 }

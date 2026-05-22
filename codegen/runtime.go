@@ -31,6 +31,16 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 		return
 	}
+	// Primitive *T: route through the arena-aware retain.  The runtime
+	// short-circuits on foreign pointers (outside the Tin arena) and on
+	// interior pointers (header-magic mismatch), so this is safe to
+	// emit unconditionally for any *intT / *floatT / *void.
+	if isPrimitivePtr(t) {
+		ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+		block.NewCall(cg.ensureRetainPtr(), ptrI8)
+
+		return
+	}
 
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
@@ -304,6 +314,14 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 				}
 			}
 		}
+	}
+
+	// Primitive *T: arena-aware release, mirror of the retain side.
+	if isPrimitivePtr(t) {
+		ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
+		block.NewCall(cg.ensureReleasePtr(), ptrI8)
+
+		return
 	}
 
 	rcPtr := cg.extractRCDataPtr(block, val, t)

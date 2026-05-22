@@ -60,6 +60,19 @@ typedef struct { uint32_t rc; uint32_t flags; uint64_t _pad; } TinRCHdr;
 #define TIN_RC_ARENA       ((uint32_t)0x8)
 #define TIN_RC_STATIC_DTOR ((uint32_t)0x10)
 
+// Stamped into _pad on every heap-allocated rc-block (_tin_rc_alloc,
+// _tin_rc_alloc_local, the handover paths).  _tin_is_managed reads
+// the would-be header at `ptr - sizeof(TinRCHdr)` and rejects the
+// pointer when _pad does not match -- that's how the runtime tells a
+// genuine block-start pointer from an interior pointer that happens
+// to land inside one of our blocks.  A 64-bit nonce collides with
+// random data at one chance in 2^64, which is effectively never.
+// Static immortal sentinels (rodata strings, atom blocks, stack
+// composites for cLayoutStructs) live outside the arena, so
+// _tin_is_managed rejects them on the range check before ever
+// reading _pad -- they keep _pad = 0 without trouble.
+#define TIN_RC_HDR_MAGIC   ((uint64_t)0xC1F5C0DEEDC0DE15)
+
 // Pin the header size so Tin's codegen (which hardcodes a [2 x i64] RCHdr
 // slot in cLayoutStruct stack composites and in genCLayoutStructLit's
 // immortal-sentinel layout) breaks at C-compile time if TinRCHdr ever

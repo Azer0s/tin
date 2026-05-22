@@ -1,33 +1,37 @@
-// tin runtime - heap arena segregation for biased RC.
+// tin runtime - heap arena segregation.
 //
 // Reserves a large virtual address range at startup and registers it
-// with mimalloc as an exclusive arena.  Tin's `_tin_rc_alloc` routes
-// every managed allocation through this arena, so the runtime can
-// distinguish Tin-managed pointers from C-managed ones via a cheap
-// range check (`_tin_is_managed`).
+// with mimalloc as an exclusive arena.  Every Tin rc-block (and
+// nothing else) is allocated from heaps pinned to this arena, so the
+// runtime can decide "is this pointer one of ours?" via a single
+// range check (_tin_is_managed).
 //
-// The virtual reservation is essentially free: `mmap(PROT_NONE)` only
-// registers a hole in the process's VMA list, no RAM is committed
-// until pages are touched.  Pages commit lazily as mimalloc grows
-// into the arena; `madvise(MADV_DONTNEED)` returns RSS to the OS when
-// regions go cold.
+// The virtual reservation is essentially free: mmap registers a
+// hole in the process's VMA list, no RAM is committed until pages
+// are touched.  Pages commit lazily as mimalloc grows into the arena,
+// and madvise(MADV_DONTNEED) returns RSS to the OS on shrink.
 //
-// Configuration via `TINMAXHEAP` env var (default 16 GB):
-//   TINMAXHEAP=64G  -> reserve 64 GiB virtual.
+// Per-thread heaps: mimalloc heaps are not safe to allocate from
+// concurrently, so each thread that runs ARC allocations gets its
+// own heap pinned to the shared arena.  The TLS init is contention-
+// free -- a thread only ever creates its own heap, never another
+// thread's -- so no mutex is involved.
+//
+// Configuration via TINMAXHEAP env var (default 16 GiB):
+//   TINMAXHEAP=64G   -> reserve 64 GiB virtual.
 //   TINMAXHEAP=2048M -> reserve 2 GiB.
-//   TINMAXHEAP=0    -> disable the arena; allocations come from
-//                       generic mimalloc heaps and `_tin_is_managed`
-//                       always returns 1 (degraded mode; legacy
-//                       behavior, useful for debugging only).
+//   TINMAXHEAP=0     -> disable the arena; ARC allocations fall back
+//                       to mimalloc's default heap and _tin_is_managed
+//                       returns 1 unconditionally (sanitizer builds,
+//                       debugging).
 
 #include "runtime.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <sys/mman.h>
 
 #if !TIN_USE_MIMALLOC
 #  error "heap_arena.c requires TIN_USE_MIMALLOC=1; mimalloc is now a hard dependency"
@@ -35,19 +39,28 @@
 
 #include <mimalloc.h>
 
-// Single-arena configuration.  Multi-arena fallback (when the initial
-// reservation exhausts) is a future extension; for now a single
-// generous reservation covers every realistic workload.
-//
-// The arena_id and bounds are process-global (write-once at init).
-// The HEAP is per-thread because mimalloc heaps are not thread-safe
-// for concurrent allocations -- each thread that calls _tin_rc_alloc
-// lazily creates its own heap pinned to our arena, so all Tin
-// allocations land in the segregated address range.
 static mi_arena_id_t _tin_arena_id;
 static void         *_tin_arena_base;
 static size_t        _tin_arena_size;
 static int           _tin_arena_active;
+
+// One mi_heap per thread, lazily created on first ARC alloc.  Pinned
+// to _tin_arena_id so allocations from this heap land in our reserved
+// range.  Cross-thread free is safe (mi_free routes back to the
+// owning heap internally).
+static __thread mi_heap_t *_tin_thread_heap;
+
+// Per-thread heaps are tracked in a lock-free singly-linked list so
+// the atexit handler can destroy them all at clean shutdown.  Each
+// thread atomically prepends its own node on first heap creation;
+// the list is read-only after main() returns (workers have joined
+// by then), so the destroy walk needs no synchronization.
+typedef struct _tin_heap_node {
+    mi_heap_t            *heap;
+    struct _tin_heap_node *next;
+} _tin_heap_node;
+
+static _Atomic(_tin_heap_node *) _tin_heap_list_head;
 
 #define TIN_DEFAULT_HEAP_GB 16
 
@@ -77,42 +90,31 @@ static size_t _tin_parse_heap_size(const char *s) {
     return (size_t)n * mult;
 }
 
-// One-shot init.  Called from the C-main prologue before any user
-// code runs, before any `_tin_rc_alloc` call.  Idempotent under
-// repeated calls (re-entries are no-ops).
+// One-shot init.  Fires at constructor priority 101 -- before any
+// user-priority constructor in the rest of the runtime touches the
+// allocator, after libc's own setup (priorities 0-100).
 void _tin_heap_init(void) {
     if (_tin_arena_active) return;
 
     size_t want = _tin_parse_heap_size(getenv("TINMAXHEAP"));
     if (want == 0) {
-        // Degraded mode: skip arena setup.  _tin_is_managed will
-        // return 1 for any non-null pointer; retain/release falls
-        // back to the legacy "trust the caller" behavior.  Useful
-        // for sanitizer-instrumented builds where mimalloc arenas
-        // interfere with shadow memory.
-        return;
+        return; // degraded mode; _tin_is_managed returns 1
     }
 
-    // Reserve our arena via mimalloc.  `exclusive=false` adds the arena
-    // to mimalloc's global pool: the default (per-thread, thread-safe)
-    // heap allocates from it preferentially, so all `mi_malloc` calls
-    // through the runtime's shim land in the Tin range.  This avoids
-    // the need for explicit per-thread heaps -- those introduce a
-    // race in `mi_heap_new_in_arena` on first concurrent allocation
-    // that manifested as fmutex deadlocks in fiber-heavy tests.
-    //   commit=false:       reserve virtually; commit pages on demand.
-    //   allow_large=false:  no huge pages (avoids host-specific config).
+    // Reserve our arena with exclusive=true so ONLY heaps explicitly
+    // bound to it (via mi_heap_new_in_arena) draw from it.  Default
+    // mi_malloc on any thread goes to mimalloc's other heaps, OUTSIDE
+    // our arena, so the range check in _tin_is_managed truly identifies
+    // rc-blocks vs everything else.
     //
-    // macOS and some Linux configurations cap large virtual reservations
-    // (Apple silicon hosts reject ~16GB+ reservations even with
-    // unlimited ulimit -v).  Halve the requested size on failure and
-    // retry down to 256 MiB before giving up.
+    // macOS / aarch64 caps large virtual reservations even with
+    // unlimited ulimit -v; halve and retry down to 256 MiB.
     int err = 0;
     while (want >= (256ULL << 20)) {
         err = mi_reserve_os_memory_ex(want,
                                       /* commit       */ false,
                                       /* allow_large  */ false,
-                                      /* exclusive    */ false,
+                                      /* exclusive    */ true,
                                       &_tin_arena_id);
         if (err == 0) break;
         want /= 2;
@@ -123,8 +125,6 @@ void _tin_heap_init(void) {
         exit(1);
     }
 
-    // Pull back the actual address mimalloc reserved so _tin_is_managed
-    // can range-check against it.
     size_t actual_size = 0;
     void *base = mi_arena_area(_tin_arena_id, &actual_size);
     if (!base || actual_size == 0) {
@@ -137,49 +137,107 @@ void _tin_heap_init(void) {
     _tin_arena_active = 1;
 }
 
-// Returns 1 when `ptr` is an address Tin's allocator handed out, 0
-// otherwise.  The cheap range check covers the entire reserved
-// arena; mimalloc may not have committed every page yet, but a Tin
-// allocation that produced `ptr` has by definition committed the
-// containing region.  Pointers that escaped from C / static data /
-// stack / foreign mmap'd regions land outside the arena range and
-// return 0.
+// Returns 1 only when ptr points at the start of a Tin rc-block --
+// i.e. the public pointer of one of our allocations.  Two-stage check:
 //
-// Degraded mode (`TINMAXHEAP=0`): `_tin_arena_active == 0`, the
-// function returns 1 unconditionally for non-null pointers --
-// equivalent to today's pre-segregation behavior.
+//   1. Range: ptr must fall inside [base, base+size).  Foreign
+//      pointers (libc malloc / stack / rodata / mmap / extern) live
+//      outside the exclusive arena and fail this.
+//   2. Magic: the would-be header at (ptr - sizeof(TinRCHdr)) must
+//      carry TIN_RC_HDR_MAGIC in its _pad slot.  _tin_rc_alloc and
+//      friends stamp it at allocation; interior pointers (e.g.
+//      &arr[5]) land inside block data where _pad mismatches and the
+//      check fails, so _tin_retain_ptr / _tin_release_ptr safely
+//      no-op rather than corrupting bytes 16 ahead of the pointer.
+//
+// Degraded mode (TINMAXHEAP=0): no arena, return 1 unconditionally
+// for non-null pointers.  Retain/release on foreign pointers will then
+// touch the header math; only useful in builds where the sanitizer
+// already invalidates the arena trick.
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
     if (!_tin_arena_active) return 1;
     uintptr_t addr = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)_tin_arena_base;
-    return addr - base < _tin_arena_size;
+    if (addr - base >= _tin_arena_size) return 0;
+    // ptr is in the arena.  The header sits at ptr - sizeof(TinRCHdr).
+    // Reject pointers too close to the arena base for the subtract to
+    // stay in-range -- there is no real rc-block whose header would
+    // land before the arena, but the bounds-check keeps the read safe
+    // under any future shifting allocator layouts.
+    if (addr - base < sizeof(TinRCHdr)) return 0;
+    TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    return hdr->_pad == TIN_RC_HDR_MAGIC;
 }
 
-// Internal accessor used by arc.c::_tin_rc_alloc to route managed
-// allocations through the arena's dedicated heap.  When the arena is
-// inactive (degraded mode), returns NULL and the caller falls back
-// to mi_malloc.
-//
-// Each calling thread gets its own heap pinned to our arena -- mimalloc
-// heaps are not thread-safe for concurrent allocations, but threads
-// allocating from heaps in the same arena all land in our segregated
-// virtual range.  The arena membership is what _tin_is_managed checks;
-// the per-heap split is just so concurrent allocators don't trample
-// each other's free lists.
-// With exclusive=false the runtime's default mi_malloc allocates from
-// our arena automatically, so no Tin-specific heap is needed.
-// `_tin_managed_heap` always returns NULL; arc.c's _tin_arena_alloc
-// falls through to plain malloc (the macro shim routes to mi_malloc).
+// Returns the calling thread's rc-heap, lazily creating it on the
+// first ARC alloc this thread performs.  No locking: a thread only
+// ever writes to its own TLS slot, so concurrent initialization on
+// different threads doesn't share state.  Each newly-created heap is
+// also enrolled in the global atomic list so atexit cleanup can
+// destroy it.
 mi_heap_t *_tin_managed_heap(void) {
-    return NULL;
+    mi_heap_t *h = _tin_thread_heap;
+    if (h != NULL) return h;
+
+    if (!_tin_arena_active) {
+        // Degraded mode: fall back to mimalloc's main heap (process-
+        // wide, thread-safe via mi_malloc's TLS).  The atexit hook
+        // does not destroy this -- mimalloc owns its lifetime.
+        _tin_thread_heap = mi_heap_main();
+        return _tin_thread_heap;
+    }
+
+    h = mi_heap_new_in_arena(_tin_arena_id);
+    if (h == NULL) {
+        // Arena exhausted or creation failed; fall back to the main
+        // heap.  Subsequent allocs from this thread leak out of the
+        // arena; _tin_is_managed will report those as foreign and
+        // provenance-aware callers will skip them.  Not registered
+        // for atexit destroy.
+        _tin_thread_heap = mi_heap_main();
+        return _tin_thread_heap;
+    }
+
+    // Register so atexit can destroy.  Uses libc malloc (not our
+    // heap, obviously); the node leak on process exit is harmless.
+    _tin_heap_node *node = (_tin_heap_node *)malloc(sizeof(_tin_heap_node));
+    if (node != NULL) {
+        node->heap = h;
+        _tin_heap_node *head = atomic_load(&_tin_heap_list_head);
+        for (;;) {
+            node->next = head;
+            if (atomic_compare_exchange_weak(&_tin_heap_list_head, &head, node)) break;
+        }
+    }
+
+    _tin_thread_heap = h;
+    return h;
 }
 
-// Initialize the arena as soon as the binary loads -- before any
-// constructor in the rest of the runtime touches the allocator.
-// Constructor priority 101 is the lowest non-reserved value, so this
-// fires before any user-priority constructor; libc's allocator setup
-// runs even earlier via priority 0-100.
+// atexit hook: destroy every per-thread rc-heap we registered.  Frees
+// all rc-blocks regardless of refcount -- intended for clean shutdown
+// where the caller has guaranteed no live references remain (workers
+// joined, runtime quiesced).  Used for leak-checker friendliness;
+// uninstrumented builds would otherwise see every still-rc'd block
+// reported as a leak on process exit.
+static void _tin_arena_atexit(void) {
+    // First let mimalloc reclaim its deferred free lists.  Then walk
+    // the registered heap list and destroy each.  After this, any
+    // _tin_release call would UB; the assumption is the program is
+    // shutting down and no further runtime allocator calls happen.
+    mi_collect(true);
+
+    _tin_heap_node *node = atomic_load(&_tin_heap_list_head);
+    while (node != NULL) {
+        _tin_heap_node *next = node->next;
+        mi_heap_destroy(node->heap);
+        free(node);
+        node = next;
+    }
+}
+
 __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
     _tin_heap_init();
+    atexit(_tin_arena_atexit);
 }

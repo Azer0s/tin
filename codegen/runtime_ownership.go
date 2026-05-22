@@ -401,6 +401,7 @@ const (
 	rcKindLeadingPtr rcKind = 1 // string / fat array / trait fat ptr / named struct ptr -- retain ptr at offset 0
 	rcKindAny        rcKind = 2 // any: {i32 tag, i8* ptr} -- release via _tin_release_any(tag, ptr@8)
 	rcKindFn         rcKind = 3 // fat fn ptr: {coro*, colored*, sync*, env*} -- release via _tin_release_closure(env@24)
+	rcKindRawPtr     rcKind = 4 // primitive *T (*i64, *void, ...) -- retain/release via _tin_{retain,release}_ptr; foreign + interior pointers no-op via arena-range + header-magic check
 )
 
 // rcKindOf classifies an LLVM type by where its retainable pointer
@@ -415,9 +416,33 @@ func rcKindOf(t irtypes.Type) rcKind {
 		return rcKindFn
 	case isStringType(t), isFatArrayPtr(t), isTraitFatPtrShape(t):
 		return rcKindLeadingPtr
+	case isPrimitivePtr(t):
+		return rcKindRawPtr
 	}
 
 	return rcKindNone
+}
+
+// isPrimitivePtr reports whether t is a pointer whose element type is
+// a scalar (*i64, *f64, *void, *byte, ...) -- NOT a pointer to a
+// named struct (those have per-struct release helpers) and NOT a
+// fat-ptr shape (string / fat array / trait / fat fn ptr, caught by
+// their own predicates earlier in the switch).  Caller emits
+// _tin_retain_ptr / _tin_release_ptr for these; the runtime's
+// arena-range + header-magic check makes foreign and interior
+// pointers safe no-ops.
+func isPrimitivePtr(t irtypes.Type) bool {
+	pt, ok := t.(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	switch pt.ElemType.(type) {
+	case *irtypes.IntType, *irtypes.FloatType:
+		return true
+	}
+
+	return false
 }
 
 // channelRCKindOf is the channel/atomic-specific variant of rcKindOf.

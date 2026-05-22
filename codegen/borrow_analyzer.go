@@ -453,6 +453,42 @@ func (cg *CodeGen) bodyWritesToGlobal(body ast.Node) bool {
 	return found
 }
 
+// bodyCallsExtern reports whether `body` contains a direct call to an
+// extern (foreign C) function.  Extern callees are opaque to the
+// analyzer: the foreign code may stash a pointer in thread-local
+// state, hand it to a separate OS thread, or otherwise publish it.
+// Any function that calls extern is therefore treated as a publishing
+// site by the biased-RC analyzer.
+func (cg *CodeGen) bodyCallsExtern(body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+
+	walkAST(body, func(n ast.Node) {
+		if found {
+			return
+		}
+
+		call, ok := n.(*ast.CallExpr)
+		if !ok || call == nil {
+			return
+		}
+
+		name := directCalleeName(call.Func)
+		if name == "" {
+			return
+		}
+
+		if decl, ok2 := cg.funcDecls[name]; ok2 && decl != nil && decl.IsExtern != "" {
+			found = true
+		}
+	})
+
+	return found
+}
+
 // bodyCrossesFiberBoundary reports whether `body` contains a spawn,
 // await, or other operation that can hand a value off to a different
 // thread.  Such functions cannot be sync-local: any RC block they
