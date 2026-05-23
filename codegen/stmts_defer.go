@@ -83,14 +83,32 @@ func (cg *CodeGen) genDeferThunk(block *ir.Block, call ast.Node) (value.Value, v
 	// Step 4: unpack captures from env (defer thunks run once; env persists during execution)
 	cg.unpackEnv(entryBlock, f, envStructType, captures, false)
 
+	// Push a fresh thunk-local scope before emitting the deferred call.
+	// Without this, any temporaries the call emission registers (e.g.
+	// autocopy temps for receiver-deep-copy on method calls inside the
+	// thunk body) get registered in the OUTER caller's scope.  Those
+	// temps' allocas live in the THUNK's frame, so when the outer
+	// scope-exit eventually runs it would load from a dead stack
+	// frame.  Equally bad: the thunk never releases them, leaking
+	// every per-temp rc bump on the cell / fat-ptr / etc.
+	prevScope := cg.curScope
+	cg.curScope = newScope(prevScope)
+	cg.curScope.isFunctionBoundary = true
+
 	// Step 5: emit the deferred call
 	if _, err := cg.genExpr(entryBlock, call); err != nil {
+		cg.curScope = prevScope
+		cg.popClosureCtx(prevCtx)
+
 		return nil, nil, err
 	}
 
 	if entryBlock.Term == nil {
+		cg.emitScopeRelease(entryBlock, cg.curScope)
 		entryBlock.NewRet(nil)
 	}
+
+	cg.curScope = prevScope
 
 	// Restore context.
 	cg.popClosureCtx(prevCtx)

@@ -88,6 +88,16 @@ func (cg *CodeGen) ensureRCAllocLocal() *ir.Func {
 // ensureMakeShared lazily declares _tin_make_shared(ptr i8*).
 // Emitted at any site where a previously-local block crosses a
 // fiber boundary -- spawn capture, channel send, global store, etc.
+//
+// Currently unused: the allocator picker (rcAllocLocal vs rcAlloc)
+// only flips to local when the call-graph analyzer proved the block
+// cannot escape, so no escape-transition machinery is required yet.
+// The declaration and field are kept so a future tightening of the
+// analyzer can switch more allocations to the non-atomic fast path
+// without round-tripping through the runtime.  See
+// docs/internals/memory.md "_tin_make_shared - escape transition".
+//
+//nolint:unused // kept for future biased-rc escape transition; see comment above
 func (cg *CodeGen) ensureMakeShared() *ir.Func {
 	if cg.makeSharedFn != nil {
 		return cg.makeSharedFn
@@ -279,6 +289,22 @@ func (cg *CodeGen) ensureReleaseAny() *ir.Func {
 		[]*ir.Param{ir.NewParam("tag", irtypes.I32), ir.NewParam("data", irtypes.I8Ptr)}, false)
 
 	return cg.releaseAnyFn
+}
+
+// ensureAnyDeepCopyFn lazily declares _tin_any_deepcopy(tag i32, data i8*) i8*.
+// Dispatches through the per-type-id deep-copy table populated at
+// module init.  Returns a freshly-allocated data block for the
+// boxed value when a thunk is registered, or the input pointer
+// (with rc bumped) as a fallback for types lacking a thunk.
+func (cg *CodeGen) ensureAnyDeepCopyFn() *ir.Func {
+	if cg.anyDeepCopyFn != nil {
+		return cg.anyDeepCopyFn
+	}
+
+	cg.anyDeepCopyFn = cg.ensureExternDecl("_tin_any_deepcopy", irtypes.I8Ptr,
+		[]*ir.Param{ir.NewParam("tag", irtypes.I32), ir.NewParam("data", irtypes.I8Ptr)}, false)
+
+	return cg.anyDeepCopyFn
 }
 
 // ensureForeachStructElemRelease lazily declares

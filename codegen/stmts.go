@@ -534,6 +534,18 @@ func (cg *CodeGen) genWhereBody(block *ir.Block, body ast.Node, retType irtypes.
 	skipName := ""
 	if ident, ok := body.(*ast.Identifier); ok {
 		skipName = ident.Name
+		// Mirrors genReturn: a borrowed Identifier (typically a non-
+		// reassigning RC param under the new RC model) has no +1 the
+		// skipName above could transfer.  Without a return-site retain
+		// the caller's receiving binding and the caller's source
+		// binding would share the single rc share, double-releasing
+		// on their two scope exits.
+		if e, has := cg.curScope.lookup(ident.Name); has && e.isAlloc && e.isRC &&
+			e.ownership == ownershipBorrowed {
+			if !cg.emitOwningPtrRetainIfApplicable(block, bodyVal) {
+				cg.emitRetain(block, bodyVal)
+			}
+		}
 	}
 
 	_ = cg.emitDefers(block)

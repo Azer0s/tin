@@ -74,26 +74,77 @@ receive:
 
 ## When does the compiler emit retain/release?
 
-The codegen (`codegen/runtime.go`) inserts ARC calls at these points:
+Tin uses a **caller-keeps-the-share** model. The caller's binding holds
+the rc throughout the call; the body never touches the rc of its
+parameters *unless* the body reassigns one of them (in which case that
+parameter reverts to the classical owned model for the duration of the
+function).
 
-| Event                                                      | ARC call                                        |
-|------------------------------------------------------------|-------------------------------------------------|
-| Variable assigned from an existing reference (identifier)  | `_tin_retain(new_ref)`                          |
-| Variable goes out of scope                                 | `_tin_release(var)`                             |
-| Variable overwritten                                       | `_tin_release(old)`, then retain the new value  |
-| Return value                                               | retain before returning; caller takes ownership |
-| Temporary result from `++` or function call used in `echo` | `_tin_release(temp)` after use                  |
-| Function argument passing                                  | no retain (callee borrows, not owns)            |
-| Method called on temporary struct receiver (`tmp.method()`) | `emitRelease(tmp)` after the outer call        |
-| `*ptr` when `ptr` is a temporary producer                  | `_tin_release(ptr)` on the outer allocation     |
+The codegen (`codegen/runtime.go` and `codegen/exprs_call.go`) inserts
+ARC calls at these points:
 
-This follows a **caller-retain, callee-borrows** model. Ownership transfers
-happen explicitly at assignment and scope exit.
+| Event                                                      | ARC call                                                       |
+|------------------------------------------------------------|----------------------------------------------------------------|
+| Variable assigned from an existing reference (identifier)  | `_tin_retain(new_ref)`                                         |
+| Variable goes out of scope                                 | `_tin_release(var)`                                            |
+| Variable overwritten                                       | `_tin_release(old)`, then retain the new value                 |
+| `return ident` where `ident` is a borrowed RC binding (most params) | `_tin_retain` at the return site so the caller's receiving binding gets its own share |
+| Temporary result from `++` or function call used in `echo` | `_tin_release(temp)` after use                                 |
+| Function argument default `f(a)`, `a` still live after     | no rc work at the call site                                    |
+| Function argument default `f(a)`, `a`'s last use           | post-call `_tin_release` + caller scope-exit on `a` skipped (implicit move) |
+| Function argument with explicit `move`                     | post-call `_tin_release`; caller's scope-exit release skipped  |
+| Function argument with explicit `ref` (asserts transparent) | no rc work at the call site                                    |
+| Function argument with explicit `copy(a)`                  | deep-copy `a` into a fresh temp; pass temp via default protocol |
+| Method called on temporary struct receiver (`tmp.method()`) | `emitRelease(tmp)` after the outer call                       |
+| `*ptr` when `ptr` is a temporary producer                  | `_tin_release(ptr)` on the outer allocation                    |
 
-Fresh allocations (`++` concat, slice append, function return values) start
-with `rc = 1`. If they are stored in a named variable, the scope-exit release
-brings `rc` back to zero. If they are used as temporaries (e.g., passed
-directly to `echo`), an explicit release is emitted at the use site.
+**Function body emission for parameters:**
+
+- *Non-reassigning param* (analyzer proves the body never executes
+  `p = ...`): no entry retain, no scope-exit release. The param's
+  scope entry is classified `ownershipBorrowed`. Return-of-this-param
+  emits one retain at the return site.
+- *Reassigning param* (analyzer sees any reassign of the param name):
+  entry retain + scope-exit release + normal release-old/retain-new
+  on every store (classical owned model). The entry retain gives the
+  body its own +1 to manage independently of the caller's binding.
+
+In both cases, the body's *sinks* (`p.box = b`, `chan.send(b)`, etc.)
+emit their own retains on the value being stored - those are sink-side
+rc work, unrelated to the parameter classification.
+
+The per-parameter **convention** computed by the borrow analyzer:
+
+- `transparent` - body neither sinks nor reassigns. Eligible for `ref`.
+- `consumes`    - body sinks but does not reassign.
+- `retains`     - body reassigns the param (or escapes the rc in an
+  opaque way the analyzer cannot decompose).
+
+The convention drives the `ref` keyword's compile-time check
+(`transparent` is the only one that admits `ref`) and shows up in
+`--explain-ownership`. It does **not** by itself decide the body-side
+rc emission - that decision is the binary "does the body reassign this
+param?" (`transparent` and `consumes` share the borrowed body codegen;
+only `retains` uses the owned model).
+
+Fresh allocations (`++` concat, slice append, function return values)
+start with `rc = 1`. If they are stored in a named variable, the
+scope-exit release brings `rc` back to zero. If they are used as
+temporaries (e.g., passed directly to `echo`), an explicit release is
+emitted at the use site.
+
+### Call-site keywords
+
+| Keyword     | Caller behavior                                                                 |
+|-------------|---------------------------------------------------------------------------------|
+| `f(a)`      | Default: nothing if `a` is still live after, post-call release + skip scope-exit if it's `a`'s last use (implicit move). |
+| `f(ref a)`  | Asserts callee is `transparent`. Compile error otherwise. Emits no rc work.     |
+| `f(move a)` | Post-call `_tin_release`; caller's scope-exit release skipped. Marks `a` ownership-moved. Allowed for any callee convention. |
+| `f(copy(a))`| Lowers to `let __t = deep_copy(a); f(__t)`. `__t` is fresh (`rc=1`) and goes through the default protocol. `a` is untouched. |
+
+All four lower to the same LLVM function body for `f`. The only thing
+that varies is the rc operations the caller emits around the call
+instruction itself.
 
 ---
 

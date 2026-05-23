@@ -19,23 +19,19 @@ import (
 // most produce the funny warning on integer-only arithmetic, which
 // is acceptable noise; false negatives would silently skip the warn.
 func isPtrArithBinExpr(n ast.Node) bool {
-	for {
-		bin, ok := n.(*ast.BinExpr)
-		if !ok || bin == nil {
-			return false
-		}
-
-		if bin.Op != "+" && bin.Op != "-" {
-			return false
-		}
-		// Direct BinExpr arithmetic: this is the candidate.  Whether
-		// the operand actually has pointer type is decided by the
-		// child BinExpr emitter; the warning fires when it would
-		// have been ptr arith and the target is integer.
-		_ = bin
-
-		return true
+	bin, ok := n.(*ast.BinExpr)
+	if !ok || bin == nil {
+		return false
 	}
+
+	if bin.Op != "+" && bin.Op != "-" {
+		return false
+	}
+	// Direct BinExpr arithmetic: this is the candidate.  Whether
+	// the operand actually has pointer type is decided by the
+	// child BinExpr emitter; the warning fires when it would
+	// have been ptr arith and the target is integer.
+	return true
 }
 
 func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error) {
@@ -85,6 +81,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 
 		prevTransient := cg.transientPtrAllowed
 		cg.transientPtrAllowed = true
+
 		defer func() { cg.transientPtrAllowed = prevTransient }()
 	}
 

@@ -13,6 +13,15 @@ import (
 )
 
 func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, error) {
+	// Stash a call-arg context so nested `ref a` evaluations can look
+	// up the callee's per-param convention to validate the assertion.
+	// Push on entry, pop on every return path via defer.
+	if e != nil {
+		calleeName, paramNames := cg.callContextInfoFor(e.Func)
+		cg.pushCallArgContext(calleeName, paramNames, e.Args)
+
+		defer cg.popCallArgContext()
+	}
 	// Resolve callee.
 	var (
 		callee     value.Value
@@ -295,7 +304,10 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						return nil, err3
 					}
 				}
-				// Adapt args if needed and call.
+				// Adapt args if needed and call.  Auto-copy struct args
+				// flowing into mutating callees first so the caller's
+				// binding stays isolated from the callee's mutations.
+				cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 				preCoerceVals := argVals
 				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
 				result := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
@@ -387,6 +399,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				ovCallee = oEntry.val
 			}
 
+			cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
@@ -562,6 +575,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 							ovCallee = oEntry.val
 						}
 
+						cg.applyAutoCopyToArgVals(block, e.Args, olArgs)
 						preCoerceVals := append([]value.Value(nil), olArgs...)
 						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 							olArgs = cg.adaptArgs(block, olArgs, f2.Sig)
@@ -639,6 +653,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						ovCallee = oEntry.val
 					}
 
+					cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
 						argVals = cg.adaptArgs(block, argVals, f.Sig)
@@ -931,6 +946,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 					}
 
+					cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 					preCoerceVals := append([]value.Value(nil), argVals...)
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
 					result2 := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
@@ -1101,6 +1117,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 		}
 
+		cg.applyAutoCopyToArgVals(block, e.Args, llArgs)
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
 
 		// Strict per-argument type check. Fires for clear mismatches

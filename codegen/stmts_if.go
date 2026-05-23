@@ -136,6 +136,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	// names (used as the snapshot candidate set), and capture the pre-if
 	// state so each branch can roll back into a fresh per-branch view.
 	moveCandidates := map[string]bool{}
+
 	if names := collectMovedNames(s.Then); len(names) > 0 {
 		for n := range names {
 			moveCandidates[n] = true
@@ -169,6 +170,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 	if err != nil {
 		return nil, false, err
 	}
+
 	branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
 	cg.restoreMoveState(preMoveSnap)
 
@@ -218,6 +220,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		if err != nil {
 			return nil, false, err
 		}
+
 		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
 		cg.restoreMoveState(preMoveSnap)
 
@@ -248,6 +251,7 @@ func (cg *CodeGen) genIf(block *ir.Block, s *ast.IfStmt) (*ir.Block, bool, error
 		if err != nil {
 			return nil, false, err
 		}
+
 		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
 		cg.restoreMoveState(preMoveSnap)
 

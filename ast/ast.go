@@ -917,6 +917,18 @@ type MoveExpr struct {
 	Name string // the identifier being moved (e.g. "x")
 }
 
+// RefExpr is the call-site `ref a` assertion: the caller asserts that
+// the corresponding parameter convention is `transparent`, i.e. no rc
+// traffic is required at this call site.  Codegen emits a compile
+// error when the analyzer classified the callee's parameter as
+// `consumes` or `retains`.  Outside a call-arg context the keyword
+// degrades to a plain identifier read.  Only bare identifiers are
+// accepted; partial refs (`ref x.field`) are a parse error.
+type RefExpr struct {
+	base
+	Name string // the identifier being borrowed (e.g. "a")
+}
+
 // TryExpr propagates a fallible-typed expression: `try foo()`.
 // Codegen desugars to:
 //

@@ -23,6 +23,7 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 	// don't traffic in arithmetic stay unaffected.
 	prevTransient := cg.transientPtrAllowed
 	cg.transientPtrAllowed = true
+
 	defer func() { cg.transientPtrAllowed = prevTransient }()
 
 	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
@@ -224,6 +225,7 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	// arithmetic view is indexed in-place without escaping.
 	prevTransient := cg.transientPtrAllowed
 	cg.transientPtrAllowed = true
+
 	defer func() { cg.transientPtrAllowed = prevTransient }()
 
 	// `arr[lo..hi]` is the canonical range-slice form -- routes to

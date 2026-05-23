@@ -544,6 +544,39 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 		return mv, nil
 
+	case lexer.KW_REF:
+		// `ref ident` as a primary expression is the call-site borrow
+		// assertion.  The for-loop binding shape `for ref x in xs` is
+		// handled at the statement level before this path runs, so
+		// the only `ref` we see here is the call-site form.  Codegen
+		// validates the callee's per-param convention is transparent
+		// at the call site and emits a compile error otherwise.  Only
+		// bare identifiers are accepted; partial refs (`ref x.field`)
+		// are an error.
+		refTok := p.advance()
+
+		nextRefTok := p.peek()
+		if nextRefTok.Type != lexer.IDENT {
+			return nil, p.errAtTok(nextRefTok,
+				"`ref` expects an identifier (the binding being borrowed); got %s",
+				nextRefTok.Type.String())
+		}
+
+		refIDTok := p.advance()
+
+		switch p.peek().Type {
+		case lexer.DOT, lexer.LBRACKET, lexer.LPAREN:
+			return nil, p.errAtTok(p.peek(),
+				"`ref` expects a bare identifier; partial refs (`ref %s%s...`) are not supported. Extract first: `let v = %s%s...; ref v`",
+				refIDTok.Literal, p.peek().Type.String(),
+				refIDTok.Literal, p.peek().Type.String())
+		}
+
+		re := &ast.RefExpr{Name: refIDTok.Literal}
+		re.SetPos(ast.Pos{Line: refTok.Line, Col: refTok.Col})
+
+		return re, nil
+
 	case lexer.KW_YIELD:
 		p.advance()
 

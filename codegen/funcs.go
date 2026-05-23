@@ -702,6 +702,8 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	cg.currentFnBorrowSet = cg.analyzeFunctionBorrows(n.Body)
 	prevMovedBindings := cg.movedBindings
 	cg.movedBindings = nil
+	prevImplicitMoves := cg.implicitMoveSites
+	cg.implicitMoveSites = computeImplicitMoveSites(n.Body)
 	// Biased RC: route _tin_rc_alloc to the local (shared=0) variant
 	// when the call-graph analyzer proved this function is NOT
 	// reachable from an {#async} root AND the body does not write
@@ -736,6 +738,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	defer func() {
 		cg.currentFnBorrowSet = prevBorrowSet
 		cg.movedBindings = prevMovedBindings
+		cg.implicitMoveSites = prevImplicitMoves
 		cg.curFnSyncLocal = prevSyncLocal
 	}()
 
@@ -841,7 +844,20 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		}
 	}
 
-	paramBorrows := cg.analyzeFunctionParamBorrows(n.Body, paramNames)
+	paramConventions := cg.analyzeFunctionParamConventions(n.Body, paramNames)
+	// New RC model: the body never touches param rc unless the body
+	// mutates the parameter -- either reassigning it directly
+	// (`p = x`) or writing through a compound target rooted at it
+	// (`p.f = x`, `p[i] = x`, `*p = x`).  Non-mutating RC params get
+	// classified borrowed -- no entry retain, no scope-exit release --
+	// because the caller's binding keeps the rc alive through the
+	// call.  Return-of-borrowed-param sites emit a retain so the
+	// caller's receiving binding gets its own share separate from the
+	// source.  Mutating params keep today's owned classification:
+	// entry retain + scope-exit release.  The entry retain gives the
+	// body its own +1 to release-old against, so a `p.f = newval`
+	// store does not decrement the caller's shared buffer rc.
+	paramMutatedSet := cg.collectMutatedTargets(n.Body)
 
 	// Alloca parameters and register them in scope.
 	// Iterate tin params; skip varargs (no LLVM parameter), but register a
@@ -868,8 +884,12 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		isRC := isRCTrackedType(p.Type())
 		// Borrowed parameters skip the callee's entry retain.
 		// emitScopeRelease in runtime_scope.go matches it by also
-		// skipping the release, so the pair stays balanced.
-		paramBorrowed := paramBorrows[astParam.Name]
+		// skipping the release, so the pair stays balanced.  The
+		// borrow criterion is "RC-tracked and body does not mutate
+		// this name (neither reassign nor write through)"; mutating
+		// params keep today's owned model so the assign rc machinery
+		// has a +1 to release-old against.
+		paramBorrowed := isRC && !paramMutatedSet[astParam.Name]
 		if !paramBorrowed {
 			cg.emitRetain(entry, p)
 		}
@@ -887,10 +907,18 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// perspective and could double-free external resources).
 		cg.curScope.set(astParam.Name, &scopeEntry{val: alloca, isAlloc: true, isRC: isRC, noDeinit: true, isUnsigned: isUnsignedTinType(astParam.Type), scalarTypeName: scalar8BitTypeName(astParam.Type), tinType: astParam.Type, declPos: n.Pos(), ownership: paramOwnership})
 		cg.warnIfBuiltinShadow("param", astParam.Name, n.Pos())
-		// Record the parameter in --explain-ownership so the user
-		// can see whether the analyzer demoted it from Owned to
-		// Borrowed.
-		cg.recordOwnership(astParam.Name, paramOwnership, "parameter")
+		// Record the parameter in --explain-ownership.  The note
+		// prints the convention so users see the three-way
+		// classification (transparent / consumes / retains) instead
+		// of just owned vs borrow.
+		conv, hasConv := paramConventions[astParam.Name]
+		note := "parameter"
+
+		if hasConv {
+			note = "parameter (" + conv.String() + ")"
+		}
+
+		cg.recordOwnership(astParam.Name, paramOwnership, note)
 
 		if llIdx == 1 {
 			firstParamAlloca = alloca

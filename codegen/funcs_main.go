@@ -160,6 +160,8 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.curFnAstBody = td.Body
 		cg.currentFnBorrowSet = cg.analyzeFunctionBorrows(td.Body)
 		cg.movedBindings = nil
+		prevImplicitMoves := cg.implicitMoveSites
+		cg.implicitMoveSites = computeImplicitMoveSites(td.Body)
 
 		prevMutated := cg.mutatedNames
 		cg.mutatedNames = collectMutatedNames(td.Body)
@@ -188,6 +190,7 @@ func (cg *CodeGen) genTestRunner() error {
 		cg.curFnAstBody = prevFnAstBody
 		cg.currentFnBorrowSet = prevBorrowSet
 		cg.movedBindings = prevMovedBindings
+		cg.implicitMoveSites = prevImplicitMoves
 		cg.mutatedNames = prevMutated
 
 		testFuncs[i] = fn

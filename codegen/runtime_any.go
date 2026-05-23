@@ -23,7 +23,13 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 
 	cg.anyDispatchEmitted = true
 
-	regFn := cg.ensureExternDecl("_tin_register_any_release", irtypes.Void,
+	regRelease := cg.ensureExternDecl("_tin_register_any_release", irtypes.Void,
+		[]*ir.Param{
+			ir.NewParam("type_id", irtypes.I32),
+			ir.NewParam("fn", irtypes.I8Ptr),
+		}, false)
+
+	regDeepCopy := cg.ensureExternDecl("_tin_register_any_deepcopy", irtypes.Void,
 		[]*ir.Param{
 			ir.NewParam("type_id", irtypes.I32),
 			ir.NewParam("fn", irtypes.I8Ptr),
@@ -54,20 +60,82 @@ func (cg *CodeGen) emitAnyDispatchRegistrations(block *ir.Block) *ir.Block {
 			continue
 		}
 
-		if !cg.structEligibleForAnyDispatch(structName, st) {
-			continue
+		if cg.structEligibleForAnyDispatch(structName, st) {
+			relFn := cg.ensureStructPtrReleaseFn(structName, st)
+			if relFn != nil {
+				fnI8 := block.NewBitCast(relFn, irtypes.I8Ptr)
+				block.NewCall(regRelease, constant.NewInt(irtypes.I32, int64(typeID)), fnI8)
+			}
 		}
 
-		relFn := cg.ensureStructPtrReleaseFn(structName, st)
-		if relFn == nil {
-			continue
+		// Any-deepcopy is independently eligible: we register a
+		// thunk for every named struct that has a deep-copy fn,
+		// not just the deinit / no-copy carve-out structEligibleFor
+		// AnyDispatch applies to release.  Lets ordinary value-
+		// types with rc fields get isolated deep-copy when boxed
+		// in `any` and that any flows into a mutating callee.
+		// ADT and cLayoutStructs go through their own paths; skip.
+		if !cg.isDataType(st) && !cg.cLayoutStructs[structName] && cg.structHasRelease(structName, st) {
+			thunk := cg.ensureAnyDeepCopyThunk(structName, st)
+			if thunk != nil {
+				thunkI8 := block.NewBitCast(thunk, irtypes.I8Ptr)
+				block.NewCall(regDeepCopy, constant.NewInt(irtypes.I32, int64(typeID)), thunkI8)
+			}
 		}
-
-		fnI8 := block.NewBitCast(relFn, irtypes.I8Ptr)
-		block.NewCall(regFn, constant.NewInt(irtypes.I32, int64(typeID)), fnI8)
 	}
 
 	return block
+}
+
+// ensureAnyDeepCopyThunk returns a cached or freshly-generated
+// `i8* @{struct}__any_deepcopy(i8* %src)` thunk that the runtime
+// dispatcher (_tin_any_deepcopy) calls when the type-id matches.
+//
+// The thunk loads the boxed struct from %src (a _tin_rc_alloc'd
+// data block holding the struct value), deep-copies it via the
+// per-struct deep-copy generator, allocates a new block of the
+// same size, stores the deep-copy result, and returns the new
+// block as i8*.  Result: callers get a fresh data slot with
+// isolated buffer fields, matching how the box-to-any boxing
+// originally allocated the data block.
+//
+// Cached in cg.anyDeepCopyThunks so successive call sites share
+// the same registered thunk.
+func (cg *CodeGen) ensureAnyDeepCopyThunk(structName string, st *irtypes.StructType) *ir.Func {
+	if cg.anyDeepCopyThunks == nil {
+		cg.anyDeepCopyThunks = map[string]*ir.Func{}
+	}
+
+	if fn, ok := cg.anyDeepCopyThunks[structName]; ok {
+		return fn
+	}
+
+	deepFn := cg.ensureStructDeepCopyFn(structName, st)
+	if deepFn == nil {
+		return nil
+	}
+
+	fnName := structName + "__any_deepcopy"
+	fn := cg.activeModule().NewFunc(fnName, irtypes.I8Ptr,
+		ir.NewParam("src", irtypes.I8Ptr))
+	cg.anyDeepCopyThunks[structName] = fn
+
+	entry := fn.NewBlock("entry")
+
+	typedSrc := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(st))
+	srcVal := entry.NewLoad(st, typedSrc)
+	copied := entry.NewCall(deepFn, srcVal)
+
+	nullStructPtr := constant.NewNull(irtypes.NewPointer(st))
+	sizeGep := entry.NewGetElementPtr(st, nullStructPtr, constant.NewInt(irtypes.I64, 1))
+	size := entry.NewPtrToInt(sizeGep, irtypes.I64)
+
+	newBlock := entry.NewCall(cg.ensureRCAlloc(), size)
+	newTyped := entry.NewBitCast(newBlock, irtypes.NewPointer(st))
+	entry.NewStore(copied, newTyped)
+	entry.NewRet(newBlock)
+
+	return fn
 }
 
 // structEligibleForAnyDispatch returns true when boxing a *NamedStruct

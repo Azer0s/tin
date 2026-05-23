@@ -303,7 +303,7 @@ type CodeGen struct {
 	// ARC runtime functions (lazily declared).
 	rcAllocFn                  *ir.Func // _tin_rc_alloc(size i64) i8*
 	rcAllocLocalFn             *ir.Func // _tin_rc_alloc_local(size i64) i8*  (biased: starts shared=0)
-	makeSharedFn               *ir.Func // _tin_make_shared(ptr i8*)
+	makeSharedFn               *ir.Func //nolint:unused // _tin_make_shared(ptr i8*); kept for future biased-rc escape transition (see ensureMakeShared)
 	retainFn                   *ir.Func // _tin_retain(ptr i8*)
 	releaseFn                  *ir.Func // _tin_release(ptr i8*)
 	retainPtrFn                *ir.Func // _tin_retain_ptr(ptr i8*) -- provenance-aware
@@ -317,6 +317,7 @@ type CodeGen struct {
 	releaseFnElemArrayFn       *ir.Func // _tin_release_fn_elem_array(data i8*, count i64)
 	releaseClosureFn           *ir.Func // _tin_release_closure(env i8*)
 	releaseAnyFn               *ir.Func // _tin_release_any(tag i32, data i8*)
+	anyDeepCopyFn              *ir.Func // _tin_any_deepcopy(tag i32, data i8*) i8*
 	foreachStructElemReleaseFn *ir.Func // _tin_foreach_struct_elem_release(data i8*, count i64, elem_size i64, fn i8*)
 	foreachFixedElemReleaseFn  *ir.Func // _tin_foreach_fixed_elem_release(data i8*, count i64, elem_size i64, fn i8*)
 	releasePtrElemArrayFn      *ir.Func // _tin_release_ptr_elem_array(data i8*, count i64)
@@ -326,6 +327,23 @@ type CodeGen struct {
 	// Each function has signature void @{name}__release_ptr({struct}* %ptr) and
 	// null-guards before loading/releasing the struct's ARC fields and freeing the block.
 	structPtrReleaseFns map[string]*ir.Func
+	// per-struct deep-copy helpers: struct name -> IR function with
+	// signature `{struct} @{name}__deep_copy({struct} %src)`.  The
+	// body walks each field: scalars and pointers copy directly,
+	// string/[T] field buffers are cloned via _tin_rc_alloc + memcpy,
+	// nested struct fields recurse.  Used by the call-site auto-copy
+	// dispatch when a struct arg flows into a mutating callee while
+	// the caller still needs the value, so the callee's mutations stay
+	// isolated to its own copy.
+	structDeepCopyFns map[string]*ir.Func
+	// per-element deep-copy helpers used inside fat-array deep copies:
+	// elemTypeKey -> `void @__tin_deepcopy_<key>_elem(i8* elem_ptr)`.
+	// Each helper loads the element value, deep-copies it via
+	// deepCopyFieldValue (recursive through the same type tree as
+	// struct field deep copy), and stores the isolated value back into
+	// the element slot.  Reuses _tin_foreach_struct_elem_retain as the
+	// iteration driver since the helper signature matches.
+	elemDeepCopyHelpers map[string]*ir.Func
 	// per-type null-safe heap-block release helpers: type key -> IR function.
 	// Same null-guard / load-then-decrement / release-fields-on-free pattern as
 	// structPtrReleaseFns but for non-named element types (fat array, string,
@@ -578,6 +596,38 @@ type CodeGen struct {
 	// funcDecls: function name -> FuncDecl AST, populated during predeclaration.
 	// Used by the #pure transitive side-effect checker.
 	funcDecls map[string]*ast.FuncDecl
+
+	// fnParamConventions caches per-function param conventions
+	// (transparent / consumes / retains) computed lazily by
+	// analyzeFunctionParamConventions on first call-site lookup.
+	// Read by `ref a` to validate the call-site assertion against the
+	// callee's analyzer-classified convention.
+	fnParamConventions map[string]map[string]ParamConvention
+
+	// fnParamMutated caches the per-function "does the body mutate
+	// this param" decision (any compound-target write, identifier
+	// reassign, or write-through-pointer).  Read at call sites to
+	// auto-pick deep_copy when a struct-typed arg flows into a
+	// mutating callee while the caller still needs the value.
+	fnParamMutated map[string]map[string]bool
+
+	// callArgContextStack carries (callee-name, ordered param names,
+	// arg AST nodes) for the call currently being evaluated.
+	// genCallExpr pushes on entry, pops on exit; genRefExpr reads the
+	// top frame to look up the expected convention for the current arg
+	// position and emits a compile error if the callee does not
+	// classify that param as transparent.
+	callArgContextStack []callArgContext
+
+	// implicitMoveSites is the set of *ast.Identifier nodes a per-
+	// function liveness pre-pass classified as the binding's single
+	// read site.  When such an identifier appears as a call argument
+	// codegen lowers it with move semantics: post-call release and
+	// the binding's scope-exit release is elided (the binding is
+	// marked ownership-moved, so subsequent reads would also error).
+	// Computed once per function body before codegen via
+	// computeImplicitMoveSites; reset at function boundary.
+	implicitMoveSites map[*ast.Identifier]bool
 
 	// methodMayMutateReceiver: method base name -> true if any
 	// definition with this base name takes a pointer receiver (and
@@ -998,8 +1048,15 @@ type CodeGen struct {
 	dataTypeIDs         map[string]int32
 	dataVariants        map[string]map[string]*dataVariantInfo
 	dataVariantLookup   map[string][]string
-	dataValueReleaseFns map[string]*ir.Func
-	dataValueRetainFns  map[string]*ir.Func
+	dataValueReleaseFns  map[string]*ir.Func
+	dataValueRetainFns   map[string]*ir.Func
+	dataValueDeepCopyFns map[string]*ir.Func
+
+	// anyDeepCopyThunks: per-struct `i8*(i8*)` thunks the runtime
+	// dispatcher (_tin_any_deepcopy) calls when a type-id matches.
+	// Populated lazily by ensureAnyDeepCopyThunk and registered at
+	// module init alongside the per-type release thunks.
+	anyDeepCopyThunks map[string]*ir.Func
 
 	// Fiber / coroutine state
 

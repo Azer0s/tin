@@ -345,6 +345,7 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 	isIdentTarget := false
 
 	var identEntry *scopeEntry
+
 	if id, ok2 := s.Target.(*ast.Identifier); ok2 {
 		if entry, ok3 := cg.curScope.lookup(id.Name); ok3 && entry.declaredLet && !entry.isGlobal {
 			isIdentTarget = true

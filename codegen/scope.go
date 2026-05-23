@@ -214,6 +214,51 @@ func (o ownership) String() string {
 	}
 }
 
+// ParamConvention classifies what a function body does with one of
+// its parameters.  Computed by the borrow analyzer per parameter and
+// consulted at every call site to decide whether the caller emits a
+// retain before the call, a release after, both, or nothing.
+//
+// The convention is purely metadata: a function body's IR is the same
+// regardless of which conventions the callers pick.  All rc work tied
+// to the call boundary lives on the caller's side of the call.
+type ParamConvention int8
+
+const (
+	// paramTransparent: body neither retains nor escapes the param.
+	// Caller emits no rc work at the call site.  This is "Borrowed"
+	// in the older per-param-bool terminology.
+	paramTransparent ParamConvention = iota
+	// paramConsumes: body has a sink that takes ownership of the
+	// param's rc -- field store into another rc-tracked struct, channel
+	// send, return-of-param, closure capture that escapes.  The
+	// caller emits retain-before / release-after, same as paramRetains;
+	// the distinction matters for `move arg` (paramConsumes can absorb
+	// the moved rc into the sink so no post-call release fires).
+	paramConsumes
+	// paramRetains: body keeps a surviving retain that is not paired
+	// by an exit release -- mutates external state through the param,
+	// passes the param to an opaque callee whose convention is
+	// unknown, etc.  Caller emits retain-before / release-after.
+	// Default when the analyzer cannot prove transparent or consumes.
+	paramRetains
+)
+
+// String returns the user-facing convention name shown by
+// `--explain-ownership` next to each parameter.
+func (c ParamConvention) String() string {
+	switch c {
+	case paramTransparent:
+		return "transparent"
+	case paramConsumes:
+		return "consumes"
+	case paramRetains:
+		return "retains"
+	default:
+		return "unknown"
+	}
+}
+
 type scope struct {
 	vars               map[string]*scopeEntry
 	names              []string // insertion order of `vars` keys; never randomized.

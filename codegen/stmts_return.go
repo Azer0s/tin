@@ -280,6 +280,20 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	retSkipName := ""
 	if ident, ok := s.Value.(*ast.Identifier); ok {
 		retSkipName = ident.Name
+		// Returning a borrowed Identifier (typically a non-reassigning
+		// RC param under the new model -- the body never retained, the
+		// caller's binding holds the rc share).  Without a retain here
+		// the caller's receiving binding and the caller's source
+		// binding would share one rc share, double-releasing on the
+		// two scope exits.  Owned identifiers carry their own +1 and
+		// the skipName above transfers it cleanly; only Borrowed ones
+		// need the extra retain.
+		if e, has := cg.curScope.lookup(ident.Name); has && e.isAlloc && e.isRC &&
+			e.ownership == ownershipBorrowed {
+			if !cg.emitOwningPtrRetainIfApplicable(block, val) {
+				cg.emitRetain(block, val)
+			}
+		}
 	} else if isCopyExpr(s.Value) && !cg.isFreshBytesAlloc(val) && !cg.isFreshCallResult(val) &&
 		!cg.isDerefOfRawVoidPtrCast(s.Value) && !isFreshSliceExpr(s.Value) {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
@@ -425,6 +439,18 @@ func (cg *CodeGen) genCoroReturn(block *ir.Block, s *ast.ReturnStmt) error {
 	if s.Value != nil {
 		if ident, ok := s.Value.(*ast.Identifier); ok {
 			retSkipName = ident.Name
+			// Mirror genReturn's borrowed-Identifier retain so a
+			// coroutine that yields a non-reassigning RC param to its
+			// awaiter transfers its own rc share.  Without this, the
+			// awaiter's receiving binding and the caller's source
+			// binding share one rc share and double-release on their
+			// two scope exits.
+			if e, has := cg.curScope.lookup(ident.Name); has && e.isAlloc && e.isRC &&
+				e.ownership == ownershipBorrowed && retVal != nil {
+				if !cg.emitOwningPtrRetainIfApplicable(block, retVal) {
+					cg.emitRetain(block, retVal)
+				}
+			}
 		}
 	}
 
@@ -557,6 +583,31 @@ func (cg *CodeGen) genBuiltinCopy(block *ir.Block, arg ast.Node) (value.Value, e
 	}
 
 	t := val.Type()
+
+	// Named struct: route through the per-struct deep-copy intrinsic
+	// (same machinery the auto-copy dispatch uses).  Skips ADT and
+	// cLayoutStruct since their layouts aren't navigable by the
+	// generic field walker; users wanting `copy()` on those today get
+	// a clear error pointing at the open follow-ups.
+	if st, ok := t.(*irtypes.StructType); ok && st.Name() != "" &&
+		!isStringType(st) && !isFatArrayPtr(st) && !isAnyType(st) &&
+		!isTraitFatPtrShape(st) && !isFatFnPtr(st) && !isAtomType(st) {
+		if cg.isDataType(st) {
+			return nil, fmt.Errorf("copy() not yet supported for ADT (data) types - tracked as a follow-up")
+		}
+
+		if cg.cLayoutStructs[st.Name()] {
+			return nil, fmt.Errorf("copy() not yet supported for cLayoutStruct types")
+		}
+
+		if cg.structTypeFor(CanonKey(st.Name())) == nil {
+			return nil, fmt.Errorf("copy() cannot resolve struct type %s", st.Name())
+		}
+
+		fn := cg.ensureStructDeepCopyFn(st.Name(), st)
+
+		return block.NewCall(fn, val), nil
+	}
 
 	if !isStringType(t) && !isFatArrayPtr(t) {
 		return nil, fmt.Errorf("copy() not supported for type %s", t)

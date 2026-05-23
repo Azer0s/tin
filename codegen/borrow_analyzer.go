@@ -25,7 +25,6 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-
 // analyzeFunctionBorrows walks a function body and returns the set of
 // let-binding names that can be classified as Borrowed.  Borrow
 // analysis is a core language feature and always runs.
@@ -59,7 +58,7 @@ func (cg *CodeGen) analyzeFunctionBorrows(body ast.Node) map[string]bool {
 			// global (and the current body does not mutate it
 			// directly either).  Other external sources -- params
 			// and captures -- still fall back to Owned because we
-			// have no analogue for them yet.
+			// have no analog for them yet.
 			if !cg.globalAliasIsBorrowSafe(body, source) {
 				continue
 			}
@@ -145,6 +144,7 @@ func directCalleeName(fn ast.Node) string {
 		}
 		// "a::b::c" -> "a__b__c" -- the call-graph keys mirror this.
 		joined := ""
+
 		for i, p := range v.Path {
 			if i > 0 {
 				joined += "__"
@@ -193,17 +193,46 @@ func directCalleeName(fn ast.Node) string {
 // uses) leaves the parameter Owned, matching today's runtime
 // behavior.
 func (cg *CodeGen) analyzeFunctionParamBorrows(body ast.Node, paramNames []string) map[string]bool {
+	conventions := cg.analyzeFunctionParamConventions(body, paramNames)
+	if conventions == nil {
+		return nil
+	}
+
+	result := map[string]bool{}
+
+	for name, conv := range conventions {
+		if conv == paramTransparent {
+			result[name] = true
+		}
+	}
+
+	return result
+}
+
+// analyzeFunctionParamConventions classifies each parameter as
+// transparent / consumes / retains based on what the body does with
+// it.  The convention drives caller-side rc emission at every call
+// site: transparent params get no caller-side rc work; consumes /
+// retains both get retain-before / release-after.  The split between
+// the two matters for `move arg` -- consumes can absorb the moved rc
+// into the sink so no post-call release fires.
+//
+// See docs/15-ownership.md "The call site is where rc work happens"
+// for the user-facing description.
+func (cg *CodeGen) analyzeFunctionParamConventions(body ast.Node, paramNames []string) map[string]ParamConvention {
 	if body == nil || len(paramNames) == 0 {
 		return nil
 	}
 	// Param mutation check: only `p = newptr` (direct reassign of the
-	// binding) disqualifies; writes through the pointer (`*p = x`,
-	// `p.f = x`, `p[i] = x`) mutate the pointee, not the param itself,
-	// so the caller's rc invariant holds.  Without this distinction,
-	// `fn inc(p *i64) = *p = *p + 1` would always force the callee's
-	// entry retain even when the body never reassigns p.
+	// binding) disqualifies the transparent classification; writes
+	// through the pointer (`*p = x`, `p.f = x`, `p[i] = x`) mutate
+	// the pointee, not the param itself, so the caller's rc invariant
+	// holds.  Without this distinction, `fn inc(p *i64) = *p = *p + 1`
+	// would always force the caller's pre-call retain even when the
+	// body never reassigns p.
 	reassigned := cg.collectReassignedNames(body)
-	result := map[string]bool{}
+	sinks := cg.collectParamSinks(body)
+	result := map[string]ParamConvention{}
 
 	for _, name := range paramNames {
 		if name == "" {
@@ -211,15 +240,160 @@ func (cg *CodeGen) analyzeFunctionParamBorrows(body ast.Node, paramNames []strin
 		}
 
 		if reassigned[name] {
+			// Reassigning the param itself is an opaque rc
+			// transition; conservatively classify as retains so
+			// the caller keeps its rc alive across the call.
+			result[name] = paramRetains
+
 			continue
 		}
 
 		if cg.bindingIsBorrowSafe(body, name) {
-			result[name] = true
+			result[name] = paramTransparent
+
+			continue
 		}
+
+		if sinks[name] {
+			result[name] = paramConsumes
+
+			continue
+		}
+
+		result[name] = paramRetains
 	}
 
 	return result
+}
+
+// paramConventionsFor returns the cached per-param convention map
+// for fnName, populating it from funcDecls on first lookup.  Returns
+// nil when the function is not in funcDecls (extern, lambda, trait
+// dispatch target whose impl is unknown at the call site).  Callers
+// treat nil as "convention unknown" -- ref-arg checks stay silent in
+// that case rather than rejecting valid code.
+func (cg *CodeGen) paramConventionsFor(fnName string) map[string]ParamConvention {
+	if cg.fnParamConventions == nil {
+		cg.fnParamConventions = map[string]map[string]ParamConvention{}
+	}
+
+	if cached, ok := cg.fnParamConventions[fnName]; ok {
+		return cached
+	}
+
+	decl := cg.funcDecls[fnName]
+	if decl == nil || decl.Body == nil {
+		return nil
+	}
+
+	paramNames := make([]string, 0, len(decl.Params))
+	for _, p := range decl.Params {
+		if p.Name != "" && !p.IsVarArgs {
+			paramNames = append(paramNames, p.Name)
+		}
+	}
+
+	result := cg.analyzeFunctionParamConventions(decl.Body, paramNames)
+	cg.fnParamConventions[fnName] = result
+
+	return result
+}
+
+// paramMutatedFor returns the cached per-param mutation map for
+// fnName, populating it from funcDecls on first lookup.  A param is
+// "mutated" when the body contains an AssignStmt/AugAssignStmt/
+// PostfixStmt whose target chain roots at that param name -- direct
+// reassign, field-write, index-write, or write-through-pointer.
+// Read by call-site dispatch to decide when a struct-typed arg
+// flowing into a mutating callee needs deep_copy to preserve the
+// caller's value-semantics view.  Returns nil for unknown callees.
+func (cg *CodeGen) paramMutatedFor(fnName string) map[string]bool {
+	if cg.fnParamMutated == nil {
+		cg.fnParamMutated = map[string]map[string]bool{}
+	}
+
+	if cached, ok := cg.fnParamMutated[fnName]; ok {
+		return cached
+	}
+
+	decl := cg.funcDecls[fnName]
+	if decl == nil || decl.Body == nil {
+		return nil
+	}
+
+	result := cg.collectMutatedTargets(decl.Body)
+	cg.fnParamMutated[fnName] = result
+
+	return result
+}
+
+// collectParamSinks walks `body` and returns the set of identifier
+// names that escape via a "sink" the analyzer recognizes.  A sink is
+// a use site where the body transfers an rc into a recipient that
+// outlives the function call: a return value, an assignment into a
+// struct field of another rc-tracked binding, a channel send, or a
+// closure / spawn capture.  When every escape path for a param is a
+// sink, the convention can be paramConsumes (the body has somewhere
+// to put the moved rc) rather than paramRetains.
+//
+// Conservative on uncertainty: a name not in the set defaults to
+// retains, which is the safe higher-traffic side.
+func (cg *CodeGen) collectParamSinks(body ast.Node) map[string]bool {
+	out := map[string]bool{}
+
+	if body == nil {
+		return out
+	}
+
+	walkAST(body, func(n ast.Node) {
+		switch v := n.(type) {
+		case *ast.ReturnStmt:
+			if v == nil || v.Value == nil {
+				return
+			}
+
+			if id, ok := v.Value.(*ast.Identifier); ok && id != nil {
+				out[id.Name] = true
+			}
+		case *ast.AssignStmt:
+			if v == nil || v.Value == nil {
+				return
+			}
+			// `target.field = id`, `target[i] = id`, `*target = id`:
+			// the rvalue identifier flows into a sink controlled by
+			// another binding (target's storage).
+			switch v.Target.(type) {
+			case *ast.FieldAccess, *ast.IndexExpr, *ast.DerefExpr:
+				if id, ok := v.Value.(*ast.Identifier); ok && id != nil {
+					out[id.Name] = true
+				}
+			}
+		case *ast.SpawnExpr:
+			if v == nil {
+				return
+			}
+			// Anything used inside a spawn body is captured into
+			// the closure env and outlives the call boundary.
+			walkAST(v, func(n2 ast.Node) {
+				if id, ok := n2.(*ast.Identifier); ok && id != nil {
+					out[id.Name] = true
+				}
+			})
+		case *ast.LambdaExpr:
+			if v == nil {
+				return
+			}
+			// Same reasoning as SpawnExpr: lambda captures persist
+			// past the call when the lambda escapes.
+			walkAST(v.Body, func(n2 ast.Node) {
+				if id, ok := n2.(*ast.Identifier); ok && id != nil {
+					out[id.Name] = true
+				}
+			})
+		}
+	})
+
+	return out
 }
 
 // collectReassignedNames returns the set of identifier names that are
@@ -235,7 +409,7 @@ func (cg *CodeGen) collectReassignedNames(node ast.Node) map[string]bool {
 	}
 
 	record := func(target ast.Node) {
-		if id, isId := target.(*ast.Identifier); isId && id != nil {
+		if id, isID := target.(*ast.Identifier); isID && id != nil {
 			out[id.Name] = true
 		}
 	}
@@ -297,7 +471,7 @@ func (cg *CodeGen) collectBorrowCandidates(node ast.Node) map[string]string {
 		// doesn't safely cover yet.
 		if ao, isAddr := vd.Value.(*ast.AddressOfExpr); isAddr && ao != nil {
 			if ix, isIx := ao.Expr.(*ast.IndexExpr); isIx && ix != nil {
-				if id, isId := ix.Expr.(*ast.Identifier); isId && id != nil {
+				if id, isID := ix.Expr.(*ast.Identifier); isID && id != nil {
 					out[vd.Name] = id.Name
 				}
 			}
@@ -519,6 +693,7 @@ func (cg *CodeGen) bodyWritesToGlobal(body ast.Node) bool {
 			if v == nil {
 				return
 			}
+
 			if name := rootIdentifierName(v.Target); name != "" {
 				if _, isGlobal := cg.topLevelVarPos[name]; isGlobal {
 					found = true
@@ -528,6 +703,7 @@ func (cg *CodeGen) bodyWritesToGlobal(body ast.Node) bool {
 			if v == nil {
 				return
 			}
+
 			if name := rootIdentifierName(v.Target); name != "" {
 				if _, isGlobal := cg.topLevelVarPos[name]; isGlobal {
 					found = true

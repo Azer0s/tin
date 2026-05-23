@@ -508,6 +508,50 @@ void _tin_register_any_release(int32_t type_id, TinAnyRelease fn) {
     }
 }
 
+// Per-type-id deep-copy dispatch.  Parallel to the release table.
+// Codegen registers a thunk for every struct it can deep-copy; the
+// call site (struct field of type `any`, autocopy on an `any` arg)
+// dispatches through this table to produce an isolated boxed value.
+// Falls back to retain-and-share when no thunk is registered, so
+// types that aren't registered keep today's sharing semantics
+// (no regression, just no isolation).
+typedef void *(*TinAnyDeepCopy)(void *);
+static TinAnyDeepCopy _tin_any_deepcopy_table[TIN_ANY_DISPATCH_MAX];
+
+void _tin_register_any_deepcopy(int32_t type_id, TinAnyDeepCopy fn) {
+    if (type_id >= 0 && type_id < TIN_ANY_DISPATCH_MAX) {
+        _tin_any_deepcopy_table[type_id] = fn;
+    }
+}
+
+// _tin_any_deepcopy returns a freshly-allocated data block for the
+// any value identified by (tag, data) when a per-type deep-copy
+// thunk is registered.  When no thunk exists, falls back to bumping
+// the rc on the existing block and returning the same pointer -
+// callers treat the returned pointer as the new data slot for the
+// boxed value.
+void *_tin_any_deepcopy(int32_t tag, void *data) {
+    if (!data) return NULL;
+
+    if (tag >= 6 && tag < TIN_ANY_DISPATCH_MAX) {
+        TinAnyDeepCopy fn = _tin_any_deepcopy_table[tag];
+        if (fn) {
+            return fn(data);
+        }
+    }
+
+    TinRCHdr *hdr = _rc_hdr(data);
+    uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
+    if (!(flags & TIN_RC_IMMORTAL)) {
+        if (flags & TIN_RC_SHARED) {
+            __atomic_fetch_add(&hdr->rc, 1, __ATOMIC_ACQ_REL);
+        } else {
+            hdr->rc++;
+        }
+    }
+    return data;
+}
+
 void _tin_release_any(int32_t tag, void *data) {
     if (!data) return;
 

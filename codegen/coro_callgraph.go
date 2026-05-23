@@ -27,6 +27,7 @@ func recordCallees(n ast.Node, out *[]string) {
 				for _, p := range fn.Path[1:] {
 					name += "__" + p
 				}
+
 				*out = append(*out, name)
 			}
 		case *ast.FieldAccess:

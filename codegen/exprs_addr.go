@@ -88,6 +88,7 @@ func (cg *CodeGen) genDerefExpr(block *ir.Block, e *ast.DerefExpr) (value.Value,
 	cg.transientPtrAllowed = true
 	val, err := cg.genExpr(block, e.Expr)
 	cg.transientPtrAllowed = prevTransient
+
 	if err != nil {
 		return nil, err
 	}

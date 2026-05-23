@@ -66,6 +66,33 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 		return
 	}
 
+	// `move x` at a call site: the caller skips its scope-exit release
+	// for x (genMoveExpr marks the binding ownershipMoved).  If the
+	// callee is borrow-classified it adds no rc traffic of its own, so
+	// without a post-call release the rc the caller dropped never
+	// reaches zero and the block leaks.  When the callee is owned-
+	// classified the post-call release here cancels its entry retain
+	// (which the callee has already paired with an exit release), keeping
+	// the rc balanced in that case too.  Net: one release per `move arg`,
+	// emitted at the call site instead of at the caller's scope exit.
+	if _, isMove := astArg.(*ast.MoveExpr); isMove {
+		cg.emitRelease(block, pre)
+
+		return
+	}
+
+	// Implicit move on last-use: the liveness pre-pass marked this
+	// identifier as the binding's single read site.  Lowering matches
+	// explicit `move x` exactly: emit a post-call release and mark
+	// the binding so its scope-exit release is elided.  Without the
+	// mark the scope exit would double-release.
+	if id, isID := astArg.(*ast.Identifier); isID && cg.implicitMoveSites[id] {
+		cg.emitRelease(block, pre)
+		cg.markImplicitMoved(id.Name)
+
+		return
+	}
+
 	if isCopyExpr(astArg) {
 		return
 	}

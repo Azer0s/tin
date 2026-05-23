@@ -27,14 +27,96 @@ silently broken correctness - just slightly more rc work than the ideal.
 Every binding in Tin has an **ownership state** decided by the compiler:
 
 - **Owned**: holds a +1 reference to an rc-tracked block. Retains at
-  creation; releases at scope exit.
+  creation (when needed); releases at scope exit.
 - **Borrowed**: aliases a value whose lifetime is guaranteed by another
   binding. No retain, no release.
-- **Moved**: ownership has been transferred. No release at scope exit.
+- **Moved**: ownership has been transferred. No release at scope exit;
+  the binding is invalidated and any subsequent read is a compile error.
 
 You do not write these annotations. The compiler picks the cheapest
 state that is safe. If unsure, it falls back to `Owned` (same as plain
 ARC).
+
+**Function bodies are rc-neutral on their parameters** in the common
+case. When the body never reassigns a parameter, the body emits no
+entry retain and no scope-exit release on that parameter. The caller's
+binding keeps the rc share alive throughout the call, so the body can
+freely read, sink, or pass through without bookkeeping. When the body
+*does* reassign a parameter (`s = some_other_value` against the param
+name), the compiler reverts to the classical owned model for that
+parameter: entry retain on `s`, scope-exit release on `s`, and normal
+release-old/retain-new on every subsequent assign.
+
+A function that returns a non-reassigned parameter directly emits one
+retain at the return site so the caller's receiving binding gets a
+share of its own (separate from the caller's source binding).
+
+## The call site is where rc work happens
+
+The analyzer infers a per-parameter **convention** for every function
+based on what the body does:
+
+- **transparent**: read-only - the body never sinks and never reassigns.
+- **consumes**: the body has a sink that retains the value (a field
+  store, channel send, captured-in-escaping-closure, etc.) but does
+  not reassign the parameter.
+- **retains**: the body reassigns the parameter (or escapes the rc in
+  a way the analyzer cannot track precisely).
+
+The convention shows up in `--explain-ownership` and gates the `ref`
+keyword (only `transparent` permits `ref`). It does **not** drive
+extra rc work at the call site - the body is responsible for its own
+sink/reassign accounting, and the caller's side stays simple:
+
+| call form          | what the caller emits                             |
+|--------------------|----------------------------------------------------|
+| `f(a)` default     | borrow if `a` is still live after; move if it's `a`'s last use (Phase F implicit move) |
+| `f(ref a)`         | borrow (compile error if convention != transparent) |
+| `f(move a)`        | post-call release; skip caller scope-exit         |
+| `f(copy(a))`       | deep-copy `a` into a fresh temp; pass the temp default |
+
+The default form auto-selects between borrow-style (no boundary rc)
+and move-style (post-call release) based on the liveness pre-pass.
+The callee's own classification (transparent / consumes / retains)
+gates the `ref` keyword but does **not** affect the caller's emission:
+the same call site emits the same boundary rc regardless of what the
+callee does internally.
+
+**Value semantics for every value type.** A parameter passed by
+value (no leading `*`) is fully isolated from the caller's binding
+when the callee mutates it - regardless of whether the value is a
+struct, array, string, or ADT. The compiler emits an automatic
+deep-copy at the call boundary whenever the callee's body mutates
+the parameter and the binding is still live after the call. The
+rule applies uniformly:
+
+| arg shape       | callee mutates? | what happens                  |
+|-----------------|-----------------|-------------------------------|
+| `f(value)`      | no              | shared (zero rc work)         |
+| `f(value)`      | yes, last use   | move (transfer rc)            |
+| `f(value)`      | yes, still live | deep-copy at call boundary    |
+| `f(&value)`     | (anything)      | explicit sharing via pointer  |
+
+The same rule covers method calls: `value.method()` deep-copies
+the receiver when the method body mutates `this`.
+
+**To opt into Go-style buffer sharing**, declare the parameter as a
+pointer (`fn f(arr *[T])`) and pass `f(&arr)` at the call site.
+Pointers say "I mean this to share"; bare value types say "this
+is mine."
+
+Deep-copy machinery handles all the shapes the compiler knows
+how to walk: scalars are bit-copied, string and `[T]` buffers get
+fresh allocations via `_tin_rc_alloc`+memcpy, `[Struct]` elements
+recurse per-element, nested struct fields recurse through the
+per-struct generator, and ADT (data) values dispatch on the
+variant tag and deep-copy the active variant's payload fields.
+Pointer fields and `any` fields stay shared by reference (those
+are explicit sharing shapes).
+
+You never have to write `move` or `copy` to get the optimization -
+the keywords are for when you want use-after-move enforcement or to
+make the transfer visible in source.
 
 ## For programmers from other languages
 
@@ -67,11 +149,11 @@ reclaims much of that overhead automatically.
 | Rust concept                             | Tin equivalent                                            | Difference                                                    |
 | ---------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------- |
 | Ownership rules (one owner, lifetimes)   | ARC (shared ownership via rc)                             | Tin has no "one owner" rule; shared ownership is the default  |
-| Borrow checker compile errors            | None                                                      | Tin's borrow analysis only elides rc traffic; cannot error    |
+| Borrow checker compile errors            | None for inferred conventions; explicit `ref`/`move` are checked | Inference can never error; the keywords are opt-in assertions |
 | `&x` (immutable borrow with lifetime)    | `&x` produces `*T` (rc-tracked pointer)                   | Tin pointers are kept alive by ARC; no lifetime annotations   |
 | `&mut x` (exclusive mutable borrow)      | No syntactic equivalent                                   | Tin has no exclusive-borrow checking                          |
 | `move \|x\| ...` for closures            | Closures captured according to analyzer; no keyword needed | Optional `move` is a perf hint, not enforcement              |
-| `let y = x` consumes x (move semantics)  | `let y = x` copies (analyzer may elide)                   | Use-after isn't a default error; only after explicit `move x` |
+| `let y = x` consumes x (move semantics)  | `let y = x` copies (analyzer may elide); ref/move are call-site keywords | Use-after isn't a default error; only after explicit `move x` |
 | `Box<T>`                                 | Heap by default for reference types                       | No `Box` type                                                  |
 | `Rc<T>` / `Arc<T>`                       | Built-in for every reference type                         | Tin's rc is always atomic                                      |
 | `unsafe { }` block                       | Does not exist                                            | No unsafe escape hatch - ARC always applies                   |
@@ -82,56 +164,99 @@ work. Tin emits ARC rc work and uses an analyzer to prove which calls
 are redundant. Same end goal (cheap correct memory management),
 different cost model and different ergonomics.
 
-## The `move` keyword
+## The call-site keywords
 
-Tin has an optional `move` keyword that is a **perf hint to the
-optimizer**, not an ownership-transfer primitive. You never need to
-write it for correctness. You write it when you want to guarantee no
-retain happens.
+Tin has three optional keywords that you can write at a call site to
+constrain how the call lowers. None of them are required for
+correctness - the analyzer picks the right semantics automatically.
+You write them when you want to make your intent explicit or to lock
+in an optimization regardless of inference.
 
-### Canonical case: fresh allocation into consumer
-
-```rust
-fn one_shot() =
-  let s = build_big_thing()    // rc=1 (fresh)
-  hand_off(move s)             // zero ops; callee owns the original rc=1
+```
+f(a)         // default: analyzer-inferred per the convention table
+f(ref a)     // assert: zero rc traffic at this call
+f(move a)    // transfer a's rc into the callee
+f(copy(a))   // force a retain before the call, regardless of inference
 ```
 
-Without `move`: the call site emits a retain (to give the callee its own
-reference) and the caller's scope exit emits a release. With `move`: the
-rc=1 flows straight from `build_big_thing` into the callee and gets
-dropped there. Net savings: a retain plus the caller's redundant
-release.
+All three are **call-site-only**. They live on the caller, not in the
+callee's signature - the same function can be called four different
+ways depending on what each call site wants.
 
-After `move x`, `x` is invalidated:
+### `ref a` -- assert borrow
+
+`ref a` is the explicit "this call must not bump the rc" assertion.
+The compiler accepts it only when the callee's convention is
+`transparent`; otherwise it's a compile error:
+
+```rust
+fn store_box(p *Place, b Box) =
+  p.box = b      // sink: convention(b) = consumes
+
+let a = make_box()
+store_box(p, ref a)
+//          ^^^^^ error: cannot pass `ref a` to `store_box`:
+//                parameter `b` consumes its rc
+```
+
+For a read-only callee, `ref` is a no-op assertion - the analyzer
+already would have produced zero rc traffic. The keyword is for
+locking that in so a future edit that adds a field-store to the
+callee body becomes a localized error instead of a silent retain at
+the call site.
+
+### `move a` -- transfer ownership
+
+`move a` transfers the caller's rc into the callee. After the call,
+`a` is invalidated and any subsequent read is a compile error.
 
 ```rust
 let s = build_big_thing()
 hand_off(move s)
-echo s   // ERROR: use of moved value `s`
+echo s   // error: use of moved value `s`
 ```
 
-The optimizer also picks move automatically when it can prove a binding's
-last use is a transfer. The keyword is for cases where (a) you want to
-guarantee the optimization regardless of inference, (b) you want the
-consumption to be visible in source for readers, or (c) a
-`-Wmove-suggested` warning told you a manual hint would help.
+Validity of `move`:
+- The source must be an Owned local binding. Parameters, iterator
+  bindings, globals, and `ref` bindings cannot be moved.
+- Partial moves (`move x.field`) are not supported - extract first.
 
-### Where `move` does not apply
+The lowering is uniform across conventions: one post-call release at
+the call site, caller scope-exit on `a` skipped. The body's per-class
+behavior (no rc work on non-reassigned params, full owned model on
+reassigned params) handles its own accounting independently. Math
+balances either way: every rc the body or its sinks added is matched
+by the caller's post-release plus the body's own scope-exit on whatever
+local the slot holds at the time.
 
-- **Iterator bindings**: `for item in xs:` exposes a view into xs, not
-  ownership. `move item` is a compile error. Extract first:
-  ```rust
-  for item in xs:
-    let owned = item     // copy (retain)
-    move owned           // now allowed
-  ```
-- **Function parameters**: callee does not own them; the caller does.
-- **Captured-by-reference closure variables**: same reason.
+You get the use-after-move compile check regardless of convention.
 
-The rule: **`move` requires a binding the current scope owns.** Partial
-moves (`move x.field`) are not supported - extract the field to its own
-binding first, or take a pointer (`let p = &x.field`).
+The optimizer also picks move automatically when it can prove a
+binding's last use is a transfer - you don't have to write `move` to
+get the optimization. Write it when:
+
+1. You want a compile-time guarantee that the binding is dead after
+   this call (use-after-move enforcement).
+2. You want the consumption to be visible in source for readers.
+3. `-Wmove-suggested` flagged a call site where the optimizer would
+   have applied move and a manual hint would make it explicit.
+
+### `copy(a)` -- deep copy + default call
+
+`copy(a)` lowers to a deep copy of `a` into a fresh allocation
+(`rc=1`) and then passes that fresh temp through the default call
+protocol. The original `a` is untouched - it keeps its rc and
+remains usable after the call.
+
+```rust
+let a = [1, 2, 3]
+mutate(copy(a))   // callee receives an independent buffer
+echo a            // still [1, 2, 3]
+```
+
+Use it when the caller wants the callee's modifications to be
+isolated from the original binding, or when you want to defeat the
+implicit-move-on-last-use heuristic at a specific call site.
 
 ## Common patterns
 
@@ -148,16 +273,26 @@ fn render(state State) string =
 anywhere. The `++` consumes its operands and returns a fresh owned
 string.
 
-### Fresh allocation into consumer (one `move`)
+### Fresh allocation into consumer (move)
 
-See the canonical case above. This is where `move` shines.
+```rust
+fn one_shot() =
+  let s = build_big_thing()
+  hand_off(move s)
+```
+
+`build_big_thing` returns rc=1; `move s` transfers that rc straight
+into `hand_off` without an extra retain at the call site. If
+`hand_off` consumes (stores in a field), the body's field-store
+takes the rc directly. If it just reads, the caller drops the rc
+right after the call returns.
 
 ### Iterator into sink (extraction + move)
 
 ```rust
 for item in xs:
   let owned = item     // retain (the only mandatory rc op)
-  sink(move owned)     // callee skips entry retain
+  sink(move owned)     // callee's sink takes the rc; no extra traffic
 ```
 
 Saves one retain/release pair vs naive ARC. The array still holds its
@@ -184,7 +319,7 @@ remains borrowed in `handle`.
 
 ```rust
 fn handle(req Request) =
-  spawn fn{#async}() = 
+  spawn fn{#async}() =
     validate(req)     // closure passes the whole `req`
   // -> analyzer captures req in full, promoted to owned
 ```
@@ -197,36 +332,42 @@ whole-capture is the conservative default, not a problem to surface.
 
 ## Across function boundaries
 
-The analyzer infers each function's ownership contract automatically:
-which parameters it treats as borrows vs owned, whether the return is
-fresh-owned or a borrow of a parameter. Callers consult that contract
-when classifying their own bindings. So:
+The analyzer infers each function's per-parameter convention
+automatically: whether the body treats the param as transparent,
+consumes its rc into a sink, or retains an additional reference. The
+convention drives the `ref` keyword's compile-time check and the
+body-side rc model (borrowed body for transparent/consumes,
+classical owned body for retains). The caller's call-site code
+chooses between borrow (no boundary rc) and move (post-call release)
+based purely on the binding's liveness.
 
 ```rust
 fn print_path(p string) =
-  echo p                     // p only read; analyzer infers `p: borrow`
+  echo p                     // p only read; convention(p) = transparent
 
 fn main() =
   let cfg = load_config()
-  print_path(cfg.path)       // caller knows print_path borrows; no rc bump
+  print_path(cfg.path)       // zero rc work at the call site
 ```
 
-The contract is inferred, never written. You see it through
+The convention is inferred, never written. You see it through
 `--explain-ownership`:
 
 ```
 fn print_path:
-  param p   borrow  (read-only in body)
-  return    -       (no value)
+  param p    transparent  (read-only in body)
+fn main:
+  let cfg    owned         (returned from load_config)
 ```
 
 For recursive functions, the analyzer iterates until the inferred
-contracts stabilize. For mutually-recursive groups, the whole group is
-analyzed together. You do not need to think about either case.
+conventions stabilize. For mutually-recursive groups, the whole group
+is analyzed together. You do not need to think about either case.
 
 ## When the analyzer is unsure
 
-The fallback is **owned** - same as plain ARC. This guarantees:
+The fallback is **owned** + `retains` convention - same as plain ARC.
+This guarantees:
 
 - **No memory leak** beyond what ARC produces.
 - **No use-after-free** at any optimization level.
@@ -234,13 +375,13 @@ The fallback is **owned** - same as plain ARC. This guarantees:
   to (or slightly worse than) plain ARC.
 
 Compile-time warnings nudge you toward patterns the analyzer can
-optimize. Runtime checks (default on, stripped by `--release`) validate
-the optimizer's decisions on every elided pair.
+optimize. Runtime checks (opt-in via `--check=`) validate the
+optimizer's decisions on every elided pair.
 
 ## See also
 
 - [15-ownership-borrowing.md](./15-ownership-borrowing.md) - diagnostic
-  flags, warning ladder, `--release` mode.
+  flags, warning ladder, the call-site keyword error catalog.
 - [internals/memory.md](./internals/memory.md) - the ARC runtime model.
-- [internals/clayout-structs.md](./internals/clayout-structs.md) -
-  cLayoutStruct wrapper layout (special case at the FFI boundary).
+- [internals/memory-arc-codegen.md](./internals/memory-arc-codegen.md) -
+  where the compiler emits retains and releases.

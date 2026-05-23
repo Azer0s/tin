@@ -7,9 +7,9 @@ optimizer is doing and validate that it is doing the right thing.
 ## Warnings
 
 The optimizer emits warnings when it had to back off from an
-optimization it wanted to apply, or when an explicit `move` is invalid.
-None of these are errors by default; the generated code is always
-correct.
+optimization it wanted to apply, or when a call-site keyword is
+redundant. None of these are errors by default; the generated code is
+always correct.
 
 | Flag                          | Default level | When it fires                                                                              |
 | ----------------------------- | ------------- | ------------------------------------------------------------------------------------------ |
@@ -19,8 +19,14 @@ correct.
 | `-Wclayout-pointer-extern`    | `-W2`         | A pointer-extern cLayoutStruct wrapper crossed a boundary that may outlive the C-side memory. |
 | `-Wcycle-risk`                | `-W2`         | A struct definition admits an RC cycle in the static type graph (`A` -> `*B` -> `*A`).    |
 | `-Wmove-suggested`            | `-W3`         | A fresh-allocation flows into a single consumer; explicit `move` would be clearer.         |
+| `-Wref-redundant`             | `-W3`         | `ref a` at a call site whose callee is already transparent - the keyword adds nothing.     |
+| `-Wcopy-redundant`            | `-W3`         | `copy(a)` at a call site whose callee already retains - the keyword adds nothing.          |
 
-The following are hard errors, not warnings (no flag to disable):
+The call-site keywords carry their own hard-error catalog. None of these
+have a flag; they fire whenever you use a keyword in a way the
+analyzer cannot satisfy.
+
+### `move` errors
 
 | Error                         | When it fires                                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------------------ |
@@ -28,7 +34,8 @@ The following are hard errors, not warnings (no flag to disable):
 | `self-move`                   | `x = move x`.                                                                              |
 | `move-in-loop`                | A move on a binding declared outside the loop; iteration 2 would be use-after-move.        |
 | `move-after-use`              | `move x` when `x` was aliased earlier in the same scope (would invalidate the alias).      |
-| `move-non-owning-binding`     | A `move` on a function parameter or an iterator binding - the scope does not own this binding. |
+| `move-non-owning-binding`     | A `move` on a function parameter, an iterator binding, a global, or a `ref` binding - the scope does not own this binding. |
+| `move-partial`                | `move x.field` - partial moves are not supported. Extract to a local first.                |
 
 Every diagnostic carries a source span and offers all available
 remediation paths. Example for `move-non-owning-binding`:
@@ -58,7 +65,36 @@ foo.tin:18:5: error: cannot move `item` (iterator binding, view into `xs`)
               move owned
 ```
 
-To promote warnings to errors for CI hygiene:
+### `ref` errors
+
+| Error                         | When it fires                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `ref-into-consuming-param`    | `f(ref a)` where the callee's body sinks `a`'s rc (field store, channel send, return, etc.). |
+| `ref-into-retaining-param`    | `f(ref a)` where the callee's body keeps a surviving retain on `a`.                        |
+| `ref-on-mutable-target`       | `ref a` where the call would later mutate through `a`'s storage (e.g. `&a` passed and written through). |
+| `ref-binding-escapes`         | A `ref`-classified binding is returned, captured into a fiber, or stored in a field.       |
+
+Example:
+
+```
+foo.tin:42:13: error: cannot pass `ref a` to `store_box`:
+  parameter `b` consumes its rc (would conflict with ref's no-traffic guarantee)
+   42  |   store_box(p, ref a)
+       |                ^^^^^
+   note: store_box stores its parameter into `p.box` at line 18; that takes ownership
+   help: drop `ref` to allow the rc transfer:
+       store_box(p, a)
+   help: or refactor `store_box` to not consume its parameter
+```
+
+### `copy()` errors
+
+| Error                         | When it fires                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `copy-of-moved`               | `copy(a)` after `a` was moved earlier in the scope.                                        |
+| `copy-of-non-rc`              | `copy(a)` where `a` is a value type that doesn't participate in rc (i64, f64, etc.). The keyword has no meaning. |
+
+## Promoting warnings to errors
 
 ```
 $ tin build -Werror=conservative-promotion src/main.tin
@@ -67,18 +103,37 @@ $ tin build -Werror src/main.tin   # all warnings at current -W level
 
 ## `--explain-ownership`
 
-Prints the analyzer's decision for every binding in the program.
-Useful when you want to confirm an optimization fired (or did not):
+Prints the analyzer's decision for every binding in the program, plus
+the convention for every function parameter. Useful when you want to
+confirm an optimization fired (or did not):
 
 ```
 $ tin build --explain-ownership src/main.tin
+fn print_path:
+  param p          transparent  (read-only in body)
+fn store_box:
+  param p          retains      (mutated through pointer)
+  param b          consumes     (stored into p.box at line 18)
 fn handle_request:
-  let req       owned   (returned to caller)
-  let path      borrow  (read-only, dropped at scope exit)
-  let method    borrow  (read-only, passed to log() which takes a borrow)
-  let response  owned   (captured by fiber spawned at line 51)
-  let cleanup   move    (last use at line 58, transferred to defer chain)
+  let req          owned        (returned to caller)
+  let path         borrow       (read-only, dropped at scope exit)
+  let method       borrow       (read-only, passed to log() which borrows)
+  let response     owned        (captured by fiber spawned at line 51)
+  let cleanup      move         (last use at line 58, transferred to defer chain)
 ```
+
+The per-parameter `transparent` / `consumes` / `retains` lines describe
+the function's convention: what the body does with that parameter. The
+convention gates the `ref` keyword (only `transparent` permits it) and
+chooses which body-side rc model the parameter uses (`transparent` and
+`consumes` use the borrowed-body model: no entry retain, no scope-exit
+release; `retains` uses the classical owned-body model). The caller's
+call-site code chooses between borrow (no boundary rc) and move
+(post-call release) based on the binding's liveness, independently of
+the convention.
+
+The per-binding `owned` / `borrow` / `move` lines describe what the
+analyzer decided for each let-binding inside the function body.
 
 Scope to a single function:
 
@@ -96,9 +151,10 @@ For compiler and runtime debugging:
 %s = call i8* @_tin_alloc(...)
 ; binding `t` borrow of `s` -- no entry retain
 %t = bitcast i8* %s to ...
+; call site f(s): default protocol, `s` still live after -- no caller rc work
+%r = call i64 @f(%t)
 ; scope exit (line 50)
 call void @_tin_release(i8* %s)
-; --- no release for %t (borrow)
 ```
 
 ## Runtime checks (opt-in)
@@ -146,7 +202,7 @@ rc-balance report at exit:
 
 - **ARC itself.** Every retain/release the optimizer could not elide is
   always emitted. Memory safety is unchanged at every level.
-- **`move` use-after-move compile errors.** Compile-time only; not
+- **`move`, `ref`, `copy()` compile errors.** Compile-time only; not
   gated by any runtime flag.
 - **`-W*` warnings.** These are compile-time, not runtime.
 - **`defer` blocks, panic handlers, fiber scheduler.** Program

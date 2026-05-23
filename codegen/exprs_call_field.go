@@ -520,9 +520,28 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 			}
 		}
 
-		// Adapt arg types to function signature.
+		// Adapt arg types to function signature.  The `this` receiver
+		// sits at llArgs[0] when instIsStatic is false; the user-
+		// authored e.Args correspond to llArgs[1..].  Autocopy fires
+		// on the receiver (when the method mutates `this`) and per
+		// user arg.
 		if f, ok2 := callee.(*ir.Func); ok2 {
 			calleeType = f.Sig
+
+			argSliceStart := 1
+			if instIsStatic {
+				argSliceStart = 0
+			}
+
+			if !instIsStatic && len(llArgs) > 0 {
+				llArgs[0] = cg.maybeAutoCopyReceiverVal(block, fn.Expr, llArgs[0])
+			}
+
+			if argSliceStart < len(llArgs) {
+				userArgs := llArgs[argSliceStart:]
+				cg.applyAutoCopyToArgVals(block, e.Args, userArgs)
+			}
+
 			llArgs = cg.adaptArgs(block, llArgs, calleeType)
 		}
 

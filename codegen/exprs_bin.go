@@ -49,6 +49,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	// outer operators (`*`, `/`, `%`, `<<`, ...) leave the flag at
 	// the caller's setting.
 	prevTransient := cg.transientPtrAllowed
+
 	switch e.Op {
 	case "+", "-", "==", "!=", "<", "<=", ">", ">=":
 		cg.transientPtrAllowed = true
@@ -57,6 +58,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	left, err := cg.genExpr(block, e.Left)
 	if err != nil {
 		cg.transientPtrAllowed = prevTransient
+
 		return nil, err
 	}
 
@@ -68,6 +70,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 
 	right, err := cg.genExpr(block, e.Right)
 	cg.transientPtrAllowed = prevTransient
+
 	if err != nil {
 		return nil, err
 	}

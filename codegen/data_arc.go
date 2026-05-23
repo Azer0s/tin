@@ -445,5 +445,127 @@ func (cg *CodeGen) suppressIfaceDataScopeReleases() {
 	}
 }
 
+// emitDataValueDeepCopy returns a deep copy of an ADT value: the tag
+// is bit-copied and the active variant's payload fields are deep-
+// copied (via deepCopyFieldValue) into a fresh payload slot.
+// Variants with no deep-copyable fields fall through to a plain bit-
+// copy.  Bypasses the per-struct deep-copy generator because that
+// walks fields without tag awareness and would corrupt the shared
+// payload's RC on scope-exit.
+func (cg *CodeGen) emitDataValueDeepCopy(block *ir.Block, val value.Value) value.Value {
+	st, ok := val.Type().(*irtypes.StructType)
+	if !ok {
+		return val
+	}
+
+	fn := cg.ensureDataValueDeepCopyFn(st.Name(), st)
+	if fn == nil {
+		return val
+	}
+
+	return block.NewCall(fn, val)
+}
+
+// ensureDataValueDeepCopyFn lazily emits a per-ADT helper that
+// produces a deep copy of a `data` value.  Signature:
+// `data @Foo__data_deep_copy(data %src) -> data`.  The body bit-
+// copies the source into a stack alloca, dispatches on the tag,
+// rewrites each releasable payload field in place with its deep-
+// copied form, then loads and returns the modified value.
+//
+// Caches per-ADT.  If no variant has any deep-copyable field the
+// helper still gets cached (as nil); callers fall back to bit-copy.
+func (cg *CodeGen) ensureDataValueDeepCopyFn(adtName string, st *irtypes.StructType) *ir.Func {
+	if fn, ok := cg.dataValueDeepCopyFns[adtName]; ok {
+		return fn
+	}
+
+	variants := cg.dataVariants[adtName]
+	if variants == nil {
+		cg.dataValueDeepCopyFns[adtName] = nil
+
+		return nil
+	}
+
+	any := false
+
+	for _, vi := range variants {
+		if cg.variantHasReleasableField(vi) {
+			any = true
+
+			break
+		}
+	}
+
+	if !any {
+		cg.dataValueDeepCopyFns[adtName] = nil
+
+		return nil
+	}
+
+	fnName := adtName + "__data_deep_copy"
+	fn := cg.mod.NewFunc(fnName, st, ir.NewParam("src", st))
+	fn.Linkage = enum.LinkageWeakODR
+	cg.dataValueDeepCopyFns[adtName] = fn
+
+	entry := fn.NewBlock("entry")
+	exit := fn.NewBlock("exit")
+
+	// Stack copy: bit-copy the source so the tag and any scalar
+	// fields are already in place; the per-variant case blocks only
+	// have to overwrite the rc-tracked payload slots with their
+	// deep-copied form.
+	stackCopy := entry.NewAlloca(st)
+	entry.NewStore(fn.Params[0], stackCopy)
+
+	tagGEP := entry.NewGetElementPtr(st, stackCopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	tagI64 := entry.NewLoad(irtypes.I64, tagGEP)
+
+	payloadGEP := entry.NewGetElementPtr(st, stackCopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+	var switchCases []*ir.Case
+
+	for _, e := range sortedVariants(variants) {
+		variantName, vi := e.Name, e.Info
+		if !cg.variantHasReleasableField(vi) {
+			continue
+		}
+
+		caseBlock := fn.NewBlock("var_" + variantName)
+		switchCases = append(switchCases, ir.NewCase(
+			constant.NewInt(irtypes.I64, vi.Tag), caseBlock))
+
+		payloadPtr := caseBlock.NewBitCast(payloadGEP, irtypes.NewPointer(vi.PayloadType))
+
+		for fi, f := range vi.Fields {
+			if f.IsWeak {
+				continue
+			}
+
+			fieldType := vi.PayloadType.Fields[fi]
+			if !cg.fieldNeedsOwningRelease(fieldType) {
+				continue
+			}
+
+			fieldPtr := caseBlock.NewGetElementPtr(vi.PayloadType, payloadPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fi)))
+			fieldVal := caseBlock.NewLoad(fieldType, fieldPtr)
+			copied := cg.deepCopyFieldValue(caseBlock, fieldVal, fieldType)
+			caseBlock.NewStore(copied, fieldPtr)
+		}
+
+		caseBlock.NewBr(exit)
+	}
+
+	entry.NewSwitch(tagI64, exit, switchCases...)
+
+	result := exit.NewLoad(st, stackCopy)
+	exit.NewRet(result)
+
+	return fn
+}
+
 // genAdtIsExpr handles `x is Ctor(bindings...)` and `x is NullaryVariant` on
 // an ADT-typed scrutinee. Returns (value, handled=true, err) when it

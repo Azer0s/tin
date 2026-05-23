@@ -797,6 +797,7 @@ func (cg *CodeGen) genVarDecl(block *ir.Block, s *ast.VarDecl) (*ir.Block, error
 	// allocation; flagging as Borrowed would suppress the
 	// scope-exit release of the freshly-allocated block.
 	coerceAllocates := false
+
 	if preCoerceSrcType != nil {
 		if isAnyType(llType) && !isAnyType(preCoerceSrcType) {
 			coerceAllocates = true

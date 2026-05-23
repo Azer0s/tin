@@ -198,9 +198,11 @@ below); it skips arguments that are references to existing named variables.
 | Argument type                          | Action                                              |
 |----------------------------------------|-----------------------------------------------------|
 | `any` (post-coercion only)             | `emitRelease(post)` - box from type coercion freed  |
-| `copy(x)` annotation                  | No-op - copy semantics, caller retains ownership    |
+| `isCopyExpr` (identifier / field / index / deref / addr-of) | No-op - the source binding still owns the rc |
 | RC-tracked fat type (string, array, `any`) | `emitRelease(pre)` - direct release of fat value |
 | `*TinStruct` pointer from a temporary  | `emitRelease(pre)` - heap block returned by callee  |
+| `MoveExpr` (`f(move x)`)               | `emitRelease(pre)` - balances the caller's skipped scope-exit release |
+| `InterpolatedString` (`f("{x}")`)      | `emitRelease(pre)` - fresh _tin_rc_alloc'd buffer  |
 | Anything else                          | No-op                                               |
 
 The `*TinStruct` case uses the `isTemporaryProducer` gate to distinguish:

@@ -189,51 +189,6 @@ func (s *session) buildRuntime(outSo string) error {
 	return nil
 }
 
-// findMimallocInstall mirrors main package's helper of the same name.
-// REPL builds its own runtime .so and needs the include/link paths
-// for mimalloc to compile the heap-arena module.
-func findMimallocInstall(targetGOOS string) (libDir, incDir string, ok bool) {
-	var libCandidates []string
-
-	var incCandidates []string
-
-	if targetGOOS == "darwin" {
-		libCandidates = []string{"/opt/homebrew/lib", "/usr/local/lib"}
-		incCandidates = []string{"/opt/homebrew/include", "/usr/local/include"}
-	} else {
-		libCandidates = []string{"/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib", "/usr/local/lib"}
-		incCandidates = []string{"/usr/include", "/usr/local/include"}
-	}
-
-	libNames := []string{"libmimalloc.so", "libmimalloc.dylib", "libmimalloc.a"}
-
-	for _, d := range libCandidates {
-		for _, n := range libNames {
-			if _, err := os.Stat(filepath.Join(d, n)); err == nil {
-				libDir = d
-
-				break
-			}
-		}
-
-		if libDir != "" {
-			break
-		}
-	}
-
-	for _, d := range incCandidates {
-		if _, err := os.Stat(filepath.Join(d, "mimalloc.h")); err == nil {
-			incDir = d
-
-			break
-		}
-	}
-
-	ok = libDir != "" && incDir != ""
-
-	return
-}
-
 // close cleans up temp files. Does not close loaded libraries
 // (they must outlive any JIT'd code still running).
 func (s *session) close() {

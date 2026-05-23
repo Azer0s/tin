@@ -141,6 +141,7 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 	// all arms; the snapshot/restore lives in the genCaseBody closure
 	// so each arm walks a fresh per-branch view of movedBindings.
 	moveCandidates := map[string]bool{}
+
 	for _, c := range s.Cases {
 		for n := range collectMovedNames(c.Body) {
 			moveCandidates[n] = true
@@ -224,6 +225,7 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		if err != nil {
 			return nil, err
 		}
+
 		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
 		cg.restoreMoveState(preMoveSnap)
 
@@ -247,6 +249,7 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		if err != nil {
 			return nil, err
 		}
+
 		branchSets = append(branchSets, diffBranchMoves(preMoveSnap.moved, cg.movedBindings))
 		cg.restoreMoveState(preMoveSnap)
 
@@ -265,6 +268,7 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		// so the intersection logic sees the no-move path.
 		branchSets = append(branchSets, map[string]bool{})
 	}
+
 	cg.movedBindings = cg.commitMergedMoves(branchSets, preMoveSnap.moved)
 
 	// All arms terminated - afterBlock is unreachable; signal exhaustive termination.

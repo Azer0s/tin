@@ -503,6 +503,7 @@ const volatileAddrSpace = 1
 // and treat a volatile pointer as if it has no rc to manage.
 func isVolatilePtr(t irtypes.Type) bool {
 	pt, ok := t.(*irtypes.PointerType)
+
 	return ok && pt.AddrSpace == volatileAddrSpace
 }
 

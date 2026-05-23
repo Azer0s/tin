@@ -322,6 +322,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	// promotes intersection moves to use-after-move while keeping
 	// partial moves rc-balanced via genMoveExpr's pre-move retain.
 	moveCandidates := map[string]bool{}
+
 	for _, c := range s.Cases {
 		for n := range collectMovedNames(c.Body) {
 			moveCandidates[n] = true
@@ -555,6 +556,7 @@ func (cg *CodeGen) genDataMatch(block *ir.Block, s *ast.MatchStmt, resAlloca val
 	if s.Default == nil && !exhaustive {
 		branchSets = append(branchSets, map[string]bool{})
 	}
+
 	cg.movedBindings = cg.commitMergedMoves(branchSets, preMoveSnap.moved)
 
 	// Release the scrutinee's owned ARC fields on the merged exit
