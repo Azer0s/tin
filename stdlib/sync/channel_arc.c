@@ -228,59 +228,57 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
 // TinChannel - Vyukov MPMC ring buffer + fiber waiter queues.
 //
 // Cache-line layout:
-//   [0..N]:      ref_count + wq_fmu (waiter-queue lock, uncontended on fast path)
-//   [N..N+64]:   cap, cap_mask, elem_size, rc_kind, closed, wq counters, wq pointers
-//   [aligned]:   enq_pos on its own 64-byte cache line (producer hot)
-//   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot)
-//   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters
-//   [separate]:  data_buf (cap * elem_size bytes)
+//   [line 0]:    hot read-mostly fields (cap_mask, elem_size, seq_buf,
+//                data_buf, cap, rc_kind, single_thread, closed,
+//                recv/send_wq_cnt) -- every fast-path send/recv loads
+//                this one line.
+//   [line 1]:    ref_count -- isolated so cross-thread retain/release
+//                doesn't ping the hot line.
+//   [line 2..N]: wq_fmu + waiter queues -- slow path only.
+//   [aligned]:   enq_pos on its own 64-byte cache line (producer hot).
+//   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot).
+//   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters.
+//   [separate]:  data_buf (cap * elem_size bytes).
 // ---------------------------------------------------------------------------
 typedef struct TinChannel {
-    // Pin ref_count to its own cache line: cross-thread channel
-    // retain/release would otherwise invalidate the line that holds
-    // wq_fmu.state, which every slow-path mutex op CASes on.  Pure
-    // defensive isolation -- the bench suite barely retains channels,
-    // but channel-passing workloads see the win.
-    _Alignas(64) atomic_int  ref_count;
-    _Alignas(64) TinFastMutex wq_fmu;     // waiter-queue lock (slow path only)
-
-    int64_t          cap;
-    int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
-    int64_t          elem_size;
-    atomic_bool      closed;
-    int              rc_kind;
+    // ----- Line 0: hot read-mostly metadata (~52 bytes used) ---------------
+    // Every fast-path send/recv touches this line: lf_enqueue reads
+    // cap_mask + seq_buf, the wrappers read rc_kind / single_thread /
+    // closed / wq_cnts.  Packing them all here means the hot path loads
+    // 1 cache line of metadata + 1 line for enq_pos (or deq_pos) = 2
+    // lines per op instead of the 3-4 the field-by-field layout used to
+    // cost.  Writes to wq_cnt (slow-path, when a fiber parks/unparks)
+    // do invalidate this line on remote cores, but that's rare.
+    _Alignas(64) int64_t          cap_mask;     // 0..7
+    int64_t                       elem_size;    // 8..15
+    _Atomic(int64_t)             *seq_buf;      // 16..23
+    char                         *data_buf;     // 24..31
+    int64_t                       cap;          // 32..39
+    int                           rc_kind;      // 40..43
 #if defined(__x86_64__) || defined(_M_X64)
-    // single_thread: snapshot of !_tin_mt_active at channel creation.
-    // x86-only because the ST fast path saves ~5 cycles per op there
-    // (LOCK CMPXCHG -> plain MOV).  On ARM64 the CAS is cheap, the
-    // per-op branch costs as much as it saves, so we don't even hold
-    // the field.  Adjacent to cap_mask/elem_size/rc_kind so it shares
-    // the already-hot cache line every lf_op loads.
-    int              single_thread;
+    int                           single_thread; // 44..47, x86 only
+#else
+    int                           _pad_st;       // 44..47, keep layout uniform
 #endif
+    atomic_bool                   closed;        // 48
+    char                          _pad_hot[3];   // 49..51
+    _Atomic(int32_t)              recv_wq_cnt;   // 52..55
+    _Atomic(int32_t)              send_wq_cnt;   // 56..59
+    // 60..63 implicit pad to alignment of next line
 
-    // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
-    // path: if 0, no wakeup is needed and wq_fmu is never touched.  Pinned to
-    // their own cache line so slow-path writes (when a fiber parks) don't
-    // invalidate the line holding cap / cap_mask / elem_size / rc_kind /
-    // single_thread, which every fast-path send/recv reads.
-    _Alignas(64) _Atomic(int32_t) recv_wq_cnt;
-    _Atomic(int32_t) send_wq_cnt;
+    // ----- Line 1: ref_count -- isolated from hot line ---------------------
+    _Alignas(64) atomic_int       ref_count;
 
-    TinWaiterQueue   recv_wq;    // protected by wq_fmu
-    TinWaiterQueue   send_wq;    // protected by wq_fmu
+    // ----- Line 2..N: slow-path only ---------------------------------------
+    _Alignas(64) TinFastMutex     wq_fmu;       // waiter-queue lock
+    TinWaiterQueue                recv_wq;       // protected by wq_fmu
+    TinWaiterQueue                send_wq;       // protected by wq_fmu
 
-    // Vyukov MPMC ring buffer state.
-    // enq_pos and deq_pos sit on separate cache lines to prevent
-    // producer/consumer false sharing.  Use alignas(64) so layout
-    // changes to earlier fields don't drift the alignment.
+    // ----- Ring buffer positions: each on its own cache line ---------------
     _Alignas(64) _Atomic(int64_t) enq_pos;
-    char             _pad_enq[56];
+    char                          _pad_enq[56];
     _Alignas(64) _Atomic(int64_t) deq_pos;
-    char             _pad_deq[56];
-
-    _Atomic(int64_t) *seq_buf;   // cap entries; seq[i] initialized to i
-    char             *data_buf;  // cap * elem_size bytes
+    char                          _pad_deq[56];
 } TinChannel;
 
 // ---------------------------------------------------------------------------
@@ -307,8 +305,20 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     while (po2 < cap) po2 <<= 1;
     cap = po2;
 
-    TinChannel *ch = (TinChannel *)calloc(1, sizeof(TinChannel));
-    if (!ch) { fputs("tin: channel alloc failed\n", stderr); exit(1); }
+    // _Alignas(64) on internal fields makes _Alignof(TinChannel) == 64,
+    // but plain calloc / malloc on glibc only guarantees 16-byte
+    // alignment.  When the struct base is not 64-aligned, enq_pos /
+    // deq_pos land at struct-base + offset which is also not 64-aligned,
+    // so they straddle cache lines and reintroduce the producer/consumer
+    // false sharing the alignas was meant to prevent.  posix_memalign is
+    // the cross-platform way to ask for a 64-aligned allocation;
+    // memset to zero matches calloc semantics so atomic_init / wq_alloc
+    // and friends see the same zero-init they had before.
+    TinChannel *ch = NULL;
+    if (posix_memalign((void **)&ch, 64, sizeof(TinChannel)) != 0 || !ch) {
+        fputs("tin: channel alloc failed\n", stderr); exit(1);
+    }
+    memset(ch, 0, sizeof(TinChannel));
 
     atomic_init(&ch->ref_count, 1);
     tin_fmutex_init(&ch->wq_fmu);
@@ -426,7 +436,13 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
                 rc_release_slot(dst, rc_kind);
                 _chan_elem_copy(dst, val, esz);
                 rc_retain_slot(dst, rc_kind);
-                atomic_store_explicit(pseq, pos + 1, memory_order_release);
+                // seq_cst publish (LOCK XCHG on x86) so the store buffer
+                // drains here -- the caller's subsequent recv_wq_cnt load
+                // then sees any concurrent parker's increment without a
+                // separate atomic_thread_fence call.  Replaces the
+                // release-store + post-call MFENCE pair with a single
+                // LOCK op.
+                atomic_store_explicit(pseq, pos + 1, memory_order_seq_cst);
                 return 1;
             }
         } else if (diff < 0) {
@@ -468,7 +484,8 @@ static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind)
                 // out's retain). Zero the slot so a future _tin_channel_free
                 // doesn't double-release.
                 if (rc_kind != TIN_RC_NONE) memset(src, 0, esz);
-                atomic_store_explicit(pseq, pos + ch->cap, memory_order_release);
+                // seq_cst publish -- see twin in lf_enqueue for rationale.
+                atomic_store_explicit(pseq, pos + ch->cap, memory_order_seq_cst);
                 return 1;
             }
         } else if (diff < 0) {
@@ -600,19 +617,12 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
     int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
     if (__builtin_expect(rcnt == 0, 1)) {
         if (lf_enqueue(ch, val, esz, rc_kind)) {
-            // Peterson missed-wakeup protection: drain this thread's
-            // store buffer so the recheck below sees any concurrent
-            // recv_wq_cnt increment AND a concurrent consumer's final
-            // lf_dequeue sees our seq[pos] release-store from lf_enqueue.
-            // Without this fence, lf_enqueue's release-store and the
-            // seq_cst recv_wq_cnt load can both compile to plain MOVs
-            // on x86 (release stores don't drain the buffer, seq_cst
-            // loads are plain MOVs), letting both sides miss each other
-            // -> deadlock under cap=2 SPMC stress on linux x86_64 GHA.
-            // Single-thread builds (TINMAXPROCS=1) have no concurrent
-            // fibers on another core, so the race window doesn't exist;
-            // skip the fence on the hot path.
-            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
+            // No explicit fence here: lf_enqueue's final seq[pos] publish
+            // is seq_cst (LOCK XCHG on x86), which drains the store
+            // buffer so the recv_wq_cnt load below sees any concurrent
+            // parker's seq_cst increment.  Replaces what used to be a
+            // release-store + atomic_thread_fence(seq_cst) pair with a
+            // single LOCK op inside lf_enqueue.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_recv(ch);
@@ -730,9 +740,7 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         void *data = _lf_dequeue_tls(ch);
         if (data) {
-            // Peterson missed-wakeup protection -- see twin fence in
-            // _tin_channel_send_blocking's fast path.
-            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
+            // No explicit fence: lf_dequeue's final seq publish is seq_cst.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
@@ -829,9 +837,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
     if (__builtin_expect(
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
-            // Peterson missed-wakeup protection -- see twin fence in
-            // _tin_channel_send_blocking's fast path.
-            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
+            // No explicit fence: lf_dequeue's final seq publish is seq_cst.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
