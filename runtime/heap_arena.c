@@ -142,18 +142,32 @@ int _tin_is_managed(void *ptr) {
     return hdr->_pad == TIN_RC_HDR_MAGIC;
 }
 
+// _tin_mi_default_heap returns a usable heap for allocations that
+// don't need the per-arena slot.  mimalloc 3.x exposes mi_heap_main;
+// mimalloc 2.x (Ubuntu 24.04 ships 2.1.2) renamed it to
+// mi_heap_get_default.  The format of MI_MALLOC_VERSION differs
+// across the rename (3-digit pre-3.0, 5-digit 3.0+), and the
+// numeric threshold cleanly separates them.
+static inline mi_heap_t *_tin_mi_default_heap(void) {
+#if MI_MALLOC_VERSION >= 30000
+    return mi_heap_main();
+#else
+    return mi_heap_get_default();
+#endif
+}
+
 mi_heap_t *_tin_managed_heap(void) {
     mi_heap_t *h = _tin_thread_heap;
     if (h != NULL) return h;
 
     if (!_tin_arena_active) {
-        _tin_thread_heap = mi_heap_main();
+        _tin_thread_heap = _tin_mi_default_heap();
         return _tin_thread_heap;
     }
 
     h = mi_heap_new_in_arena(_tin_arena_id);
     if (h == NULL) {
-        _tin_thread_heap = mi_heap_main();
+        _tin_thread_heap = _tin_mi_default_heap();
         return _tin_thread_heap;
     }
 
