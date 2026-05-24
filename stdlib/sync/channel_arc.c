@@ -251,8 +251,11 @@ typedef struct TinChannel {
     int              single_thread;
 
     // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
-    // path: if 0, no wakeup is needed and wq_fmu is never touched.
-    _Atomic(int32_t) recv_wq_cnt;
+    // path: if 0, no wakeup is needed and wq_fmu is never touched.  Pinned to
+    // their own cache line so slow-path writes (when a fiber parks) don't
+    // invalidate the line holding cap / cap_mask / elem_size / rc_kind /
+    // single_thread, which every fast-path send/recv reads.
+    _Alignas(64) _Atomic(int32_t) recv_wq_cnt;
     _Atomic(int32_t) send_wq_cnt;
 
     TinWaiterQueue   recv_wq;    // protected by wq_fmu
