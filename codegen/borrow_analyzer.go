@@ -168,47 +168,6 @@ func directCalleeName(fn ast.Node) string {
 	return ""
 }
 
-// analyzeFunctionParamBorrows classifies which parameters in
-// `paramNames` are borrow-safe within `body`.  When true, codegen
-// skips the callee's entry retain and scope-exit release for that
-// parameter; Tin's calling convention places both ops on the callee
-// side, so eliding both stays balanced and the caller's binding rc
-// is preserved through the call independently.
-//
-// The contract assumes the caller holds at least one independent
-// rc on the value across the call.  For let-bound arguments
-// (`let f = fn() = ...; foo(f)`) this is true: the let-binding
-// keeps its own +1 reference for the binding's scope, which strictly
-// contains the call.  For INLINE arguments (`foo(fn() = ...)`,
-// `foo("literal")`) the temporary's rc may be exactly 1, owned by
-// nothing other than the callee's entry retain -- the helper must
-// not classify those params as borrow.  We can't tell at this
-// analysis depth whether the caller-side argument is let-bound or
-// inline, so we exclude fn-typed params (where inline lambda args
-// are common) and method receivers (named "this").
-//
-// Conservative under uncertainty: any pattern the analyzer cannot
-// reason about (return-of-param, address-of, mutation, capture into
-// closure / fiber, method call on the param, interpolated-string
-// uses) leaves the parameter Owned, matching today's runtime
-// behavior.
-func (cg *CodeGen) analyzeFunctionParamBorrows(body ast.Node, paramNames []string) map[string]bool {
-	conventions := cg.analyzeFunctionParamConventions(body, paramNames)
-	if conventions == nil {
-		return nil
-	}
-
-	result := map[string]bool{}
-
-	for name, conv := range conventions {
-		if conv == paramTransparent {
-			result[name] = true
-		}
-	}
-
-	return result
-}
-
 // analyzeFunctionParamConventions classifies each parameter as
 // transparent / consumes / retains based on what the body does with
 // it.  The convention drives caller-side rc emission at every call

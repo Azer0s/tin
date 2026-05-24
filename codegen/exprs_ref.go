@@ -104,6 +104,7 @@ func (cg *CodeGen) callContextInfoFor(fnNode ast.Node) (string, []string) {
 	case *ast.ScopeAccess:
 		if fn != nil {
 			joined := ""
+
 			for i, p := range fn.Path {
 				if i > 0 {
 					joined += "__"
@@ -278,6 +279,8 @@ func refRemediationVerb(c ParamConvention) string {
 		return "consume"
 	case paramRetains:
 		return "retain"
+	case paramTransparent:
+		return "use"
 	}
 
 	return "use"

@@ -135,6 +135,7 @@ func (cg *CodeGen) deepCopyFieldValue(block *ir.Block, val value.Value, t irtype
 			newData := block.NewCall(cg.ensureAnyDeepCopyFn(), tag, data)
 
 			var result value.Value = constant.NewUndef(ft)
+
 			result = block.NewInsertValue(result, tag, 0)
 			result = block.NewInsertValue(result, newData, 1)
 
@@ -202,6 +203,7 @@ func (cg *CodeGen) deepCopyStringValue(block *ir.Block, val value.Value, t *irty
 	block.NewCall(cg.ensureMemcpy(), newI8, srcI8, length, constant.NewInt(irtypes.I1, 0))
 
 	var result value.Value = constant.NewUndef(t)
+
 	result = block.NewInsertValue(result, newI8, 0)
 	result = block.NewInsertValue(result, length, 1)
 	result = block.NewInsertValue(result, length, 2)
@@ -259,6 +261,7 @@ func (cg *CodeGen) deepCopyArrayValue(block *ir.Block, val value.Value, t *irtyp
 	}
 
 	var result value.Value = constant.NewUndef(t)
+
 	result = block.NewInsertValue(result, newDataPtr, 0)
 	result = block.NewInsertValue(result, length, 1)
 	result = block.NewInsertValue(result, length, 2)

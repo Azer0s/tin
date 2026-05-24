@@ -400,6 +400,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			}
 
 			cg.applyAutoCopyToArgVals(block, e.Args, argVals)
+
 			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
@@ -576,6 +577,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						}
 
 						cg.applyAutoCopyToArgVals(block, e.Args, olArgs)
+
 						preCoerceVals := append([]value.Value(nil), olArgs...)
 						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
 							olArgs = cg.adaptArgs(block, olArgs, f2.Sig)
@@ -654,6 +656,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					cg.applyAutoCopyToArgVals(block, e.Args, argVals)
+
 					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
 						argVals = cg.adaptArgs(block, argVals, f.Sig)

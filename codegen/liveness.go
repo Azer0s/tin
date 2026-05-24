@@ -99,10 +99,10 @@ func computeImplicitMoveSites(body ast.Node) map[*ast.Identifier]bool {
 // implicitMoveState tracks the walk's progress while computing
 // implicit move sites.
 type implicitMoveState struct {
-	bindingDecls map[string]ast.Pos       // name -> position of `let name = ...`
+	bindingDecls map[string]ast.Pos           // name -> position of `let name = ...`
 	reads        map[string][]*ast.Identifier // name -> reads (in document order)
-	captureNames map[string]bool          // names captured by closure / spawn / defer
-	mutated      map[string]bool          // names reassigned via `=` / `op=`
+	captureNames map[string]bool              // names captured by closure / spawn / defer
+	mutated      map[string]bool              // names reassigned via `=` / `op=`
 }
 
 // walk recursively visits the AST.  `loopDepth` increments inside

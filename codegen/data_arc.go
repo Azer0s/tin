@@ -445,27 +445,6 @@ func (cg *CodeGen) suppressIfaceDataScopeReleases() {
 	}
 }
 
-// emitDataValueDeepCopy returns a deep copy of an ADT value: the tag
-// is bit-copied and the active variant's payload fields are deep-
-// copied (via deepCopyFieldValue) into a fresh payload slot.
-// Variants with no deep-copyable fields fall through to a plain bit-
-// copy.  Bypasses the per-struct deep-copy generator because that
-// walks fields without tag awareness and would corrupt the shared
-// payload's RC on scope-exit.
-func (cg *CodeGen) emitDataValueDeepCopy(block *ir.Block, val value.Value) value.Value {
-	st, ok := val.Type().(*irtypes.StructType)
-	if !ok {
-		return val
-	}
-
-	fn := cg.ensureDataValueDeepCopyFn(st.Name(), st)
-	if fn == nil {
-		return val
-	}
-
-	return block.NewCall(fn, val)
-}
-
 // ensureDataValueDeepCopyFn lazily emits a per-ADT helper that
 // produces a deep copy of a `data` value.  Signature:
 // `data @Foo__data_deep_copy(data %src) -> data`.  The body bit-

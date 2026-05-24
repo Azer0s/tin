@@ -1045,9 +1045,9 @@ type CodeGen struct {
 	// dataVariants[adt][v]  -> per-variant info (tag, payload struct, fields)
 	// dataVariantLookup[v]  -> list of ADT names that declare a variant named v;
 	//                         used to resolve bare constructor references.
-	dataTypeIDs         map[string]int32
-	dataVariants        map[string]map[string]*dataVariantInfo
-	dataVariantLookup   map[string][]string
+	dataTypeIDs          map[string]int32
+	dataVariants         map[string]map[string]*dataVariantInfo
+	dataVariantLookup    map[string][]string
 	dataValueReleaseFns  map[string]*ir.Func
 	dataValueRetainFns   map[string]*ir.Func
 	dataValueDeepCopyFns map[string]*ir.Func

@@ -85,6 +85,7 @@ func (cg *CodeGen) bindAutoCopyTemp(block *ir.Block, copied value.Value) value.V
 
 	alloca := block.NewAlloca(copied.Type())
 	block.NewStore(copied, alloca)
+
 	tmpName := fmt.Sprintf(".autocopy_%d", cg.strCount)
 	cg.strCount++
 	cg.curScope.set(tmpName, &scopeEntry{
