@@ -539,7 +539,16 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
     int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
     if (__builtin_expect(rcnt == 0, 1)) {
         if (lf_enqueue(ch, val, esz, rc_kind)) {
-            // Check again for newly-parked receivers.
+            // Peterson missed-wakeup protection: drain this thread's
+            // store buffer so the recheck below sees any concurrent
+            // recv_wq_cnt increment AND a concurrent consumer's final
+            // lf_dequeue sees our seq[pos] release-store from lf_enqueue.
+            // Without this fence, lf_enqueue's release-store and the
+            // seq_cst recv_wq_cnt load can both compile to plain MOVs
+            // on x86 (release stores don't drain the buffer, seq_cst
+            // loads are plain MOVs), letting both sides miss each other
+            // -> deadlock under cap=2 SPMC stress on linux x86_64 GHA.
+            atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_recv(ch);
@@ -657,6 +666,9 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         void *data = _lf_dequeue_tls(ch);
         if (data) {
+            // Peterson missed-wakeup protection -- see twin fence in
+            // _tin_channel_send_blocking's fast path.
+            atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
@@ -753,6 +765,9 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
     if (__builtin_expect(
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
+            // Peterson missed-wakeup protection -- see twin fence in
+            // _tin_channel_send_blocking's fast path.
+            atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
