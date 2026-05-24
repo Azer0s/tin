@@ -36,6 +36,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+// When valgrind/memcheck.h is available, expand to client requests
+// that let memcheck distinguish the intentional out-of-bounds magic
+// probe in _tin_is_managed from a real invalid read.  Outside
+// valgrind the macros are zero-cost no-ops; outside the header the
+// probe is unconditional and the wrappers below fall back to a
+// plain read.
+#if defined(__has_include)
+#  if __has_include(<valgrind/memcheck.h>)
+#    include <valgrind/memcheck.h>
+#    define _TIN_VG_PRESENT 1
+#  endif
+#endif
+
+// _tin_probe_magic reads the 8-byte _pad slot in the would-be
+// TinRCHdr at `ptr - sizeof(TinRCHdr)`.  When running under valgrind
+// the surrounding bytes may be NOACCESS (allocator metadata) or even
+// in a freed region; the probe is intentional and known to land
+// outside the user's allocation for foreign pointers, so save the
+// vbits, mark the slot defined for the read, then restore the vbits
+// so memcheck still flags genuine use-after-frees of nearby memory
+// from elsewhere.
+static inline uint64_t _tin_probe_magic(const TinRCHdr *hdr) {
+#ifdef _TIN_VG_PRESENT
+    unsigned char vbits[sizeof(hdr->_pad)];
+    int saved = (VALGRIND_GET_VBITS(&hdr->_pad, vbits, sizeof(hdr->_pad)) == 0);
+    (void)VALGRIND_MAKE_MEM_DEFINED(&hdr->_pad, sizeof(hdr->_pad));
+    uint64_t pad = hdr->_pad;
+    if (saved) (void)VALGRIND_SET_VBITS(&hdr->_pad, vbits, sizeof(hdr->_pad));
+    return pad;
+#else
+    return hdr->_pad;
+#endif
+}
+
 #if TIN_USE_MIMALLOC
 
 #include <stdatomic.h>
@@ -139,7 +173,7 @@ int _tin_is_managed(void *ptr) {
         if (addr - base < sizeof(TinRCHdr))  return 0;
     }
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
-    return hdr->_pad == TIN_RC_HDR_MAGIC;
+    return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
 // _tin_mi_default_heap returns a usable heap for allocations that
@@ -212,7 +246,7 @@ __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
-    return hdr->_pad == TIN_RC_HDR_MAGIC;
+    return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
 #endif // TIN_USE_MIMALLOC
