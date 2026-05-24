@@ -249,11 +249,15 @@ typedef struct TinChannel {
     int64_t          elem_size;
     atomic_bool      closed;
     int              rc_kind;
+#if defined(__x86_64__) || defined(_M_X64)
     // single_thread: snapshot of !_tin_mt_active at channel creation.
-    // Adjacent to cap_mask/elem_size/rc_kind so it shares the
-    // already-hot cache line that every lf_op loads.  Branch in
-    // lf_enqueue/lf_dequeue selects plain head-tail vs Vyukov.
+    // x86-only because the ST fast path saves ~5 cycles per op there
+    // (LOCK CMPXCHG -> plain MOV).  On ARM64 the CAS is cheap, the
+    // per-op branch costs as much as it saves, so we don't even hold
+    // the field.  Adjacent to cap_mask/elem_size/rc_kind so it shares
+    // the already-hot cache line every lf_op loads.
     int              single_thread;
+#endif
 
     // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
     // path: if 0, no wakeup is needed and wq_fmu is never touched.  Pinned to
@@ -313,7 +317,9 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     ch->elem_size = elem_size;
     atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
     ch->rc_kind   = rc_kind;
+#if defined(__x86_64__) || defined(_M_X64)
     ch->single_thread = _tin_mt_active ? 0 : 1;
+#endif
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->enq_pos, 0, memory_order_relaxed);
@@ -382,11 +388,14 @@ void _tin_channel_free(void *ptr) {
 // ---------------------------------------------------------------------------
 
 static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc_kind) {
-    // Single-thread fast path: with no concurrent worker, the producer
-    // and consumer cannot interleave inside this function (no yield
-    // points), so the Vyukov CAS + per-slot seq machinery is overkill.
-    // A plain head-tail check suffices.  Saves the LOCK CMPXCHG and the
-    // acquire load on x86 per op.
+#if defined(__x86_64__) || defined(_M_X64)
+    // Single-thread fast path (x86 only): with no concurrent worker,
+    // the producer and consumer cannot interleave inside this function
+    // (no yield points), so the Vyukov CAS + per-slot seq machinery is
+    // overkill.  A plain head-tail check suffices.  Saves the LOCK
+    // CMPXCHG and the acquire load per op.  Gated to x86 because on
+    // ARM the CAS is cheap and the per-op branch costs more than it
+    // saves -- measured on M4 Pro.
     if (__builtin_expect(ch->single_thread, 0)) {
         int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
         int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
@@ -398,6 +407,7 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
         atomic_store_explicit(&ch->enq_pos, enq + 1, memory_order_relaxed);
         return 1;
     }
+#endif
 
     int64_t pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
     for (;;) {
@@ -428,6 +438,8 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
 }
 
 static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind) {
+#if defined(__x86_64__) || defined(_M_X64)
+    // x86-only ST fast path -- see twin in lf_enqueue.
     if (__builtin_expect(ch->single_thread, 0)) {
         int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
         int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
@@ -438,6 +450,7 @@ static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind)
         atomic_store_explicit(&ch->deq_pos, deq + 1, memory_order_relaxed);
         return 1;
     }
+#endif
 
     int64_t pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
     for (;;) {
