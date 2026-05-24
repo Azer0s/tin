@@ -399,15 +399,22 @@ static TinRunnable _rq_pop(void) {
 #define WORKER_MAX      256                   // max TINMAXPROCS supported
 
 typedef struct {
-    _Atomic(int64_t) top;       // steal pointer (thieves read/CAS)
-    char _pad0[56];             // keep top on its own cache line
-    _Atomic(int64_t) bottom;    // owner pointer (owner reads/writes)
-    char _pad1[56];             // keep bottom on its own cache line
+    // top and bottom each get their own cache line via alignas, so the
+    // thief side (CASing top) and the owner side (writing bottom) don't
+    // false-share.  Previously this was hand-rolled with `_pad0[56]`,
+    // which broke whenever sizeof(int64_t) or earlier struct fields
+    // drifted; the alignas form is layout-stable.
+    _Alignas(64) _Atomic(int64_t) top;     // steal pointer (thieves read/CAS)
+    _Alignas(64) _Atomic(int64_t) bottom;  // owner pointer (owner reads/writes)
     TinRunnable      buf[WORKER_LQ_SIZE];
     TinFiber        *fibs[WORKER_LQ_SIZE];
 } WorkerLocalQueue;
 
-static WorkerLocalQueue _worker_lqs[WORKER_MAX];
+// Per-entry alignment so adjacent workers' queues start on cache-line
+// boundaries.  Without this, worker N's `top` could share a line with
+// worker N-1's `fibs[63]` -- every steal would bounce the neighbour's
+// cache.  alignas on the typedef + on the array element gets both halves.
+static _Alignas(64) WorkerLocalQueue _worker_lqs[WORKER_MAX];
 static _Atomic(int)     _worker_idx_counter = 0;
 
 // Forward-declared here so _lq_push/_lq_pop/_worker_push can use them;
