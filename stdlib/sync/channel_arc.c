@@ -236,8 +236,13 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
 //   [separate]:  data_buf (cap * elem_size bytes)
 // ---------------------------------------------------------------------------
 typedef struct TinChannel {
-    atomic_int       ref_count;
-    TinFastMutex     wq_fmu;     // waiter-queue lock (slow path only)
+    // Pin ref_count to its own cache line: cross-thread channel
+    // retain/release would otherwise invalidate the line that holds
+    // wq_fmu.state, which every slow-path mutex op CASes on.  Pure
+    // defensive isolation -- the bench suite barely retains channels,
+    // but channel-passing workloads see the win.
+    _Alignas(64) atomic_int  ref_count;
+    _Alignas(64) TinFastMutex wq_fmu;     // waiter-queue lock (slow path only)
 
     int64_t          cap;
     int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
